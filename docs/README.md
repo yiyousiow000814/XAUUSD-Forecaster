@@ -34,6 +34,7 @@ current rules merely because they discovered one.
 - [News evidence](contracts/NEWS_EVIDENCE.md)
 - [Evidence lanes](contracts/EVIDENCE_LANES.md)
 - [Hosting boundaries](contracts/HOSTING_BOUNDARIES.md)
+- [Release control](contracts/RELEASE_CONTROL.md)
 - [Preview isolation](contracts/PREVIEW_ISOLATION.md)
 - [Assistant state](contracts/ASSISTANT_STATE.md)
 - [Assistant orchestration](contracts/ASSISTANT_ORCHESTRATION.md)
@@ -89,6 +90,7 @@ current rules merely because they discovered one.
 ### Historical evidence
 
 - Audits: [test suite](audits/TEST_SUITE.md),
+  [release-control ownership 2026-08-20](audits/RELEASE_CONTROL_2026_08_20.md),
   [U5 authority](audits/U5_AUTHORITY.md),
   [documentation inventory](audits/DOCUMENTATION_INVENTORY.md),
   [repository reliability 2026-08-17](audits/REPOSITORY_RELIABILITY_2026_08_17.md),

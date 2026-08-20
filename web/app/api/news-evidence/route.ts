@@ -10,12 +10,17 @@ import {
   NEWS_EVIDENCE_CONTRACT_VERSION,
   NEWS_EVIDENCE_SNAPSHOT_ID,
   NewsEvidenceProtocolError,
+  prepareNewsEvidenceBatch,
   prepareNewsEvidenceSnapshot,
   readNewsEvidencePage,
   readPreviewNewsEvidencePage,
   stageNewsEvidenceBatch,
 } from "../_shared/news-evidence-store";
 import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
+import {
+  authorizeReleaseValidation, isReleaseValidationContext, releaseValidationResponse,
+  validateJsonWithD1,
+} from "../_shared/release-validation";
 import {
   d1CapabilityFailure,
   D1CapabilityError,
@@ -91,9 +96,10 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const previewRejection = rejectPreviewWrite();
   if (previewRejection) return previewRejection;
-  if (!await isIngestAuthorized(request)) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
+  const validation = await authorizeReleaseValidation(
+    request, "news-evidence-write", isIngestAuthorized,
+  );
+  if (validation instanceof Response) return validation;
   const binding = env.DB as D1Database | undefined;
   if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   const bounded = await readBoundedBody(request, MAX_WRITE_BYTES);
@@ -116,6 +122,16 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "invalid evidence contract" }, { status: 400 });
     }
     if (typeof body.cleanup_active_snapshot === "string") {
+      if (isReleaseValidationContext(validation)) {
+        if (!NEWS_EVIDENCE_SNAPSHOT_ID.test(body.cleanup_active_snapshot)
+            || !await validateJsonWithD1(binding, bounded.serialized)) {
+          return NextResponse.json({ error: "invalid evidence cleanup" }, { status: 400 });
+        }
+        return releaseValidationResponse(validation, {
+          body: "bounded-read", json: "parsed+d1-json1",
+          mutation_boundary: "evidence-snapshot-cleanup",
+        });
+      }
       return NextResponse.json(await cleanupNewsEvidenceSnapshots(
         binding, body.cleanup_active_snapshot,
       ));
@@ -127,6 +143,16 @@ export async function POST(request: Request) {
         || Number(body.expected_count) < 0
       ) {
         return NextResponse.json({ error: "invalid evidence manifest" }, { status: 400 });
+      }
+      if (isReleaseValidationContext(validation)) {
+        if (!await validateJsonWithD1(binding, bounded.serialized)) {
+          return NextResponse.json({ error: "invalid evidence manifest" }, { status: 400 });
+        }
+        return releaseValidationResponse(validation, {
+          body: "bounded-read", json: "parsed+d1-json1",
+          transformed: { expected_count: Number(body.expected_count) },
+          mutation_boundary: "evidence-snapshot-prepare",
+        });
       }
       return NextResponse.json(await prepareNewsEvidenceSnapshot(
         binding, body.prepare_snapshot, Number(body.expected_count),
@@ -140,6 +166,16 @@ export async function POST(request: Request) {
       ) {
         return NextResponse.json({ error: "invalid evidence activation" }, { status: 400 });
       }
+      if (isReleaseValidationContext(validation)) {
+        if (!await validateJsonWithD1(binding, bounded.serialized)) {
+          return NextResponse.json({ error: "invalid evidence activation" }, { status: 400 });
+        }
+        return releaseValidationResponse(validation, {
+          body: "bounded-read", json: "parsed+d1-json1",
+          transformed: { expected_count: Number(body.expected_count) },
+          mutation_boundary: "evidence-snapshot-activation",
+        });
+      }
       return NextResponse.json(await activateNewsEvidenceSnapshot(
         binding, body.activate_snapshot, Number(body.expected_count),
       ));
@@ -152,6 +188,18 @@ export async function POST(request: Request) {
       || body.items.length > MAX_WRITE_ITEMS
     ) {
       return NextResponse.json({ error: "invalid evidence batch" }, { status: 400 });
+    }
+    if (isReleaseValidationContext(validation)) {
+      const prepared = await prepareNewsEvidenceBatch(body.items as EvidenceItem[]);
+      if (!await validateJsonWithD1(binding, bounded.serialized)) {
+        return NextResponse.json({ error: "invalid evidence batch" }, { status: 400 });
+      }
+      return releaseValidationResponse(validation, {
+        body: "bounded-read", json: "parsed+d1-json1",
+        transformed: { items: prepared.rows.length, sha256: true,
+          serialized_items: prepared.rows.length },
+        mutation_boundary: "evidence-stage-batch",
+      });
     }
     return NextResponse.json(await stageNewsEvidenceBatch(
       binding, body.snapshot_id, Number(body.offset), body.items as EvidenceItem[],

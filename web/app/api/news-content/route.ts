@@ -1,8 +1,13 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
+import { readBoundedBody } from "../_shared/dashboard-snapshot";
 import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
 import { publicNewsRecord } from "../../_lib/public-news-copy";
+import {
+  authorizeReleaseValidation, isReleaseValidationContext, releaseValidationResponse,
+  validateJsonWithD1,
+} from "../_shared/release-validation";
 
 export const dynamic = "force-dynamic";
 
@@ -90,11 +95,12 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const previewRejection = rejectPreviewWrite();
   if (previewRejection) return previewRejection;
-  if (!await isIngestAuthorized(request)) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
-  const serialized = await request.text();
-  if (new TextEncoder().encode(serialized).byteLength > 450_000) {
+  const validation = await authorizeReleaseValidation(
+    request, "news-content-write", isIngestAuthorized,
+  );
+  if (validation instanceof Response) return validation;
+  const bounded = await readBoundedBody(request, 450_000);
+  if (bounded.status === "too_large") {
     return NextResponse.json({ error: "payload too large" }, { status: 413 });
   }
   const binding = env.DB as D1Database | undefined;
@@ -102,8 +108,19 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   }
   try {
-    const body = JSON.parse(serialized) as { items?: NewsDetailItem[]; reset?: unknown };
+    const body = JSON.parse(bounded.serialized) as {
+      items?: NewsDetailItem[]; reset?: unknown
+    };
     if (body.reset === true) {
+      if (isReleaseValidationContext(validation)) {
+        if (!await validateJsonWithD1(binding, bounded.serialized)) {
+          return NextResponse.json({ error: "invalid news detail reset" }, { status: 400 });
+        }
+        return releaseValidationResponse(validation, {
+          body: "bounded-read", json: "parsed+d1-json1",
+          transformed: { reset: true }, mutation_boundary: "news-content-reset",
+        });
+      }
       await binding.prepare("DELETE FROM news_details").run();
       return NextResponse.json({ status: "OK", reset: true });
     }
@@ -131,6 +148,16 @@ export async function POST(request: Request) {
            received_at=excluded.received_at`,
       ).bind(item.detail_key, item.detail_hash, JSON.stringify(item.payload), now);
     });
+    if (isReleaseValidationContext(validation)) {
+      if (!await validateJsonWithD1(binding, bounded.serialized)) {
+        return NextResponse.json({ error: "invalid news detail batch" }, { status: 400 });
+      }
+      return releaseValidationResponse(validation, {
+        body: "bounded-read", json: "parsed+d1-json1",
+        transformed: { items: body.items.length, prepared_statements: statements.length },
+        mutation_boundary: "news-content-upsert-batch",
+      });
+    }
     if (statements.length) await binding.batch(statements);
     return NextResponse.json({ status: "OK", received: statements.length });
   } catch (reason) {

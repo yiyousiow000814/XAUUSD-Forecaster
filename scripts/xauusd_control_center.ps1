@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "CodeRevision", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync")]
     [string]$ServiceKey = "",
@@ -28,8 +28,9 @@ $watchdogLog = Join-Path $logRoot "control-watchdog.jsonl"
 $watchdogHeartbeatPath = Join-Path $moduleRoot ".local\forward\control-watchdog-heartbeat.json"
 $runtimeCodeStatePath = Join-Path $moduleRoot ".local\forward\runtime-code-state.json"
 $runtimeUpdateStatePath = Join-Path $moduleRoot ".local\forward\runtime-update-state.json"
-$dashboardSyncConfigPath = Join-Path $moduleRoot ".local\forward\dashboard-sync.json"
-$runtimeUpdateCheckInterval = [TimeSpan]::FromMinutes(5)
+$releaseControlStatePath = Join-Path $moduleRoot ".local\forward\release-control-state.json"
+$releaseHistoryPath = Join-Path $moduleRoot ".local\forward\release-control-history.jsonl"
+$releaseLockPath = Join-Path $moduleRoot ".local\forward\release-control.lock"
 $runtimePreflightContractVersion = "isolated-critical-status-diagnostics-v4"
 $preflightDiagnosticMaxCharacters = 2048
 $codeReloadTimeout = [TimeSpan]::FromMinutes(5)
@@ -44,7 +45,34 @@ $runtimeControlFileNames = @(
     "xauusd_watchdog_guard.ps1",
     "xauusd_watchdog_guard_launcher.vbs"
 )
+$runtimeControlManifestName = "runtime-control-bundle.json"
 $collectorSecretsPath = Join-Path $repositoryRoot ".local\secrets\collector-keys.json"
+$workerName = "aurum-signal-room"
+$workerUrl = "https://aurum-signal-room.yiyousiow1234.workers.dev"
+$cloudflareAccountId = "48ce531f39e2310b4c858c8916a01d51"
+$releaseSchemaVersion = "stable-candidate-release-v3"
+$previewArtifactKind = "PREVIEW"
+$productionCandidateArtifactKind = "PRODUCTION_CANDIDATE"
+$legacyReferenceArtifactKind = "LEGACY_REFERENCE"
+$legacyBootstrapStableArtifactKind = "LEGACY_BOOTSTRAP_STABLE"
+$unknownArtifactKind = "UNKNOWN"
+$requiredGitHubChecks = @(
+    "Python regression suite",
+    "Web build and tests",
+    "Windows runtime contracts",
+    "Repository policy",
+    "Analyze (actions)",
+    "Analyze (csharp)",
+    "Analyze (javascript-typescript)",
+    "Analyze (python)"
+)
+$workerCpuPassP95Ms = 6.0
+$workerCpuPassP99Ms = 8.0
+$workerCpuPassMaxMs = 10.0
+$candidateDiscoveryInterval = [TimeSpan]::FromMinutes(5)
+$releaseLockOwnerGrace = [TimeSpan]::FromSeconds(30)
+$bootstrapAcceptedCandidateWorker = "dd823aa4-20f0-47e1-9255-1b785a4c17b0"
+$bootstrapAcceptedCandidateRevision = "14c055a35040fa963700c988f770c9bb52fa669e"
 
 function Get-UserEnvironmentValue {
     param([Parameter(Mandatory = $true)][string]$Name)
@@ -175,93 +203,1214 @@ function Write-RuntimeUpdateState {
     Move-Item -LiteralPath $temporary -Destination $runtimeUpdateStatePath -Force
 }
 
-function Get-DeploymentStatusUrl {
-    $environmentUrl = [Environment]::GetEnvironmentVariable(
-        "CLOUDFLARE_INGEST_URL", "User"
-    )
-    if ($environmentUrl -and $environmentUrl.StartsWith("https://")) {
-        return $environmentUrl.Trim()
-    }
-    if (-not (Test-Path -LiteralPath $dashboardSyncConfigPath)) { return $null }
+function Get-ReleaseControlState {
+    if (-not (Test-Path -LiteralPath $releaseControlStatePath)) { return $null }
     try {
-        $config = Get-Content -LiteralPath $dashboardSyncConfigPath -Raw | ConvertFrom-Json
-        $targets = @($config.targets | Where-Object {
-            $_.enabled -ne $false -and
-            ([string]$_.remote_ingest_url).StartsWith("https://")
-        })
-        $cloudflare = $targets | Where-Object {
-            ([string]$_.name) -eq "cloudflare" -or
-            ([Uri]$_.remote_ingest_url).Host.EndsWith("workers.dev")
-        } | Select-Object -First 1
-        if ($cloudflare) { return ([string]$cloudflare.remote_ingest_url).Trim() }
-        if (([string]$config.remote_ingest_url).StartsWith("https://")) {
-            return ([string]$config.remote_ingest_url).Trim()
+        $state = Get-Content -LiteralPath $releaseControlStatePath -Raw | ConvertFrom-Json
+        if (-not $state.candidate_discovery) {
+            $state | Add-Member -NotePropertyName candidate_discovery -NotePropertyValue (
+                [pscustomobject]@{
+                    watermark_created_at = $null
+                    watermark_version_id = $null
+                    initialized_at = $null
+                }
+            )
         }
-    } catch {}
-    return $null
-}
-
-function Get-DeployedMainRevision {
-    $url = Get-DeploymentStatusUrl
-    if (-not $url) { return $null }
-    try {
-        $response = Invoke-RestMethod -Method Get -Uri $url -TimeoutSec 5
-        $revision = [string]$response.main_revision
-        if ($response.status -eq "OK" -and $revision -match '^[0-9a-f]{40}$') {
-            return $revision
+        if (-not $state.PSObject.Properties['previous_stable_rollback_eligible']) {
+            $state | Add-Member -NotePropertyName previous_stable_rollback_eligible `
+                -NotePropertyValue $false
         }
-    } catch {}
-    return $null
-}
-
-function Get-VerifiedOriginMain {
-    try {
-        & git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=30 `
-            -C $repositoryRoot fetch origin main --quiet 2>$null
-        if ($LASTEXITCODE -ne 0) { return $null }
-        $revision = (& git -C $repositoryRoot rev-parse origin/main 2>$null).Trim()
-        if ($LASTEXITCODE -eq 0 -and $revision -match '^[0-9a-f]{40}$') {
-            Write-RuntimeUpdateState @{
-                last_remote_check = [DateTimeOffset]::UtcNow.ToString("o")
-                last_remote_revision = $revision
+        if (-not $state.PSObject.Properties['previous_stable_rollback_reason']) {
+            $state | Add-Member -NotePropertyName previous_stable_rollback_reason `
+                -NotePropertyValue "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"
+        }
+        if ([string]$state.schema_version -in @(
+            "stable-candidate-release-v1", "stable-candidate-release-v2"
+        )) {
+            foreach ($identity in @($state.stable, $state.previous_stable)) {
+                if ($identity -and -not $identity.PSObject.Properties['artifact_kind']) {
+                    $identity | Add-Member -NotePropertyName artifact_kind `
+                        -NotePropertyValue $productionCandidateArtifactKind
+                }
             }
-            return $revision
+            foreach ($identity in @($state.candidate, $state.queued_candidate)) {
+                if ($identity -and -not $identity.PSObject.Properties['artifact_kind']) {
+                    $legacyAccepted = (
+                        [string]$identity.worker_version_id -eq $bootstrapAcceptedCandidateWorker -and
+                        [string]$identity.git_sha -eq $bootstrapAcceptedCandidateRevision
+                    )
+                    $identity | Add-Member -NotePropertyName artifact_kind `
+                        -NotePropertyValue $(if ($legacyAccepted) {
+                            $legacyReferenceArtifactKind
+                        } else { $unknownArtifactKind })
+                }
+            }
+            if ($state.stable) {
+                $state.stable.artifact_kind = $legacyBootstrapStableArtifactKind
+                if (-not $state.stable.PSObject.Properties['worker_git_sha']) {
+                    $state.stable | Add-Member -NotePropertyName worker_git_sha `
+                        -NotePropertyValue "NOT_RECORDED"
+                }
+            }
+            if ($state.candidate -and
+                [string]$state.candidate.worker_version_id -eq $bootstrapAcceptedCandidateWorker -and
+                [string]$state.candidate.git_sha -eq $bootstrapAcceptedCandidateRevision) {
+                $state.candidate.artifact_kind = $legacyReferenceArtifactKind
+                foreach ($field in @("validation_state", "compatibility_state")) {
+                    if ($state.candidate.PSObject.Properties[$field]) {
+                        $state.candidate.$field = "REBASE_REQUIRED"
+                    } else {
+                        $state.candidate | Add-Member -NotePropertyName $field `
+                            -NotePropertyValue "REBASE_REQUIRED"
+                    }
+                }
+                if ($state.candidate.validation) {
+                    $state.candidate.validation | Add-Member -NotePropertyName reason `
+                        -NotePropertyValue "REBASE_ON_RELEASE_CONTROL_MAIN_REQUIRED" -Force
+                }
+            }
+            $state.schema_version = $releaseSchemaVersion
         }
-    } catch {}
+        return $state
+    } catch { $null }
+}
+
+function Write-ReleaseControlState {
+    param([Parameter(Mandatory = $true)][object]$State)
+    $controlBundle = Get-RuntimeControlBundleIdentity
+    foreach ($field in @("control_bundle_revision", "control_bundle_exact_revision",
+        "control_bundle_hash_verified")) {
+        if (-not $State.PSObject.Properties[$field]) {
+            $State | Add-Member -NotePropertyName $field -NotePropertyValue $null
+        }
+    }
+    $State.control_bundle_revision = if ($controlBundle) {
+        [string]$controlBundle.source_revision
+    } else { $null }
+    $State.control_bundle_exact_revision = [bool]($controlBundle -and $controlBundle.exact_revision)
+    $State.control_bundle_hash_verified = [bool]$controlBundle
+    $directory = Split-Path -Parent $releaseControlStatePath
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $temporary = "$releaseControlStatePath.tmp"
+    $State | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $temporary -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination $releaseControlStatePath -Force
+}
+
+function Write-ReleaseHistory {
+    param([string]$Event, [object]$Release, [hashtable]$Detail = @{})
+    $directory = Split-Path -Parent $releaseHistoryPath
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    [pscustomobject]@{
+        occurred_at = [DateTimeOffset]::UtcNow.ToString("o")
+        event = $Event
+        release = $Release
+        detail = $Detail
+    } | ConvertTo-Json -Compress -Depth 12 | Add-Content -LiteralPath $releaseHistoryPath -Encoding UTF8
+}
+
+function New-ReleaseIdentity {
+    param(
+        [Parameter(Mandatory = $true)][string]$GitSha,
+        [Parameter(Mandatory = $true)][string]$WorkerVersionId,
+        [Parameter(Mandatory = $true)][string]$WindowsRevision,
+        [string]$Branch = "",
+        [string]$PullRequest = "",
+        [string]$ValidationState = "NEW",
+        [ValidateSet("PREVIEW", "PRODUCTION_CANDIDATE", "LEGACY_REFERENCE", "LEGACY_BOOTSTRAP_STABLE", "UNKNOWN")]
+        [string]$ArtifactKind = "UNKNOWN",
+        [string]$VersionCreatedAt = ""
+    )
+    [pscustomobject]@{
+        git_sha = $GitSha
+        worker_version_id = $WorkerVersionId
+        windows_revision = $WindowsRevision
+        branch = $Branch
+        pull_request = $PullRequest
+        artifact_kind = $ArtifactKind
+        version_created_at = $VersionCreatedAt
+        compatibility_state = "PENDING"
+        cutover_order = "PAUSE_SYNC_WINDOWS_WORKER_RESUME_SYNC"
+        validation_state = $ValidationState
+        validation_key = "$WorkerVersionId`:$GitSha"
+        validation = $null
+        discovered_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+}
+
+function Test-ReleaseIdentity {
+    param([object]$Left, [object]$Right)
+    return [bool](
+        $Left -and $Right -and
+        [string]$Left.git_sha -eq [string]$Right.git_sha -and
+        [string]$Left.worker_version_id -eq [string]$Right.worker_version_id -and
+        [string]$Left.windows_revision -eq [string]$Right.windows_revision -and
+        [string]$Left.artifact_kind -eq [string]$Right.artifact_kind
+    )
+}
+
+function Enter-ReleaseTransactionLock {
+    if (Test-Path -LiteralPath $releaseLockPath) {
+        $owner = $null
+        try {
+            $owner = Get-Content -LiteralPath (Join-Path $releaseLockPath "owner.json") -Raw |
+                ConvertFrom-Json
+        } catch {}
+        $ownerAlive = $false
+        if ($owner -and [int]$owner.owner_pid -gt 0) {
+            $ownerAlive = [bool](Get-Process -Id ([int]$owner.owner_pid) -ErrorAction SilentlyContinue)
+        }
+        $acquired = [DateTimeOffset]::MinValue
+        $ageKnown = $owner -and [DateTimeOffset]::TryParse(
+            [string]$owner.acquired_at, [ref]$acquired
+        )
+        $lockCreated = [DateTimeOffset](Get-Item -LiteralPath $releaseLockPath).CreationTimeUtc
+        $stale = (-not $ownerAlive) -and (
+            $ageKnown -or
+            ([DateTimeOffset]::UtcNow - $lockCreated) -ge $releaseLockOwnerGrace
+        )
+        if (-not $stale) { return $false }
+        # The path is fixed below the runtime state root. Only an abandoned lock
+        # whose owner is gone is removed; release state/history are untouched.
+        Remove-Item -LiteralPath $releaseLockPath -Recurse -Force -ErrorAction Stop
+        Write-ReleaseHistory -Event "ABANDONED_LOCK_RECOVERED" -Release $null `
+            -Detail @{ owner_pid = if ($owner) { [int]$owner.owner_pid } else { 0 } }
+    }
+    try {
+        New-Item -ItemType Directory -Path $releaseLockPath -ErrorAction Stop | Out-Null
+        [pscustomobject]@{
+            owner_pid = $PID
+            acquired_at = [DateTimeOffset]::UtcNow.ToString("o")
+        } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $releaseLockPath "owner.json") -Encoding UTF8
+        $script:releaseTransactionLockHeld = $true
+        return $true
+    } catch { return $false }
+}
+
+function Exit-ReleaseTransactionLock {
+    if ($script:releaseTransactionLockHeld -and (Test-Path -LiteralPath $releaseLockPath)) {
+        Remove-Item -LiteralPath $releaseLockPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $script:releaseTransactionLockHeld = $false
+}
+
+function Invoke-WranglerJson {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+    $webRoot = Join-Path $repositoryRoot "web"
+    Push-Location $webRoot
+    try {
+        $output = @(& npx.cmd wrangler @Arguments --json 2>$null)
+        if ($LASTEXITCODE -ne 0) { throw "Wrangler command failed." }
+        ($output -join "`n") | ConvertFrom-Json
+    } finally { Pop-Location }
+}
+
+function Get-CloudflareDeployment {
+    Invoke-WranglerJson -Arguments @("deployments", "status", "--name", $workerName)
+}
+
+function Get-CloudflareVersions {
+    @(Invoke-WranglerJson -Arguments @("versions", "list", "--name", $workerName))
+}
+
+function Invoke-CloudflareDeployment {
+    param(
+        [Parameter(Mandatory = $true)][string]$StableVersionId,
+        [string]$CandidateVersionId = "",
+        [Parameter(Mandatory = $true)][string]$Message
+    )
+    $specifications = @("$StableVersionId@100")
+    if ($CandidateVersionId) { $specifications += "$CandidateVersionId@0" }
+    $webRoot = Join-Path $repositoryRoot "web"
+    Push-Location $webRoot
+    try {
+        $null = @(& npx.cmd wrangler versions deploy @specifications --name $workerName --yes --message $Message 2>&1)
+        if ($LASTEXITCODE -ne 0) { throw "Cloudflare deployment failed." }
+    } finally { Pop-Location }
+}
+
+function Get-ReleaseGitShaFromVersion {
+    param([Parameter(Mandatory = $true)][object]$Version)
+    $message = [string]$Version.annotations.'workers/message'
+    if ($message -match '(?i)release:([0-9a-f]{40})') { return $matches[1].ToLowerInvariant() }
     return $null
 }
 
-function Test-RevisionDescendsFrom {
-    param([string]$Ancestor, [string]$Candidate)
-    if (-not $Ancestor -or -not $Candidate) { return $false }
-    & git -C $repositoryRoot merge-base --is-ancestor $Ancestor $Candidate 2>$null
-    return $LASTEXITCODE -eq 0
+function Get-ReleaseBranchFromVersion {
+    param([Parameter(Mandatory = $true)][object]$Version)
+    $message = [string]$Version.annotations.'workers/message'
+    if ($message -match '(?i)branch:([^\s]+)') { return $matches[1] }
+    return [string]$Version.annotations.'workers/alias'
 }
 
-function Test-MainCandidate {
-    param([string]$CurrentRevision, [string]$CandidateRevision)
-    if (-not $CandidateRevision -or $CandidateRevision -eq $CurrentRevision) {
+function Get-ReleaseArtifactKindFromVersion {
+    param([Parameter(Mandatory = $true)][object]$Version)
+    $message = [string]$Version.annotations.'workers/message'
+    if ($message -match '(?i)artifact[_-]kind:(PREVIEW|PRODUCTION_CANDIDATE)') {
+        return $matches[1].ToUpperInvariant()
+    }
+    return $unknownArtifactKind
+}
+
+function Get-ReleaseVersionCreatedAt {
+    param([Parameter(Mandatory = $true)][object]$Version)
+    $created = [DateTimeOffset]::MinValue
+    if ([DateTimeOffset]::TryParse([string]$Version.metadata.created_on, [ref]$created)) {
+        return $created.ToUniversalTime().ToString("o")
+    }
+    return ""
+}
+
+function Test-VersionAfterDiscoveryWatermark {
+    param(
+        [Parameter(Mandatory = $true)][object]$Version,
+        [Parameter(Mandatory = $true)][object]$Discovery
+    )
+    if (-not $Discovery.watermark_created_at) { return $true }
+    $createdAt = Get-ReleaseVersionCreatedAt -Version $Version
+    if (-not $createdAt) { return $false }
+    $created = [DateTimeOffset]::Parse($createdAt)
+    $watermark = [DateTimeOffset]::Parse([string]$Discovery.watermark_created_at)
+    if ($created -gt $watermark) { return $true }
+    if ($created -lt $watermark) { return $false }
+    return [string]$Version.id -gt [string]$Discovery.watermark_version_id
+}
+
+function Set-CandidateDiscoveryWatermark {
+    param(
+        [Parameter(Mandatory = $true)][object]$State,
+        [Parameter(Mandatory = $true)][object]$Version
+    )
+    $State.candidate_discovery.watermark_created_at =
+        Get-ReleaseVersionCreatedAt -Version $Version
+    $State.candidate_discovery.watermark_version_id = [string]$Version.id
+    if (-not $State.candidate_discovery.initialized_at) {
+        $State.candidate_discovery.initialized_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+}
+
+function Get-DeploymentVersion {
+    param([object]$Deployment, [double]$Percentage)
+    @($Deployment.versions | Where-Object { [double]$_.percentage -eq $Percentage }) |
+        Select-Object -First 1
+}
+
+function New-ReleaseControlState {
+    param([object]$Stable, [object]$Candidate = $null)
+    [pscustomobject]@{
+        schema_version = $releaseSchemaVersion
+        stable = $Stable
+        candidate = $Candidate
+        previous_stable = $null
+        previous_stable_rollback_eligible = $false
+        previous_stable_rollback_reason = "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"
+        queued_candidate = $null
+        transaction = $null
+        deployment_status = "READY"
+        drift = $null
+        last_candidate_check = $null
+        candidate_discovery = [pscustomobject]@{
+            watermark_created_at = $null
+            watermark_version_id = $null
+            initialized_at = $null
+        }
+        updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+}
+
+function Initialize-ReleaseControl {
+    $existing = Get-ReleaseControlState
+    if ($existing) { return $existing }
+    $deployment = Get-CloudflareDeployment
+    $stableVersion = Get-DeploymentVersion -Deployment $deployment -Percentage 100
+    if (-not $stableVersion) { throw "Exactly one 100% Stable Worker version is required." }
+    $runtime = Get-RuntimeCodeState
+    $revision = if ($runtime) { [string]$runtime.applied_revision } else { Get-CodeRevision }
+    if ($revision -notmatch '^[0-9a-f]{40}$') { throw "Stable Windows revision is unavailable." }
+    $stable = New-ReleaseIdentity -GitSha $revision `
+        -WorkerVersionId ([string]$stableVersion.version_id) `
+        -WindowsRevision $revision -Branch "main" -ValidationState "PASSED" `
+        -ArtifactKind $legacyBootstrapStableArtifactKind
+    $stable | Add-Member -NotePropertyName worker_git_sha -NotePropertyValue "NOT_RECORDED"
+    $stable | Add-Member -NotePropertyName provenance_state `
+        -NotePropertyValue "LEGACY_EXACT_WORKER_WINDOWS_PAIR"
+    $stable.compatibility_state = "PASSED"
+    $acceptedPlacement = @($deployment.versions | Where-Object {
+        [string]$_.version_id -eq $bootstrapAcceptedCandidateWorker -and
+        [double]$_.percentage -eq 0
+    }).Count -eq 1
+    $accepted = $null
+    if ($acceptedPlacement) {
+        $accepted = New-ReleaseIdentity -GitSha $bootstrapAcceptedCandidateRevision `
+            -WorkerVersionId $bootstrapAcceptedCandidateWorker `
+            -WindowsRevision $bootstrapAcceptedCandidateRevision `
+            -Branch "fix/worker-cpu-headroom" -PullRequest "268" `
+            -ValidationState "REBASE_REQUIRED" -ArtifactKind $legacyReferenceArtifactKind
+        $accepted.compatibility_state = "REBASE_REQUIRED"
+        $accepted.validation = [pscustomobject]@{
+            key = [string]$accepted.validation_key
+            repository = "PASSED"
+            windows = "PASSED"
+            cloudflare = "PASSED"
+            accepted_before_release_control = $true
+            acceptance_mode = "LEGACY_ACCEPTED_MANUAL_EVIDENCE"
+            source_reference = "PR_268_ACCEPTED_REVIEW_COMMENT"
+            source_timestamp = $null
+            source_timestamp_status = "NOT_RECORDED_IN_BOOTSTRAP_SOURCE"
+            reason = "REBASE_ON_RELEASE_CONTROL_MAIN_REQUIRED"
+            cpu_evidence = [pscustomobject]@{
+                source = "CLOUDFLARE_WORKERS_OBSERVABILITY"
+                acceptance_mode = "LEGACY_ACCEPTED_MANUAL_EVIDENCE"
+                invocations = 104
+                p50_cpu_ms = 2
+                max_cpu_ms = 5
+                p95_cpu_ms = 4
+                p99_cpu_ms = 4
+                exceeded_cpu = 0
+                exceeded_memory = 0
+                responses_1102 = 0
+                responses_5xx = 0
+                source_reference = "PR_268_ACCEPTED_REVIEW_COMMENT"
+            }
+        }
+    }
+    $state = New-ReleaseControlState -Stable $stable -Candidate $accepted
+    $knownVersions = @(Get-CloudflareVersions | Sort-Object {
+        [DateTimeOffset]$_.metadata.created_on
+    }, { [string]$_.id })
+    $latestKnownVersion = $knownVersions | Select-Object -Last 1
+    if ($latestKnownVersion) {
+        $state.candidate_discovery.watermark_created_at =
+            Get-ReleaseVersionCreatedAt -Version $latestKnownVersion
+        $state.candidate_discovery.watermark_version_id = [string]$latestKnownVersion.id
+        $state.candidate_discovery.initialized_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+    Write-ReleaseControlState -State $state
+    Write-ReleaseHistory -Event "BOOTSTRAPPED" -Release $stable
+    if ($accepted) {
+        Write-ReleaseHistory -Event "ACCEPTED_CANDIDATE_IMPORTED" -Release $accepted
+    }
+    return $state
+}
+
+function Get-CandidateChangedFiles {
+    param([string]$StableRevision, [string]$CandidateRevision)
+    $changed = @(& git -C $repositoryRoot diff --name-only $StableRevision $CandidateRevision 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw "Candidate boundary classification failed." }
+    @($changed | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+}
+
+function Test-AutomaticStorageCompatibility {
+    param([string[]]$ChangedFiles)
+    # Schema evolution is never inferred from a green unit suite. A release
+    # containing a storage migration needs a separate coordinated migration
+    # protocol before this controller may authorize Promote or Reverse.
+    return @($ChangedFiles | Where-Object {
+        $_ -like "web/drizzle/*" -or
+        $_ -match '(^|/)migrations?/' -or
+        $_ -in @("web/wrangler.jsonc", "web/worker-configuration.d.ts")
+    }).Count -eq 0
+}
+
+function Test-RequiredGitHubChecks {
+    param([Parameter(Mandatory = $true)][string]$Revision)
+    try {
+        $json = @(& gh api --method GET `
+            "repos/yiyousiow000814/XAUUSD-Forecaster/commits/$Revision/check-runs" 2>$null) -join "`n"
+        if ($LASTEXITCODE -ne 0) { return "PENDING" }
+        $runs = @(($json | ConvertFrom-Json).check_runs)
+        foreach ($name in $requiredGitHubChecks) {
+            $matching = @($runs | Where-Object { [string]$_.name -eq $name })
+            if ($matching.Count -eq 0 -or
+                @($matching | Where-Object { [string]$_.status -ne "completed" }).Count -gt 0) {
+                return "PENDING"
+            }
+            if (@($matching | Where-Object { [string]$_.conclusion -ne "success" }).Count -gt 0) {
+                return "FAILED"
+            }
+        }
+        return "PASSED"
+    } catch { return "PENDING" }
+}
+
+function Test-ProductionCandidateProvenance {
+    param([Parameter(Mandatory = $true)][object]$Candidate)
+    if ([string]$Candidate.artifact_kind -ne $productionCandidateArtifactKind -or
+        [string]$Candidate.branch -ne "main" -or
+        [string]$Candidate.git_sha -ne [string]$Candidate.windows_revision) {
         return $false
     }
-    $state = Get-RuntimeUpdateState
-    if (
-        $state -and
-        [string]$state.failed_revision -eq $CandidateRevision -and
-        [string]$state.failed_preflight_contract -eq $runtimePreflightContractVersion
-    ) {
-        return $false
+    & git -C $repositoryRoot fetch origin --quiet 2>$null
+    if ($LASTEXITCODE -ne 0) { return $false }
+    & git -C $repositoryRoot cat-file -e "$([string]$Candidate.git_sha)^{commit}" 2>$null
+    if ($LASTEXITCODE -ne 0) { return $false }
+    & git -C $repositoryRoot merge-base --is-ancestor `
+        ([string]$Candidate.git_sha) origin/main 2>$null
+    return [bool]($LASTEXITCODE -eq 0)
+}
+
+function Test-SingleProductionOwner {
+    foreach ($service in @($services | Where-Object { $_.Key -in $reloadableServiceKeys })) {
+        if (@(Get-ForecasterProcesses $service).Count -ne 1) { return $false }
     }
-    $acceptedMain = if ($state) { [string]$state.accepted_main_revision } else { "" }
-    if ($acceptedMain) {
-        # A PR runtime may be bootstrapped before a squash merge.  In that case
-        # the new main commit is not a descendant of the PR commit, but it must
-        # still advance the last independently verified main checkpoint.
-        return (
-            $CandidateRevision -ne $acceptedMain -and
-            (Test-RevisionDescendsFrom $acceptedMain $CandidateRevision)
+    return $true
+}
+
+function Invoke-WorkersObservabilityQuery {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Filters,
+        [Parameter(Mandatory = $true)][object[]]$Calculations,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$From,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$To
+    )
+    $token = Get-UserEnvironmentValue -Name "CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN"
+    if (-not $token) { return $null }
+    $body = [pscustomobject]@{
+        queryId = "aurum-release-candidate-validation"
+        timeframe = [pscustomobject]@{
+            from = $From.ToUnixTimeMilliseconds()
+            to = $To.ToUnixTimeMilliseconds()
+        }
+        view = "calculations"
+        chart = $false
+        ignoreSeries = $true
+        parameters = [pscustomobject]@{
+            datasets = @()
+            filterCombination = "and"
+            filters = $Filters
+            calculations = $Calculations
+            limit = 10
+        }
+    }
+    $uri = "https://api.cloudflare.com/client/v4/accounts/$cloudflareAccountId/workers/observability/telemetry/query"
+    try {
+        $response = Invoke-RestMethod -Method Post -Uri $uri `
+            -Headers @{ Authorization = "Bearer $token" } `
+            -ContentType "application/json" -Body ($body | ConvertTo-Json -Depth 10) `
+            -TimeoutSec 30
+        if (-not $response.success) { return $null }
+        return $response.result
+    } catch { return $null }
+}
+
+function Get-CalculationAggregate {
+    param([object]$QueryResult, [string]$Alias)
+    $calculation = @($QueryResult.calculations | Where-Object {
+        [string]$_.alias -eq $Alias
+    }) | Select-Object -First 1
+    if (-not $calculation -or @($calculation.aggregates).Count -eq 0) { return $null }
+    return $calculation.aggregates[0].value
+}
+
+function Get-WorkerCpuGateState {
+    param([Parameter(Mandatory = $true)][object]$Evidence, [int]$ExpectedInvocations)
+    if ($Evidence.invocations -ne $ExpectedInvocations -or
+        $Evidence.exceeded_cpu -gt 0 -or $Evidence.responses_1102 -gt 0 -or
+        $Evidence.responses_5xx -gt 0 -or
+        $Evidence.p99_cpu_ms -gt $workerCpuPassMaxMs -or
+        $Evidence.max_cpu_ms -gt $workerCpuPassMaxMs) { return "FAILED" }
+    if ($Evidence.p95_cpu_ms -le $workerCpuPassP95Ms -and
+        $Evidence.p99_cpu_ms -le $workerCpuPassP99Ms -and
+        $Evidence.max_cpu_ms -lt $workerCpuPassMaxMs) { return "PASSED" }
+    return "REVIEW_REQUIRED"
+}
+
+function Get-CandidatePlatformEvidence {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$From,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$To,
+        [int]$ExpectedInvocations = 1,
+        [string]$RoutePath = "",
+        [string]$RouteMethod = "",
+        [string]$RouteFamily = "GLOBAL"
+    )
+    $baseFilters = @(
+        [pscustomobject]@{ key='$metadata.service'; operation='eq'; type='string'; value=$workerName },
+        [pscustomobject]@{ key='$workers.scriptVersion.id'; operation='eq'; type='string'; value=[string]$Candidate.worker_version_id }
+    )
+    if ($RoutePath) {
+        $baseFilters += [pscustomobject]@{
+            key='$workers.event.request.path'; operation='eq'; type='string'; value=$RoutePath
+        }
+    }
+    if ($RouteMethod) {
+        $baseFilters += [pscustomobject]@{
+            key='$workers.event.request.method'; operation='eq'; type='string'; value=$RouteMethod
+        }
+    }
+    $base = Invoke-WorkersObservabilityQuery -From $From -To $To `
+        -Filters $baseFilters -Calculations @(
+            [pscustomobject]@{ operator='count'; alias='invocations' },
+            [pscustomobject]@{ key='$workers.cpuTimeMs'; keyType='number'; operator='max'; alias='max_cpu_ms' },
+            [pscustomobject]@{ key='$workers.cpuTimeMs'; keyType='number'; operator='p95'; alias='p95_cpu_ms' },
+            [pscustomobject]@{ key='$workers.cpuTimeMs'; keyType='number'; operator='p99'; alias='p99_cpu_ms' },
+            [pscustomobject]@{ key='$workers.wallTimeMs'; keyType='number'; operator='max'; alias='max_wall_ms' }
         )
+    if (-not $base) { return $null }
+    $exceeded = Invoke-WorkersObservabilityQuery -From $From -To $To `
+        -Filters @($baseFilters + [pscustomobject]@{
+            key='$workers.outcome'; operation='eq'; type='string'; value='exceededCpu'
+        }) -Calculations @([pscustomobject]@{ operator='count'; alias='exceeded_cpu' })
+    $failures = Invoke-WorkersObservabilityQuery -From $From -To $To `
+        -Filters @($baseFilters + [pscustomobject]@{
+            key='$workers.event.response.status'; operation='gte'; type='number'; value=500
+        }) -Calculations @([pscustomobject]@{ operator='count'; alias='responses_5xx' })
+    $exceededMemory = Invoke-WorkersObservabilityQuery -From $From -To $To `
+        -Filters @($baseFilters + [pscustomobject]@{
+            key='$workers.outcome'; operation='eq'; type='string'; value='exceededMemory'
+        }) -Calculations @([pscustomobject]@{ operator='count'; alias='exceeded_memory' })
+    if (-not $exceeded -or -not $failures -or -not $exceededMemory) { return $null }
+    $invocations = Get-CalculationAggregate -QueryResult $base -Alias "invocations"
+    $maxCpu = Get-CalculationAggregate -QueryResult $base -Alias "max_cpu_ms"
+    $p95Cpu = Get-CalculationAggregate -QueryResult $base -Alias "p95_cpu_ms"
+    $p99Cpu = Get-CalculationAggregate -QueryResult $base -Alias "p99_cpu_ms"
+    $maxWall = Get-CalculationAggregate -QueryResult $base -Alias "max_wall_ms"
+    $exceededCpu = Get-CalculationAggregate -QueryResult $exceeded -Alias "exceeded_cpu"
+    $responses5xx = Get-CalculationAggregate -QueryResult $failures -Alias "responses_5xx"
+    $exceededMemoryCount = Get-CalculationAggregate -QueryResult $exceededMemory -Alias "exceeded_memory"
+    $responses1102 = if ($null -ne $exceededCpu -and $null -ne $exceededMemoryCount) {
+        [int]$exceededCpu + [int]$exceededMemoryCount
+    } else { $null }
+    if (@($invocations, $maxCpu, $p95Cpu, $p99Cpu, $maxWall, $exceededCpu,
+        $responses1102, $responses5xx |
+        Where-Object { $null -eq $_ }).Count -gt 0) { return $null }
+    $evidence = [pscustomobject]@{
+        source = "CLOUDFLARE_WORKERS_OBSERVABILITY"
+        route_family = $RouteFamily
+        route_path = if ($RoutePath) { $RoutePath } else { $null }
+        route_method = if ($RouteMethod) { $RouteMethod } else { $null }
+        worker_version_id = [string]$Candidate.worker_version_id
+        from = $From.ToString("o")
+        to = $To.ToString("o")
+        invocations = [int]$invocations
+        max_cpu_ms = [double]$maxCpu
+        p95_cpu_ms = [double]$p95Cpu
+        p99_cpu_ms = [double]$p99Cpu
+        max_wall_ms = [double]$maxWall
+        exceeded_cpu = [int]$exceededCpu
+        exceeded_memory = [int]$exceededMemoryCount
+        responses_1102 = [int]$responses1102
+        responses_5xx = [int]$responses5xx
     }
-    return Test-RevisionDescendsFrom $CurrentRevision $CandidateRevision
+    $gateState = Get-WorkerCpuGateState -Evidence $evidence `
+        -ExpectedInvocations $ExpectedInvocations
+    $evidence | Add-Member -NotePropertyName gate_state -NotePropertyValue $gateState
+    $evidence | Add-Member -NotePropertyName passed `
+        -NotePropertyValue ([bool]($gateState -eq "PASSED"))
+    return $evidence
+}
+
+function Get-CandidateCpuEvidence {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$From,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$To,
+        [Parameter(Mandatory = $true)][object[]]$Routes
+    )
+    $expected = [int](($Routes | Measure-Object -Property acceptance_samples -Sum).Sum)
+    $global = Get-CandidatePlatformEvidence -Candidate $Candidate -From $From -To $To `
+        -ExpectedInvocations $expected
+    if (-not $global) { return $null }
+    $families = @()
+    $routeGroups = @($Routes | Group-Object { "{0}|{1}|{2}" -f `
+        [string]$_.path, [string]$_.method, [string]$_.family })
+    foreach ($group in $routeGroups) {
+        $route = $group.Group[0]
+        $familyExpected = [int](($group.Group |
+            Measure-Object -Property acceptance_samples -Sum).Sum)
+        $evidence = Get-CandidatePlatformEvidence -Candidate $Candidate `
+            -From $From -To $To -ExpectedInvocations $familyExpected `
+            -RoutePath ([string]$route.path) -RouteMethod ([string]$route.method) `
+            -RouteFamily ([string]$route.family)
+        if (-not $evidence) { return $null }
+        $families += $evidence
+    }
+    $failed = @($families | Where-Object { [string]$_.gate_state -eq "FAILED" }).Count -gt 0
+    $review = @($families | Where-Object {
+        [string]$_.gate_state -eq "REVIEW_REQUIRED"
+    }).Count -gt 0
+    $gateState = if ($failed -or [string]$global.gate_state -eq "FAILED") {
+        "FAILED"
+    } elseif ($review -or [string]$global.gate_state -eq "REVIEW_REQUIRED") {
+        "REVIEW_REQUIRED"
+    } else { "PASSED" }
+    [pscustomobject]@{
+        source = "CLOUDFLARE_WORKERS_OBSERVABILITY"
+        worker_version_id = [string]$Candidate.worker_version_id
+        expected_invocations = $expected
+        global = $global
+        routes = $families
+        invocations = [int]$global.invocations
+        max_cpu_ms = [double]$global.max_cpu_ms
+        p95_cpu_ms = [double]$global.p95_cpu_ms
+        p99_cpu_ms = [double]$global.p99_cpu_ms
+        max_wall_ms = [double]$global.max_wall_ms
+        exceeded_cpu = [int]$global.exceeded_cpu
+        exceeded_memory = [int]$global.exceeded_memory
+        responses_1102 = [int]$global.responses_1102
+        responses_5xx = [int]$global.responses_5xx
+        gate_state = $gateState
+        passed = [bool]($gateState -eq "PASSED")
+    }
+}
+
+function Get-CandidateInvocationCount {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$From,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$To
+    )
+    $result = Invoke-WorkersObservabilityQuery -From $From -To $To -Filters @(
+        [pscustomobject]@{ key='$metadata.service'; operation='eq'; type='string'; value=$workerName },
+        [pscustomobject]@{ key='$workers.scriptVersion.id'; operation='eq'; type='string'; value=[string]$Candidate.worker_version_id }
+    ) -Calculations @([pscustomobject]@{ operator='count'; alias='invocations' })
+    if (-not $result) { return $null }
+    return Get-CalculationAggregate -QueryResult $result -Alias "invocations"
+}
+
+function Get-WorkerValidationManifest {
+    param([string]$Revision = "")
+    if ($Revision) {
+        $object = "{0}:web/worker-validation-manifest.json" -f $Revision
+        $raw = (& git -C $repositoryRoot show $object 2>$null) -join "`n"
+        if ($LASTEXITCODE -ne 0 -or -not $raw) {
+            throw "WORKER_ROUTE_VALIDATION_MANIFEST_UNAVAILABLE"
+        }
+    } else {
+        $path = Join-Path $repositoryRoot "web\worker-validation-manifest.json"
+        if (-not (Test-Path -LiteralPath $path)) {
+            throw "WORKER_ROUTE_VALIDATION_MANIFEST_UNAVAILABLE"
+        }
+        $raw = Get-Content -LiteralPath $path -Raw
+    }
+    $manifest = $raw | ConvertFrom-Json
+    if ([int]$manifest.schema_version -ne 2 -or @($manifest.routes).Count -eq 0 -or
+        -not $manifest.fixture_builder) {
+        throw "WORKER_ROUTE_VALIDATION_MANIFEST_INVALID"
+    }
+    return $manifest
+}
+
+function Test-ValidationRouteOwnedByChange {
+    param([object]$Route, [string[]]$ChangedFiles)
+    foreach ($file in $ChangedFiles) {
+        foreach ($owner in @($Route.owners)) {
+            if ($file -like [string]$owner) { return $true }
+        }
+        foreach ($producer in @($Route.producers)) {
+            if ($file -like [string]$producer) { return $true }
+        }
+    }
+    return $false
+}
+
+function Get-CandidateRouteValidationPlan {
+    param([string[]]$ChangedFiles, [string]$Revision = "")
+    $manifest = Get-WorkerValidationManifest -Revision $Revision
+    $manifestChanged = "web/worker-validation-manifest.json" -in $ChangedFiles
+    $fixtureBuilderChanged = @($ChangedFiles | Where-Object {
+        $_ -like [string]$manifest.fixture_builder -or
+        $_ -eq "tests/test_release_validation_fixtures.py"
+    }).Count -gt 0
+    $workerCodeChanged = @($ChangedFiles | Where-Object {
+        $file = $_
+        @($manifest.bundle_runtime_roots | Where-Object {
+            $file -like [string]$_
+        }).Count -gt 0
+    }).Count -gt 0
+    $selectedRoutes = @($manifest.routes | Where-Object {
+        [bool]$_.cpu_required -and (
+            $manifestChanged -or $fixtureBuilderChanged -or
+            (Test-ValidationRouteOwnedByChange -Route $_ -ChangedFiles $ChangedFiles) -or
+            ($workerCodeChanged -and [bool]$_.baseline)
+        )
+    })
+    $selected = @()
+    foreach ($route in $selectedRoutes) {
+        $scenarios = @($route.scenarios)
+        if ($scenarios.Count -eq 0) {
+            $scenarios = @([pscustomobject]@{ name = "default" })
+        }
+        foreach ($scenario in $scenarios) {
+            $copy = $route.PSObject.Copy()
+            $copy | Add-Member -NotePropertyName scenario `
+                -NotePropertyValue ([string]$scenario.name)
+            if ($scenario.fixture) { $copy.fixture = [string]$scenario.fixture }
+            $selected += $copy
+        }
+    }
+    $contractRoutes = @($manifest.routes | Where-Object {
+        $manifestChanged -or (Test-ValidationRouteOwnedByChange -Route $_ -ChangedFiles $ChangedFiles)
+    })
+    $staticChanged = @($ChangedFiles | Where-Object {
+        ($_ -like "web/app/*" -and $_ -notlike "web/app/*/route.ts" -and
+            $_ -notlike "web/app/api/_shared/*") -or
+        $_ -like "web/public/*" -or
+        $_ -in @("web/vite.config.ts", "web/wrangler.jsonc", "web/worker/index.ts")
+    }).Count -gt 0
+    [pscustomobject]@{
+        manifest_schema_version = [int]$manifest.schema_version
+        static_assets = @($manifest.static_assets)
+        worker_reads = @($selected | Where-Object { [string]$_.boundary -eq "WORKER_READ" })
+        worker_writes = @($selected | Where-Object { [string]$_.boundary -eq "WORKER_WRITE" })
+        contract_routes = $contractRoutes
+        worker_cpu_required = [bool]($selected.Count -gt 0)
+        requires_validation = [bool]($selected.Count -gt 0 -or $staticChanged)
+    }
+}
+
+function New-CandidateValidationFixtureWorkspace {
+    param([Parameter(Mandatory = $true)][object]$Candidate)
+    $stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) `
+        ("aurum-release-validation-{0}" -f [guid]::NewGuid().ToString("N"))
+    $fixtureRoot = Join-Path $stageRoot ".release-validation-fixtures"
+    & git -C $repositoryRoot worktree add --detach --quiet $stageRoot `
+        ([string]$Candidate.git_sha) 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "Candidate fixture worktree is unavailable." }
+    try {
+        $python = (Get-Command python.exe -ErrorAction Stop).Source
+        & $python (Join-Path $stageRoot "scripts\build_release_validation_fixtures.py") `
+            --output $fixtureRoot | Out-Null
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $fixtureRoot)) {
+            throw "Production-shaped fixture generation failed."
+        }
+        return [pscustomobject]@{ stage_root=$stageRoot; fixture_root=$fixtureRoot }
+    } catch {
+        & git -C $repositoryRoot worktree remove --force $stageRoot 2>$null
+        & git -C $repositoryRoot worktree prune 2>$null
+        throw
+    }
+}
+
+function Remove-CandidateValidationFixtureWorkspace {
+    param([object]$Workspace)
+    if (-not $Workspace -or -not $Workspace.stage_root) { return }
+    & git -C $repositoryRoot worktree remove --force ([string]$Workspace.stage_root) 2>$null
+    & git -C $repositoryRoot worktree prune 2>$null
+}
+
+function Invoke-CandidateRouteSample {
+    param(
+        [Parameter(Mandatory = $true)][object]$Route,
+        [Parameter(Mandatory = $true)][hashtable]$VersionHeaders,
+        [Parameter(Mandatory = $true)][string]$ValidationRun,
+        [Parameter(Mandatory = $true)][string]$FixtureRoot,
+        [string]$IngestToken = ""
+    )
+    $requestId = [guid]::NewGuid().ToString()
+    $headers = @{} + $VersionHeaders
+    $headers["X-Aurum-Validation-Run"] = $ValidationRun
+    $headers["X-Aurum-Request-ID"] = $requestId
+    $parameters = @{
+        UseBasicParsing=$true; Method=[string]$Route.method
+        Uri="$workerUrl$($Route.path)$([string]$Route.request_query)"; Headers=$headers; TimeoutSec=30
+    }
+    if ([string]$Route.strategy -eq "PRODUCTION_SHAPED_DRY_RUN") {
+        if (-not $IngestToken) {
+            return [pscustomobject]@{
+                request_id=$requestId; status=0; passed=$false
+                reason="INGEST_AUTHORITY_UNAVAILABLE"
+            }
+        }
+        $fixture = Join-Path $FixtureRoot ([string]$Route.fixture)
+        if (-not (Test-Path -LiteralPath $fixture)) {
+            return [pscustomobject]@{
+                request_id=$requestId; status=0; passed=$false
+                reason="VALIDATION_FIXTURE_UNAVAILABLE"
+            }
+        }
+        $headers.Authorization = "Bearer $IngestToken"
+        $headers["X-Aurum-Release-Validation"] = "dry-run"
+        $parameters.ContentType = "application/json"
+        $parameters.Body = [System.IO.File]::ReadAllBytes($fixture)
+    }
+    try {
+        $response = Invoke-WebRequest @parameters
+        $passed = [bool]($response.StatusCode -eq 200)
+        if ([string]$Route.strategy -eq "PRODUCTION_SHAPED_DRY_RUN") {
+            try {
+                $payload = $response.Content | ConvertFrom-Json
+                $passed = $passed -and [string]$payload.status -eq "DRY_RUN_OK" -and
+                    [bool]$payload.mutated -eq $false -and
+                    [string]$payload.route_family -eq [string]$Route.family
+            } catch { $passed = $false }
+        }
+        $reason = if ($passed) { $null } else { "VALIDATION_RESPONSE_INVALID" }
+        return [pscustomobject]@{
+            request_id=$requestId; status=[int]$response.StatusCode; passed=$passed
+            reason=$reason
+        }
+    } catch {
+        $status = if ($_.Exception.Response) {
+            [int]$_.Exception.Response.StatusCode
+        } else { 0 }
+        return [pscustomobject]@{
+            request_id=$requestId; status=$status; passed=$false
+            reason="VALIDATION_REQUEST_FAILED"
+        }
+    }
+}
+
+function Invoke-CandidateWorkerValidation {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$RoutePlan
+    )
+    $header = @{
+        "Cloudflare-Workers-Version-Overrides" =
+            "$workerName=`"$([string]$Candidate.worker_version_id)`""
+    }
+    $results = @()
+    $staticStartedAt = [DateTimeOffset]::UtcNow
+    foreach ($route in @($RoutePlan.static_assets)) {
+        try {
+            $response = Invoke-WebRequest -UseBasicParsing -Method Get `
+                -Uri "$workerUrl$($route.path)" -Headers $header -TimeoutSec 30
+            $markerPassed = -not $route.marker -or $response.Content -like "*$($route.marker)*"
+            $results += [pscustomobject]@{
+                route = $route.path; boundary = "STATIC_ASSET"; request_id = $null
+                status = [int]$response.StatusCode
+                passed = [bool]($response.StatusCode -eq 200 -and $markerPassed)
+            }
+        } catch {
+            $status = if ($_.Exception.Response) {
+                [int]$_.Exception.Response.StatusCode
+            } else { 0 }
+            $results += [pscustomobject]@{
+                route = $route.path; boundary = "STATIC_ASSET"; request_id = $null
+                status = $status
+                passed = $false
+            }
+        }
+    }
+    Start-Sleep -Seconds 5
+    $staticEndedAt = [DateTimeOffset]::UtcNow
+    $staticInvocations = Get-CandidateInvocationCount -Candidate $Candidate `
+        -From $staticStartedAt.AddSeconds(-2) -To $staticEndedAt.AddSeconds(2)
+    if ($null -eq $staticInvocations -or [int]$staticInvocations -ne 0) {
+        $results += [pscustomobject]@{
+            route = "STATIC_ASSET_INVOCATIONS"; boundary = "STATIC_ASSET"
+            request_id = $null; status = 0; passed = $false
+            observed_invocations = $staticInvocations
+        }
+    }
+    $workerRoutes = @($RoutePlan.worker_reads) + @($RoutePlan.worker_writes)
+    if ($workerRoutes.Count -eq 0) {
+        return [pscustomobject]@{
+            passed = [bool](@($results | Where-Object { -not $_.passed }).Count -eq 0)
+            validation_run = $null; expected_worker_invocations = 0
+            static_worker_invocations = $staticInvocations; routes = $results
+            cpu_evidence = "NOT_REQUIRED"
+        }
+    }
+    $workspace = $null
+    $validationRun = [guid]::NewGuid().ToString()
+    $ingestToken = [Environment]::GetEnvironmentVariable("CLOUDFLARE_INGEST_TOKEN", "User")
+    try {
+        if (@($RoutePlan.worker_writes).Count -gt 0) {
+            $workspace = New-CandidateValidationFixtureWorkspace -Candidate $Candidate
+        }
+        $fixtureRoot = if ($workspace) { [string]$workspace.fixture_root } else { "" }
+        foreach ($route in $workerRoutes) {
+            $warmups = @()
+            for ($index = 0; $index -lt [int]$route.warmup_samples; $index++) {
+                $warmups += Invoke-CandidateRouteSample -Route $route `
+                    -VersionHeaders $header -ValidationRun $validationRun `
+                    -FixtureRoot $fixtureRoot -IngestToken $ingestToken
+            }
+            if (@($warmups | Where-Object { -not $_.passed }).Count -gt 0) {
+                $results += [pscustomobject]@{
+                    route=$route.path; method=$route.method; family=$route.family
+                    scenario=$route.scenario
+                    boundary=$route.boundary; warmup_samples=$warmups.Count
+                    acceptance_samples=0; passed=$false; reason="WARMUP_FAILED"
+                }
+            }
+        }
+        $workerStartedAt = [DateTimeOffset]::UtcNow
+        foreach ($route in $workerRoutes) {
+            $samples = @()
+            for ($index = 0; $index -lt [int]$route.acceptance_samples; $index++) {
+                $samples += Invoke-CandidateRouteSample -Route $route `
+                    -VersionHeaders $header -ValidationRun $validationRun `
+                    -FixtureRoot $fixtureRoot -IngestToken $ingestToken
+            }
+            $failures = @($samples | Where-Object { -not $_.passed })
+            $sampleReason = if ($failures.Count) {
+                [string]$failures[0].reason
+            } else { $null }
+            $results += [pscustomobject]@{
+                route=$route.path; method=$route.method; family=$route.family
+                scenario=$route.scenario
+                boundary=$route.boundary; warmup_samples=[int]$route.warmup_samples
+                acceptance_samples=$samples.Count
+                request_ids=@($samples | ForEach-Object { $_.request_id })
+                statuses=@($samples | Group-Object status | ForEach-Object {
+                    [pscustomobject]@{ status=[int]$_.Name; count=$_.Count }
+                })
+                passed=[bool]($failures.Count -eq 0)
+                reason=$sampleReason
+            }
+        }
+        $workerEndedAt = [DateTimeOffset]::UtcNow
+        Start-Sleep -Seconds 8
+        $platform = $null
+        for ($attempt = 0; $attempt -lt 3 -and -not $platform; $attempt++) {
+            $platform = Get-CandidateCpuEvidence -Candidate $Candidate `
+                -From $workerStartedAt `
+                -To $workerEndedAt.AddSeconds(2) -Routes $workerRoutes
+            if (-not $platform -and $attempt -lt 2) { Start-Sleep -Seconds 5 }
+        }
+    } finally {
+        Remove-CandidateValidationFixtureWorkspace -Workspace $workspace
+    }
+    $expectedInvocations = [int](($workerRoutes |
+        Measure-Object -Property acceptance_samples -Sum).Sum)
+    [pscustomobject]@{
+        passed = [bool](@($results | Where-Object { -not $_.passed }).Count -eq 0)
+        validation_run = $validationRun
+        expected_worker_invocations = $expectedInvocations
+        static_worker_invocations = $staticInvocations
+        routes = $results
+        cpu_evidence = $platform
+    }
+}
+
+function Set-CloudflareCandidatePointer {
+    param([object]$Stable, [object]$Candidate)
+    Invoke-CloudflareDeployment `
+        -StableVersionId ([string]$Stable.worker_version_id) `
+        -CandidateVersionId ([string]$Candidate.worker_version_id) `
+        -Message "stage release candidate $([string]$Candidate.validation_key)"
+}
+
+function Invoke-AutomaticCandidateValidation {
+    param([Parameter(Mandatory = $true)][object]$Candidate)
+    $state = Get-ReleaseControlState
+    if (-not $state -or -not (Test-ReleaseIdentity $state.candidate $Candidate)) { return $false }
+    $state.candidate.validation_state = "STAGING"
+    $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+    Write-ReleaseControlState -State $state
+    try {
+        if ([string]$Candidate.artifact_kind -ne $productionCandidateArtifactKind) {
+            throw "Only a PRODUCTION_CANDIDATE artifact can enter validation."
+        }
+        if (-not (Test-ProductionCandidateProvenance -Candidate $Candidate)) {
+            throw "PRODUCTION_CANDIDATE_MAIN_PROVENANCE_REQUIRED"
+        }
+        $state.candidate.validation_state = "TESTING"
+        Write-ReleaseControlState -State $state
+        if (-not (Invoke-ProductionShapePreflight -Revision ([string]$Candidate.windows_revision))) {
+            throw "Isolated Windows preflight failed."
+        }
+        $checks = Test-RequiredGitHubChecks -Revision ([string]$Candidate.git_sha)
+        if ($checks -eq "FAILED") { throw "Required GitHub checks failed." }
+        if ($checks -eq "PENDING") {
+            $state.candidate.validation = [pscustomobject]@{
+                key = [string]$Candidate.validation_key
+                repository = "PENDING"
+                windows = "PASSED"
+                cloudflare = "PENDING"
+                tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            Write-ReleaseControlState -State $state
+            return $false
+        }
+        $changed = @(Get-CandidateChangedFiles `
+            -StableRevision ([string]$state.stable.git_sha) `
+            -CandidateRevision ([string]$Candidate.git_sha))
+        if (-not (Test-AutomaticStorageCompatibility -ChangedFiles $changed)) {
+            $state.candidate.compatibility_state = "REVIEW_REQUIRED"
+            $state.candidate.validation_state = "REVIEW_REQUIRED"
+            $state.candidate.validation = [pscustomobject]@{
+                key = [string]$Candidate.validation_key
+                repository = "PASSED"
+                windows = "PASSED"
+                cloudflare = "PENDING"
+                reason = "COORDINATED_STORAGE_MIGRATION_REQUIRED"
+                tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            Write-ReleaseControlState -State $state
+            return $false
+        }
+        $routePlan = Get-CandidateRouteValidationPlan -ChangedFiles $changed `
+            -Revision ([string]$Candidate.git_sha)
+        $workerChanged = [bool]$routePlan.worker_cpu_required
+        $cloudflareChanged = [bool]$routePlan.requires_validation
+        Set-CloudflareCandidatePointer -Stable $state.stable -Candidate $Candidate
+        $cloudflare = [pscustomobject]@{ passed = $true; routes = @(); cpu_evidence = "NOT_REQUIRED" }
+        if ($cloudflareChanged) {
+            $cloudflare = Invoke-CandidateWorkerValidation -Candidate $Candidate `
+                -RoutePlan $routePlan
+            if (-not $cloudflare.passed) { throw "Directed Worker validation failed." }
+            if (-not $cloudflare.cpu_evidence) {
+                $state.candidate.validation = [pscustomobject]@{
+                    key = [string]$Candidate.validation_key
+                    repository = "PASSED"
+                    windows = "PASSED"
+                    cloudflare = "TESTING"
+                    reason = "PLATFORM_CPU_EVIDENCE_REQUIRED"
+                    routes = $cloudflare.routes
+                    tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+                }
+                Write-ReleaseControlState -State $state
+                return $false
+            }
+            if ([string]$cloudflare.cpu_evidence.gate_state -eq "REVIEW_REQUIRED") {
+                $state.candidate.validation_state = "REVIEW_REQUIRED"
+                $state.candidate.validation = [pscustomobject]@{
+                    key = [string]$Candidate.validation_key
+                    repository = "PASSED"; windows = "PASSED"
+                    cloudflare = "REVIEW_REQUIRED"
+                    reason = "WORKER_CPU_HEADROOM_REVIEW_REQUIRED"
+                    route_plan = $routePlan; routes = $cloudflare.routes
+                    cpu_evidence = $cloudflare.cpu_evidence
+                    tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+                }
+                Write-ReleaseControlState -State $state
+                return $false
+            }
+            if (-not $cloudflare.cpu_evidence.passed) {
+                throw "Cloudflare platform CPU or 5xx validation failed."
+            }
+        }
+        $state.candidate.compatibility_state = "PASSED"
+        $state.candidate.validation_state = "PASSED"
+        $state.candidate.validation = [pscustomobject]@{
+            key = [string]$Candidate.validation_key
+            repository = "PASSED"
+            windows = "PASSED"
+            cloudflare = "PASSED"
+            worker_changed = $workerChanged
+            cloudflare_changed = $cloudflareChanged
+            route_plan = $routePlan
+            routes = $cloudflare.routes
+            cpu_evidence = $cloudflare.cpu_evidence
+            tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+        }
+        $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "CANDIDATE_PASSED" -Release $state.candidate
+        return $true
+    } catch {
+        $state = Get-ReleaseControlState
+        if ($state -and (Test-ReleaseIdentity $state.candidate $Candidate)) {
+            $state.candidate.validation_state = "FAILED"
+            $state.candidate.validation = [pscustomobject]@{
+                key = [string]$Candidate.validation_key
+                error = Protect-PreflightDiagnosticText $_.Exception.Message
+                tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            Write-ReleaseControlState -State $state
+            Write-ReleaseHistory -Event "CANDIDATE_FAILED" -Release $state.candidate
+        }
+        return $false
+    }
+}
+
+function Find-NewCandidateRelease {
+    $state = Get-ReleaseControlState
+    if (-not $state) { return $null }
+    $versions = @(Get-CloudflareVersions | Sort-Object {
+        [DateTimeOffset]$_.metadata.created_on
+    }, { [string]$_.id })
+    if (@($versions).Count -eq 0) { return $null }
+    if (-not $state.candidate_discovery.initialized_at) {
+        Set-CandidateDiscoveryWatermark -State $state -Version ($versions | Select-Object -Last 1)
+        $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "CANDIDATE_DISCOVERY_INITIALIZED" -Release $null `
+            -Detail @{
+                watermark_version_id = [string]$state.candidate_discovery.watermark_version_id
+                historical_versions_eligible = $false
+            }
+        return $null
+    }
+    $newVersions = @($versions | Where-Object {
+        Test-VersionAfterDiscoveryWatermark -Version $_ -Discovery $state.candidate_discovery
+    })
+    $discovered = $null
+    foreach ($version in $newVersions) {
+        Set-CandidateDiscoveryWatermark -State $state -Version $version
+        $sha = Get-ReleaseGitShaFromVersion -Version $version
+        $artifactKind = Get-ReleaseArtifactKindFromVersion -Version $version
+        if (-not $sha -or $sha -eq [string]$state.stable.git_sha -or
+            $artifactKind -ne $productionCandidateArtifactKind) { continue }
+        $candidate = New-ReleaseIdentity -GitSha $sha `
+            -WorkerVersionId ([string]$version.id) -WindowsRevision $sha `
+            -Branch (Get-ReleaseBranchFromVersion -Version $version) `
+            -ArtifactKind $artifactKind `
+            -VersionCreatedAt (Get-ReleaseVersionCreatedAt -Version $version)
+        $discovered = $candidate
+    }
+    if (-not $discovered) {
+        if (@($newVersions).Count -gt 0) {
+            $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+            Write-ReleaseControlState -State $state
+        }
+        return $null
+    }
+    if ($state.transaction) {
+        $state.queued_candidate = $discovered
+        $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "CANDIDATE_QUEUED" -Release $discovered
+        return $null
+    }
+    if ($state.candidate -and (Test-ReleaseIdentity $state.candidate $discovered)) {
+        Write-ReleaseControlState -State $state
+        return $state.candidate
+    }
+    if ($state.candidate) {
+        Write-ReleaseHistory -Event "CANDIDATE_SUPERSEDED" -Release $state.candidate `
+            -Detail @{ replacement_key = [string]$discovered.validation_key }
+    }
+    $state.candidate = $discovered
+    $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+    Write-ReleaseControlState -State $state
+    Write-ReleaseHistory -Event "CANDIDATE_DISCOVERED" -Release $discovered
+    return $discovered
+}
+
+function Invoke-CandidateDiscovery {
+    if (-not (Enter-ReleaseTransactionLock)) { return $false }
+    try {
+        $state = Get-ReleaseControlState
+        if ($state) {
+            $state.last_candidate_check = [DateTimeOffset]::UtcNow.ToString("o")
+            Write-ReleaseControlState -State $state
+        }
+        $null = Reconcile-ReleaseControlState
+        $state = Get-ReleaseControlState
+        $candidate = Find-NewCandidateRelease
+        if (-not $candidate) {
+            $state = Get-ReleaseControlState
+            if ($state -and -not $state.transaction) { $candidate = $state.candidate }
+        }
+        if (-not $candidate) { return $false }
+        if ([string]$candidate.validation_state -in @(
+            "PASSED", "FAILED", "REVIEW_REQUIRED", "REBASE_REQUIRED"
+        )) { return $true }
+        return Invoke-AutomaticCandidateValidation -Candidate $candidate
+    } finally { Exit-ReleaseTransactionLock }
+}
+
+function Start-CandidateDiscovery {
+    $state = Get-ReleaseControlState
+    if (-not $state) { return }
+    $lastCheck = [DateTimeOffset]::MinValue
+    if ($state.last_candidate_check) {
+        [DateTimeOffset]::TryParse([string]$state.last_candidate_check, [ref]$lastCheck) | Out-Null
+    }
+    if (([DateTimeOffset]::UtcNow - $lastCheck) -lt $candidateDiscoveryInterval) { return }
+    $arguments = @(
+        "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
+        "-File", ('"{0}"' -f $PSCommandPath), "-Action", "DiscoverCandidate",
+        "-RuntimeRoot", ('"{0}"' -f $moduleRoot),
+        "-RepositoryRoot", ('"{0}"' -f $repositoryRoot)
+    )
+    Start-Process -FilePath "powershell.exe" -ArgumentList $arguments `
+        -WorkingDirectory $moduleRoot -WindowStyle Hidden | Out-Null
 }
 
 function Write-RuntimeUpdateFailure {
@@ -287,13 +1436,32 @@ function Write-RuntimeUpdateFailure {
     Write-WatchdogEvent -Event "RUNTIME_UPDATE_FAILED" -Service "all" -State $Message
 }
 
+function Get-Sha256Hex {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+    $stream = [System.IO.File]::OpenRead($LiteralPath)
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString(
+            $algorithm.ComputeHash($stream)
+        ) -replace "-", "").ToLowerInvariant()
+    } finally {
+        $algorithm.Dispose()
+        $stream.Dispose()
+    }
+}
+
 function Sync-StableRuntimeControlFiles {
     param(
         [string]$SourceRoot = $moduleRoot,
-        [string]$ControlRoot = (Join-Path $repositoryRoot ".local\runtime-control")
+        [string]$ControlRoot = (Join-Path $repositoryRoot ".local\runtime-control"),
+        [string]$SourceRevision = ""
     )
-    $stageRoot = Join-Path $ControlRoot (".staging-{0}" -f [guid]::NewGuid())
-    $backupRoot = Join-Path $ControlRoot (".backup-{0}" -f [guid]::NewGuid())
+    # Keep transactional paths beside the bundle and short enough for Windows
+    # PowerShell/.NET installations that still enforce legacy MAX_PATH limits.
+    $controlParent = Split-Path -Parent $ControlRoot
+    $transactionId = [guid]::NewGuid().ToString("N")
+    $stageRoot = Join-Path $controlParent (".rcs-{0}" -f $transactionId)
+    $backupRoot = Join-Path $controlParent (".rcb-{0}" -f $transactionId)
     New-Item -ItemType Directory -Path $ControlRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
@@ -305,7 +1473,25 @@ function Sync-StableRuntimeControlFiles {
             }
             Copy-Item -LiteralPath $source -Destination (Join-Path $stageRoot $name) -Force
         }
+        if (-not $SourceRevision) {
+            $SourceRevision = (& git -C $SourceRoot rev-parse HEAD 2>$null | Select-Object -First 1)
+        }
+        $exactRevision = [bool]($SourceRevision -match '^[0-9a-f]{40}$')
+        $hashes = @{}
         foreach ($name in $runtimeControlFileNames) {
+            $hashes[$name] = Get-Sha256Hex `
+                -LiteralPath (Join-Path $stageRoot $name)
+        }
+        [pscustomobject]@{
+            schema_version = 1
+            source_revision = if ($exactRevision) { $SourceRevision } else { $null }
+            exact_revision = $exactRevision
+            created_at = [DateTimeOffset]::UtcNow.ToString("o")
+            files = $hashes
+        } | ConvertTo-Json -Depth 5 | Set-Content `
+            -LiteralPath (Join-Path $stageRoot $runtimeControlManifestName) -Encoding UTF8
+        $payloadNames = @($runtimeControlFileNames) + @($runtimeControlManifestName)
+        foreach ($name in $payloadNames) {
             $destination = Join-Path $ControlRoot $name
             if (Test-Path -LiteralPath $destination) {
                 Copy-Item -LiteralPath $destination `
@@ -313,12 +1499,12 @@ function Sync-StableRuntimeControlFiles {
             }
         }
         try {
-            foreach ($name in $runtimeControlFileNames) {
+            foreach ($name in $payloadNames) {
                 Move-Item -LiteralPath (Join-Path $stageRoot $name) `
                     -Destination (Join-Path $ControlRoot $name) -Force
             }
         } catch {
-            foreach ($name in $runtimeControlFileNames) {
+            foreach ($name in $payloadNames) {
                 $destination = Join-Path $ControlRoot $name
                 $backup = Join-Path $backupRoot $name
                 if (Test-Path -LiteralPath $backup) {
@@ -713,34 +1899,17 @@ function Invoke-ProductionShapePreflight {
     }
 }
 
-function Get-DesiredMainRevision {
-    param([string]$CurrentRevision)
-    $state = Get-RuntimeUpdateState
-    $lastCheck = [DateTimeOffset]::MinValue
-    if ($state -and $state.last_remote_check) {
-        [DateTimeOffset]::TryParse([string]$state.last_remote_check, [ref]$lastCheck) | Out-Null
-    }
-    if (([DateTimeOffset]::UtcNow - $lastCheck) -lt $runtimeUpdateCheckInterval) {
-        return $null
-    }
-    Write-RuntimeUpdateState @{
-        last_remote_check = [DateTimeOffset]::UtcNow.ToString("o")
-    }
-    $deployed = Get-DeployedMainRevision
-    if (-not $deployed -or $deployed -eq $CurrentRevision) { return $null }
-    $verified = Get-VerifiedOriginMain
-    if ($verified -eq $deployed -and (Test-MainCandidate $CurrentRevision $verified)) {
-        Write-RuntimeUpdateState @{ last_deployed_revision = $deployed }
-        return $verified
-    }
-    return $null
-}
-
 function Update-RuntimeCheckout {
     param([string]$Revision)
     if (-not $RuntimeRoot) { return $false }
     $previousRevision = Get-CodeRevision
-    if (-not (Test-MainCandidate $previousRevision $Revision)) { return $false }
+    $releaseState = Get-ReleaseControlState
+    if (-not $releaseState -or -not $releaseState.candidate -or
+        [string]$releaseState.candidate.validation_state -ne "PASSED" -or
+        [string]$releaseState.candidate.artifact_kind -ne $productionCandidateArtifactKind -or
+        [string]$releaseState.candidate.windows_revision -ne $Revision -or
+        [string]$releaseState.candidate.validation.key -ne
+            [string]$releaseState.candidate.validation_key) { return $false }
     if (-not (Invoke-ProductionShapePreflight -Revision $Revision)) { return $false }
     Write-RuntimeUpdateState @{
         update_status = "SWITCHING"
@@ -755,9 +1924,7 @@ function Update-RuntimeCheckout {
         & git -C $moduleRoot checkout --detach --force --quiet $Revision 2>$null
         if ($LASTEXITCODE -ne 0) { throw "verified revision checkout failed" }
         $checkoutChanged = $true
-        Sync-StableRuntimeControlFiles
         Write-RuntimeUpdateState @{
-            accepted_main_revision = $Revision
             previous_revision = $previousRevision
             staged_revision = $Revision
             staged_at = [DateTimeOffset]::UtcNow.ToString("o")
@@ -771,13 +1938,6 @@ function Update-RuntimeCheckout {
             if ($LASTEXITCODE -ne 0) {
                 Write-RuntimeUpdateFailure -Revision $Revision -Status "ROLLBACK_FAILED" `
                     -Message "Candidate switch preparation failed and the previous checkout could not be restored: $reason"
-                return $false
-            }
-            try {
-                Sync-StableRuntimeControlFiles
-            } catch {
-                Write-RuntimeUpdateFailure -Revision $Revision -Status "ROLLBACK_FAILED" `
-                    -Message "Candidate switch preparation failed and the previous control bundle could not be restored: $reason; $($_.Exception.Message)"
                 return $false
             }
         }
@@ -848,9 +2008,10 @@ function Get-ServiceProcessStartedAt {
 function Test-CodeReloadHealth {
     param(
         [DateTimeOffset]$ReloadStarted,
-        [string[]]$AllowedWorkerStates = @("STARTING", "RUNNING")
+        [string[]]$AllowedWorkerStates = @("STARTING", "RUNNING"),
+        [string[]]$RequiredServiceKeys = $reloadableServiceKeys
     )
-    foreach ($service in @($services | Where-Object { $_.Key -in $reloadableServiceKeys })) {
+    foreach ($service in @($services | Where-Object { $_.Key -in $RequiredServiceKeys })) {
         if (@(Get-ForecasterProcesses $service).Count -eq 0) { return $false }
     }
     foreach ($heartbeatSpec in @(
@@ -869,11 +2030,14 @@ function Test-CodeReloadHealth {
             return $false
         }
     }
-    try {
-        $response = Invoke-WebRequest -UseBasicParsing `
-            -Uri "http://127.0.0.1:8765/api/health" -TimeoutSec 2
-        if ($response.StatusCode -ne 200) { return $false }
-    } catch { return $false }
+    if ("api" -in $RequiredServiceKeys) {
+        try {
+            $response = Invoke-WebRequest -UseBasicParsing `
+                -Uri "http://127.0.0.1:8765/api/health" -TimeoutSec 2
+            if ($response.StatusCode -ne 200) { return $false }
+        } catch { return $false }
+    }
+    if ("sync" -notin $RequiredServiceKeys) { return $true }
     $statusFile = Join-Path $moduleRoot ".local\forward\dashboard-sync-status.json"
     if (-not (Test-Path -LiteralPath $statusFile)) { return $false }
     try {
@@ -890,26 +2054,42 @@ function Test-CodeReloadHealth {
 }
 
 function Restart-CodeReloadableServices {
-    param([string]$Revision)
+    param([string]$Revision, [string[]]$DeferredServiceKeys = @())
     $targets = @($services | Where-Object { $_.Key -in $reloadableServiceKeys })
+    $immediateTargets = @($targets | Where-Object { $_.Key -notin $DeferredServiceKeys })
     $reloadStarted = [DateTimeOffset]::UtcNow
     Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_STARTED" `
         -Service "collector,annotator,api,sync" -State $Revision
     foreach ($service in $targets) { Stop-ForecasterService $service }
     Start-Sleep -Milliseconds 800
-    foreach ($service in $targets) {
+    foreach ($service in $immediateTargets) {
         Start-ForecasterService $service -SkipExistingCheck
     }
     $deadline = [DateTimeOffset]::UtcNow.Add($codeReloadTimeout)
     do {
         Start-Sleep -Milliseconds 500
         Write-WatchdogHeartbeat
-        $healthy = Test-CodeReloadHealth -ReloadStarted $reloadStarted
+        $healthy = Test-CodeReloadHealth -ReloadStarted $reloadStarted `
+            -RequiredServiceKeys @($immediateTargets.Key)
     } while (-not $healthy -and [DateTimeOffset]::UtcNow -lt $deadline)
     if (-not $healthy) { throw "Code revision reload failed functional health checks." }
     Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_HEALTHY" `
         -Service "collector,annotator,api,sync" -State $Revision
     return $reloadStarted
+}
+
+function Complete-DeferredServiceReload {
+    param([DateTimeOffset]$ReloadStarted, [string[]]$DeferredServiceKeys)
+    foreach ($service in @($services | Where-Object { $_.Key -in $DeferredServiceKeys })) {
+        Start-ForecasterService $service -SkipExistingCheck
+    }
+    $deadline = [DateTimeOffset]::UtcNow.Add($codeReloadTimeout)
+    do {
+        Start-Sleep -Milliseconds 500
+        Write-WatchdogHeartbeat
+        $healthy = Test-CodeReloadHealth -ReloadStarted $ReloadStarted
+    } while (-not $healthy -and [DateTimeOffset]::UtcNow -lt $deadline)
+    if (-not $healthy) { throw "Deferred release services failed functional health checks." }
 }
 
 function Invoke-RuntimeCandidateActivation {
@@ -973,7 +2153,8 @@ function Start-RuntimeObservation {
     param(
         [string]$Revision,
         [string]$PreviousRevision,
-        [DateTimeOffset]$HealthBoundary = [DateTimeOffset]::UtcNow
+        [DateTimeOffset]$HealthBoundary = [DateTimeOffset]::UtcNow,
+        [ValidateSet("PROMOTE", "REVERSE")][string]$Mode = "PROMOTE"
     )
     $latestDecision = Get-LatestRuntimeDecisionTime
     Write-RuntimeUpdateState @{
@@ -986,6 +2167,7 @@ function Start-RuntimeObservation {
         observation_last_decision_time = $latestDecision
         observation_success_cycles = 0
         observation_consecutive_failures = 0
+        observation_mode = $Mode
         user_visible_failure = $false
         failure_message = $null
     }
@@ -995,25 +2177,415 @@ function Start-RuntimeObservation {
 
 function Invoke-RuntimeRollback {
     param([string]$FailedRevision, [string]$PreviousRevision, [string]$Reason)
+    $releaseLockAcquiredHere = $false
+    $releaseBeforeRollback = Get-ReleaseControlState
+    if ($releaseBeforeRollback -and $releaseBeforeRollback.transaction -and
+        -not $script:releaseTransactionLockHeld) {
+        if (-not (Enter-ReleaseTransactionLock)) { return $false }
+        $releaseLockAcquiredHere = $true
+    }
     try {
         if (-not $PreviousRevision -or $PreviousRevision -notmatch '^[0-9a-f]{40}$') {
             throw "previous revision is unavailable"
         }
         & git -C $moduleRoot checkout --detach --force --quiet $PreviousRevision 2>$null
         if ($LASTEXITCODE -ne 0) { throw "cannot restore previous revision" }
-        Sync-StableRuntimeControlFiles
         Restart-CodeReloadableServices -Revision $PreviousRevision
         Write-RuntimeCodeState -Revision $PreviousRevision
         Write-RuntimeUpdateFailure -Revision $FailedRevision -Status "ROLLED_BACK" `
             -Message "Candidate observation failed and the previous version was restored: $Reason"
         Write-WatchdogEvent -Event "RUNTIME_ROLLBACK_APPLIED" `
             -Service "all" -State $PreviousRevision
+        $releaseState = Get-ReleaseControlState
+        if ($releaseState -and $releaseState.transaction -and
+            [string]$releaseState.transaction.type -eq "PROMOTE") {
+            $prior = $releaseState.transaction.previous
+            Invoke-CloudflareDeployment `
+                -StableVersionId ([string]$prior.worker_version_id) `
+                -Message "automatic release reverse $([string]$releaseState.transaction.id)"
+            $releaseState.candidate.validation_state = "FAILED"
+            $releaseState.candidate.validation = [pscustomobject]@{
+                key = [string]$releaseState.candidate.validation_key
+                error = "OBSERVATION_FAILED"
+                tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            $releaseState.transaction = $null
+            $releaseState.deployment_status = "READY"
+            $releaseState.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+            Write-ReleaseControlState -State $releaseState
+            Write-ReleaseHistory -Event "PROMOTION_REVERSED" -Release $prior `
+                -Detail @{ reason = $Reason }
+        } elseif ($releaseState -and $releaseState.transaction -and
+            [string]$releaseState.transaction.type -eq "REVERSE") {
+            $prior = $releaseState.transaction.previous
+            Invoke-CloudflareDeployment `
+                -StableVersionId ([string]$prior.worker_version_id) `
+                -Message "failed reverse recovery $([string]$releaseState.transaction.id)"
+            $releaseState.transaction = $null
+            $releaseState.deployment_status = "RECOVERY_REQUIRED"
+            $releaseState.drift = [pscustomobject]@{
+                code = "REVERSE_OBSERVATION_FAILED"
+                reason = $Reason
+                observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            $releaseState.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+            Write-ReleaseControlState -State $releaseState
+            Write-ReleaseHistory -Event "REVERSE_OBSERVATION_FAILED" -Release $prior `
+                -Detail @{ reason = $Reason }
+        }
         return $true
     } catch {
         Write-RuntimeUpdateFailure -Revision $FailedRevision -Status "ROLLBACK_FAILED" `
             -Message "Candidate observation and automatic rollback both failed; inspect local services: $Reason; $($_.Exception.Message)"
         return $false
+    } finally {
+        if ($releaseLockAcquiredHere) { Exit-ReleaseTransactionLock }
     }
+}
+
+function Test-CloudflareReleasePlacement {
+    param([object]$Stable, [object]$Candidate = $null)
+    $deployment = Get-CloudflareDeployment
+    $stablePlacement = @($deployment.versions | Where-Object {
+        [string]$_.version_id -eq [string]$Stable.worker_version_id -and
+        [double]$_.percentage -eq 100
+    }).Count -eq 1
+    if (-not $stablePlacement) { return $false }
+    if ($Candidate) {
+        return @($deployment.versions | Where-Object {
+            [string]$_.version_id -eq [string]$Candidate.worker_version_id -and
+            [double]$_.percentage -eq 0
+        }).Count -eq 1
+    }
+    return $true
+}
+
+function Test-CloudflareRollbackTarget {
+    param([Parameter(Mandatory = $true)][object]$Target)
+    if (-not $Target.worker_version_id) { return $false }
+    $known = @(Get-CloudflareVersions | Where-Object {
+        [string]$_.id -eq [string]$Target.worker_version_id
+    })
+    if ($known.Count -ne 1) { return $false }
+    $deployment = Get-CloudflareDeployment
+    return @($deployment.versions | Where-Object {
+        [string]$_.version_id -eq [string]$Target.worker_version_id -and
+        [double]$_.percentage -in @(0, 100)
+    }).Count -eq 1
+}
+
+function Start-ReleasePromotion {
+    if (-not (Enter-ReleaseTransactionLock)) { throw "Another release transaction is active." }
+    try {
+        $state = Get-ReleaseControlState
+        if (-not $state -or $state.transaction) { throw "Release state is not ready." }
+        $candidate = $state.candidate
+        if (-not $candidate -or [string]$candidate.validation_state -ne "PASSED") {
+            throw "Candidate has not passed validation."
+        }
+        if ([string]$candidate.artifact_kind -ne $productionCandidateArtifactKind) {
+            throw "Preview and unknown artifacts cannot be promoted."
+        }
+        Assert-ActiveControlBundle
+        if (-not (Test-ProductionCandidateProvenance -Candidate $candidate)) {
+            throw "PRODUCTION_CANDIDATE_MAIN_PROVENANCE_REQUIRED"
+        }
+        if ([string]$candidate.validation.key -ne [string]$candidate.validation_key -or
+            [string]$candidate.validation_key -ne
+                "$([string]$candidate.worker_version_id):$([string]$candidate.git_sha)") {
+            throw "Candidate validation does not belong to this release."
+        }
+        if ([string]$candidate.git_sha -ne [string]$candidate.windows_revision -or
+            [string]$candidate.compatibility_state -ne "PASSED") {
+            throw "Worker and Windows compatibility is not authorized."
+        }
+        if ([string]$state.deployment_status -ne "READY") {
+            throw "Release control is not deployment-ready."
+        }
+        if (-not (Test-CloudflareReleasePlacement -Stable $state.stable -Candidate $candidate)) {
+            throw "Cloudflare Stable/Candidate placement drifted."
+        }
+        if (-not (Test-CloudflareRollbackTarget -Target $state.stable)) {
+            throw "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"
+        }
+        $runtime = Get-RuntimeCodeState
+        if (-not $runtime -or [string]$runtime.applied_revision -ne [string]$state.stable.windows_revision) {
+            throw "Windows Stable revision drifted."
+        }
+        if (-not (Test-SingleProductionOwner)) { throw "Exactly one Windows production owner is required." }
+        $transaction = [pscustomobject]@{
+            id = [guid]::NewGuid().ToString()
+            type = "PROMOTE"
+            phase = "PRECHECK"
+            target = $candidate
+            previous = $state.stable
+            started_at = [DateTimeOffset]::UtcNow.ToString("o")
+        }
+        $state.transaction = $transaction
+        $state.deployment_status = "PROMOTING"
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "PROMOTION_STARTED" -Release $candidate
+
+        if (-not (Update-RuntimeCheckout -Revision ([string]$candidate.windows_revision))) {
+            throw "Candidate Windows checkout failed."
+        }
+        $state = Get-ReleaseControlState
+        $state.transaction.phase = "CUTOVER"
+        Write-ReleaseControlState -State $state
+        $reloadStarted = Restart-CodeReloadableServices `
+            -Revision ([string]$candidate.windows_revision) `
+            -DeferredServiceKeys @("sync")
+        Invoke-CloudflareDeployment `
+            -StableVersionId ([string]$candidate.worker_version_id) `
+            -CandidateVersionId ([string]$state.stable.worker_version_id) `
+            -Message "promote release $([string]$state.transaction.id)"
+        Complete-DeferredServiceReload -ReloadStarted $reloadStarted `
+            -DeferredServiceKeys @("sync")
+        Start-RuntimeObservation -Revision ([string]$candidate.windows_revision) `
+            -PreviousRevision ([string]$state.stable.windows_revision) `
+            -HealthBoundary $reloadStarted
+        Write-RuntimeCodeState -Revision ([string]$candidate.windows_revision)
+        Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_APPLIED" `
+            -Service "collector,annotator,api,sync" `
+            -State ([string]$candidate.windows_revision)
+        $state = Get-ReleaseControlState
+        $state.transaction.phase = "OBSERVING"
+        $state.deployment_status = "OBSERVING"
+        Write-ReleaseControlState -State $state
+        return $true
+    } catch {
+        $failure = $_.Exception.Message
+        $state = Get-ReleaseControlState
+        if ($state -and $state.transaction -and [string]$state.transaction.type -eq "PROMOTE") {
+            Invoke-RuntimeRollback `
+                -FailedRevision ([string]$state.transaction.target.windows_revision) `
+                -PreviousRevision ([string]$state.transaction.previous.windows_revision) `
+                -Reason $failure | Out-Null
+        }
+        throw
+    } finally { Exit-ReleaseTransactionLock }
+}
+
+function Complete-ReleasePromotion {
+    $releaseLockAcquiredHere = $false
+    if (-not $script:releaseTransactionLockHeld) {
+        if (-not (Enter-ReleaseTransactionLock)) { return }
+        $releaseLockAcquiredHere = $true
+    }
+    try {
+        $state = Get-ReleaseControlState
+        if (-not $state -or -not $state.transaction -or
+            [string]$state.transaction.type -ne "PROMOTE" -or
+            [string]$state.transaction.phase -ne "OBSERVING") { return }
+        $target = $state.transaction.target
+        $previous = $state.transaction.previous
+        $state.stable = $target
+        $state.previous_stable = $previous
+        $state.previous_stable_rollback_eligible = Test-CloudflareRollbackTarget -Target $previous
+        $state.previous_stable_rollback_reason = if ($state.previous_stable_rollback_eligible) {
+            $null
+        } else { "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE" }
+        $state.candidate = $state.queued_candidate
+        $state.queued_candidate = $null
+        $state.transaction = $null
+        $state.deployment_status = "READY"
+        $state.drift = $null
+        $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "STABLE_COMMITTED" -Release $target
+    } finally {
+        if ($releaseLockAcquiredHere) { Exit-ReleaseTransactionLock }
+    }
+}
+
+function Invoke-ReleaseWindowsRestore {
+    param([Parameter(Mandatory = $true)][string]$Revision)
+    & git -C $moduleRoot checkout --detach --force --quiet $Revision 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "Cannot restore Windows revision." }
+    Restart-CodeReloadableServices -Revision $Revision | Out-Null
+    Write-RuntimeCodeState -Revision $Revision
+}
+
+function Invoke-ReverseStable {
+    if (-not (Enter-ReleaseTransactionLock)) { throw "Another release transaction is active." }
+    try {
+        $state = Get-ReleaseControlState
+        if (-not $state -or $state.transaction -or -not $state.previous_stable) {
+            throw "Previous Stable is unavailable."
+        }
+        Assert-ActiveControlBundle
+        if (-not (Test-CloudflareRollbackTarget -Target $state.previous_stable)) {
+            throw "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"
+        }
+        if (-not (Test-SingleProductionOwner)) { throw "Exactly one Windows production owner is required." }
+        $current = $state.stable
+        $target = $state.previous_stable
+        $state.transaction = [pscustomobject]@{
+            id = [guid]::NewGuid().ToString()
+            type = "REVERSE"
+            phase = "REVERSING"
+            target = $target
+            previous = $current
+            started_at = [DateTimeOffset]::UtcNow.ToString("o")
+        }
+        $state.deployment_status = "REVERSING"
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "REVERSE_STARTED" -Release $target
+        $syncService = $services | Where-Object Key -eq "sync" | Select-Object -First 1
+        if ($syncService) { Stop-ForecasterService $syncService }
+        Invoke-CloudflareDeployment `
+            -StableVersionId ([string]$target.worker_version_id) `
+            -Message "reverse stable $([string]$state.transaction.id)"
+        Invoke-ReleaseWindowsRestore -Revision ([string]$target.windows_revision)
+        if (-not (Test-SingleProductionOwner)) { throw "Production owner uniqueness failed after Reverse." }
+        Start-RuntimeObservation -Revision ([string]$target.windows_revision) `
+            -PreviousRevision ([string]$current.windows_revision) -Mode "REVERSE"
+        $state = Get-ReleaseControlState
+        $state.transaction.phase = "REVERSE_OBSERVING"
+        $state.deployment_status = "REVERSE_OBSERVING"
+        $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "REVERSE_OBSERVATION_STARTED" -Release $target
+        return $true
+    } catch {
+        $state = Get-ReleaseControlState
+        if ($state) {
+            $state.deployment_status = "RECOVERY_REQUIRED"
+            $state.drift = [pscustomobject]@{
+                code = "REVERSE_INCOMPLETE"
+                observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            Write-ReleaseControlState -State $state
+        }
+        throw
+    } finally { Exit-ReleaseTransactionLock }
+}
+
+function Complete-ReleaseReverse {
+    $releaseLockAcquiredHere = $false
+    if (-not $script:releaseTransactionLockHeld) {
+        if (-not (Enter-ReleaseTransactionLock)) { return }
+        $releaseLockAcquiredHere = $true
+    }
+    try {
+        $state = Get-ReleaseControlState
+        if (-not $state -or -not $state.transaction -or
+            [string]$state.transaction.type -ne "REVERSE" -or
+            [string]$state.transaction.phase -ne "REVERSE_OBSERVING") { return }
+        $target = $state.transaction.target
+        $current = $state.transaction.previous
+        $state.stable = $target
+        $state.previous_stable = $current
+        $state.previous_stable_rollback_eligible = Test-CloudflareRollbackTarget -Target $current
+        $state.previous_stable_rollback_reason = if ($state.previous_stable_rollback_eligible) {
+            $null
+        } else { "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE" }
+        $state.transaction = $null
+        $state.deployment_status = "READY"
+        $state.drift = $null
+        $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "STABLE_REVERSED" -Release $target
+    } finally {
+        if ($releaseLockAcquiredHere) { Exit-ReleaseTransactionLock }
+    }
+}
+
+function Reconcile-ReleaseControlState {
+    $state = Get-ReleaseControlState
+    if (-not $state) { return $null }
+    $deployment = Get-CloudflareDeployment
+    $runtime = Get-RuntimeCodeState
+    $observedWorker = [string](Get-DeploymentVersion -Deployment $deployment -Percentage 100).version_id
+    $observedWindows = if ($runtime) { [string]$runtime.applied_revision } else { "" }
+    if ($state.transaction) {
+        $target = $state.transaction.target
+        $targetObserved = (
+            $observedWorker -eq [string]$target.worker_version_id -and
+            $observedWindows -eq [string]$target.windows_revision
+        )
+        if ([string]$state.transaction.type -eq "REVERSE" -and $targetObserved) {
+            if ([string]$state.transaction.phase -eq "REVERSING") {
+                Start-RuntimeObservation -Revision ([string]$target.windows_revision) `
+                    -PreviousRevision ([string]$state.transaction.previous.windows_revision) `
+                    -Mode "REVERSE"
+                $state.transaction.phase = "REVERSE_OBSERVING"
+                $state.deployment_status = "REVERSE_OBSERVING"
+                Write-ReleaseControlState -State $state
+                return $state
+            }
+            if ([string]$state.transaction.phase -eq "REVERSE_OBSERVING") {
+                $observation = Get-RuntimeUpdateState
+                if ($observation -and [string]$observation.update_status -eq "ACTIVE" -and
+                    [string]$observation.activated_revision -eq [string]$target.windows_revision) {
+                    Complete-ReleaseReverse
+                    return Get-ReleaseControlState
+                }
+                if ($observation -and [string]$observation.update_status -eq "OBSERVING" -and
+                    [string]$observation.observing_revision -eq [string]$target.windows_revision) {
+                    Test-RuntimeObservation | Out-Null
+                    return Get-ReleaseControlState
+                }
+            }
+        }
+        if ([string]$state.transaction.phase -eq "OBSERVING" -and $targetObserved) {
+            $observation = Get-RuntimeUpdateState
+            if ($observation -and [string]$observation.update_status -eq "ACTIVE" -and
+                [string]$observation.activated_revision -eq [string]$target.windows_revision) {
+                Complete-ReleasePromotion
+                return Get-ReleaseControlState
+            }
+            if ($observation -and [string]$observation.update_status -eq "OBSERVING" -and
+                [string]$observation.observing_revision -eq [string]$target.windows_revision) {
+                Test-RuntimeObservation | Out-Null
+                return Get-ReleaseControlState
+            }
+            $state.deployment_status = "RECOVERY_REQUIRED"
+            $state.drift = [pscustomobject]@{
+                code = "OBSERVATION_STATE_MISSING_OR_MISMATCHED"
+                worker_version_id = $observedWorker
+                windows_revision = $observedWindows
+                observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            Write-ReleaseControlState -State $state
+            return $state
+        }
+        $state.deployment_status = "RECOVERY_REQUIRED"
+        $state.drift = [pscustomobject]@{
+            code = "INCOMPLETE_RELEASE_TRANSACTION"
+            phase = [string]$state.transaction.phase
+            worker_version_id = $observedWorker
+            windows_revision = $observedWindows
+            observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+        }
+        Write-ReleaseControlState -State $state
+        return $state
+    }
+    if ($observedWorker -ne [string]$state.stable.worker_version_id -or
+        $observedWindows -ne [string]$state.stable.windows_revision) {
+        $state.deployment_status = "DEPLOYMENT_DRIFT"
+        $state.drift = [pscustomobject]@{
+            code = "STABLE_IDENTITY_MISMATCH"
+            worker_version_id = $observedWorker
+            windows_revision = $observedWindows
+            observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+        }
+    } else {
+        $state.deployment_status = "READY"
+        $state.drift = $null
+    }
+    if ($state.previous_stable) {
+        $state.previous_stable_rollback_eligible =
+            Test-CloudflareRollbackTarget -Target $state.previous_stable
+        $state.previous_stable_rollback_reason = if ($state.previous_stable_rollback_eligible) {
+            $null
+        } else { "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE" }
+    } else {
+        $state.previous_stable_rollback_eligible = $false
+        $state.previous_stable_rollback_reason = "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"
+    }
+    Write-ReleaseControlState -State $state
+    return $state
 }
 
 function Test-RuntimeObservation {
@@ -1149,6 +2721,11 @@ function Test-RuntimeObservation {
         }
         Write-WatchdogEvent -Event "RUNTIME_OBSERVATION_PASSED" `
             -Service "all" -State "$revision cycles=$cycles"
+        if ([string]$state.observation_mode -eq "REVERSE") {
+            Complete-ReleaseReverse
+        } else {
+            Complete-ReleasePromotion
+        }
         return $true
     }
     if (([DateTimeOffset]::UtcNow - $readyAt) -ge $runtimeObservationTimeout) {
@@ -1446,14 +3023,50 @@ function Write-WatchdogEvent {
     } | ConvertTo-Json -Compress | Add-Content -LiteralPath $watchdogLog -Encoding UTF8
 }
 
+function Get-RuntimeControlBundleIdentity {
+    $path = Join-Path $PSScriptRoot $runtimeControlManifestName
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    try {
+        $identity = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        if (-not [bool]$identity.exact_revision -or
+            [string]$identity.source_revision -notmatch '^[0-9a-f]{40}$') {
+            return $null
+        }
+        foreach ($name in $runtimeControlFileNames) {
+            $file = Join-Path $PSScriptRoot $name
+            $expected = [string]$identity.files.$name
+            if (-not (Test-Path -LiteralPath $file) -or -not $expected) { return $null }
+            $actual = Get-Sha256Hex -LiteralPath $file
+            if ($actual -ne $expected) { return $null }
+        }
+        return $identity
+    } catch { return $null }
+}
+
+function Assert-ActiveControlBundle {
+    $identity = Get-RuntimeControlBundleIdentity
+    if (-not $identity) { throw "CONTROL_BUNDLE_HASH_VERIFICATION_FAILED" }
+    if (-not [bool]$identity.exact_revision -or
+        [string]$identity.source_revision -notmatch '^[0-9a-f]{40}$') {
+        throw "CONTROL_BUNDLE_EXACT_REVISION_REQUIRED"
+    }
+    return $identity
+}
+
 function Write-WatchdogHeartbeat {
     $directory = Split-Path -Parent $watchdogHeartbeatPath
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
     $temporary = "$watchdogHeartbeatPath.tmp"
+    $controlBundle = Get-RuntimeControlBundleIdentity
     [pscustomobject]@{
         observed_at = [DateTimeOffset]::UtcNow.ToString("o")
         process_id = $PID
         revision = Get-CodeRevision
+        control_bundle_revision = if ($controlBundle) {
+            [string]$controlBundle.source_revision
+        } else { $null }
+        control_bundle_exact_revision = [bool]($controlBundle -and $controlBundle.exact_revision)
+        control_bundle_hash_verified = [bool]$controlBundle
     } | ConvertTo-Json -Compress | Set-Content -LiteralPath $temporary -Encoding UTF8
     Move-Item -LiteralPath $temporary -Destination $watchdogHeartbeatPath -Force
 }
@@ -1472,18 +3085,6 @@ function Start-WatchdogReplacement {
     Start-Process -FilePath $wscript -ArgumentList $arguments -WindowStyle Hidden
 }
 
-function Invoke-RuntimeCheckoutHandoff {
-    param([string]$Revision)
-    if (-not (Update-RuntimeCheckout -Revision $Revision)) { return $false }
-    Write-WatchdogEvent -Event "MAIN_RUNTIME_UPDATED" `
-        -Service "all" -State $Revision
-    # PowerShell has already parsed this supervisor process, so replacing the
-    # control files on disk cannot update its loaded functions. Hand control to
-    # the newly copied launcher before evaluating candidate health.
-    Start-WatchdogReplacement
-    return $true
-}
-
 function Invoke-ForecasterWatchdog {
     $failureCounts = @{}
     $lastRestart = @{}
@@ -1491,7 +3092,6 @@ function Invoke-ForecasterWatchdog {
         $failureCounts[$service.Key] = 0
         $lastRestart[$service.Key] = [DateTimeOffset]::MinValue
     }
-    $lastCodeReload = [DateTimeOffset]::MinValue
     $watchdogRevisionAtStart = Get-CodeRevision
     Ensure-WatchdogGuardTask
     Write-WatchdogEvent -Event "WATCHDOG_STARTED" -Service "all" -State "MONITORING"
@@ -1499,52 +3099,18 @@ function Invoke-ForecasterWatchdog {
         Write-WatchdogHeartbeat
         try {
             $currentRevision = Get-CodeRevision
-            $desiredRevision = Get-DesiredMainRevision -CurrentRevision $currentRevision
-            if ($desiredRevision -and (
-                Invoke-RuntimeCheckoutHandoff -Revision $desiredRevision
-            )) {
+            # Git/main and Worker version movement only discover Candidate work.
+            # Production checkout and traffic remain Stable until local Promote.
+            Start-CandidateDiscovery
+            $observationHealthy = Test-RuntimeObservation
+            $currentRevision = Get-CodeRevision
+            if ($currentRevision -ne $watchdogRevisionAtStart -and
+                (-not $observationHealthy -or -not (Get-ReleaseControlState).transaction)) {
+                # Only an explicit Promote/Reverse may change the checkout. Once
+                # that durable transaction finishes, hand supervision to its
+                # matching control bundle.
+                Start-WatchdogReplacement
                 return 0
-            }
-            $runtimeState = Get-RuntimeCodeState
-            $appliedRevision = if ($runtimeState) {
-                [string]$runtimeState.applied_revision
-            } else { "" }
-            if ($currentRevision -and $currentRevision -ne $appliedRevision -and (
-                [DateTimeOffset]::UtcNow - $lastCodeReload
-            ).TotalSeconds -ge 120) {
-                $lastCodeReload = [DateTimeOffset]::UtcNow
-                $updateState = Get-RuntimeUpdateState
-                $previousRevision = if ($updateState) {
-                    [string]$updateState.previous_revision
-                } else { $appliedRevision }
-                try {
-                    Invoke-RuntimeCandidateActivation `
-                        -Revision $currentRevision `
-                        -PreviousRevision $previousRevision
-                } catch {
-                    Invoke-RuntimeRollback -FailedRevision $currentRevision `
-                        -PreviousRevision $previousRevision `
-                        -Reason $_.Exception.Message | Out-Null
-                    $currentRevision = Get-CodeRevision
-                }
-                foreach ($service in $services) {
-                    $lastRestart[$service.Key] = [DateTimeOffset]::UtcNow
-                    $failureCounts[$service.Key] = 0
-                }
-                if ($currentRevision -ne $watchdogRevisionAtStart) {
-                    # The launcher that started this process may predate its own
-                    # supervisor loop, so start the newly copied launcher before
-                    # this process exits. This makes the first upgrade self-hosting.
-                    Start-WatchdogReplacement
-                    return 0
-                }
-            }
-            if (-not (Test-RuntimeObservation)) {
-                $currentRevision = Get-CodeRevision
-                if ($currentRevision -ne $watchdogRevisionAtStart) {
-                    Start-WatchdogReplacement
-                    return 0
-                }
             }
             $status = @(Get-ForecasterStatus)
             foreach ($service in $services) {
@@ -1685,12 +3251,6 @@ function Install-ProductionRuntime {
     if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
         throw "Cannot resolve the verified development revision."
     }
-    & git -C $source fetch origin main --quiet 2>$null
-    if ($LASTEXITCODE -ne 0) { throw "Cannot verify the initial origin/main checkpoint." }
-    $baseMainRevision = (& git -C $source rev-parse origin/main 2>$null).Trim()
-    if ($LASTEXITCODE -ne 0 -or $baseMainRevision -notmatch '^[0-9a-f]{40}$') {
-        throw "Cannot resolve the initial origin/main checkpoint."
-    }
     if (Test-Path -LiteralPath $runtime) {
         $inside = (& git -C $runtime rev-parse --is-inside-work-tree 2>$null).Trim()
         if ($LASTEXITCODE -ne 0 -or $inside -ne "true") {
@@ -1709,7 +3269,6 @@ function Install-ProductionRuntime {
         New-Item -ItemType Junction -Path $runtimeLocal -Target $sourceLocal | Out-Null
     }
     Write-RuntimeUpdateState @{
-        accepted_main_revision = $baseMainRevision
         bootstrap_revision = $revision
         installed_at = [DateTimeOffset]::UtcNow.ToString("o")
     }
@@ -1770,6 +3329,153 @@ function Install-ControlShortcut {
     return $shortcutPath
 }
 
+function Get-ControlCenterReleasePresentation {
+    param([object]$Release)
+
+    if (-not $Release -or -not $Release.stable) {
+        return [pscustomobject]@{
+            candidate_state = "UNAVAILABLE"
+            candidate_detail = "Release control has not been bootstrapped."
+            can_promote = $false
+            promote_reason = "Not bootstrapped"
+            can_reverse = $false
+            reverse_reason = "Not bootstrapped"
+        }
+    }
+
+    $transactionActive = [bool]$Release.transaction
+    $deploymentReady = [string]$Release.deployment_status -eq "READY"
+    $candidateState = if ($Release.candidate) {
+        [string]$Release.candidate.validation_state
+    } else { "UNAVAILABLE" }
+    if (-not $candidateState) { $candidateState = "UNAVAILABLE" }
+    $candidateKind = if ($Release.candidate -and $Release.candidate.artifact_kind) {
+        [string]$Release.candidate.artifact_kind
+    } else { $unknownArtifactKind }
+    $compatibilityPassed = [bool]($Release.candidate -and
+        [string]$Release.candidate.compatibility_state -eq "PASSED")
+    $controlBundleReady = [bool]($Release.control_bundle_hash_verified -and
+        $Release.control_bundle_exact_revision -and
+        [string]$Release.control_bundle_revision -match '^[0-9a-f]{40}$')
+    $candidateProvenanceReady = [bool]($Release.candidate -and
+        [string]$Release.candidate.branch -eq "main" -and
+        [string]$Release.candidate.git_sha -eq [string]$Release.candidate.windows_revision -and
+        [string]$Release.candidate.validation.key -eq [string]$Release.candidate.validation_key)
+
+    $candidateDetail = switch ($candidateState) {
+        "PASSED" { "All required validation evidence is current." }
+        "FAILED" {
+            if ($Release.candidate.validation.error) {
+                [string]$Release.candidate.validation.error
+            } elseif ($Release.candidate.validation.reason) {
+                [string]$Release.candidate.validation.reason
+            } else { "Candidate validation failed." }
+        }
+        "TESTING" { "Validation is running against the exact release identity." }
+        "STAGING" { "Candidate is being staged at zero percent traffic." }
+        "NEW" { "Candidate is waiting for validation to begin." }
+        "REVIEW_REQUIRED" { [string]$Release.candidate.validation.reason }
+        "REBASE_REQUIRED" { "REBASE_ON_RELEASE_CONTROL_MAIN_REQUIRED" }
+        default { "No candidate release is currently available." }
+    }
+
+    $promoteReason = if ($transactionActive) {
+        "A release transaction is already in progress"
+    } elseif (-not $controlBundleReady) {
+        "CONTROL_BUNDLE_HASH_VERIFICATION_FAILED"
+    } elseif (-not $deploymentReady) {
+        "Deployment status is $($Release.deployment_status)"
+    } elseif (-not $Release.candidate) {
+        "Candidate unavailable"
+    } elseif ($candidateKind -ne $productionCandidateArtifactKind) {
+        if ($candidateKind -eq $previewArtifactKind) {
+            "Preview cannot be promoted"
+        } elseif ($candidateKind -eq $legacyReferenceArtifactKind) {
+            "REBASE_ON_RELEASE_CONTROL_MAIN_REQUIRED"
+        } else { "Artifact provenance is unknown" }
+    } elseif (-not $compatibilityPassed) {
+        "Compatibility has not passed"
+    } elseif ($candidateState -eq "TESTING" -or $candidateState -eq "STAGING" -or $candidateState -eq "NEW") {
+        "Candidate still testing"
+    } elseif ($candidateState -eq "FAILED") {
+        "Candidate failed validation"
+    } elseif ($candidateState -ne "PASSED") {
+        "Candidate has not passed validation"
+    } else { "Ready to promote" }
+
+    $reverseReason = if ($transactionActive) {
+        "A release transaction is already in progress"
+    } elseif (-not $controlBundleReady) {
+        "CONTROL_BUNDLE_HASH_VERIFICATION_FAILED"
+    } elseif (-not $deploymentReady) {
+        "Deployment status is $($Release.deployment_status)"
+    } elseif (-not $Release.previous_stable) {
+        "Previous Stable unavailable"
+    } elseif (-not [bool]$Release.previous_stable_rollback_eligible) {
+        "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"
+    } else { "Ready to reverse" }
+
+    [pscustomobject]@{
+        candidate_state = $candidateState
+        candidate_kind = $candidateKind
+        candidate_detail = $candidateDetail
+        can_promote = [bool]($deploymentReady -and -not $transactionActive -and
+            $Release.candidate -and $candidateState -eq "PASSED" -and
+            $candidateKind -eq $productionCandidateArtifactKind -and
+            $compatibilityPassed -and $candidateProvenanceReady -and $controlBundleReady)
+        promote_reason = $promoteReason
+        can_reverse = [bool]($deploymentReady -and -not $transactionActive -and
+            $Release.previous_stable -and $Release.previous_stable_rollback_eligible -and
+            $controlBundleReady)
+        reverse_reason = $reverseReason
+    }
+}
+
+function Get-ControlCenterSummaryPresentation {
+    param([Parameter(Mandatory = $true)][object]$Snapshot)
+
+    $healthyStates = @("RUNNING", "LIVE", "MARKET CLOSED", "API OK", "SYNC OK")
+    $serviceRows = @($Snapshot.services)
+    $healthyCount = @($serviceRows | Where-Object { [string]$_.State -in $healthyStates }).Count
+    $unhealthyCount = $serviceRows.Count - $healthyCount
+    $localRuntime = if ($healthyCount -eq 0) {
+        "STOPPED"
+    } elseif ($unhealthyCount -eq 0) {
+        "RUNNING"
+    } else { "PARTIAL" }
+
+    $releaseView = Get-ControlCenterReleasePresentation -Release $Snapshot.release
+    $deploymentState = if ($Snapshot.release) {
+        [string]$Snapshot.release.deployment_status
+    } else { "UNAVAILABLE" }
+    $overall = if (
+        $deploymentState -match "FAILED|DRIFT|RECOVERY" -or
+        ($serviceRows.Count -gt 0 -and $unhealthyCount -eq $serviceRows.Count)
+    ) {
+        "FAILED"
+    } elseif (
+        $unhealthyCount -gt 0 -or $deploymentState -ne "READY" -or
+        $releaseView.candidate_state -eq "FAILED"
+    ) {
+        "DEGRADED"
+    } else { "HEALTHY" }
+
+    $captured = "--"
+    try {
+        $capturedAt = [DateTimeOffset]::Parse([string]$Snapshot.captured_at)
+        $captured = [TimeZoneInfo]::ConvertTimeBySystemTimeZoneId(
+            $capturedAt, "Singapore Standard Time"
+        ).ToString("HH:mm:ss")
+    } catch {}
+
+    [pscustomobject]@{
+        overall = $overall
+        local_runtime = $localRuntime
+        candidate_state = $releaseView.candidate_state
+        last_refresh = $captured
+    }
+}
+
 function Show-ControlCenter {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
@@ -1787,175 +3493,572 @@ function Show-ControlCenter {
         return
     }
 
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = "XAUUSD Forecaster Control Center"
-    $form.Size = New-Object System.Drawing.Size(720, 680)
-    $form.StartPosition = "CenterScreen"
-    $form.ShowInTaskbar = $true
-    $form.MinimumSize = New-Object System.Drawing.Size(720, 680)
-    $form.BackColor = [System.Drawing.Color]::FromArgb(235, 230, 215)
-    $form.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 10)
+    $canvas = [System.Drawing.Color]::FromArgb(235, 237, 232)
+    $surface = [System.Drawing.Color]::FromArgb(251, 251, 248)
+    $ink = [System.Drawing.Color]::FromArgb(26, 35, 36)
+    $muted = [System.Drawing.Color]::FromArgb(91, 101, 100)
+    $line = [System.Drawing.Color]::FromArgb(207, 211, 207)
+    $accent = [System.Drawing.Color]::FromArgb(29, 48, 49)
+    $active = [System.Drawing.Color]::FromArgb(30, 116, 103)
+    $green = [System.Drawing.Color]::FromArgb(31, 118, 72)
+    $greenWash = [System.Drawing.Color]::FromArgb(224, 241, 231)
+    $amber = [System.Drawing.Color]::FromArgb(151, 99, 15)
+    $amberWash = [System.Drawing.Color]::FromArgb(250, 239, 210)
+    $red = [System.Drawing.Color]::FromArgb(174, 58, 48)
+    $redWash = [System.Drawing.Color]::FromArgb(249, 228, 224)
+    $gray = [System.Drawing.Color]::FromArgb(91, 99, 97)
+    $grayWash = [System.Drawing.Color]::FromArgb(232, 235, 232)
+    $headingFont = New-Object System.Drawing.Font("Segoe UI Semibold", 12.5)
+    $bodyFont = New-Object System.Drawing.Font("Segoe UI Variable Text", 9.5)
+    $monoFont = New-Object System.Drawing.Font("Cascadia Mono", 8.5)
+    $toolTip = New-Object System.Windows.Forms.ToolTip
+    $toolTip.AutoPopDelay = 12000
+    $toolTip.InitialDelay = 250
 
-    $title = New-Object System.Windows.Forms.Label
-    $title.Text = "XAUUSD FORECASTER / LOCAL CONTROL CENTER"
-    $title.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 16, [System.Drawing.FontStyle]::Bold)
-    $title.AutoSize = $true
-    $title.Location = New-Object System.Drawing.Point(24, 20)
-    $form.Controls.Add($title)
-
-    $subtitle = New-Object System.Windows.Forms.Label
-    $subtitle.Text = "Local process control. Dashboard mirrors are view-only and never place orders."
-    $subtitle.AutoSize = $true
-    $subtitle.Location = New-Object System.Drawing.Point(26, 58)
-    $form.Controls.Add($subtitle)
-
-    $statusLabels = @{}
-    $actionButtons = New-Object System.Collections.ArrayList
-    $rowY = 105
-    foreach ($service in $services) {
-        $name = New-Object System.Windows.Forms.Label
-        $name.Text = $service.Label
-        $name.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 11, [System.Drawing.FontStyle]::Bold)
-        $name.AutoSize = $true
-        $name.Location = New-Object System.Drawing.Point(30, $rowY)
-        $form.Controls.Add($name)
-
-        $status = New-Object System.Windows.Forms.Label
-        $status.Text = "CHECKING"
-        $status.Width = 130
-        $status.Location = New-Object System.Drawing.Point(315, ($rowY + 2))
-        $form.Controls.Add($status)
-        $statusLabels[$service.Key] = $status
-
-        $startButton = New-Object System.Windows.Forms.Button
-        $startButton.Text = "Start"
-        $startButton.Tag = $service.Key
-        $startButton.Size = New-Object System.Drawing.Size(80, 30)
-        $startButton.Location = New-Object System.Drawing.Point(455, ($rowY - 6))
-        $startButton.Add_Click({
-            param($sender)
-            Invoke-GuiOperation -Operation "ServiceStart" -TargetKey $sender.Tag
-        })
-        $form.Controls.Add($startButton)
-        [void]$actionButtons.Add($startButton)
-
-        $stopButton = New-Object System.Windows.Forms.Button
-        $stopButton.Text = "Stop"
-        $stopButton.Tag = $service.Key
-        $stopButton.Size = New-Object System.Drawing.Size(80, 30)
-        $stopButton.Location = New-Object System.Drawing.Point(545, ($rowY - 6))
-        $stopButton.Add_Click({
-            param($sender)
-            Invoke-GuiOperation -Operation "ServiceStop" -TargetKey $sender.Tag
-        })
-        $form.Controls.Add($stopButton)
-        [void]$actionButtons.Add($stopButton)
-        $rowY += 48
+    function New-UiLabel {
+        param(
+            [string]$Text = "",
+            [System.Drawing.Font]$Font = $bodyFont,
+            [System.Drawing.Color]$Color = $ink,
+            [System.Windows.Forms.DockStyle]$Dock = [System.Windows.Forms.DockStyle]::None,
+            [System.Drawing.ContentAlignment]$Align = [System.Drawing.ContentAlignment]::MiddleLeft
+        )
+        $label = New-Object System.Windows.Forms.Label
+        $label.Text = $Text
+        $label.Font = $Font
+        $label.ForeColor = $Color
+        $label.Dock = $Dock
+        $label.TextAlign = $Align
+        $label.AutoEllipsis = $true
+        return $label
     }
 
-    $startAll = New-Object System.Windows.Forms.Button
-    $startAll.Text = "Start All"
-    $startAll.Size = New-Object System.Drawing.Size(120, 38)
-    $startAll.Location = New-Object System.Drawing.Point(28, 355)
+    function New-UiButton {
+        param([string]$Text, [string]$Kind = "Neutral", [int]$Width = 118)
+        $button = New-Object System.Windows.Forms.Button
+        $button.Text = $Text
+        $button.Width = $Width
+        $button.Height = 34
+        $button.Margin = New-Object System.Windows.Forms.Padding(0, 0, 8, 0)
+        $button.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+        $button.FlatAppearance.BorderSize = 1
+        $button.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 8.7)
+        if ($Kind -eq "Primary") {
+            $button.BackColor = $accent
+            $button.ForeColor = [System.Drawing.Color]::White
+            $button.FlatAppearance.BorderColor = $accent
+        } elseif ($Kind -eq "Positive") {
+            $button.BackColor = $greenWash
+            $button.ForeColor = $green
+            $button.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(178, 214, 191)
+        } elseif ($Kind -eq "Danger") {
+            $button.BackColor = $surface
+            $button.ForeColor = $red
+            $button.FlatAppearance.BorderColor = $red
+        } else {
+            $button.BackColor = $surface
+            $button.ForeColor = $ink
+            $button.FlatAppearance.BorderColor = $line
+        }
+        return $button
+    }
+
+    function Add-SoftPanelBorder {
+        param([System.Windows.Forms.Panel]$Panel, [System.Drawing.Color]$Color = $line)
+        $borderColor = $Color
+        $paintBorder = {
+            param($sender, $eventArgs)
+            $pen = New-Object System.Drawing.Pen($borderColor)
+            try {
+                $eventArgs.Graphics.DrawRectangle(
+                    $pen, 0, 0,
+                    [Math]::Max(0, $sender.ClientSize.Width - 1),
+                    [Math]::Max(0, $sender.ClientSize.Height - 1)
+                )
+            } finally { $pen.Dispose() }
+        }.GetNewClosure()
+        $Panel.Add_Paint($paintBorder)
+    }
+
+    function Set-StatusBadge {
+        param([System.Windows.Forms.Label]$Label, [string]$State)
+        $normalized = if ($State) { $State.ToUpperInvariant() } else { "UNKNOWN" }
+        $Label.Text = "  $normalized  "
+        if ($normalized -in @("HEALTHY", "RUNNING", "LIVE", "MARKET CLOSED", "API OK", "SYNC OK", "PASSED", "READY", "CURRENT", "ENABLED")) {
+            $Label.ForeColor = $green
+            $Label.BackColor = $greenWash
+        } elseif ($normalized -in @("DEGRADED", "PARTIAL", "TESTING", "STAGING", "NEW", "SYNC DEGRADED", "OBSERVING", "PENDING")) {
+            $Label.ForeColor = $amber
+            $Label.BackColor = $amberWash
+        } elseif ($normalized -in @("FAILED", "ERROR", "OFFLINE", "STOPPED", "RECOVERY REQUIRED", "DEPLOYMENT DRIFT")) {
+            $Label.ForeColor = $red
+            $Label.BackColor = $redWash
+        } else {
+            $Label.ForeColor = $gray
+            $Label.BackColor = $grayWash
+        }
+    }
+
+    function New-SummaryCell {
+        param([string]$Caption)
+        $panel = New-Object System.Windows.Forms.Panel
+        $panel.Dock = "Fill"
+        $panel.BackColor = $surface
+        $panel.Margin = New-Object System.Windows.Forms.Padding(0, 0, 1, 0)
+        $captionLabel = New-UiLabel -Text $Caption.ToUpperInvariant() -Font (New-Object System.Drawing.Font("Segoe UI Semibold", 7.5)) -Color $muted
+        $captionLabel.Location = New-Object System.Drawing.Point(14, 10)
+        $captionLabel.Size = New-Object System.Drawing.Size(190, 20)
+        $valueLabel = New-UiLabel -Text "CHECKING" -Font (New-Object System.Drawing.Font("Segoe UI Variable Display", 10.5, [System.Drawing.FontStyle]::Bold))
+        $valueLabel.Location = New-Object System.Drawing.Point(12, 32)
+        $valueLabel.AutoSize = $true
+        $panel.Controls.Add($captionLabel)
+        $panel.Controls.Add($valueLabel)
+        return [pscustomobject]@{ Panel = $panel; Value = $valueLabel }
+    }
+
+    function New-ReleaseCard {
+        param([string]$Title, [bool]$Emphasized = $false)
+        $card = New-Object System.Windows.Forms.Panel
+        $card.Dock = "Fill"
+        $card.BackColor = $surface
+        $card.BorderStyle = [System.Windows.Forms.BorderStyle]::None
+        $card.Margin = New-Object System.Windows.Forms.Padding($(if ($Emphasized) { 5 } else { 0 }), 0, $(if ($Emphasized) { 5 } else { 0 }), 0)
+
+        $titleLabel = New-UiLabel -Text $Title -Font (New-Object System.Drawing.Font("Segoe UI Semibold", 12))
+        $titleLabel.Location = New-Object System.Drawing.Point(16, 12)
+        $titleLabel.Size = New-Object System.Drawing.Size(180, 24)
+        $card.Controls.Add($titleLabel)
+
+        $badge = New-UiLabel -Text "  LOADING  " -Font (New-Object System.Drawing.Font("Segoe UI Semibold", 8))
+        $badge.AutoSize = $true
+        $badge.Location = New-Object System.Drawing.Point(16, 43)
+        Set-StatusBadge -Label $badge -State "UNKNOWN"
+        $card.Controls.Add($badge)
+
+        $git = New-UiLabel -Text "Git       --" -Font $monoFont -Color $ink
+        $git.Location = New-Object System.Drawing.Point(16, 76)
+        $git.Size = New-Object System.Drawing.Size(165, 21)
+        $git.Anchor = "Top,Left,Right"
+        $worker = New-UiLabel -Text "Worker    --" -Font $monoFont -Color $muted
+        $worker.Location = New-Object System.Drawing.Point(16, 98)
+        $worker.Size = New-Object System.Drawing.Size(165, 21)
+        $worker.Anchor = "Top,Left,Right"
+        $windows = New-UiLabel -Text "Windows   --" -Font $monoFont -Color $muted
+        $windows.Location = New-Object System.Drawing.Point(16, 120)
+        $windows.Size = New-Object System.Drawing.Size(165, 21)
+        $windows.Anchor = "Top,Left,Right"
+        $detail = New-UiLabel -Text "Loading release identity..." -Color $muted
+        $detail.Location = New-Object System.Drawing.Point(16, 148)
+        $detail.Size = New-Object System.Drawing.Size(165, 42)
+        $detail.Anchor = "Top,Left,Right"
+        $card.Controls.AddRange(@($git, $worker, $windows, $detail))
+        Add-SoftPanelBorder -Panel $card
+        return [pscustomobject]@{
+            Panel = $card; Badge = $badge; Git = $git; Worker = $worker
+            Windows = $windows; Detail = $detail
+        }
+    }
+
+    function Get-ShortIdentity {
+        param([object]$Value, [int]$Length = 12)
+        $text = [string]$Value
+        if (-not $text) { return "--" }
+        if ($text.Length -le $Length) { return $text }
+        return $text.Substring(0, $Length)
+    }
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "XAUUSD Forecaster Control Center"
+    $form.Size = New-Object System.Drawing.Size(1180, 970)
+    $form.MinimumSize = New-Object System.Drawing.Size(1060, 840)
+    $form.StartPosition = "CenterScreen"
+    $form.ShowInTaskbar = $true
+    $form.BackColor = $canvas
+    $form.Font = $bodyFont
+    $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
+    $form.AutoScroll = $false
+    $doubleBufferProperty = $form.GetType().GetProperty("DoubleBuffered", [System.Reflection.BindingFlags]"Instance,NonPublic")
+    if ($doubleBufferProperty) { $doubleBufferProperty.SetValue($form, $true, $null) }
+
+    $root = New-Object System.Windows.Forms.TableLayoutPanel
+    $root.Dock = "Top"
+    $root.AutoSize = $false
+    $root.Height = 932
+    $root.Padding = New-Object System.Windows.Forms.Padding(24, 20, 24, 20)
+    $root.ColumnCount = 1
+    $root.RowCount = 5
+    [void]$root.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+    foreach ($height in @(106, 256, 330, 140, 60)) {
+        [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, $height)))
+    }
+    $viewport = New-Object System.Windows.Forms.Panel
+    $viewport.Dock = "Fill"
+    $viewport.AutoScroll = $true
+    $viewport.BackColor = $canvas
+    $viewport.Controls.Add($root)
+    $form.Controls.Add($viewport)
+
+    $header = New-Object System.Windows.Forms.Panel
+    $header.Dock = "Fill"
+    $header.BackColor = $accent
+    $header.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 14)
+    $title = New-UiLabel -Text "XAUUSD Forecaster" -Font (New-Object System.Drawing.Font("Segoe UI Variable Display", 20, [System.Drawing.FontStyle]::Bold)) -Color ([System.Drawing.Color]::White)
+    $title.Location = New-Object System.Drawing.Point(20, 18)
+    $title.Size = New-Object System.Drawing.Size(360, 34)
+    $subtitle = New-UiLabel -Text "LOCAL CONTROL CENTER  /  FORWARD-ONLY OPERATIONS" -Font (New-Object System.Drawing.Font("Cascadia Mono", 8)) -Color ([System.Drawing.Color]::FromArgb(196, 213, 208))
+    $subtitle.Location = New-Object System.Drawing.Point(22, 55)
+    $subtitle.Size = New-Object System.Drawing.Size(420, 22)
+    $header.Controls.AddRange(@($title, $subtitle))
+
+    $summaryGrid = New-Object System.Windows.Forms.TableLayoutPanel
+    $summaryGrid.ColumnCount = 4
+    $summaryGrid.RowCount = 1
+    $summaryGrid.BackColor = $line
+    $summaryHost = New-Object System.Windows.Forms.Panel
+    $summaryHost.Dock = "Right"
+    $summaryHost.Width = 640
+    $summaryHost.Padding = New-Object System.Windows.Forms.Padding(0, 15, 20, 15)
+    $summaryHost.BackColor = $accent
+    $summaryGrid.Dock = "Fill"
+    foreach ($width in @(25, 25, 25, 25)) {
+        [void]$summaryGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, $width)))
+    }
+    $overallSummary = New-SummaryCell -Caption "Overall"
+    $stableSummary = New-SummaryCell -Caption "Stable"
+    $candidateSummary = New-SummaryCell -Caption "Candidate"
+    $runtimeSummary = New-SummaryCell -Caption "Local runtime"
+    $summaryGrid.Controls.Add($overallSummary.Panel, 0, 0)
+    $summaryGrid.Controls.Add($stableSummary.Panel, 1, 0)
+    $summaryGrid.Controls.Add($candidateSummary.Panel, 2, 0)
+    $summaryGrid.Controls.Add($runtimeSummary.Panel, 3, 0)
+    $summaryHost.Controls.Add($summaryGrid)
+    $header.Controls.Add($summaryHost)
+    $root.Controls.Add($header, 0, 0)
+
+    $servicesPanel = New-Object System.Windows.Forms.Panel
+    $servicesPanel.Dock = "Fill"
+    $servicesPanel.BackColor = $surface
+    $servicesPanel.BorderStyle = [System.Windows.Forms.BorderStyle]::None
+    $servicesPanel.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 14)
+    $servicesLayout = New-Object System.Windows.Forms.TableLayoutPanel
+    $servicesLayout.Dock = "Fill"
+    $servicesLayout.ColumnCount = 1
+    $servicesLayout.RowCount = 2
+    [void]$servicesLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+    [void]$servicesLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 45)))
+    [void]$servicesLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+    $servicesHeader = New-Object System.Windows.Forms.Panel
+    $servicesHeader.Dock = "Fill"
+    $servicesHeader.Margin = New-Object System.Windows.Forms.Padding(0)
+    $servicesHeader.BackColor = $surface
+    $servicesTitle = New-UiLabel -Text "Local services" -Font $headingFont
+    $servicesTitle.Location = New-Object System.Drawing.Point(18, 8)
+    $servicesTitle.Size = New-Object System.Drawing.Size(300, 24)
+    $servicesHint = New-UiLabel -Text "Five production owners on this Windows host" -Font (New-Object System.Drawing.Font("Segoe UI Variable Text", 8.5)) -Color $muted
+    $servicesHint.Location = New-Object System.Drawing.Point(19, 30)
+    $servicesHint.Size = New-Object System.Drawing.Size(360, 18)
+    $servicesHeader.Controls.AddRange(@($servicesTitle, $servicesHint))
+
+    $serviceDescriptions = @{
+        quote = "Receives the cTrader XAUUSD quote stream"
+        collector = "Builds the five-minute decision and training ledger"
+        annotator = "Classifies eligible news evidence"
+        api = "Serves the local dashboard contract"
+        sync = "Publishes bounded dashboard mirrors"
+    }
+    $serviceGrid = New-Object System.Windows.Forms.TableLayoutPanel
+    $serviceGrid.Dock = "Fill"
+    $serviceGrid.Margin = New-Object System.Windows.Forms.Padding(0)
+    $serviceGrid.Padding = New-Object System.Windows.Forms.Padding(18, 0, 18, 0)
+    $serviceGrid.ColumnCount = 4
+    $serviceGrid.RowCount = $services.Count
+    [void]$serviceGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 35)))
+    [void]$serviceGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 38)))
+    [void]$serviceGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 145)))
+    [void]$serviceGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 145)))
+    $statusLabels = @{}
+    $actionButtons = New-Object System.Collections.ArrayList
+    $serviceIndex = 0
+    foreach ($service in $services) {
+        [void]$serviceGrid.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 39)))
+        $namePanel = New-Object System.Windows.Forms.Panel
+        $namePanel.Dock = "Fill"
+        $namePanel.Margin = New-Object System.Windows.Forms.Padding(0)
+        $name = New-UiLabel -Text $service.Label -Font (New-Object System.Drawing.Font("Segoe UI Semibold", 9.3)) -Dock "Fill"
+        $name.Padding = New-Object System.Windows.Forms.Padding(8, 0, 0, 0)
+        $namePanel.Controls.Add($name)
+        $description = New-UiLabel -Text $serviceDescriptions[$service.Key] -Color $muted -Dock "Fill"
+        $description.Padding = New-Object System.Windows.Forms.Padding(6, 0, 0, 0)
+        $status = New-UiLabel -Text "  CHECKING  " -Font (New-Object System.Drawing.Font("Segoe UI Semibold", 8))
+        $status.AutoSize = $true
+        $status.Anchor = "Left"
+        Set-StatusBadge -Label $status -State "UNKNOWN"
+        $statusLabels[$service.Key] = $status
+
+        $serviceActions = New-Object System.Windows.Forms.FlowLayoutPanel
+        $serviceActions.Dock = "Fill"
+        $serviceActions.FlowDirection = "LeftToRight"
+        $serviceActions.WrapContents = $false
+        $serviceActions.Padding = New-Object System.Windows.Forms.Padding(0, 4, 0, 0)
+        $startButton = New-UiButton -Text "Start" -Kind "Positive" -Width 62
+        $startButton.Tag = $service.Key
+        $startButton.Add_Click({ param($sender) Invoke-GuiOperation -Operation "ServiceStart" -TargetKey $sender.Tag })
+        $stopButton = New-UiButton -Text "Stop" -Width 62
+        $stopButton.Tag = $service.Key
+        $stopButton.Add_Click({ param($sender) Invoke-GuiOperation -Operation "ServiceStop" -TargetKey $sender.Tag })
+        $serviceActions.Controls.AddRange(@($startButton, $stopButton))
+        [void]$actionButtons.Add($startButton)
+        [void]$actionButtons.Add($stopButton)
+
+        $serviceGrid.Controls.Add($namePanel, 0, $serviceIndex)
+        $serviceGrid.Controls.Add($description, 1, $serviceIndex)
+        $serviceGrid.Controls.Add($status, 2, $serviceIndex)
+        $serviceGrid.Controls.Add($serviceActions, 3, $serviceIndex)
+        $serviceIndex++
+    }
+    $servicesLayout.Controls.Add($servicesHeader, 0, 0)
+    $servicesLayout.Controls.Add($serviceGrid, 0, 1)
+    $servicesPanel.Controls.Add($servicesLayout)
+    $root.Controls.Add($servicesPanel, 0, 1)
+
+    $releasePanel = New-Object System.Windows.Forms.Panel
+    $releasePanel.Dock = "Fill"
+    $releasePanel.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 14)
+    $releaseLayout = New-Object System.Windows.Forms.TableLayoutPanel
+    $releaseLayout.Dock = "Fill"
+    $releaseLayout.ColumnCount = 1
+    $releaseLayout.RowCount = 2
+    [void]$releaseLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+    [void]$releaseLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 45)))
+    [void]$releaseLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+    $releaseHeader = New-Object System.Windows.Forms.Panel
+    $releaseHeader.Dock = "Fill"
+    $releaseHeader.Margin = New-Object System.Windows.Forms.Padding(0)
+    $releaseHeader.BackColor = $canvas
+    $releaseTitle = New-UiLabel -Text "Release control" -Font $headingFont
+    $releaseTitle.Location = New-Object System.Drawing.Point(0, 3)
+    $releaseTitle.Size = New-Object System.Drawing.Size(300, 24)
+    $releaseHint = New-UiLabel -Text "One exact Git / Worker / Windows release at every boundary" -Font (New-Object System.Drawing.Font("Segoe UI Variable Text", 8.5)) -Color $muted
+    $releaseHint.Location = New-Object System.Drawing.Point(1, 27)
+    $releaseHint.Size = New-Object System.Drawing.Size(500, 18)
+    $releaseHeader.Controls.AddRange(@($releaseTitle, $releaseHint))
+
+    $releaseGrid = New-Object System.Windows.Forms.TableLayoutPanel
+    $releaseGrid.Dock = "Fill"
+    $releaseGrid.Margin = New-Object System.Windows.Forms.Padding(0)
+    $releaseGrid.ColumnCount = 3
+    $releaseGrid.RowCount = 1
+    [void]$releaseGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 29)))
+    [void]$releaseGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 42)))
+    [void]$releaseGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 29)))
+    $stableCard = New-ReleaseCard -Title "Stable"
+    $candidateCard = New-ReleaseCard -Title "Release Candidate" -Emphasized $true
+    $previousCard = New-ReleaseCard -Title "Previous Stable"
+    $candidateCard.Panel.BackColor = [System.Drawing.Color]::FromArgb(246, 250, 248)
+    $candidateCard.Panel.Add_Paint({
+        param($sender, $eventArgs)
+        $brush = New-Object System.Drawing.SolidBrush($active)
+        try { $eventArgs.Graphics.FillRectangle($brush, 0, 0, $sender.ClientSize.Width, 4) }
+        finally { $brush.Dispose() }
+    })
+    $candidateCard.Detail.Size = New-Object System.Drawing.Size(165, 20)
+    $candidateCard.Detail.Location = New-Object System.Drawing.Point(16, 143)
+    $releaseGrid.Controls.Add($stableCard.Panel, 0, 0)
+    $releaseGrid.Controls.Add($candidateCard.Panel, 1, 0)
+    $releaseGrid.Controls.Add($previousCard.Panel, 2, 0)
+    $releaseLayout.Controls.Add($releaseHeader, 0, 0)
+    $releaseLayout.Controls.Add($releaseGrid, 0, 1)
+    $releasePanel.Controls.Add($releaseLayout)
+    $root.Controls.Add($releasePanel, 0, 2)
+
+    $candidateChecks = New-Object System.Windows.Forms.TableLayoutPanel
+    $candidateChecks.Location = New-Object System.Drawing.Point(16, 166)
+    $candidateChecks.Anchor = "Top,Left,Right"
+    $candidateChecks.Size = New-Object System.Drawing.Size(165, 40)
+    $candidateChecks.ColumnCount = 2
+    $candidateChecks.RowCount = 2
+    [void]$candidateChecks.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 50)))
+    [void]$candidateChecks.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 50)))
+    foreach ($height in @(20, 20)) {
+        [void]$candidateChecks.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, $height)))
+    }
+    $candidateCheckLabels = @{}
+    foreach ($item in @(
+        @("windows", "Runtime + heartbeat"), @("contracts", "API routes"),
+        @("cpu", "CPU headroom"), @("limits", "5xx + 1102")
+    )) {
+        $checkLabel = New-UiLabel -Text "$($item[1]): waiting" -Font (New-Object System.Drawing.Font("Segoe UI Variable Text", 8)) -Color $muted -Dock "Fill"
+        $candidateCheckLabels[$item[0]] = $checkLabel
+        $index = $candidateCheckLabels.Count - 1
+        $candidateChecks.Controls.Add($checkLabel, ($index % 2), [Math]::Floor($index / 2))
+    }
+    $candidateCard.Panel.Controls.Add($candidateChecks)
+    $candidateReason = New-UiLabel -Text "Waiting for release state..." -Color $muted
+    $candidateReason.Location = New-Object System.Drawing.Point(16, 210)
+    $candidateReason.Anchor = "Left,Right,Bottom"
+    $candidateReason.Size = New-Object System.Drawing.Size(165, 18)
+    $candidateReason.Font = New-Object System.Drawing.Font("Segoe UI Variable Text", 8)
+    $candidateCard.Panel.Controls.Add($candidateReason)
+
+    $promoteButton = New-UiButton -Text "Promote Candidate" -Kind "Primary" -Width 176
+    $promoteButton.Location = New-Object System.Drawing.Point(16, 235)
+    $promoteButton.Anchor = "Left,Bottom"
+    $promoteButton.Enabled = $false
+    $promoteButton.Add_Click({
+        $state = Get-ReleaseControlState
+        if (-not $state -or -not $state.candidate) { return }
+        $message = "Promote this exact release to Stable?`n`nGit: $($state.candidate.git_sha)`nWorker: $($state.candidate.worker_version_id)`nWindows: $($state.candidate.windows_revision)"
+        if ([System.Windows.Forms.MessageBox]::Show(
+            $message, "Confirm Promote Candidate", "YesNo", "Warning"
+        ) -eq "Yes") { Invoke-GuiOperation -Operation "PromoteCandidate" }
+    })
+    $candidateCard.Panel.Controls.Add($promoteButton)
+    [void]$actionButtons.Add($promoteButton)
+
+    $reverseButton = New-UiButton -Text "Reverse Stable" -Kind "Danger" -Width 150
+    $reverseButton.Location = New-Object System.Drawing.Point(16, 232)
+    $reverseButton.Anchor = "Left,Bottom"
+    $reverseButton.Enabled = $false
+    $reverseButton.Add_Click({
+        $state = Get-ReleaseControlState
+        if (-not $state -or -not $state.previous_stable) { return }
+        $message = "Reverse Stable to this exact release?`n`nGit: $($state.previous_stable.git_sha)`nWorker: $($state.previous_stable.worker_version_id)`nWindows: $($state.previous_stable.windows_revision)"
+        if ([System.Windows.Forms.MessageBox]::Show(
+            $message, "Confirm Reverse Stable", "YesNo", "Warning"
+        ) -eq "Yes") { Invoke-GuiOperation -Operation "ReverseStable" }
+    })
+    $previousCard.Panel.Controls.Add($reverseButton)
+    [void]$actionButtons.Add($reverseButton)
+    $reverseReason = New-UiLabel -Text "Waiting for release state..." -Color $muted
+    $reverseReason.Location = New-Object System.Drawing.Point(16, 199)
+    $reverseReason.Anchor = "Left,Right,Bottom"
+    $reverseReason.Size = New-Object System.Drawing.Size(165, 28)
+    $reverseReason.Font = New-Object System.Drawing.Font("Segoe UI Variable Text", 8)
+    $previousCard.Panel.Controls.Add($reverseReason)
+
+    function Update-ReleaseCardLayout {
+        foreach ($card in @($stableCard, $candidateCard, $previousCard)) {
+            $contentWidth = [Math]::Max(120, $card.Panel.ClientSize.Width - 32)
+            $card.Git.Width = $contentWidth
+            $card.Worker.Width = $contentWidth
+            $card.Windows.Width = $contentWidth
+            $card.Detail.Width = $contentWidth
+        }
+        $candidateWidth = [Math]::Max(120, $candidateCard.Panel.ClientSize.Width - 32)
+        $candidateChecks.Width = $candidateWidth
+        $candidateReason.Width = $candidateWidth
+        $previousWidth = [Math]::Max(120, $previousCard.Panel.ClientSize.Width - 32)
+        $reverseReason.Width = $previousWidth
+    }
+    $form.Add_SizeChanged({ Update-ReleaseCardLayout })
+
+    $actionsPanel = New-Object System.Windows.Forms.TableLayoutPanel
+    $actionsPanel.Dock = "Fill"
+    $actionsPanel.ColumnCount = 3
+    $actionsPanel.RowCount = 1
+    $actionsPanel.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 12)
+    [void]$actionsPanel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 36)))
+    [void]$actionsPanel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 30)))
+    [void]$actionsPanel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 34)))
+    $root.Controls.Add($actionsPanel, 0, 3)
+
+    function New-ActionGroup {
+        param([string]$Title)
+        $panel = New-Object System.Windows.Forms.Panel
+        $panel.Dock = "Fill"
+        $panel.BackColor = $surface
+        $panel.BorderStyle = [System.Windows.Forms.BorderStyle]::None
+        $panel.Margin = New-Object System.Windows.Forms.Padding(0, 0, 10, 0)
+        Add-SoftPanelBorder -Panel $panel
+        $label = New-UiLabel -Text $Title -Font (New-Object System.Drawing.Font("Segoe UI Semibold", 9)) -Color $muted
+        $label.Location = New-Object System.Drawing.Point(14, 10)
+        $label.Size = New-Object System.Drawing.Size(230, 22)
+        $flow = New-Object System.Windows.Forms.FlowLayoutPanel
+        $flow.Location = New-Object System.Drawing.Point(14, 43)
+        $flow.Anchor = "Top,Left,Right"
+        $flow.Size = New-Object System.Drawing.Size(170, 82)
+        $flow.WrapContents = $true
+        $panel.Controls.AddRange(@($label, $flow))
+        return [pscustomobject]@{ Panel = $panel; Flow = $flow }
+    }
+    $batchGroup = New-ActionGroup -Title "Batch operations"
+    $toolsGroup = New-ActionGroup -Title "Tools"
+    $systemGroup = New-ActionGroup -Title "System"
+    $actionsPanel.Controls.Add($batchGroup.Panel, 0, 0)
+    $actionsPanel.Controls.Add($toolsGroup.Panel, 1, 0)
+    $systemGroup.Panel.Margin = New-Object System.Windows.Forms.Padding(0)
+    $actionsPanel.Controls.Add($systemGroup.Panel, 2, 0)
+
+    $startAll = New-UiButton -Text "Start All" -Kind "Primary" -Width 100
     $startAll.Add_Click({ Invoke-GuiOperation -Operation "Start" })
-    $form.Controls.Add($startAll)
-    [void]$actionButtons.Add($startAll)
-
-    $restartAll = New-Object System.Windows.Forms.Button
-    $restartAll.Text = "Restart All"
-    $restartAll.Size = New-Object System.Drawing.Size(120, 38)
-    $restartAll.Location = New-Object System.Drawing.Point(158, 355)
+    $restartAll = New-UiButton -Text "Restart All" -Width 105
     $restartAll.Add_Click({ Invoke-GuiOperation -Operation "Restart" })
-    $form.Controls.Add($restartAll)
-    [void]$actionButtons.Add($restartAll)
+    $stopAll = New-UiButton -Text "Stop All" -Kind "Danger" -Width 100
+    $stopAll.Add_Click({
+        if ([System.Windows.Forms.MessageBox]::Show(
+            "Stop every local XAUUSD Forecaster service?", "Confirm Stop All", "YesNo", "Warning"
+        ) -eq "Yes") { Invoke-GuiOperation -Operation "Stop" }
+    })
+    $batchGroup.Flow.Controls.AddRange(@($startAll, $restartAll, $stopAll))
+    foreach ($button in @($startAll, $restartAll, $stopAll)) { [void]$actionButtons.Add($button) }
 
-    $stopAll = New-Object System.Windows.Forms.Button
-    $stopAll.Text = "Stop All"
-    $stopAll.Size = New-Object System.Drawing.Size(120, 38)
-    $stopAll.Location = New-Object System.Drawing.Point(288, 355)
-    $stopAll.Add_Click({ Invoke-GuiOperation -Operation "Stop" })
-    $form.Controls.Add($stopAll)
-    [void]$actionButtons.Add($stopAll)
-
-    $openSite = New-Object System.Windows.Forms.Button
-    $openSite.Text = "Open Dashboard"
-    $openSite.Size = New-Object System.Drawing.Size(130, 38)
-    $openSite.Location = New-Object System.Drawing.Point(418, 355)
+    $openSite = New-UiButton -Text "Open Dashboard" -Width 130
     $openSite.Add_Click({ Start-Process $dashboardUrl })
-    $form.Controls.Add($openSite)
-
-    $openLogs = New-Object System.Windows.Forms.Button
-    $openLogs.Text = "Open Logs"
-    $openLogs.Size = New-Object System.Drawing.Size(110, 38)
-    $openLogs.Location = New-Object System.Drawing.Point(558, 355)
+    $openLogs = New-UiButton -Text "Open Logs" -Width 100
     $openLogs.Add_Click({ Start-Process explorer.exe $logRoot })
-    $form.Controls.Add($openLogs)
+    $refreshButton = New-UiButton -Text "Refresh" -Width 90
+    $toolsGroup.Flow.Controls.AddRange(@($openSite, $openLogs, $refreshButton))
 
-    $autoLabel = New-Object System.Windows.Forms.Label
-    $autoLabel.AutoSize = $true
-    $autoLabel.Location = New-Object System.Drawing.Point(30, 425)
-    $form.Controls.Add($autoLabel)
+    $enableAuto = New-UiButton -Text "Enable Auto-start" -Width 135
+    $enableAuto.Add_Click({ Enable-AutoStart; Request-GuiStatus })
+    $disableAuto = New-UiButton -Text "Disable Auto-start" -Kind "Danger" -Width 138
+    $disableAuto.Add_Click({
+        if ([System.Windows.Forms.MessageBox]::Show(
+            "Disable automatic startup at Windows logon?", "Confirm Disable Auto-start", "YesNo", "Warning"
+        ) -eq "Yes") { Disable-AutoStart; Request-GuiStatus }
+    })
+    $clockButton = New-UiButton -Text "Repair Time (Admin)" -Width 142
+    $clockButton.Add_Click({ Repair-WindowsTime; Request-GuiStatus })
+    $systemGroup.Flow.Controls.AddRange(@($enableAuto, $disableAuto, $clockButton))
 
-    $enableAuto = New-Object System.Windows.Forms.Button
-    $enableAuto.Text = "Enable Auto-start"
-    $enableAuto.Size = New-Object System.Drawing.Size(190, 38)
-    $enableAuto.Location = New-Object System.Drawing.Point(310, 414)
-    $enableAuto.Add_Click({ Enable-AutoStart })
-    $form.Controls.Add($enableAuto)
-
-    $disableAuto = New-Object System.Windows.Forms.Button
-    $disableAuto.Text = "Disable Auto-start"
-    $disableAuto.Size = New-Object System.Drawing.Size(150, 38)
-    $disableAuto.Location = New-Object System.Drawing.Point(510, 414)
-    $disableAuto.Add_Click({ Disable-AutoStart })
-    $form.Controls.Add($disableAuto)
-
-    $refreshButton = New-Object System.Windows.Forms.Button
-    $refreshButton.Text = "Refresh Status"
-    $refreshButton.Size = New-Object System.Drawing.Size(150, 38)
-    $refreshButton.Location = New-Object System.Drawing.Point(30, 470)
-    $form.Controls.Add($refreshButton)
-
-    $clockButton = New-Object System.Windows.Forms.Button
-    $clockButton.Text = "Repair Windows Time (Admin)"
-    $clockButton.Size = New-Object System.Drawing.Size(220, 38)
-    $clockButton.Location = New-Object System.Drawing.Point(195, 470)
-    $clockButton.Add_Click({ Repair-WindowsTime })
-    $form.Controls.Add($clockButton)
-
-    $clockLabel = New-Object System.Windows.Forms.Label
-    $clockLabel.AutoSize = $true
-    $clockLabel.Location = New-Object System.Drawing.Point(430, 481)
-    $form.Controls.Add($clockLabel)
-
-    $operationLabel = New-Object System.Windows.Forms.Label
-    $operationLabel.Text = "Ready"
-    $operationLabel.AutoSize = $true
-    $operationLabel.Location = New-Object System.Drawing.Point(30, 545)
-    $operationLabel.ForeColor = [System.Drawing.Color]::FromArgb(82, 78, 68)
-    $form.Controls.Add($operationLabel)
-
-    $note = New-Object System.Windows.Forms.Label
-    $note.Text = "A powered-off PC cannot collect data. This control center never authorizes trading."
-    $note.AutoSize = $true
-    $note.Location = New-Object System.Drawing.Point(30, 590)
-    $form.Controls.Add($note)
+    $footer = New-Object System.Windows.Forms.Panel
+    $footer.Dock = "Fill"
+    $footer.BackColor = [System.Drawing.Color]::FromArgb(234, 231, 222)
+    $footer.Margin = New-Object System.Windows.Forms.Padding(0)
+    $operationLabel = New-UiLabel -Text "READY" -Font (New-Object System.Drawing.Font("Segoe UI Variable Text", 8.5, [System.Drawing.FontStyle]::Bold))
+    $operationLabel.Location = New-Object System.Drawing.Point(14, 7)
+    $operationLabel.Size = New-Object System.Drawing.Size(520, 22)
+    $systemMetaLabel = New-UiLabel -Text "Windows Time: checking  /  Auto-start: checking  /  Last refresh: --" -Color $muted
+    $systemMetaLabel.Dock = "Right"
+    $systemMetaLabel.Width = 550
+    $systemMetaLabel.Padding = New-Object System.Windows.Forms.Padding(0, 7, 14, 28)
+    $systemMetaLabel.TextAlign = "MiddleRight"
+    $note = New-UiLabel -Text "A powered-off PC cannot collect data. This control center never authorizes trading." -Color $muted
+    $note.Location = New-Object System.Drawing.Point(14, 30)
+    $note.Size = New-Object System.Drawing.Size(720, 20)
+    $footer.Controls.AddRange(@($operationLabel, $systemMetaLabel, $note))
+    $root.Controls.Add($footer, 0, 4)
 
     $script:guiOperation = $null
     $script:guiOperationName = ""
+    $script:lastGuiSnapshot = $null
     function Set-GuiBusy {
         param([bool]$Busy, [string]$Message)
         foreach ($button in $actionButtons) { $button.Enabled = -not $Busy }
         $refreshButton.Enabled = -not $Busy
-        $operationLabel.Text = $Message
+        $operationLabel.Text = $Message.ToUpperInvariant()
+        $operationLabel.ForeColor = if ($Busy) { $amber } else { $ink }
         $form.UseWaitCursor = $Busy
+        if (-not $Busy -and $script:lastGuiSnapshot) { Apply-GuiStatus $script:lastGuiSnapshot }
     }
     function Invoke-GuiOperation {
         param([string]$Operation, [string]$TargetKey = "")
         if ($script:guiOperation -and -not $script:guiOperation.HasExited) { return }
         $arguments = @(
             "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
-            "-File", ('"{0}"' -f $PSCommandPath), "-Action", $Operation
+            "-File", ('"{0}"' -f $PSCommandPath), "-Action", $Operation,
+            "-RuntimeRoot", ('"{0}"' -f $moduleRoot),
+            "-RepositoryRoot", ('"{0}"' -f $repositoryRoot)
         )
         if ($TargetKey) { $arguments += @("-ServiceKey", $TargetKey) }
         $script:guiOperationName = $Operation
@@ -1970,32 +4073,112 @@ function Show-ControlCenter {
     $script:lastStatusRequest = [DateTime]::MinValue
     function Apply-GuiStatus {
         param([pscustomobject]$Snapshot)
+        $script:lastGuiSnapshot = $Snapshot
         foreach ($row in @($Snapshot.services)) {
             $label = $statusLabels[$row.Key]
-            $label.Text = $row.State
-            $label.ForeColor = if ($row.State -in @("RUNNING", "LIVE", "MARKET CLOSED", "API OK", "SYNC OK")) {
-                [System.Drawing.Color]::FromArgb(52, 105, 38)
-            } elseif ($row.State -eq "SYNC DEGRADED") {
-                [System.Drawing.Color]::FromArgb(170, 105, 0)
+            if ($label) { Set-StatusBadge -Label $label -State ([string]$row.State) }
+        }
+        $summary = Get-ControlCenterSummaryPresentation -Snapshot $Snapshot
+        Set-StatusBadge -Label $overallSummary.Value -State $summary.overall
+        Set-StatusBadge -Label $runtimeSummary.Value -State $summary.local_runtime
+        Set-StatusBadge -Label $candidateSummary.Value -State $summary.candidate_state
+        $release = $Snapshot.release
+        if ($release -and $release.stable) {
+            $stableShort = Get-ShortIdentity $release.stable.git_sha
+            $stableSummary.Value.Text = "  $stableShort  "
+            $stableSummary.Value.ForeColor = [System.Drawing.Color]::White
+            $stableSummary.Value.BackColor = $accent
+            Set-StatusBadge -Label $stableCard.Badge -State ([string]$release.deployment_status)
+            $stableCard.Git.Text = "Git       $(Get-ShortIdentity $release.stable.git_sha)"
+            $stableCard.Worker.Text = "Worker    $(Get-ShortIdentity $release.stable.worker_version_id)"
+            $stableCard.Windows.Text = "Windows   $(Get-ShortIdentity $release.stable.windows_revision)"
+            $stableCard.Detail.Text = "Authoritative production release."
+
+            $releaseView = Get-ControlCenterReleasePresentation -Release $release
+            if ($release.candidate) {
+                Set-StatusBadge -Label $candidateCard.Badge -State $releaseView.candidate_state
+                $candidateCard.Git.Text = "Git       $(Get-ShortIdentity $release.candidate.git_sha)"
+                $candidateCard.Worker.Text = "Worker    $(Get-ShortIdentity $release.candidate.worker_version_id)"
+                $candidateCard.Windows.Text = "Windows   $(Get-ShortIdentity $release.candidate.windows_revision)"
+                $candidateCard.Detail.Text = "$($releaseView.candidate_kind)  /  $($releaseView.candidate_detail)"
+                $validation = $release.candidate.validation
+                $windowsCheck = if ($validation -and $validation.windows) { [string]$validation.windows } else { "WAITING" }
+                $contractCheck = if ($validation -and $validation.cloudflare) { [string]$validation.cloudflare } else { "WAITING" }
+                $cpuCheck = "WAITING"
+                $limitCheck = "WAITING"
+                if ($validation -and $validation.cpu_evidence -eq "NOT_REQUIRED") {
+                    $cpuCheck = "NOT REQUIRED"
+                    $limitCheck = "NOT REQUIRED"
+                } elseif ($validation -and $validation.cpu_evidence) {
+                    $cpuCheck = if ($validation.cpu_evidence.gate_state) {
+                        [string]$validation.cpu_evidence.gate_state
+                    } elseif ($validation.cpu_evidence.passed) { "PASSED" } else { "FAILED" }
+                    $limitCheck = if (
+                        [int]$validation.cpu_evidence.responses_5xx -eq 0 -and
+                        [int]$validation.cpu_evidence.responses_1102 -eq 0 -and
+                        [int]$validation.cpu_evidence.exceeded_cpu -eq 0
+                    ) { "PASSED" } else { "FAILED" }
+                }
+                $candidateCheckLabels.windows.Text = "Runtime + heartbeat: $windowsCheck"
+                $candidateCheckLabels.contracts.Text = "API routes: $contractCheck"
+                $candidateCheckLabels.cpu.Text = "CPU headroom: $cpuCheck"
+                $candidateCheckLabels.limits.Text = "5xx + 1102: $limitCheck"
             } else {
-                [System.Drawing.Color]::FromArgb(190, 45, 36)
+                Set-StatusBadge -Label $candidateCard.Badge -State "UNAVAILABLE"
+                $candidateCard.Git.Text = "Git       --"
+                $candidateCard.Worker.Text = "Worker    --"
+                $candidateCard.Windows.Text = "Windows   --"
+                $candidateCard.Detail.Text = "No immutable candidate has been discovered."
+                foreach ($label in $candidateCheckLabels.Values) { $label.Text = "Not available" }
             }
-        }
-        $autoLabel.Text = if ($Snapshot.auto_start) {
-            "Auto-start: enabled at Windows logon"
+            $candidateReason.Text = $releaseView.promote_reason
+            $promoteButton.Enabled = $releaseView.can_promote
+            $promoteButton.BackColor = if ($releaseView.can_promote) { $accent } else { $grayWash }
+            $promoteButton.ForeColor = if ($releaseView.can_promote) { [System.Drawing.Color]::White } else { $gray }
+            $promoteButton.FlatAppearance.BorderColor = if ($releaseView.can_promote) { $accent } else { $line }
+            $toolTip.SetToolTip($promoteButton, $releaseView.promote_reason)
+
+            if ($release.previous_stable) {
+                Set-StatusBadge -Label $previousCard.Badge -State "AVAILABLE"
+                $previousCard.Git.Text = "Git       $(Get-ShortIdentity $release.previous_stable.git_sha)"
+                $previousCard.Worker.Text = "Worker    $(Get-ShortIdentity $release.previous_stable.worker_version_id)"
+                $previousCard.Windows.Text = "Windows   $(Get-ShortIdentity $release.previous_stable.windows_revision)"
+                $previousCard.Detail.Text = "Reverse restores this exact Worker and Windows pair."
+            } else {
+                Set-StatusBadge -Label $previousCard.Badge -State "UNAVAILABLE"
+                $previousCard.Git.Text = "Git       --"
+                $previousCard.Worker.Text = "Worker    --"
+                $previousCard.Windows.Text = "Windows   --"
+                $previousCard.Detail.Text = "A Previous Stable appears after the first completed promotion."
+            }
+            $reverseButton.Enabled = $releaseView.can_reverse
+            $reverseReason.Text = $releaseView.reverse_reason
+            $toolTip.SetToolTip($reverseButton, $releaseView.reverse_reason)
         } else {
-            "Auto-start: disabled"
+            $stableSummary.Value.Text = "  UNAVAILABLE  "
+            Set-StatusBadge -Label $stableCard.Badge -State "UNAVAILABLE"
+            Set-StatusBadge -Label $candidateCard.Badge -State "UNAVAILABLE"
+            Set-StatusBadge -Label $previousCard.Badge -State "UNAVAILABLE"
+            $stableCard.Detail.Text = "Release control has not been bootstrapped."
+            $candidateCard.Detail.Text = "Candidate validation is unavailable."
+            $previousCard.Detail.Text = "No rollback identity is available."
+            $candidateReason.Text = "Not bootstrapped"
+            $reverseReason.Text = "Not bootstrapped"
+            $candidateCheckLabels.windows.Text = "Runtime + heartbeat: unavailable"
+            $candidateCheckLabels.contracts.Text = "API routes: unavailable"
+            $candidateCheckLabels.cpu.Text = "CPU headroom: unavailable"
+            $candidateCheckLabels.limits.Text = "5xx + 1102: unavailable"
+            $promoteButton.Enabled = $false
+            $promoteButton.BackColor = $grayWash
+            $promoteButton.ForeColor = $gray
+            $promoteButton.FlatAppearance.BorderColor = $line
+            $reverseButton.Enabled = $false
+            $toolTip.SetToolTip($promoteButton, "Release control not bootstrapped")
+            $toolTip.SetToolTip($reverseButton, "Release control not bootstrapped")
         }
-        $clockLabel.Text = if ($Snapshot.windows_time_running) {
-            "Windows Time: RUNNING"
-        } else {
-            "Windows Time: STOPPED"
-        }
-        $clockLabel.ForeColor = if ($Snapshot.windows_time_running) {
-            [System.Drawing.Color]::FromArgb(52, 105, 38)
-        } else {
-            [System.Drawing.Color]::FromArgb(190, 45, 36)
-        }
+        $autoState = if ($Snapshot.auto_start) { "ENABLED" } else { "DISABLED" }
+        $clockState = if ($Snapshot.windows_time_running) { "RUNNING" } else { "ISSUE" }
+        $systemMetaLabel.Text = "Windows Time: $clockState  /  Auto-start: $autoState  /  Last refresh: $($summary.last_refresh)"
     }
     function Request-GuiStatus {
         if ($script:statusRefreshProcess -and -not $script:statusRefreshProcess.HasExited) { return }
@@ -2057,6 +4240,7 @@ function Show-ControlCenter {
     })
     $activationTimer.Start()
     $form.Add_Shown({
+        Update-ReleaseCardLayout
         $form.Activate()
         $form.TopMost = $true
         $form.TopMost = $false
@@ -2094,7 +4278,13 @@ switch ($Action) {
                 } else { "RELOAD_REQUIRED" }
                 applied_at = if ($runtimeState) { $runtimeState.applied_at } else { $null }
             }
-        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $StatusPath -Encoding UTF8
+            release = Get-ReleaseControlState
+        } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $StatusPath -Encoding UTF8
+    }
+    "ReleaseStatusJson" {
+        if (-not $StatusPath) { throw "StatusPath is required for ReleaseStatusJson." }
+        Get-ReleaseControlState | ConvertTo-Json -Depth 12 |
+            Set-Content -LiteralPath $StatusPath -Encoding UTF8
     }
     "CodeRevision" { Write-Output (Get-CodeRevision) }
     "Start" { Start-All; Start-Sleep -Seconds 2; Get-ForecasterStatus | Format-Table -AutoSize }
@@ -2111,6 +4301,19 @@ switch ($Action) {
         Stop-ForecasterService $target
     }
     "Watchdog" { Start-All; exit (Invoke-ForecasterWatchdog) }
+    "DiscoverCandidate" { if (Invoke-CandidateDiscovery) { exit 0 } else { exit 1 } }
+    "ReconcileRelease" {
+        if (-not (Enter-ReleaseTransactionLock)) { exit 1 }
+        try { Reconcile-ReleaseControlState | ConvertTo-Json -Depth 12 }
+        finally { Exit-ReleaseTransactionLock }
+    }
+    "PromoteCandidate" { if (Start-ReleasePromotion) { exit 0 } else { exit 1 } }
+    "ReverseStable" { if (Invoke-ReverseStable) { exit 0 } else { exit 1 } }
+    "BootstrapRelease" {
+        if (-not (Enter-ReleaseTransactionLock)) { throw "Another release transaction is active." }
+        try { Initialize-ReleaseControl | ConvertTo-Json -Depth 12 }
+        finally { Exit-ReleaseTransactionLock }
+    }
     "EnableAutoStart" { Enable-AutoStart; Write-Output "Auto-start enabled." }
     "DisableAutoStart" { Disable-AutoStart; Write-Output "Auto-start disabled." }
     "InstallRuntime" { Install-ProductionRuntime | Format-List }

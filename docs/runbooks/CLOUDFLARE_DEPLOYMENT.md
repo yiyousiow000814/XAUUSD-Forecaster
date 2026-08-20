@@ -7,9 +7,77 @@ from `web/`:
 ```powershell
 npm run lint
 npm test
-npx wrangler d1 migrations apply aurum-signal-room --remote
-npx wrangler deploy
+npx wrangler versions upload --message "release:<full-main-git-sha> branch:main artifact_kind:PRODUCTION_CANDIDATE"
 ```
+
+Both production and non-production Workers Builds commands upload immutable
+Versions. The production command MUST NOT be `wrangler deploy`. Its configured
+command is:
+
+```text
+Production:     npx wrangler versions upload --message "release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH artifact_kind:PRODUCTION_CANDIDATE"
+Non-production: npm run cf:preview-upload -- --message "release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH artifact_kind:PREVIEW"
+```
+
+The local Control Center discovers the exact release identity, keeps Candidate
+at 0%, and runs boundary-appropriate automatic validation. A successful build
+or merge does not change Stable. After Candidate is PASSED, the operator uses
+**Promote Candidate**, confirms the exact Git/Worker/Windows identities, and
+waits for the existing decision-cycle observation. **Reverse Stable** restores
+the recorded Previous Stable identities without rolling back D1 or deleting
+SQLite evidence. See [`RELEASE_CONTROL.md`](../contracts/RELEASE_CONTROL.md).
+
+Bootstrap a previously unmanaged runtime only after the Cloudflare production
+build command above is saved and the active Worker deployment is rechecked at
+100%. Run the hidden `BootstrapRelease` Control Center action once, verify the
+recorded Stable Worker and Windows identities, then allow Candidate discovery.
+Do not hand-edit `release-control-state.json` or copy validation evidence from a
+different Worker Version ID or Git SHA.
+
+The non-production script passes an explicit `--name aurum-signal-room-preview`
+target. Do not replace this with a named environment on the production service:
+Cloudflare service environments share that service's Version history. The
+separate Preview Worker must never upload a Version into the production
+`aurum-signal-room` history. The commands deliberately emit different immutable
+artifact kinds; a production candidate additionally requires `branch:main` and
+Git reachability from `origin/main`.
+
+Normal builds and Candidate staging never apply D1 migrations or provision
+bindings. A change under `web/drizzle/`, a migration directory, Wrangler
+bindings, or generated Worker binding types is `REVIEW_REQUIRED` until a
+separate coordinated platform/storage protocol is executed. Missing configured
+resources fail the build; do not use Wrangler auto-configuration as recovery.
+
+Worker-changing Candidates require a Cloudflare API token limited to read-only
+Workers Observability query access. Store it only in the Windows user
+environment as `CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN`; never pass it on a
+command line or write it to repository/runtime state. Without that protected
+credential the controller deliberately leaves the Candidate in TESTING with
+`PLATFORM_CPU_EVIDENCE_REQUIRED`. The queried evidence is bound to the exact
+Worker Version ID and must satisfy the CPU/headroom policy in the release
+contract, including exact probe counts and zero `exceededCpu`, 1102, or 5xx.
+The controller reads the candidate revision's Worker validation manifest,
+builds deterministic production-shaped fixtures in an isolated candidate
+worktree, runs excluded warm-ups, and then gathers repeated global and
+route-family platform samples. Dry-run writes exercise the normal bounded
+transport and read-only D1 validation but stop before authoritative mutation.
+Do not substitute `{}` fixtures or treat one invocation per route as CPU
+acceptance.
+
+Use these explicit local actions only through the Control Center confirmation
+UI. The underlying commands are documented for recovery diagnosis, not for
+automatic CI execution:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/xauusd_control_center.ps1 -Action PromoteCandidate
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/xauusd_control_center.ps1 -Action ReverseStable
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/xauusd_control_center.ps1 -Action ReconcileRelease
+```
+
+To roll back the Workers Builds control-plane bootstrap, restore the former
+production deploy command `npx wrangler deploy` in **Settings > Build**. This is
+an emergency configuration rollback only: it re-enables implicit production
+promotion and therefore must not be used as a normal release operation.
 
 When a migration schedules a new version of work for a Windows consumer, use a
 two-phase cutover. First deploy the claim-generation compatibility gate and

@@ -1,7 +1,12 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
+import { readBoundedBody } from "../_shared/dashboard-snapshot";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
+import {
+  authorizeReleaseValidation, isReleaseValidationContext, releaseValidationResponse,
+  validateJsonWithD1,
+} from "../_shared/release-validation";
 
 export const dynamic = "force-dynamic";
 
@@ -286,13 +291,15 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const previewRejection = rejectPreviewWrite();
   if (previewRejection) return previewRejection;
-  if (!await isIngestAuthorized(request)) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
-  const serialized = await request.text();
-  if (new TextEncoder().encode(serialized).byteLength > MAX_INGEST_BYTES) {
+  const validation = await authorizeReleaseValidation(
+    request, "market-history-write", isIngestAuthorized,
+  );
+  if (validation instanceof Response) return validation;
+  const bounded = await readBoundedBody(request, MAX_INGEST_BYTES);
+  if (bounded.status === "too_large") {
     return NextResponse.json({ error: "payload too large" }, { status: 413 });
   }
+  const serialized = bounded.serialized;
   const binding = env.DB as D1Database | undefined;
   if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   try {
@@ -307,7 +314,7 @@ export async function POST(request: Request) {
     if (candles.length > 500 || decisions.length > 2_500
         || decisionOverviews.length > 2) throw new Error("batch too large");
     const receivedAt = new Date().toISOString();
-    await ensureMarketSchema(binding);
+    const statements: D1PreparedStatement[] = [];
     if (body.overview) {
       const overview = body.overview;
       if (!Array.isArray(overview.candles) || overview.candles.length > OVERVIEW_POINTS
@@ -317,11 +324,11 @@ export async function POST(request: Request) {
             || ![row.open, row.high, row.low, row.close].every(Number.isFinite))) {
         throw new Error("invalid overview");
       }
-      await binding.prepare(
+      statements.push(binding.prepare(
         `INSERT INTO market_history_overview (overview_key,payload,received_at)
          VALUES ('all',?,?) ON CONFLICT(overview_key) DO UPDATE SET
            payload=excluded.payload,received_at=excluded.received_at`,
-      ).bind(JSON.stringify(overview), receivedAt).run();
+      ).bind(JSON.stringify(overview), receivedAt));
     }
     for (const summary of decisionOverviews) {
       if (!summary.model_identity
@@ -334,16 +341,15 @@ export async function POST(request: Request) {
         throw new Error("invalid decision overview");
       }
       const key = `${summary.model_identity}\u0000${summary.frequency}`;
-      await binding.prepare(
+      statements.push(binding.prepare(
         `INSERT INTO market_decision_overviews
            (overview_key,model_identity,frequency,payload,received_at)
          VALUES (?,?,?,?,?) ON CONFLICT(overview_key) DO UPDATE SET
            model_identity=excluded.model_identity,frequency=excluded.frequency,
            payload=excluded.payload,received_at=excluded.received_at`,
       ).bind(key, summary.model_identity, summary.frequency,
-        JSON.stringify(summary), receivedAt).run();
+        JSON.stringify(summary), receivedAt));
     }
-    const statements: D1PreparedStatement[] = [];
     for (const row of candles) {
       const epoch = asEpoch(row.time);
       if (epoch === null || ![row.open, row.high, row.low, row.close].every(Number.isFinite)) {
@@ -374,6 +380,19 @@ export async function POST(request: Request) {
            received_at=excluded.received_at`,
       ).bind(key, epoch, row.decision_time, row.model_identity, JSON.stringify(row), receivedAt));
     }
+    if (isReleaseValidationContext(validation)) {
+      if (!await validateJsonWithD1(binding, serialized)) {
+        throw new Error("invalid JSON");
+      }
+      return releaseValidationResponse(validation, {
+        body: "bounded-read", json: "parsed+d1-json1",
+        transformed: { candles: candles.length, decisions: decisions.length,
+          overview: Boolean(body.overview), decision_overviews: decisionOverviews.length,
+          prepared_statements: statements.length },
+        mutation_boundary: "schema-and-history-batch",
+      });
+    }
+    await ensureMarketSchema(binding);
     for (let start = 0; start < statements.length; start += MAX_BATCH_STATEMENTS) {
       await binding.batch(statements.slice(start, start + MAX_BATCH_STATEMENTS));
     }

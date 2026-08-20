@@ -1281,7 +1281,7 @@ test("returns a verified main revision through the deployment status endpoint", 
   assert.match(ingest, /main_revision/);
   assert.match(ingest, /export async function GET/);
   assert.match(ingest, /Cache-Control.*no-store/);
-  assert.match(ingest, /writeDashboardSnapshot\(request, binding, 1\)/);
+  assert.match(ingest, /writeDashboardSnapshot\(request, binding, 1,/);
   assert.doesNotMatch(ingest, /request\.json\(\)|JSON\.stringify\(|TextEncoder/);
   assert.match(snapshot, /json_valid\(payload\)/);
   assert.match(snapshot, /content-length/);
@@ -1826,7 +1826,7 @@ test("reads the bounded learning first page before the compact live relay", () =
   assert.match(source, /return new Response\(row\.payload/);
   assert.doesNotMatch(source, /NextResponse\.json\(JSON\.parse\(row\.payload\)/);
   assert.match(source, /previewBundle\?\.learning_summary/);
-  assert.match(source, /writeDashboardSnapshot\(request, binding, 3\)/);
+  assert.match(source, /writeDashboardSnapshot\(request, binding, 3,/);
   assert.doesNotMatch(source, /JSON\.parse\(serialized\)|TextEncoder/);
 });
 
@@ -1861,7 +1861,7 @@ test("uses one D1-validated writer for every large dashboard snapshot", () => {
     ["../app/api/audit/route.ts", 4],
   ]) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
-    assert.match(source, new RegExp(`writeDashboardSnapshot\\(request, binding, ${id}\\)`), path);
+    assert.match(source, new RegExp(`writeDashboardSnapshot\\(request, binding, ${id},`), path);
     assert.doesNotMatch(source, /INSERT INTO dashboard_snapshots/, path);
   }
 });
@@ -1895,7 +1895,7 @@ test("activates only complete paged news-evidence generations outside status", (
   assert.match(store, /LIMIT 200/);
   assert.match(store, /INSERT INTO news_evidence_state/);
   assert.match(store, /WHERE snapshot_id<>\?/);
-  assert.ok(route.indexOf("rejectPreviewWrite()") < route.indexOf("isIngestAuthorized(request)"));
+  assert.ok(route.indexOf("rejectPreviewWrite()") < route.indexOf("authorizeReleaseValidation("));
   assert.ok(route.indexOf("rejectPreviewWrite()") < route.indexOf("readBoundedBody(request"));
   assert.match(sync, /news evidence snapshot expected \{total\} rows but staged \{received\}/);
   assert.match(sync, /"activate_snapshot": snapshot_id/);
@@ -2913,4 +2913,205 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(css, /\.assistant-transcript-banners \{ grid-row:2/);
   assert.match(css, /\.assistant-message-scroll \{ grid-row:3/);
   assert.match(css, /\.assistant-composer-shell \{ grid-row:4/);
+});
+
+test("release validation authorizes before exposing a non-mutating context", async () => {
+  const {
+    authorizeReleaseValidation, isReleaseValidationContext, releaseValidationResponse,
+  } = await import(
+    "../app/api/_shared/release-validation.ts"
+  );
+  const ordinary = new Request("https://example.test/api/audit", { method: "POST" });
+  assert.equal(await authorizeReleaseValidation(
+    ordinary, "audit-write", async () => true,
+  ), null);
+
+  const request = new Request("https://example.test/api/audit", {
+    method: "POST",
+    headers: {
+      "X-Aurum-Release-Validation": "dry-run",
+      "X-Aurum-Validation-Run": "validation-run-1",
+      "X-Aurum-Request-ID": "request-1",
+    },
+  });
+  let authorized = false;
+  const context = await authorizeReleaseValidation(request, "audit-write", async () => {
+    authorized = true;
+    return true;
+  });
+  assert.equal(authorized, true);
+  assert.equal(isReleaseValidationContext(context), true);
+  const response = releaseValidationResponse(context, { json: "d1-json1" });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    status: "DRY_RUN_OK",
+    route_family: "audit-write",
+    validation_run: "validation-run-1",
+    request_id: "request-1",
+    mutated: false,
+    work: { json: "d1-json1" },
+  });
+
+  const unauthorized = await authorizeReleaseValidation(
+    request, "audit-write", async () => false,
+  );
+  assert.equal(unauthorized.status, 401);
+  assert.deepEqual(await unauthorized.json(), { error: "unauthorized" });
+});
+
+test("production-shaped release validation reaches work before every mutation", () => {
+  for (const [path, family, completion] of [
+    ["../app/api/ingest/route.ts", "status-ingest", "releaseValidationResponse(validation"],
+    ["../app/api/audit/route.ts", "audit-write", "releaseValidationResponse(validation"],
+    ["../app/api/learning/route.ts", "learning-write", "releaseValidationResponse(validation"],
+    ["../app/api/market-chart/route.ts", "market-chart-write", "releaseValidationResponse(validation"],
+    ["../app/api/market-history/route.ts", "market-history-write", "releaseValidationResponse(validation"],
+    ["../app/api/learning-history/route.ts", "learning-history-write", "releaseValidationResponse(validation"],
+    ["../app/api/news-evidence/route.ts", "news-evidence-write", "releaseValidationResponse(validation"],
+    ["../app/api/news-index/route.ts", "news-index-write", "finishReleaseValidation(binding, validation"],
+  ]) {
+    const source = readFileSync(new URL(path, import.meta.url), "utf8");
+    const auth = source.indexOf(`request, "${family}", isIngestAuthorized`);
+    const bodyRead = Math.max(
+      source.indexOf("readBoundedBody(request", auth),
+      source.indexOf("writeDashboardSnapshot(request", auth),
+    );
+    const response = source.indexOf(completion, bodyRead);
+    const mutation = Math.max(
+      source.indexOf(".run()", response), source.indexOf("binding.batch(", response),
+      source.indexOf("writeDashboardSnapshot(request", response + 1),
+    );
+    assert.ok(auth >= 0 && bodyRead > auth && response > bodyRead, path);
+    if (mutation >= 0) assert.ok(mutation > response, path);
+  }
+});
+
+test("snapshot dry-run reads bounds and uses read-only D1 JSON validation", async () => {
+  const { writeDashboardSnapshot } = await import(
+    "../app/api/_shared/dashboard-snapshot.ts"
+  );
+  const calls = [];
+  const binding = {
+    prepare(sql) {
+      calls.push(sql);
+      return { bind() { return { first: async () => ({ valid: 1 }) }; } };
+    },
+  };
+  const body = JSON.stringify({ generated_at: "2026-08-20T00:00:00Z" });
+  const result = await writeDashboardSnapshot(new Request("https://example.test/api/audit", {
+    method: "POST", body,
+  }), binding, 4, { dryRun: true });
+  assert.equal(result, "validated");
+  assert.deepEqual(calls, ["SELECT json_valid(?) AS valid"]);
+});
+
+test("Worker validation manifest owns every production route and direct router", () => {
+  const manifest = JSON.parse(readFileSync(
+    new URL("../worker-validation-manifest.json", import.meta.url), "utf8",
+  ));
+  const declared = new Set(manifest.routes.map(route => `${route.method} ${route.path}`));
+  const discover = (directory, prefix = "") => {
+    const found = [];
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        found.push(...discover(new URL(`${entry.name}/`, directory), `${prefix}/${entry.name}`));
+      } else if (entry.name === "route.ts") {
+        const source = readFileSync(new URL(entry.name, directory), "utf8");
+        const methods = new Set();
+        for (const match of source.matchAll(/export\s+(?:async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE)\b/g)) {
+          methods.add(match[1]);
+        }
+        for (const match of source.matchAll(/export\s+const\s+(GET|POST|PUT|PATCH|DELETE)\s*=/g)) {
+          methods.add(match[1]);
+        }
+        for (const match of source.matchAll(/export\s*\{([^}]+)\}\s*from/g)) {
+          for (const entry of match[1].split(",").map(value => value.trim())) {
+            const exported = entry.split(/\s+as\s+/).at(-1);
+            if (/^(GET|POST|PUT|PATCH|DELETE)$/.test(exported)) methods.add(exported);
+          }
+        }
+        for (const method of methods) {
+          found.push(`${method} ${prefix}`);
+        }
+      }
+    }
+    return found;
+  };
+  const discovered = discover(new URL("../app/", import.meta.url));
+  for (const route of discovered) {
+    assert.ok(declared.has(route), `WORKER_ROUTE_VALIDATION_POLICY_MISSING: ${route}`);
+  }
+  const workerDirectory = new URL("../worker/", import.meta.url);
+  for (const entry of readdirSync(workerDirectory, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
+    const workerSource = readFileSync(new URL(entry.name, workerDirectory), "utf8");
+    const directPaths = new Set();
+    for (const match of workerSource.matchAll(/url\.pathname\s*===\s*"([^"]+)"/g)) {
+      directPaths.add(match[1]);
+    }
+    for (const path of directPaths) {
+      assert.ok(manifest.routes.some(route => route.path === path
+          && route.boundary === "DIRECT_WORKER_ROUTE" && route.method === "ANY"),
+        `WORKER_ROUTE_VALIDATION_POLICY_MISSING: DIRECT ${path}`);
+    }
+  }
+  for (const route of manifest.routes) {
+    assert.ok(route.family && route.boundary && route.criticality && route.strategy);
+    assert.ok(Array.isArray(route.owners) && route.owners.length > 0);
+    assert.ok(route.owners.includes("web/worker/*.ts"));
+    if (!route.cpu_required) {
+      assert.equal(route.criticality, "OPTIONAL");
+      assert.ok(route.cpu_exempt_reason || manifest.optional_cpu_exempt_reason);
+    }
+    if (["CRITICAL", "HEAVY"].includes(route.criticality)
+        && route.boundary !== "STATIC_ASSET") {
+      assert.equal(route.cpu_required, true);
+    }
+    if (route.strategy === "PRODUCTION_SHAPED_DRY_RUN") {
+      assert.ok(route.fixture && route.auth_required && route.cpu_required);
+      assert.ok(route.acceptance_samples >= 10);
+    }
+    if (["news-content-write", "news-evidence-write", "news-index-write"].includes(route.family)) {
+      assert.ok(Array.isArray(route.scenarios) && route.scenarios.length >= 2);
+    }
+  }
+  assert.deepEqual(
+    manifest.routes.find(route => route.family === "news-index-write").scenarios
+      .map(scenario => scenario.name),
+    ["normal", "reset", "withdrawal", "prune", "reconcile", "neutralize"],
+  );
+  assert.deepEqual(
+    manifest.routes.find(route => route.family === "news-evidence-write").scenarios
+      .map(scenario => scenario.name),
+    ["prepare", "stage", "activate", "cleanup"],
+  );
+  assert.deepEqual(
+    manifest.routes.find(route => route.family === "news-content-write").scenarios
+      .map(scenario => scenario.name),
+    ["normal", "reset"],
+  );
+});
+
+test("non-production builds target an isolated Preview Worker", () => {
+  const config = JSON.parse(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(config.name, "aurum-signal-room");
+  assert.equal(packageJson.scripts["cf:preview-upload"],
+    "wrangler versions upload --name aurum-signal-room-preview");
+  assert.ok(!packageJson.scripts["cf:preview-upload"].includes("--env"));
+});
+
+test("route inventory parser covers const and re-exported handlers", () => {
+  const source = "export const GET = handler; export { put as POST, DELETE } from './shared';";
+  const methods = new Set();
+  for (const match of source.matchAll(/export\s+const\s+(GET|POST|PUT|PATCH|DELETE)\s*=/g)) {
+    methods.add(match[1]);
+  }
+  for (const match of source.matchAll(/export\s*\{([^}]+)\}\s*from/g)) {
+    for (const entry of match[1].split(",").map(value => value.trim())) {
+      const exported = entry.split(/\s+as\s+/).at(-1);
+      if (/^(GET|POST|PUT|PATCH|DELETE)$/.test(exported)) methods.add(exported);
+    }
+  }
+  assert.deepEqual([...methods].sort(), ["DELETE", "GET", "POST"]);
 });

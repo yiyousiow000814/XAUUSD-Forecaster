@@ -1,7 +1,12 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
+import { readBoundedBody } from "../_shared/dashboard-snapshot";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
+import {
+  authorizeReleaseValidation, isReleaseValidationContext, releaseValidationResponse,
+  type ReleaseValidationContext, validateJsonWithD1,
+} from "../_shared/release-validation";
 import {
   ACTIVE_NEWS_SQL,
   NEWS_REVIEW_STATE_CASE_SQL,
@@ -30,6 +35,21 @@ type NewsIndexItem = {
   annotation_status?: unknown;
   [key: string]: unknown;
 };
+
+async function finishReleaseValidation(
+  binding: D1Database,
+  validation: ReleaseValidationContext | Response | null,
+  serialized: string,
+  work: Record<string, unknown>,
+) {
+  if (!isReleaseValidationContext(validation)) return null;
+  if (!await validateJsonWithD1(binding, serialized)) {
+    throw new Error("invalid JSON");
+  }
+  return releaseValidationResponse(validation, {
+    body: "bounded-read", json: "parsed+d1-json1", ...work,
+  });
+}
 
 const pageRequest = (request: Request) => {
   const query = new URL(request.url).searchParams;
@@ -269,13 +289,15 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const previewRejection = rejectPreviewWrite();
   if (previewRejection) return previewRejection;
-  if (!await isIngestAuthorized(request)) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
-  const serialized = await request.text();
-  if (new TextEncoder().encode(serialized).byteLength > 450_000) {
+  const validation = await authorizeReleaseValidation(
+    request, "news-index-write", isIngestAuthorized,
+  );
+  if (validation instanceof Response) return validation;
+  const bounded = await readBoundedBody(request, 450_000);
+  if (bounded.status === "too_large") {
     return NextResponse.json({ error: "payload too large" }, { status: 413 });
   }
+  const serialized = bounded.serialized;
   const binding = env.DB as D1Database | undefined;
   if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   try {
@@ -285,6 +307,10 @@ export async function POST(request: Request) {
       neutralize_operational_state_for_contract?: unknown;
     };
     if (body.reset === true) {
+      const checked = await finishReleaseValidation(binding, validation, serialized, {
+        transformed: { reset: true }, mutation_boundary: "news-index-reset",
+      });
+      if (checked) return checked;
       await binding.prepare("DELETE FROM news_index").run();
       return NextResponse.json({ status: "OK", reset: true });
     }
@@ -303,6 +329,11 @@ export async function POST(request: Request) {
         binding.prepare("DELETE FROM news_index WHERE detail_key = ?").bind(key),
         binding.prepare("DELETE FROM news_details WHERE detail_key = ?").bind(key),
       ]);
+      const checked = await finishReleaseValidation(binding, validation, serialized, {
+        transformed: { withdrawals: keys.length, prepared_statements: statements.length },
+        mutation_boundary: "news-withdrawal-batch",
+      });
+      if (checked) return checked;
       const results = statements.length ? await binding.batch(statements) : [];
       return NextResponse.json({
         status: "OK",
@@ -330,6 +361,11 @@ export async function POST(request: Request) {
       statements.push(binding.prepare(
         "DELETE FROM news_details WHERE NOT EXISTS (SELECT 1 FROM news_index WHERE news_index.detail_key = news_details.detail_key)",
       ));
+      const checked = await finishReleaseValidation(binding, validation, serialized, {
+        transformed: { prepared_statements: statements.length },
+        mutation_boundary: "news-prune-reconcile-batch",
+      });
+      if (checked) return checked;
       const results = await binding.batch(statements);
       return NextResponse.json({
         status: "OK", removed: results.reduce((sum, result) => sum + (result.meta.changes ?? 0), 0),
@@ -340,7 +376,7 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "invalid mirror contract" }, { status: 400 });
       }
       const contract = body.neutralize_operational_state_for_contract;
-      const results = await binding.batch([
+      const statements = [
         binding.prepare(
           `UPDATE news_index SET model_candidate=0 WHERE mirror_contract <> ?`,
         ).bind(contract),
@@ -359,7 +395,13 @@ export async function POST(request: Request) {
          WHERE mirror_contract <> ?
            AND NOT ${NEWS_REVIEW_STATE_INVARIANT_SQL}`,
         ).bind(contract),
-      ]);
+      ];
+      const checked = await finishReleaseValidation(binding, validation, serialized, {
+        transformed: { contract, prepared_statements: statements.length },
+        mutation_boundary: "news-contract-neutralization-batch",
+      });
+      if (checked) return checked;
+      const results = await binding.batch(statements);
       return NextResponse.json({
         status: "OK",
         candidates_neutralized: results[0]?.meta.changes ?? 0,
@@ -421,6 +463,11 @@ export async function POST(request: Request) {
         item.mirror_contract, JSON.stringify(item), now,
       )];
     });
+    const checked = await finishReleaseValidation(binding, validation, serialized, {
+      transformed: { items: body.items.length, prepared_statements: statements.length },
+      mutation_boundary: "news-index-upsert-batch",
+    });
+    if (checked) return checked;
     if (statements.length) await binding.batch(statements);
     return NextResponse.json({ status: "OK", received: body.items.length });
   } catch (reason) {
