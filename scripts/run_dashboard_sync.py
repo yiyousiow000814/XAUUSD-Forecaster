@@ -48,9 +48,10 @@ LOCAL_STATUS_TIMEOUT_SECONDS = 20
 REMOTE_POST_TIMEOUT_SECONDS = 30
 REMOTE_NEWS_LIMIT = 200
 REMOTE_DECISION_LIMIT = 20
-NEWS_DETAIL_BATCH_LIMIT_BYTES = 400_000
+NEWS_DETAIL_BATCH_LIMIT_BYTES = 160_000
 NEWS_INDEX_BATCH_LIMIT_BYTES = 400_000
 NEWS_WRITE_BATCH_ITEMS = 20
+NEWS_DETAIL_BATCH_ITEMS = 8
 NEWS_EVIDENCE_WRITE_BATCH_ITEMS = 20
 NEWS_EVIDENCE_PAGES_PER_CYCLE = 1
 MARKET_HISTORY_PAGES_PER_CYCLE = 1
@@ -66,7 +67,7 @@ MARKET_HISTORY_BATCH_LIMIT_BYTES = 350_000
 MARKET_HISTORY_BATCH_ITEMS = 40
 MARKET_HISTORY_OVERLAP_SECONDS = 2 * 3_600
 LEARNING_HISTORY_CONTRACT_VERSION = "learning-history-d1-v2"
-LEARNING_HISTORY_BATCH_LIMIT_BYTES = 300_000
+LEARNING_HISTORY_BATCH_LIMIT_BYTES = 120_000
 LEARNING_HISTORY_FULL_REFRESH_SECONDS = 86_400
 LEARNING_SUMMARY_CURVE_POINTS = 48
 LEARNING_SUMMARY_GROUPS_PER_IDENTITY = 6
@@ -78,6 +79,7 @@ REMOTE_MARKET_DECISION_LIMIT = 288 * 5
 REMOTE_MARKET_CANDLE_LIMIT = 576
 REMOTE_MARKET_DENSE_LIMITS = (1440, 1152, 864, 576, 288, 0)
 REMOTE_MARKET_OVERVIEW_LIMITS = (480, 240, 120, 80, 40)
+MARKET_CHART_SNAPSHOT_LIMIT_BYTES = 300_000
 
 _RESOURCE_SCHEDULE_LOCK = threading.Lock()
 
@@ -230,7 +232,7 @@ def news_mirror_parts(payload: dict) -> tuple[list[dict], list[dict]]:
 
 def news_detail_batches(rows: list[dict]) -> list[list[dict]]:
     return _bounded_item_batches(
-        rows, NEWS_DETAIL_BATCH_LIMIT_BYTES, max_items=NEWS_WRITE_BATCH_ITEMS,
+        rows, NEWS_DETAIL_BATCH_LIMIT_BYTES, max_items=NEWS_DETAIL_BATCH_ITEMS,
     )
 
 
@@ -751,11 +753,11 @@ def market_chart_snapshot(payload: dict) -> bytes:
                 ensure_ascii=False, allow_nan=False, separators=(",", ":"),
             ).encode("utf-8")
             last_size = len(encoded)
-            if last_size <= REMOTE_PAYLOAD_LIMIT_BYTES:
+            if last_size <= MARKET_CHART_SNAPSHOT_LIMIT_BYTES:
                 return encoded
     raise PayloadContractError(
         f"half-hour market chart payload is {last_size} bytes "
-        f"(limit {REMOTE_PAYLOAD_LIMIT_BYTES})"
+        f"(limit {MARKET_CHART_SNAPSHOT_LIMIT_BYTES})"
     )
 
 

@@ -963,7 +963,7 @@ def test_news_detail_batches_stay_bounded() -> None:
     assert len(batches) > 1
     assert sum(len(batch) for batch in batches) == len(rows)
     for batch in batches:
-        assert len(batch) <= module.NEWS_WRITE_BATCH_ITEMS
+        assert len(batch) <= module.NEWS_DETAIL_BATCH_ITEMS
         encoded = json.dumps(
             {"items": batch}, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
@@ -2283,12 +2283,16 @@ def test_remote_market_chart_is_split_from_status_and_keeps_recent_window() -> N
 
     market = json.loads(module.market_chart_snapshot(payload))
     retained = market["decisions"]
-    assert len(retained) == module.REMOTE_MARKET_DECISION_LIMIT
-    assert retained[0]["source_decision_id"] == "d-20"
+    assert 0 < len(retained) <= module.REMOTE_MARKET_DECISION_LIMIT
+    assert retained[0]["source_decision_id"] == (
+        f"d-{len(decisions) - len(retained)}"
+    )
     assert all(row["source_decision_id"] != "d-0" for row in retained)
     assert retained[-1]["source_decision_id"] == f"d-{len(decisions) - 1}"
     assert "exit_time" not in retained[1]
-    assert retained[1]["model_version"] == "model-21"
+    assert retained[1]["model_version"] == (
+        f"model-{len(decisions) - len(retained) + 1}"
+    )
     assert len(market["candles"]) == 1
     assert market["candles"][0]["open"] == 1.123
     assert market["candles"][0]["time"] == "2026-08-05T00:00:00Z"
@@ -2329,7 +2333,7 @@ def test_seven_day_market_snapshot_is_recent_only_under_limit() -> None:
     })
     market = json.loads(encoded)
 
-    assert len(encoded) <= module.REMOTE_PAYLOAD_LIMIT_BYTES
+    assert len(encoded) <= module.MARKET_CHART_SNAPSHOT_LIMIT_BYTES
     assert len(market["candles"]) == module.REMOTE_MARKET_CANDLE_LIMIT
     assert 0 < len(market["overview_candles"]) <= 480
     assert len(market["decisions"]) <= module.REMOTE_MARKET_DECISION_LIMIT
