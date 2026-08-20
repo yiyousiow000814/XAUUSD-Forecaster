@@ -2989,6 +2989,32 @@ def test_chinese_repair_policy_preserves_natural_english_identifiers() -> None:
     assert not re.search(r"\d", rejected_seed)
     assert numeric_instruction.endswith("SOURCE_NUMBER_LEXEMES\n[]")
 
+    latin_retry = annotation_module._chinese_repair_payload(
+        {
+            "headline_zh": "黄金资金流向",
+            "summary_zh": "黄金ETF资金流入增加。",
+            "primary_story_title_zh": "黄金资金流向",
+            "semantic_reason_zh": "ETF资金流向直接反映黄金需求。",
+        },
+        "Gold fund flows increased",
+        "Exchange traded funds added gold holdings.",
+        invalid_fields=("summary_zh", "semantic_reason_zh"),
+        failure_reason=(
+            "UNGROUNDED_LATIN_DISPLAY: display contains Latin text absent "
+            "from the immutable source"
+        ),
+    )
+    latin_instruction = latin_retry["contents"][0]["parts"][0]["text"]
+    assert (
+        "Every run listed in FORBIDDEN_UNGROUNDED_LATIN_RUNS"
+        in latin_instruction
+    )
+    assert (
+        'FORBIDDEN_UNGROUNDED_LATIN_RUNS\n'
+        '{"summary_zh":["ETF"],"semantic_reason_zh":["ETF"]}'
+        in latin_instruction
+    )
+
 
 def test_invalid_display_fields_include_numeric_siblings() -> None:
     result = {
@@ -3177,6 +3203,59 @@ def test_display_checkpoint_accepts_grounded_names_without_model_call(
 
     assert repaired["summary_zh"] == result["summary_zh"]
     assert model == annotation_module.FALLBACK_GEMINI_MODEL
+
+
+def test_display_checkpoint_translates_ungrounded_etf_without_model_call(
+    monkeypatch,
+) -> None:
+    result = {
+        "headline_zh": "黄金资金流向增强",
+        "summary_zh": "黄金ETF持仓增加，反映投资者需求回升。",
+        "primary_story_title_zh": "黄金资金流向增强",
+        "semantic_reason_zh": "ETF资金流向直接反映黄金投资需求。",
+    }
+    checkpoint = {
+        "semantic_result": result,
+        "llm_model_version": annotation_module.FALLBACK_GEMINI_MODEL,
+        "invalid_fields": ["summary_zh", "semantic_reason_zh"],
+        "rejection_reason": "UNGROUNDED_LATIN_DISPLAY",
+    }
+    monkeypatch.setattr(
+        annotation_module._GeminiRequestPool,
+        "_repair_display_until_valid",
+        lambda *_args, **_kwargs: pytest.fail(
+            "deterministic glossary recovery must not call a provider"
+        ),
+    )
+
+    repaired, model = object.__new__(
+        annotation_module._GeminiRequestPool
+    ).repair_display_checkpoint(
+        0, annotation_module.DEFAULT_GEMINI_MODEL, checkpoint,
+        "Gold fund flows increased",
+        "Exchange traded funds added to their gold holdings.",
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+    )
+
+    assert repaired["summary_zh"] == (
+        "黄金交易所交易基金持仓增加，反映投资者需求回升。"
+    )
+    assert repaired["semantic_reason_zh"].startswith("交易所交易基金资金流向")
+    assert model == annotation_module.FALLBACK_GEMINI_MODEL
+
+
+def test_display_recovery_preserves_source_grounded_etf() -> None:
+    result = {
+        "headline_zh": "黄金ETF资金流向",
+        "summary_zh": "黄金ETF持仓增加，市场继续关注投资需求。",
+    }
+
+    annotation_module._recover_display_fields(
+        result, "Gold ETF holdings increased", "Investors added to the ETF.",
+    )
+
+    assert result["headline_zh"] == "黄金ETF资金流向"
+    assert "ETF" in result["summary_zh"]
 
 
 def test_display_checkpoint_accepts_source_grounded_episode_titles_without_model_call(
