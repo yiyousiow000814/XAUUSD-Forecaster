@@ -409,7 +409,13 @@ function Get-CloudflareDeployment {
 }
 
 function Get-CloudflareVersions {
-    @(Invoke-WranglerJson -Arguments @("versions", "list", "--name", $workerName))
+    $versions = Invoke-WranglerJson -Arguments @(
+        "versions", "list", "--name", $workerName
+    )
+    # ConvertFrom-Json may return its top-level JSON array as one pipeline
+    # object. Emit each version explicitly so sorting/filtering never treats
+    # the complete Wrangler response as one synthetic version.
+    foreach ($version in @($versions)) { Write-Output $version }
 }
 
 function Get-CloudflareVersionDetails {

@@ -1388,6 +1388,20 @@ def test_release_version_timestamp_normalizes_all_wrangler_shapes(tmp_path) -> N
     )
 
 
+def test_cloudflare_version_wrapper_enumerates_top_level_wrangler_array(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Invoke-WranglerJson { Write-Output -NoEnumerate @("
+        "[pscustomobject]@{id='version-a';metadata=[pscustomobject]@{created_on='2026-08-20T10:00:00Z'}},"
+        "[pscustomobject]@{id='version-b';metadata=[pscustomobject]@{created_on='2026-08-20T11:00:00Z'}}) };"
+        "$versions=@(Get-CloudflareVersions | Sort-Object "
+        "@{Expression={Get-ReleaseVersionCreatedAtValue -Version $_}},"
+        "@{Expression={[string]$_.id}});"
+        'Write-Output "$($versions.Count),$($versions[-1].id)"',
+    )
+    assert result == "2,version-b"
+
+
 def test_bootstrap_watermark_uses_newest_valid_timestamp_then_version_id(tmp_path) -> None:
     stable = "a" * 40
     result = _run_control_center_contract(
