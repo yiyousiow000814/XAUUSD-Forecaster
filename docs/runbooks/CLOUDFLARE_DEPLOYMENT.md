@@ -7,8 +7,7 @@ from `web/`:
 ```powershell
 npm run lint
 npm test
-npx wrangler d1 migrations apply aurum-signal-room --remote
-npx wrangler versions upload --message "release:<full-git-sha> branch:<branch> artifact_kind:<PREVIEW-or-PRODUCTION_CANDIDATE>"
+npx wrangler versions upload --message "release:<full-main-git-sha> branch:main artifact_kind:PRODUCTION_CANDIDATE"
 ```
 
 Both production and non-production Workers Builds commands upload immutable
@@ -17,7 +16,7 @@ command is:
 
 ```text
 Production:     npx wrangler versions upload --message "release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH artifact_kind:PRODUCTION_CANDIDATE"
-Non-production: npx wrangler versions upload --message "release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH artifact_kind:PREVIEW"
+Non-production: npx wrangler versions upload --env preview --message "release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH artifact_kind:PREVIEW"
 ```
 
 The local Control Center discovers the exact release identity, keeps Candidate
@@ -35,8 +34,17 @@ recorded Stable Worker and Windows identities, then allow Candidate discovery.
 Do not hand-edit `release-control-state.json` or copy validation evidence from a
 different Worker Version ID or Git SHA.
 
-The production and non-production commands deliberately emit different
-immutable artifact kinds. Do not derive this authority later from a branch name.
+The non-production command targets the separate `aurum-signal-room-preview`
+Worker. It must never upload a Version into the production
+`aurum-signal-room` history. The commands deliberately emit different immutable
+artifact kinds; a production candidate additionally requires `branch:main` and
+Git reachability from `origin/main`.
+
+Normal builds and Candidate staging never apply D1 migrations or provision
+bindings. A change under `web/drizzle/`, a migration directory, Wrangler
+bindings, or generated Worker binding types is `REVIEW_REQUIRED` until a
+separate coordinated platform/storage protocol is executed. Missing configured
+resources fail the build; do not use Wrangler auto-configuration as recovery.
 
 Worker-changing Candidates require a Cloudflare API token limited to read-only
 Workers Observability query access. Store it only in the Windows user

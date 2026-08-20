@@ -3021,9 +3021,13 @@ test("Worker validation manifest owns every production route and direct router",
         for (const match of source.matchAll(/export\s+(?:async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE)\b/g)) {
           methods.add(match[1]);
         }
+        for (const match of source.matchAll(/export\s+const\s+(GET|POST|PUT|PATCH|DELETE)\s*=/g)) {
+          methods.add(match[1]);
+        }
         for (const match of source.matchAll(/export\s*\{([^}]+)\}\s*from/g)) {
-          for (const method of match[1].split(",").map(value => value.trim())) {
-            if (/^(GET|POST|PUT|PATCH|DELETE)$/.test(method)) methods.add(method);
+          for (const entry of match[1].split(",").map(value => value.trim())) {
+            const exported = entry.split(/\s+as\s+/).at(-1);
+            if (/^(GET|POST|PUT|PATCH|DELETE)$/.test(exported)) methods.add(exported);
           }
         }
         for (const method of methods) {
@@ -3041,18 +3045,72 @@ test("Worker validation manifest owns every production route and direct router",
   for (const entry of readdirSync(workerDirectory, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
     const workerSource = readFileSync(new URL(entry.name, workerDirectory), "utf8");
+    const directPaths = new Set();
     for (const match of workerSource.matchAll(/url\.pathname\s*===\s*"([^"]+)"/g)) {
-      assert.ok(declared.has(`GET ${match[1]}`),
-        `WORKER_ROUTE_VALIDATION_POLICY_MISSING: GET ${match[1]}`);
+      directPaths.add(match[1]);
+    }
+    for (const path of directPaths) {
+      assert.ok(manifest.routes.some(route => route.path === path
+          && route.boundary === "DIRECT_WORKER_ROUTE" && route.method === "ANY"),
+        `WORKER_ROUTE_VALIDATION_POLICY_MISSING: DIRECT ${path}`);
     }
   }
   for (const route of manifest.routes) {
     assert.ok(route.family && route.boundary && route.criticality && route.strategy);
     assert.ok(Array.isArray(route.owners) && route.owners.length > 0);
     assert.ok(route.owners.includes("web/worker/*.ts"));
+    if (!route.cpu_required) {
+      assert.equal(route.criticality, "OPTIONAL");
+      assert.ok(route.cpu_exempt_reason || manifest.optional_cpu_exempt_reason);
+    }
+    if (["CRITICAL", "HEAVY"].includes(route.criticality)
+        && route.boundary !== "STATIC_ASSET") {
+      assert.equal(route.cpu_required, true);
+    }
     if (route.strategy === "PRODUCTION_SHAPED_DRY_RUN") {
       assert.ok(route.fixture && route.auth_required && route.cpu_required);
       assert.ok(route.acceptance_samples >= 10);
     }
+    if (["news-content-write", "news-evidence-write", "news-index-write"].includes(route.family)) {
+      assert.ok(Array.isArray(route.scenarios) && route.scenarios.length >= 2);
+    }
   }
+  assert.deepEqual(
+    manifest.routes.find(route => route.family === "news-index-write").scenarios
+      .map(scenario => scenario.name),
+    ["normal", "reset", "withdrawal", "prune", "reconcile", "neutralize"],
+  );
+  assert.deepEqual(
+    manifest.routes.find(route => route.family === "news-evidence-write").scenarios
+      .map(scenario => scenario.name),
+    ["prepare", "stage", "activate", "cleanup"],
+  );
+  assert.deepEqual(
+    manifest.routes.find(route => route.family === "news-content-write").scenarios
+      .map(scenario => scenario.name),
+    ["normal", "reset"],
+  );
+});
+
+test("non-production builds target an isolated Preview Worker", () => {
+  const config = JSON.parse(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
+  assert.equal(config.name, "aurum-signal-room");
+  assert.equal(config.env.preview.name, "aurum-signal-room-preview");
+  assert.equal(config.env.preview.d1_databases[0].database_id,
+    config.d1_databases[0].database_id);
+});
+
+test("route inventory parser covers const and re-exported handlers", () => {
+  const source = "export const GET = handler; export { put as POST, DELETE } from './shared';";
+  const methods = new Set();
+  for (const match of source.matchAll(/export\s+const\s+(GET|POST|PUT|PATCH|DELETE)\s*=/g)) {
+    methods.add(match[1]);
+  }
+  for (const match of source.matchAll(/export\s*\{([^}]+)\}\s*from/g)) {
+    for (const entry of match[1].split(",").map(value => value.trim())) {
+      const exported = entry.split(/\s+as\s+/).at(-1);
+      if (/^(GET|POST|PUT|PATCH|DELETE)$/.test(exported)) methods.add(exported);
+    }
+  }
+  assert.deepEqual([...methods].sort(), ["DELETE", "GET", "POST"]);
 });

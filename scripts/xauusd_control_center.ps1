@@ -50,10 +50,22 @@ $collectorSecretsPath = Join-Path $repositoryRoot ".local\secrets\collector-keys
 $workerName = "aurum-signal-room"
 $workerUrl = "https://aurum-signal-room.yiyousiow1234.workers.dev"
 $cloudflareAccountId = "48ce531f39e2310b4c858c8916a01d51"
-$releaseSchemaVersion = "stable-candidate-release-v2"
+$releaseSchemaVersion = "stable-candidate-release-v3"
 $previewArtifactKind = "PREVIEW"
 $productionCandidateArtifactKind = "PRODUCTION_CANDIDATE"
+$legacyReferenceArtifactKind = "LEGACY_REFERENCE"
+$legacyBootstrapStableArtifactKind = "LEGACY_BOOTSTRAP_STABLE"
 $unknownArtifactKind = "UNKNOWN"
+$requiredGitHubChecks = @(
+    "Python regression suite",
+    "Web build and tests",
+    "Windows runtime contracts",
+    "Repository policy",
+    "Analyze (actions)",
+    "Analyze (csharp)",
+    "Analyze (javascript-typescript)",
+    "Analyze (python)"
+)
 $workerCpuPassP95Ms = 6.0
 $workerCpuPassP99Ms = 8.0
 $workerCpuPassMaxMs = 10.0
@@ -204,7 +216,17 @@ function Get-ReleaseControlState {
                 }
             )
         }
-        if ([string]$state.schema_version -eq "stable-candidate-release-v1") {
+        if (-not $state.PSObject.Properties['previous_stable_rollback_eligible']) {
+            $state | Add-Member -NotePropertyName previous_stable_rollback_eligible `
+                -NotePropertyValue $false
+        }
+        if (-not $state.PSObject.Properties['previous_stable_rollback_reason']) {
+            $state | Add-Member -NotePropertyName previous_stable_rollback_reason `
+                -NotePropertyValue "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"
+        }
+        if ([string]$state.schema_version -in @(
+            "stable-candidate-release-v1", "stable-candidate-release-v2"
+        )) {
             foreach ($identity in @($state.stable, $state.previous_stable)) {
                 if ($identity -and -not $identity.PSObject.Properties['artifact_kind']) {
                     $identity | Add-Member -NotePropertyName artifact_kind `
@@ -219,8 +241,32 @@ function Get-ReleaseControlState {
                     )
                     $identity | Add-Member -NotePropertyName artifact_kind `
                         -NotePropertyValue $(if ($legacyAccepted) {
-                            $productionCandidateArtifactKind
+                            $legacyReferenceArtifactKind
                         } else { $unknownArtifactKind })
+                }
+            }
+            if ($state.stable) {
+                $state.stable.artifact_kind = $legacyBootstrapStableArtifactKind
+                if (-not $state.stable.PSObject.Properties['worker_git_sha']) {
+                    $state.stable | Add-Member -NotePropertyName worker_git_sha `
+                        -NotePropertyValue "NOT_RECORDED"
+                }
+            }
+            if ($state.candidate -and
+                [string]$state.candidate.worker_version_id -eq $bootstrapAcceptedCandidateWorker -and
+                [string]$state.candidate.git_sha -eq $bootstrapAcceptedCandidateRevision) {
+                $state.candidate.artifact_kind = $legacyReferenceArtifactKind
+                foreach ($field in @("validation_state", "compatibility_state")) {
+                    if ($state.candidate.PSObject.Properties[$field]) {
+                        $state.candidate.$field = "REBASE_REQUIRED"
+                    } else {
+                        $state.candidate | Add-Member -NotePropertyName $field `
+                            -NotePropertyValue "REBASE_REQUIRED"
+                    }
+                }
+                if ($state.candidate.validation) {
+                    $state.candidate.validation | Add-Member -NotePropertyName reason `
+                        -NotePropertyValue "REBASE_ON_RELEASE_CONTROL_MAIN_REQUIRED" -Force
                 }
             }
             $state.schema_version = $releaseSchemaVersion
@@ -231,6 +277,18 @@ function Get-ReleaseControlState {
 
 function Write-ReleaseControlState {
     param([Parameter(Mandatory = $true)][object]$State)
+    $controlBundle = Get-RuntimeControlBundleIdentity
+    foreach ($field in @("control_bundle_revision", "control_bundle_exact_revision",
+        "control_bundle_hash_verified")) {
+        if (-not $State.PSObject.Properties[$field]) {
+            $State | Add-Member -NotePropertyName $field -NotePropertyValue $null
+        }
+    }
+    $State.control_bundle_revision = if ($controlBundle) {
+        [string]$controlBundle.source_revision
+    } else { $null }
+    $State.control_bundle_exact_revision = [bool]($controlBundle -and $controlBundle.exact_revision)
+    $State.control_bundle_hash_verified = [bool]$controlBundle
     $directory = Split-Path -Parent $releaseControlStatePath
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
     $temporary = "$releaseControlStatePath.tmp"
@@ -258,7 +316,7 @@ function New-ReleaseIdentity {
         [string]$Branch = "",
         [string]$PullRequest = "",
         [string]$ValidationState = "NEW",
-        [ValidateSet("PREVIEW", "PRODUCTION_CANDIDATE", "UNKNOWN")]
+        [ValidateSet("PREVIEW", "PRODUCTION_CANDIDATE", "LEGACY_REFERENCE", "LEGACY_BOOTSTRAP_STABLE", "UNKNOWN")]
         [string]$ArtifactKind = "UNKNOWN",
         [string]$VersionCreatedAt = ""
     )
@@ -443,6 +501,8 @@ function New-ReleaseControlState {
         stable = $Stable
         candidate = $Candidate
         previous_stable = $null
+        previous_stable_rollback_eligible = $false
+        previous_stable_rollback_reason = "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"
         queued_candidate = $null
         transaction = $null
         deployment_status = "READY"
@@ -469,7 +529,10 @@ function Initialize-ReleaseControl {
     $stable = New-ReleaseIdentity -GitSha $revision `
         -WorkerVersionId ([string]$stableVersion.version_id) `
         -WindowsRevision $revision -Branch "main" -ValidationState "PASSED" `
-        -ArtifactKind $productionCandidateArtifactKind
+        -ArtifactKind $legacyBootstrapStableArtifactKind
+    $stable | Add-Member -NotePropertyName worker_git_sha -NotePropertyValue "NOT_RECORDED"
+    $stable | Add-Member -NotePropertyName provenance_state `
+        -NotePropertyValue "LEGACY_EXACT_WORKER_WINDOWS_PAIR"
     $stable.compatibility_state = "PASSED"
     $acceptedPlacement = @($deployment.versions | Where-Object {
         [string]$_.version_id -eq $bootstrapAcceptedCandidateWorker -and
@@ -481,8 +544,8 @@ function Initialize-ReleaseControl {
             -WorkerVersionId $bootstrapAcceptedCandidateWorker `
             -WindowsRevision $bootstrapAcceptedCandidateRevision `
             -Branch "fix/worker-cpu-headroom" -PullRequest "268" `
-            -ValidationState "PASSED" -ArtifactKind $productionCandidateArtifactKind
-        $accepted.compatibility_state = "PASSED"
+            -ValidationState "REBASE_REQUIRED" -ArtifactKind $legacyReferenceArtifactKind
+        $accepted.compatibility_state = "REBASE_REQUIRED"
         $accepted.validation = [pscustomobject]@{
             key = [string]$accepted.validation_key
             repository = "PASSED"
@@ -493,6 +556,7 @@ function Initialize-ReleaseControl {
             source_reference = "PR_268_ACCEPTED_REVIEW_COMMENT"
             source_timestamp = $null
             source_timestamp_status = "NOT_RECORDED_IN_BOOTSTRAP_SOURCE"
+            reason = "REBASE_ON_RELEASE_CONTROL_MAIN_REQUIRED"
             cpu_evidence = [pscustomobject]@{
                 source = "CLOUDFLARE_WORKERS_OBSERVABILITY"
                 acceptance_mode = "LEGACY_ACCEPTED_MANUAL_EVIDENCE"
@@ -541,9 +605,9 @@ function Test-AutomaticStorageCompatibility {
     # containing a storage migration needs a separate coordinated migration
     # protocol before this controller may authorize Promote or Reverse.
     return @($ChangedFiles | Where-Object {
-        $_ -like "web/drizzle/*.sql" -or
-        $_ -like "web/drizzle/meta/*" -or
-        $_ -match '(^|/)migrations?/'
+        $_ -like "web/drizzle/*" -or
+        $_ -match '(^|/)migrations?/' -or
+        $_ -in @("web/wrangler.jsonc", "web/worker-configuration.d.ts")
     }).Count -eq 0
 }
 
@@ -554,13 +618,34 @@ function Test-RequiredGitHubChecks {
             "repos/yiyousiow000814/XAUUSD-Forecaster/commits/$Revision/check-runs" 2>$null) -join "`n"
         if ($LASTEXITCODE -ne 0) { return "PENDING" }
         $runs = @(($json | ConvertFrom-Json).check_runs)
-        if ($runs.Count -eq 0 -or @($runs | Where-Object { $_.status -ne "completed" }).Count -gt 0) {
-            return "PENDING"
+        foreach ($name in $requiredGitHubChecks) {
+            $matching = @($runs | Where-Object { [string]$_.name -eq $name })
+            if ($matching.Count -eq 0 -or
+                @($matching | Where-Object { [string]$_.status -ne "completed" }).Count -gt 0) {
+                return "PENDING"
+            }
+            if (@($matching | Where-Object { [string]$_.conclusion -ne "success" }).Count -gt 0) {
+                return "FAILED"
+            }
         }
-        $bad = @($runs | Where-Object { $_.conclusion -notin @("success", "neutral", "skipped") })
-        if ($bad.Count -gt 0) { return "FAILED" }
         return "PASSED"
     } catch { return "PENDING" }
+}
+
+function Test-ProductionCandidateProvenance {
+    param([Parameter(Mandatory = $true)][object]$Candidate)
+    if ([string]$Candidate.artifact_kind -ne $productionCandidateArtifactKind -or
+        [string]$Candidate.branch -ne "main" -or
+        [string]$Candidate.git_sha -ne [string]$Candidate.windows_revision) {
+        return $false
+    }
+    & git -C $repositoryRoot fetch origin --quiet 2>$null
+    if ($LASTEXITCODE -ne 0) { return $false }
+    & git -C $repositoryRoot cat-file -e "$([string]$Candidate.git_sha)^{commit}" 2>$null
+    if ($LASTEXITCODE -ne 0) { return $false }
+    & git -C $repositoryRoot merge-base --is-ancestor `
+        ([string]$Candidate.git_sha) origin/main 2>$null
+    return [bool]($LASTEXITCODE -eq 0)
 }
 
 function Test-SingleProductionOwner {
@@ -727,9 +812,14 @@ function Get-CandidateCpuEvidence {
         -ExpectedInvocations $expected
     if (-not $global) { return $null }
     $families = @()
-    foreach ($route in $Routes) {
+    $routeGroups = @($Routes | Group-Object { "{0}|{1}|{2}" -f `
+        [string]$_.path, [string]$_.method, [string]$_.family })
+    foreach ($group in $routeGroups) {
+        $route = $group.Group[0]
+        $familyExpected = [int](($group.Group |
+            Measure-Object -Property acceptance_samples -Sum).Sum)
         $evidence = Get-CandidatePlatformEvidence -Candidate $Candidate `
-            -From $From -To $To -ExpectedInvocations ([int]$route.acceptance_samples) `
+            -From $From -To $To -ExpectedInvocations $familyExpected `
             -RoutePath ([string]$route.path) -RouteMethod ([string]$route.method) `
             -RouteFamily ([string]$route.family)
         if (-not $evidence) { return $null }
@@ -794,7 +884,8 @@ function Get-WorkerValidationManifest {
         $raw = Get-Content -LiteralPath $path -Raw
     }
     $manifest = $raw | ConvertFrom-Json
-    if ([int]$manifest.schema_version -ne 1 -or @($manifest.routes).Count -eq 0) {
+    if ([int]$manifest.schema_version -ne 2 -or @($manifest.routes).Count -eq 0 -or
+        -not $manifest.fixture_builder) {
         throw "WORKER_ROUTE_VALIDATION_MANIFEST_INVALID"
     }
     return $manifest
@@ -806,6 +897,9 @@ function Test-ValidationRouteOwnedByChange {
         foreach ($owner in @($Route.owners)) {
             if ($file -like [string]$owner) { return $true }
         }
+        foreach ($producer in @($Route.producers)) {
+            if ($file -like [string]$producer) { return $true }
+        }
     }
     return $false
 }
@@ -814,18 +908,37 @@ function Get-CandidateRouteValidationPlan {
     param([string[]]$ChangedFiles, [string]$Revision = "")
     $manifest = Get-WorkerValidationManifest -Revision $Revision
     $manifestChanged = "web/worker-validation-manifest.json" -in $ChangedFiles
-    $workerCodeChanged = @($ChangedFiles | Where-Object {
-        $_ -like "web/app/*/route.ts" -or $_ -like "web/app/api/_shared/*" -or
-        $_ -like "web/worker/*" -or
-        $_ -in @("web/vite.config.ts", "web/wrangler.jsonc")
+    $fixtureBuilderChanged = @($ChangedFiles | Where-Object {
+        $_ -like [string]$manifest.fixture_builder -or
+        $_ -eq "tests/test_release_validation_fixtures.py"
     }).Count -gt 0
-    $selected = @($manifest.routes | Where-Object {
+    $workerCodeChanged = @($ChangedFiles | Where-Object {
+        $file = $_
+        @($manifest.bundle_runtime_roots | Where-Object {
+            $file -like [string]$_
+        }).Count -gt 0
+    }).Count -gt 0
+    $selectedRoutes = @($manifest.routes | Where-Object {
         [bool]$_.cpu_required -and (
-            $manifestChanged -or
+            $manifestChanged -or $fixtureBuilderChanged -or
             (Test-ValidationRouteOwnedByChange -Route $_ -ChangedFiles $ChangedFiles) -or
             ($workerCodeChanged -and [bool]$_.baseline)
         )
     })
+    $selected = @()
+    foreach ($route in $selectedRoutes) {
+        $scenarios = @($route.scenarios)
+        if ($scenarios.Count -eq 0) {
+            $scenarios = @([pscustomobject]@{ name = "default" })
+        }
+        foreach ($scenario in $scenarios) {
+            $copy = $route.PSObject.Copy()
+            $copy | Add-Member -NotePropertyName scenario `
+                -NotePropertyValue ([string]$scenario.name)
+            if ($scenario.fixture) { $copy.fixture = [string]$scenario.fixture }
+            $selected += $copy
+        }
+    }
     $contractRoutes = @($manifest.routes | Where-Object {
         $manifestChanged -or (Test-ValidationRouteOwnedByChange -Route $_ -ChangedFiles $ChangedFiles)
     })
@@ -890,7 +1003,7 @@ function Invoke-CandidateRouteSample {
     $headers["X-Aurum-Request-ID"] = $requestId
     $parameters = @{
         UseBasicParsing=$true; Method=[string]$Route.method
-        Uri="$workerUrl$($Route.path)"; Headers=$headers; TimeoutSec=30
+        Uri="$workerUrl$($Route.path)$([string]$Route.request_query)"; Headers=$headers; TimeoutSec=30
     }
     if ([string]$Route.strategy -eq "PRODUCTION_SHAPED_DRY_RUN") {
         if (-not $IngestToken) {
@@ -909,7 +1022,7 @@ function Invoke-CandidateRouteSample {
         $headers.Authorization = "Bearer $IngestToken"
         $headers["X-Aurum-Release-Validation"] = "dry-run"
         $parameters.ContentType = "application/json"
-        $parameters.Body = Get-Content -LiteralPath $fixture -Raw
+        $parameters.Body = [System.IO.File]::ReadAllBytes($fixture)
     }
     try {
         $response = Invoke-WebRequest @parameters
@@ -1008,6 +1121,7 @@ function Invoke-CandidateWorkerValidation {
             if (@($warmups | Where-Object { -not $_.passed }).Count -gt 0) {
                 $results += [pscustomobject]@{
                     route=$route.path; method=$route.method; family=$route.family
+                    scenario=$route.scenario
                     boundary=$route.boundary; warmup_samples=$warmups.Count
                     acceptance_samples=0; passed=$false; reason="WARMUP_FAILED"
                 }
@@ -1027,6 +1141,7 @@ function Invoke-CandidateWorkerValidation {
             } else { $null }
             $results += [pscustomobject]@{
                 route=$route.path; method=$route.method; family=$route.family
+                scenario=$route.scenario
                 boundary=$route.boundary; warmup_samples=[int]$route.warmup_samples
                 acceptance_samples=$samples.Count
                 request_ids=@($samples | ForEach-Object { $_.request_id })
@@ -1080,11 +1195,8 @@ function Invoke-AutomaticCandidateValidation {
         if ([string]$Candidate.artifact_kind -ne $productionCandidateArtifactKind) {
             throw "Only a PRODUCTION_CANDIDATE artifact can enter validation."
         }
-        & git -C $repositoryRoot fetch origin --quiet 2>$null
-        & git -C $repositoryRoot cat-file -e "$([string]$Candidate.git_sha)^{commit}" 2>$null
-        if ($LASTEXITCODE -ne 0) { throw "Candidate Git commit is unavailable." }
-        if ([string]$Candidate.git_sha -ne [string]$Candidate.windows_revision) {
-            throw "Worker and Windows revisions do not identify one release."
+        if (-not (Test-ProductionCandidateProvenance -Candidate $Candidate)) {
+            throw "PRODUCTION_CANDIDATE_MAIN_PROVENANCE_REQUIRED"
         }
         $state.candidate.validation_state = "TESTING"
         Write-ReleaseControlState -State $state
@@ -1109,6 +1221,7 @@ function Invoke-AutomaticCandidateValidation {
             -CandidateRevision ([string]$Candidate.git_sha))
         if (-not (Test-AutomaticStorageCompatibility -ChangedFiles $changed)) {
             $state.candidate.compatibility_state = "REVIEW_REQUIRED"
+            $state.candidate.validation_state = "REVIEW_REQUIRED"
             $state.candidate.validation = [pscustomobject]@{
                 key = [string]$Candidate.validation_key
                 repository = "PASSED"
@@ -1275,7 +1388,9 @@ function Invoke-CandidateDiscovery {
             if ($state -and -not $state.transaction) { $candidate = $state.candidate }
         }
         if (-not $candidate) { return $false }
-        if ([string]$candidate.validation_state -in @("PASSED", "FAILED")) { return $true }
+        if ([string]$candidate.validation_state -in @(
+            "PASSED", "FAILED", "REVIEW_REQUIRED", "REBASE_REQUIRED"
+        )) { return $true }
         return Invoke-AutomaticCandidateValidation -Candidate $candidate
     } finally { Exit-ReleaseTransactionLock }
 }
@@ -1809,7 +1924,6 @@ function Update-RuntimeCheckout {
         & git -C $moduleRoot checkout --detach --force --quiet $Revision 2>$null
         if ($LASTEXITCODE -ne 0) { throw "verified revision checkout failed" }
         $checkoutChanged = $true
-        Sync-StableRuntimeControlFiles
         Write-RuntimeUpdateState @{
             previous_revision = $previousRevision
             staged_revision = $Revision
@@ -1824,13 +1938,6 @@ function Update-RuntimeCheckout {
             if ($LASTEXITCODE -ne 0) {
                 Write-RuntimeUpdateFailure -Revision $Revision -Status "ROLLBACK_FAILED" `
                     -Message "Candidate switch preparation failed and the previous checkout could not be restored: $reason"
-                return $false
-            }
-            try {
-                Sync-StableRuntimeControlFiles
-            } catch {
-                Write-RuntimeUpdateFailure -Revision $Revision -Status "ROLLBACK_FAILED" `
-                    -Message "Candidate switch preparation failed and the previous control bundle could not be restored: $reason; $($_.Exception.Message)"
                 return $false
             }
         }
@@ -2046,7 +2153,8 @@ function Start-RuntimeObservation {
     param(
         [string]$Revision,
         [string]$PreviousRevision,
-        [DateTimeOffset]$HealthBoundary = [DateTimeOffset]::UtcNow
+        [DateTimeOffset]$HealthBoundary = [DateTimeOffset]::UtcNow,
+        [ValidateSet("PROMOTE", "REVERSE")][string]$Mode = "PROMOTE"
     )
     $latestDecision = Get-LatestRuntimeDecisionTime
     Write-RuntimeUpdateState @{
@@ -2059,6 +2167,7 @@ function Start-RuntimeObservation {
         observation_last_decision_time = $latestDecision
         observation_success_cycles = 0
         observation_consecutive_failures = 0
+        observation_mode = $Mode
         user_visible_failure = $false
         failure_message = $null
     }
@@ -2081,7 +2190,6 @@ function Invoke-RuntimeRollback {
         }
         & git -C $moduleRoot checkout --detach --force --quiet $PreviousRevision 2>$null
         if ($LASTEXITCODE -ne 0) { throw "cannot restore previous revision" }
-        Sync-StableRuntimeControlFiles
         Restart-CodeReloadableServices -Revision $PreviousRevision
         Write-RuntimeCodeState -Revision $PreviousRevision
         Write-RuntimeUpdateFailure -Revision $FailedRevision -Status "ROLLED_BACK" `
@@ -2106,6 +2214,23 @@ function Invoke-RuntimeRollback {
             $releaseState.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
             Write-ReleaseControlState -State $releaseState
             Write-ReleaseHistory -Event "PROMOTION_REVERSED" -Release $prior `
+                -Detail @{ reason = $Reason }
+        } elseif ($releaseState -and $releaseState.transaction -and
+            [string]$releaseState.transaction.type -eq "REVERSE") {
+            $prior = $releaseState.transaction.previous
+            Invoke-CloudflareDeployment `
+                -StableVersionId ([string]$prior.worker_version_id) `
+                -Message "failed reverse recovery $([string]$releaseState.transaction.id)"
+            $releaseState.transaction = $null
+            $releaseState.deployment_status = "RECOVERY_REQUIRED"
+            $releaseState.drift = [pscustomobject]@{
+                code = "REVERSE_OBSERVATION_FAILED"
+                reason = $Reason
+                observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            $releaseState.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+            Write-ReleaseControlState -State $releaseState
+            Write-ReleaseHistory -Event "REVERSE_OBSERVATION_FAILED" -Release $prior `
                 -Detail @{ reason = $Reason }
         }
         return $true
@@ -2135,6 +2260,20 @@ function Test-CloudflareReleasePlacement {
     return $true
 }
 
+function Test-CloudflareRollbackTarget {
+    param([Parameter(Mandatory = $true)][object]$Target)
+    if (-not $Target.worker_version_id) { return $false }
+    $known = @(Get-CloudflareVersions | Where-Object {
+        [string]$_.id -eq [string]$Target.worker_version_id
+    })
+    if ($known.Count -ne 1) { return $false }
+    $deployment = Get-CloudflareDeployment
+    return @($deployment.versions | Where-Object {
+        [string]$_.version_id -eq [string]$Target.worker_version_id -and
+        [double]$_.percentage -in @(0, 100)
+    }).Count -eq 1
+}
+
 function Start-ReleasePromotion {
     if (-not (Enter-ReleaseTransactionLock)) { throw "Another release transaction is active." }
     try {
@@ -2146,6 +2285,10 @@ function Start-ReleasePromotion {
         }
         if ([string]$candidate.artifact_kind -ne $productionCandidateArtifactKind) {
             throw "Preview and unknown artifacts cannot be promoted."
+        }
+        Assert-ActiveControlBundle
+        if (-not (Test-ProductionCandidateProvenance -Candidate $candidate)) {
+            throw "PRODUCTION_CANDIDATE_MAIN_PROVENANCE_REQUIRED"
         }
         if ([string]$candidate.validation.key -ne [string]$candidate.validation_key -or
             [string]$candidate.validation_key -ne
@@ -2161,6 +2304,9 @@ function Start-ReleasePromotion {
         }
         if (-not (Test-CloudflareReleasePlacement -Stable $state.stable -Candidate $candidate)) {
             throw "Cloudflare Stable/Candidate placement drifted."
+        }
+        if (-not (Test-CloudflareRollbackTarget -Target $state.stable)) {
+            throw "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"
         }
         $runtime = Get-RuntimeCodeState
         if (-not $runtime -or [string]$runtime.applied_revision -ne [string]$state.stable.windows_revision) {
@@ -2235,6 +2381,10 @@ function Complete-ReleasePromotion {
         $previous = $state.transaction.previous
         $state.stable = $target
         $state.previous_stable = $previous
+        $state.previous_stable_rollback_eligible = Test-CloudflareRollbackTarget -Target $previous
+        $state.previous_stable_rollback_reason = if ($state.previous_stable_rollback_eligible) {
+            $null
+        } else { "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE" }
         $state.candidate = $state.queued_candidate
         $state.queued_candidate = $null
         $state.transaction = $null
@@ -2252,7 +2402,6 @@ function Invoke-ReleaseWindowsRestore {
     param([Parameter(Mandatory = $true)][string]$Revision)
     & git -C $moduleRoot checkout --detach --force --quiet $Revision 2>$null
     if ($LASTEXITCODE -ne 0) { throw "Cannot restore Windows revision." }
-    Sync-StableRuntimeControlFiles
     Restart-CodeReloadableServices -Revision $Revision | Out-Null
     Write-RuntimeCodeState -Revision $Revision
 }
@@ -2263,6 +2412,10 @@ function Invoke-ReverseStable {
         $state = Get-ReleaseControlState
         if (-not $state -or $state.transaction -or -not $state.previous_stable) {
             throw "Previous Stable is unavailable."
+        }
+        Assert-ActiveControlBundle
+        if (-not (Test-CloudflareRollbackTarget -Target $state.previous_stable)) {
+            throw "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"
         }
         if (-not (Test-SingleProductionOwner)) { throw "Exactly one Windows production owner is required." }
         $current = $state.stable
@@ -2285,15 +2438,14 @@ function Invoke-ReverseStable {
             -Message "reverse stable $([string]$state.transaction.id)"
         Invoke-ReleaseWindowsRestore -Revision ([string]$target.windows_revision)
         if (-not (Test-SingleProductionOwner)) { throw "Production owner uniqueness failed after Reverse." }
+        Start-RuntimeObservation -Revision ([string]$target.windows_revision) `
+            -PreviousRevision ([string]$current.windows_revision) -Mode "REVERSE"
         $state = Get-ReleaseControlState
-        $state.stable = $target
-        $state.previous_stable = $current
-        $state.transaction = $null
-        $state.deployment_status = "READY"
-        $state.drift = $null
+        $state.transaction.phase = "REVERSE_OBSERVING"
+        $state.deployment_status = "REVERSE_OBSERVING"
         $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
         Write-ReleaseControlState -State $state
-        Write-ReleaseHistory -Event "STABLE_REVERSED" -Release $target
+        Write-ReleaseHistory -Event "REVERSE_OBSERVATION_STARTED" -Release $target
         return $true
     } catch {
         $state = Get-ReleaseControlState
@@ -2307,6 +2459,36 @@ function Invoke-ReverseStable {
         }
         throw
     } finally { Exit-ReleaseTransactionLock }
+}
+
+function Complete-ReleaseReverse {
+    $releaseLockAcquiredHere = $false
+    if (-not $script:releaseTransactionLockHeld) {
+        if (-not (Enter-ReleaseTransactionLock)) { return }
+        $releaseLockAcquiredHere = $true
+    }
+    try {
+        $state = Get-ReleaseControlState
+        if (-not $state -or -not $state.transaction -or
+            [string]$state.transaction.type -ne "REVERSE" -or
+            [string]$state.transaction.phase -ne "REVERSE_OBSERVING") { return }
+        $target = $state.transaction.target
+        $current = $state.transaction.previous
+        $state.stable = $target
+        $state.previous_stable = $current
+        $state.previous_stable_rollback_eligible = Test-CloudflareRollbackTarget -Target $current
+        $state.previous_stable_rollback_reason = if ($state.previous_stable_rollback_eligible) {
+            $null
+        } else { "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE" }
+        $state.transaction = $null
+        $state.deployment_status = "READY"
+        $state.drift = $null
+        $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "STABLE_REVERSED" -Release $target
+    } finally {
+        if ($releaseLockAcquiredHere) { Exit-ReleaseTransactionLock }
+    }
 }
 
 function Reconcile-ReleaseControlState {
@@ -2323,15 +2505,28 @@ function Reconcile-ReleaseControlState {
             $observedWindows -eq [string]$target.windows_revision
         )
         if ([string]$state.transaction.type -eq "REVERSE" -and $targetObserved) {
-            $state.stable = $target
-            $state.previous_stable = $state.transaction.previous
-            $state.transaction = $null
-            $state.deployment_status = "READY"
-            $state.drift = $null
-            $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
-            Write-ReleaseControlState -State $state
-            Write-ReleaseHistory -Event "REVERSE_RECONCILED" -Release $target
-            return $state
+            if ([string]$state.transaction.phase -eq "REVERSING") {
+                Start-RuntimeObservation -Revision ([string]$target.windows_revision) `
+                    -PreviousRevision ([string]$state.transaction.previous.windows_revision) `
+                    -Mode "REVERSE"
+                $state.transaction.phase = "REVERSE_OBSERVING"
+                $state.deployment_status = "REVERSE_OBSERVING"
+                Write-ReleaseControlState -State $state
+                return $state
+            }
+            if ([string]$state.transaction.phase -eq "REVERSE_OBSERVING") {
+                $observation = Get-RuntimeUpdateState
+                if ($observation -and [string]$observation.update_status -eq "ACTIVE" -and
+                    [string]$observation.activated_revision -eq [string]$target.windows_revision) {
+                    Complete-ReleaseReverse
+                    return Get-ReleaseControlState
+                }
+                if ($observation -and [string]$observation.update_status -eq "OBSERVING" -and
+                    [string]$observation.observing_revision -eq [string]$target.windows_revision) {
+                    Test-RuntimeObservation | Out-Null
+                    return Get-ReleaseControlState
+                }
+            }
         }
         if ([string]$state.transaction.phase -eq "OBSERVING" -and $targetObserved) {
             $observation = Get-RuntimeUpdateState
@@ -2378,6 +2573,16 @@ function Reconcile-ReleaseControlState {
     } else {
         $state.deployment_status = "READY"
         $state.drift = $null
+    }
+    if ($state.previous_stable) {
+        $state.previous_stable_rollback_eligible =
+            Test-CloudflareRollbackTarget -Target $state.previous_stable
+        $state.previous_stable_rollback_reason = if ($state.previous_stable_rollback_eligible) {
+            $null
+        } else { "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE" }
+    } else {
+        $state.previous_stable_rollback_eligible = $false
+        $state.previous_stable_rollback_reason = "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"
     }
     Write-ReleaseControlState -State $state
     return $state
@@ -2516,7 +2721,11 @@ function Test-RuntimeObservation {
         }
         Write-WatchdogEvent -Event "RUNTIME_OBSERVATION_PASSED" `
             -Service "all" -State "$revision cycles=$cycles"
-        Complete-ReleasePromotion
+        if ([string]$state.observation_mode -eq "REVERSE") {
+            Complete-ReleaseReverse
+        } else {
+            Complete-ReleasePromotion
+        }
         return $true
     }
     if (([DateTimeOffset]::UtcNow - $readyAt) -ge $runtimeObservationTimeout) {
@@ -2834,6 +3043,16 @@ function Get-RuntimeControlBundleIdentity {
     } catch { return $null }
 }
 
+function Assert-ActiveControlBundle {
+    $identity = Get-RuntimeControlBundleIdentity
+    if (-not $identity) { throw "CONTROL_BUNDLE_HASH_VERIFICATION_FAILED" }
+    if (-not [bool]$identity.exact_revision -or
+        [string]$identity.source_revision -notmatch '^[0-9a-f]{40}$') {
+        throw "CONTROL_BUNDLE_EXACT_REVISION_REQUIRED"
+    }
+    return $identity
+}
+
 function Write-WatchdogHeartbeat {
     $directory = Split-Path -Parent $watchdogHeartbeatPath
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
@@ -2846,6 +3065,8 @@ function Write-WatchdogHeartbeat {
         control_bundle_revision = if ($controlBundle) {
             [string]$controlBundle.source_revision
         } else { $null }
+        control_bundle_exact_revision = [bool]($controlBundle -and $controlBundle.exact_revision)
+        control_bundle_hash_verified = [bool]$controlBundle
     } | ConvertTo-Json -Compress | Set-Content -LiteralPath $temporary -Encoding UTF8
     Move-Item -LiteralPath $temporary -Destination $watchdogHeartbeatPath -Force
 }
@@ -3133,6 +3354,13 @@ function Get-ControlCenterReleasePresentation {
     } else { $unknownArtifactKind }
     $compatibilityPassed = [bool]($Release.candidate -and
         [string]$Release.candidate.compatibility_state -eq "PASSED")
+    $controlBundleReady = [bool]($Release.control_bundle_hash_verified -and
+        $Release.control_bundle_exact_revision -and
+        [string]$Release.control_bundle_revision -match '^[0-9a-f]{40}$')
+    $candidateProvenanceReady = [bool]($Release.candidate -and
+        [string]$Release.candidate.branch -eq "main" -and
+        [string]$Release.candidate.git_sha -eq [string]$Release.candidate.windows_revision -and
+        [string]$Release.candidate.validation.key -eq [string]$Release.candidate.validation_key)
 
     $candidateDetail = switch ($candidateState) {
         "PASSED" { "All required validation evidence is current." }
@@ -3146,11 +3374,15 @@ function Get-ControlCenterReleasePresentation {
         "TESTING" { "Validation is running against the exact release identity." }
         "STAGING" { "Candidate is being staged at zero percent traffic." }
         "NEW" { "Candidate is waiting for validation to begin." }
+        "REVIEW_REQUIRED" { [string]$Release.candidate.validation.reason }
+        "REBASE_REQUIRED" { "REBASE_ON_RELEASE_CONTROL_MAIN_REQUIRED" }
         default { "No candidate release is currently available." }
     }
 
     $promoteReason = if ($transactionActive) {
         "A release transaction is already in progress"
+    } elseif (-not $controlBundleReady) {
+        "CONTROL_BUNDLE_HASH_VERIFICATION_FAILED"
     } elseif (-not $deploymentReady) {
         "Deployment status is $($Release.deployment_status)"
     } elseif (-not $Release.candidate) {
@@ -3158,6 +3390,8 @@ function Get-ControlCenterReleasePresentation {
     } elseif ($candidateKind -ne $productionCandidateArtifactKind) {
         if ($candidateKind -eq $previewArtifactKind) {
             "Preview cannot be promoted"
+        } elseif ($candidateKind -eq $legacyReferenceArtifactKind) {
+            "REBASE_ON_RELEASE_CONTROL_MAIN_REQUIRED"
         } else { "Artifact provenance is unknown" }
     } elseif (-not $compatibilityPassed) {
         "Compatibility has not passed"
@@ -3171,10 +3405,14 @@ function Get-ControlCenterReleasePresentation {
 
     $reverseReason = if ($transactionActive) {
         "A release transaction is already in progress"
+    } elseif (-not $controlBundleReady) {
+        "CONTROL_BUNDLE_HASH_VERIFICATION_FAILED"
     } elseif (-not $deploymentReady) {
         "Deployment status is $($Release.deployment_status)"
     } elseif (-not $Release.previous_stable) {
         "Previous Stable unavailable"
+    } elseif (-not [bool]$Release.previous_stable_rollback_eligible) {
+        "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"
     } else { "Ready to reverse" }
 
     [pscustomobject]@{
@@ -3184,10 +3422,11 @@ function Get-ControlCenterReleasePresentation {
         can_promote = [bool]($deploymentReady -and -not $transactionActive -and
             $Release.candidate -and $candidateState -eq "PASSED" -and
             $candidateKind -eq $productionCandidateArtifactKind -and
-            $compatibilityPassed)
+            $compatibilityPassed -and $candidateProvenanceReady -and $controlBundleReady)
         promote_reason = $promoteReason
         can_reverse = [bool]($deploymentReady -and -not $transactionActive -and
-            $Release.previous_stable)
+            $Release.previous_stable -and $Release.previous_stable_rollback_eligible -and
+            $controlBundleReady)
         reverse_reason = $reverseReason
     }
 }

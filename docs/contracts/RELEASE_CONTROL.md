@@ -10,8 +10,9 @@ Stable are distinct states.
 Every uploaded Worker Version declares one durable artifact kind in its
 immutable version annotation. `PREVIEW` is never promotable. Only
 `PRODUCTION_CANDIDATE` may enter Candidate validation or promotion. Missing or
-unknown provenance fails closed; branch names and UI labels are not artifact
-authority. Preview evidence never authorizes a production candidate, even when
+unknown provenance fails closed. A production candidate must also declare
+`main`, exist after fetch, and be reachable from `origin/main`; artifact labels
+alone are not authority. Preview evidence never authorizes a production candidate, even when
 both artifacts originate from the same Git commit.
 
 Git push, pull-request merge, and `main` movement MUST NOT change Stable.
@@ -48,13 +49,24 @@ viability, ownership uniqueness, compatibility, directed 0% Worker probes, and
 actual Cloudflare CPU/error evidence when Worker execution changed. PASSED means
 every required gate belongs to the exact release key.
 
+Repository validation requires the exact-SHA check runs named `Python regression
+suite`, `Web build and tests`, `Windows runtime contracts`, `Repository policy`,
+and CodeQL `Analyze` jobs for actions, C#, JavaScript/TypeScript, and Python.
+Every named run must exist, be complete, and conclude successfully. Missing
+required runs remain PENDING; unrelated optional runs cannot substitute.
+
 Worker validation is planned from `web/worker-validation-manifest.json`, the
 authoritative inventory of route method, hosting boundary, criticality,
-read/write ownership, validation strategy, fixture owner, CPU requirement, and
+read/write ownership, Windows transport producers, validation strategy, fixture owner, CPU requirement, and
 authentication requirement. CI fails when an App Router handler or a direct
 route in any `web/worker/*.ts` sibling lacks policy. Changed-file selection is
 derived from manifest ownership; a shared router selects every affected family,
 while documentation-only changes select no Worker CPU work.
+Package, lockfile, build configuration, shared runtime, Worker entrypoint, and
+fixture-builder changes fail safe into baseline CPU validation. Every HEAVY or
+CRITICAL Worker route is sampled unless it is a Static Asset; an OPTIONAL
+contract-only route has a machine-readable exemption policy. Multi-operation
+writes declare fixtures for each materially distinct processing path.
 
 `/`, `/health`, `/audit`, and the favicon are Static Assets: each must return
 its canonical identity and the validation window must contain zero candidate
@@ -64,7 +76,9 @@ dashboard transport builders. Their dry-run follows normal authentication,
 bounded body read, decode, parse, validation, and CPU-heavy transformation. It
 then runs the applicable read-only D1 JSON1/set validation and stops immediately
 before the first authoritative schema, upsert, batch, delete, or queue mutation.
-The response must state `mutated: false`; an invalid body still fails the normal
+Fixture files are generated as UTF-8 and transmitted as the exact byte array.
+Their bounds come from the current manifest contract rather than historical
+payload sizes. The response must state `mutated: false`; an invalid body still fails the normal
 contract. The validation header never bypasses authentication. Every Worker
 probe has a unique request ID and one validation-run ID.
 Evidence records the exact Version, short window, route family, request IDs, and
@@ -89,10 +103,15 @@ read-only API token is protected and never serialized into release state.
 PR #268 acceptance is retained only as labeled legacy manual evidence: 104
 samples, p50 2 ms, p95 4 ms, p99 4 ms, maximum 5 ms, and zero exceeded CPU,
 1102, or 5xx. Its source did not record a bootstrap timestamp; release control
-does not invent one or reinterpret older measurements.
+does not invent one or reinterpret older measurements. It is a
+`LEGACY_REFERENCE` with `REBASE_ON_RELEASE_CONTROL_MAIN_REQUIRED`, never a
+promotable Candidate. The pre-control-plane Stable is an exact Worker/Windows
+rollback pair labeled `LEGACY_BOOTSTRAP_STABLE`; its unrecorded Worker Git SHA
+remains `NOT_RECORDED`.
 
-An automatic compatibility decision covers only a release without storage
-migrations. A changed D1 or other migration remains `REVIEW_REQUIRED` until a
+An automatic compatibility decision covers only a release without storage or
+binding changes. A changed D1 or other migration, Wrangler binding, or platform
+resource remains `REVIEW_REQUIRED` until a
 separate coordinated migration protocol proves Stable-to-Candidate and Reverse
 compatibility. A green repository suite alone cannot make that decision.
 
@@ -118,7 +137,10 @@ Failed PRECHECK, CUTOVER, observation, or automatic rollback leaves the
 pre-transaction Previous Stable pointer unchanged. Only successful
 `COMMIT_STABLE` advances Previous Stable.
 
-Restart during PROMOTING, OBSERVING, or REVERSING reconciles observed Worker
+Reverse uses `REVERSING -> REVERSE_OBSERVING -> READY` and commits the restored
+Stable identity only after the same owner, heartbeat, API, sync, critical-status,
+and decision-cadence observation succeeds. Restart during PROMOTING, OBSERVING,
+REVERSING, or REVERSE_OBSERVING reconciles observed Worker
 traffic and Windows runtime identity with the durable transaction. Unexplained
 mismatch is `DEPLOYMENT_DRIFT` or `RECOVERY_REQUIRED`; it MUST NOT silently
 start another transaction.
@@ -135,6 +157,13 @@ Reverse MUST NOT delete evidence, truncate SQLite, rewrite historical
 predictions, or destructively roll back schema. Candidate migrations are
 backward-compatible and additive across Stable-to-Candidate and Reverse unless
 an explicit coordinated migration protocol governs the transition.
+
+The independently installed `.local/runtime-control` bundle owns deployment
+transactions. Business checkout, Promote, Reverse, and automatic observation
+rollback never copy control files. Their preflight verifies the active bundle's
+exact source revision and every recorded SHA-256 hash. Release diagnostics keep
+`control_bundle_revision`, `control_bundle_exact_revision`, and
+`control_bundle_hash_verified` separately from the Windows business revision.
 
 Candidate at 0% MUST NOT own background, scheduled, queue, or other duplicate
 production side effects. Directed Version Override requests are the only normal

@@ -168,6 +168,18 @@ def build_fixtures() -> dict[str, bytes]:
         "contract_version": dashboard_sync.NEWS_EVIDENCE_CONTRACT_VERSION,
         "snapshot_id": "f" * 64, "offset": 0, "items": evidence_items,
     }, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
+    snapshot_id = "f" * 64
+    detail_items = [{
+        "detail_key": f"{index + 1:064x}",
+        "detail_hash": f"{index + 101:064x}",
+        "payload": {
+            "headline": f"候选版本精确 UTF-8 新闻详情 {index}",
+            "body": "生产形状验证正文，不写入权威数据。" * 500,
+        },
+    } for index in range(12)]
+    encode = lambda value: json.dumps(
+        value, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+    ).encode("utf-8")
     return {
         "status-ingest.json": dashboard_sync.remote_snapshot(source),
         "audit-write.json": dashboard_sync.audit_snapshot(source),
@@ -175,11 +187,34 @@ def build_fixtures() -> dict[str, bytes]:
         "market-chart-write.json": dashboard_sync.market_chart_snapshot(source),
         "market-history-write.json": market_history,
         "learning-history-write.json": learning_history,
-        "news-evidence-write.json": news_evidence,
-        "news-index-write.json": json.dumps(
-            {"items": news_index}, ensure_ascii=False, allow_nan=False,
-            separators=(",", ":"),
-        ).encode(),
+        "news-evidence-prepare.json": encode({
+            "contract_version": dashboard_sync.NEWS_EVIDENCE_CONTRACT_VERSION,
+            "prepare_snapshot": snapshot_id, "expected_count": len(evidence_items),
+        }),
+        "news-evidence-stage.json": news_evidence,
+        "news-evidence-activate.json": encode({
+            "contract_version": dashboard_sync.NEWS_EVIDENCE_CONTRACT_VERSION,
+            "activate_snapshot": snapshot_id, "expected_count": len(evidence_items),
+        }),
+        "news-evidence-cleanup.json": encode({
+            "contract_version": dashboard_sync.NEWS_EVIDENCE_CONTRACT_VERSION,
+            "cleanup_active_snapshot": snapshot_id,
+        }),
+        "news-index-normal.json": encode({"items": news_index}),
+        "news-index-reset.json": encode({"reset": True}),
+        "news-index-withdrawal.json": encode({
+            "withdraw_detail_keys": [row["detail_key"] for row in news_index[:20]],
+        }),
+        "news-index-prune.json": encode({"prune_before": FIXED_START.isoformat()}),
+        "news-index-reconcile.json": encode({
+            "reconcile_contract": dashboard_sync.NEWS_MIRROR_CONTRACT_VERSION,
+        }),
+        "news-index-neutralize.json": encode({
+            "neutralize_operational_state_for_contract":
+                dashboard_sync.NEWS_MIRROR_CONTRACT_VERSION,
+        }),
+        "news-content-normal.json": encode({"items": detail_items}),
+        "news-content-reset.json": encode({"reset": True}),
     }
 
 

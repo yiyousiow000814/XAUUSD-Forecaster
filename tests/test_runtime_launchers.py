@@ -488,7 +488,7 @@ def test_candidate_readiness_accepts_a_successful_critical_probe(tmp_path) -> No
     assert result == "True,200"
 
 
-def test_switch_preparation_reports_when_previous_bundle_cannot_be_restored(
+def test_business_switch_never_invokes_control_bundle_copy(
     tmp_path,
 ) -> None:
     previous = "a" * 40
@@ -507,10 +507,10 @@ def test_switch_preparation_reports_when_previous_bundle_cannot_be_restored(
         'Write-Output "$accepted,$($script:checkouts -join \'|\'),$($state.update_status)"',
     )
 
-    assert result == f"False,{candidate}|{previous},ROLLBACK_FAILED"
+    assert result == f"True,{candidate},STAGED"
 
 
-def test_candidate_switch_installs_one_complete_runtime_control_bundle(tmp_path) -> None:
+def test_candidate_switch_preserves_reviewed_runtime_control_bundle(tmp_path) -> None:
     _write_control_bundle(tmp_path / "runtime", "previous", scripts_dir=True)
     _write_control_bundle(
         tmp_path / "repository" / ".local" / "runtime-control", "previous"
@@ -535,7 +535,7 @@ def test_candidate_switch_installs_one_complete_runtime_control_bundle(tmp_path)
     ).splitlines()
 
     assert result == [
-        ",".join(f"{candidate}|{name}" for name in RUNTIME_CONTROL_FILES),
+        ",".join(f"previous|{name}" for name in RUNTIME_CONTROL_FILES),
         "True,STAGED",
     ]
 
@@ -557,7 +557,7 @@ def test_runtime_control_bundle_records_exact_source_revision_and_hashes(tmp_pat
     assert result == f"{revision},True,{len(RUNTIME_CONTROL_FILES)}"
 
 
-def test_switch_copy_failure_restores_the_complete_previous_control_bundle(
+def test_business_switch_ignores_control_copy_failure_hook(
     tmp_path,
 ) -> None:
     _write_control_bundle(tmp_path / "runtime", "previous", scripts_dir=True)
@@ -592,12 +592,12 @@ def test_switch_copy_failure_restores_the_complete_previous_control_bundle(
     ).splitlines()
 
     assert result == [
-        ",".join(f"{previous}|{name}" for name in RUNTIME_CONTROL_FILES),
-        "False,SWITCH_FAILED",
+        ",".join(f"previous|{name}" for name in RUNTIME_CONTROL_FILES),
+        "True,STAGED",
     ]
 
 
-def test_half_installed_candidate_bundle_is_reverted_before_switch_rollback(
+def test_business_switch_never_moves_control_bundle_files(
     tmp_path,
 ) -> None:
     _write_control_bundle(tmp_path / "runtime", "previous", scripts_dir=True)
@@ -632,12 +632,12 @@ def test_half_installed_candidate_bundle_is_reverted_before_switch_rollback(
     ).splitlines()
 
     assert result == [
-        ",".join(f"{previous}|{name}" for name in RUNTIME_CONTROL_FILES),
-        "False,SWITCH_FAILED",
+        ",".join(f"previous|{name}" for name in RUNTIME_CONTROL_FILES),
+        "True,STAGED",
     ]
 
 
-def test_observation_rollback_restores_the_complete_previous_control_bundle(
+def test_observation_rollback_preserves_independent_control_bundle(
     tmp_path,
 ) -> None:
     previous = "a" * 40
@@ -661,7 +661,7 @@ def test_observation_rollback_restores_the_complete_previous_control_bundle(
     ).splitlines()
 
     assert result == [
-        ",".join(f"{previous}|{name}" for name in RUNTIME_CONTROL_FILES),
+        ",".join(f"{candidate}|{name}" for name in RUNTIME_CONTROL_FILES),
         "True",
     ]
 
@@ -1182,7 +1182,7 @@ def test_manifest_selects_baseline_and_affected_route_sample_families(tmp_path) 
         '$sharedSamples,$($adminRoutes.Count),$($docs.worker_cpu_required)"',
     )
 
-    assert result == "6,60,12,120,5,False"
+    assert result == "7,70,27,270,0,False"
 
 
 def test_one_failed_route_family_fails_candidate_cpu_evidence(tmp_path) -> None:
@@ -1239,11 +1239,14 @@ def test_v1_state_migrates_only_the_reviewed_legacy_candidate_provenance(
         f"candidate=[pscustomobject]@{{git_sha='{accepted_sha}';worker_version_id='{accepted_worker}';windows_revision='{accepted_sha}'}}; "
         "previous_stable=$null;queued_candidate=$null}; Write-ReleaseControlState $state; "
         "$migrated=Get-ReleaseControlState; "
-        'Write-Output "$($migrated.schema_version),$($migrated.stable.artifact_kind),$($migrated.candidate.artifact_kind)"',
+        'Write-Output "$($migrated.schema_version),$($migrated.stable.artifact_kind),'
+        '$($migrated.stable.worker_git_sha),$($migrated.candidate.artifact_kind),'
+        '$($migrated.candidate.validation_state)"',
     )
 
     assert result == (
-        "stable-candidate-release-v2,PRODUCTION_CANDIDATE,PRODUCTION_CANDIDATE"
+        "stable-candidate-release-v3,LEGACY_BOOTSTRAP_STABLE,NOT_RECORDED,"
+        "LEGACY_REFERENCE,REBASE_REQUIRED"
     )
 
 
@@ -1402,6 +1405,9 @@ def test_passed_candidate_promotes_only_after_observation_commit(tmp_path) -> No
         _authorized_candidate(previous, candidate)
         + "function Enter-ReleaseTransactionLock { return $true }; "
         "function Exit-ReleaseTransactionLock {}; "
+        "function Assert-ActiveControlBundle { return [pscustomobject]@{exact_revision=$true} }; "
+        "function Test-ProductionCandidateProvenance { return $true }; "
+        "function Test-CloudflareRollbackTarget { return $true }; "
         "function Test-CloudflareReleasePlacement { return $true }; "
         f"function Get-RuntimeCodeState {{ return [pscustomobject]@{{applied_revision='{previous}'}} }}; "
         "function Test-SingleProductionOwner { return $true }; "
@@ -1461,7 +1467,7 @@ def test_crash_after_observation_pass_commits_exact_stable(tmp_path) -> None:
     assert result == f"READY,{candidate},True"
 
 
-def test_crashed_completed_reverse_is_committed_from_observed_reality(tmp_path) -> None:
+def test_crashed_reverse_enters_observation_before_commit(tmp_path) -> None:
     previous = "a" * 40
     current = "b" * 40
     result = _run_control_center_contract(
@@ -1477,7 +1483,7 @@ def test_crashed_completed_reverse_is_committed_from_observed_reality(tmp_path) 
         'Write-Output "$($final.deployment_status),$($final.stable.git_sha),$($final.previous_stable.git_sha)"',
     )
 
-    assert result == f"READY,{previous},{current}"
+    assert result == f"REVERSE_OBSERVING,{current},{previous}"
 
 
 def test_reverse_restores_both_identities_without_d1_mutation(tmp_path) -> None:
@@ -1489,8 +1495,11 @@ def test_reverse_restores_both_identities_without_d1_mutation(tmp_path) -> None:
         + "$state=Get-ReleaseControlState;$state.previous_stable=$state.stable;"
         "$state.stable=$state.candidate;$state.candidate=$null;Write-ReleaseControlState $state;"
         "function Enter-ReleaseTransactionLock { return $true };function Exit-ReleaseTransactionLock {};"
+        "function Assert-ActiveControlBundle { return [pscustomobject]@{exact_revision=$true} };"
+        "function Test-CloudflareRollbackTarget { return $true };"
         "function Test-SingleProductionOwner { return $true };"
         "function Stop-ForecasterService {};"
+        "function Start-RuntimeObservation {};"
         "$script:worker='';$script:windows='';"
         "function Invoke-CloudflareDeployment { param($StableVersionId);$script:worker=$StableVersionId };"
         "function Invoke-ReleaseWindowsRestore { param($Revision);$script:windows=$Revision };"
@@ -1502,7 +1511,7 @@ def test_reverse_restores_both_identities_without_d1_mutation(tmp_path) -> None:
         "function Reconcile-ReleaseControlState", 1,
     )[0]
 
-    assert result == f"True,{previous},11111111-1111-4111-8111-111111111111,{previous}"
+    assert result == f"True,{current},11111111-1111-4111-8111-111111111111,{previous}"
     assert "D1" not in reverse_body
     assert "database" not in reverse_body.lower()
 
@@ -1548,6 +1557,174 @@ def test_storage_migration_requires_coordinated_compatibility_review(tmp_path) -
     assert result == "False"
 
 
+def test_platform_binding_change_requires_coordinated_review(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "Write-Output (Test-AutomaticStorageCompatibility -ChangedFiles "
+        "@('web/wrangler.jsonc'))",
+    )
+    assert result == "False"
+
+
+def test_required_github_gate_set_is_exact_and_missing_gate_stays_pending(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$runs=@($requiredGitHubChecks | ForEach-Object { [pscustomobject]@{"
+        "name=$_;status='completed';conclusion='success'} });"
+        "$script:payload=[pscustomobject]@{check_runs=$runs}|ConvertTo-Json -Depth 5;"
+        "function gh { $global:LASTEXITCODE=0; return $script:payload };"
+        "$all=Test-RequiredGitHubChecks -Revision ('a'*40);"
+        "$script:payload=[pscustomobject]@{check_runs=@($runs | Where-Object name -ne 'Web build and tests')}|ConvertTo-Json -Depth 5;"
+        "$missing=Test-RequiredGitHubChecks -Revision ('a'*40);"
+        "$runs[0].conclusion='failure';$script:payload=[pscustomobject]@{check_runs=$runs}|ConvertTo-Json -Depth 5;"
+        "$failed=Test-RequiredGitHubChecks -Revision ('a'*40);"
+        'Write-Output "$all,$missing,$failed"',
+    )
+    assert result == "PASSED,PENDING,FAILED"
+
+
+def test_production_candidate_requires_main_reachability(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$sha=('b'*40);$candidate=New-ReleaseIdentity -GitSha $sha "
+        "-WorkerVersionId 'worker' -WindowsRevision $sha -Branch 'feature' "
+        "-ArtifactKind 'PRODUCTION_CANDIDATE';"
+        "$script:ancestor=$true;function git {"
+        "if($args -contains 'merge-base' -and -not $script:ancestor){$global:LASTEXITCODE=1}"
+        "else{$global:LASTEXITCODE=0}};"
+        "$feature=Test-ProductionCandidateProvenance $candidate;"
+        "$candidate.artifact_kind='PREVIEW';$preview=Test-ProductionCandidateProvenance $candidate;"
+        "$candidate.artifact_kind='UNKNOWN';$unknown=Test-ProductionCandidateProvenance $candidate;"
+        "$candidate.artifact_kind='PRODUCTION_CANDIDATE';"
+        "$candidate.branch='main';$main=Test-ProductionCandidateProvenance $candidate;"
+        "$script:ancestor=$false;$unreachable=Test-ProductionCandidateProvenance $candidate;"
+        'Write-Output "$feature,$preview,$unknown,$main,$unreachable"',
+    )
+    assert result == "False,False,False,True,False"
+
+
+def test_legacy_reference_evidence_is_readable_but_never_promotable(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;"
+        "$state.candidate.artifact_kind='LEGACY_REFERENCE';"
+        "$state.candidate.validation_state='REBASE_REQUIRED';"
+        "$state.candidate.validation=[pscustomobject]@{reason='REBASE_ON_RELEASE_CONTROL_MAIN_REQUIRED';"
+        "cpu_evidence=[pscustomobject]@{samples=104;p95_cpu_ms=4;max_cpu_ms=5}};"
+        "Write-ReleaseControlState $state;"
+        "function Enter-ReleaseTransactionLock{return $true};function Exit-ReleaseTransactionLock{};"
+        "$presentation=Get-ControlCenterReleasePresentation (Get-ReleaseControlState);"
+        "try{Start-ReleasePromotion|Out-Null;$promoted=$true}catch{$promoted=$false};"
+        "$final=Get-ReleaseControlState;"
+        'Write-Output "$($presentation.can_promote),$promoted,'
+        '$($final.candidate.validation.cpu_evidence.samples),'
+        '$($final.candidate.validation.reason)"',
+    )
+    assert result == (
+        "False,False,104,REBASE_ON_RELEASE_CONTROL_MAIN_REQUIRED"
+    )
+
+
+def test_normal_release_control_never_applies_or_provisions_storage() -> None:
+    control = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    runbook = (ROOT / "docs" / "runbooks" / "CLOUDFLARE_DEPLOYMENT.md").read_text(
+        encoding="utf-8"
+    )
+    assert "d1 migrations apply" not in control
+    assert "--experimental-provision" not in control
+    normal_commands = runbook.split("## Bootstrap", 1)[0]
+    assert "d1 migrations apply" not in normal_commands
+
+
+def test_review_required_is_terminal_for_exact_candidate(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$state.candidate.validation_state='REVIEW_REQUIRED';"
+        "Write-ReleaseControlState $state;"
+        "function Enter-ReleaseTransactionLock{return $true};function Exit-ReleaseTransactionLock{};"
+        "function Reconcile-ReleaseControlState{};function Find-NewCandidateRelease{return $null};"
+        "function Invoke-AutomaticCandidateValidation{throw 'must not retry'};"
+        "$ok=Invoke-CandidateDiscovery;Write-Output $ok",
+    )
+    assert result == "True"
+
+
+def test_payload_producer_and_fixture_builder_select_worker_families(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$producer=Get-CandidateRouteValidationPlan -ChangedFiles @('scripts/run_dashboard_sync.py');"
+        "$fixture=Get-CandidateRouteValidationPlan -ChangedFiles @('scripts/build_release_validation_fixtures.py');"
+        "$package=Get-CandidateRouteValidationPlan -ChangedFiles @('web/package-lock.json');"
+        "$build=Get-CandidateRouteValidationPlan -ChangedFiles @('web/build/sites-vite-plugin.ts');"
+        "$docs=Get-CandidateRouteValidationPlan -ChangedFiles @('docs/README.md');"
+        '$p=@($producer.worker_writes|Where-Object family -eq "news-content-write").Count;'
+        '$f=@($fixture.worker_reads).Count+@($fixture.worker_writes).Count;'
+        '$b=@($package.worker_reads|Where-Object {$_.baseline}).Count+'
+        '@($package.worker_writes|Where-Object {$_.baseline}).Count;'
+        '$bb=@($build.worker_reads|Where-Object {$_.baseline}).Count+'
+        '@($build.worker_writes|Where-Object {$_.baseline}).Count;'
+        'Write-Output "$p,$f,$b,$bb,$($docs.worker_cpu_required)"',
+    )
+    producer_scenarios, all_routes, baseline, build_baseline, docs = result.split(",")
+    assert int(producer_scenarios) == 2
+    assert int(all_routes) >= 20
+    assert int(baseline) >= 5
+    assert int(build_baseline) == int(baseline)
+    assert docs == "False"
+
+
+def test_release_validator_sends_exact_fixture_bytes(tmp_path) -> None:
+    fixture = tmp_path / "repository" / "fixtures" / "utf8.json"
+    fixture.parent.mkdir(parents=True, exist_ok=True)
+    fixture.write_bytes('{"text":"精确字节"}'.encode("utf-8"))
+    expected = fixture.read_bytes().hex()
+    result = _run_control_center_contract(
+        tmp_path,
+        "$route=[pscustomobject]@{method='POST';path='/api/test';family='test';"
+        "strategy='PRODUCTION_SHAPED_DRY_RUN';fixture='utf8.json'};"
+        "$script:sent=$null;function Invoke-WebRequest{param($UseBasicParsing,$Method,$Uri,$Headers,$TimeoutSec,$ContentType,$Body);"
+        "$script:sent=$Body;$content=[pscustomobject]@{status='DRY_RUN_OK';mutated=$false;route_family='test'}|ConvertTo-Json -Compress;"
+        "return [pscustomobject]@{StatusCode=200;Content=$content}};"
+        "$null=Invoke-CandidateRouteSample -Route $route -VersionHeaders @{} "
+        "-ValidationRun 'run' -FixtureRoot (Join-Path $repositoryRoot 'fixtures') -IngestToken 'token';"
+        "$hex=($script:sent|ForEach-Object {$_.ToString('x2')}) -join '';Write-Output $hex",
+    )
+    assert result == expected
+
+
+def test_reverse_observation_commits_only_after_active_runtime_evidence(tmp_path) -> None:
+    previous = "a" * 40
+    current = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, current)
+        + "$state=Get-ReleaseControlState;$target=$state.stable;$now=$state.candidate;"
+        "$state.stable=$now;$state.previous_stable=$target;"
+        "$state.transaction=[pscustomobject]@{type='REVERSE';phase='REVERSE_OBSERVING';target=$target;previous=$now};"
+        "Write-ReleaseControlState $state;"
+        f"Write-RuntimeUpdateState @{{update_status='ACTIVE';activated_revision='{previous}';observation_mode='REVERSE'}};"
+        "function Get-CloudflareDeployment{return [pscustomobject]@{versions=@([pscustomobject]@{version_id='11111111-1111-4111-8111-111111111111';percentage=100})}};"
+        f"function Get-RuntimeCodeState{{return [pscustomobject]@{{applied_revision='{previous}'}}}};"
+        "$final=Reconcile-ReleaseControlState;"
+        'Write-Output "$($final.deployment_status),$($final.stable.git_sha),$($null -eq $final.transaction)"',
+    )
+    assert result == f"READY,{previous},True"
+
+
+def test_business_transitions_do_not_call_control_bundle_installer() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    for start, end in (
+        ("function Update-RuntimeCheckout", "function Get-RuntimeCodeState"),
+        ("function Invoke-RuntimeRollback", "function Test-CloudflareReleasePlacement"),
+        ("function Invoke-ReleaseWindowsRestore", "function Invoke-ReverseStable"),
+        ("function Invoke-ReverseStable", "function Complete-ReleaseReverse"),
+    ):
+        body = source.split(start, 1)[1].split(end, 1)[0]
+        assert "Sync-StableRuntimeControlFiles" not in body
+
+
 def test_release_gui_exposes_only_explicit_stable_candidate_controls() -> None:
     source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
 
@@ -1574,11 +1751,16 @@ def test_release_gui_presentation_explains_action_eligibility(tmp_path) -> None:
         "-WindowsRevision ('a'*40);"
         "$candidate=New-ReleaseIdentity -GitSha ('b'*40) -WorkerVersionId 'candidate-worker' "
         "-WindowsRevision ('b'*40) -ValidationState 'PASSED' "
-        "-ArtifactKind 'PRODUCTION_CANDIDATE';"
+        "-ArtifactKind 'PRODUCTION_CANDIDATE' -Branch 'main';"
         "$candidate.compatibility_state='PASSED';"
+        "$candidate.validation=[pscustomobject]@{key=$candidate.validation_key};"
         "$release=New-ReleaseControlState -Stable $stable -Candidate $candidate;"
+        "$release|Add-Member control_bundle_revision ('d'*40);"
+        "$release|Add-Member control_bundle_exact_revision $true;"
+        "$release|Add-Member control_bundle_hash_verified $true;"
         "$release.previous_stable=New-ReleaseIdentity -GitSha ('c'*40) "
         "-WorkerVersionId 'previous-worker' -WindowsRevision ('c'*40);"
+        "$release.previous_stable_rollback_eligible=$true;"
         "$passed=Get-ControlCenterReleasePresentation $release;"
         "$release.candidate.artifact_kind='PREVIEW';"
         "$preview=Get-ControlCenterReleasePresentation $release;"
