@@ -7,6 +7,13 @@ one Windows runtime revision, a compatibility decision, and validation evidence
 keyed by Worker Version ID plus Git SHA. Git, a Worker Version, Candidate, and
 Stable are distinct states.
 
+Every uploaded Worker Version declares one durable artifact kind in its
+immutable version annotation. `PREVIEW` is never promotable. Only
+`PRODUCTION_CANDIDATE` may enter Candidate validation or promotion. Missing or
+unknown provenance fails closed; branch names and UI labels are not artifact
+authority. Preview evidence never authorizes a production candidate, even when
+both artifacts originate from the same Git commit.
+
 Git push, pull-request merge, and `main` movement MUST NOT change Stable.
 Workers Builds may build and upload immutable Versions, but MUST NOT assign
 production traffic. A valid new Version stages Candidate only. Stable changes
@@ -17,6 +24,13 @@ The operator surface exposes only Stable, Candidate, and Previous Stable. A new
 Candidate may replace the Candidate pointer, but MUST NOT inherit validation
 from another Worker Version ID or Git SHA. FAILED Candidate state never changes
 Stable.
+
+Candidate discovery owns a durable monotonic `(version created_at, version_id)`
+watermark. Initialization consumes all versions already present without making
+them eligible. Every later version advances the watermark whether it is Preview,
+unknown, malformed, accepted, or failed. Restart therefore cannot rediscover
+historical or failed candidates. A production candidate arriving during a
+transaction is queued until that transaction finishes.
 
 ## Windows ownership and validation
 
@@ -34,12 +48,30 @@ viability, ownership uniqueness, compatibility, directed 0% Worker probes, and
 actual Cloudflare CPU/error evidence when Worker execution changed. PASSED means
 every required gate belongs to the exact release key.
 
-Worker acceptance queries Cloudflare Workers Observability for the exact Worker
-Version ID and records invocation count, maximum and p99 CPU, maximum wall time,
-`exceededCpu`, and 5xx counts. Directed route success without this platform
-record is not sufficient. Missing observability authority leaves Candidate in
-TESTING; any `exceededCpu` or 5xx fails that Candidate. The read-only API token
-is a protected Windows user secret and is never serialized into release state.
+Worker validation is planned by hosting boundary. `/`, `/health`, `/audit`, and
+the favicon are Static Assets: each must return its canonical identity and the
+validation window must contain zero candidate Worker invocations. Worker reads
+are directed to the exact 0% Version. Affected authenticated transport routes
+use an identified dry-run after normal authentication; it performs no D1
+mutation. Every Worker probe has a unique request ID and one validation-run ID.
+Evidence records the exact Version, short window, route family, request IDs, and
+exact expected Worker invocation count. Static requests are excluded. If the
+platform cannot filter request IDs, exact Version, short-window, and exact-count
+isolation is mandatory; noise fails the gate.
+
+Observability records exact invocation count, maximum, p95, and p99 CPU,
+maximum wall time, `exceededCpu`, 1102, and 5xx counts. The Free-plan CPU gate
+is `PASSED` only with the exact invocation count, zero failures, p95 at most
+6 ms, p99 at most 8 ms, and maximum below 10 ms. Zero failures with CPU still
+within 10 ms but without that headroom is `REVIEW_REQUIRED`. Count contamination,
+any failure, p99 above 10 ms, or a sample above 10 ms is `FAILED`; p99 18 ms can
+never pass. Missing observability authority leaves Candidate in TESTING. The
+read-only API token is protected and never serialized into release state.
+
+PR #268 acceptance is retained only as labeled legacy manual evidence: 104
+samples, p50 2 ms, p95 4 ms, p99 4 ms, maximum 5 ms, and zero exceeded CPU,
+1102, or 5xx. Its source did not record a bootstrap timestamp; release control
+does not invent one or reinterpret older measurements.
 
 An automatic compatibility decision covers only a release without storage
 migrations. A changed D1 or other migration remains `REVIEW_REQUIRED` until a
@@ -63,6 +95,10 @@ OBSERVING reuses the existing full decision-cycle observation and rollback
 policy. COMMIT_STABLE records the prior Stable as Previous Stable only after
 observation succeeds. A newly discovered Candidate during a transaction is
 queued and cannot alter the in-flight target.
+
+Failed PRECHECK, CUTOVER, observation, or automatic rollback leaves the
+pre-transaction Previous Stable pointer unchanged. Only successful
+`COMMIT_STABLE` advances Previous Stable.
 
 Restart during PROMOTING, OBSERVING, or REVERSING reconciles observed Worker
 traffic and Windows runtime identity with the durable transaction. Unexplained

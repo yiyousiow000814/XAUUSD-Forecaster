@@ -49,7 +49,13 @@ $collectorSecretsPath = Join-Path $repositoryRoot ".local\secrets\collector-keys
 $workerName = "aurum-signal-room"
 $workerUrl = "https://aurum-signal-room.yiyousiow1234.workers.dev"
 $cloudflareAccountId = "48ce531f39e2310b4c858c8916a01d51"
-$releaseSchemaVersion = "stable-candidate-release-v1"
+$releaseSchemaVersion = "stable-candidate-release-v2"
+$previewArtifactKind = "PREVIEW"
+$productionCandidateArtifactKind = "PRODUCTION_CANDIDATE"
+$unknownArtifactKind = "UNKNOWN"
+$workerCpuPassP95Ms = 6.0
+$workerCpuPassP99Ms = 8.0
+$workerCpuPassMaxMs = 10.0
 $candidateDiscoveryInterval = [TimeSpan]::FromMinutes(5)
 $releaseLockOwnerGrace = [TimeSpan]::FromSeconds(30)
 $bootstrapAcceptedCandidateWorker = "dd823aa4-20f0-47e1-9255-1b785a4c17b0"
@@ -187,7 +193,38 @@ function Write-RuntimeUpdateState {
 function Get-ReleaseControlState {
     if (-not (Test-Path -LiteralPath $releaseControlStatePath)) { return $null }
     try {
-        Get-Content -LiteralPath $releaseControlStatePath -Raw | ConvertFrom-Json
+        $state = Get-Content -LiteralPath $releaseControlStatePath -Raw | ConvertFrom-Json
+        if (-not $state.candidate_discovery) {
+            $state | Add-Member -NotePropertyName candidate_discovery -NotePropertyValue (
+                [pscustomobject]@{
+                    watermark_created_at = $null
+                    watermark_version_id = $null
+                    initialized_at = $null
+                }
+            )
+        }
+        if ([string]$state.schema_version -eq "stable-candidate-release-v1") {
+            foreach ($identity in @($state.stable, $state.previous_stable)) {
+                if ($identity -and -not $identity.PSObject.Properties['artifact_kind']) {
+                    $identity | Add-Member -NotePropertyName artifact_kind `
+                        -NotePropertyValue $productionCandidateArtifactKind
+                }
+            }
+            foreach ($identity in @($state.candidate, $state.queued_candidate)) {
+                if ($identity -and -not $identity.PSObject.Properties['artifact_kind']) {
+                    $legacyAccepted = (
+                        [string]$identity.worker_version_id -eq $bootstrapAcceptedCandidateWorker -and
+                        [string]$identity.git_sha -eq $bootstrapAcceptedCandidateRevision
+                    )
+                    $identity | Add-Member -NotePropertyName artifact_kind `
+                        -NotePropertyValue $(if ($legacyAccepted) {
+                            $productionCandidateArtifactKind
+                        } else { $unknownArtifactKind })
+                }
+            }
+            $state.schema_version = $releaseSchemaVersion
+        }
+        return $state
     } catch { $null }
 }
 
@@ -219,7 +256,10 @@ function New-ReleaseIdentity {
         [Parameter(Mandatory = $true)][string]$WindowsRevision,
         [string]$Branch = "",
         [string]$PullRequest = "",
-        [string]$ValidationState = "NEW"
+        [string]$ValidationState = "NEW",
+        [ValidateSet("PREVIEW", "PRODUCTION_CANDIDATE", "UNKNOWN")]
+        [string]$ArtifactKind = "UNKNOWN",
+        [string]$VersionCreatedAt = ""
     )
     [pscustomobject]@{
         git_sha = $GitSha
@@ -227,6 +267,8 @@ function New-ReleaseIdentity {
         windows_revision = $WindowsRevision
         branch = $Branch
         pull_request = $PullRequest
+        artifact_kind = $ArtifactKind
+        version_created_at = $VersionCreatedAt
         compatibility_state = "PENDING"
         cutover_order = "PAUSE_SYNC_WINDOWS_WORKER_RESUME_SYNC"
         validation_state = $ValidationState
@@ -242,7 +284,8 @@ function Test-ReleaseIdentity {
         $Left -and $Right -and
         [string]$Left.git_sha -eq [string]$Right.git_sha -and
         [string]$Left.worker_version_id -eq [string]$Right.worker_version_id -and
-        [string]$Left.windows_revision -eq [string]$Right.windows_revision
+        [string]$Left.windows_revision -eq [string]$Right.windows_revision -and
+        [string]$Left.artifact_kind -eq [string]$Right.artifact_kind
     )
 }
 
@@ -340,6 +383,52 @@ function Get-ReleaseBranchFromVersion {
     return [string]$Version.annotations.'workers/alias'
 }
 
+function Get-ReleaseArtifactKindFromVersion {
+    param([Parameter(Mandatory = $true)][object]$Version)
+    $message = [string]$Version.annotations.'workers/message'
+    if ($message -match '(?i)artifact[_-]kind:(PREVIEW|PRODUCTION_CANDIDATE)') {
+        return $matches[1].ToUpperInvariant()
+    }
+    return $unknownArtifactKind
+}
+
+function Get-ReleaseVersionCreatedAt {
+    param([Parameter(Mandatory = $true)][object]$Version)
+    $created = [DateTimeOffset]::MinValue
+    if ([DateTimeOffset]::TryParse([string]$Version.metadata.created_on, [ref]$created)) {
+        return $created.ToUniversalTime().ToString("o")
+    }
+    return ""
+}
+
+function Test-VersionAfterDiscoveryWatermark {
+    param(
+        [Parameter(Mandatory = $true)][object]$Version,
+        [Parameter(Mandatory = $true)][object]$Discovery
+    )
+    if (-not $Discovery.watermark_created_at) { return $true }
+    $createdAt = Get-ReleaseVersionCreatedAt -Version $Version
+    if (-not $createdAt) { return $false }
+    $created = [DateTimeOffset]::Parse($createdAt)
+    $watermark = [DateTimeOffset]::Parse([string]$Discovery.watermark_created_at)
+    if ($created -gt $watermark) { return $true }
+    if ($created -lt $watermark) { return $false }
+    return [string]$Version.id -gt [string]$Discovery.watermark_version_id
+}
+
+function Set-CandidateDiscoveryWatermark {
+    param(
+        [Parameter(Mandatory = $true)][object]$State,
+        [Parameter(Mandatory = $true)][object]$Version
+    )
+    $State.candidate_discovery.watermark_created_at =
+        Get-ReleaseVersionCreatedAt -Version $Version
+    $State.candidate_discovery.watermark_version_id = [string]$Version.id
+    if (-not $State.candidate_discovery.initialized_at) {
+        $State.candidate_discovery.initialized_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+}
+
 function Get-DeploymentVersion {
     param([object]$Deployment, [double]$Percentage)
     @($Deployment.versions | Where-Object { [double]$_.percentage -eq $Percentage }) |
@@ -358,6 +447,11 @@ function New-ReleaseControlState {
         deployment_status = "READY"
         drift = $null
         last_candidate_check = $null
+        candidate_discovery = [pscustomobject]@{
+            watermark_created_at = $null
+            watermark_version_id = $null
+            initialized_at = $null
+        }
         updated_at = [DateTimeOffset]::UtcNow.ToString("o")
     }
 }
@@ -373,7 +467,8 @@ function Initialize-ReleaseControl {
     if ($revision -notmatch '^[0-9a-f]{40}$') { throw "Stable Windows revision is unavailable." }
     $stable = New-ReleaseIdentity -GitSha $revision `
         -WorkerVersionId ([string]$stableVersion.version_id) `
-        -WindowsRevision $revision -Branch "main" -ValidationState "PASSED"
+        -WindowsRevision $revision -Branch "main" -ValidationState "PASSED" `
+        -ArtifactKind $productionCandidateArtifactKind
     $stable.compatibility_state = "PASSED"
     $acceptedPlacement = @($deployment.versions | Where-Object {
         [string]$_.version_id -eq $bootstrapAcceptedCandidateWorker -and
@@ -385,7 +480,7 @@ function Initialize-ReleaseControl {
             -WorkerVersionId $bootstrapAcceptedCandidateWorker `
             -WindowsRevision $bootstrapAcceptedCandidateRevision `
             -Branch "fix/worker-cpu-headroom" -PullRequest "268" `
-            -ValidationState "PASSED"
+            -ValidationState "PASSED" -ArtifactKind $productionCandidateArtifactKind
         $accepted.compatibility_state = "PASSED"
         $accepted.validation = [pscustomobject]@{
             key = [string]$accepted.validation_key
@@ -393,18 +488,37 @@ function Initialize-ReleaseControl {
             windows = "PASSED"
             cloudflare = "PASSED"
             accepted_before_release_control = $true
+            acceptance_mode = "LEGACY_ACCEPTED_MANUAL_EVIDENCE"
+            source_reference = "PR_268_ACCEPTED_REVIEW_COMMENT"
+            source_timestamp = $null
+            source_timestamp_status = "NOT_RECORDED_IN_BOOTSTRAP_SOURCE"
             cpu_evidence = [pscustomobject]@{
                 source = "CLOUDFLARE_WORKERS_OBSERVABILITY"
-                invocations = 56
-                max_cpu_ms = 11
-                p99_cpu_ms = 11
+                acceptance_mode = "LEGACY_ACCEPTED_MANUAL_EVIDENCE"
+                invocations = 104
+                p50_cpu_ms = 2
+                max_cpu_ms = 5
+                p95_cpu_ms = 4
+                p99_cpu_ms = 4
                 exceeded_cpu = 0
+                exceeded_memory = 0
+                responses_1102 = 0
                 responses_5xx = 0
-                observed_at = "2026-08-20T12:11:10Z"
+                source_reference = "PR_268_ACCEPTED_REVIEW_COMMENT"
             }
         }
     }
     $state = New-ReleaseControlState -Stable $stable -Candidate $accepted
+    $knownVersions = @(Get-CloudflareVersions | Sort-Object {
+        [DateTimeOffset]$_.metadata.created_on
+    }, { [string]$_.id })
+    $latestKnownVersion = $knownVersions | Select-Object -Last 1
+    if ($latestKnownVersion) {
+        $state.candidate_discovery.watermark_created_at =
+            Get-ReleaseVersionCreatedAt -Version $latestKnownVersion
+        $state.candidate_discovery.watermark_version_id = [string]$latestKnownVersion.id
+        $state.candidate_discovery.initialized_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
     Write-ReleaseControlState -State $state
     Write-ReleaseHistory -Event "BOOTSTRAPPED" -Release $stable
     if ($accepted) {
@@ -501,6 +615,19 @@ function Get-CalculationAggregate {
     return $calculation.aggregates[0].value
 }
 
+function Get-WorkerCpuGateState {
+    param([Parameter(Mandatory = $true)][object]$Evidence, [int]$ExpectedInvocations)
+    if ($Evidence.invocations -ne $ExpectedInvocations -or
+        $Evidence.exceeded_cpu -gt 0 -or $Evidence.responses_1102 -gt 0 -or
+        $Evidence.responses_5xx -gt 0 -or
+        $Evidence.p99_cpu_ms -gt $workerCpuPassMaxMs -or
+        $Evidence.max_cpu_ms -gt $workerCpuPassMaxMs) { return "FAILED" }
+    if ($Evidence.p95_cpu_ms -le $workerCpuPassP95Ms -and
+        $Evidence.p99_cpu_ms -le $workerCpuPassP99Ms -and
+        $Evidence.max_cpu_ms -lt $workerCpuPassMaxMs) { return "PASSED" }
+    return "REVIEW_REQUIRED"
+}
+
 function Get-CandidatePlatformEvidence {
     param(
         [Parameter(Mandatory = $true)][object]$Candidate,
@@ -516,6 +643,7 @@ function Get-CandidatePlatformEvidence {
         -Filters $baseFilters -Calculations @(
             [pscustomobject]@{ operator='count'; alias='invocations' },
             [pscustomobject]@{ key='$workers.cpuTimeMs'; keyType='number'; operator='max'; alias='max_cpu_ms' },
+            [pscustomobject]@{ key='$workers.cpuTimeMs'; keyType='number'; operator='p95'; alias='p95_cpu_ms' },
             [pscustomobject]@{ key='$workers.cpuTimeMs'; keyType='number'; operator='p99'; alias='p99_cpu_ms' },
             [pscustomobject]@{ key='$workers.wallTimeMs'; keyType='number'; operator='max'; alias='max_wall_ms' }
         )
@@ -528,14 +656,24 @@ function Get-CandidatePlatformEvidence {
         -Filters @($baseFilters + [pscustomobject]@{
             key='$workers.event.response.status'; operation='gte'; type='number'; value=500
         }) -Calculations @([pscustomobject]@{ operator='count'; alias='responses_5xx' })
-    if (-not $exceeded -or -not $failures) { return $null }
+    $exceededMemory = Invoke-WorkersObservabilityQuery -From $From -To $To `
+        -Filters @($baseFilters + [pscustomobject]@{
+            key='$workers.outcome'; operation='eq'; type='string'; value='exceededMemory'
+        }) -Calculations @([pscustomobject]@{ operator='count'; alias='exceeded_memory' })
+    if (-not $exceeded -or -not $failures -or -not $exceededMemory) { return $null }
     $invocations = Get-CalculationAggregate -QueryResult $base -Alias "invocations"
     $maxCpu = Get-CalculationAggregate -QueryResult $base -Alias "max_cpu_ms"
+    $p95Cpu = Get-CalculationAggregate -QueryResult $base -Alias "p95_cpu_ms"
     $p99Cpu = Get-CalculationAggregate -QueryResult $base -Alias "p99_cpu_ms"
     $maxWall = Get-CalculationAggregate -QueryResult $base -Alias "max_wall_ms"
     $exceededCpu = Get-CalculationAggregate -QueryResult $exceeded -Alias "exceeded_cpu"
     $responses5xx = Get-CalculationAggregate -QueryResult $failures -Alias "responses_5xx"
-    if (@($invocations, $maxCpu, $p99Cpu, $maxWall, $exceededCpu, $responses5xx |
+    $exceededMemoryCount = Get-CalculationAggregate -QueryResult $exceededMemory -Alias "exceeded_memory"
+    $responses1102 = if ($null -ne $exceededCpu -and $null -ne $exceededMemoryCount) {
+        [int]$exceededCpu + [int]$exceededMemoryCount
+    } else { $null }
+    if (@($invocations, $maxCpu, $p95Cpu, $p99Cpu, $maxWall, $exceededCpu,
+        $responses1102, $responses5xx |
         Where-Object { $null -eq $_ }).Count -gt 0) { return $null }
     $evidence = [pscustomobject]@{
         source = "CLOUDFLARE_WORKERS_OBSERVABILITY"
@@ -544,56 +682,169 @@ function Get-CandidatePlatformEvidence {
         to = $To.ToString("o")
         invocations = [int]$invocations
         max_cpu_ms = [double]$maxCpu
+        p95_cpu_ms = [double]$p95Cpu
         p99_cpu_ms = [double]$p99Cpu
         max_wall_ms = [double]$maxWall
         exceeded_cpu = [int]$exceededCpu
+        exceeded_memory = [int]$exceededMemoryCount
+        responses_1102 = [int]$responses1102
         responses_5xx = [int]$responses5xx
     }
-    $evidence | Add-Member -NotePropertyName passed -NotePropertyValue ([bool](
-        $evidence.invocations -ge $ExpectedInvocations -and
-        $evidence.exceeded_cpu -eq 0 -and $evidence.responses_5xx -eq 0
-    ))
+    $gateState = Get-WorkerCpuGateState -Evidence $evidence `
+        -ExpectedInvocations $ExpectedInvocations
+    $evidence | Add-Member -NotePropertyName gate_state -NotePropertyValue $gateState
+    $evidence | Add-Member -NotePropertyName passed `
+        -NotePropertyValue ([bool]($gateState -eq "PASSED"))
     return $evidence
 }
 
+function Get-CandidateInvocationCount {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$From,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$To
+    )
+    $result = Invoke-WorkersObservabilityQuery -From $From -To $To -Filters @(
+        [pscustomobject]@{ key='$metadata.service'; operation='eq'; type='string'; value=$workerName },
+        [pscustomobject]@{ key='$workers.scriptVersion.id'; operation='eq'; type='string'; value=[string]$Candidate.worker_version_id }
+    ) -Calculations @([pscustomobject]@{ operator='count'; alias='invocations' })
+    if (-not $result) { return $null }
+    return Get-CalculationAggregate -QueryResult $result -Alias "invocations"
+}
+
+function Get-CandidateRouteValidationPlan {
+    param([string[]]$ChangedFiles)
+    $sharedWorkerChange = @($ChangedFiles | Where-Object {
+        $_ -like "web/app/api/_shared/*" -or $_ -in @("web/worker/index.ts", "web/vite.config.ts", "web/wrangler.jsonc")
+    }).Count -gt 0
+    $writeRoutes = @()
+    foreach ($spec in @(
+        @("web/app/api/ingest/route.ts", "/api/ingest", "status-ingest"),
+        @("web/app/api/audit/route.ts", "/api/audit", "audit-write"),
+        @("web/app/api/learning/route.ts", "/api/learning", "learning-write"),
+        @("web/app/api/market-chart/route.ts", "/api/market-chart", "market-chart-write"),
+        @("web/app/api/market-history/route.ts", "/api/market-history", "market-history-write"),
+        @("web/app/api/learning-history/route.ts", "/api/learning-history", "learning-history-write"),
+        @("web/app/api/news-evidence/route.ts", "/api/news-evidence", "news-evidence-write"),
+        @("web/app/api/news-index/route.ts", "/api/news-index", "news-index-write")
+    )) {
+        if ($sharedWorkerChange -or $spec[0] -in $ChangedFiles) {
+            $writeRoutes += [pscustomobject]@{ path=$spec[1]; method="POST"; family=$spec[2]; authenticated=$true }
+        }
+    }
+    [pscustomobject]@{
+        static_assets = @(
+            [pscustomobject]@{ path="/"; marker="AURUM SIGNAL ROOM" },
+            [pscustomobject]@{ path="/health"; marker="系统健康状态" },
+            [pscustomobject]@{ path="/audit"; marker="新闻与决策" },
+            [pscustomobject]@{ path="/favicon.ico"; marker=$null }
+        )
+        worker_reads = @(
+            [pscustomobject]@{ path="/api/status"; method="GET"; family="status-read"; authenticated=$false },
+            [pscustomobject]@{ path="/api/audit"; method="GET"; family="audit-read"; authenticated=$false },
+            [pscustomobject]@{ path="/api/learning"; method="GET"; family="learning-read"; authenticated=$false },
+            [pscustomobject]@{ path="/api/market-chart"; method="GET"; family="market-chart-read"; authenticated=$false }
+        )
+        worker_writes = $writeRoutes
+    }
+}
+
 function Invoke-CandidateWorkerValidation {
-    param([Parameter(Mandatory = $true)][object]$Candidate)
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$RoutePlan
+    )
     $header = @{
         "Cloudflare-Workers-Version-Overrides" =
             "$workerName=`"$([string]$Candidate.worker_version_id)`""
     }
     $results = @()
-    $startedAt = [DateTimeOffset]::UtcNow
-    foreach ($path in @("/", "/health", "/audit", "/api/status", "/api/audit", "/api/learning")) {
+    $staticStartedAt = [DateTimeOffset]::UtcNow
+    foreach ($route in @($RoutePlan.static_assets)) {
         try {
             $response = Invoke-WebRequest -UseBasicParsing -Method Get `
-                -Uri "$workerUrl$path" -Headers $header -TimeoutSec 30
+                -Uri "$workerUrl$($route.path)" -Headers $header -TimeoutSec 30
+            $markerPassed = -not $route.marker -or $response.Content -like "*$($route.marker)*"
             $results += [pscustomobject]@{
-                route = $path
+                route = $route.path; boundary = "STATIC_ASSET"; request_id = $null
                 status = [int]$response.StatusCode
-                passed = [bool]($response.StatusCode -lt 500)
+                passed = [bool]($response.StatusCode -eq 200 -and $markerPassed)
             }
         } catch {
             $status = if ($_.Exception.Response) {
                 [int]$_.Exception.Response.StatusCode
             } else { 0 }
             $results += [pscustomobject]@{
-                route = $path
+                route = $route.path; boundary = "STATIC_ASSET"; request_id = $null
                 status = $status
                 passed = $false
             }
         }
     }
-    # Workers Logs ingestion is asynchronous. A short bounded wait keeps the
-    # validation outside the critical heartbeat owner while allowing the exact
-    # directed invocations to become queryable.
     Start-Sleep -Seconds 5
-    $endedAt = [DateTimeOffset]::UtcNow
+    $staticEndedAt = [DateTimeOffset]::UtcNow
+    $staticInvocations = Get-CandidateInvocationCount -Candidate $Candidate `
+        -From $staticStartedAt.AddSeconds(-2) -To $staticEndedAt.AddSeconds(2)
+    if ($null -eq $staticInvocations -or [int]$staticInvocations -ne 0) {
+        $results += [pscustomobject]@{
+            route = "STATIC_ASSET_INVOCATIONS"; boundary = "STATIC_ASSET"
+            request_id = $null; status = 0; passed = $false
+            observed_invocations = $staticInvocations
+        }
+    }
+    $validationRun = [guid]::NewGuid().ToString()
+    $workerStartedAt = [DateTimeOffset]::UtcNow
+    $workerRoutes = @($RoutePlan.worker_reads) + @($RoutePlan.worker_writes)
+    $ingestToken = [Environment]::GetEnvironmentVariable("CLOUDFLARE_INGEST_TOKEN", "User")
+    foreach ($route in $workerRoutes) {
+        $requestId = [guid]::NewGuid().ToString()
+        $requestHeaders = @{} + $header
+        $requestHeaders["X-Aurum-Validation-Run"] = $validationRun
+        $requestHeaders["X-Aurum-Request-ID"] = $requestId
+        if ($route.authenticated) {
+            if (-not $ingestToken) {
+                $results += [pscustomobject]@{
+                    route=$route.path; boundary="WORKER_WRITE"; request_id=$requestId
+                    status=0; passed=$false; reason="INGEST_AUTHORITY_UNAVAILABLE"
+                }
+                continue
+            }
+            $requestHeaders.Authorization = "Bearer $ingestToken"
+            $requestHeaders["X-Aurum-Release-Validation"] = "dry-run"
+        }
+        try {
+            $parameters = @{
+                UseBasicParsing=$true; Method=[string]$route.method
+                Uri="$workerUrl$($route.path)"; Headers=$requestHeaders; TimeoutSec=30
+            }
+            if ($route.method -eq "POST") {
+                $parameters.ContentType = "application/json"
+                $parameters.Body = "{}"
+            }
+            $response = Invoke-WebRequest @parameters
+            $results += [pscustomobject]@{
+                route=$route.path; boundary=if ($route.authenticated) { "WORKER_WRITE_DRY_RUN" } else { "WORKER_READ" }
+                request_id=$requestId; status=[int]$response.StatusCode
+                passed=[bool]($response.StatusCode -eq 200)
+            }
+        } catch {
+            $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+            $results += [pscustomobject]@{
+                route=$route.path; boundary="WORKER"; request_id=$requestId
+                status=$status; passed=$false
+            }
+        }
+    }
+    Start-Sleep -Seconds 5
+    $workerEndedAt = [DateTimeOffset]::UtcNow
     $platform = Get-CandidatePlatformEvidence -Candidate $Candidate `
-        -From $startedAt.AddMinutes(-1) -To $endedAt.AddMinutes(1) `
-        -ExpectedInvocations $results.Count
+        -From $workerStartedAt.AddSeconds(-2) -To $workerEndedAt.AddSeconds(2) `
+        -ExpectedInvocations $workerRoutes.Count
     [pscustomobject]@{
         passed = [bool](@($results | Where-Object { -not $_.passed }).Count -eq 0)
+        validation_run = $validationRun
+        expected_worker_invocations = $workerRoutes.Count
+        static_worker_invocations = $staticInvocations
         routes = $results
         cpu_evidence = $platform
     }
@@ -615,6 +866,9 @@ function Invoke-AutomaticCandidateValidation {
     $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
     Write-ReleaseControlState -State $state
     try {
+        if ([string]$Candidate.artifact_kind -ne $productionCandidateArtifactKind) {
+            throw "Only a PRODUCTION_CANDIDATE artifact can enter validation."
+        }
         & git -C $repositoryRoot fetch origin --quiet 2>$null
         & git -C $repositoryRoot cat-file -e "$([string]$Candidate.git_sha)^{commit}" 2>$null
         if ($LASTEXITCODE -ne 0) { throw "Candidate Git commit is unavailable." }
@@ -656,10 +910,12 @@ function Invoke-AutomaticCandidateValidation {
             return $false
         }
         $workerChanged = @($changed | Where-Object { $_ -like "web/*" }).Count -gt 0
+        $routePlan = Get-CandidateRouteValidationPlan -ChangedFiles $changed
         Set-CloudflareCandidatePointer -Stable $state.stable -Candidate $Candidate
         $cloudflare = [pscustomobject]@{ passed = $true; routes = @(); cpu_evidence = "NOT_REQUIRED" }
         if ($workerChanged) {
-            $cloudflare = Invoke-CandidateWorkerValidation -Candidate $Candidate
+            $cloudflare = Invoke-CandidateWorkerValidation -Candidate $Candidate `
+                -RoutePlan $routePlan
             if (-not $cloudflare.passed) { throw "Directed Worker validation failed." }
             if (-not $cloudflare.cpu_evidence) {
                 $state.candidate.validation = [pscustomobject]@{
@@ -669,6 +925,20 @@ function Invoke-AutomaticCandidateValidation {
                     cloudflare = "TESTING"
                     reason = "PLATFORM_CPU_EVIDENCE_REQUIRED"
                     routes = $cloudflare.routes
+                    tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+                }
+                Write-ReleaseControlState -State $state
+                return $false
+            }
+            if ([string]$cloudflare.cpu_evidence.gate_state -eq "REVIEW_REQUIRED") {
+                $state.candidate.validation_state = "REVIEW_REQUIRED"
+                $state.candidate.validation = [pscustomobject]@{
+                    key = [string]$Candidate.validation_key
+                    repository = "PASSED"; windows = "PASSED"
+                    cloudflare = "REVIEW_REQUIRED"
+                    reason = "WORKER_CPU_HEADROOM_REVIEW_REQUIRED"
+                    route_plan = $routePlan; routes = $cloudflare.routes
+                    cpu_evidence = $cloudflare.cpu_evidence
                     tested_at = [DateTimeOffset]::UtcNow.ToString("o")
                 }
                 Write-ReleaseControlState -State $state
@@ -686,6 +956,7 @@ function Invoke-AutomaticCandidateValidation {
             windows = "PASSED"
             cloudflare = "PASSED"
             worker_changed = $workerChanged
+            route_plan = $routePlan
             routes = $cloudflare.routes
             cpu_evidence = $cloudflare.cpu_evidence
             tested_at = [DateTimeOffset]::UtcNow.ToString("o")
@@ -713,32 +984,65 @@ function Invoke-AutomaticCandidateValidation {
 function Find-NewCandidateRelease {
     $state = Get-ReleaseControlState
     if (-not $state) { return $null }
-    $versions = @(Get-CloudflareVersions | Sort-Object { [DateTimeOffset]$_.metadata.created_on } -Descending)
-    foreach ($version in $versions) {
-        $sha = Get-ReleaseGitShaFromVersion -Version $version
-        if (-not $sha -or $sha -eq [string]$state.stable.git_sha) { continue }
-        $candidate = New-ReleaseIdentity -GitSha $sha `
-            -WorkerVersionId ([string]$version.id) -WindowsRevision $sha `
-            -Branch (Get-ReleaseBranchFromVersion -Version $version)
-        if ($state.transaction) {
-            $state.queued_candidate = $candidate
-            Write-ReleaseControlState -State $state
-            return $null
-        }
-        if ($state.candidate -and (Test-ReleaseIdentity $state.candidate $candidate)) {
-            return $state.candidate
-        }
-        if ($state.candidate) {
-            Write-ReleaseHistory -Event "CANDIDATE_SUPERSEDED" -Release $state.candidate `
-                -Detail @{ replacement_key = [string]$candidate.validation_key }
-        }
-        $state.candidate = $candidate
+    $versions = @(Get-CloudflareVersions | Sort-Object {
+        [DateTimeOffset]$_.metadata.created_on
+    }, { [string]$_.id })
+    if (@($versions).Count -eq 0) { return $null }
+    if (-not $state.candidate_discovery.initialized_at) {
+        Set-CandidateDiscoveryWatermark -State $state -Version ($versions | Select-Object -Last 1)
         $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
         Write-ReleaseControlState -State $state
-        Write-ReleaseHistory -Event "CANDIDATE_DISCOVERED" -Release $candidate
-        return $candidate
+        Write-ReleaseHistory -Event "CANDIDATE_DISCOVERY_INITIALIZED" -Release $null `
+            -Detail @{
+                watermark_version_id = [string]$state.candidate_discovery.watermark_version_id
+                historical_versions_eligible = $false
+            }
+        return $null
     }
-    return $null
+    $newVersions = @($versions | Where-Object {
+        Test-VersionAfterDiscoveryWatermark -Version $_ -Discovery $state.candidate_discovery
+    })
+    $discovered = $null
+    foreach ($version in $newVersions) {
+        Set-CandidateDiscoveryWatermark -State $state -Version $version
+        $sha = Get-ReleaseGitShaFromVersion -Version $version
+        $artifactKind = Get-ReleaseArtifactKindFromVersion -Version $version
+        if (-not $sha -or $sha -eq [string]$state.stable.git_sha -or
+            $artifactKind -ne $productionCandidateArtifactKind) { continue }
+        $candidate = New-ReleaseIdentity -GitSha $sha `
+            -WorkerVersionId ([string]$version.id) -WindowsRevision $sha `
+            -Branch (Get-ReleaseBranchFromVersion -Version $version) `
+            -ArtifactKind $artifactKind `
+            -VersionCreatedAt (Get-ReleaseVersionCreatedAt -Version $version)
+        $discovered = $candidate
+    }
+    if (-not $discovered) {
+        if (@($newVersions).Count -gt 0) {
+            $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+            Write-ReleaseControlState -State $state
+        }
+        return $null
+    }
+    if ($state.transaction) {
+        $state.queued_candidate = $discovered
+        $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "CANDIDATE_QUEUED" -Release $discovered
+        return $null
+    }
+    if ($state.candidate -and (Test-ReleaseIdentity $state.candidate $discovered)) {
+        Write-ReleaseControlState -State $state
+        return $state.candidate
+    }
+    if ($state.candidate) {
+        Write-ReleaseHistory -Event "CANDIDATE_SUPERSEDED" -Release $state.candidate `
+            -Detail @{ replacement_key = [string]$discovered.validation_key }
+    }
+    $state.candidate = $discovered
+    $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+    Write-ReleaseControlState -State $state
+    Write-ReleaseHistory -Event "CANDIDATE_DISCOVERED" -Release $discovered
+    return $discovered
 }
 
 function Invoke-CandidateDiscovery {
@@ -751,8 +1055,11 @@ function Invoke-CandidateDiscovery {
         }
         $null = Reconcile-ReleaseControlState
         $state = Get-ReleaseControlState
-        if ($state -and $state.transaction) { return $false }
         $candidate = Find-NewCandidateRelease
+        if (-not $candidate) {
+            $state = Get-ReleaseControlState
+            if ($state -and -not $state.transaction) { $candidate = $state.candidate }
+        }
         if (-not $candidate) { return $false }
         if ([string]$candidate.validation_state -in @("PASSED", "FAILED")) { return $true }
         return Invoke-AutomaticCandidateValidation -Candidate $candidate
@@ -1233,6 +1540,7 @@ function Update-RuntimeCheckout {
     $releaseState = Get-ReleaseControlState
     if (-not $releaseState -or -not $releaseState.candidate -or
         [string]$releaseState.candidate.validation_state -ne "PASSED" -or
+        [string]$releaseState.candidate.artifact_kind -ne $productionCandidateArtifactKind -or
         [string]$releaseState.candidate.windows_revision -ne $Revision -or
         [string]$releaseState.candidate.validation.key -ne
             [string]$releaseState.candidate.validation_key) { return $false }
@@ -1585,6 +1893,9 @@ function Start-ReleasePromotion {
         if (-not $candidate -or [string]$candidate.validation_state -ne "PASSED") {
             throw "Candidate has not passed validation."
         }
+        if ([string]$candidate.artifact_kind -ne $productionCandidateArtifactKind) {
+            throw "Preview and unknown artifacts cannot be promoted."
+        }
         if ([string]$candidate.validation.key -ne [string]$candidate.validation_key -or
             [string]$candidate.validation_key -ne
                 "$([string]$candidate.worker_version_id):$([string]$candidate.git_sha)") {
@@ -1593,6 +1904,9 @@ function Start-ReleasePromotion {
         if ([string]$candidate.git_sha -ne [string]$candidate.windows_revision -or
             [string]$candidate.compatibility_state -ne "PASSED") {
             throw "Worker and Windows compatibility is not authorized."
+        }
+        if ([string]$state.deployment_status -ne "READY") {
+            throw "Release control is not deployment-ready."
         }
         if (-not (Test-CloudflareReleasePlacement -Stable $state.stable -Candidate $candidate)) {
             throw "Cloudflare Stable/Candidate placement drifted."
@@ -1610,7 +1924,6 @@ function Start-ReleasePromotion {
             previous = $state.stable
             started_at = [DateTimeOffset]::UtcNow.ToString("o")
         }
-        $state.previous_stable = $state.stable
         $state.transaction = $transaction
         $state.deployment_status = "PROMOTING"
         Write-ReleaseControlState -State $state
@@ -2540,6 +2853,11 @@ function Get-ControlCenterReleasePresentation {
         [string]$Release.candidate.validation_state
     } else { "UNAVAILABLE" }
     if (-not $candidateState) { $candidateState = "UNAVAILABLE" }
+    $candidateKind = if ($Release.candidate -and $Release.candidate.artifact_kind) {
+        [string]$Release.candidate.artifact_kind
+    } else { $unknownArtifactKind }
+    $compatibilityPassed = [bool]($Release.candidate -and
+        [string]$Release.candidate.compatibility_state -eq "PASSED")
 
     $candidateDetail = switch ($candidateState) {
         "PASSED" { "All required validation evidence is current." }
@@ -2562,6 +2880,12 @@ function Get-ControlCenterReleasePresentation {
         "Deployment status is $($Release.deployment_status)"
     } elseif (-not $Release.candidate) {
         "Candidate unavailable"
+    } elseif ($candidateKind -ne $productionCandidateArtifactKind) {
+        if ($candidateKind -eq $previewArtifactKind) {
+            "Preview cannot be promoted"
+        } else { "Artifact provenance is unknown" }
+    } elseif (-not $compatibilityPassed) {
+        "Compatibility has not passed"
     } elseif ($candidateState -eq "TESTING" -or $candidateState -eq "STAGING" -or $candidateState -eq "NEW") {
         "Candidate still testing"
     } elseif ($candidateState -eq "FAILED") {
@@ -2580,9 +2904,12 @@ function Get-ControlCenterReleasePresentation {
 
     [pscustomobject]@{
         candidate_state = $candidateState
+        candidate_kind = $candidateKind
         candidate_detail = $candidateDetail
         can_promote = [bool]($deploymentReady -and -not $transactionActive -and
-            $Release.candidate -and $candidateState -eq "PASSED")
+            $Release.candidate -and $candidateState -eq "PASSED" -and
+            $candidateKind -eq $productionCandidateArtifactKind -and
+            $compatibilityPassed)
         promote_reason = $promoteReason
         can_reverse = [bool]($deploymentReady -and -not $transactionActive -and
             $Release.previous_stable)
@@ -3259,7 +3586,7 @@ function Show-ControlCenter {
                 $candidateCard.Git.Text = "Git       $(Get-ShortIdentity $release.candidate.git_sha)"
                 $candidateCard.Worker.Text = "Worker    $(Get-ShortIdentity $release.candidate.worker_version_id)"
                 $candidateCard.Windows.Text = "Windows   $(Get-ShortIdentity $release.candidate.windows_revision)"
-                $candidateCard.Detail.Text = $releaseView.candidate_detail
+                $candidateCard.Detail.Text = "$($releaseView.candidate_kind)  /  $($releaseView.candidate_detail)"
                 $validation = $release.candidate.validation
                 $windowsCheck = if ($validation -and $validation.windows) { [string]$validation.windows } else { "WAITING" }
                 $contractCheck = if ($validation -and $validation.cloudflare) { [string]$validation.cloudflare } else { "WAITING" }
@@ -3269,9 +3596,12 @@ function Show-ControlCenter {
                     $cpuCheck = "NOT REQUIRED"
                     $limitCheck = "NOT REQUIRED"
                 } elseif ($validation -and $validation.cpu_evidence) {
-                    $cpuCheck = if ($validation.cpu_evidence.passed) { "PASSED" } else { "FAILED" }
+                    $cpuCheck = if ($validation.cpu_evidence.gate_state) {
+                        [string]$validation.cpu_evidence.gate_state
+                    } elseif ($validation.cpu_evidence.passed) { "PASSED" } else { "FAILED" }
                     $limitCheck = if (
                         [int]$validation.cpu_evidence.responses_5xx -eq 0 -and
+                        [int]$validation.cpu_evidence.responses_1102 -eq 0 -and
                         [int]$validation.cpu_evidence.exceeded_cpu -eq 0
                     ) { "PASSED" } else { "FAILED" }
                 }

@@ -42,11 +42,12 @@ above were recorded. Both production **Deploy command** and non-production
 **Version command** now use:
 
 ```text
-npx wrangler versions upload --message "release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH"
+Production:     npx wrangler versions upload --message "release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH artifact_kind:PRODUCTION_CANDIDATE"
+Non-production: npx wrangler versions upload --message "release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH artifact_kind:PREVIEW"
 ```
 
-Cloudflare's injected commit and branch variables make the immutable Version
-discoverable as one release identity. A deployment-status read immediately
+Cloudflare's injected commit and branch variables plus the configured artifact
+kind make the immutable Version discoverable as one release identity. A deployment-status read immediately
 after saving showed the same deployment ID and the same Stable 100% / accepted
 #268 Candidate 0% split; saving the build configuration assigned no traffic.
 The configuration rollback is to restore the recorded former production
@@ -63,6 +64,10 @@ service restart, Promote, or Reverse was executed by this work.
 The accepted PR #268 head and 0% Candidate are reference evidence only. This
 work must not modify, merge, promote, replace, or relabel them.
 
+The earlier 56-sample/11 ms paragraph below is superseded by the accepted PR
+#268 review evidence. It remains described here only to avoid rewriting the
+chronology of the audit.
+
 At 2026-08-20 20:11 MYT, a fresh deployment read still showed Stable
 `76d314fc-e484-4f50-8ace-3689e0896709` at 100% and the accepted PR #268
 Candidate `dd823aa4-20f0-47e1-9255-1b785a4c17b0` at 0%. Exact-version Workers
@@ -71,6 +76,11 @@ CPU of 11 ms, zero `exceededCpu`, and zero 5xx responses. The 11 ms observation
 is recorded rather than relabeled as proof of a strict 10 ms ceiling; Cloudflare
 documents limited execution flexibility, while `exceededCpu` is the platform
 termination outcome.
+
+The accepted evidence used by release-control bootstrap is 104 samples: p50
+2 ms, p95 4 ms, p99 4 ms, maximum 5 ms, zero exceeded CPU, zero 1102, and zero
+5xx. It is labeled `LEGACY_ACCEPTED_MANUAL_EVIDENCE`; the source did not record
+an evidence timestamp, so no timestamp is inferred.
 
 When PR #268 is later rebased onto release-control `main`, its stale statement
 that the audit first page carries three Daily Briefs must be reconciled with its

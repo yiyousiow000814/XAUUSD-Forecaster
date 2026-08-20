@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
+import { releaseValidationDryRun } from "../_shared/release-validation";
 import {
   ACTIVE_NEWS_SQL,
   NEWS_REVIEW_STATE_CASE_SQL,
@@ -272,6 +273,8 @@ export async function POST(request: Request) {
   if (!await isIngestAuthorized(request)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
+  const dryRun = releaseValidationDryRun(request, "news-index-write");
+  if (dryRun) return dryRun;
   const serialized = await request.text();
   if (new TextEncoder().encode(serialized).byteLength > 450_000) {
     return NextResponse.json({ error: "payload too large" }, { status: 413 });

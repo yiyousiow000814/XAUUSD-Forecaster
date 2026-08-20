@@ -2914,3 +2914,48 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(css, /\.assistant-message-scroll \{ grid-row:3/);
   assert.match(css, /\.assistant-composer-shell \{ grid-row:4/);
 });
+
+test("release validation dry-run is identified and never mutates storage", async () => {
+  const { releaseValidationDryRun } = await import(
+    "../app/api/_shared/release-validation.ts"
+  );
+  const ordinary = new Request("https://example.test/api/audit", { method: "POST" });
+  assert.equal(releaseValidationDryRun(ordinary, "audit-write"), null);
+
+  const request = new Request("https://example.test/api/audit", {
+    method: "POST",
+    headers: {
+      "X-Aurum-Release-Validation": "dry-run",
+      "X-Aurum-Validation-Run": "validation-run-1",
+      "X-Aurum-Request-ID": "request-1",
+    },
+  });
+  const response = releaseValidationDryRun(request, "audit-write");
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    status: "DRY_RUN_OK",
+    route_family: "audit-write",
+    validation_run: "validation-run-1",
+    request_id: "request-1",
+    mutated: false,
+  });
+});
+
+test("authenticated release dry-runs precede every affected D1 write", () => {
+  for (const [path, family] of [
+    ["../app/api/ingest/route.ts", "status-ingest"],
+    ["../app/api/audit/route.ts", "audit-write"],
+    ["../app/api/learning/route.ts", "learning-write"],
+    ["../app/api/market-chart/route.ts", "market-chart-write"],
+    ["../app/api/market-history/route.ts", "market-history-write"],
+    ["../app/api/learning-history/route.ts", "learning-history-write"],
+    ["../app/api/news-evidence/route.ts", "news-evidence-write"],
+    ["../app/api/news-index/route.ts", "news-index-write"],
+  ]) {
+    const source = readFileSync(new URL(path, import.meta.url), "utf8");
+    const auth = source.indexOf("isIngestAuthorized(request)");
+    const dryRun = source.indexOf(`releaseValidationDryRun(request, "${family}")`);
+    const binding = source.indexOf("env.DB as D1Database", dryRun);
+    assert.ok(auth >= 0 && dryRun > auth && binding > dryRun, path);
+  }
+});

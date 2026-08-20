@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { readBoundedBody } from "../_shared/dashboard-snapshot";
 import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
+import { releaseValidationDryRun } from "../_shared/release-validation";
 
 export const dynamic = "force-dynamic";
 
@@ -266,6 +267,8 @@ export async function POST(request: Request) {
   if (!await isIngestAuthorized(request)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
+  const dryRun = releaseValidationDryRun(request, "learning-history-write");
+  if (dryRun) return dryRun;
   const body = await readBoundedBody(request, MAX_INGEST_BYTES);
   if (body.status === "too_large") {
     return NextResponse.json({ error: "payload too large" }, { status: 413 });

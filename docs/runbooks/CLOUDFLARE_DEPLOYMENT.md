@@ -8,7 +8,7 @@ from `web/`:
 npm run lint
 npm test
 npx wrangler d1 migrations apply aurum-signal-room --remote
-npx wrangler versions upload --message "release:<full-git-sha> branch:<branch>"
+npx wrangler versions upload --message "release:<full-git-sha> branch:<branch> artifact_kind:<PREVIEW-or-PRODUCTION_CANDIDATE>"
 ```
 
 Both production and non-production Workers Builds commands upload immutable
@@ -16,7 +16,8 @@ Versions. The production command MUST NOT be `wrangler deploy`. Its configured
 command is:
 
 ```text
-npx wrangler versions upload --message "release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH"
+Production:     npx wrangler versions upload --message "release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH artifact_kind:PRODUCTION_CANDIDATE"
+Non-production: npx wrangler versions upload --message "release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH artifact_kind:PREVIEW"
 ```
 
 The local Control Center discovers the exact release identity, keeps Candidate
@@ -34,14 +35,17 @@ recorded Stable Worker and Windows identities, then allow Candidate discovery.
 Do not hand-edit `release-control-state.json` or copy validation evidence from a
 different Worker Version ID or Git SHA.
 
+The production and non-production commands deliberately emit different
+immutable artifact kinds. Do not derive this authority later from a branch name.
+
 Worker-changing Candidates require a Cloudflare API token limited to read-only
 Workers Observability query access. Store it only in the Windows user
 environment as `CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN`; never pass it on a
 command line or write it to repository/runtime state. Without that protected
 credential the controller deliberately leaves the Candidate in TESTING with
 `PLATFORM_CPU_EVIDENCE_REQUIRED`. The queried evidence is bound to the exact
-Worker Version ID and must contain the directed invocations, zero
-`exceededCpu`, and zero 5xx responses.
+Worker Version ID and must satisfy the CPU/headroom policy in the release
+contract, including exact probe counts and zero `exceededCpu`, 1102, or 5xx.
 
 Use these explicit local actions only through the Control Center confirmation
 UI. The underlying commands are documented for recovery diagnosis, not for

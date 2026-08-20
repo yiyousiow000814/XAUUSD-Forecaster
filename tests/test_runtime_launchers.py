@@ -180,10 +180,11 @@ def _authorized_candidate(previous: str, candidate: str) -> str:
     return (
         f"$stable = New-ReleaseIdentity -GitSha '{previous}' "
         f"-WorkerVersionId '{stable_worker}' -WindowsRevision '{previous}' "
-        "-ValidationState 'PASSED'; $stable.compatibility_state = 'PASSED'; "
+        "-ValidationState 'PASSED' -ArtifactKind 'PRODUCTION_CANDIDATE'; "
+        "$stable.compatibility_state = 'PASSED'; "
         f"$candidateRelease = New-ReleaseIdentity -GitSha '{candidate}' "
         f"-WorkerVersionId '{candidate_worker}' -WindowsRevision '{candidate}' "
-        "-ValidationState 'PASSED'; "
+        "-ValidationState 'PASSED' -ArtifactKind 'PRODUCTION_CANDIDATE'; "
         "$candidateRelease.compatibility_state = 'PASSED'; "
         f"$candidateRelease.validation = [pscustomobject]@{{ key = '{key}' }}; "
         "$releaseState = New-ReleaseControlState -Stable $stable "
@@ -1024,18 +1025,211 @@ def test_candidate_arriving_during_promotion_is_queued(tmp_path) -> None:
         _authorized_candidate(previous, candidate)
         + "$state = Get-ReleaseControlState; "
         "$state.transaction = [pscustomobject]@{ type='PROMOTE'; phase='CUTOVER' }; "
+        "$state.candidate_discovery.initialized_at='2026-08-20T11:00:00Z'; "
+        "$state.candidate_discovery.watermark_created_at='2026-08-20T11:00:00Z'; "
+        "$state.candidate_discovery.watermark_version_id='11111111-1111-4111-8111-111111111111'; "
         "Write-ReleaseControlState $state; "
         f"$new = New-ReleaseIdentity -GitSha '{queued}' "
         "-WorkerVersionId '33333333-3333-4333-8333-333333333333' "
         f"-WindowsRevision '{queued}'; "
         "function Get-CloudflareVersions { return @([pscustomobject]@{ "
         "id=$new.worker_version_id; metadata=[pscustomobject]@{ created_on='2026-08-20T12:00:00Z' }; "
-        f"annotations=[pscustomobject]@{{ 'workers/message'='release:{queued} branch:main' }} }}) }}; "
+        f"annotations=[pscustomobject]@{{ 'workers/message'='release:{queued} branch:main artifact_kind:PRODUCTION_CANDIDATE' }} }}) }}; "
         "$null = Find-NewCandidateRelease; $final = Get-ReleaseControlState; "
         'Write-Output "$($final.candidate.git_sha),$($final.queued_candidate.git_sha)"',
     )
 
     assert result == f"{candidate},{queued}"
+
+
+def test_preview_version_is_consumed_by_watermark_but_never_becomes_candidate(
+    tmp_path,
+) -> None:
+    previous = "a" * 40
+    preview = "c" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, "b" * 40)
+        + "$state=Get-ReleaseControlState; "
+        "$state.candidate=$null; "
+        "$state.candidate_discovery.initialized_at='2026-08-20T11:00:00Z'; "
+        "$state.candidate_discovery.watermark_created_at='2026-08-20T11:00:00Z'; "
+        "$state.candidate_discovery.watermark_version_id='old'; "
+        "Write-ReleaseControlState $state; "
+        "function Get-CloudflareVersions { @([pscustomobject]@{ id='preview-version'; "
+        "metadata=[pscustomobject]@{created_on='2026-08-20T12:00:00Z'}; "
+        f"annotations=[pscustomobject]@{{'workers/message'='release:{preview} branch:feature artifact_kind:PREVIEW'}} }}) }}; "
+        "$found=Find-NewCandidateRelease; $final=Get-ReleaseControlState; "
+        'Write-Output "$($null -eq $found),$($null -eq $final.candidate),$($final.candidate_discovery.watermark_version_id)"',
+    )
+
+    assert result == "True,True,preview-version"
+
+
+def test_failed_candidate_is_not_rediscovered_after_restart(tmp_path) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, "c" * 40)
+        + "$state=Get-ReleaseControlState; $state.candidate=$null; "
+        "$state.candidate_discovery.initialized_at='2026-08-20T11:00:00Z'; "
+        "$state.candidate_discovery.watermark_created_at='2026-08-20T11:00:00Z'; "
+        "$state.candidate_discovery.watermark_version_id='old'; "
+        "Write-ReleaseControlState $state; "
+        "function Get-CloudflareVersions { @([pscustomobject]@{id='candidate-version'; "
+        "metadata=[pscustomobject]@{created_on='2026-08-20T12:00:00Z'}; "
+        f"annotations=[pscustomobject]@{{'workers/message'='release:{candidate} branch:main artifact_kind:PRODUCTION_CANDIDATE'}} }}) }}; "
+        "$first=Find-NewCandidateRelease; $state=Get-ReleaseControlState; "
+        "$state.candidate.validation_state='FAILED'; Write-ReleaseControlState $state; "
+        "$second=Find-NewCandidateRelease; $final=Get-ReleaseControlState; "
+        'Write-Output "$($first.git_sha),$($null -eq $second),$($final.candidate.validation_state)"',
+    )
+
+    assert result == f"{candidate},True,FAILED"
+
+
+def test_preview_artifact_cannot_promote_even_with_passed_evidence(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState; $state.candidate.artifact_kind='PREVIEW'; "
+        "Write-ReleaseControlState $state; "
+        "function Enter-ReleaseTransactionLock { return $true }; "
+        "function Exit-ReleaseTransactionLock {}; "
+        "try { Start-ReleasePromotion | Out-Null; 'PROMOTED' } catch { 'REJECTED' }",
+    )
+
+    assert result == "REJECTED"
+
+
+def test_preview_evidence_cannot_authorize_production_candidate(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$sha=('b'*40); $preview=New-ReleaseIdentity -GitSha $sha "
+        "-WorkerVersionId 'same-worker' -WindowsRevision $sha "
+        "-ArtifactKind 'PREVIEW' -ValidationState 'PASSED'; "
+        "$candidate=New-ReleaseIdentity -GitSha $sha -WorkerVersionId 'same-worker' "
+        "-WindowsRevision $sha -ArtifactKind 'PRODUCTION_CANDIDATE'; "
+        "Write-Output (Test-ReleaseIdentity $preview $candidate)",
+    )
+
+    assert result == "False"
+
+
+def test_static_assets_are_excluded_from_expected_worker_invocations(tmp_path) -> None:
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId 'worker' "
+        f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE'; "
+        "$plan=Get-CandidateRouteValidationPlan -ChangedFiles @('web/app/page.tsx'); "
+        "function Invoke-WebRequest { return [pscustomobject]@{StatusCode=200;Content='AURUM SIGNAL ROOM 系统健康状态 新闻与决策'} }; "
+        "function Start-Sleep {}; function Get-CandidateInvocationCount { return 0 }; "
+        "function Get-CandidatePlatformEvidence { param($Candidate,$From,$To,$ExpectedInvocations); "
+        "return [pscustomobject]@{passed=$true;expected=$ExpectedInvocations} }; "
+        "$e=Invoke-CandidateWorkerValidation -Candidate $candidate -RoutePlan $plan; "
+        'Write-Output "$($plan.static_assets.Count),$($e.expected_worker_invocations),$($e.cpu_evidence.expected)"',
+    )
+
+    assert result == "4,4,4"
+
+
+def test_version_at_or_before_watermark_cannot_replace_candidate(tmp_path) -> None:
+    previous = "a" * 40
+    current = "b" * 40
+    historical = "c" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, current)
+        + "$state=Get-ReleaseControlState; "
+        "$state.candidate_discovery.initialized_at='2026-08-20T12:00:00Z'; "
+        "$state.candidate_discovery.watermark_created_at='2026-08-20T12:00:00Z'; "
+        "$state.candidate_discovery.watermark_version_id='newer'; Write-ReleaseControlState $state; "
+        "function Get-CloudflareVersions { @([pscustomobject]@{id='older'; "
+        "metadata=[pscustomobject]@{created_on='2026-08-20T11:00:00Z'}; "
+        f"annotations=[pscustomobject]@{{'workers/message'='release:{historical} branch:main artifact_kind:PRODUCTION_CANDIDATE'}} }}) }}; "
+        "$found=Find-NewCandidateRelease; $final=Get-ReleaseControlState; "
+        'Write-Output "$($null -eq $found),$($final.candidate.git_sha)"',
+    )
+
+    assert result == f"True,{current}"
+
+
+def test_v1_state_migrates_only_the_reviewed_legacy_candidate_provenance(
+    tmp_path,
+) -> None:
+    accepted_worker = "dd823aa4-20f0-47e1-9255-1b785a4c17b0"
+    accepted_sha = "14c055a35040fa963700c988f770c9bb52fa669e"
+    result = _run_control_center_contract(
+        tmp_path,
+        "$state=[pscustomobject]@{schema_version='stable-candidate-release-v1'; "
+        "stable=[pscustomobject]@{git_sha=('a'*40);worker_version_id='stable';windows_revision=('a'*40)}; "
+        f"candidate=[pscustomobject]@{{git_sha='{accepted_sha}';worker_version_id='{accepted_worker}';windows_revision='{accepted_sha}'}}; "
+        "previous_stable=$null;queued_candidate=$null}; Write-ReleaseControlState $state; "
+        "$migrated=Get-ReleaseControlState; "
+        'Write-Output "$($migrated.schema_version),$($migrated.stable.artifact_kind),$($migrated.candidate.artifact_kind)"',
+    )
+
+    assert result == (
+        "stable-candidate-release-v2,PRODUCTION_CANDIDATE,PRODUCTION_CANDIDATE"
+    )
+
+
+def test_failed_runtime_rollback_does_not_rewrite_previous_stable(tmp_path) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
+    older = "c" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, candidate)
+        + f"$state=Get-ReleaseControlState; $state.previous_stable=New-ReleaseIdentity "
+        f"-GitSha '{older}' -WorkerVersionId 'older-worker' -WindowsRevision '{older}' "
+        "-ArtifactKind 'PRODUCTION_CANDIDATE'; "
+        "$state.transaction=[pscustomobject]@{type='PROMOTE';previous=$state.stable;target=$state.candidate}; "
+        "Write-ReleaseControlState $state; function git {$global:LASTEXITCODE=0}; "
+        "function Sync-StableRuntimeControlFiles {}; function Restart-CodeReloadableServices {}; "
+        "function Write-RuntimeCodeState {}; function Write-RuntimeUpdateFailure {}; "
+        "function Write-WatchdogEvent {}; function Invoke-CloudflareDeployment {}; "
+        f"$null=Invoke-RuntimeRollback -FailedRevision '{candidate}' -PreviousRevision '{previous}' -Reason 'test'; "
+        "$final=Get-ReleaseControlState; Write-Output $final.previous_stable.git_sha",
+    )
+
+    assert result == older
+
+
+@pytest.mark.parametrize(
+    ("p95", "p99", "maximum", "expected"),
+    [(4, 7, 9, "PASSED"), (7, 9, 10, "REVIEW_REQUIRED"), (4, 18, 18, "FAILED")],
+)
+def test_worker_cpu_gate_requires_free_tier_headroom(
+    tmp_path, p95: int, p99: int, maximum: int, expected: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$e=[pscustomobject]@{invocations=8; exceeded_cpu=0; responses_1102=0; "
+        f"responses_5xx=0; p95_cpu_ms={p95}; p99_cpu_ms={p99}; max_cpu_ms={maximum}}}; "
+        "Write-Output (Get-WorkerCpuGateState -Evidence $e -ExpectedInvocations 8)",
+    )
+
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    ("exceeded_cpu", "responses_5xx"), [(1, 0), (0, 1)],
+)
+def test_worker_cpu_gate_fails_platform_errors(
+    tmp_path, exceeded_cpu: int, responses_5xx: int,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$e=[pscustomobject]@{{invocations=8; exceeded_cpu={exceeded_cpu}; "
+        f"responses_1102={exceeded_cpu}; responses_5xx={responses_5xx}; "
+        "p95_cpu_ms=4; p99_cpu_ms=7; max_cpu_ms=9}; "
+        "Write-Output (Get-WorkerCpuGateState -Evidence $e -ExpectedInvocations 8)",
+    )
+
+    assert result == "FAILED"
 
 
 def test_worker_windows_mismatch_cannot_switch_runtime(tmp_path) -> None:
@@ -1067,6 +1261,7 @@ def test_platform_evidence_is_bound_to_exact_worker_version(tmp_path) -> None:
         "if ($alias -eq 'invocations') { return [pscustomobject]@{ calculations=@("
         "[pscustomobject]@{alias='invocations';aggregates=@([pscustomobject]@{value=6})},"
         "[pscustomobject]@{alias='max_cpu_ms';aggregates=@([pscustomobject]@{value=8})},"
+        "[pscustomobject]@{alias='p95_cpu_ms';aggregates=@([pscustomobject]@{value=5})},"
         "[pscustomobject]@{alias='p99_cpu_ms';aggregates=@([pscustomobject]@{value=7})},"
         "[pscustomobject]@{alias='max_wall_ms';aggregates=@([pscustomobject]@{value=25})}) } }; "
         "return [pscustomobject]@{ calculations=@([pscustomobject]@{alias=$alias;aggregates=@([pscustomobject]@{value=0})}) } }; "
@@ -1085,6 +1280,7 @@ def test_bootstrap_preserves_accepted_268_candidate_and_evidence(tmp_path) -> No
         "function Get-CloudflareDeployment { return [pscustomobject]@{versions=@("
         "[pscustomobject]@{version_id='76d314fc-e484-4f50-8ace-3689e0896709';percentage=100},"
         "[pscustomobject]@{version_id='dd823aa4-20f0-47e1-9255-1b785a4c17b0';percentage=0})} };"
+        "function Get-CloudflareVersions { return @() };"
         f"function Get-RuntimeCodeState {{ return [pscustomobject]@{{applied_revision='{stable}'}} }};"
         "$state=Initialize-ReleaseControl;"
         'Write-Output "$($state.stable.worker_version_id),$($state.candidate.worker_version_id),$($state.candidate.git_sha),$($state.candidate.validation.cpu_evidence.exceeded_cpu)"',
@@ -1306,24 +1502,31 @@ def test_release_gui_presentation_explains_action_eligibility(tmp_path) -> None:
         "$stable=New-ReleaseIdentity -GitSha ('a'*40) -WorkerVersionId 'stable-worker' "
         "-WindowsRevision ('a'*40);"
         "$candidate=New-ReleaseIdentity -GitSha ('b'*40) -WorkerVersionId 'candidate-worker' "
-        "-WindowsRevision ('b'*40) -ValidationState 'PASSED';"
+        "-WindowsRevision ('b'*40) -ValidationState 'PASSED' "
+        "-ArtifactKind 'PRODUCTION_CANDIDATE';"
+        "$candidate.compatibility_state='PASSED';"
         "$release=New-ReleaseControlState -Stable $stable -Candidate $candidate;"
         "$release.previous_stable=New-ReleaseIdentity -GitSha ('c'*40) "
         "-WorkerVersionId 'previous-worker' -WindowsRevision ('c'*40);"
         "$passed=Get-ControlCenterReleasePresentation $release;"
+        "$release.candidate.artifact_kind='PREVIEW';"
+        "$preview=Get-ControlCenterReleasePresentation $release;"
+        "$release.candidate.artifact_kind='PRODUCTION_CANDIDATE';"
         "$release.candidate.validation_state='FAILED';"
         "$release.candidate.validation=[pscustomobject]@{error='Worker CPU evidence failed'};"
         "$failed=Get-ControlCenterReleasePresentation $release;"
         "$release.transaction=[pscustomobject]@{type='PROMOTE'};"
         "$busy=Get-ControlCenterReleasePresentation $release;"
         "$missing=Get-ControlCenterReleasePresentation $null;"
-        "@($passed,$failed,$busy,$missing) | ConvertTo-Json -Compress",
+        "@($passed,$preview,$failed,$busy,$missing) | ConvertTo-Json -Compress",
     )
 
-    passed, failed, busy, missing = json.loads(result)
+    passed, preview, failed, busy, missing = json.loads(result)
     assert passed["can_promote"] is True
     assert passed["can_reverse"] is True
     assert passed["promote_reason"] == "Ready to promote"
+    assert preview["can_promote"] is False
+    assert preview["promote_reason"] == "Preview cannot be promoted"
     assert failed["can_promote"] is False
     assert failed["candidate_detail"] == "Worker CPU evidence failed"
     assert failed["promote_reason"] == "Candidate failed validation"

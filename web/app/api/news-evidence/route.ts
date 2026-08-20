@@ -16,6 +16,7 @@ import {
   stageNewsEvidenceBatch,
 } from "../_shared/news-evidence-store";
 import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
+import { releaseValidationDryRun } from "../_shared/release-validation";
 import {
   d1CapabilityFailure,
   D1CapabilityError,
@@ -94,6 +95,8 @@ export async function POST(request: Request) {
   if (!await isIngestAuthorized(request)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
+  const dryRun = releaseValidationDryRun(request, "news-evidence-write");
+  if (dryRun) return dryRun;
   const binding = env.DB as D1Database | undefined;
   if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   const bounded = await readBoundedBody(request, MAX_WRITE_BYTES);

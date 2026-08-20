@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
 import { writeDashboardSnapshot } from "../_shared/dashboard-snapshot";
+import { releaseValidationDryRun } from "../_shared/release-validation";
 
 export const dynamic = "force-dynamic";
 
@@ -35,6 +36,8 @@ export async function POST(request: Request) {
   if (!await isIngestAuthorized(request)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
+  const dryRun = releaseValidationDryRun(request, "audit-write");
+  if (dryRun) return dryRun;
   const binding = env.DB as D1Database | undefined;
   if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   const writeResult = await writeDashboardSnapshot(request, binding, 4);
