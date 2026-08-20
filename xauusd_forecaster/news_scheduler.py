@@ -3079,7 +3079,7 @@ def authorize_repairable_annotation_failures(
                SELECT f.failure_id,?,f.source,f.source_item_id,
                       f.revision_number,f.llm_model_version,f.prompt_version,?
                FROM news_llm_failures f
-               JOIN news_llm_failure_evidence_v1 e
+               LEFT JOIN news_llm_failure_evidence_v1 e
                  ON e.failure_id=f.failure_id
                WHERE f.task_type='ANNOTATION' AND f.prompt_version=?
                  AND f.is_terminal=1
@@ -3087,7 +3087,14 @@ def authorize_repairable_annotation_failures(
                    e.failure_stage IN (
                      'DISPLAY_REPAIR','EVIDENCE_ANCHOR_REPAIR')
                    OR (e.failure_stage='SEMANTIC_CONTRACT'
-                     AND e.cause='annotation supporting evidence is absent from source'))
+                     AND e.cause='annotation supporting evidence is absent from source')
+                   OR EXISTS (
+                     SELECT 1
+                     FROM news_annotation_display_checkpoints_v1 c
+                     WHERE c.source=f.source
+                       AND c.source_item_id=f.source_item_id
+                       AND c.revision_number=f.revision_number
+                       AND c.prompt_version=f.prompt_version))
                  AND f.attempt_number=(
                    SELECT max(f2.attempt_number) FROM news_llm_failures f2
                    WHERE f2.task_type=f.task_type AND f2.source=f.source

@@ -1139,6 +1139,82 @@ def test_contract_recovery_requeues_each_annotation_only_once(tmp_path) -> None:
     ledger.close()
 
 
+@pytest.mark.parametrize(
+    ("work_lane", "priority"),
+    (
+        (news_scheduler_module.LIVE_LANE, "NORMAL"),
+        (news_scheduler_module.CONTRACT_BACKFILL_LANE, "BACKGROUND"),
+    ),
+)
+def test_provider_terminal_display_checkpoint_recovery_preserves_job_state(
+    tmp_path, work_lane, priority,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    body = "Complete source evidence for durable display repair recovery. " * 12
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": "source", "source_item_id": f"checkpoint-{work_lane}",
+        "source_published_time": NOW, "collector_first_seen_time": NOW,
+        "fetched_time": NOW, "headline": "Report", "body": body,
+        "content_hash": digest, "cluster_id": f"checkpoint-{work_lane}",
+    })
+    job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_ANNOTATION",
+        source="source", source_item_id=f"checkpoint-{work_lane}",
+        revision_number=1, prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+        priority=priority, work_lane=work_lane, now=NOW,
+    )
+    ledger.connection.execute(
+        """UPDATE news_ai_jobs_v1
+           SET state='DEAD_LETTER',attempt_count=1,
+               last_error='HTTP Error 503: Service Unavailable',
+               completed_at=?,updated_at=? WHERE job_id=?""",
+        (NOW.isoformat(), NOW.isoformat(), job_id),
+    )
+    ledger.connection.execute(
+        """INSERT INTO news_annotation_display_checkpoints_v1 VALUES
+           (?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            f"checkpoint-id-{work_lane}", "source",
+            f"checkpoint-{work_lane}", 1, digest,
+            "gemini-3.5-flash-lite", CURRENT_NEWS_PROMPT_VERSION,
+            "{}", '["primary_story_title_zh"]',
+            "UNGROUNDED_LATIN_DISPLAY", NOW.isoformat(),
+        ),
+    )
+    ledger.append_llm_failure({
+        "failure_id": f"failure-{work_lane}", "task_type": "ANNOTATION",
+        "source": "source", "source_item_id": f"checkpoint-{work_lane}",
+        "revision_number": 1, "raw_content_hash": digest,
+        "llm_model_version": "gemini-3.5-flash-lite",
+        "prompt_version": CURRENT_NEWS_PROMPT_VERSION, "attempt_number": 5,
+        "error_type": "HTTPError", "error_signature": "provider-503",
+        "error": "HTTP Error 503: Service Unavailable", "failed_at": NOW,
+        "is_terminal": True,
+    })
+
+    recovery_at = datetime.now(UTC)
+    assert authorize_repairable_annotation_failures(
+        ledger.connection,
+        prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+        recovery_version=ANNOTATION_FAILURE_RECOVERY_VERSION,
+        now=recovery_at,
+    ) == 1
+    recovered = ledger.connection.execute(
+        """SELECT state,work_lane,priority,attempt_count,last_error
+           FROM news_ai_jobs_v1 WHERE job_id=?""",
+        (job_id,),
+    ).fetchone()
+    assert tuple(recovered) == ("QUEUED", work_lane, priority, 1, None)
+    assert authorize_repairable_annotation_failures(
+        ledger.connection,
+        prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+        recovery_version=ANNOTATION_FAILURE_RECOVERY_VERSION,
+        now=recovery_at + timedelta(minutes=1),
+    ) == 0
+    ledger.close()
+
+
 def test_account_configuration_groups_keys_without_exposing_secrets() -> None:
     credentials = configured_api_credentials(raw_accounts=json.dumps([
         {"account_id": "routine-a", "pool": "routine", "api_keys": ["key-a", "key-b"]},

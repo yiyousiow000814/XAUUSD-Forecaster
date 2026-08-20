@@ -3997,6 +3997,44 @@ def test_checkpointed_display_failure_remains_repairable(tmp_path) -> None:
     assert outcomes[-1]["next_retry_at"] is not None
 
 
+def test_checkpointed_display_provider_outage_never_becomes_terminal(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "Complete source text with enough content for annotation. " * 10
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    row = {
+        "source": "failure-test", "source_item_id": "display-provider",
+        "collector_first_seen_time": now, "fetched_time": now,
+        "headline": "Gold report", "body": body,
+        "content_hash": digest, "cluster_id": "display-provider-failure",
+        "revision_number": 1,
+    }
+    ledger.append_news_revision({
+        key: value for key, value in row.items() if key != "revision_number"
+    })
+    parsed = {
+        "row": row, "error_type": "HTTPError",
+        "error": "HTTP Error 503: Service Unavailable", "error_code": 503,
+        "failure_code": "PROVIDER_HTTP_ERROR",
+        "provider_http_status": 503,
+        "model_version": annotation_module.DEFAULT_GEMINI_MODEL,
+        "failure_context": "DISPLAY_REPAIR",
+    }
+
+    outcomes = [
+        annotation_module._append_llm_failure(
+            ledger, parsed, "ANNOTATION", annotation_module.PROMPT_VERSION,
+        )
+        for _ in range(5)
+    ]
+
+    assert {item["retry_state"] for item in outcomes} == {"BACKING_OFF"}
+    assert all(item["is_terminal"] is False for item in outcomes)
+    assert outcomes[-1]["next_retry_at"] is not None
+
+
 def test_display_checkpoint_revalidates_before_spending_another_model_call(
     monkeypatch,
 ) -> None:
