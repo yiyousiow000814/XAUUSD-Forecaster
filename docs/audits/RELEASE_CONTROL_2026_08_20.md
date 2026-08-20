@@ -37,5 +37,42 @@ the current Stable remains at 100%. The Windows watchdog must also stop treating
 activate production code. These two controls are independent and both are
 required.
 
+The Cloudflare Settings > Build bootstrap was applied after the current values
+above were recorded. Both production **Deploy command** and non-production
+**Version command** now use:
+
+```text
+npx wrangler versions upload --message "release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH"
+```
+
+Cloudflare's injected commit and branch variables make the immutable Version
+discoverable as one release identity. A deployment-status read immediately
+after saving showed the same deployment ID and the same Stable 100% / accepted
+#268 Candidate 0% split; saving the build configuration assigned no traffic.
+The configuration rollback is to restore the recorded former production
+command `npx wrangler deploy`; it is documented for emergency control-plane
+recovery and intentionally not executed because it re-enables implicit Stable
+promotion.
+
+The post-bootstrap Windows read remained on applied revision
+`783d25314b090dd7fbbf124777c3b8de517d2b85`. Collector, annotator, dashboard
+API, and dashboard sync each had one matching process; the local status surface
+reported RUNNING/RUNNING/API OK/SYNC OK. No production runtime checkout,
+service restart, Promote, or Reverse was executed by this work.
+
 The accepted PR #268 head and 0% Candidate are reference evidence only. This
 work must not modify, merge, promote, replace, or relabel them.
+
+At 2026-08-20 20:11 MYT, a fresh deployment read still showed Stable
+`76d314fc-e484-4f50-8ace-3689e0896709` at 100% and the accepted PR #268
+Candidate `dd823aa4-20f0-47e1-9255-1b785a4c17b0` at 0%. Exact-version Workers
+Observability over the preceding hour reported 56 invocations, maximum and p99
+CPU of 11 ms, zero `exceededCpu`, and zero 5xx responses. The 11 ms observation
+is recorded rather than relabeled as proof of a strict 10 ms ceiling; Cloudflare
+documents limited execution flexibility, while `exceededCpu` is the platform
+termination outcome.
+
+When PR #268 is later rebased onto release-control `main`, its stale statement
+that the audit first page carries three Daily Briefs must be reconciled with its
+accepted split-audit contract: `/api/audit` is the fixed summary and
+`/api/audit-briefs` is bounded detail.

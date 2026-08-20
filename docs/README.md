@@ -34,6 +34,7 @@ current rules merely because they discovered one.
 - [News evidence](contracts/NEWS_EVIDENCE.md)
 - [Evidence lanes](contracts/EVIDENCE_LANES.md)
 - [Hosting boundaries](contracts/HOSTING_BOUNDARIES.md)
+- [Release control](contracts/RELEASE_CONTROL.md)
 - [Preview isolation](contracts/PREVIEW_ISOLATION.md)
 - [Assistant state](contracts/ASSISTANT_STATE.md)
 - [Assistant orchestration](contracts/ASSISTANT_ORCHESTRATION.md)

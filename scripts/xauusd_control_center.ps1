@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "CodeRevision", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync")]
     [string]$ServiceKey = "",
@@ -28,8 +28,9 @@ $watchdogLog = Join-Path $logRoot "control-watchdog.jsonl"
 $watchdogHeartbeatPath = Join-Path $moduleRoot ".local\forward\control-watchdog-heartbeat.json"
 $runtimeCodeStatePath = Join-Path $moduleRoot ".local\forward\runtime-code-state.json"
 $runtimeUpdateStatePath = Join-Path $moduleRoot ".local\forward\runtime-update-state.json"
-$dashboardSyncConfigPath = Join-Path $moduleRoot ".local\forward\dashboard-sync.json"
-$runtimeUpdateCheckInterval = [TimeSpan]::FromMinutes(5)
+$releaseControlStatePath = Join-Path $moduleRoot ".local\forward\release-control-state.json"
+$releaseHistoryPath = Join-Path $moduleRoot ".local\forward\release-control-history.jsonl"
+$releaseLockPath = Join-Path $moduleRoot ".local\forward\release-control.lock"
 $runtimePreflightContractVersion = "isolated-critical-status-diagnostics-v4"
 $preflightDiagnosticMaxCharacters = 2048
 $codeReloadTimeout = [TimeSpan]::FromMinutes(5)
@@ -45,6 +46,14 @@ $runtimeControlFileNames = @(
     "xauusd_watchdog_guard_launcher.vbs"
 )
 $collectorSecretsPath = Join-Path $repositoryRoot ".local\secrets\collector-keys.json"
+$workerName = "aurum-signal-room"
+$workerUrl = "https://aurum-signal-room.yiyousiow1234.workers.dev"
+$cloudflareAccountId = "48ce531f39e2310b4c858c8916a01d51"
+$releaseSchemaVersion = "stable-candidate-release-v1"
+$candidateDiscoveryInterval = [TimeSpan]::FromMinutes(5)
+$releaseLockOwnerGrace = [TimeSpan]::FromSeconds(30)
+$bootstrapAcceptedCandidateWorker = "dd823aa4-20f0-47e1-9255-1b785a4c17b0"
+$bootstrapAcceptedCandidateRevision = "14c055a35040fa963700c988f770c9bb52fa669e"
 
 function Get-UserEnvironmentValue {
     param([Parameter(Mandatory = $true)][string]$Name)
@@ -175,93 +184,597 @@ function Write-RuntimeUpdateState {
     Move-Item -LiteralPath $temporary -Destination $runtimeUpdateStatePath -Force
 }
 
-function Get-DeploymentStatusUrl {
-    $environmentUrl = [Environment]::GetEnvironmentVariable(
-        "CLOUDFLARE_INGEST_URL", "User"
+function Get-ReleaseControlState {
+    if (-not (Test-Path -LiteralPath $releaseControlStatePath)) { return $null }
+    try {
+        Get-Content -LiteralPath $releaseControlStatePath -Raw | ConvertFrom-Json
+    } catch { $null }
+}
+
+function Write-ReleaseControlState {
+    param([Parameter(Mandatory = $true)][object]$State)
+    $directory = Split-Path -Parent $releaseControlStatePath
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $temporary = "$releaseControlStatePath.tmp"
+    $State | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $temporary -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination $releaseControlStatePath -Force
+}
+
+function Write-ReleaseHistory {
+    param([string]$Event, [object]$Release, [hashtable]$Detail = @{})
+    $directory = Split-Path -Parent $releaseHistoryPath
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    [pscustomobject]@{
+        occurred_at = [DateTimeOffset]::UtcNow.ToString("o")
+        event = $Event
+        release = $Release
+        detail = $Detail
+    } | ConvertTo-Json -Compress -Depth 12 | Add-Content -LiteralPath $releaseHistoryPath -Encoding UTF8
+}
+
+function New-ReleaseIdentity {
+    param(
+        [Parameter(Mandatory = $true)][string]$GitSha,
+        [Parameter(Mandatory = $true)][string]$WorkerVersionId,
+        [Parameter(Mandatory = $true)][string]$WindowsRevision,
+        [string]$Branch = "",
+        [string]$PullRequest = "",
+        [string]$ValidationState = "NEW"
     )
-    if ($environmentUrl -and $environmentUrl.StartsWith("https://")) {
-        return $environmentUrl.Trim()
+    [pscustomobject]@{
+        git_sha = $GitSha
+        worker_version_id = $WorkerVersionId
+        windows_revision = $WindowsRevision
+        branch = $Branch
+        pull_request = $PullRequest
+        compatibility_state = "PENDING"
+        cutover_order = "PAUSE_SYNC_WINDOWS_WORKER_RESUME_SYNC"
+        validation_state = $ValidationState
+        validation_key = "$WorkerVersionId`:$GitSha"
+        validation = $null
+        discovered_at = [DateTimeOffset]::UtcNow.ToString("o")
     }
-    if (-not (Test-Path -LiteralPath $dashboardSyncConfigPath)) { return $null }
-    try {
-        $config = Get-Content -LiteralPath $dashboardSyncConfigPath -Raw | ConvertFrom-Json
-        $targets = @($config.targets | Where-Object {
-            $_.enabled -ne $false -and
-            ([string]$_.remote_ingest_url).StartsWith("https://")
-        })
-        $cloudflare = $targets | Where-Object {
-            ([string]$_.name) -eq "cloudflare" -or
-            ([Uri]$_.remote_ingest_url).Host.EndsWith("workers.dev")
-        } | Select-Object -First 1
-        if ($cloudflare) { return ([string]$cloudflare.remote_ingest_url).Trim() }
-        if (([string]$config.remote_ingest_url).StartsWith("https://")) {
-            return ([string]$config.remote_ingest_url).Trim()
+}
+
+function Test-ReleaseIdentity {
+    param([object]$Left, [object]$Right)
+    return [bool](
+        $Left -and $Right -and
+        [string]$Left.git_sha -eq [string]$Right.git_sha -and
+        [string]$Left.worker_version_id -eq [string]$Right.worker_version_id -and
+        [string]$Left.windows_revision -eq [string]$Right.windows_revision
+    )
+}
+
+function Enter-ReleaseTransactionLock {
+    if (Test-Path -LiteralPath $releaseLockPath) {
+        $owner = $null
+        try {
+            $owner = Get-Content -LiteralPath (Join-Path $releaseLockPath "owner.json") -Raw |
+                ConvertFrom-Json
+        } catch {}
+        $ownerAlive = $false
+        if ($owner -and [int]$owner.owner_pid -gt 0) {
+            $ownerAlive = [bool](Get-Process -Id ([int]$owner.owner_pid) -ErrorAction SilentlyContinue)
         }
-    } catch {}
-    return $null
-}
-
-function Get-DeployedMainRevision {
-    $url = Get-DeploymentStatusUrl
-    if (-not $url) { return $null }
-    try {
-        $response = Invoke-RestMethod -Method Get -Uri $url -TimeoutSec 5
-        $revision = [string]$response.main_revision
-        if ($response.status -eq "OK" -and $revision -match '^[0-9a-f]{40}$') {
-            return $revision
-        }
-    } catch {}
-    return $null
-}
-
-function Get-VerifiedOriginMain {
-    try {
-        & git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=30 `
-            -C $repositoryRoot fetch origin main --quiet 2>$null
-        if ($LASTEXITCODE -ne 0) { return $null }
-        $revision = (& git -C $repositoryRoot rev-parse origin/main 2>$null).Trim()
-        if ($LASTEXITCODE -eq 0 -and $revision -match '^[0-9a-f]{40}$') {
-            Write-RuntimeUpdateState @{
-                last_remote_check = [DateTimeOffset]::UtcNow.ToString("o")
-                last_remote_revision = $revision
-            }
-            return $revision
-        }
-    } catch {}
-    return $null
-}
-
-function Test-RevisionDescendsFrom {
-    param([string]$Ancestor, [string]$Candidate)
-    if (-not $Ancestor -or -not $Candidate) { return $false }
-    & git -C $repositoryRoot merge-base --is-ancestor $Ancestor $Candidate 2>$null
-    return $LASTEXITCODE -eq 0
-}
-
-function Test-MainCandidate {
-    param([string]$CurrentRevision, [string]$CandidateRevision)
-    if (-not $CandidateRevision -or $CandidateRevision -eq $CurrentRevision) {
-        return $false
-    }
-    $state = Get-RuntimeUpdateState
-    if (
-        $state -and
-        [string]$state.failed_revision -eq $CandidateRevision -and
-        [string]$state.failed_preflight_contract -eq $runtimePreflightContractVersion
-    ) {
-        return $false
-    }
-    $acceptedMain = if ($state) { [string]$state.accepted_main_revision } else { "" }
-    if ($acceptedMain) {
-        # A PR runtime may be bootstrapped before a squash merge.  In that case
-        # the new main commit is not a descendant of the PR commit, but it must
-        # still advance the last independently verified main checkpoint.
-        return (
-            $CandidateRevision -ne $acceptedMain -and
-            (Test-RevisionDescendsFrom $acceptedMain $CandidateRevision)
+        $acquired = [DateTimeOffset]::MinValue
+        $ageKnown = $owner -and [DateTimeOffset]::TryParse(
+            [string]$owner.acquired_at, [ref]$acquired
         )
+        $lockCreated = [DateTimeOffset](Get-Item -LiteralPath $releaseLockPath).CreationTimeUtc
+        $stale = (-not $ownerAlive) -and (
+            $ageKnown -or
+            ([DateTimeOffset]::UtcNow - $lockCreated) -ge $releaseLockOwnerGrace
+        )
+        if (-not $stale) { return $false }
+        # The path is fixed below the runtime state root. Only an abandoned lock
+        # whose owner is gone is removed; release state/history are untouched.
+        Remove-Item -LiteralPath $releaseLockPath -Recurse -Force -ErrorAction Stop
+        Write-ReleaseHistory -Event "ABANDONED_LOCK_RECOVERED" -Release $null `
+            -Detail @{ owner_pid = if ($owner) { [int]$owner.owner_pid } else { 0 } }
     }
-    return Test-RevisionDescendsFrom $CurrentRevision $CandidateRevision
+    try {
+        New-Item -ItemType Directory -Path $releaseLockPath -ErrorAction Stop | Out-Null
+        [pscustomobject]@{
+            owner_pid = $PID
+            acquired_at = [DateTimeOffset]::UtcNow.ToString("o")
+        } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $releaseLockPath "owner.json") -Encoding UTF8
+        $script:releaseTransactionLockHeld = $true
+        return $true
+    } catch { return $false }
+}
+
+function Exit-ReleaseTransactionLock {
+    if ($script:releaseTransactionLockHeld -and (Test-Path -LiteralPath $releaseLockPath)) {
+        Remove-Item -LiteralPath $releaseLockPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $script:releaseTransactionLockHeld = $false
+}
+
+function Invoke-WranglerJson {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+    $webRoot = Join-Path $repositoryRoot "web"
+    Push-Location $webRoot
+    try {
+        $output = @(& npx.cmd wrangler @Arguments --json 2>$null)
+        if ($LASTEXITCODE -ne 0) { throw "Wrangler command failed." }
+        ($output -join "`n") | ConvertFrom-Json
+    } finally { Pop-Location }
+}
+
+function Get-CloudflareDeployment {
+    Invoke-WranglerJson -Arguments @("deployments", "status", "--name", $workerName)
+}
+
+function Get-CloudflareVersions {
+    @(Invoke-WranglerJson -Arguments @("versions", "list", "--name", $workerName))
+}
+
+function Invoke-CloudflareDeployment {
+    param(
+        [Parameter(Mandatory = $true)][string]$StableVersionId,
+        [string]$CandidateVersionId = "",
+        [Parameter(Mandatory = $true)][string]$Message
+    )
+    $specifications = @("$StableVersionId@100")
+    if ($CandidateVersionId) { $specifications += "$CandidateVersionId@0" }
+    $webRoot = Join-Path $repositoryRoot "web"
+    Push-Location $webRoot
+    try {
+        $null = @(& npx.cmd wrangler versions deploy @specifications --name $workerName --yes --message $Message 2>&1)
+        if ($LASTEXITCODE -ne 0) { throw "Cloudflare deployment failed." }
+    } finally { Pop-Location }
+}
+
+function Get-ReleaseGitShaFromVersion {
+    param([Parameter(Mandatory = $true)][object]$Version)
+    $message = [string]$Version.annotations.'workers/message'
+    if ($message -match '(?i)release:([0-9a-f]{40})') { return $matches[1].ToLowerInvariant() }
+    return $null
+}
+
+function Get-ReleaseBranchFromVersion {
+    param([Parameter(Mandatory = $true)][object]$Version)
+    $message = [string]$Version.annotations.'workers/message'
+    if ($message -match '(?i)branch:([^\s]+)') { return $matches[1] }
+    return [string]$Version.annotations.'workers/alias'
+}
+
+function Get-DeploymentVersion {
+    param([object]$Deployment, [double]$Percentage)
+    @($Deployment.versions | Where-Object { [double]$_.percentage -eq $Percentage }) |
+        Select-Object -First 1
+}
+
+function New-ReleaseControlState {
+    param([object]$Stable, [object]$Candidate = $null)
+    [pscustomobject]@{
+        schema_version = $releaseSchemaVersion
+        stable = $Stable
+        candidate = $Candidate
+        previous_stable = $null
+        queued_candidate = $null
+        transaction = $null
+        deployment_status = "READY"
+        drift = $null
+        last_candidate_check = $null
+        updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+}
+
+function Initialize-ReleaseControl {
+    $existing = Get-ReleaseControlState
+    if ($existing) { return $existing }
+    $deployment = Get-CloudflareDeployment
+    $stableVersion = Get-DeploymentVersion -Deployment $deployment -Percentage 100
+    if (-not $stableVersion) { throw "Exactly one 100% Stable Worker version is required." }
+    $runtime = Get-RuntimeCodeState
+    $revision = if ($runtime) { [string]$runtime.applied_revision } else { Get-CodeRevision }
+    if ($revision -notmatch '^[0-9a-f]{40}$') { throw "Stable Windows revision is unavailable." }
+    $stable = New-ReleaseIdentity -GitSha $revision `
+        -WorkerVersionId ([string]$stableVersion.version_id) `
+        -WindowsRevision $revision -Branch "main" -ValidationState "PASSED"
+    $stable.compatibility_state = "PASSED"
+    $acceptedPlacement = @($deployment.versions | Where-Object {
+        [string]$_.version_id -eq $bootstrapAcceptedCandidateWorker -and
+        [double]$_.percentage -eq 0
+    }).Count -eq 1
+    $accepted = $null
+    if ($acceptedPlacement) {
+        $accepted = New-ReleaseIdentity -GitSha $bootstrapAcceptedCandidateRevision `
+            -WorkerVersionId $bootstrapAcceptedCandidateWorker `
+            -WindowsRevision $bootstrapAcceptedCandidateRevision `
+            -Branch "fix/worker-cpu-headroom" -PullRequest "268" `
+            -ValidationState "PASSED"
+        $accepted.compatibility_state = "PASSED"
+        $accepted.validation = [pscustomobject]@{
+            key = [string]$accepted.validation_key
+            repository = "PASSED"
+            windows = "PASSED"
+            cloudflare = "PASSED"
+            accepted_before_release_control = $true
+            cpu_evidence = [pscustomobject]@{
+                source = "CLOUDFLARE_WORKERS_OBSERVABILITY"
+                invocations = 56
+                max_cpu_ms = 11
+                p99_cpu_ms = 11
+                exceeded_cpu = 0
+                responses_5xx = 0
+                observed_at = "2026-08-20T12:11:10Z"
+            }
+        }
+    }
+    $state = New-ReleaseControlState -Stable $stable -Candidate $accepted
+    Write-ReleaseControlState -State $state
+    Write-ReleaseHistory -Event "BOOTSTRAPPED" -Release $stable
+    if ($accepted) {
+        Write-ReleaseHistory -Event "ACCEPTED_CANDIDATE_IMPORTED" -Release $accepted
+    }
+    return $state
+}
+
+function Get-CandidateChangedFiles {
+    param([string]$StableRevision, [string]$CandidateRevision)
+    $changed = @(& git -C $repositoryRoot diff --name-only $StableRevision $CandidateRevision 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw "Candidate boundary classification failed." }
+    @($changed | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+}
+
+function Test-AutomaticStorageCompatibility {
+    param([string[]]$ChangedFiles)
+    # Schema evolution is never inferred from a green unit suite. A release
+    # containing a storage migration needs a separate coordinated migration
+    # protocol before this controller may authorize Promote or Reverse.
+    return @($ChangedFiles | Where-Object {
+        $_ -like "web/drizzle/*.sql" -or
+        $_ -like "web/drizzle/meta/*" -or
+        $_ -match '(^|/)migrations?/'
+    }).Count -eq 0
+}
+
+function Test-RequiredGitHubChecks {
+    param([Parameter(Mandatory = $true)][string]$Revision)
+    try {
+        $json = @(& gh api --method GET `
+            "repos/yiyousiow000814/XAUUSD-Forecaster/commits/$Revision/check-runs" 2>$null) -join "`n"
+        if ($LASTEXITCODE -ne 0) { return "PENDING" }
+        $runs = @(($json | ConvertFrom-Json).check_runs)
+        if ($runs.Count -eq 0 -or @($runs | Where-Object { $_.status -ne "completed" }).Count -gt 0) {
+            return "PENDING"
+        }
+        $bad = @($runs | Where-Object { $_.conclusion -notin @("success", "neutral", "skipped") })
+        if ($bad.Count -gt 0) { return "FAILED" }
+        return "PASSED"
+    } catch { return "PENDING" }
+}
+
+function Test-SingleProductionOwner {
+    foreach ($service in @($services | Where-Object { $_.Key -in $reloadableServiceKeys })) {
+        if (@(Get-ForecasterProcesses $service).Count -ne 1) { return $false }
+    }
+    return $true
+}
+
+function Invoke-WorkersObservabilityQuery {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Filters,
+        [Parameter(Mandatory = $true)][object[]]$Calculations,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$From,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$To
+    )
+    $token = Get-UserEnvironmentValue -Name "CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN"
+    if (-not $token) { return $null }
+    $body = [pscustomobject]@{
+        queryId = "aurum-release-candidate-validation"
+        timeframe = [pscustomobject]@{
+            from = $From.ToUnixTimeMilliseconds()
+            to = $To.ToUnixTimeMilliseconds()
+        }
+        view = "calculations"
+        chart = $false
+        ignoreSeries = $true
+        parameters = [pscustomobject]@{
+            datasets = @()
+            filterCombination = "and"
+            filters = $Filters
+            calculations = $Calculations
+            limit = 10
+        }
+    }
+    $uri = "https://api.cloudflare.com/client/v4/accounts/$cloudflareAccountId/workers/observability/telemetry/query"
+    try {
+        $response = Invoke-RestMethod -Method Post -Uri $uri `
+            -Headers @{ Authorization = "Bearer $token" } `
+            -ContentType "application/json" -Body ($body | ConvertTo-Json -Depth 10) `
+            -TimeoutSec 30
+        if (-not $response.success) { return $null }
+        return $response.result
+    } catch { return $null }
+}
+
+function Get-CalculationAggregate {
+    param([object]$QueryResult, [string]$Alias)
+    $calculation = @($QueryResult.calculations | Where-Object {
+        [string]$_.alias -eq $Alias
+    }) | Select-Object -First 1
+    if (-not $calculation -or @($calculation.aggregates).Count -eq 0) { return $null }
+    return $calculation.aggregates[0].value
+}
+
+function Get-CandidatePlatformEvidence {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$From,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$To,
+        [int]$ExpectedInvocations = 1
+    )
+    $baseFilters = @(
+        [pscustomobject]@{ key='$metadata.service'; operation='eq'; type='string'; value=$workerName },
+        [pscustomobject]@{ key='$workers.scriptVersion.id'; operation='eq'; type='string'; value=[string]$Candidate.worker_version_id }
+    )
+    $base = Invoke-WorkersObservabilityQuery -From $From -To $To `
+        -Filters $baseFilters -Calculations @(
+            [pscustomobject]@{ operator='count'; alias='invocations' },
+            [pscustomobject]@{ key='$workers.cpuTimeMs'; keyType='number'; operator='max'; alias='max_cpu_ms' },
+            [pscustomobject]@{ key='$workers.cpuTimeMs'; keyType='number'; operator='p99'; alias='p99_cpu_ms' },
+            [pscustomobject]@{ key='$workers.wallTimeMs'; keyType='number'; operator='max'; alias='max_wall_ms' }
+        )
+    if (-not $base) { return $null }
+    $exceeded = Invoke-WorkersObservabilityQuery -From $From -To $To `
+        -Filters @($baseFilters + [pscustomobject]@{
+            key='$workers.outcome'; operation='eq'; type='string'; value='exceededCpu'
+        }) -Calculations @([pscustomobject]@{ operator='count'; alias='exceeded_cpu' })
+    $failures = Invoke-WorkersObservabilityQuery -From $From -To $To `
+        -Filters @($baseFilters + [pscustomobject]@{
+            key='$workers.event.response.status'; operation='gte'; type='number'; value=500
+        }) -Calculations @([pscustomobject]@{ operator='count'; alias='responses_5xx' })
+    if (-not $exceeded -or -not $failures) { return $null }
+    $invocations = Get-CalculationAggregate -QueryResult $base -Alias "invocations"
+    $maxCpu = Get-CalculationAggregate -QueryResult $base -Alias "max_cpu_ms"
+    $p99Cpu = Get-CalculationAggregate -QueryResult $base -Alias "p99_cpu_ms"
+    $maxWall = Get-CalculationAggregate -QueryResult $base -Alias "max_wall_ms"
+    $exceededCpu = Get-CalculationAggregate -QueryResult $exceeded -Alias "exceeded_cpu"
+    $responses5xx = Get-CalculationAggregate -QueryResult $failures -Alias "responses_5xx"
+    if (@($invocations, $maxCpu, $p99Cpu, $maxWall, $exceededCpu, $responses5xx |
+        Where-Object { $null -eq $_ }).Count -gt 0) { return $null }
+    $evidence = [pscustomobject]@{
+        source = "CLOUDFLARE_WORKERS_OBSERVABILITY"
+        worker_version_id = [string]$Candidate.worker_version_id
+        from = $From.ToString("o")
+        to = $To.ToString("o")
+        invocations = [int]$invocations
+        max_cpu_ms = [double]$maxCpu
+        p99_cpu_ms = [double]$p99Cpu
+        max_wall_ms = [double]$maxWall
+        exceeded_cpu = [int]$exceededCpu
+        responses_5xx = [int]$responses5xx
+    }
+    $evidence | Add-Member -NotePropertyName passed -NotePropertyValue ([bool](
+        $evidence.invocations -ge $ExpectedInvocations -and
+        $evidence.exceeded_cpu -eq 0 -and $evidence.responses_5xx -eq 0
+    ))
+    return $evidence
+}
+
+function Invoke-CandidateWorkerValidation {
+    param([Parameter(Mandatory = $true)][object]$Candidate)
+    $header = @{
+        "Cloudflare-Workers-Version-Overrides" =
+            "$workerName=`"$([string]$Candidate.worker_version_id)`""
+    }
+    $results = @()
+    $startedAt = [DateTimeOffset]::UtcNow
+    foreach ($path in @("/", "/health", "/audit", "/api/status", "/api/audit", "/api/learning")) {
+        try {
+            $response = Invoke-WebRequest -UseBasicParsing -Method Get `
+                -Uri "$workerUrl$path" -Headers $header -TimeoutSec 30
+            $results += [pscustomobject]@{
+                route = $path
+                status = [int]$response.StatusCode
+                passed = [bool]($response.StatusCode -lt 500)
+            }
+        } catch {
+            $status = if ($_.Exception.Response) {
+                [int]$_.Exception.Response.StatusCode
+            } else { 0 }
+            $results += [pscustomobject]@{
+                route = $path
+                status = $status
+                passed = $false
+            }
+        }
+    }
+    # Workers Logs ingestion is asynchronous. A short bounded wait keeps the
+    # validation outside the critical heartbeat owner while allowing the exact
+    # directed invocations to become queryable.
+    Start-Sleep -Seconds 5
+    $endedAt = [DateTimeOffset]::UtcNow
+    $platform = Get-CandidatePlatformEvidence -Candidate $Candidate `
+        -From $startedAt.AddMinutes(-1) -To $endedAt.AddMinutes(1) `
+        -ExpectedInvocations $results.Count
+    [pscustomobject]@{
+        passed = [bool](@($results | Where-Object { -not $_.passed }).Count -eq 0)
+        routes = $results
+        cpu_evidence = $platform
+    }
+}
+
+function Set-CloudflareCandidatePointer {
+    param([object]$Stable, [object]$Candidate)
+    Invoke-CloudflareDeployment `
+        -StableVersionId ([string]$Stable.worker_version_id) `
+        -CandidateVersionId ([string]$Candidate.worker_version_id) `
+        -Message "stage release candidate $([string]$Candidate.validation_key)"
+}
+
+function Invoke-AutomaticCandidateValidation {
+    param([Parameter(Mandatory = $true)][object]$Candidate)
+    $state = Get-ReleaseControlState
+    if (-not $state -or -not (Test-ReleaseIdentity $state.candidate $Candidate)) { return $false }
+    $state.candidate.validation_state = "STAGING"
+    $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+    Write-ReleaseControlState -State $state
+    try {
+        & git -C $repositoryRoot fetch origin --quiet 2>$null
+        & git -C $repositoryRoot cat-file -e "$([string]$Candidate.git_sha)^{commit}" 2>$null
+        if ($LASTEXITCODE -ne 0) { throw "Candidate Git commit is unavailable." }
+        if ([string]$Candidate.git_sha -ne [string]$Candidate.windows_revision) {
+            throw "Worker and Windows revisions do not identify one release."
+        }
+        $state.candidate.validation_state = "TESTING"
+        Write-ReleaseControlState -State $state
+        if (-not (Invoke-ProductionShapePreflight -Revision ([string]$Candidate.windows_revision))) {
+            throw "Isolated Windows preflight failed."
+        }
+        $checks = Test-RequiredGitHubChecks -Revision ([string]$Candidate.git_sha)
+        if ($checks -eq "FAILED") { throw "Required GitHub checks failed." }
+        if ($checks -eq "PENDING") {
+            $state.candidate.validation = [pscustomobject]@{
+                key = [string]$Candidate.validation_key
+                repository = "PENDING"
+                windows = "PASSED"
+                cloudflare = "PENDING"
+                tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            Write-ReleaseControlState -State $state
+            return $false
+        }
+        $changed = @(Get-CandidateChangedFiles `
+            -StableRevision ([string]$state.stable.git_sha) `
+            -CandidateRevision ([string]$Candidate.git_sha))
+        if (-not (Test-AutomaticStorageCompatibility -ChangedFiles $changed)) {
+            $state.candidate.compatibility_state = "REVIEW_REQUIRED"
+            $state.candidate.validation = [pscustomobject]@{
+                key = [string]$Candidate.validation_key
+                repository = "PASSED"
+                windows = "PASSED"
+                cloudflare = "PENDING"
+                reason = "COORDINATED_STORAGE_MIGRATION_REQUIRED"
+                tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            Write-ReleaseControlState -State $state
+            return $false
+        }
+        $workerChanged = @($changed | Where-Object { $_ -like "web/*" }).Count -gt 0
+        Set-CloudflareCandidatePointer -Stable $state.stable -Candidate $Candidate
+        $cloudflare = [pscustomobject]@{ passed = $true; routes = @(); cpu_evidence = "NOT_REQUIRED" }
+        if ($workerChanged) {
+            $cloudflare = Invoke-CandidateWorkerValidation -Candidate $Candidate
+            if (-not $cloudflare.passed) { throw "Directed Worker validation failed." }
+            if (-not $cloudflare.cpu_evidence) {
+                $state.candidate.validation = [pscustomobject]@{
+                    key = [string]$Candidate.validation_key
+                    repository = "PASSED"
+                    windows = "PASSED"
+                    cloudflare = "TESTING"
+                    reason = "PLATFORM_CPU_EVIDENCE_REQUIRED"
+                    routes = $cloudflare.routes
+                    tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+                }
+                Write-ReleaseControlState -State $state
+                return $false
+            }
+            if (-not $cloudflare.cpu_evidence.passed) {
+                throw "Cloudflare platform CPU or 5xx validation failed."
+            }
+        }
+        $state.candidate.compatibility_state = "PASSED"
+        $state.candidate.validation_state = "PASSED"
+        $state.candidate.validation = [pscustomobject]@{
+            key = [string]$Candidate.validation_key
+            repository = "PASSED"
+            windows = "PASSED"
+            cloudflare = "PASSED"
+            worker_changed = $workerChanged
+            routes = $cloudflare.routes
+            cpu_evidence = $cloudflare.cpu_evidence
+            tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+        }
+        $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "CANDIDATE_PASSED" -Release $state.candidate
+        return $true
+    } catch {
+        $state = Get-ReleaseControlState
+        if ($state -and (Test-ReleaseIdentity $state.candidate $Candidate)) {
+            $state.candidate.validation_state = "FAILED"
+            $state.candidate.validation = [pscustomobject]@{
+                key = [string]$Candidate.validation_key
+                error = Protect-PreflightDiagnosticText $_.Exception.Message
+                tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            Write-ReleaseControlState -State $state
+            Write-ReleaseHistory -Event "CANDIDATE_FAILED" -Release $state.candidate
+        }
+        return $false
+    }
+}
+
+function Find-NewCandidateRelease {
+    $state = Get-ReleaseControlState
+    if (-not $state) { return $null }
+    $versions = @(Get-CloudflareVersions | Sort-Object { [DateTimeOffset]$_.metadata.created_on } -Descending)
+    foreach ($version in $versions) {
+        $sha = Get-ReleaseGitShaFromVersion -Version $version
+        if (-not $sha -or $sha -eq [string]$state.stable.git_sha) { continue }
+        $candidate = New-ReleaseIdentity -GitSha $sha `
+            -WorkerVersionId ([string]$version.id) -WindowsRevision $sha `
+            -Branch (Get-ReleaseBranchFromVersion -Version $version)
+        if ($state.transaction) {
+            $state.queued_candidate = $candidate
+            Write-ReleaseControlState -State $state
+            return $null
+        }
+        if ($state.candidate -and (Test-ReleaseIdentity $state.candidate $candidate)) {
+            return $state.candidate
+        }
+        if ($state.candidate) {
+            Write-ReleaseHistory -Event "CANDIDATE_SUPERSEDED" -Release $state.candidate `
+                -Detail @{ replacement_key = [string]$candidate.validation_key }
+        }
+        $state.candidate = $candidate
+        $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "CANDIDATE_DISCOVERED" -Release $candidate
+        return $candidate
+    }
+    return $null
+}
+
+function Invoke-CandidateDiscovery {
+    if (-not (Enter-ReleaseTransactionLock)) { return $false }
+    try {
+        $state = Get-ReleaseControlState
+        if ($state) {
+            $state.last_candidate_check = [DateTimeOffset]::UtcNow.ToString("o")
+            Write-ReleaseControlState -State $state
+        }
+        $null = Reconcile-ReleaseControlState
+        $state = Get-ReleaseControlState
+        if ($state -and $state.transaction) { return $false }
+        $candidate = Find-NewCandidateRelease
+        if (-not $candidate) { return $false }
+        if ([string]$candidate.validation_state -in @("PASSED", "FAILED")) { return $true }
+        return Invoke-AutomaticCandidateValidation -Candidate $candidate
+    } finally { Exit-ReleaseTransactionLock }
+}
+
+function Start-CandidateDiscovery {
+    $state = Get-ReleaseControlState
+    if (-not $state) { return }
+    $lastCheck = [DateTimeOffset]::MinValue
+    if ($state.last_candidate_check) {
+        [DateTimeOffset]::TryParse([string]$state.last_candidate_check, [ref]$lastCheck) | Out-Null
+    }
+    if (([DateTimeOffset]::UtcNow - $lastCheck) -lt $candidateDiscoveryInterval) { return }
+    $arguments = @(
+        "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
+        "-File", ('"{0}"' -f $PSCommandPath), "-Action", "DiscoverCandidate",
+        "-RuntimeRoot", ('"{0}"' -f $moduleRoot),
+        "-RepositoryRoot", ('"{0}"' -f $repositoryRoot)
+    )
+    Start-Process -FilePath "powershell.exe" -ArgumentList $arguments `
+        -WorkingDirectory $moduleRoot -WindowStyle Hidden | Out-Null
 }
 
 function Write-RuntimeUpdateFailure {
@@ -713,34 +1226,16 @@ function Invoke-ProductionShapePreflight {
     }
 }
 
-function Get-DesiredMainRevision {
-    param([string]$CurrentRevision)
-    $state = Get-RuntimeUpdateState
-    $lastCheck = [DateTimeOffset]::MinValue
-    if ($state -and $state.last_remote_check) {
-        [DateTimeOffset]::TryParse([string]$state.last_remote_check, [ref]$lastCheck) | Out-Null
-    }
-    if (([DateTimeOffset]::UtcNow - $lastCheck) -lt $runtimeUpdateCheckInterval) {
-        return $null
-    }
-    Write-RuntimeUpdateState @{
-        last_remote_check = [DateTimeOffset]::UtcNow.ToString("o")
-    }
-    $deployed = Get-DeployedMainRevision
-    if (-not $deployed -or $deployed -eq $CurrentRevision) { return $null }
-    $verified = Get-VerifiedOriginMain
-    if ($verified -eq $deployed -and (Test-MainCandidate $CurrentRevision $verified)) {
-        Write-RuntimeUpdateState @{ last_deployed_revision = $deployed }
-        return $verified
-    }
-    return $null
-}
-
 function Update-RuntimeCheckout {
     param([string]$Revision)
     if (-not $RuntimeRoot) { return $false }
     $previousRevision = Get-CodeRevision
-    if (-not (Test-MainCandidate $previousRevision $Revision)) { return $false }
+    $releaseState = Get-ReleaseControlState
+    if (-not $releaseState -or -not $releaseState.candidate -or
+        [string]$releaseState.candidate.validation_state -ne "PASSED" -or
+        [string]$releaseState.candidate.windows_revision -ne $Revision -or
+        [string]$releaseState.candidate.validation.key -ne
+            [string]$releaseState.candidate.validation_key) { return $false }
     if (-not (Invoke-ProductionShapePreflight -Revision $Revision)) { return $false }
     Write-RuntimeUpdateState @{
         update_status = "SWITCHING"
@@ -757,7 +1252,6 @@ function Update-RuntimeCheckout {
         $checkoutChanged = $true
         Sync-StableRuntimeControlFiles
         Write-RuntimeUpdateState @{
-            accepted_main_revision = $Revision
             previous_revision = $previousRevision
             staged_revision = $Revision
             staged_at = [DateTimeOffset]::UtcNow.ToString("o")
@@ -848,9 +1342,10 @@ function Get-ServiceProcessStartedAt {
 function Test-CodeReloadHealth {
     param(
         [DateTimeOffset]$ReloadStarted,
-        [string[]]$AllowedWorkerStates = @("STARTING", "RUNNING")
+        [string[]]$AllowedWorkerStates = @("STARTING", "RUNNING"),
+        [string[]]$RequiredServiceKeys = $reloadableServiceKeys
     )
-    foreach ($service in @($services | Where-Object { $_.Key -in $reloadableServiceKeys })) {
+    foreach ($service in @($services | Where-Object { $_.Key -in $RequiredServiceKeys })) {
         if (@(Get-ForecasterProcesses $service).Count -eq 0) { return $false }
     }
     foreach ($heartbeatSpec in @(
@@ -869,11 +1364,14 @@ function Test-CodeReloadHealth {
             return $false
         }
     }
-    try {
-        $response = Invoke-WebRequest -UseBasicParsing `
-            -Uri "http://127.0.0.1:8765/api/health" -TimeoutSec 2
-        if ($response.StatusCode -ne 200) { return $false }
-    } catch { return $false }
+    if ("api" -in $RequiredServiceKeys) {
+        try {
+            $response = Invoke-WebRequest -UseBasicParsing `
+                -Uri "http://127.0.0.1:8765/api/health" -TimeoutSec 2
+            if ($response.StatusCode -ne 200) { return $false }
+        } catch { return $false }
+    }
+    if ("sync" -notin $RequiredServiceKeys) { return $true }
     $statusFile = Join-Path $moduleRoot ".local\forward\dashboard-sync-status.json"
     if (-not (Test-Path -LiteralPath $statusFile)) { return $false }
     try {
@@ -890,26 +1388,42 @@ function Test-CodeReloadHealth {
 }
 
 function Restart-CodeReloadableServices {
-    param([string]$Revision)
+    param([string]$Revision, [string[]]$DeferredServiceKeys = @())
     $targets = @($services | Where-Object { $_.Key -in $reloadableServiceKeys })
+    $immediateTargets = @($targets | Where-Object { $_.Key -notin $DeferredServiceKeys })
     $reloadStarted = [DateTimeOffset]::UtcNow
     Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_STARTED" `
         -Service "collector,annotator,api,sync" -State $Revision
     foreach ($service in $targets) { Stop-ForecasterService $service }
     Start-Sleep -Milliseconds 800
-    foreach ($service in $targets) {
+    foreach ($service in $immediateTargets) {
         Start-ForecasterService $service -SkipExistingCheck
     }
     $deadline = [DateTimeOffset]::UtcNow.Add($codeReloadTimeout)
     do {
         Start-Sleep -Milliseconds 500
         Write-WatchdogHeartbeat
-        $healthy = Test-CodeReloadHealth -ReloadStarted $reloadStarted
+        $healthy = Test-CodeReloadHealth -ReloadStarted $reloadStarted `
+            -RequiredServiceKeys @($immediateTargets.Key)
     } while (-not $healthy -and [DateTimeOffset]::UtcNow -lt $deadline)
     if (-not $healthy) { throw "Code revision reload failed functional health checks." }
     Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_HEALTHY" `
         -Service "collector,annotator,api,sync" -State $Revision
     return $reloadStarted
+}
+
+function Complete-DeferredServiceReload {
+    param([DateTimeOffset]$ReloadStarted, [string[]]$DeferredServiceKeys)
+    foreach ($service in @($services | Where-Object { $_.Key -in $DeferredServiceKeys })) {
+        Start-ForecasterService $service -SkipExistingCheck
+    }
+    $deadline = [DateTimeOffset]::UtcNow.Add($codeReloadTimeout)
+    do {
+        Start-Sleep -Milliseconds 500
+        Write-WatchdogHeartbeat
+        $healthy = Test-CodeReloadHealth -ReloadStarted $ReloadStarted
+    } while (-not $healthy -and [DateTimeOffset]::UtcNow -lt $deadline)
+    if (-not $healthy) { throw "Deferred release services failed functional health checks." }
 }
 
 function Invoke-RuntimeCandidateActivation {
@@ -995,6 +1509,13 @@ function Start-RuntimeObservation {
 
 function Invoke-RuntimeRollback {
     param([string]$FailedRevision, [string]$PreviousRevision, [string]$Reason)
+    $releaseLockAcquiredHere = $false
+    $releaseBeforeRollback = Get-ReleaseControlState
+    if ($releaseBeforeRollback -and $releaseBeforeRollback.transaction -and
+        -not $script:releaseTransactionLockHeld) {
+        if (-not (Enter-ReleaseTransactionLock)) { return $false }
+        $releaseLockAcquiredHere = $true
+    }
     try {
         if (-not $PreviousRevision -or $PreviousRevision -notmatch '^[0-9a-f]{40}$') {
             throw "previous revision is unavailable"
@@ -1008,12 +1529,294 @@ function Invoke-RuntimeRollback {
             -Message "Candidate observation failed and the previous version was restored: $Reason"
         Write-WatchdogEvent -Event "RUNTIME_ROLLBACK_APPLIED" `
             -Service "all" -State $PreviousRevision
+        $releaseState = Get-ReleaseControlState
+        if ($releaseState -and $releaseState.transaction -and
+            [string]$releaseState.transaction.type -eq "PROMOTE") {
+            $prior = $releaseState.transaction.previous
+            Invoke-CloudflareDeployment `
+                -StableVersionId ([string]$prior.worker_version_id) `
+                -Message "automatic release reverse $([string]$releaseState.transaction.id)"
+            $releaseState.candidate.validation_state = "FAILED"
+            $releaseState.candidate.validation = [pscustomobject]@{
+                key = [string]$releaseState.candidate.validation_key
+                error = "OBSERVATION_FAILED"
+                tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            $releaseState.transaction = $null
+            $releaseState.deployment_status = "READY"
+            $releaseState.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+            Write-ReleaseControlState -State $releaseState
+            Write-ReleaseHistory -Event "PROMOTION_REVERSED" -Release $prior `
+                -Detail @{ reason = $Reason }
+        }
         return $true
     } catch {
         Write-RuntimeUpdateFailure -Revision $FailedRevision -Status "ROLLBACK_FAILED" `
             -Message "Candidate observation and automatic rollback both failed; inspect local services: $Reason; $($_.Exception.Message)"
         return $false
+    } finally {
+        if ($releaseLockAcquiredHere) { Exit-ReleaseTransactionLock }
     }
+}
+
+function Test-CloudflareReleasePlacement {
+    param([object]$Stable, [object]$Candidate = $null)
+    $deployment = Get-CloudflareDeployment
+    $stablePlacement = @($deployment.versions | Where-Object {
+        [string]$_.version_id -eq [string]$Stable.worker_version_id -and
+        [double]$_.percentage -eq 100
+    }).Count -eq 1
+    if (-not $stablePlacement) { return $false }
+    if ($Candidate) {
+        return @($deployment.versions | Where-Object {
+            [string]$_.version_id -eq [string]$Candidate.worker_version_id -and
+            [double]$_.percentage -eq 0
+        }).Count -eq 1
+    }
+    return $true
+}
+
+function Start-ReleasePromotion {
+    if (-not (Enter-ReleaseTransactionLock)) { throw "Another release transaction is active." }
+    try {
+        $state = Get-ReleaseControlState
+        if (-not $state -or $state.transaction) { throw "Release state is not ready." }
+        $candidate = $state.candidate
+        if (-not $candidate -or [string]$candidate.validation_state -ne "PASSED") {
+            throw "Candidate has not passed validation."
+        }
+        if ([string]$candidate.validation.key -ne [string]$candidate.validation_key -or
+            [string]$candidate.validation_key -ne
+                "$([string]$candidate.worker_version_id):$([string]$candidate.git_sha)") {
+            throw "Candidate validation does not belong to this release."
+        }
+        if ([string]$candidate.git_sha -ne [string]$candidate.windows_revision -or
+            [string]$candidate.compatibility_state -ne "PASSED") {
+            throw "Worker and Windows compatibility is not authorized."
+        }
+        if (-not (Test-CloudflareReleasePlacement -Stable $state.stable -Candidate $candidate)) {
+            throw "Cloudflare Stable/Candidate placement drifted."
+        }
+        $runtime = Get-RuntimeCodeState
+        if (-not $runtime -or [string]$runtime.applied_revision -ne [string]$state.stable.windows_revision) {
+            throw "Windows Stable revision drifted."
+        }
+        if (-not (Test-SingleProductionOwner)) { throw "Exactly one Windows production owner is required." }
+        $transaction = [pscustomobject]@{
+            id = [guid]::NewGuid().ToString()
+            type = "PROMOTE"
+            phase = "PRECHECK"
+            target = $candidate
+            previous = $state.stable
+            started_at = [DateTimeOffset]::UtcNow.ToString("o")
+        }
+        $state.previous_stable = $state.stable
+        $state.transaction = $transaction
+        $state.deployment_status = "PROMOTING"
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "PROMOTION_STARTED" -Release $candidate
+
+        if (-not (Update-RuntimeCheckout -Revision ([string]$candidate.windows_revision))) {
+            throw "Candidate Windows checkout failed."
+        }
+        $state = Get-ReleaseControlState
+        $state.transaction.phase = "CUTOVER"
+        Write-ReleaseControlState -State $state
+        $reloadStarted = Restart-CodeReloadableServices `
+            -Revision ([string]$candidate.windows_revision) `
+            -DeferredServiceKeys @("sync")
+        Invoke-CloudflareDeployment `
+            -StableVersionId ([string]$candidate.worker_version_id) `
+            -CandidateVersionId ([string]$state.stable.worker_version_id) `
+            -Message "promote release $([string]$state.transaction.id)"
+        Complete-DeferredServiceReload -ReloadStarted $reloadStarted `
+            -DeferredServiceKeys @("sync")
+        Start-RuntimeObservation -Revision ([string]$candidate.windows_revision) `
+            -PreviousRevision ([string]$state.stable.windows_revision) `
+            -HealthBoundary $reloadStarted
+        Write-RuntimeCodeState -Revision ([string]$candidate.windows_revision)
+        Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_APPLIED" `
+            -Service "collector,annotator,api,sync" `
+            -State ([string]$candidate.windows_revision)
+        $state = Get-ReleaseControlState
+        $state.transaction.phase = "OBSERVING"
+        $state.deployment_status = "OBSERVING"
+        Write-ReleaseControlState -State $state
+        return $true
+    } catch {
+        $failure = $_.Exception.Message
+        $state = Get-ReleaseControlState
+        if ($state -and $state.transaction -and [string]$state.transaction.type -eq "PROMOTE") {
+            Invoke-RuntimeRollback `
+                -FailedRevision ([string]$state.transaction.target.windows_revision) `
+                -PreviousRevision ([string]$state.transaction.previous.windows_revision) `
+                -Reason $failure | Out-Null
+        }
+        throw
+    } finally { Exit-ReleaseTransactionLock }
+}
+
+function Complete-ReleasePromotion {
+    $releaseLockAcquiredHere = $false
+    if (-not $script:releaseTransactionLockHeld) {
+        if (-not (Enter-ReleaseTransactionLock)) { return }
+        $releaseLockAcquiredHere = $true
+    }
+    try {
+        $state = Get-ReleaseControlState
+        if (-not $state -or -not $state.transaction -or
+            [string]$state.transaction.type -ne "PROMOTE" -or
+            [string]$state.transaction.phase -ne "OBSERVING") { return }
+        $target = $state.transaction.target
+        $previous = $state.transaction.previous
+        $state.stable = $target
+        $state.previous_stable = $previous
+        $state.candidate = $state.queued_candidate
+        $state.queued_candidate = $null
+        $state.transaction = $null
+        $state.deployment_status = "READY"
+        $state.drift = $null
+        $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "STABLE_COMMITTED" -Release $target
+    } finally {
+        if ($releaseLockAcquiredHere) { Exit-ReleaseTransactionLock }
+    }
+}
+
+function Invoke-ReleaseWindowsRestore {
+    param([Parameter(Mandatory = $true)][string]$Revision)
+    & git -C $moduleRoot checkout --detach --force --quiet $Revision 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "Cannot restore Windows revision." }
+    Sync-StableRuntimeControlFiles
+    Restart-CodeReloadableServices -Revision $Revision | Out-Null
+    Write-RuntimeCodeState -Revision $Revision
+}
+
+function Invoke-ReverseStable {
+    if (-not (Enter-ReleaseTransactionLock)) { throw "Another release transaction is active." }
+    try {
+        $state = Get-ReleaseControlState
+        if (-not $state -or $state.transaction -or -not $state.previous_stable) {
+            throw "Previous Stable is unavailable."
+        }
+        if (-not (Test-SingleProductionOwner)) { throw "Exactly one Windows production owner is required." }
+        $current = $state.stable
+        $target = $state.previous_stable
+        $state.transaction = [pscustomobject]@{
+            id = [guid]::NewGuid().ToString()
+            type = "REVERSE"
+            phase = "REVERSING"
+            target = $target
+            previous = $current
+            started_at = [DateTimeOffset]::UtcNow.ToString("o")
+        }
+        $state.deployment_status = "REVERSING"
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "REVERSE_STARTED" -Release $target
+        $syncService = $services | Where-Object Key -eq "sync" | Select-Object -First 1
+        if ($syncService) { Stop-ForecasterService $syncService }
+        Invoke-CloudflareDeployment `
+            -StableVersionId ([string]$target.worker_version_id) `
+            -Message "reverse stable $([string]$state.transaction.id)"
+        Invoke-ReleaseWindowsRestore -Revision ([string]$target.windows_revision)
+        if (-not (Test-SingleProductionOwner)) { throw "Production owner uniqueness failed after Reverse." }
+        $state = Get-ReleaseControlState
+        $state.stable = $target
+        $state.previous_stable = $current
+        $state.transaction = $null
+        $state.deployment_status = "READY"
+        $state.drift = $null
+        $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "STABLE_REVERSED" -Release $target
+        return $true
+    } catch {
+        $state = Get-ReleaseControlState
+        if ($state) {
+            $state.deployment_status = "RECOVERY_REQUIRED"
+            $state.drift = [pscustomobject]@{
+                code = "REVERSE_INCOMPLETE"
+                observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            Write-ReleaseControlState -State $state
+        }
+        throw
+    } finally { Exit-ReleaseTransactionLock }
+}
+
+function Reconcile-ReleaseControlState {
+    $state = Get-ReleaseControlState
+    if (-not $state) { return $null }
+    $deployment = Get-CloudflareDeployment
+    $runtime = Get-RuntimeCodeState
+    $observedWorker = [string](Get-DeploymentVersion -Deployment $deployment -Percentage 100).version_id
+    $observedWindows = if ($runtime) { [string]$runtime.applied_revision } else { "" }
+    if ($state.transaction) {
+        $target = $state.transaction.target
+        $targetObserved = (
+            $observedWorker -eq [string]$target.worker_version_id -and
+            $observedWindows -eq [string]$target.windows_revision
+        )
+        if ([string]$state.transaction.type -eq "REVERSE" -and $targetObserved) {
+            $state.stable = $target
+            $state.previous_stable = $state.transaction.previous
+            $state.transaction = $null
+            $state.deployment_status = "READY"
+            $state.drift = $null
+            $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+            Write-ReleaseControlState -State $state
+            Write-ReleaseHistory -Event "REVERSE_RECONCILED" -Release $target
+            return $state
+        }
+        if ([string]$state.transaction.phase -eq "OBSERVING" -and $targetObserved) {
+            $observation = Get-RuntimeUpdateState
+            if ($observation -and [string]$observation.update_status -eq "ACTIVE" -and
+                [string]$observation.activated_revision -eq [string]$target.windows_revision) {
+                Complete-ReleasePromotion
+                return Get-ReleaseControlState
+            }
+            if ($observation -and [string]$observation.update_status -eq "OBSERVING" -and
+                [string]$observation.observing_revision -eq [string]$target.windows_revision) {
+                Test-RuntimeObservation | Out-Null
+                return Get-ReleaseControlState
+            }
+            $state.deployment_status = "RECOVERY_REQUIRED"
+            $state.drift = [pscustomobject]@{
+                code = "OBSERVATION_STATE_MISSING_OR_MISMATCHED"
+                worker_version_id = $observedWorker
+                windows_revision = $observedWindows
+                observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            Write-ReleaseControlState -State $state
+            return $state
+        }
+        $state.deployment_status = "RECOVERY_REQUIRED"
+        $state.drift = [pscustomobject]@{
+            code = "INCOMPLETE_RELEASE_TRANSACTION"
+            phase = [string]$state.transaction.phase
+            worker_version_id = $observedWorker
+            windows_revision = $observedWindows
+            observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+        }
+        Write-ReleaseControlState -State $state
+        return $state
+    }
+    if ($observedWorker -ne [string]$state.stable.worker_version_id -or
+        $observedWindows -ne [string]$state.stable.windows_revision) {
+        $state.deployment_status = "DEPLOYMENT_DRIFT"
+        $state.drift = [pscustomobject]@{
+            code = "STABLE_IDENTITY_MISMATCH"
+            worker_version_id = $observedWorker
+            windows_revision = $observedWindows
+            observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+        }
+    } else {
+        $state.deployment_status = "READY"
+        $state.drift = $null
+    }
+    Write-ReleaseControlState -State $state
+    return $state
 }
 
 function Test-RuntimeObservation {
@@ -1149,6 +1952,7 @@ function Test-RuntimeObservation {
         }
         Write-WatchdogEvent -Event "RUNTIME_OBSERVATION_PASSED" `
             -Service "all" -State "$revision cycles=$cycles"
+        Complete-ReleasePromotion
         return $true
     }
     if (([DateTimeOffset]::UtcNow - $readyAt) -ge $runtimeObservationTimeout) {
@@ -1472,18 +2276,6 @@ function Start-WatchdogReplacement {
     Start-Process -FilePath $wscript -ArgumentList $arguments -WindowStyle Hidden
 }
 
-function Invoke-RuntimeCheckoutHandoff {
-    param([string]$Revision)
-    if (-not (Update-RuntimeCheckout -Revision $Revision)) { return $false }
-    Write-WatchdogEvent -Event "MAIN_RUNTIME_UPDATED" `
-        -Service "all" -State $Revision
-    # PowerShell has already parsed this supervisor process, so replacing the
-    # control files on disk cannot update its loaded functions. Hand control to
-    # the newly copied launcher before evaluating candidate health.
-    Start-WatchdogReplacement
-    return $true
-}
-
 function Invoke-ForecasterWatchdog {
     $failureCounts = @{}
     $lastRestart = @{}
@@ -1491,7 +2283,6 @@ function Invoke-ForecasterWatchdog {
         $failureCounts[$service.Key] = 0
         $lastRestart[$service.Key] = [DateTimeOffset]::MinValue
     }
-    $lastCodeReload = [DateTimeOffset]::MinValue
     $watchdogRevisionAtStart = Get-CodeRevision
     Ensure-WatchdogGuardTask
     Write-WatchdogEvent -Event "WATCHDOG_STARTED" -Service "all" -State "MONITORING"
@@ -1499,52 +2290,18 @@ function Invoke-ForecasterWatchdog {
         Write-WatchdogHeartbeat
         try {
             $currentRevision = Get-CodeRevision
-            $desiredRevision = Get-DesiredMainRevision -CurrentRevision $currentRevision
-            if ($desiredRevision -and (
-                Invoke-RuntimeCheckoutHandoff -Revision $desiredRevision
-            )) {
+            # Git/main and Worker version movement only discover Candidate work.
+            # Production checkout and traffic remain Stable until local Promote.
+            Start-CandidateDiscovery
+            $observationHealthy = Test-RuntimeObservation
+            $currentRevision = Get-CodeRevision
+            if ($currentRevision -ne $watchdogRevisionAtStart -and
+                (-not $observationHealthy -or -not (Get-ReleaseControlState).transaction)) {
+                # Only an explicit Promote/Reverse may change the checkout. Once
+                # that durable transaction finishes, hand supervision to its
+                # matching control bundle.
+                Start-WatchdogReplacement
                 return 0
-            }
-            $runtimeState = Get-RuntimeCodeState
-            $appliedRevision = if ($runtimeState) {
-                [string]$runtimeState.applied_revision
-            } else { "" }
-            if ($currentRevision -and $currentRevision -ne $appliedRevision -and (
-                [DateTimeOffset]::UtcNow - $lastCodeReload
-            ).TotalSeconds -ge 120) {
-                $lastCodeReload = [DateTimeOffset]::UtcNow
-                $updateState = Get-RuntimeUpdateState
-                $previousRevision = if ($updateState) {
-                    [string]$updateState.previous_revision
-                } else { $appliedRevision }
-                try {
-                    Invoke-RuntimeCandidateActivation `
-                        -Revision $currentRevision `
-                        -PreviousRevision $previousRevision
-                } catch {
-                    Invoke-RuntimeRollback -FailedRevision $currentRevision `
-                        -PreviousRevision $previousRevision `
-                        -Reason $_.Exception.Message | Out-Null
-                    $currentRevision = Get-CodeRevision
-                }
-                foreach ($service in $services) {
-                    $lastRestart[$service.Key] = [DateTimeOffset]::UtcNow
-                    $failureCounts[$service.Key] = 0
-                }
-                if ($currentRevision -ne $watchdogRevisionAtStart) {
-                    # The launcher that started this process may predate its own
-                    # supervisor loop, so start the newly copied launcher before
-                    # this process exits. This makes the first upgrade self-hosting.
-                    Start-WatchdogReplacement
-                    return 0
-                }
-            }
-            if (-not (Test-RuntimeObservation)) {
-                $currentRevision = Get-CodeRevision
-                if ($currentRevision -ne $watchdogRevisionAtStart) {
-                    Start-WatchdogReplacement
-                    return 0
-                }
             }
             $status = @(Get-ForecasterStatus)
             foreach ($service in $services) {
@@ -1685,12 +2442,6 @@ function Install-ProductionRuntime {
     if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
         throw "Cannot resolve the verified development revision."
     }
-    & git -C $source fetch origin main --quiet 2>$null
-    if ($LASTEXITCODE -ne 0) { throw "Cannot verify the initial origin/main checkpoint." }
-    $baseMainRevision = (& git -C $source rev-parse origin/main 2>$null).Trim()
-    if ($LASTEXITCODE -ne 0 -or $baseMainRevision -notmatch '^[0-9a-f]{40}$') {
-        throw "Cannot resolve the initial origin/main checkpoint."
-    }
     if (Test-Path -LiteralPath $runtime) {
         $inside = (& git -C $runtime rev-parse --is-inside-work-tree 2>$null).Trim()
         if ($LASTEXITCODE -ne 0 -or $inside -ne "true") {
@@ -1709,7 +2460,6 @@ function Install-ProductionRuntime {
         New-Item -ItemType Junction -Path $runtimeLocal -Target $sourceLocal | Out-Null
     }
     Write-RuntimeUpdateState @{
-        accepted_main_revision = $baseMainRevision
         bootstrap_revision = $revision
         installed_at = [DateTimeOffset]::UtcNow.ToString("o")
     }
@@ -1789,10 +2539,10 @@ function Show-ControlCenter {
 
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "XAUUSD Forecaster Control Center"
-    $form.Size = New-Object System.Drawing.Size(720, 680)
+    $form.Size = New-Object System.Drawing.Size(840, 940)
     $form.StartPosition = "CenterScreen"
     $form.ShowInTaskbar = $true
-    $form.MinimumSize = New-Object System.Drawing.Size(720, 680)
+    $form.MinimumSize = New-Object System.Drawing.Size(840, 940)
     $form.BackColor = [System.Drawing.Color]::FromArgb(235, 230, 215)
     $form.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 10)
 
@@ -1856,7 +2606,66 @@ function Show-ControlCenter {
     $startAll = New-Object System.Windows.Forms.Button
     $startAll.Text = "Start All"
     $startAll.Size = New-Object System.Drawing.Size(120, 38)
-    $startAll.Location = New-Object System.Drawing.Point(28, 355)
+    $releaseGroup = New-Object System.Windows.Forms.GroupBox
+    $releaseGroup.Text = "RELEASE"
+    $releaseGroup.Size = New-Object System.Drawing.Size(770, 260)
+    $releaseGroup.Location = New-Object System.Drawing.Point(28, 340)
+    $form.Controls.Add($releaseGroup)
+
+    $stableReleaseLabel = New-Object System.Windows.Forms.Label
+    $stableReleaseLabel.Text = "Stable: loading"
+    $stableReleaseLabel.AutoSize = $false
+    $stableReleaseLabel.Size = New-Object System.Drawing.Size(730, 48)
+    $stableReleaseLabel.Location = New-Object System.Drawing.Point(18, 28)
+    $releaseGroup.Controls.Add($stableReleaseLabel)
+
+    $candidateReleaseLabel = New-Object System.Windows.Forms.Label
+    $candidateReleaseLabel.Text = "Candidate: loading"
+    $candidateReleaseLabel.AutoSize = $false
+    $candidateReleaseLabel.Size = New-Object System.Drawing.Size(730, 62)
+    $candidateReleaseLabel.Location = New-Object System.Drawing.Point(18, 78)
+    $releaseGroup.Controls.Add($candidateReleaseLabel)
+
+    $previousReleaseLabel = New-Object System.Windows.Forms.Label
+    $previousReleaseLabel.Text = "Previous Stable: loading"
+    $previousReleaseLabel.AutoSize = $false
+    $previousReleaseLabel.Size = New-Object System.Drawing.Size(730, 44)
+    $previousReleaseLabel.Location = New-Object System.Drawing.Point(18, 143)
+    $releaseGroup.Controls.Add($previousReleaseLabel)
+
+    $promoteButton = New-Object System.Windows.Forms.Button
+    $promoteButton.Text = "Promote Candidate"
+    $promoteButton.Size = New-Object System.Drawing.Size(180, 38)
+    $promoteButton.Location = New-Object System.Drawing.Point(18, 198)
+    $promoteButton.Enabled = $false
+    $promoteButton.Add_Click({
+        $state = Get-ReleaseControlState
+        if (-not $state -or -not $state.candidate) { return }
+        $message = "Promote exact release?`nGit: $($state.candidate.git_sha)`nCF: $($state.candidate.worker_version_id)`nWindows: $($state.candidate.windows_revision)"
+        if ([System.Windows.Forms.MessageBox]::Show(
+            $message, "Confirm Promote Candidate", "YesNo", "Warning"
+        ) -eq "Yes") { Invoke-GuiOperation -Operation "PromoteCandidate" }
+    })
+    $releaseGroup.Controls.Add($promoteButton)
+    [void]$actionButtons.Add($promoteButton)
+
+    $reverseButton = New-Object System.Windows.Forms.Button
+    $reverseButton.Text = "Reverse to Previous Stable"
+    $reverseButton.Size = New-Object System.Drawing.Size(160, 38)
+    $reverseButton.Location = New-Object System.Drawing.Point(210, 198)
+    $reverseButton.Enabled = $false
+    $reverseButton.Add_Click({
+        $state = Get-ReleaseControlState
+        if (-not $state -or -not $state.previous_stable) { return }
+        $message = "Reverse to exact Previous Stable?`nGit: $($state.previous_stable.git_sha)`nCF: $($state.previous_stable.worker_version_id)`nWindows: $($state.previous_stable.windows_revision)"
+        if ([System.Windows.Forms.MessageBox]::Show(
+            $message, "Confirm Reverse Stable", "YesNo", "Warning"
+        ) -eq "Yes") { Invoke-GuiOperation -Operation "ReverseStable" }
+    })
+    $releaseGroup.Controls.Add($reverseButton)
+    [void]$actionButtons.Add($reverseButton)
+
+    $startAll.Location = New-Object System.Drawing.Point(28, 625)
     $startAll.Add_Click({ Invoke-GuiOperation -Operation "Start" })
     $form.Controls.Add($startAll)
     [void]$actionButtons.Add($startAll)
@@ -1864,7 +2673,7 @@ function Show-ControlCenter {
     $restartAll = New-Object System.Windows.Forms.Button
     $restartAll.Text = "Restart All"
     $restartAll.Size = New-Object System.Drawing.Size(120, 38)
-    $restartAll.Location = New-Object System.Drawing.Point(158, 355)
+    $restartAll.Location = New-Object System.Drawing.Point(158, 625)
     $restartAll.Add_Click({ Invoke-GuiOperation -Operation "Restart" })
     $form.Controls.Add($restartAll)
     [void]$actionButtons.Add($restartAll)
@@ -1872,7 +2681,7 @@ function Show-ControlCenter {
     $stopAll = New-Object System.Windows.Forms.Button
     $stopAll.Text = "Stop All"
     $stopAll.Size = New-Object System.Drawing.Size(120, 38)
-    $stopAll.Location = New-Object System.Drawing.Point(288, 355)
+    $stopAll.Location = New-Object System.Drawing.Point(288, 625)
     $stopAll.Add_Click({ Invoke-GuiOperation -Operation "Stop" })
     $form.Controls.Add($stopAll)
     [void]$actionButtons.Add($stopAll)
@@ -1880,65 +2689,65 @@ function Show-ControlCenter {
     $openSite = New-Object System.Windows.Forms.Button
     $openSite.Text = "Open Dashboard"
     $openSite.Size = New-Object System.Drawing.Size(130, 38)
-    $openSite.Location = New-Object System.Drawing.Point(418, 355)
+    $openSite.Location = New-Object System.Drawing.Point(418, 625)
     $openSite.Add_Click({ Start-Process $dashboardUrl })
     $form.Controls.Add($openSite)
 
     $openLogs = New-Object System.Windows.Forms.Button
     $openLogs.Text = "Open Logs"
     $openLogs.Size = New-Object System.Drawing.Size(110, 38)
-    $openLogs.Location = New-Object System.Drawing.Point(558, 355)
+    $openLogs.Location = New-Object System.Drawing.Point(558, 625)
     $openLogs.Add_Click({ Start-Process explorer.exe $logRoot })
     $form.Controls.Add($openLogs)
 
     $autoLabel = New-Object System.Windows.Forms.Label
     $autoLabel.AutoSize = $true
-    $autoLabel.Location = New-Object System.Drawing.Point(30, 425)
+    $autoLabel.Location = New-Object System.Drawing.Point(30, 695)
     $form.Controls.Add($autoLabel)
 
     $enableAuto = New-Object System.Windows.Forms.Button
     $enableAuto.Text = "Enable Auto-start"
     $enableAuto.Size = New-Object System.Drawing.Size(190, 38)
-    $enableAuto.Location = New-Object System.Drawing.Point(310, 414)
+    $enableAuto.Location = New-Object System.Drawing.Point(410, 684)
     $enableAuto.Add_Click({ Enable-AutoStart })
     $form.Controls.Add($enableAuto)
 
     $disableAuto = New-Object System.Windows.Forms.Button
     $disableAuto.Text = "Disable Auto-start"
     $disableAuto.Size = New-Object System.Drawing.Size(150, 38)
-    $disableAuto.Location = New-Object System.Drawing.Point(510, 414)
+    $disableAuto.Location = New-Object System.Drawing.Point(610, 684)
     $disableAuto.Add_Click({ Disable-AutoStart })
     $form.Controls.Add($disableAuto)
 
     $refreshButton = New-Object System.Windows.Forms.Button
     $refreshButton.Text = "Refresh Status"
     $refreshButton.Size = New-Object System.Drawing.Size(150, 38)
-    $refreshButton.Location = New-Object System.Drawing.Point(30, 470)
+    $refreshButton.Location = New-Object System.Drawing.Point(30, 740)
     $form.Controls.Add($refreshButton)
 
     $clockButton = New-Object System.Windows.Forms.Button
     $clockButton.Text = "Repair Windows Time (Admin)"
     $clockButton.Size = New-Object System.Drawing.Size(220, 38)
-    $clockButton.Location = New-Object System.Drawing.Point(195, 470)
+    $clockButton.Location = New-Object System.Drawing.Point(195, 740)
     $clockButton.Add_Click({ Repair-WindowsTime })
     $form.Controls.Add($clockButton)
 
     $clockLabel = New-Object System.Windows.Forms.Label
     $clockLabel.AutoSize = $true
-    $clockLabel.Location = New-Object System.Drawing.Point(430, 481)
+    $clockLabel.Location = New-Object System.Drawing.Point(430, 751)
     $form.Controls.Add($clockLabel)
 
     $operationLabel = New-Object System.Windows.Forms.Label
     $operationLabel.Text = "Ready"
     $operationLabel.AutoSize = $true
-    $operationLabel.Location = New-Object System.Drawing.Point(30, 545)
+    $operationLabel.Location = New-Object System.Drawing.Point(30, 810)
     $operationLabel.ForeColor = [System.Drawing.Color]::FromArgb(82, 78, 68)
     $form.Controls.Add($operationLabel)
 
     $note = New-Object System.Windows.Forms.Label
     $note.Text = "A powered-off PC cannot collect data. This control center never authorizes trading."
     $note.AutoSize = $true
-    $note.Location = New-Object System.Drawing.Point(30, 590)
+    $note.Location = New-Object System.Drawing.Point(30, 850)
     $form.Controls.Add($note)
 
     $script:guiOperation = $null
@@ -1955,7 +2764,9 @@ function Show-ControlCenter {
         if ($script:guiOperation -and -not $script:guiOperation.HasExited) { return }
         $arguments = @(
             "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
-            "-File", ('"{0}"' -f $PSCommandPath), "-Action", $Operation
+            "-File", ('"{0}"' -f $PSCommandPath), "-Action", $Operation,
+            "-RuntimeRoot", ('"{0}"' -f $moduleRoot),
+            "-RepositoryRoot", ('"{0}"' -f $repositoryRoot)
         )
         if ($TargetKey) { $arguments += @("-ServiceKey", $TargetKey) }
         $script:guiOperationName = $Operation
@@ -1995,6 +2806,30 @@ function Show-ControlCenter {
             [System.Drawing.Color]::FromArgb(52, 105, 38)
         } else {
             [System.Drawing.Color]::FromArgb(190, 45, 36)
+        }
+        $release = $Snapshot.release
+        if ($release -and $release.stable) {
+            $stableReleaseLabel.Text = "Stable  Git $($release.stable.git_sha)`nCF $($release.stable.worker_version_id)  Windows $($release.stable.windows_revision)  $($release.deployment_status)"
+            $candidateReleaseLabel.Text = if ($release.candidate) {
+                "Candidate  Git $($release.candidate.git_sha)`nCF $($release.candidate.worker_version_id)  Windows $($release.candidate.windows_revision)  $($release.candidate.validation_state)"
+            } else { "Candidate: none" }
+            $previousReleaseLabel.Text = if ($release.previous_stable) {
+                "Previous Stable  Git $($release.previous_stable.git_sha)`nCF $($release.previous_stable.worker_version_id)  Windows $($release.previous_stable.windows_revision)"
+            } else { "Previous Stable: none" }
+            $promoteButton.Enabled = [bool](
+                -not $release.transaction -and $release.deployment_status -eq "READY" -and
+                $release.candidate -and $release.candidate.validation_state -eq "PASSED"
+            )
+            $reverseButton.Enabled = [bool](
+                -not $release.transaction -and $release.deployment_status -eq "READY" -and
+                $release.previous_stable
+            )
+        } else {
+            $stableReleaseLabel.Text = "Stable: release control not bootstrapped"
+            $candidateReleaseLabel.Text = "Candidate: unavailable"
+            $previousReleaseLabel.Text = "Previous Stable: unavailable"
+            $promoteButton.Enabled = $false
+            $reverseButton.Enabled = $false
         }
     }
     function Request-GuiStatus {
@@ -2094,7 +2929,13 @@ switch ($Action) {
                 } else { "RELOAD_REQUIRED" }
                 applied_at = if ($runtimeState) { $runtimeState.applied_at } else { $null }
             }
-        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $StatusPath -Encoding UTF8
+            release = Get-ReleaseControlState
+        } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $StatusPath -Encoding UTF8
+    }
+    "ReleaseStatusJson" {
+        if (-not $StatusPath) { throw "StatusPath is required for ReleaseStatusJson." }
+        Get-ReleaseControlState | ConvertTo-Json -Depth 12 |
+            Set-Content -LiteralPath $StatusPath -Encoding UTF8
     }
     "CodeRevision" { Write-Output (Get-CodeRevision) }
     "Start" { Start-All; Start-Sleep -Seconds 2; Get-ForecasterStatus | Format-Table -AutoSize }
@@ -2111,6 +2952,19 @@ switch ($Action) {
         Stop-ForecasterService $target
     }
     "Watchdog" { Start-All; exit (Invoke-ForecasterWatchdog) }
+    "DiscoverCandidate" { if (Invoke-CandidateDiscovery) { exit 0 } else { exit 1 } }
+    "ReconcileRelease" {
+        if (-not (Enter-ReleaseTransactionLock)) { exit 1 }
+        try { Reconcile-ReleaseControlState | ConvertTo-Json -Depth 12 }
+        finally { Exit-ReleaseTransactionLock }
+    }
+    "PromoteCandidate" { if (Start-ReleasePromotion) { exit 0 } else { exit 1 } }
+    "ReverseStable" { if (Invoke-ReverseStable) { exit 0 } else { exit 1 } }
+    "BootstrapRelease" {
+        if (-not (Enter-ReleaseTransactionLock)) { throw "Another release transaction is active." }
+        try { Initialize-ReleaseControl | ConvertTo-Json -Depth 12 }
+        finally { Exit-ReleaseTransactionLock }
+    }
     "EnableAutoStart" { Enable-AutoStart; Write-Output "Auto-start enabled." }
     "DisableAutoStart" { Disable-AutoStart; Write-Output "Auto-start disabled." }
     "InstallRuntime" { Install-ProductionRuntime | Format-List }

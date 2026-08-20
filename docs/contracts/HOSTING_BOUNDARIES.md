@@ -3,6 +3,8 @@
 ## Public boundary
 
 - Cloudflare Workers is the only deployment plane for this repository.
+- Stable/Candidate ownership, coordinated Windows/Worker promotion, and reverse
+  are governed by [`RELEASE_CONTROL.md`](RELEASE_CONTROL.md).
 - GitHub is a source-control and validation plane only. Repository automation
   MUST NOT create GitHub Deployments or GitHub Environments, and pull requests
   MUST NOT request deployment to a GitHub environment.

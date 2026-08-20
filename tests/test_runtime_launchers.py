@@ -65,7 +65,7 @@ def test_control_center_loads_collector_keys_without_exposing_them() -> None:
     assert 'ConvertFrom-Json' in control_center
 
 
-def test_control_center_updates_only_the_isolated_main_runtime() -> None:
+def test_control_center_stages_releases_without_main_driven_activation() -> None:
     path = ROOT / "scripts" / "xauusd_control_center.ps1"
     control_center = path.read_text(encoding="utf-8")
 
@@ -78,19 +78,18 @@ def test_control_center_updates_only_the_isolated_main_runtime() -> None:
     assert 'Write-RuntimeCodeState -Revision $Revision' in control_center
     assert 'Test-CodeReloadHealth -ReloadStarted $reloadStarted' in control_center
     assert 'Start-WatchdogReplacement' in control_center
-    assert 'currentRevision -ne $appliedRevision' in control_center
-    assert "Get-DeployedMainRevision" in control_center
-    assert "$runtimeUpdateCheckInterval = [TimeSpan]::FromMinutes(5)" in control_center
+    assert 'Invoke-RuntimeCandidateActivation' in control_center
     assert "$codeReloadTimeout = [TimeSpan]::FromMinutes(5)" in control_center
     assert "Add($codeReloadTimeout)" in control_center
-    assert "Get-VerifiedOriginMain" in control_center
-    assert "Test-RevisionDescendsFrom" in control_center
-    assert "Test-MainCandidate" in control_center
     preflight = control_center.split(
         "function Invoke-ProductionShapePreflight", 1,
-    )[1].split("function Get-DesiredMainRevision", 1)[0]
+    )[1].split("function Update-RuntimeCheckout", 1)[0]
     assert '"--allow-pending-generation-decision"' in preflight
-    assert "accepted_main_revision" in control_center
+    assert "Get-DesiredMainRevision" not in control_center
+    assert "Invoke-RuntimeCheckoutHandoff" not in control_center
+    assert "Start-CandidateDiscovery" in control_center
+    assert "Start-ReleasePromotion" in control_center
+    assert "Invoke-ReverseStable" in control_center
     assert "Install-ProductionRuntime" in control_center
     assert 'RuntimeRoot must be separate from the development checkout' in control_center
     assert 'worktree add --detach --quiet' in control_center
@@ -174,15 +173,35 @@ def _bundle_result_expression(root: str) -> str:
     )
 
 
+def _authorized_candidate(previous: str, candidate: str) -> str:
+    stable_worker = "11111111-1111-4111-8111-111111111111"
+    candidate_worker = "22222222-2222-4222-8222-222222222222"
+    key = f"{candidate_worker}:{candidate}"
+    return (
+        f"$stable = New-ReleaseIdentity -GitSha '{previous}' "
+        f"-WorkerVersionId '{stable_worker}' -WindowsRevision '{previous}' "
+        "-ValidationState 'PASSED'; $stable.compatibility_state = 'PASSED'; "
+        f"$candidateRelease = New-ReleaseIdentity -GitSha '{candidate}' "
+        f"-WorkerVersionId '{candidate_worker}' -WindowsRevision '{candidate}' "
+        "-ValidationState 'PASSED'; "
+        "$candidateRelease.compatibility_state = 'PASSED'; "
+        f"$candidateRelease.validation = [pscustomobject]@{{ key = '{key}' }}; "
+        "$releaseState = New-ReleaseControlState -Stable $stable "
+        "-Candidate $candidateRelease; Write-ReleaseControlState $releaseState; "
+    )
+
+
 def test_failed_preflight_never_switches_the_runtime_checkout(tmp_path) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
     result = _run_control_center_contract(
         tmp_path,
-        "$script:preflights = 0; $script:checkouts = 0; "
-        "function Get-CodeRevision { return ('a' * 40) }; "
-        "function Test-MainCandidate { return $true }; "
+        _authorized_candidate(previous, candidate)
+        + "$script:preflights = 0; $script:checkouts = 0; "
+        f"function Get-CodeRevision {{ return '{previous}' }}; "
         "function Invoke-ProductionShapePreflight { $script:preflights += 1; return $false }; "
         "function git { $script:checkouts += 1; $global:LASTEXITCODE = 0 }; "
-        "$accepted = Update-RuntimeCheckout -Revision ('b' * 40); "
+        f"$accepted = Update-RuntimeCheckout -Revision '{candidate}'; "
         'Write-Output "$accepted,$script:preflights,$script:checkouts"',
     )
 
@@ -462,9 +481,9 @@ def test_switch_preparation_reports_when_previous_bundle_cannot_be_restored(
     candidate = "b" * 40
     result = _run_control_center_contract(
         tmp_path,
-        "$script:checkouts = @(); "
+        _authorized_candidate(previous, candidate)
+        + "$script:checkouts = @(); "
         f"function Get-CodeRevision {{ return '{previous}' }}; "
-        "function Test-MainCandidate { return $true }; "
         "function Invoke-ProductionShapePreflight { return $true }; "
         "function git { if ($args -contains 'checkout') { "
         "$script:checkouts += [string]$args[-1] }; $global:LASTEXITCODE = 0 }; "
@@ -483,10 +502,11 @@ def test_candidate_switch_installs_one_complete_runtime_control_bundle(tmp_path)
         tmp_path / "repository" / ".local" / "runtime-control", "previous"
     )
     candidate = "b" * 40
+    previous = "a" * 40
     result = _run_control_center_contract(
         tmp_path,
-        "function Get-CodeRevision { return ('a' * 40) }; "
-        "function Test-MainCandidate { return $true }; "
+        _authorized_candidate(previous, candidate)
+        + f"function Get-CodeRevision {{ return '{previous}' }}; "
         "function Invoke-ProductionShapePreflight { return $true }; "
         "function git { if ($args -contains 'checkout') { foreach ($name in "
         "$runtimeControlFileNames) { Set-Content -LiteralPath "
@@ -517,9 +537,9 @@ def test_switch_copy_failure_restores_the_complete_previous_control_bundle(
     candidate = "b" * 40
     result = _run_control_center_contract(
         tmp_path,
-        "$script:failedCandidateCopy = $false; "
+        _authorized_candidate(previous, candidate)
+        + "$script:failedCandidateCopy = $false; "
         f"function Get-CodeRevision {{ return '{previous}' }}; "
-        "function Test-MainCandidate { return $true }; "
         "function Invoke-ProductionShapePreflight { return $true }; "
         "function git { if ($args -contains 'checkout') { $revision = [string]$args[-1]; "
         "foreach ($name in $runtimeControlFileNames) { Set-Content -LiteralPath "
@@ -557,9 +577,9 @@ def test_half_installed_candidate_bundle_is_reverted_before_switch_rollback(
     candidate = "b" * 40
     result = _run_control_center_contract(
         tmp_path,
-        "$script:failedCandidateMove = $false; "
+        _authorized_candidate(previous, candidate)
+        + "$script:failedCandidateMove = $false; "
         f"function Get-CodeRevision {{ return '{previous}' }}; "
-        "function Test-MainCandidate { return $true }; "
         "function Invoke-ProductionShapePreflight { return $true }; "
         "function git { if ($args -contains 'checkout') { $revision = [string]$args[-1]; "
         "foreach ($name in $runtimeControlFileNames) { Set-Content -LiteralPath "
@@ -651,20 +671,23 @@ def test_observation_reuses_the_reload_health_boundary(tmp_path) -> None:
     assert result == "2026-08-12T08:00:00.0000000+00:00"
 
 
-def test_runtime_checkout_hands_off_before_old_supervisor_checks_health(
-    tmp_path,
-) -> None:
+def test_candidate_discovery_cannot_change_stable(tmp_path) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
     result = _run_control_center_contract(
         tmp_path,
-        "$script:order = @(); "
-        "function Update-RuntimeCheckout { $script:order += 'checkout'; return $true }; "
-        "function Write-WatchdogEvent { $script:order += 'event' }; "
-        "function Start-WatchdogReplacement { $script:order += 'replacement' }; "
-        "$handedOff = Invoke-RuntimeCheckoutHandoff -Revision ('b' * 40); "
-        "Write-Output \"$handedOff,$($script:order -join ',')\"",
+        _authorized_candidate(previous, candidate)
+        + "$before = (Get-ReleaseControlState).stable.validation_key; "
+        "$new = New-ReleaseIdentity -GitSha ('c' * 40) "
+        "-WorkerVersionId '33333333-3333-4333-8333-333333333333' "
+        "-WindowsRevision ('c' * 40); $state = Get-ReleaseControlState; "
+        "$state.candidate = $new; Write-ReleaseControlState $state; "
+        "$after = (Get-ReleaseControlState).stable.validation_key; "
+        'Write-Output "$before,$after"',
     )
 
-    assert result == "True,checkout,event,replacement"
+    stable_key = f"11111111-1111-4111-8111-111111111111:{previous}"
+    assert result == f"{stable_key},{stable_key}"
 
 
 def test_two_new_decision_cycles_activate_even_when_observed_together(tmp_path) -> None:
@@ -939,130 +962,336 @@ def test_watchdog_guard_restarts_only_after_heartbeat_is_stale(tmp_path) -> None
     assert result == "False,True,1"
 
 
-def test_main_checkpoint_accepts_squash_merge_without_accepting_stale_main(
-    tmp_path,
-) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    for command in (
-        ["git", "init", "-q"],
-        ["git", "config", "user.email", "test@example.com"],
-        ["git", "config", "user.name", "Test"],
-    ):
-        subprocess.run(command, cwd=repo, check=True)
-    (repo / "value.txt").write_text("base", encoding="utf-8")
-    subprocess.run(["git", "add", "value.txt"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
-    base = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
-        text=True, check=True,
-    ).stdout.strip()
-    (repo / "value.txt").write_text("feature", encoding="utf-8")
-    subprocess.run(["git", "commit", "-qam", "feature"], cwd=repo, check=True)
-    feature = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
-        text=True, check=True,
-    ).stdout.strip()
-    tree = subprocess.run(
-        ["git", "rev-parse", "HEAD^{tree}"], cwd=repo, capture_output=True,
-        text=True, check=True,
-    ).stdout.strip()
-    squash = subprocess.run(
-        ["git", "commit-tree", tree, "-p", base, "-m", "squash"], cwd=repo,
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    state = repo / ".local" / "forward" / "runtime-update-state.json"
-    state.parent.mkdir(parents=True)
-    state.write_text(
-        json.dumps({"accepted_main_revision": base}), encoding="utf-8",
-    )
-    script = ROOT / "scripts" / "xauusd_control_center.ps1"
-    command = (
-        f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
-        f"-RepositoryRoot '{repo}'; "
-        f"$advance = Test-MainCandidate -CurrentRevision '{feature}' "
-        f"-CandidateRevision '{squash}'; "
-        f"$stale = Test-MainCandidate -CurrentRevision '{feature}' "
-        f"-CandidateRevision '{base}'; Write-Output \"$advance,$stale\""
-    )
-    result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-
-    assert result == "True,False"
-
-
-def test_runtime_update_requires_matching_deployed_and_verified_main(tmp_path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    current = "a" * 40
+def test_failed_candidate_cannot_promote(tmp_path) -> None:
+    previous = "a" * 40
     candidate = "b" * 40
-    script = ROOT / "scripts" / "xauusd_control_center.ps1"
-    command = (
-        f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
-        f"-RepositoryRoot '{repo}'; "
-        f"function Get-DeployedMainRevision {{ return '{candidate}' }}; "
-        f"function Get-VerifiedOriginMain {{ return '{candidate}' }}; "
-        "function Test-MainCandidate { return $true }; "
-        f"Get-DesiredMainRevision -CurrentRevision '{current}'"
-    )
-    result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-
-    assert result == candidate
-
-
-def test_failed_candidate_is_only_blocked_by_the_same_preflight_contract(
-    tmp_path,
-) -> None:
-    candidate = "b" * 40
-    current = "a" * 40
-    same_contract = _run_control_center_contract(
+    result = _run_control_center_contract(
         tmp_path,
-        "function Test-RevisionDescendsFrom { return $true }; "
-        f"Write-RuntimeUpdateState @{{ accepted_main_revision = '{current}'; "
-        f"failed_revision = '{candidate}'; failed_preflight_contract = "
-        "$runtimePreflightContractVersion }; "
-        f"Write-Output (Test-MainCandidate '{current}' '{candidate}')",
+        _authorized_candidate(previous, candidate)
+        + "$state = Get-ReleaseControlState; "
+        "$state.candidate.validation_state = 'FAILED'; "
+        "Write-ReleaseControlState $state; "
+        "function Enter-ReleaseTransactionLock { return $true }; "
+        "function Exit-ReleaseTransactionLock {}; "
+        "try { Start-ReleasePromotion | Out-Null; 'PROMOTED' } "
+        "catch { 'REJECTED' }",
     )
-    upgraded_contract = _run_control_center_contract(
-        tmp_path,
-        "function Test-RevisionDescendsFrom { return $true }; "
-        f"Write-RuntimeUpdateState @{{ accepted_main_revision = '{current}'; "
-        f"failed_revision = '{candidate}'; failed_preflight_contract = "
-        "'isolated-migrated-runtime-state-v3' }; "
-        f"Write-Output (Test-MainCandidate '{current}' '{candidate}')",
-    )
-
-    assert same_contract == "False"
-    assert upgraded_contract == "True"
-
-
-def test_runtime_update_rejects_deployment_git_mismatch(tmp_path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    current = "a" * 40
-    deployed = "b" * 40
-    verified = "c" * 40
-    script = ROOT / "scripts" / "xauusd_control_center.ps1"
-    command = (
-        f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
-        f"-RepositoryRoot '{repo}'; "
-        f"function Get-DeployedMainRevision {{ return '{deployed}' }}; "
-        f"function Get-VerifiedOriginMain {{ return '{verified}' }}; "
-        "function Test-MainCandidate { return $true }; "
-        f"$result = Get-DesiredMainRevision -CurrentRevision '{current}'; "
-        "if ($null -eq $result) { Write-Output 'REJECTED' }"
-    )
-    result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
 
     assert result == "REJECTED"
+
+
+def test_old_candidate_evidence_cannot_authorize_new_candidate(tmp_path) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, candidate)
+        + "$state = Get-ReleaseControlState; "
+        "$state.candidate.worker_version_id = '33333333-3333-4333-8333-333333333333'; "
+        "Write-ReleaseControlState $state; "
+        "function Enter-ReleaseTransactionLock { return $true }; "
+        "function Exit-ReleaseTransactionLock {}; "
+        "try { Start-ReleasePromotion | Out-Null; 'PROMOTED' } "
+        "catch { 'REJECTED' }",
+    )
+
+    assert result == "REJECTED"
+
+
+def test_completed_promotion_records_previous_stable(tmp_path) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, candidate)
+        + "$state = Get-ReleaseControlState; "
+        "$state.transaction = [pscustomobject]@{ type='PROMOTE'; phase='OBSERVING'; "
+        "target=$state.candidate; previous=$state.stable }; "
+        "Write-ReleaseControlState $state; Complete-ReleasePromotion; "
+        "$final = Get-ReleaseControlState; "
+        'Write-Output "$($final.stable.git_sha),$($final.previous_stable.git_sha),$($null -eq $final.transaction)"',
+    )
+
+    assert result == f"{candidate},{previous},True"
+
+
+def test_candidate_arriving_during_promotion_is_queued(tmp_path) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
+    queued = "c" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, candidate)
+        + "$state = Get-ReleaseControlState; "
+        "$state.transaction = [pscustomobject]@{ type='PROMOTE'; phase='CUTOVER' }; "
+        "Write-ReleaseControlState $state; "
+        f"$new = New-ReleaseIdentity -GitSha '{queued}' "
+        "-WorkerVersionId '33333333-3333-4333-8333-333333333333' "
+        f"-WindowsRevision '{queued}'; "
+        "function Get-CloudflareVersions { return @([pscustomobject]@{ "
+        "id=$new.worker_version_id; metadata=[pscustomobject]@{ created_on='2026-08-20T12:00:00Z' }; "
+        f"annotations=[pscustomobject]@{{ 'workers/message'='release:{queued} branch:main' }} }}) }}; "
+        "$null = Find-NewCandidateRelease; $final = Get-ReleaseControlState; "
+        'Write-Output "$($final.candidate.git_sha),$($final.queued_candidate.git_sha)"',
+    )
+
+    assert result == f"{candidate},{queued}"
+
+
+def test_worker_windows_mismatch_cannot_switch_runtime(tmp_path) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, candidate)
+        + "$state = Get-ReleaseControlState; "
+        "$state.candidate.windows_revision = ('c' * 40); "
+        "Write-ReleaseControlState $state; "
+        f"Write-Output (Update-RuntimeCheckout -Revision '{candidate}')",
+    )
+
+    assert result == "False"
+
+
+def test_platform_evidence_is_bound_to_exact_worker_version(tmp_path) -> None:
+    candidate = "b" * 40
+    worker = "22222222-2222-4222-8222-222222222222"
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$candidate = New-ReleaseIdentity -GitSha '{candidate}' "
+        f"-WorkerVersionId '{worker}' -WindowsRevision '{candidate}'; "
+        "$script:observedVersions = @(); "
+        "function Invoke-WorkersObservabilityQuery { param($Filters,$Calculations,$From,$To); "
+        "$script:observedVersions += @($Filters | Where-Object key -eq '$workers.scriptVersion.id')[0].value; "
+        "$alias = [string]$Calculations[0].alias; "
+        "if ($alias -eq 'invocations') { return [pscustomobject]@{ calculations=@("
+        "[pscustomobject]@{alias='invocations';aggregates=@([pscustomobject]@{value=6})},"
+        "[pscustomobject]@{alias='max_cpu_ms';aggregates=@([pscustomobject]@{value=8})},"
+        "[pscustomobject]@{alias='p99_cpu_ms';aggregates=@([pscustomobject]@{value=7})},"
+        "[pscustomobject]@{alias='max_wall_ms';aggregates=@([pscustomobject]@{value=25})}) } }; "
+        "return [pscustomobject]@{ calculations=@([pscustomobject]@{alias=$alias;aggregates=@([pscustomobject]@{value=0})}) } }; "
+        "$now=[DateTimeOffset]::UtcNow; $evidence=Get-CandidatePlatformEvidence "
+        "-Candidate $candidate -From $now.AddMinutes(-1) -To $now -ExpectedInvocations 6; "
+        'Write-Output "$($evidence.passed),$($evidence.invocations),$(@($script:observedVersions | Select-Object -Unique) -join \';\')"',
+    )
+
+    assert result == f"True,6,{worker}"
+
+
+def test_bootstrap_preserves_accepted_268_candidate_and_evidence(tmp_path) -> None:
+    stable = "a" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-CloudflareDeployment { return [pscustomobject]@{versions=@("
+        "[pscustomobject]@{version_id='76d314fc-e484-4f50-8ace-3689e0896709';percentage=100},"
+        "[pscustomobject]@{version_id='dd823aa4-20f0-47e1-9255-1b785a4c17b0';percentage=0})} };"
+        f"function Get-RuntimeCodeState {{ return [pscustomobject]@{{applied_revision='{stable}'}} }};"
+        "$state=Initialize-ReleaseControl;"
+        'Write-Output "$($state.stable.worker_version_id),$($state.candidate.worker_version_id),$($state.candidate.git_sha),$($state.candidate.validation.cpu_evidence.exceeded_cpu)"',
+    )
+
+    assert result == (
+        "76d314fc-e484-4f50-8ace-3689e0896709,"
+        "dd823aa4-20f0-47e1-9255-1b785a4c17b0,"
+        "14c055a35040fa963700c988f770c9bb52fa669e,0"
+    )
+
+
+def test_abandoned_release_lock_is_recovered_without_touching_state(tmp_path) -> None:
+    runtime = tmp_path / "runtime"
+    lock = runtime / ".local" / "forward" / "release-control.lock"
+    lock.mkdir(parents=True)
+    (lock / "owner.json").write_text(json.dumps({
+        "owner_pid": 2147483647,
+        "acquired_at": datetime.now(timezone.utc).isoformat(),
+    }), encoding="utf-8")
+    result = _run_control_center_contract(
+        tmp_path,
+        "$entered=Enter-ReleaseTransactionLock; $history=Get-Content -LiteralPath $releaseHistoryPath -Raw; "
+        'Write-Output "$entered,$($history.Contains(\'ABANDONED_LOCK_RECOVERED\'))"; '
+        "Exit-ReleaseTransactionLock",
+    )
+
+    assert result == "True,True"
+
+
+def test_live_release_lock_is_never_stolen(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "New-Item -ItemType Directory -Path $releaseLockPath -Force | Out-Null; "
+        "[pscustomobject]@{owner_pid=$PID;acquired_at=[DateTimeOffset]::UtcNow.ToString('o')} "
+        "| ConvertTo-Json | Set-Content -LiteralPath (Join-Path $releaseLockPath 'owner.json'); "
+        "Write-Output (Enter-ReleaseTransactionLock)",
+    )
+
+    assert result == "False"
+
+
+def test_passed_candidate_promotes_only_after_observation_commit(tmp_path) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, candidate)
+        + "function Enter-ReleaseTransactionLock { return $true }; "
+        "function Exit-ReleaseTransactionLock {}; "
+        "function Test-CloudflareReleasePlacement { return $true }; "
+        f"function Get-RuntimeCodeState {{ return [pscustomobject]@{{applied_revision='{previous}'}} }}; "
+        "function Test-SingleProductionOwner { return $true }; "
+        "function Update-RuntimeCheckout { return $true }; "
+        "$script:cutover=@(); "
+        "function Restart-CodeReloadableServices { $script:cutover += 'windows-with-sync-paused'; return [DateTimeOffset]::UtcNow }; "
+        "function Complete-DeferredServiceReload { $script:cutover += 'sync-resumed' }; "
+        "function Start-RuntimeObservation {}; "
+        "function Write-RuntimeCodeState {}; "
+        "function Write-WatchdogEvent {}; "
+        "function Invoke-CloudflareDeployment { $script:cutover += 'worker' }; "
+        "$started=Start-ReleasePromotion; $during=Get-ReleaseControlState; "
+        "Complete-ReleasePromotion; $after=Get-ReleaseControlState; "
+        'Write-Output "$started,$($during.stable.git_sha),$($during.transaction.phase),$($after.stable.git_sha),$($script:cutover -join \';\')"',
+    )
+
+    assert result == (
+        f"True,{previous},OBSERVING,{candidate},"
+        "windows-with-sync-paused;worker;sync-resumed"
+    )
+
+
+def test_crashed_cutover_is_reconciled_to_recovery_required(tmp_path) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, candidate)
+        + "$state=Get-ReleaseControlState; "
+        "$state.transaction=[pscustomobject]@{type='PROMOTE';phase='CUTOVER';target=$state.candidate;previous=$state.stable}; "
+        "Write-ReleaseControlState $state; "
+        "function Get-CloudflareDeployment { return [pscustomobject]@{versions=@([pscustomobject]@{version_id='22222222-2222-4222-8222-222222222222';percentage=100})} }; "
+        f"function Get-RuntimeCodeState {{ return [pscustomobject]@{{applied_revision='{candidate}'}} }}; "
+        "$final=Reconcile-ReleaseControlState; "
+        'Write-Output "$($final.deployment_status),$($final.drift.code),$($final.drift.phase)"',
+    )
+
+    assert result == "RECOVERY_REQUIRED,INCOMPLETE_RELEASE_TRANSACTION,CUTOVER"
+
+
+def test_crash_after_observation_pass_commits_exact_stable(tmp_path) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, candidate)
+        + "$state=Get-ReleaseControlState;"
+        "$state.transaction=[pscustomobject]@{type='PROMOTE';phase='OBSERVING';target=$state.candidate;previous=$state.stable};"
+        "Write-ReleaseControlState $state;"
+        f"Write-RuntimeUpdateState @{{update_status='ACTIVE';activated_revision='{candidate}'}};"
+        "function Get-CloudflareDeployment { return [pscustomobject]@{versions=@([pscustomobject]@{version_id='22222222-2222-4222-8222-222222222222';percentage=100})} };"
+        f"function Get-RuntimeCodeState {{ return [pscustomobject]@{{applied_revision='{candidate}'}} }};"
+        "$final=Reconcile-ReleaseControlState;"
+        'Write-Output "$($final.deployment_status),$($final.stable.git_sha),$($null -eq $final.transaction)"',
+    )
+
+    assert result == f"READY,{candidate},True"
+
+
+def test_crashed_completed_reverse_is_committed_from_observed_reality(tmp_path) -> None:
+    previous = "a" * 40
+    current = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, current)
+        + "$state=Get-ReleaseControlState;$target=$state.stable;$current=$state.candidate;"
+        "$state.stable=$current;$state.previous_stable=$target;"
+        "$state.transaction=[pscustomobject]@{type='REVERSE';phase='REVERSING';target=$target;previous=$current};"
+        "Write-ReleaseControlState $state;"
+        "function Get-CloudflareDeployment { return [pscustomobject]@{versions=@([pscustomobject]@{version_id='11111111-1111-4111-8111-111111111111';percentage=100})} };"
+        f"function Get-RuntimeCodeState {{ return [pscustomobject]@{{applied_revision='{previous}'}} }};"
+        "$final=Reconcile-ReleaseControlState;"
+        'Write-Output "$($final.deployment_status),$($final.stable.git_sha),$($final.previous_stable.git_sha)"',
+    )
+
+    assert result == f"READY,{previous},{current}"
+
+
+def test_reverse_restores_both_identities_without_d1_mutation(tmp_path) -> None:
+    previous = "a" * 40
+    current = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, current)
+        + "$state=Get-ReleaseControlState;$state.previous_stable=$state.stable;"
+        "$state.stable=$state.candidate;$state.candidate=$null;Write-ReleaseControlState $state;"
+        "function Enter-ReleaseTransactionLock { return $true };function Exit-ReleaseTransactionLock {};"
+        "function Test-SingleProductionOwner { return $true };"
+        "function Stop-ForecasterService {};"
+        "$script:worker='';$script:windows='';"
+        "function Invoke-CloudflareDeployment { param($StableVersionId);$script:worker=$StableVersionId };"
+        "function Invoke-ReleaseWindowsRestore { param($Revision);$script:windows=$Revision };"
+        "$ok=Invoke-ReverseStable;$final=Get-ReleaseControlState;"
+        'Write-Output "$ok,$($final.stable.git_sha),$script:worker,$script:windows"',
+    )
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    reverse_body = source.split("function Invoke-ReverseStable", 1)[1].split(
+        "function Reconcile-ReleaseControlState", 1,
+    )[0]
+
+    assert result == f"True,{previous},11111111-1111-4111-8111-111111111111,{previous}"
+    assert "D1" not in reverse_body
+    assert "database" not in reverse_body.lower()
+
+
+def test_release_drift_is_detected_without_changing_stable(tmp_path) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, candidate)
+        + "function Get-CloudflareDeployment { return [pscustomobject]@{versions=@([pscustomobject]@{version_id='99999999-9999-4999-8999-999999999999';percentage=100})} }; "
+        f"function Get-RuntimeCodeState {{ return [pscustomobject]@{{applied_revision='{previous}'}} }}; "
+        "$final=Reconcile-ReleaseControlState; "
+        'Write-Output "$($final.deployment_status),$($final.stable.git_sha)"',
+    )
+
+    assert result == f"DEPLOYMENT_DRIFT,{previous}"
+
+
+def test_release_requires_exactly_one_owner_for_every_side_effect_service(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-ForecasterProcesses { param($Service); "
+        "if ($Service.Key -eq 'sync') { return @([pscustomobject]@{ProcessId=1},[pscustomobject]@{ProcessId=2}) }; "
+        "return [pscustomobject]@{ProcessId=1} }; "
+        "$duplicate=Test-SingleProductionOwner; "
+        "function Get-ForecasterProcesses { param($Service); return [pscustomobject]@{ProcessId=1} }; "
+        "$single=Test-SingleProductionOwner; Write-Output \"$duplicate,$single\"",
+    )
+
+    assert result == "False,True"
+
+
+def test_storage_migration_requires_coordinated_compatibility_review(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "Write-Output (Test-AutomaticStorageCompatibility -ChangedFiles "
+        "@('web/worker/index.ts','web/drizzle/0022_new.sql'))",
+    )
+
+    assert result == "False"
+
+
+def test_release_gui_exposes_only_explicit_stable_candidate_controls() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+
+    assert '"Stable  Git $($release.stable.git_sha)' in source
+    assert '"Candidate  Git $($release.candidate.git_sha)' in source
+    assert '"Previous Stable  Git $($release.previous_stable.git_sha)' in source
+    assert '$promoteButton.Text = "Promote Candidate"' in source
+    assert '$reverseButton.Text = "Reverse to Previous Stable"' in source
+    assert "CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN" not in source.split(
+        "function Show-ControlCenter", 1,
+    )[1]
 
 
 def test_code_reload_health_requires_fresh_successful_sync(tmp_path) -> None:
