@@ -57,8 +57,9 @@ test("serves canonical public shells and favicon as static assets before Worker 
   ];
   for (const [file, identity] of staticPages) {
     const url = new URL(`../dist/client/${file}`, import.meta.url);
-    assert.ok(statSync(url).size > 10_000, file);
-    assert.match(readFileSync(url, "utf8"), new RegExp(identity), file);
+    const html = readFileSync(url, "utf8");
+    assert.ok(Buffer.byteLength(html) > 10_000, file);
+    assert.match(html, new RegExp(identity), file);
   }
   assert.ok(statSync(new URL("../dist/client/favicon.svg", import.meta.url)).size > 0);
   assert.match(redirects, /^\/favicon\.ico \/favicon\.svg 301/m);
