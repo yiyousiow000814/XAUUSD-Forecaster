@@ -139,10 +139,17 @@ def _run_control_center_contract(tmp_path, body: str) -> str:
         f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{runtime}' "
         f"-RepositoryRoot '{repository}'; {body}"
     )
-    return subprocess.run(
+    result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode:
+        raise AssertionError(
+            "PowerShell control contract failed\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+    return result.stdout.strip()
 
 
 def _write_runtime_observation(tmp_path, **overrides) -> None:
