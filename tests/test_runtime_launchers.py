@@ -1038,7 +1038,9 @@ def test_completed_promotion_records_previous_stable(tmp_path) -> None:
         + "$state = Get-ReleaseControlState; "
         "$state.transaction = [pscustomobject]@{ type='PROMOTE'; phase='OBSERVING'; "
         "target=$state.candidate; previous=$state.stable }; "
-        "Write-ReleaseControlState $state; Complete-ReleasePromotion; "
+        "Write-ReleaseControlState $state; "
+        "function Test-CloudflareRollbackTarget { return $true }; "
+        "Complete-ReleasePromotion; "
         "$final = Get-ReleaseControlState; "
         'Write-Output "$($final.stable.git_sha),$($final.previous_stable.git_sha),$($null -eq $final.transaction)"',
     )
@@ -1705,6 +1707,7 @@ def test_reverse_observation_commits_only_after_active_runtime_evidence(tmp_path
         "$state.transaction=[pscustomobject]@{type='REVERSE';phase='REVERSE_OBSERVING';target=$target;previous=$now};"
         "Write-ReleaseControlState $state;"
         f"Write-RuntimeUpdateState @{{update_status='ACTIVE';activated_revision='{previous}';observation_mode='REVERSE'}};"
+        "function Test-CloudflareRollbackTarget{return $true};"
         "function Get-CloudflareDeployment{return [pscustomobject]@{versions=@([pscustomobject]@{version_id='11111111-1111-4111-8111-111111111111';percentage=100})}};"
         f"function Get-RuntimeCodeState{{return [pscustomobject]@{{applied_revision='{previous}'}}}};"
         "$final=Reconcile-ReleaseControlState;"
