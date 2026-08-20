@@ -64,6 +64,7 @@ from .news_semantics import (
     require_chinese_primary_display,
     SUPPORTED_NEWS_PROMPT_VERSIONS,
     validate_news_annotation,
+    visible_latin_runs,
 )
 
 
@@ -87,6 +88,9 @@ TITLE_TRANSLATION_MODELS = (
 DISPLAY_REPAIR_MODELS = (
     DEFAULT_GEMMA_MODEL, DEFAULT_GEMINI_MODEL, FALLBACK_GEMINI_MODEL,
 )
+DETERMINISTIC_DISPLAY_TRANSLATIONS = {
+    "ETF": "交易所交易基金",
+}
 HIGH_PRIORITY_NEWS_SOURCES = frozenset({"federal_reserve_monetary"})
 SOURCE_IDENTITY_MAX_TOKENS = 8
 SOURCE_IDENTITY_MAX_CHARACTERS = 64
@@ -1404,7 +1408,7 @@ class _GeminiRequestPool:
             start_index,
             model=model,
             purpose="chinese-repair",
-            prompt_contract=f"{prompt_version}:chinese-repair-v1",
+            prompt_contract=f"{prompt_version}:chinese-repair-v2-grounded-latin",
             payload=payload,
             input_tokens=input_tokens,
             decode=_decode_model_json,
@@ -1726,6 +1730,9 @@ def _chinese_repair_payload(
     rejected_output = {
         field: result.get(field) for field in repair_fields
     }
+    grounded_latin, ungrounded_latin = _display_latin_repair_feedback(
+        result, repair_fields, headline, body,
+    )
     source_number_lexemes = _source_number_lexemes(headline, body)
     numeric_recovery_instruction = ""
     if numeric_rejection:
@@ -1757,7 +1764,11 @@ def _chinese_repair_payload(
             "identifiers, and proper nouns in English when that is more natural or "
             "accurate. Do not leave entire explanatory sentences unnecessarily in "
             "English or another source language, and do not force proper nouns "
-            "into awkward translations. "
+            "into awkward translations. Preserve only the existing Latin runs "
+            "listed in SOURCE_GROUNDED_LATIN_RUNS, with their exact spelling. "
+            "Every run listed in FORBIDDEN_UNGROUNDED_LATIN_RUNS must be "
+            "translated into natural Chinese or removed. Do not introduce any "
+            "new Latin run; when uncertain, use Chinese only. "
             "Any numeric claim must copy one exact spelling from "
             "SOURCE_NUMBER_LEXEMES. Never convert units or magnitudes. If a "
             "numeric claim cannot be expressed with an exact source lexeme, "
@@ -1771,6 +1782,16 @@ def _chinese_repair_payload(
             + json.dumps(
                 rejected_output,
                 ensure_ascii=False,
+            )
+            + "\nSOURCE_GROUNDED_LATIN_RUNS\n"
+            + json.dumps(
+                grounded_latin, ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\nFORBIDDEN_UNGROUNDED_LATIN_RUNS\n"
+            + json.dumps(
+                ungrounded_latin, ensure_ascii=False,
+                separators=(",", ":"),
             )
             + "\nSOURCE_NUMBER_LEXEMES\n"
             + json.dumps(
@@ -1791,6 +1812,31 @@ def _chinese_repair_payload(
             "temperature": 0,
         },
     }
+
+
+def _display_latin_repair_feedback(
+    result: dict, repair_fields: list[str], headline: str, body: str,
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Give display repair exact bounded feedback from the V17 validator."""
+    source = canonical_annotation_source_text(headline, body)
+    grounded: dict[str, list[str]] = {}
+    ungrounded: dict[str, list[str]] = {}
+    for field in repair_fields:
+        accepted: list[str] = []
+        rejected: list[str] = []
+        for _, _, exact_text in visible_latin_runs(result.get(field)):
+            try:
+                grounded_display_latin_spans(exact_text, source)
+            except ValueError as error:
+                if str(error).startswith("UNGROUNDED_LATIN_DISPLAY"):
+                    rejected.append(exact_text)
+            else:
+                accepted.append(exact_text)
+        if accepted:
+            grounded[field] = list(dict.fromkeys(accepted))
+        if rejected:
+            ungrounded[field] = list(dict.fromkeys(rejected))
+    return grounded, ungrounded
 
 
 def _numeric_free_display_seed(text: str) -> str:
@@ -2785,6 +2831,7 @@ def _recover_display_fields(result: dict, headline: str, body: str) -> None:
     """Make display text auditable without rejecting structured measurements."""
     source = canonical_annotation_source_text(headline, body)
     _normalize_translated_named_months(result, source)
+    _translate_ungrounded_common_financial_terms(result, source)
     token_pattern = re.compile(
         r"\d+(?:(?:\s*[./-]\s*\d+)|(?:\s*,\s*\d{1,3}(?!\d)))*"
     )
@@ -2812,6 +2859,36 @@ def _recover_display_fields(result: dict, headline: str, body: str) -> None:
 
         result[field] = token_pattern.sub(recover, str(result.get(field) or ""))
     _restore_source_number_lexemes(result, headline, body)
+
+
+def _translate_ungrounded_common_financial_terms(
+    result: dict, source: str,
+) -> None:
+    """Translate a narrow unambiguous glossary only when Latin is ungrounded."""
+    fields = (
+        "headline_zh", "summary_zh", "primary_story_title_zh",
+        "semantic_reason_zh",
+    )
+    for field in fields:
+        if field not in result:
+            continue
+        text = str(result.get(field) or "")
+        for latin, chinese in DETERMINISTIC_DISPLAY_TRANSLATIONS.items():
+            pattern = re.compile(
+                rf"(?<![A-Za-z0-9]){re.escape(latin)}(?![A-Za-z0-9])",
+                re.IGNORECASE,
+            )
+
+            def translate(match: re.Match[str]) -> str:
+                try:
+                    grounded_display_latin_spans(match.group(0), source)
+                except ValueError as error:
+                    if str(error).startswith("UNGROUNDED_LATIN_DISPLAY"):
+                        return chinese
+                return match.group(0)
+
+            text = pattern.sub(translate, text)
+        result[field] = text
 
 
 def _validate_current_result(
