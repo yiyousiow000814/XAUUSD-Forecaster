@@ -5,6 +5,8 @@ import io
 import json
 import subprocess
 import sys
+import threading
+import time
 import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2487,6 +2489,88 @@ def test_operator_retry_sync_mirrors_claims_applies_and_finishes(monkeypatch) ->
     assert remote_posts[1][1]["action"] == "FINISH"
     assert remote_posts[1][1]["status"] == "APPLIED"
     assert remote_posts[2][1] == {"action": "SYNC_JOBS", "items": [applied_job]}
+
+
+@pytest.mark.parametrize(("commands", "expected_seconds"), [
+    (10, 30),
+    (50, 150),
+    (100, 300),
+])
+def test_operator_retry_batch_has_bounded_bulk_sla(commands, expected_seconds) -> None:
+    module = _sync_module()
+
+    assert module.OPERATOR_RETRY_COMMANDS_PER_CYCLE == 10
+    assert module.operator_retry_bulk_sla_seconds(commands) == expected_seconds
+
+
+def test_slow_heavy_resource_does_not_block_critical_heartbeat(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    schedule_path = tmp_path / "resource-schedule.json"
+    status_path = tmp_path / "sync-status.json"
+    _schedule_only(module, schedule_path, "audit")
+    target = {
+        "name": "candidate",
+        "local_status_url": "http://local/api/status",
+        "remote_ingest_url": "https://candidate.example/api/ingest",
+        "resource_schedule_state_file": str(schedule_path),
+    }
+    monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps({
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "system": {"online": True, "quote_age_seconds": 1},
+            }).encode("utf-8")
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_args, **_kwargs: _Response())
+    heartbeat_times = []
+    heartbeat_payloads = []
+    heavy_finished = threading.Event()
+
+    def post_json(url, _body, _config):
+        if url.endswith("/api/ingest"):
+            heartbeat_times.append(time.monotonic())
+            heartbeat_payloads.append(json.loads(_body))
+
+    def slow_audit(_payload, _config):
+        time.sleep(61)
+        heavy_finished.set()
+
+    monkeypatch.setattr(module, "_post_json", post_json)
+    monkeypatch.setattr(module, "_sync_audit", slow_audit)
+
+    count = module.run_continuous_sync(
+        {"local_status_url": "http://local/api/status"},
+        status_file=status_path,
+        interval_seconds=30,
+        max_heartbeats=3,
+    )
+
+    assert count == 3
+    assert len(heartbeat_times) == 3
+    intervals = [
+        heartbeat_times[index] - heartbeat_times[index - 1]
+        for index in range(1, len(heartbeat_times))
+    ]
+    assert all(28 <= interval <= 35 for interval in intervals)
+    assert heartbeat_times[-1] < heartbeat_times[0] + 61
+    assert all(payload["system"]["online"] is True for payload in heartbeat_payloads)
+    assert heavy_finished.is_set()
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["status"] == "OK"
+    assert (
+        datetime.now(timezone.utc)
+        - datetime.fromisoformat(status["last_success"])
+    ).total_seconds() < 5
 
 
 def test_local_operator_bridge_transport_requires_dedicated_secret(monkeypatch) -> None:

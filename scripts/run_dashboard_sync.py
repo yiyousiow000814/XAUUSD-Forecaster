@@ -10,11 +10,13 @@ import math
 import os
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import UTC, datetime, timedelta
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
@@ -53,7 +55,7 @@ NEWS_EVIDENCE_WRITE_BATCH_ITEMS = 20
 NEWS_EVIDENCE_PAGES_PER_CYCLE = 1
 MARKET_HISTORY_PAGES_PER_CYCLE = 1
 MARKET_OVERVIEWS_PER_CYCLE = 2
-OPERATOR_RETRY_COMMANDS_PER_CYCLE = 1
+OPERATOR_RETRY_COMMANDS_PER_CYCLE = 10
 HEAVY_RESOURCES_PER_CYCLE = 1
 RESOURCE_BACKOFF_MAX_SECONDS = 3_600
 NEWS_READER_WINDOW_DAYS = 60
@@ -75,6 +77,8 @@ REMOTE_MARKET_DECISION_LIMIT = 288 * 5
 REMOTE_MARKET_CANDLE_LIMIT = 576
 REMOTE_MARKET_DENSE_LIMITS = (1440, 1152, 864, 576, 288, 0)
 REMOTE_MARKET_OVERVIEW_LIMITS = (480, 240, 120, 80, 40)
+
+_RESOURCE_SCHEDULE_LOCK = threading.Lock()
 
 from xauusd_forecaster.dashboard_payloads import (
     audit_status_payload,
@@ -128,6 +132,20 @@ class RemoteInvariantViolation(RuntimeError):
             f"remote invariant check failed: {self.error_code} "
             f"({self.evidence['violation_count']} violations)"
         )
+
+
+def operator_retry_bulk_sla_seconds(
+    command_count: int,
+    *,
+    cadence_seconds: int = 30,
+    commands_per_cycle: int = OPERATOR_RETRY_COMMANDS_PER_CYCLE,
+) -> int:
+    """Return the product SLA for draining an already queued command batch."""
+    if command_count <= 0:
+        return 0
+    if cadence_seconds <= 0 or commands_per_cycle <= 0:
+        raise ValueError("retry cadence and batch size must be positive")
+    return math.ceil(command_count / commands_per_cycle) * cadence_seconds
 
 NEWS_INDEX_FIELDS = (
     "category", "source", "source_item_id", "revision_number", "cluster_id",
@@ -1806,7 +1824,9 @@ def _schedule_epoch(value: object) -> float:
         return 0.0
 
 
-def _due_resource_policies(state: dict, now: datetime) -> list[tuple]:
+def _due_resource_policies(
+    state: dict, now: datetime, *, lane: str | None = None,
+) -> list[tuple]:
     resources = state.get("resources")
     if not isinstance(resources, dict):
         resources = {}
@@ -1820,6 +1840,10 @@ def _due_resource_policies(state: dict, now: datetime) -> list[tuple]:
             due.append(policy)
     controls = [policy for policy in due if not policy[3]]
     heavy = [policy for policy in due if policy[3]][:HEAVY_RESOURCES_PER_CYCLE]
+    if lane == "control":
+        return controls
+    if lane == "heavy":
+        return heavy
     return [*controls, *heavy]
 
 
@@ -1857,7 +1881,25 @@ def _resource_schedule_path(config: dict) -> Path:
     ))
 
 
-def sync_once(config: dict) -> SyncResourceResults:
+def _persist_resource_schedule_result(
+    path: Path,
+    resource: str,
+    cadence_seconds: int,
+    *,
+    now: datetime,
+    success: bool,
+) -> None:
+    """Merge one lane's result without overwriting another lane's progress."""
+    with _RESOURCE_SCHEDULE_LOCK:
+        state = _read_news_sync_state(path)
+        _record_resource_schedule(
+            state, resource, cadence_seconds, now=now, success=success,
+        )
+        _write_news_sync_state(path, state)
+
+
+def sync_heartbeat_once(config: dict) -> tuple[list[dict], SyncResourceResults]:
+    """Publish only the critical heartbeat and return currently healthy targets."""
     with urllib.request.urlopen(
         _local_critical_status_url(config), timeout=LOCAL_STATUS_TIMEOUT_SECONDS
     ) as response:
@@ -1865,17 +1907,13 @@ def sync_once(config: dict) -> SyncResourceResults:
 
     degraded = []
     observations = []
-    healthy_targets = 0
-    live_payload = remote_snapshot(critical_payload)
     healthy = []
+    live_payload = remote_snapshot(critical_payload)
     for target in configured_targets(config):
         target_name = target["name"]
         started = time.perf_counter()
         try:
-            # The live heartbeat is the critical path. Optional, growing
-            # resources must not make a healthy target appear offline.
             _post_json(target["remote_ingest_url"], live_payload, target)
-            healthy_targets += 1
             healthy.append(target)
             observations.append({
                 "target": target_name,
@@ -1901,19 +1939,27 @@ def sync_once(config: dict) -> SyncResourceResults:
                 "duration_ms": duration_ms,
                 "completed_at": datetime.now(UTC).isoformat(),
             })
-            continue
-    if healthy_targets == 0:
+    if not healthy:
         error = AllTargetsRejected(degraded)
         error.resource_observations = observations
         raise error
+    return healthy, SyncResourceResults(degraded, observations)
 
-    for target in healthy:
+
+def sync_resource_lane(
+    targets: list[dict], *, lane: str | None = None,
+) -> SyncResourceResults:
+    """Advance control or accumulated resources independently of heartbeat."""
+    degraded = []
+    observations = []
+    for target in targets:
         target_name = target["name"]
         schedule_path = _resource_schedule_path(target)
-        schedule_state = _read_news_sync_state(schedule_path)
+        with _RESOURCE_SCHEDULE_LOCK:
+            schedule_state = _read_news_sync_state(schedule_path)
         now = datetime.now(UTC)
         for resource, operation_name, cadence_seconds, _heavy in (
-            _due_resource_policies(schedule_state, now)
+            _due_resource_policies(schedule_state, now, lane=lane)
         ):
             started = time.perf_counter()
             try:
@@ -1923,11 +1969,10 @@ def sync_once(config: dict) -> SyncResourceResults:
                 else:
                     operation({}, target)
                 completed_at = datetime.now(UTC)
-                _record_resource_schedule(
-                    schedule_state, resource, cadence_seconds,
+                _persist_resource_schedule_result(
+                    schedule_path, resource, cadence_seconds,
                     now=completed_at, success=True,
                 )
-                _write_news_sync_state(schedule_path, schedule_state)
                 observations.append({
                     "target": target_name,
                     "resource": resource,
@@ -1940,11 +1985,10 @@ def sync_once(config: dict) -> SyncResourceResults:
             except Exception as error:
                 duration_ms = round((time.perf_counter() - started) * 1000, 1)
                 completed_at = datetime.now(UTC)
-                _record_resource_schedule(
-                    schedule_state, resource, cadence_seconds,
+                _persist_resource_schedule_result(
+                    schedule_path, resource, cadence_seconds,
                     now=completed_at, success=False,
                 )
-                _write_news_sync_state(schedule_path, schedule_state)
                 failure = {
                     "target": target_name,
                     "resource": resource,
@@ -1965,6 +2009,15 @@ def sync_once(config: dict) -> SyncResourceResults:
                     "completed_at": datetime.now(UTC).isoformat(),
                 })
     return SyncResourceResults(degraded, observations)
+
+
+def sync_once(config: dict) -> SyncResourceResults:
+    healthy, heartbeat = sync_heartbeat_once(config)
+    optional = sync_resource_lane(healthy)
+    return SyncResourceResults(
+        [*heartbeat, *optional],
+        [*heartbeat.resource_observations, *optional.resource_observations],
+    )
 
 
 def sync_with_retry(config: dict, *, attempts: int = 3) -> tuple[int, list[dict]]:
@@ -2000,6 +2053,113 @@ def sync_with_retry(config: dict, *, attempts: int = 3) -> tuple[int, list[dict]
     raise RuntimeError("dashboard sync retry loop exhausted")
 
 
+def _lane_failure(lane: str, error: Exception) -> SyncResourceResults:
+    failure = {
+        "target": "scheduler",
+        "resource": f"{lane}_lane",
+        "error_type": type(error).__name__,
+        "error_code": sync_error_code(error),
+        "error": str(error)[:500],
+    }
+    observation = {
+        "target": "scheduler",
+        "resource": f"{lane}_lane",
+        "status": "ERROR",
+        "duration_ms": None,
+        "completed_at": datetime.now(UTC).isoformat(),
+    }
+    return SyncResourceResults([failure], [observation])
+
+
+def _consume_lane_future(
+    lane: str, future: Future | None,
+) -> tuple[Future | None, SyncResourceResults | None]:
+    if future is None or not future.done():
+        return future, None
+    try:
+        return None, future.result()
+    except Exception as error:
+        return None, _lane_failure(lane, error)
+
+
+def run_continuous_sync(
+    config: dict,
+    *,
+    status_file: Path,
+    interval_seconds: float = 30.0,
+    stop_event: threading.Event | None = None,
+    max_heartbeats: int | None = None,
+) -> int:
+    """Keep heartbeat, control work, and accumulated work on separate owners."""
+    stop = stop_event or threading.Event()
+    interval = max(5.0, interval_seconds)
+    latest_lane_results: dict[str, SyncResourceResults] = {
+        "control": SyncResourceResults([], []),
+        "heavy": SyncResourceResults([], []),
+    }
+    futures: dict[str, Future | None] = {"control": None, "heavy": None}
+    executors = {
+        lane: ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"dashboard-{lane}")
+        for lane in futures
+    }
+    heartbeat_count = 0
+    try:
+        while not stop.is_set():
+            cycle_started = time.monotonic()
+            for lane in futures:
+                futures[lane], completed = _consume_lane_future(
+                    lane, futures[lane],
+                )
+                if completed is not None:
+                    latest_lane_results[lane] = completed
+            try:
+                healthy, heartbeat = sync_heartbeat_once(config)
+                degraded = [
+                    *heartbeat,
+                    *latest_lane_results["control"],
+                    *latest_lane_results["heavy"],
+                ]
+                observations = [
+                    *heartbeat.resource_observations,
+                    *latest_lane_results["control"].resource_observations,
+                    *latest_lane_results["heavy"].resource_observations,
+                ]
+                write_sync_status(
+                    status_file,
+                    success=True,
+                    attempts_used=1,
+                    degraded_resources=degraded,
+                    resource_observations=observations,
+                )
+                for lane in futures:
+                    if futures[lane] is None:
+                        futures[lane] = executors[lane].submit(
+                            sync_resource_lane, healthy, lane=lane,
+                        )
+                print(json.dumps({
+                    "event": "DASHBOARD_HEARTBEAT_OK",
+                    "heartbeat_sequence": heartbeat_count + 1,
+                    "degraded_resources": degraded,
+                }), flush=True)
+            except Exception as error:
+                write_sync_status(status_file, success=False, error=error)
+                print(json.dumps({
+                    "event": "DASHBOARD_HEARTBEAT_ERROR",
+                    "heartbeat_sequence": heartbeat_count + 1,
+                    "error_type": type(error).__name__,
+                    "error": str(error)[:500],
+                }), flush=True)
+            heartbeat_count += 1
+            if max_heartbeats is not None and heartbeat_count >= max_heartbeats:
+                break
+            remaining = interval - (time.monotonic() - cycle_started)
+            stop.wait(max(0.0, remaining))
+    finally:
+        for executor in executors.values():
+            executor.shutdown(wait=True, cancel_futures=False)
+    return heartbeat_count
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -2008,6 +2168,12 @@ def main() -> int:
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     config = json.loads(args.config.read_text(encoding="utf-8"))
+    if not args.once:
+        return run_continuous_sync(
+            config,
+            status_file=args.status_file,
+            interval_seconds=args.interval_seconds,
+        )
     while True:
         try:
             attempts_used, degraded_resources = sync_with_retry(config)
@@ -2045,9 +2211,7 @@ def main() -> int:
                 ),
                 flush=True,
             )
-        if args.once:
-            break
-        time.sleep(max(5.0, args.interval_seconds))
+        break
     return 0
 
 

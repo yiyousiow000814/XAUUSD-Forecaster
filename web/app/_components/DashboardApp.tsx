@@ -52,8 +52,8 @@ function parseDashboardUrl(url: URL): DashboardLocation | null {
 
 function canonicalHref(location: DashboardLocation): string {
   if (location.room === "live") return "/";
-  if (location.room === "audit") return `/?room=audit&view=${location.auditView}`;
-  if (location.room === "health") return "/?room=health";
+  if (location.room === "audit") return `/audit?view=${location.auditView}`;
+  if (location.room === "health") return "/health";
   if (location.room === "admin") return "/admin";
   if (location.room === "assistant") return "/admin/assistant";
   if (location.room === "retry") return "/admin/retry-jobs";

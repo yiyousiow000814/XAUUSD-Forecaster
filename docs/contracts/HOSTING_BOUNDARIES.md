@@ -87,11 +87,16 @@
   growing-resource failure remains visible as that resource's degraded state,
   but shared plumbing must still publish unrelated healthy critical state.
 - Public static shells and immutable assets do not enter the Worker execution
-  path. API requests enter a minimal router that loads only the selected API
-  module; React rendering and dashboard view modules are not part of the API
-  execution boundary. Snapshot JSON already validated by D1 is returned as its
-  stored string, without a parse-and-serialize cycle in the Worker.
-- Dashboard synchronization always publishes the critical heartbeat first.
+  path. `/`, `/health`, and `/audit` are canonical public URLs with distinct
+  prerendered HTML identities; a direct reload or a client without JavaScript
+  must receive the requested page rather than a generic Live shell. API
+  requests enter a minimal router that loads only the selected API module;
+  React rendering and dashboard view modules are not part of the API execution
+  boundary. Snapshot JSON already validated by D1 is returned as its stored
+  string, without a parse-and-serialize cycle in the Worker.
+- Dashboard synchronization gives the critical heartbeat an execution owner
+  independent from control and heavy optional work. A slow optional build must
+  not delay the next heartbeat or make an otherwise current public status stale.
   Each optional resource owns a durable next-run time and failure backoff, each
   accumulated resource advances through a bounded page, and one cycle admits
   only a fixed number of heavy resources. Restarting the synchronizer must not

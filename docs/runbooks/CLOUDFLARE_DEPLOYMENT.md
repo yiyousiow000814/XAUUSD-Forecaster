@@ -74,10 +74,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/xauusd_control_cente
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/xauusd_control_center.ps1 -Action ReconcileRelease
 ```
 
-To roll back the Workers Builds control-plane bootstrap, restore the former
-production deploy command `npx wrangler deploy` in **Settings > Build**. This is
-an emergency configuration rollback only: it re-enables implicit production
-promotion and therefore must not be used as a normal release operation.
+After Candidate validation, confirm `/` and `/favicon.ico` are Static Asset responses and
+do not create Worker invocations. Confirm `/health` and `/audit` are also Static
+Assets and that their raw HTML contains `系统健康状态` and `证据台页面`
+respectively. For API probes, record `X-Aurum-Git-SHA`,
+`X-Aurum-Worker-Version`, `X-Aurum-Route`, `X-Aurum-Resource`, and
+`X-Aurum-Request-Id`, then correlate them with Workers Logs. Inspect actual
+Cloudflare CPU time for the route-family soak; local Windows process CPU timers
+are not a substitute for the platform invocation measurement.
+
+The local benchmark reports the same production-shaped route family with
+diagnostic logging disabled and enabled. The difference estimates local logging
+cost only; neither result proves the Free-plan CPU limit is safe or that a prior
+1102 is resolved.
+
+Candidate staging, directed validation, Promote, observation, and Reverse are
+owned by Release Control. Operators must not substitute ad-hoc Wrangler deploy,
+versions-deploy, rollback, or remote migration commands for that state machine.
 
 When a migration schedules a new version of work for a Windows consumer, use a
 two-phase cutover. First deploy the claim-generation compatibility gate and

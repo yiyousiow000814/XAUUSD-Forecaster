@@ -47,23 +47,43 @@ async function invoke(path, init = {}, env = runtimeEnv) {
   return worker.fetch(new Request(`https://example.test${path}`, init), env, context);
 }
 
-test("serves the public shell and favicon as static assets before Worker execution", () => {
+test("serves canonical public shells and favicon as static assets before Worker execution", () => {
   const config = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
   const redirects = readFileSync(new URL("../dist/client/_redirects", import.meta.url), "utf8");
-  assert.ok(statSync(new URL("../dist/client/index.html", import.meta.url)).size > 10_000);
+  const staticPages = [
+    ["index.html", "最近90分钟"],
+    ["health.html", "系统健康状态"],
+    ["audit.html", "证据台页面"],
+  ];
+  for (const [file, identity] of staticPages) {
+    const url = new URL(`../dist/client/${file}`, import.meta.url);
+    assert.ok(statSync(url).size > 10_000, file);
+    assert.match(readFileSync(url, "utf8"), new RegExp(identity), file);
+  }
   assert.ok(statSync(new URL("../dist/client/favicon.svg", import.meta.url)).size > 0);
   assert.match(redirects, /^\/favicon\.ico \/favicon\.svg 301/m);
   assert.match(config, /"run_worker_first": \[[\s\S]*"\/api\/\*", "\/admin\/api\/\*", "\/_vinext\/image"/);
   assert.doesNotMatch(config, /run_worker_first[^\]]*favicon/);
+  assert.doesNotMatch(config, /run_worker_first[^\]]*"\/(?:health|audit)"/);
+});
+
+test("benchmarks diagnostic logging without claiming local proof of platform CPU safety", () => {
+  const benchmark = readFileSync(
+    new URL("../build/benchmark-worker-cpu.mjs", import.meta.url), "utf8",
+  );
+  assert.match(benchmark, /logging_disabled: loggingDisabled/);
+  assert.match(benchmark, /logging_enabled: loggingEnabled/);
+  assert.match(benchmark, /logging_delta: loggingDelta/);
+  assert.match(benchmark, /diagnostic_log_bytes_written/);
+  assert.doesNotMatch(benchmark, /worker_limit_ms/);
+  assert.match(benchmark, /cannot prove Cloudflare CPU safety/);
 });
 
 test("keeps legacy redirects on the minimal Worker path", async () => {
   for (const [path, destination] of [
     ["/status", "/admin/ai-usage"],
-    ["/health", "/?room=health"],
     ["/assistant", "/admin/assistant"],
     ["/retry-jobs", "/admin/retry-jobs"],
-    ["/audit?view=league", "/?room=audit&view=league"],
   ]) {
     const response = await invoke(path, { redirect: "manual" });
     assert.equal(response.status, 307, path);

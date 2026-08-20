@@ -1,4 +1,6 @@
 import { readdirSync } from "node:fs";
+import { Console } from "node:console";
+import { Writable } from "node:stream";
 import { D1TestDatabase } from "../tests/d1-test-database.mjs";
 
 const SAMPLE_COUNT = 120;
@@ -130,10 +132,8 @@ async function sample(label, factory, count = SAMPLE_COUNT) {
   };
 }
 
-const originalLog = console.log;
-console.log = () => {};
-const results = [];
-try {
+async function runRouteFamily() {
+  const results = [];
   for (const [path, init = {}] of routes) {
     results.push(await sample(path, () => new Request(`https://example.test${path}`, init)));
   }
@@ -148,9 +148,39 @@ try {
       body: maximum,
     },
   ), 40));
+  return results;
+}
+
+const originalLog = console.log;
+let diagnosticLogBytes = 0;
+let loggingDisabled;
+let loggingEnabled;
+try {
+  console.log = () => {};
+  loggingDisabled = await runRouteFamily();
+  const diagnosticSink = new Writable({
+    write(chunk, _encoding, callback) {
+      diagnosticLogBytes += Buffer.byteLength(chunk);
+      callback();
+    },
+  });
+  const diagnosticConsole = new Console({ stdout: diagnosticSink, stderr: diagnosticSink });
+  console.log = diagnosticConsole.log.bind(diagnosticConsole);
+  loggingEnabled = await runRouteFamily();
 } finally {
   console.log = originalLog;
 }
+
+const loggingDelta = loggingEnabled.map((enabled, index) => ({
+  route: enabled.route,
+  mean_cpu_ms_delta: rounded(
+    enabled.mean_cpu_ms_windows_timer
+      - loggingDisabled[index].mean_cpu_ms_windows_timer,
+  ),
+  p95_active_wall_ms_delta: rounded(
+    enabled.p95_active_wall_ms - loggingDisabled[index].p95_active_wall_ms,
+  ),
+}));
 
 const staticRows = ["/", "/favicon.ico"].map(route => ({
   route, samples: SAMPLE_COUNT, mean_cpu_ms_windows_timer: 0,
@@ -158,9 +188,11 @@ const staticRows = ["/", "/favicon.ico"].map(route => ({
   max_active_wall_ms: 0, failures: 0, delivery: "static asset; Worker not invoked",
 }));
 const report = {
-  methodology: "Warmed production bundle; active wall subtracts measured local D1 execution. Windows CPU timer is aggregate-only; verify p95 CPU from Cloudflare invocation logs.",
-  worker_limit_ms: 10,
+  methodology: "Warmed production bundle; active wall subtracts measured local D1 execution. Logging-enabled samples serialize and write every diagnostic to an in-memory Node Console sink. Windows CPU timers are aggregate local evidence only and cannot prove Cloudflare CPU safety or resolution of Error 1102; validate a 0% Candidate with platform invocation logs before promotion.",
   static: staticRows,
-  worker: results,
+  logging_disabled: loggingDisabled,
+  logging_enabled: loggingEnabled,
+  logging_delta: loggingDelta,
+  diagnostic_log_bytes_written: diagnosticLogBytes,
 };
 console.log(JSON.stringify(report, null, 2));

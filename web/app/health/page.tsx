@@ -1,5 +1,11 @@
-import { redirect } from "next/navigation";
+import DashboardApp from "../_components/DashboardApp";
+import { previewResources } from "../_lib/preview-resources";
 
-export default function LegacyHealthPage() {
-  redirect("/?room=health");
+export const dynamic = "force-static";
+
+export default function HealthPage() {
+  return <DashboardApp
+    initialLocation={{ room: "health", auditView: "news" }}
+    initialResources={previewResources()}
+  />;
 }

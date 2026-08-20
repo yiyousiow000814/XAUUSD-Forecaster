@@ -1108,7 +1108,7 @@ export default function AuditView() {
   const selectView = (next: AuditDeskView) => {
     pendingScrollTop.current = window.scrollY;
     setView(next);
-    window.history.replaceState(null, "", `/?room=audit&view=${next}`);
+    window.history.replaceState(null, "", `/audit?view=${next}`);
   };
 
   useLayoutEffect(() => {
@@ -1149,7 +1149,7 @@ export default function AuditView() {
 
   useEffect(() => {
     if (requestedView === "qa") {
-      window.history.replaceState(null, "", "/?room=audit&view=briefs");
+      window.history.replaceState(null, "", "/audit?view=briefs");
     }
   }, [requestedView]);
 

@@ -20,8 +20,13 @@ async function listHtml(directory) {
 }
 
 const published = await listHtml(source);
-if (!published.some(path => relative(source, path).replaceAll("\\", "/") === "index.html")) {
-  throw new Error("vinext did not prerender the public root shell");
+const publishedRoutes = new Set(
+  published.map(path => relative(source, path).replaceAll("\\", "/")),
+);
+const requiredRoutes = ["index.html", "health.html", "audit.html"];
+const missingRoutes = requiredRoutes.filter(path => !publishedRoutes.has(path));
+if (missingRoutes.length) {
+  throw new Error(`vinext did not prerender public shells: ${missingRoutes.join(", ")}`);
 }
 
 console.log(`Published ${published.length} prerendered HTML assets.`);

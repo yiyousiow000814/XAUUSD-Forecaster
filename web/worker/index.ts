@@ -10,13 +10,9 @@ const isPreview = __AURUM_DEPLOYMENT__.is_preview;
 
 const LEGACY_REDIRECTS: Record<string, string> = {
   "/status": "/admin/ai-usage",
-  "/health": "/?room=health",
   "/assistant": "/admin/assistant",
   "/retry-jobs": "/admin/retry-jobs",
 };
-const AUDIT_VIEWS = new Set([
-  "news", "evidence", "stories", "decisions", "league", "coverage",
-]);
 
 const safeRequestId = (request: Request) => {
   const supplied = request.headers.get("x-correlation-id")?.trim();
@@ -70,10 +66,7 @@ const worker = {
     const versionId = env.CF_VERSION_METADATA?.id ?? "local";
     let result: ApiRouteResult;
     try {
-      const requestedAuditView = url.searchParams.get("view") ?? "news";
-      const auditView = AUDIT_VIEWS.has(requestedAuditView) ? requestedAuditView : "news";
-      const legacyRedirect = LEGACY_REDIRECTS[url.pathname]
-        ?? (url.pathname === "/audit" ? `/?room=audit&view=${auditView}` : null);
+      const legacyRedirect = LEGACY_REDIRECTS[url.pathname] ?? null;
       if (legacyRedirect) {
         result = {
           response: Response.redirect(new URL(legacyRedirect, request.url), 307),
