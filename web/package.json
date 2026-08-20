@@ -15,6 +15,7 @@
     "db:generate": "drizzle-kit generate",
     "cf:types": "wrangler types worker-configuration.d.ts",
     "cf:types:check": "wrangler types worker-configuration.d.ts --check",
+    "cf:preview-upload": "wrangler versions upload --name aurum-signal-room-preview",
     "cf:deploy": "npm run test && wrangler deploy"
   },
   "dependencies": {

@@ -16,7 +16,7 @@ command is:
 
 ```text
 Production:     npx wrangler versions upload --message "release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH artifact_kind:PRODUCTION_CANDIDATE"
-Non-production: npx wrangler versions upload --env preview --message "release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH artifact_kind:PREVIEW"
+Non-production: npm run cf:preview-upload -- --message "release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH artifact_kind:PREVIEW"
 ```
 
 The local Control Center discovers the exact release identity, keeps Candidate
@@ -34,8 +34,10 @@ recorded Stable Worker and Windows identities, then allow Candidate discovery.
 Do not hand-edit `release-control-state.json` or copy validation evidence from a
 different Worker Version ID or Git SHA.
 
-The non-production command targets the separate `aurum-signal-room-preview`
-Worker. It must never upload a Version into the production
+The non-production script passes an explicit `--name aurum-signal-room-preview`
+target. Do not replace this with a named environment on the production service:
+Cloudflare service environments share that service's Version history. The
+separate Preview Worker must never upload a Version into the production
 `aurum-signal-room` history. The commands deliberately emit different immutable
 artifact kinds; a production candidate additionally requires `branch:main` and
 Git reachability from `origin/main`.

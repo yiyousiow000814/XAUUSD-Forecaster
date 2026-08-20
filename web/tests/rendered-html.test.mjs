@@ -3094,10 +3094,11 @@ test("Worker validation manifest owns every production route and direct router",
 
 test("non-production builds target an isolated Preview Worker", () => {
   const config = JSON.parse(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(config.name, "aurum-signal-room");
-  assert.equal(config.env.preview.name, "aurum-signal-room-preview");
-  assert.equal(config.env.preview.d1_databases[0].database_id,
-    config.d1_databases[0].database_id);
+  assert.equal(packageJson.scripts["cf:preview-upload"],
+    "wrangler versions upload --name aurum-signal-room-preview");
+  assert.ok(!packageJson.scripts["cf:preview-upload"].includes("--env"));
 });
 
 test("route inventory parser covers const and re-exported handlers", () => {
