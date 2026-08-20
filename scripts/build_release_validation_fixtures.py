@@ -149,7 +149,7 @@ def build_fixtures() -> dict[str, bytes]:
     )
     learning_records = dashboard_sync.learning_history_records(source)
     learning_batch = max(
-        dashboard_sync.learning_history_batches(learning_records * 100),
+        dashboard_sync.learning_history_batches(learning_records),
         key=lambda rows: len(json.dumps(
             {"records": rows}, ensure_ascii=False, separators=(",", ":"),
         ).encode()),

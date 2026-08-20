@@ -1327,8 +1327,12 @@ function Sync-StableRuntimeControlFiles {
         [string]$ControlRoot = (Join-Path $repositoryRoot ".local\runtime-control"),
         [string]$SourceRevision = ""
     )
-    $stageRoot = Join-Path $ControlRoot (".staging-{0}" -f [guid]::NewGuid())
-    $backupRoot = Join-Path $ControlRoot (".backup-{0}" -f [guid]::NewGuid())
+    # Keep transactional paths beside the bundle and short enough for Windows
+    # PowerShell/.NET installations that still enforce legacy MAX_PATH limits.
+    $controlParent = Split-Path -Parent $ControlRoot
+    $transactionId = [guid]::NewGuid().ToString("N")
+    $stageRoot = Join-Path $controlParent (".rcs-{0}" -f $transactionId)
+    $backupRoot = Join-Path $controlParent (".rcb-{0}" -f $transactionId)
     New-Item -ItemType Directory -Path $ControlRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
