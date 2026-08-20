@@ -147,6 +147,19 @@ test("replays the production read route family through bounded API modules", asy
   assert.equal(status.observation_scope, "D1_SNAPSHOT");
 });
 
+test("keeps migrated market history schema out of the request hot path", () => {
+  const source = readFileSync(
+    new URL("../app/api/market-history/route.ts", import.meta.url), "utf8",
+  );
+  assert.doesNotMatch(source, /CREATE TABLE IF NOT EXISTS market_/);
+  assert.match(readFileSync(
+    new URL("../drizzle/0004_market_history.sql", import.meta.url), "utf8",
+  ), /CREATE TABLE IF NOT EXISTS `market_candles`/);
+  assert.match(readFileSync(
+    new URL("../drizzle/0006_materialized_history_overviews.sql", import.meta.url), "utf8",
+  ), /CREATE TABLE IF NOT EXISTS `market_history_overview`/);
+});
+
 test("bounds empty, oversized, maximum legal, and concurrent snapshot writes", async () => {
   if (isPreviewBuild) return;
   const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
