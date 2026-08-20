@@ -658,6 +658,7 @@ def annotate_pending_news(
     def parse(item: tuple[int, dict]) -> dict[str, object]:
         index, row = item
         started = datetime.now(UTC)
+        display_repair_context = False
         try:
             if selected_provider == "ollama":
                 result, exact_model = _call_ollama(
@@ -668,6 +669,7 @@ def annotate_pending_news(
                     ledger.connection, row, prompt_version=prompt_version,
                 )
                 if checkpoint is not None:
+                    display_repair_context = True
                     result, exact_model = request_pool.repair_display_checkpoint(
                         index, selected_model, checkpoint,
                         row["headline"], row["body"] or "",
@@ -719,6 +721,9 @@ def annotate_pending_news(
                 "model_version": expected_model_identity,
                 "prompt_version": prompt_version,
                 "display_checkpoint": display_checkpoint,
+                "failure_context": (
+                    "DISPLAY_REPAIR" if display_repair_context else None
+                ),
             }
 
     pending_records = pending_records[:effective_limit]
@@ -783,7 +788,7 @@ def _persist_parsed_annotation(
         repair_is_pending = (
             isinstance(failure_evidence, dict)
             and failure_evidence.get("failure_stage") == "DISPLAY_REPAIR"
-        )
+        ) or parsed_record.get("failure_context") == "DISPLAY_REPAIR"
         return {
             "status": "ERROR", "source": row["source"],
             "source_item_id": row["source_item_id"],
@@ -3010,6 +3015,10 @@ def _append_llm_failure(
         str(failure_evidence.get("failure_stage") or "")
         if isinstance(failure_evidence, dict) else ""
     )
+    display_repair_context = (
+        failure_stage == "DISPLAY_REPAIR"
+        or parsed_record.get("failure_context") == "DISPLAY_REPAIR"
+    )
     transient = (
         error_code in {429, 500, 502, 503, 504}
         or parsed_record.get("retryable_transport") is True
@@ -3022,7 +3031,11 @@ def _append_llm_failure(
         terminal = False
         delay = timedelta(minutes=(1, 2, 5, 15, 30)[min(attempt - 1, 4)])
     elif transient:
-        terminal = attempt >= 5
+        # A durable display checkpoint preserves already-validated semantics.
+        # Provider transport pressure must not terminalize that narrower repair
+        # stage; a later attempt resumes the checkpoint instead of recomputing
+        # semantic work.
+        terminal = False if display_repair_context else attempt >= 5
         delay = timedelta(minutes=(15, 60, 360, 720)[min(attempt - 1, 3)])
     elif failure_code in {
         "MODEL_OUTPUT_CONTRACT_FAILED", "MODEL_OUTPUT_INVALID",
