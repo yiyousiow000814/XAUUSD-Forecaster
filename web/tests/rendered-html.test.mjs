@@ -3067,6 +3067,30 @@ test("snapshot dry-run reads bounds and uses read-only D1 JSON validation", asyn
   assert.deepEqual(calls, ["SELECT json_valid(?) AS valid"]);
 });
 
+test("split audit routes share authenticated bounded zero-mutation validation", () => {
+  const helper = readFileSync(new URL(
+    "../app/api/_shared/audit-detail-snapshot.ts", import.meta.url,
+  ), "utf8");
+  assert.match(helper, /authorizeReleaseValidation\([\s\S]*validationFamily, isIngestAuthorized/);
+  assert.match(helper, /dryRun: isReleaseValidationContext\(validation\)/);
+  assert.match(helper, /maxBytes: AUDIT_DETAIL_SNAPSHOT_BYTES/);
+  assert.match(helper, /result === "too_large"[\s\S]*status: 413/);
+  assert.match(helper, /result === "invalid"[\s\S]*status: 400/);
+  assert.match(helper, /result === "validated"[\s\S]*releaseValidationResponse/);
+  assert.match(helper, /mutation_boundary: `audit-snapshot-\$\{snapshotId\}-upsert`/);
+  for (const [resource, id, family] of [
+    ["briefs", "briefs", "audit-briefs-write"],
+    ["stories", "stories", "audit-stories-write"],
+    ["decisions", "decisions", "audit-decisions-write"],
+  ]) {
+    const route = readFileSync(new URL(
+      `../app/api/audit-${resource}/route.ts`, import.meta.url,
+    ), "utf8");
+    assert.match(route, new RegExp(`AUDIT_SNAPSHOT_IDS\\.${id}`));
+    assert.match(route, new RegExp(`"${family}"`));
+  }
+});
+
 test("Worker validation manifest owns every production route and direct router", () => {
   const manifest = JSON.parse(readFileSync(
     new URL("../worker-validation-manifest.json", import.meta.url), "utf8",

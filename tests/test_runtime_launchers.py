@@ -1184,7 +1184,7 @@ def test_manifest_selects_baseline_and_affected_route_sample_families(tmp_path) 
         '$sharedSamples,$($adminRoutes.Count),$($docs.worker_cpu_required)"',
     )
 
-    assert result == "7,70,27,270,0,False"
+    assert result == "7,70,33,330,0,False"
 
 
 def test_one_failed_route_family_fails_candidate_cpu_evidence(tmp_path) -> None:
@@ -1367,6 +1367,59 @@ def test_bootstrap_preserves_accepted_268_candidate_and_evidence(tmp_path) -> No
         "dd823aa4-20f0-47e1-9255-1b785a4c17b0,"
         "14c055a35040fa963700c988f770c9bb52fa669e,0"
     )
+
+
+def test_release_version_timestamp_normalizes_all_wrangler_shapes(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$scalar=[pscustomobject]@{metadata=[pscustomobject]@{created_on='2026-08-20T10:00:00+00:00'}};"
+        "$array=[pscustomobject]@{metadata=[pscustomobject]@{created_on=@('bad','2026-08-20T11:00:00Z')}};"
+        "$multiple=[pscustomobject]@{metadata=[pscustomobject]@{created_on=@(@('2026-08-20T09:00:00Z'),@('2026-08-20T12:00:00Z'))}};"
+        "$malformed=[pscustomobject]@{metadata=[pscustomobject]@{created_on='not-a-date'}};"
+        "$missing=[pscustomobject]@{metadata=[pscustomobject]@{}};"
+        'Write-Output "$(Get-ReleaseVersionCreatedAt $scalar),'
+        '$(Get-ReleaseVersionCreatedAt $array),$(Get-ReleaseVersionCreatedAt $multiple),'
+        '$(Get-ReleaseVersionCreatedAt $malformed),$(Get-ReleaseVersionCreatedAt $missing)"',
+    )
+    assert result == (
+        "2026-08-20T10:00:00.0000000+00:00,"
+        "2026-08-20T11:00:00.0000000+00:00,"
+        "2026-08-20T12:00:00.0000000+00:00,,"
+    )
+
+
+def test_bootstrap_watermark_uses_newest_valid_timestamp_then_version_id(tmp_path) -> None:
+    stable = "a" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-CloudflareDeployment { [pscustomobject]@{versions=@("
+        "[pscustomobject]@{version_id='stable-worker';percentage=100})} };"
+        "function Get-CloudflareVersions { @("
+        "[pscustomobject]@{id='version-a';metadata=[pscustomobject]@{created_on=@('bad','2026-08-20T12:00:00Z')}},"
+        "[pscustomobject]@{id='version-b';metadata=[pscustomobject]@{created_on=@(@('2026-08-20T12:00:00Z'))}},"
+        "[pscustomobject]@{id='version-z';metadata=[pscustomobject]@{created_on='bad'}}) } ;"
+        f"function Get-RuntimeCodeState {{ [pscustomobject]@{{applied_revision='{stable}'}} }};"
+        "$state=Initialize-ReleaseControl;"
+        'Write-Output "$($state.candidate_discovery.watermark_version_id),$($state.candidate_discovery.watermark_created_at)"',
+    )
+    assert result == "version-b,2026-08-20T12:00:00.0000000+00:00"
+
+
+def test_candidate_discovery_accepts_object_array_timestamp_without_crashing(tmp_path) -> None:
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "c" * 40)
+        + "$state=Get-ReleaseControlState;$state.candidate=$null;"
+        "$state.candidate_discovery.initialized_at='2026-08-20T10:00:00Z';"
+        "$state.candidate_discovery.watermark_created_at='2026-08-20T10:00:00Z';"
+        "$state.candidate_discovery.watermark_version_id='old';Write-ReleaseControlState $state;"
+        "function Get-CloudflareVersions { @([pscustomobject]@{id='11111111-1111-4111-8111-111111111111';"
+        "metadata=[pscustomobject]@{created_on=@('bad','2026-08-20T12:00:00Z');has_preview=$true};"
+        f"annotations=[pscustomobject]@{{'workers/message'='release:{candidate} branch:main artifact_kind:PRODUCTION_CANDIDATE'}}}}) }};"
+        "$found=Find-NewCandidateRelease;Write-Output $found.git_sha",
+    )
+    assert result == candidate
 
 
 def test_abandoned_release_lock_is_recovered_without_touching_state(tmp_path) -> None:
@@ -1569,6 +1622,55 @@ def test_platform_binding_change_requires_coordinated_review(tmp_path) -> None:
     assert result == "False"
 
 
+def test_compatibility_classifier_separates_storage_from_platform_review(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$storage=Get-CandidateCompatibilityRequirement @('web/drizzle/0022.sql');"
+        "$platform=Get-CandidateCompatibilityRequirement @('web/wrangler.jsonc');"
+        "$automatic=Get-CandidateCompatibilityRequirement @('web/app/api/status/route.ts');"
+        'Write-Output "$($storage.state),$($platform.state),$($automatic.state)"',
+    )
+    assert result == (
+        "COORDINATED_STORAGE_MIGRATION_REQUIRED,"
+        "PLATFORM_CONFIG_REVIEW_REQUIRED,AUTOMATIC"
+    )
+
+
+def test_platform_compatibility_approval_is_exact_audited_and_narrow(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$candidate.validation_state='REVIEW_REQUIRED';$candidate.compatibility_state='REVIEW_REQUIRED';"
+        "$candidate.validation=[pscustomobject]@{key=$candidate.validation_key;"
+        "reason='PLATFORM_CONFIG_REVIEW_REQUIRED';resources_verified=$true;"
+        "review_files=@('web/wrangler.jsonc')};Write-ReleaseControlState $state;"
+        "function Test-ProductionCandidateProvenance{return $true};"
+        "function Test-RequiredGitHubChecks{return 'PASSED'};"
+        "function Get-CandidateChangedFiles{return @('web/wrangler.jsonc')};"
+        "function Test-CandidatePlatformResources{return $true};"
+        "$approved=Approve-CandidateCompatibility;$final=Get-ReleaseControlState;"
+        "$history=Get-Content -LiteralPath $releaseHistoryPath -Raw;"
+        'Write-Output "$($approved.validation_state),'
+        '$($approved.compatibility_approval.validation_key -eq $approved.validation_key),'
+        '$($history.Contains(\'CANDIDATE_COMPATIBILITY_APPROVED\'))"',
+    )
+    assert result == "NEW,True,True"
+
+
+def test_storage_or_resource_failure_cannot_use_compatibility_approval(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$state.candidate.validation_state='REVIEW_REQUIRED';"
+        "$state.candidate.validation=[pscustomobject]@{key=$state.candidate.validation_key;"
+        "reason='COORDINATED_STORAGE_MIGRATION_REQUIRED';resources_verified=$true};"
+        "Write-ReleaseControlState $state;"
+        "try{Approve-CandidateCompatibility|Out-Null;'APPROVED'}catch{'BLOCKED'}",
+    )
+    assert result == "BLOCKED"
+
+
 def test_required_github_gate_set_is_exact_and_missing_gate_stays_pending(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
@@ -1737,6 +1839,10 @@ def test_release_gui_exposes_only_explicit_stable_candidate_controls() -> None:
     assert 'New-ReleaseCard -Title "Previous Stable"' in source
     assert 'New-UiButton -Text "Promote Candidate"' in source
     assert 'New-UiButton -Text "Reverse Stable"' in source
+    assert 'New-UiButton -Text "Bootstrap Release Control"' in source
+    assert 'New-UiButton -Text "Open Stable"' in source
+    assert 'New-UiButton -Text "Open Candidate"' in source
+    assert 'New-UiButton `\n        -Text "Approve Compatibility"' in source
     assert 'Git: $($state.candidate.git_sha)' in source
     assert 'Worker: $($state.candidate.worker_version_id)' in source
     assert 'Windows: $($state.candidate.windows_revision)' in source

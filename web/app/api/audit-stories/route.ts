@@ -14,5 +14,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  return writeAuditDetailSnapshot(request, AUDIT_SNAPSHOT_IDS.stories, "invalid audit stories payload");
+  return writeAuditDetailSnapshot(
+    request, AUDIT_SNAPSHOT_IDS.stories,
+    "invalid audit stories payload", "audit-stories-write",
+  );
 }

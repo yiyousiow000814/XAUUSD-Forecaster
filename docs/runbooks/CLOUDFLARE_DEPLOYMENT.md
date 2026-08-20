@@ -29,7 +29,7 @@ SQLite evidence. See [`RELEASE_CONTROL.md`](../contracts/RELEASE_CONTROL.md).
 
 Bootstrap a previously unmanaged runtime only after the Cloudflare production
 build command above is saved and the active Worker deployment is rechecked at
-100%. Run the hidden `BootstrapRelease` Control Center action once, verify the
+100%. Use **Bootstrap Release Control** in the Control Center once, verify the
 recorded Stable Worker and Windows identities, then allow Candidate discovery.
 Do not hand-edit `release-control-state.json` or copy validation evidence from a
 different Worker Version ID or Git SHA.
@@ -43,10 +43,14 @@ artifact kinds; a production candidate additionally requires `branch:main` and
 Git reachability from `origin/main`.
 
 Normal builds and Candidate staging never apply D1 migrations or provision
-bindings. A change under `web/drizzle/`, a migration directory, Wrangler
-bindings, or generated Worker binding types is `REVIEW_REQUIRED` until a
-separate coordinated platform/storage protocol is executed. Missing configured
-resources fail the build; do not use Wrangler auto-configuration as recovery.
+bindings. Schema, migration, provisioning, or destructive storage changes are
+`COORDINATED_STORAGE_MIGRATION_REQUIRED` and have no simple UI override.
+Non-destructive Worker configuration or binding metadata changes are
+`PLATFORM_CONFIG_REVIEW_REQUIRED`; after the exact Candidate provenance,
+required checks, and existing production resource identities are verified, the
+operator may approve that exact Version+SHA with **Approve Compatibility**.
+Approval is audited and never carries to another Candidate. Missing resources
+remain blocked; do not use Wrangler auto-configuration as recovery.
 
 Worker-changing Candidates require a Cloudflare API token limited to read-only
 Workers Observability query access. Store it only in the Windows user
@@ -64,15 +68,10 @@ transport and read-only D1 validation but stop before authoritative mutation.
 Do not substitute `{}` fixtures or treat one invocation per route as CPU
 acceptance.
 
-Use these explicit local actions only through the Control Center confirmation
-UI. The underlying commands are documented for recovery diagnosis, not for
-automatic CI execution:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/xauusd_control_center.ps1 -Action PromoteCandidate
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/xauusd_control_center.ps1 -Action ReverseStable
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/xauusd_control_center.ps1 -Action ReconcileRelease
-```
+Normal release operation uses only the confirmed Control Center actions:
+**Open Candidate**, **Approve Compatibility** when narrowly eligible,
+**Promote Candidate**, and **Reverse Stable**. Hidden PowerShell actions are not
+the operator workflow.
 
 After Candidate validation, confirm `/` and `/favicon.ico` are Static Asset responses and
 do not create Worker invocations. Confirm `/health` and `/audit` are also Static
@@ -91,6 +90,15 @@ cost only; neither result proves the Free-plan CPU limit is safe or that a prior
 Candidate staging, directed validation, Promote, observation, and Reverse are
 owned by Release Control. Operators must not substitute ad-hoc Wrangler deploy,
 versions-deploy, rollback, or remote migration commands for that state machine.
+
+## Historical PR #268 evidence
+
+The pre-rebase PR #268 Candidate produced 104 distinct Cloudflare platform
+samples: all 104 returned HTTP 200, CPU p50/p95/p99/max was 2/4/4/5 ms, and
+there were zero 5xx, `exceededCpu`, or 1102 outcomes. Its `/api/audit` Candidate
+payload was approximately 2,180 bytes. This is historical acceptance evidence
+only. A rebased main `PRODUCTION_CANDIDATE` must repeat exact-Version+SHA Release
+Control validation; this evidence cannot authorize promotion.
 
 When a migration schedules a new version of work for a Windows consumer, use a
 two-phase cutover. First deploy the claim-generation compatibility gate and

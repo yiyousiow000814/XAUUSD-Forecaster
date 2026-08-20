@@ -96,13 +96,13 @@ def _source_payload() -> dict:
         "storylines": [{
             "storyline_id": f"story-{index:03d}",
             "headline": f"Production-shaped storyline {index}",
-            "narrative_zh": "候选版本故事线与时间脉络证据。" * 120,
-        } for index in range(40)],
+            "narrative_zh": "候选版本故事线与时间脉络证据。" * 60,
+        } for index in range(24)],
         "market_reaction_streams": [{
             "stream_id": f"reaction-{index:03d}",
-            "summary_zh": "市场反应流的有界审计内容。" * 100,
-        } for index in range(40)],
-        "storyline_summary": {"total": 40, "active": 40},
+            "summary_zh": "市场反应流的有界审计内容。" * 40,
+        } for index in range(24)],
+        "storyline_summary": {"total": 24, "active": 24},
         "news_evidence_summary": {"total_events": 200, "model_eligible": 200},
         "market_chart": {
             "candles": candles,
@@ -183,6 +183,9 @@ def build_fixtures() -> dict[str, bytes]:
     return {
         "status-ingest.json": dashboard_sync.remote_snapshot(source),
         "audit-write.json": dashboard_sync.audit_snapshot(source),
+        "audit-briefs-write.json": dashboard_sync.audit_briefs_snapshot(source),
+        "audit-stories-write.json": dashboard_sync.audit_stories_snapshot(source),
+        "audit-decisions-write.json": dashboard_sync.audit_decisions_snapshot(source),
         "learning-write.json": dashboard_sync.learning_snapshot(source),
         "market-chart-write.json": dashboard_sync.market_chart_snapshot(source),
         "market-history-write.json": market_history,

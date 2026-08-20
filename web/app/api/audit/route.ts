@@ -45,8 +45,7 @@ export async function POST(request: Request) {
   if (validation instanceof Response) return validation;
   const binding = env.DB as D1Database | undefined;
   if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
-  const writeResult = await writeDashboardSnapshot(
-    request, binding, AUDIT_SNAPSHOT_IDS.summary, {
+  const writeResult = await writeDashboardSnapshot(request, binding, AUDIT_SNAPSHOT_IDS.summary, {
     dryRun: isReleaseValidationContext(validation),
     maxBytes: AUDIT_SUMMARY_SNAPSHOT_BYTES,
   },

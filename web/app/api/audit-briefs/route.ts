@@ -9,5 +9,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  return writeAuditDetailSnapshot(request, AUDIT_SNAPSHOT_IDS.briefs, "invalid audit briefs payload");
+  return writeAuditDetailSnapshot(
+    request, AUDIT_SNAPSHOT_IDS.briefs,
+    "invalid audit briefs payload", "audit-briefs-write",
+  );
 }

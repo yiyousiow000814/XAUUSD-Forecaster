@@ -103,7 +103,6 @@ export async function POST(request: Request) {
   if (bounded.status === "too_large") {
     return NextResponse.json({ error: "payload too large" }, { status: 413 });
   }
-  const serialized = bounded.serialized;
   const binding = env.DB as D1Database | undefined;
   if (!binding) {
     return NextResponse.json({ error: "database unavailable" }, { status: 503 });

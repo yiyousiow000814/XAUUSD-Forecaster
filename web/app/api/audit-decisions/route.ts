@@ -9,5 +9,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  return writeAuditDetailSnapshot(request, AUDIT_SNAPSHOT_IDS.decisions, "invalid audit decisions payload");
+  return writeAuditDetailSnapshot(
+    request, AUDIT_SNAPSHOT_IDS.decisions,
+    "invalid audit decisions payload", "audit-decisions-write",
+  );
 }
