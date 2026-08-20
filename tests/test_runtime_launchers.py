@@ -1460,6 +1460,7 @@ def test_crash_after_observation_pass_commits_exact_stable(tmp_path) -> None:
         "$state.transaction=[pscustomobject]@{type='PROMOTE';phase='OBSERVING';target=$state.candidate;previous=$state.stable};"
         "Write-ReleaseControlState $state;"
         f"Write-RuntimeUpdateState @{{update_status='ACTIVE';activated_revision='{candidate}'}};"
+        "function Test-CloudflareRollbackTarget { return $true };"
         "function Get-CloudflareDeployment { return [pscustomobject]@{versions=@([pscustomobject]@{version_id='22222222-2222-4222-8222-222222222222';percentage=100})} };"
         f"function Get-RuntimeCodeState {{ return [pscustomobject]@{{applied_revision='{candidate}'}} }};"
         "$final=Reconcile-ReleaseControlState;"
