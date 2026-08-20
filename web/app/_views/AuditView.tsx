@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
 import CountValue from "../_components/CountValue";
+import type { AuditViewName } from "../_components/DashboardNavigation";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
 import {
   DashboardResourceError, loadDashboardResource, readDashboardResource,
@@ -33,7 +33,7 @@ type Prediction = {
   prediction_status: string;
 };
 
-type AuditDeskView = "briefs" | "search" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage";
+type AuditDeskView = AuditViewName;
 
 type Decision = {
   decision_id: string;
@@ -823,14 +823,7 @@ function NewsRow({
   </details>;
 }
 
-export default function AuditView() {
-  const searchParams = useSearchParams();
-  const requestedView = searchParams.get("view");
-  const initialView = requestedView === "qa"
-    ? "briefs"
-    : requestedView === "briefs" || requestedView === "search" || requestedView === "news" || requestedView === "evidence" || requestedView === "stories" || requestedView === "decisions" || requestedView === "league" || requestedView === "coverage"
-    ? requestedView
-    : "news";
+export default function AuditView({ initialView }: { initialView: AuditDeskView }) {
   const cachedStatus = readDashboardResource<Payload>("/api/status");
   const cachedAudit = readDashboardResource<Partial<Payload>>("/api/audit");
   const cachedLearning = readDashboardResource<Partial<Payload>>("/api/learning");

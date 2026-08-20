@@ -27,9 +27,10 @@ const AdminOverviewView = lazy(loadAdminOverviewView);
 const AuditView = lazy(loadAuditView);
 const AssistantView = lazy(loadAssistantView);
 
-const AUDIT_VIEWS = new Set<AuditViewName>(["news", "evidence", "stories", "decisions", "league", "coverage"]);
+const AUDIT_VIEWS = new Set<AuditViewName>(["briefs", "search", "news", "evidence", "stories", "decisions", "league", "coverage"]);
 
 function validAuditView(value: string | null | undefined): AuditViewName {
+  if (value === "qa") return "briefs";
   return value && AUDIT_VIEWS.has(value as AuditViewName) ? value as AuditViewName : "news";
 }
 
@@ -106,7 +107,8 @@ export default function DashboardApp({
   }, []);
 
   useLayoutEffect(() => {
-    const destination = parseDashboardUrl(new URL(window.location.href));
+    const currentUrl = new URL(window.location.href);
+    const destination = parseDashboardUrl(currentUrl);
     if (!destination) return;
     if (
       window.location.pathname === "/"
@@ -114,6 +116,12 @@ export default function DashboardApp({
     ) {
       window.location.replace(canonicalHref(destination));
       return;
+    }
+    if (
+      currentUrl.pathname === "/audit"
+      && currentUrl.searchParams.get("view") !== destination.auditView
+    ) {
+      window.history.replaceState(null, "", canonicalHref(destination));
     }
     let active = true;
     queueMicrotask(() => {
@@ -175,7 +183,7 @@ export default function DashboardApp({
         {location.room === "health" && <HealthView initialPayload={initialStatus} />}
         {location.room === "admin" && <AdminOverviewView />}
         {location.room === "retry" && <RetryView />}
-        {location.room === "audit" && <AuditView key={location.auditView} />}
+        {location.room === "audit" && <AuditView key={location.auditView} initialView={location.auditView} />}
         {location.room === "assistant" && <AssistantView />}
       </Suspense>
     </DashboardShell>

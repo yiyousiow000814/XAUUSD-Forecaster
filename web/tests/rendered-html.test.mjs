@@ -1265,7 +1265,7 @@ test("renders static Preview shells with embedded resources for client-side room
     assert.equal(response.status, 200, path);
     assert.match(html, marker, path);
   }
-  for (const view of ["news", "evidence", "stories", "decisions", "league", "coverage"]) {
+  for (const view of ["briefs", "search", "news", "evidence", "stories", "decisions", "league", "coverage"]) {
     const response = await render(`/audit?view=${view}`);
     assert.equal(response.status, 200, view);
     const html = await response.text();
@@ -1275,6 +1275,10 @@ test("renders static Preview shells with embedded resources for client-side room
   const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
   assert.match(app, /parseDashboardUrl\(new URL\(window\.location\.href\)\)/);
   assert.match(app, /setLocation\(current =>/);
+  assert.match(app, /<AuditView key=\{location\.auditView\} initialView=\{location\.auditView\}/);
+  const audit = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  assert.match(audit, /function AuditView\(\{ initialView \}/);
+  assert.doesNotMatch(audit, /useSearchParams/);
 });
 
 test("formats server-rendered preview times in one deterministic timezone", () => {
@@ -1672,9 +1676,10 @@ test("renders the news and decision audit route", async () => {
   const html = await response.text();
   assert.match(html, /Aurum Signal Room/);
   assert.match(html, /XAUUSD · Forward-only intelligence/);
-  assert.match(html, />新闻 <b>/);
-  assert.match(html, /当前可用新闻事件/);
+  assert.match(html, /新闻与决策/);
   const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  assert.match(source, />新闻 <b>/);
+  assert.match(source, /当前可用新闻事件/);
   assert.match(source, /模型真正用过哪些新闻/);
   assert.match(source, /按独立事件说明模型用过什么、没用什么/);
   assert.match(source, /evidence-intro evidence-intro-compact/);
@@ -1750,7 +1755,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /无效样本/);
   assert.match(source, /activeLearningIdentities/);
   assert.match(source, /counts\?\.live_oos_model_groups/);
-  assert.match(html, /class="news-table"/);
+  assert.match(source, /className="news-table"/);
 });
 
 test("switches dashboard rooms locally and reuses client data between views", () => {
@@ -2691,8 +2696,9 @@ test("keeps the legacy news Q&A queue protected and paused without a duplicate s
 
   assert.doesNotMatch(view, /view === "qa"/);
   assert.doesNotMatch(view, /PRIVATE · EVIDENCE GROUNDED|私有问答|\/api\/news-questions/);
-  assert.match(view, /requestedView === "qa"[\s\S]*?\? "briefs"/);
-  assert.match(view, /requestedView === "qa"[\s\S]*?replaceState\(null, "", "\/audit\?view=briefs"\)/);
+  const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
+  assert.match(app, /value === "qa"\) return "briefs"/);
+  assert.match(app, /currentUrl\.searchParams\.get\("view"\) !== destination\.auditView[\s\S]*?replaceState\(null, "", canonicalHref\(destination\)\)/);
   assert.match(route, /rejectPreviewWrite\(\)/);
   const postRoute = route.slice(route.indexOf("export async function POST"));
   assert.ok(
