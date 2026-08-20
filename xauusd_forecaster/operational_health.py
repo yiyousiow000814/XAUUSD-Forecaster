@@ -245,7 +245,8 @@ def scheduler_health_snapshot(
                  AND lane_classified=1 AND work_lane='LIVE'
                  AND (task_type='ACTIVE_ANNOTATION' OR
                       (provenance_resolved=1 AND provenance_version=?))
-                 AND state='DEAD_LETTER' AND updated_at>=?
+                 AND state='DEAD_LETTER'
+                 AND COALESCE(completed_at,updated_at)>=?
                  AND COALESCE(last_error,'')<>
                      'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'
                GROUP BY task_type""",
