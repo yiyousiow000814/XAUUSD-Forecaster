@@ -48,7 +48,7 @@ LOCAL_STATUS_TIMEOUT_SECONDS = 20
 REMOTE_POST_TIMEOUT_SECONDS = 30
 REMOTE_NEWS_LIMIT = 200
 REMOTE_DECISION_LIMIT = 20
-REMOTE_DAILY_BRIEF_LIMIT = 3
+REMOTE_DAILY_BRIEF_LIMIT = 14
 NEWS_DETAIL_BATCH_LIMIT_BYTES = 160_000
 NEWS_INDEX_BATCH_LIMIT_BYTES = 400_000
 NEWS_WRITE_BATCH_ITEMS = 20
@@ -81,10 +81,15 @@ REMOTE_MARKET_CANDLE_LIMIT = 576
 REMOTE_MARKET_DENSE_LIMITS = (1440, 1152, 864, 576, 288, 192, 144, 0)
 REMOTE_MARKET_OVERVIEW_LIMITS = (480, 240, 120, 80, 40)
 MARKET_CHART_SNAPSHOT_LIMIT_BYTES = 230_000
+AUDIT_FIRST_PAGE_LIMIT_BYTES = 16_000
+AUDIT_DETAIL_LIMIT_BYTES = 120_000
 
 _RESOURCE_SCHEDULE_LOCK = threading.Lock()
 
 from xauusd_forecaster.dashboard_payloads import (
+    audit_briefs_payload,
+    audit_decisions_payload,
+    audit_stories_payload,
     audit_status_payload,
     critical_status_payload,
 )
@@ -796,13 +801,42 @@ def remote_snapshot(payload: dict) -> bytes:
 
 
 def audit_snapshot(payload: dict) -> bytes:
-    """Build a bounded optional first page independently of the heartbeat."""
-    return _encoded_snapshot(
-        audit_status_payload(
-            payload, decision_limit=REMOTE_DECISION_LIMIT,
-            daily_brief_limit=REMOTE_DAILY_BRIEF_LIMIT,
-        ),
-        label="bounded audit first page",
+    """Build a fixed summary independently of all growing audit detail."""
+    return _bounded_audit_snapshot(
+        audit_status_payload(payload), label="audit summary",
+        limit=AUDIT_FIRST_PAGE_LIMIT_BYTES,
+    )
+
+
+def _bounded_audit_snapshot(payload: dict, *, label: str, limit: int) -> bytes:
+    encoded = json.dumps(
+        payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) > limit:
+        raise PayloadContractError(
+            f"{label} payload is {len(encoded)} bytes (limit {limit})"
+        )
+    return encoded
+
+
+def audit_briefs_snapshot(payload: dict) -> bytes:
+    return _bounded_audit_snapshot(
+        audit_briefs_payload(payload, brief_limit=REMOTE_DAILY_BRIEF_LIMIT),
+        label="audit briefs", limit=AUDIT_DETAIL_LIMIT_BYTES,
+    )
+
+
+def audit_decisions_snapshot(payload: dict) -> bytes:
+    return _bounded_audit_snapshot(
+        audit_decisions_payload(payload, decision_limit=REMOTE_DECISION_LIMIT),
+        label="audit decisions", limit=AUDIT_DETAIL_LIMIT_BYTES,
+    )
+
+
+def audit_stories_snapshot(payload: dict) -> bytes:
+    return _bounded_audit_snapshot(
+        audit_stories_payload(payload), label="audit stories",
+        limit=AUDIT_DETAIL_LIMIT_BYTES,
     )
 
 
@@ -1646,6 +1680,13 @@ def _sync_audit(local_payload: dict, config: dict) -> None:
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/audit"
     )
     _post_json(audit_url, audit_snapshot(local_payload), config)
+    root = audit_url.rsplit("/", 1)[0]
+    for resource, snapshot in (
+        ("audit-briefs", audit_briefs_snapshot(local_payload)),
+        ("audit-stories", audit_stories_snapshot(local_payload)),
+        ("audit-decisions", audit_decisions_snapshot(local_payload)),
+    ):
+        _post_json(f"{root}/{resource}", snapshot, config)
 
 
 def _local_news_evidence_url(

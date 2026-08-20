@@ -101,6 +101,12 @@
   accumulated resource advances through a bounded page, and one cycle admits
   only a fixed number of heavy resources. Restarting the synchronizer must not
   collapse those independent cadences into one upload burst.
+- The audit landing resource is a fixed summary contract. Daily Brief bodies,
+  decision inspection rows, and storyline presentation detail are separate
+  lazy snapshots with independent item and serialized-byte bounds. Local
+  SQLite remains the complete authority; D1 contains only those bounded
+  display projections. A detail snapshot that has not loaded or is unavailable
+  must not be represented as an empty collection or zero count.
 - When a bound is exceeded, repair ownership, projection, pagination, batching,
   or failure isolation first. Do not default to raising the host limit or
   deleting authoritative evidence.

@@ -1,4 +1,14 @@
 export const MAX_DASHBOARD_SNAPSHOT_BYTES = 800_000;
+export const AUDIT_SUMMARY_SNAPSHOT_BYTES = 16_000;
+export const AUDIT_DETAIL_SNAPSHOT_BYTES = 120_000;
+export const AUDIT_SNAPSHOT_IDS = Object.freeze({
+  // Keep the split summary isolated from the legacy full audit snapshot (id 4)
+  // until the candidate is explicitly promoted with its matching sync owner.
+  summary: 9,
+  decisions: 6,
+  briefs: 7,
+  stories: 8,
+});
 
 import { validateJsonWithD1 } from "./release-validation";
 
@@ -68,9 +78,11 @@ export async function writeDashboardSnapshot(
   request: Request,
   binding: D1Database,
   snapshotId: number,
-  options: { dryRun?: boolean } = {},
+  options: { dryRun?: boolean; maxBytes?: number } = {},
 ): Promise<SnapshotWriteResult> {
-  const body = await readBoundedBody(request);
+  const body = await readBoundedBody(
+    request, options.maxBytes ?? MAX_DASHBOARD_SNAPSHOT_BYTES,
+  );
   if (body.status === "too_large") return "too_large";
 
   if (options.dryRun) {

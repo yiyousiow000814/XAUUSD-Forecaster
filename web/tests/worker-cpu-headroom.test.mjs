@@ -104,7 +104,10 @@ test("replays the production read route family through bounded API modules", asy
   }));
   insertSnapshot(2, jsonOfBytes(390_000, { candles: [] }));
   insertSnapshot(3, jsonOfBytes(208_000, { models: [] }));
-  insertSnapshot(4, jsonOfBytes(319_000, { decisions: [] }));
+  insertSnapshot(9, jsonOfBytes(16_000, { news_metrics: {} }));
+  insertSnapshot(6, jsonOfBytes(58_000, { recent_decisions: [] }));
+  insertSnapshot(7, jsonOfBytes(24_000, { daily_news_briefs: [] }));
+  insertSnapshot(8, jsonOfBytes(80_000, { storylines: [] }));
   database.database.prepare(
     "INSERT OR REPLACE INTO market_history_overview(overview_key,payload,received_at) VALUES('all',?,?)",
   ).run(JSON.stringify({
@@ -121,6 +124,9 @@ test("replays the production read route family through bounded API modules", asy
   const routes = [
     ["/api/status", 200],
     ["/api/audit", 200],
+    ["/api/audit-briefs", 200],
+    ["/api/audit-stories", 200],
+    ["/api/audit-decisions", 200],
     ["/api/learning", 200],
     ["/api/learning-history?resource=model&limit=6", 200],
     ["/api/market-chart", 200],
@@ -186,9 +192,27 @@ test("bounds empty, oversized, maximum legal, and concurrent snapshot writes", a
   assert.equal(maximumResponse.status, 200);
   assert.equal(maximumResponse.headers.get("x-aurum-request-bytes"), "800000");
 
+  for (const [path, limit, fields] of [
+    ["/api/audit", 16_000, { news_metrics: {} }],
+    ["/api/audit-briefs", 120_000, { daily_news_briefs: [] }],
+    ["/api/audit-stories", 120_000, { storylines: [] }],
+    ["/api/audit-decisions", 120_000, { recent_decisions: [] }],
+  ]) {
+    const bounded = await invoke(path, {
+      method: "POST", headers, body: jsonOfBytes(limit, fields),
+    });
+    assert.equal(bounded.status, 200, path);
+    assert.equal(bounded.headers.get("x-aurum-request-bytes"), String(limit), path);
+    const oversized = await invoke(path, {
+      method: "POST", headers, body: jsonOfBytes(limit + 1, fields),
+    });
+    assert.equal(oversized.status, 413, path);
+    assert.equal(oversized.headers.get("x-aurum-d1-operations"), "0", path);
+  }
+
   const concurrent = await Promise.all([
     ["/api/ingest", jsonOfBytes(300_000, { generated_at: new Date().toISOString(), system: {} })],
-    ["/api/audit", jsonOfBytes(300_000, { decisions: [] })],
+    ["/api/audit", jsonOfBytes(16_000, { news_metrics: {} })],
     ["/api/learning", jsonOfBytes(300_000, { models: [] })],
     ["/api/market-chart", jsonOfBytes(300_000, { candles: [] })],
   ].map(([path, body]) => invoke(path, { method: "POST", headers, body })));
@@ -201,7 +225,11 @@ test("turns a temporary D1 failure into a bounded resource-owned 503", async () 
     ...runtimeEnv,
     DB: { prepare() { throw new Error("temporary D1 failure"); } },
   };
-  for (const path of ["/api/status", "/api/audit", "/api/learning", "/api/market-chart"]) {
+  for (const path of [
+    "/api/status", "/api/audit", "/api/audit-briefs",
+    "/api/audit-stories", "/api/audit-decisions",
+    "/api/learning", "/api/market-chart",
+  ]) {
     const response = await invoke(path, {}, failingEnv);
     assert.equal(response.status, 503, path);
     assert.equal(response.headers.get("x-aurum-failure-stage"), "d1_read", path);
@@ -214,7 +242,11 @@ test("soaks mixed reads without framework fallback or 5xx responses", async () =
   const oldLog = console.log;
   console.log = () => {};
   try {
-    const routes = ["/api/status", "/api/audit", "/api/learning", "/api/market-chart"];
+    const routes = [
+      "/api/status", "/api/audit", "/api/audit-briefs",
+      "/api/audit-stories", "/api/audit-decisions",
+      "/api/learning", "/api/market-chart",
+    ];
     for (let cycle = 0; cycle < 100; cycle += 1) {
       const responses = await Promise.all(routes.map(path => invoke(path)));
       assert.ok(responses.every(response => response.status === 200));

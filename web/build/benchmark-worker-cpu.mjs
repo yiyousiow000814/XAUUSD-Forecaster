@@ -67,7 +67,7 @@ insertSnapshot(1, jsonOfBytes(250_000, {
 }));
 insertSnapshot(2, jsonOfBytes(390_000, { candles: [] }));
 insertSnapshot(3, jsonOfBytes(208_000, { models: [] }));
-insertSnapshot(4, jsonOfBytes(319_000, { decisions: [] }));
+insertSnapshot(9, jsonOfBytes(16_000, { news_metrics: {} }));
 sourceDatabase.database.prepare(
   "INSERT INTO market_history_overview(overview_key,payload,received_at) VALUES('all',?,?)",
 ).run(JSON.stringify({

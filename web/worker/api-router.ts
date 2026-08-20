@@ -1,6 +1,9 @@
 /// <reference types="vite/client" />
 
 import {
+  AUDIT_DETAIL_SNAPSHOT_BYTES,
+  AUDIT_SNAPSHOT_IDS,
+  AUDIT_SUMMARY_SNAPSHOT_BYTES,
   MAX_DASHBOARD_SNAPSHOT_BYTES,
   publicStatusJsonExpression,
   readBoundedBody,
@@ -27,10 +30,13 @@ const routeModules = import.meta.glob<RouteModule>([
   "../app/admin/api/**/route.ts",
 ]);
 
-const SNAPSHOT_ROUTES: Record<string, { id: number; invalid: string }> = {
-  "/api/audit": { id: 4, invalid: "invalid audit payload" },
-  "/api/learning": { id: 3, invalid: "invalid learning payload" },
-  "/api/market-chart": { id: 2, invalid: "invalid market chart payload" },
+const SNAPSHOT_ROUTES: Record<string, { id: number; invalid: string; maxBytes: number }> = {
+  "/api/audit": { id: AUDIT_SNAPSHOT_IDS.summary, invalid: "invalid audit payload", maxBytes: AUDIT_SUMMARY_SNAPSHOT_BYTES },
+  "/api/audit-decisions": { id: AUDIT_SNAPSHOT_IDS.decisions, invalid: "invalid audit decisions payload", maxBytes: AUDIT_DETAIL_SNAPSHOT_BYTES },
+  "/api/audit-briefs": { id: AUDIT_SNAPSHOT_IDS.briefs, invalid: "invalid audit briefs payload", maxBytes: AUDIT_DETAIL_SNAPSHOT_BYTES },
+  "/api/audit-stories": { id: AUDIT_SNAPSHOT_IDS.stories, invalid: "invalid audit stories payload", maxBytes: AUDIT_DETAIL_SNAPSHOT_BYTES },
+  "/api/learning": { id: 3, invalid: "invalid learning payload", maxBytes: MAX_DASHBOARD_SNAPSHOT_BYTES },
+  "/api/market-chart": { id: 2, invalid: "invalid market chart payload", maxBytes: MAX_DASHBOARD_SNAPSHOT_BYTES },
 };
 
 const PUBLIC_STATUS_SQL = `WITH selected(payload) AS (
@@ -199,6 +205,7 @@ async function snapshotWrite(
   resource: string,
   id: number | null,
   invalid: string,
+  maxBytes = MAX_DASHBOARD_SNAPSHOT_BYTES,
 ) {
   if (!await isAuthorized(request, env.INGEST_TOKEN)) {
     const response = json({ error: "unauthorized" }, 401);
@@ -214,7 +221,7 @@ async function snapshotWrite(
       failureStage: "d1_binding",
     });
   }
-  const body = await readBoundedBody(request, MAX_DASHBOARD_SNAPSHOT_BYTES);
+  const body = await readBoundedBody(request, maxBytes);
   if (body.status === "too_large") {
     const response = json({ error: "payload too large" }, 413);
     return result(response.response, resource, {
@@ -339,6 +346,7 @@ export async function routeApiRequest(
     if (request.method === "POST") {
       return snapshotWrite(
         request, env, pathname.slice(5), snapshot.id, snapshot.invalid,
+        snapshot.maxBytes,
       );
     }
   }

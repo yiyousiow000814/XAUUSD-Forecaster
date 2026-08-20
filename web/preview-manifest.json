@@ -19,6 +19,9 @@
   "resources": {
     "status": "/api/status",
     "audit": "/api/audit",
+    "auditBriefs": "/api/audit-briefs",
+    "auditStories": "/api/audit-stories",
+    "auditDecisions": "/api/audit-decisions",
     "learning": "/api/learning",
     "learningHistory": "/api/learning-history",
     "newsIndex": "/api/news-index",

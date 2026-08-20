@@ -893,6 +893,9 @@ def test_critical_status_excludes_growing_resources_and_keeps_references() -> No
     encoded = module.remote_snapshot(payload)
     mirrored = json.loads(encoded)
     audit = json.loads(module.audit_snapshot(payload))
+    audit_briefs = json.loads(module.audit_briefs_snapshot(payload))
+    audit_decisions = json.loads(module.audit_decisions_snapshot(payload))
+    audit_stories = json.loads(module.audit_stories_snapshot(payload))
     index_rows, detail_rows = module.news_mirror_parts(payload)
     learning = json.loads(module.learning_snapshot(payload))
 
@@ -916,8 +919,17 @@ def test_critical_status_excludes_growing_resources_and_keeps_references() -> No
     market_decision = json.loads(module.market_chart_snapshot(payload))["decisions"][0]
     assert market_decision["source_decision_id"] == "d1"
     assert market_decision["model_version"] == "unused-field"
-    assert len(audit["recent_decisions"]) == module.REMOTE_DECISION_LIMIT
-    assert len(audit["daily_news_briefs"]) == module.REMOTE_DAILY_BRIEF_LIMIT
+    assert "recent_decisions" not in audit
+    assert "daily_news_briefs" not in audit
+    assert "storylines" not in audit
+    assert audit["audit_briefs_resource"] == "/api/audit-briefs"
+    assert audit["audit_stories_resource"] == "/api/audit-stories"
+    assert audit["audit_decisions_resource"] == "/api/audit-decisions"
+    assert len(audit_decisions["recent_decisions"]) == module.REMOTE_DECISION_LIMIT
+    assert len(audit_briefs["daily_news_briefs"]) == min(
+        len(payload["daily_news_briefs"]), module.REMOTE_DAILY_BRIEF_LIMIT,
+    )
+    assert audit_stories.get("storylines", []) == []
     assert audit["news_evidence_resource"] == "/api/news-evidence"
     assert learning["learning_curves"]["models"] == [
         {"lifecycle_status": "LATEST", "model_version": "latest"},
@@ -930,6 +942,50 @@ def test_critical_status_excludes_growing_resources_and_keeps_references() -> No
     assert "learning_curves" not in mirrored
     assert "models" not in mirrored["training"]
     assert len(index_rows) == 100
+
+
+def test_audit_sync_owns_four_independently_bounded_resources(monkeypatch) -> None:
+    module = _sync_module()
+    payload = {
+        "generated_at": "2026-08-20T00:00:00+00:00",
+        "news_metrics": {"events": 2},
+        "daily_news_brief_summary": {"brief_date": "2026-08-20"},
+        "daily_news_briefs": [{
+            "brief_date": f"2026-08-{20 - index:02d}",
+            "brief": {"title": "简报", "items": []},
+            "brief_json": "duplicate" * 1_000,
+        } for index in range(14)],
+        "recent_decisions": [{"decision_id": str(index)} for index in range(20)],
+        "storylines": [],
+        "story_event_candidates": [],
+        "unassigned_story_events": [],
+    }
+    writes = []
+    monkeypatch.setattr(
+        module, "_post_json",
+        lambda url, body, config: writes.append((url, body)),
+    )
+
+    module._sync_audit(payload, {
+        "remote_ingest_url": "https://worker.example/api/ingest",
+    })
+
+    assert [url for url, _body in writes] == [
+        "https://worker.example/api/audit",
+        "https://worker.example/api/audit-briefs",
+        "https://worker.example/api/audit-stories",
+        "https://worker.example/api/audit-decisions",
+    ]
+    decoded = [json.loads(body) for _url, body in writes]
+    assert "daily_news_briefs" not in decoded[0]
+    assert "recent_decisions" not in decoded[0]
+    assert all("brief_json" not in row for row in decoded[1]["daily_news_briefs"])
+    assert [len(body) for _url, body in writes] == [
+        len(module.audit_snapshot(payload)),
+        len(module.audit_briefs_snapshot(payload)),
+        len(module.audit_stories_snapshot(payload)),
+        len(module.audit_decisions_snapshot(payload)),
+    ]
 
 
 @pytest.mark.parametrize(

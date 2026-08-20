@@ -778,7 +778,9 @@ test("keeps branch Preview identity and blocks writes", async () => {
   assert.match(builtPreview, new RegExp(escapedBranch));
 
   for (const path of [
-    "/api/ingest", "/api/audit", "/api/learning", "/api/learning-history",
+    "/api/ingest", "/api/audit", "/api/audit-briefs",
+    "/api/audit-stories", "/api/audit-decisions",
+    "/api/learning", "/api/learning-history",
     "/api/news-index", "/api/news-content", "/api/news-evidence", "/api/market-chart",
     "/api/market-history", "/api/news-questions", "/api/assistant-chat",
     "/api/assistant-worker/chat", "/api/assistant-worker/conversations",
@@ -1007,6 +1009,9 @@ test("keeps every audit collection in the compact Preview manifest", () => {
   assert.ok(manifest.statusInlineKeys.includes("preview"));
   assert.ok(!manifest.statusInlineKeys.includes("news_evidence"));
   assert.equal(manifest.resources.audit, "/api/audit");
+  assert.equal(manifest.resources.auditBriefs, "/api/audit-briefs");
+  assert.equal(manifest.resources.auditStories, "/api/audit-stories");
+  assert.equal(manifest.resources.auditDecisions, "/api/audit-decisions");
   assert.equal(manifest.resources.newsEvidence, "/api/news-evidence");
   assert.deepEqual(manifest.branchSnapshotStatusPaths, [
     "factor_coverage",
@@ -1712,6 +1717,11 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /api\/news-content\?key=/);
   assert.match(source, /api\/news-index\?/);
   assert.match(source, /api\/learning/);
+  assert.match(source, /briefs: "\/api\/audit-briefs"/);
+  assert.match(source, /stories: "\/api\/audit-stories"/);
+  assert.match(source, /decisions: "\/api\/audit-decisions"/);
+  assert.match(source, /当前页面尚未加载，不会显示为零或空资料/);
+  assert.match(source, /页面会自动重试，不会把缺失资料解释为空/);
   assert.match(source, /if \(view !== "news"\) \{[\s\S]*?fullNewsIndexReadyRef\.current[\s\S]*?refreshNews\(true\)/);
   assert.match(source, /Do not poll off-screen/);
   assert.match(source, /view !== "league"/);
@@ -1880,16 +1890,26 @@ test("uses one D1-validated writer for every large dashboard snapshot", () => {
   for (const [path, id] of [
     ["../app/api/market-chart/route.ts", 2],
     ["../app/api/learning/route.ts", 3],
-    ["../app/api/audit/route.ts", 4],
   ]) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
     assert.match(source, new RegExp(`writeDashboardSnapshot\\(request, binding, ${id},`), path);
     assert.doesNotMatch(source, /INSERT INTO dashboard_snapshots/, path);
   }
+  const auditRoute = readFileSync(
+    new URL("../app/api/audit/route.ts", import.meta.url), "utf8",
+  );
+  assert.match(
+    auditRoute,
+    /writeDashboardSnapshot\(\s*request,\s*binding,\s*AUDIT_SNAPSHOT_IDS\.summary,\s*\{[\s\S]*maxBytes:\s*AUDIT_SUMMARY_SNAPSHOT_BYTES/,
+  );
+  assert.doesNotMatch(auditRoute, /INSERT INTO dashboard_snapshots/);
   const ingest = readFileSync(new URL("../app/api/ingest/route.ts", import.meta.url), "utf8");
   const snapshot = readFileSync(new URL("../app/api/_shared/dashboard-snapshot.ts", import.meta.url), "utf8");
   assert.match(ingest, /writeDashboardStatusSnapshots\(body\.serialized, binding\)/);
   assert.match(snapshot, /writeDashboardStatusSnapshots/);
+  assert.match(snapshot, /summary:\s*9/);
+  assert.match(snapshot, /AUDIT_SUMMARY_SNAPSHOT_BYTES = 16_000/);
+  assert.match(snapshot, /AUDIT_DETAIL_SNAPSHOT_BYTES = 120_000/);
   assert.match(snapshot, /json_valid\(payload\)/);
   assert.match(snapshot, /json_remove/);
 });
