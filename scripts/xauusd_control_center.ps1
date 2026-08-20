@@ -1321,6 +1321,20 @@ function Write-RuntimeUpdateFailure {
     Write-WatchdogEvent -Event "RUNTIME_UPDATE_FAILED" -Service "all" -State $Message
 }
 
+function Get-Sha256Hex {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+    $stream = [System.IO.File]::OpenRead($LiteralPath)
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString(
+            $algorithm.ComputeHash($stream)
+        ) -replace "-", "").ToLowerInvariant()
+    } finally {
+        $algorithm.Dispose()
+        $stream.Dispose()
+    }
+}
+
 function Sync-StableRuntimeControlFiles {
     param(
         [string]$SourceRoot = $moduleRoot,
@@ -1350,8 +1364,8 @@ function Sync-StableRuntimeControlFiles {
         $exactRevision = [bool]($SourceRevision -match '^[0-9a-f]{40}$')
         $hashes = @{}
         foreach ($name in $runtimeControlFileNames) {
-            $hashes[$name] = (Get-FileHash -Algorithm SHA256 `
-                -LiteralPath (Join-Path $stageRoot $name)).Hash.ToLowerInvariant()
+            $hashes[$name] = Get-Sha256Hex `
+                -LiteralPath (Join-Path $stageRoot $name)
         }
         [pscustomobject]@{
             schema_version = 1
@@ -2813,7 +2827,7 @@ function Get-RuntimeControlBundleIdentity {
             $file = Join-Path $PSScriptRoot $name
             $expected = [string]$identity.files.$name
             if (-not (Test-Path -LiteralPath $file) -or -not $expected) { return $null }
-            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+            $actual = Get-Sha256Hex -LiteralPath $file
             if ($actual -ne $expected) { return $null }
         }
         return $identity
