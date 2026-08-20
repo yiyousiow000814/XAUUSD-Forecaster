@@ -1265,12 +1265,18 @@ test("renders static Preview shells with embedded resources for client-side room
     assert.equal(response.status, 200, path);
     assert.match(html, marker, path);
   }
-  for (const view of ["briefs", "search", "news", "evidence", "stories", "decisions", "league", "coverage"]) {
+  for (const view of ["news", "evidence", "stories", "decisions", "league", "coverage"]) {
     const response = await render(`/audit?view=${view}`);
     assert.equal(response.status, 200, view);
     const html = await response.text();
     assert.doesNotMatch(html, /正在同步页面当前指标/, view);
-    assert.match(html, /current-metric-placeholder/, view);
+    assert.match(html, /<title>证据台页面 \| Aurum Signal Room<\/title>/, view);
+    assert.match(html, /<noscript><main><h1>证据台页面<\/h1>/, view);
+  }
+  for (const view of ["briefs", "search"]) {
+    const response = await render(`/audit?view=${view}`);
+    assert.equal(response.status, 200, view);
+    assert.match(await response.text(), /证据台页面/, view);
   }
   const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
   assert.match(app, /parseDashboardUrl\(new URL\(window\.location\.href\)\)/);

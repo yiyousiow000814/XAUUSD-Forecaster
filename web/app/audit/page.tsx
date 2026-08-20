@@ -8,8 +8,11 @@ export const metadata: Metadata = {
 };
 
 export default function AuditPage() {
-  return <DashboardApp
-    initialLocation={{ room: "audit", auditView: "news" }}
-    initialResources={previewResources()}
-  />;
+  return <>
+    <noscript><main><h1>证据台页面</h1><p>启用 JavaScript 后可查看完整新闻与决策证据。</p></main></noscript>
+    <DashboardApp
+      initialLocation={{ room: "audit", auditView: "news" }}
+      initialResources={previewResources()}
+    />
+  </>;
 }
