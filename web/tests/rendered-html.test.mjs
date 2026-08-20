@@ -1281,7 +1281,7 @@ test("returns a verified main revision through the deployment status endpoint", 
   assert.match(ingest, /main_revision/);
   assert.match(ingest, /export async function GET/);
   assert.match(ingest, /Cache-Control.*no-store/);
-  assert.match(ingest, /writeDashboardSnapshot\(request, binding, 1\)/);
+  assert.match(ingest, /writeDashboardSnapshot\(request, binding, 1,/);
   assert.doesNotMatch(ingest, /request\.json\(\)|JSON\.stringify\(|TextEncoder/);
   assert.match(snapshot, /json_valid\(payload\)/);
   assert.match(snapshot, /content-length/);
@@ -1826,7 +1826,7 @@ test("reads the bounded learning first page before the compact live relay", () =
   assert.match(source, /return new Response\(row\.payload/);
   assert.doesNotMatch(source, /NextResponse\.json\(JSON\.parse\(row\.payload\)/);
   assert.match(source, /previewBundle\?\.learning_summary/);
-  assert.match(source, /writeDashboardSnapshot\(request, binding, 3\)/);
+  assert.match(source, /writeDashboardSnapshot\(request, binding, 3,/);
   assert.doesNotMatch(source, /JSON\.parse\(serialized\)|TextEncoder/);
 });
 
@@ -1861,7 +1861,7 @@ test("uses one D1-validated writer for every large dashboard snapshot", () => {
     ["../app/api/audit/route.ts", 4],
   ]) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
-    assert.match(source, new RegExp(`writeDashboardSnapshot\\(request, binding, ${id}\\)`), path);
+    assert.match(source, new RegExp(`writeDashboardSnapshot\\(request, binding, ${id},`), path);
     assert.doesNotMatch(source, /INSERT INTO dashboard_snapshots/, path);
   }
 });
@@ -1895,7 +1895,7 @@ test("activates only complete paged news-evidence generations outside status", (
   assert.match(store, /LIMIT 200/);
   assert.match(store, /INSERT INTO news_evidence_state/);
   assert.match(store, /WHERE snapshot_id<>\?/);
-  assert.ok(route.indexOf("rejectPreviewWrite()") < route.indexOf("isIngestAuthorized(request)"));
+  assert.ok(route.indexOf("rejectPreviewWrite()") < route.indexOf("authorizeReleaseValidation("));
   assert.ok(route.indexOf("rejectPreviewWrite()") < route.indexOf("readBoundedBody(request"));
   assert.match(sync, /news evidence snapshot expected \{total\} rows but staged \{received\}/);
   assert.match(sync, /"activate_snapshot": snapshot_id/);
@@ -2915,12 +2915,16 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(css, /\.assistant-composer-shell \{ grid-row:4/);
 });
 
-test("release validation dry-run is identified and never mutates storage", async () => {
-  const { releaseValidationDryRun } = await import(
+test("release validation authorizes before exposing a non-mutating context", async () => {
+  const {
+    authorizeReleaseValidation, isReleaseValidationContext, releaseValidationResponse,
+  } = await import(
     "../app/api/_shared/release-validation.ts"
   );
   const ordinary = new Request("https://example.test/api/audit", { method: "POST" });
-  assert.equal(releaseValidationDryRun(ordinary, "audit-write"), null);
+  assert.equal(await authorizeReleaseValidation(
+    ordinary, "audit-write", async () => true,
+  ), null);
 
   const request = new Request("https://example.test/api/audit", {
     method: "POST",
@@ -2930,7 +2934,14 @@ test("release validation dry-run is identified and never mutates storage", async
       "X-Aurum-Request-ID": "request-1",
     },
   });
-  const response = releaseValidationDryRun(request, "audit-write");
+  let authorized = false;
+  const context = await authorizeReleaseValidation(request, "audit-write", async () => {
+    authorized = true;
+    return true;
+  });
+  assert.equal(authorized, true);
+  assert.equal(isReleaseValidationContext(context), true);
+  const response = releaseValidationResponse(context, { json: "d1-json1" });
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), {
     status: "DRY_RUN_OK",
@@ -2938,24 +2949,110 @@ test("release validation dry-run is identified and never mutates storage", async
     validation_run: "validation-run-1",
     request_id: "request-1",
     mutated: false,
+    work: { json: "d1-json1" },
   });
+
+  const unauthorized = await authorizeReleaseValidation(
+    request, "audit-write", async () => false,
+  );
+  assert.equal(unauthorized.status, 401);
+  assert.deepEqual(await unauthorized.json(), { error: "unauthorized" });
 });
 
-test("authenticated release dry-runs precede every affected D1 write", () => {
-  for (const [path, family] of [
-    ["../app/api/ingest/route.ts", "status-ingest"],
-    ["../app/api/audit/route.ts", "audit-write"],
-    ["../app/api/learning/route.ts", "learning-write"],
-    ["../app/api/market-chart/route.ts", "market-chart-write"],
-    ["../app/api/market-history/route.ts", "market-history-write"],
-    ["../app/api/learning-history/route.ts", "learning-history-write"],
-    ["../app/api/news-evidence/route.ts", "news-evidence-write"],
-    ["../app/api/news-index/route.ts", "news-index-write"],
+test("production-shaped release validation reaches work before every mutation", () => {
+  for (const [path, family, completion] of [
+    ["../app/api/ingest/route.ts", "status-ingest", "releaseValidationResponse(validation"],
+    ["../app/api/audit/route.ts", "audit-write", "releaseValidationResponse(validation"],
+    ["../app/api/learning/route.ts", "learning-write", "releaseValidationResponse(validation"],
+    ["../app/api/market-chart/route.ts", "market-chart-write", "releaseValidationResponse(validation"],
+    ["../app/api/market-history/route.ts", "market-history-write", "releaseValidationResponse(validation"],
+    ["../app/api/learning-history/route.ts", "learning-history-write", "releaseValidationResponse(validation"],
+    ["../app/api/news-evidence/route.ts", "news-evidence-write", "releaseValidationResponse(validation"],
+    ["../app/api/news-index/route.ts", "news-index-write", "finishReleaseValidation(binding, validation"],
   ]) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
-    const auth = source.indexOf("isIngestAuthorized(request)");
-    const dryRun = source.indexOf(`releaseValidationDryRun(request, "${family}")`);
-    const binding = source.indexOf("env.DB as D1Database", dryRun);
-    assert.ok(auth >= 0 && dryRun > auth && binding > dryRun, path);
+    const auth = source.indexOf(`request, "${family}", isIngestAuthorized`);
+    const bodyRead = Math.max(
+      source.indexOf("readBoundedBody(request", auth),
+      source.indexOf("writeDashboardSnapshot(request", auth),
+    );
+    const response = source.indexOf(completion, bodyRead);
+    const mutation = Math.max(
+      source.indexOf(".run()", response), source.indexOf("binding.batch(", response),
+      source.indexOf("writeDashboardSnapshot(request", response + 1),
+    );
+    assert.ok(auth >= 0 && bodyRead > auth && response > bodyRead, path);
+    if (mutation >= 0) assert.ok(mutation > response, path);
+  }
+});
+
+test("snapshot dry-run reads bounds and uses read-only D1 JSON validation", async () => {
+  const { writeDashboardSnapshot } = await import(
+    "../app/api/_shared/dashboard-snapshot.ts"
+  );
+  const calls = [];
+  const binding = {
+    prepare(sql) {
+      calls.push(sql);
+      return { bind() { return { first: async () => ({ valid: 1 }) }; } };
+    },
+  };
+  const body = JSON.stringify({ generated_at: "2026-08-20T00:00:00Z" });
+  const result = await writeDashboardSnapshot(new Request("https://example.test/api/audit", {
+    method: "POST", body,
+  }), binding, 4, { dryRun: true });
+  assert.equal(result, "validated");
+  assert.deepEqual(calls, ["SELECT json_valid(?) AS valid"]);
+});
+
+test("Worker validation manifest owns every production route and direct router", () => {
+  const manifest = JSON.parse(readFileSync(
+    new URL("../worker-validation-manifest.json", import.meta.url), "utf8",
+  ));
+  const declared = new Set(manifest.routes.map(route => `${route.method} ${route.path}`));
+  const discover = (directory, prefix = "") => {
+    const found = [];
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        found.push(...discover(new URL(`${entry.name}/`, directory), `${prefix}/${entry.name}`));
+      } else if (entry.name === "route.ts") {
+        const source = readFileSync(new URL(entry.name, directory), "utf8");
+        const methods = new Set();
+        for (const match of source.matchAll(/export\s+(?:async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE)\b/g)) {
+          methods.add(match[1]);
+        }
+        for (const match of source.matchAll(/export\s*\{([^}]+)\}\s*from/g)) {
+          for (const method of match[1].split(",").map(value => value.trim())) {
+            if (/^(GET|POST|PUT|PATCH|DELETE)$/.test(method)) methods.add(method);
+          }
+        }
+        for (const method of methods) {
+          found.push(`${method} ${prefix}`);
+        }
+      }
+    }
+    return found;
+  };
+  const discovered = discover(new URL("../app/", import.meta.url));
+  for (const route of discovered) {
+    assert.ok(declared.has(route), `WORKER_ROUTE_VALIDATION_POLICY_MISSING: ${route}`);
+  }
+  const workerDirectory = new URL("../worker/", import.meta.url);
+  for (const entry of readdirSync(workerDirectory, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
+    const workerSource = readFileSync(new URL(entry.name, workerDirectory), "utf8");
+    for (const match of workerSource.matchAll(/url\.pathname\s*===\s*"([^"]+)"/g)) {
+      assert.ok(declared.has(`GET ${match[1]}`),
+        `WORKER_ROUTE_VALIDATION_POLICY_MISSING: GET ${match[1]}`);
+    }
+  }
+  for (const route of manifest.routes) {
+    assert.ok(route.family && route.boundary && route.criticality && route.strategy);
+    assert.ok(Array.isArray(route.owners) && route.owners.length > 0);
+    assert.ok(route.owners.includes("web/worker/*.ts"));
+    if (route.strategy === "PRODUCTION_SHAPED_DRY_RUN") {
+      assert.ok(route.fixture && route.auth_required && route.cpu_required);
+      assert.ok(route.acceptance_samples >= 10);
+    }
   }
 });

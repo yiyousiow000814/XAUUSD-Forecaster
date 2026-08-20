@@ -248,6 +248,32 @@ async function sha256(value: string): Promise<string> {
   return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
+export async function prepareNewsEvidenceBatch(
+  items: EvidenceItem[], existingPayloadHash?: string,
+) {
+  const payloadHash = existingPayloadHash ?? await sha256(JSON.stringify(items));
+  const rows = items.map(item => {
+    if (
+      typeof item.event_key !== "string"
+      || !NEWS_EVIDENCE_SNAPSHOT_ID.test(item.event_key)
+      || typeof item.collector_first_seen_time !== "string"
+      || typeof item.broad_model_eligible !== "boolean"
+      || typeof item.model_seen !== "boolean"
+    ) {
+      throw new NewsEvidenceProtocolError(
+        "invalid evidence item", 400, "NEWS_EVIDENCE_ITEM_INVALID",
+      );
+    }
+    return {
+      item,
+      sortTime: typeof item.source_published_time === "string"
+        ? item.source_published_time : item.collector_first_seen_time,
+      serialized: JSON.stringify(item),
+    };
+  });
+  return { payloadHash, rows };
+}
+
 export async function stageNewsEvidenceBatch(
   binding: D1Database,
   snapshotId: string,
@@ -296,29 +322,18 @@ export async function stageNewsEvidenceBatch(
       { expected: nextOffset, received: offset },
     );
   }
+  const prepared = await prepareNewsEvidenceBatch(items, payloadHash);
   const now = new Date().toISOString();
-  const statements = items.map((item, index) => {
-    if (
-      typeof item.event_key !== "string"
-      || !NEWS_EVIDENCE_SNAPSHOT_ID.test(item.event_key)
-      || typeof item.collector_first_seen_time !== "string"
-      || typeof item.broad_model_eligible !== "boolean"
-      || typeof item.model_seen !== "boolean"
-    ) {
-      throw new NewsEvidenceProtocolError(
-        "invalid evidence item", 400, "NEWS_EVIDENCE_ITEM_INVALID",
-      );
-    }
-    const sortTime = typeof item.source_published_time === "string"
-      ? item.source_published_time : item.collector_first_seen_time;
+  const statements = prepared.rows.map((row, index) => {
+    const item = row.item;
     return binding.prepare(
       `INSERT INTO news_evidence_records
          (snapshot_id,event_key,ordinal,sort_time,broad_model_eligible,model_seen,payload,received_at)
        VALUES (?,?,?,?,?,?,?,?)`,
     ).bind(
-      snapshotId, item.event_key, offset + index, sortTime,
+      snapshotId, item.event_key, offset + index, row.sortTime,
       item.broad_model_eligible ? 1 : 0, item.model_seen ? 1 : 0,
-      JSON.stringify(item), now,
+      row.serialized, now,
     );
   });
   statements.push(binding.prepare(

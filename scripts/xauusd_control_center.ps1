@@ -45,6 +45,7 @@ $runtimeControlFileNames = @(
     "xauusd_watchdog_guard.ps1",
     "xauusd_watchdog_guard_launcher.vbs"
 )
+$runtimeControlManifestName = "runtime-control-bundle.json"
 $collectorSecretsPath = Join-Path $repositoryRoot ".local\secrets\collector-keys.json"
 $workerName = "aurum-signal-room"
 $workerUrl = "https://aurum-signal-room.yiyousiow1234.workers.dev"
@@ -633,12 +634,25 @@ function Get-CandidatePlatformEvidence {
         [Parameter(Mandatory = $true)][object]$Candidate,
         [Parameter(Mandatory = $true)][DateTimeOffset]$From,
         [Parameter(Mandatory = $true)][DateTimeOffset]$To,
-        [int]$ExpectedInvocations = 1
+        [int]$ExpectedInvocations = 1,
+        [string]$RoutePath = "",
+        [string]$RouteMethod = "",
+        [string]$RouteFamily = "GLOBAL"
     )
     $baseFilters = @(
         [pscustomobject]@{ key='$metadata.service'; operation='eq'; type='string'; value=$workerName },
         [pscustomobject]@{ key='$workers.scriptVersion.id'; operation='eq'; type='string'; value=[string]$Candidate.worker_version_id }
     )
+    if ($RoutePath) {
+        $baseFilters += [pscustomobject]@{
+            key='$workers.event.request.path'; operation='eq'; type='string'; value=$RoutePath
+        }
+    }
+    if ($RouteMethod) {
+        $baseFilters += [pscustomobject]@{
+            key='$workers.event.request.method'; operation='eq'; type='string'; value=$RouteMethod
+        }
+    }
     $base = Invoke-WorkersObservabilityQuery -From $From -To $To `
         -Filters $baseFilters -Calculations @(
             [pscustomobject]@{ operator='count'; alias='invocations' },
@@ -677,6 +691,9 @@ function Get-CandidatePlatformEvidence {
         Where-Object { $null -eq $_ }).Count -gt 0) { return $null }
     $evidence = [pscustomobject]@{
         source = "CLOUDFLARE_WORKERS_OBSERVABILITY"
+        route_family = $RouteFamily
+        route_path = if ($RoutePath) { $RoutePath } else { $null }
+        route_method = if ($RouteMethod) { $RouteMethod } else { $null }
         worker_version_id = [string]$Candidate.worker_version_id
         from = $From.ToString("o")
         to = $To.ToString("o")
@@ -698,6 +715,55 @@ function Get-CandidatePlatformEvidence {
     return $evidence
 }
 
+function Get-CandidateCpuEvidence {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$From,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$To,
+        [Parameter(Mandatory = $true)][object[]]$Routes
+    )
+    $expected = [int](($Routes | Measure-Object -Property acceptance_samples -Sum).Sum)
+    $global = Get-CandidatePlatformEvidence -Candidate $Candidate -From $From -To $To `
+        -ExpectedInvocations $expected
+    if (-not $global) { return $null }
+    $families = @()
+    foreach ($route in $Routes) {
+        $evidence = Get-CandidatePlatformEvidence -Candidate $Candidate `
+            -From $From -To $To -ExpectedInvocations ([int]$route.acceptance_samples) `
+            -RoutePath ([string]$route.path) -RouteMethod ([string]$route.method) `
+            -RouteFamily ([string]$route.family)
+        if (-not $evidence) { return $null }
+        $families += $evidence
+    }
+    $failed = @($families | Where-Object { [string]$_.gate_state -eq "FAILED" }).Count -gt 0
+    $review = @($families | Where-Object {
+        [string]$_.gate_state -eq "REVIEW_REQUIRED"
+    }).Count -gt 0
+    $gateState = if ($failed -or [string]$global.gate_state -eq "FAILED") {
+        "FAILED"
+    } elseif ($review -or [string]$global.gate_state -eq "REVIEW_REQUIRED") {
+        "REVIEW_REQUIRED"
+    } else { "PASSED" }
+    [pscustomobject]@{
+        source = "CLOUDFLARE_WORKERS_OBSERVABILITY"
+        worker_version_id = [string]$Candidate.worker_version_id
+        expected_invocations = $expected
+        global = $global
+        routes = $families
+        invocations = [int]$global.invocations
+        max_cpu_ms = [double]$global.max_cpu_ms
+        p95_cpu_ms = [double]$global.p95_cpu_ms
+        p99_cpu_ms = [double]$global.p99_cpu_ms
+        max_wall_ms = [double]$global.max_wall_ms
+        exceeded_cpu = [int]$global.exceeded_cpu
+        exceeded_memory = [int]$global.exceeded_memory
+        responses_1102 = [int]$global.responses_1102
+        responses_5xx = [int]$global.responses_5xx
+        gate_state = $gateState
+        passed = [bool]($gateState -eq "PASSED")
+    }
+}
+
 function Get-CandidateInvocationCount {
     param(
         [Parameter(Mandatory = $true)][object]$Candidate,
@@ -712,40 +778,163 @@ function Get-CandidateInvocationCount {
     return Get-CalculationAggregate -QueryResult $result -Alias "invocations"
 }
 
-function Get-CandidateRouteValidationPlan {
-    param([string[]]$ChangedFiles)
-    $sharedWorkerChange = @($ChangedFiles | Where-Object {
-        $_ -like "web/app/api/_shared/*" -or $_ -in @("web/worker/index.ts", "web/vite.config.ts", "web/wrangler.jsonc")
-    }).Count -gt 0
-    $writeRoutes = @()
-    foreach ($spec in @(
-        @("web/app/api/ingest/route.ts", "/api/ingest", "status-ingest"),
-        @("web/app/api/audit/route.ts", "/api/audit", "audit-write"),
-        @("web/app/api/learning/route.ts", "/api/learning", "learning-write"),
-        @("web/app/api/market-chart/route.ts", "/api/market-chart", "market-chart-write"),
-        @("web/app/api/market-history/route.ts", "/api/market-history", "market-history-write"),
-        @("web/app/api/learning-history/route.ts", "/api/learning-history", "learning-history-write"),
-        @("web/app/api/news-evidence/route.ts", "/api/news-evidence", "news-evidence-write"),
-        @("web/app/api/news-index/route.ts", "/api/news-index", "news-index-write")
-    )) {
-        if ($sharedWorkerChange -or $spec[0] -in $ChangedFiles) {
-            $writeRoutes += [pscustomobject]@{ path=$spec[1]; method="POST"; family=$spec[2]; authenticated=$true }
+function Get-WorkerValidationManifest {
+    param([string]$Revision = "")
+    if ($Revision) {
+        $object = "{0}:web/worker-validation-manifest.json" -f $Revision
+        $raw = (& git -C $repositoryRoot show $object 2>$null) -join "`n"
+        if ($LASTEXITCODE -ne 0 -or -not $raw) {
+            throw "WORKER_ROUTE_VALIDATION_MANIFEST_UNAVAILABLE"
+        }
+    } else {
+        $path = Join-Path $repositoryRoot "web\worker-validation-manifest.json"
+        if (-not (Test-Path -LiteralPath $path)) {
+            throw "WORKER_ROUTE_VALIDATION_MANIFEST_UNAVAILABLE"
+        }
+        $raw = Get-Content -LiteralPath $path -Raw
+    }
+    $manifest = $raw | ConvertFrom-Json
+    if ([int]$manifest.schema_version -ne 1 -or @($manifest.routes).Count -eq 0) {
+        throw "WORKER_ROUTE_VALIDATION_MANIFEST_INVALID"
+    }
+    return $manifest
+}
+
+function Test-ValidationRouteOwnedByChange {
+    param([object]$Route, [string[]]$ChangedFiles)
+    foreach ($file in $ChangedFiles) {
+        foreach ($owner in @($Route.owners)) {
+            if ($file -like [string]$owner) { return $true }
         }
     }
+    return $false
+}
+
+function Get-CandidateRouteValidationPlan {
+    param([string[]]$ChangedFiles, [string]$Revision = "")
+    $manifest = Get-WorkerValidationManifest -Revision $Revision
+    $manifestChanged = "web/worker-validation-manifest.json" -in $ChangedFiles
+    $workerCodeChanged = @($ChangedFiles | Where-Object {
+        $_ -like "web/app/*/route.ts" -or $_ -like "web/app/api/_shared/*" -or
+        $_ -like "web/worker/*" -or
+        $_ -in @("web/vite.config.ts", "web/wrangler.jsonc")
+    }).Count -gt 0
+    $selected = @($manifest.routes | Where-Object {
+        [bool]$_.cpu_required -and (
+            $manifestChanged -or
+            (Test-ValidationRouteOwnedByChange -Route $_ -ChangedFiles $ChangedFiles) -or
+            ($workerCodeChanged -and [bool]$_.baseline)
+        )
+    })
+    $contractRoutes = @($manifest.routes | Where-Object {
+        $manifestChanged -or (Test-ValidationRouteOwnedByChange -Route $_ -ChangedFiles $ChangedFiles)
+    })
+    $staticChanged = @($ChangedFiles | Where-Object {
+        ($_ -like "web/app/*" -and $_ -notlike "web/app/*/route.ts" -and
+            $_ -notlike "web/app/api/_shared/*") -or
+        $_ -like "web/public/*" -or
+        $_ -in @("web/vite.config.ts", "web/wrangler.jsonc", "web/worker/index.ts")
+    }).Count -gt 0
     [pscustomobject]@{
-        static_assets = @(
-            [pscustomobject]@{ path="/"; marker="AURUM SIGNAL ROOM" },
-            [pscustomobject]@{ path="/health"; marker="系统健康状态" },
-            [pscustomobject]@{ path="/audit"; marker="新闻与决策" },
-            [pscustomobject]@{ path="/favicon.ico"; marker=$null }
-        )
-        worker_reads = @(
-            [pscustomobject]@{ path="/api/status"; method="GET"; family="status-read"; authenticated=$false },
-            [pscustomobject]@{ path="/api/audit"; method="GET"; family="audit-read"; authenticated=$false },
-            [pscustomobject]@{ path="/api/learning"; method="GET"; family="learning-read"; authenticated=$false },
-            [pscustomobject]@{ path="/api/market-chart"; method="GET"; family="market-chart-read"; authenticated=$false }
-        )
-        worker_writes = $writeRoutes
+        manifest_schema_version = [int]$manifest.schema_version
+        static_assets = @($manifest.static_assets)
+        worker_reads = @($selected | Where-Object { [string]$_.boundary -eq "WORKER_READ" })
+        worker_writes = @($selected | Where-Object { [string]$_.boundary -eq "WORKER_WRITE" })
+        contract_routes = $contractRoutes
+        worker_cpu_required = [bool]($selected.Count -gt 0)
+        requires_validation = [bool]($selected.Count -gt 0 -or $staticChanged)
+    }
+}
+
+function New-CandidateValidationFixtureWorkspace {
+    param([Parameter(Mandatory = $true)][object]$Candidate)
+    $stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) `
+        ("aurum-release-validation-{0}" -f [guid]::NewGuid().ToString("N"))
+    $fixtureRoot = Join-Path $stageRoot ".release-validation-fixtures"
+    & git -C $repositoryRoot worktree add --detach --quiet $stageRoot `
+        ([string]$Candidate.git_sha) 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "Candidate fixture worktree is unavailable." }
+    try {
+        $python = (Get-Command python.exe -ErrorAction Stop).Source
+        & $python (Join-Path $stageRoot "scripts\build_release_validation_fixtures.py") `
+            --output $fixtureRoot | Out-Null
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $fixtureRoot)) {
+            throw "Production-shaped fixture generation failed."
+        }
+        return [pscustomobject]@{ stage_root=$stageRoot; fixture_root=$fixtureRoot }
+    } catch {
+        & git -C $repositoryRoot worktree remove --force $stageRoot 2>$null
+        & git -C $repositoryRoot worktree prune 2>$null
+        throw
+    }
+}
+
+function Remove-CandidateValidationFixtureWorkspace {
+    param([object]$Workspace)
+    if (-not $Workspace -or -not $Workspace.stage_root) { return }
+    & git -C $repositoryRoot worktree remove --force ([string]$Workspace.stage_root) 2>$null
+    & git -C $repositoryRoot worktree prune 2>$null
+}
+
+function Invoke-CandidateRouteSample {
+    param(
+        [Parameter(Mandatory = $true)][object]$Route,
+        [Parameter(Mandatory = $true)][hashtable]$VersionHeaders,
+        [Parameter(Mandatory = $true)][string]$ValidationRun,
+        [Parameter(Mandatory = $true)][string]$FixtureRoot,
+        [string]$IngestToken = ""
+    )
+    $requestId = [guid]::NewGuid().ToString()
+    $headers = @{} + $VersionHeaders
+    $headers["X-Aurum-Validation-Run"] = $ValidationRun
+    $headers["X-Aurum-Request-ID"] = $requestId
+    $parameters = @{
+        UseBasicParsing=$true; Method=[string]$Route.method
+        Uri="$workerUrl$($Route.path)"; Headers=$headers; TimeoutSec=30
+    }
+    if ([string]$Route.strategy -eq "PRODUCTION_SHAPED_DRY_RUN") {
+        if (-not $IngestToken) {
+            return [pscustomobject]@{
+                request_id=$requestId; status=0; passed=$false
+                reason="INGEST_AUTHORITY_UNAVAILABLE"
+            }
+        }
+        $fixture = Join-Path $FixtureRoot ([string]$Route.fixture)
+        if (-not (Test-Path -LiteralPath $fixture)) {
+            return [pscustomobject]@{
+                request_id=$requestId; status=0; passed=$false
+                reason="VALIDATION_FIXTURE_UNAVAILABLE"
+            }
+        }
+        $headers.Authorization = "Bearer $IngestToken"
+        $headers["X-Aurum-Release-Validation"] = "dry-run"
+        $parameters.ContentType = "application/json"
+        $parameters.Body = Get-Content -LiteralPath $fixture -Raw
+    }
+    try {
+        $response = Invoke-WebRequest @parameters
+        $passed = [bool]($response.StatusCode -eq 200)
+        if ([string]$Route.strategy -eq "PRODUCTION_SHAPED_DRY_RUN") {
+            try {
+                $payload = $response.Content | ConvertFrom-Json
+                $passed = $passed -and [string]$payload.status -eq "DRY_RUN_OK" -and
+                    [bool]$payload.mutated -eq $false -and
+                    [string]$payload.route_family -eq [string]$Route.family
+            } catch { $passed = $false }
+        }
+        $reason = if ($passed) { $null } else { "VALIDATION_RESPONSE_INVALID" }
+        return [pscustomobject]@{
+            request_id=$requestId; status=[int]$response.StatusCode; passed=$passed
+            reason=$reason
+        }
+    } catch {
+        $status = if ($_.Exception.Response) {
+            [int]$_.Exception.Response.StatusCode
+        } else { 0 }
+        return [pscustomobject]@{
+            request_id=$requestId; status=$status; passed=$false
+            reason="VALIDATION_REQUEST_FAILED"
+        }
     }
 }
 
@@ -792,58 +981,80 @@ function Invoke-CandidateWorkerValidation {
             observed_invocations = $staticInvocations
         }
     }
-    $validationRun = [guid]::NewGuid().ToString()
-    $workerStartedAt = [DateTimeOffset]::UtcNow
     $workerRoutes = @($RoutePlan.worker_reads) + @($RoutePlan.worker_writes)
-    $ingestToken = [Environment]::GetEnvironmentVariable("CLOUDFLARE_INGEST_TOKEN", "User")
-    foreach ($route in $workerRoutes) {
-        $requestId = [guid]::NewGuid().ToString()
-        $requestHeaders = @{} + $header
-        $requestHeaders["X-Aurum-Validation-Run"] = $validationRun
-        $requestHeaders["X-Aurum-Request-ID"] = $requestId
-        if ($route.authenticated) {
-            if (-not $ingestToken) {
-                $results += [pscustomobject]@{
-                    route=$route.path; boundary="WORKER_WRITE"; request_id=$requestId
-                    status=0; passed=$false; reason="INGEST_AUTHORITY_UNAVAILABLE"
-                }
-                continue
-            }
-            $requestHeaders.Authorization = "Bearer $ingestToken"
-            $requestHeaders["X-Aurum-Release-Validation"] = "dry-run"
-        }
-        try {
-            $parameters = @{
-                UseBasicParsing=$true; Method=[string]$route.method
-                Uri="$workerUrl$($route.path)"; Headers=$requestHeaders; TimeoutSec=30
-            }
-            if ($route.method -eq "POST") {
-                $parameters.ContentType = "application/json"
-                $parameters.Body = "{}"
-            }
-            $response = Invoke-WebRequest @parameters
-            $results += [pscustomobject]@{
-                route=$route.path; boundary=if ($route.authenticated) { "WORKER_WRITE_DRY_RUN" } else { "WORKER_READ" }
-                request_id=$requestId; status=[int]$response.StatusCode
-                passed=[bool]($response.StatusCode -eq 200)
-            }
-        } catch {
-            $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
-            $results += [pscustomobject]@{
-                route=$route.path; boundary="WORKER"; request_id=$requestId
-                status=$status; passed=$false
-            }
+    if ($workerRoutes.Count -eq 0) {
+        return [pscustomobject]@{
+            passed = [bool](@($results | Where-Object { -not $_.passed }).Count -eq 0)
+            validation_run = $null; expected_worker_invocations = 0
+            static_worker_invocations = $staticInvocations; routes = $results
+            cpu_evidence = "NOT_REQUIRED"
         }
     }
-    Start-Sleep -Seconds 5
-    $workerEndedAt = [DateTimeOffset]::UtcNow
-    $platform = Get-CandidatePlatformEvidence -Candidate $Candidate `
-        -From $workerStartedAt.AddSeconds(-2) -To $workerEndedAt.AddSeconds(2) `
-        -ExpectedInvocations $workerRoutes.Count
+    $workspace = $null
+    $validationRun = [guid]::NewGuid().ToString()
+    $ingestToken = [Environment]::GetEnvironmentVariable("CLOUDFLARE_INGEST_TOKEN", "User")
+    try {
+        if (@($RoutePlan.worker_writes).Count -gt 0) {
+            $workspace = New-CandidateValidationFixtureWorkspace -Candidate $Candidate
+        }
+        $fixtureRoot = if ($workspace) { [string]$workspace.fixture_root } else { "" }
+        foreach ($route in $workerRoutes) {
+            $warmups = @()
+            for ($index = 0; $index -lt [int]$route.warmup_samples; $index++) {
+                $warmups += Invoke-CandidateRouteSample -Route $route `
+                    -VersionHeaders $header -ValidationRun $validationRun `
+                    -FixtureRoot $fixtureRoot -IngestToken $ingestToken
+            }
+            if (@($warmups | Where-Object { -not $_.passed }).Count -gt 0) {
+                $results += [pscustomobject]@{
+                    route=$route.path; method=$route.method; family=$route.family
+                    boundary=$route.boundary; warmup_samples=$warmups.Count
+                    acceptance_samples=0; passed=$false; reason="WARMUP_FAILED"
+                }
+            }
+        }
+        $workerStartedAt = [DateTimeOffset]::UtcNow
+        foreach ($route in $workerRoutes) {
+            $samples = @()
+            for ($index = 0; $index -lt [int]$route.acceptance_samples; $index++) {
+                $samples += Invoke-CandidateRouteSample -Route $route `
+                    -VersionHeaders $header -ValidationRun $validationRun `
+                    -FixtureRoot $fixtureRoot -IngestToken $ingestToken
+            }
+            $failures = @($samples | Where-Object { -not $_.passed })
+            $sampleReason = if ($failures.Count) {
+                [string]$failures[0].reason
+            } else { $null }
+            $results += [pscustomobject]@{
+                route=$route.path; method=$route.method; family=$route.family
+                boundary=$route.boundary; warmup_samples=[int]$route.warmup_samples
+                acceptance_samples=$samples.Count
+                request_ids=@($samples | ForEach-Object { $_.request_id })
+                statuses=@($samples | Group-Object status | ForEach-Object {
+                    [pscustomobject]@{ status=[int]$_.Name; count=$_.Count }
+                })
+                passed=[bool]($failures.Count -eq 0)
+                reason=$sampleReason
+            }
+        }
+        $workerEndedAt = [DateTimeOffset]::UtcNow
+        Start-Sleep -Seconds 8
+        $platform = $null
+        for ($attempt = 0; $attempt -lt 3 -and -not $platform; $attempt++) {
+            $platform = Get-CandidateCpuEvidence -Candidate $Candidate `
+                -From $workerStartedAt `
+                -To $workerEndedAt.AddSeconds(2) -Routes $workerRoutes
+            if (-not $platform -and $attempt -lt 2) { Start-Sleep -Seconds 5 }
+        }
+    } finally {
+        Remove-CandidateValidationFixtureWorkspace -Workspace $workspace
+    }
+    $expectedInvocations = [int](($workerRoutes |
+        Measure-Object -Property acceptance_samples -Sum).Sum)
     [pscustomobject]@{
         passed = [bool](@($results | Where-Object { -not $_.passed }).Count -eq 0)
         validation_run = $validationRun
-        expected_worker_invocations = $workerRoutes.Count
+        expected_worker_invocations = $expectedInvocations
         static_worker_invocations = $staticInvocations
         routes = $results
         cpu_evidence = $platform
@@ -909,11 +1120,13 @@ function Invoke-AutomaticCandidateValidation {
             Write-ReleaseControlState -State $state
             return $false
         }
-        $workerChanged = @($changed | Where-Object { $_ -like "web/*" }).Count -gt 0
-        $routePlan = Get-CandidateRouteValidationPlan -ChangedFiles $changed
+        $routePlan = Get-CandidateRouteValidationPlan -ChangedFiles $changed `
+            -Revision ([string]$Candidate.git_sha)
+        $workerChanged = [bool]$routePlan.worker_cpu_required
+        $cloudflareChanged = [bool]$routePlan.requires_validation
         Set-CloudflareCandidatePointer -Stable $state.stable -Candidate $Candidate
         $cloudflare = [pscustomobject]@{ passed = $true; routes = @(); cpu_evidence = "NOT_REQUIRED" }
-        if ($workerChanged) {
+        if ($cloudflareChanged) {
             $cloudflare = Invoke-CandidateWorkerValidation -Candidate $Candidate `
                 -RoutePlan $routePlan
             if (-not $cloudflare.passed) { throw "Directed Worker validation failed." }
@@ -956,6 +1169,7 @@ function Invoke-AutomaticCandidateValidation {
             windows = "PASSED"
             cloudflare = "PASSED"
             worker_changed = $workerChanged
+            cloudflare_changed = $cloudflareChanged
             route_plan = $routePlan
             routes = $cloudflare.routes
             cpu_evidence = $cloudflare.cpu_evidence
@@ -1110,7 +1324,8 @@ function Write-RuntimeUpdateFailure {
 function Sync-StableRuntimeControlFiles {
     param(
         [string]$SourceRoot = $moduleRoot,
-        [string]$ControlRoot = (Join-Path $repositoryRoot ".local\runtime-control")
+        [string]$ControlRoot = (Join-Path $repositoryRoot ".local\runtime-control"),
+        [string]$SourceRevision = ""
     )
     $stageRoot = Join-Path $ControlRoot (".staging-{0}" -f [guid]::NewGuid())
     $backupRoot = Join-Path $ControlRoot (".backup-{0}" -f [guid]::NewGuid())
@@ -1125,7 +1340,25 @@ function Sync-StableRuntimeControlFiles {
             }
             Copy-Item -LiteralPath $source -Destination (Join-Path $stageRoot $name) -Force
         }
+        if (-not $SourceRevision) {
+            $SourceRevision = (& git -C $SourceRoot rev-parse HEAD 2>$null | Select-Object -First 1)
+        }
+        $exactRevision = [bool]($SourceRevision -match '^[0-9a-f]{40}$')
+        $hashes = @{}
         foreach ($name in $runtimeControlFileNames) {
+            $hashes[$name] = (Get-FileHash -Algorithm SHA256 `
+                -LiteralPath (Join-Path $stageRoot $name)).Hash.ToLowerInvariant()
+        }
+        [pscustomobject]@{
+            schema_version = 1
+            source_revision = if ($exactRevision) { $SourceRevision } else { $null }
+            exact_revision = $exactRevision
+            created_at = [DateTimeOffset]::UtcNow.ToString("o")
+            files = $hashes
+        } | ConvertTo-Json -Depth 5 | Set-Content `
+            -LiteralPath (Join-Path $stageRoot $runtimeControlManifestName) -Encoding UTF8
+        $payloadNames = @($runtimeControlFileNames) + @($runtimeControlManifestName)
+        foreach ($name in $payloadNames) {
             $destination = Join-Path $ControlRoot $name
             if (Test-Path -LiteralPath $destination) {
                 Copy-Item -LiteralPath $destination `
@@ -1133,12 +1366,12 @@ function Sync-StableRuntimeControlFiles {
             }
         }
         try {
-            foreach ($name in $runtimeControlFileNames) {
+            foreach ($name in $payloadNames) {
                 Move-Item -LiteralPath (Join-Path $stageRoot $name) `
                     -Destination (Join-Path $ControlRoot $name) -Force
             }
         } catch {
-            foreach ($name in $runtimeControlFileNames) {
+            foreach ($name in $payloadNames) {
                 $destination = Join-Path $ControlRoot $name
                 $backup = Join-Path $backupRoot $name
                 if (Test-Path -LiteralPath $backup) {
@@ -2563,14 +2796,38 @@ function Write-WatchdogEvent {
     } | ConvertTo-Json -Compress | Add-Content -LiteralPath $watchdogLog -Encoding UTF8
 }
 
+function Get-RuntimeControlBundleIdentity {
+    $path = Join-Path $PSScriptRoot $runtimeControlManifestName
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    try {
+        $identity = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        if (-not [bool]$identity.exact_revision -or
+            [string]$identity.source_revision -notmatch '^[0-9a-f]{40}$') {
+            return $null
+        }
+        foreach ($name in $runtimeControlFileNames) {
+            $file = Join-Path $PSScriptRoot $name
+            $expected = [string]$identity.files.$name
+            if (-not (Test-Path -LiteralPath $file) -or -not $expected) { return $null }
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+            if ($actual -ne $expected) { return $null }
+        }
+        return $identity
+    } catch { return $null }
+}
+
 function Write-WatchdogHeartbeat {
     $directory = Split-Path -Parent $watchdogHeartbeatPath
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
     $temporary = "$watchdogHeartbeatPath.tmp"
+    $controlBundle = Get-RuntimeControlBundleIdentity
     [pscustomobject]@{
         observed_at = [DateTimeOffset]::UtcNow.ToString("o")
         process_id = $PID
         revision = Get-CodeRevision
+        control_bundle_revision = if ($controlBundle) {
+            [string]$controlBundle.source_revision
+        } else { $null }
     } | ConvertTo-Json -Compress | Set-Content -LiteralPath $temporary -Encoding UTF8
     Move-Item -LiteralPath $temporary -Destination $watchdogHeartbeatPath -Force
 }

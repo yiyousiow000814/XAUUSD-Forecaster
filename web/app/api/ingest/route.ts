@@ -2,7 +2,9 @@ import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { rejectPreviewWrite } from "../_shared/preview";
-import { releaseValidationDryRun } from "../_shared/release-validation";
+import {
+  authorizeReleaseValidation, isReleaseValidationContext, releaseValidationResponse,
+} from "../_shared/release-validation";
 import { writeDashboardSnapshot } from "../_shared/dashboard-snapshot";
 import {
   d1CapabilityFailure,
@@ -53,21 +55,27 @@ export async function GET() {
 export async function POST(request: Request) {
   const previewRejection = rejectPreviewWrite();
   if (previewRejection) return previewRejection;
-  if (!await isIngestAuthorized(request)) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
-  const dryRun = releaseValidationDryRun(request, "status-ingest");
-  if (dryRun) return dryRun;
+  const validation = await authorizeReleaseValidation(
+    request, "status-ingest", isIngestAuthorized,
+  );
+  if (validation instanceof Response) return validation;
   const binding = env.DB as D1Database | undefined;
   if (!binding) {
     return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   }
-  const writeResult = await writeDashboardSnapshot(request, binding, 1);
+  const writeResult = await writeDashboardSnapshot(request, binding, 1, {
+    dryRun: isReleaseValidationContext(validation),
+  });
   if (writeResult === "too_large") {
     return NextResponse.json({ error: "payload too large" }, { status: 413 });
   }
   if (writeResult === "invalid") {
     return NextResponse.json({ error: "invalid status payload" }, { status: 400 });
+  }
+  if (writeResult === "validated" && isReleaseValidationContext(validation)) {
+    return releaseValidationResponse(validation, {
+      body: "bounded-read", json: "d1-json1", mutation_boundary: "snapshot-upsert",
+    });
   }
   return NextResponse.json(deploymentStatus());
 }

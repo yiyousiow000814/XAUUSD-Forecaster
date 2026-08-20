@@ -46,6 +46,13 @@ credential the controller deliberately leaves the Candidate in TESTING with
 `PLATFORM_CPU_EVIDENCE_REQUIRED`. The queried evidence is bound to the exact
 Worker Version ID and must satisfy the CPU/headroom policy in the release
 contract, including exact probe counts and zero `exceededCpu`, 1102, or 5xx.
+The controller reads the candidate revision's Worker validation manifest,
+builds deterministic production-shaped fixtures in an isolated candidate
+worktree, runs excluded warm-ups, and then gathers repeated global and
+route-family platform samples. Dry-run writes exercise the normal bounded
+transport and read-only D1 validation but stop before authoritative mutation.
+Do not substitute `{}` fixtures or treat one invocation per route as CPU
+acceptance.
 
 Use these explicit local actions only through the Control Center confirmation
 UI. The underlying commands are documented for recovery diagnosis, not for

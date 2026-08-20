@@ -128,6 +128,12 @@ def _run_control_center_contract(tmp_path, body: str) -> str:
     repository = tmp_path / "repository"
     runtime.mkdir(exist_ok=True)
     repository.mkdir(exist_ok=True)
+    manifest = repository / "web" / "worker-validation-manifest.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        (ROOT / "web" / "worker-validation-manifest.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     script = ROOT / "scripts" / "xauusd_control_center.ps1"
     command = (
         f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{runtime}' "
@@ -525,6 +531,23 @@ def test_candidate_switch_installs_one_complete_runtime_control_bundle(tmp_path)
         ",".join(f"{candidate}|{name}" for name in RUNTIME_CONTROL_FILES),
         "True,STAGED",
     ]
+
+
+def test_runtime_control_bundle_records_exact_source_revision_and_hashes(tmp_path) -> None:
+    revision = "d" * 40
+    _write_control_bundle(tmp_path / "runtime", "reviewed", scripts_dir=True)
+    result = _run_control_center_contract(
+        tmp_path,
+        f"Sync-StableRuntimeControlFiles -SourceRoot $moduleRoot "
+        f"-ControlRoot (Join-Path $repositoryRoot '.local\\runtime-control') "
+        f"-SourceRevision '{revision}'; "
+        "$manifest=Get-Content -LiteralPath (Join-Path $repositoryRoot "
+        "'.local\\runtime-control\\runtime-control-bundle.json') -Raw | ConvertFrom-Json; "
+        '$hashCount=@($manifest.files.PSObject.Properties).Count; '
+        'Write-Output "$($manifest.source_revision),$($manifest.exact_revision),$hashCount"',
+    )
+
+    assert result == f"{revision},True,{len(RUNTIME_CONTROL_FILES)}"
 
 
 def test_switch_copy_failure_restores_the_complete_previous_control_bundle(
@@ -1126,13 +1149,54 @@ def test_static_assets_are_excluded_from_expected_worker_invocations(tmp_path) -
         "$plan=Get-CandidateRouteValidationPlan -ChangedFiles @('web/app/page.tsx'); "
         "function Invoke-WebRequest { return [pscustomobject]@{StatusCode=200;Content='AURUM SIGNAL ROOM 系统健康状态 新闻与决策'} }; "
         "function Start-Sleep {}; function Get-CandidateInvocationCount { return 0 }; "
-        "function Get-CandidatePlatformEvidence { param($Candidate,$From,$To,$ExpectedInvocations); "
-        "return [pscustomobject]@{passed=$true;expected=$ExpectedInvocations} }; "
         "$e=Invoke-CandidateWorkerValidation -Candidate $candidate -RoutePlan $plan; "
-        'Write-Output "$($plan.static_assets.Count),$($e.expected_worker_invocations),$($e.cpu_evidence.expected)"',
+        'Write-Output "$($plan.static_assets.Count),$($e.expected_worker_invocations),$($e.cpu_evidence)"',
     )
 
-    assert result == "4,4,4"
+    assert result == "4,0,NOT_REQUIRED"
+
+
+def test_manifest_selects_baseline_and_affected_route_sample_families(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$heavy=Get-CandidateRouteValidationPlan "
+        "-ChangedFiles @('web/app/api/market-history/route.ts'); "
+        "$shared=Get-CandidateRouteValidationPlan "
+        "-ChangedFiles @('web/worker/api-router.ts'); "
+        "$admin=Get-CandidateRouteValidationPlan "
+        "-ChangedFiles @('web/app/admin/api/session/route.ts'); "
+        "$docs=Get-CandidateRouteValidationPlan -ChangedFiles @('docs/README.md'); "
+        "$heavyRoutes=@($heavy.worker_reads)+@($heavy.worker_writes); "
+        "$sharedRoutes=@($shared.worker_reads)+@($shared.worker_writes); "
+        "$adminRoutes=@($admin.worker_reads)+@($admin.worker_writes); "
+        "$heavySamples=($heavyRoutes|Measure-Object acceptance_samples -Sum).Sum; "
+        "$sharedSamples=($sharedRoutes|Measure-Object acceptance_samples -Sum).Sum; "
+        'Write-Output "$($heavyRoutes.Count),$heavySamples,$($sharedRoutes.Count),'
+        '$sharedSamples,$($adminRoutes.Count),$($docs.worker_cpu_required)"',
+    )
+
+    assert result == "6,60,12,120,5,False"
+
+
+def test_one_failed_route_family_fails_candidate_cpu_evidence(tmp_path) -> None:
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId 'worker' "
+        f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE'; "
+        "$routes=@([pscustomobject]@{path='/api/status';method='GET';family='status-read';acceptance_samples=10},"
+        "[pscustomobject]@{path='/api/audit';method='GET';family='audit-read';acceptance_samples=10}); "
+        "function Get-CandidatePlatformEvidence { param($Candidate,$From,$To,$ExpectedInvocations,$RoutePath,$RouteMethod,$RouteFamily); "
+        "$failed=($RouteFamily -eq 'audit-read'); $gate=if($failed){'FAILED'}else{'PASSED'}; return [pscustomobject]@{route_family=$RouteFamily;"
+        "invocations=$ExpectedInvocations;max_cpu_ms=9;p95_cpu_ms=4;p99_cpu_ms=7;max_wall_ms=10;"
+        "exceeded_cpu=0;exceeded_memory=0;responses_1102=0;responses_5xx=0;"
+        "gate_state=$gate;passed=(-not $failed)} }; "
+        "$e=Get-CandidateCpuEvidence -Candidate $candidate -From ([DateTimeOffset]::UtcNow.AddMinutes(-1)) "
+        "-To ([DateTimeOffset]::UtcNow) -Routes $routes; "
+        'Write-Output "$($e.gate_state),$($e.routes.Count),$($e.routes[1].route_family)"',
+    )
+
+    assert result == "FAILED,2,audit-read"
 
 
 def test_version_at_or_before_watermark_cannot_replace_candidate(tmp_path) -> None:

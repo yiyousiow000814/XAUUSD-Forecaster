@@ -3,7 +3,9 @@ import { NextResponse } from "next/server";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { readBoundedBody } from "../_shared/dashboard-snapshot";
 import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
-import { releaseValidationDryRun } from "../_shared/release-validation";
+import {
+  authorizeReleaseValidation, isReleaseValidationContext, releaseValidationResponse,
+} from "../_shared/release-validation";
 
 export const dynamic = "force-dynamic";
 
@@ -264,11 +266,10 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const previewRejection = rejectPreviewWrite();
   if (previewRejection) return previewRejection;
-  if (!await isIngestAuthorized(request)) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
-  const dryRun = releaseValidationDryRun(request, "learning-history-write");
-  if (dryRun) return dryRun;
+  const validation = await authorizeReleaseValidation(
+    request, "learning-history-write", isIngestAuthorized,
+  );
+  if (validation instanceof Response) return validation;
   const body = await readBoundedBody(request, MAX_INGEST_BYTES);
   if (body.status === "too_large") {
     return NextResponse.json({ error: "payload too large" }, { status: 413 });
@@ -276,6 +277,40 @@ export async function POST(request: Request) {
   const binding = env.DB as D1Database | undefined;
   if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   try {
+    if (isReleaseValidationContext(validation)) {
+      const checked = await binding.prepare(
+        `WITH root(doc) AS (
+           SELECT ? WHERE json_valid(?) AND json_type(?,'$.records')='array'
+         ), batch(row) AS (
+           SELECT value FROM root,json_each(json_extract(doc,'$.records'))
+         )
+         SELECT count(*) total,
+                sum(CASE WHEN
+                  json_type(row)='object'
+                  AND json_extract(row,'$.resource') IN
+                    ('model','version-group','curve-5m','curve-30m',
+                     'execution-point','execution-result','curve-overview',
+                     'version-overview')
+                  AND length(json_extract(row,'$.record_key'))>0
+                  AND json_type(row,'$.sort_epoch')='integer'
+                  AND json_extract(row,'$.sort_epoch')>=0
+                  AND length(json_extract(row,'$.payload_hash'))=64
+                  AND json_extract(row,'$.payload_hash') NOT GLOB '*[^0-9a-f]*'
+                  AND json_type(row,'$.payload')='object'
+                THEN 1 ELSE 0 END) valid
+         FROM batch`,
+      ).bind(body.serialized, body.serialized, body.serialized)
+        .first<{ total: number; valid: number }>();
+      const total = Number(checked?.total ?? 0);
+      if (total < 1 || total > MAX_INGEST_ROWS
+          || Number(checked?.valid ?? 0) !== total) {
+        throw new Error("empty or invalid batch");
+      }
+      return releaseValidationResponse(validation, {
+        body: "bounded-read", json: "d1-json1+json-each",
+        transformed: { records: total }, mutation_boundary: "learning-record-upsert",
+      });
+    }
     await ensureSchema(binding);
     // Keep the growing payload off the Worker's JavaScript JSON parser. D1
     // validates every row and performs one set-based idempotent upsert.

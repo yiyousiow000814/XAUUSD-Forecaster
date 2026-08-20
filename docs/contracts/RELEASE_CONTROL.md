@@ -48,19 +48,37 @@ viability, ownership uniqueness, compatibility, directed 0% Worker probes, and
 actual Cloudflare CPU/error evidence when Worker execution changed. PASSED means
 every required gate belongs to the exact release key.
 
-Worker validation is planned by hosting boundary. `/`, `/health`, `/audit`, and
-the favicon are Static Assets: each must return its canonical identity and the
-validation window must contain zero candidate Worker invocations. Worker reads
-are directed to the exact 0% Version. Affected authenticated transport routes
-use an identified dry-run after normal authentication; it performs no D1
-mutation. Every Worker probe has a unique request ID and one validation-run ID.
+Worker validation is planned from `web/worker-validation-manifest.json`, the
+authoritative inventory of route method, hosting boundary, criticality,
+read/write ownership, validation strategy, fixture owner, CPU requirement, and
+authentication requirement. CI fails when an App Router handler or a direct
+route in any `web/worker/*.ts` sibling lacks policy. Changed-file selection is
+derived from manifest ownership; a shared router selects every affected family,
+while documentation-only changes select no Worker CPU work.
+
+`/`, `/health`, `/audit`, and the favicon are Static Assets: each must return
+its canonical identity and the validation window must contain zero candidate
+Worker invocations. Worker reads are directed to the exact 0% Version. Affected
+authenticated writes use deterministic fixtures built by the production
+dashboard transport builders. Their dry-run follows normal authentication,
+bounded body read, decode, parse, validation, and CPU-heavy transformation. It
+then runs the applicable read-only D1 JSON1/set validation and stops immediately
+before the first authoritative schema, upsert, batch, delete, or queue mutation.
+The response must state `mutated: false`; an invalid body still fails the normal
+contract. The validation header never bypasses authentication. Every Worker
+probe has a unique request ID and one validation-run ID.
 Evidence records the exact Version, short window, route family, request IDs, and
 exact expected Worker invocation count. Static requests are excluded. If the
 platform cannot filter request IDs, exact Version, short-window, and exact-count
 isolation is mandatory; noise fails the gate.
 
-Observability records exact invocation count, maximum, p95, and p99 CPU,
-maximum wall time, `exceededCpu`, 1102, and 5xx counts. The Free-plan CPU gate
+Worker-changing candidates first receive excluded warm-up requests. Acceptance
+then records at least ten platform samples for every selected hot path and at
+least fifty samples overall through the baseline route set. Observability keeps
+both global and route-family sample count, maximum, p95, and p99 CPU, maximum
+wall time, `exceededCpu`, `exceededMemory`/1102, and 5xx counts. A failed route
+family fails the whole Candidate even when the global aggregate appears safe.
+The Free-plan CPU gate
 is `PASSED` only with the exact invocation count, zero failures, p95 at most
 6 ms, p99 at most 8 ms, and maximum below 10 ms. Zero failures with CPU still
 within 10 ms but without that headroom is `REVIEW_REQUIRED`. Count contamination,

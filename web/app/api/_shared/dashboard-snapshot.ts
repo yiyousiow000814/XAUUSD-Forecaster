@@ -1,6 +1,8 @@
 export const MAX_DASHBOARD_SNAPSHOT_BYTES = 800_000;
 
-export type SnapshotWriteResult = "stored" | "invalid" | "too_large";
+import { validateJsonWithD1 } from "./release-validation";
+
+export type SnapshotWriteResult = "stored" | "validated" | "invalid" | "too_large";
 
 export type BoundedBodyResult =
   | { status: "ok"; serialized: string }
@@ -56,9 +58,15 @@ export async function writeDashboardSnapshot(
   request: Request,
   binding: D1Database,
   snapshotId: number,
+  options: { dryRun?: boolean } = {},
 ): Promise<SnapshotWriteResult> {
   const body = await readBoundedBody(request);
   if (body.status === "too_large") return "too_large";
+
+  if (options.dryRun) {
+    return await validateJsonWithD1(binding, body.serialized)
+      ? "validated" : "invalid";
+  }
 
   const result = await binding.prepare(
     `WITH incoming(payload) AS (SELECT ?)
