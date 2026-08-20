@@ -2355,24 +2355,30 @@ def test_market_overview_downsampling_preserves_ohlc_extremes() -> None:
 
 def test_market_history_ingest_batches_are_bounded_and_complete() -> None:
     module = _sync_module()
+    start = datetime(2026, 8, 7, tzinfo=timezone.utc)
     candles = [{
-        "time": f"2026-08-07T00:{index:02d}:00+00:00",
+        "time": (start + timedelta(minutes=index)).isoformat(),
         "open": 4300.1234, "high": 4301.1234,
         "low": 4299.1234, "close": 4300.6234, "ticks": 20,
-    } for index in range(12)]
+    } for index in range(120)]
     decisions = [{
         "source_decision_id": f"d-{index}",
-        "decision_time": f"2026-08-07T00:{index:02d}:00+00:00",
+        "decision_time": (start + timedelta(minutes=index)).isoformat(),
         "model_identity": "BROAD_FULL", "model_version": "very-long-model-version",
         "recommended_action": "LONG", "outcome_status": "VALID",
         "ev_long_u5": 0.12, "ev_short_u5": -0.12,
         "long_quote_return": 0.001, "short_quote_return": -0.001,
-    } for index in range(12)]
+    } for index in range(120)]
 
     payloads = module._market_history_payloads(candles, decisions)
     decoded = [json.loads(payload) for payload in payloads]
 
     assert all(len(payload) <= module.MARKET_HISTORY_BATCH_LIMIT_BYTES for payload in payloads)
+    assert all(
+        len(row.get("candles", [])) + len(row.get("decisions", []))
+        <= module.MARKET_HISTORY_BATCH_ITEMS
+        for row in decoded
+    )
     assert sum(len(row.get("candles", [])) for row in decoded) == len(candles)
     assert sum(len(row.get("decisions", [])) for row in decoded) == len(decisions)
     assert module._overlap_cursor("2026-08-07T04:00:00Z") == "2026-08-07T02:00:00+00:00"

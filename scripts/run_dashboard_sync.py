@@ -63,6 +63,7 @@ NEWS_MIRROR_CONTRACT_VERSION = "news-60-day-incremental-v10-publication-clock-sk
 NEWS_EVIDENCE_CONTRACT_VERSION = "news-evidence-paged-v2"
 MARKET_HISTORY_CONTRACT_VERSION = "market-history-d1-v2"
 MARKET_HISTORY_BATCH_LIMIT_BYTES = 350_000
+MARKET_HISTORY_BATCH_ITEMS = 40
 MARKET_HISTORY_OVERLAP_SECONDS = 2 * 3_600
 LEARNING_HISTORY_CONTRACT_VERSION = "learning-history-d1-v2"
 LEARNING_HISTORY_BATCH_LIMIT_BYTES = 300_000
@@ -1370,7 +1371,10 @@ def _market_history_payloads(candles: list[dict], decisions: list[dict]) -> list
                 {key: candidate}, ensure_ascii=False, allow_nan=False,
                 separators=(",", ":"),
             ).encode("utf-8")
-            if current and len(encoded) > MARKET_HISTORY_BATCH_LIMIT_BYTES:
+            if current and (
+                len(candidate) > MARKET_HISTORY_BATCH_ITEMS
+                or len(encoded) > MARKET_HISTORY_BATCH_LIMIT_BYTES
+            ):
                 payloads.append(json.dumps(
                     {key: current}, ensure_ascii=False, allow_nan=False,
                     separators=(",", ":"),
