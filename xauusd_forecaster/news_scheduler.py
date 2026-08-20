@@ -3873,8 +3873,11 @@ def reconcile_completed_jobs(
             f"""UPDATE news_ai_jobs_v1 AS j
                SET state='COMPLETED',lease_owner=NULL,lease_expires_at=NULL,
                    updated_at=?,completed_at=?
-               WHERE state<>'COMPLETED' AND (
-                 (task_type='ACTIVE_ANNOTATION' AND EXISTS (
+               WHERE state<>'COMPLETED'
+                 AND COALESCE(last_error,'')<>
+                     'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'
+                 AND (
+                  (task_type='ACTIVE_ANNOTATION' AND EXISTS (
                    SELECT 1 FROM news_annotations a
                     WHERE a.source=j.source AND a.source_item_id=j.source_item_id
                       AND a.revision_number=j.revision_number
@@ -3900,6 +3903,8 @@ def reconcile_completed_jobs(
                    last_error='CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE',
                    updated_at=?,completed_at=?
                WHERE state IN ('QUEUED','BACKING_OFF','COMPLETED','DEAD_LETTER')
+                 AND COALESCE(last_error,'')<>
+                     'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'
                  AND (
                    (j.task_type='ACTIVE_ANNOTATION'
                     AND j.prompt_version<>?)

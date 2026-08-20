@@ -1797,9 +1797,22 @@ def test_superseded_jobs_are_reconciled_without_another_model_attempt(tmp_path) 
         ledger.connection, now=NOW + timedelta(minutes=2),
     ) == 1
     row = ledger.connection.execute(
-        "SELECT state,last_error FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+        """SELECT state,last_error,updated_at,completed_at
+           FROM news_ai_jobs_v1 WHERE job_id=?""",
+        (job_id,),
     ).fetchone()
-    assert tuple(row) == ("DEAD_LETTER", "CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE")
+    assert tuple(row[:2]) == (
+        "DEAD_LETTER", "CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE",
+    )
+    assert reconcile_completed_jobs(
+        ledger.connection, now=NOW + timedelta(minutes=3),
+    ) == 0
+    reconciled_again = ledger.connection.execute(
+        """SELECT state,last_error,updated_at,completed_at
+           FROM news_ai_jobs_v1 WHERE job_id=?""",
+        (job_id,),
+    ).fetchone()
+    assert tuple(reconciled_again) == tuple(row)
     counts = scheduler_counts(ledger.connection)
     assert counts["obsolete"] == 1
     assert counts["dead_letter"] == 0
