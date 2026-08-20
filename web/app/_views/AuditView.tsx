@@ -1140,12 +1140,6 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     }
   };
 
-  useEffect(() => {
-    if (requestedView === "qa") {
-      window.history.replaceState(null, "", "/audit?view=briefs");
-    }
-  }, [requestedView]);
-
   const progress = useMemo(() => {
     const training = payload?.training;
     if (!training) return 0;

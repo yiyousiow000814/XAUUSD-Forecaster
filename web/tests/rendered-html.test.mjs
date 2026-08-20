@@ -1285,6 +1285,7 @@ test("renders static Preview shells with embedded resources for client-side room
   const audit = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   assert.match(audit, /function AuditView\(\{ initialView \}/);
   assert.doesNotMatch(audit, /useSearchParams/);
+  assert.doesNotMatch(audit, /requestedView/);
 });
 
 test("formats server-rendered preview times in one deterministic timezone", () => {
