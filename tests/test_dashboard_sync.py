@@ -2534,17 +2534,43 @@ def test_slow_heavy_resource_does_not_block_critical_heartbeat(
     monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_args, **_kwargs: _Response())
     heartbeat_times = []
     heartbeat_payloads = []
+    heartbeat_heavy_finished = []
     heavy_finished = threading.Event()
+    heavy_started = threading.Event()
+    clock_changed = threading.Condition()
+    logical_time = [0.0]
+
+    def monotonic():
+        with clock_changed:
+            return logical_time[0]
+
+    class _LogicalStop:
+        def is_set(self):
+            return False
+
+        def wait(self, seconds):
+            if logical_time[0] == 0:
+                assert heavy_started.wait(1), "heavy lane did not start"
+            with clock_changed:
+                logical_time[0] += seconds
+                clock_changed.notify_all()
+            time.sleep(0.01)
+            return False
 
     def post_json(url, _body, _config):
         if url.endswith("/api/ingest"):
             heartbeat_times.append(time.monotonic())
             heartbeat_payloads.append(json.loads(_body))
+            heartbeat_heavy_finished.append(heavy_finished.is_set())
 
     def slow_audit(_payload, _config):
-        time.sleep(61)
+        started_at = monotonic()
+        heavy_started.set()
+        with clock_changed:
+            clock_changed.wait_for(lambda: logical_time[0] - started_at >= 61)
         heavy_finished.set()
 
+    monkeypatch.setattr(module.time, "monotonic", monotonic)
     monkeypatch.setattr(module, "_post_json", post_json)
     monkeypatch.setattr(module, "_sync_audit", slow_audit)
 
@@ -2552,17 +2578,19 @@ def test_slow_heavy_resource_does_not_block_critical_heartbeat(
         {"local_status_url": "http://local/api/status"},
         status_file=status_path,
         interval_seconds=30,
-        max_heartbeats=3,
+        stop_event=_LogicalStop(),
+        max_heartbeats=4,
     )
 
-    assert count == 3
-    assert len(heartbeat_times) == 3
+    assert count == 4
+    assert len(heartbeat_times) == 4
     intervals = [
         heartbeat_times[index] - heartbeat_times[index - 1]
         for index in range(1, len(heartbeat_times))
     ]
-    assert all(28 <= interval <= 35 for interval in intervals)
-    assert heartbeat_times[-1] < heartbeat_times[0] + 61
+    assert intervals == [30, 30, 30]
+    assert heartbeat_times[2] == heartbeat_times[0] + 60
+    assert heartbeat_heavy_finished[:3] == [False, False, False]
     assert all(payload["system"]["online"] is True for payload in heartbeat_payloads)
     assert heavy_finished.is_set()
     status = json.loads(status_path.read_text(encoding="utf-8"))
