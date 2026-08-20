@@ -42,6 +42,9 @@ function parseDashboardUrl(url: URL): DashboardLocation | null {
   if (url.pathname === "/audit") return { room: "audit", auditView: validAuditView(url.searchParams.get("view")) };
   if (url.pathname !== "/") return null;
   const room = url.searchParams.get("room");
+  if (room === "assistant") return { room: "assistant", auditView: "news" };
+  if (room === "retry") return { room: "retry", auditView: "news" };
+  if (room === "status") return { room: "status", auditView: "news" };
   if (room === "health") return { room, auditView: "news" };
   if (room === "audit") return { room, auditView: validAuditView(url.searchParams.get("view")) };
   return { room: "live", auditView: "news" };
@@ -100,6 +103,27 @@ export default function DashboardApp({
     else window.history.pushState(null, "", nextHref);
     pendingScrollTop.current = currentScrollTop;
     setLocation(destination);
+  }, []);
+
+  useLayoutEffect(() => {
+    const destination = parseDashboardUrl(new URL(window.location.href));
+    if (!destination) return;
+    if (
+      window.location.pathname === "/"
+      && ["admin", "assistant", "retry", "status"].includes(destination.room)
+    ) {
+      window.location.replace(canonicalHref(destination));
+      return;
+    }
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setLocation(current =>
+        current.room === destination.room && current.auditView === destination.auditView
+          ? current : destination,
+      );
+    });
+    return () => { active = false; };
   }, []);
 
   useLayoutEffect(() => {

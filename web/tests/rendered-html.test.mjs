@@ -671,12 +671,12 @@ test("keeps global shell ownership centralized and prevents view-level design dr
   }
 });
 
-test("renders one invariant global header and active section across every dashboard route", async () => {
+test("renders static public shell and path-specific admin shells with one invariant header", async () => {
   const routes = [
     ["/", "总览"],
-    ["/?room=audit&view=news", "新闻与决策"],
-    ["/?room=audit&view=league", "新闻与决策"],
-    ["/?room=health", "系统"],
+    ["/?room=audit&view=news", "总览"],
+    ["/?room=audit&view=league", "总览"],
+    ["/?room=health", "总览"],
     ["/admin", "管理员登录"],
     ["/admin/assistant", "管理员登录"],
     ["/admin/retry-jobs", "管理员登录"],
@@ -714,6 +714,11 @@ test("renders one invariant global header and active section across every dashbo
     assert.match(globalNav, />管理员登录<\/button>/);
     assert.match(mobileNav, />管理员登录<\/option>/);
   }
+  const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
+  assert.match(app, /useLayoutEffect/);
+  assert.match(app, /parseDashboardUrl\(new URL\(window\.location\.href\)\)/);
+  assert.match(app, /room === "audit"/);
+  assert.match(app, /room === "health"/);
 });
 
 test("keeps Admin login intent local until the explicit Access handoff", () => {
@@ -861,6 +866,7 @@ test("uses one current-data contract across every dashboard surface", () => {
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   const statusRoute = readFileSync(new URL("../app/api/status/route.ts", import.meta.url), "utf8");
   const statusReader = readFileSync(new URL("../app/api/_shared/dashboard-status.ts", import.meta.url), "utf8");
+  const statusContract = readFileSync(new URL("../app/api/_shared/dashboard-snapshot.ts", import.meta.url), "utf8");
   const learningRoute = readFileSync(new URL("../app/api/learning/route.ts", import.meta.url), "utf8");
 
   assert.doesNotMatch(component, /正在同步页面当前指标/);
@@ -886,7 +892,8 @@ test("uses one current-data contract across every dashboard surface", () => {
   assert.ok(learningD1 >= 0 && learningPreviewFallback > learningD1, "Preview learning must prefer current D1 data");
   assert.match(statusRoute, /withPreviewIdentity\(current\.payload, previewBundle\.status\)/);
   assert.match(statusRoute, /publicDashboardStatus\(payload\)/);
-  assert.match(statusReader, /"annotation_queue"[\s\S]*"llm_routing"/);
+  assert.match(statusReader, /PUBLIC_STATUS_PRIVATE_FIELDS/);
+  assert.match(statusContract, /"annotation_queue"[\s\S]*"llm_routing"/);
   assert.match(learningRoute, /"X-Aurum-Preview": "read-only-d1-snapshot"/);
 });
 
@@ -1242,11 +1249,11 @@ test("a shared polling lease cannot leave another visible tab permanently stale"
   }), false, "browser automation must not create background polling");
 });
 
-test("renders every Preview room from the embedded build snapshot", async () => {
+test("renders static Preview shells with embedded resources for client-side rooms", async () => {
   if (!process.env.WORKERS_CI_BRANCH || process.env.WORKERS_CI_BRANCH === "main") return;
   for (const [path, marker] of [
     ["/", /Aurum Signal Room/],
-    ["/?room=health", /系统健康状态/],
+    ["/?room=health", /Aurum Signal Room/],
     ["/admin", /管理后台/],
     ["/admin/ai-usage", /AI 模型使用状态/],
     ["/admin/retry-jobs", /PRIVATE OPERATOR QUEUE/],
@@ -1262,6 +1269,9 @@ test("renders every Preview room from the embedded build snapshot", async () => 
     assert.doesNotMatch(html, /正在同步页面当前指标/, view);
     assert.match(html, /current-metric-placeholder/, view);
   }
+  const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
+  assert.match(app, /parseDashboardUrl\(new URL\(window\.location\.href\)\)/);
+  assert.match(app, /setLocation\(current =>/);
 });
 
 test("formats server-rendered preview times in one deterministic timezone", () => {
@@ -1281,7 +1291,7 @@ test("returns a verified main revision through the deployment status endpoint", 
   assert.match(ingest, /main_revision/);
   assert.match(ingest, /export async function GET/);
   assert.match(ingest, /Cache-Control.*no-store/);
-  assert.match(ingest, /writeDashboardSnapshot\(request, binding, 1,/);
+  assert.match(ingest, /writeDashboardStatusSnapshots\(body\.serialized, binding\)/);
   assert.doesNotMatch(ingest, /request\.json\(\)|JSON\.stringify\(|TextEncoder/);
   assert.match(snapshot, /json_valid\(payload\)/);
   assert.match(snapshot, /content-length/);
@@ -1346,12 +1356,10 @@ test("renders the Gemini quota status route", async () => {
 });
 
 test("keeps System Health separate from the dedicated retry workspace", async () => {
-  const healthPage = await renderSettled("/?room=health", /系统健康状态/);
+  const healthPage = await renderSettled("/?room=health", /dashboard-header topbar/);
   assert.equal(healthPage.response.status, 200);
   const html = healthPage.html;
-  assert.match(html, /系统健康状态/);
-  assert.match(html, /系统组件/);
-  assert.match(html, /新闻来源/);
+  assert.doesNotMatch(html, /系统健康状态/);
   assert.doesNotMatch(html, /AI 模型用量|重试任务|管理后台区域/);
   assert.doesNotMatch(html, /PRIVATE OPERATOR QUEUE|class="retry-queue"/);
   const view = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
@@ -1509,6 +1517,7 @@ test("keeps System Health separate from the dedicated retry workspace", async ()
 test("separates anonymous health data from owner-only Admin evidence", async () => {
   const publicStatus = readFileSync(new URL("../app/api/status/route.ts", import.meta.url), "utf8");
   const statusProjection = readFileSync(new URL("../app/api/_shared/dashboard-status.ts", import.meta.url), "utf8");
+  const statusContract = readFileSync(new URL("../app/api/_shared/dashboard-snapshot.ts", import.meta.url), "utf8");
   const adminStatus = readFileSync(new URL("../app/api/admin-status/route.ts", import.meta.url), "utf8");
   const assistantHealth = readFileSync(new URL("../app/api/assistant-health/route.ts", import.meta.url), "utf8");
   const healthView = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
@@ -1524,7 +1533,8 @@ test("separates anonymous health data from owner-only Admin evidence", async () 
   for (const field of [
     "annotation_queue", "gemini_quota", "gemini_31_quota", "gemma_quota",
     "gemini_embedding_quota", "llm_routing",
-  ]) assert.match(statusProjection, new RegExp(`"${field}"`));
+  ]) assert.match(statusContract, new RegExp(`"${field}"`));
+  assert.match(statusProjection, /PUBLIC_STATUS_PRIVATE_FIELDS/);
   assert.doesNotMatch(healthView, /operator-retry|assistant-health|AdminOverview/);
   assert.doesNotMatch(alertBanner, /assistant-health|AssistantOperationalHealth/);
   assert.match(adminOverview, /fetch\(`\$\{ADMIN_API_PREFIX\}\/operator-retry`/);
@@ -1659,8 +1669,8 @@ test("renders the news and decision audit route", async () => {
   const html = await response.text();
   assert.match(html, /Aurum Signal Room/);
   assert.match(html, /XAUUSD · Forward-only intelligence/);
-  assert.match(html, />新闻 <b>/);
-  assert.match(html, /当前可用新闻事件/);
+  assert.doesNotMatch(html, />新闻 <b>/);
+  assert.doesNotMatch(html, /当前可用新闻事件/);
   const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   assert.match(source, /模型真正用过哪些新闻/);
   assert.match(source, /按独立事件说明模型用过什么、没用什么/);
@@ -1737,15 +1747,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /无效样本/);
   assert.match(source, /activeLearningIdentities/);
   assert.match(source, /counts\?\.live_oos_model_groups/);
-  if (process.env.WORKERS_CI_BRANCH && process.env.WORKERS_CI_BRANCH !== "main") {
-    assert.doesNotMatch(html, /news-row-placeholder/);
-  } else {
-    assert.match(html, /news-row-placeholder/);
-  }
-  assert.match(html, /决策与30分钟结果/);
-  assert.match(html, /Live OOS 学习曲线/);
-  assert.match(html, /大视野覆盖/);
-  assert.match(html, /学习进度/);
+  assert.doesNotMatch(html, /news-row-placeholder/);
 });
 
 test("switches dashboard rooms locally and reuses client data between views", () => {
@@ -1781,21 +1783,25 @@ test("switches dashboard rooms locally and reuses client data between views", ()
   assert.match(cache, /cache: "no-store"/);
 });
 
-test("redirects legacy dashboard URLs to the single app shell", async () => {
+test("redirects path-based legacy URLs while the static root handles query rooms client-side", async () => {
   for (const [path, location] of [
     ["/status", "/admin/ai-usage"],
     ["/health", "/?room=health"],
     ["/assistant", "/admin/assistant"],
     ["/retry-jobs", "/admin/retry-jobs"],
-    ["/?room=assistant", "/admin/assistant"],
-    ["/?room=retry", "/admin/retry-jobs"],
-    ["/?room=status", "/admin/ai-usage"],
     ["/audit?view=league", "/?room=audit&view=league"],
   ]) {
     const response = await render(path);
     assert.equal(response.status, 307);
-    assert.equal(response.headers.get("location"), location);
+    const redirected = new URL(response.headers.get("location"), "http://localhost");
+    assert.equal(redirected.pathname + redirected.search, location);
   }
+  for (const path of ["/?room=assistant", "/?room=retry", "/?room=status"]) {
+    const response = await render(path);
+    assert.equal(response.status, 200);
+  }
+  const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
+  assert.match(app, /window\.location\.replace\(canonicalHref\(destination\)\)/);
 });
 
 test("reloads an already-open dashboard after a deployment changes its client bundle", () => {
@@ -1855,7 +1861,6 @@ test("stores growing learning history as bounded idempotent D1 records", () => {
 
 test("uses one D1-validated writer for every large dashboard snapshot", () => {
   for (const [path, id] of [
-    ["../app/api/ingest/route.ts", 1],
     ["../app/api/market-chart/route.ts", 2],
     ["../app/api/learning/route.ts", 3],
     ["../app/api/audit/route.ts", 4],
@@ -1863,6 +1868,25 @@ test("uses one D1-validated writer for every large dashboard snapshot", () => {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
     assert.match(source, new RegExp(`writeDashboardSnapshot\\(request, binding, ${id},`), path);
     assert.doesNotMatch(source, /INSERT INTO dashboard_snapshots/, path);
+  }
+  const ingest = readFileSync(new URL("../app/api/ingest/route.ts", import.meta.url), "utf8");
+  const snapshot = readFileSync(new URL("../app/api/_shared/dashboard-snapshot.ts", import.meta.url), "utf8");
+  assert.match(ingest, /writeDashboardStatusSnapshots\(body\.serialized, binding\)/);
+  assert.match(snapshot, /writeDashboardStatusSnapshots/);
+  assert.match(snapshot, /json_valid\(payload\)/);
+  assert.match(snapshot, /json_remove/);
+});
+
+test("streams byte bounds before parsing every history-sensitive large write", () => {
+  for (const path of [
+    "../app/api/market-history/route.ts",
+    "../app/api/news-index/route.ts",
+    "../app/api/news-content/route.ts",
+  ]) {
+    const source = readFileSync(new URL(path, import.meta.url), "utf8");
+    assert.match(source, /readBoundedBody\(request,/i, path);
+    assert.doesNotMatch(source, /request\.text\(\)|request\.json\(\)/, path);
+    assert.doesNotMatch(source, /new TextEncoder\(\)\.encode\(serialized\)/, path);
   }
 });
 

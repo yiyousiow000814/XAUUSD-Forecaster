@@ -1,4 +1,5 @@
 import { applyFreshness } from "../status/freshness.js";
+import { PUBLIC_STATUS_PRIVATE_FIELDS } from "./dashboard-snapshot";
 
 export type DashboardStatusRead = {
   payload: Record<string, unknown>;
@@ -29,9 +30,8 @@ export async function readDashboardStatus(
 
 export function publicDashboardStatus(payload: Record<string, unknown>) {
   const publicPayload = { ...payload };
-  for (const privateField of [
-    "annotation_queue", "gemini_quota", "gemini_31_quota", "gemma_quota",
-    "gemini_embedding_quota", "llm_routing",
-  ]) delete publicPayload[privateField];
+  for (const privateField of PUBLIC_STATUS_PRIVATE_FIELDS) {
+    delete publicPayload[privateField];
+  }
   return publicPayload;
 }

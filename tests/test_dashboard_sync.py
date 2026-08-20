@@ -22,6 +22,17 @@ def _sync_module():
     return module
 
 
+def _schedule_only(module, path: Path, resource: str) -> None:
+    future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "resources": {
+            policy[0]: {"next_run_at": future}
+            for policy in module.RESOURCE_POLICIES if policy[0] != resource
+        },
+    }), encoding="utf-8")
+
+
 def _dashboard_module():
     path = Path(__file__).resolve().parents[1] / "scripts" / "run_dashboard_api.py"
     spec = importlib.util.spec_from_file_location("run_dashboard_api_sync_test", path)
@@ -1347,7 +1358,10 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
         "prepare_snapshot": snapshot_id,
         "expected_count": len(rows),
     }
-    module._sync_news_evidence({}, config)
+    for _ in range(10):
+        if any("activate_snapshot" in body for _url, body in posted):
+            break
+        module._sync_news_evidence({}, config)
 
     batches = [body for _url, body in posted if "items" in body]
     activation = next(body for _url, body in posted if "activate_snapshot" in body)
@@ -1622,7 +1636,9 @@ def test_optional_growing_resource_failure_does_not_block_heartbeat(
         "name": "cloudflare", "remote_ingest_url": "https://remote/api/ingest",
         "token": "test", "legacy": False,
         "local_status_url": "http://local/api/status",
+        "resource_schedule_state_file": str(tmp_path / "schedule.json"),
     }
+    _schedule_only(module, tmp_path / "schedule.json", "news_evidence")
     monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
     posted = []
     monkeypatch.setattr(
@@ -1656,7 +1672,7 @@ def test_optional_growing_resource_failure_does_not_block_heartbeat(
 
 
 def test_growing_local_snapshot_failure_cannot_block_critical_heartbeat(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ) -> None:
     module = _sync_module()
     critical = {
@@ -1684,6 +1700,7 @@ def test_growing_local_snapshot_failure_cannot_block_critical_heartbeat(
         "name": "cloudflare", "remote_ingest_url": "https://remote/api/ingest",
         "token": "test", "legacy": False,
         "local_status_url": "http://local/api/status",
+        "resource_schedule_state_file": str(tmp_path / "schedule.json"),
     }
     monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
     posted = []
@@ -1697,19 +1714,110 @@ def test_growing_local_snapshot_failure_cannot_block_critical_heartbeat(
     assert len(posted) == 1
     assert posted[0][0] == "https://remote/api/ingest"
     assert json.loads(posted[0][1])["system"]["online"] is True
-    assert {row["resource"] for row in result} == {
-        "audit", "learning", "market_chart", "market_history", "news",
-        "news_evidence",
-    }
+    assert {row["resource"] for row in result} == {"audit"}
     assert all(row["resource"] != "optional_snapshot" for row in result)
     assert next(
         row for row in result.resource_observations if row["resource"] == "heartbeat"
     )["status"] == "OK"
 
 
+def test_sync_resource_budget_and_cadence_resume_from_durable_state(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    critical = {"generated_at": "2026-08-20T04:00:00+00:00", "system": {}}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(critical).encode()
+
+    schedule = tmp_path / "schedule.json"
+    target = {
+        "name": "cloudflare", "remote_ingest_url": "https://remote/api/ingest",
+        "token": "test", "legacy": False,
+        "local_status_url": "http://local/api/status",
+        "resource_schedule_state_file": str(schedule),
+    }
+    monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k: Response())
+    monkeypatch.setattr(module, "_post_json", lambda *_a, **_k: {})
+    called = []
+    for resource, operation_name, _cadence, _heavy in module.RESOURCE_POLICIES:
+        monkeypatch.setattr(
+            module, operation_name,
+            lambda *_a, resource=resource, **_k: called.append(resource),
+        )
+
+    module.sync_once({"local_status_url": "http://local/api/status"})
+    first = called.copy()
+    called.clear()
+    module.sync_once({"local_status_url": "http://local/api/status"})
+    second = called.copy()
+
+    assert first == ["operator_retries", "news_questions", "audit"]
+    assert second == ["learning"]
+    persisted = json.loads(schedule.read_text(encoding="utf-8"))
+    assert persisted["schema_version"] == 1
+    assert persisted["resources"]["audit"]["next_run_at"]
+    assert persisted["resources"]["learning"]["last_success_at"]
+
+
+def test_optional_failure_persists_backoff_without_same_cycle_retry(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    critical = {"generated_at": "2026-08-20T04:00:00+00:00", "system": {}}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(critical).encode()
+
+    schedule = tmp_path / "schedule.json"
+    _schedule_only(module, schedule, "audit")
+    target = {
+        "name": "cloudflare", "remote_ingest_url": "https://remote/api/ingest",
+        "token": "test", "legacy": False,
+        "local_status_url": "http://local/api/status",
+        "resource_schedule_state_file": str(schedule),
+    }
+    monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k: Response())
+    monkeypatch.setattr(module, "_post_json", lambda *_a, **_k: {})
+    calls = []
+
+    def fail_audit(*_args, **_kwargs):
+        calls.append("audit")
+        raise TimeoutError("audit unavailable")
+
+    monkeypatch.setattr(module, "_sync_audit", fail_audit)
+
+    first = module.sync_once({"local_status_url": "http://local/api/status"})
+    second = module.sync_once({"local_status_url": "http://local/api/status"})
+
+    assert calls == ["audit"]
+    assert [row["resource"] for row in first] == ["audit"]
+    assert second == []
+    persisted = json.loads(schedule.read_text(encoding="utf-8"))
+    audit = persisted["resources"]["audit"]
+    assert audit["consecutive_failures"] == 1
+    assert datetime.fromisoformat(audit["next_run_at"]) > datetime.now(timezone.utc)
+
+
 @pytest.mark.parametrize("failed_resource", ["audit", "learning", "market_chart"])
 def test_optional_resource_families_degrade_only_their_owner(
-    monkeypatch, failed_resource,
+    monkeypatch, tmp_path, failed_resource,
 ) -> None:
     module = _sync_module()
     critical = {
@@ -1732,7 +1840,9 @@ def test_optional_resource_families_degrade_only_their_owner(
         "name": "cloudflare", "remote_ingest_url": "https://remote/api/ingest",
         "token": "test", "legacy": False,
         "local_status_url": "http://local/api/status",
+        "resource_schedule_state_file": str(tmp_path / "schedule.json"),
     }
+    _schedule_only(module, tmp_path / "schedule.json", failed_resource)
     monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
     posted = []
     monkeypatch.setattr(
@@ -1741,7 +1851,8 @@ def test_optional_resource_families_degrade_only_their_owner(
     )
     operations = {
         "audit": "_sync_audit",
-        "learning": "_sync_learning",
+        "learning": "_sync_learning_summary",
+        "learning_history": "_sync_learning_history",
         "market_chart": "_sync_market",
         "market_history": "_sync_market_history",
         "news": "_sync_news",
@@ -1760,15 +1871,13 @@ def test_optional_resource_families_degrade_only_their_owner(
     result = module.sync_once({"local_status_url": "http://local/api/status"})
 
     assert posted[0][0] == "https://remote/api/ingest"
-    assert called == list(operations)
+    assert called == [failed_resource]
     assert [row["resource"] for row in result] == [failed_resource]
     by_resource = {row["resource"]: row for row in result.resource_observations}
     assert by_resource["heartbeat"]["status"] == "OK"
     assert by_resource[failed_resource]["status"] == "ERROR"
-    assert all(
-        row["status"] == "OK" for name, row in by_resource.items()
-        if name not in {failed_resource}
-    )
+    assert all(row["status"] == "OK" for name, row in by_resource.items()
+               if name not in {failed_resource})
 
 
 def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> None:
@@ -1834,35 +1943,28 @@ def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> 
         }],
     }
 
-    first_cycle = module.sync_once(config)
-    assert first_cycle == []
-    assert {row["resource"] for row in first_cycle.resource_observations} == {
-        "heartbeat", "audit", "learning", "market_chart", "market_history", "news",
-        "news_evidence", "news_questions", "operator_retries",
-    }
-    assert all(row["status"] == "OK" for row in first_cycle.resource_observations)
-    assert all(row["duration_ms"] >= 0 for row in first_cycle.resource_observations)
+    module._sync_learning_summary(payload, config)
+    module._sync_news(payload, config)
     assert posted.count("https://remote/api/learning") == 1
     # An unknown mirror contract neutralizes only stale operational state before
     # authoritative replay. Completed reader history stays visible throughout
     # the handover; reconciliation removes stale remote-only rows at the end.
     assert posted.count("https://remote/api/news-index") == 3
-    assert posted[0] == "https://remote/api/ingest"
 
     posted.clear()
     payload["generated_at"] = "2026-08-07T00:00:30+00:00"
-    module.sync_once(config)
+    module._sync_learning_summary(payload, config)
+    module._sync_news(payload, config)
     assert "https://remote/api/learning" not in posted
     assert "https://remote/api/news-index" not in posted
-    assert posted[0] == "https://remote/api/ingest"
 
     posted.clear()
     payload["learning_curves"]["learning_stage"] = "READY"
     payload["recent_news"][0]["headline"] = "第一条（更新）"
-    module.sync_once(config)
+    module._sync_learning_summary(payload, config)
+    module._sync_news(payload, config)
     assert posted.count("https://remote/api/learning") == 1
     assert posted.count("https://remote/api/news-index") == 1
-    assert posted[0] == "https://remote/api/ingest"
 
     news_state = json.loads((tmp_path / "news-state.json").read_text(encoding="utf-8"))
     assert news_state["cursor"].startswith('["2026-08-07T00:00:00')
@@ -1925,7 +2027,7 @@ def test_sync_repopulates_news_index_without_full_refresh_marker(
         "learning_state_file": str(tmp_path / "learning-state.json"),
     }
 
-    module.sync_once(config)
+    module._sync_news(payload, config)
 
     assert posted.count("https://remote/api/news-index") == 3
     state = json.loads(state_file.read_text(encoding="utf-8"))

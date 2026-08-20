@@ -4,6 +4,7 @@ output/
 __pycache__/
 *.py[cod]
 build/
+!web/build/
 *.egg-info/
 ctrader/**/bin/
 ctrader/**/obj/

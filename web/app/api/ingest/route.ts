@@ -4,8 +4,12 @@ import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { rejectPreviewWrite } from "../_shared/preview";
 import {
   authorizeReleaseValidation, isReleaseValidationContext, releaseValidationResponse,
+  validateJsonWithD1,
 } from "../_shared/release-validation";
-import { writeDashboardSnapshot } from "../_shared/dashboard-snapshot";
+import {
+  readBoundedBody,
+  writeDashboardStatusSnapshots,
+} from "../_shared/dashboard-snapshot";
 import {
   d1CapabilityFailure,
   D1CapabilityError,
@@ -15,6 +19,7 @@ import {
 declare const __AURUM_DEPLOYMENT__: {
   branch: string;
   commit_sha: string;
+  is_preview: boolean;
 };
 
 function deploymentStatus() {
@@ -63,12 +68,13 @@ export async function POST(request: Request) {
   if (!binding) {
     return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   }
-  const writeResult = await writeDashboardSnapshot(request, binding, 1, {
-    dryRun: isReleaseValidationContext(validation),
-  });
-  if (writeResult === "too_large") {
+  const body = await readBoundedBody(request);
+  if (body.status === "too_large") {
     return NextResponse.json({ error: "payload too large" }, { status: 413 });
   }
+  const writeResult = isReleaseValidationContext(validation)
+    ? await validateJsonWithD1(binding, body.serialized) ? "validated" : "invalid"
+    : await writeDashboardStatusSnapshots(body.serialized, binding);
   if (writeResult === "invalid") {
     return NextResponse.json({ error: "invalid status payload" }, { status: 400 });
   }

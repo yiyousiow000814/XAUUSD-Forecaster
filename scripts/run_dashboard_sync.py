@@ -38,6 +38,9 @@ DEFAULT_MARKET_HISTORY_STATE = (
 DEFAULT_NEWS_EVIDENCE_STATE = (
     MODULE_ROOT / ".local" / "forward" / "dashboard-news-evidence-sync-state.json"
 )
+DEFAULT_RESOURCE_SCHEDULE_STATE = (
+    MODULE_ROOT / ".local" / "forward" / "dashboard-resource-schedule-state.json"
+)
 REMOTE_PAYLOAD_LIMIT_BYTES = 750_000
 LOCAL_STATUS_TIMEOUT_SECONDS = 20
 REMOTE_POST_TIMEOUT_SECONDS = 30
@@ -47,7 +50,12 @@ NEWS_DETAIL_BATCH_LIMIT_BYTES = 400_000
 NEWS_INDEX_BATCH_LIMIT_BYTES = 400_000
 NEWS_WRITE_BATCH_ITEMS = 20
 NEWS_EVIDENCE_WRITE_BATCH_ITEMS = 20
-NEWS_EVIDENCE_PAGES_PER_CYCLE = 4
+NEWS_EVIDENCE_PAGES_PER_CYCLE = 1
+MARKET_HISTORY_PAGES_PER_CYCLE = 1
+MARKET_OVERVIEWS_PER_CYCLE = 2
+OPERATOR_RETRY_COMMANDS_PER_CYCLE = 1
+HEAVY_RESOURCES_PER_CYCLE = 1
+RESOURCE_BACKOFF_MAX_SECONDS = 3_600
 NEWS_READER_WINDOW_DAYS = 60
 NEWS_MIRROR_CONTRACT_VERSION = "news-60-day-incremental-v10-publication-clock-skew"
 NEWS_EVIDENCE_CONTRACT_VERSION = "news-evidence-paged-v2"
@@ -1020,7 +1028,7 @@ def _sync_operator_retries(_local_payload: dict, config: dict) -> None:
     )
     worker_id = _assistant_worker_id()
     processed = False
-    for _ in range(100):
+    for _ in range(OPERATOR_RETRY_COMMANDS_PER_CYCLE):
         command = _get_json(
             f"{worker_url}?{urllib.parse.urlencode({'worker_id': worker_id})}", config,
         ).get("item")
@@ -1165,6 +1173,17 @@ def configured_targets(config: dict) -> list[dict]:
             name,
             legacy=scoped["legacy"],
         ))
+        scoped["resource_schedule_state_file"] = str(_target_state_path(
+            Path(target.get(
+                "resource_schedule_state_file",
+                config.get(
+                    "resource_schedule_state_file",
+                    DEFAULT_RESOURCE_SCHEDULE_STATE,
+                ),
+            )),
+            name,
+            legacy=scoped["legacy"],
+        ))
         targets.append(scoped)
     if not targets:
         raise ValueError("dashboard sync has no configured targets")
@@ -1186,65 +1205,86 @@ def _write_news_sync_state(path: Path, state: dict) -> None:
     temporary.replace(path)
 
 
-def _sync_learning(local_payload: dict, config: dict) -> None:
+def _learning_payload(local_payload: dict, config: dict) -> dict:
     if not local_payload and config.get("local_status_url"):
-        local_payload = _read_local_resource(config, "/api/learning")
+        return _read_local_resource(config, "/api/learning")
+    return local_payload
+
+
+def _sync_learning_history(local_payload: dict, config: dict) -> None:
+    local_payload = _learning_payload(local_payload, config)
+    remote_host = urllib.parse.urlsplit(config["remote_ingest_url"]).hostname or ""
+    if remote_host.lower().endswith(".chatgpt.site"):
+        return
+    history_url = config.get("remote_learning_history_url") or (
+        config["remote_ingest_url"].rsplit("/", 1)[0] + "/learning-history"
+    )
+    history_state_path = Path(config.get(
+        "learning_history_state_file", DEFAULT_LEARNING_HISTORY_STATE,
+    ))
+    history_state = _read_news_sync_state(history_state_path)
+    hashes = history_state.get("hashes", {})
+    if not isinstance(hashes, dict):
+        hashes = {}
+    now = datetime.now(UTC)
+    last_full = history_state.get("last_full_sync")
+    refresh_in_progress = bool(history_state.get("full_refresh_started_at"))
+    try:
+        full_refresh_due = (
+            history_state.get("contract_version") != LEARNING_HISTORY_CONTRACT_VERSION
+            or not last_full
+            or (now - datetime.fromisoformat(str(last_full))).total_seconds()
+            >= LEARNING_HISTORY_FULL_REFRESH_SECONDS
+        )
+    except (TypeError, ValueError):
+        full_refresh_due = True
+    if full_refresh_due and not refresh_in_progress:
+        hashes = {}
+        history_state["full_refresh_started_at"] = now.isoformat()
+
+    records = learning_history_records(local_payload)
+    pending = [
+        row for row in records
+        if hashes.get(f"{row['resource']}\0{row['record_key']}")
+        != row["payload_hash"]
+    ]
+    batches = learning_history_batches(pending)
+    if batches:
+        batch = batches[0]
+        encoded = json.dumps(
+            {"records": batch}, ensure_ascii=False, allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        _post_json(history_url, encoded, config)
+        for row in batch:
+            hashes[f"{row['resource']}\0{row['record_key']}"] = row["payload_hash"]
+        _write_news_sync_state(history_state_path, {
+            "contract_version": LEARNING_HISTORY_CONTRACT_VERSION,
+            "hashes": hashes,
+            "last_full_sync": last_full,
+            "full_refresh_started_at": history_state.get("full_refresh_started_at"),
+            "pending_record_count": len(pending) - len(batch),
+            "last_progress": now.isoformat(),
+        })
+        return
+
+    _write_news_sync_state(history_state_path, {
+        "contract_version": LEARNING_HISTORY_CONTRACT_VERSION,
+        "hashes": hashes,
+        "last_full_sync": now.isoformat() if full_refresh_due else last_full,
+        "last_success": now.isoformat(),
+        "pending_record_count": 0,
+    })
+
+
+def _sync_learning_summary(local_payload: dict, config: dict) -> None:
+    local_payload = _learning_payload(local_payload, config)
     learning_url = config.get("remote_learning_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/learning"
     )
     learning_state_path = Path(
         config.get("learning_state_file", DEFAULT_LEARNING_STATE)
     )
-    remote_host = urllib.parse.urlsplit(config["remote_ingest_url"]).hostname or ""
-    if not remote_host.lower().endswith(".chatgpt.site"):
-        history_url = config.get("remote_learning_history_url") or (
-            config["remote_ingest_url"].rsplit("/", 1)[0] + "/learning-history"
-        )
-        history_state_path = Path(config.get(
-            "learning_history_state_file", DEFAULT_LEARNING_HISTORY_STATE,
-        ))
-        history_state = _read_news_sync_state(history_state_path)
-        hashes = history_state.get("hashes", {})
-        if not isinstance(hashes, dict):
-            hashes = {}
-        last_full = history_state.get("last_full_sync")
-        try:
-            full_refresh_due = (
-                history_state.get("contract_version") != LEARNING_HISTORY_CONTRACT_VERSION
-                or not last_full
-                or (datetime.now(UTC) - datetime.fromisoformat(last_full)).total_seconds()
-                >= LEARNING_HISTORY_FULL_REFRESH_SECONDS
-            )
-        except (TypeError, ValueError):
-            full_refresh_due = True
-        records = learning_history_records(local_payload)
-        pending = [
-            row for row in records
-            if full_refresh_due
-            or hashes.get(f"{row['resource']}\0{row['record_key']}")
-            != row["payload_hash"]
-        ]
-        for batch in learning_history_batches(pending):
-            encoded = json.dumps(
-                {"records": batch}, ensure_ascii=False, allow_nan=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            _post_json(history_url, encoded, config)
-            for row in batch:
-                hashes[f"{row['resource']}\0{row['record_key']}"] = row["payload_hash"]
-            _write_news_sync_state(history_state_path, {
-                "contract_version": LEARNING_HISTORY_CONTRACT_VERSION,
-                "hashes": hashes,
-                "last_full_sync": last_full,
-            })
-        if full_refresh_due:
-            last_full = datetime.now(UTC).isoformat()
-        _write_news_sync_state(history_state_path, {
-            "contract_version": LEARNING_HISTORY_CONTRACT_VERSION,
-            "hashes": hashes,
-            "last_full_sync": last_full,
-            "last_success": datetime.now(UTC).isoformat(),
-        })
     learning_state = _read_news_sync_state(learning_state_path)
     learning_payload = learning_snapshot(local_payload)
     learning_hash = hashlib.sha256(learning_payload).hexdigest()
@@ -1254,6 +1294,13 @@ def _sync_learning(local_payload: dict, config: dict) -> None:
             "payload_hash": learning_hash,
             "last_success": datetime.now(UTC).isoformat(),
         })
+
+
+def _sync_learning(local_payload: dict, config: dict) -> None:
+    """Compatibility helper; the scheduler owns these as separate resources."""
+    payload = _learning_payload(local_payload, config)
+    _sync_learning_history(payload, config)
+    _sync_learning_summary(payload, config)
 
 
 def _sync_market(local_payload: dict, config: dict) -> None:
@@ -1396,7 +1443,7 @@ def _sync_market_history(config: dict) -> None:
     new_after = cursor
     after = _overlap_cursor(cursor)
     pages = 0
-    while True:
+    while pages < MARKET_HISTORY_PAGES_PER_CYCLE:
         with urllib.request.urlopen(
             _local_market_history_url(config, after),
             timeout=LOCAL_STATUS_TIMEOUT_SECONDS,
@@ -1421,13 +1468,30 @@ def _sync_market_history(config: dict) -> None:
         pages += 1
         if not page.get("has_more") or not next_cursor or next_cursor == after:
             break
-        if pages >= 1_000:
-            raise RuntimeError("market history backfill exceeded 1000 pages")
         after = str(next_cursor)
-    for summary in decision_overviews.values():
+    summaries = sorted(decision_overviews.items())
+    overview_offset = int(state.get("overview_offset") or 0)
+    selected_summaries = []
+    if summaries:
+        for index in range(min(MARKET_OVERVIEWS_PER_CYCLE, len(summaries))):
+            selected_summaries.append(
+                summaries[(overview_offset + index) % len(summaries)][1]
+            )
+        overview_offset = (
+            overview_offset + len(selected_summaries)
+        ) % len(summaries)
+    for summary in selected_summaries:
         _post_json(
             remote_url, _market_decision_overview_payload(summary), config,
         )
+    _write_news_sync_state(state_path, {
+        "contract_version": MARKET_HISTORY_CONTRACT_VERSION,
+        "cursor": cursor,
+        "decision_overviews": decision_overviews,
+        "overview_offset": overview_offset,
+        "has_more": bool(page.get("has_more")),
+        "last_success": datetime.now(UTC).isoformat(),
+    })
 
 
 def _local_news_archive_url(config: dict, after: str | None) -> str:
@@ -1720,6 +1784,79 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
     })
 
 
+RESOURCE_POLICIES = (
+    # Control-plane commands are bounded independently from historical mirrors.
+    ("operator_retries", "_sync_operator_retries", 30, False),
+    ("news_questions", "_sync_news_questions", 300, False),
+    # At most one of these accumulated resources runs in a sync cycle.
+    ("audit", "_sync_audit", 300, True),
+    ("learning", "_sync_learning_summary", 300, True),
+    ("learning_history", "_sync_learning_history", 300, True),
+    ("market_chart", "_sync_market", 60, True),
+    ("market_history", "_sync_market_history", 120, True),
+    ("news", "_sync_news", 60, True),
+    ("news_evidence", "_sync_news_evidence", 300, True),
+)
+
+
+def _schedule_epoch(value: object) -> float:
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _due_resource_policies(state: dict, now: datetime) -> list[tuple]:
+    resources = state.get("resources")
+    if not isinstance(resources, dict):
+        resources = {}
+    due = []
+    for policy in RESOURCE_POLICIES:
+        resource = policy[0]
+        resource_state = resources.get(resource)
+        if not isinstance(resource_state, dict):
+            resource_state = {}
+        if _schedule_epoch(resource_state.get("next_run_at")) <= now.timestamp():
+            due.append(policy)
+    controls = [policy for policy in due if not policy[3]]
+    heavy = [policy for policy in due if policy[3]][:HEAVY_RESOURCES_PER_CYCLE]
+    return [*controls, *heavy]
+
+
+def _record_resource_schedule(
+    state: dict,
+    resource: str,
+    cadence_seconds: int,
+    *,
+    now: datetime,
+    success: bool,
+) -> None:
+    resources = state.setdefault("resources", {})
+    current = resources.get(resource)
+    if not isinstance(current, dict):
+        current = {}
+    failures = 0 if success else int(current.get("consecutive_failures") or 0) + 1
+    delay = cadence_seconds if success else min(
+        RESOURCE_BACKOFF_MAX_SECONDS,
+        max(cadence_seconds, 30 * (2 ** min(failures - 1, 7))),
+    )
+    resources[resource] = {
+        **current,
+        "last_attempt_at": now.isoformat(),
+        "last_success_at": now.isoformat() if success else current.get("last_success_at"),
+        "consecutive_failures": failures,
+        "next_run_at": (now + timedelta(seconds=delay)).isoformat(),
+    }
+    state["schema_version"] = 1
+    state["updated_at"] = now.isoformat()
+
+
+def _resource_schedule_path(config: dict) -> Path:
+    return Path(config.get(
+        "resource_schedule_state_file", DEFAULT_RESOURCE_SCHEDULE_STATE,
+    ))
+
+
 def sync_once(config: dict) -> SyncResourceResults:
     with urllib.request.urlopen(
         _local_critical_status_url(config), timeout=LOCAL_STATUS_TIMEOUT_SECONDS
@@ -1772,19 +1909,25 @@ def sync_once(config: dict) -> SyncResourceResults:
 
     for target in healthy:
         target_name = target["name"]
-        for resource, operation in (
-            ("audit", _sync_audit),
-            ("learning", _sync_learning),
-            ("market_chart", _sync_market),
-            ("market_history", lambda _payload, scoped: _sync_market_history(scoped)),
-            ("news", _sync_news),
-            ("news_evidence", _sync_news_evidence),
-            ("news_questions", _sync_news_questions),
-            ("operator_retries", _sync_operator_retries),
+        schedule_path = _resource_schedule_path(target)
+        schedule_state = _read_news_sync_state(schedule_path)
+        now = datetime.now(UTC)
+        for resource, operation_name, cadence_seconds, _heavy in (
+            _due_resource_policies(schedule_state, now)
         ):
             started = time.perf_counter()
             try:
-                operation({}, target)
+                operation = globals()[operation_name]
+                if operation_name == "_sync_market_history":
+                    operation(target)
+                else:
+                    operation({}, target)
+                completed_at = datetime.now(UTC)
+                _record_resource_schedule(
+                    schedule_state, resource, cadence_seconds,
+                    now=completed_at, success=True,
+                )
+                _write_news_sync_state(schedule_path, schedule_state)
                 observations.append({
                     "target": target_name,
                     "resource": resource,
@@ -1796,6 +1939,12 @@ def sync_once(config: dict) -> SyncResourceResults:
                 })
             except Exception as error:
                 duration_ms = round((time.perf_counter() - started) * 1000, 1)
+                completed_at = datetime.now(UTC)
+                _record_resource_schedule(
+                    schedule_state, resource, cadence_seconds,
+                    now=completed_at, success=False,
+                )
+                _write_news_sync_state(schedule_path, schedule_state)
                 failure = {
                     "target": target_name,
                     "resource": resource,
