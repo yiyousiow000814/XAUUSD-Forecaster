@@ -48,6 +48,7 @@ LOCAL_STATUS_TIMEOUT_SECONDS = 20
 REMOTE_POST_TIMEOUT_SECONDS = 30
 REMOTE_NEWS_LIMIT = 200
 REMOTE_DECISION_LIMIT = 20
+REMOTE_DAILY_BRIEF_LIMIT = 3
 NEWS_DETAIL_BATCH_LIMIT_BYTES = 160_000
 NEWS_INDEX_BATCH_LIMIT_BYTES = 400_000
 NEWS_WRITE_BATCH_ITEMS = 20
@@ -797,7 +798,10 @@ def remote_snapshot(payload: dict) -> bytes:
 def audit_snapshot(payload: dict) -> bytes:
     """Build a bounded optional first page independently of the heartbeat."""
     return _encoded_snapshot(
-        audit_status_payload(payload, decision_limit=REMOTE_DECISION_LIMIT),
+        audit_status_payload(
+            payload, decision_limit=REMOTE_DECISION_LIMIT,
+            daily_brief_limit=REMOTE_DAILY_BRIEF_LIMIT,
+        ),
         label="bounded audit first page",
     )
 

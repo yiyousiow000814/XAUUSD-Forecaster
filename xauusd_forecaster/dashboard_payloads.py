@@ -65,6 +65,7 @@ def critical_status_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 def audit_status_payload(
     payload: Mapping[str, Any], *, decision_limit: int = 20,
+    daily_brief_limit: int | None = None,
 ) -> dict[str, Any]:
     """Project the bounded optional audit first page from local authority."""
     snapshot = {
@@ -75,6 +76,9 @@ def audit_status_payload(
     decisions = snapshot.get("recent_decisions")
     if isinstance(decisions, list):
         snapshot["recent_decisions"] = decisions[:decision_limit]
+    briefs = snapshot.get("daily_news_briefs")
+    if isinstance(briefs, list) and daily_brief_limit is not None:
+        snapshot["daily_news_briefs"] = briefs[:daily_brief_limit]
     summary = snapshot.get("daily_news_brief_summary")
     if isinstance(summary, dict):
         snapshot["daily_news_brief_summary"] = {

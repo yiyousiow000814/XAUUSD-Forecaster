@@ -867,6 +867,10 @@ def test_critical_status_excludes_growing_resources_and_keeps_references() -> No
             "annotation_reason": "搜索线索：来自聚合发现源，不是独立官方发布",
         } for index in range(100)],
         "recent_decisions": [{"id": index} for index in range(30)],
+        "daily_news_briefs": [
+            {"brief_date": f"2026-08-{20 - index:02d}", "revision_number": 1}
+            for index in range(5)
+        ],
         "news_evidence": [
             {"id": index, "model_seen": index < 97}
             for index in range(202)
@@ -913,6 +917,7 @@ def test_critical_status_excludes_growing_resources_and_keeps_references() -> No
     assert market_decision["source_decision_id"] == "d1"
     assert market_decision["model_version"] == "unused-field"
     assert len(audit["recent_decisions"]) == module.REMOTE_DECISION_LIMIT
+    assert len(audit["daily_news_briefs"]) == module.REMOTE_DAILY_BRIEF_LIMIT
     assert audit["news_evidence_resource"] == "/api/news-evidence"
     assert learning["learning_curves"]["models"] == [
         {"lifecycle_status": "LATEST", "model_version": "latest"},
