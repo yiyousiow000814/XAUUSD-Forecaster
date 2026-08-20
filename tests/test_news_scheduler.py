@@ -672,6 +672,33 @@ def test_rolling_tpm_uses_actual_only_for_trustworthy_success(
     assert tuple(row) == (5_600, 5_600, 5_600, actual_tokens)
 
 
+def test_rolling_usage_excludes_reservations_after_observation_time() -> None:
+    connection = _connection()
+    common = {
+        "connection": connection,
+        "account_id": "account-a",
+        "model_family": "gemini-test",
+        "daily_limit": 1_000,
+        "requests_per_minute": 20,
+        "input_tokens_per_minute": 15_000,
+    }
+    assert reserve_account_request(
+        **common, input_tokens=1_000, usage_id="past",
+        now=NOW - timedelta(seconds=30),
+    )
+    assert reserve_account_request(
+        **common, input_tokens=2_000, usage_id="future",
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert rolling_account_usage(
+        connection,
+        account_id="account-a",
+        model_families=("gemini-test",),
+        now=NOW,
+    ) == (1, 1_000)
+
+
 def test_actual_token_correction_changes_admission_and_exact_expiry() -> None:
     def corrected_connection(actual_tokens: int) -> sqlite3.Connection:
         connection = _connection()
