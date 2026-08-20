@@ -6,6 +6,7 @@ import sqlite3
 import threading
 import time
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -2428,6 +2429,67 @@ def test_provider_dispatch_deferral_does_not_probe_accounts_or_consume_attempt(
     assert tuple(deferral) == (
         "PROVIDER_DISPATCH_DEFERRED", retry_at.isoformat(),
     )
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("failure_code", "expected_models", "expected_status"),
+    (
+        (
+            "PROVIDER_DISPATCH_DEFERRED",
+            ("gemini-3.5-flash-lite",),
+            "DEFERRED",
+        ),
+        (
+            "BACKFILL_BUDGET_DEFERRED",
+            ("gemini-3.5-flash-lite",),
+            "DEFERRED",
+        ),
+        (
+            "MODEL_CAPACITY_DEFERRED",
+            ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite"),
+            "OK",
+        ),
+    ),
+)
+def test_annotation_fallback_never_crosses_maintenance_deferral(
+    tmp_path, monkeypatch, failure_code: str,
+    expected_models: tuple[str, ...], expected_status: str,
+) -> None:
+    from scripts import run_news_annotator as runner
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    job = SimpleNamespace(
+        task_type="ACTIVE_ANNOTATION",
+        priority="FAST",
+        work_lane="LIVE",
+    )
+    credential = ApiCredential(
+        "account-a", ROUTINE_POOL, "key-a", "credential-a",
+    )
+    calls = []
+    monkeypatch.setattr(
+        runner, "pending_record_for_job",
+        lambda *_args, **_kwargs: {"source_item_id": "current"},
+    )
+
+    def annotate(*_args, model, **_kwargs):
+        calls.append(model)
+        if len(calls) == 1:
+            return [{
+                "status": "DEFERRED",
+                "failure_code": failure_code,
+            }]
+        return [{"status": "OK"}]
+
+    monkeypatch.setattr(runner, "annotate_pending_news", annotate)
+
+    status = runner._execute_job(
+        ledger, credential, job, now=NOW,
+    )
+
+    assert tuple(calls) == expected_models
+    assert status["status"] == expected_status
     ledger.close()
 
 
