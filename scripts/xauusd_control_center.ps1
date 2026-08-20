@@ -2520,6 +2520,121 @@ function Install-ControlShortcut {
     return $shortcutPath
 }
 
+function Get-ControlCenterReleasePresentation {
+    param([object]$Release)
+
+    if (-not $Release -or -not $Release.stable) {
+        return [pscustomobject]@{
+            candidate_state = "UNAVAILABLE"
+            candidate_detail = "Release control has not been bootstrapped."
+            can_promote = $false
+            promote_reason = "Not bootstrapped"
+            can_reverse = $false
+            reverse_reason = "Not bootstrapped"
+        }
+    }
+
+    $transactionActive = [bool]$Release.transaction
+    $deploymentReady = [string]$Release.deployment_status -eq "READY"
+    $candidateState = if ($Release.candidate) {
+        [string]$Release.candidate.validation_state
+    } else { "UNAVAILABLE" }
+    if (-not $candidateState) { $candidateState = "UNAVAILABLE" }
+
+    $candidateDetail = switch ($candidateState) {
+        "PASSED" { "All required validation evidence is current." }
+        "FAILED" {
+            if ($Release.candidate.validation.error) {
+                [string]$Release.candidate.validation.error
+            } elseif ($Release.candidate.validation.reason) {
+                [string]$Release.candidate.validation.reason
+            } else { "Candidate validation failed." }
+        }
+        "TESTING" { "Validation is running against the exact release identity." }
+        "STAGING" { "Candidate is being staged at zero percent traffic." }
+        "NEW" { "Candidate is waiting for validation to begin." }
+        default { "No candidate release is currently available." }
+    }
+
+    $promoteReason = if ($transactionActive) {
+        "A release transaction is already in progress"
+    } elseif (-not $deploymentReady) {
+        "Deployment status is $($Release.deployment_status)"
+    } elseif (-not $Release.candidate) {
+        "Candidate unavailable"
+    } elseif ($candidateState -eq "TESTING" -or $candidateState -eq "STAGING" -or $candidateState -eq "NEW") {
+        "Candidate still testing"
+    } elseif ($candidateState -eq "FAILED") {
+        "Candidate failed validation"
+    } elseif ($candidateState -ne "PASSED") {
+        "Candidate has not passed validation"
+    } else { "Ready to promote" }
+
+    $reverseReason = if ($transactionActive) {
+        "A release transaction is already in progress"
+    } elseif (-not $deploymentReady) {
+        "Deployment status is $($Release.deployment_status)"
+    } elseif (-not $Release.previous_stable) {
+        "Previous Stable unavailable"
+    } else { "Ready to reverse" }
+
+    [pscustomobject]@{
+        candidate_state = $candidateState
+        candidate_detail = $candidateDetail
+        can_promote = [bool]($deploymentReady -and -not $transactionActive -and
+            $Release.candidate -and $candidateState -eq "PASSED")
+        promote_reason = $promoteReason
+        can_reverse = [bool]($deploymentReady -and -not $transactionActive -and
+            $Release.previous_stable)
+        reverse_reason = $reverseReason
+    }
+}
+
+function Get-ControlCenterSummaryPresentation {
+    param([Parameter(Mandatory = $true)][object]$Snapshot)
+
+    $healthyStates = @("RUNNING", "LIVE", "MARKET CLOSED", "API OK", "SYNC OK")
+    $serviceRows = @($Snapshot.services)
+    $healthyCount = @($serviceRows | Where-Object { [string]$_.State -in $healthyStates }).Count
+    $unhealthyCount = $serviceRows.Count - $healthyCount
+    $localRuntime = if ($healthyCount -eq 0) {
+        "STOPPED"
+    } elseif ($unhealthyCount -eq 0) {
+        "RUNNING"
+    } else { "PARTIAL" }
+
+    $releaseView = Get-ControlCenterReleasePresentation -Release $Snapshot.release
+    $deploymentState = if ($Snapshot.release) {
+        [string]$Snapshot.release.deployment_status
+    } else { "UNAVAILABLE" }
+    $overall = if (
+        $deploymentState -match "FAILED|DRIFT|RECOVERY" -or
+        ($serviceRows.Count -gt 0 -and $unhealthyCount -eq $serviceRows.Count)
+    ) {
+        "FAILED"
+    } elseif (
+        $unhealthyCount -gt 0 -or $deploymentState -ne "READY" -or
+        $releaseView.candidate_state -eq "FAILED"
+    ) {
+        "DEGRADED"
+    } else { "HEALTHY" }
+
+    $captured = "--"
+    try {
+        $capturedAt = [DateTimeOffset]::Parse([string]$Snapshot.captured_at)
+        $captured = [TimeZoneInfo]::ConvertTimeBySystemTimeZoneId(
+            $capturedAt, "Singapore Standard Time"
+        ).ToString("HH:mm:ss")
+    } catch {}
+
+    [pscustomobject]@{
+        overall = $overall
+        local_runtime = $localRuntime
+        candidate_state = $releaseView.candidate_state
+        last_refresh = $captured
+    }
+}
+
 function Show-ControlCenter {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
@@ -2537,227 +2652,563 @@ function Show-ControlCenter {
         return
     }
 
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = "XAUUSD Forecaster Control Center"
-    $form.Size = New-Object System.Drawing.Size(840, 940)
-    $form.StartPosition = "CenterScreen"
-    $form.ShowInTaskbar = $true
-    $form.MinimumSize = New-Object System.Drawing.Size(840, 940)
-    $form.BackColor = [System.Drawing.Color]::FromArgb(235, 230, 215)
-    $form.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 10)
+    $canvas = [System.Drawing.Color]::FromArgb(235, 237, 232)
+    $surface = [System.Drawing.Color]::FromArgb(251, 251, 248)
+    $ink = [System.Drawing.Color]::FromArgb(26, 35, 36)
+    $muted = [System.Drawing.Color]::FromArgb(91, 101, 100)
+    $line = [System.Drawing.Color]::FromArgb(207, 211, 207)
+    $accent = [System.Drawing.Color]::FromArgb(29, 48, 49)
+    $active = [System.Drawing.Color]::FromArgb(30, 116, 103)
+    $green = [System.Drawing.Color]::FromArgb(31, 118, 72)
+    $greenWash = [System.Drawing.Color]::FromArgb(224, 241, 231)
+    $amber = [System.Drawing.Color]::FromArgb(151, 99, 15)
+    $amberWash = [System.Drawing.Color]::FromArgb(250, 239, 210)
+    $red = [System.Drawing.Color]::FromArgb(174, 58, 48)
+    $redWash = [System.Drawing.Color]::FromArgb(249, 228, 224)
+    $gray = [System.Drawing.Color]::FromArgb(91, 99, 97)
+    $grayWash = [System.Drawing.Color]::FromArgb(232, 235, 232)
+    $headingFont = New-Object System.Drawing.Font("Segoe UI Semibold", 12.5)
+    $bodyFont = New-Object System.Drawing.Font("Segoe UI Variable Text", 9.5)
+    $monoFont = New-Object System.Drawing.Font("Cascadia Mono", 8.5)
+    $toolTip = New-Object System.Windows.Forms.ToolTip
+    $toolTip.AutoPopDelay = 12000
+    $toolTip.InitialDelay = 250
 
-    $title = New-Object System.Windows.Forms.Label
-    $title.Text = "XAUUSD FORECASTER / LOCAL CONTROL CENTER"
-    $title.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 16, [System.Drawing.FontStyle]::Bold)
-    $title.AutoSize = $true
-    $title.Location = New-Object System.Drawing.Point(24, 20)
-    $form.Controls.Add($title)
-
-    $subtitle = New-Object System.Windows.Forms.Label
-    $subtitle.Text = "Local process control. Dashboard mirrors are view-only and never place orders."
-    $subtitle.AutoSize = $true
-    $subtitle.Location = New-Object System.Drawing.Point(26, 58)
-    $form.Controls.Add($subtitle)
-
-    $statusLabels = @{}
-    $actionButtons = New-Object System.Collections.ArrayList
-    $rowY = 105
-    foreach ($service in $services) {
-        $name = New-Object System.Windows.Forms.Label
-        $name.Text = $service.Label
-        $name.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 11, [System.Drawing.FontStyle]::Bold)
-        $name.AutoSize = $true
-        $name.Location = New-Object System.Drawing.Point(30, $rowY)
-        $form.Controls.Add($name)
-
-        $status = New-Object System.Windows.Forms.Label
-        $status.Text = "CHECKING"
-        $status.Width = 130
-        $status.Location = New-Object System.Drawing.Point(315, ($rowY + 2))
-        $form.Controls.Add($status)
-        $statusLabels[$service.Key] = $status
-
-        $startButton = New-Object System.Windows.Forms.Button
-        $startButton.Text = "Start"
-        $startButton.Tag = $service.Key
-        $startButton.Size = New-Object System.Drawing.Size(80, 30)
-        $startButton.Location = New-Object System.Drawing.Point(455, ($rowY - 6))
-        $startButton.Add_Click({
-            param($sender)
-            Invoke-GuiOperation -Operation "ServiceStart" -TargetKey $sender.Tag
-        })
-        $form.Controls.Add($startButton)
-        [void]$actionButtons.Add($startButton)
-
-        $stopButton = New-Object System.Windows.Forms.Button
-        $stopButton.Text = "Stop"
-        $stopButton.Tag = $service.Key
-        $stopButton.Size = New-Object System.Drawing.Size(80, 30)
-        $stopButton.Location = New-Object System.Drawing.Point(545, ($rowY - 6))
-        $stopButton.Add_Click({
-            param($sender)
-            Invoke-GuiOperation -Operation "ServiceStop" -TargetKey $sender.Tag
-        })
-        $form.Controls.Add($stopButton)
-        [void]$actionButtons.Add($stopButton)
-        $rowY += 48
+    function New-UiLabel {
+        param(
+            [string]$Text = "",
+            [System.Drawing.Font]$Font = $bodyFont,
+            [System.Drawing.Color]$Color = $ink,
+            [System.Windows.Forms.DockStyle]$Dock = [System.Windows.Forms.DockStyle]::None,
+            [System.Drawing.ContentAlignment]$Align = [System.Drawing.ContentAlignment]::MiddleLeft
+        )
+        $label = New-Object System.Windows.Forms.Label
+        $label.Text = $Text
+        $label.Font = $Font
+        $label.ForeColor = $Color
+        $label.Dock = $Dock
+        $label.TextAlign = $Align
+        $label.AutoEllipsis = $true
+        return $label
     }
 
-    $startAll = New-Object System.Windows.Forms.Button
-    $startAll.Text = "Start All"
-    $startAll.Size = New-Object System.Drawing.Size(120, 38)
-    $releaseGroup = New-Object System.Windows.Forms.GroupBox
-    $releaseGroup.Text = "RELEASE"
-    $releaseGroup.Size = New-Object System.Drawing.Size(770, 260)
-    $releaseGroup.Location = New-Object System.Drawing.Point(28, 340)
-    $form.Controls.Add($releaseGroup)
+    function New-UiButton {
+        param([string]$Text, [string]$Kind = "Neutral", [int]$Width = 118)
+        $button = New-Object System.Windows.Forms.Button
+        $button.Text = $Text
+        $button.Width = $Width
+        $button.Height = 34
+        $button.Margin = New-Object System.Windows.Forms.Padding(0, 0, 8, 0)
+        $button.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+        $button.FlatAppearance.BorderSize = 1
+        $button.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 8.7)
+        if ($Kind -eq "Primary") {
+            $button.BackColor = $accent
+            $button.ForeColor = [System.Drawing.Color]::White
+            $button.FlatAppearance.BorderColor = $accent
+        } elseif ($Kind -eq "Positive") {
+            $button.BackColor = $greenWash
+            $button.ForeColor = $green
+            $button.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(178, 214, 191)
+        } elseif ($Kind -eq "Danger") {
+            $button.BackColor = $surface
+            $button.ForeColor = $red
+            $button.FlatAppearance.BorderColor = $red
+        } else {
+            $button.BackColor = $surface
+            $button.ForeColor = $ink
+            $button.FlatAppearance.BorderColor = $line
+        }
+        return $button
+    }
 
-    $stableReleaseLabel = New-Object System.Windows.Forms.Label
-    $stableReleaseLabel.Text = "Stable: loading"
-    $stableReleaseLabel.AutoSize = $false
-    $stableReleaseLabel.Size = New-Object System.Drawing.Size(730, 48)
-    $stableReleaseLabel.Location = New-Object System.Drawing.Point(18, 28)
-    $releaseGroup.Controls.Add($stableReleaseLabel)
+    function Add-SoftPanelBorder {
+        param([System.Windows.Forms.Panel]$Panel, [System.Drawing.Color]$Color = $line)
+        $borderColor = $Color
+        $paintBorder = {
+            param($sender, $eventArgs)
+            $pen = New-Object System.Drawing.Pen($borderColor)
+            try {
+                $eventArgs.Graphics.DrawRectangle(
+                    $pen, 0, 0,
+                    [Math]::Max(0, $sender.ClientSize.Width - 1),
+                    [Math]::Max(0, $sender.ClientSize.Height - 1)
+                )
+            } finally { $pen.Dispose() }
+        }.GetNewClosure()
+        $Panel.Add_Paint($paintBorder)
+    }
 
-    $candidateReleaseLabel = New-Object System.Windows.Forms.Label
-    $candidateReleaseLabel.Text = "Candidate: loading"
-    $candidateReleaseLabel.AutoSize = $false
-    $candidateReleaseLabel.Size = New-Object System.Drawing.Size(730, 62)
-    $candidateReleaseLabel.Location = New-Object System.Drawing.Point(18, 78)
-    $releaseGroup.Controls.Add($candidateReleaseLabel)
+    function Set-StatusBadge {
+        param([System.Windows.Forms.Label]$Label, [string]$State)
+        $normalized = if ($State) { $State.ToUpperInvariant() } else { "UNKNOWN" }
+        $Label.Text = "  $normalized  "
+        if ($normalized -in @("HEALTHY", "RUNNING", "LIVE", "MARKET CLOSED", "API OK", "SYNC OK", "PASSED", "READY", "CURRENT", "ENABLED")) {
+            $Label.ForeColor = $green
+            $Label.BackColor = $greenWash
+        } elseif ($normalized -in @("DEGRADED", "PARTIAL", "TESTING", "STAGING", "NEW", "SYNC DEGRADED", "OBSERVING", "PENDING")) {
+            $Label.ForeColor = $amber
+            $Label.BackColor = $amberWash
+        } elseif ($normalized -in @("FAILED", "ERROR", "OFFLINE", "STOPPED", "RECOVERY REQUIRED", "DEPLOYMENT DRIFT")) {
+            $Label.ForeColor = $red
+            $Label.BackColor = $redWash
+        } else {
+            $Label.ForeColor = $gray
+            $Label.BackColor = $grayWash
+        }
+    }
 
-    $previousReleaseLabel = New-Object System.Windows.Forms.Label
-    $previousReleaseLabel.Text = "Previous Stable: loading"
-    $previousReleaseLabel.AutoSize = $false
-    $previousReleaseLabel.Size = New-Object System.Drawing.Size(730, 44)
-    $previousReleaseLabel.Location = New-Object System.Drawing.Point(18, 143)
-    $releaseGroup.Controls.Add($previousReleaseLabel)
+    function New-SummaryCell {
+        param([string]$Caption)
+        $panel = New-Object System.Windows.Forms.Panel
+        $panel.Dock = "Fill"
+        $panel.BackColor = $surface
+        $panel.Margin = New-Object System.Windows.Forms.Padding(0, 0, 1, 0)
+        $captionLabel = New-UiLabel -Text $Caption.ToUpperInvariant() -Font (New-Object System.Drawing.Font("Segoe UI Semibold", 7.5)) -Color $muted
+        $captionLabel.Location = New-Object System.Drawing.Point(14, 10)
+        $captionLabel.Size = New-Object System.Drawing.Size(190, 20)
+        $valueLabel = New-UiLabel -Text "CHECKING" -Font (New-Object System.Drawing.Font("Segoe UI Variable Display", 10.5, [System.Drawing.FontStyle]::Bold))
+        $valueLabel.Location = New-Object System.Drawing.Point(12, 32)
+        $valueLabel.AutoSize = $true
+        $panel.Controls.Add($captionLabel)
+        $panel.Controls.Add($valueLabel)
+        return [pscustomobject]@{ Panel = $panel; Value = $valueLabel }
+    }
 
-    $promoteButton = New-Object System.Windows.Forms.Button
-    $promoteButton.Text = "Promote Candidate"
-    $promoteButton.Size = New-Object System.Drawing.Size(180, 38)
-    $promoteButton.Location = New-Object System.Drawing.Point(18, 198)
+    function New-ReleaseCard {
+        param([string]$Title, [bool]$Emphasized = $false)
+        $card = New-Object System.Windows.Forms.Panel
+        $card.Dock = "Fill"
+        $card.BackColor = $surface
+        $card.BorderStyle = [System.Windows.Forms.BorderStyle]::None
+        $card.Margin = New-Object System.Windows.Forms.Padding($(if ($Emphasized) { 5 } else { 0 }), 0, $(if ($Emphasized) { 5 } else { 0 }), 0)
+
+        $titleLabel = New-UiLabel -Text $Title -Font (New-Object System.Drawing.Font("Segoe UI Semibold", 12))
+        $titleLabel.Location = New-Object System.Drawing.Point(16, 12)
+        $titleLabel.Size = New-Object System.Drawing.Size(180, 24)
+        $card.Controls.Add($titleLabel)
+
+        $badge = New-UiLabel -Text "  LOADING  " -Font (New-Object System.Drawing.Font("Segoe UI Semibold", 8))
+        $badge.AutoSize = $true
+        $badge.Location = New-Object System.Drawing.Point(16, 43)
+        Set-StatusBadge -Label $badge -State "UNKNOWN"
+        $card.Controls.Add($badge)
+
+        $git = New-UiLabel -Text "Git       --" -Font $monoFont -Color $ink
+        $git.Location = New-Object System.Drawing.Point(16, 76)
+        $git.Size = New-Object System.Drawing.Size(165, 21)
+        $git.Anchor = "Top,Left,Right"
+        $worker = New-UiLabel -Text "Worker    --" -Font $monoFont -Color $muted
+        $worker.Location = New-Object System.Drawing.Point(16, 98)
+        $worker.Size = New-Object System.Drawing.Size(165, 21)
+        $worker.Anchor = "Top,Left,Right"
+        $windows = New-UiLabel -Text "Windows   --" -Font $monoFont -Color $muted
+        $windows.Location = New-Object System.Drawing.Point(16, 120)
+        $windows.Size = New-Object System.Drawing.Size(165, 21)
+        $windows.Anchor = "Top,Left,Right"
+        $detail = New-UiLabel -Text "Loading release identity..." -Color $muted
+        $detail.Location = New-Object System.Drawing.Point(16, 148)
+        $detail.Size = New-Object System.Drawing.Size(165, 42)
+        $detail.Anchor = "Top,Left,Right"
+        $card.Controls.AddRange(@($git, $worker, $windows, $detail))
+        Add-SoftPanelBorder -Panel $card
+        return [pscustomobject]@{
+            Panel = $card; Badge = $badge; Git = $git; Worker = $worker
+            Windows = $windows; Detail = $detail
+        }
+    }
+
+    function Get-ShortIdentity {
+        param([object]$Value, [int]$Length = 12)
+        $text = [string]$Value
+        if (-not $text) { return "--" }
+        if ($text.Length -le $Length) { return $text }
+        return $text.Substring(0, $Length)
+    }
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "XAUUSD Forecaster Control Center"
+    $form.Size = New-Object System.Drawing.Size(1180, 970)
+    $form.MinimumSize = New-Object System.Drawing.Size(1060, 840)
+    $form.StartPosition = "CenterScreen"
+    $form.ShowInTaskbar = $true
+    $form.BackColor = $canvas
+    $form.Font = $bodyFont
+    $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
+    $form.AutoScroll = $false
+    $doubleBufferProperty = $form.GetType().GetProperty("DoubleBuffered", [System.Reflection.BindingFlags]"Instance,NonPublic")
+    if ($doubleBufferProperty) { $doubleBufferProperty.SetValue($form, $true, $null) }
+
+    $root = New-Object System.Windows.Forms.TableLayoutPanel
+    $root.Dock = "Top"
+    $root.AutoSize = $false
+    $root.Height = 932
+    $root.Padding = New-Object System.Windows.Forms.Padding(24, 20, 24, 20)
+    $root.ColumnCount = 1
+    $root.RowCount = 5
+    [void]$root.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+    foreach ($height in @(106, 256, 330, 140, 60)) {
+        [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, $height)))
+    }
+    $viewport = New-Object System.Windows.Forms.Panel
+    $viewport.Dock = "Fill"
+    $viewport.AutoScroll = $true
+    $viewport.BackColor = $canvas
+    $viewport.Controls.Add($root)
+    $form.Controls.Add($viewport)
+
+    $header = New-Object System.Windows.Forms.Panel
+    $header.Dock = "Fill"
+    $header.BackColor = $accent
+    $header.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 14)
+    $title = New-UiLabel -Text "XAUUSD Forecaster" -Font (New-Object System.Drawing.Font("Segoe UI Variable Display", 20, [System.Drawing.FontStyle]::Bold)) -Color ([System.Drawing.Color]::White)
+    $title.Location = New-Object System.Drawing.Point(20, 18)
+    $title.Size = New-Object System.Drawing.Size(360, 34)
+    $subtitle = New-UiLabel -Text "LOCAL CONTROL CENTER  /  FORWARD-ONLY OPERATIONS" -Font (New-Object System.Drawing.Font("Cascadia Mono", 8)) -Color ([System.Drawing.Color]::FromArgb(196, 213, 208))
+    $subtitle.Location = New-Object System.Drawing.Point(22, 55)
+    $subtitle.Size = New-Object System.Drawing.Size(420, 22)
+    $header.Controls.AddRange(@($title, $subtitle))
+
+    $summaryGrid = New-Object System.Windows.Forms.TableLayoutPanel
+    $summaryGrid.ColumnCount = 4
+    $summaryGrid.RowCount = 1
+    $summaryGrid.BackColor = $line
+    $summaryHost = New-Object System.Windows.Forms.Panel
+    $summaryHost.Dock = "Right"
+    $summaryHost.Width = 640
+    $summaryHost.Padding = New-Object System.Windows.Forms.Padding(0, 15, 20, 15)
+    $summaryHost.BackColor = $accent
+    $summaryGrid.Dock = "Fill"
+    foreach ($width in @(25, 25, 25, 25)) {
+        [void]$summaryGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, $width)))
+    }
+    $overallSummary = New-SummaryCell -Caption "Overall"
+    $stableSummary = New-SummaryCell -Caption "Stable"
+    $candidateSummary = New-SummaryCell -Caption "Candidate"
+    $runtimeSummary = New-SummaryCell -Caption "Local runtime"
+    $summaryGrid.Controls.Add($overallSummary.Panel, 0, 0)
+    $summaryGrid.Controls.Add($stableSummary.Panel, 1, 0)
+    $summaryGrid.Controls.Add($candidateSummary.Panel, 2, 0)
+    $summaryGrid.Controls.Add($runtimeSummary.Panel, 3, 0)
+    $summaryHost.Controls.Add($summaryGrid)
+    $header.Controls.Add($summaryHost)
+    $root.Controls.Add($header, 0, 0)
+
+    $servicesPanel = New-Object System.Windows.Forms.Panel
+    $servicesPanel.Dock = "Fill"
+    $servicesPanel.BackColor = $surface
+    $servicesPanel.BorderStyle = [System.Windows.Forms.BorderStyle]::None
+    $servicesPanel.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 14)
+    $servicesLayout = New-Object System.Windows.Forms.TableLayoutPanel
+    $servicesLayout.Dock = "Fill"
+    $servicesLayout.ColumnCount = 1
+    $servicesLayout.RowCount = 2
+    [void]$servicesLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+    [void]$servicesLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 45)))
+    [void]$servicesLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+    $servicesHeader = New-Object System.Windows.Forms.Panel
+    $servicesHeader.Dock = "Fill"
+    $servicesHeader.Margin = New-Object System.Windows.Forms.Padding(0)
+    $servicesHeader.BackColor = $surface
+    $servicesTitle = New-UiLabel -Text "Local services" -Font $headingFont
+    $servicesTitle.Location = New-Object System.Drawing.Point(18, 8)
+    $servicesTitle.Size = New-Object System.Drawing.Size(300, 24)
+    $servicesHint = New-UiLabel -Text "Five production owners on this Windows host" -Font (New-Object System.Drawing.Font("Segoe UI Variable Text", 8.5)) -Color $muted
+    $servicesHint.Location = New-Object System.Drawing.Point(19, 30)
+    $servicesHint.Size = New-Object System.Drawing.Size(360, 18)
+    $servicesHeader.Controls.AddRange(@($servicesTitle, $servicesHint))
+
+    $serviceDescriptions = @{
+        quote = "Receives the cTrader XAUUSD quote stream"
+        collector = "Builds the five-minute decision and training ledger"
+        annotator = "Classifies eligible news evidence"
+        api = "Serves the local dashboard contract"
+        sync = "Publishes bounded dashboard mirrors"
+    }
+    $serviceGrid = New-Object System.Windows.Forms.TableLayoutPanel
+    $serviceGrid.Dock = "Fill"
+    $serviceGrid.Margin = New-Object System.Windows.Forms.Padding(0)
+    $serviceGrid.Padding = New-Object System.Windows.Forms.Padding(18, 0, 18, 0)
+    $serviceGrid.ColumnCount = 4
+    $serviceGrid.RowCount = $services.Count
+    [void]$serviceGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 35)))
+    [void]$serviceGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 38)))
+    [void]$serviceGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 145)))
+    [void]$serviceGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 145)))
+    $statusLabels = @{}
+    $actionButtons = New-Object System.Collections.ArrayList
+    $serviceIndex = 0
+    foreach ($service in $services) {
+        [void]$serviceGrid.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 39)))
+        $namePanel = New-Object System.Windows.Forms.Panel
+        $namePanel.Dock = "Fill"
+        $namePanel.Margin = New-Object System.Windows.Forms.Padding(0)
+        $name = New-UiLabel -Text $service.Label -Font (New-Object System.Drawing.Font("Segoe UI Semibold", 9.3)) -Dock "Fill"
+        $name.Padding = New-Object System.Windows.Forms.Padding(8, 0, 0, 0)
+        $namePanel.Controls.Add($name)
+        $description = New-UiLabel -Text $serviceDescriptions[$service.Key] -Color $muted -Dock "Fill"
+        $description.Padding = New-Object System.Windows.Forms.Padding(6, 0, 0, 0)
+        $status = New-UiLabel -Text "  CHECKING  " -Font (New-Object System.Drawing.Font("Segoe UI Semibold", 8))
+        $status.AutoSize = $true
+        $status.Anchor = "Left"
+        Set-StatusBadge -Label $status -State "UNKNOWN"
+        $statusLabels[$service.Key] = $status
+
+        $serviceActions = New-Object System.Windows.Forms.FlowLayoutPanel
+        $serviceActions.Dock = "Fill"
+        $serviceActions.FlowDirection = "LeftToRight"
+        $serviceActions.WrapContents = $false
+        $serviceActions.Padding = New-Object System.Windows.Forms.Padding(0, 4, 0, 0)
+        $startButton = New-UiButton -Text "Start" -Kind "Positive" -Width 62
+        $startButton.Tag = $service.Key
+        $startButton.Add_Click({ param($sender) Invoke-GuiOperation -Operation "ServiceStart" -TargetKey $sender.Tag })
+        $stopButton = New-UiButton -Text "Stop" -Width 62
+        $stopButton.Tag = $service.Key
+        $stopButton.Add_Click({ param($sender) Invoke-GuiOperation -Operation "ServiceStop" -TargetKey $sender.Tag })
+        $serviceActions.Controls.AddRange(@($startButton, $stopButton))
+        [void]$actionButtons.Add($startButton)
+        [void]$actionButtons.Add($stopButton)
+
+        $serviceGrid.Controls.Add($namePanel, 0, $serviceIndex)
+        $serviceGrid.Controls.Add($description, 1, $serviceIndex)
+        $serviceGrid.Controls.Add($status, 2, $serviceIndex)
+        $serviceGrid.Controls.Add($serviceActions, 3, $serviceIndex)
+        $serviceIndex++
+    }
+    $servicesLayout.Controls.Add($servicesHeader, 0, 0)
+    $servicesLayout.Controls.Add($serviceGrid, 0, 1)
+    $servicesPanel.Controls.Add($servicesLayout)
+    $root.Controls.Add($servicesPanel, 0, 1)
+
+    $releasePanel = New-Object System.Windows.Forms.Panel
+    $releasePanel.Dock = "Fill"
+    $releasePanel.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 14)
+    $releaseLayout = New-Object System.Windows.Forms.TableLayoutPanel
+    $releaseLayout.Dock = "Fill"
+    $releaseLayout.ColumnCount = 1
+    $releaseLayout.RowCount = 2
+    [void]$releaseLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+    [void]$releaseLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 45)))
+    [void]$releaseLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+    $releaseHeader = New-Object System.Windows.Forms.Panel
+    $releaseHeader.Dock = "Fill"
+    $releaseHeader.Margin = New-Object System.Windows.Forms.Padding(0)
+    $releaseHeader.BackColor = $canvas
+    $releaseTitle = New-UiLabel -Text "Release control" -Font $headingFont
+    $releaseTitle.Location = New-Object System.Drawing.Point(0, 3)
+    $releaseTitle.Size = New-Object System.Drawing.Size(300, 24)
+    $releaseHint = New-UiLabel -Text "One exact Git / Worker / Windows release at every boundary" -Font (New-Object System.Drawing.Font("Segoe UI Variable Text", 8.5)) -Color $muted
+    $releaseHint.Location = New-Object System.Drawing.Point(1, 27)
+    $releaseHint.Size = New-Object System.Drawing.Size(500, 18)
+    $releaseHeader.Controls.AddRange(@($releaseTitle, $releaseHint))
+
+    $releaseGrid = New-Object System.Windows.Forms.TableLayoutPanel
+    $releaseGrid.Dock = "Fill"
+    $releaseGrid.Margin = New-Object System.Windows.Forms.Padding(0)
+    $releaseGrid.ColumnCount = 3
+    $releaseGrid.RowCount = 1
+    [void]$releaseGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 29)))
+    [void]$releaseGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 42)))
+    [void]$releaseGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 29)))
+    $stableCard = New-ReleaseCard -Title "Stable"
+    $candidateCard = New-ReleaseCard -Title "Release Candidate" -Emphasized $true
+    $previousCard = New-ReleaseCard -Title "Previous Stable"
+    $candidateCard.Panel.BackColor = [System.Drawing.Color]::FromArgb(246, 250, 248)
+    $candidateCard.Panel.Add_Paint({
+        param($sender, $eventArgs)
+        $brush = New-Object System.Drawing.SolidBrush($active)
+        try { $eventArgs.Graphics.FillRectangle($brush, 0, 0, $sender.ClientSize.Width, 4) }
+        finally { $brush.Dispose() }
+    })
+    $candidateCard.Detail.Size = New-Object System.Drawing.Size(165, 20)
+    $candidateCard.Detail.Location = New-Object System.Drawing.Point(16, 143)
+    $releaseGrid.Controls.Add($stableCard.Panel, 0, 0)
+    $releaseGrid.Controls.Add($candidateCard.Panel, 1, 0)
+    $releaseGrid.Controls.Add($previousCard.Panel, 2, 0)
+    $releaseLayout.Controls.Add($releaseHeader, 0, 0)
+    $releaseLayout.Controls.Add($releaseGrid, 0, 1)
+    $releasePanel.Controls.Add($releaseLayout)
+    $root.Controls.Add($releasePanel, 0, 2)
+
+    $candidateChecks = New-Object System.Windows.Forms.TableLayoutPanel
+    $candidateChecks.Location = New-Object System.Drawing.Point(16, 166)
+    $candidateChecks.Anchor = "Top,Left,Right"
+    $candidateChecks.Size = New-Object System.Drawing.Size(165, 40)
+    $candidateChecks.ColumnCount = 2
+    $candidateChecks.RowCount = 2
+    [void]$candidateChecks.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 50)))
+    [void]$candidateChecks.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 50)))
+    foreach ($height in @(20, 20)) {
+        [void]$candidateChecks.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, $height)))
+    }
+    $candidateCheckLabels = @{}
+    foreach ($item in @(
+        @("windows", "Runtime + heartbeat"), @("contracts", "API routes"),
+        @("cpu", "CPU headroom"), @("limits", "5xx + 1102")
+    )) {
+        $checkLabel = New-UiLabel -Text "$($item[1]): waiting" -Font (New-Object System.Drawing.Font("Segoe UI Variable Text", 8)) -Color $muted -Dock "Fill"
+        $candidateCheckLabels[$item[0]] = $checkLabel
+        $index = $candidateCheckLabels.Count - 1
+        $candidateChecks.Controls.Add($checkLabel, ($index % 2), [Math]::Floor($index / 2))
+    }
+    $candidateCard.Panel.Controls.Add($candidateChecks)
+    $candidateReason = New-UiLabel -Text "Waiting for release state..." -Color $muted
+    $candidateReason.Location = New-Object System.Drawing.Point(16, 210)
+    $candidateReason.Anchor = "Left,Right,Bottom"
+    $candidateReason.Size = New-Object System.Drawing.Size(165, 18)
+    $candidateReason.Font = New-Object System.Drawing.Font("Segoe UI Variable Text", 8)
+    $candidateCard.Panel.Controls.Add($candidateReason)
+
+    $promoteButton = New-UiButton -Text "Promote Candidate" -Kind "Primary" -Width 176
+    $promoteButton.Location = New-Object System.Drawing.Point(16, 235)
+    $promoteButton.Anchor = "Left,Bottom"
     $promoteButton.Enabled = $false
     $promoteButton.Add_Click({
         $state = Get-ReleaseControlState
         if (-not $state -or -not $state.candidate) { return }
-        $message = "Promote exact release?`nGit: $($state.candidate.git_sha)`nCF: $($state.candidate.worker_version_id)`nWindows: $($state.candidate.windows_revision)"
+        $message = "Promote this exact release to Stable?`n`nGit: $($state.candidate.git_sha)`nWorker: $($state.candidate.worker_version_id)`nWindows: $($state.candidate.windows_revision)"
         if ([System.Windows.Forms.MessageBox]::Show(
             $message, "Confirm Promote Candidate", "YesNo", "Warning"
         ) -eq "Yes") { Invoke-GuiOperation -Operation "PromoteCandidate" }
     })
-    $releaseGroup.Controls.Add($promoteButton)
+    $candidateCard.Panel.Controls.Add($promoteButton)
     [void]$actionButtons.Add($promoteButton)
 
-    $reverseButton = New-Object System.Windows.Forms.Button
-    $reverseButton.Text = "Reverse to Previous Stable"
-    $reverseButton.Size = New-Object System.Drawing.Size(160, 38)
-    $reverseButton.Location = New-Object System.Drawing.Point(210, 198)
+    $reverseButton = New-UiButton -Text "Reverse Stable" -Kind "Danger" -Width 150
+    $reverseButton.Location = New-Object System.Drawing.Point(16, 232)
+    $reverseButton.Anchor = "Left,Bottom"
     $reverseButton.Enabled = $false
     $reverseButton.Add_Click({
         $state = Get-ReleaseControlState
         if (-not $state -or -not $state.previous_stable) { return }
-        $message = "Reverse to exact Previous Stable?`nGit: $($state.previous_stable.git_sha)`nCF: $($state.previous_stable.worker_version_id)`nWindows: $($state.previous_stable.windows_revision)"
+        $message = "Reverse Stable to this exact release?`n`nGit: $($state.previous_stable.git_sha)`nWorker: $($state.previous_stable.worker_version_id)`nWindows: $($state.previous_stable.windows_revision)"
         if ([System.Windows.Forms.MessageBox]::Show(
             $message, "Confirm Reverse Stable", "YesNo", "Warning"
         ) -eq "Yes") { Invoke-GuiOperation -Operation "ReverseStable" }
     })
-    $releaseGroup.Controls.Add($reverseButton)
+    $previousCard.Panel.Controls.Add($reverseButton)
     [void]$actionButtons.Add($reverseButton)
+    $reverseReason = New-UiLabel -Text "Waiting for release state..." -Color $muted
+    $reverseReason.Location = New-Object System.Drawing.Point(16, 199)
+    $reverseReason.Anchor = "Left,Right,Bottom"
+    $reverseReason.Size = New-Object System.Drawing.Size(165, 28)
+    $reverseReason.Font = New-Object System.Drawing.Font("Segoe UI Variable Text", 8)
+    $previousCard.Panel.Controls.Add($reverseReason)
 
-    $startAll.Location = New-Object System.Drawing.Point(28, 625)
+    function Update-ReleaseCardLayout {
+        foreach ($card in @($stableCard, $candidateCard, $previousCard)) {
+            $contentWidth = [Math]::Max(120, $card.Panel.ClientSize.Width - 32)
+            $card.Git.Width = $contentWidth
+            $card.Worker.Width = $contentWidth
+            $card.Windows.Width = $contentWidth
+            $card.Detail.Width = $contentWidth
+        }
+        $candidateWidth = [Math]::Max(120, $candidateCard.Panel.ClientSize.Width - 32)
+        $candidateChecks.Width = $candidateWidth
+        $candidateReason.Width = $candidateWidth
+        $previousWidth = [Math]::Max(120, $previousCard.Panel.ClientSize.Width - 32)
+        $reverseReason.Width = $previousWidth
+    }
+    $form.Add_SizeChanged({ Update-ReleaseCardLayout })
+
+    $actionsPanel = New-Object System.Windows.Forms.TableLayoutPanel
+    $actionsPanel.Dock = "Fill"
+    $actionsPanel.ColumnCount = 3
+    $actionsPanel.RowCount = 1
+    $actionsPanel.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 12)
+    [void]$actionsPanel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 36)))
+    [void]$actionsPanel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 30)))
+    [void]$actionsPanel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 34)))
+    $root.Controls.Add($actionsPanel, 0, 3)
+
+    function New-ActionGroup {
+        param([string]$Title)
+        $panel = New-Object System.Windows.Forms.Panel
+        $panel.Dock = "Fill"
+        $panel.BackColor = $surface
+        $panel.BorderStyle = [System.Windows.Forms.BorderStyle]::None
+        $panel.Margin = New-Object System.Windows.Forms.Padding(0, 0, 10, 0)
+        Add-SoftPanelBorder -Panel $panel
+        $label = New-UiLabel -Text $Title -Font (New-Object System.Drawing.Font("Segoe UI Semibold", 9)) -Color $muted
+        $label.Location = New-Object System.Drawing.Point(14, 10)
+        $label.Size = New-Object System.Drawing.Size(230, 22)
+        $flow = New-Object System.Windows.Forms.FlowLayoutPanel
+        $flow.Location = New-Object System.Drawing.Point(14, 43)
+        $flow.Anchor = "Top,Left,Right"
+        $flow.Size = New-Object System.Drawing.Size(170, 82)
+        $flow.WrapContents = $true
+        $panel.Controls.AddRange(@($label, $flow))
+        return [pscustomobject]@{ Panel = $panel; Flow = $flow }
+    }
+    $batchGroup = New-ActionGroup -Title "Batch operations"
+    $toolsGroup = New-ActionGroup -Title "Tools"
+    $systemGroup = New-ActionGroup -Title "System"
+    $actionsPanel.Controls.Add($batchGroup.Panel, 0, 0)
+    $actionsPanel.Controls.Add($toolsGroup.Panel, 1, 0)
+    $systemGroup.Panel.Margin = New-Object System.Windows.Forms.Padding(0)
+    $actionsPanel.Controls.Add($systemGroup.Panel, 2, 0)
+
+    $startAll = New-UiButton -Text "Start All" -Kind "Primary" -Width 100
     $startAll.Add_Click({ Invoke-GuiOperation -Operation "Start" })
-    $form.Controls.Add($startAll)
-    [void]$actionButtons.Add($startAll)
-
-    $restartAll = New-Object System.Windows.Forms.Button
-    $restartAll.Text = "Restart All"
-    $restartAll.Size = New-Object System.Drawing.Size(120, 38)
-    $restartAll.Location = New-Object System.Drawing.Point(158, 625)
+    $restartAll = New-UiButton -Text "Restart All" -Width 105
     $restartAll.Add_Click({ Invoke-GuiOperation -Operation "Restart" })
-    $form.Controls.Add($restartAll)
-    [void]$actionButtons.Add($restartAll)
+    $stopAll = New-UiButton -Text "Stop All" -Kind "Danger" -Width 100
+    $stopAll.Add_Click({
+        if ([System.Windows.Forms.MessageBox]::Show(
+            "Stop every local XAUUSD Forecaster service?", "Confirm Stop All", "YesNo", "Warning"
+        ) -eq "Yes") { Invoke-GuiOperation -Operation "Stop" }
+    })
+    $batchGroup.Flow.Controls.AddRange(@($startAll, $restartAll, $stopAll))
+    foreach ($button in @($startAll, $restartAll, $stopAll)) { [void]$actionButtons.Add($button) }
 
-    $stopAll = New-Object System.Windows.Forms.Button
-    $stopAll.Text = "Stop All"
-    $stopAll.Size = New-Object System.Drawing.Size(120, 38)
-    $stopAll.Location = New-Object System.Drawing.Point(288, 625)
-    $stopAll.Add_Click({ Invoke-GuiOperation -Operation "Stop" })
-    $form.Controls.Add($stopAll)
-    [void]$actionButtons.Add($stopAll)
-
-    $openSite = New-Object System.Windows.Forms.Button
-    $openSite.Text = "Open Dashboard"
-    $openSite.Size = New-Object System.Drawing.Size(130, 38)
-    $openSite.Location = New-Object System.Drawing.Point(418, 625)
+    $openSite = New-UiButton -Text "Open Dashboard" -Width 130
     $openSite.Add_Click({ Start-Process $dashboardUrl })
-    $form.Controls.Add($openSite)
-
-    $openLogs = New-Object System.Windows.Forms.Button
-    $openLogs.Text = "Open Logs"
-    $openLogs.Size = New-Object System.Drawing.Size(110, 38)
-    $openLogs.Location = New-Object System.Drawing.Point(558, 625)
+    $openLogs = New-UiButton -Text "Open Logs" -Width 100
     $openLogs.Add_Click({ Start-Process explorer.exe $logRoot })
-    $form.Controls.Add($openLogs)
+    $refreshButton = New-UiButton -Text "Refresh" -Width 90
+    $toolsGroup.Flow.Controls.AddRange(@($openSite, $openLogs, $refreshButton))
 
-    $autoLabel = New-Object System.Windows.Forms.Label
-    $autoLabel.AutoSize = $true
-    $autoLabel.Location = New-Object System.Drawing.Point(30, 695)
-    $form.Controls.Add($autoLabel)
+    $enableAuto = New-UiButton -Text "Enable Auto-start" -Width 135
+    $enableAuto.Add_Click({ Enable-AutoStart; Request-GuiStatus })
+    $disableAuto = New-UiButton -Text "Disable Auto-start" -Kind "Danger" -Width 138
+    $disableAuto.Add_Click({
+        if ([System.Windows.Forms.MessageBox]::Show(
+            "Disable automatic startup at Windows logon?", "Confirm Disable Auto-start", "YesNo", "Warning"
+        ) -eq "Yes") { Disable-AutoStart; Request-GuiStatus }
+    })
+    $clockButton = New-UiButton -Text "Repair Time (Admin)" -Width 142
+    $clockButton.Add_Click({ Repair-WindowsTime; Request-GuiStatus })
+    $systemGroup.Flow.Controls.AddRange(@($enableAuto, $disableAuto, $clockButton))
 
-    $enableAuto = New-Object System.Windows.Forms.Button
-    $enableAuto.Text = "Enable Auto-start"
-    $enableAuto.Size = New-Object System.Drawing.Size(190, 38)
-    $enableAuto.Location = New-Object System.Drawing.Point(410, 684)
-    $enableAuto.Add_Click({ Enable-AutoStart })
-    $form.Controls.Add($enableAuto)
-
-    $disableAuto = New-Object System.Windows.Forms.Button
-    $disableAuto.Text = "Disable Auto-start"
-    $disableAuto.Size = New-Object System.Drawing.Size(150, 38)
-    $disableAuto.Location = New-Object System.Drawing.Point(610, 684)
-    $disableAuto.Add_Click({ Disable-AutoStart })
-    $form.Controls.Add($disableAuto)
-
-    $refreshButton = New-Object System.Windows.Forms.Button
-    $refreshButton.Text = "Refresh Status"
-    $refreshButton.Size = New-Object System.Drawing.Size(150, 38)
-    $refreshButton.Location = New-Object System.Drawing.Point(30, 740)
-    $form.Controls.Add($refreshButton)
-
-    $clockButton = New-Object System.Windows.Forms.Button
-    $clockButton.Text = "Repair Windows Time (Admin)"
-    $clockButton.Size = New-Object System.Drawing.Size(220, 38)
-    $clockButton.Location = New-Object System.Drawing.Point(195, 740)
-    $clockButton.Add_Click({ Repair-WindowsTime })
-    $form.Controls.Add($clockButton)
-
-    $clockLabel = New-Object System.Windows.Forms.Label
-    $clockLabel.AutoSize = $true
-    $clockLabel.Location = New-Object System.Drawing.Point(430, 751)
-    $form.Controls.Add($clockLabel)
-
-    $operationLabel = New-Object System.Windows.Forms.Label
-    $operationLabel.Text = "Ready"
-    $operationLabel.AutoSize = $true
-    $operationLabel.Location = New-Object System.Drawing.Point(30, 810)
-    $operationLabel.ForeColor = [System.Drawing.Color]::FromArgb(82, 78, 68)
-    $form.Controls.Add($operationLabel)
-
-    $note = New-Object System.Windows.Forms.Label
-    $note.Text = "A powered-off PC cannot collect data. This control center never authorizes trading."
-    $note.AutoSize = $true
-    $note.Location = New-Object System.Drawing.Point(30, 850)
-    $form.Controls.Add($note)
+    $footer = New-Object System.Windows.Forms.Panel
+    $footer.Dock = "Fill"
+    $footer.BackColor = [System.Drawing.Color]::FromArgb(234, 231, 222)
+    $footer.Margin = New-Object System.Windows.Forms.Padding(0)
+    $operationLabel = New-UiLabel -Text "READY" -Font (New-Object System.Drawing.Font("Segoe UI Variable Text", 8.5, [System.Drawing.FontStyle]::Bold))
+    $operationLabel.Location = New-Object System.Drawing.Point(14, 7)
+    $operationLabel.Size = New-Object System.Drawing.Size(520, 22)
+    $systemMetaLabel = New-UiLabel -Text "Windows Time: checking  /  Auto-start: checking  /  Last refresh: --" -Color $muted
+    $systemMetaLabel.Dock = "Right"
+    $systemMetaLabel.Width = 550
+    $systemMetaLabel.Padding = New-Object System.Windows.Forms.Padding(0, 7, 14, 28)
+    $systemMetaLabel.TextAlign = "MiddleRight"
+    $note = New-UiLabel -Text "A powered-off PC cannot collect data. This control center never authorizes trading." -Color $muted
+    $note.Location = New-Object System.Drawing.Point(14, 30)
+    $note.Size = New-Object System.Drawing.Size(720, 20)
+    $footer.Controls.AddRange(@($operationLabel, $systemMetaLabel, $note))
+    $root.Controls.Add($footer, 0, 4)
 
     $script:guiOperation = $null
     $script:guiOperationName = ""
+    $script:lastGuiSnapshot = $null
     function Set-GuiBusy {
         param([bool]$Busy, [string]$Message)
         foreach ($button in $actionButtons) { $button.Enabled = -not $Busy }
         $refreshButton.Enabled = -not $Busy
-        $operationLabel.Text = $Message
+        $operationLabel.Text = $Message.ToUpperInvariant()
+        $operationLabel.ForeColor = if ($Busy) { $amber } else { $ink }
         $form.UseWaitCursor = $Busy
+        if (-not $Busy -and $script:lastGuiSnapshot) { Apply-GuiStatus $script:lastGuiSnapshot }
     }
     function Invoke-GuiOperation {
         param([string]$Operation, [string]$TargetKey = "")
@@ -2781,56 +3232,109 @@ function Show-ControlCenter {
     $script:lastStatusRequest = [DateTime]::MinValue
     function Apply-GuiStatus {
         param([pscustomobject]$Snapshot)
+        $script:lastGuiSnapshot = $Snapshot
         foreach ($row in @($Snapshot.services)) {
             $label = $statusLabels[$row.Key]
-            $label.Text = $row.State
-            $label.ForeColor = if ($row.State -in @("RUNNING", "LIVE", "MARKET CLOSED", "API OK", "SYNC OK")) {
-                [System.Drawing.Color]::FromArgb(52, 105, 38)
-            } elseif ($row.State -eq "SYNC DEGRADED") {
-                [System.Drawing.Color]::FromArgb(170, 105, 0)
-            } else {
-                [System.Drawing.Color]::FromArgb(190, 45, 36)
-            }
+            if ($label) { Set-StatusBadge -Label $label -State ([string]$row.State) }
         }
-        $autoLabel.Text = if ($Snapshot.auto_start) {
-            "Auto-start: enabled at Windows logon"
-        } else {
-            "Auto-start: disabled"
-        }
-        $clockLabel.Text = if ($Snapshot.windows_time_running) {
-            "Windows Time: RUNNING"
-        } else {
-            "Windows Time: STOPPED"
-        }
-        $clockLabel.ForeColor = if ($Snapshot.windows_time_running) {
-            [System.Drawing.Color]::FromArgb(52, 105, 38)
-        } else {
-            [System.Drawing.Color]::FromArgb(190, 45, 36)
-        }
+        $summary = Get-ControlCenterSummaryPresentation -Snapshot $Snapshot
+        Set-StatusBadge -Label $overallSummary.Value -State $summary.overall
+        Set-StatusBadge -Label $runtimeSummary.Value -State $summary.local_runtime
+        Set-StatusBadge -Label $candidateSummary.Value -State $summary.candidate_state
         $release = $Snapshot.release
         if ($release -and $release.stable) {
-            $stableReleaseLabel.Text = "Stable  Git $($release.stable.git_sha)`nCF $($release.stable.worker_version_id)  Windows $($release.stable.windows_revision)  $($release.deployment_status)"
-            $candidateReleaseLabel.Text = if ($release.candidate) {
-                "Candidate  Git $($release.candidate.git_sha)`nCF $($release.candidate.worker_version_id)  Windows $($release.candidate.windows_revision)  $($release.candidate.validation_state)"
-            } else { "Candidate: none" }
-            $previousReleaseLabel.Text = if ($release.previous_stable) {
-                "Previous Stable  Git $($release.previous_stable.git_sha)`nCF $($release.previous_stable.worker_version_id)  Windows $($release.previous_stable.windows_revision)"
-            } else { "Previous Stable: none" }
-            $promoteButton.Enabled = [bool](
-                -not $release.transaction -and $release.deployment_status -eq "READY" -and
-                $release.candidate -and $release.candidate.validation_state -eq "PASSED"
-            )
-            $reverseButton.Enabled = [bool](
-                -not $release.transaction -and $release.deployment_status -eq "READY" -and
-                $release.previous_stable
-            )
+            $stableShort = Get-ShortIdentity $release.stable.git_sha
+            $stableSummary.Value.Text = "  $stableShort  "
+            $stableSummary.Value.ForeColor = [System.Drawing.Color]::White
+            $stableSummary.Value.BackColor = $accent
+            Set-StatusBadge -Label $stableCard.Badge -State ([string]$release.deployment_status)
+            $stableCard.Git.Text = "Git       $(Get-ShortIdentity $release.stable.git_sha)"
+            $stableCard.Worker.Text = "Worker    $(Get-ShortIdentity $release.stable.worker_version_id)"
+            $stableCard.Windows.Text = "Windows   $(Get-ShortIdentity $release.stable.windows_revision)"
+            $stableCard.Detail.Text = "Authoritative production release."
+
+            $releaseView = Get-ControlCenterReleasePresentation -Release $release
+            if ($release.candidate) {
+                Set-StatusBadge -Label $candidateCard.Badge -State $releaseView.candidate_state
+                $candidateCard.Git.Text = "Git       $(Get-ShortIdentity $release.candidate.git_sha)"
+                $candidateCard.Worker.Text = "Worker    $(Get-ShortIdentity $release.candidate.worker_version_id)"
+                $candidateCard.Windows.Text = "Windows   $(Get-ShortIdentity $release.candidate.windows_revision)"
+                $candidateCard.Detail.Text = $releaseView.candidate_detail
+                $validation = $release.candidate.validation
+                $windowsCheck = if ($validation -and $validation.windows) { [string]$validation.windows } else { "WAITING" }
+                $contractCheck = if ($validation -and $validation.cloudflare) { [string]$validation.cloudflare } else { "WAITING" }
+                $cpuCheck = "WAITING"
+                $limitCheck = "WAITING"
+                if ($validation -and $validation.cpu_evidence -eq "NOT_REQUIRED") {
+                    $cpuCheck = "NOT REQUIRED"
+                    $limitCheck = "NOT REQUIRED"
+                } elseif ($validation -and $validation.cpu_evidence) {
+                    $cpuCheck = if ($validation.cpu_evidence.passed) { "PASSED" } else { "FAILED" }
+                    $limitCheck = if (
+                        [int]$validation.cpu_evidence.responses_5xx -eq 0 -and
+                        [int]$validation.cpu_evidence.exceeded_cpu -eq 0
+                    ) { "PASSED" } else { "FAILED" }
+                }
+                $candidateCheckLabels.windows.Text = "Runtime + heartbeat: $windowsCheck"
+                $candidateCheckLabels.contracts.Text = "API routes: $contractCheck"
+                $candidateCheckLabels.cpu.Text = "CPU headroom: $cpuCheck"
+                $candidateCheckLabels.limits.Text = "5xx + 1102: $limitCheck"
+            } else {
+                Set-StatusBadge -Label $candidateCard.Badge -State "UNAVAILABLE"
+                $candidateCard.Git.Text = "Git       --"
+                $candidateCard.Worker.Text = "Worker    --"
+                $candidateCard.Windows.Text = "Windows   --"
+                $candidateCard.Detail.Text = "No immutable candidate has been discovered."
+                foreach ($label in $candidateCheckLabels.Values) { $label.Text = "Not available" }
+            }
+            $candidateReason.Text = $releaseView.promote_reason
+            $promoteButton.Enabled = $releaseView.can_promote
+            $promoteButton.BackColor = if ($releaseView.can_promote) { $accent } else { $grayWash }
+            $promoteButton.ForeColor = if ($releaseView.can_promote) { [System.Drawing.Color]::White } else { $gray }
+            $promoteButton.FlatAppearance.BorderColor = if ($releaseView.can_promote) { $accent } else { $line }
+            $toolTip.SetToolTip($promoteButton, $releaseView.promote_reason)
+
+            if ($release.previous_stable) {
+                Set-StatusBadge -Label $previousCard.Badge -State "AVAILABLE"
+                $previousCard.Git.Text = "Git       $(Get-ShortIdentity $release.previous_stable.git_sha)"
+                $previousCard.Worker.Text = "Worker    $(Get-ShortIdentity $release.previous_stable.worker_version_id)"
+                $previousCard.Windows.Text = "Windows   $(Get-ShortIdentity $release.previous_stable.windows_revision)"
+                $previousCard.Detail.Text = "Reverse restores this exact Worker and Windows pair."
+            } else {
+                Set-StatusBadge -Label $previousCard.Badge -State "UNAVAILABLE"
+                $previousCard.Git.Text = "Git       --"
+                $previousCard.Worker.Text = "Worker    --"
+                $previousCard.Windows.Text = "Windows   --"
+                $previousCard.Detail.Text = "A Previous Stable appears after the first completed promotion."
+            }
+            $reverseButton.Enabled = $releaseView.can_reverse
+            $reverseReason.Text = $releaseView.reverse_reason
+            $toolTip.SetToolTip($reverseButton, $releaseView.reverse_reason)
         } else {
-            $stableReleaseLabel.Text = "Stable: release control not bootstrapped"
-            $candidateReleaseLabel.Text = "Candidate: unavailable"
-            $previousReleaseLabel.Text = "Previous Stable: unavailable"
+            $stableSummary.Value.Text = "  UNAVAILABLE  "
+            Set-StatusBadge -Label $stableCard.Badge -State "UNAVAILABLE"
+            Set-StatusBadge -Label $candidateCard.Badge -State "UNAVAILABLE"
+            Set-StatusBadge -Label $previousCard.Badge -State "UNAVAILABLE"
+            $stableCard.Detail.Text = "Release control has not been bootstrapped."
+            $candidateCard.Detail.Text = "Candidate validation is unavailable."
+            $previousCard.Detail.Text = "No rollback identity is available."
+            $candidateReason.Text = "Not bootstrapped"
+            $reverseReason.Text = "Not bootstrapped"
+            $candidateCheckLabels.windows.Text = "Runtime + heartbeat: unavailable"
+            $candidateCheckLabels.contracts.Text = "API routes: unavailable"
+            $candidateCheckLabels.cpu.Text = "CPU headroom: unavailable"
+            $candidateCheckLabels.limits.Text = "5xx + 1102: unavailable"
             $promoteButton.Enabled = $false
+            $promoteButton.BackColor = $grayWash
+            $promoteButton.ForeColor = $gray
+            $promoteButton.FlatAppearance.BorderColor = $line
             $reverseButton.Enabled = $false
+            $toolTip.SetToolTip($promoteButton, "Release control not bootstrapped")
+            $toolTip.SetToolTip($reverseButton, "Release control not bootstrapped")
         }
+        $autoState = if ($Snapshot.auto_start) { "ENABLED" } else { "DISABLED" }
+        $clockState = if ($Snapshot.windows_time_running) { "RUNNING" } else { "ISSUE" }
+        $systemMetaLabel.Text = "Windows Time: $clockState  /  Auto-start: $autoState  /  Last refresh: $($summary.last_refresh)"
     }
     function Request-GuiStatus {
         if ($script:statusRefreshProcess -and -not $script:statusRefreshProcess.HasExited) { return }
@@ -2892,6 +3396,7 @@ function Show-ControlCenter {
     })
     $activationTimer.Start()
     $form.Add_Shown({
+        Update-ReleaseCardLayout
         $form.Activate()
         $form.TopMost = $true
         $form.TopMost = $false

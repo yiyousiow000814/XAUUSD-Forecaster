@@ -1284,14 +1284,76 @@ def test_storage_migration_requires_coordinated_compatibility_review(tmp_path) -
 def test_release_gui_exposes_only_explicit_stable_candidate_controls() -> None:
     source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
 
-    assert '"Stable  Git $($release.stable.git_sha)' in source
-    assert '"Candidate  Git $($release.candidate.git_sha)' in source
-    assert '"Previous Stable  Git $($release.previous_stable.git_sha)' in source
-    assert '$promoteButton.Text = "Promote Candidate"' in source
-    assert '$reverseButton.Text = "Reverse to Previous Stable"' in source
+    assert 'New-ReleaseCard -Title "Stable"' in source
+    assert 'New-ReleaseCard -Title "Release Candidate" -Emphasized $true' in source
+    assert 'New-ReleaseCard -Title "Previous Stable"' in source
+    assert 'New-UiButton -Text "Promote Candidate"' in source
+    assert 'New-UiButton -Text "Reverse Stable"' in source
+    assert 'Git: $($state.candidate.git_sha)' in source
+    assert 'Worker: $($state.candidate.worker_version_id)' in source
+    assert 'Windows: $($state.candidate.windows_revision)' in source
+    assert 'Git: $($state.previous_stable.git_sha)' in source
+    assert 'Worker: $($state.previous_stable.worker_version_id)' in source
+    assert 'Windows: $($state.previous_stable.windows_revision)' in source
     assert "CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN" not in source.split(
         "function Show-ControlCenter", 1,
     )[1]
+
+
+def test_release_gui_presentation_explains_action_eligibility(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$stable=New-ReleaseIdentity -GitSha ('a'*40) -WorkerVersionId 'stable-worker' "
+        "-WindowsRevision ('a'*40);"
+        "$candidate=New-ReleaseIdentity -GitSha ('b'*40) -WorkerVersionId 'candidate-worker' "
+        "-WindowsRevision ('b'*40) -ValidationState 'PASSED';"
+        "$release=New-ReleaseControlState -Stable $stable -Candidate $candidate;"
+        "$release.previous_stable=New-ReleaseIdentity -GitSha ('c'*40) "
+        "-WorkerVersionId 'previous-worker' -WindowsRevision ('c'*40);"
+        "$passed=Get-ControlCenterReleasePresentation $release;"
+        "$release.candidate.validation_state='FAILED';"
+        "$release.candidate.validation=[pscustomobject]@{error='Worker CPU evidence failed'};"
+        "$failed=Get-ControlCenterReleasePresentation $release;"
+        "$release.transaction=[pscustomobject]@{type='PROMOTE'};"
+        "$busy=Get-ControlCenterReleasePresentation $release;"
+        "$missing=Get-ControlCenterReleasePresentation $null;"
+        "@($passed,$failed,$busy,$missing) | ConvertTo-Json -Compress",
+    )
+
+    passed, failed, busy, missing = json.loads(result)
+    assert passed["can_promote"] is True
+    assert passed["can_reverse"] is True
+    assert passed["promote_reason"] == "Ready to promote"
+    assert failed["can_promote"] is False
+    assert failed["candidate_detail"] == "Worker CPU evidence failed"
+    assert failed["promote_reason"] == "Candidate failed validation"
+    assert busy["can_promote"] is False
+    assert busy["can_reverse"] is False
+    assert busy["promote_reason"] == "A release transaction is already in progress"
+    assert missing["candidate_state"] == "UNAVAILABLE"
+    assert missing["promote_reason"] == "Not bootstrapped"
+
+
+def test_control_center_summary_separates_runtime_health_from_candidate_state(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$stable=New-ReleaseIdentity -GitSha ('a'*40) -WorkerVersionId 'stable-worker' "
+        "-WindowsRevision ('a'*40);"
+        "$candidate=New-ReleaseIdentity -GitSha ('b'*40) -WorkerVersionId 'candidate-worker' "
+        "-WindowsRevision ('b'*40) -ValidationState 'TESTING';"
+        "$release=New-ReleaseControlState -Stable $stable -Candidate $candidate;"
+        "$snapshot=[pscustomobject]@{captured_at='2026-08-20T12:00:00+08:00';release=$release;"
+        "services=@([pscustomobject]@{State='RUNNING'},[pscustomobject]@{State='STOPPED'})};"
+        "Get-ControlCenterSummaryPresentation $snapshot | ConvertTo-Json -Compress",
+    )
+
+    summary = json.loads(result)
+    assert summary["overall"] == "DEGRADED"
+    assert summary["local_runtime"] == "PARTIAL"
+    assert summary["candidate_state"] == "TESTING"
+    assert summary["last_refresh"] == "12:00:00"
 
 
 def test_code_reload_health_requires_fresh_successful_sync(tmp_path) -> None:
