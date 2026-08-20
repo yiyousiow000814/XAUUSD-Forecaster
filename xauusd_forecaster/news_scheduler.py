@@ -693,6 +693,7 @@ def rolling_account_usage(
     account_clause = "" if share_across_accounts else "AND account_id=?"
     parameters: tuple[object, ...] = (
         _iso(now - timedelta(seconds=60)),
+        _iso(now),
         *((account_id,) if not share_across_accounts else ()),
         *families,
     )
@@ -700,7 +701,7 @@ def rolling_account_usage(
         f"""SELECT COALESCE(sum(request_count),0) AS requests,
                    COALESCE(sum({EFFECTIVE_INPUT_TOKENS_SQL}),0) AS tokens
             FROM news_ai_account_request_usage_v1
-            WHERE reserved_at>? {account_clause}
+            WHERE reserved_at>? AND reserved_at<=? {account_clause}
               AND model_family IN ({placeholders})""",
         parameters,
     ).fetchone()
