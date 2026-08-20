@@ -80,6 +80,11 @@ EMBEDDING_PREREQUISITE_FAILURE_CODES = frozenset({
     "NEWS_EMBEDDING_BACKFILL_PENDING",
     *GEMINI_EMBEDDING_FAILURE_CODES,
 })
+MAINTENANCE_DEFERRAL_CODES = frozenset({
+    *EMBEDDING_PREREQUISITE_FAILURE_CODES,
+    "PROVIDER_DISPATCH_DEFERRED",
+    "BACKFILL_BUDGET_DEFERRED",
+})
 
 
 def write_heartbeat(
@@ -189,7 +194,7 @@ def _execute_job(
         )[0]
         if (
             status.get("status") == "DEFERRED"
-            and status.get("failure_code") != "BACKFILL_BUDGET_DEFERRED"
+            and status.get("failure_code") not in MAINTENANCE_DEFERRAL_CODES
         ):
             status = annotate_pending_news(
                 **common,
@@ -306,11 +311,7 @@ def _credentials_for_job(
 
 
 def _may_try_another_credential(status: dict[str, object]) -> bool:
-    if status.get("failure_code") in {
-        *EMBEDDING_PREREQUISITE_FAILURE_CODES,
-        "PROVIDER_DISPATCH_DEFERRED",
-        "BACKFILL_BUDGET_DEFERRED",
-    }:
+    if status.get("failure_code") in MAINTENANCE_DEFERRAL_CODES:
         return False
     if status.get("retry_with_another_account"):
         return True
@@ -420,11 +421,9 @@ def _run_scheduled_lane(
             status = _with_scheduler_failure_code(_execute_job_safely(
                 ledger, credential, job, now=attempted_at,
             ))
-            maintenance_deferred = status.get("failure_code") in {
-                *EMBEDDING_PREREQUISITE_FAILURE_CODES,
-                "PROVIDER_DISPATCH_DEFERRED",
-                "BACKFILL_BUDGET_DEFERRED",
-            }
+            maintenance_deferred = (
+                status.get("failure_code") in MAINTENANCE_DEFERRAL_CODES
+            )
             if not maintenance_deferred:
                 record_job_attempt(
                     ledger.connection,
@@ -462,11 +461,7 @@ def _run_scheduled_lane(
                     available_at=outcome_at + timedelta(minutes=1),
                     error="CURRENT_EVIDENCE_NOT_AVAILABLE",
                 )
-        elif status.get("failure_code") in {
-            *EMBEDDING_PREREQUISITE_FAILURE_CODES,
-            "PROVIDER_DISPATCH_DEFERRED",
-            "BACKFILL_BUDGET_DEFERRED",
-        }:
+        elif status.get("failure_code") in MAINTENANCE_DEFERRAL_CODES:
             retry_at = _next_retry(status, outcome_at)
             record_scheduler_deferral(
                 ledger.connection,
