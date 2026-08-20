@@ -11,6 +11,7 @@ from .annotation import (
     SUPPORTED_GEMINI_MODELS,
     pending_annotation_records,
 )
+from .critical_annotation_state import RETIRED_ERROR
 from .forward_ledger import canonical_hash
 from .news import NEWS_INTAKE_MAX_AGE
 from .news_evidence import annotation_is_actionable_candidate
@@ -19,6 +20,7 @@ from .news_relevance import google_news_item_is_relevant
 from .news_identity import preferred_cluster_peer_predicate
 from .news_scheduler import (
     LIVE_LANE,
+    WORK_PROVENANCE_VERSION,
     configured_api_credentials,
     resolve_work_provenance,
 )
@@ -370,7 +372,9 @@ def news_semantic_pipeline_health_at(
     This historical path deliberately excludes the mutable annotator heartbeat,
     current credentials, and the job table's latest state.  Job creation,
     append-only attempts, and immutable semantic outputs are the only scheduler
-    evidence that can be replayed without applying later state backwards.
+    evidence that can be replayed without applying later state backwards. The
+    authoritative provenance classification selects operational membership;
+    it is classification metadata, not later execution evidence.
     """
     from .operational_health import TASK_QUEUE_SLA
 
@@ -392,12 +396,15 @@ def news_semantic_pipeline_health_at(
 
     jobs = ledger.connection.execute(
         """SELECT job_id,task_type,source,source_item_id,revision_number,
-                  annotation_id,prompt_version,created_at
+                  annotation_id,prompt_version,created_at,last_error,completed_at
            FROM news_ai_jobs_v1
            WHERE task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT')
+             AND work_lane=? AND lane_classified=1
+             AND (task_type='ACTIVE_ANNOTATION' OR
+                  (provenance_resolved=1 AND provenance_version=?))
              AND created_at>=? AND created_at<=?
            ORDER BY created_at,job_id""",
-        (intake_floor, query_cutoff),
+        (LIVE_LANE, WORK_PROVENANCE_VERSION, intake_floor, query_cutoff),
     ).fetchall()
     unresolved: list[tuple[str, datetime]] = []
     operational_reason_counts: dict[str, int] = {}
@@ -441,8 +448,16 @@ def news_semantic_pipeline_health_at(
             (row["job_id"], query_cutoff),
         ).fetchone()
         deferral_values = dict(deferral) if deferral is not None else None
+        retired_at = _instant(row["completed_at"])
+        retired = bool(
+            str(row["last_error"] or "") == RETIRED_ERROR
+            and retired_at is not None
+            and retired_at <= observed_at
+        )
         evidence.append((
             row["job_id"], task_type, row["created_at"], completed,
+            RETIRED_ERROR if retired else None,
+            retired_at.isoformat() if retired and retired_at else None,
             *(
                 (
                     attempt_values["attempt_number"], attempt_values["outcome"],
@@ -461,7 +476,7 @@ def news_semantic_pipeline_health_at(
                 if deferral_values is not None else (None,) * 3
             ),
         ))
-        if completed is not None:
+        if completed is not None or retired:
             continue
 
         created_at = _instant(row["created_at"])
