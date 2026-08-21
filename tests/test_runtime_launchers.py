@@ -564,18 +564,20 @@ def test_release_data_parity_is_exact_versioned_and_fail_closed(tmp_path) -> Non
         "$stable=[pscustomobject]@{worker_version_id='stable'};"
         "$candidate=[pscustomobject]@{worker_version_id='candidate'};"
         "function Invoke-ExactVersionJson { param($VersionId,$Path);"
-        "if($Path -eq '/api/status'){return [pscustomobject]@{generated_at='t';"
-        "forward_epoch='e';counts=[pscustomobject]@{decisions=1};latest=$null;training=$null}};"
-        "return [pscustomobject]@{generated_at='t'} };"
+        "$payload=if($Path -eq '/api/status'){[pscustomobject]@{generated_at='t';"
+        "forward_epoch='e';counts=[pscustomobject]@{decisions=1};latest=$null;training=$null}}"
+        "else{[pscustomobject]@{generated_at='t'}};return [pscustomobject]@{payload=$payload;"
+        "observed_version_id=$VersionId} };"
         "$first=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
         "function Invoke-ExactVersionJson { param($VersionId,$Path);"
-        "if($Path -eq '/api/status'){return [pscustomobject]@{generated_at='t';"
-        "forward_epoch='e';counts=[pscustomobject]@{decisions=$(if($VersionId -eq 'candidate'){2}else{1})};latest=$null;training=$null}};"
-        "return [pscustomobject]@{generated_at='t'} };"
+        "$payload=if($Path -eq '/api/status'){[pscustomobject]@{generated_at='t';"
+        "forward_epoch='e';counts=[pscustomobject]@{decisions=$(if($VersionId -eq 'candidate'){2}else{1})};latest=$null;training=$null}}"
+        "else{[pscustomobject]@{generated_at='t'}};return [pscustomobject]@{payload=$payload;"
+        "observed_version_id=$VersionId} };"
         "$second=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
         'Write-Output "$($first.passed),$($second.passed),$($second.routes[0].reason)"',
     )
-    assert result == "True,False,SEMANTIC_DATA_MISMATCH"
+    assert result == "True,False,CANDIDATE_DATA_PARITY_FAILED"
 
 
 def test_wpf_shell_is_bundled_with_winforms_fallback_and_release_controls() -> None:
@@ -586,12 +588,16 @@ def test_wpf_shell_is_bundled_with_winforms_fallback_and_release_controls() -> N
     for name in (
         "ServiceList", "StableIdentity", "CandidateIdentity", "PreviousIdentity",
         "PromoteButton", "ReverseButton", "StartButton", "StopButton",
+        "CandidateChecks", "OpenStableButton", "OpenCandidateButton",
+        "ApproveCompatibilityButton", "CandidateTechnicalEvidence",
     ):
         assert name in serialized
     source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
     assert "function Show-WpfControlCenter" in source
     assert "if (Show-WpfControlCenter)" in source
     assert "using WinForms fallback" in source
+    assert 'Invoke-WpfOperation ([string]$button.CommandParameter)' in source
+    assert 'Get-ControlCenterReleasePresentation -Release $release' in source
 
 
 def test_business_switch_ignores_control_copy_failure_hook(

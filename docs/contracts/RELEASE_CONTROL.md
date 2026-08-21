@@ -59,6 +59,13 @@ not the Cloudflare Access boundary and is recorded as
 the protected production hostname proves the boundary. Validation never
 simulates or claims a successful human login.
 
+Every parity receipt records the Worker version observed in response headers.
+Generated-at serialization differences are ignored, while status/quote and
+decision cadence, audit transitions, and unexpectedly empty learning/market
+datasets fail with machine-readable route reasons. The Candidate browser page
+labels its versioned `workers.dev` surface as unprotected, removes the login
+action, and directs operators to validate login only at the formal Access host.
+
 The local graphical shell is presentation only. WPF/XAML is the normal Windows
 surface and the XAML file participates in the exact revision/hash control
 bundle; WinForms remains a compatibility fallback. Both invoke the same

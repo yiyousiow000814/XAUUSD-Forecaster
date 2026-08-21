@@ -1307,7 +1307,13 @@ function Invoke-ExactVersionJson {
     if ([int]$response.StatusCode -ne 200) {
         throw "Exact-version read $Path returned $([int]$response.StatusCode)."
     }
-    return $response.Content | ConvertFrom-Json
+    return [pscustomobject]@{
+        payload = $response.Content | ConvertFrom-Json
+        requested_version_id = $VersionId
+        observed_version_id = [string]$response.Headers["X-Aurum-Worker-Version"]
+        observed_git_sha = [string]$response.Headers["X-Aurum-Git-SHA"]
+        server_timing = [string]$response.Headers["Server-Timing"]
+    }
 }
 
 function ConvertTo-ReleaseSemanticProjection {
@@ -1355,28 +1361,83 @@ function Test-CandidateDataParity {
     $results = @()
     foreach ($path in $routes) {
         try {
-            $stablePayload = Invoke-ExactVersionJson `
+            $stableRead = Invoke-ExactVersionJson `
                 -VersionId ([string]$Stable.worker_version_id) -Path $path
-            $candidatePayload = Invoke-ExactVersionJson `
+            $candidateRead = Invoke-ExactVersionJson `
                 -VersionId ([string]$Candidate.worker_version_id) -Path $path
-            $stableJson = ConvertTo-ReleaseSemanticProjection -Path $path `
-                -Payload $stablePayload | ConvertTo-Json -Depth 30 -Compress
-            $candidateJson = ConvertTo-ReleaseSemanticProjection -Path $path `
-                -Payload $candidatePayload | ConvertTo-Json -Depth 30 -Compress
+            if ([string]$stableRead.observed_version_id -ne [string]$Stable.worker_version_id -or
+                [string]$candidateRead.observed_version_id -ne [string]$Candidate.worker_version_id) {
+                throw "EXACT_VERSION_IDENTITY_MISMATCH"
+            }
+            $stablePayload = $stableRead.payload
+            $candidatePayload = $candidateRead.payload
+            $stableProjection = ConvertTo-ReleaseSemanticProjection -Path $path `
+                -Payload $stablePayload
+            $candidateProjection = ConvertTo-ReleaseSemanticProjection -Path $path `
+                -Payload $candidatePayload
+            # Snapshot publication is asynchronous. Compare authoritative data,
+            # not generated_at byte equality, and admit only one normal cadence
+            # of lag for the decision surface.
+            $stableProjection.generated_at = $null
+            $candidateProjection.generated_at = $null
+            $stableJson = $stableProjection | ConvertTo-Json -Depth 30 -Compress
+            $candidateJson = $candidateProjection | ConvertTo-Json -Depth 30 -Compress
+            $passed = [bool]($stableJson -ceq $candidateJson)
+            $reason = if ($passed) { "PASSED" } else { "CANDIDATE_DATA_PARITY_FAILED" }
+            if ($path -eq "/api/status") {
+                try {
+                    $stableTime = [DateTimeOffset]::Parse([string]$stablePayload.generated_at)
+                    $candidateTime = [DateTimeOffset]::Parse([string]$candidatePayload.generated_at)
+                    if (($stableTime - $candidateTime).TotalSeconds -gt 420) {
+                        $passed = $false; $reason = "CANDIDATE_STATUS_STALE"
+                    }
+                    $stableDecision = [DateTimeOffset]::Parse(
+                        [string]$stablePayload.latest.decision.decision_time
+                    )
+                    $candidateDecision = [DateTimeOffset]::Parse(
+                        [string]$candidatePayload.latest.decision.decision_time
+                    )
+                    if (($stableDecision - $candidateDecision).TotalSeconds -gt 420) {
+                        $passed = $false; $reason = "CANDIDATE_DECISION_BEHIND_STABLE"
+                    }
+                    $candidateQuote = [DateTimeOffset]::Parse(
+                        [string]$candidatePayload.latest.quote.observed_at
+                    )
+                    if (($candidateTime - $candidateQuote).TotalSeconds -gt 75) {
+                        $passed = $false; $reason = "CANDIDATE_QUOTE_STALE"
+                    }
+                } catch { }
+            }
+            if ($path -eq "/api/audit" -and -not $passed) {
+                $reason = "CANDIDATE_AUDIT_TRANSITION_STALE"
+            }
+            if ($path -in @("/api/learning", "/api/market-chart")) {
+                $stableItems = @($stablePayload.learning_curves) + @($stablePayload.decisions)
+                $candidateItems = @($candidatePayload.learning_curves) + @($candidatePayload.decisions)
+                if ($stableItems.Count -gt 0 -and $candidateItems.Count -eq 0) {
+                    $passed = $false; $reason = "CANDIDATE_DATASET_UNEXPECTEDLY_EMPTY"
+                }
+            }
             $results += [pscustomobject]@{
-                route = $path; passed = [bool]($stableJson -ceq $candidateJson)
-                reason = if ($stableJson -ceq $candidateJson) { "MATCH" } `
-                    else { "SEMANTIC_DATA_MISMATCH" }
+                route = $path; state = if ($passed) { "PASSED" } else { "FAILED" }
+                passed = $passed; reason = $reason
+                stable_version_id = [string]$stableRead.observed_version_id
+                candidate_version_id = [string]$candidateRead.observed_version_id
             }
         } catch {
             $results += [pscustomobject]@{
-                route = $path; passed = $false
-                reason = "EXACT_VERSION_READ_FAILED"
+                route = $path; state = "FAILED"; passed = $false
+                reason = if ($_.Exception.Message -eq "EXACT_VERSION_IDENTITY_MISMATCH") {
+                    "EXACT_VERSION_IDENTITY_MISMATCH"
+                } else { "EXACT_VERSION_READ_FAILED" }
                 error = Protect-PreflightDiagnosticText $_.Exception.Message
             }
         }
     }
     return [pscustomobject]@{
+        state = if (@($results | Where-Object { -not $_.passed }).Count -eq 0) {
+            "PASSED"
+        } else { "FAILED" }
         passed = [bool](@($results | Where-Object { -not $_.passed }).Count -eq 0)
         stable_version_id = [string]$Stable.worker_version_id
         candidate_version_id = [string]$Candidate.worker_version_id
@@ -3839,20 +3900,21 @@ function Show-WpfControlCenter {
             $windows = if ($Release.windows_revision) { ([string]$Release.windows_revision).Substring(0, [Math]::Min(12, ([string]$Release.windows_revision).Length)) } else { "--" }
             return "Git       $git`nWorker    $worker`nWindows   $windows"
         }
-        function Invoke-WpfOperation([string]$Operation) {
+        function Invoke-WpfOperation([string]$Operation, [string]$ServiceKey = "") {
             $arguments = @(
                 "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
                 "-File", ('"{0}"' -f $PSCommandPath), "-Action", $Operation,
                 "-RuntimeRoot", ('"{0}"' -f $moduleRoot),
                 "-RepositoryRoot", ('"{0}"' -f $repositoryRoot)
             )
+            if ($ServiceKey) { $arguments += @("-ServiceKey", $ServiceKey) }
             Start-Process -FilePath "powershell.exe" -ArgumentList $arguments `
                 -WorkingDirectory $moduleRoot -WindowStyle Hidden | Out-Null
         }
         function Refresh-WpfStatus {
             $status = @(Get-ForecasterStatus)
             (Find-WpfControl "ServiceList").ItemsSource = @($status | ForEach-Object {
-                [pscustomobject]@{ Name = $_.Name; State = $_.State }
+                [pscustomobject]@{ Key = $_.Key; Name = $_.Component; State = $_.State }
             })
             $bad = @($status | Where-Object { $_.State -match "STOPPED|ERROR|STALE|OFFLINE" }).Count
             (Find-WpfControl "OverallState").Text = if ($bad) { "DEGRADED" } else { "HEALTHY" }
@@ -3868,10 +3930,24 @@ function Show-WpfControlCenter {
                 else { "Validation evidence is available." }
             } else { "Candidate validation is unavailable." }
             (Find-WpfControl "CandidateReason").Text = $reason
-            (Find-WpfControl "PromoteButton").IsEnabled = [bool](
-                $release -and $release.candidate -and
-                [string]$release.candidate.validation_state -eq "PASSED"
-            )
+            $releaseView = Get-ControlCenterReleasePresentation -Release $release
+            $validation = if ($release -and $release.candidate) {
+                $release.candidate.validation
+            } else { $null }
+            (Find-WpfControl "CandidateChecks").Text = @(
+                "Repository: $([string]$(if ($validation) { $validation.repository } else { 'unavailable' }))"
+                "Windows: $([string]$(if ($validation) { $validation.windows } else { 'unavailable' }))"
+                "Cloudflare: $([string]$(if ($validation) { $validation.cloudflare } else { 'unavailable' }))"
+                "Data parity: $([string]$(if ($validation -and $validation.data_parity) { $validation.data_parity.state } else { 'unavailable' }))"
+                "CPU / 5xx: $([string]$(if ($validation -and $validation.cpu_evidence) { $validation.cpu_evidence.gate_state } else { 'unavailable' }))"
+                "Access boundary: formal-host only"
+            ) -join "`n"
+            (Find-WpfControl "CandidateTechnicalEvidence").Text = if ($release -and $release.candidate) {
+                "validation key: $($release.candidate.validation_key)`nbrowser: $($release.candidate.browser_url)`nreason: $reason"
+            } else { "No exact-version evidence loaded." }
+            (Find-WpfControl "PromoteButton").IsEnabled = [bool]$releaseView.can_promote
+            (Find-WpfControl "ApproveCompatibilityButton").IsEnabled = [bool]$releaseView.can_approve_compatibility
+            (Find-WpfControl "OpenCandidateButton").IsEnabled = [bool]($release -and $release.candidate -and $release.candidate.browser_url)
             (Find-WpfControl "PreviousState").Text = if ($release -and $release.previous_stable) { "AVAILABLE" } else { "UNAVAILABLE" }
             (Find-WpfControl "PreviousIdentity").Text = Format-WpfIdentity $release.previous_stable
             (Find-WpfControl "ReverseButton").IsEnabled = [bool]($release -and $release.previous_stable)
@@ -3883,6 +3959,29 @@ function Show-WpfControlCenter {
         (Find-WpfControl "StopButton").Add_Click({ Invoke-WpfOperation "Stop" })
         (Find-WpfControl "DashboardButton").Add_Click({ Start-Process $dashboardUrl })
         (Find-WpfControl "LogsButton").Add_Click({ Start-Process explorer.exe $logRoot })
+        (Find-WpfControl "OpenStableButton").Add_Click({ Start-Process $dashboardUrl })
+        (Find-WpfControl "OpenCandidateButton").Add_Click({
+            $state = Get-ReleaseControlState
+            if ($state -and $state.candidate -and $state.candidate.browser_url) {
+                Start-Process ([string]$state.candidate.browser_url)
+            }
+        })
+        (Find-WpfControl "ApproveCompatibilityButton").Add_Click({
+            if ([System.Windows.MessageBox]::Show(
+                "Approve only the displayed exact compatibility evidence?",
+                "Confirm Compatibility", "YesNo", "Warning"
+            ) -eq "Yes") { Invoke-WpfOperation "ApproveCompatibility" }
+        })
+        $window.AddHandler(
+            [System.Windows.Controls.Button]::ClickEvent,
+            [System.Windows.RoutedEventHandler]{
+                param($sender, $eventArgs)
+                $button = $eventArgs.OriginalSource
+                if ($button.CommandParameter -in @("ServiceStart", "ServiceStop") -and $button.Tag) {
+                    Invoke-WpfOperation ([string]$button.CommandParameter) ([string]$button.Tag)
+                }
+            }
+        )
         (Find-WpfControl "PromoteButton").Add_Click({
             if ([System.Windows.MessageBox]::Show(
                 "Promote only this fully validated Candidate?", "Confirm Promote",
