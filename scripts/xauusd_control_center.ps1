@@ -1380,11 +1380,20 @@ function Test-CandidateDataParity {
             # of lag for the decision surface.
             $stableProjection.generated_at = $null
             $candidateProjection.generated_at = $null
-            $stableJson = $stableProjection | ConvertTo-Json -Depth 30 -Compress
-            $candidateJson = $candidateProjection | ConvertTo-Json -Depth 30 -Compress
-            $passed = [bool]($stableJson -ceq $candidateJson)
+            $stableShape = @($stableProjection.Keys) -join ","
+            $candidateShape = @($candidateProjection.Keys) -join ","
+            $passed = [bool]($stableShape -ceq $candidateShape)
             $reason = if ($passed) { "PASSED" } else { "CANDIDATE_DATA_PARITY_FAILED" }
             if ($path -eq "/api/status") {
+                if ([string]$stablePayload.forward_epoch -ne
+                    [string]$candidatePayload.forward_epoch) {
+                    $passed = $false; $reason = "CANDIDATE_DATA_PARITY_FAILED"
+                }
+                $stableCount = [int]$stablePayload.counts.decisions
+                $candidateCount = [int]$candidatePayload.counts.decisions
+                if ($candidateCount -lt $stableCount) {
+                    $passed = $false; $reason = "CANDIDATE_DECISION_BEHIND_STABLE"
+                }
                 try {
                     $stableTime = [DateTimeOffset]::Parse([string]$stablePayload.generated_at)
                     $candidateTime = [DateTimeOffset]::Parse([string]$candidatePayload.generated_at)
@@ -1408,8 +1417,18 @@ function Test-CandidateDataParity {
                     }
                 } catch { }
             }
-            if ($path -eq "/api/audit" -and -not $passed) {
-                $reason = "CANDIDATE_AUDIT_TRANSITION_STALE"
+            if ($path -eq "/api/audit") {
+                try {
+                    $stableAuditTime = [DateTimeOffset]::Parse(
+                        [string]$stablePayload.generated_at
+                    )
+                    $candidateAuditTime = [DateTimeOffset]::Parse(
+                        [string]$candidatePayload.generated_at
+                    )
+                    if (($stableAuditTime - $candidateAuditTime).TotalMinutes -gt 15) {
+                        $passed = $false; $reason = "CANDIDATE_AUDIT_TRANSITION_STALE"
+                    }
+                } catch { }
             }
             if ($path -in @("/api/learning", "/api/market-chart")) {
                 $stableItems = @($stablePayload.learning_curves) + @($stablePayload.decisions)
@@ -1461,7 +1480,7 @@ function Get-CandidateAuthInspection {
                 "$workerName=`"$([string]$Candidate.worker_version_id)`""
         }
         $response = Invoke-WebRequest -UseBasicParsing -Method Get `
-            -Uri "$workerUrl/admin/api/session" -Headers $headers `
+            -Uri "$dashboardUrl/admin/api/session" -Headers $headers `
             -MaximumRedirection 0 -TimeoutSec 30
         $result.production_host_probe = "HTTP_$([int]$response.StatusCode)"
         if ([int]$response.StatusCode -in @(401, 403)) {

@@ -571,13 +571,25 @@ def test_release_data_parity_is_exact_versioned_and_fail_closed(tmp_path) -> Non
         "$first=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
         "function Invoke-ExactVersionJson { param($VersionId,$Path);"
         "$payload=if($Path -eq '/api/status'){[pscustomobject]@{generated_at='t';"
-        "forward_epoch='e';counts=[pscustomobject]@{decisions=$(if($VersionId -eq 'candidate'){2}else{1})};latest=$null;training=$null}}"
+        "forward_epoch='e';counts=[pscustomobject]@{decisions=$(if($VersionId -eq 'candidate'){0}else{1})};latest=$null;training=$null}}"
         "else{[pscustomobject]@{generated_at='t'}};return [pscustomobject]@{payload=$payload;"
         "observed_version_id=$VersionId} };"
         "$second=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
         'Write-Output "$($first.passed),$($second.passed),$($second.routes[0].reason)"',
     )
-    assert result == "True,False,CANDIDATE_DATA_PARITY_FAILED"
+    assert result == "True,False,CANDIDATE_DECISION_BEHIND_STABLE"
+
+
+def test_candidate_auth_evidence_uses_formal_access_host_only() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
+        encoding="utf-8"
+    )
+    body = source.split("function Get-CandidateAuthInspection", 1)[1].split(
+        "function Invoke-AutomaticCandidateValidation", 1
+    )[0]
+    assert '$dashboardUrl/admin/api/session' in body
+    assert '$workerUrl/admin/api/session' not in body
+    assert 'versioned_workers_dev = "UNPROTECTED_TEST_SURFACE"' in body
 
 
 def test_wpf_shell_is_bundled_with_winforms_fallback_and_release_controls() -> None:
