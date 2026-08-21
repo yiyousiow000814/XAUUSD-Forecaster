@@ -48,6 +48,10 @@ REQUIRED_GENERATION_IDENTITIES = frozenset({
 NEWS_TRAINING_ELIGIBLE_STATES = frozenset({
     "AVAILABLE", "DEGRADED", "QUIET",
 })
+TRAINING_MATERIALIZATION_CONTRACT = canonical_hash((
+    "training-materialization-v1", FEATURE_VERSION, NEWS_FEATURE_VERSION,
+    ELIGIBILITY_VERSION, LABEL_VERSION, EVIDENCE_POLICY_VERSION,
+))
 
 
 def news_input_state_is_training_eligible(state: object) -> bool:
@@ -120,6 +124,93 @@ def _eligible_row_count(ledger, cutoff: datetime) -> int:
          ELIGIBILITY_VERSION, LABEL_VERSION),
     ).fetchone()
     return int(row["count"])
+
+
+def _install_training_materialization_state(connection) -> None:
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS training_materialization_state_v1 (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            contract_hash TEXT NOT NULL,
+            row_count INTEGER NOT NULL,
+            cursor_decision_time TEXT,
+            cursor_decision_id TEXT,
+            state TEXT NOT NULL CHECK(state IN ('CLEAN','DIRTY')),
+            updated_at TEXT NOT NULL
+        )"""
+    )
+
+
+def _eligible_row_cursor(ledger, cutoff: datetime) -> tuple[str | None, str | None]:
+    row = ledger.connection.execute(
+        """SELECT m.decision_time,e.source_decision_id
+        FROM training_eligibility_v2 e
+        JOIN derived_market_snapshots m USING(source_decision_id)
+        JOIN derived_news_feature_snapshots n USING(source_decision_id)
+        JOIN derived_outcomes o USING(source_decision_id)
+        WHERE e.eligible_at <= ? AND o.outcome_status='VALID'
+          AND m.feature_version=? AND n.feature_version=?
+          AND n.eligibility_version=? AND o.label_version=?
+        ORDER BY m.decision_time DESC,e.source_decision_id DESC LIMIT 1""",
+        (cutoff.isoformat(), FEATURE_VERSION, NEWS_FEATURE_VERSION,
+         ELIGIBILITY_VERSION, LABEL_VERSION),
+    ).fetchone()
+    return ((str(row["decision_time"]), str(row["source_decision_id"]))
+            if row else (None, None))
+
+
+def refresh_training_materialization_state(ledger, cutoff: datetime) -> dict:
+    """Maintain a durable bounded index over immutable training snapshots.
+
+    A growing tail advances the cursor.  A contract change, row deletion, or
+    late historical insertion is marked DIRTY so only the background owner
+    performs the full authoritative rebuild.
+    """
+    _install_training_materialization_state(ledger.connection)
+    count = _eligible_row_count(ledger, cutoff)
+    cursor_time, cursor_id = _eligible_row_cursor(ledger, cutoff)
+    previous = ledger.connection.execute(
+        "SELECT * FROM training_materialization_state_v1 WHERE id=1"
+    ).fetchone()
+    state = "CLEAN"
+    if previous is not None:
+        old_cursor = (previous["cursor_decision_time"], previous["cursor_decision_id"])
+        new_cursor = (cursor_time, cursor_id)
+        if (str(previous["contract_hash"]) != TRAINING_MATERIALIZATION_CONTRACT
+                or count < int(previous["row_count"])
+                or (count > int(previous["row_count"])
+                    and old_cursor[0] is not None and new_cursor <= old_cursor)):
+            state = "DIRTY"
+        elif str(previous["state"]) == "DIRTY":
+            state = "DIRTY"
+    now = datetime.now(UTC).isoformat()
+    with ledger.connection:
+        ledger.connection.execute(
+            """INSERT INTO training_materialization_state_v1 VALUES(1,?,?,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET contract_hash=excluded.contract_hash,
+              row_count=excluded.row_count,
+              cursor_decision_time=excluded.cursor_decision_time,
+              cursor_decision_id=excluded.cursor_decision_id,
+              state=excluded.state,updated_at=excluded.updated_at""",
+            (TRAINING_MATERIALIZATION_CONTRACT, count, cursor_time, cursor_id,
+             state, now),
+        )
+    return {"row_count": count, "cursor_decision_time": cursor_time,
+            "cursor_decision_id": cursor_id, "state": state,
+            "contract_hash": TRAINING_MATERIALIZATION_CONTRACT}
+
+
+def _mark_training_materialization_clean(ledger, cutoff: datetime, count: int) -> None:
+    cursor_time, cursor_id = _eligible_row_cursor(ledger, cutoff)
+    _install_training_materialization_state(ledger.connection)
+    with ledger.connection:
+        ledger.connection.execute(
+            """INSERT INTO training_materialization_state_v1 VALUES(1,?,?,?,?,'CLEAN',?)
+            ON CONFLICT(id) DO UPDATE SET contract_hash=excluded.contract_hash,
+              row_count=excluded.row_count,cursor_decision_time=excluded.cursor_decision_time,
+              cursor_decision_id=excluded.cursor_decision_id,state='CLEAN',updated_at=excluded.updated_at""",
+            (TRAINING_MATERIALIZATION_CONTRACT, count, cursor_time, cursor_id,
+             datetime.now(UTC).isoformat()),
+        )
 
 
 def complete_training_rows(ledger, cutoff: datetime) -> list[dict]:
@@ -510,7 +601,8 @@ def _neutral_core_news_artifact(dataset_hash: str) -> RidgeArtifact:
 
 def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[dict]:
     """Build and atomically activate five core models plus one diagnostic."""
-    eligible_count = _eligible_row_count(ledger, cutoff)
+    materialization = refresh_training_materialization_state(ledger, cutoff)
+    eligible_count = int(materialization["row_count"])
     if eligible_count < PREVIEW_ROWS:
         return [{"status": "ENGINEERING" if eligible_count < 30 else "EARLY_LEARNING",
                  "complete_rows": eligible_count, "next_threshold": PREVIEW_ROWS}]
@@ -519,6 +611,7 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
     if (
         candidate_latest is not None
         and generation_matches_contract(candidate_latest, CURRENT_NEWS_CONTRACT)
+        and materialization["state"] == "CLEAN"
         and eligible_count < int(candidate_latest["training_rows"]) + RETRAIN_INTERVAL
     ):
         return [{"status": "NOT_DUE", "complete_rows": eligible_count,
@@ -526,6 +619,7 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
                  "next_threshold": int(candidate_latest["training_rows"]) + RETRAIN_INTERVAL}]
     rows = complete_training_rows(ledger, cutoff)
     count = len(rows)
+    _mark_training_materialization_clean(ledger, cutoff, eligible_count)
     if count < PREVIEW_ROWS:
         return [{"status": "ENGINEERING" if count < 30 else "EARLY_LEARNING",
                  "complete_rows": count, "next_threshold": PREVIEW_ROWS}]

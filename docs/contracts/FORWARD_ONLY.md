@@ -242,6 +242,14 @@ are immutable model-update fields.
   A generation below its next threshold performs no feature parsing, event
   lookup, or Ridge work. When due, event snapshots are read as one set rather
   than one query per historical decision.
+- The eligibility index persists its current contract, row count, and ordered
+  decision cursor. Tail growth advances incrementally. Contract changes, row
+  loss, and late historical eligibility mark the index dirty and authorize a
+  background rebuild; the decision-clock owner never performs that rebuild.
+- A restart with a complete active current-contract generation begins the
+  decision clock immediately and schedules reconciliation on the durable
+  background owner. A missing or incompatible generation remains fail-closed
+  until synchronous startup reconciliation produces a valid generation.
 - The collector trains a non-actionable Market Preview at 96 V2-eligible rows,
   the first Shadow Challenger set at 200 rows, then a new version after each 50
   new eligible rows. Sixty trading days is a confidence milestone, not a

@@ -47,7 +47,9 @@ from xauusd_forecaster.news_semantics import (
 )
 from xauusd_forecaster.news_time import assess_news_time, category_time_rule
 from xauusd_forecaster.repair_v2 import immutable_table_hash
-from xauusd_forecaster import inference_v2, news_contract_migration, training_v2
+from xauusd_forecaster import (
+    execution_learning, inference_v2, news_contract_migration, training_v2,
+)
 from xauusd_forecaster.u5_state import U5State, U5_VERSION
 from xauusd_forecaster.execution_learning import (
     EXECUTION_CHART_MAX_POINTS, LOT_FEATURES, EXIT_FEATURES,
@@ -56,6 +58,37 @@ from xauusd_forecaster.execution_learning import (
     score_execution_predictions, train_due_execution,
 )
 from xauusd_forecaster.training import MARKET_FEATURES
+
+
+def test_training_materialization_cursor_is_durable_and_late_rows_mark_dirty(
+    monkeypatch,
+) -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    ledger = SimpleNamespace(connection=connection)
+    count = 100
+    cursor = ("2026-08-20T12:00:00+00:00", "decision-100")
+    monkeypatch.setattr(training_v2, "_eligible_row_count", lambda *_: count)
+    monkeypatch.setattr(training_v2, "_eligible_row_cursor", lambda *_: cursor)
+    cutoff = datetime(2026, 8, 20, 12, 30, tzinfo=timezone.utc)
+
+    first = training_v2.refresh_training_materialization_state(ledger, cutoff)
+    assert first["state"] == "CLEAN"
+    count = 101
+    cursor = ("2026-08-20T12:05:00+00:00", "decision-101")
+    advanced = training_v2.refresh_training_materialization_state(ledger, cutoff)
+    assert advanced["state"] == "CLEAN"
+    assert advanced["row_count"] == 101
+
+    # A newly eligible historical row changes the count without advancing the
+    # tail cursor.  It cannot be silently treated as an incremental append.
+    count = 102
+    dirty = training_v2.refresh_training_materialization_state(ledger, cutoff)
+    assert dirty["state"] == "DIRTY"
+    persisted = connection.execute(
+        "SELECT row_count,cursor_decision_id,state FROM training_materialization_state_v1"
+    ).fetchone()
+    assert tuple(persisted) == (102, "decision-101", "DIRTY")
 
 
 @pytest.mark.parametrize(
@@ -195,7 +228,7 @@ def test_executable_horizon_starts_from_entry_received_time() -> None:
     assert label.exit_received_time == entry_received + timedelta(minutes=30)
 
 
-def test_execution_ridges_follow_one_frozen_live_direction(tmp_path) -> None:
+def test_execution_ridges_follow_one_frozen_live_direction(tmp_path, monkeypatch) -> None:
     start = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=start)
     quotes = [
@@ -240,6 +273,14 @@ def test_execution_ridges_follow_one_frozen_live_direction(tmp_path) -> None:
     assert ledger.connection.execute(
         "SELECT count(*) FROM execution_model_updates_v2"
     ).fetchone()[0] == 2
+    with monkeypatch.context() as due_gate:
+        due_gate.setattr(
+            execution_learning, "_training_rows",
+            lambda *_: pytest.fail("NOT_DUE must not materialize execution rows"),
+        )
+        assert {row["status"] for row in train_due_execution(
+            ledger, start + timedelta(days=1), tmp_path / "execution-models"
+        )} == {"NOT_DUE"}
     lot = ledger.connection.execute(
         "SELECT artifact_paths_json FROM execution_model_updates_v2 WHERE model_identity='LOT_RIDGE'"
     ).fetchone()

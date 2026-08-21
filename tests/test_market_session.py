@@ -12,10 +12,31 @@ from xauusd_forecaster.forward_ledger import ForwardLedger
 from scripts.run_forward_collector import (
     append_current_grid_events,
     append_due_grid_events,
+    startup_reconciliation_plan,
 )
 
 
 UTC = timezone.utc
+
+
+def test_current_generation_makes_startup_reconciliation_background(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "scripts.run_forward_collector.require_current_contract_generation",
+        lambda _connection: "generation-current",
+    )
+    assert startup_reconciliation_plan(object()) == {
+        "synchronous": False,
+        "active_generation_id": "generation-current",
+    }
+
+
+def test_missing_generation_keeps_startup_fail_closed(monkeypatch) -> None:
+    def missing(_connection):
+        raise RuntimeError("missing current generation")
+    monkeypatch.setattr(
+        "scripts.run_forward_collector.require_current_contract_generation", missing,
+    )
+    assert startup_reconciliation_plan(object())["synchronous"] is True
 
 
 def broker_session(

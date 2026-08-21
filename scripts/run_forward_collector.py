@@ -62,6 +62,15 @@ def reconcile_news_contract(ledger, cutoff: datetime, artifact_root: Path) -> di
     }
 
 
+def startup_reconciliation_plan(connection) -> dict:
+    """Choose the bounded startup path without weakening generation safety."""
+    try:
+        generation_id = require_current_contract_generation(connection)
+    except RuntimeError:
+        return {"synchronous": True, "active_generation_id": None}
+    return {"synchronous": False, "active_generation_id": generation_id}
+
+
 DEFAULT_LOCAL_ROOT = MODULE_ROOT / ".local" / "forward"
 
 
@@ -218,15 +227,24 @@ def main() -> int:
         ),
         flush=True,
     )
-    # Reconcile at startup even in --once mode.  A rule release must build its
-    # compatible news generation from already matured point-in-time evidence;
-    # it must not wait for 96 brand-new direction rows.
-    with RuntimeHeartbeatPulse(
-        status_file, service="collector", state="STARTING",
-    ):
-        startup_reconciliation = reconcile_news_contract(
-            ledger, datetime.now(UTC), local_root / "models-v2"
-        )
+    # A valid current generation is sufficient to begin the decision clock.
+    # Reconciliation is durable background work and must not make a healthy
+    # restart wait behind historical materialization.  A missing/incompatible
+    # generation remains fail-closed and is built before any decision append.
+    startup_plan = startup_reconciliation_plan(ledger.connection)
+    startup_requires_reconciliation = not startup_plan["synchronous"]
+    if not startup_plan["synchronous"]:
+        startup_reconciliation = {
+            "status": "BACKGROUND_SCHEDULED",
+            "active_generation_id": startup_plan["active_generation_id"],
+        }
+    else:
+        with RuntimeHeartbeatPulse(
+            status_file, service="collector", state="STARTING",
+        ):
+            startup_reconciliation = reconcile_news_contract(
+                ledger, datetime.now(UTC), local_root / "models-v2"
+            )
     print(
         json.dumps(
             {"event": "NEWS_CONTRACT_RECONCILIATION", **startup_reconciliation},
@@ -261,6 +279,11 @@ def main() -> int:
     news_owner.start()
     training_owner.start()
     heartbeat.start()
+    if startup_requires_reconciliation:
+        request_background_training(
+            ledger.connection, datetime.now(UTC), reconcile=True,
+        )
+        training_owner.wake()
     try:
         while True:
             now = datetime.now(UTC)

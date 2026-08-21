@@ -168,6 +168,34 @@ def _training_rows(ledger, cutoff: datetime) -> list:
     ).fetchall()
 
 
+def _execution_due_statuses(ledger, cutoff: datetime) -> list[dict] | None:
+    """Return both NOT_DUE states without reading or parsing training rows."""
+    counts = ledger.connection.execute(
+        """SELECT count(*) AS lot_count,
+        sum(CASE WHEN json_valid(checkpoint_path_json)
+                  AND json_array_length(checkpoint_path_json)=5 THEN 1 ELSE 0 END)
+            AS exit_count
+        FROM execution_training_examples_v2 WHERE observed_at<=?""",
+        (cutoff.isoformat(),),
+    ).fetchone()
+    statuses = []
+    for identity, count in (
+        (LOT_IDENTITY, int(counts["lot_count"] or 0)),
+        (EXIT_IDENTITY, int(counts["exit_count"] or 0)),
+    ):
+        latest = ledger.connection.execute(
+            """SELECT training_decisions FROM execution_model_updates_v2
+            WHERE model_identity=? ORDER BY training_decisions DESC,created_at DESC LIMIT 1""",
+            (identity,),
+        ).fetchone()
+        if latest is None or count >= int(latest["training_decisions"]) + RETRAIN_INTERVAL:
+            return None
+        statuses.append({"model_identity": identity, "status": "NOT_DUE",
+                         "complete_rows": count,
+                         "next_threshold": int(latest["training_decisions"]) + RETRAIN_INTERVAL})
+    return statuses
+
+
 def _latest_model(ledger, identity: str, before: datetime):
     return ledger.connection.execute(
         """SELECT * FROM execution_model_updates_v2
@@ -180,6 +208,9 @@ def train_due_execution(ledger, cutoff: datetime, artifact_root: str | Path,
                         quote_root: str | Path | None = None) -> list[dict]:
     if quote_root is not None:
         bootstrap_execution_examples(ledger, quote_root, cutoff)
+    not_due = _execution_due_statuses(ledger, cutoff)
+    if not_due is not None:
+        return not_due
     rows = _training_rows(ledger, cutoff)
     statuses = []
     root = Path(artifact_root).resolve().with_name("execution-models-v2")
