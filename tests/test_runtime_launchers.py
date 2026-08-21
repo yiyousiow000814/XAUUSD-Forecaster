@@ -16,6 +16,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_CONTROL_FILES = (
     "xauusd_control_center.ps1",
+    "control_center.xaml",
     "xauusd_watchdog_launcher.vbs",
     "xauusd_watchdog_guard.ps1",
     "xauusd_watchdog_guard_launcher.vbs",
@@ -555,6 +556,42 @@ def test_runtime_control_bundle_records_exact_source_revision_and_hashes(tmp_pat
     )
 
     assert result == f"{revision},True,{len(RUNTIME_CONTROL_FILES)}"
+
+
+def test_release_data_parity_is_exact_versioned_and_fail_closed(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$stable=[pscustomobject]@{worker_version_id='stable'};"
+        "$candidate=[pscustomobject]@{worker_version_id='candidate'};"
+        "function Invoke-ExactVersionJson { param($VersionId,$Path);"
+        "if($Path -eq '/api/status'){return [pscustomobject]@{generated_at='t';"
+        "forward_epoch='e';counts=[pscustomobject]@{decisions=1};latest=$null;training=$null}};"
+        "return [pscustomobject]@{generated_at='t'} };"
+        "$first=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
+        "function Invoke-ExactVersionJson { param($VersionId,$Path);"
+        "if($Path -eq '/api/status'){return [pscustomobject]@{generated_at='t';"
+        "forward_epoch='e';counts=[pscustomobject]@{decisions=$(if($VersionId -eq 'candidate'){2}else{1})};latest=$null;training=$null}};"
+        "return [pscustomobject]@{generated_at='t'} };"
+        "$second=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
+        'Write-Output "$($first.passed),$($second.passed),$($second.routes[0].reason)"',
+    )
+    assert result == "True,False,SEMANTIC_DATA_MISMATCH"
+
+
+def test_wpf_shell_is_bundled_with_winforms_fallback_and_release_controls() -> None:
+    import xml.etree.ElementTree as ET
+
+    root = ET.parse(ROOT / "scripts" / "control_center.xaml").getroot()
+    serialized = ET.tostring(root, encoding="unicode")
+    for name in (
+        "ServiceList", "StableIdentity", "CandidateIdentity", "PreviousIdentity",
+        "PromoteButton", "ReverseButton", "StartButton", "StopButton",
+    ):
+        assert name in serialized
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    assert "function Show-WpfControlCenter" in source
+    assert "if (Show-WpfControlCenter)" in source
+    assert "using WinForms fallback" in source
 
 
 def test_business_switch_ignores_control_copy_failure_hook(

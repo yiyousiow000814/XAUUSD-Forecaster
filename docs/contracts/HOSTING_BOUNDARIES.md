@@ -107,6 +107,12 @@
   SQLite remains the complete authority; D1 contains only those bounded
   display projections. A detail snapshot that has not loaded or is unavailable
   must not be represented as an empty collection or zero count.
+- During a split-snapshot handover, the read boundary selects the freshest
+  valid compatible snapshot by durable `received_at`, with the split snapshot
+  winning only an exact timestamp tie. Legacy audit detail is projected and
+  item-bounded inside D1 JSON1; a Worker must not deserialize the growing
+  legacy document merely to decide freshness. Invalid or oversized candidates
+  are skipped, and absence of a valid bounded source fails closed.
 - When a bound is exceeded, repair ownership, projection, pagination, batching,
   or failure isolation first. Do not default to raising the host limit or
   deleting authoritative evidence.

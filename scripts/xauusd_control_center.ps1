@@ -41,6 +41,7 @@ $runtimeDecisionHorizon = [TimeSpan]::FromMinutes(30)
 $reloadableServiceKeys = @("collector", "annotator", "api", "sync")
 $runtimeControlFileNames = @(
     "xauusd_control_center.ps1",
+    "control_center.xaml",
     "xauusd_watchdog_launcher.vbs",
     "xauusd_watchdog_guard.ps1",
     "xauusd_watchdog_guard_launcher.vbs"
@@ -1293,6 +1294,131 @@ function Set-CloudflareCandidatePointer {
         -Message "stage release candidate $([string]$Candidate.validation_key)"
 }
 
+function Invoke-ExactVersionJson {
+    param(
+        [Parameter(Mandatory = $true)][string]$VersionId,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+    $headers = @{
+        "Cloudflare-Workers-Version-Overrides" = "$workerName=`"$VersionId`""
+    }
+    $response = Invoke-WebRequest -UseBasicParsing -Method Get `
+        -Uri "$workerUrl$Path" -Headers $headers -TimeoutSec 30
+    if ([int]$response.StatusCode -ne 200) {
+        throw "Exact-version read $Path returned $([int]$response.StatusCode)."
+    }
+    return $response.Content | ConvertFrom-Json
+}
+
+function ConvertTo-ReleaseSemanticProjection {
+    param([Parameter(Mandatory = $true)][string]$Path, [object]$Payload)
+    switch ($Path) {
+        "/api/status" {
+            return [ordered]@{
+                generated_at = $Payload.generated_at
+                forward_epoch = $Payload.forward_epoch
+                counts = $Payload.counts
+                latest = $Payload.latest
+                training = $Payload.training
+            }
+        }
+        "/api/audit" {
+            return [ordered]@{
+                generated_at = $Payload.generated_at
+                news_metrics = $Payload.news_metrics
+                daily_news_brief_summary = $Payload.daily_news_brief_summary
+                storyline_summary = $Payload.storyline_summary
+            }
+        }
+        "/api/learning" {
+            return [ordered]@{
+                generated_at = $Payload.generated_at
+                training = $Payload.training
+                learning_curves = $Payload.learning_curves
+            }
+        }
+        "/api/market-chart" {
+            return [ordered]@{
+                generated_at = $Payload.generated_at
+                decisions = $Payload.decisions
+                training_markers = $Payload.training_markers
+            }
+        }
+        default { return $Payload }
+    }
+}
+
+function Test-CandidateDataParity {
+    param([Parameter(Mandatory = $true)][object]$Stable,
+          [Parameter(Mandatory = $true)][object]$Candidate)
+    $routes = @("/api/status", "/api/audit", "/api/learning", "/api/market-chart")
+    $results = @()
+    foreach ($path in $routes) {
+        try {
+            $stablePayload = Invoke-ExactVersionJson `
+                -VersionId ([string]$Stable.worker_version_id) -Path $path
+            $candidatePayload = Invoke-ExactVersionJson `
+                -VersionId ([string]$Candidate.worker_version_id) -Path $path
+            $stableJson = ConvertTo-ReleaseSemanticProjection -Path $path `
+                -Payload $stablePayload | ConvertTo-Json -Depth 30 -Compress
+            $candidateJson = ConvertTo-ReleaseSemanticProjection -Path $path `
+                -Payload $candidatePayload | ConvertTo-Json -Depth 30 -Compress
+            $results += [pscustomobject]@{
+                route = $path; passed = [bool]($stableJson -ceq $candidateJson)
+                reason = if ($stableJson -ceq $candidateJson) { "MATCH" } `
+                    else { "SEMANTIC_DATA_MISMATCH" }
+            }
+        } catch {
+            $results += [pscustomobject]@{
+                route = $path; passed = $false
+                reason = "EXACT_VERSION_READ_FAILED"
+                error = Protect-PreflightDiagnosticText $_.Exception.Message
+            }
+        }
+    }
+    return [pscustomobject]@{
+        passed = [bool](@($results | Where-Object { -not $_.passed }).Count -eq 0)
+        stable_version_id = [string]$Stable.worker_version_id
+        candidate_version_id = [string]$Candidate.worker_version_id
+        routes = $results
+    }
+}
+
+function Get-CandidateAuthInspection {
+    param([Parameter(Mandatory = $true)][object]$Candidate)
+    # workers.dev version URLs are not the Access-protected production host.
+    # They may prove application behavior, never a successful human login.
+    $result = [ordered]@{
+        state = "AUTH_BOUNDARY_NOT_TESTABLE"
+        version_id = [string]$Candidate.worker_version_id
+        versioned_workers_dev = "UNPROTECTED_TEST_SURFACE"
+        production_host_probe = "NOT_OBSERVED"
+    }
+    try {
+        $headers = @{
+            "Cloudflare-Workers-Version-Overrides" =
+                "$workerName=`"$([string]$Candidate.worker_version_id)`""
+        }
+        $response = Invoke-WebRequest -UseBasicParsing -Method Get `
+            -Uri "$workerUrl/admin/api/session" -Headers $headers `
+            -MaximumRedirection 0 -TimeoutSec 30
+        $result.production_host_probe = "HTTP_$([int]$response.StatusCode)"
+        if ([int]$response.StatusCode -in @(401, 403)) {
+            $result.state = "UNAUTHENTICATED_BOUNDARY_CONFIRMED"
+        }
+    } catch {
+        $status = if ($_.Exception.Response) {
+            [int]$_.Exception.Response.StatusCode
+        } else { 0 }
+        $result.production_host_probe = if ($status) { "HTTP_$status" } `
+            else { "PROBE_UNAVAILABLE" }
+        if ($status -in @(401, 403)) {
+            $result.state = "UNAUTHENTICATED_BOUNDARY_CONFIRMED"
+        }
+    }
+    return [pscustomobject]$result
+}
+
 function Invoke-AutomaticCandidateValidation {
     param([Parameter(Mandatory = $true)][object]$Candidate)
     $state = Get-ReleaseControlState
@@ -1414,6 +1540,23 @@ function Invoke-AutomaticCandidateValidation {
                 throw "Cloudflare platform CPU or 5xx validation failed."
             }
         }
+        $dataParity = Test-CandidateDataParity -Stable $state.stable `
+            -Candidate $Candidate
+        $authInspection = Get-CandidateAuthInspection -Candidate $Candidate
+        if (-not $dataParity.passed) {
+            $state.candidate.validation_state = "REVIEW_REQUIRED"
+            $state.candidate.validation = [pscustomobject]@{
+                key = [string]$Candidate.validation_key
+                repository = "PASSED"; windows = "PASSED"; cloudflare = "PASSED"
+                reason = "SEMANTIC_DATA_PARITY_REVIEW_REQUIRED"
+                data_parity = $dataParity; auth_inspection = $authInspection
+                route_plan = $routePlan; routes = $cloudflare.routes
+                cpu_evidence = $cloudflare.cpu_evidence
+                tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            Write-ReleaseControlState -State $state
+            return $false
+        }
         $state.candidate.compatibility_state = "PASSED"
         $state.candidate.validation_state = "PASSED"
         $state.candidate.validation = [pscustomobject]@{
@@ -1426,6 +1569,8 @@ function Invoke-AutomaticCandidateValidation {
             route_plan = $routePlan
             routes = $cloudflare.routes
             cpu_evidence = $cloudflare.cpu_evidence
+            data_parity = $dataParity
+            auth_inspection = $authInspection
             tested_at = [DateTimeOffset]::UtcNow.ToString("o")
         }
         $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
@@ -3676,6 +3821,94 @@ function Get-ControlCenterSummaryPresentation {
     }
 }
 
+function Show-WpfControlCenter {
+    $xamlPath = Join-Path $PSScriptRoot "control_center.xaml"
+    if (-not (Test-Path -LiteralPath $xamlPath)) { return $false }
+    try {
+        Add-Type -AssemblyName PresentationFramework
+        Add-Type -AssemblyName PresentationCore
+        [xml]$xaml = Get-Content -LiteralPath $xamlPath -Raw
+        $reader = New-Object System.Xml.XmlNodeReader $xaml
+        $window = [Windows.Markup.XamlReader]::Load($reader)
+
+        function Find-WpfControl([string]$Name) { return $window.FindName($Name) }
+        function Format-WpfIdentity($Release) {
+            if (-not $Release) { return "Git       --`nWorker    --`nWindows   --" }
+            $git = if ($Release.git_sha) { ([string]$Release.git_sha).Substring(0, [Math]::Min(12, ([string]$Release.git_sha).Length)) } else { "--" }
+            $worker = if ($Release.worker_version_id) { ([string]$Release.worker_version_id).Substring(0, [Math]::Min(12, ([string]$Release.worker_version_id).Length)) } else { "--" }
+            $windows = if ($Release.windows_revision) { ([string]$Release.windows_revision).Substring(0, [Math]::Min(12, ([string]$Release.windows_revision).Length)) } else { "--" }
+            return "Git       $git`nWorker    $worker`nWindows   $windows"
+        }
+        function Invoke-WpfOperation([string]$Operation) {
+            $arguments = @(
+                "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
+                "-File", ('"{0}"' -f $PSCommandPath), "-Action", $Operation,
+                "-RuntimeRoot", ('"{0}"' -f $moduleRoot),
+                "-RepositoryRoot", ('"{0}"' -f $repositoryRoot)
+            )
+            Start-Process -FilePath "powershell.exe" -ArgumentList $arguments `
+                -WorkingDirectory $moduleRoot -WindowStyle Hidden | Out-Null
+        }
+        function Refresh-WpfStatus {
+            $status = @(Get-ForecasterStatus)
+            (Find-WpfControl "ServiceList").ItemsSource = @($status | ForEach-Object {
+                [pscustomobject]@{ Name = $_.Name; State = $_.State }
+            })
+            $bad = @($status | Where-Object { $_.State -match "STOPPED|ERROR|STALE|OFFLINE" }).Count
+            (Find-WpfControl "OverallState").Text = if ($bad) { "DEGRADED" } else { "HEALTHY" }
+            (Find-WpfControl "RefreshTime").Text = [DateTime]::Now.ToString("HH:mm:ss")
+            $release = Get-ReleaseControlState
+            (Find-WpfControl "StableState").Text = if ($release -and $release.stable) { "STABLE" } else { "UNAVAILABLE" }
+            (Find-WpfControl "StableIdentity").Text = Format-WpfIdentity $release.stable
+            (Find-WpfControl "CandidateState").Text = if ($release -and $release.candidate) { [string]$release.candidate.validation_state } else { "UNAVAILABLE" }
+            (Find-WpfControl "CandidateIdentity").Text = Format-WpfIdentity $release.candidate
+            $reason = if ($release -and $release.candidate -and $release.candidate.validation) {
+                if ($release.candidate.validation.reason) { [string]$release.candidate.validation.reason }
+                elseif ($release.candidate.validation.error) { [string]$release.candidate.validation.error }
+                else { "Validation evidence is available." }
+            } else { "Candidate validation is unavailable." }
+            (Find-WpfControl "CandidateReason").Text = $reason
+            (Find-WpfControl "PromoteButton").IsEnabled = [bool](
+                $release -and $release.candidate -and
+                [string]$release.candidate.validation_state -eq "PASSED"
+            )
+            (Find-WpfControl "PreviousState").Text = if ($release -and $release.previous_stable) { "AVAILABLE" } else { "UNAVAILABLE" }
+            (Find-WpfControl "PreviousIdentity").Text = Format-WpfIdentity $release.previous_stable
+            (Find-WpfControl "ReverseButton").IsEnabled = [bool]($release -and $release.previous_stable)
+        }
+
+        (Find-WpfControl "RefreshButton").Add_Click({ Refresh-WpfStatus })
+        (Find-WpfControl "StartButton").Add_Click({ Invoke-WpfOperation "Start" })
+        (Find-WpfControl "RestartButton").Add_Click({ Invoke-WpfOperation "Restart" })
+        (Find-WpfControl "StopButton").Add_Click({ Invoke-WpfOperation "Stop" })
+        (Find-WpfControl "DashboardButton").Add_Click({ Start-Process $dashboardUrl })
+        (Find-WpfControl "LogsButton").Add_Click({ Start-Process explorer.exe $logRoot })
+        (Find-WpfControl "PromoteButton").Add_Click({
+            if ([System.Windows.MessageBox]::Show(
+                "Promote only this fully validated Candidate?", "Confirm Promote",
+                "YesNo", "Warning"
+            ) -eq "Yes") { Invoke-WpfOperation "PromoteCandidate" }
+        })
+        (Find-WpfControl "ReverseButton").Add_Click({
+            if ([System.Windows.MessageBox]::Show(
+                "Reverse to the exact Previous Stable release?", "Confirm Reverse",
+                "YesNo", "Warning"
+            ) -eq "Yes") { Invoke-WpfOperation "ReverseStable" }
+        })
+        $timer = New-Object Windows.Threading.DispatcherTimer
+        $timer.Interval = [TimeSpan]::FromSeconds(5)
+        $timer.Add_Tick({ Refresh-WpfStatus })
+        $window.Add_Closed({ $timer.Stop() })
+        Refresh-WpfStatus
+        $timer.Start()
+        [void]$window.ShowDialog()
+        return $true
+    } catch {
+        Write-Warning "WPF control center unavailable; using WinForms fallback: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Show-ControlCenter {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
@@ -3689,6 +3922,11 @@ function Show-ControlCenter {
     )
     if (-not $createdNew) {
         [void]$activationEvent.Set()
+        $activationEvent.Dispose()
+        return
+    }
+
+    if (Show-WpfControlCenter) {
         $activationEvent.Dispose()
         return
     }

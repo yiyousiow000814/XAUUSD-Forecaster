@@ -49,6 +49,21 @@ viability, ownership uniqueness, compatibility, directed 0% Worker probes, and
 actual Cloudflare CPU/error evidence when Worker execution changed. PASSED means
 every required gate belongs to the exact release key.
 
+Stable and Candidate dashboard inspection uses exact Worker version overrides
+against the same production data authority. Promotion requires semantic parity
+for the bounded status, audit, learning, and market projections; a route read
+failure or material mismatch is `SEMANTIC_DATA_PARITY_REVIEW_REQUIRED`, never a
+pass inferred from HTTP availability alone. A versioned `workers.dev` URL is
+not the Cloudflare Access boundary and is recorded as
+`AUTH_BOUNDARY_NOT_TESTABLE` unless an unauthenticated exact-version probe on
+the protected production hostname proves the boundary. Validation never
+simulates or claims a successful human login.
+
+The local graphical shell is presentation only. WPF/XAML is the normal Windows
+surface and the XAML file participates in the exact revision/hash control
+bundle; WinForms remains a compatibility fallback. Both invoke the same
+PowerShell release engine and neither owns alternate promote or reverse rules.
+
 Repository validation requires the exact-SHA check runs named `Python regression
 suite`, `Web build and tests`, `Windows runtime contracts`, `Repository policy`,
 and CodeQL `Analyze` jobs for actions, C#, JavaScript/TypeScript, and Python.
