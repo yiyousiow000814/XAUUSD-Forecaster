@@ -3304,25 +3304,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         try:
-            # Older stable supervisors request /api/status while handing over
-            # to a newer control bundle. Only isolated candidate databases use
-            # the bounded critical snapshot for that bootstrap request.
-            isolated_preflight_alias = (
-                path == "/api/status"
-                and self.database.parent.name == "preflight"
-                and self.database.parent.parent.name == ".local"
+            # /api/status is the canonical bounded first-paint contract. Heavy
+            # audit, learning, and market detail have independent lazy/paged
+            # owners and may never inflate this request path again.
+            body, snapshot_state, snapshot_age = self.critical_status_cache.get(
+                self.database,
+                lambda database: critical_status_payload(
+                    _dashboard_payload(database, include_optional=False)
+                ),
             )
-            if path == "/api/critical-status" or isolated_preflight_alias:
-                body, snapshot_state, snapshot_age = self.critical_status_cache.get(
-                    self.database,
-                    lambda database: critical_status_payload(
-                        _dashboard_payload(database, include_optional=False)
-                    ),
-                )
-            else:
-                body, snapshot_state, snapshot_age = self.status_cache.get(
-                    self.database, _dashboard_payload,
-                )
             status = 200
         except StatusSnapshotUnavailable as error:
             body = json.dumps({"error": str(error)[:500]}).encode()

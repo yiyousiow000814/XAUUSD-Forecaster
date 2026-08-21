@@ -1633,15 +1633,12 @@ def test_critical_status_route_uses_the_independent_bounded_builder(
         thread.join(timeout=2)
 
 
-@pytest.mark.parametrize(
-    ("database", "expected_optional"),
-    [
-        (Path(".local/preflight/forward.sqlite3"), False),
-        (Path(".local/forward/forward.sqlite3"), True),
-    ],
-)
-def test_legacy_status_alias_is_bounded_only_for_isolated_preflight(
-    monkeypatch, tmp_path, database, expected_optional,
+@pytest.mark.parametrize("database", [
+    Path(".local/preflight/forward.sqlite3"),
+    Path(".local/forward/forward.sqlite3"),
+])
+def test_status_alias_is_always_the_bounded_first_paint_contract(
+    monkeypatch, tmp_path, database,
 ) -> None:
     module = _dashboard_module()
     module.Handler.database = tmp_path / database
@@ -1670,7 +1667,7 @@ def test_legacy_status_alias_is_bounded_only_for_isolated_preflight(
         server.server_close()
         thread.join(timeout=2)
 
-    assert calls == [expected_optional]
+    assert calls == [False]
 
 
 def test_status_snapshot_cache_serves_bounded_stale_during_slow_refresh(

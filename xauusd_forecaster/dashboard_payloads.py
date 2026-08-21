@@ -42,6 +42,12 @@ def critical_status_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     training = snapshot.get("training")
     if isinstance(training, dict):
         training.pop("models", None)  # Model details belong to /api/learning.
+    # The Live first paint owns one fixed 90-minute decision window.  Keep it
+    # on the bounded status contract while all older/detail history remains on
+    # the paged market/audit resources.
+    snapshot["recent_decisions"] = audit_decisions_payload(
+        payload, decision_limit=18, prediction_limit=8,
+    )["recent_decisions"]
     snapshot.update({
         "learning_resource": "/api/learning",
         "news_index_resource": "/api/news-index",

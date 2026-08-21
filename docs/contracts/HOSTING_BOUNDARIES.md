@@ -113,6 +113,11 @@
   item-bounded inside D1 JSON1; a Worker must not deserialize the growing
   legacy document merely to decide freshness. Invalid or oversized candidates
   are skipped, and absence of a valid bounded source fails closed.
+- Local `/api/status` and `/api/critical-status` are the same bounded
+  first-paint contract. They include only the fixed recent 90-minute decision
+  window; audit, learning, market detail, and older history retain independent
+  lazy/paged owners. A compatibility alias must not rebuild or serialize the
+  complete historical dashboard payload.
 - When a bound is exceeded, repair ownership, projection, pagination, batching,
   or failure isolation first. Do not default to raising the host limit or
   deleting authoritative evidence.
