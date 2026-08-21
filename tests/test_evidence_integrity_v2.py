@@ -213,6 +213,19 @@ def test_received_time_after_expiry_invalidates_entry_even_when_event_time_is_ea
     assert label.reason_codes == ("NO_ENTRY_RECEIVED_WITHIN_EXPIRY",)
 
 
+def test_execution_collecting_gate_does_not_materialize_rows(tmp_path, monkeypatch) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    monkeypatch.setattr(
+        execution_learning, "_training_rows",
+        lambda *_: pytest.fail("COLLECTING must not materialize execution rows"),
+    )
+    statuses = train_due_execution(
+        ledger, datetime.now(UTC), tmp_path / "execution-models",
+    )
+    assert {row["status"] for row in statuses} == {"COLLECTING"}
+    ledger.close()
+
+
 def test_executable_horizon_starts_from_entry_received_time() -> None:
     decision = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     entry_received = decision + timedelta(seconds=19)

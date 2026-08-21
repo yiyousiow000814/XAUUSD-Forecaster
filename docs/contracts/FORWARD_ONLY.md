@@ -250,6 +250,9 @@ are immutable model-update fields.
   decision clock immediately and schedules reconciliation on the durable
   background owner. A missing or incompatible generation remains fail-closed
   until synchronous startup reconciliation produces a valid generation.
+- Execution LOT/EXIT training uses aggregate eligible counts for both
+  `COLLECTING` and `NOT_DUE`; it reads and parses training rows only when one
+  identity has reached its first or next immutable-generation threshold.
 - The collector trains a non-actionable Market Preview at 96 V2-eligible rows,
   the first Shadow Challenger set at 200 rows, then a new version after each 50
   new eligible rows. Sixty trading days is a confidence milestone, not a

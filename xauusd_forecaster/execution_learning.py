@@ -188,7 +188,14 @@ def _execution_due_statuses(ledger, cutoff: datetime) -> list[dict] | None:
             WHERE model_identity=? ORDER BY training_decisions DESC,created_at DESC LIMIT 1""",
             (identity,),
         ).fetchone()
-        if latest is None or count >= int(latest["training_decisions"]) + RETRAIN_INTERVAL:
+        if latest is None:
+            if count >= MIN_TRAINING_DECISIONS:
+                return None
+            statuses.append({"model_identity": identity, "status": "COLLECTING",
+                             "complete_rows": count,
+                             "next_threshold": MIN_TRAINING_DECISIONS})
+            continue
+        if count >= int(latest["training_decisions"]) + RETRAIN_INTERVAL:
             return None
         statuses.append({"model_identity": identity, "status": "NOT_DUE",
                          "complete_rows": count,
