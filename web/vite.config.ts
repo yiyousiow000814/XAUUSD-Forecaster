@@ -2,6 +2,7 @@ import vinext from "vinext";
 import { defineConfig } from "vite";
 import { sites } from "./build/sites-vite-plugin";
 import { execFileSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   compactPreviewLearning,
@@ -22,9 +23,20 @@ export default defineConfig(async () => {
 
   // Wrangler snapshots its log path while the Cloudflare plugin is imported.
   const { cloudflare } = await import("@cloudflare/vite-plugin");
-  const branch = process.env.WORKERS_CI_BRANCH ?? "";
-  const commit = process.env.WORKERS_CI_COMMIT_SHA ?? "";
-  const isWorkerPreview = Boolean(branch && commit && branch !== "main");
+  const git = (...args: string[]) => {
+    try {
+      return execFileSync("git", args, {
+        cwd: resolve(".."), encoding: "utf8",
+      }).trim();
+    } catch {
+      return "";
+    }
+  };
+  const ciBranch = process.env.WORKERS_CI_BRANCH ?? "";
+  const ciCommit = process.env.WORKERS_CI_COMMIT_SHA ?? "";
+  const branch = ciBranch || git("branch", "--show-current");
+  const commit = ciCommit || git("rev-parse", "HEAD");
+  const isWorkerPreview = Boolean(ciBranch && ciCommit && ciBranch !== "main");
   let previewBundle: unknown = null;
   if (isWorkerPreview) {
     const python = process.platform === "win32" ? "python" : "python3";
@@ -57,7 +69,19 @@ export default defineConfig(async () => {
       ? { watch: { useFsEvents: false, usePolling: true } }
       : undefined,
     plugins: [
-      vinext(),
+      vinext({ prerender: { routes: "*" } }),
+      {
+        name: "aurum-vinext-lazy-entry-prerender",
+        closeBundle() {
+          const source = resolve("dist/server/vinext-client-assets.js");
+          const destination = resolve(
+            "dist/server/_next/static/vinext-client-assets.js",
+          );
+          if (!existsSync(source)) return;
+          mkdirSync(resolve("dist/server/_next/static"), { recursive: true });
+          copyFileSync(source, destination);
+        },
+      },
       sites(),
       cloudflare({
         viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
@@ -66,7 +90,11 @@ export default defineConfig(async () => {
     ],
     define: {
       __AURUM_PREVIEW_BUNDLE__: JSON.stringify(previewBundle),
-      __AURUM_DEPLOYMENT__: JSON.stringify({ branch, commit_sha: commit }),
+      __AURUM_DEPLOYMENT__: JSON.stringify({
+        branch,
+        commit_sha: commit,
+        is_preview: isWorkerPreview,
+      }),
     },
   };
 });

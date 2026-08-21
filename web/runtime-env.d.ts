@@ -10,6 +10,7 @@ declare global {
       DASHBOARD_OPERATOR_OWNER_EMAILS?: string;
       ASSISTANT_OWNER_SUBJECTS?: string;
       ASSISTANT_OWNER_EMAILS?: string;
+      CF_VERSION_METADATA?: WorkerVersionMetadata;
     }
   }
 
@@ -21,6 +22,7 @@ declare global {
     DASHBOARD_OPERATOR_OWNER_EMAILS?: string;
     ASSISTANT_OWNER_SUBJECTS?: string;
     ASSISTANT_OWNER_EMAILS?: string;
+    CF_VERSION_METADATA?: WorkerVersionMetadata;
   }
 }
 

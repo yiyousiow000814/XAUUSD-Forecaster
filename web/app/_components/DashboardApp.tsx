@@ -27,9 +27,10 @@ const AdminOverviewView = lazy(loadAdminOverviewView);
 const AuditView = lazy(loadAuditView);
 const AssistantView = lazy(loadAssistantView);
 
-const AUDIT_VIEWS = new Set<AuditViewName>(["news", "evidence", "stories", "decisions", "league", "coverage"]);
+const AUDIT_VIEWS = new Set<AuditViewName>(["briefs", "search", "news", "evidence", "stories", "decisions", "league", "coverage"]);
 
 function validAuditView(value: string | null | undefined): AuditViewName {
+  if (value === "qa") return "briefs";
   return value && AUDIT_VIEWS.has(value as AuditViewName) ? value as AuditViewName : "news";
 }
 
@@ -42,6 +43,9 @@ function parseDashboardUrl(url: URL): DashboardLocation | null {
   if (url.pathname === "/audit") return { room: "audit", auditView: validAuditView(url.searchParams.get("view")) };
   if (url.pathname !== "/") return null;
   const room = url.searchParams.get("room");
+  if (room === "assistant") return { room: "assistant", auditView: "news" };
+  if (room === "retry") return { room: "retry", auditView: "news" };
+  if (room === "status") return { room: "status", auditView: "news" };
   if (room === "health") return { room, auditView: "news" };
   if (room === "audit") return { room, auditView: validAuditView(url.searchParams.get("view")) };
   return { room: "live", auditView: "news" };
@@ -49,8 +53,8 @@ function parseDashboardUrl(url: URL): DashboardLocation | null {
 
 function canonicalHref(location: DashboardLocation): string {
   if (location.room === "live") return "/";
-  if (location.room === "audit") return `/?room=audit&view=${location.auditView}`;
-  if (location.room === "health") return "/?room=health";
+  if (location.room === "audit") return `/audit?view=${location.auditView}`;
+  if (location.room === "health") return "/health";
   if (location.room === "admin") return "/admin";
   if (location.room === "assistant") return "/admin/assistant";
   if (location.room === "retry") return "/admin/retry-jobs";
@@ -103,6 +107,34 @@ export default function DashboardApp({
   }, []);
 
   useLayoutEffect(() => {
+    const currentUrl = new URL(window.location.href);
+    const destination = parseDashboardUrl(currentUrl);
+    if (!destination) return;
+    if (
+      window.location.pathname === "/"
+      && ["admin", "assistant", "retry", "status"].includes(destination.room)
+    ) {
+      window.location.replace(canonicalHref(destination));
+      return;
+    }
+    if (
+      currentUrl.pathname === "/audit"
+      && currentUrl.searchParams.get("view") !== destination.auditView
+    ) {
+      window.history.replaceState(null, "", canonicalHref(destination));
+    }
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setLocation(current =>
+        current.room === destination.room && current.auditView === destination.auditView
+          ? current : destination,
+      );
+    });
+    return () => { active = false; };
+  }, []);
+
+  useLayoutEffect(() => {
     if (pendingScrollTop.current === null) return;
     const cancel = settleResponsiveScroll(options => window.scrollTo(options), () => window.scrollY, pendingScrollTop.current!);
     pendingScrollTop.current = null;
@@ -151,7 +183,7 @@ export default function DashboardApp({
         {location.room === "health" && <HealthView initialPayload={initialStatus} />}
         {location.room === "admin" && <AdminOverviewView />}
         {location.room === "retry" && <RetryView />}
-        {location.room === "audit" && <AuditView key={location.auditView} />}
+        {location.room === "audit" && <AuditView key={location.auditView} initialView={location.auditView} />}
         {location.room === "assistant" && <AssistantView />}
       </Suspense>
     </DashboardShell>

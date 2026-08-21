@@ -2,7 +2,85 @@ from __future__ import annotations
 
 import pytest
 
-from xauusd_forecaster.dashboard_payloads import bounded_evidence_window
+from xauusd_forecaster.dashboard_payloads import (
+    audit_briefs_payload,
+    audit_decisions_payload,
+    audit_status_payload,
+    audit_stories_payload,
+    bounded_evidence_window,
+)
+
+
+def test_audit_summary_is_independent_of_every_growing_detail_family() -> None:
+    summary = {
+        "generated_at": "2026-08-20T00:00:00+00:00",
+        "news_metrics": {"events": 12},
+        "daily_news_brief_summary": {"brief_date": "2026-08-20"},
+        "storyline_summary": {"total": 7},
+    }
+    baseline = audit_status_payload(summary)
+    grown = {
+        **summary,
+        **{
+            field: [{"value": "x" * 10_000}] * 1_000
+            for field in (
+                "recent_decisions", "daily_news_briefs", "storylines",
+                "market_narrative_candidates", "archived_storylines",
+                "archived_story_event_candidates", "story_event_candidates",
+                "market_reaction_streams", "theme_streams",
+                "unassigned_story_events",
+            )
+        },
+    }
+
+    assert audit_status_payload(grown) == baseline
+    assert baseline["audit_briefs_resource"] == "/api/audit-briefs"
+    assert baseline["audit_stories_resource"] == "/api/audit-stories"
+    assert baseline["audit_decisions_resource"] == "/api/audit-decisions"
+
+
+def test_audit_detail_projections_bound_items_and_nested_growth() -> None:
+    payload = {
+        "generated_at": "2026-08-20T00:00:00+00:00",
+        "daily_news_briefs": [{
+            "brief_date": str(index), "brief": {"title": "kept"},
+            "brief_json": "duplicate" * 1_000,
+        } for index in range(10)],
+        "recent_decisions": [{
+            "decision_id": str(index), "features": {"unused": "x" * 1_000},
+            "predictions": [{"model_identity": str(model)} for model in range(20)],
+        } for index in range(30)],
+        "storylines": [{
+            "storyline_id": str(index),
+            "timeline": list(range(100)),
+            "market_reactions": list(range(100)),
+            "commentary": list(range(100)),
+            "background": list(range(100)),
+        } for index in range(30)],
+        "story_event_candidates": list(range(100)),
+        "unassigned_story_events": list(range(100)),
+        "theme_streams": list(range(30)),
+        "market_reaction_streams": list(range(30)),
+    }
+
+    briefs = audit_briefs_payload(payload, brief_limit=3)
+    decisions = audit_decisions_payload(payload, decision_limit=20)
+    stories = audit_stories_payload(payload)
+
+    assert len(briefs["daily_news_briefs"]) == 3
+    assert all("brief_json" not in row for row in briefs["daily_news_briefs"])
+    assert len(decisions["recent_decisions"]) == 20
+    assert all("features" not in row for row in decisions["recent_decisions"])
+    assert all(len(row["predictions"]) == 8 for row in decisions["recent_decisions"])
+    assert len(stories["storylines"]) == 20
+    assert all(len(row["timeline"]) == 8 for row in stories["storylines"])
+    assert all(row["timeline"][:4] == [0, 1, 2, 3] for row in stories["storylines"])
+    assert all(row["timeline"][-4:] == [96, 97, 98, 99] for row in stories["storylines"])
+    assert all(len(row["commentary"]) == 4 for row in stories["storylines"])
+    assert len(stories["story_event_candidates"]) == 50
+    assert len(stories["unassigned_story_events"]) == 50
+    assert len(stories["theme_streams"]) == 12
+    assert len(stories["market_reaction_streams"]) == 12
 
 
 @pytest.mark.parametrize(

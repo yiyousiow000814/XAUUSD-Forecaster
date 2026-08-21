@@ -21,7 +21,9 @@ def test_external_probe_covers_only_public_pages_and_status(monkeypatch) -> None
 
     evidence = probe.check_public_surface("https://example.invalid/")
 
-    assert len(evidence) == 3
+    assert len(evidence) == 4
+    assert evidence[1].startswith("/health=200")
+    assert evidence[2].startswith("/audit=200")
     assert evidence[-1].startswith("/api/status=200")
     assert all(not item.startswith("/status=") for item in evidence)
     assert all("assistant-health" not in item for item in evidence)

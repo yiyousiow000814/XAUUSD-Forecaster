@@ -13,6 +13,7 @@ TIMEOUT_SECONDS = 20
 PAGE_MARKERS = {
     "/": "Aurum Signal Room",
     "/health": "系统健康状态",
+    "/audit": "证据台页面",
 }
 
 

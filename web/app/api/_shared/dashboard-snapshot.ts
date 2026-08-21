@@ -1,12 +1,32 @@
 export const MAX_DASHBOARD_SNAPSHOT_BYTES = 800_000;
+export const AUDIT_SUMMARY_SNAPSHOT_BYTES = 16_000;
+export const AUDIT_DETAIL_SNAPSHOT_BYTES = 120_000;
+export const AUDIT_SNAPSHOT_IDS = Object.freeze({
+  // Keep the split summary isolated from the legacy full audit snapshot (id 4)
+  // until the candidate is explicitly promoted with its matching sync owner.
+  summary: 9,
+  decisions: 6,
+  briefs: 7,
+  stories: 8,
+});
 
 import { validateJsonWithD1 } from "./release-validation";
 
 export type SnapshotWriteResult = "stored" | "validated" | "invalid" | "too_large";
 
 export type BoundedBodyResult =
-  | { status: "ok"; serialized: string }
+  | { status: "ok"; serialized: string; receivedBytes: number }
   | { status: "too_large" };
+
+export const PUBLIC_STATUS_PRIVATE_FIELDS = [
+  "annotation_queue", "gemini_quota", "gemini_31_quota",
+  "gemma_quota", "gemini_embedding_quota", "llm_routing",
+] as const;
+
+export function publicStatusJsonExpression() {
+  return `json_remove(payload, ${PUBLIC_STATUS_PRIVATE_FIELDS
+    .map(field => `'$.${field}'`).join(", ")})`;
+}
 
 function declaredBodyBytes(request: Request): number | null {
   const raw = request.headers.get("content-length");
@@ -23,7 +43,7 @@ export async function readBoundedBody(
   if (declaredBytes !== null && declaredBytes > maxBytes) {
     return { status: "too_large" };
   }
-  if (!request.body) return { status: "ok", serialized: "" };
+  if (!request.body) return { status: "ok", serialized: "", receivedBytes: 0 };
 
   const reader = request.body.getReader();
   const decoder = new TextDecoder();
@@ -41,7 +61,7 @@ export async function readBoundedBody(
       decoded.push(decoder.decode(value, { stream: true }));
     }
     decoded.push(decoder.decode());
-    return { status: "ok", serialized: decoded.join("") };
+    return { status: "ok", serialized: decoded.join(""), receivedBytes };
   } finally {
     reader.releaseLock();
   }
@@ -58,9 +78,11 @@ export async function writeDashboardSnapshot(
   request: Request,
   binding: D1Database,
   snapshotId: number,
-  options: { dryRun?: boolean } = {},
+  options: { dryRun?: boolean; maxBytes?: number } = {},
 ): Promise<SnapshotWriteResult> {
-  const body = await readBoundedBody(request);
+  const body = await readBoundedBody(
+    request, options.maxBytes ?? MAX_DASHBOARD_SNAPSHOT_BYTES,
+  );
   if (body.status === "too_large") return "too_large";
 
   if (options.dryRun) {
@@ -68,13 +90,40 @@ export async function writeDashboardSnapshot(
       ? "validated" : "invalid";
   }
 
+  return writeSerializedDashboardSnapshot(body.serialized, binding, snapshotId);
+}
+
+export async function writeSerializedDashboardSnapshot(
+  serialized: string,
+  binding: D1Database,
+  snapshotId: number,
+): Promise<SnapshotWriteResult> {
   const result = await binding.prepare(
     `WITH incoming(payload) AS (SELECT ?)
      INSERT INTO dashboard_snapshots (id, payload, received_at)
      SELECT ?, payload, ? FROM incoming WHERE json_valid(payload)
      ON CONFLICT(id) DO UPDATE SET
        payload=excluded.payload, received_at=excluded.received_at`,
-  ).bind(body.serialized, snapshotId, new Date().toISOString()).run();
+  ).bind(serialized, snapshotId, new Date().toISOString()).run();
+
+  return Number(result.meta.changes ?? 0) > 0 ? "stored" : "invalid";
+}
+
+export async function writeDashboardStatusSnapshots(
+  serialized: string,
+  binding: D1Database,
+): Promise<SnapshotWriteResult> {
+  const receivedAt = new Date().toISOString();
+  const result = await binding.prepare(
+    `WITH incoming(payload, received_at) AS (SELECT ?, ?)
+     INSERT INTO dashboard_snapshots (id, payload, received_at)
+     SELECT 1, payload, received_at FROM incoming WHERE json_valid(payload)
+     UNION ALL
+     SELECT 5, ${publicStatusJsonExpression()}, received_at
+     FROM incoming WHERE json_valid(payload)
+     ON CONFLICT(id) DO UPDATE SET
+       payload=excluded.payload, received_at=excluded.received_at`,
+  ).bind(serialized, receivedAt).run();
 
   return Number(result.meta.changes ?? 0) > 0 ? "stored" : "invalid";
 }

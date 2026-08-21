@@ -1,6 +1,9 @@
 const CLOUDFLARE_WORKERS_STUB = `
 const env = new Proxy({}, {
   get(_target, key) {
+    if (globalThis.__AURUM_TEST_WORKER_ENV) {
+      return globalThis.__AURUM_TEST_WORKER_ENV[key];
+    }
     throw new Error(\`Preview write touched Cloudflare env before rejection: \${String(key)}\`);
   },
 });

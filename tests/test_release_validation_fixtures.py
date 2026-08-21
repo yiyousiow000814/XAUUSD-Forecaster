@@ -36,3 +36,9 @@ def test_release_validation_fixtures_are_bounded_production_contracts() -> None:
     assert len(decoded["news-evidence-stage.json"]["items"]) == 20
     assert 1 <= len(decoded["news-index-normal.json"]["items"]) <= 20
     assert "候选版本精确 UTF-8" in fixtures["news-content-normal.json"].decode("utf-8")
+    assert len(fixtures["audit-write.json"]) <= 16_000
+    for name in (
+        "audit-briefs-write.json", "audit-stories-write.json",
+        "audit-decisions-write.json",
+    ):
+        assert len(fixtures[name]) <= 120_000

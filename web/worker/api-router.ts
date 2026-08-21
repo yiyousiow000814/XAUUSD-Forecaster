@@ -1,0 +1,354 @@
+/// <reference types="vite/client" />
+
+import {
+  AUDIT_DETAIL_SNAPSHOT_BYTES,
+  AUDIT_SNAPSHOT_IDS,
+  AUDIT_SUMMARY_SNAPSHOT_BYTES,
+  MAX_DASHBOARD_SNAPSHOT_BYTES,
+  publicStatusJsonExpression,
+  readBoundedBody,
+  writeDashboardStatusSnapshots,
+  writeSerializedDashboardSnapshot,
+} from "../app/api/_shared/dashboard-snapshot";
+import {
+  d1CapabilityFailure,
+  D1CapabilityError,
+  requireD1Capabilities,
+} from "../app/api/_shared/d1-capabilities";
+
+declare const __AURUM_DEPLOYMENT__: {
+  branch: string;
+  commit_sha: string;
+  is_preview: boolean;
+};
+
+type RouteModule = Record<string, ((request: Request) => Response | Promise<Response>) | undefined>;
+type RouteLoader = () => Promise<RouteModule>;
+
+const routeModules = import.meta.glob<RouteModule>([
+  "../app/api/**/route.ts",
+  "../app/admin/api/**/route.ts",
+]);
+
+const SNAPSHOT_ROUTES: Record<string, { id: number; invalid: string; maxBytes: number }> = {
+  "/api/audit": { id: AUDIT_SNAPSHOT_IDS.summary, invalid: "invalid audit payload", maxBytes: AUDIT_SUMMARY_SNAPSHOT_BYTES },
+  "/api/audit-decisions": { id: AUDIT_SNAPSHOT_IDS.decisions, invalid: "invalid audit decisions payload", maxBytes: AUDIT_DETAIL_SNAPSHOT_BYTES },
+  "/api/audit-briefs": { id: AUDIT_SNAPSHOT_IDS.briefs, invalid: "invalid audit briefs payload", maxBytes: AUDIT_DETAIL_SNAPSHOT_BYTES },
+  "/api/audit-stories": { id: AUDIT_SNAPSHOT_IDS.stories, invalid: "invalid audit stories payload", maxBytes: AUDIT_DETAIL_SNAPSHOT_BYTES },
+  "/api/learning": { id: 3, invalid: "invalid learning payload", maxBytes: MAX_DASHBOARD_SNAPSHOT_BYTES },
+  "/api/market-chart": { id: 2, invalid: "invalid market chart payload", maxBytes: MAX_DASHBOARD_SNAPSHOT_BYTES },
+};
+
+const PUBLIC_STATUS_SQL = `WITH selected(payload) AS (
+  SELECT payload FROM dashboard_snapshots
+   WHERE id IN (5, 1)
+   ORDER BY CASE id WHEN 5 THEN 0 ELSE 1 END
+   LIMIT 1
+), public(payload) AS (
+  SELECT ${publicStatusJsonExpression()} FROM selected
+), measured AS (
+  SELECT payload,
+    CASE
+      WHEN json_type(payload, '$.system.quote_age_seconds') IN ('integer', 'real')
+       AND julianday(json_extract(payload, '$.generated_at')) IS NOT NULL
+      THEN max(0.0,
+        CAST(json_extract(payload, '$.system.quote_age_seconds') AS REAL)
+        + max(0.0, (julianday('now')
+          - julianday(json_extract(payload, '$.generated_at'))) * 86400.0)
+      )
+      ELSE NULL
+    END AS quote_age_seconds
+  FROM public
+), finalized(payload) AS (
+  SELECT json_set(
+    payload,
+    '$.observation_scope', 'D1_SNAPSHOT',
+    '$.system.quote_age_seconds', quote_age_seconds,
+    '$.system.online', json(CASE
+      WHEN json_extract(payload, '$.system.online') = 1
+       AND quote_age_seconds IS NOT NULL AND quote_age_seconds <= 75
+      THEN 'true' ELSE 'false' END)
+  ) FROM measured
+)
+SELECT payload, length(CAST(payload AS BLOB)) AS payload_bytes FROM finalized`;
+
+export type ApiRouteResult = {
+  response: Response;
+  resource: string;
+  d1Operations: number | null;
+  requestBytes: number | null;
+  responseBytes: number | null;
+  failureStage: string | null;
+};
+
+const bytes = (value: string) => new TextEncoder().encode(value).byteLength;
+
+async function isAuthorized(request: Request, expected: string | undefined) {
+  const provided = /^Bearer\s+(.+)$/i.exec(
+    request.headers.get("authorization") ?? "",
+  )?.[1];
+  if (!expected || !provided) return false;
+  const digest = async (value: string) => new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)),
+  );
+  const [expectedDigest, providedDigest] = await Promise.all([
+    digest(expected), digest(provided),
+  ]);
+  let difference = expectedDigest.length ^ providedDigest.length;
+  for (let index = 0; index < expectedDigest.length; index += 1) {
+    difference |= expectedDigest[index] ^ providedDigest[index];
+  }
+  return difference === 0;
+}
+
+function json(payload: unknown, status = 200, headers: HeadersInit = {}) {
+  const serialized = JSON.stringify(payload);
+  return {
+    response: new Response(serialized, {
+      status,
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        ...headers,
+      },
+    }),
+    responseBytes: bytes(serialized),
+  };
+}
+
+function result(
+  response: Response,
+  resource: string,
+  options: Partial<Omit<ApiRouteResult, "response" | "resource">> = {},
+): ApiRouteResult {
+  return {
+    response,
+    resource,
+    d1Operations: options.d1Operations ?? null,
+    requestBytes: options.requestBytes ?? null,
+    responseBytes: options.responseBytes ?? null,
+    failureStage: options.failureStage ?? null,
+  };
+}
+
+async function snapshotRead(
+  binding: D1Database | undefined,
+  id: number,
+  resource: string,
+) {
+  if (!binding) {
+    const response = json({ error: `等待${resource}首次同步` }, 503);
+    return result(response.response, resource, {
+      d1Operations: 0, responseBytes: response.responseBytes,
+      failureStage: "d1_binding",
+    });
+  }
+  try {
+    const row = await binding.prepare(
+      `SELECT payload, length(CAST(payload AS BLOB)) AS payload_bytes
+       FROM dashboard_snapshots WHERE id = ?`,
+    ).bind(id).first<{ payload: string; payload_bytes: number }>();
+    if (row) {
+      return result(new Response(row.payload, {
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "private, max-age=15",
+        },
+      }), resource, {
+        d1Operations: 1, responseBytes: Number(row.payload_bytes),
+      });
+    }
+  } catch {
+    // The resource owns its D1 failure and reports it below.
+  }
+  const response = json({ error: `等待${resource}首次同步` }, 503);
+  return result(response.response, resource, {
+    d1Operations: 1, responseBytes: response.responseBytes,
+    failureStage: "d1_read",
+  });
+}
+
+async function publicStatusRead(binding: D1Database | undefined) {
+  if (!binding) {
+    const response = json({ error: "等待公开状态快照" }, 503);
+    return result(response.response, "status", {
+      d1Operations: 0, responseBytes: response.responseBytes,
+      failureStage: "d1_binding",
+    });
+  }
+  try {
+    const row = await binding.prepare(PUBLIC_STATUS_SQL).first<{
+      payload: string; payload_bytes: number;
+    }>();
+    if (row?.payload) {
+      return result(new Response(row.payload, {
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store, max-age=0",
+        },
+      }), "status", {
+        d1Operations: 1, responseBytes: Number(row.payload_bytes),
+      });
+    }
+  } catch {
+    // The public status read remains fail-closed.
+  }
+  const response = json({ error: "等待公开状态快照" }, 503);
+  return result(response.response, "status", {
+    d1Operations: 1, responseBytes: response.responseBytes,
+    failureStage: "d1_read",
+  });
+}
+
+async function snapshotWrite(
+  request: Request,
+  env: Env,
+  resource: string,
+  id: number | null,
+  invalid: string,
+  maxBytes = MAX_DASHBOARD_SNAPSHOT_BYTES,
+) {
+  if (!await isAuthorized(request, env.INGEST_TOKEN)) {
+    const response = json({ error: "unauthorized" }, 401);
+    return result(response.response, resource, {
+      d1Operations: 0, responseBytes: response.responseBytes,
+      failureStage: "authorization",
+    });
+  }
+  if (!env.DB) {
+    const response = json({ error: "database unavailable" }, 503);
+    return result(response.response, resource, {
+      d1Operations: 0, responseBytes: response.responseBytes,
+      failureStage: "d1_binding",
+    });
+  }
+  const body = await readBoundedBody(request, maxBytes);
+  if (body.status === "too_large") {
+    const response = json({ error: "payload too large" }, 413);
+    return result(response.response, resource, {
+      d1Operations: 0, responseBytes: response.responseBytes,
+      failureStage: "request_bound",
+    });
+  }
+  const writeResult = id === null
+    ? await writeDashboardStatusSnapshots(body.serialized, env.DB)
+    : await writeSerializedDashboardSnapshot(body.serialized, env.DB, id);
+  if (writeResult === "invalid") {
+    const response = json({ error: invalid }, 400);
+    return result(response.response, resource, {
+      d1Operations: 1, requestBytes: body.receivedBytes,
+      responseBytes: response.responseBytes, failureStage: "json_validation",
+    });
+  }
+  const payload = resource === "status" ? {
+    status: "OK",
+    main_revision:
+      __AURUM_DEPLOYMENT__.branch === "main"
+      && /^[0-9a-f]{40}$/.test(__AURUM_DEPLOYMENT__.commit_sha)
+        ? __AURUM_DEPLOYMENT__.commit_sha : null,
+  } : { status: "OK" };
+  const response = json(payload);
+  return result(response.response, resource, {
+    d1Operations: 1, requestBytes: body.receivedBytes,
+    responseBytes: response.responseBytes,
+  });
+}
+
+async function ingestHealth(env: Env) {
+  if (!env.DB) {
+    const response = json({
+      status: "ERROR", error: "database unavailable",
+      error_code: "D1_BINDING_MISSING",
+    }, 503, { "Cache-Control": "no-store" });
+    return result(response.response, "status", {
+      d1Operations: 0, responseBytes: response.responseBytes,
+      failureStage: "d1_binding",
+    });
+  }
+  try {
+    await requireD1Capabilities(env.DB, [
+      "operator_retry_scheduling", "paged_news_evidence",
+    ]);
+    const response = json({
+      status: "OK",
+      main_revision:
+        __AURUM_DEPLOYMENT__.branch === "main"
+        && /^[0-9a-f]{40}$/.test(__AURUM_DEPLOYMENT__.commit_sha)
+          ? __AURUM_DEPLOYMENT__.commit_sha : null,
+    }, 200, { "Cache-Control": "no-store" });
+    return result(response.response, "ingest-health", {
+      d1Operations: 1, responseBytes: response.responseBytes,
+    });
+  } catch (error) {
+    const payload = error instanceof D1CapabilityError
+      ? d1CapabilityFailure(error)
+      : { status: "ERROR", error: "database unavailable" };
+    const response = json(payload, 503, { "Cache-Control": "no-store" });
+    return result(response.response, "ingest-health", {
+      d1Operations: 1, responseBytes: response.responseBytes,
+      failureStage: "d1_capability",
+    });
+  }
+}
+
+function moduleKey(pathname: string) {
+  return pathname.startsWith("/admin/api/")
+    ? `../app${pathname}/route.ts`
+    : `../app${pathname}/route.ts`;
+}
+
+async function genericRoute(request: Request, pathname: string) {
+  const loader = routeModules[moduleKey(pathname)] as RouteLoader | undefined;
+  if (!loader) return null;
+  const routeModule = await loader();
+  const handler = routeModule[request.method] ?? (
+    request.method === "HEAD" ? routeModule.GET : undefined
+  );
+  if (!handler) {
+    const response = json({ error: "method not allowed" }, 405, { Allow: "GET, POST" });
+    return result(response.response, pathname.split("/").at(-1) ?? "api", {
+      d1Operations: 0, responseBytes: response.responseBytes,
+      failureStage: "method",
+    });
+  }
+  const response = await handler(request);
+  const rawContentLength = response.headers.get("content-length");
+  const contentLength = rawContentLength === null ? null : Number(rawContentLength);
+  return result(response, pathname.split("/").at(-1) ?? "api", {
+    responseBytes: contentLength !== null
+      && Number.isSafeInteger(contentLength) && contentLength >= 0
+      ? contentLength : null,
+    failureStage: response.status >= 500 ? "route_handler" : null,
+  });
+}
+
+export async function routeApiRequest(
+  request: Request,
+  env: Env,
+  isPreview: boolean,
+): Promise<ApiRouteResult | null> {
+  const pathname = new URL(request.url).pathname;
+  if (isPreview) return genericRoute(request, pathname);
+
+  if (request.method === "GET" && pathname === "/api/status") {
+    return publicStatusRead(env.DB);
+  }
+  if (pathname === "/api/ingest") {
+    if (request.method === "GET") return ingestHealth(env);
+    if (request.method === "POST") {
+      return snapshotWrite(request, env, "status", null, "invalid status payload");
+    }
+  }
+  const snapshot = SNAPSHOT_ROUTES[pathname];
+  if (snapshot) {
+    if (request.method === "GET") {
+      return snapshotRead(env.DB, snapshot.id, pathname.slice(5));
+    }
+    if (request.method === "POST") {
+      return snapshotWrite(
+        request, env, pathname.slice(5), snapshot.id, snapshot.invalid,
+        snapshot.maxBytes,
+      );
+    }
+  }
+  return genericRoute(request, pathname);
+}

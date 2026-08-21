@@ -2,7 +2,11 @@ import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
-import { writeDashboardSnapshot } from "../_shared/dashboard-snapshot";
+import {
+  AUDIT_SNAPSHOT_IDS,
+  AUDIT_SUMMARY_SNAPSHOT_BYTES,
+  writeDashboardSnapshot,
+} from "../_shared/dashboard-snapshot";
 import {
   authorizeReleaseValidation, isReleaseValidationContext, releaseValidationResponse,
 } from "../_shared/release-validation";
@@ -16,7 +20,7 @@ export async function GET() {
     if (binding) {
       const row = await binding.prepare(
         "SELECT payload FROM dashboard_snapshots WHERE id = ?",
-      ).bind(4).first<{ payload: string }>();
+      ).bind(AUDIT_SNAPSHOT_IDS.summary).first<{ payload: string }>();
       if (row) {
         return new Response(row.payload, {
           headers: {
@@ -41,9 +45,11 @@ export async function POST(request: Request) {
   if (validation instanceof Response) return validation;
   const binding = env.DB as D1Database | undefined;
   if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
-  const writeResult = await writeDashboardSnapshot(request, binding, 4, {
+  const writeResult = await writeDashboardSnapshot(request, binding, AUDIT_SNAPSHOT_IDS.summary, {
     dryRun: isReleaseValidationContext(validation),
-  });
+    maxBytes: AUDIT_SUMMARY_SNAPSHOT_BYTES,
+  },
+  );
   if (writeResult === "too_large") {
     return NextResponse.json({ error: "payload too large" }, { status: 413 });
   }

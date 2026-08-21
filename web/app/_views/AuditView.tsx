@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
 import CountValue from "../_components/CountValue";
+import type { AuditViewName } from "../_components/DashboardNavigation";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
 import {
   DashboardResourceError, loadDashboardResource, readDashboardResource,
@@ -33,7 +33,14 @@ type Prediction = {
   prediction_status: string;
 };
 
-type AuditDeskView = "briefs" | "search" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage";
+type AuditDeskView = AuditViewName;
+type AuditDetailView = "briefs" | "stories" | "decisions";
+
+const AUDIT_DETAIL_RESOURCES: Record<AuditDetailView, string> = {
+  briefs: "/api/audit-briefs",
+  stories: "/api/audit-stories",
+  decisions: "/api/audit-decisions",
+};
 
 type Decision = {
   decision_id: string;
@@ -292,6 +299,9 @@ type Payload = {
   daily_news_brief_summary?: DailyNewsBriefSummary;
   news_evidence?: NewsEvidence[];
   audit_resource?: string;
+  audit_briefs_resource?: string;
+  audit_stories_resource?: string;
+  audit_decisions_resource?: string;
   news_evidence_resource?: string;
   news_evidence_summary: {
     policy_version: string;
@@ -823,20 +833,19 @@ function NewsRow({
   </details>;
 }
 
-export default function AuditView() {
-  const searchParams = useSearchParams();
-  const requestedView = searchParams.get("view");
-  const initialView = requestedView === "qa"
-    ? "briefs"
-    : requestedView === "briefs" || requestedView === "search" || requestedView === "news" || requestedView === "evidence" || requestedView === "stories" || requestedView === "decisions" || requestedView === "league" || requestedView === "coverage"
-    ? requestedView
-    : "news";
+export default function AuditView({ initialView }: { initialView: AuditDeskView }) {
   const cachedStatus = readDashboardResource<Payload>("/api/status");
   const cachedAudit = readDashboardResource<Partial<Payload>>("/api/audit");
+  const cachedAuditBriefs = readDashboardResource<Partial<Payload>>(AUDIT_DETAIL_RESOURCES.briefs);
+  const cachedAuditStories = readDashboardResource<Partial<Payload>>(AUDIT_DETAIL_RESOURCES.stories);
+  const cachedAuditDecisions = readDashboardResource<Partial<Payload>>(AUDIT_DETAIL_RESOURCES.decisions);
   const cachedLearning = readDashboardResource<Partial<Payload>>("/api/learning");
   const cachedNewsIndex = readDashboardResource<NewsIndexResponse>(`/api/news-index?page=1&limit=${NEWS_PER_PAGE}&review_state=COMPLETED`);
   const [payload, setPayload] = useState<Payload | null>(() => cachedStatus
-    ? ({ ...cachedStatus, ...cachedAudit, ...cachedLearning } as Payload)
+    ? ({
+        ...cachedStatus, ...cachedAudit, ...cachedLearning,
+        ...cachedAuditBriefs, ...cachedAuditStories, ...cachedAuditDecisions,
+      } as Payload)
     : null);
   const [newsIndex, setNewsIndex] = useState<NewsIndexResponse>(() => (
     cachedNewsIndex ?? {
@@ -855,6 +864,14 @@ export default function AuditView() {
   const [auditState, setAuditState] = useState<CurrentDataPhase | "idle">(
     cachedAudit ? "ready" : "idle",
   );
+  const [auditDetailState, setAuditDetailState] = useState<Record<AuditDetailView, CurrentDataPhase | "idle">>({
+    briefs: cachedAuditBriefs ? "ready" : "idle",
+    stories: cachedAuditStories ? "ready" : "idle",
+    decisions: cachedAuditDecisions ? "ready" : "idle",
+  });
+  const [auditDetailError, setAuditDetailError] = useState<Record<AuditDetailView, string | null>>({
+    briefs: null, stories: null, decisions: null,
+  });
   const [statusError, setStatusError] = useState<string | null>(null);
   const [learningError, setLearningError] = useState<string | null>(null);
   const [auditError, setAuditError] = useState<string | null>(null);
@@ -964,6 +981,32 @@ export default function AuditView() {
     } catch (reason) {
       setAuditState("error");
       setAuditError(reason instanceof Error ? reason.message : "无法读取审计首屏");
+    }
+  }, []);
+
+  const refreshAuditDetail = useCallback(async (
+    detailView: AuditDetailView, force = false,
+  ) => {
+    setAuditDetailState(previous => ({
+      ...previous,
+      [detailView]: previous[detailView] === "ready" ? "ready" : "loading",
+    }));
+    try {
+      const body = await loadDashboardResource<Partial<Payload>>(
+        AUDIT_DETAIL_RESOURCES[detailView], { force },
+      );
+      setPayload(previous => ({ ...previous, ...body }) as Payload);
+      setAuditDetailState(previous => ({ ...previous, [detailView]: "ready" }));
+      setAuditDetailError(previous => ({ ...previous, [detailView]: null }));
+    } catch (reason) {
+      setAuditDetailState(previous => ({
+        ...previous,
+        [detailView]: previous[detailView] === "ready" ? "ready" : "error",
+      }));
+      setAuditDetailError(previous => ({
+        ...previous,
+        [detailView]: reason instanceof Error ? reason.message : "无法读取审计详情",
+      }));
     }
   }, []);
 
@@ -1077,8 +1120,10 @@ export default function AuditView() {
     );
   }, [refreshLearning, view]);
 
+  const selectedAuditDetailState = view in AUDIT_DETAIL_RESOURCES
+    ? auditDetailState[view as AuditDetailView] : null;
+
   useEffect(() => {
-    if (!new Set(["briefs", "stories", "decisions"]).has(view)) return;
     return scheduleDashboardRefresh(
       () => void refreshAudit(auditState !== "ready"),
       () => void refreshAudit(true),
@@ -1086,7 +1131,21 @@ export default function AuditView() {
       "current",
       "audit",
     );
-  }, [auditState, refreshAudit, view]);
+  }, [auditState, refreshAudit]);
+
+  useEffect(() => {
+    if (!(view in AUDIT_DETAIL_RESOURCES)) return;
+    const detailView = view as AuditDetailView;
+    return scheduleDashboardRefresh(
+      () => void refreshAuditDetail(
+        detailView, selectedAuditDetailState !== "ready",
+      ),
+      () => void refreshAuditDetail(detailView, true),
+      DASHBOARD_REFRESH_INTERVALS.status,
+      "current",
+      `audit-detail:${detailView}`,
+    );
+  }, [refreshAuditDetail, selectedAuditDetailState, view]);
 
   useEffect(() => {
     if (view !== "evidence") return;
@@ -1108,7 +1167,7 @@ export default function AuditView() {
   const selectView = (next: AuditDeskView) => {
     pendingScrollTop.current = window.scrollY;
     setView(next);
-    window.history.replaceState(null, "", `/?room=audit&view=${next}`);
+    window.history.replaceState(null, "", `/audit?view=${next}`);
   };
 
   useLayoutEffect(() => {
@@ -1146,12 +1205,6 @@ export default function AuditView() {
       setSearchBusy(false);
     }
   };
-
-  useEffect(() => {
-    if (requestedView === "qa") {
-      window.history.replaceState(null, "", "/?room=audit&view=briefs");
-    }
-  }, [requestedView]);
 
   const progress = useMemo(() => {
     const training = payload?.training;
@@ -1240,6 +1293,9 @@ export default function AuditView() {
     view === "evidence" && evidenceError && `新闻证据：${evidenceError}`,
     view === "league" && learningError && `学习进度：${learningError}`,
     view === "news" && newsError && `新闻索引：${newsError}`,
+    view in AUDIT_DETAIL_RESOURCES
+      && auditDetailError[view as AuditDetailView]
+      && `审计详情：${auditDetailError[view as AuditDetailView]}`,
   ].filter(Boolean).join(" · ");
   const legacyEvidence = useMemo(
     () => mergeNewsEvidenceByEvent(payload?.news_evidence ?? []),
@@ -1360,7 +1416,10 @@ export default function AuditView() {
         </select>
       </label>
 
-      {view === "briefs" && (() => {
+      {selectedAuditDetailState === "loading" && <div className="current-data-notice is-loading" role="status"><b>审计详情读取中</b><span>当前页面尚未加载，不会显示为零或空资料。</span></div>}
+      {selectedAuditDetailState === "error" && <div className="current-data-notice is-error" role="alert"><b>审计详情暂不可用</b><span>页面会自动重试，不会把缺失资料解释为空。</span></div>}
+
+      {view === "briefs" && selectedAuditDetailState === "ready" && (() => {
         const briefs = payload?.daily_news_briefs ?? [];
         const summary = payload?.daily_news_brief_summary;
         const dates = Array.from(new Set([summary?.brief_date, ...briefs.map(row => row.brief_date)].filter((value): value is string => Boolean(value))));
@@ -1569,7 +1628,7 @@ export default function AuditView() {
         {visibleEvidence.length > 8 && <button className="mobile-reveal-button" type="button" aria-expanded={showAllEvidence} onClick={() => setShowAllEvidence(value => !value)}>{showAllEvidence ? "收起证据" : `显示本页其余 ${formatExactCount(visibleEvidence.length - 8)} 个事件`}</button>}
       </section>}
 
-      {view === "stories" && <section className="story-desk">
+      {view === "stories" && selectedAuditDetailState === "ready" && <section className="story-desk">
         <header className="evidence-intro evidence-intro-compact"><div><p className="eyebrow">事件脉络</p><h2>第一次进展立即显示，后续变化接在一起。</h2></div></header>
         {payload?.system.deployment && <section className={`deployment-proof ${deploymentPresentation.className}`}><b>{deploymentPresentation.label}</b>{payload.system.deployment.status === "DEPLOYMENT_DRIFT" ? <span>本机 {payload.system.deployment.runtime_git_sha?.slice(0, 8) ?? "未知"} · 远端 {payload.system.deployment.expected_git_sha?.slice(0, 8) ?? "未知"}</span> : payload.system.deployment.runtime_git_sha ? <span>版本 {payload.system.deployment.runtime_git_sha.slice(0, 8)}</span> : null}</section>}
         <div className="event-thread-summary" aria-label="事件脉络统计"><span><b><CountValue value={activeEventTotal} /></b> 个独立事件</span><span><b><CountValue value={continuedEventTotal} /></b> 个已有后续</span><span><b><CountValue value={singleEventTotal} /></b> 个暂无后续</span></div>
@@ -1602,7 +1661,7 @@ export default function AuditView() {
         <details className="unassigned-story-events"><summary>未归属事件 <b><CountValue value={payload?.storyline_summary?.unassigned_total} /></b></summary>{(payload?.unassigned_story_events ?? []).map(item => <div key={item.event_key}><time>{time(item.first_seen)}</time><span>{item.headline}</span><small>{item.record_kind} · {item.reason}</small></div>)}</details>
       </section>}
 
-      {view === "decisions" && <section className="decision-audit">
+      {view === "decisions" && selectedAuditDetailState === "ready" && <section className="decision-audit">
         {(payload?.recent_decisions ?? []).map((row) => {
           const full = row.predictions.find(item => item.model_identity === "BROAD_FULL")
             ?? row.predictions.find(item => item.model_identity === "FULL");

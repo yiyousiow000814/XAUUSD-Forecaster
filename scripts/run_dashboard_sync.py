@@ -10,11 +10,13 @@ import math
 import os
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import UTC, datetime, timedelta
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
@@ -38,24 +40,35 @@ DEFAULT_MARKET_HISTORY_STATE = (
 DEFAULT_NEWS_EVIDENCE_STATE = (
     MODULE_ROOT / ".local" / "forward" / "dashboard-news-evidence-sync-state.json"
 )
+DEFAULT_RESOURCE_SCHEDULE_STATE = (
+    MODULE_ROOT / ".local" / "forward" / "dashboard-resource-schedule-state.json"
+)
 REMOTE_PAYLOAD_LIMIT_BYTES = 750_000
 LOCAL_STATUS_TIMEOUT_SECONDS = 20
 REMOTE_POST_TIMEOUT_SECONDS = 30
 REMOTE_NEWS_LIMIT = 200
 REMOTE_DECISION_LIMIT = 20
-NEWS_DETAIL_BATCH_LIMIT_BYTES = 400_000
+REMOTE_DAILY_BRIEF_LIMIT = 14
+NEWS_DETAIL_BATCH_LIMIT_BYTES = 160_000
 NEWS_INDEX_BATCH_LIMIT_BYTES = 400_000
 NEWS_WRITE_BATCH_ITEMS = 20
+NEWS_DETAIL_BATCH_ITEMS = 8
 NEWS_EVIDENCE_WRITE_BATCH_ITEMS = 20
-NEWS_EVIDENCE_PAGES_PER_CYCLE = 4
+NEWS_EVIDENCE_PAGES_PER_CYCLE = 1
+MARKET_HISTORY_PAGES_PER_CYCLE = 1
+MARKET_OVERVIEWS_PER_CYCLE = 2
+OPERATOR_RETRY_COMMANDS_PER_CYCLE = 10
+HEAVY_RESOURCES_PER_CYCLE = 1
+RESOURCE_BACKOFF_MAX_SECONDS = 3_600
 NEWS_READER_WINDOW_DAYS = 60
 NEWS_MIRROR_CONTRACT_VERSION = "news-60-day-incremental-v10-publication-clock-skew"
 NEWS_EVIDENCE_CONTRACT_VERSION = "news-evidence-paged-v2"
 MARKET_HISTORY_CONTRACT_VERSION = "market-history-d1-v2"
 MARKET_HISTORY_BATCH_LIMIT_BYTES = 350_000
+MARKET_HISTORY_BATCH_ITEMS = 25
 MARKET_HISTORY_OVERLAP_SECONDS = 2 * 3_600
 LEARNING_HISTORY_CONTRACT_VERSION = "learning-history-d1-v2"
-LEARNING_HISTORY_BATCH_LIMIT_BYTES = 300_000
+LEARNING_HISTORY_BATCH_LIMIT_BYTES = 60_000
 LEARNING_HISTORY_FULL_REFRESH_SECONDS = 86_400
 LEARNING_SUMMARY_CURVE_POINTS = 48
 LEARNING_SUMMARY_GROUPS_PER_IDENTITY = 6
@@ -65,10 +78,18 @@ LEARNING_OVERVIEW_GROUPS_PER_IDENTITY = 60
 MARKET_OVERVIEW_DECISIONS_PER_SERIES = 240
 REMOTE_MARKET_DECISION_LIMIT = 288 * 5
 REMOTE_MARKET_CANDLE_LIMIT = 576
-REMOTE_MARKET_DENSE_LIMITS = (1440, 1152, 864, 576, 288, 0)
+REMOTE_MARKET_DENSE_LIMITS = (1440, 1152, 864, 576, 288, 192, 144, 0)
 REMOTE_MARKET_OVERVIEW_LIMITS = (480, 240, 120, 80, 40)
+MARKET_CHART_SNAPSHOT_LIMIT_BYTES = 230_000
+AUDIT_FIRST_PAGE_LIMIT_BYTES = 16_000
+AUDIT_DETAIL_LIMIT_BYTES = 120_000
+
+_RESOURCE_SCHEDULE_LOCK = threading.Lock()
 
 from xauusd_forecaster.dashboard_payloads import (
+    audit_briefs_payload,
+    audit_decisions_payload,
+    audit_stories_payload,
     audit_status_payload,
     critical_status_payload,
 )
@@ -120,6 +141,20 @@ class RemoteInvariantViolation(RuntimeError):
             f"remote invariant check failed: {self.error_code} "
             f"({self.evidence['violation_count']} violations)"
         )
+
+
+def operator_retry_bulk_sla_seconds(
+    command_count: int,
+    *,
+    cadence_seconds: int = 30,
+    commands_per_cycle: int = OPERATOR_RETRY_COMMANDS_PER_CYCLE,
+) -> int:
+    """Return the product SLA for draining an already queued command batch."""
+    if command_count <= 0:
+        return 0
+    if cadence_seconds <= 0 or commands_per_cycle <= 0:
+        raise ValueError("retry cadence and batch size must be positive")
+    return math.ceil(command_count / commands_per_cycle) * cadence_seconds
 
 NEWS_INDEX_FIELDS = (
     "category", "source", "source_item_id", "revision_number", "cluster_id",
@@ -203,7 +238,7 @@ def news_mirror_parts(payload: dict) -> tuple[list[dict], list[dict]]:
 
 def news_detail_batches(rows: list[dict]) -> list[list[dict]]:
     return _bounded_item_batches(
-        rows, NEWS_DETAIL_BATCH_LIMIT_BYTES, max_items=NEWS_WRITE_BATCH_ITEMS,
+        rows, NEWS_DETAIL_BATCH_LIMIT_BYTES, max_items=NEWS_DETAIL_BATCH_ITEMS,
     )
 
 
@@ -724,11 +759,11 @@ def market_chart_snapshot(payload: dict) -> bytes:
                 ensure_ascii=False, allow_nan=False, separators=(",", ":"),
             ).encode("utf-8")
             last_size = len(encoded)
-            if last_size <= REMOTE_PAYLOAD_LIMIT_BYTES:
+            if last_size <= MARKET_CHART_SNAPSHOT_LIMIT_BYTES:
                 return encoded
     raise PayloadContractError(
         f"half-hour market chart payload is {last_size} bytes "
-        f"(limit {REMOTE_PAYLOAD_LIMIT_BYTES})"
+        f"(limit {MARKET_CHART_SNAPSHOT_LIMIT_BYTES})"
     )
 
 
@@ -766,10 +801,42 @@ def remote_snapshot(payload: dict) -> bytes:
 
 
 def audit_snapshot(payload: dict) -> bytes:
-    """Build a bounded optional first page independently of the heartbeat."""
-    return _encoded_snapshot(
-        audit_status_payload(payload, decision_limit=REMOTE_DECISION_LIMIT),
-        label="bounded audit first page",
+    """Build a fixed summary independently of all growing audit detail."""
+    return _bounded_audit_snapshot(
+        audit_status_payload(payload), label="audit summary",
+        limit=AUDIT_FIRST_PAGE_LIMIT_BYTES,
+    )
+
+
+def _bounded_audit_snapshot(payload: dict, *, label: str, limit: int) -> bytes:
+    encoded = json.dumps(
+        payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) > limit:
+        raise PayloadContractError(
+            f"{label} payload is {len(encoded)} bytes (limit {limit})"
+        )
+    return encoded
+
+
+def audit_briefs_snapshot(payload: dict) -> bytes:
+    return _bounded_audit_snapshot(
+        audit_briefs_payload(payload, brief_limit=REMOTE_DAILY_BRIEF_LIMIT),
+        label="audit briefs", limit=AUDIT_DETAIL_LIMIT_BYTES,
+    )
+
+
+def audit_decisions_snapshot(payload: dict) -> bytes:
+    return _bounded_audit_snapshot(
+        audit_decisions_payload(payload, decision_limit=REMOTE_DECISION_LIMIT),
+        label="audit decisions", limit=AUDIT_DETAIL_LIMIT_BYTES,
+    )
+
+
+def audit_stories_snapshot(payload: dict) -> bytes:
+    return _bounded_audit_snapshot(
+        audit_stories_payload(payload), label="audit stories",
+        limit=AUDIT_DETAIL_LIMIT_BYTES,
     )
 
 
@@ -1020,7 +1087,7 @@ def _sync_operator_retries(_local_payload: dict, config: dict) -> None:
     )
     worker_id = _assistant_worker_id()
     processed = False
-    for _ in range(100):
+    for _ in range(OPERATOR_RETRY_COMMANDS_PER_CYCLE):
         command = _get_json(
             f"{worker_url}?{urllib.parse.urlencode({'worker_id': worker_id})}", config,
         ).get("item")
@@ -1165,6 +1232,17 @@ def configured_targets(config: dict) -> list[dict]:
             name,
             legacy=scoped["legacy"],
         ))
+        scoped["resource_schedule_state_file"] = str(_target_state_path(
+            Path(target.get(
+                "resource_schedule_state_file",
+                config.get(
+                    "resource_schedule_state_file",
+                    DEFAULT_RESOURCE_SCHEDULE_STATE,
+                ),
+            )),
+            name,
+            legacy=scoped["legacy"],
+        ))
         targets.append(scoped)
     if not targets:
         raise ValueError("dashboard sync has no configured targets")
@@ -1186,65 +1264,86 @@ def _write_news_sync_state(path: Path, state: dict) -> None:
     temporary.replace(path)
 
 
-def _sync_learning(local_payload: dict, config: dict) -> None:
+def _learning_payload(local_payload: dict, config: dict) -> dict:
     if not local_payload and config.get("local_status_url"):
-        local_payload = _read_local_resource(config, "/api/learning")
+        return _read_local_resource(config, "/api/learning")
+    return local_payload
+
+
+def _sync_learning_history(local_payload: dict, config: dict) -> None:
+    local_payload = _learning_payload(local_payload, config)
+    remote_host = urllib.parse.urlsplit(config["remote_ingest_url"]).hostname or ""
+    if remote_host.lower().endswith(".chatgpt.site"):
+        return
+    history_url = config.get("remote_learning_history_url") or (
+        config["remote_ingest_url"].rsplit("/", 1)[0] + "/learning-history"
+    )
+    history_state_path = Path(config.get(
+        "learning_history_state_file", DEFAULT_LEARNING_HISTORY_STATE,
+    ))
+    history_state = _read_news_sync_state(history_state_path)
+    hashes = history_state.get("hashes", {})
+    if not isinstance(hashes, dict):
+        hashes = {}
+    now = datetime.now(UTC)
+    last_full = history_state.get("last_full_sync")
+    refresh_in_progress = bool(history_state.get("full_refresh_started_at"))
+    try:
+        full_refresh_due = (
+            history_state.get("contract_version") != LEARNING_HISTORY_CONTRACT_VERSION
+            or not last_full
+            or (now - datetime.fromisoformat(str(last_full))).total_seconds()
+            >= LEARNING_HISTORY_FULL_REFRESH_SECONDS
+        )
+    except (TypeError, ValueError):
+        full_refresh_due = True
+    if full_refresh_due and not refresh_in_progress:
+        hashes = {}
+        history_state["full_refresh_started_at"] = now.isoformat()
+
+    records = learning_history_records(local_payload)
+    pending = [
+        row for row in records
+        if hashes.get(f"{row['resource']}\0{row['record_key']}")
+        != row["payload_hash"]
+    ]
+    batches = learning_history_batches(pending)
+    if batches:
+        batch = batches[0]
+        encoded = json.dumps(
+            {"records": batch}, ensure_ascii=False, allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        _post_json(history_url, encoded, config)
+        for row in batch:
+            hashes[f"{row['resource']}\0{row['record_key']}"] = row["payload_hash"]
+        _write_news_sync_state(history_state_path, {
+            "contract_version": LEARNING_HISTORY_CONTRACT_VERSION,
+            "hashes": hashes,
+            "last_full_sync": last_full,
+            "full_refresh_started_at": history_state.get("full_refresh_started_at"),
+            "pending_record_count": len(pending) - len(batch),
+            "last_progress": now.isoformat(),
+        })
+        return
+
+    _write_news_sync_state(history_state_path, {
+        "contract_version": LEARNING_HISTORY_CONTRACT_VERSION,
+        "hashes": hashes,
+        "last_full_sync": now.isoformat() if full_refresh_due else last_full,
+        "last_success": now.isoformat(),
+        "pending_record_count": 0,
+    })
+
+
+def _sync_learning_summary(local_payload: dict, config: dict) -> None:
+    local_payload = _learning_payload(local_payload, config)
     learning_url = config.get("remote_learning_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/learning"
     )
     learning_state_path = Path(
         config.get("learning_state_file", DEFAULT_LEARNING_STATE)
     )
-    remote_host = urllib.parse.urlsplit(config["remote_ingest_url"]).hostname or ""
-    if not remote_host.lower().endswith(".chatgpt.site"):
-        history_url = config.get("remote_learning_history_url") or (
-            config["remote_ingest_url"].rsplit("/", 1)[0] + "/learning-history"
-        )
-        history_state_path = Path(config.get(
-            "learning_history_state_file", DEFAULT_LEARNING_HISTORY_STATE,
-        ))
-        history_state = _read_news_sync_state(history_state_path)
-        hashes = history_state.get("hashes", {})
-        if not isinstance(hashes, dict):
-            hashes = {}
-        last_full = history_state.get("last_full_sync")
-        try:
-            full_refresh_due = (
-                history_state.get("contract_version") != LEARNING_HISTORY_CONTRACT_VERSION
-                or not last_full
-                or (datetime.now(UTC) - datetime.fromisoformat(last_full)).total_seconds()
-                >= LEARNING_HISTORY_FULL_REFRESH_SECONDS
-            )
-        except (TypeError, ValueError):
-            full_refresh_due = True
-        records = learning_history_records(local_payload)
-        pending = [
-            row for row in records
-            if full_refresh_due
-            or hashes.get(f"{row['resource']}\0{row['record_key']}")
-            != row["payload_hash"]
-        ]
-        for batch in learning_history_batches(pending):
-            encoded = json.dumps(
-                {"records": batch}, ensure_ascii=False, allow_nan=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            _post_json(history_url, encoded, config)
-            for row in batch:
-                hashes[f"{row['resource']}\0{row['record_key']}"] = row["payload_hash"]
-            _write_news_sync_state(history_state_path, {
-                "contract_version": LEARNING_HISTORY_CONTRACT_VERSION,
-                "hashes": hashes,
-                "last_full_sync": last_full,
-            })
-        if full_refresh_due:
-            last_full = datetime.now(UTC).isoformat()
-        _write_news_sync_state(history_state_path, {
-            "contract_version": LEARNING_HISTORY_CONTRACT_VERSION,
-            "hashes": hashes,
-            "last_full_sync": last_full,
-            "last_success": datetime.now(UTC).isoformat(),
-        })
     learning_state = _read_news_sync_state(learning_state_path)
     learning_payload = learning_snapshot(local_payload)
     learning_hash = hashlib.sha256(learning_payload).hexdigest()
@@ -1254,6 +1353,13 @@ def _sync_learning(local_payload: dict, config: dict) -> None:
             "payload_hash": learning_hash,
             "last_success": datetime.now(UTC).isoformat(),
         })
+
+
+def _sync_learning(local_payload: dict, config: dict) -> None:
+    """Compatibility helper; the scheduler owns these as separate resources."""
+    payload = _learning_payload(local_payload, config)
+    _sync_learning_history(payload, config)
+    _sync_learning_summary(payload, config)
 
 
 def _sync_market(local_payload: dict, config: dict) -> None:
@@ -1305,7 +1411,10 @@ def _market_history_payloads(candles: list[dict], decisions: list[dict]) -> list
                 {key: candidate}, ensure_ascii=False, allow_nan=False,
                 separators=(",", ":"),
             ).encode("utf-8")
-            if current and len(encoded) > MARKET_HISTORY_BATCH_LIMIT_BYTES:
+            if current and (
+                len(candidate) > MARKET_HISTORY_BATCH_ITEMS
+                or len(encoded) > MARKET_HISTORY_BATCH_LIMIT_BYTES
+            ):
                 payloads.append(json.dumps(
                     {key: current}, ensure_ascii=False, allow_nan=False,
                     separators=(",", ":"),
@@ -1396,7 +1505,7 @@ def _sync_market_history(config: dict) -> None:
     new_after = cursor
     after = _overlap_cursor(cursor)
     pages = 0
-    while True:
+    while pages < MARKET_HISTORY_PAGES_PER_CYCLE:
         with urllib.request.urlopen(
             _local_market_history_url(config, after),
             timeout=LOCAL_STATUS_TIMEOUT_SECONDS,
@@ -1421,13 +1530,30 @@ def _sync_market_history(config: dict) -> None:
         pages += 1
         if not page.get("has_more") or not next_cursor or next_cursor == after:
             break
-        if pages >= 1_000:
-            raise RuntimeError("market history backfill exceeded 1000 pages")
         after = str(next_cursor)
-    for summary in decision_overviews.values():
+    summaries = sorted(decision_overviews.items())
+    overview_offset = int(state.get("overview_offset") or 0)
+    selected_summaries = []
+    if summaries:
+        for index in range(min(MARKET_OVERVIEWS_PER_CYCLE, len(summaries))):
+            selected_summaries.append(
+                summaries[(overview_offset + index) % len(summaries)][1]
+            )
+        overview_offset = (
+            overview_offset + len(selected_summaries)
+        ) % len(summaries)
+    for summary in selected_summaries:
         _post_json(
             remote_url, _market_decision_overview_payload(summary), config,
         )
+    _write_news_sync_state(state_path, {
+        "contract_version": MARKET_HISTORY_CONTRACT_VERSION,
+        "cursor": cursor,
+        "decision_overviews": decision_overviews,
+        "overview_offset": overview_offset,
+        "has_more": bool(page.get("has_more")),
+        "last_success": datetime.now(UTC).isoformat(),
+    })
 
 
 def _local_news_archive_url(config: dict, after: str | None) -> str:
@@ -1554,6 +1680,13 @@ def _sync_audit(local_payload: dict, config: dict) -> None:
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/audit"
     )
     _post_json(audit_url, audit_snapshot(local_payload), config)
+    root = audit_url.rsplit("/", 1)[0]
+    for resource, snapshot in (
+        ("audit-briefs", audit_briefs_snapshot(local_payload)),
+        ("audit-stories", audit_stories_snapshot(local_payload)),
+        ("audit-decisions", audit_decisions_snapshot(local_payload)),
+    ):
+        _post_json(f"{root}/{resource}", snapshot, config)
 
 
 def _local_news_evidence_url(
@@ -1720,7 +1853,104 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
     })
 
 
-def sync_once(config: dict) -> SyncResourceResults:
+RESOURCE_POLICIES = (
+    # Control-plane commands are bounded independently from historical mirrors.
+    ("operator_retries", "_sync_operator_retries", 30, False),
+    ("news_questions", "_sync_news_questions", 300, False),
+    # At most one of these accumulated resources runs in a sync cycle.
+    ("audit", "_sync_audit", 300, True),
+    ("learning", "_sync_learning_summary", 300, True),
+    ("learning_history", "_sync_learning_history", 300, True),
+    ("market_chart", "_sync_market", 60, True),
+    ("market_history", "_sync_market_history", 120, True),
+    ("news", "_sync_news", 60, True),
+    ("news_evidence", "_sync_news_evidence", 300, True),
+)
+
+
+def _schedule_epoch(value: object) -> float:
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _due_resource_policies(
+    state: dict, now: datetime, *, lane: str | None = None,
+) -> list[tuple]:
+    resources = state.get("resources")
+    if not isinstance(resources, dict):
+        resources = {}
+    due = []
+    for policy in RESOURCE_POLICIES:
+        resource = policy[0]
+        resource_state = resources.get(resource)
+        if not isinstance(resource_state, dict):
+            resource_state = {}
+        if _schedule_epoch(resource_state.get("next_run_at")) <= now.timestamp():
+            due.append(policy)
+    controls = [policy for policy in due if not policy[3]]
+    heavy = [policy for policy in due if policy[3]][:HEAVY_RESOURCES_PER_CYCLE]
+    if lane == "control":
+        return controls
+    if lane == "heavy":
+        return heavy
+    return [*controls, *heavy]
+
+
+def _record_resource_schedule(
+    state: dict,
+    resource: str,
+    cadence_seconds: int,
+    *,
+    now: datetime,
+    success: bool,
+) -> None:
+    resources = state.setdefault("resources", {})
+    current = resources.get(resource)
+    if not isinstance(current, dict):
+        current = {}
+    failures = 0 if success else int(current.get("consecutive_failures") or 0) + 1
+    delay = cadence_seconds if success else min(
+        RESOURCE_BACKOFF_MAX_SECONDS,
+        max(cadence_seconds, 30 * (2 ** min(failures - 1, 7))),
+    )
+    resources[resource] = {
+        **current,
+        "last_attempt_at": now.isoformat(),
+        "last_success_at": now.isoformat() if success else current.get("last_success_at"),
+        "consecutive_failures": failures,
+        "next_run_at": (now + timedelta(seconds=delay)).isoformat(),
+    }
+    state["schema_version"] = 1
+    state["updated_at"] = now.isoformat()
+
+
+def _resource_schedule_path(config: dict) -> Path:
+    return Path(config.get(
+        "resource_schedule_state_file", DEFAULT_RESOURCE_SCHEDULE_STATE,
+    ))
+
+
+def _persist_resource_schedule_result(
+    path: Path,
+    resource: str,
+    cadence_seconds: int,
+    *,
+    now: datetime,
+    success: bool,
+) -> None:
+    """Merge one lane's result without overwriting another lane's progress."""
+    with _RESOURCE_SCHEDULE_LOCK:
+        state = _read_news_sync_state(path)
+        _record_resource_schedule(
+            state, resource, cadence_seconds, now=now, success=success,
+        )
+        _write_news_sync_state(path, state)
+
+
+def sync_heartbeat_once(config: dict) -> tuple[list[dict], SyncResourceResults]:
+    """Publish only the critical heartbeat and return currently healthy targets."""
     with urllib.request.urlopen(
         _local_critical_status_url(config), timeout=LOCAL_STATUS_TIMEOUT_SECONDS
     ) as response:
@@ -1728,17 +1958,13 @@ def sync_once(config: dict) -> SyncResourceResults:
 
     degraded = []
     observations = []
-    healthy_targets = 0
-    live_payload = remote_snapshot(critical_payload)
     healthy = []
+    live_payload = remote_snapshot(critical_payload)
     for target in configured_targets(config):
         target_name = target["name"]
         started = time.perf_counter()
         try:
-            # The live heartbeat is the critical path. Optional, growing
-            # resources must not make a healthy target appear offline.
             _post_json(target["remote_ingest_url"], live_payload, target)
-            healthy_targets += 1
             healthy.append(target)
             observations.append({
                 "target": target_name,
@@ -1764,27 +1990,40 @@ def sync_once(config: dict) -> SyncResourceResults:
                 "duration_ms": duration_ms,
                 "completed_at": datetime.now(UTC).isoformat(),
             })
-            continue
-    if healthy_targets == 0:
+    if not healthy:
         error = AllTargetsRejected(degraded)
         error.resource_observations = observations
         raise error
+    return healthy, SyncResourceResults(degraded, observations)
 
-    for target in healthy:
+
+def sync_resource_lane(
+    targets: list[dict], *, lane: str | None = None,
+) -> SyncResourceResults:
+    """Advance control or accumulated resources independently of heartbeat."""
+    degraded = []
+    observations = []
+    for target in targets:
         target_name = target["name"]
-        for resource, operation in (
-            ("audit", _sync_audit),
-            ("learning", _sync_learning),
-            ("market_chart", _sync_market),
-            ("market_history", lambda _payload, scoped: _sync_market_history(scoped)),
-            ("news", _sync_news),
-            ("news_evidence", _sync_news_evidence),
-            ("news_questions", _sync_news_questions),
-            ("operator_retries", _sync_operator_retries),
+        schedule_path = _resource_schedule_path(target)
+        with _RESOURCE_SCHEDULE_LOCK:
+            schedule_state = _read_news_sync_state(schedule_path)
+        now = datetime.now(UTC)
+        for resource, operation_name, cadence_seconds, _heavy in (
+            _due_resource_policies(schedule_state, now, lane=lane)
         ):
             started = time.perf_counter()
             try:
-                operation({}, target)
+                operation = globals()[operation_name]
+                if operation_name == "_sync_market_history":
+                    operation(target)
+                else:
+                    operation({}, target)
+                completed_at = datetime.now(UTC)
+                _persist_resource_schedule_result(
+                    schedule_path, resource, cadence_seconds,
+                    now=completed_at, success=True,
+                )
                 observations.append({
                     "target": target_name,
                     "resource": resource,
@@ -1796,6 +2035,11 @@ def sync_once(config: dict) -> SyncResourceResults:
                 })
             except Exception as error:
                 duration_ms = round((time.perf_counter() - started) * 1000, 1)
+                completed_at = datetime.now(UTC)
+                _persist_resource_schedule_result(
+                    schedule_path, resource, cadence_seconds,
+                    now=completed_at, success=False,
+                )
                 failure = {
                     "target": target_name,
                     "resource": resource,
@@ -1816,6 +2060,15 @@ def sync_once(config: dict) -> SyncResourceResults:
                     "completed_at": datetime.now(UTC).isoformat(),
                 })
     return SyncResourceResults(degraded, observations)
+
+
+def sync_once(config: dict) -> SyncResourceResults:
+    healthy, heartbeat = sync_heartbeat_once(config)
+    optional = sync_resource_lane(healthy)
+    return SyncResourceResults(
+        [*heartbeat, *optional],
+        [*heartbeat.resource_observations, *optional.resource_observations],
+    )
 
 
 def sync_with_retry(config: dict, *, attempts: int = 3) -> tuple[int, list[dict]]:
@@ -1851,6 +2104,113 @@ def sync_with_retry(config: dict, *, attempts: int = 3) -> tuple[int, list[dict]
     raise RuntimeError("dashboard sync retry loop exhausted")
 
 
+def _lane_failure(lane: str, error: Exception) -> SyncResourceResults:
+    failure = {
+        "target": "scheduler",
+        "resource": f"{lane}_lane",
+        "error_type": type(error).__name__,
+        "error_code": sync_error_code(error),
+        "error": str(error)[:500],
+    }
+    observation = {
+        "target": "scheduler",
+        "resource": f"{lane}_lane",
+        "status": "ERROR",
+        "duration_ms": None,
+        "completed_at": datetime.now(UTC).isoformat(),
+    }
+    return SyncResourceResults([failure], [observation])
+
+
+def _consume_lane_future(
+    lane: str, future: Future | None,
+) -> tuple[Future | None, SyncResourceResults | None]:
+    if future is None or not future.done():
+        return future, None
+    try:
+        return None, future.result()
+    except Exception as error:
+        return None, _lane_failure(lane, error)
+
+
+def run_continuous_sync(
+    config: dict,
+    *,
+    status_file: Path,
+    interval_seconds: float = 30.0,
+    stop_event: threading.Event | None = None,
+    max_heartbeats: int | None = None,
+) -> int:
+    """Keep heartbeat, control work, and accumulated work on separate owners."""
+    stop = stop_event or threading.Event()
+    interval = max(5.0, interval_seconds)
+    latest_lane_results: dict[str, SyncResourceResults] = {
+        "control": SyncResourceResults([], []),
+        "heavy": SyncResourceResults([], []),
+    }
+    futures: dict[str, Future | None] = {"control": None, "heavy": None}
+    executors = {
+        lane: ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"dashboard-{lane}")
+        for lane in futures
+    }
+    heartbeat_count = 0
+    try:
+        while not stop.is_set():
+            cycle_started = time.monotonic()
+            for lane in futures:
+                futures[lane], completed = _consume_lane_future(
+                    lane, futures[lane],
+                )
+                if completed is not None:
+                    latest_lane_results[lane] = completed
+            try:
+                healthy, heartbeat = sync_heartbeat_once(config)
+                degraded = [
+                    *heartbeat,
+                    *latest_lane_results["control"],
+                    *latest_lane_results["heavy"],
+                ]
+                observations = [
+                    *heartbeat.resource_observations,
+                    *latest_lane_results["control"].resource_observations,
+                    *latest_lane_results["heavy"].resource_observations,
+                ]
+                write_sync_status(
+                    status_file,
+                    success=True,
+                    attempts_used=1,
+                    degraded_resources=degraded,
+                    resource_observations=observations,
+                )
+                for lane in futures:
+                    if futures[lane] is None:
+                        futures[lane] = executors[lane].submit(
+                            sync_resource_lane, healthy, lane=lane,
+                        )
+                print(json.dumps({
+                    "event": "DASHBOARD_HEARTBEAT_OK",
+                    "heartbeat_sequence": heartbeat_count + 1,
+                    "degraded_resources": degraded,
+                }), flush=True)
+            except Exception as error:
+                write_sync_status(status_file, success=False, error=error)
+                print(json.dumps({
+                    "event": "DASHBOARD_HEARTBEAT_ERROR",
+                    "heartbeat_sequence": heartbeat_count + 1,
+                    "error_type": type(error).__name__,
+                    "error": str(error)[:500],
+                }), flush=True)
+            heartbeat_count += 1
+            if max_heartbeats is not None and heartbeat_count >= max_heartbeats:
+                break
+            remaining = interval - (time.monotonic() - cycle_started)
+            stop.wait(max(0.0, remaining))
+    finally:
+        for executor in executors.values():
+            executor.shutdown(wait=True, cancel_futures=False)
+    return heartbeat_count
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -1859,6 +2219,12 @@ def main() -> int:
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     config = json.loads(args.config.read_text(encoding="utf-8"))
+    if not args.once:
+        return run_continuous_sync(
+            config,
+            status_file=args.status_file,
+            interval_seconds=args.interval_seconds,
+        )
     while True:
         try:
             attempts_used, degraded_resources = sync_with_retry(config)
@@ -1896,9 +2262,7 @@ def main() -> int:
                 ),
                 flush=True,
             )
-        if args.once:
-            break
-        time.sleep(max(5.0, args.interval_seconds))
+        break
     return 0
 
 

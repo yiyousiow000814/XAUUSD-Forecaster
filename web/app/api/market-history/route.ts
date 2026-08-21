@@ -151,29 +151,6 @@ async function previousCandleEnd(binding: D1Database, before: number) {
   return previous ? Number(previous.time_epoch) + 300 : before;
 }
 
-async function ensureMarketSchema(binding: D1Database) {
-  await binding.batch([
-    binding.prepare(`CREATE TABLE IF NOT EXISTS market_candles (
-      time_epoch integer PRIMARY KEY NOT NULL,time text NOT NULL,
-      open_milli integer NOT NULL,high_milli integer NOT NULL,low_milli integer NOT NULL,
-      close_milli integer NOT NULL,ticks integer NOT NULL,received_at text NOT NULL)`),
-    binding.prepare(`CREATE TABLE IF NOT EXISTS market_decisions (
-      decision_key text PRIMARY KEY NOT NULL,decision_epoch integer NOT NULL,
-      decision_time text NOT NULL,model_identity text NOT NULL,payload text NOT NULL,
-      received_at text NOT NULL)`),
-    binding.prepare(`CREATE INDEX IF NOT EXISTS market_decisions_time_idx
-      ON market_decisions (decision_epoch)`),
-    binding.prepare(`CREATE INDEX IF NOT EXISTS market_decisions_model_time_idx
-      ON market_decisions (model_identity,decision_epoch)`),
-    binding.prepare(`CREATE TABLE IF NOT EXISTS market_history_overview (
-      overview_key text PRIMARY KEY NOT NULL,payload text NOT NULL,
-      received_at text NOT NULL)`),
-    binding.prepare(`CREATE TABLE IF NOT EXISTS market_decision_overviews (
-      overview_key text PRIMARY KEY NOT NULL,model_identity text NOT NULL,
-      frequency text NOT NULL,payload text NOT NULL,received_at text NOT NULL)`),
-  ]);
-}
-
 async function materializedMarketOverview(binding: D1Database) {
   const row = await binding.prepare(
     `SELECT payload FROM market_history_overview WHERE overview_key='all'`,

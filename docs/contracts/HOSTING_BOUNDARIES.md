@@ -86,6 +86,27 @@
 - Failure belongs to the resource whose write or read failed. Optional or
   growing-resource failure remains visible as that resource's degraded state,
   but shared plumbing must still publish unrelated healthy critical state.
+- Public static shells and immutable assets do not enter the Worker execution
+  path. `/`, `/health`, and `/audit` are canonical public URLs with distinct
+  prerendered HTML identities; a direct reload or a client without JavaScript
+  must receive the requested page rather than a generic Live shell. API
+  requests enter a minimal router that loads only the selected API module;
+  React rendering and dashboard view modules are not part of the API execution
+  boundary. Snapshot JSON already validated by D1 is returned as its stored
+  string, without a parse-and-serialize cycle in the Worker.
+- Dashboard synchronization gives the critical heartbeat an execution owner
+  independent from control and heavy optional work. A slow optional build must
+  not delay the next heartbeat or make an otherwise current public status stale.
+  Each optional resource owns a durable next-run time and failure backoff, each
+  accumulated resource advances through a bounded page, and one cycle admits
+  only a fixed number of heavy resources. Restarting the synchronizer must not
+  collapse those independent cadences into one upload burst.
+- The audit landing resource is a fixed summary contract. Daily Brief bodies,
+  decision inspection rows, and storyline presentation detail are separate
+  lazy snapshots with independent item and serialized-byte bounds. Local
+  SQLite remains the complete authority; D1 contains only those bounded
+  display projections. A detail snapshot that has not loaded or is unavailable
+  must not be represented as an empty collection or zero count.
 - When a bound is exceeded, repair ownership, projection, pagination, batching,
   or failure isolation first. Do not default to raising the host limit or
   deleting authoritative evidence.

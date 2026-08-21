@@ -3,7 +3,7 @@
 import { createContext, useContext, type ReactNode } from "react";
 
 export type DashboardRoom = "live" | "audit" | "health" | "admin" | "assistant" | "retry" | "status";
-export type AuditViewName = "news" | "evidence" | "stories" | "decisions" | "league" | "coverage";
+export type AuditViewName = "briefs" | "search" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage";
 
 export type DashboardLocation = {
   room: DashboardRoom;

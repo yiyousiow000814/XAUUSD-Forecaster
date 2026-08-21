@@ -15,13 +15,15 @@ CRITICAL_STATUS_FIELDS = (
     "gemma_quota", "gemini_embedding_quota", "llm_routing", "training",
     "factor_coverage", "sources",
 )
-AUDIT_SNAPSHOT_FIELDS = (
-    "generated_at", "recent_decisions", "daily_news_briefs", "news_metrics",
-    "daily_news_brief_summary", "storylines", "market_narrative_candidates",
-    "archived_storylines", "archived_story_event_candidates",
-    "story_event_candidates", "market_reaction_streams", "theme_streams",
-    "unassigned_story_events", "storyline_summary", "news_evidence_summary",
-    "news_feature_policy",
+AUDIT_FIRST_PAGE_FIELDS = (
+    "generated_at", "news_metrics", "daily_news_brief_summary",
+    "storyline_summary", "news_evidence_summary", "news_feature_policy",
+)
+AUDIT_STORY_FIELDS = (
+    "storylines", "market_narrative_candidates", "archived_storylines",
+    "archived_story_event_candidates", "story_event_candidates",
+    "market_reaction_streams", "theme_streams", "unassigned_story_events",
+    "storyline_summary",
 )
 DAILY_BRIEF_SUMMARY_FIELDS = (
     "brief_date", "phase", "received_items", "reviewed_items", "pending_items",
@@ -64,17 +66,14 @@ def critical_status_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def audit_status_payload(
-    payload: Mapping[str, Any], *, decision_limit: int = 20,
+    payload: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Project the bounded optional audit first page from local authority."""
+    """Project the fixed audit summary; growing detail has separate owners."""
     snapshot = {
         key: copy.deepcopy(payload[key])
-        for key in AUDIT_SNAPSHOT_FIELDS
+        for key in AUDIT_FIRST_PAGE_FIELDS
         if key in payload
     }
-    decisions = snapshot.get("recent_decisions")
-    if isinstance(decisions, list):
-        snapshot["recent_decisions"] = decisions[:decision_limit]
     summary = snapshot.get("daily_news_brief_summary")
     if isinstance(summary, dict):
         snapshot["daily_news_brief_summary"] = {
@@ -82,6 +81,96 @@ def audit_status_payload(
             if key in summary
         }
     snapshot["news_evidence_resource"] = "/api/news-evidence"
+    snapshot["audit_briefs_resource"] = "/api/audit-briefs"
+    snapshot["audit_stories_resource"] = "/api/audit-stories"
+    snapshot["audit_decisions_resource"] = "/api/audit-decisions"
+    return snapshot
+
+
+def audit_briefs_payload(
+    payload: Mapping[str, Any], *, brief_limit: int = 3,
+) -> dict[str, Any]:
+    """Keep a bounded set of rendered briefs without duplicate raw JSON."""
+    rows = copy.deepcopy(payload.get("daily_news_briefs", []))
+    if not isinstance(rows, list):
+        rows = []
+    for row in rows[:brief_limit]:
+        if isinstance(row, dict):
+            row.pop("brief_json", None)
+    return {
+        "generated_at": payload.get("generated_at"),
+        "daily_news_briefs": rows[:brief_limit],
+    }
+
+
+def audit_decisions_payload(
+    payload: Mapping[str, Any], *, decision_limit: int = 20,
+    prediction_limit: int = 8,
+) -> dict[str, Any]:
+    """Keep recent decision presentation evidence, excluding unused features."""
+    rows = copy.deepcopy(payload.get("recent_decisions", []))
+    if not isinstance(rows, list):
+        rows = []
+    compact = []
+    for row in rows[:decision_limit]:
+        if not isinstance(row, dict):
+            continue
+        row.pop("features", None)
+        predictions = row.get("predictions")
+        if isinstance(predictions, list):
+            row["predictions"] = predictions[:prediction_limit]
+        compact.append(row)
+    return {
+        "generated_at": payload.get("generated_at"),
+        "recent_decisions": compact,
+    }
+
+
+def _bounded_storyline(row: Any, *, timeline_limit: int) -> Any:
+    if not isinstance(row, dict):
+        return row
+    timeline = row.get("timeline")
+    if isinstance(timeline, list) and len(timeline) > timeline_limit:
+        first = timeline_limit // 2
+        row["timeline"] = timeline[:first] + timeline[-(timeline_limit - first):]
+    for field in ("market_reactions", "commentary", "background"):
+        values = row.get(field)
+        if isinstance(values, list):
+            row[field] = values[-4:]
+    return row
+
+
+def audit_stories_payload(
+    payload: Mapping[str, Any], *, storyline_limit: int = 20,
+    timeline_limit: int = 8, candidate_limit: int = 50,
+    stream_limit: int = 12,
+) -> dict[str, Any]:
+    """Project bounded story presentation detail and retain exact totals."""
+    snapshot = {
+        key: copy.deepcopy(payload[key])
+        for key in AUDIT_STORY_FIELDS if key in payload
+    }
+    for field in (
+        "storylines", "market_narrative_candidates", "archived_storylines",
+    ):
+        rows = snapshot.get(field)
+        if isinstance(rows, list):
+            snapshot[field] = [
+                _bounded_storyline(row, timeline_limit=timeline_limit)
+                for row in rows[:storyline_limit]
+            ]
+    for field in (
+        "archived_story_event_candidates", "story_event_candidates",
+        "unassigned_story_events",
+    ):
+        rows = snapshot.get(field)
+        if isinstance(rows, list):
+            snapshot[field] = rows[:candidate_limit]
+    for field in ("market_reaction_streams", "theme_streams"):
+        rows = snapshot.get(field)
+        if isinstance(rows, list):
+            snapshot[field] = rows[:stream_limit]
+    snapshot["generated_at"] = payload.get("generated_at")
     return snapshot
 
 

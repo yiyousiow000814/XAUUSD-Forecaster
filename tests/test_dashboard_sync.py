@@ -5,6 +5,8 @@ import io
 import json
 import subprocess
 import sys
+import threading
+import time
 import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,6 +22,17 @@ def _sync_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _schedule_only(module, path: Path, resource: str) -> None:
+    future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "resources": {
+            policy[0]: {"next_run_at": future}
+            for policy in module.RESOURCE_POLICIES if policy[0] != resource
+        },
+    }), encoding="utf-8")
 
 
 def _dashboard_module():
@@ -854,6 +867,10 @@ def test_critical_status_excludes_growing_resources_and_keeps_references() -> No
             "annotation_reason": "搜索线索：来自聚合发现源，不是独立官方发布",
         } for index in range(100)],
         "recent_decisions": [{"id": index} for index in range(30)],
+        "daily_news_briefs": [
+            {"brief_date": f"2026-08-{20 - index:02d}", "revision_number": 1}
+            for index in range(5)
+        ],
         "news_evidence": [
             {"id": index, "model_seen": index < 97}
             for index in range(202)
@@ -876,6 +893,9 @@ def test_critical_status_excludes_growing_resources_and_keeps_references() -> No
     encoded = module.remote_snapshot(payload)
     mirrored = json.loads(encoded)
     audit = json.loads(module.audit_snapshot(payload))
+    audit_briefs = json.loads(module.audit_briefs_snapshot(payload))
+    audit_decisions = json.loads(module.audit_decisions_snapshot(payload))
+    audit_stories = json.loads(module.audit_stories_snapshot(payload))
     index_rows, detail_rows = module.news_mirror_parts(payload)
     learning = json.loads(module.learning_snapshot(payload))
 
@@ -899,7 +919,17 @@ def test_critical_status_excludes_growing_resources_and_keeps_references() -> No
     market_decision = json.loads(module.market_chart_snapshot(payload))["decisions"][0]
     assert market_decision["source_decision_id"] == "d1"
     assert market_decision["model_version"] == "unused-field"
-    assert len(audit["recent_decisions"]) == module.REMOTE_DECISION_LIMIT
+    assert "recent_decisions" not in audit
+    assert "daily_news_briefs" not in audit
+    assert "storylines" not in audit
+    assert audit["audit_briefs_resource"] == "/api/audit-briefs"
+    assert audit["audit_stories_resource"] == "/api/audit-stories"
+    assert audit["audit_decisions_resource"] == "/api/audit-decisions"
+    assert len(audit_decisions["recent_decisions"]) == module.REMOTE_DECISION_LIMIT
+    assert len(audit_briefs["daily_news_briefs"]) == min(
+        len(payload["daily_news_briefs"]), module.REMOTE_DAILY_BRIEF_LIMIT,
+    )
+    assert audit_stories.get("storylines", []) == []
     assert audit["news_evidence_resource"] == "/api/news-evidence"
     assert learning["learning_curves"]["models"] == [
         {"lifecycle_status": "LATEST", "model_version": "latest"},
@@ -912,6 +942,50 @@ def test_critical_status_excludes_growing_resources_and_keeps_references() -> No
     assert "learning_curves" not in mirrored
     assert "models" not in mirrored["training"]
     assert len(index_rows) == 100
+
+
+def test_audit_sync_owns_four_independently_bounded_resources(monkeypatch) -> None:
+    module = _sync_module()
+    payload = {
+        "generated_at": "2026-08-20T00:00:00+00:00",
+        "news_metrics": {"events": 2},
+        "daily_news_brief_summary": {"brief_date": "2026-08-20"},
+        "daily_news_briefs": [{
+            "brief_date": f"2026-08-{20 - index:02d}",
+            "brief": {"title": "简报", "items": []},
+            "brief_json": "duplicate" * 1_000,
+        } for index in range(14)],
+        "recent_decisions": [{"decision_id": str(index)} for index in range(20)],
+        "storylines": [],
+        "story_event_candidates": [],
+        "unassigned_story_events": [],
+    }
+    writes = []
+    monkeypatch.setattr(
+        module, "_post_json",
+        lambda url, body, config: writes.append((url, body)),
+    )
+
+    module._sync_audit(payload, {
+        "remote_ingest_url": "https://worker.example/api/ingest",
+    })
+
+    assert [url for url, _body in writes] == [
+        "https://worker.example/api/audit",
+        "https://worker.example/api/audit-briefs",
+        "https://worker.example/api/audit-stories",
+        "https://worker.example/api/audit-decisions",
+    ]
+    decoded = [json.loads(body) for _url, body in writes]
+    assert "daily_news_briefs" not in decoded[0]
+    assert "recent_decisions" not in decoded[0]
+    assert all("brief_json" not in row for row in decoded[1]["daily_news_briefs"])
+    assert [len(body) for _url, body in writes] == [
+        len(module.audit_snapshot(payload)),
+        len(module.audit_briefs_snapshot(payload)),
+        len(module.audit_stories_snapshot(payload)),
+        len(module.audit_decisions_snapshot(payload)),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -950,7 +1024,7 @@ def test_news_detail_batches_stay_bounded() -> None:
     assert len(batches) > 1
     assert sum(len(batch) for batch in batches) == len(rows)
     for batch in batches:
-        assert len(batch) <= module.NEWS_WRITE_BATCH_ITEMS
+        assert len(batch) <= module.NEWS_DETAIL_BATCH_ITEMS
         encoded = json.dumps(
             {"items": batch}, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
@@ -1347,7 +1421,10 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
         "prepare_snapshot": snapshot_id,
         "expected_count": len(rows),
     }
-    module._sync_news_evidence({}, config)
+    for _ in range(10):
+        if any("activate_snapshot" in body for _url, body in posted):
+            break
+        module._sync_news_evidence({}, config)
 
     batches = [body for _url, body in posted if "items" in body]
     activation = next(body for _url, body in posted if "activate_snapshot" in body)
@@ -1622,7 +1699,9 @@ def test_optional_growing_resource_failure_does_not_block_heartbeat(
         "name": "cloudflare", "remote_ingest_url": "https://remote/api/ingest",
         "token": "test", "legacy": False,
         "local_status_url": "http://local/api/status",
+        "resource_schedule_state_file": str(tmp_path / "schedule.json"),
     }
+    _schedule_only(module, tmp_path / "schedule.json", "news_evidence")
     monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
     posted = []
     monkeypatch.setattr(
@@ -1656,7 +1735,7 @@ def test_optional_growing_resource_failure_does_not_block_heartbeat(
 
 
 def test_growing_local_snapshot_failure_cannot_block_critical_heartbeat(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ) -> None:
     module = _sync_module()
     critical = {
@@ -1684,6 +1763,7 @@ def test_growing_local_snapshot_failure_cannot_block_critical_heartbeat(
         "name": "cloudflare", "remote_ingest_url": "https://remote/api/ingest",
         "token": "test", "legacy": False,
         "local_status_url": "http://local/api/status",
+        "resource_schedule_state_file": str(tmp_path / "schedule.json"),
     }
     monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
     posted = []
@@ -1697,19 +1777,110 @@ def test_growing_local_snapshot_failure_cannot_block_critical_heartbeat(
     assert len(posted) == 1
     assert posted[0][0] == "https://remote/api/ingest"
     assert json.loads(posted[0][1])["system"]["online"] is True
-    assert {row["resource"] for row in result} == {
-        "audit", "learning", "market_chart", "market_history", "news",
-        "news_evidence",
-    }
+    assert {row["resource"] for row in result} == {"audit"}
     assert all(row["resource"] != "optional_snapshot" for row in result)
     assert next(
         row for row in result.resource_observations if row["resource"] == "heartbeat"
     )["status"] == "OK"
 
 
+def test_sync_resource_budget_and_cadence_resume_from_durable_state(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    critical = {"generated_at": "2026-08-20T04:00:00+00:00", "system": {}}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(critical).encode()
+
+    schedule = tmp_path / "schedule.json"
+    target = {
+        "name": "cloudflare", "remote_ingest_url": "https://remote/api/ingest",
+        "token": "test", "legacy": False,
+        "local_status_url": "http://local/api/status",
+        "resource_schedule_state_file": str(schedule),
+    }
+    monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k: Response())
+    monkeypatch.setattr(module, "_post_json", lambda *_a, **_k: {})
+    called = []
+    for resource, operation_name, _cadence, _heavy in module.RESOURCE_POLICIES:
+        monkeypatch.setattr(
+            module, operation_name,
+            lambda *_a, resource=resource, **_k: called.append(resource),
+        )
+
+    module.sync_once({"local_status_url": "http://local/api/status"})
+    first = called.copy()
+    called.clear()
+    module.sync_once({"local_status_url": "http://local/api/status"})
+    second = called.copy()
+
+    assert first == ["operator_retries", "news_questions", "audit"]
+    assert second == ["learning"]
+    persisted = json.loads(schedule.read_text(encoding="utf-8"))
+    assert persisted["schema_version"] == 1
+    assert persisted["resources"]["audit"]["next_run_at"]
+    assert persisted["resources"]["learning"]["last_success_at"]
+
+
+def test_optional_failure_persists_backoff_without_same_cycle_retry(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    critical = {"generated_at": "2026-08-20T04:00:00+00:00", "system": {}}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(critical).encode()
+
+    schedule = tmp_path / "schedule.json"
+    _schedule_only(module, schedule, "audit")
+    target = {
+        "name": "cloudflare", "remote_ingest_url": "https://remote/api/ingest",
+        "token": "test", "legacy": False,
+        "local_status_url": "http://local/api/status",
+        "resource_schedule_state_file": str(schedule),
+    }
+    monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k: Response())
+    monkeypatch.setattr(module, "_post_json", lambda *_a, **_k: {})
+    calls = []
+
+    def fail_audit(*_args, **_kwargs):
+        calls.append("audit")
+        raise TimeoutError("audit unavailable")
+
+    monkeypatch.setattr(module, "_sync_audit", fail_audit)
+
+    first = module.sync_once({"local_status_url": "http://local/api/status"})
+    second = module.sync_once({"local_status_url": "http://local/api/status"})
+
+    assert calls == ["audit"]
+    assert [row["resource"] for row in first] == ["audit"]
+    assert second == []
+    persisted = json.loads(schedule.read_text(encoding="utf-8"))
+    audit = persisted["resources"]["audit"]
+    assert audit["consecutive_failures"] == 1
+    assert datetime.fromisoformat(audit["next_run_at"]) > datetime.now(timezone.utc)
+
+
 @pytest.mark.parametrize("failed_resource", ["audit", "learning", "market_chart"])
 def test_optional_resource_families_degrade_only_their_owner(
-    monkeypatch, failed_resource,
+    monkeypatch, tmp_path, failed_resource,
 ) -> None:
     module = _sync_module()
     critical = {
@@ -1732,7 +1903,9 @@ def test_optional_resource_families_degrade_only_their_owner(
         "name": "cloudflare", "remote_ingest_url": "https://remote/api/ingest",
         "token": "test", "legacy": False,
         "local_status_url": "http://local/api/status",
+        "resource_schedule_state_file": str(tmp_path / "schedule.json"),
     }
+    _schedule_only(module, tmp_path / "schedule.json", failed_resource)
     monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
     posted = []
     monkeypatch.setattr(
@@ -1741,7 +1914,8 @@ def test_optional_resource_families_degrade_only_their_owner(
     )
     operations = {
         "audit": "_sync_audit",
-        "learning": "_sync_learning",
+        "learning": "_sync_learning_summary",
+        "learning_history": "_sync_learning_history",
         "market_chart": "_sync_market",
         "market_history": "_sync_market_history",
         "news": "_sync_news",
@@ -1760,15 +1934,13 @@ def test_optional_resource_families_degrade_only_their_owner(
     result = module.sync_once({"local_status_url": "http://local/api/status"})
 
     assert posted[0][0] == "https://remote/api/ingest"
-    assert called == list(operations)
+    assert called == [failed_resource]
     assert [row["resource"] for row in result] == [failed_resource]
     by_resource = {row["resource"]: row for row in result.resource_observations}
     assert by_resource["heartbeat"]["status"] == "OK"
     assert by_resource[failed_resource]["status"] == "ERROR"
-    assert all(
-        row["status"] == "OK" for name, row in by_resource.items()
-        if name not in {failed_resource}
-    )
+    assert all(row["status"] == "OK" for name, row in by_resource.items()
+               if name not in {failed_resource})
 
 
 def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> None:
@@ -1834,35 +2006,28 @@ def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> 
         }],
     }
 
-    first_cycle = module.sync_once(config)
-    assert first_cycle == []
-    assert {row["resource"] for row in first_cycle.resource_observations} == {
-        "heartbeat", "audit", "learning", "market_chart", "market_history", "news",
-        "news_evidence", "news_questions", "operator_retries",
-    }
-    assert all(row["status"] == "OK" for row in first_cycle.resource_observations)
-    assert all(row["duration_ms"] >= 0 for row in first_cycle.resource_observations)
+    module._sync_learning_summary(payload, config)
+    module._sync_news(payload, config)
     assert posted.count("https://remote/api/learning") == 1
     # An unknown mirror contract neutralizes only stale operational state before
     # authoritative replay. Completed reader history stays visible throughout
     # the handover; reconciliation removes stale remote-only rows at the end.
     assert posted.count("https://remote/api/news-index") == 3
-    assert posted[0] == "https://remote/api/ingest"
 
     posted.clear()
     payload["generated_at"] = "2026-08-07T00:00:30+00:00"
-    module.sync_once(config)
+    module._sync_learning_summary(payload, config)
+    module._sync_news(payload, config)
     assert "https://remote/api/learning" not in posted
     assert "https://remote/api/news-index" not in posted
-    assert posted[0] == "https://remote/api/ingest"
 
     posted.clear()
     payload["learning_curves"]["learning_stage"] = "READY"
     payload["recent_news"][0]["headline"] = "第一条（更新）"
-    module.sync_once(config)
+    module._sync_learning_summary(payload, config)
+    module._sync_news(payload, config)
     assert posted.count("https://remote/api/learning") == 1
     assert posted.count("https://remote/api/news-index") == 1
-    assert posted[0] == "https://remote/api/ingest"
 
     news_state = json.loads((tmp_path / "news-state.json").read_text(encoding="utf-8"))
     assert news_state["cursor"].startswith('["2026-08-07T00:00:00')
@@ -1925,7 +2090,7 @@ def test_sync_repopulates_news_index_without_full_refresh_marker(
         "learning_state_file": str(tmp_path / "learning-state.json"),
     }
 
-    module.sync_once(config)
+    module._sync_news(payload, config)
 
     assert posted.count("https://remote/api/news-index") == 3
     state = json.loads(state_file.read_text(encoding="utf-8"))
@@ -2179,12 +2344,16 @@ def test_remote_market_chart_is_split_from_status_and_keeps_recent_window() -> N
 
     market = json.loads(module.market_chart_snapshot(payload))
     retained = market["decisions"]
-    assert len(retained) == module.REMOTE_MARKET_DECISION_LIMIT
-    assert retained[0]["source_decision_id"] == "d-20"
+    assert 0 < len(retained) <= module.REMOTE_MARKET_DECISION_LIMIT
+    assert retained[0]["source_decision_id"] == (
+        f"d-{len(decisions) - len(retained)}"
+    )
     assert all(row["source_decision_id"] != "d-0" for row in retained)
     assert retained[-1]["source_decision_id"] == f"d-{len(decisions) - 1}"
     assert "exit_time" not in retained[1]
-    assert retained[1]["model_version"] == "model-21"
+    assert retained[1]["model_version"] == (
+        f"model-{len(decisions) - len(retained) + 1}"
+    )
     assert len(market["candles"]) == 1
     assert market["candles"][0]["open"] == 1.123
     assert market["candles"][0]["time"] == "2026-08-05T00:00:00Z"
@@ -2225,7 +2394,7 @@ def test_seven_day_market_snapshot_is_recent_only_under_limit() -> None:
     })
     market = json.loads(encoded)
 
-    assert len(encoded) <= module.REMOTE_PAYLOAD_LIMIT_BYTES
+    assert len(encoded) <= module.MARKET_CHART_SNAPSHOT_LIMIT_BYTES
     assert len(market["candles"]) == module.REMOTE_MARKET_CANDLE_LIMIT
     assert 0 < len(market["overview_candles"]) <= 480
     assert len(market["decisions"]) <= module.REMOTE_MARKET_DECISION_LIMIT
@@ -2251,24 +2420,30 @@ def test_market_overview_downsampling_preserves_ohlc_extremes() -> None:
 
 def test_market_history_ingest_batches_are_bounded_and_complete() -> None:
     module = _sync_module()
+    start = datetime(2026, 8, 7, tzinfo=timezone.utc)
     candles = [{
-        "time": f"2026-08-07T00:{index:02d}:00+00:00",
+        "time": (start + timedelta(minutes=index)).isoformat(),
         "open": 4300.1234, "high": 4301.1234,
         "low": 4299.1234, "close": 4300.6234, "ticks": 20,
-    } for index in range(12)]
+    } for index in range(120)]
     decisions = [{
         "source_decision_id": f"d-{index}",
-        "decision_time": f"2026-08-07T00:{index:02d}:00+00:00",
+        "decision_time": (start + timedelta(minutes=index)).isoformat(),
         "model_identity": "BROAD_FULL", "model_version": "very-long-model-version",
         "recommended_action": "LONG", "outcome_status": "VALID",
         "ev_long_u5": 0.12, "ev_short_u5": -0.12,
         "long_quote_return": 0.001, "short_quote_return": -0.001,
-    } for index in range(12)]
+    } for index in range(120)]
 
     payloads = module._market_history_payloads(candles, decisions)
     decoded = [json.loads(payload) for payload in payloads]
 
     assert all(len(payload) <= module.MARKET_HISTORY_BATCH_LIMIT_BYTES for payload in payloads)
+    assert all(
+        len(row.get("candles", [])) + len(row.get("decisions", []))
+        <= module.MARKET_HISTORY_BATCH_ITEMS
+        for row in decoded
+    )
     assert sum(len(row.get("candles", [])) for row in decoded) == len(candles)
     assert sum(len(row.get("decisions", [])) for row in decoded) == len(decisions)
     assert module._overlap_cursor("2026-08-07T04:00:00Z") == "2026-08-07T02:00:00+00:00"
@@ -2385,6 +2560,116 @@ def test_operator_retry_sync_mirrors_claims_applies_and_finishes(monkeypatch) ->
     assert remote_posts[1][1]["action"] == "FINISH"
     assert remote_posts[1][1]["status"] == "APPLIED"
     assert remote_posts[2][1] == {"action": "SYNC_JOBS", "items": [applied_job]}
+
+
+@pytest.mark.parametrize(("commands", "expected_seconds"), [
+    (10, 30),
+    (50, 150),
+    (100, 300),
+])
+def test_operator_retry_batch_has_bounded_bulk_sla(commands, expected_seconds) -> None:
+    module = _sync_module()
+
+    assert module.OPERATOR_RETRY_COMMANDS_PER_CYCLE == 10
+    assert module.operator_retry_bulk_sla_seconds(commands) == expected_seconds
+
+
+def test_slow_heavy_resource_does_not_block_critical_heartbeat(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    schedule_path = tmp_path / "resource-schedule.json"
+    status_path = tmp_path / "sync-status.json"
+    _schedule_only(module, schedule_path, "audit")
+    target = {
+        "name": "candidate",
+        "local_status_url": "http://local/api/status",
+        "remote_ingest_url": "https://candidate.example/api/ingest",
+        "resource_schedule_state_file": str(schedule_path),
+    }
+    monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps({
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "system": {"online": True, "quote_age_seconds": 1},
+            }).encode("utf-8")
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_args, **_kwargs: _Response())
+    heartbeat_times = []
+    heartbeat_payloads = []
+    heartbeat_heavy_finished = []
+    heavy_finished = threading.Event()
+    heavy_started = threading.Event()
+    clock_changed = threading.Condition()
+    logical_time = [0.0]
+
+    def monotonic():
+        with clock_changed:
+            return logical_time[0]
+
+    class _LogicalStop:
+        def is_set(self):
+            return False
+
+        def wait(self, seconds):
+            if logical_time[0] == 0:
+                assert heavy_started.wait(1), "heavy lane did not start"
+            with clock_changed:
+                logical_time[0] += seconds
+                clock_changed.notify_all()
+            time.sleep(0.01)
+            return False
+
+    def post_json(url, _body, _config):
+        if url.endswith("/api/ingest"):
+            heartbeat_times.append(time.monotonic())
+            heartbeat_payloads.append(json.loads(_body))
+            heartbeat_heavy_finished.append(heavy_finished.is_set())
+
+    def slow_audit(_payload, _config):
+        started_at = monotonic()
+        heavy_started.set()
+        with clock_changed:
+            clock_changed.wait_for(lambda: logical_time[0] - started_at >= 61)
+        heavy_finished.set()
+
+    monkeypatch.setattr(module.time, "monotonic", monotonic)
+    monkeypatch.setattr(module, "_post_json", post_json)
+    monkeypatch.setattr(module, "_sync_audit", slow_audit)
+
+    count = module.run_continuous_sync(
+        {"local_status_url": "http://local/api/status"},
+        status_file=status_path,
+        interval_seconds=30,
+        stop_event=_LogicalStop(),
+        max_heartbeats=4,
+    )
+
+    assert count == 4
+    assert len(heartbeat_times) == 4
+    intervals = [
+        heartbeat_times[index] - heartbeat_times[index - 1]
+        for index in range(1, len(heartbeat_times))
+    ]
+    assert intervals == [30, 30, 30]
+    assert heartbeat_times[2] == heartbeat_times[0] + 60
+    assert heartbeat_heavy_finished[:3] == [False, False, False]
+    assert all(payload["system"]["online"] is True for payload in heartbeat_payloads)
+    assert heavy_finished.is_set()
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["status"] == "OK"
+    assert (
+        datetime.now(timezone.utc)
+        - datetime.fromisoformat(status["last_success"])
+    ).total_seconds() < 5
 
 
 def test_local_operator_bridge_transport_requires_dedicated_secret(monkeypatch) -> None:

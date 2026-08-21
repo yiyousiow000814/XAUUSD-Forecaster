@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "ApproveCompatibility", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync")]
     [string]$ServiceKey = "",
@@ -409,7 +409,20 @@ function Get-CloudflareDeployment {
 }
 
 function Get-CloudflareVersions {
-    @(Invoke-WranglerJson -Arguments @("versions", "list", "--name", $workerName))
+    $versions = Invoke-WranglerJson -Arguments @(
+        "versions", "list", "--name", $workerName
+    )
+    # ConvertFrom-Json may return its top-level JSON array as one pipeline
+    # object. Emit each version explicitly so sorting/filtering never treats
+    # the complete Wrangler response as one synthetic version.
+    foreach ($version in @($versions)) { Write-Output $version }
+}
+
+function Get-CloudflareVersionDetails {
+    param([Parameter(Mandatory = $true)][string]$VersionId)
+    Invoke-WranglerJson -Arguments @(
+        "versions", "view", $VersionId, "--name", $workerName
+    )
 }
 
 function Invoke-CloudflareDeployment {
@@ -451,13 +464,63 @@ function Get-ReleaseArtifactKindFromVersion {
     return $unknownArtifactKind
 }
 
+function Get-ReleaseTimestampValues {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return }
+    if ($Value -is [string] -or $Value -is [DateTime] -or
+        $Value -is [DateTimeOffset]) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$Value)) { Write-Output $Value }
+        return
+    }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        foreach ($item in $Value) { Get-ReleaseTimestampValues -Value $item }
+        return
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$Value)) { Write-Output $Value }
+}
+
+function Get-ReleaseVersionPreviewUrl {
+    param(
+        [Parameter(Mandatory = $true)][object]$Version,
+        [Parameter(Mandatory = $true)][object]$Candidate
+    )
+    if (-not [bool]$Version.metadata.has_preview -or
+        [string]$Version.id -notmatch '^[0-9a-f]{8}-[0-9a-f-]{27}$' -or
+        [string]$Version.id -ne [string]$Candidate.worker_version_id -or
+        (Get-ReleaseGitShaFromVersion -Version $Version) -ne [string]$Candidate.git_sha -or
+        (Get-ReleaseArtifactKindFromVersion -Version $Version) -ne
+            $productionCandidateArtifactKind) { return "" }
+    try {
+        $production = [Uri]$dashboardUrl
+        $workerPrefix = "$workerName."
+        if (-not $production.Host.StartsWith(
+            $workerPrefix, [StringComparison]::OrdinalIgnoreCase
+        )) { return "" }
+        $suffix = $production.Host.Substring($workerPrefix.Length)
+        $versionPrefix = ([string]$Version.id).Substring(0, 8)
+        return "{0}://{1}-{2}.{3}" -f `
+            $production.Scheme, $versionPrefix, $workerName, $suffix
+    } catch { return "" }
+}
+
+function Get-ReleaseVersionCreatedAtValue {
+    param([Parameter(Mandatory = $true)][object]$Version)
+    $newest = [DateTimeOffset]::MinValue
+    foreach ($candidate in @(Get-ReleaseTimestampValues -Value $Version.metadata.created_on)) {
+        $parsed = [DateTimeOffset]::MinValue
+        if ([DateTimeOffset]::TryParse([string]$candidate, [ref]$parsed)) {
+            $utc = $parsed.ToUniversalTime()
+            if ($utc -gt $newest) { $newest = $utc }
+        }
+    }
+    return $newest
+}
+
 function Get-ReleaseVersionCreatedAt {
     param([Parameter(Mandatory = $true)][object]$Version)
-    $created = [DateTimeOffset]::MinValue
-    if ([DateTimeOffset]::TryParse([string]$Version.metadata.created_on, [ref]$created)) {
-        return $created.ToUniversalTime().ToString("o")
-    }
-    return ""
+    $created = Get-ReleaseVersionCreatedAtValue -Version $Version
+    if ($created -eq [DateTimeOffset]::MinValue) { return "" }
+    return $created.ToString("o")
 }
 
 function Test-VersionAfterDiscoveryWatermark {
@@ -574,9 +637,9 @@ function Initialize-ReleaseControl {
         }
     }
     $state = New-ReleaseControlState -Stable $stable -Candidate $accepted
-    $knownVersions = @(Get-CloudflareVersions | Sort-Object {
-        [DateTimeOffset]$_.metadata.created_on
-    }, { [string]$_.id })
+    $knownVersions = @(Get-CloudflareVersions | Sort-Object `
+        @{ Expression = { Get-ReleaseVersionCreatedAtValue -Version $_ } }, `
+        @{ Expression = { [string]$_.id } })
     $latestKnownVersion = $knownVersions | Select-Object -Last 1
     if ($latestKnownVersion) {
         $state.candidate_discovery.watermark_created_at =
@@ -599,16 +662,62 @@ function Get-CandidateChangedFiles {
     @($changed | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
 }
 
+function Get-CandidateCompatibilityRequirement {
+    param([string[]]$ChangedFiles)
+    $storage = @($ChangedFiles | Where-Object {
+        $_ -like "web/drizzle/*" -or
+        $_ -match '(^|/)migrations?/' -or $_ -match '(?i)(^|/)schema\.(sql|sqlite)$'
+    })
+    if ($storage.Count -gt 0) {
+        return [pscustomobject]@{
+            state = "COORDINATED_STORAGE_MIGRATION_REQUIRED"; files = $storage
+        }
+    }
+    $platform = @($ChangedFiles | Where-Object {
+        $_ -in @(
+            "web/wrangler.jsonc", "web/worker-configuration.d.ts",
+            "web/runtime-env.d.ts"
+        )
+    })
+    if ($platform.Count -gt 0) {
+        return [pscustomobject]@{
+            state = "PLATFORM_CONFIG_REVIEW_REQUIRED"; files = $platform
+        }
+    }
+    return [pscustomobject]@{ state = "AUTOMATIC"; files = @() }
+}
+
 function Test-AutomaticStorageCompatibility {
     param([string[]]$ChangedFiles)
-    # Schema evolution is never inferred from a green unit suite. A release
-    # containing a storage migration needs a separate coordinated migration
-    # protocol before this controller may authorize Promote or Reverse.
-    return @($ChangedFiles | Where-Object {
-        $_ -like "web/drizzle/*" -or
-        $_ -match '(^|/)migrations?/' -or
-        $_ -in @("web/wrangler.jsonc", "web/worker-configuration.d.ts")
-    }).Count -eq 0
+    return [bool]((Get-CandidateCompatibilityRequirement `
+        -ChangedFiles $ChangedFiles).state -eq "AUTOMATIC")
+}
+
+function Test-CandidatePlatformResources {
+    param(
+        [Parameter(Mandatory = $true)][object]$Stable,
+        [Parameter(Mandatory = $true)][object]$Candidate
+    )
+    try {
+        $stableVersion = Get-CloudflareVersionDetails -VersionId $Stable.worker_version_id
+        $candidateVersion = Get-CloudflareVersionDetails -VersionId $Candidate.worker_version_id
+        $externalTypes = @("d1", "kv_namespace", "r2_bucket", "vectorize")
+        foreach ($binding in @($candidateVersion.resources.bindings | Where-Object {
+            [string]$_.type -in $externalTypes
+        })) {
+            $match = @($stableVersion.resources.bindings | Where-Object {
+                [string]$_.type -eq [string]$binding.type -and
+                [string]$_.name -eq [string]$binding.name -and
+                [string]$_.id -eq [string]$binding.id -and
+                [string]$_.database_id -eq [string]$binding.database_id -and
+                [string]$_.namespace_id -eq [string]$binding.namespace_id -and
+                [string]$_.bucket_name -eq [string]$binding.bucket_name -and
+                [string]$_.index_name -eq [string]$binding.index_name
+            })
+            if ($match.Count -ne 1) { return $false }
+        }
+        return $true
+    } catch { return $false }
 }
 
 function Test-RequiredGitHubChecks {
@@ -1219,7 +1328,8 @@ function Invoke-AutomaticCandidateValidation {
         $changed = @(Get-CandidateChangedFiles `
             -StableRevision ([string]$state.stable.git_sha) `
             -CandidateRevision ([string]$Candidate.git_sha))
-        if (-not (Test-AutomaticStorageCompatibility -ChangedFiles $changed)) {
+        $compatibility = Get-CandidateCompatibilityRequirement -ChangedFiles $changed
+        if ([string]$compatibility.state -eq "COORDINATED_STORAGE_MIGRATION_REQUIRED") {
             $state.candidate.compatibility_state = "REVIEW_REQUIRED"
             $state.candidate.validation_state = "REVIEW_REQUIRED"
             $state.candidate.validation = [pscustomobject]@{
@@ -1228,10 +1338,40 @@ function Invoke-AutomaticCandidateValidation {
                 windows = "PASSED"
                 cloudflare = "PENDING"
                 reason = "COORDINATED_STORAGE_MIGRATION_REQUIRED"
+                review_files = @($compatibility.files)
                 tested_at = [DateTimeOffset]::UtcNow.ToString("o")
             }
             Write-ReleaseControlState -State $state
             return $false
+        }
+        if ([string]$compatibility.state -eq "PLATFORM_CONFIG_REVIEW_REQUIRED") {
+            $approved = [bool]($state.candidate.compatibility_approval -and
+                [string]$state.candidate.compatibility_approval.validation_key -eq
+                    [string]$Candidate.validation_key)
+            if (-not $approved) {
+                $resourcesVerified = Test-CandidatePlatformResources `
+                    -Stable $state.stable -Candidate $Candidate
+                $state.candidate.compatibility_state = "REVIEW_REQUIRED"
+                $state.candidate.validation_state = "REVIEW_REQUIRED"
+                $state.candidate.validation = [pscustomobject]@{
+                    key = [string]$Candidate.validation_key
+                    repository = "PASSED"; windows = "PASSED"; cloudflare = "PENDING"
+                    reason = if ($resourcesVerified) {
+                        "PLATFORM_CONFIG_REVIEW_REQUIRED"
+                    } else { "PLATFORM_RESOURCE_VERIFICATION_FAILED" }
+                    review_files = @($compatibility.files)
+                    resources_verified = $resourcesVerified
+                    tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+                }
+                Write-ReleaseControlState -State $state
+                Write-ReleaseHistory -Event "CANDIDATE_COMPATIBILITY_REVIEW_REQUIRED" `
+                    -Release $state.candidate -Detail @{
+                        validation_key = [string]$Candidate.validation_key
+                        files = @($compatibility.files)
+                        resources_verified = $resourcesVerified
+                    }
+                return $false
+            }
         }
         $routePlan = Get-CandidateRouteValidationPlan -ChangedFiles $changed `
             -Revision ([string]$Candidate.git_sha)
@@ -1311,9 +1451,9 @@ function Invoke-AutomaticCandidateValidation {
 function Find-NewCandidateRelease {
     $state = Get-ReleaseControlState
     if (-not $state) { return $null }
-    $versions = @(Get-CloudflareVersions | Sort-Object {
-        [DateTimeOffset]$_.metadata.created_on
-    }, { [string]$_.id })
+    $versions = @(Get-CloudflareVersions | Sort-Object `
+        @{ Expression = { Get-ReleaseVersionCreatedAtValue -Version $_ } }, `
+        @{ Expression = { [string]$_.id } })
     if (@($versions).Count -eq 0) { return $null }
     if (-not $state.candidate_discovery.initialized_at) {
         Set-CandidateDiscoveryWatermark -State $state -Version ($versions | Select-Object -Last 1)
@@ -1341,6 +1481,9 @@ function Find-NewCandidateRelease {
             -Branch (Get-ReleaseBranchFromVersion -Version $version) `
             -ArtifactKind $artifactKind `
             -VersionCreatedAt (Get-ReleaseVersionCreatedAt -Version $version)
+        $candidate | Add-Member -NotePropertyName browser_url `
+            -NotePropertyValue (Get-ReleaseVersionPreviewUrl `
+                -Version $version -Candidate $candidate)
         $discovered = $candidate
     }
     if (-not $discovered) {
@@ -1370,6 +1513,49 @@ function Find-NewCandidateRelease {
     Write-ReleaseControlState -State $state
     Write-ReleaseHistory -Event "CANDIDATE_DISCOVERED" -Release $discovered
     return $discovered
+}
+
+function Approve-CandidateCompatibility {
+    $state = Get-ReleaseControlState
+    if (-not $state -or -not $state.candidate) {
+        throw "Candidate unavailable."
+    }
+    $candidate = $state.candidate
+    if ([string]$candidate.validation_state -ne "REVIEW_REQUIRED" -or
+        [string]$candidate.validation.reason -ne "PLATFORM_CONFIG_REVIEW_REQUIRED" -or
+        [string]$candidate.validation.key -ne [string]$candidate.validation_key -or
+        -not [bool]$candidate.validation.resources_verified) {
+        throw "Only an exact verified non-destructive platform review can be approved."
+    }
+    if (-not (Test-ProductionCandidateProvenance -Candidate $candidate) -or
+        (Test-RequiredGitHubChecks -Revision ([string]$candidate.git_sha)) -ne "PASSED") {
+        throw "Candidate provenance and required checks must pass before approval."
+    }
+    $changed = @(Get-CandidateChangedFiles `
+        -StableRevision ([string]$state.stable.git_sha) `
+        -CandidateRevision ([string]$candidate.git_sha))
+    $requirement = Get-CandidateCompatibilityRequirement -ChangedFiles $changed
+    if ([string]$requirement.state -ne "PLATFORM_CONFIG_REVIEW_REQUIRED" -or
+        -not (Test-CandidatePlatformResources -Stable $state.stable -Candidate $candidate)) {
+        throw "Candidate is not eligible for non-destructive compatibility approval."
+    }
+    $approval = @{
+        validation_key = [string]$candidate.validation_key
+        approved_at = [DateTimeOffset]::UtcNow.ToString("o")
+        approved_by = [Environment]::UserName
+        reason = "PLATFORM_CONFIG_REVIEW_APPROVED"
+        files = @($requirement.files)
+        resources_verified = $true
+    }
+    $candidate | Add-Member -Force -NotePropertyName compatibility_approval `
+        -NotePropertyValue $approval
+    $candidate.compatibility_state = "APPROVED"
+    $candidate.validation_state = "NEW"
+    $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+    Write-ReleaseControlState -State $state
+    Write-ReleaseHistory -Event "CANDIDATE_COMPATIBILITY_APPROVED" `
+        -Release $candidate -Detail $approval
+    return $candidate
 }
 
 function Invoke-CandidateDiscovery {
@@ -3340,6 +3526,8 @@ function Get-ControlCenterReleasePresentation {
             promote_reason = "Not bootstrapped"
             can_reverse = $false
             reverse_reason = "Not bootstrapped"
+            can_approve_compatibility = $false
+            compatibility_review_reason = "Not bootstrapped"
         }
     }
 
@@ -3361,6 +3549,13 @@ function Get-ControlCenterReleasePresentation {
         [string]$Release.candidate.branch -eq "main" -and
         [string]$Release.candidate.git_sha -eq [string]$Release.candidate.windows_revision -and
         [string]$Release.candidate.validation.key -eq [string]$Release.candidate.validation_key)
+    $canApproveCompatibility = [bool]($Release.candidate -and
+        $candidateState -eq "REVIEW_REQUIRED" -and
+        [string]$Release.candidate.validation.reason -eq "PLATFORM_CONFIG_REVIEW_REQUIRED" -and
+        [string]$Release.candidate.validation.key -eq [string]$Release.candidate.validation_key -and
+        [bool]$Release.candidate.validation.resources_verified -and
+        $candidateKind -eq $productionCandidateArtifactKind -and
+        [string]$Release.candidate.branch -eq "main")
 
     $candidateDetail = switch ($candidateState) {
         "PASSED" { "All required validation evidence is current." }
@@ -3428,6 +3623,11 @@ function Get-ControlCenterReleasePresentation {
             $Release.previous_stable -and $Release.previous_stable_rollback_eligible -and
             $controlBundleReady)
         reverse_reason = $reverseReason
+        can_approve_compatibility = $canApproveCompatibility
+        compatibility_review_reason = if ($Release.candidate -and
+            $Release.candidate.validation.reason) {
+            [string]$Release.candidate.validation.reason
+        } else { "No compatibility review pending" }
     }
 }
 
@@ -3900,8 +4100,73 @@ function Show-ControlCenter {
     $candidateReason.Font = New-Object System.Drawing.Font("Segoe UI Variable Text", 8)
     $candidateCard.Panel.Controls.Add($candidateReason)
 
-    $promoteButton = New-UiButton -Text "Promote Candidate" -Kind "Primary" -Width 176
-    $promoteButton.Location = New-Object System.Drawing.Point(16, 235)
+    $openStableButton = New-UiButton -Text "Open Stable" -Width 120
+    $openStableButton.Location = New-Object System.Drawing.Point(16, 232)
+    $openStableButton.Anchor = "Left,Bottom"
+    $openStableButton.Enabled = $false
+    $openStableButton.Add_Click({ Start-Process $dashboardUrl })
+    $stableCard.Panel.Controls.Add($openStableButton)
+    [void]$actionButtons.Add($openStableButton)
+
+    $bootstrapButton = New-UiButton -Text "Bootstrap Release Control" -Kind "Primary" -Width 210
+    $bootstrapButton.Location = New-Object System.Drawing.Point(16, 232)
+    $bootstrapButton.Anchor = "Left,Bottom"
+    $bootstrapButton.Visible = $false
+    $bootstrapButton.Add_Click({
+        if ([System.Windows.Forms.MessageBox]::Show(
+            "Initialize Release Control from the exact current production Worker and Windows runtime? Existing state will never be overwritten.",
+            "Confirm Bootstrap Release Control", "YesNo", "Warning"
+        ) -eq "Yes") { Invoke-GuiOperation -Operation "BootstrapRelease" }
+    })
+    $stableCard.Panel.Controls.Add($bootstrapButton)
+    [void]$actionButtons.Add($bootstrapButton)
+
+    $openCandidateButton = New-UiButton -Text "Open Candidate" -Width 126
+    $openCandidateButton.Location = New-Object System.Drawing.Point(16, 235)
+    $openCandidateButton.Anchor = "Left,Bottom"
+    $openCandidateButton.Enabled = $false
+    $openCandidateButton.Add_Click({
+        $state = Get-ReleaseControlState
+        if (-not $state -or -not $state.candidate) { return }
+        try {
+            $details = Get-CloudflareVersionDetails `
+                -VersionId ([string]$state.candidate.worker_version_id)
+            $url = Get-ReleaseVersionPreviewUrl `
+                -Version $details -Candidate $state.candidate
+            if (-not $url -or $url -ne [string]$state.candidate.browser_url) {
+                throw "Candidate URL unavailable"
+            }
+            Start-Process $url
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show(
+                "Candidate URL unavailable: $($_.Exception.Message)",
+                "Open Candidate", "OK", "Warning"
+            ) | Out-Null
+        }
+    })
+    $candidateCard.Panel.Controls.Add($openCandidateButton)
+    [void]$actionButtons.Add($openCandidateButton)
+
+    $approveCompatibilityButton = New-UiButton `
+        -Text "Approve Compatibility" -Width 156
+    $approveCompatibilityButton.Location = New-Object System.Drawing.Point(136, 235)
+    $approveCompatibilityButton.Anchor = "Left,Bottom"
+    $approveCompatibilityButton.Enabled = $false
+    $approveCompatibilityButton.Visible = $false
+    $approveCompatibilityButton.Add_Click({
+        $state = Get-ReleaseControlState
+        if (-not $state -or -not $state.candidate) { return }
+        $files = @($state.candidate.validation.review_files) -join "`n"
+        $message = "Approve the reviewed non-destructive platform configuration for this exact Candidate only?`n`nValidation key: $($state.candidate.validation_key)`n`n$files"
+        if ([System.Windows.Forms.MessageBox]::Show(
+            $message, "Approve Reviewed Compatibility", "YesNo", "Warning"
+        ) -eq "Yes") { Invoke-GuiOperation -Operation "ApproveCompatibility" }
+    })
+    $candidateCard.Panel.Controls.Add($approveCompatibilityButton)
+    [void]$actionButtons.Add($approveCompatibilityButton)
+
+    $promoteButton = New-UiButton -Text "Promote Candidate" -Kind "Primary" -Width 112
+    $promoteButton.Location = New-Object System.Drawing.Point(300, 235)
     $promoteButton.Anchor = "Left,Bottom"
     $promoteButton.Enabled = $false
     $promoteButton.Add_Click({
@@ -4041,6 +4306,8 @@ function Show-ControlCenter {
 
     $script:guiOperation = $null
     $script:guiOperationName = ""
+    $script:guiOperationOutputPath = ""
+    $script:guiOperationErrorPath = ""
     $script:lastGuiSnapshot = $null
     function Set-GuiBusy {
         param([bool]$Busy, [string]$Message)
@@ -4062,9 +4329,15 @@ function Show-ControlCenter {
         )
         if ($TargetKey) { $arguments += @("-ServiceKey", $TargetKey) }
         $script:guiOperationName = $Operation
+        $script:guiOperationOutputPath = Join-Path $env:TEMP `
+            ("xauusd-control-operation-{0}.out" -f ([guid]::NewGuid().ToString("N")))
+        $script:guiOperationErrorPath = Join-Path $env:TEMP `
+            ("xauusd-control-operation-{0}.err" -f ([guid]::NewGuid().ToString("N")))
         $script:guiOperation = Start-Process -FilePath "powershell.exe" `
             -ArgumentList $arguments -WorkingDirectory $moduleRoot `
-            -WindowStyle Hidden -PassThru
+            -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput $script:guiOperationOutputPath `
+            -RedirectStandardError $script:guiOperationErrorPath
         Set-GuiBusy -Busy $true -Message "Working in background: $Operation"
     }
 
@@ -4093,6 +4366,10 @@ function Show-ControlCenter {
             $stableCard.Worker.Text = "Worker    $(Get-ShortIdentity $release.stable.worker_version_id)"
             $stableCard.Windows.Text = "Windows   $(Get-ShortIdentity $release.stable.windows_revision)"
             $stableCard.Detail.Text = "Authoritative production release."
+            $stableCard.Detail.Text = "$($release.stable.artifact_kind) / $($release.stable.provenance_state) / $($release.deployment_status)"
+            $openStableButton.Enabled = $true
+            $openStableButton.Visible = $true
+            $bootstrapButton.Visible = $false
 
             $releaseView = Get-ControlCenterReleasePresentation -Release $release
             if ($release.candidate) {
@@ -4100,8 +4377,11 @@ function Show-ControlCenter {
                 $candidateCard.Git.Text = "Git       $(Get-ShortIdentity $release.candidate.git_sha)"
                 $candidateCard.Worker.Text = "Worker    $(Get-ShortIdentity $release.candidate.worker_version_id)"
                 $candidateCard.Windows.Text = "Windows   $(Get-ShortIdentity $release.candidate.windows_revision)"
-                $candidateCard.Detail.Text = "$($releaseView.candidate_kind)  /  $($releaseView.candidate_detail)"
+                $candidateCard.Detail.Text = "$($releaseView.candidate_kind) / $($release.candidate.branch) / $($release.candidate.compatibility_state)"
                 $validation = $release.candidate.validation
+                $repositoryCheck = if ($validation -and $validation.repository) {
+                    [string]$validation.repository
+                } else { "WAITING" }
                 $windowsCheck = if ($validation -and $validation.windows) { [string]$validation.windows } else { "WAITING" }
                 $contractCheck = if ($validation -and $validation.cloudflare) { [string]$validation.cloudflare } else { "WAITING" }
                 $cpuCheck = "WAITING"
@@ -4119,10 +4399,21 @@ function Show-ControlCenter {
                         [int]$validation.cpu_evidence.exceeded_cpu -eq 0
                     ) { "PASSED" } else { "FAILED" }
                 }
-                $candidateCheckLabels.windows.Text = "Runtime + heartbeat: $windowsCheck"
+                $candidateCheckLabels.windows.Text = "Repo / Windows: $repositoryCheck / $windowsCheck"
                 $candidateCheckLabels.contracts.Text = "API routes: $contractCheck"
-                $candidateCheckLabels.cpu.Text = "CPU headroom: $cpuCheck"
-                $candidateCheckLabels.limits.Text = "5xx + 1102: $limitCheck"
+                $cpu = if ($validation -and $validation.cpu_evidence -and
+                    $validation.cpu_evidence -ne "NOT_REQUIRED") {
+                    $validation.cpu_evidence
+                } else { $null }
+                $candidateCheckLabels.cpu.Text = if ($cpu) {
+                    "CPU p95/p99/max: $($cpu.p95_cpu_ms)/$($cpu.p99_cpu_ms)/$($cpu.max_cpu_ms) ms"
+                } else { "CPU headroom: $cpuCheck" }
+                $candidateCheckLabels.limits.Text = if ($cpu) {
+                    "5xx/1102/exceeded: $($cpu.responses_5xx)/$($cpu.responses_1102)/$($cpu.exceeded_cpu)"
+                } else { "5xx + 1102: $limitCheck" }
+                $openCandidateButton.Enabled = [bool]($release.candidate.browser_url -and
+                    [string]$release.candidate.artifact_kind -eq $productionCandidateArtifactKind -and
+                    [string]$release.candidate.branch -eq "main")
             } else {
                 Set-StatusBadge -Label $candidateCard.Badge -State "UNAVAILABLE"
                 $candidateCard.Git.Text = "Git       --"
@@ -4130,6 +4421,7 @@ function Show-ControlCenter {
                 $candidateCard.Windows.Text = "Windows   --"
                 $candidateCard.Detail.Text = "No immutable candidate has been discovered."
                 foreach ($label in $candidateCheckLabels.Values) { $label.Text = "Not available" }
+                $openCandidateButton.Enabled = $false
             }
             $candidateReason.Text = $releaseView.promote_reason
             $promoteButton.Enabled = $releaseView.can_promote
@@ -4137,6 +4429,11 @@ function Show-ControlCenter {
             $promoteButton.ForeColor = if ($releaseView.can_promote) { [System.Drawing.Color]::White } else { $gray }
             $promoteButton.FlatAppearance.BorderColor = if ($releaseView.can_promote) { $accent } else { $line }
             $toolTip.SetToolTip($promoteButton, $releaseView.promote_reason)
+            $approveCompatibilityButton.Visible = $releaseView.can_approve_compatibility
+            $approveCompatibilityButton.Enabled = $releaseView.can_approve_compatibility
+            $toolTip.SetToolTip(
+                $approveCompatibilityButton, $releaseView.compatibility_review_reason
+            )
 
             if ($release.previous_stable) {
                 Set-StatusBadge -Label $previousCard.Badge -State "AVAILABLE"
@@ -4173,6 +4470,12 @@ function Show-ControlCenter {
             $promoteButton.ForeColor = $gray
             $promoteButton.FlatAppearance.BorderColor = $line
             $reverseButton.Enabled = $false
+            $openStableButton.Visible = $false
+            $openStableButton.Enabled = $false
+            $bootstrapButton.Visible = $true
+            $bootstrapButton.Enabled = $true
+            $openCandidateButton.Enabled = $false
+            $approveCompatibilityButton.Visible = $false
             $toolTip.SetToolTip($promoteButton, "Release control not bootstrapped")
             $toolTip.SetToolTip($reverseButton, "Release control not bootstrapped")
         }
@@ -4217,9 +4520,28 @@ function Show-ControlCenter {
         if (-not $script:guiOperation -or -not $script:guiOperation.HasExited) { return }
         $exitCode = $script:guiOperation.ExitCode
         $finished = $script:guiOperationName
+        $output = if (Test-Path -LiteralPath $script:guiOperationOutputPath) {
+            (Get-Content -LiteralPath $script:guiOperationOutputPath -Raw -ErrorAction SilentlyContinue).Trim()
+        } else { "" }
+        $errorText = if (Test-Path -LiteralPath $script:guiOperationErrorPath) {
+            (Get-Content -LiteralPath $script:guiOperationErrorPath -Raw -ErrorAction SilentlyContinue).Trim()
+        } else { "" }
+        Remove-Item -LiteralPath $script:guiOperationOutputPath,$script:guiOperationErrorPath `
+            -Force -ErrorAction SilentlyContinue
         $script:guiOperation.Dispose()
         $script:guiOperation = $null
         Set-GuiBusy -Busy $false -Message $(if ($exitCode -eq 0) { "Completed: $finished" } else { "Failed: $finished (exit $exitCode)" })
+        if ($exitCode -ne 0) {
+            [System.Windows.Forms.MessageBox]::Show(
+                $(if ($errorText) { $errorText } else { "Operation failed without diagnostic output." }),
+                "$finished failed", "OK", "Error"
+            ) | Out-Null
+        } elseif ($finished -in @("BootstrapRelease", "ApproveCompatibility")) {
+            [System.Windows.Forms.MessageBox]::Show(
+                $(if ($output) { $output } else { "$finished completed." }),
+                "$finished completed", "OK", "Information"
+            ) | Out-Null
+        }
         Request-GuiStatus
     })
     $operationTimer.Start()
@@ -4312,6 +4634,11 @@ switch ($Action) {
     "BootstrapRelease" {
         if (-not (Enter-ReleaseTransactionLock)) { throw "Another release transaction is active." }
         try { Initialize-ReleaseControl | ConvertTo-Json -Depth 12 }
+        finally { Exit-ReleaseTransactionLock }
+    }
+    "ApproveCompatibility" {
+        if (-not (Enter-ReleaseTransactionLock)) { throw "Another release transaction is active." }
+        try { Approve-CandidateCompatibility | ConvertTo-Json -Depth 12 }
         finally { Exit-ReleaseTransactionLock }
     }
     "EnableAutoStart" { Enable-AutoStart; Write-Output "Auto-start enabled." }
