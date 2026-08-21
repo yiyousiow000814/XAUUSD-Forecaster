@@ -1424,13 +1424,37 @@ def _attach_event_exposure(rows: list[dict], *, event_days: int = 1,
         row["broad_events"] = [{**event, "model_permission": "BROAD_MODEL"}]
 
 
+def _stub_training_rows(monkeypatch, rows: list[dict]) -> None:
+    monkeypatch.setattr(training_v2, "_eligible_row_count", lambda *_: len(rows))
+    monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: rows)
+
+
+def test_not_due_gate_does_not_materialize_training_rows(tmp_path, monkeypatch) -> None:
+    ledger = ForwardLedger(tmp_path / "forward-not-due.sqlite3")
+    monkeypatch.setattr(training_v2, "_eligible_row_count", lambda *_: 12)
+    monkeypatch.setattr(
+        training_v2, "complete_training_rows",
+        lambda *_: pytest.fail("NOT_DUE must not materialize training rows"),
+    )
+
+    result = training_v2.train_due_v2(
+        ledger, datetime(2026, 8, 5, 12, tzinfo=UTC), tmp_path / "models",
+    )
+
+    assert result == [{
+        "status": "ENGINEERING", "complete_rows": 12,
+        "next_threshold": training_v2.PREVIEW_ROWS,
+    }]
+    ledger.close()
+
+
 @pytest.mark.parametrize("count", [96, 200])
 def test_generation_waits_for_news_evidence_without_partial_market_update(
     tmp_path, monkeypatch, count: int
 ) -> None:
     ledger = ForwardLedger(tmp_path / f"forward-{count}.sqlite3")
     rows = _training_rows(count)
-    monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: rows)
+    _stub_training_rows(monkeypatch, rows)
     result = training_v2.train_due_v2(
         ledger, datetime(2026, 8, 5, 12, tzinfo=UTC), tmp_path / "models"
     )
@@ -1448,7 +1472,7 @@ def test_generation_treats_fully_expired_news_as_insufficient(tmp_path, monkeypa
     for row in rows:
         for event in (*row["core_events"], *row["broad_events"]):
             event["raw_weight"] = 0.0
-    monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: rows)
+    _stub_training_rows(monkeypatch, rows)
 
     result = training_v2.train_due_v2(
         ledger, datetime(2026, 8, 5, 12, tzinfo=UTC), tmp_path / "models"
@@ -1556,13 +1580,13 @@ def test_policy_generation_does_not_reuse_legacy_retrain_clock(tmp_path, monkeyp
     _insert_model_update(
         ledger.connection, "broad-full-existing", "BROAD_FULL", initial_cutoff
     )
-    monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: _training_rows(145))
+    _stub_training_rows(monkeypatch, _training_rows(145))
     result = training_v2.train_due_v2(
         ledger, datetime(2026, 8, 6, 20, tzinfo=UTC), tmp_path / "models"
     )
     assert result[0]["status"] == "NEWS_GENERATION_EVIDENCE_INSUFFICIENT"
 
-    monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: _training_rows(146))
+    _stub_training_rows(monkeypatch, _training_rows(146))
     monkeypatch.setattr(
         training_v2, "_write_market_artifact",
         lambda _rows, root, cutoff, stage: (
@@ -1605,7 +1629,7 @@ def test_news_models_train_early_with_explicit_experimental_status(
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("{}", encoding="utf-8")
 
-    monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: rows)
+    _stub_training_rows(monkeypatch, rows)
     (tmp_path / "market.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
         training_v2, "_write_market_artifact",
@@ -1672,7 +1696,7 @@ def test_generation_activates_all_six_models_with_broad_news_and_cold_core_lane(
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("{}", encoding="utf-8")
 
-    monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: rows)
+    _stub_training_rows(monkeypatch, rows)
     monkeypatch.setattr(
         training_v2, "_write_market_artifact",
         lambda _rows, root, cutoff, stage: (
@@ -2121,9 +2145,7 @@ def test_contract_upgrade_bypasses_old_generation_retrain_clock(
             (base + timedelta(minutes=1)).isoformat(), "TEST",
         ),
     )
-    monkeypatch.setattr(
-        training_v2, "complete_training_rows", lambda *_: _training_rows(120),
-    )
+    _stub_training_rows(monkeypatch, _training_rows(120))
 
     result = training_v2.train_due_v2(
         ledger, base + timedelta(days=1), tmp_path / "models",

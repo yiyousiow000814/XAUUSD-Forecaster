@@ -238,6 +238,10 @@ are immutable model-update fields.
 - U5 is a scale and reporting unit only; it cannot vote on direction.
 - A new Challenger is trained after each 50 additional eligible rows for the
   same model stage.
+- The due gate uses bounded aggregate state before materializing training rows.
+  A generation below its next threshold performs no feature parsing, event
+  lookup, or Ridge work. When due, event snapshots are read as one set rather
+  than one query per historical decision.
 - The collector trains a non-actionable Market Preview at 96 V2-eligible rows,
   the first Shadow Challenger set at 200 rows, then a new version after each 50
   new eligible rows. Sixty trading days is a confidence milestone, not a

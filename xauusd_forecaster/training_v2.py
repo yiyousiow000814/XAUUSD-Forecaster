@@ -22,7 +22,7 @@ from .news_contracts import (
     generation_matches_contract,
 )
 from .news_evidence import BROAD_NEWS_FEATURES, EVIDENCE_POLICY_VERSION
-from .news_features_v2 import EVIDENCE_GRADE_WEIGHT, aggregate_news_features_v2
+from .news_features_v2 import EVIDENCE_GRADE_WEIGHT
 from .ridge import RidgeArtifact, train_ridge
 from .training import MARKET_FEATURES
 
@@ -102,9 +102,61 @@ def _rows(ledger, cutoff: datetime):
     ).fetchall()
 
 
+def _eligible_row_count(ledger, cutoff: datetime) -> int:
+    """Return a cheap upper bound before materializing immutable features."""
+    row = ledger.connection.execute(
+        """SELECT count(*) AS count
+        FROM training_eligibility_v2 e
+        JOIN derived_market_snapshots m
+          ON m.source_decision_id=e.source_decision_id
+        JOIN derived_news_feature_snapshots n
+          ON n.source_decision_id=e.source_decision_id
+        JOIN derived_outcomes o
+          ON o.source_decision_id=e.source_decision_id
+        WHERE e.eligible_at <= ? AND o.outcome_status='VALID'
+          AND m.feature_version=? AND n.feature_version=?
+          AND n.eligibility_version=? AND o.label_version=?""",
+        (cutoff.isoformat(), FEATURE_VERSION, NEWS_FEATURE_VERSION,
+         ELIGIBILITY_VERSION, LABEL_VERSION),
+    ).fetchone()
+    return int(row["count"])
+
+
 def complete_training_rows(ledger, cutoff: datetime) -> list[dict]:
     complete = []
-    for row in _rows(ledger, cutoff):
+    rows = _rows(ledger, cutoff)
+    decision_ids = {str(row["source_decision_id"]) for row in rows}
+    events_by_decision: dict[str, list[dict]] = defaultdict(list)
+    if decision_ids:
+        for event in ledger.connection.execute(
+            """SELECT s.source_decision_id,s.event_id,s.event_version_id,
+                      s.model_permission,s.raw_weight,c.event_occurred_at,
+                      c.event_clock_source,c.event_time_precision,c.evidence_grade,
+                      coalesce(b.source_budget_id,c.canonical_source) AS source_budget_id
+               FROM news_decision_event_snapshots_v1 s
+               JOIN news_event_catalog_v1 c USING(event_version_id)
+               LEFT JOIN news_event_source_budgets_v1 b USING(event_version_id)
+               JOIN training_eligibility_v2 e
+                 ON e.source_decision_id=s.source_decision_id
+               JOIN derived_market_snapshots m
+                 ON m.source_decision_id=s.source_decision_id
+               JOIN derived_news_feature_snapshots n
+                 ON n.source_decision_id=s.source_decision_id
+               JOIN derived_outcomes o
+                 ON o.source_decision_id=s.source_decision_id
+               WHERE s.policy_version=? AND e.eligible_at<=?
+                 AND o.outcome_status='VALID' AND m.feature_version=?
+                 AND n.feature_version=? AND n.eligibility_version=?
+                 AND o.label_version=?
+               ORDER BY s.source_decision_id,s.model_permission,s.event_id,
+                        s.event_version_id""",
+            (EVIDENCE_POLICY_VERSION, cutoff.isoformat(), FEATURE_VERSION,
+             NEWS_FEATURE_VERSION, ELIGIBILITY_VERSION, LABEL_VERSION),
+        ):
+            decision_id = str(event["source_decision_id"])
+            if decision_id in decision_ids:
+                events_by_decision[decision_id].append(dict(event))
+    for row in rows:
         market = json.loads(row["features_json"])
         market_values = [market.get(name) for name in MARKET_FEATURES]
         if row["u5"] is None or any(value is None for value in market_values):
@@ -114,24 +166,12 @@ def complete_training_rows(ledger, cutoff: datetime) -> list[dict]:
         if not np.isfinite(values).all() or not np.isfinite(target):
             continue
         decision_id = row["source_decision_id"]
-        event_rows = ledger.connection.execute(
-            """SELECT s.event_id,s.event_version_id,s.model_permission,s.raw_weight,
-                       c.event_occurred_at,c.event_clock_source,c.event_time_precision,
-                       c.evidence_grade,
-                       coalesce(b.source_budget_id,c.canonical_source) AS source_budget_id
-            FROM news_decision_event_snapshots_v1 s
-            JOIN news_event_catalog_v1 c USING(event_version_id)
-            LEFT JOIN news_event_source_budgets_v1 b USING(event_version_id)
-            WHERE s.source_decision_id=? AND s.policy_version=?
-            ORDER BY s.model_permission,s.event_id,s.event_version_id""",
-            (decision_id, EVIDENCE_POLICY_VERSION),
-        ).fetchall()
-        if event_rows:
-            event_snapshots = [dict(event) for event in event_rows]
-        else:
-            event_snapshots = aggregate_news_features_v2(
-                ledger, datetime.fromisoformat(row["decision_time"])
-            )["event_snapshots"]
+        event_rows = events_by_decision.get(str(decision_id), [])
+        # Current derived-news snapshots and their zero-or-more event rows are
+        # materialized atomically by live append or contract reconciliation.
+        # An empty set is authoritative quiet evidence, not permission to
+        # reconstruct every historical decision on the training hot path.
+        event_snapshots = [dict(event) for event in event_rows]
         complete.append({
             "decision_id": decision_id, "lane": row["evidence_lane"],
             "decision_time": row["decision_time"], "market": values,
@@ -470,6 +510,20 @@ def _neutral_core_news_artifact(dataset_hash: str) -> RidgeArtifact:
 
 def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[dict]:
     """Build and atomically activate five core models plus one diagnostic."""
+    eligible_count = _eligible_row_count(ledger, cutoff)
+    if eligible_count < PREVIEW_ROWS:
+        return [{"status": "ENGINEERING" if eligible_count < 30 else "EARLY_LEARNING",
+                 "complete_rows": eligible_count, "next_threshold": PREVIEW_ROWS}]
+    candidate_stage = "SHADOW" if eligible_count >= SHADOW_ROWS else "PREVIEW_ONLY"
+    candidate_latest = _latest_generation(ledger.connection, candidate_stage)
+    if (
+        candidate_latest is not None
+        and generation_matches_contract(candidate_latest, CURRENT_NEWS_CONTRACT)
+        and eligible_count < int(candidate_latest["training_rows"]) + RETRAIN_INTERVAL
+    ):
+        return [{"status": "NOT_DUE", "complete_rows": eligible_count,
+                 "generation_id": candidate_latest["generation_id"],
+                 "next_threshold": int(candidate_latest["training_rows"]) + RETRAIN_INTERVAL}]
     rows = complete_training_rows(ledger, cutoff)
     count = len(rows)
     if count < PREVIEW_ROWS:
