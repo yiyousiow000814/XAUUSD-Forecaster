@@ -135,6 +135,10 @@ def _install_training_materialization_state(connection) -> None:
             cursor_decision_time TEXT,
             cursor_decision_id TEXT,
             state TEXT NOT NULL CHECK(state IN ('CLEAN','DIRTY')),
+            materialization_mode TEXT NOT NULL,
+            materialization_receipt_hash TEXT NOT NULL,
+            last_success_at TEXT NOT NULL,
+            rebuild_generation INTEGER NOT NULL,
             updated_at TEXT NOT NULL
         )"""
     )
@@ -172,6 +176,13 @@ def refresh_training_materialization_state(ledger, cutoff: datetime) -> dict:
         "SELECT * FROM training_materialization_state_v1 WHERE id=1"
     ).fetchone()
     state = "CLEAN"
+    now = datetime.now(UTC).isoformat()
+    mode = "INDEX_ONLY"
+    rebuild_generation = 0
+    receipt_hash = canonical_hash((
+        TRAINING_MATERIALIZATION_CONTRACT, count, cursor_time, cursor_id,
+    ))
+    last_success_at = now
     if previous is not None:
         old_cursor = (previous["cursor_decision_time"], previous["cursor_decision_id"])
         new_cursor = (cursor_time, cursor_id)
@@ -182,34 +193,68 @@ def refresh_training_materialization_state(ledger, cutoff: datetime) -> dict:
             state = "DIRTY"
         elif str(previous["state"]) == "DIRTY":
             state = "DIRTY"
-    now = datetime.now(UTC).isoformat()
+        mode = str(previous["materialization_mode"])
+        rebuild_generation = int(previous["rebuild_generation"])
+        last_success_at = str(previous["last_success_at"])
+        if state == "CLEAN" and count != int(previous["row_count"]):
+            receipt_hash = canonical_hash((
+                str(previous["materialization_receipt_hash"]),
+                count, cursor_time, cursor_id,
+            ))
+            last_success_at = now
+        else:
+            receipt_hash = str(previous["materialization_receipt_hash"])
     with ledger.connection:
         ledger.connection.execute(
-            """INSERT INTO training_materialization_state_v1 VALUES(1,?,?,?,?,?,?)
+            """INSERT INTO training_materialization_state_v1
+            VALUES(1,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET contract_hash=excluded.contract_hash,
               row_count=excluded.row_count,
               cursor_decision_time=excluded.cursor_decision_time,
               cursor_decision_id=excluded.cursor_decision_id,
-              state=excluded.state,updated_at=excluded.updated_at""",
+              state=excluded.state,
+              materialization_mode=excluded.materialization_mode,
+              materialization_receipt_hash=excluded.materialization_receipt_hash,
+              last_success_at=excluded.last_success_at,
+              rebuild_generation=excluded.rebuild_generation,
+              updated_at=excluded.updated_at""",
             (TRAINING_MATERIALIZATION_CONTRACT, count, cursor_time, cursor_id,
-             state, now),
+             state, mode, receipt_hash, last_success_at, rebuild_generation, now),
         )
     return {"row_count": count, "cursor_decision_time": cursor_time,
             "cursor_decision_id": cursor_id, "state": state,
-            "contract_hash": TRAINING_MATERIALIZATION_CONTRACT}
+            "contract_hash": TRAINING_MATERIALIZATION_CONTRACT,
+            "materialization_mode": mode,
+            "materialization_receipt_hash": receipt_hash,
+            "last_success_at": last_success_at,
+            "rebuild_generation": rebuild_generation}
 
 
-def _mark_training_materialization_clean(ledger, cutoff: datetime, count: int) -> None:
+def _mark_training_materialization_clean(
+    ledger, cutoff: datetime, eligible_count: int, rows: list[dict],
+) -> None:
     cursor_time, cursor_id = _eligible_row_cursor(ledger, cutoff)
     _install_training_materialization_state(ledger.connection)
+    previous = ledger.connection.execute(
+        "SELECT rebuild_generation FROM training_materialization_state_v1 WHERE id=1"
+    ).fetchone()
+    generation = int(previous["rebuild_generation"] if previous else 0) + 1
+    now = datetime.now(UTC).isoformat()
+    receipt_hash = canonical_hash([row["receipt"] for row in rows])
     with ledger.connection:
         ledger.connection.execute(
-            """INSERT INTO training_materialization_state_v1 VALUES(1,?,?,?,?,'CLEAN',?)
+            """INSERT INTO training_materialization_state_v1
+            VALUES(1,?,?,?,?,'CLEAN','FULL',?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET contract_hash=excluded.contract_hash,
               row_count=excluded.row_count,cursor_decision_time=excluded.cursor_decision_time,
-              cursor_decision_id=excluded.cursor_decision_id,state='CLEAN',updated_at=excluded.updated_at""",
-            (TRAINING_MATERIALIZATION_CONTRACT, count, cursor_time, cursor_id,
-             datetime.now(UTC).isoformat()),
+              cursor_decision_id=excluded.cursor_decision_id,state='CLEAN',
+              materialization_mode='FULL',
+              materialization_receipt_hash=excluded.materialization_receipt_hash,
+              last_success_at=excluded.last_success_at,
+              rebuild_generation=excluded.rebuild_generation,
+              updated_at=excluded.updated_at""",
+            (TRAINING_MATERIALIZATION_CONTRACT, eligible_count, cursor_time,
+             cursor_id, receipt_hash, now, generation, now),
         )
 
 
@@ -619,7 +664,9 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
                  "next_threshold": int(candidate_latest["training_rows"]) + RETRAIN_INTERVAL}]
     rows = complete_training_rows(ledger, cutoff)
     count = len(rows)
-    _mark_training_materialization_clean(ledger, cutoff, eligible_count)
+    _mark_training_materialization_clean(
+        ledger, cutoff, eligible_count, rows,
+    )
     if count < PREVIEW_ROWS:
         return [{"status": "ENGINEERING" if count < 30 else "EARLY_LEARNING",
                  "complete_rows": count, "next_threshold": PREVIEW_ROWS}]

@@ -74,6 +74,9 @@ def test_training_materialization_cursor_is_durable_and_late_rows_mark_dirty(
 
     first = training_v2.refresh_training_materialization_state(ledger, cutoff)
     assert first["state"] == "CLEAN"
+    assert first["materialization_mode"] == "INDEX_ONLY"
+    assert len(first["materialization_receipt_hash"]) == 64
+    assert first["rebuild_generation"] == 0
     count = 101
     cursor = ("2026-08-20T12:05:00+00:00", "decision-101")
     advanced = training_v2.refresh_training_materialization_state(ledger, cutoff)
@@ -86,9 +89,23 @@ def test_training_materialization_cursor_is_durable_and_late_rows_mark_dirty(
     dirty = training_v2.refresh_training_materialization_state(ledger, cutoff)
     assert dirty["state"] == "DIRTY"
     persisted = connection.execute(
-        "SELECT row_count,cursor_decision_id,state FROM training_materialization_state_v1"
+        """SELECT row_count,cursor_decision_id,state,
+                  materialization_mode,rebuild_generation
+             FROM training_materialization_state_v1"""
     ).fetchone()
-    assert tuple(persisted) == (102, "decision-101", "DIRTY")
+    assert tuple(persisted) == (
+        102, "decision-101", "DIRTY", "INDEX_ONLY", 0,
+    )
+    training_v2._mark_training_materialization_clean(
+        ledger, cutoff, 102,
+        [{"receipt": ("decision-101", "market", "news", "outcome")}],
+    )
+    rebuilt = connection.execute(
+        """SELECT state,materialization_mode,rebuild_generation,
+                  length(materialization_receipt_hash)
+             FROM training_materialization_state_v1"""
+    ).fetchone()
+    assert tuple(rebuilt) == ("CLEAN", "FULL", 1, 64)
 
 
 @pytest.mark.parametrize(

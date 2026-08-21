@@ -243,9 +243,12 @@ are immutable model-update fields.
   lookup, or Ridge work. When due, event snapshots are read as one set rather
   than one query per historical decision.
 - The eligibility index persists its current contract, row count, and ordered
-  decision cursor. Tail growth advances incrementally. Contract changes, row
-  loss, and late historical eligibility mark the index dirty and authorize a
-  background rebuild; the decision-clock owner never performs that rebuild.
+  decision cursor, materialization mode/receipt, last successful update, and
+  rebuild generation. Tail growth advances the receipt incrementally. Contract
+  changes, row loss, and late historical eligibility mark the index dirty and
+  authorize a background rebuild; the decision-clock owner never performs that
+  rebuild. Full rebuild receipts are derived from the immutable market/news/
+  outcome snapshot hashes used by training.
 - A restart with a complete active current-contract generation begins the
   decision clock immediately and schedules reconciliation on the durable
   background owner. A missing or incompatible generation remains fail-closed
