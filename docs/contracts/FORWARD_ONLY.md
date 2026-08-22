@@ -238,6 +238,28 @@ are immutable model-update fields.
 - U5 is a scale and reporting unit only; it cannot vote on direction.
 - A new Challenger is trained after each 50 additional eligible rows for the
   same model stage.
+- The due gate uses durable materialized training-row state before model work.
+  A generation below its next threshold performs no feature parsing, event
+  lookup, or Ridge work. Exact market, news, broad-news, target, event-version,
+  model-permission, source-budget, and receipt evidence is stored by source
+  decision ID in disposable local derived state. Training reads that durable
+  set instead of reconstructing every historical decision.
+- Source-table triggers maintain a durable dirty-ID queue. Normal updates bulk
+  load and atomically replace only newly eligible or changed decisions, then
+  advance the ordered cursor and incremental receipt. No source change performs
+  zero row materialization. Contract drift, stored-row hash corruption, source
+  deletion, explicit dirty state, or eligibility inserted before the cursor
+  requires a set-oriented full rebuild. A failed replacement leaves the prior
+  valid materialized set and dirty evidence intact. Authoritative immutable
+  evidence remains the source of truth; the decision-clock owner never rebuilds
+  training state.
+- A restart with a complete active current-contract generation begins the
+  decision clock immediately and schedules reconciliation on the durable
+  background owner. A missing or incompatible generation remains fail-closed
+  until synchronous startup reconciliation produces a valid generation.
+- Execution LOT/EXIT training uses aggregate eligible counts for both
+  `COLLECTING` and `NOT_DUE`; it reads and parses training rows only when one
+  identity has reached its first or next immutable-generation threshold.
 - The collector trains a non-actionable Market Preview at 96 V2-eligible rows,
   the first Shadow Challenger set at 200 rows, then a new version after each 50
   new eligible rows. Sixty trading days is a confidence milestone, not a

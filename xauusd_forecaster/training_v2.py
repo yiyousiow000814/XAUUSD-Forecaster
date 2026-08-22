@@ -22,7 +22,7 @@ from .news_contracts import (
     generation_matches_contract,
 )
 from .news_evidence import BROAD_NEWS_FEATURES, EVIDENCE_POLICY_VERSION
-from .news_features_v2 import EVIDENCE_GRADE_WEIGHT, aggregate_news_features_v2
+from .news_features_v2 import EVIDENCE_GRADE_WEIGHT
 from .ridge import RidgeArtifact, train_ridge
 from .training import MARKET_FEATURES
 
@@ -32,6 +32,7 @@ PREVIEW_ROWS = 96
 SHADOW_ROWS = 200
 LIVE_GENERATION_STAGE = "SHADOW"
 RETRAIN_INTERVAL = 50
+MATERIALIZATION_BATCH_ROWS = 200
 NEWS_MIN_EXPOSED_ROWS = 30
 NEWS_MIN_CLUSTERS = 10
 NEWS_EXPERIMENTAL_MIN_CLUSTERS = 1
@@ -48,6 +49,10 @@ REQUIRED_GENERATION_IDENTITIES = frozenset({
 NEWS_TRAINING_ELIGIBLE_STATES = frozenset({
     "AVAILABLE", "DEGRADED", "QUIET",
 })
+TRAINING_MATERIALIZATION_CONTRACT = canonical_hash((
+    "training-materialization-v2", FEATURE_VERSION, NEWS_FEATURE_VERSION,
+    ELIGIBILITY_VERSION, LABEL_VERSION, EVIDENCE_POLICY_VERSION,
+))
 
 
 def news_input_state_is_training_eligible(state: object) -> bool:
@@ -69,7 +74,20 @@ def news_evidence_status(event_days: int, clusters: int = NEWS_MIN_CLUSTERS) -> 
     return "EXPERIMENTAL_SPARSE_CLUSTERS"
 
 
-def _rows(ledger, cutoff: datetime):
+def _rows(ledger, cutoff: datetime, source_ids: list[str] | None = None):
+    source_filter = ""
+    parameters: list[object] = [
+        cutoff.isoformat(), FEATURE_VERSION, NEWS_FEATURE_VERSION,
+        ELIGIBILITY_VERSION, LABEL_VERSION,
+    ]
+    if source_ids is not None:
+        if not source_ids:
+            return []
+        source_filter = (
+            " AND e.source_decision_id IN ("
+            + ",".join("?" for _ in source_ids) + ")"
+        )
+        parameters.extend(source_ids)
     return ledger.connection.execute(
         """SELECT e.source_decision_id, e.evidence_lane, m.decision_time,
                   m.features_json, m.u5, m.output_hash AS market_hash,
@@ -95,16 +113,430 @@ def _rows(ledger, cutoff: datetime):
           ON h.source_decision_id=e.source_decision_id
         WHERE e.eligible_at <= ? AND o.outcome_status='VALID'
           AND m.feature_version=? AND n.feature_version=?
-          AND n.eligibility_version=? AND o.label_version=?
-        ORDER BY m.decision_time, e.source_decision_id""",
-        (cutoff.isoformat(), FEATURE_VERSION, NEWS_FEATURE_VERSION,
-         ELIGIBILITY_VERSION, LABEL_VERSION),
+          AND n.eligibility_version=? AND o.label_version=?"""
+        + source_filter
+        + " ORDER BY m.decision_time, e.source_decision_id",
+        parameters,
     ).fetchall()
 
 
-def complete_training_rows(ledger, cutoff: datetime) -> list[dict]:
+def _install_training_materialization_state(connection) -> None:
+    installed = connection.execute(
+        """SELECT 1 FROM sqlite_master
+            WHERE type='trigger'
+              AND name='trg_training_materialization_news_event_source_budgets_v1_delete'"""
+    ).fetchone()
+    if installed is not None:
+        materialized_columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(materialized_training_rows_v1)"
+            )
+        }
+        dirty_columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(training_materialization_dirty_v1)"
+            )
+        }
+        if ("materialized_row_hash" in materialized_columns and
+                "dirty_revision" in dirty_columns):
+            return
+    connection.executescript(
+        """CREATE TABLE IF NOT EXISTS training_materialization_state_v1 (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            contract_hash TEXT NOT NULL,
+            row_count INTEGER NOT NULL,
+            cursor_decision_time TEXT,
+            cursor_decision_id TEXT,
+            state TEXT NOT NULL CHECK(state IN ('CLEAN','DIRTY')),
+            materialization_mode TEXT NOT NULL,
+            materialization_receipt_hash TEXT NOT NULL,
+            last_success_at TEXT NOT NULL,
+            rebuild_generation INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS materialized_training_rows_v1 (
+            source_decision_id TEXT PRIMARY KEY,
+            decision_time TEXT NOT NULL,
+            row_json TEXT NOT NULL,
+            source_receipt_hash TEXT NOT NULL,
+            materialized_row_hash TEXT NOT NULL,
+            contract_hash TEXT NOT NULL,
+            materialized_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_materialized_training_rows_v1_order
+          ON materialized_training_rows_v1(decision_time,source_decision_id);
+        CREATE TABLE IF NOT EXISTS training_materialization_dirty_v1 (
+            source_decision_id TEXT PRIMARY KEY,
+            dirty_revision INTEGER NOT NULL DEFAULT 1,
+            source_table TEXT NOT NULL,
+            change_kind TEXT NOT NULL,
+            dirty_at TEXT NOT NULL
+        );
+        """
+    )
+    columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(materialized_training_rows_v1)"
+        )
+    }
+    if "materialized_row_hash" not in columns:
+        connection.execute(
+            "ALTER TABLE materialized_training_rows_v1 "
+            "ADD COLUMN materialized_row_hash TEXT"
+        )
+    dirty_columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(training_materialization_dirty_v1)"
+        )
+    }
+    if "dirty_revision" not in dirty_columns:
+        connection.execute(
+            "ALTER TABLE training_materialization_dirty_v1 "
+            "ADD COLUMN dirty_revision INTEGER NOT NULL DEFAULT 1"
+        )
+    direct_sources = (
+        "training_eligibility_v2", "derived_market_snapshots",
+        "derived_news_feature_snapshots", "derived_outcomes",
+        "news_input_coverage_snapshots_v1",
+        "news_semantic_health_snapshots_v1",
+        "news_decision_event_snapshots_v1",
+    )
+    for table in direct_sources:
+        for operation, reference in (
+            ("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD"),
+        ):
+            trigger = f"trg_training_materialization_{table}_{operation.lower()}"
+            connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            connection.execute(
+                f"""CREATE TRIGGER IF NOT EXISTS
+                  {trigger}
+                AFTER {operation} ON {table}
+                BEGIN
+                  INSERT INTO training_materialization_dirty_v1
+                    (source_decision_id,dirty_revision,source_table,change_kind,dirty_at)
+                  VALUES ({reference}.source_decision_id,1,'{table}','{operation}',
+                          strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                  ON CONFLICT(source_decision_id) DO UPDATE SET
+                    dirty_revision=dirty_revision+1,
+                    source_table=excluded.source_table,
+                    change_kind=excluded.change_kind,
+                    dirty_at=excluded.dirty_at;
+                END"""
+            )
+    related_sources = {
+        "news_event_catalog_v1": "event_version_id",
+        "news_event_source_budgets_v1": "event_version_id",
+    }
+    for table, key in related_sources.items():
+        for operation, reference in (
+            ("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD"),
+        ):
+            trigger = f"trg_training_materialization_{table}_{operation.lower()}"
+            connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            connection.execute(
+                f"""CREATE TRIGGER IF NOT EXISTS
+                  {trigger}
+                AFTER {operation} ON {table}
+                BEGIN
+                  INSERT INTO training_materialization_dirty_v1
+                    (source_decision_id,dirty_revision,source_table,change_kind,dirty_at)
+                  SELECT source_decision_id,1,'{table}','{operation}',
+                         strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                    FROM news_decision_event_snapshots_v1
+                   WHERE {key}={reference}.{key}
+                  ON CONFLICT(source_decision_id) DO UPDATE SET
+                    dirty_revision=dirty_revision+1,
+                    source_table=excluded.source_table,
+                    change_kind=excluded.change_kind,
+                    dirty_at=excluded.dirty_at;
+                END"""
+            )
+
+
+def refresh_training_materialization_state(ledger, cutoff: datetime) -> dict:
+    """Materialize only changed training rows, or atomically rebuild on drift."""
+    _install_training_materialization_state(ledger.connection)
+    previous = ledger.connection.execute(
+        "SELECT * FROM training_materialization_state_v1 WHERE id=1"
+    ).fetchone()
+    now = datetime.now(UTC).isoformat()
+    rebuild = (
+        previous is None
+        or str(previous["contract_hash"]) != TRAINING_MATERIALIZATION_CONTRACT
+        or str(previous["state"]) == "DIRTY"
+        or ledger.connection.execute(
+            """SELECT 1 FROM materialized_training_rows_v1
+                WHERE contract_hash<>? LIMIT 1""",
+            (TRAINING_MATERIALIZATION_CONTRACT,),
+        ).fetchone() is not None
+    )
+    if rebuild:
+        observed_dirty = [
+            (str(row["source_decision_id"]), int(row["dirty_revision"]))
+            for row in ledger.connection.execute(
+                "SELECT source_decision_id,dirty_revision "
+                "FROM training_materialization_dirty_v1"
+            )
+        ]
+        rows = _build_training_rows(ledger, cutoff)
+        try:
+            _replace_materialized_training_rows(
+                ledger, rows, observed_dirty, now,
+            )
+        except Exception:
+            ledger.connection.rollback()
+            raise
+        generation = int(previous["rebuild_generation"] if previous else 0) + 1
+        mode = "FULL"
+        processed = len(rows)
+        snapshot = {
+            "row_count": len(rows),
+            "cursor_decision_time": rows[-1]["decision_time"] if rows else None,
+            "cursor_decision_id": rows[-1]["decision_id"] if rows else None,
+        }
+        receipt_hash = canonical_hash([row["receipt"] for row in rows])
+    else:
+        observed_dirty = [
+            (str(row["source_decision_id"]), int(row["dirty_revision"]))
+            for row in ledger.connection.execute(
+                """SELECT d.source_decision_id,d.dirty_revision
+                     FROM training_materialization_dirty_v1 d
+                     LEFT JOIN training_eligibility_v2 e
+                       USING(source_decision_id)
+                     LEFT JOIN materialized_training_rows_v1 m
+                       USING(source_decision_id)
+                    WHERE m.source_decision_id IS NOT NULL
+                       OR e.eligible_at<=?
+                    ORDER BY d.dirty_at,d.source_decision_id LIMIT ?""",
+                (cutoff.isoformat(), MATERIALIZATION_BATCH_ROWS),
+            )
+        ]
+        dirty_ids = [source_id for source_id, _ in observed_dirty]
+        if dirty_ids:
+            placeholders = ",".join("?" for _ in dirty_ids)
+            changed = ledger.connection.execute(
+                f"""SELECT d.source_decision_id,m.source_decision_id AS materialized_id,
+                            source.decision_time
+                       FROM training_materialization_dirty_v1 d
+                       LEFT JOIN materialized_training_rows_v1 m
+                         USING(source_decision_id)
+                       LEFT JOIN derived_market_snapshots source
+                         USING(source_decision_id)
+                      WHERE d.source_decision_id IN ({placeholders})""",
+                dirty_ids,
+            ).fetchall()
+            source_deleted = any(
+                row["materialized_id"] is not None and row["decision_time"] is None
+                for row in changed
+            )
+            late_insertion = any(
+                row["materialized_id"] is None
+                and row["decision_time"] is not None
+                and previous["cursor_decision_time"] is not None
+                and (
+                    str(row["decision_time"]), str(row["source_decision_id"])
+                ) <= (
+                    str(previous["cursor_decision_time"]),
+                    str(previous["cursor_decision_id"]),
+                )
+                for row in changed
+            )
+            if source_deleted or late_insertion:
+                with ledger.connection:
+                    ledger.connection.execute(
+                        "UPDATE training_materialization_state_v1 "
+                        "SET state='DIRTY',updated_at=? WHERE id=1", (now,),
+                    )
+                return refresh_training_materialization_state(ledger, cutoff)
+        old_materialized_count = 0
+        if dirty_ids:
+            placeholders = ",".join("?" for _ in dirty_ids)
+            old_materialized_count = int(ledger.connection.execute(
+                f"SELECT count(*) FROM materialized_training_rows_v1 "
+                f"WHERE source_decision_id IN ({placeholders})",
+                dirty_ids,
+            ).fetchone()[0])
+        rows = (
+            _build_training_rows(ledger, cutoff, dirty_ids) if dirty_ids else []
+        )
+        try:
+            _update_materialized_training_rows(
+                ledger, observed_dirty, rows, now,
+            )
+        except Exception:
+            ledger.connection.rollback()
+            raise
+        generation = int(previous["rebuild_generation"])
+        mode = "INCREMENTAL" if dirty_ids else "NO_CHANGE"
+        processed = len(dirty_ids)
+        if dirty_ids:
+            latest = ledger.connection.execute(
+                """SELECT decision_time,source_decision_id
+                     FROM materialized_training_rows_v1
+                    ORDER BY decision_time DESC,source_decision_id DESC LIMIT 1"""
+            ).fetchone()
+            snapshot = {
+                "row_count": (
+                    int(previous["row_count"]) - old_materialized_count + len(rows)
+                ),
+                "cursor_decision_time": latest["decision_time"] if latest else None,
+                "cursor_decision_id": latest["source_decision_id"] if latest else None,
+            }
+            receipt_hash = canonical_hash((
+                str(previous["materialization_receipt_hash"]),
+                [(source_id, next((row["receipt"] for row in rows
+                                   if str(row["decision_id"]) == source_id), None))
+                 for source_id in dirty_ids],
+            ))
+        else:
+            snapshot = {
+                "row_count": int(previous["row_count"]),
+                "cursor_decision_time": previous["cursor_decision_time"],
+                "cursor_decision_id": previous["cursor_decision_id"],
+            }
+            receipt_hash = str(previous["materialization_receipt_hash"])
+    with ledger.connection:
+        ledger.connection.execute(
+            """INSERT INTO training_materialization_state_v1
+            VALUES(1,?,?,?,?,'CLEAN',?,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET contract_hash=excluded.contract_hash,
+              row_count=excluded.row_count,
+              cursor_decision_time=excluded.cursor_decision_time,
+              cursor_decision_id=excluded.cursor_decision_id,state='CLEAN',
+              materialization_mode=excluded.materialization_mode,
+              materialization_receipt_hash=excluded.materialization_receipt_hash,
+              last_success_at=excluded.last_success_at,
+              rebuild_generation=excluded.rebuild_generation,
+              updated_at=excluded.updated_at""",
+            (TRAINING_MATERIALIZATION_CONTRACT, snapshot["row_count"],
+             snapshot["cursor_decision_time"], snapshot["cursor_decision_id"],
+             mode, receipt_hash, now, generation, now),
+        )
+    pending = int(ledger.connection.execute(
+        """SELECT count(*)
+             FROM training_materialization_dirty_v1 d
+             LEFT JOIN training_eligibility_v2 e USING(source_decision_id)
+             LEFT JOIN materialized_training_rows_v1 m USING(source_decision_id)
+            WHERE m.source_decision_id IS NOT NULL OR e.eligible_at<=?""",
+        (cutoff.isoformat(),),
+    ).fetchone()[0])
+    return {
+        **snapshot, "state": "CLEAN",
+        "contract_hash": TRAINING_MATERIALIZATION_CONTRACT,
+        "materialization_mode": mode,
+        "materialization_receipt_hash": receipt_hash,
+        "last_success_at": now, "rebuild_generation": generation,
+        "processed_source_rows": processed, "pending_source_rows": pending,
+    }
+
+
+def _persisted_training_row(row: dict, now: str) -> tuple:
+    row_json = json.dumps(row, sort_keys=True, separators=(",", ":"))
+    return (
+        str(row["decision_id"]), str(row["decision_time"]),
+        row_json, canonical_hash(row["receipt"]), canonical_hash(row),
+        TRAINING_MATERIALIZATION_CONTRACT, now,
+    )
+
+
+def _acknowledge_dirty_revisions(ledger, observed_dirty: list[tuple[str, int]]) -> None:
+    ledger.connection.executemany(
+        "DELETE FROM training_materialization_dirty_v1 "
+        "WHERE source_decision_id=? AND dirty_revision=?",
+        observed_dirty,
+    )
+
+
+def _replace_materialized_training_rows(
+    ledger, rows: list[dict], observed_dirty: list[tuple[str, int]], now: str,
+) -> None:
+    persisted = [_persisted_training_row(row, now) for row in rows]
+    ledger.connection.execute("DELETE FROM materialized_training_rows_v1")
+    ledger.connection.executemany(
+        """INSERT INTO materialized_training_rows_v1
+        (source_decision_id,decision_time,row_json,source_receipt_hash,
+         materialized_row_hash,contract_hash,materialized_at)
+        VALUES(?,?,?,?,?,?,?)""",
+        persisted,
+    )
+    _acknowledge_dirty_revisions(ledger, observed_dirty)
+
+
+def _update_materialized_training_rows(
+    ledger, observed_dirty: list[tuple[str, int]], rows: list[dict], now: str,
+) -> None:
+    if not observed_dirty:
+        return
+    source_ids = [source_id for source_id, _ in observed_dirty]
+    placeholders = ",".join("?" for _ in source_ids)
+    persisted = [_persisted_training_row(row, now) for row in rows]
+    ledger.connection.execute(
+        f"DELETE FROM materialized_training_rows_v1 "
+        f"WHERE source_decision_id IN ({placeholders})",
+        source_ids,
+    )
+    ledger.connection.executemany(
+        """INSERT INTO materialized_training_rows_v1
+        (source_decision_id,decision_time,row_json,source_receipt_hash,
+         materialized_row_hash,contract_hash,materialized_at)
+        VALUES(?,?,?,?,?,?,?)""",
+        persisted,
+    )
+    _acknowledge_dirty_revisions(ledger, observed_dirty)
+
+
+def _build_training_rows(
+    ledger, cutoff: datetime, source_ids: list[str] | None = None,
+) -> list[dict]:
     complete = []
-    for row in _rows(ledger, cutoff):
+    rows = _rows(ledger, cutoff, source_ids)
+    decision_ids = {str(row["source_decision_id"]) for row in rows}
+    events_by_decision: dict[str, list[dict]] = defaultdict(list)
+    if decision_ids:
+        event_source_filter = ""
+        event_parameters: list[object] = [
+            EVIDENCE_POLICY_VERSION, cutoff.isoformat(), FEATURE_VERSION,
+            NEWS_FEATURE_VERSION, ELIGIBILITY_VERSION, LABEL_VERSION,
+        ]
+        if source_ids is not None:
+            event_source_filter = (
+                " AND s.source_decision_id IN ("
+                + ",".join("?" for _ in source_ids) + ")"
+            )
+            event_parameters.extend(source_ids)
+        for event in ledger.connection.execute(
+            """SELECT s.source_decision_id,s.event_id,s.event_version_id,
+                      s.model_permission,s.raw_weight,c.event_occurred_at,
+                      c.event_clock_source,c.event_time_precision,c.evidence_grade,
+                      coalesce(b.source_budget_id,c.canonical_source) AS source_budget_id
+               FROM news_decision_event_snapshots_v1 s
+               JOIN news_event_catalog_v1 c USING(event_version_id)
+               LEFT JOIN news_event_source_budgets_v1 b USING(event_version_id)
+               JOIN training_eligibility_v2 e
+                 ON e.source_decision_id=s.source_decision_id
+               JOIN derived_market_snapshots m
+                 ON m.source_decision_id=s.source_decision_id
+               JOIN derived_news_feature_snapshots n
+                 ON n.source_decision_id=s.source_decision_id
+               JOIN derived_outcomes o
+                 ON o.source_decision_id=s.source_decision_id
+               WHERE s.policy_version=? AND e.eligible_at<=?
+                 AND o.outcome_status='VALID' AND m.feature_version=?
+                  AND n.feature_version=? AND n.eligibility_version=?
+                  AND o.label_version=?"""
+            + event_source_filter
+            + """ ORDER BY s.source_decision_id,s.model_permission,s.event_id,
+                         s.event_version_id""",
+            event_parameters,
+        ):
+            decision_id = str(event["source_decision_id"])
+            if decision_id in decision_ids:
+                events_by_decision[decision_id].append(dict(event))
+    for row in rows:
         market = json.loads(row["features_json"])
         market_values = [market.get(name) for name in MARKET_FEATURES]
         if row["u5"] is None or any(value is None for value in market_values):
@@ -114,24 +546,12 @@ def complete_training_rows(ledger, cutoff: datetime) -> list[dict]:
         if not np.isfinite(values).all() or not np.isfinite(target):
             continue
         decision_id = row["source_decision_id"]
-        event_rows = ledger.connection.execute(
-            """SELECT s.event_id,s.event_version_id,s.model_permission,s.raw_weight,
-                       c.event_occurred_at,c.event_clock_source,c.event_time_precision,
-                       c.evidence_grade,
-                       coalesce(b.source_budget_id,c.canonical_source) AS source_budget_id
-            FROM news_decision_event_snapshots_v1 s
-            JOIN news_event_catalog_v1 c USING(event_version_id)
-            LEFT JOIN news_event_source_budgets_v1 b USING(event_version_id)
-            WHERE s.source_decision_id=? AND s.policy_version=?
-            ORDER BY s.model_permission,s.event_id,s.event_version_id""",
-            (decision_id, EVIDENCE_POLICY_VERSION),
-        ).fetchall()
-        if event_rows:
-            event_snapshots = [dict(event) for event in event_rows]
-        else:
-            event_snapshots = aggregate_news_features_v2(
-                ledger, datetime.fromisoformat(row["decision_time"])
-            )["event_snapshots"]
+        event_rows = events_by_decision.get(str(decision_id), [])
+        # Current derived-news snapshots and their zero-or-more event rows are
+        # materialized atomically by live append or contract reconciliation.
+        # An empty set is authoritative quiet evidence, not permission to
+        # reconstruct every historical decision on the training hot path.
+        event_snapshots = [dict(event) for event in event_rows]
         complete.append({
             "decision_id": decision_id, "lane": row["evidence_lane"],
             "decision_time": row["decision_time"], "market": values,
@@ -167,6 +587,40 @@ def complete_training_rows(ledger, cutoff: datetime) -> list[dict]:
             ),
         })
     return complete
+
+
+def complete_training_rows(ledger, cutoff: datetime) -> list[dict]:
+    """Read the durable point-in-time rows after incremental reconciliation."""
+    refresh_training_materialization_state(ledger, cutoff)
+    rows = ledger.connection.execute(
+        """SELECT row_json,source_receipt_hash,materialized_row_hash
+             FROM materialized_training_rows_v1
+            WHERE contract_hash=?
+            ORDER BY decision_time,source_decision_id""",
+        (TRAINING_MATERIALIZATION_CONTRACT,),
+    ).fetchall()
+    try:
+        decoded = [json.loads(row["row_json"]) for row in rows]
+        valid = all(
+            canonical_hash(item) == str(row["materialized_row_hash"])
+            and canonical_hash(item["receipt"]) == str(row["source_receipt_hash"])
+            for row, item in zip(rows, decoded)
+        )
+    except (json.JSONDecodeError, KeyError, TypeError):
+        valid = False
+    if not valid:
+        with ledger.connection:
+            ledger.connection.execute(
+                "UPDATE training_materialization_state_v1 "
+                "SET state='DIRTY',updated_at=? WHERE id=1",
+                (datetime.now(UTC).isoformat(),),
+            )
+        refresh_training_materialization_state(ledger, cutoff)
+        return complete_training_rows(ledger, cutoff)
+    for item in decoded:
+        item["receipt"] = tuple(item["receipt"])
+        item["news_receipt"] = tuple(item["news_receipt"])
+    return decoded
 
 
 def _news_learning_rows(rows: list[dict]) -> list[dict]:
@@ -470,6 +924,25 @@ def _neutral_core_news_artifact(dataset_hash: str) -> RidgeArtifact:
 
 def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[dict]:
     """Build and atomically activate five core models plus one diagnostic."""
+    materialization = refresh_training_materialization_state(ledger, cutoff)
+    eligible_count = int(materialization["row_count"])
+    if int(materialization.get("pending_source_rows", 0)):
+        return [{"status": "MATERIALIZING", "complete_rows": eligible_count,
+                 "remaining_rows": int(materialization["pending_source_rows"])}]
+    if eligible_count < PREVIEW_ROWS:
+        return [{"status": "ENGINEERING" if eligible_count < 30 else "EARLY_LEARNING",
+                 "complete_rows": eligible_count, "next_threshold": PREVIEW_ROWS}]
+    candidate_stage = "SHADOW" if eligible_count >= SHADOW_ROWS else "PREVIEW_ONLY"
+    candidate_latest = _latest_generation(ledger.connection, candidate_stage)
+    if (
+        candidate_latest is not None
+        and generation_matches_contract(candidate_latest, CURRENT_NEWS_CONTRACT)
+        and materialization["state"] == "CLEAN"
+        and eligible_count < int(candidate_latest["training_rows"]) + RETRAIN_INTERVAL
+    ):
+        return [{"status": "NOT_DUE", "complete_rows": eligible_count,
+                 "generation_id": candidate_latest["generation_id"],
+                 "next_threshold": int(candidate_latest["training_rows"]) + RETRAIN_INTERVAL}]
     rows = complete_training_rows(ledger, cutoff)
     count = len(rows)
     if count < PREVIEW_ROWS:
