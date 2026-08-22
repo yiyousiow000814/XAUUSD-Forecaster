@@ -42,6 +42,7 @@ $reloadableServiceKeys = @("collector", "annotator", "api", "sync")
 $runtimeControlFileNames = @(
     "xauusd_control_center.ps1",
     "control_center.xaml",
+    "xauusd_control_center_launcher.vbs",
     "xauusd_watchdog_launcher.vbs",
     "xauusd_watchdog_guard.ps1",
     "xauusd_watchdog_guard_launcher.vbs"
@@ -1478,55 +1479,121 @@ function Test-CandidateDataParity {
     param([Parameter(Mandatory = $true)][object]$Stable,
           [Parameter(Mandatory = $true)][object]$Candidate)
     $routes = @(
-        "/api/status",
-        "/api/audit",
-        "/api/audit-briefs",
-        "/api/audit-stories",
-        "/api/audit-decisions",
-        "/api/learning",
-        "/api/market-chart",
-        "/api/market-history?limit=20",
+        "/api/status", "/api/audit", "/api/audit-briefs",
+        "/api/audit-stories", "/api/audit-decisions", "/api/learning",
+        "/api/market-chart", "/api/market-history?limit=20",
         "/api/news-index?page=1&limit=20",
         "/api/news-evidence?mode=all&page=1&limit=20"
     )
+    $legacyMode = [string]$Stable.artifact_kind -eq $legacyBootstrapStableArtifactKind
+    $identityMode = if ($legacyMode) {
+        "LEGACY_BOOTSTRAP_STABLE_COMPAT"
+    } else { "EXACT_VERSION" }
+    if ($legacyMode) {
+        try { $deployment = Get-CloudflareDeployment } catch { $deployment = $null }
+        $stablePlacement = @($deployment.versions | Where-Object {
+            [string]$_.version_id -eq [string]$Stable.worker_version_id -and
+            [double]$_.percentage -eq 100
+        })
+        $candidatePlacement = @($deployment.versions | Where-Object {
+            [string]$_.version_id -eq [string]$Candidate.worker_version_id -and
+            [double]$_.percentage -eq 0
+        })
+        $runtime = Get-RuntimeCodeState
+        $legacyEvidencePassed = [bool](
+            $stablePlacement.Count -eq 1 -and
+            $candidatePlacement.Count -eq 1 -and
+            [string]$Stable.git_sha -match '^[0-9a-f]{40}$' -and
+            [string]$Stable.windows_revision -eq [string]$Stable.git_sha -and
+            $runtime -and
+            [string]$runtime.applied_revision -eq [string]$Stable.windows_revision
+        )
+        if (-not $legacyEvidencePassed) {
+            return [pscustomobject]@{
+                state = "FAILED"; passed = $false; identity_mode = $identityMode
+                reason = "LEGACY_STABLE_DEPLOYMENT_EVIDENCE_UNPROVEN"
+                stable_version_id = [string]$Stable.worker_version_id
+                candidate_version_id = [string]$Candidate.worker_version_id
+                routes = @()
+            }
+        }
+    }
     $results = @()
+    $legacyAuditTime = $null
     foreach ($path in $routes) {
+        if ($legacyMode -and $path -in @(
+            "/api/audit-briefs", "/api/audit-stories", "/api/audit-decisions"
+        )) {
+            try {
+                $candidateRead = Invoke-ExactVersionJson `
+                    -VersionId ([string]$Candidate.worker_version_id) -Path $path
+                if ([string]$candidateRead.observed_version_id -ne
+                        [string]$Candidate.worker_version_id -or
+                    [string]::IsNullOrWhiteSpace([string]$candidateRead.observed_git_sha) -or
+                    [string]$candidateRead.observed_git_sha -ne [string]$Candidate.git_sha) {
+                    throw "EXACT_VERSION_IDENTITY_MISMATCH"
+                }
+                $payload = $candidateRead.payload
+                $generated = ConvertTo-RequiredReleaseTime $payload.generated_at
+                $knownFields = switch ($path) {
+                    "/api/audit-briefs" { @("daily_news_briefs") }
+                    "/api/audit-stories" { @("storylines", "market_narrative_candidates", "story_event_candidates") }
+                    default { @("recent_decisions", "predictions") }
+                }
+                if (@($knownFields | Where-Object {
+                    Test-ReleaseJsonProperty -Object $payload -Name $_
+                }).Count -eq 0) {
+                    throw "LEGACY_AUDIT_SPLIT_SCHEMA_MISMATCH"
+                }
+                if ($null -eq $legacyAuditTime -or
+                    ($legacyAuditTime - $generated).TotalMinutes -gt 15) {
+                    throw "CANDIDATE_AUDIT_TRANSITION_STALE"
+                }
+                $results += [pscustomobject]@{
+                    route = $path; state = "PASSED"; passed = $true; reason = "PASSED"
+                    stable_version_id = [string]$Stable.worker_version_id
+                    candidate_version_id = [string]$candidateRead.observed_version_id
+                }
+            } catch {
+                $reason = if ($_.Exception.Message -in @(
+                    "EXACT_VERSION_IDENTITY_MISMATCH", "CANDIDATE_AUDIT_TRANSITION_STALE",
+                    "LEGACY_AUDIT_SPLIT_SCHEMA_MISMATCH"
+                )) { $_.Exception.Message } else { "EXACT_VERSION_READ_FAILED" }
+                $results += [pscustomobject]@{
+                    route = $path; state = "FAILED"; passed = $false; reason = $reason
+                    error = Protect-PreflightDiagnosticText $_.Exception.Message
+                    stable_version_id = [string]$Stable.worker_version_id
+                    candidate_version_id = [string]$Candidate.worker_version_id
+                }
+            }
+            continue
+        }
         try {
             $stableRead = Invoke-ExactVersionJson `
                 -VersionId ([string]$Stable.worker_version_id) -Path $path
             $candidateRead = Invoke-ExactVersionJson `
                 -VersionId ([string]$Candidate.worker_version_id) -Path $path
-            if ([string]$stableRead.observed_version_id -ne [string]$Stable.worker_version_id -or
-                [string]$candidateRead.observed_version_id -ne [string]$Candidate.worker_version_id) {
-                throw "EXACT_VERSION_IDENTITY_MISMATCH"
-            }
-            if ((Test-ReleaseJsonProperty -Object $Stable -Name "git_sha") -and
-                -not [string]::IsNullOrWhiteSpace([string]$stableRead.observed_git_sha) -and
-                [string]$stableRead.observed_git_sha -ne [string]$Stable.git_sha) {
-                throw "EXACT_VERSION_IDENTITY_MISMATCH"
-            }
-            if ((Test-ReleaseJsonProperty -Object $Candidate -Name "git_sha") -and
-                -not [string]::IsNullOrWhiteSpace([string]$candidateRead.observed_git_sha) -and
+            if ((-not $legacyMode -and
+                    [string]$stableRead.observed_version_id -ne [string]$Stable.worker_version_id) -or
+                [string]$candidateRead.observed_version_id -ne [string]$Candidate.worker_version_id -or
+                (-not $legacyMode -and (
+                    [string]::IsNullOrWhiteSpace([string]$stableRead.observed_git_sha) -or
+                    [string]$stableRead.observed_git_sha -ne [string]$Stable.git_sha)) -or
+                [string]::IsNullOrWhiteSpace([string]$candidateRead.observed_git_sha) -or
                 [string]$candidateRead.observed_git_sha -ne [string]$Candidate.git_sha) {
                 throw "EXACT_VERSION_IDENTITY_MISMATCH"
             }
             $stablePayload = $stableRead.payload
             $candidatePayload = $candidateRead.payload
-            $stableProjection = ConvertTo-ReleaseSemanticProjection -Path $path `
-                -Payload $stablePayload
-            $candidateProjection = ConvertTo-ReleaseSemanticProjection -Path $path `
-                -Payload $candidatePayload
-            # Snapshot publication is asynchronous. Compare shape and explicit
-            # freshness fields below, never serialized byte equality.
-            $stableShape = @($stableProjection.Keys) -join ","
-            $candidateShape = @($candidateProjection.Keys) -join ","
-            $passed = [bool]($stableShape -ceq $candidateShape)
+            $stableProjection = ConvertTo-ReleaseSemanticProjection -Path $path -Payload $stablePayload
+            $candidateProjection = ConvertTo-ReleaseSemanticProjection -Path $path -Payload $candidatePayload
+            $passed = [bool]((@($stableProjection.Keys) -join ",") -ceq
+                (@($candidateProjection.Keys) -join ","))
             $reason = if ($passed) { "PASSED" } else { "CANDIDATE_DATA_PARITY_FAILED" }
             if ($path -eq "/api/status") {
-                $statusResult = Test-CandidateStatusPayload `
-                    -StablePayload $stablePayload -CandidatePayload $candidatePayload
-                $passed = [bool]$statusResult.passed
-                $reason = [string]$statusResult.reason
+                $statusResult = Test-CandidateStatusPayload -StablePayload $stablePayload `
+                    -CandidatePayload $candidatePayload
+                $passed = [bool]$statusResult.passed; $reason = [string]$statusResult.reason
             }
             if ($path -eq "/api/audit") {
                 try {
@@ -1535,6 +1602,7 @@ function Test-CandidateDataParity {
                     if (($stableAuditTime - $candidateAuditTime).TotalMinutes -gt 15) {
                         $passed = $false; $reason = "CANDIDATE_AUDIT_TRANSITION_STALE"
                     }
+                    if ($legacyMode) { $legacyAuditTime = $stableAuditTime }
                 } catch {
                     $passed = $false; $reason = "CANDIDATE_STATUS_SCHEMA_MISMATCH"
                 }
@@ -1549,7 +1617,7 @@ function Test-CandidateDataParity {
             $results += [pscustomobject]@{
                 route = $path; state = if ($passed) { "PASSED" } else { "FAILED" }
                 passed = $passed; reason = $reason
-                stable_version_id = [string]$stableRead.observed_version_id
+                stable_version_id = if ($legacyMode) { [string]$Stable.worker_version_id } else { [string]$stableRead.observed_version_id }
                 candidate_version_id = [string]$candidateRead.observed_version_id
             }
         } catch {
@@ -1567,6 +1635,7 @@ function Test-CandidateDataParity {
             "PASSED"
         } else { "FAILED" }
         passed = [bool](@($results | Where-Object { -not $_.passed }).Count -eq 0)
+        identity_mode = $identityMode
         stable_version_id = [string]$Stable.worker_version_id
         candidate_version_id = [string]$Candidate.worker_version_id
         routes = $results
@@ -3836,17 +3905,24 @@ function Repair-WindowsTime {
 }
 
 function Install-ControlShortcut {
+    param([string]$ShortcutPath = "")
     $desktop = [Environment]::GetFolderPath("Desktop")
-    $shortcutPath = Join-Path $desktop "XAUUSD Forecaster Control Center.lnk"
+    if (-not $ShortcutPath) {
+        $ShortcutPath = Join-Path $desktop "XAUUSD Forecaster Control Center.lnk"
+    }
     $launcherPath = Join-Path $PSScriptRoot "xauusd_control_center_launcher.vbs"
+    if (-not (Test-Path -LiteralPath $launcherPath)) {
+        throw "Verified Control Center GUI launcher is missing."
+    }
     $shell = New-Object -ComObject WScript.Shell
-    $shortcut = $shell.CreateShortcut($shortcutPath)
+    $shortcut = $shell.CreateShortcut($ShortcutPath)
     $shortcut.TargetPath = "$env:WINDIR\System32\wscript.exe"
-    $shortcut.Arguments = '"{0}"' -f $launcherPath
+    $shortcut.Arguments = '"{0}" "{1}" "{2}"' -f `
+        $launcherPath, $moduleRoot, $repositoryRoot
     $shortcut.WorkingDirectory = $moduleRoot
     $shortcut.Description = "Start, stop, inspect, and configure XAUUSD Forecaster"
     $shortcut.Save()
-    return $shortcutPath
+    return $ShortcutPath
 }
 
 function Get-ControlCenterReleasePresentation {
@@ -4024,6 +4100,24 @@ function Import-WpfControlCenterWindow {
     return [Windows.Markup.XamlReader]::Load($reader)
 }
 
+function Write-ControlCenterUiStarted {
+    param(
+        [ValidateSet("WPF", "WINFORMS_FALLBACK")][string]$Mode,
+        [string]$FailureReason = ""
+    )
+    $bundle = Get-RuntimeControlBundleIdentity
+    New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+    [pscustomobject]@{
+        time = [DateTimeOffset]::UtcNow.ToString("o")
+        event = "CONTROL_CENTER_UI_STARTED"
+        mode = $Mode
+        control_revision = if ($bundle) { [string]$bundle.source_revision } else { $null }
+        failure_reason = if ($FailureReason) {
+            Protect-PreflightDiagnosticText $FailureReason
+        } else { $null }
+    } | ConvertTo-Json -Compress | Add-Content -LiteralPath $watchdogLog -Encoding UTF8
+}
+
 function Test-WpfControlCenterLayout {
     $window = Import-WpfControlCenterWindow
     try {
@@ -4086,6 +4180,7 @@ function Test-WpfControlCenterLayout {
 }
 
 function Show-WpfControlCenter {
+    $script:wpfFailureReason = ""
     try {
         $window = Import-WpfControlCenterWindow
 
@@ -4137,7 +4232,7 @@ function Show-WpfControlCenter {
                 "Repository: $([string]$(if ($validation) { $validation.repository } else { 'unavailable' }))"
                 "Windows preflight: $([string]$(if ($validation) { $validation.windows } else { 'unavailable' }))"
                 "API routes: $([string]$(if ($validation) { $validation.cloudflare } else { 'unavailable' }))"
-                "Data parity: $([string]$(if ($validation -and $validation.data_parity) { $validation.data_parity.state } else { 'unavailable' }))"
+                "Data parity: $([string]$(if ($validation -and $validation.data_parity) { $validation.data_parity.state } else { 'unavailable' })) ($([string]$(if ($validation -and $validation.data_parity -and $validation.data_parity.identity_mode) { $validation.data_parity.identity_mode } else { 'unavailable' })))"
                 "CPU headroom: $([string]$(if ($validation -and $validation.cpu_evidence) { $validation.cpu_evidence.gate_state } else { 'unavailable' }))"
                 "5xx / 1102: $([string]$(if ($validation -and $validation.cpu_evidence) { $validation.cpu_evidence.gate_state } else { 'unavailable' }))"
                 "Compatibility: $([string]$(if ($release -and $release.candidate) { $release.candidate.compatibility_state } else { 'unavailable' }))"
@@ -4199,11 +4294,19 @@ function Show-WpfControlCenter {
         $timer.Interval = [TimeSpan]::FromSeconds(5)
         $timer.Add_Tick({ Refresh-WpfStatus })
         $window.Add_Closed({ $timer.Stop() })
+        $script:wpfUiStartedRecorded = $false
+        $window.Add_ContentRendered({
+            if (-not $script:wpfUiStartedRecorded) {
+                Write-ControlCenterUiStarted -Mode "WPF"
+                $script:wpfUiStartedRecorded = $true
+            }
+        })
         Refresh-WpfStatus
         $timer.Start()
         [void]$window.ShowDialog()
         return $true
     } catch {
+        $script:wpfFailureReason = Protect-PreflightDiagnosticText $_.Exception.Message
         Write-Warning "WPF control center unavailable; using WinForms fallback: $($_.Exception.Message)"
         return $false
     }
@@ -5100,6 +5203,8 @@ function Show-ControlCenter {
     })
     $activationTimer.Start()
     $form.Add_Shown({
+        Write-ControlCenterUiStarted -Mode "WINFORMS_FALLBACK" `
+            -FailureReason $script:wpfFailureReason
         Update-ReleaseCardLayout
         $form.Activate()
         $form.TopMost = $true

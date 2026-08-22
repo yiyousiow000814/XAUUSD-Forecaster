@@ -66,6 +66,16 @@ datasets fail with machine-readable route reasons. The Candidate browser page
 labels its versioned `workers.dev` surface as unprotected, removes the login
 action, and directs operators to validate login only at the formal Access host.
 
+The first migration from an explicitly recorded `LEGACY_BOOTSTRAP_STABLE`
+uses a narrow compatibility receipt because that Worker predates exact identity
+headers and split Audit routes. Current deployment evidence must prove the
+recorded legacy Worker owns 100% traffic, the exact Candidate owns 0%, and the
+recorded Windows bootstrap identity is still active. The Candidate remains
+subject to exact Worker and Git headers. Its bounded split Audit resources are
+validated directly against the legacy `/api/audit` freshness authority. Any
+later Stable uses normal exact-version validation; missing headers or routes do
+not infer legacy compatibility.
+
 The local graphical shell is presentation only. WPF/XAML is the normal Windows
 surface and the XAML file participates in the exact revision/hash control
 bundle; WinForms remains a compatibility fallback. Both invoke the same

@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_CONTROL_FILES = (
     "xauusd_control_center.ps1",
     "control_center.xaml",
+    "xauusd_control_center_launcher.vbs",
     "xauusd_watchdog_launcher.vbs",
     "xauusd_watchdog_guard.ps1",
     "xauusd_watchdog_guard_launcher.vbs",
@@ -667,8 +668,8 @@ def test_candidate_data_parity_checks_complete_bounded_route_set_and_identity(
     status_json = json.dumps(_status_payload(), separators=(",", ":"))
     result = _run_control_center_contract(
         tmp_path,
-        "$stable=[pscustomobject]@{worker_version_id='stable'};"
-        "$candidate=[pscustomobject]@{worker_version_id='candidate'};"
+        "$stable=[pscustomobject]@{worker_version_id='stable';git_sha='stable-git'};"
+        "$candidate=[pscustomobject]@{worker_version_id='candidate';git_sha='candidate-git'};"
         "$script:paths=@();"
         "function Invoke-ExactVersionJson { param($VersionId,$Path);"
         "$script:paths += $Path;"
@@ -676,8 +677,10 @@ def test_candidate_data_parity_checks_complete_bounded_route_set_and_identity(
         "elseif($Path -eq '/api/audit'){[pscustomobject]@{generated_at="
         "'2026-08-21T10:20:00+00:00'}}else{[pscustomobject]@{items=@(1)}};"
         "$observed=if($VersionId -eq 'candidate' -and $Path -eq '/api/news-evidence?mode=all&page=1&limit=20')"
-        "{'wrong'}else{$VersionId};return [pscustomobject]@{payload=$payload;"
-        "observed_version_id=$observed;observed_git_sha=''} };"
+        "{'wrong'}else{$VersionId};"
+        "$git=if($VersionId -eq 'stable'){'stable-git'}else{'candidate-git'};"
+        "return [pscustomobject]@{payload=$payload;"
+        "observed_version_id=$observed;observed_git_sha=$git} };"
         "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
         '$route=$result.routes | Where-Object {$_.route -like "/api/news-evidence*"};'
         'Write-Output "$($script:paths.Count),$($route.reason),$($result.passed)"',
@@ -689,21 +692,172 @@ def test_candidate_data_parity_rejects_unexpected_empty_dataset(tmp_path) -> Non
     status_json = json.dumps(_status_payload(), separators=(",", ":"))
     result = _run_control_center_contract(
         tmp_path,
-        "$stable=[pscustomobject]@{worker_version_id='stable'};"
-        "$candidate=[pscustomobject]@{worker_version_id='candidate'};"
+        "$stable=[pscustomobject]@{worker_version_id='stable';git_sha='stable-git'};"
+        "$candidate=[pscustomobject]@{worker_version_id='candidate';git_sha='candidate-git'};"
         "function Invoke-ExactVersionJson { param($VersionId,$Path);"
         f"$payload=if($Path -eq '/api/status'){{'{status_json}' | ConvertFrom-Json}}"
         "elseif($Path -eq '/api/audit'){[pscustomobject]@{generated_at="
         "'2026-08-21T10:20:00+00:00'}}elseif($Path -like '/api/news-index*')"
         "{$items=if($VersionId -eq 'stable'){@(1)}else{@()};"
         "[pscustomobject]@{items=$items}}"
-        "else{[pscustomobject]@{items=@()}};return [pscustomobject]@{payload=$payload;"
-        "observed_version_id=$VersionId;observed_git_sha=''} };"
+        "else{[pscustomobject]@{items=@()}};"
+        "$git=if($VersionId -eq 'stable'){'stable-git'}else{'candidate-git'};"
+        "return [pscustomobject]@{payload=$payload;"
+        "observed_version_id=$VersionId;observed_git_sha=$git} };"
         "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
         '$route=$result.routes | Where-Object {$_.route -like "/api/news-index*"};'
         'Write-Output "$($route.reason),$($result.passed),$($route.error)"',
     )
     assert result == "CANDIDATE_DATASET_UNEXPECTEDLY_EMPTY,False,"
+
+
+def _legacy_parity_contract(
+    *, candidate_header: str = "candidate", candidate_percentage: int = 0,
+    split_generated_at: str = "2026-08-21T10:20:00+00:00",
+) -> str:
+    stable_sha = "a" * 40
+    candidate_sha = "b" * 40
+    status_json = json.dumps(_status_payload(), separators=(",", ":"))
+    return (
+        f"$stable=[pscustomobject]@{{worker_version_id='stable';git_sha='{stable_sha}';"
+        f"windows_revision='{stable_sha}';artifact_kind='LEGACY_BOOTSTRAP_STABLE'}};"
+        f"$candidate=[pscustomobject]@{{worker_version_id='candidate';git_sha='{candidate_sha}';"
+        "artifact_kind='PRODUCTION_CANDIDATE'};"
+        "function Get-CloudflareDeployment { [pscustomobject]@{versions=@("
+        "[pscustomobject]@{version_id='stable';percentage=100},"
+        f"[pscustomobject]@{{version_id='candidate';percentage={candidate_percentage}}})}}}};"
+        f"function Get-RuntimeCodeState {{ [pscustomobject]@{{applied_revision='{stable_sha}'}} }};"
+        "$script:paths=@();"
+        "function Invoke-ExactVersionJson { param($VersionId,$Path);"
+        "$script:paths += \"$VersionId|$Path\";"
+        f"$payload=if($Path -eq '/api/status'){{'{status_json}' | ConvertFrom-Json}}"
+        "elseif($Path -eq '/api/audit'){[pscustomobject]@{generated_at="
+        "'2026-08-21T10:20:00+00:00'}}"
+        f"elseif($Path -eq '/api/audit-briefs'){{[pscustomobject]@{{generated_at='{split_generated_at}';daily_news_briefs=@()}}}}"
+        f"elseif($Path -eq '/api/audit-stories'){{[pscustomobject]@{{generated_at='{split_generated_at}';storylines=@()}}}}"
+        f"elseif($Path -eq '/api/audit-decisions'){{[pscustomobject]@{{generated_at='{split_generated_at}';recent_decisions=@()}}}}"
+        "else{[pscustomobject]@{items=@()}};"
+        f"$observed=if($VersionId -eq 'stable'){{''}}else{{'{candidate_header}'}};"
+        f"$git=if($VersionId -eq 'stable'){{''}}else{{'{candidate_sha}'}};"
+        "[pscustomobject]@{payload=$payload;observed_version_id=$observed;"
+        "observed_git_sha=$git} };"
+    )
+
+
+def test_legacy_bootstrap_parity_accepts_missing_stable_headers_and_split_routes(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _legacy_parity_contract()
+        + "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
+        + 'Write-Output "$($result.passed),$($result.identity_mode),$($script:paths.Count)"',
+    )
+    assert result == "True,LEGACY_BOOTSTRAP_STABLE_COMPAT,17"
+
+
+def test_legacy_bootstrap_parity_requires_current_stable100_evidence(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _legacy_parity_contract(candidate_percentage=10)
+        + "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
+        + 'Write-Output "$($result.passed),$($result.reason),$($script:paths.Count)"',
+    )
+    assert result == "False,LEGACY_STABLE_DEPLOYMENT_EVIDENCE_UNPROVEN,0"
+
+
+def test_legacy_bootstrap_parity_keeps_candidate_identity_exact(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _legacy_parity_contract(candidate_header="wrong")
+        + "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
+        + '$route=$result.routes|Select-Object -First 1;'
+        + 'Write-Output "$($result.passed),$($route.reason)"',
+    )
+    assert result == "False,EXACT_VERSION_IDENTITY_MISMATCH"
+
+
+def test_legacy_bootstrap_split_audit_must_be_current(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _legacy_parity_contract(split_generated_at="2026-08-21T09:50:00+00:00")
+        + "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
+        + '$route=$result.routes|Where-Object {$_.route -eq "/api/audit-briefs"};'
+        + 'Write-Output "$($result.passed),$($route.reason)"',
+    )
+    assert result == "False,CANDIDATE_AUDIT_TRANSITION_STALE"
+
+
+def test_modern_stable_missing_identity_headers_never_uses_legacy_mode(tmp_path) -> None:
+    status_json = json.dumps(_status_payload(), separators=(",", ":"))
+    result = _run_control_center_contract(
+        tmp_path,
+        "$stable=[pscustomobject]@{worker_version_id='stable';git_sha='stable-git';"
+        "artifact_kind='PRODUCTION_CANDIDATE'};"
+        "$candidate=[pscustomobject]@{worker_version_id='candidate';git_sha='candidate-git'};"
+        "function Invoke-ExactVersionJson { param($VersionId,$Path);"
+        f"$payload=if($Path -eq '/api/status'){{'{status_json}'|ConvertFrom-Json}}"
+        "elseif($Path -eq '/api/audit'){[pscustomobject]@{generated_at='2026-08-21T10:20:00+00:00'}}"
+        "else{[pscustomobject]@{items=@()}};"
+        "$version=if($VersionId -eq 'stable'){''}else{'candidate'};"
+        "$git=if($VersionId -eq 'stable'){''}else{'candidate-git'};"
+        "[pscustomobject]@{payload=$payload;observed_version_id=$version;observed_git_sha=$git}};"
+        "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
+        '$route=$result.routes|Select-Object -First 1;'
+        'Write-Output "$($result.identity_mode),$($result.passed),$($route.reason)"',
+    )
+    assert result == "EXACT_VERSION,False,EXACT_VERSION_IDENTITY_MISMATCH"
+
+
+def test_modern_stable_uses_exact_version_mode_after_first_promotion(tmp_path) -> None:
+    status_json = json.dumps(_status_payload(), separators=(",", ":"))
+    result = _run_control_center_contract(
+        tmp_path,
+        "$stable=[pscustomobject]@{worker_version_id='stable';git_sha='stable-git';"
+        "artifact_kind='PRODUCTION_CANDIDATE'};"
+        "$candidate=[pscustomobject]@{worker_version_id='candidate';git_sha='candidate-git'};"
+        "function Invoke-ExactVersionJson { param($VersionId,$Path);"
+        f"$payload=if($Path -eq '/api/status'){{'{status_json}'|ConvertFrom-Json}}"
+        "elseif($Path -eq '/api/audit'){[pscustomobject]@{generated_at='2026-08-21T10:20:00+00:00'}}"
+        "else{[pscustomobject]@{items=@()}};"
+        "$git=if($VersionId -eq 'stable'){'stable-git'}else{'candidate-git'};"
+        "[pscustomobject]@{payload=$payload;observed_version_id=$VersionId;observed_git_sha=$git}};"
+        "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
+        'Write-Output "$($result.identity_mode),$($result.passed)"',
+    )
+    assert result == "EXACT_VERSION,True"
+
+
+def test_control_center_launcher_and_shortcut_use_verified_bundle_path(tmp_path) -> None:
+    launcher = (ROOT / "scripts" / "xauusd_control_center_launcher.vbs").read_text(
+        encoding="utf-8",
+    )
+    assert "-NoProfile -STA -WindowStyle Hidden" in launcher
+    assert "-RuntimeRoot" in launcher and "-RepositoryRoot" in launcher
+    assert "shell.Run command, 0, False" in launcher
+    shortcut = tmp_path / "XAUUSD Forecaster Control Center.lnk"
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$path=Install-ControlShortcut -ShortcutPath '{shortcut}';"
+        "$link=(New-Object -ComObject WScript.Shell).CreateShortcut($path);"
+        'Write-Output "$($link.TargetPath)|$($link.Arguments)|$($link.WorkingDirectory)"',
+    )
+    target, arguments, working = result.split("|", 2)
+    assert target.lower().endswith("\\system32\\wscript.exe")
+    assert "xauusd_control_center_launcher.vbs" in arguments
+    assert str(tmp_path / "runtime") in arguments
+    assert str(tmp_path / "repository") in arguments
+    assert working == str(tmp_path / "runtime")
+
+
+def test_control_center_records_wpf_and_bounded_fallback_diagnostics() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
+        encoding="utf-8",
+    )
+    assert 'event = "CONTROL_CENTER_UI_STARTED"' in source
+    assert 'Write-ControlCenterUiStarted -Mode "WPF"' in source
+    assert 'Write-ControlCenterUiStarted -Mode "WINFORMS_FALLBACK"' in source
+    assert "Protect-PreflightDiagnosticText $FailureReason" in source
 
 
 def test_candidate_auth_evidence_uses_formal_access_host_only() -> None:
