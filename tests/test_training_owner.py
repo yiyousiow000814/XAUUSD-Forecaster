@@ -135,7 +135,7 @@ def test_slow_training_is_owned_off_the_requesting_decision_connection(
     ledger.close()
 
 
-def test_expired_training_lease_is_reclaimed_without_duplicate_live_owner(tmp_path) -> None:
+def test_expired_training_lease_cannot_be_stolen_from_live_owner(tmp_path) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     training_owner.install_training_owner_schema(ledger.connection)
     cutoff = datetime(2026, 8, 20, 12, tzinfo=UTC)
@@ -155,7 +155,174 @@ def test_expired_training_lease_is_reclaimed_without_duplicate_live_owner(tmp_pa
             "UPDATE background_training_owner_v1 SET lease_expires_at=? WHERE id=1",
             ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(),),
         )
-    assert second._claim(second_ledger.connection) is not None
+    assert second._claim(second_ledger.connection) is None
     first_ledger.close()
     second_ledger.close()
+    ledger.close()
+
+
+def test_blocked_training_renews_lease_across_twenty_logical_minutes(
+    tmp_path, monkeypatch,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    training_owner.install_training_owner_schema(ledger.connection)
+    entered = threading.Event()
+    release = threading.Event()
+    logical_now = [datetime.now(UTC)]
+
+    def blocked(*_args):
+        entered.set()
+        assert release.wait(3)
+        return [{"status": "NOT_DUE"}]
+
+    monkeypatch.setattr(training_owner, "train_due_v2", blocked)
+    monkeypatch.setattr(training_owner, "train_due_execution", lambda *_: [])
+    first = training_owner.BackgroundTrainingOwner(
+        ledger.path, tmp_path / "models", tmp_path / "execution",
+        lease_seconds=60, heartbeat_seconds=0.01, clock=lambda: logical_now[0],
+    )
+    first.start()
+    training_owner.request_background_training(
+        ledger.connection, logical_now[0], clock=lambda: logical_now[0],
+    )
+    first.wake()
+    assert entered.wait(3)
+    initial = ledger.connection.execute(
+        """SELECT lease_heartbeat_at,lease_expires_at,process_id,
+                  process_start_token FROM background_training_owner_v1"""
+    ).fetchone()
+    logical_now[0] += timedelta(minutes=21)
+    deadline = time.time() + 2
+    renewed = None
+    while time.time() < deadline:
+        renewed = ledger.connection.execute(
+            """SELECT lease_heartbeat_at,lease_expires_at
+               FROM background_training_owner_v1"""
+        ).fetchone()
+        if renewed[0] != initial[0]:
+            break
+        time.sleep(0.01)
+    assert renewed[0] == logical_now[0].isoformat()
+    assert datetime.fromisoformat(renewed[1]) > logical_now[0]
+    assert initial[2] and initial[3]
+
+    second = training_owner.BackgroundTrainingOwner(
+        ledger.path, tmp_path / "models", tmp_path / "execution",
+        clock=lambda: logical_now[0],
+    )
+    second_ledger = ForwardLedger(ledger.path)
+    assert second._claim(second_ledger.connection) is None
+    with ledger.connection:
+        ledger.connection.execute(
+            "UPDATE background_training_owner_v1 SET lease_expires_at=? WHERE id=1",
+            ((logical_now[0] - timedelta(seconds=1)).isoformat(),),
+        )
+    assert second._claim(second_ledger.connection) is None
+
+    release.set()
+    first.close()
+    assert first._lease_thread is None
+    second_ledger.close()
+    ledger.close()
+
+
+def test_confirmed_dead_training_process_is_recoverable(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    training_owner.install_training_owner_schema(ledger.connection)
+    cutoff = datetime(2026, 8, 20, 12, tzinfo=UTC)
+    training_owner.request_background_training(ledger.connection, cutoff)
+    first = training_owner.BackgroundTrainingOwner(
+        ledger.path, tmp_path / "models", tmp_path / "execution",
+    )
+    first_ledger = ForwardLedger(ledger.path)
+    assert first._claim(first_ledger.connection) is not None
+    with ledger.connection:
+        ledger.connection.execute(
+            "UPDATE background_training_owner_v1 SET lease_expires_at=? WHERE id=1",
+            ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(),),
+        )
+    recovered = training_owner.BackgroundTrainingOwner(
+        ledger.path, tmp_path / "models", tmp_path / "execution",
+        process_probe=lambda _pid, _token: False,
+    )
+    recovered_ledger = ForwardLedger(ledger.path)
+    assert recovered._claim(recovered_ledger.connection) is not None
+    row = ledger.connection.execute(
+        "SELECT lease_owner,process_id,process_start_token FROM background_training_owner_v1"
+    ).fetchone()
+    assert row[0] == recovered.owner_id
+    assert row[1] == recovered.process_id
+    assert row[2] == recovered.process_start_token
+    first_ledger.close()
+    recovered_ledger.close()
+    ledger.close()
+
+
+def test_inconsistent_expired_owner_identity_fails_closed(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    training_owner.install_training_owner_schema(ledger.connection)
+    cutoff = datetime(2026, 8, 20, 12, tzinfo=UTC)
+    training_owner.request_background_training(ledger.connection, cutoff)
+    first = training_owner.BackgroundTrainingOwner(
+        ledger.path, tmp_path / "models", tmp_path / "execution",
+    )
+    first_ledger = ForwardLedger(ledger.path)
+    assert first._claim(first_ledger.connection) is not None
+    with ledger.connection:
+        ledger.connection.execute(
+            """UPDATE background_training_owner_v1
+                  SET process_start_token=NULL,lease_expires_at=? WHERE id=1""",
+            ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(),),
+        )
+    second = training_owner.BackgroundTrainingOwner(
+        ledger.path, tmp_path / "models", tmp_path / "execution",
+    )
+    second_ledger = ForwardLedger(ledger.path)
+    assert second._claim(second_ledger.connection) is None
+    row = ledger.connection.execute(
+        "SELECT state,last_error FROM background_training_owner_v1"
+    ).fetchone()
+    assert tuple(row) == ("RUNNING", "TRAINING_OWNER_IDENTITY_UNRESOLVED")
+    first_ledger.close()
+    second_ledger.close()
+    ledger.close()
+
+
+def test_training_failure_preserves_active_generation_and_retries_once_later(
+    tmp_path, monkeypatch,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    training_owner.install_training_owner_schema(ledger.connection)
+    active_generation = {"id": "stable", "activations": 0}
+    attempted = threading.Event()
+
+    def fail_training(*_args):
+        attempted.set()
+        raise RuntimeError("controlled training failure")
+
+    monkeypatch.setattr(training_owner, "train_due_v2", fail_training)
+    monkeypatch.setattr(training_owner, "train_due_execution", lambda *_: [])
+    owner = training_owner.BackgroundTrainingOwner(
+        ledger.path, tmp_path / "models", tmp_path / "execution",
+    )
+    owner.start()
+    training_owner.request_background_training(
+        ledger.connection, datetime.now(UTC),
+    )
+    owner.wake()
+    assert attempted.wait(3)
+    deadline = time.time() + 2
+    row = None
+    while time.time() < deadline:
+        row = ledger.connection.execute(
+            "SELECT state,last_error,lease_owner FROM background_training_owner_v1"
+        ).fetchone()
+        if row[0] == "PENDING":
+            break
+        time.sleep(0.01)
+    assert row[0] == "PENDING"
+    assert "controlled training failure" in row[1]
+    assert row[2] is None
+    assert active_generation == {"id": "stable", "activations": 0}
+    owner.close()
     ledger.close()

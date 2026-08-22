@@ -297,13 +297,17 @@ reads the latest committed news evidence and never waits for a source poll.
 An unfinished or stale poll degrades news freshness while decision-time
 semantic-health snapshots continue advancing on every eligible market grid.
 Training and news-contract reconciliation likewise have one durable background
-owner with an expiring SQLite lease and a connection owned only by that thread.
+owner with a renewable SQLite lease and a connection owned only by that thread.
 The five-minute lane may persist or coalesce a training request, but it never
 waits for row materialization, event lookup, Ridge fitting, artifact writes, or
-reconciliation. A request arriving during training schedules one rerun; a
-crashed owner is recoverable after lease expiry without creating two live
-owners. Training failure remains durable evidence and cannot delay the next
-decision heartbeat.
+reconciliation. A request arriving during training schedules one rerun. The
+lease heartbeat
+advances independently while training runs and records the owner PID plus OS
+process-start identity. Expiry alone never permits takeover: a second owner may
+recover durable work only after the prior process identity is proven dead;
+incomplete or unresolvable identity fails closed as a stuck-owner diagnostic.
+Training failure remains durable evidence and cannot delay the next decision
+heartbeat.
 Broker-native cTrader `Symbol.MarketHours` is authoritative for daily market
 closure. Its `market-session.json` heartbeat is state telemetry and must remain
 fresh on the Algo timer independently of quote ticks. Python and dashboard code
