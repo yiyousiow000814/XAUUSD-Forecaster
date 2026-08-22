@@ -15,6 +15,12 @@ import {
   D1CapabilityError,
   requireD1Capabilities,
 } from "../app/api/_shared/d1-capabilities";
+import {
+  beginReleaseValidation,
+  isReleaseValidationContext,
+  releaseValidationResponse,
+  validateJsonWithD1,
+} from "../app/api/_shared/release-validation";
 
 declare const __AURUM_DEPLOYMENT__: {
   branch: string;
@@ -261,6 +267,7 @@ async function snapshotWrite(
   resource: string,
   id: number | null,
   invalid: string,
+  routeFamily: string,
   maxBytes = MAX_DASHBOARD_SNAPSHOT_BYTES,
 ) {
   if (!await isAuthorized(request, env.INGEST_TOKEN)) {
@@ -277,6 +284,13 @@ async function snapshotWrite(
       failureStage: "d1_binding",
     });
   }
+  const validation = beginReleaseValidation(request, routeFamily);
+  if (validation instanceof Response) {
+    return result(validation, resource, {
+      d1Operations: 0,
+      failureStage: "release_validation_identity",
+    });
+  }
   const body = await readBoundedBody(request, maxBytes);
   if (body.status === "too_large") {
     const response = json({ error: "payload too large" }, 413);
@@ -285,14 +299,28 @@ async function snapshotWrite(
       failureStage: "request_bound",
     });
   }
-  const writeResult = id === null
-    ? await writeDashboardStatusSnapshots(body.serialized, env.DB)
-    : await writeSerializedDashboardSnapshot(body.serialized, env.DB, id);
+  const writeResult = isReleaseValidationContext(validation)
+    ? await validateJsonWithD1(env.DB, body.serialized) ? "validated" : "invalid"
+    : id === null
+      ? await writeDashboardStatusSnapshots(body.serialized, env.DB)
+      : await writeSerializedDashboardSnapshot(body.serialized, env.DB, id);
   if (writeResult === "invalid") {
     const response = json({ error: invalid }, 400);
     return result(response.response, resource, {
       d1Operations: 1, requestBytes: body.receivedBytes,
       responseBytes: response.responseBytes, failureStage: "json_validation",
+    });
+  }
+  if (writeResult === "validated" && isReleaseValidationContext(validation)) {
+    const response = releaseValidationResponse(validation, {
+      body: "bounded-read", json: "d1-json1",
+      mutation_boundary: id === null ? "status-snapshot-upsert" : "snapshot-upsert",
+    });
+    const serialized = await response.clone().text();
+    return result(response, resource, {
+      d1Operations: 1,
+      requestBytes: body.receivedBytes,
+      responseBytes: bytes(serialized),
     });
   }
   const payload = resource === "status" ? {
@@ -391,7 +419,9 @@ export async function routeApiRequest(
   if (pathname === "/api/ingest") {
     if (request.method === "GET") return ingestHealth(env);
     if (request.method === "POST") {
-      return snapshotWrite(request, env, "status", null, "invalid status payload");
+      return snapshotWrite(
+        request, env, "status", null, "invalid status payload", "status-ingest",
+      );
     }
   }
   const snapshot = SNAPSHOT_ROUTES[pathname];
@@ -402,6 +432,7 @@ export async function routeApiRequest(
     if (request.method === "POST") {
       return snapshotWrite(
         request, env, pathname.slice(5), snapshot.id, snapshot.invalid,
+        `${pathname.slice(5)}-write`,
         snapshot.maxBytes,
       );
     }

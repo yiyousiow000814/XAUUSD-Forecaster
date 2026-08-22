@@ -274,6 +274,51 @@ test("bounds empty, oversized, maximum legal, and concurrent snapshot writes", a
   assert.deepEqual(concurrent.map(response => response.status), [200, 200, 200, 200]);
 });
 
+test("fast snapshot routes honor authenticated release dry-run without mutation", async () => {
+  if (isPreviewBuild) return;
+  const validationHeaders = {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+    "X-Aurum-Release-Validation": "dry-run",
+    "X-Aurum-Validation-Run": "worker-router-family-run",
+  };
+  const routes = [
+    ["/api/ingest", "status-ingest", { generated_at: new Date().toISOString(), system: {} }],
+    ["/api/audit", "audit-write", { news_metrics: {} }],
+    ["/api/audit-briefs", "audit-briefs-write", { daily_news_briefs: [] }],
+    ["/api/audit-stories", "audit-stories-write", { storylines: [] }],
+    ["/api/audit-decisions", "audit-decisions-write", { recent_decisions: [] }],
+    ["/api/learning", "learning-write", { models: [] }],
+    ["/api/market-chart", "market-chart-write", { candles: [] }],
+  ];
+  const before = JSON.stringify(database.database.prepare(
+    "SELECT id,payload,received_at FROM dashboard_snapshots ORDER BY id",
+  ).all());
+  for (const [path, routeFamily, payload] of routes) {
+    const response = await invoke(path, {
+      method: "POST",
+      headers: {
+        ...validationHeaders,
+        "X-Aurum-Request-ID": `request-${routeFamily}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    assert.equal(response.status, 200, path);
+    assert.equal(response.headers.get("x-aurum-d1-operations"), "1", path);
+    const body = await response.json();
+    assert.equal(body.status, "DRY_RUN_OK", path);
+    assert.equal(body.route_family, routeFamily, path);
+    assert.equal(body.validation_run, "worker-router-family-run", path);
+    assert.equal(body.mutated, false, path);
+    assert.doesNotMatch(JSON.stringify(body), new RegExp(token), path);
+  }
+  const after = JSON.stringify(database.database.prepare(
+    "SELECT id,payload,received_at FROM dashboard_snapshots ORDER BY id",
+  ).all());
+  assert.equal(after, before);
+  assert.doesNotMatch(after, new RegExp(token));
+});
+
 test("turns a temporary D1 failure into a bounded resource-owned 503", async () => {
   if (isPreviewBuild) return;
   const failingEnv = {
