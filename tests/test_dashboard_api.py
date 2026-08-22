@@ -2309,15 +2309,24 @@ def test_critical_status_owns_bounded_recent_decisions_and_live_oos_count(
     assert critical["counts"]["live_oos_model_groups"] == 0
     normalized = [" ".join(statement.lower().split()) for statement in statements]
     decision_reads = [
-        statement for statement in normalized
-        if "from decision_events d join market_snapshots" in statement
+        statement for statement in statements
+        if "from decision_events d join market_snapshots"
+        in " ".join(statement.lower().split())
     ]
     bounded_decision_reads = [
-        statement for statement in decision_reads if "limit 18" in statement
+        statement for statement in decision_reads if "limit 18" in statement.lower()
     ]
     assert bounded_decision_reads
     assert not any("features_json" in statement for statement in bounded_decision_reads)
     assert not any("row_number() over" in statement for statement in normalized)
+    with real_connect(database) as connection:
+        plan = [
+            str(row[3]) for row in connection.execute(
+                "EXPLAIN QUERY PLAN " + bounded_decision_reads[0]
+            )
+        ]
+    assert any("source_decision_id=?" in step for step in plan)
+    assert not any("prediction_v2_time" in step for step in plan)
 
 
 def test_critical_status_returns_every_available_decision_below_window(tmp_path) -> None:
