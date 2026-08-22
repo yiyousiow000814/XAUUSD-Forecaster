@@ -892,6 +892,34 @@ def test_wpf_shell_is_bundled_with_winforms_fallback_and_release_controls() -> N
     assert 'Get-ControlCenterReleasePresentation -Release $release' in source
 
 
+def test_release_gui_actions_are_tracked_single_flight_in_both_shells() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
+        encoding="utf-8",
+    )
+    wpf = source[source.index("function Show-WpfControlCenter"):source.index(
+        "function Show-ControlCenter"
+    )]
+    fallback = source[source.index("function Show-ControlCenter"):]
+
+    assert "if (Test-WpfOperationActive) { return }" in wpf
+    assert "-WindowStyle Hidden -PassThru" in wpf
+    assert "Set-WpfReleaseBusy -Busy $true -Operation $Operation" in wpf
+    assert all(state in wpf for state in ("APPROVING", "PROMOTING", "REVERSING"))
+    assert all(name in wpf for name in (
+        '"ApproveCompatibilityButton", "PromoteButton", "ReverseButton"',
+        "$script:wpfOperation.HasExited",
+        "Refresh-WpfStatus",
+        "$script:wpfOperation = $null",
+    ))
+    assert "Operation failed without diagnostic output." in wpf
+
+    assert "if ($script:guiOperation -and -not $script:guiOperation.HasExited) { return }" in fallback
+    assert all(state in fallback for state in ("APPROVING", "PROMOTING", "REVERSING"))
+    assert fallback.index("Set-GuiBusy -Busy $true") < fallback.index(
+        '$script:guiOperation = Start-Process -FilePath "powershell.exe"'
+    )
+
+
 def test_wpf_runtime_loads_and_keeps_release_controls_reachable() -> None:
     script = ROOT / "scripts" / "xauusd_control_center.ps1"
     result = subprocess.run(
@@ -1555,6 +1583,73 @@ def test_manifest_selects_baseline_and_affected_route_sample_families(tmp_path) 
     )
 
     assert result == "7,70,33,330,0,False"
+
+
+def test_directed_route_sample_fails_closed_on_exact_identity_mismatch(tmp_path) -> None:
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Invoke-WebRequest { return [pscustomobject]@{StatusCode=200;Content='{}';Headers=@{"
+        "'X-Aurum-Worker-Version'='wrong-worker';'X-Aurum-Git-SHA'=('c'*40);"
+        "'X-Aurum-Route'='/api/status';'X-Aurum-Resource'='status';"
+        "'X-Aurum-D1-Operations'='1';'X-Aurum-Request-Bytes'='0';"
+        "'X-Aurum-Response-Bytes'='2';'X-Aurum-Failure-Stage'='';"
+        "'Server-Timing'='aurum;dur=1.00'}} };"
+        f"$route=[pscustomobject]@{{method='GET';path='/api/status';request_query='';"
+        f"strategy='DIRECT_REQUEST';family='status-read';expected_worker_version='worker';"
+        f"expected_git_sha='{candidate}'}};"
+        "$sample=Invoke-CandidateRouteSample -Route $route -VersionHeaders @{} "
+        "-ValidationRun 'run-1' -FixtureRoot $repositoryRoot -IngestToken '';"
+        'Write-Output "$($sample.passed),$($sample.reason),$($sample.method),$($sample.path),'
+        '$($sample.status),$($sample.observed_worker_version),$($sample.resource)"',
+    )
+
+    assert result == "False,WORKER_IDENTITY_MISMATCH,GET,/api/status,200,wrong-worker,status"
+
+
+def test_failed_directed_validation_persists_bounded_route_receipt(tmp_path) -> None:
+    stable = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$stable=New-ReleaseIdentity -GitSha '{stable}' -WorkerVersionId 'stable-worker' "
+        f"-WindowsRevision '{stable}';"
+        f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId 'candidate-worker' "
+        f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE' -Branch 'main';"
+        "$candidate.compatibility_state='APPROVED';"
+        "$state=New-ReleaseControlState -Stable $stable -Candidate $candidate;"
+        "Write-ReleaseControlState $state;"
+        "function Test-ProductionCandidateProvenance { return $true };"
+        "function Invoke-ProductionShapePreflight { return $true };"
+        "function Test-RequiredGitHubChecks { return 'PASSED' };"
+        "function Get-CandidateChangedFiles { return @('web/worker/api-router.ts') };"
+        "function Get-CandidateCompatibilityRequirement { return [pscustomobject]@{state='COMPATIBLE';files=@()} };"
+        "function Get-CandidateRouteValidationPlan { return [pscustomobject]@{worker_cpu_required=$true;requires_validation=$true;static_assets=@();worker_reads=@();worker_writes=@()} };"
+        "function Set-CloudflareCandidatePointer {};"
+        "function Invoke-CandidateWorkerValidation { return [pscustomobject]@{passed=$false;validation_run='run-2';"
+        "expected_worker_invocations=10;observed_worker_invocations=$null;static_worker_invocations=0;"
+        "static_observability_state='PASSED';cpu_evidence='NOT_RUN';routes=@([pscustomobject]@{"
+        "route='/api/learning-history';path='/api/learning-history?limit=100';method='GET';passed=$false;"
+        "reason='INVALID_RESOURCE';status=400;first_failure=[pscustomobject]@{method='GET';"
+        "path='/api/learning-history?limit=100';expected_status=200;status=400;reason='INVALID_RESOURCE';"
+        "requested_worker_version='candidate-worker';observed_worker_version='candidate-worker';"
+        f"observed_git_sha='{candidate}';resource='learning-history';d1_operations='0';"
+        "request_bytes='0';response_bytes='28';failure_stage='route';request_id='request-2';"
+        "validation_run='run-2'}})} };"
+        "Invoke-AutomaticCandidateValidation -Candidate $candidate | Out-Null;"
+        "$saved=Get-ReleaseControlState; $json=$saved|ConvertTo-Json -Depth 20 -Compress;"
+        'Write-Output "$($saved.candidate.validation_state),$($saved.candidate.validation.reason),'
+        '$($saved.candidate.validation.cloudflare),$($saved.candidate.validation.routes_failed),'
+        '$($saved.candidate.validation.first_failure.method),$($saved.candidate.validation.first_failure.path),'
+        '$($saved.candidate.validation.first_failure.status),$($saved.candidate.validation.first_failure.reason),'
+        '$($saved.candidate.validation.data_parity.state),$($saved.candidate.validation.cpu_headroom.state),'
+        "$([bool]($json -match 'token|secret'))\"",
+    )
+
+    assert result == (
+        "FAILED,DIRECTED_WORKER_VALIDATION_FAILED,FAILED,1,GET,"
+        "/api/learning-history?limit=100,400,INVALID_RESOURCE,NOT_RUN,NOT_RUN,False"
+    )
 
 
 def test_one_failed_route_family_fails_candidate_cpu_evidence(tmp_path) -> None:
