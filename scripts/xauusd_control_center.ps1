@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "ApproveCompatibility", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "ApproveCompatibility", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync")]
     [string]$ServiceKey = "",
@@ -4010,15 +4010,84 @@ function Get-ControlCenterSummaryPresentation {
     }
 }
 
-function Show-WpfControlCenter {
+function Import-WpfControlCenterWindow {
     $xamlPath = Join-Path $PSScriptRoot "control_center.xaml"
-    if (-not (Test-Path -LiteralPath $xamlPath)) { return $false }
+    if (-not (Test-Path -LiteralPath $xamlPath)) {
+        throw "WPF control resource is missing: $xamlPath"
+    }
+    Add-Type -AssemblyName PresentationFramework
+    Add-Type -AssemblyName PresentationCore
+    [xml]$xaml = [IO.File]::ReadAllText(
+        $xamlPath, [Text.UTF8Encoding]::new($false)
+    )
+    $reader = New-Object System.Xml.XmlNodeReader $xaml
+    return [Windows.Markup.XamlReader]::Load($reader)
+}
+
+function Test-WpfControlCenterLayout {
+    $window = Import-WpfControlCenterWindow
     try {
-        Add-Type -AssemblyName PresentationFramework
-        Add-Type -AssemblyName PresentationCore
-        [xml]$xaml = Get-Content -LiteralPath $xamlPath -Raw
-        $reader = New-Object System.Xml.XmlNodeReader $xaml
-        $window = [Windows.Markup.XamlReader]::Load($reader)
+        $required = @(
+            "RootScrollViewer", "RootLayout", "ReleaseGrid", "StableCard",
+            "CandidateCard", "PreviousCard", "CandidateChecks",
+            "CandidateReason", "OpenStableButton", "OpenCandidateButton",
+            "ApproveCompatibilityButton", "PromoteButton", "ReverseButton",
+            "CandidateTechnicalEvidence", "FooterDisclaimer"
+        )
+        foreach ($name in $required) {
+            if (-not $window.FindName($name)) { throw "Missing WPF control: $name" }
+        }
+        $scroll = $window.FindName("RootScrollViewer")
+        if ($scroll.VerticalScrollBarVisibility -ne
+            [Windows.Controls.ScrollBarVisibility]::Auto) {
+            throw "RootScrollViewer must retain automatic vertical scrolling."
+        }
+        $results = @()
+        foreach ($viewport in @(
+            @(1366, 768), @(1920, 1080)
+        )) {
+            foreach ($scale in @(1.0, 1.25, 1.5)) {
+                $width = [Math]::Floor($viewport[0] / $scale)
+                $height = [Math]::Floor($viewport[1] / $scale)
+                $width = [Math]::Max([double]$window.MinWidth, $width)
+                $height = [Math]::Max([double]$window.MinHeight, $height)
+                $content = [Windows.FrameworkElement]$window.Content
+                $size = [Windows.Size]::new($width, $height)
+                $content.Measure($size)
+                $content.Arrange([Windows.Rect]::new(0, 0, $width, $height))
+                $content.UpdateLayout()
+                $reachable = $true
+                foreach ($name in @(
+                    "OpenStableButton", "OpenCandidateButton",
+                    "ApproveCompatibilityButton", "PromoteButton", "ReverseButton"
+                )) {
+                    $control = [Windows.FrameworkElement]$window.FindName($name)
+                    if ($control.ActualWidth -le 0 -or $control.ActualHeight -le 0) {
+                        $reachable = $false
+                    }
+                }
+                if (-not $reachable) {
+                    throw "Critical WPF actions failed layout at $($viewport[0])x$($viewport[1]) scale $scale."
+                }
+                $results += [pscustomobject]@{
+                    viewport = "$($viewport[0])x$($viewport[1])"
+                    scale = $scale
+                    logical_width = $width
+                    logical_height = $height
+                    critical_controls_reachable = $reachable
+                    vertical_scroll_available = [bool]($scroll.ScrollableHeight -gt 0)
+                }
+            }
+        }
+        return $results
+    } finally {
+        $window.Close()
+    }
+}
+
+function Show-WpfControlCenter {
+    try {
+        $window = Import-WpfControlCenterWindow
 
         function Find-WpfControl([string]$Name) { return $window.FindName($Name) }
         function Format-WpfIdentity($Release) {
@@ -4057,17 +4126,21 @@ function Show-WpfControlCenter {
                 elseif ($release.candidate.validation.error) { [string]$release.candidate.validation.error }
                 else { "Validation evidence is available." }
             } else { "Candidate validation is unavailable." }
-            (Find-WpfControl "CandidateReason").Text = $reason
             $releaseView = Get-ControlCenterReleasePresentation -Release $release
+            (Find-WpfControl "CandidateReason").Text = if ($releaseView.can_promote) {
+                "Ready for explicit manual promotion."
+            } else { "Cannot promote: $reason" }
             $validation = if ($release -and $release.candidate) {
                 $release.candidate.validation
             } else { $null }
             (Find-WpfControl "CandidateChecks").Text = @(
                 "Repository: $([string]$(if ($validation) { $validation.repository } else { 'unavailable' }))"
-                "Windows: $([string]$(if ($validation) { $validation.windows } else { 'unavailable' }))"
-                "Cloudflare: $([string]$(if ($validation) { $validation.cloudflare } else { 'unavailable' }))"
+                "Windows preflight: $([string]$(if ($validation) { $validation.windows } else { 'unavailable' }))"
+                "API routes: $([string]$(if ($validation) { $validation.cloudflare } else { 'unavailable' }))"
                 "Data parity: $([string]$(if ($validation -and $validation.data_parity) { $validation.data_parity.state } else { 'unavailable' }))"
-                "CPU / 5xx: $([string]$(if ($validation -and $validation.cpu_evidence) { $validation.cpu_evidence.gate_state } else { 'unavailable' }))"
+                "CPU headroom: $([string]$(if ($validation -and $validation.cpu_evidence) { $validation.cpu_evidence.gate_state } else { 'unavailable' }))"
+                "5xx / 1102: $([string]$(if ($validation -and $validation.cpu_evidence) { $validation.cpu_evidence.gate_state } else { 'unavailable' }))"
+                "Compatibility: $([string]$(if ($release -and $release.candidate) { $release.candidate.compatibility_state } else { 'unavailable' }))"
                 "Access boundary: formal-host only"
             ) -join "`n"
             (Find-WpfControl "CandidateTechnicalEvidence").Text = if ($release -and $release.candidate) {
@@ -5074,6 +5147,9 @@ switch ($Action) {
             Set-Content -LiteralPath $StatusPath -Encoding UTF8
     }
     "CodeRevision" { Write-Output (Get-CodeRevision) }
+    "WpfLayoutSmoke" {
+        Test-WpfControlCenterLayout | ConvertTo-Json -Depth 4
+    }
     "Start" { Start-All; Start-Sleep -Seconds 2; Get-ForecasterStatus | Format-Table -AutoSize }
     "Stop" { Stop-All; Start-Sleep -Seconds 1; Get-ForecasterStatus | Format-Table -AutoSize }
     "Restart" { Restart-All; Start-Sleep -Seconds 2; Get-ForecasterStatus | Format-Table -AutoSize }

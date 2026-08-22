@@ -738,6 +738,41 @@ def test_wpf_shell_is_bundled_with_winforms_fallback_and_release_controls() -> N
     assert 'Get-ControlCenterReleasePresentation -Release $release' in source
 
 
+def test_wpf_runtime_loads_and_keeps_release_controls_reachable() -> None:
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    result = subprocess.run(
+        [
+            "powershell.exe", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass",
+            "-File", str(script), "-Action", "WpfLayoutSmoke",
+            "-RuntimeRoot", str(ROOT), "-RepositoryRoot", str(ROOT),
+        ],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    )
+    layouts = json.loads(result.stdout)
+    assert {(row["viewport"], row["scale"]) for row in layouts} == {
+        (viewport, scale)
+        for viewport in ("1366x768", "1920x1080")
+        for scale in (1, 1.25, 1.5)
+    }
+    assert all(row["critical_controls_reachable"] for row in layouts)
+    constrained = [
+        row for row in layouts
+        if row["viewport"] == "1366x768" and row["scale"] == 1.5
+    ]
+    assert constrained[0]["vertical_scroll_available"] is True
+
+
+def test_wpf_resource_is_utf8_and_footer_has_no_mojibake() -> None:
+    xaml = (ROOT / "scripts" / "control_center.xaml").read_text(encoding="utf-8")
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "Decision support only · never authorizes trading" in xaml
+    assert "Decision support only Â· never authorizes trading" not in xaml
+    assert "[IO.File]::ReadAllText" in source
+    assert "[Text.UTF8Encoding]::new($false)" in source
+
+
 def test_business_switch_ignores_control_copy_failure_hook(
     tmp_path,
 ) -> None:
