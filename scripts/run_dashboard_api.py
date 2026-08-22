@@ -29,6 +29,11 @@ from xauusd_forecaster.dashboard_payloads import (
     audit_status_payload,
     critical_status_payload,
 )
+from xauusd_forecaster.dashboard_read_models import (
+    DashboardReadModelOwner,
+    DashboardReadModelUnavailable,
+    read_dashboard_read_model,
+)
 from xauusd_forecaster.critical_annotation_state import annotation_queue_snapshot
 from xauusd_forecaster.dashboard_summaries import (
     dashboard_collected_news_sources,
@@ -42,6 +47,7 @@ from xauusd_forecaster.dashboard_summaries import (
     dashboard_total_brief_days,
     dashboard_valid_outcome_summary,
 )
+from scripts.run_dashboard_sync import _learning_summary, market_chart_snapshot
 from xauusd_forecaster.news_scheduler import (  # noqa: E402
     RetryScheduleConflict,
     apply_retry_schedule_override,
@@ -3088,16 +3094,22 @@ def _optional_resource_payload(database: Path, resource: str) -> dict:
     if resource == "audit":
         return audit_status_payload(payload)
     if resource == "learning":
-        return {
+        summary = {
             key: payload[key] for key in (
-                "generated_at", "counts", "training", "learning_curves",
-                "execution_learning",
+                "generated_at", "counts", "training",
             ) if key in payload
         }
+        if isinstance(summary.get("training"), dict):
+            summary["training"] = {
+                key: value for key, value in summary["training"].items()
+                if key != "models"
+            }
+        summary.update(_learning_summary(payload))
+        return summary
     if resource == "market_chart":
         return {
             "generated_at": payload.get("generated_at"),
-            "market_chart": payload.get("market_chart", {}),
+            "market_chart": json.loads(market_chart_snapshot(payload)),
         }
     raise ValueError(f"unknown optional dashboard resource: {resource}")
 
@@ -3244,32 +3256,23 @@ class Handler(BaseHTTPRequestHandler):
                 status = 409
             self._write_json(status, body)
             return
-        resource_builders = {
-            "/api/audit": (
-                self.audit_cache,
-                lambda database: _optional_resource_payload(database, "audit"),
-            ),
-            "/api/learning": (
-                self.learning_cache,
-                lambda database: _optional_resource_payload(database, "learning"),
-            ),
-            "/api/market-chart": (
-                self.market_chart_cache,
-                lambda database: _optional_resource_payload(database, "market_chart"),
-            ),
+        read_model_resources = {
+            "/api/audit": "audit",
+            "/api/learning": "learning",
+            "/api/market-chart": "market_chart",
         }
-        if path in resource_builders:
-            cache, builder = resource_builders[path]
+        if path in read_model_resources:
             try:
-                body, snapshot_state, snapshot_age = cache.get(
-                    self.database, builder,
+                body, metadata = read_dashboard_read_model(
+                    self.database, read_model_resources[path],
                 )
                 status = 200
                 headers = {
-                    "X_Dashboard_Snapshot_State": snapshot_state,
-                    "X_Dashboard_Snapshot_Age": f"{snapshot_age:.3f}",
+                    "X_Dashboard_Read_Model": str(metadata["state"]),
+                    "X_Dashboard_Snapshot_Age": f"{metadata['age_seconds']:.3f}",
+                    "X_Dashboard_Source_Revision": str(metadata["source_revision"]),
                 }
-            except StatusSnapshotUnavailable as error:
+            except DashboardReadModelUnavailable as error:
                 body = json.dumps({"error": str(error)[:500]}).encode()
                 status = 503
                 headers = {}
@@ -3424,6 +3427,18 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
     Handler.database = args.database.resolve()
+    read_model_owner = DashboardReadModelOwner(
+        Handler.database,
+        {
+            resource: (
+                lambda database, resource=resource: _optional_resource_payload(
+                    database, resource,
+                )
+            )
+            for resource in ("audit", "learning", "market_chart")
+        },
+    )
+    read_model_owner.start()
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(
         json.dumps(
@@ -3437,7 +3452,11 @@ def main() -> int:
         ),
         flush=True,
     )
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        read_model_owner.stop()
+        server.server_close()
     return 0
 
 
