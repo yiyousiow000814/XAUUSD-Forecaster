@@ -1100,6 +1100,28 @@ function Remove-CandidateValidationFixtureWorkspace {
     & git -C $repositoryRoot worktree prune 2>$null
 }
 
+function Get-CandidateRouteResponseReason {
+    param([object]$Payload, [string]$Fallback)
+    if ($Payload) {
+        foreach ($path in @(
+            @("error_code"), @("reason"), @("error", "code"), @("error")
+        )) {
+            $value = $Payload
+            foreach ($name in $path) {
+                if ($null -eq $value -or $null -eq $value.PSObject.Properties[$name]) {
+                    $value = $null
+                    break
+                }
+                $value = $value.$name
+            }
+            if ($value -is [string] -and -not [string]::IsNullOrWhiteSpace($value)) {
+                return Protect-PreflightDiagnosticText $value
+            }
+        }
+    }
+    return $Fallback
+}
+
 function Invoke-CandidateRouteSample {
     param(
         [Parameter(Mandatory = $true)][object]$Route,
@@ -1137,27 +1159,69 @@ function Invoke-CandidateRouteSample {
     }
     try {
         $response = Invoke-WebRequest @parameters
-        $passed = [bool]($response.StatusCode -eq 200)
+        $payload = $null
+        try { $payload = $response.Content | ConvertFrom-Json } catch {}
+        $observedVersion = [string]$response.Headers["X-Aurum-Worker-Version"]
+        $observedGit = [string]$response.Headers["X-Aurum-Git-SHA"]
+        $identityPassed = [bool](
+            $observedVersion -eq [string]$Route.expected_worker_version -and
+            $observedGit -eq [string]$Route.expected_git_sha
+        )
+        $dryRunPassed = $true
         if ([string]$Route.strategy -eq "PRODUCTION_SHAPED_DRY_RUN") {
-            try {
-                $payload = $response.Content | ConvertFrom-Json
-                $passed = $passed -and [string]$payload.status -eq "DRY_RUN_OK" -and
-                    [bool]$payload.mutated -eq $false -and
-                    [string]$payload.route_family -eq [string]$Route.family
-            } catch { $passed = $false }
+            $dryRunPassed = [bool]($payload -and
+                [string]$payload.status -eq "DRY_RUN_OK" -and
+                [bool]$payload.mutated -eq $false -and
+                [string]$payload.route_family -eq [string]$Route.family)
         }
-        $reason = if ($passed) { $null } else { "VALIDATION_RESPONSE_INVALID" }
+        $passed = [bool]($response.StatusCode -eq 200 -and $identityPassed -and $dryRunPassed)
+        $reason = if ([int]$response.StatusCode -ne 200) {
+            Get-CandidateRouteResponseReason -Payload $payload -Fallback "HTTP_STATUS_MISMATCH"
+        } elseif (-not $identityPassed) {
+            "WORKER_IDENTITY_MISMATCH"
+        } elseif (-not $dryRunPassed) {
+            "RELEASE_DRY_RUN_CONTRACT_MISMATCH"
+        } else { $null }
         return [pscustomobject]@{
-            request_id=$requestId; status=[int]$response.StatusCode; passed=$passed
+            request_id=$requestId; method=[string]$Route.method
+            path="$([string]$Route.path)$([string]$Route.request_query)"
+            expected_status=200; status=[int]$response.StatusCode; passed=$passed
             reason=$reason
+            requested_worker_version=[string]$Route.expected_worker_version
+            observed_worker_version=$observedVersion; observed_git_sha=$observedGit
+            route=[string]$response.Headers["X-Aurum-Route"]
+            resource=[string]$response.Headers["X-Aurum-Resource"]
+            d1_operations=[string]$response.Headers["X-Aurum-D1-Operations"]
+            request_bytes=[string]$response.Headers["X-Aurum-Request-Bytes"]
+            response_bytes=[string]$response.Headers["X-Aurum-Response-Bytes"]
+            failure_stage=[string]$response.Headers["X-Aurum-Failure-Stage"]
+            server_timing=[string]$response.Headers["Server-Timing"]
+            validation_run=$ValidationRun
         }
     } catch {
-        $status = if ($_.Exception.Response) {
-            [int]$_.Exception.Response.StatusCode
+        $errorResponse = $_.Exception.Response
+        $status = if ($errorResponse) {
+            [int]$errorResponse.StatusCode
         } else { 0 }
+        $payload = $null
+        try { $payload = $_.ErrorDetails.Message | ConvertFrom-Json } catch {}
         return [pscustomobject]@{
-            request_id=$requestId; status=$status; passed=$false
-            reason="VALIDATION_REQUEST_FAILED"
+            request_id=$requestId; method=[string]$Route.method
+            path="$([string]$Route.path)$([string]$Route.request_query)"
+            expected_status=200; status=$status; passed=$false
+            reason=(Get-CandidateRouteResponseReason -Payload $payload `
+                -Fallback "VALIDATION_REQUEST_FAILED")
+            requested_worker_version=[string]$Route.expected_worker_version
+            observed_worker_version=if ($errorResponse) { [string]$errorResponse.Headers["X-Aurum-Worker-Version"] } else { "" }
+            observed_git_sha=if ($errorResponse) { [string]$errorResponse.Headers["X-Aurum-Git-SHA"] } else { "" }
+            route=if ($errorResponse) { [string]$errorResponse.Headers["X-Aurum-Route"] } else { "" }
+            resource=if ($errorResponse) { [string]$errorResponse.Headers["X-Aurum-Resource"] } else { "" }
+            d1_operations=if ($errorResponse) { [string]$errorResponse.Headers["X-Aurum-D1-Operations"] } else { "" }
+            request_bytes=if ($errorResponse) { [string]$errorResponse.Headers["X-Aurum-Request-Bytes"] } else { "" }
+            response_bytes=if ($errorResponse) { [string]$errorResponse.Headers["X-Aurum-Response-Bytes"] } else { "" }
+            failure_stage=if ($errorResponse) { [string]$errorResponse.Headers["X-Aurum-Failure-Stage"] } else { "request" }
+            server_timing=if ($errorResponse) { [string]$errorResponse.Headers["Server-Timing"] } else { "" }
+            validation_run=$ValidationRun
         }
     }
 }
@@ -1170,6 +1234,12 @@ function Invoke-CandidateWorkerValidation {
     $header = @{
         "Cloudflare-Workers-Version-Overrides" =
             "$workerName=`"$([string]$Candidate.worker_version_id)`""
+    }
+    foreach ($route in @($RoutePlan.worker_reads) + @($RoutePlan.worker_writes)) {
+        $route | Add-Member -NotePropertyName expected_worker_version `
+            -NotePropertyValue ([string]$Candidate.worker_version_id) -Force
+        $route | Add-Member -NotePropertyName expected_git_sha `
+            -NotePropertyValue ([string]$Candidate.git_sha) -Force
     }
     $results = @()
     $staticStartedAt = [DateTimeOffset]::UtcNow
@@ -1198,10 +1268,14 @@ function Invoke-CandidateWorkerValidation {
     $staticEndedAt = [DateTimeOffset]::UtcNow
     $staticInvocations = Get-CandidateInvocationCount -Candidate $Candidate `
         -From $staticStartedAt.AddSeconds(-2) -To $staticEndedAt.AddSeconds(2)
-    if ($null -eq $staticInvocations -or [int]$staticInvocations -ne 0) {
+    $staticObservabilityState = if ($null -eq $staticInvocations) {
+        "DIAGNOSTIC_UNAVAILABLE"
+    } elseif ([int]$staticInvocations -eq 0) { "PASSED" } else { "FAILED" }
+    if ($null -ne $staticInvocations -and [int]$staticInvocations -ne 0) {
         $results += [pscustomobject]@{
             route = "STATIC_ASSET_INVOCATIONS"; boundary = "STATIC_ASSET"
-            request_id = $null; status = 0; passed = $false
+            method = "GET"; request_id = $null; status = 0; passed = $false
+            reason = "STATIC_ASSET_WORKER_INVOCATION_MISMATCH"
             observed_invocations = $staticInvocations
         }
     }
@@ -1211,6 +1285,7 @@ function Invoke-CandidateWorkerValidation {
             passed = [bool](@($results | Where-Object { -not $_.passed }).Count -eq 0)
             validation_run = $null; expected_worker_invocations = 0
             static_worker_invocations = $staticInvocations; routes = $results
+            static_observability_state = $staticObservabilityState
             cpu_evidence = "NOT_REQUIRED"
         }
     }
@@ -1230,11 +1305,13 @@ function Invoke-CandidateWorkerValidation {
                     -FixtureRoot $fixtureRoot -IngestToken $ingestToken
             }
             if (@($warmups | Where-Object { -not $_.passed }).Count -gt 0) {
+                $firstWarmupFailure = @($warmups | Where-Object { -not $_.passed })[0]
                 $results += [pscustomobject]@{
                     route=$route.path; method=$route.method; family=$route.family
                     scenario=$route.scenario
                     boundary=$route.boundary; warmup_samples=$warmups.Count
                     acceptance_samples=0; passed=$false; reason="WARMUP_FAILED"
+                    first_failure=$firstWarmupFailure
                 }
             }
         }
@@ -1251,7 +1328,8 @@ function Invoke-CandidateWorkerValidation {
                 [string]$failures[0].reason
             } else { $null }
             $results += [pscustomobject]@{
-                route=$route.path; method=$route.method; family=$route.family
+                route=$route.path; path="$([string]$route.path)$([string]$route.request_query)"
+                method=$route.method; family=$route.family
                 scenario=$route.scenario
                 boundary=$route.boundary; warmup_samples=[int]$route.warmup_samples
                 acceptance_samples=$samples.Count
@@ -1261,16 +1339,21 @@ function Invoke-CandidateWorkerValidation {
                 })
                 passed=[bool]($failures.Count -eq 0)
                 reason=$sampleReason
+                first_failure=if ($failures.Count) { $failures[0] } else { $null }
             }
         }
         $workerEndedAt = [DateTimeOffset]::UtcNow
-        Start-Sleep -Seconds 8
         $platform = $null
-        for ($attempt = 0; $attempt -lt 3 -and -not $platform; $attempt++) {
-            $platform = Get-CandidateCpuEvidence -Candidate $Candidate `
-                -From $workerStartedAt `
-                -To $workerEndedAt.AddSeconds(2) -Routes $workerRoutes
-            if (-not $platform -and $attempt -lt 2) { Start-Sleep -Seconds 5 }
+        if (@($results | Where-Object { -not $_.passed }).Count -eq 0) {
+            Start-Sleep -Seconds 8
+            for ($attempt = 0; $attempt -lt 3 -and -not $platform; $attempt++) {
+                $platform = Get-CandidateCpuEvidence -Candidate $Candidate `
+                    -From $workerStartedAt `
+                    -To $workerEndedAt.AddSeconds(2) -Routes $workerRoutes
+                if (-not $platform -and $attempt -lt 2) { Start-Sleep -Seconds 5 }
+            }
+        } else {
+            $platform = "NOT_RUN"
         }
     } finally {
         Remove-CandidateValidationFixtureWorkspace -Workspace $workspace
@@ -1281,7 +1364,11 @@ function Invoke-CandidateWorkerValidation {
         passed = [bool](@($results | Where-Object { -not $_.passed }).Count -eq 0)
         validation_run = $validationRun
         expected_worker_invocations = $expectedInvocations
+        observed_worker_invocations = if ($platform -and $platform -ne "NOT_RUN") {
+            $platform.invocations
+        } else { $null }
         static_worker_invocations = $staticInvocations
+        static_observability_state = $staticObservabilityState
         routes = $results
         cpu_evidence = $platform
     }
@@ -1766,7 +1853,59 @@ function Invoke-AutomaticCandidateValidation {
         if ($cloudflareChanged) {
             $cloudflare = Invoke-CandidateWorkerValidation -Candidate $Candidate `
                 -RoutePlan $routePlan
-            if (-not $cloudflare.passed) { throw "Directed Worker validation failed." }
+            if (-not $cloudflare.passed) {
+                $failedRoutes = @($cloudflare.routes | Where-Object { -not $_.passed })
+                $passedRoutes = @($cloudflare.routes | Where-Object { $_.passed })
+                $firstFailedRoute = $failedRoutes | Select-Object -First 1
+                $firstFailure = if ($firstFailedRoute.first_failure) {
+                    $firstFailedRoute.first_failure
+                } else {
+                    [pscustomobject]@{
+                        method = [string]$firstFailedRoute.method
+                        path = [string]$(if ($firstFailedRoute.path) {
+                            $firstFailedRoute.path
+                        } else { $firstFailedRoute.route })
+                        expected_status = 200
+                        status = [int]$firstFailedRoute.status
+                        reason = [string]$firstFailedRoute.reason
+                        requested_worker_version = [string]$Candidate.worker_version_id
+                        observed_worker_version = ""
+                        observed_git_sha = ""
+                    }
+                }
+                $state.candidate.validation_state = "FAILED"
+                $state.candidate.validation = [pscustomobject]@{
+                    key = [string]$Candidate.validation_key
+                    repository = "PASSED"
+                    windows = "PASSED"
+                    cloudflare = "FAILED"
+                    compatibility = [string]$state.candidate.compatibility_state
+                    reason = "DIRECTED_WORKER_VALIDATION_FAILED"
+                    validation_run = $cloudflare.validation_run
+                    route_plan = $routePlan
+                    routes = $cloudflare.routes
+                    routes_tested = [int]($passedRoutes.Count + $failedRoutes.Count)
+                    routes_passed = [int]$passedRoutes.Count
+                    routes_failed = [int]$failedRoutes.Count
+                    expected_worker_invocations = $cloudflare.expected_worker_invocations
+                    observed_worker_invocations = $cloudflare.observed_worker_invocations
+                    static_worker_invocations = $cloudflare.static_worker_invocations
+                    static_observability_state = $cloudflare.static_observability_state
+                    first_failure = $firstFailure
+                    data_parity = [pscustomobject]@{ state = "NOT_RUN" }
+                    cpu_headroom = [pscustomobject]@{ state = "NOT_RUN" }
+                    worker_failures = [pscustomobject]@{ state = "NOT_RUN" }
+                    cpu_evidence = "NOT_RUN"
+                    tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+                }
+                Write-ReleaseControlState -State $state
+                Write-ReleaseHistory -Event "CANDIDATE_FAILED" `
+                    -Release $state.candidate -Detail @{
+                        reason = "DIRECTED_WORKER_VALIDATION_FAILED"
+                        validation_run = $cloudflare.validation_run
+                    }
+                return $false
+            }
             if (-not $cloudflare.cpu_evidence) {
                 $state.candidate.validation = [pscustomobject]@{
                     key = [string]$Candidate.validation_key
@@ -1774,7 +1913,15 @@ function Invoke-AutomaticCandidateValidation {
                     windows = "PASSED"
                     cloudflare = "TESTING"
                     reason = "PLATFORM_CPU_EVIDENCE_REQUIRED"
+                    validation_run = $cloudflare.validation_run
+                    route_plan = $routePlan
                     routes = $cloudflare.routes
+                    expected_worker_invocations = $cloudflare.expected_worker_invocations
+                    observed_worker_invocations = $cloudflare.observed_worker_invocations
+                    static_observability_state = $cloudflare.static_observability_state
+                    data_parity = [pscustomobject]@{ state = "NOT_RUN" }
+                    cpu_headroom = [pscustomobject]@{ state = "DIAGNOSTIC_UNAVAILABLE" }
+                    worker_failures = [pscustomobject]@{ state = "DIAGNOSTIC_UNAVAILABLE" }
                     tested_at = [DateTimeOffset]::UtcNow.ToString("o")
                 }
                 Write-ReleaseControlState -State $state
@@ -3925,6 +4072,40 @@ function Install-ControlShortcut {
     return $ShortcutPath
 }
 
+function Get-DirectedWorkerValidationSummary {
+    param([object]$Validation)
+    $routes = if ($Validation -and $Validation.routes) { @($Validation.routes) } else { @() }
+    $tested = if ($Validation -and $null -ne $Validation.routes_tested) {
+        [int]$Validation.routes_tested
+    } else { $routes.Count }
+    $failed = if ($Validation -and $null -ne $Validation.routes_failed) {
+        [int]$Validation.routes_failed
+    } else { @($routes | Where-Object { -not $_.passed }).Count }
+    $passed = if ($Validation -and $null -ne $Validation.routes_passed) {
+        [int]$Validation.routes_passed
+    } else { [Math]::Max(0, $tested - $failed) }
+    $first = if ($Validation -and $Validation.first_failure) {
+        $Validation.first_failure
+    } else {
+        $route = $routes | Where-Object { -not $_.passed } | Select-Object -First 1
+        if ($route -and $route.first_failure) { $route.first_failure } else { $route }
+    }
+    $firstLine = if ($first) {
+        $method = if ($first.method) { [string]$first.method } else { "REQUEST" }
+        $path = if ($first.path) { [string]$first.path } else { [string]$first.route }
+        $status = if ($null -ne $first.status) { "HTTP $([int]$first.status)" } else { "HTTP --" }
+        $reason = if ($first.reason) { [string]$first.reason } else { "VALIDATION_FAILED" }
+        "$method $path · $status · $reason"
+    } else { "" }
+    return [pscustomobject]@{
+        tested = $tested; passed = $passed; failed = $failed
+        state = if ($Validation -and $Validation.cloudflare) {
+            [string]$Validation.cloudflare
+        } else { "WAITING" }
+        first_failure = $first; first_failure_line = $firstLine
+    }
+}
+
 function Get-ControlCenterReleasePresentation {
     param([object]$Release)
 
@@ -4003,7 +4184,9 @@ function Get-ControlCenterReleasePresentation {
     } elseif ($candidateState -eq "TESTING" -or $candidateState -eq "STAGING" -or $candidateState -eq "NEW") {
         "Candidate still testing"
     } elseif ($candidateState -eq "FAILED") {
-        "Candidate failed validation"
+        if ($Release.candidate.validation.reason) {
+            [string]$Release.candidate.validation.reason
+        } else { "Candidate failed validation" }
     } elseif ($candidateState -ne "PASSED") {
         "Candidate has not passed validation"
     } else { "Ready to promote" }
@@ -4192,7 +4375,36 @@ function Show-WpfControlCenter {
             $windows = if ($Release.windows_revision) { ([string]$Release.windows_revision).Substring(0, [Math]::Min(12, ([string]$Release.windows_revision).Length)) } else { "--" }
             return "Git       $git`nWorker    $worker`nWindows   $windows"
         }
+        $script:wpfOperation = $null
+        $script:wpfOperationName = ""
+        $script:wpfOperationOutputPath = ""
+        $script:wpfOperationErrorPath = ""
+        function Test-WpfOperationActive {
+            return [bool]($script:wpfOperation -and -not $script:wpfOperation.HasExited)
+        }
+        function Set-WpfReleaseBusy([bool]$Busy, [string]$Operation = "") {
+            foreach ($name in @(
+                "ApproveCompatibilityButton", "PromoteButton", "ReverseButton"
+            )) {
+                (Find-WpfControl $name).IsEnabled = -not $Busy
+            }
+            if (-not $Busy) { return }
+            $state = switch ($Operation) {
+                "ApproveCompatibility" { "APPROVING" }
+                "PromoteCandidate" { "PROMOTING" }
+                "ReverseStable" { "REVERSING" }
+                default { "WORKING" }
+            }
+            if ($Operation -eq "ReverseStable") {
+                (Find-WpfControl "PreviousState").Text = $state
+            } else {
+                (Find-WpfControl "CandidateState").Text = $state
+            }
+            (Find-WpfControl "CandidateReason").Text =
+                "$state · tracked background operation in progress"
+        }
         function Invoke-WpfOperation([string]$Operation, [string]$ServiceKey = "") {
+            if (Test-WpfOperationActive) { return }
             $arguments = @(
                 "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
                 "-File", ('"{0}"' -f $PSCommandPath), "-Action", $Operation,
@@ -4200,8 +4412,24 @@ function Show-WpfControlCenter {
                 "-RepositoryRoot", ('"{0}"' -f $repositoryRoot)
             )
             if ($ServiceKey) { $arguments += @("-ServiceKey", $ServiceKey) }
-            Start-Process -FilePath "powershell.exe" -ArgumentList $arguments `
-                -WorkingDirectory $moduleRoot -WindowStyle Hidden | Out-Null
+            $script:wpfOperationName = $Operation
+            $script:wpfOperationOutputPath = Join-Path $env:TEMP `
+                ("xauusd-wpf-operation-{0}.out" -f ([guid]::NewGuid().ToString("N")))
+            $script:wpfOperationErrorPath = Join-Path $env:TEMP `
+                ("xauusd-wpf-operation-{0}.err" -f ([guid]::NewGuid().ToString("N")))
+            Set-WpfReleaseBusy -Busy $true -Operation $Operation
+            try {
+                $script:wpfOperation = Start-Process -FilePath "powershell.exe" `
+                    -ArgumentList $arguments -WorkingDirectory $moduleRoot `
+                    -WindowStyle Hidden -PassThru `
+                    -RedirectStandardOutput $script:wpfOperationOutputPath `
+                    -RedirectStandardError $script:wpfOperationErrorPath
+            } catch {
+                $script:wpfOperation = $null
+                Set-WpfReleaseBusy -Busy $false
+                Refresh-WpfStatus
+                throw
+            }
         }
         function Refresh-WpfStatus {
             $status = @(Get-ForecasterStatus)
@@ -4228,25 +4456,58 @@ function Show-WpfControlCenter {
             $validation = if ($release -and $release.candidate) {
                 $release.candidate.validation
             } else { $null }
+            $directed = Get-DirectedWorkerValidationSummary -Validation $validation
+            if ($directed.failed -gt 0 -and $directed.first_failure_line) {
+                (Find-WpfControl "CandidateReason").Text =
+                    "$($directed.first_failure_line)`nCannot promote: $reason"
+            }
+            $apiRouteState = if ($directed.tested -gt 0) {
+                "$($directed.state) · $($directed.passed)/$($directed.tested)"
+            } else { $directed.state }
+            $dataParityState = if ($validation -and $validation.data_parity) {
+                [string]$validation.data_parity.state
+            } else { "unavailable" }
+            $cpuState = if ($validation -and $validation.cpu_headroom) {
+                [string]$validation.cpu_headroom.state
+            } elseif ($validation -and $validation.cpu_evidence -and
+                $validation.cpu_evidence -notin @("NOT_RUN", "NOT_REQUIRED")) {
+                [string]$validation.cpu_evidence.gate_state
+            } elseif ($validation -and $validation.cpu_evidence) {
+                [string]$validation.cpu_evidence
+            } else { "unavailable" }
+            $failureState = if ($validation -and $validation.worker_failures) {
+                [string]$validation.worker_failures.state
+            } else { $cpuState }
             (Find-WpfControl "CandidateChecks").Text = @(
                 "Repository: $([string]$(if ($validation) { $validation.repository } else { 'unavailable' }))"
                 "Windows preflight: $([string]$(if ($validation) { $validation.windows } else { 'unavailable' }))"
-                "API routes: $([string]$(if ($validation) { $validation.cloudflare } else { 'unavailable' }))"
-                "Data parity: $([string]$(if ($validation -and $validation.data_parity) { $validation.data_parity.state } else { 'unavailable' })) ($([string]$(if ($validation -and $validation.data_parity -and $validation.data_parity.identity_mode) { $validation.data_parity.identity_mode } else { 'unavailable' })))"
-                "CPU headroom: $([string]$(if ($validation -and $validation.cpu_evidence) { $validation.cpu_evidence.gate_state } else { 'unavailable' }))"
-                "5xx / 1102: $([string]$(if ($validation -and $validation.cpu_evidence) { $validation.cpu_evidence.gate_state } else { 'unavailable' }))"
+                "API routes: $apiRouteState"
+                "Data parity: $dataParityState"
+                "CPU headroom: $cpuState"
+                "5xx / 1102: $failureState"
                 "Compatibility: $([string]$(if ($release -and $release.candidate) { $release.candidate.compatibility_state } else { 'unavailable' }))"
                 "Access boundary: formal-host only"
             ) -join "`n"
             (Find-WpfControl "CandidateTechnicalEvidence").Text = if ($release -and $release.candidate) {
-                "validation key: $($release.candidate.validation_key)`nbrowser: $($release.candidate.browser_url)`nreason: $reason"
+                $evidence = [ordered]@{
+                    validation_key = [string]$release.candidate.validation_key
+                    validation_run = if ($validation) { $validation.validation_run } else { $null }
+                    reason = $reason
+                    first_failure = $directed.first_failure
+                    routes = if ($validation) { $validation.routes } else { @() }
+                }
+                $evidence | ConvertTo-Json -Depth 10
             } else { "No exact-version evidence loaded." }
-            (Find-WpfControl "PromoteButton").IsEnabled = [bool]$releaseView.can_promote
-            (Find-WpfControl "ApproveCompatibilityButton").IsEnabled = [bool]$releaseView.can_approve_compatibility
+            $operationActive = Test-WpfOperationActive
+            (Find-WpfControl "PromoteButton").IsEnabled = [bool]($releaseView.can_promote -and -not $operationActive)
+            (Find-WpfControl "ApproveCompatibilityButton").IsEnabled = [bool]($releaseView.can_approve_compatibility -and -not $operationActive)
             (Find-WpfControl "OpenCandidateButton").IsEnabled = [bool]($release -and $release.candidate -and $release.candidate.browser_url)
             (Find-WpfControl "PreviousState").Text = if ($release -and $release.previous_stable) { "AVAILABLE" } else { "UNAVAILABLE" }
             (Find-WpfControl "PreviousIdentity").Text = Format-WpfIdentity $release.previous_stable
-            (Find-WpfControl "ReverseButton").IsEnabled = [bool]($release -and $release.previous_stable)
+            (Find-WpfControl "ReverseButton").IsEnabled = [bool]($releaseView.can_reverse -and -not $operationActive)
+            if ($operationActive) {
+                Set-WpfReleaseBusy -Busy $true -Operation $script:wpfOperationName
+            }
         }
 
         (Find-WpfControl "RefreshButton").Add_Click({ Refresh-WpfStatus })
@@ -4293,7 +4554,43 @@ function Show-WpfControlCenter {
         $timer = New-Object Windows.Threading.DispatcherTimer
         $timer.Interval = [TimeSpan]::FromSeconds(5)
         $timer.Add_Tick({ Refresh-WpfStatus })
-        $window.Add_Closed({ $timer.Stop() })
+        $operationTimer = New-Object Windows.Threading.DispatcherTimer
+        $operationTimer.Interval = [TimeSpan]::FromMilliseconds(400)
+        $operationTimer.Add_Tick({
+            if (-not $script:wpfOperation -or -not $script:wpfOperation.HasExited) {
+                return
+            }
+            $exitCode = $script:wpfOperation.ExitCode
+            $finished = $script:wpfOperationName
+            $output = if (Test-Path -LiteralPath $script:wpfOperationOutputPath) {
+                (Get-Content -LiteralPath $script:wpfOperationOutputPath -Raw `
+                    -ErrorAction SilentlyContinue).Trim()
+            } else { "" }
+            $errorText = if (Test-Path -LiteralPath $script:wpfOperationErrorPath) {
+                (Get-Content -LiteralPath $script:wpfOperationErrorPath -Raw `
+                    -ErrorAction SilentlyContinue).Trim()
+            } else { "" }
+            Remove-Item -LiteralPath `
+                $script:wpfOperationOutputPath,$script:wpfOperationErrorPath `
+                -Force -ErrorAction SilentlyContinue
+            $script:wpfOperation.Dispose()
+            $script:wpfOperation = $null
+            Set-WpfReleaseBusy -Busy $false
+            Refresh-WpfStatus
+            if ($exitCode -ne 0) {
+                [System.Windows.MessageBox]::Show(
+                    $(if ($errorText) { $errorText } else {
+                        "Operation failed without diagnostic output."
+                    }), "$finished failed", "OK", "Error"
+                ) | Out-Null
+            } elseif ($finished -eq "ApproveCompatibility") {
+                [System.Windows.MessageBox]::Show(
+                    $(if ($output) { $output } else { "$finished completed." }),
+                    "$finished completed", "OK", "Information"
+                ) | Out-Null
+            }
+        })
+        $window.Add_Closed({ $timer.Stop(); $operationTimer.Stop() })
         $script:wpfUiStartedRecorded = $false
         $window.Add_ContentRendered({
             if (-not $script:wpfUiStartedRecorded) {
@@ -4303,6 +4600,7 @@ function Show-WpfControlCenter {
         })
         Refresh-WpfStatus
         $timer.Start()
+        $operationTimer.Start()
         [void]$window.ShowDialog()
         return $true
     } catch {
@@ -4974,12 +5272,24 @@ function Show-ControlCenter {
             ("xauusd-control-operation-{0}.out" -f ([guid]::NewGuid().ToString("N")))
         $script:guiOperationErrorPath = Join-Path $env:TEMP `
             ("xauusd-control-operation-{0}.err" -f ([guid]::NewGuid().ToString("N")))
-        $script:guiOperation = Start-Process -FilePath "powershell.exe" `
-            -ArgumentList $arguments -WorkingDirectory $moduleRoot `
-            -WindowStyle Hidden -PassThru `
-            -RedirectStandardOutput $script:guiOperationOutputPath `
-            -RedirectStandardError $script:guiOperationErrorPath
-        Set-GuiBusy -Busy $true -Message "Working in background: $Operation"
+        $busyMessage = switch ($Operation) {
+            "ApproveCompatibility" { "APPROVING · tracked background operation" }
+            "PromoteCandidate" { "PROMOTING · tracked background operation" }
+            "ReverseStable" { "REVERSING · tracked background operation" }
+            default { "Working in background: $Operation" }
+        }
+        Set-GuiBusy -Busy $true -Message $busyMessage
+        try {
+            $script:guiOperation = Start-Process -FilePath "powershell.exe" `
+                -ArgumentList $arguments -WorkingDirectory $moduleRoot `
+                -WindowStyle Hidden -PassThru `
+                -RedirectStandardOutput $script:guiOperationOutputPath `
+                -RedirectStandardError $script:guiOperationErrorPath
+        } catch {
+            $script:guiOperation = $null
+            Set-GuiBusy -Busy $false -Message "Failed to start: $Operation"
+            throw
+        }
     }
 
     $statusSnapshotPath = Join-Path $env:TEMP ("xauusd-control-status-{0}.json" -f $PID)
@@ -5020,6 +5330,7 @@ function Show-ControlCenter {
                 $candidateCard.Windows.Text = "Windows   $(Get-ShortIdentity $release.candidate.windows_revision)"
                 $candidateCard.Detail.Text = "$($releaseView.candidate_kind) / $($release.candidate.branch) / $($release.candidate.compatibility_state)"
                 $validation = $release.candidate.validation
+                $directed = Get-DirectedWorkerValidationSummary -Validation $validation
                 $repositoryCheck = if ($validation -and $validation.repository) {
                     [string]$validation.repository
                 } else { "WAITING" }
@@ -5041,7 +5352,9 @@ function Show-ControlCenter {
                     ) { "PASSED" } else { "FAILED" }
                 }
                 $candidateCheckLabels.windows.Text = "Repo / Windows: $repositoryCheck / $windowsCheck"
-                $candidateCheckLabels.contracts.Text = "API routes: $contractCheck"
+                $candidateCheckLabels.contracts.Text = if ($directed.tested -gt 0) {
+                    "API routes: $contractCheck · $($directed.passed)/$($directed.tested)"
+                } else { "API routes: $contractCheck" }
                 $cpu = if ($validation -and $validation.cpu_evidence -and
                     $validation.cpu_evidence -ne "NOT_REQUIRED") {
                     $validation.cpu_evidence
@@ -5064,7 +5377,14 @@ function Show-ControlCenter {
                 foreach ($label in $candidateCheckLabels.Values) { $label.Text = "Not available" }
                 $openCandidateButton.Enabled = $false
             }
-            $candidateReason.Text = $releaseView.promote_reason
+            $candidateReason.Text = if ($release.candidate -and
+                [string]$release.candidate.validation_state -eq "FAILED") {
+                $failureLine = (Get-DirectedWorkerValidationSummary `
+                    -Validation $release.candidate.validation).first_failure_line
+                if ($failureLine) {
+                    "$failureLine / $($releaseView.promote_reason)"
+                } else { $releaseView.promote_reason }
+            } else { $releaseView.promote_reason }
             $promoteButton.Enabled = $releaseView.can_promote
             $promoteButton.BackColor = if ($releaseView.can_promote) { $accent } else { $grayWash }
             $promoteButton.ForeColor = if ($releaseView.can_promote) { [System.Drawing.Color]::White } else { $gray }

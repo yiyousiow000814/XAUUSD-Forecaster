@@ -2209,6 +2209,30 @@ def _dashboard_payload(
         ).fetchall()
         recent = connection.execute(
             """SELECT d.decision_id, d.decision_time, d.effective_action, d.data_health,
+                      s.bid, s.ask, s.spread,
+                      o.outcome_status,
+                      o.reason_codes_json AS outcome_reason_codes_json,
+                      o.long_return, o.short_return,
+                      (SELECT p.recommended_action FROM predictions_v2 p
+                       JOIN model_updates_v2 u USING(model_version)
+                       WHERE p.source_decision_id=d.decision_id
+                         -- Prevent the low-cardinality identity/time index from
+                         -- turning this fixed 18-row lookup into a historical
+                         -- BROAD_FULL scan. The primary key owns decision-local
+                         -- prediction lookup; identity remains a filter.
+                         AND +p.model_identity='BROAD_FULL'
+                       ORDER BY u.created_at DESC LIMIT 1) AS research_action,
+                      (SELECT p.prediction_status FROM predictions_v2 p
+                       JOIN model_updates_v2 u USING(model_version)
+                       WHERE p.source_decision_id=d.decision_id
+                         AND +p.model_identity='BROAD_FULL'
+                       ORDER BY u.created_at DESC LIMIT 1) AS research_status
+               FROM decision_events d
+               JOIN market_snapshots s USING(snapshot_id)
+               LEFT JOIN outcomes o USING(decision_id)
+               ORDER BY d.decision_time DESC LIMIT 18"""
+        ).fetchall() if not include_audit else connection.execute(
+            """SELECT d.decision_id, d.decision_time, d.effective_action, d.data_health,
                       s.bid, s.ask, s.spread, s.features_json,
                       o.outcome_status,
                       o.reason_codes_json AS outcome_reason_codes_json,
@@ -2229,9 +2253,9 @@ def _dashboard_payload(
                JOIN market_snapshots s USING(snapshot_id)
                LEFT JOIN outcomes o USING(decision_id)
                ORDER BY d.decision_time DESC LIMIT 30"""
-        ).fetchall() if include_audit else []
+        ).fetchall()
         counts = dashboard_table_counts(connection)
-        decision_ids = [row["decision_id"] for row in recent]
+        decision_ids = [row["decision_id"] for row in recent] if include_audit else []
         predictions_by_decision: dict[str, list[dict]] = {key: [] for key in decision_ids}
         if decision_ids:
             placeholders = ",".join("?" for _ in decision_ids)
@@ -2469,6 +2493,28 @@ def _dashboard_payload(
                 if row.get("active_rank") is not None and row.get("model_identity")
             })
         else:
+            active_generation = connection.execute(
+                """SELECT generation_id
+                   FROM news_model_generation_activations_v1
+                   ORDER BY activated_at DESC,activation_id DESC LIMIT 1"""
+            ).fetchone()
+            if active_generation is not None:
+                counts["live_oos_model_groups"] = int(connection.execute(
+                    """SELECT count(DISTINCT model_identity) FROM (
+                         SELECT model_identity
+                         FROM news_model_generation_members_v1
+                         WHERE generation_id=?
+                         UNION ALL
+                         SELECT model_identity
+                         FROM news_model_generation_aux_members_v1
+                         WHERE generation_id=?
+                       )""",
+                    (active_generation["generation_id"], active_generation["generation_id"]),
+                ).fetchone()[0])
+            else:
+                counts["live_oos_model_groups"] = int(connection.execute(
+                    "SELECT count(DISTINCT model_identity) FROM model_updates_v2"
+                ).fetchone()[0])
             complete = int(counts["training_eligibility_v2"])
             learning = {
                 "models": [],
@@ -2724,11 +2770,13 @@ def _dashboard_payload(
 
     def serialize_row(row: sqlite3.Row) -> dict:
         item = dict(row)
-        item["features"] = json.loads(item.pop("features_json"))
+        if "features_json" in item:
+            item["features"] = json.loads(item.pop("features_json"))
         item["outcome_reason_codes"] = json.loads(
             item.pop("outcome_reason_codes_json") or "[]"
         )
-        item["predictions"] = predictions_by_decision.get(item["decision_id"], [])
+        if include_audit:
+            item["predictions"] = predictions_by_decision.get(item["decision_id"], [])
         return item
 
     # The status snapshot remains a small recent page. The complete bounded
