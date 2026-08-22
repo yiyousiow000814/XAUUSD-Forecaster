@@ -3,6 +3,9 @@ from __future__ import annotations
 import threading
 import time
 import json
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
@@ -14,6 +17,28 @@ from scripts.run_forward_collector import append_current_grid_events
 
 
 UTC = timezone.utc
+
+
+def test_real_windows_process_identity_tracks_child_lifetime() -> None:
+    if os.name != "nt":
+        return
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    try:
+        token, alive = training_owner._process_start_token(child.pid)
+        assert alive is True
+        assert token and token.startswith("windows-filetime:")
+        assert training_owner._process_identity_alive(child.pid, token) is True
+        assert training_owner._process_identity_alive(
+            child.pid, "windows-filetime:0",
+        ) is False
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+        child._handle.Close()
+    assert training_owner._process_identity_alive(child.pid, token) is False
 
 
 def test_blocked_training_does_not_stop_multiple_decision_cycles(

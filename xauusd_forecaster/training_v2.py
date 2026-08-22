@@ -127,13 +127,20 @@ def _install_training_materialization_state(connection) -> None:
               AND name='trg_training_materialization_news_event_source_budgets_v1_delete'"""
     ).fetchone()
     if installed is not None:
-        columns = {
+        materialized_columns = {
             str(row[1])
             for row in connection.execute(
                 "PRAGMA table_info(materialized_training_rows_v1)"
             )
         }
-        if "materialized_row_hash" in columns:
+        dirty_columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(training_materialization_dirty_v1)"
+            )
+        }
+        if ("materialized_row_hash" in materialized_columns and
+                "dirty_revision" in dirty_columns):
             return
     connection.executescript(
         """CREATE TABLE IF NOT EXISTS training_materialization_state_v1 (
@@ -162,6 +169,7 @@ def _install_training_materialization_state(connection) -> None:
           ON materialized_training_rows_v1(decision_time,source_decision_id);
         CREATE TABLE IF NOT EXISTS training_materialization_dirty_v1 (
             source_decision_id TEXT PRIMARY KEY,
+            dirty_revision INTEGER NOT NULL DEFAULT 1,
             source_table TEXT NOT NULL,
             change_kind TEXT NOT NULL,
             dirty_at TEXT NOT NULL
@@ -179,6 +187,17 @@ def _install_training_materialization_state(connection) -> None:
             "ALTER TABLE materialized_training_rows_v1 "
             "ADD COLUMN materialized_row_hash TEXT"
         )
+    dirty_columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(training_materialization_dirty_v1)"
+        )
+    }
+    if "dirty_revision" not in dirty_columns:
+        connection.execute(
+            "ALTER TABLE training_materialization_dirty_v1 "
+            "ADD COLUMN dirty_revision INTEGER NOT NULL DEFAULT 1"
+        )
     direct_sources = (
         "training_eligibility_v2", "derived_market_snapshots",
         "derived_news_feature_snapshots", "derived_outcomes",
@@ -190,16 +209,19 @@ def _install_training_materialization_state(connection) -> None:
         for operation, reference in (
             ("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD"),
         ):
+            trigger = f"trg_training_materialization_{table}_{operation.lower()}"
+            connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
             connection.execute(
                 f"""CREATE TRIGGER IF NOT EXISTS
-                  trg_training_materialization_{table}_{operation.lower()}
+                  {trigger}
                 AFTER {operation} ON {table}
                 BEGIN
                   INSERT INTO training_materialization_dirty_v1
-                    (source_decision_id,source_table,change_kind,dirty_at)
-                  VALUES ({reference}.source_decision_id,'{table}','{operation}',
+                    (source_decision_id,dirty_revision,source_table,change_kind,dirty_at)
+                  VALUES ({reference}.source_decision_id,1,'{table}','{operation}',
                           strftime('%Y-%m-%dT%H:%M:%fZ','now'))
                   ON CONFLICT(source_decision_id) DO UPDATE SET
+                    dirty_revision=dirty_revision+1,
                     source_table=excluded.source_table,
                     change_kind=excluded.change_kind,
                     dirty_at=excluded.dirty_at;
@@ -213,18 +235,21 @@ def _install_training_materialization_state(connection) -> None:
         for operation, reference in (
             ("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD"),
         ):
+            trigger = f"trg_training_materialization_{table}_{operation.lower()}"
+            connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
             connection.execute(
                 f"""CREATE TRIGGER IF NOT EXISTS
-                  trg_training_materialization_{table}_{operation.lower()}
+                  {trigger}
                 AFTER {operation} ON {table}
                 BEGIN
                   INSERT INTO training_materialization_dirty_v1
-                    (source_decision_id,source_table,change_kind,dirty_at)
-                  SELECT source_decision_id,'{table}','{operation}',
+                    (source_decision_id,dirty_revision,source_table,change_kind,dirty_at)
+                  SELECT source_decision_id,1,'{table}','{operation}',
                          strftime('%Y-%m-%dT%H:%M:%fZ','now')
                     FROM news_decision_event_snapshots_v1
                    WHERE {key}={reference}.{key}
                   ON CONFLICT(source_decision_id) DO UPDATE SET
+                    dirty_revision=dirty_revision+1,
                     source_table=excluded.source_table,
                     change_kind=excluded.change_kind,
                     dirty_at=excluded.dirty_at;
@@ -250,9 +275,18 @@ def refresh_training_materialization_state(ledger, cutoff: datetime) -> dict:
         ).fetchone() is not None
     )
     if rebuild:
+        observed_dirty = [
+            (str(row["source_decision_id"]), int(row["dirty_revision"]))
+            for row in ledger.connection.execute(
+                "SELECT source_decision_id,dirty_revision "
+                "FROM training_materialization_dirty_v1"
+            )
+        ]
         rows = _build_training_rows(ledger, cutoff)
         try:
-            _replace_materialized_training_rows(ledger, rows, now)
+            _replace_materialized_training_rows(
+                ledger, rows, observed_dirty, now,
+            )
         except Exception:
             ledger.connection.rollback()
             raise
@@ -266,10 +300,10 @@ def refresh_training_materialization_state(ledger, cutoff: datetime) -> dict:
         }
         receipt_hash = canonical_hash([row["receipt"] for row in rows])
     else:
-        dirty_ids = [
-            str(row["source_decision_id"])
+        observed_dirty = [
+            (str(row["source_decision_id"]), int(row["dirty_revision"]))
             for row in ledger.connection.execute(
-                """SELECT d.source_decision_id
+                """SELECT d.source_decision_id,d.dirty_revision
                      FROM training_materialization_dirty_v1 d
                      LEFT JOIN training_eligibility_v2 e
                        USING(source_decision_id)
@@ -281,6 +315,7 @@ def refresh_training_materialization_state(ledger, cutoff: datetime) -> dict:
                 (cutoff.isoformat(), MATERIALIZATION_BATCH_ROWS),
             )
         ]
+        dirty_ids = [source_id for source_id, _ in observed_dirty]
         if dirty_ids:
             placeholders = ",".join("?" for _ in dirty_ids)
             changed = ledger.connection.execute(
@@ -329,7 +364,9 @@ def refresh_training_materialization_state(ledger, cutoff: datetime) -> dict:
             _build_training_rows(ledger, cutoff, dirty_ids) if dirty_ids else []
         )
         try:
-            _update_materialized_training_rows(ledger, dirty_ids, rows, now)
+            _update_materialized_training_rows(
+                ledger, observed_dirty, rows, now,
+            )
         except Exception:
             ledger.connection.rollback()
             raise
@@ -406,7 +443,17 @@ def _persisted_training_row(row: dict, now: str) -> tuple:
     )
 
 
-def _replace_materialized_training_rows(ledger, rows: list[dict], now: str) -> None:
+def _acknowledge_dirty_revisions(ledger, observed_dirty: list[tuple[str, int]]) -> None:
+    ledger.connection.executemany(
+        "DELETE FROM training_materialization_dirty_v1 "
+        "WHERE source_decision_id=? AND dirty_revision=?",
+        observed_dirty,
+    )
+
+
+def _replace_materialized_training_rows(
+    ledger, rows: list[dict], observed_dirty: list[tuple[str, int]], now: str,
+) -> None:
     persisted = [_persisted_training_row(row, now) for row in rows]
     ledger.connection.execute("DELETE FROM materialized_training_rows_v1")
     ledger.connection.executemany(
@@ -416,14 +463,15 @@ def _replace_materialized_training_rows(ledger, rows: list[dict], now: str) -> N
         VALUES(?,?,?,?,?,?,?)""",
         persisted,
     )
-    ledger.connection.execute("DELETE FROM training_materialization_dirty_v1")
+    _acknowledge_dirty_revisions(ledger, observed_dirty)
 
 
 def _update_materialized_training_rows(
-    ledger, source_ids: list[str], rows: list[dict], now: str,
+    ledger, observed_dirty: list[tuple[str, int]], rows: list[dict], now: str,
 ) -> None:
-    if not source_ids:
+    if not observed_dirty:
         return
+    source_ids = [source_id for source_id, _ in observed_dirty]
     placeholders = ",".join("?" for _ in source_ids)
     persisted = [_persisted_training_row(row, now) for row in rows]
     ledger.connection.execute(
@@ -438,11 +486,7 @@ def _update_materialized_training_rows(
         VALUES(?,?,?,?,?,?,?)""",
         persisted,
     )
-    ledger.connection.execute(
-        f"DELETE FROM training_materialization_dirty_v1 "
-        f"WHERE source_decision_id IN ({placeholders})",
-        source_ids,
-    )
+    _acknowledge_dirty_revisions(ledger, observed_dirty)
 
 
 def _build_training_rows(

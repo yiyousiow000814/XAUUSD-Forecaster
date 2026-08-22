@@ -109,6 +109,35 @@ def _append_materializable_training_row(
     connection.commit()
 
 
+def _append_training_event(
+    ledger, decision_id: str, decision_time: datetime, suffix: str,
+) -> None:
+    version_id = f"event-version-{suffix}"
+    event_id = f"event-{suffix}"
+    ledger.connection.execute(
+        "INSERT INTO news_event_catalog_v1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            version_id, event_id, EVIDENCE_POLICY_VERSION,
+            (decision_time - timedelta(minutes=10)).isoformat(),
+            "OFFICIAL_RELEASE_TIME", "TIMESTAMP", "official-source",
+            f"source-{suffix}", f"source-hash-{suffix}", "A",
+            '["OFFICIAL_MODEL"]', "[]", decision_time.isoformat(),
+        ),
+    )
+    ledger.connection.execute(
+        "INSERT INTO news_event_source_budgets_v1 VALUES (?,?,?,?)",
+        (version_id, f"budget-{suffix}", "REPORTING_ORGANIZATION",
+         decision_time.isoformat()),
+    )
+    ledger.connection.execute(
+        "INSERT INTO news_decision_event_snapshots_v1 VALUES (?,?,?,?,?,?,?,?,?)",
+        (decision_id, decision_time.isoformat(), event_id, version_id,
+         EVIDENCE_POLICY_VERSION, "OFFICIAL_MODEL", 0.75, 10.0,
+         f"snapshot-{suffix}"),
+    )
+    ledger.connection.commit()
+
+
 def test_training_rows_materialize_incrementally_without_rescanning_history(
     tmp_path, monkeypatch,
 ) -> None:
@@ -153,6 +182,34 @@ def test_training_rows_materialize_incrementally_without_rescanning_history(
     assert len(calls[-1]) == 50
     assert fifty["row_count"] == 52
     assert len(training_v2.complete_training_rows(ledger, cutoff)) == 52
+    ledger.close()
+
+
+def test_existing_dirty_queue_upgrades_to_revisioned_acknowledgement(tmp_path) -> None:
+    cutoff = datetime(2026, 8, 20, 18, 0, tzinfo=timezone.utc)
+    ledger = ForwardLedger(tmp_path / "dirty-revision-upgrade.sqlite3")
+    _append_materializable_training_row(
+        ledger, "decision-upgrade", cutoff - timedelta(minutes=10),
+    )
+    training_v2.refresh_training_materialization_state(ledger, cutoff)
+    with ledger.connection:
+        ledger.connection.execute("DROP TABLE training_materialization_dirty_v1")
+        ledger.connection.execute(
+            """CREATE TABLE training_materialization_dirty_v1 (
+                source_decision_id TEXT PRIMARY KEY,
+                source_table TEXT NOT NULL,
+                change_kind TEXT NOT NULL,
+                dirty_at TEXT NOT NULL
+            )"""
+        )
+    result = training_v2.refresh_training_materialization_state(ledger, cutoff)
+    columns = {
+        row[1] for row in ledger.connection.execute(
+            "PRAGMA table_info(training_materialization_dirty_v1)"
+        )
+    }
+    assert result["materialization_mode"] == "NO_CHANGE"
+    assert "dirty_revision" in columns
     ledger.close()
 
 
@@ -227,6 +284,107 @@ def test_incremental_materialization_failure_preserves_prior_rows(
     assert ledger.connection.execute(
         "SELECT count(*) FROM training_materialization_dirty_v1"
     ).fetchone()[0] == 1
+    ledger.close()
+
+
+def test_incremental_materialization_preserves_newer_dirty_revision(
+    tmp_path, monkeypatch,
+) -> None:
+    cutoff = datetime(2026, 8, 20, 18, 0, tzinfo=timezone.utc)
+    path = tmp_path / "incremental-race.sqlite3"
+    ledger = ForwardLedger(path)
+    _append_materializable_training_row(
+        ledger, "decision-race", cutoff - timedelta(minutes=10),
+    )
+    training_v2.refresh_training_materialization_state(ledger, cutoff)
+    _append_training_event(
+        ledger, "decision-race", cutoff - timedelta(minutes=10), "first",
+    )
+
+    original = training_v2._build_training_rows
+    raced = False
+
+    def build_then_mutate(owner, at, source_ids=None):
+        nonlocal raced
+        rows = original(owner, at, source_ids)
+        if not raced:
+            raced = True
+            concurrent = ForwardLedger(path)
+            _append_training_event(
+                concurrent, "decision-race", cutoff - timedelta(minutes=10),
+                "second",
+            )
+            concurrent.close()
+        return rows
+
+    monkeypatch.setattr(training_v2, "_build_training_rows", build_then_mutate)
+    stale = training_v2.refresh_training_materialization_state(ledger, cutoff)
+    pending = ledger.connection.execute(
+        "SELECT dirty_revision FROM training_materialization_dirty_v1 "
+        "WHERE source_decision_id='decision-race'"
+    ).fetchone()
+    assert stale["materialization_mode"] == "INCREMENTAL"
+    assert pending is not None and pending[0] == 2
+
+    newest = training_v2.refresh_training_materialization_state(ledger, cutoff)
+    assert newest["materialization_mode"] == "INCREMENTAL"
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM training_materialization_dirty_v1"
+    ).fetchone()[0] == 0
+    assert training_v2.complete_training_rows(ledger, cutoff) == original(
+        ledger, cutoff,
+    )
+    ledger.close()
+
+
+def test_full_materialization_preserves_changes_arriving_during_rebuild(
+    tmp_path, monkeypatch,
+) -> None:
+    cutoff = datetime(2026, 8, 20, 18, 0, tzinfo=timezone.utc)
+    path = tmp_path / "full-race.sqlite3"
+    ledger = ForwardLedger(path)
+    _append_materializable_training_row(
+        ledger, "decision-race", cutoff - timedelta(minutes=10),
+    )
+    training_v2.refresh_training_materialization_state(ledger, cutoff)
+    _append_training_event(
+        ledger, "decision-race", cutoff - timedelta(minutes=10), "first",
+    )
+    with ledger.connection:
+        ledger.connection.execute(
+            "UPDATE training_materialization_state_v1 SET state='DIRTY' WHERE id=1"
+        )
+
+    original = training_v2._build_training_rows
+    raced = False
+
+    def build_then_mutate(owner, at, source_ids=None):
+        nonlocal raced
+        rows = original(owner, at, source_ids)
+        if not raced and source_ids is None:
+            raced = True
+            concurrent = ForwardLedger(path)
+            _append_training_event(
+                concurrent, "decision-race", cutoff - timedelta(minutes=10),
+                "second",
+            )
+            concurrent.close()
+        return rows
+
+    monkeypatch.setattr(training_v2, "_build_training_rows", build_then_mutate)
+    rebuilt = training_v2.refresh_training_materialization_state(ledger, cutoff)
+    pending = ledger.connection.execute(
+        "SELECT dirty_revision FROM training_materialization_dirty_v1 "
+        "WHERE source_decision_id='decision-race'"
+    ).fetchone()
+    assert rebuilt["materialization_mode"] == "FULL"
+    assert pending is not None and pending[0] == 2
+
+    repaired = training_v2.refresh_training_materialization_state(ledger, cutoff)
+    assert repaired["materialization_mode"] == "INCREMENTAL"
+    assert training_v2.complete_training_rows(ledger, cutoff) == original(
+        ledger, cutoff,
+    )
     ledger.close()
 
 
