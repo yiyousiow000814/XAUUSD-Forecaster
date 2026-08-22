@@ -2320,6 +2320,33 @@ def test_critical_status_owns_bounded_recent_decisions_and_live_oos_count(
     assert not any("row_number() over" in statement for statement in normalized)
 
 
+def test_critical_status_returns_every_available_decision_below_window(tmp_path) -> None:
+    module = _dashboard_module()
+    now = datetime(2026, 8, 23, 2, 0, tzinfo=UTC)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now)
+    ledger.close()
+    for index in range(2):
+        _append_decision_at(
+            database, now - timedelta(minutes=5 * index), identifier=f"-{index}",
+        )
+
+    payload = module._dashboard_payload(
+        database, clock=lambda: now, include_optional=False,
+    )
+    critical = module.critical_status_payload(payload)
+
+    assert [row["decision_id"] for row in critical["recent_decisions"]] == [
+        "decision-0", "decision-1",
+    ]
+    assert critical["mirror_window"] == {
+        "bounded": True,
+        "critical_only": True,
+        "audit_embedded": False,
+        "growing_collections_embedded": False,
+    }
+
+
 def test_live_quote_candle_cache_reads_only_appended_bytes(tmp_path) -> None:
     module = _dashboard_module()
     quote_file = tmp_path / "xauusd-quotes-20260812.jsonl"

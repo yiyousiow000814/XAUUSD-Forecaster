@@ -1135,6 +1135,24 @@ def test_two_new_decision_cycles_activate_even_when_observed_together(tmp_path) 
     assert result == "True,ACTIVE,2"
 
 
+def test_observation_reads_two_cycles_from_bounded_status_contract(tmp_path) -> None:
+    _write_runtime_observation(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Test-CodeReloadHealth { return $true }; "
+        "function Test-CurrentProductionShape { return $null }; "
+        "function Invoke-RestMethod { return [pscustomobject]@{recent_decisions=@("
+        "[pscustomobject]@{decision_time='2026-08-13T03:10:00+00:00'},"
+        "[pscustomobject]@{decision_time='2026-08-13T03:05:00+00:00'})} }; "
+        "$observed = Test-RuntimeObservation; "
+        "$state = Get-RuntimeUpdateState; "
+        '$times = @(Get-RuntimeDecisionTimes); Write-Output '
+        '"$observed,$($state.update_status),$($state.observation_success_cycles),$($times.Count)"',
+    )
+
+    assert result == "True,ACTIVE,2,2"
+
+
 def test_observation_counts_only_strictly_new_five_minute_cycles(tmp_path) -> None:
     _write_runtime_observation(tmp_path)
     result = _run_control_center_contract(
