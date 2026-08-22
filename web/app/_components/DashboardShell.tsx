@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode,
+} from "react";
 import {
   adminAuthStateAfterProbe,
   isTrustedAdminAuthMessage,
@@ -30,6 +32,12 @@ import SystemStatePill from "./SystemStatePill";
 export const isVersionedCandidateHost = (hostname: string) => (
   /^[0-9a-f]{8}-aurum-signal-room\./i.test(hostname)
 );
+
+const subscribeStaticBrowserLocation = () => () => undefined;
+const candidateInspectionSnapshot = () => (
+  isVersionedCandidateHost(window.location.hostname)
+);
+const candidateInspectionServerSnapshot = () => false;
 
 type ShellStatusPayload = {
   system?: {
@@ -163,7 +171,11 @@ export default function DashboardShell({ children, location }: { children: React
   const navigation = useDashboardNavigation();
   const [adminAuthState, setAdminAuthState] = useState<AdminAuthState>("CHECKING");
   const [adminLoginOpen, setAdminLoginOpen] = useState(false);
-  const [candidateInspection, setCandidateInspection] = useState(false);
+  const candidateInspection = useSyncExternalStore(
+    subscribeStaticBrowserLocation,
+    candidateInspectionSnapshot,
+    candidateInspectionServerSnapshot,
+  );
   const dialogRef = useRef<HTMLDialogElement>(null);
   const popupRef = useRef<Window | null>(null);
   const popupCloseTimerRef = useRef<number | null>(null);
@@ -181,7 +193,6 @@ export default function DashboardShell({ children, location }: { children: React
   }, [applyAuthOutcome]);
 
   useEffect(() => {
-    setCandidateInspection(isVersionedCandidateHost(window.location.hostname));
     queueMicrotask(() => void revalidateAdminSession());
     const unsubscribe = subscribeAdminAuthOutcomes(applyAuthOutcome);
     const revalidateOnReturn = () => {
