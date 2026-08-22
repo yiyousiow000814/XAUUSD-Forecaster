@@ -60,52 +60,223 @@ from xauusd_forecaster.execution_learning import (
 from xauusd_forecaster.training import MARKET_FEATURES
 
 
-def test_training_materialization_cursor_is_durable_and_late_rows_mark_dirty(
-    monkeypatch,
+def _append_materializable_training_row(
+    ledger, decision_id: str, decision_time: datetime,
 ) -> None:
-    connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
-    ledger = SimpleNamespace(connection=connection)
-    count = 100
-    cursor = ("2026-08-20T12:00:00+00:00", "decision-100")
-    monkeypatch.setattr(training_v2, "_eligible_row_count", lambda *_: count)
-    monkeypatch.setattr(training_v2, "_eligible_row_cursor", lambda *_: cursor)
-    cutoff = datetime(2026, 8, 20, 12, 30, tzinfo=timezone.utc)
+    market = {name: float(index + 1) for index, name in enumerate(MARKET_FEATURES)}
+    news = {
+        name: 0.0 for name in (*training_v2.NEWS_FEATURES,
+                              *training_v2.BROAD_MODEL_FEATURES)
+    }
+    market_hash = canonical_hash((decision_id, "market"))
+    news_hash = canonical_hash((decision_id, "news"))
+    outcome_hash = canonical_hash((decision_id, "outcome"))
+    connection = ledger.connection
+    connection.execute(
+        """INSERT INTO derived_market_snapshots VALUES
+        (?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?)""",
+        (f"market-{decision_id}", decision_id, decision_time.isoformat(),
+         market_hash, "LIVE_OOS", decision_time.isoformat(),
+         training_v2.FEATURE_VERSION, "u5-test", 1.0, json.dumps(market),
+         "OK", "[]", market_hash, market_hash),
+    )
+    connection.execute(
+        """INSERT INTO derived_news_feature_snapshots VALUES
+        (?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?)""",
+        (f"news-{decision_id}", decision_id, decision_time.isoformat(),
+         "LIVE_OOS", decision_time.isoformat(), training_v2.NEWS_FEATURE_VERSION,
+         training_v2.ELIGIBILITY_VERSION, json.dumps(news), 0, 0, 0, 0,
+         news_hash, news_hash),
+    )
+    connection.execute(
+        """INSERT INTO derived_outcomes (
+        derived_outcome_id,source_decision_id,decision_time,evidence_lane,
+        recomputed_at,label_version,outcome_status,reason_codes_json,
+        ambiguity_state,gross_midpoint_direction_move,long_quote_return,
+        short_quote_return,commission_status,slippage_status,
+        source_evidence_hash,output_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (f"outcome-{decision_id}", decision_id, decision_time.isoformat(),
+         "LIVE_OOS", decision_time.isoformat(), training_v2.LABEL_VERSION,
+         "VALID", "[]", "NONE", 0.1, 0.1, -0.1, "UNCONFIGURED",
+         "UNAVAILABLE_SHADOW", outcome_hash, outcome_hash),
+    )
+    connection.execute(
+        "INSERT INTO training_eligibility_v2 VALUES (?,?,?,?,?,?,?,?)",
+        (f"eligibility-{decision_id}", decision_id, "LIVE_OOS",
+         decision_time.isoformat(), training_v2.ELIGIBILITY_VERSION,
+         market_hash, outcome_hash, news_hash),
+    )
+    connection.commit()
 
+
+def test_training_rows_materialize_incrementally_without_rescanning_history(
+    tmp_path, monkeypatch,
+) -> None:
+    cutoff = datetime(2026, 8, 20, 18, 0, tzinfo=timezone.utc)
+    ledger = ForwardLedger(tmp_path / "incremental-training.sqlite3")
+    _append_materializable_training_row(
+        ledger, "decision-0", cutoff - timedelta(hours=1)
+    )
+    calls: list[list[str] | None] = []
+    original = training_v2._build_training_rows
+
+    def observed_builder(owner, at, source_ids=None):
+        calls.append(source_ids)
+        return original(owner, at, source_ids)
+
+    monkeypatch.setattr(training_v2, "_build_training_rows", observed_builder)
     first = training_v2.refresh_training_materialization_state(ledger, cutoff)
-    assert first["state"] == "CLEAN"
-    assert first["materialization_mode"] == "INDEX_ONLY"
-    assert len(first["materialization_receipt_hash"]) == 64
-    assert first["rebuild_generation"] == 0
-    count = 101
-    cursor = ("2026-08-20T12:05:00+00:00", "decision-101")
-    advanced = training_v2.refresh_training_materialization_state(ledger, cutoff)
-    assert advanced["state"] == "CLEAN"
-    assert advanced["row_count"] == 101
+    assert first["materialization_mode"] == "FULL"
+    assert first["processed_source_rows"] == 1
+    assert calls == [None]
 
-    # A newly eligible historical row changes the count without advancing the
-    # tail cursor.  It cannot be silently treated as an incremental append.
-    count = 102
-    dirty = training_v2.refresh_training_materialization_state(ledger, cutoff)
-    assert dirty["state"] == "DIRTY"
-    persisted = connection.execute(
-        """SELECT row_count,cursor_decision_id,state,
-                  materialization_mode,rebuild_generation
-             FROM training_materialization_state_v1"""
-    ).fetchone()
-    assert tuple(persisted) == (
-        102, "decision-101", "DIRTY", "INDEX_ONLY", 0,
+    unchanged = training_v2.refresh_training_materialization_state(ledger, cutoff)
+    assert unchanged["materialization_mode"] == "NO_CHANGE"
+    assert unchanged["processed_source_rows"] == 0
+    assert calls == [None]
+
+    _append_materializable_training_row(
+        ledger, "decision-1", cutoff - timedelta(minutes=55)
     )
-    training_v2._mark_training_materialization_clean(
-        ledger, cutoff, 102,
-        [{"receipt": ("decision-101", "market", "news", "outcome")}],
+    one = training_v2.refresh_training_materialization_state(ledger, cutoff)
+    assert one["materialization_mode"] == "INCREMENTAL"
+    assert one["processed_source_rows"] == 1
+    assert calls[-1] == ["decision-1"]
+
+    for index in range(2, 52):
+        _append_materializable_training_row(
+            ledger, f"decision-{index}",
+            cutoff - timedelta(minutes=50) + timedelta(seconds=index)
+        )
+    fifty = training_v2.refresh_training_materialization_state(ledger, cutoff)
+    assert fifty["processed_source_rows"] == 50
+    assert len(calls[-1]) == 50
+    assert fifty["row_count"] == 52
+    assert len(training_v2.complete_training_rows(ledger, cutoff)) == 52
+    ledger.close()
+
+
+def test_training_materialization_rebuilds_late_rows_and_corruption(
+    tmp_path, monkeypatch,
+) -> None:
+    cutoff = datetime(2026, 8, 20, 18, 0, tzinfo=timezone.utc)
+    ledger = ForwardLedger(tmp_path / "dirty-training.sqlite3")
+    _append_materializable_training_row(
+        ledger, "decision-tail", cutoff - timedelta(minutes=5)
     )
-    rebuilt = connection.execute(
-        """SELECT state,materialization_mode,rebuild_generation,
-                  length(materialization_receipt_hash)
-             FROM training_materialization_state_v1"""
+    initial = training_v2.refresh_training_materialization_state(ledger, cutoff)
+    authoritative = training_v2._build_training_rows(ledger, cutoff)
+    assert training_v2.complete_training_rows(ledger, cutoff) == authoritative
+
+    _append_materializable_training_row(
+        ledger, "decision-late", cutoff - timedelta(hours=2)
+    )
+    late = training_v2.refresh_training_materialization_state(ledger, cutoff)
+    assert late["materialization_mode"] == "FULL"
+    assert late["rebuild_generation"] == initial["rebuild_generation"] + 1
+
+    ledger.connection.execute(
+        """UPDATE materialized_training_rows_v1 SET row_json='{}'
+            WHERE source_decision_id='decision-tail'"""
+    )
+    ledger.connection.commit()
+    repaired = training_v2.complete_training_rows(ledger, cutoff)
+    assert repaired == training_v2._build_training_rows(ledger, cutoff)
+    state = ledger.connection.execute(
+        "SELECT state,rebuild_generation FROM training_materialization_state_v1"
     ).fetchone()
-    assert tuple(rebuilt) == ("CLEAN", "FULL", 1, 64)
+    assert tuple(state) == ("CLEAN", late["rebuild_generation"] + 1)
+
+    old_contract = training_v2.TRAINING_MATERIALIZATION_CONTRACT
+    monkeypatch.setattr(
+        training_v2, "TRAINING_MATERIALIZATION_CONTRACT",
+        canonical_hash((old_contract, "next-contract")),
+    )
+    contract = training_v2.refresh_training_materialization_state(ledger, cutoff)
+    assert contract["materialization_mode"] == "FULL"
+    assert contract["rebuild_generation"] == state["rebuild_generation"] + 1
+    ledger.close()
+
+
+def test_incremental_materialization_failure_preserves_prior_rows(
+    tmp_path, monkeypatch,
+) -> None:
+    cutoff = datetime(2026, 8, 20, 18, 0, tzinfo=timezone.utc)
+    ledger = ForwardLedger(tmp_path / "atomic-training.sqlite3")
+    _append_materializable_training_row(
+        ledger, "decision-0", cutoff - timedelta(minutes=10)
+    )
+    training_v2.refresh_training_materialization_state(ledger, cutoff)
+    before = ledger.connection.execute(
+        "SELECT source_decision_id,row_json FROM materialized_training_rows_v1"
+    ).fetchall()
+    _append_materializable_training_row(
+        ledger, "decision-1", cutoff - timedelta(minutes=5)
+    )
+
+    def crash_before_commit(*_args):
+        raise RuntimeError("injected materialization failure")
+
+    monkeypatch.setattr(training_v2, "_persisted_training_row", crash_before_commit)
+    with pytest.raises(RuntimeError, match="injected materialization failure"):
+        training_v2.refresh_training_materialization_state(ledger, cutoff)
+    after = ledger.connection.execute(
+        "SELECT source_decision_id,row_json FROM materialized_training_rows_v1"
+    ).fetchall()
+    assert [tuple(row) for row in after] == [tuple(row) for row in before]
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM training_materialization_dirty_v1"
+    ).fetchone()[0] == 1
+    ledger.close()
+
+
+def test_materialized_training_row_preserves_exact_event_and_dataset_evidence(
+    tmp_path,
+) -> None:
+    decision_time = datetime(2026, 8, 20, 17, 0, tzinfo=timezone.utc)
+    cutoff = decision_time + timedelta(hours=1)
+    ledger = ForwardLedger(tmp_path / "event-materialization.sqlite3")
+    _append_materializable_training_row(ledger, "decision-event", decision_time)
+    event = (
+        "event-version", "event", EVIDENCE_POLICY_VERSION,
+        (decision_time - timedelta(minutes=10)).isoformat(),
+        "OFFICIAL_RELEASE_TIME", "TIMESTAMP", "official-source",
+        "source-item", "source-hash", "A", '["OFFICIAL_MODEL"]', "[]",
+        decision_time.isoformat(),
+    )
+    ledger.connection.execute(
+        "INSERT INTO news_event_catalog_v1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        event,
+    )
+    ledger.connection.execute(
+        "INSERT INTO news_event_source_budgets_v1 VALUES (?,?,?,?)",
+        ("event-version", "budget-official", "REPORTING_ORGANIZATION",
+         decision_time.isoformat()),
+    )
+    ledger.connection.execute(
+        "INSERT INTO news_decision_event_snapshots_v1 VALUES (?,?,?,?,?,?,?,?,?)",
+        ("decision-event", decision_time.isoformat(), "event", "event-version",
+         EVIDENCE_POLICY_VERSION, "OFFICIAL_MODEL", 0.75, 10.0,
+         "snapshot-hash"),
+    )
+    ledger.connection.commit()
+
+    authoritative = training_v2._build_training_rows(ledger, cutoff)
+    materialized = training_v2.complete_training_rows(ledger, cutoff)
+    assert materialized == authoritative
+    assert canonical_hash([row["receipt"] for row in materialized]) == canonical_hash(
+        [row["receipt"] for row in authoritative]
+    )
+    assert materialized[0]["core_events"] == [{
+        "source_decision_id": "decision-event", "event_id": "event",
+        "event_version_id": "event-version", "model_permission": "OFFICIAL_MODEL",
+        "raw_weight": 0.75,
+        "event_occurred_at": (decision_time - timedelta(minutes=10)).isoformat(),
+        "event_clock_source": "OFFICIAL_RELEASE_TIME",
+        "event_time_precision": "TIMESTAMP", "evidence_grade": "A",
+        "source_budget_id": "budget-official",
+    }]
+    ledger.close()
 
 
 @pytest.mark.parametrize(
@@ -1496,13 +1667,19 @@ def _attach_event_exposure(rows: list[dict], *, event_days: int = 1,
 
 
 def _stub_training_rows(monkeypatch, rows: list[dict]) -> None:
-    monkeypatch.setattr(training_v2, "_eligible_row_count", lambda *_: len(rows))
+    monkeypatch.setattr(
+        training_v2, "refresh_training_materialization_state",
+        lambda *_: {"row_count": len(rows), "state": "CLEAN"},
+    )
     monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: rows)
 
 
 def test_not_due_gate_does_not_materialize_training_rows(tmp_path, monkeypatch) -> None:
     ledger = ForwardLedger(tmp_path / "forward-not-due.sqlite3")
-    monkeypatch.setattr(training_v2, "_eligible_row_count", lambda *_: 12)
+    monkeypatch.setattr(
+        training_v2, "refresh_training_materialization_state",
+        lambda *_: {"row_count": 12, "state": "CLEAN"},
+    )
     monkeypatch.setattr(
         training_v2, "complete_training_rows",
         lambda *_: pytest.fail("NOT_DUE must not materialize training rows"),

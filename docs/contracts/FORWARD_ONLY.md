@@ -238,17 +238,21 @@ are immutable model-update fields.
 - U5 is a scale and reporting unit only; it cannot vote on direction.
 - A new Challenger is trained after each 50 additional eligible rows for the
   same model stage.
-- The due gate uses bounded aggregate state before materializing training rows.
+- The due gate uses durable materialized training-row state before model work.
   A generation below its next threshold performs no feature parsing, event
-  lookup, or Ridge work. When due, event snapshots are read as one set rather
-  than one query per historical decision.
-- The eligibility index persists its current contract, row count, and ordered
-  decision cursor, materialization mode/receipt, last successful update, and
-  rebuild generation. Tail growth advances the receipt incrementally. Contract
-  changes, row loss, and late historical eligibility mark the index dirty and
-  authorize a background rebuild; the decision-clock owner never performs that
-  rebuild. Full rebuild receipts are derived from the immutable market/news/
-  outcome snapshot hashes used by training.
+  lookup, or Ridge work. Exact market, news, broad-news, target, event-version,
+  model-permission, source-budget, and receipt evidence is stored by source
+  decision ID in disposable local derived state. Training reads that durable
+  set instead of reconstructing every historical decision.
+- Source-table triggers maintain a durable dirty-ID queue. Normal updates bulk
+  load and atomically replace only newly eligible or changed decisions, then
+  advance the ordered cursor and incremental receipt. No source change performs
+  zero row materialization. Contract drift, stored-row hash corruption, source
+  deletion, explicit dirty state, or eligibility inserted before the cursor
+  requires a set-oriented full rebuild. A failed replacement leaves the prior
+  valid materialized set and dirty evidence intact. Authoritative immutable
+  evidence remains the source of truth; the decision-clock owner never rebuilds
+  training state.
 - A restart with a complete active current-contract generation begins the
   decision clock immediately and schedules reconciliation on the durable
   background owner. A missing or incompatible generation remains fail-closed
