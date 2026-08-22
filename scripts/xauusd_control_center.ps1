@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "ApproveCompatibility", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "ApproveCompatibility", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync")]
     [string]$ServiceKey = "",
@@ -41,6 +41,8 @@ $runtimeDecisionHorizon = [TimeSpan]::FromMinutes(30)
 $reloadableServiceKeys = @("collector", "annotator", "api", "sync")
 $runtimeControlFileNames = @(
     "xauusd_control_center.ps1",
+    "control_center.xaml",
+    "xauusd_control_center_launcher.vbs",
     "xauusd_watchdog_launcher.vbs",
     "xauusd_watchdog_guard.ps1",
     "xauusd_watchdog_guard_launcher.vbs"
@@ -1293,6 +1295,388 @@ function Set-CloudflareCandidatePointer {
         -Message "stage release candidate $([string]$Candidate.validation_key)"
 }
 
+function Invoke-ExactVersionJson {
+    param(
+        [Parameter(Mandatory = $true)][string]$VersionId,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+    $headers = @{
+        "Cloudflare-Workers-Version-Overrides" = "$workerName=`"$VersionId`""
+    }
+    $response = Invoke-WebRequest -UseBasicParsing -Method Get `
+        -Uri "$workerUrl$Path" -Headers $headers -TimeoutSec 30
+    if ([int]$response.StatusCode -ne 200) {
+        throw "Exact-version read $Path returned $([int]$response.StatusCode)."
+    }
+    return [pscustomobject]@{
+        payload = $response.Content | ConvertFrom-Json
+        requested_version_id = $VersionId
+        observed_version_id = [string]$response.Headers["X-Aurum-Worker-Version"]
+        observed_git_sha = [string]$response.Headers["X-Aurum-Git-SHA"]
+        server_timing = [string]$response.Headers["Server-Timing"]
+    }
+}
+
+function ConvertTo-ReleaseSemanticProjection {
+    param([Parameter(Mandatory = $true)][string]$Path, [object]$Payload)
+    switch ($Path) {
+        "/api/status" {
+            return [ordered]@{
+                generated_at = $Payload.generated_at
+                forward_epoch = $Payload.forward_epoch
+                counts = $Payload.counts
+                latest = $Payload.latest
+                training = $Payload.training
+            }
+        }
+        "/api/audit" {
+            return [ordered]@{
+                generated_at = $Payload.generated_at
+                news_metrics = $Payload.news_metrics
+                daily_news_brief_summary = $Payload.daily_news_brief_summary
+                storyline_summary = $Payload.storyline_summary
+            }
+        }
+        "/api/learning" {
+            return [ordered]@{
+                generated_at = $Payload.generated_at
+                training = $Payload.training
+                learning_curves = $Payload.learning_curves
+            }
+        }
+        "/api/market-chart" {
+            return [ordered]@{
+                generated_at = $Payload.generated_at
+                decisions = $Payload.decisions
+                training_markers = $Payload.training_markers
+            }
+        }
+        default { return $Payload }
+    }
+}
+
+function Test-ReleaseJsonProperty {
+    param([object]$Object, [Parameter(Mandatory = $true)][string]$Name)
+    return [bool]($null -ne $Object -and $null -ne $Object.PSObject.Properties[$Name])
+}
+
+function ConvertTo-RequiredReleaseTime {
+    param([object]$Value)
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
+        throw "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+    }
+    $parsed = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse(
+        [string]$Value,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind,
+        [ref]$parsed
+    )) {
+        throw "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+    }
+    return $parsed
+}
+
+function Get-ReleaseDatasetCount {
+    param([Parameter(Mandatory = $true)][string]$Path, [object]$Payload)
+    $properties = switch -Wildcard ($Path) {
+        "/api/audit-briefs*" { @("daily_news_briefs") }
+        "/api/audit-stories*" { @("storylines", "market_narrative_candidates", "story_event_candidates") }
+        "/api/audit-decisions*" { @("recent_decisions", "predictions") }
+        "/api/learning*" { @("learning_curves", "models") }
+        "/api/market-chart*" { @("decisions", "points") }
+        "/api/market-history*" { @("items", "points", "decisions") }
+        "/api/news-index*" { @("items", "articles") }
+        "/api/news-evidence*" { @("items", "news_evidence") }
+        default { @() }
+    }
+    $count = 0
+    foreach ($name in $properties) {
+        if (Test-ReleaseJsonProperty -Object $Payload -Name $name) {
+            $count += @($Payload.$name).Count
+        }
+    }
+    return $count
+}
+
+function Test-CandidateStatusPayload {
+    param([object]$StablePayload, [object]$CandidatePayload)
+    try {
+        foreach ($payload in @($StablePayload, $CandidatePayload)) {
+            foreach ($name in @("generated_at", "forward_epoch", "counts", "latest", "system")) {
+                if (-not (Test-ReleaseJsonProperty -Object $payload -Name $name)) {
+                    throw "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+                }
+            }
+            if (-not (Test-ReleaseJsonProperty -Object $payload.counts -Name "decision_events") -or
+                -not (Test-ReleaseJsonProperty -Object $payload.latest -Name "decision_time") -or
+                -not (Test-ReleaseJsonProperty -Object $payload.system -Name "market_session")) {
+                throw "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+            }
+            if ($null -eq $payload.counts.decision_events -or
+                -not ([string]$payload.system.market_session -in
+                    @("OPEN", "CLOSED", "WEEKLY_CLOSED", "DATA_UNAVAILABLE"))) {
+                throw "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$StablePayload.forward_epoch) -or
+            [string]::IsNullOrWhiteSpace([string]$CandidatePayload.forward_epoch)) {
+            throw "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+        }
+        if ([string]$StablePayload.forward_epoch -ne [string]$CandidatePayload.forward_epoch) {
+            return [pscustomobject]@{ passed=$false; reason="CANDIDATE_STATUS_SCHEMA_MISMATCH" }
+        }
+        $stableGenerated = ConvertTo-RequiredReleaseTime $StablePayload.generated_at
+        $candidateGenerated = ConvertTo-RequiredReleaseTime $CandidatePayload.generated_at
+        $stableDecision = ConvertTo-RequiredReleaseTime $StablePayload.latest.decision_time
+        $candidateDecision = ConvertTo-RequiredReleaseTime $CandidatePayload.latest.decision_time
+        $stableCount = [long]$StablePayload.counts.decision_events
+        $candidateCount = [long]$CandidatePayload.counts.decision_events
+        if ($candidateCount -lt $stableCount) {
+            return [pscustomobject]@{ passed=$false; reason="CANDIDATE_COUNT_REGRESSION" }
+        }
+        if (($stableGenerated - $candidateGenerated).TotalSeconds -gt 420) {
+            return [pscustomobject]@{ passed=$false; reason="CANDIDATE_STATUS_STALE" }
+        }
+        if (($stableDecision - $candidateDecision).TotalSeconds -gt 420) {
+            return [pscustomobject]@{ passed=$false; reason="CANDIDATE_DECISION_BEHIND_STABLE" }
+        }
+        $stableSession = [string]$StablePayload.system.market_session
+        $candidateSession = [string]$CandidatePayload.system.market_session
+        if ($stableSession -eq "OPEN" -and $candidateSession -ne "OPEN") {
+            return [pscustomobject]@{ passed=$false; reason="CANDIDATE_QUOTE_STALE" }
+        }
+        if ($candidateSession -eq "OPEN") {
+            if (-not (Test-ReleaseJsonProperty -Object $CandidatePayload.system -Name "quote_age_seconds") -or
+                $null -eq $CandidatePayload.system.quote_age_seconds) {
+                throw "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+            }
+            $quoteAge = 0.0
+            if (-not [double]::TryParse(
+                [string]$CandidatePayload.system.quote_age_seconds,
+                [Globalization.NumberStyles]::Float,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [ref]$quoteAge
+            ) -or $quoteAge -lt 0) {
+                throw "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+            }
+            if ($quoteAge -gt 75) {
+                return [pscustomobject]@{ passed=$false; reason="CANDIDATE_QUOTE_STALE" }
+            }
+        }
+        return [pscustomobject]@{ passed=$true; reason="PASSED" }
+    } catch {
+        return [pscustomobject]@{
+            passed=$false
+            reason=if ($_.Exception.Message -eq "CANDIDATE_STATUS_SCHEMA_MISMATCH") {
+                "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+            } else { "CANDIDATE_STATUS_SCHEMA_MISMATCH" }
+        }
+    }
+}
+
+function Test-CandidateDataParity {
+    param([Parameter(Mandatory = $true)][object]$Stable,
+          [Parameter(Mandatory = $true)][object]$Candidate)
+    $routes = @(
+        "/api/status", "/api/audit", "/api/audit-briefs",
+        "/api/audit-stories", "/api/audit-decisions", "/api/learning",
+        "/api/market-chart", "/api/market-history?limit=20",
+        "/api/news-index?page=1&limit=20",
+        "/api/news-evidence?mode=all&page=1&limit=20"
+    )
+    $legacyMode = [string]$Stable.artifact_kind -eq $legacyBootstrapStableArtifactKind
+    $identityMode = if ($legacyMode) {
+        "LEGACY_BOOTSTRAP_STABLE_COMPAT"
+    } else { "EXACT_VERSION" }
+    if ($legacyMode) {
+        try { $deployment = Get-CloudflareDeployment } catch { $deployment = $null }
+        $stablePlacement = @($deployment.versions | Where-Object {
+            [string]$_.version_id -eq [string]$Stable.worker_version_id -and
+            [double]$_.percentage -eq 100
+        })
+        $candidatePlacement = @($deployment.versions | Where-Object {
+            [string]$_.version_id -eq [string]$Candidate.worker_version_id -and
+            [double]$_.percentage -eq 0
+        })
+        $runtime = Get-RuntimeCodeState
+        $legacyEvidencePassed = [bool](
+            $stablePlacement.Count -eq 1 -and
+            $candidatePlacement.Count -eq 1 -and
+            [string]$Stable.git_sha -match '^[0-9a-f]{40}$' -and
+            [string]$Stable.windows_revision -eq [string]$Stable.git_sha -and
+            $runtime -and
+            [string]$runtime.applied_revision -eq [string]$Stable.windows_revision
+        )
+        if (-not $legacyEvidencePassed) {
+            return [pscustomobject]@{
+                state = "FAILED"; passed = $false; identity_mode = $identityMode
+                reason = "LEGACY_STABLE_DEPLOYMENT_EVIDENCE_UNPROVEN"
+                stable_version_id = [string]$Stable.worker_version_id
+                candidate_version_id = [string]$Candidate.worker_version_id
+                routes = @()
+            }
+        }
+    }
+    $results = @()
+    $legacyAuditTime = $null
+    foreach ($path in $routes) {
+        if ($legacyMode -and $path -in @(
+            "/api/audit-briefs", "/api/audit-stories", "/api/audit-decisions"
+        )) {
+            try {
+                $candidateRead = Invoke-ExactVersionJson `
+                    -VersionId ([string]$Candidate.worker_version_id) -Path $path
+                if ([string]$candidateRead.observed_version_id -ne
+                        [string]$Candidate.worker_version_id -or
+                    [string]::IsNullOrWhiteSpace([string]$candidateRead.observed_git_sha) -or
+                    [string]$candidateRead.observed_git_sha -ne [string]$Candidate.git_sha) {
+                    throw "EXACT_VERSION_IDENTITY_MISMATCH"
+                }
+                $payload = $candidateRead.payload
+                $generated = ConvertTo-RequiredReleaseTime $payload.generated_at
+                $knownFields = switch ($path) {
+                    "/api/audit-briefs" { @("daily_news_briefs") }
+                    "/api/audit-stories" { @("storylines", "market_narrative_candidates", "story_event_candidates") }
+                    default { @("recent_decisions", "predictions") }
+                }
+                if (@($knownFields | Where-Object {
+                    Test-ReleaseJsonProperty -Object $payload -Name $_
+                }).Count -eq 0) {
+                    throw "LEGACY_AUDIT_SPLIT_SCHEMA_MISMATCH"
+                }
+                if ($null -eq $legacyAuditTime -or
+                    ($legacyAuditTime - $generated).TotalMinutes -gt 15) {
+                    throw "CANDIDATE_AUDIT_TRANSITION_STALE"
+                }
+                $results += [pscustomobject]@{
+                    route = $path; state = "PASSED"; passed = $true; reason = "PASSED"
+                    stable_version_id = [string]$Stable.worker_version_id
+                    candidate_version_id = [string]$candidateRead.observed_version_id
+                }
+            } catch {
+                $reason = if ($_.Exception.Message -in @(
+                    "EXACT_VERSION_IDENTITY_MISMATCH", "CANDIDATE_AUDIT_TRANSITION_STALE",
+                    "LEGACY_AUDIT_SPLIT_SCHEMA_MISMATCH"
+                )) { $_.Exception.Message } else { "EXACT_VERSION_READ_FAILED" }
+                $results += [pscustomobject]@{
+                    route = $path; state = "FAILED"; passed = $false; reason = $reason
+                    error = Protect-PreflightDiagnosticText $_.Exception.Message
+                    stable_version_id = [string]$Stable.worker_version_id
+                    candidate_version_id = [string]$Candidate.worker_version_id
+                }
+            }
+            continue
+        }
+        try {
+            $stableRead = Invoke-ExactVersionJson `
+                -VersionId ([string]$Stable.worker_version_id) -Path $path
+            $candidateRead = Invoke-ExactVersionJson `
+                -VersionId ([string]$Candidate.worker_version_id) -Path $path
+            if ((-not $legacyMode -and
+                    [string]$stableRead.observed_version_id -ne [string]$Stable.worker_version_id) -or
+                [string]$candidateRead.observed_version_id -ne [string]$Candidate.worker_version_id -or
+                (-not $legacyMode -and (
+                    [string]::IsNullOrWhiteSpace([string]$stableRead.observed_git_sha) -or
+                    [string]$stableRead.observed_git_sha -ne [string]$Stable.git_sha)) -or
+                [string]::IsNullOrWhiteSpace([string]$candidateRead.observed_git_sha) -or
+                [string]$candidateRead.observed_git_sha -ne [string]$Candidate.git_sha) {
+                throw "EXACT_VERSION_IDENTITY_MISMATCH"
+            }
+            $stablePayload = $stableRead.payload
+            $candidatePayload = $candidateRead.payload
+            $stableProjection = ConvertTo-ReleaseSemanticProjection -Path $path -Payload $stablePayload
+            $candidateProjection = ConvertTo-ReleaseSemanticProjection -Path $path -Payload $candidatePayload
+            $passed = [bool]((@($stableProjection.Keys) -join ",") -ceq
+                (@($candidateProjection.Keys) -join ","))
+            $reason = if ($passed) { "PASSED" } else { "CANDIDATE_DATA_PARITY_FAILED" }
+            if ($path -eq "/api/status") {
+                $statusResult = Test-CandidateStatusPayload -StablePayload $stablePayload `
+                    -CandidatePayload $candidatePayload
+                $passed = [bool]$statusResult.passed; $reason = [string]$statusResult.reason
+            }
+            if ($path -eq "/api/audit") {
+                try {
+                    $stableAuditTime = ConvertTo-RequiredReleaseTime $stablePayload.generated_at
+                    $candidateAuditTime = ConvertTo-RequiredReleaseTime $candidatePayload.generated_at
+                    if (($stableAuditTime - $candidateAuditTime).TotalMinutes -gt 15) {
+                        $passed = $false; $reason = "CANDIDATE_AUDIT_TRANSITION_STALE"
+                    }
+                    if ($legacyMode) { $legacyAuditTime = $stableAuditTime }
+                } catch {
+                    $passed = $false; $reason = "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+                }
+            }
+            if ($path -notin @("/api/status", "/api/audit")) {
+                $stableCount = Get-ReleaseDatasetCount -Path $path -Payload $stablePayload
+                $candidateCount = Get-ReleaseDatasetCount -Path $path -Payload $candidatePayload
+                if ($stableCount -gt 0 -and $candidateCount -eq 0) {
+                    $passed = $false; $reason = "CANDIDATE_DATASET_UNEXPECTEDLY_EMPTY"
+                }
+            }
+            $results += [pscustomobject]@{
+                route = $path; state = if ($passed) { "PASSED" } else { "FAILED" }
+                passed = $passed; reason = $reason
+                stable_version_id = if ($legacyMode) { [string]$Stable.worker_version_id } else { [string]$stableRead.observed_version_id }
+                candidate_version_id = [string]$candidateRead.observed_version_id
+            }
+        } catch {
+            $results += [pscustomobject]@{
+                route = $path; state = "FAILED"; passed = $false
+                reason = if ($_.Exception.Message -eq "EXACT_VERSION_IDENTITY_MISMATCH") {
+                    "EXACT_VERSION_IDENTITY_MISMATCH"
+                } else { "EXACT_VERSION_READ_FAILED" }
+                error = Protect-PreflightDiagnosticText $_.Exception.Message
+            }
+        }
+    }
+    return [pscustomobject]@{
+        state = if (@($results | Where-Object { -not $_.passed }).Count -eq 0) {
+            "PASSED"
+        } else { "FAILED" }
+        passed = [bool](@($results | Where-Object { -not $_.passed }).Count -eq 0)
+        identity_mode = $identityMode
+        stable_version_id = [string]$Stable.worker_version_id
+        candidate_version_id = [string]$Candidate.worker_version_id
+        routes = $results
+    }
+}
+
+function Get-CandidateAuthInspection {
+    param([Parameter(Mandatory = $true)][object]$Candidate)
+    # workers.dev version URLs are not the Access-protected production host.
+    # They may prove application behavior, never a successful human login.
+    $result = [ordered]@{
+        state = "AUTH_BOUNDARY_NOT_TESTABLE"
+        version_id = [string]$Candidate.worker_version_id
+        versioned_workers_dev = "UNPROTECTED_TEST_SURFACE"
+        production_host_probe = "NOT_OBSERVED"
+    }
+    try {
+        $headers = @{
+            "Cloudflare-Workers-Version-Overrides" =
+                "$workerName=`"$([string]$Candidate.worker_version_id)`""
+        }
+        $response = Invoke-WebRequest -UseBasicParsing -Method Get `
+            -Uri "$dashboardUrl/admin/api/session" -Headers $headers `
+            -MaximumRedirection 0 -TimeoutSec 30
+        $result.production_host_probe = "HTTP_$([int]$response.StatusCode)"
+        if ([int]$response.StatusCode -in @(401, 403)) {
+            $result.state = "UNAUTHENTICATED_BOUNDARY_CONFIRMED"
+        }
+    } catch {
+        $status = if ($_.Exception.Response) {
+            [int]$_.Exception.Response.StatusCode
+        } else { 0 }
+        $result.production_host_probe = if ($status) { "HTTP_$status" } `
+            else { "PROBE_UNAVAILABLE" }
+        if ($status -in @(401, 403)) {
+            $result.state = "UNAUTHENTICATED_BOUNDARY_CONFIRMED"
+        }
+    }
+    return [pscustomobject]$result
+}
+
 function Invoke-AutomaticCandidateValidation {
     param([Parameter(Mandatory = $true)][object]$Candidate)
     $state = Get-ReleaseControlState
@@ -1414,6 +1798,23 @@ function Invoke-AutomaticCandidateValidation {
                 throw "Cloudflare platform CPU or 5xx validation failed."
             }
         }
+        $dataParity = Test-CandidateDataParity -Stable $state.stable `
+            -Candidate $Candidate
+        $authInspection = Get-CandidateAuthInspection -Candidate $Candidate
+        if (-not $dataParity.passed) {
+            $state.candidate.validation_state = "REVIEW_REQUIRED"
+            $state.candidate.validation = [pscustomobject]@{
+                key = [string]$Candidate.validation_key
+                repository = "PASSED"; windows = "PASSED"; cloudflare = "PASSED"
+                reason = "SEMANTIC_DATA_PARITY_REVIEW_REQUIRED"
+                data_parity = $dataParity; auth_inspection = $authInspection
+                route_plan = $routePlan; routes = $cloudflare.routes
+                cpu_evidence = $cloudflare.cpu_evidence
+                tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            Write-ReleaseControlState -State $state
+            return $false
+        }
         $state.candidate.compatibility_state = "PASSED"
         $state.candidate.validation_state = "PASSED"
         $state.candidate.validation = [pscustomobject]@{
@@ -1426,6 +1827,8 @@ function Invoke-AutomaticCandidateValidation {
             route_plan = $routePlan
             routes = $cloudflare.routes
             cpu_evidence = $cloudflare.cpu_evidence
+            data_parity = $dataParity
+            auth_inspection = $authInspection
             tested_at = [DateTimeOffset]::UtcNow.ToString("o")
         }
         $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
@@ -3502,17 +3905,24 @@ function Repair-WindowsTime {
 }
 
 function Install-ControlShortcut {
+    param([string]$ShortcutPath = "")
     $desktop = [Environment]::GetFolderPath("Desktop")
-    $shortcutPath = Join-Path $desktop "XAUUSD Forecaster Control Center.lnk"
+    if (-not $ShortcutPath) {
+        $ShortcutPath = Join-Path $desktop "XAUUSD Forecaster Control Center.lnk"
+    }
     $launcherPath = Join-Path $PSScriptRoot "xauusd_control_center_launcher.vbs"
+    if (-not (Test-Path -LiteralPath $launcherPath)) {
+        throw "Verified Control Center GUI launcher is missing."
+    }
     $shell = New-Object -ComObject WScript.Shell
-    $shortcut = $shell.CreateShortcut($shortcutPath)
+    $shortcut = $shell.CreateShortcut($ShortcutPath)
     $shortcut.TargetPath = "$env:WINDIR\System32\wscript.exe"
-    $shortcut.Arguments = '"{0}"' -f $launcherPath
+    $shortcut.Arguments = '"{0}" "{1}" "{2}"' -f `
+        $launcherPath, $moduleRoot, $repositoryRoot
     $shortcut.WorkingDirectory = $moduleRoot
     $shortcut.Description = "Start, stop, inspect, and configure XAUUSD Forecaster"
     $shortcut.Save()
-    return $shortcutPath
+    return $ShortcutPath
 }
 
 function Get-ControlCenterReleasePresentation {
@@ -3676,6 +4086,232 @@ function Get-ControlCenterSummaryPresentation {
     }
 }
 
+function Import-WpfControlCenterWindow {
+    $xamlPath = Join-Path $PSScriptRoot "control_center.xaml"
+    if (-not (Test-Path -LiteralPath $xamlPath)) {
+        throw "WPF control resource is missing: $xamlPath"
+    }
+    Add-Type -AssemblyName PresentationFramework
+    Add-Type -AssemblyName PresentationCore
+    [xml]$xaml = [IO.File]::ReadAllText(
+        $xamlPath, [Text.UTF8Encoding]::new($false)
+    )
+    $reader = New-Object System.Xml.XmlNodeReader $xaml
+    return [Windows.Markup.XamlReader]::Load($reader)
+}
+
+function Write-ControlCenterUiStarted {
+    param(
+        [ValidateSet("WPF", "WINFORMS_FALLBACK")][string]$Mode,
+        [string]$FailureReason = ""
+    )
+    $bundle = Get-RuntimeControlBundleIdentity
+    New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+    [pscustomobject]@{
+        time = [DateTimeOffset]::UtcNow.ToString("o")
+        event = "CONTROL_CENTER_UI_STARTED"
+        mode = $Mode
+        control_revision = if ($bundle) { [string]$bundle.source_revision } else { $null }
+        failure_reason = if ($FailureReason) {
+            Protect-PreflightDiagnosticText $FailureReason
+        } else { $null }
+    } | ConvertTo-Json -Compress | Add-Content -LiteralPath $watchdogLog -Encoding UTF8
+}
+
+function Test-WpfControlCenterLayout {
+    $window = Import-WpfControlCenterWindow
+    try {
+        $required = @(
+            "RootScrollViewer", "RootLayout", "ReleaseGrid", "StableCard",
+            "CandidateCard", "PreviousCard", "CandidateChecks",
+            "CandidateReason", "OpenStableButton", "OpenCandidateButton",
+            "ApproveCompatibilityButton", "PromoteButton", "ReverseButton",
+            "CandidateTechnicalEvidence", "FooterDisclaimer"
+        )
+        foreach ($name in $required) {
+            if (-not $window.FindName($name)) { throw "Missing WPF control: $name" }
+        }
+        $scroll = $window.FindName("RootScrollViewer")
+        if ($scroll.VerticalScrollBarVisibility -ne
+            [Windows.Controls.ScrollBarVisibility]::Auto) {
+            throw "RootScrollViewer must retain automatic vertical scrolling."
+        }
+        $results = @()
+        foreach ($viewport in @(
+            @(1366, 768), @(1920, 1080)
+        )) {
+            foreach ($scale in @(1.0, 1.25, 1.5)) {
+                $width = [Math]::Floor($viewport[0] / $scale)
+                $height = [Math]::Floor($viewport[1] / $scale)
+                $width = [Math]::Max([double]$window.MinWidth, $width)
+                $height = [Math]::Max([double]$window.MinHeight, $height)
+                $content = [Windows.FrameworkElement]$window.Content
+                $size = [Windows.Size]::new($width, $height)
+                $content.Measure($size)
+                $content.Arrange([Windows.Rect]::new(0, 0, $width, $height))
+                $content.UpdateLayout()
+                $reachable = $true
+                foreach ($name in @(
+                    "OpenStableButton", "OpenCandidateButton",
+                    "ApproveCompatibilityButton", "PromoteButton", "ReverseButton"
+                )) {
+                    $control = [Windows.FrameworkElement]$window.FindName($name)
+                    if ($control.ActualWidth -le 0 -or $control.ActualHeight -le 0) {
+                        $reachable = $false
+                    }
+                }
+                if (-not $reachable) {
+                    throw "Critical WPF actions failed layout at $($viewport[0])x$($viewport[1]) scale $scale."
+                }
+                $results += [pscustomobject]@{
+                    viewport = "$($viewport[0])x$($viewport[1])"
+                    scale = $scale
+                    logical_width = $width
+                    logical_height = $height
+                    critical_controls_reachable = $reachable
+                    vertical_scroll_available = [bool]($scroll.ScrollableHeight -gt 0)
+                }
+            }
+        }
+        return $results
+    } finally {
+        $window.Close()
+    }
+}
+
+function Show-WpfControlCenter {
+    $script:wpfFailureReason = ""
+    try {
+        $window = Import-WpfControlCenterWindow
+
+        function Find-WpfControl([string]$Name) { return $window.FindName($Name) }
+        function Format-WpfIdentity($Release) {
+            if (-not $Release) { return "Git       --`nWorker    --`nWindows   --" }
+            $git = if ($Release.git_sha) { ([string]$Release.git_sha).Substring(0, [Math]::Min(12, ([string]$Release.git_sha).Length)) } else { "--" }
+            $worker = if ($Release.worker_version_id) { ([string]$Release.worker_version_id).Substring(0, [Math]::Min(12, ([string]$Release.worker_version_id).Length)) } else { "--" }
+            $windows = if ($Release.windows_revision) { ([string]$Release.windows_revision).Substring(0, [Math]::Min(12, ([string]$Release.windows_revision).Length)) } else { "--" }
+            return "Git       $git`nWorker    $worker`nWindows   $windows"
+        }
+        function Invoke-WpfOperation([string]$Operation, [string]$ServiceKey = "") {
+            $arguments = @(
+                "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
+                "-File", ('"{0}"' -f $PSCommandPath), "-Action", $Operation,
+                "-RuntimeRoot", ('"{0}"' -f $moduleRoot),
+                "-RepositoryRoot", ('"{0}"' -f $repositoryRoot)
+            )
+            if ($ServiceKey) { $arguments += @("-ServiceKey", $ServiceKey) }
+            Start-Process -FilePath "powershell.exe" -ArgumentList $arguments `
+                -WorkingDirectory $moduleRoot -WindowStyle Hidden | Out-Null
+        }
+        function Refresh-WpfStatus {
+            $status = @(Get-ForecasterStatus)
+            (Find-WpfControl "ServiceList").ItemsSource = @($status | ForEach-Object {
+                [pscustomobject]@{ Key = $_.Key; Name = $_.Component; State = $_.State }
+            })
+            $bad = @($status | Where-Object { $_.State -match "STOPPED|ERROR|STALE|OFFLINE" }).Count
+            (Find-WpfControl "OverallState").Text = if ($bad) { "DEGRADED" } else { "HEALTHY" }
+            (Find-WpfControl "RefreshTime").Text = [DateTime]::Now.ToString("HH:mm:ss")
+            $release = Get-ReleaseControlState
+            (Find-WpfControl "StableState").Text = if ($release -and $release.stable) { "STABLE" } else { "UNAVAILABLE" }
+            (Find-WpfControl "StableIdentity").Text = Format-WpfIdentity $release.stable
+            (Find-WpfControl "CandidateState").Text = if ($release -and $release.candidate) { [string]$release.candidate.validation_state } else { "UNAVAILABLE" }
+            (Find-WpfControl "CandidateIdentity").Text = Format-WpfIdentity $release.candidate
+            $reason = if ($release -and $release.candidate -and $release.candidate.validation) {
+                if ($release.candidate.validation.reason) { [string]$release.candidate.validation.reason }
+                elseif ($release.candidate.validation.error) { [string]$release.candidate.validation.error }
+                else { "Validation evidence is available." }
+            } else { "Candidate validation is unavailable." }
+            $releaseView = Get-ControlCenterReleasePresentation -Release $release
+            (Find-WpfControl "CandidateReason").Text = if ($releaseView.can_promote) {
+                "Ready for explicit manual promotion."
+            } else { "Cannot promote: $reason" }
+            $validation = if ($release -and $release.candidate) {
+                $release.candidate.validation
+            } else { $null }
+            (Find-WpfControl "CandidateChecks").Text = @(
+                "Repository: $([string]$(if ($validation) { $validation.repository } else { 'unavailable' }))"
+                "Windows preflight: $([string]$(if ($validation) { $validation.windows } else { 'unavailable' }))"
+                "API routes: $([string]$(if ($validation) { $validation.cloudflare } else { 'unavailable' }))"
+                "Data parity: $([string]$(if ($validation -and $validation.data_parity) { $validation.data_parity.state } else { 'unavailable' })) ($([string]$(if ($validation -and $validation.data_parity -and $validation.data_parity.identity_mode) { $validation.data_parity.identity_mode } else { 'unavailable' })))"
+                "CPU headroom: $([string]$(if ($validation -and $validation.cpu_evidence) { $validation.cpu_evidence.gate_state } else { 'unavailable' }))"
+                "5xx / 1102: $([string]$(if ($validation -and $validation.cpu_evidence) { $validation.cpu_evidence.gate_state } else { 'unavailable' }))"
+                "Compatibility: $([string]$(if ($release -and $release.candidate) { $release.candidate.compatibility_state } else { 'unavailable' }))"
+                "Access boundary: formal-host only"
+            ) -join "`n"
+            (Find-WpfControl "CandidateTechnicalEvidence").Text = if ($release -and $release.candidate) {
+                "validation key: $($release.candidate.validation_key)`nbrowser: $($release.candidate.browser_url)`nreason: $reason"
+            } else { "No exact-version evidence loaded." }
+            (Find-WpfControl "PromoteButton").IsEnabled = [bool]$releaseView.can_promote
+            (Find-WpfControl "ApproveCompatibilityButton").IsEnabled = [bool]$releaseView.can_approve_compatibility
+            (Find-WpfControl "OpenCandidateButton").IsEnabled = [bool]($release -and $release.candidate -and $release.candidate.browser_url)
+            (Find-WpfControl "PreviousState").Text = if ($release -and $release.previous_stable) { "AVAILABLE" } else { "UNAVAILABLE" }
+            (Find-WpfControl "PreviousIdentity").Text = Format-WpfIdentity $release.previous_stable
+            (Find-WpfControl "ReverseButton").IsEnabled = [bool]($release -and $release.previous_stable)
+        }
+
+        (Find-WpfControl "RefreshButton").Add_Click({ Refresh-WpfStatus })
+        (Find-WpfControl "StartButton").Add_Click({ Invoke-WpfOperation "Start" })
+        (Find-WpfControl "RestartButton").Add_Click({ Invoke-WpfOperation "Restart" })
+        (Find-WpfControl "StopButton").Add_Click({ Invoke-WpfOperation "Stop" })
+        (Find-WpfControl "DashboardButton").Add_Click({ Start-Process $dashboardUrl })
+        (Find-WpfControl "LogsButton").Add_Click({ Start-Process explorer.exe $logRoot })
+        (Find-WpfControl "OpenStableButton").Add_Click({ Start-Process $dashboardUrl })
+        (Find-WpfControl "OpenCandidateButton").Add_Click({
+            $state = Get-ReleaseControlState
+            if ($state -and $state.candidate -and $state.candidate.browser_url) {
+                Start-Process ([string]$state.candidate.browser_url)
+            }
+        })
+        (Find-WpfControl "ApproveCompatibilityButton").Add_Click({
+            if ([System.Windows.MessageBox]::Show(
+                "Approve only the displayed exact compatibility evidence?",
+                "Confirm Compatibility", "YesNo", "Warning"
+            ) -eq "Yes") { Invoke-WpfOperation "ApproveCompatibility" }
+        })
+        $window.AddHandler(
+            [System.Windows.Controls.Button]::ClickEvent,
+            [System.Windows.RoutedEventHandler]{
+                param($sender, $eventArgs)
+                $button = $eventArgs.OriginalSource
+                if ($button.CommandParameter -in @("ServiceStart", "ServiceStop") -and $button.Tag) {
+                    Invoke-WpfOperation ([string]$button.CommandParameter) ([string]$button.Tag)
+                }
+            }
+        )
+        (Find-WpfControl "PromoteButton").Add_Click({
+            if ([System.Windows.MessageBox]::Show(
+                "Promote only this fully validated Candidate?", "Confirm Promote",
+                "YesNo", "Warning"
+            ) -eq "Yes") { Invoke-WpfOperation "PromoteCandidate" }
+        })
+        (Find-WpfControl "ReverseButton").Add_Click({
+            if ([System.Windows.MessageBox]::Show(
+                "Reverse to the exact Previous Stable release?", "Confirm Reverse",
+                "YesNo", "Warning"
+            ) -eq "Yes") { Invoke-WpfOperation "ReverseStable" }
+        })
+        $timer = New-Object Windows.Threading.DispatcherTimer
+        $timer.Interval = [TimeSpan]::FromSeconds(5)
+        $timer.Add_Tick({ Refresh-WpfStatus })
+        $window.Add_Closed({ $timer.Stop() })
+        $script:wpfUiStartedRecorded = $false
+        $window.Add_ContentRendered({
+            if (-not $script:wpfUiStartedRecorded) {
+                Write-ControlCenterUiStarted -Mode "WPF"
+                $script:wpfUiStartedRecorded = $true
+            }
+        })
+        Refresh-WpfStatus
+        $timer.Start()
+        [void]$window.ShowDialog()
+        return $true
+    } catch {
+        $script:wpfFailureReason = Protect-PreflightDiagnosticText $_.Exception.Message
+        Write-Warning "WPF control center unavailable; using WinForms fallback: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Show-ControlCenter {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
@@ -3689,6 +4325,11 @@ function Show-ControlCenter {
     )
     if (-not $createdNew) {
         [void]$activationEvent.Set()
+        $activationEvent.Dispose()
+        return
+    }
+
+    if (Show-WpfControlCenter) {
         $activationEvent.Dispose()
         return
     }
@@ -4562,6 +5203,8 @@ function Show-ControlCenter {
     })
     $activationTimer.Start()
     $form.Add_Shown({
+        Write-ControlCenterUiStarted -Mode "WINFORMS_FALLBACK" `
+            -FailureReason $script:wpfFailureReason
         Update-ReleaseCardLayout
         $form.Activate()
         $form.TopMost = $true
@@ -4609,6 +5252,9 @@ switch ($Action) {
             Set-Content -LiteralPath $StatusPath -Encoding UTF8
     }
     "CodeRevision" { Write-Output (Get-CodeRevision) }
+    "WpfLayoutSmoke" {
+        Test-WpfControlCenterLayout | ConvertTo-Json -Depth 4
+    }
     "Start" { Start-All; Start-Sleep -Seconds 2; Get-ForecasterStatus | Format-Table -AutoSize }
     "Stop" { Stop-All; Start-Sleep -Seconds 1; Get-ForecasterStatus | Format-Table -AutoSize }
     "Restart" { Restart-All; Start-Sleep -Seconds 2; Get-ForecasterStatus | Format-Table -AutoSize }

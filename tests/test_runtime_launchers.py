@@ -16,6 +16,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_CONTROL_FILES = (
     "xauusd_control_center.ps1",
+    "control_center.xaml",
+    "xauusd_control_center_launcher.vbs",
     "xauusd_watchdog_launcher.vbs",
     "xauusd_watchdog_guard.ps1",
     "xauusd_watchdog_guard_launcher.vbs",
@@ -555,6 +557,374 @@ def test_runtime_control_bundle_records_exact_source_revision_and_hashes(tmp_pat
     )
 
     assert result == f"{revision},True,{len(RUNTIME_CONTROL_FILES)}"
+
+
+def _status_payload(**overrides) -> dict:
+    payload = {
+        "generated_at": "2026-08-21T10:20:00+00:00",
+        "forward_epoch": "2026-08-01T00:00:00+00:00",
+        "counts": {"decision_events": 100},
+        "latest": {"decision_time": "2026-08-21T10:20:00+00:00"},
+        "system": {"market_session": "OPEN", "quote_age_seconds": 25.0},
+    }
+    for key, value in overrides.items():
+        owner, _, field = key.partition("__")
+        if field:
+            payload[owner][field] = value
+        else:
+            payload[owner] = value
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("candidate", "expected"),
+    [
+        ({"system__quote_age_seconds": 56_000}, "CANDIDATE_QUOTE_STALE"),
+        ({"latest__decision_time": "2026-08-21T10:00:00+00:00"},
+         "CANDIDATE_DECISION_BEHIND_STABLE"),
+        ({"latest__decision_time": None}, "CANDIDATE_STATUS_SCHEMA_MISMATCH"),
+        ({"system__quote_age_seconds": None}, "CANDIDATE_STATUS_SCHEMA_MISMATCH"),
+        ({"generated_at": "not-a-time"}, "CANDIDATE_STATUS_SCHEMA_MISMATCH"),
+        ({"counts__decision_events": 99}, "CANDIDATE_COUNT_REGRESSION"),
+        ({"system__market_session": "DATA_UNAVAILABLE"}, "CANDIDATE_QUOTE_STALE"),
+    ],
+)
+def test_candidate_status_parity_fails_closed(
+    tmp_path, candidate: dict, expected: str,
+) -> None:
+    stable_json = json.dumps(_status_payload(), separators=(",", ":"))
+    candidate_json = json.dumps(
+        _status_payload(**candidate), separators=(",", ":"),
+    )
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$stable='{stable_json}' | ConvertFrom-Json;"
+        f"$candidate='{candidate_json}' | ConvertFrom-Json;"
+        "$result=Test-CandidateStatusPayload -StablePayload $stable "
+        "-CandidatePayload $candidate;"
+        'Write-Output "$($result.passed),$($result.reason)"',
+    )
+    assert result == f"False,{expected}"
+
+
+def test_candidate_status_parity_skips_open_quote_rule_when_closed(tmp_path) -> None:
+    stable_json = json.dumps(
+        _status_payload(
+            system__market_session="CLOSED", system__quote_age_seconds=None,
+        ), separators=(",", ":"),
+    )
+    candidate_json = json.dumps(
+        _status_payload(
+            system__market_session="CLOSED", system__quote_age_seconds=None,
+        ), separators=(",", ":"),
+    )
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$stable='{stable_json}' | ConvertFrom-Json;"
+        f"$candidate='{candidate_json}' | ConvertFrom-Json;"
+        "$result=Test-CandidateStatusPayload -StablePayload $stable "
+        "-CandidatePayload $candidate;"
+        'Write-Output "$($result.passed),$($result.reason)"',
+    )
+    assert result == "True,PASSED"
+
+
+@pytest.mark.parametrize(("owner", "field"), [("latest", "decision_time"), ("system", "quote_age_seconds")])
+def test_candidate_status_parity_rejects_missing_required_fields(
+    tmp_path, owner: str, field: str,
+) -> None:
+    stable = _status_payload()
+    candidate = _status_payload()
+    candidate[owner].pop(field)
+    stable_json = json.dumps(stable, separators=(",", ":"))
+    candidate_json = json.dumps(candidate, separators=(",", ":"))
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$stable='{stable_json}' | ConvertFrom-Json;"
+        f"$candidate='{candidate_json}' | ConvertFrom-Json;"
+        "$result=Test-CandidateStatusPayload -StablePayload $stable "
+        "-CandidatePayload $candidate;"
+        'Write-Output "$($result.passed),$($result.reason)"',
+    )
+    assert result == "False,CANDIDATE_STATUS_SCHEMA_MISMATCH"
+
+
+def test_candidate_status_parity_accepts_valid_current_candidate(tmp_path) -> None:
+    payload_json = json.dumps(_status_payload(), separators=(",", ":"))
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$stable='{payload_json}' | ConvertFrom-Json;"
+        f"$candidate='{payload_json}' | ConvertFrom-Json;"
+        "$result=Test-CandidateStatusPayload -StablePayload $stable "
+        "-CandidatePayload $candidate;"
+        'Write-Output "$($result.passed),$($result.reason)"',
+    )
+    assert result == "True,PASSED"
+
+
+def test_candidate_data_parity_checks_complete_bounded_route_set_and_identity(
+    tmp_path,
+) -> None:
+    status_json = json.dumps(_status_payload(), separators=(",", ":"))
+    result = _run_control_center_contract(
+        tmp_path,
+        "$stable=[pscustomobject]@{worker_version_id='stable';git_sha='stable-git'};"
+        "$candidate=[pscustomobject]@{worker_version_id='candidate';git_sha='candidate-git'};"
+        "$script:paths=@();"
+        "function Invoke-ExactVersionJson { param($VersionId,$Path);"
+        "$script:paths += $Path;"
+        f"$payload=if($Path -eq '/api/status'){{'{status_json}' | ConvertFrom-Json}}"
+        "elseif($Path -eq '/api/audit'){[pscustomobject]@{generated_at="
+        "'2026-08-21T10:20:00+00:00'}}else{[pscustomobject]@{items=@(1)}};"
+        "$observed=if($VersionId -eq 'candidate' -and $Path -eq '/api/news-evidence?mode=all&page=1&limit=20')"
+        "{'wrong'}else{$VersionId};"
+        "$git=if($VersionId -eq 'stable'){'stable-git'}else{'candidate-git'};"
+        "return [pscustomobject]@{payload=$payload;"
+        "observed_version_id=$observed;observed_git_sha=$git} };"
+        "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
+        '$route=$result.routes | Where-Object {$_.route -like "/api/news-evidence*"};'
+        'Write-Output "$($script:paths.Count),$($route.reason),$($result.passed)"',
+    )
+    assert result == "20,EXACT_VERSION_IDENTITY_MISMATCH,False"
+
+
+def test_candidate_data_parity_rejects_unexpected_empty_dataset(tmp_path) -> None:
+    status_json = json.dumps(_status_payload(), separators=(",", ":"))
+    result = _run_control_center_contract(
+        tmp_path,
+        "$stable=[pscustomobject]@{worker_version_id='stable';git_sha='stable-git'};"
+        "$candidate=[pscustomobject]@{worker_version_id='candidate';git_sha='candidate-git'};"
+        "function Invoke-ExactVersionJson { param($VersionId,$Path);"
+        f"$payload=if($Path -eq '/api/status'){{'{status_json}' | ConvertFrom-Json}}"
+        "elseif($Path -eq '/api/audit'){[pscustomobject]@{generated_at="
+        "'2026-08-21T10:20:00+00:00'}}elseif($Path -like '/api/news-index*')"
+        "{$items=if($VersionId -eq 'stable'){@(1)}else{@()};"
+        "[pscustomobject]@{items=$items}}"
+        "else{[pscustomobject]@{items=@()}};"
+        "$git=if($VersionId -eq 'stable'){'stable-git'}else{'candidate-git'};"
+        "return [pscustomobject]@{payload=$payload;"
+        "observed_version_id=$VersionId;observed_git_sha=$git} };"
+        "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
+        '$route=$result.routes | Where-Object {$_.route -like "/api/news-index*"};'
+        'Write-Output "$($route.reason),$($result.passed),$($route.error)"',
+    )
+    assert result == "CANDIDATE_DATASET_UNEXPECTEDLY_EMPTY,False,"
+
+
+def _legacy_parity_contract(
+    *, candidate_header: str = "candidate", candidate_percentage: int = 0,
+    split_generated_at: str = "2026-08-21T10:20:00+00:00",
+) -> str:
+    stable_sha = "a" * 40
+    candidate_sha = "b" * 40
+    status_json = json.dumps(_status_payload(), separators=(",", ":"))
+    return (
+        f"$stable=[pscustomobject]@{{worker_version_id='stable';git_sha='{stable_sha}';"
+        f"windows_revision='{stable_sha}';artifact_kind='LEGACY_BOOTSTRAP_STABLE'}};"
+        f"$candidate=[pscustomobject]@{{worker_version_id='candidate';git_sha='{candidate_sha}';"
+        "artifact_kind='PRODUCTION_CANDIDATE'};"
+        "function Get-CloudflareDeployment { [pscustomobject]@{versions=@("
+        "[pscustomobject]@{version_id='stable';percentage=100},"
+        f"[pscustomobject]@{{version_id='candidate';percentage={candidate_percentage}}})}}}};"
+        f"function Get-RuntimeCodeState {{ [pscustomobject]@{{applied_revision='{stable_sha}'}} }};"
+        "$script:paths=@();"
+        "function Invoke-ExactVersionJson { param($VersionId,$Path);"
+        "$script:paths += \"$VersionId|$Path\";"
+        f"$payload=if($Path -eq '/api/status'){{'{status_json}' | ConvertFrom-Json}}"
+        "elseif($Path -eq '/api/audit'){[pscustomobject]@{generated_at="
+        "'2026-08-21T10:20:00+00:00'}}"
+        f"elseif($Path -eq '/api/audit-briefs'){{[pscustomobject]@{{generated_at='{split_generated_at}';daily_news_briefs=@()}}}}"
+        f"elseif($Path -eq '/api/audit-stories'){{[pscustomobject]@{{generated_at='{split_generated_at}';storylines=@()}}}}"
+        f"elseif($Path -eq '/api/audit-decisions'){{[pscustomobject]@{{generated_at='{split_generated_at}';recent_decisions=@()}}}}"
+        "else{[pscustomobject]@{items=@()}};"
+        f"$observed=if($VersionId -eq 'stable'){{''}}else{{'{candidate_header}'}};"
+        f"$git=if($VersionId -eq 'stable'){{''}}else{{'{candidate_sha}'}};"
+        "[pscustomobject]@{payload=$payload;observed_version_id=$observed;"
+        "observed_git_sha=$git} };"
+    )
+
+
+def test_legacy_bootstrap_parity_accepts_missing_stable_headers_and_split_routes(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _legacy_parity_contract()
+        + "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
+        + 'Write-Output "$($result.passed),$($result.identity_mode),$($script:paths.Count)"',
+    )
+    assert result == "True,LEGACY_BOOTSTRAP_STABLE_COMPAT,17"
+
+
+def test_legacy_bootstrap_parity_requires_current_stable100_evidence(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _legacy_parity_contract(candidate_percentage=10)
+        + "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
+        + 'Write-Output "$($result.passed),$($result.reason),$($script:paths.Count)"',
+    )
+    assert result == "False,LEGACY_STABLE_DEPLOYMENT_EVIDENCE_UNPROVEN,0"
+
+
+def test_legacy_bootstrap_parity_keeps_candidate_identity_exact(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _legacy_parity_contract(candidate_header="wrong")
+        + "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
+        + '$route=$result.routes|Select-Object -First 1;'
+        + 'Write-Output "$($result.passed),$($route.reason)"',
+    )
+    assert result == "False,EXACT_VERSION_IDENTITY_MISMATCH"
+
+
+def test_legacy_bootstrap_split_audit_must_be_current(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _legacy_parity_contract(split_generated_at="2026-08-21T09:50:00+00:00")
+        + "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
+        + '$route=$result.routes|Where-Object {$_.route -eq "/api/audit-briefs"};'
+        + 'Write-Output "$($result.passed),$($route.reason)"',
+    )
+    assert result == "False,CANDIDATE_AUDIT_TRANSITION_STALE"
+
+
+def test_modern_stable_missing_identity_headers_never_uses_legacy_mode(tmp_path) -> None:
+    status_json = json.dumps(_status_payload(), separators=(",", ":"))
+    result = _run_control_center_contract(
+        tmp_path,
+        "$stable=[pscustomobject]@{worker_version_id='stable';git_sha='stable-git';"
+        "artifact_kind='PRODUCTION_CANDIDATE'};"
+        "$candidate=[pscustomobject]@{worker_version_id='candidate';git_sha='candidate-git'};"
+        "function Invoke-ExactVersionJson { param($VersionId,$Path);"
+        f"$payload=if($Path -eq '/api/status'){{'{status_json}'|ConvertFrom-Json}}"
+        "elseif($Path -eq '/api/audit'){[pscustomobject]@{generated_at='2026-08-21T10:20:00+00:00'}}"
+        "else{[pscustomobject]@{items=@()}};"
+        "$version=if($VersionId -eq 'stable'){''}else{'candidate'};"
+        "$git=if($VersionId -eq 'stable'){''}else{'candidate-git'};"
+        "[pscustomobject]@{payload=$payload;observed_version_id=$version;observed_git_sha=$git}};"
+        "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
+        '$route=$result.routes|Select-Object -First 1;'
+        'Write-Output "$($result.identity_mode),$($result.passed),$($route.reason)"',
+    )
+    assert result == "EXACT_VERSION,False,EXACT_VERSION_IDENTITY_MISMATCH"
+
+
+def test_modern_stable_uses_exact_version_mode_after_first_promotion(tmp_path) -> None:
+    status_json = json.dumps(_status_payload(), separators=(",", ":"))
+    result = _run_control_center_contract(
+        tmp_path,
+        "$stable=[pscustomobject]@{worker_version_id='stable';git_sha='stable-git';"
+        "artifact_kind='PRODUCTION_CANDIDATE'};"
+        "$candidate=[pscustomobject]@{worker_version_id='candidate';git_sha='candidate-git'};"
+        "function Invoke-ExactVersionJson { param($VersionId,$Path);"
+        f"$payload=if($Path -eq '/api/status'){{'{status_json}'|ConvertFrom-Json}}"
+        "elseif($Path -eq '/api/audit'){[pscustomobject]@{generated_at='2026-08-21T10:20:00+00:00'}}"
+        "else{[pscustomobject]@{items=@()}};"
+        "$git=if($VersionId -eq 'stable'){'stable-git'}else{'candidate-git'};"
+        "[pscustomobject]@{payload=$payload;observed_version_id=$VersionId;observed_git_sha=$git}};"
+        "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
+        'Write-Output "$($result.identity_mode),$($result.passed)"',
+    )
+    assert result == "EXACT_VERSION,True"
+
+
+def test_control_center_launcher_and_shortcut_use_verified_bundle_path(tmp_path) -> None:
+    launcher = (ROOT / "scripts" / "xauusd_control_center_launcher.vbs").read_text(
+        encoding="utf-8",
+    )
+    assert "-NoProfile -STA -WindowStyle Hidden" in launcher
+    assert "-RuntimeRoot" in launcher and "-RepositoryRoot" in launcher
+    assert "shell.Run command, 0, False" in launcher
+    shortcut = tmp_path / "XAUUSD Forecaster Control Center.lnk"
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$path=Install-ControlShortcut -ShortcutPath '{shortcut}';"
+        "$link=(New-Object -ComObject WScript.Shell).CreateShortcut($path);"
+        'Write-Output "$($link.TargetPath)|$($link.Arguments)|$($link.WorkingDirectory)"',
+    )
+    target, arguments, working = result.split("|", 2)
+    assert target.lower().endswith("\\system32\\wscript.exe")
+    assert "xauusd_control_center_launcher.vbs" in arguments
+    assert str(tmp_path / "runtime") in arguments
+    assert str(tmp_path / "repository") in arguments
+    assert working == str(tmp_path / "runtime")
+
+
+def test_control_center_records_wpf_and_bounded_fallback_diagnostics() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
+        encoding="utf-8",
+    )
+    assert 'event = "CONTROL_CENTER_UI_STARTED"' in source
+    assert 'Write-ControlCenterUiStarted -Mode "WPF"' in source
+    assert 'Write-ControlCenterUiStarted -Mode "WINFORMS_FALLBACK"' in source
+    assert "Protect-PreflightDiagnosticText $FailureReason" in source
+
+
+def test_candidate_auth_evidence_uses_formal_access_host_only() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
+        encoding="utf-8"
+    )
+    body = source.split("function Get-CandidateAuthInspection", 1)[1].split(
+        "function Invoke-AutomaticCandidateValidation", 1
+    )[0]
+    assert '$dashboardUrl/admin/api/session' in body
+    assert '$workerUrl/admin/api/session' not in body
+    assert 'versioned_workers_dev = "UNPROTECTED_TEST_SURFACE"' in body
+
+
+def test_wpf_shell_is_bundled_with_winforms_fallback_and_release_controls() -> None:
+    import xml.etree.ElementTree as ET
+
+    root = ET.parse(ROOT / "scripts" / "control_center.xaml").getroot()
+    serialized = ET.tostring(root, encoding="unicode")
+    for name in (
+        "ServiceList", "StableIdentity", "CandidateIdentity", "PreviousIdentity",
+        "PromoteButton", "ReverseButton", "StartButton", "StopButton",
+        "CandidateChecks", "OpenStableButton", "OpenCandidateButton",
+        "ApproveCompatibilityButton", "CandidateTechnicalEvidence",
+    ):
+        assert name in serialized
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    assert "function Show-WpfControlCenter" in source
+    assert "if (Show-WpfControlCenter)" in source
+    assert "using WinForms fallback" in source
+    assert 'Invoke-WpfOperation ([string]$button.CommandParameter)' in source
+    assert 'Get-ControlCenterReleasePresentation -Release $release' in source
+
+
+def test_wpf_runtime_loads_and_keeps_release_controls_reachable() -> None:
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    result = subprocess.run(
+        [
+            "powershell.exe", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass",
+            "-File", str(script), "-Action", "WpfLayoutSmoke",
+            "-RuntimeRoot", str(ROOT), "-RepositoryRoot", str(ROOT),
+        ],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    )
+    layouts = json.loads(result.stdout)
+    assert {(row["viewport"], row["scale"]) for row in layouts} == {
+        (viewport, scale)
+        for viewport in ("1366x768", "1920x1080")
+        for scale in (1, 1.25, 1.5)
+    }
+    assert all(row["critical_controls_reachable"] for row in layouts)
+    constrained = [
+        row for row in layouts
+        if row["viewport"] == "1366x768" and row["scale"] == 1.5
+    ]
+    assert constrained[0]["vertical_scroll_available"] is True
+
+
+def test_wpf_resource_is_utf8_and_footer_has_no_mojibake() -> None:
+    xaml = (ROOT / "scripts" / "control_center.xaml").read_text(encoding="utf-8")
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "Decision support only · never authorizes trading" in xaml
+    assert "Decision support only Â· never authorizes trading" not in xaml
+    assert "[IO.File]::ReadAllText" in source
+    assert "[Text.UTF8Encoding]::new($false)" in source
 
 
 def test_business_switch_ignores_control_copy_failure_hook(

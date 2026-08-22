@@ -1265,6 +1265,10 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     : payload?.counts?.live_oos_model_groups !== undefined
       ? statusState
       : learningState === "idle" ? "loading" : learningState;
+  const liveOosHeadlinePhase: CurrentDataPhase =
+    liveOosModelGroups === undefined && view !== "league" ? "ready" : liveOosPhase;
+  const liveOosHeadline = liveOosModelGroups === undefined
+    ? "点击查看" : `${liveOosModelGroups}组`;
   const latestVersionGroups = (payload?.learning_curves?.version_groups ?? []).filter(
     row => row.lifecycle_status === "LATEST",
   );
@@ -1397,7 +1401,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>当前可用新闻事件 <b><MetricValue phase={statusState}><CountValue value={newsMetrics.events.currently_model_eligible} /></MetricValue></b></a>
         <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b><MetricValue phase={statusState}><CountValue value={activeEventTotal} /></MetricValue></b></a>
         <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b><MetricValue phase={statusState}><CountValue value={payload?.counts?.decision_events} /></MetricValue></b></a>
-        <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b><MetricValue phase={liveOosPhase}>{liveOosModelGroups !== undefined ? `${liveOosModelGroups}组` : "—"}</MetricValue></b></a>
+        <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b><MetricValue phase={liveOosHeadlinePhase}>{liveOosHeadline}</MetricValue></b></a>
         <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b><MetricValue phase={coveragePhase} snapshotLabel="分支快照" snapshotTitle="此覆盖结果由当前 PR 分支在构建时重新计算，不是生产实时观测">{payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</MetricValue></b></a>
       </nav>
       </div>
@@ -1411,7 +1415,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
           <option value="evidence">当前可用新闻事件 · {formatExactCount(newsMetrics.events.currently_model_eligible)}</option>
           <option value="stories">事件脉络 · {formatExactCount(activeEventTotal)}</option>
           <option value="decisions">决策与30分钟结果 · {formatExactCount(payload?.counts?.decision_events)}</option>
-          <option value="league">Live OOS 学习曲线 · {formatExactCount(liveOosModelGroups)}组</option>
+          <option value="league">Live OOS 学习曲线 · {liveOosModelGroups === undefined ? "点击查看" : `${formatExactCount(liveOosModelGroups)}组`}</option>
           <option value="coverage">大视野覆盖 · {formatExactCount(payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length)}/11</option>
         </select>
       </label>

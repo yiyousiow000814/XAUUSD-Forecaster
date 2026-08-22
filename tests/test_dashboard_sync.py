@@ -866,7 +866,10 @@ def test_critical_status_excludes_growing_resources_and_keeps_references() -> No
             "annotation_reason_code": "SEARCH_LEAD",
             "annotation_reason": "搜索线索：来自聚合发现源，不是独立官方发布",
         } for index in range(100)],
-        "recent_decisions": [{"id": index} for index in range(30)],
+        "recent_decisions": [{
+            "id": index, "features": {"unused": index},
+            "predictions": list(range(12)),
+        } for index in range(30)],
         "daily_news_briefs": [
             {"brief_date": f"2026-08-{20 - index:02d}", "revision_number": 1}
             for index in range(5)
@@ -915,7 +918,9 @@ def test_critical_status_excludes_growing_resources_and_keeps_references() -> No
     assert mirrored["market_chart"]["decisions"] == []
     assert "news_evidence" not in mirrored
     assert "recent_news" not in mirrored
-    assert "recent_decisions" not in mirrored
+    assert len(mirrored["recent_decisions"]) == 18
+    assert "features" not in mirrored["recent_decisions"][0]
+    assert len(mirrored["recent_decisions"][0]["predictions"]) == 8
     market_decision = json.loads(module.market_chart_snapshot(payload))["decisions"][0]
     assert market_decision["source_decision_id"] == "d1"
     assert market_decision["model_version"] == "unused-field"

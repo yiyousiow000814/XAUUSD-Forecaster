@@ -555,6 +555,7 @@ class ForwardLedger:
             install_dashboard_critical_activity_schema,
             install_dashboard_summary_schema,
         )
+        from .dashboard_read_models import install_dashboard_read_model_schema
         from .evidence_v2 import install_v2_schema
         from .news_scheduler import install_scheduler_schema
 
@@ -563,6 +564,7 @@ class ForwardLedger:
         install_assistant_capacity_schema(self.connection)
         install_dashboard_summary_schema(self.connection)
         install_dashboard_critical_activity_schema(self.connection)
+        install_dashboard_read_model_schema(self.connection)
         self._install_source_poll_schema()
         self._install_daily_brief_lifecycle_schema()
         self._install_append_only_triggers()

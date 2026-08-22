@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode,
+} from "react";
 import {
   adminAuthStateAfterProbe,
   isTrustedAdminAuthMessage,
@@ -26,6 +28,16 @@ import {
 } from "./DashboardNavigation";
 import MobileDashboardNav from "./MobileDashboardNav";
 import SystemStatePill from "./SystemStatePill";
+
+export const isVersionedCandidateHost = (hostname: string) => (
+  /^[0-9a-f]{8}-aurum-signal-room\./i.test(hostname)
+);
+
+const subscribeStaticBrowserLocation = () => () => undefined;
+const candidateInspectionSnapshot = () => (
+  isVersionedCandidateHost(window.location.hostname)
+);
+const candidateInspectionServerSnapshot = () => false;
 
 type ShellStatusPayload = {
   system?: {
@@ -159,6 +171,11 @@ export default function DashboardShell({ children, location }: { children: React
   const navigation = useDashboardNavigation();
   const [adminAuthState, setAdminAuthState] = useState<AdminAuthState>("CHECKING");
   const [adminLoginOpen, setAdminLoginOpen] = useState(false);
+  const candidateInspection = useSyncExternalStore(
+    subscribeStaticBrowserLocation,
+    candidateInspectionSnapshot,
+    candidateInspectionServerSnapshot,
+  );
   const dialogRef = useRef<HTMLDialogElement>(null);
   const popupRef = useRef<Window | null>(null);
   const popupCloseTimerRef = useRef<number | null>(null);
@@ -271,16 +288,20 @@ export default function DashboardShell({ children, location }: { children: React
       {adminLoginOpen ? <article>
         <header><h2>管理员登录</h2></header>
         <div>
-          <p>仅系统管理员可访问 Assistant、重试任务和 AI 模型用量。</p>
-          <span>{adminAuthState === "FORBIDDEN"
+          <p>{candidateInspection
+            ? "这是未受 Cloudflare Access 保护的 Candidate 检查页面。"
+            : "仅系统管理员可访问 Assistant、重试任务和 AI 模型用量。"}</p>
+          <span>{candidateInspection
+            ? "管理员登录需在正式 Access 边界验收；此页面不会伪造登录通过。"
+            : adminAuthState === "FORBIDDEN"
             ? "当前 Google 账号不在管理员允许名单中。"
             : "登录后进入私有管理后台。"}</span>
         </div>
         <footer>
           <button type="button" onClick={closeAdminLogin}>取消</button>
-          <button className="admin-login-primary" type="button" onClick={beginAdminLogin}>
-            使用 Google 登录
-          </button>
+          {candidateInspection ? null : <button
+            className="admin-login-primary" type="button" onClick={beginAdminLogin}
+          >使用 Google 登录</button>}
         </footer>
       </article> : null}
     </dialog>

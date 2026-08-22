@@ -22,6 +22,12 @@ from xauusd_forecaster.annotation import (
 )
 from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES
 from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.dashboard_read_models import (
+    DashboardReadModelOwner,
+    DashboardReadModelUnavailable,
+    READ_MODEL_CONTRACTS,
+    read_dashboard_read_model,
+)
 from xauusd_forecaster.dashboard_summaries import (
     DASHBOARD_COUNT_TABLES,
     install_dashboard_summary_schema,
@@ -1633,15 +1639,12 @@ def test_critical_status_route_uses_the_independent_bounded_builder(
         thread.join(timeout=2)
 
 
-@pytest.mark.parametrize(
-    ("database", "expected_optional"),
-    [
-        (Path(".local/preflight/forward.sqlite3"), False),
-        (Path(".local/forward/forward.sqlite3"), True),
-    ],
-)
-def test_legacy_status_alias_is_bounded_only_for_isolated_preflight(
-    monkeypatch, tmp_path, database, expected_optional,
+@pytest.mark.parametrize("database", [
+    Path(".local/preflight/forward.sqlite3"),
+    Path(".local/forward/forward.sqlite3"),
+])
+def test_status_alias_is_always_the_bounded_first_paint_contract(
+    monkeypatch, tmp_path, database,
 ) -> None:
     module = _dashboard_module()
     module.Handler.database = tmp_path / database
@@ -1670,7 +1673,7 @@ def test_legacy_status_alias_is_bounded_only_for_isolated_preflight(
         server.server_close()
         thread.join(timeout=2)
 
-    assert calls == [expected_optional]
+    assert calls == [False]
 
 
 def test_status_snapshot_cache_serves_bounded_stale_during_slow_refresh(
@@ -1796,40 +1799,160 @@ def test_health_endpoint_tracks_critical_readiness_not_optional_status(
         thread.join(timeout=2)
 
 
-def test_optional_api_producers_fail_independently(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("failed_resource", tuple(READ_MODEL_CONTRACTS))
+def test_optional_api_producers_fail_independently(
+    monkeypatch, tmp_path, failed_resource,
+) -> None:
     module = _dashboard_module()
-    module.Handler.database = tmp_path / "unused.sqlite3"
-    module.Handler.audit_cache = module.StatusSnapshotCache()
-    module.Handler.learning_cache = module.StatusSnapshotCache()
-    module.Handler.market_chart_cache = module.StatusSnapshotCache()
+    database = tmp_path / "forward.sqlite3"
+    ForwardLedger(database).close()
+    module.Handler.database = database
 
     def resource(_database, name):
-        if name == "audit":
-            raise RuntimeError("audit source failed")
+        if name == failed_resource:
+            raise RuntimeError(f"{name} source failed")
         return {"generated_at": "2026-08-19T00:00:00+00:00", "resource": name}
 
-    monkeypatch.setattr(module, "_optional_resource_payload", resource)
+    owner = DashboardReadModelOwner(
+        database, {name: lambda database, name=name: resource(database, name)
+                   for name in READ_MODEL_CONTRACTS},
+    )
+    expected_refresh = {resource: 1 for resource in READ_MODEL_CONTRACTS}
+    expected_refresh[failed_resource] = -1
+    assert owner.refresh_once() == expected_refresh
+    monkeypatch.setattr(
+        module, "_optional_resource_payload",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("GET must not invoke an optional producer")
+        ),
+    )
     server = module.ThreadingHTTPServer(("127.0.0.1", 0), module.Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        with pytest.raises(urllib.error.HTTPError) as failed:
-            urllib.request.urlopen(
-                f"http://127.0.0.1:{server.server_port}/api/audit", timeout=2,
-            )
-        assert failed.value.code == 500
         for path, expected in (
-            ("/api/learning", "learning"),
+            ("/api/audit", "audit"), ("/api/learning", "learning"),
             ("/api/market-chart", "market_chart"),
         ):
-            with urllib.request.urlopen(
-                f"http://127.0.0.1:{server.server_port}{path}", timeout=2,
-            ) as response:
-                assert json.loads(response.read())["resource"] == expected
+            if expected == failed_resource:
+                with pytest.raises(urllib.error.HTTPError) as failed:
+                    urllib.request.urlopen(
+                        f"http://127.0.0.1:{server.server_port}{path}", timeout=2,
+                    )
+                assert failed.value.code == 503
+            else:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{server.server_port}{path}", timeout=2,
+                ) as response:
+                    assert json.loads(response.read())["resource"] == expected
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_durable_optional_read_models_are_atomic_bounded_and_incremental(
+    monkeypatch, tmp_path,
+) -> None:
+    import xauusd_forecaster.dashboard_read_models as read_models
+
+    database = tmp_path / "forward.sqlite3"
+    ForwardLedger(database).close()
+    calls = {resource: 0 for resource in READ_MODEL_CONTRACTS}
+
+    def builder(resource):
+        def build(_database):
+            calls[resource] += 1
+            return {
+                "generated_at": "2026-08-21T10:20:00+00:00",
+                "resource": resource,
+                "generation": calls[resource],
+            }
+        return build
+
+    owner = DashboardReadModelOwner(
+        database, {resource: builder(resource) for resource in READ_MODEL_CONTRACTS},
+    )
+    assert owner.refresh_once() == {
+        "audit": 1, "learning": 1, "market_chart": 1,
+    }
+    assert owner.refresh_once() == {
+        "audit": 0, "learning": 0, "market_chart": 0,
+    }
+    assert calls == {"audit": 1, "learning": 1, "market_chart": 1}
+
+    connection = sqlite3.connect(database)
+    with connection:
+        connection.execute(
+            """UPDATE dashboard_optional_read_model_state_v1
+                  SET source_revision=source_revision+1 WHERE resource='audit'"""
+        )
+    connection.close()
+    assert owner.refresh_once() == {
+        "audit": 1, "learning": 0, "market_chart": 0,
+    }
+    assert calls == {"audit": 2, "learning": 1, "market_chart": 1}
+
+    prior, _ = read_dashboard_read_model(database, "audit")
+    monkeypatch.setattr(
+        read_models, "_payload_bytes",
+        lambda _payload: (_ for _ in ()).throw(RuntimeError("crash before commit")),
+    )
+    connection = sqlite3.connect(database)
+    with connection:
+        connection.execute(
+            """UPDATE dashboard_optional_read_model_state_v1
+                  SET source_revision=source_revision+1 WHERE resource='audit'"""
+        )
+    connection.close()
+    with pytest.raises(RuntimeError, match="crash before commit"):
+        owner.refresh_resource("audit")
+    current, _ = read_dashboard_read_model(database, "audit")
+    assert current == prior
+
+
+def test_optional_read_model_validation_and_concurrent_reads(tmp_path) -> None:
+    database = tmp_path / "forward.sqlite3"
+    ForwardLedger(database).close()
+    owner = DashboardReadModelOwner(
+        database,
+        {
+            resource: lambda _database, resource=resource: {
+                "generated_at": "2026-08-21T10:20:00+00:00",
+                "resource": resource,
+            }
+            for resource in READ_MODEL_CONTRACTS
+        },
+    )
+    owner.refresh_once()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(
+            lambda _index: read_dashboard_read_model(database, "learning")[0],
+            range(24),
+        ))
+    assert len(set(results)) == 1
+    _, stale = read_dashboard_read_model(
+        database, "learning",
+        now=datetime(2026, 8, 22, 10, 20, tzinfo=UTC),
+    )
+    assert stale["state"] == "STALE"
+
+    connection = sqlite3.connect(database)
+    with connection:
+        connection.execute(
+            """UPDATE dashboard_optional_read_models_v1
+                  SET payload_hash='broken' WHERE resource='learning'"""
+        )
+    with pytest.raises(DashboardReadModelUnavailable, match="corrupt"):
+        read_dashboard_read_model(database, "learning")
+    with connection:
+        connection.execute(
+            """UPDATE dashboard_optional_read_models_v1
+                  SET contract_version='old-contract' WHERE resource='market_chart'"""
+        )
+    connection.close()
+    with pytest.raises(DashboardReadModelUnavailable, match="contract mismatch"):
+        read_dashboard_read_model(database, "market_chart")
 
 
 def test_retry_operator_bridge_lists_and_atomically_applies_idempotent_override(
