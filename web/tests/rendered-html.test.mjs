@@ -731,6 +731,10 @@ test("keeps Admin login intent local until the explicit Access handoff", () => {
   assert.match(shell, /<h2>管理员登录<\/h2>/);
   assert.match(shell, /仅系统管理员可访问 Assistant、重试任务和 AI 模型用量。/);
   assert.match(shell, /登录后进入私有管理后台。/);
+  assert.match(shell, /\^\[0-9a-f\]\{8\}-aurum-signal-room/);
+  assert.match(shell, /这是未受 Cloudflare Access 保护的 Candidate 检查页面。/);
+  assert.match(shell, /管理员登录需在正式 Access 边界验收；此页面不会伪造登录通过。/);
+  assert.match(shell, /candidateInspection \? null : <button/);
   assert.match(shell, /className="admin-login-primary"[\s\S]*onClick=\{beginAdminLogin\}/);
   assert.match(shell, /openAdminAuthPopup[\s\S]*window\.location\.assign\("\/admin"\)/);
   assert.match(shell, /isTrustedAdminAuthMessage[\s\S]*revalidateAdminSession/);

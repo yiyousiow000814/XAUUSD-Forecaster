@@ -27,11 +27,11 @@ const context = {
   passThroughOnException() {},
 };
 
-function insertSnapshot(id, payload) {
+function insertSnapshot(id, payload, receivedAt = new Date().toISOString()) {
   database.database.prepare(
     `INSERT INTO dashboard_snapshots(id,payload,received_at) VALUES(?,?,?)
      ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,received_at=excluded.received_at`,
-  ).run(id, payload, new Date().toISOString());
+  ).run(id, payload, receivedAt);
 }
 
 function jsonOfBytes(targetBytes, fields = {}) {
@@ -151,6 +151,61 @@ test("replays the production read route family through bounded API modules", asy
   assert.equal(status.annotation_queue, undefined);
   assert.equal(status.gemini_quota, undefined);
   assert.equal(status.observation_scope, "D1_SNAPSHOT");
+});
+
+test("selects the freshest valid status snapshot and strips private legacy fields", async () => {
+  if (isPreviewBuild) return;
+  insertSnapshot(5, JSON.stringify({
+    generated_at: "2026-08-20T00:00:00Z",
+    system: { online: true, quote_age_seconds: 1 },
+    source: "older-public",
+  }), "2026-08-20T00:00:01Z");
+  insertSnapshot(1, JSON.stringify({
+    generated_at: new Date().toISOString(),
+    system: { online: true, quote_age_seconds: 1 },
+    source: "newer-private",
+    annotation_queue: { secret: true },
+  }), "2026-08-20T00:00:02Z");
+  let payload = await (await invoke("/api/status")).json();
+  assert.equal(payload.source, "newer-private");
+  assert.equal(payload.annotation_queue, undefined);
+
+  insertSnapshot(1, "{invalid", "2026-08-20T00:00:03Z");
+  payload = await (await invoke("/api/status")).json();
+  assert.equal(payload.source, "older-public");
+});
+
+test("uses the freshest compatible audit source during split-snapshot transition", async () => {
+  if (isPreviewBuild) return;
+  const older = "2026-08-20T00:00:01Z";
+  const newer = "2026-08-20T00:00:02Z";
+  insertSnapshot(6, JSON.stringify({ generated_at: older, recent_decisions: [{ decision_id: "split" }] }), older);
+  insertSnapshot(7, JSON.stringify({ generated_at: older, daily_news_briefs: [{ brief_date: "split" }] }), older);
+  insertSnapshot(8, JSON.stringify({ generated_at: older, storylines: [{ storyline_id: "split" }] }), older);
+  insertSnapshot(9, JSON.stringify({ generated_at: older, news_metrics: { source: "split" } }), older);
+  insertSnapshot(4, JSON.stringify({
+    generated_at: newer,
+    news_metrics: { source: "legacy" },
+    recent_decisions: [{
+      decision_id: "legacy", features: { growing: "x".repeat(2_000) },
+      predictions: Array.from({ length: 20 }, (_, index) => ({ index })),
+    }],
+    daily_news_briefs: [{ brief_date: "legacy", brief_json: "not-copied-to-JS" }],
+    storylines: [{ storyline_id: "legacy" }],
+  }), newer);
+
+  assert.equal((await (await invoke("/api/audit")).json()).news_metrics.source, "legacy");
+  const decisions = await (await invoke("/api/audit-decisions")).json();
+  assert.equal(decisions.recent_decisions[0].decision_id, "legacy");
+  assert.equal(decisions.recent_decisions[0].features, undefined);
+  assert.equal(decisions.recent_decisions[0].predictions.length, 8);
+  const briefs = await (await invoke("/api/audit-briefs")).json();
+  assert.equal(briefs.daily_news_briefs[0].brief_date, "legacy");
+  assert.equal(briefs.daily_news_briefs[0].brief_json, undefined);
+  assert.equal((await (await invoke("/api/audit-stories")).json()).storylines[0].storyline_id, "legacy");
+
+  insertSnapshot(4, "{invalid", "2026-08-20T00:00:03Z");
+  assert.equal((await (await invoke("/api/audit-decisions")).json()).recent_decisions[0].decision_id, "split");
 });
 
 test("keeps migrated market history schema out of the request hot path", () => {

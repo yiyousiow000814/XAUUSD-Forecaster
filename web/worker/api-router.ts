@@ -30,19 +30,72 @@ const routeModules = import.meta.glob<RouteModule>([
   "../app/admin/api/**/route.ts",
 ]);
 
-const SNAPSHOT_ROUTES: Record<string, { id: number; invalid: string; maxBytes: number }> = {
-  "/api/audit": { id: AUDIT_SNAPSHOT_IDS.summary, invalid: "invalid audit payload", maxBytes: AUDIT_SUMMARY_SNAPSHOT_BYTES },
-  "/api/audit-decisions": { id: AUDIT_SNAPSHOT_IDS.decisions, invalid: "invalid audit decisions payload", maxBytes: AUDIT_DETAIL_SNAPSHOT_BYTES },
-  "/api/audit-briefs": { id: AUDIT_SNAPSHOT_IDS.briefs, invalid: "invalid audit briefs payload", maxBytes: AUDIT_DETAIL_SNAPSHOT_BYTES },
-  "/api/audit-stories": { id: AUDIT_SNAPSHOT_IDS.stories, invalid: "invalid audit stories payload", maxBytes: AUDIT_DETAIL_SNAPSHOT_BYTES },
+type SnapshotRoute = {
+  id: number; invalid: string; maxBytes: number;
+  legacyFields?: Record<string, number | null>;
+  readSql?: string;
+};
+
+const SNAPSHOT_ROUTES: Record<string, SnapshotRoute> = {
+  "/api/audit": { id: AUDIT_SNAPSHOT_IDS.summary, invalid: "invalid audit payload", maxBytes: AUDIT_SUMMARY_SNAPSHOT_BYTES, legacyFields: {
+    generated_at: null, news_metrics: null, daily_news_brief_summary: null,
+    storyline_summary: null, news_evidence_summary: null, news_feature_policy: null,
+  } },
+  "/api/audit-decisions": { id: AUDIT_SNAPSHOT_IDS.decisions, invalid: "invalid audit decisions payload", maxBytes: AUDIT_DETAIL_SNAPSHOT_BYTES, legacyFields: { generated_at: null, recent_decisions: 20 } },
+  "/api/audit-briefs": { id: AUDIT_SNAPSHOT_IDS.briefs, invalid: "invalid audit briefs payload", maxBytes: AUDIT_DETAIL_SNAPSHOT_BYTES, legacyFields: { generated_at: null, daily_news_briefs: 3 } },
+  "/api/audit-stories": { id: AUDIT_SNAPSHOT_IDS.stories, invalid: "invalid audit stories payload", maxBytes: AUDIT_DETAIL_SNAPSHOT_BYTES, legacyFields: {
+    generated_at: null, storylines: 20, market_narrative_candidates: 50,
+    archived_storylines: 20, archived_story_event_candidates: 50,
+    story_event_candidates: 50, market_reaction_streams: 12,
+    theme_streams: 12, unassigned_story_events: 50, storyline_summary: null,
+  } },
   "/api/learning": { id: 3, invalid: "invalid learning payload", maxBytes: MAX_DASHBOARD_SNAPSHOT_BYTES },
   "/api/market-chart": { id: 2, invalid: "invalid market chart payload", maxBytes: MAX_DASHBOARD_SNAPSHOT_BYTES },
 };
 
+function legacyAuditProjection(fields: Record<string, number | null>) {
+  const arrayValue = (field: string) => {
+    if (field === "recent_decisions") {
+      return `json_set(json_remove(item.item_value, '$.features'), '$.predictions', json(coalesce(`
+        + `(SELECT json_group_array(json(prediction_value)) FROM (`
+        + `SELECT prediction.value AS prediction_value FROM json_each(item.item_value, '$.predictions') prediction LIMIT 8)), '[]')))`;
+    }
+    if (field === "daily_news_briefs") return `json_remove(item.item_value, '$.brief_json')`;
+    return "json(item.item_value)";
+  };
+  return `json_object(${Object.entries(fields).flatMap(([field, limit]) => [
+    `'${field}'`, limit === null
+      ? `json_extract(payload, '$.${field}')`
+      : `json(coalesce((SELECT json_group_array(${arrayValue(field)}) FROM (`
+        + `SELECT value AS item_value FROM json_each(payload, '$.${field}') LIMIT ${limit}) item), '[]'))`,
+  ]).join(", ")})`;
+}
+
+function auditSnapshotSql(route: SnapshotRoute) {
+  if (!route.legacyFields) return null;
+  return `WITH candidates(payload, received_at, preference) AS (
+    SELECT payload, received_at, 0 FROM dashboard_snapshots
+     WHERE id=${route.id} AND json_valid(payload)
+    UNION ALL
+    SELECT ${legacyAuditProjection(route.legacyFields)}, received_at, 1
+      FROM dashboard_snapshots WHERE id=4 AND json_valid(payload)
+  ), selected(payload) AS (
+    SELECT payload FROM candidates
+     WHERE length(CAST(payload AS BLOB)) <= ${route.maxBytes}
+     ORDER BY julianday(received_at) DESC, preference ASC LIMIT 1
+  )
+  SELECT payload, length(CAST(payload AS BLOB)) AS payload_bytes FROM selected`;
+}
+
+for (const route of Object.values(SNAPSHOT_ROUTES)) {
+  if (route.legacyFields) route.readSql = auditSnapshotSql(route) ?? undefined;
+}
+
 const PUBLIC_STATUS_SQL = `WITH selected(payload) AS (
   SELECT payload FROM dashboard_snapshots
-   WHERE id IN (5, 1)
-   ORDER BY CASE id WHEN 5 THEN 0 ELSE 1 END
+   WHERE id IN (5, 1) AND json_valid(payload)
+   ORDER BY julianday(received_at) DESC,
+            CASE id WHEN 5 THEN 0 ELSE 1 END
    LIMIT 1
 ), public(payload) AS (
   SELECT ${publicStatusJsonExpression()} FROM selected
@@ -132,7 +185,7 @@ function result(
 
 async function snapshotRead(
   binding: D1Database | undefined,
-  id: number,
+  route: SnapshotRoute,
   resource: string,
 ) {
   if (!binding) {
@@ -143,10 +196,13 @@ async function snapshotRead(
     });
   }
   try {
-    const row = await binding.prepare(
-      `SELECT payload, length(CAST(payload AS BLOB)) AS payload_bytes
-       FROM dashboard_snapshots WHERE id = ?`,
-    ).bind(id).first<{ payload: string; payload_bytes: number }>();
+    const statement = route.readSql
+      ? binding.prepare(route.readSql)
+      : binding.prepare(
+        `SELECT payload, length(CAST(payload AS BLOB)) AS payload_bytes
+         FROM dashboard_snapshots WHERE id = ? AND json_valid(payload)`,
+      ).bind(route.id);
+    const row = await statement.first<{ payload: string; payload_bytes: number }>();
     if (row) {
       return result(new Response(row.payload, {
         headers: {
@@ -341,7 +397,7 @@ export async function routeApiRequest(
   const snapshot = SNAPSHOT_ROUTES[pathname];
   if (snapshot) {
     if (request.method === "GET") {
-      return snapshotRead(env.DB, snapshot.id, pathname.slice(5));
+      return snapshotRead(env.DB, snapshot, pathname.slice(5));
     }
     if (request.method === "POST") {
       return snapshotWrite(

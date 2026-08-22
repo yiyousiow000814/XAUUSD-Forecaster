@@ -107,6 +107,23 @@
   SQLite remains the complete authority; D1 contains only those bounded
   display projections. A detail snapshot that has not loaded or is unavailable
   must not be represented as an empty collection or zero count.
+- During a split-snapshot handover, the read boundary selects the freshest
+  valid compatible snapshot by durable `received_at`, with the split snapshot
+  winning only an exact timestamp tie. Legacy audit detail is projected and
+  item-bounded inside D1 JSON1; a Worker must not deserialize the growing
+  legacy document merely to decide freshness. Invalid or oversized candidates
+  are skipped, and absence of a valid bounded source fails closed.
+- Local `/api/status` and `/api/critical-status` are the same bounded
+  first-paint contract. They include only the fixed recent 90-minute decision
+  window; audit, learning, market detail, and older history retain independent
+  lazy/paged owners. A compatibility alias must not rebuild or serialize the
+  complete historical dashboard payload.
+- Local audit, learning, and market-chart summary GETs read durable derived
+  models rather than invoking historical builders. A single background owner
+  tracks each resource independently, builds outside the request boundary, and
+  atomically replaces a model only when its source revision is unchanged.
+  Contract/hash mismatch or corruption fails closed; a failed rebuild retains
+  the prior known-good model and cannot delay the critical status owner.
 - When a bound is exceeded, repair ownership, projection, pagination, batching,
   or failure isolation first. Do not default to raising the host limit or
   deleting authoritative evidence.
