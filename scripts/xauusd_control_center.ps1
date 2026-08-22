@@ -1354,10 +1354,141 @@ function ConvertTo-ReleaseSemanticProjection {
     }
 }
 
+function Test-ReleaseJsonProperty {
+    param([object]$Object, [Parameter(Mandatory = $true)][string]$Name)
+    return [bool]($null -ne $Object -and $null -ne $Object.PSObject.Properties[$Name])
+}
+
+function ConvertTo-RequiredReleaseTime {
+    param([object]$Value)
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
+        throw "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+    }
+    $parsed = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse(
+        [string]$Value,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind,
+        [ref]$parsed
+    )) {
+        throw "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+    }
+    return $parsed
+}
+
+function Get-ReleaseDatasetCount {
+    param([Parameter(Mandatory = $true)][string]$Path, [object]$Payload)
+    $properties = switch -Wildcard ($Path) {
+        "/api/audit-briefs*" { @("daily_news_briefs") }
+        "/api/audit-stories*" { @("storylines", "market_narrative_candidates", "story_event_candidates") }
+        "/api/audit-decisions*" { @("recent_decisions", "predictions") }
+        "/api/learning*" { @("learning_curves", "models") }
+        "/api/market-chart*" { @("decisions", "points") }
+        "/api/market-history*" { @("items", "points", "decisions") }
+        "/api/news-index*" { @("items", "articles") }
+        "/api/news-evidence*" { @("items", "news_evidence") }
+        default { @() }
+    }
+    $count = 0
+    foreach ($name in $properties) {
+        if (Test-ReleaseJsonProperty -Object $Payload -Name $name) {
+            $count += @($Payload.$name).Count
+        }
+    }
+    return $count
+}
+
+function Test-CandidateStatusPayload {
+    param([object]$StablePayload, [object]$CandidatePayload)
+    try {
+        foreach ($payload in @($StablePayload, $CandidatePayload)) {
+            foreach ($name in @("generated_at", "forward_epoch", "counts", "latest", "system")) {
+                if (-not (Test-ReleaseJsonProperty -Object $payload -Name $name)) {
+                    throw "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+                }
+            }
+            if (-not (Test-ReleaseJsonProperty -Object $payload.counts -Name "decision_events") -or
+                -not (Test-ReleaseJsonProperty -Object $payload.latest -Name "decision_time") -or
+                -not (Test-ReleaseJsonProperty -Object $payload.system -Name "market_session")) {
+                throw "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+            }
+            if ($null -eq $payload.counts.decision_events -or
+                -not ([string]$payload.system.market_session -in
+                    @("OPEN", "CLOSED", "WEEKLY_CLOSED", "DATA_UNAVAILABLE"))) {
+                throw "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$StablePayload.forward_epoch) -or
+            [string]::IsNullOrWhiteSpace([string]$CandidatePayload.forward_epoch)) {
+            throw "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+        }
+        if ([string]$StablePayload.forward_epoch -ne [string]$CandidatePayload.forward_epoch) {
+            return [pscustomobject]@{ passed=$false; reason="CANDIDATE_STATUS_SCHEMA_MISMATCH" }
+        }
+        $stableGenerated = ConvertTo-RequiredReleaseTime $StablePayload.generated_at
+        $candidateGenerated = ConvertTo-RequiredReleaseTime $CandidatePayload.generated_at
+        $stableDecision = ConvertTo-RequiredReleaseTime $StablePayload.latest.decision_time
+        $candidateDecision = ConvertTo-RequiredReleaseTime $CandidatePayload.latest.decision_time
+        $stableCount = [long]$StablePayload.counts.decision_events
+        $candidateCount = [long]$CandidatePayload.counts.decision_events
+        if ($candidateCount -lt $stableCount) {
+            return [pscustomobject]@{ passed=$false; reason="CANDIDATE_COUNT_REGRESSION" }
+        }
+        if (($stableGenerated - $candidateGenerated).TotalSeconds -gt 420) {
+            return [pscustomobject]@{ passed=$false; reason="CANDIDATE_STATUS_STALE" }
+        }
+        if (($stableDecision - $candidateDecision).TotalSeconds -gt 420) {
+            return [pscustomobject]@{ passed=$false; reason="CANDIDATE_DECISION_BEHIND_STABLE" }
+        }
+        $stableSession = [string]$StablePayload.system.market_session
+        $candidateSession = [string]$CandidatePayload.system.market_session
+        if ($stableSession -eq "OPEN" -and $candidateSession -ne "OPEN") {
+            return [pscustomobject]@{ passed=$false; reason="CANDIDATE_QUOTE_STALE" }
+        }
+        if ($candidateSession -eq "OPEN") {
+            if (-not (Test-ReleaseJsonProperty -Object $CandidatePayload.system -Name "quote_age_seconds") -or
+                $null -eq $CandidatePayload.system.quote_age_seconds) {
+                throw "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+            }
+            $quoteAge = 0.0
+            if (-not [double]::TryParse(
+                [string]$CandidatePayload.system.quote_age_seconds,
+                [Globalization.NumberStyles]::Float,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [ref]$quoteAge
+            ) -or $quoteAge -lt 0) {
+                throw "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+            }
+            if ($quoteAge -gt 75) {
+                return [pscustomobject]@{ passed=$false; reason="CANDIDATE_QUOTE_STALE" }
+            }
+        }
+        return [pscustomobject]@{ passed=$true; reason="PASSED" }
+    } catch {
+        return [pscustomobject]@{
+            passed=$false
+            reason=if ($_.Exception.Message -eq "CANDIDATE_STATUS_SCHEMA_MISMATCH") {
+                "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+            } else { "CANDIDATE_STATUS_SCHEMA_MISMATCH" }
+        }
+    }
+}
+
 function Test-CandidateDataParity {
     param([Parameter(Mandatory = $true)][object]$Stable,
           [Parameter(Mandatory = $true)][object]$Candidate)
-    $routes = @("/api/status", "/api/audit", "/api/learning", "/api/market-chart")
+    $routes = @(
+        "/api/status",
+        "/api/audit",
+        "/api/audit-briefs",
+        "/api/audit-stories",
+        "/api/audit-decisions",
+        "/api/learning",
+        "/api/market-chart",
+        "/api/market-history?limit=20",
+        "/api/news-index?page=1&limit=20",
+        "/api/news-evidence?mode=all&page=1&limit=20"
+    )
     $results = @()
     foreach ($path in $routes) {
         try {
@@ -1369,71 +1500,49 @@ function Test-CandidateDataParity {
                 [string]$candidateRead.observed_version_id -ne [string]$Candidate.worker_version_id) {
                 throw "EXACT_VERSION_IDENTITY_MISMATCH"
             }
+            if ((Test-ReleaseJsonProperty -Object $Stable -Name "git_sha") -and
+                -not [string]::IsNullOrWhiteSpace([string]$stableRead.observed_git_sha) -and
+                [string]$stableRead.observed_git_sha -ne [string]$Stable.git_sha) {
+                throw "EXACT_VERSION_IDENTITY_MISMATCH"
+            }
+            if ((Test-ReleaseJsonProperty -Object $Candidate -Name "git_sha") -and
+                -not [string]::IsNullOrWhiteSpace([string]$candidateRead.observed_git_sha) -and
+                [string]$candidateRead.observed_git_sha -ne [string]$Candidate.git_sha) {
+                throw "EXACT_VERSION_IDENTITY_MISMATCH"
+            }
             $stablePayload = $stableRead.payload
             $candidatePayload = $candidateRead.payload
             $stableProjection = ConvertTo-ReleaseSemanticProjection -Path $path `
                 -Payload $stablePayload
             $candidateProjection = ConvertTo-ReleaseSemanticProjection -Path $path `
                 -Payload $candidatePayload
-            # Snapshot publication is asynchronous. Compare authoritative data,
-            # not generated_at byte equality, and admit only one normal cadence
-            # of lag for the decision surface.
-            $stableProjection.generated_at = $null
-            $candidateProjection.generated_at = $null
+            # Snapshot publication is asynchronous. Compare shape and explicit
+            # freshness fields below, never serialized byte equality.
             $stableShape = @($stableProjection.Keys) -join ","
             $candidateShape = @($candidateProjection.Keys) -join ","
             $passed = [bool]($stableShape -ceq $candidateShape)
             $reason = if ($passed) { "PASSED" } else { "CANDIDATE_DATA_PARITY_FAILED" }
             if ($path -eq "/api/status") {
-                if ([string]$stablePayload.forward_epoch -ne
-                    [string]$candidatePayload.forward_epoch) {
-                    $passed = $false; $reason = "CANDIDATE_DATA_PARITY_FAILED"
-                }
-                $stableCount = [int]$stablePayload.counts.decisions
-                $candidateCount = [int]$candidatePayload.counts.decisions
-                if ($candidateCount -lt $stableCount) {
-                    $passed = $false; $reason = "CANDIDATE_DECISION_BEHIND_STABLE"
-                }
-                try {
-                    $stableTime = [DateTimeOffset]::Parse([string]$stablePayload.generated_at)
-                    $candidateTime = [DateTimeOffset]::Parse([string]$candidatePayload.generated_at)
-                    if (($stableTime - $candidateTime).TotalSeconds -gt 420) {
-                        $passed = $false; $reason = "CANDIDATE_STATUS_STALE"
-                    }
-                    $stableDecision = [DateTimeOffset]::Parse(
-                        [string]$stablePayload.latest.decision.decision_time
-                    )
-                    $candidateDecision = [DateTimeOffset]::Parse(
-                        [string]$candidatePayload.latest.decision.decision_time
-                    )
-                    if (($stableDecision - $candidateDecision).TotalSeconds -gt 420) {
-                        $passed = $false; $reason = "CANDIDATE_DECISION_BEHIND_STABLE"
-                    }
-                    $candidateQuote = [DateTimeOffset]::Parse(
-                        [string]$candidatePayload.latest.quote.observed_at
-                    )
-                    if (($candidateTime - $candidateQuote).TotalSeconds -gt 75) {
-                        $passed = $false; $reason = "CANDIDATE_QUOTE_STALE"
-                    }
-                } catch { }
+                $statusResult = Test-CandidateStatusPayload `
+                    -StablePayload $stablePayload -CandidatePayload $candidatePayload
+                $passed = [bool]$statusResult.passed
+                $reason = [string]$statusResult.reason
             }
             if ($path -eq "/api/audit") {
                 try {
-                    $stableAuditTime = [DateTimeOffset]::Parse(
-                        [string]$stablePayload.generated_at
-                    )
-                    $candidateAuditTime = [DateTimeOffset]::Parse(
-                        [string]$candidatePayload.generated_at
-                    )
+                    $stableAuditTime = ConvertTo-RequiredReleaseTime $stablePayload.generated_at
+                    $candidateAuditTime = ConvertTo-RequiredReleaseTime $candidatePayload.generated_at
                     if (($stableAuditTime - $candidateAuditTime).TotalMinutes -gt 15) {
                         $passed = $false; $reason = "CANDIDATE_AUDIT_TRANSITION_STALE"
                     }
-                } catch { }
+                } catch {
+                    $passed = $false; $reason = "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+                }
             }
-            if ($path -in @("/api/learning", "/api/market-chart")) {
-                $stableItems = @($stablePayload.learning_curves) + @($stablePayload.decisions)
-                $candidateItems = @($candidatePayload.learning_curves) + @($candidatePayload.decisions)
-                if ($stableItems.Count -gt 0 -and $candidateItems.Count -eq 0) {
+            if ($path -notin @("/api/status", "/api/audit")) {
+                $stableCount = Get-ReleaseDatasetCount -Path $path -Payload $stablePayload
+                $candidateCount = Get-ReleaseDatasetCount -Path $path -Payload $candidatePayload
+                if ($stableCount -gt 0 -and $candidateCount -eq 0) {
                     $passed = $false; $reason = "CANDIDATE_DATASET_UNEXPECTEDLY_EMPTY"
                 }
             }

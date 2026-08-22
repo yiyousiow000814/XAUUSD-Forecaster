@@ -558,26 +558,152 @@ def test_runtime_control_bundle_records_exact_source_revision_and_hashes(tmp_pat
     assert result == f"{revision},True,{len(RUNTIME_CONTROL_FILES)}"
 
 
-def test_release_data_parity_is_exact_versioned_and_fail_closed(tmp_path) -> None:
+def _status_payload(**overrides) -> dict:
+    payload = {
+        "generated_at": "2026-08-21T10:20:00+00:00",
+        "forward_epoch": "2026-08-01T00:00:00+00:00",
+        "counts": {"decision_events": 100},
+        "latest": {"decision_time": "2026-08-21T10:20:00+00:00"},
+        "system": {"market_session": "OPEN", "quote_age_seconds": 25.0},
+    }
+    for key, value in overrides.items():
+        owner, _, field = key.partition("__")
+        if field:
+            payload[owner][field] = value
+        else:
+            payload[owner] = value
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("candidate", "expected"),
+    [
+        ({"system__quote_age_seconds": 56_000}, "CANDIDATE_QUOTE_STALE"),
+        ({"latest__decision_time": "2026-08-21T10:00:00+00:00"},
+         "CANDIDATE_DECISION_BEHIND_STABLE"),
+        ({"latest__decision_time": None}, "CANDIDATE_STATUS_SCHEMA_MISMATCH"),
+        ({"system__quote_age_seconds": None}, "CANDIDATE_STATUS_SCHEMA_MISMATCH"),
+        ({"generated_at": "not-a-time"}, "CANDIDATE_STATUS_SCHEMA_MISMATCH"),
+        ({"counts__decision_events": 99}, "CANDIDATE_COUNT_REGRESSION"),
+        ({"system__market_session": "DATA_UNAVAILABLE"}, "CANDIDATE_QUOTE_STALE"),
+    ],
+)
+def test_candidate_status_parity_fails_closed(
+    tmp_path, candidate: dict, expected: str,
+) -> None:
+    stable_json = json.dumps(_status_payload(), separators=(",", ":"))
+    candidate_json = json.dumps(
+        _status_payload(**candidate), separators=(",", ":"),
+    )
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$stable='{stable_json}' | ConvertFrom-Json;"
+        f"$candidate='{candidate_json}' | ConvertFrom-Json;"
+        "$result=Test-CandidateStatusPayload -StablePayload $stable "
+        "-CandidatePayload $candidate;"
+        'Write-Output "$($result.passed),$($result.reason)"',
+    )
+    assert result == f"False,{expected}"
+
+
+def test_candidate_status_parity_skips_open_quote_rule_when_closed(tmp_path) -> None:
+    stable_json = json.dumps(
+        _status_payload(
+            system__market_session="CLOSED", system__quote_age_seconds=None,
+        ), separators=(",", ":"),
+    )
+    candidate_json = json.dumps(
+        _status_payload(
+            system__market_session="CLOSED", system__quote_age_seconds=None,
+        ), separators=(",", ":"),
+    )
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$stable='{stable_json}' | ConvertFrom-Json;"
+        f"$candidate='{candidate_json}' | ConvertFrom-Json;"
+        "$result=Test-CandidateStatusPayload -StablePayload $stable "
+        "-CandidatePayload $candidate;"
+        'Write-Output "$($result.passed),$($result.reason)"',
+    )
+    assert result == "True,PASSED"
+
+
+@pytest.mark.parametrize(("owner", "field"), [("latest", "decision_time"), ("system", "quote_age_seconds")])
+def test_candidate_status_parity_rejects_missing_required_fields(
+    tmp_path, owner: str, field: str,
+) -> None:
+    stable = _status_payload()
+    candidate = _status_payload()
+    candidate[owner].pop(field)
+    stable_json = json.dumps(stable, separators=(",", ":"))
+    candidate_json = json.dumps(candidate, separators=(",", ":"))
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$stable='{stable_json}' | ConvertFrom-Json;"
+        f"$candidate='{candidate_json}' | ConvertFrom-Json;"
+        "$result=Test-CandidateStatusPayload -StablePayload $stable "
+        "-CandidatePayload $candidate;"
+        'Write-Output "$($result.passed),$($result.reason)"',
+    )
+    assert result == "False,CANDIDATE_STATUS_SCHEMA_MISMATCH"
+
+
+def test_candidate_status_parity_accepts_valid_current_candidate(tmp_path) -> None:
+    payload_json = json.dumps(_status_payload(), separators=(",", ":"))
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$stable='{payload_json}' | ConvertFrom-Json;"
+        f"$candidate='{payload_json}' | ConvertFrom-Json;"
+        "$result=Test-CandidateStatusPayload -StablePayload $stable "
+        "-CandidatePayload $candidate;"
+        'Write-Output "$($result.passed),$($result.reason)"',
+    )
+    assert result == "True,PASSED"
+
+
+def test_candidate_data_parity_checks_complete_bounded_route_set_and_identity(
+    tmp_path,
+) -> None:
+    status_json = json.dumps(_status_payload(), separators=(",", ":"))
+    result = _run_control_center_contract(
+        tmp_path,
+        "$stable=[pscustomobject]@{worker_version_id='stable'};"
+        "$candidate=[pscustomobject]@{worker_version_id='candidate'};"
+        "$script:paths=@();"
+        "function Invoke-ExactVersionJson { param($VersionId,$Path);"
+        "$script:paths += $Path;"
+        f"$payload=if($Path -eq '/api/status'){{'{status_json}' | ConvertFrom-Json}}"
+        "elseif($Path -eq '/api/audit'){[pscustomobject]@{generated_at="
+        "'2026-08-21T10:20:00+00:00'}}else{[pscustomobject]@{items=@(1)}};"
+        "$observed=if($VersionId -eq 'candidate' -and $Path -eq '/api/news-evidence?mode=all&page=1&limit=20')"
+        "{'wrong'}else{$VersionId};return [pscustomobject]@{payload=$payload;"
+        "observed_version_id=$observed;observed_git_sha=''} };"
+        "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
+        '$route=$result.routes | Where-Object {$_.route -like "/api/news-evidence*"};'
+        'Write-Output "$($script:paths.Count),$($route.reason),$($result.passed)"',
+    )
+    assert result == "20,EXACT_VERSION_IDENTITY_MISMATCH,False"
+
+
+def test_candidate_data_parity_rejects_unexpected_empty_dataset(tmp_path) -> None:
+    status_json = json.dumps(_status_payload(), separators=(",", ":"))
     result = _run_control_center_contract(
         tmp_path,
         "$stable=[pscustomobject]@{worker_version_id='stable'};"
         "$candidate=[pscustomobject]@{worker_version_id='candidate'};"
         "function Invoke-ExactVersionJson { param($VersionId,$Path);"
-        "$payload=if($Path -eq '/api/status'){[pscustomobject]@{generated_at='t';"
-        "forward_epoch='e';counts=[pscustomobject]@{decisions=1};latest=$null;training=$null}}"
-        "else{[pscustomobject]@{generated_at='t'}};return [pscustomobject]@{payload=$payload;"
-        "observed_version_id=$VersionId} };"
-        "$first=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
-        "function Invoke-ExactVersionJson { param($VersionId,$Path);"
-        "$payload=if($Path -eq '/api/status'){[pscustomobject]@{generated_at='t';"
-        "forward_epoch='e';counts=[pscustomobject]@{decisions=$(if($VersionId -eq 'candidate'){0}else{1})};latest=$null;training=$null}}"
-        "else{[pscustomobject]@{generated_at='t'}};return [pscustomobject]@{payload=$payload;"
-        "observed_version_id=$VersionId} };"
-        "$second=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
-        'Write-Output "$($first.passed),$($second.passed),$($second.routes[0].reason)"',
+        f"$payload=if($Path -eq '/api/status'){{'{status_json}' | ConvertFrom-Json}}"
+        "elseif($Path -eq '/api/audit'){[pscustomobject]@{generated_at="
+        "'2026-08-21T10:20:00+00:00'}}elseif($Path -like '/api/news-index*')"
+        "{$items=if($VersionId -eq 'stable'){@(1)}else{@()};"
+        "[pscustomobject]@{items=$items}}"
+        "else{[pscustomobject]@{items=@()}};return [pscustomobject]@{payload=$payload;"
+        "observed_version_id=$VersionId;observed_git_sha=''} };"
+        "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
+        '$route=$result.routes | Where-Object {$_.route -like "/api/news-index*"};'
+        'Write-Output "$($route.reason),$($result.passed),$($route.error)"',
     )
-    assert result == "True,False,CANDIDATE_DECISION_BEHIND_STABLE"
+    assert result == "CANDIDATE_DATASET_UNEXPECTEDLY_EMPTY,False,"
 
 
 def test_candidate_auth_evidence_uses_formal_access_host_only() -> None:
