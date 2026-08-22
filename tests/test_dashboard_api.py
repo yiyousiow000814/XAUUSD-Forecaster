@@ -119,13 +119,17 @@ def _write_annotator_heartbeat(
     }), encoding="utf-8")
 
 
-def _append_decision_at(database: Path, created_at: datetime) -> None:
+def _append_decision_at(
+    database: Path, created_at: datetime, *, identifier: str = "",
+) -> None:
+    snapshot_id = f"snapshot{identifier}"
+    decision_id = f"decision{identifier}"
     connection = sqlite3.connect(database)
     try:
         connection.execute(
             "INSERT INTO market_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                "snapshot", created_at.isoformat(), created_at.isoformat(),
+                snapshot_id, created_at.isoformat(), created_at.isoformat(),
                 "FORWARD", "fixture", created_at.isoformat(),
                 created_at.isoformat(), 2400.0, 2400.2, 0.2, "{}", "fixture",
                 None, "WARMUP", "OK", 0, "[]", "snapshot-hash",
@@ -134,7 +138,7 @@ def _append_decision_at(database: Path, created_at: datetime) -> None:
         connection.execute(
             "INSERT INTO decision_events VALUES (?,?,?,?,?,?,?,?)",
             (
-                "decision", created_at.isoformat(), "snapshot",
+                decision_id, created_at.isoformat(), snapshot_id,
                 created_at.isoformat(), "visible-news-hash", "OK", "WAIT", "[]",
             ),
         )
@@ -2266,6 +2270,54 @@ def test_critical_builder_uses_bounded_u5_window_and_materialized_counts(
         or " j.state='" in statement
         for statement in job_reads
     ), job_reads
+
+
+def test_critical_status_owns_bounded_recent_decisions_and_live_oos_count(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _dashboard_module()
+    now = datetime(2026, 8, 23, 2, 0, tzinfo=UTC)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now)
+    ledger.close()
+    for index in range(20):
+        _append_decision_at(
+            database, now - timedelta(minutes=5 * index), identifier=f"-{index}",
+        )
+
+    real_connect = module.sqlite3.connect
+    statements: list[str] = []
+
+    def tracked_connect(target, *args, **kwargs):
+        connection = real_connect(target, *args, **kwargs)
+        if str(database) in str(target):
+            connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(module.sqlite3, "connect", tracked_connect)
+    payload = module._dashboard_payload(
+        database, clock=lambda: now, include_optional=False,
+    )
+    critical = module.critical_status_payload(payload)
+
+    assert len(critical["recent_decisions"]) == 18
+    assert [row["decision_id"] for row in critical["recent_decisions"][:2]] == [
+        "decision-0", "decision-1",
+    ]
+    assert all("features" not in row for row in critical["recent_decisions"])
+    assert all("predictions" not in row for row in critical["recent_decisions"])
+    assert critical["counts"]["live_oos_model_groups"] == 0
+    normalized = [" ".join(statement.lower().split()) for statement in statements]
+    decision_reads = [
+        statement for statement in normalized
+        if "from decision_events d join market_snapshots" in statement
+    ]
+    bounded_decision_reads = [
+        statement for statement in decision_reads if "limit 18" in statement
+    ]
+    assert bounded_decision_reads
+    assert not any("features_json" in statement for statement in bounded_decision_reads)
+    assert not any("row_number() over" in statement for statement in normalized)
 
 
 def test_live_quote_candle_cache_reads_only_appended_bytes(tmp_path) -> None:
