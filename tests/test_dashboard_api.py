@@ -1029,7 +1029,7 @@ def test_broker_reopen_immediately_restores_freshness_enforcement(tmp_path) -> N
 def test_outcome_settler_health_uses_successful_loop_heartbeat_not_output_age(
     tmp_path,
 ) -> None:
-    now = datetime.now(UTC).replace(microsecond=0)
+    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
     database = tmp_path / "forward-evidence.sqlite3"
     ForwardLedger(database, now=now).close()
     (tmp_path / "collector-status.json").write_text(json.dumps({
@@ -1040,7 +1040,7 @@ def test_outcome_settler_health_uses_successful_loop_heartbeat_not_output_age(
         "work_items": 0,
     }), encoding="utf-8")
 
-    payload = _dashboard_module()._dashboard_payload(database)
+    payload = _dashboard_module()._dashboard_payload(database, clock=lambda: now)
 
     outcome = payload["system"]["components"]["outcome_settler"]
     assert outcome["status"] == "OK"
