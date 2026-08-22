@@ -3027,6 +3027,12 @@ test("release validation authorizes before exposing a non-mutating context", asy
   assert.deepEqual(await unauthorized.json(), { error: "unauthorized" });
 });
 
+test("keeps learning cadence controls at the shared interaction target height", () => {
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.summary-cadence button \{ min-height:44px;/);
+  assert.match(css, /\.summary-cadence button \{ width:100%; min-width:0; min-height:48px;/);
+});
+
 test("release route plan supplies the required learning-history resource", () => {
   const manifest = JSON.parse(readFileSync(
     new URL("../worker-validation-manifest.json", import.meta.url), "utf8",
