@@ -1029,7 +1029,7 @@ def test_broker_reopen_immediately_restores_freshness_enforcement(tmp_path) -> N
 def test_outcome_settler_health_uses_successful_loop_heartbeat_not_output_age(
     tmp_path,
 ) -> None:
-    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
+    now = datetime(2026, 8, 19, 10, 0, tzinfo=UTC)
     database = tmp_path / "forward-evidence.sqlite3"
     ForwardLedger(database, now=now).close()
     (tmp_path / "collector-status.json").write_text(json.dumps({
