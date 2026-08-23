@@ -53,3 +53,60 @@ Architecture documents affected: SYSTEM_ARCHITECTURE, RUNTIME_AND_RELEASE, CODEB
 
 Replacement heads and semantic conflict ownership are recorded as each Draft
 PR is repaired. A replacement head remains `PENDING` until its PR is merged.
+## Original campaign execution tracker
+
+## Status and baseline
+
+This document is a `PENDING` execution tracker. It records the open stacked
+campaign and MUST NOT be read as `CURRENT` architecture until its PRs merge in
+order.
+
+- Audited base: `d4103fbe61e0c025b9d246d35804fecb2a3c3fdb`
+- Base branch: `refactor/dashboard-health-projection` (Draft PR #285)
+- Execution date: 2026-08-23
+- Python collection baseline: 1,500 cases
+- Python production/script modules: 104
+- Import edges: 316
+- Non-trivial import SCCs: one 14-module component
+- Package imports from `scripts`: zero
+- Script-to-script shared-library imports: three call sites across two build
+  scripts and the Dashboard API; C2 removes the Dashboard API dependency.
+
+`CURRENT` remains the architecture recorded for the audited main revision.
+Every campaign row below is `PENDING` until merged. The package and test trees
+described by the campaign are `TARGET` until the corresponding row is merged.
+
+## Planned linear stack
+
+| Order | Phase / branch | Immediate base | Owner boundary | Expected files | Validation family | Rollback | Status | PR / final SHA |
+|---:|---|---|---|---|---|---|---|---|
+| 1 | C2 `refactor/dashboard-resource-contracts` | `refactor/dashboard-health-projection` | Deterministic Dashboard resource serialization and byte bounds | Dashboard resource owner, API/Sync imports, focused tests, architecture policy/docs | Dashboard API/Sync/resource contracts; full Python | Revert one extraction commit; no state migration | LOCALLY VALIDATED | Pending PR creation |
+| 2 | C3a `refactor/dashboard-api-news-resources` | C2 | News archive, evidence, and content read resources | Dashboard news resource owners, API wrapper, focused tests/maps | Dashboard/news resource and route tests; full Python | Revert mechanical owner move | PLANNED | TBD |
+| 3 | C3b `refactor/dashboard-api-market-resources` | C3a | Market history and chart read resources | Dashboard market owner, API wrapper, focused tests/maps | Market/API production-shape tests; full Python | Revert mechanical owner move | PLANNED | TBD |
+| 4 | C3c `refactor/dashboard-api-optional-resources` | C3b | Remaining optional/audit/deployment reads and operator bridge | Explicit resource owners, API wrapper, focused tests/maps | API, retry, audit and release-read tests; full Python | Revert mechanical owner move | PLANNED | TBD |
+| 5 | C4 `refactor/dashboard-sync-runtime` | C3c | Sync progress, cadence, transport, and lane runtime | `dashboard/sync/` owners, thin script, focused tests/maps | Sync isolation/protocol tests; full Python | Revert package extraction | PLANNED | TBD |
+| 6 | C5 `refactor/news-annotator-runtime` | C4 | Durable annotator batch execution and Brief-cycle orchestration | News scheduler/Brief runtime owners, thin script, focused tests/maps | Scheduler, annotation, retrieval, Brief; full Python | Revert package extraction | PLANNED | TBD |
+| 7 | C6 `refactor/control-center-boundaries` | C5 | Control Center release/supervision modules behind stable entry path | PowerShell owner files, bundle manifest, launcher tests/maps | Windows runtime and release fixtures | Revert dot-source extraction and manifest change | PLANNED | TBD |
+| 8 | D1 `refactor/decision-evidence-packages` | C6 | Canonical Decision and Evidence packages | Canonical modules, narrow shims, migration map/tests | Decision/evidence/forward-only/production-shape; full Python | Restore canonical files to legacy paths | PLANNED | TBD |
+| 9 | D2 `refactor/training-package` | D1 | Canonical Training package | Training modules, narrow shims, migration map/tests | Training/evidence integrity; full Python | Restore canonical files to legacy paths | PLANNED | TBD |
+| 10 | D3 `refactor/news-ai-packages` | D2 | Canonical News and AI packages and SCC reduction | News/AI modules, narrow shims, migration map/tests | Scheduler/annotation/retrieval/Brief/AI; full Python | Restore canonical files to legacy paths | PLANNED | TBD |
+| 11 | D4 `refactor/assistant-runtime-dashboard-packages` | D3 | Assistant, Runtime, and Dashboard package closure | Canonical modules, public facades/shims, migration map/tests | Assistant/runtime/Dashboard; full Python | Restore canonical files to legacy paths | PLANNED | TBD |
+| 12 | E1 `refactor/python-test-organization` | D4 | Python contract and integration test ownership | Test moves/support modules and audit mapping | Collection reconciliation; full Python | Reverse test-only moves | PLANNED | TBD |
+| 13 | E2 `refactor/web-windows-test-organization` | E1 | Web and Windows test ownership | Safe test moves/names and runner references only where discovered | Full Web and Windows runtime suites | Reverse test-only moves | PLANNED | TBD |
+| 14 | Closure `chore/modularization-campaign-closure` | E2 | Campaign evidence and merge/rollback order | Closure audit and final architecture map status | Full stack exact-head checks | Revert docs-only commit | PLANNED | TBD |
+
+The exact boundary may be narrowed after audit, but unrelated owners will not be
+combined to save PR count. The hard limit is 14 Draft PRs.
+
+## Baseline dependency evidence
+
+The initial SCC contains `ai_task_registry`, `annotation`,
+`assistant_capacity`, `assistant_routing`, `critical_annotation_state`,
+`daily_brief`, `forward_ledger`, `gemini_embeddings`, `market`,
+`market_session`, `news_retrieval`, `news_scheduler`, `news_time`, and
+`semantic_transition`. Phase D must measure this exact component again rather
+than assuming file moves remove it.
+
+The two permitted transitional build imports of `run_dashboard_sync.py` are
+owned by C4 and have no runtime authority. They are explicitly rejected at
+campaign completion.

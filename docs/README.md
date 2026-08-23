@@ -44,6 +44,7 @@ current rules merely because they discovered one.
 - [Daily Brief](contracts/DAILY_BRIEF.md)
 - [Operational health](contracts/OPERATIONAL_HEALTH.md)
 - [Live broadcast](contracts/LIVE_BROADCAST.md)
+- [Canonical package dependencies](contracts/PACKAGE_DEPENDENCIES.md)
 
 ### Specifications
 
@@ -91,11 +92,13 @@ current rules merely because they discovered one.
 ### Current plans
 
 - [Repository modularization](plans/REPOSITORY_MODULARIZATION.md)
+- [Modularization execution tracker](plans/MODULARIZATION_EXECUTION.md)
 - [Assistant implementation roadmap](plans/ASSISTANT_ROADMAP.md)
 
 ### Operations and reference
 
 - [Codebase map](reference/CODEBASE_MAP.md)
+- [Module migration map](reference/MODULE_MIGRATION_MAP.md)
 - [Cloudflare deployment runbook](runbooks/CLOUDFLARE_DEPLOYMENT.md)
 - [Control Plane installation runbook](runbooks/CONTROL_PLANE_INSTALLATION.md)
 - [Live broadcast bootstrap runbook](runbooks/LIVE_BROADCAST_BOOTSTRAP.md)

@@ -13,6 +13,7 @@ ARCHITECTURE_DOCS = (
     Path("README.md"),
     Path("docs/README.md"),
     Path("docs/contracts/ARCHITECTURE_RULES.md"),
+    Path("docs/contracts/PACKAGE_DEPENDENCIES.md"),
     Path("docs/design/SYSTEM_ARCHITECTURE.md"),
     Path("docs/design/DECISION_AND_EVIDENCE.md"),
     Path("docs/design/NEWS_AND_AI.md"),
@@ -21,6 +22,8 @@ ARCHITECTURE_DOCS = (
     Path("docs/design/WEB_AND_CLOUDFLARE.md"),
     Path("docs/design/RUNTIME_AND_RELEASE.md"),
     Path("docs/reference/CODEBASE_MAP.md"),
+    Path("docs/reference/MODULE_MIGRATION_MAP.md"),
+    Path("docs/plans/MODULARIZATION_EXECUTION.md"),
     Path("docs/plans/REPOSITORY_MODULARIZATION.md"),
 )
 CODEBASE_MAP = Path("docs/reference/CODEBASE_MAP.md")

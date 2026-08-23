@@ -27,7 +27,8 @@ contract.
 | Decision-output status | `xauusd_forecaster/dashboard/health_projection.py` | Dashboard runtime-component health projection owner | `scripts/run_dashboard_api.py`; decision evidence and broker session remain authoritative inputs | `tests/test_dashboard_health_projection.py`, `tests/test_dashboard_api.py` | [Operational Health](../contracts/OPERATIONAL_HEALTH.md) |
 | Collector heartbeat presentation | `xauusd_forecaster/dashboard/health_projection.py` | Dashboard runtime-component health projection owner | `xauusd_forecaster/runtime_health.py` writes heartbeat state; `scripts/run_dashboard_api.py` orchestrates the payload | `tests/test_dashboard_health_projection.py`, `tests/test_runtime_health.py`, `tests/test_dashboard_api.py` | [Operational Health](../contracts/OPERATIONAL_HEALTH.md) |
 | Audit, learning, or market detail | `xauusd_forecaster/dashboard_read_models.py` | DashboardReadModelOwner | `xauusd_forecaster/dashboard_summaries.py`, `xauusd_forecaster/learning_curves.py` | `tests/test_dashboard_api.py` | [Paged Dashboard History](../design/PAGED_DASHBOARD_HISTORY.md) |
-| Dashboard sync | `scripts/run_dashboard_sync.py` | Dashboard Sync process | `scripts/run_dashboard_api.py`, `xauusd_forecaster/dashboard_payloads.py` | `tests/test_dashboard_sync.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
+| Dashboard resource serialization | `xauusd_forecaster/dashboard/resource_contracts.py` | Dashboard resource-contract owner | `xauusd_forecaster/dashboard_payloads.py`; API and Sync are consumers | `tests/test_dashboard_resource_contracts.py`, `tests/test_dashboard_sync.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
+| Dashboard sync | `scripts/run_dashboard_sync.py` | Dashboard Sync process | `xauusd_forecaster/dashboard/resource_contracts.py`, `xauusd_forecaster/dashboard_payloads.py` | `tests/test_dashboard_sync.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
 | Cloudflare API routing | `web/worker/api-router.ts` | Minimal API Worker router | `web/worker/index.ts`, `web/db/schema.ts` | `web/tests/d1-capabilities.test.mjs`, `web/tests/worker-cpu-headroom.test.mjs` | [Web and Cloudflare](../design/WEB_AND_CLOUDFLARE.md) |
 | Static Web UI | `web/app/_components/DashboardApp.tsx` | Web feature/view owners | `web/app/_components/DashboardShell.tsx`, `web/app/globals.css` | `web/tests/rendered-html.test.mjs`, `web/tests/responsive-scroll.test.mjs` | [Dashboard Presentation](../specs/DASHBOARD_PRESENTATION.md) |
 | Preview | `scripts/build_preview_bundle.py` | Preview build owner | `web/app/_lib/preview-manifest.ts`, `web/app/_lib/preview-resources.ts` | `tests/test_dashboard_sync.py`, `web/tests/rendered-html.test.mjs` | [Preview Behavior](../specs/PREVIEW_BEHAVIOR.md), [Preview Isolation](../contracts/PREVIEW_ISOLATION.md) |
@@ -135,6 +136,8 @@ contract.
 
 ### Dashboard and sync
 
+- `xauusd_forecaster/dashboard/resource_contracts.py` — owns deterministic
+  learning/news/market/audit projections and exact serialized-byte bounds.
 - `xauusd_forecaster/dashboard/health_projection.py` — owns read-only
   component projections for semantic health, Collector heartbeat, and Decision
   cadence; it owns no source authority, cache, or operational alert taxonomy.
@@ -152,7 +155,7 @@ contract.
 - `scripts/run_dashboard_api.py` — currently combines local HTTP orchestration
   with many resource adapters.
 - `scripts/run_dashboard_sync.py` — currently combines remote transport,
-  pagination, scheduling and sync orchestration.
+  pagination, scheduling and sync orchestration; serializers are package-owned.
 
 ### Web and Cloudflare
 
