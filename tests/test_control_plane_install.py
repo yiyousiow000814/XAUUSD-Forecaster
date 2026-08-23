@@ -3,10 +3,17 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import textwrap
 
 import pytest
+
+
+pytestmark = pytest.mark.skipif(
+    shutil.which("powershell.exe") is None,
+    reason="Windows PowerShell is required for Control Plane contracts",
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]

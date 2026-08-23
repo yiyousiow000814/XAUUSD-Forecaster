@@ -48,3 +48,4 @@ jobs:
           tests/test_runtime_health.py
           tests/test_news_scheduler.py
           tests/test_runtime_launchers.py
+          tests/test_control_plane_install.py
