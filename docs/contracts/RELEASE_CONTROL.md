@@ -86,6 +86,13 @@ suite`, `Web build and tests`, `Windows runtime contracts`, `Repository policy`,
 and CodeQL `Analyze` jobs for actions, C#, JavaScript/TypeScript, and Python.
 Every named run must exist, be complete, and conclude successfully. Missing
 required runs remain PENDING; unrelated optional runs cannot substitute.
+Transient external repository or GitHub transport failures leave the same exact
+Candidate in retryable `CHECKS_PENDING`, fail closed for promotion, and retain
+already-passed isolated Windows preflight evidence for that validation key.
+Recovery appends history before validation continues on the same Worker Version
+ID and Git SHA. Authentication, authorization, malformed identity, invalid ref,
+missing commit, and main-reachability failures remain deterministic and never
+become retryable merely because a transport retry path exists.
 
 Worker validation is planned from `web/worker-validation-manifest.json`, the
 authoritative inventory of route method, hosting boundary, criticality,

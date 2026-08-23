@@ -2223,6 +2223,149 @@ def test_required_github_gate_uses_latest_exact_sha_attempt(tmp_path) -> None:
     assert result == "PASSED,PENDING,CHECKS_BLOCKED"
 
 
+@pytest.mark.parametrize(
+    ("operation", "diagnostic", "expected"),
+    (
+        ("FETCH_ORIGIN", "fatal: operation timed out", True),
+        ("FETCH_ORIGIN", "Failed to connect to github.com port 443", True),
+        ("FETCH_ORIGIN", "Temporary failure in name resolution", True),
+        ("FETCH_ORIGIN", "Connection reset by peer", True),
+        ("FETCH_ORIGIN", "TLS handshake connection terminated", True),
+        ("GITHUB_CHECKS_API", "HTTP 503 Service Unavailable", True),
+        ("GITHUB_CHECKS_API", "HTTP 429 rate limit exceeded", True),
+        ("GITHUB_CHECKS_API", "HTTP 403 API rate limit exceeded", True),
+        ("GITHUB_CHECKS_API", "HTTP 403 forbidden", False),
+        ("GITHUB_CHECKS_API", "HTTP 403 authentication failed rate limit", False),
+        ("FETCH_ORIGIN", "Authentication failed for repository", False),
+        ("FETCH_ORIGIN", "Permission denied", False),
+        ("FETCH_ORIGIN", "fatal: couldn't find remote ref invalid", False),
+        ("FETCH_ORIGIN", "Repository not found", False),
+        ("LOCAL_DIFF", "Failed to connect to github.com port 443", False),
+    ),
+)
+def test_repository_transport_failure_classifier_is_bounded(
+    tmp_path, operation: str, diagnostic: str, expected: bool,
+) -> None:
+    escaped = diagnostic.replace("'", "''")
+    result = _run_control_center_contract(
+        tmp_path,
+        f"Test-TransientExternalRepositoryFailure -Operation '{operation}' "
+        f"-ExitCode 1 -Diagnostic '{escaped}'",
+    )
+    assert result == str(expected)
+
+
+def test_github_cli_auth_and_invalid_payload_are_not_retryable(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "function gh{$global:LASTEXITCODE=1;'HTTP 401 authentication failed'};"
+        "$auth=Get-RequiredGitHubChecksResult -Revision ('a'*40);"
+        "function gh{$global:LASTEXITCODE=0;'not-json'};"
+        "$invalid=Get-RequiredGitHubChecksResult -Revision ('a'*40);"
+        'Write-Output "$($auth.state),$($auth.reason),$($invalid.state),$($invalid.reason)"',
+    )
+    assert result == (
+        "FAILED,GITHUB_CHECKS_ACCESS_FAILED,"
+        "FAILED,GITHUB_CHECKS_RESPONSE_INVALID"
+    )
+
+
+def test_repository_diagnostics_are_bounded_and_secret_safe(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$value=Protect-PreflightDiagnosticText "
+        "'fatal: https://oauth-secret@github.com/repository timeout' -Limit 200;"
+        "Write-Output $value",
+    )
+    assert result == "fatal: https://[REDACTED]@github.com/repository timeout"
+
+
+def test_fetch_timeout_keeps_exact_candidate_retryable_and_non_promotable(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$state.candidate.validation_state='NEW';"
+        "$state.candidate.compatibility_state='PENDING';Write-ReleaseControlState $state;"
+        "$candidate=$state.candidate;"
+        "function Test-ProductionCandidateProvenance{"
+        "$script:lastRepositoryValidationResult=[pscustomobject]@{"
+        "state='REPOSITORY_PENDING';reason='REPOSITORY_TRANSPORT_UNAVAILABLE';"
+        "operation='FETCH_ORIGIN';exit_code=128;diagnostic='fatal: operation timed out'};"
+        "return $false};"
+        "Invoke-AutomaticCandidateValidation -Candidate $candidate|Out-Null;"
+        "$saved=Get-ReleaseControlState;$view=Get-ControlCenterReleasePresentation $saved;"
+        "$history=Get-Content -LiteralPath $releaseHistoryPath -Raw;"
+        'Write-Output "$($saved.candidate.validation_state),'
+        '$($saved.candidate.validation.reason),$($saved.candidate.validation.windows),'
+        '$($saved.candidate.validation.repository_retryable),$($view.can_promote),'
+        '$($saved.candidate.validation_key -eq $candidate.validation_key),'
+        '$($history.Contains(\'CANDIDATE_REPOSITORY_PENDING\'))"',
+    )
+    assert result == (
+        "CHECKS_PENDING,REPOSITORY_TRANSPORT_UNAVAILABLE,NOT_RUN,"
+        "True,False,True,True"
+    )
+
+
+def test_same_key_recovers_after_github_transport_without_repeating_preflight(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$state.candidate.validation_state='NEW';"
+        "$state.candidate.compatibility_state='PENDING';"
+        "$state.candidate|Add-Member compatibility_approval ([pscustomobject]@{"
+        "validation_key=$state.candidate.validation_key;resources_verified=$true});"
+        "Write-ReleaseControlState $state;$candidate=$state.candidate;"
+        "$script:githubAvailable=$false;$script:preflights=0;"
+        "function Test-ProductionCandidateProvenance{return $true};"
+        "function Invoke-ProductionShapePreflight{$script:preflights++;return $true};"
+        "function Test-RequiredGitHubChecks{if($script:githubAvailable){'PASSED'}else{"
+        "$script:lastGitHubChecksResult=[pscustomobject]@{state='REPOSITORY_PENDING';"
+        "reason='GITHUB_TEMPORARILY_UNAVAILABLE';exit_code=1;"
+        "diagnostic='HTTP 503 Service Unavailable'};'REPOSITORY_PENDING'}};"
+        "function Get-CandidateChangedFiles{return @('docs/README.md')};"
+        "function Get-CandidateCompatibilityRequirement{return [pscustomobject]@{state='AUTOMATIC';files=@()}};"
+        "function Get-CandidateRouteValidationPlan{return [pscustomobject]@{worker_cpu_required=$false;"
+        "requires_validation=$false;static_assets=@();worker_reads=@();worker_writes=@()}};"
+        "function Set-CloudflareCandidatePointer{};"
+        "function Test-CandidateDataParity{return [pscustomobject]@{passed=$true;state='PASSED'}};"
+        "function Get-CandidateAuthInspection{return [pscustomobject]@{state='PASSED'}};"
+        "Invoke-AutomaticCandidateValidation -Candidate $candidate|Out-Null;"
+        "$pending=Get-ReleaseControlState;$script:githubAvailable=$true;"
+        "function Enter-ReleaseTransactionLock{return $true};function Exit-ReleaseTransactionLock{};"
+        "function Reconcile-ReleaseControlState{};function Find-NewCandidateRelease{return $null};"
+        "Invoke-CandidateDiscovery|Out-Null;$final=Get-ReleaseControlState;"
+        "$history=Get-Content -LiteralPath $releaseHistoryPath -Raw;"
+        'Write-Output "$($pending.candidate.validation_state),'
+        '$($pending.candidate.validation.windows),$($final.candidate.validation_state),'
+        '$script:preflights,$($final.candidate.validation_key -eq $candidate.validation_key),'
+        '$($final.candidate.compatibility_approval.validation_key -eq $candidate.validation_key),'
+        '$($history.Contains(\'CANDIDATE_REPOSITORY_PENDING\')),'
+        '$($history.Contains(\'CANDIDATE_CHECKS_RECOVERED\'))"',
+    )
+    assert result == "CHECKS_PENDING,PASSED,PASSED,1,True,True,True,True"
+
+
+def test_deterministic_provenance_failure_remains_terminal(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$state.candidate.validation_state='NEW';"
+        "Write-ReleaseControlState $state;$candidate=$state.candidate;"
+        "function Test-ProductionCandidateProvenance{"
+        "$script:lastRepositoryValidationResult=[pscustomobject]@{state='FAILED';"
+        "reason='PRODUCTION_CANDIDATE_MAIN_REACHABILITY_REQUIRED'};return $false};"
+        "Invoke-AutomaticCandidateValidation -Candidate $candidate|Out-Null;"
+        "$saved=Get-ReleaseControlState;"
+        'Write-Output "$($saved.candidate.validation_state),$($saved.candidate.validation.error)"',
+    )
+    assert result == "FAILED,PRODUCTION_CANDIDATE_MAIN_REACHABILITY_REQUIRED"
+
+
 def test_checks_blocked_candidate_recovers_on_same_sha_without_duplicate_identity(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
@@ -2271,6 +2414,25 @@ def test_checks_blocked_presentation_is_retryable_but_not_promotable(tmp_path) -
     assert result == (
         "CHECKS_BLOCKED,False,Required GitHub checks failed and may be rerun "
         "for this exact SHA."
+    )
+
+
+def test_repository_pending_presentation_is_distinct_and_non_promotable(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$state.candidate.validation_state='CHECKS_PENDING';"
+        "$state.control_bundle_hash_verified=$true;$state.control_bundle_exact_revision=$true;"
+        "$state.control_bundle_revision=('c'*40);"
+        "$state.candidate.validation=[pscustomobject]@{key=$state.candidate.validation_key;"
+        "repository='PENDING';repository_retryable=$true;windows='PASSED';"
+        "reason='GITHUB_TEMPORARILY_UNAVAILABLE'};Write-ReleaseControlState $state;"
+        "$view=Get-ControlCenterReleasePresentation -Release $state;"
+        'Write-Output "$($view.candidate_state),$($view.can_promote),$($view.candidate_detail)"',
+    )
+    assert result == (
+        "CHECKS_PENDING,False,GitHub temporarily unavailable. "
+        "Retrying automatically."
     )
 
 

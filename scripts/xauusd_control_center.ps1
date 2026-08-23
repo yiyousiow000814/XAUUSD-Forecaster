@@ -660,6 +660,57 @@ function Initialize-ReleaseControl {
     return $state
 }
 
+function Test-TransientExternalRepositoryFailure {
+    param(
+        [Parameter(Mandatory = $true)][string]$Operation,
+        [Parameter(Mandatory = $true)][int]$ExitCode,
+        [string]$Diagnostic = ""
+    )
+    if ($ExitCode -eq 0 -or $Operation -notin @(
+        "FETCH_ORIGIN", "GITHUB_CHECKS_API"
+    )) { return $false }
+    $text = [string]$Diagnostic
+    if ($text -match '(?i)(authentication failed|could not read username|' +
+        'permission denied|repository not found|invalid (ref|reference)|' +
+        'bad object|ambiguous argument|unknown revision|not a valid object|' +
+        'couldn''t find remote ref|remote ref .* not found|access denied|' +
+        'http[^0-9]*40[14])') {
+        return $false
+    }
+    if ($text -match '(?i)rate limit') { return $true }
+    if ($text -match '(?i)http[^0-9]*403') { return $false }
+    return [bool]($text -match '(?i)(timed? out|timeout|could not connect|' +
+        'failed to connect|connection (refused|reset|closed)|' +
+        'temporary failure in name resolution|could not resolve host|' +
+        'name or service not known|socket (error|hang up)|unexpected eof|' +
+        '(tls|ssl).*(handshake|connect|connection|socket|terminated)|' +
+        'http[^0-9]*(429|5\d\d)|status( code)?[^0-9]*(429|5\d\d)|' +
+        'rate limit)')
+}
+
+function Invoke-RepositoryRead {
+    param(
+        [Parameter(Mandatory = $true)][string]$Operation,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+    $raw = @(& git @Arguments 2>&1)
+    $exitCode = [int]$LASTEXITCODE
+    $lines = @($raw | ForEach-Object { [string]$_ })
+    $diagnostic = if ($exitCode -ne 0) {
+        Protect-PreflightDiagnosticText ($lines -join "`n")
+    } else { $null }
+    [pscustomobject]@{
+        passed = [bool]($exitCode -eq 0)
+        exit_code = $exitCode
+        output = if ($exitCode -eq 0) { $lines } else { @() }
+        diagnostic = $diagnostic
+        failure_class = if (Test-TransientExternalRepositoryFailure `
+            -Operation $Operation -ExitCode $exitCode -Diagnostic $diagnostic) {
+            "TRANSIENT_EXTERNAL"
+        } else { "DETERMINISTIC_FAILURE" }
+    }
+}
+
 function Get-CandidateChangedFiles {
     param([string]$StableRevision, [string]$CandidateRevision)
     $changed = @(& git -C $repositoryRoot diff --name-only $StableRevision $CandidateRevision 2>$null)
@@ -725,51 +776,120 @@ function Test-CandidatePlatformResources {
     } catch { return $false }
 }
 
-function Test-RequiredGitHubChecks {
+function Get-RequiredGitHubChecksResult {
     param([Parameter(Mandatory = $true)][string]$Revision)
     try {
-        $json = @(& gh api --method GET `
+        $raw = @(& gh api --method GET `
             "repos/yiyousiow000814/XAUUSD-Forecaster/commits/$Revision/check-runs?filter=latest&per_page=100" `
-            2>$null) -join "`n"
-        if ($LASTEXITCODE -ne 0) { return "PENDING" }
-        $runs = @(($json | ConvertFrom-Json).check_runs)
+            2>&1)
+        $exitCode = [int]$LASTEXITCODE
+        $json = @($raw | ForEach-Object { [string]$_ }) -join "`n"
+        if ($exitCode -ne 0) {
+            $diagnostic = Protect-PreflightDiagnosticText $json
+            if (Test-TransientExternalRepositoryFailure -Operation "GITHUB_CHECKS_API" `
+                -ExitCode $exitCode -Diagnostic $diagnostic) {
+                return [pscustomobject]@{
+                    state = "REPOSITORY_PENDING"
+                    reason = "GITHUB_TEMPORARILY_UNAVAILABLE"
+                    exit_code = $exitCode
+                    diagnostic = $diagnostic
+                }
+            }
+            return [pscustomobject]@{
+                state = "FAILED"
+                reason = "GITHUB_CHECKS_ACCESS_FAILED"
+                exit_code = $exitCode
+                diagnostic = $diagnostic
+            }
+        }
+        $runs = @(($json | ConvertFrom-Json -ErrorAction Stop).check_runs)
         foreach ($name in $requiredGitHubChecks) {
             $matching = @($runs | Where-Object {
                 [string]$_.name -eq $name -and
                 [string]$_.head_sha -eq $Revision
             })
             if ($matching.Count -eq 0) {
-                return "PENDING"
+                return [pscustomobject]@{
+                    state = "PENDING"; reason = "REQUIRED_GITHUB_CHECKS_PENDING"
+                }
             }
             $latest = $matching | Sort-Object `
                 @{ Expression = { [string]$_.started_at }; Descending = $true }, `
                 @{ Expression = { [long]$_.id }; Descending = $true } | `
                 Select-Object -First 1
             if ([string]$latest.status -ne "completed") {
-                return "PENDING"
+                return [pscustomobject]@{
+                    state = "PENDING"; reason = "REQUIRED_GITHUB_CHECKS_PENDING"
+                }
             }
             if ([string]$latest.conclusion -ne "success") {
-                return "CHECKS_BLOCKED"
+                return [pscustomobject]@{
+                    state = "CHECKS_BLOCKED"; reason = "REQUIRED_GITHUB_CHECKS_BLOCKED"
+                }
             }
         }
-        return "PASSED"
-    } catch { return "PENDING" }
+        return [pscustomobject]@{ state = "PASSED"; reason = $null }
+    } catch {
+        return [pscustomobject]@{
+            state = "FAILED"
+            reason = "GITHUB_CHECKS_RESPONSE_INVALID"
+            exit_code = 0
+            diagnostic = Protect-PreflightDiagnosticText $_.Exception.Message
+        }
+    }
 }
 
-function Test-ProductionCandidateProvenance {
+function Test-RequiredGitHubChecks {
+    param([Parameter(Mandatory = $true)][string]$Revision)
+    $script:lastGitHubChecksResult = Get-RequiredGitHubChecksResult -Revision $Revision
+    return [string]$script:lastGitHubChecksResult.state
+}
+
+function Get-ProductionCandidateProvenanceResult {
     param([Parameter(Mandatory = $true)][object]$Candidate)
     if ([string]$Candidate.artifact_kind -ne $productionCandidateArtifactKind -or
         [string]$Candidate.branch -ne "main" -or
         [string]$Candidate.git_sha -ne [string]$Candidate.windows_revision) {
-        return $false
+        return [pscustomobject]@{
+            state = "FAILED"; reason = "PRODUCTION_CANDIDATE_MAIN_PROVENANCE_REQUIRED"
+        }
     }
-    & git -C $repositoryRoot fetch origin --quiet 2>$null
-    if ($LASTEXITCODE -ne 0) { return $false }
+    $fetch = Invoke-RepositoryRead -Operation "FETCH_ORIGIN" `
+        -Arguments @("-C", $repositoryRoot, "fetch", "origin", "--quiet")
+    if (-not $fetch.passed) {
+        return [pscustomobject]@{
+            state = if ($fetch.failure_class -eq "TRANSIENT_EXTERNAL") {
+                "REPOSITORY_PENDING"
+            } else { "FAILED" }
+            reason = if ($fetch.failure_class -eq "TRANSIENT_EXTERNAL") {
+                "REPOSITORY_TRANSPORT_UNAVAILABLE"
+            } else { "PRODUCTION_CANDIDATE_MAIN_PROVENANCE_REQUIRED" }
+            operation = "FETCH_ORIGIN"
+            exit_code = [int]$fetch.exit_code
+            diagnostic = $fetch.diagnostic
+        }
+    }
     & git -C $repositoryRoot cat-file -e "$([string]$Candidate.git_sha)^{commit}" 2>$null
-    if ($LASTEXITCODE -ne 0) { return $false }
+    if ($LASTEXITCODE -ne 0) {
+        return [pscustomobject]@{
+            state = "FAILED"; reason = "PRODUCTION_CANDIDATE_COMMIT_REQUIRED"
+        }
+    }
     & git -C $repositoryRoot merge-base --is-ancestor `
         ([string]$Candidate.git_sha) origin/main 2>$null
-    return [bool]($LASTEXITCODE -eq 0)
+    if ($LASTEXITCODE -ne 0) {
+        return [pscustomobject]@{
+            state = "FAILED"; reason = "PRODUCTION_CANDIDATE_MAIN_REACHABILITY_REQUIRED"
+        }
+    }
+    return [pscustomobject]@{ state = "PASSED"; reason = $null }
+}
+
+function Test-ProductionCandidateProvenance {
+    param([Parameter(Mandatory = $true)][object]$Candidate)
+    $script:lastRepositoryValidationResult =
+        Get-ProductionCandidateProvenanceResult -Candidate $Candidate
+    return [bool]($script:lastRepositoryValidationResult.state -eq "PASSED")
 }
 
 function Test-SingleProductionOwner {
@@ -1777,6 +1897,53 @@ function Get-CandidateAuthInspection {
     return [pscustomobject]$result
 }
 
+function Set-CandidateRepositoryPending {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [Parameter(Mandatory = $true)][string]$Operation,
+        [int]$ExitCode = 1,
+        [string]$Diagnostic = "",
+        [bool]$WindowsPassed = $false
+    )
+    $state = Get-ReleaseControlState
+    if (-not $state -or -not (Test-ReleaseIdentity $state.candidate $Candidate)) {
+        return $false
+    }
+    $priorState = [string]$state.candidate.validation_state
+    $priorReason = [string]$state.candidate.validation.reason
+    $windowsState = if ($WindowsPassed -or
+        [string]$state.candidate.validation.windows -eq "PASSED") {
+        "PASSED"
+    } else { "NOT_RUN" }
+    $state.candidate.validation_state = "CHECKS_PENDING"
+    $state.candidate.validation = [pscustomobject]@{
+        key = [string]$Candidate.validation_key
+        repository = "PENDING"
+        repository_retryable = $true
+        windows = $windowsState
+        cloudflare = "NOT_RUN"
+        reason = $Reason
+        operation = $Operation
+        exit_code = $ExitCode
+        diagnostic = Protect-PreflightDiagnosticText $Diagnostic
+        tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+    $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+    Write-ReleaseControlState -State $state
+    if ($priorState -ne "CHECKS_PENDING" -or $priorReason -ne $Reason) {
+        Write-ReleaseHistory -Event "CANDIDATE_REPOSITORY_PENDING" `
+            -Release $state.candidate -Detail @{
+                reason = $Reason
+                operation = $Operation
+                exit_code = $ExitCode
+                diagnostic = Protect-PreflightDiagnosticText $Diagnostic
+                retryable = $true
+            }
+    }
+    return $true
+}
+
 function Invoke-AutomaticCandidateValidation {
     param([Parameter(Mandatory = $true)][object]$Candidate)
     $state = Get-ReleaseControlState
@@ -1793,8 +1960,27 @@ function Invoke-AutomaticCandidateValidation {
         if ([string]$Candidate.artifact_kind -ne $productionCandidateArtifactKind) {
             throw "Only a PRODUCTION_CANDIDATE artifact can enter validation."
         }
+        $script:lastRepositoryValidationResult = $null
         if (-not (Test-ProductionCandidateProvenance -Candidate $Candidate)) {
-            throw "PRODUCTION_CANDIDATE_MAIN_PROVENANCE_REQUIRED"
+            $repositoryResult = $script:lastRepositoryValidationResult
+            if ($repositoryResult -and
+                [string]$repositoryResult.state -eq "REPOSITORY_PENDING") {
+                Set-CandidateRepositoryPending -Candidate $Candidate `
+                    -Reason ([string]$repositoryResult.reason) `
+                    -Operation ([string]$repositoryResult.operation) `
+                    -ExitCode ([int]$repositoryResult.exit_code) `
+                    -Diagnostic ([string]$repositoryResult.diagnostic) `
+                    -WindowsPassed $windowsAlreadyPassed
+                return $false
+            }
+            $repositoryFailure = if ($repositoryResult -and $repositoryResult.reason) {
+                [string]$repositoryResult.reason
+            } else { "PRODUCTION_CANDIDATE_MAIN_PROVENANCE_REQUIRED" }
+            if ($repositoryResult -and $repositoryResult.diagnostic) {
+                $repositoryFailure += ": " +
+                    (Protect-PreflightDiagnosticText $repositoryResult.diagnostic)
+            }
+            throw $repositoryFailure
         }
         $state.candidate.validation_state = "TESTING"
         Write-ReleaseControlState -State $state
@@ -1802,7 +1988,27 @@ function Invoke-AutomaticCandidateValidation {
             -not (Invoke-ProductionShapePreflight -Revision ([string]$Candidate.windows_revision))) {
             throw "Isolated Windows preflight failed."
         }
+        $script:lastGitHubChecksResult = $null
         $checks = Test-RequiredGitHubChecks -Revision ([string]$Candidate.git_sha)
+        $checksResult = $script:lastGitHubChecksResult
+        if ($checks -eq "REPOSITORY_PENDING") {
+            Set-CandidateRepositoryPending -Candidate $Candidate `
+                -Reason $(if ($checksResult -and $checksResult.reason) {
+                    [string]$checksResult.reason
+                } else { "GITHUB_TEMPORARILY_UNAVAILABLE" }) `
+                -Operation "GITHUB_CHECKS_API" `
+                -ExitCode $(if ($checksResult) { [int]$checksResult.exit_code } else { 1 }) `
+                -Diagnostic $(if ($checksResult) {
+                    [string]$checksResult.diagnostic
+                } else { "" }) `
+                -WindowsPassed $true
+            return $false
+        }
+        if ($checks -eq "FAILED") {
+            throw $(if ($checksResult -and $checksResult.reason) {
+                [string]$checksResult.reason
+            } else { "GITHUB_CHECKS_ACCESS_FAILED" })
+        }
         if ($checks -eq "CHECKS_BLOCKED") {
             $state.candidate.validation_state = "CHECKS_BLOCKED"
             $state.candidate.validation = [pscustomobject]@{
@@ -1837,7 +2043,10 @@ function Invoke-AutomaticCandidateValidation {
         }
         if ($priorValidationState -in @("CHECKS_BLOCKED", "CHECKS_PENDING")) {
             Write-ReleaseHistory -Event "CANDIDATE_CHECKS_RECOVERED" `
-                -Release $state.candidate -Detail @{ exact_sha = [string]$Candidate.git_sha }
+                -Release $state.candidate -Detail @{
+                    exact_sha = [string]$Candidate.git_sha
+                    prior_reason = [string]$Candidate.validation.reason
+                }
         }
         $changed = @(Get-CandidateChangedFiles `
             -StableRevision ([string]$state.stable.git_sha) `
@@ -2514,6 +2723,9 @@ function Protect-PreflightDiagnosticText {
         $text,
         '(?i)(["'']?\b(?:api[_-]?key|token|secret|password|authorization)\b["'']?\s*[:=]\s*)["'']?[^\s,;"'']+',
         '$1[REDACTED]'
+    )
+    $text = [regex]::Replace(
+        $text, '(?i)(https://)[^/@\s]+@', '$1[REDACTED]@'
     )
     if ($text.Length -gt $Limit) {
         return "[TRUNCATED]" + $text.Substring($text.Length - $Limit)
@@ -4721,7 +4933,13 @@ function Get-ControlCenterReleasePresentation {
         "TESTING" { "Validation is running against the exact release identity." }
         "STAGING" { "Candidate is being staged at zero percent traffic." }
         "NEW" { "Candidate is waiting for validation to begin." }
-        "CHECKS_PENDING" { "Required GitHub checks are pending for this exact SHA." }
+        "CHECKS_PENDING" {
+            if ([string]$Release.candidate.validation.reason -in @(
+                "REPOSITORY_TRANSPORT_UNAVAILABLE", "GITHUB_TEMPORARILY_UNAVAILABLE"
+            )) {
+                "GitHub temporarily unavailable. Retrying automatically."
+            } else { "Required GitHub checks are pending for this exact SHA." }
+        }
         "CHECKS_BLOCKED" { "Required GitHub checks failed and may be rerun for this exact SHA." }
         "REVIEW_REQUIRED" { [string]$Release.candidate.validation.reason }
         "REBASE_REQUIRED" { "REBASE_ON_RELEASE_CONTROL_MAIN_REQUIRED" }
