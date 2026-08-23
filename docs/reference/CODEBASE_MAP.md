@@ -23,7 +23,7 @@ contract.
 | Embedding or retrieval | `xauusd_forecaster/news_retrieval.py` | News identity retrieval owner | `xauusd_forecaster/gemini_embeddings.py`, `xauusd_forecaster/news_impact.py` | `tests/test_gemini_embeddings.py`, `tests/test_news_hybrid_retrieval.py` | [News Identity Retrieval](../design/NEWS_IDENTITY_RETRIEVAL.md) |
 | Daily Brief | `xauusd_forecaster/daily_brief.py` | Annotator Daily Brief owner | `scripts/run_news_annotator.py`, `xauusd_forecaster/news_scheduler.py` | `tests/test_daily_brief.py` | [Daily Brief](../contracts/DAILY_BRIEF.md) |
 | Operational health | `xauusd_forecaster/operational_health.py` | Component health owners, projected by Dashboard | `xauusd_forecaster/news_pipeline_health.py`, `xauusd_forecaster/runtime_health.py` | `tests/test_operational_health.py`, `tests/test_runtime_health.py` | [Operational Health](../contracts/OPERATIONAL_HEALTH.md) |
-| Dashboard first paint | `xauusd_forecaster/dashboard_payloads.py` | Dashboard API critical owner | `scripts/run_dashboard_api.py`, `xauusd_forecaster/operational_health.py` | `tests/test_dashboard_payloads.py`, `tests/test_dashboard_api.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
+| Dashboard first paint | `xauusd_forecaster/dashboard_payloads.py` | Dashboard API critical owner | `xauusd_forecaster/dashboard/status_cache.py`, `scripts/run_dashboard_api.py`, `xauusd_forecaster/operational_health.py` | `tests/test_dashboard_payloads.py`, `tests/test_dashboard_status_cache.py`, `tests/test_dashboard_api.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
 | Audit, learning, or market detail | `xauusd_forecaster/dashboard_read_models.py` | DashboardReadModelOwner | `xauusd_forecaster/dashboard_summaries.py`, `xauusd_forecaster/learning_curves.py` | `tests/test_dashboard_api.py` | [Paged Dashboard History](../design/PAGED_DASHBOARD_HISTORY.md) |
 | Dashboard sync | `scripts/run_dashboard_sync.py` | Dashboard Sync process | `scripts/run_dashboard_api.py`, `xauusd_forecaster/dashboard_payloads.py` | `tests/test_dashboard_sync.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
 | Cloudflare API routing | `web/worker/api-router.ts` | Minimal API Worker router | `web/worker/index.ts`, `web/db/schema.ts` | `web/tests/d1-capabilities.test.mjs`, `web/tests/worker-cpu-headroom.test.mjs` | [Web and Cloudflare](../design/WEB_AND_CLOUDFLARE.md) |
@@ -133,6 +133,9 @@ contract.
 
 ### Dashboard and sync
 
+- `xauusd_forecaster/dashboard/status_cache.py` — owns the disposable
+  process-local serialized first-paint/readiness snapshot, bounded last-good,
+  single-flight refresh, and cache health; it is not forecast authority.
 - `xauusd_forecaster/dashboard_payloads.py` — defines bounded critical and audit
   payload contracts.
 - `xauusd_forecaster/dashboard_read_models.py` — owns per-resource background

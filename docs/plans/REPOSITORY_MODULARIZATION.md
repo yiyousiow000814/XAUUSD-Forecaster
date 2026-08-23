@@ -7,6 +7,10 @@ or grant authority to move runtime code.
 
 **No production file move is performed by the architecture-baseline PR.**
 
+The first Phase B extraction is implemented by the current stacked change but
+remains `PENDING` until that change merges. The baseline architecture remains
+the current package authority until then.
+
 The baseline was measured at
 `b763a96f5b862b72a0fbb34419ff01909e450338` on 2026-08-23. Generated types,
 lockfiles, generated migration manifests, fixtures, and vendor files were
@@ -30,7 +34,7 @@ not an architectural contract.
 | File | Size | Current responsibilities | Owners mixed | Change risk | Suggested future action |
 |---|---:|---|---|---|---|
 | `scripts/xauusd_control_center.ps1` | 5,456 lines / 273,725 bytes | Service supervision, watchdog, Candidate discovery, CI/Cloudflare checks, DB preflight, Promote/Reverse, WPF/WinForms UI, diagnostics | Runtime, release, platform validation, operator UI | Very high | Extract one behavior-preserving control boundary at a time; keep the entry script as orchestration |
-| `scripts/run_dashboard_api.py` | 3,374 / 159,405 | HTTP server, critical cache, resource adapters/builders, paging, health projection, retry override | API, read models, market/news/audit, scheduler bridge | High | First extract self-contained cache ownership; later move resource builders by owner |
+| `scripts/run_dashboard_api.py` | 3,248 / 154,122 | HTTP server, cache wiring, resource adapters/builders, paging, health projection, retry override | API, read models, market/news/audit, scheduler bridge | High | Status-cache ownership extracted in the pending Phase B change; later work is outside this change |
 | `scripts/run_dashboard_sync.py` | 2,080 / 90,707 | Remote transport, compaction, paging, cursor state, scheduling, retries, heartbeat and lanes | Sync control, resource owners, transport | High | Separate resource codecs/checkpoints from process/lane orchestration in later single-resource PRs |
 | `scripts/run_news_annotator.py` | 698 / 27,384 | Process loop, scheduler lane execution, credential selection, Brief cycle, heartbeat | Runtime orchestration, scheduler, provider execution | Medium-high | Keep thread/process creation here; move transition execution behind existing domain owners |
 | `xauusd_forecaster/news_scheduler.py` | 3,799 / 163,737 | Schema, jobs, attempts, overrides, account quota, provider governor, backfill admission, migrations | Scheduler, capacity, operator control, migrations | Very high | Split only by durable table/transition owner after contract tests define dependency direction |
@@ -93,7 +97,8 @@ runtime behavior, schema, route, payload, import, or production file location.
 
 ### Phase B — First low-risk extraction
 
-Recommended first refactor PR:
+Implementation status: `PENDING` until the current stacked change merges. This
+change implements only the first refactor boundary described below:
 
 - **Source file:** `scripts/run_dashboard_api.py`.
 - **Exact responsibility:** `StatusSnapshotUnavailable` and
@@ -102,10 +107,10 @@ Recommended first refactor PR:
 - **Target module:** `xauusd_forecaster/dashboard/status_cache.py`, with
   `xauusd_forecaster/dashboard/__init__.py` containing no eager re-exports.
 - **Compatibility/import strategy:** the entry script imports the two public
-  names directly so existing `run_dashboard_api` callers observe the same
-  names during the PR. Remove that compatibility only after all callers import
-  the owner module and the entry script no longer exposes it as a supported
-  surface.
+  names and three constants directly so existing `run_dashboard_api` callers
+  observe the same names during the handover. Remove that compatibility only
+  after all callers import the owner module and the entry script no longer
+  exposes those names as a supported surface.
 - **Focused tests:** move/parameterize the existing cache behavior cases from
   `tests/test_dashboard_api.py` into
   `tests/test_dashboard_status_cache.py`; retain API-level first-paint and
@@ -114,6 +119,8 @@ Recommended first refactor PR:
   involved.
 - **Expected files:** the source entry script, two new package files, the
   existing API tests, one focused test module, the Dashboard/Codebase maps.
+- **Measured result:** `run_dashboard_api.py` is 3,248 lines / 154,122 bytes
+  after extraction, using the same measurement method as the baseline table.
 - **Non-goals:** no HTTP route, TTL, timeout, thread, payload, database, sync,
   cache policy, package-wide dashboard migration, or test-semantic change.
 
