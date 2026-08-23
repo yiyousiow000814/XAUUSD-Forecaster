@@ -77,6 +77,10 @@ credentials.
 
 ## Detailed documentation
 
+- [System Architecture](docs/design/SYSTEM_ARCHITECTURE.md)
+- [Codebase Map](docs/reference/CODEBASE_MAP.md)
+- [Architecture Rules](docs/contracts/ARCHITECTURE_RULES.md)
+- [Repository Modularization Plan](docs/plans/REPOSITORY_MODULARIZATION.md)
 - [Documentation index and taxonomy](docs/README.md)
 - [Product specification](docs/specs/PRODUCT.md)
 - [System boundaries contract](docs/contracts/SYSTEM_BOUNDARIES.md)

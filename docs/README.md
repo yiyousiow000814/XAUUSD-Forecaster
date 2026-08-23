@@ -28,6 +28,7 @@ current rules merely because they discovered one.
 
 ### Contracts
 
+- [Repository architecture rules](contracts/ARCHITECTURE_RULES.md)
 - [System boundaries](contracts/SYSTEM_BOUNDARIES.md)
 - [Forward-only evidence](contracts/FORWARD_ONLY.md)
 - [Replay](contracts/REPLAY.md)
@@ -63,6 +64,13 @@ current rules merely because they discovered one.
 
 ### Designs
 
+- [System architecture](design/SYSTEM_ARCHITECTURE.md)
+- [Decision and evidence](design/DECISION_AND_EVIDENCE.md)
+- [News and AI](design/NEWS_AND_AI.md)
+- [Training and models](design/TRAINING_AND_MODELS.md)
+- [Dashboard and sync](design/DASHBOARD_AND_SYNC.md)
+- [Web and Cloudflare](design/WEB_AND_CLOUDFLARE.md)
+- [Runtime and release](design/RUNTIME_AND_RELEASE.md)
 - [News identity retrieval](design/NEWS_IDENTITY_RETRIEVAL.md)
 
 - [Dynamic AI scheduler](design/AI_PRIORITY_SCHEDULER.md)
@@ -82,10 +90,12 @@ current rules merely because they discovered one.
 
 ### Current plans
 
+- [Repository modularization](plans/REPOSITORY_MODULARIZATION.md)
 - [Assistant implementation roadmap](plans/ASSISTANT_ROADMAP.md)
 
 ### Operations and reference
 
+- [Codebase map](reference/CODEBASE_MAP.md)
 - [Cloudflare deployment runbook](runbooks/CLOUDFLARE_DEPLOYMENT.md)
 - [Control Plane installation runbook](runbooks/CONTROL_PLANE_INSTALLATION.md)
 - [Live broadcast bootstrap runbook](runbooks/LIVE_BROADCAST_BOOTSTRAP.md)
