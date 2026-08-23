@@ -19,7 +19,15 @@ for (const count of sizes.length ? sizes : [500, 1000]) {
     generated_at: new Date().toISOString(), source_revision: "benchmark", market_session: "OPEN",
     freshness: { online: true, state: "FRESH" },
     quote: { bid: 1, ask: 2, spread: 1, source_received_time: new Date().toISOString() },
-    forecast: { action: "WAIT", hold_minutes: 30 }, health: { status: "HEALTHY", alerts: [] },
+    forecast: {
+      model_identity: "BENCHMARK", model_version: "local",
+      recommended_action: "WAIT", prediction_status: "READY",
+      ev_long_u5: 0, ev_short_u5: 0, interval_width: 0,
+      decision_time: new Date().toISOString(), signal_expiry_seconds: 20,
+      forecast_horizon_seconds: 1800, directional_bias: "NEUTRAL",
+      frozen_record: true,
+    },
+    health: { status: "HEALTHY", alerts: [] },
   };
   const started = performance.now();
   const response = await new LiveHub(ctx, {}).fetch(new Request("https://hub/publish", {
