@@ -207,6 +207,25 @@ Implementation status: `PENDING` until the C2 stacked change merges.
 - **Non-goals:** no payload byte, key order, omission, limit, cadence, route,
   cursor, remote transport, or production-state change.
 
+### Phase C-3a — Dashboard news resources
+
+Implementation status: `PENDING` until the C3a stacked change merges.
+
+- **Exact responsibility:** 60-day news archive read/cursor projection,
+  event-evidence display rows, immutable local generation manifest,
+  process-local evidence page cache, byte-bounded paging, and public news
+  metrics.
+- **Target module:** `xauusd_forecaster/dashboard/news_resources.py`.
+- **Compatibility:** `run_dashboard_api.py` imports and exposes the exact
+  canonical names while retaining only route/HTTP/process orchestration.
+- **Focused tests:** pure news resource cases move to
+  `tests/test_dashboard_news_resources.py`; tests crossing the full Dashboard
+  payload or HTTP route remain in `tests/test_dashboard_api.py`.
+- **Rollback:** revert the extraction commit; existing SQLite evidence and
+  replaceable manifest/cache state require no migration.
+- **Non-goals:** no SQL text, news eligibility, annotation recovery, cache,
+  manifest, cursor, byte limit, route, status, or payload change.
+
 ## Priority method
 
 File size is only an inventory signal. Rank a proposed split using:
