@@ -924,13 +924,18 @@ def test_release_gui_actions_are_tracked_single_flight_in_both_shells() -> None:
         "Refresh-WpfStatus",
         "$script:wpfOperation = $null",
     ))
-    assert "Operation failed without diagnostic output." in wpf
+    assert "Resolve-ControlCenterOperationPresentation" in wpf
+    assert "Operation failed without diagnostic output." not in wpf
+    assert "$script:wpfOperation.WaitForExit()" in wpf
+    assert '"-OperationResultPath"' in wpf
 
     assert "if ($script:guiOperation) { return }" in fallback
     assert all(state in fallback for state in ("APPROVING", "PROMOTING", "REVERSING"))
     assert fallback.index("Set-GuiBusy -Busy $true") < fallback.index(
         '$script:guiOperation = Start-Process -FilePath "powershell.exe"'
     )
+    assert "$script:guiOperation.WaitForExit()" in fallback
+    assert "Resolve-ControlCenterOperationPresentation" in fallback
 
 
 def test_control_center_operation_callbacks_are_empty_safe_and_contained(tmp_path) -> None:
@@ -947,6 +952,258 @@ def test_control_center_operation_callbacks_are_empty_safe_and_contained(tmp_pat
         'Write-Output "$($null -ne $text),$($text.Length),$ok,$script:failure,$before,$after"',
     )
     assert result == "True,0,False,timer failed,True,False"
+
+
+def test_structured_child_success_ignores_ambient_native_exit_code(tmp_path) -> None:
+    result_path = tmp_path / "operation-result.json"
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-ReleaseControlState{return $null};"
+        "function Get-RuntimeControlBundleIdentity{return [pscustomobject]@{"
+        "source_revision=('a'*40)}};"
+        "function Invoke-ControlCenterOperationAction{param($Operation);"
+        "cmd.exe /c exit 23};"
+        f"$code=Invoke-ControlCenterStructuredOperation -Operation 'Start' "
+        f"-ResultPath '{result_path}';"
+        f"$saved=Read-ControlCenterOperationResult -Path '{result_path}';"
+        'Write-Output "$code,$LASTEXITCODE,$($saved.success),$($saved.committed),'
+        '$($saved.reason),$($saved.control_revision)"',
+    )
+    assert result == f"0,23,True,True,COMPLETED,{'a' * 40}"
+    assert not list(tmp_path.glob("operation-result.json.*.tmp"))
+
+
+def test_structured_child_failure_is_nonzero_with_bounded_diagnostic(tmp_path) -> None:
+    result_path = tmp_path / "operation-result.json"
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-ReleaseControlState{return $null};"
+        "function Get-RuntimeControlBundleIdentity{return [pscustomobject]@{"
+        "source_revision=('a'*40)}};"
+        "function Invoke-ControlCenterOperationAction{param($Operation);"
+        "$global:LASTEXITCODE=0;throw 'deterministic child failure'};"
+        f"$code=Invoke-ControlCenterStructuredOperation -Operation 'Start' "
+        f"-ResultPath '{result_path}' 2>$null;"
+        f"$saved=Read-ControlCenterOperationResult -Path '{result_path}';"
+        'Write-Output "$code,$($saved.success),$($saved.committed),'
+        '$($saved.reason),$($saved.diagnostic)"',
+    )
+    assert result == "1,False,False,OPERATION_FAILED,deterministic child failure"
+
+
+def test_structured_result_overrides_conflicting_process_exit_status(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$success=[pscustomobject]@{operation='ApproveCompatibility';success=$true;"
+        "committed=$true;reason='COMPLETED';diagnostic=''};"
+        "$failure=[pscustomobject]@{operation='ApproveCompatibility';success=$false;"
+        "committed=$false;reason='OPERATION_FAILED';diagnostic='gate rejected'};"
+        "$reportedSuccess=Resolve-ControlCenterOperationPresentation "
+        "-Operation 'ApproveCompatibility' -ProcessExitCode 17 -Result $success;"
+        "$reportedFailure=Resolve-ControlCenterOperationPresentation "
+        "-Operation 'ApproveCompatibility' -ProcessExitCode 0 -Result $failure;"
+        'Write-Output "$($reportedSuccess.state),$($reportedSuccess.committed),'
+        '$($reportedFailure.state),$($reportedFailure.diagnostic)"',
+    )
+    assert result == "SUCCESS,True,FAILURE,gate rejected"
+
+
+def test_stale_structured_result_revision_is_rejected(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$stale=[pscustomobject]@{operation='Start';success=$true;committed=$true;"
+        "reason='COMPLETED';diagnostic='';control_revision=('b'*40)};"
+        "$resolved=Resolve-ControlCenterOperationPresentation -Operation 'Start' "
+        "-ProcessExitCode 0 -Result $stale -ExpectedControlRevision ('a'*40);"
+        'Write-Output "$($resolved.state),$($resolved.reason)"',
+    )
+    assert result == "INDETERMINATE,OPERATION_RESULT_UNAVAILABLE"
+
+
+def test_post_action_result_transport_failure_is_indeterminate_not_false_failure(
+    tmp_path,
+) -> None:
+    missing_dir = tmp_path / "missing" / "result.json"
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-ReleaseControlState{return $null};"
+        "function Get-RuntimeControlBundleIdentity{return [pscustomobject]@{"
+        "source_revision=('a'*40)}};"
+        "function Invoke-ControlCenterOperationAction{param($Operation);return $null};"
+        f"$code=Invoke-ControlCenterStructuredOperation -Operation 'Start' "
+        f"-ResultPath '{missing_dir}' 2>$null;"
+        "$resolved=Resolve-ControlCenterOperationPresentation -Operation 'Start' "
+        "-ProcessExitCode $code;"
+        'Write-Output "$code,$($resolved.state),$($resolved.reason)"',
+    )
+    assert result == "2,INDETERMINATE,OPERATION_RESULT_UNAVAILABLE"
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected"),
+    (
+        ("stdout diagnostic", "", "stdout diagnostic"),
+        ("", "stderr diagnostic", "stderr diagnostic"),
+        ("less useful stdout", "stderr diagnostic", "stderr diagnostic"),
+        ("", "", ""),
+    ),
+)
+def test_operation_diagnostic_uses_result_then_stderr_then_stdout(
+    tmp_path, stdout: str, stderr: str, expected: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        f"Write-Output (Get-ControlCenterOperationDiagnostic "
+        f"-StandardOutput '{stdout}' -StandardError '{stderr}')",
+    )
+    assert result == expected
+
+
+def test_authoritative_approval_commit_survives_result_transport_failure(tmp_path) -> None:
+    key = f"22222222-2222-4222-8222-222222222222:{'b' * 40}"
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$candidate.compatibility_state='APPROVED';$candidate.validation_state='NEW';"
+        f"$candidate|Add-Member -Force compatibility_approval ([pscustomobject]@{{"
+        f"validation_key='{key}';resources_verified=$true}});"
+        "Write-ReleaseControlState $state;"
+        "Write-ReleaseHistory -Event 'CANDIDATE_COMPATIBILITY_APPROVED' "
+        f"-Release $candidate -Detail @{{validation_key='{key}'}};"
+        "$resolved=Resolve-ControlCenterOperationPresentation "
+        "-Operation 'ApproveCompatibility' -ProcessExitCode 2 "
+        f"-ReleaseState $state -ExpectedValidationKey '{key}';"
+        'Write-Output "$($resolved.state),$($resolved.committed),$($resolved.reason)"',
+    )
+    assert result == "SUCCESS,True,AUTHORITATIVE_COMMIT_CONFIRMED"
+
+
+@pytest.mark.parametrize(
+    ("operation", "event"),
+    (("PromoteCandidate", "STABLE_COMMITTED"), ("ReverseStable", "STABLE_REVERSED")),
+)
+def test_release_terminal_commit_requires_ready_state_and_exact_history(
+    tmp_path, operation: str, event: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$release=New-ReleaseIdentity -GitSha ('a'*40) -WorkerVersionId "
+        "'11111111-1111-4111-8111-111111111111' -WindowsRevision ('a'*40);"
+        "$state=[pscustomobject]@{stable=$release;transaction=$null;deployment_status='READY'};"
+        f"$before=Test-ControlCenterReleaseOperationCommitted -Operation '{operation}' "
+        "-ReleaseState $state -ExpectedRelease $release;"
+        f"Write-ReleaseHistory -Event '{event}' -Release $release;"
+        f"$after=Test-ControlCenterReleaseOperationCommitted -Operation '{operation}' "
+        "-ReleaseState $state -ExpectedRelease $release;"
+        "$state.transaction=[pscustomobject]@{type='OTHER'};"
+        f"$active=Test-ControlCenterReleaseOperationCommitted -Operation '{operation}' "
+        "-ReleaseState $state -ExpectedRelease $release;"
+        'Write-Output "$before,$after,$active"',
+    )
+    assert result == "False,True,False"
+
+
+def test_successful_approval_commit_has_deterministic_child_success(tmp_path) -> None:
+    result_path = tmp_path / "approve-result.json"
+    key = f"22222222-2222-4222-8222-222222222222:{'b' * 40}"
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "function Get-RuntimeControlBundleIdentity{return [pscustomobject]@{"
+        "source_revision=('a'*40)}};"
+        "function Invoke-ControlCenterOperationAction{param($Operation);"
+        "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$candidate.compatibility_state='APPROVED';$candidate.validation_state='NEW';"
+        f"$candidate|Add-Member -Force compatibility_approval ([pscustomobject]@{{"
+        f"validation_key='{key}';resources_verified=$true}});"
+        "Write-ReleaseControlState $state;"
+        "Write-ReleaseHistory -Event 'CANDIDATE_COMPATIBILITY_APPROVED' "
+        f"-Release $candidate -Detail @{{validation_key='{key}'}}}};"
+        f"$code=Invoke-ControlCenterStructuredOperation "
+        f"-Operation 'ApproveCompatibility' -ResultPath '{result_path}';"
+        f"$saved=Read-ControlCenterOperationResult -Path '{result_path}';"
+        'Write-Output "$code,$($saved.success),$($saved.committed),'
+        '$($saved.release_validation_key)"',
+    )
+    assert result == f"0,True,True,{key}"
+
+
+def test_precommit_approval_failure_has_deterministic_child_failure(tmp_path) -> None:
+    result_path = tmp_path / "approve-result.json"
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "function Get-RuntimeControlBundleIdentity{return [pscustomobject]@{"
+        "source_revision=('a'*40)}};"
+        "function Invoke-ControlCenterOperationAction{param($Operation);"
+        "throw 'APPROVAL_RETRYABLE: GITHUB_TEMPORARILY_UNAVAILABLE'};"
+        f"$code=Invoke-ControlCenterStructuredOperation "
+        f"-Operation 'ApproveCompatibility' -ResultPath '{result_path}' 2>$null;"
+        f"$saved=Read-ControlCenterOperationResult -Path '{result_path}';"
+        'Write-Output "$code,$($saved.success),$($saved.committed),'
+        '$($saved.diagnostic)"',
+    )
+    assert result == (
+        "1,False,False,"
+        "APPROVAL_RETRYABLE: GITHUB_TEMPORARILY_UNAVAILABLE"
+    )
+
+
+@pytest.mark.parametrize(
+    "operation",
+    (
+        "PromoteCandidate", "ReverseStable", "Start", "Stop", "Restart",
+        "ServiceStart", "ServiceStop", "DiscoverCandidate", "ReconcileRelease",
+    ),
+)
+def test_sibling_gui_operations_share_explicit_structured_exit_contract(
+    tmp_path, operation: str,
+) -> None:
+    result_path = tmp_path / f"{operation}.json"
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-ReleaseControlState{return $null};"
+        "function Get-RuntimeControlBundleIdentity{return [pscustomobject]@{"
+        "source_revision=('a'*40)}};"
+        "function Invoke-ControlCenterOperationAction{param($Operation);return $null};"
+        "function Test-ControlCenterReleaseOperationCommitted{return $true};"
+        f"$code=Invoke-ControlCenterStructuredOperation -Operation '{operation}' "
+        f"-ResultPath '{result_path}';"
+        f"$saved=Read-ControlCenterOperationResult -Path '{result_path}';"
+        'Write-Output "$code,$($saved.operation),$($saved.success)"',
+    )
+    assert result == f"0,{operation},True"
+
+
+def test_gui_operation_lifecycle_prevents_orphan_and_duplicate_children() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
+        encoding="utf-8"
+    )
+    wpf = source[source.index("function Show-WpfControlCenter"):source.index(
+        "function Show-ControlCenter"
+    )]
+    fallback = source[source.index("function Show-ControlCenter"):]
+    assert "if (Test-WpfOperationActive) { return }" in wpf
+    assert "if ($script:guiOperation) { return }" in fallback
+    assert "$eventArgs.Cancel = $true" in wpf
+    assert "$eventArgs.Cancel = $true" in fallback
+    assert "$script:wpfOperation = $null" in wpf
+    assert "$script:guiOperation = $null" in fallback
+    assert "$script:wpfOperationResultPath" in wpf
+    assert "$script:guiOperationResultPath" in fallback
+    assert "Refresh-WpfStatus" in wpf
+    assert "Request-GuiStatus" in fallback
+    assert "APPROVING | tracked background operation in progress" in source
+    assert "PROMOTING | tracked background operation in progress" in source
+    assert "REVERSING | tracked background operation in progress" in source
+    assert " · " not in source
+    assert "Â" not in source
+    assert source.index("$script:wpfOperation = $null", source.index("$operationTimer.Add_Tick")) < source.index(
+        'if ([string]$presentation.state -eq "FAILURE")', source.index("$operationTimer.Add_Tick")
+    )
+    assert "CONTROL_CENTER_OPERATION_COMPLETED" in source
+    assert "exit ([int]$operationExitCode)" in source
 
 
 def test_wpf_post_render_failures_cannot_enter_winforms_fallback() -> None:
@@ -2227,6 +2484,34 @@ def test_platform_compatibility_approval_is_exact_audited_and_narrow(tmp_path) -
         '$($history.Contains(\'CANDIDATE_COMPATIBILITY_APPROVED\'))"',
     )
     assert result == "NEW,True,True"
+
+
+def test_compatibility_approval_cannot_be_double_written(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$candidate.validation_state='REVIEW_REQUIRED';"
+        "$candidate.compatibility_state='REVIEW_REQUIRED';"
+        "$candidate.validation=[pscustomobject]@{key=$candidate.validation_key;"
+        "reason='PLATFORM_CONFIG_REVIEW_REQUIRED';resources_verified=$true;"
+        "windows='PASSED';review_files=@('web/wrangler.jsonc')};"
+        "Write-ReleaseControlState $state;"
+        "function Get-ProductionCandidateProvenanceResult{return [pscustomobject]@{state='PASSED'}};"
+        "function Get-RequiredGitHubChecksResult{return [pscustomobject]@{state='PASSED'}};"
+        "function Get-CandidateChangedFiles{return @('web/wrangler.jsonc')};"
+        "function Test-CandidatePlatformResources{return $true};"
+        "$null=Approve-CandidateCompatibility;$second='';"
+        "try{$null=Approve-CandidateCompatibility}catch{$second=$_.Exception.Message};"
+        "$history=Get-Content -LiteralPath $releaseHistoryPath -Raw;"
+        "$count=([regex]::Matches($history,'CANDIDATE_COMPATIBILITY_APPROVED')).Count;"
+        "$final=Get-ReleaseControlState;"
+        'Write-Output "$count,$($second.Contains(\'Only an exact verified\')),'
+        '$($final.candidate.compatibility_state),'
+        '$($final.candidate.compatibility_approval.validation_key -eq '
+        '$final.candidate.validation_key)"',
+    )
+    assert result == "1,True,APPROVED,True"
 
 
 @pytest.mark.parametrize(

@@ -86,6 +86,16 @@ timer failures remain contained in the same WPF owner. GUI action children must
 execute the installed, hash-verified control script at the exact bundle revision
 captured by their parent GUI; a path or revision mismatch fails closed.
 
+Every GUI operation child writes one `control-center-operation-v1` result and
+then exits explicitly: semantic success is exit `0`, while a pre-commit failure
+is nonzero with a bounded diagnostic. Ambient native exit state, formatting,
+cleanup, and stdout/stderr content never determine the operation outcome.
+Presentation consumes the structured result and refreshes release state. If the
+result transport fails after an exact approval receipt and matching approval
+history were committed, the UI reports the authoritative commit instead of a
+false operation failure. A missing result without authoritative commit evidence
+is indeterminate, never inferred as success or failure from empty output alone.
+
 Repository validation requires the exact-SHA check runs named `Python regression
 suite`, `Web build and tests`, `Windows runtime contracts`, `Repository policy`,
 and CodeQL `Analyze` jobs for actions, C#, JavaScript/TypeScript, and Python.

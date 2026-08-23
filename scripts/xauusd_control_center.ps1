@@ -9,7 +9,8 @@ param(
     [string]$SourceRoot = "",
     [string]$SourceRevision = "",
     [string]$ExpectedControlScriptPath = "",
-    [string]$ExpectedControlRevision = ""
+    [string]$ExpectedControlRevision = "",
+    [string]$OperationResultPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -4938,7 +4939,7 @@ function Get-DirectedWorkerValidationSummary {
         $path = if ($first.path) { [string]$first.path } else { [string]$first.route }
         $status = if ($null -ne $first.status) { "HTTP $([int]$first.status)" } else { "HTTP --" }
         $reason = if ($first.reason) { [string]$first.reason } else { "VALIDATION_FAILED" }
-        "$method $path · $status · $reason"
+        "$method $path | $status | $reason"
     } else { "" }
     return [pscustomobject]@{
         tested = $tested; passed = $passed; failed = $failed
@@ -5162,6 +5163,394 @@ function Get-ControlCenterOperationText {
     return Protect-PreflightDiagnosticText -Value (([string]$content).Trim())
 }
 
+function Get-ControlCenterOperationState {
+    param([object]$ReleaseState = $null)
+    if (-not $ReleaseState) { $ReleaseState = Get-ReleaseControlState }
+    [pscustomobject]@{
+        deployment_status = if ($ReleaseState) {
+            [string]$ReleaseState.deployment_status
+        } else { "UNAVAILABLE" }
+        stable_validation_key = if ($ReleaseState -and $ReleaseState.stable) {
+            [string]$ReleaseState.stable.validation_key
+        } else { "" }
+        candidate_validation_key = if ($ReleaseState -and $ReleaseState.candidate) {
+            [string]$ReleaseState.candidate.validation_key
+        } else { "" }
+        candidate_validation_state = if ($ReleaseState -and $ReleaseState.candidate) {
+            [string]$ReleaseState.candidate.validation_state
+        } else { "UNAVAILABLE" }
+        candidate_compatibility_state = if ($ReleaseState -and $ReleaseState.candidate) {
+            [string]$ReleaseState.candidate.compatibility_state
+        } else { "UNAVAILABLE" }
+        transaction_type = if ($ReleaseState -and $ReleaseState.transaction) {
+            [string]$ReleaseState.transaction.type
+        } else { "" }
+    }
+}
+
+function New-ControlCenterOperationResult {
+    param(
+        [Parameter(Mandatory = $true)][string]$Operation,
+        [Parameter(Mandatory = $true)][bool]$Success,
+        [Parameter(Mandatory = $true)][bool]$Committed,
+        [string]$Reason = "",
+        [string]$Diagnostic = "",
+        [object]$ReleaseState = $null
+    )
+    $bundle = Get-RuntimeControlBundleIdentity
+    [pscustomobject]@{
+        schema_version = "control-center-operation-v1"
+        operation = $Operation
+        success = $Success
+        committed = $Committed
+        reason = $Reason
+        diagnostic = if ($Diagnostic) {
+            Protect-PreflightDiagnosticText -Value $Diagnostic
+        } else { "" }
+        control_revision = if ($bundle) { [string]$bundle.source_revision } else { "" }
+        release_validation_key = if ($ReleaseState -and $ReleaseState.candidate) {
+            [string]$ReleaseState.candidate.validation_key
+        } else { "" }
+        authoritative_state = Get-ControlCenterOperationState -ReleaseState $ReleaseState
+        completed_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+}
+
+function Write-ControlCenterOperationResult {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][object]$Result
+    )
+    $directory = Split-Path -Parent $Path
+    if (-not $directory -or -not (Test-Path -LiteralPath $directory)) {
+        throw "CONTROL_CENTER_RESULT_DIRECTORY_UNAVAILABLE"
+    }
+    $temporary = "$Path.$PID.tmp"
+    try {
+        $Result | ConvertTo-Json -Depth 12 -Compress |
+            Set-Content -LiteralPath $temporary -Encoding UTF8 -ErrorAction Stop
+        Move-Item -LiteralPath $temporary -Destination $Path -Force -ErrorAction Stop
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Read-ControlCenterOperationResult {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
+    try {
+        $result = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+        if ([string]$result.schema_version -ne "control-center-operation-v1" -or
+            -not $result.operation) { return $null }
+        return $result
+    } catch { return $null }
+}
+
+function Test-ControlCenterApprovalCommitted {
+    param(
+        [object]$ReleaseState,
+        [Parameter(Mandatory = $true)][string]$ValidationKey
+    )
+    if (-not $ReleaseState -or -not $ReleaseState.candidate -or
+        [string]$ReleaseState.candidate.validation_key -ne $ValidationKey -or
+        [string]$ReleaseState.candidate.compatibility_state -ne "APPROVED" -or
+        [string]$ReleaseState.candidate.compatibility_approval.validation_key -ne
+            $ValidationKey) { return $false }
+    if (-not (Test-Path -LiteralPath $releaseHistoryPath)) { return $false }
+    foreach ($line in @(Get-Content -LiteralPath $releaseHistoryPath -Tail 1000 `
+        -ErrorAction SilentlyContinue)) {
+        try {
+            $entry = $line | ConvertFrom-Json -ErrorAction Stop
+            if ([string]$entry.event -eq "CANDIDATE_COMPATIBILITY_APPROVED" -and
+                [string]$entry.release.validation_key -eq $ValidationKey -and
+                [string]$entry.detail.validation_key -eq $ValidationKey) {
+                return $true
+            }
+        } catch {}
+    }
+    return $false
+}
+
+function Test-ControlCenterReleaseHistoryContains {
+    param(
+        [Parameter(Mandatory = $true)][string]$Event,
+        [Parameter(Mandatory = $true)][object]$ExpectedRelease
+    )
+    if (-not (Test-Path -LiteralPath $releaseHistoryPath)) { return $false }
+    foreach ($line in @(Get-Content -LiteralPath $releaseHistoryPath -Tail 1000 `
+        -ErrorAction SilentlyContinue)) {
+        try {
+            $entry = $line | ConvertFrom-Json -ErrorAction Stop
+            if ([string]$entry.event -eq $Event -and
+                (Test-ReleaseIdentity $entry.release $ExpectedRelease)) {
+                return $true
+            }
+        } catch {}
+    }
+    return $false
+}
+
+function Test-ControlCenterReleaseOperationCommitted {
+    param(
+        [Parameter(Mandatory = $true)][string]$Operation,
+        [object]$ReleaseState,
+        [object]$ExpectedRelease = $null,
+        [string]$ExpectedValidationKey = ""
+    )
+    switch ($Operation) {
+        "ApproveCompatibility" {
+            return [bool]($ExpectedValidationKey -and
+                (Test-ControlCenterApprovalCommitted -ReleaseState $ReleaseState `
+                    -ValidationKey $ExpectedValidationKey))
+        }
+        "PromoteCandidate" {
+            return [bool]($ExpectedRelease -and $ReleaseState -and (
+                ((-not $ReleaseState.transaction) -and
+                    [string]$ReleaseState.deployment_status -eq "READY" -and
+                    (Test-ReleaseIdentity $ReleaseState.stable $ExpectedRelease) -and
+                    (Test-ControlCenterReleaseHistoryContains `
+                        -Event "STABLE_COMMITTED" -ExpectedRelease $ExpectedRelease)) -or
+                ($ReleaseState.transaction -and
+                    [string]$ReleaseState.transaction.type -eq "PROMOTE" -and
+                    [string]$ReleaseState.deployment_status -in @(
+                        "PROMOTING", "OBSERVING"
+                    ) -and
+                    (Test-ReleaseIdentity $ReleaseState.transaction.target $ExpectedRelease))))
+        }
+        "ReverseStable" {
+            return [bool]($ExpectedRelease -and $ReleaseState -and (
+                ((-not $ReleaseState.transaction) -and
+                    [string]$ReleaseState.deployment_status -eq "READY" -and
+                    (Test-ReleaseIdentity $ReleaseState.stable $ExpectedRelease) -and
+                    (Test-ControlCenterReleaseHistoryContains `
+                        -Event "STABLE_REVERSED" -ExpectedRelease $ExpectedRelease)) -or
+                ($ReleaseState.transaction -and
+                    [string]$ReleaseState.transaction.type -eq "REVERSE" -and
+                    [string]$ReleaseState.deployment_status -in @(
+                        "REVERSING", "REVERSE_OBSERVING"
+                    ) -and
+                    (Test-ReleaseIdentity $ReleaseState.transaction.target $ExpectedRelease))))
+        }
+    }
+    return $false
+}
+
+function Get-ControlCenterOperationDiagnostic {
+    param(
+        [object]$Result = $null,
+        [string]$StandardOutput = "",
+        [string]$StandardError = ""
+    )
+    foreach ($value in @(
+        $(if ($Result) { [string]$Result.diagnostic } else { "" }),
+        $StandardError,
+        $StandardOutput
+    )) {
+        if ($value) { return Protect-PreflightDiagnosticText -Value $value }
+    }
+    return ""
+}
+
+function Resolve-ControlCenterOperationPresentation {
+    param(
+        [Parameter(Mandatory = $true)][string]$Operation,
+        [Nullable[int]]$ProcessExitCode = $null,
+        [object]$Result = $null,
+        [object]$ReleaseState = $null,
+        [object]$ExpectedRelease = $null,
+        [string]$ExpectedValidationKey = "",
+        [string]$ExpectedControlRevision = "",
+        [string]$StandardOutput = "",
+        [string]$StandardError = ""
+    )
+    $diagnostic = Get-ControlCenterOperationDiagnostic -Result $Result `
+        -StandardOutput $StandardOutput -StandardError $StandardError
+    if ($Result -and [string]$Result.operation -eq $Operation -and
+        (-not $ExpectedControlRevision -or
+            [string]$Result.control_revision -eq $ExpectedControlRevision)) {
+        if ([bool]$Result.success) {
+            return [pscustomobject]@{
+                state = "SUCCESS"; committed = [bool]$Result.committed
+                diagnostic = $diagnostic; reason = [string]$Result.reason
+            }
+        }
+        return [pscustomobject]@{
+            state = "FAILURE"; committed = [bool]$Result.committed
+            diagnostic = $diagnostic; reason = [string]$Result.reason
+        }
+    }
+    if (Test-ControlCenterReleaseOperationCommitted -Operation $Operation `
+        -ReleaseState $ReleaseState -ExpectedRelease $ExpectedRelease `
+        -ExpectedValidationKey $ExpectedValidationKey) {
+        return [pscustomobject]@{
+            state = "SUCCESS"; committed = $true
+            diagnostic = "Operation result transport failed after authoritative commit."
+            reason = "AUTHORITATIVE_COMMIT_CONFIRMED"
+        }
+    }
+    return [pscustomobject]@{
+        state = "INDETERMINATE"; committed = $false
+        diagnostic = $(if ($diagnostic) { $diagnostic } else {
+            "Structured operation result unavailable; authoritative state was refreshed."
+        })
+        reason = $(if ($null -eq $ProcessExitCode) {
+            "PROCESS_EXIT_UNAVAILABLE"
+        } else { "OPERATION_RESULT_UNAVAILABLE" })
+    }
+}
+
+function Write-ControlCenterOperationEvent {
+    param(
+        [Parameter(Mandatory = $true)][string]$Operation,
+        [Parameter(Mandatory = $true)][object]$Presentation,
+        [Nullable[int]]$ProcessExitCode = $null,
+        [object]$Result = $null
+    )
+    New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+    [pscustomobject]@{
+        time = [DateTimeOffset]::UtcNow.ToString("o")
+        event = "CONTROL_CENTER_OPERATION_COMPLETED"
+        operation = $Operation
+        state = [string]$Presentation.state
+        committed = [bool]$Presentation.committed
+        reason = [string]$Presentation.reason
+        process_exit_code = if ($null -eq $ProcessExitCode) {
+            $null
+        } else { [int]$ProcessExitCode }
+        result_available = [bool]$Result
+        result_control_revision = if ($Result) {
+            [string]$Result.control_revision
+        } else { "" }
+        release_validation_key = if ($Result) {
+            [string]$Result.release_validation_key
+        } else { "" }
+    } | ConvertTo-Json -Compress |
+        Add-Content -LiteralPath $watchdogLog -Encoding UTF8
+}
+
+function Invoke-ControlCenterOperationAction {
+    param([Parameter(Mandatory = $true)][string]$Operation)
+    switch ($Operation) {
+        "Start" { Start-All; Start-Sleep -Seconds 2; return @(Get-ForecasterStatus) }
+        "Stop" { Stop-All; Start-Sleep -Seconds 1; return @(Get-ForecasterStatus) }
+        "Restart" { Restart-All; Start-Sleep -Seconds 2; return @(Get-ForecasterStatus) }
+        "ServiceStart" {
+            $target = $services | Where-Object Key -eq $ServiceKey
+            if (-not $target) { throw "Unknown service key: $ServiceKey" }
+            Start-ForecasterService $target
+            return $target
+        }
+        "ServiceStop" {
+            $target = $services | Where-Object Key -eq $ServiceKey
+            if (-not $target) { throw "Unknown service key: $ServiceKey" }
+            Stop-ForecasterService $target
+            return $target
+        }
+        "DiscoverCandidate" {
+            if (-not (Invoke-CandidateDiscovery)) {
+                throw "Candidate discovery did not complete."
+            }
+            return Get-ReleaseControlState
+        }
+        "ReconcileRelease" {
+            if (-not (Enter-ReleaseTransactionLock)) {
+                throw "Another release transaction is active."
+            }
+            try { return Reconcile-ReleaseControlState }
+            finally { Exit-ReleaseTransactionLock }
+        }
+        "PromoteCandidate" {
+            if (-not (Start-ReleasePromotion)) { throw "Promotion did not start." }
+            return Get-ReleaseControlState
+        }
+        "ReverseStable" {
+            if (-not (Invoke-ReverseStable)) { throw "Reverse did not start." }
+            return Get-ReleaseControlState
+        }
+        "ApproveCompatibility" {
+            if (-not (Enter-ReleaseTransactionLock)) {
+                throw "Another release transaction is active."
+            }
+            try { return Approve-CandidateCompatibility }
+            finally { Exit-ReleaseTransactionLock }
+        }
+        default { throw "Unsupported Control Center operation: $Operation" }
+    }
+}
+
+function Invoke-ControlCenterStructuredOperation {
+    param(
+        [Parameter(Mandatory = $true)][string]$Operation,
+        [Parameter(Mandatory = $true)][string]$ResultPath
+    )
+    $before = Get-ReleaseControlState
+    $expectedRelease = if ($Operation -eq "PromoteCandidate" -and $before) {
+        $before.candidate
+    } elseif ($Operation -eq "ReverseStable" -and $before) {
+        $before.previous_stable
+    } else { $null }
+    $expectedValidationKey = if ($before -and $before.candidate) {
+        [string]$before.candidate.validation_key
+    } else { "" }
+    $operationError = $null
+    try {
+        $null = Invoke-ControlCenterOperationAction -Operation $Operation
+    } catch {
+        $operationError = $_
+    }
+    $after = Get-ReleaseControlState
+    if ($operationError) {
+        $diagnostic = Protect-PreflightDiagnosticText `
+            -Value $operationError.Exception.Message
+        $committed = [bool]($Operation -eq "ApproveCompatibility" -and
+            (Test-ControlCenterApprovalCommitted -ReleaseState $after `
+                -ValidationKey $expectedValidationKey))
+        $result = New-ControlCenterOperationResult -Operation $Operation `
+            -Success $committed -Committed $committed `
+            -Reason $(if ($committed) {
+                "AUTHORITATIVE_COMMIT_CONFIRMED"
+            } else { "OPERATION_FAILED" }) `
+            -Diagnostic $diagnostic -ReleaseState $after
+        try { Write-ControlCenterOperationResult -Path $ResultPath -Result $result }
+        catch {
+            [Console]::Error.WriteLine(
+                (Protect-PreflightDiagnosticText -Value $_.Exception.Message)
+            )
+            return 2
+        }
+        if ($committed) { return 0 }
+        [Console]::Error.WriteLine($diagnostic)
+        return 1
+    }
+    $committed = if ($Operation -in @(
+        "ApproveCompatibility", "PromoteCandidate", "ReverseStable"
+    )) {
+        Test-ControlCenterReleaseOperationCommitted -Operation $Operation `
+            -ReleaseState $after -ExpectedRelease $expectedRelease `
+            -ExpectedValidationKey $expectedValidationKey
+    } else { $true }
+    $semanticSuccess = [bool]($Operation -notin @(
+        "ApproveCompatibility", "PromoteCandidate", "ReverseStable"
+    ) -or $committed)
+    $result = New-ControlCenterOperationResult -Operation $Operation `
+        -Success $semanticSuccess -Committed $committed `
+        -Reason $(if ($semanticSuccess) {
+            "COMPLETED"
+        } else { "AUTHORITATIVE_COMMIT_MISSING" }) `
+        -ReleaseState $after
+    try {
+        Write-ControlCenterOperationResult -Path $ResultPath -Result $result
+    } catch {
+        [Console]::Error.WriteLine(
+            (Protect-PreflightDiagnosticText -Value $_.Exception.Message)
+        )
+        return 2
+    }
+    if ($semanticSuccess) { return 0 }
+    return 1
+}
+
 function Invoke-ControlCenterUiCallback {
     param(
         [Parameter(Mandatory = $true)][scriptblock]$Callback,
@@ -5263,6 +5652,9 @@ function Show-WpfControlCenter {
         $script:wpfOperationName = ""
         $script:wpfOperationOutputPath = ""
         $script:wpfOperationErrorPath = ""
+        $script:wpfOperationResultPath = ""
+        $script:wpfOperationExpectedRelease = $null
+        $script:wpfOperationValidationKey = ""
         function Test-WpfOperationActive {
             return [bool]$script:wpfOperation
         }
@@ -5291,7 +5683,7 @@ function Show-WpfControlCenter {
                 (Find-WpfControl "CandidateState").Text = $state
             }
             (Find-WpfControl "CandidateReason").Text =
-                "$state · tracked background operation in progress"
+                "$state | tracked background operation in progress"
         }
         function Invoke-WpfOperation([string]$Operation, [string]$ServiceKey = "") {
             if (Test-WpfOperationActive) { return }
@@ -5309,6 +5701,21 @@ function Show-WpfControlCenter {
                 ("xauusd-wpf-operation-{0}.out" -f ([guid]::NewGuid().ToString("N")))
             $script:wpfOperationErrorPath = Join-Path $env:TEMP `
                 ("xauusd-wpf-operation-{0}.err" -f ([guid]::NewGuid().ToString("N")))
+            $script:wpfOperationResultPath = Join-Path $env:TEMP `
+                ("xauusd-wpf-operation-{0}.json" -f ([guid]::NewGuid().ToString("N")))
+            $releaseBefore = Get-ReleaseControlState
+            $script:wpfOperationValidationKey = if ($releaseBefore -and
+                $releaseBefore.candidate) {
+                [string]$releaseBefore.candidate.validation_key
+            } else { "" }
+            $script:wpfOperationExpectedRelease = if (
+                $Operation -eq "PromoteCandidate" -and $releaseBefore
+            ) { $releaseBefore.candidate } elseif (
+                $Operation -eq "ReverseStable" -and $releaseBefore
+            ) { $releaseBefore.previous_stable } else { $null }
+            $arguments += @(
+                "-OperationResultPath", ('"{0}"' -f $script:wpfOperationResultPath)
+            )
             Set-WpfReleaseBusy -Busy $true -Operation $Operation
             try {
                 $script:wpfOperation = Start-Process -FilePath "powershell.exe" `
@@ -5319,7 +5726,8 @@ function Show-WpfControlCenter {
             } catch {
                 $script:wpfOperation = $null
                 Remove-Item -LiteralPath `
-                    $script:wpfOperationOutputPath,$script:wpfOperationErrorPath `
+                    $script:wpfOperationOutputPath,$script:wpfOperationErrorPath,`
+                    $script:wpfOperationResultPath `
                     -Force -ErrorAction SilentlyContinue
                 Set-WpfReleaseBusy -Busy $false
                 [void](Invoke-ControlCenterUiCallback -Callback { Refresh-WpfStatus })
@@ -5365,7 +5773,7 @@ function Show-WpfControlCenter {
                     "$($directed.first_failure_line)`nCannot promote: $reason"
             }
             $apiRouteState = if ($directed.tested -gt 0) {
-                "$($directed.state) · $($directed.passed)/$($directed.tested)"
+                "$($directed.state) | $($directed.passed)/$($directed.tested)"
             } else { $directed.state }
             $dataParityState = if ($validation -and $validation.data_parity) {
                 [string]$validation.data_parity.state
@@ -5499,28 +5907,35 @@ function Show-WpfControlCenter {
                 if (-not $script:wpfOperation -or -not $script:wpfOperation.HasExited) {
                     return
                 }
-                $exitCode = $script:wpfOperation.ExitCode
+                $script:wpfOperation.WaitForExit()
+                $script:wpfOperation.Refresh()
+                $exitCode = [int]$script:wpfOperation.ExitCode
                 $finished = $script:wpfOperationName
+                $presentation = $null
                 try {
                     $output = Get-ControlCenterOperationText `
                         -Path $script:wpfOperationOutputPath
                     $errorText = Get-ControlCenterOperationText `
                         -Path $script:wpfOperationErrorPath
-                    if ($exitCode -ne 0) {
-                        [System.Windows.MessageBox]::Show(
-                            $(if ($errorText) { $errorText } else {
-                                "Operation failed without diagnostic output."
-                            }), "$finished failed", "OK", "Error"
-                        ) | Out-Null
-                    } elseif ($finished -eq "ApproveCompatibility") {
-                        [System.Windows.MessageBox]::Show(
-                            $(if ($output) { $output } else { "$finished completed." }),
-                            "$finished completed", "OK", "Information"
-                        ) | Out-Null
-                    }
+                    $operationResult = Read-ControlCenterOperationResult `
+                        -Path $script:wpfOperationResultPath
+                    $releaseAfter = Get-ReleaseControlState
+                    $presentation = Resolve-ControlCenterOperationPresentation `
+                        -Operation $finished -ProcessExitCode $exitCode `
+                        -Result $operationResult -ReleaseState $releaseAfter `
+                        -ExpectedRelease $script:wpfOperationExpectedRelease `
+                        -ExpectedValidationKey $script:wpfOperationValidationKey `
+                        -ExpectedControlRevision ([string]$controlIdentity.source_revision) `
+                        -StandardOutput $output -StandardError $errorText
+                    [void](Invoke-ControlCenterUiCallback -Callback {
+                        Write-ControlCenterOperationEvent -Operation $finished `
+                            -Presentation $presentation -ProcessExitCode $exitCode `
+                            -Result $operationResult
+                    })
                 } finally {
                     Remove-Item -LiteralPath `
-                        $script:wpfOperationOutputPath,$script:wpfOperationErrorPath `
+                        $script:wpfOperationOutputPath,$script:wpfOperationErrorPath,`
+                        $script:wpfOperationResultPath `
                         -Force -ErrorAction SilentlyContinue
                     $completedProcess = $script:wpfOperation
                     $script:wpfOperation = $null
@@ -5528,7 +5943,40 @@ function Show-WpfControlCenter {
                     Set-WpfReleaseBusy -Busy $false
                     [void](Invoke-ControlCenterUiCallback -Callback { Refresh-WpfStatus })
                 }
+                if ([string]$presentation.state -eq "FAILURE") {
+                    [System.Windows.MessageBox]::Show(
+                        $(if ($presentation.diagnostic) {
+                            [string]$presentation.diagnostic
+                        } else {
+                            "$finished failed."
+                        }), "$finished failed", "OK", "Error"
+                    ) | Out-Null
+                } elseif ([string]$presentation.state -eq "INDETERMINATE") {
+                    [System.Windows.MessageBox]::Show(
+                        ([string]$presentation.diagnostic),
+                        "$finished result unavailable", "OK", "Warning"
+                    ) | Out-Null
+                } elseif ($finished -in @(
+                    "ApproveCompatibility", "PromoteCandidate", "ReverseStable"
+                )) {
+                    [System.Windows.MessageBox]::Show(
+                        "$finished completed and authoritative state was refreshed.",
+                        "$finished completed", "OK", "Information"
+                    ) | Out-Null
+                }
             } -OnFailure { param($message) Show-WpfCallbackFailure $message })
+        })
+        $window.Add_Closing({
+            param($sender, $eventArgs)
+            if (Test-WpfOperationActive) {
+                $eventArgs.Cancel = $true
+                try {
+                    [System.Windows.MessageBox]::Show(
+                        "Wait for the tracked operation to finish before closing.",
+                        "Operation in progress", "OK", "Warning"
+                    ) | Out-Null
+                } catch {}
+            }
         })
         $window.Add_Closed({ $timer.Stop(); $operationTimer.Stop() })
         $window.Add_ContentRendered({
@@ -6204,6 +6652,9 @@ function Show-ControlCenter {
     $script:guiOperationName = ""
     $script:guiOperationOutputPath = ""
     $script:guiOperationErrorPath = ""
+    $script:guiOperationResultPath = ""
+    $script:guiOperationExpectedRelease = $null
+    $script:guiOperationValidationKey = ""
     $script:lastGuiSnapshot = $null
     function Set-GuiBusy {
         param([bool]$Busy, [string]$Message)
@@ -6231,10 +6682,25 @@ function Show-ControlCenter {
             ("xauusd-control-operation-{0}.out" -f ([guid]::NewGuid().ToString("N")))
         $script:guiOperationErrorPath = Join-Path $env:TEMP `
             ("xauusd-control-operation-{0}.err" -f ([guid]::NewGuid().ToString("N")))
+        $script:guiOperationResultPath = Join-Path $env:TEMP `
+            ("xauusd-control-operation-{0}.json" -f ([guid]::NewGuid().ToString("N")))
+        $releaseBefore = Get-ReleaseControlState
+        $script:guiOperationValidationKey = if ($releaseBefore -and
+            $releaseBefore.candidate) {
+            [string]$releaseBefore.candidate.validation_key
+        } else { "" }
+        $script:guiOperationExpectedRelease = if (
+            $Operation -eq "PromoteCandidate" -and $releaseBefore
+        ) { $releaseBefore.candidate } elseif (
+            $Operation -eq "ReverseStable" -and $releaseBefore
+        ) { $releaseBefore.previous_stable } else { $null }
+        $arguments += @(
+            "-OperationResultPath", ('"{0}"' -f $script:guiOperationResultPath)
+        )
         $busyMessage = switch ($Operation) {
-            "ApproveCompatibility" { "APPROVING · tracked background operation" }
-            "PromoteCandidate" { "PROMOTING · tracked background operation" }
-            "ReverseStable" { "REVERSING · tracked background operation" }
+            "ApproveCompatibility" { "APPROVING | tracked background operation in progress" }
+            "PromoteCandidate" { "PROMOTING | tracked background operation in progress" }
+            "ReverseStable" { "REVERSING | tracked background operation in progress" }
             default { "Working in background: $Operation" }
         }
         Set-GuiBusy -Busy $true -Message $busyMessage
@@ -6246,6 +6712,9 @@ function Show-ControlCenter {
                 -RedirectStandardError $script:guiOperationErrorPath
         } catch {
             $script:guiOperation = $null
+            Remove-Item -LiteralPath `
+                $script:guiOperationOutputPath,$script:guiOperationErrorPath,`
+                $script:guiOperationResultPath -Force -ErrorAction SilentlyContinue
             Set-GuiBusy -Busy $false -Message "Failed to start: $Operation"
             throw
         }
@@ -6315,7 +6784,7 @@ function Show-ControlCenter {
                 }
                 $candidateCheckLabels.windows.Text = "Repo / Windows: $repositoryCheck / $windowsCheck"
                 $candidateCheckLabels.contracts.Text = if ($directed.tested -gt 0) {
-                    "API routes: $contractCheck · $($directed.passed)/$($directed.tested)"
+                    "API routes: $contractCheck | $($directed.passed)/$($directed.tested)"
                 } else { "API routes: $contractCheck" }
                 $cpu = if ($validation -and $validation.cpu_evidence -and
                     $validation.cpu_evidence -ne "NOT_REQUIRED") {
@@ -6407,7 +6876,7 @@ function Show-ControlCenter {
         $systemMetaLabel.Text = "Windows Time: $clockState  /  Auto-start: $autoState  /  Last refresh: $($summary.last_refresh)"
     }
     function Request-GuiStatus {
-        if ($script:statusRefreshProcess -and -not $script:statusRefreshProcess.HasExited) { return }
+        if ($script:statusRefreshProcess) { return }
         $arguments = @(
             "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
             "-File", ('"{0}"' -f $PSCommandPath), "-Action", "StatusJson",
@@ -6445,24 +6914,56 @@ function Show-ControlCenter {
     $operationTimer.Interval = 400
     $operationTimer.Add_Tick({
         if (-not $script:guiOperation -or -not $script:guiOperation.HasExited) { return }
-        $exitCode = $script:guiOperation.ExitCode
+        $script:guiOperation.WaitForExit()
+        $script:guiOperation.Refresh()
+        $exitCode = [int]$script:guiOperation.ExitCode
         $finished = $script:guiOperationName
         $output = Get-ControlCenterOperationText -Path $script:guiOperationOutputPath
         $errorText = Get-ControlCenterOperationText -Path $script:guiOperationErrorPath
-        Remove-Item -LiteralPath $script:guiOperationOutputPath,$script:guiOperationErrorPath `
+        $operationResult = Read-ControlCenterOperationResult `
+            -Path $script:guiOperationResultPath
+        $releaseAfter = Get-ReleaseControlState
+        $presentation = Resolve-ControlCenterOperationPresentation `
+            -Operation $finished -ProcessExitCode $exitCode -Result $operationResult `
+            -ReleaseState $releaseAfter `
+            -ExpectedRelease $script:guiOperationExpectedRelease `
+            -ExpectedValidationKey $script:guiOperationValidationKey `
+            -ExpectedControlRevision ([string]$controlIdentity.source_revision) `
+            -StandardOutput $output -StandardError $errorText
+        try {
+            Write-ControlCenterOperationEvent -Operation $finished `
+                -Presentation $presentation -ProcessExitCode $exitCode `
+                -Result $operationResult
+        } catch {}
+        Remove-Item -LiteralPath `
+            $script:guiOperationOutputPath,$script:guiOperationErrorPath,`
+            $script:guiOperationResultPath `
             -Force -ErrorAction SilentlyContinue
         $completedProcess = $script:guiOperation
         $script:guiOperation = $null
         try { $completedProcess.Dispose() } catch {}
-        Set-GuiBusy -Busy $false -Message $(if ($exitCode -eq 0) { "Completed: $finished" } else { "Failed: $finished (exit $exitCode)" })
-        if ($exitCode -ne 0) {
+        Set-GuiBusy -Busy $false -Message $(switch ([string]$presentation.state) {
+            "SUCCESS" { "Completed: $finished" }
+            "FAILURE" { "Failed: $finished" }
+            default { "Result unavailable: $finished" }
+        })
+        if ([string]$presentation.state -eq "FAILURE") {
             [System.Windows.Forms.MessageBox]::Show(
-                $(if ($errorText) { $errorText } else { "Operation failed without diagnostic output." }),
+                $(if ($presentation.diagnostic) {
+                    [string]$presentation.diagnostic
+                } else { "$finished failed." }),
                 "$finished failed", "OK", "Error"
             ) | Out-Null
-        } elseif ($finished -in @("BootstrapRelease", "ApproveCompatibility")) {
+        } elseif ([string]$presentation.state -eq "INDETERMINATE") {
             [System.Windows.Forms.MessageBox]::Show(
-                $(if ($output) { $output } else { "$finished completed." }),
+                ([string]$presentation.diagnostic),
+                "$finished result unavailable", "OK", "Warning"
+            ) | Out-Null
+        } elseif ($finished -in @(
+            "BootstrapRelease", "ApproveCompatibility", "PromoteCandidate", "ReverseStable"
+        )) {
+            [System.Windows.Forms.MessageBox]::Show(
+                "$finished completed and authoritative state was refreshed.",
                 "$finished completed", "OK", "Information"
             ) | Out-Null
         }
@@ -6500,6 +7001,18 @@ function Show-ControlCenter {
         $activationEvent.Dispose()
         Remove-Item -LiteralPath $statusSnapshotPath -Force -ErrorAction SilentlyContinue
     })
+    $form.Add_FormClosing({
+        param($sender, $eventArgs)
+        if ($script:guiOperation) {
+            $eventArgs.Cancel = $true
+            try {
+                [System.Windows.Forms.MessageBox]::Show(
+                    "Wait for the tracked operation to finish before closing.",
+                    "Operation in progress", "OK", "Warning"
+                ) | Out-Null
+            } catch {}
+        }
+    })
     [void]$form.ShowDialog()
 }
 
@@ -6507,6 +7020,21 @@ if ($ExpectedControlScriptPath -or $ExpectedControlRevision) {
     $null = Assert-ControlCenterProcessIdentity `
         -ExpectedScriptPath $ExpectedControlScriptPath `
         -ExpectedRevision $ExpectedControlRevision
+}
+
+if ($OperationResultPath) {
+    $structuredActions = @(
+        "Start", "Stop", "Restart", "ServiceStart", "ServiceStop",
+        "DiscoverCandidate", "ReconcileRelease", "PromoteCandidate",
+        "ReverseStable", "ApproveCompatibility"
+    )
+    if ($Action -notin $structuredActions) {
+        [Console]::Error.WriteLine("Unsupported structured operation: $Action")
+        exit 2
+    }
+    $operationExitCode = Invoke-ControlCenterStructuredOperation `
+        -Operation $Action -ResultPath $OperationResultPath
+    exit ([int]$operationExitCode)
 }
 
 switch ($Action) {
@@ -6544,37 +7072,34 @@ switch ($Action) {
     "WpfLayoutSmoke" {
         Test-WpfControlCenterLayout | ConvertTo-Json -Depth 4
     }
-    "Start" { Start-All; Start-Sleep -Seconds 2; Get-ForecasterStatus | Format-Table -AutoSize }
-    "Stop" { Stop-All; Start-Sleep -Seconds 1; Get-ForecasterStatus | Format-Table -AutoSize }
-    "Restart" { Restart-All; Start-Sleep -Seconds 2; Get-ForecasterStatus | Format-Table -AutoSize }
-    "ServiceStart" {
-        $target = $services | Where-Object Key -eq $ServiceKey
-        if (-not $target) { throw "Unknown service key: $ServiceKey" }
-        Start-ForecasterService $target
-    }
-    "ServiceStop" {
-        $target = $services | Where-Object Key -eq $ServiceKey
-        if (-not $target) { throw "Unknown service key: $ServiceKey" }
-        Stop-ForecasterService $target
-    }
+    "Start" { Invoke-ControlCenterOperationAction -Operation $Action | Format-Table -AutoSize }
+    "Stop" { Invoke-ControlCenterOperationAction -Operation $Action | Format-Table -AutoSize }
+    "Restart" { Invoke-ControlCenterOperationAction -Operation $Action | Format-Table -AutoSize }
+    "ServiceStart" { $null = Invoke-ControlCenterOperationAction -Operation $Action }
+    "ServiceStop" { $null = Invoke-ControlCenterOperationAction -Operation $Action }
     "Watchdog" { Start-All; exit (Invoke-ForecasterWatchdog) }
-    "DiscoverCandidate" { if (Invoke-CandidateDiscovery) { exit 0 } else { exit 1 } }
-    "ReconcileRelease" {
-        if (-not (Enter-ReleaseTransactionLock)) { exit 1 }
-        try { Reconcile-ReleaseControlState | ConvertTo-Json -Depth 12 }
-        finally { Exit-ReleaseTransactionLock }
+    "DiscoverCandidate" {
+        try { $null = Invoke-ControlCenterOperationAction -Operation $Action; exit 0 }
+        catch { Write-Error $_.Exception.Message; exit 1 }
     }
-    "PromoteCandidate" { if (Start-ReleasePromotion) { exit 0 } else { exit 1 } }
-    "ReverseStable" { if (Invoke-ReverseStable) { exit 0 } else { exit 1 } }
+    "ReconcileRelease" {
+        Invoke-ControlCenterOperationAction -Operation $Action | ConvertTo-Json -Depth 12
+    }
+    "PromoteCandidate" {
+        try { $null = Invoke-ControlCenterOperationAction -Operation $Action; exit 0 }
+        catch { Write-Error $_.Exception.Message; exit 1 }
+    }
+    "ReverseStable" {
+        try { $null = Invoke-ControlCenterOperationAction -Operation $Action; exit 0 }
+        catch { Write-Error $_.Exception.Message; exit 1 }
+    }
     "BootstrapRelease" {
         if (-not (Enter-ReleaseTransactionLock)) { throw "Another release transaction is active." }
         try { Initialize-ReleaseControl | ConvertTo-Json -Depth 12 }
         finally { Exit-ReleaseTransactionLock }
     }
     "ApproveCompatibility" {
-        if (-not (Enter-ReleaseTransactionLock)) { throw "Another release transaction is active." }
-        try { Approve-CandidateCompatibility | ConvertTo-Json -Depth 12 }
-        finally { Exit-ReleaseTransactionLock }
+        Invoke-ControlCenterOperationAction -Operation $Action | ConvertTo-Json -Depth 12
     }
     "EnableAutoStart" { Enable-AutoStart; Write-Output "Auto-start enabled." }
     "DisableAutoStart" { Disable-AutoStart; Write-Output "Auto-start disabled." }
