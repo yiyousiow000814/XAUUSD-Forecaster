@@ -28,6 +28,7 @@ contract.
 | Collector heartbeat presentation | `xauusd_forecaster/dashboard/health_projection.py` | Dashboard runtime-component health projection owner | `xauusd_forecaster/runtime_health.py` writes heartbeat state; `scripts/run_dashboard_api.py` orchestrates the payload | `tests/test_dashboard_health_projection.py`, `tests/test_runtime_health.py`, `tests/test_dashboard_api.py` | [Operational Health](../contracts/OPERATIONAL_HEALTH.md) |
 | Audit, learning, or market detail | `xauusd_forecaster/dashboard_read_models.py` | DashboardReadModelOwner | `xauusd_forecaster/dashboard_summaries.py`, `xauusd_forecaster/learning_curves.py` | `tests/test_dashboard_api.py` | [Paged Dashboard History](../design/PAGED_DASHBOARD_HISTORY.md) |
 | Local news archive or evidence detail | `xauusd_forecaster/dashboard/news_resources.py` | Dashboard news-resource owner | Local SQLite evidence authority; `scripts/run_dashboard_api.py` owns HTTP translation | `tests/test_dashboard_news_resources.py`, `tests/test_dashboard_api.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
+| Local market history or current chart | `xauusd_forecaster/dashboard/market_resources.py` | Dashboard market-resource owner | Quote JSONL and local SQLite authority; `scripts/run_dashboard_api.py` owns HTTP translation | `tests/test_dashboard_market_resources.py`, `tests/test_dashboard_api.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
 | Dashboard resource serialization | `xauusd_forecaster/dashboard/resource_contracts.py` | Dashboard resource-contract owner | `xauusd_forecaster/dashboard_payloads.py`; API and Sync are consumers | `tests/test_dashboard_resource_contracts.py`, `tests/test_dashboard_sync.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
 | Dashboard sync | `scripts/run_dashboard_sync.py` | Dashboard Sync process | `xauusd_forecaster/dashboard/resource_contracts.py`, `xauusd_forecaster/dashboard_payloads.py` | `tests/test_dashboard_sync.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
 | Cloudflare API routing | `web/worker/api-router.ts` | Minimal API Worker router | `web/worker/index.ts`, `web/db/schema.ts` | `web/tests/d1-capabilities.test.mjs`, `web/tests/worker-cpu-headroom.test.mjs` | [Web and Cloudflare](../design/WEB_AND_CLOUDFLARE.md) |
@@ -141,6 +142,8 @@ contract.
   learning/news/market/audit projections and exact serialized-byte bounds.
 - `xauusd_forecaster/dashboard/news_resources.py` — owns local news archive
   reads, event-evidence resource generation/manifest, page cache, and metrics.
+- `xauusd_forecaster/dashboard/market_resources.py` — owns quote-file parsing
+  cache, market history/paging, decision reads, and chart projection.
 - `xauusd_forecaster/dashboard/health_projection.py` — owns read-only
   component projections for semantic health, Collector heartbeat, and Decision
   cadence; it owns no source authority, cache, or operational alert taxonomy.

@@ -44,6 +44,10 @@ bounds. It owns no transport, cursor, schedule, thread, or durable state.
 event-evidence display generation, immutable manifest handover, process-local
 page cache, paging, and news display metrics. Local SQLite remains authority;
 the cache and manifest are replaceable read-resource state.
+`xauusd_forecaster.dashboard.market_resources` owns quote-file enumeration and
+incremental parsing cache, market-history decision reads/paging, and current
+chart projection. Quote JSONL and local SQLite remain authoritative inputs;
+the process-local candle cache is disposable.
 `run_dashboard_sync.py` owns D1 mirroring and per-target progress. The
 scheduler remains the state-transition owner for audited retry overrides.
 
@@ -164,6 +168,8 @@ collapse all optional resources into one restart burst.
 - `xauusd_forecaster/dashboard/news_resources.py`: read-only archive SQL,
   event-evidence generation/manifest handover, process-local paging cache, and
   display metrics.
+- `xauusd_forecaster/dashboard/market_resources.py`: quote-file cache/parsing,
+  market-history SQL/paging, downsampling, and current chart projection.
 - `xauusd_forecaster/dashboard_payloads.py`: critical and audit contracts.
 - `xauusd_forecaster/dashboard_summaries.py`: indexed summary queries.
 - `xauusd_forecaster/learning_curves.py`: learning resource.
@@ -175,6 +181,7 @@ collapse all optional resources into one restart burst.
 `tests/test_dashboard_health_projection.py`,
 `tests/test_dashboard_resource_contracts.py`,
 `tests/test_dashboard_news_resources.py`,
+`tests/test_dashboard_market_resources.py`,
 `tests/test_dashboard_status_cache.py`, `tests/test_dashboard_api.py`,
 `tests/test_dashboard_payloads.py`,
 `tests/test_dashboard_sync.py`, `tests/test_operational_health.py`,
@@ -193,8 +200,8 @@ audited retry semantics.
 ## 16. Known current gaps
 
 Both entry scripts still contain extensive query, transport, scheduling, and
-domain logic. Shared serializers and Dashboard news reads are package-owned in
-the pending stack, but market/optional reads remain in the API entry point and
+domain logic. Shared serializers plus Dashboard news and market reads are
+package-owned in the pending stack, but optional reads remain in the API and
 two build commands retain transitional Sync imports until C4. The large
 API/sync tests group several resource families in single files. The lazy local
 market-history route has bounded output but growing source enumeration/merge
