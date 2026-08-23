@@ -79,10 +79,10 @@ from xauusd_forecaster.news_time import (
     SOURCE_REPORTED_TIME,
     assess_news_semantic_eligibility,
 )
-from xauusd_forecaster.ridge import RidgeArtifact, train_ridge
+from xauusd_forecaster.training.ridge import RidgeArtifact, train_ridge
 from xauusd_forecaster.shadow_simulation import shadow_league
 from xauusd_forecaster.u5_state import U5State
-from xauusd_forecaster.training import (
+from xauusd_forecaster.training.materialization import (
     MARKET_FEATURES,
     auto_train_due,
     train_market_challenger,

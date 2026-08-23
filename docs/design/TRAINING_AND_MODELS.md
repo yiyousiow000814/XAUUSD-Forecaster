@@ -107,19 +107,19 @@ rerun. Dirty revisions and publication records survive restart.
 ## 12. Entry points
 
 - Owner creation and wake: `scripts/run_forward_collector.py`
-- Training owner: `xauusd_forecaster/training_owner.py`
+- Training owner: `xauusd_forecaster/training/runtime.py`
 - One-shot repair that may seed eligible evidence:
   `scripts/run_evidence_repair_v2.py`
 
 ## 13. Core modules
 
-- `xauusd_forecaster/training_v2.py`: materialization, fit, manifest and
+- `xauusd_forecaster/training/generation.py`: materialization, fit, manifest and
   complete-generation publication.
-- `xauusd_forecaster/training_owner.py`: durable background lifecycle.
-- `xauusd_forecaster/training.py`: shared market/news training operations.
-- `xauusd_forecaster/ridge.py`: bounded Ridge artifact implementation.
+- `xauusd_forecaster/training/runtime.py`: durable background lifecycle.
+- `xauusd_forecaster/training/materialization.py`: shared market/news training operations.
+- `xauusd_forecaster/training/ridge.py`: bounded Ridge artifact implementation.
 - `xauusd_forecaster/news_contracts.py`: current complete-generation contract.
-- `xauusd_forecaster/inference_v2.py`: active-generation validation and reads.
+- `xauusd_forecaster/decision/inference.py`: active-generation validation and reads.
 - `xauusd_forecaster/execution_learning.py`: separate execution models.
 
 ## 14. Relevant tests

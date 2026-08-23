@@ -20,7 +20,7 @@ from xauusd_forecaster.news_features_v2 import aggregate_news_features_v2
 from xauusd_forecaster.news_input_coverage import news_input_coverage_at
 from xauusd_forecaster.news_evidence import EVIDENCE_POLICY_VERSION
 from xauusd_forecaster.repair_v2 import LANE_RULE_VERSION, TRAINING_ELIGIBILITY_VERSION
-from xauusd_forecaster.training import MARKET_FEATURES
+from xauusd_forecaster.training.materialization import MARKET_FEATURES
 from xauusd_forecaster.u5_state import U5_VERSION
 from xauusd_forecaster.execution_learning import append_execution_examples, append_lot_predictions
 
