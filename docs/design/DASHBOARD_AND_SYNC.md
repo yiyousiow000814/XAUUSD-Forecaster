@@ -204,10 +204,10 @@ collapse all optional resources into one restart burst.
 `tests/test_dashboard_market_resources.py`,
 `tests/test_dashboard_status_resources.py`,
 `tests/test_dashboard_operator_bridge.py`,
-`tests/test_dashboard_status_cache.py`, `tests/test_dashboard_api.py`,
+`tests/test_dashboard_status_cache.py`, `tests/dashboard/test_api.py`,
 `tests/test_dashboard_payloads.py`,
-`tests/test_dashboard_sync.py`, `tests/test_operational_health.py`,
-`tests/test_runtime_health.py`, and `tests/test_news_scheduler.py` cover first
+`tests/dashboard/test_sync.py`, `tests/runtime/test_operational_health.py`,
+`tests/runtime/test_runtime_health.py`, and `tests/news/test_scheduler.py` cover first
 paint, runtime-component thresholds and broker boundaries, cache single-flight
 and bounded last-good, resource isolation, byte/page bounds, cursor retry, and
 audited retry semantics.

@@ -137,11 +137,11 @@ than spending a second model request.
 
 ## 14. Relevant tests
 
-`tests/test_news_collection_owner.py`, `tests/test_forward_only.py`,
-`tests/test_news_scheduler.py`, `tests/test_scheduler_transition_execution.py`,
-`tests/test_critical_annotation_state.py`, `tests/test_news_event_identity.py`,
+`tests/test_news_collection_owner.py`, `tests/integration/test_forward_only.py`,
+`tests/news/test_scheduler.py`, `tests/news/test_scheduler_transition_execution.py`,
+`tests/news/test_critical_annotation_state.py`, `tests/test_news_event_identity.py`,
 `tests/test_news_hybrid_retrieval.py`, `tests/test_gemini_embeddings.py`,
-`tests/test_news_pipeline_health.py`, and `tests/test_daily_brief.py`.
+`tests/test_news_pipeline_health.py`, and `tests/news/test_daily_brief.py`.
 
 ## 15. Authoritative contracts/specs
 

@@ -16,7 +16,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 CONTROL_FILES = (
     "xauusd_control_center.ps1",
     "xauusd_control_center_runtime.ps1",

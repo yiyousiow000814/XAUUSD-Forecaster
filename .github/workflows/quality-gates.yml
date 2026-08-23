@@ -36,8 +36,8 @@ jobs:
         # workflow; every platform-neutral test remains in this fast full gate.
         run: >-
           python -m pytest -q --timeout=30 --timeout-method=thread
-          --ignore=tests/test_runtime_launchers.py
-          --ignore=tests/test_control_plane_install.py
+          --ignore=tests/runtime/test_control_center_contracts.py
+          --ignore=tests/runtime/test_control_plane_install.py
 
   web-build-and-tests:
     name: Web build and tests

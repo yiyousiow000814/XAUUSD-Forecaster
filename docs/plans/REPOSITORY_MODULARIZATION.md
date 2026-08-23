@@ -55,12 +55,12 @@ not an architectural contract.
 | `web/app/globals.css` | 2,056 / 211,860 | Shared tokens/layout plus many feature-specific responsive states | Nearly every Web feature | High | Move stable feature blocks beside owners without changing selector order or responsive contracts |
 | `web/app/_views/AuditView.tsx` | 1,727 / 118,017 | Audit navigation, news/decision/story presentation, data/resource states | Several audit resources | High | Extract leaf presentation sections with existing resource contracts; preserve view ownership |
 | `web/app/audit/LearningGraphModal.tsx` | 1,060 / 85,749 | Modal shell, chart transforms, controls, table/detail rendering | Learning resource and visualization | Medium | Extract pure chart/data transforms before UI shell, with rendered and data-shape tests |
-| `tests/test_forward_only.py` | 5,354 / 246,524 | Collection, point-in-time, ledger, source and forward-only families | Multiple evidence owners | High test coupling | Split by contract family, not production filename |
-| `tests/test_dashboard_api.py` | 3,290 / 152,423 | Critical cache, read models, API resources, market/news paging, overrides | API and several data owners | High test coupling | Extract stable owner-level contract modules as production boundaries are separated |
-| `tests/test_evidence_integrity_v2.py` | 3,112 / 151,447 | Repair, materialization, generation, weighting and evidence integrity | Evidence and training owners | High test coupling | Preserve one explicit cross-runtime integrity suite; split independent setup-heavy families |
-| `tests/test_news_scheduler.py` | 2,855 / 127,007 | Jobs, quota, governor, retry, overrides, migrations | Scheduler sub-owners | High test coupling | Organize around transition invariants and capacity contracts |
-| `tests/test_dashboard_sync.py` | 2,404 / 107,643 | Payload bounds, resources, cursors, target isolation, continuous lanes | Sync plus multiple resource owners | High test coupling | Keep cross-resource isolation tests; split resource protocols after production ownership is explicit |
-| `tests/test_runtime_launchers.py` | 2,352 / 132,873 | Hidden launch, service inventory, watchdog and release transitions | Runtime and release owners | High test coupling | Separate supervision from release transaction contracts without losing exact cross-boundary tests |
+| `tests/integration/test_forward_only.py` | 5,354 / 246,524 | Collection, point-in-time, ledger, source and forward-only families | Multiple evidence owners | High test coupling | Split by contract family, not production filename |
+| `tests/dashboard/test_api.py` | 3,290 / 152,423 | Critical cache, read models, API resources, market/news paging, overrides | API and several data owners | High test coupling | Extract stable owner-level contract modules as production boundaries are separated |
+| `tests/evidence/test_integrity_v2.py` | 3,112 / 151,447 | Repair, materialization, generation, weighting and evidence integrity | Evidence and training owners | High test coupling | Preserve one explicit cross-runtime integrity suite; split independent setup-heavy families |
+| `tests/news/test_scheduler.py` | 2,855 / 127,007 | Jobs, quota, governor, retry, overrides, migrations | Scheduler sub-owners | High test coupling | Organize around transition invariants and capacity contracts |
+| `tests/dashboard/test_sync.py` | 2,404 / 107,643 | Payload bounds, resources, cursors, target isolation, continuous lanes | Sync plus multiple resource owners | High test coupling | Keep cross-resource isolation tests; split resource protocols after production ownership is explicit |
+| `tests/runtime/test_control_center_contracts.py` | 2,352 / 132,873 | Hidden launch, service inventory, watchdog and release transitions | Runtime and release owners | High test coupling | Separate supervision from release transaction contracts without losing exact cross-boundary tests |
 
 ## Proposed target layout
 
@@ -121,7 +121,7 @@ change implements only the first refactor boundary described below:
   after all callers import the owner module and the entry script no longer
   exposes those names as a supported surface.
 - **Focused tests:** move/parameterize the existing cache behavior cases from
-  `tests/test_dashboard_api.py` into
+  `tests/dashboard/test_api.py` into
   `tests/test_dashboard_status_cache.py`; retain API-level first-paint and
   last-good integration assertions in the original suite.
 - **Rollback:** revert the one extraction commit; no state or data migration is
@@ -164,7 +164,7 @@ Implementation status: `PENDING` until the Phase 3 stacked change merges.
 - **Focused tests:** direct projection boundaries move to
   `tests/test_dashboard_health_projection.py`; payload placement, snapshot
   timing, alert aggregation, route, database, and API integration remain in
-  `tests/test_dashboard_api.py` and the operational/runtime suites.
+  `tests/dashboard/test_api.py` and the operational/runtime suites.
 - **Measured result:** `run_dashboard_api.py` is 3,004 lines / 144,559 bytes
   after extraction, using the same measurement method as the inventory table.
 - **Rollback:** revert the single extraction commit; no state or data migration
@@ -220,7 +220,7 @@ Implementation status: `PENDING` until the C3a stacked change merges.
   canonical names while retaining only route/HTTP/process orchestration.
 - **Focused tests:** pure news resource cases move to
   `tests/test_dashboard_news_resources.py`; tests crossing the full Dashboard
-  payload or HTTP route remain in `tests/test_dashboard_api.py`.
+  payload or HTTP route remain in `tests/dashboard/test_api.py`.
 - **Rollback:** revert the extraction commit; existing SQLite evidence and
   replaceable manifest/cache state require no migration.
 - **Non-goals:** no SQL text, news eligibility, annotation recovery, cache,
@@ -238,7 +238,7 @@ Implementation status: `PENDING` until the C3b stacked change merges.
   canonical functions, constants, lock, and cache during the handover.
 - **Focused tests:** quote cache, gzip/session chart, downsampling, and cursor
   page cases move to `tests/test_dashboard_market_resources.py`; HTTP route and
-  complete payload assertions remain in `tests/test_dashboard_api.py`.
+  complete payload assertions remain in `tests/dashboard/test_api.py`.
 - **Rollback:** revert the extraction commit; the cache is disposable and no
   quote or SQLite authority is migrated.
 - **Known unchanged gap:** market-history output is capped but retained-file
@@ -259,7 +259,7 @@ Implementation status: `PENDING` until the C3c stacked change merges.
   names while retaining HTTP/process orchestration and the operator bridge.
 - **Focused tests:** direct deployment, session, and learning-cache contracts
   move to `tests/test_dashboard_status_resources.py`; full payload and HTTP
-  assertions remain in `tests/test_dashboard_api.py`.
+  assertions remain in `tests/dashboard/test_api.py`.
 - **Rollback:** revert the extraction commit; the derived cache is disposable
   and no SQLite, file, schema, route, or process authority is migrated.
 - **Non-goals:** no SQL, payload, timestamp, freshness, cache, route, scheduler,
@@ -300,7 +300,7 @@ Implementation status: `PENDING` until the C4 stacked change merges.
   production script-to-script library imports.
 - **Focused tests:** direct protocol tests call package owners; cross-resource
   isolation, heartbeat ordering, lane shutdown, and production-shape cases stay
-  in `tests/test_dashboard_sync.py`.
+  in `tests/dashboard/test_sync.py`.
 - **Rollback:** revert the extraction commit; checkpoint schemas and files are
   unchanged and require no migration.
 - **Non-goals:** no cadence, backoff, cursor, page, byte, auth, endpoint,

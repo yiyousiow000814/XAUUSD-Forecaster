@@ -159,8 +159,9 @@ failures remain owned and visible in WPF rather than switching release engines.
 
 ## 14. Relevant tests
 
-`tests/test_runtime_launchers.py`, `tests/test_control_plane_install.py`, `tests/test_runtime_health.py`,
-`tests/test_production_shape.py`, `tests/test_release_validation_fixtures.py`,
+`tests/runtime/test_control_center_contracts.py`,
+`tests/runtime/test_control_plane_install.py`, `tests/runtime/test_runtime_health.py`,
+`tests/runtime/test_production_shape.py`, `tests/runtime/test_release_validation_fixtures.py`,
 `tests/test_ci_contracts.py`, and `tests/test_repository_policy.py` cover
 service inventory, exact child/bundle identity, safe Control Plane installation
 and rollback, bounded repository retries, WPF lifecycle, structured operation

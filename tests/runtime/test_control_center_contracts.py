@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 CONTROL_CENTER_OWNER_FILES = (
     "xauusd_control_center.ps1",
     "xauusd_control_center_release.ps1",
