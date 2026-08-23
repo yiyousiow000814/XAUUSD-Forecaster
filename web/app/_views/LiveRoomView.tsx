@@ -23,7 +23,7 @@ type Decision = {
   outcome_reason_codes?: string[];
   long_return?: number | null;
   short_return?: number | null;
-  features: Record<string, number | null>;
+  features?: Record<string, number | null>;
 };
 
 type Payload = {

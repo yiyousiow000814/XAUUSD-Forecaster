@@ -1415,7 +1415,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
           <option value="evidence">当前可用新闻事件 · {formatExactCount(newsMetrics.events.currently_model_eligible)}</option>
           <option value="stories">事件脉络 · {formatExactCount(activeEventTotal)}</option>
           <option value="decisions">决策与30分钟结果 · {formatExactCount(payload?.counts?.decision_events)}</option>
-          <option value="league">Live OOS 学习曲线 · {liveOosModelGroups === undefined ? "点击查看" : `${formatExactCount(liveOosModelGroups)}组`}</option>
+          <option value="league">Live OOS 学习曲线 · {liveOosModelGroups === undefined ? "读取中" : `${formatExactCount(liveOosModelGroups)}组`}</option>
           <option value="coverage">大视野覆盖 · {formatExactCount(payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length)}/11</option>
         </select>
       </label>

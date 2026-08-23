@@ -1776,6 +1776,8 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /无效样本/);
   assert.match(source, /activeLearningIdentities/);
   assert.match(source, /counts\?\.live_oos_model_groups/);
+  assert.match(source, /Live OOS 学习曲线 · \{liveOosModelGroups === undefined \? "读取中"/);
+  assert.doesNotMatch(source, /Live OOS 学习曲线 · .*点击查看/);
   assert.match(source, /className="news-table"/);
 });
 
@@ -3023,6 +3025,22 @@ test("release validation authorizes before exposing a non-mutating context", asy
   );
   assert.equal(unauthorized.status, 401);
   assert.deepEqual(await unauthorized.json(), { error: "unauthorized" });
+});
+
+test("keeps learning cadence controls at the shared interaction target height", () => {
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.summary-cadence button \{ min-height:44px;/);
+  assert.match(css, /\.summary-cadence button \{ width:100%; min-width:0; min-height:48px;/);
+});
+
+test("release route plan supplies the required learning-history resource", () => {
+  const manifest = JSON.parse(readFileSync(
+    new URL("../worker-validation-manifest.json", import.meta.url), "utf8",
+  ));
+  const route = manifest.routes.find(row =>
+    row.method === "GET" && row.path === "/api/learning-history"
+  );
+  assert.equal(route.request_query, "?resource=model&limit=100");
 });
 
 test("production-shaped release validation reaches work before every mutation", () => {
