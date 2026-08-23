@@ -2172,7 +2172,8 @@ def test_required_github_gate_set_is_exact_and_missing_gate_stays_pending(tmp_pa
     result = _run_control_center_contract(
         tmp_path,
         "$runs=@($requiredGitHubChecks | ForEach-Object { [pscustomobject]@{"
-        "name=$_;status='completed';conclusion='success'} });"
+        "id=1;name=$_;head_sha=('a'*40);started_at='2026-08-23T01:00:00Z';"
+        "status='completed';conclusion='success'} });"
         "$script:payload=[pscustomobject]@{check_runs=$runs}|ConvertTo-Json -Depth 5;"
         "function gh { $global:LASTEXITCODE=0; return $script:payload };"
         "$all=Test-RequiredGitHubChecks -Revision ('a'*40);"
@@ -2182,7 +2183,82 @@ def test_required_github_gate_set_is_exact_and_missing_gate_stays_pending(tmp_pa
         "$failed=Test-RequiredGitHubChecks -Revision ('a'*40);"
         'Write-Output "$all,$missing,$failed"',
     )
-    assert result == "PASSED,PENDING,FAILED"
+    assert result == "PASSED,PENDING,CHECKS_BLOCKED"
+
+
+def test_required_github_gate_uses_latest_exact_sha_attempt(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$base=@($requiredGitHubChecks | ForEach-Object { [pscustomobject]@{"
+        "id=1;name=$_;head_sha=('a'*40);started_at='2026-08-23T01:00:00Z';"
+        "status='completed';conclusion='success'} });"
+        "$old=[pscustomobject]@{id=2;name=$requiredGitHubChecks[0];head_sha=('a'*40);"
+        "started_at='2026-08-23T02:00:00Z';status='completed';conclusion='cancelled'};"
+        "$new=[pscustomobject]@{id=3;name=$requiredGitHubChecks[0];head_sha=('a'*40);"
+        "started_at='2026-08-23T03:00:00Z';status='completed';conclusion='success'};"
+        "$script:payload=[pscustomobject]@{check_runs=@($base)+@($old,$new)}|ConvertTo-Json -Depth 5;"
+        "function gh{$global:LASTEXITCODE=0;$script:payload};"
+        "$recovered=Test-RequiredGitHubChecks -Revision ('a'*40);"
+        "$new.status='in_progress';$new.conclusion=$null;"
+        "$script:payload=[pscustomobject]@{check_runs=@($base)+@($old,$new)}|ConvertTo-Json -Depth 5;"
+        "$pending=Test-RequiredGitHubChecks -Revision ('a'*40);"
+        "$new.head_sha=('b'*40);"
+        "$script:payload=[pscustomobject]@{check_runs=@($base)+@($old,$new)}|ConvertTo-Json -Depth 5;"
+        "$wrongSha=Test-RequiredGitHubChecks -Revision ('a'*40);"
+        'Write-Output "$recovered,$pending,$wrongSha"',
+    )
+    assert result == "PASSED,PENDING,CHECKS_BLOCKED"
+
+
+def test_checks_blocked_candidate_recovers_on_same_sha_without_duplicate_identity(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$state.candidate.validation_state='NEW';"
+        "$state.candidate.compatibility_state='PENDING';Write-ReleaseControlState $state;"
+        "$candidate=$state.candidate;$script:checksPass=$false;$script:preflights=0;"
+        "function Test-ProductionCandidateProvenance{return $true};"
+        "function Invoke-ProductionShapePreflight{$script:preflights++;return $true};"
+        "function Test-RequiredGitHubChecks{if($script:checksPass){'PASSED'}else{'CHECKS_BLOCKED'}};"
+        "function Get-CandidateChangedFiles{return @('docs/README.md')};"
+        "function Get-CandidateCompatibilityRequirement{return [pscustomobject]@{state='AUTOMATIC';files=@()}};"
+        "function Get-CandidateRouteValidationPlan{return [pscustomobject]@{worker_cpu_required=$false;"
+        "requires_validation=$false;static_assets=@();worker_reads=@();worker_writes=@()}};"
+        "function Set-CloudflareCandidatePointer{};"
+        "function Test-CandidateDataParity{return [pscustomobject]@{passed=$true;state='PASSED'}};"
+        "function Get-CandidateAuthInspection{return [pscustomobject]@{state='PASSED'}};"
+        "Invoke-AutomaticCandidateValidation -Candidate $candidate|Out-Null;"
+        "$blocked=Get-ReleaseControlState;$script:checksPass=$true;"
+        "function Enter-ReleaseTransactionLock{return $true};function Exit-ReleaseTransactionLock{};"
+        "function Reconcile-ReleaseControlState{};function Find-NewCandidateRelease{return $null};"
+        "Invoke-CandidateDiscovery|Out-Null;$final=Get-ReleaseControlState;"
+        "$history=Get-Content -LiteralPath $releaseHistoryPath -Raw;"
+        "$blockedEvents=([regex]::Matches($history,'CANDIDATE_CHECKS_BLOCKED')).Count;"
+        "$recoveredEvents=([regex]::Matches($history,'CANDIDATE_CHECKS_RECOVERED')).Count;"
+        'Write-Output "$($blocked.candidate.validation_state),$($blocked.candidate.validation.repository),'
+        '$($final.candidate.validation_state),$script:preflights,$blockedEvents,$recoveredEvents,'
+        '$($final.candidate.git_sha -eq $candidate.git_sha)"',
+    )
+    assert result == "CHECKS_BLOCKED,FAILED,PASSED,1,1,1,True"
+
+
+def test_checks_blocked_presentation_is_retryable_but_not_promotable(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$state.candidate.validation_state='CHECKS_BLOCKED';"
+        "$state.control_bundle_hash_verified=$true;$state.control_bundle_exact_revision=$true;"
+        "$state.control_bundle_revision=('c'*40);"
+        "$state.candidate.validation=[pscustomobject]@{key=$state.candidate.validation_key;"
+        "repository='FAILED';repository_retryable=$true;windows='PASSED';"
+        "reason='REQUIRED_GITHUB_CHECKS_BLOCKED'};Write-ReleaseControlState $state;"
+        "$view=Get-ControlCenterReleasePresentation -Release $state;"
+        'Write-Output "$($view.candidate_state),$($view.can_promote),$($view.candidate_detail)"',
+    )
+    assert result == (
+        "CHECKS_BLOCKED,False,Required GitHub checks failed and may be rerun "
+        "for this exact SHA."
+    )
 
 
 def test_production_candidate_requires_main_reachability(tmp_path) -> None:

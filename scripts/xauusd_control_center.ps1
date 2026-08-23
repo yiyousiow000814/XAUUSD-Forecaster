@@ -726,17 +726,27 @@ function Test-RequiredGitHubChecks {
     param([Parameter(Mandatory = $true)][string]$Revision)
     try {
         $json = @(& gh api --method GET `
-            "repos/yiyousiow000814/XAUUSD-Forecaster/commits/$Revision/check-runs" 2>$null) -join "`n"
+            "repos/yiyousiow000814/XAUUSD-Forecaster/commits/$Revision/check-runs?filter=latest&per_page=100" `
+            2>$null) -join "`n"
         if ($LASTEXITCODE -ne 0) { return "PENDING" }
         $runs = @(($json | ConvertFrom-Json).check_runs)
         foreach ($name in $requiredGitHubChecks) {
-            $matching = @($runs | Where-Object { [string]$_.name -eq $name })
-            if ($matching.Count -eq 0 -or
-                @($matching | Where-Object { [string]$_.status -ne "completed" }).Count -gt 0) {
+            $matching = @($runs | Where-Object {
+                [string]$_.name -eq $name -and
+                [string]$_.head_sha -eq $Revision
+            })
+            if ($matching.Count -eq 0) {
                 return "PENDING"
             }
-            if (@($matching | Where-Object { [string]$_.conclusion -ne "success" }).Count -gt 0) {
-                return "FAILED"
+            $latest = $matching | Sort-Object `
+                @{ Expression = { [string]$_.started_at }; Descending = $true }, `
+                @{ Expression = { [long]$_.id }; Descending = $true } | `
+                Select-Object -First 1
+            if ([string]$latest.status -ne "completed") {
+                return "PENDING"
+            }
+            if ([string]$latest.conclusion -ne "success") {
+                return "CHECKS_BLOCKED"
             }
         }
         return "PASSED"
@@ -1768,6 +1778,11 @@ function Invoke-AutomaticCandidateValidation {
     param([Parameter(Mandatory = $true)][object]$Candidate)
     $state = Get-ReleaseControlState
     if (-not $state -or -not (Test-ReleaseIdentity $state.candidate $Candidate)) { return $false }
+    $priorValidationState = [string]$state.candidate.validation_state
+    $windowsAlreadyPassed = [bool](
+        $priorValidationState -in @("CHECKS_BLOCKED", "CHECKS_PENDING") -and
+        [string]$state.candidate.validation.windows -eq "PASSED"
+    )
     $state.candidate.validation_state = "STAGING"
     $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
     Write-ReleaseControlState -State $state
@@ -1780,21 +1795,46 @@ function Invoke-AutomaticCandidateValidation {
         }
         $state.candidate.validation_state = "TESTING"
         Write-ReleaseControlState -State $state
-        if (-not (Invoke-ProductionShapePreflight -Revision ([string]$Candidate.windows_revision))) {
+        if (-not $windowsAlreadyPassed -and
+            -not (Invoke-ProductionShapePreflight -Revision ([string]$Candidate.windows_revision))) {
             throw "Isolated Windows preflight failed."
         }
         $checks = Test-RequiredGitHubChecks -Revision ([string]$Candidate.git_sha)
-        if ($checks -eq "FAILED") { throw "Required GitHub checks failed." }
+        if ($checks -eq "CHECKS_BLOCKED") {
+            $state.candidate.validation_state = "CHECKS_BLOCKED"
+            $state.candidate.validation = [pscustomobject]@{
+                key = [string]$Candidate.validation_key
+                repository = "FAILED"
+                repository_retryable = $true
+                windows = "PASSED"
+                cloudflare = "NOT_RUN"
+                reason = "REQUIRED_GITHUB_CHECKS_BLOCKED"
+                tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            Write-ReleaseControlState -State $state
+            if ($priorValidationState -ne "CHECKS_BLOCKED") {
+                Write-ReleaseHistory -Event "CANDIDATE_CHECKS_BLOCKED" `
+                    -Release $state.candidate -Detail @{ retryable = $true }
+            }
+            return $false
+        }
         if ($checks -eq "PENDING") {
+            $state.candidate.validation_state = "CHECKS_PENDING"
             $state.candidate.validation = [pscustomobject]@{
                 key = [string]$Candidate.validation_key
                 repository = "PENDING"
+                repository_retryable = $true
                 windows = "PASSED"
-                cloudflare = "PENDING"
+                cloudflare = "NOT_RUN"
+                reason = "REQUIRED_GITHUB_CHECKS_PENDING"
                 tested_at = [DateTimeOffset]::UtcNow.ToString("o")
             }
             Write-ReleaseControlState -State $state
             return $false
+        }
+        if ($priorValidationState -in @("CHECKS_BLOCKED", "CHECKS_PENDING")) {
+            Write-ReleaseHistory -Event "CANDIDATE_CHECKS_RECOVERED" `
+                -Release $state.candidate -Detail @{ exact_sha = [string]$Candidate.git_sha }
         }
         $changed = @(Get-CandidateChangedFiles `
             -StableRevision ([string]$state.stable.git_sha) `
@@ -4160,6 +4200,8 @@ function Get-ControlCenterReleasePresentation {
         "TESTING" { "Validation is running against the exact release identity." }
         "STAGING" { "Candidate is being staged at zero percent traffic." }
         "NEW" { "Candidate is waiting for validation to begin." }
+        "CHECKS_PENDING" { "Required GitHub checks are pending for this exact SHA." }
+        "CHECKS_BLOCKED" { "Required GitHub checks failed and may be rerun for this exact SHA." }
         "REVIEW_REQUIRED" { [string]$Release.candidate.validation.reason }
         "REBASE_REQUIRED" { "REBASE_ON_RELEASE_CONTROL_MAIN_REQUIRED" }
         default { "No candidate release is currently available." }
@@ -4181,8 +4223,10 @@ function Get-ControlCenterReleasePresentation {
         } else { "Artifact provenance is unknown" }
     } elseif (-not $compatibilityPassed) {
         "Compatibility has not passed"
-    } elseif ($candidateState -eq "TESTING" -or $candidateState -eq "STAGING" -or $candidateState -eq "NEW") {
+    } elseif ($candidateState -in @("TESTING", "STAGING", "NEW", "CHECKS_PENDING")) {
         "Candidate still testing"
+    } elseif ($candidateState -eq "CHECKS_BLOCKED") {
+        "REQUIRED_GITHUB_CHECKS_BLOCKED / RETRYABLE"
     } elseif ($candidateState -eq "FAILED") {
         if ($Release.candidate.validation.reason) {
             [string]$Release.candidate.validation.reason
@@ -4248,7 +4292,7 @@ function Get-ControlCenterSummaryPresentation {
         "FAILED"
     } elseif (
         $unhealthyCount -gt 0 -or $deploymentState -ne "READY" -or
-        $releaseView.candidate_state -eq "FAILED"
+        $releaseView.candidate_state -in @("FAILED", "CHECKS_BLOCKED")
     ) {
         "DEGRADED"
     } else { "HEALTHY" }
@@ -5334,6 +5378,9 @@ function Show-ControlCenter {
                 $repositoryCheck = if ($validation -and $validation.repository) {
                     [string]$validation.repository
                 } else { "WAITING" }
+                if ($releaseView.candidate_state -eq "CHECKS_BLOCKED") {
+                    $repositoryCheck = "$repositoryCheck / RETRYABLE"
+                }
                 $windowsCheck = if ($validation -and $validation.windows) { [string]$validation.windows } else { "WAITING" }
                 $contractCheck = if ($validation -and $validation.cloudflare) { [string]$validation.cloudflare } else { "WAITING" }
                 $cpuCheck = "WAITING"
