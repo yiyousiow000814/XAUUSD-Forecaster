@@ -94,6 +94,7 @@ test("one complete HTTP baseline precedes push and recurring status polling is s
   assert.match(liveRoom, /DASHBOARD_REFRESH_INTERVALS\.live,[\s\S]*"current",[\s\S]*"status"/);
   assert.doesNotMatch(liveRoom, /"live-status"/);
   assert.match(liveRoom, /effectiveQuoteAgeSeconds\([\s\S]*payload[\s\S]*now/);
+  assert.match(liveRoom, /!current\.preview_status_summary\) setRefreshing\(false\)/);
   assert.match(shell, /ensureStatusBaseline[\s\S]*\.catch\([\s\S]*\.finally\(\(\) => \{ if \(active\) transport\?\.start\(\)/);
   assert.match(previewBanner, /subscribeDashboardResource\([\s\S]*"\/api\/status"/);
   assert.doesNotMatch(previewBanner, /fetch\([\s\S]*\/api\/status/);

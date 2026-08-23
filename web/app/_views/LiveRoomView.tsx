@@ -157,7 +157,9 @@ export default function LiveRoomView() {
   }, [refresh]);
 
   useEffect(() => subscribeDashboardResource("/api/status", () => {
-    setPayload(readDashboardResource<Payload>("/api/status"));
+    const current = readDashboardResource<Payload>("/api/status");
+    setPayload(current);
+    if (current && !current.preview_status_summary) setRefreshing(false);
   }), []);
 
   useEffect(() => {
