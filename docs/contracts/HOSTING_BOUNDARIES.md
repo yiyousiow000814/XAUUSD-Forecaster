@@ -62,6 +62,32 @@
   API boundary, its owner and source of truth must be identified, the path must
   be classified as critical or optional, and its work and transport growth must
   be classified against accumulated state.
+- Boundary correctness includes producer and consumer compatibility. Field and
+  resource names, serialized shape, units, optionality, ordering, and deletion
+  meaning must agree at the real production entry points. Producer validation
+  alone cannot establish that the consumer preserves required behavior.
+- A transport optimization must preserve required consumer semantics, not only
+  remain within a byte or item limit. Partial, compact, delta, and incremental
+  transports must define the authoritative complete baseline, delta-owned
+  fields, merge and deletion behavior, stale and sequence handling, and
+  reconnect/resync behavior. A compact update MUST NOT erase unrelated richer
+  baseline state unless complete replacement is the explicit contract. The
+  receiver must have a bounded path to recover every required complete field.
+- Recurring cross-boundary work has exactly one explicit execution owner with a
+  defined startup and supervision path, cadence, disabled/not-configured state,
+  activation boundary, durable state, retry and failure isolation, rollback,
+  shutdown, and process/machine restart recovery. A callable component or
+  schedule definition without a supervised production invocation is not an
+  execution owner.
+- Monotonic identity, cursor, or sequence authority required by a transport must
+  survive or reconcile across process restart, machine restart, and reconnect.
+  Ambiguous ownership or stale acknowledgements fail closed rather than
+  resetting authority or silently accepting an older update.
+- Externally mutable readiness is distinct from deterministic contract failure.
+  Where release eligibility depends on an external check, provisioning step, or
+  service becoming available, the same immutable identity remains retryable and
+  non-promotable until readiness succeeds. Release-specific state and promotion
+  semantics are governed by [`RELEASE_CONTROL.md`](RELEASE_CONTROL.md).
 - A path that communicates liveness, readiness, current authority, deployment,
   or control state must have bounded work and bounded transport independently
   of history, record, user, retry, or generation growth. Its representation is

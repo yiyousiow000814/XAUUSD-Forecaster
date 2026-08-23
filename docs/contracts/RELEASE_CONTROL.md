@@ -109,8 +109,27 @@ is indeterminate, never inferred as success or failure from empty output alone.
 Repository validation requires the exact-SHA check runs named `Python regression
 suite`, `Web build and tests`, `Windows runtime contracts`, `Repository policy`,
 and CodeQL `Analyze` jobs for actions, C#, JavaScript/TypeScript, and Python.
-Every named run must exist, be complete, and conclude successfully. Missing
-required runs remain PENDING; unrelated optional runs cannot substitute.
+For each required name, only runs whose `head_sha` equals the Candidate Git SHA
+are eligible, and the latest exact-SHA attempt is authoritative. Latest-attempt
+ordering is deterministic by start time and then run ID. An older failed or
+cancelled attempt cannot poison a newer successful rerun; an older success
+cannot authorize promotion while a newer attempt is in progress or has failed.
+Unrelated optional runs cannot substitute.
+
+The external required-check gate has three outcomes. `PENDING` means a required
+exact-SHA run is missing or its latest attempt is incomplete, and is represented
+by Candidate state `CHECKS_PENDING`. `CHECKS_BLOCKED` means the latest attempt
+for a required exact-SHA run completed without success. `PASSED` means every
+required name's latest exact-SHA attempt completed successfully.
+`CHECKS_PENDING` and `CHECKS_BLOCKED` are fail-closed, non-promotable, and
+retryable for the same immutable Worker Version ID plus Git SHA. A later GitHub
+rerun for that exact SHA may re-enter validation without creating a new
+Candidate identity, and an already-passed isolated Windows preflight is retained.
+These external states do not convert deterministic provenance, compatibility,
+directed Worker, CPU, parity, transaction, or observation failures into
+retryable states; those retain their existing terminal or operator-review
+semantics.
+
 Transient external repository or GitHub transport failures leave the same exact
 Candidate in retryable `CHECKS_PENDING`, fail closed for promotion, and retain
 already-passed isolated Windows preflight evidence for that validation key.
@@ -246,6 +265,12 @@ rollback never copy control files. Their preflight verifies the active bundle's
 exact source revision and every recorded SHA-256 hash. Release diagnostics keep
 `control_bundle_revision`, `control_bundle_exact_revision`, and
 `control_bundle_hash_verified` separately from the Windows business revision.
+The Control Plane bundle revision and Business Runtime revision are independent
+identities. Promoting or reversing the Business Runtime changes only the
+coordinated Worker and Windows business pair; it MUST NOT replace, upgrade, or
+imply validation of the installed deployment-control bundle. A Control Plane
+bundle change requires its own explicit installation and exact revision/hash
+verification.
 
 Control Plane installation is a separate local transaction, not a Business
 Runtime Promote. The repository entry point MUST resolve one exact revision
