@@ -18,7 +18,6 @@ from xauusd_forecaster.live_broadcast import public_live_state, publish_live_sta
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True, type=Path)
-    parser.add_argument("--url", required=True)
     parser.add_argument("--sequence", required=True, type=int)
     parser.add_argument("--source-revision", required=True)
     parser.add_argument("--send", action="store_true", help="future coordinated cutover only")
@@ -29,7 +28,7 @@ def main() -> int:
         status, sequence=args.sequence, source_revision=args.source_revision,
     )
     result = publish_live_state(
-        args.url, os.environ.get("LIVE_BROADCAST_PUBLISH_TOKEN", ""), state,
+        os.environ.get("LIVE_BROADCAST_PUBLISH_TOKEN", ""), state,
         dry_run=not args.send,
         allow_production_publish=args.activate_production_publisher,
     )

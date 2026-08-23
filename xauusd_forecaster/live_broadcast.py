@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import copy
 import json
-import urllib.parse
 import urllib.request
 from collections.abc import Mapping
 from typing import Any
 
 LIVE_SCHEMA_VERSION = "PUBLIC_LIVE_V1"
+LIVE_BROADCAST_ORIGIN = "https://aurum-live-broadcast.yiyousiow1234.workers.dev"
 MAX_LIVE_BYTES = 16_384
 MAX_RECENT_DECISIONS = 6
 PRIVATE_FIELDS = {
@@ -141,7 +141,7 @@ def public_live_state(status: Mapping[str, Any], *, sequence: int, source_revisi
 
 
 def publish_live_state(
-    url: str, token: str, state: Mapping[str, Any], *, dry_run: bool = True,
+    token: str, state: Mapping[str, Any], *, dry_run: bool = True,
     allow_production_publish: bool = False, timeout_seconds: int = 10,
 ) -> dict[str, Any]:
     """Publish only through an explicit activation boundary; Preview stays dry-run."""
@@ -150,10 +150,7 @@ def publish_live_state(
     if not dry_run and not allow_production_publish:
         raise PermissionError("production broadcast publisher is not activated")
     payload = serialize_live_state(validate_live_state(state))
-    parsed = urllib.parse.urlsplit(url)
-    if parsed.scheme != "https" or not parsed.netloc or parsed.query:
-        raise ValueError("broadcast URL must be a query-free HTTPS origin")
-    endpoint = f"{url.rstrip('/')}/publish"
+    endpoint = f"{LIVE_BROADCAST_ORIGIN}/publish"
     if dry_run:
         endpoint += "?dry_run=true"
     request = urllib.request.Request(

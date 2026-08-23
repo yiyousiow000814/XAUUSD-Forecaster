@@ -36,6 +36,8 @@ from `LIVE_BROADCAST_PUBLISH_TOKEN` with digest-based constant-time semantics
 before reading or parsing the body. The token must never enter a URL, log,
 database, Durable Object record, or response. Browser WebSockets have no publish
 permission; an application message closes the subscriber connection.
+The Windows publisher uses one code-owned `aurum-live-broadcast` origin; runtime
+input cannot redirect the credential to another host.
 
 An authenticated `?dry_run=true` publish validates the complete contract and
 size but performs zero storage writes and zero broadcasts. Preview and 0%

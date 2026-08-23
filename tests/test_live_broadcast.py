@@ -69,9 +69,11 @@ def test_publisher_is_dry_run_by_default_and_never_places_token_in_url() -> None
         def read(self): return json.dumps({"valid": True, "dry_run": True}).encode()
 
     with patch("urllib.request.urlopen", return_value=Response()) as opened:
-        result = publish_live_state("https://broadcast.example", "secret-token", state)
+        result = publish_live_state("secret-token", state)
     request = opened.call_args.args[0]
-    assert request.full_url == "https://broadcast.example/publish?dry_run=true"
+    assert request.full_url == (
+        "https://aurum-live-broadcast.yiyousiow1234.workers.dev/publish?dry_run=true"
+    )
     assert "secret-token" not in request.full_url
     assert request.headers["Authorization"] == "Bearer secret-token"
     assert result["dry_run"] is True
@@ -80,4 +82,4 @@ def test_publisher_is_dry_run_by_default_and_never_places_token_in_url() -> None
 def test_live_publish_requires_explicit_future_activation() -> None:
     state = public_live_state(status(), sequence=1, source_revision="abc")
     with pytest.raises(PermissionError, match="not activated"):
-        publish_live_state("https://broadcast.example", "secret", state, dry_run=False)
+        publish_live_state("secret", state, dry_run=False)
