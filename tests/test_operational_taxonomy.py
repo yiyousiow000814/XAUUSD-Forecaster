@@ -4,7 +4,7 @@ from pathlib import Path
 
 from xauusd_forecaster.news.brief.product import GENERATION_FAILURE_CODES
 from xauusd_forecaster.news.retrieval.gemini_embeddings import GEMINI_EMBEDDING_FAILURE_CODES
-from xauusd_forecaster.operational_taxonomy import (
+from xauusd_forecaster.runtime.taxonomy import (
     INTENTIONALLY_UNCORRELATED_FAILURE_CODES,
     normalize_operational_event,
     operational_code_index,
@@ -183,7 +183,7 @@ def test_disallowed_emitted_severity_fails_visibly_instead_of_hiding_event() -> 
 def test_current_python_operational_emitters_use_allowed_severities() -> None:
     registered = operational_code_index()
     emitted = _emitted_alert_calls(
-        ROOT / "xauusd_forecaster" / "operational_health.py"
+        ROOT / "xauusd_forecaster" / "runtime" / "operational_health.py"
     )
     assert emitted
     for codes, severities in emitted:

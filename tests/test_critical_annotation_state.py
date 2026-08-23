@@ -19,7 +19,7 @@ from xauusd_forecaster.news.semantics.critical_state import (
     refresh_news_revision_state,
 )
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.operational_health import scheduler_health_snapshot
+from xauusd_forecaster.runtime.operational_health import scheduler_health_snapshot
 from xauusd_forecaster.news.scheduler.state import (
     ROUTINE_POOL,
     backoff_job,

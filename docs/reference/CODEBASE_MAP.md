@@ -11,7 +11,7 @@ contract.
 
 | I want to change… | Start here | Main owner | Supporting modules | Tests | Docs |
 |---|---|---|---|---|---|
-| Five-minute decision | `scripts/run_forward_collector.py` | Collector process loop | `xauusd_forecaster/collector_runtime.py`, `xauusd_forecaster/decision/engine.py`, `xauusd_forecaster/decision/live.py`, `xauusd_forecaster/decision/inference.py` | `tests/test_decision.py`, `tests/test_forward_only.py` | [Decision and Evidence](../design/DECISION_AND_EVIDENCE.md) |
+| Five-minute decision | `scripts/run_forward_collector.py` | Collector process loop | `xauusd_forecaster/decision/collector_runtime.py`, `xauusd_forecaster/decision/engine.py`, `xauusd_forecaster/decision/live.py`, `xauusd_forecaster/decision/inference.py` | `tests/test_decision.py`, `tests/test_forward_only.py` | [Decision and Evidence](../design/DECISION_AND_EVIDENCE.md) |
 | Quote or session handling | `ctrader/XauusdForwardQuoteBridge/XauusdForwardQuoteBridge.cs` | Quote Bridge | `xauusd_forecaster/market.py`, `xauusd_forecaster/market_session.py` | `tests/test_quotes_and_labeling.py`, `tests/test_market_session.py` | [Forward-only Evidence](../contracts/FORWARD_ONLY.md) |
 | Outcome labeling | `xauusd_forecaster/decision/live.py` | Collector settlement loop | `xauusd_forecaster/evidence/executable_label.py`, `xauusd_forecaster/execution_costs.py` | `tests/test_quotes_and_labeling.py`, `tests/test_execution_costs.py` | [System Boundaries](../contracts/SYSTEM_BOUNDARIES.md) |
 | Training materialization | `xauusd_forecaster/training/materialization.py` | BackgroundTrainingOwner | `xauusd_forecaster/training/runtime.py`, `xauusd_forecaster/evidence/ledger.py` | `tests/test_training_owner.py`, `tests/test_evidence_integrity_v2.py` | [Training and Models](../design/TRAINING_AND_MODELS.md) |
@@ -22,23 +22,23 @@ contract.
 | Scheduler or retry | `xauusd_forecaster/news/scheduler/state.py` | Durable scheduler state-transition owner | `xauusd_forecaster/news/scheduler/runtime.py`, `xauusd_forecaster/news/semantics/transitions.py`; entry script owns process/thread wiring | `tests/test_news_scheduler.py`, `tests/test_scheduler_transition_execution.py` | [AI Scheduler](../design/AI_PRIORITY_SCHEDULER.md) |
 | Embedding or retrieval | `xauusd_forecaster/news/retrieval/search.py` | News identity retrieval owner | `xauusd_forecaster/news/retrieval/gemini_embeddings.py`, `xauusd_forecaster/news/annotation/impact.py` | `tests/test_gemini_embeddings.py`, `tests/test_news_hybrid_retrieval.py` | [News Identity Retrieval](../design/NEWS_IDENTITY_RETRIEVAL.md) |
 | Daily Brief | `xauusd_forecaster/news/brief/product.py` | Daily Brief result/transition owner | `xauusd_forecaster/news/brief/runtime.py`, `xauusd_forecaster/news/scheduler/state.py` | `tests/test_daily_brief.py` | [Daily Brief](../contracts/DAILY_BRIEF.md) |
-| Operational health | `xauusd_forecaster/operational_health.py` | Component health owners; alert/taxonomy aggregation remains here | `xauusd_forecaster/dashboard/health_projection.py`, `xauusd_forecaster/news/scheduler/health.py`, `xauusd_forecaster/runtime_health.py` | `tests/test_dashboard_health_projection.py`, `tests/test_operational_health.py`, `tests/test_runtime_health.py` | [Operational Health](../contracts/OPERATIONAL_HEALTH.md) |
-| Dashboard first paint | `xauusd_forecaster/dashboard/status_resources.py` | Dashboard status-resource composition owner | `xauusd_forecaster/dashboard_payloads.py`, `xauusd_forecaster/dashboard/health_projection.py`, `xauusd_forecaster/dashboard/status_cache.py`; `scripts/run_dashboard_api.py` owns HTTP translation | `tests/test_dashboard_status_resources.py`, `tests/test_dashboard_payloads.py`, `tests/test_dashboard_health_projection.py`, `tests/test_dashboard_status_cache.py`, `tests/test_dashboard_api.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
+| Operational health | `xauusd_forecaster/runtime/operational_health.py` | Component health owners; alert/taxonomy aggregation remains here | `xauusd_forecaster/dashboard/health_projection.py`, `xauusd_forecaster/news/scheduler/health.py`, `xauusd_forecaster/runtime/health.py` | `tests/test_dashboard_health_projection.py`, `tests/test_operational_health.py`, `tests/test_runtime_health.py` | [Operational Health](../contracts/OPERATIONAL_HEALTH.md) |
+| Dashboard first paint | `xauusd_forecaster/dashboard/status_resources.py` | Dashboard status-resource composition owner | `xauusd_forecaster/dashboard/payloads.py`, `xauusd_forecaster/dashboard/health_projection.py`, `xauusd_forecaster/dashboard/status_cache.py`; `scripts/run_dashboard_api.py` owns HTTP translation | `tests/test_dashboard_status_resources.py`, `tests/test_dashboard_payloads.py`, `tests/test_dashboard_health_projection.py`, `tests/test_dashboard_status_cache.py`, `tests/test_dashboard_api.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
 | Decision-output status | `xauusd_forecaster/dashboard/health_projection.py` | Dashboard runtime-component health projection owner | `scripts/run_dashboard_api.py`; decision evidence and broker session remain authoritative inputs | `tests/test_dashboard_health_projection.py`, `tests/test_dashboard_api.py` | [Operational Health](../contracts/OPERATIONAL_HEALTH.md) |
-| Collector heartbeat presentation | `xauusd_forecaster/dashboard/health_projection.py` | Dashboard runtime-component health projection owner | `xauusd_forecaster/runtime_health.py` writes heartbeat state; `scripts/run_dashboard_api.py` orchestrates the payload | `tests/test_dashboard_health_projection.py`, `tests/test_runtime_health.py`, `tests/test_dashboard_api.py` | [Operational Health](../contracts/OPERATIONAL_HEALTH.md) |
-| Audit, learning, or market detail | `xauusd_forecaster/dashboard_read_models.py` | DashboardReadModelOwner | `xauusd_forecaster/dashboard_summaries.py`, `xauusd_forecaster/learning_curves.py` | `tests/test_dashboard_api.py` | [Paged Dashboard History](../design/PAGED_DASHBOARD_HISTORY.md) |
+| Collector heartbeat presentation | `xauusd_forecaster/dashboard/health_projection.py` | Dashboard runtime-component health projection owner | `xauusd_forecaster/runtime/health.py` writes heartbeat state; `scripts/run_dashboard_api.py` orchestrates the payload | `tests/test_dashboard_health_projection.py`, `tests/test_runtime_health.py`, `tests/test_dashboard_api.py` | [Operational Health](../contracts/OPERATIONAL_HEALTH.md) |
+| Audit, learning, or market detail | `xauusd_forecaster/dashboard/read_models.py` | DashboardReadModelOwner | `xauusd_forecaster/dashboard/summaries.py`, `xauusd_forecaster/dashboard/learning_curves.py` | `tests/test_dashboard_api.py` | [Paged Dashboard History](../design/PAGED_DASHBOARD_HISTORY.md) |
 | Local news archive or evidence detail | `xauusd_forecaster/dashboard/news_resources.py` | Dashboard news-resource owner | Local SQLite evidence authority; `scripts/run_dashboard_api.py` owns HTTP translation | `tests/test_dashboard_news_resources.py`, `tests/test_dashboard_api.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
 | Local market history or current chart | `xauusd_forecaster/dashboard/market_resources.py` | Dashboard market-resource owner | Quote JSONL and local SQLite authority; `scripts/run_dashboard_api.py` owns HTTP translation | `tests/test_dashboard_market_resources.py`, `tests/test_dashboard_api.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
-| Dashboard resource serialization | `xauusd_forecaster/dashboard/resource_contracts.py` | Dashboard resource-contract owner | `xauusd_forecaster/dashboard_payloads.py`; API and Sync are consumers | `tests/test_dashboard_resource_contracts.py`, `tests/test_dashboard_sync.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
+| Dashboard resource serialization | `xauusd_forecaster/dashboard/resource_contracts.py` | Dashboard resource-contract owner | `xauusd_forecaster/dashboard/payloads.py`; API and Sync are consumers | `tests/test_dashboard_resource_contracts.py`, `tests/test_dashboard_sync.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
 | Local scheduler operator bridge | `xauusd_forecaster/dashboard/operator_bridge.py` | Dashboard operator-bridge service owner | `xauusd_forecaster/news/scheduler/state.py` retains transition authority; `scripts/run_dashboard_api.py` owns HTTP translation | `tests/test_dashboard_operator_bridge.py`, `tests/test_dashboard_api.py`, `tests/test_news_scheduler.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
 | Dashboard sync | `scripts/run_dashboard_sync.py` | Dashboard Sync process orchestration | `xauusd_forecaster/dashboard/sync/progress.py`, `xauusd_forecaster/dashboard/sync/transport.py`, `xauusd_forecaster/dashboard/sync/resource_protocols.py`, `xauusd_forecaster/dashboard/resource_contracts.py` | `tests/test_dashboard_sync.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
 | Cloudflare API routing | `web/worker/api-router.ts` | Minimal API Worker router | `web/worker/index.ts`, `web/db/schema.ts` | `web/tests/d1-capabilities.test.mjs`, `web/tests/worker-cpu-headroom.test.mjs` | [Web and Cloudflare](../design/WEB_AND_CLOUDFLARE.md) |
 | Static Web UI | `web/app/_components/DashboardApp.tsx` | Web feature/view owners | `web/app/_components/DashboardShell.tsx`, `web/app/globals.css` | `web/tests/rendered-html.test.mjs`, `web/tests/responsive-scroll.test.mjs` | [Dashboard Presentation](../specs/DASHBOARD_PRESENTATION.md) |
 | Preview | `scripts/build_preview_bundle.py` | Preview build owner | `web/app/_lib/preview-manifest.ts`, `web/app/_lib/preview-resources.ts` | `tests/test_dashboard_sync.py`, `web/tests/rendered-html.test.mjs` | [Preview Behavior](../specs/PREVIEW_BEHAVIOR.md), [Preview Isolation](../contracts/PREVIEW_ISOLATION.md) |
 | Admin authentication | `web/app/_lib/admin-auth-session.ts` | Admin auth boundary | `web/app/chatgpt-auth.ts`, `web/app/admin/api/session/route.ts` | `web/tests/admin-auth-session.test.mjs`, `web/tests/assistant-auth.test.mjs` | [Assistant Security](../contracts/ASSISTANT_SECURITY.md) |
-| Release control | `scripts/xauusd_control_center_release.ps1` | Exact installed Control Center release owner | `scripts/xauusd_control_center.ps1`, `scripts/install_control_plane.ps1`, `scripts/build_release_validation_fixtures.py`, `xauusd_forecaster/production_shape.py` | `tests/test_runtime_launchers.py`, `tests/test_control_plane_install.py`, `tests/test_release_validation_fixtures.py` | [Release Control](../contracts/RELEASE_CONTROL.md) |
-| Runtime supervision | `scripts/xauusd_control_center_runtime.ps1` | Control Plane and Control Center runtime owner | `scripts/xauusd_control_center.ps1`, `scripts/install_control_plane.ps1`, `scripts/xauusd_watchdog_guard.ps1`, `xauusd_forecaster/runtime_health.py` | `tests/test_runtime_launchers.py`, `tests/test_control_plane_install.py`, `tests/test_runtime_health.py` | [Runtime and Release](../design/RUNTIME_AND_RELEASE.md) |
-| Assistant retained architecture | `docs/design/ASSISTANT_ARCHITECTURE.md` | Assistant contracts; execution PAUSED | `web/db/schema.ts`, `xauusd_forecaster/assistant_agent.py` | `tests/test_assistant_agent.py`, `web/tests/assistant-chat.test.mjs` | [Assistant Status](../design/ASSISTANT_IMPLEMENTATION_STATUS.md) |
+| Release control | `scripts/xauusd_control_center_release.ps1` | Exact installed Control Center release owner | `scripts/xauusd_control_center.ps1`, `scripts/install_control_plane.ps1`, `scripts/build_release_validation_fixtures.py`, `xauusd_forecaster/runtime/production_shape.py` | `tests/test_runtime_launchers.py`, `tests/test_control_plane_install.py`, `tests/test_release_validation_fixtures.py` | [Release Control](../contracts/RELEASE_CONTROL.md) |
+| Runtime supervision | `scripts/xauusd_control_center_runtime.ps1` | Control Plane and Control Center runtime owner | `scripts/xauusd_control_center.ps1`, `scripts/install_control_plane.ps1`, `scripts/xauusd_watchdog_guard.ps1`, `xauusd_forecaster/runtime/health.py` | `tests/test_runtime_launchers.py`, `tests/test_control_plane_install.py`, `tests/test_runtime_health.py` | [Runtime and Release](../design/RUNTIME_AND_RELEASE.md) |
+| Assistant retained architecture | `docs/design/ASSISTANT_ARCHITECTURE.md` | Assistant contracts; execution PAUSED | `web/db/schema.ts`, `xauusd_forecaster/assistant/agent.py` | `tests/test_assistant_agent.py`, `web/tests/assistant-chat.test.mjs` | [Assistant Status](../design/ASSISTANT_IMPLEMENTATION_STATUS.md) |
 | Live broadcast delivery | `xauusd_forecaster/live_broadcast.py` | Optional Windows Stable publisher and isolated LiveHub transport | `scripts/run_live_broadcast_publisher.py`, `broadcast/src/index.js`, `web/app/_lib/live-broadcast.ts` | `tests/test_live_broadcast.py`, `broadcast/test/index.test.mjs`, `web/tests/live-broadcast.test.mjs` | [Live Broadcast Design](../design/LIVE_BROADCAST.md), [Live Broadcast Contract](../contracts/LIVE_BROADCAST.md) |
 
 ## Runtime entry-point index
@@ -85,6 +85,10 @@ contract.
 | Vectorize Assistant index | Derived retained Assistant memory index | Assistant index worker, PAUSED | Assistant retrieval, PAUSED | Versioned vectors; never canonical conversation authority |
 | Cloudflare Version metadata | Immutable Worker artifact identity | Cloudflare build/upload | Control Center release validation and runtime | Append-only Versions; placement is separate current state |
 | Local release-control state/history | Stable/Candidate transition authority | Control Center/Watchdog | Operator UI, Dashboard, recovery | Constant-size current identities plus append-only bounded history/projections |
+
+`xauusd_forecaster/shared_store_schema.py` is the explicit composition boundary
+that invokes each co-resident SQLite owner's schema installer in the preserved
+historical order. It owns no schema or data itself.
 
 ## Package/module index by subsystem
 
@@ -165,13 +169,13 @@ contract.
 - `xauusd_forecaster/dashboard/status_cache.py` — owns the disposable
   process-local serialized first-paint/readiness snapshot, bounded last-good,
   single-flight refresh, and cache health; it is not forecast authority.
-- `xauusd_forecaster/dashboard_payloads.py` — defines bounded critical and audit
+- `xauusd_forecaster/dashboard/payloads.py` — defines bounded critical and audit
   payload contracts.
-- `xauusd_forecaster/dashboard_read_models.py` — owns per-resource background
+- `xauusd_forecaster/dashboard/read_models.py` — owns per-resource background
   builds, source revisions, hashes and last-good replacement.
-- `xauusd_forecaster/dashboard_summaries.py` — provides indexed aggregate reads.
-- `xauusd_forecaster/learning_curves.py` — builds learning summaries and pages.
-- `xauusd_forecaster/operational_health.py` — projects component incidents and
+- `xauusd_forecaster/dashboard/summaries.py` — provides indexed aggregate reads.
+- `xauusd_forecaster/dashboard/learning_curves.py` — builds learning summaries and pages.
+- `xauusd_forecaster/runtime/operational_health.py` — projects component incidents and
   bounded status.
 - `scripts/run_dashboard_api.py` — owns local HTTP/process orchestration.
 - `scripts/run_dashboard_sync.py` — owns CLI, heartbeat-first cycle, lane
@@ -192,18 +196,18 @@ contract.
 
 ### Runtime, release and Assistant
 
-- `xauusd_forecaster/runtime_health.py` — atomically refreshes service heartbeat
+- `xauusd_forecaster/runtime/health.py` — atomically refreshes service heartbeat
   files from a dedicated pulse thread.
-- `xauusd_forecaster/production_shape.py` — validates Candidate runtime/model
+- `xauusd_forecaster/runtime/production_shape.py` — validates Candidate runtime/model
   shape without activating it.
 - `scripts/xauusd_control_center.ps1` — owns supervision, Candidate validation,
   release transactions, deterministic structured operation results, recovery,
   WPF/WinForms lifecycle, and operator UI.
 - `scripts/install_control_plane.ps1` — owns exact-revision Control Plane
   installation, complete bundle verification, watchdog handoff, and rollback.
-- `xauusd_forecaster/assistant_agent.py` — retained bounded agent implementation;
+- `xauusd_forecaster/assistant/agent.py` — retained bounded agent implementation;
   no local worker currently invokes it.
-- `xauusd_forecaster/assistant_routing.py` — retained provider-independent task
+- `xauusd_forecaster/assistant/routing.py` — retained provider-independent task
   routing contract.
 - `web/app/api/_shared/assistant-chat.ts` — retained D1 Assistant chat state and
   request contract; new execution admission is PAUSED.

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from tests.model_accounting_fakes import CallbackModelAccountant
-from xauusd_forecaster import assistant_titles
+from xauusd_forecaster.assistant import titles as assistant_titles
 
 
 def test_title_generation_uses_bounded_context_and_the_metered_gateway(monkeypatch) -> None:

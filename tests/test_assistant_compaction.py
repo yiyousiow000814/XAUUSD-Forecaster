@@ -5,7 +5,7 @@ import json
 import pytest
 
 from tests.model_accounting_fakes import CallbackModelAccountant
-from xauusd_forecaster import assistant_compaction
+from xauusd_forecaster.assistant import compaction as assistant_compaction
 
 
 def source_messages() -> list[dict[str, object]]:

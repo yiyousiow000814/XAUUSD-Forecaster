@@ -21,7 +21,7 @@ from xauusd_forecaster.news.scheduler.state import (
     sync_pending_jobs,
     ROUTINE_POOL,
 )
-from xauusd_forecaster.operational_health import scheduler_health_snapshot
+from xauusd_forecaster.runtime.operational_health import scheduler_health_snapshot
 
 
 NOW = datetime(2026, 8, 20, 2, 0, tzinfo=UTC)

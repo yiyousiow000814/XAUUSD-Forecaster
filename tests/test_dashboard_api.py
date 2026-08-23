@@ -26,13 +26,13 @@ from xauusd_forecaster.news.annotation.product import (
 )
 from xauusd_forecaster.ai.provider_registry import AI_QUOTA_SURFACES
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.dashboard_read_models import (
+from xauusd_forecaster.dashboard.read_models import (
     DashboardReadModelOwner,
     DashboardReadModelUnavailable,
     READ_MODEL_CONTRACTS,
     read_dashboard_read_model,
 )
-from xauusd_forecaster.dashboard_summaries import (
+from xauusd_forecaster.dashboard.summaries import (
     DASHBOARD_COUNT_TABLES,
     dashboard_distinct_article_count,
     dashboard_news_source_summary,
@@ -1204,7 +1204,7 @@ def test_optional_api_producers_fail_independently(
 def test_durable_optional_read_models_are_atomic_bounded_and_incremental(
     monkeypatch, tmp_path,
 ) -> None:
-    import xauusd_forecaster.dashboard_read_models as read_models
+    import xauusd_forecaster.dashboard.read_models as read_models
 
     database = tmp_path / "forward.sqlite3"
     ForwardLedger(database).close()

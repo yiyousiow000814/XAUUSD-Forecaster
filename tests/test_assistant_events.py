@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.assistant_events import (
+from xauusd_forecaster.assistant.events import (
     MAX_ASSISTANT_ANSWER_DELTA_BYTES,
     AssistantEventBuilder,
     AssistantEventContractError,

@@ -164,7 +164,7 @@ collapse all optional resources into one restart burst.
 
 ## 13. Core modules
 
-- `xauusd_forecaster/dashboard_read_models.py`: per-resource model owner,
+- `xauusd_forecaster/dashboard/read_models.py`: per-resource model owner,
   atomic replacement, hashes and last-good behavior.
 - `xauusd_forecaster/dashboard/status_cache.py`: process-local serialized
   snapshot cache, single-flight refresh, bounded last-good, and health state.
@@ -190,10 +190,10 @@ collapse all optional resources into one restart burst.
   HTTP and independent target configuration.
 - `xauusd_forecaster/dashboard/sync/resource_protocols.py`: bounded per-resource
   mirror protocols and acknowledgements.
-- `xauusd_forecaster/dashboard_payloads.py`: critical and audit contracts.
-- `xauusd_forecaster/dashboard_summaries.py`: indexed summary queries.
-- `xauusd_forecaster/learning_curves.py`: learning resource.
-- `xauusd_forecaster/operational_health.py`: component health projection.
+- `xauusd_forecaster/dashboard/payloads.py`: critical and audit contracts.
+- `xauusd_forecaster/dashboard/summaries.py`: indexed summary queries.
+- `xauusd_forecaster/dashboard/learning_curves.py`: learning resource.
+- `xauusd_forecaster/runtime/operational_health.py`: component health projection.
 - `xauusd_forecaster/news/scheduler/state.py`: retry-command transition owner.
 
 ## 14. Relevant tests

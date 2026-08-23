@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.assistant_content import (
+from xauusd_forecaster.assistant.content import (
     ASSISTANT_CONTENT_PROTOCOL_VERSION,
     AssistantContentContractError,
     build_assistant_content_document,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from xauusd_forecaster.dashboard_payloads import (
+from xauusd_forecaster.dashboard.payloads import (
     audit_briefs_payload,
     audit_decisions_payload,
     audit_status_payload,

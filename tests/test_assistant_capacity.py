@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from xauusd_forecaster.assistant_capacity import (
+from xauusd_forecaster.assistant.capacity import (
     ASSISTANT_CAPACITY_POLICY_VERSION,
     AssistantCapacityPolicy,
     AssistantCapacityUnavailable,
@@ -15,7 +15,7 @@ from xauusd_forecaster.assistant_capacity import (
     credential_pool_fingerprint,
     execute_assistant_capacity_route,
 )
-from xauusd_forecaster.assistant_routing import (
+from xauusd_forecaster.assistant.routing import (
     AssistantTaskType,
     ModelCapacityClass,
     ModelProfile,
@@ -400,7 +400,7 @@ def test_background_cannot_consume_preemptible_pool() -> None:
 def sqlite3_connection():
     import sqlite3
 
-    from xauusd_forecaster.assistant_capacity import (
+    from xauusd_forecaster.assistant.capacity import (
         install_assistant_capacity_schema,
     )
     from xauusd_forecaster.news.scheduler.state import install_scheduler_schema

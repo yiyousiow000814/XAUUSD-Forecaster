@@ -10,7 +10,7 @@ from xauusd_forecaster.decision.inference import MODEL_IDENTITIES
 from xauusd_forecaster.news.scheduler.state import reserve_account_request
 from xauusd_forecaster.news.collection.source_registry import NEWS_SOURCE_REGISTRY
 from xauusd_forecaster.news.collection.intake import RUNTIME_NEWS_POLL_SOURCES
-from xauusd_forecaster.production_shape import (
+from xauusd_forecaster.runtime.production_shape import (
     production_contract_snapshot,
     production_shape_violations,
 )

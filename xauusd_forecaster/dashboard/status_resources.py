@@ -47,8 +47,8 @@ from xauusd_forecaster.dashboard.resource_contracts import (
     _learning_summary,
     market_chart_snapshot,
 )
-from xauusd_forecaster.dashboard_payloads import audit_status_payload, bounded_evidence_window
-from xauusd_forecaster.dashboard_summaries import (
+from xauusd_forecaster.dashboard.payloads import audit_status_payload, bounded_evidence_window
+from xauusd_forecaster.dashboard.summaries import (
     dashboard_collected_news_sources,
     dashboard_distinct_article_count,
     dashboard_latest_activity,
@@ -67,7 +67,7 @@ from xauusd_forecaster.factors import (
     factor_coverage,
 )
 from xauusd_forecaster.ai.quota import GeminiQuotaLedger
-from xauusd_forecaster.learning_curves import learning_curve_payload
+from xauusd_forecaster.dashboard.learning_curves import learning_curve_payload
 from xauusd_forecaster.market_session import expected_weekly_closure
 from xauusd_forecaster.ai.model_limits import GEMMA_PROVIDER_LANES_PER_ACCOUNT
 from xauusd_forecaster.news.semantics.model_contracts import CURRENT_NEWS_CONTRACT
@@ -84,8 +84,8 @@ from xauusd_forecaster.news.semantics.relevance import GOOGLE_NEWS_MAX_AGE
 from xauusd_forecaster.news.scheduler.state import account_quota_snapshot, configured_api_credentials
 from xauusd_forecaster.news.semantics.contracts import model_usable_annotation_predicate
 from xauusd_forecaster.news.collection.source_registry import NEWS_SOURCE_REGISTRY
-from xauusd_forecaster.operational_health import extend_with_component_alerts, scheduler_health_snapshot
-from xauusd_forecaster.production_shape import production_contract_snapshot
+from xauusd_forecaster.runtime.operational_health import extend_with_component_alerts, scheduler_health_snapshot
+from xauusd_forecaster.runtime.production_shape import production_contract_snapshot
 from xauusd_forecaster.news.collection.source_polling import source_poll_recovery_state
 from xauusd_forecaster.news.annotation.storylines import STORYLINE_POLICY_VERSION, temporal_event_graph
 
