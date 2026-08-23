@@ -1,11 +1,13 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "ApproveCompatibility", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "ApproveCompatibility", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync")]
     [string]$ServiceKey = "",
     [string]$StatusPath = "",
     [string]$RuntimeRoot = "",
-    [string]$RepositoryRoot = ""
+    [string]$RepositoryRoot = "",
+    [string]$SourceRoot = "",
+    [string]$SourceRevision = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,6 +33,7 @@ $runtimeUpdateStatePath = Join-Path $moduleRoot ".local\forward\runtime-update-s
 $releaseControlStatePath = Join-Path $moduleRoot ".local\forward\release-control-state.json"
 $releaseHistoryPath = Join-Path $moduleRoot ".local\forward\release-control-history.jsonl"
 $releaseLockPath = Join-Path $moduleRoot ".local\forward\release-control.lock"
+$controlPlaneInstallStatePath = Join-Path $moduleRoot ".local\forward\control-plane-install-state.json"
 $runtimePreflightContractVersion = "isolated-critical-status-diagnostics-v4"
 $preflightDiagnosticMaxCharacters = 2048
 $codeReloadTimeout = [TimeSpan]::FromMinutes(5)
@@ -2226,6 +2229,136 @@ function Get-Sha256Hex {
     }
 }
 
+function Get-RuntimeControlBundleIdentityAtRoot {
+    param([Parameter(Mandatory = $true)][string]$ControlRoot)
+    $path = Join-Path $ControlRoot $runtimeControlManifestName
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    try {
+        $identity = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        if (-not [bool]$identity.exact_revision -or
+            [string]$identity.source_revision -notmatch '^[0-9a-f]{40}$') {
+            return $null
+        }
+        foreach ($name in $runtimeControlFileNames) {
+            $file = Join-Path $ControlRoot $name
+            $expected = [string]$identity.files.$name
+            if (-not (Test-Path -LiteralPath $file) -or
+                $expected -notmatch '^[0-9a-f]{64}$') { return $null }
+            $actual = Get-Sha256Hex -LiteralPath $file
+            if ($actual -ne $expected) { return $null }
+        }
+        return $identity
+    } catch { return $null }
+}
+
+function New-VerifiedRuntimeControlBundleStage {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceRoot,
+        [Parameter(Mandatory = $true)][string]$SourceRevision,
+        [Parameter(Mandatory = $true)][string]$StageRoot,
+        [switch]$RequireImmutableSource
+    )
+    if ($SourceRevision -notmatch '^[0-9a-f]{40}$') {
+        throw "CONTROL_BUNDLE_EXACT_REVISION_REQUIRED"
+    }
+    $revisionOutput = @(& git -C $SourceRoot rev-parse HEAD 2>$null)
+    $revisionExitCode = $LASTEXITCODE
+    $observedRevision = if ($revisionOutput.Count -gt 0) {
+        ([string]$revisionOutput[0]).Trim()
+    } else { "" }
+    if ($revisionExitCode -ne 0 -or $observedRevision -ne $SourceRevision) {
+        throw "CONTROL_BUNDLE_SOURCE_REVISION_MISMATCH"
+    }
+    if ($RequireImmutableSource) {
+        $dirty = @(& git -C $SourceRoot status --porcelain 2>$null)
+        if ($LASTEXITCODE -ne 0 -or $dirty.Count -ne 0) {
+            throw "CONTROL_BUNDLE_IMMUTABLE_SOURCE_REQUIRED"
+        }
+        & git -C $SourceRoot symbolic-ref -q HEAD 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            throw "CONTROL_BUNDLE_DETACHED_SOURCE_REQUIRED"
+        }
+    }
+    New-Item -ItemType Directory -Path $StageRoot -Force | Out-Null
+    foreach ($name in $runtimeControlFileNames) {
+        $source = Join-Path $SourceRoot ("scripts\{0}" -f $name)
+        if (-not (Test-Path -LiteralPath $source)) {
+            throw "Missing runtime control file: $source"
+        }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $StageRoot $name) -Force
+    }
+    $hashes = @{}
+    foreach ($name in $runtimeControlFileNames) {
+        $hashes[$name] = Get-Sha256Hex -LiteralPath (Join-Path $StageRoot $name)
+    }
+    [pscustomobject]@{
+        schema_version = 1
+        source_revision = $SourceRevision
+        exact_revision = $true
+        created_at = [DateTimeOffset]::UtcNow.ToString("o")
+        files = $hashes
+    } | ConvertTo-Json -Depth 5 | Set-Content `
+        -LiteralPath (Join-Path $StageRoot $runtimeControlManifestName) -Encoding UTF8
+    $identity = Get-RuntimeControlBundleIdentityAtRoot -ControlRoot $StageRoot
+    if (-not $identity -or [string]$identity.source_revision -ne $SourceRevision) {
+        throw "CONTROL_BUNDLE_STAGED_HASH_VERIFICATION_FAILED"
+    }
+    return $identity
+}
+
+function Install-VerifiedRuntimeControlBundleStage {
+    param(
+        [Parameter(Mandatory = $true)][string]$StageRoot,
+        [Parameter(Mandatory = $true)][string]$ControlRoot,
+        [Parameter(Mandatory = $true)][string]$BackupRoot
+    )
+    $stagedIdentity = Get-RuntimeControlBundleIdentityAtRoot -ControlRoot $StageRoot
+    if (-not $stagedIdentity) { throw "CONTROL_BUNDLE_STAGED_HASH_VERIFICATION_FAILED" }
+    New-Item -ItemType Directory -Path $ControlRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
+    $payloadNames = @($runtimeControlFileNames) + @($runtimeControlManifestName)
+    foreach ($name in $payloadNames) {
+        $destination = Join-Path $ControlRoot $name
+        if (Test-Path -LiteralPath $destination) {
+            Copy-Item -LiteralPath $destination -Destination (Join-Path $BackupRoot $name) -Force
+        }
+    }
+    try {
+        foreach ($name in $payloadNames) {
+            Copy-Item -LiteralPath (Join-Path $StageRoot $name) `
+                -Destination (Join-Path $ControlRoot $name) -Force
+        }
+        $installed = Get-RuntimeControlBundleIdentityAtRoot -ControlRoot $ControlRoot
+        if (-not $installed -or
+            [string]$installed.source_revision -ne [string]$stagedIdentity.source_revision) {
+            throw "CONTROL_BUNDLE_INSTALLED_HASH_VERIFICATION_FAILED"
+        }
+        return $installed
+    } catch {
+        Restore-RuntimeControlBundleBackup -BackupRoot $BackupRoot -ControlRoot $ControlRoot
+        throw
+    }
+}
+
+function Restore-RuntimeControlBundleBackup {
+    param(
+        [Parameter(Mandatory = $true)][string]$BackupRoot,
+        [Parameter(Mandatory = $true)][string]$ControlRoot
+    )
+    $backupIdentity = Get-RuntimeControlBundleIdentityAtRoot -ControlRoot $BackupRoot
+    if (-not $backupIdentity) { throw "CONTROL_BUNDLE_BACKUP_VERIFICATION_FAILED" }
+    foreach ($name in @($runtimeControlFileNames) + @($runtimeControlManifestName)) {
+        Copy-Item -LiteralPath (Join-Path $BackupRoot $name) `
+            -Destination (Join-Path $ControlRoot $name) -Force
+    }
+    $restored = Get-RuntimeControlBundleIdentityAtRoot -ControlRoot $ControlRoot
+    if (-not $restored -or
+        [string]$restored.source_revision -ne [string]$backupIdentity.source_revision) {
+        throw "CONTROL_BUNDLE_ROLLBACK_VERIFICATION_FAILED"
+    }
+    return $restored
+}
+
 function Sync-StableRuntimeControlFiles {
     param(
         [string]$SourceRoot = $moduleRoot,
@@ -2238,59 +2371,14 @@ function Sync-StableRuntimeControlFiles {
     $transactionId = [guid]::NewGuid().ToString("N")
     $stageRoot = Join-Path $controlParent (".rcs-{0}" -f $transactionId)
     $backupRoot = Join-Path $controlParent (".rcb-{0}" -f $transactionId)
-    New-Item -ItemType Directory -Path $ControlRoot -Force | Out-Null
-    New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
-    New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
     try {
-        foreach ($name in $runtimeControlFileNames) {
-            $source = Join-Path $SourceRoot ("scripts\{0}" -f $name)
-            if (-not (Test-Path -LiteralPath $source)) {
-                throw "Missing runtime control file: $source"
-            }
-            Copy-Item -LiteralPath $source -Destination (Join-Path $stageRoot $name) -Force
-        }
         if (-not $SourceRevision) {
             $SourceRevision = (& git -C $SourceRoot rev-parse HEAD 2>$null | Select-Object -First 1)
         }
-        $exactRevision = [bool]($SourceRevision -match '^[0-9a-f]{40}$')
-        $hashes = @{}
-        foreach ($name in $runtimeControlFileNames) {
-            $hashes[$name] = Get-Sha256Hex `
-                -LiteralPath (Join-Path $stageRoot $name)
-        }
-        [pscustomobject]@{
-            schema_version = 1
-            source_revision = if ($exactRevision) { $SourceRevision } else { $null }
-            exact_revision = $exactRevision
-            created_at = [DateTimeOffset]::UtcNow.ToString("o")
-            files = $hashes
-        } | ConvertTo-Json -Depth 5 | Set-Content `
-            -LiteralPath (Join-Path $stageRoot $runtimeControlManifestName) -Encoding UTF8
-        $payloadNames = @($runtimeControlFileNames) + @($runtimeControlManifestName)
-        foreach ($name in $payloadNames) {
-            $destination = Join-Path $ControlRoot $name
-            if (Test-Path -LiteralPath $destination) {
-                Copy-Item -LiteralPath $destination `
-                    -Destination (Join-Path $backupRoot $name) -Force
-            }
-        }
-        try {
-            foreach ($name in $payloadNames) {
-                Move-Item -LiteralPath (Join-Path $stageRoot $name) `
-                    -Destination (Join-Path $ControlRoot $name) -Force
-            }
-        } catch {
-            foreach ($name in $payloadNames) {
-                $destination = Join-Path $ControlRoot $name
-                $backup = Join-Path $backupRoot $name
-                if (Test-Path -LiteralPath $backup) {
-                    Move-Item -LiteralPath $backup -Destination $destination -Force
-                } elseif (Test-Path -LiteralPath $destination) {
-                    Remove-Item -LiteralPath $destination -Force
-                }
-            }
-            throw
-        }
+        $null = New-VerifiedRuntimeControlBundleStage -SourceRoot $SourceRoot `
+            -SourceRevision $SourceRevision -StageRoot $stageRoot
+        $null = Install-VerifiedRuntimeControlBundleStage -StageRoot $stageRoot `
+            -ControlRoot $ControlRoot -BackupRoot $backupRoot
     } finally {
         if (Test-Path -LiteralPath $stageRoot) {
             Remove-Item -LiteralPath $stageRoot -Recurse -Force
@@ -3800,23 +3888,7 @@ function Write-WatchdogEvent {
 }
 
 function Get-RuntimeControlBundleIdentity {
-    $path = Join-Path $PSScriptRoot $runtimeControlManifestName
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
-    try {
-        $identity = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
-        if (-not [bool]$identity.exact_revision -or
-            [string]$identity.source_revision -notmatch '^[0-9a-f]{40}$') {
-            return $null
-        }
-        foreach ($name in $runtimeControlFileNames) {
-            $file = Join-Path $PSScriptRoot $name
-            $expected = [string]$identity.files.$name
-            if (-not (Test-Path -LiteralPath $file) -or -not $expected) { return $null }
-            $actual = Get-Sha256Hex -LiteralPath $file
-            if ($actual -ne $expected) { return $null }
-        }
-        return $identity
-    } catch { return $null }
+    Get-RuntimeControlBundleIdentityAtRoot -ControlRoot $PSScriptRoot
 }
 
 function Assert-ActiveControlBundle {
@@ -3834,9 +3906,13 @@ function Write-WatchdogHeartbeat {
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
     $temporary = "$watchdogHeartbeatPath.tmp"
     $controlBundle = Get-RuntimeControlBundleIdentity
+    $processIdentity = Get-ControlPlaneProcessIdentity -ProcessId $PID
     [pscustomobject]@{
         observed_at = [DateTimeOffset]::UtcNow.ToString("o")
         process_id = $PID
+        process_start_token = if ($processIdentity) {
+            [string]$processIdentity.process_start_token
+        } else { $null }
         revision = Get-CodeRevision
         control_bundle_revision = if ($controlBundle) {
             [string]$controlBundle.source_revision
@@ -3847,7 +3923,251 @@ function Write-WatchdogHeartbeat {
     Move-Item -LiteralPath $temporary -Destination $watchdogHeartbeatPath -Force
 }
 
+function Get-ControlPlaneProcessIdentity {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" `
+        -ErrorAction SilentlyContinue
+    if (-not $process) { return $null }
+    $created = [DateTimeOffset]$process.CreationDate
+    [pscustomobject]@{
+        process_id = [int]$process.ProcessId
+        parent_process_id = [int]$process.ParentProcessId
+        process_start_token = $created.ToUniversalTime().ToString("o")
+        name = [string]$process.Name
+        command_line = [string]$process.CommandLine
+    }
+}
+
+function Get-VerifiedWatchdogOwners {
+    $controlRoot = Join-Path $repositoryRoot ".local\runtime-control"
+    $controlScript = Join-Path $controlRoot "xauusd_control_center.ps1"
+    @(
+        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Name -eq "powershell.exe" -and $_.CommandLine -and
+                $_.CommandLine.Contains($controlScript) -and
+                $_.CommandLine -match '(?i)-Action\s+Watchdog' -and
+                $_.CommandLine.Contains($moduleRoot) -and
+                $_.CommandLine.Contains($repositoryRoot)
+            } | ForEach-Object {
+                $identity = Get-ControlPlaneProcessIdentity -ProcessId ([int]$_.ProcessId)
+                $launcher = Get-ControlPlaneProcessIdentity `
+                    -ProcessId ([int]$identity.parent_process_id)
+                $expectedLauncher = Join-Path $controlRoot "xauusd_watchdog_launcher.vbs"
+                if (-not $launcher -or $launcher.name -ne "wscript.exe" -or
+                    -not $launcher.command_line.Contains($expectedLauncher) -or
+                    -not $launcher.command_line.Contains($moduleRoot) -or
+                    -not $launcher.command_line.Contains($repositoryRoot)) {
+                    return
+                }
+                $identity | Add-Member -NotePropertyName launcher_identity `
+                    -NotePropertyValue $launcher
+                $identity
+            }
+    )
+}
+
+function Get-VerifiedControlCenterGuiOwners {
+    $controlScript = Join-Path $repositoryRoot `
+        ".local\runtime-control\xauusd_control_center.ps1"
+    $guiLauncher = Join-Path $repositoryRoot `
+        ".local\runtime-control\xauusd_control_center_launcher.vbs"
+    @(
+        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.CommandLine -and (
+                    ($_.Name -eq "powershell.exe" -and
+                     $_.CommandLine.Contains($controlScript) -and
+                     $_.CommandLine -match '(?i)-Action\s+Gui') -or
+                    ($_.Name -eq "wscript.exe" -and
+                     $_.CommandLine.Contains($guiLauncher) -and
+                     $_.CommandLine.Contains($moduleRoot) -and
+                     $_.CommandLine.Contains($repositoryRoot))
+                )
+            } | ForEach-Object {
+                Get-ControlPlaneProcessIdentity -ProcessId ([int]$_.ProcessId)
+            }
+    )
+}
+
+function Assert-CurrentWatchdogHeartbeat {
+    param(
+        [Parameter(Mandatory = $true)][object]$Owner,
+        [Parameter(Mandatory = $true)][string]$ExpectedRevision
+    )
+    if (-not (Test-Path -LiteralPath $watchdogHeartbeatPath)) {
+        throw "CONTROL_PLANE_CURRENT_WATCHDOG_HEARTBEAT_MISSING"
+    }
+    try {
+        $heartbeat = Get-Content -LiteralPath $watchdogHeartbeatPath -Raw |
+            ConvertFrom-Json
+        $observedAt = [DateTimeOffset]::Parse([string]$heartbeat.observed_at)
+    } catch {
+        throw "CONTROL_PLANE_CURRENT_WATCHDOG_HEARTBEAT_INVALID"
+    }
+    if (($observedAt -gt [DateTimeOffset]::UtcNow.AddSeconds(30)) -or
+        ([DateTimeOffset]::UtcNow - $observedAt).TotalSeconds -gt 120 -or
+        [int]$heartbeat.process_id -ne [int]$Owner.process_id -or
+        ([string]$heartbeat.process_start_token -and
+         [string]$heartbeat.process_start_token -ne [string]$Owner.process_start_token) -or
+        [string]$heartbeat.control_bundle_revision -ne $ExpectedRevision -or
+        -not [bool]$heartbeat.control_bundle_exact_revision -or
+        -not [bool]$heartbeat.control_bundle_hash_verified) {
+        throw "CONTROL_PLANE_CURRENT_WATCHDOG_HEARTBEAT_MISMATCH"
+    }
+    return $heartbeat
+}
+
+function Get-ControlPlaneIsolationSnapshot {
+    $serviceIdentities = [ordered]@{}
+    foreach ($service in $services) {
+        $serviceIdentities[$service.Key] = @(
+            Get-ForecasterProcesses -Service $service | ForEach-Object {
+                Get-ControlPlaneProcessIdentity -ProcessId ([int]$_.ProcessId)
+            }
+        )
+    }
+    [pscustomobject]@{
+        business_runtime_revision = Get-CodeRevision
+        services = [pscustomobject]$serviceIdentities
+        release_state_hash = if (Test-Path -LiteralPath $releaseControlStatePath) {
+            Get-Sha256Hex -LiteralPath $releaseControlStatePath
+        } else { $null }
+        release_history_hash = if (Test-Path -LiteralPath $releaseHistoryPath) {
+            Get-Sha256Hex -LiteralPath $releaseHistoryPath
+        } else { $null }
+    }
+}
+
+function Assert-ControlPlaneIsolationSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][object]$Before,
+        [Parameter(Mandatory = $true)][object]$After
+    )
+    if ([string]$Before.business_runtime_revision -ne
+        [string]$After.business_runtime_revision) {
+        throw "CONTROL_PLANE_INSTALL_CHANGED_BUSINESS_RUNTIME"
+    }
+    if ([string]$Before.release_state_hash -ne [string]$After.release_state_hash -or
+        [string]$Before.release_history_hash -ne [string]$After.release_history_hash) {
+        throw "CONTROL_PLANE_INSTALL_CHANGED_RELEASE_STATE"
+    }
+    foreach ($service in $services) {
+        $beforeProcesses = @($Before.services.($service.Key))
+        $afterProcesses = @($After.services.($service.Key))
+        if ($beforeProcesses.Count -ne 1 -or $afterProcesses.Count -ne 1 -or
+            [int]$beforeProcesses[0].process_id -ne [int]$afterProcesses[0].process_id -or
+            [string]$beforeProcesses[0].process_start_token -ne
+                [string]$afterProcesses[0].process_start_token) {
+            throw "CONTROL_PLANE_INSTALL_CHANGED_SERVICE_$($service.Key.ToUpperInvariant())"
+        }
+    }
+}
+
+function Write-ControlPlaneInstallState {
+    param([Parameter(Mandatory = $true)][hashtable]$Values)
+    $current = @{}
+    if (Test-Path -LiteralPath $controlPlaneInstallStatePath) {
+        try {
+            $prior = Get-Content -LiteralPath $controlPlaneInstallStatePath -Raw |
+                ConvertFrom-Json
+            foreach ($property in $prior.PSObject.Properties) {
+                $current[$property.Name] = $property.Value
+            }
+        } catch {}
+    }
+    foreach ($key in $Values.Keys) { $current[$key] = $Values[$key] }
+    $directory = Split-Path -Parent $controlPlaneInstallStatePath
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $temporary = "$controlPlaneInstallStatePath.tmp"
+    $current | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $temporary -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination $controlPlaneInstallStatePath -Force
+}
+
+function Suspend-ControlPlaneSupervision {
+    $state = @{}
+    foreach ($name in @($guardTaskName, $taskName)) {
+        $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        if (-not $task) { throw "CONTROL_PLANE_SCHEDULED_TASK_MISSING:$name" }
+        $state[$name] = [bool]$task.Settings.Enabled
+    }
+    try {
+        foreach ($name in @($guardTaskName, $taskName)) {
+            Disable-ScheduledTask -TaskName $name | Out-Null
+            if ($name -eq $guardTaskName) {
+                Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+            }
+        }
+    } catch {
+        Restore-ControlPlaneSupervision -State $state
+        throw
+    }
+    return $state
+}
+
+function Restore-ControlPlaneSupervision {
+    param([hashtable]$State)
+    if (-not $State) { return }
+    foreach ($name in @($taskName, $guardTaskName)) {
+        if ([bool]$State[$name]) { Enable-ScheduledTask -TaskName $name | Out-Null }
+    }
+}
+
+function Wait-ControlPlaneGuardQuiesced {
+    param([TimeSpan]$Timeout = ([TimeSpan]::FromSeconds(15)))
+    $guardScript = Join-Path $repositoryRoot `
+        ".local\runtime-control\xauusd_watchdog_guard.ps1"
+    $guardLauncher = Join-Path $repositoryRoot `
+        ".local\runtime-control\xauusd_watchdog_guard_launcher.vbs"
+    $deadline = [DateTimeOffset]::UtcNow.Add($Timeout)
+    do {
+        $owners = @(
+            Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.CommandLine -and
+                    ($_.CommandLine.Contains($guardScript) -or
+                     $_.CommandLine.Contains($guardLauncher))
+                }
+        )
+        if ($owners.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+    throw "CONTROL_PLANE_GUARD_DID_NOT_QUIESCE"
+}
+
+function Stop-VerifiedWatchdogOwner {
+    param([Parameter(Mandatory = $true)][object]$Identity)
+    $current = Get-ControlPlaneProcessIdentity -ProcessId ([int]$Identity.process_id)
+    if (-not $current -or
+        [string]$current.process_start_token -ne [string]$Identity.process_start_token -or
+        $current.name -ne "powershell.exe" -or
+        $current.command_line -notmatch '(?i)-Action\s+Watchdog') {
+        throw "CONTROL_PLANE_WATCHDOG_IDENTITY_CHANGED"
+    }
+    Stop-Process -Id ([int]$current.process_id) -Force
+    Wait-Process -Id ([int]$current.process_id) -Timeout 15 -ErrorAction SilentlyContinue
+    if (Get-Process -Id ([int]$current.process_id) -ErrorAction SilentlyContinue) {
+        throw "CONTROL_PLANE_WATCHDOG_STOP_FAILED"
+    }
+    $expectedLauncherIdentity = $Identity.launcher_identity
+    $launcher = Get-ControlPlaneProcessIdentity `
+        -ProcessId ([int]$expectedLauncherIdentity.process_id)
+    if ($launcher -and $launcher.name -eq "wscript.exe") {
+        $expectedLauncher = Join-Path $repositoryRoot `
+            ".local\runtime-control\xauusd_watchdog_launcher.vbs"
+        if ([string]$launcher.process_start_token -ne
+                [string]$expectedLauncherIdentity.process_start_token -or
+            -not $launcher.command_line.Contains($expectedLauncher) -or
+            -not $launcher.command_line.Contains($moduleRoot) -or
+            -not $launcher.command_line.Contains($repositoryRoot)) {
+            throw "CONTROL_PLANE_LAUNCHER_IDENTITY_MISMATCH"
+        }
+        Stop-Process -Id ([int]$launcher.process_id) -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Start-WatchdogReplacement {
+    param([switch]$PassThru)
     $controlRoot = Join-Path $repositoryRoot ".local\runtime-control"
     $controlScript = Join-Path $controlRoot "xauusd_control_center.ps1"
     $launcher = Join-Path $controlRoot "xauusd_watchdog_launcher.vbs"
@@ -3858,7 +4178,208 @@ function Start-WatchdogReplacement {
     $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
     $arguments = '"{0}" "{1}" "{2}" "{3}"' -f `
         $launcher, $controlScript, $moduleRoot, $repositoryRoot
-    Start-Process -FilePath $wscript -ArgumentList $arguments -WindowStyle Hidden
+    $process = Start-Process -FilePath $wscript -ArgumentList $arguments `
+        -WindowStyle Hidden -PassThru
+    if ($PassThru) { return $process }
+}
+
+function Wait-VerifiedWatchdogHandoff {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedRevision,
+        [Parameter(Mandatory = $true)][object]$PreviousIdentity,
+        [TimeSpan]$Timeout = ([TimeSpan]::FromSeconds(90))
+    )
+    $deadline = [DateTimeOffset]::UtcNow.Add($Timeout)
+    do {
+        Start-Sleep -Milliseconds 250
+        $heartbeat = $null
+        try {
+            if (Test-Path -LiteralPath $watchdogHeartbeatPath) {
+                $heartbeat = Get-Content -LiteralPath $watchdogHeartbeatPath -Raw |
+                    ConvertFrom-Json
+            }
+        } catch {}
+        if (-not $heartbeat -or
+            [string]$heartbeat.control_bundle_revision -ne $ExpectedRevision -or
+            -not [bool]$heartbeat.control_bundle_exact_revision -or
+            -not [bool]$heartbeat.control_bundle_hash_verified -or
+            [string]$heartbeat.process_start_token -eq "") { continue }
+        $owners = @(Get-VerifiedWatchdogOwners)
+        if ($owners.Count -ne 1) { continue }
+        $owner = $owners[0]
+        if ([int]$owner.process_id -ne [int]$heartbeat.process_id -or
+            [string]$owner.process_start_token -ne
+                [string]$heartbeat.process_start_token -or
+            ([int]$owner.process_id -eq [int]$PreviousIdentity.process_id -and
+             [string]$owner.process_start_token -eq
+                [string]$PreviousIdentity.process_start_token)) { continue }
+        return $owner
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+    throw "CONTROL_PLANE_NEW_WATCHDOG_HEARTBEAT_TIMEOUT"
+}
+
+function Invoke-ControlPlaneInstall {
+    param(
+        [Parameter(Mandatory = $true)][string]$VerifiedSourceRoot,
+        [Parameter(Mandatory = $true)][string]$TargetRevision
+    )
+    if ($TargetRevision -notmatch '^[0-9a-f]{40}$') {
+        throw "CONTROL_BUNDLE_EXACT_REVISION_REQUIRED"
+    }
+    $controlRoot = Join-Path $repositoryRoot ".local\runtime-control"
+    $currentBundle = Get-RuntimeControlBundleIdentityAtRoot -ControlRoot $controlRoot
+    if (-not $currentBundle) { throw "CONTROL_BUNDLE_CURRENT_VERIFICATION_FAILED" }
+    if (@(Get-VerifiedControlCenterGuiOwners).Count -ne 0) {
+        throw "CONTROL_CENTER_GUI_MUST_BE_CLOSED"
+    }
+    $release = Get-ReleaseControlState
+    if (($release -and $release.transaction) -or
+        (Test-Path -LiteralPath $releaseLockPath)) {
+        throw "CONTROL_PLANE_INSTALL_BLOCKED_BY_RELEASE_TRANSACTION"
+    }
+    $oldOwners = @(Get-VerifiedWatchdogOwners)
+    if ($oldOwners.Count -ne 1) {
+        throw "CONTROL_PLANE_EXACTLY_ONE_WATCHDOG_REQUIRED"
+    }
+    $oldOwner = $oldOwners[0]
+    $oldHeartbeat = Assert-CurrentWatchdogHeartbeat -Owner $oldOwner `
+        -ExpectedRevision ([string]$currentBundle.source_revision)
+    $isolationBefore = Get-ControlPlaneIsolationSnapshot
+    foreach ($service in $services) {
+        if (@($isolationBefore.services.($service.Key)).Count -ne 1) {
+            throw "CONTROL_PLANE_SERVICE_OWNER_REQUIRED:$($service.Key)"
+        }
+    }
+
+    $controlParent = Split-Path -Parent $controlRoot
+    $transactionId = [guid]::NewGuid().ToString("N")
+    $stageRoot = Join-Path $controlParent (".cps-{0}" -f $transactionId)
+    $backupRoot = Join-Path $controlParent (".cpb-{0}" -f $transactionId)
+    $supervisionState = $null
+    $releaseLockHeld = $false
+    $oldStopped = $false
+    $bundleInstalled = $false
+    $newOwner = $null
+    $startedAt = [DateTimeOffset]::UtcNow.ToString("o")
+    Write-ControlPlaneInstallState @{
+        transaction_id = $transactionId
+        target_revision = $TargetRevision
+        previous_revision = [string]$currentBundle.source_revision
+        started_at = $startedAt
+        completed_at = $null
+        phase = "PRECHECK"
+        old_watchdog_identity = $oldOwner
+        old_watchdog_heartbeat = $oldHeartbeat
+        new_watchdog_identity = $null
+        bundle_hash_verified = $false
+        rollback_result = $null
+        isolation_before = $isolationBefore
+        isolation_after = $null
+    }
+    try {
+        if (-not (Enter-ReleaseTransactionLock)) {
+            throw "CONTROL_PLANE_INSTALL_BLOCKED_BY_RELEASE_TRANSACTION"
+        }
+        $releaseLockHeld = $true
+        $staged = New-VerifiedRuntimeControlBundleStage `
+            -SourceRoot $VerifiedSourceRoot -SourceRevision $TargetRevision `
+            -StageRoot $stageRoot -RequireImmutableSource
+        if (-not $staged) { throw "CONTROL_BUNDLE_STAGED_HASH_VERIFICATION_FAILED" }
+        Write-ControlPlaneInstallState @{
+            phase = "QUIESCE_CONTROL_SUPERVISION"
+            bundle_hash_verified = $true
+        }
+        $supervisionState = Suspend-ControlPlaneSupervision
+        Wait-ControlPlaneGuardQuiesced
+        # Revalidate the complete stage before the first destructive process action.
+        if (-not (Get-RuntimeControlBundleIdentityAtRoot -ControlRoot $stageRoot)) {
+            throw "CONTROL_BUNDLE_STAGED_HASH_VERIFICATION_FAILED"
+        }
+        Write-ControlPlaneInstallState @{ phase = "STOP_OLD_WATCHDOG" }
+        Stop-VerifiedWatchdogOwner -Identity $oldOwner
+        $oldStopped = $true
+        if (@(Get-VerifiedWatchdogOwners).Count -ne 0) {
+            throw "CONTROL_PLANE_OLD_WATCHDOG_STILL_OWNS"
+        }
+        Write-ControlPlaneInstallState @{ phase = "INSTALL_BUNDLE" }
+        $installed = Install-VerifiedRuntimeControlBundleStage `
+            -StageRoot $stageRoot -ControlRoot $controlRoot -BackupRoot $backupRoot
+        $bundleInstalled = $true
+        if ([string]$installed.source_revision -ne $TargetRevision) {
+            throw "CONTROL_BUNDLE_INSTALLED_REVISION_MISMATCH"
+        }
+        Write-ControlPlaneInstallState @{ phase = "START_NEW_WATCHDOG" }
+        $null = Start-WatchdogReplacement -PassThru
+        Write-ControlPlaneInstallState @{ phase = "VERIFY_NEW_HEARTBEAT" }
+        $newOwner = Wait-VerifiedWatchdogHandoff -ExpectedRevision $TargetRevision `
+            -PreviousIdentity $oldOwner
+        $isolationAfter = Get-ControlPlaneIsolationSnapshot
+        Assert-ControlPlaneIsolationSnapshot -Before $isolationBefore -After $isolationAfter
+        Restore-ControlPlaneSupervision -State $supervisionState
+        $supervisionState = $null
+        Write-ControlPlaneInstallState @{
+            phase = "COMMITTED"
+            completed_at = [DateTimeOffset]::UtcNow.ToString("o")
+            new_watchdog_identity = $newOwner
+            rollback_result = "NOT_REQUIRED"
+            isolation_after = $isolationAfter
+        }
+        return [pscustomobject]@{
+            status = "COMMITTED"
+            previous_revision = [string]$currentBundle.source_revision
+            target_revision = $TargetRevision
+            old_watchdog_identity = $oldOwner
+            new_watchdog_identity = $newOwner
+            business_runtime_revision = [string]$isolationBefore.business_runtime_revision
+            bundle_hash_verified = $true
+        }
+    } catch {
+        $failure = $_.Exception.Message
+        $rollbackResult = "NOT_REQUIRED"
+        try {
+            if ($oldStopped) {
+                foreach ($owner in @(Get-VerifiedWatchdogOwners)) {
+                    Stop-VerifiedWatchdogOwner -Identity $owner
+                }
+                if ($bundleInstalled) {
+                    $null = Restore-RuntimeControlBundleBackup `
+                        -BackupRoot $backupRoot -ControlRoot $controlRoot
+                }
+                $null = Start-WatchdogReplacement -PassThru
+                $restoredOwner = Wait-VerifiedWatchdogHandoff `
+                    -ExpectedRevision ([string]$currentBundle.source_revision) `
+                    -PreviousIdentity $oldOwner
+                $isolationAfter = Get-ControlPlaneIsolationSnapshot
+                Assert-ControlPlaneIsolationSnapshot -Before $isolationBefore `
+                    -After $isolationAfter
+                $rollbackResult = "ROLLED_BACK"
+                $newOwner = $restoredOwner
+            }
+        } catch {
+            $rollbackResult = "ROLLBACK_FAILED: $($_.Exception.Message)"
+        }
+        try {
+            Restore-ControlPlaneSupervision -State $supervisionState
+        } catch {
+            $rollbackResult = "ROLLBACK_FAILED: supervision restore: $($_.Exception.Message)"
+        }
+        Write-ControlPlaneInstallState @{
+            phase = if ($rollbackResult -eq "ROLLED_BACK") { "ROLLED_BACK" } else { "FAILED" }
+            completed_at = [DateTimeOffset]::UtcNow.ToString("o")
+            new_watchdog_identity = $newOwner
+            rollback_result = $rollbackResult
+            failure = $failure
+            isolation_after = if ($oldStopped) { $isolationAfter } else { $null }
+        }
+        throw "CONTROL_PLANE_INSTALL_FAILED: $failure; $rollbackResult"
+    } finally {
+        if ($releaseLockHeld) { Exit-ReleaseTransactionLock }
+        foreach ($path in @($stageRoot, $backupRoot)) {
+            if (Test-Path -LiteralPath $path) {
+                Remove-Item -LiteralPath $path -Recurse -Force
+            }
+        }
+    }
 }
 
 function Invoke-ForecasterWatchdog {
@@ -4353,7 +4874,8 @@ function Test-WpfControlCenterLayout {
             "CandidateCard", "PreviousCard", "CandidateChecks",
             "CandidateReason", "OpenStableButton", "OpenCandidateButton",
             "ApproveCompatibilityButton", "PromoteButton", "ReverseButton",
-            "CandidateTechnicalEvidence", "FooterDisclaimer"
+            "CandidateTechnicalEvidence", "FooterDisclaimer",
+            "ControlPlaneIdentity", "BusinessRuntimeIdentity"
         )
         foreach ($name in $required) {
             if (-not $window.FindName($name)) { throw "Missing WPF control: $name" }
@@ -4477,6 +4999,13 @@ function Show-WpfControlCenter {
         }
         function Refresh-WpfStatus {
             $status = @(Get-ForecasterStatus)
+            $controlBundle = Get-RuntimeControlBundleIdentity
+            (Find-WpfControl "ControlPlaneIdentity").Text = if ($controlBundle) {
+                "Control Plane  $(([string]$controlBundle.source_revision).Substring(0, 12))  EXACT · HASH VERIFIED"
+            } else { "Control Plane  --  UNVERIFIED" }
+            $businessRevision = Get-CodeRevision
+            (Find-WpfControl "BusinessRuntimeIdentity").Text =
+                "Business Runtime  $(if ($businessRevision) { $businessRevision.Substring(0, 12) } else { '--' })"
             (Find-WpfControl "ServiceList").ItemsSource = @($status | ForEach-Object {
                 [pscustomobject]@{ Key = $_.Key; Name = $_.Component; State = $_.State }
             })
@@ -4891,7 +5420,17 @@ function Show-ControlCenter {
     $subtitle = New-UiLabel -Text "LOCAL CONTROL CENTER  /  FORWARD-ONLY OPERATIONS" -Font (New-Object System.Drawing.Font("Cascadia Mono", 8)) -Color ([System.Drawing.Color]::FromArgb(196, 213, 208))
     $subtitle.Location = New-Object System.Drawing.Point(22, 55)
     $subtitle.Size = New-Object System.Drawing.Size(420, 22)
-    $header.Controls.AddRange(@($title, $subtitle))
+    $controlBundle = Get-RuntimeControlBundleIdentity
+    $controlIdentityLabel = New-UiLabel -Text $(if ($controlBundle) {
+        "Control Plane  $(([string]$controlBundle.source_revision).Substring(0, 12))  EXACT · HASH VERIFIED"
+    } else { "Control Plane  --  UNVERIFIED" }) -Font (New-Object System.Drawing.Font("Cascadia Mono", 8)) -Color ([System.Drawing.Color]::White)
+    $controlIdentityLabel.Location = New-Object System.Drawing.Point(22, 74)
+    $controlIdentityLabel.Size = New-Object System.Drawing.Size(440, 18)
+    $businessRevision = Get-CodeRevision
+    $businessIdentityLabel = New-UiLabel -Text "Business Runtime  $(if ($businessRevision) { $businessRevision.Substring(0, 12) } else { '--' })" -Font (New-Object System.Drawing.Font("Cascadia Mono", 8)) -Color ([System.Drawing.Color]::FromArgb(196, 213, 208))
+    $businessIdentityLabel.Location = New-Object System.Drawing.Point(22, 89)
+    $businessIdentityLabel.Size = New-Object System.Drawing.Size(440, 18)
+    $header.Controls.AddRange(@($title, $subtitle, $controlIdentityLabel, $businessIdentityLabel))
 
     $summaryGrid = New-Object System.Windows.Forms.TableLayoutPanel
     $summaryGrid.ColumnCount = 4
@@ -5657,6 +6196,14 @@ switch ($Action) {
     "EnableAutoStart" { Enable-AutoStart; Write-Output "Auto-start enabled." }
     "DisableAutoStart" { Disable-AutoStart; Write-Output "Auto-start disabled." }
     "InstallRuntime" { Install-ProductionRuntime | Format-List }
+    "InstallControlPlane" {
+        if (-not $SourceRoot -or -not $SourceRevision) {
+            throw "SourceRoot and SourceRevision are required for InstallControlPlane."
+        }
+        Invoke-ControlPlaneInstall -VerifiedSourceRoot `
+            ([System.IO.Path]::GetFullPath($SourceRoot)) `
+            -TargetRevision $SourceRevision | Format-List
+    }
     "InstallShortcut" { Write-Output (Install-ControlShortcut) }
     default { Show-ControlCenter }
 }

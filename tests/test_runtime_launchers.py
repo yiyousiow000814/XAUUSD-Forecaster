@@ -543,8 +543,21 @@ def test_candidate_switch_preserves_reviewed_runtime_control_bundle(tmp_path) ->
 
 
 def test_runtime_control_bundle_records_exact_source_revision_and_hashes(tmp_path) -> None:
-    revision = "d" * 40
-    _write_control_bundle(tmp_path / "runtime", "reviewed", scripts_dir=True)
+    runtime = tmp_path / "runtime"
+    _write_control_bundle(runtime, "reviewed", scripts_dir=True)
+    subprocess.run(["git", "init", "-q"], cwd=runtime, check=True)
+    subprocess.run(["git", "config", "user.name", "Contract Test"], cwd=runtime, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "contract-test@example.invalid"],
+        cwd=runtime,
+        check=True,
+    )
+    subprocess.run(["git", "add", "scripts"], cwd=runtime, check=True)
+    subprocess.run(["git", "commit", "-qm", "test bundle"], cwd=runtime, check=True)
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=runtime,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
     result = _run_control_center_contract(
         tmp_path,
         f"Sync-StableRuntimeControlFiles -SourceRoot $moduleRoot "

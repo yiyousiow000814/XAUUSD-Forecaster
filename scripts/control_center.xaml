@@ -14,7 +14,7 @@
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
     <Border Background="#203B39" Padding="24,20" CornerRadius="3">
       <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-        <StackPanel><TextBlock Text="XAUUSD FORECASTER" Foreground="White" FontSize="27" FontWeight="SemiBold"/><TextBlock Text="LOCAL CONTROL CENTER  /  FORWARD-ONLY OPERATIONS" Foreground="#BFD8D1" FontSize="11" Margin="0,6,0,0"/></StackPanel>
+        <StackPanel><TextBlock Text="XAUUSD FORECASTER" Foreground="White" FontSize="27" FontWeight="SemiBold"/><TextBlock Text="LOCAL CONTROL CENTER  /  FORWARD-ONLY OPERATIONS" Foreground="#BFD8D1" FontSize="11" Margin="0,6,0,0"/><TextBlock x:Name="ControlPlaneIdentity" Text="Control Plane  --  UNVERIFIED" Foreground="White" FontFamily="Consolas" FontSize="11" Margin="0,8,0,0"/><TextBlock x:Name="BusinessRuntimeIdentity" Text="Business Runtime  --" Foreground="#BFD8D1" FontFamily="Consolas" FontSize="11" Margin="0,2,0,0"/></StackPanel>
         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"><TextBlock Text="OVERALL  " Foreground="#BFD8D1"/><TextBlock x:Name="OverallState" Text="CHECKING" Foreground="White" FontWeight="Bold"/><TextBlock Text="     LAST REFRESH  " Foreground="#BFD8D1"/><TextBlock x:Name="RefreshTime" Text="--" Foreground="White"/></StackPanel>
       </Grid>
     </Border>

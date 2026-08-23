@@ -84,6 +84,7 @@ current rules merely because they discovered one.
 ### Operations and reference
 
 - [Cloudflare deployment runbook](runbooks/CLOUDFLARE_DEPLOYMENT.md)
+- [Control Plane installation runbook](runbooks/CONTROL_PLANE_INSTALLATION.md)
 - [Input and provider reference](reference/INPUTS.md)
 - [AI provider quota reference](AI_PROVIDER_QUOTAS.md)
 
