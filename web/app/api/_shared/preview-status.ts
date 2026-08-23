@@ -1,4 +1,7 @@
-import { PREVIEW_BRANCH_SNAPSHOT_STATUS_PATHS } from "../../_lib/preview-manifest.ts";
+import {
+  PREVIEW_BRANCH_SNAPSHOT_STATUS_PATHS,
+  PREVIEW_FALLBACK_STATUS_PATHS,
+} from "../../_lib/preview-manifest.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -23,6 +26,15 @@ function overlayPath(target: JsonObject, source: JsonObject, path: string): bool
   const leaf = segments.at(-1);
   if (!leaf || !Object.hasOwn(sourceCursor, leaf)) return false;
   targetCursor[leaf] = sourceCursor[leaf];
+  return true;
+}
+
+function hasPath(target: JsonObject, path: string): boolean {
+  let cursor: unknown = target;
+  for (const segment of path.split(".")) {
+    if (!isJsonObject(cursor) || !Object.hasOwn(cursor, segment)) return false;
+    cursor = cursor[segment];
+  }
   return true;
 }
 
@@ -57,6 +69,11 @@ export function withPreviewIdentity(current: JsonObject, frozen: JsonObject): Js
   const appliedPaths = PREVIEW_BRANCH_SNAPSHOT_STATUS_PATHS.filter(
     path => overlayPath(merged, frozen, path),
   );
+  for (const path of PREVIEW_FALLBACK_STATUS_PATHS) {
+    if (!hasPath(current, path) && overlayPath(merged, frozen, path)) {
+      appliedPaths.push(path);
+    }
+  }
   const preview = merged.preview as JsonObject;
   const branchSnapshot = preview.branch_snapshot as JsonObject;
   branchSnapshot.status_paths = appliedPaths;

@@ -16,6 +16,10 @@
     "llm_routing.display_only.maximum_concurrent_requests",
     "llm_routing.display_only.minute_scope"
   ],
+  "fallbackStatusPaths": [
+    "recent_decisions",
+    "counts.live_oos_model_groups"
+  ],
   "resources": {
     "status": "/api/status",
     "audit": "/api/audit",

@@ -993,6 +993,26 @@ test("preserves field-level provenance while overlaying current read-only status
   assert.equal(result.system.source_of_truth, "生产 D1 当前只读数据");
 });
 
+test("uses frozen bounded status fields only when current D1 omits them", () => {
+  const frozen = {
+    recent_decisions: [{ decision_id: "frozen" }],
+    counts: { live_oos_model_groups: 3 },
+  };
+  const missing = withPreviewIdentity({ counts: { decision_events: 20 } }, frozen);
+  assert.deepEqual(missing.recent_decisions, [{ decision_id: "frozen" }]);
+  assert.equal(missing.counts.live_oos_model_groups, 3);
+  assert.ok(missing.preview.branch_snapshot.status_paths.includes("recent_decisions"));
+  assert.ok(missing.preview.branch_snapshot.status_paths.includes("counts.live_oos_model_groups"));
+
+  const realZero = withPreviewIdentity({
+    recent_decisions: [], counts: { decision_events: 20, live_oos_model_groups: 0 },
+  }, frozen);
+  assert.deepEqual(realZero.recent_decisions, []);
+  assert.equal(realZero.counts.live_oos_model_groups, 0);
+  assert.ok(!realZero.preview.branch_snapshot.status_paths.includes("recent_decisions"));
+  assert.ok(!realZero.preview.branch_snapshot.status_paths.includes("counts.live_oos_model_groups"));
+});
+
 test("marks only declared branch snapshot fields as snapshots", () => {
   const paths = ["factor_coverage", "annotation_queue.requests_per_minute"];
   assert.equal(statusFieldPhase("ready", paths, "factor_coverage"), "snapshot");
