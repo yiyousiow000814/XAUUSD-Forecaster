@@ -33,7 +33,7 @@ from xauusd_forecaster.assistant_tools import (
     AssistantToolDefinition,
     AssistantToolRegistry,
 )
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.model_gateway import ModelRequestUsage
 from xauusd_forecaster.news_scheduler import PREEMPTIBLE_POOL, ApiCredential
 

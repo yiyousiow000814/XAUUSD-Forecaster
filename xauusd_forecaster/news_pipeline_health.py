@@ -12,7 +12,7 @@ from .annotation import (
     pending_annotation_records,
 )
 from .critical_annotation_state import RETIRED_ERROR
-from .forward_ledger import canonical_hash
+from xauusd_forecaster.evidence.ledger import canonical_hash
 from .news import NEWS_INTAKE_MAX_AGE
 from .news_evidence import annotation_is_actionable_candidate
 from .news_impact import IMPACT_MODEL, IMPACT_PROMPT_VERSION

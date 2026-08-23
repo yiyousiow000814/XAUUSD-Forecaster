@@ -6,8 +6,8 @@ import pytest
 import xauusd_forecaster.news_pipeline_health as news_pipeline_health_module
 
 from xauusd_forecaster.critical_annotation_state import RETIRED_ERROR
-from xauusd_forecaster.forward_engine import ForwardEngine
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.decision.engine import ForwardEngine
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.news_pipeline_health import news_semantic_pipeline_health_at
 from xauusd_forecaster.news_scheduler import (
     CONTRACT_BACKFILL_LANE,

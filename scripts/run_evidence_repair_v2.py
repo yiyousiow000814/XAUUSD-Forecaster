@@ -16,7 +16,7 @@ from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 
-from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
+from xauusd_forecaster.evidence.ledger import ForwardLedger  # noqa: E402
 from xauusd_forecaster.repair_v2 import run_repair  # noqa: E402
 
 

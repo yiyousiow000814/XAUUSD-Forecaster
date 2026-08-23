@@ -16,8 +16,8 @@ import xauusd_forecaster.annotation as annotation_module
 import xauusd_forecaster.news_relevance as news_relevance_module
 import xauusd_forecaster.news_time as news_time_module
 
-from xauusd_forecaster.forward_engine import ForwardEngine
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.decision.engine import ForwardEngine
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.content import (
     extract_article_full_text,
     extract_federal_reserve_full_text,

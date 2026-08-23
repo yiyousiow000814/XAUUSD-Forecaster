@@ -15,7 +15,7 @@ from xauusd_forecaster.annotation import (
     PROMPT_VERSION, TITLE_PROMPT_VERSION, annotate_pending_news,
     assess_pending_news_impacts, translate_pending_headlines,
 )
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.gemini_embeddings import (
     GEMINI_EMBEDDING_FAILURE_CODES, GeminiEmbeddingFailure,
 )

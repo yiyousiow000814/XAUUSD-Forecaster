@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster import news_pipeline_health
 from xauusd_forecaster.annotation import DEFAULT_GEMINI_MODEL, PROMPT_VERSION
 from xauusd_forecaster.critical_annotation_state import record_annotation_completion

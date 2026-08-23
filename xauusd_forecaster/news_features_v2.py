@@ -6,9 +6,9 @@ import json
 import math
 from datetime import datetime
 
-from .evidence_v2 import ELIGIBILITY_VERSION
+from xauusd_forecaster.evidence.schema import ELIGIBILITY_VERSION
 from .factors import MACRO_FEATURE_MAP, NEWS_FEATURES
-from .forward_ledger import canonical_hash
+from xauusd_forecaster.evidence.ledger import canonical_hash
 from .macro_release import macro_release_features_at
 from .news_contracts import CORE_MODEL_STORAGE_PERMISSION
 from .news_evidence import BROAD_NEWS_FEATURES, event_evidence_rows

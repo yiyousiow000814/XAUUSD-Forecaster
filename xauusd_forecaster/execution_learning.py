@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .forward_ledger import canonical_hash
+from xauusd_forecaster.evidence.ledger import canonical_hash
 from .execution_costs import net_shadow_log_return
 from .market import MarketObservation
 from .ridge import RidgeArtifact, train_ridge
@@ -126,7 +126,7 @@ def append_execution_examples(ledger, *, decision_id: str, appended_at: datetime
 
 def bootstrap_execution_examples(ledger, quote_root: str | Path, cutoff: datetime) -> int:
     """Build training material only from frozen predictions and retained quotes."""
-    from .executable_label import build_executable_label_v2
+    from xauusd_forecaster.evidence.executable_label import build_executable_label_v2
     from .repair_v2 import _read_quotes
 
     missing = ledger.connection.execute(

@@ -10,11 +10,11 @@ from pathlib import Path
 
 import numpy as np
 
-from .evidence_v2 import (
+from xauusd_forecaster.evidence.schema import (
     ELIGIBILITY_VERSION, FEATURE_VERSION, LABEL_VERSION, NEWS_FEATURE_VERSION,
 )
 from .factors import NEWS_FEATURES
-from .forward_ledger import canonical_hash
+from xauusd_forecaster.evidence.ledger import canonical_hash
 from .news_contracts import (
     CORE_EVIDENCE_STORAGE_LANE,
     CORE_MODEL_STORAGE_PERMISSION,

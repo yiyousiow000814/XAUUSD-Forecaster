@@ -199,7 +199,7 @@ def _version_cadence_metrics(
 
 
 def learning_curve_payload(connection, observed_at: datetime | None = None) -> dict:
-    from .inference_v2 import news_model_activation_status
+    from xauusd_forecaster.decision.inference import news_model_activation_status
     from .training_v2 import NEWS_MIN_EXPOSED_ROWS
     observed_at = observed_at or datetime.now(timezone.utc)
     if observed_at.tzinfo is None:

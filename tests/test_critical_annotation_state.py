@@ -18,7 +18,7 @@ from xauusd_forecaster.critical_annotation_state import (
     news_current_counts,
     refresh_news_revision_state,
 )
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.operational_health import scheduler_health_snapshot
 from xauusd_forecaster.news_scheduler import (
     ROUTINE_POOL,

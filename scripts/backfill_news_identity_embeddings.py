@@ -13,7 +13,7 @@ import sys
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 
-from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
+from xauusd_forecaster.evidence.ledger import ForwardLedger  # noqa: E402
 from xauusd_forecaster.news_impact import (  # noqa: E402
     IDENTITY_CANDIDATE_UNIVERSE_LIMIT,
     load_identity_candidate_universe,

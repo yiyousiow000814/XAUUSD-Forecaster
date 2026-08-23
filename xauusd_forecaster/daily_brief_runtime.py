@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from xauusd_forecaster.daily_brief import brief_dates_to_process, update_daily_brief
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.news_scheduler import (
     ApiCredential, LIVE_LANE, ROUTINE_POOL, configured_api_credentials,
     credentials_for_background_task,
@@ -42,4 +42,3 @@ def run_daily_brief_batch(
             "account_id": credential.account_id if credential else None,
         })
     return results
-

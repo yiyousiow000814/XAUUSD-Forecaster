@@ -24,6 +24,13 @@ merges.
 | `scripts/xauusd_control_center.ps1` (runtime supervision) | `scripts/xauusd_control_center_runtime.ps1` | Control Center runtime owner | Stable entry path dot-sources the owner into the same script scope | Retain because the dot-source file is part of the hashed runtime-control bundle |
 | `scripts/xauusd_control_center.ps1` (release transactions and validation) | `scripts/xauusd_control_center_release.ps1` | Control Center release owner | Stable entry path dot-sources the owner into the same script scope | Retain because the dot-source file is part of the hashed runtime-control bundle |
 | `scripts/xauusd_control_center.ps1` (diagnostics and UI) | `scripts/xauusd_control_center_presentation.ps1` | Control Center presentation owner | Stable entry path dot-sources the owner into the same script scope | Retain because the dot-source file is part of the hashed runtime-control bundle |
+| `xauusd_forecaster/decision/__init__.py` legacy decision import surface | `xauusd_forecaster/decision/selection.py` | Decision-selection owner | Package facade contains explicit imports and `__all__` only | Retain while root package exports `ShadowDecisionGate` and `select_recommended_action` |
+| `xauusd_forecaster/forward_engine.py` | `xauusd_forecaster/decision/engine.py` | Five-minute Decision orchestration owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/inference_v2.py` | `xauusd_forecaster/decision/inference.py` | V2 Decision inference owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/live_v2.py` | `xauusd_forecaster/decision/live.py` | Frozen Decision/outcome append owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/forward_ledger.py` | `xauusd_forecaster/evidence/ledger.py` | Append-only evidence-store owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/evidence_v2.py` | `xauusd_forecaster/evidence/schema.py` | V2 evidence schema/integrity owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/executable_label.py` | `xauusd_forecaster/evidence/executable_label.py` | Executable-price evidence label owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
 
 Future Phase D rows must name every retained flat facade. `THIN_SHIM` means the
 legacy Python file contains only a docstring, explicit canonical imports,

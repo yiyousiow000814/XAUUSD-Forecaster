@@ -9,16 +9,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from xauusd_forecaster.evidence_v2 import (
+from xauusd_forecaster.evidence.schema import (
     ELIGIBILITY_VERSION,
     V2_SCHEMA,
     install_v2_schema,
 )
-from xauusd_forecaster.executable_label import build_executable_label_v2
+from xauusd_forecaster.evidence.executable_label import build_executable_label_v2
 from xauusd_forecaster.execution_costs import net_shadow_log_return
-from xauusd_forecaster.forward_ledger import ForwardLedger, canonical_hash
+from xauusd_forecaster.evidence.ledger import ForwardLedger, canonical_hash
 from xauusd_forecaster.learning_curves import _bounded_curve, _stage, learning_curve_payload
-from xauusd_forecaster.live_v2 import (
+from xauusd_forecaster.decision.live import (
     _append_news_visibility_receipts,
     append_live_decision_v2,
     append_live_outcome_v2,
@@ -47,8 +47,9 @@ from xauusd_forecaster.news_semantics import (
 )
 from xauusd_forecaster.news_time import assess_news_time, category_time_rule
 from xauusd_forecaster.repair_v2 import immutable_table_hash
+from xauusd_forecaster.decision import inference as inference_v2
 from xauusd_forecaster import (
-    execution_learning, inference_v2, news_contract_migration, training_v2,
+    execution_learning, news_contract_migration, training_v2,
 )
 from xauusd_forecaster.u5_state import U5State, U5_VERSION
 from xauusd_forecaster.execution_learning import (

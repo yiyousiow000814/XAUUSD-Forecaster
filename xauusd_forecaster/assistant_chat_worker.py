@@ -41,7 +41,7 @@ from .assistant_tools import (
     AssistantToolRegistry,
     build_news_search_tool,
 )
-from .forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from .news_scheduler import ApiCredential
 
 

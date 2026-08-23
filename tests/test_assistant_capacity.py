@@ -21,7 +21,7 @@ from xauusd_forecaster.assistant_routing import (
     ModelProfile,
     plan_assistant_route,
 )
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.model_gateway import (
     ModelGatewayCapacityExhausted,
     ModelRequestUsage,

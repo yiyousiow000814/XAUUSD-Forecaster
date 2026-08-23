@@ -9,7 +9,7 @@ import pytest
 
 from xauusd_forecaster import annotation, daily_brief
 from xauusd_forecaster.ai_provider_registry import quota_surface_for_model
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.model_gateway import (
     GeminiModelGateway, ModelGatewayCapacityExhausted, ModelGatewayResponseInvalid,
 )

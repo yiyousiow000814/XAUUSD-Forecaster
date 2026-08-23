@@ -47,7 +47,7 @@ from xauusd_forecaster.annotation import (
     IMPACT_PROMPT_VERSION,
     _append_impact_failure,
 )
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.news_semantics import (
     CURRENT_NEWS_PROMPT_VERSION,
     PREVIOUS_NEWS_PROMPT_VERSION,

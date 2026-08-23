@@ -26,7 +26,7 @@ from .content import (
     extract_article_full_text,
     extract_federal_reserve_full_text,
 )
-from .forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from .news_relevance import google_news_item_is_relevant
 from .news_time import assess_publication_receipt_clock
 from .source_polling import (

@@ -5,7 +5,7 @@ import sqlite3
 import numpy as np
 import pytest
 
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.gemini_embeddings import (
     GeminiEmbeddingCapacityDeferred,
     GeminiEmbeddingClient,

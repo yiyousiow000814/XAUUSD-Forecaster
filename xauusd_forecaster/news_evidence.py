@@ -9,7 +9,7 @@ import urllib.parse
 from collections import defaultdict
 from datetime import datetime
 
-from .forward_ledger import canonical_hash
+from xauusd_forecaster.evidence.ledger import canonical_hash
 from .news_impact import (
     HANDOVER_IMPACT_PROMPT_VERSION,
     IMPACT_MODEL,

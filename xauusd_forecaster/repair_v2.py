@@ -11,7 +11,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .evidence_v2 import (
+from xauusd_forecaster.evidence.schema import (
     ELIGIBILITY_VERSION,
     EVIDENCE_CONTRACT_VERSION,
     FEATURE_VERSION,
@@ -19,8 +19,8 @@ from .evidence_v2 import (
     NEWS_FEATURE_VERSION,
     install_v2_schema,
 )
-from .executable_label import build_executable_label_v2
-from .forward_ledger import ForwardLedger, canonical_hash
+from xauusd_forecaster.evidence.executable_label import build_executable_label_v2
+from xauusd_forecaster.evidence.ledger import ForwardLedger, canonical_hash
 from .m1 import aggregate_xautk002_batch
 from .market import MarketObservation, build_forward_snapshot
 from .news_features_v2 import aggregate_news_features_v2, frozen_rule_rows

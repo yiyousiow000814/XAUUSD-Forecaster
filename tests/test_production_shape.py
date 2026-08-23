@@ -4,9 +4,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES
-from xauusd_forecaster.inference_v2 import MODEL_IDENTITIES
+from xauusd_forecaster.decision.inference import MODEL_IDENTITIES
 from xauusd_forecaster.news_scheduler import reserve_account_request
 from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
 from xauusd_forecaster.news import RUNTIME_NEWS_POLL_SOURCES

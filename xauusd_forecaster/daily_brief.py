@@ -14,7 +14,7 @@ from .annotation import (
     GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL, PROMPT_VERSION,
     conservative_input_token_estimate, generate_metered_json,
 )
-from .forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from .model_gateway import (
     ModelGatewayCapacityExhausted, ModelGatewayResponseInvalid,
     ModelRequestAccountant, ModelRequestUsage,
