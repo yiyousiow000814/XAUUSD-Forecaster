@@ -44,6 +44,7 @@ DEFAULT_NEWS_EVIDENCE_STATE = (
 DEFAULT_RESOURCE_SCHEDULE_STATE = (
     MODULE_ROOT / ".local" / "forward" / "dashboard-resource-schedule-state.json"
 )
+SYNC_STATE_ROOT = DEFAULT_CONFIG.parent.resolve()
 LOCAL_STATUS_TIMEOUT_SECONDS = 20
 REMOTE_POST_TIMEOUT_SECONDS = 30
 NEWS_PROJECTION_BATCHES_PER_CYCLE = 4
@@ -112,9 +113,12 @@ from xauusd_forecaster.dashboard.resource_contracts import (
     _visual_decision_overview,
     _visual_version_overview,
     audit_briefs_snapshot,
+    audit_briefs_payload,
     audit_decisions_snapshot,
+    audit_decisions_payload,
     audit_snapshot,
     audit_stories_snapshot,
+    audit_stories_payload,
     compact_market_chart,
     learning_history_batches,
     learning_history_records,
@@ -521,6 +525,29 @@ def _target_state_path(path: Path, target_name: str, *, legacy: bool) -> Path:
     return path.with_name(f"{path.stem}-{safe_name}{path.suffix}")
 
 
+def _validated_sync_state_path(path: Path) -> Path:
+    """Keep mutable sync cursors inside the private runtime state directory."""
+    if path.is_absolute():
+        parent = path.parent
+    else:
+        parent = SYNC_STATE_ROOT if path.parent == Path(".") else path.parent
+    filename = path.name
+    allowed_characters = frozenset(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+    )
+    if (
+        parent != SYNC_STATE_ROOT
+        or not 6 <= len(filename) <= 128
+        or not filename[0].isalnum()
+        or not filename.endswith(".json")
+        or any(character not in allowed_characters for character in filename)
+    ):
+        raise ValueError(
+            f"dashboard sync state path must be one JSON file under {SYNC_STATE_ROOT}"
+        )
+    return SYNC_STATE_ROOT / filename
+
+
 def configured_targets(config: dict) -> list[dict]:
     """Resolve legacy or multi-target mirror configuration without sharing state."""
     declared = config.get("targets")
@@ -558,47 +585,47 @@ def configured_targets(config: dict) -> list[dict]:
             "legacy": bool(target.get("legacy", False)),
         }
         scoped.pop("targets", None)
-        scoped["learning_state_file"] = str(_target_state_path(
+        scoped["learning_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "learning_state_file",
                 config.get("learning_state_file", DEFAULT_LEARNING_STATE),
             )),
             name,
             legacy=scoped["legacy"],
-        ))
-        scoped["news_state_file"] = str(_target_state_path(
+        )))
+        scoped["news_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "news_state_file",
                 config.get("news_state_file", DEFAULT_NEWS_STATE),
             )),
             name,
             legacy=scoped["legacy"],
-        ))
-        scoped["market_history_state_file"] = str(_target_state_path(
+        )))
+        scoped["market_history_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "market_history_state_file",
                 config.get("market_history_state_file", DEFAULT_MARKET_HISTORY_STATE),
             )),
             name,
             legacy=scoped["legacy"],
-        ))
-        scoped["learning_history_state_file"] = str(_target_state_path(
+        )))
+        scoped["learning_history_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "learning_history_state_file",
                 config.get("learning_history_state_file", DEFAULT_LEARNING_HISTORY_STATE),
             )),
             name,
             legacy=scoped["legacy"],
-        ))
-        scoped["news_evidence_state_file"] = str(_target_state_path(
+        )))
+        scoped["news_evidence_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "news_evidence_state_file",
                 config.get("news_evidence_state_file", DEFAULT_NEWS_EVIDENCE_STATE),
             )),
             name,
             legacy=scoped["legacy"],
-        ))
-        scoped["resource_schedule_state_file"] = str(_target_state_path(
+        )))
+        scoped["resource_schedule_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "resource_schedule_state_file",
                 config.get(
@@ -608,7 +635,7 @@ def configured_targets(config: dict) -> list[dict]:
             )),
             name,
             legacy=scoped["legacy"],
-        ))
+        )))
         targets.append(scoped)
     if not targets:
         raise ValueError("dashboard sync has no configured targets")
