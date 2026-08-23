@@ -24,7 +24,9 @@ package.__path__ = [str(MODULE_ROOT / "xauusd_forecaster")]
 sys.modules["xauusd_forecaster"] = package
 factor_coverage = importlib.import_module("xauusd_forecaster.factors").factor_coverage
 model_limits = importlib.import_module("xauusd_forecaster.model_limits")
-dashboard_sync = importlib.import_module("scripts.run_dashboard_sync")
+dashboard_sync = importlib.import_module(
+    "xauusd_forecaster.dashboard.resource_contracts"
+)
 assess_news_semantic_eligibility = importlib.import_module(
     "xauusd_forecaster.news_time"
 ).assess_news_semantic_eligibility

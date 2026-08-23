@@ -12,7 +12,8 @@ from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 
-from scripts import run_dashboard_sync as dashboard_sync
+from xauusd_forecaster.dashboard import resource_contracts as dashboard_sync
+from xauusd_forecaster.dashboard.sync import resource_protocols as sync_protocols
 from xauusd_forecaster.news_projection import build_news_projection_generation
 
 
@@ -145,7 +146,7 @@ def build_fixtures() -> dict[str, bytes]:
         for index in range(2_500)
     ]
     market_history = max(
-        dashboard_sync._market_history_payloads(candles[:500], decisions[:2_500]),
+        sync_protocols._market_history_payloads(candles[:500], decisions[:2_500]),
         key=len,
     )
     learning_records = dashboard_sync.learning_history_records(source)
@@ -169,7 +170,7 @@ def build_fixtures() -> dict[str, bytes]:
         for index in range(dashboard_sync.NEWS_EVIDENCE_WRITE_BATCH_ITEMS)
     ]
     news_evidence = json.dumps({
-        "contract_version": dashboard_sync.NEWS_EVIDENCE_CONTRACT_VERSION,
+        "contract_version": sync_protocols.NEWS_EVIDENCE_CONTRACT_VERSION,
         "snapshot_id": "f" * 64, "offset": 0, "items": evidence_items,
     }, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
     snapshot_id = "f" * 64
@@ -187,16 +188,16 @@ def build_fixtures() -> dict[str, bytes]:
         "market-history-write.json": market_history,
         "learning-history-write.json": learning_history,
         "news-evidence-prepare.json": encode({
-            "contract_version": dashboard_sync.NEWS_EVIDENCE_CONTRACT_VERSION,
+            "contract_version": sync_protocols.NEWS_EVIDENCE_CONTRACT_VERSION,
             "prepare_snapshot": snapshot_id, "expected_count": len(evidence_items),
         }),
         "news-evidence-stage.json": news_evidence,
         "news-evidence-activate.json": encode({
-            "contract_version": dashboard_sync.NEWS_EVIDENCE_CONTRACT_VERSION,
+            "contract_version": sync_protocols.NEWS_EVIDENCE_CONTRACT_VERSION,
             "activate_snapshot": snapshot_id, "expected_count": len(evidence_items),
         }),
         "news-evidence-cleanup.json": encode({
-            "contract_version": dashboard_sync.NEWS_EVIDENCE_CONTRACT_VERSION,
+            "contract_version": sync_protocols.NEWS_EVIDENCE_CONTRACT_VERSION,
             "cleanup_active_snapshot": snapshot_id,
         }),
         "news-index-prepare.json": encode({

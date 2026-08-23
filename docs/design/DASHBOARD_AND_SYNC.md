@@ -55,8 +55,10 @@ replaceable process-local derived state; the API remains the HTTP/process owner.
 `xauusd_forecaster.dashboard.operator_bridge` owns the loopback/non-browser
 authorization contract, retry-job response, and bounded override-batch service.
 The scheduler remains the unique state-transition owner; the API retains HTTP
-parsing and response translation. `run_dashboard_sync.py` owns D1 mirroring and
-per-target progress.
+parsing and response translation. Dashboard Sync progress, transport, and
+per-resource protocols are owned under `xauusd_forecaster.dashboard.sync`;
+`run_dashboard_sync.py` retains CLI, heartbeat-first orchestration, lane
+lifecycle, and structured top-level logging.
 
 ## 4. Inputs and outputs
 
@@ -182,6 +184,12 @@ collapse all optional resources into one restart burst.
   broker-session read projections.
 - `xauusd_forecaster/dashboard/operator_bridge.py`: loopback authorization,
   retry-job read service, and bounded delegation to scheduler transitions.
+- `xauusd_forecaster/dashboard/sync/progress.py`: cursor/checkpoint files,
+  resource cadence/backoff, process status, and schedule merging.
+- `xauusd_forecaster/dashboard/sync/transport.py`: authenticated local/remote
+  HTTP and independent target configuration.
+- `xauusd_forecaster/dashboard/sync/resource_protocols.py`: bounded per-resource
+  mirror protocols and acknowledgements.
 - `xauusd_forecaster/dashboard_payloads.py`: critical and audit contracts.
 - `xauusd_forecaster/dashboard_summaries.py`: indexed summary queries.
 - `xauusd_forecaster/learning_curves.py`: learning resource.
@@ -213,10 +221,10 @@ audited retry semantics.
 
 ## 16. Known current gaps
 
-The API entry script retains only HTTP/process orchestration; status, optional,
-news, market, and audited operator-bridge services are package-owned in
-the pending stack. Sync still contains extensive transport and scheduling logic,
-and two build commands retain transitional Sync imports until C4. The large
+The API and Sync entry scripts retain their process orchestration boundaries;
+resource, transport, progress, and audited operator services are package-owned
+in the pending stack. Preview and release builders import package owners rather
+than a runtime script. The large
 API/sync tests group several resource families in single files. The lazy local
 market-history route has bounded output but growing source enumeration/merge
 work in its request path.

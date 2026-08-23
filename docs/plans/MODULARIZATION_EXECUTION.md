@@ -84,8 +84,8 @@ described by the campaign are `TARGET` until the corresponding row is merged.
 | 2 | C3a `refactor/dashboard-api-news-resources` | C2 | News archive, evidence, and content read resources | Dashboard news resource owners, API wrapper, focused tests/maps | Dashboard/news resource and route tests; full Python | Revert mechanical owner move | DRAFT PR OPEN | #288 / `32d70213e8aaab44dffc67c617b22e7fea461e01` |
 | 3 | C3b `refactor/dashboard-api-market-resources` | C3a | Market history and chart read resources | Dashboard market owner, API wrapper, focused tests/maps | Market/API production-shape tests; full Python | Revert mechanical owner move | DRAFT PR OPEN | #289 / `5165299b429ce435756a3d61923ad9904536be60` |
 | 4 | C3c `refactor/dashboard-api-optional-resources` | C3b | Current status and optional read-resource composition | Status resource owner, API compatibility imports, focused tests/maps | API, audit and release-read tests; full Python | Revert mechanical owner move | DRAFT PR OPEN | #290 / `496423da5e245b844ef0c8afb1f227867ef7d560` |
-| 5 | C3d `refactor/dashboard-operator-bridge` | C3c | Audited local scheduler operator bridge | Auth/list/apply service owner and HTTP adapter | Retry authorization/transition tests; full Python | Revert bridge extraction | IN PROGRESS | Pending validation |
-| 6 | C4 `refactor/dashboard-sync-runtime` | C3d | Sync progress, cadence, transport, and lane runtime | `dashboard/sync/` owners, thin script, focused tests/maps | Sync isolation/protocol tests; full Python | Revert package extraction | PLANNED | TBD |
+| 5 | C3d `refactor/dashboard-operator-bridge` | C3c | Audited local scheduler operator bridge | Auth/list/apply service owner and HTTP adapter | Retry authorization/transition tests; full Python | Revert bridge extraction | DRAFT PR OPEN | #291 / `a6fe7ad59f079f008795377ed2022fdeda19d2e4` |
+| 6 | C4 `refactor/dashboard-sync-runtime` | C3d | Sync progress, cadence, transport, and lane runtime | `dashboard/sync/` owners, thin script, focused tests/maps | Sync isolation/protocol tests; full Python | Revert package extraction | IN PROGRESS | Pending validation |
 | 7 | C5 `refactor/news-annotator-runtime` | C4 | Durable annotator batch execution and Brief-cycle orchestration | News scheduler/Brief runtime owners, thin script, focused tests/maps | Scheduler, annotation, retrieval, Brief; full Python | Revert package extraction | PLANNED | TBD |
 | 8 | C6 `refactor/control-center-boundaries` | C5 | Control Center release/supervision modules behind stable entry path | PowerShell owner files, bundle manifest, launcher tests/maps | Windows runtime and release fixtures | Revert dot-source extraction and manifest change | PLANNED | TBD |
 | 9 | D1 `refactor/decision-evidence-packages` | C6 | Canonical Decision and Evidence packages | Canonical modules, narrow shims, migration map/tests | Decision/evidence/forward-only/production-shape; full Python | Restore canonical files to legacy paths | PLANNED | TBD |
@@ -107,6 +107,5 @@ The initial SCC contains `ai_task_registry`, `annotation`,
 `semantic_transition`. Phase D must measure this exact component again rather
 than assuming file moves remove it.
 
-The two permitted transitional build imports of `run_dashboard_sync.py` are
-owned by C4 and have no runtime authority. They are explicitly rejected at
-campaign completion.
+C4 removes the two transitional build imports of `run_dashboard_sync.py`;
+script-to-script shared-library imports are rejected from that row onward.

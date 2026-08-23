@@ -31,7 +31,7 @@ contract.
 | Local market history or current chart | `xauusd_forecaster/dashboard/market_resources.py` | Dashboard market-resource owner | Quote JSONL and local SQLite authority; `scripts/run_dashboard_api.py` owns HTTP translation | `tests/test_dashboard_market_resources.py`, `tests/test_dashboard_api.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
 | Dashboard resource serialization | `xauusd_forecaster/dashboard/resource_contracts.py` | Dashboard resource-contract owner | `xauusd_forecaster/dashboard_payloads.py`; API and Sync are consumers | `tests/test_dashboard_resource_contracts.py`, `tests/test_dashboard_sync.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
 | Local scheduler operator bridge | `xauusd_forecaster/dashboard/operator_bridge.py` | Dashboard operator-bridge service owner | `xauusd_forecaster/news_scheduler.py` retains transition authority; `scripts/run_dashboard_api.py` owns HTTP translation | `tests/test_dashboard_operator_bridge.py`, `tests/test_dashboard_api.py`, `tests/test_news_scheduler.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
-| Dashboard sync | `scripts/run_dashboard_sync.py` | Dashboard Sync process | `xauusd_forecaster/dashboard/resource_contracts.py`, `xauusd_forecaster/dashboard_payloads.py` | `tests/test_dashboard_sync.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
+| Dashboard sync | `scripts/run_dashboard_sync.py` | Dashboard Sync process orchestration | `xauusd_forecaster/dashboard/sync/progress.py`, `xauusd_forecaster/dashboard/sync/transport.py`, `xauusd_forecaster/dashboard/sync/resource_protocols.py`, `xauusd_forecaster/dashboard/resource_contracts.py` | `tests/test_dashboard_sync.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
 | Cloudflare API routing | `web/worker/api-router.ts` | Minimal API Worker router | `web/worker/index.ts`, `web/db/schema.ts` | `web/tests/d1-capabilities.test.mjs`, `web/tests/worker-cpu-headroom.test.mjs` | [Web and Cloudflare](../design/WEB_AND_CLOUDFLARE.md) |
 | Static Web UI | `web/app/_components/DashboardApp.tsx` | Web feature/view owners | `web/app/_components/DashboardShell.tsx`, `web/app/globals.css` | `web/tests/rendered-html.test.mjs`, `web/tests/responsive-scroll.test.mjs` | [Dashboard Presentation](../specs/DASHBOARD_PRESENTATION.md) |
 | Preview | `scripts/build_preview_bundle.py` | Preview build owner | `web/app/_lib/preview-manifest.ts`, `web/app/_lib/preview-resources.ts` | `tests/test_dashboard_sync.py`, `web/tests/rendered-html.test.mjs` | [Preview Behavior](../specs/PREVIEW_BEHAVIOR.md), [Preview Isolation](../contracts/PREVIEW_ISOLATION.md) |
@@ -149,6 +149,12 @@ contract.
   optional-resource composition over existing evidence and runtime inputs.
 - `xauusd_forecaster/dashboard/operator_bridge.py` — owns local authorization,
   retry-job response, and bounded delegation to scheduler transitions.
+- `xauusd_forecaster/dashboard/sync/progress.py` — owns Sync checkpoint/status
+  persistence and per-resource cadence/backoff.
+- `xauusd_forecaster/dashboard/sync/transport.py` — owns authenticated local and
+  remote transport plus target isolation.
+- `xauusd_forecaster/dashboard/sync/resource_protocols.py` — owns per-resource
+  mirror protocols, bounded page advancement, and acknowledgements.
 - `xauusd_forecaster/dashboard/health_projection.py` — owns read-only
   component projections for semantic health, Collector heartbeat, and Decision
   cadence; it owns no source authority, cache, or operational alert taxonomy.
@@ -164,8 +170,8 @@ contract.
 - `xauusd_forecaster/operational_health.py` — projects component incidents and
   bounded status.
 - `scripts/run_dashboard_api.py` — owns local HTTP/process orchestration.
-- `scripts/run_dashboard_sync.py` — currently combines remote transport,
-  pagination, scheduling and sync orchestration; serializers are package-owned.
+- `scripts/run_dashboard_sync.py` — owns CLI, heartbeat-first cycle, lane
+  lifecycle, retry orchestration, and structured top-level logging.
 
 ### Web and Cloudflare
 
