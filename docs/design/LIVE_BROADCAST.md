@@ -3,9 +3,10 @@
 ## Data path
 
 The existing dashboard mirror heartbeat remains approximately 30 seconds and
-keeps audit, learning, news, and history cadences independent. A future explicit
-Windows cutover projects one compact `PUBLIC_LIVE_V1` state and publishes it to
-the isolated `aurum-live-broadcast` Worker. `LiveHub` stores one latest snapshot
+keeps audit, learning, news, and history cadences independent. An explicit,
+separately gated Windows publisher projects one compact `PUBLIC_LIVE_V1` state
+at approximately 30-second cadence and publishes it to the isolated
+`aurum-live-broadcast` Worker. `LiveHub` stores one latest snapshot
 and fans it out through hibernating WebSockets. Browsers merge that state into
 the shared `/api/status` cache used by all public views.
 
@@ -48,8 +49,21 @@ blank page and has no collector or decision-loop impact. Reversing the website
 to an older Stable is safe because old code ignores the service. The namespace
 and latest state remain intact during rollback.
 
+## Publisher ownership and recovery
+
+The publisher is an optional Control Center service, not a child of collection,
+annotation, API, or dashboard sync. Its states are `DISABLED`, `NOT_CONFIGURED`,
+`RUNNING`, and `DEGRADED`; its failure never restarts or degrades a core owner.
+It remains inactive until both the explicit activation flag and publisher token
+are configured during coordinated cutover.
+
+The next sequence is reconciled from an atomically persisted local acknowledgement
+and `LiveHub` health. A rejected stale sequence repairs only that delivery stage
+from the returned latest sequence; already-valid source projection is preserved.
+The local acknowledgement advances only after a non-dry-run publish is accepted.
+
 ## Deployment state
 
-This design adds code and an operator runbook only. The publisher is not wired
-into Windows startup, no secret is configured, no service exists as a result of
-the change, and no Durable Object namespace is provisioned by repository tests.
+This design wires the isolated owner and Control Center lifecycle but does not
+activate it, configure a secret, create a service, or provision a Durable Object
+namespace. Repository and Preview tests perform no production mutation.

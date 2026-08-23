@@ -16,7 +16,20 @@ type LiveState = {
   market_session: string;
   freshness: { online: boolean; state: string };
   quote: { bid: number; ask: number; spread: number; source_received_time: string };
-  forecast: Record<string, unknown>;
+  forecast: {
+    model_identity: string | null;
+    model_version: string | null;
+    recommended_action: "LONG" | "SHORT" | "WAIT";
+    prediction_status: string | null;
+    ev_long_u5: number | null;
+    ev_short_u5: number | null;
+    interval_width: number | null;
+    decision_time: string | null;
+    signal_expiry_seconds: number;
+    forecast_horizon_seconds: number;
+    directional_bias: "LONG" | "SHORT" | "NEUTRAL";
+    frozen_record: boolean;
+  };
   health: { status?: string; alerts?: unknown[] };
   recent_decisions?: unknown[];
 };
@@ -28,6 +41,7 @@ type Timer = ReturnType<typeof setTimeout>;
 const INITIAL_WAIT_MS = 2_500;
 const STALE_AFTER_MS = 75_000;
 const BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const;
+const MAX_RECENT_DECISIONS = 18;
 
 function configuredUrl(): string | null {
   const env = (import.meta as ImportMeta & { env?: Record<string, string> }).env;
@@ -53,7 +67,50 @@ function validState(value: unknown): value is LiveState {
     && Number.isSafeInteger(state.sequence) && Number(state.sequence) > 0
     && typeof state.generated_at === "string"
     && typeof state.quote?.source_received_time === "string"
+    && Number.isFinite(Date.parse(state.quote.source_received_time))
     && Number.isFinite(state.quote?.bid) && Number.isFinite(state.quote?.ask);
+}
+
+function decisionKey(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  const key = row.decision_id ?? row.decision_time;
+  return typeof key === "string" && key ? key : null;
+}
+
+export function mergeRecentDecisions(current: unknown, incoming: unknown): unknown[] {
+  const merged: unknown[] = [];
+  const seen = new Set<string>();
+  for (const row of [
+    ...(Array.isArray(incoming) ? incoming : []),
+    ...(Array.isArray(current) ? current : []),
+  ]) {
+    const key = decisionKey(row);
+    if (key && seen.has(key)) continue;
+    if (key) seen.add(key);
+    merged.push(row);
+    if (merged.length === MAX_RECENT_DECISIONS) break;
+  }
+  return merged;
+}
+
+export function effectiveQuoteAgeSeconds(
+  status: Record<string, unknown> | null,
+  now = Date.now(),
+): number | null {
+  const system = status?.system && typeof status.system === "object"
+    ? status.system as Record<string, unknown> : {};
+  const latest = status?.latest && typeof status.latest === "object"
+    ? status.latest as Record<string, unknown> : {};
+  const transport = status?.live_transport && typeof status.live_transport === "object"
+    ? status.live_transport as Record<string, unknown> : {};
+  if (transport.source_mode === "LIVE_PUSH") {
+    const receivedAt = Date.parse(String(latest.source_received_time ?? ""));
+    if (Number.isFinite(receivedAt)) return Math.max(0, (now - receivedAt) / 1_000);
+  }
+  return typeof system.quote_age_seconds === "number"
+    && Number.isFinite(system.quote_age_seconds)
+    ? system.quote_age_seconds : null;
 }
 
 function applyToStatus(state: LiveState, mode: LiveSourceMode): void {
@@ -63,14 +120,18 @@ function applyToStatus(state: LiveState, mode: LiveSourceMode): void {
       ? status.system as Record<string, unknown> : {};
     const latest = status.latest && typeof status.latest === "object"
       ? status.latest as Record<string, unknown> : {};
+    const operational = status.operational_health && typeof status.operational_health === "object"
+      ? status.operational_health as Record<string, unknown> : {};
     return {
       ...status,
       generated_at: state.generated_at,
       system: { ...system, online: state.freshness.online, market_session: state.market_session },
       latest: { ...latest, ...state.quote },
       research_forecast: state.forecast,
-      operational_health: state.health,
-      ...(state.recent_decisions ? { recent_decisions: state.recent_decisions } : {}),
+      operational_health: { ...operational, ...state.health },
+      ...(state.recent_decisions ? {
+        recent_decisions: mergeRecentDecisions(status.recent_decisions, state.recent_decisions),
+      } : {}),
       live_transport: {
         source_mode: mode,
         schema_version: state.schema_version,

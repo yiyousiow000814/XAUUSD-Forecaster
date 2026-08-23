@@ -72,13 +72,20 @@ next update, and application writes are rejected.
 4. Configure `VITE_LIVE_BROADCAST_URL` for the intended main Candidate.
 5. Configure Release Control health URL and, only when needed, the explicitly
    compatible broadcast revision.
-6. Run Candidate validation and record broadcast readiness separately from HTTP
-   fallback.
+6. Run Candidate validation against the pinned service health authority and an
+   authenticated zero-mutation dry-run. Missing configuration or external
+   availability remains retryable for the same Candidate; a latest state is not
+   required before Promote.
 7. Verify Candidate WebSocket, stale handling, and HTTP fallback.
 8. Promote the website only after all existing gates pass.
-9. Activate the matching Windows publisher during the normal runtime cutover;
-   Preview and validation continue to use dry-run.
-10. Keep OBSERVING until normal decision cycles complete.
+9. During the matching Windows runtime cutover, configure the publisher token
+   in the user environment and set
+   `AURUM_LIVE_BROADCAST_PUBLISHER_ENABLED=1`. Preview and pre-Promote validation
+   continue to use dry-run; never activate the publisher from Preview.
+10. Verify Control Center reports `RUNNING` and `/health` exposes a real latest
+    `PUBLIC_LIVE_V1` state from the exact runtime revision with
+    `latest_published_at` no older than 90 seconds.
+11. Keep OBSERVING until normal decision cycles complete.
 
 ## Failure and rollback
 

@@ -1,5 +1,5 @@
 import { shouldPollDashboardResource } from "./dashboard-refresh-policy";
-import { isLiveBroadcastHealthy, liveBroadcastEnabled } from "./live-broadcast";
+import { isLiveBroadcastHealthy } from "./live-broadcast";
 
 export type DashboardRefreshCleanup = () => void;
 export type DashboardResourceMode = "current" | "build-snapshot";
@@ -13,6 +13,16 @@ export const DASHBOARD_REFRESH_INTERVALS = {
 } as const;
 
 const POLL_LEASE_PREFIX = "aurum-dashboard-poll";
+let statusBaseline: Promise<void> | null = null;
+
+export function ensureStatusBaseline(
+  refresh: () => void | Promise<unknown>,
+): Promise<void> {
+  if (!statusBaseline) {
+    statusBaseline = Promise.resolve().then(refresh).then(() => undefined);
+  }
+  return statusBaseline;
+}
 
 export function statusPollingSuppressed(
   coordinationKey: string,
@@ -66,8 +76,11 @@ export function scheduleDashboardRefresh(
 ): DashboardRefreshCleanup {
   const statusResource = coordinationKey === "status";
   const initial = window.setTimeout(
-    () => { if (!statusPollingSuppressed(coordinationKey)) initialRefresh(); },
-    statusResource && liveBroadcastEnabled() ? 2_500 : 0,
+    () => {
+      if (statusResource) void ensureStatusBaseline(initialRefresh);
+      else initialRefresh();
+    },
+    0,
   );
   let lastLocalPollAt = Date.now();
   const pollWhenEligible = () => {

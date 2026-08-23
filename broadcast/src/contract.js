@@ -1,6 +1,6 @@
 export const LIVE_SCHEMA_VERSION = "PUBLIC_LIVE_V1";
 export const MAX_LIVE_BYTES = 16_384;
-export const MAX_RECENT_DECISIONS = 6;
+export const MAX_RECENT_DECISIONS = 18;
 
 const PRIVATE_KEYS = new Set([
   "gemini_quota", "gemini_31_quota", "gemma_quota", "gemini_embedding_quota",
@@ -48,6 +48,11 @@ export function validateLiveState(value) {
   if (value.quote.spread < 0) throw new TypeError("invalid quote spread");
   if (value.quote.ask < value.quote.bid) throw new TypeError("crossed quote");
   if (!object(value.forecast) || !object(value.health)) throw new TypeError("invalid summaries");
+  if (!["LONG", "SHORT", "WAIT"].includes(value.forecast.recommended_action)
+      || !finiteNumber(value.forecast.signal_expiry_seconds)
+      || !finiteNumber(value.forecast.forecast_horizon_seconds)) {
+    throw new TypeError("invalid forecast");
+  }
   if (value.recent_decisions !== undefined) {
     if (!Array.isArray(value.recent_decisions)
         || value.recent_decisions.length > MAX_RECENT_DECISIONS) {

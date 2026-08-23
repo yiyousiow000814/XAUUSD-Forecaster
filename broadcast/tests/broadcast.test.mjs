@@ -12,7 +12,13 @@ function state(sequence = 1, overrides = {}) {
     market_session: "OPEN",
     freshness: { online: true, state: "FRESH" },
     quote: { bid: 3370.1, ask: 3370.3, spread: 0.2, source_received_time: "2026-08-23T05:00:00.000Z" },
-    forecast: { action: "WAIT", hold_minutes: 30, decision_time: "2026-08-23T05:00:00.000Z" },
+    forecast: {
+      model_identity: "FULL", model_version: "v18", recommended_action: "WAIT",
+      prediction_status: "READY", ev_long_u5: 0.1, ev_short_u5: -0.1,
+      interval_width: 0.2, decision_time: "2026-08-23T05:00:00.000Z",
+      signal_expiry_seconds: 20, forecast_horizon_seconds: 1800,
+      directional_bias: "NEUTRAL", frozen_record: true,
+    },
     health: { status: "HEALTHY", alerts: [] },
     recent_decisions: [{ decision_time: "2026-08-23T05:00:00.000Z", action: "WAIT" }],
     ...overrides,
@@ -28,7 +34,14 @@ function context(socketCount = 0) {
   }));
   return {
     values, sockets,
-    storage: { get: async key => values.get(key), put: async (key, value) => values.set(key, value) },
+    storage: {
+      get: async key => values.get(key),
+      put: async (key, value) => {
+        if (key && typeof key === "object") {
+          for (const [name, nested] of Object.entries(key)) values.set(name, nested);
+        } else values.set(key, value);
+      },
+    },
     getWebSockets: () => sockets,
     acceptWebSocket(socket) { sockets.push(socket); },
   };
@@ -57,7 +70,7 @@ test("the public contract is small and rejects private or malformed evidence", (
   assert.ok(Buffer.byteLength(JSON.stringify(state())) < MAX_LIVE_BYTES);
   assert.throws(() => validateLiveState(state(1, { gemini_quota: {} })), /private/);
   assert.throws(() => validateLiveState(state(1, { quote: { bid: 2, ask: 1, spread: -1, source_received_time: "x" } })), /quote spread|crossed/);
-  assert.throws(() => validateLiveState(state(1, { recent_decisions: Array(7).fill({}) })), /bounded/);
+  assert.throws(() => validateLiveState(state(1, { recent_decisions: Array(19).fill({}) })), /bounded/);
 });
 
 test("publisher auth happens before parsing and dry-run has no Durable Object effects", async () => {
@@ -131,12 +144,17 @@ test("a new hibernating subscriber receives the durable latest full state", asyn
 });
 
 test("health exposes code identity and binding readiness without secrets", async () => {
-  const response = await worker.fetch(new Request("https://service.test/health"), envFor(context()));
+  const ctx = context();
+  await publish(new LiveHub(ctx, {}), state(4));
+  const response = await worker.fetch(new Request("https://service.test/health"), envFor(ctx));
   assert.equal(response.status, 200);
   const health = await response.json();
   assert.equal(health.code_revision, "candidate-sha");
   assert.equal(health.schema_version, "PUBLIC_LIVE_V1");
   assert.equal(health.binding_ready, true);
+  assert.equal(health.latest_sequence, 4);
+  assert.equal(health.latest_source_revision, state().source_revision);
+  assert.ok(Number.isFinite(Date.parse(health.latest_published_at)));
   assert.ok(!JSON.stringify(health).includes("publish-secret"));
 });
 

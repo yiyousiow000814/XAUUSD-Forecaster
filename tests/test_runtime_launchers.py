@@ -3947,24 +3947,170 @@ def test_api_and_sync_load_operator_bridge_from_user_environment(tmp_path) -> No
     )
 
 
-def test_broadcast_dependency_readiness_is_exact_revision_and_fail_closed(tmp_path) -> None:
+def test_broadcast_platform_readiness_is_exact_revision_and_dry_run_only(tmp_path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     script = ROOT / "scripts" / "xauusd_control_center.ps1"
     command = (
         f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
         f"-RepositoryRoot '{repo}'; "
-        "$env:AURUM_LIVE_BROADCAST_HEALTH_URL='https://broadcast.test/health'; "
         "$env:AURUM_LIVE_BROADCAST_COMPATIBLE_REVISION=''; "
-        "function Invoke-RestMethod { return [pscustomobject]@{"
-        "schema_version='PUBLIC_LIVE_V1'; code_revision='candidate-sha'; "
-        "binding_ready=$true; latest_available=$true; latest_generated_at='2026-08-23T05:00:00Z'} }; "
+        "function Get-BroadcastPublisherToken { return 'publisher-secret' }; "
+        "function Invoke-RestMethod { param($Method,$Uri,$Headers,$ContentType,$Body,$TimeoutSec); "
+        "if($Method -eq 'Post'){return [pscustomobject]@{valid=$true;dry_run=$true;schema_version='PUBLIC_LIVE_V1'}};"
+        "return [pscustomobject]@{service='aurum-live-broadcast';"
+        "schema_version='PUBLIC_LIVE_V1';code_revision='candidate-sha';"
+        "binding_ready=$true;latest_available=$false} }; "
         "$ready=Test-BroadcastServiceReadiness -CandidateRevision 'candidate-sha'; "
         "$wrong=Test-BroadcastServiceReadiness -CandidateRevision 'different-sha'; "
-        "Write-Output \"$($ready.state),$($wrong.reason),$($wrong.revision_accepted)\""
+        "Write-Output \"$($ready.state),$($ready.dry_run_storage_mutation),"
+        "$($wrong.state),$($wrong.reason),$($wrong.revision_accepted)\""
     )
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
-    assert result == "PASSED,BROADCAST_NOT_READY,False"
+    assert result == "PASSED,False,BROADCAST_BLOCKED,BROADCAST_PLATFORM_NOT_READY,False"
+
+
+def test_broadcast_missing_configuration_is_retryable_and_authority_is_pinned(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    command = (
+        f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
+        f"-RepositoryRoot '{repo}'; "
+        "function Get-BroadcastPublisherToken { return '' }; "
+        "$result=Test-BroadcastServiceReadiness -CandidateRevision ('a'*40); "
+        "Write-Output \"$($result.state),$($result.retryable),$($result.authority)\""
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert result == (
+        "BROADCAST_PENDING,True,"
+        "https://aurum-live-broadcast.yiyousiow1234.workers.dev/health"
+    )
+
+
+def test_broadcast_live_readiness_requires_fresh_matching_real_publisher(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    command = (
+        f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
+        f"-RepositoryRoot '{repo}'; "
+        "$script:published=[DateTimeOffset]::UtcNow.AddSeconds(-30).ToString('o');"
+        "function Invoke-RestMethod { return [pscustomobject]@{service='aurum-live-broadcast';"
+        "schema_version='PUBLIC_LIVE_V1';binding_ready=$true;latest_available=$true;"
+        "latest_sequence=9;latest_generated_at=$script:published;"
+        "latest_published_at=$script:published;latest_source_revision='candidate-sha'} };"
+        "function Get-ForecasterProcesses{return @([pscustomobject]@{ProcessId=1})};"
+        "function Get-ServiceState{return 'RUNNING'};"
+        "$fresh=Test-BroadcastLiveDeliveryReadiness -ExpectedRevision 'candidate-sha';"
+        "$script:published=[DateTimeOffset]::UtcNow.AddDays(-2).ToString('o');"
+        "$stale=Test-BroadcastLiveDeliveryReadiness -ExpectedRevision 'candidate-sha';"
+        "Write-Output \"$($fresh.state),$($stale.state),$($stale.freshness_threshold_seconds)\""
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert result == "PASSED,BROADCAST_LIVE_BLOCKED,90"
+
+
+def test_broadcast_blocked_candidate_is_rediscovered_but_failed_is_terminal(tmp_path) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, candidate)
+        + "$state=Get-ReleaseControlState;$state.candidate.validation_state='BROADCAST_BLOCKED';"
+        "Write-ReleaseControlState $state;"
+        "function Enter-ReleaseTransactionLock{return $true};function Exit-ReleaseTransactionLock{};"
+        "function Reconcile-ReleaseControlState{};function Find-NewCandidateRelease{return $null};"
+        "$script:calls=0;function Invoke-AutomaticCandidateValidation{$script:calls++;return $true};"
+        "$null=Invoke-CandidateDiscovery;$blockedCalls=$script:calls;"
+        "$state=Get-ReleaseControlState;$state.candidate.validation_state='FAILED';Write-ReleaseControlState $state;"
+        "$null=Invoke-CandidateDiscovery;Write-Output \"$blockedCalls,$script:calls\"",
+    )
+    assert result == "1,1"
+
+
+def test_same_broadcast_candidate_recovers_and_continues_validation(tmp_path) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, candidate)
+        + "$script:ready=$false;"
+        "function Test-ProductionCandidateProvenance{return $true};"
+        "function Invoke-ProductionShapePreflight{return $true};"
+        "function Test-RequiredGitHubChecks{return 'PASSED'};"
+        "function Get-CandidateChangedFiles{return @('broadcast/src/index.js')};"
+        "function Test-BroadcastServiceReadiness{if($script:ready){return [pscustomobject]@{"
+        "state='PASSED';passed=$true;retryable=$false;reason='PASSED'}};"
+        "return [pscustomobject]@{state='BROADCAST_BLOCKED';passed=$false;"
+        "retryable=$true;reason='BROADCAST_PLATFORM_NOT_READY'}};"
+        "function Get-CandidateCompatibilityRequirement{return [pscustomobject]@{"
+        "state='COORDINATED_STORAGE_MIGRATION_REQUIRED';files=@('broadcast/wrangler.jsonc')}};"
+        "$candidateRelease=(Get-ReleaseControlState).candidate;"
+        "$first=Invoke-AutomaticCandidateValidation -Candidate $candidateRelease;"
+        "$blocked=(Get-ReleaseControlState).candidate;"
+        "$script:ready=$true;"
+        "$second=Invoke-AutomaticCandidateValidation -Candidate $blocked;"
+        "$final=Get-ReleaseControlState;"
+        "$history=Get-Content -LiteralPath $releaseHistoryPath -Raw;"
+        "Write-Output \"$first,$($blocked.validation_state),$second,"
+        "$($final.candidate.validation_state),$($history -match 'CANDIDATE_BROADCAST_RECOVERED')\"",
+    )
+
+    assert result == "False,BROADCAST_BLOCKED,False,REVIEW_REQUIRED,True"
+
+
+def test_broadcast_publisher_reports_disabled_unconfigured_degraded_and_running(tmp_path) -> None:
+    status_path = (
+        tmp_path / "runtime" / ".local" / "forward"
+        / "live-broadcast-publisher-status.json"
+    )
+    status_path.parent.mkdir(parents=True)
+    status_path.write_text(json.dumps({
+        "state": "RUNNING",
+        "last_success": datetime.now(timezone.utc).isoformat(),
+    }), encoding="utf-8")
+    result = _run_control_center_contract(
+        tmp_path,
+        "$service=[pscustomobject]@{Key='broadcast'};"
+        "$script:enabled=$false;$script:token='';"
+        "function Test-BroadcastPublisherEnabled{return $script:enabled};"
+        "function Get-BroadcastPublisherToken{return $script:token};"
+        "$disabled=Get-ServiceState -Service $service -Processes @();"
+        "$script:enabled=$true;"
+        "$unconfigured=Get-ServiceState -Service $service -Processes @();"
+        "$script:token='publisher-secret';"
+        "$degraded=Get-ServiceState -Service $service -Processes @();"
+        "$running=Get-ServiceState -Service $service "
+        "-Processes @([pscustomobject]@{ProcessId=1});"
+        "Write-Output \"$disabled,$unconfigured,$degraded,$running\"",
+    )
+
+    assert result == "DISABLED,NOT_CONFIGURED,DEGRADED,RUNNING"
+
+
+def test_broadcast_owner_starts_independently_without_reclassifying_core_services(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:enabled=$true;$script:started=@();"
+        "function Test-BroadcastPublisherEnabled{return $script:enabled};"
+        "function Get-ForecasterStatus{return @($services|ForEach-Object{"
+        "[pscustomobject]@{Key=$_.Key;State=if($_.Key -eq 'broadcast'){'DEGRADED'}else{'RUNNING'}}})};"
+        "function Start-ForecasterService{param($Service,[switch]$SkipExistingCheck);"
+        "$script:started+=@($Service.Key)};"
+        "Start-All;"
+        "$core=@((Get-ForecasterStatus)|Where-Object Key -ne 'broadcast'|Select-Object -ExpandProperty State);"
+        "Write-Output \"$($script:started -join ','),$($core -contains 'DEGRADED'),"
+        "$($reloadableServiceKeys -contains 'broadcast')\"",
+    )
+
+    assert result == "broadcast,False,False"

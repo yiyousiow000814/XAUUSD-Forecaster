@@ -1,6 +1,7 @@
 import { LIVE_SCHEMA_VERSION, MAX_LIVE_BYTES, stateUpdate, validateLiveState } from "./contract.js";
 
 const LATEST_KEY = "latest-state";
+const LATEST_PUBLISHED_AT_KEY = "latest-published-at";
 const DIGEST_ALGORITHM = "SHA-256";
 
 function json(value, status = 200) {
@@ -82,7 +83,11 @@ export class LiveHub {
       const message = latest
         ? { type: "STATE_UPDATE", sequence: state.sequence, state: stateUpdate(latest, state) }
         : { type: "FULL_STATE", state };
-      await this.ctx.storage.put(LATEST_KEY, state);
+      const publishedAt = new Date().toISOString();
+      await this.ctx.storage.put({
+        [LATEST_KEY]: state,
+        [LATEST_PUBLISHED_AT_KEY]: publishedAt,
+      });
       const encoded = JSON.stringify(message);
       let delivered = 0;
       for (const socket of this.ctx.getWebSockets()) {
@@ -92,10 +97,13 @@ export class LiveHub {
     }
     if (url.pathname === "/health") {
       const latest = await this.ctx.storage.get(LATEST_KEY);
+      const latestPublishedAt = await this.ctx.storage.get(LATEST_PUBLISHED_AT_KEY);
       return json({
         binding_ready: true,
         latest_available: Boolean(latest),
         latest_generated_at: latest?.generated_at ?? null,
+        latest_published_at: latestPublishedAt ?? null,
+        latest_source_revision: latest?.source_revision ?? null,
         latest_sequence: latest?.sequence ?? null,
         subscribers: this.ctx.getWebSockets().length,
       });
