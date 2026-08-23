@@ -28,6 +28,11 @@ Annotator account lanes are a thread pool, not separate services.
 the durable AI job scheduler and calls domain validators; individual annotation,
 impact, translation, retrieval, and Daily Brief modules own their result
 contracts.
+`news_scheduler_runtime.py` owns one-job dispatch, account/model routing,
+durable batch transitions, lock retry, and scheduler sleep calculation while
+delegating persisted transitions to `news_scheduler.py`. `daily_brief_runtime.py`
+owns the bounded Brief backlog cycle. The entry script retains CLI/config,
+heartbeat, thread-pool construction, startup/shutdown, and top-level cycle calls.
 
 ## 4. Inputs and outputs
 
@@ -105,6 +110,8 @@ than spending a second model request.
 
 - Collection lifecycle: `scripts/run_forward_collector.py`
 - Semantic worker: `scripts/run_news_annotator.py`
+- Scheduler batch runtime: `xauusd_forecaster/news_scheduler_runtime.py`
+- Daily Brief cycle runtime: `xauusd_forecaster/daily_brief_runtime.py`
 - One-shot embedding repair: `scripts/backfill_news_identity_embeddings.py`
 - One-shot pruning/audits: `scripts/prune_unused_news.py`,
   `scripts/audit_news_candidate_retrieval.py`, and
@@ -115,6 +122,9 @@ than spending a second model request.
 - `xauusd_forecaster/news_collection_owner.py`: collection thread lifecycle.
 - `xauusd_forecaster/news.py`: source adapters and collection rules.
 - `xauusd_forecaster/news_scheduler.py`: durable jobs, quota/governor, retry.
+- `xauusd_forecaster/news_scheduler_runtime.py`: job dispatch, account/model
+  routing, durable transition orchestration, lock retry, and scheduler sleep.
+- `xauusd_forecaster/daily_brief_runtime.py`: bounded Daily Brief backlog cycle.
 - `xauusd_forecaster/annotation.py`: structured annotation, impact and title
   execution.
 - `xauusd_forecaster/news_semantics.py`: annotation validation.

@@ -2188,10 +2188,10 @@ def test_preemptible_quota_deferral_flows_to_routine_account(
         ApiCredential("urgent-account", PREEMPTIBLE_POOL, "urgent-key", "urgent"),
         ApiCredential("routine-account", ROUTINE_POOL, "routine-key", "routine"),
     )
-    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
-    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner.scheduler_runtime, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner.scheduler_runtime, "sync_pending_jobs", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
-        runner,
+        runner.scheduler_runtime,
         "_execute_job",
         lambda _ledger, credential, _job, **_kwargs: (
             {"status": "DEFERRED", "reason": "quota"}
@@ -2293,8 +2293,8 @@ def test_scheduler_tries_every_independent_account_before_waiting(
         ApiCredential(f"account-{name}", ROUTINE_POOL, f"key-{name}", name)
         for name in ("a", "b", "c")
     )
-    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
-    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner.scheduler_runtime, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner.scheduler_runtime, "sync_pending_jobs", lambda *_args, **_kwargs: {})
     calls = []
 
     def execute(_ledger, credential, _job, **_kwargs):
@@ -2306,7 +2306,7 @@ def test_scheduler_tries_every_independent_account_before_waiting(
                     "error": "temporarily unavailable"}
         return {"status": "OK"}
 
-    monkeypatch.setattr(runner, "_execute_job", execute)
+    monkeypatch.setattr(runner.scheduler_runtime, "_execute_job", execute)
 
     statuses = runner.run_scheduled_batch(ledger, batch_size=1)
 
@@ -2330,7 +2330,7 @@ def test_embedding_catchup_is_deferred_without_trying_another_account(
             "news identity embedding backfill is incomplete: 300 missing"
         )
 
-    monkeypatch.setattr(runner, "_execute_job", pending)
+    monkeypatch.setattr(runner.scheduler_runtime, "_execute_job", pending)
 
     status = runner._execute_job_safely(
         object(), object(), object(), now=NOW,
@@ -2357,8 +2357,8 @@ def test_embedding_provider_throttle_wait_does_not_consume_impact_attempt(
     credential = ApiCredential(
         "account-a", ROUTINE_POOL, "not-a-real-key", "credential-a",
     )
-    monkeypatch.setattr(runner, "configured_api_credentials", lambda: (credential,))
-    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner.scheduler_runtime, "configured_api_credentials", lambda: (credential,))
+    monkeypatch.setattr(runner.scheduler_runtime, "sync_pending_jobs", lambda *_args, **_kwargs: {})
     retry_at = datetime.now(UTC) + timedelta(minutes=5)
 
     def throttled(*_args, **_kwargs):
@@ -2372,7 +2372,7 @@ def test_embedding_provider_throttle_wait_does_not_consume_impact_attempt(
         error.next_retry_at = retry_at.isoformat()
         raise error
 
-    monkeypatch.setattr(runner, "_execute_job", throttled)
+    monkeypatch.setattr(runner.scheduler_runtime, "_execute_job", throttled)
 
     statuses = runner.run_scheduled_batch(ledger, batch_size=3)
 
@@ -2411,8 +2411,8 @@ def test_provider_dispatch_deferral_does_not_probe_accounts_or_consume_attempt(
     )
     retry_at = datetime.now(UTC) + timedelta(milliseconds=250)
     calls = []
-    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
-    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner.scheduler_runtime, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner.scheduler_runtime, "sync_pending_jobs", lambda *_args, **_kwargs: {})
 
     def deferred(_ledger, credential, _job, **_kwargs):
         calls.append(credential.account_id)
@@ -2422,7 +2422,7 @@ def test_provider_dispatch_deferral_does_not_probe_accounts_or_consume_attempt(
             "next_retry_at": retry_at.isoformat(),
         }
 
-    monkeypatch.setattr(runner, "_execute_job", deferred)
+    monkeypatch.setattr(runner.scheduler_runtime, "_execute_job", deferred)
     statuses = runner.run_scheduled_batch(ledger, batch_size=3)
 
     assert calls == ["account-a"]
@@ -2482,7 +2482,7 @@ def test_annotation_fallback_never_crosses_maintenance_deferral(
     )
     calls = []
     monkeypatch.setattr(
-        runner, "pending_record_for_job",
+        runner.scheduler_runtime, "pending_record_for_job",
         lambda *_args, **_kwargs: {"source_item_id": "current"},
     )
 
@@ -2495,7 +2495,7 @@ def test_annotation_fallback_never_crosses_maintenance_deferral(
             }]
         return [{"status": "OK"}]
 
-    monkeypatch.setattr(runner, "annotate_pending_news", annotate)
+    monkeypatch.setattr(runner.scheduler_runtime, "annotate_pending_news", annotate)
 
     status = runner._execute_job(
         ledger, credential, job, now=NOW,
@@ -2521,10 +2521,10 @@ def test_backfill_budget_deferral_is_non_attempt_healthy_pacing(
     )
     credential = ApiCredential("account-a", ROUTINE_POOL, "key-a", "credential-a")
     retry_at = datetime.now(UTC) + timedelta(minutes=1)
-    monkeypatch.setattr(runner, "configured_api_credentials", lambda: (credential,))
-    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner.scheduler_runtime, "configured_api_credentials", lambda: (credential,))
+    monkeypatch.setattr(runner.scheduler_runtime, "sync_pending_jobs", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
-        runner, "_execute_job",
+        runner.scheduler_runtime, "_execute_job",
         lambda *_args, **_kwargs: {
             "status": "DEFERRED",
             "failure_code": "BACKFILL_BUDGET_DEFERRED",
@@ -2633,8 +2633,8 @@ def test_embedding_maintenance_does_not_consume_job_attempts_and_resumes(
     credential = ApiCredential(
         "account-a", ROUTINE_POOL, "not-a-real-key", "credential-a",
     )
-    monkeypatch.setattr(runner, "configured_api_credentials", lambda: (credential,))
-    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner.scheduler_runtime, "configured_api_credentials", lambda: (credential,))
+    monkeypatch.setattr(runner.scheduler_runtime, "sync_pending_jobs", lambda *_args, **_kwargs: {})
     ready = False
     gemma_requests = 0
 
@@ -2645,7 +2645,7 @@ def test_embedding_maintenance_does_not_consume_job_attempts_and_resumes(
         gemma_requests += 1
         return {"status": "OK"}
 
-    monkeypatch.setattr(runner, "_execute_job", execute)
+    monkeypatch.setattr(runner.scheduler_runtime, "_execute_job", execute)
 
     for _ in range(2):
         statuses = runner.run_scheduled_batch(ledger, batch_size=3)
@@ -2699,8 +2699,8 @@ def test_display_repair_tries_another_independent_account_before_waiting(
         ApiCredential("account-a", ROUTINE_POOL, "key-a", "a"),
         ApiCredential("account-b", ROUTINE_POOL, "key-b", "b"),
     )
-    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
-    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner.scheduler_runtime, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner.scheduler_runtime, "sync_pending_jobs", lambda *_args, **_kwargs: {})
     calls = []
 
     def execute(_ledger, credential, _job, **_kwargs):
@@ -2712,7 +2712,7 @@ def test_display_repair_tries_another_independent_account_before_waiting(
             }
         return {"status": "OK"}
 
-    monkeypatch.setattr(runner, "_execute_job", execute)
+    monkeypatch.setattr(runner.scheduler_runtime, "_execute_job", execute)
 
     statuses = runner.run_scheduled_batch(ledger, batch_size=1)
 
@@ -2743,15 +2743,15 @@ def test_capacity_blocked_route_is_skipped_for_the_rest_of_the_lane(
         ApiCredential("account-a", ROUTINE_POOL, "key-a", "a"),
         ApiCredential("account-b", ROUTINE_POOL, "key-b", "b"),
     )
-    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
-    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner.scheduler_runtime, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner.scheduler_runtime, "sync_pending_jobs", lambda *_args, **_kwargs: {})
 
     def execute(_ledger, _credential, job, **_kwargs):
         if job.task_type == "ACTIVE_IMPACT":
             return {"status": "DEFERRED", "reason": "quota"}
         return {"status": "OK"}
 
-    monkeypatch.setattr(runner, "_execute_job", execute)
+    monkeypatch.setattr(runner.scheduler_runtime, "_execute_job", execute)
 
     statuses = runner.run_scheduled_batch(ledger, batch_size=3)
 
@@ -2800,10 +2800,11 @@ def test_extra_key_in_one_account_does_not_inflate_batch_capacity(
         ApiCredential("one-account", ROUTINE_POOL, "key-a", "a"),
         ApiCredential("one-account", ROUTINE_POOL, "key-b", "b"),
     )
-    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
-    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner.scheduler_runtime, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner.scheduler_runtime, "sync_pending_jobs", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
-        runner, "_execute_job", lambda *_args, **_kwargs: {"status": "OK"},
+        runner.scheduler_runtime, "_execute_job",
+        lambda *_args, **_kwargs: {"status": "OK"},
     )
 
     statuses = runner.run_scheduled_batch(ledger, batch_size=None)
@@ -2830,8 +2831,8 @@ def test_default_batch_runs_independent_accounts_concurrently(
         ApiCredential("account-a", ROUTINE_POOL, "key-a", "a"),
         ApiCredential("account-b", ROUTINE_POOL, "key-b", "b"),
     )
-    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
-    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner.scheduler_runtime, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner.scheduler_runtime, "sync_pending_jobs", lambda *_args, **_kwargs: {})
     first_calls = threading.Barrier(4)
     lock = threading.Lock()
     active = 0
@@ -2854,7 +2855,7 @@ def test_default_batch_runs_independent_accounts_concurrently(
             active -= 1
         return {"status": "OK"}
 
-    monkeypatch.setattr(runner, "_execute_job", execute)
+    monkeypatch.setattr(runner.scheduler_runtime, "_execute_job", execute)
     progress: list[int] = []
 
     statuses = runner.run_scheduled_batch(
@@ -2886,10 +2887,10 @@ def test_concurrent_account_lanes_bound_capacity_probes_per_lane(
         ApiCredential("account-a", ROUTINE_POOL, "key-a", "a"),
         ApiCredential("account-b", ROUTINE_POOL, "key-b", "b"),
     )
-    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
-    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner.scheduler_runtime, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner.scheduler_runtime, "sync_pending_jobs", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
-        runner, "_execute_job",
+        runner.scheduler_runtime, "_execute_job",
         lambda *_args, **_kwargs: {"status": "DEFERRED", "reason": "quota"},
     )
 
@@ -2932,15 +2933,15 @@ def test_daily_brief_capacity_reserves_only_its_own_account(
         ApiCredential("brief-account", ROUTINE_POOL, "key-a", "a"),
         ApiCredential("impact-account", ROUTINE_POOL, "key-b", "b"),
     )
-    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
-    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner.scheduler_runtime, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner.scheduler_runtime, "sync_pending_jobs", lambda *_args, **_kwargs: {})
     attempted_accounts: list[str] = []
 
     def execute(_ledger, credential, _job, **_kwargs):
         attempted_accounts.append(credential.account_id)
         return {"status": "OK"}
 
-    monkeypatch.setattr(runner, "_execute_job", execute)
+    monkeypatch.setattr(runner.scheduler_runtime, "_execute_job", execute)
 
     statuses = runner.run_scheduled_batch(
         ledger,
@@ -3004,10 +3005,10 @@ def test_scheduler_persists_structured_model_failure_without_credentials(
     credential = ApiCredential(
         "account-a", ROUTINE_POOL, "secret-api-key", "safe-fingerprint",
     )
-    monkeypatch.setattr(runner, "configured_api_credentials", lambda: (credential,))
-    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner.scheduler_runtime, "configured_api_credentials", lambda: (credential,))
+    monkeypatch.setattr(runner.scheduler_runtime, "sync_pending_jobs", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
-        runner, "_execute_job",
+        runner.scheduler_runtime, "_execute_job",
         lambda *_args, **_kwargs: {
             "status": "ERROR", "failure_code": "PROVIDER_HTTP_ERROR",
             "provider_http_status": 503, "error_type": "HTTPError",
@@ -3045,8 +3046,8 @@ def test_provider_http_failure_uses_an_independent_account_failover(
         ApiCredential("account-a", ROUTINE_POOL, "key-a", "fingerprint-a"),
         ApiCredential("account-b", ROUTINE_POOL, "key-b", "fingerprint-b"),
     )
-    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
-    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner.scheduler_runtime, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner.scheduler_runtime, "sync_pending_jobs", lambda *_args, **_kwargs: {})
     calls = []
 
     def execute(_ledger, credential, _job, **_kwargs):
@@ -3059,7 +3060,7 @@ def test_provider_http_failure_uses_an_independent_account_failover(
             }
         return {"status": "OK"}
 
-    monkeypatch.setattr(runner, "_execute_job", execute)
+    monkeypatch.setattr(runner.scheduler_runtime, "_execute_job", execute)
 
     statuses = runner.run_scheduled_batch(ledger, batch_size=1)
 
@@ -3097,8 +3098,8 @@ def test_failover_deferral_is_owned_by_the_account_that_deferred(
         ApiCredential("account-a", PREEMPTIBLE_POOL, "key-a", "fingerprint-a"),
         ApiCredential("account-b", ROUTINE_POOL, "key-b", "fingerprint-b"),
     )
-    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
-    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner.scheduler_runtime, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner.scheduler_runtime, "sync_pending_jobs", lambda *_args, **_kwargs: {})
     calls = []
 
     def execute(_ledger, credential, _job, **_kwargs):
@@ -3111,7 +3112,7 @@ def test_failover_deferral_is_owned_by_the_account_that_deferred(
             }
         return {"status": "DEFERRED", "reason": "quota"}
 
-    monkeypatch.setattr(runner, "_execute_job", execute)
+    monkeypatch.setattr(runner.scheduler_runtime, "_execute_job", execute)
 
     statuses = runner.run_scheduled_batch(ledger, batch_size=2)
 
@@ -3132,7 +3133,7 @@ def test_job_safety_boundary_does_not_misclassify_database_failures(
     from scripts import run_news_annotator as runner
 
     monkeypatch.setattr(
-        runner, "_execute_job",
+        runner.scheduler_runtime, "_execute_job",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             sqlite3.OperationalError("database is locked")
         ),

@@ -19,9 +19,9 @@ contract.
 | News collection | `xauusd_forecaster/news_collection_owner.py` | NewsCollectionOwner | `xauusd_forecaster/news.py`, `xauusd_forecaster/source_polling.py` | `tests/test_news_collection_owner.py`, `tests/test_source_polling.py` | [News and AI](../design/NEWS_AND_AI.md) |
 | Annotation | `xauusd_forecaster/annotation.py` | Annotator scheduler | `xauusd_forecaster/news_semantics.py`, `scripts/run_news_annotator.py` | `tests/test_news_semantic_contract_v15.py`, `tests/test_critical_annotation_state.py` | [News Evidence](../contracts/NEWS_EVIDENCE.md) |
 | Impact and event identity | `xauusd_forecaster/news_impact.py` | Annotator scheduler | `xauusd_forecaster/news_identity.py`, `xauusd_forecaster/news_event_identity.py` | `tests/test_news_event_identity.py`, `tests/test_news_hybrid_retrieval.py` | [News Evidence](../contracts/NEWS_EVIDENCE.md) |
-| Scheduler or retry | `xauusd_forecaster/news_scheduler.py` | Durable scheduler | `scripts/run_news_annotator.py`, `xauusd_forecaster/semantic_transition.py` | `tests/test_news_scheduler.py`, `tests/test_scheduler_transition_execution.py` | [AI Scheduler](../design/AI_PRIORITY_SCHEDULER.md) |
+| Scheduler or retry | `xauusd_forecaster/news_scheduler.py` | Durable scheduler state-transition owner | `xauusd_forecaster/news_scheduler_runtime.py`, `xauusd_forecaster/semantic_transition.py`; entry script owns process/thread wiring | `tests/test_news_scheduler.py`, `tests/test_scheduler_transition_execution.py` | [AI Scheduler](../design/AI_PRIORITY_SCHEDULER.md) |
 | Embedding or retrieval | `xauusd_forecaster/news_retrieval.py` | News identity retrieval owner | `xauusd_forecaster/gemini_embeddings.py`, `xauusd_forecaster/news_impact.py` | `tests/test_gemini_embeddings.py`, `tests/test_news_hybrid_retrieval.py` | [News Identity Retrieval](../design/NEWS_IDENTITY_RETRIEVAL.md) |
-| Daily Brief | `xauusd_forecaster/daily_brief.py` | Annotator Daily Brief owner | `scripts/run_news_annotator.py`, `xauusd_forecaster/news_scheduler.py` | `tests/test_daily_brief.py` | [Daily Brief](../contracts/DAILY_BRIEF.md) |
+| Daily Brief | `xauusd_forecaster/daily_brief.py` | Daily Brief result/transition owner | `xauusd_forecaster/daily_brief_runtime.py`, `xauusd_forecaster/news_scheduler.py` | `tests/test_daily_brief.py` | [Daily Brief](../contracts/DAILY_BRIEF.md) |
 | Operational health | `xauusd_forecaster/operational_health.py` | Component health owners; alert/taxonomy aggregation remains here | `xauusd_forecaster/dashboard/health_projection.py`, `xauusd_forecaster/news_pipeline_health.py`, `xauusd_forecaster/runtime_health.py` | `tests/test_dashboard_health_projection.py`, `tests/test_operational_health.py`, `tests/test_runtime_health.py` | [Operational Health](../contracts/OPERATIONAL_HEALTH.md) |
 | Dashboard first paint | `xauusd_forecaster/dashboard/status_resources.py` | Dashboard status-resource composition owner | `xauusd_forecaster/dashboard_payloads.py`, `xauusd_forecaster/dashboard/health_projection.py`, `xauusd_forecaster/dashboard/status_cache.py`; `scripts/run_dashboard_api.py` owns HTTP translation | `tests/test_dashboard_status_resources.py`, `tests/test_dashboard_payloads.py`, `tests/test_dashboard_health_projection.py`, `tests/test_dashboard_status_cache.py`, `tests/test_dashboard_api.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
 | Decision-output status | `xauusd_forecaster/dashboard/health_projection.py` | Dashboard runtime-component health projection owner | `scripts/run_dashboard_api.py`; decision evidence and broker session remain authoritative inputs | `tests/test_dashboard_health_projection.py`, `tests/test_dashboard_api.py` | [Operational Health](../contracts/OPERATIONAL_HEALTH.md) |
@@ -50,7 +50,7 @@ contract.
 | `ctrader/XauusdForwardQuoteBridge/run_live_quote_bridge.ps1` | cTrader CLI Quote Bridge process | Operator/Control Center | cTrader robot | CLI path and external secrets | Launch/process logs |
 | `ctrader/XauusdForwardQuoteBridge/XauusdForwardQuoteBridge.cs` | cTrader robot in Quote Bridge process | Quote Bridge | Tick and timer callbacks | Broker-native symbol, Bid/Ask, session | Daily quote JSONL, atomic session heartbeat |
 | `scripts/run_forward_collector.py` | Collector process | Collector | Decision loop, collection/training/heartbeat threads | Quote files, SQLite, models, config | Forecast evidence, outcomes, owner state, status, backups |
-| `scripts/run_news_annotator.py` | Annotator process | Annotator scheduler | Scheduler cycle, account thread pool, heartbeat | SQLite jobs/revisions, provider config | Semantic results, attempts, quota, Briefs, status |
+| `scripts/run_news_annotator.py` | Annotator process | Annotator process orchestration | CLI/config, account thread-pool construction, heartbeat, startup/shutdown, top-level cycles | SQLite jobs/revisions, provider config | Semantic results, attempts, quota, Briefs, status |
 | `scripts/run_dashboard_api.py` | Dashboard API process | Local API/read-model owner | ThreadingHTTPServer, read-model owner, cache refresh | SQLite, quote/status/release files | Derived read models and audited local retry overrides |
 | `scripts/run_dashboard_sync.py` | Dashboard Sync process | Sync owner | Heartbeat loop and control/heavy lanes | Local APIs, target config, cursor/schedule state | D1 mirrors, cursor/schedule state, sync status |
 | `scripts/run_live_broadcast_publisher.py` | Optional live publisher process | Windows Stable broadcast publisher | Bounded periodic publish cycle | Local public projection, local acknowledgement, pinned broadcast health | Authenticated latest-state delivery and atomic acknowledgement |
@@ -115,6 +115,10 @@ contract.
   collection/intake behavior.
 - `xauusd_forecaster/news_scheduler.py` — owns durable AI jobs, account capacity,
   provider governor, retries, and operator overrides.
+- `xauusd_forecaster/news_scheduler_runtime.py` — owns scheduled job dispatch,
+  account/model routing, durable transition orchestration, and lock retry.
+- `xauusd_forecaster/daily_brief_runtime.py` — owns the bounded Daily Brief
+  backlog cycle over scheduler-owned routine capacity.
 - `xauusd_forecaster/annotation.py` — executes structured annotation, impact and
   title model operations.
 - `xauusd_forecaster/news_semantics.py` — validates current semantic structure.
