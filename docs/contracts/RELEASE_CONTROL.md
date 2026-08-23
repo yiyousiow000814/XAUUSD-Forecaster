@@ -80,6 +80,11 @@ The local graphical shell is presentation only. WPF/XAML is the normal Windows
 surface and the XAML file participates in the exact revision/hash control
 bundle; WinForms remains a compatibility fallback. Both invoke the same
 PowerShell release engine and neither owns alternate promote or reverse rules.
+WinForms fallback is permitted only when WPF fails before its first successful
+`ContentRendered` event. After that event, action, child-process, refresh, and
+timer failures remain contained in the same WPF owner. GUI action children must
+execute the installed, hash-verified control script at the exact bundle revision
+captured by their parent GUI; a path or revision mismatch fails closed.
 
 Repository validation requires the exact-SHA check runs named `Python regression
 suite`, `Web build and tests`, `Windows runtime contracts`, `Repository policy`,

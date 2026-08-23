@@ -364,5 +364,5 @@ def test_control_plane_isolation_and_visible_identity_are_explicit() -> None:
     assert "Stop-ScheduledTask -TaskName $name" in supervision
     assert "ControlPlaneIdentity" in xaml
     assert "BusinessRuntimeIdentity" in xaml
-    assert "EXACT · HASH VERIFIED" in source
+    assert "EXACT | HASH VERIFIED" in source
     assert 'BuildPath(scriptDirectory, "xauusd_control_center.ps1")' in launcher
