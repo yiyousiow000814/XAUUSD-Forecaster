@@ -197,6 +197,25 @@ exact source revision and every recorded SHA-256 hash. Release diagnostics keep
 `control_bundle_revision`, `control_bundle_exact_revision`, and
 `control_bundle_hash_verified` separately from the Windows business revision.
 
+Control Plane installation is a separate local transaction, not a Business
+Runtime Promote. The repository entry point MUST resolve one exact revision
+equal to the fetched `origin/main`, stage it from a clean detached Git worktree,
+and verify the complete bundle before stopping supervision. The handoff order is
+`PRECHECK -> QUIESCE_CONTROL_SUPERVISION -> STOP_OLD_WATCHDOG -> INSTALL_BUNDLE
+-> START_NEW_WATCHDOG -> VERIFY_NEW_HEARTBEAT -> COMMITTED`. The new heartbeat
+MUST identify a different process-start token, the target bundle revision, and
+successful exact/hash verification while exactly one watchdog owns supervision.
+
+The transaction MUST preserve the Business Runtime revision and every quote,
+collector, annotator, API, and sync process identity. An active release
+transaction or open Control Center GUI blocks installation. Failure after the
+old watchdog stops restores the previous complete verified bundle, starts a new
+process from that previous bundle, verifies its heartbeat and single ownership,
+and records `ROLLED_BACK`. Current bounded evidence is stored in
+`.local/forward/control-plane-install-state.json`; it never rewrites release
+history or Stable/Candidate identities. The operator procedure is
+[`CONTROL_PLANE_INSTALLATION.md`](../runbooks/CONTROL_PLANE_INSTALLATION.md).
+
 Candidate at 0% MUST NOT own background, scheduled, queue, or other duplicate
 production side effects. Directed Version Override requests are the only normal
 Candidate Worker traffic; this project does not use random percentage canaries.
