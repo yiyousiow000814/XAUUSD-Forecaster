@@ -300,7 +300,7 @@ not be collapsed.
 | Training and models | Requested on outcomes/reconciliation; early `NOT_DUE` | Mature eligible rows | Materialized rows and complete generation | SQLite plus immutable files | Collector THREAD | Scheduling isolated, process failure domain shared |
 | Dashboard and sync | Critical cache seconds; sync heartbeat; resource-specific cadence | Local authority/read models | Local API and D1 mirrors | SQLite plus target cursor/schedule files | Two PROCESSES with THREADS | Large entry scripts own both orchestration and domain logic |
 | Web and Cloudflare | Request-driven and static build | Static bundle, D1, auth | HTML/assets/API JSON/admin state | D1, Vectorize, build artifacts, metadata | STATIC + WORKER + REQUEST HANDLERS | Large shared CSS/views and many route-adjacent owners |
-| Runtime and release | Watchdog cycles and explicit operator actions | Git revision, CI, Cloudflare Versions, health | Stable/Candidate state and service lifecycle | Local control state/history, Cloudflare metadata | CONTROL PROCESSES / one-shot actions | Control Center mixes supervision, release and UI responsibilities |
+| Runtime and release | Watchdog cycles and explicit operator actions | Git revision, CI, Cloudflare Versions, health | Stable/Candidate state and service lifecycle | Local control state/history, Cloudflare metadata | CONTROL PROCESSES / one-shot actions | Stable entry path loads separate same-process supervision, release and presentation owners |
 | Assistant | PAUSED | Authenticated owner request | Fail-closed paused status; retained reads | D1 and retained Vectorize | REQUEST HANDLERS; no local worker | Implementation remains retained while activation is intentionally absent |
 
 ## Current gaps
@@ -313,9 +313,9 @@ this baseline.
 2. The flat `xauusd_forecaster` package hides subsystem ownership. A static AST
    audit found one large strongly connected import group across ledger,
    scheduler, annotation, news, training-adjacent, and Assistant support code.
-3. `run_dashboard_api.py`, `run_dashboard_sync.py`,
-   `run_news_annotator.py`, and `xauusd_control_center.ps1` contain substantial
-   domain logic as well as process orchestration.
+3. The remaining large entry points retain process orchestration while their
+   extracted package or dot-sourced owners hold resource, scheduler, release,
+   supervision and presentation behavior.
 4. Large production files span multiple responsibilities. Size alone is not
    the reason to split them; owner mixing, fan-in/fan-out, critical-path risk,
    change frequency, and rollback difficulty are the reasons to investigate.

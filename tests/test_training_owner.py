@@ -13,7 +13,7 @@ from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster import training_owner
 from xauusd_forecaster.market import BrokerMarketSession, MarketObservation
 from xauusd_forecaster.runtime_health import write_runtime_heartbeat
-from scripts.run_forward_collector import append_current_grid_events
+from xauusd_forecaster.collector_runtime import append_current_grid_events
 
 
 UTC = timezone.utc
