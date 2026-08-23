@@ -11,6 +11,10 @@ The first Phase B extraction is implemented by the current stacked change but
 remains `PENDING` until that change merges. The baseline architecture remains
 the current package authority until then.
 
+The first Phase C extraction is implemented by the next stacked change but
+also remains `PENDING` until merge. It must not be read as selection or
+authorization of a Phase 4 boundary.
+
 The baseline was measured at
 `b763a96f5b862b72a0fbb34419ff01909e450338` on 2026-08-23. Generated types,
 lockfiles, generated migration manifests, fixtures, and vendor files were
@@ -34,7 +38,7 @@ not an architectural contract.
 | File | Size | Current responsibilities | Owners mixed | Change risk | Suggested future action |
 |---|---:|---|---|---|---|
 | `scripts/xauusd_control_center.ps1` | 5,456 lines / 273,725 bytes | Service supervision, watchdog, Candidate discovery, CI/Cloudflare checks, DB preflight, Promote/Reverse, WPF/WinForms UI, diagnostics | Runtime, release, platform validation, operator UI | Very high | Extract one behavior-preserving control boundary at a time; keep the entry script as orchestration |
-| `scripts/run_dashboard_api.py` | 3,248 / 154,122 | HTTP server, cache wiring, resource adapters/builders, paging, health projection, retry override | API, read models, market/news/audit, scheduler bridge | High | Status-cache ownership extracted in the pending Phase B change; later work is outside this change |
+| `scripts/run_dashboard_api.py` | 3,004 / 144,559 | HTTP server, cache and health-projection wiring, resource adapters/builders, paging, payload orchestration, retry override | API, read models, market/news/audit, scheduler bridge | High | Status cache and runtime-health projection extracted in pending stacked changes; later work is outside this change |
 | `scripts/run_dashboard_sync.py` | 2,080 / 90,707 | Remote transport, compaction, paging, cursor state, scheduling, retries, heartbeat and lanes | Sync control, resource owners, transport | High | Separate resource codecs/checkpoints from process/lane orchestration in later single-resource PRs |
 | `scripts/run_news_annotator.py` | 698 / 27,384 | Process loop, scheduler lane execution, credential selection, Brief cycle, heartbeat | Runtime orchestration, scheduler, provider execution | Medium-high | Keep thread/process creation here; move transition execution behind existing domain owners |
 | `xauusd_forecaster/news_scheduler.py` | 3,799 / 163,737 | Schema, jobs, attempts, overrides, account quota, provider governor, backfill admission, migrations | Scheduler, capacity, operator control, migrations | Very high | Split only by durable table/transition owner after contract tests define dependency direction |
@@ -137,6 +141,31 @@ Keep process and thread creation, command-line parsing, startup, shutdown, and
 top-level health in entry points. Move transition rules, queries, serialization,
 and recovery policy behind the domain owner already named by a contract. Each
 PR must demonstrate identical externally observable behavior.
+
+#### Phase C-1 — Dashboard runtime-health projection
+
+Implementation status: `PENDING` until the Phase 3 stacked change merges.
+
+- **Exact responsibility:** semantic-pipeline projection, current materialized
+  semantic-health lookup, Collector heartbeat projection, Decision-output
+  cadence/broker projection, and their seven fixed thresholds.
+- **Target module:**
+  `xauusd_forecaster/dashboard/health_projection.py`, a standard-library-only
+  read owner with no cache or durable state.
+- **Compatibility/import strategy:** `run_dashboard_api.py` directly imports
+  all four private functions and seven constants during the handover. Remove
+  those entry-point names only after every caller imports the owner module and
+  the entry point no longer exposes them as a supported test/caller surface.
+- **Focused tests:** direct projection boundaries move to
+  `tests/test_dashboard_health_projection.py`; payload placement, snapshot
+  timing, alert aggregation, route, database, and API integration remain in
+  `tests/test_dashboard_api.py` and the operational/runtime suites.
+- **Measured result:** `run_dashboard_api.py` is 3,004 lines / 144,559 bytes
+  after extraction, using the same measurement method as the inventory table.
+- **Rollback:** revert the single extraction commit; no state or data migration
+  is involved.
+- **Non-goals:** no health semantics, threshold, status/reason/message, SQL,
+  route, payload, process, cache, database, sync, Preview, or production change.
 
 ### Phase D — Domain package migration
 
