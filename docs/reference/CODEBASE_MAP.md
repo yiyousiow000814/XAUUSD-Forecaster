@@ -23,7 +23,7 @@ contract.
 | Embedding or retrieval | `xauusd_forecaster/news_retrieval.py` | News identity retrieval owner | `xauusd_forecaster/gemini_embeddings.py`, `xauusd_forecaster/news_impact.py` | `tests/test_gemini_embeddings.py`, `tests/test_news_hybrid_retrieval.py` | [News Identity Retrieval](../design/NEWS_IDENTITY_RETRIEVAL.md) |
 | Daily Brief | `xauusd_forecaster/daily_brief.py` | Annotator Daily Brief owner | `scripts/run_news_annotator.py`, `xauusd_forecaster/news_scheduler.py` | `tests/test_daily_brief.py` | [Daily Brief](../contracts/DAILY_BRIEF.md) |
 | Operational health | `xauusd_forecaster/operational_health.py` | Component health owners; alert/taxonomy aggregation remains here | `xauusd_forecaster/dashboard/health_projection.py`, `xauusd_forecaster/news_pipeline_health.py`, `xauusd_forecaster/runtime_health.py` | `tests/test_dashboard_health_projection.py`, `tests/test_operational_health.py`, `tests/test_runtime_health.py` | [Operational Health](../contracts/OPERATIONAL_HEALTH.md) |
-| Dashboard first paint | `xauusd_forecaster/dashboard_payloads.py` | Dashboard API critical owner | `xauusd_forecaster/dashboard/health_projection.py`, `xauusd_forecaster/dashboard/status_cache.py`, `scripts/run_dashboard_api.py`, `xauusd_forecaster/operational_health.py` | `tests/test_dashboard_payloads.py`, `tests/test_dashboard_health_projection.py`, `tests/test_dashboard_status_cache.py`, `tests/test_dashboard_api.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
+| Dashboard first paint | `xauusd_forecaster/dashboard/status_resources.py` | Dashboard status-resource composition owner | `xauusd_forecaster/dashboard_payloads.py`, `xauusd_forecaster/dashboard/health_projection.py`, `xauusd_forecaster/dashboard/status_cache.py`; `scripts/run_dashboard_api.py` owns HTTP translation | `tests/test_dashboard_status_resources.py`, `tests/test_dashboard_payloads.py`, `tests/test_dashboard_health_projection.py`, `tests/test_dashboard_status_cache.py`, `tests/test_dashboard_api.py` | [Dashboard and Sync](../design/DASHBOARD_AND_SYNC.md) |
 | Decision-output status | `xauusd_forecaster/dashboard/health_projection.py` | Dashboard runtime-component health projection owner | `scripts/run_dashboard_api.py`; decision evidence and broker session remain authoritative inputs | `tests/test_dashboard_health_projection.py`, `tests/test_dashboard_api.py` | [Operational Health](../contracts/OPERATIONAL_HEALTH.md) |
 | Collector heartbeat presentation | `xauusd_forecaster/dashboard/health_projection.py` | Dashboard runtime-component health projection owner | `xauusd_forecaster/runtime_health.py` writes heartbeat state; `scripts/run_dashboard_api.py` orchestrates the payload | `tests/test_dashboard_health_projection.py`, `tests/test_runtime_health.py`, `tests/test_dashboard_api.py` | [Operational Health](../contracts/OPERATIONAL_HEALTH.md) |
 | Audit, learning, or market detail | `xauusd_forecaster/dashboard_read_models.py` | DashboardReadModelOwner | `xauusd_forecaster/dashboard_summaries.py`, `xauusd_forecaster/learning_curves.py` | `tests/test_dashboard_api.py` | [Paged Dashboard History](../design/PAGED_DASHBOARD_HISTORY.md) |
@@ -144,6 +144,8 @@ contract.
   reads, event-evidence resource generation/manifest, page cache, and metrics.
 - `xauusd_forecaster/dashboard/market_resources.py` — owns quote-file parsing
   cache, market history/paging, decision reads, and chart projection.
+- `xauusd_forecaster/dashboard/status_resources.py` — owns current status and
+  optional-resource composition over existing evidence and runtime inputs.
 - `xauusd_forecaster/dashboard/health_projection.py` — owns read-only
   component projections for semantic health, Collector heartbeat, and Decision
   cadence; it owns no source authority, cache, or operational alert taxonomy.
@@ -158,8 +160,8 @@ contract.
 - `xauusd_forecaster/learning_curves.py` — builds learning summaries and pages.
 - `xauusd_forecaster/operational_health.py` — projects component incidents and
   bounded status.
-- `scripts/run_dashboard_api.py` — currently combines local HTTP orchestration
-  with many resource adapters.
+- `scripts/run_dashboard_api.py` — owns local HTTP/process orchestration and
+  retains the audited scheduler operator bridge pending C3d.
 - `scripts/run_dashboard_sync.py` — currently combines remote transport,
   pagination, scheduling and sync orchestration; serializers are package-owned.
 
