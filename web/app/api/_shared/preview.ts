@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 export type PreviewBundle = {
   status: Record<string, unknown>;
   audit?: Record<string, unknown>;
+  audit_briefs?: Record<string, unknown> | null;
+  audit_stories?: Record<string, unknown> | null;
+  audit_decisions?: Record<string, unknown> | null;
   learning_summary?: Record<string, unknown>;
   learning_history?: Array<{
     resource: string; record_key: string; sort_epoch: number;

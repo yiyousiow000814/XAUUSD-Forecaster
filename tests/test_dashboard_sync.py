@@ -178,6 +178,126 @@ def test_preview_evidence_fixture_is_stable_and_omits_display_age() -> None:
     assert changed["snapshot_id"] != first["snapshot_id"]
 
 
+def test_preview_bundle_uses_split_resources_with_narrow_legacy_fallback(
+    monkeypatch,
+) -> None:
+    module = _preview_module()
+    decisions = [{
+        "decision_id": str(index), "decision_time": f"2026-08-23T{index:02d}:00:00Z",
+        "features": {"private": index}, "predictions": list(range(20)),
+    } for index in range(20)]
+    legacy_audit = {
+        "generated_at": "2026-08-23T05:00:00+00:00",
+        "recent_decisions": decisions,
+        "daily_news_briefs": [],
+        "daily_news_brief_summary": {"brief_date": "2026-08-23"},
+        "storylines": [{"storyline_id": "story-1"}],
+        "storyline_summary": {"total": 1, "candidate_total": 0},
+        "market_narrative_candidates": [], "archived_storylines": [],
+        "archived_story_event_candidates": [], "story_event_candidates": [],
+        "market_reaction_streams": [], "theme_streams": [],
+        "unassigned_story_events": [],
+        "news_metrics": {"events": {"currently_model_eligible": 84}},
+        "news_evidence_summary": {}, "news_feature_policy": {},
+    }
+    status = {
+        "generated_at": "2026-08-23T05:00:00+00:00",
+        "system": {"online": True, "components": {}},
+        "counts": {}, "annotation_queue": {}, "factor_coverage": [],
+        "news_source_health": [], "training": {},
+    }
+    learning = {"learning_curves": {"models": [{
+        "model_identity": "BROAD_FULL", "lifecycle_status": "LATEST",
+    }]}}
+
+    def read(_base_url: str, path: str) -> dict:
+        if path == "/api/status":
+            return status
+        if path == "/api/audit":
+            return legacy_audit
+        if path in {"/api/audit-briefs", "/api/audit-stories", "/api/audit-decisions"}:
+            raise urllib.error.HTTPError(path, 404, "missing", {}, None)
+        if path == "/api/learning":
+            return learning
+        if path == "/api/market-chart":
+            return {}
+        if path.startswith("/api/news-evidence"):
+            return {"generated_at": status["generated_at"], "items": [{
+                "event_key": "a" * 64, "broad_model_eligible": True,
+            }]}
+        if path.startswith("/api/learning-history"):
+            return {"items": []}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(module, "_read_json", read)
+    monkeypatch.setattr(module, "_read_completed_news_index", lambda _url: {"items": []})
+    bundle = module.build_bundle("https://example.test", "feature/test", "abc123")
+
+    assert len(bundle["status"]["recent_decisions"]) == 18
+    assert bundle["status"]["counts"]["live_oos_model_groups"] == 1
+    resources = bundle["status"]["preview"]["resources"]
+    assert resources["recent_decisions"]["source_path"] == "/api/audit"
+    assert resources["recent_decisions"]["compatibility_fallback"] is True
+    assert resources["audit_stories"]["availability"] == "AVAILABLE"
+    assert bundle["audit_stories"]["storylines"] == [{"storyline_id": "story-1"}]
+    assert bundle["audit"]["news_metrics"]["events"]["currently_model_eligible"] == 84
+    assert bundle["news_evidence"]["items"][0]["event_key"] == "a" * 64
+
+
+def test_preview_bundle_keeps_unavailable_distinct_from_real_zero(monkeypatch) -> None:
+    module = _preview_module()
+
+    def build(*, modern_zero: bool) -> dict:
+        status = {
+            "generated_at": "2026-08-23T05:00:00+00:00",
+            "system": {"online": True, "components": {}},
+            "counts": {}, "annotation_queue": {}, "factor_coverage": [],
+            "news_source_health": [], "training": {},
+        }
+        if modern_zero:
+            status["recent_decisions"] = []
+
+        def read(_base_url: str, path: str) -> dict:
+            if path == "/api/status":
+                return status
+            if path == "/api/audit":
+                return {"generated_at": status["generated_at"]}
+            if path == "/api/learning":
+                return {"learning_curves": {"models": []}} if modern_zero else {}
+            if path == "/api/market-chart":
+                return {}
+            if modern_zero and path == "/api/audit-briefs":
+                return {"daily_news_briefs": []}
+            if modern_zero and path == "/api/audit-stories":
+                return {"storylines": [], "storyline_summary": {"total": 0}}
+            if modern_zero and path == "/api/audit-decisions":
+                return {"recent_decisions": []}
+            if modern_zero and path.startswith("/api/news-evidence"):
+                return {"items": []}
+            if path.startswith("/api/learning-history"):
+                return {"items": []}
+            raise urllib.error.HTTPError(path, 404, "missing", {}, None)
+
+        monkeypatch.setattr(module, "_read_json", read)
+        monkeypatch.setattr(module, "_read_completed_news_index", lambda _url: {"items": []})
+        return module.build_bundle("https://example.test", "feature/test", "abc123")
+
+    unavailable = build(modern_zero=False)
+    unavailable_resources = unavailable["status"]["preview"]["resources"]
+    assert unavailable_resources["recent_decisions"]["availability"] == module.UNAVAILABLE_IN_BUILD_SNAPSHOT
+    assert unavailable_resources["audit_stories"]["availability"] == module.UNAVAILABLE_IN_BUILD_SNAPSHOT
+    assert unavailable["audit_stories"] is None
+    assert "recent_decisions" not in unavailable["status"]
+    assert "live_oos_model_groups" not in unavailable["status"]["counts"]
+
+    zero = build(modern_zero=True)
+    assert zero["status"]["recent_decisions"] == []
+    assert zero["audit_stories"]["storylines"] == []
+    assert zero["audit_stories"]["storyline_summary"]["total"] == 0
+    assert zero["status"]["counts"]["live_oos_model_groups"] == 0
+    assert zero["status"]["preview"]["resources"]["audit_stories"]["availability"] == "AVAILABLE"
+
+
 def test_preview_reader_rejects_a_noncanonical_source() -> None:
     module = _preview_module()
 

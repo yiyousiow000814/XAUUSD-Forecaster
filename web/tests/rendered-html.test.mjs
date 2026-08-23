@@ -41,7 +41,7 @@ const {
   sourceAggregate,
   sourceScanState,
 } = await import("../app/_lib/health-scan-presentation.ts");
-const { compactPreviewStatus } = await import("../build/preview-learning.ts");
+const { compactPreviewAuditDetail, compactPreviewStatus } = await import("../build/preview-learning.ts");
 
 test("reserves the global shell alert for blocking operational faults", () => {
   const warning = { code: "OPS_AI_BACKLOG_OVERDUE", severity: "WARNING", scope: "ACTIVE_IMPACT", message_zh: "积压", blocking: false, evidence: {} };
@@ -182,6 +182,21 @@ test("retains bounded operational incidents for deterministic Preview hydration"
   assert.deepEqual(compact.operational_health, operationalHealth);
   const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
   assert.ok(manifest.statusInlineKeys.includes("operational_health"));
+});
+
+test("bounds Preview decision evidence without retaining model internals", () => {
+  const rows = Array.from({ length: 20 }, (_, index) => ({
+    id: index,
+    features: { private: index },
+    predictions: { private: index },
+    decision: index % 2 ? "WAIT" : "LONG",
+  }));
+  const status = compactPreviewStatus({ recent_decisions: rows });
+  assert.equal(status.recent_decisions.length, 18);
+  assert.equal(status.recent_decisions[0].decision, "LONG");
+  assert.ok(!("features" in status.recent_decisions[0]));
+  assert.ok(!("predictions" in status.recent_decisions[0]));
+  assert.equal(compactPreviewAuditDetail({ recent_decisions: rows }).recent_decisions.length, 12);
 });
 
 test("summarizes Assistant queue evidence without exposing job content", () => {
@@ -837,6 +852,7 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   assert.match(vite, /compactPreviewLearning/);
   assert.match(vite, /compactPreviewStatus/);
   assert.match(vite, /compactPreviewAudit/);
+  assert.match(vite, /compactPreviewAuditDetail/);
   assert.match(vite, /compactPreviewNewsIndex/);
   assert.match(vite, /delete bundle\.learning/);
   assert.match(learning, /daily_news_briefs: 2/);
@@ -866,6 +882,10 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   assert.match(previewBuilder, /resource=version-overview/);
   assert.match(previewBuilder, /\*version_history/);
   assert.match(previewBuilder, /"news_evidence": news_evidence/);
+  assert.match(previewBuilder, /UNAVAILABLE_IN_BUILD_SNAPSHOT/);
+  const auditView = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  assert.match(auditView, /liveOosModelGroups === undefined\s*\? "读取中"/);
+  assert.doesNotMatch(auditView, /Live OOS[^\n]*点击查看/);
   assert.doesNotMatch(page, /auditView === "league"/);
   assert.match(previewResources, /\[PREVIEW_RESOURCES\.status\]: publicDashboardStatus\(previewBundle\.status\)/);
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);

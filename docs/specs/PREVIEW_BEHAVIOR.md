@@ -123,6 +123,16 @@ product requirement.
   to their immutable build snapshots. Machine-readable field provenance marks
   the status keys that remain branch build snapshots; factor coverage is the
   current branch-recomputed example.
+- The build captures audit briefs, storylines, decisions, and news evidence from
+  their independently owned public resources. While Stable predates those split
+  audit routes, the builder may project only the matching fields from the legacy
+  public audit snapshot and labels that resource as a compatibility source.
+  Absence of both sources is `UNAVAILABLE_IN_BUILD_SNAPSHOT`, never an empty
+  collection.
+- Recent decisions and the Live OOS model-group summary retain real zero values.
+  If no authoritative public source exists, the fields are omitted and their
+  per-resource provenance reports `UNAVAILABLE_IN_BUILD_SNAPSHOT`; presentation
+  must not turn that state into `0` or an actionable drill-down.
 - The bounded operational-health event set is retained in the build snapshot so
   server rendering and hydration use the same first-paint incident evidence
   before the allowed current status refresh completes.

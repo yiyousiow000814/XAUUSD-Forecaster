@@ -35,6 +35,7 @@
     "annotation_queue", "news_source_health", "llm_routing", "gemini_quota",
     "gemini_31_quota", "gemma_quota", "gemini_embedding_quota", "latest", "research_forecast",
     "u5_context", "outcome_summary", "sources", "forward_epoch",
+    "recent_decisions",
     "learning_resource", "news_index_resource",
     "audit_resource", "news_evidence_resource", "market_chart_resource",
     "market_history_resource"
