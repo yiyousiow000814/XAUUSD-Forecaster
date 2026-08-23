@@ -7,7 +7,9 @@ param(
     [string]$RuntimeRoot = "",
     [string]$RepositoryRoot = "",
     [string]$SourceRoot = "",
-    [string]$SourceRevision = ""
+    [string]$SourceRevision = "",
+    [string]$ExpectedControlScriptPath = "",
+    [string]$ExpectedControlRevision = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -890,6 +892,30 @@ function Test-ProductionCandidateProvenance {
     $script:lastRepositoryValidationResult =
         Get-ProductionCandidateProvenanceResult -Candidate $Candidate
     return [bool]($script:lastRepositoryValidationResult.state -eq "PASSED")
+}
+
+function Get-CandidateCompatibilityApprovalGate {
+    param([Parameter(Mandatory = $true)][object]$Candidate)
+    $provenance = Get-ProductionCandidateProvenanceResult -Candidate $Candidate
+    if ([string]$provenance.state -ne "PASSED") {
+        return [pscustomobject]@{
+            state = if ([string]$provenance.state -eq "REPOSITORY_PENDING") {
+                "RETRYABLE"
+            } else { "FAILED" }
+            reason = [string]$provenance.reason
+            diagnostic = [string]$provenance.diagnostic
+        }
+    }
+    $checks = Get-RequiredGitHubChecksResult -Revision ([string]$Candidate.git_sha)
+    return [pscustomobject]@{
+        state = if ([string]$checks.state -eq "PASSED") {
+            "PASSED"
+        } elseif ([string]$checks.state -in @("REPOSITORY_PENDING", "PENDING")) {
+            "RETRYABLE"
+        } else { "FAILED" }
+        reason = [string]$checks.reason
+        diagnostic = [string]$checks.diagnostic
+    }
 }
 
 function Test-SingleProductionOwner {
@@ -2329,9 +2355,12 @@ function Approve-CandidateCompatibility {
         -not [bool]$candidate.validation.resources_verified) {
         throw "Only an exact verified non-destructive platform review can be approved."
     }
-    if (-not (Test-ProductionCandidateProvenance -Candidate $candidate) -or
-        (Test-RequiredGitHubChecks -Revision ([string]$candidate.git_sha)) -ne "PASSED") {
-        throw "Candidate provenance and required checks must pass before approval."
+    $approvalGate = Get-CandidateCompatibilityApprovalGate -Candidate $candidate
+    if ([string]$approvalGate.state -eq "RETRYABLE") {
+        throw "APPROVAL_RETRYABLE: $([string]$approvalGate.reason). Retry after repository and GitHub checks are available."
+    }
+    if ([string]$approvalGate.state -ne "PASSED") {
+        throw "APPROVAL_REJECTED: $([string]$approvalGate.reason)."
     }
     $changed = @(Get-CandidateChangedFiles `
         -StableRevision ([string]$state.stable.git_sha) `
@@ -4113,6 +4142,47 @@ function Assert-ActiveControlBundle {
     return $identity
 }
 
+function Test-ControlCenterChildIdentity {
+    param(
+        [Parameter(Mandatory = $true)][string]$CurrentScriptPath,
+        [Parameter(Mandatory = $true)][string]$InstalledScriptPath,
+        [Parameter(Mandatory = $true)][string]$CurrentRevision,
+        [string]$ExpectedScriptPath = "",
+        [string]$ExpectedRevision = ""
+    )
+    if ([bool]$ExpectedScriptPath -ne [bool]$ExpectedRevision) { return $false }
+    if (-not [string]::Equals(
+        [System.IO.Path]::GetFullPath($CurrentScriptPath),
+        [System.IO.Path]::GetFullPath($InstalledScriptPath),
+        [StringComparison]::OrdinalIgnoreCase
+    )) { return $false }
+    if ($ExpectedScriptPath -and (-not [string]::Equals(
+        [System.IO.Path]::GetFullPath($CurrentScriptPath),
+        [System.IO.Path]::GetFullPath($ExpectedScriptPath),
+        [StringComparison]::OrdinalIgnoreCase
+    ))) { return $false }
+    return (-not $ExpectedRevision -or $CurrentRevision -eq $ExpectedRevision)
+}
+
+function Assert-ControlCenterProcessIdentity {
+    param(
+        [string]$ExpectedScriptPath = "",
+        [string]$ExpectedRevision = ""
+    )
+    $identity = Assert-ActiveControlBundle
+    $currentScript = [System.IO.Path]::GetFullPath($PSCommandPath)
+    $installedScript = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot `
+        ".local\runtime-control\xauusd_control_center.ps1"))
+    if (-not (Test-ControlCenterChildIdentity `
+        -CurrentScriptPath $currentScript -InstalledScriptPath $installedScript `
+        -CurrentRevision ([string]$identity.source_revision) `
+        -ExpectedScriptPath $ExpectedScriptPath `
+        -ExpectedRevision $ExpectedRevision)) {
+        throw "CONTROL_CENTER_SCRIPT_OR_REVISION_MISMATCH"
+    }
+    return $identity
+}
+
 function Write-WatchdogHeartbeat {
     $directory = Split-Path -Parent $watchdogHeartbeatPath
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
@@ -5084,6 +5154,34 @@ function Write-ControlCenterUiStarted {
     } | ConvertTo-Json -Compress | Add-Content -LiteralPath $watchdogLog -Encoding UTF8
 }
 
+function Get-ControlCenterOperationText {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return "" }
+    $content = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $content) { return "" }
+    return Protect-PreflightDiagnosticText -Value (([string]$content).Trim())
+}
+
+function Invoke-ControlCenterUiCallback {
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$Callback,
+        [scriptblock]$OnFailure = $null
+    )
+    try {
+        & $Callback
+        return $true
+    } catch {
+        $diagnostic = Protect-PreflightDiagnosticText $_.Exception.Message
+        if ($OnFailure) { & $OnFailure $diagnostic }
+        return $false
+    }
+}
+
+function Test-WpfFallbackAllowed {
+    param([bool]$ContentRendered)
+    return (-not $ContentRendered)
+}
+
 function Test-WpfControlCenterLayout {
     $window = Import-WpfControlCenterWindow
     try {
@@ -5148,7 +5246,9 @@ function Test-WpfControlCenterLayout {
 
 function Show-WpfControlCenter {
     $script:wpfFailureReason = ""
+    $script:wpfUiStartedRecorded = $false
     try {
+        $controlIdentity = Assert-ControlCenterProcessIdentity
         $window = Import-WpfControlCenterWindow
 
         function Find-WpfControl([string]$Name) { return $window.FindName($Name) }
@@ -5164,13 +5264,19 @@ function Show-WpfControlCenter {
         $script:wpfOperationOutputPath = ""
         $script:wpfOperationErrorPath = ""
         function Test-WpfOperationActive {
-            return [bool]($script:wpfOperation -and -not $script:wpfOperation.HasExited)
+            return [bool]$script:wpfOperation
         }
         function Set-WpfReleaseBusy([bool]$Busy, [string]$Operation = "") {
-            foreach ($name in @(
-                "ApproveCompatibilityButton", "PromoteButton", "ReverseButton"
-            )) {
+            foreach ($name in @("StartButton", "RestartButton", "StopButton")) {
                 (Find-WpfControl $name).IsEnabled = -not $Busy
+            }
+            (Find-WpfControl "ServiceList").IsEnabled = -not $Busy
+            if ($Busy) {
+                foreach ($name in @(
+                    "ApproveCompatibilityButton", "PromoteButton", "ReverseButton"
+                )) {
+                    (Find-WpfControl $name).IsEnabled = $false
+                }
             }
             if (-not $Busy) { return }
             $state = switch ($Operation) {
@@ -5193,7 +5299,9 @@ function Show-WpfControlCenter {
                 "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
                 "-File", ('"{0}"' -f $PSCommandPath), "-Action", $Operation,
                 "-RuntimeRoot", ('"{0}"' -f $moduleRoot),
-                "-RepositoryRoot", ('"{0}"' -f $repositoryRoot)
+                "-RepositoryRoot", ('"{0}"' -f $repositoryRoot),
+                "-ExpectedControlScriptPath", ('"{0}"' -f $PSCommandPath),
+                "-ExpectedControlRevision", ([string]$controlIdentity.source_revision)
             )
             if ($ServiceKey) { $arguments += @("-ServiceKey", $ServiceKey) }
             $script:wpfOperationName = $Operation
@@ -5210,16 +5318,20 @@ function Show-WpfControlCenter {
                     -RedirectStandardError $script:wpfOperationErrorPath
             } catch {
                 $script:wpfOperation = $null
+                Remove-Item -LiteralPath `
+                    $script:wpfOperationOutputPath,$script:wpfOperationErrorPath `
+                    -Force -ErrorAction SilentlyContinue
                 Set-WpfReleaseBusy -Busy $false
-                Refresh-WpfStatus
-                throw
+                [void](Invoke-ControlCenterUiCallback -Callback { Refresh-WpfStatus })
+                Show-WpfCallbackFailure `
+                    (Protect-PreflightDiagnosticText $_.Exception.Message)
             }
         }
         function Refresh-WpfStatus {
             $status = @(Get-ForecasterStatus)
             $controlBundle = Get-RuntimeControlBundleIdentity
             (Find-WpfControl "ControlPlaneIdentity").Text = if ($controlBundle) {
-                "Control Plane  $(([string]$controlBundle.source_revision).Substring(0, 12))  EXACT · HASH VERIFIED"
+                "Control Plane  $(([string]$controlBundle.source_revision).Substring(0, 12))  EXACT | HASH VERIFIED"
             } else { "Control Plane  --  UNVERIFIED" }
             $businessRevision = Get-CodeRevision
             (Find-WpfControl "BusinessRuntimeIdentity").Text =
@@ -5301,10 +5413,33 @@ function Show-WpfControlCenter {
             }
         }
 
-        (Find-WpfControl "RefreshButton").Add_Click({ Refresh-WpfStatus })
-        (Find-WpfControl "StartButton").Add_Click({ Invoke-WpfOperation "Start" })
-        (Find-WpfControl "RestartButton").Add_Click({ Invoke-WpfOperation "Restart" })
-        (Find-WpfControl "StopButton").Add_Click({ Invoke-WpfOperation "Stop" })
+        function Show-WpfCallbackFailure([string]$Diagnostic) {
+            try {
+                (Find-WpfControl "CandidateReason").Text = "Control Center error: $Diagnostic"
+                [System.Windows.MessageBox]::Show(
+                    $Diagnostic, "Control Center error", "OK", "Error"
+                ) | Out-Null
+            } catch { Write-Warning "WPF callback failed: $Diagnostic" }
+        }
+        (Find-WpfControl "RefreshButton").Add_Click({
+            [void](Invoke-ControlCenterUiCallback -Callback { Refresh-WpfStatus } `
+                -OnFailure { param($message) Show-WpfCallbackFailure $message })
+        })
+        (Find-WpfControl "StartButton").Add_Click({
+            [void](Invoke-ControlCenterUiCallback -Callback {
+                Invoke-WpfOperation "Start"
+            } -OnFailure { param($message) Show-WpfCallbackFailure $message })
+        })
+        (Find-WpfControl "RestartButton").Add_Click({
+            [void](Invoke-ControlCenterUiCallback -Callback {
+                Invoke-WpfOperation "Restart"
+            } -OnFailure { param($message) Show-WpfCallbackFailure $message })
+        })
+        (Find-WpfControl "StopButton").Add_Click({
+            [void](Invoke-ControlCenterUiCallback -Callback {
+                Invoke-WpfOperation "Stop"
+            } -OnFailure { param($message) Show-WpfCallbackFailure $message })
+        })
         (Find-WpfControl "DashboardButton").Add_Click({ Start-Process $dashboardUrl })
         (Find-WpfControl "LogsButton").Add_Click({ Start-Process explorer.exe $logRoot })
         (Find-WpfControl "OpenStableButton").Add_Click({ Start-Process $dashboardUrl })
@@ -5315,10 +5450,12 @@ function Show-WpfControlCenter {
             }
         })
         (Find-WpfControl "ApproveCompatibilityButton").Add_Click({
-            if ([System.Windows.MessageBox]::Show(
-                "Approve only the displayed exact compatibility evidence?",
-                "Confirm Compatibility", "YesNo", "Warning"
-            ) -eq "Yes") { Invoke-WpfOperation "ApproveCompatibility" }
+            [void](Invoke-ControlCenterUiCallback -Callback {
+                if ([System.Windows.MessageBox]::Show(
+                    "Approve only the displayed exact compatibility evidence?",
+                    "Confirm Compatibility", "YesNo", "Warning"
+                ) -eq "Yes") { Invoke-WpfOperation "ApproveCompatibility" }
+            } -OnFailure { param($message) Show-WpfCallbackFailure $message })
         })
         $window.AddHandler(
             [System.Windows.Controls.Button]::ClickEvent,
@@ -5326,67 +5463,80 @@ function Show-WpfControlCenter {
                 param($sender, $eventArgs)
                 $button = $eventArgs.OriginalSource
                 if ($button.CommandParameter -in @("ServiceStart", "ServiceStop") -and $button.Tag) {
-                    Invoke-WpfOperation ([string]$button.CommandParameter) ([string]$button.Tag)
+                    [void](Invoke-ControlCenterUiCallback -Callback {
+                        Invoke-WpfOperation ([string]$button.CommandParameter) `
+                            ([string]$button.Tag)
+                    } -OnFailure { param($message) Show-WpfCallbackFailure $message })
                 }
             }
         )
         (Find-WpfControl "PromoteButton").Add_Click({
-            if ([System.Windows.MessageBox]::Show(
-                "Promote only this fully validated Candidate?", "Confirm Promote",
-                "YesNo", "Warning"
-            ) -eq "Yes") { Invoke-WpfOperation "PromoteCandidate" }
+            [void](Invoke-ControlCenterUiCallback -Callback {
+                if ([System.Windows.MessageBox]::Show(
+                    "Promote only this fully validated Candidate?", "Confirm Promote",
+                    "YesNo", "Warning"
+                ) -eq "Yes") { Invoke-WpfOperation "PromoteCandidate" }
+            } -OnFailure { param($message) Show-WpfCallbackFailure $message })
         })
         (Find-WpfControl "ReverseButton").Add_Click({
-            if ([System.Windows.MessageBox]::Show(
-                "Reverse to the exact Previous Stable release?", "Confirm Reverse",
-                "YesNo", "Warning"
-            ) -eq "Yes") { Invoke-WpfOperation "ReverseStable" }
+            [void](Invoke-ControlCenterUiCallback -Callback {
+                if ([System.Windows.MessageBox]::Show(
+                    "Reverse to the exact Previous Stable release?", "Confirm Reverse",
+                    "YesNo", "Warning"
+                ) -eq "Yes") { Invoke-WpfOperation "ReverseStable" }
+            } -OnFailure { param($message) Show-WpfCallbackFailure $message })
         })
         $timer = New-Object Windows.Threading.DispatcherTimer
         $timer.Interval = [TimeSpan]::FromSeconds(5)
-        $timer.Add_Tick({ Refresh-WpfStatus })
+        $timer.Add_Tick({
+            [void](Invoke-ControlCenterUiCallback -Callback { Refresh-WpfStatus } `
+                -OnFailure { param($message) Show-WpfCallbackFailure $message })
+        })
         $operationTimer = New-Object Windows.Threading.DispatcherTimer
         $operationTimer.Interval = [TimeSpan]::FromMilliseconds(400)
         $operationTimer.Add_Tick({
-            if (-not $script:wpfOperation -or -not $script:wpfOperation.HasExited) {
-                return
-            }
-            $exitCode = $script:wpfOperation.ExitCode
-            $finished = $script:wpfOperationName
-            $output = if (Test-Path -LiteralPath $script:wpfOperationOutputPath) {
-                (Get-Content -LiteralPath $script:wpfOperationOutputPath -Raw `
-                    -ErrorAction SilentlyContinue).Trim()
-            } else { "" }
-            $errorText = if (Test-Path -LiteralPath $script:wpfOperationErrorPath) {
-                (Get-Content -LiteralPath $script:wpfOperationErrorPath -Raw `
-                    -ErrorAction SilentlyContinue).Trim()
-            } else { "" }
-            Remove-Item -LiteralPath `
-                $script:wpfOperationOutputPath,$script:wpfOperationErrorPath `
-                -Force -ErrorAction SilentlyContinue
-            $script:wpfOperation.Dispose()
-            $script:wpfOperation = $null
-            Set-WpfReleaseBusy -Busy $false
-            Refresh-WpfStatus
-            if ($exitCode -ne 0) {
-                [System.Windows.MessageBox]::Show(
-                    $(if ($errorText) { $errorText } else {
-                        "Operation failed without diagnostic output."
-                    }), "$finished failed", "OK", "Error"
-                ) | Out-Null
-            } elseif ($finished -eq "ApproveCompatibility") {
-                [System.Windows.MessageBox]::Show(
-                    $(if ($output) { $output } else { "$finished completed." }),
-                    "$finished completed", "OK", "Information"
-                ) | Out-Null
-            }
+            [void](Invoke-ControlCenterUiCallback -Callback {
+                if (-not $script:wpfOperation -or -not $script:wpfOperation.HasExited) {
+                    return
+                }
+                $exitCode = $script:wpfOperation.ExitCode
+                $finished = $script:wpfOperationName
+                try {
+                    $output = Get-ControlCenterOperationText `
+                        -Path $script:wpfOperationOutputPath
+                    $errorText = Get-ControlCenterOperationText `
+                        -Path $script:wpfOperationErrorPath
+                    if ($exitCode -ne 0) {
+                        [System.Windows.MessageBox]::Show(
+                            $(if ($errorText) { $errorText } else {
+                                "Operation failed without diagnostic output."
+                            }), "$finished failed", "OK", "Error"
+                        ) | Out-Null
+                    } elseif ($finished -eq "ApproveCompatibility") {
+                        [System.Windows.MessageBox]::Show(
+                            $(if ($output) { $output } else { "$finished completed." }),
+                            "$finished completed", "OK", "Information"
+                        ) | Out-Null
+                    }
+                } finally {
+                    Remove-Item -LiteralPath `
+                        $script:wpfOperationOutputPath,$script:wpfOperationErrorPath `
+                        -Force -ErrorAction SilentlyContinue
+                    $completedProcess = $script:wpfOperation
+                    $script:wpfOperation = $null
+                    try { $completedProcess.Dispose() } catch {}
+                    Set-WpfReleaseBusy -Busy $false
+                    [void](Invoke-ControlCenterUiCallback -Callback { Refresh-WpfStatus })
+                }
+            } -OnFailure { param($message) Show-WpfCallbackFailure $message })
         })
         $window.Add_Closed({ $timer.Stop(); $operationTimer.Stop() })
-        $script:wpfUiStartedRecorded = $false
         $window.Add_ContentRendered({
             if (-not $script:wpfUiStartedRecorded) {
-                Write-ControlCenterUiStarted -Mode "WPF"
                 $script:wpfUiStartedRecorded = $true
+                [void](Invoke-ControlCenterUiCallback -Callback {
+                    Write-ControlCenterUiStarted -Mode "WPF"
+                })
             }
         })
         Refresh-WpfStatus
@@ -5396,12 +5546,18 @@ function Show-WpfControlCenter {
         return $true
     } catch {
         $script:wpfFailureReason = Protect-PreflightDiagnosticText $_.Exception.Message
+        if (-not (Test-WpfFallbackAllowed `
+            -ContentRendered ([bool]$script:wpfUiStartedRecorded))) {
+            Write-Warning "WPF runtime failure contained without fallback: $($script:wpfFailureReason)"
+            return $true
+        }
         Write-Warning "WPF control center unavailable; using WinForms fallback: $($_.Exception.Message)"
         return $false
     }
 }
 
 function Show-ControlCenter {
+    $controlIdentity = Assert-ControlCenterProcessIdentity
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
 
@@ -5640,7 +5796,7 @@ function Show-ControlCenter {
     $subtitle.Size = New-Object System.Drawing.Size(420, 22)
     $controlBundle = Get-RuntimeControlBundleIdentity
     $controlIdentityLabel = New-UiLabel -Text $(if ($controlBundle) {
-        "Control Plane  $(([string]$controlBundle.source_revision).Substring(0, 12))  EXACT · HASH VERIFIED"
+        "Control Plane  $(([string]$controlBundle.source_revision).Substring(0, 12))  EXACT | HASH VERIFIED"
     } else { "Control Plane  --  UNVERIFIED" }) -Font (New-Object System.Drawing.Font("Cascadia Mono", 8)) -Color ([System.Drawing.Color]::White)
     $controlIdentityLabel.Location = New-Object System.Drawing.Point(22, 74)
     $controlIdentityLabel.Size = New-Object System.Drawing.Size(440, 18)
@@ -6060,12 +6216,14 @@ function Show-ControlCenter {
     }
     function Invoke-GuiOperation {
         param([string]$Operation, [string]$TargetKey = "")
-        if ($script:guiOperation -and -not $script:guiOperation.HasExited) { return }
+        if ($script:guiOperation) { return }
         $arguments = @(
             "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
             "-File", ('"{0}"' -f $PSCommandPath), "-Action", $Operation,
             "-RuntimeRoot", ('"{0}"' -f $moduleRoot),
-            "-RepositoryRoot", ('"{0}"' -f $repositoryRoot)
+            "-RepositoryRoot", ('"{0}"' -f $repositoryRoot),
+            "-ExpectedControlScriptPath", ('"{0}"' -f $PSCommandPath),
+            "-ExpectedControlRevision", ([string]$controlIdentity.source_revision)
         )
         if ($TargetKey) { $arguments += @("-ServiceKey", $TargetKey) }
         $script:guiOperationName = $Operation
@@ -6253,7 +6411,11 @@ function Show-ControlCenter {
         $arguments = @(
             "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
             "-File", ('"{0}"' -f $PSCommandPath), "-Action", "StatusJson",
-            "-StatusPath", ('"{0}"' -f $statusSnapshotPath)
+            "-StatusPath", ('"{0}"' -f $statusSnapshotPath),
+            "-RuntimeRoot", ('"{0}"' -f $moduleRoot),
+            "-RepositoryRoot", ('"{0}"' -f $repositoryRoot),
+            "-ExpectedControlScriptPath", ('"{0}"' -f $PSCommandPath),
+            "-ExpectedControlRevision", ([string]$controlIdentity.source_revision)
         )
         $script:lastStatusRequest = Get-Date
         $script:statusRefreshProcess = Start-Process -FilePath "powershell.exe" `
@@ -6285,16 +6447,13 @@ function Show-ControlCenter {
         if (-not $script:guiOperation -or -not $script:guiOperation.HasExited) { return }
         $exitCode = $script:guiOperation.ExitCode
         $finished = $script:guiOperationName
-        $output = if (Test-Path -LiteralPath $script:guiOperationOutputPath) {
-            (Get-Content -LiteralPath $script:guiOperationOutputPath -Raw -ErrorAction SilentlyContinue).Trim()
-        } else { "" }
-        $errorText = if (Test-Path -LiteralPath $script:guiOperationErrorPath) {
-            (Get-Content -LiteralPath $script:guiOperationErrorPath -Raw -ErrorAction SilentlyContinue).Trim()
-        } else { "" }
+        $output = Get-ControlCenterOperationText -Path $script:guiOperationOutputPath
+        $errorText = Get-ControlCenterOperationText -Path $script:guiOperationErrorPath
         Remove-Item -LiteralPath $script:guiOperationOutputPath,$script:guiOperationErrorPath `
             -Force -ErrorAction SilentlyContinue
-        $script:guiOperation.Dispose()
+        $completedProcess = $script:guiOperation
         $script:guiOperation = $null
+        try { $completedProcess.Dispose() } catch {}
         Set-GuiBusy -Busy $false -Message $(if ($exitCode -eq 0) { "Completed: $finished" } else { "Failed: $finished (exit $exitCode)" })
         if ($exitCode -ne 0) {
             [System.Windows.Forms.MessageBox]::Show(
@@ -6342,6 +6501,12 @@ function Show-ControlCenter {
         Remove-Item -LiteralPath $statusSnapshotPath -Force -ErrorAction SilentlyContinue
     })
     [void]$form.ShowDialog()
+}
+
+if ($ExpectedControlScriptPath -or $ExpectedControlRevision) {
+    $null = Assert-ControlCenterProcessIdentity `
+        -ExpectedScriptPath $ExpectedControlScriptPath `
+        -ExpectedRevision $ExpectedControlRevision
 }
 
 switch ($Action) {

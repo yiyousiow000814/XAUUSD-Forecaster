@@ -920,17 +920,78 @@ def test_release_gui_actions_are_tracked_single_flight_in_both_shells() -> None:
     assert all(state in wpf for state in ("APPROVING", "PROMOTING", "REVERSING"))
     assert all(name in wpf for name in (
         '"ApproveCompatibilityButton", "PromoteButton", "ReverseButton"',
-        "$script:wpfOperation.HasExited",
+        "return [bool]$script:wpfOperation",
         "Refresh-WpfStatus",
         "$script:wpfOperation = $null",
     ))
     assert "Operation failed without diagnostic output." in wpf
 
-    assert "if ($script:guiOperation -and -not $script:guiOperation.HasExited) { return }" in fallback
+    assert "if ($script:guiOperation) { return }" in fallback
     assert all(state in fallback for state in ("APPROVING", "PROMOTING", "REVERSING"))
     assert fallback.index("Set-GuiBusy -Busy $true") < fallback.index(
         '$script:guiOperation = Start-Process -FilePath "powershell.exe"'
     )
+
+
+def test_control_center_operation_callbacks_are_empty_safe_and_contained(tmp_path) -> None:
+    empty = tmp_path / "empty.out"
+    empty.write_text("", encoding="utf-8")
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$text=Get-ControlCenterOperationText -Path '{empty}';"
+        "$script:failure='';$ok=Invoke-ControlCenterUiCallback "
+        "-Callback { throw 'timer failed' } "
+        "-OnFailure { param($message) $script:failure=$message };"
+        "$before=Test-WpfFallbackAllowed -ContentRendered $false;"
+        "$after=Test-WpfFallbackAllowed -ContentRendered $true;"
+        'Write-Output "$($null -ne $text),$($text.Length),$ok,$script:failure,$before,$after"',
+    )
+    assert result == "True,0,False,timer failed,True,False"
+
+
+def test_wpf_post_render_failures_cannot_enter_winforms_fallback() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
+        encoding="utf-8"
+    )
+    wpf = source[source.index("function Show-WpfControlCenter"):source.index(
+        "function Show-ControlCenter"
+    )]
+    assert wpf.index("$script:wpfUiStartedRecorded = $true") < wpf.index(
+        'Write-ControlCenterUiStarted -Mode "WPF"'
+    )
+    assert "Test-WpfFallbackAllowed" in wpf
+    assert "WPF runtime failure contained without fallback" in wpf
+    assert "Get-ControlCenterOperationText" in wpf
+    assert "Invoke-ControlCenterUiCallback" in wpf
+
+
+def test_gui_children_are_bound_to_installed_script_and_parent_revision(tmp_path) -> None:
+    installed = tmp_path / "runtime-control" / "xauusd_control_center.ps1"
+    stale = tmp_path / "stale" / "xauusd_control_center.ps1"
+    installed.parent.mkdir()
+    stale.parent.mkdir()
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$pass=Test-ControlCenterChildIdentity -CurrentScriptPath '{installed}' "
+        f"-InstalledScriptPath '{installed}' -CurrentRevision ('a'*40) "
+        f"-ExpectedScriptPath '{installed}' -ExpectedRevision ('a'*40);"
+        f"$stale=Test-ControlCenterChildIdentity -CurrentScriptPath '{stale}' "
+        f"-InstalledScriptPath '{installed}' -CurrentRevision ('a'*40) "
+        f"-ExpectedScriptPath '{installed}' -ExpectedRevision ('a'*40);"
+        f"$revision=Test-ControlCenterChildIdentity -CurrentScriptPath '{installed}' "
+        f"-InstalledScriptPath '{installed}' -CurrentRevision ('b'*40) "
+        f"-ExpectedScriptPath '{installed}' -ExpectedRevision ('a'*40);"
+        'Write-Output "$pass,$stale,$revision"',
+    )
+    assert result == "True,False,False"
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert source.count('"-ExpectedControlScriptPath"') >= 2
+    assert source.count('"-ExpectedControlRevision"') >= 2
+    assert "EXACT | HASH VERIFIED" in source
+    assert "EXACT · HASH VERIFIED" not in source
+    assert "EXACT Â· HASH VERIFIED" not in source
 
 
 def test_wpf_runtime_loads_and_keeps_release_controls_reachable() -> None:
@@ -2155,8 +2216,8 @@ def test_platform_compatibility_approval_is_exact_audited_and_narrow(tmp_path) -
         "$candidate.validation=[pscustomobject]@{key=$candidate.validation_key;"
         "reason='PLATFORM_CONFIG_REVIEW_REQUIRED';resources_verified=$true;"
         "review_files=@('web/wrangler.jsonc')};Write-ReleaseControlState $state;"
-        "function Test-ProductionCandidateProvenance{return $true};"
-        "function Test-RequiredGitHubChecks{return 'PASSED'};"
+        "function Get-ProductionCandidateProvenanceResult{return [pscustomobject]@{state='PASSED'}};"
+        "function Get-RequiredGitHubChecksResult{return [pscustomobject]@{state='PASSED'}};"
         "function Get-CandidateChangedFiles{return @('web/wrangler.jsonc')};"
         "function Test-CandidatePlatformResources{return $true};"
         "$approved=Approve-CandidateCompatibility;$final=Get-ReleaseControlState;"
@@ -2166,6 +2227,78 @@ def test_platform_compatibility_approval_is_exact_audited_and_narrow(tmp_path) -
         '$($history.Contains(\'CANDIDATE_COMPATIBILITY_APPROVED\'))"',
     )
     assert result == "NEW,True,True"
+
+
+@pytest.mark.parametrize(
+    ("gate", "diagnostic", "reason"),
+    (
+        ("FETCH", "fatal: operation timed out", "REPOSITORY_TRANSPORT_UNAVAILABLE"),
+        ("GITHUB", "HTTP 503 Service Unavailable", "GITHUB_TEMPORARILY_UNAVAILABLE"),
+        ("GITHUB", "HTTP 429 rate limit exceeded", "GITHUB_TEMPORARILY_UNAVAILABLE"),
+    ),
+)
+def test_compatibility_approval_transient_failure_preserves_review_evidence(
+    tmp_path, gate: str, diagnostic: str, reason: str,
+) -> None:
+    setup = (
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$candidate.branch='main';"
+        "$candidate.validation_state='REVIEW_REQUIRED';"
+        "$candidate.compatibility_state='REVIEW_REQUIRED';"
+        "$candidate.validation=[pscustomobject]@{key=$candidate.validation_key;"
+        "reason='PLATFORM_CONFIG_REVIEW_REQUIRED';resources_verified=$true;"
+        "windows='PASSED';review_files=@('web/wrangler.jsonc')};"
+        "Write-ReleaseControlState $state;$before=Get-Content $releaseControlStatePath -Raw;"
+    )
+    if gate == "FETCH":
+        mocks = (
+            "function Invoke-RepositoryRead{return [pscustomobject]@{passed=$false;"
+            "failure_class='TRANSIENT_EXTERNAL';exit_code=128;"
+            f"diagnostic='{diagnostic}'}}}};"
+        )
+    else:
+        mocks = (
+            "function Get-ProductionCandidateProvenanceResult{"
+            "return [pscustomobject]@{state='PASSED'}};"
+            f"function gh{{$global:LASTEXITCODE=1;'{diagnostic}'}};"
+        )
+    result = _run_control_center_contract(
+        tmp_path,
+        setup + mocks
+        + "$message='';try{Approve-CandidateCompatibility|Out-Null}catch{$message=$_.Exception.Message};"
+        "$after=Get-Content $releaseControlStatePath -Raw;$final=Get-ReleaseControlState;"
+        'Write-Output "$($message.Contains(\'APPROVAL_RETRYABLE\')),'
+        '$($message.Contains(\'' + reason + '\')),$($before -eq $after),'
+        '$($null -eq $final.candidate.compatibility_approval),'
+        '$($final.candidate.validation_state),$($final.candidate.compatibility_state),'
+        '$($final.candidate.validation.windows),'
+        '$($final.candidate.validation.key -eq $final.candidate.validation_key)"',
+    )
+    assert result == "True,True,True,True,REVIEW_REQUIRED,REVIEW_REQUIRED,PASSED,True"
+
+
+def test_compatibility_approval_deterministic_provenance_failure_is_rejected(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$candidate.validation_state='REVIEW_REQUIRED';"
+        "$candidate.compatibility_state='REVIEW_REQUIRED';"
+        "$candidate.validation=[pscustomobject]@{key=$candidate.validation_key;"
+        "reason='PLATFORM_CONFIG_REVIEW_REQUIRED';resources_verified=$true;windows='PASSED'};"
+        "Write-ReleaseControlState $state;$before=Get-Content $releaseControlStatePath -Raw;"
+        "function Get-ProductionCandidateProvenanceResult{return [pscustomobject]@{"
+        "state='FAILED';reason='PRODUCTION_CANDIDATE_MAIN_PROVENANCE_REQUIRED'}};"
+        "$message='';try{Approve-CandidateCompatibility|Out-Null}catch{$message=$_.Exception.Message};"
+        "$after=Get-Content $releaseControlStatePath -Raw;"
+        'Write-Output "$($message.Contains(\'APPROVAL_REJECTED\')),'
+        '$($message.Contains(\'PRODUCTION_CANDIDATE_MAIN_PROVENANCE_REQUIRED\')),'
+        '$($before -eq $after)"',
+    )
+    assert result == "True,True,True"
 
 
 def test_storage_or_resource_failure_cannot_use_compatibility_approval(tmp_path) -> None:
