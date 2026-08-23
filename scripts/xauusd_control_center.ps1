@@ -2595,6 +2595,51 @@ function Set-CandidateRepositoryPending {
     return $true
 }
 
+function Test-BroadcastServiceReadiness {
+    param([Parameter(Mandatory = $true)][string]$CandidateRevision)
+    $healthUrl = [string]$env:AURUM_LIVE_BROADCAST_HEALTH_URL
+    $compatibleRevision = [string]$env:AURUM_LIVE_BROADCAST_COMPATIBLE_REVISION
+    if ([string]::IsNullOrWhiteSpace($healthUrl)) {
+        return [pscustomobject]@{
+            state = "FAILED"; passed = $false
+            reason = "BROADCAST_HEALTH_URL_NOT_CONFIGURED"
+            health_url_configured = $false
+        }
+    }
+    try {
+        $health = Invoke-RestMethod -Method Get -Uri $healthUrl -TimeoutSec 15
+        $revisionAccepted = (
+            [string]$health.code_revision -eq $CandidateRevision -or
+            (-not [string]::IsNullOrWhiteSpace($compatibleRevision) -and
+                [string]$health.code_revision -eq $compatibleRevision)
+        )
+        $passed = (
+            [string]$health.schema_version -eq "PUBLIC_LIVE_V1" -and
+            [bool]$health.binding_ready -and [bool]$health.latest_available -and
+            $revisionAccepted
+        )
+        return [pscustomobject]@{
+            state = if ($passed) { "PASSED" } else { "FAILED" }
+            passed = $passed
+            reason = if ($passed) { "PASSED" } else { "BROADCAST_NOT_READY" }
+            health_url_configured = $true
+            schema_version = [string]$health.schema_version
+            code_revision = [string]$health.code_revision
+            binding_ready = [bool]$health.binding_ready
+            latest_available = [bool]$health.latest_available
+            latest_generated_at = [string]$health.latest_generated_at
+            revision_accepted = $revisionAccepted
+        }
+    } catch {
+        return [pscustomobject]@{
+            state = "FAILED"; passed = $false
+            reason = "BROADCAST_HEALTH_PROBE_FAILED"
+            health_url_configured = $true
+            error = Protect-PreflightDiagnosticText $_.Exception.Message
+        }
+    }
+}
+
 function Invoke-AutomaticCandidateValidation {
     param([Parameter(Mandatory = $true)][object]$Candidate)
     $state = Get-ReleaseControlState
@@ -2705,6 +2750,33 @@ function Invoke-AutomaticCandidateValidation {
         $changed = @(Get-CandidateChangedFiles `
             -StableRevision ([string]$state.stable.git_sha) `
             -CandidateRevision ([string]$Candidate.git_sha))
+        $broadcastRequired = [bool](@($changed | Where-Object {
+            [string]$_ -match '^(broadcast/|web/app/_lib/live-broadcast\.ts$)'
+        }).Count -gt 0)
+        $broadcast = [pscustomobject]@{
+            state = "NOT_REQUIRED"; passed = $true; reason = "NOT_REQUIRED"
+        }
+        if ($broadcastRequired) {
+            $broadcast = Test-BroadcastServiceReadiness `
+                -CandidateRevision ([string]$Candidate.git_sha)
+            if (-not $broadcast.passed) {
+                $state.candidate.validation_state = "FAILED"
+                $state.candidate.validation = [pscustomobject]@{
+                    key = [string]$Candidate.validation_key
+                    repository = "PASSED"; windows = "PASSED"; cloudflare = "PENDING"
+                    broadcast = $broadcast
+                    reason = [string]$broadcast.reason
+                    tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+                }
+                Write-ReleaseControlState -State $state
+                Write-ReleaseHistory -Event "CANDIDATE_FAILED" `
+                    -Release $state.candidate -Detail @{
+                        reason = [string]$broadcast.reason
+                        broadcast = $broadcast
+                    }
+                return $false
+            }
+        }
         $compatibility = Get-CandidateCompatibilityRequirement -ChangedFiles $changed
         if ([string]$compatibility.state -eq "COORDINATED_STORAGE_MIGRATION_REQUIRED") {
             $state.candidate.compatibility_state = "REVIEW_REQUIRED"

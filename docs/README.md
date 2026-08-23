@@ -42,6 +42,7 @@ current rules merely because they discovered one.
 - [Assistant security boundaries](contracts/ASSISTANT_SECURITY.md)
 - [Daily Brief](contracts/DAILY_BRIEF.md)
 - [Operational health](contracts/OPERATIONAL_HEALTH.md)
+- [Live broadcast](contracts/LIVE_BROADCAST.md)
 
 ### Specifications
 
@@ -69,6 +70,7 @@ current rules merely because they discovered one.
 - [Paged dashboard history](design/PAGED_DASHBOARD_HISTORY.md)
 - [Assistant architecture](design/ASSISTANT_ARCHITECTURE.md)
 - [Assistant implementation status](design/ASSISTANT_IMPLEMENTATION_STATUS.md)
+- [Shared live broadcast](design/LIVE_BROADCAST.md)
 
 ### Architecture decisions
 
@@ -86,6 +88,7 @@ current rules merely because they discovered one.
 
 - [Cloudflare deployment runbook](runbooks/CLOUDFLARE_DEPLOYMENT.md)
 - [Control Plane installation runbook](runbooks/CONTROL_PLANE_INSTALLATION.md)
+- [Live broadcast bootstrap runbook](runbooks/LIVE_BROADCAST_BOOTSTRAP.md)
 - [Input and provider reference](reference/INPUTS.md)
 - [AI provider quota reference](AI_PROVIDER_QUOTAS.md)
 

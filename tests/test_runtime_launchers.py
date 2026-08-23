@@ -3945,3 +3945,26 @@ def test_api_and_sync_load_operator_bridge_from_user_environment(tmp_path) -> No
         "bridge-secret-from-user-environment-123456,"
         "bridge-secret-from-user-environment-123456"
     )
+
+
+def test_broadcast_dependency_readiness_is_exact_revision_and_fail_closed(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    command = (
+        f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
+        f"-RepositoryRoot '{repo}'; "
+        "$env:AURUM_LIVE_BROADCAST_HEALTH_URL='https://broadcast.test/health'; "
+        "$env:AURUM_LIVE_BROADCAST_COMPATIBLE_REVISION=''; "
+        "function Invoke-RestMethod { return [pscustomobject]@{"
+        "schema_version='PUBLIC_LIVE_V1'; code_revision='candidate-sha'; "
+        "binding_ready=$true; latest_available=$true; latest_generated_at='2026-08-23T05:00:00Z'} }; "
+        "$ready=Test-BroadcastServiceReadiness -CandidateRevision 'candidate-sha'; "
+        "$wrong=Test-BroadcastServiceReadiness -CandidateRevision 'different-sha'; "
+        "Write-Output \"$($ready.state),$($wrong.reason),$($wrong.revision_accepted)\""
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert result == "PASSED,BROADCAST_NOT_READY,False"

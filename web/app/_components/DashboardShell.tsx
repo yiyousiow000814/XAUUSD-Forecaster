@@ -28,6 +28,7 @@ import {
 } from "./DashboardNavigation";
 import MobileDashboardNav from "./MobileDashboardNav";
 import SystemStatePill from "./SystemStatePill";
+import { liveBroadcastTransport } from "../_lib/live-broadcast";
 
 export const isVersionedCandidateHost = (hostname: string) => (
   /^[0-9a-f]{8}-aurum-signal-room\./i.test(hostname)
@@ -167,6 +168,11 @@ function AdminSectionNavigation({ location }: { location: DashboardLocation }) {
 }
 
 export default function DashboardShell({ children, location }: { children: ReactNode; location: DashboardLocation }) {
+  useEffect(() => {
+    const transport = liveBroadcastTransport();
+    transport?.start();
+    return () => transport?.stop();
+  }, []);
   const activeDestination = activeDashboardDestination(location.room);
   const navigation = useDashboardNavigation();
   const [adminAuthState, setAdminAuthState] = useState<AdminAuthState>("CHECKING");

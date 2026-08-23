@@ -1,4 +1,5 @@
 import { shouldPollDashboardResource } from "./dashboard-refresh-policy";
+import { isLiveBroadcastHealthy, liveBroadcastEnabled } from "./live-broadcast";
 
 export type DashboardRefreshCleanup = () => void;
 export type DashboardResourceMode = "current" | "build-snapshot";
@@ -12,6 +13,13 @@ export const DASHBOARD_REFRESH_INTERVALS = {
 } as const;
 
 const POLL_LEASE_PREFIX = "aurum-dashboard-poll";
+
+export function statusPollingSuppressed(
+  coordinationKey: string,
+  liveHealthy = isLiveBroadcastHealthy(),
+): boolean {
+  return coordinationKey === "status" && liveHealthy;
+}
 
 function mayPoll(
   coordinationKey: string,
@@ -48,7 +56,7 @@ function mayPoll(
   return true;
 }
 
-/** Run once immediately; only current read-only resources may poll. */
+/** Prefer the singleton live stream; only current read-only resources may poll. */
 export function scheduleDashboardRefresh(
   initialRefresh: () => void,
   pollRefresh: () => void,
@@ -56,9 +64,14 @@ export function scheduleDashboardRefresh(
   resourceMode: DashboardResourceMode,
   coordinationKey = "status",
 ): DashboardRefreshCleanup {
-  const initial = window.setTimeout(initialRefresh, 0);
+  const statusResource = coordinationKey === "status";
+  const initial = window.setTimeout(
+    () => { if (!statusPollingSuppressed(coordinationKey)) initialRefresh(); },
+    statusResource && liveBroadcastEnabled() ? 2_500 : 0,
+  );
   let lastLocalPollAt = Date.now();
   const pollWhenEligible = () => {
+    if (statusPollingSuppressed(coordinationKey)) return;
     const now = Date.now();
     if (mayPoll(coordinationKey, intervalMs, lastLocalPollAt, now)) {
       lastLocalPollAt = now;
