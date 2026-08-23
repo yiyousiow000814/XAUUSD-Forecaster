@@ -109,7 +109,9 @@ function GlobalSystemState() {
     const current = readDashboardResourceState<ShellStatusPayload>("/api/status");
     queueMicrotask(update);
     if (!current.hasSnapshot && !current.loading) {
-      void loadDashboardResource<ShellStatusPayload>("/api/status").catch(() => undefined);
+      void ensureStatusBaseline(
+        () => loadDashboardResource<ShellStatusPayload>("/api/status"),
+      ).catch(() => undefined);
     }
     return () => {
       active = false;

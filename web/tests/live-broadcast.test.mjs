@@ -90,10 +90,13 @@ test("one complete HTTP baseline precedes push and recurring status polling is s
   assert.equal(statusPollingSuppressed("news", true), false);
   const liveRoom = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
   const shell = readFileSync(new URL("../app/_components/DashboardShell.tsx", import.meta.url), "utf8");
+  const previewBanner = readFileSync(new URL("../app/_components/PreviewBanner.tsx", import.meta.url), "utf8");
   assert.match(liveRoom, /DASHBOARD_REFRESH_INTERVALS\.live,[\s\S]*"current",[\s\S]*"status"/);
   assert.doesNotMatch(liveRoom, /"live-status"/);
   assert.match(liveRoom, /effectiveQuoteAgeSeconds\([\s\S]*payload[\s\S]*now/);
   assert.match(shell, /ensureStatusBaseline[\s\S]*\.catch\([\s\S]*\.finally\(\(\) => \{ if \(active\) transport\?\.start\(\)/);
+  assert.match(previewBanner, /subscribeDashboardResource\([\s\S]*"\/api\/status"/);
+  assert.doesNotMatch(previewBanner, /fetch\([\s\S]*\/api\/status/);
 });
 
 test("push preserves complete baseline, forecast actions, and the 90-minute ledger", () => withTimers(() => {

@@ -1,6 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import {
+  readDashboardResource, subscribeDashboardResource,
+} from "../_lib/dashboard-resource";
 
 type PreviewInfo = {
   is_preview?: boolean;
@@ -10,16 +13,15 @@ type PreviewInfo = {
 };
 
 export default function PreviewBanner() {
-  const [preview, setPreview] = useState<PreviewInfo | null>(null);
+  const readPreview = () => {
+    const payload = readDashboardResource<{ preview?: PreviewInfo }>("/api/status");
+    return payload?.preview?.is_preview ? payload.preview : null;
+  };
+  const [preview, setPreview] = useState<PreviewInfo | null>(readPreview);
 
-  useEffect(() => {
-    const controller = new AbortController();
-    void fetch("/api/status", { cache: "no-store", signal: controller.signal })
-      .then(response => response.ok ? response.json() : null)
-      .then(payload => setPreview(payload?.preview?.is_preview ? payload.preview : null))
-      .catch(() => undefined);
-    return () => controller.abort();
-  }, []);
+  useEffect(() => subscribeDashboardResource(
+    "/api/status", () => setPreview(readPreview()),
+  ), []);
 
   if (!preview) return null;
   return <aside className="preview-banner" role="status">
