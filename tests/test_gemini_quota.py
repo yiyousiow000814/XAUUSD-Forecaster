@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from xauusd_forecaster.gemini_quota import GeminiQuotaLedger, key_fingerprint
+from xauusd_forecaster.ai.quota import GeminiQuotaLedger, key_fingerprint
 
 
 KEY = "secret-api-key-for-migration"

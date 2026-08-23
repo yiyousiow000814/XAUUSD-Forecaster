@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import xauusd_forecaster.news_scheduler as news_scheduler_module
-from xauusd_forecaster.news_scheduler import (
+import xauusd_forecaster.news.scheduler.state as news_scheduler_module
+from xauusd_forecaster.news.scheduler.state import (
     ApiCredential,
     PREEMPTIBLE_POOL,
     ROUTINE_POOL,
@@ -40,7 +40,7 @@ from xauusd_forecaster.news_scheduler import (
     scheduler_counts,
     sync_pending_jobs,
 )
-from xauusd_forecaster.annotation import (
+from xauusd_forecaster.news.annotation.product import (
     ANNOTATION_FAILURE_RECOVERY_VERSION,
     IMPACT_FAILURE_RECOVERY_VERSION,
     IMPACT_MODEL,
@@ -48,11 +48,11 @@ from xauusd_forecaster.annotation import (
     _append_impact_failure,
 )
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.news_semantics import (
+from xauusd_forecaster.news.semantics.contracts import (
     CURRENT_NEWS_PROMPT_VERSION,
     PREVIOUS_NEWS_PROMPT_VERSION,
 )
-from xauusd_forecaster.semantic_transition import (
+from xauusd_forecaster.news.semantics.transitions import (
     ARCHIVAL_ONLY,
     DETERMINISTIC_MIGRATION,
     MODEL_REVIEW_REQUIRED,
@@ -2065,7 +2065,7 @@ def test_sync_uses_v15_semantic_priority_not_headline_keywords(tmp_path) -> None
 def test_impact_discovery_advances_old_backfill_and_new_arrivals(
     tmp_path, monkeypatch,
 ) -> None:
-    import xauusd_forecaster.annotation as annotation
+    import xauusd_forecaster.news.annotation.product as annotation
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     calls = []
@@ -2254,7 +2254,7 @@ def test_claim_can_skip_a_capacity_blocked_task_route() -> None:
 
 
 def test_accounts_are_ranked_by_shared_live_model_headroom() -> None:
-    from xauusd_forecaster.news_impact import IMPACT_MODEL
+    from xauusd_forecaster.news.annotation.impact import IMPACT_MODEL
 
     connection = _connection()
     credentials = (
@@ -2323,7 +2323,7 @@ def test_embedding_catchup_is_deferred_without_trying_another_account(
     monkeypatch,
 ) -> None:
     from scripts import run_news_annotator as runner
-    from xauusd_forecaster.news_retrieval import NewsEmbeddingBackfillPending
+    from xauusd_forecaster.news.retrieval.search import NewsEmbeddingBackfillPending
 
     def pending(*_args, **_kwargs):
         raise NewsEmbeddingBackfillPending(
@@ -2345,7 +2345,7 @@ def test_embedding_provider_throttle_wait_does_not_consume_impact_attempt(
     tmp_path, monkeypatch,
 ) -> None:
     from scripts import run_news_annotator as runner
-    from xauusd_forecaster.gemini_embeddings import GeminiEmbeddingFailure
+    from xauusd_forecaster.news.retrieval.gemini_embeddings import GeminiEmbeddingFailure
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     job_id = enqueue_job(
@@ -2621,7 +2621,7 @@ def test_embedding_maintenance_does_not_consume_job_attempts_and_resumes(
     tmp_path, monkeypatch,
 ) -> None:
     from scripts import run_news_annotator as runner
-    from xauusd_forecaster.news_retrieval import NewsEmbeddingBackfillPending
+    from xauusd_forecaster.news.retrieval.search import NewsEmbeddingBackfillPending
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     job_id = enqueue_job(
@@ -2773,8 +2773,8 @@ def test_capacity_blocked_route_is_skipped_for_the_rest_of_the_lane(
 
 
 def test_every_scheduler_task_has_one_declared_semantic_route() -> None:
-    from xauusd_forecaster.ai_task_registry import AI_TASK_ROUTE_BY_TYPE
-    from xauusd_forecaster.news_scheduler import TASKS
+    from xauusd_forecaster.news.scheduler.task_registry import AI_TASK_ROUTE_BY_TYPE
+    from xauusd_forecaster.news.scheduler.state import TASKS
 
     assert set(TASKS).issubset(AI_TASK_ROUTE_BY_TYPE)
     assert AI_TASK_ROUTE_BY_TYPE["DAILY_BRIEF"].semantic_owner == "DISPLAY_ONLY"
@@ -2958,8 +2958,8 @@ def test_daily_brief_capacity_reserves_only_its_own_account(
 def test_display_route_uses_declared_fallback_when_gemma_capacity_is_full(
     monkeypatch,
 ) -> None:
-    import xauusd_forecaster.annotation as annotation
-    from xauusd_forecaster.model_gateway import (
+    import xauusd_forecaster.news.annotation.product as annotation
+    from xauusd_forecaster.ai.model_gateway import (
         ModelGatewayCapacityExhausted,
         ModelRequestAccountant,
     )

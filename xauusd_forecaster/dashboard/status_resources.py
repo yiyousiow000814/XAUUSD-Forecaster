@@ -11,11 +11,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from xauusd_forecaster.ai_provider_registry import (
+from xauusd_forecaster.ai.provider_registry import (
     AI_QUOTA_SURFACES,
     GEMINI_EMBEDDING_REQUESTS_PER_DAY_PER_ACCOUNT,
 )
-from xauusd_forecaster.annotation import (
+from xauusd_forecaster.news.annotation.product import (
     DEFAULT_GEMINI_MODEL,
     DEFAULT_GEMMA_MODEL,
     FALLBACK_GEMINI_MODEL,
@@ -29,8 +29,8 @@ from xauusd_forecaster.annotation import (
     PROMPT_VERSION,
     pending_annotation_records,
 )
-from xauusd_forecaster.critical_annotation_state import annotation_queue_snapshot
-from xauusd_forecaster.daily_brief import daily_brief_summary, recent_daily_briefs
+from xauusd_forecaster.news.semantics.critical_state import annotation_queue_snapshot
+from xauusd_forecaster.news.brief.product import daily_brief_summary, recent_daily_briefs
 from xauusd_forecaster.dashboard.health_projection import (
     _collector_component,
     _decision_collector_component,
@@ -66,28 +66,28 @@ from xauusd_forecaster.factors import (
     FACTOR_COVERAGE_NEWS_SOURCES,
     factor_coverage,
 )
-from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
+from xauusd_forecaster.ai.quota import GeminiQuotaLedger
 from xauusd_forecaster.learning_curves import learning_curve_payload
 from xauusd_forecaster.market_session import expected_weekly_closure
-from xauusd_forecaster.model_limits import GEMMA_PROVIDER_LANES_PER_ACCOUNT
-from xauusd_forecaster.news_contracts import CURRENT_NEWS_CONTRACT
-from xauusd_forecaster.news_evidence import EVIDENCE_POLICY_VERSION, event_evidence_rows_from_connection
-from xauusd_forecaster.news_features_v2 import COLLECTION_SOURCES
-from xauusd_forecaster.news_identity import preferred_cluster_peer_predicate
-from xauusd_forecaster.news_impact import (
+from xauusd_forecaster.ai.model_limits import GEMMA_PROVIDER_LANES_PER_ACCOUNT
+from xauusd_forecaster.news.semantics.model_contracts import CURRENT_NEWS_CONTRACT
+from xauusd_forecaster.news.semantics.evidence import EVIDENCE_POLICY_VERSION, event_evidence_rows_from_connection
+from xauusd_forecaster.news.semantics.features import COLLECTION_SOURCES
+from xauusd_forecaster.news.retrieval.identity import preferred_cluster_peer_predicate
+from xauusd_forecaster.news.annotation.impact import (
     HANDOVER_IMPACT_PROMPT_VERSION,
     IMPACT_MODEL,
     IMPACT_PROMPT_VERSION,
 )
-from xauusd_forecaster.news_pipeline_health import news_semantic_pipeline_health
-from xauusd_forecaster.news_relevance import GOOGLE_NEWS_MAX_AGE
-from xauusd_forecaster.news_scheduler import account_quota_snapshot, configured_api_credentials
-from xauusd_forecaster.news_semantics import model_usable_annotation_predicate
-from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
+from xauusd_forecaster.news.scheduler.health import news_semantic_pipeline_health
+from xauusd_forecaster.news.semantics.relevance import GOOGLE_NEWS_MAX_AGE
+from xauusd_forecaster.news.scheduler.state import account_quota_snapshot, configured_api_credentials
+from xauusd_forecaster.news.semantics.contracts import model_usable_annotation_predicate
+from xauusd_forecaster.news.collection.source_registry import NEWS_SOURCE_REGISTRY
 from xauusd_forecaster.operational_health import extend_with_component_alerts, scheduler_health_snapshot
 from xauusd_forecaster.production_shape import production_contract_snapshot
-from xauusd_forecaster.source_polling import source_poll_recovery_state
-from xauusd_forecaster.storylines import STORYLINE_POLICY_VERSION, temporal_event_graph
+from xauusd_forecaster.news.collection.source_polling import source_poll_recovery_state
+from xauusd_forecaster.news.annotation.storylines import STORYLINE_POLICY_VERSION, temporal_event_graph
 
 
 MODULE_ROOT = Path(__file__).resolve().parents[2]
@@ -1498,4 +1498,3 @@ def _optional_resource_payload(database: Path, resource: str) -> dict:
             "market_chart": json.loads(market_chart_snapshot(payload)),
         }
     raise ValueError(f"unknown optional dashboard resource: {resource}")
-

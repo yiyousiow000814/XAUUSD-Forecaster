@@ -19,12 +19,12 @@ from xauusd_forecaster.dashboard.status_cache import (
     StatusSnapshotCache,
     StatusSnapshotUnavailable,
 )
-from xauusd_forecaster.annotation import (
+from xauusd_forecaster.news.annotation.product import (
     ANNOTATION_FAILURE_RECOVERY_VERSION,
     INVALID_CHINESE_TITLE,
     PROMPT_VERSION,
 )
-from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES
+from xauusd_forecaster.ai.provider_registry import AI_QUOTA_SURFACES
 from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.dashboard_read_models import (
     DashboardReadModelOwner,
@@ -39,13 +39,13 @@ from xauusd_forecaster.dashboard_summaries import (
     dashboard_table_counts,
     install_dashboard_summary_schema,
 )
-from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
-from xauusd_forecaster.news_scheduler import (
+from xauusd_forecaster.ai.quota import GeminiQuotaLedger
+from xauusd_forecaster.news.scheduler.state import (
     authorize_repairable_annotation_failures,
     configured_api_credentials,
     reserve_account_request,
 )
-from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
+from xauusd_forecaster.news.collection.source_registry import NEWS_SOURCE_REGISTRY
 from tests.dashboard_news_fixtures import (
     _append_basic_annotation,
     _basic_annotation_payload,
@@ -898,7 +898,7 @@ def test_dashboard_annotation_counts_match_current_worker_policy(tmp_path) -> No
                 parsed_at=now + timedelta(seconds=1),
                 prompt_version=PROMPT_VERSION,
             )
-    from xauusd_forecaster.news_scheduler import sync_pending_jobs
+    from xauusd_forecaster.news.scheduler.state import sync_pending_jobs
     sync_pending_jobs(ledger.connection, now=now + timedelta(seconds=2))
     ledger.connection.close()
 
@@ -927,7 +927,7 @@ def test_dashboard_annotation_counts_match_current_worker_policy(tmp_path) -> No
 
 
 def test_dashboard_quota_uses_scheduler_ledger(tmp_path, monkeypatch) -> None:
-    import xauusd_forecaster.news_scheduler as news_scheduler
+    import xauusd_forecaster.news.scheduler.state as news_scheduler
 
     configured = {"GEMINI_API_KEYS": "key-a;key-b", "GEMINI_API_KEY": ""}
     monkeypatch.setattr(
@@ -975,7 +975,7 @@ def test_dashboard_quota_uses_scheduler_ledger(tmp_path, monkeypatch) -> None:
 def test_dashboard_quota_keeps_pre_scheduler_file_compatibility(
     tmp_path, monkeypatch,
 ) -> None:
-    import xauusd_forecaster.news_scheduler as news_scheduler
+    import xauusd_forecaster.news.scheduler.state as news_scheduler
 
     configured = {"GEMINI_API_KEYS": "legacy-key", "GEMINI_API_KEY": ""}
     monkeypatch.setattr(
@@ -1308,7 +1308,7 @@ def test_optional_read_model_validation_and_concurrent_reads(tmp_path) -> None:
 def test_retry_operator_bridge_lists_and_atomically_applies_idempotent_override(
     monkeypatch, tmp_path,
 ) -> None:
-    from xauusd_forecaster.news_scheduler import (
+    from xauusd_forecaster.news.scheduler.state import (
         ROUTINE_POOL, backoff_job, claim_job, enqueue_job,
     )
 
@@ -2460,7 +2460,7 @@ def test_dashboard_keeps_readable_late_news_in_semantic_queue(tmp_path) -> None:
             "cluster_id": "late-readable",
         }
     )
-    from xauusd_forecaster.news_scheduler import sync_pending_jobs
+    from xauusd_forecaster.news.scheduler.state import sync_pending_jobs
     sync_pending_jobs(ledger.connection, now=now)
     ledger.connection.close()
 

@@ -5,13 +5,13 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from xauusd_forecaster.annotation import (
+from xauusd_forecaster.news.annotation.product import (
     ANNOTATION_FAILURE_RECOVERY_VERSION,
     PROMPT_VERSION,
 )
 from xauusd_forecaster.dashboard import news_resources as module
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.news_scheduler import authorize_repairable_annotation_failures
+from xauusd_forecaster.news.scheduler.state import authorize_repairable_annotation_failures
 from tests.dashboard_news_fixtures import (
     _append_basic_annotation,
     _basic_annotation_payload,

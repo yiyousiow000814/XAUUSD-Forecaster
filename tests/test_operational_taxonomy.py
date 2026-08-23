@@ -2,8 +2,8 @@ import ast
 import re
 from pathlib import Path
 
-from xauusd_forecaster.daily_brief import GENERATION_FAILURE_CODES
-from xauusd_forecaster.gemini_embeddings import GEMINI_EMBEDDING_FAILURE_CODES
+from xauusd_forecaster.news.brief.product import GENERATION_FAILURE_CODES
+from xauusd_forecaster.news.retrieval.gemini_embeddings import GEMINI_EMBEDDING_FAILURE_CODES
 from xauusd_forecaster.operational_taxonomy import (
     INTENTIONALLY_UNCORRELATED_FAILURE_CODES,
     normalize_operational_event,

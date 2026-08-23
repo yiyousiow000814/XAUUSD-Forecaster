@@ -110,8 +110,8 @@ than spending a second model request.
 
 - Collection lifecycle: `scripts/run_forward_collector.py`
 - Semantic worker: `scripts/run_news_annotator.py`
-- Scheduler batch runtime: `xauusd_forecaster/news_scheduler_runtime.py`
-- Daily Brief cycle runtime: `xauusd_forecaster/daily_brief_runtime.py`
+- Scheduler batch runtime: `xauusd_forecaster/news/scheduler/runtime.py`
+- Daily Brief cycle runtime: `xauusd_forecaster/news/brief/runtime.py`
 - One-shot embedding repair: `scripts/backfill_news_identity_embeddings.py`
 - One-shot pruning/audits: `scripts/prune_unused_news.py`,
   `scripts/audit_news_candidate_retrieval.py`, and
@@ -119,21 +119,21 @@ than spending a second model request.
 
 ## 13. Core modules
 
-- `xauusd_forecaster/news_collection_owner.py`: collection thread lifecycle.
-- `xauusd_forecaster/news.py`: source adapters and collection rules.
-- `xauusd_forecaster/news_scheduler.py`: durable jobs, quota/governor, retry.
-- `xauusd_forecaster/news_scheduler_runtime.py`: job dispatch, account/model
+- `xauusd_forecaster/news/collection/runtime.py`: collection thread lifecycle.
+- `xauusd_forecaster/news/collection/intake.py`: source adapters and collection rules.
+- `xauusd_forecaster/news/scheduler/state.py`: durable jobs, quota/governor, retry.
+- `xauusd_forecaster/news/scheduler/runtime.py`: job dispatch, account/model
   routing, durable transition orchestration, lock retry, and scheduler sleep.
-- `xauusd_forecaster/daily_brief_runtime.py`: bounded Daily Brief backlog cycle.
-- `xauusd_forecaster/annotation.py`: structured annotation, impact and title
+- `xauusd_forecaster/news/brief/runtime.py`: bounded Daily Brief backlog cycle.
+- `xauusd_forecaster/news/annotation/product.py`: structured annotation, impact and title
   execution.
-- `xauusd_forecaster/news_semantics.py`: annotation validation.
-- `xauusd_forecaster/news_impact.py`: impact and event-candidate context.
-- `xauusd_forecaster/news_retrieval.py`: hybrid retrieval and embedding progress.
-- `xauusd_forecaster/gemini_embeddings.py`: Gemini embedding transport/accounting.
-- `xauusd_forecaster/news_input_coverage.py`: frozen decision-time availability.
-- `xauusd_forecaster/news_pipeline_health.py`: operational semantic health.
-- `xauusd_forecaster/daily_brief.py`: date-scoped Brief lifecycle.
+- `xauusd_forecaster/news/semantics/contracts.py`: annotation validation.
+- `xauusd_forecaster/news/annotation/impact.py`: impact and event-candidate context.
+- `xauusd_forecaster/news/retrieval/search.py`: hybrid retrieval and embedding progress.
+- `xauusd_forecaster/news/retrieval/gemini_embeddings.py`: Gemini embedding transport/accounting.
+- `xauusd_forecaster/news/semantics/input_coverage.py`: frozen decision-time availability.
+- `xauusd_forecaster/news/scheduler/health.py`: operational semantic health.
+- `xauusd_forecaster/news/brief/product.py`: date-scoped Brief lifecycle.
 
 ## 14. Relevant tests
 

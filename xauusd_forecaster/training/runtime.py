@@ -12,7 +12,7 @@ from pathlib import Path
 
 from xauusd_forecaster.execution_learning import train_due_execution
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.news_contract_migration import append_missing_current_news_snapshots
+from xauusd_forecaster.news.semantics.migration import append_missing_current_news_snapshots
 from xauusd_forecaster.training.generation import train_due_v2
 
 

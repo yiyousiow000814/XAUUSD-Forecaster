@@ -194,7 +194,7 @@ collapse all optional resources into one restart burst.
 - `xauusd_forecaster/dashboard_summaries.py`: indexed summary queries.
 - `xauusd_forecaster/learning_curves.py`: learning resource.
 - `xauusd_forecaster/operational_health.py`: component health projection.
-- `xauusd_forecaster/news_scheduler.py`: retry-command transition owner.
+- `xauusd_forecaster/news/scheduler/state.py`: retry-command transition owner.
 
 ## 14. Relevant tests
 

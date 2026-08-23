@@ -14,12 +14,12 @@ from xauusd_forecaster.evidence.schema import ELIGIBILITY_VERSION, FEATURE_VERSI
 from xauusd_forecaster.decision.selection import select_post_cost_ev_action
 from xauusd_forecaster.execution_costs import ROUND_TRIP_COMMISSION_LOG_COST
 from xauusd_forecaster.evidence.ledger import canonical_hash
-from xauusd_forecaster.news_contracts import (
+from xauusd_forecaster.news.semantics.model_contracts import (
     CURRENT_NEWS_CONTRACT,
     NewsContract,
 )
-from xauusd_forecaster.news_evidence import EVIDENCE_POLICY_VERSION
-from xauusd_forecaster.news_input_coverage import NEWS_INPUT_STATES
+from xauusd_forecaster.news.semantics.evidence import EVIDENCE_POLICY_VERSION
+from xauusd_forecaster.news.semantics.input_coverage import NEWS_INPUT_STATES
 from xauusd_forecaster.training.ridge import RidgeArtifact
 from xauusd_forecaster.training.materialization import MARKET_FEATURES
 

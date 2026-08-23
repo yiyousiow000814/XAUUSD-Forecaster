@@ -15,11 +15,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from xauusd_forecaster.annotation import (  # noqa: E402
+from xauusd_forecaster.news.annotation.product import (  # noqa: E402
     DEFAULT_GEMMA_MODEL,
     generate_metered_response,
 )
-from xauusd_forecaster.named_reference_benchmark import (  # noqa: E402
+from xauusd_forecaster.news.retrieval.named_reference_benchmark import (  # noqa: E402
     REVIEW_CONTRACT_VERSION,
     benchmark_manifest_sha256,
     decode_named_reference_review,
@@ -27,11 +27,11 @@ from xauusd_forecaster.named_reference_benchmark import (  # noqa: E402
     named_reference_review_payload,
     score_named_reference_runs,
 )
-from xauusd_forecaster.news_scheduler import (  # noqa: E402
+from xauusd_forecaster.news.scheduler.state import (  # noqa: E402
     configured_api_credentials,
     install_scheduler_schema,
 )
-from xauusd_forecaster.scheduler_model_gateway import (  # noqa: E402
+from xauusd_forecaster.news.scheduler.model_gateway import (  # noqa: E402
     SchedulerModelAccountant,
 )
 

@@ -6,9 +6,9 @@ import math
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from .news_semantics import V1_NEWS_PROMPT_VERSIONS
-from .news_identity import news_representative_key
-from .macro_release import MACRO_RELEASE_FEATURES
+from xauusd_forecaster.news.semantics.contracts import V1_NEWS_PROMPT_VERSIONS
+from xauusd_forecaster.news.retrieval.identity import news_representative_key
+from xauusd_forecaster.news.collection.macro_release import MACRO_RELEASE_FEATURES
 
 if TYPE_CHECKING:
     from xauusd_forecaster.evidence.ledger import ForwardLedger

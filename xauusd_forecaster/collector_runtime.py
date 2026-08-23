@@ -9,7 +9,7 @@ from xauusd_forecaster.decision.engine import ForwardEngine, floor_five_minutes
 from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.market import JsonlMarketProvider, NullMarketProvider
 from xauusd_forecaster.market_session import skipped_grid_reason
-from xauusd_forecaster.news_contract_migration import append_missing_current_news_snapshots
+from xauusd_forecaster.news.semantics.migration import append_missing_current_news_snapshots
 from xauusd_forecaster.training.generation import require_current_contract_generation, train_due_v2
 
 UTC = timezone.utc

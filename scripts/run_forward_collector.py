@@ -30,7 +30,7 @@ from xauusd_forecaster.runtime_health import (  # noqa: E402
     RuntimeHeartbeatPulse,
     write_runtime_heartbeat,
 )
-from xauusd_forecaster.news_collection_owner import NewsCollectionOwner  # noqa: E402
+from xauusd_forecaster.news.collection.runtime import NewsCollectionOwner  # noqa: E402
 from xauusd_forecaster.training.runtime import (  # noqa: E402
     BackgroundTrainingOwner,
     install_training_owner_schema,

@@ -7,16 +7,17 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-from xauusd_forecaster import annotation, daily_brief
-from xauusd_forecaster.ai_provider_registry import quota_surface_for_model
+from xauusd_forecaster.news.annotation import product as annotation
+from xauusd_forecaster.news.brief import product as daily_brief
+from xauusd_forecaster.ai.provider_registry import quota_surface_for_model
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.model_gateway import (
+from xauusd_forecaster.ai.model_gateway import (
     GeminiModelGateway, ModelGatewayCapacityExhausted, ModelGatewayResponseInvalid,
 )
-from xauusd_forecaster.news_scheduler import (
+from xauusd_forecaster.news.scheduler.state import (
     ApiCredential, ROUTINE_POOL, enqueue_job, quota_day,
 )
-from xauusd_forecaster.scheduler_model_gateway import SchedulerModelAccountant
+from xauusd_forecaster.news.scheduler.model_gateway import SchedulerModelAccountant
 from tests.model_accounting_fakes import CallbackModelAccountant
 
 
@@ -1083,7 +1084,7 @@ def test_routine_only_account_generates_daily_brief(tmp_path, monkeypatch) -> No
 def test_daily_brief_reranks_account_headroom_for_each_date(
     tmp_path, monkeypatch,
 ) -> None:
-    from xauusd_forecaster import daily_brief_runtime as runner
+    from xauusd_forecaster.news.brief import runtime as runner
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     credentials = (

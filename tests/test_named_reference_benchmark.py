@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.named_reference_benchmark import (
+from xauusd_forecaster.news.retrieval.named_reference_benchmark import (
     EXPECTED_HARD_GUARD_CASES,
     EXPECTED_REVIEW_CASES,
     benchmark_manifest_sha256,

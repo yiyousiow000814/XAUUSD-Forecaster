@@ -1,7 +1,7 @@
 import pytest
 
-from xauusd_forecaster.news_semantics import CURRENT_NEWS_PROMPT_VERSION
-from xauusd_forecaster.storylines import (
+from xauusd_forecaster.news.semantics.contracts import CURRENT_NEWS_PROMPT_VERSION
+from xauusd_forecaster.news.annotation.storylines import (
     LEGACY_POLICY_STATUS,
     storyline_rows,
     temporal_event_graph,

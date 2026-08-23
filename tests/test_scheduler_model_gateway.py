@@ -8,13 +8,13 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES
-from xauusd_forecaster.annotation import DEFAULT_GEMMA_MODEL
+from xauusd_forecaster.ai.provider_registry import AI_QUOTA_SURFACES
+from xauusd_forecaster.news.annotation.product import DEFAULT_GEMMA_MODEL
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.model_gateway import (
+from xauusd_forecaster.ai.model_gateway import (
     GeminiModelGateway, ModelGatewayResponseInvalid, ModelRequestUsage,
 )
-from xauusd_forecaster.news_scheduler import (
+from xauusd_forecaster.news.scheduler.state import (
     ApiCredential,
     CONTRACT_BACKFILL_LANE,
     calibrated_input_tokens,
@@ -24,7 +24,7 @@ from xauusd_forecaster.news_scheduler import (
     reserve_provider_dispatch,
     rolling_account_usage,
 )
-from xauusd_forecaster.scheduler_model_gateway import SchedulerModelAccountant
+from xauusd_forecaster.news.scheduler.model_gateway import SchedulerModelAccountant
 
 
 NOW = datetime(2026, 8, 18, 1, 0, tzinfo=UTC)

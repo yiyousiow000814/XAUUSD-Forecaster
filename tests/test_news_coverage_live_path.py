@@ -3,17 +3,17 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-import xauusd_forecaster.news_pipeline_health as news_pipeline_health_module
+import xauusd_forecaster.news.scheduler.health as news_pipeline_health_module
 
-from xauusd_forecaster.critical_annotation_state import RETIRED_ERROR
+from xauusd_forecaster.news.semantics.critical_state import RETIRED_ERROR
 from xauusd_forecaster.decision.engine import ForwardEngine
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.news_pipeline_health import news_semantic_pipeline_health_at
-from xauusd_forecaster.news_scheduler import (
+from xauusd_forecaster.news.scheduler.health import news_semantic_pipeline_health_at
+from xauusd_forecaster.news.scheduler.state import (
     CONTRACT_BACKFILL_LANE,
     enqueue_job,
 )
-from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
+from xauusd_forecaster.news.collection.source_registry import NEWS_SOURCE_REGISTRY
 
 
 class _EmptyProvider:

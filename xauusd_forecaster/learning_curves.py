@@ -9,7 +9,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from .execution_costs import COMMISSION_STATUS, SLIPPAGE_STATUS, net_shadow_log_return
-from .news_contracts import (
+from xauusd_forecaster.news.semantics.model_contracts import (
     CURRENT_NEWS_CONTRACT,
     generation_matches_contract,
 )

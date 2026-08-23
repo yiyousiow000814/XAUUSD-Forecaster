@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
-from xauusd_forecaster.news_contracts import CURRENT_NEWS_CONTRACT
+from xauusd_forecaster.news.semantics.model_contracts import CURRENT_NEWS_CONTRACT
 
 
 UTC = timezone.utc

@@ -7,7 +7,7 @@ import re
 import unicodedata
 from typing import Any
 
-from .local_embeddings import (
+from xauusd_forecaster.news.retrieval.local_embeddings import (
     LOCAL_EMBEDDING_DIMENSIONS,
     LOCAL_EMBEDDING_MODEL,
     OllamaEmbeddingClient,

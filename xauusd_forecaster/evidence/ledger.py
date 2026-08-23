@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from xauusd_forecaster.news_semantics import (
+from xauusd_forecaster.news.semantics.contracts import (
     canonical_annotation_source_text,
     CURRENT_NEWS_PROMPT_VERSION,
     NEWS_CATEGORIES,
@@ -548,7 +548,7 @@ class ForwardLedger:
         self.connection.execute("PRAGMA busy_timeout=60000")
         self.connection.executescript(SCHEMA)
         from xauusd_forecaster.assistant_capacity import install_assistant_capacity_schema
-        from xauusd_forecaster.critical_annotation_state import (
+        from xauusd_forecaster.news.semantics.critical_state import (
             install_critical_annotation_state_schema,
         )
         from xauusd_forecaster.dashboard_summaries import (
@@ -557,7 +557,7 @@ class ForwardLedger:
         )
         from xauusd_forecaster.dashboard_read_models import install_dashboard_read_model_schema
         from xauusd_forecaster.evidence.schema import install_v2_schema
-        from xauusd_forecaster.news_scheduler import install_scheduler_schema
+        from xauusd_forecaster.news.scheduler.state import install_scheduler_schema
 
         install_v2_schema(self.connection)
         install_scheduler_schema(self.connection)
@@ -755,7 +755,7 @@ class ForwardLedger:
                     content_hash, record["cluster_id"], latency,
                 ),
             )
-            from xauusd_forecaster.critical_annotation_state import refresh_news_cluster_state
+            from xauusd_forecaster.news.semantics.critical_state import refresh_news_cluster_state
             refresh_news_cluster_state(self.connection, previous_cluster_id)
             refresh_news_cluster_state(self.connection, str(record["cluster_id"]))
         return revision, True
@@ -945,7 +945,7 @@ class ForwardLedger:
                     json.dumps(vector, sort_keys=True, separators=(",", ":")),
                 ),
             )
-            from xauusd_forecaster.critical_annotation_state import (
+            from xauusd_forecaster.news.semantics.critical_state import (
                 record_annotation_completion,
                 refresh_news_revision_state,
             )
@@ -960,7 +960,7 @@ class ForwardLedger:
             refresh_news_revision_state(self.connection, *source_key)
 
     def append_news_impact_assessment(self, record: dict[str, Any]) -> None:
-        from xauusd_forecaster.news_impact import (
+        from xauusd_forecaster.news.annotation.impact import (
             EVENT_STATES, IDENTITY_RELATIONS, IMPACT_CLASSES, UPDATE_TYPES,
         )
 
@@ -994,7 +994,7 @@ class ForwardLedger:
         if not str(record["reason_zh"]).strip():
             raise ValueError("impact reason is empty")
         has_resolution = record.get("resolution_id") is not None
-        from xauusd_forecaster.news_impact import IMPACT_PROMPT_VERSION
+        from xauusd_forecaster.news.annotation.impact import IMPACT_PROMPT_VERSION
         if record["prompt_version"] == IMPACT_PROMPT_VERSION and not has_resolution:
             raise ValueError("current impact assessment requires identity resolution")
         if has_resolution:
@@ -1267,7 +1267,7 @@ class ForwardLedger:
                     int(bool(record.get("is_terminal"))),
                 ),
             )
-            from xauusd_forecaster.critical_annotation_state import refresh_news_revision_state
+            from xauusd_forecaster.news.semantics.critical_state import refresh_news_revision_state
             refresh_news_revision_state(self.connection, *source_key)
 
     def append_discovery_failure(self, record: dict[str, Any]) -> None:

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 
-from .annotation import DEFAULT_GEMMA_MODEL, generate_metered_json
+from xauusd_forecaster.news.annotation.product import DEFAULT_GEMMA_MODEL, generate_metered_json
 from .assistant_routing import apply_provider_thinking_level
-from .model_gateway import ModelRequestAccountant
+from xauusd_forecaster.ai.model_gateway import ModelRequestAccountant
 
 
 ASSISTANT_TITLE_PROMPT_VERSION = "assistant-title-v1"

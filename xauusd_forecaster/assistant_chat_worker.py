@@ -42,7 +42,7 @@ from .assistant_tools import (
     build_news_search_tool,
 )
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from .news_scheduler import ApiCredential
+from xauusd_forecaster.news.scheduler.state import ApiCredential
 
 
 ASSISTANT_CHAT_MAX_CLAIMS_PER_SYNC = 3

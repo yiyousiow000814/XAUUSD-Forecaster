@@ -7,11 +7,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-import xauusd_forecaster.news_scheduler as scheduler
-import xauusd_forecaster.semantic_transition as transition_policy
+import xauusd_forecaster.news.scheduler.state as scheduler
+import xauusd_forecaster.news.semantics.transitions as transition_policy
 from tests.test_news_semantic_contract_v15 import _target_annotation
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.news_semantics import (
+from xauusd_forecaster.news.semantics.contracts import (
     CURRENT_NEWS_PROMPT_VERSION,
     PREVIOUS_NEWS_PROMPT_VERSION,
 )

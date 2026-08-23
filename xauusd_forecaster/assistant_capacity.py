@@ -23,12 +23,12 @@ from .assistant_routing import (
     provider_thinking_level,
     routing_provenance,
 )
-from .model_gateway import (
+from xauusd_forecaster.ai.model_gateway import (
     ModelGatewayCapacityExhausted,
     ModelRequestAccountant,
     ModelRequestUsage,
 )
-from .news_scheduler import (
+from xauusd_forecaster.news.scheduler.state import (
     PREEMPTIBLE_POOL,
     ROUTINE_POOL,
     ApiCredential,
@@ -280,7 +280,7 @@ def _default_policy(
     credential_pool_id: str,
     profile: ModelProfile,
 ) -> AssistantCapacityPolicy | None:
-    from .ai_provider_registry import quota_surface_for_model
+    from xauusd_forecaster.ai.provider_registry import quota_surface_for_model
 
     try:
         surface = quota_surface_for_model(profile.model_id)

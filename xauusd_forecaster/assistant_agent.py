@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
-from .annotation import generate_metered_response
+from xauusd_forecaster.news.annotation.product import generate_metered_response
 from .assistant_capacity import (
     AssistantCapacityPolicy,
     AssistantServicePriority,
@@ -35,7 +35,7 @@ from .assistant_routing import (
     conservative_assistant_token_estimate,
     plan_assistant_route,
 )
-from .model_gateway import OllamaAssistantGateway
+from xauusd_forecaster.ai.model_gateway import OllamaAssistantGateway
 from .assistant_tools import (
     ASSISTANT_TOOL_REGISTRY_VERSION,
     NEWS_SEARCH_TOOL_NAME,
@@ -46,7 +46,7 @@ from .assistant_tools import (
     AssistantToolResult,
     AssistantToolStatus,
 )
-from .news_scheduler import ApiCredential
+from xauusd_forecaster.news.scheduler.state import ApiCredential
 
 
 ASSISTANT_AGENT_POLICY_VERSION = "assistant-agent-v2"
