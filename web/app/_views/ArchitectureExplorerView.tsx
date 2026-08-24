@@ -200,16 +200,20 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   const activeImpact = failureMode ? architectureFailureImpact(manifest, selectedId) : null;
   const searchMatches = useMemo(() => searchArchitectureNodes(manifest, query, state), [manifest, query, state]);
   const focusId = hoveredId ?? selectedId;
-  const relations = focusId ? architectureRelations(manifest, focusId, viewId) : null;
-  const scenarioNodes = new Set(scenario ? scenario.node_ids.slice(0, scenarioStep + 1) : []);
-  const scenarioEdges = new Set(scenario ? scenario.edge_ids.slice(0, scenarioStep) : []);
-  const stateNodes = state === "ALL" ? [] : graph.nodes.filter(item => item.data.node.runtime_state === state).map(item => item.id);
-  const highlightedNodes = new Set(focusId ? [focusId, ...(hoveredId ? relations?.directUpstream ?? [] : relations?.upstream ?? []), ...(hoveredId ? relations?.directDownstream ?? [] : relations?.downstream ?? [])] : scenario ? scenarioNodes : stateNodes);
-  const directEdges = focusId ? graph.edges.filter(edge => edge.from === focusId || edge.to === focusId).map(edge => edge.id) : [];
-  const stateEdges = state === "ALL" ? [] : graph.edges.filter(edge => stateNodes.includes(edge.from) && stateNodes.includes(edge.to)).map(edge => edge.id);
-  const highlightedEdges = new Set(focusId ? hoveredId ? directEdges : relations?.connectedEdges ?? [] : scenario ? scenarioEdges : stateEdges);
-  const affected = new Set(activeImpact?.affected.map(item => item.node_id) ?? []);
-  const continues = new Set(activeImpact?.continues.map(item => item.node_id) ?? []);
+  const relations = useMemo(() => focusId ? architectureRelations(manifest, focusId, viewId) : null, [focusId, manifest, viewId]);
+  const scenarioNodes = useMemo(() => new Set(scenario ? scenario.node_ids.slice(0, scenarioStep + 1) : []), [scenario, scenarioStep]);
+  const scenarioEdges = useMemo(() => new Set(scenario ? scenario.edge_ids.slice(0, scenarioStep) : []), [scenario, scenarioStep]);
+  const stateNodes = useMemo(() => state === "ALL" ? [] : graph.nodes.filter(item => item.data.node.runtime_state === state).map(item => item.id), [graph.nodes, state]);
+  const highlightedNodes = useMemo(() => new Set(focusId
+    ? [focusId, ...(hoveredId ? relations?.directUpstream ?? [] : relations?.upstream ?? []), ...(hoveredId ? relations?.directDownstream ?? [] : relations?.downstream ?? [])]
+    : scenario ? scenarioNodes : stateNodes), [focusId, hoveredId, relations, scenario, scenarioNodes, stateNodes]);
+  const highlightedEdges = useMemo(() => {
+    const directEdges = focusId ? graph.edges.filter(edge => edge.from === focusId || edge.to === focusId).map(edge => edge.id) : [];
+    const stateEdges = state === "ALL" ? [] : graph.edges.filter(edge => stateNodes.includes(edge.from) && stateNodes.includes(edge.to)).map(edge => edge.id);
+    return new Set(focusId ? hoveredId ? directEdges : relations?.connectedEdges ?? [] : scenario ? scenarioEdges : stateEdges);
+  }, [focusId, graph.edges, hoveredId, relations, scenario, scenarioEdges, state, stateNodes]);
+  const affected = useMemo(() => new Set(activeImpact?.affected.map(item => item.node_id) ?? []), [activeImpact]);
+  const continues = useMemo(() => new Set(activeImpact?.continues.map(item => item.node_id) ?? []), [activeImpact]);
   const hasFocus = Boolean(focusId || scenario || state !== "ALL");
   const sha = architectureCommitSha();
 
@@ -266,17 +270,17 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
     return () => observer.disconnect();
   }, [camera]);
 
-  const flowNodes: ArchitectureFlowNode[] = graph.nodes.map(item => ({
+  const flowNodes: ArchitectureFlowNode[] = useMemo(() => graph.nodes.map(item => ({
     ...item, type: "architecture", draggable: false, selectable: true,
     data: { ...item.data, selected: item.id === selectedId, highlighted: highlightedNodes.has(item.id), dimmed: hasFocus && !highlightedNodes.has(item.id),
       direction: graph.direction, failureStatus: affected.has(item.id) ? "AFFECTED" : continues.has(item.id) ? "CONTINUES" : null,
       onSelect: selectNode, onHover: setHoveredId, onDrill: drill, onNavigate: navigateNode },
-  }));
-  const laneNodes: ArchitectureLaneNode[] = graph.laneBoxes.map(item => ({
+  })), [affected, continues, drill, graph.direction, graph.nodes, hasFocus, highlightedNodes, navigateNode, selectNode, selectedId]);
+  const laneNodes: ArchitectureLaneNode[] = useMemo(() => graph.laneBoxes.map(item => ({
     ...item, type: "lane", draggable: false, selectable: false, focusable: false, connectable: false,
     zIndex: -1, data: item.data,
-  }));
-  const flowEdges: ArchitectureFlowEdge[] = graph.edges.map(item => ({
+  })), [graph.laneBoxes]);
+  const flowEdges: ArchitectureFlowEdge[] = useMemo(() => graph.edges.map(item => ({
     id: item.id, source: item.source, target: item.target, type: "architecture", label: item.label,
     markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18, color: item.criticality === "CRITICAL" ? "#137d74" : "#607278" },
     animated: scenarioEdges.has(item.id), data: {
@@ -291,7 +295,8 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
         || scenarioEdges.has(item.id)
         || hoveredEdgeId === item.id,
     },
-  }));
+  })), [graph.edges, hasFocus, highlightedEdges, hoveredEdgeId, scenarioEdges, viewId]);
+  const flowElements = useMemo(() => [...laneNodes, ...flowNodes], [flowNodes, laneNodes]);
 
   const runScenario = (id: string) => {
     const next = manifest.scenarios.find(item => item.id === id); setScenarioId(id); setScenarioStep(0); setSelectedId(null); setFailureMode(false);
@@ -351,7 +356,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
     <section className={`${styles.stage} ${selected ? styles.withInspector : ""}`} style={{ minHeight: canvasHeight }}>
       <div className={styles.canvas} data-graph-direction={graph.direction} data-testid="architecture-graph" ref={canvasRef} style={{ height: canvasHeight }}
         onTransitionEnd={event => { if (event.propertyName === "width") { canvasTransitionCompleteRef.current = true; camera.layoutChanged(); } }}>
-        <ReactFlow<ArchitectureCanvasNode, ArchitectureFlowEdge> nodes={[...laneNodes, ...flowNodes]} edges={flowEdges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
+        <ReactFlow<ArchitectureCanvasNode, ArchitectureFlowEdge> nodes={flowElements} edges={flowEdges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
           elementsSelectable minZoom={0.25} maxZoom={1.6} nodesConnectable={false} nodesDraggable={false}
           onEdgeMouseEnter={(_, edge) => setHoveredEdgeId(edge.id)} onEdgeMouseLeave={() => setHoveredEdgeId(null)}
           panOnDrag zoomOnPinch zoomOnScroll proOptions={{ hideAttribution: true }}>

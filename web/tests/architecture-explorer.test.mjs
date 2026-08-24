@@ -213,7 +213,8 @@ test("26. Fit zoom is bounded by view size and selection does not refit", () => 
   assert.match(viewSource, /const zoom = current\.flow\.getZoom\(\)/);
   assert.match(viewSource, /current\.flow\.setViewport\(\{/);
   assert.match(viewSource, /y: 64 - item\.position\.y \* zoom/);
-  assert.doesNotMatch(viewSource, /selectedId\]\);\s*$/m);
+  assert.match(viewSource, /nodes=\{flowElements\}/);
+  assert.doesNotMatch(viewSource, /nodes=\{\[\.\.\.laneNodes/);
 });
 
 test("27. Edge labels follow critical, release, interaction, guide, and sparse-view rules", () => {
