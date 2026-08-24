@@ -1,0 +1,21 @@
+{
+  "schema_version": "cloudflare-production-build-v1",
+  "source": {
+    "provider": "github",
+    "repository": "yiyousiow000814/XAUUSD-Forecaster",
+    "production_branch": "main",
+    "root_directory": "/web",
+    "path_includes": ["*"],
+    "path_excludes": []
+  },
+  "commands": {
+    "build": "npm ci && npm test",
+    "deploy": "npx wrangler versions upload --message \"release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH artifact_kind:PRODUCTION_CANDIDATE\""
+  },
+  "output": {
+    "artifact_kind": "PRODUCTION_CANDIDATE",
+    "immutable_version_only": true,
+    "changes_stable_traffic": false
+  },
+  "non_production_builds_enabled": false
+}

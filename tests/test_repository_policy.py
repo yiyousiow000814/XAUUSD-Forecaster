@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import pytest
 
-from scripts.check_repository_policy import check_repository
+from scripts.check_repository_policy import (
+    EXPECTED_CLOUDFLARE_BUILD_CONTRACT,
+    check_repository,
+)
+
+
+VALID_BUILD_CONTRACT = json.dumps(EXPECTED_CLOUDFLARE_BUILD_CONTRACT)
+
+
+@pytest.fixture(autouse=True)
+def cloudflare_build_contract(tmp_path: Path) -> None:
+    write(tmp_path, "web/cloudflare-build-contract.json", VALID_BUILD_CONTRACT)
 
 
 def write(root: Path, relative: str, content: str) -> None:
@@ -139,3 +151,28 @@ def test_current_repository_satisfies_hosting_policy() -> None:
     root = Path(__file__).resolve().parents[1]
 
     assert check_repository(root) == []
+
+
+def test_rejects_missing_or_mutable_production_build_contract(tmp_path: Path) -> None:
+    contract = tmp_path / "web" / "cloudflare-build-contract.json"
+    contract.unlink()
+    assert "exact-main immutable Cloudflare production build contract is required" in boundaries(tmp_path)
+
+    write(
+        tmp_path,
+        "web/cloudflare-build-contract.json",
+        VALID_BUILD_CONTRACT.replace("versions upload", "deploy"),
+    )
+    assert (
+        "Cloudflare production build contract drifted from exact-main immutable upload"
+        in boundaries(tmp_path)
+    )
+
+
+def test_rejects_direct_production_deploy_package_script(tmp_path: Path) -> None:
+    write(
+        tmp_path,
+        "web/package.json",
+        '{"scripts":{"cf:deploy":"npm test && wrangler deploy"}}',
+    )
+    assert "direct production wrangler deploy script is forbidden" in boundaries(tmp_path)

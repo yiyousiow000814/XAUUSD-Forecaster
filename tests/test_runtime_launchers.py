@@ -303,6 +303,10 @@ def _write_runtime_observation(tmp_path, **overrides) -> None:
         "observation_last_decision_time": "2026-08-13T03:00:00+00:00",
         "observation_success_cycles": 0,
         "observation_consecutive_failures": 0,
+        "observation_validation_key": None,
+        "observation_deferred_projection_obligations": [],
+        "observation_deferred_projection_state": "NOT_REQUIRED",
+        "observation_projection_boundary_at": started_at,
     }
     state.update(overrides)
     path = tmp_path / "runtime" / ".local" / "forward" / "runtime-update-state.json"
@@ -341,7 +345,10 @@ def _authorized_candidate(previous: str, candidate: str) -> str:
         "$candidateRelease.compatibility_state = 'PASSED'; "
         f"$candidateRelease.validation = [pscustomobject]@{{ key = '{key}' }}; "
         "$releaseState = New-ReleaseControlState -Stable $stable "
-        "-Candidate $candidateRelease; Write-ReleaseControlState $releaseState; "
+        "-Candidate $candidateRelease; "
+        "$releaseState.candidate_materialization=[pscustomobject]@{"
+        f"revision='{candidate}';state='MATERIALIZED';worker_version_id='{candidate_worker}'}}; "
+        "Write-ReleaseControlState $releaseState; "
     )
 
 
@@ -902,9 +909,13 @@ def test_legacy_bootstrap_parity_accepts_missing_stable_headers_and_split_routes
         tmp_path,
         _legacy_parity_contract()
         + "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
-        + 'Write-Output "$($result.passed),$($result.identity_mode),$($script:paths.Count)"',
+        + 'Write-Output "$($result.passed),$($result.state),$($result.identity_mode),'
+        + '$($result.deferred_obligations.Count),$($script:paths.Count)"',
     )
-    assert result == "True,LEGACY_BOOTSTRAP_STABLE_COMPAT,17"
+    assert result == (
+        "True,PASSED_WITH_DEFERRED_OBLIGATIONS,"
+        "LEGACY_BOOTSTRAP_STABLE_COMPAT,3,17"
+    )
 
 
 def test_legacy_bootstrap_parity_requires_current_stable100_evidence(tmp_path) -> None:
@@ -928,15 +939,19 @@ def test_legacy_bootstrap_parity_keeps_candidate_identity_exact(tmp_path) -> Non
     assert result == "False,EXACT_VERSION_IDENTITY_MISMATCH"
 
 
-def test_legacy_bootstrap_split_audit_must_be_current(tmp_path) -> None:
+def test_legacy_bootstrap_split_audit_defers_candidate_only_producer(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
         _legacy_parity_contract(split_generated_at="2026-08-21T09:50:00+00:00")
         + "$result=Test-CandidateDataParity -Stable $stable -Candidate $candidate;"
         + '$route=$result.routes|Where-Object {$_.route -eq "/api/audit-briefs"};'
-        + 'Write-Output "$($result.passed),$($route.reason)"',
+        + 'Write-Output "$($result.passed),$($result.state),$($route.state),'
+        '$($result.deferred_obligations.Count)"',
     )
-    assert result == "False,CANDIDATE_AUDIT_TRANSITION_STALE"
+    assert result == (
+        "True,PASSED_WITH_DEFERRED_OBLIGATIONS,"
+        "DEFERRED_TO_POST_CUTOVER_OBSERVATION,3"
+    )
 
 
 def test_modern_stable_missing_identity_headers_never_uses_legacy_mode(tmp_path) -> None:
@@ -1952,6 +1967,7 @@ def test_candidate_arriving_during_promotion_is_queued(tmp_path) -> None:
         "function Get-CloudflareVersions { return @([pscustomobject]@{ "
         "id=$new.worker_version_id; metadata=[pscustomobject]@{ created_on='2026-08-20T12:00:00Z' }; "
         f"annotations=[pscustomobject]@{{ 'workers/message'='release:{queued} branch:main artifact_kind:PRODUCTION_CANDIDATE' }} }}) }}; "
+        f"function Get-OriginMainRevision {{ '{queued}' }}; "
         "$null = Find-NewCandidateRelease; $final = Get-ReleaseControlState; "
         'Write-Output "$($final.candidate.git_sha),$($final.queued_candidate.git_sha)"',
     )
@@ -1976,6 +1992,7 @@ def test_preview_version_is_consumed_by_watermark_but_never_becomes_candidate(
         "function Get-CloudflareVersions { @([pscustomobject]@{ id='preview-version'; "
         "metadata=[pscustomobject]@{created_on='2026-08-20T12:00:00Z'}; "
         f"annotations=[pscustomobject]@{{'workers/message'='release:{preview} branch:feature artifact_kind:PREVIEW'}} }}) }}; "
+        f"function Get-OriginMainRevision {{ '{preview}' }}; "
         "$found=Find-NewCandidateRelease; $final=Get-ReleaseControlState; "
         'Write-Output "$($null -eq $found),$($null -eq $final.candidate),$($final.candidate_discovery.watermark_version_id)"',
     )
@@ -1997,6 +2014,7 @@ def test_failed_candidate_is_not_rediscovered_after_restart(tmp_path) -> None:
         "function Get-CloudflareVersions { @([pscustomobject]@{id='candidate-version'; "
         "metadata=[pscustomobject]@{created_on='2026-08-20T12:00:00Z'}; "
         f"annotations=[pscustomobject]@{{'workers/message'='release:{candidate} branch:main artifact_kind:PRODUCTION_CANDIDATE'}} }}) }}; "
+        f"function Get-OriginMainRevision {{ '{candidate}' }}; "
         "$first=Find-NewCandidateRelease; $state=Get-ReleaseControlState; "
         "$state.candidate.validation_state='FAILED'; Write-ReleaseControlState $state; "
         "$second=Find-NewCandidateRelease; $final=Get-ReleaseControlState; "
@@ -2280,6 +2298,7 @@ def test_failed_directed_validation_persists_bounded_route_receipt(tmp_path) -> 
         "function Get-CandidateCompatibilityRequirement { return [pscustomobject]@{state='COMPATIBLE';files=@()} };"
         "function Get-CandidateRouteValidationPlan { return [pscustomobject]@{worker_cpu_required=$true;requires_validation=$true;static_assets=@();worker_reads=@();worker_writes=@()} };"
         "function Set-CloudflareCandidatePointer {};"
+        "function Wait-CandidatePlacementPropagation { return [pscustomobject]@{passed=$true;state='READY'} };"
         "function Invoke-CandidateWorkerValidation { return [pscustomobject]@{passed=$false;validation_run='run-2';"
         "expected_worker_invocations=10;observed_worker_invocations=$null;static_worker_invocations=0;"
         "static_observability_state='PASSED';cpu_evidence='NOT_RUN';routes=@([pscustomobject]@{"
@@ -2341,6 +2360,7 @@ def test_version_at_or_before_watermark_cannot_replace_candidate(tmp_path) -> No
         "function Get-CloudflareVersions { @([pscustomobject]@{id='older'; "
         "metadata=[pscustomobject]@{created_on='2026-08-20T11:00:00Z'}; "
         f"annotations=[pscustomobject]@{{'workers/message'='release:{historical} branch:main artifact_kind:PRODUCTION_CANDIDATE'}} }}) }}; "
+        f"function Get-OriginMainRevision {{ '{current}' }}; "
         "$found=Find-NewCandidateRelease; $final=Get-ReleaseControlState; "
         'Write-Output "$($null -eq $found),$($final.candidate.git_sha)"',
     )
@@ -2470,6 +2490,7 @@ def test_failed_platform_gate_persists_complete_nonsecret_evidence(tmp_path) -> 
         "function Get-CandidateRouteValidationPlan{return [pscustomobject]@{worker_cpu_required=$true;"
         "requires_validation=$true;static_assets=@();worker_reads=@();worker_writes=@()}};"
         "function Set-CloudflareCandidatePointer{};"
+        "function Wait-CandidatePlacementPropagation{return [pscustomobject]@{passed=$true;state='READY'}};"
         "function Invoke-CandidateWorkerValidation{return [pscustomobject]@{passed=$true;"
         "validation_run='run-platform';expected_worker_invocations=8;observed_worker_invocations=8;"
         "static_observability_state='PASSED';observability_credential_source='LOCAL_SECRET_FILE';"
@@ -2614,12 +2635,80 @@ def test_candidate_discovery_accepts_object_array_timestamp_without_crashing(tmp
         "$state.candidate_discovery.initialized_at='2026-08-20T10:00:00Z';"
         "$state.candidate_discovery.watermark_created_at='2026-08-20T10:00:00Z';"
         "$state.candidate_discovery.watermark_version_id='old';Write-ReleaseControlState $state;"
+        f"function Get-OriginMainRevision {{ '{candidate}' }};"
         "function Get-CloudflareVersions { @([pscustomobject]@{id='11111111-1111-4111-8111-111111111111';"
         "metadata=[pscustomobject]@{created_on=@('bad','2026-08-20T12:00:00Z');has_preview=$true};"
         f"annotations=[pscustomobject]@{{'workers/message'='release:{candidate} branch:main artifact_kind:PRODUCTION_CANDIDATE'}}}}) }};"
         "$found=Find-NewCandidateRelease;Write-Output $found.git_sha",
     )
     assert result == candidate
+
+
+def test_candidate_discovery_ignores_late_older_main_build(tmp_path) -> None:
+    current = "d" * 40
+    older = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "c" * 40)
+        + "$state=Get-ReleaseControlState;$state.candidate=$null;"
+        "$state.candidate_discovery.initialized_at='2026-08-20T10:00:00Z';"
+        "$state.candidate_discovery.watermark_created_at='2026-08-20T10:00:00Z';"
+        "$state.candidate_discovery.watermark_version_id='old';Write-ReleaseControlState $state;"
+        f"function Get-OriginMainRevision {{ '{current}' }};"
+        "function Get-CloudflareVersions { @([pscustomobject]@{id='late-old';"
+        "metadata=[pscustomobject]@{created_on='2026-08-20T12:00:00Z';has_preview=$true};"
+        f"annotations=[pscustomobject]@{{'workers/message'='release:{older} branch:main "
+        "artifact_kind:PRODUCTION_CANDIDATE'}}) };"
+        "$found=Find-NewCandidateRelease;$saved=Get-ReleaseControlState;"
+        'Write-Output "$($null -eq $found),$($saved.candidate_materialization.state),'
+        '$($saved.candidate_materialization.revision),$($saved.candidate_discovery.watermark_version_id)"',
+    )
+    assert result == f"True,PENDING,{current},late-old"
+
+
+def test_pending_exact_main_materializes_on_later_discovery_poll(tmp_path) -> None:
+    current = "d" * 40
+    older = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "c" * 40)
+        + "$state=Get-ReleaseControlState;$state.candidate=$null;"
+        "$state.candidate_discovery.initialized_at='2026-08-20T10:00:00Z';"
+        "$state.candidate_discovery.watermark_created_at='2026-08-20T10:00:00Z';"
+        "$state.candidate_discovery.watermark_version_id='old';Write-ReleaseControlState $state;"
+        f"function Get-OriginMainRevision {{ '{current}' }};"
+        "$script:buildReady=$false;function Get-CloudflareVersions {"
+        "$versions=@([pscustomobject]@{id='late-old';metadata=[pscustomobject]@{"
+        "created_on='2026-08-20T12:00:00Z';has_preview=$true};"
+        f"annotations=[pscustomobject]@{{'workers/message'='release:{older} branch:main "
+        "artifact_kind:PRODUCTION_CANDIDATE'}});"
+        "if($script:buildReady){$versions+= [pscustomobject]@{id='exact-current';"
+        "metadata=[pscustomobject]@{created_on='2026-08-20T12:05:00Z';has_preview=$true};"
+        f"annotations=[pscustomobject]@{{'workers/message'='release:{current} branch:main "
+        "artifact_kind:PRODUCTION_CANDIDATE'}}};return $versions};"
+        "$first=Find-NewCandidateRelease;$pending=Get-ReleaseControlState;"
+        "$script:buildReady=$true;$second=Find-NewCandidateRelease;"
+        "$saved=Get-ReleaseControlState;"
+        'Write-Output "$($null -eq $first),$($pending.candidate_materialization.state),'
+        '$($second.git_sha),$($saved.candidate_materialization.state),'
+        '$($saved.candidate_materialization.worker_version_id)"',
+    )
+    assert result == f"True,PENDING,{current},MATERIALIZED,exact-current"
+
+
+def test_candidate_placement_propagation_timeout_is_retryable(tmp_path) -> None:
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, candidate)
+        + "$candidatePlacementPropagationTimeout=[TimeSpan]::Zero;"
+        "function Invoke-ExactVersionJson { throw '404 before placement propagation' };"
+        "$result=Wait-CandidatePlacementPropagation -Candidate $candidateRelease;"
+        'Write-Output "$($result.passed),$($result.state),$($result.reason)"',
+    )
+    assert result == (
+        "False,RETRYABLE,CANDIDATE_PLACEMENT_PROPAGATION_PENDING"
+    )
 
 
 def test_abandoned_release_lock_is_recovered_without_touching_state(tmp_path) -> None:
@@ -2683,6 +2772,36 @@ def test_passed_candidate_promotes_only_after_observation_commit(tmp_path) -> No
         f"True,{previous},OBSERVING,{candidate},"
         "windows-with-sync-paused;worker;sync-resumed"
     )
+
+
+def test_deferred_projection_obligation_blocks_stable_commit(tmp_path) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, candidate)
+        + "$state=Get-ReleaseControlState;"
+        "$obligation=[pscustomobject]@{route='/api/audit-stories';"
+        "state='DEFERRED_TO_POST_CUTOVER_OBSERVATION';"
+        "validation_key=$state.candidate.validation_key;"
+        "required_producer_revision=$state.candidate.windows_revision};"
+        "$state.transaction=[pscustomobject]@{type='PROMOTE';phase='OBSERVING';"
+        "target=$state.candidate;previous=$state.stable;"
+        "deferred_projection_obligations=@($obligation)};Write-ReleaseControlState $state;"
+        "Write-RuntimeUpdateState @{update_status='ACTIVE';"
+        "observation_validation_key=$state.candidate.validation_key;"
+        "observation_deferred_projection_state='PENDING'};"
+        "function Enter-ReleaseTransactionLock{return $true};"
+        "function Exit-ReleaseTransactionLock{};function Test-CloudflareRollbackTarget{return $true};"
+        "Complete-ReleasePromotion;$pending=Get-ReleaseControlState;"
+        "$runtime=Get-RuntimeUpdateState;"
+        "$runtime.observation_deferred_projection_state='PASSED';"
+        "$runtime|ConvertTo-Json -Depth 12|Set-Content -LiteralPath $runtimeUpdateStatePath;"
+        "Complete-ReleasePromotion;$passed=Get-ReleaseControlState;"
+        'Write-Output "$($pending.transaction.phase),$($pending.stable.git_sha),'
+        '$($null -eq $passed.transaction),$($passed.stable.git_sha)"',
+    )
+    assert result == f"OBSERVING,{previous},True,{candidate}"
 
 
 def test_crashed_cutover_is_reconciled_to_recovery_required(tmp_path) -> None:
@@ -3122,6 +3241,7 @@ def test_same_key_recovers_after_github_transport_without_repeating_preflight(
         "function Get-CandidateRouteValidationPlan{return [pscustomobject]@{worker_cpu_required=$false;"
         "requires_validation=$false;static_assets=@();worker_reads=@();worker_writes=@()}};"
         "function Set-CloudflareCandidatePointer{};"
+        "function Wait-CandidatePlacementPropagation{return [pscustomobject]@{passed=$true;state='READY'}};"
         "function Test-CandidateDataParity{return [pscustomobject]@{passed=$true;state='PASSED'}};"
         "function Get-CandidateAuthInspection{return [pscustomobject]@{state='PASSED'}};"
         "Invoke-AutomaticCandidateValidation -Candidate $candidate|Out-Null;"
@@ -3171,6 +3291,7 @@ def test_checks_blocked_candidate_recovers_on_same_sha_without_duplicate_identit
         "function Get-CandidateRouteValidationPlan{return [pscustomobject]@{worker_cpu_required=$false;"
         "requires_validation=$false;static_assets=@();worker_reads=@();worker_writes=@()}};"
         "function Set-CloudflareCandidatePointer{};"
+        "function Wait-CandidatePlacementPropagation{return [pscustomobject]@{passed=$true;state='READY'}};"
         "function Test-CandidateDataParity{return [pscustomobject]@{passed=$true;state='PASSED'}};"
         "function Get-CandidateAuthInspection{return [pscustomobject]@{state='PASSED'}};"
         "Invoke-AutomaticCandidateValidation -Candidate $candidate|Out-Null;"
@@ -3226,22 +3347,22 @@ def test_repository_pending_presentation_is_distinct_and_non_promotable(tmp_path
     )
 
 
-def test_production_candidate_requires_main_reachability(tmp_path) -> None:
+def test_production_candidate_requires_exact_current_main(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
         "$sha=('b'*40);$candidate=New-ReleaseIdentity -GitSha $sha "
         "-WorkerVersionId 'worker' -WindowsRevision $sha -Branch 'feature' "
         "-ArtifactKind 'PRODUCTION_CANDIDATE';"
-        "$script:ancestor=$true;function git {"
-        "if($args -contains 'merge-base' -and -not $script:ancestor){$global:LASTEXITCODE=1}"
-        "else{$global:LASTEXITCODE=0}};"
+        "$script:exact=$true;function git {"
+        "$global:LASTEXITCODE=0;if($args -contains 'rev-parse'){"
+        "if($script:exact){'b'*40}else{'c'*40}}};"
         "$feature=Test-ProductionCandidateProvenance $candidate;"
         "$candidate.artifact_kind='PREVIEW';$preview=Test-ProductionCandidateProvenance $candidate;"
         "$candidate.artifact_kind='UNKNOWN';$unknown=Test-ProductionCandidateProvenance $candidate;"
         "$candidate.artifact_kind='PRODUCTION_CANDIDATE';"
         "$candidate.branch='main';$main=Test-ProductionCandidateProvenance $candidate;"
-        "$script:ancestor=$false;$unreachable=Test-ProductionCandidateProvenance $candidate;"
-        'Write-Output "$feature,$preview,$unknown,$main,$unreachable"',
+        "$script:exact=$false;$older=Test-ProductionCandidateProvenance $candidate;"
+        'Write-Output "$feature,$preview,$unknown,$main,$older"',
     )
     assert result == "False,False,False,True,False"
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,32 @@ AUTOMATION_SUFFIXES = {
 }
 IGNORED_PARTS = {".next", ".open-next", "node_modules", "__pycache__"}
 POLICY_IMPLEMENTATION = Path("scripts/check_repository_policy.py")
+CLOUDFLARE_BUILD_CONTRACT = Path("web/cloudflare-build-contract.json")
+EXPECTED_CLOUDFLARE_BUILD_CONTRACT = {
+    "schema_version": "cloudflare-production-build-v1",
+    "source": {
+        "provider": "github",
+        "repository": "yiyousiow000814/XAUUSD-Forecaster",
+        "production_branch": "main",
+        "root_directory": "/web",
+        "path_includes": ["*"],
+        "path_excludes": [],
+    },
+    "commands": {
+        "build": "npm ci && npm test",
+        "deploy": (
+            'npx wrangler versions upload --message '
+            '"release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH '
+            'artifact_kind:PRODUCTION_CANDIDATE"'
+        ),
+    },
+    "output": {
+        "artifact_kind": "PRODUCTION_CANDIDATE",
+        "immutable_version_only": True,
+        "changes_stable_traffic": False,
+    },
+    "non_production_builds_enabled": False,
+}
 
 YAML_ENVIRONMENT_KEY = re.compile(
     r"(?:^|[{,])\s*(?:environment|'environment'|\"environment\")\s*:",
@@ -176,6 +203,38 @@ def _automation_files(root: Path) -> Iterable[tuple[Path, Path]]:
 def check_repository(root: Path) -> list[PolicyViolation]:
     root = root.resolve()
     violations: list[PolicyViolation] = []
+
+    build_contract_path = root / CLOUDFLARE_BUILD_CONTRACT
+    try:
+        build_contract = json.loads(build_contract_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        violations.append(PolicyViolation(
+            CLOUDFLARE_BUILD_CONTRACT,
+            1,
+            "exact-main immutable Cloudflare production build contract is required",
+        ))
+    else:
+        if build_contract != EXPECTED_CLOUDFLARE_BUILD_CONTRACT:
+            violations.append(PolicyViolation(
+                CLOUDFLARE_BUILD_CONTRACT,
+                1,
+                "Cloudflare production build contract drifted from exact-main immutable upload",
+            ))
+
+    package_path = root / "web/package.json"
+    if package_path.exists():
+        try:
+            package = json.loads(package_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            package = {}
+        for command in package.get("scripts", {}).values():
+            if re.search(r"\bwrangler(?:\.cmd)?\s+deploy\b", str(command), re.IGNORECASE):
+                violations.append(PolicyViolation(
+                    Path("web/package.json"),
+                    1,
+                    "direct production wrangler deploy script is forbidden",
+                ))
+                break
 
     for path, relative in _automation_files(root):
         text = path.read_text(encoding="utf-8", errors="replace")

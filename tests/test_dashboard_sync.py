@@ -970,6 +970,10 @@ def test_audit_sync_owns_four_independently_bounded_resources(monkeypatch) -> No
         module, "_post_json",
         lambda url, body, config: writes.append((url, body)),
     )
+    producer_revision = "d" * 40
+    monkeypatch.setattr(
+        module, "_projection_producer_revision", lambda: producer_revision,
+    )
 
     module._sync_audit(payload, {
         "remote_ingest_url": "https://worker.example/api/ingest",
@@ -985,11 +989,15 @@ def test_audit_sync_owns_four_independently_bounded_resources(monkeypatch) -> No
     assert "daily_news_briefs" not in decoded[0]
     assert "recent_decisions" not in decoded[0]
     assert all("brief_json" not in row for row in decoded[1]["daily_news_briefs"])
+    assert all(
+        snapshot["producer_revision"] == producer_revision
+        for snapshot in decoded[1:]
+    )
     assert [len(body) for _url, body in writes] == [
         len(module.audit_snapshot(payload)),
-        len(module.audit_briefs_snapshot(payload)),
-        len(module.audit_stories_snapshot(payload)),
-        len(module.audit_decisions_snapshot(payload)),
+        len(module.audit_briefs_snapshot(payload, producer_revision)),
+        len(module.audit_stories_snapshot(payload, producer_revision)),
+        len(module.audit_decisions_snapshot(payload, producer_revision)),
     ]
 
 

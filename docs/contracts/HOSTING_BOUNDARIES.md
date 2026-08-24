@@ -113,6 +113,26 @@
   item-bounded inside D1 JSON1; a Worker must not deserialize the growing
   legacy document merely to decide freshness. Invalid or oversized candidates
   are skipped, and absence of a valid bounded source fails closed.
+- Candidate-era Audit split projection handover has one explicit owner record:
+  Dashboard Sync is the sole execution owner; forecasting SQLite is the
+  authoritative store; the active Business Runtime revision is the producer;
+  the exact Candidate Worker is the consumer; and the boundary is
+  `SQLite -> Windows Dashboard Sync -> D1 -> Worker`.
+  `/api/audit-briefs`, `/api/audit-stories`, and `/api/audit-decisions` are
+  optional display resources during normal operation but mandatory release
+  obligations when their producer changes. Each write is independently item-
+  and byte-bounded. Its checkpoint is `generated_at` plus exact
+  `producer_revision`; release evidence also binds the validation key and
+  post-cutover boundary.
+- Before Promote, the legacy producer remains the only Sync owner and all
+  Stable-capable projections retain normal parity. Candidate-only projections
+  are explicit deferred obligations, not passes or ignored routes. After Sync
+  is paused, Windows and Worker cut over, and that same Sync owner resumes from
+  Candidate code, observation requires fresh exact-producer snapshots and full
+  semantic equality. Failure retains the last-good D1 value and immutable
+  evidence, blocks Stable commit, and is isolated from forecasting SQLite.
+  Pending evidence retries within observation; hard failure or timeout uses the
+  release rollback. A second pre-promotion Sync owner is forbidden.
 - Local `/api/status` and `/api/critical-status` are the same bounded
   first-paint contract. They include only the fixed recent 90-minute decision
   window; audit, learning, market detail, and older history retain independent

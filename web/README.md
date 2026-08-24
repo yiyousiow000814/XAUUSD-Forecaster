@@ -97,7 +97,7 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 - `npm run db:generate`: generate Drizzle migrations after schema changes
 - `npm run cf:types`: refresh Cloudflare binding types
 - `npm run cf:types:check`: fail when committed binding types drift from config
-- `npm run cf:deploy`: test and deploy the Worker
+- `npm run cf:preview-upload`: upload an immutable Version to the separate Preview Worker
 
 ## One-time Cloudflare Setup
 
@@ -110,8 +110,10 @@ npx wrangler secret put CF_ACCESS_TEAM_DOMAIN
 npx wrangler secret put CF_ACCESS_AUD
 npx wrangler secret put DASHBOARD_OPERATOR_OWNER_SUBJECTS
 npx wrangler secret put DASHBOARD_OPERATOR_OWNER_EMAILS
-npm run cf:deploy
 ```
+
+Production Version materialization and traffic ownership follow the release
+control runbook. Do not use an ad-hoc direct deploy after setup.
 
 One Cloudflare Access application and at least one matching Dashboard Operator
 owner subject or email must be configured before the Admin Console or its human
@@ -152,10 +154,12 @@ starts `Dashboard Mirrors`:
 - `XAUUSD_DASHBOARD_URL`
 
 For automatic deployment after a GitHub push, connect the GitHub repository in
-Cloudflare Workers Builds, set the root directory to `web`, use
-`npm ci && npm test` as the build command and
-`npx wrangler deploy` as the deploy command. Keep D1 identifiers in
-`wrangler.jsonc`; keep `INGEST_TOKEN` in Cloudflare secrets.
+Cloudflare Workers Builds and match
+[`cloudflare-build-contract.json`](cloudflare-build-contract.json): production
+branch `main`, root directory `/web`, include path `*`, no exclude paths,
+`npm ci && npm test` as the build command, and immutable `wrangler versions
+upload` as the deploy command. The build must not assign Stable traffic. Keep D1
+identifiers in `wrangler.jsonc`; keep `INGEST_TOKEN` in Cloudflare secrets.
 
 ## Learn More
 
