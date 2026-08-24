@@ -1874,9 +1874,15 @@ function Invoke-CandidateWorkerValidation {
                 Measure-Object -Property acceptance_samples -Sum).Sum)
             Start-Sleep -Seconds 8
             $observedInvocations = $null
+            $platformTo = $workerEndedAt.AddSeconds(2)
             for ($attempt = 0; $attempt -lt 24; $attempt++) {
+                # Worker event timestamps can be recorded after the response
+                # completes. Advance the upper bound with each propagation poll
+                # so late platform events are not permanently excluded by the
+                # first fixed response-time window.
+                $platformTo = [DateTimeOffset]::UtcNow
                 $observedInvocations = Get-CandidateInvocationCount -Candidate $Candidate `
-                    -From $workerStartedAt -To $workerEndedAt.AddSeconds(2) `
+                    -From $workerStartedAt -To $platformTo `
                     -ValidationRun $validationRun
                 if ($null -ne $observedInvocations -and
                     [int]$observedInvocations -ge $expectedInvocations) { break }
@@ -1886,7 +1892,7 @@ function Invoke-CandidateWorkerValidation {
                 [int]$observedInvocations -ge $expectedInvocations) {
                 $platform = Get-CandidateCpuEvidence -Candidate $Candidate `
                     -From $workerStartedAt `
-                    -To $workerEndedAt.AddSeconds(2) -Routes $workerRoutes `
+                    -To $platformTo -Routes $workerRoutes `
                     -ValidationRun $validationRun
             } else {
                 $script:lastWorkersObservabilityDiagnostic =
