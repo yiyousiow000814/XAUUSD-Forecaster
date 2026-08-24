@@ -2811,44 +2811,99 @@ def test_news_projection_source_freezes_until_exact_snapshot_is_activated(tmp_pa
     ]
 
 
-def test_news_projection_scans_invariant_reader_context_once_across_pages(
+def test_news_projection_scans_candidate_universe_once_across_detail_pages(
     monkeypatch,
 ) -> None:
     module = _dashboard_module()
-    frozen_context = ("epoch", {("example", "claimable", 1)})
+    frozen_context = ("epoch", set())
+    candidate_keys = [
+        ("example", f"item-{index}", 1, f"2026-08-24T00:{index:03d}:00+00:00")
+        for index in range(1_001)
+    ]
     context_calls = 0
-    page_calls = 0
+    candidate_calls = 0
+    detail_page_sizes: list[int] = []
 
     def context(_connection, _now):
         nonlocal context_calls
         context_calls += 1
         return frozen_context
 
-    def page(_connection, after, _limit, *, now, context):
-        nonlocal page_calls
-        page_calls += 1
-        assert _limit == 200
-        assert context is frozen_context
-        item_id = f"item-{page_calls}"
-        return {
-            "items": [{
-                "source": "example", "source_item_id": item_id,
-                "revision_number": 1, "cluster_id": item_id,
-                "collector_first_seen_time": now.isoformat(),
-            }],
-            "withdrawals": [],
-            "next_cursor": "next" if after is None else "done",
-            "has_more": after is None,
-        }
+    def candidates(_connection, *, cutoff, after, limit):
+        nonlocal candidate_calls
+        candidate_calls += 1
+        assert after is None
+        assert limit == module.NEWS_PROJECTION_MAX_ITEMS + 1
+        return candidate_keys
+
+    def rows(_connection, _now, *, after=None, limit, candidate_keys=None):
+        assert after is None
+        assert candidate_keys is not None
+        assert limit == len(candidate_keys)
+        detail_page_sizes.append(limit)
+        return [{
+            "source": source, "source_item_id": item_id,
+            "revision_number": revision, "cluster_id": item_id,
+            "collector_first_seen_time": updated,
+        } for source, item_id, revision, updated in candidate_keys]
+
+    def serialize(rows, _now, epoch, claimable):
+        assert epoch == frozen_context[0]
+        assert claimable is frozen_context[1]
+        return rows
 
     monkeypatch.setattr(module, "_news_archive_context", context)
-    monkeypatch.setattr(module, "_news_archive_page", page)
+    monkeypatch.setattr(module, "_news_mirror_candidate_keys", candidates)
+    monkeypatch.setattr(module, "_news_reader_rows", rows)
+    monkeypatch.setattr(module, "_serialize_news_rows", serialize)
 
     generation = module._build_news_projection_source(object())
 
     assert context_calls == 1
-    assert page_calls == 2
-    assert generation.manifest["expected_index_count"] == 2
+    assert candidate_calls == 1
+    assert detail_page_sizes == [1_000, 1]
+    assert generation.manifest["expected_index_count"] == 1_001
+
+
+def test_news_projection_request_starts_one_background_build(monkeypatch, tmp_path) -> None:
+    module = _dashboard_module()
+    module._NEWS_PROJECTION_CACHE.clear()
+    generation = __import__(
+        "xauusd_forecaster.news_projection", fromlist=["build_news_projection_generation"],
+    ).build_news_projection_generation(
+        [], [], window_start="2026-06-25T00:00:00+00:00",
+        watermark="2026-08-24T00:00:00+00:00",
+    )
+    pending_threads = []
+
+    class DeferredThread:
+        def __init__(self, *, target, args, name, daemon):
+            assert name == "news-projection-source"
+            assert daemon is True
+            self.target = target
+            self.args = args
+            pending_threads.append(self)
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(module.threading, "Thread", DeferredThread)
+    monkeypatch.setattr(
+        module, "_build_news_projection_source_from_database",
+        lambda _database: generation,
+    )
+
+    with pytest.raises(module.NewsProjectionSourcePending):
+        module._news_projection_source_for_request(tmp_path / "db.sqlite3", None)
+    with pytest.raises(module.NewsProjectionSourcePending):
+        module._news_projection_source_for_request(tmp_path / "db.sqlite3", None)
+    assert len(pending_threads) == 1
+
+    pending_threads[0].target(*pending_threads[0].args)
+
+    assert module._news_projection_source_for_request(
+        tmp_path / "db.sqlite3", None,
+    ) is generation
 
 
 def test_news_projection_source_rejects_non_batch_offsets(tmp_path) -> None:

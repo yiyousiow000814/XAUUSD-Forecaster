@@ -88,6 +88,8 @@ _NEWS_EVIDENCE_CACHE_LOCK = threading.Lock()
 _NEWS_EVIDENCE_CACHE: dict[str, object] = {}
 _NEWS_PROJECTION_CACHE_LOCK = threading.Lock()
 _NEWS_PROJECTION_CACHE: dict[str, object] = {}
+NEWS_PROJECTION_SOURCE_REFRESH_SECONDS = 300.0
+NEWS_PROJECTION_SOURCE_RETRY_SECONDS = 30.0
 _NEWS_EVIDENCE_VOLATILE_FIELDS = frozenset({"economic_age_minutes"})
 _NEWS_EVIDENCE_MANIFEST_VERSION = "local-news-evidence-generation-v2"
 
@@ -1045,14 +1047,16 @@ def _news_reader_rows(
     *,
     after: str | None = None,
     limit: int = 200,
+    candidate_keys: list[tuple[str, str, int, str]] | None = None,
 ) -> list[sqlite3.Row]:
     """Read one bounded page from the canonical 60-day reader archive."""
     cutoff = (now - timedelta(days=NEWS_READER_WINDOW_DAYS)).isoformat(
         timespec="microseconds"
     )
-    candidate_keys = _news_mirror_candidate_keys(
-        connection, cutoff=cutoff, after=after, limit=max(limit * 8, 160),
-    )
+    if candidate_keys is None:
+        candidate_keys = _news_mirror_candidate_keys(
+            connection, cutoff=cutoff, after=after, limit=max(limit * 8, 160),
+        )
     if not candidate_keys:
         return []
     candidate_clause = ",".join("(?,?,?,?)" for _ in candidate_keys)
@@ -1463,23 +1467,34 @@ def _build_news_projection_source(
     # This is an in-process materialization bound, not an HTTP display or write
     # transport limit. Reusing the 20-row reader response bound here would
     # repeat the projection joins hundreds of times for one frozen generation.
-    source_page_items = min(200, NEWS_PROJECTION_MAX_ITEMS)
-    after: str | None = None
+    source_page_items = min(1_000, NEWS_PROJECTION_MAX_ITEMS)
+    cutoff = (now - timedelta(days=NEWS_READER_WINDOW_DAYS)).isoformat(
+        timespec="microseconds"
+    )
+    candidate_keys = _news_mirror_candidate_keys(
+        connection, cutoff=cutoff, after=None,
+        limit=NEWS_PROJECTION_MAX_ITEMS + 1,
+    )
+    if len(candidate_keys) > NEWS_PROJECTION_MAX_ITEMS:
+        raise ValueError("news source universe exceeds the 10,000-row bound")
     items: list[dict] = []
     withdrawals: list[dict] = []
-    while True:
-        page = _news_archive_page(
-            connection, after, source_page_items, now=now, context=context,
+    epoch, claimable_keys = context
+    for start in range(0, len(candidate_keys), source_page_items):
+        page_keys = candidate_keys[start:start + source_page_items]
+        rows = _news_reader_rows(
+            connection, now, limit=len(page_keys), candidate_keys=page_keys,
         )
-        items.extend(page["items"])
-        withdrawals.extend(page["withdrawals"])
-        if len(items) + len(withdrawals) > NEWS_PROJECTION_MAX_ITEMS:
-            raise ValueError("news source universe exceeds the 10,000-row bound")
-        after = page.get("next_cursor")
-        if not page.get("has_more"):
-            break
-        if not after:
-            raise ValueError("news source pagination stalled before completion")
+        serialized = _serialize_news_rows(rows, now, epoch, claimable_keys)
+        withdrawals.extend({
+            "source": item["source"],
+            "source_item_id": item["source_item_id"],
+            "revision_number": item["revision_number"],
+        } for item in serialized if item.get("xauusd_relevance") == "IRRELEVANT")
+        items.extend(
+            item for item in serialized
+            if item.get("xauusd_relevance") != "IRRELEVANT"
+        )
     return build_news_projection_generation(
         items, withdrawals,
         window_start=(now - timedelta(days=NEWS_READER_WINDOW_DAYS)).isoformat(),
@@ -1504,7 +1519,78 @@ def _news_projection_source(
         ):
             return cached
         _NEWS_PROJECTION_CACHE["generation"] = candidate
+        _NEWS_PROJECTION_CACHE["built_at"] = time.monotonic()
         return candidate
+
+
+class NewsProjectionSourcePending(RuntimeError):
+    """The bounded local projection is building without blocking HTTP."""
+
+
+def _build_news_projection_source_from_database(
+    database: Path,
+) -> NewsProjectionGeneration:
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)
+    connection.row_factory = sqlite3.Row
+    try:
+        return _build_news_projection_source(connection)
+    finally:
+        connection.close()
+
+
+def _finish_news_projection_source_build(database: Path) -> None:
+    try:
+        candidate = _build_news_projection_source_from_database(database)
+    except Exception as error:
+        with _NEWS_PROJECTION_CACHE_LOCK:
+            _NEWS_PROJECTION_CACHE["error"] = type(error).__name__
+            _NEWS_PROJECTION_CACHE["retry_at"] = (
+                time.monotonic() + NEWS_PROJECTION_SOURCE_RETRY_SECONDS
+            )
+            _NEWS_PROJECTION_CACHE["building"] = False
+        return
+    with _NEWS_PROJECTION_CACHE_LOCK:
+        cached = _NEWS_PROJECTION_CACHE.get("generation")
+        if (
+            not isinstance(cached, NewsProjectionGeneration)
+            or candidate.manifest["source_digest"]
+            != cached.manifest["source_digest"]
+        ):
+            _NEWS_PROJECTION_CACHE["generation"] = candidate
+        _NEWS_PROJECTION_CACHE["built_at"] = time.monotonic()
+        _NEWS_PROJECTION_CACHE.pop("error", None)
+        _NEWS_PROJECTION_CACHE.pop("retry_at", None)
+        _NEWS_PROJECTION_CACHE["building"] = False
+
+
+def _news_projection_source_for_request(
+    database: Path, activated_snapshot_id: str | None,
+) -> NewsProjectionGeneration:
+    """Return a frozen source or start one bounded background materialization."""
+    with _NEWS_PROJECTION_CACHE_LOCK:
+        cached = _NEWS_PROJECTION_CACHE.get("generation")
+        built_at = float(_NEWS_PROJECTION_CACHE.get("built_at") or 0.0)
+        if isinstance(cached, NewsProjectionGeneration):
+            snapshot_id = str(cached.manifest["snapshot_id"])
+            refresh_due = (
+                activated_snapshot_id == snapshot_id
+                and time.monotonic() - built_at
+                >= NEWS_PROJECTION_SOURCE_REFRESH_SECONDS
+            )
+            if not refresh_due:
+                return cached
+        if _NEWS_PROJECTION_CACHE.get("building") is True:
+            raise NewsProjectionSourcePending("news projection source is building")
+        retry_at = float(_NEWS_PROJECTION_CACHE.get("retry_at") or 0.0)
+        if retry_at > time.monotonic():
+            raise NewsProjectionSourcePending("news projection source retry is pending")
+        _NEWS_PROJECTION_CACHE["building"] = True
+    worker = threading.Thread(
+        target=_finish_news_projection_source_build,
+        args=(database,), name="news-projection-source", daemon=True,
+    )
+    worker.start()
+    raise NewsProjectionSourcePending("news projection source is building")
 
 
 def _news_projection_batch(
@@ -3365,16 +3451,9 @@ class Handler(BaseHTTPRequestHandler):
                     r"[a-f0-9]{64}", activated_snapshot_id,
                 ):
                     raise ValueError("invalid activated news snapshot identity")
-                connection = sqlite3.connect(
-                    f"file:{self.database}?mode=ro", uri=True, timeout=5,
+                generation = _news_projection_source_for_request(
+                    self.database, activated_snapshot_id,
                 )
-                connection.row_factory = sqlite3.Row
-                try:
-                    generation = _news_projection_source(
-                        connection, activated_snapshot_id,
-                    )
-                finally:
-                    connection.close()
                 if mode == "manifest":
                     payload = {"manifest": generation.manifest}
                 elif mode == "batch":
@@ -3388,6 +3467,14 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("invalid news projection source mode")
                 body = json.dumps(payload, allow_nan=False).encode()
                 status = 200
+            except NewsProjectionSourcePending as error:
+                body = json.dumps({
+                    "error": str(error),
+                    "error_code": "NEWS_PROJECTION_SOURCE_BUILDING",
+                    "projection_state": "REPLAYING",
+                }).encode()
+                self._write_json(503, body, Retry_After="30")
+                return
             except (OSError, sqlite3.Error, TypeError, ValueError) as error:
                 body = json.dumps({"error": str(error)[:500]}).encode()
                 status = 400
