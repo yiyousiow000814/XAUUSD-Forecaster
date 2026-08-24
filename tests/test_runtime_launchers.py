@@ -2243,6 +2243,21 @@ def test_version_host_routes_distinguish_static_assets_from_worker_redirects(tmp
     )
 
 
+def test_compatibility_redirects_validate_their_final_page_marker() -> None:
+    manifest = json.loads((ROOT / "web" / "worker-validation-manifest.json").read_text(
+        encoding="utf-8",
+    ))
+    redirects = {
+        row["path"]: (row["redirect_path"], row["marker"])
+        for row in manifest["static_assets"] if row.get("redirect_path")
+    }
+    assert redirects["/status"] == ("/admin/ai-usage", "AI 模型使用状态")
+    assert redirects["/assistant"] == ("/admin/assistant", "ASSISTANT PAUSED")
+    assert redirects["/retry-jobs"] == (
+        "/admin/retry-jobs", "PRIVATE OPERATOR QUEUE",
+    )
+
+
 def test_static_asset_validation_uses_raw_utf8_and_exact_contract(tmp_path) -> None:
     candidate = "b" * 40
     result = _run_control_center_contract(

@@ -62,6 +62,7 @@ test("acceptance inventory owns every page bidirectionally", () => {
     assert.ok(Number.isInteger(page.version_host?.status), `missing version status: ${page.route}`);
     if (page.class === "COMPAT_REDIRECT") {
       assert.ok(page.version_host.redirect_path, `missing redirect target: ${page.route}`);
+      assert.ok(page.version_host.marker, `missing final redirect marker: ${page.route}`);
     } else {
       assert.ok(page.version_host.content_type, `missing content type: ${page.route}`);
       assert.ok(page.version_host.marker, `missing semantic marker: ${page.route}`);
@@ -81,9 +82,9 @@ test("acceptance inventory owns every page bidirectionally", () => {
     const asset = workerManifest.static_assets.find(row => row.path === page.route);
     assert.ok(asset, `missing Candidate route acceptance: ${page.route}`);
     assert.equal(asset.redirect_path ?? null, page.version_host.redirect_path ?? null);
+    assert.equal(asset.marker, page.version_host.marker);
     if (!page.version_host.redirect_path) {
       assert.equal(asset.content_type, page.version_host.content_type);
-      assert.equal(asset.marker, page.version_host.marker);
     }
   }
 });
@@ -165,6 +166,15 @@ test("pagination siblings are classified and point to inventoried APIs", () => {
     assert.ok(family.cursor && family.generation_transition);
     assert.equal(family.requires_complete_walk, true);
   }
+});
+
+test("bounded-lag pagination carries an explicit walk watermark", () => {
+  const learning = inventory.pagination_families.find(row => row.id === "learning-history");
+  const market = inventory.pagination_families.find(row => row.id === "market-history");
+  assert.match(learning.cursor, /watermark/);
+  assert.equal(learning.generation_transition, "EXPLICIT_WATERMARK_REQUIRED");
+  assert.equal(market.cursor, "before");
+  assert.equal(market.generation_transition, "ONE_WALK_ONE_WATERMARK");
 });
 
 test("the three Cloudflare acceptance channels remain distinct", () => {

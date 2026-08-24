@@ -109,7 +109,7 @@
       "content_type": "text/html",
       "body_encoding": "utf-8",
       "require_html_charset": true,
-      "marker": "系统健康状态",
+      "marker": "AI 模型使用状态",
       "redirect_path": "/admin/ai-usage"
     },
     {

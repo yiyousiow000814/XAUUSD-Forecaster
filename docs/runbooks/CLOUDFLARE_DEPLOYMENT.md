@@ -69,6 +69,34 @@ operator may approve that exact Version+SHA with **Approve Compatibility**.
 Approval is audited and never carries to another Candidate. Missing resources
 remain blocked; do not use Wrangler auto-configuration as recovery.
 
+## Bootstrap first atomic News CURRENT
+
+Migration `0022_news_projection_generation.sql` is additive. Apply it only after
+the exact-main immutable Candidate exists at 0% and before Candidate validation;
+the current Stable continues to serve the legacy News archive throughout this
+step. Record the migration receipt and confirm that the legacy tables remain.
+
+The normal mirror still targets Stable, so it cannot safely bootstrap routes
+that exist only on the Candidate. Direct the bounded News replay through the
+exact Candidate Version host instead. Keep the ingest credential in an
+environment variable and use an isolated, Git-ignored state receipt:
+
+```powershell
+npx wrangler d1 migrations apply aurum-signal-room --remote
+python ../scripts/bootstrap_news_projection.py `
+  --config ../.local/forward/dashboard-sync.json `
+  --version-host $candidateVersionHost `
+  --state-file ../.local/release-control/first-news-current.json
+```
+
+The bootstrap fails closed unless the target is an exact production Worker
+Version origin, the source is the localhost Dashboard API, and the remote state
+is receipt-verified `CURRENT` with zero missing details and zero invariant
+violations. Preserve its generation, snapshot, source digest, receipt digest,
+and exact counts as release evidence. Walk the Candidate News pagination and
+rendered totals before continuing. Do not Promote while bootstrap is replaying
+or failed. Do not delete the legacy archive during this cutover.
+
 Worker-changing Candidates require a Cloudflare API token limited to read-only
 Workers Observability query access. Store it under the exact
 `CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN` key in the repository-local,

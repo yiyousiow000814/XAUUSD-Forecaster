@@ -84,21 +84,21 @@
       "route": "/assistant",
       "source": "app/assistant/page.tsx",
       "class": "COMPAT_REDIRECT",
-      "version_host": { "status": 307, "redirect_path": "/admin/assistant" },
+      "version_host": { "status": 307, "redirect_path": "/admin/assistant", "marker": "ASSISTANT PAUSED" },
       "production_anonymous": { "behavior": "CLOUDFLARE_ACCESS_REDIRECT" }
     },
     {
       "route": "/retry-jobs",
       "source": "app/retry-jobs/page.tsx",
       "class": "COMPAT_REDIRECT",
-      "version_host": { "status": 307, "redirect_path": "/admin/retry-jobs" },
+      "version_host": { "status": 307, "redirect_path": "/admin/retry-jobs", "marker": "PRIVATE OPERATOR QUEUE" },
       "production_anonymous": { "behavior": "CLOUDFLARE_ACCESS_REDIRECT" }
     },
     {
       "route": "/status",
       "source": "app/status/page.tsx",
       "class": "COMPAT_REDIRECT",
-      "version_host": { "status": 307, "redirect_path": "/admin/ai-usage" },
+      "version_host": { "status": 307, "redirect_path": "/admin/ai-usage", "marker": "AI 模型使用状态" },
       "production_anonymous": { "behavior": "CLOUDFLARE_ACCESS_REDIRECT" }
     }
   ],
@@ -171,7 +171,7 @@
     { "id": "health.runtime_owners", "authority": "WINDOWS_PROCESS_AND_HEARTBEAT_STATE", "projection": "dashboard_snapshots:1", "api_field": "status.services", "ui_field": "health.serviceCounts", "invariant": "PARTITION", "freshness": "LIVE", "display_state": "FRESH_PROJECTION" }
   ],
   "pagination_families": [
-    { "id": "learning-history", "api": "/api/learning-history", "semantics": "BOUNDED_LAG_WATERMARK", "cursor": "sort_epoch,record_key", "max_page_items": 500, "requires_complete_walk": true, "generation_transition": "EXPLICIT_WATERMARK_REQUIRED" },
+    { "id": "learning-history", "api": "/api/learning-history", "semantics": "BOUNDED_LAG_WATERMARK", "cursor": "position(sort_epoch,record_key)+watermark(sort_epoch,record_key)", "max_page_items": 500, "requires_complete_walk": true, "generation_transition": "EXPLICIT_WATERMARK_REQUIRED" },
     { "id": "market-history", "api": "/api/market-history", "semantics": "BOUNDED_LAG_WATERMARK", "cursor": "before", "requires_complete_walk": true, "generation_transition": "ONE_WALK_ONE_WATERMARK" },
     { "id": "news-index", "api": "/api/news-index", "semantics": "EXACT_SNAPSHOT", "cursor": "generation,sort_time,detail_key", "max_page_items": 50, "requires_complete_walk": true, "generation_transition": "REJECT_MIXED_GENERATION" },
     { "id": "news-search", "api": "/api/news-search", "semantics": "EXACT_SNAPSHOT", "cursor": "generation,sort_time,detail_key", "max_page_items": 20, "requires_complete_walk": true, "generation_transition": "REJECT_MIXED_GENERATION" },

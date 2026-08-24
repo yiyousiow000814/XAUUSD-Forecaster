@@ -1731,7 +1731,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /页面会自动重试，不会把缺失资料解释为空/);
   assert.match(source, /if \(view !== "news"\) \{[\s\S]*?fullNewsIndexReadyRef\.current[\s\S]*?refreshNews\(true\)/);
   assert.match(source, /Do not poll off-screen/);
-  assert.match(source, /view !== "league"/);
+  assert.doesNotMatch(source, /if \(view !== "league"\) return/);
   assert.match(source, /loadDashboardResource<Payload>\("\/api\/status"/);
   assert.doesNotMatch(source, /Promise\.allSettled/);
   assert.doesNotMatch(source, /row\.topics\.map/);
@@ -1887,6 +1887,9 @@ test("stores growing learning history as bounded idempotent D1 records", () => {
   assert.match(route, /running_bytes<=\?/);
   assert.doesNotMatch(route, /results\.map\(row => JSON\.parse\(row\.payload\)\)/);
   assert.match(route, /next_cursor/);
+  assert.match(route, /type LearningCursor/);
+  assert.match(route, /watermarkEpoch/);
+  assert.match(route, /source\.sort_epoch<watermark\.sort_epoch/);
   assert.match(sync, /LEARNING_HISTORY_CONTRACT_VERSION = "learning-history-d1-v2"/);
   assert.match(route, /resource='curve-overview'/);
   assert.match(route, /resource='version-overview'/);
@@ -2587,7 +2590,7 @@ test("shows residual and news-only research directions without implying executio
   assert.doesNotMatch(source, /仅显示修正值，不单独判断方向/);
 });
 
-test("loads bounded learning history only when interactive charts need it", () => {
+test("auto-loads the bounded learning summary but keeps deep history interactive", () => {
   const audit = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
   const compact = readFileSync(new URL("../build/preview-learning.ts", import.meta.url), "utf8");
@@ -2596,6 +2599,8 @@ test("loads bounded learning history only when interactive charts need it", () =
   assert.match(compact, /identity_curves: \[\]/);
   assert.match(audit, /refreshStatus\(!fullStatusReadyRef\.current\)/);
   assert.match(audit, /refreshLearning\(!fullLearningReadyRef\.current\)/);
+  assert.doesNotMatch(audit, /if \(view !== "league"\) return/);
+  assert.doesNotMatch(audit, /点击查看/);
   assert.match(audit, /if \(!fullLearningReadyRef\.current\) void refreshLearning\(true\)/);
   assert.match(audit, /historyResource=\{payload\?\.learning_history_resource\}/);
   assert.match(modal, /resource: "version-group"/);
