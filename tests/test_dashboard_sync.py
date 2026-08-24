@@ -732,6 +732,7 @@ def test_configured_targets_adds_independent_cloudflare_mirror(
     monkeypatch, tmp_path
 ) -> None:
     module = _sync_module()
+    monkeypatch.setattr(module, "SYNC_STATE_ROOT", tmp_path.resolve())
     monkeypatch.setenv(
         "CLOUDFLARE_INGEST_URL", "https://example.workers.dev/api/ingest"
     )
@@ -741,6 +742,10 @@ def test_configured_targets_adds_independent_cloudflare_mirror(
         "token": "sites-token",
         "learning_state_file": str(tmp_path / "learning.json"),
         "news_state_file": str(tmp_path / "news.json"),
+        "market_history_state_file": str(tmp_path / "market-history.json"),
+        "learning_history_state_file": str(tmp_path / "learning-history.json"),
+        "news_evidence_state_file": str(tmp_path / "news-evidence.json"),
+        "resource_schedule_state_file": str(tmp_path / "schedule.json"),
     }
 
     sites, cloudflare = module.configured_targets(config)
@@ -757,6 +762,7 @@ def test_configured_targets_can_disable_retired_sites_mirror(
     monkeypatch, tmp_path
 ) -> None:
     module = _sync_module()
+    monkeypatch.setattr(module, "SYNC_STATE_ROOT", tmp_path.resolve())
     monkeypatch.setenv(
         "CLOUDFLARE_INGEST_URL", "https://example.workers.dev/api/ingest"
     )
@@ -767,12 +773,47 @@ def test_configured_targets_can_disable_retired_sites_mirror(
         "token": "retired-token",
         "learning_state_file": str(tmp_path / "learning.json"),
         "news_state_file": str(tmp_path / "news.json"),
+        "market_history_state_file": str(tmp_path / "market-history.json"),
+        "learning_history_state_file": str(tmp_path / "learning-history.json"),
+        "news_evidence_state_file": str(tmp_path / "news-evidence.json"),
+        "resource_schedule_state_file": str(tmp_path / "schedule.json"),
     }
 
     targets = module.configured_targets(config)
 
     assert [target["name"] for target in targets] == ["cloudflare"]
     assert targets[0]["remote_ingest_url"].endswith("workers.dev/api/ingest")
+
+
+def test_configured_targets_rejects_every_state_path_outside_runtime_root(
+    monkeypatch, tmp_path
+) -> None:
+    module = _sync_module()
+    state_root = tmp_path / "private-state"
+    state_root.mkdir()
+    monkeypatch.setattr(module, "SYNC_STATE_ROOT", state_root.resolve())
+    monkeypatch.setenv(
+        "CLOUDFLARE_INGEST_URL", "https://example.workers.dev/api/ingest"
+    )
+    monkeypatch.setenv("CLOUDFLARE_INGEST_TOKEN", "cloudflare-token")
+    state_keys = (
+        "learning_state_file", "news_state_file", "market_history_state_file",
+        "learning_history_state_file", "news_evidence_state_file",
+        "resource_schedule_state_file",
+    )
+    for state_key in state_keys:
+        config = {
+            "enabled": False,
+            "remote_ingest_url": "https://retired.chatgpt.site/api/ingest",
+            "token": "retired-token",
+            **{
+                key: str(state_root / f"{key}.json")
+                for key in state_keys
+            },
+            state_key: str(tmp_path / "outside.json"),
+        }
+        with pytest.raises(ValueError, match="must remain under"):
+            module.configured_targets(config)
 
 
 def test_sites_bypass_header_is_shared_by_get_and_post_but_not_cloudflare(

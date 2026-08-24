@@ -19,6 +19,7 @@ from scripts.run_dashboard_sync import (  # noqa: E402
     _get_json,
     _read_news_sync_state,
     _sync_news,
+    _validated_sync_state_path,
 )
 
 VERSION_HOST = re.compile(
@@ -115,7 +116,7 @@ def main() -> int:
         base_config=config,
         origin=_version_origin(args.version_host),
         token=os.environ.get(args.token_env, ""),
-        state_file=args.state_file,
+        state_file=_validated_sync_state_path(args.state_file),
         max_cycles=args.max_cycles,
         retry_seconds=args.retry_seconds,
     )

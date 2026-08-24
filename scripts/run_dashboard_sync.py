@@ -44,6 +44,7 @@ DEFAULT_NEWS_EVIDENCE_STATE = (
 DEFAULT_RESOURCE_SCHEDULE_STATE = (
     MODULE_ROOT / ".local" / "forward" / "dashboard-resource-schedule-state.json"
 )
+SYNC_STATE_ROOT = DEFAULT_CONFIG.parent.resolve()
 REMOTE_PAYLOAD_LIMIT_BYTES = 750_000
 LOCAL_STATUS_TIMEOUT_SECONDS = 20
 REMOTE_POST_TIMEOUT_SECONDS = 30
@@ -1162,6 +1163,18 @@ def _target_state_path(path: Path, target_name: str, *, legacy: bool) -> Path:
     return path.with_name(f"{path.stem}-{safe_name}{path.suffix}")
 
 
+def _validated_sync_state_path(path: Path) -> Path:
+    """Keep mutable sync cursors inside the private runtime state directory."""
+    candidate = path.resolve()
+    try:
+        candidate.relative_to(SYNC_STATE_ROOT)
+    except ValueError as error:
+        raise ValueError(
+            f"dashboard sync state path must remain under {SYNC_STATE_ROOT}"
+        ) from error
+    return candidate
+
+
 def configured_targets(config: dict) -> list[dict]:
     """Resolve legacy or multi-target mirror configuration without sharing state."""
     declared = config.get("targets")
@@ -1199,47 +1212,47 @@ def configured_targets(config: dict) -> list[dict]:
             "legacy": bool(target.get("legacy", False)),
         }
         scoped.pop("targets", None)
-        scoped["learning_state_file"] = str(_target_state_path(
+        scoped["learning_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "learning_state_file",
                 config.get("learning_state_file", DEFAULT_LEARNING_STATE),
             )),
             name,
             legacy=scoped["legacy"],
-        ))
-        scoped["news_state_file"] = str(_target_state_path(
+        )))
+        scoped["news_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "news_state_file",
                 config.get("news_state_file", DEFAULT_NEWS_STATE),
             )),
             name,
             legacy=scoped["legacy"],
-        ))
-        scoped["market_history_state_file"] = str(_target_state_path(
+        )))
+        scoped["market_history_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "market_history_state_file",
                 config.get("market_history_state_file", DEFAULT_MARKET_HISTORY_STATE),
             )),
             name,
             legacy=scoped["legacy"],
-        ))
-        scoped["learning_history_state_file"] = str(_target_state_path(
+        )))
+        scoped["learning_history_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "learning_history_state_file",
                 config.get("learning_history_state_file", DEFAULT_LEARNING_HISTORY_STATE),
             )),
             name,
             legacy=scoped["legacy"],
-        ))
-        scoped["news_evidence_state_file"] = str(_target_state_path(
+        )))
+        scoped["news_evidence_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "news_evidence_state_file",
                 config.get("news_evidence_state_file", DEFAULT_NEWS_EVIDENCE_STATE),
             )),
             name,
             legacy=scoped["legacy"],
-        ))
-        scoped["resource_schedule_state_file"] = str(_target_state_path(
+        )))
+        scoped["resource_schedule_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "resource_schedule_state_file",
                 config.get(
@@ -1249,7 +1262,7 @@ def configured_targets(config: dict) -> list[dict]:
             )),
             name,
             legacy=scoped["legacy"],
-        ))
+        )))
         targets.append(scoped)
     if not targets:
         raise ValueError("dashboard sync has no configured targets")
