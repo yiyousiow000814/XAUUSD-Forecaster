@@ -454,7 +454,9 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
         audit_briefs, resources["audit_briefs"] = _legacy_resource(
             "/api/audit-briefs", source_audit,
             ("daily_news_briefs",),
-            lambda value: json.loads(dashboard_sync.audit_briefs_snapshot(value)),
+            lambda value: dashboard_sync.audit_briefs_payload(
+                value, brief_limit=dashboard_sync.REMOTE_DAILY_BRIEF_LIMIT,
+            ),
         )
     audit_stories, resources["audit_stories"] = _read_optional_json(
         base_url, "/api/audit-stories",
@@ -463,7 +465,7 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
         audit_stories, resources["audit_stories"] = _legacy_resource(
             "/api/audit-stories", source_audit,
             ("storylines", "storyline_summary"),
-            lambda value: json.loads(dashboard_sync.audit_stories_snapshot(value)),
+            dashboard_sync.audit_stories_payload,
         )
     audit_decisions, resources["audit_decisions"] = _read_optional_json(
         base_url, "/api/audit-decisions",
@@ -472,7 +474,9 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
         audit_decisions, resources["audit_decisions"] = _legacy_resource(
             "/api/audit-decisions", source_audit,
             ("recent_decisions",),
-            lambda value: json.loads(dashboard_sync.audit_decisions_snapshot(value)),
+            lambda value: dashboard_sync.audit_decisions_payload(
+                value, decision_limit=dashboard_sync.REMOTE_DECISION_LIMIT,
+            ),
         )
 
     status = dict(source_status)

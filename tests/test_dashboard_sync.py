@@ -244,6 +244,55 @@ def test_preview_bundle_uses_split_resources_with_narrow_legacy_fallback(
     assert bundle["news_evidence"]["items"][0]["event_key"] == "a" * 64
 
 
+def test_preview_legacy_projection_is_not_coupled_to_sync_transport_limit(
+    monkeypatch,
+) -> None:
+    module = _preview_module()
+    large = "x" * (module.dashboard_sync.AUDIT_DETAIL_LIMIT_BYTES + 1)
+    legacy_audit = {
+        "generated_at": "2026-08-23T05:00:00+00:00",
+        "recent_decisions": [{"decision_id": "decision-1", "reason": large}],
+        "daily_news_briefs": [{"brief_date": "2026-08-23", "body": large}],
+        "storylines": [{"storyline_id": "story-1", "body": large}],
+        "storyline_summary": {"total": 1},
+    }
+    status = {
+        "generated_at": legacy_audit["generated_at"],
+        "system": {"online": True, "components": {}},
+        "counts": {}, "annotation_queue": {}, "factor_coverage": [],
+        "news_source_health": [], "training": {},
+    }
+
+    def read(_base_url: str, path: str) -> dict:
+        if path == "/api/status":
+            return status
+        if path == "/api/audit":
+            return legacy_audit
+        if path in {"/api/audit-briefs", "/api/audit-stories", "/api/audit-decisions"}:
+            raise urllib.error.HTTPError(path, 404, "missing", {}, None)
+        if path == "/api/learning":
+            return {"learning_curves": {"models": []}}
+        if path == "/api/market-chart":
+            return {}
+        if path.startswith("/api/news-evidence"):
+            return {"items": []}
+        if path.startswith("/api/learning-history"):
+            return {"items": []}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(module, "_read_json", read)
+    monkeypatch.setattr(module, "_read_completed_news_index", lambda _url: {"items": []})
+    bundle = module.build_bundle("https://example.test", "feature/test", "abc123")
+
+    assert bundle["audit_briefs"]["daily_news_briefs"][0]["body"] == large
+    assert bundle["audit_stories"]["storylines"][0]["body"] == large
+    assert bundle["audit_decisions"]["recent_decisions"][0]["reason"] == large
+    assert all(
+        bundle["status"]["preview"]["resources"][resource]["compatibility_fallback"]
+        for resource in ("audit_briefs", "audit_stories", "audit_decisions")
+    )
+
+
 def test_preview_bundle_keeps_unavailable_distinct_from_real_zero(monkeypatch) -> None:
     module = _preview_module()
 
