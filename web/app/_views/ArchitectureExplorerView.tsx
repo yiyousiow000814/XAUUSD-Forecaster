@@ -179,6 +179,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
       }),
       execute: intent => {
         const current = cameraStateRef.current;
+        if (canvasRef.current) canvasRef.current.dataset.lastCameraIntent = intent.type;
         const duration = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 260;
         if (intent.type !== "FOCUS_NODE") {
           current.flow.fitView({ ...architectureFitOptions(current.graph.view.node_ids.length, current.mobile), duration });
@@ -367,7 +368,8 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
       <button disabled={scenarioStep === scenario.steps.length - 1} onClick={() => moveScenario(1)} type="button">Next</button>
       <button aria-label="Close scenario" onClick={() => { setScenarioId(""); setScenarioStep(0); }} type="button">×</button></section> : null}
     <section className={`${styles.stage} ${selected ? styles.withInspector : ""}`} style={{ minHeight: canvasHeight }}>
-      <div className={styles.canvas} data-graph-direction={graph.direction} data-testid="architecture-graph" ref={canvasRef} style={{ height: canvasHeight }}
+      <div className={styles.canvas} data-camera-flow-ready={flowInitialized} data-camera-nodes-ready={nodesInitialized}
+        data-graph-direction={graph.direction} data-testid="architecture-graph" ref={canvasRef} style={{ height: canvasHeight }}
         onTransitionEnd={event => { if (event.propertyName === "width") { canvasTransitionCompleteRef.current = true; camera.layoutChanged(); } }}>
         <ReactFlow<ArchitectureCanvasNode, ArchitectureFlowEdge> defaultNodes={flowElements} defaultEdges={flowEdges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
           elementsSelectable minZoom={0.25} maxZoom={1.6} nodesConnectable={false} nodesDraggable={false}
