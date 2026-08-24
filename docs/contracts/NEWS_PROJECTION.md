@@ -7,6 +7,8 @@
 - One source snapshot fixes a 60-day `window_start`, a `watermark`, the
   projection contract, expected index and detail counts, withdrawal count, and
   deterministic source and receipt digests.
+- Local source manifest and batch reads are loopback operator-bridge endpoints;
+  they require the bridge credential and are not browser or public APIs.
 - A source snapshot is immutable while it is being replayed. Source changes
   create a replacement generation; they never alter an in-flight generation.
 

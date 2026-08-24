@@ -3441,6 +3441,10 @@ class Handler(BaseHTTPRequestHandler):
             self._write_json(status, body)
             return
         if path == "/api/news-archive":
+            auth_error = self._operator_bridge_auth_error()
+            if auth_error is not None:
+                self._write_json(*auth_error)
+                return
             query = urllib.parse.parse_qs(parsed.query)
             mode = (query.get("mode") or ["manifest"])[0]
             activated_snapshot_id = (

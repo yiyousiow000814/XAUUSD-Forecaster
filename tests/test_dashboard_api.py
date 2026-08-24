@@ -2906,6 +2906,69 @@ def test_news_projection_request_starts_one_background_build(monkeypatch, tmp_pa
     ) is generation
 
 
+def test_news_projection_manifest_is_authorized_and_nonblocking(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _dashboard_module()
+    module._NEWS_PROJECTION_CACHE.clear()
+    module.Handler.database = tmp_path / "forward.sqlite3"
+    token = "operator-bridge-" + "x" * 32
+    monkeypatch.setenv("DASHBOARD_OPERATOR_BRIDGE_TOKEN", token)
+    generation = __import__(
+        "xauusd_forecaster.news_projection", fromlist=["build_news_projection_generation"],
+    ).build_news_projection_generation(
+        [], [], window_start="2026-06-25T00:00:00+00:00",
+        watermark="2026-08-24T00:00:00+00:00",
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    def build(_database):
+        started.set()
+        assert release.wait(timeout=2)
+        return generation
+
+    monkeypatch.setattr(module, "_build_news_projection_source_from_database", build)
+    server = module.ThreadingHTTPServer(("127.0.0.1", 0), module.Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/api/news-archive?mode=manifest"
+    try:
+        with pytest.raises(urllib.error.HTTPError) as unauthorized:
+            urllib.request.urlopen(url, timeout=2)
+        assert unauthorized.value.code == 401
+
+        request = urllib.request.Request(
+            url, headers={"X-Aurum-Operator-Bridge-Token": token},
+        )
+        with pytest.raises(urllib.error.HTTPError) as warming:
+            urllib.request.urlopen(request, timeout=2)
+        assert warming.value.code == 503
+        assert warming.value.headers["Retry-After"] == "30"
+        payload = json.loads(warming.value.read())
+        assert payload == {
+            "error": "news projection source is building",
+            "error_code": "NEWS_PROJECTION_SOURCE_BUILDING",
+            "projection_state": "REPLAYING",
+        }
+        assert started.wait(timeout=1)
+        release.set()
+        for _ in range(100):
+            if module._NEWS_PROJECTION_CACHE.get("building") is False:
+                break
+            time.sleep(0.01)
+
+        with urllib.request.urlopen(request, timeout=2) as response:
+            ready = json.loads(response.read())
+        assert response.status == 200
+        assert ready["manifest"] == generation.manifest
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_news_projection_source_rejects_non_batch_offsets(tmp_path) -> None:
     module = _dashboard_module()
     module._NEWS_PROJECTION_CACHE.clear()
