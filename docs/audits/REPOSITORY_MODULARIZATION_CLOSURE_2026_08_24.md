@@ -7,7 +7,7 @@ not make the target package layout, test organization, or Architecture Explorer
 `CURRENT`; those states change only after the ordered stack merges.
 
 - Audited latest `main`: `0bc4c1f84e7b7f48e628f5111c56adb6ad824a2a`
-- Final implementation head: #304 at `20bb289332cb31346f34a962e3406163dc5980c2`
+- Final implementation head: #304 at `77e0b4d59ef6581efbff7d9cfe2015254522d5f2`
 - Closure: existing Draft PR #302, documentation-only, based on #304
 - Complete Draft PR count: 18
 - Campaign sequence from #287 through Closure: 15 Draft PRs
@@ -55,8 +55,8 @@ the authoritative value.
 | 14 | #298 | `refactor/news-ai-packages` | `f0b876e50b2acf6953aad408389d2fb38362c764` | `78ef970f1f13692cccf164d5b2bcfd60a7ca5b3b` |
 | 15 | #299 | `refactor/assistant-runtime-dashboard-packages` | `78ef970f1f13692cccf164d5b2bcfd60a7ca5b3b` | `7587435b821fe78d87a729fe871de2e8422b168b` |
 | 16 | #301 | `refactor/test-organization` | `7587435b821fe78d87a729fe871de2e8422b168b` | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` |
-| 17 | #304 | `feat/private-architecture-explorer` | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` | `20bb289332cb31346f34a962e3406163dc5980c2` |
-| 18 | #302 | `chore/modularization-campaign-closure` | `20bb289332cb31346f34a962e3406163dc5980c2` | live PR #302 head OID |
+| 17 | #304 | `feat/private-architecture-explorer` | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` | `77e0b4d59ef6581efbff7d9cfe2015254522d5f2` |
+| 18 | #302 | `chore/modularization-campaign-closure` | `77e0b4d59ef6581efbff7d9cfe2015254522d5f2` | live PR #302 head OID |
 
 ## Latest-main integration
 
@@ -122,7 +122,7 @@ Final local evidence:
 - camera controller: ten behavioral cases cover initial/view/manual Fit, rapid
   cancellation, cross-view search/scenarios, scenario steps, inspector close,
   stale frames, and one-shot mobile TB initialization;
-- lazy Explorer JS: 312,801 bytes / 94,398 gzip; lazy CSS: 32,771 / 6,520 gzip;
+- lazy Explorer JS: 313,364 bytes / 94,444 gzip; lazy CSS: 32,771 / 6,490 gzip;
 - public initial graph dependency delta: zero; graph packages remain lazy-only;
 - architecture docs/imports/manifest, repository policy, compileall, PowerShell
   parse, and diff checks passed.
@@ -144,15 +144,17 @@ impact, mobile TB graph, bottom sheet, relationship fallback, and exact-SHA
 links were exercised. No Architecture API or third-party request occurred.
 
 The exact #304 immutable Preview at
-`https://1e4586ed-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`
-was then verified on desktop and at both phone viewports. Version
-`1e4586ed-acdb-4476-b1d8-c6027f138815` exposed the exact `61b43dd3`
-build marker, 11-node/11-edge Overview with no initial selection, responsive TB
-phone layout, 44px target minimum, Decision selection and inspector, guided
-flow, explicit Cloudflare AFFECTED/CONTINUES state, and bottom-sheet detail.
-The Explorer contract still contains no Architecture API or runtime fetch. The
-viewport override was reset and the final task-created browser session count
-was zero. The known shared Admin-shell React
+`https://2d9f9ee1-aurum-signal-room.yiyousiow1234.workers.dev/admin/architecture`
+was then verified at 1280x720 and both phone viewports. Version
+`2d9f9ee1-bae3-4607-9b17-3bd0799a982f` exposed the exact `77e0b4d5`
+build marker and an initially fitted 11-node Overview with no selection.
+View switching produced one final Fit; opening the inspector preserved zoom,
+closing it refit once after the width transition, and cross-view search plus
+release-scenario steps produced one final Focus. Both 390x844 and 360x800
+mounted directly as TB, had no horizontal overflow, no visible target below
+44px, and retained selection, inspector, scenario, and close controls. The
+Explorer contract still contains no Architecture API or runtime fetch. The
+viewport override was reset and no Preview page was left open. The known shared Admin-shell React
 hydration #418 remains reproducible; it is outside this PR's explicit non-goals
 and is not hidden as Explorer evidence.
 
