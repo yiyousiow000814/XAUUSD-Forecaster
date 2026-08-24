@@ -22,12 +22,12 @@ Architecture documents affected: SYSTEM_ARCHITECTURE, RUNTIME_AND_RELEASE, CODEB
 ### Pre-integration snapshot
 
 - Verification date: 2026-08-24.
-- Latest main: `c2df79bff1fac75e324f12f2cdf0d97edadbaf96`.
+- Latest main: `0bc4c1f84e7b7f48e628f5111c56adb6ad824a2a`.
 - Rebuild reason: the pending modularization stack predates the Control Plane,
   bounded repository retry, exact child identity/WPF lifecycle, and deterministic
   structured Control Center operation-result contracts merged by #284, #286,
-  #293, #300, #303, #305, and #306.
-- Latest-main collection: 1,569 tests.
+  #293, #300, #303, and #305 through #311.
+- Latest-main collection: 1,580 tests.
 - Pre-rebase Closure collection: 1,512 tests.
 - Assistant remains `PAUSED`.
 
@@ -58,12 +58,12 @@ PR is repaired. A replacement head remains `PENDING` until its PR is merged.
 
 - #287 tracker add/add: retained both this latest-main integration snapshot and
   the original Phase C execution tracker; no runtime boundary was involved.
-- #295 Control Center: `c2df79bff1fac75e324f12f2cdf0d97edadbaf96`
+- #295 Control Center: `0bc4c1f84e7b7f48e628f5111c56adb6ad824a2a`
   was the behavioral source, including #303 Candidate static-asset validation
-  and #305 local release-observability credential loading, plus #306 persisted
-  failed platform evidence. PowerShell AST comparison mapped all 205 functions
-  exactly once with zero normalized-body hash changes: 72 runtime/Control Plane,
-  90 release/validation,
+  and #305 local release-observability credential loading, plus #306 through
+  #310 release-lifecycle and exact CPU-evidence corrections. PowerShell AST
+  comparison mapped all 210 functions exactly once: 73 runtime/Control Plane,
+  94 release/validation,
   and 43 presentation/structured-result definitions.
   The stable entry retains the complete latest-main parameter block, constants,
   service inventory, `Action`/`ServiceKey` dispatch, and three dot-source paths.
@@ -79,27 +79,27 @@ planning heads in the frozen original tracker section.
 
 | PR | Exact repaired base | Exact repaired head | Semantic conflict owner |
 |---:|---|---|---|
-| #282 | `main` / `c2df79bff1fac75e324f12f2cdf0d97edadbaf96` | `c786c988436d7e946b710e1e725de64e1b034624` | Current-main architecture baseline |
-| #283 | `c786c988436d7e946b710e1e725de64e1b034624` | `e6691cf8885622908f23ec9048d0aa31771e85ea` | None |
-| #285 | `e6691cf8885622908f23ec9048d0aa31771e85ea` | `1f65f6fdb03807ccbb9d75f55cbf8a802cd9af51` | None |
-| #287 | `1f65f6fdb03807ccbb9d75f55cbf8a802cd9af51` | `fc4f525a0fb80773df1e189d7058c7ab374f27ff` | Tracker add/add retained both audit sections |
-| #288 | `fc4f525a0fb80773df1e189d7058c7ab374f27ff` | `2086dd38c8a118a3505bad11de3ce601dd236936` | None |
-| #289 | `2086dd38c8a118a3505bad11de3ce601dd236936` | `558a6ba01dbaeed22ad93711124022033308f347` | None |
-| #290 | `558a6ba01dbaeed22ad93711124022033308f347` | `1e20f6bcb0f512e7fc7000b2f21c91377eb8c387` | None |
-| #291 | `1e20f6bcb0f512e7fc7000b2f21c91377eb8c387` | `6bb70ffd05a32a8f04072946b0d4461b2a9bd6cc` | Bounded retry for Windows loopback abort in rejection-only test transport |
-| #292 | `6bb70ffd05a32a8f04072946b0d4461b2a9bd6cc` | `d68d31bf08f3ea16bb5fba1ddac42dd6392664c7` | None |
-| #294 | `d68d31bf08f3ea16bb5fba1ddac42dd6392664c7` | `75d268ecd27b07bc8ef04f02df774af762005e91` | None |
-| #295 | `75d268ecd27b07bc8ef04f02df774af762005e91` | `0ee6306373f395aafc07df538157a84f7fd434d7` | Latest-main semantic reconstruction plus lowest-owner UTF-8 PowerShell harness repair |
-| #296 | `0ee6306373f395aafc07df538157a84f7fd434d7` | `14666eca504d30c542608c77d8593b3ba22cccb4` | None |
-| #297 | `14666eca504d30c542608c77d8593b3ba22cccb4` | `fa65a4bf65d8f1ae019bac718cc1ea6fa594bd0d` | None |
-| #298 | `fa65a4bf65d8f1ae019bac718cc1ea6fa594bd0d` | `9a7f25a19a0c2f93dca9fc7f6945e8003a1008ce` | None; one transient loopback reset passed on clean rerun |
-| #299 | `9a7f25a19a0c2f93dca9fc7f6945e8003a1008ce` | `53afec5867b736bde187e6432911c1a6f249f662` | Documentation merge retained current control semantics |
-| #301 | `53afec5867b736bde187e6432911c1a6f249f662` | `494cf7807028c6e13e993eae5ff26665371070e0` | Control Plane test-root correction and full inventory reconciliation |
-| #304 | `494cf7807028c6e13e993eae5ff26665371070e0` | `1628a1e99e0beb125959a70bf35d9b3d31419966` | Replaced rejected card catalog with manifest-v2 node-link graph |
-| #302 | `1628a1e99e0beb125959a70bf35d9b3d31419966` | live PR #302 head OID | Documentation-only closure reconstruction |
+| #282 | `main` / `0bc4c1f84e7b7f48e628f5111c56adb6ad824a2a` | `3ec3f8d4b30302a7ad0803cd3e0ab880bbda00f8` | Current-main architecture baseline |
+| #283 | `3ec3f8d4b30302a7ad0803cd3e0ab880bbda00f8` | `bc151d061ec0b673ecb4834344743dc4d2598b5e` | None |
+| #285 | `bc151d061ec0b673ecb4834344743dc4d2598b5e` | `123fd495657c2a9f524dff1bddc1138bd745a931` | None |
+| #287 | `123fd495657c2a9f524dff1bddc1138bd745a931` | `24b07b947c4523884eabdcfc75f8aa3123f9ea38` | Tracker add/add retained both audit sections |
+| #288 | `24b07b947c4523884eabdcfc75f8aa3123f9ea38` | `4f7d6aadba8cdf40a06ce24f37b9f112107f3f16` | None |
+| #289 | `4f7d6aadba8cdf40a06ce24f37b9f112107f3f16` | `d062854327366e8a109d28ae8b13367a1c6c2dae` | None |
+| #290 | `d062854327366e8a109d28ae8b13367a1c6c2dae` | `676ebf4497aebd0d4ba4012e08be2cbd7926ea90` | None |
+| #291 | `676ebf4497aebd0d4ba4012e08be2cbd7926ea90` | `4475923781814a55520a2f9d24a51e22b44d2575` | Bounded retry for Windows loopback abort in rejection-only test transport |
+| #292 | `4475923781814a55520a2f9d24a51e22b44d2575` | `290586f0ed06da76406fd485590a48826280b117` | None |
+| #294 | `290586f0ed06da76406fd485590a48826280b117` | `c5aad43c85fcedecd200aea79e623202a7ae5262` | None |
+| #295 | `c5aad43c85fcedecd200aea79e623202a7ae5262` | `2f809e3e3fbe6deaadfa214aae5de132953a8397` | Latest-main semantic reconstruction plus delayed-event validation-window repair |
+| #296 | `2f809e3e3fbe6deaadfa214aae5de132953a8397` | `5c522cd34a69fa8c50dce72dad13014c728a9f99` | None |
+| #297 | `5c522cd34a69fa8c50dce72dad13014c728a9f99` | `f0b876e50b2acf6953aad408389d2fb38362c764` | None |
+| #298 | `f0b876e50b2acf6953aad408389d2fb38362c764` | `78ef970f1f13692cccf164d5b2bcfd60a7ca5b3b` | None; one transient loopback reset passed on clean rerun |
+| #299 | `78ef970f1f13692cccf164d5b2bcfd60a7ca5b3b` | `7587435b821fe78d87a729fe871de2e8422b168b` | Documentation merge retained current control semantics |
+| #301 | `7587435b821fe78d87a729fe871de2e8422b168b` | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` | Control Plane test-root correction and full inventory reconciliation |
+| #304 | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` | `61b43dd3866d6ce651bf05652ec1cceeabd68c40` | Node-link graph plus semantic and beginner-UX correction |
+| #302 | `61b43dd3866d6ce651bf05652ec1cceeabd68c40` | live PR #302 head OID | Documentation-only closure reconstruction |
 
-Final implementation collection is 1,614: all 1,569 current-main contracts,
-32 campaign net additions, and 13 Explorer manifest cases, with zero unexplained
+Final implementation collection is 1,628: all 1,580 current-main contracts,
+32 campaign net additions, and 16 Explorer manifest cases, with zero unexplained
 removals. The exact replacement proof is in the test-organization and Closure
 audits. The complete merge order now contains 18 Draft PRs; the campaign from
 #287 through #302 contains 15, including #304.
