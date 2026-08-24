@@ -1528,7 +1528,9 @@ function Get-WorkerValidationManifest {
                     [string]::IsNullOrWhiteSpace([string]$asset.marker))) -or
             ([string]$asset.redirect_path -and
                 ([string]$asset.redirect_path -notmatch '^/[^?#]*$' -or
-                    [string]$asset.redirect_path -eq [string]$asset.path))) {
+                    [string]$asset.redirect_path -eq [string]$asset.path)) -or
+            ($null -ne $asset.worker_expected -and
+                $asset.worker_expected -isnot [bool])) {
             throw "WORKER_ROUTE_VALIDATION_MANIFEST_INVALID"
         }
     }
@@ -1960,26 +1962,34 @@ function Invoke-CandidateWorkerValidation {
     foreach ($route in @($RoutePlan.static_assets)) {
         $results += Invoke-CandidateStaticAssetSample -Candidate $Candidate -Route $route
     }
+    $expectedVersionRouteInvocations = @($RoutePlan.static_assets | Where-Object {
+        [bool]$_.worker_expected
+    }).Count
     Start-Sleep -Seconds 5
     $staticEndedAt = [DateTimeOffset]::UtcNow
     $staticInvocations = Get-CandidateInvocationCount -Candidate $Candidate `
         -From $staticStartedAt.AddSeconds(-2) -To $staticEndedAt.AddSeconds(2)
     $staticObservabilityState = if ($null -eq $staticInvocations) {
         "DIAGNOSTIC_UNAVAILABLE"
-    } elseif ([int]$staticInvocations -eq 0) { "PASSED" } else { "FAILED" }
-    if ($null -ne $staticInvocations -and [int]$staticInvocations -ne 0) {
+    } elseif ([int]$staticInvocations -eq $expectedVersionRouteInvocations) {
+        "PASSED"
+    } else { "FAILED" }
+    if ($null -ne $staticInvocations -and
+        [int]$staticInvocations -ne $expectedVersionRouteInvocations) {
         $results += [pscustomobject]@{
-            route = "STATIC_ASSET_INVOCATIONS"; boundary = "STATIC_ASSET"
+            route = "VERSION_HOST_ROUTE_INVOCATIONS"; boundary = "VERSION_HOST_ROUTE"
             method = "GET"; request_id = $null; status = 0; passed = $false
-            reason = "STATIC_ASSET_WORKER_INVOCATION_MISMATCH"
+            reason = "VERSION_HOST_ROUTE_WORKER_INVOCATION_MISMATCH"
+            expected_invocations = $expectedVersionRouteInvocations
             observed_invocations = $staticInvocations
         }
     }
     $workerRoutes = @($RoutePlan.worker_reads) + @($RoutePlan.worker_writes)
     if ($workerRoutes.Count -eq 0) {
         return [pscustomobject]@{
+            channel = "VERSION_HOST_RESULT"
             passed = [bool](@($results | Where-Object { -not $_.passed }).Count -eq 0)
-            validation_run = $null; expected_worker_invocations = 0
+            validation_run = $null; expected_worker_invocations = $expectedVersionRouteInvocations
             static_worker_invocations = $staticInvocations; routes = $results
             static_observability_state = $staticObservabilityState
             cpu_evidence = "NOT_REQUIRED"
@@ -2072,6 +2082,7 @@ function Invoke-CandidateWorkerValidation {
     $expectedInvocations = [int](($workerRoutes |
         Measure-Object -Property acceptance_samples -Sum).Sum)
     [pscustomobject]@{
+        channel = "VERSION_HOST_RESULT"
         passed = [bool](@($results | Where-Object { -not $_.passed }).Count -eq 0)
         validation_run = $validationRun
         expected_worker_invocations = $expectedInvocations

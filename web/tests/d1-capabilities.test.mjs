@@ -28,8 +28,9 @@ test("D1 capabilities accept the reviewed additive migrations", async () => {
   const database = new D1TestDatabase([
     "0020_operator_retry_scheduling.sql",
     "0021_paged_news_evidence.sql",
+    "0022_news_projection_generation.sql",
   ]);
   await requireD1Capabilities(database, [
-    "operator_retry_scheduling", "paged_news_evidence",
+    "operator_retry_scheduling", "paged_news_evidence", "news_projection_generation",
   ]);
 });

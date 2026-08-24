@@ -94,6 +94,90 @@ export const newsEvidenceBatches = sqliteTable(
   table => [primaryKey({ columns: [table.snapshotId, table.batchOffset] })],
 );
 
+export const newsProjectionGenerations = sqliteTable("news_projection_generations", {
+  generationId: text("generation_id").primaryKey(),
+  snapshotId: text("snapshot_id").notNull(),
+  state: text("state").notNull(),
+  contractVersion: text("contract_version").notNull(),
+  windowStart: text("window_start").notNull(),
+  watermark: text("watermark").notNull(),
+  expectedIndexCount: integer("expected_index_count").notNull(),
+  expectedDetailCount: integer("expected_detail_count").notNull(),
+  withdrawalCount: integer("withdrawal_count").notNull(),
+  sourceDigest: text("source_digest").notNull(),
+  expectedReceiptDigest: text("expected_receipt_digest").notNull(),
+  receiptDigest: text("receipt_digest").notNull(),
+  nextDetailOffset: integer("next_detail_offset").notNull(),
+  nextIndexOffset: integer("next_index_offset").notNull(),
+  stagedDetailCount: integer("staged_detail_count").notNull(),
+  stagedIndexCount: integer("staged_index_count").notNull(),
+  missingDetailCount: integer("missing_detail_count").notNull(),
+  invariantViolationCount: integer("invariant_violation_count").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  activatedAt: text("activated_at"),
+}, table => [index("news_projection_generations_state_idx").on(table.state, table.updatedAt)]);
+
+export const newsProjectionIndex = sqliteTable("news_projection_index", {
+  generationId: text("generation_id").notNull(),
+  detailKey: text("detail_key").notNull(),
+  ordinal: integer("ordinal").notNull(),
+  category: text("category").notNull(),
+  clusterId: text("cluster_id").notNull(),
+  publishedTime: text("published_time").notNull(),
+  collectorFirstSeenTime: text("collector_first_seen_time").notNull(),
+  parsed: integer("parsed").notNull(),
+  modelCandidate: integer("model_candidate").notNull(),
+  impactExpiresAt: text("impact_expires_at"),
+  mirrorContract: text("mirror_contract").notNull(),
+  payloadHash: text("payload_hash").notNull(),
+  payload: text("payload").notNull(),
+  receivedAt: text("received_at").notNull(),
+}, table => [
+  primaryKey({ columns: [table.generationId, table.detailKey] }),
+  uniqueIndex("news_projection_index_ordinal_idx").on(table.generationId, table.ordinal),
+  index("news_projection_index_page_idx").on(
+    table.generationId, table.publishedTime, table.collectorFirstSeenTime, table.detailKey,
+  ),
+  index("news_projection_index_category_idx").on(
+    table.generationId, table.category, table.publishedTime, table.detailKey,
+  ),
+]);
+
+export const newsProjectionDetails = sqliteTable("news_projection_details", {
+  generationId: text("generation_id").notNull(),
+  detailKey: text("detail_key").notNull(),
+  detailHash: text("detail_hash").notNull(),
+  payload: text("payload").notNull(),
+  receivedAt: text("received_at").notNull(),
+}, table => [primaryKey({ columns: [table.generationId, table.detailKey] })]);
+
+export const newsProjectionBatches = sqliteTable("news_projection_batches", {
+  generationId: text("generation_id").notNull(),
+  batchKind: text("batch_kind").notNull(),
+  batchOffset: integer("batch_offset").notNull(),
+  itemCount: integer("item_count").notNull(),
+  payloadHash: text("payload_hash").notNull(),
+  receiptDigest: text("receipt_digest").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, table => [primaryKey({ columns: [table.generationId, table.batchKind, table.batchOffset] })]);
+
+export const newsProjectionState = sqliteTable("news_projection_state", {
+  id: integer("id").primaryKey(),
+  activeGenerationId: text("active_generation_id").notNull(),
+  snapshotId: text("snapshot_id").notNull(),
+  contractVersion: text("contract_version").notNull(),
+  sourceDigest: text("source_digest").notNull(),
+  receiptDigest: text("receipt_digest").notNull(),
+  indexCount: integer("index_count").notNull(),
+  detailCount: integer("detail_count").notNull(),
+  missingDetailCount: integer("missing_detail_count").notNull(),
+  invariantViolationCount: integer("invariant_violation_count").notNull(),
+  projectionState: text("projection_state").notNull(),
+  activatedAt: text("activated_at").notNull(),
+  verifiedAt: text("verified_at").notNull(),
+});
+
 export const marketCandles = sqliteTable("market_candles", {
   timeEpoch: integer("time_epoch").primaryKey(),
   time: text("time").notNull(),

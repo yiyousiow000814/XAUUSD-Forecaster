@@ -26,19 +26,34 @@ const ALLOWED_RESOURCES = new Set([
   "execution-point", "execution-result", "curve-overview", "version-overview",
 ]);
 
-function encodeCursor(sortEpoch: number, recordKey: string) {
-  return btoa(JSON.stringify([sortEpoch, recordKey]))
+type LearningCursor = {
+  positionEpoch: number;
+  positionKey: string;
+  watermarkEpoch: number;
+  watermarkKey: string;
+};
+
+function encodeCursor(cursor: LearningCursor) {
+  return btoa(JSON.stringify([
+    cursor.positionEpoch, cursor.positionKey,
+    cursor.watermarkEpoch, cursor.watermarkKey,
+  ]))
     .replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }
 
-function decodeCursor(value: string | null): [number, string] | null {
+function decodeCursor(value: string | null): LearningCursor | null {
   if (!value) return null;
   try {
     const padded = value.replaceAll("-", "+").replaceAll("_", "/")
       + "=".repeat((4 - value.length % 4) % 4);
     const decoded = JSON.parse(atob(padded));
-    return Array.isArray(decoded) && Number.isSafeInteger(decoded[0])
-      && typeof decoded[1] === "string" ? [decoded[0], decoded[1]] : null;
+    return Array.isArray(decoded) && decoded.length === 4
+      && Number.isSafeInteger(decoded[0]) && typeof decoded[1] === "string"
+      && Number.isSafeInteger(decoded[2]) && typeof decoded[3] === "string"
+      ? {
+        positionEpoch: decoded[0], positionKey: decoded[1],
+        watermarkEpoch: decoded[2], watermarkKey: decoded[3],
+      } : null;
   } catch {
     return null;
   }
@@ -64,15 +79,20 @@ function responseFromRows(
   rows: Array<{ sort_epoch: number; record_key: string; payload: string | Record<string, unknown> }>,
   total: number,
   limit: number,
+  watermark: { sort_epoch: number; record_key: string } | null,
 ) {
   const visible = rows.slice(0, limit);
   const last = visible.at(-1);
   return {
     items: visible.map(row => typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload),
     total,
-    next_cursor: rows.length > limit && last
-      ? encodeCursor(Number(last.sort_epoch), last.record_key) : null,
+    next_cursor: rows.length > limit && last && watermark
+      ? encodeCursor({
+        positionEpoch: Number(last.sort_epoch), positionKey: last.record_key,
+        watermarkEpoch: Number(watermark.sort_epoch), watermarkKey: watermark.record_key,
+      }) : null,
     has_more: rows.length > limit,
+    watermark,
   };
 }
 
@@ -97,10 +117,17 @@ function previewPage(url: URL) {
   let rows = previewRecords().filter(row => row.resource === resource);
   if (identity) rows = rows.filter(row => row.payload.model_identity === identity);
   rows.sort((a, b) => b.sort_epoch - a.sort_epoch || b.record_key.localeCompare(a.record_key));
+  const watermark = cursor
+    ? { sort_epoch: cursor.watermarkEpoch, record_key: cursor.watermarkKey }
+    : rows[0] ? { sort_epoch: rows[0].sort_epoch, record_key: rows[0].record_key } : null;
+  if (watermark) rows = rows.filter(row => row.sort_epoch < watermark.sort_epoch
+    || (row.sort_epoch === watermark.sort_epoch && row.record_key <= watermark.record_key));
   const total = rows.length;
-  if (cursor) rows = rows.filter(row => row.sort_epoch < cursor[0]
-    || (row.sort_epoch === cursor[0] && row.record_key < cursor[1]));
-  return previewJson({ ...responseFromRows(rows, total, limit), preview_limited: true });
+  if (cursor) rows = rows.filter(row => row.sort_epoch < cursor.positionEpoch
+    || (row.sort_epoch === cursor.positionEpoch && row.record_key < cursor.positionKey));
+  return previewJson({
+    ...responseFromRows(rows, total, limit, watermark), preview_limited: true,
+  });
 }
 
 async function pagedRecords(binding: D1Database, url: URL) {
@@ -109,22 +136,33 @@ async function pagedRecords(binding: D1Database, url: URL) {
   const limit = Math.min(MAX_PAGE_ROWS, Math.max(1, Number(url.searchParams.get("limit")) || 6));
   const cursor = decodeCursor(url.searchParams.get("cursor"));
   const identityClause = identity ? "AND json_extract(payload,'$.model_identity')=?" : "";
-  const cursorClause = cursor
+  const positionClause = cursor
     ? "AND (sort_epoch<? OR (sort_epoch=? AND record_key<?))" : "";
   const values: unknown[] = [resource];
   if (identity) values.push(identity);
-  if (cursor) values.push(cursor[0], cursor[0], cursor[1]);
+  if (cursor) values.push(
+    cursor.watermarkEpoch, cursor.watermarkKey,
+    cursor.positionEpoch, cursor.positionEpoch, cursor.positionKey,
+  );
   const result = await binding.prepare(
-    `WITH base AS (
+    `WITH source AS (
        SELECT sort_epoch,record_key,payload FROM learning_records
        WHERE resource=? ${identityClause}
+     ), watermark AS (
+       ${cursor
+    ? "SELECT ? sort_epoch,? record_key"
+    : "SELECT sort_epoch,record_key FROM source ORDER BY sort_epoch DESC,record_key DESC LIMIT 1"}
+     ), base AS (
+       SELECT source.sort_epoch,source.record_key,source.payload FROM source,watermark
+       WHERE source.sort_epoch<watermark.sort_epoch
+          OR (source.sort_epoch=watermark.sort_epoch AND source.record_key<=watermark.record_key)
      ), candidates AS (
        SELECT sort_epoch,record_key,payload,
               row_number() OVER (ORDER BY sort_epoch DESC,record_key DESC) sequence,
               sum(length(CAST(payload AS BLOB))+1) OVER (
                 ORDER BY sort_epoch DESC,record_key DESC
               ) running_bytes
-       FROM base WHERE 1=1 ${cursorClause}
+       FROM base WHERE 1=1 ${positionClause}
      ), visible AS (
        SELECT sort_epoch,record_key,payload FROM candidates
        WHERE sequence<=? AND (running_bytes<=? OR sequence=1)
@@ -137,18 +175,26 @@ async function pagedRecords(binding: D1Database, url: URL) {
        (SELECT count(*) FROM candidates) remaining,
        (SELECT count(*) FROM visible) visible_count,
        (SELECT sort_epoch FROM visible ORDER BY sort_epoch,record_key LIMIT 1) last_epoch,
-       (SELECT record_key FROM visible ORDER BY sort_epoch,record_key LIMIT 1) last_key`,
+       (SELECT record_key FROM visible ORDER BY sort_epoch,record_key LIMIT 1) last_key,
+       (SELECT sort_epoch FROM watermark) watermark_epoch,
+       (SELECT record_key FROM watermark) watermark_key`,
   ).bind(...values, limit, MAX_RESPONSE_BYTES).first<{
     items_json: string; total: number; remaining: number; visible_count: number;
     last_epoch: number | null; last_key: string | null;
+    watermark_epoch: number | null; watermark_key: string | null;
   }>();
   if (!result) throw new Error("missing page result");
   const hasMore = Number(result.remaining) > Number(result.visible_count);
-  const nextCursor = hasMore && result.last_epoch !== null && result.last_key
-    ? encodeCursor(Number(result.last_epoch), result.last_key) : null;
+  const watermark = result.watermark_epoch !== null && result.watermark_key
+    ? { sort_epoch: Number(result.watermark_epoch), record_key: result.watermark_key } : null;
+  const nextCursor = hasMore && result.last_epoch !== null && result.last_key && watermark
+    ? encodeCursor({
+      positionEpoch: Number(result.last_epoch), positionKey: result.last_key,
+      watermarkEpoch: watermark.sort_epoch, watermarkKey: watermark.record_key,
+    }) : null;
   return rawItemsResponse(result.items_json, {
     total: Number(result.total), next_cursor: nextCursor, has_more: hasMore,
-    byte_limit: MAX_RESPONSE_BYTES,
+    watermark, byte_limit: MAX_RESPONSE_BYTES,
   });
 }
 

@@ -172,7 +172,11 @@ test("uses the D1 archive before Preview fallback and preserves database evidenc
   const databaseId = "f".repeat(64);
   const binding = {
     prepare(sql) {
-      return {
+      const statement = {
+        async first() {
+          statements.push({ sql, bindings: [] });
+          return { active_generation_id: "a".repeat(64) };
+        },
         bind(...bindings) {
           statements.push({ sql, bindings });
           return {
@@ -183,6 +187,7 @@ test("uses the D1 archive before Preview fallback and preserves database evidenc
           };
         },
       };
+      return statement;
     },
   };
   const outcome = await retrieveNews({
@@ -194,9 +199,10 @@ test("uses the D1 archive before Preview fallback and preserves database evidenc
   assert.equal(outcome.payload.source_mode, "READ_ONLY_D1_ARCHIVE");
   assert.equal(outcome.payload.archive_complete, true);
   assert.equal(outcome.payload.items[0].evidence_id, databaseId);
-  assert.match(statements[0].sql, /ORDER BY published_time DESC, collector_first_seen_time DESC, detail_key DESC/);
-  assert.match(statements[0].sql, /LIMIT \? OFFSET \?/);
-  assert.equal(statements.length, 2);
+  assert.match(statements[0].sql, /news_projection_state/);
+  assert.match(statements[1].sql, /ORDER BY published_time DESC, collector_first_seen_time DESC, detail_key DESC/);
+  assert.match(statements[1].sql, /LIMIT \? OFFSET \?/);
+  assert.equal(statements.length, 3);
 });
 
 test("labels Preview fallback and returns explicit unavailability outside Preview", async () => {
@@ -216,6 +222,21 @@ test("labels Preview fallback and returns explicit unavailability outside Previe
     status: 503,
     code: "NEWS_RETRIEVAL_UNAVAILABLE",
     error: "新闻搜索暂不可用",
+  });
+});
+
+test("rejects mixed-generation search pagination instead of silently switching", async () => {
+  const request = requestFor({ q: "美联储", generation: "b".repeat(64), page: "2" });
+  const binding = {
+    prepare() {
+      return { async first() { return { active_generation_id: "a".repeat(64) }; } };
+    },
+  };
+  assert.deepEqual(await retrieveNews({ binding, request }), {
+    ok: false,
+    status: 409,
+    code: "NEWS_PROJECTION_GENERATION_CHANGED",
+    error: "新闻档案已更新，请从第一页重新查看",
   });
 });
 

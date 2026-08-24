@@ -69,6 +69,34 @@ operator may approve that exact Version+SHA with **Approve Compatibility**.
 Approval is audited and never carries to another Candidate. Missing resources
 remain blocked; do not use Wrangler auto-configuration as recovery.
 
+## Bootstrap first atomic News CURRENT
+
+Migration `0022_news_projection_generation.sql` is additive. Apply it only after
+the exact-main immutable Candidate exists at 0% and before Candidate validation;
+the current Stable continues to serve the legacy News archive throughout this
+step. Record the migration receipt and confirm that the legacy tables remain.
+
+The normal mirror still targets Stable, so it cannot safely bootstrap routes
+that exist only on the Candidate. Direct the bounded News replay through the
+exact Candidate Version host instead. Keep the ingest credential in an
+environment variable and use an isolated, Git-ignored state receipt:
+
+```powershell
+npx wrangler d1 migrations apply aurum-signal-room --remote
+python ../scripts/bootstrap_news_projection.py `
+  --config ../.local/forward/dashboard-sync.json `
+  --version-host $candidateVersionHost `
+  --state-file ../.local/release-control/first-news-current.json
+```
+
+The bootstrap fails closed unless the target is an exact production Worker
+Version origin, the source is the localhost Dashboard API, and the remote state
+is receipt-verified `CURRENT` with zero missing details and zero invariant
+violations. Preserve its generation, snapshot, source digest, receipt digest,
+and exact counts as release evidence. Walk the Candidate News pagination and
+rendered totals before continuing. Do not Promote while bootstrap is replaying
+or failed. Do not delete the legacy archive during this cutover.
+
 Worker-changing Candidates require a Cloudflare API token limited to read-only
 Workers Observability query access. Store it under the exact
 `CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN` key in the repository-local,
@@ -94,10 +122,11 @@ Normal release operation uses only the confirmed Control Center actions:
 **Promote Candidate**, and **Reverse Stable**. Hidden PowerShell actions are not
 the operator workflow.
 
-After Candidate validation, confirm `/` and `/favicon.ico` are Static Asset responses and
-do not create Worker invocations. Confirm `/health` and `/audit` are also Static
-Assets and that their raw HTML contains `系统健康状态` and `证据台页面`
-respectively. For API probes, record `X-Aurum-Git-SHA`,
+After Candidate validation, confirm every page and exact marker or redirect in
+`web/acceptance-inventory.json`. Static pages and `/favicon.ico` must not create
+Worker invocations; `/assistant`, `/retry-jobs`, and `/status` are deliberate
+Worker-owned compatibility redirects and must produce exactly one invocation
+per sample. For API probes, record `X-Aurum-Git-SHA`,
 `X-Aurum-Worker-Version`, `X-Aurum-Route`, `X-Aurum-Resource`, and
 `X-Aurum-Request-Id`, then correlate them with Workers Logs. Inspect actual
 Cloudflare CPU time for the route-family soak; local Windows process CPU timers
@@ -223,6 +252,29 @@ Run the anonymous probes from the repository root:
 python scripts/check_public_health.py
 python scripts/check_admin_access_boundary.py
 ```
+
+These commands together produce `PRODUCTION_ANONYMOUS_ACCESS_RESULT`. Candidate
+validation produces the separate `VERSION_HOST_RESULT` and reads every page in
+`web/acceptance-inventory.json`; a new or deleted `page.tsx` fails the
+bidirectional inventory test and cannot silently escape Candidate acceptance.
+Do not treat a Candidate Admin shell `200` as authenticated acceptance.
+
+`PRODUCTION_AUTHENTICATED_ACCESS_RESULT` remains a human-session acceptance
+item because the supported Google/Cloudflare Access login, non-owner denial,
+popup behavior, logout, and reauthentication require a real browser identity.
+Record it separately from the two automated channels. It is complete only when
+all authenticated page markers and `/admin/api/*` contracts in
+`web/acceptance-inventory.json` pass in one reused owner session, a non-owner is
+denied, both Access logout endpoints are exercised, and the next `/admin`
+navigation requires authentication. If any step is not performed, record
+`MANUAL_REQUIRED` or `FAILED`, never PASS.
+
+A Cloudflare Access Service Token may be used for a future machine endpoint only
+when that endpoint's policy explicitly authorizes service-token identity via
+`CF-Access-Client-Id` and `CF-Access-Client-Secret`. The current human Admin
+contract does not make a service token equivalent to the owner browser session,
+so it cannot satisfy `PRODUCTION_AUTHENTICATED_ACCESS_RESULT` and must not be
+added as a test bypass.
 
 The first command covers only genuinely public surfaces. The second requires
 every human Admin path, including `/admin/auth-complete` and

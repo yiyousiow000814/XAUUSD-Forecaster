@@ -2774,6 +2774,253 @@ def test_news_archive_is_60_day_bounded_and_cursor_safe(tmp_path) -> None:
     ) for row in rows}) == 3
 
 
+def test_news_projection_source_freezes_until_exact_snapshot_is_activated(tmp_path) -> None:
+    module = _dashboard_module()
+    module._NEWS_PROJECTION_CACHE.clear()
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+
+    def append(item_id: str) -> None:
+        body = f"complete projection evidence for {item_id} " * 30
+        ledger.append_news_revision({
+            "source": "bea_economic_releases", "source_item_id": item_id,
+            "source_published_time": now, "collector_first_seen_time": now,
+            "fetched_time": now, "headline": item_id, "body": body,
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+            "cluster_id": item_id,
+        })
+
+    append("first")
+    frozen = module._news_projection_source(ledger.connection, None)
+    append("second")
+    retry = module._news_projection_source(ledger.connection, None)
+
+    assert retry is frozen
+    assert frozen.manifest["expected_index_count"] == 1
+    assert sum(map(len, frozen.detail_batches)) == 1
+    assert sum(map(len, frozen.index_batches)) == 1
+
+    replacement = module._news_projection_source(
+        ledger.connection, frozen.manifest["snapshot_id"],
+    )
+    assert replacement.manifest["snapshot_id"] != frozen.manifest["snapshot_id"]
+    assert replacement.manifest["expected_index_count"] == 2
+    assert replacement.manifest["expected_detail_count"] == 2
+    assert replacement.manifest["expected_receipt_digest"] != frozen.manifest[
+        "expected_receipt_digest"
+    ]
+
+
+def test_news_projection_scans_candidate_universe_once_across_detail_pages(
+    monkeypatch,
+) -> None:
+    module = _dashboard_module()
+    frozen_context = ("epoch", set())
+    candidate_keys = [
+        ("example", f"item-{index}", 1, f"2026-08-24T00:{index:03d}:00+00:00")
+        for index in range(1_001)
+    ]
+    context_calls = 0
+    candidate_calls = 0
+    detail_page_sizes: list[int] = []
+
+    def context(_connection, _now):
+        nonlocal context_calls
+        context_calls += 1
+        return frozen_context
+
+    def candidates(_connection, *, cutoff, after, limit):
+        nonlocal candidate_calls
+        candidate_calls += 1
+        assert after is None
+        assert limit == module.NEWS_PROJECTION_MAX_ITEMS + 1
+        return candidate_keys
+
+    def rows(_connection, _now, *, after=None, limit, candidate_keys=None):
+        assert after is None
+        assert candidate_keys is not None
+        assert limit == len(candidate_keys)
+        detail_page_sizes.append(limit)
+        return [{
+            "source": source, "source_item_id": item_id,
+            "revision_number": revision, "cluster_id": item_id,
+            "collector_first_seen_time": updated,
+        } for source, item_id, revision, updated in candidate_keys]
+
+    def serialize(rows, _now, epoch, claimable):
+        assert epoch == frozen_context[0]
+        assert claimable is frozen_context[1]
+        return rows
+
+    monkeypatch.setattr(module, "_news_archive_context", context)
+    monkeypatch.setattr(module, "_news_mirror_candidate_keys", candidates)
+    monkeypatch.setattr(module, "_news_reader_rows", rows)
+    monkeypatch.setattr(module, "_serialize_news_rows", serialize)
+
+    generation = module._build_news_projection_source(object())
+
+    assert context_calls == 1
+    assert candidate_calls == 1
+    assert detail_page_sizes == [1_000, 1]
+    assert generation.manifest["expected_index_count"] == 1_001
+
+
+def test_news_projection_request_starts_one_background_build(monkeypatch, tmp_path) -> None:
+    module = _dashboard_module()
+    module._NEWS_PROJECTION_CACHE.clear()
+    generation = __import__(
+        "xauusd_forecaster.news_projection", fromlist=["build_news_projection_generation"],
+    ).build_news_projection_generation(
+        [], [], window_start="2026-06-25T00:00:00+00:00",
+        watermark="2026-08-24T00:00:00+00:00",
+    )
+    pending_threads = []
+
+    class DeferredThread:
+        def __init__(self, *, target, args, name, daemon):
+            assert name == "news-projection-source"
+            assert daemon is True
+            self.target = target
+            self.args = args
+            pending_threads.append(self)
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(module.threading, "Thread", DeferredThread)
+    monkeypatch.setattr(
+        module, "_build_news_projection_source_from_database",
+        lambda _database: generation,
+    )
+
+    with pytest.raises(module.NewsProjectionSourcePending):
+        module._news_projection_source_for_request(tmp_path / "db.sqlite3", None)
+    with pytest.raises(module.NewsProjectionSourcePending):
+        module._news_projection_source_for_request(tmp_path / "db.sqlite3", None)
+    assert len(pending_threads) == 1
+
+    pending_threads[0].target(*pending_threads[0].args)
+
+    assert module._news_projection_source_for_request(
+        tmp_path / "db.sqlite3", None,
+    ) is generation
+
+    module._NEWS_PROJECTION_CACHE["built_at"] = (
+        time.monotonic() - module.NEWS_PROJECTION_SOURCE_REFRESH_SECONDS - 1
+    )
+    assert module._news_projection_source_for_request(
+        tmp_path / "db.sqlite3", generation.manifest["snapshot_id"],
+    ) is generation
+    assert len(pending_threads) == 2
+    assert module._news_projection_source_for_request(
+        tmp_path / "db.sqlite3", generation.manifest["snapshot_id"],
+    ) is generation
+    assert len(pending_threads) == 2
+    module._NEWS_PROJECTION_CACHE.clear()
+
+
+def test_news_projection_manifest_is_authorized_and_nonblocking(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _dashboard_module()
+    module._NEWS_PROJECTION_CACHE.clear()
+    module.Handler.database = tmp_path / "forward.sqlite3"
+    token = "operator-bridge-" + "x" * 32
+    monkeypatch.setenv("DASHBOARD_OPERATOR_BRIDGE_TOKEN", token)
+    generation = __import__(
+        "xauusd_forecaster.news_projection", fromlist=["build_news_projection_generation"],
+    ).build_news_projection_generation(
+        [], [], window_start="2026-06-25T00:00:00+00:00",
+        watermark="2026-08-24T00:00:00+00:00",
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    def build(_database):
+        started.set()
+        assert release.wait(timeout=2)
+        return generation
+
+    monkeypatch.setattr(module, "_build_news_projection_source_from_database", build)
+    server = module.ThreadingHTTPServer(("127.0.0.1", 0), module.Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/api/news-archive?mode=manifest"
+    try:
+        with pytest.raises(urllib.error.HTTPError) as unauthorized:
+            urllib.request.urlopen(url, timeout=2)
+        assert unauthorized.value.code == 401
+
+        request = urllib.request.Request(
+            url, headers={"X-Aurum-Operator-Bridge-Token": token},
+        )
+        with pytest.raises(urllib.error.HTTPError) as warming:
+            urllib.request.urlopen(request, timeout=2)
+        assert warming.value.code == 503
+        assert warming.value.headers["Retry-After"] == "30"
+        payload = json.loads(warming.value.read())
+        assert payload == {
+            "error": "news projection source is building",
+            "error_code": "NEWS_PROJECTION_SOURCE_BUILDING",
+            "projection_state": "REPLAYING",
+        }
+        assert started.wait(timeout=1)
+        release.set()
+        for _ in range(100):
+            if module._NEWS_PROJECTION_CACHE.get("building") is False:
+                break
+            time.sleep(0.01)
+
+        with urllib.request.urlopen(request, timeout=2) as response:
+            ready = json.loads(response.read())
+        assert response.status == 200
+        assert ready["manifest"] == generation.manifest
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_news_projection_source_rejects_non_batch_offsets(tmp_path) -> None:
+    module = _dashboard_module()
+    module._NEWS_PROJECTION_CACHE.clear()
+    generation = __import__(
+        "xauusd_forecaster.news_projection", fromlist=["build_news_projection_generation"],
+    ).build_news_projection_generation(
+        [{
+            "source": "example", "source_item_id": str(index), "revision_number": 1,
+            "category": "其他", "cluster_id": str(index),
+            "collector_first_seen_time": "2026-08-24T00:00:00+00:00",
+        } for index in range(10)], [],
+        window_start="2026-06-25T00:00:00+00:00",
+        watermark="2026-08-24T00:00:00+00:00",
+    )
+
+    first = module._news_projection_batch(generation, "detail", 0)
+    assert len(first["items"]) == 8
+    with pytest.raises(ValueError, match="frozen batch boundary"):
+        module._news_projection_batch(generation, "detail", 1)
+
+
+def test_news_projection_accepts_a_large_realistic_article_within_worker_bound() -> None:
+    projection = __import__(
+        "xauusd_forecaster.news_projection", fromlist=["build_news_projection_generation"],
+    )
+    generation = projection.build_news_projection_generation(
+        [{
+            "source": "example", "source_item_id": "large", "revision_number": 1,
+            "cluster_id": "large", "body": "x" * 175_000,
+            "collector_first_seen_time": "2026-08-24T00:00:00+00:00",
+        }], [], window_start="2026-06-25T00:00:00+00:00",
+        watermark="2026-08-24T00:00:00+00:00",
+    )
+
+    encoded = projection.compact_json(list(generation.detail_batches[0])).encode()
+    assert len(encoded) <= projection.NEWS_DETAIL_BATCH_LIMIT_BYTES
+    assert projection.NEWS_DETAIL_BATCH_LIMIT_BYTES == 400_000
+
+
 def test_news_archive_discovers_a_bounded_changed_key_page(tmp_path) -> None:
     module = _dashboard_module()
     now = datetime.now(UTC).replace(microsecond=0)

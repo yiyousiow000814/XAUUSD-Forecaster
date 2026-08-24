@@ -13,6 +13,7 @@ MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 
 from scripts import run_dashboard_sync as dashboard_sync
+from xauusd_forecaster.news_projection import build_news_projection_generation
 
 
 FIXED_START = datetime(2026, 8, 13, tzinfo=UTC)
@@ -158,8 +159,11 @@ def build_fixtures() -> dict[str, bytes]:
         {"records": learning_batch}, ensure_ascii=False, allow_nan=False,
         separators=(",", ":"),
     ).encode()
-    news_rows, _ = dashboard_sync.news_mirror_parts(source)
-    news_index = max(dashboard_sync.news_index_batches(news_rows), key=len)
+    news_generation = build_news_projection_generation(
+        source["recent_news"], [],
+        window_start=FIXED_START.isoformat(),
+        watermark=(FIXED_START + timedelta(days=7)).isoformat(),
+    )
     evidence_items = [
         {**_news(index), "headline": f"Bounded evidence headline {index}"}
         for index in range(20)
@@ -169,14 +173,6 @@ def build_fixtures() -> dict[str, bytes]:
         "snapshot_id": "f" * 64, "offset": 0, "items": evidence_items,
     }, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
     snapshot_id = "f" * 64
-    detail_items = [{
-        "detail_key": f"{index + 1:064x}",
-        "detail_hash": f"{index + 101:064x}",
-        "payload": {
-            "headline": f"候选版本精确 UTF-8 新闻详情 {index}",
-            "body": "生产形状验证正文，不写入权威数据。" * 500,
-        },
-    } for index in range(12)]
     encode = lambda value: json.dumps(
         value, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
     ).encode("utf-8")
@@ -203,21 +199,33 @@ def build_fixtures() -> dict[str, bytes]:
             "contract_version": dashboard_sync.NEWS_EVIDENCE_CONTRACT_VERSION,
             "cleanup_active_snapshot": snapshot_id,
         }),
-        "news-index-normal.json": encode({"items": news_index}),
-        "news-index-reset.json": encode({"reset": True}),
-        "news-index-withdrawal.json": encode({
-            "withdraw_detail_keys": [row["detail_key"] for row in news_index[:20]],
+        "news-index-prepare.json": encode({
+            "action": "prepare",
+            "generation_id": news_generation.manifest["generation_id"],
+            "manifest": news_generation.manifest,
         }),
-        "news-index-prune.json": encode({"prune_before": FIXED_START.isoformat()}),
-        "news-index-reconcile.json": encode({
-            "reconcile_contract": dashboard_sync.NEWS_MIRROR_CONTRACT_VERSION,
+        "news-index-stage.json": encode({
+            "action": "stage_index",
+            "generation_id": news_generation.manifest["generation_id"],
+            "offset": 0, "items": list(news_generation.index_batches[0]),
         }),
-        "news-index-neutralize.json": encode({
-            "neutralize_operational_state_for_contract":
-                dashboard_sync.NEWS_MIRROR_CONTRACT_VERSION,
+        "news-index-activate.json": encode({
+            "action": "activate",
+            "generation_id": news_generation.manifest["generation_id"],
         }),
-        "news-content-normal.json": encode({"items": detail_items}),
-        "news-content-reset.json": encode({"reset": True}),
+        "news-index-verify.json": encode({
+            "action": "verify",
+            "generation_id": news_generation.manifest["generation_id"],
+        }),
+        "news-index-abandon.json": encode({
+            "action": "abandon",
+            "generation_id": news_generation.manifest["generation_id"],
+        }),
+        "news-content-stage.json": encode({
+            "action": "stage_details",
+            "generation_id": news_generation.manifest["generation_id"],
+            "offset": 0, "items": list(news_generation.detail_batches[0]),
+        }),
     }
 
 

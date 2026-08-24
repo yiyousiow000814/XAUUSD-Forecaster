@@ -44,16 +44,14 @@ DEFAULT_NEWS_EVIDENCE_STATE = (
 DEFAULT_RESOURCE_SCHEDULE_STATE = (
     MODULE_ROOT / ".local" / "forward" / "dashboard-resource-schedule-state.json"
 )
+SYNC_STATE_ROOT = DEFAULT_CONFIG.parent.resolve()
 REMOTE_PAYLOAD_LIMIT_BYTES = 750_000
 LOCAL_STATUS_TIMEOUT_SECONDS = 20
 REMOTE_POST_TIMEOUT_SECONDS = 30
 REMOTE_NEWS_LIMIT = 200
 REMOTE_DECISION_LIMIT = 20
 REMOTE_DAILY_BRIEF_LIMIT = 14
-NEWS_DETAIL_BATCH_LIMIT_BYTES = 160_000
-NEWS_INDEX_BATCH_LIMIT_BYTES = 400_000
-NEWS_WRITE_BATCH_ITEMS = 20
-NEWS_DETAIL_BATCH_ITEMS = 8
+NEWS_PROJECTION_BATCHES_PER_CYCLE = 4
 NEWS_EVIDENCE_WRITE_BATCH_ITEMS = 20
 NEWS_EVIDENCE_PAGES_PER_CYCLE = 1
 MARKET_HISTORY_PAGES_PER_CYCLE = 1
@@ -62,7 +60,6 @@ OPERATOR_RETRY_COMMANDS_PER_CYCLE = 10
 HEAVY_RESOURCES_PER_CYCLE = 1
 RESOURCE_BACKOFF_MAX_SECONDS = 3_600
 NEWS_READER_WINDOW_DAYS = 60
-NEWS_MIRROR_CONTRACT_VERSION = "news-60-day-incremental-v10-publication-clock-skew"
 NEWS_EVIDENCE_CONTRACT_VERSION = "news-evidence-paged-v2"
 MARKET_HISTORY_CONTRACT_VERSION = "market-history-d1-v2"
 MARKET_HISTORY_BATCH_LIMIT_BYTES = 350_000
@@ -93,6 +90,18 @@ from xauusd_forecaster.dashboard_payloads import (
     audit_stories_payload,
     audit_status_payload,
     critical_status_payload,
+)
+from xauusd_forecaster.news_projection import (
+    NEWS_DETAIL_BATCH_ITEMS,
+    NEWS_DETAIL_BATCH_LIMIT_BYTES,
+    NEWS_INDEX_FIELDS,
+    NEWS_INDEX_BATCH_LIMIT_BYTES,
+    NEWS_MIRROR_CONTRACT_VERSION,
+    NEWS_PROJECTION_MAX_BATCH_ITEMS as NEWS_WRITE_BATCH_ITEMS,
+    bounded_batches as _projection_bounded_batches,
+    sha256_json as _projection_json_hash,
+    split_news_rows,
+    stable_news_key,
 )
 
 
@@ -138,6 +147,14 @@ class RemoteInvariantViolation(RuntimeError):
             "violation_count": int(payload.get("violation_count") or 0),
             "checks": checks[:12] if isinstance(checks, list) else [],
         }
+        if isinstance(payload.get("contradictions"), dict):
+            self.evidence["contradictions"] = dict(
+                list(payload["contradictions"].items())[:12]
+            )
+        if payload.get("staging_generation_id"):
+            self.evidence["staging_generation_id"] = str(
+                payload["staging_generation_id"]
+            )[:64]
         super().__init__(
             f"remote invariant check failed: {self.error_code} "
             f"({self.evidence['violation_count']} violations)"
@@ -157,18 +174,6 @@ def operator_retry_bulk_sla_seconds(
         raise ValueError("retry cadence and batch size must be positive")
     return math.ceil(command_count / commands_per_cycle) * cadence_seconds
 
-NEWS_INDEX_FIELDS = (
-    "category", "source", "source_item_id", "revision_number", "cluster_id",
-    "source_published_time", "collector_first_seen_time", "headline",
-    "content_characters", "content_status", "content_fetch_status",
-    "content_error_type", "annotation_status", "annotation_reason_code",
-    "annotation_reason",
-    "model_visibility", "parsed_at", "emerging_topic_zh",
-    "impact_status", "impact_class", "impact_event_state",
-    "impact_update_type", "impact_assessed_at", "impact_expires_at",
-    "impact_event_at", "impact_clock_source", "impact_reason_zh",
-    "mirror_updated_at",
-)
 MARKET_DECISION_FIELDS = (
     "source_decision_id", "decision_time", "model_identity",
     "recommended_action", "outcome_status", "ev_long_u5", "ev_short_u5",
@@ -177,11 +182,7 @@ MARKET_DECISION_FIELDS = (
 
 
 def _stable_news_key(row: dict) -> str:
-    identity = "\0".join((
-        str(row.get("source", "")), str(row.get("source_item_id", "")),
-        str(row.get("revision_number", "")),
-    ))
-    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return stable_news_key(row)
 
 
 def news_withdrawal_keys(payload: dict) -> list[str]:
@@ -200,51 +201,25 @@ def news_withdrawal_keys(payload: dict) -> list[str]:
 
 
 def _json_hash(value: object) -> str:
-    encoded = json.dumps(
-        value, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return _projection_json_hash(value, sort_keys=True)
 
 
 def news_mirror_parts(payload: dict) -> tuple[list[dict], list[dict]]:
     """Split the complete news rows into a compact index and lazy details."""
-    index_rows = []
-    detail_rows = []
     rows = payload.get("items")
     if not isinstance(rows, list):
         rows = payload.get("recent_news", [])[:REMOTE_NEWS_LIMIT]
-    for row in rows:
-        detail_key = _stable_news_key(row)
-        detail_payload = {
-            key: value for key, value in row.items() if key not in NEWS_INDEX_FIELDS
-        }
-        encoded_detail = json.dumps(
-            detail_payload, ensure_ascii=False, allow_nan=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        detail_hash = hashlib.sha256(encoded_detail).hexdigest()
-        index_rows.append({
-            **{key: row.get(key) for key in NEWS_INDEX_FIELDS},
-            "detail_key": detail_key,
-            "mirror_contract": NEWS_MIRROR_CONTRACT_VERSION,
-        })
-        detail_rows.append({
-            "detail_key": detail_key,
-            "detail_hash": detail_hash,
-            "payload": detail_payload,
-        })
-    return index_rows, detail_rows
+    return split_news_rows(rows)
 
 
 def news_detail_batches(rows: list[dict]) -> list[list[dict]]:
-    return _bounded_item_batches(
+    return _projection_bounded_batches(
         rows, NEWS_DETAIL_BATCH_LIMIT_BYTES, max_items=NEWS_DETAIL_BATCH_ITEMS,
     )
 
 
 def news_index_batches(rows: list[dict]) -> list[list[dict]]:
-    return _bounded_item_batches(
+    return _projection_bounded_batches(
         rows, NEWS_INDEX_BATCH_LIMIT_BYTES, max_items=NEWS_WRITE_BATCH_ITEMS,
     )
 
@@ -1188,6 +1163,29 @@ def _target_state_path(path: Path, target_name: str, *, legacy: bool) -> Path:
     return path.with_name(f"{path.stem}-{safe_name}{path.suffix}")
 
 
+def _validated_sync_state_path(path: Path) -> Path:
+    """Keep mutable sync cursors inside the private runtime state directory."""
+    if path.is_absolute():
+        parent = path.parent
+    else:
+        parent = SYNC_STATE_ROOT if path.parent == Path(".") else path.parent
+    filename = path.name
+    allowed_characters = frozenset(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+    )
+    if (
+        parent != SYNC_STATE_ROOT
+        or not 6 <= len(filename) <= 128
+        or not filename[0].isalnum()
+        or not filename.endswith(".json")
+        or any(character not in allowed_characters for character in filename)
+    ):
+        raise ValueError(
+            f"dashboard sync state path must be one JSON file under {SYNC_STATE_ROOT}"
+        )
+    return SYNC_STATE_ROOT / filename
+
+
 def configured_targets(config: dict) -> list[dict]:
     """Resolve legacy or multi-target mirror configuration without sharing state."""
     declared = config.get("targets")
@@ -1225,47 +1223,47 @@ def configured_targets(config: dict) -> list[dict]:
             "legacy": bool(target.get("legacy", False)),
         }
         scoped.pop("targets", None)
-        scoped["learning_state_file"] = str(_target_state_path(
+        scoped["learning_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "learning_state_file",
                 config.get("learning_state_file", DEFAULT_LEARNING_STATE),
             )),
             name,
             legacy=scoped["legacy"],
-        ))
-        scoped["news_state_file"] = str(_target_state_path(
+        )))
+        scoped["news_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "news_state_file",
                 config.get("news_state_file", DEFAULT_NEWS_STATE),
             )),
             name,
             legacy=scoped["legacy"],
-        ))
-        scoped["market_history_state_file"] = str(_target_state_path(
+        )))
+        scoped["market_history_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "market_history_state_file",
                 config.get("market_history_state_file", DEFAULT_MARKET_HISTORY_STATE),
             )),
             name,
             legacy=scoped["legacy"],
-        ))
-        scoped["learning_history_state_file"] = str(_target_state_path(
+        )))
+        scoped["learning_history_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "learning_history_state_file",
                 config.get("learning_history_state_file", DEFAULT_LEARNING_HISTORY_STATE),
             )),
             name,
             legacy=scoped["legacy"],
-        ))
-        scoped["news_evidence_state_file"] = str(_target_state_path(
+        )))
+        scoped["news_evidence_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "news_evidence_state_file",
                 config.get("news_evidence_state_file", DEFAULT_NEWS_EVIDENCE_STATE),
             )),
             name,
             legacy=scoped["legacy"],
-        ))
-        scoped["resource_schedule_state_file"] = str(_target_state_path(
+        )))
+        scoped["resource_schedule_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "resource_schedule_state_file",
                 config.get(
@@ -1275,7 +1273,7 @@ def configured_targets(config: dict) -> list[dict]:
             )),
             name,
             legacy=scoped["legacy"],
-        ))
+        )))
         targets.append(scoped)
     if not targets:
         raise ValueError("dashboard sync has no configured targets")
@@ -1589,57 +1587,62 @@ def _sync_market_history(config: dict) -> None:
     })
 
 
-def _local_news_archive_url(config: dict, after: str | None) -> str:
+def _local_news_archive_url(
+    config: dict, *, mode: str, snapshot_id: str | None = None,
+    kind: str | None = None, offset: int | None = None,
+    activated_snapshot_id: str | None = None,
+) -> str:
     status_url = urllib.parse.urlsplit(config["local_status_url"])
-    query = {"limit": str(NEWS_WRITE_BATCH_ITEMS)}
-    if after:
-        query["after"] = after
+    query = {"mode": mode}
+    if snapshot_id:
+        query["snapshot_id"] = snapshot_id
+    if kind:
+        query["kind"] = kind
+    if offset is not None:
+        query["offset"] = str(offset)
+    if activated_snapshot_id:
+        query["activated_snapshot_id"] = activated_snapshot_id
     return urllib.parse.urlunsplit((
         status_url.scheme, status_url.netloc, "/api/news-archive",
         urllib.parse.urlencode(query), "",
     ))
 
 
-def _verify_news_mirror_state(
-    news_index_url: str,
-    config: dict,
-    *,
-    expected_contract: str | None,
-) -> None:
-    """Verify persisted D1 relationships after a bounded mirror write."""
-    query = {
-        "health_check": "1",
-        "current_contract": NEWS_MIRROR_CONTRACT_VERSION,
+def _verify_news_projection_state(
+    news_index_url: str, config: dict, manifest: dict,
+) -> dict:
+    payload = _get_json(news_index_url + "?health_check=1", config)
+    expected = {
+        "status": "OK",
+        "projection_state": "CURRENT",
+        "verified_complete": True,
+        "active_generation_id": manifest["generation_id"],
+        "snapshot_id": manifest["snapshot_id"],
+        "source_digest": manifest["source_digest"],
+        "receipt_digest": manifest["expected_receipt_digest"],
+        "index_count": manifest["expected_index_count"],
+        "detail_count": manifest["expected_detail_count"],
+        "missing_detail_count": 0,
+        "invariant_violation_count": 0,
     }
-    if expected_contract:
-        query["expected_contract"] = expected_contract
-    payload = _get_json(
-        news_index_url + "?" + urllib.parse.urlencode(query), config,
-    )
-    if payload.get("status") != "OK":
-        raise RemoteInvariantViolation(payload)
+    contradictions = {
+        key: {"expected": value, "received": payload.get(key)}
+        for key, value in expected.items() if payload.get(key) != value
+    }
+    if contradictions:
+        raise RemoteInvariantViolation({
+            "status": "ERROR", "error_code": "NEWS_PROJECTION_HEALTH_MISMATCH",
+            "violation_count": len(contradictions), "contradictions": contradictions,
+        })
+    return payload
 
 
 def _sync_news(_local_payload: dict, config: dict) -> None:
-    """Advance one bounded archive page; never replay the whole archive."""
+    """Advance one immutable generation without exposing partial replacement."""
     state_path = Path(config.get("news_state_file", DEFAULT_NEWS_STATE))
     state = _read_news_sync_state(state_path)
-    contract_changed = (
-        state.get("mirror_contract_version") != NEWS_MIRROR_CONTRACT_VERSION
-    )
-    if contract_changed:
-        state = {"mirror_contract_version": NEWS_MIRROR_CONTRACT_VERSION}
-
-    if config.get("local_status_url"):
-        with urllib.request.urlopen(
-            _local_news_archive_url(config, state.get("cursor")),
-            timeout=LOCAL_STATUS_TIMEOUT_SECONDS,
-        ) as response:
-            page = json.loads(response.read())
-    else:
-        page = {"items": _local_payload.get("recent_news", []), "has_more": False}
-    news_index, details = news_mirror_parts(page)
-    withdrawal_keys = news_withdrawal_keys(page)
+    if state.get("contract_version") != NEWS_MIRROR_CONTRACT_VERSION:
+        state = {"contract_version": NEWS_MIRROR_CONTRACT_VERSION}
     news_index_url = config.get("remote_news_index_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-index"
     )
@@ -1647,62 +1650,114 @@ def _sync_news(_local_payload: dict, config: dict) -> None:
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-content"
     )
 
-    if contract_changed:
-        _post_json(news_index_url, json.dumps({
-            "neutralize_operational_state_for_contract": NEWS_MIRROR_CONTRACT_VERSION,
-        }, separators=(",", ":")).encode("utf-8"), config)
-
-    # Details are durable before their index records become discoverable.
-    for batch in news_detail_batches(details):
-        _post_json(news_url, json.dumps(
-            {"items": batch}, ensure_ascii=False, allow_nan=False,
-            separators=(",", ":"),
-        ).encode("utf-8"), config)
-    for batch in news_index_batches(news_index):
-        _post_json(news_index_url, json.dumps(
-            {"items": batch}, ensure_ascii=False, allow_nan=False,
-            separators=(",", ":"),
-        ).encode("utf-8"), config)
-    for start in range(0, len(withdrawal_keys), NEWS_WRITE_BATCH_ITEMS):
-        _post_json(news_index_url, json.dumps(
-            {"withdraw_detail_keys": withdrawal_keys[
-                start:start + NEWS_WRITE_BATCH_ITEMS
-            ]}, separators=(",", ":"),
-        ).encode("utf-8"), config)
-
-    next_cursor = page.get("next_cursor")
-    if next_cursor:
-        state["cursor"] = str(next_cursor)
-    now = datetime.now(UTC)
-    last_prune = state.get("last_prune")
-    try:
-        prune_due = (
-            not last_prune
-            or (now - datetime.fromisoformat(str(last_prune))).total_seconds() >= 86_400
+    if config.get("local_status_url"):
+        manifest_page = _get_local_json(_local_news_archive_url(
+            config, mode="manifest",
+            activated_snapshot_id=state.get("active_snapshot_id"),
+        ))
+        manifest = manifest_page.get("manifest")
+    else:
+        raise PayloadContractError(
+            "news generation sync requires local_status_url for frozen batch replay"
         )
-    except ValueError:
-        prune_due = True
-    maintenance: dict[str, str] = {}
-    if prune_due:
-        cutoff = (now - timedelta(days=NEWS_READER_WINDOW_DAYS)).isoformat()
-        maintenance["prune_before"] = cutoff
-        state["last_prune"] = now.isoformat()
-    if not page.get("has_more") and state.get("reconciled_contract") != NEWS_MIRROR_CONTRACT_VERSION:
-        maintenance["reconcile_contract"] = NEWS_MIRROR_CONTRACT_VERSION
-        state["reconciled_contract"] = NEWS_MIRROR_CONTRACT_VERSION
-    if maintenance:
-        _post_json(news_index_url, json.dumps(
-            maintenance, separators=(",", ":"),
-        ).encode("utf-8"), config)
-    _verify_news_mirror_state(
-        news_index_url,
-        config,
-        expected_contract=(
-            NEWS_MIRROR_CONTRACT_VERSION if not page.get("has_more") else None
-        ),
+    if not isinstance(manifest, dict):
+        raise PayloadContractError("local news projection manifest is missing")
+    generation_id = str(manifest.get("generation_id") or "")
+    previous_generation = state.get("generation_id")
+    if (
+        previous_generation and previous_generation != generation_id
+        and state.get("projection_state") != "CURRENT"
+    ):
+        _post_json(news_index_url, json.dumps({
+            "action": "abandon", "generation_id": previous_generation,
+        }, separators=(",", ":")).encode(), config)
+        state = {"contract_version": NEWS_MIRROR_CONTRACT_VERSION}
+
+    prepare_payload = json.dumps({
+        "action": "prepare", "generation_id": generation_id,
+        "manifest": manifest,
+    }, ensure_ascii=False, separators=(",", ":")).encode()
+    try:
+        prepare = _post_json(news_index_url, prepare_payload, config)
+    except RemoteInvariantViolation as error:
+        orphan = error.evidence.get("staging_generation_id")
+        if error.error_code != "NEWS_PROJECTION_STAGING_BUSY" or not orphan:
+            raise
+        _post_json(news_index_url, json.dumps({
+            "action": "abandon", "generation_id": orphan,
+        }, separators=(",", ":")).encode(), config)
+        prepare = _post_json(news_index_url, prepare_payload, config)
+    detail_offset = int(prepare.get("next_detail_offset", 0))
+    index_offset = int(prepare.get("next_index_offset", 0))
+    work = 0
+    snapshot_id = str(manifest["snapshot_id"])
+    while (
+        not prepare.get("active") and work < NEWS_PROJECTION_BATCHES_PER_CYCLE
+        and detail_offset < int(manifest["expected_detail_count"])
+    ):
+        page = _get_local_json(_local_news_archive_url(
+            config, mode="batch", snapshot_id=snapshot_id,
+            kind="detail", offset=detail_offset,
+        ))
+        items = page.get("items")
+        if not isinstance(items, list) or not items:
+            raise PayloadContractError("local news detail batch did not advance")
+        result = _post_json(news_url, json.dumps({
+            "action": "stage_details", "generation_id": generation_id,
+            "offset": detail_offset, "items": items,
+        }, ensure_ascii=False, separators=(",", ":")).encode(), config)
+        detail_offset += len(items)
+        if int(result.get("received", -1)) != len(items):
+            raise PayloadContractError("remote news detail receipt count mismatched")
+        work += 1
+    while (
+        not prepare.get("active") and work < NEWS_PROJECTION_BATCHES_PER_CYCLE
+        and detail_offset == int(manifest["expected_detail_count"])
+        and index_offset < int(manifest["expected_index_count"])
+    ):
+        page = _get_local_json(_local_news_archive_url(
+            config, mode="batch", snapshot_id=snapshot_id,
+            kind="index", offset=index_offset,
+        ))
+        items = page.get("items")
+        if not isinstance(items, list) or not items:
+            raise PayloadContractError("local news index batch did not advance")
+        result = _post_json(news_index_url, json.dumps({
+            "action": "stage_index", "generation_id": generation_id,
+            "offset": index_offset, "items": items,
+        }, ensure_ascii=False, separators=(",", ":")).encode(), config)
+        index_offset += len(items)
+        if int(result.get("received", -1)) != len(items):
+            raise PayloadContractError("remote news index receipt count mismatched")
+        work += 1
+
+    complete = (
+        detail_offset == int(manifest["expected_detail_count"])
+        and index_offset == int(manifest["expected_index_count"])
     )
-    state["has_more"] = bool(page.get("has_more"))
-    state["last_success"] = now.isoformat()
+    if not prepare.get("active") and complete:
+        _post_json(news_index_url, json.dumps({
+            "action": "activate", "generation_id": generation_id,
+        }, separators=(",", ":")).encode(), config)
+        _post_json(news_index_url, json.dumps({
+            "action": "verify", "generation_id": generation_id,
+        }, separators=(",", ":")).encode(), config)
+    if prepare.get("active") or complete:
+        _verify_news_projection_state(news_index_url, config, manifest)
+        state["active_snapshot_id"] = snapshot_id
+        state["projection_state"] = "CURRENT"
+        state["last_success"] = datetime.now(UTC).isoformat()
+    else:
+        state["projection_state"] = "REPLAYING"
+    state.update({
+        "generation_id": generation_id, "snapshot_id": snapshot_id,
+        "source_digest": manifest["source_digest"],
+        "expected_receipt_digest": manifest["expected_receipt_digest"],
+        "next_detail_offset": detail_offset, "next_index_offset": index_offset,
+        "expected_detail_count": manifest["expected_detail_count"],
+        "expected_index_count": manifest["expected_index_count"],
+        "updated_at": datetime.now(UTC).isoformat(),
+    })
     _write_news_sync_state(state_path, state)
 
 

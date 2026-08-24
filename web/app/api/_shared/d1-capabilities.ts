@@ -10,6 +10,13 @@ export const D1_CAPABILITIES = {
     "news_evidence_staging",
     "news_evidence_batches",
   ],
+  news_projection_generation: [
+    "news_projection_generations",
+    "news_projection_index",
+    "news_projection_details",
+    "news_projection_batches",
+    "news_projection_state",
+  ],
 } as const;
 
 export type D1Capability = keyof typeof D1_CAPABILITIES;

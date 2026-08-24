@@ -32,6 +32,7 @@ current rules merely because they discovered one.
 - [Forward-only evidence](contracts/FORWARD_ONLY.md)
 - [Replay](contracts/REPLAY.md)
 - [News evidence](contracts/NEWS_EVIDENCE.md)
+- [News projection](contracts/NEWS_PROJECTION.md)
 - [Evidence lanes](contracts/EVIDENCE_LANES.md)
 - [Hosting boundaries](contracts/HOSTING_BOUNDARIES.md)
 - [Release control](contracts/RELEASE_CONTROL.md)
