@@ -818,6 +818,7 @@ def test_configured_targets_rejects_every_state_path_outside_runtime_root(
 
 @pytest.mark.parametrize("value", [
     "../escape.json", "nested/state.json", "state.txt", "state name.json",
+    f"{'a' * 129}.json",
 ])
 def test_sync_state_path_rejects_traversal_and_non_json_names(
     monkeypatch, tmp_path, value

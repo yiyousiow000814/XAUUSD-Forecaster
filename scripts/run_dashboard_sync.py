@@ -1170,9 +1170,15 @@ def _validated_sync_state_path(path: Path) -> Path:
     else:
         parent = SYNC_STATE_ROOT if path.parent == Path(".") else path.parent
     filename = path.name
+    allowed_characters = frozenset(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+    )
     if (
         parent != SYNC_STATE_ROOT
-        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.json", filename) is None
+        or not 6 <= len(filename) <= 128
+        or not filename[0].isalnum()
+        or not filename.endswith(".json")
+        or any(character not in allowed_characters for character in filename)
     ):
         raise ValueError(
             f"dashboard sync state path must be one JSON file under {SYNC_STATE_ROOT}"
