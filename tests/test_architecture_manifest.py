@@ -6,6 +6,8 @@ from pathlib import Path
 
 from scripts.check_architecture_manifest import (
     CAMPAIGN_ORDER,
+    CANONICAL_PACKAGE_DEPENDENCIES,
+    REQUIRED_FAILURE_IMPACTS,
     load_manifest,
     validate_manifest,
 )
@@ -92,6 +94,40 @@ def test_six_architecture_dimensions_are_required() -> None:
     manifest, _ = manifest_copy()
     del manifest["nodes"][0]["architecture"]["bounded_work"]
     assert any("all six dimensions" in error for error in errors_for(manifest))
+
+
+def test_every_node_has_an_explicit_beginner_purpose() -> None:
+    manifest, _ = manifest_copy()
+    assert all(node["purpose"].strip() for node in manifest["nodes"])
+    manifest["nodes"][0]["purpose"] = " "
+    assert any("purpose must be a non-empty string" in error for error in errors_for(manifest))
+
+
+def test_package_dependency_view_matches_the_canonical_contract() -> None:
+    manifest, _ = manifest_copy()
+    view = next(item for item in manifest["views"] if item["id"] == "package-dependencies")
+    edges = {item["id"]: item for item in manifest["edges"]}
+    actual = {(edges[edge_id]["from"], edges[edge_id]["to"]) for edge_id in view["edge_ids"]}
+    expected = {
+        (f"package-{source}", f"package-{dependency}")
+        for source, dependencies in CANONICAL_PACKAGE_DEPENDENCIES.items()
+        for dependency in dependencies
+    }
+    assert actual == expected
+    assert all(edges[edge_id]["kind"] == "DEPENDENCY" for edge_id in view["edge_ids"])
+    assert view["relationship_note"] == "A → B means A may import or depend on B."
+    assert view["prohibited_directions"]
+
+    view["edge_ids"].remove(view["edge_ids"][0])
+    assert any("view must contain every dependency edge" in error for error in errors_for(manifest))
+
+
+def test_required_failure_impacts_are_explicit() -> None:
+    manifest, _ = manifest_copy()
+    impacts = {item["node_id"]: item for item in manifest["failure_impacts"]}
+    assert REQUIRED_FAILURE_IMPACTS.issubset(impacts)
+    assert all("AFFECTED" in entry["message"] for impact in impacts.values() for entry in impact["affected"])
+    assert all("CONTINUES" in entry["message"] for impact in impacts.values() for entry in impact["continues"])
 
 
 def test_enum_values_fail_closed() -> None:

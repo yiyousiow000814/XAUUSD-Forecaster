@@ -6,13 +6,13 @@ declare const __AURUM_DEPLOYMENT__: { commit_sha?: string };
 export type ArchitectureState = "CURRENT" | "PENDING" | "TARGET" | "PAUSED" | "RETAINED";
 export type ArchitecturePathState = "CURRENT_PATH" | "PENDING_PATH" | "LEGACY_SHIM" | "TARGET_PATH";
 export type ArchitectureNodeKind = "SUBSYSTEM" | "PROCESS" | "THREAD" | "CONTROL" | "WORKER" | "REQUEST_HANDLER" | "STORE" | "STATIC" | "COMPONENT" | "EXTERNAL";
-export type ArchitectureEdgeKind = "DATA" | "READ" | "WRITE" | "CONTROL" | "MODEL" | "MIRROR" | "OPTIONAL";
+export type ArchitectureEdgeKind = "DATA" | "READ" | "WRITE" | "CONTROL" | "MODEL" | "MIRROR" | "OPTIONAL" | "DEPENDENCY";
 export type ArchitectureCriticality = "CRITICAL" | "BACKGROUND" | "OPTIONAL" | "CONTROL_PLANE";
 export type ArchitectureDimension = "ownership" | "boundary" | "critical_path" | "bounded_work" | "incremental" | "failure_isolation";
 export type ArchitectureNode = {
   id: string; label: string; short_label: string; kind: ArchitectureNodeKind;
   runtime_state: ArchitectureState; implementation_state: ArchitecturePathState;
-  owner: string; summary: string; architecture: Record<ArchitectureDimension, string>;
+  owner: string; summary: string; purpose: string; architecture: Record<ArchitectureDimension, string>;
   inputs: string[]; outputs: string[]; code_paths: string[]; test_paths: string[];
   document_paths: string[]; tags: string[]; subsystem_view?: string;
 };
@@ -24,6 +24,7 @@ export type ArchitectureLane = { id: string; label: string; node_ids: string[] }
 export type ArchitectureView = {
   id: string; label: string; summary: string; layout_direction: "LR" | "TB";
   node_ids: string[]; edge_ids: string[]; entry_node: string; primary_path: string[]; lanes: ArchitectureLane[];
+  relationship_note?: string; prohibited_directions?: string[];
 };
 export type ArchitectureScenario = {
   id: string; label: string; description: string; view_id: string; node_ids: string[]; edge_ids: string[];
@@ -44,12 +45,16 @@ export type ArchitectureGraphNode = {
   id: string; position: { x: number; y: number }; width: number; height: number;
   data: { node: ArchitectureNode; laneId: string; laneLabel: string };
 };
+export type ArchitectureGraphLane = {
+  id: string; position: { x: number; y: number }; width: number; height: number;
+  data: { label: string; direction: "LR" | "TB" };
+};
 export type ArchitectureGraphEdge = ArchitectureEdge & { source: string; target: string };
 
 const STATES = new Set<ArchitectureState>(["CURRENT", "PENDING", "TARGET", "PAUSED", "RETAINED"]);
 const PATH_STATES = new Set<ArchitecturePathState>(["CURRENT_PATH", "PENDING_PATH", "LEGACY_SHIM", "TARGET_PATH"]);
 const NODE_KINDS = new Set<ArchitectureNodeKind>(["SUBSYSTEM", "PROCESS", "THREAD", "CONTROL", "WORKER", "REQUEST_HANDLER", "STORE", "STATIC", "COMPONENT", "EXTERNAL"]);
-const EDGE_KINDS = new Set<ArchitectureEdgeKind>(["DATA", "READ", "WRITE", "CONTROL", "MODEL", "MIRROR", "OPTIONAL"]);
+const EDGE_KINDS = new Set<ArchitectureEdgeKind>(["DATA", "READ", "WRITE", "CONTROL", "MODEL", "MIRROR", "OPTIONAL", "DEPENDENCY"]);
 const CRITICALITIES = new Set<ArchitectureCriticality>(["CRITICAL", "BACKGROUND", "OPTIONAL", "CONTROL_PLANE"]);
 const DIMENSIONS: ArchitectureDimension[] = ["ownership", "boundary", "critical_path", "bounded_work", "incremental", "failure_isolation"];
 
@@ -72,6 +77,9 @@ export function parseArchitectureManifest(value: unknown): ArchitectureManifest 
       || !Array.isArray(candidate.scenarios) || !Array.isArray(candidate.failure_impacts)) return null;
   if (!candidate.nodes.every(node => node && typeof node.id === "string" && NODE_KINDS.has(node.kind)
       && STATES.has(node.runtime_state) && PATH_STATES.has(node.implementation_state)
+      && typeof node.summary === "string" && node.summary.trim().length > 0
+      && typeof node.purpose === "string" && node.purpose.trim().length > 0
+      && typeof node.owner === "string" && node.owner.trim().length > 0
       && DIMENSIONS.every(key => typeof node.architecture?.[key] === "string")
       && [node.inputs, node.outputs, node.code_paths, node.test_paths, node.document_paths, node.tags].every(isStringArray))) return null;
   const nodeIds = new Set(candidate.nodes.map(node => node.id));
@@ -85,7 +93,9 @@ export function parseArchitectureManifest(value: unknown): ArchitectureManifest 
   const viewById = new Map(candidate.views.map(view => [view.id, view]));
   if (viewIds.size !== candidate.views.length || !candidate.views.every(view => {
     if (!view || !["LR", "TB"].includes(view.layout_direction) || !isStringArray(view.node_ids)
-        || !isStringArray(view.edge_ids) || !isStringArray(view.primary_path) || !Array.isArray(view.lanes)) return false;
+        || !isStringArray(view.edge_ids) || !isStringArray(view.primary_path) || !Array.isArray(view.lanes)
+        || (view.relationship_note !== undefined && typeof view.relationship_note !== "string")
+        || (view.prohibited_directions !== undefined && !isStringArray(view.prohibited_directions))) return false;
     const visible = new Set(view.node_ids);
     const laneNodes = view.lanes.flatMap(lane => lane.node_ids);
     const primaryEdges = view.primary_path.slice(0, -1).map((from, index) => view.edge_ids.find(edgeId => {
@@ -150,7 +160,7 @@ export function searchArchitectureNodes(manifest: ArchitectureManifest, query: s
   return manifest.nodes.filter(node => {
     if (state !== "ALL" && node.runtime_state !== state) return false;
     if (!normalized) return true;
-    return [node.label, node.short_label, node.owner, node.summary, ...node.code_paths, ...node.test_paths, ...node.document_paths, ...node.tags]
+    return [node.label, node.short_label, node.owner, node.summary, node.purpose, ...node.code_paths, ...node.test_paths, ...node.document_paths, ...node.tags]
       .some(value => value.toLocaleLowerCase().includes(normalized));
   });
 }
@@ -161,6 +171,15 @@ export function bestViewForNode(manifest: ArchitectureManifest, node: Architectu
 }
 export function architectureFailureImpact(manifest: ArchitectureManifest, nodeId: string | null) {
   return nodeId ? manifest.failure_impacts.find(item => item.node_id === nodeId) ?? null : null;
+}
+
+export function architectureFitOptions(nodeCount: number, mobile: boolean) {
+  const maxZoom = nodeCount <= 5 ? (mobile ? 1.12 : 1.3) : nodeCount <= 9 ? (mobile ? 1 : 1.12) : (mobile ? .9 : 1);
+  return { padding: mobile ? .08 : .07, maxZoom, duration: 280 } as const;
+}
+
+export function architectureCanvasHeight(nodeCount: number, mobile: boolean) {
+  return mobile ? Math.min(1600, Math.max(650, nodeCount * 135)) : 650;
 }
 
 export function buildArchitectureGraph(manifest: ArchitectureManifest, viewId: string, direction?: "LR" | "TB") {
@@ -175,11 +194,38 @@ export function buildArchitectureGraph(manifest: ArchitectureManifest, viewId: s
   const visibleEdges = view.edge_ids.map(id => manifest.edges.find(item => item.id === id)!).filter(Boolean);
   visibleEdges.forEach(item => graph.setEdge(item.from, item.to, { id: item.id }));
   dagre.layout(graph);
+  const compactMobilePositions = new Map<string, { x: number; y: number }>();
+  if (rankdir === "TB") {
+    let cursorY = 24;
+    for (const lane of view.lanes) {
+      for (const nodeId of lane.node_ids) {
+        compactMobilePositions.set(nodeId, { x: 24, y: cursorY });
+        cursorY += height + 36;
+      }
+      cursorY += 28;
+    }
+  }
   const nodes: ArchitectureGraphNode[] = view.node_ids.map(id => {
-    const position = graph.node(id) as { x: number; y: number }; const lane = laneByNode.get(id)!;
-    return { id, position: { x: position.x - width / 2, y: position.y - height / 2 }, width, height,
+    const dagrePosition = graph.node(id) as { x: number; y: number }; const lane = laneByNode.get(id)!;
+    const position = compactMobilePositions.get(id) ?? { x: dagrePosition.x - width / 2, y: dagrePosition.y - height / 2 };
+    return { id, position, width, height,
       data: { node: nodeById.get(id)!, laneId: lane.id, laneLabel: lane.label } };
   });
+  const lanePadding = rankdir === "TB" ? { x: 18, top: 34, bottom: 18 } : { x: 22, top: 34, bottom: 20 };
+  const laneBoxes: ArchitectureGraphLane[] = view.lanes.map(lane => {
+    const laneNodes = nodes.filter(node => lane.node_ids.includes(node.id));
+    const left = Math.min(...laneNodes.map(node => node.position.x));
+    const top = Math.min(...laneNodes.map(node => node.position.y));
+    const right = Math.max(...laneNodes.map(node => node.position.x + node.width));
+    const bottom = Math.max(...laneNodes.map(node => node.position.y + node.height));
+    return {
+      id: `lane-${lane.id}`,
+      position: { x: left - lanePadding.x, y: top - lanePadding.top },
+      width: right - left + lanePadding.x * 2,
+      height: bottom - top + lanePadding.top + lanePadding.bottom,
+      data: { label: lane.label, direction: rankdir },
+    };
+  });
   const edges: ArchitectureGraphEdge[] = visibleEdges.map(item => ({ ...item, source: item.from, target: item.to }));
-  return { view, nodes, edges, direction: rankdir };
+  return { view, nodes, laneBoxes, edges, direction: rankdir };
 }

@@ -29,15 +29,19 @@ Markdown parser, Windows process, background thread, or production mutation.
 
 - Schema: `architecture-explorer-v2`
 - Views: 11
-- Nodes: 28
-- Edges: 38
+- Nodes: 37
+- Edges: 66
 - Guided scenarios: 4
-- Explicit failure-impact definitions: 2
-- Serialized bytes: 50,891 of the fixed 65,536-byte limit
+- Explicit failure-impact definitions: 8
+- Serialized bytes: 64,971 of the fixed 65,536-byte limit
 - Edge IDs, endpoints, labels, kinds, criticalities, and descriptions are explicit.
 - View edge membership, visible endpoints, continuous primary paths, lane
   membership, scenario continuity, and failure references fail closed.
 - Coordinates are not stored; Dagre calculates finite positions per selected view.
+- Every node has a non-empty `purpose` separate from summary and ownership.
+- The package view has nine explicit canonical package nodes and 28
+  `DEPENDENCY` edges matching `PACKAGE_DEPENDENCIES.md`; it contains no runtime
+  transport, materialization, Candidate, or published-model node.
 
 ## Interaction and presentation evidence
 
@@ -46,13 +50,22 @@ Markdown parser, Windows process, background thread, or production mutation.
 - Hover highlights direct neighbors. Selection highlights the transitive
   upstream/downstream path, dims unrelated nodes, and opens a closable inspector.
 - Inspector starts with beginner questions, then collapsed architecture
-  dimensions and compact Code/Test/Docs tabs.
+  dimensions and compact Code/Test/Docs tabs. Its Chinese-primary questions
+  keep summary, purpose, owner, and architecture ownership semantically separate.
 - Node-owned subsystem links and breadcrumb history replace the generic drill action.
 - Search selects and centers a node in its relevant graph; it never creates a card grid.
 - Manifest-owned scenarios cover one Decision, Training-to-Decision,
   Cloudflare unavailable, and the exact-revision release path.
-- Failure mode uses explicit `AFFECTED` and `CONTINUES` membership. It does not
-  classify every non-neighbor as safe.
+- Failure mode uses explicit `AFFECTED` and `CONTINUES` membership for Training,
+  Cloudflare, Decision, Evidence Ledger, News, Dashboard Sync, D1, and Control
+  Plane. Nodes without a contract expose a disabled control and explanation;
+  the UI never classifies every non-neighbor as safe.
+- Labelled lane regions sit behind the graph and do not intercept selection,
+  pan, or zoom. Critical edge labels remain visible; background and optional
+  labels appear for interaction, guidance, or sparse views while the text
+  fallback always retains every label.
+- Small views permit a larger bounded fit zoom. View changes fit all nodes;
+  opening the inspector preserves zoom, and closing it refits the restored width.
 - Keyboard nodes support Enter, Space, arrows, Escape, visible focus, and an
   `aria-live` selected-path announcement. The relationship text equivalent is
   secondary and collapsible. Reduced motion disables guided edge animation.
@@ -63,11 +76,11 @@ Measured from the production client build with maximum gzip compression:
 
 | Artifact | Raw bytes | Gzip bytes | Boundary |
 |---|---:|---:|---|
-| Lazy Explorer JS | 294,225 | 89,990 | Private lazy chunk only |
-| Lazy Explorer CSS | 30,690 | 6,119 | Private lazy chunk only |
-| Public `DashboardApp` JS | 29,177 | 10,110 | Public initial path |
-| Public shared `index` JS | 217,752 | 58,249 | Public initial path |
-| Public initial CSS | 199,919 | 34,359 | Public initial path |
+| Lazy Explorer JS | 310,799 | 93,454 | Private lazy chunk only |
+| Lazy Explorer CSS | 32,639 | 6,467 | Private lazy chunk only |
+| Public `DashboardApp` JS | 29,177 | 10,228 | Public initial path |
+| Public shared `index` JS | 217,752 | 58,189 | Public initial path |
+| Public initial CSS | 199,919 | 34,287 | Public initial path |
 
 The public JS raw sizes are unchanged from the rejected #304 build boundary;
 the graph packages occur only in `ArchitectureExplorerView-*.js`. The scoped
@@ -80,8 +93,8 @@ initial gzip regression is therefore below the 2 KiB ceiling.
 | Viewport | Graph | Inspector | Overflow | Targets |
 |---|---|---|---|---|
 | 1440x900 | LR Overview, 11 nodes / 11 edges, arrows, labels, MiniMap | Closed initially; 380px drawer after selection | none | at least 44px |
-| 390x844 | TB Dagre graph, pan/pinch/Fit, no MiniMap | 58% bottom sheet | none | at least 44px |
-| 360x800 | TB Dagre graph and nine-step Decision guide | bottom sheet | none | zero visible targets below 44px |
+| 390x844 | Lane-first TB graph, pan/pinch/Fit, no MiniMap; nodes remain about 209x81 px in Overview | Fixed 58dvh bottom sheet | none | at least 44px |
+| 360x800 | Lane-first TB graph and nine-step Decision guide | Fixed 58dvh bottom sheet | none | zero visible targets below 44px |
 
 Browser checks exercised Decision selection/dimming, inspector close,
 subsystem membership, guided next-step navigation, Training nodes, explicit

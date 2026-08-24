@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
-  architectureGithubHref, architectureRelations, bestViewForNode, buildArchitectureGraph,
+  architectureCanvasHeight, architectureFitOptions, architectureGithubHref, architectureRelations, bestViewForNode, buildArchitectureGraph,
   parseArchitectureManifest, searchArchitectureNodes,
 } from "../app/_lib/architecture-explorer.ts";
 import { loadArchitectureManifest } from "../build/architecture-manifest.ts";
@@ -19,7 +19,7 @@ const cssSource = source("../app/_views/ArchitectureExplorerView.module.css");
 test("1. Initial System Overview contains a real graph canvas", () => {
   assert.equal(manifest.schema, "architecture-explorer-v2");
   assert.equal(manifest.views[0].id, "system-overview");
-  assert.match(viewSource, /<ReactFlow<ArchitectureFlowNode, ArchitectureFlowEdge>/);
+  assert.match(viewSource, /<ReactFlow<ArchitectureCanvasNode, ArchitectureFlowEdge>/);
   assert.match(viewSource, /data-testid="architecture-graph"/);
   assert.equal(parseArchitectureManifest({ schema: "wrong", nodes: [], edges: [], views: [] }), null);
 });
@@ -64,8 +64,9 @@ test("7. Unrelated nodes are visually and semantically dimmed", () => {
 });
 
 test("8. Closing the inspector restores full graph width", () => {
-  assert.match(viewSource, /aria-label="Close inspector"/);
-  assert.match(viewSource, /setSelectedId\(null\)/);
+  assert.match(viewSource, /aria-label="关闭详情"/);
+  assert.match(viewSource, /closeInspector/);
+  assert.match(viewSource, /window\.setTimeout\(\(\) => fitGraph\(220\), 230\)/);
   assert.match(cssSource, /\.withInspector \.canvas \{ width: calc\(100% - 380px\)/);
 });
 
@@ -103,7 +104,7 @@ test("13. Node-owned drill-down changes graph membership", () => {
   const training = manifest.nodes.find(item => item.id === "training");
   assert.equal(training.subsystem_view, "training-models");
   assert.notDeepEqual(buildArchitectureGraph(manifest, "system-overview").view.node_ids, buildArchitectureGraph(manifest, training.subsystem_view).view.node_ids);
-  assert.match(viewSource, /Open subsystem/);
+  assert.match(viewSource, /打开子系统/);
 });
 
 test("14. Back breadcrumb restores the parent graph", () => {
@@ -116,7 +117,7 @@ test("15. Pan, zoom, fit, and read-only controls are explicit", () => {
   assert.match(viewSource, /<Controls/);
   assert.match(viewSource, /panOnDrag zoomOnPinch zoomOnScroll/);
   assert.match(viewSource, /nodesConnectable=\{false\} nodesDraggable=\{false\}/);
-  assert.match(viewSource, />Fit</);
+  assert.match(viewSource, /适配画布 · Fit/);
 });
 
 test("16. MiniMap exists only on desktop", () => {
@@ -129,13 +130,14 @@ test("17. Mobile transforms every view to a finite top-to-bottom graph", () => {
     const graph = buildArchitectureGraph(manifest, view.id, "TB");
     assert.equal(graph.direction, "TB");
     assert.ok(graph.nodes.every(node => Number.isFinite(node.position.x) && Number.isFinite(node.position.y)));
+    assert.equal(new Set(graph.nodes.map(node => node.position.x)).size, 1);
   }
-  assert.match(cssSource, /@media \(max-width: 720px\)[\s\S]*\.inspector \{ inset: auto 0 0/);
+  assert.match(cssSource, /@media \(max-width: 720px\)[\s\S]*\.inspector \{ position: fixed; inset: auto 0 0/);
 });
 
 test("18. A collapsible relationship text equivalent remains secondary", () => {
   assert.match(viewSource, /<details className=\{styles\.textFallback\}>/);
-  assert.match(viewSource, /Relationship text fallback/);
+  assert.match(viewSource, /关系文字版 · Relationship text fallback/);
 });
 
 test("19. Explorer makes no Architecture API or runtime fetch", () => {
@@ -164,4 +166,74 @@ test("22. Source links require one exact immutable build SHA", () => {
   assert.equal(architectureGithubHref(manifest, "architecture/manifest.json", sha), `https://github.com/${manifest.repository}/blob/${sha}/architecture/manifest.json`);
   assert.equal(architectureGithubHref(manifest, "architecture/manifest.json", "main"), null);
   assert.equal(architectureGithubHref(manifest, "../secret", sha), null);
+});
+
+test("23. Purpose is explicit and ownership remains a separate answer", () => {
+  assert.ok(manifest.nodes.every(node => typeof node.purpose === "string" && node.purpose.trim()));
+  assert.match(viewSource, /<dt>它是什么？<\/dt><dd>\{node\.summary\}<\/dd>/);
+  assert.match(viewSource, /<dt>为什么需要它？<\/dt><dd>\{node\.purpose\}<\/dd>/);
+  assert.match(viewSource, /<dt>谁负责它？<\/dt>/);
+  assert.match(viewSource, /\{node\.owner\}/);
+  assert.match(viewSource, /\{node\.architecture\.ownership\}/);
+});
+
+test("24. Canonical Package Dependencies is an import graph only", () => {
+  const view = manifest.views.find(item => item.id === "package-dependencies");
+  const expectedNodes = new Set(["foundational", "ai", "evidence", "news", "training", "decision", "runtime", "assistant", "dashboard"].map(id => `package-${id}`));
+  assert.deepEqual(new Set(view.node_ids), expectedNodes);
+  assert.ok(view.edge_ids.length > 0);
+  assert.ok(view.edge_ids.every(id => manifest.edges.find(edge => edge.id === id)?.kind === "DEPENDENCY"));
+  assert.equal(view.relationship_note, "A → B means A may import or depend on B.");
+  assert.ok(view.prohibited_directions.length >= 4);
+  assert.ok(!view.node_ids.some(id => ["published-model", "training-materialization", "candidate-validation"].includes(id)));
+  assert.match(viewSource, /禁止的反向依赖 · Prohibited reverse directions/);
+});
+
+test("25. Every view exposes non-interactive labelled lane regions", () => {
+  for (const view of manifest.views) {
+    const graph = buildArchitectureGraph(manifest, view.id);
+    assert.equal(graph.laneBoxes.length, view.lanes.length);
+    assert.ok(graph.laneBoxes.every(lane => Number.isFinite(lane.position.x) && Number.isFinite(lane.position.y) && lane.width > 0 && lane.height > 0));
+  }
+  assert.match(viewSource, /type: "lane"/);
+  assert.match(viewSource, /selectable: false, focusable: false/);
+  assert.match(cssSource, /react-flow__node-lane[^}]+pointer-events: none/s);
+  assert.match(viewSource, /if \(!architectureNode\) return "#d7e2e0"/);
+});
+
+test("26. Fit zoom is bounded by view size and selection does not refit", () => {
+  assert.ok(architectureFitOptions(4, false).maxZoom > architectureFitOptions(11, false).maxZoom);
+  assert.ok(architectureFitOptions(4, true).maxZoom <= architectureFitOptions(4, false).maxZoom);
+  assert.equal(architectureCanvasHeight(4, true), 650);
+  assert.equal(architectureCanvasHeight(11, true), 1485);
+  assert.equal(architectureCanvasHeight(99, true), 1600);
+  assert.equal(architectureCanvasHeight(11, false), 650);
+  assert.match(viewSource, /zoom: flow\.getZoom\(\)/);
+  assert.match(viewSource, /flow\.setViewport\(\{/);
+  assert.match(viewSource, /y: 64 - item\.position\.y \* zoom/);
+  assert.doesNotMatch(viewSource, /selectedId\]\);\s*$/m);
+});
+
+test("27. Edge labels follow critical, release, interaction, guide, and sparse-view rules", () => {
+  assert.match(viewSource, /item\.criticality === "CRITICAL"/);
+  assert.match(viewSource, /item\.criticality === "CONTROL_PLANE" && viewId === "runtime-release"/);
+  assert.match(viewSource, /graph\.edges\.length <= 4/);
+  assert.match(viewSource, /hoveredEdgeId === item\.id/);
+  assert.match(viewSource, /data\.showLabel \?/);
+  assert.match(viewSource, /graph\.edges\.map\(edge =>/);
+});
+
+test("28. Beginner and failure copy is Chinese-primary", () => {
+  for (const label of ["它是什么？", "为什么需要它？", "谁负责它？", "输入来自哪里？", "输出到哪里？", "它坏了会停止什么？", "什么仍会继续？", "打开子系统"]) {
+    assert.ok(viewSource.includes(label), label);
+  }
+});
+
+test("29. Required failure impacts are explicit and missing contracts stay disabled", () => {
+  const required = ["training", "cloudflare", "decision", "evidence", "news", "dashboard-sync", "d1", "control-plane"];
+  assert.ok(required.every(id => manifest.failure_impacts.some(item => item.node_id === id)));
+  assert.ok(manifest.failure_impacts.every(impact => impact.affected.every(item => item.message.includes("AFFECTED"))));
+  assert.ok(manifest.failure_impacts.every(impact => impact.continues.every(item => item.message.includes("CONTINUES"))));
+  assert.match(viewSource, /disabled=\{!impactForSelected\}/);
+  assert.match(viewSource, /没有显式 failure impact contract/);
 });

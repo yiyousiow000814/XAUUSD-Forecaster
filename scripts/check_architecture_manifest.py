@@ -15,7 +15,7 @@ KINDS = {
 }
 RUNTIME_STATES = {"CURRENT", "PENDING", "TARGET", "PAUSED", "RETAINED"}
 IMPLEMENTATION_STATES = {"CURRENT_PATH", "PENDING_PATH", "LEGACY_SHIM", "TARGET_PATH"}
-EDGE_KINDS = {"DATA", "READ", "WRITE", "CONTROL", "MODEL", "MIRROR", "OPTIONAL"}
+EDGE_KINDS = {"DATA", "READ", "WRITE", "CONTROL", "MODEL", "MIRROR", "OPTIONAL", "DEPENDENCY"}
 EDGE_CRITICALITIES = {"CRITICAL", "BACKGROUND", "OPTIONAL", "CONTROL_PLANE"}
 LAYOUT_DIRECTIONS = {"LR", "TB"}
 ARCHITECTURE_FIELDS = {
@@ -26,6 +26,20 @@ CAMPAIGN_ORDER = [
     "latest-main", "phase-c", "phase-d", "phase-e",
     "architecture-explorer", "closure",
 ]
+CANONICAL_PACKAGE_DEPENDENCIES = {
+    "foundational": set(),
+    "ai": {"foundational"},
+    "evidence": {"foundational", "ai"},
+    "news": {"foundational", "ai", "evidence"},
+    "training": {"foundational", "ai", "evidence", "news"},
+    "decision": {"foundational", "ai", "evidence", "news", "training"},
+    "runtime": {"foundational"},
+    "assistant": {"foundational", "ai", "evidence", "news"},
+    "dashboard": {"foundational", "ai", "evidence", "news", "training", "decision", "runtime", "assistant"},
+}
+REQUIRED_FAILURE_IMPACTS = {
+    "training", "cloudflare", "decision", "evidence", "news", "dashboard-sync", "d1", "control-plane",
+}
 SECRET_PATTERN = re.compile(
     r"(?:-----BEGIN [A-Z ]+PRIVATE KEY-----|(?:api|secret|token|password)[_-]?key\s*[:=])",
     re.IGNORECASE,
@@ -71,6 +85,9 @@ def validate_manifest(root: Path, manifest: dict[str, Any], byte_size: int) -> l
             errors.append(f"{node_id}: invalid runtime_state {node.get('runtime_state')!r}")
         if node.get("implementation_state") not in IMPLEMENTATION_STATES:
             errors.append(f"{node_id}: invalid implementation_state {node.get('implementation_state')!r}")
+        for field in ("owner", "summary", "purpose"):
+            if not isinstance(node.get(field), str) or not node[field].strip():
+                errors.append(f"{node_id}: {field} must be a non-empty string")
         architecture = node.get("architecture")
         if not isinstance(architecture, dict) or set(architecture) != ARCHITECTURE_FIELDS:
             errors.append(f"{node_id}: architecture must contain all six dimensions")
@@ -150,6 +167,13 @@ def validate_manifest(root: Path, manifest: dict[str, Any], byte_size: int) -> l
         view_id = view.get("id", "<missing>")
         if view.get("layout_direction") not in LAYOUT_DIRECTIONS:
             errors.append(f"{view_id}: invalid layout direction")
+        if view.get("relationship_note") is not None and (not isinstance(view["relationship_note"], str) or not view["relationship_note"].strip()):
+            errors.append(f"{view_id}: relationship_note must be a non-empty string")
+        if view.get("prohibited_directions") is not None and (
+            not isinstance(view["prohibited_directions"], list)
+            or not all(isinstance(item, str) and item.strip() for item in view["prohibited_directions"])
+        ):
+            errors.append(f"{view_id}: prohibited_directions must contain non-empty strings")
         view_nodes = view.get("node_ids")
         view_edges = view.get("edge_ids")
         if not isinstance(view_nodes, list) or not isinstance(view_edges, list):
@@ -192,6 +216,26 @@ def validate_manifest(root: Path, manifest: dict[str, Any], byte_size: int) -> l
                 primary_edges.append(match)
         validate_path(f"{view_id} primary path", primary_path, primary_edges, node_set, edge_set)
 
+    package_view = view_by_id.get("package-dependencies", {})
+    expected_package_nodes = {f"package-{name}" for name in CANONICAL_PACKAGE_DEPENDENCIES}
+    expected_dependency_pairs = {
+        (f"package-{source}", f"package-{target}")
+        for source, targets in CANONICAL_PACKAGE_DEPENDENCIES.items()
+        for target in targets
+    }
+    dependency_edges = [edge for edge in edges if isinstance(edge, dict) and edge.get("kind") == "DEPENDENCY"]
+    actual_dependency_pairs = {(edge.get("from"), edge.get("to")) for edge in dependency_edges}
+    if set(package_view.get("node_ids", [])) != expected_package_nodes:
+        errors.append("package-dependencies: canonical package nodes do not match contract")
+    if set(package_view.get("edge_ids", [])) != {edge.get("id") for edge in dependency_edges}:
+        errors.append("package-dependencies: view must contain every dependency edge and no runtime edge")
+    if actual_dependency_pairs != expected_dependency_pairs:
+        errors.append("package-dependencies: dependency directions do not match contract")
+    if package_view.get("relationship_note") != "A → B means A may import or depend on B.":
+        errors.append("package-dependencies: import direction explanation is missing")
+    if not package_view.get("prohibited_directions"):
+        errors.append("package-dependencies: prohibited reverse directions are missing")
+
     for item in nodes:
         if isinstance(item, dict) and item.get("subsystem_view") is not None and item.get("subsystem_view") not in view_ids:
             errors.append(f"{item.get('id')}: missing subsystem view {item.get('subsystem_view')}")
@@ -227,6 +271,8 @@ def validate_manifest(root: Path, manifest: dict[str, Any], byte_size: int) -> l
         errors.append("failure_impacts must be a non-empty list")
         impacts = []
     impact_ids = {item.get("node_id") for item in impacts if isinstance(item, dict)}
+    if not REQUIRED_FAILURE_IMPACTS.issubset(impact_ids):
+        errors.append(f"missing required failure impacts: {sorted(REQUIRED_FAILURE_IMPACTS - impact_ids)!r}")
     for impact in impacts:
         if not isinstance(impact, dict) or impact.get("node_id") not in known_nodes:
             errors.append(f"invalid failure impact owner: {impact!r}")
@@ -241,6 +287,10 @@ def validate_manifest(root: Path, manifest: dict[str, Any], byte_size: int) -> l
             errors.append(f"{impact.get('node_id')}: failure impact references missing node")
         if set(entry.get("node_id") for entry in affected) & set(entry.get("node_id") for entry in continues):
             errors.append(f"{impact.get('node_id')}: failure impact overlaps affected and continues")
+        if any("AFFECTED" not in entry.get("message", "") for entry in affected if isinstance(entry, dict)):
+            errors.append(f"{impact.get('node_id')}: affected messages must be explicit")
+        if any("CONTINUES" not in entry.get("message", "") for entry in continues if isinstance(entry, dict)):
+            errors.append(f"{impact.get('node_id')}: continues messages must be explicit")
     for scenario in scenarios:
         if isinstance(scenario, dict) and scenario.get("failure_node_id") is not None and scenario.get("failure_node_id") not in impact_ids:
             errors.append(f"{scenario.get('id')}: missing failure impact")

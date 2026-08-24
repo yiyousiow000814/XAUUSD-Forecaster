@@ -41,6 +41,23 @@ membership. Guided scenarios own ordered continuous paths; failure exploration
 uses explicit `affected` and `continues` membership and never infers safety from
 graph distance.
 
+Every node owns a non-empty beginner-facing `purpose` distinct from `summary`,
+`owner`, and the six architecture dimensions. The inspector presents those
+facts separately: what the node is, why it exists, and who owns it.
+
+`Canonical Package Dependencies` is a compile-time import graph derived from
+`docs/contracts/PACKAGE_DEPENDENCIES.md`. Its nine `package-*` nodes and
+`DEPENDENCY` edges are separate from operational runtime/data nodes. The view
+states that `A → B` means A may import or depend on B and lists prohibited
+reverse directions without drawing them as valid edges.
+
+Lane membership renders as non-interactive labelled swimlane regions. Desktop
+uses Dagre layout; narrow screens use a bounded lane-first TB compaction so all
+nodes fit without shrinking text below a useful size. Critical labels remain
+visible, while background and optional labels expand on interaction or in a
+sparse view. Failure controls are available only for nodes with explicit
+`AFFECTED` and `CONTINUES` contracts.
+
 The client uses Dagre to calculate finite positions from the selected bounded
 view. Coordinates are not stored in the manifest. React Flow renders only that
 view's nodes and edges as a read-only graph. Both libraries and their CSS remain

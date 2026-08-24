@@ -83,6 +83,14 @@ and scoped graph CSS are referenced only by the lazy Explorer view, so they do
 not join the public Live initial dependency path. Source links bind to the
 immutable build SHA.
 
+The graph renders manifest lanes as pointer-transparent labelled regions.
+Mobile uses a bounded lane-first top-to-bottom compaction and a node-count
+bounded canvas height so fit-all remains readable; its inspector is a viewport
+bottom sheet. Edge labels remain in the accessible text equivalent even when
+background or optional visual labels are interaction-only. The canonical
+package view contains only `DEPENDENCY` edges governed by the package
+dependency contract.
+
 ## 9. Incremental mechanisms
 
 D1 histories use stable keys, cursors, and materialized overviews. Snapshot
