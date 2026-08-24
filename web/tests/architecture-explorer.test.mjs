@@ -247,7 +247,7 @@ test("27. Visible edges own port visibility and terminal nodes have no phantom h
   assert.match(viewSource, /data\.hasOutgoingEdge \? <Handle/);
   assert.match(cssSource, /\.handleLR \{ width: 6px !important; min-width: 6px !important; height: 22px !important;/);
   assert.match(cssSource, /\.handleTB \{ width: 22px !important; height: 6px !important; min-height: 6px !important;/);
-  assert.match(cssSource, /\.handle \{[^}]*border-radius: 999px !important;/);
+  assert.match(cssSource, /\.handle \{[^}]*display: block !important;[^}]*border-radius: 999px !important;[^}]*padding: 0 !important;/);
 });
 
 test("28. Every routed edge clears unrelated nodes and keeps a unique complete path", () => {
