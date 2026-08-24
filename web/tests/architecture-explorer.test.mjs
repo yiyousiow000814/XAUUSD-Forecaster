@@ -4,7 +4,7 @@ import test from "node:test";
 
 import {
   ARCHITECTURE_EDGE_OVERLAP_TOLERANCE, ARCHITECTURE_LANE_GAP, ARCHITECTURE_MOBILE_NODE_WIDTH_FLOOR, ARCHITECTURE_SEMANTIC_LAYOUT_PASSES,
-  architectureCanvasHeight, architectureEdgeRoute, architectureFitOptions, architectureGithubHref, architectureGraphBounds, architectureMobileViewport,
+  architectureCanvasHeight, architectureDisclosedEdgeIds, architectureDisclosedGraph, architectureEdgeRoute, architectureFitOptions, architectureGithubHref, architectureGraphBounds, architectureMobileViewport,
   architecturePortVisibility, architectureRelations, architectureRouteCrossesUnrelatedNode, architectureRoutePath, architectureSharedCollinearLength,
   bestViewForNode, buildArchitectureGraph,
   parseArchitectureManifest, searchArchitectureNodes,
@@ -547,4 +547,143 @@ test("48. Mobile initialization exposes only one TB layout Fit", () => {
   assert.match(viewSource, /mobile === null[\s\S]*Preparing architecture layout/);
   assert.doesNotMatch(viewSource, /elementsSelectable fitView/);
   assert.doesNotMatch(viewSource, /window\.setTimeout/);
+});
+
+test("49. Navigation taxonomy has exactly one beginner overview", () => {
+  const overviews = manifest.views.filter(view => view.navigation.role === "OVERVIEW");
+  assert.deepEqual(overviews.map(view => [view.id, view.navigation.audience]), [["system-overview", "BEGINNER"]]);
+});
+
+test("50. Beginner subsystem taxonomy is manifest-owned", () => {
+  assert.deepEqual(manifest.views.filter(view => view.navigation.role === "SUBSYSTEM").map(view => view.id),
+    ["decision-evidence", "training-models", "news-ai", "dashboard-sync", "web-cloudflare", "assistant"]);
+});
+
+test("51. Advanced and campaign views stay outside beginner navigation", () => {
+  const advanced = manifest.views.filter(view => view.navigation.audience === "ADVANCED").map(view => view.id);
+  assert.deepEqual(advanced, ["execution-topology", "runtime-release", "package-dependencies", "modularization-campaign"]);
+});
+
+test("52. Every non-overview view returns to System Overview", () => {
+  assert.ok(manifest.views.slice(1).every(view => view.navigation.parent_view === "system-overview"));
+});
+
+test("53. Overview initially exposes the critical spine", () => {
+  const visible = architectureDisclosedEdgeIds(manifest, "system-overview");
+  for (const id of ["quote-to-runtime", "runtime-to-decision", "decision-to-evidence", "evidence-to-dashboard", "dashboard-to-web-overview"]) assert.ok(visible.has(id));
+});
+
+test("54. Overview initially exposes optional News to Decision", () => {
+  assert.ok(architectureDisclosedEdgeIds(manifest, "system-overview").has("news-to-decision"));
+});
+
+test("55. Overview keeps feedback and release-control relationships secondary", () => {
+  const visible = architectureDisclosedEdgeIds(manifest, "system-overview");
+  for (const id of ["evidence-to-training", "training-to-decision", "github-to-control-plane", "control-plane-to-center"]) assert.equal(visible.has(id), false);
+});
+
+test("56. Selecting Decision reveals its direct relationships", () => {
+  const visible = architectureDisclosedEdgeIds(manifest, "system-overview", { selectedNodeId: "decision" });
+  for (const id of ["runtime-to-decision", "decision-to-evidence", "news-to-decision", "training-to-decision", "decision-to-dashboard"]) assert.ok(visible.has(id));
+});
+
+test("57. Selecting Decision retains the overview spine", () => {
+  const base = architectureDisclosedEdgeIds(manifest, "system-overview");
+  const selected = architectureDisclosedEdgeIds(manifest, "system-overview", { selectedNodeId: "decision" });
+  assert.ok([...base].every(id => selected.has(id)));
+});
+
+test("58. Disclosure preserves complete-graph node positions", () => {
+  const full = buildArchitectureGraph(manifest, "system-overview");
+  const disclosed = architectureDisclosedGraph(full, architectureDisclosedEdgeIds(manifest, "system-overview"));
+  assert.deepEqual(disclosed.nodes.map(node => [node.id, node.position]), full.nodes.map(node => [node.id, node.position]));
+});
+
+test("59. Disclosure preserves preassigned route anchors", () => {
+  const full = buildArchitectureGraph(manifest, "system-overview");
+  const disclosed = architectureDisclosedGraph(full, architectureDisclosedEdgeIds(manifest, "system-overview"));
+  for (const edge of disclosed.edges) assert.deepEqual(edge, full.edges.find(item => item.id === edge.id));
+});
+
+test("60. A guided scenario adds its owned relationships without replacing context", () => {
+  const scenario = manifest.scenarios.find(item => item.id === "release-path");
+  const visible = architectureDisclosedEdgeIds(manifest, scenario.view_id, { scenarioEdgeIds: scenario.edge_ids });
+  assert.ok(scenario.edge_ids.every(id => visible.has(id)));
+  assert.ok(manifest.views.find(view => view.id === scenario.view_id).disclosure.always_visible_edge_ids.every(id => visible.has(id)));
+});
+
+test("61. Explicit show-all reveals every relationship when allowed", () => {
+  const visible = architectureDisclosedEdgeIds(manifest, "system-overview", { showAll: true });
+  assert.deepEqual(visible, new Set(manifest.views[0].edge_ids));
+});
+
+test("62. Reference mode exposes the complete current view", () => {
+  const view = manifest.views.find(item => item.id === "runtime-release");
+  assert.deepEqual(architectureDisclosedEdgeIds(manifest, view.id, { referenceMode: true }), new Set(view.edge_ids));
+});
+
+test("63. Training is a monotonic five-node flow in no more than three lanes", () => {
+  const view = manifest.views.find(item => item.id === "training-models");
+  assert.deepEqual(view.primary_path, ["evidence", "training-materialization", "training", "published-model", "decision"]);
+  assert.ok(view.lanes.length <= 3);
+  assert.deepEqual(architectureDisclosedEdgeIds(manifest, view.id), new Set(view.edge_ids));
+});
+
+test("64. News defaults to news-owned relationships only", () => {
+  const visible = architectureDisclosedEdgeIds(manifest, "news-ai");
+  assert.deepEqual(visible, new Set(["collector-to-news", "ai-to-news", "news-to-decision", "news-to-evidence", "news-to-dashboard"]));
+});
+
+test("65. Dashboard defaults to its compact end-to-end projection", () => {
+  const view = manifest.views.find(item => item.id === "dashboard-sync");
+  assert.deepEqual(architectureDisclosedEdgeIds(manifest, view.id), new Set(view.edge_ids));
+  assert.deepEqual(view.primary_path, ["decision", "dashboard", "dashboard-api", "dashboard-sync", "d1", "web-worker"]);
+});
+
+test("66. Runtime and Release defaults to release path, not supervision", () => {
+  const visible = architectureDisclosedEdgeIds(manifest, "runtime-release");
+  assert.equal(visible.has("center-to-runtime"), false);
+  for (const id of ["github-to-control-plane", "control-plane-to-center", "center-to-candidate", "candidate-to-stable"]) assert.ok(visible.has(id));
+});
+
+test("67. Assistant remains a simple PAUSED subsystem", () => {
+  const view = manifest.views.find(item => item.id === "assistant");
+  assert.equal(view.lanes.length, 2);
+  assert.equal(manifest.nodes.find(node => node.id === "assistant-owner").runtime_state, "PAUSED");
+  assert.deepEqual(architectureDisclosedEdgeIds(manifest, view.id), new Set(view.edge_ids));
+});
+
+test("68. Package dependencies initially render nine nodes and zero edges", () => {
+  const full = buildArchitectureGraph(manifest, "package-dependencies");
+  const disclosed = architectureDisclosedGraph(full, architectureDisclosedEdgeIds(manifest, "package-dependencies"));
+  assert.equal(disclosed.nodes.length, 9); assert.equal(disclosed.edges.length, 0);
+});
+
+test("69. Package selection reveals exactly incoming and outgoing dependencies", () => {
+  const selected = "package-decision";
+  const visible = architectureDisclosedEdgeIds(manifest, "package-dependencies", { selectedNodeId: selected });
+  const expected = manifest.edges.filter(edge => edge.from === selected || edge.to === selected).filter(edge => edge.id.startsWith("dep-")).map(edge => edge.id);
+  assert.deepEqual([...visible].sort(), expected.sort());
+});
+
+test("70. Package selection never recalculates the layout", () => {
+  const full = buildArchitectureGraph(manifest, "package-dependencies", "TB");
+  const visible = architectureDisclosedEdgeIds(manifest, "package-dependencies", { selectedNodeId: "package-dashboard" });
+  assert.deepEqual(architectureDisclosedGraph(full, visible).nodes.map(node => node.position), full.nodes.map(node => node.position));
+});
+
+test("71. Show all dependencies is explicit and complete", () => {
+  const view = manifest.views.find(item => item.id === "package-dependencies");
+  const visible = architectureDisclosedEdgeIds(manifest, view.id, { showAll: true });
+  assert.equal(visible.size, 28); assert.deepEqual(visible, new Set(view.edge_ids));
+});
+
+test("72. Visible ports correspond exactly to disclosed routed endpoints", () => {
+  const full = buildArchitectureGraph(manifest, "package-dependencies");
+  const visible = architectureDisclosedEdgeIds(manifest, "package-dependencies", { selectedNodeId: "package-decision" });
+  const disclosed = architectureDisclosedGraph(full, visible);
+  for (const node of disclosed.nodes) {
+    assert.deepEqual(new Set(node.data.incomingPorts.map(port => port.edgeId)), new Set(disclosed.edges.filter(edge => edge.target === node.id).map(edge => edge.id)));
+    assert.deepEqual(new Set(node.data.outgoingPorts.map(port => port.edgeId)), new Set(disclosed.edges.filter(edge => edge.source === node.id).map(edge => edge.id)));
+  }
 });

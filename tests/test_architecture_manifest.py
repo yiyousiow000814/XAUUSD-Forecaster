@@ -172,6 +172,28 @@ def test_compact_rows_restore_full_graph_with_meaningful_headroom() -> None:
     assert web_view["layout_hints"]["auto_place_unlisted"] is True
 
 
+def test_view_navigation_taxonomy_is_beginner_first() -> None:
+    manifest, _ = manifest_copy()
+    overviews = [view for view in manifest["views"] if view["navigation"]["role"] == "OVERVIEW"]
+    assert [(view["id"], view["navigation"]["audience"]) for view in overviews] == [("system-overview", "BEGINNER")]
+    assert all(view["navigation"].get("parent_view") == "system-overview" for view in manifest["views"][1:])
+    assert next(view for view in manifest["views"] if view["id"] == "package-dependencies")["navigation"] == {
+        "role": "ADVANCED", "audience": "ADVANCED", "parent_view": "system-overview",
+    }
+
+
+def test_disclosure_metadata_is_bounded_to_each_view() -> None:
+    manifest, _ = manifest_copy()
+    for view in manifest["views"]:
+        disclosure = view["disclosure"]
+        classified = disclosure["always_visible_edge_ids"] + disclosure["secondary_edge_ids"]
+        assert len(classified) == len(set(classified))
+        assert set(classified) <= set(view["edge_ids"])
+    package = next(view for view in manifest["views"] if view["id"] == "package-dependencies")
+    assert package["disclosure"]["default_mode"] == "SELECTED_PACKAGE"
+    assert package["disclosure"]["always_visible_edge_ids"] == []
+
+
 def test_compact_row_width_fails_closed() -> None:
     source = json.loads((ROOT / "architecture" / "manifest.json").read_bytes())
     source["nodes"][0].pop()

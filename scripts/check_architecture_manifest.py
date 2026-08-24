@@ -169,8 +169,14 @@ def expand_compact_manifest(source: dict[str, Any]) -> dict[str, Any]:
     scenarios = manifest.get("scenarios")
     if not isinstance(views, list) or not isinstance(scenarios, list):
         raise ValueError("invalid compact graph contract")
+    view_metadata = manifest.get("view_metadata")
+    if not isinstance(view_metadata, list) or len(view_metadata) != len(views):
+        raise ValueError("invalid compact view metadata contract")
     manifest["views"] = []
-    for view in views:
+    role_codes = {"O": "OVERVIEW", "S": "SUBSYSTEM", "A": "ADVANCED", "C": "CAMPAIGN"}
+    audience_codes = {"B": "BEGINNER", "A": "ADVANCED"}
+    disclosure_codes = {"P": "PRIMARY_PATH", "V": "VIEW_RELATIONSHIPS", "N": "SELECTED_NODE", "K": "SELECTED_PACKAGE"}
+    for view_index, view in enumerate(views):
         lanes = view.get("lanes") if isinstance(view, dict) else None
         if not isinstance(lanes, list) or any(not isinstance(lane.get("node_ids"), list) for lane in lanes if isinstance(lane, dict)):
             raise ValueError("invalid compact view lanes")
@@ -192,7 +198,50 @@ def expand_compact_manifest(source: dict[str, Any]) -> dict[str, Any]:
                 "convergences": [{"target": row[0], "sources": row[1]} for row in convergence_rows],
                 "auto_place_unlisted": auto_place,
             }
-        expanded_view = {**view, "node_ids": [node_id for lane in lanes for node_id in lane["node_ids"]]}
+        metadata = view_metadata[view_index]
+        if not isinstance(metadata, list) or len(metadata) != 7:
+            raise ValueError("invalid compact view metadata row")
+        role, audience, parent_index, default_mode, always_rows, secondary_rows, allow_show_all = metadata
+        if role not in role_codes or audience not in audience_codes or default_mode not in disclosure_codes:
+            raise ValueError("invalid compact view metadata enum")
+        if parent_index is not None and (not isinstance(parent_index, int) or parent_index < 0 or parent_index >= len(views)):
+            raise ValueError("invalid compact parent view")
+        if not isinstance(always_rows, list) or not isinstance(secondary_rows, list) or not isinstance(allow_show_all, bool):
+            raise ValueError("invalid compact disclosure contract")
+        def expand_edge_rows(rows: list[Any], excluded: list[str] | None = None) -> list[str]:
+            expanded: list[str] = []
+            for edge_id in rows:
+                if edge_id == "$all":
+                    expanded.extend(view.get("edge_ids", []))
+                elif edge_id == "$rest":
+                    expanded.extend(item for item in view.get("edge_ids", []) if item not in (excluded or []))
+                elif edge_id == "$primary":
+                    for left, right in zip(view.get("primary_path", []), view.get("primary_path", [])[1:]):
+                        matches = [edge["id"] for edge in edges if edge.get("id") in view.get("edge_ids", []) and edge.get("from") == left and edge.get("to") == right]
+                        if len(matches) != 1:
+                            raise ValueError("ambiguous compact view primary path")
+                        expanded.append(matches[0])
+                elif isinstance(edge_id, str):
+                    expanded.append(edge_id)
+                else:
+                    raise ValueError("invalid compact disclosure edge")
+            return list(dict.fromkeys(expanded))
+        always_edges = expand_edge_rows(always_rows)
+        expanded_view = {
+            **view,
+            "node_ids": [node_id for lane in lanes for node_id in lane["node_ids"]],
+            "navigation": {
+                "role": role_codes[role],
+                "audience": audience_codes[audience],
+                **({"parent_view": views[parent_index]["id"]} if parent_index is not None else {}),
+            },
+            "disclosure": {
+                "default_mode": disclosure_codes[default_mode],
+                "always_visible_edge_ids": always_edges,
+                "secondary_edge_ids": expand_edge_rows(secondary_rows, always_edges),
+                "allow_show_all": allow_show_all,
+            },
+        }
         if layout_hints is not None:
             expanded_view["layout_hints"] = layout_hints
         manifest["views"].append(expanded_view)
@@ -211,6 +260,7 @@ def expand_compact_manifest(source: dict[str, Any]) -> dict[str, Any]:
         manifest["scenarios"].append({**scenario, "node_ids": node_ids, "edge_ids": edge_ids})
     manifest.pop("node_fields", None)
     manifest.pop("edge_fields", None)
+    manifest.pop("view_metadata", None)
     return manifest
 
 
@@ -330,6 +380,17 @@ def validate_manifest(root: Path, manifest: dict[str, Any], byte_size: int) -> l
             errors.append("view must be an object")
             continue
         view_id = view.get("id", "<missing>")
+        navigation = view.get("navigation")
+        disclosure = view.get("disclosure")
+        if not isinstance(navigation, dict) or navigation.get("role") not in {"OVERVIEW", "SUBSYSTEM", "ADVANCED", "CAMPAIGN"} \
+                or navigation.get("audience") not in {"BEGINNER", "ADVANCED"} \
+                or (navigation.get("parent_view") is not None and navigation.get("parent_view") not in view_ids):
+            errors.append(f"{view_id}: invalid navigation metadata")
+        if not isinstance(disclosure, dict) or disclosure.get("default_mode") not in {"PRIMARY_PATH", "VIEW_RELATIONSHIPS", "SELECTED_NODE", "SELECTED_PACKAGE"} \
+                or not isinstance(disclosure.get("always_visible_edge_ids"), list) \
+                or not isinstance(disclosure.get("secondary_edge_ids"), list) \
+                or not isinstance(disclosure.get("allow_show_all"), bool):
+            errors.append(f"{view_id}: invalid disclosure metadata")
         if view.get("layout_direction") not in LAYOUT_DIRECTIONS:
             errors.append(f"{view_id}: invalid layout direction")
         if view.get("relationship_note") is not None and (not isinstance(view["relationship_note"], str) or not view["relationship_note"].strip()):
@@ -346,6 +407,10 @@ def validate_manifest(root: Path, manifest: dict[str, Any], byte_size: int) -> l
             continue
         node_set = set(view_nodes)
         edge_set = set(view_edges)
+        if isinstance(disclosure, dict):
+            disclosed = disclosure.get("always_visible_edge_ids", []) + disclosure.get("secondary_edge_ids", [])
+            if len(disclosed) != len(set(disclosed)) or any(edge_id not in edge_set for edge_id in disclosed):
+                errors.append(f"{view_id}: disclosure edges must be unique view edges")
         errors.extend(_validate_layout_hints(view_id, view.get("layout_hints"), node_set))
         if len(node_set) != len(view_nodes) or len(edge_set) != len(view_edges):
             errors.append(f"{view_id}: duplicated view membership")
@@ -381,6 +446,22 @@ def validate_manifest(root: Path, manifest: dict[str, Any], byte_size: int) -> l
                 match = next((edge_id for edge_id in view_edges if (known_edges.get(edge_id) or {}).get("from") == left and (known_edges.get(edge_id) or {}).get("to") == right), None)
                 primary_edges.append(match)
         validate_path(f"{view_id} primary path", primary_path, primary_edges, node_set, edge_set)
+
+    overview_views = [view for view in views if isinstance(view, dict) and view.get("navigation", {}).get("role") == "OVERVIEW"]
+    if len(overview_views) != 1 or overview_views[0].get("id") != "system-overview" \
+            or overview_views[0].get("navigation", {}).get("audience") != "BEGINNER":
+        errors.append("views must contain exactly one beginner System Overview")
+    expected_taxonomy = {
+        "decision-evidence": ("SUBSYSTEM", "BEGINNER"), "training-models": ("SUBSYSTEM", "BEGINNER"),
+        "news-ai": ("SUBSYSTEM", "BEGINNER"), "dashboard-sync": ("SUBSYSTEM", "BEGINNER"),
+        "web-cloudflare": ("SUBSYSTEM", "BEGINNER"), "assistant": ("SUBSYSTEM", "BEGINNER"),
+        "execution-topology": ("ADVANCED", "ADVANCED"), "package-dependencies": ("ADVANCED", "ADVANCED"),
+        "runtime-release": ("ADVANCED", "ADVANCED"), "modularization-campaign": ("CAMPAIGN", "ADVANCED"),
+    }
+    for view_id, expected in expected_taxonomy.items():
+        navigation = view_by_id.get(view_id, {}).get("navigation", {})
+        if (navigation.get("role"), navigation.get("audience")) != expected:
+            errors.append(f"{view_id}: navigation taxonomy must be {expected!r}")
 
     package_view = view_by_id.get("package-dependencies", {})
     expected_package_nodes = {f"package-{name}" for name in CANONICAL_PACKAGE_DEPENDENCIES}

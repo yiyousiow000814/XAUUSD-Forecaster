@@ -76,20 +76,32 @@ provenance.
 
 The private `/admin/architecture` route consumes the bounded architecture
 manifest at build time. Its read-only React Flow renderer uses Dagre once per
-selected bounded view to position only that view's explicit nodes and edges.
+selected bounded view to position all of that view's explicit nodes and edges.
 It has no API, D1 table, Worker handler, GitHub runtime request, Markdown
 parser, Windows process, or background owner. The manifest, graph libraries,
 and scoped graph CSS are referenced only by the lazy Explorer view, so they do
 not join the public Live initial dependency path. Source links bind to the
 immutable build SHA.
 
+Explore is the beginner-first default: one System Overview leads through
+node-owned subsystem actions and breadcrumbs, while one Advanced menu contains
+advanced topology and campaign views. Reference mode provides direct access to
+the same manifest and complete current-view relationships. View navigation and
+progressive-disclosure modes are manifest metadata, not component-owned copies.
+
+The graph calculates layout, lanes, per-edge anchors, and routes from the
+complete current view. Disclosure then filters rendered edges and their exact
+ports; disclosure does not rerun Dagre, trigger Fit, or change zoom. The package
+view therefore starts with nine nodes and no edges,
+reveals incident dependencies for the selected package, and exposes the full
+`DEPENDENCY` graph only through Show All or Reference. Its text list is derived
+from the same manifest edges.
+
 The graph renders manifest lanes as pointer-transparent labelled regions.
-Mobile uses a bounded lane-first top-to-bottom compaction and a node-count
-bounded canvas height so fit-all remains readable; its inspector is a viewport
-bottom sheet. Edge labels remain in the accessible text equivalent even when
-background or optional visual labels are interaction-only. The canonical
-package view contains only `DEPENDENCY` edges governed by the package
-dependency contract.
+Mobile uses a bounded lane-first top-to-bottom layout, geometry-derived canvas
+height, a node readability zoom floor, and horizontal canvas panning; its
+inspector is a viewport bottom sheet. Edge labels remain in the accessible text
+equivalent when background or optional visual labels are interaction-only.
 
 ## 9. Incremental mechanisms
 

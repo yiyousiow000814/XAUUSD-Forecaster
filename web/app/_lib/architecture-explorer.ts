@@ -29,10 +29,18 @@ export type ArchitectureLayoutHints = {
   convergences: ArchitectureConvergence[];
   auto_place_unlisted: true;
 };
+export type ArchitectureViewRole = "OVERVIEW" | "SUBSYSTEM" | "ADVANCED" | "CAMPAIGN";
+export type ArchitectureAudience = "BEGINNER" | "ADVANCED";
+export type ArchitectureDisclosureMode = "PRIMARY_PATH" | "VIEW_RELATIONSHIPS" | "SELECTED_NODE" | "SELECTED_PACKAGE";
+export type ArchitectureNavigation = { role: ArchitectureViewRole; audience: ArchitectureAudience; parent_view?: string };
+export type ArchitectureDisclosure = {
+  default_mode: ArchitectureDisclosureMode; always_visible_edge_ids: string[]; secondary_edge_ids: string[]; allow_show_all: boolean;
+};
 export type ArchitectureView = {
   id: string; label: string; summary: string; layout_direction: "LR" | "TB";
   node_ids: string[]; edge_ids: string[]; entry_node: string; primary_path: string[]; lanes: ArchitectureLane[];
   relationship_note?: string; prohibited_directions?: string[]; layout_hints?: ArchitectureLayoutHints;
+  navigation: ArchitectureNavigation; disclosure: ArchitectureDisclosure;
 };
 export type ArchitectureScenario = {
   id: string; label: string; description: string; view_id: string; node_ids: string[]; edge_ids: string[];
@@ -79,6 +87,9 @@ const NODE_KINDS = new Set<ArchitectureNodeKind>(["SUBSYSTEM", "PROCESS", "THREA
 const EDGE_KINDS = new Set<ArchitectureEdgeKind>(["DATA", "READ", "WRITE", "CONTROL", "MODEL", "MIRROR", "OPTIONAL", "DEPENDENCY"]);
 const CRITICALITIES = new Set<ArchitectureCriticality>(["CRITICAL", "BACKGROUND", "OPTIONAL", "CONTROL_PLANE"]);
 const DIMENSIONS: ArchitectureDimension[] = ["ownership", "boundary", "critical_path", "bounded_work", "incremental", "failure_isolation"];
+const VIEW_ROLES = new Set<ArchitectureViewRole>(["OVERVIEW", "SUBSYSTEM", "ADVANCED", "CAMPAIGN"]);
+const VIEW_AUDIENCES = new Set<ArchitectureAudience>(["BEGINNER", "ADVANCED"]);
+const DISCLOSURE_MODES = new Set<ArchitectureDisclosureMode>(["PRIMARY_PATH", "VIEW_RELATIONSHIPS", "SELECTED_NODE", "SELECTED_PACKAGE"]);
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(item => typeof item === "string");
@@ -136,6 +147,18 @@ function isValidLayoutHints(value: unknown, visible: Set<string>) {
   });
 }
 
+function isValidViewMetadata(view: Partial<ArchitectureView>, viewIds: Set<string>) {
+  const navigation = view.navigation;
+  const disclosure = view.disclosure;
+  if (!navigation || !VIEW_ROLES.has(navigation.role) || !VIEW_AUDIENCES.has(navigation.audience)
+      || (navigation.parent_view !== undefined && !viewIds.has(navigation.parent_view))) return false;
+  if (!disclosure || !DISCLOSURE_MODES.has(disclosure.default_mode)
+      || !isStringArray(disclosure.always_visible_edge_ids) || !isStringArray(disclosure.secondary_edge_ids)
+      || typeof disclosure.allow_show_all !== "boolean") return false;
+  const classified = [...disclosure.always_visible_edge_ids, ...disclosure.secondary_edge_ids];
+  return new Set(classified).size === classified.length && classified.every(id => view.edge_ids?.includes(id));
+}
+
 export function parseArchitectureManifest(value: unknown): ArchitectureManifest | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<ArchitectureManifest>;
@@ -162,7 +185,8 @@ export function parseArchitectureManifest(value: unknown): ArchitectureManifest 
     if (!view || !["LR", "TB"].includes(view.layout_direction) || !isStringArray(view.node_ids)
         || !isStringArray(view.edge_ids) || !isStringArray(view.primary_path) || !Array.isArray(view.lanes)
         || (view.relationship_note !== undefined && typeof view.relationship_note !== "string")
-        || (view.prohibited_directions !== undefined && !isStringArray(view.prohibited_directions))) return false;
+        || (view.prohibited_directions !== undefined && !isStringArray(view.prohibited_directions))
+        || !isValidViewMetadata(view, viewIds)) return false;
     const visible = new Set(view.node_ids);
     if (!isValidLayoutHints(view.layout_hints, visible)) return false;
     const laneNodes = view.lanes.flatMap(lane => lane.node_ids);
@@ -174,6 +198,8 @@ export function parseArchitectureManifest(value: unknown): ArchitectureManifest 
       && view.edge_ids.every(id => { const edge = edgeById.get(id); return edge && visible.has(edge.from) && visible.has(edge.to); })
       && isContinuous(view.primary_path, primaryEdges, edgeById);
   })) return null;
+  const overviews = candidate.views.filter(view => view.navigation.role === "OVERVIEW");
+  if (overviews.length !== 1 || overviews[0].id !== "system-overview" || overviews[0].navigation.audience !== "BEGINNER") return null;
   const scenarioIds = new Set(candidate.scenarios.map(scenario => scenario.id));
   if (scenarioIds.size !== candidate.scenarios.length || !candidate.scenarios.every(scenario => scenario && viewIds.has(scenario.view_id)
       && isStringArray(scenario.node_ids) && isStringArray(scenario.edge_ids)
@@ -237,6 +263,36 @@ export function bestViewForNode(manifest: ArchitectureManifest, node: Architectu
   if (node.subsystem_view && manifest.views.some(view => view.id === node.subsystem_view)) return node.subsystem_view;
   return manifest.views.find(view => view.node_ids.includes(node.id))?.id ?? manifest.views[0].id;
 }
+
+export type ArchitectureDisclosureSelection = {
+  selectedNodeId?: string | null; scenarioEdgeIds?: Iterable<string>; showAll?: boolean; referenceMode?: boolean;
+};
+
+export function architectureDisclosedEdgeIds(
+  manifest: ArchitectureManifest, viewId: string, selection: ArchitectureDisclosureSelection = {},
+) {
+  const view = manifest.views.find(item => item.id === viewId) ?? manifest.views[0];
+  if (selection.referenceMode || (selection.showAll && view.disclosure.allow_show_all)) return new Set(view.edge_ids);
+  const visible = new Set(view.disclosure.always_visible_edge_ids);
+  for (const edgeId of selection.scenarioEdgeIds ?? []) if (view.edge_ids.includes(edgeId)) visible.add(edgeId);
+  if (selection.selectedNodeId) {
+    for (const edge of manifest.edges) if (view.edge_ids.includes(edge.id)
+        && (edge.from === selection.selectedNodeId || edge.to === selection.selectedNodeId)) visible.add(edge.id);
+  }
+  return visible;
+}
+
+export function architectureDisclosedGraph<T extends ReturnType<typeof buildArchitectureGraph>>(graph: T, visibleEdgeIds: Set<string>): T {
+  const edges = graph.edges.filter(edge => visibleEdgeIds.has(edge.id));
+  const nodes = graph.nodes.map(node => {
+    const incomingPorts = node.data.incomingPorts.filter(port => visibleEdgeIds.has(port.edgeId));
+    const outgoingPorts = node.data.outgoingPorts.filter(port => visibleEdgeIds.has(port.edgeId));
+    return { ...node, data: { ...node.data, incomingPorts, outgoingPorts,
+      hasIncomingEdge: incomingPorts.length > 0, hasOutgoingEdge: outgoingPorts.length > 0 } };
+  });
+  return { ...graph, nodes, edges };
+}
+
 export function architectureFailureImpact(manifest: ArchitectureManifest, nodeId: string | null) {
   return nodeId ? manifest.failure_impacts.find(item => item.node_id === nodeId) ?? null : null;
 }

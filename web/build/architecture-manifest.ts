@@ -23,7 +23,15 @@ function expandArchitectureManifest(source: Record<string, unknown>) {
   if (!Array.isArray(manifest.views) || !Array.isArray(manifest.scenarios)) {
     throw new Error("Architecture manifest has an invalid build contract");
   }
-  manifest.views = manifest.views.map(value => {
+  const compactViews = manifest.views;
+  const viewMetadata = manifest.view_metadata;
+  if (!Array.isArray(viewMetadata) || viewMetadata.length !== compactViews.length) {
+    throw new Error("Architecture manifest has invalid compact view metadata");
+  }
+  const roleCodes = { O: "OVERVIEW", S: "SUBSYSTEM", A: "ADVANCED", C: "CAMPAIGN" } as const;
+  const audienceCodes = { B: "BEGINNER", A: "ADVANCED" } as const;
+  const disclosureCodes = { P: "PRIMARY_PATH", V: "VIEW_RELATIONSHIPS", N: "SELECTED_NODE", K: "SELECTED_PACKAGE" } as const;
+  manifest.views = compactViews.map((value, viewIndex) => {
     if (!value || typeof value !== "object") throw new Error("Architecture manifest has an invalid view");
     const view = value as Record<string, unknown>;
     if (!Array.isArray(view.lanes)) throw new Error("Architecture manifest view has invalid lanes");
@@ -51,7 +59,37 @@ function expandArchitectureManifest(source: Record<string, unknown>) {
         auto_place_unlisted: autoPlace,
       };
     }
-    return { ...view, node_ids: nodeIds, ...(layoutHints === undefined ? {} : { layout_hints: layoutHints }) };
+    const metadata = viewMetadata[viewIndex];
+    if (!Array.isArray(metadata) || metadata.length !== 7) throw new Error("Architecture manifest has invalid compact view metadata row");
+    const [role, audience, parentIndex, defaultMode, alwaysRows, secondaryRows, allowShowAll] = metadata;
+    if (!(typeof role === "string" && role in roleCodes) || !(typeof audience === "string" && audience in audienceCodes)
+        || !(typeof defaultMode === "string" && defaultMode in disclosureCodes)
+        || !Array.isArray(alwaysRows) || !Array.isArray(secondaryRows) || typeof allowShowAll !== "boolean"
+        || (parentIndex !== null && (!Number.isInteger(parentIndex) || Number(parentIndex) < 0 || Number(parentIndex) >= compactViews.length))) {
+      throw new Error("Architecture manifest has invalid compact view metadata values");
+    }
+    const expandEdgeRows = (rows: unknown[], excluded: string[] = []) => {
+      const expanded: string[] = [];
+      for (const edgeId of rows) {
+        if (edgeId === "$all") expanded.push(...view.edge_ids as string[]);
+        else if (edgeId === "$rest") expanded.push(...(view.edge_ids as string[]).filter(id => !excluded.includes(id)));
+        else if (edgeId === "$primary") for (let index = 0; index < (view.primary_path as string[]).length - 1; index += 1) {
+          const from = (view.primary_path as string[])[index]; const to = (view.primary_path as string[])[index + 1];
+          const matches = edges.filter(edge => (view.edge_ids as string[]).includes(edge.id as string) && edge.from === from && edge.to === to);
+          if (matches.length !== 1) throw new Error("Architecture manifest primary path is ambiguous");
+          expanded.push(matches[0].id as string);
+        } else if (typeof edgeId === "string") expanded.push(edgeId);
+        else throw new Error("Architecture manifest has invalid disclosure edge");
+      }
+      return [...new Set(expanded)];
+    };
+    const alwaysEdges = expandEdgeRows(alwaysRows);
+    return { ...view, node_ids: nodeIds,
+      navigation: { role: roleCodes[role as keyof typeof roleCodes], audience: audienceCodes[audience as keyof typeof audienceCodes],
+        ...(parentIndex === null ? {} : { parent_view: (compactViews[Number(parentIndex)] as Record<string, unknown>).id }) },
+      disclosure: { default_mode: disclosureCodes[defaultMode as keyof typeof disclosureCodes], always_visible_edge_ids: alwaysEdges,
+        secondary_edge_ids: expandEdgeRows(secondaryRows, alwaysEdges), allow_show_all: allowShowAll },
+      ...(layoutHints === undefined ? {} : { layout_hints: layoutHints }) };
   });
   manifest.scenarios = manifest.scenarios.map(value => {
     if (!value || typeof value !== "object") throw new Error("Architecture manifest has an invalid scenario");
@@ -67,6 +105,7 @@ function expandArchitectureManifest(source: Record<string, unknown>) {
   });
   delete manifest.node_fields;
   delete manifest.edge_fields;
+  delete manifest.view_metadata;
   return manifest;
 }
 

@@ -45,6 +45,22 @@ Every node owns a non-empty beginner-facing `purpose` distinct from `summary`,
 `owner`, and the six architecture dimensions. The inspector presents those
 facts separately: what the node is, why it exists, and who owns it.
 
+Each view also owns navigation and progressive-disclosure metadata. Navigation
+classifies the view as `OVERVIEW`, `SUBSYSTEM`, `ADVANCED`, or `CAMPAIGN`, names
+its `BEGINNER` or `ADVANCED` audience, and links non-overview views back to the
+System Overview. There is exactly one beginner Overview. Explore mode starts
+there and reaches subsystem graphs through node-owned drill-down; Reference
+mode exposes the same manifest as a complete direct-access catalogue.
+
+Disclosure modes are `PRIMARY_PATH`, `VIEW_RELATIONSHIPS`, `SELECTED_NODE`, and
+`SELECTED_PACKAGE`. A view declares always-visible and secondary edge IDs plus
+whether an explicit Show All action is allowed. The engine always lays out the
+complete view, assigns ports, and routes every edge before disclosure. Changing
+selection or disclosure filters only rendered edges and matching ports; it
+must never run Dagre again, move a node, reassign an anchor, trigger Fit, or
+change zoom. Missing future UI specialization falls back to the manifest view,
+while unlisted semantic nodes retain Dagre auto-placement.
+
 The checked-in representation keeps explicit `node_fields` and `edge_fields`
 beside compact rows. The bounded build loader restores named node and edge
 objects before client validation. View node membership is derived from its
@@ -59,6 +75,10 @@ v2 graph contract.
 `DEPENDENCY` edges are separate from operational runtime/data nodes. The view
 states that `A → B` means A may import or depend on B and lists prohibited
 reverse directions without drawing them as valid edges.
+Its Explore default is selection-first: nine package nodes and no edges. A
+selected package reveals only its incoming and outgoing dependency edges; Show
+All Dependencies and Reference mode expose the complete manifest edge set. The
+text dependency list is derived from those same edges.
 
 Lane membership renders as non-interactive labelled swimlane regions. Desktop
 uses LR layout; narrow screens use TB layout with a bounded readable initial

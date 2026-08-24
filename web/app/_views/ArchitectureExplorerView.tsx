@@ -14,7 +14,7 @@ import {
 import {
   architectureCanvasHeight, architectureCommitSha, architectureFailureImpact, architectureFitOptions, architectureGithubHref, architectureRelations,
   architectureEdgeRoute, architectureGraphBounds, architectureMobileViewport, architectureRouteLabelPoint, architectureRoutePath,
-  bestViewForNode, buildArchitectureGraph, bundledArchitectureManifest, searchArchitectureNodes,
+  architectureDisclosedEdgeIds, architectureDisclosedGraph, bestViewForNode, buildArchitectureGraph, bundledArchitectureManifest, searchArchitectureNodes,
   type ArchitectureEdge, type ArchitectureFailureImpact, type ArchitectureManifest, type ArchitectureNode, type ArchitecturePortSlot,
 } from "../_lib/architecture-explorer";
 import styles from "./ArchitectureExplorerView.module.css";
@@ -147,6 +147,17 @@ function Inspector({ manifest, node, impact, sha, onClose, onDrill }: {
   </aside>;
 }
 
+function DependencyReference({ manifest, selectedId }: { manifest: ArchitectureManifest; selectedId: string | null }) {
+  const view = manifest.views.find(item => item.id === "package-dependencies")!;
+  const edges = view.edge_ids.map(id => manifest.edges.find(edge => edge.id === id)!).filter(Boolean);
+  const rows = selectedId ? edges.filter(edge => edge.from === selectedId || edge.to === selectedId) : edges;
+  const name = (id: string) => manifest.nodes.find(node => node.id === id)?.short_label ?? id;
+  return <details className={styles.dependencyReference} open={Boolean(selectedId)}>
+    <summary>依赖矩阵 · Manifest dependency list ({rows.length})</summary>
+    <div>{rows.map(edge => <p key={edge.id}><b>{name(edge.from)}</b><span>may depend on →</span><b>{name(edge.to)}</b></p>)}</div>
+  </details>;
+}
+
 function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; mobile: boolean }) {
   const flow = useReactFlow();
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -161,18 +172,26 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   const [scenarioId, setScenarioId] = useState("");
   const [scenarioStep, setScenarioStep] = useState(0);
   const [failureMode, setFailureMode] = useState(false);
+  const [experienceMode, setExperienceMode] = useState<"EXPLORE" | "REFERENCE">("EXPLORE");
+  const [showAllRelationships, setShowAllRelationships] = useState(false);
   const [flowInitialized, setFlowInitialized] = useState(false);
-  const graph = useMemo(() => buildArchitectureGraph(manifest, viewId, mobile ? "TB" : undefined), [manifest, mobile, viewId]);
+  const fullGraph = useMemo(() => buildArchitectureGraph(manifest, viewId, mobile ? "TB" : undefined), [manifest, mobile, viewId]);
+  const scenario = manifest.scenarios.find(item => item.id === scenarioId) ?? null;
+  const disclosedEdgeIds = useMemo(() => architectureDisclosedEdgeIds(manifest, viewId, {
+    selectedNodeId: selectedId, scenarioEdgeIds: scenario?.edge_ids, showAll: showAllRelationships,
+    referenceMode: experienceMode === "REFERENCE",
+  }), [experienceMode, manifest, scenario?.edge_ids, selectedId, showAllRelationships, viewId]);
+  const graph = useMemo(() => architectureDisclosedGraph(fullGraph, disclosedEdgeIds), [disclosedEdgeIds, fullGraph]);
   const nodesInitialized = useStore(useCallback(state => graph.view.node_ids.every(id => {
     const measured = state.nodeLookup.get(id)?.measured;
     return Boolean(measured && (measured.width ?? 0) > 0 && (measured.height ?? 0) > 0);
   }), [graph.view.node_ids]));
-  const graphBounds = useMemo(() => architectureGraphBounds(graph.nodes, graph.laneBoxes), [graph.laneBoxes, graph.nodes]);
+  const graphBounds = useMemo(() => architectureGraphBounds(fullGraph.nodes, fullGraph.laneBoxes), [fullGraph.laneBoxes, fullGraph.nodes]);
   const canvasHeight = architectureCanvasHeight(graphBounds, mobile);
-  const cameraStateRef = useRef({ flow, flowInitialized, graph, mobile, nodesInitialized, viewId });
+  const cameraStateRef = useRef({ flow, flowInitialized, graph: fullGraph, mobile, nodesInitialized, viewId });
   const [camera] = useState(() => createArchitectureCameraController());
   useLayoutEffect(() => {
-    cameraStateRef.current = { flow, flowInitialized, graph, mobile, nodesInitialized, viewId };
+    cameraStateRef.current = { flow, flowInitialized, graph: fullGraph, mobile, nodesInitialized, viewId };
     camera.configure({
       requestFrame: callback => window.requestAnimationFrame(callback),
       cancelFrame: frame => window.cancelAnimationFrame(frame),
@@ -213,9 +232,8 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
       },
     });
     camera.layoutChanged();
-  }, [camera, canvasHeight, flow, flowInitialized, graph, mobile, nodesInitialized, viewId]);
+  }, [camera, canvasHeight, flow, flowInitialized, fullGraph, mobile, nodesInitialized, viewId]);
   const selected = selectedId ? manifest.nodes.find(item => item.id === selectedId) ?? null : null;
-  const scenario = manifest.scenarios.find(item => item.id === scenarioId) ?? null;
   const activeImpact = failureMode ? architectureFailureImpact(manifest, selectedId) : null;
   const searchMatches = useMemo(() => searchArchitectureNodes(manifest, query, state), [manifest, query, state]);
   const focusId = hoveredId ?? selectedId;
@@ -247,7 +265,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   }, [mobile]);
   const changeView = useCallback((next: string, remember = false, cameraIntent?: ArchitectureCameraIntent) => {
     if (remember && next !== viewId) setViewHistory(items => [...items, viewId]);
-    setViewId(next); setSelectedId(null); setHoveredId(null); setHoveredEdgeId(null); setFailureMode(false);
+    setViewId(next); setSelectedId(null); setHoveredId(null); setHoveredEdgeId(null); setFailureMode(false); setShowAllRelationships(false);
     camera.request(cameraIntent ?? { type: "FIT_VIEW", viewId: next });
   }, [camera, setFailureMode, setHoveredEdgeId, setHoveredId, setSelectedId, setViewHistory, setViewId, viewId]);
   const selectNode = useCallback((id: string) => {
@@ -348,27 +366,35 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
     setSelectedId(node.id); setQuery("");
   };
   const impactForSelected = architectureFailureImpact(manifest, selectedId);
+  const subsystemViews = manifest.views.filter(view => view.navigation.role === "SUBSYSTEM");
+  const advancedViews = manifest.views.filter(view => ["ADVANCED", "CAMPAIGN"].includes(view.navigation.role));
   const announced = scenario ? `${scenario.label}: step ${scenarioStep + 1} of ${scenario.steps.length}. ${scenario.steps[scenarioStep]?.message}`
     : selected ? `${selected.label} selected. Upstream ${relations?.upstream.length ?? 0}; downstream ${relations?.downstream.length ?? 0}.` : "No architecture node selected.";
 
   return <main className={styles.main}>
     <header className={styles.header}>
       <div><span>PRIVATE · BUILD {sha?.slice(0, 8) ?? "UNVERIFIED"}</span><h1>系统架构</h1><p>{graph.view.summary}</p></div>
-      <nav aria-label="Architecture breadcrumb" className={styles.breadcrumbs}>
-        <button onClick={() => { setViewHistory([]); setScenarioId(""); changeView("system-overview"); }} type="button">System Overview</button>
-        {viewHistory.length ? <><span aria-hidden="true">›</span><button onClick={() => { const previous = viewHistory.at(-1)!; setViewHistory(items => items.slice(0, -1)); changeView(previous); }} type="button">Back</button></> : null}
-        {viewId !== "system-overview" ? <><span aria-hidden="true">›</span><strong>{graph.view.label}</strong></> : null}
-        {selected ? <><span aria-hidden="true">›</span><em>{selected.short_label}</em></> : null}
-      </nav>
+      <div className={styles.headerNavigation}><div aria-label="Explorer experience mode" className={styles.modeSwitch} role="group">
+        <button aria-pressed={experienceMode === "EXPLORE"} onClick={() => { setExperienceMode("EXPLORE"); setShowAllRelationships(false); }} type="button">Explore</button>
+        <button aria-pressed={experienceMode === "REFERENCE"} onClick={() => setExperienceMode("REFERENCE")} type="button">Reference</button>
+      </div><nav aria-label="Architecture breadcrumb" className={styles.breadcrumbs}>
+          <button onClick={() => { setViewHistory([]); setScenarioId(""); changeView("system-overview"); }} type="button">System Overview</button>
+          {viewHistory.length ? <><span aria-hidden="true">›</span><button onClick={() => { const previous = viewHistory.at(-1)!; setViewHistory(items => items.slice(0, -1)); changeView(previous); }} type="button">Back</button></> : null}
+          {viewId !== "system-overview" ? <><span aria-hidden="true">›</span><strong>{graph.view.label}</strong></> : null}
+          {selected ? <><span aria-hidden="true">›</span><em>{selected.short_label}</em></> : null}
+        </nav></div>
     </header>
     <section className={styles.toolbar} aria-label="Architecture graph toolbar">
       <label className={styles.search}><span>Search owner, purpose, file, test, or change target</span><input aria-label="Search architecture" onChange={event => setQuery(event.currentTarget.value)} placeholder="training, release, dashboard, retry…" type="search" value={query} />
         {query ? <div className={styles.searchResults} role="listbox">{searchMatches.slice(0, 7).map(node => <button aria-selected="false" key={node.id} onClick={() => selectSearch(node)} role="option" type="button"><strong>{node.short_label}</strong><span>{node.owner}</span></button>)}{!searchMatches.length ? <p>No matching change target.</p> : null}</div> : null}
       </label>
-      <label><span>View</span><select aria-label="Architecture view" onChange={event => { setScenarioId(""); changeView(event.currentTarget.value); }} value={viewId}>{manifest.views.map(view => <option key={view.id} value={view.id}>{view.label}</option>)}</select></label>
-      <label><span>State</span><select aria-label="Runtime state" onChange={event => setState(event.currentTarget.value as typeof state)} value={state}>{STATES.map(item => <option key={item}>{item}</option>)}</select></label>
       <label><span>Scenario</span><select aria-label="Guided scenario" onChange={event => runScenario(event.currentTarget.value)} value={scenarioId}><option value="">Explore freely</option>{manifest.scenarios.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
-      <button aria-describedby={selected && !impactForSelected ? "failure-contract-status" : undefined} aria-pressed={failureMode} className={styles.failureButton} disabled={!impactForSelected} onClick={() => setFailureMode(value => !value)} type="button">故障影响</button>
+      <details className={styles.advancedMenu}><summary>Advanced</summary><div>
+        {experienceMode === "REFERENCE" ? <label><span>All views</span><select aria-label="Architecture reference view" onChange={event => { setScenarioId(""); changeView(event.currentTarget.value); event.currentTarget.closest("details")?.removeAttribute("open"); }} value={viewId}>{manifest.views.map(view => <option key={view.id} value={view.id}>{view.label}</option>)}</select></label> : <><h2>Subsystems</h2>{subsystemViews.map(view => <button key={view.id} onClick={event => { changeView(view.id, true); event.currentTarget.closest("details")?.removeAttribute("open"); }} type="button">{view.label}</button>)}<h2>Advanced views</h2>{advancedViews.map(view => <button key={view.id} onClick={event => { changeView(view.id, true); event.currentTarget.closest("details")?.removeAttribute("open"); }} type="button">{view.label}</button>)}</>}
+        <label><span>Runtime state</span><select aria-label="Runtime state" onChange={event => setState(event.currentTarget.value as typeof state)} value={state}>{STATES.map(item => <option key={item}>{item}</option>)}</select></label>
+        <button aria-describedby={selected && !impactForSelected ? "failure-contract-status" : undefined} aria-pressed={failureMode} className={styles.failureButton} disabled={!impactForSelected} onClick={() => setFailureMode(value => !value)} type="button">故障影响</button>
+        {graph.view.disclosure.allow_show_all && experienceMode === "EXPLORE" ? <button aria-pressed={showAllRelationships} onClick={event => { setShowAllRelationships(value => !value); event.currentTarget.closest("details")?.removeAttribute("open"); }} type="button">{viewId === "package-dependencies" ? "Show all dependencies" : "Show all relationships"}</button> : null}
+      </div></details>
       <button className={styles.fitButton} onClick={() => camera.request({ type: "MANUAL_FIT", viewId })} type="button">适配画布 · Fit</button>
     </section>
     {selected && !impactForSelected ? <p className={styles.failureAvailability} id="failure-contract-status">此节点没有显式 failure impact contract，故障按钮已禁用。</p> : null}
@@ -376,6 +402,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
       <strong>{graph.view.relationship_note}</strong>
       {graph.view.prohibited_directions?.length ? <details><summary>禁止的反向依赖 · Prohibited reverse directions</summary><ul>{graph.view.prohibited_directions.map(item => <li key={item}>{item}</li>)}</ul></details> : null}
     </aside> : null}
+    {viewId === "package-dependencies" ? <DependencyReference manifest={manifest} selectedId={selectedId} /> : null}
     {scenario ? <section className={styles.guide} aria-label="Guided architecture scenario"><div><b>{scenario.label}</b><span>{scenario.steps[scenarioStep]?.message}</span><small>{scenarioStep + 1} / {scenario.steps.length}</small></div>
       <button disabled={scenarioStep === 0} onClick={() => moveScenario(-1)} type="button">Previous</button>
       <button disabled={scenarioStep === scenario.steps.length - 1} onClick={() => moveScenario(1)} type="button">Next</button>

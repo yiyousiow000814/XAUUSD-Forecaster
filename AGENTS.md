@@ -40,6 +40,13 @@ Architecture documents affected:
 - Optional semantic layout hints may encode meaningful rank, track, and
   convergence relationships. They must remain orientation-independent, omit
   absolute coordinates, and automatically place unlisted nodes.
+- Architecture Explorer views must declare navigation role, audience, parent,
+  and progressive-disclosure metadata in `architecture/manifest.json`. Keep one
+  beginner System Overview; reach beginner subsystems through node drill-down
+  and keep advanced/campaign views behind the Advanced or Reference surface.
+- Calculate Explorer layout, port anchors, and routes from the complete current
+  view. Disclosure may filter edges and ports only; selection, scenarios, and
+  Show All must not rerun layout, trigger Fit, or change zoom.
 
 ## Before Adding Code
 

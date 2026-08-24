@@ -7,7 +7,8 @@ card catalog and permanent detail wall rather than an architecture graph. The
 bounded manifest, build-time injection, private route, security boundary, and
 exact-SHA source links were retained. The renderer is now a read-only React
 Flow node-link graph with Dagre fallback, optional semantic layout constraints,
-and visible directed connectors.
+visible directed connectors. The final information architecture is
+beginner-first without changing the accepted graph geometry or camera owner.
 
 ## Architecture gate
 
@@ -34,18 +35,44 @@ Markdown parser, Windows process, background thread, or production mutation.
 - Edges: 66
 - Guided scenarios: 4
 - Explicit failure-impact definitions: 8
-- Serialized bytes: 52,379 of the fixed 65,536-byte limit
+- Serialized bytes: 52,331 of the fixed 65,536-byte limit
 - Edge IDs, endpoints, labels, kinds, criticalities, and descriptions are explicit.
 - View edge membership, visible endpoints, continuous primary paths, lane
   membership, scenario continuity, and failure references fail closed.
 - Coordinates are not stored; Dagre calculates finite fallback positions per
   selected view and validated hints may constrain semantic relationships.
 - Every node has a non-empty `purpose` separate from summary and ownership.
+- Every view declares a navigation role, audience, optional parent, disclosure
+  mode, always-visible edges, secondary edges, and Show All permission.
 - The package view has nine explicit canonical package nodes and 28
   `DEPENDENCY` edges matching `PACKAGE_DEPENDENCIES.md`; it contains no runtime
   transport, materialization, Candidate, or published-model node.
 
 ## Interaction and presentation evidence
+
+### Beginner-first navigation and disclosure
+
+- Explore is the default experience. It starts at the single beginner System
+  Overview and removes the permanent 11-view selector.
+- Node selection opens the explanation first; node-owned Open Subsystem actions
+  enter beginner subsystem graphs and breadcrumbs preserve the route back.
+- The toolbar contains search, scenarios, Fit, and one Advanced menu. Reference
+  mode exposes complete-view access from the same manifest.
+- Overview defaults to the cTrader → Business Runtime → Decision → Evidence →
+  Dashboard → Worker/Browser spine plus optional News → Decision. Feedback and
+  release-control relationships remain secondary until selection or Show All.
+- Training uses three lanes for the monotonic Evidence → Materialization →
+  Generation → Published Model → Decision path. News and Dashboard start with
+  only their subsystem-specific relationships. Runtime and Release starts with
+  the release path while supervision remains secondary. Assistant remains PAUSED.
+- Package Dependencies starts with nine nodes and zero edges. Selection reveals
+  only incident dependencies; Show All Dependencies and Reference expose all 28.
+- Complete-view layout, ports, and routes are calculated once. Disclosure only
+  filters rendered edges and matching ports, so it cannot move nodes, change
+  anchors, rerun Fit, or take camera ownership.
+- Twenty-four added behavior tests cover taxonomy, default disclosure, selection,
+  scenarios, stable geometry, subsystem semantics, package selection, Show All,
+  and exact visible-port correspondence.
 
 ### Semantic layout audit
 
@@ -71,8 +98,8 @@ Family-level tests prove deterministic LR/TB alignment, the Worker convergence,
 finite bounds, lane separation, preserved routing, and a synthetic connected
 node omitted from all hints.
 
-- Initial Overview has no selected node or inspector and renders 11 nodes with
-  11 visible directed edges and arrow markers.
+- Initial Overview has no selected node or inspector and renders the full 11-node
+  layout with six disclosed directed edges and arrow markers.
 - Hover highlights direct neighbors. Selection highlights the transitive
   upstream/downstream path, dims unrelated nodes, and opens a closable inspector.
 - Inspector starts with beginner questions, then collapsed architecture
@@ -102,10 +129,10 @@ Measured from the production client build with maximum gzip compression:
 
 | Artifact | Raw bytes | Gzip bytes | Boundary |
 |---|---:|---:|---|
-| Lazy Explorer JS | 323,250 | 97,553 | Private lazy chunk only |
-| Lazy Explorer CSS | 33,047 | 6,546 | Private lazy chunk only |
-| Public `DashboardApp` JS | 29,177 | 10,225 | Public initial path |
-| Public shared `index` JS | 217,752 | 58,188 | Public initial path |
+| Lazy Explorer JS | 330,959 | 98,876 | Private lazy chunk only |
+| Lazy Explorer CSS | 35,505 | 6,938 | Private lazy chunk only |
+| Public `DashboardApp` JS | 29,177 | 10,226 | Public initial path |
+| Public shared `index` JS | 217,752 | 58,184 | Public initial path |
 | Public initial CSS | 199,919 | 34,287 | Public initial path |
 
 The public JS raw sizes are unchanged from the rejected #304 build boundary;
@@ -118,13 +145,27 @@ initial gzip regression is therefore below the 2 KiB ceiling.
 
 | Viewport | Graph | Inspector | Overflow | Targets |
 |---|---|---|---|---|
-| 1440x900 | LR Overview, 11 nodes / 11 edges, arrows, labels, MiniMap | Closed initially; 380px drawer after selection | none | at least 44px |
-| 390x844 | Lane-first TB graph, pan/pinch/Fit, no MiniMap; nodes remain about 209x81 px in Overview | Fixed 58dvh bottom sheet | none | at least 44px |
-| 360x800 | Lane-first TB graph and nine-step Decision guide | Fixed 58dvh bottom sheet | none | zero visible targets below 44px |
+| 1440x900 | LR Overview, full 11-node layout / 6 disclosed edges, arrows, labels, MiniMap; Decision selection keeps zoom unchanged | Closed initially; 380px drawer after selection | none | at least 44px |
+| 390x844 | TB graph with 168px node-width floor, horizontal canvas pan, no MiniMap; Advanced menu exposes beginner and advanced routes | Fixed 58dvh bottom sheet; selected package shows 6 incident dependencies | none | at least 44px |
+| 360x800 | TB Overview with 168px node-width floor and compact search/scenario/Advanced/Fit toolbar | Fixed 58dvh bottom sheet | none | smallest visible target 44px |
 
 Browser checks exercised Decision selection/dimming, inspector close,
-subsystem membership, guided next-step navigation, Training nodes, explicit
-Cloudflare failure state, relationship fallback, and responsive direction.
+subsystem membership and breadcrumbs, Training's three-lane path, package
+initial/selected/show-all disclosure, mobile beginner navigation, relationship
+fallback, responsive direction, exact 168px mobile floor, and unchanged zoom
+during Decision disclosure. The local browser ended with zero task-created
+sessions.
 Local status/session requests correctly fail without Cloudflare bindings and
 are not Explorer requests. Exact deployed Preview evidence is recorded in the
 pull request after the immutable branch build completes.
+
+## Final local validation
+
+- Architecture manifest: 37 nodes, 66 edges, 11 views, 4 scenarios, 52,331 bytes.
+- Architecture manifest contracts: 21 passed.
+- Explorer behavior/geometry/camera contracts: 72 passed, including 24 new
+  beginner-navigation and disclosure behaviors.
+- Complete platform-neutral Python suite: 1,414 passed.
+- Complete Web suite: 328 total; 322 passed and 6 intentionally skipped.
+- Windows runtime contracts: 335 passed.
+- Architecture TypeScript check and Web lint: passed.
