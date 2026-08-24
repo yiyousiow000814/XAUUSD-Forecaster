@@ -1900,16 +1900,157 @@ def test_static_assets_are_excluded_from_expected_worker_invocations(tmp_path) -
     candidate = "b" * 40
     result = _run_control_center_contract(
         tmp_path,
-        f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId 'worker' "
+        "$dashboardUrl='https://aurum-signal-room.yiyousiow1234.chatgpt.site'; "
+        f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' "
+        "-WorkerVersionId '11111111-1111-1111-1111-111111111111' "
         f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE'; "
+        "$candidate|Add-Member browser_url 'https://11111111-aurum-signal-room.yiyousiow1234.workers.dev'; "
         "$plan=Get-CandidateRouteValidationPlan -ChangedFiles @('web/app/page.tsx'); "
-        "function Invoke-WebRequest { return [pscustomobject]@{StatusCode=200;Content='AURUM SIGNAL ROOM 系统健康状态 新闻与决策'} }; "
+        "function Invoke-CandidateStaticAssetRequest { param($RequestUri); "
+        "if($RequestUri.AbsolutePath -eq '/favicon.ico'){return [pscustomobject]@{"
+        "status=301;location='/favicon.svg';content_type='';body_bytes=[byte[]]@();"
+        "cf_cache_status='';etag='';age=''}};"
+        "$text=if($RequestUri.AbsolutePath -eq '/favicon.svg'){'<svg/>'}else{"
+        "'<meta charset=\"utf-8\">Aurum Signal Room 系统健康状态 新闻与决策'}; "
+        "$type=if($RequestUri.AbsolutePath -eq '/favicon.svg'){'image/svg+xml'}else{'text/html'}; "
+        "return [pscustomobject]@{status=200;location='';content_type=$type;"
+        "body_bytes=[Text.Encoding]::UTF8.GetBytes($text);cf_cache_status='HIT';etag='x';age='1'} }; "
         "function Start-Sleep {}; function Get-CandidateInvocationCount { return 0 }; "
         "$e=Invoke-CandidateWorkerValidation -Candidate $candidate -RoutePlan $plan; "
-        'Write-Output "$($plan.static_assets.Count),$($e.expected_worker_invocations),$($e.cpu_evidence)"',
+        'Write-Output "$($plan.static_assets.Count),$($e.expected_worker_invocations),'
+        '$($e.cpu_evidence),$($e.passed),$($e.routes[1].requested_host)"',
     )
 
-    assert result == "4,0,NOT_REQUIRED"
+    assert result == (
+        "4,0,NOT_REQUIRED,True,"
+        "11111111-aurum-signal-room.yiyousiow1234.workers.dev"
+    )
+
+
+def test_static_asset_validation_uses_raw_utf8_and_exact_contract(tmp_path) -> None:
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' "
+        "-WorkerVersionId '22222222-2222-2222-2222-222222222222' "
+        f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE'; "
+        "$candidate|Add-Member browser_url 'https://22222222-aurum-signal-room.yiyousiow1234.workers.dev'; "
+        "$route=[pscustomobject]@{path='/health';content_type='text/html';"
+        "body_encoding='utf-8';require_html_charset=$true;marker='系统健康状态'}; "
+        "$script:response=[pscustomobject]@{status=200;content_type='text/html';"
+        "body_bytes=[Text.Encoding]::UTF8.GetBytes('<meta charset=\"utf-8\">系统健康状态');"
+        "cf_cache_status='HIT';etag='asset';age='2'}; "
+        "function Invoke-CandidateStaticAssetRequest { return $script:response }; "
+        "$ok=Invoke-CandidateStaticAssetSample -Candidate $candidate -Route $route; "
+        "$script:response.body_bytes=[byte[]](0xff,0xfe);"
+        "$badUtf8=Invoke-CandidateStaticAssetSample -Candidate $candidate -Route $route; "
+        "$script:response.body_bytes=[Text.Encoding]::UTF8.GetBytes('<meta charset=\"utf-8\">other');"
+        "$missing=Invoke-CandidateStaticAssetSample -Candidate $candidate -Route $route; "
+        "$script:response.body_bytes=[Text.Encoding]::UTF8.GetBytes('系统健康状态');"
+        "$charset=Invoke-CandidateStaticAssetSample -Candidate $candidate -Route $route; "
+        "$script:response.content_type='application/json';"
+        "$wrongType=Invoke-CandidateStaticAssetSample -Candidate $candidate -Route $route; "
+        'Write-Output "$($ok.passed),$($ok.marker_present),$($ok.body_sha256.Length),'
+        '$($badUtf8.reason),$($missing.reason),$($charset.reason),'
+        '$($wrongType.reason),$($ok.requested_host)"',
+    )
+
+    assert result == (
+        "True,True,64,INVALID_UTF8_BODY,MARKER_MISSING,HTML_CHARSET_MISMATCH,"
+        "CONTENT_TYPE_MISMATCH,"
+        "22222222-aurum-signal-room.yiyousiow1234.workers.dev"
+    )
+
+
+def test_static_asset_validation_fails_closed_for_status_body_and_host(tmp_path) -> None:
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' "
+        "-WorkerVersionId '33333333-3333-3333-3333-333333333333' "
+        f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE'; "
+        "$candidate|Add-Member browser_url 'https://33333333-aurum-signal-room.yiyousiow1234.workers.dev'; "
+        "$route=[pscustomobject]@{path='/audit';content_type='text/html';"
+        "body_encoding='utf-8';require_html_charset=$true;marker='新闻与决策'}; "
+        "$script:response=[pscustomobject]@{status=401;content_type='text/html';"
+        "body_bytes=[Text.Encoding]::UTF8.GetBytes('<meta charset=\"utf-8\">新闻与决策');"
+        "cf_cache_status='';etag='';age=''}; "
+        "function Invoke-CandidateStaticAssetRequest { return $script:response }; "
+        "$reasons=@(); foreach($status in @(401,403,404,500)){"
+        "$script:response.status=$status; $reasons+=(Invoke-CandidateStaticAssetSample "
+        "-Candidate $candidate -Route $route).reason}; "
+        "$script:response.status=200;$script:response.body_bytes=[byte[]]@();"
+        "$reasons+=(Invoke-CandidateStaticAssetSample -Candidate $candidate -Route $route).reason; "
+        "$candidate.browser_url='https://aurum-signal-room.yiyousiow1234.workers.dev';"
+        "$reasons+=(Invoke-CandidateStaticAssetSample -Candidate $candidate -Route $route).reason; "
+        "$candidate.browser_url='https://33333333-aurum-signal-room.yiyousiow1234.workers.dev';"
+        "function Invoke-CandidateStaticAssetRequest { throw 'timeout' };"
+        "$reasons+=(Invoke-CandidateStaticAssetSample -Candidate $candidate -Route $route).reason; "
+        "Write-Output ($reasons -join ',')",
+    )
+
+    assert result == (
+        "HTTP_STATUS_MISMATCH,HTTP_STATUS_MISMATCH,HTTP_STATUS_MISMATCH,"
+        "HTTP_STATUS_MISMATCH,EMPTY_BODY,CANDIDATE_STATIC_HOST_MISMATCH,"
+        "VALIDATION_REQUEST_FAILED"
+    )
+
+
+def test_candidate_version_url_is_derived_from_worker_not_formal_dashboard(tmp_path) -> None:
+    candidate = "b" * 40
+    worker = "44444444-4444-4444-4444-444444444444"
+    result = _run_control_center_contract(
+        tmp_path,
+        "$dashboardUrl='https://aurum-signal-room.yiyousiow1234.chatgpt.site';"
+        f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId '{worker}' "
+        f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE';"
+        f"$version=[pscustomobject]@{{id='{worker}';metadata=[pscustomobject]@{{"
+        "has_preview=$true};annotations=[pscustomobject]@{"
+        f"'workers/message'='release:{candidate} branch:main "
+        "artifact_kind:PRODUCTION_CANDIDATE'}};"
+        "Write-Output (Get-ReleaseVersionPreviewUrl -Version $version -Candidate $candidate)",
+    )
+
+    assert result == (
+        "https://44444444-aurum-signal-room.yiyousiow1234.workers.dev"
+    )
+
+
+def test_dry_run_payload_requires_exact_fields_and_boolean_false(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$valid=[pscustomobject]@{status='DRY_RUN_OK';mutated=$false;"
+        "route_family='status-ingest';count=0;message='';optional=$false};"
+        "$missing=[pscustomobject]@{status='DRY_RUN_OK';route_family='status-ingest'};"
+        "$wrongType=[pscustomobject]@{status='DRY_RUN_OK';mutated=0;"
+        "route_family='status-ingest'};"
+        "$wrongValue=[pscustomobject]@{status='OK';mutated=$false;"
+        "route_family='status-ingest'};"
+        '$values=@($valid,$missing,$wrongType,$wrongValue,$null)|ForEach-Object{'
+        "Test-CandidateDryRunPayload -Payload $_ -ExpectedFamily 'status-ingest'};"
+        "Write-Output ($values -join ',')",
+    )
+
+    assert result == "True,False,False,False,False"
+
+
+def test_directed_summary_reports_counts_and_exact_static_predicate(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$failure=[pscustomobject]@{method='GET';path='/health';status=200;"
+        "passed=$false;reason='MARKER_MISSING';expected_marker='HEALTH_MARKER';"
+        "marker_present=$false};"
+        "$validation=[pscustomobject]@{cloudflare='FAILED';routes_tested=37;"
+        "routes_passed=35;routes_failed=2;first_failure=$failure;routes=@($failure)};"
+        "$summary=Get-DirectedWorkerValidationSummary -Validation $validation;"
+        'Write-Output "$($summary.tested),$($summary.passed),$($summary.failed),'
+        '$($summary.first_failure_line)"',
+    )
+
+    assert result == (
+        "37,35,2,GET /health | HTTP 200 | MARKER_MISSING | "
+        "EXPECTED marker=HEALTH_MARKER | ACTUAL marker_present=false"
+    )
 
 
 def test_manifest_selects_baseline_and_affected_route_sample_families(tmp_path) -> None:
@@ -1924,14 +2065,40 @@ def test_manifest_selects_baseline_and_affected_route_sample_families(tmp_path) 
         "$docs=Get-CandidateRouteValidationPlan -ChangedFiles @('docs/README.md'); "
         "$heavyRoutes=@($heavy.worker_reads)+@($heavy.worker_writes); "
         "$sharedRoutes=@($shared.worker_reads)+@($shared.worker_writes); "
+        "$sharedKeys=@($shared.static_assets|ForEach-Object{'STATIC|GET|'+$_.path})+"
+        "@($sharedRoutes|ForEach-Object{$_.boundary+'|'+$_.method+'|'+$_.path+'|'+$_.scenario}); "
         "$adminRoutes=@($admin.worker_reads)+@($admin.worker_writes); "
         "$heavySamples=($heavyRoutes|Measure-Object acceptance_samples -Sum).Sum; "
         "$sharedSamples=($sharedRoutes|Measure-Object acceptance_samples -Sum).Sum; "
         'Write-Output "$($heavyRoutes.Count),$heavySamples,$($sharedRoutes.Count),'
-        '$sharedSamples,$($adminRoutes.Count),$($docs.worker_cpu_required)"',
+        '$sharedSamples,$($adminRoutes.Count),$($docs.worker_cpu_required),'
+        '$($shared.static_assets.Count+$sharedRoutes.Count),'
+        '$(@($sharedKeys|Sort-Object -Unique).Count),$($shared.worker_reads.Count),'
+        '$($shared.worker_writes.Count)"',
     )
 
-    assert result == "7,70,33,330,0,False"
+    assert result == "7,70,33,330,0,False,37,37,12,21"
+
+
+def test_static_manifest_rejects_missing_or_wrong_typed_contract_fields(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$path=Join-Path $repositoryRoot 'web\\worker-validation-manifest.json';"
+        "$manifest=Get-Content -LiteralPath $path -Raw -Encoding UTF8|ConvertFrom-Json;"
+        "$manifest.static_assets[0].content_type=$null;"
+        "$manifest|ConvertTo-Json -Depth 20|Set-Content -LiteralPath $path -Encoding UTF8;"
+        "$missing=try{Get-WorkerValidationManifest|Out-Null;'PASS'}catch{$_.Exception.Message};"
+        "$manifest.static_assets[0].content_type='text/html';"
+        "$manifest.static_assets[0].require_html_charset='true';"
+        "$manifest|ConvertTo-Json -Depth 20|Set-Content -LiteralPath $path -Encoding UTF8;"
+        "$wrongType=try{Get-WorkerValidationManifest|Out-Null;'PASS'}catch{$_.Exception.Message};"
+        'Write-Output "$missing,$wrongType"',
+    )
+
+    assert result == (
+        "WORKER_ROUTE_VALIDATION_MANIFEST_INVALID,"
+        "WORKER_ROUTE_VALIDATION_MANIFEST_INVALID"
+    )
 
 
 def test_directed_route_sample_fails_closed_on_exact_identity_mismatch(tmp_path) -> None:

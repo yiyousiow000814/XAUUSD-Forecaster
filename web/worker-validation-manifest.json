@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "fixture_builder": "scripts/build_release_validation_fixtures.py",
   "optional_cpu_exempt_reason": "OPTIONAL_SMALL_OR_IO_DOMINATED_CONTRACT_ROUTE",
   "bundle_runtime_roots": [
@@ -21,10 +21,38 @@
     "news-content-*.json": 450000
   },
   "static_assets": [
-    { "path": "/", "marker": "AURUM SIGNAL ROOM" },
-    { "path": "/health", "marker": "系统健康状态" },
-    { "path": "/audit", "marker": "新闻与决策" },
-    { "path": "/favicon.ico", "marker": null }
+    {
+      "path": "/",
+      "content_type": "text/html",
+      "body_encoding": "utf-8",
+      "require_html_charset": true,
+      "marker": "Aurum Signal Room",
+      "redirect_path": null
+    },
+    {
+      "path": "/health",
+      "content_type": "text/html",
+      "body_encoding": "utf-8",
+      "require_html_charset": true,
+      "marker": "\u7cfb\u7edf\u5065\u5eb7\u72b6\u6001",
+      "redirect_path": null
+    },
+    {
+      "path": "/audit",
+      "content_type": "text/html",
+      "body_encoding": "utf-8",
+      "require_html_charset": true,
+      "marker": "\u65b0\u95fb\u4e0e\u51b3\u7b56",
+      "redirect_path": null
+    },
+    {
+      "path": "/favicon.ico",
+      "content_type": "image/svg+xml",
+      "body_encoding": null,
+      "require_html_charset": false,
+      "marker": null,
+      "redirect_path": "/favicon.svg"
+    }
   ],
   "routes": [
     { "path": "/api/status", "method": "GET", "family": "status-read", "boundary": "WORKER_READ", "criticality": "CRITICAL", "strategy": "DIRECT_REQUEST", "baseline": true, "cpu_required": true, "auth_required": false, "warmup_samples": 2, "acceptance_samples": 10, "owners": ["web/app/api/status/route.ts", "web/app/api/_shared/*", "web/worker/*.ts", "web/vite.config.ts", "web/wrangler.jsonc"] },
