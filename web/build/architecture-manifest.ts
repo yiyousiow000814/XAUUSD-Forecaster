@@ -33,7 +33,25 @@ function expandArchitectureManifest(source: Record<string, unknown>) {
       }
       return (lane as Record<string, unknown>).node_ids as unknown[];
     });
-    return { ...view, node_ids: nodeIds };
+    let layoutHints = view.layout_hints;
+    if (Array.isArray(layoutHints)) {
+      if (layoutHints.length !== 5) throw new Error("Architecture manifest view has invalid compact semantic layout");
+      const [mode, rankRows, trackRows, convergenceRows, autoPlace] = layoutHints;
+      const expandGroups = (rows: unknown, idKey: "id" | "target", membersKey: "node_ids" | "sources") => {
+        if (!Array.isArray(rows) || rows.some(row => !Array.isArray(row) || row.length !== 2)) {
+          throw new Error("Architecture manifest view has invalid compact semantic layout rows");
+        }
+        return rows.map(row => ({ [idKey]: row[0], [membersKey]: row[1] }));
+      };
+      layoutHints = {
+        mode,
+        rank_groups: expandGroups(rankRows, "id", "node_ids"),
+        track_groups: expandGroups(trackRows, "id", "node_ids"),
+        convergences: expandGroups(convergenceRows, "target", "sources"),
+        auto_place_unlisted: autoPlace,
+      };
+    }
+    return { ...view, node_ids: nodeIds, ...(layoutHints === undefined ? {} : { layout_hints: layoutHints }) };
   });
   manifest.scenarios = manifest.scenarios.map(value => {
     if (!value || typeof value !== "object") throw new Error("Architecture manifest has an invalid scenario");

@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
-  ARCHITECTURE_EDGE_OVERLAP_TOLERANCE, ARCHITECTURE_LANE_GAP, ARCHITECTURE_MOBILE_NODE_WIDTH_FLOOR,
+  ARCHITECTURE_EDGE_OVERLAP_TOLERANCE, ARCHITECTURE_LANE_GAP, ARCHITECTURE_MOBILE_NODE_WIDTH_FLOOR, ARCHITECTURE_SEMANTIC_LAYOUT_PASSES,
   architectureCanvasHeight, architectureEdgeRoute, architectureFitOptions, architectureGithubHref, architectureGraphBounds, architectureMobileViewport,
   architecturePortVisibility, architectureRelations, architectureRouteCrossesUnrelatedNode, architectureRoutePath, architectureSharedCollinearLength,
   bestViewForNode, buildArchitectureGraph,
@@ -317,7 +317,66 @@ test("30. Fan-in routes do not create a hidden collinear junction", () => {
   assert.doesNotMatch(viewSource, /<h[1-6][^>]*>\{data\.edge\.label\}/);
 });
 
-test("31. Mobile automatic viewport preserves the node readability floor and permits canvas panning", () => {
+test("31. Semantic ranks, tracks, and convergence remain exact in LR and TB", () => {
+  const view = manifest.views.find(item => item.id === "web-cloudflare");
+  assert.equal(view.layout_hints.mode, "SEMANTIC_GRID");
+  assert.equal(view.layout_hints.auto_place_unlisted, true);
+  assert.equal(ARCHITECTURE_SEMANTIC_LAYOUT_PASSES, 8);
+  for (const direction of ["LR", "TB"]) {
+    const graph = buildArchitectureGraph(manifest, view.id, direction);
+    const repeated = buildArchitectureGraph(manifest, view.id, direction);
+    const center = id => {
+      const node = graph.nodes.find(item => item.id === id);
+      return { primary: direction === "LR" ? node.position.x + node.width / 2 : node.position.y + node.height / 2,
+        cross: direction === "LR" ? node.position.y + node.height / 2 : node.position.x + node.width / 2 };
+    };
+    assert.deepEqual(graph.nodes.map(node => node.position), repeated.nodes.map(node => node.position), `${direction} deterministic nodes`);
+    assert.deepEqual(graph.laneBoxes, repeated.laneBoxes, `${direction} deterministic lanes`);
+    assert.equal(center("dashboard-sync").primary, center("stable-release").primary, `${direction} source rank`);
+    assert.equal(center("d1").primary, center("cloudflare").primary, `${direction} intermediate rank`);
+    assert.equal(center("dashboard-sync").cross, center("d1").cross, `${direction} projection track`);
+    assert.equal(center("stable-release").cross, center("cloudflare").cross, `${direction} release track`);
+    assert.equal(center("web-worker").cross, center("architecture-explorer").cross, `${direction} presentation track`);
+    assert.equal(center("web-worker").cross, (center("d1").cross + center("cloudflare").cross) / 2, `${direction} convergence midpoint`);
+    const bounds = architectureGraphBounds(graph.nodes, graph.laneBoxes);
+    assert.ok([bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite), `${direction} finite bounds`);
+  }
+});
+
+test("32. Semantic views automatically place an unlisted connected node", () => {
+  const expanded = structuredClone(manifest);
+  const view = expanded.views.find(item => item.id === "web-cloudflare");
+  const templateNode = expanded.nodes.find(item => item.id === "architecture-explorer");
+  expanded.nodes.push({ ...templateNode, id: "automatic-extension", label: "Automatic Extension", short_label: "Extension" });
+  const templateEdge = expanded.edges.find(item => item.id === "web-to-explorer");
+  expanded.edges.push({ ...templateEdge, id: "explorer-to-extension", from: "architecture-explorer", to: "automatic-extension" });
+  view.node_ids.push("automatic-extension");
+  view.edge_ids.push("explorer-to-extension");
+  view.lanes.push({ id: "extension", label: "Automatic Extension", node_ids: ["automatic-extension"] });
+
+  for (const direction of ["LR", "TB"]) {
+    const graph = buildArchitectureGraph(expanded, view.id, direction);
+    const automatic = graph.nodes.find(node => node.id === "automatic-extension");
+    const lane = graph.laneBoxes.find(item => item.id === "lane-extension");
+    assert.ok(automatic && Number.isFinite(automatic.position.x) && Number.isFinite(automatic.position.y), `${direction} finite fallback`);
+    assert.ok(graph.nodes.every(node => node.id === automatic.id || !(
+      automatic.position.x < node.position.x + node.width && node.position.x < automatic.position.x + automatic.width
+      && automatic.position.y < node.position.y + node.height && node.position.y < automatic.position.y + automatic.height
+    )), `${direction} no node overlap`);
+    assert.ok(automatic.position.x > lane.position.x && automatic.position.y > lane.position.y
+      && automatic.position.x + automatic.width < lane.position.x + lane.width
+      && automatic.position.y + automatic.height < lane.position.y + lane.height, `${direction} lane containment`);
+    const route = architectureEdgeRoute(graph.nodes, graph.edges.find(edge => edge.id === "explorer-to-extension"), direction);
+    assert.equal(architectureRouteCrossesUnrelatedNode(route, graph.nodes, "architecture-explorer", "automatic-extension"), false);
+    const center = id => { const node = graph.nodes.find(item => item.id === id); return direction === "LR"
+      ? { primary: node.position.x + node.width / 2, cross: node.position.y + node.height / 2 }
+      : { primary: node.position.y + node.height / 2, cross: node.position.x + node.width / 2 }; };
+    assert.equal(center("dashboard-sync").primary, center("stable-release").primary, `${direction} retained source rank`);
+    assert.equal(center("web-worker").cross, (center("d1").cross + center("cloudflare").cross) / 2, `${direction} retained convergence`);
+  }
+});
+
+test("33. Mobile automatic viewport preserves the node readability floor and permits canvas panning", () => {
   for (const view of manifest.views) {
     const graph = buildArchitectureGraph(manifest, view.id, "TB");
     const bounds = architectureGraphBounds(graph.nodes, graph.laneBoxes);
@@ -347,7 +406,7 @@ test("31. Mobile automatic viewport preserves the node readability floor and per
   assert.match(cssSource, /\.laneRegion > span \{ top: 7px; left: 10px; font-size: 13px;/);
 });
 
-test("32. Mobile canvas height follows graph geometry rather than node count", () => {
+test("34. Mobile canvas height follows graph geometry rather than node count", () => {
   assert.equal(architectureCanvasHeight({ x: 0, y: 0, width: 500, height: 600 }, true), 696);
   assert.equal(architectureCanvasHeight({ x: 0, y: 0, width: 500, height: 800 }, true), 896);
   assert.equal(architectureCanvasHeight({ x: 0, y: 0, width: 500, height: 800 }, false), 650);
@@ -355,7 +414,7 @@ test("32. Mobile canvas height follows graph geometry rather than node count", (
   assert.doesNotMatch(source("../app/_lib/architecture-explorer.ts"), /nodeCount \* 135/);
 });
 
-test("33. Fit zoom is bounded by view size and selection does not refit", () => {
+test("35. Fit zoom is bounded by view size and selection does not refit", () => {
   assert.ok(architectureFitOptions(4, false).maxZoom > architectureFitOptions(11, false).maxZoom);
   assert.ok(architectureFitOptions(4, true).maxZoom <= architectureFitOptions(4, false).maxZoom);
   assert.match(viewSource, /const zoom = current\.flow\.getZoom\(\)/);
@@ -367,7 +426,7 @@ test("33. Fit zoom is bounded by view size and selection does not refit", () => 
   assert.doesNotMatch(viewSource, /nodes=\{\[\.\.\.laneNodes/);
 });
 
-test("34. Edge labels follow critical, release, interaction, guide, and sparse-view rules", () => {
+test("36. Edge labels follow critical, release, interaction, guide, and sparse-view rules", () => {
   assert.match(viewSource, /item\.criticality === "CRITICAL"/);
   assert.match(viewSource, /item\.criticality === "CONTROL_PLANE" && viewId === "runtime-release"/);
   assert.match(viewSource, /graph\.edges\.length <= 4/);
@@ -376,13 +435,13 @@ test("34. Edge labels follow critical, release, interaction, guide, and sparse-v
   assert.match(viewSource, /graph\.edges\.map\(edge =>/);
 });
 
-test("35. Beginner and failure copy is Chinese-primary", () => {
+test("37. Beginner and failure copy is Chinese-primary", () => {
   for (const label of ["它是什么？", "为什么需要它？", "谁负责它？", "输入来自哪里？", "输出到哪里？", "它坏了会停止什么？", "什么仍会继续？", "打开子系统"]) {
     assert.ok(viewSource.includes(label), label);
   }
 });
 
-test("36. Required failure impacts are explicit and missing contracts stay disabled", () => {
+test("38. Required failure impacts are explicit and missing contracts stay disabled", () => {
   const required = ["training", "cloudflare", "decision", "evidence", "news", "dashboard-sync", "d1", "control-plane"];
   assert.ok(required.every(id => manifest.failure_impacts.some(item => item.node_id === id)));
   assert.ok(manifest.failure_impacts.every(impact => impact.affected.every(item => item.message.includes("AFFECTED"))));
@@ -415,7 +474,7 @@ function cameraHarness(initial = {}) {
   return { commands, controller, flush, frames, layout };
 }
 
-test("37. Camera owner performs one initial automatic Fit", () => {
+test("39. Camera owner performs one initial automatic Fit", () => {
   const h = cameraHarness({ flowInitialized: false });
   h.controller.request({ type: "FIT_VIEW", viewId: "system-overview" }); h.flush();
   assert.equal(h.commands.length, 0);
@@ -423,13 +482,13 @@ test("37. Camera owner performs one initial automatic Fit", () => {
   assert.deepEqual(h.commands.map(item => item.type), ["FIT_VIEW"]);
 });
 
-test("38. One view switch performs one automatic Fit", () => {
+test("40. One view switch performs one automatic Fit", () => {
   const h = cameraHarness({ viewId: "training-models" });
   h.controller.request({ type: "FIT_VIEW", viewId: "training-models" }); h.flush();
   assert.deepEqual(h.commands.map(item => item.type), ["FIT_VIEW"]);
 });
 
-test("39. Rapid A to B to C navigation executes only C", () => {
+test("41. Rapid A to B to C navigation executes only C", () => {
   const h = cameraHarness({ viewId: "view-c" });
   h.controller.request({ type: "FIT_VIEW", viewId: "view-a" });
   h.controller.request({ type: "FIT_VIEW", viewId: "view-b" });
@@ -437,19 +496,19 @@ test("39. Rapid A to B to C navigation executes only C", () => {
   assert.deepEqual(h.commands, [{ type: "FIT_VIEW", viewId: "view-c" }]);
 });
 
-test("40. Cross-view search performs one final Focus without Fit", () => {
+test("42. Cross-view search performs one final Focus without Fit", () => {
   const h = cameraHarness({ viewId: "training-models" });
   h.controller.request({ type: "FOCUS_NODE", viewId: "training-models", nodeId: "training", source: "SEARCH" }); h.flush();
   assert.deepEqual(h.commands.map(item => item.type), ["FOCUS_NODE"]);
 });
 
-test("41. A cross-view scenario starts with one Focus and no duplicate Fit", () => {
+test("43. A cross-view scenario starts with one Focus and no duplicate Fit", () => {
   const h = cameraHarness({ viewId: "runtime-release" });
   h.controller.request({ type: "FOCUS_NODE", viewId: "runtime-release", nodeId: "github", source: "SCENARIO_STEP" }); h.flush();
   assert.deepEqual(h.commands.map(item => item.type), ["FOCUS_NODE"]);
 });
 
-test("42. Each scenario step performs exactly one camera command", () => {
+test("44. Each scenario step performs exactly one camera command", () => {
   const h = cameraHarness({ viewId: "system-overview" });
   for (const nodeId of ["ctrader", "business-runtime", "decision"]) {
     h.controller.request({ type: "FOCUS_NODE", viewId: "system-overview", nodeId, source: "SCENARIO_STEP" }); h.flush();
@@ -457,7 +516,7 @@ test("42. Each scenario step performs exactly one camera command", () => {
   assert.deepEqual(h.commands.map(item => item.nodeId), ["ctrader", "business-runtime", "decision"]);
 });
 
-test("43. Inspector close waits for width transition then Fits once", () => {
+test("45. Inspector close waits for width transition then Fits once", () => {
   const h = cameraHarness({ canvasTransitionComplete: false });
   h.controller.request({ type: "REFIT_AFTER_INSPECTOR_CLOSE", viewId: "system-overview" }); h.flush();
   assert.equal(h.commands.length, 0);
@@ -465,13 +524,13 @@ test("43. Inspector close waits for width transition then Fits once", () => {
   assert.deepEqual(h.commands.map(item => item.type), ["REFIT_AFTER_INSPECTOR_CLOSE"]);
 });
 
-test("44. Manual Fit performs exactly one Fit", () => {
+test("46. Manual Fit performs exactly one Fit", () => {
   const h = cameraHarness();
   h.controller.request({ type: "MANUAL_FIT", viewId: "system-overview" }); h.flush();
   assert.deepEqual(h.commands.map(item => item.type), ["MANUAL_FIT"]);
 });
 
-test("45. Cancelled stale frames cannot move the current view", () => {
+test("47. Cancelled stale frames cannot move the current view", () => {
   const h = cameraHarness({ viewId: "view-b" });
   h.controller.request({ type: "FIT_VIEW", viewId: "view-a" });
   const staleFrames = [...h.frames.values()];
@@ -480,7 +539,7 @@ test("45. Cancelled stale frames cannot move the current view", () => {
   assert.deepEqual(h.commands, [{ type: "FIT_VIEW", viewId: "view-b" }]);
 });
 
-test("46. Mobile initialization exposes only one TB layout Fit", () => {
+test("48. Mobile initialization exposes only one TB layout Fit", () => {
   const h = cameraHarness({ viewId: "system-overview" });
   h.controller.request({ type: "FIT_VIEW", viewId: "system-overview" }); h.flush();
   assert.equal(buildArchitectureGraph(manifest, "system-overview", "TB").direction, "TB");

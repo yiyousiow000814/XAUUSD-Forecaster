@@ -61,16 +61,43 @@ states that `A → B` means A may import or depend on B and lists prohibited
 reverse directions without drawing them as valid edges.
 
 Lane membership renders as non-interactive labelled swimlane regions. Desktop
-uses Dagre layout; narrow screens use a bounded lane-first TB compaction so all
-nodes fit without shrinking text below a useful size. Critical labels remain
-visible, while background and optional labels expand on interaction or in a
-sparse view. Failure controls are available only for nodes with explicit
-`AFFECTED` and `CONTINUES` contracts.
+uses LR layout; narrow screens use TB layout with a bounded readable initial
+viewport and horizontal canvas panning. Critical labels remain visible, while
+background and optional labels expand on interaction or in a sparse view.
+Failure controls are available only for nodes with explicit `AFFECTED` and
+`CONTINUES` contracts.
 
-The client uses Dagre to calculate finite positions from the selected bounded
-view. Coordinates are not stored in the manifest. React Flow renders only that
-view's nodes and edges as a read-only graph. Both libraries and their CSS remain
-inside the lazy private Explorer boundary.
+### Optional semantic layout
+
+Dagre remains the deterministic default. A view may additionally declare
+`layout_hints` with mode `SEMANTIC_GRID` when its architecture has a meaningful
+rank, track, or convergence relationship that generic topology cannot express.
+The same contract is orientation-independent: ranks become columns in LR and
+rows in TB; tracks become rows in LR and columns in TB. A convergence centers
+its target track between the declared source tracks on the cross axis.
+
+Semantic hints describe relationships, never pixels. Absolute `x`, `y`,
+position, or coordinate fields are invalid. Every declared node must belong to
+the view; a node cannot belong to multiple rank or track groups; two nodes
+cannot occupy the same declared rank/track cell; and convergence membership
+must be complete and unambiguous. Unlisted nodes are placed automatically from
+their connected neighbours and the Dagre fallback. The engine performs at most
+eight deterministic global spacing passes to keep nodes and lane boxes apart;
+it never shifts one hinted lane independently and thereby breaks alignment.
+
+The compact checked-in form stores `[mode, rank rows, track rows, convergence
+rows, auto-place]`; the Python checker and build loader expand it to the named
+contract before validation. Of the current 11 views, only `web-cloudflare`
+needs semantic hints: its projection and release branches are symmetric and
+converge on Worker. The other ten views remain Dagre-owned after audit because
+their linear, dense, feedback, or control-plane structure has no equally clear
+semantic grid. Do not add hints merely to decorate a view.
+
+The client uses Dagre to calculate finite fallback positions from the selected
+bounded view, then applies any validated semantic relationships. Coordinates
+are not stored in the manifest. React Flow renders only that view's nodes and
+edges as a read-only graph. Both libraries and their CSS remain inside the lazy
+private Explorer boundary.
 
 One camera-intent controller exclusively owns automatic Fit, node Focus,
 post-inspector refit, and manual Fit. It waits for React Flow node

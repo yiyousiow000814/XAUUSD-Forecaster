@@ -52,6 +52,105 @@ NODE_FIELDS = [
 EDGE_FIELDS = ["id", "from", "to", "label", "kind", "criticality", "description"]
 
 
+def _validate_layout_hints(view_id: str, hints: Any, node_set: set[str]) -> list[str]:
+    if hints is None:
+        return []
+    owner = f"{view_id}: layout_hints"
+    if not isinstance(hints, dict):
+        return [f"{owner} must be an object"]
+    errors: list[str] = []
+    absolute_fields = {"x", "y", "position", "coordinate", "coordinates"}
+
+    def find_absolute(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(str(key).lower() in absolute_fields or find_absolute(item) for key, item in value.items())
+        if isinstance(value, list):
+            return any(find_absolute(item) for item in value)
+        return False
+
+    if find_absolute(hints):
+        errors.append(f"{owner} must not contain absolute coordinate fields")
+    if set(hints) - {"mode", "rank_groups", "track_groups", "convergences", "auto_place_unlisted"}:
+        errors.append(f"{owner} contains unsupported fields")
+    if hints.get("mode") != "SEMANTIC_GRID":
+        errors.append(f"{owner} has an invalid semantic mode")
+    if hints.get("auto_place_unlisted") is not True:
+        errors.append(f"{owner} must auto-place unlisted nodes")
+    rank_groups = hints.get("rank_groups")
+    track_groups = hints.get("track_groups")
+    convergences = hints.get("convergences")
+    if not all(isinstance(value, list) for value in (rank_groups, track_groups, convergences)):
+        return errors + [f"{owner} groups and convergences must be lists"]
+    if not rank_groups and not track_groups and not convergences:
+        errors.append(f"{owner} semantic mode has no usable groups")
+
+    all_groups = rank_groups + track_groups
+    group_ids = [group.get("id") for group in all_groups if isinstance(group, dict)]
+    if len(group_ids) != len(set(group_ids)):
+        errors.append(f"{owner} has duplicate semantic group IDs")
+    memberships: dict[str, dict[str, str]] = {"rank": {}, "track": {}}
+    for family_name, groups in (("rank", rank_groups), ("track", track_groups)):
+        for group in groups:
+            if not isinstance(group, dict) or set(group) != {"id", "node_ids"}:
+                errors.append(f"{owner} has an invalid {family_name} group")
+                continue
+            group_id = group.get("id")
+            members = group.get("node_ids")
+            if (not isinstance(group_id, str) or not group_id.strip() or not isinstance(members, list) or not members
+                    or not all(isinstance(node_id, str) for node_id in members)):
+                errors.append(f"{owner} has an invalid {family_name} group")
+                continue
+            if len(members) != len(set(members)):
+                errors.append(f"{owner} {group_id} has duplicate node IDs")
+            for node_id in members:
+                if node_id not in node_set:
+                    errors.append(f"{owner} {group_id} references unknown node {node_id}")
+                if node_id in memberships[family_name]:
+                    errors.append(f"{owner} node {node_id} belongs to multiple {family_name} groups")
+                memberships[family_name][node_id] = group_id
+
+    occupied: dict[tuple[str, str], str] = {}
+    for node_id in node_set:
+        if node_id not in memberships["rank"] or node_id not in memberships["track"]:
+            continue
+        cell = (memberships["rank"][node_id], memberships["track"][node_id])
+        if cell in occupied:
+            errors.append(f"{owner} has contradictory constraints for {occupied[cell]} and {node_id}")
+        occupied[cell] = node_id
+
+    convergence_tracks: set[str] = set()
+    convergence_targets: set[str] = set()
+    for convergence in convergences:
+        if not isinstance(convergence, dict) or set(convergence) != {"target", "sources"}:
+            errors.append(f"{owner} has an invalid convergence")
+            continue
+        target = convergence.get("target")
+        sources = convergence.get("sources")
+        if not isinstance(target, str) or target not in node_set:
+            errors.append(f"{owner} convergence target is missing from the view")
+        elif target in convergence_targets:
+            errors.append(f"{owner} has contradictory convergence targets")
+        else:
+            convergence_targets.add(target)
+        if not isinstance(sources, list) or len(sources) < 2 or not all(isinstance(source, str) for source in sources):
+            errors.append(f"{owner} convergence must have at least two sources")
+            continue
+        if len(sources) != len(set(sources)) or target in sources:
+            errors.append(f"{owner} convergence has contradictory sources")
+        for source in sources:
+            if not isinstance(source, str) or source not in node_set:
+                errors.append(f"{owner} convergence source {source} is missing from the view")
+        target_track = memberships["track"].get(target)
+        if target_track and (
+            target_track in convergence_tracks
+            or any(memberships["track"].get(source) == target_track for source in sources)
+        ):
+            errors.append(f"{owner} convergence contradicts track {target_track}")
+        if target_track:
+            convergence_tracks.add(target_track)
+    return errors
+
+
 def expand_compact_manifest(source: dict[str, Any]) -> dict[str, Any]:
     manifest = dict(source)
     for row_key, field_key, expected_fields in (
@@ -77,7 +176,26 @@ def expand_compact_manifest(source: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("invalid compact view lanes")
         if any(not isinstance(lane, dict) for lane in lanes):
             raise ValueError("invalid compact view lane")
-        manifest["views"].append({**view, "node_ids": [node_id for lane in lanes for node_id in lane["node_ids"]]})
+        layout_hints = view.get("layout_hints")
+        if isinstance(layout_hints, list):
+            if len(layout_hints) != 5:
+                raise ValueError("invalid compact semantic layout contract")
+            mode, rank_rows, track_rows, convergence_rows, auto_place = layout_hints
+            if any(not isinstance(rows, list) for rows in (rank_rows, track_rows, convergence_rows)):
+                raise ValueError("invalid compact semantic layout rows")
+            if any(not isinstance(row, list) or len(row) != 2 for rows in (rank_rows, track_rows, convergence_rows) for row in rows):
+                raise ValueError("invalid compact semantic layout row width")
+            layout_hints = {
+                "mode": mode,
+                "rank_groups": [{"id": row[0], "node_ids": row[1]} for row in rank_rows],
+                "track_groups": [{"id": row[0], "node_ids": row[1]} for row in track_rows],
+                "convergences": [{"target": row[0], "sources": row[1]} for row in convergence_rows],
+                "auto_place_unlisted": auto_place,
+            }
+        expanded_view = {**view, "node_ids": [node_id for lane in lanes for node_id in lane["node_ids"]]}
+        if layout_hints is not None:
+            expanded_view["layout_hints"] = layout_hints
+        manifest["views"].append(expanded_view)
     manifest["scenarios"] = []
     for scenario in scenarios:
         steps = scenario.get("steps") if isinstance(scenario, dict) else None
@@ -228,6 +346,7 @@ def validate_manifest(root: Path, manifest: dict[str, Any], byte_size: int) -> l
             continue
         node_set = set(view_nodes)
         edge_set = set(view_edges)
+        errors.extend(_validate_layout_hints(view_id, view.get("layout_hints"), node_set))
         if len(node_set) != len(view_nodes) or len(edge_set) != len(view_edges):
             errors.append(f"{view_id}: duplicated view membership")
         for node_id in view_nodes:

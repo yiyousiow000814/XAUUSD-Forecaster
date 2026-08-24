@@ -33,6 +33,13 @@ Architecture documents affected:
 - Any architecture, owner, boundary, dependency, or canonical path change must
   update `architecture/manifest.json` and the relevant architecture document in
   the same PR. Validate it with `scripts/check_architecture_manifest.py`.
+- Add a manifest node or edge when introducing a real subsystem, process,
+  owner, store, or cross-boundary dependency. An ordinary internal helper or
+  behavior-preserving refactor does not become an architecture node. Never
+  infer authority, criticality, or failure behavior from imports alone.
+- Optional semantic layout hints may encode meaningful rank, track, and
+  convergence relationships. They must remain orientation-independent, omit
+  absolute coordinates, and automatically place unlisted nodes.
 
 ## Before Adding Code
 

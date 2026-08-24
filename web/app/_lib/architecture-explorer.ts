@@ -20,10 +20,19 @@ export type ArchitectureEdge = {
   criticality: ArchitectureCriticality; description: string;
 };
 export type ArchitectureLane = { id: string; label: string; node_ids: string[] };
+export type ArchitectureSemanticGroup = { id: string; node_ids: string[] };
+export type ArchitectureConvergence = { target: string; sources: string[] };
+export type ArchitectureLayoutHints = {
+  mode: "SEMANTIC_GRID";
+  rank_groups: ArchitectureSemanticGroup[];
+  track_groups: ArchitectureSemanticGroup[];
+  convergences: ArchitectureConvergence[];
+  auto_place_unlisted: true;
+};
 export type ArchitectureView = {
   id: string; label: string; summary: string; layout_direction: "LR" | "TB";
   node_ids: string[]; edge_ids: string[]; entry_node: string; primary_path: string[]; lanes: ArchitectureLane[];
-  relationship_note?: string; prohibited_directions?: string[];
+  relationship_note?: string; prohibited_directions?: string[]; layout_hints?: ArchitectureLayoutHints;
 };
 export type ArchitectureScenario = {
   id: string; label: string; description: string; view_id: string; node_ids: string[]; edge_ids: string[];
@@ -62,6 +71,7 @@ export type ArchitectureGraphBounds = { x: number; y: number; width: number; hei
 export const ARCHITECTURE_LANE_GAP = { LR: 24, TB: 20 } as const;
 export const ARCHITECTURE_EDGE_OVERLAP_TOLERANCE = 6;
 export const ARCHITECTURE_MOBILE_NODE_WIDTH_FLOOR = 168;
+export const ARCHITECTURE_SEMANTIC_LAYOUT_PASSES = 8;
 
 const STATES = new Set<ArchitectureState>(["CURRENT", "PENDING", "TARGET", "PAUSED", "RETAINED"]);
 const PATH_STATES = new Set<ArchitecturePathState>(["CURRENT_PATH", "PENDING_PATH", "LEGACY_SHIM", "TARGET_PATH"]);
@@ -78,6 +88,51 @@ function isContinuous(nodeIds: string[], edgeIds: string[], edgeById: Map<string
   return edgeIds.length === nodeIds.length - 1 && edgeIds.every((edgeId, index) => {
     const edge = edgeById.get(edgeId);
     return edge?.from === nodeIds[index] && edge.to === nodeIds[index + 1];
+  });
+}
+
+function isValidLayoutHints(value: unknown, visible: Set<string>) {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object") return false;
+  const hints = value as Partial<ArchitectureLayoutHints>;
+  if (Object.keys(hints).some(key => !["mode", "rank_groups", "track_groups", "convergences", "auto_place_unlisted"].includes(key))) return false;
+  if (hints.mode !== "SEMANTIC_GRID" || hints.auto_place_unlisted !== true
+      || !Array.isArray(hints.rank_groups) || !Array.isArray(hints.track_groups)
+      || !Array.isArray(hints.convergences)) return false;
+  const groups = [...hints.rank_groups, ...hints.track_groups];
+  if (!groups.length && !hints.convergences.length) return false;
+  if (!groups.every(group => group && Object.keys(group).length === 2 && Object.hasOwn(group, "id") && Object.hasOwn(group, "node_ids")
+      && typeof group.id === "string" && group.id.trim()
+      && isStringArray(group.node_ids) && group.node_ids.length > 0
+      && new Set(group.node_ids).size === group.node_ids.length
+      && group.node_ids.every(id => visible.has(id)))) return false;
+  if (new Set(groups.map(group => group.id)).size !== groups.length) return false;
+  for (const family of [hints.rank_groups, hints.track_groups]) {
+    const members = family.flatMap(group => group.node_ids);
+    if (new Set(members).size !== members.length) return false;
+  }
+  const rankByNode = new Map(hints.rank_groups.flatMap(group => group.node_ids.map(id => [id, group.id] as const)));
+  const trackByNode = new Map(hints.track_groups.flatMap(group => group.node_ids.map(id => [id, group.id] as const)));
+  const occupied = new Set<string>();
+  for (const id of visible) {
+    const key = rankByNode.has(id) && trackByNode.has(id) ? `${rankByNode.get(id)}\u0000${trackByNode.get(id)}` : null;
+    if (key && occupied.has(key)) return false;
+    if (key) occupied.add(key);
+  }
+  const convergenceTracks = new Set<string>();
+  const convergenceTargets = new Set<string>();
+  return hints.convergences.every(item => {
+    if (!item || Object.keys(item).length !== 2 || !Object.hasOwn(item, "target") || !Object.hasOwn(item, "sources")
+        || typeof item.target !== "string" || !visible.has(item.target) || convergenceTargets.has(item.target)
+        || !isStringArray(item.sources) || item.sources.length < 2
+        || new Set(item.sources).size !== item.sources.length
+        || item.sources.includes(item.target) || !item.sources.every(id => visible.has(id))) return false;
+    const targetTrack = trackByNode.get(item.target);
+    if (targetTrack && (convergenceTracks.has(targetTrack)
+        || item.sources.some(source => trackByNode.get(source) === targetTrack))) return false;
+    if (targetTrack) convergenceTracks.add(targetTrack);
+    convergenceTargets.add(item.target);
+    return true;
   });
 }
 
@@ -109,6 +164,7 @@ export function parseArchitectureManifest(value: unknown): ArchitectureManifest 
         || (view.relationship_note !== undefined && typeof view.relationship_note !== "string")
         || (view.prohibited_directions !== undefined && !isStringArray(view.prohibited_directions))) return false;
     const visible = new Set(view.node_ids);
+    if (!isValidLayoutHints(view.layout_hints, visible)) return false;
     const laneNodes = view.lanes.flatMap(lane => lane.node_ids);
     const primaryEdges = view.primary_path.slice(0, -1).map((from, index) => view.edge_ids.find(edgeId => {
       const edge = edgeById.get(edgeId); return edge?.from === from && edge.to === view.primary_path[index + 1];
@@ -269,6 +325,102 @@ function separateArchitectureLanes(nodes: ArchitectureGraphNode[], lanes: Archit
   return placed;
 }
 
+function architectureLaneBoxesConflict(lanes: ArchitectureGraphLane[], direction: "LR" | "TB") {
+  const gap = ARCHITECTURE_LANE_GAP[direction];
+  for (let left = 0; left < lanes.length; left += 1) for (let right = left + 1; right < lanes.length; right += 1) {
+    const a = lanes[left]; const b = lanes[right];
+    const xSeparated = a.position.x >= b.position.x + b.width + gap || b.position.x >= a.position.x + a.width + gap;
+    const ySeparated = a.position.y >= b.position.y + b.height + gap || b.position.y >= a.position.y + a.height + gap;
+    if (!xSeparated && !ySeparated) return true;
+  }
+  return false;
+}
+
+function architectureNodesOverlap(left: ArchitectureGraphNode, right: ArchitectureGraphNode, gap = 12) {
+  return left.position.x < right.position.x + right.width + gap
+    && right.position.x < left.position.x + left.width + gap
+    && left.position.y < right.position.y + right.height + gap
+    && right.position.y < left.position.y + left.height + gap;
+}
+
+function applySemanticArchitectureLayout(
+  nodes: ArchitectureGraphNode[], view: ArchitectureView, edges: ArchitectureEdge[], direction: "LR" | "TB",
+) {
+  const hints = view.layout_hints!;
+  const fallback = new Map(nodes.map(node => [node.id, { ...node.position }]));
+  const rankByNode = new Map(hints.rank_groups.flatMap((group, rank) => group.node_ids.map(id => [id, rank] as const)));
+  const trackByNode = new Map(hints.track_groups.flatMap((group, track) => group.node_ids.map(id => [id, track] as const)));
+  const primarySize = direction === "LR" ? nodes[0].width : nodes[0].height;
+  const crossSize = direction === "LR" ? nodes[0].height : nodes[0].width;
+  const fallbackPrimaryCenter = (node: ArchitectureGraphNode) => {
+    const position = fallback.get(node.id)!;
+    return direction === "LR" ? position.x + node.width / 2 : position.y + node.height / 2;
+  };
+  const fallbackCrossCenter = (node: ArchitectureGraphNode) => {
+    const position = fallback.get(node.id)!;
+    return direction === "LR" ? position.y + node.height / 2 : position.x + node.width / 2;
+  };
+  const primaryOrigin = Math.min(...nodes.map(fallbackPrimaryCenter));
+  const crossOrigin = Math.min(...nodes.map(fallbackCrossCenter));
+
+  for (let pass = 0; pass < ARCHITECTURE_SEMANTIC_LAYOUT_PASSES; pass += 1) {
+    const rankStep = primarySize + (direction === "LR" ? 80 : 84) + pass * 28;
+    const trackStep = crossSize + (direction === "LR" ? 84 : 66) + pass * 28;
+    const resolvedRanks = new Map(rankByNode);
+    const pending = nodes.filter(node => !resolvedRanks.has(node.id)).sort((left, right) => left.id.localeCompare(right.id));
+    for (let attempt = 0; attempt < nodes.length && pending.some(node => !resolvedRanks.has(node.id)); attempt += 1) {
+      for (const node of pending) {
+        if (resolvedRanks.has(node.id)) continue;
+        const incoming = edges.filter(edge => edge.to === node.id).map(edge => resolvedRanks.get(edge.from)).filter(Number.isFinite) as number[];
+        const outgoing = edges.filter(edge => edge.from === node.id).map(edge => resolvedRanks.get(edge.to)).filter(Number.isFinite) as number[];
+        const estimates = [...incoming.map(rank => rank + 1), ...outgoing.map(rank => rank - 1)];
+        if (estimates.length) resolvedRanks.set(node.id, Math.round(estimates.reduce((sum, rank) => sum + rank, 0) / estimates.length));
+      }
+    }
+    for (const node of pending) if (!resolvedRanks.has(node.id)) {
+      resolvedRanks.set(node.id, Math.round((fallbackPrimaryCenter(node) - primaryOrigin) / rankStep));
+    }
+
+    const crossCenters = new Map<string, number>();
+    nodes.forEach(node => crossCenters.set(node.id, trackByNode.has(node.id)
+      ? crossOrigin + trackByNode.get(node.id)! * trackStep : fallbackCrossCenter(node)));
+    for (const node of nodes.filter(item => !trackByNode.has(item.id)).sort((left, right) => left.id.localeCompare(right.id))) {
+      const neighbours = edges.filter(edge => edge.from === node.id || edge.to === node.id)
+        .map(edge => edge.from === node.id ? edge.to : edge.from)
+        .map(id => crossCenters.get(id)).filter(Number.isFinite) as number[];
+      if (neighbours.length) crossCenters.set(node.id, neighbours.reduce((sum, value) => sum + value, 0) / neighbours.length);
+    }
+    for (const convergence of hints.convergences) {
+      const midpoint = convergence.sources.reduce((sum, id) => sum + crossCenters.get(id)!, 0) / convergence.sources.length;
+      const targetTrack = trackByNode.get(convergence.target);
+      if (targetTrack === undefined) crossCenters.set(convergence.target, midpoint);
+      else hints.track_groups[targetTrack].node_ids.forEach(id => crossCenters.set(id, midpoint));
+    }
+
+    nodes.forEach(node => {
+      const primary = primaryOrigin + resolvedRanks.get(node.id)! * rankStep;
+      const cross = crossCenters.get(node.id)!;
+      node.position = direction === "LR"
+        ? { x: primary - node.width / 2, y: cross - node.height / 2 }
+        : { x: cross - node.width / 2, y: primary - node.height / 2 };
+    });
+    for (const node of nodes.filter(item => !trackByNode.has(item.id)).sort((left, right) => left.id.localeCompare(right.id))) {
+      const baseCross = crossCenters.get(node.id)!;
+      for (let slot = 0; slot <= nodes.length + 2; slot += 1) {
+        const ordinal = slot === 0 ? 0 : Math.ceil(slot / 2) * (slot % 2 ? 1 : -1);
+        const cross = baseCross + ordinal * trackStep;
+        node.position = direction === "LR"
+          ? { ...node.position, y: cross - node.height / 2 }
+          : { ...node.position, x: cross - node.width / 2 };
+        if (!nodes.some(other => other.id !== node.id && architectureNodesOverlap(node, other))) break;
+      }
+    }
+    const laneBoxes = view.lanes.map(lane => laneBounds(nodes, lane, direction));
+    if (!architectureLaneBoxesConflict(laneBoxes, direction)) return laneBoxes;
+  }
+  throw new Error(`Semantic layout could not separate lanes for ${view.id} in ${direction}`);
+}
+
 export function architecturePortVisibility(edges: Pick<ArchitectureGraphEdge, "source" | "target">[], nodeId: string) {
   return {
     hasIncomingEdge: edges.some(edge => edge.target === nodeId),
@@ -421,7 +573,9 @@ export function buildArchitectureGraph(manifest: ArchitectureManifest, viewId: s
     return { id, position, width, height,
       data: { node: nodeById.get(id)!, laneId: lane.id, laneLabel: lane.label, ...ports, incomingPorts: [], outgoingPorts: [] } };
   });
-  const laneBoxes = separateArchitectureLanes(nodes, view.lanes, rankdir);
+  const laneBoxes = view.layout_hints
+    ? applySemanticArchitectureLayout(nodes, view, visibleEdges, rankdir)
+    : separateArchitectureLanes(nodes, view.lanes, rankdir);
   const edgeShapes = visibleEdges.map(item => ({ ...item, source: item.from, target: item.to }));
   const anchorByEdge = architectureEdgeAnchors(nodes, edgeShapes, rankdir);
   const routeOrder = [...edgeShapes].map(edge => edge.id).sort();

@@ -166,6 +166,10 @@ def test_compact_rows_restore_full_graph_with_meaningful_headroom() -> None:
     expanded = expand_compact_manifest(source)
     assert all(isinstance(node, dict) and "purpose" in node for node in expanded["nodes"])
     assert all(isinstance(edge, dict) and "description" in edge for edge in expanded["edges"])
+    web_view = next(view for view in expanded["views"] if view["id"] == "web-cloudflare")
+    assert isinstance(next(view for view in source["views"] if view["id"] == "web-cloudflare")["layout_hints"], list)
+    assert web_view["layout_hints"]["mode"] == "SEMANTIC_GRID"
+    assert web_view["layout_hints"]["auto_place_unlisted"] is True
 
 
 def test_compact_row_width_fails_closed() -> None:
@@ -173,6 +177,40 @@ def test_compact_row_width_fails_closed() -> None:
     source["nodes"][0].pop()
     with pytest.raises(ValueError, match="row width"):
         expand_compact_manifest(source)
+
+
+def test_semantic_layout_hints_fail_closed_as_one_contract() -> None:
+    manifest, _ = manifest_copy()
+    view = next(item for item in manifest["views"] if item["id"] == "web-cloudflare")
+    hints = view["layout_hints"]
+    assert [item["id"] for item in manifest["views"] if "layout_hints" in item] == ["web-cloudflare"]
+
+    mutations = [
+        (lambda value: value["rank_groups"].append(copy.deepcopy(value["rank_groups"][0])), "duplicate semantic group IDs"),
+        (lambda value: value["rank_groups"][0]["node_ids"].append("unknown-node"), "unknown node"),
+        (lambda value: value["rank_groups"][1]["node_ids"].append("dashboard-sync"), "multiple rank groups"),
+        (lambda value: value["track_groups"][1]["node_ids"].append("dashboard-sync"), "multiple track groups"),
+        (lambda value: value["convergences"][0].update({"target": "missing-node"}), "target is missing from the view"),
+        (lambda value: value["convergences"][0].update({"sources": ["d1"]}), "at least two sources"),
+        (lambda value: value.update({"rank_groups": [], "track_groups": [], "convergences": []}), "no usable groups"),
+        (lambda value: value.update({"x": 120}), "absolute coordinate field"),
+    ]
+    for mutate, expected in mutations:
+        candidate = copy.deepcopy(manifest)
+        candidate_hints = next(item for item in candidate["views"] if item["id"] == view["id"])["layout_hints"]
+        mutate(candidate_hints)
+        assert any(expected in error for error in errors_for(candidate)), expected
+
+    contradiction = copy.deepcopy(manifest)
+    contradiction_hints = next(item for item in contradiction["views"] if item["id"] == view["id"])["layout_hints"]
+    contradiction_hints["rank_groups"][1]["node_ids"].remove("d1")
+    contradiction_hints["rank_groups"][0]["node_ids"].append("d1")
+    assert any("contradictory constraints" in error for error in errors_for(contradiction))
+
+    convergence_conflict = copy.deepcopy(manifest)
+    convergence_hints = next(item for item in convergence_conflict["views"] if item["id"] == view["id"])["layout_hints"]
+    convergence_hints["convergences"].append(copy.deepcopy(hints["convergences"][0]))
+    assert any("contradictory convergence targets" in error for error in errors_for(convergence_conflict))
 
 
 def test_campaign_order_and_pending_semantics_are_fixed() -> None:

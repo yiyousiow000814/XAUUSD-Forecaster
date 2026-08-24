@@ -6,7 +6,8 @@ The first Explorer renderer was rejected because it presented a two-column
 card catalog and permanent detail wall rather than an architecture graph. The
 bounded manifest, build-time injection, private route, security boundary, and
 exact-SHA source links were retained. The renderer is now a read-only React
-Flow node-link graph with Dagre layout and visible directed connectors.
+Flow node-link graph with Dagre fallback, optional semantic layout constraints,
+and visible directed connectors.
 
 ## Architecture gate
 
@@ -33,17 +34,42 @@ Markdown parser, Windows process, background thread, or production mutation.
 - Edges: 66
 - Guided scenarios: 4
 - Explicit failure-impact definitions: 8
-- Serialized bytes: 64,971 of the fixed 65,536-byte limit
+- Serialized bytes: 52,379 of the fixed 65,536-byte limit
 - Edge IDs, endpoints, labels, kinds, criticalities, and descriptions are explicit.
 - View edge membership, visible endpoints, continuous primary paths, lane
   membership, scenario continuity, and failure references fail closed.
-- Coordinates are not stored; Dagre calculates finite positions per selected view.
+- Coordinates are not stored; Dagre calculates finite fallback positions per
+  selected view and validated hints may constrain semantic relationships.
 - Every node has a non-empty `purpose` separate from summary and ownership.
 - The package view has nine explicit canonical package nodes and 28
   `DEPENDENCY` edges matching `PACKAGE_DEPENDENCIES.md`; it contains no runtime
   transport, materialization, Candidate, or published-model node.
 
 ## Interaction and presentation evidence
+
+### Semantic layout audit
+
+All 11 views were reviewed. `web-cloudflare` is the only view with semantic
+hints because it owns one unambiguous symmetric grid: Dashboard Sync and Stable
+Release share a source rank; D1 and Cloudflare share the next rank; each pair
+stays on its projection or release track; Worker is centered between the two
+incoming tracks; and Explorer stays on Worker's presentation track. The same
+rank/track/convergence contract drives LR and TB without stored coordinates.
+
+The remaining ten views retain plain Dagre layout. Their linear paths, dense
+dependency graph, feedback cycles, and control-plane sequences do not express a
+single non-contradictory semantic grid, so adding hints would be decorative.
+Unlisted nodes stay valid: the semantic engine derives bounded positions from
+connected constrained neighbours and then Dagre, while at most eight global
+spacing passes keep lane regions separate without independently moving a
+hinted lane.
+
+The checker and client reject unknown or duplicate membership, multiple rank or
+track membership, occupied semantic cells, incomplete or contradictory
+convergence, empty semantic mode, unsupported fields, and absolute coordinates.
+Family-level tests prove deterministic LR/TB alignment, the Worker convergence,
+finite bounds, lane separation, preserved routing, and a synthetic connected
+node omitted from all hints.
 
 - Initial Overview has no selected node or inspector and renders 11 nodes with
   11 visible directed edges and arrow markers.
@@ -76,10 +102,10 @@ Measured from the production client build with maximum gzip compression:
 
 | Artifact | Raw bytes | Gzip bytes | Boundary |
 |---|---:|---:|---|
-| Lazy Explorer JS | 310,799 | 93,454 | Private lazy chunk only |
-| Lazy Explorer CSS | 32,639 | 6,467 | Private lazy chunk only |
-| Public `DashboardApp` JS | 29,177 | 10,228 | Public initial path |
-| Public shared `index` JS | 217,752 | 58,189 | Public initial path |
+| Lazy Explorer JS | 323,250 | 97,553 | Private lazy chunk only |
+| Lazy Explorer CSS | 33,047 | 6,546 | Private lazy chunk only |
+| Public `DashboardApp` JS | 29,177 | 10,225 | Public initial path |
+| Public shared `index` JS | 217,752 | 58,188 | Public initial path |
 | Public initial CSS | 199,919 | 34,287 | Public initial path |
 
 The public JS raw sizes are unchanged from the rejected #304 build boundary;
