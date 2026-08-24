@@ -7,7 +7,7 @@ not make the target package layout, test organization, or Architecture Explorer
 `CURRENT`; those states change only after the ordered stack merges.
 
 - Audited latest `main`: `c2df79bff1fac75e324f12f2cdf0d97edadbaf96`
-- Final implementation head: #304 at `d95891263894d6eec201ddab1cc9f3a767e78ed1`
+- Final implementation head: #304 at `1628a1e99e0beb125959a70bf35d9b3d31419966`
 - Closure: existing Draft PR #302, documentation-only, based on #304
 - Complete Draft PR count: 18
 - Campaign sequence from #287 through Closure: 15 Draft PRs
@@ -55,8 +55,8 @@ the authoritative value.
 | 14 | #298 | `refactor/news-ai-packages` | `fa65a4bf65d8f1ae019bac718cc1ea6fa594bd0d` | `9a7f25a19a0c2f93dca9fc7f6945e8003a1008ce` |
 | 15 | #299 | `refactor/assistant-runtime-dashboard-packages` | `9a7f25a19a0c2f93dca9fc7f6945e8003a1008ce` | `53afec5867b736bde187e6432911c1a6f249f662` |
 | 16 | #301 | `refactor/test-organization` | `53afec5867b736bde187e6432911c1a6f249f662` | `494cf7807028c6e13e993eae5ff26665371070e0` |
-| 17 | #304 | `feat/private-architecture-explorer` | `494cf7807028c6e13e993eae5ff26665371070e0` | `d95891263894d6eec201ddab1cc9f3a767e78ed1` |
-| 18 | #302 | `chore/modularization-campaign-closure` | `d95891263894d6eec201ddab1cc9f3a767e78ed1` | live PR #302 head OID |
+| 17 | #304 | `feat/private-architecture-explorer` | `494cf7807028c6e13e993eae5ff26665371070e0` | `1628a1e99e0beb125959a70bf35d9b3d31419966` |
+| 18 | #302 | `chore/modularization-campaign-closure` | `1628a1e99e0beb125959a70bf35d9b3d31419966` | live PR #302 head OID |
 
 ## Latest-main integration
 
@@ -102,24 +102,24 @@ Control Center action was executed live.
 | Latest `main` | 1,569 |
 | Original pre-rebase Closure | 1,512 |
 | Repaired #301 | 1,601 |
-| Final implementation with Explorer | 1,610 |
+| Final implementation with Explorer | 1,614 |
 
 Raw latest-main-to-#301 comparison produced 76 removed and 108 added node IDs.
 Sixty-seven removals are identical logical symbols relocated with owner splits;
 the remaining nine are individually mapped to equivalent-or-stronger nodes in
 `docs/audits/TEST_ORGANIZATION_2026_08_24.md`. Unexplained removals are zero.
-The final net increase over current main is 41: 32 campaign cases plus nine
-Architecture Explorer cases.
+The final net increase over current main is 45: 32 campaign cases plus 13
+Architecture Explorer manifest cases.
 
 Final local evidence:
 
-- Python: 1,610 passed;
-- Web: 257 passed, 6 skipped; build, scoped strict typecheck, and lint passed;
+- Python: 1,614 passed;
+- Web: 271 passed, 6 skipped; build, scoped strict typecheck, and lint passed;
 - runtime owner: 280 passed; Control Center plus Control Plane: 212 passed;
   Control Plane focused: 14 passed;
-- manifest: nine tests; 24 nodes, 28 edges, 11 views, 28,502 bytes;
-- lazy Explorer chunk: 34,827 bytes / 9,911 gzip;
-- public shared initial delta: +940 bytes / +137 gzip;
+- manifest: 13 tests; 28 nodes, 38 edges, 11 views, four scenarios, 50,891 bytes;
+- lazy Explorer JS: 294,225 bytes / 89,990 gzip; lazy CSS: 30,690 / 6,119 gzip;
+- public initial graph dependency delta: zero; graph packages remain lazy-only;
 - architecture docs/imports/manifest, repository policy, compileall, PowerShell
   parse, and diff checks passed.
 
@@ -132,22 +132,25 @@ Worker route, runtime GitHub request, Markdown parser, Windows process, or
 background thread.
 
 Local in-app browser checks at 1440x900, 390x844, and 360x800 found no
-horizontal overflow and no visible interactive target under 44px. Overview,
-drill-down, keyboard selection, search, state filter, breadcrumbs, dependency/
-unaffected text, Campaign selection, mobile details, and exact-SHA links were
-exercised. No Architecture API or third-party request occurred; console errors
-and warnings were empty; final browser session count was zero.
+horizontal overflow and no visible interactive target under 44px. The real
+node-link Overview rendered 11 nodes and 11 directed edges with no initial
+selection. Decision path highlighting/dimming, closable inspector, node-owned
+drill-down, search, state filter, breadcrumbs, guided paths, explicit failure
+impact, mobile TB graph, bottom sheet, relationship fallback, and exact-SHA
+links were exercised. No Architecture API or third-party request occurred.
 
 The exact #304 immutable Preview at
-`https://33481f39-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`
-was then verified at the same three viewports. The deployed flow preserved the
-exact `d9589126` build marker, responsive layout, 44px target minimum,
-drill-down, search/filter, Campaign selection, mobile detail reachability, and
-zero Architecture API or third-party requests. The viewport override was reset
-and the final task-created browser session count was zero. A shared Admin-shell
-React hydration #418 is reproducible on the #282 latest-main baseline Preview
-and #304; it is not introduced by the Explorer boundary and remains separate
-owner work.
+`https://a8c2963a-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`
+was then verified at the same three viewports. It exposed the exact `1628a1e9`
+build marker, 11-node/11-edge Overview with no initial selection, responsive TB
+phone layout, 44px target minimum, Decision selection and inspector, guided
+flow, explicit Cloudflare AFFECTED/CONTINUES state, and bottom-sheet detail.
+Across the captured reload there were zero network failures, zero third-party
+requests, and zero Architecture API requests. The unauthenticated session probe
+returned its expected 401. The viewport override was reset and the final
+task-created browser session count was zero. The known shared Admin-shell React
+hydration #418 remains reproducible; it is outside this PR's explicit non-goals
+and is not hidden as Explorer evidence.
 
 ## External import compatibility
 
