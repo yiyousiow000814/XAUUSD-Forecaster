@@ -184,22 +184,27 @@ def test_candidate_validation_retries_delayed_observability_evidence(tmp_path) -
         "family='status-read';scenario='status';boundary='WORKER_READ';warmup_samples=1;"
         "acceptance_samples=2};"
         "$plan=[pscustomobject]@{static_assets=@();worker_reads=@($route);worker_writes=@()};"
-        "function Start-Sleep{};$script:countAttempts=0;$script:phases=@();"
-        "function Get-CandidateInvocationCount{$script:countAttempts++;"
+        "function Start-Sleep{};$script:countAttempts=0;$script:countWindows=@();"
+        "$script:phases=@();function Get-CandidateInvocationCount{"
+        "param($Candidate,$From,$To,$ValidationRun);"
+        "$script:countAttempts++;$script:countWindows+=$To;"
         "if($script:countAttempts -eq 1){0}else{2}};"
         "function Invoke-CandidateRouteSample{param($ValidationPhase);"
         "$script:phases+=$ValidationPhase;return [pscustomobject]@{passed=$true;"
         "request_id='request';status=200}};"
-        "$script:evidenceAttempts=0;function Get-CandidateCpuEvidence{"
-        "$script:evidenceAttempts++;return [pscustomobject]@{"
+        "$script:evidenceAttempts=0;$script:evidenceTo=$null;"
+        "function Get-CandidateCpuEvidence{"
+        "param($Candidate,$From,$To,$Routes,$ValidationRun);"
+        "$script:evidenceAttempts++;$script:evidenceTo=$To;return [pscustomobject]@{"
         "invocations=2;passed=$true;gate_state='PASSED'}};"
         "$validation=Invoke-CandidateWorkerValidation -Candidate $candidate -RoutePlan $plan;"
         'Write-Output "$script:countAttempts,$script:evidenceAttempts,'
         '$($validation.observed_worker_invocations),$($script:phases -join \':\'),'
-        '$($validation.observability_diagnostic)"',
+        '$($validation.observability_diagnostic),'
+        '$($script:evidenceTo -eq $script:countWindows[1])"',
     )
 
-    assert result == "2,1,2,warmup:acceptance:acceptance,"
+    assert result == "2,1,2,warmup:acceptance:acceptance,,True"
 
 
 def test_delayed_platform_telemetry_keeps_exact_candidate_retryable(tmp_path) -> None:
