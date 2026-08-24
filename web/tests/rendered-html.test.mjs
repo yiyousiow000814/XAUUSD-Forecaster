@@ -2028,6 +2028,27 @@ test("bounds a streamed snapshot without content-length", async () => {
   assert.equal(cancelled, true);
 });
 
+test("preserves UTF-8 split across bounded request chunks", async () => {
+  const { readBoundedBody } = await import(
+    "../app/api/_shared/dashboard-snapshot.ts"
+  );
+  const encoded = new TextEncoder().encode('{"headline":"黄金上涨"}');
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoded.slice(0, 15));
+      controller.enqueue(encoded.slice(15, 18));
+      controller.enqueue(encoded.slice(18));
+      controller.close();
+    },
+  });
+  const result = await readBoundedBody(new Request("https://example.test/api/news", {
+    method: "POST", body: stream, duplex: "half",
+  }), encoded.byteLength);
+  assert.deepEqual(result, {
+    status: "ok", serialized: '{"headline":"黄金上涨"}', receivedBytes: encoded.byteLength,
+  });
+});
+
 test("lets D1 validate raw snapshot JSON in the same write", async () => {
   const { writeDashboardSnapshot } = await import("../app/api/_shared/dashboard-snapshot.ts");
   const calls = [];

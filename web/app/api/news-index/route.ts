@@ -425,8 +425,7 @@ export async function POST(request: Request) {
         }],
       }, { status: 409 });
     }
-    const now = new Date().toISOString();
-    const statements = body.items.flatMap(item => {
+    for (const item of body.items) {
       if (
         typeof item.detail_key !== "string"
         || !/^[a-f0-9]{64}$/.test(item.detail_key)
@@ -435,6 +434,14 @@ export async function POST(request: Request) {
         || typeof item.cluster_id !== "string"
         || typeof item.mirror_contract !== "string"
       ) throw new Error("invalid news index item");
+    }
+    const checked = await finishReleaseValidation(binding, validation, serialized, {
+      transformed: { items: body.items.length, prepared_statements: body.items.length * 2 },
+      mutation_boundary: "news-index-upsert-batch",
+    });
+    if (checked) return checked;
+    const now = new Date().toISOString();
+    const statements = body.items.flatMap(item => {
       const publishedTime = typeof item.source_published_time === "string"
         ? item.source_published_time : item.collector_first_seen_time;
       return [binding.prepare(
@@ -463,11 +470,6 @@ export async function POST(request: Request) {
         item.mirror_contract, JSON.stringify(item), now,
       )];
     });
-    const checked = await finishReleaseValidation(binding, validation, serialized, {
-      transformed: { items: body.items.length, prepared_statements: statements.length },
-      mutation_boundary: "news-index-upsert-batch",
-    });
-    if (checked) return checked;
     if (statements.length) await binding.batch(statements);
     return NextResponse.json({ status: "OK", received: body.items.length });
   } catch (reason) {
