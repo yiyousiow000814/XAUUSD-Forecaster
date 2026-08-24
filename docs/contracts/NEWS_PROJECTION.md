@@ -47,6 +47,9 @@
   closed.
 - A retry resumes the remote detail and index offsets and preserves the prior
   `CURRENT` generation. It MUST NOT restart an accepted stage blindly.
+- Building the frozen local source universe runs outside the HTTP request path.
+  Until that bounded build completes, manifest reads return `REPLAYING` with a
+  retry interval; they do not hold the sync request open or replace `CURRENT`.
 - Manifest mismatch, receipt contradiction, missing detail, partial activation,
   stale staging, and source-snapshot mismatch require an explicit recovery
   state. An orphan staging generation may be removed using its rejection
