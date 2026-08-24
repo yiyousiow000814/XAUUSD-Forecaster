@@ -31,9 +31,9 @@ jobs:
   runtime-contracts:
     name: Windows runtime contracts
     runs-on: windows-latest
-    # A warm Windows runner spends about 90 seconds installing native wheels and
-    # about 70 seconds on these contracts. Leave bounded room for runner variance.
-    timeout-minutes: 5
+    # Recent complete runs need about five minutes including native-wheel setup.
+    # Keep per-test fail-closed bounds below and allow bounded runner variance.
+    timeout-minutes: 7
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
