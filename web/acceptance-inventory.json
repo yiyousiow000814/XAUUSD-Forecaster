@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "api_contract_source": "worker-validation-manifest.json",
+  "access_channels": [
+    {
+      "id": "VERSION_HOST_RESULT",
+      "purpose": "Exact immutable Candidate code, asset, route, and dry-run behavior",
+      "authentication": "RELEASE_VALIDATION_TOKEN_OR_NONE_AS_CLASSIFIED"
+    },
+    {
+      "id": "PRODUCTION_ANONYMOUS_ACCESS_RESULT",
+      "purpose": "Public production behavior, human Cloudflare Access boundary, and Worker machine-private denial",
+      "authentication": "NONE"
+    },
+    {
+      "id": "PRODUCTION_AUTHENTICATED_ACCESS_RESULT",
+      "purpose": "Real Cloudflare Access owner session, shared navigation, authorization, logout, and reauthentication",
+      "authentication": "HUMAN_ACCESS_SESSION"
+    }
+  ],
+  "pages": [
+    {
+      "route": "/",
+      "source": "app/page.tsx",
+      "class": "PUBLIC",
+      "version_host": { "status": 200, "content_type": "text/html", "marker": "Aurum Signal Room" },
+      "production_anonymous": { "behavior": "STATUS", "status": 200 }
+    },
+    {
+      "route": "/audit",
+      "source": "app/audit/page.tsx",
+      "class": "PUBLIC",
+      "version_host": { "status": 200, "content_type": "text/html", "marker": "新闻与决策" },
+      "production_anonymous": { "behavior": "STATUS", "status": 200 }
+    },
+    {
+      "route": "/health",
+      "source": "app/health/page.tsx",
+      "class": "PUBLIC",
+      "version_host": { "status": 200, "content_type": "text/html", "marker": "系统健康状态" },
+      "production_anonymous": { "behavior": "STATUS", "status": 200 }
+    },
+    {
+      "route": "/admin",
+      "source": "app/admin/page.tsx",
+      "class": "AUTHENTICATED",
+      "version_host": { "status": 200, "content_type": "text/html", "marker": "OWNER OPERATIONS" },
+      "production_anonymous": { "behavior": "CLOUDFLARE_ACCESS_REDIRECT" },
+      "production_authenticated": { "status": 200, "marker": "OWNER OPERATIONS" }
+    },
+    {
+      "route": "/admin/retry-jobs",
+      "source": "app/admin/retry-jobs/page.tsx",
+      "class": "AUTHENTICATED",
+      "version_host": { "status": 200, "content_type": "text/html", "marker": "PRIVATE OPERATOR QUEUE" },
+      "production_anonymous": { "behavior": "CLOUDFLARE_ACCESS_REDIRECT" },
+      "production_authenticated": { "status": 200, "marker": "PRIVATE OPERATOR QUEUE" }
+    },
+    {
+      "route": "/admin/ai-usage",
+      "source": "app/admin/ai-usage/page.tsx",
+      "class": "AUTHENTICATED",
+      "version_host": { "status": 200, "content_type": "text/html", "marker": "AI 模型使用状态" },
+      "production_anonymous": { "behavior": "CLOUDFLARE_ACCESS_REDIRECT" },
+      "production_authenticated": { "status": 200, "marker": "AI 模型使用状态" }
+    },
+    {
+      "route": "/admin/assistant",
+      "source": "app/admin/assistant/page.tsx",
+      "class": "PAUSED_AUTHENTICATED",
+      "version_host": { "status": 200, "content_type": "text/html", "marker": "ASSISTANT PAUSED" },
+      "production_anonymous": { "behavior": "CLOUDFLARE_ACCESS_REDIRECT" },
+      "production_authenticated": { "status": 200, "marker": "ASSISTANT PAUSED" }
+    },
+    {
+      "route": "/admin/auth-complete",
+      "source": "app/admin/auth-complete/page.tsx",
+      "class": "AUTH_CALLBACK",
+      "version_host": { "status": 200, "content_type": "text/html", "marker": "管理员认证已完成" },
+      "production_anonymous": { "behavior": "CLOUDFLARE_ACCESS_REDIRECT" },
+      "production_authenticated": { "status": 200, "marker": "管理员认证已完成" }
+    },
+    {
+      "route": "/assistant",
+      "source": "app/assistant/page.tsx",
+      "class": "COMPAT_REDIRECT",
+      "version_host": { "status": 307, "redirect_path": "/admin/assistant" },
+      "production_anonymous": { "behavior": "CLOUDFLARE_ACCESS_REDIRECT" }
+    },
+    {
+      "route": "/retry-jobs",
+      "source": "app/retry-jobs/page.tsx",
+      "class": "COMPAT_REDIRECT",
+      "version_host": { "status": 307, "redirect_path": "/admin/retry-jobs" },
+      "production_anonymous": { "behavior": "CLOUDFLARE_ACCESS_REDIRECT" }
+    },
+    {
+      "route": "/status",
+      "source": "app/status/page.tsx",
+      "class": "COMPAT_REDIRECT",
+      "version_host": { "status": 307, "redirect_path": "/health" },
+      "production_anonymous": { "behavior": "CLOUDFLARE_ACCESS_REDIRECT" }
+    }
+  ],
+  "api_classes": {
+    "PUBLIC_READ": [
+      "GET /api/status", "GET /api/ingest", "GET /api/audit",
+      "GET /api/audit-briefs", "GET /api/audit-stories", "GET /api/audit-decisions",
+      "GET /api/learning", "GET /api/learning-history", "GET /api/market-chart",
+      "GET /api/market-history", "GET /api/news-index", "GET /api/news-content",
+      "GET /api/news-evidence", "GET /api/news-search"
+    ],
+    "PRODUCTION_SHAPED_DRY_RUN_WRITE": [
+      "POST /api/ingest", "POST /api/audit", "POST /api/audit-briefs",
+      "POST /api/audit-stories", "POST /api/audit-decisions", "POST /api/learning",
+      "POST /api/learning-history", "POST /api/market-chart", "POST /api/market-history",
+      "POST /api/news-index", "POST /api/news-content", "POST /api/news-evidence"
+    ],
+    "AUTHENTICATED_READ_WRITE": [
+      "GET /api/admin-status", "GET /api/news-questions", "POST /api/news-questions",
+      "GET /api/operator-retry", "POST /api/operator-retry",
+      "GET /admin/api/admin-status", "GET /admin/api/news-questions",
+      "POST /admin/api/news-questions", "GET /admin/api/operator-retry",
+      "POST /admin/api/operator-retry", "GET /admin/api/session"
+    ],
+    "PAUSED_FEATURE": [
+      "GET /api/assistant-health", "GET /api/assistant-chat", "POST /api/assistant-chat",
+      "GET /api/assistant-conversations", "POST /api/assistant-conversations",
+      "GET /admin/api/assistant-health", "GET /admin/api/assistant-chat",
+      "POST /admin/api/assistant-chat", "GET /admin/api/assistant-conversations",
+      "POST /admin/api/assistant-conversations"
+    ],
+    "INTERNAL_ONLY": [
+      "GET /api/assistant-worker/chat", "POST /api/assistant-worker/chat",
+      "GET /api/assistant-worker/conversations", "POST /api/assistant-worker/conversations",
+      "GET /api/assistant-worker/news-questions", "POST /api/assistant-worker/news-questions",
+      "GET /api/operator-retry-worker", "POST /api/operator-retry-worker",
+      "ANY /_vinext/image"
+    ]
+  },
+  "materialized_resources": [
+    { "id": "status", "authority": "WINDOWS_RUNTIME_STATE", "producer": "dashboard-sync", "projection": "dashboard_snapshots:1,5", "api": ["/api/status", "/api/admin-status"], "consumer": ["health", "admin"], "consistency": "LIVE_EPHEMERAL", "freshness": "REQUIRED", "recovery": "NEXT_HEARTBEAT", "release_obligation": "REQUIRED" },
+    { "id": "audit", "authority": "LOCAL_EVIDENCE_SQLITE", "producer": "dashboard-sync", "projection": "dashboard_snapshots:4,9", "api": ["/api/audit"], "consumer": ["audit"], "consistency": "DERIVED_INVARIANT", "freshness": "BOUNDED_LAG", "recovery": "IDEMPOTENT_REPUBLISH", "release_obligation": "REQUIRED" },
+    { "id": "audit-briefs", "authority": "LOCAL_EVIDENCE_SQLITE", "producer": "dashboard-sync", "projection": "dashboard_snapshots:7", "api": ["/api/audit-briefs"], "consumer": ["audit"], "consistency": "DERIVED_INVARIANT", "freshness": "BOUNDED_LAG", "recovery": "IDEMPOTENT_REPUBLISH", "release_obligation": "REQUIRED" },
+    { "id": "audit-stories", "authority": "LOCAL_EVIDENCE_SQLITE", "producer": "dashboard-sync", "projection": "dashboard_snapshots:8", "api": ["/api/audit-stories"], "consumer": ["audit"], "consistency": "DERIVED_INVARIANT", "freshness": "BOUNDED_LAG", "recovery": "IDEMPOTENT_REPUBLISH", "release_obligation": "REQUIRED" },
+    { "id": "audit-decisions", "authority": "LOCAL_EVIDENCE_SQLITE", "producer": "dashboard-sync", "projection": "dashboard_snapshots:6", "api": ["/api/audit-decisions"], "consumer": ["audit"], "consistency": "DERIVED_INVARIANT", "freshness": "BOUNDED_LAG", "recovery": "IDEMPOTENT_REPUBLISH", "release_obligation": "REQUIRED" },
+    { "id": "learning", "authority": "LOCAL_EVIDENCE_SQLITE", "producer": "dashboard-sync", "projection": "dashboard_snapshots:3", "api": ["/api/learning"], "consumer": ["learning-dashboard"], "consistency": "DERIVED_INVARIANT", "freshness": "BOUNDED_LAG", "recovery": "IDEMPOTENT_REPUBLISH", "release_obligation": "REQUIRED" },
+    { "id": "learning-history", "authority": "LOCAL_EVIDENCE_SQLITE", "producer": "dashboard-sync", "projection": "learning_records", "api": ["/api/learning-history"], "consumer": ["learning-dashboard"], "consistency": "BOUNDED_LAG_PARITY", "freshness": "WATERMARK", "recovery": "CURSOR_REPLAY_WITH_DAILY_HASH_REFRESH", "release_obligation": "REQUIRED" },
+    { "id": "market-chart", "authority": "LOCAL_QUOTES_AND_EVIDENCE", "producer": "dashboard-sync", "projection": "dashboard_snapshots:2", "api": ["/api/market-chart"], "consumer": ["market-dashboard"], "consistency": "DERIVED_INVARIANT", "freshness": "BOUNDED_LAG", "recovery": "IDEMPOTENT_REPUBLISH", "release_obligation": "REQUIRED" },
+    { "id": "market-history", "authority": "LOCAL_QUOTES_AND_EVIDENCE", "producer": "dashboard-sync", "projection": "market_candles,market_decisions,market_history_overview,decision_overviews", "api": ["/api/market-history"], "consumer": ["market-dashboard"], "consistency": "BOUNDED_LAG_PARITY", "freshness": "WATERMARK", "recovery": "OVERLAP_CURSOR_REPLAY", "release_obligation": "REQUIRED" },
+    { "id": "news-index", "authority": "LOCAL_NEWS_SQLITE_FIXED_SNAPSHOT", "producer": "dashboard-sync", "projection": "news_projection_generation,news_index", "api": ["/api/news-index", "/api/news-search"], "consumer": ["audit"], "consistency": "EXACT_SNAPSHOT_PARITY", "freshness": "ACTIVE_GENERATION", "recovery": "BOUNDED_GENERATION_REPLAY", "release_obligation": "REQUIRED" },
+    { "id": "news-content", "authority": "LOCAL_NEWS_SQLITE_FIXED_SNAPSHOT", "producer": "dashboard-sync", "projection": "news_projection_generation,news_details", "api": ["/api/news-content"], "consumer": ["audit"], "consistency": "EXACT_SNAPSHOT_PARITY", "freshness": "ACTIVE_GENERATION", "recovery": "DETAIL_FIRST_BOUNDED_GENERATION_REPLAY", "release_obligation": "REQUIRED" },
+    { "id": "news-evidence", "authority": "LOCAL_IMMUTABLE_EVIDENCE_SNAPSHOT", "producer": "dashboard-sync", "projection": "news_evidence_state,news_evidence_records", "api": ["/api/news-evidence"], "consumer": ["audit"], "consistency": "EXACT_SNAPSHOT_PARITY", "freshness": "ACTIVE_GENERATION", "recovery": "PREPARE_STAGE_ACTIVATE", "release_obligation": "REQUIRED" },
+    { "id": "operator-retry", "authority": "D1_OPERATIONAL_STATE", "producer": "operator-retry-worker", "projection": "operator_retry_jobs", "api": ["/api/operator-retry", "/api/operator-retry-worker"], "consumer": ["admin-retry-jobs"], "consistency": "LIVE_EPHEMERAL", "freshness": "REQUIRED", "recovery": "LEASE_AND_RETRY", "release_obligation": "OPTIONAL" }
+  ],
+  "metrics": [
+    { "id": "news.readable_total", "authority": "LOCAL_NEWS_SNAPSHOT_MANIFEST", "projection": "news_projection_generation.expected_index_count", "api_field": "news-index.readable_total", "ui_field": "audit.readableNewsTotal", "invariant": "EXACT", "freshness": "ACTIVE_GENERATION", "display_state": "CURRENT_ONLY" },
+    { "id": "news.review_partition", "authority": "ACTIVE_NEWS_GENERATION", "projection": "news_index", "api_field": "review_state_counts", "ui_field": "audit.reviewStateCounts", "invariant": "PARTITION", "freshness": "ACTIVE_GENERATION", "display_state": "CURRENT_OR_RECOVERY_LABEL" },
+    { "id": "news.model_candidates", "authority": "ACTIVE_NEWS_GENERATION", "projection": "news_index.model_candidate", "api_field": "model_candidate_total", "ui_field": "audit.modelCandidateTotal", "invariant": "SUBSET", "freshness": "ACTIVE_GENERATION", "display_state": "CURRENT_OR_RECOVERY_LABEL" },
+    { "id": "audit.briefs", "authority": "LOCAL_EVIDENCE_SQLITE", "projection": "dashboard_snapshots:7", "api_field": "audit-briefs.items", "ui_field": "audit.briefCount", "invariant": "DERIVED", "freshness": "BOUNDED_LAG", "display_state": "FRESH_PROJECTION" },
+    { "id": "audit.stories", "authority": "LOCAL_EVIDENCE_SQLITE", "projection": "dashboard_snapshots:8", "api_field": "audit-stories.items", "ui_field": "audit.storyCount", "invariant": "DERIVED", "freshness": "BOUNDED_LAG", "display_state": "FRESH_PROJECTION" },
+    { "id": "audit.events", "authority": "LOCAL_EVIDENCE_SQLITE", "projection": "dashboard_snapshots:9", "api_field": "audit.event_count", "ui_field": "audit.eventCount", "invariant": "DERIVED", "freshness": "BOUNDED_LAG", "display_state": "FRESH_PROJECTION" },
+    { "id": "audit.decisions", "authority": "LOCAL_EVIDENCE_SQLITE", "projection": "dashboard_snapshots:6", "api_field": "audit-decisions.items", "ui_field": "audit.decisionCount", "invariant": "DERIVED", "freshness": "BOUNDED_LAG", "display_state": "FRESH_PROJECTION" },
+    { "id": "learning.records", "authority": "LOCAL_EVIDENCE_SQLITE", "projection": "learning_records", "api_field": "learning-history.total", "ui_field": "learning.recordCount", "invariant": "BOUNDED_LAG", "freshness": "WATERMARK", "display_state": "APPLIED_WATERMARK" },
+    { "id": "learning.groups", "authority": "LOCAL_EVIDENCE_SQLITE", "projection": "learning_records:version-group", "api_field": "learning.version_groups", "ui_field": "learning.groupCount", "invariant": "DERIVED", "freshness": "WATERMARK", "display_state": "APPLIED_WATERMARK" },
+    { "id": "learning.versions", "authority": "LOCAL_EVIDENCE_SQLITE", "projection": "learning_records:model", "api_field": "learning.models", "ui_field": "learning.versionCount", "invariant": "DERIVED", "freshness": "WATERMARK", "display_state": "APPLIED_WATERMARK" },
+    { "id": "learning.oos", "authority": "LOCAL_EVIDENCE_SQLITE", "projection": "learning_records:execution-result", "api_field": "learning.oos_count", "ui_field": "learning.oosCount", "invariant": "SUBSET", "freshness": "WATERMARK", "display_state": "APPLIED_WATERMARK" },
+    { "id": "market.candles", "authority": "LOCAL_QUOTES", "projection": "market_candles,market_history_overview", "api_field": "market-history.source_candle_count", "ui_field": "market.sourceCandleCount", "invariant": "BOUNDED_LAG", "freshness": "WATERMARK", "display_state": "APPLIED_WATERMARK" },
+    { "id": "market.decisions", "authority": "LOCAL_EVIDENCE_SQLITE", "projection": "market_decisions,decision_overviews", "api_field": "market-history.source_decision_count", "ui_field": "market.sourceDecisionCount", "invariant": "BOUNDED_LAG", "freshness": "WATERMARK", "display_state": "APPLIED_WATERMARK" },
+    { "id": "operations.retry_partition", "authority": "D1_OPERATIONAL_STATE", "projection": "operator_retry_jobs", "api_field": "operator-retry.counts", "ui_field": "retry-jobs.counts", "invariant": "PARTITION", "freshness": "LIVE", "display_state": "LIVE" },
+    { "id": "health.runtime_owners", "authority": "WINDOWS_PROCESS_AND_HEARTBEAT_STATE", "projection": "dashboard_snapshots:1", "api_field": "status.services", "ui_field": "health.serviceCounts", "invariant": "PARTITION", "freshness": "LIVE", "display_state": "FRESH_PROJECTION" }
+  ],
+  "pagination_families": [
+    { "id": "learning-history", "api": "/api/learning-history", "semantics": "BOUNDED_LAG_WATERMARK", "cursor": "sort_epoch,record_key", "max_page_items": 500, "requires_complete_walk": true, "generation_transition": "EXPLICIT_WATERMARK_REQUIRED" },
+    { "id": "market-history", "api": "/api/market-history", "semantics": "BOUNDED_LAG_WATERMARK", "cursor": "before", "requires_complete_walk": true, "generation_transition": "ONE_WALK_ONE_WATERMARK" },
+    { "id": "news-index", "api": "/api/news-index", "semantics": "EXACT_SNAPSHOT", "cursor": "generation,sort_time,detail_key", "max_page_items": 50, "requires_complete_walk": true, "generation_transition": "REJECT_MIXED_GENERATION" },
+    { "id": "news-search", "api": "/api/news-search", "semantics": "EXACT_SNAPSHOT", "cursor": "generation,sort_time,detail_key", "max_page_items": 20, "requires_complete_walk": true, "generation_transition": "REJECT_MIXED_GENERATION" },
+    { "id": "news-evidence", "api": "/api/news-evidence", "semantics": "EXACT_SNAPSHOT", "cursor": "snapshot_id,sort_time,event_key", "max_page_items": 50, "requires_complete_walk": true, "generation_transition": "REJECT_MIXED_GENERATION" }
+  ]
+}
