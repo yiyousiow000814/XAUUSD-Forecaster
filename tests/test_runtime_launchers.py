@@ -2427,6 +2427,73 @@ def test_worker_cpu_gate_fails_platform_errors(
     assert result == "FAILED"
 
 
+@pytest.mark.parametrize(
+    ("expected", "observed", "exceeded", "responses_1102", "responses_5xx", "maximum", "reason"),
+    [
+        (8, 7, 0, 0, 0, 9, "WORKER_INVOCATION_COUNT_MISMATCH"),
+        (8, 8, 0, 0, 1, 9, "WORKER_5XX_OBSERVED"),
+        (8, 8, 1, 1, 0, 9, "WORKER_PLATFORM_LIMIT_EXCEEDED"),
+        (8, 8, 0, 0, 0, 11, "WORKER_CPU_HEADROOM_FAILED"),
+    ],
+)
+def test_worker_platform_failure_reason_is_specific(
+    tmp_path, expected: int, observed: int, exceeded: int, responses_1102: int,
+    responses_5xx: int, maximum: int, reason: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$e=[pscustomobject]@{{expected_invocations={expected};invocations={observed};"
+        f"exceeded_cpu={exceeded};responses_1102={responses_1102};"
+        f"responses_5xx={responses_5xx};p99_cpu_ms=7;max_cpu_ms={maximum}}};"
+        "Get-WorkerPlatformFailureReason -Evidence $e",
+    )
+    assert result == reason
+
+
+def test_failed_platform_gate_persists_complete_nonsecret_evidence(tmp_path) -> None:
+    stable = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$stable=New-ReleaseIdentity -GitSha '{stable}' -WorkerVersionId 'stable-worker' "
+        f"-WindowsRevision '{stable}';"
+        f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId 'candidate-worker' "
+        f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE' -Branch 'main';"
+        "$candidate.compatibility_state='APPROVED';"
+        "$state=New-ReleaseControlState -Stable $stable -Candidate $candidate;"
+        "Write-ReleaseControlState $state;"
+        "function Test-ProductionCandidateProvenance{return $true};"
+        "function Invoke-ProductionShapePreflight{return $true};"
+        "function Test-RequiredGitHubChecks{return 'PASSED'};"
+        "function Get-CandidateChangedFiles{return @('web/worker/api-router.ts')};"
+        "function Get-CandidateCompatibilityRequirement{return [pscustomobject]@{state='COMPATIBLE';files=@()}};"
+        "function Get-CandidateRouteValidationPlan{return [pscustomobject]@{worker_cpu_required=$true;"
+        "requires_validation=$true;static_assets=@();worker_reads=@();worker_writes=@()}};"
+        "function Set-CloudflareCandidatePointer{};"
+        "function Invoke-CandidateWorkerValidation{return [pscustomobject]@{passed=$true;"
+        "validation_run='run-platform';expected_worker_invocations=8;observed_worker_invocations=8;"
+        "static_observability_state='PASSED';observability_credential_source='LOCAL_SECRET_FILE';"
+        "observability_diagnostic=$null;routes=@([pscustomobject]@{path='/api/status';passed=$true});"
+        "cpu_evidence=[pscustomobject]@{expected_invocations=8;invocations=8;gate_state='FAILED';"
+        "passed=$false;p95_cpu_ms=4;p99_cpu_ms=7;max_cpu_ms=9;exceeded_cpu=0;"
+        "responses_1102=0;responses_5xx=1}}};"
+        "Invoke-AutomaticCandidateValidation -Candidate $candidate|Out-Null;"
+        "$saved=Get-ReleaseControlState;$validation=$saved.candidate.validation;"
+        "$history=Get-Content -LiteralPath $releaseHistoryPath -Raw;"
+        'Write-Output "$($saved.candidate.validation_state),$($validation.reason),'
+        '$($validation.routes.Count),$($validation.cpu_evidence.invocations),'
+        '$($validation.cpu_evidence.responses_5xx),$($validation.observability_credential_source),'
+        '$($validation.data_parity.state),$($validation.worker_failures.state),'
+        '$([bool]($history -match \'WORKER_5XX_OBSERVED\')),'
+        '$([bool](($validation|ConvertTo-Json -Depth 20) -match \'platform-secret-value\'))"',
+    )
+
+    assert result == (
+        "FAILED,WORKER_5XX_OBSERVED,1,8,1,LOCAL_SECRET_FILE,"
+        "NOT_RUN,FAILED,True,False"
+    )
+
+
 def test_worker_windows_mismatch_cannot_switch_runtime(tmp_path) -> None:
     previous = "a" * 40
     candidate = "b" * 40

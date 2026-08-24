@@ -1061,6 +1061,22 @@ function Get-WorkerCpuGateState {
     return "REVIEW_REQUIRED"
 }
 
+function Get-WorkerPlatformFailureReason {
+    param([Parameter(Mandatory = $true)][object]$Evidence)
+    if ([int]$Evidence.invocations -ne [int]$Evidence.expected_invocations) {
+        return "WORKER_INVOCATION_COUNT_MISMATCH"
+    }
+    if ([int]$Evidence.responses_5xx -gt 0) { return "WORKER_5XX_OBSERVED" }
+    if ([int]$Evidence.exceeded_cpu -gt 0 -or [int]$Evidence.responses_1102 -gt 0) {
+        return "WORKER_PLATFORM_LIMIT_EXCEEDED"
+    }
+    if ([double]$Evidence.p99_cpu_ms -gt $workerCpuPassMaxMs -or
+        [double]$Evidence.max_cpu_ms -gt $workerCpuPassMaxMs) {
+        return "WORKER_CPU_HEADROOM_FAILED"
+    }
+    return "WORKER_PLATFORM_EVIDENCE_FAILED"
+}
+
 function Get-CandidatePlatformEvidence {
     param(
         [Parameter(Mandatory = $true)][object]$Candidate,
@@ -2497,7 +2513,39 @@ function Invoke-AutomaticCandidateValidation {
                 return $false
             }
             if (-not $cloudflare.cpu_evidence.passed) {
-                throw "Cloudflare platform CPU or 5xx validation failed."
+                $platformReason = Get-WorkerPlatformFailureReason `
+                    -Evidence $cloudflare.cpu_evidence
+                $state.candidate.validation_state = "FAILED"
+                $state.candidate.validation = [pscustomobject]@{
+                    key = [string]$Candidate.validation_key
+                    repository = "PASSED"; windows = "PASSED"; cloudflare = "FAILED"
+                    compatibility = [string]$state.candidate.compatibility_state
+                    reason = $platformReason
+                    validation_run = $cloudflare.validation_run
+                    route_plan = $routePlan; routes = $cloudflare.routes
+                    expected_worker_invocations = $cloudflare.expected_worker_invocations
+                    observed_worker_invocations = $cloudflare.observed_worker_invocations
+                    static_observability_state = $cloudflare.static_observability_state
+                    observability_credential_source = $cloudflare.observability_credential_source
+                    observability_diagnostic = $cloudflare.observability_diagnostic
+                    data_parity = [pscustomobject]@{ state = "NOT_RUN" }
+                    cpu_headroom = [pscustomobject]@{ state = "FAILED" }
+                    worker_failures = [pscustomobject]@{
+                        state = if ([int]$cloudflare.cpu_evidence.responses_5xx -gt 0 -or
+                            [int]$cloudflare.cpu_evidence.responses_1102 -gt 0) {
+                            "FAILED"
+                        } else { "PASSED" }
+                    }
+                    cpu_evidence = $cloudflare.cpu_evidence
+                    tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+                }
+                Write-ReleaseControlState -State $state
+                Write-ReleaseHistory -Event "CANDIDATE_FAILED" `
+                    -Release $state.candidate -Detail @{
+                        reason = $platformReason
+                        validation_run = $cloudflare.validation_run
+                    }
+                return $false
             }
         }
         $dataParity = Test-CandidateDataParity -Stable $state.stable `
