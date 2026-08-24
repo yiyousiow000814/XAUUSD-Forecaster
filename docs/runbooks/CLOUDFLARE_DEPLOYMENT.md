@@ -53,9 +53,13 @@ Approval is audited and never carries to another Candidate. Missing resources
 remain blocked; do not use Wrangler auto-configuration as recovery.
 
 Worker-changing Candidates require a Cloudflare API token limited to read-only
-Workers Observability query access. Store it only in the Windows user
-environment as `CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN`; never pass it on a
-command line or write it to repository/runtime state. Without that protected
+Workers Observability query access. Store it under the exact
+`CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN` key in the repository-local,
+Git-ignored `.local/secrets/cloudflare-release.json` object. The Windows user
+environment variable of the same name remains the fallback when that file does
+not exist. Never pass the credential on a command line or write it to
+repository/runtime state. A present but malformed file, missing key, or empty
+value fails closed with a non-secret diagnostic. Without that protected
 credential the controller deliberately leaves the Candidate in TESTING with
 `PLATFORM_CPU_EVIDENCE_REQUIRED`. The queried evidence is bound to the exact
 Worker Version ID and must satisfy the CPU/headroom policy in the release

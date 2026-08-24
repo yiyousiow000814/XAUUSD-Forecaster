@@ -55,6 +55,8 @@ $runtimeControlFileNames = @(
 )
 $runtimeControlManifestName = "runtime-control-bundle.json"
 $collectorSecretsPath = Join-Path $repositoryRoot ".local\secrets\collector-keys.json"
+$releaseSecretsRoot = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot ".local\secrets"))
+$releaseSecretsPath = [System.IO.Path]::GetFullPath((Join-Path $releaseSecretsRoot "cloudflare-release.json"))
 $workerName = "aurum-signal-room"
 $workerUrl = "https://aurum-signal-room.yiyousiow1234.workers.dev"
 $cloudflareAccountId = "48ce531f39e2310b4c858c8916a01d51"
@@ -86,6 +88,56 @@ $bootstrapAcceptedCandidateRevision = "14c055a35040fa963700c988f770c9bb52fa669e"
 function Get-UserEnvironmentValue {
     param([Parameter(Mandatory = $true)][string]$Name)
     [Environment]::GetEnvironmentVariable($Name, "User")
+}
+
+function Get-ReleaseSecret {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    if ([System.IO.Path]::GetDirectoryName($releaseSecretsPath) -ne $releaseSecretsRoot) {
+        return [pscustomobject]@{
+            available = $false; value = ""; source = "UNAVAILABLE"
+            diagnostic = "LOCAL_SECRET_PATH_INVALID"
+        }
+    }
+    if (Test-Path -LiteralPath $releaseSecretsPath) {
+        try {
+            $secrets = Get-Content -LiteralPath $releaseSecretsPath -Raw -Encoding UTF8 |
+                ConvertFrom-Json
+        } catch {
+            return [pscustomobject]@{
+                available = $false; value = ""; source = "UNAVAILABLE"
+                diagnostic = "LOCAL_SECRET_FILE_MALFORMED_JSON"
+            }
+        }
+        $property = $secrets.PSObject.Properties[$Name]
+        if (-not $property) {
+            return [pscustomobject]@{
+                available = $false; value = ""; source = "UNAVAILABLE"
+                diagnostic = "LOCAL_SECRET_KEY_MISSING"
+            }
+        }
+        $value = ([string]$property.Value).Trim()
+        if (-not $value) {
+            return [pscustomobject]@{
+                available = $false; value = ""; source = "UNAVAILABLE"
+                diagnostic = "LOCAL_SECRET_VALUE_EMPTY"
+            }
+        }
+        return [pscustomobject]@{
+            available = $true; value = $value; source = "LOCAL_SECRET_FILE"
+            diagnostic = $null
+        }
+    }
+    $value = ([string](Get-UserEnvironmentValue -Name $Name)).Trim()
+    if ($value) {
+        return [pscustomobject]@{
+            available = $true; value = $value; source = "USER_ENVIRONMENT"
+            diagnostic = $null
+        }
+    }
+    return [pscustomobject]@{
+        available = $false; value = ""; source = "UNAVAILABLE"
+        diagnostic = "RELEASE_SECRET_UNAVAILABLE"
+    }
 }
 
 function Get-CollectorSecret {
@@ -934,8 +986,13 @@ function Invoke-WorkersObservabilityQuery {
         [Parameter(Mandatory = $true)][DateTimeOffset]$From,
         [Parameter(Mandatory = $true)][DateTimeOffset]$To
     )
-    $token = Get-UserEnvironmentValue -Name "CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN"
-    if (-not $token) { return $null }
+    $secret = Get-ReleaseSecret -Name "CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN"
+    $script:lastWorkersObservabilityCredentialSource = [string]$secret.source
+    if (-not $secret.available) {
+        $script:lastWorkersObservabilityDiagnostic = [string]$secret.diagnostic
+        return $null
+    }
+    $token = [string]$secret.value
     $body = [pscustomobject]@{
         queryId = "aurum-release-candidate-validation"
         timeframe = [pscustomobject]@{
@@ -959,9 +1016,27 @@ function Invoke-WorkersObservabilityQuery {
             -Headers @{ Authorization = "Bearer $token" } `
             -ContentType "application/json" -Body ($body | ConvertTo-Json -Depth 10) `
             -TimeoutSec 30
-        if (-not $response.success) { return $null }
+        if (-not $response.success) {
+            $script:lastWorkersObservabilityDiagnostic = "OBSERVABILITY_API_REJECTED"
+            return $null
+        }
+        $script:lastWorkersObservabilityDiagnostic = $null
         return $response.result
-    } catch { return $null }
+    } catch {
+        $statusCode = 0
+        try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { $statusCode = 0 }
+        $script:lastWorkersObservabilityDiagnostic = if ($statusCode -in @(401, 403)) {
+            "OBSERVABILITY_CREDENTIAL_REJECTED"
+        } elseif ($statusCode -eq 429) {
+            "OBSERVABILITY_RATE_LIMITED"
+        } elseif ($statusCode -ge 500 -and $statusCode -le 599) {
+            "OBSERVABILITY_TRANSIENT_API_FAILURE"
+        } else { "OBSERVABILITY_QUERY_FAILED" }
+        return $null
+    } finally {
+        $token = $null
+        $secret = $null
+    }
 }
 
 function Get-CalculationAggregate {
@@ -1045,9 +1120,13 @@ function Get-CandidatePlatformEvidence {
     } else { $null }
     if (@($invocations, $maxCpu, $p95Cpu, $p99Cpu, $maxWall, $exceededCpu,
         $responses1102, $responses5xx |
-        Where-Object { $null -eq $_ }).Count -gt 0) { return $null }
+        Where-Object { $null -eq $_ }).Count -gt 0) {
+        $script:lastWorkersObservabilityDiagnostic = "OBSERVABILITY_SCHEMA_INVALID"
+        return $null
+    }
     $evidence = [pscustomobject]@{
         source = "CLOUDFLARE_WORKERS_OBSERVABILITY"
+        credential_source = [string]$script:lastWorkersObservabilityCredentialSource
         route_family = $RouteFamily
         route_path = if ($RoutePath) { $RoutePath } else { $null }
         route_method = if ($RouteMethod) { $RouteMethod } else { $null }
@@ -1108,6 +1187,7 @@ function Get-CandidateCpuEvidence {
     } else { "PASSED" }
     [pscustomobject]@{
         source = "CLOUDFLARE_WORKERS_OBSERVABILITY"
+        credential_source = [string]$script:lastWorkersObservabilityCredentialSource
         worker_version_id = [string]$Candidate.worker_version_id
         expected_invocations = $expected
         global = $global
@@ -1596,6 +1676,8 @@ function Invoke-CandidateWorkerValidation {
         [Parameter(Mandatory = $true)][object]$Candidate,
         [Parameter(Mandatory = $true)][object]$RoutePlan
     )
+    $script:lastWorkersObservabilityDiagnostic = $null
+    $script:lastWorkersObservabilityCredentialSource = "UNAVAILABLE"
     $header = @{
         "Cloudflare-Workers-Version-Overrides" =
             "$workerName=`"$([string]$Candidate.worker_version_id)`""
@@ -1693,11 +1775,25 @@ function Invoke-CandidateWorkerValidation {
         $platform = $null
         if (@($results | Where-Object { -not $_.passed }).Count -eq 0) {
             Start-Sleep -Seconds 8
-            for ($attempt = 0; $attempt -lt 3 -and -not $platform; $attempt++) {
+            for ($attempt = 0; $attempt -lt 3; $attempt++) {
                 $platform = Get-CandidateCpuEvidence -Candidate $Candidate `
                     -From $workerStartedAt `
                     -To $workerEndedAt.AddSeconds(2) -Routes $workerRoutes
-                if (-not $platform -and $attempt -lt 2) { Start-Sleep -Seconds 5 }
+                $telemetryPending = [bool](-not $platform -or
+                    [int]$platform.invocations -lt [int](($workerRoutes |
+                        Measure-Object -Property acceptance_samples -Sum).Sum))
+                if (-not $telemetryPending) {
+                    if ($script:lastWorkersObservabilityDiagnostic -eq
+                        "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING") {
+                        $script:lastWorkersObservabilityDiagnostic = $null
+                    }
+                    break
+                }
+                if ($platform) {
+                    $script:lastWorkersObservabilityDiagnostic =
+                        "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"
+                }
+                if ($attempt -lt 2) { Start-Sleep -Seconds 5 }
             }
         } else {
             $platform = "NOT_RUN"
@@ -1716,6 +1812,8 @@ function Invoke-CandidateWorkerValidation {
         } else { $null }
         static_worker_invocations = $staticInvocations
         static_observability_state = $staticObservabilityState
+        observability_credential_source = [string]$script:lastWorkersObservabilityCredentialSource
+        observability_diagnostic = [string]$script:lastWorkersObservabilityDiagnostic
         routes = $results
         cpu_evidence = $platform
     }
@@ -2374,6 +2472,8 @@ function Invoke-AutomaticCandidateValidation {
                     expected_worker_invocations = $cloudflare.expected_worker_invocations
                     observed_worker_invocations = $cloudflare.observed_worker_invocations
                     static_observability_state = $cloudflare.static_observability_state
+                    observability_credential_source = $cloudflare.observability_credential_source
+                    observability_diagnostic = $cloudflare.observability_diagnostic
                     data_parity = [pscustomobject]@{ state = "NOT_RUN" }
                     cpu_headroom = [pscustomobject]@{ state = "DIAGNOSTIC_UNAVAILABLE" }
                     worker_failures = [pscustomobject]@{ state = "DIAGNOSTIC_UNAVAILABLE" }
