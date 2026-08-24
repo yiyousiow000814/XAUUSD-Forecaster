@@ -5,7 +5,6 @@ import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
 import {
   authorizeReleaseValidation, isReleaseValidationContext, releaseValidationResponse,
-  type ReleaseValidationContext, validateJsonWithD1,
 } from "../_shared/release-validation";
 import {
   ACTIVE_NEWS_SQL,
@@ -35,21 +34,6 @@ type NewsIndexItem = {
   annotation_status?: unknown;
   [key: string]: unknown;
 };
-
-async function finishReleaseValidation(
-  binding: D1Database,
-  validation: ReleaseValidationContext | Response | null,
-  serialized: string,
-  work: Record<string, unknown>,
-) {
-  if (!isReleaseValidationContext(validation)) return null;
-  if (!await validateJsonWithD1(binding, serialized)) {
-    throw new Error("invalid JSON");
-  }
-  return releaseValidationResponse(validation, {
-    body: "bounded-read", json: "parsed+d1-json1", ...work,
-  });
-}
 
 const pageRequest = (request: Request) => {
   const query = new URL(request.url).searchParams;
@@ -301,16 +285,109 @@ export async function POST(request: Request) {
   const binding = env.DB as D1Database | undefined;
   if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   try {
+    if (isReleaseValidationContext(validation)) {
+      const checked = await binding.prepare(
+        `WITH root(doc) AS (
+           SELECT ? WHERE json_valid(?)
+         ), batch(payload) AS (
+           SELECT value FROM root,json_each(json_extract(doc,'$.items'))
+         ), withdrawals(detail_key) AS (
+           SELECT value FROM root,json_each(json_extract(doc,'$.withdraw_detail_keys'))
+         )
+         SELECT
+            CASE
+              WHEN json_type(doc,'$.reset')='true' THEN 'reset'
+              WHEN json_type(doc,'$.withdraw_detail_keys') IS NOT NULL
+                THEN 'withdrawal'
+             WHEN json_type(doc,'$.prune_before')='text'
+               OR json_type(doc,'$.reconcile_contract')='text' THEN 'maintenance'
+             WHEN json_type(doc,'$.neutralize_operational_state_for_contract')='text'
+               THEN 'neutralize'
+             WHEN json_type(doc,'$.items')='array' THEN 'items'
+             ELSE 'invalid'
+           END kind,
+           json_extract(doc,'$.prune_before') prune_before,
+           json_type(doc,'$.prune_before')='text' has_prune,
+           json_type(doc,'$.reconcile_contract')='text' has_reconcile,
+            json_extract(doc,'$.neutralize_operational_state_for_contract') contract,
+            json_type(doc,'$.withdraw_detail_keys') withdrawal_type,
+           (SELECT count(*) FROM batch) item_total,
+            (SELECT count(*) FROM batch WHERE
+              json_type(payload)='object'
+              AND length(json_extract(payload,'$.detail_key'))=64
+              AND json_extract(payload,'$.detail_key') NOT GLOB '*[^0-9a-f]*'
+              AND json_type(payload,'$.category')='text'
+              AND json_type(payload,'$.collector_first_seen_time')='text'
+              AND json_type(payload,'$.cluster_id')='text'
+              AND json_type(payload,'$.mirror_contract')='text') item_valid,
+            (SELECT count(*) FROM batch WHERE
+              ${NEWS_REVIEW_STATE_INVARIANT_SQL}) review_valid,
+           (SELECT count(*) FROM withdrawals) withdrawal_total,
+           (SELECT count(*) FROM withdrawals WHERE
+             typeof(detail_key)='text' AND length(detail_key)=64
+             AND detail_key NOT GLOB '*[^0-9a-f]*') withdrawal_valid
+         FROM root`,
+      ).bind(serialized, serialized).first<{
+        kind: string; prune_before: string | null; has_prune: number; has_reconcile: number;
+        contract: string | null; item_total: number; item_valid: number;
+        review_valid: number;
+        withdrawal_type: string | null;
+        withdrawal_total: number; withdrawal_valid: number;
+      }>();
+      if (!checked) {
+        return NextResponse.json({ error: "invalid news index payload" }, { status: 400 });
+      }
+      const itemTotal = Number(checked.item_total ?? 0);
+      const itemValid = Number(checked.item_valid ?? 0);
+      const reviewValid = Number(checked.review_valid ?? 0);
+      const withdrawalTotal = Number(checked.withdrawal_total ?? 0);
+      const withdrawalValid = Number(checked.withdrawal_valid ?? 0);
+      let work: Record<string, unknown>;
+      let mutationBoundary: string;
+      if (checked.kind === "reset") {
+        work = { reset: true }; mutationBoundary = "news-index-reset";
+      } else if (checked.kind === "withdrawal"
+          && checked.withdrawal_type === "array"
+          && withdrawalTotal <= 20 && withdrawalValid === withdrawalTotal) {
+        work = { withdrawals: withdrawalTotal, prepared_statements: withdrawalTotal * 2 };
+        mutationBoundary = "news-withdrawal-batch";
+      } else if (checked.kind === "maintenance"
+          && (!checked.has_prune || !Number.isNaN(Date.parse(String(checked.prune_before))))) {
+        work = { prepared_statements: Number(checked.has_prune) + Number(checked.has_reconcile) + 1 };
+        mutationBoundary = "news-prune-reconcile-batch";
+      } else if (checked.kind === "neutralize"
+          && /^[a-z0-9][a-z0-9._-]{0,127}$/.test(String(checked.contract))) {
+        work = { contract: checked.contract, prepared_statements: 2 };
+        mutationBoundary = "news-contract-neutralization-batch";
+      } else if (checked.kind === "items"
+          && itemTotal <= 20 && itemValid === itemTotal
+          && reviewValid !== itemTotal) {
+        return NextResponse.json({
+          error: "news review state invariant violation",
+          error_code: "NEWS_MIRROR_STATE_INVARIANT_VIOLATION",
+          violation_count: itemTotal - reviewValid,
+          checks: [{
+            code: "NEWS_REVIEW_STATE_INVALID", count: itemTotal - reviewValid,
+          }],
+        }, { status: 409 });
+      } else if (checked.kind === "items"
+          && itemTotal <= 20 && itemValid === itemTotal) {
+        work = { items: itemTotal, prepared_statements: itemTotal * 2 };
+        mutationBoundary = "news-index-upsert-batch";
+      } else {
+        return NextResponse.json({ error: "invalid news index payload" }, { status: 400 });
+      }
+      return releaseValidationResponse(validation, {
+        body: "bounded-read", json: "d1-json1+json-each", transformed: work,
+        mutation_boundary: mutationBoundary,
+      });
+    }
     const body = JSON.parse(serialized) as {
       items?: NewsIndexItem[]; reset?: unknown; prune_before?: unknown;
       reconcile_contract?: unknown; withdraw_detail_keys?: unknown;
       neutralize_operational_state_for_contract?: unknown;
     };
     if (body.reset === true) {
-      const checked = await finishReleaseValidation(binding, validation, serialized, {
-        transformed: { reset: true }, mutation_boundary: "news-index-reset",
-      });
-      if (checked) return checked;
       await binding.prepare("DELETE FROM news_index").run();
       return NextResponse.json({ status: "OK", reset: true });
     }
@@ -329,11 +406,6 @@ export async function POST(request: Request) {
         binding.prepare("DELETE FROM news_index WHERE detail_key = ?").bind(key),
         binding.prepare("DELETE FROM news_details WHERE detail_key = ?").bind(key),
       ]);
-      const checked = await finishReleaseValidation(binding, validation, serialized, {
-        transformed: { withdrawals: keys.length, prepared_statements: statements.length },
-        mutation_boundary: "news-withdrawal-batch",
-      });
-      if (checked) return checked;
       const results = statements.length ? await binding.batch(statements) : [];
       return NextResponse.json({
         status: "OK",
@@ -361,11 +433,6 @@ export async function POST(request: Request) {
       statements.push(binding.prepare(
         "DELETE FROM news_details WHERE NOT EXISTS (SELECT 1 FROM news_index WHERE news_index.detail_key = news_details.detail_key)",
       ));
-      const checked = await finishReleaseValidation(binding, validation, serialized, {
-        transformed: { prepared_statements: statements.length },
-        mutation_boundary: "news-prune-reconcile-batch",
-      });
-      if (checked) return checked;
       const results = await binding.batch(statements);
       return NextResponse.json({
         status: "OK", removed: results.reduce((sum, result) => sum + (result.meta.changes ?? 0), 0),
@@ -396,11 +463,6 @@ export async function POST(request: Request) {
            AND NOT ${NEWS_REVIEW_STATE_INVARIANT_SQL}`,
         ).bind(contract),
       ];
-      const checked = await finishReleaseValidation(binding, validation, serialized, {
-        transformed: { contract, prepared_statements: statements.length },
-        mutation_boundary: "news-contract-neutralization-batch",
-      });
-      if (checked) return checked;
       const results = await binding.batch(statements);
       return NextResponse.json({
         status: "OK",
@@ -435,11 +497,6 @@ export async function POST(request: Request) {
         || typeof item.mirror_contract !== "string"
       ) throw new Error("invalid news index item");
     }
-    const checked = await finishReleaseValidation(binding, validation, serialized, {
-      transformed: { items: body.items.length, prepared_statements: body.items.length * 2 },
-      mutation_boundary: "news-index-upsert-batch",
-    });
-    if (checked) return checked;
     const now = new Date().toISOString();
     const statements = body.items.flatMap(item => {
       const publishedTime = typeof item.source_published_time === "string"

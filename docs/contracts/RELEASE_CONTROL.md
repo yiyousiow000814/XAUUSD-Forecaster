@@ -151,17 +151,24 @@ Their bounds come from the current manifest contract rather than historical
 payload sizes. The response must state `mutated: false`; an invalid body still fails the normal
 contract. The validation header never bypasses authentication. Every Worker
 probe has a unique request ID and one validation-run ID.
-Evidence records the exact Version, short window, route family, request IDs, and
-exact expected Worker invocation count. Static requests are excluded. If the
-platform cannot filter request IDs, exact Version, short-window, and exact-count
-isolation is mandatory; noise fails the gate.
+Evidence records the exact Version, validation run, acceptance phase, frozen
+time bounds, route family/scenario, expected request IDs, and exact expected
+Worker invocation count. Static requests are excluded. Release control reads
+the raw `cf-worker-event` universe, advances the upper bound only until the
+expected request set is complete, then freezes it. Consecutive complete reads
+must have identical event IDs, request IDs, and a SHA-256 universe digest.
+Pagination, when required, retains that frozen upper bound. Noise, duplicate
+IDs, a missing expected request, or an identity mismatch fails closed.
 
 Worker-changing candidates first receive excluded warm-up requests. Acceptance
 then records at least ten platform samples for every selected hot path and at
-least fifty samples overall through the baseline route set. Observability keeps
-both global and route-family sample count, maximum, p95, and p99 CPU, maximum
-wall time, `exceededCpu`, `exceededMemory`/1102, and 5xx counts. A failed route
-family fails the whole Candidate even when the global aggregate appears safe.
+least fifty samples overall through the baseline route set. All global and
+route-family counts, maximum, p95, and p99 CPU, maximum wall time,
+`exceededCpu`, `exceededMemory`, 1102, and 5xx counts are derived locally from
+that one raw universe. A numeric zero CPU value is a valid sample. Independent
+Cloudflare calculation queries must not be combined into one release result.
+A failed route family fails the whole Candidate even when the global result
+appears safe.
 The Free-plan CPU gate
 is `PASSED` only with the exact invocation count, zero failures, p95 at most
 6 ms, p99 at most 8 ms, and maximum below 10 ms. Zero failures with CPU still

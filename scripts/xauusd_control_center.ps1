@@ -1160,142 +1160,6 @@ function Get-CandidateObservabilityFilters {
     return $filters
 }
 
-function Get-CandidatePlatformEvidence {
-    param(
-        [Parameter(Mandatory = $true)][object]$Candidate,
-        [Parameter(Mandatory = $true)][DateTimeOffset]$From,
-        [Parameter(Mandatory = $true)][DateTimeOffset]$To,
-        [int]$ExpectedInvocations = 1,
-        [string]$RoutePath = "",
-        [string]$RouteMethod = "",
-        [string]$RouteFamily = "GLOBAL",
-        [string]$ValidationRun = ""
-    )
-    $baseFilters = @(Get-CandidateObservabilityFilters -Candidate $Candidate `
-        -RoutePath $RoutePath -RouteMethod $RouteMethod `
-        -ValidationRun $ValidationRun)
-    $base = Invoke-WorkersObservabilityQuery -From $From -To $To `
-        -Filters $baseFilters -Calculations @(
-            [pscustomobject]@{ operator='count'; alias='invocations' },
-            [pscustomobject]@{ key='$workers.cpuTimeMs'; keyType='number'; operator='max'; alias='max_cpu_ms' },
-            [pscustomobject]@{ key='$workers.cpuTimeMs'; keyType='number'; operator='p95'; alias='p95_cpu_ms' },
-            [pscustomobject]@{ key='$workers.cpuTimeMs'; keyType='number'; operator='p99'; alias='p99_cpu_ms' },
-            [pscustomobject]@{ key='$workers.wallTimeMs'; keyType='number'; operator='max'; alias='max_wall_ms' }
-        )
-    if (-not $base) { return $null }
-    $exceeded = Invoke-WorkersObservabilityQuery -From $From -To $To `
-        -Filters @($baseFilters + [pscustomobject]@{
-            key='$workers.outcome'; operation='eq'; type='string'; value='exceededCpu'
-        }) -Calculations @([pscustomobject]@{ operator='count'; alias='exceeded_cpu' })
-    $failures = Invoke-WorkersObservabilityQuery -From $From -To $To `
-        -Filters @($baseFilters + [pscustomobject]@{
-            key='$workers.event.response.status'; operation='gte'; type='number'; value=500
-        }) -Calculations @([pscustomobject]@{ operator='count'; alias='responses_5xx' })
-    $exceededMemory = Invoke-WorkersObservabilityQuery -From $From -To $To `
-        -Filters @($baseFilters + [pscustomobject]@{
-            key='$workers.outcome'; operation='eq'; type='string'; value='exceededMemory'
-        }) -Calculations @([pscustomobject]@{ operator='count'; alias='exceeded_memory' })
-    if (-not $exceeded -or -not $failures -or -not $exceededMemory) { return $null }
-    $invocations = Get-CalculationAggregate -QueryResult $base -Alias "invocations"
-    $maxCpu = Get-CalculationAggregate -QueryResult $base -Alias "max_cpu_ms"
-    $p95Cpu = Get-CalculationAggregate -QueryResult $base -Alias "p95_cpu_ms"
-    $p99Cpu = Get-CalculationAggregate -QueryResult $base -Alias "p99_cpu_ms"
-    $maxWall = Get-CalculationAggregate -QueryResult $base -Alias "max_wall_ms"
-    $exceededCpu = Get-CalculationAggregate -QueryResult $exceeded -Alias "exceeded_cpu"
-    $responses5xx = Get-CalculationAggregate -QueryResult $failures -Alias "responses_5xx"
-    $exceededMemoryCount = Get-CalculationAggregate -QueryResult $exceededMemory -Alias "exceeded_memory"
-    $responses1102 = if ($null -ne $exceededCpu -and $null -ne $exceededMemoryCount) {
-        [int]$exceededCpu + [int]$exceededMemoryCount
-    } else { $null }
-    if (@($invocations, $maxCpu, $p95Cpu, $p99Cpu, $maxWall, $exceededCpu,
-        $responses1102, $responses5xx |
-        Where-Object { $null -eq $_ }).Count -gt 0) {
-        $script:lastWorkersObservabilityDiagnostic = "OBSERVABILITY_SCHEMA_INVALID"
-        return $null
-    }
-    $evidence = [pscustomobject]@{
-        source = "CLOUDFLARE_WORKERS_OBSERVABILITY"
-        credential_source = [string]$script:lastWorkersObservabilityCredentialSource
-        route_family = $RouteFamily
-        route_path = if ($RoutePath) { $RoutePath } else { $null }
-        route_method = if ($RouteMethod) { $RouteMethod } else { $null }
-        worker_version_id = [string]$Candidate.worker_version_id
-        from = $From.ToString("o")
-        to = $To.ToString("o")
-        invocations = [int]$invocations
-        max_cpu_ms = [double]$maxCpu
-        p95_cpu_ms = [double]$p95Cpu
-        p99_cpu_ms = [double]$p99Cpu
-        max_wall_ms = [double]$maxWall
-        exceeded_cpu = [int]$exceededCpu
-        exceeded_memory = [int]$exceededMemoryCount
-        responses_1102 = [int]$responses1102
-        responses_5xx = [int]$responses5xx
-    }
-    $gateState = Get-WorkerCpuGateState -Evidence $evidence `
-        -ExpectedInvocations $ExpectedInvocations
-    $evidence | Add-Member -NotePropertyName gate_state -NotePropertyValue $gateState
-    $evidence | Add-Member -NotePropertyName passed `
-        -NotePropertyValue ([bool]($gateState -eq "PASSED"))
-    return $evidence
-}
-
-function Get-CandidateCpuEvidence {
-    param(
-        [Parameter(Mandatory = $true)][object]$Candidate,
-        [Parameter(Mandatory = $true)][DateTimeOffset]$From,
-        [Parameter(Mandatory = $true)][DateTimeOffset]$To,
-        [Parameter(Mandatory = $true)][object[]]$Routes,
-        [string]$ValidationRun = ""
-    )
-    $expected = [int](($Routes | Measure-Object -Property acceptance_samples -Sum).Sum)
-    $global = Get-CandidatePlatformEvidence -Candidate $Candidate -From $From -To $To `
-        -ExpectedInvocations $expected -ValidationRun $ValidationRun
-    if (-not $global) { return $null }
-    $families = @()
-    $routeGroups = @($Routes | Group-Object { "{0}|{1}|{2}" -f `
-        [string]$_.path, [string]$_.method, [string]$_.family })
-    foreach ($group in $routeGroups) {
-        $route = $group.Group[0]
-        $familyExpected = [int](($group.Group |
-            Measure-Object -Property acceptance_samples -Sum).Sum)
-        $evidence = Get-CandidatePlatformEvidence -Candidate $Candidate `
-            -From $From -To $To -ExpectedInvocations $familyExpected `
-            -RoutePath ([string]$route.path) -RouteMethod ([string]$route.method) `
-            -RouteFamily ([string]$route.family) -ValidationRun $ValidationRun
-        if (-not $evidence) { return $null }
-        $families += $evidence
-    }
-    $failed = @($families | Where-Object { [string]$_.gate_state -eq "FAILED" }).Count -gt 0
-    $review = @($families | Where-Object {
-        [string]$_.gate_state -eq "REVIEW_REQUIRED"
-    }).Count -gt 0
-    $gateState = if ($failed -or [string]$global.gate_state -eq "FAILED") {
-        "FAILED"
-    } elseif ($review -or [string]$global.gate_state -eq "REVIEW_REQUIRED") {
-        "REVIEW_REQUIRED"
-    } else { "PASSED" }
-    [pscustomobject]@{
-        source = "CLOUDFLARE_WORKERS_OBSERVABILITY"
-        credential_source = [string]$script:lastWorkersObservabilityCredentialSource
-        worker_version_id = [string]$Candidate.worker_version_id
-        expected_invocations = $expected
-        global = $global
-        routes = $families
-        invocations = [int]$global.invocations
-        max_cpu_ms = [double]$global.max_cpu_ms
-        p95_cpu_ms = [double]$global.p95_cpu_ms
-        p99_cpu_ms = [double]$global.p99_cpu_ms
-        max_wall_ms = [double]$global.max_wall_ms
-        exceeded_cpu = [int]$global.exceeded_cpu
-        exceeded_memory = [int]$global.exceeded_memory
-        responses_1102 = [int]$global.responses_1102
-        responses_5xx = [int]$global.responses_5xx
-        gate_state = $gateState
-        passed = [bool]($gateState -eq "PASSED")
-    }
-}
-
 function Get-CandidateInvocationCount {
     param(
         [Parameter(Mandatory = $true)][object]$Candidate,
@@ -1310,6 +1174,315 @@ function Get-CandidateInvocationCount {
         -Calculations @([pscustomobject]@{ operator='count'; alias='invocations' })
     if (-not $result) { return $null }
     return Get-CalculationAggregate -QueryResult $result -Alias "invocations"
+}
+
+function Invoke-WorkersObservabilityEventsQuery {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Filters,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$From,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$To,
+        [string]$Offset = ""
+    )
+    $secret = Get-ReleaseSecret -Name "CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN"
+    $script:lastWorkersObservabilityCredentialSource = [string]$secret.source
+    if (-not $secret.available) {
+        $script:lastWorkersObservabilityDiagnostic = [string]$secret.diagnostic
+        return $null
+    }
+    $token = [string]$secret.value
+    $body = [ordered]@{
+        queryId = "aurum-release-candidate-validation-events"
+        timeframe = [ordered]@{
+            from = $From.ToUnixTimeMilliseconds()
+            to = $To.ToUnixTimeMilliseconds()
+        }
+        view = "events"
+        limit = 2000
+        parameters = [ordered]@{
+            datasets = @()
+            filterCombination = "and"
+            filters = $Filters
+            calculations = @()
+        }
+    }
+    if ($Offset) { $body.offset = $Offset }
+    $uri = "https://api.cloudflare.com/client/v4/accounts/$cloudflareAccountId/workers/observability/telemetry/query"
+    try {
+        $response = Invoke-RestMethod -Method Post -Uri $uri `
+            -Headers @{ Authorization = "Bearer $token" } `
+            -ContentType "application/json" -Body ($body | ConvertTo-Json -Depth 12) `
+            -TimeoutSec 30
+        if (-not $response.success -or -not $response.result.events) {
+            $script:lastWorkersObservabilityDiagnostic = "OBSERVABILITY_API_REJECTED"
+            return $null
+        }
+        $script:lastWorkersObservabilityDiagnostic = $null
+        return $response.result.events
+    } catch {
+        $statusCode = 0
+        try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { $statusCode = 0 }
+        $script:lastWorkersObservabilityDiagnostic = if ($statusCode -in @(401, 403)) {
+            "OBSERVABILITY_CREDENTIAL_REJECTED"
+        } elseif ($statusCode -eq 429) {
+            "OBSERVABILITY_RATE_LIMITED"
+        } elseif ($statusCode -ge 500 -and $statusCode -le 599) {
+            "OBSERVABILITY_TRANSIENT_API_FAILURE"
+        } else { "OBSERVABILITY_QUERY_FAILED" }
+        return $null
+    } finally {
+        $token = $null
+        $secret = $null
+    }
+}
+
+function Get-ReleaseTelemetryProperty {
+    param([object]$Object, [Parameter(Mandatory = $true)][string]$Name)
+    if ($null -eq $Object -or $null -eq $Object.PSObject.Properties[$Name]) {
+        return $null
+    }
+    return $Object.PSObject.Properties[$Name].Value
+}
+
+function ConvertTo-ReleaseTelemetryRecord {
+    param([Parameter(Mandatory = $true)][object]$Event)
+    $metadata = Get-ReleaseTelemetryProperty -Object $Event -Name '$metadata'
+    $workers = Get-ReleaseTelemetryProperty -Object $Event -Name '$workers'
+    $workerEvent = Get-ReleaseTelemetryProperty -Object $workers -Name 'event'
+    $request = Get-ReleaseTelemetryProperty -Object $workerEvent -Name 'request'
+    $response = Get-ReleaseTelemetryProperty -Object $workerEvent -Name 'response'
+    $headers = Get-ReleaseTelemetryProperty -Object $request -Name 'headers'
+    $scriptVersion = Get-ReleaseTelemetryProperty -Object $workers -Name 'scriptVersion'
+    $cpu = Get-ReleaseTelemetryProperty -Object $workers -Name 'cpuTimeMs'
+    $wall = Get-ReleaseTelemetryProperty -Object $workers -Name 'wallTimeMs'
+    $record = [pscustomobject]@{
+        event_id = [string](Get-ReleaseTelemetryProperty -Object $metadata -Name 'id')
+        event_type = [string](Get-ReleaseTelemetryProperty -Object $metadata -Name 'type')
+        worker_version_id = [string](Get-ReleaseTelemetryProperty -Object $scriptVersion -Name 'id')
+        request_id = [string](Get-ReleaseTelemetryProperty -Object $headers -Name 'x-aurum-request-id')
+        validation_run = [string](Get-ReleaseTelemetryProperty -Object $headers -Name 'x-aurum-validation-run')
+        validation_phase = [string](Get-ReleaseTelemetryProperty -Object $headers -Name 'x-aurum-validation-phase')
+        method = [string](Get-ReleaseTelemetryProperty -Object $request -Name 'method')
+        path = [string](Get-ReleaseTelemetryProperty -Object $workerEvent -Name 'path')
+        status = [int](Get-ReleaseTelemetryProperty -Object $response -Name 'status')
+        outcome = [string](Get-ReleaseTelemetryProperty -Object $workers -Name 'outcome')
+        cpu_ms = if ($null -eq $cpu) { $null } else { [double]$cpu }
+        wall_ms = if ($null -eq $wall) { $null } else { [double]$wall }
+    }
+    if (-not $record.event_id -or -not $record.request_id -or
+        $null -eq $record.cpu_ms -or $null -eq $record.wall_ms) {
+        throw "OBSERVABILITY_SCHEMA_INVALID"
+    }
+    return $record
+}
+
+function Get-ReleaseTelemetryDigest {
+    param([Parameter(Mandatory = $true)][object[]]$Records)
+    $lines = @($Records | Sort-Object event_id | ForEach-Object {
+        @($_.event_id, $_.request_id, $_.worker_version_id, $_.validation_run,
+            $_.validation_phase, $_.method, $_.path, $_.status, $_.outcome,
+            $_.cpu_ms, $_.wall_ms) -join "|"
+    })
+    $bytes = [Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($hasher.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant() }
+    finally { $hasher.Dispose() }
+}
+
+function Get-ReleaseTelemetryPercentile {
+    param([Parameter(Mandatory = $true)][double[]]$Values, [double]$Percentile)
+    if ($Values.Count -eq 0) { return $null }
+    $ordered = @($Values | Sort-Object)
+    $index = [Math]::Max(0, [Math]::Ceiling($Percentile * $ordered.Count) - 1)
+    return [double]$ordered[$index]
+}
+
+function Get-ReleaseTelemetryMetrics {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Records,
+        [Parameter(Mandatory = $true)][string]$RouteFamily,
+        [int]$ExpectedInvocations
+    )
+    $cpu = [double[]]@($Records | ForEach-Object { [double]$_.cpu_ms })
+    $wall = [double[]]@($Records | ForEach-Object { [double]$_.wall_ms })
+    $evidence = [pscustomobject]@{
+        route_family = $RouteFamily
+        invocations = $Records.Count
+        max_cpu_ms = [double](($cpu | Measure-Object -Maximum).Maximum)
+        p95_cpu_ms = Get-ReleaseTelemetryPercentile -Values $cpu -Percentile 0.95
+        p99_cpu_ms = Get-ReleaseTelemetryPercentile -Values $cpu -Percentile 0.99
+        max_wall_ms = [double](($wall | Measure-Object -Maximum).Maximum)
+        exceeded_cpu = @($Records | Where-Object { $_.outcome -eq 'exceededCpu' }).Count
+        exceeded_memory = @($Records | Where-Object { $_.outcome -eq 'exceededMemory' }).Count
+        responses_1102 = @($Records | Where-Object {
+            $_.outcome -in @('exceededCpu', 'exceededMemory')
+        }).Count
+        responses_5xx = @($Records | Where-Object { $_.status -ge 500 -and $_.status -le 599 }).Count
+    }
+    $gateState = Get-WorkerCpuGateState -Evidence $evidence -ExpectedInvocations $ExpectedInvocations
+    $evidence | Add-Member gate_state $gateState
+    $evidence | Add-Member passed ([bool]($gateState -eq 'PASSED'))
+    return $evidence
+}
+
+function Get-CandidateFrozenPlatformEvidence {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$From,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$To,
+        [Parameter(Mandatory = $true)][object[]]$ExpectedRequests,
+        [Parameter(Mandatory = $true)][string]$ValidationRun
+    )
+    $filters = @(Get-CandidateObservabilityFilters -Candidate $Candidate -ValidationRun $ValidationRun)
+    $expectedIds = @($ExpectedRequests | ForEach-Object { [string]$_.request_id } | Sort-Object)
+    if (@($expectedIds | Where-Object { -not $_ }).Count -gt 0 -or
+        @($expectedIds | Select-Object -Unique).Count -ne $expectedIds.Count) {
+        $script:lastWorkersObservabilityDiagnostic = 'EXPECTED_REQUEST_UNIVERSE_INVALID'
+        return $null
+    }
+    $stableDigest = ''
+    $stableEventIds = ''
+    $stableRequestIds = ''
+    $stableReads = 0
+    $records = @()
+    $frozenTo = $To
+    $frozen = $false
+    for ($attempt = 0; $attempt -lt 24; $attempt++) {
+        if (-not $frozen) { $frozenTo = [DateTimeOffset]::UtcNow }
+        $events = @()
+        $offset = ''
+        for ($pageNumber = 0; $pageNumber -lt 20; $pageNumber++) {
+            $page = Invoke-WorkersObservabilityEventsQuery -Filters $filters `
+                -From $From -To $frozenTo -Offset $offset
+            if ($null -eq $page) { return $null }
+            $pageEvents = @($page.events)
+            $events += $pageEvents
+            if ($pageEvents.Count -lt 2000) { break }
+            $lastMetadata = Get-ReleaseTelemetryProperty -Object $pageEvents[-1] -Name '$metadata'
+            $nextOffset = [string](Get-ReleaseTelemetryProperty -Object $lastMetadata -Name 'id')
+            if (-not $nextOffset -or $nextOffset -eq $offset) {
+                $script:lastWorkersObservabilityDiagnostic = 'OBSERVABILITY_EVENT_CURSOR_INVALID'
+                return $null
+            }
+            $offset = $nextOffset
+        }
+        if ($events.Count -ge 40000) {
+            $script:lastWorkersObservabilityDiagnostic = 'OBSERVABILITY_EVENT_PAGE_BOUND_EXCEEDED'
+            return $null
+        }
+        try { $candidateRecords = @($events | ForEach-Object { ConvertTo-ReleaseTelemetryRecord $_ }) }
+        catch {
+            $script:lastWorkersObservabilityDiagnostic = 'OBSERVABILITY_SCHEMA_INVALID'
+            return $null
+        }
+        $actualIds = @($candidateRecords | ForEach-Object { $_.request_id } | Sort-Object)
+        $eventIds = @($candidateRecords | ForEach-Object { $_.event_id })
+        $identityValid = @($candidateRecords | Where-Object {
+            $_.worker_version_id -ne [string]$Candidate.worker_version_id -or
+            $_.validation_run -ne $ValidationRun -or $_.validation_phase -ne 'acceptance' -or
+            $_.event_type -ne 'cf-worker-event'
+        }).Count -eq 0
+        $complete = $identityValid -and $actualIds.Count -eq $expectedIds.Count -and
+            @($actualIds | Select-Object -Unique).Count -eq $actualIds.Count -and
+            @($eventIds | Select-Object -Unique).Count -eq $eventIds.Count -and
+            (($actualIds -join "`n") -ceq ($expectedIds -join "`n"))
+        if ($complete) {
+            $frozen = $true
+            $digest = Get-ReleaseTelemetryDigest -Records $candidateRecords
+            $eventIdSet = @($eventIds | Sort-Object) -join "`n"
+            $requestIdSet = $actualIds -join "`n"
+            if ($digest -eq $stableDigest -and $eventIdSet -ceq $stableEventIds -and
+                $requestIdSet -ceq $stableRequestIds) {
+                $stableReads++
+            } else {
+                $stableDigest = $digest
+                $stableEventIds = $eventIdSet
+                $stableRequestIds = $requestIdSet
+                $stableReads = 1
+            }
+            if ($stableReads -ge 2) { $records = $candidateRecords; break }
+        } else {
+            $stableDigest = ''
+            $stableEventIds = ''
+            $stableRequestIds = ''
+            $stableReads = 0
+        }
+        if ($attempt -lt 23) { Start-Sleep -Seconds 10 }
+    }
+    if ($records.Count -ne $expectedIds.Count) {
+        $script:lastWorkersObservabilityDiagnostic = 'OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING'
+        return $null
+    }
+    $expectedById = @{}
+    foreach ($expected in $ExpectedRequests) { $expectedById[[string]$expected.request_id] = $expected }
+    $families = @()
+    foreach ($group in @($records | Group-Object { [string]$expectedById[$_.request_id].family })) {
+        $familyExpected = @($ExpectedRequests | Where-Object { [string]$_.family -eq $group.Name }).Count
+        $families += Get-ReleaseTelemetryMetrics -Records @($group.Group) `
+            -RouteFamily $group.Name -ExpectedInvocations $familyExpected
+    }
+    $familyReconciliation = @($ExpectedRequests | Group-Object { [string]$_.family } |
+        ForEach-Object {
+            $name = [string]$_.Name
+            $expectedCount = $_.Count
+            $actualCount = @($records | Where-Object {
+                [string]$expectedById[$_.request_id].family -eq $name
+            }).Count
+            [pscustomobject]@{
+                family = $name; expected = $expectedCount; actual = $actualCount
+                matched = [bool]($expectedCount -eq $actualCount)
+            }
+        })
+    $scenarioReconciliation = @($ExpectedRequests | Group-Object {
+            "{0}|{1}" -f [string]$_.family, [string]$_.scenario
+        } | ForEach-Object {
+            $family = [string]$_.Group[0].family
+            $scenario = [string]$_.Group[0].scenario
+            $expectedCount = $_.Count
+            $actualCount = @($records | Where-Object {
+                $row = $expectedById[$_.request_id]
+                [string]$row.family -eq $family -and [string]$row.scenario -eq $scenario
+            }).Count
+            [pscustomobject]@{
+                family = $family; scenario = $scenario
+                expected = $expectedCount; actual = $actualCount
+                matched = [bool]($expectedCount -eq $actualCount)
+            }
+        })
+    $global = Get-ReleaseTelemetryMetrics -Records $records -RouteFamily 'GLOBAL' `
+        -ExpectedInvocations $expectedIds.Count
+    $failed = @($families | Where-Object { $_.gate_state -eq 'FAILED' }).Count -gt 0
+    $review = @($families | Where-Object { $_.gate_state -eq 'REVIEW_REQUIRED' }).Count -gt 0
+    $gateState = if ($failed -or $global.gate_state -eq 'FAILED') { 'FAILED' }
+        elseif ($review -or $global.gate_state -eq 'REVIEW_REQUIRED') { 'REVIEW_REQUIRED' }
+        else { 'PASSED' }
+    return [pscustomobject]@{
+        source = 'CLOUDFLARE_WORKERS_OBSERVABILITY_RAW_EVENTS'
+        credential_source = [string]$script:lastWorkersObservabilityCredentialSource
+        worker_version_id = [string]$Candidate.worker_version_id
+        validation_run = $ValidationRun
+        frozen_from = $From.ToString('o')
+        frozen_to = $frozenTo.ToString('o')
+        universe_digest = $stableDigest
+        stable_reads = $stableReads
+        expected_invocations = $expectedIds.Count
+        invocations = $records.Count
+        expected_requests = @($ExpectedRequests)
+        request_reconciliation = [pscustomobject]@{ expected=$expectedIds.Count; actual=$records.Count; matched=$true }
+        family_reconciliation = $familyReconciliation
+        scenario_reconciliation = $scenarioReconciliation
+        global = $global
+        routes = $families
+        max_cpu_ms = $global.max_cpu_ms
+        p95_cpu_ms = $global.p95_cpu_ms
+        p99_cpu_ms = $global.p99_cpu_ms
+        max_wall_ms = $global.max_wall_ms
+        exceeded_cpu = $global.exceeded_cpu
+        exceeded_memory = $global.exceeded_memory
+        responses_1102 = $global.responses_1102
+        responses_5xx = $global.responses_5xx
+        gate_state = $gateState
+        passed = [bool]($gateState -eq 'PASSED')
+    }
 }
 
 function Get-WorkerValidationManifest {
@@ -1872,32 +2045,24 @@ function Invoke-CandidateWorkerValidation {
         if (@($results | Where-Object { -not $_.passed }).Count -eq 0) {
             $expectedInvocations = [int](($workerRoutes |
                 Measure-Object -Property acceptance_samples -Sum).Sum)
+            $expectedRequests = @($results | Where-Object {
+                $_.boundary -in @('WORKER_READ', 'WORKER_WRITE') -and $_.request_ids
+            } | ForEach-Object {
+                $result = $_
+                @($result.request_ids | ForEach-Object {
+                    [pscustomobject]@{
+                        request_id = [string]$_
+                        family = [string]$result.family
+                        scenario = [string]$result.scenario
+                        method = [string]$result.method
+                        path = [string]$result.route
+                    }
+                })
+            })
             Start-Sleep -Seconds 8
-            $observedInvocations = $null
-            $platformTo = $workerEndedAt.AddSeconds(2)
-            for ($attempt = 0; $attempt -lt 24; $attempt++) {
-                # Worker event timestamps can be recorded after the response
-                # completes. Advance the upper bound with each propagation poll
-                # so late platform events are not permanently excluded by the
-                # first fixed response-time window.
-                $platformTo = [DateTimeOffset]::UtcNow
-                $observedInvocations = Get-CandidateInvocationCount -Candidate $Candidate `
-                    -From $workerStartedAt -To $platformTo `
-                    -ValidationRun $validationRun
-                if ($null -ne $observedInvocations -and
-                    [int]$observedInvocations -ge $expectedInvocations) { break }
-                if ($attempt -lt 23) { Start-Sleep -Seconds 10 }
-            }
-            if ($null -ne $observedInvocations -and
-                [int]$observedInvocations -ge $expectedInvocations) {
-                $platform = Get-CandidateCpuEvidence -Candidate $Candidate `
-                    -From $workerStartedAt `
-                    -To $platformTo -Routes $workerRoutes `
-                    -ValidationRun $validationRun
-            } else {
-                $script:lastWorkersObservabilityDiagnostic =
-                    "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"
-            }
+            $platform = Get-CandidateFrozenPlatformEvidence -Candidate $Candidate `
+                -From $workerStartedAt -To ([DateTimeOffset]::UtcNow) `
+                -ExpectedRequests $expectedRequests -ValidationRun $validationRun
         } else {
             $platform = "NOT_RUN"
         }

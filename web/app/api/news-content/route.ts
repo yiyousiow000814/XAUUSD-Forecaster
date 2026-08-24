@@ -6,7 +6,6 @@ import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/previ
 import { publicNewsRecord } from "../../_lib/public-news-copy";
 import {
   authorizeReleaseValidation, isReleaseValidationContext, releaseValidationResponse,
-  validateJsonWithD1,
 } from "../_shared/release-validation";
 
 export const dynamic = "force-dynamic";
@@ -108,19 +107,50 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   }
   try {
+    if (isReleaseValidationContext(validation)) {
+      const checked = await binding.prepare(
+        `WITH root(doc) AS (
+           SELECT ? WHERE json_valid(?)
+         ), batch(row) AS (
+           SELECT value FROM root,json_each(json_extract(doc,'$.items'))
+         )
+         SELECT
+            CASE
+              WHEN json_type(doc,'$.reset')='true' THEN 'reset'
+             WHEN json_type(doc,'$.items')='array' THEN 'items'
+             ELSE 'invalid'
+           END kind,
+           (SELECT count(*) FROM batch) total,
+           (SELECT count(*) FROM batch WHERE
+             json_type(row)='object'
+             AND length(json_extract(row,'$.detail_key'))=64
+             AND json_extract(row,'$.detail_key') NOT GLOB '*[^0-9a-f]*'
+             AND length(json_extract(row,'$.detail_hash'))=64
+             AND json_extract(row,'$.detail_hash') NOT GLOB '*[^0-9a-f]*'
+              AND json_type(row,'$.payload') IN ('object','array')) valid
+         FROM root`,
+      ).bind(bounded.serialized, bounded.serialized).first<{
+        kind: string; total: number; valid: number;
+      }>();
+      const total = Number(checked?.total ?? 0);
+      const valid = Number(checked?.valid ?? 0);
+      if (!checked || (checked.kind !== "reset"
+          && (checked.kind !== "items" || total > 20 || valid !== total))) {
+        return NextResponse.json({ error: "invalid news detail batch" }, { status: 400 });
+      }
+      return releaseValidationResponse(validation, {
+        body: "bounded-read", json: "d1-json1+json-each",
+        transformed: checked.kind === "reset"
+          ? { reset: true }
+          : { items: total, prepared_statements: total },
+        mutation_boundary: checked.kind === "reset"
+          ? "news-content-reset" : "news-content-upsert-batch",
+      });
+    }
     const body = JSON.parse(bounded.serialized) as {
       items?: NewsDetailItem[]; reset?: unknown
     };
     if (body.reset === true) {
-      if (isReleaseValidationContext(validation)) {
-        if (!await validateJsonWithD1(binding, bounded.serialized)) {
-          return NextResponse.json({ error: "invalid news detail reset" }, { status: 400 });
-        }
-        return releaseValidationResponse(validation, {
-          body: "bounded-read", json: "parsed+d1-json1",
-          transformed: { reset: true }, mutation_boundary: "news-content-reset",
-        });
-      }
       await binding.prepare("DELETE FROM news_details").run();
       return NextResponse.json({ status: "OK", reset: true });
     }
@@ -138,16 +168,6 @@ export async function POST(request: Request) {
       ) {
         throw new Error("invalid news detail item");
       }
-    }
-    if (isReleaseValidationContext(validation)) {
-      if (!await validateJsonWithD1(binding, bounded.serialized)) {
-        return NextResponse.json({ error: "invalid news detail batch" }, { status: 400 });
-      }
-      return releaseValidationResponse(validation, {
-        body: "bounded-read", json: "parsed+d1-json1",
-        transformed: { items: body.items.length, prepared_statements: body.items.length },
-        mutation_boundary: "news-content-upsert-batch",
-      });
     }
     const now = new Date().toISOString();
     const statements = body.items.map((item) => {

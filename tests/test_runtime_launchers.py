@@ -189,22 +189,120 @@ def test_candidate_validation_retries_delayed_observability_evidence(tmp_path) -
         "param($Candidate,$From,$To,$ValidationRun);"
         "$script:countAttempts++;$script:countWindows+=$To;"
         "if($script:countAttempts -eq 1){0}else{2}};"
-        "function Invoke-CandidateRouteSample{param($ValidationPhase);"
-        "$script:phases+=$ValidationPhase;return [pscustomobject]@{passed=$true;"
-        "request_id='request';status=200}};"
+        "$script:requestIndex=0;function Invoke-CandidateRouteSample{param($ValidationPhase);"
+        "$script:phases+=$ValidationPhase;$script:requestIndex++;return [pscustomobject]@{passed=$true;"
+        "request_id=('request-'+$script:requestIndex);status=200}};"
         "$script:evidenceAttempts=0;$script:evidenceTo=$null;"
-        "function Get-CandidateCpuEvidence{"
-        "param($Candidate,$From,$To,$Routes,$ValidationRun);"
-        "$script:evidenceAttempts++;$script:evidenceTo=$To;return [pscustomobject]@{"
+        "function Get-CandidateFrozenPlatformEvidence{"
+        "param($Candidate,$From,$To,$ExpectedRequests,$ValidationRun);"
+        "$script:evidenceAttempts++;$script:evidenceTo=$To;$script:expected=$ExpectedRequests.Count;"
+        "return [pscustomobject]@{"
         "invocations=2;passed=$true;gate_state='PASSED'}};"
         "$validation=Invoke-CandidateWorkerValidation -Candidate $candidate -RoutePlan $plan;"
-        'Write-Output "$script:countAttempts,$script:evidenceAttempts,'
+        'Write-Output "$script:countAttempts,$script:evidenceAttempts,$script:expected,'
         '$($validation.observed_worker_invocations),$($script:phases -join \':\'),'
-        '$($validation.observability_diagnostic),'
-        '$($script:evidenceTo -eq $script:countWindows[1])"',
+        '$($validation.observability_diagnostic)"',
     )
 
-    assert result == "2,1,2,warmup:acceptance:acceptance,,True"
+    assert result == "1,1,2,2,warmup:acceptance:acceptance,"
+
+
+def test_raw_telemetry_metrics_keep_zero_cpu_samples(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$records=@("
+        "[pscustomobject]@{cpu_ms=0;wall_ms=1;outcome='ok';status=200},"
+        "[pscustomobject]@{cpu_ms=2;wall_ms=3;outcome='ok';status=200});"
+        "$e=Get-ReleaseTelemetryMetrics -Records $records -RouteFamily 'test' "
+        "-ExpectedInvocations 2;"
+        'Write-Output "$($e.invocations),$($e.p95_cpu_ms),$($e.p99_cpu_ms),'
+        '$($e.max_cpu_ms),$($e.responses_5xx),$($e.responses_1102),$($e.gate_state)"',
+    )
+
+    assert result == "2,2,2,2,0,0,PASSED"
+
+
+def test_raw_telemetry_classifies_worker_1102_from_resource_outcomes(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$records=@("
+        "[pscustomobject]@{cpu_ms=10;wall_ms=11;outcome='exceededCpu';status=500},"
+        "[pscustomobject]@{cpu_ms=1;wall_ms=2;outcome='ok';status=200});"
+        "$e=Get-ReleaseTelemetryMetrics -Records $records -RouteFamily 'test' "
+        "-ExpectedInvocations 2;"
+        'Write-Output "$($e.exceeded_cpu),$($e.exceeded_memory),'
+        '$($e.responses_1102),$($e.responses_5xx),$($e.gate_state)"',
+    )
+
+    assert result == "1,0,1,1,FAILED"
+
+
+def test_frozen_raw_telemetry_reconciles_identical_event_universe(tmp_path) -> None:
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId 'worker' "
+        f"-WindowsRevision '{candidate}';"
+        "function Start-Sleep{};function New-Event($id,$request,$cpu){"
+        "[pscustomobject]@{'$metadata'=[pscustomobject]@{id=$id;type='cf-worker-event'};"
+        "'$workers'=[pscustomobject]@{cpuTimeMs=$cpu;wallTimeMs=2;outcome='ok';"
+        "scriptVersion=[pscustomobject]@{id='worker'};event=[pscustomobject]@{path='/api/status';"
+        "request=[pscustomobject]@{method='GET';headers=[pscustomobject]@{"
+        "'x-aurum-request-id'=$request;'x-aurum-validation-run'='run';"
+        "'x-aurum-validation-phase'='acceptance'}};response=[pscustomobject]@{status=200}}}}};"
+        "$script:queries=0;$script:observedVersions=@();$script:observedKeys=@();"
+        "function Invoke-WorkersObservabilityEventsQuery{param($Filters);"
+        "$script:queries++;"
+        "$script:observedVersions+=@($Filters|Where-Object key -eq '$workers.scriptVersion.id')[0].value;"
+        "$script:observedKeys+=@($Filters|ForEach-Object key);"
+        "[pscustomobject]@{count=2;events=@("
+        "(New-Event 'event-1' 'request-1' 0),(New-Event 'event-2' 'request-2' 2))}};"
+        "$expected=@([pscustomobject]@{request_id='request-1';family='status-read';scenario='a'},"
+        "[pscustomobject]@{request_id='request-2';family='status-read';scenario='a'});"
+        "$e=Get-CandidateFrozenPlatformEvidence -Candidate $candidate "
+        "-From ([DateTimeOffset]::UtcNow.AddMinutes(-1)) -To ([DateTimeOffset]::UtcNow) "
+        "-ExpectedRequests $expected -ValidationRun 'run';"
+        'Write-Output "$script:queries,$($e.invocations),$($e.stable_reads),'
+        '$($e.request_reconciliation.matched),$($e.universe_digest.Length),'
+        '$($e.p95_cpu_ms),$($e.routes[0].invocations),'
+        '$($e.family_reconciliation[0].matched),$($e.scenario_reconciliation[0].actual),'
+        '$(@($script:observedVersions|Select-Object -Unique)-join \';\'),'
+        '$(@($script:observedKeys|Select-Object -Unique)-contains \'$metadata.type\'),'
+        '$(@($script:observedKeys|Select-Object -Unique)-contains \'$workers.event.request.headers.x-aurum-validation-run\'),'
+        '$(@($script:observedKeys|Select-Object -Unique)-contains \'$workers.event.request.headers.x-aurum-validation-phase\')"',
+    )
+
+    assert result == "2,2,2,True,64,2,2,True,2,worker,True,True,True"
+
+
+def test_frozen_raw_telemetry_paginates_without_moving_upper_bound(tmp_path) -> None:
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId 'worker' "
+        f"-WindowsRevision '{candidate}';"
+        "function Start-Sleep{};function New-Event($number){"
+        "$id=('event-{0:d4}' -f $number);$request=('request-{0:d4}' -f $number);"
+        "[pscustomobject]@{'$metadata'=[pscustomobject]@{id=$id;type='cf-worker-event'};"
+        "'$workers'=[pscustomobject]@{cpuTimeMs=0;wallTimeMs=1;outcome='ok';"
+        "scriptVersion=[pscustomobject]@{id='worker'};event=[pscustomobject]@{path='/api/status';"
+        "request=[pscustomobject]@{method='GET';headers=[pscustomobject]@{"
+        "'x-aurum-request-id'=$request;'x-aurum-validation-run'='run';"
+        "'x-aurum-validation-phase'='acceptance'}};response=[pscustomobject]@{status=200}}}}};"
+        "$script:queries=0;$script:bounds=@();function Invoke-WorkersObservabilityEventsQuery{"
+        "param($To,$Offset);$script:queries++;$script:bounds+=$To.ToString('o');"
+        "if($Offset){[pscustomobject]@{count=2001;events=@((New-Event 2001))}}"
+        "else{[pscustomobject]@{count=2001;events=@(1..2000|ForEach-Object{New-Event $_})}}};"
+        "$expected=@(1..2001|ForEach-Object{[pscustomobject]@{"
+        "request_id=('request-{0:d4}' -f $_);family='status-read';scenario='status'}});"
+        "$e=Get-CandidateFrozenPlatformEvidence -Candidate $candidate "
+        "-From ([DateTimeOffset]::UtcNow.AddMinutes(-1)) -To ([DateTimeOffset]::UtcNow) "
+        "-ExpectedRequests $expected -ValidationRun 'run';"
+        '$uniqueBounds=@($script:bounds|Select-Object -Unique);'
+        'Write-Output "$script:queries,$($e.invocations),$($e.stable_reads),$($uniqueBounds.Count)"',
+    )
+
+    assert result == "4,2001,2,1"
 
 
 def test_delayed_platform_telemetry_keeps_exact_candidate_retryable(tmp_path) -> None:
@@ -2370,25 +2468,16 @@ def test_failed_directed_validation_persists_bounded_route_receipt(tmp_path) -> 
     )
 
 
-def test_one_failed_route_family_fails_candidate_cpu_evidence(tmp_path) -> None:
-    candidate = "b" * 40
-    result = _run_control_center_contract(
-        tmp_path,
-        f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId 'worker' "
-        f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE'; "
-        "$routes=@([pscustomobject]@{path='/api/status';method='GET';family='status-read';acceptance_samples=10},"
-        "[pscustomobject]@{path='/api/audit';method='GET';family='audit-read';acceptance_samples=10}); "
-        "function Get-CandidatePlatformEvidence { param($Candidate,$From,$To,$ExpectedInvocations,$RoutePath,$RouteMethod,$RouteFamily,$ValidationRun); "
-        "$failed=($RouteFamily -eq 'audit-read'); $gate=if($failed){'FAILED'}else{'PASSED'}; return [pscustomobject]@{route_family=$RouteFamily;"
-        "invocations=$ExpectedInvocations;max_cpu_ms=9;p95_cpu_ms=4;p99_cpu_ms=7;max_wall_ms=10;"
-        "exceeded_cpu=0;exceeded_memory=0;responses_1102=0;responses_5xx=0;"
-        "gate_state=$gate;passed=(-not $failed)} }; "
-        "$e=Get-CandidateCpuEvidence -Candidate $candidate -From ([DateTimeOffset]::UtcNow.AddMinutes(-1)) "
-        "-To ([DateTimeOffset]::UtcNow) -Routes $routes; "
-        'Write-Output "$($e.gate_state),$($e.routes.Count),$($e.routes[1].route_family)"',
+def test_candidate_cpu_evidence_comes_from_one_raw_event_universe() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
+        encoding="utf-8",
     )
 
-    assert result == "FAILED,2,audit-read"
+    assert "function Get-CandidateCpuEvidence" not in source
+    assert "function Get-CandidatePlatformEvidence" not in source
+    assert "Get-CandidateFrozenPlatformEvidence -Candidate $Candidate" in source
+    assert "CLOUDFLARE_WORKERS_OBSERVABILITY_RAW_EVENTS" in source
+    assert "universe_digest = $stableDigest" in source
 
 
 def test_version_at_or_before_watermark_cannot_replace_candidate(tmp_path) -> None:
@@ -2573,40 +2662,6 @@ def test_worker_windows_mismatch_cannot_switch_runtime(tmp_path) -> None:
     )
 
     assert result == "False"
-
-
-def test_platform_evidence_is_bound_to_exact_worker_version(tmp_path) -> None:
-    candidate = "b" * 40
-    worker = "22222222-2222-4222-8222-222222222222"
-    result = _run_control_center_contract(
-        tmp_path,
-        f"$candidate = New-ReleaseIdentity -GitSha '{candidate}' "
-        f"-WorkerVersionId '{worker}' -WindowsRevision '{candidate}'; "
-        "$script:observedVersions = @(); $script:observedKeys = @(); "
-        "function Invoke-WorkersObservabilityQuery { param($Filters,$Calculations,$From,$To); "
-        "$script:observedVersions += @($Filters | Where-Object key -eq '$workers.scriptVersion.id')[0].value; "
-        "$script:observedKeys += @($Filters | ForEach-Object key); "
-        "$alias = [string]$Calculations[0].alias; "
-        "if ($alias -eq 'invocations') { return [pscustomobject]@{ calculations=@("
-        "[pscustomobject]@{alias='invocations';aggregates=@([pscustomobject]@{value=6})},"
-        "[pscustomobject]@{alias='max_cpu_ms';aggregates=@([pscustomobject]@{value=8})},"
-        "[pscustomobject]@{alias='p95_cpu_ms';aggregates=@([pscustomobject]@{value=5})},"
-        "[pscustomobject]@{alias='p99_cpu_ms';aggregates=@([pscustomobject]@{value=7})},"
-        "[pscustomobject]@{alias='max_wall_ms';aggregates=@([pscustomobject]@{value=25})}) } }; "
-        "return [pscustomobject]@{ calculations=@([pscustomobject]@{alias=$alias;aggregates=@([pscustomobject]@{value=0})}) } }; "
-        "$now=[DateTimeOffset]::UtcNow; $evidence=Get-CandidatePlatformEvidence "
-        "-Candidate $candidate -From $now.AddMinutes(-1) -To $now -ExpectedInvocations 6 "
-        "-RoutePath '/api/status' -RouteMethod 'GET' -ValidationRun 'run-1'; "
-        "$keys=@($script:observedKeys|Select-Object -Unique);"
-        'Write-Output "$($evidence.passed),$($evidence.invocations),'
-        '$(@($script:observedVersions | Select-Object -Unique) -join \';\'),'
-        '$($keys -contains \'$metadata.type\'),'
-        '$($keys -contains \'$workers.event.path\'),'
-        '$($keys -contains \'$workers.event.request.headers.x-aurum-validation-run\'),'
-        '$($keys -contains \'$workers.event.request.headers.x-aurum-validation-phase\')"',
-    )
-
-    assert result == f"True,6,{worker},True,True,True,True"
 
 
 def test_bootstrap_preserves_accepted_268_candidate_and_evidence(tmp_path) -> None:
