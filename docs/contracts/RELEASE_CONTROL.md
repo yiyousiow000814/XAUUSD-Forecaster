@@ -11,7 +11,7 @@ Every uploaded Worker Version declares one durable artifact kind in its
 immutable version annotation. `PREVIEW` is never promotable. Only
 `PRODUCTION_CANDIDATE` may enter Candidate validation or promotion. Missing or
 unknown provenance fails closed. A production candidate must also declare
-`main`, exist after fetch, and be reachable from `origin/main`; artifact labels
+`main`, exist after fetch, and equal the exact current `origin/main`; artifact labels
 alone are not authority. Preview evidence never authorizes a production candidate, even when
 both artifacts originate from the same Git commit.
 
@@ -32,6 +32,13 @@ them eligible. Every later version advances the watermark whether it is Preview,
 unknown, malformed, accepted, or failed. Restart therefore cannot rediscover
 historical or failed candidates. A production candidate arriving during a
 transaction is queued until that transaction finishes.
+
+Release Control records materialization for the exact current `origin/main` as
+`PENDING` or `MATERIALIZED`. Only a matching immutable Worker Version may make
+it `MATERIALIZED`. An older main build that completes out of order advances the
+discovery watermark but cannot replace, validate as, or supersede the current
+main Candidate. A missing exact Version remains visible and retryable without
+changing Stable.
 
 ## Windows ownership and validation
 
@@ -71,8 +78,11 @@ uses a narrow compatibility receipt because that Worker predates exact identity
 headers and split Audit routes. Current deployment evidence must prove the
 recorded legacy Worker owns 100% traffic, the exact Candidate owns 0%, and the
 recorded Windows bootstrap identity is still active. The Candidate remains
-subject to exact Worker and Git headers. Its bounded split Audit resources are
-validated directly against the legacy `/api/audit` freshness authority. Any
+subject to exact Worker and Git headers. Split Audit resources that the legacy
+Windows producer cannot publish are not reported as ordinary parity passes.
+Their pre-promotion receipts are `DEFERRED_TO_POST_CUTOVER_OBSERVATION`, bound to
+the exact validation key and required Candidate producer revision. All resources
+the legacy producer can prove still require normal semantic parity. Any
 later Stable uses normal exact-version validation; missing headers or routes do
 not infer legacy compatibility.
 
@@ -189,7 +199,12 @@ revision is activated without sync, Worker traffic is switched, and sync is
 resumed only after both identities match. This bounds the mixed-contract window
 without creating a second production owner.
 OBSERVING reuses the existing full decision-cycle observation and rollback
-policy. COMMIT_STABLE records the prior Stable as Previous Stable only after
+policy. Deferred split-projection obligations additionally require snapshots
+published after the cutover boundary, exact `producer_revision`, exact Worker/Git
+response identity, and full production-builder semantic equality. Pending is
+bounded and retryable; a hard mismatch or timeout enters automatic rollback.
+`COMMIT_STABLE` is forbidden until every obligation for the exact validation key
+is `PASSED`. It records the prior Stable as Previous Stable only after all
 observation succeeds. A newly discovered Candidate during a transaction is
 queued and cannot alter the in-flight target.
 

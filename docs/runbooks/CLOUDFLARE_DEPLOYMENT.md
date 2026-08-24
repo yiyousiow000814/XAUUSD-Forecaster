@@ -10,14 +10,22 @@ npm test
 npx wrangler versions upload --message "release:<full-main-git-sha> branch:main artifact_kind:PRODUCTION_CANDIDATE"
 ```
 
-Both production and non-production Workers Builds commands upload immutable
-Versions. The production command MUST NOT be `wrangler deploy`. Its configured
-command is:
+The checked-in desired state is
+[`web/cloudflare-build-contract.json`](../../web/cloudflare-build-contract.json).
+Repository policy requires its exact immutable production configuration. The
+Cloudflare Workers Builds project must match it: GitHub repository
+`yiyousiow000814/XAUUSD-Forecaster`, production branch `main`, root `/web`, build
+command `npm ci && npm test`, include path `*`, no exclude paths, and no direct
+production deploy. The production command MUST NOT be `wrangler deploy`:
 
 ```text
 Production:     npx wrangler versions upload --message "release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH artifact_kind:PRODUCTION_CANDIDATE"
-Non-production: npm run cf:preview-upload -- --message "release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH artifact_kind:PREVIEW"
+Optional Preview: npm run cf:preview-upload -- --message "release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH artifact_kind:PREVIEW"
 ```
+
+Non-production Workers Builds are currently disabled. If enabled later, they
+must use the separate Preview Worker and `PREVIEW` command above; they must not
+upload into production Version history.
 
 The local Control Center discovers the exact release identity, keeps Candidate
 at 0%, and runs boundary-appropriate automatic validation. A successful build
@@ -26,6 +34,15 @@ or merge does not change Stable. After Candidate is PASSED, the operator uses
 waits for the existing decision-cycle observation. **Reverse Stable** restores
 the recorded Previous Stable identities without rolling back D1 or deleting
 SQLite evidence. See [`RELEASE_CONTROL.md`](../contracts/RELEASE_CONTROL.md).
+
+After every `main` merge, confirm a Workers Build exists for that exact SHA.
+Build initialization may queue for several minutes; queue latency is not a
+skipped build. Release Control records the exact main revision as
+`candidate_materialization=PENDING` until the annotated immutable Version is
+visible, then changes it to `MATERIALIZED`. Retry a transient failed build
+through the configured Workers Builds retry mechanism. Never recover by
+deploying traffic, and never accept a late older-main Version as the current
+Candidate.
 
 Bootstrap a previously unmanaged runtime only after the Cloudflare production
 build command above is saved and the active Worker deployment is rechecked at
@@ -40,7 +57,7 @@ Cloudflare service environments share that service's Version history. The
 separate Preview Worker must never upload a Version into the production
 `aurum-signal-room` history. The commands deliberately emit different immutable
 artifact kinds; a production candidate additionally requires `branch:main` and
-Git reachability from `origin/main`.
+exact equality with the current `origin/main`.
 
 Normal builds and Candidate staging never apply D1 migrations or provision
 bindings. Schema, migration, provisioning, or destructive storage changes are

@@ -81,6 +81,11 @@ $workerCpuPassP99Ms = 8.0
 $workerCpuPassMaxMs = 10.0
 $candidateStaticAssetMaxBytes = 1048576
 $candidateDiscoveryInterval = [TimeSpan]::FromMinutes(5)
+$candidatePlacementPropagationTimeout = [TimeSpan]::FromMinutes(3)
+$candidatePlacementProbeIntervalSeconds = 5
+$candidateOnlyProjectionRoutes = @(
+    "/api/audit-briefs", "/api/audit-stories", "/api/audit-decisions"
+)
 $releaseLockOwnerGrace = [TimeSpan]::FromSeconds(30)
 $bootstrapAcceptedCandidateWorker = "dd823aa4-20f0-47e1-9255-1b785a4c17b0"
 $bootstrapAcceptedCandidateRevision = "14c055a35040fa963700c988f770c9bb52fa669e"
@@ -479,6 +484,46 @@ function Get-CloudflareVersions {
     foreach ($version in @($versions)) { Write-Output $version }
 }
 
+function Get-OriginMainRevision {
+    if (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot ".git"))) {
+        return $null
+    }
+    $fetch = Invoke-RepositoryRead -Operation "FETCH_ORIGIN" `
+        -Arguments @("-C", $repositoryRoot, "fetch", "origin", "--quiet")
+    if (-not $fetch.passed) { return $null }
+    $result = Invoke-RepositoryRead -Operation "READ_ORIGIN_MAIN" `
+        -Arguments @("-C", $repositoryRoot, "rev-parse", "origin/main")
+    if (-not $result.passed) { return $null }
+    $revision = ([string](@($result.output)[0])).Trim().ToLowerInvariant()
+    if ($revision -notmatch '^[0-9a-f]{40}$') { return $null }
+    return $revision
+}
+
+function Set-CandidateMaterializationState {
+    param(
+        [Parameter(Mandatory = $true)][object]$State,
+        [Parameter(Mandatory = $true)][string]$Revision,
+        [Parameter(Mandatory = $true)][ValidateSet("PENDING", "MATERIALIZED")]
+        [string]$Status,
+        [string]$WorkerVersionId = ""
+    )
+    $receipt = [pscustomobject]@{
+        revision = $Revision
+        state = $Status
+        reason = if ($Status -eq "MATERIALIZED") {
+            "EXACT_MAIN_CANDIDATE_MATERIALIZED"
+        } else { "EXACT_MAIN_CANDIDATE_PENDING" }
+        worker_version_id = if ($WorkerVersionId) { $WorkerVersionId } else { $null }
+        observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+    if ($State.PSObject.Properties['candidate_materialization']) {
+        $State.candidate_materialization = $receipt
+    } else {
+        $State | Add-Member -NotePropertyName candidate_materialization `
+            -NotePropertyValue $receipt
+    }
+}
+
 function Get-CloudflareVersionDetails {
     param([Parameter(Mandatory = $true)][string]$VersionId)
     Invoke-WranglerJson -Arguments @(
@@ -637,6 +682,7 @@ function New-ReleaseControlState {
             watermark_version_id = $null
             initialized_at = $null
         }
+        candidate_materialization = $null
         updated_at = [DateTimeOffset]::UtcNow.ToString("o")
     }
 }
@@ -931,11 +977,11 @@ function Get-ProductionCandidateProvenanceResult {
             state = "FAILED"; reason = "PRODUCTION_CANDIDATE_COMMIT_REQUIRED"
         }
     }
-    & git -C $repositoryRoot merge-base --is-ancestor `
-        ([string]$Candidate.git_sha) origin/main 2>$null
-    if ($LASTEXITCODE -ne 0) {
+    $originMain = ([string](@(& git -C $repositoryRoot rev-parse origin/main 2>$null)[0])).Trim().ToLowerInvariant()
+    if ($LASTEXITCODE -ne 0 -or $originMain -notmatch '^[0-9a-f]{40}$' -or
+        $originMain -ne [string]$Candidate.git_sha) {
         return [pscustomobject]@{
-            state = "FAILED"; reason = "PRODUCTION_CANDIDATE_MAIN_REACHABILITY_REQUIRED"
+            state = "FAILED"; reason = "PRODUCTION_CANDIDATE_EXACT_MAIN_REQUIRED"
         }
     }
     return [pscustomobject]@{ state = "PASSED"; reason = $null }
@@ -1865,6 +1911,36 @@ function Invoke-ExactVersionJson {
     }
 }
 
+function Wait-CandidatePlacementPropagation {
+    param([Parameter(Mandatory = $true)][object]$Candidate)
+    $deadline = [DateTimeOffset]::UtcNow + $candidatePlacementPropagationTimeout
+    do {
+        try {
+            $read = Invoke-ExactVersionJson `
+                -VersionId ([string]$Candidate.worker_version_id) -Path "/api/ingest"
+            if ([string]$read.observed_version_id -eq
+                    [string]$Candidate.worker_version_id -and
+                [string]$read.observed_git_sha -eq [string]$Candidate.git_sha) {
+                return [pscustomobject]@{
+                    passed = $true; state = "PASSED"; reason = "PASSED"
+                    observed_version_id = [string]$read.observed_version_id
+                    observed_git_sha = [string]$read.observed_git_sha
+                }
+            }
+        } catch {
+            $lastError = Protect-PreflightDiagnosticText $_.Exception.Message
+        }
+        if ([DateTimeOffset]::UtcNow -lt $deadline) {
+            Start-Sleep -Seconds $candidatePlacementProbeIntervalSeconds
+        }
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+    return [pscustomobject]@{
+        passed = $false; state = "RETRYABLE"
+        reason = "CANDIDATE_PLACEMENT_PROPAGATION_PENDING"
+        diagnostic = $lastError
+    }
+}
+
 function ConvertTo-ReleaseSemanticProjection {
     param([Parameter(Mandatory = $true)][string]$Path, [object]$Payload)
     switch ($Path) {
@@ -2093,12 +2169,26 @@ function Test-CandidateDataParity {
                 }).Count -eq 0) {
                     throw "LEGACY_AUDIT_SPLIT_SCHEMA_MISMATCH"
                 }
-                if ($null -eq $legacyAuditTime -or
-                    ($legacyAuditTime - $generated).TotalMinutes -gt 15) {
-                    throw "CANDIDATE_AUDIT_TRANSITION_STALE"
+                if ($null -eq $legacyAuditTime) {
+                    throw "CANDIDATE_STATUS_SCHEMA_MISMATCH"
                 }
+                # The legacy Windows producer cannot own these resources even
+                # when a retained D1 snapshot happens to be recent.
+                $deferred = $true
                 $results += [pscustomobject]@{
-                    route = $path; state = "PASSED"; passed = $true; reason = "PASSED"
+                    route = $path
+                    state = if ($deferred) {
+                        "DEFERRED_TO_POST_CUTOVER_OBSERVATION"
+                    } else { "PASSED" }
+                    passed = -not $deferred
+                    blocking = $false
+                    reason = if ($deferred) {
+                        "CANDIDATE_PROJECTION_PRODUCER_NOT_ACTIVE"
+                    } else { "PASSED" }
+                    required_producer_revision = [string]$Candidate.windows_revision
+                    validation_key = [string]$Candidate.validation_key
+                    observed_generated_at = $generated.ToString("o")
+                    authority_generated_at = $legacyAuditTime.ToString("o")
                     stable_version_id = [string]$Stable.worker_version_id
                     candidate_version_id = [string]$candidateRead.observed_version_id
                 }
@@ -2178,15 +2268,31 @@ function Test-CandidateDataParity {
             }
         }
     }
+    $deferred = @($results | Where-Object {
+        [string]$_.state -eq "DEFERRED_TO_POST_CUTOVER_OBSERVATION"
+    })
+    $blocking = @($results | Where-Object {
+        -not $_.passed -and [string]$_.state -ne
+            "DEFERRED_TO_POST_CUTOVER_OBSERVATION"
+    })
     return [pscustomobject]@{
-        state = if (@($results | Where-Object { -not $_.passed }).Count -eq 0) {
-            "PASSED"
-        } else { "FAILED" }
-        passed = [bool](@($results | Where-Object { -not $_.passed }).Count -eq 0)
+        state = if ($blocking.Count -gt 0) { "FAILED" } elseif ($deferred.Count -gt 0) {
+            "PASSED_WITH_DEFERRED_OBLIGATIONS"
+        } else { "PASSED" }
+        passed = [bool]($blocking.Count -eq 0)
         identity_mode = $identityMode
         stable_version_id = [string]$Stable.worker_version_id
         candidate_version_id = [string]$Candidate.worker_version_id
         routes = $results
+        deferred_obligations = @($deferred | ForEach-Object {
+            [pscustomobject]@{
+                route = [string]$_.route
+                state = [string]$_.state
+                validation_key = [string]$_.validation_key
+                required_producer_revision = [string]$_.required_producer_revision
+                authority_generated_at = [string]$_.authority_generated_at
+            }
+        })
     }
 }
 
@@ -2278,7 +2384,9 @@ function Invoke-AutomaticCandidateValidation {
     if (-not $state -or -not (Test-ReleaseIdentity $state.candidate $Candidate)) { return $false }
     $priorValidationState = [string]$state.candidate.validation_state
     $windowsAlreadyPassed = [bool](
-        $priorValidationState -in @("CHECKS_BLOCKED", "CHECKS_PENDING") -and
+        $priorValidationState -in @(
+            "CHECKS_BLOCKED", "CHECKS_PENDING", "PLATFORM_PENDING"
+        ) -and
         [string]$state.candidate.validation.windows -eq "PASSED"
     )
     $state.candidate.validation_state = "STAGING"
@@ -2429,6 +2537,25 @@ function Invoke-AutomaticCandidateValidation {
         $workerChanged = [bool]$routePlan.worker_cpu_required
         $cloudflareChanged = [bool]$routePlan.requires_validation
         Set-CloudflareCandidatePointer -Stable $state.stable -Candidate $Candidate
+        $placementPropagation = Wait-CandidatePlacementPropagation -Candidate $Candidate
+        if (-not $placementPropagation.passed) {
+            $state.candidate.validation_state = "PLATFORM_PENDING"
+            $state.candidate.validation = [pscustomobject]@{
+                key = [string]$Candidate.validation_key
+                repository = "PASSED"; windows = "PASSED"; cloudflare = "PENDING"
+                compatibility = [string]$state.candidate.compatibility_state
+                reason = "CANDIDATE_PLACEMENT_PROPAGATION_PENDING"
+                placement_propagation = $placementPropagation
+                tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            Write-ReleaseControlState -State $state
+            Write-ReleaseHistory -Event "CANDIDATE_PLATFORM_PENDING" `
+                -Release $state.candidate -Detail @{
+                    reason = "CANDIDATE_PLACEMENT_PROPAGATION_PENDING"
+                    retryable = $true
+                }
+            return $false
+        }
         $cloudflare = [pscustomobject]@{ passed = $true; routes = @(); cpu_evidence = "NOT_REQUIRED" }
         if ($cloudflareChanged) {
             $cloudflare = Invoke-CandidateWorkerValidation -Candidate $Candidate `
@@ -2604,10 +2731,18 @@ function Invoke-AutomaticCandidateValidation {
 function Find-NewCandidateRelease {
     $state = Get-ReleaseControlState
     if (-not $state) { return $null }
+    $mainRevision = Get-OriginMainRevision
+    if (-not $mainRevision) { return $null }
     $versions = @(Get-CloudflareVersions | Sort-Object `
         @{ Expression = { Get-ReleaseVersionCreatedAtValue -Version $_ } }, `
         @{ Expression = { [string]$_.id } })
-    if (@($versions).Count -eq 0) { return $null }
+    if (@($versions).Count -eq 0) {
+        Set-CandidateMaterializationState -State $state -Revision $mainRevision `
+            -Status "PENDING"
+        $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $state
+        return $null
+    }
     if (-not $state.candidate_discovery.initialized_at) {
         Set-CandidateDiscoveryWatermark -State $state -Version ($versions | Select-Object -Last 1)
         $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
@@ -2627,7 +2762,8 @@ function Find-NewCandidateRelease {
         Set-CandidateDiscoveryWatermark -State $state -Version $version
         $sha = Get-ReleaseGitShaFromVersion -Version $version
         $artifactKind = Get-ReleaseArtifactKindFromVersion -Version $version
-        if (-not $sha -or $sha -eq [string]$state.stable.git_sha -or
+        if (-not $sha -or $sha -ne $mainRevision -or
+            $sha -eq [string]$state.stable.git_sha -or
             $artifactKind -ne $productionCandidateArtifactKind) { continue }
         $candidate = New-ReleaseIdentity -GitSha $sha `
             -WorkerVersionId ([string]$version.id) -WindowsRevision $sha `
@@ -2640,12 +2776,33 @@ function Find-NewCandidateRelease {
         $discovered = $candidate
     }
     if (-not $discovered) {
-        if (@($newVersions).Count -gt 0) {
-            $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        $exactVersion = @($versions | Where-Object {
+            (Get-ReleaseGitShaFromVersion -Version $_) -eq $mainRevision -and
+            (Get-ReleaseBranchFromVersion -Version $_) -eq "main" -and
+            (Get-ReleaseArtifactKindFromVersion -Version $_) -eq
+                $productionCandidateArtifactKind
+        } | Select-Object -Last 1)
+        if ($exactVersion.Count -gt 0 -and $state.candidate -and
+            [string]$state.candidate.git_sha -eq $mainRevision -and
+            [string]$state.candidate.worker_version_id -eq [string]$exactVersion[0].id) {
+            Set-CandidateMaterializationState -State $state -Revision $mainRevision `
+                -Status "MATERIALIZED" -WorkerVersionId ([string]$exactVersion[0].id)
             Write-ReleaseControlState -State $state
+            if ([string]$state.candidate.validation_state -eq "FAILED") {
+                return $null
+            }
+            return $state.candidate
         }
+    }
+    if (-not $discovered) {
+        Set-CandidateMaterializationState -State $state -Revision $mainRevision `
+            -Status "PENDING"
+        $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $state
         return $null
     }
+    Set-CandidateMaterializationState -State $state -Revision $mainRevision `
+        -Status "MATERIALIZED" -WorkerVersionId ([string]$discovered.worker_version_id)
     if ($state.transaction) {
         $state.queued_candidate = $discovered
         $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
@@ -2727,7 +2884,15 @@ function Invoke-CandidateDiscovery {
         $candidate = Find-NewCandidateRelease
         if (-not $candidate) {
             $state = Get-ReleaseControlState
-            if ($state -and -not $state.transaction) { $candidate = $state.candidate }
+            $materialization = if ($state) { $state.candidate_materialization } else { $null }
+            if ($state -and -not $state.transaction -and $state.candidate -and
+                $materialization -and
+                [string]$materialization.state -eq "MATERIALIZED" -and
+                [string]$materialization.revision -eq [string]$state.candidate.git_sha -and
+                [string]$materialization.worker_version_id -eq
+                    [string]$state.candidate.worker_version_id) {
+                $candidate = $state.candidate
+            }
         }
         if (-not $candidate) { return $false }
         if ([string]$candidate.validation_state -in @(
@@ -3584,7 +3749,10 @@ function Start-RuntimeObservation {
         [string]$Revision,
         [string]$PreviousRevision,
         [DateTimeOffset]$HealthBoundary = [DateTimeOffset]::UtcNow,
-        [ValidateSet("PROMOTE", "REVERSE")][string]$Mode = "PROMOTE"
+        [ValidateSet("PROMOTE", "REVERSE")][string]$Mode = "PROMOTE",
+        [array]$DeferredProjectionObligations = @(),
+        [string]$ValidationKey = "",
+        [DateTimeOffset]$ProjectionBoundary = [DateTimeOffset]::UtcNow
     )
     $latestDecision = Get-LatestRuntimeDecisionTime
     Write-RuntimeUpdateState @{
@@ -3598,6 +3766,12 @@ function Start-RuntimeObservation {
         observation_success_cycles = 0
         observation_consecutive_failures = 0
         observation_mode = $Mode
+        observation_validation_key = if ($ValidationKey) { $ValidationKey } else { $null }
+        observation_deferred_projection_obligations = @($DeferredProjectionObligations)
+        observation_deferred_projection_state = if (@($DeferredProjectionObligations).Count) {
+            "PENDING"
+        } else { "NOT_REQUIRED" }
+        observation_projection_boundary_at = $ProjectionBoundary.ToString("o")
         user_visible_failure = $false
         failure_message = $null
     }
@@ -3629,6 +3803,8 @@ function Invoke-RuntimeRollback {
         $releaseState = Get-ReleaseControlState
         if ($releaseState -and $releaseState.transaction -and
             [string]$releaseState.transaction.type -eq "PROMOTE") {
+            $priorValidation = $releaseState.candidate.validation
+            $observationEvidence = Get-RuntimeUpdateState
             $prior = $releaseState.transaction.previous
             Invoke-CloudflareDeployment `
                 -StableVersionId ([string]$prior.worker_version_id) `
@@ -3637,6 +3813,11 @@ function Invoke-RuntimeRollback {
             $releaseState.candidate.validation = [pscustomobject]@{
                 key = [string]$releaseState.candidate.validation_key
                 error = "OBSERVATION_FAILED"
+                reason = $Reason
+                prior_validation = $priorValidation
+                deferred_projection_evidence = if ($observationEvidence) {
+                    $observationEvidence.observation_deferred_projection_evidence
+                } else { $null }
                 tested_at = [DateTimeOffset]::UtcNow.ToString("o")
             }
             $releaseState.transaction = $null
@@ -3743,12 +3924,27 @@ function Start-ReleasePromotion {
             throw "Windows Stable revision drifted."
         }
         if (-not (Test-SingleProductionOwner)) { throw "Exactly one Windows production owner is required." }
+        $deferredObligations = @(
+            $candidate.validation.data_parity.deferred_obligations |
+                Where-Object { $null -ne $_ }
+        )
+        foreach ($obligation in $deferredObligations) {
+            if ([string]$obligation.state -ne
+                    "DEFERRED_TO_POST_CUTOVER_OBSERVATION" -or
+                [string]$obligation.validation_key -ne [string]$candidate.validation_key -or
+                [string]$obligation.required_producer_revision -ne
+                    [string]$candidate.windows_revision -or
+                [string]$obligation.route -notin $candidateOnlyProjectionRoutes) {
+                throw "DEFERRED_PROJECTION_OBLIGATION_INVALID"
+            }
+        }
         $transaction = [pscustomobject]@{
             id = [guid]::NewGuid().ToString()
             type = "PROMOTE"
             phase = "PRECHECK"
             target = $candidate
             previous = $state.stable
+            deferred_projection_obligations = $deferredObligations
             started_at = [DateTimeOffset]::UtcNow.ToString("o")
         }
         $state.transaction = $transaction
@@ -3769,11 +3965,21 @@ function Start-ReleasePromotion {
             -StableVersionId ([string]$candidate.worker_version_id) `
             -CandidateVersionId ([string]$state.stable.worker_version_id) `
             -Message "promote release $([string]$state.transaction.id)"
+        $projectionBoundary = [DateTimeOffset]::UtcNow
         Complete-DeferredServiceReload -ReloadStarted $reloadStarted `
             -DeferredServiceKeys @("sync")
-        Start-RuntimeObservation -Revision ([string]$candidate.windows_revision) `
-            -PreviousRevision ([string]$state.stable.windows_revision) `
-            -HealthBoundary $reloadStarted
+        if ($deferredObligations.Count -gt 0) {
+            Start-RuntimeObservation -Revision ([string]$candidate.windows_revision) `
+                -PreviousRevision ([string]$state.stable.windows_revision) `
+                -HealthBoundary $reloadStarted `
+                -DeferredProjectionObligations $deferredObligations `
+                -ValidationKey ([string]$candidate.validation_key) `
+                -ProjectionBoundary $projectionBoundary
+        } else {
+            Start-RuntimeObservation -Revision ([string]$candidate.windows_revision) `
+                -PreviousRevision ([string]$state.stable.windows_revision) `
+                -HealthBoundary $reloadStarted
+        }
         Write-RuntimeCodeState -Revision ([string]$candidate.windows_revision)
         Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_APPLIED" `
             -Service "collector,annotator,api,sync" `
@@ -3809,6 +4015,18 @@ function Complete-ReleasePromotion {
             [string]$state.transaction.phase -ne "OBSERVING") { return }
         $target = $state.transaction.target
         $previous = $state.transaction.previous
+        $deferred = @($state.transaction.deferred_projection_obligations |
+            Where-Object { $null -ne $_ })
+        if ($deferred.Count -gt 0) {
+            $runtimeObservation = Get-RuntimeUpdateState
+            if (-not $runtimeObservation -or
+                [string]$runtimeObservation.observation_validation_key -ne
+                    [string]$target.validation_key -or
+                [string]$runtimeObservation.observation_deferred_projection_state -ne
+                    "PASSED") {
+                return
+            }
+        }
         $state.stable = $target
         $state.previous_stable = $previous
         $state.previous_stable_rollback_eligible = Test-CloudflareRollbackTarget -Target $previous
@@ -4018,6 +4236,52 @@ function Reconcile-ReleaseControlState {
     return $state
 }
 
+function Test-DeferredProjectionObligations {
+    param(
+        [Parameter(Mandatory = $true)][array]$Obligations,
+        [Parameter(Mandatory = $true)][object]$Target,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$RequiredAfter,
+        [Parameter(Mandatory = $true)][string]$ValidationKey
+    )
+    if ($ValidationKey -ne [string]$Target.validation_key) {
+        return [pscustomobject]@{
+            state = "FAILED"; reason = "DEFERRED_PROJECTION_VALIDATION_KEY_MISMATCH"
+        }
+    }
+    $routes = @($Obligations | ForEach-Object { [string]$_.route })
+    if ($routes.Count -eq 0) {
+        return [pscustomobject]@{ state = "PASSED"; reason = "NOT_REQUIRED"; routes = @() }
+    }
+    if (@($routes | Where-Object { $_ -notin $candidateOnlyProjectionRoutes }).Count -gt 0 -or
+        @($routes | Select-Object -Unique).Count -ne $routes.Count) {
+        return [pscustomobject]@{
+            state = "FAILED"; reason = "DEFERRED_PROJECTION_ROUTE_NOT_ALLOWED"
+        }
+    }
+    $python = (Get-Command python.exe -ErrorAction Stop).Source
+    $arguments = @(
+        (Join-Path $moduleRoot "scripts\check_deferred_projection_parity.py"),
+        "--local-audit-url", "http://127.0.0.1:8765/api/audit",
+        "--remote-base-url", $workerUrl,
+        "--worker-name", $workerName,
+        "--version-id", ([string]$Target.worker_version_id),
+        "--git-sha", ([string]$Target.git_sha),
+        "--producer-revision", ([string]$Target.windows_revision),
+        "--required-after", $RequiredAfter.ToString("o")
+    )
+    foreach ($route in $routes) { $arguments += @("--route", $route) }
+    $output = @(& $python @arguments 2>&1)
+    try {
+        return (($output | ForEach-Object { [string]$_ }) -join "`n") |
+            ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return [pscustomobject]@{
+            state = "FAILED"; reason = "DEFERRED_PROJECTION_EVIDENCE_INVALID"
+            diagnostic = Protect-PreflightDiagnosticText ($output -join "`n")
+        }
+    }
+}
+
 function Test-RuntimeObservation {
     $state = Get-RuntimeUpdateState
     if (-not $state -or [string]$state.update_status -ne "OBSERVING") {
@@ -4068,6 +4332,50 @@ function Test-RuntimeObservation {
         } else {
             Write-RuntimeUpdateState @{ observation_consecutive_failures = 0 }
             return $true
+        }
+    }
+    $deferredObligations = @($state.observation_deferred_projection_obligations |
+        Where-Object { $null -ne $_ })
+    if (-not $failure -and $deferredObligations.Count -gt 0 -and
+        [string]$state.observation_deferred_projection_state -ne "PASSED") {
+        $projectionBoundary = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse(
+            [string]$state.observation_projection_boundary_at,
+            [ref]$projectionBoundary
+        )) {
+            $failure = "DEFERRED_PROJECTION_BOUNDARY_INVALID"
+        } else {
+            $release = Get-ReleaseControlState
+            $target = if ($release -and $release.transaction) {
+                $release.transaction.target
+            } else { $null }
+            if (-not $target) {
+                $failure = "DEFERRED_PROJECTION_TARGET_UNAVAILABLE"
+            } else {
+                $projection = Test-DeferredProjectionObligations `
+                    -Obligations $deferredObligations -Target $target `
+                    -RequiredAfter $projectionBoundary `
+                    -ValidationKey ([string]$state.observation_validation_key)
+                if ([string]$projection.state -eq "PASSED") {
+                    Write-RuntimeUpdateState @{
+                        observation_deferred_projection_state = "PASSED"
+                        observation_deferred_projection_evidence = $projection
+                        observation_deferred_projection_passed_at = [DateTimeOffset]::UtcNow.ToString("o")
+                    }
+                } elseif ([string]$projection.state -eq "FAILED") {
+                    $failure = [string]$projection.reason
+                } elseif (([DateTimeOffset]::UtcNow - $projectionBoundary) -ge
+                        $runtimeObservationTimeout) {
+                    $failure = "DEFERRED_PROJECTION_OBSERVATION_TIMEOUT"
+                } else {
+                    Write-RuntimeUpdateState @{
+                        observation_deferred_projection_state = "PENDING"
+                        observation_deferred_projection_evidence = $projection
+                        observation_consecutive_failures = 0
+                    }
+                    return $true
+                }
+            }
         }
     }
     if (-not $failure) {

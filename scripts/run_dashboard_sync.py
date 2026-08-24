@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -819,23 +820,55 @@ def _bounded_audit_snapshot(payload: dict, *, label: str, limit: int) -> bytes:
     return encoded
 
 
-def audit_briefs_snapshot(payload: dict) -> bytes:
+def _projection_producer_revision() -> str:
+    try:
+        revision = subprocess.check_output(
+            ["git", "-C", str(MODULE_ROOT), "rev-parse", "HEAD"],
+            text=True, timeout=5,
+        ).strip().lower()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return revision if re.fullmatch(r"[0-9a-f]{40}", revision) else ""
+
+
+def _with_projection_producer(snapshot: dict, producer_revision: str | None) -> dict:
+    projected = dict(snapshot)
+    if producer_revision:
+        projected["producer_revision"] = producer_revision
+    return projected
+
+
+def audit_briefs_snapshot(
+    payload: dict, producer_revision: str | None = None,
+) -> bytes:
     return _bounded_audit_snapshot(
-        audit_briefs_payload(payload, brief_limit=REMOTE_DAILY_BRIEF_LIMIT),
+        _with_projection_producer(
+            audit_briefs_payload(payload, brief_limit=REMOTE_DAILY_BRIEF_LIMIT),
+            producer_revision,
+        ),
         label="audit briefs", limit=AUDIT_DETAIL_LIMIT_BYTES,
     )
 
 
-def audit_decisions_snapshot(payload: dict) -> bytes:
+def audit_decisions_snapshot(
+    payload: dict, producer_revision: str | None = None,
+) -> bytes:
     return _bounded_audit_snapshot(
-        audit_decisions_payload(payload, decision_limit=REMOTE_DECISION_LIMIT),
+        _with_projection_producer(
+            audit_decisions_payload(payload, decision_limit=REMOTE_DECISION_LIMIT),
+            producer_revision,
+        ),
         label="audit decisions", limit=AUDIT_DETAIL_LIMIT_BYTES,
     )
 
 
-def audit_stories_snapshot(payload: dict) -> bytes:
+def audit_stories_snapshot(
+    payload: dict, producer_revision: str | None = None,
+) -> bytes:
     return _bounded_audit_snapshot(
-        audit_stories_payload(payload), label="audit stories",
+        _with_projection_producer(
+            audit_stories_payload(payload), producer_revision,
+        ), label="audit stories",
         limit=AUDIT_DETAIL_LIMIT_BYTES,
     )
 
@@ -1681,10 +1714,13 @@ def _sync_audit(local_payload: dict, config: dict) -> None:
     )
     _post_json(audit_url, audit_snapshot(local_payload), config)
     root = audit_url.rsplit("/", 1)[0]
+    producer_revision = _projection_producer_revision()
+    if not producer_revision:
+        raise PayloadContractError("projection producer revision is unavailable")
     for resource, snapshot in (
-        ("audit-briefs", audit_briefs_snapshot(local_payload)),
-        ("audit-stories", audit_stories_snapshot(local_payload)),
-        ("audit-decisions", audit_decisions_snapshot(local_payload)),
+        ("audit-briefs", audit_briefs_snapshot(local_payload, producer_revision)),
+        ("audit-stories", audit_stories_snapshot(local_payload, producer_revision)),
+        ("audit-decisions", audit_decisions_snapshot(local_payload, producer_revision)),
     ):
         _post_json(f"{root}/{resource}", snapshot, config)
 
