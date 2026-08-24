@@ -155,22 +155,24 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   const [scenarioId, setScenarioId] = useState("");
   const [scenarioStep, setScenarioStep] = useState(0);
   const [failureMode, setFailureMode] = useState(false);
+  const [flowInitialized, setFlowInitialized] = useState(false);
   const graph = useMemo(() => buildArchitectureGraph(manifest, viewId, mobile ? "TB" : undefined), [manifest, mobile, viewId]);
   const nodesInitialized = useStore(useCallback(state => graph.view.node_ids.every(id => {
     const measured = state.nodeLookup.get(id)?.measured;
     return Boolean(measured && (measured.width ?? 0) > 0 && (measured.height ?? 0) > 0);
   }), [graph.view.node_ids]));
   const canvasHeight = architectureCanvasHeight(graph.view.node_ids.length, mobile);
-  const cameraStateRef = useRef({ flow, graph, mobile, nodesInitialized, viewId });
+  const cameraStateRef = useRef({ flow, flowInitialized, graph, mobile, nodesInitialized, viewId });
   const [camera] = useState(() => createArchitectureCameraController());
   useLayoutEffect(() => {
-    cameraStateRef.current = { flow, graph, mobile, nodesInitialized, viewId };
+    cameraStateRef.current = { flow, flowInitialized, graph, mobile, nodesInitialized, viewId };
     camera.configure({
       requestFrame: callback => window.requestAnimationFrame(callback),
       cancelFrame: frame => window.cancelAnimationFrame(frame),
       readLayout: () => ({
         viewId: cameraStateRef.current.viewId,
         nodesInitialized: cameraStateRef.current.nodesInitialized,
+        flowInitialized: cameraStateRef.current.flowInitialized,
         canvasTransitionComplete: canvasTransitionCompleteRef.current,
         width: canvasRef.current?.clientWidth ?? 0,
         height: canvasRef.current?.clientHeight ?? 0,
@@ -198,7 +200,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
       },
     });
     camera.layoutChanged();
-  }, [camera, flow, graph, mobile, nodesInitialized, viewId]);
+  }, [camera, flow, flowInitialized, graph, mobile, nodesInitialized, viewId]);
   const selected = selectedId ? manifest.nodes.find(item => item.id === selectedId) ?? null : null;
   const scenario = manifest.scenarios.find(item => item.id === scenarioId) ?? null;
   const activeImpact = failureMode ? architectureFailureImpact(manifest, selectedId) : null;
@@ -260,11 +262,11 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
     window.addEventListener("keydown", close); return () => window.removeEventListener("keydown", close);
   }, [closeInspector]);
   useEffect(() => {
-    if (!nodesInitialized || initialCameraRequestedRef.current) return;
+    if (!flowInitialized || !nodesInitialized || initialCameraRequestedRef.current) return;
     initialCameraRequestedRef.current = true;
     if (camera.pendingIntent()) camera.layoutChanged();
     else camera.request({ type: "FIT_VIEW", viewId });
-  }, [camera, nodesInitialized, viewId]);
+  }, [camera, flowInitialized, nodesInitialized, viewId]);
   useEffect(() => () => camera.cancel(), [camera]);
   useEffect(() => {
     camera.layoutChanged();
@@ -369,6 +371,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
         onTransitionEnd={event => { if (event.propertyName === "width") { canvasTransitionCompleteRef.current = true; camera.layoutChanged(); } }}>
         <ReactFlow<ArchitectureCanvasNode, ArchitectureFlowEdge> defaultNodes={flowElements} defaultEdges={flowEdges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
           elementsSelectable minZoom={0.25} maxZoom={1.6} nodesConnectable={false} nodesDraggable={false}
+          onInit={() => setFlowInitialized(true)}
           onEdgeMouseEnter={(_, edge) => setHoveredEdgeId(edge.id)} onEdgeMouseLeave={() => setHoveredEdgeId(null)}
           panOnDrag zoomOnPinch zoomOnScroll proOptions={{ hideAttribution: true }}>
           <Background color="#b7c3c5" gap={22} size={1} />

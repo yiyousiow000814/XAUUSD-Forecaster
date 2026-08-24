@@ -248,7 +248,7 @@ function cameraHarness(initial = {}) {
   const frames = new Map();
   const commands = [];
   const layout = {
-    viewId: "system-overview", nodesInitialized: true, canvasTransitionComplete: true,
+    viewId: "system-overview", nodesInitialized: true, flowInitialized: true, canvasTransitionComplete: true,
     width: 1200, height: 650, ...initial,
   };
   const controller = createArchitectureCameraController({
@@ -268,8 +268,10 @@ function cameraHarness(initial = {}) {
 }
 
 test("30. Camera owner performs one initial automatic Fit", () => {
-  const h = cameraHarness();
+  const h = cameraHarness({ flowInitialized: false });
   h.controller.request({ type: "FIT_VIEW", viewId: "system-overview" }); h.flush();
+  assert.equal(h.commands.length, 0);
+  h.layout.flowInitialized = true; h.controller.layoutChanged(); h.flush();
   assert.deepEqual(h.commands.map(item => item.type), ["FIT_VIEW"]);
 });
 

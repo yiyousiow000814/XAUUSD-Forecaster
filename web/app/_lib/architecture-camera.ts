@@ -7,6 +7,7 @@ export type ArchitectureCameraIntent =
 export type ArchitectureCameraLayout = {
   viewId: string;
   nodesInitialized: boolean;
+  flowInitialized: boolean;
   canvasTransitionComplete: boolean;
   width: number;
   height: number;
@@ -38,7 +39,7 @@ export function createArchitectureCameraController(initialOptions?: CameraContro
       frame = null;
       if (!pending) return;
       const layout = environment.readLayout();
-      if (layout.viewId !== pending.viewId || !layout.nodesInitialized
+      if (layout.viewId !== pending.viewId || !layout.nodesInitialized || !layout.flowInitialized
           || !layout.canvasTransitionComplete || layout.width <= 0 || layout.height <= 0) {
         stableLayout = "";
         return;
