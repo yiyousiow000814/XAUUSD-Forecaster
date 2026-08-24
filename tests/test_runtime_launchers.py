@@ -3260,6 +3260,47 @@ def test_same_key_recovers_after_github_transport_without_repeating_preflight(
     assert result == "CHECKS_PENDING,PASSED,PASSED,1,True,True,True,True"
 
 
+@pytest.mark.parametrize(
+    ("same_validation_key", "expected_preflights"),
+    ((True, 0), (False, 1)),
+)
+def test_approved_candidate_reuses_only_same_key_windows_preflight(
+    tmp_path, same_validation_key: bool, expected_preflights: int,
+) -> None:
+    prior_key = (
+        "$candidate.validation_key"
+        if same_validation_key
+        else "('stale:' + ('c'*40))"
+    )
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$state.candidate.validation_state='NEW';"
+        "$state.candidate.compatibility_state='APPROVED';"
+        f"$state.candidate.validation=[pscustomobject]@{{key={prior_key};"
+        "repository='PASSED';windows='PASSED';cloudflare='PENDING'};"
+        "$state.candidate|Add-Member -Force compatibility_approval ([pscustomobject]@{"
+        "validation_key=$candidate.validation_key;resources_verified=$true});"
+        "Write-ReleaseControlState $state;$script:preflights=0;"
+        "function Test-ProductionCandidateProvenance{return $true};"
+        "function Invoke-ProductionShapePreflight{$script:preflights++;return $true};"
+        "function Test-RequiredGitHubChecks{'PASSED'};"
+        "function Get-CandidateChangedFiles{return @('docs/README.md')};"
+        "function Get-CandidateCompatibilityRequirement{return [pscustomobject]@{state='AUTOMATIC';files=@()}};"
+        "function Get-CandidateRouteValidationPlan{return [pscustomobject]@{worker_cpu_required=$false;"
+        "requires_validation=$false;static_assets=@();worker_reads=@();worker_writes=@()}};"
+        "function Set-CloudflareCandidatePointer{};"
+        "function Wait-CandidatePlacementPropagation{return [pscustomobject]@{passed=$true;state='READY'}};"
+        "function Test-CandidateDataParity{return [pscustomobject]@{passed=$true;state='PASSED'}};"
+        "function Get-CandidateAuthInspection{return [pscustomobject]@{state='PASSED'}};"
+        "Invoke-AutomaticCandidateValidation -Candidate $candidate|Out-Null;"
+        "$saved=Get-ReleaseControlState;"
+        'Write-Output "$($saved.candidate.validation_state),$script:preflights"',
+    )
+    assert result == f"PASSED,{expected_preflights}"
+
+
 def test_deterministic_provenance_failure_remains_terminal(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,

@@ -2384,8 +2384,9 @@ function Invoke-AutomaticCandidateValidation {
     if (-not $state -or -not (Test-ReleaseIdentity $state.candidate $Candidate)) { return $false }
     $priorValidationState = [string]$state.candidate.validation_state
     $windowsAlreadyPassed = [bool](
+        [string]$state.candidate.validation.key -eq [string]$Candidate.validation_key -and
         $priorValidationState -in @(
-            "CHECKS_BLOCKED", "CHECKS_PENDING", "PLATFORM_PENDING"
+            "NEW", "CHECKS_BLOCKED", "CHECKS_PENDING", "PLATFORM_PENDING"
         ) -and
         [string]$state.candidate.validation.windows -eq "PASSED"
     )
