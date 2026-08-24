@@ -67,6 +67,144 @@ def test_control_center_loads_collector_keys_without_exposing_them() -> None:
     assert 'ConvertFrom-Json' in control_center
 
 
+def test_release_observability_secret_prefers_valid_local_file(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$root=Join-Path $repositoryRoot '.local\\secrets';"
+        "New-Item -ItemType Directory -Path $root -Force|Out-Null;"
+        "$path=Join-Path $root 'cloudflare-release.json';"
+        "@{CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN='  local-release-token  '}|"
+        "ConvertTo-Json|Set-Content -LiteralPath $path -Encoding UTF8;"
+        "function Get-UserEnvironmentValue{return 'environment-release-token'};"
+        "$secret=Get-ReleaseSecret -Name 'CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN';"
+        'Write-Output "$($secret.available),$($secret.source),$($secret.value.Length),$($secret.diagnostic)"',
+    )
+
+    assert result == "True,LOCAL_SECRET_FILE,19,"
+    assert "local-release-token" not in result
+    assert "environment-release-token" not in result
+
+
+def test_release_observability_secret_falls_back_to_user_environment(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-UserEnvironmentValue{return '  environment-release-token  '};"
+        "$secret=Get-ReleaseSecret -Name 'CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN';"
+        'Write-Output "$($secret.available),$($secret.source),$($secret.value.Length),$($secret.diagnostic)"',
+    )
+
+    assert result == "True,USER_ENVIRONMENT,25,"
+    assert "environment-release-token" not in result
+
+
+@pytest.mark.parametrize(
+    ("content", "diagnostic"),
+    [
+        ("{bad-json", "LOCAL_SECRET_FILE_MALFORMED_JSON"),
+        ('{"WRONG_KEY":"value"}', "LOCAL_SECRET_KEY_MISSING"),
+        ('{"CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN":"   "}', "LOCAL_SECRET_VALUE_EMPTY"),
+    ],
+)
+def test_release_observability_secret_file_fails_closed_with_bounded_diagnostic(
+    tmp_path, content: str, diagnostic: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$root=Join-Path $repositoryRoot '.local\\secrets';"
+        "New-Item -ItemType Directory -Path $root -Force|Out-Null;"
+        f"[IO.File]::WriteAllText((Join-Path $root 'cloudflare-release.json'),'{content}');"
+        "function Get-UserEnvironmentValue{return 'environment-release-token'};"
+        "$secret=Get-ReleaseSecret -Name 'CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN';"
+        'Write-Output "$($secret.available),$($secret.source),$($secret.value.Length),$($secret.diagnostic)"',
+    )
+
+    assert result == f"False,UNAVAILABLE,0,{diagnostic}"
+    assert "environment-release-token" not in result
+
+
+def test_release_observability_token_is_not_persisted(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$root=Join-Path $repositoryRoot '.local\\secrets';"
+        "New-Item -ItemType Directory -Path $root -Force|Out-Null;"
+        "$path=Join-Path $root 'cloudflare-release.json';"
+        "@{CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN='nonpersistent-release-token'}|"
+        "ConvertTo-Json|Set-Content -LiteralPath $path -Encoding UTF8;"
+        "function Invoke-RestMethod{return [pscustomobject]@{success=$true;result=[pscustomobject]@{calculations=@()}}};"
+        "$null=Invoke-WorkersObservabilityQuery "
+        "-Filters @([pscustomobject]@{key='k';value='v'}) "
+        "-Calculations @([pscustomobject]@{operator='count';alias='count'}) "
+        "-From ([DateTimeOffset]::UtcNow.AddMinutes(-1)) -To ([DateTimeOffset]::UtcNow);"
+        "$release=New-ReleaseControlState -Stable (New-ReleaseIdentity -GitSha ('a'*40) "
+        "-WorkerVersionId 'stable' -WindowsRevision ('a'*40));"
+        "Write-ReleaseControlState $release;Write-ReleaseHistory -Event 'SECRET_TEST' -Release $release;"
+        "$persisted=(Get-Content -LiteralPath $releaseControlStatePath -Raw)+(Get-Content -LiteralPath $releaseHistoryPath -Raw);"
+        'Write-Output "$($script:lastWorkersObservabilityCredentialSource),$([bool]($persisted -match \'nonpersistent-release-token\'))"',
+    )
+
+    assert result == "LOCAL_SECRET_FILE,False"
+
+
+@pytest.mark.parametrize(
+    ("status", "diagnostic"),
+    [
+        (403, "OBSERVABILITY_CREDENTIAL_REJECTED"),
+        (429, "OBSERVABILITY_RATE_LIMITED"),
+        (503, "OBSERVABILITY_TRANSIENT_API_FAILURE"),
+    ],
+)
+def test_release_observability_failure_class_is_bounded(
+    tmp_path, status: int, diagnostic: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-ReleaseSecret{return [pscustomobject]@{available=$true;"
+        "value='classification-release-token';source='LOCAL_SECRET_FILE';diagnostic=$null}};"
+        f"function Invoke-RestMethod{{$exception=[System.Exception]::new('safe');"
+        f"$exception|Add-Member -NotePropertyName Response -NotePropertyValue "
+        f"([pscustomobject]@{{StatusCode={status}}});throw $exception}};"
+        "$null=Invoke-WorkersObservabilityQuery "
+        "-Filters @([pscustomobject]@{key='k';value='v'}) "
+        "-Calculations @([pscustomobject]@{operator='count';alias='count'}) "
+        "-From ([DateTimeOffset]::UtcNow.AddMinutes(-1)) -To ([DateTimeOffset]::UtcNow);"
+        'Write-Output "$script:lastWorkersObservabilityDiagnostic,$script:lastWorkersObservabilityCredentialSource"',
+    )
+
+    assert result == f"{diagnostic},LOCAL_SECRET_FILE"
+    assert "classification-release-token" not in result
+
+
+def test_candidate_validation_retries_delayed_observability_evidence(tmp_path) -> None:
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId 'worker' "
+        f"-WindowsRevision '{candidate}';"
+        "$route=[pscustomobject]@{path='/api/status';request_query='';method='GET';"
+        "family='status-read';scenario='status';boundary='WORKER_READ';warmup_samples=0;"
+        "acceptance_samples=2};"
+        "$plan=[pscustomobject]@{static_assets=@();worker_reads=@($route);worker_writes=@()};"
+        "function Start-Sleep{};function Get-CandidateInvocationCount{return 0};"
+        "function Invoke-CandidateRouteSample{return [pscustomobject]@{passed=$true;"
+        "request_id='request';status=200}};"
+        "$script:attempts=0;function Get-CandidateCpuEvidence{$script:attempts++;"
+        "$count=if($script:attempts -eq 1){0}else{2};return [pscustomobject]@{"
+        "invocations=$count;passed=$true;gate_state='PASSED'}};"
+        "$validation=Invoke-CandidateWorkerValidation -Candidate $candidate -RoutePlan $plan;"
+        'Write-Output "$script:attempts,$($validation.observed_worker_invocations),$($validation.observability_diagnostic)"',
+    )
+
+    assert result == "2,2,"
+
+
+def test_repository_local_release_secret_path_is_gitignored() -> None:
+    result = subprocess.run(
+        ["git", "check-ignore", ".local/secrets/cloudflare-release.json"],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0
+
+
 def test_control_center_stages_releases_without_main_driven_activation() -> None:
     path = ROOT / "scripts" / "xauusd_control_center.ps1"
     control_center = path.read_text(encoding="utf-8")
