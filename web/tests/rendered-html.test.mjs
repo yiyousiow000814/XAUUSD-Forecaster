@@ -979,7 +979,7 @@ test("marks only declared branch snapshot fields as snapshots", () => {
   assert.equal(statusFieldPhase("error", paths, "factor_coverage"), "error");
 });
 
-test("only a current D1 archive may publish the 60-day news total", async () => {
+test("only a receipt-matched current generation may publish the 60-day news total", async () => {
   const { authoritativeNewsTotals } = await import("../app/_lib/news-index-contract.ts");
   const frozen = {
     total: 200, all_total: 200, readable_total: 200,
@@ -987,15 +987,24 @@ test("only a current D1 archive may publish the 60-day news total", async () => 
     totals_scope: "BUILD_SNAPSHOT",
   };
   assert.equal(authoritativeNewsTotals(frozen), null);
-  assert.deepEqual(authoritativeNewsTotals({
+  const current = {
     ...frozen,
     total: 1138,
     all_total: 1138,
     readable_total: 1138,
     parsed_total: 1100,
     model_candidate_total: 31,
-    totals_scope: "D1_ARCHIVE",
-  }), { category: 1138, readable: 1138, parsed: 1100, modelCandidates: 31 });
+    totals_scope: "VERIFIED_CURRENT_GENERATION",
+    projection_state: "CURRENT", verified_complete: true,
+    generation_id: "a".repeat(64), snapshot_id: "b".repeat(64),
+    source_digest: "c".repeat(64), receipt_digest: "d".repeat(64),
+    source_receipt_digest: "d".repeat(64),
+  };
+  assert.deepEqual(authoritativeNewsTotals(current), {
+    category: 1138, readable: 1138, parsed: 1100, modelCandidates: 31,
+  });
+  assert.equal(authoritativeNewsTotals({ ...current, projection_state: "REPLAYING" }), null);
+  assert.equal(authoritativeNewsTotals({ ...current, source_receipt_digest: "e".repeat(64) }), null);
   assert.equal(authoritativeNewsTotals({
     ...frozen,
     totals_scope: "RECENT_WINDOW",
@@ -1040,13 +1049,13 @@ test("falls through to read-only D1 for later Preview news and details", () => {
   const index = readFileSync(new URL("../app/api/news-index/route.ts", import.meta.url), "utf8");
   const detail = readFileSync(new URL("../app/api/news-content/route.ts", import.meta.url), "utf8");
   assert.doesNotMatch(index, /inlinePreviewItems/);
-  assert.match(index, /D1 is the source of truth even on the first Preview page/);
-  assert.match(index, /"read-only-d1-archive"/);
-  assert.match(index, /"current-read-unavailable"/);
-  assert.match(detail, /if \(detail\) return previewJson\(publicNewsRecord\(detail\)\)/);
-  assert.match(detail, /payload: publicNewsRecord|const payload = publicNewsRecord/);
-  assert.match(index, /return publicNewsRecord\(item\) as NewsIndexItem/);
-  assert.match(detail, /"read-only-d1-detail"/);
+  assert.match(index, /readNewsProjectionPage/);
+  assert.match(index, /"read-only-current-generation"/);
+  assert.match(index, /requireD1Capabilities\(binding, \["news_projection_generation"\]\)/);
+  assert.match(detail, /readNewsProjectionDetails/);
+  assert.match(detail, /publicNewsRecord\(value\)/);
+  assert.match(index, /return publicNewsRecord\(item\) as NewsProjectionIndexItem/);
+  assert.match(detail, /NEWS_DETAIL_MISSING/);
   assert.doesNotMatch(detail, /该新闻详情不在本次 Preview 快照中/);
 });
 
@@ -1104,13 +1113,14 @@ test("separates completed, processing, and isolated news by durable review state
 
   const view = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const route = readFileSync(new URL("../app/api/news-index/route.ts", import.meta.url), "utf8");
+  const store = readFileSync(new URL("../app/api/_shared/news-projection-store.ts", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(view, /className="news-review-zones"/);
   assert.match(view, /review_state: newsReviewState/);
   assert.match(view, /setNewsCategory\("全部"\)/);
   assert.match(route, /invalid review state/);
   assert.match(route, /review_state_counts/);
-  assert.match(route, /NEWS_REVIEW_STATE_CASE_SQL/);
+  assert.match(store, /NEWS_REVIEW_STATE_CASE_SQL/);
   assert.doesNotMatch(route, /annotation_status'\) IN/);
   assert.match(css, /\.news-review-zones button \{[^}]*min-height:104px/);
   assert.match(view, /className="news-category-picker"/);
@@ -1127,39 +1137,32 @@ test("separates completed, processing, and isolated news by durable review state
 
 test("keeps the 60-day news archive inside bounded D1 work", () => {
   const index = readFileSync(new URL("../app/api/news-index/route.ts", import.meta.url), "utf8");
+  const store = readFileSync(new URL("../app/api/_shared/news-projection-store.ts", import.meta.url), "utf8");
   const reviewState = readFileSync(new URL("../app/_lib/news-review-state.ts", import.meta.url), "utf8");
   const detail = readFileSync(new URL("../app/api/news-content/route.ts", import.meta.url), "utf8");
-  const migration = readFileSync(new URL("../drizzle/0007_bounded_news_archive.sql", import.meta.url), "utf8");
-  assert.match(index, /body\.items\.length > 20/);
-  assert.match(detail, /body\.items\.length > 20/);
+  const migration = readFileSync(new URL("../drizzle/0022_news_projection_generation.sql", import.meta.url), "utf8");
+  assert.match(store, /NEWS_PROJECTION_MAX_BATCH_ITEMS = 20/);
+  assert.match(store, /items\.length > NEWS_PROJECTION_MAX_BATCH_ITEMS/);
   assert.match(detail, /DETAIL_BATCH_LIMIT = 12/);
-  assert.match(detail, /WHERE detail_key IN \(\$\{placeholders\}\)/);
-  assert.match(index, /ORDER BY published_time DESC/);
-  assert.match(index, /impact_expires_at>\?/);
+  assert.match(store, /WHERE generation_id=\? AND detail_key IN \(\$\{placeholders\}\)/);
+  assert.match(store, /ORDER BY published_time DESC/);
+  assert.match(store, /impact_expires_at>\?/);
   assert.match(index, /item\.model_visibility = "IMPACT_EXPIRED"/);
-  assert.match(index, /DELETE FROM news_index WHERE mirror_contract <> \?/);
-  assert.match(index, /neutralize_operational_state_for_contract/);
-  assert.match(index, /CONTRACT_HANDOVER_PENDING/);
   assert.match(reviewState, /annotation_status'\)='NOT_REQUIRED'/);
   assert.match(reviewState, /model_visibility'\)='NOT_YET_PARSED'/);
   assert.match(index, /health_check/);
-  assert.match(index, /NEWS_DETAIL_MISSING/);
-  assert.match(index, /NEWS_PARSED_FLAG_MISMATCH/);
-  assert.match(index, /NEWS_CANDIDATE_FLAG_MISMATCH/);
-  assert.match(index, /current_contract/);
-  assert.match(index, /mirror_contract=\?/);
-  assert.match(index, /NEWS_DUPLICATE_ACTIVE_CLUSTER/);
-  assert.match(index, /NEWS_MIRROR_CONTRACT_STALE/);
+  assert.match(store, /missing_detail_count/);
+  assert.match(store, /review_violation_count/);
+  assert.match(store, /duplicate_cluster_count/);
+  assert.match(store, /expected_receipt_digest/);
+  assert.match(store, /NEWS_PROJECTION_RECEIPT_CONTRADICTION/);
   assert.match(index, /NEWS_MIRROR_HEALTH_UNAVAILABLE/);
-  assert.match(index, /news review state invariant violation/);
-  assert.match(index, /SET model_candidate=0 WHERE mirror_contract <> \?/);
-  assert.match(index, /SET parsed=0,/);
-  assert.match(index, /body\.withdraw_detail_keys\.length > 20/);
-  assert.match(index, /DELETE FROM news_index WHERE detail_key = \?/);
-  assert.match(index, /DELETE FROM news_details WHERE detail_key = \?/);
+  assert.match(store, /NEWS_PROJECTION_STAGING_TTL_MS/);
+  assert.match(store, /state='SUPERSEDED'/);
+  assert.match(store, /only a staging news generation can be abandoned/);
   assert.match(index, /s-maxage=30/);
-  assert.match(migration, /news_index_published_idx/);
-  assert.match(migration, /news_index_category_published_idx/);
+  assert.match(migration, /news_projection_index_page_idx/);
+  assert.match(migration, /news_projection_index_category_idx/);
 });
 
 test("keeps every D1 migration compatible with remote compound-statement parsing", () => {
@@ -1749,12 +1752,13 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /row\.model_visibility !== "NOT_YET_PARSED"/);
   assert.match(source, /个当前可用事件/);
   const newsIndexRoute = readFileSync(new URL("../app/api/news-index/route.ts", import.meta.url), "utf8");
-  assert.match(newsIndexRoute, /SUPERSEDED_CONTRACT/);
-  assert.match(newsIndexRoute, /CASE WHEN \$\{ACTIVE_NEWS_SQL\} THEN parsed ELSE 0 END/);
-  assert.match(newsIndexRoute, /FROM news_index WHERE \$\{ACTIVE_NEWS_SQL\} GROUP BY review_state/);
-  assert.match(newsIndexRoute, /neutralize_operational_state_for_contract/);
-  assert.match(newsIndexRoute, /SET model_candidate=0 WHERE mirror_contract <> \?/);
-  assert.match(newsIndexRoute, /NEWS_REVIEW_STATE_SQL\[reviewState\]/);
+  const newsStore = readFileSync(new URL("../app/api/_shared/news-projection-store.ts", import.meta.url), "utf8");
+  assert.match(newsStore, /state='SUPERSEDED'/);
+  assert.match(newsStore, /COALESCE\(sum\(parsed\),0\) parsed/);
+  assert.match(newsStore, /FROM news_projection_index WHERE generation_id=\? AND \$\{ACTIVE_NEWS_SQL\}/);
+  assert.match(newsIndexRoute, /action === "prepare"/);
+  assert.match(newsIndexRoute, /action === "activate"/);
+  assert.match(newsStore, /NEWS_REVIEW_STATE_SQL\[options\.reviewState\]/);
   assert.match(source, /evidenceMode === "eligible"/);
   assert.match(source, />当前可用 <b>/);
   assert.match(source, />历史上用过 <b>/);
@@ -3215,14 +3219,17 @@ test("Worker validation manifest owns every production route and direct router",
       assert.ok(route.fixture && route.auth_required && route.cpu_required);
       assert.ok(route.acceptance_samples >= 10);
     }
-    if (["news-content-write", "news-evidence-write", "news-index-write"].includes(route.family)) {
+    if (["news-evidence-write", "news-index-write"].includes(route.family)) {
       assert.ok(Array.isArray(route.scenarios) && route.scenarios.length >= 2);
+    }
+    if (route.family === "news-content-write") {
+      assert.ok(Array.isArray(route.scenarios) && route.scenarios.length >= 1);
     }
   }
   assert.deepEqual(
     manifest.routes.find(route => route.family === "news-index-write").scenarios
       .map(scenario => scenario.name),
-    ["normal", "reset", "withdrawal", "prune", "reconcile", "neutralize"],
+    ["prepare", "stage_index", "activate", "verify", "abandon"],
   );
   assert.deepEqual(
     manifest.routes.find(route => route.family === "news-evidence-write").scenarios
@@ -3232,7 +3239,7 @@ test("Worker validation manifest owns every production route and direct router",
   assert.deepEqual(
     manifest.routes.find(route => route.family === "news-content-write").scenarios
       .map(scenario => scenario.name),
-    ["normal", "reset"],
+    ["stage_details"],
   );
 });
 

@@ -118,7 +118,7 @@ def main() -> int:
     except ProbeFailure as error:
         print(f"OPS_ADMIN_ACCESS_BOUNDARY_FAILED: {error}", file=sys.stderr)
         return 1
-    print("OPS_ADMIN_ACCESS_BOUNDARY_OK " + " ".join(evidence))
+    print("PRODUCTION_ANONYMOUS_ACCESS_RESULT ACCESS_PASS " + " ".join(evidence))
     return 0
 
 

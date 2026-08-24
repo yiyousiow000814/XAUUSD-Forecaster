@@ -2774,6 +2774,104 @@ def test_news_archive_is_60_day_bounded_and_cursor_safe(tmp_path) -> None:
     ) for row in rows}) == 3
 
 
+def test_news_projection_source_freezes_until_exact_snapshot_is_activated(tmp_path) -> None:
+    module = _dashboard_module()
+    module._NEWS_PROJECTION_CACHE.clear()
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+
+    def append(item_id: str) -> None:
+        body = f"complete projection evidence for {item_id} " * 30
+        ledger.append_news_revision({
+            "source": "bea_economic_releases", "source_item_id": item_id,
+            "source_published_time": now, "collector_first_seen_time": now,
+            "fetched_time": now, "headline": item_id, "body": body,
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+            "cluster_id": item_id,
+        })
+
+    append("first")
+    frozen = module._news_projection_source(ledger.connection, None)
+    append("second")
+    retry = module._news_projection_source(ledger.connection, None)
+
+    assert retry is frozen
+    assert frozen.manifest["expected_index_count"] == 1
+    assert sum(map(len, frozen.detail_batches)) == 1
+    assert sum(map(len, frozen.index_batches)) == 1
+
+    replacement = module._news_projection_source(
+        ledger.connection, frozen.manifest["snapshot_id"],
+    )
+    assert replacement.manifest["snapshot_id"] != frozen.manifest["snapshot_id"]
+    assert replacement.manifest["expected_index_count"] == 2
+    assert replacement.manifest["expected_detail_count"] == 2
+    assert replacement.manifest["expected_receipt_digest"] != frozen.manifest[
+        "expected_receipt_digest"
+    ]
+
+
+def test_news_projection_scans_invariant_reader_context_once_across_pages(
+    monkeypatch,
+) -> None:
+    module = _dashboard_module()
+    frozen_context = ("epoch", {("example", "claimable", 1)})
+    context_calls = 0
+    page_calls = 0
+
+    def context(_connection, _now):
+        nonlocal context_calls
+        context_calls += 1
+        return frozen_context
+
+    def page(_connection, after, _limit, *, now, context):
+        nonlocal page_calls
+        page_calls += 1
+        assert _limit == 200
+        assert context is frozen_context
+        item_id = f"item-{page_calls}"
+        return {
+            "items": [{
+                "source": "example", "source_item_id": item_id,
+                "revision_number": 1, "cluster_id": item_id,
+                "collector_first_seen_time": now.isoformat(),
+            }],
+            "withdrawals": [],
+            "next_cursor": "next" if after is None else "done",
+            "has_more": after is None,
+        }
+
+    monkeypatch.setattr(module, "_news_archive_context", context)
+    monkeypatch.setattr(module, "_news_archive_page", page)
+
+    generation = module._build_news_projection_source(object())
+
+    assert context_calls == 1
+    assert page_calls == 2
+    assert generation.manifest["expected_index_count"] == 2
+
+
+def test_news_projection_source_rejects_non_batch_offsets(tmp_path) -> None:
+    module = _dashboard_module()
+    module._NEWS_PROJECTION_CACHE.clear()
+    generation = __import__(
+        "xauusd_forecaster.news_projection", fromlist=["build_news_projection_generation"],
+    ).build_news_projection_generation(
+        [{
+            "source": "example", "source_item_id": str(index), "revision_number": 1,
+            "category": "其他", "cluster_id": str(index),
+            "collector_first_seen_time": "2026-08-24T00:00:00+00:00",
+        } for index in range(10)], [],
+        window_start="2026-06-25T00:00:00+00:00",
+        watermark="2026-08-24T00:00:00+00:00",
+    )
+
+    first = module._news_projection_batch(generation, "detail", 0)
+    assert len(first["items"]) == 8
+    with pytest.raises(ValueError, match="frozen batch boundary"):
+        module._news_projection_batch(generation, "detail", 1)
+
+
 def test_news_archive_discovers_a_bounded_changed_key_page(tmp_path) -> None:
     module = _dashboard_module()
     now = datetime.now(UTC).replace(microsecond=0)

@@ -46,6 +46,73 @@
       "redirect_path": null
     },
     {
+      "path": "/admin",
+      "content_type": "text/html",
+      "body_encoding": "utf-8",
+      "require_html_charset": true,
+      "marker": "OWNER OPERATIONS",
+      "redirect_path": null
+    },
+    {
+      "path": "/admin/retry-jobs",
+      "content_type": "text/html",
+      "body_encoding": "utf-8",
+      "require_html_charset": true,
+      "marker": "PRIVATE OPERATOR QUEUE",
+      "redirect_path": null
+    },
+    {
+      "path": "/admin/ai-usage",
+      "content_type": "text/html",
+      "body_encoding": "utf-8",
+      "require_html_charset": true,
+      "marker": "AI 模型使用状态",
+      "redirect_path": null
+    },
+    {
+      "path": "/admin/assistant",
+      "content_type": "text/html",
+      "body_encoding": "utf-8",
+      "require_html_charset": true,
+      "marker": "ASSISTANT PAUSED",
+      "redirect_path": null
+    },
+    {
+      "path": "/admin/auth-complete",
+      "content_type": "text/html",
+      "body_encoding": "utf-8",
+      "require_html_charset": true,
+      "marker": "管理员认证已完成",
+      "redirect_path": null
+    },
+    {
+      "path": "/assistant",
+      "worker_expected": true,
+      "content_type": "text/html",
+      "body_encoding": "utf-8",
+      "require_html_charset": true,
+      "marker": "ASSISTANT PAUSED",
+      "redirect_path": "/admin/assistant"
+    },
+    {
+      "path": "/retry-jobs",
+      "worker_expected": true,
+      "content_type": "text/html",
+      "body_encoding": "utf-8",
+      "require_html_charset": true,
+      "marker": "PRIVATE OPERATOR QUEUE",
+      "redirect_path": "/admin/retry-jobs"
+    },
+    {
+      "path": "/status",
+      "worker_expected": true,
+      "content_type": "text/html",
+      "body_encoding": "utf-8",
+      "require_html_charset": true,
+      "marker": "系统健康状态",
+      "redirect_path": "/admin/ai-usage"
+    },
+    {
       "path": "/favicon.ico",
       "content_type": "image/svg+xml",
       "body_encoding": null,
@@ -73,7 +140,7 @@
     { "path": "/api/market-history", "method": "POST", "family": "market-history-write", "boundary": "WORKER_WRITE", "criticality": "HEAVY", "strategy": "PRODUCTION_SHAPED_DRY_RUN", "fixture": "market-history-write.json", "cpu_required": true, "auth_required": true, "warmup_samples": 2, "acceptance_samples": 10, "producers": ["scripts/run_dashboard_sync.py", "xauusd_forecaster/dashboard_payloads.py"], "owners": ["web/app/api/market-history/route.ts", "web/app/api/_shared/*", "web/worker/*.ts", "web/vite.config.ts", "web/wrangler.jsonc"] },
     { "path": "/api/learning-history", "method": "POST", "family": "learning-history-write", "boundary": "WORKER_WRITE", "criticality": "HEAVY", "strategy": "PRODUCTION_SHAPED_DRY_RUN", "fixture": "learning-history-write.json", "cpu_required": true, "auth_required": true, "warmup_samples": 2, "acceptance_samples": 10, "producers": ["scripts/run_dashboard_sync.py", "xauusd_forecaster/dashboard_payloads.py"], "owners": ["web/app/api/learning-history/route.ts", "web/app/api/_shared/*", "web/worker/*.ts", "web/vite.config.ts", "web/wrangler.jsonc"] },
     { "path": "/api/news-evidence", "method": "POST", "family": "news-evidence-write", "boundary": "WORKER_WRITE", "criticality": "HEAVY", "strategy": "PRODUCTION_SHAPED_DRY_RUN", "fixture": "news-evidence-stage.json", "cpu_required": true, "auth_required": true, "warmup_samples": 2, "acceptance_samples": 10, "producers": ["scripts/run_dashboard_sync.py", "xauusd_forecaster/dashboard_payloads.py"], "scenarios": [{"name":"prepare","fixture":"news-evidence-prepare.json"},{"name":"stage","fixture":"news-evidence-stage.json"},{"name":"activate","fixture":"news-evidence-activate.json"},{"name":"cleanup","fixture":"news-evidence-cleanup.json"}], "owners": ["web/app/api/news-evidence/route.ts", "web/app/api/_shared/*", "web/worker/*.ts", "web/vite.config.ts", "web/wrangler.jsonc"] },
-    { "path": "/api/news-index", "method": "POST", "family": "news-index-write", "boundary": "WORKER_WRITE", "criticality": "HEAVY", "strategy": "PRODUCTION_SHAPED_DRY_RUN", "fixture": "news-index-normal.json", "cpu_required": true, "auth_required": true, "warmup_samples": 2, "acceptance_samples": 10, "producers": ["scripts/run_dashboard_sync.py", "xauusd_forecaster/dashboard_payloads.py"], "scenarios": [{"name":"normal","fixture":"news-index-normal.json"},{"name":"reset","fixture":"news-index-reset.json"},{"name":"withdrawal","fixture":"news-index-withdrawal.json"},{"name":"prune","fixture":"news-index-prune.json"},{"name":"reconcile","fixture":"news-index-reconcile.json"},{"name":"neutralize","fixture":"news-index-neutralize.json"}], "owners": ["web/app/api/news-index/route.ts", "web/app/api/_shared/*", "web/worker/*.ts", "web/vite.config.ts", "web/wrangler.jsonc"] },
+    { "path": "/api/news-index", "method": "POST", "family": "news-index-write", "boundary": "WORKER_WRITE", "criticality": "HEAVY", "strategy": "PRODUCTION_SHAPED_DRY_RUN", "fixture": "news-index-prepare.json", "cpu_required": true, "auth_required": true, "warmup_samples": 2, "acceptance_samples": 10, "producers": ["scripts/run_dashboard_sync.py", "xauusd_forecaster/news_projection.py"], "scenarios": [{"name":"prepare","fixture":"news-index-prepare.json"},{"name":"stage_index","fixture":"news-index-stage.json"},{"name":"activate","fixture":"news-index-activate.json"},{"name":"verify","fixture":"news-index-verify.json"},{"name":"abandon","fixture":"news-index-abandon.json"}], "owners": ["web/app/api/news-index/route.ts", "web/app/api/_shared/news-projection-store.ts", "web/worker/*.ts", "web/vite.config.ts", "web/wrangler.jsonc"] },
 
     { "path": "/api/admin-status", "method": "GET", "family": "admin-status-read", "boundary": "WORKER_READ", "criticality": "OPTIONAL", "strategy": "CONTRACT_ONLY", "cpu_required": false, "auth_required": true, "owners": ["web/app/api/admin-status/route.ts", "web/app/api/_shared/*", "web/worker/*.ts"] },
     { "path": "/api/assistant-chat", "method": "GET", "family": "assistant-chat-read", "boundary": "WORKER_READ", "criticality": "OPTIONAL", "strategy": "CONTRACT_ONLY", "cpu_required": false, "auth_required": true, "owners": ["web/app/api/assistant-chat/route.ts", "web/app/api/_shared/*", "web/worker/*.ts"] },
@@ -91,7 +158,7 @@
     { "path": "/api/learning-history", "request_query": "?resource=model&limit=100", "method": "GET", "family": "learning-history-read", "boundary": "WORKER_READ", "criticality": "HEAVY", "strategy": "DIRECT_REQUEST", "cpu_required": true, "auth_required": false, "warmup_samples": 2, "acceptance_samples": 10, "owners": ["web/app/api/learning-history/route.ts", "web/app/api/_shared/*", "web/worker/*.ts"] },
     { "path": "/api/market-history", "request_query": "?limit=500", "method": "GET", "family": "market-history-read", "boundary": "WORKER_READ", "criticality": "HEAVY", "strategy": "DIRECT_REQUEST", "cpu_required": true, "auth_required": false, "warmup_samples": 2, "acceptance_samples": 10, "owners": ["web/app/api/market-history/route.ts", "web/app/api/_shared/*", "web/worker/*.ts"] },
     { "path": "/api/news-content", "method": "GET", "family": "news-content-read", "boundary": "WORKER_READ", "criticality": "OPTIONAL", "strategy": "CONTRACT_ONLY", "cpu_required": false, "auth_required": false, "owners": ["web/app/api/news-content/route.ts", "web/app/api/_shared/*", "web/worker/*.ts"] },
-    { "path": "/api/news-content", "method": "POST", "family": "news-content-write", "boundary": "WORKER_WRITE", "criticality": "HEAVY", "strategy": "PRODUCTION_SHAPED_DRY_RUN", "fixture": "news-content-normal.json", "cpu_required": true, "auth_required": true, "warmup_samples": 2, "acceptance_samples": 10, "producers": ["scripts/run_dashboard_sync.py", "xauusd_forecaster/dashboard_payloads.py"], "scenarios": [{"name":"normal","fixture":"news-content-normal.json"},{"name":"reset","fixture":"news-content-reset.json"}], "owners": ["web/app/api/news-content/route.ts", "web/app/api/_shared/*", "web/worker/*.ts"] },
+    { "path": "/api/news-content", "method": "POST", "family": "news-content-write", "boundary": "WORKER_WRITE", "criticality": "HEAVY", "strategy": "PRODUCTION_SHAPED_DRY_RUN", "fixture": "news-content-stage.json", "cpu_required": true, "auth_required": true, "warmup_samples": 2, "acceptance_samples": 10, "producers": ["scripts/run_dashboard_sync.py", "xauusd_forecaster/news_projection.py"], "scenarios": [{"name":"stage_details","fixture":"news-content-stage.json"}], "owners": ["web/app/api/news-content/route.ts", "web/app/api/_shared/news-projection-store.ts", "web/worker/*.ts"] },
     { "path": "/api/news-evidence", "request_query": "?limit=50", "method": "GET", "family": "news-evidence-read", "boundary": "WORKER_READ", "criticality": "HEAVY", "strategy": "DIRECT_REQUEST", "cpu_required": true, "auth_required": false, "warmup_samples": 2, "acceptance_samples": 10, "owners": ["web/app/api/news-evidence/route.ts", "web/app/api/_shared/*", "web/worker/*.ts"] },
     { "path": "/api/news-index", "request_query": "?page=1&limit=50", "method": "GET", "family": "news-index-read", "boundary": "WORKER_READ", "criticality": "HEAVY", "strategy": "DIRECT_REQUEST", "cpu_required": true, "auth_required": false, "warmup_samples": 2, "acceptance_samples": 10, "owners": ["web/app/api/news-index/route.ts", "web/app/api/_shared/*", "web/worker/*.ts"] },
     { "path": "/api/news-questions", "method": "GET", "family": "news-questions-read", "boundary": "WORKER_READ", "criticality": "OPTIONAL", "strategy": "CONTRACT_ONLY", "cpu_required": false, "auth_required": true, "owners": ["web/app/api/news-questions/route.ts", "web/app/api/_shared/*", "web/worker/*.ts"] },

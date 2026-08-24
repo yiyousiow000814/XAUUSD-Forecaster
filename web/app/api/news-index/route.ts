@@ -7,267 +7,148 @@ import {
   authorizeReleaseValidation, isReleaseValidationContext, releaseValidationResponse,
 } from "../_shared/release-validation";
 import {
-  ACTIVE_NEWS_SQL,
-  NEWS_REVIEW_STATE_CASE_SQL,
+  d1CapabilityFailure, D1CapabilityError, requireD1Capabilities,
+} from "../_shared/d1-capabilities";
+import {
+  abandonNewsProjection,
+  activateNewsProjection,
+  NEWS_GENERATION_ID,
+  NEWS_PROJECTION_CONTRACT_VERSION,
+  NewsProjectionProtocolError,
+  prepareNewsProjection,
+  readNewsProjectionHealth,
+  readNewsProjectionPage,
+  stageNewsProjectionBatch,
+  validateNewsProjectionManifest,
+  verifyNewsProjection,
+  type NewsProjectionIndexItem,
+} from "../_shared/news-projection-store";
+import {
   NEWS_REVIEW_STATE_INVARIANT_SQL,
-  NEWS_REVIEW_STATE_SQL,
   NEWS_REVIEW_STATES,
-  newsReviewStateInvariantHolds,
-  newsReviewStateOf,
   parseNewsReviewState,
-  type NewsReviewState,
 } from "../../_lib/news-review-state";
 import { publicNewsRecord } from "../../_lib/public-news-copy";
 
 export const dynamic = "force-dynamic";
 
-type NewsIndexItem = {
-  detail_key?: unknown;
-  category?: unknown;
-  collector_first_seen_time?: unknown;
-  source_published_time?: unknown;
-  cluster_id?: unknown;
-  parsed_at?: unknown;
-  model_visibility?: unknown;
-  impact_expires_at?: unknown;
-  mirror_contract?: unknown;
-  annotation_status?: unknown;
-  [key: string]: unknown;
-};
+const MAX_WRITE_BYTES = 450_000;
 
-const pageRequest = (request: Request) => {
-  const query = new URL(request.url).searchParams;
-  const page = Math.max(1, Number.parseInt(query.get("page") ?? "1", 10) || 1);
-  const pageSize = Math.min(50, Math.max(1, Number.parseInt(query.get("limit") ?? "12", 10) || 12));
-  return {
-    page, pageSize,
-    category: query.get("category")?.trim() ?? "",
-    reviewState: parseNewsReviewState(query.get("review_state")),
-  };
-};
+function failure(reason: unknown) {
+  if (reason instanceof D1CapabilityError) {
+    return NextResponse.json(d1CapabilityFailure(reason), { status: 503 });
+  }
+  if (reason instanceof NewsProjectionProtocolError) {
+    return NextResponse.json({
+      error: reason.message, error_code: reason.code, ...reason.details,
+    }, { status: reason.status });
+  }
+  if (reason instanceof SyntaxError) {
+    return NextResponse.json({ error: "invalid news projection payload" }, { status: 400 });
+  }
+  return NextResponse.json({ error: "新闻档案暂时不可用" }, { status: 503 });
+}
 
 export async function GET(request: Request) {
   const query = new URL(request.url).searchParams;
   const healthCheck = query.get("health_check") === "1";
-  const currentContract = query.get("current_contract")?.trim() ?? "";
-  const expectedContract = query.get("expected_contract")?.trim() ?? "";
-  const { page, pageSize, category, reviewState } = pageRequest(request);
-  if (reviewState === null) {
-    return NextResponse.json({ error: "invalid review state" }, { status: 400 });
-  }
-  // D1 is the source of truth even on the first Preview page. Returning the
-  // immutable build bundle here freezes the visible total at build time while
-  // the bounded archive continues to grow.
+  const binding = env.DB as D1Database | undefined;
+  if (!binding) return NextResponse.json({
+    status: "ERROR", projection_state: "RECOVERY_REQUIRED",
+    verified_complete: false, error_code: "NEWS_MIRROR_HEALTH_UNAVAILABLE",
+  }, { status: 503 });
   try {
-    const binding = env.DB as D1Database | undefined;
-    if (!binding && healthCheck) {
-      return NextResponse.json({
-        status: "ERROR",
-        error_code: "NEWS_MIRROR_HEALTH_UNAVAILABLE",
-        error: "DatabaseUnavailable",
-      }, { status: 503, headers: { "Cache-Control": "no-store, max-age=0" } });
-    }
-    if (binding) {
-      if (healthCheck) {
-        const checks = await binding.prepare(
-          `SELECT 'NEWS_REVIEW_STATE_INVALID' AS code, count(*) AS count
-             FROM news_index
-            WHERE ${ACTIVE_NEWS_SQL} AND NOT ${NEWS_REVIEW_STATE_INVARIANT_SQL}
-           UNION ALL
-           SELECT 'NEWS_DETAIL_MISSING', count(*)
-             FROM news_index i
-            WHERE ${ACTIVE_NEWS_SQL.replaceAll("payload", "i.payload")}
-              AND NOT EXISTS (
-                SELECT 1 FROM news_details d WHERE d.detail_key=i.detail_key
-              )
-           UNION ALL
-           SELECT 'NEWS_PARSED_FLAG_MISMATCH', count(*)
-             FROM news_index
-            WHERE ${ACTIVE_NEWS_SQL}
-              AND parsed <> CASE
-                WHEN json_extract(payload, '$.parsed_at') IS NOT NULL THEN 1 ELSE 0 END
-           UNION ALL
-           SELECT 'NEWS_CANDIDATE_FLAG_MISMATCH', count(*)
-             FROM news_index
-            WHERE ${ACTIVE_NEWS_SQL}
-              AND (?='' OR mirror_contract=?)
-              AND model_candidate <> CASE
-                WHEN json_extract(payload, '$.model_visibility')='MODEL_VISIBLE'
-                THEN 1 ELSE 0 END
-           UNION ALL
-           SELECT 'NEWS_DUPLICATE_ACTIVE_CLUSTER', count(*) FROM (
-             SELECT cluster_id FROM news_index
-              WHERE ${ACTIVE_NEWS_SQL}
-              GROUP BY cluster_id HAVING count(*) > 1
-           )`,
-        ).bind(currentContract, currentContract)
-          .all<{ code: string; count: number }>();
-        const failures = checks.results
-          .map(row => ({ code: row.code, count: Number(row.count ?? 0) }))
-          .filter(row => row.count > 0);
-        if (expectedContract) {
-          const contractRow = await binding.prepare(
-            `SELECT count(*) AS count FROM news_index
-              WHERE ${ACTIVE_NEWS_SQL} AND mirror_contract <> ?`,
-          ).bind(expectedContract).first<{ count: number }>();
-          const count = Number(contractRow?.count ?? 0);
-          if (count > 0) failures.push({ code: "NEWS_MIRROR_CONTRACT_STALE", count });
-        }
-        const violations = failures.reduce((sum, row) => sum + row.count, 0);
-        return NextResponse.json({
-          status: violations ? "ERROR" : "OK",
-          error_code: violations ? "NEWS_MIRROR_STATE_INVARIANT_VIOLATION" : null,
-          violation_count: violations,
-          checks: failures.slice(0, 12),
-        }, { headers: { "Cache-Control": "no-store, max-age=0" } });
-      }
-      const conditions = [ACTIVE_NEWS_SQL, NEWS_REVIEW_STATE_SQL[reviewState]];
-      const bindValues: string[] = [];
-      if (category) {
-        conditions.push("category = ?");
-        bindValues.push(category);
-      }
-      const where = `WHERE ${conditions.join(" AND ")}`;
-      const reviewWhere = `WHERE ${ACTIVE_NEWS_SQL} AND ${NEWS_REVIEW_STATE_SQL[reviewState]}`;
-      const offset = (page - 1) * pageSize;
-      const now = new Date().toISOString();
-      const [rows, totalRow, totalsRow, categoryRows, reviewRows] = await Promise.all([
-        binding.prepare(
-          `SELECT payload FROM news_index ${where}
-           ORDER BY published_time DESC,
-                    collector_first_seen_time DESC, detail_key DESC LIMIT ? OFFSET ?`,
-        ).bind(...bindValues, pageSize, offset).all<{ payload: string }>(),
-        binding.prepare(`SELECT count(*) AS count FROM news_index ${where}`)
-          .bind(...bindValues).first<{ count: number }>(),
-        binding.prepare(
-          `SELECT count(*) AS count,
-                  COALESCE(sum(CASE WHEN ${ACTIVE_NEWS_SQL} THEN parsed ELSE 0 END), 0) AS parsed,
-                  COALESCE(sum(CASE WHEN ${ACTIVE_NEWS_SQL} AND model_candidate=1
-                    AND (impact_expires_at IS NULL OR impact_expires_at='' OR impact_expires_at>?)
-                    THEN 1 ELSE 0 END), 0) AS model_candidate
-           FROM news_index`,
-        ).bind(now).first<{ count: number; parsed: number; model_candidate: number }>(),
-        binding.prepare(
-          `SELECT category, count(*) AS count FROM news_index ${reviewWhere}
-           GROUP BY category`,
-        ).all<{ category: string; count: number }>(),
-        binding.prepare(
-          `SELECT ${NEWS_REVIEW_STATE_CASE_SQL} AS review_state, count(*) AS count
-           FROM news_index WHERE ${ACTIVE_NEWS_SQL} GROUP BY review_state`,
-        ).all<{ review_state: NewsReviewState; count: number }>(),
-      ]);
-      const payload = {
-        items: rows.results.map(row => {
-          const item = JSON.parse(row.payload) as NewsIndexItem;
-          if (
-            item.model_visibility === "MODEL_VISIBLE"
-            && typeof item.impact_expires_at === "string"
-            && item.impact_expires_at <= now
-          ) {
-            item.model_visibility = "IMPACT_EXPIRED";
-            item.impact_status = "EXPIRED";
-          }
-          return publicNewsRecord(item) as NewsIndexItem;
-        }),
-        total: totalRow?.count ?? 0,
-        all_total: totalsRow?.count ?? 0,
-        readable_total: totalsRow?.count ?? 0,
-        parsed_total: totalsRow?.parsed ?? 0,
-        model_candidate_total: totalsRow?.model_candidate ?? 0,
-        category_counts: Object.fromEntries(
-          categoryRows.results.map(row => [row.category, row.count]),
-        ),
-        review_state: reviewState,
-        review_state_counts: Object.fromEntries(
-          NEWS_REVIEW_STATES.map(state => [
-            state,
-            reviewRows.results.find(row => row.review_state === state)?.count ?? 0,
-          ]),
-        ),
-        page,
-        page_size: pageSize,
-        window_days: 60,
-        totals_scope: "D1_ARCHIVE",
-      };
-      if (previewBundle) return previewJson(payload, 200, "read-only-d1-archive");
-      return NextResponse.json(payload, {
-        headers: { "Cache-Control": "public, max-age=15, s-maxage=30, stale-while-revalidate=120" },
-      });
-    }
-  } catch (error) {
+    await requireD1Capabilities(binding, ["news_projection_generation"]);
     if (healthCheck) {
-      return NextResponse.json({
-        status: "ERROR",
-        error_code: "NEWS_MIRROR_HEALTH_UNAVAILABLE",
-        error: error instanceof Error ? error.name : "UnknownError",
-      }, { status: 503, headers: { "Cache-Control": "no-store, max-age=0" } });
-    }
-    // Fall through to the relay when D1 is temporarily unavailable.
-  }
-
-  // A Preview is allowed to read the shared archive, but it must never replace
-  // a failed archive page with the relay's tiny recent-news window. That would
-  // turn a transient D1 error into a convincing but false empty result.
-  if (previewBundle) {
-    return previewJson(
-      { error: "新闻档案暂时不可用，请稍后重试" },
-      503,
-      "current-read-unavailable",
-    );
-  }
-
-  const relay = process.env.STATUS_RELAY_URL;
-  if (relay) {
-    try {
-      const response = await fetch(relay, {
-        cache: "no-store",
-        headers: { Accept: "application/json" },
-        signal: AbortSignal.timeout(4_000),
+      const payload = await readNewsProjectionHealth(binding);
+      return NextResponse.json(payload, {
+        status: payload.status === "OK" ? 200 : 503,
+        headers: { "Cache-Control": "no-store, max-age=0" },
       });
-      const payload = await response.json() as { recent_news?: NewsIndexItem[] };
-      const all = [...(payload.recent_news ?? [])]
-        .map(item => publicNewsRecord(item) as NewsIndexItem)
-        .sort((left, right) => {
-          const leftTime = String(left.source_published_time ?? left.collector_first_seen_time ?? "");
-          const rightTime = String(right.source_published_time ?? right.collector_first_seen_time ?? "");
-          return rightTime.localeCompare(leftTime);
-        });
-      const stateItems = all.filter(row => newsReviewStateOf(row) === reviewState);
-      const categoryCounts = Object.fromEntries(
-        [...new Set(stateItems.map(row => String(row.category ?? "其他")))].map(name => [
-          name, stateItems.filter(row => String(row.category ?? "其他") === name).length,
-        ]),
-      );
-      const filtered = category
-        ? stateItems.filter(row => row.category === category)
-        : stateItems;
-      const parsedTotal = all.filter(row => typeof row.parsed_at === "string" && row.parsed_at.length > 0).length;
-      const modelCandidateTotal = all.filter(row => row.model_visibility === "MODEL_VISIBLE").length;
-      const offset = (page - 1) * pageSize;
-      return NextResponse.json({
-        items: filtered.slice(offset, offset + pageSize),
-        total: filtered.length,
-        all_total: all.length,
-        readable_total: all.length,
-        parsed_total: parsedTotal,
-        model_candidate_total: modelCandidateTotal,
-        category_counts: categoryCounts,
-        review_state: reviewState,
-        review_state_counts: Object.fromEntries(
-          NEWS_REVIEW_STATES.map(state => [
-            state, all.filter(row => newsReviewStateOf(row) === state).length,
-          ]),
-        ),
-        page,
-        page_size: pageSize,
-        totals_scope: "RECENT_WINDOW",
-      }, { status: response.status, headers: { "Cache-Control": "no-store, max-age=0" } });
-    } catch {
-      // Return a single public-facing error below.
     }
+    const reviewState = parseNewsReviewState(query.get("review_state"));
+    if (reviewState === null) {
+      return NextResponse.json({ error: "invalid review state" }, { status: 400 });
+    }
+    const page = Math.max(1, Number.parseInt(query.get("page") ?? "1", 10) || 1);
+    const pageSize = Math.min(
+      50, Math.max(1, Number.parseInt(query.get("limit") ?? "12", 10) || 12),
+    );
+    const expectedGenerationId = query.get("generation")?.trim() ?? "";
+    if (expectedGenerationId && !NEWS_GENERATION_ID.test(expectedGenerationId)) {
+      return NextResponse.json({ error: "invalid news generation" }, { status: 400 });
+    }
+    const payload = await readNewsProjectionPage(binding, {
+      page, pageSize, reviewState, category: query.get("category")?.trim() ?? "",
+      expectedGenerationId: expectedGenerationId || undefined,
+    });
+    const now = new Date().toISOString();
+    payload.items = payload.items.map(raw => {
+      const item = { ...raw };
+      if (
+        item.model_visibility === "MODEL_VISIBLE"
+        && typeof item.impact_expires_at === "string"
+        && item.impact_expires_at <= now
+      ) {
+        item.model_visibility = "IMPACT_EXPIRED";
+        item.impact_status = "EXPIRED";
+      }
+      return publicNewsRecord(item) as NewsProjectionIndexItem;
+    });
+    payload.review_state_counts = Object.fromEntries(NEWS_REVIEW_STATES.map(state => [
+      state, payload.review_state_counts[state] ?? 0,
+    ]));
+    return previewBundle ? previewJson(payload, 200, "read-only-current-generation")
+      : NextResponse.json(payload, {
+        headers: {
+          "Cache-Control": "public, max-age=15, s-maxage=30, stale-while-revalidate=120",
+        },
+      });
+  } catch (reason) {
+    return failure(reason);
   }
+}
 
-  return NextResponse.json({ error: "等待公开新闻索引" }, { status: 503 });
+function releaseIndexValidation(
+  checked: {
+    action: string; generation_id: string; snapshot_id: string;
+    contract_version: string; window_start: string; watermark: string;
+    expected_index_count: number; expected_detail_count: number;
+    withdrawal_count: number; source_digest: string; expected_receipt_digest: string;
+    batch_offset: number; item_total: number; item_valid: number; review_valid: number;
+  } | null,
+) {
+  if (!checked || !NEWS_GENERATION_ID.test(String(checked.generation_id ?? ""))) return null;
+  if (checked.action === "prepare") {
+    try {
+      validateNewsProjectionManifest({
+        generation_id: checked.generation_id, snapshot_id: checked.snapshot_id,
+        contract_version: checked.contract_version, window_start: checked.window_start,
+        watermark: checked.watermark, expected_index_count: checked.expected_index_count,
+        expected_detail_count: checked.expected_detail_count,
+        withdrawal_count: checked.withdrawal_count, source_digest: checked.source_digest,
+        expected_receipt_digest: checked.expected_receipt_digest,
+      });
+      return { manifest: true, prepared_statements: 5 };
+    } catch { return null; }
+  }
+  if (checked.action === "stage_index") {
+    const total = Number(checked.item_total ?? 0);
+    if (
+      !Number.isSafeInteger(checked.batch_offset) || checked.batch_offset < 0
+      || total < 1 || total > 20 || Number(checked.item_valid) !== total
+      || Number(checked.review_valid) !== total
+    ) return null;
+    return { items: total, prepared_statements: total + 2 };
+  }
+  if (["activate", "verify", "abandon"].includes(checked.action)) {
+    return {
+      generation: checked.generation_id,
+      prepared_statements: checked.action === "activate" ? 3
+        : checked.action === "verify" ? 2 : 4,
+    };
+  }
+  return null;
 }
 
 export async function POST(request: Request) {
@@ -277,262 +158,91 @@ export async function POST(request: Request) {
     request, "news-index-write", isIngestAuthorized,
   );
   if (validation instanceof Response) return validation;
-  const bounded = await readBoundedBody(request, 450_000);
+  const bounded = await readBoundedBody(request, MAX_WRITE_BYTES);
   if (bounded.status === "too_large") {
     return NextResponse.json({ error: "payload too large" }, { status: 413 });
   }
-  const serialized = bounded.serialized;
   const binding = env.DB as D1Database | undefined;
   if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   try {
+    await requireD1Capabilities(binding, ["news_projection_generation"]);
     if (isReleaseValidationContext(validation)) {
       const checked = await binding.prepare(
-        `WITH root(doc) AS (
-           SELECT ? WHERE json_valid(?)
-         ), batch(payload) AS (
-           SELECT value FROM root,json_each(json_extract(doc,'$.items'))
-         ), withdrawals(detail_key) AS (
-           SELECT value FROM root,json_each(json_extract(doc,'$.withdraw_detail_keys'))
-         )
-         SELECT
-            CASE
-              WHEN json_type(doc,'$.reset')='true' THEN 'reset'
-              WHEN json_type(doc,'$.withdraw_detail_keys') IS NOT NULL
-                THEN 'withdrawal'
-             WHEN json_type(doc,'$.prune_before')='text'
-               OR json_type(doc,'$.reconcile_contract')='text' THEN 'maintenance'
-             WHEN json_type(doc,'$.neutralize_operational_state_for_contract')='text'
-               THEN 'neutralize'
-             WHEN json_type(doc,'$.items')='array' THEN 'items'
-             ELSE 'invalid'
-           END kind,
-           json_extract(doc,'$.prune_before') prune_before,
-           json_type(doc,'$.prune_before')='text' has_prune,
-           json_type(doc,'$.reconcile_contract')='text' has_reconcile,
-            json_extract(doc,'$.neutralize_operational_state_for_contract') contract,
-            json_type(doc,'$.withdraw_detail_keys') withdrawal_type,
-           (SELECT count(*) FROM batch) item_total,
-            (SELECT count(*) FROM batch WHERE
-              json_type(payload)='object'
-              AND length(json_extract(payload,'$.detail_key'))=64
-              AND json_extract(payload,'$.detail_key') NOT GLOB '*[^0-9a-f]*'
-              AND json_type(payload,'$.category')='text'
-              AND json_type(payload,'$.collector_first_seen_time')='text'
-              AND json_type(payload,'$.cluster_id')='text'
-              AND json_type(payload,'$.mirror_contract')='text') item_valid,
-            (SELECT count(*) FROM batch WHERE
-              ${NEWS_REVIEW_STATE_INVARIANT_SQL}) review_valid,
-           (SELECT count(*) FROM withdrawals) withdrawal_total,
-           (SELECT count(*) FROM withdrawals WHERE
-             typeof(detail_key)='text' AND length(detail_key)=64
-             AND detail_key NOT GLOB '*[^0-9a-f]*') withdrawal_valid
-         FROM root`,
-      ).bind(serialized, serialized).first<{
-        kind: string; prune_before: string | null; has_prune: number; has_reconcile: number;
-        contract: string | null; item_total: number; item_valid: number;
-        review_valid: number;
-        withdrawal_type: string | null;
-        withdrawal_total: number; withdrawal_valid: number;
-      }>();
-      if (!checked) {
-        return NextResponse.json({ error: "invalid news index payload" }, { status: 400 });
-      }
-      const itemTotal = Number(checked.item_total ?? 0);
-      const itemValid = Number(checked.item_valid ?? 0);
-      const reviewValid = Number(checked.review_valid ?? 0);
-      const withdrawalTotal = Number(checked.withdrawal_total ?? 0);
-      const withdrawalValid = Number(checked.withdrawal_valid ?? 0);
-      let work: Record<string, unknown>;
-      let mutationBoundary: string;
-      if (checked.kind === "reset") {
-        work = { reset: true }; mutationBoundary = "news-index-reset";
-      } else if (checked.kind === "withdrawal"
-          && checked.withdrawal_type === "array"
-          && withdrawalTotal <= 20 && withdrawalValid === withdrawalTotal) {
-        work = { withdrawals: withdrawalTotal, prepared_statements: withdrawalTotal * 2 };
-        mutationBoundary = "news-withdrawal-batch";
-      } else if (checked.kind === "maintenance"
-          && (!checked.has_prune || !Number.isNaN(Date.parse(String(checked.prune_before))))) {
-        work = { prepared_statements: Number(checked.has_prune) + Number(checked.has_reconcile) + 1 };
-        mutationBoundary = "news-prune-reconcile-batch";
-      } else if (checked.kind === "neutralize"
-          && /^[a-z0-9][a-z0-9._-]{0,127}$/.test(String(checked.contract))) {
-        work = { contract: checked.contract, prepared_statements: 2 };
-        mutationBoundary = "news-contract-neutralization-batch";
-      } else if (checked.kind === "items"
-          && itemTotal <= 20 && itemValid === itemTotal
-          && reviewValid !== itemTotal) {
-        return NextResponse.json({
-          error: "news review state invariant violation",
-          error_code: "NEWS_MIRROR_STATE_INVARIANT_VIOLATION",
-          violation_count: itemTotal - reviewValid,
-          checks: [{
-            code: "NEWS_REVIEW_STATE_INVALID", count: itemTotal - reviewValid,
-          }],
-        }, { status: 409 });
-      } else if (checked.kind === "items"
-          && itemTotal <= 20 && itemValid === itemTotal) {
-        work = { items: itemTotal, prepared_statements: itemTotal * 2 };
-        mutationBoundary = "news-index-upsert-batch";
-      } else {
-        return NextResponse.json({ error: "invalid news index payload" }, { status: 400 });
+        `WITH root(doc) AS (SELECT ? WHERE json_valid(?)),
+              batch(payload) AS (
+                SELECT value FROM root,json_each(json_extract(doc,'$.items'))
+              )
+         SELECT json_extract(doc,'$.action') action,
+                json_extract(doc,'$.generation_id') generation_id,
+                json_extract(doc,'$.manifest.snapshot_id') snapshot_id,
+                json_extract(doc,'$.manifest.contract_version') contract_version,
+                json_extract(doc,'$.manifest.window_start') window_start,
+                json_extract(doc,'$.manifest.watermark') watermark,
+                json_extract(doc,'$.manifest.expected_index_count') expected_index_count,
+                json_extract(doc,'$.manifest.expected_detail_count') expected_detail_count,
+                json_extract(doc,'$.manifest.withdrawal_count') withdrawal_count,
+                json_extract(doc,'$.manifest.source_digest') source_digest,
+                json_extract(doc,'$.manifest.expected_receipt_digest') expected_receipt_digest,
+                json_extract(doc,'$.offset') batch_offset,
+                (SELECT count(*) FROM batch) item_total,
+                (SELECT count(*) FROM batch WHERE
+                  json_type(payload)='object'
+                  AND json_type(payload,'$.detail_key')='text'
+                  AND length(json_extract(payload,'$.detail_key'))=64
+                  AND json_extract(payload,'$.detail_key') NOT GLOB '*[^0-9a-f]*'
+                  AND json_type(payload,'$.category')='text'
+                  AND json_type(payload,'$.collector_first_seen_time')='text'
+                  AND json_type(payload,'$.cluster_id')='text'
+                  AND json_type(payload,'$.mirror_contract')='text') item_valid,
+                (SELECT count(*) FROM batch WHERE
+                  ${NEWS_REVIEW_STATE_INVARIANT_SQL}) review_valid
+           FROM root`,
+      ).bind(bounded.serialized, bounded.serialized).first<Parameters<typeof releaseIndexValidation>[0]>();
+      const work = releaseIndexValidation(checked);
+      if (!work) {
+        return NextResponse.json({ error: "invalid news projection payload" }, { status: 400 });
       }
       return releaseValidationResponse(validation, {
         body: "bounded-read", json: "d1-json1+json-each", transformed: work,
-        mutation_boundary: mutationBoundary,
+        mutation_boundary: `news-generation-${checked?.action}`,
       });
     }
-    const body = JSON.parse(serialized) as {
-      items?: NewsIndexItem[]; reset?: unknown; prune_before?: unknown;
-      reconcile_contract?: unknown; withdraw_detail_keys?: unknown;
-      neutralize_operational_state_for_contract?: unknown;
+    const body = JSON.parse(bounded.serialized) as {
+      action?: unknown; generation_id?: unknown; manifest?: unknown;
+      offset?: unknown; items?: unknown;
     };
-    if (body.reset === true) {
-      await binding.prepare("DELETE FROM news_index").run();
-      return NextResponse.json({ status: "OK", reset: true });
+    if (body.action === "prepare") {
+      const manifest = validateNewsProjectionManifest(body.manifest);
+      if (body.generation_id !== manifest.generation_id) {
+        return NextResponse.json({ error: "generation identity mismatch" }, { status: 400 });
+      }
+      return NextResponse.json(await prepareNewsProjection(binding, manifest));
     }
-    if (body.withdraw_detail_keys !== undefined) {
-      if (
-        !Array.isArray(body.withdraw_detail_keys)
-        || body.withdraw_detail_keys.length > 20
-        || body.withdraw_detail_keys.some(
-          key => typeof key !== "string" || !/^[a-f0-9]{64}$/.test(key),
-        )
-      ) {
-        return NextResponse.json({ error: "invalid news withdrawal batch" }, { status: 400 });
-      }
-      const keys = body.withdraw_detail_keys as string[];
-      const statements = keys.flatMap(key => [
-        binding.prepare("DELETE FROM news_index WHERE detail_key = ?").bind(key),
-        binding.prepare("DELETE FROM news_details WHERE detail_key = ?").bind(key),
-      ]);
-      const results = statements.length ? await binding.batch(statements) : [];
-      return NextResponse.json({
-        status: "OK",
-        withdrawn: results.reduce(
-          (sum, result) => sum + (result.meta.changes ?? 0), 0,
-        ),
-      });
+    if (typeof body.generation_id !== "string") {
+      return NextResponse.json({ error: "invalid news generation" }, { status: 400 });
     }
-    if (typeof body.prune_before === "string" || typeof body.reconcile_contract === "string") {
-      const statements: D1PreparedStatement[] = [];
-      if (typeof body.prune_before === "string") {
-        if (Number.isNaN(Date.parse(body.prune_before))) {
-          return NextResponse.json({ error: "invalid prune cutoff" }, { status: 400 });
-        }
-        statements.push(
-          binding.prepare("DELETE FROM news_index WHERE published_time < ?").bind(body.prune_before),
-        );
+    if (body.action === "stage_index") {
+      if (!Number.isSafeInteger(body.offset) || !Array.isArray(body.items)) {
+        return NextResponse.json({ error: "invalid news index batch" }, { status: 400 });
       }
-      if (typeof body.reconcile_contract === "string") {
-        statements.push(
-          binding.prepare("DELETE FROM news_index WHERE mirror_contract <> ?")
-            .bind(body.reconcile_contract),
-        );
-      }
-      statements.push(binding.prepare(
-        "DELETE FROM news_details WHERE NOT EXISTS (SELECT 1 FROM news_index WHERE news_index.detail_key = news_details.detail_key)",
+      return NextResponse.json(await stageNewsProjectionBatch(
+        binding, "index", body.generation_id, Number(body.offset),
+        body.items as NewsProjectionIndexItem[],
       ));
-      const results = await binding.batch(statements);
-      return NextResponse.json({
-        status: "OK", removed: results.reduce((sum, result) => sum + (result.meta.changes ?? 0), 0),
-      });
     }
-    if (typeof body.neutralize_operational_state_for_contract === "string") {
-      if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(body.neutralize_operational_state_for_contract)) {
-        return NextResponse.json({ error: "invalid mirror contract" }, { status: 400 });
-      }
-      const contract = body.neutralize_operational_state_for_contract;
-      const statements = [
-        binding.prepare(
-          `UPDATE news_index SET model_candidate=0 WHERE mirror_contract <> ?`,
-        ).bind(contract),
-        binding.prepare(
-          `UPDATE news_index
-         SET parsed=0,
-             payload=json_set(
-               payload,
-               '$.parsed_at', NULL,
-               '$.model_visibility', 'NOT_YET_PARSED',
-               '$.annotation_status', 'SUPERSEDED_CONTRACT',
-               '$.annotation_reason_code', 'CONTRACT_HANDOVER_PENDING',
-               '$.annotation_reason', '旧语义契约已退出当前视图',
-               '$.impact_status', 'SUPERSEDED_CONTRACT'
-             )
-         WHERE mirror_contract <> ?
-           AND NOT ${NEWS_REVIEW_STATE_INVARIANT_SQL}`,
-        ).bind(contract),
-      ];
-      const results = await binding.batch(statements);
-      return NextResponse.json({
-        status: "OK",
-        candidates_neutralized: results[0]?.meta.changes ?? 0,
-        operational_states_neutralized: results[1]?.meta.changes ?? 0,
-      });
+    if (body.action === "activate") {
+      return NextResponse.json(await activateNewsProjection(binding, body.generation_id));
     }
-    if (!Array.isArray(body.items) || body.items.length > 20) {
-      return NextResponse.json({ error: "invalid news index batch" }, { status: 400 });
+    if (body.action === "verify") {
+      return NextResponse.json(await verifyNewsProjection(binding, body.generation_id));
     }
-    const invalidReviewStateCount = body.items.filter(
-      item => !newsReviewStateInvariantHolds(item),
-    ).length;
-    if (invalidReviewStateCount > 0) {
-      return NextResponse.json({
-        error: "news review state invariant violation",
-        error_code: "NEWS_MIRROR_STATE_INVARIANT_VIOLATION",
-        violation_count: invalidReviewStateCount,
-        checks: [{
-          code: "NEWS_REVIEW_STATE_INVALID",
-          count: invalidReviewStateCount,
-        }],
-      }, { status: 409 });
+    if (body.action === "abandon") {
+      return NextResponse.json(await abandonNewsProjection(binding, body.generation_id));
     }
-    for (const item of body.items) {
-      if (
-        typeof item.detail_key !== "string"
-        || !/^[a-f0-9]{64}$/.test(item.detail_key)
-        || typeof item.category !== "string"
-        || typeof item.collector_first_seen_time !== "string"
-        || typeof item.cluster_id !== "string"
-        || typeof item.mirror_contract !== "string"
-      ) throw new Error("invalid news index item");
-    }
-    const now = new Date().toISOString();
-    const statements = body.items.flatMap(item => {
-      const publishedTime = typeof item.source_published_time === "string"
-        ? item.source_published_time : item.collector_first_seen_time;
-      return [binding.prepare(
-        "DELETE FROM news_index WHERE cluster_id = ? AND detail_key <> ?",
-      ).bind(item.cluster_id, item.detail_key), binding.prepare(
-        `INSERT INTO news_index
-          (detail_key, category, cluster_id, published_time, collector_first_seen_time,
-           parsed, model_candidate, impact_expires_at, mirror_contract, payload, received_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(detail_key) DO UPDATE SET
-           category=excluded.category,
-           cluster_id=excluded.cluster_id,
-           published_time=excluded.published_time,
-           collector_first_seen_time=excluded.collector_first_seen_time,
-           parsed=excluded.parsed,
-           model_candidate=excluded.model_candidate,
-           impact_expires_at=excluded.impact_expires_at,
-           mirror_contract=excluded.mirror_contract,
-           payload=excluded.payload,
-           received_at=excluded.received_at`,
-      ).bind(
-        item.detail_key, item.category, item.cluster_id, publishedTime,
-        item.collector_first_seen_time, typeof item.parsed_at === "string" ? 1 : 0,
-        item.model_visibility === "MODEL_VISIBLE" ? 1 : 0,
-        typeof item.impact_expires_at === "string" ? item.impact_expires_at : null,
-        item.mirror_contract, JSON.stringify(item), now,
-      )];
-    });
-    if (statements.length) await binding.batch(statements);
-    return NextResponse.json({ status: "OK", received: body.items.length });
+    return NextResponse.json({ error: "invalid news projection action" }, { status: 400 });
   } catch (reason) {
-    return NextResponse.json(
-      { error: reason instanceof Error ? reason.message : "invalid news index item" },
-      { status: 400 },
-    );
+    return failure(reason);
   }
 }
+
+export { NEWS_PROJECTION_CONTRACT_VERSION };

@@ -255,6 +255,7 @@ type NewsSearchResponse = {
   };
   source_mode: "D1_ARCHIVE" | "READ_ONLY_D1_ARCHIVE" | "IMMUTABLE_PREVIEW_SNAPSHOT" | "NOT_QUERIED";
   archive_complete: boolean | null;
+  generation_id: string | null;
 };
 
 const emptyNewsSearch = (): NewsSearchResponse => ({
@@ -263,7 +264,7 @@ const emptyNewsSearch = (): NewsSearchResponse => ({
     published_from: null, published_to: null, received_from: null, received_to: null,
     evidence_id: null, source: null, category: null,
   },
-  source_mode: "NOT_QUERIED", archive_complete: null,
+  source_mode: "NOT_QUERIED", archive_complete: null, generation_id: null,
 });
 
 type Payload = {
@@ -469,6 +470,13 @@ type NewsIndexResponse = {
   page_size: number;
   window_days?: number;
   totals_scope?: NewsTotalsScope;
+  projection_state?: "CURRENT" | "RECOVERY_REQUIRED" | "REPLAYING" | "VERIFYING" | "DEGRADED";
+  verified_complete?: boolean;
+  generation_id?: string;
+  snapshot_id?: string;
+  source_digest?: string;
+  receipt_digest?: string;
+  source_receipt_digest?: string;
 };
 
 type NewsDetailResponse = { payload: Partial<News> };
@@ -922,7 +930,9 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
   const [graphStartTab, setGraphStartTab] = useState<"curve" | "execution">("curve");
   const fullStatusReadyRef = useRef(Boolean(cachedStatus && !cachedStatus.preview_status_summary));
   const fullLearningReadyRef = useRef(Boolean(cachedLearning && !cachedLearning.learning_preview_summary));
-  const fullNewsIndexReadyRef = useRef(cachedNewsIndex?.totals_scope === "D1_ARCHIVE");
+  const fullNewsIndexReadyRef = useRef(Boolean(
+    cachedNewsIndex && authoritativeNewsTotals(cachedNewsIndex),
+  ));
   const learningDataAvailableRef = useRef(Boolean(cachedLearning));
   const learningFailureCountRef = useRef(0);
   const [summaryCadence, setSummaryCadence] = useState<EvaluationCadence>("EVERY_5M");
@@ -1063,12 +1073,29 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
       page: String(newsPage), limit: String(NEWS_PER_PAGE),
       review_state: newsReviewState,
     });
+    if (newsPage > 1 && newsIndex.generation_id) {
+      query.set("generation", newsIndex.generation_id);
+    }
     if (newsCategory !== "全部") query.set("category", newsCategory);
-    const body = await loadDashboardResource<NewsIndexResponse>(`/api/news-index?${query}`, { force });
+    let body: NewsIndexResponse;
+    try {
+      body = await loadDashboardResource<NewsIndexResponse>(`/api/news-index?${query}`, { force });
+    } catch (reason) {
+      if (
+        !(reason instanceof DashboardResourceError)
+        || reason.code !== "NEWS_PROJECTION_GENERATION_CHANGED" || newsPage <= 1
+      ) throw reason;
+      query.set("page", "1");
+      query.delete("generation");
+      body = await loadDashboardResource<NewsIndexResponse>(
+        `/api/news-index?${query}`, { force: true },
+      );
+      setNewsPage(1);
+    }
     setNewsIndex(body);
-    if (body.totals_scope === "D1_ARCHIVE") fullNewsIndexReadyRef.current = true;
+    if (authoritativeNewsTotals(body)) fullNewsIndexReadyRef.current = true;
     setNewsError(null);
-  }, [newsCategory, newsPage, newsReviewState]);
+  }, [newsCategory, newsIndex.generation_id, newsPage, newsReviewState]);
 
   useEffect(() => {
     return scheduleDashboardRefresh(
@@ -1188,6 +1215,9 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     setSearchBusy(true);
     try {
       const params = new URLSearchParams({ page: String(page), limit: "10" });
+      if (page > 1 && applied?.generation_id) {
+        params.set("generation", applied.generation_id);
+      }
       if (query) params.set("q", query);
       if (appliedFilters) {
         for (const [name, value] of Object.entries(appliedFilters)) {
@@ -1197,7 +1227,19 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         if (searchDateFrom) params.set(`${searchTimeField}_from`, searchDateFrom);
         if (searchDateTo) params.set(`${searchTimeField}_to`, searchDateTo);
       }
-      setSearchResults(await loadDashboardResource<NewsSearchResponse>(`/api/news-search?${params}`, { force: true }));
+      try {
+        setSearchResults(await loadDashboardResource<NewsSearchResponse>(`/api/news-search?${params}`, { force: true }));
+      } catch (reason) {
+        if (
+          !(reason instanceof DashboardResourceError)
+          || reason.code !== "NEWS_PROJECTION_GENERATION_CHANGED" || page <= 1
+        ) throw reason;
+        params.set("page", "1");
+        params.delete("generation");
+        setSearchResults(await loadDashboardResource<NewsSearchResponse>(
+          `/api/news-search?${params}`, { force: true },
+        ));
+      }
       setSearchError(null);
     } catch (reason) {
       setSearchError(reason instanceof Error ? reason.message : "新闻搜索暂不可用");
@@ -1213,6 +1255,12 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
   }, [payload]);
 
   const archiveTotals = authoritativeNewsTotals(newsIndex);
+  const newsProjectionNotice = ({
+    REPLAYING: ["新闻档案正在重播", "当前仍保留上一版可读资料；新代次完成精确核对前，不宣称近60天总量。"],
+    VERIFYING: ["新闻档案正在核对", "索引、详情与来源回执正在做最终一致性检查。"],
+    RECOVERY_REQUIRED: ["新闻档案需要恢复", "完整性证据不一致，系统已停止发布近60天总量。"],
+    DEGRADED: ["新闻档案暂时降级", "当前资料不足以证明完整近60天范围。"],
+  } as const)[newsIndex.projection_state as "REPLAYING" | "VERIFYING" | "RECOVERY_REQUIRED" | "DEGRADED"];
   const newsPhase: CurrentDataPhase = archiveTotals
     ? "ready" : newsError ? "error" : "loading";
   const branchSnapshotStatusPaths = payload?.preview?.branch_snapshot?.status_paths;
@@ -1527,6 +1575,10 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         {searchResults.total > searchResults.page_size && <nav className="search-pages" aria-label="搜索结果分页"><button type="button" aria-label="上一页搜索结果" disabled={searchResults.page <= 1 || searchBusy} onClick={() => void runNewsSearch(searchResults.page - 1, searchResults)}>←</button><span>{formatExactCount(searchResults.page)} / {formatExactCount(Math.ceil(searchResults.total / searchResults.page_size))}</span><button type="button" aria-label="下一页搜索结果" disabled={searchResults.page >= Math.ceil(searchResults.total / searchResults.page_size) || searchBusy} onClick={() => void runNewsSearch(searchResults.page + 1, searchResults)}>→</button></nav>}
       </section>}
       {view === "news" && <>
+        {!archiveTotals && newsProjectionNotice && <div
+          className={`current-data-notice ${newsIndex.projection_state === "RECOVERY_REQUIRED" || newsIndex.projection_state === "DEGRADED" ? "is-error" : "is-loading"}`}
+          role={newsIndex.projection_state === "RECOVERY_REQUIRED" || newsIndex.projection_state === "DEGRADED" ? "alert" : "status"}
+        ><b>{newsProjectionNotice[0]}</b><span>{newsProjectionNotice[1]}</span></div>}
         <section className="annotation-queue" aria-label="新闻处理进度">
           <span><b><CountValue value={readableNewsTotal} /></b> {readableNewsTotal === null ? "正在读取近60天新闻总量" : "条近60天可读新闻"}</span>
           <span><b><CountValue value={parsedNewsTotal} /></b> 条语义复核完成</span>

@@ -224,6 +224,29 @@ python scripts/check_public_health.py
 python scripts/check_admin_access_boundary.py
 ```
 
+These commands together produce `PRODUCTION_ANONYMOUS_ACCESS_RESULT`. Candidate
+validation produces the separate `VERSION_HOST_RESULT` and reads every page in
+`web/acceptance-inventory.json`; a new or deleted `page.tsx` fails the
+bidirectional inventory test and cannot silently escape Candidate acceptance.
+Do not treat a Candidate Admin shell `200` as authenticated acceptance.
+
+`PRODUCTION_AUTHENTICATED_ACCESS_RESULT` remains a human-session acceptance
+item because the supported Google/Cloudflare Access login, non-owner denial,
+popup behavior, logout, and reauthentication require a real browser identity.
+Record it separately from the two automated channels. It is complete only when
+all authenticated page markers and `/admin/api/*` contracts in
+`web/acceptance-inventory.json` pass in one reused owner session, a non-owner is
+denied, both Access logout endpoints are exercised, and the next `/admin`
+navigation requires authentication. If any step is not performed, record
+`MANUAL_REQUIRED` or `FAILED`, never PASS.
+
+A Cloudflare Access Service Token may be used for a future machine endpoint only
+when that endpoint's policy explicitly authorizes service-token identity via
+`CF-Access-Client-Id` and `CF-Access-Client-Secret`. The current human Admin
+contract does not make a service token equivalent to the owner browser session,
+so it cannot satisfy `PRODUCTION_AUTHENTICATED_ACCESS_RESULT` and must not be
+added as a test bypass.
+
 The first command covers only genuinely public surfaces. The second requires
 every human Admin path, including `/admin/auth-complete` and
 `/admin/api/session`, to redirect to Cloudflare Access while public surfaces

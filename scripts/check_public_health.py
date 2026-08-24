@@ -84,7 +84,7 @@ def main() -> int:
     except ProbeFailure as error:
         print(f"{error.code}: {error}", file=sys.stderr)
         return 1
-    print("OPS_PUBLIC_SURFACE_OK " + " ".join(evidence))
+    print("PRODUCTION_ANONYMOUS_ACCESS_RESULT PUBLIC_PASS " + " ".join(evidence))
     return 0
 
 

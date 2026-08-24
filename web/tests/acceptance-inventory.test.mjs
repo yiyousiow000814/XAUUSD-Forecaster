@@ -71,6 +71,21 @@ test("acceptance inventory owns every page bidirectionally", () => {
       assert.ok(page.production_authenticated?.marker, `missing authenticated marker: ${page.route}`);
     }
   }
+  const versionHostPages = new Set(
+    workerManifest.static_assets
+      .filter(asset => asset.path !== "/favicon.ico")
+      .map(asset => asset.path),
+  );
+  assert.deepEqual([...versionHostPages].sort(), [...declared].sort());
+  for (const page of inventory.pages) {
+    const asset = workerManifest.static_assets.find(row => row.path === page.route);
+    assert.ok(asset, `missing Candidate route acceptance: ${page.route}`);
+    assert.equal(asset.redirect_path ?? null, page.version_host.redirect_path ?? null);
+    if (!page.version_host.redirect_path) {
+      assert.equal(asset.content_type, page.version_host.content_type);
+      assert.equal(asset.marker, page.version_host.marker);
+    }
+  }
 });
 
 test("route source, Worker manifest, and API classifications agree bidirectionally", () => {

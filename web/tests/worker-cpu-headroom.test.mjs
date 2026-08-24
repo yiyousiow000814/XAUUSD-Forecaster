@@ -132,7 +132,7 @@ test("replays the production read route family through bounded API modules", asy
     ["/api/market-chart", 200],
     ["/api/market-history?range=24&identity=BROAD_FULL&frequency=30m", 200],
     ["/api/news-evidence?mode=all&page=1&limit=20", 200],
-    [`/api/news-content?key=${"a".repeat(64)}`, 404],
+    [`/api/news-content?key=${"a".repeat(64)}`, 503],
     ["/api/operator-retry-worker?worker_id=worker-test", 200],
     ["/api/ingest", 200],
   ];
@@ -290,27 +290,30 @@ test("production-shaped writes honor authenticated release dry-run without mutat
     ["/api/audit-decisions", "audit-decisions-write", { recent_decisions: [] }, "1"],
     ["/api/learning", "learning-write", { models: [] }, "1"],
     ["/api/market-chart", "market-chart-write", { candles: [] }, "1"],
-    ["/api/news-index", "news-index-write", { items: [{
-      detail_key: "1".repeat(64), category: "美国宏观", cluster_id: "cluster-1",
-      collector_first_seen_time: "2026-08-20T00:00:00Z",
-      source_published_time: "2026-08-19T23:58:00Z",
-      annotation_status: "READY", model_visibility: "MODEL_VISIBLE",
-      parsed_at: "2026-08-20T00:00:00Z", mirror_contract: "release-validation-v1",
-    }] }, "unknown"],
-    ["/api/news-content", "news-content-write", { items: [{
+    ["/api/news-index", "news-index-write", {
+      action: "prepare", generation_id: "1".repeat(64), manifest: {
+        generation_id: "1".repeat(64), snapshot_id: "2".repeat(64),
+        contract_version: "news-projection-generation-v1",
+        window_start: "2026-06-21T00:00:00Z", watermark: "2026-08-20T00:00:00Z",
+        expected_index_count: 1, expected_detail_count: 1, withdrawal_count: 0,
+        source_digest: "3".repeat(64), expected_receipt_digest: "4".repeat(64),
+      },
+    }, "unknown"],
+    ["/api/news-content", "news-content-write", {
+      action: "stage_details", generation_id: "1".repeat(64), offset: 0, items: [{
       detail_key: "1".repeat(64), detail_hash: "2".repeat(64),
       payload: { headline: "候选版本新闻详情", body: "只验证，不写入。" },
-    }] }, "unknown"],
+    }], }, "unknown"],
   ];
   const state = () => JSON.stringify({
     snapshots: database.database.prepare(
       "SELECT id,payload,received_at FROM dashboard_snapshots ORDER BY id",
     ).all(),
     newsIndex: database.database.prepare(
-      "SELECT detail_key,payload,received_at FROM news_index ORDER BY detail_key",
+      "SELECT generation_id,detail_key,payload,received_at FROM news_projection_index ORDER BY generation_id,detail_key",
     ).all(),
     newsDetails: database.database.prepare(
-      "SELECT detail_key,payload,received_at FROM news_details ORDER BY detail_key",
+      "SELECT generation_id,detail_key,payload,received_at FROM news_projection_details ORDER BY generation_id,detail_key",
     ).all(),
   });
   const before = state();
@@ -349,27 +352,27 @@ test("news release dry-runs reject invalid payloads without mutation", async () 
   };
   const state = () => JSON.stringify({
     newsIndex: database.database.prepare(
-      "SELECT detail_key,payload,received_at FROM news_index ORDER BY detail_key",
+      "SELECT generation_id,detail_key,payload,received_at FROM news_projection_index ORDER BY generation_id,detail_key",
     ).all(),
     newsDetails: database.database.prepare(
-      "SELECT detail_key,payload,received_at FROM news_details ORDER BY detail_key",
+      "SELECT generation_id,detail_key,payload,received_at FROM news_projection_details ORDER BY generation_id,detail_key",
     ).all(),
   });
   const before = state();
   for (const [caseIndex, [path, body, expectedStatus]] of [
-    ["/api/news-index", JSON.stringify({ items: [{
+    ["/api/news-index", JSON.stringify({ action: "stage_index", generation_id: "1".repeat(64), offset: 0, items: [{
       detail_key: "1".repeat(64), category: "美国宏观", cluster_id: "cluster-1",
       collector_first_seen_time: "2026-08-20T00:00:00Z",
       annotation_status: "NOT_A_REVIEW_STATE", model_visibility: "MODEL_VISIBLE",
       mirror_contract: "release-validation-v1",
-    }] }), 409],
-    ["/api/news-content", JSON.stringify({ items: [{
+    }] }), 400],
+    ["/api/news-content", JSON.stringify({ action: "stage_details", generation_id: "1".repeat(64), offset: 0, items: [{
       detail_key: "1".repeat(64), detail_hash: "not-a-sha256", payload: {},
     }] }), 400],
     ["/api/news-index", "{not-json", 400],
     ["/api/news-content", "{not-json", 400],
     ["/api/news-index", JSON.stringify({
-      withdraw_detail_keys: null,
+      action: "stage_index", generation_id: "1".repeat(64), offset: null,
       items: [{
         detail_key: "1".repeat(64), category: "美国宏观", cluster_id: "cluster-1",
         collector_first_seen_time: "2026-08-20T00:00:00Z",
@@ -377,7 +380,7 @@ test("news release dry-runs reject invalid payloads without mutation", async () 
         parsed_at: "2026-08-20T00:00:00Z", mirror_contract: "release-validation-v1",
       }],
     }), 400],
-    ["/api/news-content", JSON.stringify({ reset: 1 }), 400],
+    ["/api/news-content", JSON.stringify({ action: "reset" }), 400],
   ].entries()) {
     const response = await invoke(path, {
       method: "POST", headers: {

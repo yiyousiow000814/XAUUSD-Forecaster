@@ -22,6 +22,7 @@ export type NewsRetrievalRequest = {
   pageSize: number;
   filters: NewsRetrievalFilters;
   hasCriteria: boolean;
+  generationId: string | null;
 };
 
 export type NewsRetrievalSourceMode =
@@ -45,6 +46,7 @@ export type NewsRetrievalPayload = {
   source_mode: NewsRetrievalSourceMode;
   archive_complete: boolean | null;
   has_more: boolean;
+  generation_id: string | null;
   retrieval: {
     ordering: readonly ["published_time DESC", "collector_first_seen_time DESC", "detail_key DESC"];
     cutoff: string | null;
@@ -58,8 +60,8 @@ export type NewsRetrievalOutcome =
   | { ok: true; payload: NewsRetrievalPayload }
   | {
     ok: false;
-    status: 503;
-    code: "NEWS_RETRIEVAL_UNAVAILABLE";
+    status: 409 | 503;
+    code: "NEWS_PROJECTION_GENERATION_CHANGED" | "NEWS_RETRIEVAL_UNAVAILABLE";
     error: string;
   };
 
@@ -164,6 +166,10 @@ export function parseNewsRetrievalRequest(input: Request | URL | string): NewsRe
     source: boundedText(params.get("source"), 80),
     category: boundedText(params.get("category"), 40),
   };
+  const generationId = boundedText(params.get("generation"), 64);
+  if (generationId && !/^[a-f0-9]{64}$/.test(generationId)) {
+    return boundaryError("INVALID_GENERATION", "新闻档案代次无效");
+  }
   return {
     ok: true,
     value: {
@@ -173,6 +179,7 @@ export function parseNewsRetrievalRequest(input: Request | URL | string): NewsRe
       pageSize: boundedPositiveInteger(params.get("limit"), 10, MAX_PAGE_SIZE),
       filters,
       hasCriteria: Boolean(query || Object.values(filters).some(Boolean)),
+      generationId,
     },
   };
 }
@@ -293,6 +300,7 @@ const responsePayload = (
   sourceMode: NewsRetrievalSourceMode,
   archiveComplete: boolean | null,
   fallbackReason: "AUTHORITATIVE_STORE_UNAVAILABLE" | null = null,
+  generationId: string | null = null,
 ): NewsRetrievalPayload => ({
   items,
   total,
@@ -303,6 +311,7 @@ const responsePayload = (
   source_mode: sourceMode,
   archive_complete: archiveComplete,
   has_more: request.page * request.pageSize < total,
+  generation_id: generationId,
   retrieval: {
     ordering: ORDERING,
     cutoff: request.filters.received_to,
@@ -317,15 +326,33 @@ const retrieveFromD1 = async (
   request: NewsRetrievalRequest,
   preview: boolean,
 ) => {
+  const state = await binding.prepare(
+    `SELECT active_generation_id FROM news_projection_state
+      WHERE id=1 AND projection_state='CURRENT'
+        AND missing_detail_count=0 AND invariant_violation_count=0`,
+  ).first<{ active_generation_id: string }>();
+  if (!state) throw new Error("current news generation is unavailable");
+  if (request.generationId && request.generationId !== state.active_generation_id) {
+    throw new NewsRetrievalGenerationChanged();
+  }
   const { whereSql, bindings } = buildNewsRetrievalSql(request);
   const offset = (request.page - 1) * request.pageSize;
   const [rows, count] = await Promise.all([
     binding.prepare(
-      `SELECT payload, detail_key FROM news_index ${whereSql}
+      `SELECT i.payload, i.detail_key FROM news_projection_index i
+       JOIN news_projection_state s ON s.active_generation_id=i.generation_id
+        AND s.projection_state='CURRENT' AND s.missing_detail_count=0
+        AND s.invariant_violation_count=0
+       ${whereSql}
        ORDER BY published_time DESC, collector_first_seen_time DESC, detail_key DESC
        LIMIT ? OFFSET ?`,
     ).bind(...bindings, request.pageSize, offset).all<D1NewsRow>(),
-    binding.prepare(`SELECT count(*) AS count FROM news_index ${whereSql}`)
+    binding.prepare(
+      `SELECT count(*) AS count FROM news_projection_index i
+       JOIN news_projection_state s ON s.active_generation_id=i.generation_id
+        AND s.projection_state='CURRENT' AND s.missing_detail_count=0
+        AND s.invariant_violation_count=0 ${whereSql}`,
+    )
       .bind(...bindings).first<{ count: number }>(),
   ]);
   const items = rows.results.map(row => {
@@ -341,8 +368,12 @@ const retrieveFromD1 = async (
     Number(count?.count ?? 0),
     preview ? "READ_ONLY_D1_ARCHIVE" : "D1_ARCHIVE",
     true,
+    null,
+    state.active_generation_id,
   );
 };
+
+class NewsRetrievalGenerationChanged extends Error {}
 
 const retrieveFromPreview = (
   previewItems: Array<Record<string, unknown>>,
@@ -384,7 +415,13 @@ export async function retrieveNews(options: {
           options.previewItems !== undefined,
         ),
       };
-    } catch {
+    } catch (reason) {
+      if (reason instanceof NewsRetrievalGenerationChanged) {
+        return {
+          ok: false, status: 409, code: "NEWS_PROJECTION_GENERATION_CHANGED",
+          error: "新闻档案已更新，请从第一页重新查看",
+        };
+      }
       // A Preview may fall back to its bounded immutable build snapshot below.
     }
   }

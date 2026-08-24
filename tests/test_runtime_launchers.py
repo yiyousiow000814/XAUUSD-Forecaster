@@ -2206,7 +2206,7 @@ def test_preview_evidence_cannot_authorize_production_candidate(tmp_path) -> Non
     assert result == "False"
 
 
-def test_static_assets_are_excluded_from_expected_worker_invocations(tmp_path) -> None:
+def test_version_host_routes_distinguish_static_assets_from_worker_redirects(tmp_path) -> None:
     candidate = "b" * 40
     result = _run_control_center_contract(
         tmp_path,
@@ -2220,19 +2220,25 @@ def test_static_assets_are_excluded_from_expected_worker_invocations(tmp_path) -
         "if($RequestUri.AbsolutePath -eq '/favicon.ico'){return [pscustomobject]@{"
         "status=301;location='/favicon.svg';content_type='';body_bytes=[byte[]]@();"
         "cf_cache_status='';etag='';age=''}};"
+        "$redirects=@{'/assistant'='/admin/assistant';'/retry-jobs'='/admin/retry-jobs';"
+        "'/status'='/admin/ai-usage'};if($redirects.ContainsKey($RequestUri.AbsolutePath)){"
+        "return [pscustomobject]@{status=307;location=$redirects[$RequestUri.AbsolutePath];"
+        "content_type='';body_bytes=[byte[]]@();cf_cache_status='';etag='';age=''}};"
         "$text=if($RequestUri.AbsolutePath -eq '/favicon.svg'){'<svg/>'}else{"
-        "'<meta charset=\"utf-8\">Aurum Signal Room 系统健康状态 新闻与决策'}; "
+        "'<meta charset=\"utf-8\">Aurum Signal Room 系统健康状态 新闻与决策 "
+        "OWNER OPERATIONS PRIVATE OPERATOR QUEUE AI 模型使用状态 ASSISTANT PAUSED "
+        "管理员认证已完成'}; "
         "$type=if($RequestUri.AbsolutePath -eq '/favicon.svg'){'image/svg+xml'}else{'text/html'}; "
         "return [pscustomobject]@{status=200;location='';content_type=$type;"
         "body_bytes=[Text.Encoding]::UTF8.GetBytes($text);cf_cache_status='HIT';etag='x';age='1'} }; "
-        "function Start-Sleep {}; function Get-CandidateInvocationCount { return 0 }; "
+        "function Start-Sleep {}; function Get-CandidateInvocationCount { return 3 }; "
         "$e=Invoke-CandidateWorkerValidation -Candidate $candidate -RoutePlan $plan; "
         'Write-Output "$($plan.static_assets.Count),$($e.expected_worker_invocations),'
         '$($e.cpu_evidence),$($e.passed),$($e.routes[1].requested_host)"',
     )
 
     assert result == (
-        "4,0,NOT_REQUIRED,True,"
+        "12,3,NOT_REQUIRED,True,"
         "11111111-aurum-signal-room.yiyousiow1234.workers.dev"
     )
 
@@ -2387,7 +2393,7 @@ def test_manifest_selects_baseline_and_affected_route_sample_families(tmp_path) 
         '$($shared.worker_writes.Count)"',
     )
 
-    assert result == "7,70,33,330,0,False,37,37,12,21"
+    assert result == "7,70,31,310,0,False,43,43,12,19"
 
 
 def test_static_manifest_rejects_missing_or_wrong_typed_contract_fields(tmp_path) -> None:
@@ -3592,7 +3598,7 @@ def test_payload_producer_and_fixture_builder_select_worker_families(tmp_path) -
         'Write-Output "$p,$f,$b,$bb,$($docs.worker_cpu_required)"',
     )
     producer_scenarios, all_routes, baseline, build_baseline, docs = result.split(",")
-    assert int(producer_scenarios) == 2
+    assert int(producer_scenarios) == 1
     assert int(all_routes) >= 20
     assert int(baseline) >= 5
     assert int(build_baseline) == int(baseline)

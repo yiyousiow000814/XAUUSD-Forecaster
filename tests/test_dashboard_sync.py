@@ -566,50 +566,56 @@ def test_sync_status_reports_optional_resource_degradation(tmp_path) -> None:
     assert status["degraded_resources"] == degraded
 
 
-def test_news_mirror_health_verifies_completed_contract(monkeypatch) -> None:
+def test_news_projection_health_verifies_exact_generation_receipt(monkeypatch) -> None:
     module = _sync_module()
     requested = []
+    manifest = {
+        "generation_id": "a" * 64, "snapshot_id": "b" * 64,
+        "source_digest": "c" * 64, "expected_receipt_digest": "d" * 64,
+        "expected_index_count": 2, "expected_detail_count": 2,
+    }
     monkeypatch.setattr(
         module, "_get_json",
         lambda url, _config: requested.append(url) or {
-            "status": "OK", "violation_count": 0, "checks": [],
+            "status": "OK", "projection_state": "CURRENT",
+            "verified_complete": True, "active_generation_id": "a" * 64,
+            "snapshot_id": "b" * 64, "source_digest": "c" * 64,
+            "receipt_digest": "d" * 64, "index_count": 2, "detail_count": 2,
+            "missing_detail_count": 0, "invariant_violation_count": 0,
         },
     )
 
-    module._verify_news_mirror_state(
-        "https://worker.example/api/news-index", {"token": "test"},
-        expected_contract=module.NEWS_MIRROR_CONTRACT_VERSION,
+    module._verify_news_projection_state(
+        "https://worker.example/api/news-index", {"token": "test"}, manifest,
     )
 
-    assert requested == [
-        "https://worker.example/api/news-index?health_check=1&current_contract="
-        + module.NEWS_MIRROR_CONTRACT_VERSION
-        + "&expected_contract="
-        + module.NEWS_MIRROR_CONTRACT_VERSION
-    ]
+    assert requested == ["https://worker.example/api/news-index?health_check=1"]
 
 
-def test_news_mirror_health_preserves_bounded_invariant_evidence(monkeypatch) -> None:
+def test_news_projection_health_reports_exact_contradictions(monkeypatch) -> None:
     module = _sync_module()
     monkeypatch.setattr(module, "_get_json", lambda *_a, **_k: {
-        "status": "ERROR",
-        "error_code": "NEWS_MIRROR_STATE_INVARIANT_VIOLATION",
-        "violation_count": 21,
-        "checks": [{"code": "NEWS_REVIEW_STATE_INVALID", "count": 21}],
+        "status": "OK", "projection_state": "CURRENT", "verified_complete": True,
+        "active_generation_id": "a" * 64, "snapshot_id": "b" * 64,
+        "source_digest": "c" * 64, "receipt_digest": "0" * 64,
+        "index_count": 2, "detail_count": 2,
+        "missing_detail_count": 0, "invariant_violation_count": 0,
     })
+    manifest = {
+        "generation_id": "a" * 64, "snapshot_id": "b" * 64,
+        "source_digest": "c" * 64, "expected_receipt_digest": "d" * 64,
+        "expected_index_count": 2, "expected_detail_count": 2,
+    }
 
     with pytest.raises(module.RemoteInvariantViolation) as captured:
-        module._verify_news_mirror_state(
-            "https://worker.example/api/news-index", {"token": "test"},
-            expected_contract=None,
+        module._verify_news_projection_state(
+            "https://worker.example/api/news-index", {"token": "test"}, manifest,
         )
 
-    assert module.sync_error_code(captured.value) == (
-        "NEWS_MIRROR_STATE_INVARIANT_VIOLATION"
-    )
-    assert captured.value.evidence == {
-        "violation_count": 21,
-        "checks": [{"code": "NEWS_REVIEW_STATE_INVALID", "count": 21}],
+    assert module.sync_error_code(captured.value) == "NEWS_PROJECTION_HEALTH_MISMATCH"
+    assert captured.value.evidence["violation_count"] == 1
+    assert captured.value.evidence["contradictions"]["receipt_digest"] == {
+        "expected": "d" * 64, "received": "0" * 64,
     }
 
 
@@ -1279,72 +1285,109 @@ def test_learning_history_is_durable_before_summary_and_retries_idempotently(
     assert posted == []
 
 
-def test_news_details_are_durable_before_index_is_published(monkeypatch, tmp_path) -> None:
-    module = _sync_module()
-    monkeypatch.setattr(module, "_verify_news_mirror_state", lambda *_a, **_k: None)
-    payload = {
-        "recent_news": [{
-            "source": "example", "source_item_id": "1", "revision_number": 1,
-            "category": "其他",
-            "collector_first_seen_time": "2026-08-10T00:00:00+00:00",
-            "headline": "新闻", "summary_zh": "完整摘要",
-        }],
-    }
-    state_file = tmp_path / "news-state.json"
-    state_file.write_text(json.dumps({
-        "mirror_contract_version": module.NEWS_MIRROR_CONTRACT_VERSION,
-        "hashes": {}, "index_hashes": {},
-    }), encoding="utf-8")
-    posted: list[str] = []
-    monkeypatch.setattr(
-        module, "_post_json", lambda url, _body, _config: posted.append(url)
+def _projection_fixture(count: int = 10):
+    from xauusd_forecaster.news_projection import build_news_projection_generation
+
+    rows = [{
+        "source": "example", "source_item_id": str(index), "revision_number": 1,
+        "category": "其他", "cluster_id": f"cluster-{index}",
+        "collector_first_seen_time": "2026-08-10T00:00:00+00:00",
+        "headline": f"新闻 {index}", "summary_zh": "完整摘要",
+        "annotation_status": "READY", "model_visibility": "MODEL_VISIBLE",
+        "impact_status": "ACTIVE", "parsed_at": "2026-08-10T00:01:00+00:00",
+    } for index in range(count)]
+    return build_news_projection_generation(
+        rows, [], window_start="2026-06-11T00:00:00+00:00",
+        watermark="2026-08-10T00:00:00+00:00",
     )
+
+
+def _projection_local_get(generation, url: str) -> dict:
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+    if query["mode"] == ["manifest"]:
+        return {"manifest": generation.manifest}
+    kind = query["kind"][0]
+    offset = int(query["offset"][0])
+    batches = generation.detail_batches if kind == "detail" else generation.index_batches
+    cursor = 0
+    for batch in batches:
+        if cursor == offset:
+            return {"items": list(batch), "offset": offset, "next_offset": offset + len(batch)}
+        cursor += len(batch)
+    return {"items": [], "offset": offset, "next_offset": offset}
+
+
+def test_news_generation_stages_all_details_before_index_and_activation(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    generation = _projection_fixture()
+    state_file = tmp_path / "news-state.json"
+    posted: list[tuple[str, dict]] = []
+
+    def post(url, body, _config):
+        payload = json.loads(body)
+        posted.append((url, payload))
+        if payload["action"] == "prepare":
+            return {"status": "OK", "active": False, "next_detail_offset": 0,
+                    "next_index_offset": 0}
+        if payload["action"].startswith("stage_"):
+            return {"status": "OK", "received": len(payload["items"])}
+        return {"status": "OK"}
+
+    manifest = generation.manifest
+    monkeypatch.setattr(module, "_get_local_json", lambda url: _projection_local_get(generation, url))
+    monkeypatch.setattr(module, "_post_json", post)
+    monkeypatch.setattr(module, "_get_json", lambda *_a, **_k: {
+        "status": "OK", "projection_state": "CURRENT", "verified_complete": True,
+        "active_generation_id": manifest["generation_id"],
+        "snapshot_id": manifest["snapshot_id"], "source_digest": manifest["source_digest"],
+        "receipt_digest": manifest["expected_receipt_digest"],
+        "index_count": 10, "detail_count": 10, "missing_detail_count": 0,
+        "invariant_violation_count": 0,
+    })
     config = {
+        "local_status_url": "http://local/api/status",
         "remote_ingest_url": "https://remote/api/ingest",
         "news_state_file": str(state_file), "token": "test",
     }
 
-    module._sync_news(payload, config)
+    module._sync_news({}, config)
 
-    assert posted == [
-        "https://remote/api/news-content",
-        "https://remote/api/news-index",
-        "https://remote/api/news-index",
+    assert [body["action"] for _url, body in posted] == [
+        "prepare", "stage_details", "stage_details", "stage_index", "activate", "verify",
     ]
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    assert state["projection_state"] == "CURRENT"
+    assert state["active_snapshot_id"] == manifest["snapshot_id"]
 
 
 def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_path) -> None:
     module = _sync_module()
-    monkeypatch.setattr(module, "_verify_news_mirror_state", lambda *_a, **_k: None)
-    payload = {
-        "recent_news": [{
-            "source": "example", "source_item_id": "1", "revision_number": 1,
-            "category": "其他",
-            "collector_first_seen_time": "2026-08-10T00:00:00+00:00",
-            "headline": "新闻", "summary_zh": "完整摘要",
-        }],
-    }
+    generation = _projection_fixture(1)
     state_file = tmp_path / "news-state.json"
-    state_file.write_text(json.dumps({
-        "mirror_contract_version": module.NEWS_MIRROR_CONTRACT_VERSION,
-        "hashes": {}, "index_hashes": {},
-    }), encoding="utf-8")
     posted: list[str] = []
+    monkeypatch.setattr(module, "_get_local_json", lambda url: _projection_local_get(generation, url))
 
-    def fail_detail(url, _body, _config):
-        posted.append(url)
-        raise TimeoutError("detail upload timed out")
+    def fail_detail(url, body, _config):
+        action = json.loads(body)["action"]
+        posted.append(action)
+        if action == "stage_details":
+            raise TimeoutError("detail upload timed out")
+        return {"status": "OK", "active": False, "next_detail_offset": 0,
+                "next_index_offset": 0}
 
     monkeypatch.setattr(module, "_post_json", fail_detail)
     config = {
+        "local_status_url": "http://local/api/status",
         "remote_ingest_url": "https://remote/api/ingest",
         "news_state_file": str(state_file), "token": "test",
     }
 
     with pytest.raises(TimeoutError, match="detail upload timed out"):
-        module._sync_news(payload, config)
+        module._sync_news({}, config)
 
-    assert posted == ["https://remote/api/news-content"]
+    assert posted == ["prepare", "stage_details"]
 
 
 def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
@@ -1956,377 +1999,113 @@ def test_optional_resource_families_degrade_only_their_owner(
                if name not in {failed_resource})
 
 
-def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> None:
-    module = _sync_module()
-    monkeypatch.setenv("DASHBOARD_OPERATOR_BRIDGE_TOKEN", "test-bridge-" + "x" * 32)
-    monkeypatch.setattr(module, "_verify_news_mirror_state", lambda *_a, **_k: None)
-    monkeypatch.setattr(module, "_sync_news_evidence", lambda *_a, **_k: None)
-    payload = {
-        "generated_at": "2026-08-07T00:00:00+00:00",
-        "learning_curves": {"learning_stage": "EARLY"},
-        "execution_learning": {"models": []},
-        "recent_news": [{
-            "source": "example", "source_item_id": "1", "revision_number": 1,
-            "category": "其他", "collector_first_seen_time": "2026-08-07T00:00:00+00:00",
-            "headline": "第一条", "summary_zh": "摘要",
-        }],
-        "market_chart": {"decisions": []},
-    }
-
-    class Response:
-        status = 200
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def read(self):
-            return json.dumps(payload, ensure_ascii=False).encode("utf-8")
-
-    posted: list[str] = []
-    news_page_calls = 0
-
-    def urlopen(url, *_args, **_kwargs):
-        nonlocal news_page_calls
-        if "/api/news-archive" in str(url):
-            news_page_calls += 1
-            page = {
-                "items": payload["recent_news"] if news_page_calls in {1, 3} else [],
-                "next_cursor": '["2026-08-07T00:00:00+00:00","example","1",1]',
-                "has_more": False,
-            }
-
-            class NewsResponse(Response):
-                def read(self):
-                    return json.dumps(page, ensure_ascii=False).encode("utf-8")
-
-            return NewsResponse()
-        return Response()
-
-    monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
-    monkeypatch.setattr(module, "_post_json", lambda url, _body, _config: posted.append(url))
-    config = {
-        "local_status_url": "http://local/status",
-        "remote_ingest_url": "https://remote/api/ingest",
-        "token": "test",
-        "news_state_file": str(tmp_path / "news-state.json"),
-        "learning_state_file": str(tmp_path / "learning-state.json"),
-        "targets": [{
-            "name": "sites", "legacy": True,
-            "remote_ingest_url": "https://remote/api/ingest", "token": "test",
-        }],
-    }
-
-    module._sync_learning_summary(payload, config)
-    module._sync_news(payload, config)
-    assert posted.count("https://remote/api/learning") == 1
-    # An unknown mirror contract neutralizes only stale operational state before
-    # authoritative replay. Completed reader history stays visible throughout
-    # the handover; reconciliation removes stale remote-only rows at the end.
-    assert posted.count("https://remote/api/news-index") == 3
-
-    posted.clear()
-    payload["generated_at"] = "2026-08-07T00:00:30+00:00"
-    module._sync_learning_summary(payload, config)
-    module._sync_news(payload, config)
-    assert "https://remote/api/learning" not in posted
-    assert "https://remote/api/news-index" not in posted
-
-    posted.clear()
-    payload["learning_curves"]["learning_stage"] = "READY"
-    payload["recent_news"][0]["headline"] = "第一条（更新）"
-    module._sync_learning_summary(payload, config)
-    module._sync_news(payload, config)
-    assert posted.count("https://remote/api/learning") == 1
-    assert posted.count("https://remote/api/news-index") == 1
-
-    news_state = json.loads((tmp_path / "news-state.json").read_text(encoding="utf-8"))
-    assert news_state["cursor"].startswith('["2026-08-07T00:00:00')
-    assert news_state["reconciled_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
-    assert news_state["mirror_contract_version"] == module.NEWS_MIRROR_CONTRACT_VERSION
-
-
-def test_sync_repopulates_news_index_without_full_refresh_marker(
-    monkeypatch, tmp_path
-) -> None:
-    module = _sync_module()
-    monkeypatch.setenv("DASHBOARD_OPERATOR_BRIDGE_TOKEN", "test-bridge-" + "y" * 32)
-    monkeypatch.setattr(module, "_verify_news_mirror_state", lambda *_a, **_k: None)
-    payload = {
-        "generated_at": "2026-08-07T00:00:00+00:00",
-        "learning_curves": {},
-        "execution_learning": {"models": []},
-        "recent_news": [{
-            "source": "Federal Reserve",
-            "source_item_id": "press-1",
-            "revision_number": 1,
-            "category": "利率/Fed",
-            "collector_first_seen_time": "2026-08-07T00:00:00+00:00",
-            "headline": "第一条",
-        }],
-        "market_chart": {"decisions": []},
-    }
-    index_rows, _ = module.news_mirror_parts(payload)
-    state_file = tmp_path / "news-state.json"
-    state_file.write_text(json.dumps({
-        "index_hashes": {
-            index_rows[0]["detail_key"]: module._json_hash(index_rows[0]),
-        },
-        "hashes": {},
-        "last_full_sync": "2026-08-07T00:00:00+00:00",
-    }), encoding="utf-8")
-
-    class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def read(self):
-            return json.dumps(payload, ensure_ascii=False).encode("utf-8")
-
-    posted: list[str] = []
-    monkeypatch.setattr(
-        module.urllib.request, "urlopen", lambda *_args, **_kwargs: Response()
-    )
-    monkeypatch.setattr(
-        module, "_post_json", lambda url, _body, _config: posted.append(url)
-    )
-    config = {
-        "local_status_url": "http://local/status",
-        "remote_ingest_url": "https://remote/api/ingest",
-        "token": "test",
-        "news_state_file": str(state_file),
-        "learning_state_file": str(tmp_path / "learning-state.json"),
-    }
-
-    module._sync_news(payload, config)
-
-    assert posted.count("https://remote/api/news-index") == 3
-    state = json.loads(state_file.read_text(encoding="utf-8"))
-    assert state["mirror_contract_version"] == module.NEWS_MIRROR_CONTRACT_VERSION
-    assert state["reconciled_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
-
-
-@pytest.mark.parametrize("previous_contract", [
-    "news-60-day-incremental-v2",
-    "news-60-day-incremental-v3-semantic-categories",
-    "news-60-day-incremental-v4-relevance-filter",
-    "news-60-day-incremental-v7-semantic-handover",
-    "news-60-day-incremental-v8-recovery-state",
-    "news-60-day-incremental-v9-semantic-projection",
-])
-def test_news_materialization_contract_upgrade_replays_and_reconciles_old_state(
-    monkeypatch, tmp_path, previous_contract
-) -> None:
-    module = _sync_module()
-    monkeypatch.setattr(module, "_verify_news_mirror_state", lambda *_a, **_k: None)
-    state_file = tmp_path / "news-state.json"
-    stale_cursor = '["2026-08-13T00:00:00Z","example","old",1]'
-    state_file.write_text(json.dumps({
-        "mirror_contract_version": previous_contract,
-        "reconciled_contract": previous_contract,
-        "cursor": stale_cursor,
-    }), encoding="utf-8")
-    requested: list[str] = []
-    posted: list[tuple[str, dict]] = []
-    page = {
-        "items": [{
-            "source": "example", "source_item_id": "new", "revision_number": 1,
-            "category": "风险情绪 / 避险",
-            "collector_first_seen_time": "2026-08-14T00:00:00Z",
-            "headline": "新的语义分类",
-        }],
-        "next_cursor": '["2026-08-14T00:00:00Z","example","new",1]',
-        "has_more": False,
-    }
-
-    class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def read(self):
-            return json.dumps(page, ensure_ascii=False).encode("utf-8")
-
-    def urlopen(url, *_args, **_kwargs):
-        requested.append(str(url))
-        return Response()
-
-    def post_json(url, body, _config):
-        posted.append((url, json.loads(body)))
-
-    monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
-    monkeypatch.setattr(module, "_post_json", post_json)
-    module._sync_news({}, {
-        "local_status_url": "http://local/status",
-        "remote_ingest_url": "https://remote/api/ingest",
-        "news_state_file": str(state_file),
-        "token": "test",
-    })
-
-    # A changed materialization contract discards the old cursor and starts at
-    # the bounded archive head instead of continuing after a stale row.
-    assert len(requested) == 1
-    assert "after=" not in requested[0]
-    assert f"limit={module.NEWS_WRITE_BATCH_ITEMS}" in requested[0]
-    index_payloads = [body for url, body in posted if url.endswith("/news-index")]
-    assert index_payloads[0] == {
-        "neutralize_operational_state_for_contract": module.NEWS_MIRROR_CONTRACT_VERSION,
-    }
-    replay_payload = next(payload for payload in index_payloads if "items" in payload)
-    assert replay_payload["items"][0]["category"] == "风险情绪 / 避险"
-    assert replay_payload["items"][0]["mirror_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
-    assert index_payloads[-1]["reconcile_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
-    state = json.loads(state_file.read_text(encoding="utf-8"))
-    assert state["cursor"] != stale_cursor
-    assert state["mirror_contract_version"] == module.NEWS_MIRROR_CONTRACT_VERSION
-    assert state["reconciled_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
-
-
-def test_semantic_projection_upgrade_replays_late_discovery_once(
+def test_news_generation_resumes_remote_offsets_and_bounds_each_cycle(
     monkeypatch, tmp_path,
 ) -> None:
     module = _sync_module()
-    monkeypatch.setattr(module, "_verify_news_mirror_state", lambda *_a, **_k: None)
-    state_file = tmp_path / "news-state.json"
-    state_file.write_text(json.dumps({
-        "mirror_contract_version": "news-60-day-incremental-v9-semantic-projection",
-        "reconciled_contract": "news-60-day-incremental-v9-semantic-projection",
-        "cursor": '["2026-08-17T04:09:01+00:00","google_news_gold_context","old",1]',
-    }), encoding="utf-8")
-    current_item = {
-        "source": "google_news_fed_rates",
-        "source_item_id": "late-discovery-cpi",
-        "revision_number": 1,
-        "cluster_id": "late-discovery-cpi-cluster",
-        "content_hash": "a" * 64,
-        "category": "通胀/就业",
-        "source_published_time": "2026-08-15T06:13:28+00:00",
-        "collector_first_seen_time": "2026-08-17T04:09:01+00:00",
-        "annotation_status": "READY",
-        "model_visibility": "IMPACT_PENDING",
-        "impact_status": "PENDING_IMPACT",
-        "eligibility_version": "news-source-eligibility-v14-resolved-identity",
-        "mirror_updated_at": "2026-08-17T04:09:02+00:00",
-        "headline": "CPI in Focus: Can the Dollar Turn Lower Again?",
-    }
-    requests: list[str] = []
-    posted: list[tuple[str, dict]] = []
+    generation = _projection_fixture(25)
+    manifest = generation.manifest
+    offsets = {"detail": 0, "index": 0}
+    active = False
+    actions: list[str] = []
 
-    class Response:
-        def __init__(self, payload):
-            self.payload = payload
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def read(self):
-            return json.dumps(self.payload).encode()
-
-    def urlopen(url, *_args, **_kwargs):
-        requests.append(str(url))
-        return Response({
-            "items": [] if "after=" in str(url) else [current_item],
-            "next_cursor": '["2026-08-17T04:09:02+00:00","google_news_fed_rates","late-discovery-cpi",1]',
-            "has_more": False,
-        })
-
-    monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
     monkeypatch.setattr(
-        module, "_post_json",
-        lambda url, body, _config: posted.append((url, json.loads(body))),
+        module, "_get_local_json", lambda url: _projection_local_get(generation, url),
     )
+
+    def post(_url, body, _config):
+        nonlocal active
+        payload = json.loads(body)
+        action = payload["action"]
+        actions.append(action)
+        if action == "prepare":
+            return {"status": "OK", "active": active,
+                    "next_detail_offset": offsets["detail"],
+                    "next_index_offset": offsets["index"]}
+        if action == "stage_details":
+            assert payload["offset"] == offsets["detail"]
+            offsets["detail"] += len(payload["items"])
+            return {"status": "OK", "received": len(payload["items"])}
+        if action == "stage_index":
+            assert offsets["detail"] == 25
+            assert payload["offset"] == offsets["index"]
+            offsets["index"] += len(payload["items"])
+            return {"status": "OK", "received": len(payload["items"])}
+        if action == "activate":
+            assert offsets == {"detail": 25, "index": 25}
+            active = True
+        return {"status": "OK"}
+
+    monkeypatch.setattr(module, "_post_json", post)
+    monkeypatch.setattr(module, "_get_json", lambda *_a, **_k: {
+        "status": "OK", "projection_state": "CURRENT", "verified_complete": True,
+        "active_generation_id": manifest["generation_id"],
+        "snapshot_id": manifest["snapshot_id"], "source_digest": manifest["source_digest"],
+        "receipt_digest": manifest["expected_receipt_digest"],
+        "index_count": 25, "detail_count": 25, "missing_detail_count": 0,
+        "invariant_violation_count": 0,
+    })
     config = {
-        "local_status_url": "http://local/status",
-        "remote_ingest_url": "https://remote/api/ingest",
-        "news_state_file": str(state_file),
-        "token": "test",
-    }
-
-    module._sync_news({}, config)
-
-    index_payloads = [
-        body for url, body in posted if url.endswith("/news-index")
-    ]
-    assert "after=" not in requests[0]
-    assert index_payloads[0] == {
-        "neutralize_operational_state_for_contract":
-            module.NEWS_MIRROR_CONTRACT_VERSION,
-    }
-    replay = next(payload for payload in index_payloads if "items" in payload)
-    assert replay["items"][0]["annotation_status"] == "READY"
-    assert replay["items"][0]["model_visibility"] == "IMPACT_PENDING"
-    assert replay["items"][0]["source_published_time"] == current_item[
-        "source_published_time"
-    ]
-    assert replay["items"][0]["collector_first_seen_time"] == current_item[
-        "collector_first_seen_time"
-    ]
-    assert index_payloads[-1]["reconcile_contract"] == (
-        module.NEWS_MIRROR_CONTRACT_VERSION
-    )
-    stable_state = json.loads(state_file.read_text(encoding="utf-8"))
-
-    posted.clear()
-    module._sync_news({}, config)
-
-    assert all(not url.endswith("/news-index") for url, _body in posted)
-    second_state = json.loads(state_file.read_text(encoding="utf-8"))
-    assert second_state["mirror_contract_version"] == stable_state[
-        "mirror_contract_version"
-    ]
-    assert second_state["reconciled_contract"] == stable_state[
-        "reconciled_contract"
-    ]
-    assert second_state["cursor"] == stable_state["cursor"]
-
-
-def test_news_sync_forwards_exact_semantic_withdrawals(monkeypatch, tmp_path) -> None:
-    module = _sync_module()
-    monkeypatch.setattr(module, "_verify_news_mirror_state", lambda *_a, **_k: None)
-    page = {
-        "items": [],
-        "withdrawals": [{
-            "source": "gdelt_gold_geopolitics",
-            "source_item_id": "entertainment-one",
-            "revision_number": 1,
-        }],
-        "next_cursor": '["2026-08-15T00:00:00Z","gdelt","one",1]',
-        "has_more": True,
-    }
-
-    class Response:
-        def __enter__(self): return self
-        def __exit__(self, *_args): return False
-        def read(self): return json.dumps(page).encode()
-
-    posted: list[tuple[str, dict]] = []
-    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k: Response())
-    monkeypatch.setattr(
-        module, "_post_json",
-        lambda url, body, _config: posted.append((url, json.loads(body))),
-    )
-    module._sync_news({}, {
-        "local_status_url": "http://local/status",
-        "remote_ingest_url": "https://remote/api/ingest",
+        "local_status_url": "http://local/api/status",
+        "remote_ingest_url": "https://remote/api/ingest", "token": "test",
         "news_state_file": str(tmp_path / "news-state.json"),
-        "token": "test",
+    }
+
+    module._sync_news({}, config)
+    assert actions == ["prepare"] + ["stage_details"] * 4
+    first_state = json.loads(Path(config["news_state_file"]).read_text(encoding="utf-8"))
+    assert first_state["projection_state"] == "REPLAYING"
+    actions.clear()
+    module._sync_news({}, config)
+    assert actions == ["prepare", "stage_index", "stage_index", "activate", "verify"]
+    assert active is True
+
+    actions.clear()
+    module._sync_news({}, config)
+    assert actions == ["prepare"]
+
+
+def test_news_generation_uses_rejection_reason_to_remove_orphan_staging(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    generation = _projection_fixture(1)
+    orphan = "f" * 64
+    attempts = 0
+    actions: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        module, "_get_local_json", lambda url: _projection_local_get(generation, url),
+    )
+
+    def post(_url, body, _config):
+        nonlocal attempts
+        payload = json.loads(body)
+        actions.append((payload["action"], payload.get("generation_id")))
+        if payload["action"] == "prepare":
+            attempts += 1
+            if attempts == 1:
+                raise module.RemoteInvariantViolation({
+                    "error_code": "NEWS_PROJECTION_STAGING_BUSY",
+                    "violation_count": 1, "staging_generation_id": orphan,
+                })
+            return {"active": False, "next_detail_offset": 0, "next_index_offset": 0}
+        if payload["action"].startswith("stage_"):
+            return {"received": len(payload["items"])}
+        return {"status": "OK"}
+
+    monkeypatch.setattr(module, "_post_json", post)
+    monkeypatch.setattr(module, "_verify_news_projection_state", lambda *_a: {})
+    module._sync_news({}, {
+        "local_status_url": "http://local/api/status",
+        "remote_ingest_url": "https://remote/api/ingest", "token": "test",
+        "news_state_file": str(tmp_path / "news-state.json"),
     })
 
-    withdrawals = [
-        body["withdraw_detail_keys"] for url, body in posted
-        if url.endswith("/news-index") and "withdraw_detail_keys" in body
+    assert actions[:3] == [
+        ("prepare", generation.manifest["generation_id"]),
+        ("abandon", orphan),
+        ("prepare", generation.manifest["generation_id"]),
     ]
-    assert withdrawals == [[module._stable_news_key(page["withdrawals"][0])]]
 
 
 def test_remote_market_chart_is_split_from_status_and_keeps_recent_window() -> None:

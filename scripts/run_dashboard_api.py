@@ -47,6 +47,11 @@ from xauusd_forecaster.dashboard_summaries import (
     dashboard_total_brief_days,
     dashboard_valid_outcome_summary,
 )
+from xauusd_forecaster.news_projection import (
+    NEWS_PROJECTION_MAX_ITEMS,
+    NewsProjectionGeneration,
+    build_news_projection_generation,
+)
 from scripts.run_dashboard_sync import _learning_summary, market_chart_snapshot
 from xauusd_forecaster.news_scheduler import (  # noqa: E402
     RetryScheduleConflict,
@@ -81,6 +86,8 @@ _QUOTE_CANDLE_CACHE_LOCK = threading.Lock()
 _QUOTE_CANDLE_CACHE: dict[str, dict] = {}
 _NEWS_EVIDENCE_CACHE_LOCK = threading.Lock()
 _NEWS_EVIDENCE_CACHE: dict[str, object] = {}
+_NEWS_PROJECTION_CACHE_LOCK = threading.Lock()
+_NEWS_PROJECTION_CACHE: dict[str, object] = {}
 _NEWS_EVIDENCE_VOLATILE_FIELDS = frozenset({"economic_age_minutes"})
 _NEWS_EVIDENCE_MANIFEST_VERSION = "local-news-evidence-generation-v2"
 
@@ -1388,18 +1395,32 @@ def _serialize_news_rows(
     return news
 
 
-def _news_archive_page(
-    connection: sqlite3.Connection, after: str | None, limit: int,
-) -> dict:
-    now = datetime.now(UTC)
+def _news_archive_context(
+    connection: sqlite3.Connection, now: datetime,
+) -> tuple[str, set[tuple[str, str, int]]]:
+    """Freeze reader metadata that is invariant across one paged generation."""
     epoch_row = connection.execute(
         "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
     ).fetchone()
     epoch = str(epoch_row[0])
     claimable_keys = {
         (str(row["source"]), str(row["source_item_id"]), int(row["revision_number"]))
-        for row in pending_annotation_records(connection, limit=100_000)
+        for row in pending_annotation_records(
+            connection, observed_at=now,
+            received_from=now - timedelta(days=NEWS_READER_WINDOW_DAYS),
+            limit=NEWS_PROJECTION_MAX_ITEMS,
+        )
     }
+    return epoch, claimable_keys
+
+
+def _news_archive_page(
+    connection: sqlite3.Connection, after: str | None, limit: int,
+    *, now: datetime | None = None,
+    context: tuple[str, set[tuple[str, str, int]]] | None = None,
+) -> dict:
+    now = now or datetime.now(UTC)
+    epoch, claimable_keys = context or _news_archive_context(connection, now)
     rows = _news_reader_rows(connection, now, after=after, limit=limit + 1)
     has_more = len(rows) > limit
     serialized = _serialize_news_rows(rows[:limit], now, epoch, claimable_keys)
@@ -1431,6 +1452,94 @@ def _news_archive_page(
         "window_days": NEWS_READER_WINDOW_DAYS,
         "window_start": (now - timedelta(days=NEWS_READER_WINDOW_DAYS)).isoformat(),
     }
+
+
+def _build_news_projection_source(
+    connection: sqlite3.Connection,
+) -> NewsProjectionGeneration:
+    """Freeze one complete, bounded 60-day source universe in reader order."""
+    now = datetime.now(UTC)
+    context = _news_archive_context(connection, now)
+    # This is an in-process materialization bound, not an HTTP display or write
+    # transport limit. Reusing the 20-row reader response bound here would
+    # repeat the projection joins hundreds of times for one frozen generation.
+    source_page_items = min(200, NEWS_PROJECTION_MAX_ITEMS)
+    after: str | None = None
+    items: list[dict] = []
+    withdrawals: list[dict] = []
+    while True:
+        page = _news_archive_page(
+            connection, after, source_page_items, now=now, context=context,
+        )
+        items.extend(page["items"])
+        withdrawals.extend(page["withdrawals"])
+        if len(items) + len(withdrawals) > NEWS_PROJECTION_MAX_ITEMS:
+            raise ValueError("news source universe exceeds the 10,000-row bound")
+        after = page.get("next_cursor")
+        if not page.get("has_more"):
+            break
+        if not after:
+            raise ValueError("news source pagination stalled before completion")
+    return build_news_projection_generation(
+        items, withdrawals,
+        window_start=(now - timedelta(days=NEWS_READER_WINDOW_DAYS)).isoformat(),
+        watermark=now.isoformat(),
+    )
+
+
+def _news_projection_source(
+    connection: sqlite3.Connection, activated_snapshot_id: str | None,
+) -> NewsProjectionGeneration:
+    """Keep staging immutable; refresh only after its exact snapshot activates."""
+    with _NEWS_PROJECTION_CACHE_LOCK:
+        cached = _NEWS_PROJECTION_CACHE.get("generation")
+        if isinstance(cached, NewsProjectionGeneration):
+            snapshot_id = str(cached.manifest["snapshot_id"])
+            if activated_snapshot_id != snapshot_id:
+                return cached
+        candidate = _build_news_projection_source(connection)
+        if (
+            isinstance(cached, NewsProjectionGeneration)
+            and candidate.manifest["source_digest"] == cached.manifest["source_digest"]
+        ):
+            return cached
+        _NEWS_PROJECTION_CACHE["generation"] = candidate
+        return candidate
+
+
+def _news_projection_batch(
+    generation: NewsProjectionGeneration, kind: str, offset: int,
+) -> dict:
+    batches = (
+        generation.detail_batches if kind == "detail"
+        else generation.index_batches if kind == "index"
+        else None
+    )
+    if batches is None or offset < 0:
+        raise ValueError("invalid news projection batch request")
+    next_offset = 0
+    for batch in batches:
+        if next_offset == offset:
+            items = list(batch)
+            return {
+                "generation_id": generation.manifest["generation_id"],
+                "snapshot_id": generation.manifest["snapshot_id"],
+                "kind": kind,
+                "offset": offset,
+                "items": items,
+                "next_offset": offset + len(items),
+            }
+        next_offset += len(batch)
+    expected = generation.manifest[
+        "expected_detail_count" if kind == "detail" else "expected_index_count"
+    ]
+    if offset == expected:
+        return {
+            "generation_id": generation.manifest["generation_id"],
+            "snapshot_id": generation.manifest["snapshot_id"],
+            "kind": kind, "offset": offset, "items": [], "next_offset": offset,
+        }
+    raise ValueError("news projection offset is not a frozen batch boundary")
 
 
 def _quote_history_files(directory: Path) -> list[Path]:
@@ -3247,20 +3356,36 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/news-archive":
             query = urllib.parse.parse_qs(parsed.query)
-            after = (query.get("after") or [None])[0]
+            mode = (query.get("mode") or ["manifest"])[0]
+            activated_snapshot_id = (
+                query.get("activated_snapshot_id") or [None]
+            )[0]
             try:
-                limit = min(
-                    NEWS_ARCHIVE_PAGE_LIMIT,
-                    max(1, int((query.get("limit") or [NEWS_ARCHIVE_PAGE_LIMIT])[0])),
-                )
+                if activated_snapshot_id and not re.fullmatch(
+                    r"[a-f0-9]{64}", activated_snapshot_id,
+                ):
+                    raise ValueError("invalid activated news snapshot identity")
                 connection = sqlite3.connect(
                     f"file:{self.database}?mode=ro", uri=True, timeout=5,
                 )
                 connection.row_factory = sqlite3.Row
                 try:
-                    payload = _news_archive_page(connection, after, limit)
+                    generation = _news_projection_source(
+                        connection, activated_snapshot_id,
+                    )
                 finally:
                     connection.close()
+                if mode == "manifest":
+                    payload = {"manifest": generation.manifest}
+                elif mode == "batch":
+                    snapshot_id = (query.get("snapshot_id") or [""])[0]
+                    if snapshot_id != generation.manifest["snapshot_id"]:
+                        raise ValueError("news projection snapshot is no longer available")
+                    kind = (query.get("kind") or [""])[0]
+                    offset = int((query.get("offset") or ["0"])[0])
+                    payload = _news_projection_batch(generation, kind, offset)
+                else:
+                    raise ValueError("invalid news projection source mode")
                 body = json.dumps(payload, allow_nan=False).encode()
                 status = 200
             except (OSError, sqlite3.Error, TypeError, ValueError) as error:
