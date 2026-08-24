@@ -1567,6 +1567,7 @@ def _news_projection_source_for_request(
     database: Path, activated_snapshot_id: str | None,
 ) -> NewsProjectionGeneration:
     """Return a frozen source or start one bounded background materialization."""
+    fallback: NewsProjectionGeneration | None = None
     with _NEWS_PROJECTION_CACHE_LOCK:
         cached = _NEWS_PROJECTION_CACHE.get("generation")
         built_at = float(_NEWS_PROJECTION_CACHE.get("built_at") or 0.0)
@@ -1579,10 +1580,15 @@ def _news_projection_source_for_request(
             )
             if not refresh_due:
                 return cached
+            fallback = cached
         if _NEWS_PROJECTION_CACHE.get("building") is True:
+            if fallback is not None:
+                return fallback
             raise NewsProjectionSourcePending("news projection source is building")
         retry_at = float(_NEWS_PROJECTION_CACHE.get("retry_at") or 0.0)
         if retry_at > time.monotonic():
+            if fallback is not None:
+                return fallback
             raise NewsProjectionSourcePending("news projection source retry is pending")
         _NEWS_PROJECTION_CACHE["building"] = True
     worker = threading.Thread(
@@ -1590,6 +1596,8 @@ def _news_projection_source_for_request(
         args=(database,), name="news-projection-source", daemon=True,
     )
     worker.start()
+    if fallback is not None:
+        return fallback
     raise NewsProjectionSourcePending("news projection source is building")
 
 

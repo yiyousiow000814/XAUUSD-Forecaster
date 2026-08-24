@@ -2905,6 +2905,19 @@ def test_news_projection_request_starts_one_background_build(monkeypatch, tmp_pa
         tmp_path / "db.sqlite3", None,
     ) is generation
 
+    module._NEWS_PROJECTION_CACHE["built_at"] = (
+        time.monotonic() - module.NEWS_PROJECTION_SOURCE_REFRESH_SECONDS - 1
+    )
+    assert module._news_projection_source_for_request(
+        tmp_path / "db.sqlite3", generation.manifest["snapshot_id"],
+    ) is generation
+    assert len(pending_threads) == 2
+    assert module._news_projection_source_for_request(
+        tmp_path / "db.sqlite3", generation.manifest["snapshot_id"],
+    ) is generation
+    assert len(pending_threads) == 2
+    module._NEWS_PROJECTION_CACHE.clear()
+
 
 def test_news_projection_manifest_is_authorized_and_nonblocking(
     monkeypatch, tmp_path,
