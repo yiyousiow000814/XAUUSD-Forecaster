@@ -157,7 +157,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   const [failureMode, setFailureMode] = useState(false);
   const graph = useMemo(() => buildArchitectureGraph(manifest, viewId, mobile ? "TB" : undefined), [manifest, mobile, viewId]);
   const nodesInitialized = useStore(useCallback(state => architectureNodesInitialized(
-    [...state.nodeLookup.values()].map(node => node.internals.userNode),
+    [...state.nodeLookup.values()],
     graph.view.node_ids,
   ), [graph.view.node_ids]));
   const canvasHeight = architectureCanvasHeight(graph.view.node_ids.length, mobile);
