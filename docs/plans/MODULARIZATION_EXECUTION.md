@@ -95,11 +95,11 @@ planning heads in the frozen original tracker section.
 | #298 | `f0b876e50b2acf6953aad408389d2fb38362c764` | `78ef970f1f13692cccf164d5b2bcfd60a7ca5b3b` | None; one transient loopback reset passed on clean rerun |
 | #299 | `78ef970f1f13692cccf164d5b2bcfd60a7ca5b3b` | `7587435b821fe78d87a729fe871de2e8422b168b` | Documentation merge retained current control semantics |
 | #301 | `7587435b821fe78d87a729fe871de2e8422b168b` | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` | Control Plane test-root correction and full inventory reconciliation |
-| #304 | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` | `5dc1daac105b02c2e9770123d288f75d18d4a88c` | Node-link graph plus semantic rank/track/convergence hints, beginner UX, single-owner camera, deterministic per-edge anchors, overlap-safe routing, and mobile readability correction |
-| #302 | `5dc1daac105b02c2e9770123d288f75d18d4a88c` | live PR #302 head OID | Documentation-only closure reconstruction and immutable before/after Preview screenshots |
+| #304 | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` | `d949931351e9344c11fe83541e5afdc53283b45b` | Node-link graph plus semantic rank/track/convergence hints, beginner-first Explore/Reference navigation, single-owner camera, deterministic per-edge anchors, overlap-safe routing, explicit disclosure, and mobile readability correction |
+| #302 | `d949931351e9344c11fe83541e5afdc53283b45b` | live PR #302 head OID | Documentation-only closure reconstruction and immutable exact-viewport Preview screenshots |
 
-Final implementation collection is 1,631: all 1,580 current-main contracts,
-32 campaign net additions, and 19 Explorer manifest cases, with zero unexplained
+Final implementation collection is 1,633: all 1,580 current-main contracts,
+32 campaign net additions, and 21 Explorer manifest cases, with zero unexplained
 removals. The exact replacement proof is in the test-organization and Closure
 audits. The complete merge order now contains 18 Draft PRs; the campaign from
 #287 through #302 contains 15, including #304.

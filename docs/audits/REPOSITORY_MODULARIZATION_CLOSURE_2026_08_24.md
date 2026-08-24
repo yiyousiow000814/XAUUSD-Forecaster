@@ -7,7 +7,7 @@ not make the target package layout, test organization, or Architecture Explorer
 `CURRENT`; those states change only after the ordered stack merges.
 
 - Audited latest `main`: `0bc4c1f84e7b7f48e628f5111c56adb6ad824a2a`
-- Final implementation head: #304 at `5dc1daac105b02c2e9770123d288f75d18d4a88c`
+- Final implementation head: #304 at `d949931351e9344c11fe83541e5afdc53283b45b`
 - Closure: existing Draft PR #302, documentation-only, based on #304
 - Complete Draft PR count: 18
 - Campaign sequence from #287 through Closure: 15 Draft PRs
@@ -55,8 +55,8 @@ the authoritative value.
 | 14 | #298 | `refactor/news-ai-packages` | `f0b876e50b2acf6953aad408389d2fb38362c764` | `78ef970f1f13692cccf164d5b2bcfd60a7ca5b3b` |
 | 15 | #299 | `refactor/assistant-runtime-dashboard-packages` | `78ef970f1f13692cccf164d5b2bcfd60a7ca5b3b` | `7587435b821fe78d87a729fe871de2e8422b168b` |
 | 16 | #301 | `refactor/test-organization` | `7587435b821fe78d87a729fe871de2e8422b168b` | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` |
-| 17 | #304 | `feat/private-architecture-explorer` | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` | `5dc1daac105b02c2e9770123d288f75d18d4a88c` |
-| 18 | #302 | `chore/modularization-campaign-closure` | `5dc1daac105b02c2e9770123d288f75d18d4a88c` | live PR #302 head OID |
+| 17 | #304 | `feat/private-architecture-explorer` | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` | `d949931351e9344c11fe83541e5afdc53283b45b` |
+| 18 | #302 | `chore/modularization-campaign-closure` | `d949931351e9344c11fe83541e5afdc53283b45b` | live PR #302 head OID |
 
 ## Latest-main integration
 
@@ -103,23 +103,24 @@ Control Center action was executed live.
 | Latest `main` | 1,580 |
 | Original pre-rebase Closure | 1,512 |
 | Repaired #301 | 1,612 |
-| Final implementation with Explorer | 1,631 |
+| Final implementation with Explorer | 1,633 |
 
 Raw latest-main-to-#301 comparison produced 76 removed and 108 added node IDs.
 Sixty-seven removals are identical logical symbols relocated with owner splits;
 the remaining nine are individually mapped to equivalent-or-stronger nodes in
 `docs/audits/TEST_ORGANIZATION_2026_08_24.md`. Unexplained removals are zero.
-The final net increase over current main is 51: 32 campaign cases plus 19
+The final net increase over current main is 53: 32 campaign cases plus 21
 Architecture Explorer manifest cases.
 
 Final local evidence:
 
-- Python platform-neutral CI gate: 1,412 passed; complete collection: 1,631;
-- Web: 298 passed, 6 skipped; build, scoped strict typecheck, and lint passed;
+- Python platform-neutral CI gate: 1,414 passed; complete collection: 1,633;
+- Web: 328 total, 322 passed, 6 skipped; build, scoped strict typecheck, and lint passed;
 - exact Windows CI family: 335 passed; Control Center plus Control Plane: 219
   collected; Control Plane focused: 14 collected;
-- Explorer: 48 tests; manifest validator: 19 tests; 37 nodes, 66 edges, 11
-  views, four scenarios, 52,379 bytes;
+- Explorer: 72 tests, including 24 beginner-navigation and disclosure contracts;
+  manifest validator: 21 tests; 37 nodes, 66 edges, 11 views, four scenarios,
+  52,331 bytes;
 - geometry contracts cover pairwise lane containment and 24px LR / 20px TB
   spacing, mobile branch topology, deterministic edge-specific anchors,
   exact port-to-route endpoints, node-safe orthogonal routes, and a 6px maximum
@@ -133,7 +134,7 @@ Final local evidence:
 - semantic layout: deterministic LR/TB ranks and tracks, centered convergence,
   eight-pass global spacing bound, strict fail-closed validation, and automatic
   placement of a synthetic connected node omitted from all hints;
-- lazy Explorer JS: 323,250 bytes / 97,553 gzip; lazy CSS: 33,047 / 6,546 gzip;
+- lazy Explorer JS: 330,959 bytes / 98,876 gzip; lazy CSS: 35,505 / 6,938 gzip;
 - public initial graph dependency delta: zero; graph packages remain lazy-only;
 - architecture docs/imports/manifest, repository policy, compileall, PowerShell
   parse, and diff checks passed.
@@ -147,43 +148,66 @@ Worker route, runtime GitHub request, Markdown parser, Windows process, or
 background thread.
 
 The exact #304 immutable Preview at
-`https://6ff5ea14-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`
+`https://253455b1-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`
 was verified at 1440x900, 390x844, and 360x800. Version
-`6ff5ea14-5bca-49ae-932d-61bc9586d5ac` exposed the exact `5dc1daac`
-build marker at every viewport. The Web and Cloudflare view retained both real
-branches, six expected nodes, four non-overlapping lanes, equal source and
-intermediate ranks, aligned branch tracks, centered Worker convergence, and
-Worker/Explorer presentation alignment. LR handles measured
-6x22px and TB handles measured 22x6px. D1 and Cloudflare target ports were
-separated by 60.48px on desktop and 142.59px on mobile; both arrows remained
-visible and each route endpoint matched its own rendered port within 0.001px.
-Mobile nodes remained 168px wide with 17px primary text and 13px lane headings.
-No viewport had page-level horizontal overflow. Both phone flows exercised a
-90px horizontal graph pan without page overflow, then view retention, Worker /
-Browser selection, bottom-sheet inspector open, scroll, and close. The
-Explorer contract still contains no Architecture API or runtime fetch. The
-viewport override was reset and all six QA-created browser tabs were closed;
-the final session-tab count was zero. The known shared Admin-shell React hydration #418 remains
-reproducible; it is outside this PR's explicit non-goals and is not hidden as
-Explorer evidence.
+`253455b1-a539-4f4b-8102-09f2698a9980` exposed the exact `d9499313`
+build marker at every viewport.
 
-Before and after at 1440x900:
+The beginner-first Explore surface opens on System Overview instead of an
+11-view selector. Search, scenarios, Advanced, and Fit remain directly
+reachable. Advanced contains the Reference navigation and complete package
+graph disclosure. System Overview shows its 11-node spine with six disclosed
+edges; selecting Decision discloses eight related edges without changing the
+camera zoom. Training shows five nodes, four edges, and three lanes. News,
+Dashboard, and Runtime and Release show 6/5, 8/7, and 7/4 nodes/edges. Package
+view starts with nine nodes and no inferred relationships, discloses six exact
+incident dependencies for Decision, and exposes all 28 package dependencies
+only on request. The adjacent dependency list is derived from the same six
+selected edges.
 
-![Web and Cloudflare before semantic constraints at 1440x900](screenshots/architecture-web-cloudflare-before-1440x900.png)
+Every visible routed endpoint matches its rendered port. Deterministic
+edge-specific slots and the partial-overlap contract retain separate fan-in
+routes through the Worker border; no hidden junction is introduced and both
+arrowheads remain independently visible. The 72-case Explorer family protects
+LR/TB port ownership, overlap tolerance, node-safe routing, semantic layout,
+camera ownership, disclosure, and beginner navigation.
 
-![Web and Cloudflare after semantic constraints at 1440x900](screenshots/architecture-web-cloudflare-after-1440x900.png)
+At both phone sizes, rendered nodes remain 168 CSS px wide, interactive targets
+remain at least 44px, the graph pans horizontally inside React Flow, and the
+page itself has no horizontal overflow. At 360x800, a 150px graph pan changed
+the viewport x coordinate from -145.348 to -295.348 while retaining zoom
+0.705882 and page overflow remained false. Package selection opens the fixed
+bottom-sheet inspector without reducing the node readability floor. Canvas
+height derives from graph and lane geometry rather than node count alone. The
+viewport override was reset and the final task-created browser-session count
+was zero. The known shared Admin-shell React hydration #418 remains
+reproducible after reload; it predates this disclosure change and is recorded
+rather than hidden.
 
-Before and after at 390x844:
+Representative 1440x900 evidence:
 
-![Web and Cloudflare before semantic constraints at 390x844](screenshots/architecture-web-cloudflare-before-390x844.png)
+![System Overview at 1440x900](screenshots/architecture-explorer-d949931/1440x900-overview.png)
 
-![Web and Cloudflare after semantic constraints at 390x844](screenshots/architecture-web-cloudflare-after-390x844.png)
+![Decision disclosure at 1440x900](screenshots/architecture-explorer-d949931/1440x900-overview-decision-selected.png)
 
-Before and after at 360x800:
+![Training lanes at 1440x900](screenshots/architecture-explorer-d949931/1440x900-training.png)
 
-![Web and Cloudflare before semantic constraints at 360x800](screenshots/architecture-web-cloudflare-before-360x800.png)
+![Package selection at 1440x900](screenshots/architecture-explorer-d949931/1440x900-package-selected.png)
 
-![Web and Cloudflare after semantic constraints at 360x800](screenshots/architecture-web-cloudflare-after-360x800.png)
+![Complete package dependencies at 1440x900](screenshots/architecture-explorer-d949931/1440x900-package-show-all.png)
+
+Exact phone evidence:
+
+![Beginner navigation at 390x844](screenshots/architecture-explorer-d949931/390x844-beginner-navigation.png)
+
+![Selected package at 390x844](screenshots/architecture-explorer-d949931/390x844-selected-package.png)
+
+![Beginner navigation at 360x800](screenshots/architecture-explorer-d949931/360x800-beginner-navigation.png)
+
+![Selected package at 360x800](screenshots/architecture-explorer-d949931/360x800-selected-package.png)
+
+The same evidence directory also retains Overview at both phone widths and the
+desktop Dashboard, News, Runtime and Release, and initial Package states.
 
 ## External import compatibility
 
