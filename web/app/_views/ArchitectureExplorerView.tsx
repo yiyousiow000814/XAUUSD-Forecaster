@@ -13,9 +13,9 @@ import {
 } from "../_lib/architecture-camera";
 import {
   architectureCanvasHeight, architectureCommitSha, architectureFailureImpact, architectureFitOptions, architectureGithubHref, architectureRelations,
-  architectureEdgeRoute, architectureRouteLabelPoint, architectureRoutePath,
+  architectureEdgeRoute, architectureGraphBounds, architectureMobileViewport, architectureRouteLabelPoint, architectureRoutePath,
   bestViewForNode, buildArchitectureGraph, bundledArchitectureManifest, searchArchitectureNodes,
-  type ArchitectureEdge, type ArchitectureFailureImpact, type ArchitectureManifest, type ArchitectureNode,
+  type ArchitectureEdge, type ArchitectureFailureImpact, type ArchitectureManifest, type ArchitectureNode, type ArchitecturePortSlot,
 } from "../_lib/architecture-explorer";
 import styles from "./ArchitectureExplorerView.module.css";
 
@@ -33,6 +33,7 @@ type FailureStatus = "AFFECTED" | "CONTINUES" | null;
 type FlowNodeData = Record<string, unknown> & {
   node: ArchitectureNode; laneLabel: string; selected: boolean; dimmed: boolean; highlighted: boolean;
   direction: "LR" | "TB"; hasIncomingEdge: boolean; hasOutgoingEdge: boolean;
+  incomingPorts: ArchitecturePortSlot[]; outgoingPorts: ArchitecturePortSlot[];
   failureStatus: FailureStatus; onSelect: (id: string) => void; onHover: (id: string | null) => void;
   onDrill: (id: string) => void; onNavigate: (id: string, direction: number) => void;
 };
@@ -58,9 +59,11 @@ const ArchitectureGraphNode = memo(function ArchitectureGraphNode({ data }: Node
   const { node, laneLabel, selected, dimmed, highlighted, failureStatus, onSelect, onHover, onDrill, onNavigate } = data;
   const className = [styles.graphNode, styles[`kind${node.kind}`], selected ? styles.selected : "",
     highlighted ? styles.highlighted : "", dimmed ? styles.dimmed : "", failureStatus ? styles[`failure${failureStatus}`] : ""].filter(Boolean).join(" ");
+  const portStyle = (port: ArchitecturePortSlot) => data.direction === "TB" ? { left: port.offset } : { top: port.offset };
   return <article className={className} data-failure-status={failureStatus ?? undefined} data-node-id={node.id}>
-    {data.hasIncomingEdge ? <Handle className={`${styles.handle} ${data.direction === "TB" ? styles.handleTB : styles.handleLR}`}
-      isConnectable={false} position={data.direction === "TB" ? Position.Top : Position.Left} type="target" /> : null}
+    {data.incomingPorts.map(port => <Handle className={`${styles.handle} ${data.direction === "TB" ? styles.handleTB : styles.handleLR}`}
+      data-edge-port={port.edgeId} id={`${port.edgeId}-target`} isConnectable={false} key={port.edgeId}
+      position={data.direction === "TB" ? Position.Top : Position.Left} style={portStyle(port)} type="target" />)}
     <button aria-label={`${node.label}, ${node.kind}, ${node.runtime_state}`} aria-pressed={selected} title={node.summary}
       onClick={() => onSelect(node.id)} onDoubleClick={() => onDrill(node.id)}
       onFocus={() => onHover(node.id)} onBlur={() => onHover(null)}
@@ -75,8 +78,9 @@ const ArchitectureGraphNode = memo(function ArchitectureGraphNode({ data }: Node
       <small>{laneLabel}</small>
       {failureStatus ? <em>{failureStatus}</em> : null}
     </button>
-    {data.hasOutgoingEdge ? <Handle className={`${styles.handle} ${data.direction === "TB" ? styles.handleTB : styles.handleLR}`}
-      isConnectable={false} position={data.direction === "TB" ? Position.Bottom : Position.Right} type="source" /> : null}
+    {data.outgoingPorts.map(port => <Handle className={`${styles.handle} ${data.direction === "TB" ? styles.handleTB : styles.handleLR}`}
+      data-edge-port={port.edgeId} id={`${port.edgeId}-source`} isConnectable={false} key={port.edgeId}
+      position={data.direction === "TB" ? Position.Bottom : Position.Right} style={portStyle(port)} type="source" />)}
   </article>;
 });
 
@@ -163,7 +167,8 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
     const measured = state.nodeLookup.get(id)?.measured;
     return Boolean(measured && (measured.width ?? 0) > 0 && (measured.height ?? 0) > 0);
   }), [graph.view.node_ids]));
-  const canvasHeight = architectureCanvasHeight(graph.view.node_ids.length, mobile);
+  const graphBounds = useMemo(() => architectureGraphBounds(graph.nodes, graph.laneBoxes), [graph.laneBoxes, graph.nodes]);
+  const canvasHeight = architectureCanvasHeight(graphBounds, mobile);
   const cameraStateRef = useRef({ flow, flowInitialized, graph, mobile, nodesInitialized, viewId });
   const [camera] = useState(() => createArchitectureCameraController());
   useLayoutEffect(() => {
@@ -182,6 +187,12 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
       execute: intent => {
         const current = cameraStateRef.current;
         const duration = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 260;
+        if (intent.type !== "FOCUS_NODE" && current.mobile && intent.type !== "MANUAL_FIT") {
+          const width = canvasRef.current?.clientWidth ?? window.innerWidth;
+          const height = canvasRef.current?.clientHeight ?? canvasHeight;
+          current.flow.setViewport(architectureMobileViewport(current.graph.nodes, current.graph.laneBoxes, width, height), { duration });
+          return;
+        }
         if (intent.type !== "FOCUS_NODE") {
           current.flow.fitView({ ...architectureFitOptions(current.graph.view.node_ids.length, current.mobile), duration });
           return;
@@ -202,7 +213,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
       },
     });
     camera.layoutChanged();
-  }, [camera, flow, flowInitialized, graph, mobile, nodesInitialized, viewId]);
+  }, [camera, canvasHeight, flow, flowInitialized, graph, mobile, nodesInitialized, viewId]);
   const selected = selectedId ? manifest.nodes.find(item => item.id === selectedId) ?? null : null;
   const scenario = manifest.scenarios.find(item => item.id === scenarioId) ?? null;
   const activeImpact = failureMode ? architectureFailureImpact(manifest, selectedId) : null;
@@ -292,6 +303,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   })), [graph.laneBoxes]);
   const flowEdges: ArchitectureFlowEdge[] = useMemo(() => graph.edges.map(item => ({
     id: item.id, source: item.source, target: item.target, type: "architecture", label: item.label,
+    sourceHandle: `${item.id}-source`, targetHandle: `${item.id}-target`,
     markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18, color: item.criticality === "CRITICAL" ? "#137d74" : "#607278" },
     animated: scenarioEdges.has(item.id), data: {
       edge: item,

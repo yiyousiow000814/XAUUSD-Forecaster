@@ -3,8 +3,10 @@ import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
-  ARCHITECTURE_LANE_GAP, architectureCanvasHeight, architectureEdgeRoute, architectureFitOptions, architectureGithubHref,
-  architecturePortVisibility, architectureRelations, architectureRouteCrossesUnrelatedNode, architectureRoutePath, bestViewForNode, buildArchitectureGraph,
+  ARCHITECTURE_EDGE_OVERLAP_TOLERANCE, ARCHITECTURE_LANE_GAP, ARCHITECTURE_MOBILE_NODE_WIDTH_FLOOR,
+  architectureCanvasHeight, architectureEdgeRoute, architectureFitOptions, architectureGithubHref, architectureGraphBounds, architectureMobileViewport,
+  architecturePortVisibility, architectureRelations, architectureRouteCrossesUnrelatedNode, architectureRoutePath, architectureSharedCollinearLength,
+  bestViewForNode, buildArchitectureGraph,
   parseArchitectureManifest, searchArchitectureNodes,
 } from "../app/_lib/architecture-explorer.ts";
 import { createArchitectureCameraController } from "../app/_lib/architecture-camera.ts";
@@ -243,8 +245,8 @@ test("27. Visible edges own port visibility and terminal nodes have no phantom h
   const web = buildArchitectureGraph(manifest, "web-cloudflare", "LR");
   assert.deepEqual(architecturePortVisibility(web.edges, "architecture-explorer"), { hasIncomingEdge: true, hasOutgoingEdge: false });
   assert.deepEqual(architecturePortVisibility(web.edges, "stable-release"), { hasIncomingEdge: false, hasOutgoingEdge: true });
-  assert.match(viewSource, /data\.hasIncomingEdge \? <Handle/);
-  assert.match(viewSource, /data\.hasOutgoingEdge \? <Handle/);
+  assert.match(viewSource, /data\.incomingPorts\.map\(port => <Handle/);
+  assert.match(viewSource, /data\.outgoingPorts\.map\(port => <Handle/);
   assert.match(cssSource, /\.handleLR \{ width: 6px !important; min-width: 6px !important; height: 22px !important;/);
   assert.match(cssSource, /\.handleTB \{ width: 22px !important; height: 6px !important; min-height: 6px !important;/);
   assert.match(cssSource, /\.handle \{[^}]*display: block !important;[^}]*border-radius: 999px !important;[^}]*padding: 0 !important;/);
@@ -270,24 +272,92 @@ test("28. Every routed edge clears unrelated nodes and keeps a unique complete p
   }
 });
 
-test("29. Web and Cloudflare keeps two distinct branches through one presentation node", () => {
+test("29. Every edge owns exact source and target port anchors", () => {
+  for (const view of manifest.views) for (const direction of ["LR", "TB"]) {
+    const graph = buildArchitectureGraph(manifest, view.id, direction);
+    for (const edge of graph.edges) {
+      const source = graph.nodes.find(node => node.id === edge.source);
+      const target = graph.nodes.find(node => node.id === edge.target);
+      const sourcePort = source.data.outgoingPorts.find(port => port.edgeId === edge.id);
+      const targetPort = target.data.incomingPorts.find(port => port.edgeId === edge.id);
+      assert.deepEqual(sourcePort.anchor, edge.sourceAnchor, `${view.id} ${direction} ${edge.id} source port`);
+      assert.deepEqual(targetPort.anchor, edge.targetAnchor, `${view.id} ${direction} ${edge.id} target port`);
+      const route = architectureEdgeRoute(graph.nodes, edge, direction);
+      assert.deepEqual(route[0], edge.sourceAnchor, `${view.id} ${direction} ${edge.id} route source`);
+      assert.deepEqual(route.at(-1), edge.targetAnchor, `${view.id} ${direction} ${edge.id} route target`);
+    }
+  }
+  assert.match(viewSource, /id=\{`\$\{port\.edgeId\}-target`\}/);
+  assert.match(viewSource, /id=\{`\$\{port\.edgeId\}-source`\}/);
+  assert.match(viewSource, /sourceHandle: `\$\{item\.id\}-source`, targetHandle: `\$\{item\.id\}-target`/);
+});
+
+test("30. Fan-in routes do not create a hidden collinear junction", () => {
+  for (const view of manifest.views) for (const direction of ["LR", "TB"]) {
+    const graph = buildArchitectureGraph(manifest, view.id, direction);
+    const routes = graph.edges.map(edge => ({ edge, points: architectureEdgeRoute(graph.nodes, edge, direction) }));
+    for (let left = 0; left < routes.length; left += 1) for (let right = left + 1; right < routes.length; right += 1) {
+      assert.ok(architectureSharedCollinearLength(routes[left].points, routes[right].points) <= ARCHITECTURE_EDGE_OVERLAP_TOLERANCE,
+        `${view.id} ${direction}: ${routes[left].edge.id} shares a trunk with ${routes[right].edge.id}`);
+    }
+  }
   for (const direction of ["LR", "TB"]) {
     const graph = buildArchitectureGraph(manifest, "web-cloudflare", direction);
-    const route = (id) => architectureRoutePath(architectureEdgeRoute(graph.nodes, graph.edges.find(edge => edge.id === id), direction));
-    assert.notEqual(route("sync-to-d1"), route("stable-to-cloudflare"));
-    assert.notEqual(route("d1-to-web"), route("cloudflare-to-web"));
+    const d1 = graph.edges.find(edge => edge.id === "d1-to-web");
+    const cloudflare = graph.edges.find(edge => edge.id === "cloudflare-to-web");
+    const d1Route = architectureEdgeRoute(graph.nodes, d1, direction);
+    const cloudflareRoute = architectureEdgeRoute(graph.nodes, cloudflare, direction);
+    assert.notDeepEqual(d1.targetAnchor, cloudflare.targetAnchor, `${direction} distinct Worker target slots`);
+    assert.equal(architectureSharedCollinearLength(d1Route, cloudflareRoute), 0, `${direction} hidden fan-in trunk`);
+    assert.deepEqual(d1Route.at(-1), d1.targetAnchor);
+    assert.deepEqual(cloudflareRoute.at(-1), cloudflare.targetAnchor);
     assert.ok(graph.edges.some(edge => edge.source === "web-worker" && edge.target === "architecture-explorer"));
   }
+  assert.match(viewSource, /markerEnd: \{ type: MarkerType\.ArrowClosed/);
   assert.doesNotMatch(viewSource, /<h[1-6][^>]*>\{data\.edge\.label\}/);
 });
 
-test("30. Fit zoom is bounded by view size and selection does not refit", () => {
+test("31. Mobile automatic viewport preserves the node readability floor and permits canvas panning", () => {
+  for (const view of manifest.views) {
+    const graph = buildArchitectureGraph(manifest, view.id, "TB");
+    const bounds = architectureGraphBounds(graph.nodes, graph.laneBoxes);
+    const height = architectureCanvasHeight(bounds, true);
+    for (const width of [390, 360]) {
+      const viewport = architectureMobileViewport(graph.nodes, graph.laneBoxes, width, height);
+      assert.ok(Math.min(...graph.nodes.map(node => node.width * viewport.zoom)) >= ARCHITECTURE_MOBILE_NODE_WIDTH_FLOOR);
+    }
+  }
+  const web = buildArchitectureGraph(manifest, "web-cloudflare", "TB");
+  const bounds = architectureGraphBounds(web.nodes, web.laneBoxes);
+  const canvasWidth = 334;
+  const viewport = architectureMobileViewport(web.nodes, web.laneBoxes, canvasWidth, architectureCanvasHeight(bounds, true));
+  assert.ok(bounds.width * viewport.zoom > canvasWidth, "wide branch graph remains horizontally pannable instead of shrinking below the floor");
+  const worker = web.nodes.find(node => node.id === "web-worker");
+  const stable = web.nodes.find(node => node.id === "stable-release");
+  const projected = node => ({ left: node.position.x * viewport.zoom + viewport.x, right: (node.position.x + node.width) * viewport.zoom + viewport.x });
+  assert.ok(Math.min(projected(worker).right, canvasWidth) - Math.max(projected(worker).left, 0) >= 140,
+    "primary convergence node remains readable initially");
+  assert.ok(Math.min(projected(stable).right, canvasWidth) - Math.max(projected(stable).left, 0) >= 60,
+    "secondary release branch remains visually apparent initially");
+  assert.equal(ARCHITECTURE_MOBILE_NODE_WIDTH_FLOOR, 168);
+  assert.match(viewSource, /current\.mobile && intent\.type !== "MANUAL_FIT"/);
+  assert.match(viewSource, /panOnDrag zoomOnPinch zoomOnScroll/);
+  assert.match(cssSource, /\.stage \{[^}]*overflow: hidden;/);
+  assert.match(cssSource, /@media \(max-width: 720px\)[\s\S]*\.graphNode strong \{ font-size: 17px; \}/);
+  assert.match(cssSource, /\.laneRegion > span \{ top: 7px; left: 10px; font-size: 13px;/);
+});
+
+test("32. Mobile canvas height follows graph geometry rather than node count", () => {
+  assert.equal(architectureCanvasHeight({ x: 0, y: 0, width: 500, height: 600 }, true), 696);
+  assert.equal(architectureCanvasHeight({ x: 0, y: 0, width: 500, height: 800 }, true), 896);
+  assert.equal(architectureCanvasHeight({ x: 0, y: 0, width: 500, height: 800 }, false), 650);
+  assert.match(viewSource, /architectureCanvasHeight\(graphBounds, mobile\)/);
+  assert.doesNotMatch(source("../app/_lib/architecture-explorer.ts"), /nodeCount \* 135/);
+});
+
+test("33. Fit zoom is bounded by view size and selection does not refit", () => {
   assert.ok(architectureFitOptions(4, false).maxZoom > architectureFitOptions(11, false).maxZoom);
   assert.ok(architectureFitOptions(4, true).maxZoom <= architectureFitOptions(4, false).maxZoom);
-  assert.equal(architectureCanvasHeight(4, true), 650);
-  assert.equal(architectureCanvasHeight(11, true), 1485);
-  assert.equal(architectureCanvasHeight(99, true), 1600);
-  assert.equal(architectureCanvasHeight(11, false), 650);
   assert.match(viewSource, /const zoom = current\.flow\.getZoom\(\)/);
   assert.match(viewSource, /current\.flow\.setViewport\(\{/);
   assert.match(viewSource, /y: 64 - item\.position\.y \* zoom/);
@@ -297,7 +367,7 @@ test("30. Fit zoom is bounded by view size and selection does not refit", () => 
   assert.doesNotMatch(viewSource, /nodes=\{\[\.\.\.laneNodes/);
 });
 
-test("31. Edge labels follow critical, release, interaction, guide, and sparse-view rules", () => {
+test("34. Edge labels follow critical, release, interaction, guide, and sparse-view rules", () => {
   assert.match(viewSource, /item\.criticality === "CRITICAL"/);
   assert.match(viewSource, /item\.criticality === "CONTROL_PLANE" && viewId === "runtime-release"/);
   assert.match(viewSource, /graph\.edges\.length <= 4/);
@@ -306,13 +376,13 @@ test("31. Edge labels follow critical, release, interaction, guide, and sparse-v
   assert.match(viewSource, /graph\.edges\.map\(edge =>/);
 });
 
-test("32. Beginner and failure copy is Chinese-primary", () => {
+test("35. Beginner and failure copy is Chinese-primary", () => {
   for (const label of ["它是什么？", "为什么需要它？", "谁负责它？", "输入来自哪里？", "输出到哪里？", "它坏了会停止什么？", "什么仍会继续？", "打开子系统"]) {
     assert.ok(viewSource.includes(label), label);
   }
 });
 
-test("33. Required failure impacts are explicit and missing contracts stay disabled", () => {
+test("36. Required failure impacts are explicit and missing contracts stay disabled", () => {
   const required = ["training", "cloudflare", "decision", "evidence", "news", "dashboard-sync", "d1", "control-plane"];
   assert.ok(required.every(id => manifest.failure_impacts.some(item => item.node_id === id)));
   assert.ok(manifest.failure_impacts.every(impact => impact.affected.every(item => item.message.includes("AFFECTED"))));
@@ -345,7 +415,7 @@ function cameraHarness(initial = {}) {
   return { commands, controller, flush, frames, layout };
 }
 
-test("34. Camera owner performs one initial automatic Fit", () => {
+test("37. Camera owner performs one initial automatic Fit", () => {
   const h = cameraHarness({ flowInitialized: false });
   h.controller.request({ type: "FIT_VIEW", viewId: "system-overview" }); h.flush();
   assert.equal(h.commands.length, 0);
@@ -353,13 +423,13 @@ test("34. Camera owner performs one initial automatic Fit", () => {
   assert.deepEqual(h.commands.map(item => item.type), ["FIT_VIEW"]);
 });
 
-test("35. One view switch performs one automatic Fit", () => {
+test("38. One view switch performs one automatic Fit", () => {
   const h = cameraHarness({ viewId: "training-models" });
   h.controller.request({ type: "FIT_VIEW", viewId: "training-models" }); h.flush();
   assert.deepEqual(h.commands.map(item => item.type), ["FIT_VIEW"]);
 });
 
-test("36. Rapid A to B to C navigation executes only C", () => {
+test("39. Rapid A to B to C navigation executes only C", () => {
   const h = cameraHarness({ viewId: "view-c" });
   h.controller.request({ type: "FIT_VIEW", viewId: "view-a" });
   h.controller.request({ type: "FIT_VIEW", viewId: "view-b" });
@@ -367,19 +437,19 @@ test("36. Rapid A to B to C navigation executes only C", () => {
   assert.deepEqual(h.commands, [{ type: "FIT_VIEW", viewId: "view-c" }]);
 });
 
-test("37. Cross-view search performs one final Focus without Fit", () => {
+test("40. Cross-view search performs one final Focus without Fit", () => {
   const h = cameraHarness({ viewId: "training-models" });
   h.controller.request({ type: "FOCUS_NODE", viewId: "training-models", nodeId: "training", source: "SEARCH" }); h.flush();
   assert.deepEqual(h.commands.map(item => item.type), ["FOCUS_NODE"]);
 });
 
-test("38. A cross-view scenario starts with one Focus and no duplicate Fit", () => {
+test("41. A cross-view scenario starts with one Focus and no duplicate Fit", () => {
   const h = cameraHarness({ viewId: "runtime-release" });
   h.controller.request({ type: "FOCUS_NODE", viewId: "runtime-release", nodeId: "github", source: "SCENARIO_STEP" }); h.flush();
   assert.deepEqual(h.commands.map(item => item.type), ["FOCUS_NODE"]);
 });
 
-test("39. Each scenario step performs exactly one camera command", () => {
+test("42. Each scenario step performs exactly one camera command", () => {
   const h = cameraHarness({ viewId: "system-overview" });
   for (const nodeId of ["ctrader", "business-runtime", "decision"]) {
     h.controller.request({ type: "FOCUS_NODE", viewId: "system-overview", nodeId, source: "SCENARIO_STEP" }); h.flush();
@@ -387,7 +457,7 @@ test("39. Each scenario step performs exactly one camera command", () => {
   assert.deepEqual(h.commands.map(item => item.nodeId), ["ctrader", "business-runtime", "decision"]);
 });
 
-test("40. Inspector close waits for width transition then Fits once", () => {
+test("43. Inspector close waits for width transition then Fits once", () => {
   const h = cameraHarness({ canvasTransitionComplete: false });
   h.controller.request({ type: "REFIT_AFTER_INSPECTOR_CLOSE", viewId: "system-overview" }); h.flush();
   assert.equal(h.commands.length, 0);
@@ -395,13 +465,13 @@ test("40. Inspector close waits for width transition then Fits once", () => {
   assert.deepEqual(h.commands.map(item => item.type), ["REFIT_AFTER_INSPECTOR_CLOSE"]);
 });
 
-test("41. Manual Fit performs exactly one Fit", () => {
+test("44. Manual Fit performs exactly one Fit", () => {
   const h = cameraHarness();
   h.controller.request({ type: "MANUAL_FIT", viewId: "system-overview" }); h.flush();
   assert.deepEqual(h.commands.map(item => item.type), ["MANUAL_FIT"]);
 });
 
-test("42. Cancelled stale frames cannot move the current view", () => {
+test("45. Cancelled stale frames cannot move the current view", () => {
   const h = cameraHarness({ viewId: "view-b" });
   h.controller.request({ type: "FIT_VIEW", viewId: "view-a" });
   const staleFrames = [...h.frames.values()];
@@ -410,7 +480,7 @@ test("42. Cancelled stale frames cannot move the current view", () => {
   assert.deepEqual(h.commands, [{ type: "FIT_VIEW", viewId: "view-b" }]);
 });
 
-test("43. Mobile initialization exposes only one TB layout Fit", () => {
+test("46. Mobile initialization exposes only one TB layout Fit", () => {
   const h = cameraHarness({ viewId: "system-overview" });
   h.controller.request({ type: "FIT_VIEW", viewId: "system-overview" }); h.flush();
   assert.equal(buildArchitectureGraph(manifest, "system-overview", "TB").direction, "TB");

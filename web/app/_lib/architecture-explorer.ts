@@ -42,16 +42,26 @@ export type ArchitectureManifest = {
 };
 export type ArchitectureGraphNode = {
   id: string; position: { x: number; y: number }; width: number; height: number;
-  data: { node: ArchitectureNode; laneId: string; laneLabel: string; hasIncomingEdge: boolean; hasOutgoingEdge: boolean };
+  data: {
+    node: ArchitectureNode; laneId: string; laneLabel: string; hasIncomingEdge: boolean; hasOutgoingEdge: boolean;
+    incomingPorts: ArchitecturePortSlot[]; outgoingPorts: ArchitecturePortSlot[];
+  };
 };
 export type ArchitectureGraphLane = {
   id: string; position: { x: number; y: number }; width: number; height: number;
   data: { label: string; direction: "LR" | "TB" };
 };
-export type ArchitectureGraphEdge = ArchitectureEdge & { source: string; target: string };
+export type ArchitectureGraphEdge = ArchitectureEdge & {
+  source: string; target: string; sourceAnchor: ArchitecturePoint; targetAnchor: ArchitecturePoint;
+  routeSlot: number; routeCount: number;
+};
 export type ArchitecturePoint = { x: number; y: number };
+export type ArchitecturePortSlot = { edgeId: string; offset: number; anchor: ArchitecturePoint };
+export type ArchitectureGraphBounds = { x: number; y: number; width: number; height: number };
 
 export const ARCHITECTURE_LANE_GAP = { LR: 24, TB: 20 } as const;
+export const ARCHITECTURE_EDGE_OVERLAP_TOLERANCE = 6;
+export const ARCHITECTURE_MOBILE_NODE_WIDTH_FLOOR = 168;
 
 const STATES = new Set<ArchitectureState>(["CURRENT", "PENDING", "TARGET", "PAUSED", "RETAINED"]);
 const PATH_STATES = new Set<ArchitecturePathState>(["CURRENT_PATH", "PENDING_PATH", "LEGACY_SHIM", "TARGET_PATH"]);
@@ -180,8 +190,38 @@ export function architectureFitOptions(nodeCount: number, mobile: boolean) {
   return { padding: mobile ? .08 : .07, maxZoom, duration: 280 } as const;
 }
 
-export function architectureCanvasHeight(nodeCount: number, mobile: boolean) {
-  return mobile ? Math.min(1600, Math.max(650, nodeCount * 135)) : 650;
+export function architectureGraphBounds(nodes: ArchitectureGraphNode[], lanes: ArchitectureGraphLane[]): ArchitectureGraphBounds {
+  const boxes = lanes.length ? lanes : nodes;
+  const left = Math.min(...boxes.map(item => item.position.x));
+  const top = Math.min(...boxes.map(item => item.position.y));
+  const right = Math.max(...boxes.map(item => item.position.x + item.width));
+  const bottom = Math.max(...boxes.map(item => item.position.y + item.height));
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+export function architectureCanvasHeight(bounds: ArchitectureGraphBounds, mobile: boolean) {
+  return mobile ? Math.min(980, Math.max(590, Math.round(bounds.height + 96))) : 650;
+}
+
+export function architectureMobileViewport(
+  nodes: ArchitectureGraphNode[], lanes: ArchitectureGraphLane[], canvasWidth: number, canvasHeight: number,
+) {
+  const bounds = architectureGraphBounds(nodes, lanes);
+  const minimumNodeWidth = Math.min(...nodes.map(node => node.width));
+  const readabilityZoom = ARCHITECTURE_MOBILE_NODE_WIDTH_FLOOR / minimumNodeWidth;
+  const fitZoom = Math.min((canvasWidth - 28) / bounds.width, (canvasHeight - 96) / bounds.height, 1);
+  const zoom = Math.max(readabilityZoom, fitZoom);
+  const boundsCenterX = bounds.x + bounds.width / 2;
+  const convergenceNodes = nodes.filter(node => node.data.incomingPorts.length > 1);
+  const convergenceCenterX = convergenceNodes.length
+    ? convergenceNodes.reduce((total, node) => total + node.position.x + node.width / 2, 0) / convergenceNodes.length
+    : boundsCenterX;
+  const usefulCenterX = boundsCenterX * .73 + convergenceCenterX * .27;
+  return {
+    x: canvasWidth / 2 - usefulCenterX * zoom,
+    y: 48 - bounds.y * zoom,
+    zoom,
+  };
 }
 
 function laneBounds(nodes: ArchitectureGraphNode[], lane: ArchitectureLane, direction: "LR" | "TB"): ArchitectureGraphLane {
@@ -236,6 +276,43 @@ export function architecturePortVisibility(edges: Pick<ArchitectureGraphEdge, "s
   };
 }
 
+function portOffset(size: number, index: number, count: number) {
+  if (count === 1) return size / 2;
+  const margin = Math.min(18, size / 4);
+  return margin + index * ((size - margin * 2) / (count - 1));
+}
+
+export function architectureEdgeAnchors(
+  nodes: ArchitectureGraphNode[], edges: Array<Pick<ArchitectureGraphEdge, "id" | "source" | "target">>, direction: "LR" | "TB",
+) {
+  const anchors = new Map<string, { sourceAnchor: ArchitecturePoint; targetAnchor: ArchitecturePoint }>();
+  const nodeById = new Map(nodes.map(node => [node.id, node]));
+  const crossCenter = (nodeId: string) => {
+    const node = nodeById.get(nodeId)!;
+    return direction === "LR" ? node.position.y + node.height / 2 : node.position.x + node.width / 2;
+  };
+  const assign = (node: ArchitectureGraphNode, side: "source" | "target") => {
+    const incident = edges.filter(edge => side === "source" ? edge.source === node.id : edge.target === node.id)
+      .sort((left, right) => {
+        const leftOther = side === "source" ? left.target : left.source;
+        const rightOther = side === "source" ? right.target : right.source;
+        return crossCenter(leftOther) - crossCenter(rightOther) || left.id.localeCompare(right.id);
+      });
+    incident.forEach((edge, index) => {
+      const size = direction === "LR" ? node.height : node.width;
+      const offset = portOffset(size, index, incident.length);
+      const anchor = direction === "LR"
+        ? { x: node.position.x + (side === "source" ? node.width : 0), y: node.position.y + offset }
+        : { x: node.position.x + offset, y: node.position.y + (side === "source" ? node.height : 0) };
+      const current = anchors.get(edge.id) ?? {} as { sourceAnchor: ArchitecturePoint; targetAnchor: ArchitecturePoint };
+      current[side === "source" ? "sourceAnchor" : "targetAnchor"] = anchor;
+      anchors.set(edge.id, current);
+    });
+  };
+  nodes.forEach(node => { assign(node, "target"); assign(node, "source"); });
+  return anchors;
+}
+
 function segmentIntersectsNode(a: ArchitecturePoint, b: ArchitecturePoint, node: ArchitectureGraphNode, clearance = 8) {
   const left = node.position.x - clearance; const right = node.position.x + node.width + clearance;
   const top = node.position.y - clearance; const bottom = node.position.y + node.height + clearance;
@@ -255,37 +332,62 @@ export function architectureEdgeRoute(
   nodes: ArchitectureGraphNode[], edge: Pick<ArchitectureGraphEdge, "id" | "source" | "target">, direction: "LR" | "TB",
 ) {
   const source = nodes.find(node => node.id === edge.source)!; const target = nodes.find(node => node.id === edge.target)!;
-  const start = direction === "LR"
+  const anchors = "sourceAnchor" in edge && "targetAnchor" in edge
+    ? edge as Pick<ArchitectureGraphEdge, "sourceAnchor" | "targetAnchor">
+    : architectureEdgeAnchors(nodes, [edge], direction).get(edge.id)!;
+  const start = anchors?.sourceAnchor ?? (direction === "LR"
     ? { x: source.position.x + source.width, y: source.position.y + source.height / 2 }
-    : { x: source.position.x + source.width / 2, y: source.position.y + source.height };
-  const end = direction === "LR"
+    : { x: source.position.x + source.width / 2, y: source.position.y + source.height });
+  const end = anchors?.targetAnchor ?? (direction === "LR"
     ? { x: target.position.x, y: target.position.y + target.height / 2 }
-    : { x: target.position.x + target.width / 2, y: target.position.y };
-  const middle = direction === "LR" ? (start.x + end.x) / 2 : (start.y + end.y) / 2;
+    : { x: target.position.x + target.width / 2, y: target.position.y });
+  const hashOrdinal = [...edge.id].reduce((total, char) => total + char.charCodeAt(0), 0) % 9 - 4;
+  const routeSlot = "routeSlot" in edge ? Number(edge.routeSlot) : hashOrdinal + 4;
+  const routeCount = "routeCount" in edge ? Number(edge.routeCount) : 9;
+  const channelOffset = (routeSlot - (routeCount - 1) / 2) * 3;
+  const middle = (direction === "LR" ? (start.x + end.x) / 2 : (start.y + end.y) / 2) + channelOffset;
   const direct = direction === "LR"
     ? [start, { x: middle, y: start.y }, { x: middle, y: end.y }, end]
     : [start, { x: start.x, y: middle }, { x: end.x, y: middle }, end];
   if (!architectureRouteCrossesUnrelatedNode(direct, nodes, edge.source, edge.target)) return direct;
 
-  const ordinal = [...edge.id].reduce((total, char) => total + char.charCodeAt(0), 0) % 5;
+  const detourOrdinal = routeSlot;
   if (direction === "LR") {
-    const above = Math.min(...nodes.map(node => node.position.y)) - 24 - ordinal * 8;
-    const below = Math.max(...nodes.map(node => node.position.y + node.height)) + 24 + ordinal * 8;
-    const stubStart = start.x + 18; const stubEnd = end.x - 18;
+    const above = Math.min(...nodes.map(node => node.position.y)) - 24 - detourOrdinal * 4;
+    const below = Math.max(...nodes.map(node => node.position.y + node.height)) + 24 + detourOrdinal * 4;
+    const stubStart = start.x + 14 + detourOrdinal * 1.5; const stubEnd = end.x - 14 - detourOrdinal * 1.5;
     for (const y of [above, below]) {
       const route = [start, { x: stubStart, y: start.y }, { x: stubStart, y }, { x: stubEnd, y }, { x: stubEnd, y: end.y }, end];
       if (!architectureRouteCrossesUnrelatedNode(route, nodes, edge.source, edge.target)) return route;
     }
   } else {
-    const left = Math.min(...nodes.map(node => node.position.x)) - 24 - ordinal * 8;
-    const right = Math.max(...nodes.map(node => node.position.x + node.width)) + 24 + ordinal * 8;
-    const stubStart = start.y + 18; const stubEnd = end.y - 18;
+    const left = Math.min(...nodes.map(node => node.position.x)) - 24 - detourOrdinal * 4;
+    const right = Math.max(...nodes.map(node => node.position.x + node.width)) + 24 + detourOrdinal * 4;
+    const stubStart = start.y + 14 + detourOrdinal * 1.5; const stubEnd = end.y - 14 - detourOrdinal * 1.5;
     for (const x of [left, right]) {
       const route = [start, { x: start.x, y: stubStart }, { x, y: stubStart }, { x, y: stubEnd }, { x: end.x, y: stubEnd }, end];
       if (!architectureRouteCrossesUnrelatedNode(route, nodes, edge.source, edge.target)) return route;
     }
   }
   return direct;
+}
+
+export function architectureSharedCollinearLength(left: ArchitecturePoint[], right: ArchitecturePoint[]) {
+  let longest = 0;
+  for (let leftIndex = 1; leftIndex < left.length; leftIndex += 1) {
+    const a = left[leftIndex - 1]; const b = left[leftIndex];
+    for (let rightIndex = 1; rightIndex < right.length; rightIndex += 1) {
+      const c = right[rightIndex - 1]; const d = right[rightIndex];
+      if (a.x === b.x && c.x === d.x && a.x === c.x) {
+        longest = Math.max(longest, Math.max(0, Math.min(Math.max(a.y, b.y), Math.max(c.y, d.y))
+          - Math.max(Math.min(a.y, b.y), Math.min(c.y, d.y))));
+      } else if (a.y === b.y && c.y === d.y && a.y === c.y) {
+        longest = Math.max(longest, Math.max(0, Math.min(Math.max(a.x, b.x), Math.max(c.x, d.x))
+          - Math.max(Math.min(a.x, b.x), Math.min(c.x, d.x))));
+      }
+    }
+  }
+  return longest;
 }
 
 export function architectureRoutePath(points: ArchitecturePoint[]) {
@@ -317,9 +419,26 @@ export function buildArchitectureGraph(manifest: ArchitectureManifest, viewId: s
     const position = { x: dagrePosition.x - width / 2, y: dagrePosition.y - height / 2 };
     const ports = architecturePortVisibility(visibleEdges.map(item => ({ source: item.from, target: item.to })), id);
     return { id, position, width, height,
-      data: { node: nodeById.get(id)!, laneId: lane.id, laneLabel: lane.label, ...ports } };
+      data: { node: nodeById.get(id)!, laneId: lane.id, laneLabel: lane.label, ...ports, incomingPorts: [], outgoingPorts: [] } };
   });
   const laneBoxes = separateArchitectureLanes(nodes, view.lanes, rankdir);
-  const edges: ArchitectureGraphEdge[] = visibleEdges.map(item => ({ ...item, source: item.from, target: item.to }));
+  const edgeShapes = visibleEdges.map(item => ({ ...item, source: item.from, target: item.to }));
+  const anchorByEdge = architectureEdgeAnchors(nodes, edgeShapes, rankdir);
+  const routeOrder = [...edgeShapes].map(edge => edge.id).sort();
+  const edges: ArchitectureGraphEdge[] = edgeShapes.map(item => ({
+    ...item, ...anchorByEdge.get(item.id)!, routeSlot: routeOrder.indexOf(item.id), routeCount: routeOrder.length,
+  }));
+  nodes.forEach(node => {
+    node.data.incomingPorts = edges.filter(edge => edge.target === node.id).map(edge => ({
+      edgeId: edge.id,
+      offset: rankdir === "LR" ? edge.targetAnchor.y - node.position.y : edge.targetAnchor.x - node.position.x,
+      anchor: edge.targetAnchor,
+    }));
+    node.data.outgoingPorts = edges.filter(edge => edge.source === node.id).map(edge => ({
+      edgeId: edge.id,
+      offset: rankdir === "LR" ? edge.sourceAnchor.y - node.position.y : edge.sourceAnchor.x - node.position.x,
+      anchor: edge.sourceAnchor,
+    }));
+  });
   return { view, nodes, laneBoxes, edges, direction: rankdir };
 }
