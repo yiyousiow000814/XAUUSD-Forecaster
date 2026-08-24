@@ -31,7 +31,8 @@
 - A generation contains at most 10,000 index rows and 10,000 detail rows.
   Withdrawal identities are counted within the same 10,000-source-row bound.
 - One write batch contains at most 20 rows. The local producer additionally
-  enforces 160,000 bytes for detail batches and 400,000 bytes for index batches.
+  enforces 400,000 bytes for detail and index batches, below each 450,000-byte
+  Worker request bound.
   One sync cycle advances at most four generation batches.
 - D1 retains at most one `CURRENT`, one replacement `STAGING`, and one
   short-lived `SUPERSEDED` generation. A new prepare removes older superseded

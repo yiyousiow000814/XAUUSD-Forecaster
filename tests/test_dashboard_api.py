@@ -3003,6 +3003,24 @@ def test_news_projection_source_rejects_non_batch_offsets(tmp_path) -> None:
         module._news_projection_batch(generation, "detail", 1)
 
 
+def test_news_projection_accepts_a_large_realistic_article_within_worker_bound() -> None:
+    projection = __import__(
+        "xauusd_forecaster.news_projection", fromlist=["build_news_projection_generation"],
+    )
+    generation = projection.build_news_projection_generation(
+        [{
+            "source": "example", "source_item_id": "large", "revision_number": 1,
+            "cluster_id": "large", "body": "x" * 175_000,
+            "collector_first_seen_time": "2026-08-24T00:00:00+00:00",
+        }], [], window_start="2026-06-25T00:00:00+00:00",
+        watermark="2026-08-24T00:00:00+00:00",
+    )
+
+    encoded = projection.compact_json(list(generation.detail_batches[0])).encode()
+    assert len(encoded) <= projection.NEWS_DETAIL_BATCH_LIMIT_BYTES
+    assert projection.NEWS_DETAIL_BATCH_LIMIT_BYTES == 400_000
+
+
 def test_news_archive_discovers_a_bounded_changed_key_page(tmp_path) -> None:
     module = _dashboard_module()
     now = datetime.now(UTC).replace(microsecond=0)
