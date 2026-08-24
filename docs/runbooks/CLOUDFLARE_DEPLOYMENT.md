@@ -94,10 +94,11 @@ Normal release operation uses only the confirmed Control Center actions:
 **Promote Candidate**, and **Reverse Stable**. Hidden PowerShell actions are not
 the operator workflow.
 
-After Candidate validation, confirm `/` and `/favicon.ico` are Static Asset responses and
-do not create Worker invocations. Confirm `/health` and `/audit` are also Static
-Assets and that their raw HTML contains `系统健康状态` and `证据台页面`
-respectively. For API probes, record `X-Aurum-Git-SHA`,
+After Candidate validation, confirm every page and exact marker or redirect in
+`web/acceptance-inventory.json`. Static pages and `/favicon.ico` must not create
+Worker invocations; `/assistant`, `/retry-jobs`, and `/status` are deliberate
+Worker-owned compatibility redirects and must produce exactly one invocation
+per sample. For API probes, record `X-Aurum-Git-SHA`,
 `X-Aurum-Worker-Version`, `X-Aurum-Route`, `X-Aurum-Resource`, and
 `X-Aurum-Request-Id`, then correlate them with Workers Logs. Inspect actual
 Cloudflare CPU time for the route-family soak; local Windows process CPU timers
