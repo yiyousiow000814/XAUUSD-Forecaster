@@ -16,3 +16,9 @@ export function previewResources(): Record<string, unknown> {
   }
   return resources;
 }
+
+export function previewAdminResources(): Record<string, unknown> {
+  const resources = previewResources();
+  if (previewBundle) resources["/admin/api/admin-status"] = previewBundle.status;
+  return resources;
+}

@@ -809,6 +809,7 @@ test("keeps branch Preview identity and blocks writes", async () => {
 
 test("hydrates Preview first paint from its immutable build snapshot", () => {
   const page = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const adminPage = readFileSync(new URL("../app/_components/AdminDashboardPage.tsx", import.meta.url), "utf8");
   const previewResources = readFileSync(new URL("../app/_lib/preview-resources.ts", import.meta.url), "utf8");
   const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
   const resources = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
@@ -817,8 +818,11 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   assert.match(previewResources, /review_state=COMPLETED/);
   assert.match(previewResources, /previewBundle\.status/);
   assert.match(previewResources, /previewBundle\.audit/);
+  assert.match(adminPage, /initialResources=\{previewAdminResources\(\)\}/);
+  assert.match(previewResources, /resources\["\/admin\/api\/admin-status"\] = previewBundle\.status/);
   assert.match(app, /const initialStatus = initialResources\["\/api\/status"\]/);
-  assert.match(app, /<StatusView \/>/);
+  assert.match(app, /const initialAdminStatus = initialResources\["\/admin\/api\/admin-status"\]/);
+  assert.match(app, /<StatusView initialPayload=\{initialAdminStatus\} \/>/);
   assert.match(app, /<HealthView initialPayload=\{initialStatus\}/);
   const health = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
   const status = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
