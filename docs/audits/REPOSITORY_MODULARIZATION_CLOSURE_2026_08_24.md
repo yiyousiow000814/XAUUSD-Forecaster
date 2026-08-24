@@ -7,7 +7,7 @@ not make the target package layout, test organization, or Architecture Explorer
 `CURRENT`; those states change only after the ordered stack merges.
 
 - Audited latest `main`: `0bc4c1f84e7b7f48e628f5111c56adb6ad824a2a`
-- Final implementation head: #304 at `61b43dd3866d6ce651bf05652ec1cceeabd68c40`
+- Final implementation head: #304 at `20bb289332cb31346f34a962e3406163dc5980c2`
 - Closure: existing Draft PR #302, documentation-only, based on #304
 - Complete Draft PR count: 18
 - Campaign sequence from #287 through Closure: 15 Draft PRs
@@ -55,8 +55,8 @@ the authoritative value.
 | 14 | #298 | `refactor/news-ai-packages` | `f0b876e50b2acf6953aad408389d2fb38362c764` | `78ef970f1f13692cccf164d5b2bcfd60a7ca5b3b` |
 | 15 | #299 | `refactor/assistant-runtime-dashboard-packages` | `78ef970f1f13692cccf164d5b2bcfd60a7ca5b3b` | `7587435b821fe78d87a729fe871de2e8422b168b` |
 | 16 | #301 | `refactor/test-organization` | `7587435b821fe78d87a729fe871de2e8422b168b` | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` |
-| 17 | #304 | `feat/private-architecture-explorer` | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` | `61b43dd3866d6ce651bf05652ec1cceeabd68c40` |
-| 18 | #302 | `chore/modularization-campaign-closure` | `61b43dd3866d6ce651bf05652ec1cceeabd68c40` | live PR #302 head OID |
+| 17 | #304 | `feat/private-architecture-explorer` | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` | `20bb289332cb31346f34a962e3406163dc5980c2` |
+| 18 | #302 | `chore/modularization-campaign-closure` | `20bb289332cb31346f34a962e3406163dc5980c2` | live PR #302 head OID |
 
 ## Latest-main integration
 
@@ -103,23 +103,26 @@ Control Center action was executed live.
 | Latest `main` | 1,580 |
 | Original pre-rebase Closure | 1,512 |
 | Repaired #301 | 1,612 |
-| Final implementation with Explorer | 1,628 |
+| Final implementation with Explorer | 1,630 |
 
 Raw latest-main-to-#301 comparison produced 76 removed and 108 added node IDs.
 Sixty-seven removals are identical logical symbols relocated with owner splits;
 the remaining nine are individually mapped to equivalent-or-stronger nodes in
 `docs/audits/TEST_ORGANIZATION_2026_08_24.md`. Unexplained removals are zero.
-The final net increase over current main is 48: 32 campaign cases plus 16
+The final net increase over current main is 50: 32 campaign cases plus 18
 Architecture Explorer manifest cases.
 
 Final local evidence:
 
-- Python: 1,628 passed;
-- Web: 279 passed, 6 skipped; build, scoped strict typecheck, and lint passed;
+- Python platform-neutral CI gate: 1,411 passed; complete collection: 1,630;
+- Web: 289 passed, 6 skipped; build, scoped strict typecheck, and lint passed;
 - exact Windows CI family: 335 passed; Control Center plus Control Plane: 219
   collected; Control Plane focused: 14 collected;
-- manifest: 16 tests; 37 nodes, 66 edges, 11 views, four scenarios, 64,971 bytes;
-- lazy Explorer JS: 310,802 bytes / 93,552 gzip; lazy CSS: 32,657 / 6,500 gzip;
+- manifest: 18 tests; 37 nodes, 66 edges, 11 views, four scenarios, 52,006 bytes;
+- camera controller: ten behavioral cases cover initial/view/manual Fit, rapid
+  cancellation, cross-view search/scenarios, scenario steps, inspector close,
+  stale frames, and one-shot mobile TB initialization;
+- lazy Explorer JS: 312,801 bytes / 94,398 gzip; lazy CSS: 32,771 / 6,520 gzip;
 - public initial graph dependency delta: zero; graph packages remain lazy-only;
 - architecture docs/imports/manifest, repository policy, compileall, PowerShell
   parse, and diff checks passed.

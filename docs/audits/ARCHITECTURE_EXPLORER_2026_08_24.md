@@ -144,9 +144,16 @@ node omitted from all hints.
   pan, or zoom. Critical edge labels remain visible; background and optional
   labels appear for interaction, guidance, or sparse views while the text
   fallback always retains every label.
-- Small views permit a larger bounded fit zoom. View changes fit all nodes;
-  opening the inspector preserves zoom. Desktop close refits restored width,
-  while mobile close preserves both path and viewport without a camera command.
+- One latest-intent camera controller exclusively owns automatic Fit, Focus,
+  inspector-close refit, and manual Fit. It cancels pending frames and waits
+  for React Flow node initialization plus stable measured canvas dimensions.
+- Cross-view search and scenarios issue one final Focus rather than Fit then
+  Focus. Small views permit a larger bounded fit zoom. Opening the inspector
+  preserves zoom; desktop close waits for width transition completion before
+  one refit, while mobile close preserves both path and viewport without a
+  camera command.
+- Mobile resolves the breakpoint before React Flow mounts, so the first graph
+  is TB and performs one Fit without exposing an intermediate LR layout.
 - Keyboard nodes support Enter, Space, arrows, Escape, visible focus, and an
   `aria-live` selected-path announcement. The relationship text equivalent is
   secondary and collapsible. Reduced motion disables guided edge animation.

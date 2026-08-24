@@ -95,11 +95,11 @@ planning heads in the frozen original tracker section.
 | #298 | `f0b876e50b2acf6953aad408389d2fb38362c764` | `78ef970f1f13692cccf164d5b2bcfd60a7ca5b3b` | None; one transient loopback reset passed on clean rerun |
 | #299 | `78ef970f1f13692cccf164d5b2bcfd60a7ca5b3b` | `7587435b821fe78d87a729fe871de2e8422b168b` | Documentation merge retained current control semantics |
 | #301 | `7587435b821fe78d87a729fe871de2e8422b168b` | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` | Control Plane test-root correction and full inventory reconciliation |
-| #304 | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` | `61b43dd3866d6ce651bf05652ec1cceeabd68c40` | Node-link graph plus semantic and beginner-UX correction |
-| #302 | `61b43dd3866d6ce651bf05652ec1cceeabd68c40` | live PR #302 head OID | Documentation-only closure reconstruction |
+| #304 | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` | `20bb289332cb31346f34a962e3406163dc5980c2` | Node-link graph plus semantic, beginner-UX, and single-owner camera correction |
+| #302 | `20bb289332cb31346f34a962e3406163dc5980c2` | live PR #302 head OID | Documentation-only closure reconstruction |
 
 Final implementation collection is 1,628: all 1,580 current-main contracts,
-32 campaign net additions, and 16 Explorer manifest cases, with zero unexplained
+32 campaign net additions, and 18 Explorer manifest cases, with zero unexplained
 removals. The exact replacement proof is in the test-organization and Closure
 audits. The complete merge order now contains 18 Draft PRs; the campaign from
 #287 through #302 contains 15, including #304.
