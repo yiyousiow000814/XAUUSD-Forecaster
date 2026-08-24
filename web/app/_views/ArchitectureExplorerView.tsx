@@ -144,6 +144,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   const flow = useReactFlow();
   const canvasRef = useRef<HTMLDivElement>(null);
   const canvasTransitionCompleteRef = useRef(true);
+  const initialCameraRequestedRef = useRef(false);
   const [viewId, setViewId] = useState("system-overview");
   const [viewHistory, setViewHistory] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -259,9 +260,12 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
     window.addEventListener("keydown", close); return () => window.removeEventListener("keydown", close);
   }, [closeInspector]);
   useEffect(() => {
-    camera.request({ type: "FIT_VIEW", viewId: "system-overview" });
-    return () => camera.cancel();
-  }, [camera]);
+    if (!nodesInitialized || initialCameraRequestedRef.current) return;
+    initialCameraRequestedRef.current = true;
+    if (camera.pendingIntent()) camera.layoutChanged();
+    else camera.request({ type: "FIT_VIEW", viewId });
+  }, [camera, nodesInitialized, viewId]);
+  useEffect(() => () => camera.cancel(), [camera]);
   useEffect(() => {
     camera.layoutChanged();
   }, [camera, graph.direction, graph.view.id, nodesInitialized]);
