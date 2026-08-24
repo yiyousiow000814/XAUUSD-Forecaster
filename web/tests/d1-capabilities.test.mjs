@@ -18,6 +18,7 @@ test("D1 capabilities fail closed with bounded missing schema evidence", async (
         "operator_retry_jobs",
         "operator_retry_requests",
         "operator_retry_request_events",
+        "operator_retry_sync_state",
       ]);
       return true;
     },
@@ -27,6 +28,7 @@ test("D1 capabilities fail closed with bounded missing schema evidence", async (
 test("D1 capabilities accept the reviewed additive migrations", async () => {
   const database = new D1TestDatabase([
     "0020_operator_retry_scheduling.sql",
+    "0023_operator_retry_sync_digest.sql",
     "0021_paged_news_evidence.sql",
     "0022_news_projection_generation.sql",
   ]);

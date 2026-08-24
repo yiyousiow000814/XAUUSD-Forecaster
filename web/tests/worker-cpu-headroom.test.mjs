@@ -245,6 +245,98 @@ test("keeps migrated market history schema out of the request hot path", () => {
   ), /CREATE TABLE IF NOT EXISTS `market_history_overview`/);
 });
 
+test("storage sync families accept identical payloads without repeating physical writes", async () => {
+  if (isPreviewBuild) return;
+  const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+  const post = async (path, payload) => {
+    const response = await invoke(path, {
+      method: "POST", headers, body: JSON.stringify(payload),
+    });
+    assert.equal(response.status, 200, `${path}: ${await response.clone().text()}`);
+    return response.json();
+  };
+
+  const retryJob = {
+    job_id: "f".repeat(64), task_type: "ACTIVE_IMPACT", title: "Write contract",
+    state: "BACKING_OFF", priority: "NORMAL",
+    available_at: "2026-08-25T01:00:00+00:00", attempt_count: 2,
+    last_error: "provider unavailable", last_failure_at: "2026-08-25T00:55:00Z",
+    lease_expires_at: null, override_mode: null, override_requested_at: null,
+    original_available_at: "2026-08-25T01:00:00Z",
+  };
+  const retryFirst = await post("/api/operator-retry-worker", {
+    action: "SYNC_JOBS", items: [retryJob],
+  });
+  assert.equal(retryFirst.accepted, 1);
+  assert.equal(retryFirst.written, 1);
+  const retryReplay = await post("/api/operator-retry-worker", {
+    action: "SYNC_JOBS", items: [{ ...retryJob, job_id: retryJob.job_id.toUpperCase() }],
+  });
+  assert.equal(retryReplay.accepted, 1);
+  assert.equal(retryReplay.written, 0);
+  assert.equal(retryReplay.unchanged, true);
+  const retryChanged = await post("/api/operator-retry-worker", {
+    action: "SYNC_JOBS", items: [{ ...retryJob, title: "Changed contract" }],
+  });
+  assert.equal(retryChanged.written, 1);
+  const retryEmpty = await post("/api/operator-retry-worker", {
+    action: "SYNC_JOBS", items: [],
+  });
+  assert.equal(retryEmpty.accepted, 0);
+  assert.equal(retryEmpty.deleted, 1);
+
+  const candle = {
+    time: "2026-08-25T01:00:00.000Z", open: 3380, high: 3382,
+    low: 3379, close: 3381, ticks: 42,
+  };
+  const decision = {
+    source_decision_id: "write-contract-decision",
+    decision_time: "2026-08-25T01:00:00.000Z",
+    model_identity: "BROAD_FULL", direction: "WAIT",
+  };
+  const marketPayload = {
+    overview: {
+      candles: [candle], source_candle_count: 1,
+      history_start: candle.time, history_end: candle.time,
+    },
+    decision_overviews: [{
+      model_identity: "BROAD_FULL", frequency: "30m", decisions: [decision],
+      source_decision_count: 1, decision_count: 1, decision_downsampled: false,
+    }],
+    candles: [candle], decisions: [decision],
+  };
+  const marketFirst = await post("/api/market-history", marketPayload);
+  assert.equal(marketFirst.accepted, 4);
+  assert.equal(marketFirst.written, 4);
+  const marketReplay = await post("/api/market-history", marketPayload);
+  assert.equal(marketReplay.accepted, 4);
+  assert.equal(marketReplay.written, 0);
+  const marketChanged = await post("/api/market-history", {
+    candles: [{ ...candle, close: 3381.5 }],
+  });
+  assert.equal(marketChanged.accepted, 1);
+  assert.equal(marketChanged.written, 1);
+
+  const learningRecord = {
+    resource: "model", record_key: "write-contract-model", sort_epoch: 1,
+    payload_hash: "a".repeat(64), payload: { model_identity: "WRITE_CONTRACT" },
+  };
+  const learningFirst = await post("/api/learning-history", { records: [learningRecord] });
+  assert.equal(learningFirst.accepted, 1);
+  assert.equal(learningFirst.written, 1);
+  const learningReplay = await post("/api/learning-history", { records: [learningRecord] });
+  assert.equal(learningReplay.accepted, 1);
+  assert.equal(learningReplay.written, 0);
+  const learningChanged = await post("/api/learning-history", {
+    records: [{
+      ...learningRecord, sort_epoch: 2, payload_hash: "b".repeat(64),
+      payload: { model_identity: "WRITE_CONTRACT_V2" },
+    }],
+  });
+  assert.equal(learningChanged.accepted, 1);
+  assert.equal(learningChanged.written, 1);
+});
+
 test("bounds empty, oversized, maximum legal, and concurrent snapshot writes", async () => {
   if (isPreviewBuild) return;
   const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };

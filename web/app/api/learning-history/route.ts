@@ -70,6 +70,35 @@ async function ensureSchema(binding: D1Database) {
   ]);
 }
 
+async function validateLearningBatch(binding: D1Database, serialized: string) {
+  const checked = await binding.prepare(
+    `WITH root(doc) AS (
+       SELECT ? WHERE json_valid(?) AND json_type(?,'$.records')='array'
+     ), batch(row) AS (
+       SELECT value FROM root,json_each(json_extract(doc,'$.records'))
+     )
+     SELECT count(*) total,
+            sum(CASE WHEN
+              json_type(row)='object'
+              AND json_extract(row,'$.resource') IN
+                ('model','version-group','curve-5m','curve-30m',
+                 'execution-point','execution-result','curve-overview','version-overview')
+              AND length(json_extract(row,'$.record_key'))>0
+              AND json_type(row,'$.sort_epoch')='integer'
+              AND json_extract(row,'$.sort_epoch')>=0
+              AND length(json_extract(row,'$.payload_hash'))=64
+              AND json_extract(row,'$.payload_hash') NOT GLOB '*[^0-9a-f]*'
+              AND json_type(row,'$.payload')='object'
+            THEN 1 ELSE 0 END) valid
+     FROM batch`,
+  ).bind(serialized, serialized, serialized).first<{ total: number; valid: number }>();
+  const total = Number(checked?.total ?? 0);
+  if (total < 1 || total > MAX_INGEST_ROWS || Number(checked?.valid ?? 0) !== total) {
+    throw new Error("empty or invalid batch");
+  }
+  return total;
+}
+
 function previewRecords() {
   return Array.isArray(previewBundle?.learning_history)
     ? previewBundle.learning_history as LearningRecord[] : [];
@@ -323,35 +352,8 @@ export async function POST(request: Request) {
   const binding = env.DB as D1Database | undefined;
   if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   try {
+    const total = await validateLearningBatch(binding, body.serialized);
     if (isReleaseValidationContext(validation)) {
-      const checked = await binding.prepare(
-        `WITH root(doc) AS (
-           SELECT ? WHERE json_valid(?) AND json_type(?,'$.records')='array'
-         ), batch(row) AS (
-           SELECT value FROM root,json_each(json_extract(doc,'$.records'))
-         )
-         SELECT count(*) total,
-                sum(CASE WHEN
-                  json_type(row)='object'
-                  AND json_extract(row,'$.resource') IN
-                    ('model','version-group','curve-5m','curve-30m',
-                     'execution-point','execution-result','curve-overview',
-                     'version-overview')
-                  AND length(json_extract(row,'$.record_key'))>0
-                  AND json_type(row,'$.sort_epoch')='integer'
-                  AND json_extract(row,'$.sort_epoch')>=0
-                  AND length(json_extract(row,'$.payload_hash'))=64
-                  AND json_extract(row,'$.payload_hash') NOT GLOB '*[^0-9a-f]*'
-                  AND json_type(row,'$.payload')='object'
-                THEN 1 ELSE 0 END) valid
-         FROM batch`,
-      ).bind(body.serialized, body.serialized, body.serialized)
-        .first<{ total: number; valid: number }>();
-      const total = Number(checked?.total ?? 0);
-      if (total < 1 || total > MAX_INGEST_ROWS
-          || Number(checked?.valid ?? 0) !== total) {
-        throw new Error("empty or invalid batch");
-      }
       return releaseValidationResponse(validation, {
         body: "bounded-read", json: "d1-json1+json-each",
         transformed: { records: total }, mutation_boundary: "learning-record-upsert",
@@ -359,44 +361,29 @@ export async function POST(request: Request) {
     }
     await ensureSchema(binding);
     // Keep the growing payload off the Worker's JavaScript JSON parser. D1
-    // validates every row and performs one set-based idempotent upsert.
+    // validates the complete batch before performing one set-based idempotent upsert.
     const result = await binding.prepare(
       `WITH root(doc) AS (
          SELECT ? WHERE json_valid(?) AND json_type(?,'$.records')='array'
        ), batch(row) AS (
          SELECT value FROM root,json_each(json_extract(doc,'$.records'))
-       ), validation AS (
-         SELECT count(*) total,
-                sum(CASE WHEN
-                  json_type(row)='object'
-                  AND json_extract(row,'$.resource') IN
-                    ('model','version-group','curve-5m','curve-30m',
-                     'execution-point','execution-result','curve-overview',
-                     'version-overview')
-                  AND length(json_extract(row,'$.record_key'))>0
-                  AND json_type(row,'$.sort_epoch')='integer'
-                  AND json_extract(row,'$.sort_epoch')>=0
-                  AND length(json_extract(row,'$.payload_hash'))=64
-                  AND json_extract(row,'$.payload_hash') NOT GLOB '*[^0-9a-f]*'
-                  AND json_type(row,'$.payload')='object'
-                THEN 1 ELSE 0 END) valid
-         FROM batch
        )
        INSERT INTO learning_records
          (resource,record_key,sort_epoch,payload_hash,payload,received_at)
        SELECT json_extract(row,'$.resource'),json_extract(row,'$.record_key'),
               json_extract(row,'$.sort_epoch'),json_extract(row,'$.payload_hash'),
               json_extract(row,'$.payload'),?
-       FROM batch,validation
-       WHERE total BETWEEN 1 AND ? AND valid=total
+       FROM batch WHERE true
        ON CONFLICT(resource,record_key) DO UPDATE SET
          sort_epoch=excluded.sort_epoch,payload_hash=excluded.payload_hash,
-         payload=excluded.payload,received_at=excluded.received_at`,
+         payload=excluded.payload,received_at=excluded.received_at
+       WHERE learning_records.sort_epoch IS NOT excluded.sort_epoch
+          OR learning_records.payload_hash IS NOT excluded.payload_hash
+          OR learning_records.payload IS NOT excluded.payload`,
     ).bind(body.serialized, body.serialized, body.serialized,
-      new Date().toISOString(), MAX_INGEST_ROWS).run();
-    const records = Number(result.meta.changes ?? 0);
-    if (!records) throw new Error("empty or invalid batch");
-    return NextResponse.json({ status: "OK", records });
+      new Date().toISOString()).run();
+    const written = Number(result.meta.changes ?? 0);
+    return NextResponse.json({ status: "OK", records: total, accepted: total, written });
   } catch {
     return NextResponse.json({ error: "invalid learning history payload" }, { status: 400 });
   }

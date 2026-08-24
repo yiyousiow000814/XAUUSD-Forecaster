@@ -304,7 +304,8 @@ export async function POST(request: Request) {
       statements.push(binding.prepare(
         `INSERT INTO market_history_overview (overview_key,payload,received_at)
          VALUES ('all',?,?) ON CONFLICT(overview_key) DO UPDATE SET
-           payload=excluded.payload,received_at=excluded.received_at`,
+           payload=excluded.payload,received_at=excluded.received_at
+         WHERE market_history_overview.payload IS NOT excluded.payload`,
       ).bind(JSON.stringify(overview), receivedAt));
     }
     for (const summary of decisionOverviews) {
@@ -323,7 +324,10 @@ export async function POST(request: Request) {
            (overview_key,model_identity,frequency,payload,received_at)
          VALUES (?,?,?,?,?) ON CONFLICT(overview_key) DO UPDATE SET
            model_identity=excluded.model_identity,frequency=excluded.frequency,
-           payload=excluded.payload,received_at=excluded.received_at`,
+           payload=excluded.payload,received_at=excluded.received_at
+         WHERE market_decision_overviews.model_identity IS NOT excluded.model_identity
+            OR market_decision_overviews.frequency IS NOT excluded.frequency
+            OR market_decision_overviews.payload IS NOT excluded.payload`,
       ).bind(key, summary.model_identity, summary.frequency,
         JSON.stringify(summary), receivedAt));
     }
@@ -338,7 +342,13 @@ export async function POST(request: Request) {
          VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(time_epoch) DO UPDATE SET
            time=excluded.time,open_milli=excluded.open_milli,high_milli=excluded.high_milli,
            low_milli=excluded.low_milli,close_milli=excluded.close_milli,
-           ticks=excluded.ticks,received_at=excluded.received_at`,
+           ticks=excluded.ticks,received_at=excluded.received_at
+         WHERE market_candles.time IS NOT excluded.time
+            OR market_candles.open_milli IS NOT excluded.open_milli
+            OR market_candles.high_milli IS NOT excluded.high_milli
+            OR market_candles.low_milli IS NOT excluded.low_milli
+            OR market_candles.close_milli IS NOT excluded.close_milli
+            OR market_candles.ticks IS NOT excluded.ticks`,
       ).bind(epoch, row.time, Math.round(row.open * 1_000), Math.round(row.high * 1_000),
         Math.round(row.low * 1_000), Math.round(row.close * 1_000), row.ticks ?? 0, receivedAt));
     }
@@ -354,7 +364,11 @@ export async function POST(request: Request) {
          VALUES (?,?,?,?,?,?) ON CONFLICT(decision_key) DO UPDATE SET
            decision_epoch=excluded.decision_epoch,decision_time=excluded.decision_time,
            model_identity=excluded.model_identity,payload=excluded.payload,
-           received_at=excluded.received_at`,
+           received_at=excluded.received_at
+         WHERE market_decisions.decision_epoch IS NOT excluded.decision_epoch
+            OR market_decisions.decision_time IS NOT excluded.decision_time
+            OR market_decisions.model_identity IS NOT excluded.model_identity
+            OR market_decisions.payload IS NOT excluded.payload`,
       ).bind(key, epoch, row.decision_time, row.model_identity, JSON.stringify(row), receivedAt));
     }
     if (isReleaseValidationContext(validation)) {
@@ -369,13 +383,15 @@ export async function POST(request: Request) {
         mutation_boundary: "schema-and-history-batch",
       });
     }
-    await ensureMarketSchema(binding);
+    let written = 0;
     for (let start = 0; start < statements.length; start += MAX_BATCH_STATEMENTS) {
-      await binding.batch(statements.slice(start, start + MAX_BATCH_STATEMENTS));
+      const results = await binding.batch(statements.slice(start, start + MAX_BATCH_STATEMENTS));
+      written += results.reduce((total, result) => total + Number(result.meta?.changes ?? 0), 0);
     }
     return NextResponse.json({
       status: "OK", candles: candles.length, decisions: decisions.length,
       overview: Boolean(body.overview), decision_overviews: decisionOverviews.length,
+      accepted: statements.length, written,
     });
   } catch {
     return NextResponse.json({ error: "invalid market history payload" }, { status: 400 });

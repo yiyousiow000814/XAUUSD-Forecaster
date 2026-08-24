@@ -225,14 +225,76 @@ export async function syncOperatorRetryJobs(
   now = new Date(),
 ) {
   if (items.length > 500) throw new OperatorRetryInputError("INVALID_SYNC", "retry mirror is too large");
+  const boundedText = (value: unknown, field: string, limit: number) => {
+    const text = String(value ?? "").trim();
+    if (!text || text.length > limit) {
+      throw new OperatorRetryInputError("INVALID_SYNC", `${field} is invalid`);
+    }
+    return text;
+  };
+  const nullableText = (value: unknown, field: string, limit: number) => {
+    if (value === undefined || value === null || value === "") return null;
+    return boundedText(value, field, limit);
+  };
+  const nullableTime = (value: unknown, field: string) => (
+    value === undefined || value === null || value === "" ? null : isoTime(value, field)
+  );
+  const normalized = items.map(item => {
+    const jobId = String(item.job_id ?? "").trim().toLowerCase();
+    const attemptCount = Number(item.attempt_count);
+    if (!/^[a-f0-9]{64}$/.test(jobId) || !Number.isSafeInteger(attemptCount) || attemptCount < 0) {
+      throw new OperatorRetryInputError("INVALID_SYNC", "retry mirror job identity is invalid");
+    }
+    const overrideMode = nullableText(item.override_mode, "override_mode", 32);
+    if (overrideMode !== null && !OPERATOR_RETRY_MODES.includes(overrideMode as OperatorRetryMode)) {
+      throw new OperatorRetryInputError("INVALID_SYNC", "override_mode is invalid");
+    }
+    return {
+      job_id: jobId,
+      task_type: boundedText(item.task_type, "task_type", 100),
+      title: boundedText(item.title, "title", 500),
+      state: boundedText(item.state, "state", 32),
+      priority: boundedText(item.priority, "priority", 32),
+      available_at: isoTime(item.available_at, "available_at"),
+      attempt_count: attemptCount,
+      last_error: nullableText(item.last_error, "last_error", 4_000),
+      last_failure_at: nullableTime(item.last_failure_at, "last_failure_at"),
+      lease_expires_at: nullableTime(item.lease_expires_at, "lease_expires_at"),
+      override_mode: overrideMode,
+      override_requested_at: nullableTime(item.override_requested_at, "override_requested_at"),
+      original_available_at: isoTime(item.original_available_at, "original_available_at"),
+    };
+  }).sort((left, right) => left.job_id.localeCompare(right.job_id));
+  if (new Set(normalized.map(item => item.job_id)).size !== normalized.length) {
+    throw new OperatorRetryInputError("INVALID_SYNC", "retry mirror contains duplicate jobs");
+  }
+  const payload = JSON.stringify(normalized);
+  const payloadDigest = await digest(payload);
+  const previous = await binding.prepare(
+    "SELECT payload_digest,item_count,synced_at FROM operator_retry_sync_state WHERE id=1",
+  ).first<{ payload_digest: string; item_count: number; synced_at: string }>();
+  if (previous?.payload_digest === payloadDigest && Number(previous.item_count) === normalized.length) {
+    return {
+      count: normalized.length, accepted: normalized.length, written: 0, deleted: 0,
+      unchanged: true, synced_at: previous.synced_at,
+    };
+  }
   const syncedAt = now.toISOString();
   const generation = crypto.randomUUID();
-  const statements = items.map(item => binding.prepare(
+  const results = await binding.batch([
+    binding.prepare(
     `INSERT INTO operator_retry_jobs (
      job_id,task_type,title,state,priority,available_at,attempt_count,last_error,
      last_failure_at,lease_expires_at,override_mode,override_requested_at,
      original_available_at,synced_at,sync_generation)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+     SELECT json_extract(value,'$.job_id'),json_extract(value,'$.task_type'),
+       json_extract(value,'$.title'),json_extract(value,'$.state'),
+       json_extract(value,'$.priority'),json_extract(value,'$.available_at'),
+       json_extract(value,'$.attempt_count'),json_extract(value,'$.last_error'),
+       json_extract(value,'$.last_failure_at'),json_extract(value,'$.lease_expires_at'),
+       json_extract(value,'$.override_mode'),json_extract(value,'$.override_requested_at'),
+       json_extract(value,'$.original_available_at'),?,?
+     FROM json_each(?) WHERE true
      ON CONFLICT(job_id) DO UPDATE SET
        task_type=excluded.task_type,title=excluded.title,state=excluded.state,
        priority=excluded.priority,available_at=excluded.available_at,
@@ -241,19 +303,23 @@ export async function syncOperatorRetryJobs(
        override_mode=excluded.override_mode,override_requested_at=excluded.override_requested_at,
        original_available_at=excluded.original_available_at,synced_at=excluded.synced_at,
        sync_generation=excluded.sync_generation`,
-  ).bind(
-    String(item.job_id), String(item.task_type), String(item.title), String(item.state),
-    String(item.priority), isoTime(item.available_at, "available_at"),
-    Number(item.attempt_count), item.last_error ?? null, item.last_failure_at ?? null,
-    item.lease_expires_at ?? null, item.override_mode ?? null,
-    item.override_requested_at ?? null, isoTime(item.original_available_at, "original_available_at"),
-    syncedAt, generation,
-  ));
-  statements.push(binding.prepare(
+    ).bind(syncedAt, generation, payload),
+    binding.prepare(
     "DELETE FROM operator_retry_jobs WHERE sync_generation<>?",
-  ).bind(generation));
-  await binding.batch(statements);
-  return { count: items.length, synced_at: syncedAt };
+    ).bind(generation),
+    binding.prepare(
+      `INSERT INTO operator_retry_sync_state (id,payload_digest,item_count,synced_at)
+       VALUES (1,?,?,?) ON CONFLICT(id) DO UPDATE SET
+         payload_digest=excluded.payload_digest,item_count=excluded.item_count,
+         synced_at=excluded.synced_at`,
+    ).bind(payloadDigest, normalized.length, syncedAt),
+  ]);
+  return {
+    count: normalized.length, accepted: normalized.length,
+    written: Number(results[0].meta?.changes ?? 0),
+    deleted: Number(results[1].meta?.changes ?? 0),
+    unchanged: false, synced_at: syncedAt,
+  };
 }
 
 export async function claimOperatorRetryRequest(

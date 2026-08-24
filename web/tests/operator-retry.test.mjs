@@ -59,8 +59,13 @@ const job = (suffix, state = "BACKING_OFF") => ({
   original_available_at: "2026-08-19T06:00:00.000Z",
 });
 
+const retryMigrations = [
+  "0020_operator_retry_scheduling.sql",
+  "0023_operator_retry_sync_digest.sql",
+];
+
 test("bulk admission is per-job, owner-audited, and browser replay is idempotent", async () => {
-  const database = new D1TestDatabase(["0020_operator_retry_scheduling.sql"]);
+  const database = new D1TestDatabase(retryMigrations);
   await syncOperatorRetryJobs(database, [job("a"), job("b", "LEASED")], new Date("2026-08-19T03:00:00Z"));
   const input = {
     operatorId: "cloudflare-access:owner", idempotencyKey: "00000000-0000-4000-8000-000000000001",
@@ -82,7 +87,7 @@ test("bulk admission is per-job, owner-audited, and browser replay is idempotent
 });
 
 test("machine lease completion is bounded and public reads contain no secrets", async () => {
-  const database = new D1TestDatabase(["0020_operator_retry_scheduling.sql"]);
+  const database = new D1TestDatabase(retryMigrations);
   await syncOperatorRetryJobs(database, [job("c")], new Date("2026-08-19T03:00:00Z"));
   await createOperatorRetryRequests(database, {
     operatorId: "cloudflare-access:owner", idempotencyKey: "00000000-0000-4000-8000-000000000002",
@@ -106,7 +111,7 @@ test("machine lease completion is bounded and public reads contain no secrets", 
 });
 
 test("expired machine leases are reclaimed without duplicating the durable command", async () => {
-  const database = new D1TestDatabase(["0020_operator_retry_scheduling.sql"]);
+  const database = new D1TestDatabase(retryMigrations);
   await syncOperatorRetryJobs(database, [job("d")], new Date("2026-08-19T03:00:00Z"));
   await createOperatorRetryRequests(database, {
     operatorId: "cloudflare-access:owner", idempotencyKey: "00000000-0000-4000-8000-000000000003",
