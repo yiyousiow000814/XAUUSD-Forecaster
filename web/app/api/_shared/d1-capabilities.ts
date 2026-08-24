@@ -3,6 +3,7 @@ export const D1_CAPABILITIES = {
     "operator_retry_jobs",
     "operator_retry_requests",
     "operator_retry_request_events",
+    "operator_retry_sync_state",
   ],
   paged_news_evidence: [
     "news_evidence_records",
