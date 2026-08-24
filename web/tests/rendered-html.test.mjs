@@ -1351,8 +1351,8 @@ test("renders the Gemini quota status route", async () => {
   assert.match(source, /id="quota-capacity-title">账户与每日额度/);
   assert.match(source, /id="quota-allocation-title">新闻额度分配/);
   assert.match(source, /id="quota-queue-title">请求异常/);
-  assert.match(source, /annotation_queue\.backing_off \? "quota-metric-attention"/);
-  assert.match(source, /annotation_queue\.dead_letter \? "quota-metric-danger"/);
+  assert.match(source, /annotation_queue\?\.backing_off \? "quota-metric-attention"/);
+  assert.match(source, /annotation_queue\?\.dead_letter \? "quota-metric-danger"/);
   assert.match(source, /className="throughput-section" aria-labelledby="throughput-title"/);
   assert.doesNotMatch(html, /class="routing-grid"/);
   assert.match(html, /账户与每日额度[\s\S]*?Gemini 3\.5 Flash-Lite[\s\S]*?Gemini 3\.1 Flash-Lite/);
@@ -1373,6 +1373,9 @@ test("renders the Gemini quota status route", async () => {
   assert.match(source, /查看账本与 Google 额度的区别/);
   assert.match(html, /分支配置/);
   assert.match(html, /Pacific midnight/);
+  assert.doesNotMatch(source, /payload\?\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+/);
+  assert.match(source, /llm_routing\?\.action_bearing\?\.model/);
+  assert.match(source, /llm_routing\?\.display_only\?\.requests_per_minute/);
   assert.match(html, /AI 模型用量/);
   assert.match(html, /aria-current="page"[^>]*>AI 模型用量<\/a>/);
   assert.match(html, /data-read-state="(?:CURRENT|REFRESHING)"/);
