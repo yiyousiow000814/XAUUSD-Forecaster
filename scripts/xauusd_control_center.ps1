@@ -1123,6 +1123,43 @@ function Get-WorkerPlatformFailureReason {
     return "WORKER_PLATFORM_EVIDENCE_FAILED"
 }
 
+function Get-CandidateObservabilityFilters {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [string]$RoutePath = "",
+        [string]$RouteMethod = "",
+        [string]$ValidationRun = ""
+    )
+    $filters = @(
+        [pscustomobject]@{ key='$metadata.service'; operation='eq'; type='string'; value=$workerName },
+        [pscustomobject]@{ key='$workers.scriptVersion.id'; operation='eq'; type='string'; value=[string]$Candidate.worker_version_id },
+        [pscustomobject]@{ key='$metadata.type'; operation='eq'; type='string'; value='cf-worker-event' }
+    )
+    if ($ValidationRun) {
+        $filters += @(
+            [pscustomobject]@{
+                key='$workers.event.request.headers.x-aurum-validation-run'
+                operation='eq'; type='string'; value=$ValidationRun
+            },
+            [pscustomobject]@{
+                key='$workers.event.request.headers.x-aurum-validation-phase'
+                operation='eq'; type='string'; value='acceptance'
+            }
+        )
+    }
+    if ($RoutePath) {
+        $filters += [pscustomobject]@{
+            key='$workers.event.path'; operation='eq'; type='string'; value=$RoutePath
+        }
+    }
+    if ($RouteMethod) {
+        $filters += [pscustomobject]@{
+            key='$workers.event.request.method'; operation='eq'; type='string'; value=$RouteMethod
+        }
+    }
+    return $filters
+}
+
 function Get-CandidatePlatformEvidence {
     param(
         [Parameter(Mandatory = $true)][object]$Candidate,
@@ -1131,22 +1168,12 @@ function Get-CandidatePlatformEvidence {
         [int]$ExpectedInvocations = 1,
         [string]$RoutePath = "",
         [string]$RouteMethod = "",
-        [string]$RouteFamily = "GLOBAL"
+        [string]$RouteFamily = "GLOBAL",
+        [string]$ValidationRun = ""
     )
-    $baseFilters = @(
-        [pscustomobject]@{ key='$metadata.service'; operation='eq'; type='string'; value=$workerName },
-        [pscustomobject]@{ key='$workers.scriptVersion.id'; operation='eq'; type='string'; value=[string]$Candidate.worker_version_id }
-    )
-    if ($RoutePath) {
-        $baseFilters += [pscustomobject]@{
-            key='$workers.event.request.path'; operation='eq'; type='string'; value=$RoutePath
-        }
-    }
-    if ($RouteMethod) {
-        $baseFilters += [pscustomobject]@{
-            key='$workers.event.request.method'; operation='eq'; type='string'; value=$RouteMethod
-        }
-    }
+    $baseFilters = @(Get-CandidateObservabilityFilters -Candidate $Candidate `
+        -RoutePath $RoutePath -RouteMethod $RouteMethod `
+        -ValidationRun $ValidationRun)
     $base = Invoke-WorkersObservabilityQuery -From $From -To $To `
         -Filters $baseFilters -Calculations @(
             [pscustomobject]@{ operator='count'; alias='invocations' },
@@ -1218,11 +1245,12 @@ function Get-CandidateCpuEvidence {
         [Parameter(Mandatory = $true)][object]$Candidate,
         [Parameter(Mandatory = $true)][DateTimeOffset]$From,
         [Parameter(Mandatory = $true)][DateTimeOffset]$To,
-        [Parameter(Mandatory = $true)][object[]]$Routes
+        [Parameter(Mandatory = $true)][object[]]$Routes,
+        [string]$ValidationRun = ""
     )
     $expected = [int](($Routes | Measure-Object -Property acceptance_samples -Sum).Sum)
     $global = Get-CandidatePlatformEvidence -Candidate $Candidate -From $From -To $To `
-        -ExpectedInvocations $expected
+        -ExpectedInvocations $expected -ValidationRun $ValidationRun
     if (-not $global) { return $null }
     $families = @()
     $routeGroups = @($Routes | Group-Object { "{0}|{1}|{2}" -f `
@@ -1234,7 +1262,7 @@ function Get-CandidateCpuEvidence {
         $evidence = Get-CandidatePlatformEvidence -Candidate $Candidate `
             -From $From -To $To -ExpectedInvocations $familyExpected `
             -RoutePath ([string]$route.path) -RouteMethod ([string]$route.method) `
-            -RouteFamily ([string]$route.family)
+            -RouteFamily ([string]$route.family) -ValidationRun $ValidationRun
         if (-not $evidence) { return $null }
         $families += $evidence
     }
@@ -1272,12 +1300,14 @@ function Get-CandidateInvocationCount {
     param(
         [Parameter(Mandatory = $true)][object]$Candidate,
         [Parameter(Mandatory = $true)][DateTimeOffset]$From,
-        [Parameter(Mandatory = $true)][DateTimeOffset]$To
+        [Parameter(Mandatory = $true)][DateTimeOffset]$To,
+        [string]$ValidationRun = ""
     )
-    $result = Invoke-WorkersObservabilityQuery -From $From -To $To -Filters @(
-        [pscustomobject]@{ key='$metadata.service'; operation='eq'; type='string'; value=$workerName },
-        [pscustomobject]@{ key='$workers.scriptVersion.id'; operation='eq'; type='string'; value=[string]$Candidate.worker_version_id }
-    ) -Calculations @([pscustomobject]@{ operator='count'; alias='invocations' })
+    $filters = @(Get-CandidateObservabilityFilters -Candidate $Candidate `
+        -ValidationRun $ValidationRun)
+    $result = Invoke-WorkersObservabilityQuery -From $From -To $To `
+        -Filters $filters `
+        -Calculations @([pscustomobject]@{ operator='count'; alias='invocations' })
     if (-not $result) { return $null }
     return Get-CalculationAggregate -QueryResult $result -Alias "invocations"
 }
@@ -1637,11 +1667,13 @@ function Invoke-CandidateRouteSample {
         [Parameter(Mandatory = $true)][hashtable]$VersionHeaders,
         [Parameter(Mandatory = $true)][string]$ValidationRun,
         [Parameter(Mandatory = $true)][string]$FixtureRoot,
-        [string]$IngestToken = ""
+        [string]$IngestToken = "",
+        [ValidateSet("warmup", "acceptance")][string]$ValidationPhase = "acceptance"
     )
     $requestId = [guid]::NewGuid().ToString()
     $headers = @{} + $VersionHeaders
     $headers["X-Aurum-Validation-Run"] = $ValidationRun
+    $headers["X-Aurum-Validation-Phase"] = $ValidationPhase
     $headers["X-Aurum-Request-ID"] = $requestId
     $parameters = @{
         UseBasicParsing=$true; Method=[string]$Route.method
@@ -1793,7 +1825,8 @@ function Invoke-CandidateWorkerValidation {
             for ($index = 0; $index -lt [int]$route.warmup_samples; $index++) {
                 $warmups += Invoke-CandidateRouteSample -Route $route `
                     -VersionHeaders $header -ValidationRun $validationRun `
-                    -FixtureRoot $fixtureRoot -IngestToken $ingestToken
+                    -FixtureRoot $fixtureRoot -IngestToken $ingestToken `
+                    -ValidationPhase "warmup"
             }
             if (@($warmups | Where-Object { -not $_.passed }).Count -gt 0) {
                 $firstWarmupFailure = @($warmups | Where-Object { -not $_.passed })[0]
@@ -1812,7 +1845,8 @@ function Invoke-CandidateWorkerValidation {
             for ($index = 0; $index -lt [int]$route.acceptance_samples; $index++) {
                 $samples += Invoke-CandidateRouteSample -Route $route `
                     -VersionHeaders $header -ValidationRun $validationRun `
-                    -FixtureRoot $fixtureRoot -IngestToken $ingestToken
+                    -FixtureRoot $fixtureRoot -IngestToken $ingestToken `
+                    -ValidationPhase "acceptance"
             }
             $failures = @($samples | Where-Object { -not $_.passed })
             $sampleReason = if ($failures.Count) {
@@ -1836,26 +1870,27 @@ function Invoke-CandidateWorkerValidation {
         $workerEndedAt = [DateTimeOffset]::UtcNow
         $platform = $null
         if (@($results | Where-Object { -not $_.passed }).Count -eq 0) {
+            $expectedInvocations = [int](($workerRoutes |
+                Measure-Object -Property acceptance_samples -Sum).Sum)
             Start-Sleep -Seconds 8
-            for ($attempt = 0; $attempt -lt 3; $attempt++) {
+            $observedInvocations = $null
+            for ($attempt = 0; $attempt -lt 24; $attempt++) {
+                $observedInvocations = Get-CandidateInvocationCount -Candidate $Candidate `
+                    -From $workerStartedAt -To $workerEndedAt.AddSeconds(2) `
+                    -ValidationRun $validationRun
+                if ($null -ne $observedInvocations -and
+                    [int]$observedInvocations -ge $expectedInvocations) { break }
+                if ($attempt -lt 23) { Start-Sleep -Seconds 10 }
+            }
+            if ($null -ne $observedInvocations -and
+                [int]$observedInvocations -ge $expectedInvocations) {
                 $platform = Get-CandidateCpuEvidence -Candidate $Candidate `
                     -From $workerStartedAt `
-                    -To $workerEndedAt.AddSeconds(2) -Routes $workerRoutes
-                $telemetryPending = [bool](-not $platform -or
-                    [int]$platform.invocations -lt [int](($workerRoutes |
-                        Measure-Object -Property acceptance_samples -Sum).Sum))
-                if (-not $telemetryPending) {
-                    if ($script:lastWorkersObservabilityDiagnostic -eq
-                        "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING") {
-                        $script:lastWorkersObservabilityDiagnostic = $null
-                    }
-                    break
-                }
-                if ($platform) {
-                    $script:lastWorkersObservabilityDiagnostic =
-                        "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"
-                }
-                if ($attempt -lt 2) { Start-Sleep -Seconds 5 }
+                    -To $workerEndedAt.AddSeconds(2) -Routes $workerRoutes `
+                    -ValidationRun $validationRun
+            } else {
+                $script:lastWorkersObservabilityDiagnostic =
+                    "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"
             }
         } else {
             $platform = "NOT_RUN"
@@ -2604,12 +2639,21 @@ function Invoke-AutomaticCandidateValidation {
                 return $false
             }
             if (-not $cloudflare.cpu_evidence) {
+                $telemetryPending = [bool](
+                    [string]$cloudflare.observability_diagnostic -eq
+                        "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"
+                )
+                if ($telemetryPending) {
+                    $state.candidate.validation_state = "PLATFORM_PENDING"
+                }
                 $state.candidate.validation = [pscustomobject]@{
                     key = [string]$Candidate.validation_key
                     repository = "PASSED"
                     windows = "PASSED"
-                    cloudflare = "TESTING"
-                    reason = "PLATFORM_CPU_EVIDENCE_REQUIRED"
+                    cloudflare = if ($telemetryPending) { "PENDING" } else { "TESTING" }
+                    reason = if ($telemetryPending) {
+                        "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"
+                    } else { "PLATFORM_CPU_EVIDENCE_REQUIRED" }
                     validation_run = $cloudflare.validation_run
                     route_plan = $routePlan
                     routes = $cloudflare.routes
@@ -2624,6 +2668,13 @@ function Invoke-AutomaticCandidateValidation {
                     tested_at = [DateTimeOffset]::UtcNow.ToString("o")
                 }
                 Write-ReleaseControlState -State $state
+                if ($telemetryPending) {
+                    Write-ReleaseHistory -Event "CANDIDATE_PLATFORM_PENDING" `
+                        -Release $state.candidate -Detail @{
+                            reason = "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"
+                            retryable = $true
+                        }
+                }
                 return $false
             }
             if ([string]$cloudflare.cpu_evidence.gate_state -eq "REVIEW_REQUIRED") {
