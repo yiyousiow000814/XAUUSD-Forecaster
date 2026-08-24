@@ -136,8 +136,18 @@ horizontal overflow and no visible interactive target under 44px. Overview,
 drill-down, keyboard selection, search, state filter, breadcrumbs, dependency/
 unaffected text, Campaign selection, mobile details, and exact-SHA links were
 exercised. No Architecture API or third-party request occurred; console errors
-and warnings were empty; final browser session count was zero. Deployed Preview
-remains an exact-head remote gate and is not inferred from local evidence.
+and warnings were empty; final browser session count was zero.
+
+The exact #304 immutable Preview at
+`https://33481f39-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`
+was then verified at the same three viewports. The deployed flow preserved the
+exact `d9589126` build marker, responsive layout, 44px target minimum,
+drill-down, search/filter, Campaign selection, mobile detail reachability, and
+zero Architecture API or third-party requests. The viewport override was reset
+and the final task-created browser session count was zero. A shared Admin-shell
+React hydration #418 is reproducible on the #282 latest-main baseline Preview
+and #304; it is not introduced by the Explorer boundary and remains separate
+owner work.
 
 ## External import compatibility
 
