@@ -305,7 +305,7 @@ export function buildArchitectureGraph(manifest: ArchitectureManifest, viewId: s
   const rankdir = direction ?? view.layout_direction;
   const width = rankdir === "TB" ? 238 : 190; const height = rankdir === "TB" ? 92 : 90;
   const graph = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
-  graph.setGraph({ rankdir, ranker: "network-simplex", nodesep: rankdir === "TB" ? 24 : 30, ranksep: rankdir === "TB" ? 68 : 66, marginx: 24, marginy: 24 });
+  graph.setGraph({ rankdir, ranker: "network-simplex", nodesep: rankdir === "TB" ? 24 : 30, ranksep: rankdir === "TB" ? 72 : 66, marginx: 24, marginy: 24 });
   const nodeById = new Map(manifest.nodes.map(item => [item.id, item]));
   const laneByNode = new Map(view.lanes.flatMap(lane => lane.node_ids.map(nodeId => [nodeId, lane] as const)));
   view.node_ids.forEach(nodeId => graph.setNode(nodeId, { width, height, rank: view.lanes.findIndex(lane => lane.node_ids.includes(nodeId)) }));
