@@ -28,6 +28,7 @@ BUILDERS = {
 LOCAL_AUDIT_URL = "http://127.0.0.1:8765/api/audit"
 REMOTE_BASE_URL = "https://aurum-signal-room.yiyousiow1234.workers.dev"
 WORKER_NAME = "aurum-signal-room"
+REMOTE_URLS = {route: REMOTE_BASE_URL + route for route in BUILDERS}
 
 
 def _read_json(url: str, *, headers: dict[str, str] | None = None) -> tuple[dict, object]:
@@ -43,12 +44,11 @@ def _read_json(url: str, *, headers: dict[str, str] | None = None) -> tuple[dict
 
 
 def verify(
-    *, local_audit_url: str, remote_base_url: str, worker_name: str,
-    version_id: str, git_sha: str, producer_revision: str,
+    *, version_id: str, git_sha: str, producer_revision: str,
     routes: list[str], required_after: datetime,
 ) -> dict:
     try:
-        authority, _ = _read_json(local_audit_url)
+        authority, _ = _read_json(LOCAL_AUDIT_URL)
     except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError) as error:
         return {"state": "PENDING", "reason": "LOCAL_AUDIT_AUTHORITY_UNAVAILABLE",
                 "diagnostic": str(error)[:512], "routes": []}
@@ -61,9 +61,9 @@ def verify(
         expected = json.loads(builder(authority, producer_revision).decode("utf-8"))
         try:
             observed, headers = _read_json(
-                remote_base_url.rstrip("/") + route,
+                REMOTE_URLS[route],
                 headers={"Cloudflare-Workers-Version-Overrides":
-                         f'{worker_name}="{version_id}"'},
+                         f'{WORKER_NAME}="{version_id}"'},
             )
         except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError) as error:
             results.append({"route": route, "state": "PENDING",
@@ -115,9 +115,6 @@ def main() -> int:
     if required_after.tzinfo is None:
         raise SystemExit("required-after must be timezone-aware")
     result = verify(
-        local_audit_url=LOCAL_AUDIT_URL,
-        remote_base_url=REMOTE_BASE_URL,
-        worker_name=WORKER_NAME,
         version_id=args.version_id,
         git_sha=args.git_sha,
         producer_revision=args.producer_revision,

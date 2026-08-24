@@ -49,9 +49,7 @@ def test_exact_candidate_projection_semantics_pass(monkeypatch) -> None:
         }))
     monkeypatch.setattr(module, "_read_json", lambda *_a, **_k: responses.pop(0))
     result = module.verify(
-        local_audit_url="http://local/api/audit",
-        remote_base_url="https://worker.example",
-        worker_name="worker", version_id=version, git_sha=revision,
+        version_id=version, git_sha=revision,
         producer_revision=revision, routes=list(module.BUILDERS),
         required_after=generated - timedelta(seconds=1),
     )
@@ -76,9 +74,7 @@ def test_old_producer_projection_remains_pending(monkeypatch) -> None:
     ]
     monkeypatch.setattr(module, "_read_json", lambda *_a, **_k: responses.pop(0))
     result = module.verify(
-        local_audit_url="http://local/api/audit",
-        remote_base_url="https://worker.example",
-        worker_name="worker", version_id=version, git_sha=revision,
+        version_id=version, git_sha=revision,
         producer_revision=revision, routes=[route],
         required_after=generated - timedelta(seconds=1),
     )
