@@ -120,7 +120,7 @@ def validate_manifest(root: Path, manifest: dict[str, Any], byte_size: int) -> l
         for item in campaign:
             if item.get("state") != "PENDING" or not item.get("branch"):
                 errors.append(f"stale campaign entry: {item!r}")
-            if item.get("id") != "architecture-explorer" and not isinstance(item.get("pr"), int):
+            if not isinstance(item.get("pr"), int):
                 errors.append(f"campaign PR is missing: {item!r}")
     return errors
 

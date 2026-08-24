@@ -50,7 +50,7 @@
     {"id":"phase-c","label":"Phase C","branch":"refactor/control-center-boundaries","pr":295,"state":"PENDING"},
     {"id":"phase-d","label":"Phase D","branch":"refactor/assistant-runtime-dashboard-packages","pr":299,"state":"PENDING"},
     {"id":"phase-e","label":"Phase E","branch":"refactor/test-organization","pr":301,"state":"PENDING"},
-    {"id":"architecture-explorer","label":"Architecture Explorer","branch":"feat/private-architecture-explorer","pr":null,"state":"PENDING"},
+    {"id":"architecture-explorer","label":"Architecture Explorer","branch":"feat/private-architecture-explorer","pr":304,"state":"PENDING"},
     {"id":"closure","label":"Closure","branch":"chore/modularization-campaign-closure","pr":302,"state":"PENDING"}
   ]
 }
