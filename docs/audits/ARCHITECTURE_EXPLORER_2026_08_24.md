@@ -21,7 +21,7 @@ Markdown parser, Windows process, background thread, or production mutation.
 - Views: 11
 - Nodes: 24
 - Edges: 28
-- Serialized bytes: 28,447 of the fixed 65,536-byte limit
+- Serialized bytes: 28,446 of the fixed 65,536-byte limit
 - Runtime and implementation states are separate fields.
 - Detailed Markdown contracts remain authoritative.
 
@@ -29,12 +29,12 @@ Markdown parser, Windows process, background thread, or production mutation.
 
 | Artifact | Repaired #301 parent | Explorer working tree | Delta |
 |---|---:|---:|---:|
-| `DashboardApp` chunk | 28,696 bytes / 10,157 gzip | 29,117 bytes / 10,251 gzip | +421 / +94 gzip |
-| shared `index` chunk | 217,233 bytes / 58,792 gzip | 217,752 bytes / 58,839 gzip | +519 / +47 gzip |
-| lazy Explorer chunk | absent | 34,772 bytes / 9,907 gzip | lazy only |
+| `DashboardApp` chunk | 28,696 bytes / 10,157 gzip | 29,117 bytes / 10,250 gzip | +421 / +93 gzip |
+| shared `index` chunk | 217,233 bytes / 58,792 gzip | 217,752 bytes / 58,836 gzip | +519 / +44 gzip |
+| lazy Explorer chunk | absent | 34,827 bytes / 9,911 gzip | lazy only |
 
-The public initial shared chunks increase by 940 raw bytes and 141 gzip bytes
-for route/navigation wiring. The 28,447-byte manifest exists only in the lazy
+The public initial shared chunks increase by 940 raw bytes and 137 gzip bytes
+for route/navigation wiring. The 28,446-byte manifest exists only in the lazy
 Explorer chunk and does not inflate the public Live initial payload.
 
 ## Local responsive QA
