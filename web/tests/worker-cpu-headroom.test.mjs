@@ -339,6 +339,57 @@ test("production-shaped writes honor authenticated release dry-run without mutat
   assert.doesNotMatch(after, new RegExp(token));
 });
 
+test("news release dry-runs reject invalid payloads without mutation", async () => {
+  if (isPreviewBuild) return;
+  const validationHeaders = {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+    "X-Aurum-Release-Validation": "dry-run",
+    "X-Aurum-Validation-Run": "invalid-news-payload-run",
+  };
+  const state = () => JSON.stringify({
+    newsIndex: database.database.prepare(
+      "SELECT detail_key,payload,received_at FROM news_index ORDER BY detail_key",
+    ).all(),
+    newsDetails: database.database.prepare(
+      "SELECT detail_key,payload,received_at FROM news_details ORDER BY detail_key",
+    ).all(),
+  });
+  const before = state();
+  for (const [caseIndex, [path, body, expectedStatus]] of [
+    ["/api/news-index", JSON.stringify({ items: [{
+      detail_key: "1".repeat(64), category: "美国宏观", cluster_id: "cluster-1",
+      collector_first_seen_time: "2026-08-20T00:00:00Z",
+      annotation_status: "NOT_A_REVIEW_STATE", model_visibility: "MODEL_VISIBLE",
+      mirror_contract: "release-validation-v1",
+    }] }), 409],
+    ["/api/news-content", JSON.stringify({ items: [{
+      detail_key: "1".repeat(64), detail_hash: "not-a-sha256", payload: {},
+    }] }), 400],
+    ["/api/news-index", "{not-json", 400],
+    ["/api/news-content", "{not-json", 400],
+    ["/api/news-index", JSON.stringify({
+      withdraw_detail_keys: null,
+      items: [{
+        detail_key: "1".repeat(64), category: "美国宏观", cluster_id: "cluster-1",
+        collector_first_seen_time: "2026-08-20T00:00:00Z",
+        annotation_status: "READY", model_visibility: "MODEL_VISIBLE",
+        parsed_at: "2026-08-20T00:00:00Z", mirror_contract: "release-validation-v1",
+      }],
+    }), 400],
+    ["/api/news-content", JSON.stringify({ reset: 1 }), 400],
+  ].entries()) {
+    const response = await invoke(path, {
+      method: "POST", headers: {
+        ...validationHeaders, "X-Aurum-Request-ID": `invalid-news-${caseIndex}`,
+      }, body,
+    });
+    assert.equal(response.status, expectedStatus, `${path}: ${await response.clone().text()}`);
+    assert.equal(response.headers.get("x-aurum-d1-operations"), "unknown", path);
+  }
+  assert.equal(state(), before);
+});
+
 test("turns a temporary D1 failure into a bounded resource-owned 503", async () => {
   if (isPreviewBuild) return;
   const failingEnv = {

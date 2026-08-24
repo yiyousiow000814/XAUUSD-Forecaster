@@ -3073,7 +3073,6 @@ test("production-shaped release validation reaches work before every mutation", 
     ["../app/api/market-history/route.ts", "market-history-write", "releaseValidationResponse(validation"],
     ["../app/api/learning-history/route.ts", "learning-history-write", "releaseValidationResponse(validation"],
     ["../app/api/news-evidence/route.ts", "news-evidence-write", "releaseValidationResponse(validation"],
-    ["../app/api/news-index/route.ts", "news-index-write", "finishReleaseValidation(binding, validation"],
   ]) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
     const auth = source.indexOf(`request, "${family}", isIngestAuthorized`);
@@ -3088,6 +3087,22 @@ test("production-shaped release validation reaches work before every mutation", 
     );
     assert.ok(auth >= 0 && bodyRead > auth && response > bodyRead, path);
     if (mutation >= 0) assert.ok(mutation > response, path);
+  }
+
+  for (const [path, family] of [
+    ["../app/api/news-index/route.ts", "news-index-write"],
+    ["../app/api/news-content/route.ts", "news-content-write"],
+  ]) {
+    const source = readFileSync(new URL(path, import.meta.url), "utf8");
+    const auth = source.indexOf(`request, "${family}", isIngestAuthorized`);
+    const bodyRead = source.indexOf("readBoundedBody(request", auth);
+    const releaseWork = source.indexOf("d1-json1+json-each", bodyRead);
+    const response = source.indexOf("releaseValidationResponse(validation", bodyRead);
+    const firstMutation = Math.min(...[
+      source.indexOf(".run()", response), source.indexOf("binding.batch(", response),
+    ].filter(index => index >= 0));
+    assert.ok(auth >= 0 && bodyRead > auth && releaseWork > bodyRead, path);
+    assert.ok(response > bodyRead && firstMutation > response, path);
   }
 });
 
