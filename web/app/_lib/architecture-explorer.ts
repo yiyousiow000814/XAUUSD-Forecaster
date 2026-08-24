@@ -42,13 +42,16 @@ export type ArchitectureManifest = {
 };
 export type ArchitectureGraphNode = {
   id: string; position: { x: number; y: number }; width: number; height: number;
-  data: { node: ArchitectureNode; laneId: string; laneLabel: string };
+  data: { node: ArchitectureNode; laneId: string; laneLabel: string; hasIncomingEdge: boolean; hasOutgoingEdge: boolean };
 };
 export type ArchitectureGraphLane = {
   id: string; position: { x: number; y: number }; width: number; height: number;
   data: { label: string; direction: "LR" | "TB" };
 };
 export type ArchitectureGraphEdge = ArchitectureEdge & { source: string; target: string };
+export type ArchitecturePoint = { x: number; y: number };
+
+export const ARCHITECTURE_LANE_GAP = { LR: 24, TB: 20 } as const;
 
 const STATES = new Set<ArchitectureState>(["CURRENT", "PENDING", "TARGET", "PAUSED", "RETAINED"]);
 const PATH_STATES = new Set<ArchitecturePathState>(["CURRENT_PATH", "PENDING_PATH", "LEGACY_SHIM", "TARGET_PATH"]);
@@ -181,6 +184,122 @@ export function architectureCanvasHeight(nodeCount: number, mobile: boolean) {
   return mobile ? Math.min(1600, Math.max(650, nodeCount * 135)) : 650;
 }
 
+function laneBounds(nodes: ArchitectureGraphNode[], lane: ArchitectureLane, direction: "LR" | "TB"): ArchitectureGraphLane {
+  const laneNodes = nodes.filter(node => lane.node_ids.includes(node.id));
+  const padding = direction === "TB" ? { x: 18, top: 34, bottom: 18 } : { x: 22, top: 34, bottom: 20 };
+  const left = Math.min(...laneNodes.map(node => node.position.x));
+  const top = Math.min(...laneNodes.map(node => node.position.y));
+  const right = Math.max(...laneNodes.map(node => node.position.x + node.width));
+  const bottom = Math.max(...laneNodes.map(node => node.position.y + node.height));
+  return {
+    id: `lane-${lane.id}`,
+    position: { x: left - padding.x, y: top - padding.top },
+    width: right - left + padding.x * 2,
+    height: bottom - top + padding.top + padding.bottom,
+    data: { label: lane.label, direction },
+  };
+}
+
+function separateArchitectureLanes(nodes: ArchitectureGraphNode[], lanes: ArchitectureLane[], direction: "LR" | "TB") {
+  const placed: ArchitectureGraphLane[] = [];
+  const gap = ARCHITECTURE_LANE_GAP[direction];
+  for (const lane of lanes) {
+    let bounds = laneBounds(nodes, lane, direction);
+    for (let attempt = 0; attempt < placed.length; attempt += 1) {
+      const conflicting = placed.filter(previous => {
+        const xSeparated = bounds.position.x >= previous.position.x + previous.width + gap
+          || previous.position.x >= bounds.position.x + bounds.width + gap;
+        const ySeparated = bounds.position.y >= previous.position.y + previous.height + gap
+          || previous.position.y >= bounds.position.y + bounds.height + gap;
+        return !xSeparated && !ySeparated;
+      });
+      if (!conflicting.length) break;
+      const delta = direction === "LR"
+        ? Math.max(...conflicting.map(previous => previous.position.y + previous.height + gap - bounds.position.y))
+        : Math.max(...conflicting.map(previous => previous.position.x + previous.width + gap - bounds.position.x));
+      for (const node of nodes) {
+        if (!lane.node_ids.includes(node.id)) continue;
+        if (direction === "LR") node.position.y += delta;
+        else node.position.x += delta;
+      }
+      bounds = laneBounds(nodes, lane, direction);
+    }
+    placed.push(bounds);
+  }
+  return placed;
+}
+
+export function architecturePortVisibility(edges: Pick<ArchitectureGraphEdge, "source" | "target">[], nodeId: string) {
+  return {
+    hasIncomingEdge: edges.some(edge => edge.target === nodeId),
+    hasOutgoingEdge: edges.some(edge => edge.source === nodeId),
+  };
+}
+
+function segmentIntersectsNode(a: ArchitecturePoint, b: ArchitecturePoint, node: ArchitectureGraphNode, clearance = 8) {
+  const left = node.position.x - clearance; const right = node.position.x + node.width + clearance;
+  const top = node.position.y - clearance; const bottom = node.position.y + node.height + clearance;
+  if (a.x === b.x) return a.x > left && a.x < right && Math.max(a.y, b.y) > top && Math.min(a.y, b.y) < bottom;
+  if (a.y === b.y) return a.y > top && a.y < bottom && Math.max(a.x, b.x) > left && Math.min(a.x, b.x) < right;
+  return true;
+}
+
+export function architectureRouteCrossesUnrelatedNode(
+  points: ArchitecturePoint[], nodes: ArchitectureGraphNode[], sourceId: string, targetId: string,
+) {
+  const obstacles = nodes.filter(node => node.id !== sourceId && node.id !== targetId);
+  return points.slice(1).some((point, index) => obstacles.some(node => segmentIntersectsNode(points[index], point, node)));
+}
+
+export function architectureEdgeRoute(
+  nodes: ArchitectureGraphNode[], edge: Pick<ArchitectureGraphEdge, "id" | "source" | "target">, direction: "LR" | "TB",
+) {
+  const source = nodes.find(node => node.id === edge.source)!; const target = nodes.find(node => node.id === edge.target)!;
+  const start = direction === "LR"
+    ? { x: source.position.x + source.width, y: source.position.y + source.height / 2 }
+    : { x: source.position.x + source.width / 2, y: source.position.y + source.height };
+  const end = direction === "LR"
+    ? { x: target.position.x, y: target.position.y + target.height / 2 }
+    : { x: target.position.x + target.width / 2, y: target.position.y };
+  const middle = direction === "LR" ? (start.x + end.x) / 2 : (start.y + end.y) / 2;
+  const direct = direction === "LR"
+    ? [start, { x: middle, y: start.y }, { x: middle, y: end.y }, end]
+    : [start, { x: start.x, y: middle }, { x: end.x, y: middle }, end];
+  if (!architectureRouteCrossesUnrelatedNode(direct, nodes, edge.source, edge.target)) return direct;
+
+  const ordinal = [...edge.id].reduce((total, char) => total + char.charCodeAt(0), 0) % 5;
+  if (direction === "LR") {
+    const above = Math.min(...nodes.map(node => node.position.y)) - 24 - ordinal * 8;
+    const below = Math.max(...nodes.map(node => node.position.y + node.height)) + 24 + ordinal * 8;
+    const stubStart = start.x + 18; const stubEnd = end.x - 18;
+    for (const y of [above, below]) {
+      const route = [start, { x: stubStart, y: start.y }, { x: stubStart, y }, { x: stubEnd, y }, { x: stubEnd, y: end.y }, end];
+      if (!architectureRouteCrossesUnrelatedNode(route, nodes, edge.source, edge.target)) return route;
+    }
+  } else {
+    const left = Math.min(...nodes.map(node => node.position.x)) - 24 - ordinal * 8;
+    const right = Math.max(...nodes.map(node => node.position.x + node.width)) + 24 + ordinal * 8;
+    const stubStart = start.y + 18; const stubEnd = end.y - 18;
+    for (const x of [left, right]) {
+      const route = [start, { x: start.x, y: stubStart }, { x, y: stubStart }, { x, y: stubEnd }, { x: end.x, y: stubEnd }, end];
+      if (!architectureRouteCrossesUnrelatedNode(route, nodes, edge.source, edge.target)) return route;
+    }
+  }
+  return direct;
+}
+
+export function architectureRoutePath(points: ArchitecturePoint[]) {
+  return points.map((point, index) => `${index ? "L" : "M"}${point.x},${point.y}`).join(" ");
+}
+
+export function architectureRouteLabelPoint(points: ArchitecturePoint[]) {
+  const segments = points.slice(1).map((point, index) => ({
+    a: points[index], b: point, length: Math.abs(point.x - points[index].x) + Math.abs(point.y - points[index].y),
+  }));
+  const longest = segments.reduce((best, item) => item.length > best.length ? item : best, segments[0]);
+  return { x: (longest.a.x + longest.b.x) / 2, y: (longest.a.y + longest.b.y) / 2 };
+}
+
 export function buildArchitectureGraph(manifest: ArchitectureManifest, viewId: string, direction?: "LR" | "TB") {
   const view = manifest.views.find(item => item.id === viewId) ?? manifest.views[0];
   const rankdir = direction ?? view.layout_direction;
@@ -193,38 +312,14 @@ export function buildArchitectureGraph(manifest: ArchitectureManifest, viewId: s
   const visibleEdges = view.edge_ids.map(id => manifest.edges.find(item => item.id === id)!).filter(Boolean);
   visibleEdges.forEach(item => graph.setEdge(item.from, item.to, { id: item.id }));
   dagre.layout(graph);
-  const compactMobilePositions = new Map<string, { x: number; y: number }>();
-  if (rankdir === "TB") {
-    let cursorY = 24;
-    for (const lane of view.lanes) {
-      for (const nodeId of lane.node_ids) {
-        compactMobilePositions.set(nodeId, { x: 24, y: cursorY });
-        cursorY += height + 36;
-      }
-      cursorY += 28;
-    }
-  }
   const nodes: ArchitectureGraphNode[] = view.node_ids.map(id => {
     const dagrePosition = graph.node(id) as { x: number; y: number }; const lane = laneByNode.get(id)!;
-    const position = compactMobilePositions.get(id) ?? { x: dagrePosition.x - width / 2, y: dagrePosition.y - height / 2 };
+    const position = { x: dagrePosition.x - width / 2, y: dagrePosition.y - height / 2 };
+    const ports = architecturePortVisibility(visibleEdges.map(item => ({ source: item.from, target: item.to })), id);
     return { id, position, width, height,
-      data: { node: nodeById.get(id)!, laneId: lane.id, laneLabel: lane.label } };
+      data: { node: nodeById.get(id)!, laneId: lane.id, laneLabel: lane.label, ...ports } };
   });
-  const lanePadding = rankdir === "TB" ? { x: 18, top: 34, bottom: 18 } : { x: 22, top: 34, bottom: 20 };
-  const laneBoxes: ArchitectureGraphLane[] = view.lanes.map(lane => {
-    const laneNodes = nodes.filter(node => lane.node_ids.includes(node.id));
-    const left = Math.min(...laneNodes.map(node => node.position.x));
-    const top = Math.min(...laneNodes.map(node => node.position.y));
-    const right = Math.max(...laneNodes.map(node => node.position.x + node.width));
-    const bottom = Math.max(...laneNodes.map(node => node.position.y + node.height));
-    return {
-      id: `lane-${lane.id}`,
-      position: { x: left - lanePadding.x, y: top - lanePadding.top },
-      width: right - left + lanePadding.x * 2,
-      height: bottom - top + lanePadding.top + lanePadding.bottom,
-      data: { label: lane.label, direction: rankdir },
-    };
-  });
+  const laneBoxes = separateArchitectureLanes(nodes, view.lanes, rankdir);
   const edges: ArchitectureGraphEdge[] = visibleEdges.map(item => ({ ...item, source: item.from, target: item.to }));
   return { view, nodes, laneBoxes, edges, direction: rankdir };
 }

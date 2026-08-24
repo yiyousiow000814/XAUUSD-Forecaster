@@ -3,7 +3,7 @@
 import "@xyflow/react/dist/style.css";
 import {
   Background, BaseEdge, Controls, EdgeLabelRenderer, Handle, MarkerType, MiniMap, Position,
-  ReactFlow, ReactFlowProvider, getSmoothStepPath, useReactFlow, useStore,
+  ReactFlow, ReactFlowProvider, useReactFlow, useStore,
   type Edge, type EdgeProps, type Node, type NodeProps,
 } from "@xyflow/react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -13,6 +13,7 @@ import {
 } from "../_lib/architecture-camera";
 import {
   architectureCanvasHeight, architectureCommitSha, architectureFailureImpact, architectureFitOptions, architectureGithubHref, architectureRelations,
+  architectureEdgeRoute, architectureRouteLabelPoint, architectureRoutePath,
   bestViewForNode, buildArchitectureGraph, bundledArchitectureManifest, searchArchitectureNodes,
   type ArchitectureEdge, type ArchitectureFailureImpact, type ArchitectureManifest, type ArchitectureNode,
 } from "../_lib/architecture-explorer";
@@ -31,11 +32,11 @@ const KIND_SYMBOL: Record<string, string> = {
 type FailureStatus = "AFFECTED" | "CONTINUES" | null;
 type FlowNodeData = Record<string, unknown> & {
   node: ArchitectureNode; laneLabel: string; selected: boolean; dimmed: boolean; highlighted: boolean;
-  direction: "LR" | "TB";
+  direction: "LR" | "TB"; hasIncomingEdge: boolean; hasOutgoingEdge: boolean;
   failureStatus: FailureStatus; onSelect: (id: string) => void; onHover: (id: string | null) => void;
   onDrill: (id: string) => void; onNavigate: (id: string, direction: number) => void;
 };
-type FlowEdgeData = Record<string, unknown> & { edge: ArchitectureEdge; highlighted: boolean; dimmed: boolean; guided: boolean; showLabel: boolean };
+type FlowEdgeData = Record<string, unknown> & { edge: ArchitectureEdge; highlighted: boolean; dimmed: boolean; guided: boolean; showLabel: boolean; route: Array<{ x: number; y: number }> };
 type FlowLaneData = Record<string, unknown> & { label: string; direction: "LR" | "TB" };
 type ArchitectureFlowNode = Node<FlowNodeData, "architecture">;
 type ArchitectureLaneNode = Node<FlowLaneData, "lane">;
@@ -58,7 +59,8 @@ const ArchitectureGraphNode = memo(function ArchitectureGraphNode({ data }: Node
   const className = [styles.graphNode, styles[`kind${node.kind}`], selected ? styles.selected : "",
     highlighted ? styles.highlighted : "", dimmed ? styles.dimmed : "", failureStatus ? styles[`failure${failureStatus}`] : ""].filter(Boolean).join(" ");
   return <article className={className} data-failure-status={failureStatus ?? undefined} data-node-id={node.id}>
-    <Handle className={styles.handle} isConnectable={false} position={data.direction === "TB" ? Position.Top : Position.Left} type="target" />
+    {data.hasIncomingEdge ? <Handle className={`${styles.handle} ${data.direction === "TB" ? styles.handleTB : styles.handleLR}`}
+      isConnectable={false} position={data.direction === "TB" ? Position.Top : Position.Left} type="target" /> : null}
     <button aria-label={`${node.label}, ${node.kind}, ${node.runtime_state}`} aria-pressed={selected} title={node.summary}
       onClick={() => onSelect(node.id)} onDoubleClick={() => onDrill(node.id)}
       onFocus={() => onHover(node.id)} onBlur={() => onHover(null)}
@@ -73,19 +75,20 @@ const ArchitectureGraphNode = memo(function ArchitectureGraphNode({ data }: Node
       <small>{laneLabel}</small>
       {failureStatus ? <em>{failureStatus}</em> : null}
     </button>
-    <Handle className={styles.handle} isConnectable={false} position={data.direction === "TB" ? Position.Bottom : Position.Right} type="source" />
+    {data.hasOutgoingEdge ? <Handle className={`${styles.handle} ${data.direction === "TB" ? styles.handleTB : styles.handleLR}`}
+      isConnectable={false} position={data.direction === "TB" ? Position.Bottom : Position.Right} type="source" /> : null}
   </article>;
 });
 
 const ArchitectureGraphEdge = memo(function ArchitectureGraphEdge(props: EdgeProps<ArchitectureFlowEdge>) {
-  const [path, labelX, labelY] = getSmoothStepPath(props);
   const data = props.data!;
+  const path = architectureRoutePath(data.route); const label = architectureRouteLabelPoint(data.route);
   const className = [styles.graphEdge, styles[`edge${data.edge.criticality}`], data.highlighted ? styles.edgeHighlighted : "",
     data.dimmed ? styles.edgeDimmed : "", data.guided ? styles.edgeGuided : ""].filter(Boolean).join(" ");
   return <>
     <BaseEdge id={props.id} markerEnd={props.markerEnd} path={path} className={className} />
     {data.showLabel ? <EdgeLabelRenderer><span className={`${styles.edgeLabel} ${data.dimmed ? styles.edgeLabelDimmed : ""}`}
-      style={{ transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)` }} title={data.edge.description}>
+      style={{ transform: `translate(-50%, -50%) translate(${label.x}px,${label.y}px)` }} title={data.edge.description}>
       {data.edge.label}<small>{data.edge.kind}</small>
     </span></EdgeLabelRenderer> : null}
   </>;
@@ -292,6 +295,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
     markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18, color: item.criticality === "CRITICAL" ? "#137d74" : "#607278" },
     animated: scenarioEdges.has(item.id), data: {
       edge: item,
+      route: architectureEdgeRoute(graph.nodes, item, graph.direction),
       highlighted: highlightedEdges.has(item.id),
       dimmed: hasFocus && !highlightedEdges.has(item.id),
       guided: scenarioEdges.has(item.id),
@@ -302,7 +306,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
         || scenarioEdges.has(item.id)
         || hoveredEdgeId === item.id,
     },
-  })), [graph.edges, hasFocus, highlightedEdges, hoveredEdgeId, scenarioEdges, viewId]);
+  })), [graph.direction, graph.edges, graph.nodes, hasFocus, highlightedEdges, hoveredEdgeId, scenarioEdges, viewId]);
   const flowElements = useMemo(() => [...laneNodes, ...flowNodes], [flowNodes, laneNodes]);
   useLayoutEffect(() => {
     flow.setNodes(flowElements);

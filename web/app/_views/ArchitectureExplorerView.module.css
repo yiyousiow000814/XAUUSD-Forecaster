@@ -77,7 +77,9 @@
 .graphNode.highlighted { border-color: var(--graph-accent); box-shadow: 0 0 0 3px rgba(19,125,116,.12), 0 8px 24px rgba(29,54,59,.14); }
 .graphNode.dimmed { opacity: .24; }
 .graphNode.failureAFFECTED { border: 2px solid #a23b32; background: #fff0ed; }.graphNode.failureCONTINUES { border: 2px solid #1f775d; background: #eaf7f1; }
-.handle { width: 8px !important; height: 8px !important; border: 2px solid white !important; background: var(--graph-accent) !important; opacity: .85; }
+.handle { border: 2px solid white !important; border-radius: 999px !important; background: var(--graph-accent) !important; opacity: .85; }
+.handleLR { width: 6px !important; min-width: 6px !important; height: 22px !important; }
+.handleTB { width: 22px !important; height: 6px !important; min-height: 6px !important; }
 
 .graphEdge { fill: none; stroke: var(--graph-line); stroke-width: 1.5; transition: opacity .16s ease, stroke .16s ease, stroke-width .16s ease; }
 .edgeCRITICAL { stroke: var(--graph-accent); stroke-width: 2.4; }.edgeBACKGROUND { stroke-dasharray: 7 5; }.edgeOPTIONAL { stroke: #91a2a5; stroke-dasharray: 4 7; }.edgeCONTROL_PLANE { stroke: var(--graph-amber); stroke-dasharray: 2 5; }
