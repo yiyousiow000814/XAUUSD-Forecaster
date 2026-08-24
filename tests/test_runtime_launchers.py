@@ -1900,6 +1900,7 @@ def test_static_assets_are_excluded_from_expected_worker_invocations(tmp_path) -
     candidate = "b" * 40
     result = _run_control_center_contract(
         tmp_path,
+        "$dashboardUrl='https://aurum-signal-room.yiyousiow1234.chatgpt.site'; "
         f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' "
         "-WorkerVersionId '11111111-1111-1111-1111-111111111111' "
         f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE'; "
@@ -1992,6 +1993,26 @@ def test_static_asset_validation_fails_closed_for_status_body_and_host(tmp_path)
         "HTTP_STATUS_MISMATCH,HTTP_STATUS_MISMATCH,HTTP_STATUS_MISMATCH,"
         "HTTP_STATUS_MISMATCH,EMPTY_BODY,CANDIDATE_STATIC_HOST_MISMATCH,"
         "VALIDATION_REQUEST_FAILED"
+    )
+
+
+def test_candidate_version_url_is_derived_from_worker_not_formal_dashboard(tmp_path) -> None:
+    candidate = "b" * 40
+    worker = "44444444-4444-4444-4444-444444444444"
+    result = _run_control_center_contract(
+        tmp_path,
+        "$dashboardUrl='https://aurum-signal-room.yiyousiow1234.chatgpt.site';"
+        f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId '{worker}' "
+        f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE';"
+        f"$version=[pscustomobject]@{{id='{worker}';metadata=[pscustomobject]@{{"
+        "has_preview=$true};annotations=[pscustomobject]@{"
+        f"'workers/message'='release:{candidate} branch:main "
+        "artifact_kind:PRODUCTION_CANDIDATE'}};"
+        "Write-Output (Get-ReleaseVersionPreviewUrl -Version $version -Candidate $candidate)",
+    )
+
+    assert result == (
+        "https://44444444-aurum-signal-room.yiyousiow1234.workers.dev"
     )
 
 

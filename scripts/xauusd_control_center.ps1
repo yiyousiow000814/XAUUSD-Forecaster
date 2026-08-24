@@ -500,7 +500,7 @@ function Get-ReleaseVersionPreviewUrl {
         (Get-ReleaseArtifactKindFromVersion -Version $Version) -ne
             $productionCandidateArtifactKind) { return "" }
     try {
-        $production = [Uri]$dashboardUrl
+        $production = [Uri]$workerUrl
         $workerPrefix = "$workerName."
         if (-not $production.Host.StartsWith(
             $workerPrefix, [StringComparison]::OrdinalIgnoreCase
@@ -1338,7 +1338,7 @@ function Get-CandidateStaticAssetBaseUri {
             [UriKind]::Absolute, [ref]$candidateUri)) {
         throw "CANDIDATE_STATIC_HOST_MISMATCH"
     }
-    $productionUri = [Uri]$dashboardUrl
+    $productionUri = [Uri]$workerUrl
     $workerPrefix = "$workerName."
     if (-not $productionUri.Host.StartsWith(
             $workerPrefix, [StringComparison]::OrdinalIgnoreCase)) {
