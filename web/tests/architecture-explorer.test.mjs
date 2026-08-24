@@ -213,7 +213,8 @@ test("26. Fit zoom is bounded by view size and selection does not refit", () => 
   assert.match(viewSource, /const zoom = current\.flow\.getZoom\(\)/);
   assert.match(viewSource, /current\.flow\.setViewport\(\{/);
   assert.match(viewSource, /y: 64 - item\.position\.y \* zoom/);
-  assert.match(viewSource, /nodes=\{flowElements\}/);
+  assert.match(viewSource, /defaultNodes=\{flowElements\}/);
+  assert.match(viewSource, /flow\.setNodes\(flowElements\)/);
   assert.doesNotMatch(viewSource, /nodes=\{\[\.\.\.laneNodes/);
 });
 

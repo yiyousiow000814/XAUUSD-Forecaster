@@ -297,6 +297,10 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
     },
   })), [graph.edges, hasFocus, highlightedEdges, hoveredEdgeId, scenarioEdges, viewId]);
   const flowElements = useMemo(() => [...laneNodes, ...flowNodes], [flowNodes, laneNodes]);
+  useLayoutEffect(() => {
+    flow.setNodes(flowElements);
+    flow.setEdges(flowEdges);
+  }, [flow, flowEdges, flowElements]);
 
   const runScenario = (id: string) => {
     const next = manifest.scenarios.find(item => item.id === id); setScenarioId(id); setScenarioStep(0); setSelectedId(null); setFailureMode(false);
@@ -356,7 +360,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
     <section className={`${styles.stage} ${selected ? styles.withInspector : ""}`} style={{ minHeight: canvasHeight }}>
       <div className={styles.canvas} data-graph-direction={graph.direction} data-testid="architecture-graph" ref={canvasRef} style={{ height: canvasHeight }}
         onTransitionEnd={event => { if (event.propertyName === "width") { canvasTransitionCompleteRef.current = true; camera.layoutChanged(); } }}>
-        <ReactFlow<ArchitectureCanvasNode, ArchitectureFlowEdge> nodes={flowElements} edges={flowEdges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
+        <ReactFlow<ArchitectureCanvasNode, ArchitectureFlowEdge> defaultNodes={flowElements} defaultEdges={flowEdges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
           elementsSelectable minZoom={0.25} maxZoom={1.6} nodesConnectable={false} nodesDraggable={false}
           onEdgeMouseEnter={(_, edge) => setHoveredEdgeId(edge.id)} onEdgeMouseLeave={() => setHoveredEdgeId(null)}
           panOnDrag zoomOnPinch zoomOnScroll proOptions={{ hideAttribution: true }}>
