@@ -144,7 +144,6 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   const flow = useReactFlow();
   const canvasRef = useRef<HTMLDivElement>(null);
   const canvasTransitionCompleteRef = useRef(true);
-  const initialCameraRequestedRef = useRef(false);
   const [viewId, setViewId] = useState("system-overview");
   const [viewHistory, setViewHistory] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -262,16 +261,12 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
     const close = (event: KeyboardEvent) => { if (event.key === "Escape") closeInspector(); };
     window.addEventListener("keydown", close); return () => window.removeEventListener("keydown", close);
   }, [closeInspector]);
-  useEffect(() => {
-    if (!flowInitialized || !nodesInitialized || initialCameraRequestedRef.current) return;
-    initialCameraRequestedRef.current = true;
+  const initializeFlow = useCallback(() => {
+    setFlowInitialized(true);
     if (camera.pendingIntent()) camera.layoutChanged();
     else camera.request({ type: "FIT_VIEW", viewId });
-  }, [camera, flowInitialized, nodesInitialized, viewId]);
-  useEffect(() => () => {
-    initialCameraRequestedRef.current = false;
-    camera.cancel();
-  }, [camera]);
+  }, [camera, viewId]);
+  useEffect(() => () => camera.cancel(), [camera]);
   useEffect(() => {
     camera.layoutChanged();
   }, [camera, graph.direction, graph.view.id, nodesInitialized]);
@@ -376,7 +371,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
         onTransitionEnd={event => { if (event.propertyName === "width") { canvasTransitionCompleteRef.current = true; camera.layoutChanged(); } }}>
         <ReactFlow<ArchitectureCanvasNode, ArchitectureFlowEdge> defaultNodes={flowElements} defaultEdges={flowEdges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
           elementsSelectable minZoom={0.25} maxZoom={1.6} nodesConnectable={false} nodesDraggable={false}
-          onInit={() => setFlowInitialized(true)}
+          onInit={initializeFlow}
           onEdgeMouseEnter={(_, edge) => setHoveredEdgeId(edge.id)} onEdgeMouseLeave={() => setHoveredEdgeId(null)}
           panOnDrag zoomOnPinch zoomOnScroll proOptions={{ hideAttribution: true }}>
           <Background color="#b7c3c5" gap={22} size={1} />
