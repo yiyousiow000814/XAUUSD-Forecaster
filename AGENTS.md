@@ -56,6 +56,83 @@ authoritative data.
 - Before deleting or consolidating a test, prove that its behavior is covered elsewhere or that the underlying requirement is obsolete.
 - A change is not complete merely because the full suite passes. Review whether the new or modified tests cover the correct abstraction level and whether equivalent sibling paths remain untested.
 
+## Cross-Boundary Change Discipline
+
+- Before implementing a state machine, classify every non-success state as
+  transient/pending, externally retryable, operator-reviewable, or terminal
+  deterministic failure. An externally mutable condition for the same
+  immutable identity must not become terminal merely because it is currently
+  unavailable. A retryable state remains fail closed and non-promotable; test
+  both rejection and recovery on the same identity. A terminal state requires
+  an explicit reason why the same immutable input cannot legitimately succeed.
+- A change to an API payload, serialized object, persisted snapshot, queue or
+  event, WebSocket frame, sync payload, or database-derived projection requires
+  review of the producer and every meaningful consumer. Verify names, shapes,
+  units, optionality, ordering, and user-visible semantics. Producer validation
+  or serialization coverage alone is insufficient; changed semantics require
+  consumer-level behavioral coverage.
+- For partial, compact, delta, or incremental transport, follow
+  `docs/contracts/HOSTING_BOUNDARIES.md`. Identify the authoritative complete
+  baseline, field ownership, merge and deletion rules, stale and sequence
+  semantics, and reconnect/resync behavior. Prove that applying a delta
+  preserves unrelated baseline fields and that a complete required state can
+  be rebuilt.
+- Every recurring responsibility has exactly one explicit production runtime
+  owner. Identify who starts and supervises it, cadence, disabled or
+  not-configured behavior, activation boundary, durable state, process and
+  machine restart recovery, retry and failure isolation, rollback, and
+  shutdown. A library, CLI, endpoint, scheduler definition, Worker, Durable
+  Object, or fixture does not prove that recurring production work is owned.
+- Wiring-sensitive integration tests must exercise the actual production route,
+  entry point, configuration name, coordination key, serializer-to-consumer
+  path, and service registry. When a helper is tested, also prove that its
+  production caller supplies every semantics-controlling value. A test-only
+  identifier may differ from production only when the difference is intentional
+  and independently covered.
+
+## Pre-Completion Adversarial Review
+
+A non-trivial change is not complete merely because focused tests, the full
+suite, lint, builds, or CI pass. After implementation is substantially finished,
+independently review the final exact head as if another engineer wrote it.
+
+For every changed cross-boundary workflow, trace the real production path:
+
+`producer -> state generation/storage -> transport -> routing -> production entry point -> consumer -> externally observable behavior`
+
+Use actual production call sites, configuration and route names, coordination
+keys, schemas, ownership, and deployed entry points. A helper-level test does
+not prove integration when production wiring can supply different values or
+take another path. The review must establish:
+
+- what invokes the workflow in production and who consumes every changed field;
+- behavior at first start with no state, genuine empty/zero and partial state,
+  stale state, process restart, machine restart, reconnect, dependency failure,
+  and later recovery;
+- compatibility with old Stable, activation ordering, Promote, Reverse Stable,
+  and rollback where those boundaries apply;
+- what grows, what bounds each operation and transport, whether optional
+  failure is isolated, and whether every recurring responsibility has one owner;
+- whether compact state can erase richer authority, mutable external state can
+  become accidentally terminal, and the production entry point matches the
+  tested assumptions; and
+- whether the result works from observable contracts without relying on the
+  implementation author's intended design.
+
+If this review finds a defect, fix it, rerun affected focused tests, repeat the
+review on the new exact head, and then run final exact-head validation. Before
+reporting completion, inspect the final diff, production callers, consumers,
+state transitions, lifecycle and restart paths, and tests independently. The
+implementation plan, earlier reasoning, and green tests are not evidence of the
+final implementation by themselves; completion reports must cite evidence from
+the final exact head.
+
+When human or code review finds a defect after implementation was considered
+complete, ask which reusable review rule or authoritative contract failed to
+catch that class. Update the appropriate rule or contract when the invariant
+generalizes beyond the incident; do not create permanent rules for one-off
+typos.
+
 ## Documentation Language
 
 - Write repository documentation in English. This includes the root README,
