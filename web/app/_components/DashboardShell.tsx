@@ -28,6 +28,8 @@ import {
 } from "./DashboardNavigation";
 import MobileDashboardNav from "./MobileDashboardNav";
 import SystemStatePill from "./SystemStatePill";
+import { liveBroadcastTransport } from "../_lib/live-broadcast";
+import { ensureStatusBaseline } from "../_lib/dashboard-refresh";
 
 export const isVersionedCandidateHost = (hostname: string) => (
   /^[0-9a-f]{8}-aurum-signal-room\./i.test(hostname)
@@ -107,7 +109,9 @@ function GlobalSystemState() {
     const current = readDashboardResourceState<ShellStatusPayload>("/api/status");
     queueMicrotask(update);
     if (!current.hasSnapshot && !current.loading) {
-      void loadDashboardResource<ShellStatusPayload>("/api/status").catch(() => undefined);
+      void ensureStatusBaseline(
+        () => loadDashboardResource<ShellStatusPayload>("/api/status"),
+      ).catch(() => undefined);
     }
     return () => {
       active = false;
@@ -167,6 +171,14 @@ function AdminSectionNavigation({ location }: { location: DashboardLocation }) {
 }
 
 export default function DashboardShell({ children, location }: { children: ReactNode; location: DashboardLocation }) {
+  useEffect(() => {
+    const transport = liveBroadcastTransport();
+    let active = true;
+    void ensureStatusBaseline(() => loadDashboardResource(
+      "/api/status", { force: true, maxAgeMs: 0 },
+    )).catch(() => undefined).finally(() => { if (active) transport?.start(); });
+    return () => { active = false; transport?.stop(); };
+  }, []);
   const activeDestination = activeDashboardDestination(location.room);
   const navigation = useDashboardNavigation();
   const [adminAuthState, setAdminAuthState] = useState<AdminAuthState>("CHECKING");

@@ -49,6 +49,15 @@ export function readDashboardResource<T>(url: string): T | null {
   return (resources.get(url)?.data as T | undefined) ?? null;
 }
 
+export function updateDashboardResource<T>(
+  url: string, update: (current: T | null) => T,
+): void {
+  const entry = resources.get(url);
+  const current = entry?.data === undefined ? null : entry.data as T;
+  resources.set(url, { data: update(current), updatedAt: Date.now() });
+  notifyDashboardResource(url);
+}
+
 export function clearDashboardResource(url: string): void {
   const entry = resources.get(url);
   if (!entry || entry.data === undefined) return;

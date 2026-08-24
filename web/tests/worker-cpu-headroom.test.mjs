@@ -175,6 +175,30 @@ test("selects the freshest valid status snapshot and strips private legacy field
   assert.equal(payload.source, "older-public");
 });
 
+test("backfills the bounded Live ledger from the authoritative transition snapshot", async () => {
+  if (isPreviewBuild) return;
+  const decisions = Array.from({ length: 20 }, (_, index) => ({
+    decision_id: `legacy-${index}`,
+    features: { unused: index },
+    predictions: Array.from({ length: 12 }, (_, prediction) => ({ prediction })),
+  }));
+  insertSnapshot(1, JSON.stringify({
+    generated_at: "2026-08-20T00:00:00Z",
+    system: { online: false, quote_age_seconds: 1 },
+    recent_decisions: decisions,
+  }), "2026-08-20T00:00:01Z");
+  insertSnapshot(5, JSON.stringify({
+    generated_at: "2026-08-20T00:00:02Z",
+    system: { online: false, quote_age_seconds: 1 },
+  }), "2026-08-20T00:00:03Z");
+
+  const payload = await (await invoke("/api/status")).json();
+  assert.equal(payload.recent_decisions.length, 18);
+  assert.equal(payload.recent_decisions[0].decision_id, "legacy-0");
+  assert.equal(payload.recent_decisions[0].features, undefined);
+  assert.equal(payload.recent_decisions[0].predictions.length, 8);
+});
+
 test("uses the freshest compatible audit source during split-snapshot transition", async () => {
   if (isPreviewBuild) return;
   const older = "2026-08-20T00:00:01Z";

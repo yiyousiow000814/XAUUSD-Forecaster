@@ -103,8 +103,22 @@ const PUBLIC_STATUS_SQL = `WITH selected(payload) AS (
    ORDER BY julianday(received_at) DESC,
             CASE id WHEN 5 THEN 0 ELSE 1 END
    LIMIT 1
-), public(payload) AS (
+), redacted(payload) AS (
   SELECT ${publicStatusJsonExpression()} FROM selected
+), legacy_decisions(recent_decisions) AS (
+  SELECT json_extract(${legacyAuditProjection({ recent_decisions: 18 })}, '$.recent_decisions')
+    FROM dashboard_snapshots
+   WHERE id = 1 AND json_valid(payload)
+   ORDER BY julianday(received_at) DESC
+   LIMIT 1
+), public(payload) AS (
+  SELECT CASE
+    WHEN json_type(payload, '$.recent_decisions') = 'array' THEN payload
+    ELSE json_set(
+      payload, '$.recent_decisions',
+      json(coalesce((SELECT recent_decisions FROM legacy_decisions), '[]'))
+    )
+  END FROM redacted
 ), measured AS (
   SELECT payload,
     CASE

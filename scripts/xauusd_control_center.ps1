@@ -1,7 +1,7 @@
 param(
     [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "ApproveCompatibility", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane")]
     [string]$Action = "Gui",
-    [ValidateSet("", "quote", "collector", "annotator", "api", "sync")]
+    [ValidateSet("", "quote", "collector", "annotator", "api", "sync", "broadcast")]
     [string]$ServiceKey = "",
     [string]$StatusPath = "",
     [string]$RuntimeRoot = "",
@@ -59,6 +59,9 @@ $releaseSecretsRoot = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot "
 $releaseSecretsPath = [System.IO.Path]::GetFullPath((Join-Path $releaseSecretsRoot "cloudflare-release.json"))
 $workerName = "aurum-signal-room"
 $workerUrl = "https://aurum-signal-room.yiyousiow1234.workers.dev"
+$broadcastHealthUrl = "https://aurum-live-broadcast.yiyousiow1234.workers.dev/health"
+$broadcastPublishDryRunUrl = "https://aurum-live-broadcast.yiyousiow1234.workers.dev/publish?dry_run=true"
+$broadcastFreshnessThreshold = [TimeSpan]::FromSeconds(90)
 $cloudflareAccountId = "48ce531f39e2310b4c858c8916a01d51"
 $releaseSchemaVersion = "stable-candidate-release-v3"
 $previewArtifactKind = "PREVIEW"
@@ -206,8 +209,27 @@ $services = @(
         Kind = "Python"
         Script = "scripts\run_dashboard_sync.py"
         Arguments = @("--interval-seconds", "30")
+    },
+    [pscustomobject]@{
+        Key = "broadcast"
+        Label = "Live Broadcast Publisher"
+        Match = "run_live_broadcast_publisher.py"
+        Kind = "Python"
+        Script = "scripts\run_live_broadcast_publisher.py"
+        Arguments = @(
+            "--interval-seconds", "30",
+            "--activate-production-publisher"
+        )
     }
 )
+
+function Test-BroadcastPublisherEnabled {
+    [string](Get-UserEnvironmentValue -Name "AURUM_LIVE_BROADCAST_PUBLISHER_ENABLED") -eq "1"
+}
+
+function Get-BroadcastPublisherToken {
+    [string](Get-UserEnvironmentValue -Name "LIVE_BROADCAST_PUBLISH_TOKEN")
+}
 
 function Get-ForecasterProcessSnapshot {
     @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
@@ -2595,6 +2617,142 @@ function Set-CandidateRepositoryPending {
     return $true
 }
 
+function Test-BroadcastServiceReadiness {
+    param([Parameter(Mandatory = $true)][string]$CandidateRevision)
+    $compatibleRevision = [string]$env:AURUM_LIVE_BROADCAST_COMPATIBLE_REVISION
+    $token = Get-BroadcastPublisherToken
+    if ([string]::IsNullOrWhiteSpace($token)) {
+        return [pscustomobject]@{
+            state = "BROADCAST_PENDING"; passed = $false; retryable = $true
+            reason = "BROADCAST_PUBLISH_TOKEN_NOT_CONFIGURED"
+            authority = $broadcastHealthUrl
+        }
+    }
+    try {
+        $health = Invoke-RestMethod -Method Get -Uri $broadcastHealthUrl -TimeoutSec 15
+        if ([string]$health.service -ne "aurum-live-broadcast") {
+            return [pscustomobject]@{
+                state = "FAILED"; passed = $false; retryable = $false
+                reason = "BROADCAST_AUTHORITY_MISMATCH"
+                authority = $broadcastHealthUrl
+            }
+        }
+        if ([string]$health.schema_version -ne "PUBLIC_LIVE_V1") {
+            return [pscustomobject]@{
+                state = "FAILED"; passed = $false; retryable = $false
+                reason = "BROADCAST_SCHEMA_INCOMPATIBLE"
+                authority = $broadcastHealthUrl
+                schema_version = [string]$health.schema_version
+            }
+        }
+        $revisionAccepted = (
+            [string]$health.code_revision -eq $CandidateRevision -or
+            (-not [string]::IsNullOrWhiteSpace($compatibleRevision) -and
+                [string]$health.code_revision -eq $compatibleRevision)
+        )
+        if (-not [bool]$health.binding_ready -or -not $revisionAccepted) {
+            return [pscustomobject]@{
+                state = "BROADCAST_BLOCKED"; passed = $false; retryable = $true
+                reason = "BROADCAST_PLATFORM_NOT_READY"
+                authority = $broadcastHealthUrl
+                code_revision = [string]$health.code_revision
+                binding_ready = [bool]$health.binding_ready
+                revision_accepted = $revisionAccepted
+            }
+        }
+        $dryRunState = [ordered]@{
+            schema_version = "PUBLIC_LIVE_V1"; sequence = 1
+            generated_at = [DateTimeOffset]::UtcNow.ToString("o")
+            source_revision = $CandidateRevision; market_session = "DATA_UNAVAILABLE"
+            freshness = @{ online = $false; state = "STALE" }
+            quote = @{
+                bid = 0.0; ask = 0.0; spread = 0.0
+                source_received_time = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            forecast = @{
+                model_identity = $null; model_version = $null
+                recommended_action = "WAIT"; prediction_status = "DRY_RUN"
+                ev_long_u5 = $null; ev_short_u5 = $null; interval_width = $null
+                decision_time = $null; signal_expiry_seconds = 20
+                forecast_horizon_seconds = 1800; directional_bias = "NEUTRAL"
+                frozen_record = $false
+            }
+            health = @{ status = "DRY_RUN"; alerts = @() }
+        }
+        $headers = @{ Authorization = "Bearer $token" }
+        $dryRun = Invoke-RestMethod -Method Post -Uri $broadcastPublishDryRunUrl `
+            -Headers $headers -ContentType "application/json" `
+            -Body ($dryRunState | ConvertTo-Json -Depth 8 -Compress) -TimeoutSec 15
+        $passed = [bool]$dryRun.valid -and [bool]$dryRun.dry_run -and
+            [string]$dryRun.schema_version -eq "PUBLIC_LIVE_V1"
+        return [pscustomobject]@{
+            state = if ($passed) { "PASSED" } else { "BROADCAST_BLOCKED" }
+            passed = $passed
+            retryable = -not $passed
+            reason = if ($passed) { "PASSED" } else { "BROADCAST_DRY_RUN_REJECTED" }
+            authority = $broadcastHealthUrl
+            schema_version = [string]$health.schema_version
+            code_revision = [string]$health.code_revision
+            binding_ready = [bool]$health.binding_ready
+            revision_accepted = $revisionAccepted
+            dry_run_valid = $passed
+            dry_run_storage_mutation = $false
+            dry_run_broadcast = $false
+        }
+    } catch {
+        return [pscustomobject]@{
+            state = "BROADCAST_BLOCKED"; passed = $false; retryable = $true
+            reason = "BROADCAST_HEALTH_PROBE_FAILED"
+            authority = $broadcastHealthUrl
+            error = Protect-PreflightDiagnosticText $_.Exception.Message
+        }
+    }
+}
+
+function Test-BroadcastLiveDeliveryReadiness {
+    param([Parameter(Mandatory = $true)][string]$ExpectedRevision)
+    try {
+        $health = Invoke-RestMethod -Method Get -Uri $broadcastHealthUrl -TimeoutSec 15
+        $publishedAt = [DateTimeOffset]::MinValue
+        $publishedValid = [DateTimeOffset]::TryParse(
+            [string]$health.latest_published_at, [ref]$publishedAt
+        )
+        $age = if ($publishedValid) {
+            [DateTimeOffset]::UtcNow - $publishedAt
+        } else { [TimeSpan]::MaxValue }
+        $publisherService = $services | Where-Object Key -eq "broadcast" | Select-Object -First 1
+        $processes = if ($publisherService) { @(Get-ForecasterProcesses $publisherService) } else { @() }
+        $publisherState = if ($publisherService) {
+            Get-ServiceState -Service $publisherService -Processes $processes
+        } else { "NOT_CONFIGURED" }
+        $passed = (
+            [string]$health.service -eq "aurum-live-broadcast" -and
+            [string]$health.schema_version -eq "PUBLIC_LIVE_V1" -and
+            [bool]$health.binding_ready -and [bool]$health.latest_available -and
+            [string]$health.latest_source_revision -eq $ExpectedRevision -and
+            $publishedValid -and $age -ge [TimeSpan]::Zero -and
+            $age -le $broadcastFreshnessThreshold -and
+            [string]$publisherState -eq "RUNNING"
+        )
+        return [pscustomobject]@{
+            state = if ($passed) { "PASSED" } else { "BROADCAST_LIVE_BLOCKED" }
+            passed = $passed; reason = if ($passed) { "PASSED" } else { "BROADCAST_LIVE_NOT_READY" }
+            latest_sequence = $health.latest_sequence
+            latest_generated_at = [string]$health.latest_generated_at
+            latest_published_at = [string]$health.latest_published_at
+            latest_source_revision = [string]$health.latest_source_revision
+            freshness_threshold_seconds = [int]$broadcastFreshnessThreshold.TotalSeconds
+            publisher_state = [string]$publisherState
+        }
+    } catch {
+        return [pscustomobject]@{
+            state = "BROADCAST_LIVE_BLOCKED"; passed = $false
+            reason = "BROADCAST_LIVE_PROBE_FAILED"
+            error = Protect-PreflightDiagnosticText $_.Exception.Message
+        }
+    }
+}
+
 function Invoke-AutomaticCandidateValidation {
     param([Parameter(Mandatory = $true)][object]$Candidate)
     $state = Get-ReleaseControlState
@@ -2607,6 +2765,10 @@ function Invoke-AutomaticCandidateValidation {
         ) -and
         [string]$state.candidate.validation.windows -eq "PASSED"
     )
+    $startingValidationState = [string]$state.candidate.validation_state
+    $startingValidationReason = if ($state.candidate.validation) {
+        [string]$state.candidate.validation.reason
+    } else { "" }
     $state.candidate.validation_state = "STAGING"
     $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
     Write-ReleaseControlState -State $state
@@ -2705,6 +2867,43 @@ function Invoke-AutomaticCandidateValidation {
         $changed = @(Get-CandidateChangedFiles `
             -StableRevision ([string]$state.stable.git_sha) `
             -CandidateRevision ([string]$Candidate.git_sha))
+        $broadcastRequired = [bool](@($changed | Where-Object {
+            [string]$_ -match '^(broadcast/|web/app/_lib/live-broadcast\.ts$)'
+        }).Count -gt 0)
+        $broadcast = [pscustomobject]@{
+            state = "NOT_REQUIRED"; passed = $true; reason = "NOT_REQUIRED"
+        }
+        if ($broadcastRequired) {
+            $broadcast = Test-BroadcastServiceReadiness `
+                -CandidateRevision ([string]$Candidate.git_sha)
+            if (-not $broadcast.passed) {
+                $state.candidate.validation_state = [string]$broadcast.state
+                $state.candidate.validation = [pscustomobject]@{
+                    key = [string]$Candidate.validation_key
+                    repository = "PASSED"; windows = "PASSED"; cloudflare = "PENDING"
+                    broadcast = $broadcast
+                    reason = [string]$broadcast.reason
+                    tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+                }
+                Write-ReleaseControlState -State $state
+                $event = if ([bool]$broadcast.retryable) {
+                    "CANDIDATE_BROADCAST_BLOCKED"
+                } else { "CANDIDATE_FAILED" }
+                if ($startingValidationState -ne [string]$broadcast.state -or
+                    $startingValidationReason -ne [string]$broadcast.reason) {
+                    Write-ReleaseHistory -Event $event -Release $state.candidate `
+                        -Detail @{
+                            reason = [string]$broadcast.reason
+                            broadcast = $broadcast
+                        }
+                }
+                return $false
+            }
+            if ($startingValidationState -in @("BROADCAST_PENDING", "BROADCAST_BLOCKED")) {
+                Write-ReleaseHistory -Event "CANDIDATE_BROADCAST_RECOVERED" `
+                    -Release $state.candidate -Detail @{ broadcast = $broadcast }
+            }
+        }
         $compatibility = Get-CandidateCompatibilityRequirement -ChangedFiles $changed
         if ([string]$compatibility.state -eq "COORDINATED_STORAGE_MIGRATION_REQUIRED") {
             $state.candidate.compatibility_state = "REVIEW_REQUIRED"
@@ -3904,6 +4103,24 @@ function Restart-CodeReloadableServices {
     if (-not $healthy) { throw "Code revision reload failed functional health checks." }
     Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_HEALTHY" `
         -Service "collector,annotator,api,sync" -State $Revision
+    $broadcastService = $services | Where-Object Key -eq "broadcast" | Select-Object -First 1
+    if ($broadcastService -and (Test-BroadcastPublisherEnabled)) {
+        Stop-ForecasterService $broadcastService
+        if (-not [string]::IsNullOrWhiteSpace(
+            (Get-BroadcastPublisherToken)
+        )) {
+            try {
+                Start-ForecasterService $broadcastService -SkipExistingCheck
+                Write-WatchdogEvent -Event "BROADCAST_PUBLISHER_RESTARTED" `
+                    -Service "broadcast" -State $Revision
+            } catch {
+                Write-WatchdogEvent -Event "BROADCAST_PUBLISHER_DEGRADED" `
+                    -Service "broadcast" -State (
+                        Protect-PreflightDiagnosticText $_.Exception.Message
+                    )
+            }
+        }
+    }
     return $reloadStarted
 }
 
@@ -4610,6 +4827,15 @@ function Test-RuntimeObservation {
         }
     }
     if (-not $failure) {
+        if (Test-BroadcastPublisherEnabled) {
+            $broadcastLive = Test-BroadcastLiveDeliveryReadiness `
+                -ExpectedRevision $revision
+            if (-not $broadcastLive.passed) {
+                $failure = [string]$broadcastLive.reason
+            }
+        }
+    }
+    if (-not $failure) {
         $shapeResult = Test-CurrentProductionShape
         if ($shapeResult -and [string]$shapeResult -like "DEFERRED:*") {
             $deferredCode = ([string]$shapeResult).Substring("DEFERRED:".Length)
@@ -4774,6 +5000,25 @@ function Get-ServiceState {
         [pscustomobject]$Service,
         [array]$Processes
     )
+    if ($Service.Key -eq "broadcast") {
+        if (-not (Test-BroadcastPublisherEnabled)) { return "DISABLED" }
+        if ([string]::IsNullOrWhiteSpace((Get-BroadcastPublisherToken))) {
+            return "NOT_CONFIGURED"
+        }
+        if ($Processes.Count -eq 0) { return "DEGRADED" }
+        $statusPath = Join-Path $moduleRoot ".local\forward\live-broadcast-publisher-status.json"
+        if (-not (Test-Path -LiteralPath $statusPath)) { return "DEGRADED" }
+        try {
+            $publisher = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
+            $lastSuccess = [DateTimeOffset]::MinValue
+            $fresh = [DateTimeOffset]::TryParse(
+                [string]$publisher.last_success, [ref]$lastSuccess
+            ) -and ([DateTimeOffset]::UtcNow - $lastSuccess) -le $broadcastFreshnessThreshold
+            if ([string]$publisher.state -eq "RUNNING" -and $fresh) { return "RUNNING" }
+        } catch {}
+        return "DEGRADED"
+    }
+
     if ($Processes.Count -eq 0) { return "STOPPED" }
 
     if ($Service.Key -in @("collector", "annotator")) {
@@ -4884,6 +5129,17 @@ function Start-ForecasterService {
     if (-not $SkipExistingCheck -and @(Get-ForecasterProcesses $Service).Count -gt 0) {
         return
     }
+    if ($Service.Key -eq "broadcast") {
+        if (-not (Test-BroadcastPublisherEnabled)) {
+            throw "Live Broadcast Publisher is DISABLED."
+        }
+        $publisherToken = Get-BroadcastPublisherToken
+        if ([string]::IsNullOrWhiteSpace($publisherToken)) {
+            throw "Live Broadcast Publisher is NOT_CONFIGURED."
+        }
+        $env:AURUM_LIVE_BROADCAST_PUBLISHER_ENABLED = "1"
+        $env:LIVE_BROADCAST_PUBLISH_TOKEN = $publisherToken
+    }
     New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
     if ($Service.Key -in @("annotator", "api")) {
         $env:GEMINI_API_KEY = [Environment]::GetEnvironmentVariable("GEMINI_API_KEY", "User")
@@ -4954,8 +5210,12 @@ function Stop-ForecasterService {
 function Start-All {
     $status = @(Get-ForecasterStatus)
     foreach ($service in $services) {
+        if ($service.Key -eq "broadcast" -and -not (Test-BroadcastPublisherEnabled)) {
+            continue
+        }
         $row = $status | Where-Object Key -eq $service.Key
-        if ($row.State -eq "STOPPED") {
+        if ($row.State -eq "STOPPED" -or
+            ($service.Key -eq "broadcast" -and $row.State -eq "DEGRADED")) {
             Start-ForecasterService $service -SkipExistingCheck
         }
     }
@@ -5558,10 +5818,14 @@ function Invoke-ForecasterWatchdog {
             $status = @(Get-ForecasterStatus)
             foreach ($service in $services) {
                 $row = $status | Where-Object Key -eq $service.Key
-                $unhealthy = $row.State -in @(
-                    "STOPPED", "DATA STALE", "API ERROR", "SYNC ERROR", "SYNC STALE",
-                    "COLLECTOR STALE", "ANNOTATOR STALE", "SESSION STALE"
-                )
+                $unhealthy = if ($service.Key -eq "broadcast") {
+                    (Test-BroadcastPublisherEnabled) -and $row.State -eq "DEGRADED"
+                } else {
+                    $row.State -in @(
+                        "STOPPED", "DATA STALE", "API ERROR", "SYNC ERROR", "SYNC STALE",
+                        "COLLECTOR STALE", "ANNOTATOR STALE", "SESSION STALE"
+                    )
+                }
                 if (-not $unhealthy) {
                     $failureCounts[$service.Key] = 0
                     continue
@@ -7006,7 +7270,7 @@ function Show-ControlCenter {
         if ($normalized -in @("HEALTHY", "RUNNING", "LIVE", "MARKET CLOSED", "API OK", "SYNC OK", "PASSED", "READY", "CURRENT", "ENABLED")) {
             $Label.ForeColor = $green
             $Label.BackColor = $greenWash
-        } elseif ($normalized -in @("DEGRADED", "PARTIAL", "TESTING", "STAGING", "NEW", "SYNC DEGRADED", "OBSERVING", "PENDING")) {
+        } elseif ($normalized -in @("DEGRADED", "NOT_CONFIGURED", "PARTIAL", "TESTING", "STAGING", "NEW", "SYNC DEGRADED", "OBSERVING", "PENDING", "BROADCAST_PENDING", "BROADCAST_BLOCKED")) {
             $Label.ForeColor = $amber
             $Label.BackColor = $amberWash
         } elseif ($normalized -in @("FAILED", "ERROR", "OFFLINE", "STOPPED", "RECOVERY REQUIRED", "DEPLOYMENT DRIFT")) {
@@ -7183,7 +7447,7 @@ function Show-ControlCenter {
     $servicesTitle = New-UiLabel -Text "Local services" -Font $headingFont
     $servicesTitle.Location = New-Object System.Drawing.Point(18, 8)
     $servicesTitle.Size = New-Object System.Drawing.Size(300, 24)
-    $servicesHint = New-UiLabel -Text "Five production owners on this Windows host" -Font (New-Object System.Drawing.Font("Segoe UI Variable Text", 8.5)) -Color $muted
+    $servicesHint = New-UiLabel -Text "Five core owners plus one isolated optional publisher" -Font (New-Object System.Drawing.Font("Segoe UI Variable Text", 8.5)) -Color $muted
     $servicesHint.Location = New-Object System.Drawing.Point(19, 30)
     $servicesHint.Size = New-Object System.Drawing.Size(360, 18)
     $servicesHeader.Controls.AddRange(@($servicesTitle, $servicesHint))
@@ -7194,6 +7458,7 @@ function Show-ControlCenter {
         annotator = "Classifies eligible news evidence"
         api = "Serves the local dashboard contract"
         sync = "Publishes bounded dashboard mirrors"
+        broadcast = "Publishes only compact PUBLIC_LIVE_V1 state when enabled"
     }
     $serviceGrid = New-Object System.Windows.Forms.TableLayoutPanel
     $serviceGrid.Dock = "Fill"

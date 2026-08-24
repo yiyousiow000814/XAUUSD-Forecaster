@@ -4,8 +4,11 @@ import { useCallback, useEffect, useState } from "react";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
 import CountValue from "../_components/CountValue";
 import RuntimeUpdateFailureBanner, { type RuntimeUpdateFailure } from "../_components/RuntimeUpdateFailureBanner";
-import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
+import {
+  loadDashboardResource, readDashboardResource, subscribeDashboardResource,
+} from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import { effectiveQuoteAgeSeconds } from "../_lib/live-broadcast";
 import { formatExactCount } from "../_lib/count-format";
 import { quoteBridgePresentation } from "../_lib/quote-bridge-state";
 import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
@@ -145,13 +148,19 @@ export default function LiveRoomView() {
 
   useEffect(() => {
     return scheduleDashboardRefresh(
-      () => void refresh(Boolean(payload?.preview_status_summary)),
+      () => void refresh(true),
       () => void refresh(true),
       DASHBOARD_REFRESH_INTERVALS.live,
       "current",
-      "live-status",
+      "status",
     );
-  }, [refresh, payload?.preview_status_summary]);
+  }, [refresh]);
+
+  useEffect(() => subscribeDashboardResource("/api/status", () => {
+    const current = readDashboardResource<Payload>("/api/status");
+    setPayload(current);
+    if (current && !current.preview_status_summary) setRefreshing(false);
+  }), []);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -159,6 +168,9 @@ export default function LiveRoomView() {
   }, []);
 
   const latest = payload?.latest;
+  const quoteAgeSeconds = effectiveQuoteAgeSeconds(
+    payload as unknown as Record<string, unknown> | null, now,
+  );
   const loading = (payload === null || (refreshing && payload.preview_status_summary)) && error === null;
   const currentPhase: CurrentDataPhase = error
     ? "error" : loading ? "loading" : payload?.preview_status_summary ? "snapshot" : "ready";
@@ -253,7 +265,7 @@ export default function LiveRoomView() {
             <span>BID <b>{fmt(latest?.bid)}</b></span>
             <span>ASK <b>{fmt(latest?.ask)}</b></span>
             <span>SPREAD <b>{fmt(latest?.spread, 3)}</b></span>
-            <span>AGE <b>{fmt(payload?.system.quote_age_seconds, 1)}s</b></span>
+            <span>AGE <b>{fmt(quoteAgeSeconds, 1)}s</b></span>
           </div>
         </div>
 
