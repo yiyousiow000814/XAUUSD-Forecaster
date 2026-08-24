@@ -1165,14 +1165,19 @@ def _target_state_path(path: Path, target_name: str, *, legacy: bool) -> Path:
 
 def _validated_sync_state_path(path: Path) -> Path:
     """Keep mutable sync cursors inside the private runtime state directory."""
-    candidate = path.resolve()
-    try:
-        candidate.relative_to(SYNC_STATE_ROOT)
-    except ValueError as error:
+    if path.is_absolute():
+        parent = path.parent
+    else:
+        parent = SYNC_STATE_ROOT if path.parent == Path(".") else path.parent
+    filename = path.name
+    if (
+        parent != SYNC_STATE_ROOT
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.json", filename) is None
+    ):
         raise ValueError(
-            f"dashboard sync state path must remain under {SYNC_STATE_ROOT}"
-        ) from error
-    return candidate
+            f"dashboard sync state path must be one JSON file under {SYNC_STATE_ROOT}"
+        )
+    return SYNC_STATE_ROOT / filename
 
 
 def configured_targets(config: dict) -> list[dict]:

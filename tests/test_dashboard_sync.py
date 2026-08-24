@@ -812,8 +812,21 @@ def test_configured_targets_rejects_every_state_path_outside_runtime_root(
             },
             state_key: str(tmp_path / "outside.json"),
         }
-        with pytest.raises(ValueError, match="must remain under"):
+        with pytest.raises(ValueError, match="must be one JSON file under"):
             module.configured_targets(config)
+
+
+@pytest.mark.parametrize("value", [
+    "../escape.json", "nested/state.json", "state.txt", "state name.json",
+])
+def test_sync_state_path_rejects_traversal_and_non_json_names(
+    monkeypatch, tmp_path, value
+) -> None:
+    module = _sync_module()
+    monkeypatch.setattr(module, "SYNC_STATE_ROOT", tmp_path.resolve())
+
+    with pytest.raises(ValueError, match="must be one JSON file under"):
+        module._validated_sync_state_path(Path(value))
 
 
 def test_sites_bypass_header_is_shared_by_get_and_post_but_not_cloudflare(
