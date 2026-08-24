@@ -268,7 +268,10 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
     if (camera.pendingIntent()) camera.layoutChanged();
     else camera.request({ type: "FIT_VIEW", viewId });
   }, [camera, flowInitialized, nodesInitialized, viewId]);
-  useEffect(() => () => camera.cancel(), [camera]);
+  useEffect(() => () => {
+    initialCameraRequestedRef.current = false;
+    camera.cancel();
+  }, [camera]);
   useEffect(() => {
     camera.layoutChanged();
   }, [camera, graph.direction, graph.view.id, nodesInitialized]);
