@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "incremental": false
+  },
+  "include": [
+    "next-env.d.ts",
+    "build/architecture-manifest.ts",
+    "app/_lib/architecture-explorer.ts",
+    "app/_views/ArchitectureExplorerView.tsx"
+  ],
+  "exclude": ["node_modules"]
+}

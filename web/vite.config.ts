@@ -11,6 +11,7 @@ import {
   compactPreviewAuditDetail,
   compactPreviewStatus,
 } from "./build/preview-learning";
+import { loadArchitectureManifest } from "./build/architecture-manifest";
 
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
@@ -38,6 +39,7 @@ export default defineConfig(async () => {
   const branch = ciBranch || git("branch", "--show-current");
   const commit = ciCommit || git("rev-parse", "HEAD");
   const isWorkerPreview = Boolean(ciBranch && ciCommit && ciBranch !== "main");
+  const architectureManifest = loadArchitectureManifest();
   let previewBundle: unknown = null;
   if (isWorkerPreview) {
     const python = process.platform === "win32" ? "python" : "python3";
@@ -95,6 +97,7 @@ export default defineConfig(async () => {
       }),
     ],
     define: {
+      __AURUM_ARCHITECTURE_MANIFEST__: JSON.stringify(architectureManifest),
       __AURUM_PREVIEW_BUNDLE__: JSON.stringify(previewBundle),
       __AURUM_DEPLOYMENT__: JSON.stringify({
         branch,

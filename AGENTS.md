@@ -30,6 +30,9 @@ Architecture documents affected:
 - Every abstraction must name the real dependency or boundary it hides.
 - After changing a subsystem boundary, update its detailed map and the Codebase
   Map. See the architecture rules contract for evidence requirements.
+- Any architecture, owner, boundary, dependency, or canonical path change must
+  update `architecture/manifest.json` and the relevant architecture document in
+  the same PR. Validate it with `scripts/check_architecture_manifest.py`.
 
 ## Before Adding Code
 
