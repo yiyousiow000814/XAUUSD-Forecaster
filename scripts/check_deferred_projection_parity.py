@@ -25,6 +25,9 @@ BUILDERS = {
     "/api/audit-stories": audit_stories_snapshot,
     "/api/audit-decisions": audit_decisions_snapshot,
 }
+LOCAL_AUDIT_URL = "http://127.0.0.1:8765/api/audit"
+REMOTE_BASE_URL = "https://aurum-signal-room.yiyousiow1234.workers.dev"
+WORKER_NAME = "aurum-signal-room"
 
 
 def _read_json(url: str, *, headers: dict[str, str] | None = None) -> tuple[dict, object]:
@@ -102,9 +105,6 @@ def verify(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--local-audit-url", required=True)
-    parser.add_argument("--remote-base-url", required=True)
-    parser.add_argument("--worker-name", required=True)
     parser.add_argument("--version-id", required=True)
     parser.add_argument("--git-sha", required=True)
     parser.add_argument("--producer-revision", required=True)
@@ -115,9 +115,9 @@ def main() -> int:
     if required_after.tzinfo is None:
         raise SystemExit("required-after must be timezone-aware")
     result = verify(
-        local_audit_url=args.local_audit_url,
-        remote_base_url=args.remote_base_url,
-        worker_name=args.worker_name,
+        local_audit_url=LOCAL_AUDIT_URL,
+        remote_base_url=REMOTE_BASE_URL,
+        worker_name=WORKER_NAME,
         version_id=args.version_id,
         git_sha=args.git_sha,
         producer_revision=args.producer_revision,

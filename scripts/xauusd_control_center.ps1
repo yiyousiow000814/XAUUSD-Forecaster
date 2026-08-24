@@ -4261,9 +4261,6 @@ function Test-DeferredProjectionObligations {
     $python = (Get-Command python.exe -ErrorAction Stop).Source
     $arguments = @(
         (Join-Path $moduleRoot "scripts\check_deferred_projection_parity.py"),
-        "--local-audit-url", "http://127.0.0.1:8765/api/audit",
-        "--remote-base-url", $workerUrl,
-        "--worker-name", $workerName,
         "--version-id", ([string]$Target.worker_version_id),
         "--git-sha", ([string]$Target.git_sha),
         "--producer-revision", ([string]$Target.windows_revision),
