@@ -127,8 +127,7 @@ export async function POST(request: Request) {
     if (!Array.isArray(body.items) || body.items.length > 20) {
       return NextResponse.json({ error: "invalid news detail batch" }, { status: 400 });
     }
-    const now = new Date().toISOString();
-    const statements = body.items.map((item) => {
+    for (const item of body.items) {
       if (
         typeof item.detail_key !== "string"
         || !/^[a-f0-9]{64}$/.test(item.detail_key)
@@ -139,6 +138,19 @@ export async function POST(request: Request) {
       ) {
         throw new Error("invalid news detail item");
       }
+    }
+    if (isReleaseValidationContext(validation)) {
+      if (!await validateJsonWithD1(binding, bounded.serialized)) {
+        return NextResponse.json({ error: "invalid news detail batch" }, { status: 400 });
+      }
+      return releaseValidationResponse(validation, {
+        body: "bounded-read", json: "parsed+d1-json1",
+        transformed: { items: body.items.length, prepared_statements: body.items.length },
+        mutation_boundary: "news-content-upsert-batch",
+      });
+    }
+    const now = new Date().toISOString();
+    const statements = body.items.map((item) => {
       return binding.prepare(
         `INSERT INTO news_details (detail_key, detail_hash, payload, received_at)
          VALUES (?, ?, ?, ?)
@@ -148,16 +160,6 @@ export async function POST(request: Request) {
            received_at=excluded.received_at`,
       ).bind(item.detail_key, item.detail_hash, JSON.stringify(item.payload), now);
     });
-    if (isReleaseValidationContext(validation)) {
-      if (!await validateJsonWithD1(binding, bounded.serialized)) {
-        return NextResponse.json({ error: "invalid news detail batch" }, { status: 400 });
-      }
-      return releaseValidationResponse(validation, {
-        body: "bounded-read", json: "parsed+d1-json1",
-        transformed: { items: body.items.length, prepared_statements: statements.length },
-        mutation_boundary: "news-content-upsert-batch",
-      });
-    }
     if (statements.length) await binding.batch(statements);
     return NextResponse.json({ status: "OK", received: statements.length });
   } catch (reason) {

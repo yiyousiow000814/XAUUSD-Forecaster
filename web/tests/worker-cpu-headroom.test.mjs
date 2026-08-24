@@ -274,7 +274,7 @@ test("bounds empty, oversized, maximum legal, and concurrent snapshot writes", a
   assert.deepEqual(concurrent.map(response => response.status), [200, 200, 200, 200]);
 });
 
-test("fast snapshot routes honor authenticated release dry-run without mutation", async () => {
+test("production-shaped writes honor authenticated release dry-run without mutation", async () => {
   if (isPreviewBuild) return;
   const validationHeaders = {
     Authorization: `Bearer ${token}`,
@@ -283,18 +283,38 @@ test("fast snapshot routes honor authenticated release dry-run without mutation"
     "X-Aurum-Validation-Run": "worker-router-family-run",
   };
   const routes = [
-    ["/api/ingest", "status-ingest", { generated_at: new Date().toISOString(), system: {} }],
-    ["/api/audit", "audit-write", { news_metrics: {} }],
-    ["/api/audit-briefs", "audit-briefs-write", { daily_news_briefs: [] }],
-    ["/api/audit-stories", "audit-stories-write", { storylines: [] }],
-    ["/api/audit-decisions", "audit-decisions-write", { recent_decisions: [] }],
-    ["/api/learning", "learning-write", { models: [] }],
-    ["/api/market-chart", "market-chart-write", { candles: [] }],
+    ["/api/ingest", "status-ingest", { generated_at: new Date().toISOString(), system: {} }, "1"],
+    ["/api/audit", "audit-write", { news_metrics: {} }, "1"],
+    ["/api/audit-briefs", "audit-briefs-write", { daily_news_briefs: [] }, "1"],
+    ["/api/audit-stories", "audit-stories-write", { storylines: [] }, "1"],
+    ["/api/audit-decisions", "audit-decisions-write", { recent_decisions: [] }, "1"],
+    ["/api/learning", "learning-write", { models: [] }, "1"],
+    ["/api/market-chart", "market-chart-write", { candles: [] }, "1"],
+    ["/api/news-index", "news-index-write", { items: [{
+      detail_key: "1".repeat(64), category: "美国宏观", cluster_id: "cluster-1",
+      collector_first_seen_time: "2026-08-20T00:00:00Z",
+      source_published_time: "2026-08-19T23:58:00Z",
+      annotation_status: "READY", model_visibility: "MODEL_VISIBLE",
+      parsed_at: "2026-08-20T00:00:00Z", mirror_contract: "release-validation-v1",
+    }] }, "unknown"],
+    ["/api/news-content", "news-content-write", { items: [{
+      detail_key: "1".repeat(64), detail_hash: "2".repeat(64),
+      payload: { headline: "候选版本新闻详情", body: "只验证，不写入。" },
+    }] }, "unknown"],
   ];
-  const before = JSON.stringify(database.database.prepare(
-    "SELECT id,payload,received_at FROM dashboard_snapshots ORDER BY id",
-  ).all());
-  for (const [path, routeFamily, payload] of routes) {
+  const state = () => JSON.stringify({
+    snapshots: database.database.prepare(
+      "SELECT id,payload,received_at FROM dashboard_snapshots ORDER BY id",
+    ).all(),
+    newsIndex: database.database.prepare(
+      "SELECT detail_key,payload,received_at FROM news_index ORDER BY detail_key",
+    ).all(),
+    newsDetails: database.database.prepare(
+      "SELECT detail_key,payload,received_at FROM news_details ORDER BY detail_key",
+    ).all(),
+  });
+  const before = state();
+  for (const [path, routeFamily, payload, expectedD1Operations] of routes) {
     const response = await invoke(path, {
       method: "POST",
       headers: {
@@ -304,7 +324,9 @@ test("fast snapshot routes honor authenticated release dry-run without mutation"
       body: JSON.stringify(payload),
     });
     assert.equal(response.status, 200, path);
-    assert.equal(response.headers.get("x-aurum-d1-operations"), "1", path);
+    assert.equal(
+      response.headers.get("x-aurum-d1-operations"), expectedD1Operations, path,
+    );
     const body = await response.json();
     assert.equal(body.status, "DRY_RUN_OK", path);
     assert.equal(body.route_family, routeFamily, path);
@@ -312,9 +334,7 @@ test("fast snapshot routes honor authenticated release dry-run without mutation"
     assert.equal(body.mutated, false, path);
     assert.doesNotMatch(JSON.stringify(body), new RegExp(token), path);
   }
-  const after = JSON.stringify(database.database.prepare(
-    "SELECT id,payload,received_at FROM dashboard_snapshots ORDER BY id",
-  ).all());
+  const after = state();
   assert.equal(after, before);
   assert.doesNotMatch(after, new RegExp(token));
 });

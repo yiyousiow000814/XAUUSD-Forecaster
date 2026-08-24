@@ -251,7 +251,6 @@ async function sha256(value: string): Promise<string> {
 export async function prepareNewsEvidenceBatch(
   items: EvidenceItem[], existingPayloadHash?: string,
 ) {
-  const payloadHash = existingPayloadHash ?? await sha256(JSON.stringify(items));
   const rows = items.map(item => {
     if (
       typeof item.event_key !== "string"
@@ -271,6 +270,8 @@ export async function prepareNewsEvidenceBatch(
       serialized: JSON.stringify(item),
     };
   });
+  const payloadHash = existingPayloadHash
+    ?? await sha256(`[${rows.map(row => row.serialized).join(",")}]`);
   return { payloadHash, rows };
 }
 

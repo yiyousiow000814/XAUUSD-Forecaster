@@ -4,6 +4,17 @@ const digest = async (value: string) => new Uint8Array(
   await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)),
 );
 
+let cachedExpectedToken: string | undefined;
+let cachedExpectedDigest: Promise<Uint8Array> | undefined;
+
+function expectedTokenDigest(expected: string): Promise<Uint8Array> {
+  if (cachedExpectedToken !== expected || !cachedExpectedDigest) {
+    cachedExpectedToken = expected;
+    cachedExpectedDigest = digest(expected);
+  }
+  return cachedExpectedDigest;
+}
+
 export async function isIngestAuthorized(request: Request): Promise<boolean> {
   const expected = env.INGEST_TOKEN ?? process.env.INGEST_TOKEN;
   const header = request.headers.get("authorization") ?? "";
@@ -11,7 +22,7 @@ export async function isIngestAuthorized(request: Request): Promise<boolean> {
   if (!expected || !match?.[1]) return false;
 
   const [expectedDigest, providedDigest] = await Promise.all([
-    digest(expected),
+    expectedTokenDigest(expected),
     digest(match[1]),
   ]);
   let difference = expectedDigest.length ^ providedDigest.length;

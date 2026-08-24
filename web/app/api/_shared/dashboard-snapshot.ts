@@ -46,8 +46,7 @@ export async function readBoundedBody(
   if (!request.body) return { status: "ok", serialized: "", receivedBytes: 0 };
 
   const reader = request.body.getReader();
-  const decoder = new TextDecoder();
-  const decoded: string[] = [];
+  const chunks: Uint8Array[] = [];
   let receivedBytes = 0;
   try {
     while (true) {
@@ -58,10 +57,27 @@ export async function readBoundedBody(
         await reader.cancel().catch(() => undefined);
         return { status: "too_large" };
       }
-      decoded.push(decoder.decode(value, { stream: true }));
+      chunks.push(value);
     }
-    decoded.push(decoder.decode());
-    return { status: "ok", serialized: decoded.join(""), receivedBytes };
+    if (chunks.length === 0) {
+      return { status: "ok", serialized: "", receivedBytes };
+    }
+    if (chunks.length === 1) {
+      return {
+        status: "ok",
+        serialized: new TextDecoder().decode(chunks[0]),
+        receivedBytes,
+      };
+    }
+    const combined = new Uint8Array(receivedBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      combined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return {
+      status: "ok", serialized: new TextDecoder().decode(combined), receivedBytes,
+    };
   } finally {
     reader.releaseLock();
   }
