@@ -7,3 +7,6 @@ export const PREVIEW_AUDIT_INLINE_KEYS = Object.freeze(manifest.auditInlineKeys)
 export const PREVIEW_BRANCH_SNAPSHOT_STATUS_PATHS = Object.freeze(
   manifest.branchSnapshotStatusPaths,
 );
+export const PREVIEW_FALLBACK_STATUS_PATHS = Object.freeze(
+  manifest.fallbackStatusPaths,
+);

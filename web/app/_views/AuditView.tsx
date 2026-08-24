@@ -272,6 +272,11 @@ type Payload = {
   preview?: {
     is_preview?: boolean;
     branch_snapshot?: { generated_at: string | null; status_paths: string[] };
+    resources?: Record<string, {
+      availability?: "AVAILABLE" | "UNAVAILABLE_IN_BUILD_SNAPSHOT";
+      source_path?: string | null;
+      compatibility_fallback?: boolean;
+    }>;
   };
   learning_preview_summary?: boolean;
   learning_history_resource?: string;
@@ -1311,6 +1316,10 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     : payload?.counts?.live_oos_model_groups !== undefined
       ? statusState
       : learningState === "idle" ? "loading" : learningState;
+  const liveOosHeadlinePhase: CurrentDataPhase =
+    liveOosModelGroups === undefined && view !== "league" ? "loading" : liveOosPhase;
+  const liveOosHeadline = liveOosModelGroups === undefined
+    ? "读取中" : `${liveOosModelGroups}组`;
   const latestVersionGroups = (payload?.learning_curves?.version_groups ?? []).filter(
     row => row.lifecycle_status === "LATEST",
   );
@@ -1391,9 +1400,17 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
   const deploymentPresentation = DEPLOYMENT_PRESENTATION[
     payload?.system?.deployment?.status ?? "PROVENANCE_UNKNOWN"
   ] ?? DEPLOYMENT_PRESENTATION.PROVENANCE_UNKNOWN;
-  const continuedEventTotal = payload?.storyline_summary?.total ?? 0;
-  const singleEventTotal = payload?.storyline_summary?.candidate_total ?? 0;
-  const activeEventTotal = continuedEventTotal + singleEventTotal;
+  const storylinesUnavailable = Boolean(
+    payload?.preview?.is_preview
+    && payload.preview.resources?.audit_stories?.availability
+      === "UNAVAILABLE_IN_BUILD_SNAPSHOT",
+  );
+  const continuedEventTotal = payload?.storyline_summary?.total
+    ?? (storylinesUnavailable ? null : 0);
+  const singleEventTotal = payload?.storyline_summary?.candidate_total
+    ?? (storylinesUnavailable ? null : 0);
+  const activeEventTotal = continuedEventTotal === null || singleEventTotal === null
+    ? null : continuedEventTotal + singleEventTotal;
   return (
     <main className={`audit-main audit-view-${view}`}>
       <section className="audit-intro">
@@ -1443,7 +1460,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>当前可用新闻事件 <b><MetricValue phase={statusState}><CountValue value={newsMetrics.events.currently_model_eligible} /></MetricValue></b></a>
         <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b><MetricValue phase={statusState}><CountValue value={activeEventTotal} /></MetricValue></b></a>
         <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b><MetricValue phase={statusState}><CountValue value={payload?.counts?.decision_events} /></MetricValue></b></a>
-        <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b><MetricValue phase={liveOosPhase}><CountValue value={liveOosModelGroups} />组</MetricValue></b></a>
+        <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b><MetricValue phase={liveOosHeadlinePhase}>{liveOosHeadline}</MetricValue></b></a>
         <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b><MetricValue phase={coveragePhase} snapshotLabel="分支快照" snapshotTitle="此覆盖结果由当前 PR 分支在构建时重新计算，不是生产实时观测">{payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</MetricValue></b></a>
       </nav>
       </div>

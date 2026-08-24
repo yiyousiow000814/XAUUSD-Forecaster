@@ -28,7 +28,15 @@ export function compactPreviewStatus(status: JsonObject): JsonObject {
   };
   for (const key of PREVIEW_STATUS_INLINE_KEYS) {
     const value = status[key];
-    result[key] = value;
+    if (key === "recent_decisions" && Array.isArray(value)) {
+      result[key] = value.slice(0, 18).map(row => {
+        if (!row || typeof row !== "object") return row;
+        const { features: _features, predictions: _predictions, ...bounded } = row as JsonObject;
+        return bounded;
+      });
+    } else {
+      result[key] = value;
+    }
   }
   const market = status.market_chart && typeof status.market_chart === "object"
     ? status.market_chart as JsonObject
@@ -51,6 +59,16 @@ export function compactPreviewAudit(audit: JsonObject): JsonObject {
   const result: JsonObject = {};
   for (const key of PREVIEW_AUDIT_INLINE_KEYS) {
     const value = audit[key];
+    const limit = PREVIEW_AUDIT_ARRAY_LIMITS[key];
+    result[key] = Array.isArray(value) && limit ? value.slice(0, limit) : value;
+  }
+  return result;
+}
+
+/** Keep one independently owned audit detail snapshot bounded. */
+export function compactPreviewAuditDetail(detail: JsonObject): JsonObject {
+  const result: JsonObject = {};
+  for (const [key, value] of Object.entries(detail)) {
     const limit = PREVIEW_AUDIT_ARRAY_LIMITS[key];
     result[key] = Array.isArray(value) && limit ? value.slice(0, limit) : value;
   }

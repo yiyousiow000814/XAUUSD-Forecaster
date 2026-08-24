@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { previewBundle, previewJson, rejectPreviewWrite } from "./preview";
 import {
+  AUDIT_SNAPSHOT_IDS,
   AUDIT_DETAIL_SNAPSHOT_BYTES,
   writeDashboardSnapshot,
 } from "./dashboard-snapshot";
@@ -17,10 +18,23 @@ export async function readAuditDetailSnapshot(
   fields: string[],
   unavailableLabel: string,
 ) {
-  if (previewBundle?.audit) {
+  if (previewBundle) {
+    const resource = snapshotId === AUDIT_SNAPSHOT_IDS.briefs
+      ? previewBundle.audit_briefs
+      : snapshotId === AUDIT_SNAPSHOT_IDS.stories
+        ? previewBundle.audit_stories
+        : snapshotId === AUDIT_SNAPSHOT_IDS.decisions
+          ? previewBundle.audit_decisions
+          : null;
+    if (!resource) {
+      return previewJson({
+        error: unavailableLabel,
+        availability: "UNAVAILABLE_IN_BUILD_SNAPSHOT",
+      }, 503, "unavailable-build-snapshot-resource");
+    }
     return previewJson(Object.fromEntries(
-      fields.filter(field => field in previewBundle.audit!).map(
-        field => [field, previewBundle.audit![field]],
+      fields.filter(field => field in resource).map(
+        field => [field, resource[field]],
       ),
     ));
   }

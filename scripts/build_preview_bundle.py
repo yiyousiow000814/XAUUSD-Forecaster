@@ -9,6 +9,7 @@ import importlib
 import json
 import sys
 import types
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
@@ -40,14 +41,14 @@ SERIES_BY_DOMAIN = {
 }
 
 
-def _preview_news_evidence(status: dict) -> dict:
+def _preview_news_evidence(source: dict, provenance: dict | None = None) -> dict:
     """Freeze the bounded production-derived evidence window for Preview QA."""
     rows = [
         {
             key: value for key, value in row.items()
             if key != "economic_age_minutes"
         }
-        for row in status.get("news_evidence", [])
+        for row in source.get("items", source.get("news_evidence", []))
         if isinstance(row, dict)
     ]
     encoded = json.dumps(
@@ -57,13 +58,83 @@ def _preview_news_evidence(status: dict) -> dict:
     return {
         "snapshot_id": hashlib.sha256(encoded).hexdigest(),
         "contract_version": "news-evidence-preview-v1",
-        "activated_at": status.get("generated_at"),
+        "activated_at": source.get("activated_at") or source.get("generated_at"),
         "items": rows,
+        "preview_resource": provenance or _resource_evidence(
+            "/api/news-evidence", available=True, source="/api/status",
+            compatibility=True,
+        ),
     }
 PREVIEW_MANIFEST = json.loads(
     (MODULE_ROOT / "web" / "preview-manifest.json").read_text(encoding="utf-8")
 )
 PREVIEW_NEWS_PAGE_SIZE = int(PREVIEW_MANIFEST["newsPageSize"])
+PREVIEW_RECENT_DECISION_LIMIT = 18
+UNAVAILABLE_IN_BUILD_SNAPSHOT = "UNAVAILABLE_IN_BUILD_SNAPSHOT"
+
+
+def _resource_evidence(
+    path: str, *, available: bool, source: str | None = None,
+    compatibility: bool = False, reason: str | None = None,
+) -> dict:
+    return {
+        "availability": "AVAILABLE" if available else UNAVAILABLE_IN_BUILD_SNAPSHOT,
+        "requested_path": path,
+        "source_path": source,
+        "compatibility_fallback": compatibility,
+        "reason": reason,
+    }
+
+
+def _read_optional_json(base_url: str, path: str) -> tuple[dict | None, dict]:
+    try:
+        return _read_json(base_url, path), _resource_evidence(
+            path, available=True, source=path,
+        )
+    except (OSError, RuntimeError, json.JSONDecodeError) as error:
+        return None, _resource_evidence(
+            path, available=False, reason=type(error).__name__,
+        )
+
+
+def _legacy_resource(
+    path: str, legacy: dict, required_fields: tuple[str, ...],
+    projector,
+) -> tuple[dict | None, dict]:
+    if all(field in legacy for field in required_fields):
+        return projector(legacy), _resource_evidence(
+            path, available=True, source="/api/audit",
+            compatibility=True, reason="LEGACY_STABLE_SPLIT_ROUTE_ABSENT",
+        )
+    return None, _resource_evidence(
+        path, available=False, reason="NO_AUTHORITATIVE_PUBLIC_SOURCE",
+    )
+
+
+def _live_oos_model_groups(learning: dict) -> int | None:
+    curves = learning.get("learning_curves")
+    if not isinstance(curves, dict):
+        return None
+    models = curves.get("models")
+    if isinstance(models, list):
+        return len({
+            str(row.get("model_identity"))
+            for row in models
+            if isinstance(row, dict) and row.get("model_identity")
+            and (
+                row.get("active_rank") is not None
+                or row.get("lifecycle_status") == "LATEST"
+            )
+        })
+    version_groups = curves.get("version_groups")
+    if isinstance(version_groups, list):
+        return len({
+            str(row.get("model_identity"))
+            for row in version_groups
+            if isinstance(row, dict) and row.get("model_identity")
+            and row.get("lifecycle_status") == "LATEST"
+        })
+    return None
 
 
 def _apply_branch_runtime_contract(status: dict) -> None:
@@ -368,18 +439,118 @@ def _read_completed_news_index(base_url: str) -> dict:
 
 
 def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
-    status = _read_json(base_url, "/api/status")
-    news_evidence = _preview_news_evidence(status)
-    _apply_branch_runtime_contract(status)
+    source_status = _read_json(base_url, "/api/status")
+    source_audit = _read_json(base_url, "/api/audit")
     learning = _read_json(base_url, "/api/learning")
     market_chart = _read_json(base_url, "/api/market-chart")
     market_chart["history_resource"] = "/api/market-history"
     news_index = _read_completed_news_index(base_url)
 
+    resources: dict[str, dict] = {}
+    audit_briefs, resources["audit_briefs"] = _read_optional_json(
+        base_url, "/api/audit-briefs",
+    )
+    if audit_briefs is None:
+        audit_briefs, resources["audit_briefs"] = _legacy_resource(
+            "/api/audit-briefs", source_audit,
+            ("daily_news_briefs",),
+            lambda value: dashboard_sync.audit_briefs_payload(
+                value, brief_limit=dashboard_sync.REMOTE_DAILY_BRIEF_LIMIT,
+            ),
+        )
+    audit_stories, resources["audit_stories"] = _read_optional_json(
+        base_url, "/api/audit-stories",
+    )
+    if audit_stories is None:
+        audit_stories, resources["audit_stories"] = _legacy_resource(
+            "/api/audit-stories", source_audit,
+            ("storylines", "storyline_summary"),
+            dashboard_sync.audit_stories_payload,
+        )
+    audit_decisions, resources["audit_decisions"] = _read_optional_json(
+        base_url, "/api/audit-decisions",
+    )
+    if audit_decisions is None:
+        audit_decisions, resources["audit_decisions"] = _legacy_resource(
+            "/api/audit-decisions", source_audit,
+            ("recent_decisions",),
+            lambda value: dashboard_sync.audit_decisions_payload(
+                value, decision_limit=dashboard_sync.REMOTE_DECISION_LIMIT,
+            ),
+        )
+
+    status = dict(source_status)
+    if isinstance(source_status.get("recent_decisions"), list):
+        resources["recent_decisions"] = _resource_evidence(
+            "/api/status", available=True, source="/api/status",
+        )
+    elif audit_decisions is not None and isinstance(
+        audit_decisions.get("recent_decisions"), list,
+    ):
+        status["recent_decisions"] = audit_decisions["recent_decisions"][
+            :PREVIEW_RECENT_DECISION_LIMIT
+        ]
+        resources["recent_decisions"] = {
+            **resources["audit_decisions"],
+            "requested_path": "/api/status#recent_decisions",
+        }
+    else:
+        status.pop("recent_decisions", None)
+        resources["recent_decisions"] = _resource_evidence(
+            "/api/status#recent_decisions", available=False,
+            reason="NO_AUTHORITATIVE_PUBLIC_SOURCE",
+        )
+
+    news_source, resources["news_evidence"] = _read_optional_json(
+        base_url, f"/api/news-evidence?limit={PREVIEW_NEWS_PAGE_SIZE}",
+    )
+    if news_source is None and isinstance(source_status.get("news_evidence"), list):
+        news_source = source_status
+        resources["news_evidence"] = _resource_evidence(
+            "/api/news-evidence", available=True, source="/api/status",
+            compatibility=True, reason="LEGACY_STABLE_SPLIT_ROUTE_ABSENT",
+        )
+    news_evidence = (
+        _preview_news_evidence(news_source, resources["news_evidence"])
+        if news_source is not None else None
+    )
+
+    counts = status.setdefault("counts", {})
+    live_oos_groups = counts.get("live_oos_model_groups")
+    if not isinstance(live_oos_groups, int):
+        live_oos_groups = _live_oos_model_groups(learning)
+        if live_oos_groups is not None:
+            counts["live_oos_model_groups"] = live_oos_groups
+            resources["live_oos_summary"] = _resource_evidence(
+                "/api/status#counts.live_oos_model_groups", available=True,
+                source="/api/learning", compatibility=True,
+                reason="DERIVED_FROM_BOUNDED_LEARNING_SUMMARY",
+            )
+        else:
+            counts.pop("live_oos_model_groups", None)
+            resources["live_oos_summary"] = _resource_evidence(
+                "/api/status#counts.live_oos_model_groups", available=False,
+                reason="NO_AUTHORITATIVE_PUBLIC_SOURCE",
+            )
+    else:
+        resources["live_oos_summary"] = _resource_evidence(
+            "/api/status#counts.live_oos_model_groups", available=True,
+            source="/api/status",
+        )
+
+    _apply_branch_runtime_contract(status)
+
     status["factor_coverage"] = _rebuild_factor_coverage(status)
     _backfill_annotation_reasons(news_index, status)
-    audit = json.loads(dashboard_sync.audit_snapshot(status))
+    audit = json.loads(dashboard_sync.audit_snapshot(source_audit))
+    resources["audit_summary"] = _resource_evidence(
+        "/api/audit", available=True, source="/api/audit",
+    )
     status = json.loads(dashboard_sync.remote_snapshot(status))
+    if resources["recent_decisions"]["availability"] == UNAVAILABLE_IN_BUILD_SNAPSHOT:
+        status.pop("recent_decisions", None)
+    if resources["live_oos_summary"]["availability"] == UNAVAILABLE_IN_BUILD_SNAPSHOT:
+        status.get("counts", {}).pop("live_oos_model_groups", None)
     status["preview"] = {
         "is_preview": True,
         "branch": branch,
@@ -387,6 +558,7 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
         "snapshot_generated_at": status.get("generated_at"),
         "source": "production-public-snapshot",
         "live": False,
+        "resources": resources,
     }
     system = status.setdefault("system", {})
     system["online"] = False
@@ -400,6 +572,13 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
         "runtime_dirty": False,
         "status": "PREVIEW_SNAPSHOT",
     })
+    for name, payload in (
+        ("audit_briefs", audit_briefs),
+        ("audit_stories", audit_stories),
+        ("audit_decisions", audit_decisions),
+    ):
+        if payload is not None:
+            payload["preview_resource"] = resources[name]
 
     details: dict[str, dict] = {}
     for item in news_index.get("items", [])[:PREVIEW_NEWS_PAGE_SIZE]:
@@ -446,6 +625,9 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     return {
         "status": status,
         "audit": audit,
+        "audit_briefs": audit_briefs,
+        "audit_stories": audit_stories,
+        "audit_decisions": audit_decisions,
         "learning": learning,
         # Production's public learning payload is already compressed. Wider
         # spacing there is not proof of a source-data gap, so Preview must not

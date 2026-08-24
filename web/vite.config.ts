@@ -8,6 +8,7 @@ import {
   compactPreviewLearning,
   compactPreviewNewsIndex,
   compactPreviewAudit,
+  compactPreviewAuditDetail,
   compactPreviewStatus,
 } from "./build/preview-learning";
 
@@ -57,6 +58,11 @@ export default defineConfig(async () => {
       }
       if (bundle.audit && typeof bundle.audit === "object") {
         bundle.audit = compactPreviewAudit(bundle.audit as Record<string, unknown>);
+      }
+      for (const key of ["audit_briefs", "audit_stories", "audit_decisions"]) {
+        if (bundle[key] && typeof bundle[key] === "object") {
+          bundle[key] = compactPreviewAuditDetail(bundle[key] as Record<string, unknown>);
+        }
       }
       if (bundle.news_index && typeof bundle.news_index === "object") {
         bundle.news_index = compactPreviewNewsIndex(bundle.news_index as Record<string, unknown>);
