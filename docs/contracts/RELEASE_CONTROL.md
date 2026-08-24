@@ -122,9 +122,15 @@ CRITICAL Worker route is sampled unless it is a Static Asset; an OPTIONAL
 contract-only route has a machine-readable exemption policy. Multi-operation
 writes declare fixtures for each materially distinct processing path.
 
-`/`, `/health`, `/audit`, and the favicon are Static Assets: each must return
-its canonical identity and the validation window must contain zero candidate
-Worker invocations. Worker reads are directed to the exact 0% Version. Affected
+`/`, `/health`, `/audit`, and the favicon are Static Assets. Validation reads
+their raw, bounded response bytes from the Candidate's immutable Version preview
+hostname, never from the Stable alias. The manifest defines each asset's media
+type, encoding, HTML charset declaration, and semantic marker; a mismatch fails
+with a bounded receipt containing the exact predicate and response hash, never
+the body. Redirects are disabled unless the manifest declares one exact path;
+declared redirects must remain on the immutable Candidate host. The validation
+window must contain zero candidate Worker invocations.
+Worker reads are directed to the exact 0% Version. Affected
 authenticated writes use deterministic fixtures built by the production
 dashboard transport builders. Their dry-run follows normal authentication,
 bounded body read, decode, parse, validation, and CPU-heavy transformation. It

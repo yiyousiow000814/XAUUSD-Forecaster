@@ -77,6 +77,7 @@ $requiredGitHubChecks = @(
 $workerCpuPassP95Ms = 6.0
 $workerCpuPassP99Ms = 8.0
 $workerCpuPassMaxMs = 10.0
+$candidateStaticAssetMaxBytes = 1048576
 $candidateDiscoveryInterval = [TimeSpan]::FromMinutes(5)
 $releaseLockOwnerGrace = [TimeSpan]::FromSeconds(30)
 $bootstrapAcceptedCandidateWorker = "dd823aa4-20f0-47e1-9255-1b785a4c17b0"
@@ -1152,12 +1153,39 @@ function Get-WorkerValidationManifest {
         if (-not (Test-Path -LiteralPath $path)) {
             throw "WORKER_ROUTE_VALIDATION_MANIFEST_UNAVAILABLE"
         }
-        $raw = Get-Content -LiteralPath $path -Raw
+        $raw = Get-Content -LiteralPath $path -Raw -Encoding UTF8
     }
     $manifest = $raw | ConvertFrom-Json
-    if ([int]$manifest.schema_version -ne 2 -or @($manifest.routes).Count -eq 0 -or
+    if ([int]$manifest.schema_version -ne 3 -or @($manifest.routes).Count -eq 0 -or
         -not $manifest.fixture_builder) {
         throw "WORKER_ROUTE_VALIDATION_MANIFEST_INVALID"
+    }
+    $staticPaths = @($manifest.static_assets | ForEach-Object { [string]$_.path })
+    if ($staticPaths.Count -eq 0 -or
+        @($staticPaths | Sort-Object -Unique).Count -ne $staticPaths.Count) {
+        throw "WORKER_ROUTE_VALIDATION_MANIFEST_INVALID"
+    }
+    foreach ($asset in @($manifest.static_assets)) {
+        $fields = @($asset.PSObject.Properties.Name)
+        $missingFields = @(@(
+            "path", "content_type", "body_encoding", "require_html_charset", "marker",
+            "redirect_path"
+        ) | Where-Object { $_ -notin $fields })
+        if ($missingFields.Count -gt 0 -or
+            [string]$asset.path -notmatch '^/[^?#]*$' -or
+            [string]$asset.content_type -notmatch '^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$' -or
+            $asset.require_html_charset -isnot [bool] -or
+            ([string]$asset.body_encoding -notin @("", "utf-8")) -or
+            ([bool]$asset.require_html_charset -and
+                [string]$asset.body_encoding -ne "utf-8") -or
+            ([string]$asset.content_type -eq "text/html" -and
+                (-not [bool]$asset.require_html_charset -or
+                    [string]::IsNullOrWhiteSpace([string]$asset.marker))) -or
+            ([string]$asset.redirect_path -and
+                ([string]$asset.redirect_path -notmatch '^/[^?#]*$' -or
+                    [string]$asset.redirect_path -eq [string]$asset.path))) {
+            throw "WORKER_ROUTE_VALIDATION_MANIFEST_INVALID"
+        }
     }
     return $manifest
 }
@@ -1282,6 +1310,185 @@ function Get-CandidateRouteResponseReason {
     return $Fallback
 }
 
+function Test-CandidateDryRunPayload {
+    param([object]$Payload, [string]$ExpectedFamily)
+    if (-not $Payload) { return $false }
+    $fields = @($Payload.PSObject.Properties.Name)
+    $missingFields = @(@("status", "mutated", "route_family") |
+        Where-Object { $_ -notin $fields })
+    if ($missingFields.Count -gt 0) { return $false }
+    return [bool](
+        $Payload.status -is [string] -and
+        [string]$Payload.status -eq "DRY_RUN_OK" -and
+        $Payload.mutated -is [bool] -and
+        [bool]$Payload.mutated -eq $false -and
+        $Payload.route_family -is [string] -and
+        [string]$Payload.route_family -eq $ExpectedFamily
+    )
+}
+
+function Get-CandidateStaticAssetBaseUri {
+    param([Parameter(Mandatory = $true)][object]$Candidate)
+    $versionId = [string]$Candidate.worker_version_id
+    if ($versionId -notmatch '^[0-9a-f]{8}-[0-9a-f-]{27}$') {
+        throw "CANDIDATE_STATIC_HOST_MISMATCH"
+    }
+    $candidateUri = $null
+    if (-not [Uri]::TryCreate([string]$Candidate.browser_url,
+            [UriKind]::Absolute, [ref]$candidateUri)) {
+        throw "CANDIDATE_STATIC_HOST_MISMATCH"
+    }
+    $productionUri = [Uri]$dashboardUrl
+    $workerPrefix = "$workerName."
+    if (-not $productionUri.Host.StartsWith(
+            $workerPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "CANDIDATE_STATIC_HOST_MISMATCH"
+    }
+    $suffix = $productionUri.Host.Substring($workerPrefix.Length)
+    $expectedHost = "{0}-{1}.{2}" -f $versionId.Substring(0, 8), $workerName, $suffix
+    if ($candidateUri.Scheme -ne "https" -or -not $candidateUri.IsDefaultPort -or
+        $candidateUri.Host -ne $expectedHost -or $candidateUri.AbsolutePath -ne "/" -or
+        $candidateUri.Query -or $candidateUri.Fragment) {
+        throw "CANDIDATE_STATIC_HOST_MISMATCH"
+    }
+    return $candidateUri
+}
+
+function Get-Sha256BytesHex {
+    param([byte[]]$Bytes)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return -join ($sha.ComputeHash($Bytes) | ForEach-Object { $_.ToString("x2") })
+    } finally { $sha.Dispose() }
+}
+
+function Invoke-CandidateStaticAssetRequest {
+    param([Parameter(Mandatory = $true)][Uri]$RequestUri)
+    Add-Type -AssemblyName System.Net.Http
+    $handler = New-Object System.Net.Http.HttpClientHandler
+    $handler.AllowAutoRedirect = $false
+    $client = New-Object System.Net.Http.HttpClient($handler)
+    $client.Timeout = [TimeSpan]::FromSeconds(30)
+    $response = $null
+    try {
+        $response = $client.GetAsync($RequestUri).GetAwaiter().GetResult()
+        $contentType = if ($response.Content.Headers.ContentType) {
+            [string]$response.Content.Headers.ContentType
+        } else { "" }
+        $cfCacheStatus = if ($response.Headers.Contains("CF-Cache-Status")) {
+            [string]($response.Headers.GetValues("CF-Cache-Status") | Select-Object -First 1)
+        } else { "" }
+        $age = if ($response.Headers.Contains("Age")) {
+            [string]($response.Headers.GetValues("Age") | Select-Object -First 1)
+        } else { "" }
+        return [pscustomobject]@{
+            status = [int]$response.StatusCode
+            content_type = $contentType
+            body_bytes = $response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+            location = [string]$response.Headers.Location
+            cf_cache_status = $cfCacheStatus
+            etag = [string]$response.Headers.ETag
+            age = $age
+        }
+    } finally {
+        if ($response) { $response.Dispose() }
+        $client.Dispose()
+        $handler.Dispose()
+    }
+}
+
+function Invoke-CandidateStaticAssetSample {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$Route
+    )
+    $result = [ordered]@{
+        route = [string]$Route.path; path = [string]$Route.path
+        method = "GET"; boundary = "STATIC_ASSET"; request_id = $null
+        requested_url = ""; requested_host = ""
+        requested_worker_version = [string]$Candidate.worker_version_id
+        expected_status = 200; status = 0; passed = $false; reason = $null
+        expected_content_type = [string]$Route.content_type
+        actual_content_type = ""; expected_encoding = [string]$Route.body_encoding
+        declared_charset = ""; expected_marker = [string]$Route.marker
+        marker_present = $false; body_bytes = 0; body_sha256 = ""
+        expected_redirect_path = [string]$Route.redirect_path
+        redirect_status = 0; redirect_location = ""; final_url = ""
+        cf_cache_status = ""; etag = ""; age = ""
+    }
+    try {
+        $baseUri = Get-CandidateStaticAssetBaseUri -Candidate $Candidate
+        $requestUri = [Uri]::new($baseUri, [string]$Route.path)
+        $result.requested_url = $requestUri.AbsoluteUri
+        $result.requested_host = $requestUri.Host
+        $response = Invoke-CandidateStaticAssetRequest -RequestUri $requestUri
+        if ($Route.redirect_path) {
+            $result.redirect_status = [int]$response.status
+            $result.redirect_location = [string]$response.location
+            $redirectUri = $null
+            try { $redirectUri = [Uri]::new($requestUri, [string]$response.location) } catch {}
+            if ([int]$response.status -notin @(301, 302, 307, 308) -or
+                -not $redirectUri -or $redirectUri.Scheme -ne $requestUri.Scheme -or
+                $redirectUri.Host -ne $requestUri.Host -or
+                $redirectUri.Port -ne $requestUri.Port -or
+                $redirectUri.AbsolutePath -ne [string]$Route.redirect_path -or
+                $redirectUri.Query -or $redirectUri.Fragment) {
+                $result.status = [int]$response.status
+                $result.reason = "REDIRECT_CONTRACT_MISMATCH"
+                return [pscustomobject]$result
+            }
+            $result.final_url = $redirectUri.AbsoluteUri
+            $response = Invoke-CandidateStaticAssetRequest -RequestUri $redirectUri
+        } else { $result.final_url = $requestUri.AbsoluteUri }
+        $result.status = [int]$response.status
+        $result.actual_content_type = [string]$response.content_type
+        $result.cf_cache_status = [string]$response.cf_cache_status
+        $result.etag = [string]$response.etag
+        $result.age = [string]$response.age
+        $bytes = [byte[]]$response.body_bytes
+        $result.body_bytes = $bytes.Length
+        if ($bytes.Length -gt 0) { $result.body_sha256 = Get-Sha256BytesHex -Bytes $bytes }
+        $mediaType = ([string]$response.content_type -split ';', 2)[0].Trim().ToLowerInvariant()
+        $charsetMatch = [regex]::Match([string]$response.content_type,
+            '(?i)(?:^|;)\s*charset\s*=\s*"?([^;"\s]+)')
+        if ($charsetMatch.Success) {
+            $result.declared_charset = $charsetMatch.Groups[1].Value.ToLowerInvariant()
+        }
+        if ($result.status -ne 200) { $result.reason = "HTTP_STATUS_MISMATCH" }
+        elseif ($mediaType -ne ([string]$Route.content_type).ToLowerInvariant()) {
+            $result.reason = "CONTENT_TYPE_MISMATCH"
+        } elseif ($bytes.Length -eq 0) { $result.reason = "EMPTY_BODY" }
+        elseif ($bytes.Length -gt $candidateStaticAssetMaxBytes) { $result.reason = "BODY_TOO_LARGE" }
+        else {
+            $decoded = $null
+            if ([string]$Route.body_encoding -eq "utf-8") {
+                try {
+                    $decoded = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes)
+                } catch { $result.reason = "INVALID_UTF8_BODY" }
+            }
+            if (-not $result.reason -and [bool]$Route.require_html_charset) {
+                $httpCharsetPassed = $result.declared_charset -eq "utf-8"
+                $htmlCharsetPassed = $decoded -match '(?i)<meta\b[^>]*\bcharset\s*=\s*["'']?utf-8\b'
+                if (-not ($httpCharsetPassed -or $htmlCharsetPassed)) {
+                    $result.reason = "HTML_CHARSET_MISMATCH"
+                }
+            }
+            if (-not $result.reason -and $Route.marker) {
+                $result.marker_present = $decoded.IndexOf(
+                    [string]$Route.marker, [StringComparison]::Ordinal) -ge 0
+                if (-not $result.marker_present) { $result.reason = "MARKER_MISSING" }
+            } elseif (-not $Route.marker) { $result.marker_present = $true }
+        }
+        $result.passed = [bool](-not $result.reason)
+    } catch {
+        $reason = [string]$_.Exception.Message
+        $result.reason = if ($reason -eq "CANDIDATE_STATIC_HOST_MISMATCH") {
+            $reason
+        } else { "VALIDATION_REQUEST_FAILED" }
+    }
+    return [pscustomobject]$result
+}
+
 function Invoke-CandidateRouteSample {
     param(
         [Parameter(Mandatory = $true)][object]$Route,
@@ -1329,10 +1536,8 @@ function Invoke-CandidateRouteSample {
         )
         $dryRunPassed = $true
         if ([string]$Route.strategy -eq "PRODUCTION_SHAPED_DRY_RUN") {
-            $dryRunPassed = [bool]($payload -and
-                [string]$payload.status -eq "DRY_RUN_OK" -and
-                [bool]$payload.mutated -eq $false -and
-                [string]$payload.route_family -eq [string]$Route.family)
+            $dryRunPassed = Test-CandidateDryRunPayload -Payload $payload `
+                -ExpectedFamily ([string]$Route.family)
         }
         $passed = [bool]($response.StatusCode -eq 200 -and $identityPassed -and $dryRunPassed)
         $reason = if ([int]$response.StatusCode -ne 200) {
@@ -1404,25 +1609,7 @@ function Invoke-CandidateWorkerValidation {
     $results = @()
     $staticStartedAt = [DateTimeOffset]::UtcNow
     foreach ($route in @($RoutePlan.static_assets)) {
-        try {
-            $response = Invoke-WebRequest -UseBasicParsing -Method Get `
-                -Uri "$workerUrl$($route.path)" -Headers $header -TimeoutSec 30
-            $markerPassed = -not $route.marker -or $response.Content -like "*$($route.marker)*"
-            $results += [pscustomobject]@{
-                route = $route.path; boundary = "STATIC_ASSET"; request_id = $null
-                status = [int]$response.StatusCode
-                passed = [bool]($response.StatusCode -eq 200 -and $markerPassed)
-            }
-        } catch {
-            $status = if ($_.Exception.Response) {
-                [int]$_.Exception.Response.StatusCode
-            } else { 0 }
-            $results += [pscustomobject]@{
-                route = $route.path; boundary = "STATIC_ASSET"; request_id = $null
-                status = $status
-                passed = $false
-            }
-        }
+        $results += Invoke-CandidateStaticAssetSample -Candidate $Candidate -Route $route
     }
     Start-Sleep -Seconds 5
     $staticEndedAt = [DateTimeOffset]::UtcNow
@@ -2139,18 +2326,7 @@ function Invoke-AutomaticCandidateValidation {
                 $firstFailure = if ($firstFailedRoute.first_failure) {
                     $firstFailedRoute.first_failure
                 } else {
-                    [pscustomobject]@{
-                        method = [string]$firstFailedRoute.method
-                        path = [string]$(if ($firstFailedRoute.path) {
-                            $firstFailedRoute.path
-                        } else { $firstFailedRoute.route })
-                        expected_status = 200
-                        status = [int]$firstFailedRoute.status
-                        reason = [string]$firstFailedRoute.reason
-                        requested_worker_version = [string]$Candidate.worker_version_id
-                        observed_worker_version = ""
-                        observed_git_sha = ""
-                    }
+                    $firstFailedRoute.PSObject.Copy()
                 }
                 $state.candidate.validation_state = "FAILED"
                 $state.candidate.validation = [pscustomobject]@{
@@ -4939,7 +5115,29 @@ function Get-DirectedWorkerValidationSummary {
         $path = if ($first.path) { [string]$first.path } else { [string]$first.route }
         $status = if ($null -ne $first.status) { "HTTP $([int]$first.status)" } else { "HTTP --" }
         $reason = if ($first.reason) { [string]$first.reason } else { "VALIDATION_FAILED" }
-        "$method $path | $status | $reason"
+        $predicate = switch ($reason) {
+            "CONTENT_TYPE_MISMATCH" {
+                "EXPECTED content_type=$([string]$first.expected_content_type) | " +
+                    "ACTUAL content_type=$([string]$first.actual_content_type)"
+            }
+            "INVALID_UTF8_BODY" { "EXPECTED encoding=utf-8 | ACTUAL invalid_utf8" }
+            "HTML_CHARSET_MISMATCH" { "EXPECTED html_charset=utf-8 | ACTUAL charset_missing_or_invalid" }
+            "MARKER_MISSING" {
+                "EXPECTED marker=$([string]$first.expected_marker) | ACTUAL marker_present=false"
+            }
+            "EMPTY_BODY" { "EXPECTED nonempty_body=true | ACTUAL body_bytes=0" }
+            "BODY_TOO_LARGE" {
+                "EXPECTED body_bytes<=$candidateStaticAssetMaxBytes | " +
+                    "ACTUAL body_bytes=$([int]$first.body_bytes)"
+            }
+            "REDIRECT_CONTRACT_MISMATCH" {
+                "EXPECTED redirect_path=$([string]$first.expected_redirect_path) | " +
+                    "ACTUAL redirect=$([int]$first.redirect_status) " +
+                    "$([string]$first.redirect_location)"
+            }
+            default { "" }
+        }
+        "$method $path | $status | $reason$(if ($predicate) { ' | ' + $predicate })"
     } else { "" }
     return [pscustomobject]@{
         tested = $tested; passed = $passed; failed = $failed
