@@ -6,7 +6,7 @@ import {
   architectureCanvasHeight, architectureFitOptions, architectureGithubHref, architectureRelations, bestViewForNode, buildArchitectureGraph,
   parseArchitectureManifest, searchArchitectureNodes,
 } from "../app/_lib/architecture-explorer.ts";
-import { architectureNodesInitialized, createArchitectureCameraController } from "../app/_lib/architecture-camera.ts";
+import { createArchitectureCameraController } from "../app/_lib/architecture-camera.ts";
 import { loadArchitectureManifest } from "../build/architecture-manifest.ts";
 
 const root = new URL("../..", import.meta.url).pathname.replace(/^\/(.:)/, "$1");
@@ -265,9 +265,6 @@ function cameraHarness(initial = {}) {
 }
 
 test("30. Camera owner performs one initial automatic Fit", () => {
-  const measured = (id, type = "architecture") => ({ id, type, measured: { width: 240, height: 120 } });
-  assert.equal(architectureNodesInitialized([measured("lane-a", "lane"), measured("decision")], ["decision", "dashboard"]), false);
-  assert.equal(architectureNodesInitialized([measured("lane-a", "lane"), measured("decision"), measured("dashboard")], ["decision", "dashboard"]), true);
   const h = cameraHarness();
   h.controller.request({ type: "FIT_VIEW", viewId: "system-overview" }); h.flush();
   assert.deepEqual(h.commands.map(item => item.type), ["FIT_VIEW"]);

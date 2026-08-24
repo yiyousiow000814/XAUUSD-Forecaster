@@ -12,25 +12,6 @@ export type ArchitectureCameraLayout = {
   height: number;
 };
 
-type MeasuredArchitectureNode = {
-  id: string;
-  type?: string;
-  measured?: { width?: number; height?: number };
-};
-
-export function architectureNodesInitialized(
-  nodes: MeasuredArchitectureNode[], expectedNodeIds: string[],
-) {
-  if (expectedNodeIds.length === 0) return false;
-  const measuredNodes = new Map(nodes
-    .filter(node => node.type === "architecture")
-    .map(node => [node.id, node]));
-  return expectedNodeIds.every(id => {
-    const measured = measuredNodes.get(id)?.measured;
-    return Boolean(measured && (measured.width ?? 0) > 0 && (measured.height ?? 0) > 0);
-  });
-}
-
 type CameraControllerOptions = {
   requestFrame: (callback: FrameRequestCallback) => number;
   cancelFrame: (frame: number) => void;

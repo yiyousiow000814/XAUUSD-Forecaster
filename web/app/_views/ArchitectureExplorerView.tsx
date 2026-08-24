@@ -3,12 +3,11 @@
 import "@xyflow/react/dist/style.css";
 import {
   Background, BaseEdge, Controls, EdgeLabelRenderer, Handle, MarkerType, MiniMap, Position,
-  ReactFlow, ReactFlowProvider, getSmoothStepPath, useReactFlow, useStore,
+  ReactFlow, ReactFlowProvider, getSmoothStepPath, useNodesInitialized, useReactFlow,
   type Edge, type EdgeProps, type Node, type NodeProps,
 } from "@xyflow/react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
-  architectureNodesInitialized,
   createArchitectureCameraController,
   type ArchitectureCameraIntent,
 } from "../_lib/architecture-camera";
@@ -143,6 +142,7 @@ function Inspector({ manifest, node, impact, sha, onClose, onDrill }: {
 
 function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; mobile: boolean }) {
   const flow = useReactFlow();
+  const nodesInitialized = useNodesInitialized();
   const canvasRef = useRef<HTMLDivElement>(null);
   const canvasTransitionCompleteRef = useRef(true);
   const [viewId, setViewId] = useState("system-overview");
@@ -156,10 +156,6 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   const [scenarioStep, setScenarioStep] = useState(0);
   const [failureMode, setFailureMode] = useState(false);
   const graph = useMemo(() => buildArchitectureGraph(manifest, viewId, mobile ? "TB" : undefined), [manifest, mobile, viewId]);
-  const nodesInitialized = useStore(useCallback(state => architectureNodesInitialized(
-    [...state.nodeLookup.values()],
-    graph.view.node_ids,
-  ), [graph.view.node_ids]));
   const canvasHeight = architectureCanvasHeight(graph.view.node_ids.length, mobile);
   const cameraStateRef = useRef({ flow, graph, mobile, nodesInitialized, viewId });
   const [camera] = useState(() => createArchitectureCameraController());
