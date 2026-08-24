@@ -181,20 +181,60 @@ def test_candidate_validation_retries_delayed_observability_evidence(tmp_path) -
         f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId 'worker' "
         f"-WindowsRevision '{candidate}';"
         "$route=[pscustomobject]@{path='/api/status';request_query='';method='GET';"
-        "family='status-read';scenario='status';boundary='WORKER_READ';warmup_samples=0;"
+        "family='status-read';scenario='status';boundary='WORKER_READ';warmup_samples=1;"
         "acceptance_samples=2};"
         "$plan=[pscustomobject]@{static_assets=@();worker_reads=@($route);worker_writes=@()};"
-        "function Start-Sleep{};function Get-CandidateInvocationCount{return 0};"
-        "function Invoke-CandidateRouteSample{return [pscustomobject]@{passed=$true;"
+        "function Start-Sleep{};$script:countAttempts=0;$script:phases=@();"
+        "function Get-CandidateInvocationCount{$script:countAttempts++;"
+        "if($script:countAttempts -eq 1){0}else{2}};"
+        "function Invoke-CandidateRouteSample{param($ValidationPhase);"
+        "$script:phases+=$ValidationPhase;return [pscustomobject]@{passed=$true;"
         "request_id='request';status=200}};"
-        "$script:attempts=0;function Get-CandidateCpuEvidence{$script:attempts++;"
-        "$count=if($script:attempts -eq 1){0}else{2};return [pscustomobject]@{"
-        "invocations=$count;passed=$true;gate_state='PASSED'}};"
+        "$script:evidenceAttempts=0;function Get-CandidateCpuEvidence{"
+        "$script:evidenceAttempts++;return [pscustomobject]@{"
+        "invocations=2;passed=$true;gate_state='PASSED'}};"
         "$validation=Invoke-CandidateWorkerValidation -Candidate $candidate -RoutePlan $plan;"
-        'Write-Output "$script:attempts,$($validation.observed_worker_invocations),$($validation.observability_diagnostic)"',
+        'Write-Output "$script:countAttempts,$script:evidenceAttempts,'
+        '$($validation.observed_worker_invocations),$($script:phases -join \':\'),'
+        '$($validation.observability_diagnostic)"',
     )
 
-    assert result == "2,2,"
+    assert result == "2,1,2,warmup:acceptance:acceptance,"
+
+
+def test_delayed_platform_telemetry_keeps_exact_candidate_retryable(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$state.candidate.validation_state='NEW';"
+        "$state.candidate.compatibility_state='APPROVED';Write-ReleaseControlState $state;"
+        "function Test-ProductionCandidateProvenance{return $true};"
+        "function Invoke-ProductionShapePreflight{return $true};"
+        "function Test-RequiredGitHubChecks{'PASSED'};"
+        "function Get-CandidateChangedFiles{return @('web/app/api/status/route.ts')};"
+        "function Get-CandidateCompatibilityRequirement{return [pscustomobject]@{state='AUTOMATIC';files=@()}};"
+        "function Get-CandidateRouteValidationPlan{return [pscustomobject]@{worker_cpu_required=$true;"
+        "requires_validation=$true;static_assets=@();worker_reads=@();worker_writes=@()}};"
+        "function Set-CloudflareCandidatePointer{};"
+        "function Wait-CandidatePlacementPropagation{return [pscustomobject]@{passed=$true;state='READY'}};"
+        "function Invoke-CandidateWorkerValidation{return [pscustomobject]@{passed=$true;"
+        "validation_run='run-pending';expected_worker_invocations=330;"
+        "observed_worker_invocations=$null;static_observability_state='PASSED';"
+        "observability_credential_source='LOCAL_SECRET_FILE';"
+        "observability_diagnostic='OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING';"
+        "routes=@();cpu_evidence=$null}};"
+        "Invoke-AutomaticCandidateValidation -Candidate $candidate|Out-Null;"
+        "$saved=Get-ReleaseControlState;$history=Get-Content $releaseHistoryPath -Raw;"
+        'Write-Output "$($saved.candidate.validation_state),'
+        '$($saved.candidate.validation.windows),$($saved.candidate.validation.cloudflare),'
+        '$($saved.candidate.validation.reason),'
+        '$($history.Contains(\'CANDIDATE_PLATFORM_PENDING\'))"',
+    )
+    assert result == (
+        "PLATFORM_PENDING,PASSED,PENDING,"
+        "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING,True"
+    )
 
 
 def test_repository_local_release_secret_path_is_gitignored() -> None:
@@ -2333,7 +2373,7 @@ def test_one_failed_route_family_fails_candidate_cpu_evidence(tmp_path) -> None:
         f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE'; "
         "$routes=@([pscustomobject]@{path='/api/status';method='GET';family='status-read';acceptance_samples=10},"
         "[pscustomobject]@{path='/api/audit';method='GET';family='audit-read';acceptance_samples=10}); "
-        "function Get-CandidatePlatformEvidence { param($Candidate,$From,$To,$ExpectedInvocations,$RoutePath,$RouteMethod,$RouteFamily); "
+        "function Get-CandidatePlatformEvidence { param($Candidate,$From,$To,$ExpectedInvocations,$RoutePath,$RouteMethod,$RouteFamily,$ValidationRun); "
         "$failed=($RouteFamily -eq 'audit-read'); $gate=if($failed){'FAILED'}else{'PASSED'}; return [pscustomobject]@{route_family=$RouteFamily;"
         "invocations=$ExpectedInvocations;max_cpu_ms=9;p95_cpu_ms=4;p99_cpu_ms=7;max_wall_ms=10;"
         "exceeded_cpu=0;exceeded_memory=0;responses_1102=0;responses_5xx=0;"
@@ -2537,9 +2577,10 @@ def test_platform_evidence_is_bound_to_exact_worker_version(tmp_path) -> None:
         tmp_path,
         f"$candidate = New-ReleaseIdentity -GitSha '{candidate}' "
         f"-WorkerVersionId '{worker}' -WindowsRevision '{candidate}'; "
-        "$script:observedVersions = @(); "
+        "$script:observedVersions = @(); $script:observedKeys = @(); "
         "function Invoke-WorkersObservabilityQuery { param($Filters,$Calculations,$From,$To); "
         "$script:observedVersions += @($Filters | Where-Object key -eq '$workers.scriptVersion.id')[0].value; "
+        "$script:observedKeys += @($Filters | ForEach-Object key); "
         "$alias = [string]$Calculations[0].alias; "
         "if ($alias -eq 'invocations') { return [pscustomobject]@{ calculations=@("
         "[pscustomobject]@{alias='invocations';aggregates=@([pscustomobject]@{value=6})},"
@@ -2549,11 +2590,18 @@ def test_platform_evidence_is_bound_to_exact_worker_version(tmp_path) -> None:
         "[pscustomobject]@{alias='max_wall_ms';aggregates=@([pscustomobject]@{value=25})}) } }; "
         "return [pscustomobject]@{ calculations=@([pscustomobject]@{alias=$alias;aggregates=@([pscustomobject]@{value=0})}) } }; "
         "$now=[DateTimeOffset]::UtcNow; $evidence=Get-CandidatePlatformEvidence "
-        "-Candidate $candidate -From $now.AddMinutes(-1) -To $now -ExpectedInvocations 6; "
-        'Write-Output "$($evidence.passed),$($evidence.invocations),$(@($script:observedVersions | Select-Object -Unique) -join \';\')"',
+        "-Candidate $candidate -From $now.AddMinutes(-1) -To $now -ExpectedInvocations 6 "
+        "-RoutePath '/api/status' -RouteMethod 'GET' -ValidationRun 'run-1'; "
+        "$keys=@($script:observedKeys|Select-Object -Unique);"
+        'Write-Output "$($evidence.passed),$($evidence.invocations),'
+        '$(@($script:observedVersions | Select-Object -Unique) -join \';\'),'
+        '$($keys -contains \'$metadata.type\'),'
+        '$($keys -contains \'$workers.event.path\'),'
+        '$($keys -contains \'$workers.event.request.headers.x-aurum-validation-run\'),'
+        '$($keys -contains \'$workers.event.request.headers.x-aurum-validation-phase\')"',
     )
 
-    assert result == f"True,6,{worker}"
+    assert result == f"True,6,{worker},True,True,True,True"
 
 
 def test_bootstrap_preserves_accepted_268_candidate_and_evidence(tmp_path) -> None:
