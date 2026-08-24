@@ -1186,6 +1186,8 @@ def test_wpf_shell_is_bundled_with_winforms_fallback_and_release_controls() -> N
 
     root = ET.parse(ROOT / "scripts" / "control_center.xaml").getroot()
     serialized = ET.tostring(root, encoding="unicode")
+    assert "LOCAL RUNTIME" in serialized
+    assert "OVERALL" not in serialized
     for name in (
         "ServiceList", "StableIdentity", "CandidateIdentity", "PreviousIdentity",
         "PromoteButton", "ReverseButton", "StartButton", "StopButton",
@@ -1199,6 +1201,15 @@ def test_wpf_shell_is_bundled_with_winforms_fallback_and_release_controls() -> N
     assert "using WinForms fallback" in source
     assert 'Invoke-WpfOperation ([string]$button.CommandParameter)' in source
     assert 'Get-ControlCenterReleasePresentation -Release $release' in source
+
+
+def test_control_center_route_status_is_not_inherited_from_another_gate() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
+        encoding="utf-8",
+    )
+    assert '$apiRouteState = if ($directed.tested -gt 0)' in source
+    assert '$contractCheck = if ($directed.tested -gt 0)' in source
+    assert '"API routes: $contractCheck | $($directed.passed)/$($directed.tested)"' in source
 
 
 def test_release_gui_actions_are_tracked_single_flight_in_both_shells() -> None:

@@ -7640,7 +7640,11 @@ function Show-ControlCenter {
                     $repositoryCheck = "$repositoryCheck / RETRYABLE"
                 }
                 $windowsCheck = if ($validation -and $validation.windows) { [string]$validation.windows } else { "WAITING" }
-                $contractCheck = if ($validation -and $validation.cloudflare) { [string]$validation.cloudflare } else { "WAITING" }
+                $contractCheck = if ($directed.tested -gt 0) {
+                    [string]$directed.state
+                } elseif ($validation -and $validation.cloudflare) {
+                    [string]$validation.cloudflare
+                } else { "WAITING" }
                 $cpuCheck = "WAITING"
                 $limitCheck = "WAITING"
                 if ($validation -and $validation.cpu_evidence -eq "NOT_REQUIRED") {
