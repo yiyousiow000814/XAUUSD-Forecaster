@@ -45,6 +45,15 @@ Every node owns a non-empty beginner-facing `purpose` distinct from `summary`,
 `owner`, and the six architecture dimensions. The inspector presents those
 facts separately: what the node is, why it exists, and who owns it.
 
+The checked-in representation keeps explicit `node_fields` and `edge_fields`
+beside compact rows. The bounded build loader restores named node and edge
+objects before client validation. View node membership is derived from its
+complete lane membership, and scenario node/edge paths are derived from the
+ordered steps plus the unique edge graph. Node inputs and outputs are likewise
+derived from edges instead of being serialized a second time. These are
+lossless storage reductions; the client still receives and validates the full
+v2 graph contract.
+
 `Canonical Package Dependencies` is a compile-time import graph derived from
 `docs/contracts/PACKAGE_DEPENDENCIES.md`. Its nine `package-*` nodes and
 `DEPENDENCY` edges are separate from operational runtime/data nodes. The view
@@ -62,5 +71,11 @@ The client uses Dagre to calculate finite positions from the selected bounded
 view. Coordinates are not stored in the manifest. React Flow renders only that
 view's nodes and edges as a read-only graph. Both libraries and their CSS remain
 inside the lazy private Explorer boundary.
+
+One camera-intent controller exclusively owns automatic Fit, node Focus,
+post-inspector refit, and manual Fit. It waits for React Flow node
+initialization, a stable measured canvas, and any inspector width transition.
+Replacing an intent cancels the pending animation frame, so an older view can
+never move the current viewport.
 
 Run `python scripts/check_architecture_manifest.py --root .` before committing.

@@ -50,6 +50,7 @@
 
 .stage { position: relative; min-height: 650px; border: 1px solid #c7d2d3; border-radius: 0 0 14px 14px; background: var(--graph-canvas); overflow: hidden; }
 .canvas { position: relative; width: 100%; height: 650px; transition: margin .22s ease, width .22s ease; }
+.canvasPending { display: grid; place-items: center; color: var(--graph-muted); font-size: 12px; font-weight: 800; }
 .withInspector .canvas { width: calc(100% - 380px); }
 .canvas :global(.react-flow) { background: linear-gradient(135deg, rgba(255,255,255,.64), rgba(229,237,236,.46)); }
 .canvas :global(.react-flow__attribution) { display: none; }

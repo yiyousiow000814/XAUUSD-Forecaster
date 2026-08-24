@@ -4,10 +4,15 @@ import copy
 import json
 from pathlib import Path
 
+import pytest
+
 from scripts.check_architecture_manifest import (
     CAMPAIGN_ORDER,
     CANONICAL_PACKAGE_DEPENDENCIES,
+    EDGE_FIELDS,
+    NODE_FIELDS,
     REQUIRED_FAILURE_IMPACTS,
+    expand_compact_manifest,
     load_manifest,
     validate_manifest,
 )
@@ -148,6 +153,26 @@ def test_legacy_shim_requires_migration_map_entry() -> None:
 def test_manifest_byte_bound_is_enforced() -> None:
     manifest, _ = manifest_copy()
     assert any("exceeds valid limit" in error for error in errors_for(manifest, manifest["byte_limit"] + 1))
+
+
+def test_compact_rows_restore_full_graph_with_meaningful_headroom() -> None:
+    raw = (ROOT / "architecture" / "manifest.json").read_bytes()
+    source = json.loads(raw)
+    assert source["node_fields"] == NODE_FIELDS
+    assert source["edge_fields"] == EDGE_FIELDS
+    assert len(raw) <= source["byte_limit"] * 0.8
+    assert all("node_ids" not in view for view in source["views"])
+    assert all("node_ids" not in scenario and "edge_ids" not in scenario for scenario in source["scenarios"])
+    expanded = expand_compact_manifest(source)
+    assert all(isinstance(node, dict) and "purpose" in node for node in expanded["nodes"])
+    assert all(isinstance(edge, dict) and "description" in edge for edge in expanded["edges"])
+
+
+def test_compact_row_width_fails_closed() -> None:
+    source = json.loads((ROOT / "architecture" / "manifest.json").read_bytes())
+    source["nodes"][0].pop()
+    with pytest.raises(ValueError, match="row width"):
+        expand_compact_manifest(source)
 
 
 def test_campaign_order_and_pending_semantics_are_fixed() -> None:

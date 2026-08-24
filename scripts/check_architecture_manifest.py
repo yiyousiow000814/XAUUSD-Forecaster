@@ -44,12 +44,62 @@ SECRET_PATTERN = re.compile(
     r"(?:-----BEGIN [A-Z ]+PRIVATE KEY-----|(?:api|secret|token|password)[_-]?key\s*[:=])",
     re.IGNORECASE,
 )
+NODE_FIELDS = [
+    "id", "label", "short_label", "kind", "runtime_state", "implementation_state",
+    "owner", "summary", "architecture", "code_paths", "test_paths", "document_paths",
+    "tags", "purpose", "subsystem_view",
+]
+EDGE_FIELDS = ["id", "from", "to", "label", "kind", "criticality", "description"]
+
+
+def expand_compact_manifest(source: dict[str, Any]) -> dict[str, Any]:
+    manifest = dict(source)
+    for row_key, field_key, expected_fields in (
+        ("nodes", "node_fields", NODE_FIELDS),
+        ("edges", "edge_fields", EDGE_FIELDS),
+    ):
+        fields = manifest.get(field_key)
+        rows = manifest.get(row_key)
+        if fields != expected_fields or not isinstance(rows, list):
+            raise ValueError(f"invalid compact {row_key} contract")
+        if any(not isinstance(row, list) or len(row) != len(fields) for row in rows):
+            raise ValueError(f"invalid compact {row_key} row width")
+        manifest[row_key] = [dict(zip(fields, row, strict=True)) for row in rows]
+    edges = manifest["edges"]
+    views = manifest.get("views")
+    scenarios = manifest.get("scenarios")
+    if not isinstance(views, list) or not isinstance(scenarios, list):
+        raise ValueError("invalid compact graph contract")
+    manifest["views"] = []
+    for view in views:
+        lanes = view.get("lanes") if isinstance(view, dict) else None
+        if not isinstance(lanes, list) or any(not isinstance(lane.get("node_ids"), list) for lane in lanes if isinstance(lane, dict)):
+            raise ValueError("invalid compact view lanes")
+        if any(not isinstance(lane, dict) for lane in lanes):
+            raise ValueError("invalid compact view lane")
+        manifest["views"].append({**view, "node_ids": [node_id for lane in lanes for node_id in lane["node_ids"]]})
+    manifest["scenarios"] = []
+    for scenario in scenarios:
+        steps = scenario.get("steps") if isinstance(scenario, dict) else None
+        if not isinstance(steps, list) or any(not isinstance(step, dict) or not isinstance(step.get("node_id"), str) for step in steps):
+            raise ValueError("invalid compact scenario steps")
+        node_ids = [step["node_id"] for step in steps]
+        edge_ids = []
+        for left, right in zip(node_ids, node_ids[1:]):
+            matches = [edge["id"] for edge in edges if edge.get("from") == left and edge.get("to") == right]
+            if len(matches) != 1:
+                raise ValueError("ambiguous compact scenario path")
+            edge_ids.append(matches[0])
+        manifest["scenarios"].append({**scenario, "node_ids": node_ids, "edge_ids": edge_ids})
+    manifest.pop("node_fields", None)
+    manifest.pop("edge_fields", None)
+    return manifest
 
 
 def load_manifest(root: Path) -> tuple[dict[str, Any], int]:
     path = root / "architecture" / "manifest.json"
     raw = path.read_bytes()
-    return json.loads(raw), len(raw)
+    return expand_compact_manifest(json.loads(raw)), len(raw)
 
 
 def validate_manifest(root: Path, manifest: dict[str, Any], byte_size: int) -> list[str]:
@@ -93,12 +143,9 @@ def validate_manifest(root: Path, manifest: dict[str, Any], byte_size: int) -> l
             errors.append(f"{node_id}: architecture must contain all six dimensions")
         elif any(not isinstance(architecture[key], str) or not architecture[key].strip() for key in ARCHITECTURE_FIELDS):
             errors.append(f"{node_id}: architecture dimensions must be non-empty strings")
-        for field in ("inputs", "outputs", "code_paths", "test_paths", "document_paths", "tags"):
+        for field in ("code_paths", "test_paths", "document_paths", "tags"):
             if not isinstance(node.get(field), list):
                 errors.append(f"{node_id}: {field} must be a list")
-        for endpoint in [*node.get("inputs", []), *node.get("outputs", [])]:
-            if endpoint not in known_nodes:
-                errors.append(f"{node_id}: missing input/output endpoint {endpoint}")
         for path_value in node.get("code_paths", []):
             if path_value.startswith(("tests/", "web/tests/")):
                 errors.append(f"{node_id}: code path is a test path: {path_value}")
@@ -315,7 +362,7 @@ def main() -> int:
     root = args.root.resolve()
     try:
         manifest, size = load_manifest(root)
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, json.JSONDecodeError, ValueError) as error:
         print(f"Architecture manifest invalid: {error}")
         return 1
     errors = validate_manifest(root, manifest, size)

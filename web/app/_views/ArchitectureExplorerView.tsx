@@ -3,10 +3,14 @@
 import "@xyflow/react/dist/style.css";
 import {
   Background, BaseEdge, Controls, EdgeLabelRenderer, Handle, MarkerType, MiniMap, Position,
-  ReactFlow, ReactFlowProvider, getSmoothStepPath, useReactFlow,
+  ReactFlow, ReactFlowProvider, getSmoothStepPath, useNodesInitialized, useReactFlow,
   type Edge, type EdgeProps, type Node, type NodeProps,
 } from "@xyflow/react";
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  createArchitectureCameraController,
+  type ArchitectureCameraIntent,
+} from "../_lib/architecture-camera";
 import {
   architectureCanvasHeight, architectureCommitSha, architectureFailureImpact, architectureFitOptions, architectureGithubHref, architectureRelations,
   bestViewForNode, buildArchitectureGraph, bundledArchitectureManifest, searchArchitectureNodes,
@@ -39,7 +43,7 @@ type ArchitectureCanvasNode = ArchitectureFlowNode | ArchitectureLaneNode;
 type ArchitectureFlowEdge = Edge<FlowEdgeData, "architecture">;
 
 function useMobileGraph() {
-  const [mobile, setMobile] = useState(false);
+  const [mobile, setMobile] = useState<boolean | null>(null);
   useEffect(() => {
     const media = window.matchMedia("(max-width: 720px)");
     const update = () => setMobile(media.matches);
@@ -136,9 +140,11 @@ function Inspector({ manifest, node, impact, sha, onClose, onDrill }: {
   </aside>;
 }
 
-function ExplorerGraph({ manifest }: { manifest: ArchitectureManifest }) {
-  const mobile = useMobileGraph();
+function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; mobile: boolean }) {
   const flow = useReactFlow();
+  const nodesInitialized = useNodesInitialized({ includeHiddenNodes: true });
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const canvasTransitionCompleteRef = useRef(true);
   const [viewId, setViewId] = useState("system-overview");
   const [viewHistory, setViewHistory] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -151,22 +157,44 @@ function ExplorerGraph({ manifest }: { manifest: ArchitectureManifest }) {
   const [failureMode, setFailureMode] = useState(false);
   const graph = useMemo(() => buildArchitectureGraph(manifest, viewId, mobile ? "TB" : undefined), [manifest, mobile, viewId]);
   const canvasHeight = architectureCanvasHeight(graph.view.node_ids.length, mobile);
-  const fitGraph = useCallback((duration = 280) => {
-    flow.fitView({ ...architectureFitOptions(graph.view.node_ids.length, mobile), duration });
-  }, [flow, graph.view.node_ids.length, mobile]);
-  const focusGraphNode = useCallback((item: { position: { x: number; y: number }; width: number; height: number }, duration: number) => {
-    const zoom = mobile ? .9 : 1;
-    if (mobile) {
-      const canvasWidth = Math.max(0, window.innerWidth - 26);
-      flow.setViewport({
-        x: (canvasWidth - item.width * zoom) / 2 - item.position.x * zoom,
-        y: 64 - item.position.y * zoom,
-        zoom,
-      }, { duration });
-      return;
-    }
-    flow.setCenter(item.position.x + item.width / 2, item.position.y + item.height / 2, { zoom, duration });
-  }, [flow, mobile]);
+  const cameraStateRef = useRef({ flow, graph, mobile, nodesInitialized, viewId });
+  const [camera] = useState(() => createArchitectureCameraController());
+  useLayoutEffect(() => {
+    cameraStateRef.current = { flow, graph, mobile, nodesInitialized, viewId };
+    camera.configure({
+      requestFrame: callback => window.requestAnimationFrame(callback),
+      cancelFrame: frame => window.cancelAnimationFrame(frame),
+      readLayout: () => ({
+        viewId: cameraStateRef.current.viewId,
+        nodesInitialized: cameraStateRef.current.nodesInitialized,
+        canvasTransitionComplete: canvasTransitionCompleteRef.current,
+        width: canvasRef.current?.clientWidth ?? 0,
+        height: canvasRef.current?.clientHeight ?? 0,
+      }),
+      execute: intent => {
+        const current = cameraStateRef.current;
+        const duration = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 260;
+        if (intent.type !== "FOCUS_NODE") {
+          current.flow.fitView({ ...architectureFitOptions(current.graph.view.node_ids.length, current.mobile), duration });
+          return;
+        }
+        const item = current.graph.nodes.find(node => node.id === intent.nodeId);
+        if (!item) return;
+        const zoom = current.flow.getZoom();
+        if (current.mobile) {
+          const canvasWidth = canvasRef.current?.clientWidth ?? window.innerWidth;
+          current.flow.setViewport({
+            x: (canvasWidth - item.width * zoom) / 2 - item.position.x * zoom,
+            y: 64 - item.position.y * zoom,
+            zoom,
+          }, { duration });
+          return;
+        }
+        current.flow.setCenter(item.position.x + item.width / 2, item.position.y + item.height / 2, { zoom, duration });
+      },
+    });
+    camera.layoutChanged();
+  }, [camera, flow, graph, mobile, nodesInitialized, viewId]);
   const selected = selectedId ? manifest.nodes.find(item => item.id === selectedId) ?? null : null;
   const scenario = manifest.scenarios.find(item => item.id === scenarioId) ?? null;
   const activeImpact = failureMode ? architectureFailureImpact(manifest, selectedId) : null;
@@ -185,25 +213,31 @@ function ExplorerGraph({ manifest }: { manifest: ArchitectureManifest }) {
   const hasFocus = Boolean(focusId || scenario || state !== "ALL");
   const sha = architectureCommitSha();
 
-  const changeView = useCallback((next: string, remember = false) => {
+  const beginInspectorTransition = useCallback(() => {
+    if (mobile || !canvasRef.current) {
+      canvasTransitionCompleteRef.current = true;
+      return;
+    }
+    const duration = window.getComputedStyle(canvasRef.current).transitionDuration
+      .split(",").some(value => Number.parseFloat(value) > 0);
+    canvasTransitionCompleteRef.current = !duration;
+  }, [mobile]);
+  const changeView = useCallback((next: string, remember = false, cameraIntent?: ArchitectureCameraIntent) => {
     if (remember && next !== viewId) setViewHistory(items => [...items, viewId]);
     setViewId(next); setSelectedId(null); setHoveredId(null); setHoveredEdgeId(null); setFailureMode(false);
-    const nodeCount = manifest.views.find(view => view.id === next)?.node_ids.length ?? 0;
-    window.setTimeout(() => flow.fitView({ ...architectureFitOptions(nodeCount, mobile), duration: 260 }), 180);
-  }, [flow, manifest.views, mobile, viewId]);
+    camera.request(cameraIntent ?? { type: "FIT_VIEW", viewId: next });
+  }, [camera, setFailureMode, setHoveredEdgeId, setHoveredId, setSelectedId, setViewHistory, setViewId, viewId]);
   const selectNode = useCallback((id: string) => {
+    if (!selectedId) beginInspectorTransition();
     setSelectedId(id); setFailureMode(false);
-    if (mobile) return;
-    const item = graph.nodes.find(node => node.id === id);
-    if (item) window.setTimeout(() => flow.setCenter(
-      item.position.x + item.width / 2, item.position.y + item.height / 2,
-      { zoom: flow.getZoom(), duration: 220 },
-    ), 230);
-  }, [flow, graph.nodes, mobile]);
+    camera.request({ type: "FOCUS_NODE", viewId, nodeId: id, source: "INSPECTOR" });
+  }, [beginInspectorTransition, camera, selectedId, setFailureMode, setSelectedId, viewId]);
   const closeInspector = useCallback(() => {
+    if (!selectedId) return;
+    beginInspectorTransition();
     setSelectedId(null); setFailureMode(false);
-    window.setTimeout(() => fitGraph(220), 230);
-  }, [fitGraph]);
+    camera.request({ type: "REFIT_AFTER_INSPECTOR_CLOSE", viewId });
+  }, [beginInspectorTransition, camera, selectedId, setFailureMode, setSelectedId, viewId]);
   const drill = useCallback((id: string) => {
     const item = manifest.nodes.find(node => node.id === id);
     if (item?.subsystem_view && item.subsystem_view !== viewId) changeView(item.subsystem_view, true);
@@ -218,9 +252,19 @@ function ExplorerGraph({ manifest }: { manifest: ArchitectureManifest }) {
     window.addEventListener("keydown", close); return () => window.removeEventListener("keydown", close);
   }, [closeInspector]);
   useEffect(() => {
-    const timeout = window.setTimeout(() => fitGraph(260), 300);
-    return () => window.clearTimeout(timeout);
-  }, [fitGraph, graph.direction, graph.view.id]);
+    camera.request({ type: "FIT_VIEW", viewId: "system-overview" });
+    return () => camera.cancel();
+  }, [camera]);
+  useEffect(() => {
+    camera.layoutChanged();
+  }, [camera, graph.direction, graph.view.id, nodesInitialized]);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const observer = new ResizeObserver(() => camera.layoutChanged());
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [camera]);
 
   const flowNodes: ArchitectureFlowNode[] = graph.nodes.map(item => ({
     ...item, type: "architecture", draggable: false, selectable: true,
@@ -252,26 +296,24 @@ function ExplorerGraph({ manifest }: { manifest: ArchitectureManifest }) {
   const runScenario = (id: string) => {
     const next = manifest.scenarios.find(item => item.id === id); setScenarioId(id); setScenarioStep(0); setSelectedId(null); setFailureMode(false);
     if (next) {
-      changeView(next.view_id, next.view_id !== viewId);
+      const targetId = next.failure_node_id ?? next.node_ids[0];
+      if (next.failure_node_id) beginInspectorTransition();
+      changeView(next.view_id, next.view_id !== viewId,
+        { type: "FOCUS_NODE", viewId: next.view_id, nodeId: targetId, source: "SCENARIO_STEP" });
       if (next.failure_node_id) { setSelectedId(next.failure_node_id); setFailureMode(true); }
-      else {
-        const target = buildArchitectureGraph(manifest, next.view_id, mobile ? "TB" : undefined).nodes.find(node => node.id === next.node_ids[0]);
-        if (target) window.setTimeout(() => focusGraphNode(target, 300), 420);
-      }
     }
   };
   const moveScenario = (direction: number) => {
     if (!scenario) return;
     const nextStep = Math.max(0, Math.min(scenario.steps.length - 1, scenarioStep + direction));
     setScenarioStep(nextStep);
-    const target = graph.nodes.find(node => node.id === scenario.node_ids[nextStep]);
-    if (target) window.setTimeout(() => focusGraphNode(target, 260), 80);
+    camera.request({ type: "FOCUS_NODE", viewId, nodeId: scenario.node_ids[nextStep], source: "SCENARIO_STEP" });
   };
   const selectSearch = (node: ArchitectureNode) => {
-    const targetView = bestViewForNode(manifest, node, viewId); if (targetView !== viewId) setViewId(targetView);
+    const targetView = bestViewForNode(manifest, node, viewId);
+    if (!selectedId) beginInspectorTransition();
+    changeView(targetView, false, { type: "FOCUS_NODE", viewId: targetView, nodeId: node.id, source: "SEARCH" });
     setSelectedId(node.id); setQuery("");
-    const target = buildArchitectureGraph(manifest, targetView, mobile ? "TB" : undefined).nodes.find(item => item.id === node.id);
-    if (target) window.setTimeout(() => focusGraphNode(target, 260), targetView === viewId ? 80 : 360);
   };
   const impactForSelected = architectureFailureImpact(manifest, selectedId);
   const announced = scenario ? `${scenario.label}: step ${scenarioStep + 1} of ${scenario.steps.length}. ${scenario.steps[scenarioStep]?.message}`
@@ -295,7 +337,7 @@ function ExplorerGraph({ manifest }: { manifest: ArchitectureManifest }) {
       <label><span>State</span><select aria-label="Runtime state" onChange={event => setState(event.currentTarget.value as typeof state)} value={state}>{STATES.map(item => <option key={item}>{item}</option>)}</select></label>
       <label><span>Scenario</span><select aria-label="Guided scenario" onChange={event => runScenario(event.currentTarget.value)} value={scenarioId}><option value="">Explore freely</option>{manifest.scenarios.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
       <button aria-describedby={selected && !impactForSelected ? "failure-contract-status" : undefined} aria-pressed={failureMode} className={styles.failureButton} disabled={!impactForSelected} onClick={() => setFailureMode(value => !value)} type="button">故障影响</button>
-      <button className={styles.fitButton} onClick={() => fitGraph()} type="button">适配画布 · Fit</button>
+      <button className={styles.fitButton} onClick={() => camera.request({ type: "MANUAL_FIT", viewId })} type="button">适配画布 · Fit</button>
     </section>
     {selected && !impactForSelected ? <p className={styles.failureAvailability} id="failure-contract-status">此节点没有显式 failure impact contract，故障按钮已禁用。</p> : null}
     {graph.view.relationship_note ? <aside className={styles.dependencyNotice} aria-label="Package dependency meaning">
@@ -307,9 +349,10 @@ function ExplorerGraph({ manifest }: { manifest: ArchitectureManifest }) {
       <button disabled={scenarioStep === scenario.steps.length - 1} onClick={() => moveScenario(1)} type="button">Next</button>
       <button aria-label="Close scenario" onClick={() => { setScenarioId(""); setScenarioStep(0); }} type="button">×</button></section> : null}
     <section className={`${styles.stage} ${selected ? styles.withInspector : ""}`} style={{ minHeight: canvasHeight }}>
-      <div className={styles.canvas} data-graph-direction={graph.direction} data-testid="architecture-graph" style={{ height: canvasHeight }}>
+      <div className={styles.canvas} data-graph-direction={graph.direction} data-testid="architecture-graph" ref={canvasRef} style={{ height: canvasHeight }}
+        onTransitionEnd={event => { if (event.propertyName === "width") { canvasTransitionCompleteRef.current = true; camera.layoutChanged(); } }}>
         <ReactFlow<ArchitectureCanvasNode, ArchitectureFlowEdge> nodes={[...laneNodes, ...flowNodes]} edges={flowEdges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
-          elementsSelectable fitView minZoom={0.25} maxZoom={1.6} nodesConnectable={false} nodesDraggable={false}
+          elementsSelectable minZoom={0.25} maxZoom={1.6} nodesConnectable={false} nodesDraggable={false}
           onEdgeMouseEnter={(_, edge) => setHoveredEdgeId(edge.id)} onEdgeMouseLeave={() => setHoveredEdgeId(null)}
           panOnDrag zoomOnPinch zoomOnScroll proOptions={{ hideAttribution: true }}>
           <Background color="#b7c3c5" gap={22} size={1} />
@@ -331,8 +374,16 @@ function ExplorerGraph({ manifest }: { manifest: ArchitectureManifest }) {
   </main>;
 }
 
+function ResponsiveArchitectureExplorer({ manifest }: { manifest: ArchitectureManifest }) {
+  const mobile = useMobileGraph();
+  if (mobile === null) return <main aria-busy="true" className={styles.main}>
+    <section className={styles.stage}><div className={`${styles.canvas} ${styles.canvasPending}`}><span>Preparing architecture layout…</span></div></section>
+  </main>;
+  return <ReactFlowProvider><ExplorerGraph manifest={manifest} mobile={mobile} /></ReactFlowProvider>;
+}
+
 export default function ArchitectureExplorerView() {
   const manifest = bundledArchitectureManifest();
   if (!manifest) return <main className={`${styles.main} ${styles.unavailable}`}><span>ARCHITECTURE MANIFEST</span><h1>System architecture unavailable</h1><p>The bounded build manifest is invalid. No runtime fallback request was attempted.</p></main>;
-  return <ReactFlowProvider><ExplorerGraph manifest={manifest} /></ReactFlowProvider>;
+  return <ResponsiveArchitectureExplorer manifest={manifest} />;
 }

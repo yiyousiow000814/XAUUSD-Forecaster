@@ -51,7 +51,7 @@ build -> prerendered public routes + immutable assets -> ASSETS binding
 request /api/* -> minimal Worker router -> selected route -> D1
 authenticated local sync -> ingest routes -> D1 public mirror
 admin request -> Access/session boundary -> private route -> D1
-build -> validated architecture/manifest.json v2 -> lazy React Flow/Dagre Explorer chunk
+build -> expand and validate bounded architecture/manifest.json v2 -> lazy React Flow/Dagre Explorer chunk with one camera-intent owner
 ```
 
 The public shell is not rendered through React SSR on every request. Snapshot

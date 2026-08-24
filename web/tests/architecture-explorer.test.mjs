@@ -6,6 +6,7 @@ import {
   architectureCanvasHeight, architectureFitOptions, architectureGithubHref, architectureRelations, bestViewForNode, buildArchitectureGraph,
   parseArchitectureManifest, searchArchitectureNodes,
 } from "../app/_lib/architecture-explorer.ts";
+import { createArchitectureCameraController } from "../app/_lib/architecture-camera.ts";
 import { loadArchitectureManifest } from "../build/architecture-manifest.ts";
 
 const root = new URL("../..", import.meta.url).pathname.replace(/^\/(.:)/, "$1");
@@ -63,10 +64,11 @@ test("7. Unrelated nodes are visually and semantically dimmed", () => {
   assert.match(cssSource, /\.edgeDimmed \{ opacity:/);
 });
 
-test("8. Closing the inspector restores full graph width", () => {
+test("8. Closing the inspector restores full graph width through the camera owner", () => {
   assert.match(viewSource, /aria-label="关闭详情"/);
   assert.match(viewSource, /closeInspector/);
-  assert.match(viewSource, /window\.setTimeout\(\(\) => fitGraph\(220\), 230\)/);
+  assert.match(viewSource, /REFIT_AFTER_INSPECTOR_CLOSE/);
+  assert.match(viewSource, /onTransitionEnd=/);
   assert.match(cssSource, /\.withInspector \.canvas \{ width: calc\(100% - 380px\)/);
 });
 
@@ -208,8 +210,8 @@ test("26. Fit zoom is bounded by view size and selection does not refit", () => 
   assert.equal(architectureCanvasHeight(11, true), 1485);
   assert.equal(architectureCanvasHeight(99, true), 1600);
   assert.equal(architectureCanvasHeight(11, false), 650);
-  assert.match(viewSource, /zoom: flow\.getZoom\(\)/);
-  assert.match(viewSource, /flow\.setViewport\(\{/);
+  assert.match(viewSource, /const zoom = current\.flow\.getZoom\(\)/);
+  assert.match(viewSource, /current\.flow\.setViewport\(\{/);
   assert.match(viewSource, /y: 64 - item\.position\.y \* zoom/);
   assert.doesNotMatch(viewSource, /selectedId\]\);\s*$/m);
 });
@@ -236,4 +238,101 @@ test("29. Required failure impacts are explicit and missing contracts stay disab
   assert.ok(manifest.failure_impacts.every(impact => impact.continues.every(item => item.message.includes("CONTINUES"))));
   assert.match(viewSource, /disabled=\{!impactForSelected\}/);
   assert.match(viewSource, /没有显式 failure impact contract/);
+});
+
+function cameraHarness(initial = {}) {
+  let nextFrame = 1;
+  const frames = new Map();
+  const commands = [];
+  const layout = {
+    viewId: "system-overview", nodesInitialized: true, canvasTransitionComplete: true,
+    width: 1200, height: 650, ...initial,
+  };
+  const controller = createArchitectureCameraController({
+    requestFrame(callback) { const id = nextFrame++; frames.set(id, callback); return id; },
+    cancelFrame(id) { frames.delete(id); },
+    readLayout() { return { ...layout }; },
+    execute(intent) { commands.push(intent); },
+  });
+  const flush = () => {
+    let guard = 0;
+    while (frames.size && guard++ < 20) {
+      const current = [...frames.entries()]; frames.clear();
+      current.forEach(([, callback]) => callback(0));
+    }
+  };
+  return { commands, controller, flush, frames, layout };
+}
+
+test("30. Camera owner performs one initial automatic Fit", () => {
+  const h = cameraHarness();
+  h.controller.request({ type: "FIT_VIEW", viewId: "system-overview" }); h.flush();
+  assert.deepEqual(h.commands.map(item => item.type), ["FIT_VIEW"]);
+});
+
+test("31. One view switch performs one automatic Fit", () => {
+  const h = cameraHarness({ viewId: "training-models" });
+  h.controller.request({ type: "FIT_VIEW", viewId: "training-models" }); h.flush();
+  assert.deepEqual(h.commands.map(item => item.type), ["FIT_VIEW"]);
+});
+
+test("32. Rapid A to B to C navigation executes only C", () => {
+  const h = cameraHarness({ viewId: "view-c" });
+  h.controller.request({ type: "FIT_VIEW", viewId: "view-a" });
+  h.controller.request({ type: "FIT_VIEW", viewId: "view-b" });
+  h.controller.request({ type: "FIT_VIEW", viewId: "view-c" }); h.flush();
+  assert.deepEqual(h.commands, [{ type: "FIT_VIEW", viewId: "view-c" }]);
+});
+
+test("33. Cross-view search performs one final Focus without Fit", () => {
+  const h = cameraHarness({ viewId: "training-models" });
+  h.controller.request({ type: "FOCUS_NODE", viewId: "training-models", nodeId: "training", source: "SEARCH" }); h.flush();
+  assert.deepEqual(h.commands.map(item => item.type), ["FOCUS_NODE"]);
+});
+
+test("34. A cross-view scenario starts with one Focus and no duplicate Fit", () => {
+  const h = cameraHarness({ viewId: "runtime-release" });
+  h.controller.request({ type: "FOCUS_NODE", viewId: "runtime-release", nodeId: "github", source: "SCENARIO_STEP" }); h.flush();
+  assert.deepEqual(h.commands.map(item => item.type), ["FOCUS_NODE"]);
+});
+
+test("35. Each scenario step performs exactly one camera command", () => {
+  const h = cameraHarness({ viewId: "system-overview" });
+  for (const nodeId of ["ctrader", "business-runtime", "decision"]) {
+    h.controller.request({ type: "FOCUS_NODE", viewId: "system-overview", nodeId, source: "SCENARIO_STEP" }); h.flush();
+  }
+  assert.deepEqual(h.commands.map(item => item.nodeId), ["ctrader", "business-runtime", "decision"]);
+});
+
+test("36. Inspector close waits for width transition then Fits once", () => {
+  const h = cameraHarness({ canvasTransitionComplete: false });
+  h.controller.request({ type: "REFIT_AFTER_INSPECTOR_CLOSE", viewId: "system-overview" }); h.flush();
+  assert.equal(h.commands.length, 0);
+  h.layout.width = 1580; h.layout.canvasTransitionComplete = true; h.controller.layoutChanged(); h.flush();
+  assert.deepEqual(h.commands.map(item => item.type), ["REFIT_AFTER_INSPECTOR_CLOSE"]);
+});
+
+test("37. Manual Fit performs exactly one Fit", () => {
+  const h = cameraHarness();
+  h.controller.request({ type: "MANUAL_FIT", viewId: "system-overview" }); h.flush();
+  assert.deepEqual(h.commands.map(item => item.type), ["MANUAL_FIT"]);
+});
+
+test("38. Cancelled stale frames cannot move the current view", () => {
+  const h = cameraHarness({ viewId: "view-b" });
+  h.controller.request({ type: "FIT_VIEW", viewId: "view-a" });
+  const staleFrames = [...h.frames.values()];
+  h.controller.request({ type: "FIT_VIEW", viewId: "view-b" });
+  staleFrames.forEach(callback => callback(0)); h.flush();
+  assert.deepEqual(h.commands, [{ type: "FIT_VIEW", viewId: "view-b" }]);
+});
+
+test("39. Mobile initialization exposes only one TB layout Fit", () => {
+  const h = cameraHarness({ viewId: "system-overview" });
+  h.controller.request({ type: "FIT_VIEW", viewId: "system-overview" }); h.flush();
+  assert.equal(buildArchitectureGraph(manifest, "system-overview", "TB").direction, "TB");
+  assert.deepEqual(h.commands.map(item => item.type), ["FIT_VIEW"]);
+  assert.match(viewSource, /mobile === null[\s\S]*Preparing architecture layout/);
+  assert.doesNotMatch(viewSource, /elementsSelectable fitView/);
+  assert.doesNotMatch(viewSource, /window\.setTimeout/);
 });

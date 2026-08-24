@@ -13,8 +13,7 @@ export type ArchitectureNode = {
   id: string; label: string; short_label: string; kind: ArchitectureNodeKind;
   runtime_state: ArchitectureState; implementation_state: ArchitecturePathState;
   owner: string; summary: string; purpose: string; architecture: Record<ArchitectureDimension, string>;
-  inputs: string[]; outputs: string[]; code_paths: string[]; test_paths: string[];
-  document_paths: string[]; tags: string[]; subsystem_view?: string;
+  code_paths: string[]; test_paths: string[]; document_paths: string[]; tags: string[]; subsystem_view?: string;
 };
 export type ArchitectureEdge = {
   id: string; from: string; to: string; label: string; kind: ArchitectureEdgeKind;
@@ -81,7 +80,7 @@ export function parseArchitectureManifest(value: unknown): ArchitectureManifest 
       && typeof node.purpose === "string" && node.purpose.trim().length > 0
       && typeof node.owner === "string" && node.owner.trim().length > 0
       && DIMENSIONS.every(key => typeof node.architecture?.[key] === "string")
-      && [node.inputs, node.outputs, node.code_paths, node.test_paths, node.document_paths, node.tags].every(isStringArray))) return null;
+      && [node.code_paths, node.test_paths, node.document_paths, node.tags].every(isStringArray))) return null;
   const nodeIds = new Set(candidate.nodes.map(node => node.id));
   if (nodeIds.size !== candidate.nodes.length) return null;
   if (!candidate.edges.every(edge => edge && typeof edge.id === "string" && typeof edge.label === "string"
