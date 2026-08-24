@@ -10,10 +10,12 @@ export function loadArchitectureManifest(root = resolve("..")) {
     throw new Error(`Architecture manifest exceeds ${MANIFEST_LIMIT} bytes`);
   }
   const manifest = JSON.parse(raw) as Record<string, unknown>;
-  if (manifest.schema !== "architecture-explorer-v1"
+  if (manifest.schema !== "architecture-explorer-v2"
       || !Array.isArray(manifest.nodes)
       || !Array.isArray(manifest.edges)
-      || !Array.isArray(manifest.views)) {
+      || !Array.isArray(manifest.views)
+      || !Array.isArray(manifest.scenarios)
+      || !Array.isArray(manifest.failure_impacts)) {
     throw new Error("Architecture manifest has an invalid build contract");
   }
   return manifest;

@@ -51,7 +51,7 @@ build -> prerendered public routes + immutable assets -> ASSETS binding
 request /api/* -> minimal Worker router -> selected route -> D1
 authenticated local sync -> ingest routes -> D1 public mirror
 admin request -> Access/session boundary -> private route -> D1
-build -> validated architecture/manifest.json -> lazy private Explorer chunk
+build -> validated architecture/manifest.json v2 -> lazy React Flow/Dagre Explorer chunk
 ```
 
 The public shell is not rendered through React SSR on every request. Snapshot
@@ -75,10 +75,13 @@ Static build snapshots are finite and carry explicit missing/unavailable
 provenance.
 
 The private `/admin/architecture` route consumes the bounded architecture
-manifest at build time. It has no API, D1 table, Worker handler, GitHub runtime
-request, Markdown parser, Windows process, or background owner. The complete
-manifest is referenced only by the lazy Explorer view so it does not join the
-public Live initial chunk. Source links bind to the immutable build SHA.
+manifest at build time. Its read-only React Flow renderer uses Dagre once per
+selected bounded view to position only that view's explicit nodes and edges.
+It has no API, D1 table, Worker handler, GitHub runtime request, Markdown
+parser, Windows process, or background owner. The manifest, graph libraries,
+and scoped graph CSS are referenced only by the lazy Explorer view, so they do
+not join the public Live initial dependency path. Source links bind to the
+immutable build SHA.
 
 ## 9. Incremental mechanisms
 
@@ -125,8 +128,10 @@ evidence.
 - `web/app/_views/*`: feature views.
 - `web/app/_lib/dashboard-resource.ts`: client resource loading/caching.
 - `web/app/_lib/admin-auth-session.ts`: admin session boundary.
-- `web/app/_lib/architecture-explorer.ts`: fail-closed manifest presentation,
-  search, dependency relationships, and exact-SHA source links.
+- `web/app/_lib/architecture-explorer.ts`: fail-closed manifest v2 parsing,
+  Dagre view transformation, path/failure selection, search, and exact-SHA links.
+- `web/app/_views/ArchitectureExplorerView.module.css`: private graph,
+  inspector, accessibility, and responsive presentation ownership.
 
 ## 14. Relevant tests
 

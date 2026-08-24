@@ -1,0 +1,121 @@
+.main {
+  --graph-ink: #17272b;
+  --graph-muted: #607278;
+  --graph-canvas: #edf2f1;
+  --graph-panel: #f8faf9;
+  --graph-line: #668087;
+  --graph-accent: #137d74;
+  --graph-amber: #b36b22;
+  width: min(1580px, 100%);
+  margin: 0 auto;
+  padding: 18px clamp(12px, 2vw, 30px) 42px;
+  color: var(--graph-ink);
+  font-family: var(--font-sans), system-ui, sans-serif;
+}
+
+.header { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 12px; }
+.header > div > span { color: var(--graph-accent); font-size: 11px; font-weight: 900; letter-spacing: .12em; }
+.header h1 { margin: 5px 0 4px; font: 800 clamp(30px, 4vw, 48px)/1 var(--font-sans), system-ui, sans-serif; letter-spacing: -.04em; }
+.header p { max-width: 720px; margin: 0; color: var(--graph-muted); font-size: 13px; line-height: 1.45; }
+.breadcrumbs { display: flex; min-height: 44px; align-items: center; justify-content: flex-end; gap: 8px; overflow: hidden; white-space: nowrap; }
+.breadcrumbs button { min-height: 44px; border: 0; border-radius: 9px; background: transparent; padding: 0 10px; color: var(--graph-muted); cursor: pointer; font-weight: 750; }
+.breadcrumbs button:hover, .breadcrumbs button:focus-visible { background: #dce7e5; outline: 2px solid var(--graph-accent); }
+.breadcrumbs strong, .breadcrumbs em { overflow: hidden; text-overflow: ellipsis; font-size: 12px; font-style: normal; }
+.breadcrumbs em { color: var(--graph-accent); }
+
+.toolbar { position: relative; z-index: 8; display: grid; grid-template-columns: minmax(250px, 1fr) repeat(3, minmax(140px, .32fr)) auto auto; gap: 8px; padding: 10px; border: 1px solid #c7d2d3; border-bottom: 0; border-radius: 14px 14px 0 0; background: rgba(248,250,249,.98); box-shadow: 0 8px 28px rgba(23,39,43,.07); }
+.toolbar label { position: relative; display: grid; gap: 4px; min-width: 0; color: var(--graph-muted); font-size: 10px; font-weight: 800; }
+.toolbar input, .toolbar select, .toolbar > button { width: 100%; min-height: 44px; border: 1px solid #b9c6c8; border-radius: 9px; background: white; padding: 0 11px; color: var(--graph-ink); font: 700 12px var(--font-sans), system-ui, sans-serif; }
+.toolbar input:focus, .toolbar select:focus, .toolbar > button:focus-visible { outline: 3px solid rgba(19,125,116,.28); border-color: var(--graph-accent); }
+.toolbar > button { align-self: end; cursor: pointer; }
+.toolbar > button:disabled { cursor: not-allowed; opacity: .45; }
+.failureButton[aria-pressed="true"] { border-color: #a23b32; background: #fff0ed; color: #8c3028; }
+.fitButton { color: var(--graph-accent) !important; }
+.searchResults { position: absolute; top: calc(100% + 4px); left: 0; z-index: 20; display: grid; width: min(520px, 85vw); max-height: 330px; overflow: auto; border: 1px solid #aebdbf; border-radius: 10px; background: white; box-shadow: 0 16px 42px rgba(23,39,43,.18); }
+.searchResults button { display: grid; min-height: 54px; border: 0; border-bottom: 1px solid #e0e7e7; background: transparent; padding: 8px 12px; text-align: left; cursor: pointer; }
+.searchResults button:hover, .searchResults button:focus-visible { background: #e8f2f0; outline: 2px solid var(--graph-accent); outline-offset: -2px; }
+.searchResults strong { font-size: 13px; }.searchResults span, .searchResults p { color: var(--graph-muted); font-size: 11px; }
+
+.guide { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; gap: 8px; min-height: 64px; padding: 8px 10px; border: 1px solid #95bcb7; border-bottom: 0; background: #e5f2f0; }
+.guide > div { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; min-width: 0; }
+.guide b { color: var(--graph-accent); font-size: 12px; }.guide span { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }.guide small { color: var(--graph-muted); }
+.guide button { min-width: 44px; min-height: 44px; border: 1px solid #a7bdbb; border-radius: 8px; background: white; padding: 0 10px; cursor: pointer; font-weight: 750; }
+.guide button:disabled { opacity: .4; cursor: not-allowed; }
+
+.stage { position: relative; min-height: 650px; border: 1px solid #c7d2d3; border-radius: 0 0 14px 14px; background: var(--graph-canvas); overflow: hidden; }
+.canvas { position: relative; width: 100%; height: 650px; transition: margin .22s ease, width .22s ease; }
+.withInspector .canvas { width: calc(100% - 380px); }
+.canvas :global(.react-flow) { background: linear-gradient(135deg, rgba(255,255,255,.64), rgba(229,237,236,.46)); }
+.canvas :global(.react-flow__attribution) { display: none; }
+.canvas :global(.react-flow__controls) { overflow: hidden; border: 1px solid #b9c7c8; border-radius: 10px; box-shadow: 0 7px 22px rgba(23,39,43,.12); }
+.canvas :global(.react-flow__controls-button) { width: 44px; height: 44px; border-color: #d9e1e1; background: rgba(255,255,255,.95); }
+.canvas :global(.react-flow__minimap) { overflow: hidden; border: 1px solid #b9c7c8; border-radius: 10px; background: rgba(255,255,255,.94); box-shadow: 0 7px 22px rgba(23,39,43,.1); }
+
+.graphNode { width: 100%; height: 100%; border: 1px solid #9cafb2; border-radius: 14px; background: rgba(251,253,252,.98); box-shadow: 0 7px 20px rgba(29,54,59,.11); transition: opacity .16s ease, border-color .16s ease, box-shadow .16s ease, transform .16s ease; }
+.graphNode button { display: grid; width: 100%; height: 100%; min-height: 44px; align-content: center; gap: 4px; border: 0; border-radius: inherit; background: transparent; padding: 10px 12px; color: var(--graph-ink); text-align: left; cursor: pointer; }
+.graphNode button:focus-visible { outline: 4px solid #1f9c91; outline-offset: 3px; }
+.nodeTopline { display: flex; align-items: center; gap: 5px; color: var(--graph-muted); font-size: 8px; font-weight: 900; letter-spacing: .07em; }
+.nodeTopline b { display: inline-grid; width: 20px; height: 20px; place-items: center; border-radius: 6px; background: #dbe9e7; color: var(--graph-accent); font-size: 12px; }
+.nodeTopline i { margin-left: auto; color: var(--graph-accent); font-size: 8px; font-style: normal; }
+.graphNode strong { overflow: hidden; font-size: 16px; line-height: 1.12; text-overflow: ellipsis; white-space: nowrap; }
+.graphNode small { overflow: hidden; color: var(--graph-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.graphNode em { position: absolute; right: 8px; bottom: -11px; z-index: 3; border-radius: 999px; padding: 4px 7px; background: #842c26; color: white; font-size: 8px; font-style: normal; font-weight: 900; letter-spacing: .05em; }
+.graphNode.failureCONTINUES em { background: #176c54; }
+.graphNode.kindSTORE { border-radius: 26px 26px 14px 14px; }.graphNode.kindEXTERNAL { border-style: dashed; background: rgba(248,251,250,.83); }.graphNode.kindTHREAD { border-radius: 28px; }.graphNode.kindCONTROL { border-color: #9e7f54; }.graphNode.kindWORKER { border-color: #618aa0; }
+.graphNode.selected { border: 2px solid var(--graph-accent); box-shadow: 0 0 0 5px rgba(19,125,116,.16), 0 10px 26px rgba(29,54,59,.18); transform: translateY(-1px); }
+.graphNode.highlighted { border-color: var(--graph-accent); box-shadow: 0 0 0 3px rgba(19,125,116,.12), 0 8px 24px rgba(29,54,59,.14); }
+.graphNode.dimmed { opacity: .24; }
+.graphNode.failureAFFECTED { border: 2px solid #a23b32; background: #fff0ed; }.graphNode.failureCONTINUES { border: 2px solid #1f775d; background: #eaf7f1; }
+.handle { width: 8px !important; height: 8px !important; border: 2px solid white !important; background: var(--graph-accent) !important; opacity: .85; }
+
+.graphEdge { fill: none; stroke: var(--graph-line); stroke-width: 1.5; transition: opacity .16s ease, stroke .16s ease, stroke-width .16s ease; }
+.edgeCRITICAL { stroke: var(--graph-accent); stroke-width: 2.4; }.edgeBACKGROUND { stroke-dasharray: 7 5; }.edgeOPTIONAL { stroke: #91a2a5; stroke-dasharray: 4 7; }.edgeCONTROL_PLANE { stroke: var(--graph-amber); stroke-dasharray: 2 5; }
+.edgeHighlighted, .edgeGuided { stroke: #0d9488; stroke-width: 3.7; opacity: 1; }.edgeDimmed { opacity: .12; }
+.edgeGuided { animation: guidedPulse 1.5s ease-in-out infinite; }
+.edgeLabel { position: absolute; z-index: 4; display: grid; pointer-events: all; border: 1px solid #c0cccd; border-radius: 6px; background: rgba(255,255,255,.96); padding: 3px 6px; color: #344b50; font-size: 9px; font-weight: 800; line-height: 1.1; white-space: nowrap; box-shadow: 0 2px 7px rgba(23,39,43,.08); }
+.edgeLabel small { color: var(--graph-muted); font-size: 7px; letter-spacing: .05em; }.edgeLabelDimmed { opacity: .16; }
+@keyframes guidedPulse { 50% { stroke-width: 5; filter: drop-shadow(0 0 3px rgba(13,148,136,.52)); } }
+
+.legend { position: absolute; left: 14px; bottom: 14px; z-index: 5; display: flex; flex-wrap: wrap; gap: 8px 12px; max-width: calc(100% - 190px); border: 1px solid #c4d0d0; border-radius: 9px; background: rgba(255,255,255,.91); padding: 8px 10px; box-shadow: 0 5px 18px rgba(23,39,43,.08); }
+.legend span { display: flex; align-items: center; gap: 5px; color: var(--graph-muted); font-size: 9px; font-weight: 800; }.legend i { display: block; width: 22px; border-top: 2px solid var(--graph-accent); }.legend .backgroundLine { border-style: dashed; border-color: var(--graph-line); }.legend .optionalLine { border-style: dashed; border-color: #9aabad; }.legend .controlLine { border-style: dotted; border-color: var(--graph-amber); }
+.keyboardHint { position: absolute; top: 12px; right: 14px; z-index: 4; border-radius: 7px; background: rgba(255,255,255,.86); padding: 5px 7px; color: var(--graph-muted); font-size: 9px; }
+
+.inspector { position: absolute; inset: 0 0 0 auto; z-index: 10; width: 380px; overflow: hidden; border-left: 1px solid #afbec0; background: rgba(249,251,250,.99); box-shadow: -12px 0 32px rgba(23,39,43,.13); }
+.inspector > header { display: flex; min-height: 100px; align-items: start; justify-content: space-between; gap: 12px; padding: 18px; border-bottom: 1px solid #d1dada; background: #183237; color: white; }
+.inspector header span { color: #79d7cf; font-size: 9px; font-weight: 900; letter-spacing: .08em; }.inspector header h2 { margin: 7px 0 0; font-size: 23px; line-height: 1.05; }
+.inspector > header button { width: 44px; height: 44px; flex: 0 0 auto; border: 1px solid rgba(255,255,255,.35); border-radius: 9px; background: transparent; color: white; cursor: pointer; font-size: 25px; }
+.inspectorBody { height: calc(100% - 100px); overflow: auto; padding: 14px; }
+.beginnerDetails { display: grid; gap: 0; margin: 0; }.beginnerDetails > div { padding: 10px 0; border-bottom: 1px solid #dbe3e3; }.beginnerDetails dt { color: var(--graph-accent); font-size: 10px; font-weight: 900; }.beginnerDetails dd { margin: 4px 0 0; font-size: 12px; font-weight: 650; line-height: 1.45; }
+.drillButton { width: 100%; min-height: 44px; margin: 12px 0; border: 1px solid var(--graph-accent); border-radius: 9px; background: #e6f3f1; color: var(--graph-accent); cursor: pointer; font-weight: 850; }
+.dimensions details { border-bottom: 1px solid #dbe3e3; }.dimensions summary { display: flex; min-height: 44px; align-items: center; cursor: pointer; color: #355057; font-size: 11px; font-weight: 850; }.dimensions p { margin: 0 0 12px; font-size: 12px; line-height: 1.5; }
+.sourcePanel { margin-top: 14px; }.sourcePanel nav { display: grid; grid-template-columns: repeat(3, 1fr); }.sourcePanel nav button { min-height: 44px; border: 1px solid #bdc9ca; border-right: 0; background: white; cursor: pointer; font-size: 10px; font-weight: 900; }.sourcePanel nav button:last-child { border-right: 1px solid #bdc9ca; }.sourcePanel nav button[aria-selected="true"] { background: #183237; color: white; }
+.sourceLinks { display: grid; gap: 4px; margin: 8px 0 0; padding: 0; list-style: none; }.sourceLinks a, .sourceLinks li > span { display: flex; min-height: 44px; align-items: center; overflow-wrap: anywhere; color: var(--graph-ink); font-size: 10px; line-height: 1.3; }.sourceLinks a:hover, .sourceLinks a:focus-visible { background: #e1efed; outline: 2px solid var(--graph-accent); }.emptyCopy { color: var(--graph-muted); }
+
+.failureSummary { display: grid; grid-template-columns: auto 1fr 1fr; gap: 16px; margin-top: 12px; border: 1px solid #c7d2d3; border-radius: 12px; background: white; padding: 14px; }.failureSummary h2 { margin: 0; font-size: 15px; }.failureSummary h3 { margin: 0 0 6px; font-size: 10px; letter-spacing: .08em; }.failureSummary div:first-of-type h3 { color: #9a352e; }.failureSummary div:last-child h3 { color: #176c54; }.failureSummary p { margin: 3px 0; font-size: 11px; }
+.textFallback { margin-top: 12px; border: 1px solid #c7d2d3; border-radius: 10px; background: white; }.textFallback summary { display: flex; min-height: 44px; align-items: center; padding: 0 14px; cursor: pointer; font-size: 11px; font-weight: 850; }.textFallback > div { padding: 0 14px 12px; }.textFallback p { display: grid; grid-template-columns: minmax(100px, .35fr) minmax(160px, 1fr) minmax(100px, .35fr); gap: 10px; margin: 0; padding: 7px 0; border-top: 1px solid #e0e6e6; font-size: 10px; }.textFallback span { color: var(--graph-muted); }
+.srOnly { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+.unavailable { display: grid; min-height: 70vh; align-content: start; padding-top: 70px; }.unavailable > span { color: #9a352e; font-size: 10px; font-weight: 900; letter-spacing: .12em; }.unavailable h1 { margin: 8px 0; font-size: 42px; }.unavailable p { color: var(--graph-muted); }
+
+@media (max-width: 1050px) {
+  .toolbar { grid-template-columns: minmax(230px, 1fr) repeat(3, minmax(120px, .35fr)); }
+  .toolbar > button { grid-row: 2; }.withInspector .canvas { width: calc(100% - 340px); }.inspector { width: 340px; }
+  .keyboardHint { display: none; }
+}
+
+@media (max-width: 720px) {
+  .main { padding: 10px 8px 28px; }
+  .header { display: block; margin-bottom: 8px; }.header h1 { font-size: 32px; }.header p { font-size: 12px; }
+  .breadcrumbs { justify-content: flex-start; margin-top: 8px; }
+  .toolbar { grid-template-columns: 1fr 1fr; border-radius: 12px 12px 0 0; }.search { grid-column: 1 / -1; }.toolbar label { font-size: 9px; }.toolbar input, .toolbar select, .toolbar > button { font-size: 11px; }
+  .searchResults { width: calc(100vw - 36px); }
+  .guide { grid-template-columns: 1fr auto auto; }.guide > div { grid-column: 1 / -1; grid-template-columns: 1fr auto; }.guide > div span { grid-column: 1 / -1; white-space: normal; }.guide > button:last-child { grid-column: 3; grid-row: 2; }
+  .stage { min-height: 590px; }.canvas, .withInspector .canvas { width: 100%; height: 590px; }
+  .canvas :global(.react-flow__controls) { bottom: 58px; }.legend { right: 10px; bottom: 10px; left: 10px; max-width: none; justify-content: center; }.keyboardHint { display: none; }
+  .graphNode strong { font-size: 15px; }.edgeLabel { font-size: 8px; }.edgeLabel small { display: none; }
+  .inspector { inset: auto 0 0; width: 100%; height: 58%; border-top: 1px solid #9eafb1; border-left: 0; border-radius: 18px 18px 0 0; box-shadow: 0 -14px 38px rgba(23,39,43,.2); }.inspector > header { min-height: 88px; padding: 14px 16px; }.inspectorBody { height: calc(100% - 88px); }.inspector header h2 { font-size: 20px; }
+  .failureSummary { grid-template-columns: 1fr; }.textFallback p { grid-template-columns: 1fr; gap: 3px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas, .graphNode, .graphEdge { transition: none; }.edgeGuided { animation: none; }
+}

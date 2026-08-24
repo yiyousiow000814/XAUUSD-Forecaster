@@ -1,58 +1,91 @@
 # Private Architecture Explorer Audit — 2026-08-24
 
-## Boundary
+## Outcome
 
-The Explorer is a private, static Admin presentation. Its only architecture
-source is `architecture/manifest.json`.
+The first Explorer renderer was rejected because it presented a two-column
+card catalog and permanent detail wall rather than an architecture graph. The
+bounded manifest, build-time injection, private route, security boundary, and
+exact-SHA source links were retained. The renderer is now a read-only React
+Flow node-link graph with Dagre layout and visible directed connectors.
+
+## Architecture gate
 
 ```text
-architecture/manifest.json
-  -> bounded build-time loader
-  -> Vite replacement used only by the lazy view
-  -> /admin/architecture prerender plus ArchitectureExplorerView chunk
+Owner: Architecture manifest and private Explorer renderer
+Authoritative state/store: Git-tracked architecture/manifest.json
+Execution boundary: Bounded build-time loader to the lazy Admin React Flow/Dagre client chunk
+Critical or optional: Optional private static presentation
+Maximum work per operation: One manifest no larger than 65,536 bytes; only the selected view renders
+Incremental cursor/revision/checkpoint: Manifest schema v2 and immutable build SHA
+Failure domain: Manifest validation and the private Explorer chunk only
+Last-good/recovery behavior: Invalid manifests fail the build; revert the static change with no data migration
+Architecture documents affected: architecture/README.md, WEB_AND_CLOUDFLARE.md, CODEBASE_MAP.md, this audit
 ```
 
 There is no Architecture API, D1 table, Worker route, GitHub runtime request,
 Markdown parser, Windows process, background thread, or production mutation.
 
-## Manifest inventory
+## Manifest v2 inventory
 
-- Schema: `architecture-explorer-v1`
+- Schema: `architecture-explorer-v2`
 - Views: 11
-- Nodes: 24
-- Edges: 28
-- Serialized bytes: 28,446 of the fixed 65,536-byte limit
-- Runtime and implementation states are separate fields.
-- Detailed Markdown contracts remain authoritative.
+- Nodes: 28
+- Edges: 38
+- Guided scenarios: 4
+- Explicit failure-impact definitions: 2
+- Serialized bytes: 50,891 of the fixed 65,536-byte limit
+- Edge IDs, endpoints, labels, kinds, criticalities, and descriptions are explicit.
+- View edge membership, visible endpoints, continuous primary paths, lane
+  membership, scenario continuity, and failure references fail closed.
+- Coordinates are not stored; Dagre calculates finite positions per selected view.
 
-## Bundle evidence
+## Interaction and presentation evidence
 
-| Artifact | Repaired #301 parent | Explorer working tree | Delta |
-|---|---:|---:|---:|
-| `DashboardApp` chunk | 28,696 bytes / 10,157 gzip | 29,117 bytes / 10,250 gzip | +421 / +93 gzip |
-| shared `index` chunk | 217,233 bytes / 58,792 gzip | 217,752 bytes / 58,836 gzip | +519 / +44 gzip |
-| lazy Explorer chunk | absent | 34,827 bytes / 9,911 gzip | lazy only |
+- Initial Overview has no selected node or inspector and renders 11 nodes with
+  11 visible directed edges and arrow markers.
+- Hover highlights direct neighbors. Selection highlights the transitive
+  upstream/downstream path, dims unrelated nodes, and opens a closable inspector.
+- Inspector starts with beginner questions, then collapsed architecture
+  dimensions and compact Code/Test/Docs tabs.
+- Node-owned subsystem links and breadcrumb history replace the generic drill action.
+- Search selects and centers a node in its relevant graph; it never creates a card grid.
+- Manifest-owned scenarios cover one Decision, Training-to-Decision,
+  Cloudflare unavailable, and the exact-revision release path.
+- Failure mode uses explicit `AFFECTED` and `CONTINUES` membership. It does not
+  classify every non-neighbor as safe.
+- Keyboard nodes support Enter, Space, arrows, Escape, visible focus, and an
+  `aria-live` selected-path announcement. The relationship text equivalent is
+  secondary and collapsible. Reduced motion disables guided edge animation.
 
-The public initial shared chunks increase by 940 raw bytes and 137 gzip bytes
-for route/navigation wiring. The 28,446-byte manifest exists only in the lazy
-Explorer chunk and does not inflate the public Live initial payload.
+## Bundle boundary
+
+Measured from the production client build with maximum gzip compression:
+
+| Artifact | Raw bytes | Gzip bytes | Boundary |
+|---|---:|---:|---|
+| Lazy Explorer JS | 294,225 | 89,990 | Private lazy chunk only |
+| Lazy Explorer CSS | 30,690 | 6,119 | Private lazy chunk only |
+| Public `DashboardApp` JS | 29,177 | 10,110 | Public initial path |
+| Public shared `index` JS | 217,752 | 58,249 | Public initial path |
+| Public initial CSS | 199,919 | 34,359 | Public initial path |
+
+The public JS raw sizes are unchanged from the rejected #304 build boundary;
+the graph packages occur only in `ArchitectureExplorerView-*.js`. The scoped
+Explorer stylesheet replaced and removed the previous feature block from
+`globals.css`, so graph CSS is no longer in the public stylesheet. The public
+initial gzip regression is therefore below the 2 KiB ceiling.
 
 ## Local responsive QA
 
-| Viewport | Horizontal overflow | Visible targets under 44px | Layout |
-|---|---|---|---|
-| 1440x900 | none | none | Three-pane rail, architecture lane, and detail inspector |
-| 390x844 | none | none | View selector, one-column cards, textual dependencies, details below |
-| 360x800 | none | none | View selector, one-column cards, textual dependencies, details below |
+| Viewport | Graph | Inspector | Overflow | Targets |
+|---|---|---|---|---|
+| 1440x900 | LR Overview, 11 nodes / 11 edges, arrows, labels, MiniMap | Closed initially; 380px drawer after selection | none | at least 44px |
+| 390x844 | TB Dagre graph, pan/pinch/Fit, no MiniMap | 58% bottom sheet | none | at least 44px |
+| 360x800 | TB Dagre graph and nine-step Decision guide | bottom sheet | none | zero visible targets below 44px |
 
-Verified first Overview, view drill-down, keyboard node selection, owner/path/
-test/tag search, runtime-state filtering, breadcrumb updates, upstream,
-downstream, unaffected-components text, and exact-SHA GitHub links. The mobile
-flow selected the Campaign view, filtered `PENDING`, selected the Explorer,
-scrolled to details, and retained a readable non-miniaturized layout.
-
-The Explorer made no Architecture API request and no third-party request.
-Local status/session probes cannot succeed without Cloudflare bindings; deployed
-Preview request verification remains a separate exact-head gate. Browser console
-errors/warnings were empty, the temporary viewport override was reset, and the
-final task-created browser session count was zero.
+Browser checks exercised Decision selection/dimming, inspector close,
+subsystem membership, guided next-step navigation, Training nodes, explicit
+Cloudflare failure state, relationship fallback, and responsive direction.
+Local status/session requests correctly fail without Cloudflare bindings and
+are not Explorer requests. Exact deployed Preview evidence is recorded in the
+pull request after the immutable branch build completes.

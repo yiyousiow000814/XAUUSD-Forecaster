@@ -49,6 +49,45 @@ def test_bad_edge_endpoint_fails() -> None:
     assert any("bad edge endpoint" in error for error in errors_for(manifest))
 
 
+def test_duplicate_edge_ids_and_edge_enums_fail() -> None:
+    manifest, _ = manifest_copy()
+    manifest["edges"].append(copy.deepcopy(manifest["edges"][0]))
+    manifest["edges"][0]["kind"] = "CALL"
+    manifest["edges"][1]["criticality"] = "EVERYTHING"
+    errors = errors_for(manifest)
+    assert "duplicate edge id" in errors
+    assert any("invalid edge kind" in error for error in errors)
+    assert any("invalid edge criticality" in error for error in errors)
+
+
+def test_view_edges_stay_inside_visible_nodes_and_no_node_is_orphaned() -> None:
+    manifest, _ = manifest_copy()
+    view = manifest["views"][0]
+    view["node_ids"].remove("ctrader")
+    errors = errors_for(manifest)
+    assert any("leaves visible view nodes" in error for error in errors)
+    assert any("lane membership" in error for error in errors)
+
+
+def test_primary_path_and_lane_membership_are_validated() -> None:
+    manifest, _ = manifest_copy()
+    view = manifest["views"][0]
+    view["primary_path"][1], view["primary_path"][2] = view["primary_path"][2], view["primary_path"][1]
+    view["lanes"][0]["node_ids"].append(view["lanes"][1]["node_ids"][0])
+    errors = errors_for(manifest)
+    assert any("primary path" in error for error in errors)
+    assert any("lane membership" in error for error in errors)
+
+
+def test_scenario_continuity_and_failure_references_fail_closed() -> None:
+    manifest, _ = manifest_copy()
+    manifest["scenarios"][0]["edge_ids"][0] = manifest["scenarios"][0]["edge_ids"][1]
+    manifest["failure_impacts"][0]["continues"][0]["node_id"] = "missing-node"
+    errors = errors_for(manifest)
+    assert any("follow-decision" in error and "continuous" in error for error in errors)
+    assert any("failure impact references missing node" in error for error in errors)
+
+
 def test_six_architecture_dimensions_are_required() -> None:
     manifest, _ = manifest_copy()
     del manifest["nodes"][0]["architecture"]["bounded_work"]
