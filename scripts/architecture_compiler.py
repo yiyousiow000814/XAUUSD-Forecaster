@@ -178,7 +178,11 @@ def require_cardinality(facts: list[dict[str, Any]], selector: dict[str, Any], m
 def validate_writer_authority(facts: list[dict[str, Any]], allowed_writers: dict[str, set[str]]) -> None:
     by_table: dict[str, set[str]] = {}
     for fact in facts:
-        if fact.get("type") in {"sql_operation", "d1_sql"} and fact.get("operation") in {"WRITE", "DELETE"} and fact.get("table") not in {"unresolved", "UNRESOLVED"}:
+        path = str(fact.get("path", ""))
+        is_test_evidence = "tests" in Path(path).parts
+        if (not is_test_evidence and fact.get("type") in {"sql_operation", "d1_sql"}
+                and fact.get("operation") in {"WRITE", "DELETE"}
+                and fact.get("table") not in {"unresolved", "UNRESOLVED"}):
             by_table.setdefault(str(fact["table"]), set()).add(str(fact["path"]))
     for table, writers in by_table.items():
         unexpected = writers - allowed_writers.get(table, set())

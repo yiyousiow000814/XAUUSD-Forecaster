@@ -106,6 +106,18 @@ def test_second_undeclared_writer_is_rejected(tmp_path: Path) -> None:
         validate_writer_authority(facts, {"evidence": {"scripts/a.py"}})
 
 
+def test_test_fixture_sql_is_evidence_not_writer_authority(tmp_path: Path) -> None:
+    _write(tmp_path, "scripts/a.py", "db.execute('INSERT INTO evidence(id) VALUES (1)')\n")
+    facts = extract_python(tmp_path)
+    facts.append({
+        "type": "d1_sql",
+        "operation": "WRITE",
+        "table": "evidence",
+        "path": "web/tests/reverse-compatibility.test.mjs",
+    })
+    validate_writer_authority(facts, {"evidence": {"scripts/a.py"}})
+
+
 def test_binding_cardinality_rejects_zero_and_excessive_matches() -> None:
     facts = [
         {"type": "python_module", "module": "pkg.one", "path": "pkg/one.py"},
