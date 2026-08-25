@@ -188,6 +188,47 @@ test("bounded cleanup retains the active generation", async () => {
   ).get(oldGeneration).count, 0);
 });
 
+test("cleanup retains fresh staging and prepare repairs its first receipt gap", async () => {
+  const db = database();
+  const activeGeneration = id("a");
+  const stagingGeneration = id("b");
+  const rows = [item("1", 1), item("2", 2), item("3", 3)];
+  await prepareNewsEvidenceSnapshot(db, activeGeneration, 1);
+  await stageNewsEvidenceBatch(db, activeGeneration, 0, [rows[0]]);
+  await activateNewsEvidenceSnapshot(db, activeGeneration, 1);
+  await prepareNewsEvidenceSnapshot(db, stagingGeneration, rows.length);
+  await stageNewsEvidenceBatch(db, stagingGeneration, 0, [rows[0]]);
+  await stageNewsEvidenceBatch(db, stagingGeneration, 1, [rows[1]]);
+  await stageNewsEvidenceBatch(db, stagingGeneration, 2, [rows[2]]);
+  db.database.exec(
+    "UPDATE news_evidence_records SET received_at='2020-01-01T00:00:00.000Z' "
+    + `WHERE snapshot_id='${stagingGeneration}'`,
+  );
+  db.database.exec(
+    "UPDATE news_evidence_batches SET updated_at='2020-01-01T00:00:00.000Z' "
+    + `WHERE snapshot_id='${stagingGeneration}'`,
+  );
+
+  const cleanup = await cleanupNewsEvidenceSnapshots(db, activeGeneration);
+  assert.equal(cleanup.deleted_records, 0);
+  assert.equal(cleanup.deleted_batches, 0);
+  db.database.exec(
+    `DELETE FROM news_evidence_records WHERE snapshot_id='${stagingGeneration}' AND ordinal=1`,
+  );
+  const repaired = await prepareNewsEvidenceSnapshot(db, stagingGeneration, rows.length);
+  assert.deepEqual(repaired, {
+    status: "OK", active: false, next_offset: 1, repaired_from: 3,
+  });
+  assert.equal(db.database.prepare(
+    "SELECT count(*) AS count FROM news_evidence_records WHERE snapshot_id=?",
+  ).get(stagingGeneration).count, 1);
+  await stageNewsEvidenceBatch(db, stagingGeneration, 1, rows.slice(1));
+  await activateNewsEvidenceSnapshot(db, stagingGeneration, rows.length);
+  assert.equal((await readNewsEvidencePage(db, {
+    mode: "all", rawCursor: null, page: 1, pageSize: 20,
+  })).items.length, rows.length);
+});
+
 test("cleanup feedback remains pending until bounded debt is drained", async () => {
   const db = database();
   const oldGeneration = id("c");

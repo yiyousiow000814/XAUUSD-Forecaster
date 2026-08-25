@@ -229,6 +229,45 @@ export async function prepareNewsEvidenceSnapshot(
       "NEWS_EVIDENCE_MANIFEST_MISMATCH",
     );
   }
+  let repairedOffset: number | null = null;
+  if (staging) {
+    const batches = await binding.prepare(
+      `SELECT b.batch_offset,b.item_count,
+              (SELECT count(*) FROM news_evidence_records r
+                WHERE r.snapshot_id=b.snapshot_id
+                  AND r.ordinal>=b.batch_offset
+                  AND r.ordinal<b.batch_offset+b.item_count) AS record_count
+         FROM news_evidence_batches b
+        WHERE b.snapshot_id=? ORDER BY b.batch_offset`,
+    ).bind(snapshotId).all<{
+      batch_offset: number; item_count: number; record_count: number;
+    }>();
+    let contiguous = 0;
+    for (const batch of batches.results) {
+      if (
+        Number(batch.batch_offset) !== contiguous
+        || Number(batch.item_count) < 1
+        || Number(batch.record_count) !== Number(batch.item_count)
+      ) break;
+      contiguous += Number(batch.item_count);
+    }
+    if (contiguous !== Number(staging.next_offset)) {
+      const now = new Date().toISOString();
+      await binding.batch([
+        binding.prepare(
+          "DELETE FROM news_evidence_records WHERE snapshot_id=? AND ordinal>=?",
+        ).bind(snapshotId, contiguous),
+        binding.prepare(
+          "DELETE FROM news_evidence_batches WHERE snapshot_id=? AND batch_offset>=?",
+        ).bind(snapshotId, contiguous),
+        binding.prepare(
+          `UPDATE news_evidence_staging SET next_offset=?,updated_at=?
+            WHERE snapshot_id=?`,
+        ).bind(contiguous, now, snapshotId),
+      ]);
+      repairedOffset = contiguous;
+    }
+  }
   if (!staging) {
     await binding.prepare(
       `INSERT INTO news_evidence_staging
@@ -237,7 +276,8 @@ export async function prepareNewsEvidenceSnapshot(
   }
   return {
     status: "OK", active: false,
-    next_offset: Number(staging?.next_offset ?? 0),
+    next_offset: repairedOffset ?? Number(staging?.next_offset ?? 0),
+    ...(repairedOffset === null ? {} : { repaired_from: Number(staging?.next_offset) }),
   };
 }
 
@@ -423,15 +463,21 @@ export async function cleanupNewsEvidenceSnapshots(
     binding.prepare(
       `DELETE FROM news_evidence_records WHERE rowid IN (
          SELECT rowid FROM news_evidence_records
-         WHERE snapshot_id<>? AND received_at<? LIMIT 200
+         WHERE snapshot_id<>? AND received_at<?
+           AND snapshot_id NOT IN (
+             SELECT snapshot_id FROM news_evidence_staging WHERE updated_at>=?
+           ) LIMIT 200
        )`,
-    ).bind(activeSnapshotId, readerCutoff),
+    ).bind(activeSnapshotId, readerCutoff, stagingCutoff),
     binding.prepare(
       `DELETE FROM news_evidence_batches WHERE rowid IN (
          SELECT rowid FROM news_evidence_batches
-         WHERE snapshot_id<>? AND updated_at<? LIMIT 20
+         WHERE snapshot_id<>? AND updated_at<?
+           AND snapshot_id NOT IN (
+             SELECT snapshot_id FROM news_evidence_staging WHERE updated_at>=?
+           ) LIMIT 20
        )`,
-    ).bind(activeSnapshotId, readerCutoff),
+    ).bind(activeSnapshotId, readerCutoff, stagingCutoff),
     binding.prepare(
       `DELETE FROM news_evidence_staging WHERE snapshot_id IN (
          SELECT snapshot_id FROM news_evidence_staging
@@ -442,14 +488,21 @@ export async function cleanupNewsEvidenceSnapshots(
   const pending = await binding.prepare(
     `SELECT (
        EXISTS(SELECT 1 FROM news_evidence_records
-         WHERE snapshot_id<>? AND received_at<? LIMIT 1)
+         WHERE snapshot_id<>? AND received_at<?
+           AND snapshot_id NOT IN (
+             SELECT snapshot_id FROM news_evidence_staging WHERE updated_at>=?
+           ) LIMIT 1)
        OR EXISTS(SELECT 1 FROM news_evidence_batches
-         WHERE snapshot_id<>? AND updated_at<? LIMIT 1)
+         WHERE snapshot_id<>? AND updated_at<?
+           AND snapshot_id NOT IN (
+             SELECT snapshot_id FROM news_evidence_staging WHERE updated_at>=?
+           ) LIMIT 1)
        OR EXISTS(SELECT 1 FROM news_evidence_staging
          WHERE snapshot_id<>? AND updated_at<? LIMIT 1)
      ) AS cleanup_pending`,
   ).bind(
-    activeSnapshotId, readerCutoff, activeSnapshotId, readerCutoff,
+    activeSnapshotId, readerCutoff, stagingCutoff,
+    activeSnapshotId, readerCutoff, stagingCutoff,
     activeSnapshotId, stagingCutoff,
   )
     .first<{ cleanup_pending: number }>();
