@@ -17,6 +17,7 @@ from scripts.architecture_compiler import (
     extract_typescript,
     generated_differences,
     require_cardinality,
+    source_files,
     validate_writer_authority,
     write_artifacts,
 )
@@ -38,6 +39,13 @@ def test_source_digest_is_independent_of_checkout_line_endings(tmp_path: Path) -
     path.write_bytes(b"first\r\nsecond\r\n")
     crlf = calculate_digest(tmp_path, [path])
     assert lf == crlf
+
+
+def test_source_inventory_excludes_local_hidden_workspaces(tmp_path: Path) -> None:
+    _write(tmp_path, "scripts/owner.py", "OWNER = 'repository'\n")
+    _write(tmp_path, ".local/operator_probe.py", "TOKEN = 'local-only'\n")
+    _write(tmp_path, ".codex/scratch.py", "VALUE = 'scratch'\n")
+    assert [path.relative_to(tmp_path).as_posix() for path in source_files(tmp_path)] == ["scripts/owner.py"]
 
 
 def test_python_module_inventory_follows_add_and_delete(tmp_path: Path) -> None:
@@ -128,6 +136,12 @@ def test_generated_artifacts_are_byte_deterministic_and_source_bound() -> None:
     if os.name == "nt":
         assert windows["facts"]
         assert all(fact["certainty"] == "EXACT" for fact in windows["facts"])
+
+
+def test_repository_label_is_declared_not_checkout_directory_name(tmp_path: Path) -> None:
+    code_index = json.loads(build_artifacts(ROOT)["code-index.json"])
+    assert code_index["hierarchy"]["label"] == "XAUUSD-Forecaster"
+    assert code_index["hierarchy"]["label"] != tmp_path.name
 
 
 def test_generated_check_detects_manual_edit(tmp_path: Path) -> None:

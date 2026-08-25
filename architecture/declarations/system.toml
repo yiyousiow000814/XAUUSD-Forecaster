@@ -1,6 +1,9 @@
 schema = "architecture-source-v1"
 explorer_declaration = "architecture/declarations/explorer.json"
 
+[repository]
+name = "XAUUSD-Forecaster"
+
 [generation]
 explorer_manifest = "architecture/generated/explorer-manifest.json"
 code_index = "architecture/generated/code-index.json"
