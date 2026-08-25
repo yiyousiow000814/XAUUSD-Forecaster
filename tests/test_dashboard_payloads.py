@@ -72,15 +72,15 @@ def test_audit_detail_projections_bound_items_and_nested_growth() -> None:
     assert len(decisions["recent_decisions"]) == 20
     assert all("features" not in row for row in decisions["recent_decisions"])
     assert all(len(row["predictions"]) == 8 for row in decisions["recent_decisions"])
-    assert len(stories["storylines"]) == 20
-    assert all(len(row["timeline"]) == 8 for row in stories["storylines"])
-    assert all(row["timeline"][:4] == [0, 1, 2, 3] for row in stories["storylines"])
-    assert all(row["timeline"][-4:] == [96, 97, 98, 99] for row in stories["storylines"])
+    assert len(stories["storylines"]) == 12
+    assert all(len(row["timeline"]) == 6 for row in stories["storylines"])
+    assert all(row["timeline"][:3] == [0, 1, 2] for row in stories["storylines"])
+    assert all(row["timeline"][-3:] == [97, 98, 99] for row in stories["storylines"])
     assert all(len(row["commentary"]) == 4 for row in stories["storylines"])
-    assert len(stories["story_event_candidates"]) == 50
-    assert len(stories["unassigned_story_events"]) == 50
-    assert len(stories["theme_streams"]) == 12
-    assert len(stories["market_reaction_streams"]) == 12
+    assert len(stories["story_event_candidates"]) == 12
+    assert len(stories["unassigned_story_events"]) == 12
+    assert len(stories["theme_streams"]) == 8
+    assert len(stories["market_reaction_streams"]) == 8
 
 
 @pytest.mark.parametrize(
