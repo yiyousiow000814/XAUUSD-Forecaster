@@ -170,9 +170,27 @@ export async function POST(request: Request) {
     await requireD1Capabilities(binding, ["news_projection_generation"]);
     if (isReleaseValidationContext(validation)) {
       const checked = await binding.prepare(
-        `WITH root(doc) AS (SELECT ? WHERE json_valid(?)),
+        `WITH input(doc) AS (SELECT ?),
+              root(doc) AS (SELECT doc FROM input WHERE json_valid(doc)),
               batch(payload) AS (
                 SELECT value FROM root,json_each(json_extract(doc,'$.items'))
+              ),
+              batch_checks AS (
+                SELECT count(*) item_total,
+                       coalesce(sum(CASE WHEN
+                         json_type(payload)='object'
+                         AND json_type(payload,'$.detail_key')='text'
+                         AND length(json_extract(payload,'$.detail_key'))=64
+                         AND json_extract(payload,'$.detail_key') NOT GLOB '*[^0-9a-f]*'
+                         AND json_type(payload,'$.category')='text'
+                         AND json_type(payload,'$.collector_first_seen_time')='text'
+                         AND json_type(payload,'$.cluster_id')='text'
+                         AND json_type(payload,'$.mirror_contract')='text'
+                         THEN 1 ELSE 0 END),0) item_valid,
+                       coalesce(sum(CASE WHEN
+                         ${NEWS_REVIEW_STATE_INVARIANT_SQL}
+                         THEN 1 ELSE 0 END),0) review_valid
+                  FROM batch
               )
          SELECT json_extract(doc,'$.action') action,
                 json_extract(doc,'$.generation_id') generation_id,
@@ -186,20 +204,9 @@ export async function POST(request: Request) {
                 json_extract(doc,'$.manifest.source_digest') source_digest,
                 json_extract(doc,'$.manifest.expected_receipt_digest') expected_receipt_digest,
                 json_extract(doc,'$.offset') batch_offset,
-                (SELECT count(*) FROM batch) item_total,
-                (SELECT count(*) FROM batch WHERE
-                  json_type(payload)='object'
-                  AND json_type(payload,'$.detail_key')='text'
-                  AND length(json_extract(payload,'$.detail_key'))=64
-                  AND json_extract(payload,'$.detail_key') NOT GLOB '*[^0-9a-f]*'
-                  AND json_type(payload,'$.category')='text'
-                  AND json_type(payload,'$.collector_first_seen_time')='text'
-                  AND json_type(payload,'$.cluster_id')='text'
-                  AND json_type(payload,'$.mirror_contract')='text') item_valid,
-                (SELECT count(*) FROM batch WHERE
-                  ${NEWS_REVIEW_STATE_INVARIANT_SQL}) review_valid
-           FROM root`,
-      ).bind(bounded.serialized, bounded.serialized).first<Parameters<typeof releaseIndexValidation>[0]>();
+                item_total,item_valid,review_valid
+           FROM root CROSS JOIN batch_checks`,
+      ).bind(bounded.serialized).first<Parameters<typeof releaseIndexValidation>[0]>();
       const work = releaseIndexValidation(checked);
       if (!work) {
         return NextResponse.json({ error: "invalid news projection payload" }, { status: 400 });

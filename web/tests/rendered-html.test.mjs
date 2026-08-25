@@ -3157,6 +3157,9 @@ test("production-shaped release validation reaches work before every mutation", 
     ].filter(index => index >= 0));
     assert.ok(auth >= 0 && bodyRead > auth && releaseWork > bodyRead, path);
     assert.ok(response > bodyRead && firstMutation > response, path);
+    assert.match(source, /batch_checks AS \([\s\S]*FROM batch[\s\S]*CROSS JOIN batch_checks/);
+    assert.equal(source.match(/json_each\(/g)?.length, 1, path);
+    assert.match(source, /\.bind\(bounded\.serialized\)\.first/);
   }
 });
 
