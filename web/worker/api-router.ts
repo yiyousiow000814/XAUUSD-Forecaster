@@ -6,9 +6,9 @@ import {
   AUDIT_SUMMARY_SNAPSHOT_BYTES,
   MAX_DASHBOARD_SNAPSHOT_BYTES,
   publicStatusJsonExpression,
-  readBoundedBody,
-  writeDashboardStatusSnapshots,
-  writeSerializedDashboardSnapshot,
+  readBoundedBodyBytes,
+  writeDashboardSnapshotBytes,
+  writeDashboardStatusSnapshotBytes,
 } from "../app/api/_shared/dashboard-snapshot";
 import {
   d1CapabilityFailure,
@@ -19,7 +19,6 @@ import {
   beginReleaseValidation,
   isReleaseValidationContext,
   releaseValidationResponse,
-  validateJsonWithD1,
 } from "../app/api/_shared/release-validation";
 
 declare const __AURUM_DEPLOYMENT__: {
@@ -305,7 +304,7 @@ async function snapshotWrite(
       failureStage: "release_validation_identity",
     });
   }
-  const body = await readBoundedBody(request, maxBytes);
+  const body = await readBoundedBodyBytes(request, maxBytes);
   if (body.status === "too_large") {
     const response = json({ error: "payload too large" }, 413);
     return result(response.response, resource, {
@@ -313,11 +312,13 @@ async function snapshotWrite(
       failureStage: "request_bound",
     });
   }
-  const writeResult = isReleaseValidationContext(validation)
-    ? await validateJsonWithD1(env.DB, body.serialized) ? "validated" : "invalid"
-    : id === null
-      ? await writeDashboardStatusSnapshots(body.serialized, env.DB)
-      : await writeSerializedDashboardSnapshot(body.serialized, env.DB, id);
+  const writeResult = id === null
+    ? await writeDashboardStatusSnapshotBytes(body.bytes, env.DB, {
+      dryRun: isReleaseValidationContext(validation),
+    })
+    : await writeDashboardSnapshotBytes(body.bytes, env.DB, id, {
+      dryRun: isReleaseValidationContext(validation),
+    });
   if (writeResult === "invalid") {
     const response = json({ error: invalid }, 400);
     return result(response.response, resource, {

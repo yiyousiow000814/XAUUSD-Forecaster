@@ -103,10 +103,19 @@ test("stages detail before index and atomically activates one receipt-backed gen
   const activated = await activateNewsProjection(db, id("a"));
   assert.equal(activated.index_count, 2);
   assert.equal((await readNewsProjectionHealth(db)).verified_complete, true);
+  let pagePrepareCount = 0;
+  const originalPrepare = db.prepare.bind(db);
+  db.prepare = sql => {
+    pagePrepareCount += 1;
+    return originalPrepare(sql);
+  };
   const page = await readNewsProjectionPage(db, {
-    page: 1, pageSize: 1, category: "", reviewState: "COMPLETED",
+    page: 1, pageSize: 2, category: "", reviewState: "COMPLETED",
   });
-  assert.equal(page.items.length, 1);
+  db.prepare = originalPrepare;
+  assert.equal(pagePrepareCount, 2, "state plus one bounded page projection query");
+  assert.equal(page.items.length, 2);
+  assert.deepEqual(page.items.map(item => item.detail_key), [id("2"), id("1")]);
   assert.equal(page.all_total, 2);
   assert.equal(page.totals_scope, "VERIFIED_CURRENT_GENERATION");
   const found = await readNewsProjectionDetails(db, [id("1"), id("f")]);

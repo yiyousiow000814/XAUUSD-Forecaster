@@ -72,8 +72,8 @@ async function ensureSchema(binding: D1Database) {
 
 async function validateLearningBatch(binding: D1Database, serialized: string) {
   const checked = await binding.prepare(
-    `WITH root(doc) AS (
-       SELECT ? WHERE json_valid(?) AND json_type(?,'$.records')='array'
+    `WITH input(doc) AS (SELECT ?), root(doc) AS (
+       SELECT doc FROM input WHERE json_valid(doc) AND json_type(doc,'$.records')='array'
      ), batch(row) AS (
        SELECT value FROM root,json_each(json_extract(doc,'$.records'))
      )
@@ -91,7 +91,7 @@ async function validateLearningBatch(binding: D1Database, serialized: string) {
               AND json_type(row,'$.payload')='object'
             THEN 1 ELSE 0 END) valid
      FROM batch`,
-  ).bind(serialized, serialized, serialized).first<{ total: number; valid: number }>();
+  ).bind(serialized).first<{ total: number; valid: number }>();
   const total = Number(checked?.total ?? 0);
   if (total < 1 || total > MAX_INGEST_ROWS || Number(checked?.valid ?? 0) !== total) {
     throw new Error("empty or invalid batch");
@@ -363,8 +363,8 @@ export async function POST(request: Request) {
     // Keep the growing payload off the Worker's JavaScript JSON parser. D1
     // validates the complete batch before performing one set-based idempotent upsert.
     const result = await binding.prepare(
-      `WITH root(doc) AS (
-         SELECT ? WHERE json_valid(?) AND json_type(?,'$.records')='array'
+      `WITH input(doc) AS (SELECT ?), root(doc) AS (
+         SELECT doc FROM input WHERE json_valid(doc) AND json_type(doc,'$.records')='array'
        ), batch(row) AS (
          SELECT value FROM root,json_each(json_extract(doc,'$.records'))
        )
@@ -380,8 +380,7 @@ export async function POST(request: Request) {
        WHERE learning_records.sort_epoch IS NOT excluded.sort_epoch
           OR learning_records.payload_hash IS NOT excluded.payload_hash
           OR learning_records.payload IS NOT excluded.payload`,
-    ).bind(body.serialized, body.serialized, body.serialized,
-      new Date().toISOString()).run();
+    ).bind(body.serialized, new Date().toISOString()).run();
     const written = Number(result.meta.changes ?? 0);
     return NextResponse.json({ status: "OK", records: total, accepted: total, written });
   } catch {

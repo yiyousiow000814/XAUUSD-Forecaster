@@ -1189,7 +1189,7 @@ test("keeps the 60-day news archive inside bounded D1 work", () => {
   assert.match(store, /WHERE generation_id=\? AND detail_key IN \(\$\{placeholders\}\)/);
   assert.match(store, /ORDER BY published_time DESC/);
   assert.match(store, /impact_expires_at>\?/);
-  assert.match(index, /item\.model_visibility = "IMPACT_EXPIRED"/);
+  assert.match(index, /model_visibility: "IMPACT_EXPIRED"/);
   assert.match(reviewState, /annotation_status'\)='NOT_REQUIRED'/);
   assert.match(reviewState, /model_visibility'\)='NOT_YET_PARSED'/);
   assert.match(index, /health_check/);
@@ -1359,7 +1359,7 @@ test("returns a verified main revision through the deployment status endpoint", 
   assert.match(ingest, /main_revision/);
   assert.match(ingest, /export async function GET/);
   assert.match(ingest, /Cache-Control.*no-store/);
-  assert.match(ingest, /writeDashboardStatusSnapshots\(body\.serialized, binding\)/);
+  assert.match(ingest, /writeDashboardStatusSnapshotBytes\(body\.bytes, binding/);
   assert.doesNotMatch(ingest, /request\.json\(\)|JSON\.stringify\(|TextEncoder/);
   assert.match(snapshot, /json_valid\(payload\)/);
   assert.match(snapshot, /content-length/);
@@ -1799,7 +1799,7 @@ test("renders the news and decision audit route", async () => {
   const newsIndexRoute = readFileSync(new URL("../app/api/news-index/route.ts", import.meta.url), "utf8");
   const newsStore = readFileSync(new URL("../app/api/_shared/news-projection-store.ts", import.meta.url), "utf8");
   assert.match(newsStore, /state='SUPERSEDED'/);
-  assert.match(newsStore, /COALESCE\(sum\(parsed\),0\) parsed/);
+  assert.match(newsStore, /COALESCE\(sum\(parsed\),0\),/);
   assert.match(newsStore, /FROM news_projection_index WHERE generation_id=\? AND \$\{ACTIVE_NEWS_SQL\}/);
   assert.match(newsIndexRoute, /action === "prepare"/);
   assert.match(newsIndexRoute, /action === "activate"/);
@@ -1963,8 +1963,8 @@ test("uses one D1-validated writer for every large dashboard snapshot", () => {
   assert.doesNotMatch(auditRoute, /INSERT INTO dashboard_snapshots/);
   const ingest = readFileSync(new URL("../app/api/ingest/route.ts", import.meta.url), "utf8");
   const snapshot = readFileSync(new URL("../app/api/_shared/dashboard-snapshot.ts", import.meta.url), "utf8");
-  assert.match(ingest, /writeDashboardStatusSnapshots\(body\.serialized, binding\)/);
-  assert.match(snapshot, /writeDashboardStatusSnapshots/);
+  assert.match(ingest, /writeDashboardStatusSnapshotBytes\(body\.bytes, binding/);
+  assert.match(snapshot, /writeDashboardStatusSnapshotBytes/);
   assert.match(snapshot, /summary:\s*9/);
   assert.match(snapshot, /AUDIT_SUMMARY_SNAPSHOT_BYTES = 16_000/);
   assert.match(snapshot, /AUDIT_DETAIL_SNAPSHOT_BYTES = 120_000/);
@@ -2051,6 +2051,25 @@ test("rejects an oversized snapshot when content-length understates the body", a
   });
   assert.equal(await writeDashboardSnapshot(request, binding, 3), "too_large");
   assert.equal(prepared, false);
+});
+
+test("uses one native body buffer when content-length establishes the normal bound", async () => {
+  const { readBoundedBodyBytes } = await import(
+    "../app/api/_shared/dashboard-snapshot.ts"
+  );
+  const encoded = new TextEncoder().encode('{"headline":"黄金上涨"}');
+  let arrayBufferReads = 0;
+  let streamReads = 0;
+  const request = {
+    headers: new Headers({ "content-length": String(encoded.byteLength) }),
+    body: { getReader() { streamReads += 1; throw new Error("stream path used"); } },
+    async arrayBuffer() { arrayBufferReads += 1; return encoded.slice().buffer; },
+  };
+  const result = await readBoundedBodyBytes(request, encoded.byteLength);
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.bytes, encoded);
+  assert.equal(arrayBufferReads, 1);
+  assert.equal(streamReads, 0);
 });
 
 test("bounds a streamed snapshot without content-length", async () => {
@@ -3136,6 +3155,7 @@ test("production-shaped release validation reaches work before every mutation", 
     const auth = source.indexOf(`request, "${family}", isIngestAuthorized`);
     const bodyRead = Math.max(
       source.indexOf("readBoundedBody(request", auth),
+      source.indexOf("readBoundedBodyBytes(request", auth),
       source.indexOf("writeDashboardSnapshot(request", auth),
     );
     const response = source.indexOf(completion, bodyRead);
@@ -3227,6 +3247,15 @@ test("snapshot byte transport excludes unrelated backing-buffer bytes", async ()
   assert.ok(bound instanceof ArrayBuffer);
   assert.equal(bound.byteLength, encoded.byteLength);
   assert.deepEqual(new Uint8Array(bound), encoded);
+});
+
+test("production snapshot router keeps every sibling on the shared byte boundary", () => {
+  const router = readFileSync(new URL("../worker/api-router.ts", import.meta.url), "utf8");
+  assert.match(router, /readBoundedBodyBytes\(request, maxBytes\)/);
+  assert.match(router, /writeDashboardStatusSnapshotBytes\(body\.bytes, env\.DB/);
+  assert.match(router, /writeDashboardSnapshotBytes\(body\.bytes, env\.DB, id/);
+  assert.doesNotMatch(router, /readBoundedBody\(request, maxBytes\)/);
+  assert.doesNotMatch(router, /writeSerializedDashboardSnapshot/);
 });
 
 test("split audit routes share authenticated bounded zero-mutation validation", () => {

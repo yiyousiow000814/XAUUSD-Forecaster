@@ -4,11 +4,10 @@ import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { rejectPreviewWrite } from "../_shared/preview";
 import {
   authorizeReleaseValidation, isReleaseValidationContext, releaseValidationResponse,
-  validateJsonWithD1,
 } from "../_shared/release-validation";
 import {
-  readBoundedBody,
-  writeDashboardStatusSnapshots,
+  readBoundedBodyBytes,
+  writeDashboardStatusSnapshotBytes,
 } from "../_shared/dashboard-snapshot";
 import {
   d1CapabilityFailure,
@@ -68,13 +67,13 @@ export async function POST(request: Request) {
   if (!binding) {
     return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   }
-  const body = await readBoundedBody(request);
+  const body = await readBoundedBodyBytes(request);
   if (body.status === "too_large") {
     return NextResponse.json({ error: "payload too large" }, { status: 413 });
   }
-  const writeResult = isReleaseValidationContext(validation)
-    ? await validateJsonWithD1(binding, body.serialized) ? "validated" : "invalid"
-    : await writeDashboardStatusSnapshots(body.serialized, binding);
+  const writeResult = await writeDashboardStatusSnapshotBytes(body.bytes, binding, {
+    dryRun: isReleaseValidationContext(validation),
+  });
   if (writeResult === "invalid") {
     return NextResponse.json({ error: "invalid status payload" }, { status: 400 });
   }

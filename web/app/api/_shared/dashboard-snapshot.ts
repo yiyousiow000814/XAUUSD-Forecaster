@@ -57,6 +57,17 @@ export async function readBoundedBodyBytes(
     return { status: "ok", bytes: new Uint8Array(), receivedBytes: 0 };
   }
 
+  // Authenticated production writers send Content-Length. Let the runtime
+  // materialize that already-bounded body once instead of copying stream
+  // chunks through JavaScript on every normal snapshot write. The post-read
+  // check preserves fail-closed behavior when a sender understates the header.
+  if (declaredBytes !== null) {
+    const bytes = new Uint8Array(await request.arrayBuffer());
+    return bytes.byteLength <= maxBytes
+      ? { status: "ok", bytes, receivedBytes: bytes.byteLength }
+      : { status: "too_large" };
+  }
+
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let receivedBytes = 0;
@@ -127,50 +138,49 @@ export async function writeDashboardSnapshot(
     request, options.maxBytes ?? MAX_DASHBOARD_SNAPSHOT_BYTES,
   );
   if (body.status === "too_large") return "too_large";
-
-  if (options.dryRun) {
-    return await validateJsonBytesWithD1(binding, exactArrayBuffer(body.bytes))
-      ? "validated" : "invalid";
-  }
-
-  return writeDashboardSnapshotPayload(
-    exactArrayBuffer(body.bytes), binding, snapshotId,
-  );
+  return writeDashboardSnapshotBytes(body.bytes, binding, snapshotId, options);
 }
 
-async function writeDashboardSnapshotPayload(
-  payload: string | ArrayBuffer,
+export async function writeDashboardSnapshotBytes(
+  bytes: Uint8Array,
   binding: D1Database,
   snapshotId: number,
+  options: { dryRun?: boolean } = {},
 ): Promise<SnapshotWriteResult> {
+  const payload = exactArrayBuffer(bytes);
+  if (options.dryRun) {
+    return await validateJsonBytesWithD1(binding, payload)
+      ? "validated" : "invalid";
+  }
   const result = await binding.prepare(snapshotUpsertSql)
     .bind(payload, snapshotId, new Date().toISOString()).run();
   return Number(result.meta.changes ?? 0) > 0 ? "stored" : "invalid";
 }
 
-export async function writeSerializedDashboardSnapshot(
-  serialized: string,
+export async function writeDashboardStatusSnapshotBytes(
+  bytes: Uint8Array,
   binding: D1Database,
-  snapshotId: number,
+  options: { dryRun?: boolean } = {},
 ): Promise<SnapshotWriteResult> {
-  return writeDashboardSnapshotPayload(serialized, binding, snapshotId);
-}
-
-export async function writeDashboardStatusSnapshots(
-  serialized: string,
-  binding: D1Database,
-): Promise<SnapshotWriteResult> {
+  const payload = exactArrayBuffer(bytes);
+  if (options.dryRun) {
+    return await validateJsonBytesWithD1(binding, payload)
+      ? "validated" : "invalid";
+  }
   const receivedAt = new Date().toISOString();
   const result = await binding.prepare(
-    `WITH incoming(payload, received_at) AS (SELECT ?, ?)
+    `WITH incoming(payload, received_at) AS (SELECT CAST(? AS TEXT), ?),
+          valid(payload, received_at) AS (
+            SELECT payload,received_at FROM incoming WHERE json_valid(payload)
+          )
      INSERT INTO dashboard_snapshots (id, payload, received_at)
-     SELECT 1, payload, received_at FROM incoming WHERE json_valid(payload)
+     SELECT 1, payload, received_at FROM valid
      UNION ALL
      SELECT 5, ${publicStatusJsonExpression()}, received_at
-     FROM incoming WHERE json_valid(payload)
+     FROM valid WHERE true
      ON CONFLICT(id) DO UPDATE SET
        payload=excluded.payload, received_at=excluded.received_at`,
-  ).bind(serialized, receivedAt).run();
+  ).bind(payload, receivedAt).run();
 
   return Number(result.meta.changes ?? 0) > 0 ? "stored" : "invalid";
 }
