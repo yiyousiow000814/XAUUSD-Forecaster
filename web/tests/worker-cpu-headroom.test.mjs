@@ -202,6 +202,34 @@ test("backfills the bounded Live ledger from the authoritative transition snapsh
   assert.equal(payload.recent_decisions[0].predictions.length, 8);
 });
 
+test("backfills fixed Live news metrics during the single-owner handover", async () => {
+  if (isPreviewBuild) return;
+  const metrics = {
+    schema_version: "news-metrics-v1",
+    articles: {
+      received: 7_678, stored_revisions: 7_681, readable: 4_117,
+      semantic_reviews_complete: 4_000, current_model_candidates: 115,
+    },
+    events: {
+      independent: 3_469, auditable: 3_400, currently_model_eligible: 115,
+      used_in_predictions: 90, never_used: 25,
+    },
+    prediction_usage: { decision_event_exposures: 200, frozen_model_uses: 150 },
+    training: { current_contract_rows: 80, distinct_events: 70 },
+  };
+  insertSnapshot(1, JSON.stringify({
+    generated_at: new Date().toISOString(),
+    system: { online: true, quote_age_seconds: 1 },
+    counts: { news_revisions: 7_681 },
+  }));
+  insertSnapshot(9, JSON.stringify({ news_metrics: metrics }));
+
+  const response = await invoke("/api/status");
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-aurum-d1-operations"), "1");
+  assert.deepEqual((await response.json()).news_metrics, metrics);
+});
+
 test("uses the freshest compatible audit source during split-snapshot transition", async () => {
   if (isPreviewBuild) return;
   const older = "2026-08-20T00:00:01Z";
