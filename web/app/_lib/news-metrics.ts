@@ -47,29 +47,30 @@ export function resolveNewsMetrics(payload?: LegacyNewsPayload | null): NewsMetr
   if (payload?.news_metrics) return payload.news_metrics;
   const counts = payload?.counts ?? {};
   const evidence = payload?.news_evidence_summary ?? {};
+  const unknown = Number.NaN;
   return {
     schema_version: "news-metrics-v1",
     articles: {
-      received: evidence.distinct_articles ?? 0,
-      stored_revisions: evidence.raw_article_revisions ?? counts.news_revisions ?? 0,
-      readable: counts.readable_news_items ?? 0,
-      semantic_reviews_complete: counts.parsed_news_items ?? 0,
-      current_model_candidates: counts.model_candidate_news_items ?? 0,
+      received: evidence.distinct_articles ?? unknown,
+      stored_revisions: evidence.raw_article_revisions ?? counts.news_revisions ?? unknown,
+      readable: counts.readable_news_items ?? unknown,
+      semantic_reviews_complete: counts.parsed_news_items ?? unknown,
+      current_model_candidates: counts.model_candidate_news_items ?? unknown,
     },
     events: {
-      independent: evidence.total_events ?? 0,
-      auditable: evidence.displayed_events ?? 0,
-      currently_model_eligible: evidence.broad_model_eligible ?? 0,
-      used_in_predictions: evidence.model_seen_events ?? 0,
-      never_used: evidence.model_unseen_events ?? 0,
+      independent: evidence.total_events ?? unknown,
+      auditable: evidence.displayed_events ?? unknown,
+      currently_model_eligible: evidence.broad_model_eligible ?? unknown,
+      used_in_predictions: evidence.model_seen_events ?? unknown,
+      never_used: evidence.model_unseen_events ?? unknown,
     },
     prediction_usage: {
-      decision_event_exposures: evidence.decision_event_exposures ?? 0,
-      frozen_model_uses: evidence.frozen_model_uses ?? 0,
+      decision_event_exposures: evidence.decision_event_exposures ?? unknown,
+      frozen_model_uses: evidence.frozen_model_uses ?? unknown,
     },
     training: {
-      current_contract_rows: evidence.current_contract_exposed_rows ?? 0,
-      distinct_events: evidence.current_contract_distinct_events ?? 0,
+      current_contract_rows: evidence.current_contract_exposed_rows ?? unknown,
+      distinct_events: evidence.current_contract_distinct_events ?? unknown,
     },
   };
 }

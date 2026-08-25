@@ -104,6 +104,21 @@ const PUBLIC_STATUS_SQL = `WITH selected(payload) AS (
    LIMIT 1
 ), redacted(payload) AS (
   SELECT ${publicStatusJsonExpression()} FROM selected
+), audit_metrics(news_metrics) AS (
+  SELECT json_extract(payload, '$.news_metrics')
+    FROM dashboard_snapshots
+   WHERE id = ${AUDIT_SNAPSHOT_IDS.summary}
+     AND json_valid(payload)
+     AND json_type(payload, '$.news_metrics') = 'object'
+   LIMIT 1
+), enriched(payload) AS (
+  SELECT CASE
+    WHEN json_type(payload, '$.news_metrics') = 'object' THEN payload
+    WHEN (SELECT news_metrics FROM audit_metrics) IS NOT NULL THEN json_set(
+      payload, '$.news_metrics', json((SELECT news_metrics FROM audit_metrics))
+    )
+    ELSE payload
+  END FROM redacted
 ), legacy_decisions(recent_decisions) AS (
   SELECT json_extract(${legacyAuditProjection({ recent_decisions: 18 })}, '$.recent_decisions')
     FROM dashboard_snapshots
@@ -117,7 +132,7 @@ const PUBLIC_STATUS_SQL = `WITH selected(payload) AS (
       payload, '$.recent_decisions',
       json(coalesce((SELECT recent_decisions FROM legacy_decisions), '[]'))
     )
-  END FROM redacted
+  END FROM enriched
 ), measured AS (
   SELECT payload,
     CASE

@@ -2638,7 +2638,7 @@ test("explains training rows separately from independent news events", () => {
   assert.doesNotMatch(source, /news_evidence_summary\?\./);
 });
 
-test("live room reports articles and independent events instead of revision rows", () => {
+test("live room reports articles and independent events instead of revision rows", async () => {
   const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
   const payloads = readFileSync(new URL("../../xauusd_forecaster/dashboard_payloads.py", import.meta.url), "utf8");
   assert.match(source, /NEWS ARTICLES/);
@@ -2647,6 +2647,11 @@ test("live room reports articles and independent events instead of revision rows
   assert.match(payloads, /"counts", "outcome_summary", "news_metrics", "news_source_health"/);
   assert.doesNotMatch(source, /NEWS REVISIONS/);
   assert.doesNotMatch(source, /counts\.news_revisions/);
+  const { resolveNewsMetrics } = await import("../app/_lib/news-metrics.ts");
+  const unavailable = resolveNewsMetrics({ counts: {} });
+  assert.equal(Number.isNaN(unavailable.articles.received), true);
+  assert.equal(Number.isNaN(unavailable.events.independent), true);
+  assert.equal(resolveNewsMetrics({ counts: { news_revisions: 0 } }).articles.stored_revisions, 0);
 });
 
 test("shows residual and news-only research directions without implying execution", () => {

@@ -206,7 +206,10 @@
   News rows, audit, learning, market detail, and older history retain
   independent lazy/paged owners. A compatibility alias must not rebuild or
   serialize the complete historical dashboard payload. Missing aggregate
-  authority must not be rendered as a true zero.
+  authority must not be rendered as a true zero. During a single-owner release
+  handover, the Worker may fill a missing status aggregate from the fixed audit
+  summary in the same bounded D1 read; it must not scan News rows or the legacy
+  full audit snapshot for that repair.
 - Local audit, learning, and market-chart summary GETs read durable derived
   models rather than invoking historical builders. A single background owner
   tracks each resource independently, builds outside the request boundary, and
