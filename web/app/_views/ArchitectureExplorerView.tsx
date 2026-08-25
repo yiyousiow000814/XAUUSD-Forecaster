@@ -26,6 +26,11 @@ import {
   restoreArchitecturePageScroll,
   type ArchitectureMobilePanel,
 } from "../_lib/architecture-mobile-interaction";
+import { claimEvidence, compactEvidenceStatus } from "../_lib/architecture-evidence";
+import {
+  CodeStructure, DependencyEvidenceReference, EvidenceInspector, TestEffectivenessSummary,
+  useArchitectureEvidenceBundle,
+} from "./ArchitectureEvidencePanels";
 import styles from "./ArchitectureExplorerView.module.css";
 
 const DIMENSIONS = [
@@ -43,10 +48,11 @@ type FlowNodeData = Record<string, unknown> & {
   node: ArchitectureNode; laneLabel: string; selected: boolean; dimmed: boolean; highlighted: boolean;
   direction: "LR" | "TB"; hasIncomingEdge: boolean; hasOutgoingEdge: boolean;
   incomingPorts: ArchitecturePortSlot[]; outgoingPorts: ArchitecturePortSlot[];
+  evidenceStatus: ReturnType<typeof compactEvidenceStatus>;
   failureStatus: FailureStatus; onSelect: (id: string) => void; onHover: (id: string | null) => void;
   onDrill: (id: string) => void; onNavigate: (id: string, direction: number) => void;
 };
-type FlowEdgeData = Record<string, unknown> & { edge: ArchitectureEdge; highlighted: boolean; dimmed: boolean; guided: boolean; showLabel: boolean; route: Array<{ x: number; y: number }> };
+type FlowEdgeData = Record<string, unknown> & { edge: ArchitectureEdge; highlighted: boolean; dimmed: boolean; guided: boolean; showLabel: boolean; route: Array<{ x: number; y: number }>; evidenceStatus: ReturnType<typeof compactEvidenceStatus> };
 type FlowLaneData = Record<string, unknown> & { label: string; direction: "LR" | "TB" };
 type ArchitectureFlowNode = Node<FlowNodeData, "architecture">;
 type ArchitectureLaneNode = Node<FlowLaneData, "lane">;
@@ -108,6 +114,7 @@ const ArchitectureGraphNode = memo(function ArchitectureGraphNode({ data }: Node
       <span className={styles.nodeTopline}><b aria-hidden="true">{KIND_SYMBOL[node.kind] ?? "□"}</b><span>{node.kind}</span><i>{node.runtime_state}</i></span>
       <strong>{node.short_label}</strong>
       <small>{laneLabel}</small>
+      <span className={`${styles.compactEvidence} ${styles[`evidenceTone${data.evidenceStatus.tone}`]}`} title={data.evidenceStatus.label}><b aria-hidden="true">{data.evidenceStatus.symbol}</b>{data.evidenceStatus.label}</span>
       {failureStatus ? <em>{failureStatus}</em> : null}
     </button>
     {data.outgoingPorts.map(port => <Handle className={`${styles.handle} ${data.direction === "TB" ? styles.handleTB : styles.handleLR}`}
@@ -125,7 +132,7 @@ const ArchitectureGraphEdge = memo(function ArchitectureGraphEdge(props: EdgePro
     <BaseEdge id={props.id} markerEnd={props.markerEnd} path={path} className={className} />
     {data.showLabel ? <EdgeLabelRenderer><span className={`${styles.edgeLabel} ${data.dimmed ? styles.edgeLabelDimmed : ""}`}
       style={{ transform: `translate(-50%, -50%) translate(${label.x}px,${label.y}px)` }} title={data.edge.description}>
-      {data.edge.label}<small>{data.edge.kind}</small>
+      {data.edge.label}<small>{data.edge.kind}</small><mark title={`Evidence: ${data.evidenceStatus.label}`}>{data.evidenceStatus.symbol} {data.evidenceStatus.label}</mark>
     </span></EdgeLabelRenderer> : null}
   </>;
 });
@@ -147,19 +154,20 @@ function SourceLinks({ manifest, node, sha, kind }: { manifest: ArchitectureMani
   })}</ul> : <p className={styles.emptyCopy}>None</p>;
 }
 
-function Inspector({ manifest, node, impact, sha, modal, onClose, onDrill }: {
+function Inspector({ manifest, node, edge, impact, sha, modal, onClose, onDrill, evidenceBundle, evidenceError }: {
   manifest: ArchitectureManifest; node: ArchitectureNode; impact: ArchitectureFailureImpact | null; sha: string | null;
-  modal: boolean; onClose: () => void; onDrill: (id: string) => void;
+  edge?: ArchitectureEdge | null; modal: boolean; onClose: () => void; onDrill: (id: string) => void;
+  evidenceBundle: ReturnType<typeof useArchitectureEvidenceBundle>["bundle"]; evidenceError: boolean;
 }) {
-  const [tab, setTab] = useState<"code" | "test" | "docs">("code");
+  const [tab, setTab] = useState<"code" | "evidence" | "test" | "docs">("code");
   const relations = architectureRelations(manifest, node.id);
   const names = (ids: string[]) => ids.map(id => manifest.nodes.find(item => item.id === id)?.short_label).filter(Boolean).join(" · ") || "无 · None";
   const unavailableImpact = "该节点没有显式 failure impact contract；不会推断其他节点安全。";
   return <aside aria-labelledby="architecture-inspector-title" aria-modal={modal || undefined} className={styles.inspector} role={modal ? "dialog" : "complementary"}>
-    <header><div><span>{node.kind} · {node.runtime_state}</span><h2 id="architecture-inspector-title">{node.label}</h2></div>
+    <header><div><span>{edge ? `${edge.kind} EDGE · ${edge.criticality}` : `${node.kind} · ${node.runtime_state}`}</span><h2 id="architecture-inspector-title">{edge ? edge.label : node.label}</h2></div>
       <button aria-label="关闭详情" data-sheet-initial-focus onClick={onClose} type="button">×</button></header>
     <div className={styles.inspectorBody}>
-      <dl className={styles.beginnerDetails}>
+      {edge ? <dl className={styles.beginnerDetails}><div><dt>Relationship</dt><dd>{edge.description}</dd></div><div><dt>From → To</dt><dd>{edge.from} → {edge.to}</dd></div></dl> : <dl className={styles.beginnerDetails}>
         <div><dt>它是什么？</dt><dd>{node.summary}</dd></div>
         <div><dt>为什么需要它？</dt><dd>{node.purpose}</dd></div>
         <div><dt>谁负责它？</dt><dd className={styles.ownerAnswer}><strong>{node.owner}</strong><span>{node.architecture.ownership}</span></dd></div>
@@ -167,14 +175,16 @@ function Inspector({ manifest, node, impact, sha, modal, onClose, onDrill }: {
         <div><dt>输出到哪里？</dt><dd>{names(relations.directDownstream)}</dd></div>
         <div><dt>它坏了会停止什么？</dt><dd>{impact?.affected.map(item => item.message).join(" ") ?? unavailableImpact}</dd></div>
         <div><dt>什么仍会继续？</dt><dd>{impact?.continues.map(item => item.message).join(" ") ?? unavailableImpact}</dd></div>
-      </dl>
+      </dl>}
       {node.subsystem_view ? <button className={styles.drillButton} onClick={() => onDrill(node.id)} type="button">打开子系统 <span aria-hidden="true">· Open subsystem →</span></button> : null}
       <section className={styles.dimensions} aria-label="Architecture dimensions">{DIMENSIONS.map(([key, label]) => <details key={key}>
         <summary>{label}</summary><p>{node.architecture[key]}</p>
       </details>)}</section>
       <section className={styles.sourcePanel}><nav aria-label="Source evidence">
-        {(["code", "test", "docs"] as const).map(item => <button aria-selected={tab === item} key={item} onClick={() => setTab(item)} role="tab" type="button">{item.toUpperCase()}</button>)}
-      </nav><SourceLinks kind={tab} manifest={manifest} node={node} sha={sha} /></section>
+        {(["code", "evidence", "test", "docs"] as const).map(item => <button aria-selected={tab === item} key={item} onClick={() => setTab(item)} role="tab" type="button">{item.toUpperCase()}</button>)}
+      </nav>{tab === "evidence" ? <EvidenceInspector bundle={evidenceBundle} edge={edge} error={evidenceError} manifest={manifest} node={node} sha={sha} />
+        : tab === "code" ? <><SourceLinks kind="code" manifest={manifest} node={node} sha={sha} /><CodeStructure manifest={manifest} node={node} sha={sha} /></>
+        : <SourceLinks kind={tab} manifest={manifest} node={node} sha={sha} />}</section>
     </div>
   </aside>;
 }
@@ -255,6 +265,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   const [interaction, dispatchInteraction] = useReducer(architectureMobileInteractionReducer, INITIAL_ARCHITECTURE_MOBILE_INTERACTION);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [state, setState] = useState<(typeof STATES)[number]>("ALL");
   const [scenarioId, setScenarioId] = useState("");
@@ -263,6 +274,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   const [experienceMode, setExperienceMode] = useState<"EXPLORE" | "REFERENCE">("EXPLORE");
   const [showAllRelationships, setShowAllRelationships] = useState(false);
   const [flowInitialized, setFlowInitialized] = useState(false);
+  const { bundle: evidenceBundle, error: evidenceError } = useArchitectureEvidenceBundle();
   const visibleViewport = useVisibleViewport();
   const selectedId = interaction.activePathNodeId;
   const inspectorOpen = interaction.inspectorOpen;
@@ -325,6 +337,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
     camera.layoutChanged();
   }, [camera, canvasHeight, flow, flowInitialized, fullGraph, mobile, nodesInitialized, viewId]);
   const selected = selectedId ? manifest.nodes.find(item => item.id === selectedId) ?? null : null;
+  const selectedEdge = selectedEdgeId ? manifest.edges.find(item => item.id === selectedEdgeId) ?? null : null;
   const inspectorNode = interaction.inspectorNodeId
     ? manifest.nodes.find(item => item.id === interaction.inspectorNodeId) ?? null
     : null;
@@ -372,7 +385,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
     camera.request(cameraIntent ?? { type: "FIT_VIEW", viewId: next });
   }, [camera, viewId]);
   const selectNode = useCallback((id: string) => {
-    dispatchInteraction({ type: "NODE_TAP", nodeId: id }); setFailureMode(false);
+    setSelectedEdgeId(null); dispatchInteraction({ type: "NODE_TAP", nodeId: id }); setFailureMode(false);
     if (!mobile) {
       if (!inspectorOpen) beginInspectorTransition();
       dispatchInteraction({ type: "OPEN_INSPECTOR", nodeId: id });
@@ -385,13 +398,22 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
     dispatchInteraction({ type: "CLOSE_INSPECTOR" });
     if (!mobile) camera.request({ type: "REFIT_AFTER_INSPECTOR_CLOSE", viewId });
   }, [beginInspectorTransition, camera, inspectorOpen, mobile, viewId]);
+  const selectEdge = useCallback((id: string) => {
+    const edge = manifest.edges.find(item => item.id === id);
+    if (!edge) return;
+    setSelectedEdgeId(id); dispatchInteraction({ type: "NODE_TAP", nodeId: edge.to }); setFailureMode(false);
+    if (!mobile) {
+      if (!inspectorOpen) beginInspectorTransition();
+      dispatchInteraction({ type: "OPEN_INSPECTOR", nodeId: edge.to });
+    }
+  }, [beginInspectorTransition, inspectorOpen, manifest.edges, mobile]);
   const openInspector = useCallback(() => {
     if (!selectedId) return;
     panelReturnFocusRef.current = detailsTriggerRef.current;
     dispatchInteraction({ type: "OPEN_INSPECTOR", nodeId: selectedId });
   }, [selectedId]);
   const clearPath = useCallback(() => {
-    dispatchInteraction({ type: "CLEAR_PATH" });
+    setSelectedEdgeId(null); dispatchInteraction({ type: "CLEAR_PATH" });
     setFailureMode(false);
   }, []);
   const drill = useCallback((id: string) => {
@@ -435,9 +457,10 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   const flowNodes: ArchitectureFlowNode[] = useMemo(() => graph.nodes.map(item => ({
     ...item, type: "architecture", draggable: false, selectable: true,
     data: { ...item.data, selected: item.id === selectedId, highlighted: highlightedNodes.has(item.id), dimmed: hasFocus && !highlightedNodes.has(item.id),
+      evidenceStatus: compactEvidenceStatus(claimEvidence(evidenceBundle, `node:${item.id}`).categories),
       direction: graph.direction, failureStatus: affected.has(item.id) ? "AFFECTED" : continues.has(item.id) ? "CONTINUES" : null,
       onSelect: selectNode, onHover: setHoveredId, onDrill: drill, onNavigate: navigateNode },
-  })), [affected, continues, drill, graph.direction, graph.nodes, hasFocus, highlightedNodes, navigateNode, selectNode, selectedId]);
+  })), [affected, continues, drill, evidenceBundle, graph.direction, graph.nodes, hasFocus, highlightedNodes, navigateNode, selectNode, selectedId]);
   const laneNodes: ArchitectureLaneNode[] = useMemo(() => graph.laneBoxes.map(item => ({
     ...item, type: "lane", draggable: false, selectable: false, focusable: false, connectable: false,
     zIndex: -1, data: item.data,
@@ -452,6 +475,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
       highlighted: highlightedEdges.has(item.id),
       dimmed: hasFocus && !highlightedEdges.has(item.id),
       guided: scenarioEdges.has(item.id),
+      evidenceStatus: compactEvidenceStatus(claimEvidence(evidenceBundle, `edge:${item.id}`).categories),
       showLabel: item.criticality === "CRITICAL"
         || (item.criticality === "CONTROL_PLANE" && viewId === "runtime-release")
         || graph.edges.length <= 4
@@ -459,7 +483,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
         || scenarioEdges.has(item.id)
         || hoveredEdgeId === item.id,
     },
-  })), [graph.direction, graph.edges, graph.nodes, hasFocus, highlightedEdges, hoveredEdgeId, scenarioEdges, viewId]);
+  })), [evidenceBundle, graph.direction, graph.edges, graph.nodes, hasFocus, highlightedEdges, hoveredEdgeId, scenarioEdges, viewId]);
   const flowElements = useMemo(() => [...laneNodes, ...flowNodes], [flowNodes, laneNodes]);
   useLayoutEffect(() => {
     flow.setNodes(flowElements);
@@ -513,6 +537,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
       <button aria-describedby={selected && !impactForSelected ? "failure-contract-status" : undefined} aria-pressed={failureMode} className={styles.failureButton} disabled={!impactForSelected} onClick={() => setFailureMode(value => !value)} type="button">故障影响</button>
       {graph.view.disclosure.allow_show_all ? <button aria-pressed={showAllRelationships} onClick={() => setShowAllRelationships(value => !value)} type="button">{viewId === "package-dependencies" ? "Show all dependencies" : "Show all relationships"}</button> : null}
     </>}
+    <TestEffectivenessSummary bundle={evidenceBundle} error={evidenceError} />
   </div>;
 
   return <main className={styles.main}>
@@ -528,6 +553,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
           {selected ? <><span aria-hidden="true">›</span><em>{selected.short_label}</em></> : null}
         </nav> : null}</div>
     </header>
+    <aside className={styles.generatedBanner}><b>GENERATED</b><span>Generated from repository source at <code>{sha ?? "UNAVAILABLE"}</code>.</span><span>Semantic declarations are shown separately from observed evidence.</span></aside>
     <section className={styles.toolbar} aria-label="Architecture graph toolbar">
       <label className={styles.search}><span>Search owner, purpose, file, test, or change target</span><input aria-label="Search architecture" onChange={event => setQuery(event.currentTarget.value)} placeholder="training, release, dashboard, retry…" type="search" value={query} />
         {query ? <div className={styles.searchResults} role="listbox">{searchMatches.slice(0, 7).map(node => <button aria-selected="false" key={node.id} onClick={() => selectSearch(node)} role="option" type="button"><strong>{node.short_label}</strong><span>{node.owner}</span></button>)}{!searchMatches.length ? <p>No matching change target.</p> : null}</div> : null}
@@ -543,7 +569,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
       <strong>{graph.view.relationship_note}</strong>
       {graph.view.prohibited_directions?.length ? <details><summary>禁止的反向依赖 · Prohibited reverse directions</summary><ul>{graph.view.prohibited_directions.map(item => <li key={item}>{item}</li>)}</ul></details> : null}
     </aside> : null}
-    {viewId === "package-dependencies" ? <DependencyReference manifest={manifest} onToggleShowAll={() => setShowAllRelationships(value => !value)} selectedId={selectedId} showAll={showAllRelationships} /> : null}
+    {viewId === "package-dependencies" ? <><DependencyEvidenceReference selectedId={selectedId} /><DependencyReference manifest={manifest} onToggleShowAll={() => setShowAllRelationships(value => !value)} selectedId={selectedId} showAll={showAllRelationships} /></> : null}
     {scenario ? <section className={styles.guide} aria-label="Guided architecture scenario"><div><b>{scenario.label}</b><span>{scenario.steps[scenarioStep]?.message}</span><small>{scenarioStep + 1} / {scenario.steps.length}</small></div>
       <button disabled={scenarioStep === 0} onClick={() => moveScenario(-1)} type="button">Previous</button>
       <button disabled={scenarioStep === scenario.steps.length - 1} onClick={() => moveScenario(1)} type="button">Next</button>
@@ -554,6 +580,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
         <ReactFlow<ArchitectureCanvasNode, ArchitectureFlowEdge> defaultNodes={flowElements} defaultEdges={flowEdges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
           elementsSelectable minZoom={0.25} maxZoom={1.6} nodesConnectable={false} nodesDraggable={false}
           onInit={initializeFlow}
+          onEdgeClick={(_, edge) => selectEdge(edge.id)}
           onEdgeMouseEnter={(_, edge) => setHoveredEdgeId(edge.id)} onEdgeMouseLeave={() => setHoveredEdgeId(null)}
           onPaneClick={() => { if (mobile && interaction.mobilePanel === "NONE") clearPath(); }}
           panOnDrag preventScrolling={!mobile} zoomOnPinch zoomOnScroll={!mobile} proOptions={{ hideAttribution: true }}>
@@ -568,7 +595,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
         <section className={styles.legend} aria-label="Graph legend"><span><i className={styles.criticalLine} /> Critical</span><span><i className={styles.backgroundLine} /> Background</span><span><i className={styles.optionalLine} /> Optional</span><span><i className={styles.controlLine} /> Control plane</span></section>
         <span className={styles.keyboardHint}>Tab nodes · Enter/Space select · Arrow keys navigate · Esc close</span>
       </div>
-      {!mobile && inspectorOpen && inspectorNode ? <Inspector impact={activeImpact} manifest={manifest} modal={false} node={inspectorNode} onClose={closeInspector} onDrill={drill} sha={sha} /> : null}
+      {!mobile && inspectorOpen && inspectorNode ? <Inspector edge={selectedEdge} evidenceBundle={evidenceBundle} evidenceError={evidenceError} impact={activeImpact} manifest={manifest} modal={false} node={inspectorNode} onClose={closeInspector} onDrill={drill} sha={sha} /> : null}
     </section>
     {mobile && selected ? <section aria-label="已选择节点操作" className={styles.selectedDock}>
       <strong>{selected.short_label}</strong>
@@ -578,7 +605,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
       <button onClick={clearPath} type="button">清除路径</button>
     </section> : null}
     {mobile && inspectorOpen && inspectorNode ? <MobileSheetLayer onBackdrop={() => dispatchInteraction({ type: "BACKDROP_CLICK" })} onClose={closeInspector} panel="INSPECTOR" returnFocusRef={panelReturnFocusRef}>
-      <Inspector impact={activeImpact} manifest={manifest} modal node={inspectorNode} onClose={closeInspector} onDrill={drill} sha={sha} />
+      <Inspector edge={selectedEdge} evidenceBundle={evidenceBundle} evidenceError={evidenceError} impact={activeImpact} manifest={manifest} modal node={inspectorNode} onClose={closeInspector} onDrill={drill} sha={sha} />
     </MobileSheetLayer> : null}
     {mobile && advancedOpen ? <MobileSheetLayer onBackdrop={() => dispatchInteraction({ type: "BACKDROP_CLICK" })} onClose={closeAdvanced} panel="ADVANCED" returnFocusRef={panelReturnFocusRef}>
       <section aria-labelledby="architecture-advanced-title" aria-modal="true" className={`${styles.inspector} ${styles.advancedSheet}`} role="dialog">

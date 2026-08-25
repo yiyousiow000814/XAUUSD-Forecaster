@@ -20,8 +20,14 @@ arrays are stably ordered and serialized as UTF-8 without timestamps.
   classifications, and derived contract status.
 - `runtime-evidence.json`: privacy-bounded asserted fixture event sequences and
   normalized hashes at the exact source digest.
-- `mutation-report.json`: explicit `NOT_RUN` placeholder until PR C produces
-  valid mutation outcomes.
+- `mutation-report.json`: exact-source targeted mutation outcomes, test
+  inventory, duration hotspots, and duplicate candidates. It becomes explicit
+  `NOT_RUN` when no report matches the current source digest.
+
+The private Web build embeds `explorer-manifest.json` in the already-lazy Admin
+Explorer chunk. It exposes the larger code and evidence families as separate,
+bounded virtual modules so the public initial bundle does not absorb them.
+These modules are build artifacts, not a runtime Architecture API or store.
 
 Generated artifacts must never contain environment values, credentials, raw
 prompts, user/news/database content, request bodies, absolute paths, usernames,

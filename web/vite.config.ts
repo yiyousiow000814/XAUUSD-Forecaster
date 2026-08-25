@@ -12,6 +12,7 @@ import {
   compactPreviewStatus,
 } from "./build/preview-learning";
 import { loadArchitectureManifest } from "./build/architecture-manifest";
+import { architectureEvidenceModules } from "./build/architecture-evidence";
 
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
@@ -77,6 +78,7 @@ export default defineConfig(async () => {
       ? { watch: { useFsEvents: false, usePolling: true } }
       : undefined,
     plugins: [
+      architectureEvidenceModules(),
       vinext({ prerender: { routes: "*" } }),
       {
         name: "aurum-vinext-lazy-entry-prerender",

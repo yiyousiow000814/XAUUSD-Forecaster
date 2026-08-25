@@ -5,8 +5,12 @@
   },
   "include": [
     "next-env.d.ts",
+    "architecture-virtual.d.ts",
+    "build/architecture-evidence.ts",
     "build/architecture-manifest.ts",
+    "app/_lib/architecture-evidence.ts",
     "app/_lib/architecture-explorer.ts",
+    "app/_views/ArchitectureEvidencePanels.tsx",
     "app/_views/ArchitectureExplorerView.tsx"
   ],
   "exclude": ["node_modules"]
