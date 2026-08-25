@@ -81,7 +81,12 @@ def _execution(root: Path, source_digest: str) -> dict[str, Any]:
     return document
 
 
-def compile_contract_evidence(root: Path, source_digest: str, code_facts: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+def compile_contract_evidence(
+    root: Path,
+    source_digest: str,
+    code_facts: list[dict[str, Any]],
+    mutation_document: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     contracts, bindings = load_registry(root)
     discovered = collect_python_tests(root) + collect_web_tests(code_facts)
     known_contracts = {item["id"] for item in contracts}
@@ -109,6 +114,13 @@ def compile_contract_evidence(root: Path, source_digest: str, code_facts: list[d
                           "classification": bound[0].get("classification", "UNCLASSIFIED") if bound else "UNCLASSIFIED",
                           "execution": "EXECUTED" if current and result and result.get("status") == "PASSED" else ("STALE" if result and not current else "NOT_EXECUTED"),
                           **({"duration_ms": result["duration_ms"]} if result and "duration_ms" in result else {})})
+    mutation_document = mutation_document or {}
+    mutation_current = mutation_document.get("source_digest") == source_digest
+    mutation_rows = mutation_document.get("mutations", []) if mutation_current else []
+    mutation_by_contract: dict[str, list[dict[str, Any]]] = {}
+    for row in mutation_rows:
+        if row.get("outcome") in {"KILLED", "SURVIVED", "INVALID", "TIMEOUT", "ERROR"}:
+            mutation_by_contract.setdefault(str(row.get("contract_id")), []).append(row)
     contract_rows = []
     runtime_rows = []
     for contract in contracts:
@@ -126,10 +138,17 @@ def compile_contract_evidence(root: Path, source_digest: str, code_facts: list[d
                                      "events": [{"sequence": index + 1, "event_type": event} for index, event in enumerate(events)],
                                      "normalized_hash": event_hash})
         if any(item["contract_id"] == contract["id"] for item in runtime_rows): categories.append("RUNTIME_OBSERVED")
+        contract_mutations = mutation_by_contract.get(contract["id"], [])
+        valid_kills = [item for item in contract_mutations if item["outcome"] == "KILLED"]
+        survivors = [item for item in contract_mutations if item["outcome"] == "SURVIVED"]
+        if valid_kills and not survivors:
+            categories.append("MUTATION_KILLED")
         required = contract["required_evidence"]
         status = "VERIFIED" if set(required) <= set(categories) else "PARTIAL" if len(categories) > 1 else "DECLARED_ONLY"
         contract_rows.append({**contract, "categories": categories, "status": status,
                               "bound_test_ids": sorted(item["test_id"] for item in owned),
+                              "mutation_ids": sorted(item["id"] for item in contract_mutations),
+                              "mutation_outcomes": sorted({item["outcome"] for item in contract_mutations}),
                               "missing_evidence": sorted(set(required) - set(categories))})
     test_document = {"schema": "architecture-test-evidence-v1", "generated_header": "Generated; do not edit.",
                      "source_digest": source_digest, "execution_digest_state": "CURRENT" if current else ("STALE" if execution.get("source_digest") else "UNAVAILABLE"),
