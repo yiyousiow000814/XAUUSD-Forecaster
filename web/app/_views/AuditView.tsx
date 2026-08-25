@@ -6,6 +6,7 @@ import type { AuditViewName } from "../_components/DashboardNavigation";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
 import {
   DashboardResourceError, loadDashboardResource, readDashboardResource,
+  subscribeDashboardResource,
 } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { statusFieldPhase } from "../_lib/current-data-provenance";
@@ -940,6 +941,16 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
   ));
   const learningDataAvailableRef = useRef(Boolean(cachedLearning));
   const learningFailureCountRef = useRef(0);
+
+  useEffect(() => subscribeDashboardResource("/api/status", () => {
+    const current = readDashboardResource<Payload>("/api/status");
+    if (!current) return;
+    setPayload(previous => ({ ...previous, ...current }) as Payload);
+    if (!current.preview_status_summary) fullStatusReadyRef.current = true;
+    setStatusState(current.preview_status_summary ? "snapshot" : "ready");
+    setStatusError(null);
+  }), []);
+
   const [summaryCadence, setSummaryCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [evidenceMode, setEvidenceMode] = useState<"eligible" | "seen" | "unseen">("eligible");
   const [evidencePage, setEvidencePage] = useState(1);
