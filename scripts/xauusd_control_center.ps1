@@ -2160,6 +2160,18 @@ function Invoke-CandidateStaticAssetRequest {
             cf_cache_status = $cfCacheStatus
             etag = [string]$response.Headers.ETag
             age = $age
+            worker_version = if ($response.Headers.Contains("X-Aurum-Worker-Version")) {
+                [string]($response.Headers.GetValues("X-Aurum-Worker-Version") |
+                    Select-Object -First 1)
+            } else { "" }
+            git_sha = if ($response.Headers.Contains("X-Aurum-Git-SHA")) {
+                [string]($response.Headers.GetValues("X-Aurum-Git-SHA") |
+                    Select-Object -First 1)
+            } else { "" }
+            route = if ($response.Headers.Contains("X-Aurum-Route")) {
+                [string]($response.Headers.GetValues("X-Aurum-Route") |
+                    Select-Object -First 1)
+            } else { "" }
         }
     } finally {
         if ($response) { $response.Dispose() }
@@ -2186,6 +2198,7 @@ function Invoke-CandidateStaticAssetSample {
         expected_redirect_path = [string]$Route.redirect_path
         redirect_status = 0; redirect_location = ""; final_url = ""
         cf_cache_status = ""; etag = ""; age = ""
+        observed_worker_version = ""; observed_git_sha = ""; observed_route = ""
     }
     try {
         $baseUri = Get-CandidateStaticAssetBaseUri -Candidate $Candidate
@@ -2193,6 +2206,18 @@ function Invoke-CandidateStaticAssetSample {
         $result.requested_url = $requestUri.AbsoluteUri
         $result.requested_host = $requestUri.Host
         $response = Invoke-CandidateStaticAssetRequest -RequestUri $requestUri
+        if ([bool]$Route.worker_expected) {
+            $result.observed_worker_version = [string]$response.worker_version
+            $result.observed_git_sha = [string]$response.git_sha
+            $result.observed_route = [string]$response.route
+            if ($result.observed_worker_version -ne [string]$Candidate.worker_version_id -or
+                $result.observed_git_sha -ne [string]$Candidate.git_sha -or
+                $result.observed_route -ne [string]$Route.path) {
+                $result.status = [int]$response.status
+                $result.reason = "VERSION_HOST_WORKER_IDENTITY_MISMATCH"
+                return [pscustomobject]$result
+            }
+        }
         if ($Route.redirect_path) {
             $result.redirect_status = [int]$response.status
             $result.redirect_location = [string]$response.location
@@ -2382,24 +2407,25 @@ function Invoke-CandidateWorkerValidation {
             -NotePropertyValue ([string]$Candidate.git_sha) -Force
     }
     $results = @()
-    $staticStartedAt = [DateTimeOffset]::UtcNow
     foreach ($route in @($RoutePlan.static_assets)) {
         $results += Invoke-CandidateStaticAssetSample -Candidate $Candidate -Route $route
     }
     $expectedVersionRouteInvocations = @($RoutePlan.static_assets | Where-Object {
         [bool]$_.worker_expected
     }).Count
-    Start-Sleep -Seconds 5
-    $staticEndedAt = [DateTimeOffset]::UtcNow
-    $staticInvocations = Get-CandidateInvocationCount -Candidate $Candidate `
-        -From $staticStartedAt.AddSeconds(-2) -To $staticEndedAt.AddSeconds(2)
-    $staticObservabilityState = if ($null -eq $staticInvocations) {
-        "DIAGNOSTIC_UNAVAILABLE"
-    } elseif ([int]$staticInvocations -eq $expectedVersionRouteInvocations) {
+    $workerExpectedPaths = @($RoutePlan.static_assets | Where-Object {
+        [bool]$_.worker_expected
+    } | ForEach-Object { [string]$_.path })
+    $staticInvocations = @($results | Where-Object {
+        [string]$_.route -in $workerExpectedPaths -and [bool]$_.passed -and
+        [string]$_.observed_worker_version -eq [string]$Candidate.worker_version_id -and
+        [string]$_.observed_git_sha -eq [string]$Candidate.git_sha -and
+        [string]$_.observed_route -eq [string]$_.route
+    }).Count
+    $staticObservabilityState = if ([int]$staticInvocations -eq $expectedVersionRouteInvocations) {
         "PASSED"
     } else { "FAILED" }
-    if ($null -ne $staticInvocations -and
-        [int]$staticInvocations -ne $expectedVersionRouteInvocations) {
+    if ([int]$staticInvocations -ne $expectedVersionRouteInvocations) {
         $results += [pscustomobject]@{
             route = "VERSION_HOST_ROUTE_INVOCATIONS"; boundary = "VERSION_HOST_ROUTE"
             method = "GET"; request_id = $null; status = 0; passed = $false
