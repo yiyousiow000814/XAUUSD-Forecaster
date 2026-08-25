@@ -167,11 +167,57 @@ test("bounded cleanup retains the active generation", async () => {
     "UPDATE news_evidence_records SET received_at='2020-01-01T00:00:00.000Z' "
     + `WHERE snapshot_id='${oldGeneration}'`,
   );
-  await cleanupNewsEvidenceSnapshots(db, activeGeneration);
+  db.database.exec(
+    "UPDATE news_evidence_batches SET updated_at='2020-01-01T00:00:00.000Z' "
+    + `WHERE snapshot_id='${oldGeneration}'`,
+  );
+  const cleanup = await cleanupNewsEvidenceSnapshots(db, activeGeneration);
+  assert.deepEqual(cleanup, {
+    status: "OK",
+    cleanup: "advanced",
+    deleted_records: 1,
+    deleted_batches: 1,
+    deleted_staging: 0,
+    cleanup_pending: false,
+  });
   assert.equal(db.database.prepare(
     "SELECT count(*) AS count FROM news_evidence_records WHERE snapshot_id=?",
   ).get(activeGeneration).count, 1);
   assert.equal(db.database.prepare(
     "SELECT count(*) AS count FROM news_evidence_records WHERE snapshot_id=?",
   ).get(oldGeneration).count, 0);
+});
+
+test("cleanup feedback remains pending until bounded debt is drained", async () => {
+  const db = database();
+  const oldGeneration = id("c");
+  const activeGeneration = id("d");
+  const oldItems = Array.from({ length: 205 }, (_, index) => ({
+    ...item(((index % 9) + 1).toString(), index % 60),
+    event_key: index.toString(16).padStart(64, "0"),
+  }));
+  await prepareNewsEvidenceSnapshot(db, oldGeneration, oldItems.length);
+  await stageNewsEvidenceBatch(db, oldGeneration, 0, oldItems);
+  await activateNewsEvidenceSnapshot(db, oldGeneration, oldItems.length);
+  await prepareNewsEvidenceSnapshot(db, activeGeneration, 1);
+  await stageNewsEvidenceBatch(db, activeGeneration, 0, [item("f", 1)]);
+  await activateNewsEvidenceSnapshot(db, activeGeneration, 1);
+  db.database.exec(
+    "UPDATE news_evidence_records SET received_at='2020-01-01T00:00:00.000Z' "
+    + `WHERE snapshot_id='${oldGeneration}'`,
+  );
+  db.database.exec(
+    "UPDATE news_evidence_batches SET updated_at='2020-01-01T00:00:00.000Z' "
+    + `WHERE snapshot_id='${oldGeneration}'`,
+  );
+
+  const first = await cleanupNewsEvidenceSnapshots(db, activeGeneration);
+  assert.equal(first.deleted_records, 200);
+  assert.equal(first.cleanup_pending, true);
+  const second = await cleanupNewsEvidenceSnapshots(db, activeGeneration);
+  assert.equal(second.deleted_records, 5);
+  assert.equal(second.cleanup_pending, false);
+  assert.equal(db.database.prepare(
+    "SELECT count(*) AS count FROM news_evidence_records WHERE snapshot_id=?",
+  ).get(activeGeneration).count, 1);
 });

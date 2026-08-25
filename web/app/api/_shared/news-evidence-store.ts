@@ -419,7 +419,7 @@ export async function cleanupNewsEvidenceSnapshots(
   }
   const readerCutoff = new Date(Date.now() - 5 * 60_000).toISOString();
   const stagingCutoff = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
-  await binding.batch([
+  const cleanup = await binding.batch([
     binding.prepare(
       `DELETE FROM news_evidence_records WHERE rowid IN (
          SELECT rowid FROM news_evidence_records
@@ -439,5 +439,25 @@ export async function cleanupNewsEvidenceSnapshots(
        )`,
     ).bind(activeSnapshotId, stagingCutoff),
   ]);
-  return { status: "OK", cleanup: "advanced" };
+  const pending = await binding.prepare(
+    `SELECT (
+       EXISTS(SELECT 1 FROM news_evidence_records
+         WHERE snapshot_id<>? AND received_at<? LIMIT 1)
+       OR EXISTS(SELECT 1 FROM news_evidence_batches
+         WHERE snapshot_id<>? AND updated_at<? LIMIT 1)
+       OR EXISTS(SELECT 1 FROM news_evidence_staging
+         WHERE snapshot_id<>? AND updated_at<? LIMIT 1)
+     ) AS cleanup_pending`,
+  ).bind(
+    activeSnapshotId, readerCutoff, activeSnapshotId, readerCutoff,
+    activeSnapshotId, stagingCutoff,
+  )
+    .first<{ cleanup_pending: number }>();
+  return {
+    status: "OK", cleanup: "advanced",
+    deleted_records: Number(cleanup[0]?.meta?.changes ?? 0),
+    deleted_batches: Number(cleanup[1]?.meta?.changes ?? 0),
+    deleted_staging: Number(cleanup[2]?.meta?.changes ?? 0),
+    cleanup_pending: Number(pending?.cleanup_pending ?? 0) === 1,
+  };
 }

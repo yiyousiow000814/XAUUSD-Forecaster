@@ -1749,6 +1749,83 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
     )]
 
 
+def test_news_evidence_cleanup_uses_feedback_to_drain_bounded_debt(
+    monkeypatch,
+) -> None:
+    module = _sync_module()
+    calls = []
+    responses = iter([
+        {"status": "OK", "cleanup_pending": True},
+        {"status": "OK", "cleanup_pending": True},
+        {"status": "OK", "cleanup_pending": False},
+    ])
+
+    def post(url, body, _config):
+        calls.append((url, json.loads(body)))
+        return next(responses)
+
+    monkeypatch.setattr(module, "_post_json", post)
+    snapshot_id = "a" * 64
+    pending = module._cleanup_news_evidence_snapshots(
+        "https://remote/api/news-evidence", snapshot_id, {"token": "test"},
+    )
+
+    assert pending is False
+    assert len(calls) == 3
+    assert all(call[1]["cleanup_active_snapshot"] == snapshot_id for call in calls)
+    assert len(calls) <= module.NEWS_EVIDENCE_CLEANUP_STEPS_PER_CYCLE
+
+
+def test_news_evidence_sync_drains_old_snapshot_before_admitting_replacement(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    active_snapshot = "a" * 64
+    replacement_snapshot = "b" * 64
+    state_path = tmp_path / "evidence-state.json"
+    state_path.write_text(json.dumps({
+        "contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION,
+        "active_snapshot_id": active_snapshot,
+    }), encoding="utf-8")
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "snapshot_id": replacement_snapshot,
+                "total": 1,
+                "items": [{"event_key": "c" * 64}],
+                "has_more": False,
+            }).encode()
+
+    posted = []
+
+    def post(_url, body, _config):
+        payload = json.loads(body)
+        posted.append(payload)
+        return {"status": "OK", "cleanup_pending": True}
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(module, "_post_json", post)
+    config = {
+        "local_status_url": "http://local/api/status",
+        "remote_ingest_url": "https://remote/api/ingest",
+        "token": "test",
+        "news_evidence_state_file": str(state_path),
+    }
+
+    module._sync_news_evidence({}, config)
+
+    assert len(posted) == module.NEWS_EVIDENCE_CLEANUP_STEPS_PER_CYCLE
+    assert all(payload["cleanup_active_snapshot"] == active_snapshot for payload in posted)
+    assert not any("prepare_snapshot" in payload for payload in posted)
+
+
 def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_fields(
     monkeypatch, tmp_path,
 ) -> None:

@@ -104,6 +104,11 @@
   News-evidence staging keeps each complete request within 80,000 serialized
   bytes and eight items. The Worker enforces the matching item limits and these
   route byte bounds; the larger platform ceiling is not a normal target.
+- Snapshot cleanup remains bounded per Worker request, reports whether cleanup
+  debt remains, and the producer advances a fixed number of cleanup steps per
+  cycle. While eligible cleanup debt remains, the producer must not admit
+  another replacement snapshot. Immutable replacement therefore cannot turn
+  into unbounded retained duplication even though each request is bounded.
 - Provider-capacity status crosses the dashboard boundary only as bounded,
   secret-safe per-authority/account projections. Forecasting may use a retained
   quota-day summary, but critical status must never scan accumulated provider

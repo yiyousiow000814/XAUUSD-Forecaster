@@ -55,6 +55,7 @@ NEWS_PROJECTION_BATCHES_PER_CYCLE = 4
 NEWS_EVIDENCE_WRITE_BATCH_ITEMS = 8
 NEWS_EVIDENCE_BATCH_LIMIT_BYTES = 80_000
 NEWS_EVIDENCE_PAGES_PER_CYCLE = 1
+NEWS_EVIDENCE_CLEANUP_STEPS_PER_CYCLE = 8
 MARKET_HISTORY_PAGES_PER_CYCLE = 1
 MARKET_OVERVIEWS_PER_CYCLE = 2
 OPERATOR_RETRY_COMMANDS_PER_CYCLE = 10
@@ -1818,6 +1819,23 @@ def _local_critical_status_url(config: dict) -> str:
     return _local_resource_url(config, "/api/critical-status")
 
 
+def _cleanup_news_evidence_snapshots(
+    remote_url: str, snapshot_id: str, config: dict,
+) -> bool:
+    """Drain bounded cleanup debt faster than one replacement can create it."""
+    payload = json.dumps({
+        "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
+        "cleanup_active_snapshot": snapshot_id,
+    }, separators=(",", ":")).encode("utf-8")
+    cleanup_pending = False
+    for _ in range(NEWS_EVIDENCE_CLEANUP_STEPS_PER_CYCLE):
+        result = _post_json(remote_url, payload, config)
+        cleanup_pending = result.get("cleanup_pending") is True
+        if not cleanup_pending:
+            return False
+    return cleanup_pending
+
+
 def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
     """Advance a bounded staging window and activate only a complete snapshot."""
     if not config.get("local_status_url"):
@@ -1850,14 +1868,19 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
     first_snapshot = str(first_page.get("snapshot_id") or "")
     if not re.fullmatch(r"[a-f0-9]{64}", first_snapshot):
         raise PayloadContractError("local news evidence snapshot id is invalid")
+    active_snapshot = (
+        str(state.get("active_snapshot_id"))
+        if state.get("contract_version") == NEWS_EVIDENCE_CONTRACT_VERSION
+        and state.get("active_snapshot_id") else ""
+    )
+    if active_snapshot and _cleanup_news_evidence_snapshots(
+        remote_url, active_snapshot, config,
+    ):
+        return
     if (
         state.get("contract_version") == NEWS_EVIDENCE_CONTRACT_VERSION
         and state.get("active_snapshot_id") == first_snapshot
     ):
-        _post_json(remote_url, json.dumps({
-            "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
-            "cleanup_active_snapshot": first_snapshot,
-        }, separators=(",", ":")).encode("utf-8"), config)
         return
     snapshot_id = first_snapshot
     total = int(first_page.get("total") or 0)
@@ -1927,10 +1950,7 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
                 "record_count": total,
                 "last_success": datetime.now(UTC).isoformat(),
             })
-            _post_json(remote_url, json.dumps({
-                "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
-                "cleanup_active_snapshot": snapshot_id,
-            }, separators=(",", ":")).encode("utf-8"), config)
+            _cleanup_news_evidence_snapshots(remote_url, snapshot_id, config)
             return
         if not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor:
             raise PayloadContractError("local news evidence cursor did not advance")
