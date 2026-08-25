@@ -61,14 +61,14 @@ export async function validateJsonWithD1(
   return Number(row?.valid ?? 0) === 1;
 }
 
-/** Validate exact UTF-8 request bytes in D1 without a Worker decode/re-encode pass. */
-export async function validateJsonBytesWithD1(
+/** Validate a bounded byte or strict UTF-8 text payload in one D1 operation. */
+export async function validateJsonPayloadWithD1(
   binding: D1Database,
-  bytes: ArrayBuffer,
+  payload: string | ArrayBuffer,
 ): Promise<boolean> {
   const row = await binding.prepare(
     "SELECT json_valid(CAST(? AS TEXT)) AS valid",
-  ).bind(bytes).first<{ valid: number }>();
+  ).bind(payload).first<{ valid: number }>();
   return Number(row?.valid ?? 0) === 1;
 }
 

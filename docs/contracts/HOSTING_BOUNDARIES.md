@@ -108,13 +108,15 @@
   zero-mutation D1 JSON1 path. Each request crosses into D1 once and expands its
   item array once; all item counts and invariants are aggregated in that single
   scan so validation does not multiply serialized transport or batch parsing.
-- Bounded dashboard snapshots retain the authoritative producer's exact valid
-  UTF-8 request bytes through the Worker-to-D1 boundary. D1 casts that single
-  byte transport to TEXT for JSON1 validation and storage; the Worker must not
-  decode and then re-encode large snapshots merely to cross the storage
-  boundary. Every production entry point, including the minimal API router,
-  uses that shared byte writer. Release dry-runs use the same byte transport
-  and D1 JSON1 validation without mutating authoritative rows.
+- Bounded dashboard snapshots cross the Worker-to-D1 boundary exactly once.
+  Smaller snapshots retain the authoritative producer's exact valid UTF-8
+  request bytes through D1 JSON1 validation and storage. Above the audit-detail
+  envelope, where D1's ArrayBuffer bridge exceeds the Worker CPU budget, the
+  shared writer performs one strict UTF-8 decode and binds the equivalent text;
+  malformed UTF-8 fails closed. Every production entry point, including the
+  minimal API router, uses this shared adaptive writer. Release dry-runs use
+  the same transport selection and D1 JSON1 validation without mutating
+  authoritative rows.
 - Snapshot cleanup remains bounded per Worker request, reports whether cleanup
   debt remains, and the producer advances a fixed number of cleanup steps per
   cycle. While eligible cleanup debt remains, the producer must not admit
