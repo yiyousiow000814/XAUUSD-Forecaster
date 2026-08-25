@@ -120,14 +120,14 @@ test("14. Back breadcrumb restores the parent graph", () => {
 
 test("15. Pan, zoom, fit, and read-only controls are explicit", () => {
   assert.match(viewSource, /<Controls/);
-  assert.match(viewSource, /panOnDrag zoomOnPinch zoomOnScroll/);
+  assert.match(viewSource, /panOnDrag preventScrolling={!mobile} zoomOnPinch/);
   assert.match(viewSource, /nodesConnectable=\{false\} nodesDraggable=\{false\}/);
   assert.match(viewSource, /适配画布 · Fit/);
 });
 
 test("16. MiniMap exists only on desktop", () => {
   assert.match(viewSource, /!mobile \? <MiniMap/);
-  assert.match(viewSource, /matchMedia\("\(max-width: 720px\)"\)/);
+  assert.match(viewSource, /matchMedia\("\(max-width: 720px\), \(max-height: 500px\) and \(max-width: 900px\)"\)/);
 });
 
 test("17. Mobile preserves finite top-to-bottom branch geometry instead of forcing one column", () => {
@@ -379,9 +379,8 @@ test("32. Semantic views automatically place an unlisted connected node", () => 
 test("33. Mobile automatic viewport preserves the node readability floor and permits canvas panning", () => {
   for (const view of manifest.views) {
     const graph = buildArchitectureGraph(manifest, view.id, "TB");
-    const bounds = architectureGraphBounds(graph.nodes, graph.laneBoxes);
-    const height = architectureCanvasHeight(bounds, true);
     for (const width of [390, 360]) {
+      const height = architectureCanvasHeight(width, width === 390 ? 844 : 800, true);
       const viewport = architectureMobileViewport(graph.nodes, graph.laneBoxes, width, height);
       assert.ok(Math.min(...graph.nodes.map(node => node.width * viewport.zoom)) >= ARCHITECTURE_MOBILE_NODE_WIDTH_FLOOR);
     }
@@ -389,7 +388,7 @@ test("33. Mobile automatic viewport preserves the node readability floor and per
   const web = buildArchitectureGraph(manifest, "web-cloudflare", "TB");
   const bounds = architectureGraphBounds(web.nodes, web.laneBoxes);
   const canvasWidth = 334;
-  const viewport = architectureMobileViewport(web.nodes, web.laneBoxes, canvasWidth, architectureCanvasHeight(bounds, true));
+  const viewport = architectureMobileViewport(web.nodes, web.laneBoxes, canvasWidth, architectureCanvasHeight(360, 800, true));
   assert.ok(bounds.width * viewport.zoom > canvasWidth, "wide branch graph remains horizontally pannable instead of shrinking below the floor");
   const worker = web.nodes.find(node => node.id === "web-worker");
   const stable = web.nodes.find(node => node.id === "stable-release");
@@ -400,17 +399,20 @@ test("33. Mobile automatic viewport preserves the node readability floor and per
     "secondary release branch remains visually apparent initially");
   assert.equal(ARCHITECTURE_MOBILE_NODE_WIDTH_FLOOR, 168);
   assert.match(viewSource, /current\.mobile && intent\.type !== "MANUAL_FIT"/);
-  assert.match(viewSource, /panOnDrag zoomOnPinch zoomOnScroll/);
+  assert.match(viewSource, /panOnDrag preventScrolling={!mobile} zoomOnPinch/);
   assert.match(cssSource, /\.stage \{[^}]*overflow: hidden;/);
   assert.match(cssSource, /@media \(max-width: 720px\)[\s\S]*\.graphNode strong \{ font-size: 17px; \}/);
   assert.match(cssSource, /\.laneRegion > span \{ top: 7px; left: 10px; font-size: 13px;/);
 });
 
-test("34. Mobile canvas height follows graph geometry rather than node count", () => {
-  assert.equal(architectureCanvasHeight({ x: 0, y: 0, width: 500, height: 600 }, true), 696);
-  assert.equal(architectureCanvasHeight({ x: 0, y: 0, width: 500, height: 800 }, true), 896);
-  assert.equal(architectureCanvasHeight({ x: 0, y: 0, width: 500, height: 800 }, false), 650);
-  assert.match(viewSource, /architectureCanvasHeight\(graphBounds, mobile\)/);
+test("34. Mobile visible canvas height follows the actual viewport rather than graph bounds", () => {
+  assert.equal(architectureCanvasHeight(320, 568, true), 480);
+  assert.equal(architectureCanvasHeight(360, 800, true), 544);
+  assert.equal(architectureCanvasHeight(390, 844, true), 574);
+  assert.equal(architectureCanvasHeight(844, 390, true), 281);
+  assert.equal(architectureCanvasHeight(1440, 900, false), 650);
+  assert.match(viewSource, /architectureCanvasHeight\(visibleViewport\.width, visibleViewport\.height, mobile\)/);
+  assert.doesNotMatch(viewSource, /architectureCanvasHeight\(graphBounds/);
   assert.doesNotMatch(source("../app/_lib/architecture-explorer.ts"), /nodeCount \* 135/);
 });
 

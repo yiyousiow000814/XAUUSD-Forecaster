@@ -1,6 +1,6 @@
 export type ArchitectureCameraIntent =
   | { type: "FIT_VIEW"; viewId: string }
-  | { type: "FOCUS_NODE"; viewId: string; nodeId: string; source: "INSPECTOR" | "SEARCH" | "SCENARIO_STEP" }
+  | { type: "FOCUS_NODE"; viewId: string; nodeId: string; source: "NODE_TAP" | "INSPECTOR" | "SEARCH" | "SCENARIO_STEP" }
   | { type: "REFIT_AFTER_INSPECTOR_CLOSE"; viewId: string }
   | { type: "MANUAL_FIT"; viewId: string };
 

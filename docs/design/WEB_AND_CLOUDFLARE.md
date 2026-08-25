@@ -98,9 +98,20 @@ reveals incident dependencies for the selected package, and exposes the full
 from the same manifest edges.
 
 The graph renders manifest lanes as pointer-transparent labelled regions.
-Mobile uses a bounded lane-first top-to-bottom layout, geometry-derived canvas
-height, a node readability zoom floor, and horizontal canvas panning; its
-inspector is a viewport bottom sheet. Edge labels remain in the accessible text
+Mobile uses a bounded lane-first top-to-bottom layout, a visual-viewport-derived
+canvas height, a node readability zoom floor, and canvas-contained horizontal
+panning. Graph bounds are camera inputs and never determine the visible DOM
+canvas height. The page owns vertical scroll outside the graph; the graph owns
+explicit pan and pinch gestures inside it.
+
+A pure mobile interaction reducer separates the active relationship path from
+Inspector and Advanced visibility. First tap selects and discloses a path and
+shows a compact action dock without opening details. Inspector and Advanced are
+mutually exclusive controlled sheets with backdrop/Escape close, scroll lock,
+focus containment/restoration, internal scrolling, and safe-area padding.
+Closing either sheet preserves the active path and camera. Explore Advanced
+contains only the four advanced/reference perspectives; Reference exposes all
+views and dense reference controls. Edge labels remain in the accessible text
 equivalent when background or optional visual labels are interaction-only.
 
 ## 9. Incremental mechanisms

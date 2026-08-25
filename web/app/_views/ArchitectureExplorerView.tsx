@@ -6,17 +6,26 @@ import {
   ReactFlow, ReactFlowProvider, useReactFlow, useStore,
   type Edge, type EdgeProps, type Node, type NodeProps,
 } from "@xyflow/react";
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode, type RefObject } from "react";
+import { createPortal } from "react-dom";
 import {
   createArchitectureCameraController,
   type ArchitectureCameraIntent,
 } from "../_lib/architecture-camera";
 import {
   architectureCanvasHeight, architectureCommitSha, architectureFailureImpact, architectureFitOptions, architectureGithubHref, architectureRelations,
-  architectureEdgeRoute, architectureGraphBounds, architectureMobileViewport, architectureRouteLabelPoint, architectureRoutePath,
+  architectureEdgeRoute, architectureMobileViewport, architectureRouteLabelPoint, architectureRoutePath,
   architectureDisclosedEdgeIds, architectureDisclosedGraph, bestViewForNode, buildArchitectureGraph, bundledArchitectureManifest, searchArchitectureNodes,
   type ArchitectureEdge, type ArchitectureFailureImpact, type ArchitectureManifest, type ArchitectureNode, type ArchitecturePortSlot,
 } from "../_lib/architecture-explorer";
+import {
+  INITIAL_ARCHITECTURE_MOBILE_INTERACTION,
+  architectureMobileInteractionReducer,
+  architectureSheetTabIndex,
+  lockArchitecturePageScroll,
+  restoreArchitecturePageScroll,
+  type ArchitectureMobilePanel,
+} from "../_lib/architecture-mobile-interaction";
 import styles from "./ArchitectureExplorerView.module.css";
 
 const DIMENSIONS = [
@@ -47,12 +56,35 @@ type ArchitectureFlowEdge = Edge<FlowEdgeData, "architecture">;
 function useMobileGraph() {
   const [mobile, setMobile] = useState<boolean | null>(null);
   useEffect(() => {
-    const media = window.matchMedia("(max-width: 720px)");
+    const media = window.matchMedia("(max-width: 720px), (max-height: 500px) and (max-width: 900px)");
     const update = () => setMobile(media.matches);
     update(); media.addEventListener("change", update);
     return () => media.removeEventListener("change", update);
   }, []);
   return mobile;
+}
+
+function useVisibleViewport() {
+  const [viewport, setViewport] = useState({ width: 390, height: 844 });
+  useEffect(() => {
+    let frame = 0;
+    const update = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        const visual = window.visualViewport;
+        setViewport({ width: Math.round(visual?.width ?? window.innerWidth), height: Math.round(visual?.height ?? window.innerHeight) });
+      });
+    };
+    update();
+    window.addEventListener("resize", update);
+    window.visualViewport?.addEventListener("resize", update);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", update);
+      window.visualViewport?.removeEventListener("resize", update);
+    };
+  }, []);
+  return viewport;
 }
 
 const ArchitectureGraphNode = memo(function ArchitectureGraphNode({ data }: NodeProps<ArchitectureFlowNode>) {
@@ -115,17 +147,17 @@ function SourceLinks({ manifest, node, sha, kind }: { manifest: ArchitectureMani
   })}</ul> : <p className={styles.emptyCopy}>None</p>;
 }
 
-function Inspector({ manifest, node, impact, sha, onClose, onDrill }: {
+function Inspector({ manifest, node, impact, sha, modal, onClose, onDrill }: {
   manifest: ArchitectureManifest; node: ArchitectureNode; impact: ArchitectureFailureImpact | null; sha: string | null;
-  onClose: () => void; onDrill: (id: string) => void;
+  modal: boolean; onClose: () => void; onDrill: (id: string) => void;
 }) {
   const [tab, setTab] = useState<"code" | "test" | "docs">("code");
   const relations = architectureRelations(manifest, node.id);
   const names = (ids: string[]) => ids.map(id => manifest.nodes.find(item => item.id === id)?.short_label).filter(Boolean).join(" · ") || "无 · None";
   const unavailableImpact = "该节点没有显式 failure impact contract；不会推断其他节点安全。";
-  return <aside aria-labelledby="architecture-inspector-title" className={styles.inspector}>
+  return <aside aria-labelledby="architecture-inspector-title" aria-modal={modal || undefined} className={styles.inspector} role={modal ? "dialog" : "complementary"}>
     <header><div><span>{node.kind} · {node.runtime_state}</span><h2 id="architecture-inspector-title">{node.label}</h2></div>
-      <button aria-label="关闭详情" onClick={onClose} type="button">×</button></header>
+      <button aria-label="关闭详情" data-sheet-initial-focus onClick={onClose} type="button">×</button></header>
     <div className={styles.inspectorBody}>
       <dl className={styles.beginnerDetails}>
         <div><dt>它是什么？</dt><dd>{node.summary}</dd></div>
@@ -147,13 +179,66 @@ function Inspector({ manifest, node, impact, sha, onClose, onDrill }: {
   </aside>;
 }
 
-function DependencyReference({ manifest, selectedId }: { manifest: ArchitectureManifest; selectedId: string | null }) {
+function useMobileSheetLifecycle(
+  panel: ArchitectureMobilePanel,
+  onClose: () => void,
+  returnFocusRef: RefObject<HTMLButtonElement | null>,
+) {
+  useEffect(() => {
+    if (panel === "NONE") return;
+    const scrollY = window.scrollY;
+    const body = document.body;
+    const returnFocus = returnFocusRef.current;
+    const scrollLock = lockArchitecturePageScroll(body.style, scrollY);
+    const layer = document.querySelector<HTMLElement>(`[data-mobile-sheet="${panel}"]`);
+    const focusable = () => Array.from(layer?.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), select:not([disabled]), input:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+    ) ?? []);
+    layer?.querySelector<HTMLElement>("[data-sheet-initial-focus]")?.focus({ preventScroll: true });
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); onClose(); return; }
+      if (event.key !== "Tab") return;
+      const items = focusable();
+      if (!items.length) { event.preventDefault(); return; }
+      const current = Math.max(0, items.indexOf(document.activeElement as HTMLElement));
+      const next = architectureSheetTabIndex(current, event.shiftKey ? -1 : 1, items.length);
+      if ((event.shiftKey && current === 0) || (!event.shiftKey && current === items.length - 1)) {
+        event.preventDefault(); items[next]?.focus();
+      }
+    };
+    document.addEventListener("keydown", keydown);
+    return () => {
+      document.removeEventListener("keydown", keydown);
+      window.scrollTo({ top: restoreArchitecturePageScroll(body.style, scrollLock), behavior: "auto" });
+      window.requestAnimationFrame(() => returnFocus?.focus({ preventScroll: true }));
+    };
+  }, [onClose, panel, returnFocusRef]);
+}
+
+function MobileSheetLayer({ panel, onClose, onBackdrop, returnFocusRef, children }: {
+  panel: Exclude<ArchitectureMobilePanel, "NONE">;
+  onClose: () => void;
+  onBackdrop?: () => void;
+  returnFocusRef: RefObject<HTMLButtonElement | null>;
+  children: ReactNode;
+}) {
+  useMobileSheetLifecycle(panel, onClose, returnFocusRef);
+  return createPortal(<div className={styles.sheetLayer} data-mobile-sheet={panel}>
+    <div aria-hidden="true" className={styles.sheetBackdrop} onClick={onBackdrop ?? onClose} />
+    {children}
+  </div>, document.body);
+}
+
+function DependencyReference({ manifest, selectedId, showAll, onToggleShowAll }: {
+  manifest: ArchitectureManifest; selectedId: string | null; showAll: boolean; onToggleShowAll: () => void;
+}) {
   const view = manifest.views.find(item => item.id === "package-dependencies")!;
   const edges = view.edge_ids.map(id => manifest.edges.find(edge => edge.id === id)!).filter(Boolean);
-  const rows = selectedId ? edges.filter(edge => edge.from === selectedId || edge.to === selectedId) : edges;
+  const rows = showAll ? edges : selectedId ? edges.filter(edge => edge.from === selectedId || edge.to === selectedId) : [];
   const name = (id: string) => manifest.nodes.find(node => node.id === id)?.short_label ?? id;
-  return <details className={styles.dependencyReference} open={Boolean(selectedId)}>
+  return <details className={styles.dependencyReference} open={Boolean(selectedId || showAll)}>
     <summary>依赖矩阵 · Manifest dependency list ({rows.length})</summary>
+    <button aria-pressed={showAll} className={styles.showAllButton} onClick={onToggleShowAll} type="button">{showAll ? "恢复渐进披露" : "显示全部依赖"}</button>
     <div>{rows.map(edge => <p key={edge.id}><b>{name(edge.from)}</b><span>may depend on →</span><b>{name(edge.to)}</b></p>)}</div>
   </details>;
 }
@@ -162,9 +247,12 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   const flow = useReactFlow();
   const canvasRef = useRef<HTMLDivElement>(null);
   const canvasTransitionCompleteRef = useRef(true);
+  const detailsTriggerRef = useRef<HTMLButtonElement>(null);
+  const advancedTriggerRef = useRef<HTMLButtonElement>(null);
+  const panelReturnFocusRef = useRef<HTMLButtonElement>(null);
   const [viewId, setViewId] = useState("system-overview");
   const [viewHistory, setViewHistory] = useState<string[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [interaction, dispatchInteraction] = useReducer(architectureMobileInteractionReducer, INITIAL_ARCHITECTURE_MOBILE_INTERACTION);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -175,6 +263,10 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   const [experienceMode, setExperienceMode] = useState<"EXPLORE" | "REFERENCE">("EXPLORE");
   const [showAllRelationships, setShowAllRelationships] = useState(false);
   const [flowInitialized, setFlowInitialized] = useState(false);
+  const visibleViewport = useVisibleViewport();
+  const selectedId = interaction.activePathNodeId;
+  const inspectorOpen = interaction.inspectorOpen;
+  const advancedOpen = interaction.advancedOpen;
   const fullGraph = useMemo(() => buildArchitectureGraph(manifest, viewId, mobile ? "TB" : undefined), [manifest, mobile, viewId]);
   const scenario = manifest.scenarios.find(item => item.id === scenarioId) ?? null;
   const disclosedEdgeIds = useMemo(() => architectureDisclosedEdgeIds(manifest, viewId, {
@@ -186,8 +278,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
     const measured = state.nodeLookup.get(id)?.measured;
     return Boolean(measured && (measured.width ?? 0) > 0 && (measured.height ?? 0) > 0);
   }), [graph.view.node_ids]));
-  const graphBounds = useMemo(() => architectureGraphBounds(fullGraph.nodes, fullGraph.laneBoxes), [fullGraph.laneBoxes, fullGraph.nodes]);
-  const canvasHeight = architectureCanvasHeight(graphBounds, mobile);
+  const canvasHeight = architectureCanvasHeight(visibleViewport.width, visibleViewport.height, mobile);
   const cameraStateRef = useRef({ flow, flowInitialized, graph: fullGraph, mobile, nodesInitialized, viewId });
   const [camera] = useState(() => createArchitectureCameraController());
   useLayoutEffect(() => {
@@ -234,6 +325,9 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
     camera.layoutChanged();
   }, [camera, canvasHeight, flow, flowInitialized, fullGraph, mobile, nodesInitialized, viewId]);
   const selected = selectedId ? manifest.nodes.find(item => item.id === selectedId) ?? null : null;
+  const inspectorNode = interaction.inspectorNodeId
+    ? manifest.nodes.find(item => item.id === interaction.inspectorNodeId) ?? null
+    : null;
   const activeImpact = failureMode ? architectureFailureImpact(manifest, selectedId) : null;
   const searchMatches = useMemo(() => searchArchitectureNodes(manifest, query, state), [manifest, query, state]);
   const focusId = hoveredId ?? selectedId;
@@ -253,6 +347,15 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   const continues = useMemo(() => new Set(activeImpact?.continues.map(item => item.node_id) ?? []), [activeImpact]);
   const hasFocus = Boolean(focusId || scenario || state !== "ALL");
   const sha = architectureCommitSha();
+  const orientationRef = useRef(visibleViewport.width > visibleViewport.height ? "LANDSCAPE" : "PORTRAIT");
+
+  useEffect(() => {
+    if (!mobile) return;
+    const orientation = visibleViewport.width > visibleViewport.height ? "LANDSCAPE" : "PORTRAIT";
+    if (orientation === orientationRef.current) return;
+    orientationRef.current = orientation;
+    camera.request({ type: "FIT_VIEW", viewId });
+  }, [camera, mobile, viewId, visibleViewport.height, visibleViewport.width]);
 
   const beginInspectorTransition = useCallback(() => {
     if (mobile || !canvasRef.current) {
@@ -265,23 +368,38 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   }, [mobile]);
   const changeView = useCallback((next: string, remember = false, cameraIntent?: ArchitectureCameraIntent) => {
     if (remember && next !== viewId) setViewHistory(items => [...items, viewId]);
-    setViewId(next); setSelectedId(null); setHoveredId(null); setHoveredEdgeId(null); setFailureMode(false); setShowAllRelationships(false);
+    setViewId(next); dispatchInteraction({ type: "CHANGE_VIEW" }); setHoveredId(null); setHoveredEdgeId(null); setFailureMode(false); setShowAllRelationships(false);
     camera.request(cameraIntent ?? { type: "FIT_VIEW", viewId: next });
-  }, [camera, setFailureMode, setHoveredEdgeId, setHoveredId, setSelectedId, setViewHistory, setViewId, viewId]);
+  }, [camera, viewId]);
   const selectNode = useCallback((id: string) => {
-    if (!selectedId) beginInspectorTransition();
-    setSelectedId(id); setFailureMode(false);
-    camera.request({ type: "FOCUS_NODE", viewId, nodeId: id, source: "INSPECTOR" });
-  }, [beginInspectorTransition, camera, selectedId, setFailureMode, setSelectedId, viewId]);
+    dispatchInteraction({ type: "NODE_TAP", nodeId: id }); setFailureMode(false);
+    if (!mobile) {
+      if (!inspectorOpen) beginInspectorTransition();
+      dispatchInteraction({ type: "OPEN_INSPECTOR", nodeId: id });
+    }
+    camera.request({ type: "FOCUS_NODE", viewId, nodeId: id, source: "NODE_TAP" });
+  }, [beginInspectorTransition, camera, inspectorOpen, mobile, viewId]);
   const closeInspector = useCallback(() => {
+    if (!inspectorOpen) return;
+    if (!mobile) beginInspectorTransition();
+    dispatchInteraction({ type: "CLOSE_INSPECTOR" });
+    if (!mobile) camera.request({ type: "REFIT_AFTER_INSPECTOR_CLOSE", viewId });
+  }, [beginInspectorTransition, camera, inspectorOpen, mobile, viewId]);
+  const openInspector = useCallback(() => {
     if (!selectedId) return;
-    beginInspectorTransition();
-    setSelectedId(null); setFailureMode(false);
-    camera.request({ type: "REFIT_AFTER_INSPECTOR_CLOSE", viewId });
-  }, [beginInspectorTransition, camera, selectedId, setFailureMode, setSelectedId, viewId]);
+    panelReturnFocusRef.current = detailsTriggerRef.current;
+    dispatchInteraction({ type: "OPEN_INSPECTOR", nodeId: selectedId });
+  }, [selectedId]);
+  const clearPath = useCallback(() => {
+    dispatchInteraction({ type: "CLEAR_PATH" });
+    setFailureMode(false);
+  }, []);
   const drill = useCallback((id: string) => {
     const item = manifest.nodes.find(node => node.id === id);
-    if (item?.subsystem_view && item.subsystem_view !== viewId) changeView(item.subsystem_view, true);
+    if (item?.subsystem_view && item.subsystem_view !== viewId) {
+      dispatchInteraction({ type: "OPEN_SUBSYSTEM" });
+      changeView(item.subsystem_view, true);
+    }
   }, [changeView, manifest.nodes, viewId]);
   const navigateNode = useCallback((id: string, direction: number) => {
     const index = graph.view.node_ids.indexOf(id); const next = graph.view.node_ids[(index + direction + graph.view.node_ids.length) % graph.view.node_ids.length];
@@ -289,9 +407,14 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   }, [graph.view.node_ids, selectNode]);
 
   useEffect(() => {
-    const close = (event: KeyboardEvent) => { if (event.key === "Escape") closeInspector(); };
+    if (mobile) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (advancedOpen) dispatchInteraction({ type: "ESCAPE" });
+      else closeInspector();
+    };
     window.addEventListener("keydown", close); return () => window.removeEventListener("keydown", close);
-  }, [closeInspector]);
+  }, [advancedOpen, closeInspector, mobile]);
   const initializeFlow = useCallback(() => {
     setFlowInitialized(true);
     if (camera.pendingIntent()) camera.layoutChanged();
@@ -344,57 +467,75 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   }, [flow, flowEdges, flowElements]);
 
   const runScenario = (id: string) => {
-    const next = manifest.scenarios.find(item => item.id === id); setScenarioId(id); setScenarioStep(0); setSelectedId(null); setFailureMode(false);
+    const next = manifest.scenarios.find(item => item.id === id); setScenarioId(id); setScenarioStep(0); setFailureMode(false);
+    dispatchInteraction({ type: "START_SCENARIO" });
     if (next) {
       const targetId = next.failure_node_id ?? next.node_ids[0];
-      if (next.failure_node_id) beginInspectorTransition();
       changeView(next.view_id, next.view_id !== viewId,
         { type: "FOCUS_NODE", viewId: next.view_id, nodeId: targetId, source: "SCENARIO_STEP" });
-      if (next.failure_node_id) { setSelectedId(next.failure_node_id); setFailureMode(true); }
+      if (next.failure_node_id) { dispatchInteraction({ type: "NODE_TAP", nodeId: next.failure_node_id }); setFailureMode(true); }
     }
   };
   const moveScenario = (direction: number) => {
     if (!scenario) return;
     const nextStep = Math.max(0, Math.min(scenario.steps.length - 1, scenarioStep + direction));
     setScenarioStep(nextStep);
+    dispatchInteraction({ type: "MOVE_SCENARIO" });
     camera.request({ type: "FOCUS_NODE", viewId, nodeId: scenario.node_ids[nextStep], source: "SCENARIO_STEP" });
   };
   const selectSearch = (node: ArchitectureNode) => {
     const targetView = bestViewForNode(manifest, node, viewId);
-    if (!selectedId) beginInspectorTransition();
     changeView(targetView, false, { type: "FOCUS_NODE", viewId: targetView, nodeId: node.id, source: "SEARCH" });
-    setSelectedId(node.id); setQuery("");
+    dispatchInteraction({ type: "SELECT_SEARCH_RESULT", nodeId: node.id }); setQuery("");
   };
   const impactForSelected = architectureFailureImpact(manifest, selectedId);
-  const subsystemViews = manifest.views.filter(view => view.navigation.role === "SUBSYSTEM");
   const advancedViews = manifest.views.filter(view => ["ADVANCED", "CAMPAIGN"].includes(view.navigation.role));
   const announced = scenario ? `${scenario.label}: step ${scenarioStep + 1} of ${scenario.steps.length}. ${scenario.steps[scenarioStep]?.message}`
     : selected ? `${selected.label} selected. Upstream ${relations?.upstream.length ?? 0}; downstream ${relations?.downstream.length ?? 0}.` : "No architecture node selected.";
+  const closeAdvanced = useCallback(() => dispatchInteraction({ type: "CLOSE_ADVANCED" }), []);
+  const openAdvanced = useCallback(() => {
+    panelReturnFocusRef.current = advancedTriggerRef.current;
+    dispatchInteraction({ type: "OPEN_ADVANCED" });
+  }, []);
+  const selectAdvancedView = (next: string) => {
+    dispatchInteraction({ type: "SELECT_ADVANCED_DESTINATION" });
+    setScenarioId("");
+    changeView(next, true);
+  };
+  const switchMode = (mode: "EXPLORE" | "REFERENCE") => {
+    dispatchInteraction({ type: "SWITCH_MODE" });
+    setExperienceMode(mode); setShowAllRelationships(false); setFailureMode(false);
+  };
+  const advancedContent = <div className={styles.advancedContent}>
+    {experienceMode === "EXPLORE" ? <><h3>高级与参考视图</h3>{advancedViews.map(view => <button key={view.id} onClick={() => selectAdvancedView(view.id)} type="button">{view.label}</button>)}</> : <>
+      <label><span>All views</span><select aria-label="Architecture reference view" onChange={event => selectAdvancedView(event.currentTarget.value)} value={viewId}>{manifest.views.map(view => <option key={view.id} value={view.id}>{view.label}</option>)}</select></label>
+      <label><span>Runtime state</span><select aria-label="Runtime state" onChange={event => setState(event.currentTarget.value as typeof state)} value={state}>{STATES.map(item => <option key={item}>{item}</option>)}</select></label>
+      <button aria-describedby={selected && !impactForSelected ? "failure-contract-status" : undefined} aria-pressed={failureMode} className={styles.failureButton} disabled={!impactForSelected} onClick={() => setFailureMode(value => !value)} type="button">故障影响</button>
+      {graph.view.disclosure.allow_show_all ? <button aria-pressed={showAllRelationships} onClick={() => setShowAllRelationships(value => !value)} type="button">{viewId === "package-dependencies" ? "Show all dependencies" : "Show all relationships"}</button> : null}
+    </>}
+  </div>;
 
   return <main className={styles.main}>
     <header className={styles.header}>
       <div><span>PRIVATE · BUILD {sha?.slice(0, 8) ?? "UNVERIFIED"}</span><h1>系统架构</h1><p>{graph.view.summary}</p></div>
       <div className={styles.headerNavigation}><div aria-label="Explorer experience mode" className={styles.modeSwitch} role="group">
-        <button aria-pressed={experienceMode === "EXPLORE"} onClick={() => { setExperienceMode("EXPLORE"); setShowAllRelationships(false); }} type="button">Explore</button>
-        <button aria-pressed={experienceMode === "REFERENCE"} onClick={() => setExperienceMode("REFERENCE")} type="button">Reference</button>
-      </div><nav aria-label="Architecture breadcrumb" className={styles.breadcrumbs}>
+        <button aria-pressed={experienceMode === "EXPLORE"} onClick={() => switchMode("EXPLORE")} type="button">Explore</button>
+        <button aria-pressed={experienceMode === "REFERENCE"} onClick={() => switchMode("REFERENCE")} type="button">Reference</button>
+      </div>{!mobile || viewId !== "system-overview" || viewHistory.length ? <nav aria-label="Architecture breadcrumb" className={styles.breadcrumbs}>
           <button onClick={() => { setViewHistory([]); setScenarioId(""); changeView("system-overview"); }} type="button">System Overview</button>
           {viewHistory.length ? <><span aria-hidden="true">›</span><button onClick={() => { const previous = viewHistory.at(-1)!; setViewHistory(items => items.slice(0, -1)); changeView(previous); }} type="button">Back</button></> : null}
           {viewId !== "system-overview" ? <><span aria-hidden="true">›</span><strong>{graph.view.label}</strong></> : null}
           {selected ? <><span aria-hidden="true">›</span><em>{selected.short_label}</em></> : null}
-        </nav></div>
+        </nav> : null}</div>
     </header>
     <section className={styles.toolbar} aria-label="Architecture graph toolbar">
       <label className={styles.search}><span>Search owner, purpose, file, test, or change target</span><input aria-label="Search architecture" onChange={event => setQuery(event.currentTarget.value)} placeholder="training, release, dashboard, retry…" type="search" value={query} />
         {query ? <div className={styles.searchResults} role="listbox">{searchMatches.slice(0, 7).map(node => <button aria-selected="false" key={node.id} onClick={() => selectSearch(node)} role="option" type="button"><strong>{node.short_label}</strong><span>{node.owner}</span></button>)}{!searchMatches.length ? <p>No matching change target.</p> : null}</div> : null}
       </label>
       <label><span>Scenario</span><select aria-label="Guided scenario" onChange={event => runScenario(event.currentTarget.value)} value={scenarioId}><option value="">Explore freely</option>{manifest.scenarios.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
-      <details className={styles.advancedMenu}><summary>Advanced</summary><div>
-        {experienceMode === "REFERENCE" ? <label><span>All views</span><select aria-label="Architecture reference view" onChange={event => { setScenarioId(""); changeView(event.currentTarget.value); event.currentTarget.closest("details")?.removeAttribute("open"); }} value={viewId}>{manifest.views.map(view => <option key={view.id} value={view.id}>{view.label}</option>)}</select></label> : <><h2>Subsystems</h2>{subsystemViews.map(view => <button key={view.id} onClick={event => { changeView(view.id, true); event.currentTarget.closest("details")?.removeAttribute("open"); }} type="button">{view.label}</button>)}<h2>Advanced views</h2>{advancedViews.map(view => <button key={view.id} onClick={event => { changeView(view.id, true); event.currentTarget.closest("details")?.removeAttribute("open"); }} type="button">{view.label}</button>)}</>}
-        <label><span>Runtime state</span><select aria-label="Runtime state" onChange={event => setState(event.currentTarget.value as typeof state)} value={state}>{STATES.map(item => <option key={item}>{item}</option>)}</select></label>
-        <button aria-describedby={selected && !impactForSelected ? "failure-contract-status" : undefined} aria-pressed={failureMode} className={styles.failureButton} disabled={!impactForSelected} onClick={() => setFailureMode(value => !value)} type="button">故障影响</button>
-        {graph.view.disclosure.allow_show_all && experienceMode === "EXPLORE" ? <button aria-pressed={showAllRelationships} onClick={event => { setShowAllRelationships(value => !value); event.currentTarget.closest("details")?.removeAttribute("open"); }} type="button">{viewId === "package-dependencies" ? "Show all dependencies" : "Show all relationships"}</button> : null}
-      </div></details>
+      <div className={styles.advancedMenu}><button aria-expanded={advancedOpen} aria-haspopup={mobile ? "dialog" : "menu"} onClick={advancedOpen ? closeAdvanced : openAdvanced} ref={advancedTriggerRef} type="button">高级</button>
+        {!mobile && advancedOpen ? <section aria-label="高级视图" className={styles.desktopAdvanced} role="dialog">{advancedContent}</section> : null}
+      </div>
       <button className={styles.fitButton} onClick={() => camera.request({ type: "MANUAL_FIT", viewId })} type="button">适配画布 · Fit</button>
     </section>
     {selected && !impactForSelected ? <p className={styles.failureAvailability} id="failure-contract-status">此节点没有显式 failure impact contract，故障按钮已禁用。</p> : null}
@@ -402,19 +543,20 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
       <strong>{graph.view.relationship_note}</strong>
       {graph.view.prohibited_directions?.length ? <details><summary>禁止的反向依赖 · Prohibited reverse directions</summary><ul>{graph.view.prohibited_directions.map(item => <li key={item}>{item}</li>)}</ul></details> : null}
     </aside> : null}
-    {viewId === "package-dependencies" ? <DependencyReference manifest={manifest} selectedId={selectedId} /> : null}
+    {viewId === "package-dependencies" ? <DependencyReference manifest={manifest} onToggleShowAll={() => setShowAllRelationships(value => !value)} selectedId={selectedId} showAll={showAllRelationships} /> : null}
     {scenario ? <section className={styles.guide} aria-label="Guided architecture scenario"><div><b>{scenario.label}</b><span>{scenario.steps[scenarioStep]?.message}</span><small>{scenarioStep + 1} / {scenario.steps.length}</small></div>
       <button disabled={scenarioStep === 0} onClick={() => moveScenario(-1)} type="button">Previous</button>
       <button disabled={scenarioStep === scenario.steps.length - 1} onClick={() => moveScenario(1)} type="button">Next</button>
-      <button aria-label="Close scenario" onClick={() => { setScenarioId(""); setScenarioStep(0); }} type="button">×</button></section> : null}
-    <section className={`${styles.stage} ${selected ? styles.withInspector : ""}`} style={{ minHeight: canvasHeight }}>
+      <button aria-label="Close scenario" onClick={() => { setScenarioId(""); setScenarioStep(0); setFailureMode(false); dispatchInteraction({ type: "CLOSE_SCENARIO" }); }} type="button">×</button></section> : null}
+    <section className={`${styles.stage} ${inspectorOpen && !mobile ? styles.withInspector : ""}`} style={{ minHeight: canvasHeight }}>
       <div className={styles.canvas} data-graph-direction={graph.direction} data-testid="architecture-graph" ref={canvasRef} style={{ height: canvasHeight }}
         onTransitionEnd={event => { if (event.propertyName === "width") { canvasTransitionCompleteRef.current = true; camera.layoutChanged(); } }}>
         <ReactFlow<ArchitectureCanvasNode, ArchitectureFlowEdge> defaultNodes={flowElements} defaultEdges={flowEdges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
           elementsSelectable minZoom={0.25} maxZoom={1.6} nodesConnectable={false} nodesDraggable={false}
           onInit={initializeFlow}
           onEdgeMouseEnter={(_, edge) => setHoveredEdgeId(edge.id)} onEdgeMouseLeave={() => setHoveredEdgeId(null)}
-          panOnDrag zoomOnPinch zoomOnScroll proOptions={{ hideAttribution: true }}>
+          onPaneClick={() => { if (mobile && interaction.mobilePanel === "NONE") clearPath(); }}
+          panOnDrag preventScrolling={!mobile} zoomOnPinch zoomOnScroll={!mobile} proOptions={{ hideAttribution: true }}>
           <Background color="#b7c3c5" gap={22} size={1} />
           <Controls position="bottom-right" showInteractive={false} />
           {!mobile ? <MiniMap aria-label="Architecture minimap" pannable zoomable nodeColor={node => {
@@ -426,11 +568,28 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
         <section className={styles.legend} aria-label="Graph legend"><span><i className={styles.criticalLine} /> Critical</span><span><i className={styles.backgroundLine} /> Background</span><span><i className={styles.optionalLine} /> Optional</span><span><i className={styles.controlLine} /> Control plane</span></section>
         <span className={styles.keyboardHint}>Tab nodes · Enter/Space select · Arrow keys navigate · Esc close</span>
       </div>
-      {selected ? <Inspector impact={activeImpact} manifest={manifest} node={selected} onClose={closeInspector} onDrill={drill} sha={sha} /> : null}
+      {!mobile && inspectorOpen && inspectorNode ? <Inspector impact={activeImpact} manifest={manifest} modal={false} node={inspectorNode} onClose={closeInspector} onDrill={drill} sha={sha} /> : null}
     </section>
+    {mobile && selected ? <section aria-label="已选择节点操作" className={styles.selectedDock}>
+      <strong>{selected.short_label}</strong>
+      <button onClick={openInspector} ref={detailsTriggerRef} type="button">查看详情</button>
+      {selected.subsystem_view ? <button onClick={() => drill(selected.id)} type="button">打开子系统</button> : null}
+      {impactForSelected ? <button aria-pressed={failureMode} onClick={() => setFailureMode(value => !value)} type="button">故障影响</button> : null}
+      <button onClick={clearPath} type="button">清除路径</button>
+    </section> : null}
+    {mobile && inspectorOpen && inspectorNode ? <MobileSheetLayer onBackdrop={() => dispatchInteraction({ type: "BACKDROP_CLICK" })} onClose={closeInspector} panel="INSPECTOR" returnFocusRef={panelReturnFocusRef}>
+      <Inspector impact={activeImpact} manifest={manifest} modal node={inspectorNode} onClose={closeInspector} onDrill={drill} sha={sha} />
+    </MobileSheetLayer> : null}
+    {mobile && advancedOpen ? <MobileSheetLayer onBackdrop={() => dispatchInteraction({ type: "BACKDROP_CLICK" })} onClose={closeAdvanced} panel="ADVANCED" returnFocusRef={panelReturnFocusRef}>
+      <section aria-labelledby="architecture-advanced-title" aria-modal="true" className={`${styles.inspector} ${styles.advancedSheet}`} role="dialog">
+        <header><div><span>REFERENCE CONTROLS</span><h2 id="architecture-advanced-title">高级视图</h2></div><button aria-label="关闭高级视图" data-sheet-initial-focus onClick={closeAdvanced} type="button">×</button></header>
+        <div className={styles.inspectorBody}>{advancedContent}</div>
+      </section>
+    </MobileSheetLayer> : null}
     {activeImpact ? <section className={styles.failureSummary} aria-label="Explicit failure impact"><h2>{activeImpact.label}</h2><div><h3>AFFECTED</h3>{activeImpact.affected.map(item => <p key={item.node_id}>{item.message}</p>)}</div><div><h3>CONTINUES</h3>{activeImpact.continues.map(item => <p key={item.node_id}>{item.message}</p>)}</div></section> : null}
     <details className={styles.textFallback}><summary>关系文字版 · Relationship text fallback</summary><div>{graph.edges.map(edge => <p key={edge.id}><b>{manifest.nodes.find(node => node.id === edge.from)?.short_label}</b><span>{edge.label} · {edge.kind} · {edge.criticality}</span><b>{manifest.nodes.find(node => node.id === edge.to)?.short_label}</b></p>)}</div></details>
     <p aria-live="polite" className={styles.srOnly}>{announced}</p>
+    <p aria-live="polite" className={styles.srOnly}>{interaction.mobilePanel === "INSPECTOR" ? "详情面板已打开" : interaction.mobilePanel === "ADVANCED" ? "高级视图面板已打开" : "面板已关闭"}</p>
   </main>;
 }
 

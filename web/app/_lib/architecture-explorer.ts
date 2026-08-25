@@ -311,8 +311,10 @@ export function architectureGraphBounds(nodes: ArchitectureGraphNode[], lanes: A
   return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
-export function architectureCanvasHeight(bounds: ArchitectureGraphBounds, mobile: boolean) {
-  return mobile ? Math.min(980, Math.max(590, Math.round(bounds.height + 96))) : 650;
+export function architectureCanvasHeight(viewportWidth: number, viewportHeight: number, mobile: boolean) {
+  if (!mobile) return 650;
+  if (viewportWidth > viewportHeight) return Math.min(360, Math.max(280, Math.round(viewportHeight * .72)));
+  return Math.min(720, Math.max(480, Math.round(viewportHeight * .68)));
 }
 
 export function architectureMobileViewport(

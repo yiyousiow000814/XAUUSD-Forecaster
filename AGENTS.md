@@ -47,6 +47,10 @@ Architecture documents affected:
 - Calculate Explorer layout, port anchors, and routes from the complete current
   view. Disclosure may filter edges and ports only; selection, scenarios, and
   Show All must not rerun layout, trigger Fit, or change zoom.
+- Keep mobile graph-path selection separate from Inspector and Advanced sheet
+  visibility through one tested interaction reducer. A node tap selects the
+  path first; sheet close preserves that path. Mobile canvas height comes from
+  the visual viewport, while graph bounds remain camera input only.
 
 ## Before Adding Code
 

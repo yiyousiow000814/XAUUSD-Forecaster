@@ -13,14 +13,14 @@ beginner-first without changing the accepted graph geometry or camera owner.
 ## Architecture gate
 
 ```text
-Owner: Architecture manifest and private Explorer renderer
-Authoritative state/store: Git-tracked architecture/manifest.json
-Execution boundary: Bounded build-time loader to the lazy Admin React Flow/Dagre client chunk
+Owner: Architecture manifest plus the private Explorer interaction reducer and renderer
+Authoritative state/store: Git-tracked architecture/manifest.json; ephemeral browser interaction state has no durable store
+Execution boundary: Bounded build-time loader to the lazy Admin React Flow/Dagre client chunk; one in-page reducer
 Critical or optional: Optional private static presentation
-Maximum work per operation: One manifest no larger than 65,536 bytes; only the selected view renders
-Incremental cursor/revision/checkpoint: Manifest schema v2 and immutable build SHA
-Failure domain: Manifest validation and the private Explorer chunk only
-Last-good/recovery behavior: Invalid manifests fail the build; revert the static change with no data migration
+Maximum work per operation: One manifest no larger than 65,536 bytes; one selected view and one mobile sheet render
+Incremental cursor/revision/checkpoint: Manifest schema v2, immutable build SHA, and latest camera intent
+Failure domain: Manifest validation, ephemeral mobile interaction state, and the private Explorer chunk only
+Last-good/recovery behavior: Invalid manifests fail the build; reducer boundary events normalize invalid panel combinations; revert with no data migration
 Architecture documents affected: architecture/README.md, WEB_AND_CLOUDFLARE.md, CODEBASE_MAP.md, this audit
 ```
 
@@ -54,10 +54,14 @@ Markdown parser, Windows process, background thread, or production mutation.
 
 - Explore is the default experience. It starts at the single beginner System
   Overview and removes the permanent 11-view selector.
-- Node selection opens the explanation first; node-owned Open Subsystem actions
-  enter beginner subsystem graphs and breadcrumbs preserve the route back.
-- The toolbar contains search, scenarios, Fit, and one Advanced menu. Reference
-  mode exposes complete-view access from the same manifest.
+- Desktop node selection retains click-to-open explanation behavior. On mobile,
+  first tap selects and discloses the relationship path while keeping the graph
+  visible; a compact dock then offers View Details, Open Subsystem when owned,
+  explicit Failure Impact when available, and Clear Path.
+- The compact toolbar contains search, scenarios, Fit, and one controlled
+  Advanced trigger. Explore Advanced contains only Execution Topology, Runtime
+  and Release, Canonical Package Dependencies, and Modularization Campaign.
+  Reference exposes all views and dense controls from the same manifest.
 - Overview defaults to the cTrader → Business Runtime → Decision → Evidence →
   Dashboard → Worker/Browser spine plus optional News → Decision. Feedback and
   release-control relationships remain secondary until selection or Show All.
@@ -73,6 +77,28 @@ Markdown parser, Windows process, background thread, or production mutation.
 - Twenty-four added behavior tests cover taxonomy, default disclosure, selection,
   scenarios, stable geometry, subsystem semantics, package selection, Show All,
   and exact visible-port correspondence.
+
+### Mobile interaction and viewport ownership
+
+- One pure reducer owns `activePathNodeId`, `inspectorNodeId`, `inspectorOpen`,
+  `advancedOpen`, and the mutually exclusive `mobilePanel`. It prevents an
+  orphan Inspector and prevents Inspector and Advanced from coexisting.
+- Inspector close preserves path disclosure, highlighting, view, scenario, and
+  camera. Clear Path is separate. Opening either sheet closes the other without
+  clearing the path; incompatible view/mode boundaries clear both deterministically.
+- Both mobile sheets use portal-backed controlled dialogs with a visible close,
+  backdrop and Escape close, focus containment/restoration, exact page-scroll
+  lock/restore, internal scrolling, and safe-area padding.
+- Visible canvas height is derived from the actual visual viewport. Portrait is
+  `clamp(480px, 68dvh, 720px)` and short landscape is
+  `clamp(280px, 72dvh, 360px)`. Graph/lane bounds remain camera input only.
+  Automatic framing keeps the first graph bound 48px from the canvas top;
+  manual Fit uses the same actual client box.
+- Page vertical scroll remains available outside the graph. The contained graph
+  owns explicit pan/pinch interaction, and a real pane click may clear the path;
+  a completed drag does not become a pane click.
+- Thirty-one controller/viewport/sheet/navigation tests exercise the required
+  mobile transition matrix without depending only on source expressions.
 
 ### Semantic layout audit
 
@@ -101,7 +127,8 @@ node omitted from all hints.
 - Initial Overview has no selected node or inspector and renders the full 11-node
   layout with six disclosed directed edges and arrow markers.
 - Hover highlights direct neighbors. Selection highlights the transitive
-  upstream/downstream path, dims unrelated nodes, and opens a closable inspector.
+  upstream/downstream path and dims unrelated nodes. Desktop opens the
+  inspector; mobile keeps it optional behind View Details.
 - Inspector starts with beginner questions, then collapsed architecture
   dimensions and compact Code/Test/Docs tabs. Its Chinese-primary questions
   keep summary, purpose, owner, and architecture ownership semantically separate.
@@ -118,7 +145,8 @@ node omitted from all hints.
   labels appear for interaction, guidance, or sparse views while the text
   fallback always retains every label.
 - Small views permit a larger bounded fit zoom. View changes fit all nodes;
-  opening the inspector preserves zoom, and closing it refits the restored width.
+  opening the inspector preserves zoom. Desktop close refits restored width,
+  while mobile close preserves both path and viewport without a camera command.
 - Keyboard nodes support Enter, Space, arrows, Escape, visible focus, and an
   `aria-live` selected-path announcement. The relationship text equivalent is
   secondary and collapsible. Reduced motion disables guided edge animation.
@@ -129,11 +157,11 @@ Measured from the production client build with maximum gzip compression:
 
 | Artifact | Raw bytes | Gzip bytes | Boundary |
 |---|---:|---:|---|
-| Lazy Explorer JS | 330,959 | 98,876 | Private lazy chunk only |
-| Lazy Explorer CSS | 35,505 | 6,938 | Private lazy chunk only |
-| Public `DashboardApp` JS | 29,177 | 10,226 | Public initial path |
-| Public shared `index` JS | 217,752 | 58,184 | Public initial path |
-| Public initial CSS | 199,919 | 34,287 | Public initial path |
+| Lazy Explorer JS | 337,344 | 100,769 | Private lazy chunk only |
+| Lazy Explorer CSS | 38,913 | 7,524 | Private lazy chunk only |
+| Public `DashboardApp` JS | 29,177 | 10,108 | Public initial path |
+| Public shared `index` JS | 217,752 | 58,246 | Public initial path |
+| Public initial CSS | 199,939 | 34,370 | Public initial path |
 
 The public JS raw sizes are unchanged from the rejected #304 build boundary;
 the graph packages occur only in `ArchitectureExplorerView-*.js`. The scoped
@@ -146,8 +174,10 @@ initial gzip regression is therefore below the 2 KiB ceiling.
 | Viewport | Graph | Inspector | Overflow | Targets |
 |---|---|---|---|---|
 | 1440x900 | LR Overview, full 11-node layout / 6 disclosed edges, arrows, labels, MiniMap; Decision selection keeps zoom unchanged | Closed initially; 380px drawer after selection | none | at least 44px |
-| 390x844 | TB graph with 168px node-width floor, horizontal canvas pan, no MiniMap; Advanced menu exposes beginner and advanced routes | Fixed 58dvh bottom sheet; selected package shows 6 incident dependencies | none | at least 44px |
-| 360x800 | TB Overview with 168px node-width floor and compact search/scenario/Advanced/Fit toolbar | Fixed 58dvh bottom sheet | none | smallest visible target 44px |
+| 390x844 | 574px viewport-derived TB canvas; 72px top distance; 168px node floor; first tap exposes eight-edge Decision path and dock | Controlled 72dvh sheet; close preserves all eight highlighted edges | none | at least 44px |
+| 360x800 | 544px viewport-derived TB canvas with compact two-row toolbar and internal horizontal pan | Controlled sheet; Advanced and Inspector mutually exclusive | none | at least 44px |
+| 320x568 | 480px bounded stress canvas; first graph bound remains 72px from top | Full usable bounded sheet with visible sticky close | none | at least 44px |
+| 844x390 | 281px short-landscape canvas and 65px single-row toolbar | Full-height landscape sheet remains closable | none | at least 44px |
 
 Browser checks exercised Decision selection/dimming, inspector close,
 subsystem membership and breadcrumbs, Training's three-lane path, package
@@ -163,9 +193,9 @@ pull request after the immutable branch build completes.
 
 - Architecture manifest: 37 nodes, 66 edges, 11 views, 4 scenarios, 52,331 bytes.
 - Architecture manifest contracts: 21 passed.
-- Explorer behavior/geometry/camera contracts: 72 passed, including 24 new
-  beginner-navigation and disclosure behaviors.
+- Explorer behavior/geometry/camera contracts: 103 passed, including 31 new
+  mobile state, viewport, sheet, and navigation behaviors.
 - Complete platform-neutral Python suite: 1,414 passed.
-- Complete Web suite: 328 total; 322 passed and 6 intentionally skipped.
+- Complete Web suite: 359 total; 353 passed and 6 intentionally skipped.
 - Windows runtime contracts: 335 passed.
 - Architecture TypeScript check and Web lint: passed.

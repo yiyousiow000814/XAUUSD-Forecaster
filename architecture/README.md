@@ -87,6 +87,24 @@ background and optional labels expand on interaction or in a sparse view.
 Failure controls are available only for nodes with explicit `AFFECTED` and
 `CONTINUES` contracts.
 
+Mobile interaction state has one reducer-owned contract. `activePathNodeId`
+owns graph selection, relationship disclosure, path highlighting, and the
+compact selected-node action dock. `inspectorNodeId`, `inspectorOpen`, and
+`advancedOpen` are normalized through the mutually exclusive `mobilePanel`.
+Opening or closing a controlled Inspector or Advanced sheet never clears the
+active graph path. Only Clear Path, a real blank-canvas click, or an incompatible
+view/mode boundary clears it. Search selects a path without forcing details;
+scenario highlighting remains independently owned.
+
+The visible mobile React Flow canvas is sized from `visualViewport` (falling
+back to the window viewport), not graph bounds: portrait uses a bounded 68% of
+the visible height with a 480–720px range, while short landscape uses a bounded
+72% with a 280–360px range. Graph and lane bounds feed camera calculations
+only. The page owns vertical scrolling; React Flow owns explicit graph pan and
+pinch interaction, with horizontal overflow contained by the stage. The
+Inspector and Advanced sheets lock and exactly restore page scroll, trap focus,
+restore their invoker, and include safe-area padding.
+
 ### Optional semantic layout
 
 Dagre remains the deterministic default. A view may additionally declare
@@ -120,7 +138,8 @@ edges as a read-only graph. Both libraries and their CSS remain inside the lazy
 private Explorer boundary.
 
 One camera-intent controller exclusively owns automatic Fit, node Focus,
-post-inspector refit, and manual Fit. It waits for React Flow node
+desktop post-inspector refit, and manual Fit. Mobile Inspector close does not
+refit because the active path and canvas width do not change. It waits for React Flow node
 initialization, a stable measured canvas, and any inspector width transition.
 Replacing an intent cancels the pending animation frame, so an older view can
 never move the current viewport.
