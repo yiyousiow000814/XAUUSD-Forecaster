@@ -10,7 +10,7 @@ all implementation PRs and this documentation-only closure PR remain Draft.
 - Latest integrated `main`: `da5b47ab507b078b8b8959ffa03ebee0f681e763`
   (#330).
 - Final implementation: Draft PR #328 at
-  `f5fbf9b20fcbaea9e20472c856524926ad8fa278`.
+  `bf44754e09344fc1a15c41f7b7980651747750a5`.
 - Closure: Draft PR #302, documentation-only, based directly on #328.
 - Assistant remains `PAUSED`.
 - No merge, Stable movement, production data mutation, provider call, runtime
@@ -40,11 +40,11 @@ live head OID because a commit cannot embed its own hash.
 | 15 | #299 | `refactor/assistant-runtime-dashboard-packages` | `869ab36996569e86b69cd5b2fc2e5d12e9908d9b` | `bbebc6700b1c05e5b03e7be9438c46468700aa50` |
 | 16 | #301 | `refactor/test-organization` | `bbebc6700b1c05e5b03e7be9438c46468700aa50` | `76be886c1195a2156105361b63fd2a28fd244560` |
 | 17 | #304 | `feat/private-architecture-explorer` | `76be886c1195a2156105361b63fd2a28fd244560` | `6b70398593d377cf5e9e64558145ee164e239e09` |
-| 18 | #321 | `feat/architecture-source-compiler` | `6b70398593d377cf5e9e64558145ee164e239e09` | `4d9c5ff466fc82eae39aa1b9ddb5d9c5cf14f733` |
-| 19 | #324 | `test/architecture-contract-evidence` | `4d9c5ff466fc82eae39aa1b9ddb5d9c5cf14f733` | `d1ff1b37942e9638542d1b48b0b470f85b9d05cb` |
-| 20 | #325 | `test/architecture-mutation-audit` | `d1ff1b37942e9638542d1b48b0b470f85b9d05cb` | `06334347be86acecc5f81a1fde87729fb9d869de` |
-| 21 | #328 | `feat/architecture-evidence-explorer` | `06334347be86acecc5f81a1fde87729fb9d869de` | `f5fbf9b20fcbaea9e20472c856524926ad8fa278` |
-| 22 | #302 | `chore/modularization-campaign-closure` | `f5fbf9b20fcbaea9e20472c856524926ad8fa278` | live PR #302 head OID |
+| 18 | #321 | `feat/architecture-source-compiler` | `6b70398593d377cf5e9e64558145ee164e239e09` | `9287c4532d7a938ed7026766cce19401f73c866b` |
+| 19 | #324 | `test/architecture-contract-evidence` | `9287c4532d7a938ed7026766cce19401f73c866b` | `d067215538132820747ddcf937da9973558e25ce` |
+| 20 | #325 | `test/architecture-mutation-audit` | `d067215538132820747ddcf937da9973558e25ce` | `be37d17e6691f9f751246dd36343924d46a89338` |
+| 21 | #328 | `feat/architecture-evidence-explorer` | `be37d17e6691f9f751246dd36343924d46a89338` | `bf44754e09344fc1a15c41f7b7980651747750a5` |
+| 22 | #302 | `chore/modularization-campaign-closure` | `bf44754e09344fc1a15c41f7b7980651747750a5` | live PR #302 head OID |
 
 The #326 News Evidence cleanup and #327 staging-ownership behavior were repaired
 at their lowest extracted owner in #292. #329's single-pass News validation was
@@ -89,11 +89,11 @@ traversing the installed dependency target.
 The final exact non-production Version was uploaded to the separate
 `aurum-signal-room-preview` Worker. It was not deployed to traffic:
 
-- Git SHA: `f5fbf9b20fcbaea9e20472c856524926ad8fa278`.
+- Git SHA: `bf44754e09344fc1a15c41f7b7980651747750a5`.
 - Source digest: `dd192b89a72e61d23033e137c918546876b3cd5d12d79c0aa91044ae490f0049`.
-- Version ID: `b909cf07-6081-491d-ad3e-de208651bf9d`.
+- Version ID: `c4f37529-e577-4756-a792-55ddf7d99679`.
 - URL:
-  `https://b909cf07-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`.
+  `https://c4f37529-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`.
 - Exact generated-SHA banner, Evidence Inspector, repository-relative source
   spans, module-to-symbol code drill-down, Observed/Allowed/Violations modes,
   and all three mutation survivors were verified on Preview.
@@ -108,14 +108,15 @@ The final exact non-production Version was uploaded to the separate
 - The temporary responsive override was reset and the task-owned browser session
   ended with zero controlled tabs.
 - Screenshots:
-  `docs/audits/screenshots/architecture-evidence-f5fbf9b/preview-1440x900.png`,
+  `docs/audits/screenshots/architecture-evidence-bf44754/preview-1440x900.png`,
   `preview-390x844.png`, and `preview-360x800.png`.
 - Main moved three times during required exact-head validation. Immutable intermediate
   Versions `c573df3a-7df4-485d-af2e-8609a8061cbe` and
   `d726c405-f59e-49d7-ae92-264c8ebd3602`, and
   `2cb46d64-b484-4f06-a790-d8e27bdd9ac6`, and
   `d3cff46d-9694-4074-9bc2-2d9a640f8947`, and
-  `a0084974-1ee7-4d27-bf69-1bfe41369b03` remain superseded at 0% traffic; only
+  `a0084974-1ee7-4d27-bf69-1bfe41369b03`, and
+  `b909cf07-6081-491d-ad3e-de208651bf9d` remain superseded at 0% traffic; only
   the final Version above is current evidence.
 
 ### Merge and rollback order
