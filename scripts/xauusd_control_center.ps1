@@ -597,9 +597,16 @@ function Get-ReleaseArtifactKindFromVersion {
 function Get-ReleaseTimestampValues {
     param([AllowNull()][object]$Value)
     if ($null -eq $Value) { return }
-    if ($Value -is [string] -or $Value -is [DateTime] -or
-        $Value -is [DateTimeOffset]) {
-        if (-not [string]::IsNullOrWhiteSpace([string]$Value)) { Write-Output $Value }
+    if ($Value -is [DateTimeOffset]) {
+        Write-Output $Value.ToUniversalTime().ToString("o", [Globalization.CultureInfo]::InvariantCulture)
+        return
+    }
+    if ($Value -is [DateTime]) {
+        Write-Output $Value.ToUniversalTime().ToString("o", [Globalization.CultureInfo]::InvariantCulture)
+        return
+    }
+    if ($Value -is [string]) {
+        if (-not [string]::IsNullOrWhiteSpace($Value)) { Write-Output $Value }
         return
     }
     if ($Value -is [System.Collections.IEnumerable]) {

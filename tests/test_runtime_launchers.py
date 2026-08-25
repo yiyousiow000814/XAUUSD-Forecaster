@@ -2834,19 +2834,25 @@ def test_bootstrap_preserves_accepted_268_candidate_and_evidence(tmp_path) -> No
 def test_release_version_timestamp_normalizes_all_wrangler_shapes(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
+        "[Globalization.CultureInfo]::CurrentCulture='en-GB';"
         "$scalar=[pscustomobject]@{metadata=[pscustomobject]@{created_on='2026-08-20T10:00:00+00:00'}};"
         "$array=[pscustomobject]@{metadata=[pscustomobject]@{created_on=@('bad','2026-08-20T11:00:00Z')}};"
         "$multiple=[pscustomobject]@{metadata=[pscustomobject]@{created_on=@(@('2026-08-20T09:00:00Z'),@('2026-08-20T12:00:00Z'))}};"
+        "$dateTime=[pscustomobject]@{metadata=[pscustomobject]@{created_on=[datetime]'2026-08-25T12:41:06Z'}};"
+        "$dateTimeOffset=[pscustomobject]@{metadata=[pscustomobject]@{created_on=[datetimeoffset]'2026-08-25T20:41:07+08:00'}};"
         "$malformed=[pscustomobject]@{metadata=[pscustomobject]@{created_on='not-a-date'}};"
         "$missing=[pscustomobject]@{metadata=[pscustomobject]@{}};"
         'Write-Output "$(Get-ReleaseVersionCreatedAt $scalar),'
         '$(Get-ReleaseVersionCreatedAt $array),$(Get-ReleaseVersionCreatedAt $multiple),'
+        '$(Get-ReleaseVersionCreatedAt $dateTime),$(Get-ReleaseVersionCreatedAt $dateTimeOffset),'
         '$(Get-ReleaseVersionCreatedAt $malformed),$(Get-ReleaseVersionCreatedAt $missing)"',
     )
     assert result == (
         "2026-08-20T10:00:00.0000000+00:00,"
         "2026-08-20T11:00:00.0000000+00:00,"
-        "2026-08-20T12:00:00.0000000+00:00,,"
+        "2026-08-20T12:00:00.0000000+00:00,"
+        "2026-08-25T12:41:06.0000000+00:00,"
+        "2026-08-25T12:41:07.0000000+00:00,,"
     )
 
 
