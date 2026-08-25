@@ -70,6 +70,14 @@
       "redirect_path": null
     },
     {
+      "path": "/admin/architecture",
+      "content_type": "text/html",
+      "body_encoding": "utf-8",
+      "require_html_charset": true,
+      "marker": "系统架构",
+      "redirect_path": null
+    },
+    {
       "path": "/admin/assistant",
       "content_type": "text/html",
       "body_encoding": "utf-8",
