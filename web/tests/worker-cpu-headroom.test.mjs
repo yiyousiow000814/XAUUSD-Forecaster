@@ -182,15 +182,18 @@ test("backfills the bounded Live ledger from the authoritative transition snapsh
     features: { unused: index },
     predictions: Array.from({ length: 12 }, (_, prediction) => ({ prediction })),
   }));
-  insertSnapshot(1, JSON.stringify({
+  insertSnapshot(4, JSON.stringify({
     generated_at: "2026-08-20T00:00:00Z",
-    system: { online: false, quote_age_seconds: 1 },
     recent_decisions: decisions,
   }), "2026-08-20T00:00:01Z");
-  insertSnapshot(5, JSON.stringify({
-    generated_at: "2026-08-20T00:00:02Z",
+  insertSnapshot(1, JSON.stringify({
+    generated_at: "2026-08-20T00:00:01Z",
     system: { online: false, quote_age_seconds: 1 },
-  }), "2026-08-20T00:00:03Z");
+  }), "2026-08-20T00:00:02Z");
+  insertSnapshot(5, JSON.stringify({
+    generated_at: "2026-08-20T00:00:03Z",
+    system: { online: false, quote_age_seconds: 1 },
+  }), "2026-08-20T00:00:04Z");
 
   const payload = await (await invoke("/api/status")).json();
   assert.equal(payload.recent_decisions.length, 18);

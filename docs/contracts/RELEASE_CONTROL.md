@@ -211,6 +211,20 @@ resource remains `REVIEW_REQUIRED` until a
 separate coordinated migration protocol proves Stable-to-Candidate and Reverse
 compatibility. A green repository suite alone cannot make that decision.
 
+For an additive D1 migration, **Verify Migration** is the only storage
+compatibility acceptance action. It is distinct from the platform-resource
+**Approve Compatibility** action. The verifier must bind one short-lived
+receipt to the exact Candidate validation key, Git SHA, Worker Version ID,
+Stable identity, D1 database UUID, migration filenames and hashes, applied
+migration ledger, required schema capabilities, retained legacy read
+capabilities, and authoritative projection identity and counts. It must prove
+the Candidate read path, the still-active Stable read path, and the normal
+Reverse target against the same live database. Pending migrations, missing
+capabilities, destructive or unknown migration contracts, non-current News,
+empty required legacy evidence, stale receipts, receipt tampering, or any live
+identity drift fail closed. Candidate validation rechecks the live evidence;
+the receipt cannot be copied to another Git SHA or Worker Version.
+
 ## Promotion transaction
 
 Promotion is one durable, serialized transaction:

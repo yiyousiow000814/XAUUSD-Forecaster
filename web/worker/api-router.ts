@@ -108,7 +108,7 @@ const PUBLIC_STATUS_SQL = `WITH selected(payload) AS (
 ), legacy_decisions(recent_decisions) AS (
   SELECT json_extract(${legacyAuditProjection({ recent_decisions: 18 })}, '$.recent_decisions')
     FROM dashboard_snapshots
-   WHERE id = 1 AND json_valid(payload)
+   WHERE id = 4 AND json_valid(payload)
    ORDER BY julianday(received_at) DESC
    LIMIT 1
 ), public(payload) AS (

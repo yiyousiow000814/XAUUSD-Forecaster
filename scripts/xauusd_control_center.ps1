@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "ApproveCompatibility", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync", "broadcast")]
     [string]$ServiceKey = "",
@@ -35,6 +35,7 @@ $runtimeCodeStatePath = Join-Path $moduleRoot ".local\forward\runtime-code-state
 $runtimeUpdateStatePath = Join-Path $moduleRoot ".local\forward\runtime-update-state.json"
 $releaseControlStatePath = Join-Path $moduleRoot ".local\forward\release-control-state.json"
 $releaseHistoryPath = Join-Path $moduleRoot ".local\forward\release-control-history.jsonl"
+$coordinatedMigrationReceiptPath = Join-Path $moduleRoot ".local\forward\coordinated-migration-receipt.json"
 $releaseLockPath = Join-Path $moduleRoot ".local\forward\release-control.lock"
 $controlPlaneInstallStatePath = Join-Path $moduleRoot ".local\forward\control-plane-install-state.json"
 $runtimePreflightContractVersion = "isolated-critical-status-diagnostics-v4"
@@ -90,6 +91,7 @@ $candidateOnlyProjectionRoutes = @(
     "/api/audit-briefs", "/api/audit-stories", "/api/audit-decisions"
 )
 $releaseLockOwnerGrace = [TimeSpan]::FromSeconds(30)
+$coordinatedMigrationReceiptMaxAge = [TimeSpan]::FromHours(2)
 $bootstrapAcceptedCandidateWorker = "dd823aa4-20f0-47e1-9255-1b785a4c17b0"
 $bootstrapAcceptedCandidateRevision = "14c055a35040fa963700c988f770c9bb52fa669e"
 
@@ -898,6 +900,379 @@ function Test-CandidatePlatformResources {
         }
         return $true
     } catch { return $false }
+}
+
+function Get-MigrationD1Binding {
+    param([Parameter(Mandatory = $true)][object]$Version)
+    $bindings = @($Version.resources.bindings | Where-Object {
+        [string]$_.type -eq "d1" -and [string]$_.name -eq "DB"
+    })
+    if ($bindings.Count -ne 1 -or
+        [string]$bindings[0].database_id -notmatch '^[0-9a-f-]{36}$') {
+        throw "MIGRATION_D1_BINDING_IDENTITY_INVALID"
+    }
+    return $bindings[0]
+}
+
+function Get-CoordinatedMigrationFiles {
+    param([Parameter(Mandatory = $true)][string[]]$ChangedFiles)
+    $requirement = Get-CandidateCompatibilityRequirement -ChangedFiles $ChangedFiles
+    if ([string]$requirement.state -ne "COORDINATED_STORAGE_MIGRATION_REQUIRED") {
+        throw "COORDINATED_STORAGE_MIGRATION_NOT_REQUIRED"
+    }
+    $files = @($requirement.files | Sort-Object -Unique)
+    if ($files.Count -eq 0 -or @($files | Where-Object {
+        $_ -notmatch '^web/drizzle/[0-9]{4}_[A-Za-z0-9_-]+\.sql$'
+    }).Count -gt 0) {
+        throw "MIGRATION_FILE_SCOPE_INVALID"
+    }
+    foreach ($file in $files) {
+        if (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot $file))) {
+            throw "MIGRATION_FILE_MISSING:$file"
+        }
+    }
+    return $files
+}
+
+function Assert-CoordinatedMigrationCapabilityContract {
+    param([Parameter(Mandatory = $true)][string[]]$MigrationFiles)
+    $supported = @(
+        "web/drizzle/0022_news_projection_generation.sql",
+        "web/drizzle/0023_operator_retry_sync_digest.sql"
+    )
+    $unknown = @($MigrationFiles | Where-Object { $_ -notin $supported })
+    if ($unknown.Count -gt 0) {
+        throw "MIGRATION_CAPABILITY_CONTRACT_MISSING:$($unknown -join ',')"
+    }
+    foreach ($file in $MigrationFiles) {
+        $sql = Get-Content -LiteralPath (Join-Path $repositoryRoot $file) -Raw
+        if ($sql -match '(?im)\b(DROP|DELETE|UPDATE|REPLACE|TRUNCATE|VACUUM)\b') {
+            throw "MIGRATION_REVERSE_INCOMPATIBLE:$file"
+        }
+    }
+}
+
+function Invoke-CoordinatedMigrationD1Query {
+    param([Parameter(Mandatory = $true)][string]$Sql)
+    $blocks = @(Invoke-WranglerJson -Arguments @(
+        "d1", "execute", "DB", "--remote", "--command", $Sql
+    ))
+    if ($blocks.Count -eq 0 -or @($blocks | Where-Object { -not [bool]$_.success }).Count -gt 0) {
+        throw "MIGRATION_D1_QUERY_FAILED"
+    }
+    foreach ($block in $blocks) {
+        foreach ($row in @($block.results)) { Write-Output $row }
+    }
+}
+
+function Get-CoordinatedMigrationEndpointEvidence {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$Stable
+    )
+    $candidateStatus = Invoke-WebRequest -UseBasicParsing -Method Get `
+        -Uri "$([string]$Candidate.browser_url)/api/status" -TimeoutSec 45
+    $candidateHealth = Invoke-WebRequest -UseBasicParsing -Method Get `
+        -Uri "$([string]$Candidate.browser_url)/api/news-index?health_check=1" `
+        -TimeoutSec 45
+    $stableStatus = Invoke-WebRequest -UseBasicParsing -Method Get `
+        -Uri "$workerUrl/api/status" -TimeoutSec 45
+    $candidatePayload = $candidateStatus.Content | ConvertFrom-Json
+    $healthPayload = $candidateHealth.Content | ConvertFrom-Json
+    $stablePayload = $stableStatus.Content | ConvertFrom-Json
+    $observedVersion = [string]$candidateStatus.Headers["X-Aurum-Worker-Version"]
+    $observedGit = [string]$candidateStatus.Headers["X-Aurum-Git-SHA"]
+    if ([int]$candidateStatus.StatusCode -ne 200 -or
+        $observedVersion -ne [string]$Candidate.worker_version_id -or
+        $observedGit -ne [string]$Candidate.git_sha) {
+        throw "MIGRATION_CANDIDATE_READ_IDENTITY_FAILED"
+    }
+    if ([int]$stableStatus.StatusCode -ne 200 -or
+        $null -eq $stablePayload.counts.decision_events -or
+        [long]$stablePayload.counts.decision_events -le 0) {
+        throw "MIGRATION_LEGACY_STABLE_READ_FAILED"
+    }
+    if ([int]$candidateHealth.StatusCode -ne 200 -or
+        [string]$healthPayload.projection_state -ne "CURRENT" -or
+        -not [bool]$healthPayload.verified_complete -or
+        [int]$healthPayload.index_count -ne [int]$healthPayload.detail_count -or
+        [int]$healthPayload.missing_detail_count -ne 0 -or
+        [int]$healthPayload.invariant_violation_count -ne 0 -or
+        [string]$healthPayload.receipt_digest -ne
+            [string]$healthPayload.source_receipt_digest) {
+        throw "MIGRATION_NEWS_CURRENT_INVALID"
+    }
+    return [ordered]@{
+        stable_status = 200
+        stable_decision_count_positive = $true
+        candidate_status = 200
+        candidate_worker_version = $observedVersion
+        candidate_git_sha = $observedGit
+        news_generation_id = [string]$healthPayload.active_generation_id
+        news_snapshot_id = [string]$healthPayload.snapshot_id
+        news_source_digest = [string]$healthPayload.source_digest
+        news_receipt_digest = [string]$healthPayload.receipt_digest
+        news_index_count = [int]$healthPayload.index_count
+        news_detail_count = [int]$healthPayload.detail_count
+    }
+}
+
+function Get-CoordinatedMigrationLiveEvidence {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$Stable,
+        [Parameter(Mandatory = $true)][string[]]$MigrationFiles
+    )
+    Assert-CoordinatedMigrationCapabilityContract -MigrationFiles $MigrationFiles
+    $candidateVersion = Get-CloudflareVersionDetails `
+        -VersionId ([string]$Candidate.worker_version_id)
+    $stableVersion = Get-CloudflareVersionDetails `
+        -VersionId ([string]$Stable.worker_version_id)
+    $candidateBinding = Get-MigrationD1Binding -Version $candidateVersion
+    $stableBinding = Get-MigrationD1Binding -Version $stableVersion
+    if ([string]$candidateBinding.database_id -ne [string]$stableBinding.database_id) {
+        throw "MIGRATION_REVERSE_DATABASE_IDENTITY_MISMATCH"
+    }
+    $database = Invoke-WranglerJson -Arguments @("d1", "info", "DB")
+    if ([string]$database.uuid -ne [string]$candidateBinding.database_id) {
+        throw "MIGRATION_DATABASE_IDENTITY_MISMATCH"
+    }
+    $ledger = @(Invoke-CoordinatedMigrationD1Query -Sql `
+        "SELECT name,applied_at FROM d1_migrations ORDER BY id")
+    $ledgerNames = @($ledger | ForEach-Object { [string]$_.name })
+    $candidateMigrationNames = @(Get-ChildItem -LiteralPath `
+        (Join-Path $repositoryRoot "web/drizzle") -Filter "*.sql" -File |
+        Sort-Object Name | ForEach-Object { $_.Name })
+    $pending = @($candidateMigrationNames | Where-Object { $_ -notin $ledgerNames })
+    if ($pending.Count -gt 0) {
+        throw "MIGRATION_LEDGER_PENDING:$($pending -join ',')"
+    }
+    $requiredNames = @($MigrationFiles | ForEach-Object { Split-Path $_ -Leaf })
+    $missingRequired = @($requiredNames | Where-Object { $_ -notin $ledgerNames })
+    if ($missingRequired.Count -gt 0) {
+        throw "MIGRATION_LEDGER_REQUIRED_MISSING:$($missingRequired -join ',')"
+    }
+    $capabilitySql = @"
+SELECT
+ (SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN
+  ('news_projection_generations','news_projection_index','news_projection_details',
+   'news_projection_batches','news_projection_state')) AS projection_tables,
+ (SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN
+  ('news_projection_generations_state_idx','news_projection_index_ordinal_idx',
+   'news_projection_index_page_idx','news_projection_index_category_idx')) AS projection_indexes,
+ (SELECT count(*) FROM pragma_table_info('operator_retry_sync_state') WHERE name IN
+  ('id','payload_digest','item_count','synced_at')) AS retry_columns,
+ (SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN
+  ('dashboard_snapshots','news_index','news_details','news_evidence_records')) AS legacy_tables,
+ coalesce((SELECT json_array_length(json_extract(payload,'$.recent_decisions'))
+   FROM dashboard_snapshots WHERE id=4 AND json_valid(payload)),0) AS legacy_decisions,
+ s.projection_state,s.active_generation_id,s.snapshot_id,s.source_digest,s.receipt_digest,
+ s.index_count,s.detail_count,s.missing_detail_count,s.invariant_violation_count,
+ g.state AS generation_state,g.expected_receipt_digest,g.staged_index_count,
+ g.staged_detail_count
+FROM news_projection_state s JOIN news_projection_generations g
+ ON g.generation_id=s.active_generation_id WHERE s.id=1
+"@
+    $capabilities = @(Invoke-CoordinatedMigrationD1Query -Sql $capabilitySql)
+    if ($capabilities.Count -ne 1 -or
+        [int]$capabilities[0].projection_tables -ne 5 -or
+        [int]$capabilities[0].projection_indexes -ne 4 -or
+        [int]$capabilities[0].retry_columns -ne 4) {
+        throw "MIGRATION_SCHEMA_CAPABILITY_MISSING"
+    }
+    $state = $capabilities[0]
+    if ([int]$state.legacy_tables -ne 4 -or [int]$state.legacy_decisions -le 0) {
+        throw "MIGRATION_LEGACY_COMPATIBILITY_FAILED"
+    }
+    if ([string]$state.projection_state -ne "CURRENT" -or
+        [string]$state.generation_state -ne "CURRENT" -or
+        [int]$state.index_count -ne [int]$state.detail_count -or
+        [int]$state.index_count -ne [int]$state.staged_index_count -or
+        [int]$state.detail_count -ne [int]$state.staged_detail_count -or
+        [int]$state.missing_detail_count -ne 0 -or
+        [int]$state.invariant_violation_count -ne 0 -or
+        [string]$state.receipt_digest -ne [string]$state.expected_receipt_digest) {
+        throw "MIGRATION_NEWS_CURRENT_INVALID"
+    }
+    $endpoints = Get-CoordinatedMigrationEndpointEvidence `
+        -Candidate $Candidate -Stable $Stable
+    if ([string]$endpoints.news_generation_id -ne [string]$state.active_generation_id -or
+        [string]$endpoints.news_snapshot_id -ne [string]$state.snapshot_id -or
+        [string]$endpoints.news_source_digest -ne [string]$state.source_digest -or
+        [string]$endpoints.news_receipt_digest -ne [string]$state.receipt_digest -or
+        [int]$endpoints.news_index_count -ne [int]$state.index_count -or
+        [int]$endpoints.news_detail_count -ne [int]$state.detail_count) {
+        throw "MIGRATION_NEWS_CURRENT_IDENTITY_MISMATCH"
+    }
+    $migrationHashes = @($MigrationFiles | ForEach-Object {
+        $path = Join-Path $repositoryRoot $_
+        [ordered]@{
+            path = $_
+            sha256 = Get-Sha256BytesHex -Bytes ([System.IO.File]::ReadAllBytes($path))
+        }
+    })
+    return [ordered]@{
+        validation_key = [string]$Candidate.validation_key
+        candidate_git_sha = [string]$Candidate.git_sha
+        candidate_worker_version = [string]$Candidate.worker_version_id
+        stable_git_sha = [string]$Stable.git_sha
+        stable_worker_version = [string]$Stable.worker_version_id
+        database_id = [string]$database.uuid
+        database_name = [string]$database.name
+        migration_files = $migrationHashes
+        applied_migrations = @($ledgerNames)
+        pending_migrations = @()
+        projection_tables = [int]$state.projection_tables
+        projection_indexes = [int]$state.projection_indexes
+        operator_retry_columns = [int]$state.retry_columns
+        legacy_tables = [int]$state.legacy_tables
+        legacy_decisions = [int]$state.legacy_decisions
+        news_generation_id = [string]$state.active_generation_id
+        news_snapshot_id = [string]$state.snapshot_id
+        news_source_digest = [string]$state.source_digest
+        news_receipt_digest = [string]$state.receipt_digest
+        news_index_count = [int]$state.index_count
+        news_detail_count = [int]$state.detail_count
+        stable_read = [int]$endpoints.stable_status
+        candidate_read = [int]$endpoints.candidate_status
+        reverse_safe = $true
+    }
+}
+
+function Get-CoordinatedMigrationReceiptDigest {
+    param([Parameter(Mandatory = $true)][object]$Core)
+    $json = $Core | ConvertTo-Json -Compress -Depth 12
+    Get-Sha256BytesHex -Bytes ([System.Text.Encoding]::UTF8.GetBytes($json))
+}
+
+function New-CoordinatedMigrationReceipt {
+    param([Parameter(Mandatory = $true)][object]$Evidence)
+    $checkedAt = [DateTimeOffset]::UtcNow
+    $core = [ordered]@{
+        schema_version = "coordinated-storage-migration-receipt-v1"
+        checked_at = $checkedAt.ToString("o")
+        expires_at = $checkedAt.Add($coordinatedMigrationReceiptMaxAge).ToString("o")
+        evidence = $Evidence
+    }
+    [pscustomobject]@{
+        schema_version = $core.schema_version
+        checked_at = $core.checked_at
+        expires_at = $core.expires_at
+        evidence = $core.evidence
+        receipt_digest = Get-CoordinatedMigrationReceiptDigest -Core $core
+    }
+}
+
+function Write-CoordinatedMigrationReceipt {
+    param([Parameter(Mandatory = $true)][object]$Receipt)
+    $directory = Split-Path -Parent $coordinatedMigrationReceiptPath
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $temporary = "$coordinatedMigrationReceiptPath.tmp"
+    $Receipt | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $temporary -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination $coordinatedMigrationReceiptPath -Force
+}
+
+function Assert-CoordinatedMigrationReceipt {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$Stable,
+        [Parameter(Mandatory = $true)][string[]]$MigrationFiles
+    )
+    if (-not (Test-Path -LiteralPath $coordinatedMigrationReceiptPath)) {
+        throw "MIGRATION_RECEIPT_MISSING"
+    }
+    $receipt = Get-Content -LiteralPath $coordinatedMigrationReceiptPath -Raw |
+        ConvertFrom-Json
+    $core = [ordered]@{
+        schema_version = [string]$receipt.schema_version
+        checked_at = [string]$receipt.checked_at
+        expires_at = [string]$receipt.expires_at
+        evidence = $receipt.evidence
+    }
+    if ([string]$receipt.schema_version -ne "coordinated-storage-migration-receipt-v1" -or
+        [string]$receipt.receipt_digest -ne
+            (Get-CoordinatedMigrationReceiptDigest -Core $core)) {
+        throw "MIGRATION_RECEIPT_TAMPERED"
+    }
+    $expires = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse([string]$receipt.expires_at, [ref]$expires) -or
+        $expires -le [DateTimeOffset]::UtcNow) {
+        throw "MIGRATION_RECEIPT_STALE"
+    }
+    if ([string]$receipt.evidence.validation_key -ne [string]$Candidate.validation_key -or
+        [string]$receipt.evidence.candidate_git_sha -ne [string]$Candidate.git_sha -or
+        [string]$receipt.evidence.candidate_worker_version -ne
+            [string]$Candidate.worker_version_id) {
+        throw "MIGRATION_RECEIPT_CANDIDATE_MISMATCH"
+    }
+    $live = Get-CoordinatedMigrationLiveEvidence -Candidate $Candidate `
+        -Stable $Stable -MigrationFiles $MigrationFiles
+    $recordedDigest = Get-CoordinatedMigrationReceiptDigest -Core `
+        ([ordered]@{ schema_version="migration-evidence-v1"; evidence=$receipt.evidence })
+    $liveDigest = Get-CoordinatedMigrationReceiptDigest -Core `
+        ([ordered]@{ schema_version="migration-evidence-v1"; evidence=$live })
+    if ($recordedDigest -ne $liveDigest) {
+        throw "MIGRATION_RECEIPT_LIVE_EVIDENCE_MISMATCH"
+    }
+    return $receipt
+}
+
+function Verify-CandidateCoordinatedMigration {
+    $state = Get-ReleaseControlState
+    if (-not $state -or -not $state.candidate -or -not $state.stable) {
+        throw "MIGRATION_CANDIDATE_UNAVAILABLE"
+    }
+    $candidate = $state.candidate
+    if ([string]$candidate.validation_state -ne "REVIEW_REQUIRED" -or
+        [string]$candidate.validation.reason -notin @(
+            "COORDINATED_STORAGE_MIGRATION_REQUIRED",
+            "COORDINATED_STORAGE_MIGRATION_EVIDENCE_INVALID"
+        ) -or
+        [string]$candidate.validation.key -ne [string]$candidate.validation_key) {
+        throw "MIGRATION_EXACT_REVIEW_REQUIRED"
+    }
+    $approvalGate = Get-CandidateCompatibilityApprovalGate -Candidate $candidate
+    if ([string]$approvalGate.state -ne "PASSED") {
+        throw "MIGRATION_APPROVAL_REJECTED:$([string]$approvalGate.reason)"
+    }
+    $changed = @(Get-CandidateChangedFiles -StableRevision ([string]$state.stable.git_sha) `
+        -CandidateRevision ([string]$candidate.git_sha))
+    $files = @(Get-CoordinatedMigrationFiles -ChangedFiles $changed)
+    $evidence = Get-CoordinatedMigrationLiveEvidence -Candidate $candidate `
+        -Stable $state.stable -MigrationFiles $files
+    $receipt = New-CoordinatedMigrationReceipt -Evidence $evidence
+    Write-CoordinatedMigrationReceipt -Receipt $receipt
+    $verified = Assert-CoordinatedMigrationReceipt -Candidate $candidate `
+        -Stable $state.stable -MigrationFiles $files
+    $candidate.compatibility_state = "COORDINATED_STORAGE_MIGRATION_PASSED"
+    $candidate.validation_state = "NEW"
+    $candidate.validation = [pscustomobject]@{
+        key = [string]$candidate.validation_key
+        repository = "PASSED"; windows = "PASSED"; cloudflare = "PENDING"
+        reason = "COORDINATED_STORAGE_MIGRATION_PASSED"
+        migration_receipt_digest = [string]$verified.receipt_digest
+        migration_database_id = [string]$verified.evidence.database_id
+        migration_files = @($verified.evidence.migration_files)
+        tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+    $candidate | Add-Member -NotePropertyName migration_acceptance `
+        -NotePropertyValue ([pscustomobject]@{
+            validation_key = [string]$candidate.validation_key
+            receipt_digest = [string]$verified.receipt_digest
+            database_id = [string]$verified.evidence.database_id
+            checked_at = [string]$verified.checked_at
+            expires_at = [string]$verified.expires_at
+        }) -Force
+    $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+    Write-ReleaseControlState -State $state
+    Write-ReleaseHistory -Event "COORDINATED_STORAGE_MIGRATION_PASSED" `
+        -Release $candidate -Detail @{
+            validation_key = [string]$candidate.validation_key
+            receipt_digest = [string]$verified.receipt_digest
+            database_id = [string]$verified.evidence.database_id
+            migration_files = @($files)
+        }
+    return $candidate
 }
 
 function Get-RequiredGitHubChecksResult {
@@ -2906,19 +3281,49 @@ function Invoke-AutomaticCandidateValidation {
         }
         $compatibility = Get-CandidateCompatibilityRequirement -ChangedFiles $changed
         if ([string]$compatibility.state -eq "COORDINATED_STORAGE_MIGRATION_REQUIRED") {
-            $state.candidate.compatibility_state = "REVIEW_REQUIRED"
-            $state.candidate.validation_state = "REVIEW_REQUIRED"
-            $state.candidate.validation = [pscustomobject]@{
-                key = [string]$Candidate.validation_key
-                repository = "PASSED"
-                windows = "PASSED"
-                cloudflare = "PENDING"
-                reason = "COORDINATED_STORAGE_MIGRATION_REQUIRED"
-                review_files = @($compatibility.files)
-                tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+            $accepted = [bool]($state.candidate.migration_acceptance -and
+                [string]$state.candidate.migration_acceptance.validation_key -eq
+                    [string]$Candidate.validation_key)
+            if ($accepted) {
+                try {
+                    $receipt = Assert-CoordinatedMigrationReceipt `
+                        -Candidate $Candidate -Stable $state.stable `
+                        -MigrationFiles @($compatibility.files)
+                    if ([string]$receipt.receipt_digest -ne
+                        [string]$state.candidate.migration_acceptance.receipt_digest) {
+                        throw "MIGRATION_RECEIPT_AUTHORITY_MISMATCH"
+                    }
+                    $state.candidate.compatibility_state =
+                        "COORDINATED_STORAGE_MIGRATION_PASSED"
+                } catch {
+                    $state.candidate.compatibility_state = "REVIEW_REQUIRED"
+                    $state.candidate.validation_state = "REVIEW_REQUIRED"
+                    $state.candidate.validation = [pscustomobject]@{
+                        key = [string]$Candidate.validation_key
+                        repository = "PASSED"; windows = "PASSED"; cloudflare = "PENDING"
+                        reason = "COORDINATED_STORAGE_MIGRATION_EVIDENCE_INVALID"
+                        migration_reason = Protect-PreflightDiagnosticText $_.Exception.Message
+                        review_files = @($compatibility.files)
+                        tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+                    }
+                    Write-ReleaseControlState -State $state
+                    return $false
+                }
+            } else {
+                $state.candidate.compatibility_state = "REVIEW_REQUIRED"
+                $state.candidate.validation_state = "REVIEW_REQUIRED"
+                $state.candidate.validation = [pscustomobject]@{
+                    key = [string]$Candidate.validation_key
+                    repository = "PASSED"
+                    windows = "PASSED"
+                    cloudflare = "PENDING"
+                    reason = "COORDINATED_STORAGE_MIGRATION_REQUIRED"
+                    review_files = @($compatibility.files)
+                    tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+                }
+                Write-ReleaseControlState -State $state
+                return $false
             }
-            Write-ReleaseControlState -State $state
-            return $false
         }
         if ([string]$compatibility.state -eq "PLATFORM_CONFIG_REVIEW_REQUIRED") {
             $approved = [bool]($state.candidate.compatibility_approval -and
@@ -6110,6 +6515,7 @@ function Get-ControlCenterReleasePresentation {
             promote_reason = "Not bootstrapped"
             can_reverse = $false
             reverse_reason = "Not bootstrapped"
+            can_verify_migration = $false
             can_approve_compatibility = $false
             compatibility_review_reason = "Not bootstrapped"
         }
@@ -6138,6 +6544,15 @@ function Get-ControlCenterReleasePresentation {
         [string]$Release.candidate.validation.reason -eq "PLATFORM_CONFIG_REVIEW_REQUIRED" -and
         [string]$Release.candidate.validation.key -eq [string]$Release.candidate.validation_key -and
         [bool]$Release.candidate.validation.resources_verified -and
+        $candidateKind -eq $productionCandidateArtifactKind -and
+        [string]$Release.candidate.branch -eq "main")
+    $canVerifyMigration = [bool]($Release.candidate -and
+        $candidateState -eq "REVIEW_REQUIRED" -and
+        [string]$Release.candidate.validation.reason -in @(
+            "COORDINATED_STORAGE_MIGRATION_REQUIRED",
+            "COORDINATED_STORAGE_MIGRATION_EVIDENCE_INVALID"
+        ) -and
+        [string]$Release.candidate.validation.key -eq [string]$Release.candidate.validation_key -and
         $candidateKind -eq $productionCandidateArtifactKind -and
         [string]$Release.candidate.branch -eq "main")
 
@@ -6219,6 +6634,7 @@ function Get-ControlCenterReleasePresentation {
             $Release.previous_stable -and $Release.previous_stable_rollback_eligible -and
             $controlBundleReady)
         reverse_reason = $reverseReason
+        can_verify_migration = $canVerifyMigration
         can_approve_compatibility = $canApproveCompatibility
         compatibility_review_reason = if ($Release.candidate -and
             $Release.candidate.validation.reason) {
@@ -6448,6 +6864,18 @@ function Test-ControlCenterReleaseOperationCommitted {
         [string]$ExpectedValidationKey = ""
     )
     switch ($Operation) {
+        "VerifyMigrationCompatibility" {
+            return [bool]($ExpectedValidationKey -and $ReleaseState -and
+                $ReleaseState.candidate -and
+                [string]$ReleaseState.candidate.validation_key -eq $ExpectedValidationKey -and
+                [string]$ReleaseState.candidate.migration_acceptance.validation_key -eq
+                    $ExpectedValidationKey -and
+                [string]$ReleaseState.candidate.compatibility_state -eq
+                    "COORDINATED_STORAGE_MIGRATION_PASSED" -and
+                (Test-ControlCenterReleaseHistoryContains `
+                    -Event "COORDINATED_STORAGE_MIGRATION_PASSED" `
+                    -ExpectedRelease $ReleaseState.candidate))
+        }
         "ApproveCompatibility" {
             return [bool]($ExpectedValidationKey -and
                 (Test-ControlCenterApprovalCommitted -ReleaseState $ReleaseState `
@@ -6624,6 +7052,13 @@ function Invoke-ControlCenterOperationAction {
             try { return Approve-CandidateCompatibility }
             finally { Exit-ReleaseTransactionLock }
         }
+        "VerifyMigrationCompatibility" {
+            if (-not (Enter-ReleaseTransactionLock)) {
+                throw "Another release transaction is active."
+            }
+            try { return Verify-CandidateCoordinatedMigration }
+            finally { Exit-ReleaseTransactionLock }
+        }
         default { throw "Unsupported Control Center operation: $Operation" }
     }
 }
@@ -6652,9 +7087,14 @@ function Invoke-ControlCenterStructuredOperation {
     if ($operationError) {
         $diagnostic = Protect-PreflightDiagnosticText `
             -Value $operationError.Exception.Message
-        $committed = [bool]($Operation -eq "ApproveCompatibility" -and
-            (Test-ControlCenterApprovalCommitted -ReleaseState $after `
-                -ValidationKey $expectedValidationKey))
+        $committed = [bool](
+            ($Operation -eq "ApproveCompatibility" -and
+                (Test-ControlCenterApprovalCommitted -ReleaseState $after `
+                    -ValidationKey $expectedValidationKey)) -or
+            ($Operation -eq "VerifyMigrationCompatibility" -and
+                (Test-ControlCenterReleaseOperationCommitted -Operation $Operation `
+                    -ReleaseState $after -ExpectedValidationKey $expectedValidationKey))
+        )
         $result = New-ControlCenterOperationResult -Operation $Operation `
             -Success $committed -Committed $committed `
             -Reason $(if ($committed) {
@@ -6673,14 +7113,14 @@ function Invoke-ControlCenterStructuredOperation {
         return 1
     }
     $committed = if ($Operation -in @(
-        "ApproveCompatibility", "PromoteCandidate", "ReverseStable"
+        "VerifyMigrationCompatibility", "ApproveCompatibility", "PromoteCandidate", "ReverseStable"
     )) {
         Test-ControlCenterReleaseOperationCommitted -Operation $Operation `
             -ReleaseState $after -ExpectedRelease $expectedRelease `
             -ExpectedValidationKey $expectedValidationKey
     } else { $true }
     $semanticSuccess = [bool]($Operation -notin @(
-        "ApproveCompatibility", "PromoteCandidate", "ReverseStable"
+        "VerifyMigrationCompatibility", "ApproveCompatibility", "PromoteCandidate", "ReverseStable"
     ) -or $committed)
     $result = New-ControlCenterOperationResult -Operation $Operation `
         -Success $semanticSuccess -Committed $committed `
@@ -6727,7 +7167,7 @@ function Test-WpfControlCenterLayout {
             "RootScrollViewer", "RootLayout", "ReleaseGrid", "StableCard",
             "CandidateCard", "PreviousCard", "CandidateChecks",
             "CandidateReason", "OpenStableButton", "OpenCandidateButton",
-            "ApproveCompatibilityButton", "PromoteButton", "ReverseButton",
+            "VerifyMigrationButton", "ApproveCompatibilityButton", "PromoteButton", "ReverseButton",
             "CandidateTechnicalEvidence", "FooterDisclaimer",
             "ControlPlaneIdentity", "BusinessRuntimeIdentity"
         )
@@ -6756,7 +7196,7 @@ function Test-WpfControlCenterLayout {
                 $reachable = $true
                 foreach ($name in @(
                     "OpenStableButton", "OpenCandidateButton",
-                    "ApproveCompatibilityButton", "PromoteButton", "ReverseButton"
+                    "VerifyMigrationButton", "ApproveCompatibilityButton", "PromoteButton", "ReverseButton"
                 )) {
                     $control = [Windows.FrameworkElement]$window.FindName($name)
                     if ($control.ActualWidth -le 0 -or $control.ActualHeight -le 0) {
@@ -6814,13 +7254,14 @@ function Show-WpfControlCenter {
             (Find-WpfControl "ServiceList").IsEnabled = -not $Busy
             if ($Busy) {
                 foreach ($name in @(
-                    "ApproveCompatibilityButton", "PromoteButton", "ReverseButton"
+                    "VerifyMigrationButton", "ApproveCompatibilityButton", "PromoteButton", "ReverseButton"
                 )) {
                     (Find-WpfControl $name).IsEnabled = $false
                 }
             }
             if (-not $Busy) { return }
             $state = switch ($Operation) {
+                "VerifyMigrationCompatibility" { "VERIFYING MIGRATION" }
                 "ApproveCompatibility" { "APPROVING" }
                 "PromoteCandidate" { "PROMOTING" }
                 "ReverseStable" { "REVERSING" }
@@ -6953,6 +7394,7 @@ function Show-WpfControlCenter {
                     validation_key = [string]$release.candidate.validation_key
                     validation_run = if ($validation) { $validation.validation_run } else { $null }
                     reason = $reason
+                    migration_acceptance = $release.candidate.migration_acceptance
                     first_failure = $directed.first_failure
                     routes = if ($validation) { $validation.routes } else { @() }
                 }
@@ -6960,6 +7402,7 @@ function Show-WpfControlCenter {
             } else { "No exact-version evidence loaded." }
             $operationActive = Test-WpfOperationActive
             (Find-WpfControl "PromoteButton").IsEnabled = [bool]($releaseView.can_promote -and -not $operationActive)
+            (Find-WpfControl "VerifyMigrationButton").IsEnabled = [bool]($releaseView.can_verify_migration -and -not $operationActive)
             (Find-WpfControl "ApproveCompatibilityButton").IsEnabled = [bool]($releaseView.can_approve_compatibility -and -not $operationActive)
             (Find-WpfControl "OpenCandidateButton").IsEnabled = [bool]($release -and $release.candidate -and $release.candidate.browser_url)
             (Find-WpfControl "PreviousState").Text = if ($release -and $release.previous_stable) { "AVAILABLE" } else { "UNAVAILABLE" }
@@ -7005,6 +7448,16 @@ function Show-WpfControlCenter {
             if ($state -and $state.candidate -and $state.candidate.browser_url) {
                 Start-Process ([string]$state.candidate.browser_url)
             }
+        })
+        (Find-WpfControl "VerifyMigrationButton").Add_Click({
+            [void](Invoke-ControlCenterUiCallback -Callback {
+                $state = Get-ReleaseControlState
+                $files = @($state.candidate.validation.review_files) -join "`n"
+                if ([System.Windows.MessageBox]::Show(
+                    "Verify the exact Candidate migration ledger, live D1 capabilities, Stable/Reverse compatibility, and News CURRENT?`n`n$files",
+                    "Verify Coordinated Migration", "YesNo", "Warning"
+                ) -eq "Yes") { Invoke-WpfOperation "VerifyMigrationCompatibility" }
+            } -OnFailure { param($message) Show-WpfCallbackFailure $message })
         })
         (Find-WpfControl "ApproveCompatibilityButton").Add_Click({
             [void](Invoke-ControlCenterUiCallback -Callback {
@@ -7106,7 +7559,7 @@ function Show-WpfControlCenter {
                         "$finished result unavailable", "OK", "Warning"
                     ) | Out-Null
                 } elseif ($finished -in @(
-                    "ApproveCompatibility", "PromoteCandidate", "ReverseStable"
+                    "VerifyMigrationCompatibility", "ApproveCompatibility", "PromoteCandidate", "ReverseStable"
                 )) {
                     [System.Windows.MessageBox]::Show(
                         "$finished completed and authoritative state was refreshed.",
@@ -7641,6 +8094,24 @@ function Show-ControlCenter {
     $candidateCard.Panel.Controls.Add($openCandidateButton)
     [void]$actionButtons.Add($openCandidateButton)
 
+    $verifyMigrationButton = New-UiButton `
+        -Text "Verify Migration" -Width 150
+    $verifyMigrationButton.Location = New-Object System.Drawing.Point(136, 235)
+    $verifyMigrationButton.Anchor = "Left,Bottom"
+    $verifyMigrationButton.Enabled = $false
+    $verifyMigrationButton.Visible = $false
+    $verifyMigrationButton.Add_Click({
+        $state = Get-ReleaseControlState
+        if (-not $state -or -not $state.candidate) { return }
+        $files = @($state.candidate.validation.review_files) -join "`n"
+        $message = "Verify the exact Candidate migration ledger, live D1 capabilities, Stable/Reverse compatibility, and News CURRENT?`n`n$files"
+        if ([System.Windows.Forms.MessageBox]::Show(
+            $message, "Verify Coordinated Migration", "YesNo", "Warning"
+        ) -eq "Yes") { Invoke-GuiOperation -Operation "VerifyMigrationCompatibility" }
+    })
+    $candidateCard.Panel.Controls.Add($verifyMigrationButton)
+    [void]$actionButtons.Add($verifyMigrationButton)
+
     $approveCompatibilityButton = New-UiButton `
         -Text "Approve Compatibility" -Width 156
     $approveCompatibilityButton.Location = New-Object System.Drawing.Point(136, 235)
@@ -7848,6 +8319,7 @@ function Show-ControlCenter {
             "-OperationResultPath", ('"{0}"' -f $script:guiOperationResultPath)
         )
         $busyMessage = switch ($Operation) {
+            "VerifyMigrationCompatibility" { "VERIFYING MIGRATION | tracked background operation in progress" }
             "ApproveCompatibility" { "APPROVING | tracked background operation in progress" }
             "PromoteCandidate" { "PROMOTING | tracked background operation in progress" }
             "ReverseStable" { "REVERSING | tracked background operation in progress" }
@@ -7977,6 +8449,8 @@ function Show-ControlCenter {
             $toolTip.SetToolTip($promoteButton, $releaseView.promote_reason)
             $approveCompatibilityButton.Visible = $releaseView.can_approve_compatibility
             $approveCompatibilityButton.Enabled = $releaseView.can_approve_compatibility
+            $verifyMigrationButton.Visible = $releaseView.can_verify_migration
+            $verifyMigrationButton.Enabled = $releaseView.can_verify_migration
             $toolTip.SetToolTip(
                 $approveCompatibilityButton, $releaseView.compatibility_review_reason
             )
@@ -8114,7 +8588,7 @@ function Show-ControlCenter {
                 "$finished result unavailable", "OK", "Warning"
             ) | Out-Null
         } elseif ($finished -in @(
-            "BootstrapRelease", "ApproveCompatibility", "PromoteCandidate", "ReverseStable"
+            "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "PromoteCandidate", "ReverseStable"
         )) {
             [System.Windows.Forms.MessageBox]::Show(
                 "$finished completed and authoritative state was refreshed.",
@@ -8180,7 +8654,7 @@ if ($OperationResultPath) {
     $structuredActions = @(
         "Start", "Stop", "Restart", "ServiceStart", "ServiceStop",
         "DiscoverCandidate", "ReconcileRelease", "PromoteCandidate",
-        "ReverseStable", "ApproveCompatibility"
+        "ReverseStable", "VerifyMigrationCompatibility", "ApproveCompatibility"
     )
     if ($Action -notin $structuredActions) {
         [Console]::Error.WriteLine("Unsupported structured operation: $Action")
@@ -8251,6 +8725,9 @@ switch ($Action) {
         if (-not (Enter-ReleaseTransactionLock)) { throw "Another release transaction is active." }
         try { Initialize-ReleaseControl | ConvertTo-Json -Depth 12 }
         finally { Exit-ReleaseTransactionLock }
+    }
+    "VerifyMigrationCompatibility" {
+        Invoke-ControlCenterOperationAction -Operation $Action | ConvertTo-Json -Depth 12
     }
     "ApproveCompatibility" {
         Invoke-ControlCenterOperationAction -Operation $Action | ConvertTo-Json -Depth 12
