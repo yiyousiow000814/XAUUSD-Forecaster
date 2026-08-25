@@ -10,7 +10,7 @@ export const AUDIT_SNAPSHOT_IDS = Object.freeze({
   stories: 8,
 });
 
-import { validateJsonBytesWithD1 } from "./release-validation";
+import { validateJsonPayloadWithD1 } from "./release-validation";
 
 export type SnapshotWriteResult = "stored" | "validated" | "invalid" | "too_large";
 
@@ -32,6 +32,12 @@ const snapshotUpsertSql = `WITH incoming(payload) AS (SELECT CAST(? AS TEXT))
      SELECT ?, payload, ? FROM incoming WHERE json_valid(payload)
      ON CONFLICT(id) DO UPDATE SET
        payload=excluded.payload, received_at=excluded.received_at`;
+
+// D1's bridge charges materially more Worker CPU when a large ArrayBuffer is
+// bound than when the same already-bounded UTF-8 JSON is bound as text. Keep
+// smaller snapshots on the zero-decode byte path, but cross the large-payload
+// boundary once as strict UTF-8 before the single D1 operation.
+export const SNAPSHOT_TEXT_BIND_THRESHOLD_BYTES = AUDIT_DETAIL_SNAPSHOT_BYTES;
 
 export function publicStatusJsonExpression() {
   return `json_remove(payload, ${PUBLIC_STATUS_PRIVATE_FIELDS
@@ -108,6 +114,17 @@ function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.slice().buffer;
 }
 
+function snapshotD1Payload(bytes: Uint8Array): string | ArrayBuffer | null {
+  if (bytes.byteLength <= SNAPSHOT_TEXT_BIND_THRESHOLD_BYTES) {
+    return exactArrayBuffer(bytes);
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
 export async function readBoundedBody(
   request: Request,
   maxBytes = MAX_DASHBOARD_SNAPSHOT_BYTES,
@@ -147,9 +164,10 @@ export async function writeDashboardSnapshotBytes(
   snapshotId: number,
   options: { dryRun?: boolean } = {},
 ): Promise<SnapshotWriteResult> {
-  const payload = exactArrayBuffer(bytes);
+  const payload = snapshotD1Payload(bytes);
+  if (payload === null) return "invalid";
   if (options.dryRun) {
-    return await validateJsonBytesWithD1(binding, payload)
+    return await validateJsonPayloadWithD1(binding, payload)
       ? "validated" : "invalid";
   }
   const result = await binding.prepare(snapshotUpsertSql)
@@ -164,7 +182,7 @@ export async function writeDashboardStatusSnapshotBytes(
 ): Promise<SnapshotWriteResult> {
   const payload = exactArrayBuffer(bytes);
   if (options.dryRun) {
-    return await validateJsonBytesWithD1(binding, payload)
+    return await validateJsonPayloadWithD1(binding, payload)
       ? "validated" : "invalid";
   }
   const receivedAt = new Date().toISOString();

@@ -3249,13 +3249,63 @@ test("snapshot byte transport excludes unrelated backing-buffer bytes", async ()
   assert.deepEqual(new Uint8Array(bound), encoded);
 });
 
-test("production snapshot router keeps every sibling on the shared byte boundary", () => {
+test("production snapshot router keeps every sibling on the shared adaptive boundary", () => {
   const router = readFileSync(new URL("../worker/api-router.ts", import.meta.url), "utf8");
+  const snapshot = readFileSync(new URL(
+    "../app/api/_shared/dashboard-snapshot.ts", import.meta.url,
+  ), "utf8");
   assert.match(router, /readBoundedBodyBytes\(request, maxBytes\)/);
   assert.match(router, /writeDashboardStatusSnapshotBytes\(body\.bytes, env\.DB/);
   assert.match(router, /writeDashboardSnapshotBytes\(body\.bytes, env\.DB, id/);
   assert.doesNotMatch(router, /readBoundedBody\(request, maxBytes\)/);
   assert.doesNotMatch(router, /writeSerializedDashboardSnapshot/);
+  assert.match(snapshot, /SNAPSHOT_TEXT_BIND_THRESHOLD_BYTES = AUDIT_DETAIL_SNAPSHOT_BYTES/);
+  assert.match(snapshot, /new TextDecoder\("utf-8", \{ fatal: true \}\)/);
+});
+
+test("large snapshot siblings bind strict UTF-8 text once while small siblings retain bytes", async () => {
+  const {
+    SNAPSHOT_TEXT_BIND_THRESHOLD_BYTES, writeDashboardSnapshot,
+  } = await import("../app/api/_shared/dashboard-snapshot.ts");
+  const bound = [];
+  const binding = {
+    prepare() {
+      return {
+        bind(value) {
+          bound.push(value);
+          return { first: async () => ({ valid: 1 }) };
+        },
+      };
+    },
+  };
+  const small = JSON.stringify({ headline: "黄金上涨" });
+  const large = JSON.stringify({ headline: "黄金上涨", body: "金".repeat(
+    SNAPSHOT_TEXT_BIND_THRESHOLD_BYTES,
+  ) });
+  assert.equal(await writeDashboardSnapshot(new Request("https://example.test/api/audit", {
+    method: "POST", body: small,
+  }), binding, 8, { dryRun: true }), "validated");
+  assert.equal(await writeDashboardSnapshot(new Request("https://example.test/api/learning", {
+    method: "POST", body: large,
+  }), binding, 3, { dryRun: true }), "validated");
+  assert.ok(bound[0] instanceof ArrayBuffer);
+  assert.equal(typeof bound[1], "string");
+  assert.equal(bound[1], large);
+});
+
+test("large snapshot strict UTF-8 boundary rejects malformed bytes before D1", async () => {
+  const {
+    SNAPSHOT_TEXT_BIND_THRESHOLD_BYTES, writeDashboardSnapshot,
+  } = await import("../app/api/_shared/dashboard-snapshot.ts");
+  let prepared = false;
+  const binding = { prepare() { prepared = true; throw new Error("must not bind"); } };
+  const malformed = new Uint8Array(SNAPSHOT_TEXT_BIND_THRESHOLD_BYTES + 1);
+  malformed.fill(0xff);
+  const request = new Request("https://example.test/api/market-chart", {
+    method: "POST", body: malformed,
+  });
+  assert.equal(await writeDashboardSnapshot(request, binding, 2, { dryRun: true }), "invalid");
+  assert.equal(prepared, false);
 });
 
 test("split audit routes share authenticated bounded zero-mutation validation", () => {
