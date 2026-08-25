@@ -1,0 +1,25 @@
+# High-level semantic nodes bind to their declared repository-relative code paths.
+# The compiler applies exact-one-or-more cardinality to CURRENT_PATH nodes.
+# Relationship claims remain DECLARED unless a dedicated extractor observes them.
+[defaults]
+node_selector = "declared_code_paths"
+node_minimum = 1
+edge_selector = "endpoint_source_context"
+edge_minimum = 1
+
+[[writer_authority]]
+table = "decisions"
+paths = ["xauusd_forecaster/ledger.py"]
+
+[[writer_authority]]
+table = "predictions"
+paths = ["xauusd_forecaster/evidence/ledger.py"]
+
+[[writer_authority]]
+table = "news_projection_state"
+paths = ["web/app/api/_shared/news-projection-store.ts"]
+
+[[writer_authority]]
+table = "market_decisions"
+paths = ["web/app/api/market-history/route.ts"]
+

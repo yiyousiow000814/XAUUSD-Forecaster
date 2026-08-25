@@ -243,6 +243,27 @@ degraded evidence.
 **Map notation:** each subsystem states its failure domain and the work that
 continues outside it.
 
+## Generated architecture evidence
+
+Repository source, semantic declarations, and executable contracts are the
+authoritative compiler inputs. Files under `architecture/generated/` are
+derived and MUST NOT be edited directly. Architecture-affecting changes MUST
+regenerate artifacts, pass the byte-for-byte drift check, and review the
+generated architecture diff.
+
+Static evidence proves only what its extractor observes. Imports do not prove
+owner, authority, criticality, runtime execution, or failure isolation.
+Observed imports and allowed dependency policy MUST remain separate. Semantic
+claims MUST bind to current source facts with explicit cardinality, and a
+declaration alone MUST NOT be presented as verified. Exact, fallback,
+unresolved, stale, contradicted, test, runtime, and mutation evidence remain
+distinct categories. Generated artifacts MUST contain repository-relative
+spans and normalized metadata only, never secrets or production values.
+
+**Authoritative detail:** [Compiler design](../design/ARCHITECTURE_EVIDENCE_COMPILER.md),
+[artifact protocol](../protocols/ARCHITECTURE_ARTIFACTS.md), and
+[evidence runbook](../runbooks/ARCHITECTURE_EVIDENCE.md).
+
 ## Code organization consequences
 
 - Packages and folders should correspond to subsystem owners where practical.

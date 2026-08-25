@@ -156,7 +156,7 @@ def test_manifest_byte_bound_is_enforced() -> None:
 
 
 def test_compact_rows_restore_full_graph_with_meaningful_headroom() -> None:
-    raw = (ROOT / "architecture" / "manifest.json").read_bytes()
+    raw = (ROOT / "architecture" / "generated" / "explorer-manifest.json").read_bytes()
     source = json.loads(raw)
     assert source["node_fields"] == NODE_FIELDS
     assert source["edge_fields"] == EDGE_FIELDS
@@ -195,7 +195,7 @@ def test_disclosure_metadata_is_bounded_to_each_view() -> None:
 
 
 def test_compact_row_width_fails_closed() -> None:
-    source = json.loads((ROOT / "architecture" / "manifest.json").read_bytes())
+    source = json.loads((ROOT / "architecture" / "generated" / "explorer-manifest.json").read_bytes())
     source["nodes"][0].pop()
     with pytest.raises(ValueError, match="row width"):
         expand_compact_manifest(source)

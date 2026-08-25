@@ -31,8 +31,10 @@ Architecture documents affected:
 - After changing a subsystem boundary, update its detailed map and the Codebase
   Map. See the architecture rules contract for evidence requirements.
 - Any architecture, owner, boundary, dependency, or canonical path change must
-  update `architecture/manifest.json` and the relevant architecture document in
-  the same PR. Validate it with `scripts/check_architecture_manifest.py`.
+  update the relevant declaration/contract and architecture document, regenerate
+  `architecture/generated/`, and review the generated architecture diff in the
+  same PR. Never edit generated architecture artifacts directly. Validate with
+  `scripts/compile_architecture.py --check` and the evidence verifier.
 - Add a manifest node or edge when introducing a real subsystem, process,
   owner, store, or cross-boundary dependency. An ordinary internal helper or
   behavior-preserving refactor does not become an architecture node. Never
@@ -41,7 +43,7 @@ Architecture documents affected:
   convergence relationships. They must remain orientation-independent, omit
   absolute coordinates, and automatically place unlisted nodes.
 - Architecture Explorer views must declare navigation role, audience, parent,
-  and progressive-disclosure metadata in `architecture/manifest.json`. Keep one
+  and progressive-disclosure metadata in `architecture/declarations/`. Keep one
   beginner System Overview; reach beginner subsystems through node drill-down
   and keep advanced/campaign views behind the Advanced or Reference surface.
 - Calculate Explorer layout, port anchors, and routes from the complete current
@@ -51,6 +53,11 @@ Architecture documents affected:
   visibility through one tested interaction reducer. A node tap selects the
   path first; sheet close preserves that path. Mobile canvas height comes from
   the visual viewport, while graph bounds remain camera input only.
+- Source extraction proves observed structure, not owner, authority,
+  criticality, or failure isolation. Bind those semantic declarations to source
+  facts and keep DECLARED, STATIC_MATCH, test, runtime, mutation, stale, and
+  contradicted evidence distinct. Tests claim contract protection only through
+  the contract evidence registry; surviving critical mutations remain visible.
 
 ## Before Adding Code
 

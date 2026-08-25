@@ -110,7 +110,7 @@ function expandArchitectureManifest(source: Record<string, unknown>) {
 }
 
 export function loadArchitectureManifest(root = resolve("..")) {
-  const path = resolve(root, "architecture/manifest.json");
+  const path = resolve(root, "architecture/generated/explorer-manifest.json");
   const raw = readFileSync(path, "utf8");
   if (new TextEncoder().encode(raw).byteLength > MANIFEST_LIMIT) {
     throw new Error(`Architecture manifest exceeds ${MANIFEST_LIMIT} bytes`);

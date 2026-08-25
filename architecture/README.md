@@ -1,32 +1,39 @@
-# Architecture Explorer Manifest
+# Generated Architecture Evidence
 
-`manifest.json` is the single machine-readable source used by the private
-Architecture Explorer. Detailed Markdown contracts remain authoritative for
-full rules and explanations.
+The private Architecture Explorer consumes deterministic artifacts under
+`architecture/generated/`. Those files are compiled from repository source,
+small human-owned semantic declarations under `architecture/declarations/`,
+and executable contracts under `architecture/contracts/`; they must never be
+edited directly. Detailed Markdown contracts remain authoritative for full
+rules and explanations.
 
 ## Architecture gate
 
 ```text
-Owner: Architecture manifest and private Admin presentation
-Authoritative state/store: Git-tracked architecture/manifest.json
-Execution boundary: Bounded build-time loader to the lazy Admin React Flow/Dagre chunk
+Owner: Offline architecture compiler and private Admin presentation
+Authoritative state/store: Repository source plus architecture/declarations and architecture/contracts; generated JSON is derived
+Execution boundary: Bounded local/CI compilation and build-time loader to the lazy Admin React Flow/Dagre chunk
 Critical or optional: Optional private static surface
 Maximum work per operation: One manifest no larger than 65,536 serialized bytes
-Incremental cursor/revision/checkpoint: Manifest schema and immutable build SHA
+Incremental cursor/revision/checkpoint: Stable source digest, artifact schema, and immutable build SHA
 Failure domain: Build/validation and private Explorer chunk only; no runtime API or store
-Last-good/recovery behavior: Malformed manifests fail the build; reverting the static chunk restores the prior viewer without data migration
+Last-good/recovery behavior: Stale or malformed output fails closed; regenerate from source or revert the compiler/declaration change
 Architecture documents affected: Architecture README, Codebase Map, Web and Cloudflare design, Explorer audit
 ```
 
 ## Maintenance contract
 
-- Update the manifest and the relevant architecture document in the same PR
-  whenever an owner, boundary, process, state/store, path, or dependency changes.
+- Run `python scripts/compile_architecture.py --root .` after an architecture-
+  affecting source or declaration change, then review the generated diff.
+- `--check` must be byte-clean. Manual edits to generated files are rejected.
+- Source extraction automatically inventories ordinary code structure. Owner,
+  authority, criticality, failure behavior, learner copy, and view taxonomy
+  remain explicit semantic declarations and must not be inferred from imports.
 - Keep `runtime_state` separate from `implementation_state`. A pending PR is
   `PENDING` even when its implementation exists on a branch.
 - Use repository-relative paths. Code paths must not point into `tests/`, and
   test paths must remain under `tests/` or `web/tests/`.
-- The UI receives this file through the Vite build constant. It must not fetch
+- The UI receives the generated Explorer artifact through the Vite build constant. It must not fetch
   GitHub, parse Markdown, or call an Architecture API at runtime.
 - Detailed invariants belong in `docs/contracts/` or the relevant design map;
   the manifest provides concise navigation, not a duplicate contract system.
@@ -61,7 +68,7 @@ must never run Dagre again, move a node, reassign an anchor, trigger Fit, or
 change zoom. Missing future UI specialization falls back to the manifest view,
 while unlisted semantic nodes retain Dagre auto-placement.
 
-The checked-in representation keeps explicit `node_fields` and `edge_fields`
+The generated Explorer representation keeps explicit `node_fields` and `edge_fields`
 beside compact rows. The bounded build loader restores named node and edge
 objects before client validation. View node membership is derived from its
 complete lane membership, and scenario node/edge paths are derived from the

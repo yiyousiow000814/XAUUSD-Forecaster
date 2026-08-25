@@ -42,6 +42,8 @@ jobs:
           cache: pip
       - name: Install package and test runner
         run: python -m pip install -e . pytest pytest-timeout
+      - name: Verify exact PowerShell architecture evidence
+        run: python scripts/verify_windows_architecture_evidence.py
       - name: Run Windows runtime contracts
         run: >-
           python -m pytest -q --timeout=30 --timeout-method=thread
