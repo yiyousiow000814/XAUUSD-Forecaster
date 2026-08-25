@@ -10,7 +10,7 @@ all implementation PRs and this documentation-only closure PR remain Draft.
 - Latest integrated `main`: `ae8b4d0a28d69075d2b78ff76447345ca72bb39f`
   (#340).
 - Final implementation: Draft PR #328 at
-  `91030a458f5ae1bfc9da59854afb6d910d35b977`.
+  `4becead5d1ab71e3ae73b0f052d85f1e5a53ced8`.
 - Closure: Draft PR #302, documentation-only, based directly on #328.
 - Assistant remains `PAUSED`.
 - No merge, Stable movement, production data mutation, provider call, runtime
@@ -42,9 +42,9 @@ live head OID because a commit cannot embed its own hash.
 | 17 | #304 | `feat/private-architecture-explorer` | `8c3db99bbef531eb1d8c72698b2b71972716113e` | `acb063702245745da10afd5fa36d5dcebfd69808` |
 | 18 | #321 | `feat/architecture-source-compiler` | `acb063702245745da10afd5fa36d5dcebfd69808` | `a653e4d9954c6a97f927409f5a5242612b2b01ff` |
 | 19 | #324 | `test/architecture-contract-evidence` | `a653e4d9954c6a97f927409f5a5242612b2b01ff` | `73e80b384b17b778b04f42bf50f700cdf96afa5b` |
-| 20 | #325 | `test/architecture-mutation-audit` | `73e80b384b17b778b04f42bf50f700cdf96afa5b` | `8cdef3eded58e9b76ea1401f559c00499e67b98f` |
-| 21 | #328 | `feat/architecture-evidence-explorer` | `8cdef3eded58e9b76ea1401f559c00499e67b98f` | `91030a458f5ae1bfc9da59854afb6d910d35b977` |
-| 22 | #302 | `chore/modularization-campaign-closure` | `91030a458f5ae1bfc9da59854afb6d910d35b977` | live PR #302 head OID |
+| 20 | #325 | `test/architecture-mutation-audit` | `73e80b384b17b778b04f42bf50f700cdf96afa5b` | `09dd80147f0668e2c53305a2ceeff55123f20add` |
+| 21 | #328 | `feat/architecture-evidence-explorer` | `09dd80147f0668e2c53305a2ceeff55123f20add` | `4becead5d1ab71e3ae73b0f052d85f1e5a53ced8` |
+| 22 | #302 | `chore/modularization-campaign-closure` | `4becead5d1ab71e3ae73b0f052d85f1e5a53ced8` | live PR #302 head OID |
 
 The #326 News Evidence cleanup and #327 staging-ownership behavior were repaired
 at their lowest extracted owner in #292. #329's single-pass News validation was
@@ -101,11 +101,11 @@ traversing the installed dependency target.
 The final exact non-production Version was uploaded to the separate
 `aurum-signal-room-preview` Worker. It was not deployed to traffic:
 
-- Git SHA: `91030a458f5ae1bfc9da59854afb6d910d35b977`.
+- Git SHA: `4becead5d1ab71e3ae73b0f052d85f1e5a53ced8`.
 - Source digest: `3f1740dba1731d1ce38675715944c206e9ae2e3bdb12e0e5f25b7cd6a9166ad1`.
-- Version ID: `2dd07cc1-44b4-49e6-af7d-44c43f3403c2`.
+- Version ID: `da18a1ac-a6fb-4b7e-b33c-fc997ece06e6`.
 - URL:
-  `https://2dd07cc1-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`.
+  `https://da18a1ac-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`.
 - Exact generated-SHA banner, Evidence Inspector, repository-relative source
   spans, module-to-symbol code drill-down, Observed/Allowed/Violations modes,
   and all three mutation survivors were verified on Preview.
@@ -120,7 +120,7 @@ The final exact non-production Version was uploaded to the separate
 - The temporary responsive override was reset and the task-owned browser session
   ended with zero controlled tabs.
 - Screenshots:
-  `docs/audits/screenshots/architecture-evidence-91030a45/preview-1440x900.png`,
+  `docs/audits/screenshots/architecture-evidence-4becead5/preview-1440x900.png`,
   `preview-390x844.png`, and `preview-360x800.png`.
 - Main moved twelve times during required exact-head validation. Immutable intermediate
   Versions `c573df3a-7df4-485d-af2e-8609a8061cbe` and
@@ -136,7 +136,8 @@ The final exact non-production Version was uploaded to the separate
   `bb0fd2ad-f4ad-4ace-9c80-c9846084cf06`,
   `447e1f84-5dde-4c69-abd9-ab358678c9b4`, and
   `91dc1c26-0f83-4235-b316-0f2ef15ef331`, and
-  `6e020dd3-32bb-4cdc-8a02-66ab6ed9bba6` remain superseded at 0% traffic; only
+  `6e020dd3-32bb-4cdc-8a02-66ab6ed9bba6`, and
+  `2dd07cc1-44b4-49e6-af7d-44c43f3403c2` remain superseded at 0% traffic; only
   the final Version above is current evidence.
 
 ### Merge and rollback order
