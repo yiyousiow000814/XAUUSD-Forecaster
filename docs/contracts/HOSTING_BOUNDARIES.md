@@ -109,6 +109,11 @@
   cycle. While eligible cleanup debt remains, the producer must not admit
   another replacement snapshot. Immutable replacement therefore cannot turn
   into unbounded retained duplication even though each request is bounded.
+- A producer may abandon only the staging generation recorded in its own
+  durable state. A foreign busy generation is retained for its owner to advance;
+  cleanup excludes fresh staging snapshots. Prepare reconciles staging receipts
+  with the actual contiguous persisted prefix and replays only from the first
+  gap.
 - Provider-capacity status crosses the dashboard boundary only as bounded,
   secret-safe per-authority/account projections. Forecasting may use a retained
   quota-day summary, but critical status must never scan accumulated provider

@@ -2382,47 +2382,40 @@ def test_news_generation_resumes_remote_offsets_and_bounds_each_cycle(
     assert actions == ["prepare"]
 
 
-def test_news_generation_uses_rejection_reason_to_remove_orphan_staging(
+def test_news_generation_preserves_foreign_staging_owner(
     monkeypatch, tmp_path,
 ) -> None:
     module = _sync_module()
     generation = _projection_fixture(1)
     orphan = "f" * 64
-    attempts = 0
     actions: list[tuple[str, str | None]] = []
     monkeypatch.setattr(
         module, "_get_local_json", lambda url: _projection_local_get(generation, url),
     )
 
     def post(_url, body, _config):
-        nonlocal attempts
         payload = json.loads(body)
         actions.append((payload["action"], payload.get("generation_id")))
         if payload["action"] == "prepare":
-            attempts += 1
-            if attempts == 1:
-                raise module.RemoteInvariantViolation({
-                    "error_code": "NEWS_PROJECTION_STAGING_BUSY",
-                    "violation_count": 1, "staging_generation_id": orphan,
-                })
-            return {"active": False, "next_detail_offset": 0, "next_index_offset": 0}
+            raise module.RemoteInvariantViolation({
+                "error_code": "NEWS_PROJECTION_STAGING_BUSY",
+                "violation_count": 1, "staging_generation_id": orphan,
+            })
         if payload["action"].startswith("stage_"):
             return {"received": len(payload["items"])}
         return {"status": "OK"}
 
     monkeypatch.setattr(module, "_post_json", post)
     monkeypatch.setattr(module, "_verify_news_projection_state", lambda *_a: {})
-    module._sync_news({}, {
-        "local_status_url": "http://local/api/status",
-        "remote_ingest_url": "https://remote/api/ingest", "token": "test",
-        "news_state_file": str(tmp_path / "news-state.json"),
-    })
+    with pytest.raises(module.RemoteInvariantViolation) as error:
+        module._sync_news({}, {
+            "local_status_url": "http://local/api/status",
+            "remote_ingest_url": "https://remote/api/ingest", "token": "test",
+            "news_state_file": str(tmp_path / "news-state.json"),
+        })
 
-    assert actions[:3] == [
-        ("prepare", generation.manifest["generation_id"]),
-        ("abandon", orphan),
-        ("prepare", generation.manifest["generation_id"]),
-    ]
+    assert error.value.error_code == "NEWS_PROJECTION_STAGING_BUSY"
+    assert actions == [("prepare", generation.manifest["generation_id"])]
 
 
 def test_remote_market_chart_is_split_from_status_and_keeps_recent_window() -> None:

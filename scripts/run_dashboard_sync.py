@@ -1679,16 +1679,12 @@ def _sync_news(_local_payload: dict, config: dict) -> None:
         "action": "prepare", "generation_id": generation_id,
         "manifest": manifest,
     }, ensure_ascii=False, separators=(",", ":")).encode()
-    try:
-        prepare = _post_json(news_index_url, prepare_payload, config)
-    except RemoteInvariantViolation as error:
-        orphan = error.evidence.get("staging_generation_id")
-        if error.error_code != "NEWS_PROJECTION_STAGING_BUSY" or not orphan:
-            raise
-        _post_json(news_index_url, json.dumps({
-            "action": "abandon", "generation_id": orphan,
-        }, separators=(",", ":")).encode(), config)
-        prepare = _post_json(news_index_url, prepare_payload, config)
+    # A busy generation may belong to another exact producer (for example the
+    # still-active Stable mirror while a Candidate bootstrap is replaying).
+    # Only the generation recorded in this producer's own state may be
+    # abandoned above. Preserve a foreign staging generation and let the
+    # caller retry after the owning producer advances it.
+    prepare = _post_json(news_index_url, prepare_payload, config)
     detail_offset = int(prepare.get("next_detail_offset", 0))
     index_offset = int(prepare.get("next_index_offset", 0))
     work = 0
