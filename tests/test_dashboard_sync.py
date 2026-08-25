@@ -1076,6 +1076,11 @@ def test_critical_status_excludes_growing_resources_and_keeps_references() -> No
     module = _sync_module()
     body = "完整正文" * 2_000
     payload = {
+        "news_metrics": {
+            "schema_version": "news-metrics-v1",
+            "articles": {"received": 7_678, "stored_revisions": 7_681},
+            "events": {"independent": 3_469, "currently_model_eligible": 115},
+        },
         "training": {"complete_rows": 200, "models": [{"duplicate": body}]},
         "learning_curves": {
             "models": [
@@ -1137,6 +1142,7 @@ def test_critical_status_excludes_growing_resources_and_keeps_references() -> No
     assert mirrored["news_evidence_resource"] == "/api/news-evidence"
     assert mirrored["audit_resource"] == "/api/audit"
     assert mirrored["learning_resource"] == "/api/learning"
+    assert mirrored["news_metrics"] == payload["news_metrics"]
     assert detail_rows[0]["payload"]["summary_zh"] == body
     assert index_rows[0]["content_fetch_status"] == "UNAVAILABLE"
     assert index_rows[0]["content_error_type"] == "HTTPError"

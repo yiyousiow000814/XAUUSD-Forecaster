@@ -10,7 +10,7 @@ from typing import Any
 CRITICAL_STATUS_FIELDS = (
     "generated_at", "production_contract", "dashboard_sync", "forward_epoch",
     "system", "operational_health", "latest", "research_forecast", "u5_context",
-    "counts", "outcome_summary", "news_source_health",
+    "counts", "outcome_summary", "news_metrics", "news_source_health",
     "news_input_coverage", "annotation_queue", "gemini_quota", "gemini_31_quota",
     "gemma_quota", "gemini_embedding_quota", "llm_routing", "training",
     "factor_coverage", "sources",
