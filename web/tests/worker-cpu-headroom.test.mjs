@@ -68,6 +68,94 @@ test("seeds missing bounded audit metrics exactly once during storage handover",
   assert.equal(inserted.received_at, receivedAt);
 });
 
+test("rebuilds the legacy rollback News projection from verified CURRENT", () => {
+  const beforeSeed = migrations.filter(
+    name => name < "0025_seed_legacy_news_reverse_projection.sql",
+  );
+  const handover = new D1TestDatabase(beforeSeed);
+  const generationId = "c".repeat(64);
+  const snapshotId = "d".repeat(64);
+  const sourceDigest = "e".repeat(64);
+  const receiptDigest = "f".repeat(64);
+  const detailKey = "a".repeat(64);
+  const detailHash = "b".repeat(64);
+  const receivedAt = "2026-08-26T00:00:00.000Z";
+  const indexPayload = JSON.stringify({
+    detail_key: detailKey,
+    category: "央行政策",
+    cluster_id: "cluster-1",
+    collector_first_seen_time: receivedAt,
+    source_published_time: receivedAt,
+    parsed_at: receivedAt,
+    annotation_status: "READY",
+    model_visibility: "MODEL_VISIBLE",
+    mirror_contract: "news-projection-generation-v3",
+  });
+  const detailPayload = JSON.stringify({
+    headline: "黄金与美元",
+    nullable: null,
+    score: 1.25,
+  });
+  handover.database.prepare(
+    `INSERT INTO news_projection_generations
+      (generation_id,snapshot_id,state,contract_version,window_start,watermark,
+       expected_index_count,expected_detail_count,withdrawal_count,source_digest,
+       expected_receipt_digest,receipt_digest,next_detail_offset,next_index_offset,
+       staged_detail_count,staged_index_count,missing_detail_count,
+       invariant_violation_count,created_at,updated_at,activated_at)
+     VALUES (?,?, 'CURRENT','news-projection-generation-v3',?,?,1,1,0,?,?,?,1,1,1,1,0,0,?,?,?)`,
+  ).run(
+    generationId, snapshotId, receivedAt, receivedAt, sourceDigest,
+    receiptDigest, receiptDigest, receivedAt, receivedAt, receivedAt,
+  );
+  handover.database.prepare(
+    `INSERT INTO news_projection_state
+      (id,active_generation_id,snapshot_id,contract_version,source_digest,
+       receipt_digest,index_count,detail_count,missing_detail_count,
+       invariant_violation_count,projection_state,activated_at,verified_at)
+     VALUES (1,?,?,?,?,?,1,1,0,0,'CURRENT',?,?)`,
+  ).run(
+    generationId, snapshotId, "news-projection-generation-v3", sourceDigest,
+    receiptDigest, receivedAt, receivedAt,
+  );
+  handover.database.prepare(
+    `INSERT INTO news_projection_details
+      (generation_id,detail_key,detail_hash,payload,received_at)
+     VALUES (?,?,?,?,?)`,
+  ).run(generationId, detailKey, detailHash, detailPayload, receivedAt);
+  handover.database.prepare(
+    `INSERT INTO news_projection_index
+      (generation_id,detail_key,ordinal,category,cluster_id,published_time,
+       collector_first_seen_time,parsed,model_candidate,impact_expires_at,
+       mirror_contract,payload_hash,payload,received_at)
+     VALUES (?,?,0,'央行政策','cluster-1',?,?,1,1,NULL,
+       'news-projection-generation-v3',?,?,?)`,
+  ).run(
+    generationId, detailKey, receivedAt, receivedAt, "1".repeat(64),
+    indexPayload, receivedAt,
+  );
+  handover.database.prepare(
+    `INSERT INTO news_index
+      (detail_key,category,cluster_id,published_time,collector_first_seen_time,
+       parsed,model_candidate,impact_expires_at,mirror_contract,payload,received_at)
+     VALUES (?,'旧分类','cluster-1',?,?,0,0,NULL,'legacy','{}',?)`,
+  ).run(detailKey, receivedAt, receivedAt, receivedAt);
+
+  handover.applyMigration("0025_seed_legacy_news_reverse_projection.sql");
+  handover.applyMigration("0025_seed_legacy_news_reverse_projection.sql");
+
+  const legacyDetail = handover.database.prepare(
+    "SELECT * FROM news_details WHERE detail_key=?",
+  ).get(detailKey);
+  const legacyIndex = handover.database.prepare(
+    "SELECT * FROM news_index WHERE detail_key=?",
+  ).get(detailKey);
+  assert.equal(legacyDetail.detail_hash, detailHash);
+  assert.equal(legacyDetail.payload, detailPayload);
+  assert.equal(legacyIndex.payload, indexPayload);
+  assert.equal(legacyIndex.category, "央行政策");
+});
+
 function jsonOfBytes(targetBytes, fields = {}) {
   const shell = JSON.stringify({ ...fields, padding: "" });
   assert.ok(shell.length <= targetBytes);
