@@ -104,6 +104,10 @@
   News-evidence staging keeps each complete request within 80,000 serialized
   bytes and eight items. The Worker enforces the matching item limits and these
   route byte bounds; the larger platform ceiling is not a normal target.
+- Production-shaped News projection release validation remains a bounded,
+  zero-mutation D1 JSON1 path. Each request crosses into D1 once and expands its
+  item array once; all item counts and invariants are aggregated in that single
+  scan so validation does not multiply serialized transport or batch parsing.
 - Snapshot cleanup remains bounded per Worker request, reports whether cleanup
   debt remains, and the producer advances a fixed number of cleanup steps per
   cycle. While eligible cleanup debt remains, the producer must not admit

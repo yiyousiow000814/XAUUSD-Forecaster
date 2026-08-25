@@ -97,25 +97,31 @@ export async function POST(request: Request) {
     await requireD1Capabilities(binding, ["news_projection_generation"]);
     if (isReleaseValidationContext(validation)) {
       const checked = await binding.prepare(
-        `WITH root(doc) AS (SELECT ? WHERE json_valid(?)),
+        `WITH input(doc) AS (SELECT ?),
+              root(doc) AS (SELECT doc FROM input WHERE json_valid(doc)),
               batch(row) AS (
                 SELECT value FROM root,json_each(json_extract(doc,'$.items'))
+              ),
+              batch_checks AS (
+                SELECT count(*) total,
+                       coalesce(sum(CASE WHEN
+                         json_type(row)='object'
+                         AND json_type(row,'$.detail_key')='text'
+                         AND length(json_extract(row,'$.detail_key'))=64
+                         AND json_extract(row,'$.detail_key') NOT GLOB '*[^0-9a-f]*'
+                         AND json_type(row,'$.detail_hash')='text'
+                         AND length(json_extract(row,'$.detail_hash'))=64
+                         AND json_extract(row,'$.detail_hash') NOT GLOB '*[^0-9a-f]*'
+                         AND json_type(row,'$.payload') IN ('object','array')
+                         THEN 1 ELSE 0 END),0) valid
+                  FROM batch
               )
          SELECT json_extract(doc,'$.action') action,
                 json_extract(doc,'$.generation_id') generation_id,
                 json_extract(doc,'$.offset') batch_offset,
-                (SELECT count(*) FROM batch) total,
-                (SELECT count(*) FROM batch WHERE
-                  json_type(row)='object'
-                  AND json_type(row,'$.detail_key')='text'
-                  AND length(json_extract(row,'$.detail_key'))=64
-                  AND json_extract(row,'$.detail_key') NOT GLOB '*[^0-9a-f]*'
-                  AND json_type(row,'$.detail_hash')='text'
-                  AND length(json_extract(row,'$.detail_hash'))=64
-                  AND json_extract(row,'$.detail_hash') NOT GLOB '*[^0-9a-f]*'
-                  AND json_type(row,'$.payload') IN ('object','array')) valid
-           FROM root`,
-      ).bind(bounded.serialized, bounded.serialized).first<{
+                total,valid
+           FROM root CROSS JOIN batch_checks`,
+      ).bind(bounded.serialized).first<{
         action: string; generation_id: string; batch_offset: number;
         total: number; valid: number;
       }>();
