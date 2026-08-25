@@ -34,6 +34,40 @@ function insertSnapshot(id, payload, receivedAt = new Date().toISOString()) {
   ).run(id, payload, receivedAt);
 }
 
+test("seeds missing bounded audit metrics exactly once during storage handover", () => {
+  const beforeSeed = migrations.filter(name => name < "0024_seed_bounded_audit_news_metrics.sql");
+  const handover = new D1TestDatabase(beforeSeed);
+  const legacyMetrics = {
+    schema_version: "news-metrics-v1",
+    articles: { received: 7_711, stored_revisions: 7_714 },
+    events: { independent: 3_494 },
+  };
+  const receivedAt = "2026-08-25T21:44:33.029Z";
+  handover.database.prepare(
+    "INSERT INTO dashboard_snapshots(id,payload,received_at) VALUES(4,?,?)",
+  ).run(JSON.stringify({ generated_at: receivedAt, news_metrics: legacyMetrics }), receivedAt);
+  handover.database.prepare(
+    "INSERT INTO dashboard_snapshots(id,payload,received_at) VALUES(9,?,?)",
+  ).run(JSON.stringify({ generated_at: "older", storyline_summary: { total: 12 } }), "older");
+
+  handover.applyMigration("0024_seed_bounded_audit_news_metrics.sql");
+  handover.applyMigration("0024_seed_bounded_audit_news_metrics.sql");
+  const seeded = handover.row(9, "dashboard_snapshots");
+  const payload = JSON.parse(seeded.payload);
+  assert.deepEqual(payload.news_metrics, legacyMetrics);
+  assert.deepEqual(payload.storyline_summary, { total: 12 });
+  assert.equal(seeded.received_at, "older");
+
+  const absent = new D1TestDatabase(beforeSeed);
+  absent.database.prepare(
+    "INSERT INTO dashboard_snapshots(id,payload,received_at) VALUES(4,?,?)",
+  ).run(JSON.stringify({ generated_at: receivedAt, news_metrics: legacyMetrics }), receivedAt);
+  absent.applyMigration("0024_seed_bounded_audit_news_metrics.sql");
+  const inserted = absent.row(9, "dashboard_snapshots");
+  assert.deepEqual(JSON.parse(inserted.payload).news_metrics, legacyMetrics);
+  assert.equal(inserted.received_at, receivedAt);
+});
+
 function jsonOfBytes(targetBytes, fields = {}) {
   const shell = JSON.stringify({ ...fields, padding: "" });
   assert.ok(shell.length <= targetBytes);

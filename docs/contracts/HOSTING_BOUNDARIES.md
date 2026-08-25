@@ -180,6 +180,12 @@
   Worker legacy projection so a fresh authoritative legacy snapshot cannot be
   displaced by an older validation-shaped split row merely because its former
   display selection exceeded the 120,000-byte transport envelope.
+- The coordinated migration seeds a missing fixed `news_metrics` aggregate from
+  the last valid legacy audit owner into the bounded audit summary. This is a
+  one-time, reverse-compatible handover write: Stable ignores the split row,
+  Candidate reads only the bounded summary, and the promoted Dashboard Sync
+  owner replaces that summary on its next normal cycle. Public reads must not
+  use the growing legacy audit document as a recurring fallback.
 - Candidate-era Audit split projection handover has one explicit owner record:
   Dashboard Sync is the sole execution owner; forecasting SQLite is the
   authoritative store; the active Business Runtime revision is the producer;
