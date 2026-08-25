@@ -7,7 +7,7 @@ not make the target package layout, test organization, or Architecture Explorer
 `CURRENT`; those states change only after the ordered stack merges.
 
 - Audited latest `main`: `0bc4c1f84e7b7f48e628f5111c56adb6ad824a2a`
-- Final implementation head: #304 at `d949931351e9344c11fe83541e5afdc53283b45b`
+- Final implementation head: #304 at `884f12232701c90da4f8d4780ada3fcbc97a393c`
 - Closure: existing Draft PR #302, documentation-only, based on #304
 - Complete Draft PR count: 18
 - Campaign sequence from #287 through Closure: 15 Draft PRs
@@ -55,8 +55,8 @@ the authoritative value.
 | 14 | #298 | `refactor/news-ai-packages` | `f0b876e50b2acf6953aad408389d2fb38362c764` | `78ef970f1f13692cccf164d5b2bcfd60a7ca5b3b` |
 | 15 | #299 | `refactor/assistant-runtime-dashboard-packages` | `78ef970f1f13692cccf164d5b2bcfd60a7ca5b3b` | `7587435b821fe78d87a729fe871de2e8422b168b` |
 | 16 | #301 | `refactor/test-organization` | `7587435b821fe78d87a729fe871de2e8422b168b` | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` |
-| 17 | #304 | `feat/private-architecture-explorer` | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` | `d949931351e9344c11fe83541e5afdc53283b45b` |
-| 18 | #302 | `chore/modularization-campaign-closure` | `d949931351e9344c11fe83541e5afdc53283b45b` | live PR #302 head OID |
+| 17 | #304 | `feat/private-architecture-explorer` | `386c38f3ef119dc9801fa104b2b8dd7bdf585b85` | `884f12232701c90da4f8d4780ada3fcbc97a393c` |
+| 18 | #302 | `chore/modularization-campaign-closure` | `884f12232701c90da4f8d4780ada3fcbc97a393c` | live PR #302 head OID |
 
 ## Latest-main integration
 
@@ -115,26 +115,28 @@ Architecture Explorer manifest cases.
 Final local evidence:
 
 - Python platform-neutral CI gate: 1,414 passed; complete collection: 1,633;
-- Web: 328 total, 322 passed, 6 skipped; build, scoped strict typecheck, and lint passed;
+- Web: 359 total, 353 passed, 6 skipped; build, scoped strict typecheck, and lint passed;
 - exact Windows CI family: 335 passed; Control Center plus Control Plane: 219
   collected; Control Plane focused: 14 collected;
-- Explorer: 72 tests, including 24 beginner-navigation and disclosure contracts;
+- Explorer: 103 tests, including 31 mobile interaction, viewport, sheet, and
+  navigation contracts;
   manifest validator: 21 tests; 37 nodes, 66 edges, 11 views, four scenarios,
   52,331 bytes;
 - geometry contracts cover pairwise lane containment and 24px LR / 20px TB
   spacing, mobile branch topology, deterministic edge-specific anchors,
   exact port-to-route endpoints, node-safe orthogonal routes, and a 6px maximum
   partial collinear-overlap tolerance across every view and direction;
-- mobile initial framing derives from graph/lane bounds and keeps 168px nodes,
-  17px primary text, 13px lane headings, canvas-contained horizontal pan, and
-  no page-level overflow; manual Fit retains the full overview;
+- mobile visible canvas sizing derives from `visualViewport` dimensions while
+  graph/lane bounds remain camera input only. It keeps 168px nodes, 17px
+  primary text, 13px portrait lane headings, canvas-contained pan, and no
+  page-level overflow; manual Fit retains the full overview;
 - camera controller: ten behavioral cases cover initial/view/manual Fit, rapid
   cancellation, cross-view search/scenarios, scenario steps, inspector close,
   stale frames, and one-shot mobile TB initialization;
 - semantic layout: deterministic LR/TB ranks and tracks, centered convergence,
   eight-pass global spacing bound, strict fail-closed validation, and automatic
   placement of a synthetic connected node omitted from all hints;
-- lazy Explorer JS: 330,959 bytes / 98,876 gzip; lazy CSS: 35,505 / 6,938 gzip;
+- lazy Explorer JS: 337,344 bytes / 100,769 gzip; lazy CSS: 38,913 / 7,524 gzip;
 - public initial graph dependency delta: zero; graph packages remain lazy-only;
 - architecture docs/imports/manifest, repository policy, compileall, PowerShell
   parse, and diff checks passed.
@@ -148,66 +150,85 @@ Worker route, runtime GitHub request, Markdown parser, Windows process, or
 background thread.
 
 The exact #304 immutable Preview at
-`https://253455b1-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`
-was verified at 1440x900, 390x844, and 360x800. Version
-`253455b1-a539-4f4b-8102-09f2698a9980` exposed the exact `d9499313`
-build marker at every viewport.
+`https://e4245cc6-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`
+was verified against version `e4245cc6-3f15-4320-8110-f3b9ef37a537`
+(Workers Build `6c4dd3f5-b621-4b4e-a783-766d24c746d8`). It exposed the
+exact `884f1223` build marker at every viewport. This was the single final
+Preview version uploaded for the mobile interaction completion.
 
 The beginner-first Explore surface opens on System Overview instead of an
 11-view selector. Search, scenarios, Advanced, and Fit remain directly
-reachable. Advanced contains the Reference navigation and complete package
-graph disclosure. System Overview shows its 11-node spine with six disclosed
-edges; selecting Decision discloses eight related edges without changing the
-camera zoom. Training shows five nodes, four edges, and three lanes. News,
-Dashboard, and Runtime and Release show 6/5, 8/7, and 7/4 nodes/edges. Package
-view starts with nine nodes and no inferred relationships, discloses six exact
-incident dependencies for Decision, and exposes all 28 package dependencies
-only on request. The adjacent dependency list is derived from the same six
-selected edges.
+reachable. Explore Advanced contains exactly Execution Topology, Runtime and
+Release, Canonical Package Dependencies, and Modularization Campaign; it does
+not repeat beginner subsystem destinations. Reference Advanced owns the full
+view selector, runtime-state filter, failure control, and show-all controls.
+System Overview shows its 11-node spine with six disclosed edges. A first
+mobile Decision tap selects the path without opening a sheet; the compact dock
+then owns View Details, subsystem drill-down, failure impact when declared, and
+Clear Path. Inspector open and close both retained all eight active-path edges.
 
 Every visible routed endpoint matches its rendered port. Deterministic
 edge-specific slots and the partial-overlap contract retain separate fan-in
 routes through the Worker border; no hidden junction is introduced and both
-arrowheads remain independently visible. The 72-case Explorer family protects
+arrowheads remain independently visible. The 103-case Explorer family protects
 LR/TB port ownership, overlap tolerance, node-safe routing, semantic layout,
-camera ownership, disclosure, and beginner navigation.
+camera ownership, disclosure, and the 31-case mobile state/viewport/sheet/
+navigation contract.
 
-At both phone sizes, rendered nodes remain 168 CSS px wide, interactive targets
-remain at least 44px, the graph pans horizontally inside React Flow, and the
-page itself has no horizontal overflow. At 360x800, a 150px graph pan changed
-the viewport x coordinate from -145.348 to -295.348 while retaining zoom
-0.705882 and page overflow remained false. Package selection opens the fixed
-bottom-sheet inspector without reducing the node readability floor. Canvas
-height derives from graph and lane geometry rather than node count alone. The
-viewport override was reset and the final task-created browser-session count
-was zero. The known shared Admin-shell React hydration #418 remains
-reproducible after reload; it predates this disclosure change and is recorded
-rather than hidden.
+All required device workflows passed:
 
-Representative 1440x900 evidence:
+| Viewport | Canvas | Readability and overflow | Sheet and interaction proof |
+|---|---:|---|---|
+| 320x568 | 480px | 168px nodes; 17px primary text; 13px lanes; no page overflow | Tap/path, Inspector, Escape, visible-backdrop close, scenario, search, and Fit reachable; 44px close |
+| 360x800 | 544px | same floor; first node 72px from canvas top; no page overflow | 88px dock; 576px Inspector; 544px Advanced; 8 edges before/after close |
+| 375x812 | 552px | same floor; no page overflow | complete affected flow passed |
+| 390x844 | 574px | same floor; first node 72px from canvas top; no page overflow | 88px dock; 608px Inspector; 574px Advanced; 8 edges before/after close |
+| 393x852 | 579px | same floor; no page overflow | complete affected flow passed |
+| 430x932 | 634px | same floor; no page overflow | complete affected flow passed |
+| 800x360 | 280px | 168px nodes; 16px primary text; no page overflow | internal graph pan works; both sheets fill 360px and retain 44px close |
+| 844x390 | 281px | 168px nodes; 16px primary text; no page overflow | 65px toolbar; internal pan works; both sheets fill 390px and retain 44px close |
 
-![System Overview at 1440x900](screenshots/architecture-explorer-d949931/1440x900-overview.png)
+Portrait QA exercised node tap, View Details, close with path retained, Clear
+Path, Escape, visible-backdrop close, scenario start/step/close, search, Fit,
+subsystem drill-down, breadcrumb return, and Explore/Reference switching.
+Body scroll locked only while a sheet was open and restored its prior position;
+focus moved to the sticky close and returned to the invoking control. Manual
+Fit keyboard activation retained page `scrollY` exactly at 19px. Landscape QA
+used the graph's own drag surface to bring Decision into view, proving that the
+short viewport remains usable instead of shrinking node text.
 
-![Decision disclosure at 1440x900](screenshots/architecture-explorer-d949931/1440x900-overview-decision-selected.png)
+The viewport override was reset and the active immutable-Preview QA tab count
+was zero after closure. One earlier localhost connection-error interstitial was
+still listed by the browser runtime because its `data:` error URL is protected
+from further automation; it is turn-scoped and closes with the task lifecycle.
+The known shared Admin-shell React hydration #418 remains reproducible after
+reload; it predates this Explorer change and is recorded rather than hidden.
 
-![Training lanes at 1440x900](screenshots/architecture-explorer-d949931/1440x900-training.png)
+Exact mobile evidence:
 
-![Package selection at 1440x900](screenshots/architecture-explorer-d949931/1440x900-package-selected.png)
+![390x844 initial Overview](screenshots/architecture-explorer-884f122/390x844-initial.png)
 
-![Complete package dependencies at 1440x900](screenshots/architecture-explorer-d949931/1440x900-package-show-all.png)
+![390x844 Decision path with Inspector closed](screenshots/architecture-explorer-884f122/390x844-decision-path.png)
 
-Exact phone evidence:
+![390x844 Inspector open](screenshots/architecture-explorer-884f122/390x844-inspector-open.png)
 
-![Beginner navigation at 390x844](screenshots/architecture-explorer-d949931/390x844-beginner-navigation.png)
+![390x844 Inspector closed with path preserved](screenshots/architecture-explorer-884f122/390x844-inspector-closed-path-preserved.png)
 
-![Selected package at 390x844](screenshots/architecture-explorer-d949931/390x844-selected-package.png)
+![390x844 Advanced open](screenshots/architecture-explorer-884f122/390x844-advanced-open.png)
 
-![Beginner navigation at 360x800](screenshots/architecture-explorer-d949931/360x800-beginner-navigation.png)
+![390x844 subsystem drill-down](screenshots/architecture-explorer-884f122/390x844-subsystem-drilldown.png)
 
-![Selected package at 360x800](screenshots/architecture-explorer-d949931/360x800-selected-package.png)
+![360x800 initial Overview](screenshots/architecture-explorer-884f122/360x800-initial.png)
 
-The same evidence directory also retains Overview at both phone widths and the
-desktop Dashboard, News, Runtime and Release, and initial Package states.
+![360x800 Decision path](screenshots/architecture-explorer-884f122/360x800-decision-path.png)
+
+![360x800 Advanced open](screenshots/architecture-explorer-884f122/360x800-advanced-open.png)
+
+![320x568 stress Overview](screenshots/architecture-explorer-884f122/320x568-initial.png)
+
+![320x568 Advanced stress sheet](screenshots/architecture-explorer-884f122/320x568-advanced-open.png)
+
+![844x390 landscape graph pan](screenshots/architecture-explorer-884f122/844x390-landscape.png)
 
 ## External import compatibility
 

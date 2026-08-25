@@ -183,18 +183,39 @@ initial gzip regression is therefore below the 2 KiB ceiling.
 | 1440x900 | LR Overview, full 11-node layout / 6 disclosed edges, arrows, labels, MiniMap; Decision selection keeps zoom unchanged | Closed initially; 380px drawer after selection | none | at least 44px |
 | 390x844 | 574px viewport-derived TB canvas; 72px top distance; 168px node floor; first tap exposes eight-edge Decision path and dock | Controlled 72dvh sheet; close preserves all eight highlighted edges | none | at least 44px |
 | 360x800 | 544px viewport-derived TB canvas with compact two-row toolbar and internal horizontal pan | Controlled sheet; Advanced and Inspector mutually exclusive | none | at least 44px |
+| 375x812 | 552px viewport-derived TB canvas with the same readability floor | Complete tap/path/sheet/scenario/search/Fit flow passed | none | at least 44px |
 | 320x568 | 480px bounded stress canvas; first graph bound remains 72px from top | Full usable bounded sheet with visible sticky close | none | at least 44px |
+| 393x852 | 579px viewport-derived TB canvas with the same readability floor | Complete tap/path/sheet/scenario/search/Fit flow passed | none | at least 44px |
+| 430x932 | 634px viewport-derived TB canvas with the same readability floor | Complete tap/path/sheet/scenario/search/Fit flow passed | none | at least 44px |
+| 800x360 | 280px short-landscape canvas; internal graph drag retained 168px nodes | Full-height landscape sheets remain closable | none | at least 44px |
 | 844x390 | 281px short-landscape canvas and 65px single-row toolbar | Full-height landscape sheet remains closable | none | at least 44px |
 
 Browser checks exercised Decision selection/dimming, inspector close,
 subsystem membership and breadcrumbs, Training's three-lane path, package
 initial/selected/show-all disclosure, mobile beginner navigation, relationship
 fallback, responsive direction, exact 168px mobile floor, and unchanged zoom
-during Decision disclosure. The local browser ended with zero task-created
-sessions.
+during Decision disclosure. The active local QA tab closed and its viewport
+override was reset.
 Local status/session requests correctly fail without Cloudflare bindings and
-are not Explorer requests. Exact deployed Preview evidence is recorded in the
-pull request after the immutable branch build completes.
+are not Explorer requests.
+
+## Exact immutable Preview QA
+
+Cloudflare version `e4245cc6-3f15-4320-8110-f3b9ef37a537` at
+`https://e4245cc6-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`
+exposed exact build `884f1223`. All eight mobile viewports in the table passed
+the full affected flow. At 390x844 the dock/Inspector/Advanced heights were
+88/608/574px; at 360x800 they were 88/576/544px. Inspector open and close each
+retained eight path edges. Explore Advanced listed only four advanced/campaign
+destinations, while Reference exposed all views and reference controls.
+Screenshots are stored under
+`docs/audits/screenshots/architecture-explorer-884f122/`.
+
+The immutable-Preview tab closed and the viewport override was reset. The
+browser still listed one earlier localhost error interstitial whose protected
+`data:` URL prevented automated close; it remains turn-scoped. The known
+shared Admin-shell React hydration #418 remains recorded and was not expanded
+into this PR.
 
 ## Final local validation
 
