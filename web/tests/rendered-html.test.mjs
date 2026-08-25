@@ -2392,6 +2392,13 @@ test("keeps the learning page focused and folds secondary research below the sco
   assert.match(page, /仓位与退出研究/);
 });
 
+test("accepts split audit resources without status-only system provenance", () => {
+  const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  assert.match(page, /system\?: \{ online: boolean/);
+  assert.match(page, /const deployment = payload\?\.system\?\.deployment/);
+  assert.doesNotMatch(page, /payload\?\.system\.deployment/);
+});
+
 test("keeps dashboard navigation and graph controls usable on phones", () => {
   const dashboard = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
   const shell = readFileSync(new URL("../app/_components/DashboardShell.tsx", import.meta.url), "utf8");
