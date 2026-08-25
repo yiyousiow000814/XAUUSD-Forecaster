@@ -285,7 +285,7 @@ type Payload = {
     version_group_total: number; record_total: number;
   };
   generated_at: string;
-  system: { online: boolean; market_session?: "OPEN" | "CLOSED" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE"; source_of_truth: string; sites_mirror: string; deployment?: { runtime_git_sha: string | null; expected_git_sha: string | null; runtime_dirty: boolean; status: string; storyline_policy_version: string; payload_schema_version: string; payload_generated_at: string; source_database_epoch: string | null } };
+  system?: { online: boolean; market_session?: "OPEN" | "CLOSED" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE"; source_of_truth: string; sites_mirror: string; deployment?: { runtime_git_sha: string | null; expected_git_sha: string | null; runtime_dirty: boolean; status: string; storyline_policy_version: string; payload_schema_version: string; payload_generated_at: string; source_database_epoch: string | null } };
   operational_health?: { status: "HEALTHY" | "WARNING" | "ERROR" };
   counts: Record<string, number>;
   news_metrics?: NewsMetrics;
@@ -1397,8 +1397,9 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     setEvidencePageCursors({ 1: null });
     setShowAllEvidence(false);
   };
+  const deployment = payload?.system?.deployment;
   const deploymentPresentation = DEPLOYMENT_PRESENTATION[
-    payload?.system?.deployment?.status ?? "PROVENANCE_UNKNOWN"
+    deployment?.status ?? "PROVENANCE_UNKNOWN"
   ] ?? DEPLOYMENT_PRESENTATION.PROVENANCE_UNKNOWN;
   const storylinesUnavailable = Boolean(
     payload?.preview?.is_preview
@@ -1697,7 +1698,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
 
       {view === "stories" && selectedAuditDetailState === "ready" && <section className="story-desk">
         <header className="evidence-intro evidence-intro-compact"><div><p className="eyebrow">事件脉络</p><h2>第一次进展立即显示，后续变化接在一起。</h2></div></header>
-        {payload?.system.deployment && <section className={`deployment-proof ${deploymentPresentation.className}`}><b>{deploymentPresentation.label}</b>{payload.system.deployment.status === "DEPLOYMENT_DRIFT" ? <span>本机 {payload.system.deployment.runtime_git_sha?.slice(0, 8) ?? "未知"} · 远端 {payload.system.deployment.expected_git_sha?.slice(0, 8) ?? "未知"}</span> : payload.system.deployment.runtime_git_sha ? <span>版本 {payload.system.deployment.runtime_git_sha.slice(0, 8)}</span> : null}</section>}
+        {deployment && <section className={`deployment-proof ${deploymentPresentation.className}`}><b>{deploymentPresentation.label}</b>{deployment.status === "DEPLOYMENT_DRIFT" ? <span>本机 {deployment.runtime_git_sha?.slice(0, 8) ?? "未知"} · 远端 {deployment.expected_git_sha?.slice(0, 8) ?? "未知"}</span> : deployment.runtime_git_sha ? <span>版本 {deployment.runtime_git_sha.slice(0, 8)}</span> : null}</section>}
         <div className="event-thread-summary" aria-label="事件脉络统计"><span><b><CountValue value={activeEventTotal} /></b> 个独立事件</span><span><b><CountValue value={continuedEventTotal} /></b> 个已有后续</span><span><b><CountValue value={singleEventTotal} /></b> 个暂无后续</span></div>
         {(payload?.storylines ?? []).length > 0 && <><div className={`story-grid ${showAllStorylines ? "show-all-mobile-items" : ""}`}>{(payload?.storylines ?? []).map(story => <article key={story.storyline_id}>
           <header><div><span>{({ EMERGING:"刚出现", REPORTED:"已有报道", CORROBORATED:"独立交叉确认", OFFICIALLY_CONFIRMED:"官方确认", ESCALATING:"升级中", DEESCALATING:"缓和中", CONTRADICTED:"存在冲突" } as Record<string,string>)[story.state] ?? story.state}</span><h3>{story.title}</h3></div><strong><CountValue value={story.event_count} /><small> 个进展</small></strong></header>
