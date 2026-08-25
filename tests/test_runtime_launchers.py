@@ -495,6 +495,56 @@ def _authorized_candidate(previous: str, candidate: str) -> str:
     )
 
 
+def _write_coordinated_migration_files(tmp_path) -> None:
+    target = tmp_path / "repository" / "web" / "drizzle"
+    target.mkdir(parents=True, exist_ok=True)
+    for name in (
+        "0022_news_projection_generation.sql",
+        "0023_operator_retry_sync_digest.sql",
+    ):
+        (target / name).write_text(
+            (ROOT / "web" / "drizzle" / name).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+
+def _coordinated_migration_contract_body(*, capability_overrides: str = "") -> str:
+    database_id = "33333333-3333-4333-8333-333333333333"
+    return (
+        f"$script:testDatabaseId='{database_id}';"
+        "$stable=[pscustomobject]@{git_sha=('a'*40);worker_version_id="
+        "'11111111-1111-4111-8111-111111111111'};"
+        "$candidate=[pscustomobject]@{git_sha=('b'*40);windows_revision=('b'*40);"
+        "worker_version_id='22222222-2222-4222-8222-222222222222';"
+        "validation_key=('22222222-2222-4222-8222-222222222222:'+('b'*40));"
+        "browser_url='https://candidate.example'};"
+        "function Get-CloudflareVersionDetails{param($VersionId);"
+        "return [pscustomobject]@{resources=[pscustomobject]@{bindings=@("
+        "[pscustomobject]@{type='d1';name='DB';database_id=$script:testDatabaseId})}}};"
+        "function Invoke-WranglerJson{param($Arguments);return [pscustomobject]@{"
+        "uuid=$script:testDatabaseId;name='aurum-signal-room'}};"
+        "function Invoke-CoordinatedMigrationD1Query{param($Sql);"
+        "if($Sql -like 'SELECT name,*'){return @("
+        "[pscustomobject]@{name='0022_news_projection_generation.sql';applied_at='now'},"
+        "[pscustomobject]@{name='0023_operator_retry_sync_digest.sql';applied_at='now'})};"
+        "$row=[pscustomobject]@{projection_tables=5;projection_indexes=4;retry_columns=4;"
+        "legacy_tables=4;legacy_decisions=20;projection_state='CURRENT';"
+        "active_generation_id=('c'*64);snapshot_id=('d'*64);source_digest=('e'*64);"
+        "receipt_digest=('f'*64);index_count=4117;detail_count=4117;"
+        "missing_detail_count=0;invariant_violation_count=0;generation_state='CURRENT';"
+        "expected_receipt_digest=('f'*64);staged_index_count=4117;"
+        "staged_detail_count=4117};"
+        f"{capability_overrides}return $row}};"
+        "function Get-CoordinatedMigrationEndpointEvidence{param($Candidate,$Stable);"
+        "return [ordered]@{stable_status=200;candidate_status=200;"
+        "news_generation_id=('c'*64);news_snapshot_id=('d'*64);"
+        "news_source_digest=('e'*64);news_receipt_digest=('f'*64);"
+        "news_index_count=4117;news_detail_count=4117}};"
+        "$files=@('web/drizzle/0022_news_projection_generation.sql',"
+        "'web/drizzle/0023_operator_retry_sync_digest.sql');"
+    )
+
+
 def test_failed_preflight_never_switches_the_runtime_checkout(tmp_path) -> None:
     previous = "a" * 40
     candidate = "b" * 40
@@ -1192,7 +1242,8 @@ def test_wpf_shell_is_bundled_with_winforms_fallback_and_release_controls() -> N
         "ServiceList", "StableIdentity", "CandidateIdentity", "PreviousIdentity",
         "PromoteButton", "ReverseButton", "StartButton", "StopButton",
         "CandidateChecks", "OpenStableButton", "OpenCandidateButton",
-        "ApproveCompatibilityButton", "CandidateTechnicalEvidence",
+        "VerifyMigrationButton", "ApproveCompatibilityButton",
+        "CandidateTechnicalEvidence",
     ):
         assert name in serialized
     source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
@@ -1224,9 +1275,11 @@ def test_release_gui_actions_are_tracked_single_flight_in_both_shells() -> None:
     assert "if (Test-WpfOperationActive) { return }" in wpf
     assert "-WindowStyle Hidden -PassThru" in wpf
     assert "Set-WpfReleaseBusy -Busy $true -Operation $Operation" in wpf
-    assert all(state in wpf for state in ("APPROVING", "PROMOTING", "REVERSING"))
+    assert all(state in wpf for state in (
+        "VERIFYING MIGRATION", "APPROVING", "PROMOTING", "REVERSING",
+    ))
     assert all(name in wpf for name in (
-        '"ApproveCompatibilityButton", "PromoteButton", "ReverseButton"',
+        '"VerifyMigrationButton", "ApproveCompatibilityButton", "PromoteButton", "ReverseButton"',
         "return [bool]$script:wpfOperation",
         "Refresh-WpfStatus",
         "$script:wpfOperation = $null",
@@ -1237,7 +1290,9 @@ def test_release_gui_actions_are_tracked_single_flight_in_both_shells() -> None:
     assert '"-OperationResultPath"' in wpf
 
     assert "if ($script:guiOperation) { return }" in fallback
-    assert all(state in fallback for state in ("APPROVING", "PROMOTING", "REVERSING"))
+    assert all(state in fallback for state in (
+        "VERIFYING MIGRATION", "APPROVING", "PROMOTING", "REVERSING",
+    ))
     assert fallback.index("Set-GuiBusy -Busy $true") < fallback.index(
         '$script:guiOperation = Start-Process -FilePath "powershell.exe"'
     )
@@ -3093,6 +3148,150 @@ def test_compatibility_classifier_separates_storage_from_platform_review(tmp_pat
         "COORDINATED_STORAGE_MIGRATION_REQUIRED,"
         "PLATFORM_CONFIG_REVIEW_REQUIRED,AUTOMATIC"
     )
+
+
+def test_coordinated_migration_receipt_is_exact_fresh_and_live(tmp_path) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _coordinated_migration_contract_body()
+        + "$evidence=Get-CoordinatedMigrationLiveEvidence $candidate $stable $files;"
+        "$receipt=New-CoordinatedMigrationReceipt $evidence;"
+        "Write-CoordinatedMigrationReceipt $receipt;"
+        "$verified=Assert-CoordinatedMigrationReceipt $candidate $stable $files;"
+        'Write-Output "$($verified.schema_version),$($verified.evidence.database_id),'
+        '$($verified.evidence.reverse_safe)"',
+    )
+    assert result == (
+        "coordinated-storage-migration-receipt-v1,"
+        "33333333-3333-4333-8333-333333333333,True"
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    (
+        ("$candidate.git_sha=('9'*40)", "MIGRATION_RECEIPT_CANDIDATE_MISMATCH"),
+        (
+            "$candidate.worker_version_id='99999999-9999-4999-8999-999999999999'",
+            "MIGRATION_RECEIPT_CANDIDATE_MISMATCH",
+        ),
+        (
+            "$saved=Get-Content $coordinatedMigrationReceiptPath -Raw|ConvertFrom-Json;"
+            "$saved.expires_at=[DateTimeOffset]::UtcNow.AddMinutes(-1).ToString('o');"
+            "$core=[ordered]@{schema_version=$saved.schema_version;checked_at=$saved.checked_at;"
+            "expires_at=$saved.expires_at;evidence=$saved.evidence};"
+            "$saved.receipt_digest=Get-CoordinatedMigrationReceiptDigest $core;"
+            "$saved|ConvertTo-Json -Depth 12|Set-Content $coordinatedMigrationReceiptPath",
+            "MIGRATION_RECEIPT_STALE",
+        ),
+        (
+            "$saved=Get-Content $coordinatedMigrationReceiptPath -Raw|ConvertFrom-Json;"
+            "$saved.evidence.database_name='tampered';"
+            "$saved|ConvertTo-Json -Depth 12|Set-Content $coordinatedMigrationReceiptPath",
+            "MIGRATION_RECEIPT_TAMPERED",
+        ),
+    ),
+)
+def test_coordinated_migration_receipt_rejects_reuse_staleness_and_tampering(
+    tmp_path, mutation: str, expected: str,
+) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _coordinated_migration_contract_body()
+        + "$evidence=Get-CoordinatedMigrationLiveEvidence $candidate $stable $files;"
+        "$receipt=New-CoordinatedMigrationReceipt $evidence;"
+        "Write-CoordinatedMigrationReceipt $receipt;"
+        f"{mutation};$reason='';try{{Assert-CoordinatedMigrationReceipt "
+        "$candidate $stable $files|Out-Null}catch{$reason=$_.Exception.Message};"
+        "Write-Output $reason",
+    )
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    ("setup", "expected"),
+    (
+        (
+            "function Invoke-WranglerJson{param($Arguments);return [pscustomobject]@{"
+            "uuid='44444444-4444-4444-8444-444444444444';name='wrong'}}",
+            "MIGRATION_DATABASE_IDENTITY_MISMATCH",
+        ),
+        (
+            "function Invoke-CoordinatedMigrationD1Query{param($Sql);"
+            "if($Sql -like 'SELECT name,*'){return [pscustomobject]@{"
+            "name='0022_news_projection_generation.sql';applied_at='now'}}}",
+            "MIGRATION_LEDGER_PENDING:0023_operator_retry_sync_digest.sql",
+        ),
+        (
+            "function Invoke-CoordinatedMigrationD1Query{param($Sql);"
+            "if($Sql -like 'SELECT name,*'){return @("
+            "[pscustomobject]@{name='0022_news_projection_generation.sql'},"
+            "[pscustomobject]@{name='0023_operator_retry_sync_digest.sql'})};"
+            "return [pscustomobject]@{projection_tables=4;projection_indexes=4;"
+            "retry_columns=4}}",
+            "MIGRATION_SCHEMA_CAPABILITY_MISSING",
+        ),
+        (
+            "$script:legacyFailure=$true;function Invoke-CoordinatedMigrationD1Query{"
+            "param($Sql);if($Sql -like 'SELECT name,*'){return @("
+            "[pscustomobject]@{name='0022_news_projection_generation.sql'},"
+            "[pscustomobject]@{name='0023_operator_retry_sync_digest.sql'})};"
+            "return [pscustomobject]@{projection_tables=5;projection_indexes=4;"
+            "retry_columns=4;legacy_tables=3;legacy_decisions=0}}",
+            "MIGRATION_LEGACY_COMPATIBILITY_FAILED",
+        ),
+        (
+            "function Get-CloudflareVersionDetails{param($VersionId);"
+            "$id=if($VersionId -eq $stable.worker_version_id){"
+            "'44444444-4444-4444-8444-444444444444'}else{$script:testDatabaseId};"
+            "return [pscustomobject]@{resources=[pscustomobject]@{bindings=@("
+            "[pscustomobject]@{type='d1';name='DB';database_id=$id})}}}",
+            "MIGRATION_REVERSE_DATABASE_IDENTITY_MISMATCH",
+        ),
+    ),
+)
+def test_coordinated_migration_live_gate_fails_closed(
+    tmp_path, setup: str, expected: str,
+) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _coordinated_migration_contract_body()
+        + f"{setup};$reason='';try{{Get-CoordinatedMigrationLiveEvidence "
+        "$candidate $stable $files|Out-Null}catch{$reason=$_.Exception.Message};"
+        "Write-Output $reason",
+    )
+    assert result == expected
+
+
+def test_successful_coordinated_migration_acceptance_is_audited_and_exact(
+    tmp_path,
+) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    previous, candidate = "a" * 40, "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, candidate)
+        + _coordinated_migration_contract_body()
+        + "$state=Get-ReleaseControlState;$state.candidate.validation_state='REVIEW_REQUIRED';"
+        "$state.candidate.compatibility_state='REVIEW_REQUIRED';"
+        "$state.candidate|Add-Member -Force browser_url 'https://candidate.example';"
+        "$state.candidate.validation=[pscustomobject]@{key=$state.candidate.validation_key;"
+        "reason='COORDINATED_STORAGE_MIGRATION_REQUIRED';review_files=$files};"
+        "Write-ReleaseControlState $state;"
+        "function Get-ProductionCandidateProvenanceResult{return [pscustomobject]@{state='PASSED'}};"
+        "function Get-RequiredGitHubChecksResult{return [pscustomobject]@{state='PASSED'}};"
+        "function Get-CandidateChangedFiles{return $files};"
+        "$accepted=Verify-CandidateCoordinatedMigration;$final=Get-ReleaseControlState;"
+        "$history=Get-Content $releaseHistoryPath -Raw;"
+        'Write-Output "$($accepted.validation_state),'
+        '$($final.candidate.migration_acceptance.validation_key -eq '
+        '$final.candidate.validation_key),'
+        '$($history.Contains(\'COORDINATED_STORAGE_MIGRATION_PASSED\'))"',
+    )
+    assert result == "NEW,True,True"
 
 
 def test_platform_compatibility_approval_is_exact_audited_and_narrow(tmp_path) -> None:

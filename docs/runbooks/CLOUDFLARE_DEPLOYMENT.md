@@ -97,6 +97,19 @@ and exact counts as release evidence. Walk the Candidate News pagination and
 rendered totals before continuing. Do not Promote while bootstrap is replaying
 or failed. Do not delete the legacy archive during this cutover.
 
+After the migrations are applied and the authoritative projection is CURRENT,
+run **Verify Migration** in the Control Center. Do not use **Approve
+Compatibility** for a storage change. The action independently checks the
+remote migration ledger, exact D1 UUID, required tables, indexes and columns,
+legacy Stable and Reverse reads, Candidate identity headers, the bounded legacy
+decision ledger, and News generation/snapshot/digest/count equality. It writes
+a two-hour exact-Candidate receipt and immediately rechecks it against live
+state. A changed Candidate, Worker Version, database, migration file, ledger,
+schema capability, or projection invalidates the receipt and returns the
+Candidate to `REVIEW_REQUIRED`. Resume ordinary Candidate validation only after
+the action records `COORDINATED_STORAGE_MIGRATION_PASSED` for the exact
+validation key.
+
 Worker-changing Candidates require a Cloudflare API token limited to read-only
 Workers Observability query access. Store it under the exact
 `CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN` key in the repository-local,
@@ -118,9 +131,10 @@ Do not substitute `{}` fixtures or treat one invocation per route as CPU
 acceptance.
 
 Normal release operation uses only the confirmed Control Center actions:
-**Open Candidate**, **Approve Compatibility** when narrowly eligible,
-**Promote Candidate**, and **Reverse Stable**. Hidden PowerShell actions are not
-the operator workflow.
+**Open Candidate**, **Verify Migration** for an exact coordinated storage
+migration, **Approve Compatibility** for a narrowly eligible non-storage
+platform change, **Promote Candidate**, and **Reverse Stable**. Hidden
+PowerShell actions are not the operator workflow.
 
 After Candidate validation, confirm every page and exact marker or redirect in
 `web/acceptance-inventory.json`. Static pages and `/favicon.ico` must not create
