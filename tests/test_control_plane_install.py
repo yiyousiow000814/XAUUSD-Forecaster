@@ -117,7 +117,7 @@ def _state_machine_mocks(old_revision: str, target_revision: str) -> str:
         function Assert-CurrentWatchdogHeartbeat {{ param($Owner,$ExpectedRevision); [pscustomobject]@{{process_id=$Owner.process_id;control_bundle_revision=$ExpectedRevision}} }};
         function Get-ControlPlaneIsolationSnapshot {{
           $p=[pscustomobject]@{{process_id=10;process_start_token='service-token'}};
-          [pscustomobject]@{{business_runtime_revision='runtime';services=[pscustomobject]@{{quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@($p)}}}}
+          [pscustomobject]@{{business_runtime_revision='runtime';services=[pscustomobject]@{{quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@($p);broadcast=@()}}}}
         }};
         function Assert-ControlPlaneIsolationSnapshot {{ param($Before,$After); $script:timeline+='isolation' }};
         function New-VerifiedRuntimeControlBundleStage {{ param($SourceRoot,$SourceRevision,$StageRoot,[switch]$RequireImmutableSource); $script:timeline+='stage'; [pscustomobject]@{{source_revision='{target_revision}'}} }};
@@ -366,3 +366,30 @@ def test_control_plane_isolation_and_visible_identity_are_explicit() -> None:
     assert "BusinessRuntimeIdentity" in xaml
     assert "EXACT | HASH VERIFIED" in source
     assert 'BuildPath(scriptDirectory, "xauusd_control_center.ps1")' in launcher
+
+
+@pytest.mark.parametrize(
+    ("enabled", "before_broadcast", "after_broadcast", "expected"),
+    (
+        ("$false", "@()", "@()", "PASSED"),
+        ("$false", "@($p)", "@($p)", "CONTROL_PLANE_UNEXPECTED_SERVICE_OWNER_BROADCAST"),
+        ("$true", "@()", "@()", "CONTROL_PLANE_INSTALL_CHANGED_SERVICE_BROADCAST"),
+    ),
+)
+def test_control_plane_isolation_respects_optional_broadcast_ownership(
+    tmp_path: Path,
+    enabled: str,
+    before_broadcast: str,
+    after_broadcast: str,
+    expected: str,
+) -> None:
+    body = textwrap.dedent(
+        f"""
+        function Test-BroadcastPublisherEnabled {{ return {enabled} }};
+        $p=[pscustomobject]@{{process_id=10;process_start_token='same'}};
+        $before=[pscustomobject]@{{business_runtime_revision='runtime';release_state_hash='state';release_history_hash='history';services=[pscustomobject]@{{quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@($p);broadcast={before_broadcast}}}}};
+        $after=[pscustomobject]@{{business_runtime_revision='runtime';release_state_hash='state';release_history_hash='history';services=[pscustomobject]@{{quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@($p);broadcast={after_broadcast}}}}};
+        try {{ Assert-ControlPlaneIsolationSnapshot -Before $before -After $after; Write-Output 'PASSED' }} catch {{ Write-Output $_.Exception.Message }}
+        """
+    ).replace("\n", " ")
+    assert _run_contract(tmp_path, body) == expected
