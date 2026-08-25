@@ -4,7 +4,7 @@
 
 Draft PR #328 extends the accepted #304 graph, routing, camera, disclosure, and
 mobile interaction boundaries without redesigning them. It consumes compiler
-artifacts at exact Git SHA `4b41a45dc2cfefd6a4a32a06463a527daa489d4d`
+artifacts at exact Git SHA `f5fbf9b20fcbaea9e20472c856524926ad8fa278`
 and adds only private lazy evidence surfaces:
 
 - node and edge evidence status on the existing graph;
@@ -16,15 +16,15 @@ and adds only private lazy evidence surfaces:
   retaining three surviving designated mutations as explicit gaps.
 
 The exact immutable Preview is version
-`a0084974-1ee7-4d27-bf69-1bfe41369b03` at
-`https://a0084974-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`.
+`b909cf07-6081-491d-ad3e-de208651bf9d` at
+`https://b909cf07-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`.
 Desktop 1440x900 and phone 390x844 / 360x800 passed. The phones retained the
 168px node, 17px primary text, 13px CSS lane-heading, 44px target, canvas-contained
 horizontal pan, and page-overflow contracts. Closing either sheet retained the
 path and viewport; Clear Path remained the only selection-clearing action.
 
 Screenshots are under
-`docs/audits/screenshots/architecture-evidence-4b41a45/`. The task-owned
+`docs/audits/screenshots/architecture-evidence-f5fbf9b/`. The task-owned
 browser tab was closed and its viewport override reset. The historical #304
 evidence below remains valid for its exact older Version only.
 
