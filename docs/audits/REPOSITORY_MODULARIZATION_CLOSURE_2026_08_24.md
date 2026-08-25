@@ -7,10 +7,10 @@ closure statement below. The older sections remain only as historical evidence
 for the earlier #304 campaign boundary. The complete stack is still `PENDING`:
 all implementation PRs and this documentation-only closure PR remain Draft.
 
-- Latest integrated `main`: `04b1c24aa2747599c4c521fea2bf6874d9d51947`
-  (#329).
+- Latest integrated `main`: `da5b47ab507b078b8b8959ffa03ebee0f681e763`
+  (#330).
 - Final implementation: Draft PR #328 at
-  `f5c7b81c9cee62bf06c543235ba8faf204c1cd36`.
+  `4b41a45dc2cfefd6a4a32a06463a527daa489d4d`.
 - Closure: Draft PR #302, documentation-only, based directly on #328.
 - Assistant remains `PAUSED`.
 - No merge, Stable movement, production data mutation, provider call, runtime
@@ -23,32 +23,33 @@ live head OID because a commit cannot embed its own hash.
 
 | Order | PR | Branch | Exact base SHA | Exact head SHA |
 |---:|---:|---|---|---|
-| 1 | #282 | `docs/architecture-baseline` | `04b1c24aa2747599c4c521fea2bf6874d9d51947` | `3dffba74501f8b6ed6dc613120b099c5385f52c7` |
-| 2 | #283 | `refactor/dashboard-status-cache` | `3dffba74501f8b6ed6dc613120b099c5385f52c7` | `f486a14a68e778e2389c1f6fef17ae8738a04f1b` |
-| 3 | #285 | `refactor/dashboard-health-projection` | `f486a14a68e778e2389c1f6fef17ae8738a04f1b` | `1c6589d09ab83b2caea268e3ef735a2feaca1bd1` |
-| 4 | #287 | `refactor/dashboard-resource-contracts` | `1c6589d09ab83b2caea268e3ef735a2feaca1bd1` | `0c5b6efdae71bb9d3575e1ff7ab7955c8907ad79` |
-| 5 | #288 | `refactor/dashboard-api-news-resources` | `0c5b6efdae71bb9d3575e1ff7ab7955c8907ad79` | `646da060c3296b72402dcf406cf688963dda38a1` |
-| 6 | #289 | `refactor/dashboard-api-market-resources` | `646da060c3296b72402dcf406cf688963dda38a1` | `cbc9dc86d3b3fe6637d4d6f6c5217dff85735bb5` |
-| 7 | #290 | `refactor/dashboard-api-optional-resources` | `cbc9dc86d3b3fe6637d4d6f6c5217dff85735bb5` | `771b75dd30ed1e2487c6799c8d5d6f704c3c32bc` |
-| 8 | #291 | `refactor/dashboard-operator-bridge` | `771b75dd30ed1e2487c6799c8d5d6f704c3c32bc` | `4d63a803f6dc230255ad24f5038bc1bb44983a1c` |
-| 9 | #292 | `refactor/dashboard-sync-runtime` | `4d63a803f6dc230255ad24f5038bc1bb44983a1c` | `bb95a2aa5462c355fc0df0cc5805afa8aab5237d` |
-| 10 | #294 | `refactor/news-annotator-runtime` | `bb95a2aa5462c355fc0df0cc5805afa8aab5237d` | `6118e710ab1abb8fa64b59ed68b0036d424efe47` |
-| 11 | #295 | `refactor/control-center-boundaries` | `6118e710ab1abb8fa64b59ed68b0036d424efe47` | `769452b6fd26046a4d96602aa0820eb39994da17` |
-| 12 | #296 | `refactor/decision-evidence-packages` | `769452b6fd26046a4d96602aa0820eb39994da17` | `ec55b3179e0e56b0d6292b6ac33b5a10473ec9a5` |
-| 13 | #297 | `refactor/training-package` | `ec55b3179e0e56b0d6292b6ac33b5a10473ec9a5` | `41ded223679a70ff2594f1e2b097650d6e6c6712` |
-| 14 | #298 | `refactor/news-ai-packages` | `41ded223679a70ff2594f1e2b097650d6e6c6712` | `6e7888f8f4f01caf72a3a962d2e697797428c9a0` |
-| 15 | #299 | `refactor/assistant-runtime-dashboard-packages` | `6e7888f8f4f01caf72a3a962d2e697797428c9a0` | `9c619dd23b4b839d831c1568b6720c08bf91f7e7` |
-| 16 | #301 | `refactor/test-organization` | `9c619dd23b4b839d831c1568b6720c08bf91f7e7` | `43ec93d82fbc3eefa8aae9cfdb99e185829f2e90` |
-| 17 | #304 | `feat/private-architecture-explorer` | `43ec93d82fbc3eefa8aae9cfdb99e185829f2e90` | `9476b9385949f056f81aafc5f24155325fc88f9c` |
-| 18 | #321 | `feat/architecture-source-compiler` | `9476b9385949f056f81aafc5f24155325fc88f9c` | `102b0f2aa7e95a8659f12c6e01937b915293db0f` |
-| 19 | #324 | `test/architecture-contract-evidence` | `102b0f2aa7e95a8659f12c6e01937b915293db0f` | `0d365b4dc42803d5c0f71466ad47d2e4b1bedf33` |
-| 20 | #325 | `test/architecture-mutation-audit` | `0d365b4dc42803d5c0f71466ad47d2e4b1bedf33` | `be756375e6b17afba54b067c0b9a37ba52ca3b3d` |
-| 21 | #328 | `feat/architecture-evidence-explorer` | `be756375e6b17afba54b067c0b9a37ba52ca3b3d` | `f5c7b81c9cee62bf06c543235ba8faf204c1cd36` |
-| 22 | #302 | `chore/modularization-campaign-closure` | `f5c7b81c9cee62bf06c543235ba8faf204c1cd36` | live PR #302 head OID |
+| 1 | #282 | `docs/architecture-baseline` | `da5b47ab507b078b8b8959ffa03ebee0f681e763` | `7dadfb9e0b16afc5258f59b8307a7cdabe0f320d` |
+| 2 | #283 | `refactor/dashboard-status-cache` | `7dadfb9e0b16afc5258f59b8307a7cdabe0f320d` | `e4d894ce77a8a7dab2dc87483971168fcdb3b70f` |
+| 3 | #285 | `refactor/dashboard-health-projection` | `e4d894ce77a8a7dab2dc87483971168fcdb3b70f` | `81ce36a28fef76d33199663ab480ee0ddeb6f4fd` |
+| 4 | #287 | `refactor/dashboard-resource-contracts` | `81ce36a28fef76d33199663ab480ee0ddeb6f4fd` | `1922d86e16fae904de9b50f2bc5af66da91bc996` |
+| 5 | #288 | `refactor/dashboard-api-news-resources` | `1922d86e16fae904de9b50f2bc5af66da91bc996` | `b34dd045ba4486ed35dbea3d939b37301c278f18` |
+| 6 | #289 | `refactor/dashboard-api-market-resources` | `b34dd045ba4486ed35dbea3d939b37301c278f18` | `9c4d67d3c1688ad7b39e58f846e61a93e6785e0f` |
+| 7 | #290 | `refactor/dashboard-api-optional-resources` | `9c4d67d3c1688ad7b39e58f846e61a93e6785e0f` | `f00fcdb9c77c6da5a17b813e2fbfe90fb3008042` |
+| 8 | #291 | `refactor/dashboard-operator-bridge` | `f00fcdb9c77c6da5a17b813e2fbfe90fb3008042` | `c2198ec34abca51abd7bd6ad1dbb22f58da59cae` |
+| 9 | #292 | `refactor/dashboard-sync-runtime` | `c2198ec34abca51abd7bd6ad1dbb22f58da59cae` | `3d51f427e20db1ca8c1fb8f27eafb79f1792d122` |
+| 10 | #294 | `refactor/news-annotator-runtime` | `3d51f427e20db1ca8c1fb8f27eafb79f1792d122` | `02d2bc28a65dab8969eaae01d1fa76d25364aa79` |
+| 11 | #295 | `refactor/control-center-boundaries` | `02d2bc28a65dab8969eaae01d1fa76d25364aa79` | `e139ea7723421fca0e657b015a87ac80e332159c` |
+| 12 | #296 | `refactor/decision-evidence-packages` | `e139ea7723421fca0e657b015a87ac80e332159c` | `a7d9ab611b55928ffdb6d9f782b2c3abf11e42ba` |
+| 13 | #297 | `refactor/training-package` | `a7d9ab611b55928ffdb6d9f782b2c3abf11e42ba` | `65aab5bf80156d74b6e49825d884acdf13042610` |
+| 14 | #298 | `refactor/news-ai-packages` | `65aab5bf80156d74b6e49825d884acdf13042610` | `0053170ef989b30d62d69fbe58c1a7ff0c481c48` |
+| 15 | #299 | `refactor/assistant-runtime-dashboard-packages` | `0053170ef989b30d62d69fbe58c1a7ff0c481c48` | `e196197349eef23b9038240a8282141b68144106` |
+| 16 | #301 | `refactor/test-organization` | `e196197349eef23b9038240a8282141b68144106` | `a1220f5f6a572e35345a358af30fb338b0e9779c` |
+| 17 | #304 | `feat/private-architecture-explorer` | `a1220f5f6a572e35345a358af30fb338b0e9779c` | `e707ba0ec96ea3b482937696da0937d9a41517c9` |
+| 18 | #321 | `feat/architecture-source-compiler` | `e707ba0ec96ea3b482937696da0937d9a41517c9` | `99764bf13f987b9723ef867220468c884518b1ca` |
+| 19 | #324 | `test/architecture-contract-evidence` | `99764bf13f987b9723ef867220468c884518b1ca` | `29b30bdc324d2f9c846e5f7f235690272faa754f` |
+| 20 | #325 | `test/architecture-mutation-audit` | `29b30bdc324d2f9c846e5f7f235690272faa754f` | `3eca55a049e1885382475ce96e682ce378a6028f` |
+| 21 | #328 | `feat/architecture-evidence-explorer` | `3eca55a049e1885382475ce96e682ce378a6028f` | `4b41a45dc2cfefd6a4a32a06463a527daa489d4d` |
+| 22 | #302 | `chore/modularization-campaign-closure` | `4b41a45dc2cfefd6a4a32a06463a527daa489d4d` | live PR #302 head OID |
 
 The #326 News Evidence cleanup and #327 staging-ownership behavior were repaired
 at their lowest extracted owner in #292. #329's single-pass News validation was
-preserved through #288. #283 also restores the status-cache test clock import,
+preserved through #288, and #330's byte-preserving D1 snapshot boundary was
+preserved through the full stack. #283 also restores the status-cache test clock import,
 and #287 explicitly permits the one News bootstrap transition until #292 removes
 that script-to-script dependency. The thin `scripts/run_dashboard_sync.py` entry delegates
 through the replaceable transport seam; the canonical implementation remains in
@@ -57,14 +58,14 @@ Sync contract family passed 77/77 before descendants were replayed.
 
 ### Compiler and test-effectiveness evidence
 
-- Static compiler: 5,651 current source facts, 103 high-level claims, no absolute
+- Static compiler: 5,652 current source facts, 103 high-level claims, no absolute
   workspace paths, deterministic second pass, and zero import-policy violations.
 - Generated Explorer: 37 nodes, 66 edges, 11 views, four scenarios, and a
   52,368-byte high-level manifest; detailed code and evidence indexes remain
   separate private lazy artifacts.
 - Contract registry: 16 critical contracts, 15 unique executed test identities,
-  10 normalized source-bound runtime traces, and a 1,667-test inventory (984
-  owner-touching and 1,652 not contract-classified; sets overlap by design).
+  10 normalized source-bound runtime traces, and a 1,668-test inventory (984
+  owner-touching and 1,653 not contract-classified; sets overlap by design).
 - Full mutation pilot: 12 valid mutations; 9 `KILLED`, 3 `SURVIVED`, 0
   `INVALID`, 0 `TIMEOUT`, and 0 `ERROR`.
 - Explicit survivors: `MUT-SYNC-HEARTBEAT-FIRST`,
@@ -73,7 +74,7 @@ Sync contract family passed 77/77 before descendants were replayed.
 - The C runner exposes the already lockfile-installed Web dependencies inside
   each temporary detached worktree. Both mobile mutants are killed by their
   expected reducer assertions, not by a missing TypeScript package.
-- Exact #328 local gates: Python final count recorded below; Web 397 total, 391 passed and six
+- Exact #328 local gates: Python 1,719 passed; Web 398 total, 392 passed and six
   skipped; typecheck, production build, lint, compiler drift, evidence, import
   policy, manifest, and 254-fact Windows PowerShell AST checks passed.
 
@@ -82,17 +83,17 @@ Sync contract family passed 77/77 before descendants were replayed.
 The final exact non-production Version was uploaded to the separate
 `aurum-signal-room-preview` Worker. It was not deployed to traffic:
 
-- Git SHA: `f5c7b81c9cee62bf06c543235ba8faf204c1cd36`.
-- Source digest: `808504afa79aa2d3d0c98e8dba0bf848cae614eefcd12604b68ba1eaa53bdff3`.
-- Version ID: `d3cff46d-9694-4074-9bc2-2d9a640f8947`.
+- Git SHA: `4b41a45dc2cfefd6a4a32a06463a527daa489d4d`.
+- Source digest: `414a33048ea1316d3e97f5816804ad4ef9e07def367caf4300512761744409a5`.
+- Version ID: `a0084974-1ee7-4d27-bf69-1bfe41369b03`.
 - URL:
-  `https://d3cff46d-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`.
+  `https://a0084974-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`.
 - Exact generated-SHA banner, Evidence Inspector, repository-relative source
   spans, module-to-symbol code drill-down, Observed/Allowed/Violations modes,
   and all three mutation survivors were verified on Preview.
 - 1440x900 rendered the desktop Overview with no page-level horizontal overflow.
 - 390x844 measured a 574px viewport-derived canvas, 168px nodes, 17px primary
-  text, 16px lane headings, and 44px controls. A graph pan changed the internal
+  text, 13px CSS lane headings, and 44px controls. A graph pan changed the internal
   viewport transform while page `scrollX` stayed zero. Inspector and Advanced
   closed while preserving the selected path.
 - 360x800 measured a 544px viewport-derived canvas with the same text/node
@@ -101,12 +102,13 @@ The final exact non-production Version was uploaded to the separate
 - The temporary responsive override was reset and the task-owned browser session
   ended with zero controlled tabs.
 - Screenshots:
-  `docs/audits/screenshots/architecture-evidence-f5c7b81/preview-1440x900.png`,
+  `docs/audits/screenshots/architecture-evidence-4b41a45/preview-1440x900.png`,
   `preview-390x844.png`, and `preview-360x800.png`.
-- Main moved twice during required exact-head validation. Immutable intermediate
+- Main moved three times during required exact-head validation. Immutable intermediate
   Versions `c573df3a-7df4-485d-af2e-8609a8061cbe` and
   `d726c405-f59e-49d7-ae92-264c8ebd3602`, and
-  `2cb46d64-b484-4f06-a790-d8e27bdd9ac6` remain superseded at 0% traffic; only
+  `2cb46d64-b484-4f06-a790-d8e27bdd9ac6`, and
+  `d3cff46d-9694-4074-9bc2-2d9a640f8947` remain superseded at 0% traffic; only
   the final Version above is current evidence.
 
 ### Merge and rollback order
