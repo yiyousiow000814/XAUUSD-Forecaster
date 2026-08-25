@@ -3259,11 +3259,11 @@ test("production snapshot router keeps every sibling on the shared adaptive boun
   assert.match(router, /writeDashboardSnapshotBytes\(body\.bytes, env\.DB, id/);
   assert.doesNotMatch(router, /readBoundedBody\(request, maxBytes\)/);
   assert.doesNotMatch(router, /writeSerializedDashboardSnapshot/);
-  assert.match(snapshot, /SNAPSHOT_TEXT_BIND_THRESHOLD_BYTES = AUDIT_DETAIL_SNAPSHOT_BYTES/);
+  assert.match(snapshot, /SNAPSHOT_TEXT_BIND_THRESHOLD_BYTES = 64_000/);
   assert.match(snapshot, /new TextDecoder\("utf-8", \{ fatal: true \}\)/);
 });
 
-test("large snapshot siblings bind strict UTF-8 text once while small siblings retain bytes", async () => {
+test("snapshot siblings share the measured D1 transport boundary", async () => {
   const {
     SNAPSHOT_TEXT_BIND_THRESHOLD_BYTES, writeDashboardSnapshot,
   } = await import("../app/api/_shared/dashboard-snapshot.ts");
@@ -3278,10 +3278,16 @@ test("large snapshot siblings bind strict UTF-8 text once while small siblings r
       };
     },
   };
-  const small = JSON.stringify({ headline: "黄金上涨" });
+  const small = JSON.stringify({ body: "a".repeat(
+    SNAPSHOT_TEXT_BIND_THRESHOLD_BYTES - 11,
+  ) });
   const large = JSON.stringify({ headline: "黄金上涨", body: "金".repeat(
     SNAPSHOT_TEXT_BIND_THRESHOLD_BYTES,
   ) });
+  assert.equal(new TextEncoder().encode(small).byteLength,
+    SNAPSHOT_TEXT_BIND_THRESHOLD_BYTES);
+  assert.ok(new TextEncoder().encode(large).byteLength >
+    SNAPSHOT_TEXT_BIND_THRESHOLD_BYTES);
   assert.equal(await writeDashboardSnapshot(new Request("https://example.test/api/audit", {
     method: "POST", body: small,
   }), binding, 8, { dryRun: true }), "validated");
