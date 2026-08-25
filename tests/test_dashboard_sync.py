@@ -1548,14 +1548,20 @@ def test_news_generation_stages_all_details_before_index_and_activation(
     generation = _projection_fixture()
     state_file = tmp_path / "news-state.json"
     posted: list[tuple[str, dict]] = []
+    offsets = {"detail": 0, "index": 0}
 
     def post(url, body, _config):
         payload = json.loads(body)
         posted.append((url, payload))
         if payload["action"] == "prepare":
-            return {"status": "OK", "active": False, "next_detail_offset": 0,
-                    "next_index_offset": 0}
-        if payload["action"].startswith("stage_"):
+            return {"status": "OK", "active": False,
+                    "next_detail_offset": offsets["detail"],
+                    "next_index_offset": offsets["index"]}
+        if payload["action"] == "stage_details":
+            offsets["detail"] += len(payload["items"])
+            return {"status": "OK", "received": len(payload["items"])}
+        if payload["action"] == "stage_index":
+            offsets["index"] += len(payload["items"])
             return {"status": "OK", "received": len(payload["items"])}
         return {"status": "OK"}
 
@@ -1577,9 +1583,12 @@ def test_news_generation_stages_all_details_before_index_and_activation(
     }
 
     module._sync_news({}, config)
-
     assert [body["action"] for _url, body in posted] == [
-        "prepare", "stage_details", "stage_details", "stage_index", "activate", "verify",
+        "prepare", "stage_details", "stage_details", "stage_index", "stage_index",
+    ]
+    module._sync_news({}, config)
+    assert [body["action"] for _url, body in posted][-3:] == [
+        "stage_index", "activate", "verify",
     ]
     state = json.loads(state_file.read_text(encoding="utf-8"))
     assert state["projection_state"] == "CURRENT"
@@ -1701,7 +1710,7 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
         "prepare_snapshot": snapshot_id,
         "expected_count": len(rows),
     }
-    for _ in range(10):
+    for _ in range(20):
         if any("activate_snapshot" in body for _url, body in posted):
             break
         module._sync_news_evidence({}, config)
@@ -1717,7 +1726,7 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
     )
     assert all(
         len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode())
-        <= module.NEWS_INDEX_BATCH_LIMIT_BYTES
+        <= module.NEWS_EVIDENCE_BATCH_LIMIT_BYTES
         for body in batches
     )
     assert activation == {
@@ -1820,7 +1829,7 @@ def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_field
     }
 
     sync._sync_news_evidence({}, config)
-    assert offsets[stable_snapshot] == 40
+    assert offsets[stable_snapshot] == 16
     assert activations == []
 
     age_drift_snapshot, restarted_rows = api._materialize_news_evidence_generation([
@@ -1836,6 +1845,8 @@ def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_field
     monkeypatch.setattr(sync, "NEWS_EVIDENCE_PAGES_PER_CYCLE", 2)
     monkeypatch.setattr(sync.urllib.request, "urlopen", urlopen)
     monkeypatch.setattr(sync, "_post_json", post)
+    sync._sync_news_evidence({}, config)
+    assert activations == []
     sync._sync_news_evidence({}, config)
     assert activations == [stable_snapshot]
     assert received_keys[stable_snapshot] == [row["event_key"] for row in rows]
@@ -1858,6 +1869,8 @@ def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_field
     assert changed_snapshot != stable_snapshot
     sync._sync_news_evidence({}, config)
     assert changed_snapshot in offsets
+    assert active[0] == stable_snapshot
+    sync._sync_news_evidence({}, config)
     assert active[0] == stable_snapshot
     sync._sync_news_evidence({}, config)
     assert active[0] == changed_snapshot
@@ -2281,7 +2294,10 @@ def test_news_generation_resumes_remote_offsets_and_bounds_each_cycle(
     assert first_state["projection_state"] == "REPLAYING"
     actions.clear()
     module._sync_news({}, config)
-    assert actions == ["prepare", "stage_index", "stage_index", "activate", "verify"]
+    assert actions == ["prepare"] + ["stage_index"] * 4
+    actions.clear()
+    module._sync_news({}, config)
+    assert actions == ["prepare"] + ["stage_index"] * 3 + ["activate", "verify"]
     assert active is True
 
     actions.clear()

@@ -29,8 +29,8 @@ import {
 
 export const dynamic = "force-dynamic";
 
-const MAX_WRITE_BYTES = 400_000;
-const MAX_WRITE_ITEMS = 20;
+const MAX_WRITE_BYTES = 80_000;
+const MAX_WRITE_ITEMS = 8;
 const MAX_PAGE_ITEMS = 50;
 
 function protocolFailure(reason: unknown) {

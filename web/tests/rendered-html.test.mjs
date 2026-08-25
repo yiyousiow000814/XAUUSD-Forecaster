@@ -1185,8 +1185,6 @@ test("keeps the 60-day news archive inside bounded D1 work", () => {
   const reviewState = readFileSync(new URL("../app/_lib/news-review-state.ts", import.meta.url), "utf8");
   const detail = readFileSync(new URL("../app/api/news-content/route.ts", import.meta.url), "utf8");
   const migration = readFileSync(new URL("../drizzle/0022_news_projection_generation.sql", import.meta.url), "utf8");
-  assert.match(store, /NEWS_PROJECTION_MAX_BATCH_ITEMS = 20/);
-  assert.match(store, /items\.length > NEWS_PROJECTION_MAX_BATCH_ITEMS/);
   assert.match(detail, /DETAIL_BATCH_LIMIT = 12/);
   assert.match(store, /WHERE generation_id=\? AND detail_key IN \(\$\{placeholders\}\)/);
   assert.match(store, /ORDER BY published_time DESC/);
@@ -2001,7 +1999,7 @@ test("activates only complete paged news-evidence generations outside status", (
   assert.match(migration, /news_evidence_snapshot_eligible_idx/);
   assert.match(migration, /news_evidence_batches/);
   assert.match(migration, /expected_count/);
-  assert.match(route, /MAX_WRITE_BYTES = 400_000/);
+  assert.match(route, /MAX_WRITE_BYTES = 80_000/);
   assert.match(route, /MAX_PAGE_ITEMS = 50/);
   assert.match(store, /NEWS_EVIDENCE_CURSOR_STALE/);
   assert.match(store, /sort_time<\? OR \(sort_time=\? AND event_key<\?\)/);

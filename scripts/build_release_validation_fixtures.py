@@ -166,7 +166,7 @@ def build_fixtures() -> dict[str, bytes]:
     )
     evidence_items = [
         {**_news(index), "headline": f"Bounded evidence headline {index}"}
-        for index in range(20)
+        for index in range(dashboard_sync.NEWS_EVIDENCE_WRITE_BATCH_ITEMS)
     ]
     news_evidence = json.dumps({
         "contract_version": dashboard_sync.NEWS_EVIDENCE_CONTRACT_VERSION,

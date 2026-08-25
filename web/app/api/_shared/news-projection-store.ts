@@ -6,10 +6,11 @@ import {
   type NewsReviewState,
 } from "../../_lib/news-review-state";
 
-export const NEWS_PROJECTION_CONTRACT_VERSION = "news-projection-generation-v2";
+export const NEWS_PROJECTION_CONTRACT_VERSION = "news-projection-generation-v3";
 export const NEWS_GENERATION_ID = /^[a-f0-9]{64}$/;
 export const NEWS_PROJECTION_MAX_ITEMS = 10_000;
-export const NEWS_PROJECTION_MAX_BATCH_ITEMS = 20;
+export const NEWS_INDEX_MAX_BATCH_ITEMS = 4;
+export const NEWS_DETAIL_MAX_BATCH_ITEMS = 8;
 export const NEWS_PROJECTION_STAGING_TTL_MS = 24 * 60 * 60_000;
 export const EMPTY_RECEIPT_DIGEST =
   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -367,7 +368,8 @@ export async function stageNewsProjectionBatch(
   if (
     !NEWS_GENERATION_ID.test(generationId) || !Number.isSafeInteger(offset) || offset < 0
     || !Array.isArray(items) || items.length < 1
-    || items.length > NEWS_PROJECTION_MAX_BATCH_ITEMS
+    || items.length > (kind === "detail"
+      ? NEWS_DETAIL_MAX_BATCH_ITEMS : NEWS_INDEX_MAX_BATCH_ITEMS)
     || items.some(item => kind === "detail"
       ? !validDetail(item as NewsProjectionDetailItem)
       : !validIndex(item as NewsProjectionIndexItem))

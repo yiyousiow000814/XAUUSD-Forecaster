@@ -13,6 +13,7 @@ import {
   abandonNewsProjection,
   activateNewsProjection,
   NEWS_GENERATION_ID,
+  NEWS_INDEX_MAX_BATCH_ITEMS,
   NEWS_PROJECTION_CONTRACT_VERSION,
   NewsProjectionProtocolError,
   prepareNewsProjection,
@@ -32,7 +33,7 @@ import { publicNewsRecord } from "../../_lib/public-news-copy";
 
 export const dynamic = "force-dynamic";
 
-const MAX_WRITE_BYTES = 450_000;
+const MAX_WRITE_BYTES = 120_000;
 
 function failure(reason: unknown) {
   if (reason instanceof D1CapabilityError) {
@@ -136,7 +137,8 @@ function releaseIndexValidation(
     const total = Number(checked.item_total ?? 0);
     if (
       !Number.isSafeInteger(checked.batch_offset) || checked.batch_offset < 0
-      || total < 1 || total > 20 || Number(checked.item_valid) !== total
+      || total < 1 || total > NEWS_INDEX_MAX_BATCH_ITEMS
+      || Number(checked.item_valid) !== total
       || Number(checked.review_valid) !== total
     ) return null;
     return { items: total, prepared_statements: total + 2 };

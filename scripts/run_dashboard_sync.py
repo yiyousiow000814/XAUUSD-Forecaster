@@ -52,7 +52,8 @@ REMOTE_NEWS_LIMIT = 200
 REMOTE_DECISION_LIMIT = 20
 REMOTE_DAILY_BRIEF_LIMIT = 14
 NEWS_PROJECTION_BATCHES_PER_CYCLE = 4
-NEWS_EVIDENCE_WRITE_BATCH_ITEMS = 20
+NEWS_EVIDENCE_WRITE_BATCH_ITEMS = 8
+NEWS_EVIDENCE_BATCH_LIMIT_BYTES = 80_000
 NEWS_EVIDENCE_PAGES_PER_CYCLE = 1
 MARKET_HISTORY_PAGES_PER_CYCLE = 1
 MARKET_OVERVIEWS_PER_CYCLE = 2
@@ -97,7 +98,7 @@ from xauusd_forecaster.news_projection import (
     NEWS_INDEX_FIELDS,
     NEWS_INDEX_BATCH_LIMIT_BYTES,
     NEWS_MIRROR_CONTRACT_VERSION,
-    NEWS_PROJECTION_MAX_BATCH_ITEMS as NEWS_WRITE_BATCH_ITEMS,
+    NEWS_INDEX_BATCH_ITEMS as NEWS_WRITE_BATCH_ITEMS,
     bounded_batches as _projection_bounded_batches,
     sha256_json as _projection_json_hash,
     split_news_rows,
@@ -1902,10 +1903,10 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
                 "offset": received,
                 "items": items,
             }, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
-            if len(encoded) > NEWS_INDEX_BATCH_LIMIT_BYTES:
+            if len(encoded) > NEWS_EVIDENCE_BATCH_LIMIT_BYTES:
                 raise PayloadContractError(
                     f"news evidence batch is {len(encoded)} bytes "
-                    f"(limit {NEWS_INDEX_BATCH_LIMIT_BYTES})"
+                    f"(limit {NEWS_EVIDENCE_BATCH_LIMIT_BYTES})"
                 )
             _post_json(remote_url, encoded, config)
             received += len(items)

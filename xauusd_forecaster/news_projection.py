@@ -9,13 +9,13 @@ import struct
 from dataclasses import dataclass
 from typing import Iterable
 
-NEWS_PROJECTION_CONTRACT_VERSION = "news-projection-generation-v2"
+NEWS_PROJECTION_CONTRACT_VERSION = "news-projection-generation-v3"
 NEWS_MIRROR_CONTRACT_VERSION = NEWS_PROJECTION_CONTRACT_VERSION
 NEWS_PROJECTION_MAX_ITEMS = 10_000
-NEWS_PROJECTION_MAX_BATCH_ITEMS = 20
+NEWS_INDEX_BATCH_ITEMS = 4
 NEWS_DETAIL_BATCH_ITEMS = 8
 NEWS_DETAIL_BATCH_LIMIT_BYTES = 400_000
-NEWS_INDEX_BATCH_LIMIT_BYTES = 400_000
+NEWS_INDEX_BATCH_LIMIT_BYTES = 100_000
 EMPTY_RECEIPT_DIGEST = hashlib.sha256(b"").hexdigest()
 
 NEWS_INDEX_FIELDS = (
@@ -195,7 +195,7 @@ def build_news_projection_generation(
     )
     index_batches = bounded_batches(
         index_rows, NEWS_INDEX_BATCH_LIMIT_BYTES,
-        max_items=NEWS_PROJECTION_MAX_BATCH_ITEMS,
+        max_items=NEWS_INDEX_BATCH_ITEMS,
     )
     manifest = {
         "generation_id": generation_id,
