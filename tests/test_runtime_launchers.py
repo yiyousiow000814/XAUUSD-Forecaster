@@ -204,7 +204,7 @@ def test_candidate_validation_retries_delayed_observability_evidence(tmp_path) -
         '$($validation.observability_diagnostic)"',
     )
 
-    assert result == "1,1,2,2,warmup:acceptance:acceptance,"
+    assert result == "0,1,2,2,warmup:acceptance:acceptance,"
 
 
 def test_raw_telemetry_metrics_keep_zero_cpu_samples(tmp_path) -> None:
@@ -2295,14 +2295,16 @@ def test_version_host_routes_distinguish_static_assets_from_worker_redirects(tmp
         f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE'; "
         "$candidate|Add-Member browser_url 'https://11111111-aurum-signal-room.yiyousiow1234.workers.dev'; "
         "$plan=Get-CandidateRouteValidationPlan -ChangedFiles @('web/app/page.tsx'); "
-        "function Invoke-CandidateStaticAssetRequest { param($RequestUri); "
+        "function Invoke-CandidateStaticAssetRequest { param($RequestUri,$Headers); "
         "if($RequestUri.AbsolutePath -eq '/favicon.ico'){return [pscustomobject]@{"
         "status=301;location='/favicon.svg';content_type='';body_bytes=[byte[]]@();"
         "cf_cache_status='';etag='';age=''}};"
         "$redirects=@{'/assistant'='/admin/assistant';'/retry-jobs'='/admin/retry-jobs';"
         "'/status'='/admin/ai-usage'};if($redirects.ContainsKey($RequestUri.AbsolutePath)){"
         "return [pscustomobject]@{status=307;location=$redirects[$RequestUri.AbsolutePath];"
-        "content_type='';body_bytes=[byte[]]@();cf_cache_status='';etag='';age=''}};"
+        "content_type='';body_bytes=[byte[]]@();cf_cache_status='';etag='';age='';"
+        "worker_version=$candidate.worker_version_id;git_sha=$candidate.git_sha;"
+        "route=$RequestUri.AbsolutePath}};"
         "$text=if($RequestUri.AbsolutePath -eq '/favicon.svg'){'<svg/>'}else{"
         "'<meta charset=\"utf-8\">Aurum Signal Room 系统健康状态 新闻与决策 "
         "OWNER OPERATIONS PRIVATE OPERATOR QUEUE AI 模型使用状态 ASSISTANT PAUSED "
@@ -2310,7 +2312,6 @@ def test_version_host_routes_distinguish_static_assets_from_worker_redirects(tmp
         "$type=if($RequestUri.AbsolutePath -eq '/favicon.svg'){'image/svg+xml'}else{'text/html'}; "
         "return [pscustomobject]@{status=200;location='';content_type=$type;"
         "body_bytes=[Text.Encoding]::UTF8.GetBytes($text);cf_cache_status='HIT';etag='x';age='1'} }; "
-        "function Start-Sleep {}; function Get-CandidateInvocationCount { return 3 }; "
         "$e=Invoke-CandidateWorkerValidation -Candidate $candidate -RoutePlan $plan; "
         'Write-Output "$($plan.static_assets.Count),$($e.expected_worker_invocations),'
         '$($e.cpu_evidence),$($e.passed),$($e.routes[1].requested_host)"',
@@ -2319,6 +2320,41 @@ def test_version_host_routes_distinguish_static_assets_from_worker_redirects(tmp
     assert result == (
         "12,3,NOT_REQUIRED,True,"
         "11111111-aurum-signal-room.yiyousiow1234.workers.dev"
+    )
+
+
+def test_version_host_worker_redirects_use_direct_exact_identity_evidence(
+    tmp_path,
+) -> None:
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' "
+        "-WorkerVersionId '11111111-1111-1111-1111-111111111111' "
+        f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE';"
+        "$candidate|Add-Member browser_url 'https://11111111-aurum-signal-room.yiyousiow1234.workers.dev';"
+        "$plan=[pscustomobject]@{static_assets=@([pscustomobject]@{path='/status';"
+        "worker_expected=$true;content_type='text/html';body_encoding='utf-8';"
+        "require_html_charset=$true;marker='OK';redirect_path='/admin/ai-usage'});"
+        "worker_reads=@();worker_writes=@()};"
+        "$script:wrong=$false;function Invoke-CandidateStaticAssetRequest{"
+        "param($RequestUri);if($RequestUri.AbsolutePath -eq '/status'){"
+        "return [pscustomobject]@{status=307;location='/admin/ai-usage';content_type='';"
+        "body_bytes=[byte[]]@();cf_cache_status='';etag='';age='';"
+        "worker_version=if($script:wrong){'wrong'}else{$candidate.worker_version_id};"
+        "git_sha=$candidate.git_sha;route='/status'}};"
+        "return [pscustomobject]@{status=200;location='';content_type='text/html; charset=utf-8';"
+        "body_bytes=[Text.Encoding]::UTF8.GetBytes('OK');cf_cache_status='MISS';etag='x';age=''}};"
+        "function Get-CandidateInvocationCount{throw 'static telemetry must not be queried'};"
+        "$good=Invoke-CandidateWorkerValidation $candidate $plan;$script:wrong=$true;"
+        "$bad=Invoke-CandidateWorkerValidation $candidate $plan;"
+        'Write-Output "$($good.passed)|$($good.static_worker_invocations)|'
+        '$($good.routes[0].observed_worker_version)|$($good.routes[0].observed_git_sha)|'
+        '$($good.routes[0].observed_route)|$($bad.passed)|$($bad.routes[0].reason)"',
+    )
+    assert result == (
+        "True|1|11111111-1111-1111-1111-111111111111|"
+        f"{candidate}|/status|False|VERSION_HOST_WORKER_IDENTITY_MISMATCH"
     )
 
 
