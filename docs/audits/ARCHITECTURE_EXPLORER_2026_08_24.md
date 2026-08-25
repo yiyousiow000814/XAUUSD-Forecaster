@@ -1,5 +1,33 @@
 # Private Architecture Explorer Audit — 2026-08-24
 
+## Generated evidence extension — 2026-08-25
+
+Draft PR #328 extends the accepted #304 graph, routing, camera, disclosure, and
+mobile interaction boundaries without redesigning them. It consumes compiler
+artifacts at exact Git SHA `b5bdcf21a2640ab20054ed4f2e7918d3c04001cf`
+and adds only private lazy evidence surfaces:
+
+- node and edge evidence status on the existing graph;
+- exact repository-relative source spans with extractor and certainty;
+- generated package/module/symbol code drill-down;
+- separate Observed Imports, Allowed Policy, and Violations views;
+- contract test execution and runtime-trace evidence;
+- a test-effectiveness panel that reports 16 verified critical contracts while
+  retaining three surviving designated mutations as explicit gaps.
+
+The exact immutable Preview is version
+`2cb46d64-b484-4f06-a790-d8e27bdd9ac6` at
+`https://2cb46d64-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`.
+Desktop 1440x900 and phone 390x844 / 360x800 passed. The phones retained the
+168px node, 17px primary text, 16px lane-heading, 44px target, canvas-contained
+horizontal pan, and page-overflow contracts. Closing either sheet retained the
+path and viewport; Clear Path remained the only selection-clearing action.
+
+Screenshots are under
+`docs/audits/screenshots/architecture-evidence-b5bdcf2/`. The task-owned
+browser tab was closed and its viewport override reset. The historical #304
+evidence below remains valid for its exact older Version only.
+
 ## Outcome
 
 The first Explorer renderer was rejected because it presented a two-column

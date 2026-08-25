@@ -1,5 +1,25 @@
 # Repository Modularization Execution
 
+## Architecture evidence compiler campaign refresh (PENDING)
+
+This 2026-08-25 refresh supersedes older replacement SHA and merge-order rows
+below. Latest integrated main is
+`04b1c24aa2747599c4c521fea2bf6874d9d51947`. The repaired existing stack ends at
+#304 `1943717f662b2c85a73a94f6a4304988bb6c18bb`, followed linearly by:
+
+| PR | Boundary | Exact base | Exact head |
+|---:|---|---|---|
+| #321 | Deterministic source compiler | `1943717f662b2c85a73a94f6a4304988bb6c18bb` | `ca8c84b9d8ed9d3143fbab71ae145725d7810870` |
+| #324 | Contract evidence registry | `ca8c84b9d8ed9d3143fbab71ae145725d7810870` | `1bd8ac4546c46069c40d0a358d7b92dd92aed9b0` |
+| #325 | Targeted mutation audit | `1bd8ac4546c46069c40d0a358d7b92dd92aed9b0` | `ce5d0e7fc6bf91efc26d976085559ead60413bea` |
+| #328 | Private generated-evidence Explorer | `ce5d0e7fc6bf91efc26d976085559ead60413bea` | `b5bdcf21a2640ab20054ed4f2e7918d3c04001cf` |
+| #302 | Documentation-only closure | `b5bdcf21a2640ab20054ed4f2e7918d3c04001cf` | live PR #302 head OID |
+
+All rows remain Draft and `PENDING`. Merge order is the repaired table in
+`docs/audits/REPOSITORY_MODULARIZATION_CLOSURE_2026_08_24.md`, ending
+#304 -> #321 -> #324 -> #325 -> #328 -> #302. No Git operation may move Stable.
+Assistant remains `PAUSED`.
+
 ## Full-stack latest-main integration (PENDING)
 
 This section records a pending Draft PR stack reconstruction. It does not

@@ -1,5 +1,118 @@
 # Repository Modularization Closure Audit — 2026-08-24
 
+## Architecture evidence compiler campaign refresh — 2026-08-25
+
+This section supersedes every older SHA, test count, Preview, merge-order, and
+closure statement below. The older sections remain only as historical evidence
+for the earlier #304 campaign boundary. The complete stack is still `PENDING`:
+all implementation PRs and this documentation-only closure PR remain Draft.
+
+- Latest integrated `main`: `04b1c24aa2747599c4c521fea2bf6874d9d51947`
+  (#329).
+- Final implementation: Draft PR #328 at
+  `b5bdcf21a2640ab20054ed4f2e7918d3c04001cf`.
+- Closure: Draft PR #302, documentation-only, based directly on #328.
+- Assistant remains `PAUSED`.
+- No merge, Stable movement, production data mutation, provider call, runtime
+  activation, or production deployment was performed.
+
+### Exact refreshed stack
+
+Each implementation base is the exact head of the preceding row. #302 uses a
+live head OID because a commit cannot embed its own hash.
+
+| Order | PR | Branch | Exact base SHA | Exact head SHA |
+|---:|---:|---|---|---|
+| 1 | #282 | `docs/architecture-baseline` | `04b1c24aa2747599c4c521fea2bf6874d9d51947` | `3dffba74501f8b6ed6dc613120b099c5385f52c7` |
+| 2 | #283 | `refactor/dashboard-status-cache` | `3dffba74501f8b6ed6dc613120b099c5385f52c7` | `a666ea81fb370700f1f3bc08eb00be53c7679239` |
+| 3 | #285 | `refactor/dashboard-health-projection` | `a666ea81fb370700f1f3bc08eb00be53c7679239` | `19fb2aaceb4de9aa1f3fb2eb4870c5e9c3fef5bf` |
+| 4 | #287 | `refactor/dashboard-resource-contracts` | `19fb2aaceb4de9aa1f3fb2eb4870c5e9c3fef5bf` | `f6d2ffac66ba9beda0984e6ca662b3c3fd685e93` |
+| 5 | #288 | `refactor/dashboard-api-news-resources` | `f6d2ffac66ba9beda0984e6ca662b3c3fd685e93` | `6018210763d1f02bc2e0dc93d72ee4c5035ea517` |
+| 6 | #289 | `refactor/dashboard-api-market-resources` | `6018210763d1f02bc2e0dc93d72ee4c5035ea517` | `b16f95d715b047dd38311a164f9fb5d79f639653` |
+| 7 | #290 | `refactor/dashboard-api-optional-resources` | `b16f95d715b047dd38311a164f9fb5d79f639653` | `497c001d70354bef7355a7b8815876e350be4324` |
+| 8 | #291 | `refactor/dashboard-operator-bridge` | `497c001d70354bef7355a7b8815876e350be4324` | `70592ad701ca80319b585c60f767bd061e8b0b96` |
+| 9 | #292 | `refactor/dashboard-sync-runtime` | `70592ad701ca80319b585c60f767bd061e8b0b96` | `0f9b8361746d6d9741e40e806788768e2786e741` |
+| 10 | #294 | `refactor/news-annotator-runtime` | `0f9b8361746d6d9741e40e806788768e2786e741` | `a33ec8fba901ae47b358c04538c2216465f3c60b` |
+| 11 | #295 | `refactor/control-center-boundaries` | `a33ec8fba901ae47b358c04538c2216465f3c60b` | `b73686901b33fc9c7755b4697dee8464abe86a00` |
+| 12 | #296 | `refactor/decision-evidence-packages` | `b73686901b33fc9c7755b4697dee8464abe86a00` | `b764b0d0dd450416a6bd8d72d76d28f2cb7be863` |
+| 13 | #297 | `refactor/training-package` | `b764b0d0dd450416a6bd8d72d76d28f2cb7be863` | `66205161f6692224b11de25cb0fdd36a2acf305f` |
+| 14 | #298 | `refactor/news-ai-packages` | `66205161f6692224b11de25cb0fdd36a2acf305f` | `59d84bfd7810b6d73e2b5eae08cb949671c4f6d0` |
+| 15 | #299 | `refactor/assistant-runtime-dashboard-packages` | `59d84bfd7810b6d73e2b5eae08cb949671c4f6d0` | `437f60baf84e600ec70965e164c31ecf77014f43` |
+| 16 | #301 | `refactor/test-organization` | `437f60baf84e600ec70965e164c31ecf77014f43` | `d24d1040d2f4b63a3700d09a49c5f3d0a7dd8da6` |
+| 17 | #304 | `feat/private-architecture-explorer` | `d24d1040d2f4b63a3700d09a49c5f3d0a7dd8da6` | `1943717f662b2c85a73a94f6a4304988bb6c18bb` |
+| 18 | #321 | `feat/architecture-source-compiler` | `1943717f662b2c85a73a94f6a4304988bb6c18bb` | `ca8c84b9d8ed9d3143fbab71ae145725d7810870` |
+| 19 | #324 | `test/architecture-contract-evidence` | `ca8c84b9d8ed9d3143fbab71ae145725d7810870` | `1bd8ac4546c46069c40d0a358d7b92dd92aed9b0` |
+| 20 | #325 | `test/architecture-mutation-audit` | `1bd8ac4546c46069c40d0a358d7b92dd92aed9b0` | `ce5d0e7fc6bf91efc26d976085559ead60413bea` |
+| 21 | #328 | `feat/architecture-evidence-explorer` | `ce5d0e7fc6bf91efc26d976085559ead60413bea` | `b5bdcf21a2640ab20054ed4f2e7918d3c04001cf` |
+| 22 | #302 | `chore/modularization-campaign-closure` | `b5bdcf21a2640ab20054ed4f2e7918d3c04001cf` | live PR #302 head OID |
+
+The #326 News Evidence cleanup and #327 staging-ownership behavior were repaired
+at their lowest extracted owner in #292. #329's single-pass News validation was
+preserved through #288. The thin `scripts/run_dashboard_sync.py` entry delegates
+through the replaceable transport seam; the canonical implementation remains in
+`xauusd_forecaster.dashboard.sync.resource_protocols`. The complete Dashboard
+Sync contract family passed 77/77 before descendants were replayed.
+
+### Compiler and test-effectiveness evidence
+
+- Static compiler: 4,913 current source facts, 103 high-level claims, no absolute
+  workspace paths, deterministic second pass, and zero import-policy violations.
+- Generated Explorer: 37 nodes, 66 edges, 11 views, four scenarios, and a
+  52,368-byte high-level manifest; detailed code and evidence indexes remain
+  separate private lazy artifacts.
+- Contract registry: 16 critical contracts, 15 unique executed test identities,
+  and 10 normalized source-bound runtime traces.
+- Full mutation pilot: 12 valid mutations; 9 `KILLED`, 3 `SURVIVED`, 0
+  `INVALID`, 0 `TIMEOUT`, and 0 `ERROR`.
+- Explicit survivors: `MUT-SYNC-HEARTBEAT-FIRST`,
+  `MUT-EVIDENCE-APPEND-ONLY`, and `MUT-RELEASE-PREVIEW-PROMOTION`. They remain
+  visible blockers and are not converted into passing evidence.
+- Exact #328 local gates: Python 1,718/1,718; Web 397 total, 391 passed and six
+  skipped; typecheck, production build, lint, compiler drift, evidence, import
+  policy, manifest, and 254-fact Windows PowerShell AST checks passed.
+
+### Exact immutable Preview evidence
+
+The final exact non-production Version was uploaded to the separate
+`aurum-signal-room-preview` Worker. It was not deployed to traffic:
+
+- Git SHA: `b5bdcf21a2640ab20054ed4f2e7918d3c04001cf`.
+- Source digest: `31040816a28023839dce9e56ca6e337e99638368e799a5bad4ed11fa5979a201`.
+- Version ID: `2cb46d64-b484-4f06-a790-d8e27bdd9ac6`.
+- URL:
+  `https://2cb46d64-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`.
+- Exact generated-SHA banner, Evidence Inspector, repository-relative source
+  spans, module-to-symbol code drill-down, Observed/Allowed/Violations modes,
+  and all three mutation survivors were verified on Preview.
+- 1440x900 rendered the desktop Overview with no page-level horizontal overflow.
+- 390x844 measured a 574px viewport-derived canvas, 168px nodes, 17px primary
+  text, 16px lane headings, and 44px controls. A 200px graph pan left page
+  `scrollX` at zero. The 608px Inspector and 574px Advanced sheet closed while
+  preserving the selected path.
+- 360x800 measured a 544px viewport-derived canvas with the same text/node
+  floors and canvas-contained pan. Inspector and Advanced heights were 576px
+  and 544px. Clear Path, not sheet close, removed selection.
+- The temporary responsive override was reset and the task-owned browser session
+  ended with zero controlled tabs.
+- Screenshots:
+  `docs/audits/screenshots/architecture-evidence-b5bdcf2/preview-1440x900.png`,
+  `preview-390x844.png`, and `preview-360x800.png`.
+- Main moved twice during required exact-head validation. Immutable intermediate
+  Versions `c573df3a-7df4-485d-af2e-8609a8061cbe` and
+  `d726c405-f59e-49d7-ae92-264c8ebd3602` remain superseded at 0% traffic; only
+  the final Version above is current evidence.
+
+### Merge and rollback order
+
+Merge only after review and all required exact-head checks are green, in table
+order from #282 through #328, then #302. Do not move Stable as a consequence of
+Git merge. Roll back a campaign layer by reverting only that PR after reverting
+its descendants; generated artifacts require regeneration but no data migration.
+The Preview Version can be abandoned at 0% because it owns no traffic.
+
+The remaining sections are the historical #304 closure snapshot and must not be
+used as current SHA, Preview, count, or merge-order evidence.
+
 ## Status and scope
 
 This is the closure manifest for the still-`PENDING` Draft PR stack. It does
