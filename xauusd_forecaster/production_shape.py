@@ -194,7 +194,7 @@ def production_shape_violations(
             violations.append("active generation has no subsequent live decision")
         elif actual is not None:
             missing_predictions = sorted(required - set(actual))
-            if missing_predictions:
+            if missing_predictions and not allow_pending_generation_decision:
                 violations.append(
                     "latest decision is missing models: "
                     + ", ".join(missing_predictions)

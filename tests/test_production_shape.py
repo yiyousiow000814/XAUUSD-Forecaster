@@ -293,6 +293,35 @@ def test_complete_model_family_is_required_at_generation_and_prediction_boundari
     assert _violations(ledger, _status()) == [expected]
 
 
+def test_candidate_preflight_treats_a_partially_appended_decision_as_pending(
+    tmp_path,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "pending-live-decision.sqlite3", now=NOW)
+    _seed_active_generation(ledger)
+    _append_complete_decision(ledger, omitted_identity="FULL")
+    _seed_scheduler_usage(ledger)
+    status = _status()
+    status["production_contract"] = production_contract_snapshot(
+        ledger.connection, now=VALIDATION_TIME,
+    )
+    status["dashboard_sync"] = {"status": "OK", "degraded_resources": []}
+
+    assert production_shape_violations(status) == [
+        "latest decision is missing models: FULL",
+    ]
+    assert production_shape_violations(
+        status, allow_pending_generation_decision=True,
+    ) == []
+    status["production_contract"]["active_generation"][
+        "latest_decision_models"
+    ]["MARKET_ONLY"] = "wrong-version"
+    assert production_shape_violations(
+        status, allow_pending_generation_decision=True,
+    ) == [
+        "latest decision does not use active generation versions: MARKET_ONLY",
+    ]
+
+
 @pytest.mark.parametrize(
     "payload_key",
     [surface.payload_key for surface in AI_QUOTA_SURFACES],
