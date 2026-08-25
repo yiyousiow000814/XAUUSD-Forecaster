@@ -112,8 +112,9 @@
   UTF-8 request bytes through the Worker-to-D1 boundary. D1 casts that single
   byte transport to TEXT for JSON1 validation and storage; the Worker must not
   decode and then re-encode large snapshots merely to cross the storage
-  boundary. Release dry-runs use the same byte transport and D1 JSON1
-  validation without mutating authoritative rows.
+  boundary. Every production entry point, including the minimal API router,
+  uses that shared byte writer. Release dry-runs use the same byte transport
+  and D1 JSON1 validation without mutating authoritative rows.
 - Snapshot cleanup remains bounded per Worker request, reports whether cleanup
   debt remains, and the producer advances a fixed number of cleanup steps per
   cycle. While eligible cleanup debt remains, the producer must not admit
@@ -158,6 +159,11 @@
   SQLite remains the complete authority; D1 contains only those bounded
   display projections. A detail snapshot that has not loaded or is unavailable
   must not be represented as an empty collection or zero count.
+- A bounded News index page is projected in one D1 query after the current
+  generation identity is established. Page rows, counts, review buckets,
+  category buckets, and staging identity cross the D1 boundary together; the
+  Worker decodes the page array once and preserves the established public-copy,
+  expiry, ordering, and pagination semantics.
 - During a split-snapshot handover, the read boundary selects the freshest
   valid compatible snapshot by durable `received_at`, with the split snapshot
   winning only an exact timestamp tie. Legacy audit detail is projected and

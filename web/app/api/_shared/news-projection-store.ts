@@ -701,46 +701,68 @@ export async function readNewsProjectionPage(
   }
   const where = conditions.join(" AND ");
   const offset = (options.page - 1) * options.pageSize;
-  const [rows, total, totals, categories, reviews, staging] = await Promise.all([
-    binding.prepare(
-      `SELECT payload FROM news_projection_index WHERE ${where}
+  const now = new Date().toISOString();
+  const pageData = await binding.prepare(
+    `WITH page_rows(payload,published_time,collector_first_seen_time,detail_key) AS (
+       SELECT payload,published_time,collector_first_seen_time,detail_key
+         FROM news_projection_index WHERE ${where}
         ORDER BY published_time DESC,collector_first_seen_time DESC,detail_key DESC
-        LIMIT ? OFFSET ?`,
-    ).bind(...binds, options.pageSize, offset).all<{ payload: string }>(),
-    binding.prepare(
-      `SELECT count(*) count FROM news_projection_index WHERE ${where}`,
-    ).bind(...binds).first<{ count: number }>(),
-    binding.prepare(
-      `SELECT COALESCE(sum(parsed),0) parsed,
+        LIMIT ? OFFSET ?
+     ), filtered_total(count) AS (
+       SELECT count(*) FROM news_projection_index WHERE ${where}
+     ), all_totals(parsed,model_candidate) AS (
+       SELECT COALESCE(sum(parsed),0),
               COALESCE(sum(CASE WHEN model_candidate=1
                 AND (impact_expires_at IS NULL OR impact_expires_at='' OR impact_expires_at>?)
-                THEN 1 ELSE 0 END),0) model_candidate
-         FROM news_projection_index WHERE generation_id=? AND ${ACTIVE_NEWS_SQL}`,
-    ).bind(new Date().toISOString(), state.active_generation_id)
-      .first<{ parsed: number; model_candidate: number }>(),
-    binding.prepare(
-      `SELECT category,count(*) count FROM news_projection_index
-        WHERE generation_id=? AND ${ACTIVE_NEWS_SQL}
-          AND ${NEWS_REVIEW_STATE_SQL[options.reviewState]} GROUP BY category`,
-    ).bind(state.active_generation_id).all<{ category: string; count: number }>(),
-    binding.prepare(
-      `SELECT ${NEWS_REVIEW_STATE_CASE_SQL} review_state,count(*) count
+                THEN 1 ELSE 0 END),0)
          FROM news_projection_index WHERE generation_id=? AND ${ACTIVE_NEWS_SQL}
-        GROUP BY review_state`,
-    ).bind(state.active_generation_id).all<{ review_state: NewsReviewState; count: number }>(),
-    binding.prepare(
-      `SELECT generation_id,updated_at FROM news_projection_generations
-        WHERE state='STAGING' LIMIT 1`,
-    ).first<{ generation_id: string; updated_at: string }>(),
-  ]);
+     ), category_rows(category,count) AS (
+       SELECT category,count(*) FROM news_projection_index
+        WHERE generation_id=? AND ${ACTIVE_NEWS_SQL}
+          AND ${NEWS_REVIEW_STATE_SQL[options.reviewState]} GROUP BY category
+     ), review_rows(review_state,count) AS (
+       SELECT ${NEWS_REVIEW_STATE_CASE_SQL},count(*)
+         FROM news_projection_index WHERE generation_id=? AND ${ACTIVE_NEWS_SQL}
+        GROUP BY 1
+     )
+     SELECT COALESCE((SELECT json_group_array(json(payload) ORDER BY
+                              published_time DESC,collector_first_seen_time DESC,detail_key DESC)
+                        FROM page_rows),'[]') items_json,
+            (SELECT count FROM filtered_total) total,
+            (SELECT parsed FROM all_totals) parsed,
+            (SELECT model_candidate FROM all_totals) model_candidate,
+            COALESCE((SELECT json_group_object(category,count) FROM category_rows),'{}') categories_json,
+            COALESCE((SELECT json_group_object(review_state,count) FROM review_rows),'{}') reviews_json,
+            (SELECT json_object('generation_id',generation_id,'updated_at',updated_at)
+               FROM news_projection_generations WHERE state='STAGING' LIMIT 1) staging_json`,
+  ).bind(
+    ...binds, options.pageSize, offset, ...binds,
+    now, state.active_generation_id, state.active_generation_id,
+    state.active_generation_id,
+  ).first<{
+    items_json: string; total: number; parsed: number; model_candidate: number;
+    categories_json: string; reviews_json: string; staging_json: string | null;
+  }>();
+  if (!pageData) {
+    throw new NewsProjectionProtocolError(
+      "verified news archive page is unavailable", 503,
+      "NEWS_PROJECTION_PAGE_UNAVAILABLE",
+    );
+  }
+  const items = JSON.parse(pageData.items_json) as NewsProjectionIndexItem[];
+  const categoryCounts = JSON.parse(pageData.categories_json) as Record<string, number>;
+  const reviewCounts = JSON.parse(pageData.reviews_json) as Record<NewsReviewState, number>;
+  const staging = pageData.staging_json
+    ? JSON.parse(pageData.staging_json) as { generation_id: string; updated_at: string }
+    : null;
   return {
-    items: rows.results.map(row => JSON.parse(row.payload) as NewsProjectionIndexItem),
-    total: Number(total?.count ?? 0),
+    items,
+    total: Number(pageData.total ?? 0),
     all_total: Number(state.index_count), readable_total: Number(state.index_count),
-    parsed_total: Number(totals?.parsed ?? 0),
-    model_candidate_total: Number(totals?.model_candidate ?? 0),
-    category_counts: Object.fromEntries(categories.results.map(row => [row.category, row.count])),
-    review_state_counts: Object.fromEntries(reviews.results.map(row => [row.review_state, row.count])),
+    parsed_total: Number(pageData.parsed ?? 0),
+    model_candidate_total: Number(pageData.model_candidate ?? 0),
+    category_counts: categoryCounts,
+    review_state_counts: reviewCounts,
     review_state: options.reviewState, page: options.page, page_size: options.pageSize,
     window_days: 60, totals_scope: "VERIFIED_CURRENT_GENERATION",
     projection_state: staging ? "REPLAYING" : "CURRENT", verified_complete: true,

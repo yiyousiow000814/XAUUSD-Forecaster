@@ -85,14 +85,17 @@ export async function GET(request: Request) {
     });
     const now = new Date().toISOString();
     payload.items = payload.items.map(raw => {
-      const item = { ...raw };
+      let item = raw;
       if (
         item.model_visibility === "MODEL_VISIBLE"
         && typeof item.impact_expires_at === "string"
         && item.impact_expires_at <= now
       ) {
-        item.model_visibility = "IMPACT_EXPIRED";
-        item.impact_status = "EXPIRED";
+        item = {
+          ...item,
+          model_visibility: "IMPACT_EXPIRED",
+          impact_status: "EXPIRED",
+        };
       }
       return publicNewsRecord(item) as NewsProjectionIndexItem;
     });
