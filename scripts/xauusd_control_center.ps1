@@ -965,8 +965,12 @@ function Assert-CoordinatedMigrationCapabilityContract {
 
 function Invoke-CoordinatedMigrationD1Query {
     param([Parameter(Mandatory = $true)][string]$Sql)
+    # Windows cmd.exe cannot preserve embedded newlines in an argument passed
+    # through npx.cmd.  Keep the SQL as one argument so Wrangler receives the
+    # complete statement instead of an incomplete prefix.
+    $command = ($Sql -replace "`r`n|`n|`r", " ").Trim()
     $blocks = @(Invoke-WranglerJson -Arguments @(
-        "d1", "execute", "DB", "--remote", "--command", $Sql
+        "d1", "execute", "DB", "--remote", "--command", $command
     ))
     if ($blocks.Count -eq 0 -or @($blocks | Where-Object { -not [bool]$_.success }).Count -gt 0) {
         throw "MIGRATION_D1_QUERY_FAILED"

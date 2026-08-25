@@ -553,6 +553,22 @@ def _coordinated_migration_contract_body(*, capability_overrides: str = "") -> s
     )
 
 
+def test_coordinated_migration_query_preserves_multiline_sql_across_npx_cmd(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:wranglerArguments=$null;"
+        "function Invoke-WranglerJson{param($Arguments);"
+        "$script:wranglerArguments=$Arguments;"
+        "return [pscustomobject]@{success=$true;results=@([pscustomobject]@{value=1})}};"
+        "$rows=@(Invoke-CoordinatedMigrationD1Query -Sql \"SELECT`r`n  1 AS value`n;\");"
+        "$command=[string]$script:wranglerArguments[5];"
+        'Write-Output "$($rows[0].value)|$($command -notmatch \"[`r`n]\")|$command"',
+    )
+    assert result == "1|True|SELECT   1 AS value ;"
+
+
 def test_failed_preflight_never_switches_the_runtime_checkout(tmp_path) -> None:
     previous = "a" * 40
     candidate = "b" * 40
