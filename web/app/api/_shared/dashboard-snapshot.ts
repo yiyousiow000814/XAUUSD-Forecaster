@@ -33,11 +33,12 @@ const snapshotUpsertSql = `WITH incoming(payload) AS (SELECT CAST(? AS TEXT))
      ON CONFLICT(id) DO UPDATE SET
        payload=excluded.payload, received_at=excluded.received_at`;
 
-// D1's bridge charges materially more Worker CPU when a large ArrayBuffer is
+// D1's bridge charges materially more Worker CPU when a larger ArrayBuffer is
 // bound than when the same already-bounded UTF-8 JSON is bound as text. Keep
-// smaller snapshots on the zero-decode byte path, but cross the large-payload
-// boundary once as strict UTF-8 before the single D1 operation.
-export const SNAPSHOT_TEXT_BIND_THRESHOLD_BYTES = AUDIT_DETAIL_SNAPSHOT_BYTES;
+// small snapshots on the zero-decode byte path, but cross the measured D1
+// transport boundary once as strict UTF-8 before the single D1 operation. This
+// is deliberately independent from each route's business payload envelope.
+export const SNAPSHOT_TEXT_BIND_THRESHOLD_BYTES = 64_000;
 
 export function publicStatusJsonExpression() {
   return `json_remove(payload, ${PUBLIC_STATUS_PRIVATE_FIELDS
