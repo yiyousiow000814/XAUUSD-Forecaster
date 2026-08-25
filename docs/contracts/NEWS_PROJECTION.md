@@ -7,6 +7,11 @@
 - One source snapshot fixes a 60-day `window_start`, a `watermark`, the
   projection contract, expected index and detail counts, withdrawal count, and
   deterministic source and receipt digests.
+- Receipt payload hashes cover a canonical JSON value encoding shared by the
+  Python producer and Worker consumer. Object keys sort by UTF-8 bytes, arrays
+  retain order, strings include their UTF-8 byte length, and JSON numbers use
+  normalized IEEE-754 binary64 bytes (`0`, `0.0`, and `-0.0` are equivalent).
+  Runtime-specific JSON text formatting MUST NOT affect a receipt.
 - Local source manifest and batch reads are loopback operator-bridge endpoints;
   they require the bridge credential and are not browser or public APIs.
 - A source snapshot is immutable while it is being replayed. Source changes

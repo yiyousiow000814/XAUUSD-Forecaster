@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
   abandonNewsProjection, activateNewsProjection, advanceNewsReceiptDigest, EMPTY_RECEIPT_DIGEST,
   NEWS_PROJECTION_CONTRACT_VERSION, prepareNewsProjection,
+  newsProjectionPayloadHash,
   readNewsProjectionDetails, readNewsProjectionHealth, readNewsProjectionPage,
   stageNewsProjectionBatch, verifyNewsProjection,
 } from "../app/api/_shared/news-projection-store.ts";
@@ -12,6 +14,10 @@ import { D1TestDatabase } from "./d1-test-database.mjs";
 
 const id = digit => digit.repeat(64);
 const hash = value => createHash("sha256").update(value).digest("hex");
+const receiptVectors = JSON.parse(readFileSync(
+  new URL("../../tests/fixtures/news_projection_receipt_vectors.json", import.meta.url),
+  "utf8",
+));
 const detail = digit => ({
   detail_key: id(digit), detail_hash: id(digit === "1" ? "a" : "b"),
   payload: { headline: `detail ${digit}`, body: "bounded body" },
@@ -22,18 +28,18 @@ const index = digit => ({
   collector_first_seen_time: `2026-08-2${digit}T10:01:00Z`,
   annotation_status: "READY", model_visibility: "MODEL_VISIBLE",
   parsed_at: `2026-08-2${digit}T10:02:00Z`,
-  mirror_contract: "news-projection-generation-v1",
+  mirror_contract: NEWS_PROJECTION_CONTRACT_VERSION,
 });
 const receipt = async (details, indexes) => {
   let digest = EMPTY_RECEIPT_DIGEST;
   if (details.length) {
     digest = await advanceNewsReceiptDigest(
-      digest, "detail", 0, details.length, hash(JSON.stringify(details)),
+      digest, "detail", 0, details.length, await newsProjectionPayloadHash(details),
     );
   }
   if (indexes.length) {
     digest = await advanceNewsReceiptDigest(
-      digest, "index", 0, indexes.length, hash(JSON.stringify(indexes)),
+      digest, "index", 0, indexes.length, await newsProjectionPayloadHash(indexes),
     );
   }
   return digest;
@@ -48,6 +54,27 @@ const manifest = async (digit, details, indexes, overrides = {}) => ({
   expected_receipt_digest: await receipt(details, indexes), ...overrides,
 });
 const database = () => new D1TestDatabase(["0022_news_projection_generation.sql"]);
+
+test("shares canonical receipt vectors with the Python producer", async () => {
+  assert.equal(receiptVectors.contract_version, NEWS_PROJECTION_CONTRACT_VERSION);
+  for (const vector of receiptVectors.payload_vectors) {
+    assert.equal(await newsProjectionPayloadHash(vector.value), vector.expected_hash);
+  }
+  let digest = await advanceNewsReceiptDigest(
+    EMPTY_RECEIPT_DIGEST, "detail", 0,
+    receiptVectors.payload_vectors[0].value.length,
+    await newsProjectionPayloadHash(receiptVectors.payload_vectors[0].value),
+  );
+  digest = await advanceNewsReceiptDigest(
+    digest, "index", 0,
+    Object.keys(receiptVectors.payload_vectors[1].value).length,
+    await newsProjectionPayloadHash(receiptVectors.payload_vectors[1].value),
+  );
+  assert.equal(digest, receiptVectors.expected_receipt_digest);
+  assert.equal(await newsProjectionPayloadHash({ value: 0 }), await newsProjectionPayloadHash({ value: 0.0 }));
+  assert.equal(await newsProjectionPayloadHash({ value: 0 }), await newsProjectionPayloadHash({ value: -0 }));
+  assert.equal(await newsProjectionPayloadHash({ z: 1, a: 2 }), await newsProjectionPayloadHash({ a: 2, z: 1 }));
+});
 
 test("stages detail before index and atomically activates one receipt-backed generation", async () => {
   const db = database();
