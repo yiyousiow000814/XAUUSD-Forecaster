@@ -1231,6 +1231,52 @@ def test_audit_sync_owns_four_independently_bounded_resources(monkeypatch) -> No
     ]
 
 
+def test_audit_story_projection_keeps_production_shaped_detail_below_transport_limit() -> None:
+    module = _sync_module()
+    payload = {
+        "generated_at": "2026-08-25T20:12:49+00:00",
+        "storyline_summary": {"total": 500},
+        "storylines": [{
+            "storyline_id": f"story-{index}",
+            "title": f"Story {index}",
+            "timeline": [{"headline": "黄金与宏观事件" * 20}] * 8,
+            "market_reactions": [{"headline": "市场反应" * 10}] * 6,
+            "commentary": [{"headline": "评论" * 10}] * 6,
+            "background": [{"headline": "背景" * 10}] * 6,
+        } for index in range(20)],
+        "story_event_candidates": [
+            {"candidate_id": index, "headline": "候选事件" * 20}
+            for index in range(50)
+        ],
+        "unassigned_story_events": [
+            {"event_key": index, "headline": "未分配事件" * 20}
+            for index in range(50)
+        ],
+        "theme_streams": [{"theme_id": index} for index in range(12)],
+        "market_reaction_streams": [
+            {"stream_id": index} for index in range(12)
+        ],
+    }
+
+    previous_selection = module.audit_stories_payload(
+        payload, storyline_limit=20, timeline_limit=8,
+        candidate_limit=50, stream_limit=12,
+    )
+    previous_bytes = json.dumps(
+        previous_selection, ensure_ascii=False, allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    encoded = module.audit_stories_snapshot(payload, "a" * 40)
+    projected = json.loads(encoded)
+
+    assert len(previous_bytes) > module.AUDIT_DETAIL_LIMIT_BYTES
+    assert 0 < len(projected["storylines"]) == 12
+    assert projected["storyline_summary"]["total"] == 500
+    assert len(projected["story_event_candidates"]) == 12
+    assert len(projected["unassigned_story_events"]) == 12
+    assert len(encoded) <= module.AUDIT_DETAIL_LIMIT_BYTES
+
+
 @pytest.mark.parametrize(
     "field",
     (

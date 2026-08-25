@@ -235,6 +235,39 @@ test("uses the freshest compatible audit source during split-snapshot transition
   assert.equal((await (await invoke("/api/audit-decisions")).json()).recent_decisions[0].decision_id, "split");
 });
 
+test("oversized fresh legacy stories stay ahead of stale split validation data after bounded projection", async () => {
+  if (isPreviewBuild) return;
+  const older = "2026-08-20T00:00:01Z";
+  const newer = "2026-08-20T00:00:02Z";
+  insertSnapshot(8, JSON.stringify({
+    generated_at: older,
+    storylines: [{ storyline_id: "validation-fixture" }],
+  }), older);
+  insertSnapshot(4, JSON.stringify({
+    generated_at: newer,
+    storyline_summary: { total: 500 },
+    storylines: Array.from({ length: 20 }, (_, index) => ({
+      storyline_id: `authority-${index}`,
+      timeline: Array.from({ length: 8 }, () => ({ headline: "黄金".repeat(100) })),
+    })),
+    story_event_candidates: Array.from({ length: 50 }, (_, index) => ({
+      candidate_id: index, headline: "候选".repeat(100),
+    })),
+    unassigned_story_events: Array.from({ length: 50 }, (_, index) => ({
+      event_key: index, headline: "未分配".repeat(100),
+    })),
+  }), newer);
+
+  const response = await invoke("/api/audit-stories");
+  const stories = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(stories.storylines[0].storyline_id, "authority-0");
+  assert.equal(stories.storylines.length, 12);
+  assert.equal(stories.story_event_candidates.length, 12);
+  assert.equal(stories.unassigned_story_events.length, 12);
+  assert.equal(stories.storyline_summary.total, 500);
+});
+
 test("keeps migrated market history schema out of the request hot path", () => {
   const source = readFileSync(
     new URL("../app/api/market-history/route.ts", import.meta.url), "utf8",

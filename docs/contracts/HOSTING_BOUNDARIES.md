@@ -173,6 +173,13 @@
   item-bounded inside D1 JSON1; a Worker must not deserialize the growing
   legacy document merely to decide freshness. Invalid or oversized candidates
   are skipped, and absence of a valid bounded source fails closed.
+- The storyline display projection retains at most 12 current storylines, 12
+  candidates per candidate family, eight streams per stream family, and six
+  first/last timeline events per storyline. Exact aggregate totals remain in
+  `storyline_summary`. The same limits govern the Python split producer and the
+  Worker legacy projection so a fresh authoritative legacy snapshot cannot be
+  displaced by an older validation-shaped split row merely because its former
+  display selection exceeded the 120,000-byte transport envelope.
 - Candidate-era Audit split projection handover has one explicit owner record:
   Dashboard Sync is the sole execution owner; forecasting SQLite is the
   authoritative store; the active Business Runtime revision is the producer;

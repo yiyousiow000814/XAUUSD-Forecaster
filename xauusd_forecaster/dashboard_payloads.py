@@ -25,6 +25,10 @@ AUDIT_STORY_FIELDS = (
     "market_reaction_streams", "theme_streams", "unassigned_story_events",
     "storyline_summary",
 )
+AUDIT_STORYLINE_LIMIT = 12
+AUDIT_STORY_TIMELINE_LIMIT = 6
+AUDIT_STORY_CANDIDATE_LIMIT = 12
+AUDIT_STORY_STREAM_LIMIT = 8
 DAILY_BRIEF_SUMMARY_FIELDS = (
     "brief_date", "phase", "received_items", "reviewed_items", "pending_items",
     "terminal_failure_items", "latest_revision", "last_generated_at",
@@ -147,9 +151,11 @@ def _bounded_storyline(row: Any, *, timeline_limit: int) -> Any:
 
 
 def audit_stories_payload(
-    payload: Mapping[str, Any], *, storyline_limit: int = 20,
-    timeline_limit: int = 8, candidate_limit: int = 50,
-    stream_limit: int = 12,
+    payload: Mapping[str, Any], *,
+    storyline_limit: int = AUDIT_STORYLINE_LIMIT,
+    timeline_limit: int = AUDIT_STORY_TIMELINE_LIMIT,
+    candidate_limit: int = AUDIT_STORY_CANDIDATE_LIMIT,
+    stream_limit: int = AUDIT_STORY_STREAM_LIMIT,
 ) -> dict[str, Any]:
     """Project bounded story presentation detail and retain exact totals."""
     snapshot = {
