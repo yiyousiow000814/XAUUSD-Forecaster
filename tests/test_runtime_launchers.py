@@ -518,6 +518,14 @@ def _coordinated_migration_contract_body(*, capability_overrides: str = "") -> s
         "worker_version_id='22222222-2222-4222-8222-222222222222';"
         "validation_key=('22222222-2222-4222-8222-222222222222:'+('b'*40));"
         "browser_url='https://candidate.example'};"
+        "function Invoke-RepositoryRead{param($Operation,$Arguments);"
+        "switch($Operation){"
+        "'READ_CANDIDATE_MIGRATION_TREE'{return [pscustomobject]@{passed=$true;output=@("
+        "'web/drizzle/0022_news_projection_generation.sql',"
+        "'web/drizzle/0023_operator_retry_sync_digest.sql')}};"
+        "'READ_CANDIDATE_MIGRATION_BLOB'{return [pscustomobject]@{passed=$true;output=@(('1'*40))}};"
+        "'READ_CANDIDATE_MIGRATION'{return [pscustomobject]@{passed=$true;output=@('CREATE TABLE safe (id integer);')}};"
+        "default{return [pscustomobject]@{passed=$false;output=@()}}}};"
         "function Get-CloudflareVersionDetails{param($VersionId);"
         "return [pscustomobject]@{resources=[pscustomobject]@{bindings=@("
         "[pscustomobject]@{type='d1';name='DB';database_id=$script:testDatabaseId})}}};"
@@ -3166,6 +3174,45 @@ def test_coordinated_migration_receipt_is_exact_fresh_and_live(tmp_path) -> None
         "coordinated-storage-migration-receipt-v1,"
         "33333333-3333-4333-8333-333333333333,True"
     )
+
+
+def test_migration_contract_reads_the_exact_candidate_not_stable_checkout(
+    tmp_path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    subprocess.run(["git", "config", "user.name", "Contract Test"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "contract@example.invalid"],
+        cwd=repository,
+        check=True,
+    )
+    (repository / "stable.txt").write_text("stable\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "stable"], cwd=repository, check=True)
+    stable = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    _write_coordinated_migration_files(tmp_path)
+    subprocess.run(["git", "add", "web/drizzle"], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "candidate migrations"], cwd=repository, check=True)
+    candidate = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    subprocess.run(["git", "checkout", "--detach", "-q", stable], cwd=repository, check=True)
+
+    result = _run_control_center_contract(
+        tmp_path,
+        "$changed=@('web/drizzle/0022_news_projection_generation.sql',"
+        "'web/drizzle/0023_operator_retry_sync_digest.sql');"
+        f"$files=Get-CoordinatedMigrationFiles $changed '{candidate}';"
+        f"Assert-CoordinatedMigrationCapabilityContract $files '{candidate}';"
+        'Write-Output "$($files.Count),$(git -C $repositoryRoot rev-parse HEAD)"',
+    )
+    assert result == f"2,{stable}"
 
 
 @pytest.mark.parametrize(

@@ -915,7 +915,10 @@ function Get-MigrationD1Binding {
 }
 
 function Get-CoordinatedMigrationFiles {
-    param([Parameter(Mandatory = $true)][string[]]$ChangedFiles)
+    param(
+        [Parameter(Mandatory = $true)][string[]]$ChangedFiles,
+        [Parameter(Mandatory = $true)][string]$CandidateRevision
+    )
     $requirement = Get-CandidateCompatibilityRequirement -ChangedFiles $ChangedFiles
     if ([string]$requirement.state -ne "COORDINATED_STORAGE_MIGRATION_REQUIRED") {
         throw "COORDINATED_STORAGE_MIGRATION_NOT_REQUIRED"
@@ -927,7 +930,9 @@ function Get-CoordinatedMigrationFiles {
         throw "MIGRATION_FILE_SCOPE_INVALID"
     }
     foreach ($file in $files) {
-        if (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot $file))) {
+        $exists = Invoke-RepositoryRead -Operation "READ_CANDIDATE_MIGRATION" `
+            -Arguments @("-C", $repositoryRoot, "cat-file", "-e", "${CandidateRevision}:$file")
+        if (-not $exists.passed) {
             throw "MIGRATION_FILE_MISSING:$file"
         }
     }
@@ -935,7 +940,10 @@ function Get-CoordinatedMigrationFiles {
 }
 
 function Assert-CoordinatedMigrationCapabilityContract {
-    param([Parameter(Mandatory = $true)][string[]]$MigrationFiles)
+    param(
+        [Parameter(Mandatory = $true)][string[]]$MigrationFiles,
+        [Parameter(Mandatory = $true)][string]$CandidateRevision
+    )
     $supported = @(
         "web/drizzle/0022_news_projection_generation.sql",
         "web/drizzle/0023_operator_retry_sync_digest.sql"
@@ -945,7 +953,10 @@ function Assert-CoordinatedMigrationCapabilityContract {
         throw "MIGRATION_CAPABILITY_CONTRACT_MISSING:$($unknown -join ',')"
     }
     foreach ($file in $MigrationFiles) {
-        $sql = Get-Content -LiteralPath (Join-Path $repositoryRoot $file) -Raw
+        $read = Invoke-RepositoryRead -Operation "READ_CANDIDATE_MIGRATION" `
+            -Arguments @("-C", $repositoryRoot, "show", "${CandidateRevision}:$file")
+        if (-not $read.passed) { throw "MIGRATION_FILE_MISSING:$file" }
+        $sql = @($read.output) -join "`n"
         if ($sql -match '(?im)\b(DROP|DELETE|UPDATE|REPLACE|TRUNCATE|VACUUM)\b') {
             throw "MIGRATION_REVERSE_INCOMPATIBLE:$file"
         }
@@ -1023,7 +1034,8 @@ function Get-CoordinatedMigrationLiveEvidence {
         [Parameter(Mandatory = $true)][object]$Stable,
         [Parameter(Mandatory = $true)][string[]]$MigrationFiles
     )
-    Assert-CoordinatedMigrationCapabilityContract -MigrationFiles $MigrationFiles
+    Assert-CoordinatedMigrationCapabilityContract -MigrationFiles $MigrationFiles `
+        -CandidateRevision ([string]$Candidate.git_sha)
     $candidateVersion = Get-CloudflareVersionDetails `
         -VersionId ([string]$Candidate.worker_version_id)
     $stableVersion = Get-CloudflareVersionDetails `
@@ -1040,9 +1052,13 @@ function Get-CoordinatedMigrationLiveEvidence {
     $ledger = @(Invoke-CoordinatedMigrationD1Query -Sql `
         "SELECT name,applied_at FROM d1_migrations ORDER BY id")
     $ledgerNames = @($ledger | ForEach-Object { [string]$_.name })
-    $candidateMigrationNames = @(Get-ChildItem -LiteralPath `
-        (Join-Path $repositoryRoot "web/drizzle") -Filter "*.sql" -File |
-        Sort-Object Name | ForEach-Object { $_.Name })
+    $migrationTree = Invoke-RepositoryRead -Operation "READ_CANDIDATE_MIGRATION_TREE" `
+        -Arguments @("-C", $repositoryRoot, "ls-tree", "-r", "--name-only",
+            ([string]$Candidate.git_sha), "--", "web/drizzle")
+    if (-not $migrationTree.passed) { throw "MIGRATION_FILE_SCOPE_INVALID" }
+    $candidateMigrationNames = @($migrationTree.output | Where-Object {
+        [string]$_ -match '^web/drizzle/[^/]+\.sql$'
+    } | ForEach-Object { Split-Path ([string]$_) -Leaf } | Sort-Object -Unique)
     $pending = @($candidateMigrationNames | Where-Object { $_ -notin $ledgerNames })
     if ($pending.Count -gt 0) {
         throw "MIGRATION_LEDGER_PENDING:$($pending -join ',')"
@@ -1105,10 +1121,16 @@ FROM news_projection_state s JOIN news_projection_generations g
         throw "MIGRATION_NEWS_CURRENT_IDENTITY_MISMATCH"
     }
     $migrationHashes = @($MigrationFiles | ForEach-Object {
-        $path = Join-Path $repositoryRoot $_
+        $blob = Invoke-RepositoryRead -Operation "READ_CANDIDATE_MIGRATION_BLOB" `
+            -Arguments @("-C", $repositoryRoot, "rev-parse",
+                "$([string]$Candidate.git_sha):$_")
+        $blobId = if ($blob.passed) { ([string]@($blob.output)[0]).Trim() } else { "" }
+        if ($blobId -notmatch '^[0-9a-f]{40,64}$') {
+            throw "MIGRATION_FILE_HASH_INVALID:$_"
+        }
         [ordered]@{
             path = $_
-            sha256 = Get-Sha256BytesHex -Bytes ([System.IO.File]::ReadAllBytes($path))
+            git_blob_oid = $blobId
         }
     })
     return [ordered]@{
@@ -1237,7 +1259,8 @@ function Verify-CandidateCoordinatedMigration {
     }
     $changed = @(Get-CandidateChangedFiles -StableRevision ([string]$state.stable.git_sha) `
         -CandidateRevision ([string]$candidate.git_sha))
-    $files = @(Get-CoordinatedMigrationFiles -ChangedFiles $changed)
+    $files = @(Get-CoordinatedMigrationFiles -ChangedFiles $changed `
+        -CandidateRevision ([string]$candidate.git_sha))
     $evidence = Get-CoordinatedMigrationLiveEvidence -Candidate $candidate `
         -Stable $state.stable -MigrationFiles $files
     $receipt = New-CoordinatedMigrationReceipt -Evidence $evidence
