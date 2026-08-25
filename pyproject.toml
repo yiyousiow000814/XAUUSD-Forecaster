@@ -19,6 +19,9 @@ dependencies = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "arch_contract(*ids): explicitly binds a durable architecture contract",
+]
 
 [tool.setuptools.package-data]
 xauusd_forecaster = ["*.schema.json", "operational_codes.json"]

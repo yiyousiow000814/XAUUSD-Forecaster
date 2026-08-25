@@ -19,7 +19,12 @@ def main() -> int:
     bad = [claim["claim_id"] for claim in evidence["claims"] if "CONTRADICTED" in claim["categories"]]
     if bad:
         print("Contradicted architecture claims: " + ", ".join(bad)); return 1
-    print(f"Architecture evidence passed ({len(evidence['claims'])} claims).")
+    tests = json.loads(artifacts["test-evidence.json"])
+    strict_failures = [contract["id"] for contract in tests.get("contracts", [])
+                       if contract["risk"] == "CRITICAL" and contract["missing_evidence"]]
+    if tests.get("execution_digest_state") != "CURRENT" or strict_failures:
+        print("Critical contract evidence is stale or incomplete: " + ", ".join(strict_failures)); return 1
+    print(f"Architecture evidence passed ({len(evidence['claims'])} claims, {len(tests['contracts'])} contracts).")
     return 0
 
 

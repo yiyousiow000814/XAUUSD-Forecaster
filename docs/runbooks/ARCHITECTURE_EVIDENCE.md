@@ -6,6 +6,7 @@
 python scripts/compile_architecture.py --root .
 python scripts/compile_architecture.py --root . --check
 python scripts/verify_architecture_evidence.py --root .
+python scripts/collect_architecture_test_evidence.py --root . --run
 python scripts/check_architecture_imports.py --root .
 python scripts/architecture_diff.py --root . --base <parent-ref>
 ```
@@ -19,4 +20,9 @@ If a selector is stale, repair the declaration or the owning source boundary;
 do not weaken cardinality. If an import or writer is unexpected, identify its
 real owner before updating policy. Reverting the compiler/declaration commit
 restores the prior static artifacts without runtime data migration.
+
+The bounded collector executes only tests explicitly named in
+`architecture/contracts/test_bindings.toml`. Regenerate afterward so execution
+and runtime evidence use the same digest. An old receipt becomes `STALE`; never
+edit its digest to make it current.
 
