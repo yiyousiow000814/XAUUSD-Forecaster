@@ -61,6 +61,17 @@ export async function validateJsonWithD1(
   return Number(row?.valid ?? 0) === 1;
 }
 
+/** Validate exact UTF-8 request bytes in D1 without a Worker decode/re-encode pass. */
+export async function validateJsonBytesWithD1(
+  binding: D1Database,
+  bytes: ArrayBuffer,
+): Promise<boolean> {
+  const row = await binding.prepare(
+    "SELECT json_valid(CAST(? AS TEXT)) AS valid",
+  ).bind(bytes).first<{ valid: number }>();
+  return Number(row?.valid ?? 0) === 1;
+}
+
 export function isReleaseValidationContext(
   value: ReleaseValidationContext | Response | null,
 ): value is ReleaseValidationContext {
