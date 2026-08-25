@@ -186,6 +186,14 @@
   Candidate reads only the bounded summary, and the promoted Dashboard Sync
   owner replaces that summary on its next normal cycle. Public reads must not
   use the growing legacy audit document as a recurring fallback.
+- If the still-active legacy Stable has lost derived News detail rows, the
+  coordinated migration may rebuild its rollback-only `news_index` and
+  `news_details` projection from the exact receipt-verified `CURRENT`
+  generation. Details are materialized before index rows, no generation or
+  forecasting authority is deleted, and migration acceptance independently
+  requires both D1 legacy invariants and the real Stable News health endpoint
+  to pass. Candidate and the promoted runtime continue to read generation
+  storage; the legacy copy is not a normal fallback.
 - Candidate-era Audit split projection handover has one explicit owner record:
   Dashboard Sync is the sole execution owner; forecasting SQLite is the
   authoritative store; the active Business Runtime revision is the producer;

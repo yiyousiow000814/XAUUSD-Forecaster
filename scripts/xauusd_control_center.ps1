@@ -954,7 +954,8 @@ function Assert-CoordinatedMigrationCapabilityContract {
     $supported = @(
         "web/drizzle/0022_news_projection_generation.sql",
         "web/drizzle/0023_operator_retry_sync_digest.sql",
-        "web/drizzle/0024_seed_bounded_audit_news_metrics.sql"
+        "web/drizzle/0024_seed_bounded_audit_news_metrics.sql",
+        "web/drizzle/0025_seed_legacy_news_reverse_projection.sql"
     )
     $unknown = @($MigrationFiles | Where-Object { $_ -notin $supported })
     if ($unknown.Count -gt 0) {
@@ -970,8 +971,16 @@ function Assert-CoordinatedMigrationCapabilityContract {
             $sql -match '(?im)WHERE\s+`id`\s*=\s*4' -and
             $sql -match '(?im)SELECT\s+9,' -and
             $sql -notmatch '(?im)\b(DROP|DELETE|REPLACE|TRUNCATE|VACUUM)\b'
+        $isLegacyNewsHandover = $file -eq "web/drizzle/0025_seed_legacy_news_reverse_projection.sql" -and
+            $sql -match '(?im)INSERT\s+INTO\s+`news_details`' -and
+            $sql -match '(?im)INSERT\s+INTO\s+`news_index`' -and
+            $sql -match '(?im)FROM\s+`news_projection_details`' -and
+            $sql -match '(?im)FROM\s+`news_projection_index`' -and
+            $sql -match '(?im)s\.`projection_state`\s*=\s*''CURRENT''' -and
+            $sql -match '(?im)s\.`receipt_digest`\s*=\s*g\.`expected_receipt_digest`' -and
+            $sql -notmatch '(?im)\b(DROP|DELETE|REPLACE|TRUNCATE|VACUUM)\b'
         if (($sql -match '(?im)\b(DROP|DELETE|UPDATE|REPLACE|TRUNCATE|VACUUM)\b') -and
-            -not $isBoundedAuditHandover) {
+            -not $isBoundedAuditHandover -and -not $isLegacyNewsHandover) {
             throw "MIGRATION_REVERSE_INCOMPATIBLE:$file"
         }
     }
@@ -1006,9 +1015,12 @@ function Get-CoordinatedMigrationEndpointEvidence {
         -TimeoutSec 45
     $stableStatus = Invoke-WebRequest -UseBasicParsing -Method Get `
         -Uri "$workerUrl/api/status" -TimeoutSec 45
+    $stableNewsHealth = Invoke-WebRequest -UseBasicParsing -Method Get `
+        -Uri "$workerUrl/api/news-index?health_check=1" -TimeoutSec 45
     $candidatePayload = $candidateStatus.Content | ConvertFrom-Json
     $healthPayload = $candidateHealth.Content | ConvertFrom-Json
     $stablePayload = $stableStatus.Content | ConvertFrom-Json
+    $stableNewsPayload = $stableNewsHealth.Content | ConvertFrom-Json
     $observedVersion = [string]$candidateStatus.Headers["X-Aurum-Worker-Version"]
     $observedGit = [string]$candidateStatus.Headers["X-Aurum-Git-SHA"]
     if ([int]$candidateStatus.StatusCode -ne 200 -or
@@ -1020,6 +1032,11 @@ function Get-CoordinatedMigrationEndpointEvidence {
         $null -eq $stablePayload.counts.decision_events -or
         [long]$stablePayload.counts.decision_events -le 0) {
         throw "MIGRATION_LEGACY_STABLE_READ_FAILED"
+    }
+    if ([int]$stableNewsHealth.StatusCode -ne 200 -or
+        [string]$stableNewsPayload.status -ne "OK" -or
+        [int]$stableNewsPayload.violation_count -ne 0) {
+        throw "MIGRATION_LEGACY_NEWS_READ_FAILED"
     }
     if ([int]$candidateHealth.StatusCode -ne 200 -or
         [string]$healthPayload.projection_state -ne "CURRENT" -or
@@ -1034,6 +1051,8 @@ function Get-CoordinatedMigrationEndpointEvidence {
     return [ordered]@{
         stable_status = 200
         stable_decision_count_positive = $true
+        stable_news_status = [string]$stableNewsPayload.status
+        stable_news_violation_count = [int]$stableNewsPayload.violation_count
         candidate_status = 200
         candidate_worker_version = $observedVersion
         candidate_git_sha = $observedGit
@@ -1098,9 +1117,54 @@ SELECT
   ('id','payload_digest','item_count','synced_at')) AS retry_columns,
  (SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN
   ('dashboard_snapshots','news_index','news_details','news_evidence_records')) AS legacy_tables,
- coalesce((SELECT json_array_length(json_extract(payload,'$.recent_decisions'))
-   FROM dashboard_snapshots WHERE id=4 AND json_valid(payload)),0) AS legacy_decisions,
- s.projection_state,s.active_generation_id,s.snapshot_id,s.source_digest,s.receipt_digest,
+  coalesce((SELECT json_array_length(json_extract(payload,'$.recent_decisions'))
+    FROM dashboard_snapshots WHERE id=4 AND json_valid(payload)),0) AS legacy_decisions,
+  (SELECT count(*) FROM news_projection_index pi
+    WHERE pi.generation_id=s.active_generation_id
+      AND EXISTS(SELECT 1 FROM news_index li WHERE li.detail_key=pi.detail_key))
+    AS legacy_current_index_count,
+  (SELECT count(*) FROM news_projection_details pd
+    WHERE pd.generation_id=s.active_generation_id
+      AND EXISTS(SELECT 1 FROM news_details ld WHERE ld.detail_key=pd.detail_key))
+    AS legacy_current_detail_count,
+  (SELECT count(*) FROM news_index li
+    WHERE COALESCE(json_extract(li.payload,'$.annotation_status'),'') <> 'SUPERSEDED_CONTRACT'
+      AND NOT EXISTS(SELECT 1 FROM news_details ld WHERE ld.detail_key=li.detail_key))
+    AS legacy_missing_detail_count,
+  (SELECT count(*) FROM news_index li
+    WHERE COALESCE(json_extract(li.payload,'$.annotation_status'),'') <> 'SUPERSEDED_CONTRACT'
+      AND NOT (
+        (json_extract(li.payload,'$.annotation_status')='NOT_REQUIRED'
+          AND json_extract(li.payload,'$.model_visibility')='MODEL_INELIGIBLE'
+          AND json_extract(li.payload,'$.parsed_at') IS NULL)
+        OR (json_extract(li.payload,'$.annotation_status')='QUEUED'
+          AND json_extract(li.payload,'$.model_visibility')='NOT_YET_PARSED'
+          AND json_extract(li.payload,'$.parsed_at') IS NULL)
+        OR (json_extract(li.payload,'$.annotation_status')='READY'
+          AND json_extract(li.payload,'$.model_visibility')<>'NOT_YET_PARSED'
+          AND json_extract(li.payload,'$.parsed_at') IS NOT NULL)
+        OR (json_extract(li.payload,'$.annotation_status') IN
+          ('REPAIRING_DISPLAY','BACKING_OFF','DEAD_LETTER','WAITING_CONTENT','CONTENT_UNAVAILABLE')
+          AND json_extract(li.payload,'$.model_visibility')=
+              json_extract(li.payload,'$.annotation_status')
+          AND json_extract(li.payload,'$.parsed_at') IS NULL)))
+    AS legacy_review_violation_count,
+  (SELECT count(*) FROM news_index li
+    WHERE COALESCE(json_extract(li.payload,'$.annotation_status'),'') <> 'SUPERSEDED_CONTRACT'
+      AND li.parsed <> CASE
+        WHEN json_extract(li.payload,'$.parsed_at') IS NOT NULL THEN 1 ELSE 0 END)
+    AS legacy_parsed_flag_mismatch_count,
+  (SELECT count(*) FROM news_index li
+    WHERE COALESCE(json_extract(li.payload,'$.annotation_status'),'') <> 'SUPERSEDED_CONTRACT'
+      AND li.model_candidate <> CASE
+        WHEN json_extract(li.payload,'$.model_visibility')='MODEL_VISIBLE' THEN 1 ELSE 0 END)
+    AS legacy_candidate_flag_mismatch_count,
+  (SELECT count(*) FROM (
+    SELECT cluster_id FROM news_index li
+     WHERE COALESCE(json_extract(li.payload,'$.annotation_status'),'') <> 'SUPERSEDED_CONTRACT'
+     GROUP BY cluster_id HAVING count(*) > 1))
+    AS legacy_duplicate_cluster_count,
+  s.projection_state,s.active_generation_id,s.snapshot_id,s.source_digest,s.receipt_digest,
  s.index_count,s.detail_count,s.missing_detail_count,s.invariant_violation_count,
  g.state AS generation_state,g.expected_receipt_digest,g.staged_index_count,
  g.staged_detail_count
@@ -1127,6 +1191,15 @@ FROM news_projection_state s JOIN news_projection_generations g
         [int]$state.invariant_violation_count -ne 0 -or
         [string]$state.receipt_digest -ne [string]$state.expected_receipt_digest) {
         throw "MIGRATION_NEWS_CURRENT_INVALID"
+    }
+    if ([int]$state.legacy_current_index_count -ne [int]$state.index_count -or
+        [int]$state.legacy_current_detail_count -ne [int]$state.detail_count -or
+        [int]$state.legacy_missing_detail_count -ne 0 -or
+        [int]$state.legacy_review_violation_count -ne 0 -or
+        [int]$state.legacy_parsed_flag_mismatch_count -ne 0 -or
+        [int]$state.legacy_candidate_flag_mismatch_count -ne 0 -or
+        [int]$state.legacy_duplicate_cluster_count -ne 0) {
+        throw "MIGRATION_LEGACY_NEWS_COMPATIBILITY_FAILED"
     }
     $endpoints = Get-CoordinatedMigrationEndpointEvidence `
         -Candidate $Candidate -Stable $Stable
@@ -1167,6 +1240,14 @@ FROM news_projection_state s JOIN news_projection_generations g
         operator_retry_columns = [int]$state.retry_columns
         legacy_tables = [int]$state.legacy_tables
         legacy_decisions = [int]$state.legacy_decisions
+        legacy_news_index_count = [int]$state.legacy_current_index_count
+        legacy_news_detail_count = [int]$state.legacy_current_detail_count
+        legacy_news_missing_detail_count = [int]$state.legacy_missing_detail_count
+        legacy_news_invariant_violation_count = [int]$state.legacy_review_violation_count
+        legacy_news_parsed_flag_mismatch_count = [int]$state.legacy_parsed_flag_mismatch_count
+        legacy_news_candidate_flag_mismatch_count = [int]$state.legacy_candidate_flag_mismatch_count
+        legacy_news_duplicate_cluster_count = [int]$state.legacy_duplicate_cluster_count
+        stable_news_status = [string]$endpoints.stable_news_status
         news_generation_id = [string]$state.active_generation_id
         news_snapshot_id = [string]$state.snapshot_id
         news_source_digest = [string]$state.source_digest
