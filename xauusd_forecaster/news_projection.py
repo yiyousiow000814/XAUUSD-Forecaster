@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import struct
 from dataclasses import dataclass
 from typing import Iterable
 
-NEWS_PROJECTION_CONTRACT_VERSION = "news-projection-generation-v1"
+NEWS_PROJECTION_CONTRACT_VERSION = "news-projection-generation-v2"
 NEWS_MIRROR_CONTRACT_VERSION = NEWS_PROJECTION_CONTRACT_VERSION
 NEWS_PROJECTION_MAX_ITEMS = 10_000
 NEWS_PROJECTION_MAX_BATCH_ITEMS = 20
@@ -40,6 +42,51 @@ def sha256_json(value: object, *, sort_keys: bool = False) -> str:
     return hashlib.sha256(
         compact_json(value, sort_keys=sort_keys).encode("utf-8")
     ).hexdigest()
+
+
+def canonical_receipt_bytes(value: object) -> bytes:
+    """Encode one JSON value identically across Python and JavaScript runtimes."""
+    if value is None:
+        return b"n;"
+    if value is True:
+        return b"t;"
+    if value is False:
+        return b"f;"
+    if isinstance(value, (int, float)):
+        if isinstance(value, int) and abs(value) > 9_007_199_254_740_991:
+            raise ValueError("receipt integer exceeds the JSON safe-integer range")
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("receipt number must be finite")
+        if number == 0:
+            number = 0.0
+        return b"d" + struct.pack(">d", number).hex().encode("ascii") + b";"
+    if isinstance(value, str):
+        encoded = value.encode("utf-8")
+        return b"s" + str(len(encoded)).encode("ascii") + b":" + encoded + b";"
+    if isinstance(value, (list, tuple)):
+        return (
+            b"a" + str(len(value)).encode("ascii") + b":"
+            + b"".join(canonical_receipt_bytes(item) for item in value)
+            + b";"
+        )
+    if isinstance(value, dict):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("receipt object keys must be strings")
+        keys = sorted(value, key=lambda key: key.encode("utf-8"))
+        return (
+            b"o" + str(len(keys)).encode("ascii") + b":"
+            + b"".join(
+                canonical_receipt_bytes(key) + canonical_receipt_bytes(value[key])
+                for key in keys
+            )
+            + b";"
+        )
+    raise ValueError(f"unsupported receipt value type: {type(value).__name__}")
+
+
+def receipt_payload_hash(value: object) -> str:
+    return hashlib.sha256(canonical_receipt_bytes(value)).hexdigest()
 
 
 def stable_news_key(row: dict) -> str:
@@ -105,9 +152,7 @@ def receipt_digest(
     for kind, batches in (("detail", detail_batches), ("index", index_batches)):
         offset = 0
         for batch in batches:
-            payload_hash = hashlib.sha256(
-                compact_json(batch).encode("utf-8")
-            ).hexdigest()
+            payload_hash = receipt_payload_hash(batch)
             digest = hashlib.sha256(
                 f"{digest}\n{kind}|{offset}|{len(batch)}|{payload_hash}".encode("utf-8")
             ).hexdigest()

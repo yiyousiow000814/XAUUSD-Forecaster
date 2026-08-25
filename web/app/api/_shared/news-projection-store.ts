@@ -6,7 +6,7 @@ import {
   type NewsReviewState,
 } from "../../_lib/news-review-state";
 
-export const NEWS_PROJECTION_CONTRACT_VERSION = "news-projection-generation-v1";
+export const NEWS_PROJECTION_CONTRACT_VERSION = "news-projection-generation-v2";
 export const NEWS_GENERATION_ID = /^[a-f0-9]{64}$/;
 export const NEWS_PROJECTION_MAX_ITEMS = 10_000;
 export const NEWS_PROJECTION_MAX_BATCH_ITEMS = 20;
@@ -138,6 +138,57 @@ async function sha256(value: string): Promise<string> {
   );
   return Array.from(new Uint8Array(digest), byte =>
     byte.toString(16).padStart(2, "0")).join("");
+}
+
+function utf8Compare(left: string, right: string) {
+  const encodedLeft = new TextEncoder().encode(left);
+  const encodedRight = new TextEncoder().encode(right);
+  const length = Math.min(encodedLeft.length, encodedRight.length);
+  for (let index = 0; index < length; index += 1) {
+    if (encodedLeft[index] !== encodedRight[index]) {
+      return encodedLeft[index] - encodedRight[index];
+    }
+  }
+  return encodedLeft.length - encodedRight.length;
+}
+
+function canonicalReceiptValue(value: unknown): string {
+  if (value === null) return "n;";
+  if (value === true) return "t;";
+  if (value === false) return "f;";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new NewsProjectionProtocolError(
+        "receipt number is outside the supported JSON range", 400,
+        "NEWS_PROJECTION_RECEIPT_NUMBER_INVALID",
+      );
+    }
+    const buffer = new ArrayBuffer(8);
+    new DataView(buffer).setFloat64(0, Object.is(value, -0) ? 0 : value, false);
+    const hex = Array.from(new Uint8Array(buffer), byte =>
+      byte.toString(16).padStart(2, "0")).join("");
+    return `d${hex};`;
+  }
+  if (typeof value === "string") {
+    const length = new TextEncoder().encode(value).length;
+    return `s${length}:${value};`;
+  }
+  if (Array.isArray(value)) {
+    return `a${value.length}:${value.map(canonicalReceiptValue).join("")};`;
+  }
+  if (typeof value === "object") {
+    const row = value as Record<string, unknown>;
+    const keys = Object.keys(row).sort(utf8Compare);
+    return `o${keys.length}:${keys.map(key =>
+      canonicalReceiptValue(key) + canonicalReceiptValue(row[key])).join("")};`;
+  }
+  throw new NewsProjectionProtocolError(
+    "receipt value is not valid JSON", 400, "NEWS_PROJECTION_RECEIPT_VALUE_INVALID",
+  );
+}
+
+export async function newsProjectionPayloadHash(value: unknown) {
+  return sha256(canonicalReceiptValue(value));
 }
 
 export async function advanceNewsReceiptDigest(
@@ -345,7 +396,7 @@ export async function stageNewsProjectionBatch(
       "news batch exceeds manifest", 409, "NEWS_PROJECTION_BATCH_OVERFLOW",
     );
   }
-  const payloadHash = await sha256(JSON.stringify(items));
+  const payloadHash = await newsProjectionPayloadHash(items);
   if (offset < nextOffset) {
     const receipt = await binding.prepare(
       `SELECT item_count,payload_hash,receipt_digest FROM news_projection_batches

@@ -1,0 +1,33 @@
+{
+  "contract_version": "news-projection-generation-v2",
+  "payload_vectors": [
+    {
+      "name": "numeric_unicode_and_null",
+      "value": [
+        {
+          "zero": 0.0,
+          "negative_zero": -0.0,
+          "one": 1.0,
+          "fraction": 0.2,
+          "small_exponent": 1e-7,
+          "decimal_threshold": 1e-6,
+          "large_integer_float": 1e20,
+          "unicode": "黄金😀é",
+          "missing": null,
+          "enabled": true
+        }
+      ],
+      "expected_hash": "18d07d40f2046fc486b47d86c1d0ee735b4cdf0145e16cdf7f5b2eaa3d081b3b"
+    },
+    {
+      "name": "nested_object_key_order",
+      "value": {
+        "z": null,
+        "a": [false, 2, {"β": "值", "alpha": "first"}],
+        "emoji😀": "scalar"
+      },
+      "expected_hash": "b99c2c16a533b8f2840811579e782b0f1bd49ae667a4ad9862fdd62032fd1c3b"
+    }
+  ],
+  "expected_receipt_digest": "18b077e784a7f8400cb302504f0aace2969991e3aa8e603f8fd02020b00d33a1"
+}
