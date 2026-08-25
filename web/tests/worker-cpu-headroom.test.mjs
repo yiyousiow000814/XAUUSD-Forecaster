@@ -412,7 +412,7 @@ test("production-shaped writes honor authenticated release dry-run without mutat
     ["/api/news-index", "news-index-write", {
       action: "prepare", generation_id: "1".repeat(64), manifest: {
         generation_id: "1".repeat(64), snapshot_id: "2".repeat(64),
-        contract_version: "news-projection-generation-v2",
+        contract_version: "news-projection-generation-v3",
         window_start: "2026-06-21T00:00:00Z", watermark: "2026-08-20T00:00:00Z",
         expected_index_count: 1, expected_detail_count: 1, withdrawal_count: 0,
         source_digest: "3".repeat(64), expected_receipt_digest: "4".repeat(64),
@@ -498,6 +498,32 @@ test("news release dry-runs reject invalid payloads without mutation", async () 
         annotation_status: "READY", model_visibility: "MODEL_VISIBLE",
         parsed_at: "2026-08-20T00:00:00Z", mirror_contract: "release-validation-v1",
       }],
+    }), 400],
+    ["/api/news-index", JSON.stringify({
+      action: "stage_index", generation_id: "1".repeat(64), offset: 0,
+      items: Array.from({ length: 5 }, (_, index) => ({
+        detail_key: String(index + 1).repeat(64), category: "美国宏观",
+        cluster_id: `cluster-${index}`,
+        collector_first_seen_time: "2026-08-20T00:00:00Z",
+        annotation_status: "READY", model_visibility: "MODEL_VISIBLE",
+        parsed_at: "2026-08-20T00:00:00Z",
+        mirror_contract: "news-projection-generation-v3",
+      })),
+    }), 400],
+    ["/api/news-content", JSON.stringify({
+      action: "stage_details", generation_id: "1".repeat(64), offset: 0,
+      items: Array.from({ length: 9 }, (_, index) => ({
+        detail_key: String(index + 1).repeat(64),
+        detail_hash: String(index + 2).repeat(64), payload: {},
+      })),
+    }), 400],
+    ["/api/news-evidence", JSON.stringify({
+      contract_version: "news-evidence-paged-v2", snapshot_id: "1".repeat(64), offset: 0,
+      items: Array.from({ length: 9 }, (_, index) => ({
+        event_key: String(index + 1).repeat(64),
+        collector_first_seen_time: "2026-08-20T00:00:00Z",
+        broad_model_eligible: true, model_seen: false,
+      })),
     }), 400],
     ["/api/news-content", JSON.stringify({ action: "reset" }), 400],
   ].entries()) {

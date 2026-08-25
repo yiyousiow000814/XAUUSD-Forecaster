@@ -12,6 +12,7 @@ import {
 } from "../_shared/d1-capabilities";
 import {
   NEWS_GENERATION_ID,
+  NEWS_DETAIL_MAX_BATCH_ITEMS,
   NewsProjectionProtocolError,
   readNewsProjectionDetails,
   stageNewsProjectionBatch,
@@ -123,7 +124,8 @@ export async function POST(request: Request) {
         !checked || checked.action !== "stage_details"
         || !NEWS_GENERATION_ID.test(String(checked.generation_id ?? ""))
         || !Number.isSafeInteger(checked.batch_offset) || checked.batch_offset < 0
-        || total < 1 || total > 20 || Number(checked.valid ?? 0) !== total
+        || total < 1 || total > NEWS_DETAIL_MAX_BATCH_ITEMS
+        || Number(checked.valid ?? 0) !== total
       ) {
         return NextResponse.json({ error: "invalid news detail batch" }, { status: 400 });
       }

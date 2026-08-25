@@ -99,6 +99,11 @@
   One operation must remain bounded as total authoritative state grows, and a
   complete source of truth must remain reachable without creating another
   full-history blob.
+- News projection generation v3 keeps its index arrays within 100,000 serialized
+  bytes and four items; its Worker envelope is capped at 120,000 bytes.
+  News-evidence staging keeps each complete request within 80,000 serialized
+  bytes and eight items. The Worker enforces the matching item limits and these
+  route byte bounds; the larger platform ceiling is not a normal target.
 - Provider-capacity status crosses the dashboard boundary only as bounded,
   secret-safe per-authority/account projections. Forecasting may use a retained
   quota-day summary, but critical status must never scan accumulated provider

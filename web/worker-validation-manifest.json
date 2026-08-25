@@ -16,8 +16,8 @@
     "market-chart-write.json": 800000,
     "market-history-write.json": 400000,
     "learning-history-write.json": 350000,
-    "news-evidence-*.json": 400000,
-    "news-index-*.json": 450000,
+    "news-evidence-*.json": 80000,
+    "news-index-*.json": 120000,
     "news-content-*.json": 450000
   },
   "static_assets": [
