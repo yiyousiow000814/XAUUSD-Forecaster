@@ -2114,7 +2114,9 @@ test("lets D1 validate raw snapshot JSON in the same write", async () => {
       };
     },
   };
-  const body = JSON.stringify({ generated_at: "2026-08-11T12:00:00Z" });
+  const body = JSON.stringify({
+    generated_at: "2026-08-11T12:00:00Z", headline: "黄金上涨",
+  });
   const request = new Request("https://example.test/api/ingest", {
     method: "POST",
     headers: { "content-length": String(Buffer.byteLength(body)) },
@@ -2122,8 +2124,10 @@ test("lets D1 validate raw snapshot JSON in the same write", async () => {
   });
   assert.equal(await writeDashboardSnapshot(request, binding, 1), "stored");
   assert.equal(calls.length, 1);
+  assert.match(calls[0].sql, /SELECT CAST\(\? AS TEXT\)/);
   assert.match(calls[0].sql, /WHERE json_valid\(payload\)/);
-  assert.equal(calls[0].values[0], body);
+  assert.ok(calls[0].values[0] instanceof ArrayBuffer);
+  assert.equal(new TextDecoder().decode(calls[0].values[0]), body);
   assert.equal(calls[0].values[1], 1);
 });
 
@@ -3171,15 +3175,58 @@ test("snapshot dry-run reads bounds and uses read-only D1 JSON validation", asyn
   const binding = {
     prepare(sql) {
       calls.push(sql);
-      return { bind() { return { first: async () => ({ valid: 1 }) }; } };
+      return {
+        bind(...values) {
+          calls.push(values);
+          return { first: async () => ({ valid: 1 }) };
+        },
+      };
     },
   };
-  const body = JSON.stringify({ generated_at: "2026-08-20T00:00:00Z" });
+  const body = JSON.stringify({
+    generated_at: "2026-08-20T00:00:00Z", headline: "黄金上涨",
+  });
   const result = await writeDashboardSnapshot(new Request("https://example.test/api/audit", {
     method: "POST", body,
   }), binding, 4, { dryRun: true });
   assert.equal(result, "validated");
-  assert.deepEqual(calls, ["SELECT json_valid(?) AS valid"]);
+  assert.equal(calls[0], "SELECT json_valid(CAST(? AS TEXT)) AS valid");
+  assert.ok(calls[1][0] instanceof ArrayBuffer);
+  assert.equal(new TextDecoder().decode(calls[1][0]), body);
+});
+
+test("snapshot byte transport excludes unrelated backing-buffer bytes", async () => {
+  const { writeDashboardSnapshot } = await import(
+    "../app/api/_shared/dashboard-snapshot.ts"
+  );
+  const encoded = new TextEncoder().encode('{"headline":"黄金上涨"}');
+  const backing = new Uint8Array(encoded.byteLength + 32);
+  backing.fill(0x78);
+  backing.set(encoded, 16);
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(backing.subarray(16, 16 + encoded.byteLength));
+      controller.close();
+    },
+  });
+  let bound;
+  const binding = {
+    prepare() {
+      return {
+        bind(value) {
+          bound = value;
+          return { first: async () => ({ valid: 1 }) };
+        },
+      };
+    },
+  };
+  const result = await writeDashboardSnapshot(new Request("https://example.test/api/audit", {
+    method: "POST", body: stream, duplex: "half",
+  }), binding, 4, { dryRun: true });
+  assert.equal(result, "validated");
+  assert.ok(bound instanceof ArrayBuffer);
+  assert.equal(bound.byteLength, encoded.byteLength);
+  assert.deepEqual(new Uint8Array(bound), encoded);
 });
 
 test("split audit routes share authenticated bounded zero-mutation validation", () => {

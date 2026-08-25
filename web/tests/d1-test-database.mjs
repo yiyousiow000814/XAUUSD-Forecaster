@@ -14,10 +14,13 @@ class BoundStatement {
 
   execute() {
     const statement = this.database.prepare(this.sql);
+    const bindings = this.bindings.map(value => (
+      value instanceof ArrayBuffer ? new Uint8Array(value) : value
+    ));
     if (statement.columns().length > 0) {
-      return { success: true, results: statement.all(...this.bindings), meta: { changes: 0 } };
+      return { success: true, results: statement.all(...bindings), meta: { changes: 0 } };
     }
-    const result = statement.run(...this.bindings);
+    const result = statement.run(...bindings);
     return { success: true, results: [], meta: { changes: Number(result.changes) } };
   }
 

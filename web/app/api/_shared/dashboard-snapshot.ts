@@ -10,7 +10,7 @@ export const AUDIT_SNAPSHOT_IDS = Object.freeze({
   stories: 8,
 });
 
-import { validateJsonWithD1 } from "./release-validation";
+import { validateJsonBytesWithD1 } from "./release-validation";
 
 export type SnapshotWriteResult = "stored" | "validated" | "invalid" | "too_large";
 
@@ -18,10 +18,20 @@ export type BoundedBodyResult =
   | { status: "ok"; serialized: string; receivedBytes: number }
   | { status: "too_large" };
 
+export type BoundedBodyBytesResult =
+  | { status: "ok"; bytes: Uint8Array; receivedBytes: number }
+  | { status: "too_large" };
+
 export const PUBLIC_STATUS_PRIVATE_FIELDS = [
   "annotation_queue", "gemini_quota", "gemini_31_quota",
   "gemma_quota", "gemini_embedding_quota", "llm_routing",
 ] as const;
+
+const snapshotUpsertSql = `WITH incoming(payload) AS (SELECT CAST(? AS TEXT))
+     INSERT INTO dashboard_snapshots (id, payload, received_at)
+     SELECT ?, payload, ? FROM incoming WHERE json_valid(payload)
+     ON CONFLICT(id) DO UPDATE SET
+       payload=excluded.payload, received_at=excluded.received_at`;
 
 export function publicStatusJsonExpression() {
   return `json_remove(payload, ${PUBLIC_STATUS_PRIVATE_FIELDS
@@ -35,15 +45,17 @@ function declaredBodyBytes(request: Request): number | null {
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
-export async function readBoundedBody(
+export async function readBoundedBodyBytes(
   request: Request,
   maxBytes = MAX_DASHBOARD_SNAPSHOT_BYTES,
-): Promise<BoundedBodyResult> {
+): Promise<BoundedBodyBytesResult> {
   const declaredBytes = declaredBodyBytes(request);
   if (declaredBytes !== null && declaredBytes > maxBytes) {
     return { status: "too_large" };
   }
-  if (!request.body) return { status: "ok", serialized: "", receivedBytes: 0 };
+  if (!request.body) {
+    return { status: "ok", bytes: new Uint8Array(), receivedBytes: 0 };
+  }
 
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -60,14 +72,10 @@ export async function readBoundedBody(
       chunks.push(value);
     }
     if (chunks.length === 0) {
-      return { status: "ok", serialized: "", receivedBytes };
+      return { status: "ok", bytes: new Uint8Array(), receivedBytes };
     }
     if (chunks.length === 1) {
-      return {
-        status: "ok",
-        serialized: new TextDecoder().decode(chunks[0]),
-        receivedBytes,
-      };
+      return { status: "ok", bytes: chunks[0], receivedBytes };
     }
     const combined = new Uint8Array(receivedBytes);
     let offset = 0;
@@ -75,12 +83,31 @@ export async function readBoundedBody(
       combined.set(chunk, offset);
       offset += chunk.byteLength;
     }
-    return {
-      status: "ok", serialized: new TextDecoder().decode(combined), receivedBytes,
-    };
+    return { status: "ok", bytes: combined, receivedBytes };
   } finally {
     reader.releaseLock();
   }
+}
+
+function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  if (bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 &&
+      bytes.byteLength === bytes.buffer.byteLength) {
+    return bytes.buffer;
+  }
+  return bytes.slice().buffer;
+}
+
+export async function readBoundedBody(
+  request: Request,
+  maxBytes = MAX_DASHBOARD_SNAPSHOT_BYTES,
+): Promise<BoundedBodyResult> {
+  const body = await readBoundedBodyBytes(request, maxBytes);
+  if (body.status === "too_large") return body;
+  return {
+    status: "ok",
+    serialized: new TextDecoder().decode(body.bytes),
+    receivedBytes: body.receivedBytes,
+  };
 }
 
 /**
@@ -96,17 +123,29 @@ export async function writeDashboardSnapshot(
   snapshotId: number,
   options: { dryRun?: boolean; maxBytes?: number } = {},
 ): Promise<SnapshotWriteResult> {
-  const body = await readBoundedBody(
+  const body = await readBoundedBodyBytes(
     request, options.maxBytes ?? MAX_DASHBOARD_SNAPSHOT_BYTES,
   );
   if (body.status === "too_large") return "too_large";
 
   if (options.dryRun) {
-    return await validateJsonWithD1(binding, body.serialized)
+    return await validateJsonBytesWithD1(binding, exactArrayBuffer(body.bytes))
       ? "validated" : "invalid";
   }
 
-  return writeSerializedDashboardSnapshot(body.serialized, binding, snapshotId);
+  return writeDashboardSnapshotPayload(
+    exactArrayBuffer(body.bytes), binding, snapshotId,
+  );
+}
+
+async function writeDashboardSnapshotPayload(
+  payload: string | ArrayBuffer,
+  binding: D1Database,
+  snapshotId: number,
+): Promise<SnapshotWriteResult> {
+  const result = await binding.prepare(snapshotUpsertSql)
+    .bind(payload, snapshotId, new Date().toISOString()).run();
+  return Number(result.meta.changes ?? 0) > 0 ? "stored" : "invalid";
 }
 
 export async function writeSerializedDashboardSnapshot(
@@ -114,15 +153,7 @@ export async function writeSerializedDashboardSnapshot(
   binding: D1Database,
   snapshotId: number,
 ): Promise<SnapshotWriteResult> {
-  const result = await binding.prepare(
-    `WITH incoming(payload) AS (SELECT ?)
-     INSERT INTO dashboard_snapshots (id, payload, received_at)
-     SELECT ?, payload, ? FROM incoming WHERE json_valid(payload)
-     ON CONFLICT(id) DO UPDATE SET
-       payload=excluded.payload, received_at=excluded.received_at`,
-  ).bind(serialized, snapshotId, new Date().toISOString()).run();
-
-  return Number(result.meta.changes ?? 0) > 0 ? "stored" : "invalid";
+  return writeDashboardSnapshotPayload(serialized, binding, snapshotId);
 }
 
 export async function writeDashboardStatusSnapshots(
