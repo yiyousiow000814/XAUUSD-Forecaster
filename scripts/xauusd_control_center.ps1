@@ -5850,6 +5850,14 @@ function Get-ControlPlaneIsolationSnapshot {
     }
 }
 
+function Test-ControlPlaneServiceOwnerRequired {
+    param([Parameter(Mandatory = $true)][object]$Service)
+    if ([string]$Service.Key -eq "broadcast") {
+        return [bool](Test-BroadcastPublisherEnabled)
+    }
+    return $true
+}
+
 function Assert-ControlPlaneIsolationSnapshot {
     param(
         [Parameter(Mandatory = $true)][object]$Before,
@@ -5866,10 +5874,16 @@ function Assert-ControlPlaneIsolationSnapshot {
     foreach ($service in $services) {
         $beforeProcesses = @($Before.services.($service.Key))
         $afterProcesses = @($After.services.($service.Key))
-        if ($beforeProcesses.Count -ne 1 -or $afterProcesses.Count -ne 1 -or
+        $required = Test-ControlPlaneServiceOwnerRequired -Service $service
+        if ((-not $required) -and
+            ($beforeProcesses.Count -ne 0 -or $afterProcesses.Count -ne 0)) {
+            throw "CONTROL_PLANE_UNEXPECTED_SERVICE_OWNER_$($service.Key.ToUpperInvariant())"
+        }
+        if ($required -and ($beforeProcesses.Count -ne 1 -or
+            $afterProcesses.Count -ne 1 -or
             [int]$beforeProcesses[0].process_id -ne [int]$afterProcesses[0].process_id -or
             [string]$beforeProcesses[0].process_start_token -ne
-                [string]$afterProcesses[0].process_start_token) {
+                [string]$afterProcesses[0].process_start_token)) {
             throw "CONTROL_PLANE_INSTALL_CHANGED_SERVICE_$($service.Key.ToUpperInvariant())"
         }
     }
@@ -6057,8 +6071,13 @@ function Invoke-ControlPlaneInstall {
         -ExpectedRevision ([string]$currentBundle.source_revision)
     $isolationBefore = Get-ControlPlaneIsolationSnapshot
     foreach ($service in $services) {
-        if (@($isolationBefore.services.($service.Key)).Count -ne 1) {
+        $owners = @($isolationBefore.services.($service.Key))
+        $required = Test-ControlPlaneServiceOwnerRequired -Service $service
+        if ($required -and $owners.Count -ne 1) {
             throw "CONTROL_PLANE_SERVICE_OWNER_REQUIRED:$($service.Key)"
+        }
+        if ((-not $required) -and $owners.Count -ne 0) {
+            throw "CONTROL_PLANE_UNEXPECTED_SERVICE_OWNER:$($service.Key)"
         }
     }
 
