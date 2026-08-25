@@ -2640,9 +2640,11 @@ test("explains training rows separately from independent news events", () => {
 
 test("live room reports articles and independent events instead of revision rows", () => {
   const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
+  const payloads = readFileSync(new URL("../../xauusd_forecaster/dashboard_payloads.py", import.meta.url), "utf8");
   assert.match(source, /NEWS ARTICLES/);
   assert.match(source, /newsMetrics\.articles\.received/);
   assert.match(source, /newsMetrics\.events\.independent/);
+  assert.match(payloads, /"counts", "outcome_summary", "news_metrics", "news_source_health"/);
   assert.doesNotMatch(source, /NEWS REVISIONS/);
   assert.doesNotMatch(source, /counts\.news_revisions/);
 });

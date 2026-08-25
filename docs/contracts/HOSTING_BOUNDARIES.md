@@ -202,9 +202,11 @@
   release rollback. A second pre-promotion Sync owner is forbidden.
 - Local `/api/status` and `/api/critical-status` are the same bounded
   first-paint contract. They include only the fixed recent 90-minute decision
-  window; audit, learning, market detail, and older history retain independent
-  lazy/paged owners. A compatibility alias must not rebuild or serialize the
-  complete historical dashboard payload.
+  window and the fixed `news_metrics` aggregate required by the Live headline;
+  News rows, audit, learning, market detail, and older history retain
+  independent lazy/paged owners. A compatibility alias must not rebuild or
+  serialize the complete historical dashboard payload. Missing aggregate
+  authority must not be rendered as a true zero.
 - Local audit, learning, and market-chart summary GETs read durable derived
   models rather than invoking historical builders. A single background owner
   tracks each resource independently, builds outside the request boundary, and

@@ -8,7 +8,26 @@ from xauusd_forecaster.dashboard_payloads import (
     audit_status_payload,
     audit_stories_payload,
     bounded_evidence_window,
+    critical_status_payload,
 )
+
+
+def test_critical_status_keeps_fixed_news_totals_without_news_rows() -> None:
+    metrics = {
+        "schema_version": "news-metrics-v1",
+        "articles": {"received": 7_678, "stored_revisions": 7_681},
+        "events": {"independent": 3_469, "currently_model_eligible": 115},
+    }
+    payload = {
+        "generated_at": "2026-08-25T20:45:28+00:00",
+        "news_metrics": metrics,
+        "recent_news": [{"body": "x" * 100_000}] * 1_000,
+    }
+
+    projected = critical_status_payload(payload)
+
+    assert projected["news_metrics"] == metrics
+    assert "recent_news" not in projected
 
 
 def test_audit_summary_is_independent_of_every_growing_detail_family() -> None:
