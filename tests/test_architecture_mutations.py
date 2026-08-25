@@ -8,6 +8,7 @@ import pytest
 from architecture_tools.mutations import (
     Mutation,
     MutationAuditError,
+    _remove_shared_web_dependencies,
     _run,
     _share_web_dependencies,
     _validated_source,
@@ -69,6 +70,11 @@ def test_web_mutation_worktree_uses_the_locked_dependency_tree(tmp_path) -> None
     linked = worktree / "web/node_modules"
     assert (linked / "typescript").is_dir()
     assert linked.samefile(root / "web/node_modules")
+
+    _remove_shared_web_dependencies(worktree)
+
+    assert not linked.exists()
+    assert (root / "web/node_modules/typescript").is_dir()
 
 
 def test_report_never_hides_surviving_or_invalid_mutants(tmp_path) -> None:

@@ -190,6 +190,17 @@ def _share_web_dependencies(root: Path, worktree: Path) -> None:
         ) from error
 
 
+def _remove_shared_web_dependencies(worktree: Path) -> None:
+    """Remove only the task-owned link without traversing installed dependencies."""
+    target = worktree / "web" / "node_modules"
+    if target.is_symlink():
+        target.unlink()
+    elif target.exists():
+        # Windows directory junctions are reparse points but Path.is_symlink()
+        # is false. rmdir removes the junction itself and never its target.
+        os.rmdir(target)
+
+
 def execute_mutation(root: Path, mutation: Mutation) -> dict[str, Any]:
     baseline, baseline_code, baseline_output, baseline_ms = _run(
         mutation.command, root / ("web" if mutation.platform == "WEB" else ""),
@@ -255,9 +266,8 @@ def execute_mutation(root: Path, mutation: Mutation) -> dict[str, Any]:
                     "exit_code": code, "baseline_duration_ms": baseline_ms,
                     "mutation_duration_ms": duration, "failure_signature": signature}
         finally:
-            dependency_link = worktree / "web" / "node_modules"
-            if mutation.platform == "WEB" and dependency_link.exists():
-                os.rmdir(dependency_link)
+            if mutation.platform == "WEB":
+                _remove_shared_web_dependencies(worktree)
             subprocess.run(["git", "worktree", "remove", "--force", str(worktree)],
                            cwd=root, capture_output=True, text=True)
             final_status = subprocess.run(["git", "status", "--porcelain"], cwd=root,
