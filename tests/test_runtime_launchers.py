@@ -545,6 +545,8 @@ def _coordinated_migration_contract_body(*, capability_overrides: str = "") -> s
         "legacy_tables=4;legacy_decisions=20;projection_state='CURRENT';"
         "legacy_current_index_count=4117;legacy_current_detail_count=4117;"
         "legacy_missing_detail_count=0;legacy_review_violation_count=0;"
+        "legacy_parsed_flag_mismatch_count=0;"
+        "legacy_candidate_flag_mismatch_count=0;legacy_duplicate_cluster_count=0;"
         "active_generation_id=('c'*64);snapshot_id=('d'*64);source_digest=('e'*64);"
         "receipt_digest=('f'*64);index_count=4117;detail_count=4117;"
         "missing_detail_count=0;invariant_violation_count=0;generation_state='CURRENT';"
@@ -3382,7 +3384,9 @@ def test_coordinated_migration_receipt_rejects_reuse_staleness_and_tampering(
             "expected_receipt_digest=('f'*64);staged_index_count=4117;"
             "staged_detail_count=4117;legacy_current_index_count=4117;"
             "legacy_current_detail_count=4027;legacy_missing_detail_count=90;"
-            "legacy_review_violation_count=0};return $row}",
+            "legacy_review_violation_count=0;legacy_parsed_flag_mismatch_count=0;"
+            "legacy_candidate_flag_mismatch_count=0;legacy_duplicate_cluster_count=0};"
+            "return $row}",
             "MIGRATION_LEGACY_NEWS_COMPATIBILITY_FAILED",
         ),
         (

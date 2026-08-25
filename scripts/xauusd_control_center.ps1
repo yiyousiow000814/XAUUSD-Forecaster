@@ -1149,6 +1149,21 @@ SELECT
               json_extract(li.payload,'$.annotation_status')
           AND json_extract(li.payload,'$.parsed_at') IS NULL)))
     AS legacy_review_violation_count,
+  (SELECT count(*) FROM news_index li
+    WHERE COALESCE(json_extract(li.payload,'$.annotation_status'),'') <> 'SUPERSEDED_CONTRACT'
+      AND li.parsed <> CASE
+        WHEN json_extract(li.payload,'$.parsed_at') IS NOT NULL THEN 1 ELSE 0 END)
+    AS legacy_parsed_flag_mismatch_count,
+  (SELECT count(*) FROM news_index li
+    WHERE COALESCE(json_extract(li.payload,'$.annotation_status'),'') <> 'SUPERSEDED_CONTRACT'
+      AND li.model_candidate <> CASE
+        WHEN json_extract(li.payload,'$.model_visibility')='MODEL_VISIBLE' THEN 1 ELSE 0 END)
+    AS legacy_candidate_flag_mismatch_count,
+  (SELECT count(*) FROM (
+    SELECT cluster_id FROM news_index li
+     WHERE COALESCE(json_extract(li.payload,'$.annotation_status'),'') <> 'SUPERSEDED_CONTRACT'
+     GROUP BY cluster_id HAVING count(*) > 1))
+    AS legacy_duplicate_cluster_count,
   s.projection_state,s.active_generation_id,s.snapshot_id,s.source_digest,s.receipt_digest,
  s.index_count,s.detail_count,s.missing_detail_count,s.invariant_violation_count,
  g.state AS generation_state,g.expected_receipt_digest,g.staged_index_count,
@@ -1180,7 +1195,10 @@ FROM news_projection_state s JOIN news_projection_generations g
     if ([int]$state.legacy_current_index_count -ne [int]$state.index_count -or
         [int]$state.legacy_current_detail_count -ne [int]$state.detail_count -or
         [int]$state.legacy_missing_detail_count -ne 0 -or
-        [int]$state.legacy_review_violation_count -ne 0) {
+        [int]$state.legacy_review_violation_count -ne 0 -or
+        [int]$state.legacy_parsed_flag_mismatch_count -ne 0 -or
+        [int]$state.legacy_candidate_flag_mismatch_count -ne 0 -or
+        [int]$state.legacy_duplicate_cluster_count -ne 0) {
         throw "MIGRATION_LEGACY_NEWS_COMPATIBILITY_FAILED"
     }
     $endpoints = Get-CoordinatedMigrationEndpointEvidence `
@@ -1226,6 +1244,9 @@ FROM news_projection_state s JOIN news_projection_generations g
         legacy_news_detail_count = [int]$state.legacy_current_detail_count
         legacy_news_missing_detail_count = [int]$state.legacy_missing_detail_count
         legacy_news_invariant_violation_count = [int]$state.legacy_review_violation_count
+        legacy_news_parsed_flag_mismatch_count = [int]$state.legacy_parsed_flag_mismatch_count
+        legacy_news_candidate_flag_mismatch_count = [int]$state.legacy_candidate_flag_mismatch_count
+        legacy_news_duplicate_cluster_count = [int]$state.legacy_duplicate_cluster_count
         stable_news_status = [string]$endpoints.stable_news_status
         news_generation_id = [string]$state.active_generation_id
         news_snapshot_id = [string]$state.snapshot_id
