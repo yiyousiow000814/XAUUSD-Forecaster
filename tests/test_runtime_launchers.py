@@ -501,6 +501,7 @@ def _write_coordinated_migration_files(tmp_path) -> None:
     for name in (
         "0022_news_projection_generation.sql",
         "0023_operator_retry_sync_digest.sql",
+        "0024_seed_bounded_audit_news_metrics.sql",
     ):
         (target / name).write_text(
             (ROOT / "web" / "drizzle" / name).read_text(encoding="utf-8"),
@@ -522,7 +523,8 @@ def _coordinated_migration_contract_body(*, capability_overrides: str = "") -> s
         "switch($Operation){"
         "'READ_CANDIDATE_MIGRATION_TREE'{return [pscustomobject]@{passed=$true;output=@("
         "'web/drizzle/0022_news_projection_generation.sql',"
-        "'web/drizzle/0023_operator_retry_sync_digest.sql')}};"
+        "'web/drizzle/0023_operator_retry_sync_digest.sql',"
+        "'web/drizzle/0024_seed_bounded_audit_news_metrics.sql')}};"
         "'READ_CANDIDATE_MIGRATION_BLOB'{return [pscustomobject]@{passed=$true;output=@(('1'*40))}};"
         "'READ_CANDIDATE_MIGRATION'{return [pscustomobject]@{passed=$true;output=@('CREATE TABLE safe (id integer);')}};"
         "default{return [pscustomobject]@{passed=$false;output=@()}}}};"
@@ -534,7 +536,8 @@ def _coordinated_migration_contract_body(*, capability_overrides: str = "") -> s
         "function Invoke-CoordinatedMigrationD1Query{param($Sql);"
         "if($Sql -like 'SELECT name,*'){return @("
         "[pscustomobject]@{name='0022_news_projection_generation.sql';applied_at='now'},"
-        "[pscustomobject]@{name='0023_operator_retry_sync_digest.sql';applied_at='now'})};"
+        "[pscustomobject]@{name='0023_operator_retry_sync_digest.sql';applied_at='now'},"
+        "[pscustomobject]@{name='0024_seed_bounded_audit_news_metrics.sql';applied_at='now'})};"
         "$row=[pscustomobject]@{projection_tables=5;projection_indexes=4;retry_columns=4;"
         "legacy_tables=4;legacy_decisions=20;projection_state='CURRENT';"
         "active_generation_id=('c'*64);snapshot_id=('d'*64);source_digest=('e'*64);"
@@ -549,7 +552,8 @@ def _coordinated_migration_contract_body(*, capability_overrides: str = "") -> s
         "news_source_digest=('e'*64);news_receipt_digest=('f'*64);"
         "news_index_count=4117;news_detail_count=4117}};"
         "$files=@('web/drizzle/0022_news_projection_generation.sql',"
-        "'web/drizzle/0023_operator_retry_sync_digest.sql');"
+        "'web/drizzle/0023_operator_retry_sync_digest.sql',"
+        "'web/drizzle/0024_seed_bounded_audit_news_metrics.sql');"
     )
 
 
@@ -3265,12 +3269,13 @@ def test_migration_contract_reads_the_exact_candidate_not_stable_checkout(
     result = _run_control_center_contract(
         tmp_path,
         "$changed=@('web/drizzle/0022_news_projection_generation.sql',"
-        "'web/drizzle/0023_operator_retry_sync_digest.sql');"
+        "'web/drizzle/0023_operator_retry_sync_digest.sql',"
+        "'web/drizzle/0024_seed_bounded_audit_news_metrics.sql');"
         f"$files=Get-CoordinatedMigrationFiles $changed '{candidate}';"
         f"Assert-CoordinatedMigrationCapabilityContract $files '{candidate}';"
         'Write-Output "$($files.Count),$(git -C $repositoryRoot rev-parse HEAD)"',
     )
-    assert result == f"2,{stable}"
+    assert result == f"3,{stable}"
 
 
 @pytest.mark.parametrize(
@@ -3327,22 +3332,25 @@ def test_coordinated_migration_receipt_rejects_reuse_staleness_and_tampering(
             "function Invoke-CoordinatedMigrationD1Query{param($Sql);"
             "if($Sql -like 'SELECT name,*'){return [pscustomobject]@{"
             "name='0022_news_projection_generation.sql';applied_at='now'}}}",
-            "MIGRATION_LEDGER_PENDING:0023_operator_retry_sync_digest.sql",
+            "MIGRATION_LEDGER_PENDING:0023_operator_retry_sync_digest.sql,"
+            "0024_seed_bounded_audit_news_metrics.sql",
         ),
         (
             "function Invoke-CoordinatedMigrationD1Query{param($Sql);"
-            "if($Sql -like 'SELECT name,*'){return @("
-            "[pscustomobject]@{name='0022_news_projection_generation.sql'},"
-            "[pscustomobject]@{name='0023_operator_retry_sync_digest.sql'})};"
+                "if($Sql -like 'SELECT name,*'){return @("
+                "[pscustomobject]@{name='0022_news_projection_generation.sql'},"
+                "[pscustomobject]@{name='0023_operator_retry_sync_digest.sql'},"
+                "[pscustomobject]@{name='0024_seed_bounded_audit_news_metrics.sql'})};"
             "return [pscustomobject]@{projection_tables=4;projection_indexes=4;"
             "retry_columns=4}}",
             "MIGRATION_SCHEMA_CAPABILITY_MISSING",
         ),
         (
             "$script:legacyFailure=$true;function Invoke-CoordinatedMigrationD1Query{"
-            "param($Sql);if($Sql -like 'SELECT name,*'){return @("
-            "[pscustomobject]@{name='0022_news_projection_generation.sql'},"
-            "[pscustomobject]@{name='0023_operator_retry_sync_digest.sql'})};"
+                "param($Sql);if($Sql -like 'SELECT name,*'){return @("
+                "[pscustomobject]@{name='0022_news_projection_generation.sql'},"
+                "[pscustomobject]@{name='0023_operator_retry_sync_digest.sql'},"
+                "[pscustomobject]@{name='0024_seed_bounded_audit_news_metrics.sql'})};"
             "return [pscustomobject]@{projection_tables=5;projection_indexes=4;"
             "retry_columns=4;legacy_tables=3;legacy_decisions=0}}",
             "MIGRATION_LEGACY_COMPATIBILITY_FAILED",

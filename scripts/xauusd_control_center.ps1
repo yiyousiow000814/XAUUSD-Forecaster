@@ -953,7 +953,8 @@ function Assert-CoordinatedMigrationCapabilityContract {
     )
     $supported = @(
         "web/drizzle/0022_news_projection_generation.sql",
-        "web/drizzle/0023_operator_retry_sync_digest.sql"
+        "web/drizzle/0023_operator_retry_sync_digest.sql",
+        "web/drizzle/0024_seed_bounded_audit_news_metrics.sql"
     )
     $unknown = @($MigrationFiles | Where-Object { $_ -notin $supported })
     if ($unknown.Count -gt 0) {
@@ -964,7 +965,13 @@ function Assert-CoordinatedMigrationCapabilityContract {
             -Arguments @("-C", $repositoryRoot, "show", "${CandidateRevision}:$file")
         if (-not $read.passed) { throw "MIGRATION_FILE_MISSING:$file" }
         $sql = @($read.output) -join "`n"
-        if ($sql -match '(?im)\b(DROP|DELETE|UPDATE|REPLACE|TRUNCATE|VACUUM)\b') {
+        $isBoundedAuditHandover = $file -eq "web/drizzle/0024_seed_bounded_audit_news_metrics.sql" -and
+            $sql -match '(?im)ON\s+CONFLICT\s*\(`id`\)\s+DO\s+UPDATE' -and
+            $sql -match '(?im)WHERE\s+`id`\s*=\s*4' -and
+            $sql -match '(?im)SELECT\s+9,' -and
+            $sql -notmatch '(?im)\b(DROP|DELETE|REPLACE|TRUNCATE|VACUUM)\b'
+        if (($sql -match '(?im)\b(DROP|DELETE|UPDATE|REPLACE|TRUNCATE|VACUUM)\b') -and
+            -not $isBoundedAuditHandover) {
             throw "MIGRATION_REVERSE_INCOMPATIBLE:$file"
         }
     }

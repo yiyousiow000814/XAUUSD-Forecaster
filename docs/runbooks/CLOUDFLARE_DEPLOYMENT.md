@@ -71,10 +71,14 @@ remain blocked; do not use Wrangler auto-configuration as recovery.
 
 ## Bootstrap first atomic News CURRENT
 
-Migration `0022_news_projection_generation.sql` is additive. Apply it only after
-the exact-main immutable Candidate exists at 0% and before Candidate validation;
-the current Stable continues to serve the legacy News archive throughout this
-step. Record the migration receipt and confirm that the legacy tables remain.
+Migrations `0022_news_projection_generation.sql` through
+`0024_seed_bounded_audit_news_metrics.sql` are coordinated and reverse
+compatible. Apply them only after the exact-main immutable Candidate exists at
+0% and before Candidate validation; the current Stable continues to serve the
+legacy News archive throughout this step. Migration `0024` seeds only the fixed
+News aggregate needed by the bounded split summary and does not make public
+reads scan the growing legacy audit document. Record the migration receipt and
+confirm that the legacy tables remain.
 
 The normal mirror still targets Stable, so it cannot safely bootstrap routes
 that exist only on the Candidate. Direct the bounded News replay through the
