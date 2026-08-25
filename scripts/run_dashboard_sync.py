@@ -67,16 +67,34 @@ from xauusd_forecaster.dashboard.sync.resource_protocols import (
     MARKET_HISTORY_BATCH_LIMIT_BYTES, MARKET_HISTORY_CONTRACT_VERSION,
     MARKET_HISTORY_OVERLAP_SECONDS, MARKET_HISTORY_PAGES_PER_CYCLE,
     MARKET_OVERVIEWS_PER_CYCLE, NEWS_EVIDENCE_CONTRACT_VERSION,
-    NEWS_EVIDENCE_PAGES_PER_CYCLE, NEWS_EVIDENCE_WRITE_BATCH_ITEMS,
+    NEWS_EVIDENCE_CLEANUP_STEPS_PER_CYCLE, NEWS_EVIDENCE_PAGES_PER_CYCLE,
+    NEWS_EVIDENCE_WRITE_BATCH_ITEMS,
     NEWS_PROJECTION_BATCHES_PER_CYCLE,
-    _learning_payload, _local_critical_status_url, _local_market_history_url,
+    _cleanup_news_evidence_snapshots as _cleanup_news_evidence_snapshots_owned,
+    _learning_payload,
+    _local_critical_status_url, _local_market_history_url,
     _local_news_archive_url, _local_news_evidence_url, _local_resource_url,
     _market_decision_overview_payload, _market_history_payloads, _overlap_cursor,
     _read_local_resource, _sync_assistant_chat, _sync_audit, _sync_learning,
     _sync_learning_history, _sync_learning_summary, _sync_market,
-    _sync_market_history, _sync_news, _sync_news_evidence, _sync_news_questions,
+    _sync_market_history, _sync_news,
+    _sync_news_evidence as _sync_news_evidence_owned, _sync_news_questions,
     _sync_operator_retries, _verify_news_projection_state,
 )
+
+
+def _cleanup_news_evidence_snapshots(
+    remote_url: str, snapshot_id: str, config: dict,
+) -> bool:
+    """Delegate cleanup through the entrypoint's replaceable transport seam."""
+    return _cleanup_news_evidence_snapshots_owned(
+        remote_url, snapshot_id, config, post_json=_post_json,
+    )
+
+
+def _sync_news_evidence(local_payload: dict, config: dict) -> None:
+    """Delegate evidence sync through the entrypoint's transport seam."""
+    _sync_news_evidence_owned(local_payload, config, post_json=_post_json)
 
 
 def sync_heartbeat_once(config: dict) -> tuple[list[dict], SyncResourceResults]:

@@ -110,6 +110,7 @@ def _projection_producer_revision() -> str:
 NEWS_EVIDENCE_WRITE_BATCH_ITEMS = 8
 NEWS_EVIDENCE_BATCH_LIMIT_BYTES = 80_000
 NEWS_EVIDENCE_PAGES_PER_CYCLE = 1
+NEWS_EVIDENCE_CLEANUP_STEPS_PER_CYCLE = 8
 MARKET_HISTORY_PAGES_PER_CYCLE = 1
 MARKET_OVERVIEWS_PER_CYCLE = 2
 NEWS_EVIDENCE_CONTRACT_VERSION = "news-evidence-paged-v2"
@@ -569,16 +570,12 @@ def _sync_news(_local_payload: dict, config: dict) -> None:
         "action": "prepare", "generation_id": generation_id,
         "manifest": manifest,
     }, ensure_ascii=False, separators=(",", ":")).encode()
-    try:
-        prepare = _post_json(news_index_url, prepare_payload, config)
-    except RemoteInvariantViolation as error:
-        orphan = error.evidence.get("staging_generation_id")
-        if error.error_code != "NEWS_PROJECTION_STAGING_BUSY" or not orphan:
-            raise
-        _post_json(news_index_url, json.dumps({
-            "action": "abandon", "generation_id": orphan,
-        }, separators=(",", ":")).encode(), config)
-        prepare = _post_json(news_index_url, prepare_payload, config)
+    # A busy generation may belong to another exact producer (for example the
+    # still-active Stable mirror while a Candidate bootstrap is replaying).
+    # Only the generation recorded in this producer's own state may be
+    # abandoned above. Preserve a foreign staging generation and let the
+    # caller retry after the owning producer advances it.
+    prepare = _post_json(news_index_url, prepare_payload, config)
     detail_offset = int(prepare.get("next_detail_offset", 0))
     index_offset = int(prepare.get("next_index_offset", 0))
     work = 0
@@ -708,8 +705,29 @@ def _local_critical_status_url(config: dict) -> str:
     return _local_resource_url(config, "/api/critical-status")
 
 
-def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
+def _cleanup_news_evidence_snapshots(
+    remote_url: str, snapshot_id: str, config: dict, *, post_json=None,
+) -> bool:
+    """Drain bounded cleanup debt faster than one replacement can create it."""
+    post = post_json or _post_json
+    payload = json.dumps({
+        "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
+        "cleanup_active_snapshot": snapshot_id,
+    }, separators=(",", ":")).encode("utf-8")
+    cleanup_pending = False
+    for _ in range(NEWS_EVIDENCE_CLEANUP_STEPS_PER_CYCLE):
+        result = post(remote_url, payload, config)
+        cleanup_pending = result.get("cleanup_pending") is True
+        if not cleanup_pending:
+            return False
+    return cleanup_pending
+
+
+def _sync_news_evidence(
+    _local_payload: dict, config: dict, *, post_json=None,
+) -> None:
     """Advance a bounded staging window and activate only a complete snapshot."""
+    post = post_json or _post_json
     if not config.get("local_status_url"):
         return
     remote_url = config.get("remote_news_evidence_url") or (
@@ -740,18 +758,23 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
     first_snapshot = str(first_page.get("snapshot_id") or "")
     if not re.fullmatch(r"[a-f0-9]{64}", first_snapshot):
         raise PayloadContractError("local news evidence snapshot id is invalid")
+    active_snapshot = (
+        str(state.get("active_snapshot_id"))
+        if state.get("contract_version") == NEWS_EVIDENCE_CONTRACT_VERSION
+        and state.get("active_snapshot_id") else ""
+    )
+    if active_snapshot and _cleanup_news_evidence_snapshots(
+        remote_url, active_snapshot, config, post_json=post,
+    ):
+        return
     if (
         state.get("contract_version") == NEWS_EVIDENCE_CONTRACT_VERSION
         and state.get("active_snapshot_id") == first_snapshot
     ):
-        _post_json(remote_url, json.dumps({
-            "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
-            "cleanup_active_snapshot": first_snapshot,
-        }, separators=(",", ":")).encode("utf-8"), config)
         return
     snapshot_id = first_snapshot
     total = int(first_page.get("total") or 0)
-    prepared = _post_json(remote_url, json.dumps({
+    prepared = post(remote_url, json.dumps({
         "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
         "prepare_snapshot": snapshot_id,
         "expected_count": total,
@@ -798,7 +821,7 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
                     f"news evidence batch is {len(encoded)} bytes "
                     f"(limit {NEWS_EVIDENCE_BATCH_LIMIT_BYTES})"
                 )
-            _post_json(remote_url, encoded, config)
+            post(remote_url, encoded, config)
             received += len(items)
         next_cursor = page.get("next_cursor")
         if not page.get("has_more"):
@@ -806,7 +829,7 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
                 raise PayloadContractError(
                     f"news evidence snapshot expected {total} rows but staged {received}"
                 )
-            _post_json(remote_url, json.dumps({
+            post(remote_url, json.dumps({
                 "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
                 "activate_snapshot": snapshot_id,
                 "expected_count": total,
@@ -817,10 +840,9 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
                 "record_count": total,
                 "last_success": datetime.now(UTC).isoformat(),
             })
-            _post_json(remote_url, json.dumps({
-                "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
-                "cleanup_active_snapshot": snapshot_id,
-            }, separators=(",", ":")).encode("utf-8"), config)
+            _cleanup_news_evidence_snapshots(
+                remote_url, snapshot_id, config, post_json=post,
+            )
             return
         if not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor:
             raise PayloadContractError("local news evidence cursor did not advance")
