@@ -56,6 +56,13 @@ viability, ownership uniqueness, compatibility, directed 0% Worker probes, and
 actual Cloudflare CPU/error evidence when Worker execution changed. PASSED means
 every required gate belongs to the exact release key.
 
+An isolated preflight may observe a live decision after its durable decision row
+is appended but before the complete model family is appended. Its explicit
+pending-generation mode treats that partial latest boundary like a not-yet-made
+boundary. Normal production-shape validation remains fail-closed for the same
+partial family, and pending mode still rejects mismatched versions or duplicate
+model identities that are already present.
+
 Stable and Candidate dashboard inspection uses exact Worker version overrides
 against the same production data authority. Promotion requires semantic parity
 for the bounded status, audit, learning, and market projections; a route read
