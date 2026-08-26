@@ -17,6 +17,10 @@ pytestmark = pytest.mark.skipif(
 
 
 ROOT = Path(__file__).resolve().parents[1]
+OLD_START_TOKEN = "2026-08-26T03:20:00.0000000+00:00"
+NEW_START_TOKEN = "2026-08-26T03:22:48.0603020+00:00"
+CURRENT_START_TOKEN = "2026-08-26T03:25:00.0000000+00:00"
+DEAD_INSTALLER_START_TOKEN = "2026-08-26T03:15:00.0000000+00:00"
 CONTROL_FILES = (
     "xauusd_control_center.ps1",
     "control_center.xaml",
@@ -279,10 +283,10 @@ def _abandoned_activation_mocks(
     return textwrap.dedent(
         f"""
         $script:phase='{phase}'; $script:checks=@();
-        $current=[pscustomobject]@{{process_id=$PID;process_start_token='current-token'}};
-        $old=[pscustomobject]@{{process_id=100;process_start_token='old-token'}};
+        $current=[pscustomobject]@{{process_id=$PID;process_start_token='{CURRENT_START_TOKEN}'}};
+        $old=[pscustomobject]@{{process_id=100;process_start_token='{OLD_START_TOKEN}'}};
         $baseline=[pscustomobject]@{{business_runtime_revision='runtime';release_state_hash='state';release_history_hash='history';services=[pscustomobject]@{{}}}};
-        $script:state=[pscustomobject]@{{transaction_id='{transaction_id}';phase=$script:phase;target_revision='{target_revision}';previous_revision='{'a' * 40}';bundle_hash_verified={bundle_verified};install_owner_identity=[pscustomobject]@{{process_id=999999;process_start_token='gone'}};old_watchdog_identity=$old;isolation_before=$baseline;backup_root='backup';supervision_state=$null}};
+        $script:state=[pscustomobject]@{{transaction_id='{transaction_id}';phase=$script:phase;target_revision='{target_revision}';previous_revision='{'a' * 40}';bundle_hash_verified={bundle_verified};install_owner_identity=[pscustomobject]@{{process_id=999999;process_start_token='{DEAD_INSTALLER_START_TOKEN}'}};old_watchdog_identity=$old;isolation_before=$baseline;backup_root='backup';supervision_state=$null}};
         function Get-ControlPlaneInstallState {{ $script:state.phase=$script:phase; $script:state }};
         function Write-ControlPlaneInstallState {{ param($Values); if($Values.phase){{$script:phase=[string]$Values.phase}} }};
         function Get-ControlPlaneProcessIdentity {{ param($ProcessId); if($ProcessId-eq $PID){{$current}}else{{$null}} }};
@@ -292,7 +296,7 @@ def _abandoned_activation_mocks(
         function Assert-ControlPlaneIsolationBaseline {{ param($Snapshot,$ReleaseState); $script:checks+='baseline' }};
         function Get-ControlPlaneIsolationSnapshot {{ $baseline }};
         function Assert-ControlPlaneIsolationSnapshot {{ param($Before,$After); $script:checks+='isolation' }};
-        function Write-WatchdogHeartbeat {{ param($SupervisionMode,$InstallTransactionId); New-Item -ItemType Directory -Path (Split-Path -Parent $watchdogHeartbeatPath) -Force | Out-Null; [pscustomobject]@{{install_transaction_id=$InstallTransactionId;supervision_mode=$SupervisionMode;control_bundle_revision='{target_revision}';control_bundle_exact_revision=$true;control_bundle_hash_verified=$true;process_id=$PID;process_start_token='current-token'}} | ConvertTo-Json | Set-Content -LiteralPath $watchdogHeartbeatPath }};
+        function Write-WatchdogHeartbeat {{ param($SupervisionMode,$InstallTransactionId); New-Item -ItemType Directory -Path (Split-Path -Parent $watchdogHeartbeatPath) -Force | Out-Null; [pscustomobject]@{{install_transaction_id=$InstallTransactionId;supervision_mode=$SupervisionMode;control_bundle_revision='{target_revision}';control_bundle_exact_revision=$true;control_bundle_hash_verified=$true;process_id=$PID;process_start_token='{CURRENT_START_TOKEN}'}} | ConvertTo-Json | Set-Content -LiteralPath $watchdogHeartbeatPath }};
         """
     ).replace("\n", " ")
     assert _run_contract(tmp_path, body) == (
@@ -418,18 +422,18 @@ def test_supervision_quiesce_keeps_main_task_enabled_for_restart(tmp_path: Path)
 @pytest.mark.parametrize(
     ("exact", "hashed", "heartbeat_token", "expected"),
     [
-        ("$true", "$true", "old-token", "CONTROL_PLANE_NEW_WATCHDOG_HEARTBEAT_TIMEOUT"),
-        ("$false", "$true", "new-token", "CONTROL_PLANE_NEW_WATCHDOG_HEARTBEAT_TIMEOUT"),
-        ("$true", "$false", "new-token", "CONTROL_PLANE_NEW_WATCHDOG_HEARTBEAT_TIMEOUT"),
-        ("$true", "$true", "new-token", "new-token"),
+        ("$true", "$true", OLD_START_TOKEN, "CONTROL_PLANE_NEW_WATCHDOG_HEARTBEAT_TIMEOUT"),
+        ("$false", "$true", NEW_START_TOKEN, "CONTROL_PLANE_NEW_WATCHDOG_HEARTBEAT_TIMEOUT"),
+        ("$true", "$false", NEW_START_TOKEN, "CONTROL_PLANE_NEW_WATCHDOG_HEARTBEAT_TIMEOUT"),
+        ("$true", "$true", NEW_START_TOKEN, NEW_START_TOKEN),
     ],
 )
 def test_heartbeat_requires_new_process_exact_revision_and_hashes(
     tmp_path: Path, exact: str, hashed: str, heartbeat_token: str, expected: str,
 ) -> None:
     revision = "b" * 40
-    previous = _identity(100, "old-token")
-    owner_pid = 100 if heartbeat_token == "old-token" else 200
+    previous = _identity(100, OLD_START_TOKEN)
+    owner_pid = 100 if heartbeat_token == OLD_START_TOKEN else 200
     owner = _identity(owner_pid, heartbeat_token)
     body = textwrap.dedent(
         f"""
@@ -446,15 +450,15 @@ def test_heartbeat_requires_new_process_exact_revision_and_hashes(
 
 def test_handoff_requires_quiesced_ack_from_exact_install_transaction(tmp_path: Path) -> None:
     revision = "b" * 40
-    previous = _identity(100, "old-token")
-    owner = _identity(200, "new-token")
+    previous = _identity(100, OLD_START_TOKEN)
+    owner = _identity(200, NEW_START_TOKEN)
     body = textwrap.dedent(
         f"""
         $previous={previous}; $owner={owner};
         function Start-Sleep {{ }};
         function Get-VerifiedWatchdogOwners {{ @($owner) }};
         New-Item -ItemType Directory -Path (Split-Path -Parent $watchdogHeartbeatPath) -Force | Out-Null;
-        [pscustomobject]@{{control_bundle_revision='{revision}';control_bundle_exact_revision=$true;control_bundle_hash_verified=$true;supervision_mode='QUIESCED';install_transaction_id='wrong';process_id=200;process_start_token='new-token'}} | ConvertTo-Json | Set-Content -LiteralPath $watchdogHeartbeatPath;
+        [pscustomobject]@{{control_bundle_revision='{revision}';control_bundle_exact_revision=$true;control_bundle_hash_verified=$true;supervision_mode='QUIESCED';install_transaction_id='wrong';process_id=200;process_start_token='{NEW_START_TOKEN}'}} | ConvertTo-Json | Set-Content -LiteralPath $watchdogHeartbeatPath;
         try {{ Wait-VerifiedWatchdogHandoff -ExpectedRevision '{revision}' -PreviousIdentity $previous -ExpectedMode 'QUIESCED' -ExpectedInstallTransactionId 'expected' -Timeout ([TimeSpan]::FromMilliseconds(20)) | Out-Null; Write-Output accepted }} catch {{ Write-Output $_.Exception.Message }}
         """
     ).replace("\n", " ")
@@ -531,15 +535,17 @@ def test_abandoned_install_accepts_only_exact_dead_installer_lock_identity(
     body = _abandoned_activation_mocks(
         target_revision, "VERIFY_QUIESCED_HANDOFF"
     ) + textwrap.dedent(
-        """
+        f"""
         Write-WatchdogHeartbeat -SupervisionMode 'QUIESCED' -InstallTransactionId 'txn';
         New-Item -ItemType Directory -Path $releaseLockPath -Force | Out-Null;
-        [pscustomobject]@{owner_pid=999999;owner_process_start_token='gone'} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $releaseLockPath 'owner.json');
+        [pscustomobject]@{{owner_pid=999999;owner_process_start_token='{DEAD_INSTALLER_START_TOKEN}'}} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $releaseLockPath 'owner.json');
         $verified=Assert-AbandonedControlPlaneInstallActivation -State $script:state -TransactionId 'txn';
         Write-Output "$($verified.owner.process_start_token)|$($script:checks -join ',')"
         """
     ).replace("\n", " ")
-    assert _run_contract(tmp_path, body) == "current-token|baseline,isolation"
+    assert _run_contract(tmp_path, body) == (
+        f"{CURRENT_START_TOKEN}|baseline,isolation"
+    )
 
 
 def test_failed_abandoned_activation_restores_verified_backup(tmp_path: Path) -> None:
