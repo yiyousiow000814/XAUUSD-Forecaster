@@ -1,0 +1,7 @@
+# View taxonomy, learner copy, scenarios, and disclosure remain human-owned
+# semantic declarations in explorer.json. Code hierarchy is generated separately.
+[contract]
+source = "architecture/declarations/explorer.json"
+coordinates_allowed = false
+auto_place_unlisted = true
+

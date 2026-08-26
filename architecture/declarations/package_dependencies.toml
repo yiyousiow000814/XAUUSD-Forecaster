@@ -1,0 +1,11 @@
+[allowed]
+foundational = []
+ai = ["foundational"]
+evidence = ["foundational", "ai"]
+news = ["foundational", "ai", "evidence"]
+training = ["foundational", "ai", "evidence", "news"]
+decision = ["foundational", "ai", "evidence", "news", "training"]
+runtime = ["foundational"]
+assistant = ["foundational", "ai", "evidence", "news"]
+dashboard = ["foundational", "ai", "evidence", "news", "training", "decision", "runtime", "assistant"]
+

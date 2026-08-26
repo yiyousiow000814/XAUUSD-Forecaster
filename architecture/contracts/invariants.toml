@@ -1,0 +1,17 @@
+schema = "architecture-contracts-v1"
+
+[[contract]]
+id = "ARCH-GENERATED-DETERMINISTIC"
+criticality = "CRITICAL"
+statement = "Generated architecture artifacts are deterministic and source-bound."
+
+[[contract]]
+id = "ARCH-NO-ABSOLUTE-PATHS"
+criticality = "CRITICAL"
+statement = "Generated artifacts contain only repository-relative source locations."
+
+[[contract]]
+id = "ARCH-OBSERVED-IS-NOT-POLICY"
+criticality = "CRITICAL"
+statement = "Observed imports and allowed dependency policy remain distinct evidence."
+

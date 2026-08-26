@@ -1,0 +1,3 @@
+schema = "architecture-mutations-v1"
+# PR C adds executable targeted mutations. PR A deliberately owns no mutation runner.
+

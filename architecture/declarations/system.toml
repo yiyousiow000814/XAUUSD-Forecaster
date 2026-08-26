@@ -1,0 +1,17 @@
+schema = "architecture-source-v1"
+explorer_declaration = "architecture/declarations/explorer.json"
+
+[repository]
+name = "XAUUSD-Forecaster"
+
+[generation]
+explorer_manifest = "architecture/generated/explorer-manifest.json"
+code_index = "architecture/generated/code-index.json"
+evidence_index = "architecture/generated/evidence-index.json"
+source_digest = "architecture/generated/source-digest.json"
+
+[policy]
+require_current_node_binding = true
+reject_absolute_paths = true
+reject_secret_material = true
+

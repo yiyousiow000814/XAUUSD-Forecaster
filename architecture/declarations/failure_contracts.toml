@@ -1,0 +1,4 @@
+[contract]
+source = "architecture/declarations/explorer.json"
+inference_from_imports = false
+

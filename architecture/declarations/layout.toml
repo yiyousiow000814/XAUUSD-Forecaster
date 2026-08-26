@@ -1,0 +1,5 @@
+[contract]
+orientation_independent = true
+absolute_coordinates_allowed = false
+ordinary_code_nodes_auto_placed = true
+

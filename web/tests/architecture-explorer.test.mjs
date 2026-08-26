@@ -174,8 +174,8 @@ test("21. Page stays statically prerendered behind the lazy Admin route", () => 
 
 test("22. Source links require one exact immutable build SHA", () => {
   const sha = "a".repeat(40);
-  assert.equal(architectureGithubHref(manifest, "architecture/manifest.json", sha), `https://github.com/${manifest.repository}/blob/${sha}/architecture/manifest.json`);
-  assert.equal(architectureGithubHref(manifest, "architecture/manifest.json", "main"), null);
+  assert.equal(architectureGithubHref(manifest, "architecture/generated/explorer-manifest.json", sha), `https://github.com/${manifest.repository}/blob/${sha}/architecture/generated/explorer-manifest.json`);
+  assert.equal(architectureGithubHref(manifest, "architecture/generated/explorer-manifest.json", "main"), null);
   assert.equal(architectureGithubHref(manifest, "../secret", sha), null);
 });
 

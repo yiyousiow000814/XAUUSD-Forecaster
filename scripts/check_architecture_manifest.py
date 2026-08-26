@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -26,16 +27,10 @@ CAMPAIGN_ORDER = [
     "latest-main", "phase-c", "phase-d", "phase-e",
     "architecture-explorer", "closure",
 ]
+_PACKAGE_POLICY_PATH = Path(__file__).resolve().parents[1] / "architecture/declarations/package_dependencies.toml"
 CANONICAL_PACKAGE_DEPENDENCIES = {
-    "foundational": set(),
-    "ai": {"foundational"},
-    "evidence": {"foundational", "ai"},
-    "news": {"foundational", "ai", "evidence"},
-    "training": {"foundational", "ai", "evidence", "news"},
-    "decision": {"foundational", "ai", "evidence", "news", "training"},
-    "runtime": {"foundational"},
-    "assistant": {"foundational", "ai", "evidence", "news"},
-    "dashboard": {"foundational", "ai", "evidence", "news", "training", "decision", "runtime", "assistant"},
+    source: set(targets)
+    for source, targets in tomllib.loads(_PACKAGE_POLICY_PATH.read_text(encoding="utf-8"))["allowed"].items()
 }
 REQUIRED_FAILURE_IMPACTS = {
     "training", "cloudflare", "decision", "evidence", "news", "dashboard-sync", "d1", "control-plane",
@@ -265,7 +260,7 @@ def expand_compact_manifest(source: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_manifest(root: Path) -> tuple[dict[str, Any], int]:
-    path = root / "architecture" / "manifest.json"
+    path = root / "architecture" / "generated" / "explorer-manifest.json"
     raw = path.read_bytes()
     return expand_compact_manifest(json.loads(raw)), len(raw)
 
