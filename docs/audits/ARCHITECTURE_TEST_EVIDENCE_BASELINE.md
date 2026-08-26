@@ -7,7 +7,7 @@ across Python, Web, and Windows. Ten production-shaped fixture families emit
 normalized asserted event sequences. No provider, production endpoint, or
 production store was used.
 
-At source digest `cc2489bbb23025ad8dfc21cb32a96758956c7dd9327381993bd35963d3b753c3`,
+At source digest `414a33048ea1316d3e97f5816804ad4ef9e07def367caf4300512761744409a5`,
 the deterministic collector found 1,646 test functions: 15 explicitly bound
 contract tests, 982 owner-touching tests, and 1,631 currently unclassified by
 contract class. These sets overlap by design: `TOUCHES` is a relationship,

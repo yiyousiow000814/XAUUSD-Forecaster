@@ -33,8 +33,10 @@ Architecture documents affected: Architecture README, Codebase Map, Web and Clou
   `PENDING` even when its implementation exists on a branch.
 - Use repository-relative paths. Code paths must not point into `tests/`, and
   test paths must remain under `tests/` or `web/tests/`.
-- The UI receives the generated Explorer artifact through the Vite build constant. It must not fetch
-  GitHub, parse Markdown, or call an Architecture API at runtime.
+- The UI receives the compact graph through the Vite build constant. Code and
+  evidence indexes are separate bounded virtual modules and load only inside
+  the private Explorer. It must not fetch GitHub, parse Markdown, call an
+  Architecture API, or read production D1 at runtime.
 - Detailed invariants belong in `docs/contracts/` or the relevant design map;
   the manifest provides concise navigation, not a duplicate contract system.
 
@@ -152,3 +154,26 @@ Replacing an intent cancels the pending animation frame, so an older view can
 never move the current viewport.
 
 Run `python scripts/check_architecture_manifest.py --root .` before committing.
+
+## Evidence and code drill-down
+
+The high-level learner graph remains semantic. Its compact indicator states
+only whether a declaration has a static match, is declaration-only, stale,
+contradicted, or unresolved. It never calls a declaration "verified" merely
+because the declaration exists. The Inspector's Evidence tab expands the full
+chain: declaration key, source binding and exact line span, extractor rule,
+contract and test IDs, current source digest, normalized runtime trace IDs, and
+targeted mutation outcomes. Links require the immutable build SHA.
+
+`Open code structure` is generated from `code-index.json`. It drills from the
+selected semantic node into matching repository modules and then extracted
+top-level symbols; ordinary file or symbol changes therefore update the tree
+without a manually maintained child view. This code containment tree is not a
+replacement for the learner architecture graph and never infers ownership.
+
+The package dependency reference keeps three modes separate: observed imports,
+allowed policy (including unused permissions), and violations. Test
+effectiveness likewise separates tests that merely touch code from tests bound
+to a durable contract, and it keeps every surviving designated mutation
+visible. Raw test count is inventory, not a trust score. Architecture diff is
+shown as `UNAVAILABLE` when the build lacks exact base metadata.
