@@ -40,10 +40,10 @@ function sqlDetail(sql) {
   return { operation: "UNRESOLVED", table: "UNRESOLVED", sql_literal: true };
 }
 
-for (const fullPath of walk(webRoot).filter(path => /\.(?:ts|tsx|mts|cts)$/.test(path))) {
+for (const fullPath of walk(webRoot).filter(path => /\.(?:ts|tsx|mts|cts|mjs)$/.test(path))) {
   const path = posix(fullPath);
   const source = ts.createSourceFile(fullPath, readFileSync(fullPath, "utf8"), ts.ScriptTarget.Latest, true,
-    fullPath.endsWith("x") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+    fullPath.endsWith("x") ? ts.ScriptKind.TSX : fullPath.endsWith(".mjs") ? ts.ScriptKind.JS : ts.ScriptKind.TS);
   if (/^web\/app\//.test(path) && /\/(?:page|route)\.(?:ts|tsx)$/.test(path)) {
     const route = path.replace(/^web\/app/, "").replace(/\/(?:page|route)\.(?:ts|tsx)$/, "") || "/";
     add(path.includes("/route.") ? "web_api_route" : "web_page_route", path, source, {
@@ -57,6 +57,9 @@ for (const fullPath of walk(webRoot).filter(path => /\.(?:ts|tsx|mts|cts)$/.test
     if (ts.isCallExpression(node) && node.arguments.length) {
       const expression = node.expression.getText(source);
       const first = node.arguments[0];
+      if (path.startsWith("web/tests/") && expression === "test" && ts.isStringLiteralLike(first)) {
+        add("web_test", path, node, { name: first.text, test_id: `${path}::${first.text}` });
+      }
       if ((expression.endsWith(".prepare") || expression.endsWith(".exec")) && ts.isStringLiteralLike(first)) {
         add("d1_sql", path, node, sqlDetail(first.text));
       }

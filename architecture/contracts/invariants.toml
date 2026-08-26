@@ -1,17 +1,145 @@
 schema = "architecture-contracts-v1"
 
 [[contract]]
-id = "ARCH-GENERATED-DETERMINISTIC"
-criticality = "CRITICAL"
-statement = "Generated architecture artifacts are deterministic and source-bound."
+id = "DECISION-FIXED-CADENCE"
+statement = "Decision evaluates only on the fixed eligible clock and never backfills a closed interval."
+owner = "xauusd_forecaster.decision"
+risk = "CRITICAL"
+fact_ids = ["node:decision", "node:business-runtime"]
+document = "docs/design/DECISION_AND_EVIDENCE.md"
+required_evidence = ["TEST_BOUND", "TEST_EXECUTED", "RUNTIME_OBSERVED"]
 
 [[contract]]
-id = "ARCH-NO-ABSOLUTE-PATHS"
-criticality = "CRITICAL"
-statement = "Generated artifacts contain only repository-relative source locations."
+id = "DECISION-LAST-GOOD-MODEL"
+statement = "Decision continues with the last valid model while Training is blocked or unavailable."
+owner = "xauusd_forecaster.decision"
+risk = "CRITICAL"
+fact_ids = ["edge:published-model-to-decision", "node:training"]
+document = "docs/design/TRAINING_AND_MODELS.md"
+required_evidence = ["TEST_BOUND", "TEST_EXECUTED"]
 
 [[contract]]
-id = "ARCH-OBSERVED-IS-NOT-POLICY"
-criticality = "CRITICAL"
-statement = "Observed imports and allowed dependency policy remain distinct evidence."
+id = "EVIDENCE-APPEND-ONLY"
+statement = "Decision and outcome evidence is immutable and append-only."
+owner = "xauusd_forecaster.evidence"
+risk = "CRITICAL"
+fact_ids = ["node:evidence", "edge:decision-to-evidence"]
+document = "docs/contracts/FORWARD_ONLY.md"
+required_evidence = ["TEST_BOUND", "TEST_EXECUTED", "RUNTIME_OBSERVED"]
 
+[[contract]]
+id = "TRAINING-NOT-DUE-FIRST"
+statement = "The NOT_DUE gate executes before expensive training materialization or reconstruction."
+owner = "xauusd_forecaster.training"
+risk = "CRITICAL"
+fact_ids = ["node:training-materialization", "node:training"]
+document = "docs/design/TRAINING_AND_MODELS.md"
+required_evidence = ["TEST_BOUND", "TEST_EXECUTED"]
+
+[[contract]]
+id = "TRAINING-MATERIALIZATION-BOUNDED"
+statement = "Training materialization advances with bounded pages and a durable checkpoint."
+owner = "xauusd_forecaster.training"
+risk = "CRITICAL"
+fact_ids = ["edge:evidence-to-materialization"]
+document = "docs/contracts/ARCHITECTURE_RULES.md"
+required_evidence = ["TEST_BOUND", "TEST_EXECUTED"]
+
+[[contract]]
+id = "DASHBOARD-CRITICAL-BOUNDED"
+statement = "Critical status never scans growing history and remains independently bounded."
+owner = "xauusd_forecaster.dashboard"
+risk = "CRITICAL"
+fact_ids = ["node:dashboard-api"]
+document = "docs/design/DASHBOARD_AND_SYNC.md"
+required_evidence = ["TEST_BOUND", "TEST_EXECUTED", "RUNTIME_OBSERVED"]
+
+[[contract]]
+id = "SYNC-HEARTBEAT-FIRST"
+statement = "Dashboard Sync attempts the critical heartbeat before optional or growing resources."
+owner = "xauusd_forecaster.dashboard.sync"
+risk = "CRITICAL"
+fact_ids = ["node:dashboard-sync", "edge:api-to-sync"]
+document = "docs/design/DASHBOARD_AND_SYNC.md"
+required_evidence = ["TEST_BOUND", "TEST_EXECUTED", "RUNTIME_OBSERVED"]
+
+[[contract]]
+id = "SYNC-OPTIONAL-ISOLATION"
+statement = "An optional Sync resource failure degrades only that resource and does not invalidate the critical heartbeat."
+owner = "xauusd_forecaster.dashboard.sync"
+risk = "CRITICAL"
+fact_ids = ["node:dashboard-sync"]
+document = "docs/contracts/OPERATIONAL_HEALTH.md"
+required_evidence = ["TEST_BOUND", "TEST_EXECUTED", "RUNTIME_OBSERVED"]
+
+[[contract]]
+id = "CLOUDFLARE-LOCAL-ISOLATION"
+statement = "Cloudflare unavailability does not stop local Decision or Evidence append."
+owner = "cloudflare-boundary"
+risk = "CRITICAL"
+fact_ids = ["node:cloudflare", "node:decision", "node:evidence"]
+document = "docs/contracts/HOSTING_BOUNDARIES.md"
+required_evidence = ["TEST_BOUND", "TEST_EXECUTED"]
+
+[[contract]]
+id = "RELEASE-STABLE-EXPLICIT"
+statement = "Stable changes only through explicit local Promote or Reverse after exact candidate validation."
+owner = "scripts/xauusd_control_center_release.ps1"
+risk = "CRITICAL"
+fact_ids = ["edge:candidate-to-stable", "node:stable-release"]
+document = "docs/contracts/RELEASE_CONTROL.md"
+required_evidence = ["TEST_BOUND", "TEST_EXECUTED", "RUNTIME_OBSERVED"]
+
+[[contract]]
+id = "CONTROL-PLANE-EXACT-REVISION"
+statement = "The installed Control Plane bundle and heartbeat identify the exact source revision and hashes."
+owner = "scripts/install_control_plane.ps1"
+risk = "CRITICAL"
+fact_ids = ["node:control-plane", "edge:github-to-control-plane"]
+document = "docs/contracts/RELEASE_CONTROL.md"
+required_evidence = ["TEST_BOUND", "TEST_EXECUTED", "RUNTIME_OBSERVED"]
+
+[[contract]]
+id = "CONTROL-CENTER-STRUCTURED-RESULT"
+statement = "Control Center operation success comes from the exact structured child result, not ambient exit state."
+owner = "scripts/xauusd_control_center_runtime.ps1"
+risk = "HIGH"
+fact_ids = ["node:control-center"]
+document = "docs/design/RUNTIME_AND_RELEASE.md"
+required_evidence = ["TEST_BOUND", "TEST_EXECUTED"]
+
+[[contract]]
+id = "NEWS-PROJECTION-CANONICAL-RECEIPT"
+statement = "News Projection generation and verification use one cross-runtime canonical receipt encoding."
+owner = "xauusd_forecaster.dashboard.sync"
+risk = "CRITICAL"
+fact_ids = ["edge:news-to-dashboard", "edge:sync-to-d1"]
+document = "docs/contracts/NEWS_PROJECTION.md"
+required_evidence = ["TEST_BOUND", "TEST_EXECUTED", "RUNTIME_OBSERVED"]
+
+[[contract]]
+id = "BROADCAST-BACKPRESSURE-ISOLATION"
+statement = "Live Broadcast retries bounded backpressure without blocking the forecast cadence or inventing sequence gaps."
+owner = "broadcast.publisher"
+risk = "HIGH"
+fact_ids = ["node:business-runtime"]
+document = "docs/contracts/LIVE_BROADCAST.md"
+required_evidence = ["TEST_BOUND", "TEST_EXECUTED", "RUNTIME_OBSERVED"]
+
+[[contract]]
+id = "PREVIEW-ISOLATED-READS"
+statement = "Preview remains read-only and cannot mutate production state or authorize Stable."
+owner = "web-preview"
+risk = "CRITICAL"
+fact_ids = ["node:web-worker", "node:stable-release"]
+document = "docs/contracts/PREVIEW_ISOLATION.md"
+required_evidence = ["TEST_BOUND", "TEST_EXECUTED"]
+
+[[contract]]
+id = "MOBILE-PATH-SHEET-INDEPENDENCE"
+statement = "Closing the mobile Inspector preserves the selected architecture path."
+owner = "web architecture interaction reducer"
+risk = "HIGH"
+fact_ids = ["node:architecture-explorer"]
+document = "architecture/README.md"
+required_evidence = ["TEST_BOUND", "TEST_EXECUTED", "RUNTIME_OBSERVED"]

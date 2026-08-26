@@ -1,0 +1,108 @@
+schema = "architecture-test-bindings-v1"
+
+[[binding]]
+contract_id = "DECISION-FIXED-CADENCE"
+test_id = "tests/test_market_session.py::test_collector_takes_decision_time_after_blocking_maintenance"
+platform = "PYTHON"
+classification = "CONTRACT"
+runtime_events = ["maintenance_completed", "decision_time_sampled", "decision_evaluated"]
+
+[[binding]]
+contract_id = "DECISION-LAST-GOOD-MODEL"
+test_id = "tests/evidence/test_integrity_v2.py::test_not_due_gate_does_not_materialize_training_rows"
+platform = "PYTHON"
+classification = "CONTRACT"
+
+[[binding]]
+contract_id = "EVIDENCE-APPEND-ONLY"
+test_id = "tests/test_ledger.py::test_ledger_appends_decision_and_separate_outcome"
+platform = "PYTHON"
+classification = "CONTRACT"
+runtime_events = ["decision_appended", "outcome_appended", "prior_record_preserved"]
+
+[[binding]]
+contract_id = "TRAINING-NOT-DUE-FIRST"
+test_id = "tests/evidence/test_integrity_v2.py::test_not_due_gate_does_not_materialize_training_rows"
+platform = "PYTHON"
+classification = "CONTRACT"
+
+[[binding]]
+contract_id = "TRAINING-MATERIALIZATION-BOUNDED"
+test_id = "tests/evidence/test_integrity_v2.py::test_training_rows_materialize_incrementally_without_rescanning_history"
+platform = "PYTHON"
+classification = "CONTRACT"
+
+[[binding]]
+contract_id = "DASHBOARD-CRITICAL-BOUNDED"
+test_id = "tests/dashboard/test_api.py::test_critical_summary_reads_stay_fixed_as_append_only_history_grows"
+platform = "PYTHON"
+classification = "CONTRACT"
+runtime_events = ["history_grown", "critical_status_read", "bounded_query_count_observed"]
+
+[[binding]]
+contract_id = "SYNC-HEARTBEAT-FIRST"
+test_id = "tests/dashboard/test_sync.py::test_slow_heavy_resource_does_not_block_critical_heartbeat"
+platform = "PYTHON"
+classification = "CONTRACT"
+runtime_events = ["heartbeat_attempted", "heavy_resource_started", "heartbeat_completed"]
+
+[[binding]]
+contract_id = "SYNC-OPTIONAL-ISOLATION"
+test_id = "tests/dashboard/test_sync.py::test_optional_growing_resource_failure_does_not_block_heartbeat"
+platform = "PYTHON"
+classification = "CONTRACT"
+runtime_events = ["heartbeat_completed", "optional_resource_failed", "critical_status_preserved"]
+
+[[binding]]
+contract_id = "CLOUDFLARE-LOCAL-ISOLATION"
+test_id = "tests/test_architecture_manifest.py::test_required_failure_impacts_are_explicit"
+platform = "PYTHON"
+classification = "CONTRACT"
+
+[[binding]]
+contract_id = "RELEASE-STABLE-EXPLICIT"
+test_id = "tests/runtime/test_control_center_contracts.py::test_passed_candidate_promotes_only_after_observation_commit"
+platform = "WINDOWS"
+classification = "CONTRACT"
+runtime_events = ["candidate_validated", "observation_committed", "stable_promoted"]
+
+[[binding]]
+contract_id = "CONTROL-PLANE-EXACT-REVISION"
+test_id = "tests/runtime/test_control_plane_install.py::test_heartbeat_requires_new_process_exact_revision_and_hashes"
+platform = "WINDOWS"
+classification = "CONTRACT"
+runtime_events = ["bundle_verified", "process_started", "heartbeat_revision_matched"]
+
+[[binding]]
+contract_id = "CONTROL-CENTER-STRUCTURED-RESULT"
+test_id = "tests/runtime/test_control_center_contracts.py::test_structured_result_overrides_conflicting_process_exit_status"
+platform = "WINDOWS"
+classification = "CONTRACT"
+
+[[binding]]
+contract_id = "NEWS-PROJECTION-CANONICAL-RECEIPT"
+test_id = "tests/test_news_projection.py::test_receipt_vectors_are_cross_runtime_canonical"
+platform = "PYTHON"
+classification = "CONTRACT"
+runtime_events = ["projection_encoded", "receipt_generated", "receipt_verified"]
+
+[[binding]]
+contract_id = "BROADCAST-BACKPRESSURE-ISOLATION"
+test_id = "tests/test_live_broadcast.py::test_continuous_owner_isolates_failure_and_keeps_cadence"
+platform = "PYTHON"
+classification = "CONTRACT"
+runtime_events = ["publish_failed", "cadence_continued", "sequence_retried"]
+
+[[binding]]
+contract_id = "PREVIEW-ISOLATED-READS"
+test_id = "tests/runtime/test_control_center_contracts.py::test_preview_artifact_cannot_promote_even_with_passed_evidence"
+platform = "WINDOWS"
+classification = "CONTRACT"
+
+[[binding]]
+contract_id = "MOBILE-PATH-SHEET-INDEPENDENCE"
+test_id = "web/tests/architecture-mobile-interaction.test.mjs::mobile 3: closing Inspector preserves the active path"
+platform = "WEB"
+classification = "CONTRACT"
+runtime_events = ["node_tapped", "inspector_opened", "inspector_closed", "active_path_preserved"]
+

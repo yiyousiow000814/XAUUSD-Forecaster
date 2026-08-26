@@ -262,6 +262,7 @@ spans and normalized metadata only, never secrets or production values.
 
 **Authoritative detail:** [Compiler design](../design/ARCHITECTURE_EVIDENCE_COMPILER.md),
 [artifact protocol](../protocols/ARCHITECTURE_ARTIFACTS.md), and
+[evidence policy](ARCHITECTURE_EVIDENCE.md), and
 [evidence runbook](../runbooks/ARCHITECTURE_EVIDENCE.md).
 
 ## Code organization consequences

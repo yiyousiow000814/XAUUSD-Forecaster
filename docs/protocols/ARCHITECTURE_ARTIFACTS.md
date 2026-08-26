@@ -15,8 +15,13 @@ arrays are stably ordered and serialized as UTF-8 without timestamps.
 - `source-digest.json`: per-input SHA-256 and the aggregate source digest.
 - `windows-evidence.json`: exact PowerShell parser facts tied to a separate
   PowerShell-source digest. Neutral fallback facts never satisfy this evidence.
-- `test-evidence.json` and `mutation-report.json`: explicit `NOT_COLLECTED` and
-  `NOT_RUN` placeholders until their owning campaign PRs produce evidence.
+- `test-evidence.json`: normalized collected test IDs, explicit contract
+  bindings, TOUCHES/PROTECTS relationships, exact-digest execution, durations,
+  classifications, and derived contract status.
+- `runtime-evidence.json`: privacy-bounded asserted fixture event sequences and
+  normalized hashes at the exact source digest.
+- `mutation-report.json`: explicit `NOT_RUN` placeholder until PR C produces
+  valid mutation outcomes.
 
 Generated artifacts must never contain environment values, credentials, raw
 prompts, user/news/database content, request bodies, absolute paths, usernames,

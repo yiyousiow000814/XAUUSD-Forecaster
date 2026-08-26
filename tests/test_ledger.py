@@ -35,6 +35,7 @@ def make_decision(at: datetime):
     return ShadowDecisionGate().decide(forecast)
 
 
+@pytest.mark.arch_contract("EVIDENCE-APPEND-ONLY")
 def test_ledger_appends_decision_and_separate_outcome(tmp_path) -> None:
     at = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     ledger = PredictionLedger(tmp_path / "ledger.sqlite3")
