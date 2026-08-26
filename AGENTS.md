@@ -1,5 +1,36 @@
 # Repository Working Rules
 
+## Architecture Change Gate
+
+Before changing runtime, data flow, state, API, storage, a scheduler, a
+background owner, or deployment, read
+`docs/design/SYSTEM_ARCHITECTURE.md`, `docs/reference/CODEBASE_MAP.md`, and
+`docs/contracts/ARCHITECTURE_RULES.md`, then record:
+
+```text
+Owner:
+Authoritative state/store:
+Execution boundary:
+Critical or optional:
+Maximum work per operation:
+Incremental cursor/revision/checkpoint:
+Failure domain:
+Last-good/recovery behavior:
+Architecture documents affected:
+```
+
+- Update the maps when adding a process, thread, Worker, Durable Object, store,
+  API resource, or long-running cycle.
+- Never add growing-history work to a critical or request path.
+- Keep missing, not loaded, empty, stale, and unavailable distinct.
+- Repair state only through its owner. Do not hide an architecture violation by
+  raising a timeout, limit, threshold, or quota.
+- Move code only in a separate behavior-preserving PR. One PR may change only
+  one architecture boundary.
+- Every abstraction must name the real dependency or boundary it hides.
+- After changing a subsystem boundary, update its detailed map and the Codebase
+  Map. See the architecture rules contract for evidence requirements.
+
 ## Before Adding Code
 
 1. Find the existing source of truth.
