@@ -40,6 +40,10 @@ alert aggregation remains separate.
 `xauusd_forecaster.dashboard.resource_contracts` owns deterministic learning,
 news, market, critical-status, and audit serialization plus their item and byte
 bounds. It owns no transport, cursor, schedule, thread, or durable state.
+`xauusd_forecaster.dashboard.news_resources` owns the local news archive read,
+event-evidence display generation, immutable manifest handover, process-local
+page cache, paging, and news display metrics. Local SQLite remains authority;
+the cache and manifest are replaceable read-resource state.
 `run_dashboard_sync.py` owns D1 mirroring and per-target progress. The
 scheduler remains the state-transition owner for audited retry overrides.
 
@@ -157,6 +161,9 @@ collapse all optional resources into one restart burst.
 - `xauusd_forecaster/dashboard/resource_contracts.py`: deterministic bounded
   resource projections, exact JSON encoding, learning-history records, and
   market/news/audit serialization.
+- `xauusd_forecaster/dashboard/news_resources.py`: read-only archive SQL,
+  event-evidence generation/manifest handover, process-local paging cache, and
+  display metrics.
 - `xauusd_forecaster/dashboard_payloads.py`: critical and audit contracts.
 - `xauusd_forecaster/dashboard_summaries.py`: indexed summary queries.
 - `xauusd_forecaster/learning_curves.py`: learning resource.
@@ -167,6 +174,7 @@ collapse all optional resources into one restart burst.
 
 `tests/test_dashboard_health_projection.py`,
 `tests/test_dashboard_resource_contracts.py`,
+`tests/test_dashboard_news_resources.py`,
 `tests/test_dashboard_status_cache.py`, `tests/test_dashboard_api.py`,
 `tests/test_dashboard_payloads.py`,
 `tests/test_dashboard_sync.py`, `tests/test_operational_health.py`,
@@ -185,10 +193,10 @@ audited retry semantics.
 ## 16. Known current gaps
 
 Both entry scripts still contain extensive query, transport, scheduling, and
-domain logic. The shared resource serializers are package-owned in the
-pending C2 stack, but two build commands retain transitional Sync entry-point
-imports until C4. The large API/sync tests group several resource families in
-single files. The lazy local
+domain logic. Shared serializers and Dashboard news reads are package-owned in
+the pending stack, but market/optional reads remain in the API entry point and
+two build commands retain transitional Sync imports until C4. The large
+API/sync tests group several resource families in single files. The lazy local
 market-history route has bounded output but growing source enumeration/merge
 work in its request path.
 

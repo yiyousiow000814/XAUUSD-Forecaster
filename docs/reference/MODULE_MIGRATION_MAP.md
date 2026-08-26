@@ -11,6 +11,7 @@ merges.
 | `scripts/run_dashboard_api.py` (`StatusSnapshotCache`) | `xauusd_forecaster/dashboard/status_cache.py` | Dashboard status snapshot cache | Entry-point compatibility import in PR #283 | Remove only after callers no longer rely on the entry-point name |
 | `scripts/run_dashboard_api.py` (runtime health projection) | `xauusd_forecaster/dashboard/health_projection.py` | Dashboard runtime-component projection | Entry-point compatibility import in PR #285 | Remove only after callers no longer rely on the entry-point names |
 | `scripts/run_dashboard_sync.py` (resource serializers, learning/news/market projections, byte bounds) | `xauusd_forecaster/dashboard/resource_contracts.py` | Dashboard resource-contract owner | Entry-point compatibility imports; no copied logic | Remove after Preview/release builders and all tests import the canonical owner |
+| `scripts/run_dashboard_api.py` (news archive, evidence generation/paging, news display metrics) | `xauusd_forecaster/dashboard/news_resources.py` | Dashboard news-resource owner | Entry-point compatibility imports; shared cache exists only in canonical owner | Remove after route integration callers no longer rely on entry-point names |
 
 Future Phase D rows must name every retained flat facade. `THIN_SHIM` means the
 legacy Python file contains only a docstring, explicit canonical imports,
