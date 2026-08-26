@@ -649,11 +649,15 @@ function Get-ReleaseTimestampValues {
     param([AllowNull()][object]$Value)
     if ($null -eq $Value) { return }
     if ($Value -is [DateTimeOffset]) {
-        Write-Output $Value.ToUniversalTime().ToString("o", [Globalization.CultureInfo]::InvariantCulture)
+        Write-Output ($Value.ToUniversalTime().ToString(
+            "o", [Globalization.CultureInfo]::InvariantCulture
+        ))
         return
     }
     if ($Value -is [DateTime]) {
-        Write-Output $Value.ToUniversalTime().ToString("o", [Globalization.CultureInfo]::InvariantCulture)
+        Write-Output ($Value.ToUniversalTime().ToString(
+            "o", [Globalization.CultureInfo]::InvariantCulture
+        ))
         return
     }
     if ($Value -is [string]) {
@@ -665,6 +669,28 @@ function Get-ReleaseTimestampValues {
         return
     }
     if (-not [string]::IsNullOrWhiteSpace([string]$Value)) { Write-Output $Value }
+}
+
+function ConvertTo-ReleaseTimestampUtc {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return [DateTimeOffset]::MinValue }
+    if ($Value -is [DateTimeOffset]) { return $Value.ToUniversalTime() }
+    if ($Value -is [DateTime]) {
+        return ([DateTimeOffset]$Value.ToUniversalTime()).ToUniversalTime()
+    }
+    $text = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($text)) { return [DateTimeOffset]::MinValue }
+    $parsed = [DateTimeOffset]::MinValue
+    $styles = [Globalization.DateTimeStyles]::AllowWhiteSpaces -bor
+        [Globalization.DateTimeStyles]::AssumeUniversal
+    if ([DateTimeOffset]::TryParse(
+        $text, [Globalization.CultureInfo]::InvariantCulture,
+        $styles, [ref]$parsed
+    )) { return $parsed.ToUniversalTime() }
+    if ([DateTimeOffset]::TryParse($text, [ref]$parsed)) {
+        return $parsed.ToUniversalTime()
+    }
+    return [DateTimeOffset]::MinValue
 }
 
 function Get-ReleaseVersionPreviewUrl {
@@ -695,11 +721,8 @@ function Get-ReleaseVersionCreatedAtValue {
     param([Parameter(Mandatory = $true)][object]$Version)
     $newest = [DateTimeOffset]::MinValue
     foreach ($candidate in @(Get-ReleaseTimestampValues -Value $Version.metadata.created_on)) {
-        $parsed = [DateTimeOffset]::MinValue
-        if ([DateTimeOffset]::TryParse([string]$candidate, [ref]$parsed)) {
-            $utc = $parsed.ToUniversalTime()
-            if ($utc -gt $newest) { $newest = $utc }
-        }
+        $utc = ConvertTo-ReleaseTimestampUtc -Value $candidate
+        if ($utc -gt $newest) { $newest = $utc }
     }
     return $newest
 }
@@ -708,7 +731,9 @@ function Get-ReleaseVersionCreatedAt {
     param([Parameter(Mandatory = $true)][object]$Version)
     $created = Get-ReleaseVersionCreatedAtValue -Version $Version
     if ($created -eq [DateTimeOffset]::MinValue) { return "" }
-    return $created.ToString("o")
+    return $created.ToUniversalTime().ToString(
+        "o", [Globalization.CultureInfo]::InvariantCulture
+    )
 }
 
 function Test-VersionAfterDiscoveryWatermark {
@@ -719,8 +744,11 @@ function Test-VersionAfterDiscoveryWatermark {
     if (-not $Discovery.watermark_created_at) { return $true }
     $createdAt = Get-ReleaseVersionCreatedAt -Version $Version
     if (-not $createdAt) { return $false }
-    $created = [DateTimeOffset]::Parse($createdAt)
-    $watermark = [DateTimeOffset]::Parse([string]$Discovery.watermark_created_at)
+    $created = ConvertTo-ReleaseTimestampUtc -Value $createdAt
+    $watermark = ConvertTo-ReleaseTimestampUtc `
+        -Value ([string]$Discovery.watermark_created_at)
+    if ($created -eq [DateTimeOffset]::MinValue -or
+        $watermark -eq [DateTimeOffset]::MinValue) { return $false }
     if ($created -gt $watermark) { return $true }
     if ($created -lt $watermark) { return $false }
     return [string]$Version.id -gt [string]$Discovery.watermark_version_id
