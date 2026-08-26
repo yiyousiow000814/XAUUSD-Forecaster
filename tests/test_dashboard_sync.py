@@ -2556,7 +2556,9 @@ def test_news_projection_restart_restores_exact_frozen_generation(
     assert restored.manifest == first.manifest
     assert builds == []
 
-    api._NEWS_PROJECTION_CACHE["built_at"] = 0.0
+    api._NEWS_PROJECTION_CACHE["built_at"] = (
+        time.monotonic() - api.NEWS_PROJECTION_SOURCE_REFRESH_SECONDS - 1
+    )
     fallback = api._news_projection_source_for_request(
         database, first.manifest["snapshot_id"],
     )
