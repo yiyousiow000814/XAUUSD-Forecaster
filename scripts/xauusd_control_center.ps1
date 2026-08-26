@@ -769,7 +769,7 @@ function Test-VersionAfterDiscoveryWatermark {
     if (-not $createdAt) { return $false }
     $created = ConvertTo-ReleaseTimestampUtc -Value $createdAt
     $watermark = ConvertTo-ReleaseTimestampUtc `
-        -Value ([string]$Discovery.watermark_created_at)
+        -Value $Discovery.watermark_created_at
     if ($created -eq [DateTimeOffset]::MinValue -or
         $watermark -eq [DateTimeOffset]::MinValue) { return $false }
     if ($created -gt $watermark) { return $true }
