@@ -226,6 +226,27 @@ Implementation status: `PENDING` until the C3a stacked change merges.
 - **Non-goals:** no SQL text, news eligibility, annotation recovery, cache,
   manifest, cursor, byte limit, route, status, or payload change.
 
+### Phase C-3b — Dashboard market resources
+
+Implementation status: `PENDING` until the C3b stacked change merges.
+
+- **Exact responsibility:** quote-history file discovery, incremental live-file
+  parsing cache, candle downsampling, market decision SQL, market-history
+  paging, and current market-chart projection.
+- **Target module:** `xauusd_forecaster/dashboard/market_resources.py`.
+- **Compatibility:** `run_dashboard_api.py` imports and exposes the exact
+  canonical functions, constants, lock, and cache during the handover.
+- **Focused tests:** quote cache, gzip/session chart, downsampling, and cursor
+  page cases move to `tests/test_dashboard_market_resources.py`; HTTP route and
+  complete payload assertions remain in `tests/test_dashboard_api.py`.
+- **Rollback:** revert the extraction commit; the cache is disposable and no
+  quote or SQLite authority is migrated.
+- **Known unchanged gap:** market-history output is capped but retained-file
+  enumeration/merge work still grows with history. This refactor does not
+  redefine that behavior.
+- **Non-goals:** no SQL, candle construction, cache offset, gzip handling,
+  paging, chart, route, bound, or production-state change.
+
 ## Priority method
 
 File size is only an inventory signal. Rank a proposed split using:
