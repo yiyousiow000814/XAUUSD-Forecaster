@@ -202,6 +202,12 @@ within 10 ms but without that headroom is `REVIEW_REQUIRED`. Count contamination
 any failure, p99 above 10 ms, or a sample above 10 ms is `FAILED`; p99 18 ms can
 never pass. Missing observability authority leaves Candidate in TESTING. The
 read-only API token is protected and never serialized into release state.
+An explicit validation retry may resume only an exact Candidate whose prior
+reason is CPU-headroom or semantic-parity review and whose repository and
+isolated Windows gates already passed. The retry records the prior reason,
+preserves exact migration acceptance and the accepted Windows preflight, and
+collects a new Cloudflare evidence universe; ordinary discovery never silently
+retries a terminal review.
 
 PR #268 acceptance is retained only as labeled legacy manual evidence: 104
 samples, p50 2 ms, p95 4 ms, p99 4 ms, maximum 5 ms, and zero exceeded CPU,

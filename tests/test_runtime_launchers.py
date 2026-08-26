@@ -4043,6 +4043,63 @@ def test_review_required_is_terminal_for_exact_candidate(tmp_path) -> None:
     assert result == "True"
 
 
+def test_explicit_cpu_review_retry_is_exact_audited_and_preserves_prior_gates(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$candidate.validation_state='REVIEW_REQUIRED';"
+        "$candidate.validation=[pscustomobject]@{key=$candidate.validation_key;"
+        "repository='PASSED';windows='PASSED';cloudflare='REVIEW_REQUIRED';"
+        "reason='WORKER_CPU_HEADROOM_REVIEW_REQUIRED';tested_at='prior'};"
+        "$candidate|Add-Member -Force migration_acceptance ([pscustomobject]@{"
+        "validation_key=$candidate.validation_key;receipt_digest='receipt'});"
+        "Write-ReleaseControlState $state;$script:preflights=0;"
+        "function Test-ProductionCandidateProvenance{return $true};"
+        "function Invoke-ProductionShapePreflight{$script:preflights++;return $true};"
+        "function Test-RequiredGitHubChecks{'PASSED'};"
+        "function Get-CandidateChangedFiles{return @('docs/README.md')};"
+        "function Get-CandidateCompatibilityRequirement{return [pscustomobject]@{"
+        "state='AUTOMATIC';files=@()}};"
+        "function Get-CandidateRouteValidationPlan{return [pscustomobject]@{"
+        "worker_cpu_required=$false;requires_validation=$false;static_assets=@();"
+        "worker_reads=@();worker_writes=@()}};"
+        "function Set-CloudflareCandidatePointer{};"
+        "function Wait-CandidatePlacementPropagation{return [pscustomobject]@{"
+        "passed=$true;state='READY'}};"
+        "function Test-CandidateDataParity{return [pscustomobject]@{"
+        "passed=$true;state='PASSED'}};"
+        "function Get-CandidateAuthInspection{return [pscustomobject]@{state='PASSED'}};"
+        "$ok=Retry-CandidateValidation;$final=Get-ReleaseControlState;"
+        "$history=Get-Content -LiteralPath $releaseHistoryPath -Raw;"
+        'Write-Output "$ok,$script:preflights,$($final.candidate.validation_state),'
+        '$($final.candidate.migration_acceptance.receipt_digest),'
+        '$($history.Contains(\'WORKER_CPU_HEADROOM_REVIEW_REQUIRED\')),'
+        '$($history.Contains(\'CANDIDATE_VALIDATION_RETRY_REQUESTED\'))"',
+    )
+    assert result == (
+        "True,0,PASSED,receipt,True,True"
+    )
+
+
+def test_explicit_review_retry_rejects_non_retryable_reason(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$candidate.validation_state='REVIEW_REQUIRED';"
+        "$candidate.validation=[pscustomobject]@{key=$candidate.validation_key;"
+        "repository='PASSED';windows='PASSED';"
+        "reason='COORDINATED_STORAGE_MIGRATION_REQUIRED'};"
+        "Write-ReleaseControlState $state;$diagnostic='';"
+        "try{$null=Retry-CandidateValidation}catch{$diagnostic=$_.Exception.Message};"
+        "Write-Output $diagnostic",
+    )
+    assert result == "Only an exact retryable Candidate review can restart validation."
+
+
 def test_payload_producer_and_fixture_builder_select_worker_families(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
