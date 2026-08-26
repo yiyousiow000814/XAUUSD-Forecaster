@@ -124,9 +124,9 @@ rerun. Dirty revisions and publication records survive restart.
 
 ## 14. Relevant tests
 
-`tests/test_training_owner.py`, `tests/test_evidence_integrity_v2.py`,
-`tests/test_forward_only.py`, `tests/test_execution_costs.py`, and
-`tests/test_production_shape.py` protect owner recovery, dirty materialization,
+`tests/training/test_owner.py`, `tests/evidence/test_integrity_v2.py`,
+`tests/integration/test_forward_only.py`, `tests/test_execution_costs.py`, and
+`tests/runtime/test_production_shape.py` protect owner recovery, dirty materialization,
 causality, complete generations, publication, and production shape.
 
 ## 15. Authoritative contracts/specs

@@ -16,7 +16,7 @@ import pytest
 
 
 def _sync_module():
-    path = Path(__file__).resolve().parents[1] / "scripts" / "run_dashboard_sync.py"
+    path = Path(__file__).resolve().parents[2] / "scripts" / "run_dashboard_sync.py"
     spec = importlib.util.spec_from_file_location("run_dashboard_sync_test", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -47,7 +47,7 @@ def _schedule_only(module, path: Path, resource: str) -> None:
 
 
 def _dashboard_module():
-    path = Path(__file__).resolve().parents[1] / "scripts" / "run_dashboard_api.py"
+    path = Path(__file__).resolve().parents[2] / "scripts" / "run_dashboard_api.py"
     spec = importlib.util.spec_from_file_location("run_dashboard_api_sync_test", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -100,7 +100,7 @@ def _stub_assistant_capacity_route(monkeypatch, accountant_value: str) -> list[d
 
 
 def _annotator_module():
-    path = Path(__file__).resolve().parents[1] / "scripts" / "run_news_annotator.py"
+    path = Path(__file__).resolve().parents[2] / "scripts" / "run_news_annotator.py"
     spec = importlib.util.spec_from_file_location("run_news_annotator_test", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -109,7 +109,7 @@ def _annotator_module():
 
 
 def _preview_module():
-    path = Path(__file__).resolve().parents[1] / "scripts" / "build_preview_bundle.py"
+    path = Path(__file__).resolve().parents[2] / "scripts" / "build_preview_bundle.py"
     spec = importlib.util.spec_from_file_location("build_preview_bundle_test", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -129,7 +129,7 @@ def _preview_module():
 
 def test_preview_bundle_import_does_not_require_sqlite_extension() -> None:
     """Immutable Preview assembly must remain portable to Cloudflare builds."""
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[2]
     code = """
 import importlib.abc
 import importlib.util

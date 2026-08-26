@@ -45,7 +45,7 @@ jobs:
       - name: Run Windows runtime contracts
         run: >-
           python -m pytest -q --timeout=30 --timeout-method=thread
-          tests/test_runtime_health.py
-          tests/test_news_scheduler.py
-          tests/test_runtime_launchers.py
-          tests/test_control_plane_install.py
+          tests/runtime/test_runtime_health.py
+          tests/news/test_scheduler.py
+          tests/runtime/test_control_center_contracts.py
+          tests/runtime/test_control_plane_install.py

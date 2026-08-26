@@ -125,9 +125,9 @@ for local recovery; recovery must preserve epochs and immutable records.
 
 ## 14. Relevant tests
 
-`tests/test_forward_only.py`, `tests/test_decision.py`,
+`tests/integration/test_forward_only.py`, `tests/decision/test_selection.py`,
 `tests/test_quotes_and_labeling.py`, `tests/test_market_session.py`,
-`tests/test_ledger.py`, `tests/test_evidence_integrity_v2.py`, and
+`tests/test_ledger.py`, `tests/evidence/test_integrity_v2.py`, and
 `tests/test_execution_costs.py` cover point-in-time, append-only, executable
 quote, label, and failure semantics.
 

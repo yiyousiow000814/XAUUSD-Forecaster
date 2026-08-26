@@ -10,7 +10,7 @@ from scripts.build_release_validation_fixtures import build_fixtures
 def test_release_validation_fixtures_are_bounded_production_contracts() -> None:
     fixtures = build_fixtures()
     manifest = json.loads((
-        Path(__file__).resolve().parents[1] / "web" / "worker-validation-manifest.json"
+    Path(__file__).resolve().parents[2] / "web" / "worker-validation-manifest.json"
     ).read_text(encoding="utf-8"))
     expected = set()
     for route in manifest["routes"]:

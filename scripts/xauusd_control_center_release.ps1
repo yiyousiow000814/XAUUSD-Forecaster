@@ -986,7 +986,7 @@ function Get-CandidateRouteValidationPlan {
     $manifestChanged = "web/worker-validation-manifest.json" -in $ChangedFiles
     $fixtureBuilderChanged = @($ChangedFiles | Where-Object {
         $_ -like [string]$manifest.fixture_builder -or
-        $_ -eq "tests/test_release_validation_fixtures.py"
+        $_ -eq "tests/runtime/test_release_validation_fixtures.py"
     }).Count -gt 0
     $workerCodeChanged = @($ChangedFiles | Where-Object {
         $file = $_

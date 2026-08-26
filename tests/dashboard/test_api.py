@@ -56,7 +56,7 @@ UTC = timezone.utc
 
 
 def _dashboard_module():
-    path = Path(__file__).resolve().parents[1] / "scripts" / "run_dashboard_api.py"
+    path = Path(__file__).resolve().parents[2] / "scripts" / "run_dashboard_api.py"
     spec = importlib.util.spec_from_file_location("run_dashboard_api_test", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
