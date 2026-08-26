@@ -1858,7 +1858,7 @@ function Invoke-WorkersObservabilityEventsQuery {
             return $null
         }
         $script:lastWorkersObservabilityDiagnostic = $null
-        return $response.result.events
+        return $response.result
     } catch {
         $statusCode = 0
         try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { $statusCode = 0 }

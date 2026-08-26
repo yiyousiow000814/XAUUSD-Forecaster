@@ -174,6 +174,22 @@ def test_release_observability_failure_class_is_bounded(
     assert "classification-release-token" not in result
 
 
+def test_release_observability_events_preserves_cloudflare_page_shape(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-ReleaseSecret{return [pscustomobject]@{available=$true;"
+        "value='events-release-token';source='LOCAL_SECRET_FILE';diagnostic=$null}};"
+        "function Invoke-RestMethod{return [pscustomobject]@{success=$true;result=[pscustomobject]@{"
+        "count=1;events=@([pscustomobject]@{'$metadata'=[pscustomobject]@{id='event-1'}})}}};"
+        "$page=Invoke-WorkersObservabilityEventsQuery "
+        "-Filters @([pscustomobject]@{key='k';value='v'}) "
+        "-From ([DateTimeOffset]::UtcNow.AddMinutes(-1)) -To ([DateTimeOffset]::UtcNow);"
+        'Write-Output "$($page.count),$(@($page.events).Count),$($page.events[0].\'$metadata\'.id)"',
+    )
+
+    assert result == "1,1,event-1"
+
+
 def test_candidate_validation_retries_delayed_observability_evidence(tmp_path) -> None:
     candidate = "b" * 40
     result = _run_control_center_contract(
@@ -273,6 +289,81 @@ def test_frozen_raw_telemetry_reconciles_identical_event_universe(tmp_path) -> N
     )
 
     assert result == "2,2,2,True,64,2,2,True,2,worker,True,True,True"
+
+
+def test_frozen_raw_telemetry_reconciles_exact_310_request_universe(tmp_path) -> None:
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId 'worker' "
+        f"-WindowsRevision '{candidate}';"
+        "function Start-Sleep{};function New-Event($number){"
+        "$id=('event-{0:d3}' -f $number);$request=('request-{0:d3}' -f $number);"
+        "[pscustomobject]@{'$metadata'=[pscustomobject]@{id=$id;type='cf-worker-event'};"
+        "'$workers'=[pscustomobject]@{cpuTimeMs=1;wallTimeMs=2;outcome='ok';"
+        "scriptVersion=[pscustomobject]@{id='worker'};event=[pscustomobject]@{path='/api/status';"
+        "request=[pscustomobject]@{method='GET';headers=[pscustomobject]@{"
+        "'x-aurum-request-id'=$request;'x-aurum-validation-run'='run-310';"
+        "'x-aurum-validation-phase'='acceptance'}};response=[pscustomobject]@{status=200}}}}};"
+        "$script:queries=0;function Invoke-WorkersObservabilityEventsQuery{$script:queries++;"
+        "[pscustomobject]@{count=310;events=@(1..310|ForEach-Object{New-Event $_})}};"
+        "$expected=@(1..310|ForEach-Object{[pscustomobject]@{"
+        "request_id=('request-{0:d3}' -f $_);family='status-read';scenario='status'}});"
+        "$e=Get-CandidateFrozenPlatformEvidence -Candidate $candidate "
+        "-From ([DateTimeOffset]::UtcNow.AddMinutes(-1)) -To ([DateTimeOffset]::UtcNow) "
+        "-ExpectedRequests $expected -ValidationRun 'run-310';"
+        'Write-Output "$script:queries,$($e.invocations),$($e.stable_reads),'
+        '$($e.request_reconciliation.matched),$($e.universe_digest.Length)"',
+    )
+
+    assert result == "2,310,2,True,64"
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_diagnostic"),
+    [
+        ("duplicate_event", "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"),
+        ("duplicate_request", "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"),
+        ("missing_cpu", "OBSERVABILITY_SCHEMA_INVALID"),
+        ("wrong_version", "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"),
+        ("wrong_run", "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"),
+        ("malformed_cursor", "OBSERVABILITY_EVENT_CURSOR_INVALID"),
+    ],
+)
+def test_frozen_raw_telemetry_rejects_malformed_universes(
+    tmp_path, case: str, expected_diagnostic: str,
+) -> None:
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId 'worker' "
+        f"-WindowsRevision '{candidate}';$case='{case}';"
+        "function Start-Sleep{};function New-Event($id,$request){"
+        "$workers=[pscustomobject]@{wallTimeMs=2;outcome='ok';"
+        "scriptVersion=[pscustomobject]@{id=if($case -eq 'wrong_version'){'other'}else{'worker'}};"
+        "event=[pscustomobject]@{path='/api/status';request=[pscustomobject]@{method='GET';"
+        "headers=[pscustomobject]@{'x-aurum-request-id'=$request;"
+        "'x-aurum-validation-run'=if($case -eq 'wrong_run'){'other'}else{'run'};"
+        "'x-aurum-validation-phase'='acceptance'}};response=[pscustomobject]@{status=200}}};"
+        "if($case -ne 'missing_cpu'){$workers|Add-Member cpuTimeMs 1};"
+        "[pscustomobject]@{'$metadata'=[pscustomobject]@{id=$id;type='cf-worker-event'};"
+        "'$workers'=$workers}};"
+        "function Invoke-WorkersObservabilityEventsQuery{"
+        "if($case -eq 'malformed_cursor'){return [pscustomobject]@{count=2000;events=@("
+        "1..2000|ForEach-Object{New-Event '' ('request-'+$_)})}};"
+        "$event2=if($case -eq 'duplicate_event'){'event-1'}else{'event-2'};"
+        "$request2=if($case -eq 'duplicate_request'){'request-1'}else{'request-2'};"
+        "[pscustomobject]@{count=2;events=@((New-Event 'event-1' 'request-1'),"
+        "(New-Event $event2 $request2))}};"
+        "$expected=@([pscustomobject]@{request_id='request-1';family='status';scenario='a'},"
+        "[pscustomobject]@{request_id='request-2';family='status';scenario='a'});"
+        "$null=Get-CandidateFrozenPlatformEvidence -Candidate $candidate "
+        "-From ([DateTimeOffset]::UtcNow.AddMinutes(-1)) -To ([DateTimeOffset]::UtcNow) "
+        "-ExpectedRequests $expected -ValidationRun 'run';"
+        "Write-Output $script:lastWorkersObservabilityDiagnostic",
+    )
+
+    assert result == expected_diagnostic
 
 
 def test_frozen_raw_telemetry_paginates_without_moving_upper_bound(tmp_path) -> None:
