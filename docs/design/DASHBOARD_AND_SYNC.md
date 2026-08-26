@@ -12,7 +12,9 @@ Dashboard API and Dashboard Sync are separate Python processes. The API uses
 `ThreadingHTTPServer`, a background `DashboardReadModelOwner`, and bounded
 critical-cache refresh threads owned by
 `xauusd_forecaster.dashboard.status_cache`. Sync has a main heartbeat thread
-plus one single-worker control lane and one single-worker heavy lane.
+plus one single-worker control lane and one single-worker heavy lane. The
+read-only health-projection module is called in the existing API process and
+introduces no process, thread, or store boundary.
 
 | Dimension | Current state |
 |---|---|
@@ -30,6 +32,11 @@ summary models. `run_dashboard_api.py` owns the local HTTP boundary.
 `StatusSnapshotCache` owns each process-local serialized snapshot body, age,
 single-flight refresh state, and last error. This disposable cache is not
 forecasting evidence authority and does not own any historical builder.
+`xauusd_forecaster.dashboard.health_projection` owns only the derived
+interpretation of current runtime heartbeats, decision cadence, broker session,
+and materialized semantic health. The source files and SQLite rows remain
+authoritative under their existing runtime and evidence owners; operational
+alert aggregation remains separate.
 `run_dashboard_sync.py` owns D1 mirroring and per-target progress. The
 scheduler remains the state-transition owner for audited retry overrides.
 
@@ -66,7 +73,8 @@ SQLite/quote files -> DashboardReadModelOwner (off request)
 ```
 
 Audit, learning, and market-chart GETs read durable models rather than running
-their growing builders in request threads.
+their growing builders in request threads. Critical payload orchestration calls
+the fixed-work health projections before aggregation and serialization.
 
 ## 7. Critical path
 
@@ -113,7 +121,9 @@ on the failed target/resource; another healthy target and the next heartbeat
 continue. A status-cache refresh failure records the error and retains the
 prior body, but serves it only through 90 seconds of age; without a bounded-age
 body the request fails closed and a later request may retry. One oversized item
-fails explicitly instead of silently truncating authority.
+fails explicitly instead of silently truncating authority. Health projection
+owns no cache, fallback, or retry state; `StatusSnapshotCache` continues to own
+last-good and refresh behavior.
 
 ## 11. Restart/recovery behavior
 
@@ -136,6 +146,9 @@ collapse all optional resources into one restart burst.
   atomic replacement, hashes and last-good behavior.
 - `xauusd_forecaster/dashboard/status_cache.py`: process-local serialized
   snapshot cache, single-flight refresh, bounded last-good, and health state.
+- `xauusd_forecaster/dashboard/health_projection.py`: read-only Collector,
+  decision-output, and semantic-pipeline component projections from bounded
+  current inputs.
 - `xauusd_forecaster/dashboard_payloads.py`: critical and audit contracts.
 - `xauusd_forecaster/dashboard_summaries.py`: indexed summary queries.
 - `xauusd_forecaster/learning_curves.py`: learning resource.
@@ -144,12 +157,14 @@ collapse all optional resources into one restart burst.
 
 ## 14. Relevant tests
 
+`tests/test_dashboard_health_projection.py`,
 `tests/test_dashboard_status_cache.py`, `tests/test_dashboard_api.py`,
 `tests/test_dashboard_payloads.py`,
 `tests/test_dashboard_sync.py`, `tests/test_operational_health.py`,
 `tests/test_runtime_health.py`, and `tests/test_news_scheduler.py` cover first
-paint, cache single-flight and bounded last-good, resource isolation,
-byte/page bounds, cursor retry, and audited retry semantics.
+paint, runtime-component thresholds and broker boundaries, cache single-flight
+and bounded last-good, resource isolation, byte/page bounds, cursor retry, and
+audited retry semantics.
 
 ## 15. Authoritative contracts/specs
 
