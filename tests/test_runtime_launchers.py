@@ -3179,16 +3179,20 @@ def test_pwsh_json_dates_share_one_culture_invariant_control_boundary(tmp_path) 
         tmp_path,
         "[Globalization.CultureInfo]::CurrentCulture='zh-SG';"
         "$payload='{\"created_on\":\"2026-08-26T11:29:18.0000000+00:00\","
-        "\"expires_at\":\"2026-08-26T12:29:18.0000000+00:00\"}'|ConvertFrom-Json;"
+        "\"expires_at\":\"2026-08-26T12:29:18.0000000+00:00\","
+        "\"watermark_created_at\":\"2026-08-26T11:29:18.0000000+00:00\"}'|ConvertFrom-Json;"
         "$created=ConvertTo-ReleaseTimestampUtc $payload.created_on;"
         "$expires=ConvertTo-ReleaseTimestampUtc $payload.expires_at;"
+        "$version=[pscustomobject]@{id='new';metadata=[pscustomobject]@{"
+        "created_on='2026-08-26T11:30:18.0000000+00:00'}};"
+        "$after=Test-VersionAfterDiscoveryWatermark -Version $version -Discovery $payload;"
         'Write-Output "$($payload.created_on.GetType().Name),'
-        '$($created.ToString(\'o\')),$($expires.ToString(\'o\'))"',
+        '$($created.ToString(\'o\')),$($expires.ToString(\'o\')),$after"',
         powershell="pwsh.exe",
     )
     assert result == (
         "DateTime,2026-08-26T11:29:18.0000000+00:00,"
-        "2026-08-26T12:29:18.0000000+00:00"
+        "2026-08-26T12:29:18.0000000+00:00,True"
     )
 
 
