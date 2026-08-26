@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync", "broadcast")]
     [string]$ServiceKey = "",
@@ -3953,6 +3953,53 @@ function Approve-CandidateCompatibility {
     return $candidate
 }
 
+function Retry-CandidateValidation {
+    $state = Get-ReleaseControlState
+    if (-not $state -or -not $state.candidate) {
+        throw "No Candidate is available for validation retry."
+    }
+    $candidate = $state.candidate
+    $reason = if ($candidate.validation) {
+        [string]$candidate.validation.reason
+    } else { "" }
+    $retryableReasons = @(
+        "WORKER_CPU_HEADROOM_REVIEW_REQUIRED",
+        "SEMANTIC_DATA_PARITY_REVIEW_REQUIRED"
+    )
+    if ([string]$candidate.validation_state -ne "REVIEW_REQUIRED" -or
+        $reason -notin $retryableReasons -or
+        [string]$candidate.validation.key -ne [string]$candidate.validation_key -or
+        [string]$candidate.validation.repository -ne "PASSED" -or
+        [string]$candidate.validation.windows -ne "PASSED") {
+        throw "Only an exact retryable Candidate review can restart validation."
+    }
+    $priorTestedAt = [string]$candidate.validation.tested_at
+    $candidate.validation_state = "NEW"
+    $candidate.validation = [pscustomobject]@{
+        key = [string]$candidate.validation_key
+        repository = "PASSED"
+        windows = "PASSED"
+        cloudflare = "PENDING"
+        reason = "RETRY_REQUESTED"
+        prior_reason = $reason
+        prior_tested_at = $priorTestedAt
+        tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+    $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+    Write-ReleaseControlState -State $state
+    Write-ReleaseHistory -Event "CANDIDATE_VALIDATION_RETRY_REQUESTED" `
+        -Release $candidate -Detail @{
+            validation_key = [string]$candidate.validation_key
+            prior_reason = $reason
+            preserved_repository = "PASSED"
+            preserved_windows = "PASSED"
+            preserved_migration_acceptance = [bool]($candidate.migration_acceptance -and
+                [string]$candidate.migration_acceptance.validation_key -eq
+                    [string]$candidate.validation_key)
+        }
+    return Invoke-AutomaticCandidateValidation -Candidate $candidate
+}
+
 function Invoke-CandidateDiscovery {
     if (-not (Enter-ReleaseTransactionLock)) { return $false }
     try {
@@ -7317,6 +7364,13 @@ function Invoke-ControlCenterOperationAction {
             }
             return Get-ReleaseControlState
         }
+        "RetryCandidateValidation" {
+            if (-not (Enter-ReleaseTransactionLock)) {
+                throw "Another release transaction is active."
+            }
+            try { return Retry-CandidateValidation }
+            finally { Exit-ReleaseTransactionLock }
+        }
         "ReconcileRelease" {
             if (-not (Enter-ReleaseTransactionLock)) {
                 throw "Another release transaction is active."
@@ -8940,7 +8994,7 @@ if ($ExpectedControlScriptPath -or $ExpectedControlRevision) {
 if ($OperationResultPath) {
     $structuredActions = @(
         "Start", "Stop", "Restart", "ServiceStart", "ServiceStop",
-        "DiscoverCandidate", "ReconcileRelease", "PromoteCandidate",
+        "DiscoverCandidate", "RetryCandidateValidation", "ReconcileRelease", "PromoteCandidate",
         "ReverseStable", "VerifyMigrationCompatibility", "ApproveCompatibility"
     )
     if ($Action -notin $structuredActions) {
@@ -8994,6 +9048,10 @@ switch ($Action) {
     "ServiceStop" { $null = Invoke-ControlCenterOperationAction -Operation $Action }
     "Watchdog" { Start-All; exit (Invoke-ForecasterWatchdog) }
     "DiscoverCandidate" {
+        try { $null = Invoke-ControlCenterOperationAction -Operation $Action; exit 0 }
+        catch { Write-Error $_.Exception.Message; exit 1 }
+    }
+    "RetryCandidateValidation" {
         try { $null = Invoke-ControlCenterOperationAction -Operation $Action; exit 0 }
         catch { Write-Error $_.Exception.Message; exit 1 }
     }
