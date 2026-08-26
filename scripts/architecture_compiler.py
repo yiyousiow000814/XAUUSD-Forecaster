@@ -413,11 +413,22 @@ def build_artifacts(root: Path) -> dict[str, bytes]:
     evidence = {"schema": "architecture-evidence-index-v1", "generated_header": GENERATED_HEADER, "source_digest": digest,
                 "claims": sorted(node_evidence + edge_evidence, key=lambda item: item["claim_id"])}
     digest_doc = {"schema": "architecture-source-digest-v1", "generated_header": GENERATED_HEADER, "source_digest": digest, "files": digest_entries}
-    test_evidence, runtime_evidence = compile_contract_evidence(root, digest, facts)
+    mutation_path = root / "architecture/generated/mutation-report.json"
+    mutation_document: dict[str, Any] = {}
+    if mutation_path.is_file():
+        candidate = json.loads(mutation_path.read_text(encoding="utf-8"))
+        if candidate.get("source_digest") == digest:
+            mutation_document = candidate
+    test_evidence, runtime_evidence = compile_contract_evidence(
+        root, digest, facts, mutation_document,
+    )
     placeholders = {
         "test-evidence.json": test_evidence,
         "runtime-evidence.json": runtime_evidence,
-        "mutation-report.json": {"schema": "architecture-mutation-report-v1", "generated_header": GENERATED_HEADER, "source_digest": digest, "status": "NOT_RUN", "mutations": []},
+        "mutation-report.json": mutation_document or {
+            "schema": "architecture-mutation-report-v1", "generated_header": GENERATED_HEADER,
+            "source_digest": digest, "status": "NOT_RUN", "mutations": [],
+        },
     }
     documents: dict[str, Any] = {
         "explorer-manifest.json": explorer, "code-index.json": code_index,

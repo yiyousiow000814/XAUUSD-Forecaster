@@ -1,3 +1,206 @@
 schema = "architecture-mutations-v1"
-# PR C adds executable targeted mutations. PR A deliberately owns no mutation runner.
+
+[[mutation]]
+id = "MUT-TRAINING-NOT-DUE-FIRST"
+contract_id = "TRAINING-NOT-DUE-FIRST"
+platform = "PYTHON"
+required_isolation = "TEMPORARY_GIT_WORKTREE"
+path = "xauusd_forecaster/training/generation.py"
+selector_kind = "python_symbol"
+symbol = "train_due_v2"
+operator = "replace_exact"
+before = "if eligible_count < PREVIEW_ROWS:"
+after = "if False and eligible_count < PREVIEW_ROWS:"
+expected_break = "The early NOT_DUE/engineering gate no longer prevents materialization."
+command = ["python", "-m", "pytest", "-q", "tests/evidence/test_integrity_v2.py::test_not_due_gate_does_not_materialize_training_rows"]
+timeout_seconds = 90
+smoke = true
+failure_pattern = "NOT_DUE|materialize"
+
+[[mutation]]
+id = "MUT-TRAINING-MATERIALIZATION-BOUND"
+contract_id = "TRAINING-MATERIALIZATION-BOUNDED"
+platform = "PYTHON"
+required_isolation = "TEMPORARY_GIT_WORKTREE"
+path = "xauusd_forecaster/training/generation.py"
+selector_kind = "python_module_constant"
+symbol = "MATERIALIZATION_BATCH_ROWS"
+operator = "replace_exact"
+before = "MATERIALIZATION_BATCH_ROWS = 200"
+after = "MATERIALIZATION_BATCH_ROWS = 1"
+expected_break = "One materialization pass no longer advances the declared bounded page."
+command = ["python", "-m", "pytest", "-q", "tests/evidence/test_integrity_v2.py::test_training_rows_materialize_incrementally_without_rescanning_history"]
+timeout_seconds = 90
+smoke = true
+failure_pattern = "assert|failed"
+
+[[mutation]]
+id = "MUT-SYNC-OPTIONAL-ISOLATION"
+contract_id = "SYNC-OPTIONAL-ISOLATION"
+platform = "PYTHON"
+required_isolation = "TEMPORARY_GIT_WORKTREE"
+path = "scripts/run_dashboard_sync.py"
+selector_kind = "python_symbol"
+symbol = "sync_resource_lane"
+operator = "replace_exact"
+before = "except Exception as error:\n                duration_ms = round((time.perf_counter() - started) * 1000, 1)"
+after = "except Exception as error:\n                raise\n                duration_ms = round((time.perf_counter() - started) * 1000, 1)"
+expected_break = "An optional resource failure escapes its failure domain."
+command = ["python", "-m", "pytest", "-q", "tests/dashboard/test_sync.py::test_optional_growing_resource_failure_does_not_block_heartbeat"]
+timeout_seconds = 90
+smoke = true
+failure_pattern = "optional|failed|error"
+
+[[mutation]]
+id = "MUT-SYNC-HEARTBEAT-FIRST"
+contract_id = "SYNC-HEARTBEAT-FIRST"
+platform = "PYTHON"
+required_isolation = "TEMPORARY_GIT_WORKTREE"
+path = "scripts/run_dashboard_sync.py"
+selector_kind = "python_symbol"
+symbol = "sync_once"
+operator = "replace_exact"
+before = "healthy, heartbeat = sync_heartbeat_once(config)\n    optional = sync_resource_lane(healthy)"
+after = "healthy = configured_targets(config)\n    optional = sync_resource_lane(healthy)\n    healthy, heartbeat = sync_heartbeat_once(config)"
+expected_break = "Optional work runs before the critical heartbeat."
+command = ["python", "-m", "pytest", "-q", "tests/dashboard/test_sync.py::test_growing_local_snapshot_failure_cannot_block_critical_heartbeat"]
+timeout_seconds = 90
+smoke = false
+failure_pattern = "heartbeat|failed|error"
+
+[[mutation]]
+id = "MUT-EVIDENCE-APPEND-ONLY"
+contract_id = "EVIDENCE-APPEND-ONLY"
+platform = "PYTHON"
+required_isolation = "TEMPORARY_GIT_WORKTREE"
+path = "xauusd_forecaster/evidence/ledger.py"
+selector_kind = "python_symbol"
+symbol = "_install_append_only_triggers"
+operator = "replace_exact"
+before = "f\"BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT, \""
+after = "f\"BEFORE UPDATE OF __mutation_never__ ON {table} BEGIN SELECT RAISE(ABORT, \""
+expected_break = "Updates can bypass the append-only trigger."
+command = ["python", "-m", "pytest", "-q", "tests/test_ledger.py::test_ledger_rejects_mutation_and_duplicate_records"]
+timeout_seconds = 90
+smoke = false
+failure_pattern = "append-only|failed|DID NOT RAISE"
+
+[[mutation]]
+id = "MUT-NEWS-CANONICAL-RECEIPT"
+contract_id = "NEWS-PROJECTION-CANONICAL-RECEIPT"
+platform = "PYTHON"
+required_isolation = "TEMPORARY_GIT_WORKTREE"
+path = "xauusd_forecaster/news_projection.py"
+selector_kind = "python_symbol"
+symbol = "canonical_receipt_bytes"
+operator = "replace_exact"
+before = "keys = sorted(value, key=lambda key: key.encode(\"utf-8\"))"
+after = "keys = list(value)"
+expected_break = "Receipt object keys follow insertion order instead of canonical UTF-8 order."
+command = ["python", "-m", "pytest", "-q", "tests/test_news_projection.py::test_receipt_vectors_are_cross_runtime_canonical"]
+timeout_seconds = 90
+smoke = true
+failure_pattern = "assert|failed"
+
+[[mutation]]
+id = "MUT-BROADCAST-FAILURE-ISOLATION"
+contract_id = "BROADCAST-BACKPRESSURE-ISOLATION"
+platform = "PYTHON"
+required_isolation = "TEMPORARY_GIT_WORKTREE"
+path = "scripts/run_live_broadcast_publisher.py"
+selector_kind = "python_symbol"
+symbol = "run_publisher_loop"
+operator = "replace_exact"
+before = "except Exception as error:  # failure is isolated to this delivery owner\n            atomic_json"
+after = "except Exception as error:  # failure is isolated to this delivery owner\n            raise\n            atomic_json"
+expected_break = "A transient publisher failure terminates the isolated owner loop."
+command = ["python", "-m", "pytest", "-q", "tests/test_live_broadcast.py::test_continuous_owner_isolates_failure_and_keeps_cadence"]
+timeout_seconds = 90
+smoke = true
+failure_pattern = "broadcast unavailable|failed|error"
+
+[[mutation]]
+id = "MUT-RELEASE-PREVIEW-PROMOTION"
+contract_id = "RELEASE-STABLE-EXPLICIT"
+platform = "WINDOWS"
+required_isolation = "TEMPORARY_GIT_WORKTREE"
+path = "scripts/xauusd_control_center_runtime.ps1"
+selector_kind = "powershell_function"
+symbol = "Start-ReleasePromotion"
+operator = "replace_exact"
+before = "if ([string]$candidate.artifact_kind -ne $productionCandidateArtifactKind) {"
+after = "if ($false) {"
+expected_break = "A Preview artifact can pass the explicit Stable promotion guard."
+command = ["python", "-m", "pytest", "-q", "tests/runtime/test_control_center_contracts.py::test_preview_artifact_cannot_promote_even_with_passed_evidence"]
+timeout_seconds = 120
+smoke = false
+failure_pattern = "PROMOTED|failed|assert"
+
+[[mutation]]
+id = "MUT-CONTROL-STRUCTURED-RESULT"
+contract_id = "CONTROL-CENTER-STRUCTURED-RESULT"
+platform = "WINDOWS"
+required_isolation = "TEMPORARY_GIT_WORKTREE"
+path = "scripts/xauusd_control_center_presentation.ps1"
+selector_kind = "powershell_function"
+symbol = "Resolve-ControlCenterOperationPresentation"
+operator = "replace_exact"
+before = "if ([bool]$Result.success) {"
+after = "if ($ProcessExitCode -eq 0) {"
+expected_break = "Ambient process exit state overrides the structured child result."
+command = ["python", "-m", "pytest", "-q", "tests/runtime/test_control_center_contracts.py::test_structured_result_overrides_conflicting_process_exit_status"]
+timeout_seconds = 120
+smoke = false
+failure_pattern = "assert|failed"
+
+[[mutation]]
+id = "MUT-CONTROL-PLANE-EXACT-REVISION"
+contract_id = "CONTROL-PLANE-EXACT-REVISION"
+platform = "WINDOWS"
+required_isolation = "TEMPORARY_GIT_WORKTREE"
+path = "scripts/xauusd_control_center_runtime.ps1"
+selector_kind = "powershell_function"
+symbol = "Wait-VerifiedWatchdogHandoff"
+operator = "replace_exact"
+before = "-not [bool]$heartbeat.control_bundle_exact_revision -or"
+after = "$false -or"
+expected_break = "A non-exact Control Plane heartbeat can be accepted."
+command = ["python", "-m", "pytest", "-q", "tests/runtime/test_control_plane_install.py::test_heartbeat_requires_new_process_exact_revision_and_hashes"]
+timeout_seconds = 120
+smoke = false
+failure_pattern = "assert|failed"
+
+[[mutation]]
+id = "MUT-MOBILE-PATH-PRESERVED"
+contract_id = "MOBILE-PATH-SHEET-INDEPENDENCE"
+platform = "WEB"
+required_isolation = "TEMPORARY_GIT_WORKTREE"
+path = "web/app/_lib/architecture-mobile-interaction.ts"
+selector_kind = "typescript_function"
+symbol = "architectureMobileInteractionReducer"
+operator = "replace_exact"
+before = "return state.mobilePanel === \"INSPECTOR\" ? closePanel(state) : state;"
+after = "return state.mobilePanel === \"INSPECTOR\" ? { ...closePanel(state), activePathNodeId: null } : state;"
+expected_break = "Closing Inspector clears the selected graph path."
+command = ["node", "--import", "./tests/register-cloudflare-worker-loader.mjs", "--test", "--test-name-pattern", "mobile 3: closing Inspector preserves the active path", "tests/architecture-mobile-interaction.test.mjs"]
+timeout_seconds = 90
+smoke = true
+failure_pattern = "active path|failed|assert"
+
+[[mutation]]
+id = "MUT-MOBILE-PANEL-EXCLUSION"
+contract_id = "MOBILE-PATH-SHEET-INDEPENDENCE"
+platform = "WEB"
+required_isolation = "TEMPORARY_GIT_WORKTREE"
+path = "web/app/_lib/architecture-mobile-interaction.ts"
+selector_kind = "typescript_function"
+symbol = "architectureMobileInteractionReducer"
+operator = "replace_exact"
+before = "return { ...state, inspectorNodeId: null, inspectorOpen: false, advancedOpen: true, mobilePanel: \"ADVANCED\" };"
+after = "return { ...state, inspectorNodeId: state.activePathNodeId, inspectorOpen: true, advancedOpen: true, mobilePanel: \"ADVANCED\" };"
+expected_break = "Advanced and Inspector become simultaneously visible."
+command = ["node", "--import", "./tests/register-cloudflare-worker-loader.mjs", "--test", "--test-name-pattern", "mobile 5: Advanced and Inspector are mutually exclusive", "tests/architecture-mobile-interaction.test.mjs"]
+timeout_seconds = 90
+smoke = true
+failure_pattern = "exclusive|valid|failed|assert"
 

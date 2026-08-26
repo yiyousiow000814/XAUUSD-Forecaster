@@ -12,7 +12,8 @@
 - `RUNTIME_OBSERVED` means a bounded production-shaped fixture executed and
   emitted a normalized asserted event sequence at the current digest.
 - `MUTATION_KILLED` requires a valid targeted mutation whose designated tests
-  failed for the intended contract reason. PR C owns this evidence.
+  failed for the intended contract reason. A compile-only failure is
+  `INVALID`; timeout and infrastructure failure cannot promote the contract.
 - `STALE`, `CONTRADICTED`, and `UNRESOLVED` remain visible and never satisfy a
   current requirement.
 
@@ -27,6 +28,9 @@ CRITICAL pilot contract requires `TEST_BOUND` and `TEST_EXECUTED`. A pilot may
 also require `RUNTIME_OBSERVED` when a bounded fixture exists. Historical
 semantic claims outside the pilot may remain visibly partial; they must not be
 silently promoted.
+
+A current surviving CRITICAL mutation blocks mutation-protected status. The
+report must expose every outcome and bind it to the current source digest.
 
 Test count is not a safety score. Unclassified tests remain valid regression or
 reference evidence until audited. A test that imports an owner is not a
