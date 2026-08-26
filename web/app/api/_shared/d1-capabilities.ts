@@ -16,7 +16,9 @@ export const D1_CAPABILITIES = {
     "news_projection_index",
     "news_projection_details",
     "news_projection_batches",
+    "news_projection_receipts_v2",
     "news_projection_state",
+    "news_projection_counts",
   ],
 } as const;
 

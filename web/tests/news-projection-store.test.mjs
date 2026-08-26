@@ -23,11 +23,12 @@ const detail = digit => ({
   payload: { headline: `detail ${digit}`, body: "bounded body" },
 });
 const index = digit => ({
-  detail_key: id(digit), category: "美国宏观", cluster_id: `cluster-${digit}`,
+  detail_key: id(digit), category: "增长/经济", cluster_id: `cluster-${digit}`,
   source_published_time: `2026-08-2${digit}T10:00:00Z`,
   collector_first_seen_time: `2026-08-2${digit}T10:01:00Z`,
   annotation_status: "READY", model_visibility: "MODEL_VISIBLE",
   parsed_at: `2026-08-2${digit}T10:02:00Z`,
+  impact_expires_at: `2026-09-2${digit}T10:00:00.000000+00:00`,
   mirror_contract: NEWS_PROJECTION_CONTRACT_VERSION,
 });
 const receipt = async (details, indexes) => {
@@ -56,7 +57,7 @@ const manifest = async (digit, details, indexes, overrides = {}) => ({
 const database = () => new D1TestDatabase([
   "0001_daily_epoch.sql", "0002_hard_bishop.sql",
   "0003_news_index_lookup.sql", "0007_bounded_news_archive.sql",
-  "0022_news_projection_generation.sql",
+  "0022_news_projection_generation.sql", "0027_materialize_news_projection_counts.sql",
 ]);
 
 test("shares canonical receipt vectors with the Python producer", async () => {
@@ -169,6 +170,60 @@ test("partial replacement never displaces the last verified current generation",
   );
 });
 
+test("materializes every generation's review totals and keeps page reads bounded", async () => {
+  const db = database();
+  const details = ["1", "2", "3", "4"].map(detail);
+  const indexes = [
+    { ...index("1"), category: "利率/Fed", impact_expires_at: "2099-01-01T00:00:00.000000+00:00" },
+    { ...index("2"), category: "利率/Fed", annotation_status: "NOT_REQUIRED",
+      model_visibility: "MODEL_INELIGIBLE", parsed_at: null },
+    { ...index("3"), category: "油价/能源", annotation_status: "QUEUED",
+      model_visibility: "NOT_YET_PARSED", parsed_at: null },
+    { ...index("4"), category: "油价/能源", annotation_status: "DEAD_LETTER",
+      model_visibility: "DEAD_LETTER", parsed_at: null },
+  ];
+  await prepareNewsProjection(db, await manifest("e", details, indexes));
+  await stageNewsProjectionBatch(db, "detail", id("e"), 0, details);
+  await stageNewsProjectionBatch(db, "index", id("e"), 0, indexes);
+  await activateNewsProjection(db, id("e"));
+
+  const completed = await readNewsProjectionPage(db, {
+    page: 1, pageSize: 20, category: "", reviewState: "COMPLETED",
+  });
+  assert.equal(completed.total, 2);
+  assert.equal(completed.parsed_total, 1);
+  assert.equal(completed.model_candidate_total, 1);
+  assert.deepEqual(completed.category_counts, { "利率/Fed": 2 });
+  assert.deepEqual(completed.review_state_counts, {
+    COMPLETED: 2, PROCESSING: 1, ISOLATED: 1,
+  });
+  const processing = await readNewsProjectionPage(db, {
+    page: 1, pageSize: 20, category: "油价/能源", reviewState: "PROCESSING",
+  });
+  assert.equal(processing.total, 1);
+  assert.equal(processing.items[0].detail_key, id("3"));
+  assert.equal(db.database.prepare(
+    "SELECT count(*) total FROM news_projection_counts WHERE generation_id=?",
+  ).get(id("e")).total, 7);
+});
+
+test("rejects unbounded categories and non-canonical active expiries at the batch boundary", async () => {
+  for (const [generationDigit, badIndex] of [
+    ["f", { ...index("1"), category: "unbounded-category" }],
+    ["9", { ...index("1"), impact_expires_at: "2099-01-01T00:00:00Z" }],
+  ]) {
+    const db = database();
+    const details = [detail("1")];
+    const indexes = [badIndex];
+    await prepareNewsProjection(db, await manifest(generationDigit, details, indexes));
+    await stageNewsProjectionBatch(db, "detail", id(generationDigit), 0, details);
+    await assert.rejects(
+      stageNewsProjectionBatch(db, "index", id(generationDigit), 0, indexes),
+      error => error.code === "NEWS_PROJECTION_BATCH_INVALID",
+    );
+  }
+});
+
 test("activation rejects missing details and receipt contradictions", async () => {
   const db = database();
   const details = [detail("1")];
@@ -230,8 +285,15 @@ test("keeps the rollback legacy identity set equal across replacement activation
   await prepareNewsProjection(
     db, await manifest("b", replacementDetails, replacementIndexes),
   );
+  const changesBeforeReplay = db.database.prepare("SELECT total_changes() total").get().total;
   await stageNewsProjectionBatch(db, "detail", id("b"), 0, replacementDetails);
+  const changesAfterDetails = db.database.prepare("SELECT total_changes() total").get().total;
   await stageNewsProjectionBatch(db, "index", id("b"), 0, replacementIndexes);
+  const changesAfterIndex = db.database.prepare("SELECT total_changes() total").get().total;
+  assert.equal(changesAfterDetails - changesBeforeReplay, 1,
+    "unchanged global detail replay writes only its append-only batch receipt");
+  assert.equal(changesAfterIndex - changesAfterDetails, 2,
+    "unchanged legacy index replay writes only its generation index row and batch receipt");
   assert.equal(
     db.database.prepare(
       "SELECT count(*) total FROM news_index WHERE json_extract(payload,'$.annotation_status')<>'SUPERSEDED_CONTRACT'",
@@ -254,4 +316,55 @@ test("keeps the rollback legacy identity set equal across replacement activation
   assert.equal(superseded.annotation_status, "SUPERSEDED_CONTRACT");
   assert.equal(superseded.model_visibility, "MODEL_INELIGIBLE");
   assert.equal(superseded.parsed_at, null);
+});
+
+test("activation requires the detail and index identity chains to match", async () => {
+  const db = database();
+  const priorDetails = [detail("2")];
+  const priorIndexes = [index("2")];
+  await prepareNewsProjection(db, await manifest("a", priorDetails, priorIndexes));
+  await stageNewsProjectionBatch(db, "detail", id("a"), 0, priorDetails);
+  await stageNewsProjectionBatch(db, "index", id("a"), 0, priorIndexes);
+  await activateNewsProjection(db, id("a"));
+
+  const wrongDetails = [detail("1")];
+  const wrongIndexes = [index("2")];
+  await prepareNewsProjection(db, await manifest("b", wrongDetails, wrongIndexes));
+  await stageNewsProjectionBatch(db, "detail", id("b"), 0, wrongDetails);
+  await stageNewsProjectionBatch(db, "index", id("b"), 0, wrongIndexes);
+  await assert.rejects(
+    activateNewsProjection(db, id("b")),
+    error => error.code === "NEWS_PROJECTION_INCOMPLETE"
+      && error.details.missing_detail_count === 0
+      && error.details.identity_match === false,
+  );
+  assert.equal((await readNewsProjectionHealth(db)).active_generation_id, id("a"));
+});
+
+test("fails closed when a later generation contradicts content-addressed detail evidence", async () => {
+  const db = database();
+  const originalDetails = [detail("1")];
+  const originalIndexes = [index("1")];
+  await prepareNewsProjection(db, await manifest("a", originalDetails, originalIndexes));
+  await stageNewsProjectionBatch(db, "detail", id("a"), 0, originalDetails);
+  await stageNewsProjectionBatch(db, "index", id("a"), 0, originalIndexes);
+  await activateNewsProjection(db, id("a"));
+
+  const contradiction = [{
+    ...detail("1"), detail_hash: id("f"), payload: { headline: "changed evidence" },
+  }];
+  await prepareNewsProjection(
+    db, await manifest("b", contradiction, originalIndexes),
+  );
+  const changesBefore = db.database.prepare("SELECT total_changes() total").get().total;
+  await assert.rejects(
+    stageNewsProjectionBatch(db, "detail", id("b"), 0, contradiction),
+    error => error.code === "NEWS_PROJECTION_DETAIL_CONTRADICTION",
+  );
+  const changesAfter = db.database.prepare("SELECT total_changes() total").get().total;
+  assert.equal(changesAfter, changesBefore, "contradiction cannot mutate evidence or progress");
+  assert.equal(
+    db.database.prepare("SELECT detail_hash FROM news_details WHERE detail_key=?").get(id("1")).detail_hash,
+    detail("1").detail_hash,
+  );
 });

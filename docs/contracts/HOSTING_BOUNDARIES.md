@@ -174,10 +174,16 @@
   display projections. A detail snapshot that has not loaded or is unavailable
   must not be represented as an empty collection or zero count.
 - A bounded News index page is projected in one D1 query after the current
-  generation identity is established. Page rows, counts, review buckets,
-  category buckets, and staging identity cross the D1 boundary together; the
-  Worker decodes the page array once and preserves the established public-copy,
-  expiry, ordering, and pagination semantics.
+  generation identity is established. Review/category/parsed counts that cannot
+  change inside an immutable generation are materialized atomically at every
+  activation and read from the generation summary; they must not be recomputed
+  by scanning CURRENT on each visitor request. Page rows use review/category
+  ordering indexes. Canonical fixed-width candidate-expiry timestamps are
+  stored once in sorted order with the generation summary; the Worker derives
+  the time-dependent active count by binary search without another D1 row scan.
+  Page rows, counts, review buckets, category buckets, and staging identity cross
+  the D1 boundary together; the Worker decodes the page array once and preserves
+  the established public-copy, expiry, ordering, and pagination semantics.
 - During a split-snapshot handover, the read boundary selects the freshest
   valid compatible snapshot by durable `received_at`, with the split snapshot
   winning only an exact timestamp tie. Legacy audit detail is projected and

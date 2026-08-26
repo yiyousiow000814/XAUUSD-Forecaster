@@ -1185,10 +1185,12 @@ test("keeps the 60-day news archive inside bounded D1 work", () => {
   const reviewState = readFileSync(new URL("../app/_lib/news-review-state.ts", import.meta.url), "utf8");
   const detail = readFileSync(new URL("../app/api/news-content/route.ts", import.meta.url), "utf8");
   const migration = readFileSync(new URL("../drizzle/0022_news_projection_generation.sql", import.meta.url), "utf8");
+  const countMigration = readFileSync(new URL("../drizzle/0027_materialize_news_projection_counts.sql", import.meta.url), "utf8");
   assert.match(detail, /DETAIL_BATCH_LIMIT = 12/);
-  assert.match(store, /WHERE generation_id=\? AND detail_key IN \(\$\{placeholders\}\)/);
+  assert.match(store, /FROM news_details\s+WHERE detail_key IN \(\$\{placeholders\}\)/);
   assert.match(store, /ORDER BY published_time DESC/);
-  assert.match(store, /impact_expires_at>\?/);
+  assert.match(store, /activeCandidateCount/);
+  assert.match(store, /candidate_expiries/);
   assert.match(index, /model_visibility: "IMPACT_EXPIRED"/);
   assert.match(reviewState, /annotation_status'\)='NOT_REQUIRED'/);
   assert.match(reviewState, /model_visibility'\)='NOT_YET_PARSED'/);
@@ -1205,6 +1207,11 @@ test("keeps the 60-day news archive inside bounded D1 work", () => {
   assert.match(index, /s-maxage=30/);
   assert.match(migration, /news_projection_index_page_idx/);
   assert.match(migration, /news_projection_index_category_idx/);
+  assert.match(countMigration, /news_projection_counts/);
+  assert.match(countMigration, /news_projection_index_review_page_idx/);
+  assert.match(countMigration, /news_projection_index_review_category_page_idx/);
+  assert.match(store, /FROM news_projection_counts WHERE generation_id=\?/);
+  assert.doesNotMatch(store, /filtered_total\(count\)/);
 });
 
 test("keeps every D1 migration compatible with remote compound-statement parsing", () => {
@@ -1799,11 +1806,11 @@ test("renders the news and decision audit route", async () => {
   const newsIndexRoute = readFileSync(new URL("../app/api/news-index/route.ts", import.meta.url), "utf8");
   const newsStore = readFileSync(new URL("../app/api/_shared/news-projection-store.ts", import.meta.url), "utf8");
   assert.match(newsStore, /state='SUPERSEDED'/);
-  assert.match(newsStore, /COALESCE\(sum\(parsed\),0\),/);
-  assert.match(newsStore, /FROM news_projection_index WHERE generation_id=\? AND \$\{ACTIVE_NEWS_SQL\}/);
+  assert.match(newsStore, /INSERT INTO news_projection_counts/);
+  assert.match(newsStore, /parsed_count FROM news_projection_counts/);
   assert.match(newsIndexRoute, /action === "prepare"/);
   assert.match(newsIndexRoute, /action === "activate"/);
-  assert.match(newsStore, /NEWS_REVIEW_STATE_SQL\[options\.reviewState\]/);
+  assert.match(newsStore, /\(\$\{NEWS_REVIEW_STATE_CASE_SQL\}\)=\?/);
   assert.match(source, /evidenceMode === "eligible"/);
   assert.match(source, />当前可用 <b>/);
   assert.match(source, />历史上用过 <b>/);
