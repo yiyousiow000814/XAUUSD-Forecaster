@@ -48,6 +48,10 @@ the cache and manifest are replaceable read-resource state.
 incremental parsing cache, market-history decision reads/paging, and current
 chart projection. Quote JSONL and local SQLite remain authoritative inputs;
 the process-local candle cache is disposable.
+`xauusd_forecaster.dashboard.status_resources` owns current status and optional
+resource composition, including deployment, learning-cache, source-health, and
+broker-session projections. It reads existing SQLite/files and owns only
+replaceable process-local derived state; the API remains the HTTP/process owner.
 `run_dashboard_sync.py` owns D1 mirroring and per-target progress. The
 scheduler remains the state-transition owner for audited retry overrides.
 
@@ -170,6 +174,9 @@ collapse all optional resources into one restart burst.
   display metrics.
 - `xauusd_forecaster/dashboard/market_resources.py`: quote-file cache/parsing,
   market-history SQL/paging, downsampling, and current chart projection.
+- `xauusd_forecaster/dashboard/status_resources.py`: current status and
+  optional-resource composition plus deployment, learning, source-health, and
+  broker-session read projections.
 - `xauusd_forecaster/dashboard_payloads.py`: critical and audit contracts.
 - `xauusd_forecaster/dashboard_summaries.py`: indexed summary queries.
 - `xauusd_forecaster/learning_curves.py`: learning resource.
@@ -182,6 +189,7 @@ collapse all optional resources into one restart burst.
 `tests/test_dashboard_resource_contracts.py`,
 `tests/test_dashboard_news_resources.py`,
 `tests/test_dashboard_market_resources.py`,
+`tests/test_dashboard_status_resources.py`,
 `tests/test_dashboard_status_cache.py`, `tests/test_dashboard_api.py`,
 `tests/test_dashboard_payloads.py`,
 `tests/test_dashboard_sync.py`, `tests/test_operational_health.py`,
@@ -199,10 +207,10 @@ audited retry semantics.
 
 ## 16. Known current gaps
 
-Both entry scripts still contain extensive query, transport, scheduling, and
-domain logic. Shared serializers plus Dashboard news and market reads are
-package-owned in the pending stack, but optional reads remain in the API and
-two build commands retain transitional Sync imports until C4. The large
+The API entry script retains HTTP/process orchestration and the audited operator
+bridge; status, optional, news, and market read resources are package-owned in
+the pending stack. Sync still contains extensive transport and scheduling logic,
+and two build commands retain transitional Sync imports until C4. The large
 API/sync tests group several resource families in single files. The lazy local
 market-history route has bounded output but growing source enumeration/merge
 work in its request path.

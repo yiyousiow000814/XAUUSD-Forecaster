@@ -247,6 +247,24 @@ Implementation status: `PENDING` until the C3b stacked change merges.
 - **Non-goals:** no SQL, candle construction, cache offset, gzip handling,
   paging, chart, route, bound, or production-state change.
 
+### Phase C-3c — Dashboard status resources
+
+Implementation status: `PENDING` until the C3c stacked change merges.
+
+- **Exact responsibility:** current status and optional-resource composition,
+  deployment provenance, learning revision/cache, source health, runtime
+  heartbeat, and broker-session read projections.
+- **Target module:** `xauusd_forecaster/dashboard/status_resources.py`.
+- **Compatibility:** `run_dashboard_api.py` imports and exposes the canonical
+  names while retaining HTTP/process orchestration and the operator bridge.
+- **Focused tests:** direct deployment, session, and learning-cache contracts
+  move to `tests/test_dashboard_status_resources.py`; full payload and HTTP
+  assertions remain in `tests/test_dashboard_api.py`.
+- **Rollback:** revert the extraction commit; the derived cache is disposable
+  and no SQLite, file, schema, route, or process authority is migrated.
+- **Non-goals:** no SQL, payload, timestamp, freshness, cache, route, scheduler,
+  retry, process, or production-state change.
+
 ## Priority method
 
 File size is only an inventory signal. Rank a proposed split using:
