@@ -35,6 +35,7 @@ current rules merely because they discovered one.
 - [News projection](contracts/NEWS_PROJECTION.md)
 - [Evidence lanes](contracts/EVIDENCE_LANES.md)
 - [Hosting boundaries](contracts/HOSTING_BOUNDARIES.md)
+- [Safety composition](contracts/SAFETY_COMPOSITION.md)
 - [Release control](contracts/RELEASE_CONTROL.md)
 - [Preview isolation](contracts/PREVIEW_ISOLATION.md)
 - [Assistant state](contracts/ASSISTANT_STATE.md)
@@ -63,6 +64,7 @@ current rules merely because they discovered one.
 
 ### Designs
 
+- [Release Control state machine](design/RELEASE_CONTROL_STATE_MACHINE.md)
 - [News identity retrieval](design/NEWS_IDENTITY_RETRIEVAL.md)
 
 - [Dynamic AI scheduler](design/AI_PRIORITY_SCHEDULER.md)
@@ -91,10 +93,12 @@ current rules merely because they discovered one.
 - [Live broadcast bootstrap runbook](runbooks/LIVE_BROADCAST_BOOTSTRAP.md)
 - [Input and provider reference](reference/INPUTS.md)
 - [AI provider quota reference](AI_PROVIDER_QUOTAS.md)
+- [Safety mechanism inventory](reference/SAFETY_MECHANISM_INVENTORY.md)
 
 ### Historical evidence
 
 - Audits: [test suite](audits/TEST_SUITE.md),
+  [Release Control install handoff 2026-08-26](audits/RELEASE_CONTROL_INSTALL_HANDOFF_2026_08_26.md),
   [release-control ownership 2026-08-20](audits/RELEASE_CONTROL_2026_08_20.md),
   [U5 authority](audits/U5_AUTHORITY.md),
   [documentation inventory](audits/DOCUMENTATION_INVENTORY.md),

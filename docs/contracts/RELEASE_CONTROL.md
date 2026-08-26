@@ -115,6 +115,7 @@ is indeterminate, never inferred as success or failure from empty output alone.
 
 Repository validation requires the exact-SHA check runs named `Python regression
 suite`, `Web build and tests`, `Windows runtime contracts`, `Repository policy`,
+`Release Control TLC`,
 and CodeQL `Analyze` jobs for actions, C#, JavaScript/TypeScript, and Python.
 For each required name, only runs whose `head_sha` equals the Candidate Git SHA
 are eligible, and the latest exact-SHA attempt is authoritative. Latest-attempt
@@ -249,11 +250,21 @@ normal supervision. This freezes the legacy and generation projections while
 the receipt and directed validation are produced, without creating a second
 writer or weakening live D1 verification.
 
-## Promotion transaction
+## Release lifecycle and switch transaction
 
-Promotion is one durable, serialized transaction:
+The operator lifecycle has four release-attempt phases: `PREPARE`, `VERIFY`,
+`SWITCH`, and `OBSERVE`. Discovery, migration holds, evidence review/retry,
+Control Plane handoff, prechecks, and recovery checkpoints are internal
+operations, not additional operator phases. `REVIEW_REQUIRED` is a reason
+inside `VERIFY`; it is never success. Reverse and automatic return use the same
+`SWITCH -> OBSERVE` path with Previous Stable as the target. The authoritative
+operator projection is derived by `Get-ReleaseLifecyclePhase`; legacy internal
+status and transaction fields remain crash checkpoints and must not be shown as
+an alternate lifecycle.
 
-`PRECHECK -> CUTOVER -> OBSERVING -> COMMIT_STABLE`
+Switch is one durable, serialized transaction. Its internal forward checkpoints
+remain `PRECHECK -> CUTOVER -> OBSERVING -> COMMIT_STABLE` for restart recovery,
+but they map only to `SWITCH`, `OBSERVE`, and the final Stable transition.
 
 PRECHECK verifies exact identities and evidence, compatibility, the current
 Stable placement, and one Windows production owner. CUTOVER uses the recorded
@@ -276,7 +287,7 @@ Failed PRECHECK, CUTOVER, observation, or automatic rollback leaves the
 pre-transaction Previous Stable pointer unchanged. Only successful
 `COMMIT_STABLE` advances Previous Stable.
 
-Reverse uses `REVERSING -> REVERSE_OBSERVING -> READY` and commits the restored
+Reverse internally uses `REVERSING -> REVERSE_OBSERVING -> READY` and commits the restored
 Stable identity only after the same owner, heartbeat, API, sync, critical-status,
 and decision-cadence observation succeeds. Restart during PROMOTING, OBSERVING,
 REVERSING, or REVERSE_OBSERVING reconciles observed Worker
@@ -310,14 +321,18 @@ imply validation of the installed deployment-control bundle. A Control Plane
 bundle change requires its own explicit installation and exact revision/hash
 verification.
 
-Control Plane installation is a separate local transaction, not a Business
+Control Plane installation is one internal `PREPARE` transaction, not a Business
 Runtime Promote. The repository entry point MUST resolve one exact revision
 equal to the fetched `origin/main`, stage it from a clean detached Git worktree,
 and verify the complete bundle before stopping supervision. The handoff order is
 `PRECHECK -> QUIESCE_CONTROL_SUPERVISION -> STOP_OLD_WATCHDOG -> INSTALL_BUNDLE
--> START_NEW_WATCHDOG -> VERIFY_NEW_HEARTBEAT -> COMMITTED`. The new heartbeat
-MUST identify a different process-start token, the target bundle revision, and
-successful exact/hash verification while exactly one watchdog owns supervision.
+-> START_NEW_WATCHDOG -> VERIFY_QUIESCED_HANDOFF -> ACTIVATE_NEW_WATCHDOG ->
+COMMITTED`. The replacement MUST first acknowledge `QUIESCED`, the exact install
+transaction, a different process-start token, the target bundle revision, and
+successful exact/hash verification while exactly one watchdog process exists.
+It MUST NOT start services, discover Candidates, observe a release, or recover
+service ownership before activation is granted. Its `ACTIVE` heartbeat proves
+the same exact identity after that grant.
 The service-isolation baseline is captured only after control supervision is
 quiesced and the old watchdog has stopped. A pre-quiesce snapshot is not an
 authoritative baseline because the old watchdog can still recover a service
@@ -329,9 +344,15 @@ coordinated-migration hold is active, Sync's required identity is intentionally
 absent before and after installation; the installer must preserve that stopped
 state and must not start Sync to satisfy its precheck. An active release
 transaction or open Control Center GUI blocks installation. Failure after the
-old watchdog stops restores the previous complete verified bundle, starts a new
-process from that previous bundle, verifies its heartbeat and single ownership,
-and records `ROLLED_BACK`. Current bounded evidence is stored in
+old watchdog stops first compares the recorded process baseline without
+re-applying the contextual normal-state rule that caused the failure. It then
+restores the previous complete verified bundle, starts a new process from that
+bundle, verifies its heartbeat and single ownership, and records `ROLLED_BACK`.
+The main scheduled task remains enabled while its current instance is stopped,
+so machine restart can launch the exact installed bundle. A matching
+non-terminal install resumes the same quiesced handoff; if the installer owner
+has exited after the verified bundle swap, the supervisor forward-completes
+activation and records recovery instead of remaining ownerless. Current bounded evidence is stored in
 `.local/forward/control-plane-install-state.json`; it never rewrites release
 history or Stable/Candidate identities. The operator procedure is
 [`CONTROL_PLANE_INSTALLATION.md`](../runbooks/CONTROL_PLANE_INSTALLATION.md).
