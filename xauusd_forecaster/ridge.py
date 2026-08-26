@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .forward_ledger import canonical_hash
+from xauusd_forecaster.evidence.ledger import canonical_hash
 
 
 MIN_FEATURE_SCALE = 1e-12

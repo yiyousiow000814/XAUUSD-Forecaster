@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from .models import Action, DataHealth, Decision, Forecast
+from xauusd_forecaster.models import Action, DataHealth, Decision, Forecast
 
 
 def select_post_cost_ev_action(

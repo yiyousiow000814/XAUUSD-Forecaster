@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from .factors import NEWS_FEATURES, aggregate_news_features
-from .forward_ledger import ForwardLedger, canonical_hash
+from xauusd_forecaster.evidence.ledger import ForwardLedger, canonical_hash
 from .ridge import RidgeArtifact, train_ridge
 
 

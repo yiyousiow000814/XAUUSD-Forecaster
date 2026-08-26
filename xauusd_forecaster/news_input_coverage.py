@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from .forward_ledger import canonical_hash
+from xauusd_forecaster.evidence.ledger import canonical_hash
 from .news_source_registry import NEWS_SOURCE_REGISTRY
 
 

@@ -11,7 +11,7 @@ from .news_identity import news_representative_key
 from .macro_release import MACRO_RELEASE_FEATURES
 
 if TYPE_CHECKING:
-    from .forward_ledger import ForwardLedger
+    from xauusd_forecaster.evidence.ledger import ForwardLedger
 
 
 NEWS_FEATURES = (

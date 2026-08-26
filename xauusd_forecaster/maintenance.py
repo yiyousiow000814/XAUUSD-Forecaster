@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 
 
 UTC = timezone.utc

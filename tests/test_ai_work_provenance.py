@@ -8,7 +8,7 @@ from xauusd_forecaster.annotation import (
     IMPACT_PROMPT_VERSION,
     PROMPT_VERSION,
 )
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.news_scheduler import (
     CONTRACT_BACKFILL_LANE,
     LIVE_LANE,

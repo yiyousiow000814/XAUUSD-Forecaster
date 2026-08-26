@@ -16,7 +16,7 @@ from typing import Callable
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
-from .forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from .news_relevance import google_news_item_is_relevant
 from .source_polling import source_poll_gate
 

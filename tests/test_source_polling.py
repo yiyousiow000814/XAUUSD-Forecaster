@@ -5,7 +5,7 @@ from email.utils import format_datetime
 
 import pytest
 
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.news import (
     BEA_API_SOURCE,
     EIA_API_SOURCE,

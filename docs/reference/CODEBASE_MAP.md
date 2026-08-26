@@ -11,9 +11,9 @@ contract.
 
 | I want to change… | Start here | Main owner | Supporting modules | Tests | Docs |
 |---|---|---|---|---|---|
-| Five-minute decision | `scripts/run_forward_collector.py` | Collector process loop | `xauusd_forecaster/collector_runtime.py`, `xauusd_forecaster/forward_engine.py`, `xauusd_forecaster/live_v2.py`, `xauusd_forecaster/inference_v2.py` | `tests/test_decision.py`, `tests/test_forward_only.py` | [Decision and Evidence](../design/DECISION_AND_EVIDENCE.md) |
+| Five-minute decision | `scripts/run_forward_collector.py` | Collector process loop | `xauusd_forecaster/collector_runtime.py`, `xauusd_forecaster/decision/engine.py`, `xauusd_forecaster/decision/live.py`, `xauusd_forecaster/decision/inference.py` | `tests/test_decision.py`, `tests/test_forward_only.py` | [Decision and Evidence](../design/DECISION_AND_EVIDENCE.md) |
 | Quote or session handling | `ctrader/XauusdForwardQuoteBridge/XauusdForwardQuoteBridge.cs` | Quote Bridge | `xauusd_forecaster/market.py`, `xauusd_forecaster/market_session.py` | `tests/test_quotes_and_labeling.py`, `tests/test_market_session.py` | [Forward-only Evidence](../contracts/FORWARD_ONLY.md) |
-| Outcome labeling | `xauusd_forecaster/live_v2.py` | Collector settlement loop | `xauusd_forecaster/executable_label.py`, `xauusd_forecaster/execution_costs.py` | `tests/test_quotes_and_labeling.py`, `tests/test_execution_costs.py` | [System Boundaries](../contracts/SYSTEM_BOUNDARIES.md) |
+| Outcome labeling | `xauusd_forecaster/decision/live.py` | Collector settlement loop | `xauusd_forecaster/evidence/executable_label.py`, `xauusd_forecaster/execution_costs.py` | `tests/test_quotes_and_labeling.py`, `tests/test_execution_costs.py` | [System Boundaries](../contracts/SYSTEM_BOUNDARIES.md) |
 | Training materialization | `xauusd_forecaster/training_v2.py` | BackgroundTrainingOwner | `xauusd_forecaster/training_owner.py`, `xauusd_forecaster/forward_ledger.py` | `tests/test_training_owner.py`, `tests/test_evidence_integrity_v2.py` | [Training and Models](../design/TRAINING_AND_MODELS.md) |
 | Model training or publish | `xauusd_forecaster/training_v2.py` | BackgroundTrainingOwner | `xauusd_forecaster/ridge.py`, `xauusd_forecaster/news_contracts.py` | `tests/test_evidence_integrity_v2.py`, `tests/test_production_shape.py` | [Training and Models](../design/TRAINING_AND_MODELS.md) |
 | News collection | `xauusd_forecaster/news_collection_owner.py` | NewsCollectionOwner | `xauusd_forecaster/news.py`, `xauusd_forecaster/source_polling.py` | `tests/test_news_collection_owner.py`, `tests/test_source_polling.py` | [News and AI](../design/NEWS_AND_AI.md) |
@@ -90,17 +90,17 @@ contract.
 
 ### Decision and evidence
 
-- `xauusd_forecaster/forward_engine.py` — coordinates one frozen decision and
+- `xauusd_forecaster/decision/engine.py` — coordinates one frozen decision and
   later outcome settlement.
-- `xauusd_forecaster/forward_ledger.py` — installs and exposes the shared local
+- `xauusd_forecaster/evidence/ledger.py` — installs and exposes the shared local
   append-only persistence surface.
 - `xauusd_forecaster/market.py` — reads receipt-time quote files and builds
   point-in-time market snapshots.
 - `xauusd_forecaster/market_session.py` — applies broker and weekly closure
   eligibility.
-- `xauusd_forecaster/live_v2.py` — appends the complete V2 decision and outcome
+- `xauusd_forecaster/decision/live.py` — appends the complete V2 decision and outcome
   evidence sets.
-- `xauusd_forecaster/inference_v2.py` — validates and consumes one complete
+- `xauusd_forecaster/decision/inference.py` — validates and consumes one complete
   active generation.
 - `xauusd_forecaster/evidence_v2.py` — materializes versioned derived evidence
   and eligibility.

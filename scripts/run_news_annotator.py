@@ -17,7 +17,7 @@ from typing import Callable
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.news_scheduler import (
     ApiCredential, configured_api_credentials, scheduler_counts, sync_pending_jobs,
 )

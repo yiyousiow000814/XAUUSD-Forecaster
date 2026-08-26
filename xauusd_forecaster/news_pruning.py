@@ -8,8 +8,8 @@ from pathlib import Path
 import sqlite3
 import uuid
 
-from .evidence_v2 import install_v2_schema
-from .forward_ledger import canonical_hash
+from xauusd_forecaster.evidence.schema import install_v2_schema
+from xauusd_forecaster.evidence.ledger import canonical_hash
 from .news_evidence import EVIDENCE_POLICY_VERSION
 from .news_relevance import google_news_item_is_relevant, is_google_news_source
 from .news_time import assess_news_time

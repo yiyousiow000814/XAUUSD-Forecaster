@@ -10,7 +10,7 @@ from xauusd_forecaster.annotation import (
     annotate_pending_news,
     pending_annotation_records,
 )
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
 from xauusd_forecaster.model_gateway import GeminiModelGateway
 from xauusd_forecaster.news_semantics import (

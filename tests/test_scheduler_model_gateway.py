@@ -10,7 +10,7 @@ import pytest
 
 from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES
 from xauusd_forecaster.annotation import DEFAULT_GEMMA_MODEL
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.model_gateway import (
     GeminiModelGateway, ModelGatewayResponseInvalid, ModelRequestUsage,
 )

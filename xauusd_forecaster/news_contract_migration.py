@@ -6,14 +6,14 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from .evidence_v2 import (
+from xauusd_forecaster.evidence.schema import (
     ELIGIBILITY_VERSION,
     FEATURE_VERSION,
     LABEL_VERSION,
     NEWS_FEATURE_VERSION,
     install_v2_schema,
 )
-from .forward_ledger import canonical_hash
+from xauusd_forecaster.evidence.ledger import canonical_hash
 from .news_features_v2 import aggregate_news_features_v2
 from .repair_v2 import LANE_RULE_VERSION
 

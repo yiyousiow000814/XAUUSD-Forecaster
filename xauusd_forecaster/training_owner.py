@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .execution_learning import train_due_execution
-from .forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from .news_contract_migration import append_missing_current_news_snapshots
 from .training_v2 import train_due_v2
 

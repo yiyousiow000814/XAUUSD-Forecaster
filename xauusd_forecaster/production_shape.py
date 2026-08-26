@@ -6,7 +6,7 @@ import sqlite3
 from datetime import UTC, datetime
 
 from .ai_provider_registry import AI_QUOTA_SURFACES
-from .inference_v2 import MODEL_IDENTITIES
+from xauusd_forecaster.decision.inference import MODEL_IDENTITIES
 from .news_scheduler import quota_day
 from .news_source_registry import NEWS_SOURCE_REGISTRY
 

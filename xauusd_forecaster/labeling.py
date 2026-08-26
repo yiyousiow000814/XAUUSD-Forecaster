@@ -6,7 +6,7 @@ from datetime import datetime
 import math
 from typing import Iterable
 
-from .executable_label import build_executable_label_v2
+from xauusd_forecaster.evidence.executable_label import build_executable_label_v2
 from .market import MarketObservation
 from .models import OutcomeLabel
 from .quotes import Quote

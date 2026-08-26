@@ -9,7 +9,7 @@ import sys
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster import training_owner
 from xauusd_forecaster.market import BrokerMarketSession, MarketObservation
 from xauusd_forecaster.runtime_health import write_runtime_heartbeat

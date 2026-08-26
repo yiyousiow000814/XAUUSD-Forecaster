@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.news import collect_direct_full_text_html_news
 
 

@@ -295,7 +295,7 @@ not be collapsed.
 
 | Subsystem | Cadence / SLA | Inputs | Outputs | Durable state | Execution type | Current known gap |
 |---|---|---|---|---|---|---|
-| Decision and evidence | 5-minute decision; 30-minute outcome | Quotes, session, frozen news, active model | Decisions, predictions, outcomes, checkpoints | Local JSONL, SQLite, U5/checkpoint files | PROCESS main THREAD | Entry point still contains material domain orchestration |
+| Decision and evidence | 5-minute decision; 30-minute outcome | Quotes, session, frozen news, active model | Decisions, predictions, outcomes, checkpoints | Local JSONL, SQLite, U5/checkpoint files | PROCESS main THREAD | Canonical Decision and Evidence packages; stable legacy imports are thin facades |
 | News and AI | Collection poll and scheduler retry times; provider-governed | Registered sources, revisions, credentials | Revisions, annotations, impacts, titles, Briefs | Local SQLite | Collector THREAD + Annotator PROCESS/thread pool | Shared SQLite and large scheduler/annotation modules |
 | Training and models | Requested on outcomes/reconciliation; early `NOT_DUE` | Mature eligible rows | Materialized rows and complete generation | SQLite plus immutable files | Collector THREAD | Scheduling isolated, process failure domain shared |
 | Dashboard and sync | Critical cache seconds; sync heartbeat; resource-specific cadence | Local authority/read models | Local API and D1 mirrors | SQLite plus target cursor/schedule files | Two PROCESSES with THREADS | Large entry scripts own both orchestration and domain logic |

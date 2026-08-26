@@ -24,7 +24,7 @@ from .ai_provider_registry import (
     GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
     GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
 )
-from .forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from .gemini_quota import GeminiQuotaLedger
 from .model_limits import (
     GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
