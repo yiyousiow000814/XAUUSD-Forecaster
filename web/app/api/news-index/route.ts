@@ -144,12 +144,12 @@ function releaseIndexValidation(
       || Number(checked.item_valid) !== total
       || Number(checked.review_valid) !== total
     ) return null;
-    return { items: total, prepared_statements: total + 2 };
+    return { items: total, prepared_statements: total + 3 };
   }
   if (["activate", "verify", "abandon"].includes(checked.action)) {
     return {
       generation: checked.generation_id,
-      prepared_statements: checked.action === "activate" ? 3
+      prepared_statements: checked.action === "activate" ? 4
         : checked.action === "verify" ? 2 : 4,
     };
   }

@@ -104,6 +104,12 @@
   News-evidence staging keeps each complete request within 80,000 serialized
   bytes and eight items. The Worker enforces the matching item limits and these
   route byte bounds; the larger platform ceiling is not a normal target.
+- The retained legacy News tables are a Reverse-Stable projection, not another
+  authority. Each bounded generation batch mirrors the same accepted rows into
+  that projection in the D1 batch transaction. CURRENT activation marks
+  legacy-only identities `SUPERSEDED_CONTRACT` in the same transaction that
+  moves the generation pointer, so every completed activation restores exact
+  active identity equality without replaying an unbounded serialized payload.
 - Production-shaped News projection release validation remains a bounded,
   zero-mutation D1 JSON1 path. Each request crosses into D1 once and expands its
   item array once; all item counts and invariants are aggregated in that single

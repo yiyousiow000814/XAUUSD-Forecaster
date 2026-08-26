@@ -441,6 +441,17 @@ export async function stageNewsProjectionBatch(
         JSON.stringify(item.payload), now,
       ));
     }
+    const detailKeys = (items as NewsProjectionDetailItem[]).map(item => item.detail_key);
+    const placeholders = detailKeys.map(() => "?").join(",");
+    statements.push(binding.prepare(
+      `INSERT INTO news_details (detail_key,detail_hash,payload,received_at)
+       SELECT detail_key,detail_hash,payload,received_at
+         FROM news_projection_details
+        WHERE generation_id=? AND detail_key IN (${placeholders})
+       ON CONFLICT(detail_key) DO UPDATE SET
+         detail_hash=excluded.detail_hash,payload=excluded.payload,
+         received_at=excluded.received_at`,
+    ).bind(generationId, ...detailKeys));
   } else {
     for (const [index, item] of (items as NewsProjectionIndexItem[]).entries()) {
       const published = typeof item.source_published_time === "string"
@@ -461,6 +472,23 @@ export async function stageNewsProjectionBatch(
         item.mirror_contract, await sha256(serialized), serialized, now,
       ));
     }
+    statements.push(binding.prepare(
+      `INSERT INTO news_index
+         (detail_key,category,cluster_id,published_time,collector_first_seen_time,
+          parsed,model_candidate,impact_expires_at,mirror_contract,payload,received_at)
+       SELECT detail_key,category,cluster_id,published_time,collector_first_seen_time,
+              parsed,model_candidate,impact_expires_at,mirror_contract,payload,received_at
+         FROM news_projection_index
+        WHERE generation_id=? AND ordinal>=? AND ordinal<?
+       ON CONFLICT(detail_key) DO UPDATE SET
+         category=excluded.category,cluster_id=excluded.cluster_id,
+         published_time=excluded.published_time,
+         collector_first_seen_time=excluded.collector_first_seen_time,
+         parsed=excluded.parsed,model_candidate=excluded.model_candidate,
+         impact_expires_at=excluded.impact_expires_at,
+         mirror_contract=excluded.mirror_contract,payload=excluded.payload,
+         received_at=excluded.received_at`,
+    ).bind(generationId, offset, offset + items.length));
   }
   statements.push(binding.prepare(
     `INSERT INTO news_projection_batches
@@ -582,6 +610,24 @@ export async function activateNewsProjection(
       row.receipt_digest, Number(row.expected_index_count),
       Number(row.expected_detail_count), 0, 0, now, now,
     ),
+    binding.prepare(
+      `UPDATE news_index
+          SET parsed=0,model_candidate=0,
+              payload=json_set(
+                json_set(
+                  json_set(payload,'$.annotation_status','SUPERSEDED_CONTRACT'),
+                  '$.model_visibility','MODEL_INELIGIBLE'
+                ),
+                '$.parsed_at',json('null')
+              )
+        WHERE COALESCE(json_extract(payload,'$.annotation_status'),'')<>
+                'SUPERSEDED_CONTRACT'
+          AND NOT EXISTS (
+            SELECT 1 FROM news_projection_index current
+             WHERE current.generation_id=?
+               AND current.detail_key=news_index.detail_key
+          )`,
+    ).bind(generationId),
   ]);
   return {
     status: "OK", activated: generationId,
