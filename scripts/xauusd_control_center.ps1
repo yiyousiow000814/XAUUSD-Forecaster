@@ -6095,9 +6095,16 @@ function Get-ControlPlaneIsolationSnapshot {
 }
 
 function Test-ControlPlaneServiceOwnerRequired {
-    param([Parameter(Mandatory = $true)][object]$Service)
+    param(
+        [Parameter(Mandatory = $true)][object]$Service,
+        [object]$ReleaseState
+    )
     if ([string]$Service.Key -eq "broadcast") {
         return [bool](Test-BroadcastPublisherEnabled)
+    }
+    if ([string]$Service.Key -eq "sync" -and
+        (Test-CoordinatedMigrationSyncHold -ReleaseState $ReleaseState)) {
+        return $false
     }
     return $true
 }
@@ -6105,7 +6112,8 @@ function Test-ControlPlaneServiceOwnerRequired {
 function Assert-ControlPlaneIsolationSnapshot {
     param(
         [Parameter(Mandatory = $true)][object]$Before,
-        [Parameter(Mandatory = $true)][object]$After
+        [Parameter(Mandatory = $true)][object]$After,
+        [object]$ReleaseState
     )
     if ([string]$Before.business_runtime_revision -ne
         [string]$After.business_runtime_revision) {
@@ -6118,7 +6126,8 @@ function Assert-ControlPlaneIsolationSnapshot {
     foreach ($service in $services) {
         $beforeProcesses = @($Before.services.($service.Key))
         $afterProcesses = @($After.services.($service.Key))
-        $required = Test-ControlPlaneServiceOwnerRequired -Service $service
+        $required = Test-ControlPlaneServiceOwnerRequired -Service $service `
+            -ReleaseState $ReleaseState
         if ((-not $required) -and
             ($beforeProcesses.Count -ne 0 -or $afterProcesses.Count -ne 0)) {
             throw "CONTROL_PLANE_UNEXPECTED_SERVICE_OWNER_$($service.Key.ToUpperInvariant())"
@@ -6316,7 +6325,8 @@ function Invoke-ControlPlaneInstall {
     $isolationBefore = Get-ControlPlaneIsolationSnapshot
     foreach ($service in $services) {
         $owners = @($isolationBefore.services.($service.Key))
-        $required = Test-ControlPlaneServiceOwnerRequired -Service $service
+        $required = Test-ControlPlaneServiceOwnerRequired -Service $service `
+            -ReleaseState $release
         if ($required -and $owners.Count -ne 1) {
             throw "CONTROL_PLANE_SERVICE_OWNER_REQUIRED:$($service.Key)"
         }
@@ -6388,7 +6398,8 @@ function Invoke-ControlPlaneInstall {
         $newOwner = Wait-VerifiedWatchdogHandoff -ExpectedRevision $TargetRevision `
             -PreviousIdentity $oldOwner
         $isolationAfter = Get-ControlPlaneIsolationSnapshot
-        Assert-ControlPlaneIsolationSnapshot -Before $isolationBefore -After $isolationAfter
+        Assert-ControlPlaneIsolationSnapshot -Before $isolationBefore `
+            -After $isolationAfter -ReleaseState $release
         Restore-ControlPlaneSupervision -State $supervisionState
         $supervisionState = $null
         Write-ControlPlaneInstallState @{
@@ -6425,7 +6436,7 @@ function Invoke-ControlPlaneInstall {
                     -PreviousIdentity $oldOwner
                 $isolationAfter = Get-ControlPlaneIsolationSnapshot
                 Assert-ControlPlaneIsolationSnapshot -Before $isolationBefore `
-                    -After $isolationAfter
+                    -After $isolationAfter -ReleaseState $release
                 $rollbackResult = "ROLLED_BACK"
                 $newOwner = $restoredOwner
             }

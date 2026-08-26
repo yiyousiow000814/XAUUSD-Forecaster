@@ -314,7 +314,10 @@ MUST identify a different process-start token, the target bundle revision, and
 successful exact/hash verification while exactly one watchdog owns supervision.
 
 The transaction MUST preserve the Business Runtime revision and every quote,
-collector, annotator, API, and sync process identity. An active release
+collector, annotator, API, and sync process identity. While an exact unexpired
+coordinated-migration hold is active, Sync's required identity is intentionally
+absent before and after installation; the installer must preserve that stopped
+state and must not start Sync to satisfy its precheck. An active release
 transaction or open Control Center GUI blocks installation. Failure after the
 old watchdog stops restores the previous complete verified bundle, starts a new
 process from that previous bundle, verifies its heartbeat and single ownership,

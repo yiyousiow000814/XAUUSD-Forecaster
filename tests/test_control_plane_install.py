@@ -119,7 +119,7 @@ def _state_machine_mocks(old_revision: str, target_revision: str) -> str:
           $p=[pscustomobject]@{{process_id=10;process_start_token='service-token'}};
           [pscustomobject]@{{business_runtime_revision='runtime';services=[pscustomobject]@{{quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@($p);broadcast=@()}}}}
         }};
-        function Assert-ControlPlaneIsolationSnapshot {{ param($Before,$After); $script:timeline+='isolation' }};
+        function Assert-ControlPlaneIsolationSnapshot {{ param($Before,$After,$ReleaseState); $script:timeline+='isolation' }};
         function New-VerifiedRuntimeControlBundleStage {{ param($SourceRoot,$SourceRevision,$StageRoot,[switch]$RequireImmutableSource); $script:timeline+='stage'; [pscustomobject]@{{source_revision='{target_revision}'}} }};
         function Suspend-ControlPlaneSupervision {{ $script:timeline+='suspend'; @{{}} }};
         function Wait-ControlPlaneGuardQuiesced {{ $script:timeline+='guard' }};
@@ -272,6 +272,35 @@ def test_handoff_orders_single_ownership_and_preserves_runtime(tmp_path: Path) -
     )
 
 
+def test_install_preserves_intentionally_stopped_sync_during_exact_migration_hold(
+    tmp_path: Path,
+) -> None:
+    old_revision, target_revision = "a" * 40, "b" * 40
+    body = _state_machine_mocks(old_revision, target_revision) + textwrap.dedent(
+        f"""
+        $script:release=[pscustomobject]@{{candidate=[pscustomobject]@{{
+          artifact_kind='PRODUCTION_CANDIDATE';branch='main';validation_key='candidate:key'
+        }};migration_sync_hold=[pscustomobject]@{{validation_key='candidate:key';
+          expires_at=[DateTimeOffset]::UtcNow.AddHours(1).ToString('o')}}}};
+        function Get-ReleaseControlState {{ $script:release }};
+        function Get-ControlPlaneIsolationSnapshot {{
+          $p=[pscustomobject]@{{process_id=10;process_start_token='service-token'}};
+          [pscustomobject]@{{business_runtime_revision='runtime';services=[pscustomobject]@{{
+            quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@();broadcast=@()
+          }}}}
+        }};
+        $result=Invoke-ControlPlaneInstall -VerifiedSourceRoot 'immutable'
+          -TargetRevision '{target_revision}';
+        Write-Output "$($result.status)|$($script:timeline -join ',')"
+        """
+    ).replace("\n", " ")
+    result = _run_contract(tmp_path, body)
+    assert result == (
+        "COMMITTED|lock,stage,suspend,guard,stop,install,start,heartbeat,"
+        "isolation,supervision,unlock"
+    )
+
+
 def test_partial_supervision_quiesce_restores_task_enablement(tmp_path: Path) -> None:
     body = textwrap.dedent(
         """
@@ -390,6 +419,34 @@ def test_control_plane_isolation_respects_optional_broadcast_ownership(
         $before=[pscustomobject]@{{business_runtime_revision='runtime';release_state_hash='state';release_history_hash='history';services=[pscustomobject]@{{quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@($p);broadcast={before_broadcast}}}}};
         $after=[pscustomobject]@{{business_runtime_revision='runtime';release_state_hash='state';release_history_hash='history';services=[pscustomobject]@{{quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@($p);broadcast={after_broadcast}}}}};
         try {{ Assert-ControlPlaneIsolationSnapshot -Before $before -After $after; Write-Output 'PASSED' }} catch {{ Write-Output $_.Exception.Message }}
+        """
+    ).replace("\n", " ")
+    assert _run_contract(tmp_path, body) == expected
+
+
+@pytest.mark.parametrize(
+    ("expiry", "expected"),
+    (
+        ("[DateTimeOffset]::UtcNow.AddHours(1).ToString('o')", "PASSED"),
+        ("'2020-01-01T00:00:00Z'", "CONTROL_PLANE_INSTALL_CHANGED_SERVICE_SYNC"),
+    ),
+)
+def test_control_plane_isolation_allows_stopped_sync_only_for_live_exact_hold(
+    tmp_path: Path,
+    expiry: str,
+    expected: str,
+) -> None:
+    body = textwrap.dedent(
+        f"""
+        function Test-BroadcastPublisherEnabled {{ return $false }};
+        $p=[pscustomobject]@{{process_id=10;process_start_token='same'}};
+        $release=[pscustomobject]@{{candidate=[pscustomobject]@{{
+          artifact_kind='PRODUCTION_CANDIDATE';branch='main';validation_key='candidate:key'
+        }};migration_sync_hold=[pscustomobject]@{{validation_key='candidate:key';
+          expires_at={expiry}}}}};
+        $before=[pscustomobject]@{{business_runtime_revision='runtime';release_state_hash='state';release_history_hash='history';services=[pscustomobject]@{{quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@();broadcast=@()}}}};
+        $after=[pscustomobject]@{{business_runtime_revision='runtime';release_state_hash='state';release_history_hash='history';services=[pscustomobject]@{{quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@();broadcast=@()}}}};
+        try {{ Assert-ControlPlaneIsolationSnapshot -Before $before -After $after -ReleaseState $release; Write-Output 'PASSED' }} catch {{ Write-Output $_.Exception.Message }}
         """
     ).replace("\n", " ")
     assert _run_contract(tmp_path, body) == expected
