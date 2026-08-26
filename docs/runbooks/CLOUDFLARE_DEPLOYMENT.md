@@ -95,9 +95,11 @@ python ../scripts/bootstrap_news_projection.py `
 ```
 
 The bootstrap takes one SQLite online backup and builds the frozen generation
-with Candidate code. It does not depend on the still-active Stable API
-understanding the Candidate News source protocol, and it never starts a second
-production Sync owner.
+with Candidate code. Before remote prepare it atomically stores the matching
+`*-generation.json.gz` artifact beside the state receipt; restart restores that
+artifact rather than rebuilding from changed source data. It does not depend on
+the still-active Stable API understanding the Candidate News source protocol,
+and it never starts a second production Sync owner.
 
 The bootstrap fails closed unless the target is an exact production Worker
 Version origin, the source is an explicit local SQLite snapshot or compatible
@@ -107,6 +109,22 @@ violations. Preserve its generation, snapshot, source digest, receipt digest,
 and exact counts as release evidence. Walk the Candidate News pagination and
 rendered totals before continuing. Do not Promote while bootstrap is replaying
 or failed. Do not delete the legacy archive during this cutover.
+
+If the process loses its pinned artifact or the Worker rejects an immutable
+invariant, bootstrap records `RECOVERY_REQUIRED` with the exact generation and
+error code. After investigating that evidence, remove only that rejected
+STAGING identity through the guarded recovery action:
+
+```powershell
+python ../scripts/bootstrap_news_projection.py `
+  --config ../.local/forward/dashboard-sync.json `
+  --version-host $candidateVersionHost `
+  --state-file first-news-current.json `
+  --abandon-recovery-generation $rejectedGenerationId
+```
+
+The action requires the local recovery identity and remote STAGING identity to
+match exactly, writes a recovery receipt, and cannot remove CURRENT.
 
 After the migrations are applied and the authoritative projection is CURRENT,
 run **Verify Migration** in the Control Center. Do not use **Approve

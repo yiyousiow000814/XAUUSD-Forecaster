@@ -1609,10 +1609,9 @@ def _news_projection_generation_from_payload(
     )
 
 
-def _read_persisted_news_projection_generation(
-    database: Path,
+def _read_news_projection_generation_artifact(
+    path: Path,
 ) -> NewsProjectionGeneration | None:
-    path = _news_projection_generation_path(database)
     if not path.exists():
         return None
     with gzip.open(path, "rt", encoding="utf-8") as handle:
@@ -1628,10 +1627,17 @@ def _read_persisted_news_projection_generation(
     return _news_projection_generation_from_payload(payload)
 
 
-def _write_persisted_news_projection_generation(
-    database: Path, generation: NewsProjectionGeneration,
+def _read_persisted_news_projection_generation(
+    database: Path,
+) -> NewsProjectionGeneration | None:
+    return _read_news_projection_generation_artifact(
+        _news_projection_generation_path(database),
+    )
+
+
+def _write_news_projection_generation_artifact(
+    path: Path, generation: NewsProjectionGeneration,
 ) -> None:
-    path = _news_projection_generation_path(database)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = _news_projection_generation_payload(generation)
     envelope = {
@@ -1646,6 +1652,14 @@ def _write_persisted_news_projection_generation(
             sort_keys=True, separators=(",", ":"),
         )
     os.replace(temporary, path)
+
+
+def _write_persisted_news_projection_generation(
+    database: Path, generation: NewsProjectionGeneration,
+) -> None:
+    _write_news_projection_generation_artifact(
+        _news_projection_generation_path(database), generation,
+    )
 
 
 def _finish_news_projection_source_build(database: Path) -> None:

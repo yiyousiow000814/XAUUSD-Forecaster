@@ -135,11 +135,14 @@
   with the actual contiguous persisted prefix and replays only from the first
   gap.
 - Pre-promotion News bootstrap freezes one online backup of the authoritative
-  production SQLite database with Candidate source semantics, then advances
-  that immutable generation through the normal bounded Sync replay. It must not
-  require the still-active Stable API to implement a Candidate-only source
-  protocol, activate Candidate Windows early, or create a second production
-  Sync owner.
+  production SQLite database with Candidate source semantics and atomically
+  persists that exact generation before remote prepare, then advances it through
+  the normal bounded Sync replay. Restart restores the artifact instead of
+  rebuilding from newer source state. Deterministic source or remote invariant
+  rejection fails immediately with its reason; it is not retried as transport
+  unavailability. Bootstrap must not require the still-active Stable API to
+  implement a Candidate-only source protocol, activate Candidate Windows early,
+  or create a second production Sync owner.
 - Provider-capacity status crosses the dashboard boundary only as bounded,
   secret-safe per-authority/account projections. Forecasting may use a retained
   quota-day summary, but critical status must never scan accumulated provider
