@@ -2795,6 +2795,123 @@ function Invoke-ExactVersionJson {
     }
 }
 
+function Get-ReleaseResponseHeaderValue {
+    param([object]$Response, [Parameter(Mandatory = $true)][string]$Name)
+    if (-not $Response) { return "" }
+    try {
+        $value = if ($Response.Headers.PSObject.Methods['GetValues'] -and
+            $Response.Headers.Contains($Name)) {
+            @($Response.Headers.GetValues($Name)) -join ","
+        } else { $Response.Headers[$Name] }
+        if ($value) { return [string]$value }
+    } catch {}
+    try {
+        $value = if ($Name -eq "Content-Type" -and
+            $Response.Content.Headers.ContentType) {
+            $Response.Content.Headers.ContentType.ToString()
+        } elseif ($Response.Content.Headers.PSObject.Methods['GetValues'] -and
+            $Response.Content.Headers.Contains($Name)) {
+            @($Response.Content.Headers.GetValues($Name)) -join ","
+        } else { $Response.Content.Headers[$Name] }
+        if ($value) { return [string]$value }
+    } catch {}
+    return ""
+}
+
+function Get-BoundedReleaseErrorBody {
+    param([object]$Response, [int]$MaxBytes = 65536)
+    if (-not $Response) { return $null }
+    try {
+        $body = $null
+        if ($Response.PSObject.Properties['Content'] -and
+            $Response.Content -is [string]) {
+            $body = [string]$Response.Content
+        } elseif ($Response.PSObject.Properties['Content'] -and
+            $Response.Content -and
+            $Response.Content.PSObject.Methods['ReadAsStringAsync']) {
+            $readTask = $Response.Content.ReadAsStringAsync()
+            $body = [string]$readTask.GetAwaiter().GetResult()
+        } elseif ($Response.PSObject.Methods['GetResponseStream']) {
+            $stream = $Response.GetResponseStream()
+            if ($stream) {
+                $reader = [System.IO.StreamReader]::new(
+                    $stream, [System.Text.Encoding]::UTF8, $true, 1024, $true
+                )
+                try { $body = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$body)) { return $null }
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes([string]$body)
+        if ($bytes.Length -gt $MaxBytes) { return $null }
+        return [string]$body
+    } catch { return $null }
+}
+
+function Get-ReleaseFailureFingerprint {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedPath,
+        [Parameter(Mandatory = $true)][int]$StatusCode,
+        [string]$ObservedRoute,
+        [string]$Resource,
+        [string]$FailureStage,
+        [string]$ContentType,
+        [AllowNull()][string]$Body
+    )
+    $basePath = ($ExpectedPath -split '\?', 2)[0]
+    $unsafeStages = @("exception", "framework_fallback", "ssr")
+    if ($StatusCode -lt 400 -or $ObservedRoute -cne $basePath -or
+        [string]::IsNullOrWhiteSpace($Resource) -or
+        [string]::IsNullOrWhiteSpace($FailureStage) -or
+        $FailureStage -in $unsafeStages -or
+        $ContentType -notmatch '^application/(?:[a-z0-9.+-]*\+)?json(?:\s*;|$)' -or
+        [string]::IsNullOrWhiteSpace($Body)) {
+        return [pscustomobject]@{
+            available = $false; digest = $null; machine_reason = $null
+            hard_safety_failure = $false
+        }
+    }
+    try {
+        $payload = $Body | ConvertFrom-Json -ErrorAction Stop
+        if (-not $payload -or -not $payload.PSObject.Properties) { throw "NOT_OBJECT" }
+        $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
+        if ($bodyBytes.Length -gt 65536) { throw "BODY_TOO_LARGE" }
+        $bodyDigest = Get-Sha256BytesHex -Bytes $bodyBytes
+        $machineReason = ""
+        foreach ($field in @("error_code", "code", "reason")) {
+            if ($payload.PSObject.Properties[$field] -and
+                $payload.$field -is [string] -and
+                [string]$payload.$field -match '^[A-Z][A-Z0-9_]{2,127}$') {
+                $machineReason = [string]$payload.$field
+                break
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($machineReason)) {
+            throw "MACHINE_REASON_REQUIRED"
+        }
+        $material = @(
+            "release-debt-fingerprint-v1", $basePath, [string]$StatusCode,
+            $Resource, $FailureStage, $bodyDigest
+        ) -join "`n"
+        $digest = Get-Sha256BytesHex -Bytes `
+            ([System.Text.Encoding]::UTF8.GetBytes($material))
+        $hardReason = $machineReason -match `
+            '(AUTH|UNAUTHORIZED|FORBIDDEN|IDENTITY|INTEGRITY|CORRUPT|INVARIANT|SCHEMA|CAPABILITY|MIGRATION|RECEIPT)'
+        $hardStage = $FailureStage -in @(
+            "authorization", "release_validation_identity", "json_validation"
+        )
+        return [pscustomobject]@{
+            available = $true; digest = $digest
+            machine_reason = $machineReason
+            hard_safety_failure = [bool]($hardReason -or $hardStage)
+        }
+    } catch {
+        return [pscustomobject]@{
+            available = $false; digest = $null; machine_reason = $null
+            hard_safety_failure = $false
+        }
+    }
+}
+
 function Get-ExactVersionJsonObservation {
     param(
         [Parameter(Mandatory = $true)][string]$VersionId,
@@ -2816,6 +2933,9 @@ function Get-ExactVersionJsonObservation {
             passed = $true
             identity_passed = $identityPassed
             failure_class = $null
+            failure_fingerprint = $null
+            failure_fingerprint_available = $false
+            hard_safety_failure = $false
             payload = $read.payload
             observed_version_id = [string]$read.observed_version_id
             observed_git_sha = [string]$read.observed_git_sha
@@ -2824,14 +2944,29 @@ function Get-ExactVersionJsonObservation {
         $statusCode = 0
         $observedVersion = ""
         $observedGit = ""
+        $observedRoute = ""
+        $resource = ""
+        $failureStage = ""
+        $contentType = ""
+        $body = $null
         try {
             $response = $_.Exception.Response
             if ($response) {
                 $statusCode = [int]$response.StatusCode
-                $observedVersion = [string]$response.Headers["X-Aurum-Worker-Version"]
-                $observedGit = [string]$response.Headers["X-Aurum-Git-SHA"]
+                $observedVersion = Get-ReleaseResponseHeaderValue $response `
+                    "X-Aurum-Worker-Version"
+                $observedGit = Get-ReleaseResponseHeaderValue $response "X-Aurum-Git-SHA"
+                $observedRoute = Get-ReleaseResponseHeaderValue $response "X-Aurum-Route"
+                $resource = Get-ReleaseResponseHeaderValue $response "X-Aurum-Resource"
+                $failureStage = Get-ReleaseResponseHeaderValue $response `
+                    "X-Aurum-Failure-Stage"
+                $contentType = Get-ReleaseResponseHeaderValue $response "Content-Type"
+                $body = Get-BoundedReleaseErrorBody $response
             }
         } catch {}
+        $fingerprint = Get-ReleaseFailureFingerprint -ExpectedPath $Path `
+            -StatusCode $statusCode -ObservedRoute $observedRoute -Resource $resource `
+            -FailureStage $failureStage -ContentType $contentType -Body $body
         $identityPassed = [bool](
             ([string]$observedVersion -eq $VersionId -or
              ($AllowLegacyIdentity -and [string]::IsNullOrWhiteSpace($observedVersion))) -and
@@ -2843,6 +2978,11 @@ function Get-ExactVersionJsonObservation {
             identity_passed = $identityPassed
             failure_class = if ($statusCode -gt 0) { "HTTP_$statusCode" } `
                 else { "EXACT_VERSION_READ_FAILED" }
+            failure_fingerprint = [string]$fingerprint.digest
+            failure_fingerprint_available = [bool]$fingerprint.available
+            failure_reason_code = [string]$fingerprint.machine_reason
+            failure_stage = $failureStage
+            hard_safety_failure = [bool]$fingerprint.hard_safety_failure
             payload = $null
             observed_version_id = $observedVersion
             observed_git_sha = $observedGit
@@ -3190,13 +3330,34 @@ function Test-CandidateDataParity {
             continue
         }
         if (-not $stableRead.passed -or -not $candidateRead.passed) {
+            $equivalentDebt = [bool](
+                $acceptanceClass -eq "C" -and -not $stableRead.passed -and
+                -not $candidateRead.passed -and
+                -not [bool]$candidateRead.hard_safety_failure -and
+                [bool]$stableRead.failure_fingerprint_available -and
+                [bool]$candidateRead.failure_fingerprint_available -and
+                [string]$stableRead.failure_fingerprint -ceq
+                    [string]$candidateRead.failure_fingerprint
+            )
             $matchingDebt = [bool](
                 $acceptanceClass -eq "C" -and -not $stableRead.passed -and (
                     $candidateRead.passed -or
-                    [string]$candidateRead.failure_class -eq
-                        [string]$stableRead.failure_class
+                    $equivalentDebt
                 )
             )
+            $failureReason = if ($matchingDebt) {
+                if ($candidateRead.passed) { "CANDIDATE_IMPROVES_STABLE_DEBT" }
+                else { "UNCHANGED_EXISTING_STABLE_DEBT" }
+            } elseif ([bool]$candidateRead.hard_safety_failure) {
+                "CANDIDATE_HARD_SAFETY_FAILURE"
+            } elseif ($acceptanceClass -eq "B") {
+                "CHANGED_BOUNDARY_FAILURE"
+            } elseif ($acceptanceClass -eq "C" -and $stableRead.passed) {
+                "CANDIDATE_REGRESSION"
+            } elseif ($acceptanceClass -eq "C" -and -not $stableRead.passed -and
+                -not $candidateRead.passed) {
+                "CANDIDATE_DEBT_EQUIVALENCE_UNPROVEN"
+            } else { "EXACT_VERSION_READ_FAILED" }
             $results += [pscustomobject]@{
                 route = $path; acceptance_class = $acceptanceClass
                 state = if ($matchingDebt) {
@@ -3205,14 +3366,13 @@ function Test-CandidateDataParity {
                 } else { "FAILED" }
                 passed = $matchingDebt
                 blocking = -not $matchingDebt
-                reason = if ($matchingDebt) {
-                    if ($candidateRead.passed) { "CANDIDATE_IMPROVES_STABLE_DEBT" }
-                    else { "UNCHANGED_EXISTING_STABLE_DEBT" }
-                } elseif ($acceptanceClass -eq "C" -and $stableRead.passed) {
-                    "CANDIDATE_REGRESSION"
-                } else { "EXACT_VERSION_READ_FAILED" }
+                reason = $failureReason
                 stable_failure = [string]$stableRead.failure_class
                 candidate_failure = [string]$candidateRead.failure_class
+                stable_failure_fingerprint = [string]$stableRead.failure_fingerprint
+                candidate_failure_fingerprint = [string]$candidateRead.failure_fingerprint
+                stable_failure_reason_code = [string]$stableRead.failure_reason_code
+                candidate_failure_reason_code = [string]$candidateRead.failure_reason_code
                 stable_diagnostic = [string]$stableRead.diagnostic
                 candidate_diagnostic = [string]$candidateRead.diagnostic
             }

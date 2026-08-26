@@ -146,6 +146,12 @@ ID and Git SHA. Authentication, authorization, malformed identity, invalid ref,
 missing commit, and main-reachability failures remain deterministic and never
 become retryable merely because a transport retry path exists.
 
+Required CI is repository trust evidence, not deployed Stable runtime debt.
+Progressive delivery never converts a red latest exact-SHA check into Class C.
+If a repository test represents a known production defect, its fixture must
+model that defect explicitly while continuing to prove the intended contract;
+Release Control must not accept a failing test run as unchanged Stable debt.
+
 Worker validation is planned from `web/worker-validation-manifest.json`, the
 authoritative inventory of route method, hosting boundary, criticality,
 read/write ownership, Windows transport producers, validation strategy, fixture owner, CPU requirement, and
@@ -266,6 +272,16 @@ debt to disappear. Gates have three classes:
   the same unrelated failure, the Candidate does not worsen it, and no A
   invariant is involved. Candidate-only failure, ambiguity, or worsening is a
   regression and blocks.
+
+Two failed Class-C reads are equivalent only when both exact identities pass
+and the bounded machine evidence matches: route, HTTP status, stable
+machine-readable error code, Worker resource, non-generic failure stage, and a
+SHA-256 digest of the bounded JSON response bytes. The response body is never
+persisted in release evidence. Missing or untyped reasons, oversized/non-JSON
+responses, generic exception/framework/SSR stages, or any fingerprint mismatch
+make equivalence unknown and therefore blocking. Candidate authentication,
+identity, integrity, corruption, invariant, schema, capability, migration, or
+receipt failures remain hard blockers even if Stable reports the same code.
 
 `/api/status` remains a hard critical contract. Other semantic projections use
 the same manifest ownership classification as directed Worker validation.

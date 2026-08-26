@@ -1107,7 +1107,12 @@ def test_candidate_data_parity_rejects_unexpected_empty_dataset(tmp_path) -> Non
     assert result == "CANDIDATE_DATASET_UNEXPECTEDLY_EMPTY,False,"
 
 
-def _scoped_debt_parity_contract(audit_failure: str, changed: bool) -> str:
+def _scoped_debt_parity_contract(
+    *, stable_fails: bool, candidate_fails: bool,
+    stable_fingerprint: str = "same-debt", candidate_fingerprint: str = "same-debt",
+    changed: bool = False, candidate_identity: bool = True,
+    candidate_hard_failure: bool = False,
+) -> str:
     status_json = json.dumps(_status_payload(), separators=(",", ":"))
     contract_routes = (
         "@([pscustomobject]@{path='/api/audit';auth_required=$false})"
@@ -1119,9 +1124,20 @@ def _scoped_debt_parity_contract(audit_failure: str, changed: bool) -> str:
         "$candidate=[pscustomobject]@{worker_version_id='candidate';git_sha='candidate-git'};"
         f"$plan=[pscustomobject]@{{contract_routes={contract_routes}}};"
         "function Get-ExactVersionJsonObservation{param($VersionId,$GitSha,$Path);"
-        f"if($Path -eq '/api/audit' -and ({audit_failure})){{"
-        "return [pscustomobject]@{passed=$false;identity_passed=$true;"
-        "failure_class='HTTP_503';diagnostic='existing debt'}};"
+        f"$fails=if($VersionId -eq 'stable'){{${str(stable_fails).lower()}}}"
+        f"else{{${str(candidate_fails).lower()}}};"
+        "if($Path -eq '/api/audit' -and $fails){"
+        f"$fingerprint=if($VersionId -eq 'stable'){{'{stable_fingerprint}'}}"
+        f"else{{'{candidate_fingerprint}'}};"
+        f"$identity=if($VersionId -eq 'candidate'){{${str(candidate_identity).lower()}}}"
+        "else{$true};"
+        f"$hard=if($VersionId -eq 'candidate'){{${str(candidate_hard_failure).lower()}}}"
+        "else{$false};"
+        "return [pscustomobject]@{passed=$false;"
+        "failure_class='HTTP_503';failure_fingerprint_available=$true;"
+        "failure_fingerprint=$fingerprint;hard_safety_failure=$hard;"
+        "failure_reason_code=if($hard){'DATA_INTEGRITY_VIOLATION'}else{'UPSTREAM_TIMEOUT'};"
+        "diagnostic='bounded failure';identity_passed=$identity}};"
         f"$payload=if($Path -eq '/api/status'){{'{status_json}'|ConvertFrom-Json}}"
         "elseif($Path -eq '/api/audit'){[pscustomobject]@{generated_at='2026-08-21T10:20:00Z'}}"
         "else{[pscustomobject]@{items=@(1)}};"
@@ -1134,29 +1150,100 @@ def _scoped_debt_parity_contract(audit_failure: str, changed: bool) -> str:
     )
 
 
-def test_unrelated_unchanged_stable_debt_is_visible_and_nonblocking(tmp_path) -> None:
-    result = _run_control_center_contract(
-        tmp_path, _scoped_debt_parity_contract("$true", False),
-    )
-    assert result == (
-        "True,C,EXISTING_STABLE_DEBT,UNCHANGED_EXISTING_STABLE_DEBT,1"
-    )
-
-
 @pytest.mark.parametrize(
-    ("audit_failure", "changed", "expected"),
+    ("kwargs", "expected"),
     (
-        ("$VersionId -eq 'candidate'", False, "False,C,FAILED,CANDIDATE_REGRESSION,0"),
-        ("$true", True, "False,B,FAILED,EXACT_VERSION_READ_FAILED,0"),
+        (
+            {"stable_fails": True, "candidate_fails": True},
+            "True,C,EXISTING_STABLE_DEBT,UNCHANGED_EXISTING_STABLE_DEBT,1",
+        ),
+        (
+            {"stable_fails": True, "candidate_fails": True,
+             "candidate_fingerprint": "different-debt"},
+            "False,C,FAILED,CANDIDATE_DEBT_EQUIVALENCE_UNPROVEN,0",
+        ),
+        (
+            {"stable_fails": True, "candidate_fails": False},
+            "True,C,STABLE_DEBT_IMPROVED,CANDIDATE_IMPROVES_STABLE_DEBT,1",
+        ),
+        (
+            {"stable_fails": False, "candidate_fails": True},
+            "False,C,FAILED,CANDIDATE_REGRESSION,0",
+        ),
+        (
+            {"stable_fails": True, "candidate_fails": True, "changed": True},
+            "False,B,FAILED,CHANGED_BOUNDARY_FAILURE,0",
+        ),
+        (
+            {"stable_fails": True, "candidate_fails": True,
+             "candidate_hard_failure": True},
+            "False,C,FAILED,CANDIDATE_HARD_SAFETY_FAILURE,0",
+        ),
+        (
+            {"stable_fails": True, "candidate_fails": True,
+             "candidate_identity": False},
+            "False,C,FAILED,EXACT_VERSION_IDENTITY_MISMATCH,0",
+        ),
     ),
 )
-def test_candidate_regression_or_changed_boundary_failure_still_blocks(
-    tmp_path, audit_failure: str, changed: bool, expected: str,
+def test_scoped_debt_requires_proven_equivalence_without_weakening_safety(
+    tmp_path, kwargs: dict[str, bool | str], expected: str,
 ) -> None:
     result = _run_control_center_contract(
-        tmp_path, _scoped_debt_parity_contract(audit_failure, changed),
+        tmp_path, _scoped_debt_parity_contract(**kwargs),
     )
     assert result == expected
+
+
+def test_failure_fingerprint_is_bounded_machine_evidence(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$sameA=Get-ReleaseFailureFingerprint '/api/audit' 503 '/api/audit' "
+        "'audit' 'd1_read' 'application/json; charset=utf-8' "
+        "'{\"error_code\":\"UPSTREAM_TIMEOUT\"}';"
+        "$sameB=Get-ReleaseFailureFingerprint '/api/audit' 503 '/api/audit' "
+        "'audit' 'd1_read' 'application/json; charset=utf-8' "
+        "'{\"error_code\":\"UPSTREAM_TIMEOUT\"}';"
+        "$different=Get-ReleaseFailureFingerprint '/api/audit' 503 '/api/audit' "
+        "'audit' 'exception' 'application/json' "
+        "'{\"error\":\"request failed\",\"request_id\":\"volatile\"}';"
+        "$untyped=Get-ReleaseFailureFingerprint '/api/audit' 503 '/api/audit' "
+        "'audit' 'd1_read' 'application/json' "
+        "'{\"error\":\"database unavailable\"}';"
+        "$integrity=Get-ReleaseFailureFingerprint '/api/audit' 503 '/api/audit' "
+        "'audit' 'd1_read' 'application/json' "
+        "'{\"error_code\":\"DATA_INTEGRITY_VIOLATION\"}';"
+        "$auth=Get-ReleaseFailureFingerprint '/api/audit' 403 '/api/audit' "
+        "'audit' 'authorization' 'application/json' "
+        "'{\"error_code\":\"ACCESS_DENIED\"}';"
+        'Write-Output "$($sameA.available),$($sameA.digest -eq $sameB.digest),'
+        '$($sameA.machine_reason),$($different.available),$($untyped.available),'
+        '$($integrity.hard_safety_failure),$($auth.hard_safety_failure)"',
+    )
+    assert result == "True,True,UPSTREAM_TIMEOUT,False,False,True,True"
+
+
+def test_failure_fingerprint_reads_bounded_http_response_evidence(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "Add-Type -AssemblyName System.Net.Http;"
+        "$response=[System.Net.Http.HttpResponseMessage]::new(503);"
+        "$response.Headers.Add('X-Aurum-Route','/api/audit');"
+        "$response.Headers.Add('X-Aurum-Resource','audit');"
+        "$response.Headers.Add('X-Aurum-Failure-Stage','d1_read');"
+        "$response.Content=[System.Net.Http.StringContent]::new("
+        "'{\"error_code\":\"UPSTREAM_TIMEOUT\"}',"
+        "[System.Text.Encoding]::UTF8,'application/json');"
+        "$body=Get-BoundedReleaseErrorBody $response;"
+        "$contentType=Get-ReleaseResponseHeaderValue $response 'Content-Type';"
+        "$fingerprint=Get-ReleaseFailureFingerprint '/api/audit' 503 "
+        "(Get-ReleaseResponseHeaderValue $response 'X-Aurum-Route') "
+        "(Get-ReleaseResponseHeaderValue $response 'X-Aurum-Resource') "
+        "(Get-ReleaseResponseHeaderValue $response 'X-Aurum-Failure-Stage') "
+        "$contentType $body;$response.Dispose();"
+        'Write-Output "$($fingerprint.available),$($fingerprint.machine_reason)"',
+    )
+    assert result == "True,UPSTREAM_TIMEOUT"
 
 
 def _legacy_parity_contract(
