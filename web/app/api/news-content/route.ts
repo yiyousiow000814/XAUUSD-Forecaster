@@ -137,7 +137,7 @@ export async function POST(request: Request) {
       }
       return releaseValidationResponse(validation, {
         body: "bounded-read", json: "d1-json1+json-each",
-        transformed: { items: total, prepared_statements: total + 2 },
+        transformed: { items: total, prepared_statements: total + 3 },
         mutation_boundary: "news-generation-detail-stage",
       });
     }

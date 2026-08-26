@@ -53,7 +53,11 @@ const manifest = async (digit, details, indexes, overrides = {}) => ({
   withdrawal_count: 0, source_digest: hash(`source-${digit}`),
   expected_receipt_digest: await receipt(details, indexes), ...overrides,
 });
-const database = () => new D1TestDatabase(["0022_news_projection_generation.sql"]);
+const database = () => new D1TestDatabase([
+  "0001_daily_epoch.sql", "0002_hard_bishop.sql",
+  "0003_news_index_lookup.sql", "0007_bounded_news_archive.sql",
+  "0022_news_projection_generation.sql",
+]);
 
 test("shares canonical receipt vectors with the Python producer", async () => {
   assert.equal(receiptVectors.contract_version, NEWS_PROJECTION_CONTRACT_VERSION);
@@ -102,6 +106,8 @@ test("stages detail before index and atomically activates one receipt-backed gen
   await stageNewsProjectionBatch(db, "index", id("a"), 0, indexes);
   const activated = await activateNewsProjection(db, id("a"));
   assert.equal(activated.index_count, 2);
+  assert.equal(db.database.prepare("SELECT count(*) total FROM news_details").get().total, 2);
+  assert.equal(db.database.prepare("SELECT count(*) total FROM news_index").get().total, 2);
   assert.equal((await readNewsProjectionHealth(db)).verified_complete, true);
   let pagePrepareCount = 0;
   const originalPrepare = db.prepare.bind(db);
@@ -208,4 +214,44 @@ test("retains only current plus one staging while preparing a third generation",
   assert.equal(generations.filter(row => row.state === "STAGING").length, 1);
   assert.equal(generations.some(row => row.generation_id === id("a")), false);
   assert.equal(generations.some(row => row.generation_id === id("b")), true);
+});
+
+test("keeps the rollback legacy identity set equal across replacement activations", async () => {
+  const db = database();
+  const firstDetails = [detail("1"), detail("2")];
+  const firstIndexes = [index("1"), index("2")];
+  await prepareNewsProjection(db, await manifest("a", firstDetails, firstIndexes));
+  await stageNewsProjectionBatch(db, "detail", id("a"), 0, firstDetails);
+  await stageNewsProjectionBatch(db, "index", id("a"), 0, firstIndexes);
+  await activateNewsProjection(db, id("a"));
+
+  const replacementDetails = [detail("2")];
+  const replacementIndexes = [index("2")];
+  await prepareNewsProjection(
+    db, await manifest("b", replacementDetails, replacementIndexes),
+  );
+  await stageNewsProjectionBatch(db, "detail", id("b"), 0, replacementDetails);
+  await stageNewsProjectionBatch(db, "index", id("b"), 0, replacementIndexes);
+  assert.equal(
+    db.database.prepare(
+      "SELECT count(*) total FROM news_index WHERE json_extract(payload,'$.annotation_status')<>'SUPERSEDED_CONTRACT'",
+    ).get().total,
+    2,
+    "staging remains a bounded legacy upsert and does not supersede the active set",
+  );
+  await activateNewsProjection(db, id("b"));
+
+  const legacyCurrent = db.database.prepare(
+    "SELECT detail_key FROM news_index WHERE json_extract(payload,'$.annotation_status')<>'SUPERSEDED_CONTRACT' ORDER BY detail_key",
+  ).all().map(row => row.detail_key);
+  const projectionCurrent = db.database.prepare(
+    "SELECT detail_key FROM news_projection_index WHERE generation_id=? ORDER BY detail_key",
+  ).all(id("b")).map(row => row.detail_key);
+  assert.deepEqual(legacyCurrent, projectionCurrent);
+  const superseded = JSON.parse(db.database.prepare(
+    "SELECT payload FROM news_index WHERE detail_key=?",
+  ).get(id("1")).payload);
+  assert.equal(superseded.annotation_status, "SUPERSEDED_CONTRACT");
+  assert.equal(superseded.model_visibility, "MODEL_INELIGIBLE");
+  assert.equal(superseded.parsed_at, null);
 });
