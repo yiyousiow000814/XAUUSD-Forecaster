@@ -495,10 +495,8 @@ function Enter-ReleaseTransactionLock {
                     [string]$ownerProcess.process_start_token
             ))
         }
-        $acquired = [DateTimeOffset]::MinValue
-        $ageKnown = $owner -and [DateTimeOffset]::TryParse(
-            [string]$owner.acquired_at, [ref]$acquired
-        )
+        $acquired = ConvertTo-ReleaseTimestampUtc -Value $owner.acquired_at
+        $ageKnown = $owner -and $acquired -ne [DateTimeOffset]::MinValue
         $lockCreated = [DateTimeOffset](Get-Item -LiteralPath $releaseLockPath).CreationTimeUtc
         $stale = (-not $ownerAlive) -and (
             $ageKnown -or
@@ -1474,8 +1472,8 @@ function Assert-CoordinatedMigrationReceipt {
             (Get-CoordinatedMigrationReceiptDigest -Core $core)) {
         throw "MIGRATION_RECEIPT_TAMPERED"
     }
-    $expires = [DateTimeOffset]::MinValue
-    if (-not [DateTimeOffset]::TryParse([string]$receipt.expires_at, [ref]$expires) -or
+    $expires = ConvertTo-ReleaseTimestampUtc -Value $receipt.expires_at
+    if ($expires -eq [DateTimeOffset]::MinValue -or
         $expires -le [DateTimeOffset]::UtcNow) {
         throw "MIGRATION_RECEIPT_STALE"
     }
@@ -3172,6 +3170,13 @@ function ConvertTo-RequiredReleaseTime {
     if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
         throw "CANDIDATE_STATUS_SCHEMA_MISMATCH"
     }
+    if ($Value -is [DateTime] -or $Value -is [DateTimeOffset]) {
+        $typed = ConvertTo-ReleaseTimestampUtc -Value $Value
+        if ($typed -eq [DateTimeOffset]::MinValue) {
+            throw "CANDIDATE_STATUS_SCHEMA_MISMATCH"
+        }
+        return $typed
+    }
     $parsed = [DateTimeOffset]::MinValue
     if (-not [DateTimeOffset]::TryParse(
         [string]$Value,
@@ -3721,10 +3726,9 @@ function Test-BroadcastLiveDeliveryReadiness {
     param([Parameter(Mandatory = $true)][string]$ExpectedRevision)
     try {
         $health = Invoke-RestMethod -Method Get -Uri $broadcastHealthUrl -TimeoutSec 15
-        $publishedAt = [DateTimeOffset]::MinValue
-        $publishedValid = [DateTimeOffset]::TryParse(
-            [string]$health.latest_published_at, [ref]$publishedAt
-        )
+        $publishedAt = ConvertTo-ReleaseTimestampUtc `
+            -Value $health.latest_published_at
+        $publishedValid = $publishedAt -ne [DateTimeOffset]::MinValue
         $age = if ($publishedValid) {
             [DateTimeOffset]::UtcNow - $publishedAt
         } else { [TimeSpan]::MaxValue }
@@ -4439,10 +4443,7 @@ function Invoke-CandidateDiscovery {
 function Start-CandidateDiscovery {
     $state = Get-ReleaseControlState
     if (-not $state) { return }
-    $lastCheck = [DateTimeOffset]::MinValue
-    if ($state.last_candidate_check) {
-        [DateTimeOffset]::TryParse([string]$state.last_candidate_check, [ref]$lastCheck) | Out-Null
-    }
+    $lastCheck = ConvertTo-ReleaseTimestampUtc -Value $state.last_candidate_check
     if (([DateTimeOffset]::UtcNow - $lastCheck) -lt $candidateDiscoveryInterval) { return }
     $arguments = @(
         "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
@@ -5113,12 +5114,10 @@ function Get-RuntimeHeartbeat {
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
     try {
         $heartbeat = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
-        $lastSuccess = [DateTimeOffset]::MinValue
+        $lastSuccess = ConvertTo-ReleaseTimestampUtc -Value $heartbeat.last_success
         if ([string]$heartbeat.service -ne $ServiceName -or
             [string]$heartbeat.state -notin $AllowedStates -or
-            -not [DateTimeOffset]::TryParse(
-                [string]$heartbeat.last_success, [ref]$lastSuccess
-            )) { return $null }
+            $lastSuccess -eq [DateTimeOffset]::MinValue) { return $null }
         return [pscustomobject]@{
             LastSuccess = $lastSuccess
             State = [string]$heartbeat.state
@@ -5171,10 +5170,8 @@ function Test-CodeReloadHealth {
     if (-not (Test-Path -LiteralPath $statusFile)) { return $false }
     try {
         $syncStatus = Get-Content -LiteralPath $statusFile -Raw | ConvertFrom-Json
-        $lastAttempt = [DateTimeOffset]::MinValue
-        if (-not [DateTimeOffset]::TryParse(
-            [string]$syncStatus.last_attempt, [ref]$lastAttempt
-        )) { return $false }
+        $lastAttempt = ConvertTo-ReleaseTimestampUtc -Value $syncStatus.last_attempt
+        if ($lastAttempt -eq [DateTimeOffset]::MinValue) { return $false }
         return (
             $lastAttempt -ge $ReloadStarted -and
             [string]$syncStatus.status -in @("OK", "DEGRADED")
@@ -5838,10 +5835,8 @@ function Test-RuntimeObservation {
     }
     $revision = [string]$state.observing_revision
     $previousRevision = [string]$state.previous_revision
-    $started = [DateTimeOffset]::MinValue
-    $startedValid = [DateTimeOffset]::TryParse(
-        [string]$state.observation_started_at, [ref]$started
-    )
+    $started = ConvertTo-ReleaseTimestampUtc -Value $state.observation_started_at
+    $startedValid = $started -ne [DateTimeOffset]::MinValue
     if (-not $startedValid) {
         Invoke-RuntimeRollback -FailedRevision $revision `
             -PreviousRevision $previousRevision `
@@ -5851,20 +5846,17 @@ function Test-RuntimeObservation {
     $failure = $null
     $healthBoundary = $started
     if ($state.observation_health_boundary_at) {
-        $candidateBoundary = [DateTimeOffset]::MinValue
-        if ([DateTimeOffset]::TryParse(
-            [string]$state.observation_health_boundary_at, [ref]$candidateBoundary
-        )) {
+        $candidateBoundary = ConvertTo-ReleaseTimestampUtc `
+            -Value $state.observation_health_boundary_at
+        if ($candidateBoundary -ne [DateTimeOffset]::MinValue) {
             $healthBoundary = $candidateBoundary
         }
     }
     if (-not (Test-CodeReloadHealth -ReloadStarted $healthBoundary)) {
         $failure = "reload health check failed"
     }
-    $readyAt = [DateTimeOffset]::MinValue
-    $readyValid = $state.observation_ready_at -and [DateTimeOffset]::TryParse(
-        [string]$state.observation_ready_at, [ref]$readyAt
-    )
+    $readyAt = ConvertTo-ReleaseTimestampUtc -Value $state.observation_ready_at
+    $readyValid = $readyAt -ne [DateTimeOffset]::MinValue
     if (-not $failure -and -not $readyValid) {
         if (Test-CodeReloadHealth $healthBoundary @("RUNNING")) {
             $readyAt = [DateTimeOffset]::UtcNow
@@ -5887,11 +5879,9 @@ function Test-RuntimeObservation {
         Where-Object { $null -ne $_ })
     if (-not $failure -and $deferredObligations.Count -gt 0 -and
         [string]$state.observation_deferred_projection_state -ne "PASSED") {
-        $projectionBoundary = [DateTimeOffset]::MinValue
-        if (-not [DateTimeOffset]::TryParse(
-            [string]$state.observation_projection_boundary_at,
-            [ref]$projectionBoundary
-        )) {
+        $projectionBoundary = ConvertTo-ReleaseTimestampUtc `
+            -Value $state.observation_projection_boundary_at
+        if ($projectionBoundary -eq [DateTimeOffset]::MinValue) {
             $failure = "DEFERRED_PROJECTION_BOUNDARY_INVALID"
         } else {
             $release = Get-ReleaseControlState
@@ -5974,16 +5964,14 @@ function Test-RuntimeObservation {
     $decisionTimes = @(Get-RuntimeDecisionTimes)
     $lastDecision = [string]$state.observation_last_decision_time
     $cycles = [int]$state.observation_success_cycles
-    $lastInstant = [DateTimeOffset]::MinValue
-    $lastValid = [DateTimeOffset]::TryParse($lastDecision, [ref]$lastInstant)
+    $lastInstant = ConvertTo-ReleaseTimestampUtc -Value $lastDecision
+    $lastValid = $lastInstant -ne [DateTimeOffset]::MinValue
     $referenceInstant = if ($lastValid) { $lastInstant } else { $started }
     $referenceCycle = [Math]::Floor($referenceInstant.ToUnixTimeSeconds() / 300)
     $newDecisions = @()
     foreach ($decisionTime in $decisionTimes) {
-        $decisionInstant = [DateTimeOffset]::MinValue
-        if (-not [DateTimeOffset]::TryParse(
-            [string]$decisionTime, [ref]$decisionInstant
-        )) { continue }
+        $decisionInstant = ConvertTo-ReleaseTimestampUtc -Value $decisionTime
+        if ($decisionInstant -eq [DateTimeOffset]::MinValue) { continue }
         $decisionCycle = [Math]::Floor($decisionInstant.ToUnixTimeSeconds() / 300)
         if ($decisionInstant -gt $referenceInstant -and
             $decisionCycle -gt $referenceCycle) {
@@ -6057,17 +6045,13 @@ function Get-BrokerMarketSession {
     if (-not (Test-Path -LiteralPath $path)) { return $null }
     try {
         $session = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
-        $observedAt = [DateTimeOffset]::MinValue
-        if (-not [DateTimeOffset]::TryParse(
-            [string]$session.observed_at, [ref]$observedAt
-        )) { return $null }
+        $observedAt = ConvertTo-ReleaseTimestampUtc -Value $session.observed_at
+        if ($observedAt -eq [DateTimeOffset]::MinValue) { return $null }
         $now = [DateTimeOffset]::UtcNow
         if ($observedAt -gt $now.AddSeconds(5) -or
             ($now - $observedAt).TotalSeconds -gt 20) { return $null }
-        $closesAt = [DateTimeOffset]::MinValue
-        $closesAtValid = [DateTimeOffset]::TryParse(
-            [string]$session.next_close_time, [ref]$closesAt
-        )
+        $closesAt = ConvertTo-ReleaseTimestampUtc -Value $session.next_close_time
+        $closesAtValid = $closesAt -ne [DateTimeOffset]::MinValue
         return [pscustomobject]@{
             ObservedAt = $observedAt
             IsOpen = $session.is_open -eq $true
@@ -6111,10 +6095,9 @@ function Get-ServiceState {
         if (-not (Test-Path -LiteralPath $statusPath)) { return "DEGRADED" }
         try {
             $publisher = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
-            $lastSuccess = [DateTimeOffset]::MinValue
-            $fresh = [DateTimeOffset]::TryParse(
-                [string]$publisher.last_success, [ref]$lastSuccess
-            ) -and ([DateTimeOffset]::UtcNow - $lastSuccess) -le $broadcastFreshnessThreshold
+            $lastSuccess = ConvertTo-ReleaseTimestampUtc -Value $publisher.last_success
+            $fresh = $lastSuccess -ne [DateTimeOffset]::MinValue -and
+                ([DateTimeOffset]::UtcNow - $lastSuccess) -le $broadcastFreshnessThreshold
             if ([string]$publisher.state -eq "RUNNING" -and $fresh) { return "RUNNING" }
         } catch {}
         return "DEGRADED"
@@ -6184,11 +6167,13 @@ function Get-ServiceState {
         try {
             $syncStatus = Get-Content -LiteralPath $statusFile -Raw | ConvertFrom-Json
             $lastSuccess = if ($syncStatus.last_success) {
-                [DateTimeOffset]::Parse($syncStatus.last_success)
+                ConvertTo-ReleaseTimestampUtc -Value $syncStatus.last_success
             } else { $null }
             $lastAttempt = if ($syncStatus.last_attempt) {
-                [DateTimeOffset]::Parse($syncStatus.last_attempt)
+                ConvertTo-ReleaseTimestampUtc -Value $syncStatus.last_attempt
             } else { $null }
+            if ($lastSuccess -eq [DateTimeOffset]::MinValue) { $lastSuccess = $null }
+            if ($lastAttempt -eq [DateTimeOffset]::MinValue) { $lastAttempt = $null }
             if ($syncStatus.last_error -and $lastAttempt -and (
                 -not $lastSuccess -or $lastAttempt -gt $lastSuccess
             )) { return "SYNC ERROR" }
@@ -6516,7 +6501,10 @@ function Assert-CurrentWatchdogHeartbeat {
     try {
         $heartbeat = Get-Content -LiteralPath $watchdogHeartbeatPath -Raw |
             ConvertFrom-Json
-        $observedAt = [DateTimeOffset]::Parse([string]$heartbeat.observed_at)
+        $observedAt = ConvertTo-ReleaseTimestampUtc -Value $heartbeat.observed_at
+        if ($observedAt -eq [DateTimeOffset]::MinValue) {
+            throw "invalid watchdog timestamp"
+        }
     } catch {
         throw "CONTROL_PLANE_CURRENT_WATCHDOG_HEARTBEAT_INVALID"
     }
@@ -7756,7 +7744,8 @@ function Get-ControlCenterSummaryPresentation {
 
     $captured = "--"
     try {
-        $capturedAt = [DateTimeOffset]::Parse([string]$Snapshot.captured_at)
+        $capturedAt = ConvertTo-ReleaseTimestampUtc -Value $Snapshot.captured_at
+        if ($capturedAt -eq [DateTimeOffset]::MinValue) { throw "invalid capture time" }
         $captured = [TimeZoneInfo]::ConvertTimeBySystemTimeZoneId(
             $capturedAt, "Singapore Standard Time"
         ).ToString("HH:mm:ss")

@@ -497,7 +497,9 @@ def test_local_assistant_worker_is_not_installed_or_supervised() -> None:
     assert "assistant" not in control_center.lower()
 
 
-def _run_control_center_contract(tmp_path, body: str) -> str:
+def _run_control_center_contract(
+    tmp_path, body: str, *, powershell: str = "powershell.exe",
+) -> str:
     runtime = tmp_path / "runtime"
     repository = tmp_path / "repository"
     runtime.mkdir(exist_ok=True)
@@ -514,7 +516,7 @@ def _run_control_center_contract(tmp_path, body: str) -> str:
         f"-RepositoryRoot '{repository}'; {body}"
     )
     result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
         capture_output=True, text=True, check=False,
     )
     if result.returncode:
@@ -3141,6 +3143,44 @@ def test_release_timestamp_rejects_malformed_watermark_without_throwing(tmp_path
         'Write-Output "$after,$(Get-ReleaseVersionCreatedAt $version)"',
     )
     assert result == "False,2026-08-26T18:57:10.0000000+00:00"
+
+
+def test_pwsh_json_dates_share_one_culture_invariant_control_boundary(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "[Globalization.CultureInfo]::CurrentCulture='zh-SG';"
+        "$payload='{\"created_on\":\"2026-08-26T11:29:18.0000000+00:00\","
+        "\"expires_at\":\"2026-08-26T12:29:18.0000000+00:00\"}'|ConvertFrom-Json;"
+        "$created=ConvertTo-ReleaseTimestampUtc $payload.created_on;"
+        "$expires=ConvertTo-ReleaseTimestampUtc $payload.expires_at;"
+        'Write-Output "$($payload.created_on.GetType().Name),'
+        '$($created.ToString(\'o\')),$($expires.ToString(\'o\'))"',
+        powershell="pwsh.exe",
+    )
+    assert result == (
+        "DateTime,2026-08-26T11:29:18.0000000+00:00,"
+        "2026-08-26T12:29:18.0000000+00:00"
+    )
+
+
+def test_pwsh_installer_accepts_fresh_exact_watchdog_json_identity(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "[Globalization.CultureInfo]::CurrentCulture='zh-SG';"
+        "$stamp=[DateTimeOffset]::UtcNow.ToString('o');"
+        "$json='{\"observed_at\":\"'+$stamp+'\",\"process_id\":123,'"
+        "+'\"control_bundle_revision\":\"'+('a'*40)+'\",'"
+        "+'\"control_bundle_exact_revision\":true,'"
+        "+'\"control_bundle_hash_verified\":true}';"
+        "New-Item -ItemType Directory -Path (Split-Path $watchdogHeartbeatPath) "
+        "-Force|Out-Null;Set-Content $watchdogHeartbeatPath $json -Encoding UTF8;"
+        "$owner=[pscustomobject]@{process_id=123;process_start_token=''};"
+        "$heartbeat=Assert-CurrentWatchdogHeartbeat -Owner $owner "
+        "-ExpectedRevision ('a'*40);"
+        'Write-Output "$($heartbeat.process_id),$($heartbeat.control_bundle_hash_verified)"',
+        powershell="pwsh.exe",
+    )
+    assert result == "123,True"
 
 
 def test_cloudflare_version_wrapper_enumerates_top_level_wrangler_array(tmp_path) -> None:
