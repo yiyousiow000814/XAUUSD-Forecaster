@@ -10,8 +10,9 @@ Cloudflare without letting optional history delay heartbeat publication.
 
 Dashboard API and Dashboard Sync are separate Python processes. The API uses
 `ThreadingHTTPServer`, a background `DashboardReadModelOwner`, and bounded
-critical-cache refresh threads. Sync has a main heartbeat thread plus one
-single-worker control lane and one single-worker heavy lane.
+critical-cache refresh threads owned by
+`xauusd_forecaster.dashboard.status_cache`. Sync has a main heartbeat thread
+plus one single-worker control lane and one single-worker heavy lane.
 
 | Dimension | Current state |
 |---|---|
@@ -26,6 +27,9 @@ single-worker control lane and one single-worker heavy lane.
 
 `DashboardReadModelOwner` uniquely builds audit, learning, and market-chart
 summary models. `run_dashboard_api.py` owns the local HTTP boundary.
+`StatusSnapshotCache` owns each process-local serialized snapshot body, age,
+single-flight refresh state, and last error. This disposable cache is not
+forecasting evidence authority and does not own any historical builder.
 `run_dashboard_sync.py` owns D1 mirroring and per-target progress. The
 scheduler remains the state-transition owner for audited retry overrides.
 
@@ -68,8 +72,10 @@ their growing builders in request threads.
 
 Local `/api/status` and `/api/critical-status` expose the same fixed recent
 90-minute decision window. A bounded cache refresh may serve a recent
-last-good value while one refresh runs. Sync publishes the critical heartbeat
-before it schedules control or heavy optional work.
+last-good value while one daemon refresh thread per cache instance runs. One
+builder invocation may be in flight per instance; the cache does not add a new
+bound to builder work. Sync publishes the critical heartbeat before it
+schedules control or heavy optional work.
 
 ## 8. Bounded-work mechanisms
 
@@ -104,8 +110,10 @@ A read-model build failure records the resource error and preserves its prior
 known-good payload. Corruption, hash mismatch, or contract mismatch fails that
 resource closed. API critical status remains independent. Sync records failure
 on the failed target/resource; another healthy target and the next heartbeat
-continue. One oversized item fails explicitly instead of silently truncating
-authority.
+continue. A status-cache refresh failure records the error and retains the
+prior body, but serves it only through 90 seconds of age; without a bounded-age
+body the request fails closed and a later request may retry. One oversized item
+fails explicitly instead of silently truncating authority.
 
 ## 11. Restart/recovery behavior
 
@@ -126,6 +134,8 @@ collapse all optional resources into one restart burst.
 
 - `xauusd_forecaster/dashboard_read_models.py`: per-resource model owner,
   atomic replacement, hashes and last-good behavior.
+- `xauusd_forecaster/dashboard/status_cache.py`: process-local serialized
+  snapshot cache, single-flight refresh, bounded last-good, and health state.
 - `xauusd_forecaster/dashboard_payloads.py`: critical and audit contracts.
 - `xauusd_forecaster/dashboard_summaries.py`: indexed summary queries.
 - `xauusd_forecaster/learning_curves.py`: learning resource.
@@ -134,11 +144,12 @@ collapse all optional resources into one restart burst.
 
 ## 14. Relevant tests
 
-`tests/test_dashboard_api.py`, `tests/test_dashboard_payloads.py`,
+`tests/test_dashboard_status_cache.py`, `tests/test_dashboard_api.py`,
+`tests/test_dashboard_payloads.py`,
 `tests/test_dashboard_sync.py`, `tests/test_operational_health.py`,
 `tests/test_runtime_health.py`, and `tests/test_news_scheduler.py` cover first
-paint, resource isolation, byte/page bounds, cursor retry, last-good, and
-audited retry semantics.
+paint, cache single-flight and bounded last-good, resource isolation,
+byte/page bounds, cursor retry, and audited retry semantics.
 
 ## 15. Authoritative contracts/specs
 
