@@ -955,7 +955,8 @@ function Assert-CoordinatedMigrationCapabilityContract {
         "web/drizzle/0022_news_projection_generation.sql",
         "web/drizzle/0023_operator_retry_sync_digest.sql",
         "web/drizzle/0024_seed_bounded_audit_news_metrics.sql",
-        "web/drizzle/0025_seed_legacy_news_reverse_projection.sql"
+        "web/drizzle/0025_seed_legacy_news_reverse_projection.sql",
+        "web/drizzle/0026_reconcile_legacy_news_current_identity.sql"
     )
     $unknown = @($MigrationFiles | Where-Object { $_ -notin $supported })
     if ($unknown.Count -gt 0) {
@@ -979,8 +980,19 @@ function Assert-CoordinatedMigrationCapabilityContract {
             $sql -match '(?im)s\.`projection_state`\s*=\s*''CURRENT''' -and
             $sql -match '(?im)s\.`receipt_digest`\s*=\s*g\.`expected_receipt_digest`' -and
             $sql -notmatch '(?im)\b(DROP|DELETE|REPLACE|TRUNCATE|VACUUM)\b'
+        $isLegacyNewsReconciliation =
+            $file -eq "web/drizzle/0026_reconcile_legacy_news_current_identity.sql" -and
+            $sql -match '(?im)INSERT\s+INTO\s+`news_details`' -and
+            $sql -match '(?im)INSERT\s+INTO\s+`news_index`' -and
+            $sql -match '(?im)UPDATE\s+`news_index`' -and
+            $sql -match '(?im)SUPERSEDED_CONTRACT' -and
+            $sql -match '(?im)NOT\s+EXISTS\s*\(' -and
+            $sql -match '(?im)s\.`projection_state`\s*=\s*''CURRENT''' -and
+            $sql -match '(?im)s\.`receipt_digest`\s*=\s*g\.`expected_receipt_digest`' -and
+            $sql -notmatch '(?im)\b(DROP|DELETE|REPLACE|TRUNCATE|VACUUM)\b'
         if (($sql -match '(?im)\b(DROP|DELETE|UPDATE|REPLACE|TRUNCATE|VACUUM)\b') -and
-            -not $isBoundedAuditHandover -and -not $isLegacyNewsHandover) {
+            -not $isBoundedAuditHandover -and -not $isLegacyNewsHandover -and
+            -not $isLegacyNewsReconciliation) {
             throw "MIGRATION_REVERSE_INCOMPATIBLE:$file"
         }
     }
@@ -1164,6 +1176,13 @@ SELECT
      WHERE COALESCE(json_extract(li.payload,'$.annotation_status'),'') <> 'SUPERSEDED_CONTRACT'
      GROUP BY cluster_id HAVING count(*) > 1))
     AS legacy_duplicate_cluster_count,
+  (SELECT count(*) FROM news_index li
+    WHERE COALESCE(json_extract(li.payload,'$.annotation_status'),'') <> 'SUPERSEDED_CONTRACT'
+      AND NOT EXISTS(
+        SELECT 1 FROM news_projection_index pi
+         WHERE pi.generation_id=s.active_generation_id
+           AND pi.detail_key=li.detail_key))
+    AS legacy_extra_current_index_count,
   s.projection_state,s.active_generation_id,s.snapshot_id,s.source_digest,s.receipt_digest,
  s.index_count,s.detail_count,s.missing_detail_count,s.invariant_violation_count,
  g.state AS generation_state,g.expected_receipt_digest,g.staged_index_count,
@@ -1198,7 +1217,8 @@ FROM news_projection_state s JOIN news_projection_generations g
         [int]$state.legacy_review_violation_count -ne 0 -or
         [int]$state.legacy_parsed_flag_mismatch_count -ne 0 -or
         [int]$state.legacy_candidate_flag_mismatch_count -ne 0 -or
-        [int]$state.legacy_duplicate_cluster_count -ne 0) {
+        [int]$state.legacy_duplicate_cluster_count -ne 0 -or
+        [int]$state.legacy_extra_current_index_count -ne 0) {
         throw "MIGRATION_LEGACY_NEWS_COMPATIBILITY_FAILED"
     }
     $endpoints = Get-CoordinatedMigrationEndpointEvidence `
@@ -1247,6 +1267,7 @@ FROM news_projection_state s JOIN news_projection_generations g
         legacy_news_parsed_flag_mismatch_count = [int]$state.legacy_parsed_flag_mismatch_count
         legacy_news_candidate_flag_mismatch_count = [int]$state.legacy_candidate_flag_mismatch_count
         legacy_news_duplicate_cluster_count = [int]$state.legacy_duplicate_cluster_count
+        legacy_news_extra_current_index_count = [int]$state.legacy_extra_current_index_count
         stable_news_status = [string]$endpoints.stable_news_status
         news_generation_id = [string]$state.active_generation_id
         news_snapshot_id = [string]$state.snapshot_id

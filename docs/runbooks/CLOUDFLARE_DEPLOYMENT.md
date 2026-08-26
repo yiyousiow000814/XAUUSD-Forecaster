@@ -106,7 +106,9 @@ run **Verify Migration** in the Control Center. Do not use **Approve
 Compatibility** for a storage change. The action independently checks the
 remote migration ledger, exact D1 UUID, required tables, indexes and columns,
 legacy Stable and Reverse reads, Candidate identity headers, the bounded legacy
-decision ledger, and News generation/snapshot/digest/count equality. It writes
+decision ledger, and News generation/snapshot/digest/count equality. It also
+requires the active legacy News identity set to equal CURRENT exactly; matching
+counts with one missing and one extra identity fail closed. It writes
 a two-hour exact-Candidate receipt and immediately rechecks it against live
 state. A changed Candidate, Worker Version, database, migration file, ledger,
 schema capability, or projection invalidates the receipt and returns the
@@ -123,6 +125,15 @@ again. Do not repair D1 rows manually. Keep the hold through directed Candidate
 validation; Promote resumes Sync only after Windows and Worker identities have
 cut over. `ServiceStart sync` is the explicit abort path, and an expired or
 different-Candidate hold no longer suppresses watchdog recovery.
+
+For the initial generation handover, apply the final legacy reconciliation only
+after the bootstrap has activated its receipt-verified CURRENT generation. In
+the staged release this is migration `0026_reconcile_legacy_news_current_identity.sql`;
+the earlier `0022` through `0025` migrations must already be in the remote
+ledger, so the normal Wrangler apply command has only `0026` pending. It copies
+the final CURRENT rows and marks legacy-only identities `SUPERSEDED_CONTRACT`
+without deleting details. Never apply `0026` early and then treat its ledger
+entry as evidence that a later bootstrap was reconciled.
 
 Worker-changing Candidates require a Cloudflare API token limited to read-only
 Workers Observability query access. Store it under the exact

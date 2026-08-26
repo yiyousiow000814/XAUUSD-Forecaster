@@ -224,7 +224,9 @@ compatibility acceptance action. It is distinct from the platform-resource
 receipt to the exact Candidate validation key, Git SHA, Worker Version ID,
 Stable identity, D1 database UUID, migration filenames and hashes, applied
 migration ledger, required schema capabilities, retained legacy read
-capabilities, and authoritative projection identity and counts. It must prove
+capabilities, and authoritative projection identity, exact active legacy
+identity-set equality, and counts. Count equality is never a substitute for
+identity equality. It must prove
 the Candidate read path, the still-active Stable read path, and the normal
 Reverse target against the same live database. Pending migrations, missing
 capabilities, destructive or unknown migration contracts, non-current News,

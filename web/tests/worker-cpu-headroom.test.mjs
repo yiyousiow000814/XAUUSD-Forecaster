@@ -79,6 +79,7 @@ test("rebuilds the legacy rollback News projection from verified CURRENT", () =>
   const receiptDigest = "f".repeat(64);
   const detailKey = "a".repeat(64);
   const detailHash = "b".repeat(64);
+  const obsoleteDetailKey = "9".repeat(64);
   const receivedAt = "2026-08-26T00:00:00.000Z";
   const indexPayload = JSON.stringify({
     detail_key: detailKey,
@@ -140,9 +141,39 @@ test("rebuilds the legacy rollback News projection from verified CURRENT", () =>
        parsed,model_candidate,impact_expires_at,mirror_contract,payload,received_at)
      VALUES (?,'旧分类','cluster-1',?,?,0,0,NULL,'legacy','{}',?)`,
   ).run(detailKey, receivedAt, receivedAt, receivedAt);
+  handover.database.prepare(
+    `INSERT INTO news_details(detail_key,detail_hash,payload,received_at)
+     VALUES (?,?,'{"headline":"保留的旧证据"}',?)`,
+  ).run(obsoleteDetailKey, "8".repeat(64), receivedAt);
+  handover.database.prepare(
+    `INSERT INTO news_index
+      (detail_key,category,cluster_id,published_time,collector_first_seen_time,
+       parsed,model_candidate,impact_expires_at,mirror_contract,payload,received_at)
+     VALUES (?,'旧分类','obsolete-cluster',?,?,1,1,NULL,'legacy',?,?)`,
+  ).run(
+    obsoleteDetailKey, receivedAt, receivedAt,
+    JSON.stringify({
+      annotation_status: "READY",
+      model_visibility: "MODEL_VISIBLE",
+      parsed_at: receivedAt,
+    }),
+    receivedAt,
+  );
 
   handover.applyMigration("0025_seed_legacy_news_reverse_projection.sql");
   handover.applyMigration("0025_seed_legacy_news_reverse_projection.sql");
+  handover.database.prepare(
+    "UPDATE news_projection_generations SET expected_receipt_digest=?",
+  ).run("7".repeat(64));
+  handover.applyMigration("0026_reconcile_legacy_news_current_identity.sql");
+  assert.equal(JSON.parse(handover.database.prepare(
+    "SELECT payload FROM news_index WHERE detail_key=?",
+  ).get(obsoleteDetailKey).payload).annotation_status, "READY");
+  handover.database.prepare(
+    "UPDATE news_projection_generations SET expected_receipt_digest=?",
+  ).run(receiptDigest);
+  handover.applyMigration("0026_reconcile_legacy_news_current_identity.sql");
+  handover.applyMigration("0026_reconcile_legacy_news_current_identity.sql");
 
   const legacyDetail = handover.database.prepare(
     "SELECT * FROM news_details WHERE detail_key=?",
@@ -154,6 +185,27 @@ test("rebuilds the legacy rollback News projection from verified CURRENT", () =>
   assert.equal(legacyDetail.payload, detailPayload);
   assert.equal(legacyIndex.payload, indexPayload);
   assert.equal(legacyIndex.category, "央行政策");
+  const obsoleteIndex = handover.database.prepare(
+    "SELECT * FROM news_index WHERE detail_key=?",
+  ).get(obsoleteDetailKey);
+  const obsoletePayload = JSON.parse(obsoleteIndex.payload);
+  assert.equal(obsoleteIndex.parsed, 0);
+  assert.equal(obsoleteIndex.model_candidate, 0);
+  assert.equal(obsoletePayload.annotation_status, "SUPERSEDED_CONTRACT");
+  assert.equal(obsoletePayload.model_visibility, "MODEL_INELIGIBLE");
+  assert.equal(obsoletePayload.parsed_at, null);
+  assert.ok(handover.database.prepare(
+    "SELECT 1 FROM news_details WHERE detail_key=?",
+  ).get(obsoleteDetailKey));
+  assert.deepEqual(
+    handover.database.prepare(
+      `SELECT detail_key FROM news_index
+        WHERE COALESCE(json_extract(payload,'$.annotation_status'),'')
+          <> 'SUPERSEDED_CONTRACT'
+        ORDER BY detail_key`,
+    ).all().map(row => row.detail_key),
+    [detailKey],
+  );
 });
 
 function jsonOfBytes(targetBytes, fields = {}) {
