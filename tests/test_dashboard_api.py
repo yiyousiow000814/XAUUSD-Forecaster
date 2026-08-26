@@ -3648,6 +3648,39 @@ def test_dashboard_uses_same_explicit_event_clock_as_model(tmp_path) -> None:
     assert datetime.fromisoformat(row["impact_expires_at"]) == event_time + timedelta(hours=12)
 
 
+@pytest.mark.parametrize("offset", [
+    timedelta(hours=5, minutes=30),
+    timedelta(hours=-4),
+    timedelta(hours=8),
+])
+def test_dashboard_canonicalizes_derived_impact_clocks_to_utc(offset) -> None:
+    module = _dashboard_module()
+    event_at = datetime(2026, 8, 26, 12, 5, 45, tzinfo=timezone(offset))
+    event_utc = event_at.astimezone(UTC)
+    first_seen = event_utc + timedelta(minutes=1)
+    assessed_at = event_utc + timedelta(minutes=2)
+    item = {
+        "parsed_at": first_seen.isoformat(timespec="microseconds"),
+        "impact_assessed_at": assessed_at.isoformat(timespec="microseconds"),
+        "impact_class": "SAME_DAY",
+        "impact_event_state": "ACTIVE",
+        "impact_update_type": "NEW_EVENT",
+        "event_time": event_at.isoformat(timespec="microseconds"),
+        "collector_first_seen_time": first_seen.isoformat(timespec="microseconds"),
+    }
+
+    module._apply_impact_status(item, event_utc + timedelta(minutes=3))
+
+    assert item["model_visibility"] == "MODEL_VISIBLE"
+    assert item["impact_event_at"] == event_utc.isoformat(timespec="microseconds")
+    assert item["impact_expires_at"] == (
+        event_utc + timedelta(hours=12)
+    ).isoformat(timespec="microseconds")
+    assert item["impact_available_at"] == assessed_at.isoformat(
+        timespec="microseconds"
+    )
+
+
 def test_dashboard_category_is_semantic_not_processing_state() -> None:
     module = _dashboard_module()
     assert module._news_category_label("central_bank_gold") == "央行购金"
