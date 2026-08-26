@@ -675,7 +675,7 @@ def _coordinated_migration_contract_body(*, capability_overrides: str = "") -> s
     )
 
 
-def test_coordinated_migration_query_preserves_multiline_sql_across_npx_cmd(
+def test_coordinated_migration_query_preserves_bounded_sql_beyond_cmd_limit(
     tmp_path,
 ) -> None:
     result = _run_control_center_contract(
@@ -684,11 +684,40 @@ def test_coordinated_migration_query_preserves_multiline_sql_across_npx_cmd(
         "function Invoke-WranglerJson{param($Arguments);"
         "$script:wranglerArguments=$Arguments;"
         "return [pscustomobject]@{success=$true;results=@([pscustomobject]@{value=1})}};"
-        "$rows=@(Invoke-CoordinatedMigrationD1Query -Sql \"SELECT`r`n  1 AS value`n;\");"
+        "$sql=\"SELECT`r`n  1 AS value`n; -- \"+('x'*7000);"
+        "$rows=@(Invoke-CoordinatedMigrationD1Query -Sql $sql);"
         "$command=[string]$script:wranglerArguments[5];"
-        'Write-Output "$($rows[0].value)|$($command -notmatch \"[`r`n]\")|$command"',
+        'Write-Output "$($rows[0].value)|$($script:wranglerArguments[4])|'
+        '$($command.Length)|$($command -notmatch \"[`r`n]\")"',
     )
-    assert result == "1|True|SELECT   1 AS value ;"
+    assert result == "1|--command|7025|True"
+
+
+def test_wrangler_json_bypasses_cmd_and_preserves_bounded_long_argument(
+    tmp_path,
+) -> None:
+    wrangler = (
+        tmp_path
+        / "repository"
+        / "web"
+        / "node_modules"
+        / "wrangler"
+        / "bin"
+        / "wrangler.js"
+    )
+    wrangler.parent.mkdir(parents=True, exist_ok=True)
+    wrangler.write_text("// contract fixture\n", encoding="utf-8")
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:nodeArguments=$null;"
+        "function node.exe{param($Cli,[Parameter(ValueFromRemainingArguments=$true)]$Rest);"
+        "$script:nodeArguments=@($Rest);$global:LASTEXITCODE=0;"
+        "Write-Output '{\"value\":1}'};"
+        "$long='x'*7000;$result=Invoke-WranglerJson -Arguments @('probe',$long);"
+        'Write-Output "$($result.value)|$($script:nodeArguments[0])|'
+        '$($script:nodeArguments[1].Length)|$($script:nodeArguments[2])"',
+    )
+    assert result == "1|probe|7000|--json"
 
 
 def test_failed_preflight_never_switches_the_runtime_checkout(tmp_path) -> None:

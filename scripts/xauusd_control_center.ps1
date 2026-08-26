@@ -536,9 +536,22 @@ function Exit-ReleaseTransactionLock {
 function Invoke-WranglerJson {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
     $webRoot = Join-Path $repositoryRoot "web"
+    $wranglerCli = Join-Path $webRoot "node_modules\wrangler\bin\wrangler.js"
+    if (-not (Test-Path -LiteralPath $wranglerCli)) {
+        throw "Wrangler CLI is unavailable."
+    }
+    $argumentLength = $wranglerCli.Length + 1
+    foreach ($argument in $Arguments) {
+        $argumentLength += ([string]$argument).Length + 1
+    }
+    if ($argumentLength -gt 24000) {
+        throw "WRANGLER_ARGUMENT_BOUND_EXCEEDED"
+    }
     Push-Location $webRoot
     try {
-        $output = @(& npx.cmd wrangler @Arguments --json 2>$null)
+        # Invoke the pinned CLI through Node directly. npx.cmd truncates or
+        # rejects otherwise-valid bounded arguments at cmd.exe's lower limit.
+        $output = @(& node.exe $wranglerCli @Arguments --json 2>$null)
         if ($LASTEXITCODE -ne 0) { throw "Wrangler command failed." }
         ($output -join "`n") | ConvertFrom-Json
     } finally { Pop-Location }
@@ -1101,14 +1114,15 @@ function Assert-CoordinatedMigrationCapabilityContract {
 
 function Invoke-CoordinatedMigrationD1Query {
     param([Parameter(Mandatory = $true)][string]$Sql)
-    # Windows cmd.exe cannot preserve embedded newlines in an argument passed
-    # through npx.cmd.  Keep the SQL as one argument so Wrangler receives the
-    # complete statement instead of an incomplete prefix.
+    # Keep the SQL in one bounded argument so Wrangler returns SELECT rows;
+    # Invoke-WranglerJson bypasses npx.cmd's lower Windows transport limit.
     $command = ($Sql -replace "`r`n|`n|`r", " ").Trim()
     $blocks = @(Invoke-WranglerJson -Arguments @(
         "d1", "execute", "DB", "--remote", "--command", $command
     ))
-    if ($blocks.Count -eq 0 -or @($blocks | Where-Object { -not [bool]$_.success }).Count -gt 0) {
+    if ($blocks.Count -eq 0 -or @($blocks | Where-Object {
+        -not [bool]$_.success
+    }).Count -gt 0) {
         throw "MIGRATION_D1_QUERY_FAILED"
     }
     foreach ($block in $blocks) {
