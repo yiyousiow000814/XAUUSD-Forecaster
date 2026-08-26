@@ -99,6 +99,7 @@ from xauusd_forecaster.news_projection import (
     NEWS_INDEX_FIELDS,
     NEWS_INDEX_BATCH_LIMIT_BYTES,
     NEWS_MIRROR_CONTRACT_VERSION,
+    NewsProjectionGeneration,
     NEWS_INDEX_BATCH_ITEMS as NEWS_WRITE_BATCH_ITEMS,
     bounded_batches as _projection_bounded_batches,
     sha256_json as _projection_json_hash,
@@ -1639,7 +1640,28 @@ def _verify_news_projection_state(
     return payload
 
 
-def _sync_news(_local_payload: dict, config: dict) -> None:
+def _frozen_news_projection_batch(
+    generation: NewsProjectionGeneration, *, kind: str, offset: int,
+) -> list[dict]:
+    batches = (
+        generation.detail_batches if kind == "detail"
+        else generation.index_batches if kind == "index"
+        else None
+    )
+    if batches is None or offset < 0:
+        raise PayloadContractError("frozen news generation batch request is invalid")
+    next_offset = 0
+    for batch in batches:
+        if next_offset == offset:
+            return list(batch)
+        next_offset += len(batch)
+    raise PayloadContractError("frozen news generation offset is not contiguous")
+
+
+def _sync_news(
+    _local_payload: dict, config: dict, *,
+    frozen_generation: NewsProjectionGeneration | None = None,
+) -> None:
     """Advance one immutable generation without exposing partial replacement."""
     state_path = Path(config.get("news_state_file", DEFAULT_NEWS_STATE))
     state = _read_news_sync_state(state_path)
@@ -1652,7 +1674,9 @@ def _sync_news(_local_payload: dict, config: dict) -> None:
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-content"
     )
 
-    if config.get("local_status_url"):
+    if frozen_generation is not None:
+        manifest = frozen_generation.manifest
+    elif config.get("local_status_url"):
         manifest_page = _get_local_json(_local_news_archive_url(
             config, mode="manifest",
             activated_snapshot_id=state.get("active_snapshot_id"),
@@ -1691,11 +1715,16 @@ def _sync_news(_local_payload: dict, config: dict) -> None:
         not prepare.get("active") and work < NEWS_PROJECTION_BATCHES_PER_CYCLE
         and detail_offset < int(manifest["expected_detail_count"])
     ):
-        page = _get_local_json(_local_news_archive_url(
-            config, mode="batch", snapshot_id=snapshot_id,
-            kind="detail", offset=detail_offset,
-        ))
-        items = page.get("items")
+        if frozen_generation is not None:
+            items = _frozen_news_projection_batch(
+                frozen_generation, kind="detail", offset=detail_offset,
+            )
+        else:
+            page = _get_local_json(_local_news_archive_url(
+                config, mode="batch", snapshot_id=snapshot_id,
+                kind="detail", offset=detail_offset,
+            ))
+            items = page.get("items")
         if not isinstance(items, list) or not items:
             raise PayloadContractError("local news detail batch did not advance")
         result = _post_json(news_url, json.dumps({
@@ -1711,11 +1740,16 @@ def _sync_news(_local_payload: dict, config: dict) -> None:
         and detail_offset == int(manifest["expected_detail_count"])
         and index_offset < int(manifest["expected_index_count"])
     ):
-        page = _get_local_json(_local_news_archive_url(
-            config, mode="batch", snapshot_id=snapshot_id,
-            kind="index", offset=index_offset,
-        ))
-        items = page.get("items")
+        if frozen_generation is not None:
+            items = _frozen_news_projection_batch(
+                frozen_generation, kind="index", offset=index_offset,
+            )
+        else:
+            page = _get_local_json(_local_news_archive_url(
+                config, mode="batch", snapshot_id=snapshot_id,
+                kind="index", offset=index_offset,
+            ))
+            items = page.get("items")
         if not isinstance(items, list) or not items:
             raise PayloadContractError("local news index batch did not advance")
         result = _post_json(news_index_url, json.dumps({
