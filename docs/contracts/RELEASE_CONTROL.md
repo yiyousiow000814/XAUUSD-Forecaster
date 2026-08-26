@@ -241,19 +241,41 @@ empty required legacy evidence, stale receipts, receipt tampering, or any live
 identity drift fail closed. Candidate validation rechecks the live evidence;
 the receipt cannot be copied to another Git SHA or Worker Version.
 
-Before reading coordinated-migration evidence, **Verify Migration** records a
-two-hour Sync hold for the exact main production Candidate and stops the sole
-Dashboard Sync owner. The watchdog respects `STOPPED` only while that exact,
-unexpired hold is authoritative; it continues to recover a running Sync error.
-An expired hold, a different Candidate, or an explicit service start restores
-normal supervision. This freezes the legacy and generation projections while
-the receipt and directed validation are produced, without creating a second
-writer or weakening live D1 verification.
+**Verify Migration** does not stop Dashboard Sync. It binds the receipt to the
+CURRENT generation and its activation watermark, then independently revalidates
+the live CURRENT, schema, ledger, Stable/Candidate reads, and Reverse projection.
+If Stable Sync activates a newer generation during PREPARE or VERIFY, that
+advancement is accepted only when its activation watermark is nondecreasing and
+the newer CURRENT independently satisfies every receipt, count, identity-set,
+and compatibility invariant. Mutation of the recorded generation or regression
+to an older generation fails closed. Destructive migrations that genuinely
+require downtime need a separate reviewed exceptional contract; they are not
+the additive default.
+
+Candidate acceptance blocks regressions rather than requiring unrelated Stable
+debt to disappear. Gates have three classes:
+
+- **A — hard safety** always blocks on failure, including exact identity,
+  authority, single ownership, security, integrity, migration validity,
+  rollback, required critical startup, and real Worker 5xx, 1102, limit, or
+  evidence-universe failure.
+- **B — change-scoped acceptance** is mandatory when the Candidate changes,
+  depends on, or can regress the boundary. The validation manifest's owners and
+  producers determine the affected Worker, CPU, semantic, and Access families.
+- **C — existing Stable debt** is recorded but does not block when Stable has
+  the same unrelated failure, the Candidate does not worsen it, and no A
+  invariant is involved. Candidate-only failure, ambiguity, or worsening is a
+  regression and blocks.
+
+`/api/status` remains a hard critical contract. Other semantic projections use
+the same manifest ownership classification as directed Worker validation.
+Unchanged debt remains visible in the Candidate receipt; it is never converted
+to a pass or used to waive changed-surface acceptance.
 
 ## Release lifecycle and switch transaction
 
 The operator lifecycle has four release-attempt phases: `PREPARE`, `VERIFY`,
-`SWITCH`, and `OBSERVE`. Discovery, migration holds, evidence review/retry,
+`SWITCH`, and `OBSERVE`. Discovery, evidence review/retry,
 Control Plane handoff, prechecks, and recovery checkpoints are internal
 operations, not additional operator phases. `REVIEW_REQUIRED` is a reason
 inside `VERIFY`; it is never success. Reverse and automatic return use the same
@@ -269,7 +291,8 @@ but they map only to `SWITCH`, `OBSERVE`, and the final Stable transition.
 PRECHECK verifies exact identities and evidence, compatibility, the current
 Stable placement, and one Windows production owner. CUTOVER uses the recorded
 compatibility order to switch the matching Windows and Worker identities.
-The dashboard synchronizer is paused at the boundary, the matching Windows
+The dashboard synchronizer continues throughout PREPARE and VERIFY. It is
+paused only at the SWITCH boundary, where the matching Windows
 revision is activated without sync, Worker traffic is switched, and sync is
 resumed only after both identities match. This bounds the mixed-contract window
 without creating a second production owner.
@@ -339,11 +362,11 @@ authoritative baseline because the old watchdog can still recover a service
 during immutable bundle staging.
 
 The transaction MUST preserve the Business Runtime revision and every quote,
-collector, annotator, API, and sync process identity. While an exact unexpired
-coordinated-migration hold is active, Sync's required identity is intentionally
-absent before and after installation; the installer must preserve that stopped
-state and must not start Sync to satisfy its precheck. An active release
-transaction or open Control Center GUI blocks installation. Failure after the
+collector, annotator, API, and sync process identity. Control Plane installation
+always requires the normal Stable Sync owner in its authoritative service
+baseline; Candidate preparation or migration verification cannot make that
+owner optional. An active release transaction or open Control Center GUI blocks
+installation. Failure after the
 old watchdog stops first compares the recorded process baseline without
 re-applying the contextual normal-state rule that caused the failure. It then
 restores the previous complete verified bundle, starts a new process from that
@@ -354,7 +377,7 @@ non-terminal install resumes the same quiesced handoff. Installer death never
 grants activation by itself. The replacement watchdog must independently
 re-prove the exact transaction, installed revision and hashes, old-owner fence,
 single replacement ownership, transaction-bound quiesced heartbeat,
-authoritative service baseline, unchanged release/hold context, and absence of
+authoritative service baseline, unchanged release context, and absence of
 a concurrent release transaction. Lock ownership includes the exact process
 start token so PID reuse cannot impersonate the dead installer. Only that complete proof may
 forward-complete activation. Missing or changed evidence restores the previous

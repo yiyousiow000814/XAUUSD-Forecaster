@@ -1237,8 +1237,9 @@ SELECT
     AS legacy_extra_current_index_count,
   s.projection_state,s.active_generation_id,s.snapshot_id,s.source_digest,s.receipt_digest,
  s.index_count,s.detail_count,s.missing_detail_count,s.invariant_violation_count,
- g.state AS generation_state,g.expected_receipt_digest,g.staged_index_count,
- g.staged_detail_count
+ g.state AS generation_state,g.contract_version AS generation_contract_version,
+ g.watermark AS generation_watermark,g.activated_at AS generation_activated_at,
+ g.expected_receipt_digest,g.staged_index_count,g.staged_detail_count
 FROM news_projection_state s JOIN news_projection_generations g
  ON g.generation_id=s.active_generation_id WHERE s.id=1
 "@
@@ -1322,6 +1323,9 @@ FROM news_projection_state s JOIN news_projection_generations g
         legacy_news_extra_current_index_count = [int]$state.legacy_extra_current_index_count
         stable_news_status = [string]$endpoints.stable_news_status
         news_generation_id = [string]$state.active_generation_id
+        news_contract_version = [string]$state.generation_contract_version
+        news_watermark = [string]$state.generation_watermark
+        news_activated_at = [string]$state.generation_activated_at
         news_snapshot_id = [string]$state.snapshot_id
         news_source_digest = [string]$state.source_digest
         news_receipt_digest = [string]$state.receipt_digest
@@ -1399,37 +1403,46 @@ function Assert-CoordinatedMigrationReceipt {
             [string]$Candidate.worker_version_id) {
         throw "MIGRATION_RECEIPT_CANDIDATE_MISMATCH"
     }
+    if ([string]$receipt.evidence.stable_git_sha -ne [string]$Stable.git_sha -or
+        [string]$receipt.evidence.stable_worker_version -ne
+            [string]$Stable.worker_version_id) {
+        throw "MIGRATION_RECEIPT_STABLE_MISMATCH"
+    }
     $live = Get-CoordinatedMigrationLiveEvidence -Candidate $Candidate `
         -Stable $Stable -MigrationFiles $MigrationFiles
-    $recordedDigest = Get-CoordinatedMigrationReceiptDigest -Core `
-        ([ordered]@{ schema_version="migration-evidence-v1"; evidence=$receipt.evidence })
-    $liveDigest = Get-CoordinatedMigrationReceiptDigest -Core `
-        ([ordered]@{ schema_version="migration-evidence-v1"; evidence=$live })
-    if ($recordedDigest -ne $liveDigest) {
-        throw "MIGRATION_RECEIPT_LIVE_EVIDENCE_MISMATCH"
+    $immutableFields = @(
+        "validation_key", "candidate_git_sha", "candidate_worker_version",
+        "stable_git_sha", "stable_worker_version", "database_id", "database_name",
+        "migration_files", "applied_migrations", "pending_migrations",
+        "projection_tables", "projection_indexes", "operator_retry_columns",
+        "legacy_tables", "stable_read", "candidate_read", "reverse_safe"
+    )
+    foreach ($field in $immutableFields) {
+        $recordedValue = $receipt.evidence.$field | ConvertTo-Json -Compress -Depth 12
+        $liveValue = $live.$field | ConvertTo-Json -Compress -Depth 12
+        if ($recordedValue -cne $liveValue) {
+            throw "MIGRATION_RECEIPT_LIVE_EVIDENCE_MISMATCH:$field"
+        }
+    }
+    $recordedActivation = ConvertTo-RequiredReleaseTime `
+        $receipt.evidence.news_activated_at
+    $liveActivation = ConvertTo-RequiredReleaseTime $live.news_activated_at
+    if ($liveActivation -lt $recordedActivation) {
+        throw "MIGRATION_RECEIPT_GENERATION_REGRESSION"
+    }
+    if ([string]$live.news_generation_id -eq
+            [string]$receipt.evidence.news_generation_id) {
+        foreach ($field in @(
+            "news_contract_version", "news_watermark", "news_activated_at",
+            "news_snapshot_id", "news_source_digest", "news_receipt_digest",
+            "news_index_count", "news_detail_count"
+        )) {
+            if ([string]$live.$field -cne [string]$receipt.evidence.$field) {
+                throw "MIGRATION_RECEIPT_GENERATION_MUTATED:$field"
+            }
+        }
     }
     return $receipt
-}
-
-function Test-CoordinatedMigrationSyncHold {
-    param([object]$ReleaseState)
-    if (-not $ReleaseState -or -not $ReleaseState.candidate -or
-        -not $ReleaseState.migration_sync_hold) {
-        return $false
-    }
-    $candidate = $ReleaseState.candidate
-    $hold = $ReleaseState.migration_sync_hold
-    if ([string]$candidate.artifact_kind -ne $productionCandidateArtifactKind -or
-        [string]$candidate.branch -ne "main" -or
-        [string]$hold.validation_key -ne [string]$candidate.validation_key) {
-        return $false
-    }
-    $expiresAt = [DateTimeOffset]::MinValue
-    if (-not [DateTimeOffset]::TryParse([string]$hold.expires_at, [ref]$expiresAt) -or
-        $expiresAt -le [DateTimeOffset]::UtcNow) {
-        return $false
-    }
-    return $true
 }
 
 function Test-WatchdogRecoverySuppressed {
@@ -1439,58 +1452,12 @@ function Test-WatchdogRecoverySuppressed {
         [object]$ReleaseState
     )
     if ($ServiceKey -ne "sync" -or $ServiceState -ne "STOPPED") { return $false }
-    if (Test-CoordinatedMigrationSyncHold -ReleaseState $ReleaseState) {
-        return $true
-    }
     return [bool]($ReleaseState -and $ReleaseState.transaction -and (
         ([string]$ReleaseState.transaction.type -eq "PROMOTE" -and
          [string]$ReleaseState.transaction.phase -in @("PRECHECK", "CUTOVER")) -or
         ([string]$ReleaseState.transaction.type -eq "REVERSE" -and
          [string]$ReleaseState.transaction.phase -eq "REVERSING")
     ))
-}
-
-function Enter-CoordinatedMigrationSyncHold {
-    param(
-        [Parameter(Mandatory = $true)][object]$State,
-        [Parameter(Mandatory = $true)][object]$Candidate
-    )
-    $enteredAt = [DateTimeOffset]::UtcNow
-    $hold = [pscustomobject]@{
-        validation_key = [string]$Candidate.validation_key
-        reason = "COORDINATED_STORAGE_MIGRATION_VERIFICATION"
-        entered_at = $enteredAt.ToString("o")
-        expires_at = $enteredAt.AddHours(2).ToString("o")
-    }
-    if ($State.PSObject.Properties['migration_sync_hold']) {
-        $State.migration_sync_hold = $hold
-    } else {
-        $State | Add-Member -NotePropertyName migration_sync_hold `
-            -NotePropertyValue $hold
-    }
-    $State.updated_at = $enteredAt.ToString("o")
-    Write-ReleaseControlState -State $State
-    $syncService = $services | Where-Object Key -eq "sync" | Select-Object -First 1
-    if ($syncService) { Stop-ForecasterService $syncService }
-    Write-ReleaseHistory -Event "COORDINATED_STORAGE_MIGRATION_SYNC_HELD" `
-        -Release $Candidate -Detail @{
-            validation_key = [string]$Candidate.validation_key
-            expires_at = [string]$hold.expires_at
-        }
-    return $hold
-}
-
-function Exit-CoordinatedMigrationSyncHold {
-    $state = Get-ReleaseControlState
-    if (-not $state -or -not $state.migration_sync_hold) { return }
-    $validationKey = [string]$state.migration_sync_hold.validation_key
-    $state.migration_sync_hold = $null
-    $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
-    Write-ReleaseControlState -State $state
-    if ($state.candidate) {
-        Write-ReleaseHistory -Event "COORDINATED_STORAGE_MIGRATION_SYNC_RELEASED" `
-            -Release $state.candidate -Detail @{ validation_key = $validationKey }
-    }
 }
 
 function Verify-CandidateCoordinatedMigration {
@@ -1515,7 +1482,6 @@ function Verify-CandidateCoordinatedMigration {
         -CandidateRevision ([string]$candidate.git_sha))
     $files = @(Get-CoordinatedMigrationFiles -ChangedFiles $changed `
         -CandidateRevision ([string]$candidate.git_sha))
-    $null = Enter-CoordinatedMigrationSyncHold -State $state -Candidate $candidate
     $evidence = Get-CoordinatedMigrationLiveEvidence -Candidate $candidate `
         -Stable $state.stable -MigrationFiles $files
     $receipt = New-CoordinatedMigrationReceipt -Evidence $evidence
@@ -2829,6 +2795,82 @@ function Invoke-ExactVersionJson {
     }
 }
 
+function Get-ExactVersionJsonObservation {
+    param(
+        [Parameter(Mandatory = $true)][string]$VersionId,
+        [Parameter(Mandatory = $true)][string]$GitSha,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$AllowLegacyIdentity
+    )
+    try {
+        $read = Invoke-ExactVersionJson -VersionId $VersionId -Path $Path
+        $identityPassed = [bool](
+            ([string]$read.observed_version_id -eq $VersionId -or
+             ($AllowLegacyIdentity -and
+              [string]::IsNullOrWhiteSpace([string]$read.observed_version_id))) -and
+            ([string]$read.observed_git_sha -eq $GitSha -or
+             ($AllowLegacyIdentity -and
+              [string]::IsNullOrWhiteSpace([string]$read.observed_git_sha)))
+        )
+        return [pscustomobject]@{
+            passed = $true
+            identity_passed = $identityPassed
+            failure_class = $null
+            payload = $read.payload
+            observed_version_id = [string]$read.observed_version_id
+            observed_git_sha = [string]$read.observed_git_sha
+        }
+    } catch {
+        $statusCode = 0
+        $observedVersion = ""
+        $observedGit = ""
+        try {
+            $response = $_.Exception.Response
+            if ($response) {
+                $statusCode = [int]$response.StatusCode
+                $observedVersion = [string]$response.Headers["X-Aurum-Worker-Version"]
+                $observedGit = [string]$response.Headers["X-Aurum-Git-SHA"]
+            }
+        } catch {}
+        $identityPassed = [bool](
+            ([string]$observedVersion -eq $VersionId -or
+             ($AllowLegacyIdentity -and [string]::IsNullOrWhiteSpace($observedVersion))) -and
+            ([string]$observedGit -eq $GitSha -or
+             ($AllowLegacyIdentity -and [string]::IsNullOrWhiteSpace($observedGit)))
+        )
+        return [pscustomobject]@{
+            passed = $false
+            identity_passed = $identityPassed
+            failure_class = if ($statusCode -gt 0) { "HTTP_$statusCode" } `
+                else { "EXACT_VERSION_READ_FAILED" }
+            payload = $null
+            observed_version_id = $observedVersion
+            observed_git_sha = $observedGit
+            diagnostic = Protect-PreflightDiagnosticText $_.Exception.Message
+        }
+    }
+}
+
+function Get-CandidateParityClass {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][object]$RoutePlan
+    )
+    $basePath = ([string]$Path -split '\?', 2)[0]
+    if ($basePath -eq "/api/status") { return "A" }
+    if (@($RoutePlan.contract_routes | Where-Object {
+        [string]$_.path -eq $basePath
+    }).Count -gt 0) { return "B" }
+    return "C"
+}
+
+function Test-CandidateAuthBoundaryChanged {
+    param([Parameter(Mandatory = $true)][object]$RoutePlan)
+    return [bool](@($RoutePlan.contract_routes | Where-Object {
+        [bool]$_.auth_required
+    }).Count -gt 0)
+}
+
 function Wait-CandidatePlacementPropagation {
     param([Parameter(Mandatory = $true)][object]$Candidate)
     $deadline = [DateTimeOffset]::UtcNow + $candidatePlacementPropagationTimeout
@@ -3019,7 +3061,8 @@ function Test-CandidateStatusPayload {
 
 function Test-CandidateDataParity {
     param([Parameter(Mandatory = $true)][object]$Stable,
-          [Parameter(Mandatory = $true)][object]$Candidate)
+          [Parameter(Mandatory = $true)][object]$Candidate,
+          [object]$RoutePlan = ([pscustomobject]@{ contract_routes = @() }))
     $routes = @(
         "/api/status", "/api/audit", "/api/audit-briefs",
         "/api/audit-stories", "/api/audit-decisions", "/api/learning",
@@ -3063,6 +3106,8 @@ function Test-CandidateDataParity {
     $results = @()
     $legacyAuditTime = $null
     foreach ($path in $routes) {
+        $acceptanceClass = Get-CandidateParityClass -Path $path `
+            -RoutePlan $RoutePlan
         if ($legacyMode -and $path -in @(
             "/api/audit-briefs", "/api/audit-stories", "/api/audit-decisions"
         )) {
@@ -3095,6 +3140,7 @@ function Test-CandidateDataParity {
                 $deferred = $true
                 $results += [pscustomobject]@{
                     route = $path
+                    acceptance_class = $acceptanceClass
                     state = if ($deferred) {
                         "DEFERRED_TO_POST_CUTOVER_OBSERVATION"
                     } else { "PASSED" }
@@ -3116,7 +3162,8 @@ function Test-CandidateDataParity {
                     "LEGACY_AUDIT_SPLIT_SCHEMA_MISMATCH"
                 )) { $_.Exception.Message } else { "EXACT_VERSION_READ_FAILED" }
                 $results += [pscustomobject]@{
-                    route = $path; state = "FAILED"; passed = $false; reason = $reason
+                    route = $path; acceptance_class = $acceptanceClass
+                    state = "FAILED"; passed = $false; reason = $reason
                     error = Protect-PreflightDiagnosticText $_.Exception.Message
                     stable_version_id = [string]$Stable.worker_version_id
                     candidate_version_id = [string]$Candidate.worker_version_id
@@ -3124,21 +3171,54 @@ function Test-CandidateDataParity {
             }
             continue
         }
-        try {
-            $stableRead = Invoke-ExactVersionJson `
-                -VersionId ([string]$Stable.worker_version_id) -Path $path
-            $candidateRead = Invoke-ExactVersionJson `
-                -VersionId ([string]$Candidate.worker_version_id) -Path $path
-            if ((-not $legacyMode -and
-                    [string]$stableRead.observed_version_id -ne [string]$Stable.worker_version_id) -or
-                [string]$candidateRead.observed_version_id -ne [string]$Candidate.worker_version_id -or
-                (-not $legacyMode -and (
-                    [string]::IsNullOrWhiteSpace([string]$stableRead.observed_git_sha) -or
-                    [string]$stableRead.observed_git_sha -ne [string]$Stable.git_sha)) -or
-                [string]::IsNullOrWhiteSpace([string]$candidateRead.observed_git_sha) -or
-                [string]$candidateRead.observed_git_sha -ne [string]$Candidate.git_sha) {
-                throw "EXACT_VERSION_IDENTITY_MISMATCH"
+        $stableRead = Get-ExactVersionJsonObservation `
+            -VersionId ([string]$Stable.worker_version_id) `
+            -GitSha ([string]$Stable.git_sha) -Path $path `
+            -AllowLegacyIdentity:$legacyMode
+        $candidateRead = Get-ExactVersionJsonObservation `
+            -VersionId ([string]$Candidate.worker_version_id) `
+            -GitSha ([string]$Candidate.git_sha) -Path $path
+        if (-not $candidateRead.identity_passed -or
+            (-not $legacyMode -and -not $stableRead.identity_passed)) {
+            $results += [pscustomobject]@{
+                route = $path; acceptance_class = $acceptanceClass
+                state = "FAILED"; passed = $false; blocking = $true
+                reason = "EXACT_VERSION_IDENTITY_MISMATCH"
+                stable_failure = [string]$stableRead.failure_class
+                candidate_failure = [string]$candidateRead.failure_class
             }
+            continue
+        }
+        if (-not $stableRead.passed -or -not $candidateRead.passed) {
+            $matchingDebt = [bool](
+                $acceptanceClass -eq "C" -and -not $stableRead.passed -and (
+                    $candidateRead.passed -or
+                    [string]$candidateRead.failure_class -eq
+                        [string]$stableRead.failure_class
+                )
+            )
+            $results += [pscustomobject]@{
+                route = $path; acceptance_class = $acceptanceClass
+                state = if ($matchingDebt) {
+                    if ($candidateRead.passed) { "STABLE_DEBT_IMPROVED" }
+                    else { "EXISTING_STABLE_DEBT" }
+                } else { "FAILED" }
+                passed = $matchingDebt
+                blocking = -not $matchingDebt
+                reason = if ($matchingDebt) {
+                    if ($candidateRead.passed) { "CANDIDATE_IMPROVES_STABLE_DEBT" }
+                    else { "UNCHANGED_EXISTING_STABLE_DEBT" }
+                } elseif ($acceptanceClass -eq "C" -and $stableRead.passed) {
+                    "CANDIDATE_REGRESSION"
+                } else { "EXACT_VERSION_READ_FAILED" }
+                stable_failure = [string]$stableRead.failure_class
+                candidate_failure = [string]$candidateRead.failure_class
+                stable_diagnostic = [string]$stableRead.diagnostic
+                candidate_diagnostic = [string]$candidateRead.diagnostic
+            }
+            continue
+        }
+        try {
             $stablePayload = $stableRead.payload
             $candidatePayload = $candidateRead.payload
             $stableProjection = ConvertTo-ReleaseSemanticProjection -Path $path -Payload $stablePayload
@@ -3171,14 +3251,16 @@ function Test-CandidateDataParity {
                 }
             }
             $results += [pscustomobject]@{
-                route = $path; state = if ($passed) { "PASSED" } else { "FAILED" }
-                passed = $passed; reason = $reason
+                route = $path; acceptance_class = $acceptanceClass
+                state = if ($passed) { "PASSED" } else { "FAILED" }
+                passed = $passed; blocking = -not $passed; reason = $reason
                 stable_version_id = if ($legacyMode) { [string]$Stable.worker_version_id } else { [string]$stableRead.observed_version_id }
                 candidate_version_id = [string]$candidateRead.observed_version_id
             }
         } catch {
             $results += [pscustomobject]@{
-                route = $path; state = "FAILED"; passed = $false
+                route = $path; acceptance_class = $acceptanceClass
+                state = "FAILED"; passed = $false; blocking = $true
                 reason = if ($_.Exception.Message -eq "EXACT_VERSION_IDENTITY_MISMATCH") {
                     "EXACT_VERSION_IDENTITY_MISMATCH"
                 } else { "EXACT_VERSION_READ_FAILED" }
@@ -3190,8 +3272,11 @@ function Test-CandidateDataParity {
         [string]$_.state -eq "DEFERRED_TO_POST_CUTOVER_OBSERVATION"
     })
     $blocking = @($results | Where-Object {
-        -not $_.passed -and [string]$_.state -ne
-            "DEFERRED_TO_POST_CUTOVER_OBSERVATION"
+        [bool]$_.blocking -or (-not $_.passed -and [string]$_.state -ne
+            "DEFERRED_TO_POST_CUTOVER_OBSERVATION")
+    })
+    $stableDebt = @($results | Where-Object {
+        [string]$_.state -in @("EXISTING_STABLE_DEBT", "STABLE_DEBT_IMPROVED")
     })
     return [pscustomobject]@{
         state = if ($blocking.Count -gt 0) { "FAILED" } elseif ($deferred.Count -gt 0) {
@@ -3202,6 +3287,7 @@ function Test-CandidateDataParity {
         stable_version_id = [string]$Stable.worker_version_id
         candidate_version_id = [string]$Candidate.worker_version_id
         routes = $results
+        stable_debt = $stableDebt
         deferred_obligations = @($deferred | ForEach-Object {
             [pscustomobject]@{
                 route = [string]$_.route
@@ -3818,7 +3904,7 @@ function Invoke-AutomaticCandidateValidation {
             }
         }
         $dataParity = Test-CandidateDataParity -Stable $state.stable `
-            -Candidate $Candidate
+            -Candidate $Candidate -RoutePlan $routePlan
         $authInspection = Get-CandidateAuthInspection -Candidate $Candidate
         if (-not $dataParity.passed) {
             $state.candidate.validation_state = "REVIEW_REQUIRED"
@@ -3826,6 +3912,22 @@ function Invoke-AutomaticCandidateValidation {
                 key = [string]$Candidate.validation_key
                 repository = "PASSED"; windows = "PASSED"; cloudflare = "PASSED"
                 reason = "SEMANTIC_DATA_PARITY_REVIEW_REQUIRED"
+                data_parity = $dataParity; auth_inspection = $authInspection
+                route_plan = $routePlan; routes = $cloudflare.routes
+                cpu_evidence = $cloudflare.cpu_evidence
+                tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            Write-ReleaseControlState -State $state
+            return $false
+        }
+        if ((Test-CandidateAuthBoundaryChanged -RoutePlan $routePlan) -and
+            [string]$authInspection.state -ne
+                "UNAUTHENTICATED_BOUNDARY_CONFIRMED") {
+            $state.candidate.validation_state = "REVIEW_REQUIRED"
+            $state.candidate.validation = [pscustomobject]@{
+                key = [string]$Candidate.validation_key
+                repository = "PASSED"; windows = "PASSED"; cloudflare = "PASSED"
+                reason = "ACCESS_BOUNDARY_REVIEW_REQUIRED"
                 data_parity = $dataParity; auth_inspection = $authInspection
                 route_plan = $routePlan; routes = $cloudflare.routes
                 cpu_evidence = $cloudflare.cpu_evidence
@@ -5155,9 +5257,6 @@ function Start-ReleasePromotion {
             started_at = [DateTimeOffset]::UtcNow.ToString("o")
         }
         $state.transaction = $transaction
-        # Transfer intentional Sync-stop ownership from the migration hold to
-        # this durable release transaction in the same state write.
-        Set-CoordinatedMigrationSyncHoldValue -State $state -Value $null
         $state.deployment_status = "PROMOTING"
         Write-ReleaseControlState -State $state
         Write-ReleaseHistory -Event "PROMOTION_STARTED" -Release $candidate
@@ -5286,7 +5385,6 @@ function Invoke-ReverseStable {
             previous = $current
             started_at = [DateTimeOffset]::UtcNow.ToString("o")
         }
-        Set-CoordinatedMigrationSyncHoldValue -State $state -Value $null
         $state.deployment_status = "REVERSING"
         Write-ReleaseControlState -State $state
         Write-ReleaseHistory -Event "REVERSE_STARTED" -Release $target
@@ -6221,10 +6319,6 @@ function Test-ControlPlaneServiceOwnerRequired {
     if ([string]$Service.Key -eq "broadcast") {
         return [bool](Test-BroadcastPublisherEnabled)
     }
-    if ([string]$Service.Key -eq "sync" -and
-        (Test-CoordinatedMigrationSyncHold -ReleaseState $ReleaseState)) {
-        return $false
-    }
     return $true
 }
 
@@ -6448,19 +6542,6 @@ function Restore-AbandonedControlPlaneInstallForWatchdog {
     }
     Restore-ControlPlaneSupervision -State $State.supervision_state
     return $restored
-}
-
-function Set-CoordinatedMigrationSyncHoldValue {
-    param(
-        [Parameter(Mandatory = $true)][object]$State,
-        [AllowNull()][object]$Value
-    )
-    if ($State.PSObject.Properties['migration_sync_hold']) {
-        $State.migration_sync_hold = $Value
-    } else {
-        $State | Add-Member -NotePropertyName migration_sync_hold `
-            -NotePropertyValue $Value
-    }
 }
 
 function Assert-ControlPlaneIsolationSnapshot {
@@ -7776,7 +7857,6 @@ function Invoke-ControlCenterOperationAction {
         "ServiceStart" {
             $target = $services | Where-Object Key -eq $ServiceKey
             if (-not $target) { throw "Unknown service key: $ServiceKey" }
-            if ($target.Key -eq "sync") { Exit-CoordinatedMigrationSyncHold }
             Start-ForecasterService $target
             return $target
         }

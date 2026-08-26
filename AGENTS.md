@@ -45,6 +45,22 @@ authoritative data.
 
 ## Problem Resolution Standard
 
+### Production recovery order
+
+When production is degraded, first identify and restore the last-known-safe
+Stable configuration through the safest supported path, while preserving the
+state, logs, receipts, and other forensic evidence needed for diagnosis. Only
+after Stable service is restored should permanent correction change the owning
+architecture. Safe recovery and permanent correction are separate obligations;
+neither substitutes for the other.
+
+A mechanism that can stop, isolate, or fence a production owner must define a
+direct legal path back to normal Stable operation when the release attempt is
+abandoned, expired, paused, invalidated, or crashes. Recovery must not depend on
+the failed precondition becoming true. If the last-known-safe configuration
+cannot be restored, fail closed, preserve evidence, and expose the exact
+recovery blocker.
+
 - Treat fail-closed behavior, error visibility, and audit evidence as safety
   requirements, not as substitutes for fixing the failed workflow.
 - When the user asks to resolve a failure, completion requires a corrective path

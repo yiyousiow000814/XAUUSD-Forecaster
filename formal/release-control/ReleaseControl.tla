@@ -75,12 +75,17 @@ AbandonedActivationFacts ==
 Init ==
     /\ release = [
         stable |-> StableId,
+        prepareStable |-> StableId,
         previous |-> None,
         candidate |-> None,
         candidateExact |-> TRUE,
         main |-> CandidateId,
         phase |-> "STABLE",
         gate |-> "UNTESTED",
+        hardSafe |-> TRUE,
+        changedSafe |-> TRUE,
+        stableDebt |-> FALSE,
+        candidateRegression |-> FALSE,
         accepted |-> FALSE,
         migrationReady |-> FALSE,
         transaction |-> FALSE,
@@ -88,7 +93,8 @@ Init ==
         origin |-> None,
         kind |-> "NONE",
         applied |-> FALSE,
-        hold |-> "NONE"
+        verifiedGeneration |-> 0,
+        verifiedWatermark |-> 0
         ]
     /\ health = "GOOD"
     /\ install = [
@@ -110,6 +116,7 @@ Init ==
         ]
     /\ news = [
         currentGeneration |-> 0,
+        activationWatermark |-> 0,
         currentIds |-> GenerationIds(0),
         activeLegacyGeneration |-> 0,
         activeLegacyIds |-> GenerationIds(0),
@@ -137,9 +144,14 @@ DiscoverCandidate ==
     /\ release.candidate = None
     /\ release' = [release EXCEPT
         !.candidate = CandidateId,
+        !.prepareStable = release.stable,
         !.candidateExact = TRUE,
         !.phase = "PREPARE",
         !.gate = "UNTESTED",
+        !.hardSafe = TRUE,
+        !.changedSafe = TRUE,
+        !.stableDebt = FALSE,
+        !.candidateRegression = FALSE,
         !.accepted = FALSE,
         !.migrationReady = FALSE]
     /\ UNCHANGED <<health, install, news, syncOwners, path>>
@@ -172,34 +184,43 @@ RestoreHealth ==
     /\ health' = "GOOD"
     /\ UNCHANGED <<release, install, news, syncOwners, path>>
 
-BeginHold ==
-    /\ release.phase = "PREPARE"
-    /\ ExactCandidate
-    /\ release.hold = "NONE"
-    /\ syncOwners = 1
-    /\ release' = [release EXCEPT !.hold = "ACTIVE"]
-    /\ syncOwners' = 0
-    /\ UNCHANGED <<health, install, news, path>>
-
 VerifyMigration ==
     /\ release.phase = "PREPARE"
-    /\ release.hold = "ACTIVE"
-    /\ release' = [release EXCEPT !.migrationReady = TRUE]
+    /\ ExactCandidate
+    /\ syncOwners = 1
+    /\ ReverseStableCompatible
+    /\ release' = [release EXCEPT
+        !.migrationReady = TRUE,
+        !.verifiedGeneration = news.currentGeneration,
+        !.verifiedWatermark = news.activationWatermark]
     /\ UNCHANGED <<health, install, news, syncOwners, path>>
 
-HoldExpires ==
-    /\ release.hold = "ACTIVE"
-    /\ release' = [release EXCEPT !.hold = "EXPIRED"]
+RecordStableDebt ==
+    /\ release.phase \in {"PREPARE", "VERIFY"}
+    /\ ~release.stableDebt
+    /\ release' = [release EXCEPT !.stableDebt = TRUE]
     /\ UNCHANGED <<health, install, news, syncOwners, path>>
 
-WatchdogRecoversSync ==
-    /\ CurrentSupervisorCanMutate
-    /\ release.hold # "ACTIVE"
-    /\ ~release.transaction
-    /\ syncOwners = 0
-    /\ syncOwners' = 1
-    /\ release' = [release EXCEPT !.hold = "NONE"]
-    /\ UNCHANGED <<health, install, news, path>>
+IntroduceCandidateRegression ==
+    /\ release.phase \in {"PREPARE", "VERIFY"}
+    /\ release.gate = "UNTESTED"
+    /\ ~release.candidateRegression
+    /\ release' = [release EXCEPT
+        !.candidateRegression = TRUE,
+        !.changedSafe = FALSE,
+        !.gate = "FAILED",
+        !.accepted = FALSE]
+    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+
+HardSafetyFails ==
+    /\ release.phase \in {"PREPARE", "VERIFY"}
+    /\ release.gate = "UNTESTED"
+    /\ release.hardSafe
+    /\ release' = [release EXCEPT
+        !.hardSafe = FALSE,
+        !.gate = "FAILED",
+        !.accepted = FALSE]
+    /\ UNCHANGED <<health, install, news, syncOwners, path>>
 
 BeginInstall ==
     /\ AllowControlInstall
@@ -207,6 +228,7 @@ BeginInstall ==
     /\ ~release.transaction
     /\ install.step = "IDLE"
     /\ CurrentSupervisorCanMutate
+    /\ syncOwners = 1
     /\ install' = [install EXCEPT
         !.step = "FENCED",
         !.installerAlive = TRUE,
@@ -370,7 +392,11 @@ PassEvidence ==
     /\ release.gate = "UNTESTED"
     /\ ExactCandidate
     /\ release.migrationReady
+    /\ release.hardSafe
+    /\ release.changedSafe
+    /\ ~release.candidateRegression
     /\ ReverseStableCompatible
+    /\ news.activationWatermark >= release.verifiedWatermark
     /\ release' = [release EXCEPT
         !.gate = "PASSED",
         !.accepted = TRUE]
@@ -391,8 +417,7 @@ BeginForwardSwitch ==
         !.target = release.candidate,
         !.origin = release.stable,
         !.kind = "FORWARD",
-        !.applied = FALSE,
-        !.hold = "NONE"]
+        !.applied = FALSE]
     /\ syncOwners' = 0
     /\ UNCHANGED <<health, install, news, path>>
 
@@ -441,7 +466,11 @@ ObserveSuccess ==
         !.applied = FALSE,
         !.gate = "UNTESTED",
         !.accepted = FALSE,
-        !.migrationReady = FALSE]
+        !.migrationReady = FALSE,
+        !.hardSafe = TRUE,
+        !.changedSafe = TRUE,
+        !.stableDebt = FALSE,
+        !.candidateRegression = FALSE]
     /\ UNCHANGED <<health, install, news, syncOwners, path>>
 
 ObserveFailure ==
@@ -533,8 +562,12 @@ RepairStagedLegacy ==
 
 ActivateGeneration ==
     /\ FreshStagingCompatible
+    /\ release.phase \in {"PREPARE", "VERIFY"}
+    /\ ~release.transaction
+    /\ syncOwners = 1
     /\ news' = [news EXCEPT
         !.currentGeneration = news.stagingGeneration,
+        !.activationWatermark = news.stagingGeneration,
         !.currentIds = news.stagingIds,
         !.activeLegacyGeneration = news.stagedLegacyGeneration,
         !.activeLegacyIds = news.stagedLegacyIds,
@@ -554,7 +587,8 @@ CleanupObsolete(generation) ==
 Next ==
     \/ DiscoverCandidate \/ MainMoves \/ CorruptCandidateIdentity
     \/ DegradeHealth \/ RestoreHealth
-    \/ BeginHold \/ VerifyMigration \/ HoldExpires \/ WatchdogRecoversSync
+    \/ VerifyMigration \/ RecordStableDebt
+    \/ IntroduceCandidateRegression \/ HardSafetyFails
     \/ BeginInstall \/ CaptureBaseline \/ BeginBundleSwap
     \/ CompleteBundleSwap \/ StartQuiescedSupervisor
     \/ VerifyNormalInstall \/ ActivateNormalInstall
@@ -576,7 +610,6 @@ Spec ==
     /\ [][Next]_vars
     /\ WF_vars(RestoreHealth)
     /\ WF_vars(VerifyMigration)
-    /\ WF_vars(WatchdogRecoversSync)
     /\ WF_vars(CaptureBaseline)
     /\ WF_vars(BeginBundleSwap)
     /\ WF_vars(CompleteBundleSwap)
@@ -601,6 +634,7 @@ Spec ==
 
 TypeOK ==
     /\ release.stable \in {StableId, CandidateId, NextId}
+    /\ release.prepareStable \in {StableId, CandidateId, NextId}
     /\ release.previous \in Identities
     /\ release.candidate \in Identities
     /\ release.main \in {CandidateId, NextId}
@@ -609,7 +643,8 @@ TypeOK ==
     /\ release.target \in Identities
     /\ release.origin \in Identities
     /\ release.kind \in {"NONE", "FORWARD", "RECOVER"}
-    /\ release.hold \in {"NONE", "ACTIVE", "EXPIRED"}
+    /\ release.verifiedGeneration \in Generations
+    /\ release.verifiedWatermark \in Generations
     /\ health \in {"GOOD", "BAD"}
     /\ install.step \in InstallSteps
     /\ install.mode \in {"ACTIVE", "QUIESCED", "NONE"}
@@ -619,6 +654,7 @@ TypeOK ==
     /\ install.deathCheckpoint \in DeathCheckpoints \cup {None}
     /\ syncOwners \in 0..1
     /\ news.currentGeneration \in Generations
+    /\ news.activationWatermark \in Generations
     /\ news.activeLegacyGeneration \in Generations
     /\ news.stagingGeneration \in Generations
     /\ news.stagedLegacyGeneration \in Generations
@@ -629,10 +665,25 @@ TypeOK ==
     /\ news.storedGenerations \subseteq Generations
 
 AtMostOneProductionWriter == syncOwners <= 1
-ActiveHoldOwnsStoppedSync == release.hold = "ACTIVE" => syncOwners = 0
+PrepareVerifyKeepsStableSync ==
+    release.phase \in {"PREPARE", "VERIFY"} => syncOwners = 1
+CandidatePreparationPreservesStable ==
+    release.phase \in {"PREPARE", "VERIFY"} => release.stable = release.prepareStable
+VerificationWatermarkDoesNotRegress ==
+    release.migrationReady => news.activationWatermark >= release.verifiedWatermark
 StaleSupervisorIsFenced == install.actorEpoch # install.epoch => ~CurrentSupervisorCanMutate
 PassedIdentityIsExact == release.gate = "PASSED" => ExactCandidate
 AcceptedEvidenceIsRequired == release.gate = "PASSED" => release.accepted
+PassedGatesAreSafe == release.gate = "PASSED" =>
+    release.hardSafe /\ release.changedSafe /\ ~release.candidateRegression
+HardFailuresBlock ==
+    (~release.hardSafe \/ ~release.changedSafe \/ release.candidateRegression) =>
+        release.gate # "PASSED" /\ ~release.accepted
+UnrelatedDebtIsNotFailure ==
+    release.phase \in {"PREPARE", "VERIFY"} /\
+    release.stableDebt /\ release.hardSafe /\ release.changedSafe /\
+    ~release.candidateRegression /\ release.candidateExact =>
+        release.gate # "FAILED"
 SwitchRequiresAcceptance == release.kind = "FORWARD" /\ release.transaction =>
     release.gate = "PASSED" /\ release.accepted
 StableUnchangedDuringSwitchAndObserve == release.transaction => release.stable = release.origin

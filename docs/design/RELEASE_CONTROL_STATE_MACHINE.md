@@ -52,7 +52,7 @@ Verify, Switch, and Observe are the only release-attempt phases.
 | Former concept | New location | Why no independent lifecycle identity is needed |
 |---|---|---|
 | Candidate discovery | Prepare entry | It creates the exact target; it is not an operator decision. |
-| Migration verification and Sync hold | Prepare/Verify internal operation | The hold is an exact, expiring ownership token. Its safety is enforced by the same mutation fence and watchdog rule. |
+| Migration verification | Prepare/Verify internal operation | Verification uses an immutable generation and activation watermark while Stable Sync continues. It is not a separate lifecycle state. |
 | Control Plane install and supervision handoff | Prepare internal transaction | Quiesce, baseline, bundle swap, acknowledgement, and activation are crash checkpoints behind one owner. |
 | Repository, Windows, Worker, CPU, parity, and compatibility gates | Verify evidence set | Independent accepted evidence is immutable; incomplete or reviewable evidence stays in Verify. |
 | `REVIEW_REQUIRED` and retry | Verify reason and transition | Review is not success. An allowed exact retry refreshes only rejected evidence and remains in Verify. |
@@ -73,16 +73,17 @@ replacement after installer death repeats every activation proof independently;
 a persisted checkpoint is recovery input, never authority. Failed revalidation
 restores the verified prior bundle and supervision path.
 
-A migration hold is bound to the exact version being prepared and one owner
-epoch. Expiry or identity mismatch removes its authority. Switch atomically
-transfers intentional Sync-stop ownership from the hold to the switch
-transaction; Observe resumes Sync and clears that ownership.
+Stable Sync keeps its single owner throughout Prepare and Verify. Additive
+migration evidence binds an immutable generation and activation watermark;
+later CURRENT advancement is accepted only after independent invariant checks.
+The Switch transaction alone owns the short intentional Sync stop, and Observe
+requires that owner to resume.
 
 ## Formal boundary
 
 The TLA+ model covers the four phases, exact release identity, accepted
 evidence, mutable health, forward Switch failure, post-Switch observation
-failure and recovery observation, Sync ownership, exact holds, supervision
+failure and recovery observation, Sync ownership, generation watermarks, supervision
 fencing, five installer-death checkpoints, generation identity sets, active
 legacy Reverse compatibility, and protected cleanup. It omits individual News
 rows, route payloads, SQL details, browser rendering, cryptography, and
@@ -94,7 +95,7 @@ safety mechanism inventory.
 | Formal element | Implementation owner | Contract and tests | Production evidence |
 |---|---|---|---|
 | `DiscoverCandidate` / Prepare entry | `Find-NewCandidateRelease`, `Invoke-CandidateDiscovery` | Release identity/discovery contract; Windows runtime contracts | immutable Worker annotation, discovery watermark, release history |
-| `BeginHold`, expiry, watchdog suppression | `Enter-CoordinatedMigrationSyncHold`, `Test-CoordinatedMigrationSyncHold`, `Test-WatchdogRecoverySuppressed` | Release Control migration section; runtime launcher family | exact hold record, Sync process identity, watchdog log |
+| Stable Sync during Prepare/Verify | migration receipt watermark and `Test-WatchdogRecoverySuppressed` | Release Control migration section; runtime launcher family | advancing CURRENT receipt, Sync process identity, watchdog log |
 | migration readiness | coordinated migration verifier and receipt | Release migration receipt contract; receipt/live-evidence tests | exact candidate/database/schema/projection receipt |
 | supervisor fence and baseline | `Suspend-ControlPlaneSupervision`, `Stop-VerifiedWatchdogOwner`, `Assert-ControlPlaneIsolationBaseline` | Control Plane installation contract; `test_control_plane_install.py` | install transaction, old process token, before snapshot |
 | quiesced handoff and activation | `Start-WatchdogReplacement`, `Wait-VerifiedWatchdogHandoff`, `Wait-ControlPlaneInstallActivation` | acknowledged-handoff family tests | heartbeat mode, install transaction ID, bundle revision/hash, process token |

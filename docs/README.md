@@ -98,6 +98,7 @@ current rules merely because they discovered one.
 ### Historical evidence
 
 - Audits: [test suite](audits/TEST_SUITE.md),
+  [Release Control progressive delivery 2026-08-26](audits/RELEASE_CONTROL_PROGRESSIVE_DELIVERY_2026_08_26.md),
   [Release Control install handoff 2026-08-26](audits/RELEASE_CONTROL_INSTALL_HANDOFF_2026_08_26.md),
   [release-control ownership 2026-08-20](audits/RELEASE_CONTROL_2026_08_20.md),
   [U5 authority](audits/U5_AUTHORITY.md),

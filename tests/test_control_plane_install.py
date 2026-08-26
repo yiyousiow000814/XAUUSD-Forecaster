@@ -326,33 +326,32 @@ def test_handoff_orders_single_ownership_and_preserves_runtime(tmp_path: Path) -
     )
 
 
-def test_install_preserves_intentionally_stopped_sync_during_exact_migration_hold(
+def test_install_fails_closed_when_stable_sync_owner_is_missing(
     tmp_path: Path,
 ) -> None:
     old_revision, target_revision = "a" * 40, "b" * 40
     body = _state_machine_mocks(old_revision, target_revision) + textwrap.dedent(
         f"""
-        $script:release=[pscustomobject]@{{candidate=[pscustomobject]@{{
-          artifact_kind='PRODUCTION_CANDIDATE';branch='main';validation_key='candidate:key'
-        }};migration_sync_hold=[pscustomobject]@{{validation_key='candidate:key';
-          expires_at=[DateTimeOffset]::UtcNow.AddHours(1).ToString('o')}}}};
-        function Get-ReleaseControlState {{ $script:release }};
         function Get-ControlPlaneIsolationSnapshot {{
           $p=[pscustomobject]@{{process_id=10;process_start_token='service-token'}};
           [pscustomobject]@{{business_runtime_revision='runtime';services=[pscustomobject]@{{
             quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@();broadcast=@()
           }}}}
         }};
-        $result=Invoke-ControlPlaneInstall -VerifiedSourceRoot 'immutable'
-          -TargetRevision '{target_revision}';
-        Write-Output "$($result.status)|$($script:timeline -join ',')"
+        function Assert-ControlPlaneIsolationBaseline {{ param($Snapshot,$ReleaseState);
+          if(@($Snapshot.services.sync).Count-ne 1){{throw 'CONTROL_PLANE_SERVICE_OWNER_REQUIRED:sync'}}
+        }};
+        try {{ Invoke-ControlPlaneInstall -VerifiedSourceRoot 'immutable'
+          -TargetRevision '{target_revision}' | Out-Null }} catch {{ $reason=$_.Exception.Message }};
+        Write-Output "$reason|$($script:timeline -join ',')"
         """
     ).replace("\n", " ")
     result = _run_contract(tmp_path, body)
-    assert result == (
-        "COMMITTED|lock,stage,suspend,guard,stop,baseline,install,start,"
-        "heartbeat:QUIESCED,isolation,heartbeat:ACTIVE,supervision,unlock"
+    assert result.startswith(
+        "CONTROL_PLANE_INSTALL_FAILED: "
+        "CONTROL_PLANE_SERVICE_OWNER_REQUIRED:sync; ROLLED_BACK|"
     )
+    assert "install" not in result
 
 
 def test_install_captures_service_isolation_only_after_old_watchdog_stops(
@@ -679,29 +678,15 @@ def test_control_plane_isolation_respects_optional_broadcast_ownership(
     assert _run_contract(tmp_path, body) == expected
 
 
-@pytest.mark.parametrize(
-    ("expiry", "expected"),
-    (
-        ("[DateTimeOffset]::UtcNow.AddHours(1).ToString('o')", "PASSED"),
-        ("'2020-01-01T00:00:00Z'", "CONTROL_PLANE_SERVICE_OWNER_REQUIRED:sync"),
-    ),
-)
-def test_control_plane_isolation_allows_stopped_sync_only_for_live_exact_hold(
+def test_control_plane_isolation_always_requires_stable_sync_owner(
     tmp_path: Path,
-    expiry: str,
-    expected: str,
 ) -> None:
     body = textwrap.dedent(
         f"""
         function Test-BroadcastPublisherEnabled {{ return $false }};
         $p=[pscustomobject]@{{process_id=10;process_start_token='same'}};
-        $release=[pscustomobject]@{{candidate=[pscustomobject]@{{
-          artifact_kind='PRODUCTION_CANDIDATE';branch='main';validation_key='candidate:key'
-        }};migration_sync_hold=[pscustomobject]@{{validation_key='candidate:key';
-          expires_at={expiry}}}}};
         $before=[pscustomobject]@{{business_runtime_revision='runtime';release_state_hash='state';release_history_hash='history';services=[pscustomobject]@{{quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@();broadcast=@()}}}};
-        $after=[pscustomobject]@{{business_runtime_revision='runtime';release_state_hash='state';release_history_hash='history';services=[pscustomobject]@{{quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@();broadcast=@()}}}};
-        try {{ Assert-ControlPlaneIsolationBaseline -Snapshot $before -ReleaseState $release; Write-Output 'PASSED' }} catch {{ Write-Output $_.Exception.Message }}
+        try {{ Assert-ControlPlaneIsolationBaseline -Snapshot $before; Write-Output 'PASSED' }} catch {{ Write-Output $_.Exception.Message }}
         """
     ).replace("\n", " ")
-    assert _run_contract(tmp_path, body) == expected
+    assert _run_contract(tmp_path, body) == "CONTROL_PLANE_SERVICE_OWNER_REQUIRED:sync"

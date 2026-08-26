@@ -554,6 +554,9 @@ def _coordinated_migration_contract_body(*, capability_overrides: str = "") -> s
         "active_generation_id=('c'*64);snapshot_id=('d'*64);source_digest=('e'*64);"
         "receipt_digest=('f'*64);index_count=4117;detail_count=4117;"
         "missing_detail_count=0;invariant_violation_count=0;generation_state='CURRENT';"
+        "generation_contract_version='news-projection-v3';"
+        "generation_watermark='2026-08-26T05:00:00Z';"
+        "generation_activated_at='2026-08-26T05:01:00Z';"
         "expected_receipt_digest=('f'*64);staged_index_count=4117;"
         "staged_detail_count=4117};"
         f"{capability_overrides}return $row}};"
@@ -1102,6 +1105,58 @@ def test_candidate_data_parity_rejects_unexpected_empty_dataset(tmp_path) -> Non
         'Write-Output "$($route.reason),$($result.passed),$($route.error)"',
     )
     assert result == "CANDIDATE_DATASET_UNEXPECTEDLY_EMPTY,False,"
+
+
+def _scoped_debt_parity_contract(audit_failure: str, changed: bool) -> str:
+    status_json = json.dumps(_status_payload(), separators=(",", ":"))
+    contract_routes = (
+        "@([pscustomobject]@{path='/api/audit';auth_required=$false})"
+        if changed else "@()"
+    )
+    return (
+        "$stable=[pscustomobject]@{worker_version_id='stable';git_sha='stable-git';"
+        "artifact_kind='PRODUCTION_CANDIDATE'};"
+        "$candidate=[pscustomobject]@{worker_version_id='candidate';git_sha='candidate-git'};"
+        f"$plan=[pscustomobject]@{{contract_routes={contract_routes}}};"
+        "function Get-ExactVersionJsonObservation{param($VersionId,$GitSha,$Path);"
+        f"if($Path -eq '/api/audit' -and ({audit_failure})){{"
+        "return [pscustomobject]@{passed=$false;identity_passed=$true;"
+        "failure_class='HTTP_503';diagnostic='existing debt'}};"
+        f"$payload=if($Path -eq '/api/status'){{'{status_json}'|ConvertFrom-Json}}"
+        "elseif($Path -eq '/api/audit'){[pscustomobject]@{generated_at='2026-08-21T10:20:00Z'}}"
+        "else{[pscustomobject]@{items=@(1)}};"
+        "return [pscustomobject]@{passed=$true;identity_passed=$true;payload=$payload;"
+        "observed_version_id=$VersionId;observed_git_sha=$GitSha}};"
+        "$result=Test-CandidateDataParity $stable $candidate $plan;"
+        "$audit=$result.routes|Where-Object {$_.route -eq '/api/audit'};"
+        'Write-Output "$($result.passed),$($audit.acceptance_class),'
+        '$($audit.state),$($audit.reason),$($result.stable_debt.Count)"'
+    )
+
+
+def test_unrelated_unchanged_stable_debt_is_visible_and_nonblocking(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path, _scoped_debt_parity_contract("$true", False),
+    )
+    assert result == (
+        "True,C,EXISTING_STABLE_DEBT,UNCHANGED_EXISTING_STABLE_DEBT,1"
+    )
+
+
+@pytest.mark.parametrize(
+    ("audit_failure", "changed", "expected"),
+    (
+        ("$VersionId -eq 'candidate'", False, "False,C,FAILED,CANDIDATE_REGRESSION,0"),
+        ("$true", True, "False,B,FAILED,EXACT_VERSION_READ_FAILED,0"),
+    ),
+)
+def test_candidate_regression_or_changed_boundary_failure_still_blocks(
+    tmp_path, audit_failure: str, changed: bool, expected: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path, _scoped_debt_parity_contract(audit_failure, changed),
+    )
+    assert result == expected
 
 
 def _legacy_parity_contract(
@@ -3252,6 +3307,37 @@ def test_coordinated_migration_receipt_is_exact_fresh_and_live(tmp_path) -> None
     )
 
 
+@pytest.mark.parametrize(
+    ("activation", "expected"),
+    (
+        ("2026-08-26T05:02:00Z", "PASSED"),
+        ("2026-08-26T04:59:00Z", "MIGRATION_RECEIPT_GENERATION_REGRESSION"),
+    ),
+)
+def test_migration_receipt_tolerates_only_forward_valid_current_generation(
+    tmp_path, activation: str, expected: str,
+) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _coordinated_migration_contract_body()
+        + "$evidence=Get-CoordinatedMigrationLiveEvidence $candidate $stable $files;"
+        "$receipt=New-CoordinatedMigrationReceipt $evidence;"
+        "Write-CoordinatedMigrationReceipt $receipt;"
+        "$script:next=$evidence|ConvertTo-Json -Depth 12|ConvertFrom-Json;"
+        "$script:next.news_generation_id=('9'*64);"
+        "$script:next.news_snapshot_id=('8'*64);"
+        "$script:next.news_source_digest=('7'*64);"
+        "$script:next.news_receipt_digest=('6'*64);"
+        f"$script:next.news_activated_at='{activation}';"
+        "function Get-CoordinatedMigrationLiveEvidence{return $script:next};"
+        "$reason='PASSED';try{Assert-CoordinatedMigrationReceipt "
+        "$candidate $stable $files|Out-Null}catch{$reason=$_.Exception.Message};"
+        "Write-Output $reason",
+    )
+    assert result == expected
+
+
 def test_migration_contract_reads_the_exact_candidate_not_stable_checkout(
     tmp_path,
 ) -> None:
@@ -3469,77 +3555,64 @@ def test_successful_coordinated_migration_acceptance_is_audited_and_exact(
         'Write-Output "$($accepted.validation_state),'
         '$($final.candidate.migration_acceptance.validation_key -eq '
         '$final.candidate.validation_key),'
-        '$($final.migration_sync_hold.validation_key -eq '
-        '$final.candidate.validation_key),'
-        '$(Test-CoordinatedMigrationSyncHold $final),'
+        '$($null -eq $final.PSObject.Properties[\'migration_sync_hold\']),'
         '$($history.Contains(\'COORDINATED_STORAGE_MIGRATION_PASSED\'))"',
     )
-    assert result == "NEW,True,True,True,True"
+    assert result == "NEW,True,True,True"
 
 
-@pytest.mark.parametrize(
-    ("hold_override", "candidate_override"),
-    [
-        ("$state.migration_sync_hold.validation_key=('9'*40)", ""),
-        ("$state.migration_sync_hold.expires_at='2020-01-01T00:00:00Z'", ""),
-        ("", "$state.candidate.branch='feature/not-main'"),
-        ("", "$state.candidate.artifact_kind='PREVIEW'"),
-    ],
-)
-def test_coordinated_migration_sync_hold_is_exact_bounded_and_production_only(
-    tmp_path, hold_override: str, candidate_override: str,
-) -> None:
+def test_coordinated_migration_verify_never_stops_stable_sync(tmp_path) -> None:
+    _write_coordinated_migration_files(tmp_path)
     result = _run_control_center_contract(
         tmp_path,
         _authorized_candidate("a" * 40, "b" * 40)
-        + "$state=Get-ReleaseControlState;$state.candidate.branch='main';"
-        "$state|Add-Member -Force migration_sync_hold ([pscustomobject]@{"
-        "validation_key=$state.candidate.validation_key;"
-        "expires_at=[DateTimeOffset]::UtcNow.AddHours(2).ToString('o')});"
-        f"{hold_override};{candidate_override};"
-        "Write-Output (Test-CoordinatedMigrationSyncHold $state)",
+        + _coordinated_migration_contract_body()
+        + "$state=Get-ReleaseControlState;$state.candidate.validation_state='REVIEW_REQUIRED';"
+        "$state.candidate.branch='main';"
+        "$state.candidate.validation=[pscustomobject]@{key=$state.candidate.validation_key;"
+        "reason='COORDINATED_STORAGE_MIGRATION_REQUIRED'};Write-ReleaseControlState $state;"
+        "function Get-ProductionCandidateProvenanceResult{return [pscustomobject]@{state='PASSED'}};"
+        "function Get-RequiredGitHubChecksResult{return [pscustomobject]@{state='PASSED'}};"
+        "function Get-CandidateChangedFiles{return $files};"
+        "$script:stops=0;function Stop-ForecasterService{$script:stops++};"
+        "$null=Verify-CandidateCoordinatedMigration;$final=Get-ReleaseControlState;"
+        'Write-Output "$script:stops,$($null -eq '
+        "$final.PSObject.Properties['migration_sync_hold'])\"",
     )
-    assert result == "False"
+    assert result == "0,True"
 
 
 @pytest.mark.parametrize(
-    ("service_key", "service_state", "expected"),
+    ("transaction", "expected"),
     [
-        ("sync", "STOPPED", "True"),
-        ("sync", "SYNC ERROR", "False"),
-        ("api", "STOPPED", "False"),
+        ("$null", "False"),
+        ("[pscustomobject]@{type='PROMOTE';phase='PRECHECK'}", "True"),
+        ("[pscustomobject]@{type='PROMOTE';phase='CUTOVER'}", "True"),
+        ("[pscustomobject]@{type='PROMOTE';phase='OBSERVING'}", "False"),
+        ("[pscustomobject]@{type='REVERSE';phase='REVERSING'}", "True"),
     ],
 )
-def test_watchdog_suppresses_only_an_explicit_migration_sync_stop(
-    tmp_path, service_key: str, service_state: str, expected: str,
+def test_watchdog_suppresses_stopped_sync_only_during_switch(
+    tmp_path, transaction: str, expected: str,
 ) -> None:
     result = _run_control_center_contract(
         tmp_path,
-        _authorized_candidate("a" * 40, "b" * 40)
-        + "$state=Get-ReleaseControlState;$state.candidate.branch='main';"
-        "$state|Add-Member -Force migration_sync_hold ([pscustomobject]@{"
-        "validation_key=$state.candidate.validation_key;"
-        "expires_at=[DateTimeOffset]::UtcNow.AddHours(2).ToString('o')});"
-        f"Write-Output (Test-WatchdogRecoverySuppressed '{service_key}' "
-        f"'{service_state}' $state)",
+        f"$state=[pscustomobject]@{{transaction={transaction}}};"
+        "Write-Output (Test-WatchdogRecoverySuppressed 'sync' 'STOPPED' $state)",
     )
     assert result == expected
 
 
-def test_explicit_sync_start_releases_the_migration_hold(tmp_path) -> None:
+def test_prepare_and_verify_never_suppress_sync_recovery(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
-        _authorized_candidate("a" * 40, "b" * 40)
-        + "$state=Get-ReleaseControlState;$state.candidate.branch='main';"
-        "$state|Add-Member -Force migration_sync_hold ([pscustomobject]@{"
-        "validation_key=$state.candidate.validation_key;"
-        "expires_at=[DateTimeOffset]::UtcNow.AddHours(2).ToString('o')});"
-        "Write-ReleaseControlState $state;Exit-CoordinatedMigrationSyncHold;"
-        "$final=Get-ReleaseControlState;"
-        'Write-Output "$($null -eq $final.migration_sync_hold),'
-        '$(Test-CoordinatedMigrationSyncHold $final)"',
+        "$prepare=[pscustomobject]@{transaction=$null;lifecycle_phase='PREPARE'};"
+        "$verify=[pscustomobject]@{transaction=$null;lifecycle_phase='VERIFY'};"
+        "$a=Test-WatchdogRecoverySuppressed 'sync' 'STOPPED' $prepare;"
+        "$b=Test-WatchdogRecoverySuppressed 'sync' 'STOPPED' $verify;"
+        'Write-Output "$a,$b"',
     )
-    assert result == "True,False"
+    assert result == "False,False"
 
 
 def test_platform_compatibility_approval_is_exact_audited_and_narrow(tmp_path) -> None:

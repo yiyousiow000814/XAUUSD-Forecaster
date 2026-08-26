@@ -3,7 +3,7 @@
 This simplification-first model covers the Release/Control Plane composition
 boundary, not the forecasting product or Worker route payloads. Its only
 release-attempt lifecycle phases are `PREPARE`, `VERIFY`, `SWITCH`, and
-`OBSERVE`. Review reasons, holds, handoff checkpoints, reverse, and recovery are
+`OBSERVE`. Review reasons, handoff checkpoints, reverse, and recovery are
 internal operations. It still abstracts exact identity, immutable acceptance,
 mutable dependency health, Sync ownership, watchdog epochs, Control Plane
 handoff, CURRENT/Reverse-Stable identity compatibility, cleanup, return, and
@@ -45,8 +45,10 @@ The following actions and invariants generalize the observed failure classes:
 
 | Class | Model elements |
 |---|---|
-| Watchdog defeats migration freeze | `BeginHold`, `WatchdogRecover`, `ActiveHoldOwnsStoppedSync` |
-| Install requires owner during intentional stop | `CaptureBaseline` preserves the observed baseline; owner legality is a separate Prepare precondition |
+| Prepare/Verify degrades Stable | `VerifyMigration`, `PrepareVerifyKeepsStableSync`, and generation activation while Sync retains one owner |
+| Candidate preparation mutates Stable | `CandidatePreparationPreservesStable` and the immutable prepared-Stable identity |
+| Verification races advancing Stable | generation activation watermark may advance after `VerifyMigration`; regression is forbidden |
+| Install skips the Stable Sync owner | `BeginInstall` and the captured baseline require one Sync owner |
 | Success, observation failure, automatic return | `ApplySwitch`, `DegradeHealth`, `ObserveFailure`, `ApplyRecoverySwitch`, `ObserveRecovery` |
 | Failure before Switch applies | `DegradeHealth`, `FailSwitch`, recovery Switch and observation |
 | Snapshot/handoff TOCTOU | `StartQuiescedSupervisor`, supervision epochs, `StaleSupervisorIsFenced` |
@@ -54,7 +56,7 @@ The following actions and invariants generalize the observed failure classes:
 | Missing/extra legacy projection identities | `StageLegacyInvalid`, `FreshStagingCompatible`, `ActivateGeneration` |
 | One-time legacy repair drifts later | generation 0 -> 1 -> 2; every `PrepareGeneration` clears staged compatibility evidence |
 | Cleanup deletes CURRENT or fresh STAGING | `CleanupObsolete`, `CurrentGenerationCannotBeCleaned`, `FreshStagingCannotBeCleaned` |
-| Hold expires during work | `HoldExpires`, `WatchdogRecoversSync`, `ActiveHoldOwnsStoppedSync` |
+| Existing debt blocks an improvement | `RecordStableDebt` is non-failing, while `HardSafetyFails` and `IntroduceCandidateRegression` remain blockers |
 | Main or exact identity moves | `MainMoves`, `CorruptCandidateIdentity`; neither can mutate the in-flight target or produce accepted evidence |
 
 Scenario and implementation mappings live in
