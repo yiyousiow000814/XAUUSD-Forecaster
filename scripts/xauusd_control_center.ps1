@@ -6322,18 +6322,7 @@ function Invoke-ControlPlaneInstall {
     $oldOwner = $oldOwners[0]
     $oldHeartbeat = Assert-CurrentWatchdogHeartbeat -Owner $oldOwner `
         -ExpectedRevision ([string]$currentBundle.source_revision)
-    $isolationBefore = Get-ControlPlaneIsolationSnapshot
-    foreach ($service in $services) {
-        $owners = @($isolationBefore.services.($service.Key))
-        $required = Test-ControlPlaneServiceOwnerRequired -Service $service `
-            -ReleaseState $release
-        if ($required -and $owners.Count -ne 1) {
-            throw "CONTROL_PLANE_SERVICE_OWNER_REQUIRED:$($service.Key)"
-        }
-        if ((-not $required) -and $owners.Count -ne 0) {
-            throw "CONTROL_PLANE_UNEXPECTED_SERVICE_OWNER:$($service.Key)"
-        }
-    }
+    $isolationBefore = $null
 
     $controlParent = Split-Path -Parent $controlRoot
     $transactionId = [guid]::NewGuid().ToString("N")
@@ -6357,7 +6346,7 @@ function Invoke-ControlPlaneInstall {
         new_watchdog_identity = $null
         bundle_hash_verified = $false
         rollback_result = $null
-        isolation_before = $isolationBefore
+        isolation_before = $null
         isolation_after = $null
     }
     try {
@@ -6385,6 +6374,23 @@ function Invoke-ControlPlaneInstall {
         if (@(Get-VerifiedWatchdogOwners).Count -ne 0) {
             throw "CONTROL_PLANE_OLD_WATCHDOG_STILL_OWNS"
         }
+        # The watchdog can recover a service while the immutable bundle stage is
+        # being verified. Establish the service baseline only after supervision
+        # is quiesced and the old watchdog has stopped, so no owner can mutate it
+        # between the snapshot and the handoff.
+        $isolationBefore = Get-ControlPlaneIsolationSnapshot
+        foreach ($service in $services) {
+            $owners = @($isolationBefore.services.($service.Key))
+            $required = Test-ControlPlaneServiceOwnerRequired -Service $service `
+                -ReleaseState $release
+            if ($required -and $owners.Count -ne 1) {
+                throw "CONTROL_PLANE_SERVICE_OWNER_REQUIRED:$($service.Key)"
+            }
+            if ((-not $required) -and $owners.Count -ne 0) {
+                throw "CONTROL_PLANE_UNEXPECTED_SERVICE_OWNER:$($service.Key)"
+            }
+        }
+        Write-ControlPlaneInstallState @{ isolation_before = $isolationBefore }
         Write-ControlPlaneInstallState @{ phase = "INSTALL_BUNDLE" }
         $installed = Install-VerifiedRuntimeControlBundleStage `
             -StageRoot $stageRoot -ControlRoot $controlRoot -BackupRoot $backupRoot

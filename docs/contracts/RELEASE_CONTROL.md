@@ -312,6 +312,10 @@ and verify the complete bundle before stopping supervision. The handoff order is
 -> START_NEW_WATCHDOG -> VERIFY_NEW_HEARTBEAT -> COMMITTED`. The new heartbeat
 MUST identify a different process-start token, the target bundle revision, and
 successful exact/hash verification while exactly one watchdog owns supervision.
+The service-isolation baseline is captured only after control supervision is
+quiesced and the old watchdog has stopped. A pre-quiesce snapshot is not an
+authoritative baseline because the old watchdog can still recover a service
+during immutable bundle staging.
 
 The transaction MUST preserve the Business Runtime revision and every quote,
 collector, annotator, API, and sync process identity. While an exact unexpired

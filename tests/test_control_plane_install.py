@@ -301,6 +301,31 @@ def test_install_preserves_intentionally_stopped_sync_during_exact_migration_hol
     )
 
 
+def test_install_captures_service_isolation_only_after_old_watchdog_stops(
+    tmp_path: Path,
+) -> None:
+    old_revision, target_revision = "a" * 40, "b" * 40
+    body = _state_machine_mocks(old_revision, target_revision) + textwrap.dedent(
+        f"""
+        $script:isolationCalls=0;
+        function Get-ControlPlaneIsolationSnapshot {{
+          $script:isolationCalls++;
+          if($script:isolationCalls-eq 1 -and $script:owners.Count-ne 0){{
+            throw 'ISOLATION_CAPTURED_BEFORE_QUIESCE'
+          }};
+          $p=[pscustomobject]@{{process_id=10;process_start_token='service-token'}};
+          [pscustomobject]@{{business_runtime_revision='runtime';services=[pscustomobject]@{{
+            quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@($p);broadcast=@()
+          }}}}
+        }};
+        $result=Invoke-ControlPlaneInstall -VerifiedSourceRoot 'immutable'
+          -TargetRevision '{target_revision}';
+        Write-Output "$($result.status)|$script:isolationCalls"
+        """
+    ).replace("\n", " ")
+    assert _run_contract(tmp_path, body) == "COMMITTED|2"
+
+
 def test_partial_supervision_quiesce_restores_task_enablement(tmp_path: Path) -> None:
     body = textwrap.dedent(
         """
