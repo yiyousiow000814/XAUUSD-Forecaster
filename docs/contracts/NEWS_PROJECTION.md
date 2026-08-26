@@ -27,8 +27,11 @@
 - The lifecycle is `prepare -> details -> index -> reconcile -> validate ->
   CURRENT`. Details MUST be complete before any index batch is accepted.
 - Index membership belongs to one generation. Detail bodies use their immutable,
-  content-addressed `detail_key` identity in the global derived detail store, so
-  replacement generations reuse exact existing evidence instead of copying it.
+  content-addressed `detail_key` identity in the global derived detail store.
+  The key binds both source revision identity and the exact detail payload hash,
+  so a later annotation or impact update under the same source revision stages a
+  new detail without mutating the detail visible to CURRENT. Replacement
+  generations reuse exact existing evidence instead of copying it.
   A repeated key with a different hash or payload is a contradiction and MUST
   fail before either evidence or batch progress changes. Readers MUST select
   index membership only from the active generation and resolve every identity

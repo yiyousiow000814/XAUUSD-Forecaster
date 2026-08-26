@@ -1043,6 +1043,37 @@ def test_sites_bypass_header_is_shared_by_get_and_post_but_not_cloudflare(
     )
 
 
+def test_get_json_can_explicitly_read_structured_health_error_evidence(
+    monkeypatch,
+) -> None:
+    module = _sync_module()
+    payload = {
+        "status": "ERROR",
+        "projection_state": "REPLAYING",
+        "error_code": "NEWS_PROJECTION_NOT_SYNCHRONIZED",
+        "staging": {"generation_id": "a" * 64},
+    }
+
+    def reject(*_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            "https://example.workers.dev/api/news-index?health_check=1",
+            503,
+            "Service Unavailable",
+            {},
+            io.BytesIO(json.dumps(payload).encode()),
+        )
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", reject)
+
+    with pytest.raises(module.RemoteInvariantViolation):
+        module._get_json("https://example.workers.dev/api/news-index", {"token": "x"})
+    assert module._get_json(
+        "https://example.workers.dev/api/news-index",
+        {"token": "x"},
+        allow_error_payload=True,
+    ) == payload
+
+
 def test_ingest_response_records_valid_main_revision(tmp_path, monkeypatch) -> None:
     module = _sync_module()
     revision = "a" * 40

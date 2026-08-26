@@ -1003,6 +1003,7 @@ def _get_json(
     config: dict,
     *,
     timeout_seconds: float = REMOTE_POST_TIMEOUT_SECONDS,
+    allow_error_payload: bool = False,
 ) -> dict:
     if (
         not isinstance(timeout_seconds, (int, float))
@@ -1025,6 +1026,8 @@ def _get_json(
             payload = json.loads(error.read())
         except (TypeError, ValueError):
             raise error
+        if allow_error_payload and isinstance(payload, dict):
+            return payload
         if isinstance(payload, dict) and payload.get("error_code"):
             raise RemoteInvariantViolation(payload) from error
         raise error

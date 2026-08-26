@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import re
 from pathlib import Path
 
 import pytest
@@ -98,17 +100,23 @@ def test_bootstrap_reuses_one_frozen_generation_without_stable_api(
     assert observed == [frozen, frozen]
 
 
-def test_bootstrap_does_not_retry_deterministic_source_contract_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+@pytest.mark.parametrize("error", [
+    MODULE.PayloadContractError("local news projection manifest is missing"),
+    MODULE.RemoteInvariantViolation({
+        "error_code": "NEWS_PROJECTION_DETAIL_CONTRADICTION",
+    }),
+])
+def test_bootstrap_does_not_retry_deterministic_contract_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, error: Exception,
 ) -> None:
     attempts = []
 
     def reject(*_args, **_kwargs):
         attempts.append(1)
-        raise MODULE.PayloadContractError("local news projection manifest is missing")
+        raise error
 
     monkeypatch.setattr(MODULE, "_sync_news", reject)
-    with pytest.raises(MODULE.PayloadContractError, match="manifest is missing"):
+    with pytest.raises(type(error), match=re.escape(str(error))):
         MODULE.bootstrap(
             base_config={"local_status_url": "http://127.0.0.1:8765/api/status"},
             origin="https://abc12345-aurum-signal-room.example.workers.dev",
@@ -116,3 +124,114 @@ def test_bootstrap_does_not_retry_deterministic_source_contract_failure(
             max_cycles=1_000, retry_seconds=0,
         )
     assert attempts == [1]
+
+
+def test_bootstrap_restores_persisted_generation_before_rebuilding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "candidate-generation.json.gz"
+    artifact.write_bytes(b"persisted")
+    frozen = object()
+    monkeypatch.setattr(
+        MODULE, "_read_news_projection_generation_artifact",
+        lambda path: frozen if path == artifact else None,
+    )
+    monkeypatch.setattr(
+        MODULE, "_freeze_news_projection_generation",
+        lambda _path: pytest.fail("restart must not rebuild a pinned generation"),
+    )
+
+    restored = MODULE._load_or_freeze_news_projection_generation(
+        tmp_path / "source.sqlite3", artifact,
+    )
+
+    assert restored is frozen
+
+
+def test_bootstrap_persists_generation_before_first_replay(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "candidate-generation.json.gz"
+    frozen = object()
+    writes = []
+    monkeypatch.setattr(
+        MODULE, "_freeze_news_projection_generation", lambda _path: frozen,
+    )
+    monkeypatch.setattr(
+        MODULE, "_write_news_projection_generation_artifact",
+        lambda path, generation: writes.append((path, generation)),
+    )
+
+    result = MODULE._load_or_freeze_news_projection_generation(
+        tmp_path / "source.sqlite3", artifact,
+    )
+
+    assert result is frozen
+    assert writes == [(artifact, frozen)]
+
+
+def test_missing_pinned_artifact_enters_explicit_recovery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    state_file = tmp_path / "state.json"
+    state = {
+        "contract_version": MODULE.NEWS_MIRROR_CONTRACT_VERSION,
+        "projection_state": "REPLAYING", "generation_id": "a" * 64,
+    }
+    monkeypatch.setattr(MODULE, "_read_news_sync_state", lambda _path: dict(state))
+    recorded = []
+    monkeypatch.setattr(
+        MODULE, "_record_recovery_required",
+        lambda *args: recorded.append(args),
+    )
+
+    with pytest.raises(MODULE.PayloadContractError, match="explicit recovery"):
+        MODULE._require_recoverable_artifact(
+            state_file, tmp_path / "missing-generation.json.gz",
+        )
+
+    assert recorded == [(
+        state_file, None, "FROZEN_GENERATION_ARTIFACT_MISSING",
+    )]
+
+
+def test_recovery_abandons_only_exact_recorded_staging(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    generation_id = "a" * 64
+    state_file = tmp_path / "state.json"
+    artifact = tmp_path / "state-generation.json.gz"
+    state_file.write_text("{}", encoding="utf-8")
+    artifact.write_bytes(b"artifact")
+    monkeypatch.setattr(MODULE, "_read_news_sync_state", lambda _path: {
+        "projection_state": "RECOVERY_REQUIRED", "generation_id": generation_id,
+        "recovery": {
+            "generation_id": generation_id,
+            "error_code": "FROZEN_GENERATION_ARTIFACT_MISSING",
+        },
+    })
+    health = iter([
+        {"staging": {"generation_id": generation_id}},
+        {"staging": None},
+    ])
+    monkeypatch.setattr(MODULE, "_get_json", lambda *_args, **_kwargs: next(health))
+    posted = []
+    monkeypatch.setattr(
+        MODULE, "_post_json",
+        lambda url, body, _config: posted.append((url, json.loads(body))) or {},
+    )
+
+    result = MODULE.abandon_recovery_generation(
+        config={"token": "secret"}, origin="https://candidate.example",
+        state_file=state_file, artifact_path=artifact,
+        generation_id=generation_id,
+    )
+
+    assert result["status"] == "PASSED"
+    assert posted == [(
+        "https://candidate.example/api/news-index",
+        {"action": "abandon", "generation_id": generation_id},
+    )]
+    assert not state_file.exists()
+    assert not artifact.exists()
+    assert (tmp_path / "state-recovery.json").exists()

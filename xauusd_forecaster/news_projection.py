@@ -97,15 +97,23 @@ def stable_news_key(row: dict) -> str:
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
+def content_addressed_detail_key(row: dict, detail_payload: dict) -> str:
+    """Bind derived detail identity to both source revision and exact content."""
+    return sha256_json({
+        "source_identity": stable_news_key(row),
+        "detail_hash": sha256_json(detail_payload),
+    }, sort_keys=True)
+
+
 def split_news_rows(rows: Iterable[dict]) -> tuple[list[dict], list[dict]]:
     """Return deterministically ordered index and detail projections."""
     projected: list[tuple[str, dict, dict]] = []
     for raw in rows:
         row = dict(raw)
-        detail_key = stable_news_key(row)
         detail_payload = {
             key: value for key, value in row.items() if key not in NEWS_INDEX_FIELDS
         }
+        detail_key = content_addressed_detail_key(row, detail_payload)
         index = {key: row.get(key) for key in NEWS_INDEX_FIELDS}
         index["cluster_id"] = str(index.get("cluster_id") or detail_key)
         index.update({
