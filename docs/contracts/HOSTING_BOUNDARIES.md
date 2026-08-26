@@ -160,8 +160,13 @@
   not delay the next heartbeat or make an otherwise current public status stale.
   Each optional resource owns a durable next-run time and failure backoff, each
   accumulated resource advances through a bounded page, and one cycle admits
-  only a fixed number of heavy resources. Restarting the synchronizer must not
-  collapse those independent cadences into one upload burst.
+  only a fixed number of heavy resources. The single serial heavy owner selects
+  the earliest due resource and immediately admits another bounded operation
+  while overdue work remains; heartbeat cadence is not a heavy-work admission
+  limit. Successful schedules advance from the prior durable due time without
+  accumulating execution-time drift, while missed periods coalesce instead of
+  creating a catch-up burst. Restarting the synchronizer must not collapse those
+  independent cadences into one upload burst.
 - The audit landing resource is a fixed summary contract. Daily Brief bodies,
   decision inspection rows, and storyline presentation detail are separate
   lazy snapshots with independent item and serialized-byte bounds. Local

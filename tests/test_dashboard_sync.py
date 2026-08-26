@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import importlib.util
 import io
 import json
@@ -2253,6 +2254,72 @@ def test_sync_resource_budget_and_cadence_resume_from_durable_state(
     assert persisted["resources"]["learning"]["last_success_at"]
 
 
+@pytest.mark.parametrize("days", [1, 7])
+@pytest.mark.parametrize("failing_resource", [None, "audit"])
+def test_serial_heavy_scheduler_is_starvation_free_with_restart_and_backoff(
+    days, failing_resource,
+) -> None:
+    module = _sync_module()
+    base = datetime(2026, 8, 26, tzinfo=timezone.utc)
+    heavy = [policy for policy in module.RESOURCE_POLICIES if policy[3]]
+    cadence = {policy[0]: policy[2] for policy in heavy}
+    state = {"resources": {
+        policy[0]: {"next_run_at": base.isoformat()}
+        for policy in heavy
+    }}
+    counts = {policy[0]: 0 for policy in heavy}
+    attempts = {policy[0]: 0 for policy in heavy}
+    max_lateness = {policy[0]: 0.0 for policy in heavy}
+    now = base
+    end = base + timedelta(days=days)
+    restart_at = base + timedelta(hours=12)
+    restarted = False
+    while now < end:
+        due = module._due_resource_policies(state, now, lane="heavy")
+        if not due:
+            now = datetime.fromtimestamp(min(
+                module._schedule_epoch(
+                    state["resources"][policy[0]]["next_run_at"]
+                ) for policy in heavy
+            ), tz=timezone.utc)
+            continue
+        resource, _operation, cadence_seconds, _heavy = due[0]
+        due_at = datetime.fromisoformat(
+            state["resources"][resource]["next_run_at"]
+        )
+        max_lateness[resource] = max(
+            max_lateness[resource], (now - due_at).total_seconds(),
+        )
+        attempts[resource] += 1
+        success = resource != failing_resource
+        # A deliberately delayed market build plus a timeout-shaped repeated
+        # failure keeps utilization below one while exercising queue pressure.
+        duration = (
+            45 if resource == "market_chart" and failing_resource is None
+            else 30 if not success else 1
+        )
+        now += timedelta(seconds=duration)
+        module._record_resource_schedule(
+            state, resource, cadence_seconds, now=now, success=success,
+        )
+        if success:
+            counts[resource] += 1
+        if not restarted and now >= restart_at:
+            state = json.loads(json.dumps(state))
+            restarted = True
+
+    for resource in counts:
+        if resource == failing_resource:
+            assert attempts[resource] > 0
+            assert counts[resource] == 0
+        else:
+            assert counts[resource] > 0
+        assert max_lateness[resource] < cadence[resource], (
+            resource, max_lateness[resource], cadence[resource]
+        )
+    assert counts["news_evidence"] > 0
+
+
 def test_optional_failure_persists_backoff_without_same_cycle_retry(
     monkeypatch, tmp_path,
 ) -> None:
@@ -2432,6 +2499,157 @@ def test_news_generation_resumes_remote_offsets_and_bounds_each_cycle(
     actions.clear()
     module._sync_news({}, config)
     assert actions == ["prepare"]
+
+
+def test_news_generation_rejects_manifest_drift_without_abandoning(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    first = _projection_fixture(25)
+    replacement = _projection_fixture(26)
+    state_path = tmp_path / "news-state.json"
+    state_path.write_text(json.dumps({
+        "contract_version": first.manifest["contract_version"],
+        "generation_id": first.manifest["generation_id"],
+        "snapshot_id": first.manifest["snapshot_id"],
+        "projection_state": "REPLAYING",
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        module, "_get_local_json",
+        lambda _url: {"manifest": replacement.manifest},
+    )
+    posted = []
+    monkeypatch.setattr(
+        module, "_post_json",
+        lambda _url, body, _config: posted.append(json.loads(body)) or {},
+    )
+
+    with pytest.raises(module.PayloadContractError, match="pinned news generation"):
+        module._sync_news({}, {
+            "local_status_url": "http://local/api/status",
+            "remote_ingest_url": "https://remote/api/ingest",
+            "news_state_file": str(state_path), "token": "test",
+        })
+
+    assert posted == []
+
+
+def test_news_projection_restart_restores_exact_frozen_generation(
+    monkeypatch, tmp_path,
+) -> None:
+    api = _dashboard_module()
+    api._NEWS_PROJECTION_CACHE.clear()
+    database = tmp_path / "forward.sqlite3"
+    first = _projection_fixture(25)
+    replacement = _projection_fixture(26)
+    api._write_persisted_news_projection_generation(database, first)
+    builds = []
+    monkeypatch.setattr(
+        api, "_build_news_projection_source_from_database",
+        lambda _database: builds.append("replacement") or replacement,
+    )
+
+    # A process restart clears memory. The exact in-flight artifact still wins
+    # over newer SQLite arrivals until its snapshot is reported activated.
+    api._NEWS_PROJECTION_CACHE.clear()
+    restored = api._news_projection_source_for_request(database, "f" * 64)
+    assert restored.manifest == first.manifest
+    assert builds == []
+
+    api._NEWS_PROJECTION_CACHE["built_at"] = (
+        time.monotonic() - api.NEWS_PROJECTION_SOURCE_REFRESH_SECONDS - 1
+    )
+    fallback = api._news_projection_source_for_request(
+        database, first.manifest["snapshot_id"],
+    )
+    assert fallback.manifest == first.manifest
+    for _ in range(100):
+        if api._NEWS_PROJECTION_CACHE.get("building") is False:
+            break
+        time.sleep(0.01)
+    assert builds == ["replacement"]
+
+    api._NEWS_PROJECTION_CACHE.clear()
+    restored_replacement = api._news_projection_source_for_request(
+        database, first.manifest["snapshot_id"],
+    )
+    assert restored_replacement.manifest == replacement.manifest
+    api._NEWS_PROJECTION_CACHE.clear()
+
+
+def test_news_projection_restart_fails_closed_on_corrupt_frozen_generation(
+    tmp_path,
+) -> None:
+    api = _dashboard_module()
+    database = tmp_path / "forward.sqlite3"
+    api._write_persisted_news_projection_generation(
+        database, _projection_fixture(25),
+    )
+    path = api._news_projection_generation_path(database)
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        envelope = json.load(handle)
+    envelope["sha256"] = "0" * 64
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        json.dump(envelope, handle)
+
+    with pytest.raises(ValueError, match="digest is invalid"):
+        api._read_persisted_news_projection_generation(database)
+
+
+@pytest.mark.parametrize("arrival_pattern", ["none", "one_per_minute", "bursts"])
+@pytest.mark.parametrize("restart_minute", [None, 720])
+def test_pinned_news_generation_model_reaches_current_under_24h_arrivals(
+    arrival_pattern, restart_minute,
+) -> None:
+    # Use the production-shaped 3,983-row universe. Detail batches hold eight
+    # rows and index batches hold four, with four total batches admitted per
+    # News execution.
+    row_count = 3_983
+    batches_per_generation = (
+        (row_count + 7) // 8 + (row_count + 3) // 4
+    )
+    latest_revision = 0
+    pinned_revision = None
+    remaining_batches = 0
+    current_revision = None
+    activations = []
+    abandons = 0
+    for minute in range(24 * 60):
+        if arrival_pattern == "one_per_minute":
+            latest_revision += 1
+        elif arrival_pattern == "bursts" and minute in {10, 11, 360, 900, 901}:
+            latest_revision += 25
+        if pinned_revision is None and latest_revision != current_revision:
+            pinned_revision = latest_revision
+            remaining_batches = batches_per_generation
+        if pinned_revision is not None:
+            remaining_batches = max(0, remaining_batches - 4)
+        if pinned_revision is not None and remaining_batches == 0:
+            current_revision = pinned_revision
+            activations.append((minute, current_revision))
+            pinned_revision = (
+                latest_revision if latest_revision != current_revision else None
+            )
+            remaining_batches = (
+                batches_per_generation if pinned_revision is not None else 0
+            )
+        if restart_minute == minute:
+            durable = json.loads(json.dumps({
+                "latest": latest_revision, "pinned": pinned_revision,
+                "remaining": remaining_batches, "current": current_revision,
+            }))
+            latest_revision = durable["latest"]
+            pinned_revision = durable["pinned"]
+            remaining_batches = durable["remaining"]
+            current_revision = durable["current"]
+
+    assert abandons == 0
+    assert activations
+    if arrival_pattern != "none":
+        assert len(activations) >= 3
+        assert activations == sorted(activations)
+        assert current_revision is not None
+        assert latest_revision >= current_revision
 
 
 def test_news_generation_preserves_foreign_staging_owner(
@@ -2824,6 +3042,60 @@ def test_slow_heavy_resource_does_not_block_critical_heartbeat(
         datetime.now(timezone.utc)
         - datetime.fromisoformat(status["last_success"])
     ).total_seconds() < 5
+
+
+def test_continuous_heavy_owner_drains_overdue_queue_before_next_heartbeat(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    logical_time = [0.0]
+    heartbeat_times = []
+    heavy = [policy[0] for policy in module.RESOURCE_POLICIES if policy[3]]
+    completed = []
+    lock = threading.Lock()
+
+    class LogicalStop:
+        def is_set(self):
+            return False
+
+        def wait(self, seconds):
+            logical_time[0] += seconds
+            time.sleep(0.001)
+            return False
+
+    def heartbeat(_config):
+        heartbeat_times.append(logical_time[0])
+        return ([{"name": "candidate"}], module.SyncResourceResults([], []))
+
+    def lane(_targets, *, lane):
+        if lane != "heavy":
+            return module.SyncResourceResults([], [])
+        with lock:
+            if not heavy:
+                return module.SyncResourceResults([], [])
+            resource = heavy.pop(0)
+            completed.append(resource)
+        return module.SyncResourceResults([], [{
+            "target": "candidate", "resource": resource, "status": "OK",
+            "duration_ms": 1, "completed_at": datetime.now(timezone.utc).isoformat(),
+        }])
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: logical_time[0])
+    monkeypatch.setattr(module, "sync_heartbeat_once", heartbeat)
+    monkeypatch.setattr(module, "sync_resource_lane", lane)
+    monkeypatch.setattr(module, "write_sync_status", lambda *_a, **_k: None)
+
+    count = module.run_continuous_sync(
+        {}, status_file=tmp_path / "status.json", interval_seconds=30,
+        stop_event=LogicalStop(), max_heartbeats=2,
+    )
+
+    assert count == 2
+    assert heartbeat_times == [0.0, 30.0]
+    assert completed == [
+        "audit", "learning", "learning_history", "market_chart",
+        "market_history", "news", "news_evidence",
+    ]
 
 
 def test_local_operator_bridge_transport_requires_dedicated_secret(monkeypatch) -> None:

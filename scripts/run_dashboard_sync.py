@@ -1670,10 +1670,9 @@ def _sync_news(_local_payload: dict, config: dict) -> None:
         previous_generation and previous_generation != generation_id
         and state.get("projection_state") != "CURRENT"
     ):
-        _post_json(news_index_url, json.dumps({
-            "action": "abandon", "generation_id": previous_generation,
-        }, separators=(",", ":")).encode(), config)
-        state = {"contract_version": NEWS_MIRROR_CONTRACT_VERSION}
+        raise PayloadContractError(
+            "pinned news generation changed before reaching CURRENT"
+        )
 
     prepare_payload = json.dumps({
         "action": "prepare", "generation_id": generation_id,
@@ -1681,9 +1680,8 @@ def _sync_news(_local_payload: dict, config: dict) -> None:
     }, ensure_ascii=False, separators=(",", ":")).encode()
     # A busy generation may belong to another exact producer (for example the
     # still-active Stable mirror while a Candidate bootstrap is replaying).
-    # Only the generation recorded in this producer's own state may be
-    # abandoned above. Preserve a foreign staging generation and let the
-    # caller retry after the owning producer advances it.
+    # Preserve a foreign staging generation and let the caller retry after the
+    # owning producer advances it. Abandonment requires explicit recovery.
     prepare = _post_json(news_index_url, prepare_payload, config)
     detail_offset = int(prepare.get("next_detail_offset", 0))
     index_offset = int(prepare.get("next_index_offset", 0))
@@ -1990,15 +1988,21 @@ def _due_resource_policies(
     if not isinstance(resources, dict):
         resources = {}
     due = []
-    for policy in RESOURCE_POLICIES:
+    for policy_index, policy in enumerate(RESOURCE_POLICIES):
         resource = policy[0]
         resource_state = resources.get(resource)
         if not isinstance(resource_state, dict):
             resource_state = {}
-        if _schedule_epoch(resource_state.get("next_run_at")) <= now.timestamp():
-            due.append(policy)
-    controls = [policy for policy in due if not policy[3]]
-    heavy = [policy for policy in due if policy[3]][:HEAVY_RESOURCES_PER_CYCLE]
+        due_at = _schedule_epoch(resource_state.get("next_run_at"))
+        if due_at <= now.timestamp():
+            due.append((due_at, policy_index, policy))
+    controls = [entry[2] for entry in due if not entry[2][3]]
+    heavy = [
+        entry[2] for entry in sorted(
+            (entry for entry in due if entry[2][3]),
+            key=lambda entry: (entry[0], entry[1]),
+        )[:HEAVY_RESOURCES_PER_CYCLE]
+    ]
     if lane == "control":
         return controls
     if lane == "heavy":
@@ -2023,12 +2027,23 @@ def _record_resource_schedule(
         RESOURCE_BACKOFF_MAX_SECONDS,
         max(cadence_seconds, 30 * (2 ** min(failures - 1, 7))),
     )
+    if success:
+        previous_due = _schedule_epoch(current.get("next_run_at"))
+        next_run_epoch = (
+            previous_due + cadence_seconds
+            if previous_due > 0 else now.timestamp() + cadence_seconds
+        )
+        while next_run_epoch <= now.timestamp():
+            next_run_epoch += cadence_seconds
+        next_run_at = datetime.fromtimestamp(next_run_epoch, tz=UTC)
+    else:
+        next_run_at = now + timedelta(seconds=delay)
     resources[resource] = {
         **current,
         "last_attempt_at": now.isoformat(),
         "last_success_at": now.isoformat() if success else current.get("last_success_at"),
         "consecutive_failures": failures,
-        "next_run_at": (now + timedelta(seconds=delay)).isoformat(),
+        "next_run_at": next_run_at.isoformat(),
     }
     state["schema_version"] = 1
     state["updated_at"] = now.isoformat()
@@ -2241,6 +2256,28 @@ def _consume_lane_future(
         return None, _lane_failure(lane, error)
 
 
+def _merge_lane_results(
+    previous: SyncResourceResults, current: SyncResourceResults,
+) -> SyncResourceResults:
+    """Retain one bounded latest status per target/resource across a drain."""
+    observations = {
+        (str(row.get("target")), str(row.get("resource"))): row
+        for row in previous.resource_observations
+    }
+    failures = {
+        (str(row.get("target")), str(row.get("resource"))): row
+        for row in previous
+    }
+    for row in current.resource_observations:
+        key = (str(row.get("target")), str(row.get("resource")))
+        observations[key] = row
+        if row.get("status") == "OK":
+            failures.pop(key, None)
+    for row in current:
+        failures[(str(row.get("target")), str(row.get("resource")))] = row
+    return SyncResourceResults(list(failures.values()), list(observations.values()))
+
+
 def run_continuous_sync(
     config: dict,
     *,
@@ -2249,7 +2286,12 @@ def run_continuous_sync(
     stop_event: threading.Event | None = None,
     max_heartbeats: int | None = None,
 ) -> int:
-    """Keep heartbeat, control work, and accumulated work on separate owners."""
+    """Keep heartbeat, control work, and accumulated work on separate owners.
+
+    The serial heavy owner drains already-overdue work immediately after each
+    completion. Heartbeats remain the discovery/wakeup boundary when no heavy
+    work is due, but they are not an artificial one-operation admission limit.
+    """
     stop = stop_event or threading.Event()
     interval = max(5.0, interval_seconds)
     latest_lane_results: dict[str, SyncResourceResults] = {
@@ -2270,7 +2312,9 @@ def run_continuous_sync(
                     lane, futures[lane],
                 )
                 if completed is not None:
-                    latest_lane_results[lane] = completed
+                    latest_lane_results[lane] = _merge_lane_results(
+                        latest_lane_results[lane], completed,
+                    )
             try:
                 healthy, heartbeat = sync_heartbeat_once(config)
                 degraded = [
@@ -2311,8 +2355,30 @@ def run_continuous_sync(
             heartbeat_count += 1
             if max_heartbeats is not None and heartbeat_count >= max_heartbeats:
                 break
-            remaining = interval - (time.monotonic() - cycle_started)
-            stop.wait(max(0.0, remaining))
+            deadline = cycle_started + interval
+            while not stop.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                stop.wait(min(0.25, remaining))
+                for lane in futures:
+                    futures[lane], completed = _consume_lane_future(
+                        lane, futures[lane],
+                    )
+                    if completed is None:
+                        continue
+                    latest_lane_results[lane] = _merge_lane_results(
+                        latest_lane_results[lane], completed,
+                    )
+                    if (
+                        lane == "heavy"
+                        and completed.resource_observations
+                        and not stop.is_set()
+                        and time.monotonic() < deadline
+                    ):
+                        futures[lane] = executors[lane].submit(
+                            sync_resource_lane, healthy, lane=lane,
+                        )
     finally:
         for executor in executors.values():
             executor.shutdown(wait=True, cancel_futures=False)
