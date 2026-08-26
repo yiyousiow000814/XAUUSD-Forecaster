@@ -366,6 +366,7 @@ footer { position:relative; z-index:1; display:flex; justify-content:space-betwe
 }
 
 .scheduler-health-grid > article:last-child { border-right: 0; }
+
 .scheduler-health-grid header { display: grid; gap: 5px; }
 .scheduler-health-grid dl { display: grid; grid-template-columns: 1fr 1fr; margin: 16px 0 0; }
 .scheduler-health-grid dl > div { padding: 9px 0; border-top: 1px solid rgba(17,17,15,.24); }

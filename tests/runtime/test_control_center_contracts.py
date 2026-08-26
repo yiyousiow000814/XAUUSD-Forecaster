@@ -2317,7 +2317,7 @@ def test_version_host_routes_distinguish_static_assets_from_worker_redirects(tmp
         "route=$RequestUri.AbsolutePath}};"
         "$text=if($RequestUri.AbsolutePath -eq '/favicon.svg'){'<svg/>'}else{"
         "'<meta charset=\"utf-8\">Aurum Signal Room 系统健康状态 新闻与决策 "
-        "OWNER OPERATIONS PRIVATE OPERATOR QUEUE AI 模型使用状态 ASSISTANT PAUSED "
+        "OWNER OPERATIONS PRIVATE OPERATOR QUEUE AI 模型使用状态 系统架构 ASSISTANT PAUSED "
         "管理员认证已完成'}; "
         "$type=if($RequestUri.AbsolutePath -eq '/favicon.svg'){'image/svg+xml'}else{'text/html'}; "
         "return [pscustomobject]@{status=200;location='';content_type=$type;"
@@ -2328,7 +2328,7 @@ def test_version_host_routes_distinguish_static_assets_from_worker_redirects(tmp
     )
 
     assert result == (
-        "12,3,NOT_REQUIRED,True,"
+        "13,3,NOT_REQUIRED,True,"
         "11111111-aurum-signal-room.yiyousiow1234.workers.dev"
     )
 
@@ -2533,7 +2533,7 @@ def test_manifest_selects_baseline_and_affected_route_sample_families(tmp_path) 
         '$($shared.worker_writes.Count)"',
     )
 
-    assert result == "7,70,31,310,0,False,43,43,12,19"
+    assert result == "7,70,31,310,0,False,44,44,12,19"
 
 
 def test_static_manifest_rejects_missing_or_wrong_typed_contract_fields(tmp_path) -> None:

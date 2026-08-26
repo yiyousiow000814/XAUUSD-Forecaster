@@ -59,6 +59,17 @@ Dashboard is a terminal read/projection layer. Runtime entry points orchestrate
 owners but are outside the canonical dependency graph. Assistant remains
 separately bounded and is not a forecasting critical-path dependency.
 
+## Explorer representation
+
+The private Architecture Explorer represents this table as a compile-time
+dependency graph, not as runtime transport. It uses one explicit canonical
+node for `foundational`, `ai`, `evidence`, `news`, `training`, `decision`,
+`runtime`, `assistant`, and `dashboard`. Every allowed table entry is one
+`DEPENDENCY` edge where `A → B` means A may import or depend on B. The view must
+contain no model-generation, materialization, published-model, candidate, or
+runtime transport node. Prohibited reverse directions remain explanatory text;
+they must not look like valid edges.
+
 ## Shared-store bootstrap component
 
 After canonical News/AI placement, the import inventory contains one 13-module

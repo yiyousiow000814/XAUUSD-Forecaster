@@ -2,7 +2,7 @@
 
 import { createContext, useContext, type ReactNode } from "react";
 
-export type DashboardRoom = "live" | "audit" | "health" | "admin" | "assistant" | "retry" | "status";
+export type DashboardRoom = "live" | "audit" | "health" | "admin" | "assistant" | "retry" | "status" | "architecture";
 export type AuditViewName = "briefs" | "search" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage";
 
 export type DashboardLocation = {
@@ -27,7 +27,7 @@ export const DASHBOARD_GLOBAL_DESTINATIONS: readonly DashboardGlobalDestination[
   { id: "system", label: "系统", href: "/health", rooms: ["health"] },
   {
     id: "admin", label: "管理员登录", authenticatedLabel: "管理后台", href: "/admin",
-    rooms: ["admin", "assistant", "retry", "status"], private: true,
+    rooms: ["admin", "assistant", "retry", "status", "architecture"], private: true,
   },
 ];
 
@@ -36,6 +36,7 @@ export const DASHBOARD_ADMIN_DESTINATIONS = [
   { id: "assistant", label: "Assistant", href: "/admin/assistant", room: "assistant" },
   { id: "retry", label: "重试任务", href: "/admin/retry-jobs", room: "retry" },
   { id: "ai-usage", label: "AI 模型用量", href: "/admin/ai-usage", room: "status" },
+  { id: "architecture", label: "系统架构", href: "/admin/architecture", room: "architecture" },
 ] as const;
 
 export function activeDashboardDestination(room: DashboardRoom): DashboardGlobalDestinationId {

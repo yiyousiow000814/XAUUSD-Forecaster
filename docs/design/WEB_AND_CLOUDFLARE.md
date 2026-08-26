@@ -51,6 +51,7 @@ build -> prerendered public routes + immutable assets -> ASSETS binding
 request /api/* -> minimal Worker router -> selected route -> D1
 authenticated local sync -> ingest routes -> D1 public mirror
 admin request -> Access/session boundary -> private route -> D1
+build -> expand and validate bounded architecture/manifest.json v2 -> lazy React Flow/Dagre Explorer chunk with one camera-intent owner
 ```
 
 The public shell is not rendered through React SSR on every request. Snapshot
@@ -72,6 +73,46 @@ and bounded overviews. Assistant contracts define finite turns, tool rounds,
 events, leases, pages, and capacity, although execution is currently paused.
 Static build snapshots are finite and carry explicit missing/unavailable
 provenance.
+
+The private `/admin/architecture` route consumes the bounded architecture
+manifest at build time. Its read-only React Flow renderer uses Dagre once per
+selected bounded view to position all of that view's explicit nodes and edges.
+It has no API, D1 table, Worker handler, GitHub runtime request, Markdown
+parser, Windows process, or background owner. The manifest, graph libraries,
+and scoped graph CSS are referenced only by the lazy Explorer view, so they do
+not join the public Live initial dependency path. Source links bind to the
+immutable build SHA.
+
+Explore is the beginner-first default: one System Overview leads through
+node-owned subsystem actions and breadcrumbs, while one Advanced menu contains
+advanced topology and campaign views. Reference mode provides direct access to
+the same manifest and complete current-view relationships. View navigation and
+progressive-disclosure modes are manifest metadata, not component-owned copies.
+
+The graph calculates layout, lanes, per-edge anchors, and routes from the
+complete current view. Disclosure then filters rendered edges and their exact
+ports; disclosure does not rerun Dagre, trigger Fit, or change zoom. The package
+view therefore starts with nine nodes and no edges,
+reveals incident dependencies for the selected package, and exposes the full
+`DEPENDENCY` graph only through Show All or Reference. Its text list is derived
+from the same manifest edges.
+
+The graph renders manifest lanes as pointer-transparent labelled regions.
+Mobile uses a bounded lane-first top-to-bottom layout, a visual-viewport-derived
+canvas height, a node readability zoom floor, and canvas-contained horizontal
+panning. Graph bounds are camera inputs and never determine the visible DOM
+canvas height. The page owns vertical scroll outside the graph; the graph owns
+explicit pan and pinch gestures inside it.
+
+A pure mobile interaction reducer separates the active relationship path from
+Inspector and Advanced visibility. First tap selects and discloses a path and
+shows a compact action dock without opening details. Inspector and Advanced are
+mutually exclusive controlled sheets with backdrop/Escape close, scroll lock,
+focus containment/restoration, internal scrolling, and safe-area padding.
+Closing either sheet preserves the active path and camera. Explore Advanced
+contains only the four advanced/reference perspectives; Reference exposes all
+views and dense reference controls. Edge labels remain in the accessible text
+equivalent when background or optional visual labels are interaction-only.
 
 ## 9. Incremental mechanisms
 
@@ -104,6 +145,8 @@ evidence.
 - `web/app/layout.tsx` and route `page.tsx` files
 - `web/app/api/*/route.ts` and `web/app/admin/api/*/route.ts`
 - `web/build/publish-prerendered-assets.mjs`
+- `web/build/architecture-manifest.ts`
+- `architecture/manifest.json`
 
 ## 13. Core modules
 
@@ -116,6 +159,10 @@ evidence.
 - `web/app/_views/*`: feature views.
 - `web/app/_lib/dashboard-resource.ts`: client resource loading/caching.
 - `web/app/_lib/admin-auth-session.ts`: admin session boundary.
+- `web/app/_lib/architecture-explorer.ts`: fail-closed manifest v2 parsing,
+  Dagre view transformation, path/failure selection, search, and exact-SHA links.
+- `web/app/_views/ArchitectureExplorerView.module.css`: private graph,
+  inspector, accessibility, and responsive presentation ownership.
 
 ## 14. Relevant tests
 

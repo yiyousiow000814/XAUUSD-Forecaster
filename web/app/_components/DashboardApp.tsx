@@ -20,6 +20,7 @@ const loadRetryView = () => import("../_views/RetryView");
 const loadAdminOverviewView = () => import("../_views/AdminOverviewView");
 const loadAuditView = () => import("../_views/AuditView");
 const loadAssistantView = () => import("../_views/AssistantView");
+const loadArchitectureExplorerView = () => import("../_views/ArchitectureExplorerView");
 
 const StatusView = lazy(loadStatusView);
 const HealthView = lazy(loadHealthView);
@@ -27,6 +28,7 @@ const RetryView = lazy(loadRetryView);
 const AdminOverviewView = lazy(loadAdminOverviewView);
 const AuditView = lazy(loadAuditView);
 const AssistantView = lazy(loadAssistantView);
+const ArchitectureExplorerView = lazy(loadArchitectureExplorerView);
 
 const AUDIT_VIEWS = new Set<AuditViewName>(["briefs", "search", "news", "evidence", "stories", "decisions", "league", "coverage"]);
 
@@ -41,6 +43,7 @@ function parseDashboardUrl(url: URL): DashboardLocation | null {
   if (url.pathname === "/admin/assistant") return { room: "assistant", auditView: "news" };
   if (url.pathname === "/admin/retry-jobs") return { room: "retry", auditView: "news" };
   if (url.pathname === "/admin/ai-usage") return { room: "status", auditView: "news" };
+  if (url.pathname === "/admin/architecture") return { room: "architecture", auditView: "news" };
   if (url.pathname === "/audit") return { room: "audit", auditView: validAuditView(url.searchParams.get("view")) };
   if (url.pathname !== "/") return null;
   const room = url.searchParams.get("room");
@@ -59,6 +62,7 @@ function canonicalHref(location: DashboardLocation): string {
   if (location.room === "admin") return "/admin";
   if (location.room === "assistant") return "/admin/assistant";
   if (location.room === "retry") return "/admin/retry-jobs";
+  if (location.room === "architecture") return "/admin/architecture";
   return "/admin/ai-usage";
 }
 
@@ -69,6 +73,7 @@ function preloadRoom(room: DashboardRoom): Promise<unknown> {
   if (room === "admin") return loadAdminOverviewView();
   if (room === "audit") return loadAuditView();
   if (room === "assistant") return loadAssistantView();
+  if (room === "architecture") return loadArchitectureExplorerView();
   return Promise.resolve();
 }
 
@@ -113,7 +118,7 @@ export default function DashboardApp({
     if (!destination) return;
     if (
       window.location.pathname === "/"
-      && ["admin", "assistant", "retry", "status"].includes(destination.room)
+      && ["admin", "assistant", "retry", "status", "architecture"].includes(destination.room)
     ) {
       window.location.replace(canonicalHref(destination));
       return;
@@ -144,11 +149,12 @@ export default function DashboardApp({
 
   useEffect(() => {
     void loadHealthView();
-    if (["admin", "assistant", "retry", "status"].includes(location.room)) {
+    if (["admin", "assistant", "retry", "status", "architecture"].includes(location.room)) {
       void loadStatusView();
       void loadRetryView();
       void loadAdminOverviewView();
       void loadAssistantView();
+      if (location.room === "architecture") void loadArchitectureExplorerView();
       return;
     }
     const prepareAudit = () => void loadAuditView();
@@ -187,6 +193,7 @@ export default function DashboardApp({
         {location.room === "retry" && <RetryView />}
         {location.room === "audit" && <AuditView key={location.auditView} initialView={location.auditView} />}
         {location.room === "assistant" && <AssistantView />}
+        {location.room === "architecture" && <ArchitectureExplorerView />}
       </Suspense>
     </DashboardShell>
   </DashboardNavigationProvider>;

@@ -104,6 +104,11 @@ export default function AdminOverviewView() {
         <strong>权威配额账本</strong>
         <b>打开用量状态 →</b>
       </DashboardLink>
+      <DashboardLink className="admin-overview-card" href="/admin/architecture">
+        <span>REPOSITORY MAP</span><h2>系统架构</h2>
+        <strong>11 个私有架构视图</strong>
+        <b>打开架构浏览器 →</b>
+      </DashboardLink>
     </section>
   </main>;
 }

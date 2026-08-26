@@ -65,6 +65,14 @@
       "production_authenticated": { "status": 200, "marker": "AI 模型使用状态" }
     },
     {
+      "route": "/admin/architecture",
+      "source": "app/admin/architecture/page.tsx",
+      "class": "AUTHENTICATED",
+      "version_host": { "status": 200, "content_type": "text/html", "marker": "系统架构" },
+      "production_anonymous": { "behavior": "CLOUDFLARE_ACCESS_REDIRECT" },
+      "production_authenticated": { "status": 200, "marker": "系统架构" }
+    },
+    {
       "route": "/admin/assistant",
       "source": "app/admin/assistant/page.tsx",
       "class": "PAUSED_AUTHENTICATED",

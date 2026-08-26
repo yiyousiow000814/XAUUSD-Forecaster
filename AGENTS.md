@@ -30,6 +30,27 @@ Architecture documents affected:
 - Every abstraction must name the real dependency or boundary it hides.
 - After changing a subsystem boundary, update its detailed map and the Codebase
   Map. See the architecture rules contract for evidence requirements.
+- Any architecture, owner, boundary, dependency, or canonical path change must
+  update `architecture/manifest.json` and the relevant architecture document in
+  the same PR. Validate it with `scripts/check_architecture_manifest.py`.
+- Add a manifest node or edge when introducing a real subsystem, process,
+  owner, store, or cross-boundary dependency. An ordinary internal helper or
+  behavior-preserving refactor does not become an architecture node. Never
+  infer authority, criticality, or failure behavior from imports alone.
+- Optional semantic layout hints may encode meaningful rank, track, and
+  convergence relationships. They must remain orientation-independent, omit
+  absolute coordinates, and automatically place unlisted nodes.
+- Architecture Explorer views must declare navigation role, audience, parent,
+  and progressive-disclosure metadata in `architecture/manifest.json`. Keep one
+  beginner System Overview; reach beginner subsystems through node drill-down
+  and keep advanced/campaign views behind the Advanced or Reference surface.
+- Calculate Explorer layout, port anchors, and routes from the complete current
+  view. Disclosure may filter edges and ports only; selection, scenarios, and
+  Show All must not rerun layout, trigger Fit, or change zoom.
+- Keep mobile graph-path selection separate from Inspector and Advanced sheet
+  visibility through one tested interaction reducer. A node tap selects the
+  path first; sheet close preserves that path. Mobile canvas height comes from
+  the visual viewport, while graph bounds remain camera input only.
 
 ## Before Adding Code
 
