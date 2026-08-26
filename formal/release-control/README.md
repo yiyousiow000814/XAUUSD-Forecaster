@@ -30,10 +30,10 @@ The default command runs:
   supervisor, main movement, and identity-drift behavior remain explored by the
   safety model.
 
-For a focused run, pass `--config ReleaseControlSafety.cfg`. CI uses one TLC
-worker because liveness correctness is more important than parallel speed and
-the bounded model is intentionally small. A deeper local run may increase
-`--workers`, but it must use the same pinned tool and properties.
+CI and the local command always run both configurations with one TLC worker.
+The runner intentionally accepts no command-line executable, config, cache, or
+worker overrides; the model boundary is small enough that flexibility would add
+command-execution surface without a verification benefit.
 
 TLC state directories are created in the operating-system temporary directory
 and removed after each run. They are never repository artifacts.

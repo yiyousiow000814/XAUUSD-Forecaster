@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import hashlib
 from pathlib import Path
 import shutil
@@ -49,38 +48,13 @@ def _ensure_tools(cache: Path) -> Path:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the pinned Release Control TLC models")
-    parser.add_argument(
-        "--cache",
-        type=Path,
-        default=ROOT / ".local" / "tools",
-        help="download cache for the verified tla2tools.jar",
-    )
-    parser.add_argument(
-        "--config",
-        action="append",
-        choices=CONFIGS,
-        help="run only the selected config; may be repeated",
-    )
-    parser.add_argument("--workers", type=int, default=1)
-    parser.add_argument(
-        "--java",
-        type=Path,
-        help="explicit Java executable; defaults to java on PATH",
-    )
-    args = parser.parse_args()
-
-    java = str(args.java.resolve()) if args.java else shutil.which("java")
-    if java is None:
+    if shutil.which("java") is None:
         raise RuntimeError("JAVA_11_OR_NEWER_REQUIRED")
-    if args.java and not Path(java).is_file():
-        raise RuntimeError(f"JAVA_EXECUTABLE_NOT_FOUND: {java}")
-    jar = _ensure_tools(args.cache.resolve())
-    configs = tuple(args.config or CONFIGS)
-    for config in configs:
+    jar = _ensure_tools((ROOT / ".local" / "tools").resolve())
+    for config in CONFIGS:
         with tempfile.TemporaryDirectory(prefix="xauusd-tlc-") as model_dir:
             command = [
-                java,
+                "java",
                 "-XX:+UseParallelGC",
                 "-cp",
                 str(jar),
@@ -89,7 +63,7 @@ def main() -> int:
                 "-noGenerateSpecTE",
                 "-deadlock",
                 "-workers",
-                str(args.workers),
+                "1",
                 "-metadir",
                 model_dir,
                 "-config",

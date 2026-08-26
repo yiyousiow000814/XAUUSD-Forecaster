@@ -34,5 +34,7 @@ def test_tlc_runner_and_ci_pin_one_verified_tool() -> None:
     assert "ReleaseControlSafety.cfg" in runner
     assert "ReleaseControlLiveness.cfg" in runner
     assert '"-noGenerateSpecTE"' in runner
+    assert "argparse" not in runner
+    assert 'shutil.which("java")' in runner
     assert "python scripts/run_tla_model.py" in workflow
     assert "name: Release Control TLC" in workflow
