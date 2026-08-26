@@ -267,6 +267,34 @@ def test_watchdog_repairs_interrupted_bundle_copy_after_installer_exit(
         Write-Output "$($repaired.source_revision)|$((Get-ControlPlaneInstallState).recovery)"
         """
     ).replace("\n", " ")
+
+
+def _abandoned_activation_mocks(
+    target_revision: str,
+    phase: str,
+    *,
+    transaction_id: str = "txn",
+    bundle_verified: str = "$true",
+) -> str:
+    return textwrap.dedent(
+        f"""
+        $script:phase='{phase}'; $script:checks=@();
+        $current=[pscustomobject]@{{process_id=$PID;process_start_token='current-token'}};
+        $old=[pscustomobject]@{{process_id=100;process_start_token='old-token'}};
+        $baseline=[pscustomobject]@{{business_runtime_revision='runtime';release_state_hash='state';release_history_hash='history';services=[pscustomobject]@{{}}}};
+        $script:state=[pscustomobject]@{{transaction_id='{transaction_id}';phase=$script:phase;target_revision='{target_revision}';previous_revision='{'a' * 40}';bundle_hash_verified={bundle_verified};install_owner_identity=[pscustomobject]@{{process_id=999999;process_start_token='gone'}};old_watchdog_identity=$old;isolation_before=$baseline;backup_root='backup';supervision_state=$null}};
+        function Get-ControlPlaneInstallState {{ $script:state.phase=$script:phase; $script:state }};
+        function Write-ControlPlaneInstallState {{ param($Values); if($Values.phase){{$script:phase=[string]$Values.phase}} }};
+        function Get-ControlPlaneProcessIdentity {{ param($ProcessId); if($ProcessId-eq $PID){{$current}}else{{$null}} }};
+        function Get-RuntimeControlBundleIdentity {{ [pscustomobject]@{{source_revision='{target_revision}';exact_revision=$true}} }};
+        function Get-VerifiedWatchdogOwners {{ @($current) }};
+        function Get-ReleaseControlState {{ [pscustomobject]@{{transaction=$null}} }};
+        function Assert-ControlPlaneIsolationBaseline {{ param($Snapshot,$ReleaseState); $script:checks+='baseline' }};
+        function Get-ControlPlaneIsolationSnapshot {{ $baseline }};
+        function Assert-ControlPlaneIsolationSnapshot {{ param($Before,$After); $script:checks+='isolation' }};
+        function Write-WatchdogHeartbeat {{ param($SupervisionMode,$InstallTransactionId); New-Item -ItemType Directory -Path (Split-Path -Parent $watchdogHeartbeatPath) -Force | Out-Null; [pscustomobject]@{{install_transaction_id=$InstallTransactionId;supervision_mode=$SupervisionMode;control_bundle_revision='{target_revision}';control_bundle_exact_revision=$true;control_bundle_hash_verified=$true;process_id=$PID;process_start_token='current-token'}} | ConvertTo-Json | Set-Content -LiteralPath $watchdogHeartbeatPath }};
+        """
+    ).replace("\n", " ")
     assert _run_contract(tmp_path, body) == (
         f"{target_revision}|FORWARD_REPAIRED_INTERRUPTED_BUNDLE_COPY"
     )
@@ -434,19 +462,111 @@ def test_handoff_requires_quiesced_ack_from_exact_install_transaction(tmp_path: 
     assert _run_contract(tmp_path, body) == "CONTROL_PLANE_NEW_WATCHDOG_HEARTBEAT_TIMEOUT"
 
 
-def test_quiesced_handoff_forward_recovers_after_installer_exit(tmp_path: Path) -> None:
-    body = textwrap.dedent(
+@pytest.mark.parametrize(
+    "phase",
+    ("START_NEW_WATCHDOG", "VERIFY_QUIESCED_HANDOFF", "ACTIVATE_NEW_WATCHDOG"),
+)
+def test_installer_death_rechecks_every_fact_before_active_grant(
+    tmp_path: Path, phase: str,
+) -> None:
+    target_revision = "b" * 40
+    body = _abandoned_activation_mocks(target_revision, phase) + textwrap.dedent(
         """
-        $script:phase='VERIFY_QUIESCED_HANDOFF';
-        function Get-ControlPlaneInstallState { [pscustomobject]@{transaction_id='txn';phase=$script:phase;install_owner_identity=[pscustomobject]@{process_id=999999;process_start_token='gone'}} };
-        function Get-ControlPlaneProcessIdentity { param($ProcessId); return $null };
-        function Write-ControlPlaneInstallState { param($Values); $script:phase=[string]$Values.phase };
-        function Write-WatchdogHeartbeat { param($SupervisionMode,$InstallTransactionId) };
         $result=Wait-ControlPlaneInstallActivation -TransactionId 'txn';
-        Write-Output "$result|$script:phase"
+        Write-Output "$result|$script:phase|$($script:checks -join ',')"
         """
     ).replace("\n", " ")
-    assert _run_contract(tmp_path, body) == "RECOVERED|ACTIVATE_NEW_WATCHDOG"
+    assert _run_contract(tmp_path, body) == (
+        "RECOVERED|ACTIVATE_NEW_WATCHDOG|baseline,isolation"
+    )
+
+
+def test_installer_death_before_bundle_swap_restores_safe_supervisor_path(
+    tmp_path: Path,
+) -> None:
+    old_revision, target_revision = "a" * 40, "b" * 40
+    repository = tmp_path / "repository"
+    control = repository / ".local" / "runtime-control"
+    _write_bundle(control, old_revision, "old")
+    body = textwrap.dedent(
+        f"""
+        Write-ControlPlaneInstallState @{{transaction_id='txn';target_revision='{target_revision}';previous_revision='{old_revision}';phase='STOP_OLD_WATCHDOG';install_owner_identity=[pscustomobject]@{{process_id=999999;process_start_token='gone'}};supervision_state=[pscustomobject]@{{}}}};
+        function Get-ControlPlaneProcessIdentity {{ param($ProcessId); return $null }};
+        function Get-RuntimeControlBundleIdentity {{ Get-RuntimeControlBundleIdentityAtRoot -ControlRoot '{control}' }};
+        function Restore-ControlPlaneSupervision {{ param($State); $script:restored=$true }};
+        $bundle=Repair-AbandonedControlPlaneBundleForWatchdog;
+        $state=Get-ControlPlaneInstallState;
+        Write-Output "$($bundle.source_revision)|$($state.phase)|$script:restored"
+        """
+    ).replace("\n", " ")
+    assert _run_contract(tmp_path, body) == f"{old_revision}|ROLLED_BACK|True"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    (
+        ("$script:state.transaction_id='wrong'", "CONTROL_PLANE_INSTALL_FENCE_LOST"),
+        ("$script:state.bundle_hash_verified=$false", "CONTROL_PLANE_ABANDONED_BUNDLE_NOT_VERIFIED"),
+        ("function Get-RuntimeControlBundleIdentity { [pscustomobject]@{source_revision='wrong';exact_revision=$true} }", "CONTROL_PLANE_ABANDONED_BUNDLE_IDENTITY_MISMATCH"),
+        ("function Get-ControlPlaneProcessIdentity { param($ProcessId); if($ProcessId-eq 100){$old}elseif($ProcessId-eq $PID){$current}else{$null} }", "CONTROL_PLANE_OLD_WATCHDOG_STILL_OWNS"),
+        ("function Get-VerifiedWatchdogOwners { @($current,$current) }", "CONTROL_PLANE_RECOVERY_EXACTLY_ONE_REPLACEMENT_REQUIRED"),
+        ("function Assert-ControlPlaneIsolationSnapshot { param($Before,$After); throw 'CONTROL_PLANE_INSTALL_CHANGED_SERVICE_SYNC' }", "CONTROL_PLANE_INSTALL_CHANGED_SERVICE_SYNC"),
+        ("function Get-ReleaseControlState { [pscustomobject]@{transaction=[pscustomobject]@{type='PROMOTE'}} }", "CONTROL_PLANE_RECOVERY_RELEASE_TRANSACTION_APPEARED"),
+        ("New-Item -ItemType Directory -Path $releaseLockPath -Force | Out-Null; [pscustomobject]@{owner_pid=123} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $releaseLockPath 'owner.json')", "CONTROL_PLANE_RECOVERY_CONCURRENT_RELEASE_LOCK"),
+    ),
+)
+def test_abandoned_install_safety_facts_fail_closed(
+    tmp_path: Path, mutation: str, expected: str,
+) -> None:
+    target_revision = "b" * 40
+    body = _abandoned_activation_mocks(
+        target_revision, "VERIFY_QUIESCED_HANDOFF"
+    ) + f"Write-WatchdogHeartbeat -SupervisionMode 'QUIESCED' -InstallTransactionId 'txn'; {mutation}; try {{ Assert-AbandonedControlPlaneInstallActivation -State $script:state -TransactionId 'txn' | Out-Null; Write-Output accepted }} catch {{ Write-Output $_.Exception.Message }}"
+    assert _run_contract(tmp_path, body) == expected
+
+
+def test_abandoned_install_accepts_only_exact_dead_installer_lock_identity(
+    tmp_path: Path,
+) -> None:
+    target_revision = "b" * 40
+    body = _abandoned_activation_mocks(
+        target_revision, "VERIFY_QUIESCED_HANDOFF"
+    ) + textwrap.dedent(
+        """
+        Write-WatchdogHeartbeat -SupervisionMode 'QUIESCED' -InstallTransactionId 'txn';
+        New-Item -ItemType Directory -Path $releaseLockPath -Force | Out-Null;
+        [pscustomobject]@{owner_pid=999999;owner_process_start_token='gone'} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $releaseLockPath 'owner.json');
+        $verified=Assert-AbandonedControlPlaneInstallActivation -State $script:state -TransactionId 'txn';
+        Write-Output "$($verified.owner.process_start_token)|$($script:checks -join ',')"
+        """
+    ).replace("\n", " ")
+    assert _run_contract(tmp_path, body) == "current-token|baseline,isolation"
+
+
+def test_failed_abandoned_activation_restores_verified_backup(tmp_path: Path) -> None:
+    old_revision, target_revision = "a" * 40, "b" * 40
+    repository = tmp_path / "repository"
+    control = repository / ".local" / "runtime-control"
+    backup = repository / ".local" / ".cpb-recovery"
+    _write_bundle(control, target_revision, "new")
+    _write_bundle(backup, old_revision, "old")
+    body = _abandoned_activation_mocks(
+        target_revision, "VERIFY_QUIESCED_HANDOFF", bundle_verified="$false"
+    ) + textwrap.dedent(
+        f"""
+        $script:state.backup_root='{backup}';
+        function Restore-ControlPlaneSupervision {{ param($State); $script:restored=$true }};
+        try {{ Wait-ControlPlaneInstallActivation -TransactionId 'txn' | Out-Null }} catch {{ $message=$_.Exception.Message }};
+        $bundle=Get-RuntimeControlBundleIdentityAtRoot -ControlRoot '{control}';
+        Write-Output "$message|$($bundle.source_revision)|$script:phase|$script:restored"
+        """
+    ).replace("\n", " ")
+    result = _run_contract(tmp_path, body)
+    assert result == (
+        "CONTROL_PLANE_ABANDONED_INSTALL_ROLLED_BACK: "
+        "CONTROL_PLANE_ABANDONED_BUNDLE_NOT_VERIFIED|"
+        f"{old_revision}|ROLLED_BACK|True"
+    )
 
 
 def test_failure_starting_new_watchdog_restores_old_bundle_and_owner(tmp_path: Path) -> None:

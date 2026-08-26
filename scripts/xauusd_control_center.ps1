@@ -487,7 +487,13 @@ function Enter-ReleaseTransactionLock {
         } catch {}
         $ownerAlive = $false
         if ($owner -and [int]$owner.owner_pid -gt 0) {
-            $ownerAlive = [bool](Get-Process -Id ([int]$owner.owner_pid) -ErrorAction SilentlyContinue)
+            $ownerProcess = Get-ControlPlaneProcessIdentity `
+                -ProcessId ([int]$owner.owner_pid)
+            $ownerAlive = [bool]($ownerProcess -and (
+                -not [string]$owner.owner_process_start_token -or
+                [string]$owner.owner_process_start_token -eq
+                    [string]$ownerProcess.process_start_token
+            ))
         }
         $acquired = [DateTimeOffset]::MinValue
         $ageKnown = $owner -and [DateTimeOffset]::TryParse(
@@ -507,8 +513,13 @@ function Enter-ReleaseTransactionLock {
     }
     try {
         New-Item -ItemType Directory -Path $releaseLockPath -ErrorAction Stop | Out-Null
+        $lockOwnerIdentity = Get-ControlPlaneProcessIdentity -ProcessId $PID
+        if (-not $lockOwnerIdentity) {
+            throw "RELEASE_LOCK_OWNER_IDENTITY_REQUIRED"
+        }
         [pscustomobject]@{
             owner_pid = $PID
+            owner_process_start_token = [string]$lockOwnerIdentity.process_start_token
             acquired_at = [DateTimeOffset]::UtcNow.ToString("o")
         } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $releaseLockPath "owner.json") -Encoding UTF8
         $script:releaseTransactionLockHeld = $true
@@ -6265,6 +6276,7 @@ function Repair-AbandonedControlPlaneBundleForWatchdog {
                 rollback_result = "ROLLED_BACK_BEFORE_BUNDLE_SWAP"
                 recovery = "INSTALL_OWNER_EXITED_BEFORE_BUNDLE_SWAP"
             }
+            Restore-ControlPlaneSupervision -State $state.supervision_state
             return $current
         }
         throw "CONTROL_PLANE_ABANDONED_BUNDLE_IDENTITY_MISMATCH"
@@ -6301,6 +6313,141 @@ function Repair-AbandonedControlPlaneBundleForWatchdog {
         return $restored
     }
     throw "CONTROL_PLANE_ABANDONED_BUNDLE_RECOVERY_FAILED"
+}
+
+function Get-ControlPlaneInstallOwnerAlive {
+    param([Parameter(Mandatory = $true)][object]$State)
+    $installer = $State.install_owner_identity
+    if (-not $installer -or [int]$installer.process_id -le 0 -or
+        -not [string]$installer.process_start_token) {
+        return $false
+    }
+    $observed = Get-ControlPlaneProcessIdentity `
+        -ProcessId ([int]$installer.process_id)
+    return [bool]($observed -and
+        [string]$observed.process_start_token -eq
+            [string]$installer.process_start_token)
+}
+
+function Assert-AbandonedControlPlaneInstallActivation {
+    param(
+        [Parameter(Mandatory = $true)][object]$State,
+        [Parameter(Mandatory = $true)][string]$TransactionId
+    )
+    if ([string]$State.transaction_id -ne $TransactionId) {
+        throw "CONTROL_PLANE_INSTALL_FENCE_LOST"
+    }
+    if (Get-ControlPlaneInstallOwnerAlive -State $State) {
+        throw "CONTROL_PLANE_INSTALL_OWNER_STILL_ACTIVE"
+    }
+    if (-not [bool]$State.bundle_hash_verified) {
+        throw "CONTROL_PLANE_ABANDONED_BUNDLE_NOT_VERIFIED"
+    }
+    $bundle = Get-RuntimeControlBundleIdentity
+    if (-not $bundle -or
+        [string]$bundle.source_revision -ne [string]$State.target_revision -or
+        -not [bool]$bundle.exact_revision) {
+        throw "CONTROL_PLANE_ABANDONED_BUNDLE_IDENTITY_MISMATCH"
+    }
+    $oldOwner = $State.old_watchdog_identity
+    if (-not $oldOwner -or -not [string]$oldOwner.process_start_token) {
+        throw "CONTROL_PLANE_OLD_WATCHDOG_IDENTITY_MISSING"
+    }
+    $oldObserved = Get-ControlPlaneProcessIdentity `
+        -ProcessId ([int]$oldOwner.process_id)
+    if ($oldObserved -and [string]$oldObserved.process_start_token -eq
+            [string]$oldOwner.process_start_token) {
+        throw "CONTROL_PLANE_OLD_WATCHDOG_STILL_OWNS"
+    }
+    $owners = @(Get-VerifiedWatchdogOwners)
+    $currentIdentity = Get-ControlPlaneProcessIdentity -ProcessId $PID
+    if ($owners.Count -ne 1 -or -not $currentIdentity -or
+        [int]$owners[0].process_id -ne $PID -or
+        [string]$owners[0].process_start_token -ne
+            [string]$currentIdentity.process_start_token) {
+        throw "CONTROL_PLANE_RECOVERY_EXACTLY_ONE_REPLACEMENT_REQUIRED"
+    }
+    if (-not (Test-Path -LiteralPath $watchdogHeartbeatPath)) {
+        throw "CONTROL_PLANE_RECOVERY_QUIESCED_ACK_MISSING"
+    }
+    try {
+        $heartbeat = Get-Content -LiteralPath $watchdogHeartbeatPath -Raw |
+            ConvertFrom-Json
+    } catch {
+        throw "CONTROL_PLANE_RECOVERY_QUIESCED_ACK_INVALID"
+    }
+    if ([string]$heartbeat.install_transaction_id -ne $TransactionId -or
+        [string]$heartbeat.supervision_mode -ne "QUIESCED" -or
+        [string]$heartbeat.control_bundle_revision -ne
+            [string]$State.target_revision -or
+        -not [bool]$heartbeat.control_bundle_exact_revision -or
+        -not [bool]$heartbeat.control_bundle_hash_verified -or
+        [int]$heartbeat.process_id -ne $PID -or
+        [string]$heartbeat.process_start_token -ne
+            [string]$currentIdentity.process_start_token) {
+        throw "CONTROL_PLANE_RECOVERY_QUIESCED_ACK_MISMATCH"
+    }
+    $release = Get-ReleaseControlState
+    if ($release -and $release.transaction) {
+        throw "CONTROL_PLANE_RECOVERY_RELEASE_TRANSACTION_APPEARED"
+    }
+    if (Test-Path -LiteralPath $releaseLockPath) {
+        $lockOwner = $null
+        try {
+            $lockOwner = Get-Content -LiteralPath `
+                (Join-Path $releaseLockPath "owner.json") -Raw |
+                ConvertFrom-Json
+        } catch {}
+        if (-not $lockOwner -or
+            [int]$lockOwner.owner_pid -ne
+                [int]$State.install_owner_identity.process_id -or
+            [string]$lockOwner.owner_process_start_token -ne
+                [string]$State.install_owner_identity.process_start_token) {
+            throw "CONTROL_PLANE_RECOVERY_CONCURRENT_RELEASE_LOCK"
+        }
+    }
+    $baseline = $State.isolation_before
+    if (-not $baseline) {
+        throw "CONTROL_PLANE_RECOVERY_BASELINE_MISSING"
+    }
+    Assert-ControlPlaneIsolationBaseline -Snapshot $baseline `
+        -ReleaseState $release
+    $currentIsolation = Get-ControlPlaneIsolationSnapshot
+    Assert-ControlPlaneIsolationSnapshot -Before $baseline `
+        -After $currentIsolation
+    return [pscustomobject]@{
+        owner = $owners[0]
+        isolation = $currentIsolation
+    }
+}
+
+function Restore-AbandonedControlPlaneInstallForWatchdog {
+    param(
+        [Parameter(Mandatory = $true)][object]$State,
+        [Parameter(Mandatory = $true)][string]$Failure
+    )
+    $controlRoot = Join-Path $repositoryRoot ".local\runtime-control"
+    $backup = Get-RuntimeControlBundleIdentityAtRoot `
+        -ControlRoot ([string]$State.backup_root)
+    if (-not $backup -or [string]$backup.source_revision -ne
+            [string]$State.previous_revision) {
+        throw "CONTROL_PLANE_ABANDONED_SAFE_BUNDLE_UNAVAILABLE: $Failure"
+    }
+    $restored = Restore-RuntimeControlBundleBackup `
+        -BackupRoot ([string]$State.backup_root) -ControlRoot $controlRoot
+    if (-not $restored -or [string]$restored.source_revision -ne
+            [string]$State.previous_revision) {
+        throw "CONTROL_PLANE_ABANDONED_SAFE_BUNDLE_RESTORE_FAILED: $Failure"
+    }
+    Write-ControlPlaneInstallState @{
+        phase = "ROLLED_BACK"
+        completed_at = [DateTimeOffset]::UtcNow.ToString("o")
+        rollback_result = "ROLLED_BACK_BY_RECOVERY_WATCHDOG"
+        recovery = "ABANDONED_INSTALL_FAILED_INDEPENDENT_SAFETY_CHECKS"
+        failure = $Failure
+    }
+    Restore-ControlPlaneSupervision -State $State.supervision_state
+    return $restored
 }
 
 function Set-CoordinatedMigrationSyncHoldValue {
@@ -6394,10 +6541,15 @@ function Suspend-ControlPlaneSupervision {
 }
 
 function Restore-ControlPlaneSupervision {
-    param([hashtable]$State)
+    param([object]$State)
     if (-not $State) { return }
     foreach ($name in @($taskName, $guardTaskName)) {
-        if ([bool]$State[$name]) { Enable-ScheduledTask -TaskName $name | Out-Null }
+        $enabled = if ($State -is [System.Collections.IDictionary]) {
+            [bool]$State[$name]
+        } elseif ($State.PSObject.Properties[$name]) {
+            [bool]$State.$name
+        } else { $false }
+        if ($enabled) { Enable-ScheduledTask -TaskName $name | Out-Null }
     }
 }
 
@@ -6529,29 +6681,33 @@ function Wait-ControlPlaneInstallActivation {
         if ([string]$state.phase -in @("FAILED", "ROLLED_BACK", "COMMITTED")) {
             throw "CONTROL_PLANE_INSTALL_ACTIVATION_WITHDRAWN"
         }
-        $installer = $state.install_owner_identity
-        $installerAlive = $false
-        if ($installer -and [int]$installer.process_id -gt 0) {
-            $observed = Get-ControlPlaneProcessIdentity `
-                -ProcessId ([int]$installer.process_id)
-            $installerAlive = [bool]($observed -and
-                [string]$observed.process_start_token -eq
-                    [string]$installer.process_start_token)
-        }
+        $installerAlive = Get-ControlPlaneInstallOwnerAlive -State $state
+        Write-WatchdogHeartbeat -SupervisionMode "QUIESCED" `
+            -InstallTransactionId $TransactionId
         if ([string]$state.phase -eq "ACTIVATE_NEW_WATCHDOG") {
-            return $(if ($installerAlive) { "INSTALLER_GRANTED" } else { "RECOVERED" })
+            if ($installerAlive) { return "INSTALLER_GRANTED" }
         }
         if (-not $installerAlive -and [string]$state.phase -in @(
             "INSTALL_BUNDLE", "START_NEW_WATCHDOG", "VERIFY_QUIESCED_HANDOFF"
-        )) {
-            Write-ControlPlaneInstallState @{
-                phase = "ACTIVATE_NEW_WATCHDOG"
-                recovery = "INSTALL_OWNER_EXITED_AFTER_VERIFIED_BUNDLE"
+        ) -or (-not $installerAlive -and
+            [string]$state.phase -eq "ACTIVATE_NEW_WATCHDOG")) {
+            try {
+                $verified = Assert-AbandonedControlPlaneInstallActivation `
+                    -State $state -TransactionId $TransactionId
+                Write-ControlPlaneInstallState @{
+                    phase = "ACTIVATE_NEW_WATCHDOG"
+                    recovery = "INSTALL_OWNER_EXITED_AFTER_INDEPENDENT_VERIFICATION"
+                    new_watchdog_identity = $verified.owner
+                    isolation_after = $verified.isolation
+                }
+                return "RECOVERED"
+            } catch {
+                $failure = $_.Exception.Message
+                $null = Restore-AbandonedControlPlaneInstallForWatchdog `
+                    -State $state -Failure $failure
+                throw "CONTROL_PLANE_ABANDONED_INSTALL_ROLLED_BACK: $failure"
             }
-            return "RECOVERED"
         }
-        Write-WatchdogHeartbeat -SupervisionMode "QUIESCED" `
-            -InstallTransactionId $TransactionId
         Start-Sleep -Milliseconds 250
     }
 }
@@ -6631,6 +6787,7 @@ function Invoke-ControlPlaneInstall {
             bundle_hash_verified = $true
         }
         $supervisionState = Suspend-ControlPlaneSupervision
+        Write-ControlPlaneInstallState @{ supervision_state = $supervisionState }
         Wait-ControlPlaneGuardQuiesced
         # Revalidate the complete stage before the first destructive process action.
         if (-not (Get-RuntimeControlBundleIdentityAtRoot -ControlRoot $stageRoot)) {
@@ -6778,11 +6935,14 @@ function Invoke-ForecasterWatchdog {
             -TransactionId $InstallTransactionId
         Write-WatchdogHeartbeat -SupervisionMode "ACTIVE"
         if ($activation -eq "RECOVERED") {
+            $recoveredOwner = Get-ControlPlaneProcessIdentity -ProcessId $PID
             Write-ControlPlaneInstallState @{
                 phase = "COMMITTED"
                 completed_at = [DateTimeOffset]::UtcNow.ToString("o")
+                new_watchdog_identity = $recoveredOwner
                 rollback_result = "NOT_REQUIRED"
                 recovery = "FORWARD_COMPLETED_AFTER_INSTALL_OWNER_EXIT"
+                failure = $null
             }
         }
     }

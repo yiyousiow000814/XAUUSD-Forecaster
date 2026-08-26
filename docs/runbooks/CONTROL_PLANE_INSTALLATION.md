@@ -33,6 +33,12 @@ restores the previous complete bundle, launches a new process from that bundle,
 verifies its heartbeat and single ownership, and reports `ROLLED_BACK`. After a
 machine or installer-process interruption, the main task verifies the staged or
 backup bundle and resumes the same transaction; do not start a second install.
+Installer disappearance is not an activation grant. The replacement remains
+`QUIESCED` while it independently verifies transaction ID, bundle revision and
+hash, old-owner fencing, single ownership, the recorded service baseline,
+release/hold context, and absence of another release transaction. Any mismatch
+restores the previous verified bundle and re-enables the recorded safe
+supervision path.
 
 Inspect bounded status in:
 

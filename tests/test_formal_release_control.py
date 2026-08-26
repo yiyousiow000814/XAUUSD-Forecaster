@@ -18,9 +18,15 @@ def test_formal_release_lifecycle_is_simplification_first() -> None:
         'releasePhase = "RECOVERY_REQUIRED"',
     ):
         assert accidental_top_level_state not in model
-    assert "ReviewIsNotPassed" in model
+    assert "DegradeHealth" in model
+    assert "ObserveFailure" in model
+    assert "ApplyRecoverySwitch" in model
+    assert "ObserveRecovery" in model
+    assert "StageLegacyInvalid" in model
+    assert "FreshStagingCompatible" in model
+    assert "VerifyAbandonedInstall" in model
     assert "StableChangesOnlyAfterObservation" in model
-    assert "SwitchEventuallyTerminates" in model
+    assert "TransactionEventuallyTerminates" in model
 
 
 def test_tlc_runner_and_ci_pin_one_verified_tool() -> None:
@@ -34,6 +40,7 @@ def test_tlc_runner_and_ci_pin_one_verified_tool() -> None:
     assert "ReleaseControlSafety.cfg" in runner
     assert "ReleaseControlLiveness.cfg" in runner
     assert '"-noGenerateSpecTE"' in runner
+    assert '"-coverage"' in runner
     assert "argparse" not in runner
     assert 'shutil.which("java")' in runner
     assert "python scripts/run_tla_model.py" in workflow

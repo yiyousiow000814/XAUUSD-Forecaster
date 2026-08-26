@@ -350,9 +350,15 @@ restores the previous complete verified bundle, starts a new process from that
 bundle, verifies its heartbeat and single ownership, and records `ROLLED_BACK`.
 The main scheduled task remains enabled while its current instance is stopped,
 so machine restart can launch the exact installed bundle. A matching
-non-terminal install resumes the same quiesced handoff; if the installer owner
-has exited after the verified bundle swap, the supervisor forward-completes
-activation and records recovery instead of remaining ownerless. Current bounded evidence is stored in
+non-terminal install resumes the same quiesced handoff. Installer death never
+grants activation by itself. The replacement watchdog must independently
+re-prove the exact transaction, installed revision and hashes, old-owner fence,
+single replacement ownership, transaction-bound quiesced heartbeat,
+authoritative service baseline, unchanged release/hold context, and absence of
+a concurrent release transaction. Lock ownership includes the exact process
+start token so PID reuse cannot impersonate the dead installer. Only that complete proof may
+forward-complete activation. Missing or changed evidence restores the previous
+verified bundle and recorded safe supervision path. Current bounded evidence is stored in
 `.local/forward/control-plane-install-state.json`; it never rewrites release
 history or Stable/Candidate identities. The operator procedure is
 [`CONTROL_PLANE_INSTALLATION.md`](../runbooks/CONTROL_PLANE_INSTALLATION.md).

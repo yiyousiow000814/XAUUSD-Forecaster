@@ -68,9 +68,10 @@ Verify, Switch, and Observe are the only release-attempt phases.
 An internal checkpoint is not an operator state. Control Plane installation uses
 one transaction identity and supervision epoch. The old supervisor is fenced;
 the new supervisor first acknowledges `QUIESCED`; isolation is then compared;
-activation is granted; and only the active epoch may mutate services. Recovery
-restores the recorded baseline and does not re-apply the normal-state assertion
-that triggered recovery.
+activation is granted; and only the active epoch may mutate services. A
+replacement after installer death repeats every activation proof independently;
+a persisted checkpoint is recovery input, never authority. Failed revalidation
+restores the verified prior bundle and supervision path.
 
 A migration hold is bound to the exact version being prepared and one owner
 epoch. Expiry or identity mismatch removes its authority. Switch atomically
@@ -79,12 +80,14 @@ transaction; Observe resumes Sync and clears that ownership.
 
 ## Formal boundary
 
-The TLA+ model covers the four phases, exact release identity, accepted/rejected
-evidence, switch/return, Sync ownership, exact holds, supervision fencing,
-Control Plane handoff, generation compatibility, cleanup, restart, and stale
-actors. It omits route payloads, SQL details, browser rendering, cryptography,
-and quantitative CPU/load behavior; those use the verification techniques in
-the safety mechanism inventory.
+The TLA+ model covers the four phases, exact release identity, accepted
+evidence, mutable health, forward Switch failure, post-Switch observation
+failure and recovery observation, Sync ownership, exact holds, supervision
+fencing, five installer-death checkpoints, generation identity sets, active
+legacy Reverse compatibility, and protected cleanup. It omits individual News
+rows, route payloads, SQL details, browser rendering, cryptography, and
+quantitative CPU/load behavior; those use the verification techniques in the
+safety mechanism inventory.
 
 ## Formal-to-production mapping
 
@@ -95,7 +98,7 @@ the safety mechanism inventory.
 | migration readiness | coordinated migration verifier and receipt | Release migration receipt contract; receipt/live-evidence tests | exact candidate/database/schema/projection receipt |
 | supervisor fence and baseline | `Suspend-ControlPlaneSupervision`, `Stop-VerifiedWatchdogOwner`, `Assert-ControlPlaneIsolationBaseline` | Control Plane installation contract; `test_control_plane_install.py` | install transaction, old process token, before snapshot |
 | quiesced handoff and activation | `Start-WatchdogReplacement`, `Wait-VerifiedWatchdogHandoff`, `Wait-ControlPlaneInstallActivation` | acknowledged-handoff family tests | heartbeat mode, install transaction ID, bundle revision/hash, process token |
-| install recovery | `Invoke-ControlPlaneInstall` rollback and watchdog forward recovery | recovery-independence/restart tests | failure, rollback/recovery result, exact after snapshot |
+| install recovery | `Assert-AbandonedControlPlaneInstallActivation`, `Restore-AbandonedControlPlaneInstallForWatchdog` | five-checkpoint and recovery-fact family tests | old/new owner identities, exact baseline, release context, rollback/recovery result |
 | Prepare → Verify | `Get-ReleaseLifecyclePhase`; migration/platform prerequisites inside validation | lifecycle projection contract test | operator phase plus explicit reason/evidence |
 | Verify review/retry/pass | `Invoke-AutomaticCandidateValidation`, `Retry-CandidateValidation` | exact retry and immutable-evidence contracts | validation key, prior reason, retained evidence, new evidence universe |
 | identity fail closed | `Test-ReleaseIdentity`, provenance and exact-SHA gates | release validation/runtime tests | Git/Worker/Windows response and state identities |
@@ -107,8 +110,8 @@ the safety mechanism inventory.
 | cleanup protection | Worker generation cleanup transaction | News projection and D1 bounded-work tests | current/fresh staging rows and bounded cleanup receipts |
 
 The 2026-08-26 install audit supplies observed production evidence for the
-handoff race and recovery dependence. TLC discovered two additional design
-obligations before implementation mapping: healthy-liveness assumptions must
-exclude identity corruption while the safety model still explores it, and
-restart fairness must cover repeated interruption of recovery rather than
-assuming a single uninterrupted recovery attempt.
+handoff race and recovery dependence. The amended model removes constant
+health: `DegradeHealth` can run during Switch or Observe, and fairness only
+requires that a bad dependency can recover. News uses two successive generation
+transitions with explicit CURRENT, active legacy, STAGING, and staged-legacy
+identity sets, so a repaired first generation does not authorize the next.

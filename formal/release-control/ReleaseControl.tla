@@ -2,12 +2,12 @@
 EXTENDS Naturals, TLC
 
 (***************************************************************************
-Simplification-first Release/Control Plane model. Only PREPARE, VERIFY,
-SWITCH, and OBSERVE are release-attempt lifecycle phases. Holds, reviews,
-installation checkpoints, reverse, and recovery are internal operations.
+The operator lifecycle is deliberately small: PREPARE, VERIFY, SWITCH,
+OBSERVE. Mutable environment health, News generation compatibility, and
+installer-death recovery are composed in the same execution.
 ***************************************************************************)
 
-CONSTANT HealthyExternal, AllowControlInstall, AllowMainMove, AllowIdentityDrift
+CONSTANT AllowControlInstall, AllowMainMove, AllowIdentityDrift
 
 None == "NONE"
 StableId == "STABLE"
@@ -15,593 +15,662 @@ CandidateId == "CANDIDATE"
 NextId == "NEXT"
 Identities == {None, StableId, CandidateId, NextId}
 
-VARIABLES
-    stable, previous, candidate, candidateGit, candidateWorker,
-    candidateWindows, mainGit,
-    phase, gate, acceptedEvidence, migrationReady,
-    transaction, switchTarget, switchOrigin, switchKind, switchApplied,
-    syncState, syncOwners, hold,
-    supervisorMode, supervisionEpoch, actorEpoch, installStep,
-    currentPresent, stagingFresh, reverseCompatible,
-    staleActorRejected, drift
+OldNews == "OLD"
+SharedNews == "SHARED"
+NewNews == "NEW"
+ExtraNews == "EXTRA"
+NewsIdentities == {OldNews, SharedNews, NewNews, ExtraNews}
+Generations == 0..2
+GenerationIds(g) ==
+    IF g = 0 THEN {OldNews, SharedNews}
+    ELSE IF g = 1 THEN {SharedNews, NewNews}
+    ELSE {OldNews, NewNews}
 
-vars == <<stable, previous, candidate, candidateGit, candidateWorker,
-    candidateWindows, mainGit, phase, gate, acceptedEvidence, migrationReady,
-    transaction, switchTarget, switchOrigin, switchKind, switchApplied,
-    syncState, syncOwners, hold, supervisorMode, supervisionEpoch, actorEpoch,
-    installStep, currentPresent, stagingFresh, reverseCompatible,
-    staleActorRejected, drift>>
+InstallSteps == {
+    "IDLE", "FENCED", "BASELINED", "BUNDLE_SWAPPING",
+    "BUNDLE_INSTALLED", "NEW_QUIESCED", "ISOLATION_VERIFIED",
+    "ABANDONED_VERIFIED", "ROLLING_BACK"
+}
+DeathCheckpoints == {
+    "BASELINED", "BUNDLE_SWAPPING", "BUNDLE_INSTALLED",
+    "NEW_QUIESCED", "ISOLATION_VERIFIED"
+}
+RecoveryFacts == {
+    "TXN", "BUNDLE", "OLD_FENCED", "ONE_OWNER",
+    "ISOLATION", "CONTEXT", "NO_RELEASE", "STALE_FENCED"
+}
+
+VARIABLES release, health, install, news, syncOwners, path
+
+vars == <<release, health, install, news, syncOwners, path>>
 
 ExactCandidate ==
-    /\ candidate # None
-    /\ candidateGit = candidate
-    /\ candidateWorker = candidate
-    /\ candidateWindows = candidate
+    /\ release.candidate # None
+    /\ release.candidateExact
 
 CurrentSupervisorCanMutate ==
-    /\ supervisorMode = "ACTIVE"
-    /\ actorEpoch = supervisionEpoch
+    /\ install.mode = "ACTIVE"
+    /\ install.actorEpoch = install.epoch
+
+ReverseStableCompatible ==
+    /\ news.activeLegacyGeneration = news.currentGeneration
+    /\ news.activeLegacyIds = news.currentIds
+
+FreshStagingCompatible ==
+    /\ news.stagingPresent
+    /\ news.stagedLegacyPresent
+    /\ news.stagedLegacyGeneration = news.stagingGeneration
+    /\ news.stagedLegacyIds = news.stagingIds
+
+AbandonedActivationFacts ==
+    /\ install.transactionMatches
+    /\ install.bundleValid
+    /\ install.oldFenced
+    /\ install.replacementOwners = 1
+    /\ install.isolationMatches
+    /\ install.releaseContextCompatible
+    /\ ~install.concurrentRelease
+    /\ install.staleActorFenced
 
 Init ==
-    /\ stable = StableId
-    /\ previous = None
-    /\ candidate = None
-    /\ candidateGit = None
-    /\ candidateWorker = None
-    /\ candidateWindows = None
-    /\ mainGit = CandidateId
-    /\ phase = "STABLE"
-    /\ gate = "UNTESTED"
-    /\ acceptedEvidence = FALSE
-    /\ migrationReady = FALSE
-    /\ transaction = FALSE
-    /\ switchTarget = None
-    /\ switchOrigin = None
-    /\ switchKind = "NONE"
-    /\ switchApplied = FALSE
-    /\ syncState = "RUNNING"
+    /\ release = [
+        stable |-> StableId,
+        previous |-> None,
+        candidate |-> None,
+        candidateExact |-> TRUE,
+        main |-> CandidateId,
+        phase |-> "STABLE",
+        gate |-> "UNTESTED",
+        accepted |-> FALSE,
+        migrationReady |-> FALSE,
+        transaction |-> FALSE,
+        target |-> None,
+        origin |-> None,
+        kind |-> "NONE",
+        applied |-> FALSE,
+        hold |-> "NONE"
+        ]
+    /\ health = "GOOD"
+    /\ install = [
+        step |-> "IDLE",
+        installerAlive |-> FALSE,
+        transactionMatches |-> TRUE,
+        bundleValid |-> TRUE,
+        oldFenced |-> TRUE,
+        replacementOwners |-> 1,
+        isolationMatches |-> TRUE,
+        releaseContextCompatible |-> TRUE,
+        concurrentRelease |-> FALSE,
+        staleActorFenced |-> TRUE,
+        checksPassed |-> FALSE,
+        mode |-> "ACTIVE",
+        epoch |-> 0,
+        actorEpoch |-> 0,
+        deathCheckpoint |-> None
+        ]
+    /\ news = [
+        currentGeneration |-> 0,
+        currentIds |-> GenerationIds(0),
+        activeLegacyGeneration |-> 0,
+        activeLegacyIds |-> GenerationIds(0),
+        stagingPresent |-> FALSE,
+        stagingGeneration |-> 0,
+        stagingIds |-> {},
+        stagedLegacyPresent |-> FALSE,
+        stagedLegacyGeneration |-> 0,
+        stagedLegacyIds |-> {},
+        storedGenerations |-> {0}
+        ]
     /\ syncOwners = 1
-    /\ hold = "NONE"
-    /\ supervisorMode = "ACTIVE"
-    /\ supervisionEpoch = 0
-    /\ actorEpoch = 0
-    /\ installStep = "IDLE"
-    /\ currentPresent = TRUE
-    /\ stagingFresh = FALSE
-    /\ reverseCompatible = TRUE
-    /\ staleActorRejected = TRUE
-    /\ drift = FALSE
+    /\ path = [
+        verifyPassed |-> FALSE,
+        forwardObserve |-> FALSE,
+        observeFailed |-> FALSE,
+        recoverySwitched |-> FALSE,
+        recoveryCompleted |-> FALSE,
+        switchFailed |-> FALSE
+        ]
 
 DiscoverCandidate ==
-    /\ phase = "STABLE"
-    /\ ~transaction
-    /\ candidate = None
-    /\ candidate' = CandidateId
-    /\ candidateGit' = CandidateId
-    /\ candidateWorker' = CandidateId
-    /\ candidateWindows' = CandidateId
-    /\ phase' = "PREPARE"
-    /\ gate' = "UNTESTED"
-    /\ acceptedEvidence' = FALSE
-    /\ migrationReady' = FALSE
-    /\ UNCHANGED <<stable, previous, mainGit, transaction, switchTarget,
-        switchOrigin, switchKind, switchApplied, syncState, syncOwners, hold,
-        supervisorMode, supervisionEpoch, actorEpoch, installStep,
-        currentPresent, stagingFresh, reverseCompatible,
-        staleActorRejected, drift>>
+    /\ release.phase = "STABLE"
+    /\ ~release.transaction
+    /\ release.candidate = None
+    /\ release' = [release EXCEPT
+        !.candidate = CandidateId,
+        !.candidateExact = TRUE,
+        !.phase = "PREPARE",
+        !.gate = "UNTESTED",
+        !.accepted = FALSE,
+        !.migrationReady = FALSE]
+    /\ UNCHANGED <<health, install, news, syncOwners, path>>
 
 MainMoves ==
     /\ AllowMainMove
-    /\ mainGit # NextId
-    /\ mainGit' = NextId
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, phase, gate, acceptedEvidence,
-        migrationReady, transaction, switchTarget, switchOrigin, switchKind,
-        switchApplied, syncState, syncOwners, hold, supervisorMode,
-        supervisionEpoch, actorEpoch, installStep, currentPresent,
-        stagingFresh, reverseCompatible, staleActorRejected, drift>>
-
-BeginHold ==
-    /\ phase \in {"PREPARE", "VERIFY"}
-    /\ ExactCandidate
-    /\ hold = "NONE"
-    /\ syncState = "RUNNING"
-    /\ syncOwners = 1
-    /\ hold' = "ACTIVE"
-    /\ syncState' = "STOPPED"
-    /\ syncOwners' = 0
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, phase, gate,
-        acceptedEvidence, migrationReady, transaction, switchTarget,
-        switchOrigin, switchKind, switchApplied, supervisorMode,
-        supervisionEpoch, actorEpoch, installStep, currentPresent,
-        stagingFresh, reverseCompatible, staleActorRejected, drift>>
-
-VerifyMigration ==
-    /\ phase \in {"PREPARE", "VERIFY"}
-    /\ hold = "ACTIVE"
-    /\ migrationReady' = TRUE
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, phase, gate,
-        acceptedEvidence, transaction, switchTarget, switchOrigin, switchKind,
-        switchApplied, syncState, syncOwners, hold, supervisorMode,
-        supervisionEpoch, actorEpoch, installStep, currentPresent,
-        stagingFresh, reverseCompatible, staleActorRejected, drift>>
-
-HoldExpires ==
-    /\ hold = "ACTIVE"
-    /\ hold' = "EXPIRED"
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, phase, gate,
-        acceptedEvidence, migrationReady, transaction, switchTarget,
-        switchOrigin, switchKind, switchApplied, syncState, syncOwners,
-        supervisorMode, supervisionEpoch, actorEpoch, installStep,
-        currentPresent, stagingFresh, reverseCompatible,
-        staleActorRejected, drift>>
-
-HoldMismatches ==
-    /\ hold = "ACTIVE"
-    /\ ~ExactCandidate
-    /\ hold' = "MISMATCHED"
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, phase, gate,
-        acceptedEvidence, migrationReady, transaction, switchTarget,
-        switchOrigin, switchKind, switchApplied, syncState, syncOwners,
-        supervisorMode, supervisionEpoch, actorEpoch, installStep,
-        currentPresent, stagingFresh, reverseCompatible,
-        staleActorRejected, drift>>
-
-WatchdogRecover ==
-    /\ CurrentSupervisorCanMutate
-    /\ hold # "ACTIVE"
-    /\ ~transaction
-    /\ syncState = "STOPPED"
-    /\ syncState' = "RUNNING"
-    /\ syncOwners' = 1
-    /\ hold' = "NONE"
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, phase, gate,
-        acceptedEvidence, migrationReady, transaction, switchTarget,
-        switchOrigin, switchKind, switchApplied, supervisorMode,
-        supervisionEpoch, actorEpoch, installStep, currentPresent,
-        stagingFresh, reverseCompatible, staleActorRejected, drift>>
-
-WatchdogBlockedByHoldOrSwitch ==
-    /\ syncState = "STOPPED"
-    /\ (hold = "ACTIVE" \/ transaction)
-    /\ UNCHANGED vars
-
-FenceSupervisor ==
-    /\ AllowControlInstall
-    /\ phase = "PREPARE"
-    /\ ~transaction
-    /\ installStep = "IDLE"
-    /\ CurrentSupervisorCanMutate
-    /\ supervisorMode' = "QUIESCED"
-    /\ supervisionEpoch' = 1 - supervisionEpoch
-    /\ installStep' = "FENCED"
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, phase, gate,
-        acceptedEvidence, migrationReady, transaction, switchTarget,
-        switchOrigin, switchKind, switchApplied, syncState, syncOwners, hold,
-        actorEpoch, currentPresent, stagingFresh, reverseCompatible,
-        staleActorRejected, drift>>
-
-CaptureBaseline ==
-    /\ installStep = "FENCED"
-    /\ supervisorMode = "QUIESCED"
-    /\ installStep' = "BASELINED"
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, phase, gate,
-        acceptedEvidence, migrationReady, transaction, switchTarget,
-        switchOrigin, switchKind, switchApplied, syncState, syncOwners, hold,
-        supervisorMode, supervisionEpoch, actorEpoch, currentPresent,
-        stagingFresh, reverseCompatible, staleActorRejected, drift>>
-
-InstallQuiescedSupervisor ==
-    /\ installStep = "BASELINED"
-    /\ supervisorMode = "QUIESCED"
-    /\ installStep' = "NEW_QUIESCED"
-    /\ actorEpoch' = supervisionEpoch
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, phase, gate,
-        acceptedEvidence, migrationReady, transaction, switchTarget,
-        switchOrigin, switchKind, switchApplied, syncState, syncOwners, hold,
-        supervisorMode, supervisionEpoch, currentPresent, stagingFresh,
-        reverseCompatible, staleActorRejected, drift>>
-
-ActivateSupervisor ==
-    /\ HealthyExternal
-    /\ installStep = "NEW_QUIESCED"
-    /\ supervisorMode = "QUIESCED"
-    /\ installStep' = "IDLE"
-    /\ supervisorMode' = "ACTIVE"
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, phase, gate,
-        acceptedEvidence, migrationReady, transaction, switchTarget,
-        switchOrigin, switchKind, switchApplied, syncState, syncOwners, hold,
-        supervisionEpoch, actorEpoch, currentPresent, stagingFresh,
-        reverseCompatible, staleActorRejected, drift>>
-
-FailInstall ==
-    /\ ~HealthyExternal
-    /\ installStep \in {"FENCED", "BASELINED", "NEW_QUIESCED"}
-    /\ installStep' = "FAILED"
-    /\ supervisorMode' = "NONE"
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, phase, gate,
-        acceptedEvidence, migrationReady, transaction, switchTarget,
-        switchOrigin, switchKind, switchApplied, syncState, syncOwners, hold,
-        supervisionEpoch, actorEpoch, currentPresent, stagingFresh,
-        reverseCompatible, staleActorRejected, drift>>
-
-RecoverInstall ==
-    /\ installStep = "FAILED"
-    /\ installStep' = "IDLE"
-    /\ supervisorMode' = "ACTIVE"
-    /\ actorEpoch' = supervisionEpoch
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, phase, gate,
-        acceptedEvidence, migrationReady, transaction, switchTarget,
-        switchOrigin, switchKind, switchApplied, syncState, syncOwners, hold,
-        supervisionEpoch, currentPresent, stagingFresh, reverseCompatible,
-        staleActorRejected, drift>>
-
-StaleSupervisorAttempt ==
-    /\ actorEpoch # supervisionEpoch
-    /\ staleActorRejected' = TRUE
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, phase, gate,
-        acceptedEvidence, migrationReady, transaction, switchTarget,
-        switchOrigin, switchKind, switchApplied, syncState, syncOwners, hold,
-        supervisorMode, supervisionEpoch, actorEpoch, installStep,
-        currentPresent, stagingFresh, reverseCompatible, drift>>
-
-CompletePrepare ==
-    /\ phase = "PREPARE"
-    /\ migrationReady
-    /\ installStep = "IDLE"
-    /\ CurrentSupervisorCanMutate
-    /\ phase' = "VERIFY"
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, gate, acceptedEvidence,
-        migrationReady, transaction, switchTarget, switchOrigin, switchKind,
-        switchApplied, syncState, syncOwners, hold, supervisorMode,
-        supervisionEpoch, actorEpoch, installStep, currentPresent,
-        stagingFresh, reverseCompatible, staleActorRejected, drift>>
-
-RequestRetryableEvidence ==
-    /\ phase = "VERIFY"
-    /\ gate = "UNTESTED"
-    /\ gate' = "REVIEW_RETRY"
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, phase, acceptedEvidence,
-        migrationReady, transaction, switchTarget, switchOrigin, switchKind,
-        switchApplied, syncState, syncOwners, hold, supervisorMode,
-        supervisionEpoch, actorEpoch, installStep, currentPresent,
-        stagingFresh, reverseCompatible, staleActorRejected, drift>>
-
-RetryEvidence ==
-    /\ phase = "VERIFY"
-    /\ gate = "REVIEW_RETRY"
-    /\ gate' = "UNTESTED"
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, phase, acceptedEvidence,
-        migrationReady, transaction, switchTarget, switchOrigin, switchKind,
-        switchApplied, syncState, syncOwners, hold, supervisorMode,
-        supervisionEpoch, actorEpoch, installStep, currentPresent,
-        stagingFresh, reverseCompatible, staleActorRejected, drift>>
-
-BlockEvidence ==
-    /\ phase = "VERIFY"
-    /\ gate = "UNTESTED"
-    /\ gate' \in {"REVIEW_BLOCKED", "FAILED"}
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, phase, acceptedEvidence,
-        migrationReady, transaction, switchTarget, switchOrigin, switchKind,
-        switchApplied, syncState, syncOwners, hold, supervisorMode,
-        supervisionEpoch, actorEpoch, installStep, currentPresent,
-        stagingFresh, reverseCompatible, staleActorRejected, drift>>
-
-PassEvidence ==
-    /\ HealthyExternal
-    /\ phase = "VERIFY"
-    /\ gate = "UNTESTED"
-    /\ ExactCandidate
-    /\ migrationReady
-    /\ reverseCompatible
-    /\ gate' = "PASSED"
-    /\ acceptedEvidence' = TRUE
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, phase, migrationReady,
-        transaction, switchTarget, switchOrigin, switchKind, switchApplied,
-        syncState, syncOwners, hold, supervisorMode, supervisionEpoch,
-        actorEpoch, installStep, currentPresent, stagingFresh,
-        reverseCompatible, staleActorRejected, drift>>
+    /\ release.main # NextId
+    /\ release' = [release EXCEPT !.main = NextId]
+    /\ UNCHANGED <<health, install, news, syncOwners, path>>
 
 CorruptCandidateIdentity ==
     /\ AllowIdentityDrift
-    /\ phase \in {"PREPARE", "VERIFY"}
-    /\ candidate # None
-    /\ candidateWorker = candidate
-    /\ candidateWorker' = NextId
-    /\ gate' = "FAILED"
-    /\ acceptedEvidence' = FALSE
-    /\ drift' = TRUE
-    /\ hold' = IF hold = "ACTIVE" THEN "MISMATCHED" ELSE hold
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWindows, mainGit, phase, migrationReady, transaction,
-        switchTarget, switchOrigin, switchKind, switchApplied, syncState,
-        syncOwners, supervisorMode, supervisionEpoch, actorEpoch, installStep,
-        currentPresent, stagingFresh, reverseCompatible,
-        staleActorRejected>>
+    /\ release.phase \in {"PREPARE", "VERIFY"}
+    /\ release.candidate # None
+    /\ release' = [release EXCEPT
+        !.candidateExact = FALSE,
+        !.gate = "FAILED",
+        !.accepted = FALSE]
+    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+
+DegradeHealth ==
+    /\ health = "GOOD"
+    /\ release.transaction
+    /\ release.phase \in {"SWITCH", "OBSERVE"}
+    /\ health' = "BAD"
+    /\ UNCHANGED <<release, install, news, syncOwners, path>>
+
+RestoreHealth ==
+    /\ health = "BAD"
+    /\ health' = "GOOD"
+    /\ UNCHANGED <<release, install, news, syncOwners, path>>
+
+BeginHold ==
+    /\ release.phase = "PREPARE"
+    /\ ExactCandidate
+    /\ release.hold = "NONE"
+    /\ syncOwners = 1
+    /\ release' = [release EXCEPT !.hold = "ACTIVE"]
+    /\ syncOwners' = 0
+    /\ UNCHANGED <<health, install, news, path>>
+
+VerifyMigration ==
+    /\ release.phase = "PREPARE"
+    /\ release.hold = "ACTIVE"
+    /\ release' = [release EXCEPT !.migrationReady = TRUE]
+    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+
+HoldExpires ==
+    /\ release.hold = "ACTIVE"
+    /\ release' = [release EXCEPT !.hold = "EXPIRED"]
+    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+
+WatchdogRecoversSync ==
+    /\ CurrentSupervisorCanMutate
+    /\ release.hold # "ACTIVE"
+    /\ ~release.transaction
+    /\ syncOwners = 0
+    /\ syncOwners' = 1
+    /\ release' = [release EXCEPT !.hold = "NONE"]
+    /\ UNCHANGED <<health, install, news, path>>
+
+BeginInstall ==
+    /\ AllowControlInstall
+    /\ release.phase = "PREPARE"
+    /\ ~release.transaction
+    /\ install.step = "IDLE"
+    /\ CurrentSupervisorCanMutate
+    /\ install' = [install EXCEPT
+        !.step = "FENCED",
+        !.installerAlive = TRUE,
+        !.oldFenced = TRUE,
+        !.replacementOwners = 0,
+        !.checksPassed = FALSE,
+        !.mode = "QUIESCED",
+        !.epoch = 1 - @,
+        !.deathCheckpoint = None]
+    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+
+CaptureBaseline ==
+    /\ install.step = "FENCED"
+    /\ install.installerAlive
+    /\ install' = [install EXCEPT !.step = "BASELINED"]
+    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+
+BeginBundleSwap ==
+    /\ install.step = "BASELINED"
+    /\ install.installerAlive
+    /\ install' = [install EXCEPT
+        !.step = "BUNDLE_SWAPPING",
+        !.bundleValid = FALSE]
+    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+
+CompleteBundleSwap ==
+    /\ install.step = "BUNDLE_SWAPPING"
+    /\ install.installerAlive
+    /\ install' = [install EXCEPT
+        !.step = "BUNDLE_INSTALLED",
+        !.bundleValid = TRUE]
+    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+
+StartQuiescedSupervisor ==
+    /\ install.step = "BUNDLE_INSTALLED"
+    /\ install.bundleValid
+    /\ install' = [install EXCEPT
+        !.step = "NEW_QUIESCED",
+        !.replacementOwners = 1,
+        !.actorEpoch = install.epoch]
+    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+
+VerifyNormalInstall ==
+    /\ install.step = "NEW_QUIESCED"
+    /\ install.installerAlive
+    /\ AbandonedActivationFacts
+    /\ install' = [install EXCEPT
+        !.step = "ISOLATION_VERIFIED",
+        !.checksPassed = TRUE]
+    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+
+ActivateNormalInstall ==
+    /\ install.step = "ISOLATION_VERIFIED"
+    /\ install.installerAlive
+    /\ install.checksPassed
+    /\ AbandonedActivationFacts
+    /\ install' = [install EXCEPT
+        !.step = "IDLE",
+        !.installerAlive = FALSE,
+        !.mode = "ACTIVE"]
+    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+
+InstallerDiesAt(checkpoint) ==
+    /\ checkpoint \in DeathCheckpoints
+    /\ install.installerAlive
+    /\ install.step = checkpoint
+    /\ install' = [install EXCEPT
+        !.installerAlive = FALSE,
+        !.deathCheckpoint = checkpoint]
+    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+
+InvalidateRecoveryFact(fact) ==
+    /\ fact \in RecoveryFacts
+    /\ ~install.installerAlive
+    /\ install.step \in {"BUNDLE_SWAPPING", "BUNDLE_INSTALLED",
+                          "NEW_QUIESCED", "ISOLATION_VERIFIED"}
+    /\ AbandonedActivationFacts
+    /\ install' =
+        CASE fact = "TXN" -> [install EXCEPT !.transactionMatches = FALSE]
+          [] fact = "BUNDLE" -> [install EXCEPT !.bundleValid = FALSE]
+          [] fact = "OLD_FENCED" -> [install EXCEPT !.oldFenced = FALSE]
+          [] fact = "ONE_OWNER" -> [install EXCEPT !.replacementOwners = 2]
+          [] fact = "ISOLATION" -> [install EXCEPT !.isolationMatches = FALSE]
+          [] fact = "CONTEXT" -> [install EXCEPT !.releaseContextCompatible = FALSE]
+          [] fact = "NO_RELEASE" -> [install EXCEPT !.concurrentRelease = TRUE]
+          [] OTHER -> [install EXCEPT !.staleActorFenced = FALSE]
+    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+
+RepairInterruptedBundle ==
+    /\ ~install.installerAlive
+    /\ install.step = "BUNDLE_SWAPPING"
+    /\ install.transactionMatches
+    /\ install' = [install EXCEPT
+        !.step = "BUNDLE_INSTALLED",
+        !.bundleValid = TRUE]
+    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+
+StartRecoveredQuiesced ==
+    /\ ~install.installerAlive
+    /\ install.step = "BUNDLE_INSTALLED"
+    /\ install.bundleValid
+    /\ install' = [install EXCEPT
+        !.step = "NEW_QUIESCED",
+        !.replacementOwners = 1,
+        !.actorEpoch = install.epoch]
+    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+
+VerifyAbandonedInstall ==
+    /\ ~install.installerAlive
+    /\ install.step \in {"NEW_QUIESCED", "ISOLATION_VERIFIED"}
+    /\ AbandonedActivationFacts
+    /\ install' = [install EXCEPT
+        !.step = "ABANDONED_VERIFIED",
+        !.checksPassed = TRUE]
+    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+
+ActivateRecoveredInstall ==
+    /\ ~install.installerAlive
+    /\ install.step = "ABANDONED_VERIFIED"
+    /\ install.checksPassed
+    /\ AbandonedActivationFacts
+    /\ install' = [install EXCEPT
+        !.step = "IDLE",
+        !.mode = "ACTIVE"]
+    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+
+RejectAbandonedInstall ==
+    /\ ~install.installerAlive
+    /\ install.step \in DeathCheckpoints
+    /\ \/ install.step = "BASELINED"
+       \/ ~AbandonedActivationFacts
+    /\ install' = [install EXCEPT
+        !.step = "ROLLING_BACK",
+        !.mode = "NONE",
+        !.replacementOwners = 0,
+        !.checksPassed = FALSE]
+    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+
+RestorePreviousInstall ==
+    /\ install.step = "ROLLING_BACK"
+    /\ install' = [install EXCEPT
+        !.step = "IDLE",
+        !.bundleValid = TRUE,
+        !.replacementOwners = 1,
+        !.mode = "ACTIVE",
+        !.actorEpoch = install.epoch,
+        !.concurrentRelease = FALSE]
+    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+
+CompletePrepare ==
+    /\ release.phase = "PREPARE"
+    /\ release.migrationReady
+    /\ install.step = "IDLE"
+    /\ CurrentSupervisorCanMutate
+    /\ release' = [release EXCEPT !.phase = "VERIFY"]
+    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+
+PassEvidence ==
+    /\ health = "GOOD"
+    /\ release.phase = "VERIFY"
+    /\ release.gate = "UNTESTED"
+    /\ ExactCandidate
+    /\ release.migrationReady
+    /\ ReverseStableCompatible
+    /\ release' = [release EXCEPT
+        !.gate = "PASSED",
+        !.accepted = TRUE]
+    /\ path' = [path EXCEPT !.verifyPassed = TRUE]
+    /\ UNCHANGED <<health, install, news, syncOwners>>
 
 BeginForwardSwitch ==
-    /\ phase = "VERIFY"
-    /\ ~transaction
-    /\ gate = "PASSED"
-    /\ acceptedEvidence
+    /\ release.phase = "VERIFY"
+    /\ ~release.transaction
+    /\ release.gate = "PASSED"
+    /\ release.accepted
     /\ ExactCandidate
-    /\ reverseCompatible
+    /\ ReverseStableCompatible
     /\ CurrentSupervisorCanMutate
-    /\ phase' = "SWITCH"
-    /\ transaction' = TRUE
-    /\ switchTarget' = candidate
-    /\ switchOrigin' = stable
-    /\ switchKind' = "FORWARD"
-    /\ switchApplied' = FALSE
-    /\ hold' = "NONE"
-    /\ syncState' = "STOPPED"
+    /\ release' = [release EXCEPT
+        !.phase = "SWITCH",
+        !.transaction = TRUE,
+        !.target = release.candidate,
+        !.origin = release.stable,
+        !.kind = "FORWARD",
+        !.applied = FALSE,
+        !.hold = "NONE"]
     /\ syncOwners' = 0
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, gate, acceptedEvidence,
-        migrationReady, supervisorMode, supervisionEpoch, actorEpoch,
-        installStep, currentPresent, stagingFresh, reverseCompatible,
-        staleActorRejected, drift>>
-
-BeginReturnToPrevious ==
-    /\ phase = "STABLE"
-    /\ ~transaction
-    /\ previous # None
-    /\ CurrentSupervisorCanMutate
-    /\ phase' = "SWITCH"
-    /\ transaction' = TRUE
-    /\ switchTarget' = previous
-    /\ switchOrigin' = stable
-    /\ switchKind' = "RETURN"
-    /\ switchApplied' = FALSE
-    /\ syncState' = "STOPPED"
-    /\ syncOwners' = 0
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, gate, acceptedEvidence,
-        migrationReady, hold, supervisorMode, supervisionEpoch, actorEpoch,
-        installStep, currentPresent, stagingFresh, reverseCompatible,
-        staleActorRejected, drift>>
+    /\ UNCHANGED <<health, install, news, path>>
 
 ApplySwitch ==
-    /\ HealthyExternal
-    /\ phase = "SWITCH"
-    /\ transaction
-    /\ switchTarget # None
-    /\ phase' = "OBSERVE"
-    /\ switchApplied' = TRUE
-    /\ syncState' = "RUNNING"
+    /\ health = "GOOD"
+    /\ release.phase = "SWITCH"
+    /\ release.transaction
+    /\ release.kind = "FORWARD"
+    /\ release.target # None
+    /\ release' = [release EXCEPT
+        !.phase = "OBSERVE",
+        !.applied = TRUE]
     /\ syncOwners' = 1
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, gate, acceptedEvidence,
-        migrationReady, transaction, switchTarget, switchOrigin, switchKind,
-        hold, supervisorMode, supervisionEpoch, actorEpoch, installStep,
-        currentPresent, stagingFresh, reverseCompatible,
-        staleActorRejected, drift>>
+    /\ path' = [path EXCEPT !.forwardObserve = TRUE]
+    /\ UNCHANGED <<health, install, news>>
+
+FailSwitch ==
+    /\ health = "BAD"
+    /\ release.phase = "SWITCH"
+    /\ release.transaction
+    /\ release.kind = "FORWARD"
+    /\ ~release.applied
+    /\ release' = [release EXCEPT
+        !.target = release.origin,
+        !.kind = "RECOVER",
+        !.gate = "FAILED",
+        !.accepted = FALSE]
+    /\ path' = [path EXCEPT !.switchFailed = TRUE]
+    /\ UNCHANGED <<health, install, news, syncOwners>>
 
 ObserveSuccess ==
-    /\ HealthyExternal
-    /\ phase = "OBSERVE"
-    /\ transaction
-    /\ switchApplied
-    /\ switchKind \in {"FORWARD", "RETURN"}
-    /\ stable' = switchTarget
-    /\ previous' = switchOrigin
-    /\ phase' = "STABLE"
-    /\ transaction' = FALSE
-    /\ switchTarget' = None
-    /\ switchOrigin' = None
-    /\ switchKind' = "NONE"
-    /\ switchApplied' = FALSE
-    /\ candidate' = IF switchKind = "FORWARD" THEN None ELSE candidate
-    /\ candidateGit' = IF switchKind = "FORWARD" THEN None ELSE candidateGit
-    /\ candidateWorker' = IF switchKind = "FORWARD" THEN None ELSE candidateWorker
-    /\ candidateWindows' = IF switchKind = "FORWARD" THEN None ELSE candidateWindows
-    /\ gate' = IF switchKind = "FORWARD" THEN "UNTESTED" ELSE gate
-    /\ acceptedEvidence' = IF switchKind = "FORWARD" THEN FALSE ELSE acceptedEvidence
-    /\ migrationReady' = IF switchKind = "FORWARD" THEN FALSE ELSE migrationReady
-    /\ UNCHANGED <<mainGit,
-        syncState, syncOwners, hold, supervisorMode, supervisionEpoch,
-        actorEpoch, installStep, currentPresent, stagingFresh,
-        reverseCompatible, staleActorRejected, drift>>
+    /\ health = "GOOD"
+    /\ release.phase = "OBSERVE"
+    /\ release.transaction
+    /\ release.applied
+    /\ release.kind = "FORWARD"
+    /\ release' = [release EXCEPT
+        !.stable = release.target,
+        !.previous = release.origin,
+        !.candidate = None,
+        !.phase = "STABLE",
+        !.transaction = FALSE,
+        !.target = None,
+        !.origin = None,
+        !.kind = "NONE",
+        !.applied = FALSE,
+        !.gate = "UNTESTED",
+        !.accepted = FALSE,
+        !.migrationReady = FALSE]
+    /\ UNCHANGED <<health, install, news, syncOwners, path>>
 
 ObserveFailure ==
-    /\ ~HealthyExternal
-    /\ phase = "OBSERVE"
-    /\ transaction
-    /\ switchApplied
-    /\ phase' = "SWITCH"
-    /\ switchTarget' = switchOrigin
-    /\ switchKind' = "RECOVER"
-    /\ switchApplied' = FALSE
-    /\ syncState' = "STOPPED"
+    /\ health = "BAD"
+    /\ release.phase = "OBSERVE"
+    /\ release.transaction
+    /\ release.applied
+    /\ release.kind = "FORWARD"
+    /\ release' = [release EXCEPT
+        !.phase = "SWITCH",
+        !.target = release.origin,
+        !.kind = "RECOVER",
+        !.applied = FALSE,
+        !.gate = "FAILED",
+        !.accepted = FALSE]
     /\ syncOwners' = 0
-    /\ gate' = IF gate = "PASSED" THEN "FAILED" ELSE gate
-    /\ acceptedEvidence' = FALSE
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, migrationReady,
-        transaction, switchOrigin, hold, supervisorMode, supervisionEpoch,
-        actorEpoch, installStep, currentPresent, stagingFresh,
-        reverseCompatible, staleActorRejected, drift>>
+    /\ path' = [path EXCEPT !.observeFailed = TRUE]
+    /\ UNCHANGED <<health, install, news>>
 
 ApplyRecoverySwitch ==
-    /\ phase = "SWITCH"
-    /\ transaction
-    /\ switchKind = "RECOVER"
-    /\ switchTarget = switchOrigin
-    /\ phase' = "OBSERVE"
-    /\ switchApplied' = TRUE
-    /\ syncState' = "RUNNING"
+    /\ health = "GOOD"
+    /\ release.phase = "SWITCH"
+    /\ release.transaction
+    /\ release.kind = "RECOVER"
+    /\ release.target = release.origin
+    /\ release' = [release EXCEPT
+        !.phase = "OBSERVE",
+        !.applied = TRUE]
     /\ syncOwners' = 1
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, gate, acceptedEvidence,
-        migrationReady, transaction, switchTarget, switchOrigin, switchKind,
-        hold, supervisorMode, supervisionEpoch, actorEpoch, installStep,
-        currentPresent, stagingFresh, reverseCompatible,
-        staleActorRejected, drift>>
+    /\ path' = [path EXCEPT !.recoverySwitched = TRUE]
+    /\ UNCHANGED <<health, install, news>>
 
 ObserveRecovery ==
-    /\ phase = "OBSERVE"
-    /\ transaction
-    /\ switchKind = "RECOVER"
-    /\ switchApplied
-    /\ stable = switchOrigin
-    /\ phase' = "STABLE"
-    /\ transaction' = FALSE
-    /\ switchTarget' = None
-    /\ switchOrigin' = None
-    /\ switchKind' = "NONE"
-    /\ switchApplied' = FALSE
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, gate, acceptedEvidence,
-        migrationReady, syncState, syncOwners, hold, supervisorMode,
-        supervisionEpoch, actorEpoch, installStep, currentPresent,
-        stagingFresh, reverseCompatible, staleActorRejected, drift>>
+    /\ health = "GOOD"
+    /\ release.phase = "OBSERVE"
+    /\ release.transaction
+    /\ release.kind = "RECOVER"
+    /\ release.applied
+    /\ release.stable = release.origin
+    /\ release' = [release EXCEPT
+        !.phase = "STABLE",
+        !.transaction = FALSE,
+        !.target = None,
+        !.origin = None,
+        !.kind = "NONE",
+        !.applied = FALSE]
+    /\ path' = [path EXCEPT !.recoveryCompleted = TRUE]
+    /\ UNCHANGED <<health, install, news, syncOwners>>
 
 PrepareGeneration ==
-    /\ ~stagingFresh
-    /\ stagingFresh' = TRUE
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, phase, gate,
-        acceptedEvidence, migrationReady, transaction, switchTarget,
-        switchOrigin, switchKind, switchApplied, syncState, syncOwners, hold,
-        supervisorMode, supervisionEpoch, actorEpoch, installStep,
-        currentPresent, reverseCompatible, staleActorRejected, drift>>
+    /\ ~news.stagingPresent
+    /\ news.currentGeneration < 2
+    /\ news' = [news EXCEPT
+        !.stagingPresent = TRUE,
+        !.stagingGeneration = news.currentGeneration + 1,
+        !.stagingIds = GenerationIds(news.currentGeneration + 1),
+        !.stagedLegacyPresent = FALSE,
+        !.stagedLegacyIds = {},
+        !.storedGenerations = @ \cup {news.currentGeneration + 1}]
+    /\ UNCHANGED <<release, health, install, syncOwners, path>>
+
+StageLegacyCorrect ==
+    /\ news.stagingPresent
+    /\ ~news.stagedLegacyPresent
+    /\ news' = [news EXCEPT
+        !.stagedLegacyPresent = TRUE,
+        !.stagedLegacyGeneration = news.stagingGeneration,
+        !.stagedLegacyIds = news.stagingIds]
+    /\ UNCHANGED <<release, health, install, syncOwners, path>>
+
+StageLegacyInvalid(kind) ==
+    /\ kind \in {"MISSING", "EXTRA"}
+    /\ news.stagingPresent
+    /\ ~news.stagedLegacyPresent
+    /\ news' = [news EXCEPT
+        !.stagedLegacyPresent = TRUE,
+        !.stagedLegacyGeneration = news.stagingGeneration,
+        !.stagedLegacyIds = IF kind = "MISSING" THEN {} ELSE news.stagingIds \cup {ExtraNews}]
+    /\ UNCHANGED <<release, health, install, syncOwners, path>>
+
+RepairStagedLegacy ==
+    /\ news.stagingPresent
+    /\ news.stagedLegacyPresent
+    /\ ~FreshStagingCompatible
+    /\ news' = [news EXCEPT
+        !.stagedLegacyGeneration = news.stagingGeneration,
+        !.stagedLegacyIds = news.stagingIds]
+    /\ UNCHANGED <<release, health, install, syncOwners, path>>
 
 ActivateGeneration ==
-    /\ stagingFresh
-    /\ reverseCompatible
-    /\ stagingFresh' = FALSE
-    /\ currentPresent' = TRUE
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, phase, gate,
-        acceptedEvidence, migrationReady, transaction, switchTarget,
-        switchOrigin, switchKind, switchApplied, syncState, syncOwners, hold,
-        supervisorMode, supervisionEpoch, actorEpoch, installStep,
-        reverseCompatible, staleActorRejected, drift>>
+    /\ FreshStagingCompatible
+    /\ news' = [news EXCEPT
+        !.currentGeneration = news.stagingGeneration,
+        !.currentIds = news.stagingIds,
+        !.activeLegacyGeneration = news.stagedLegacyGeneration,
+        !.activeLegacyIds = news.stagedLegacyIds,
+        !.stagingPresent = FALSE,
+        !.stagingIds = {},
+        !.stagedLegacyPresent = FALSE,
+        !.stagedLegacyIds = {}]
+    /\ UNCHANGED <<release, health, install, syncOwners, path>>
 
-CleanupObsolete ==
-    /\ currentPresent
-    /\ UNCHANGED vars
-
-RestartMachine ==
-    /\ installStep \in {"FENCED", "BASELINED", "NEW_QUIESCED"} \/ transaction
-    /\ installStep' = IF installStep = "IDLE" THEN installStep ELSE "FAILED"
-    /\ supervisorMode' = IF installStep = "IDLE" THEN supervisorMode ELSE "NONE"
-    /\ phase' = IF transaction THEN "SWITCH" ELSE phase
-    /\ switchTarget' = IF transaction THEN switchOrigin ELSE switchTarget
-    /\ switchKind' = IF transaction THEN "RECOVER" ELSE switchKind
-    /\ switchApplied' = IF transaction THEN FALSE ELSE switchApplied
-    /\ syncState' = IF transaction THEN "STOPPED" ELSE syncState
-    /\ syncOwners' = IF transaction THEN 0 ELSE syncOwners
-    /\ UNCHANGED <<stable, previous, candidate, candidateGit,
-        candidateWorker, candidateWindows, mainGit, gate, acceptedEvidence,
-        migrationReady, transaction, switchOrigin, hold, supervisionEpoch,
-        actorEpoch, currentPresent, stagingFresh, reverseCompatible,
-        staleActorRejected, drift>>
+CleanupObsolete(generation) ==
+    /\ generation \in news.storedGenerations
+    /\ generation # news.currentGeneration
+    /\ (~news.stagingPresent \/ generation # news.stagingGeneration)
+    /\ news' = [news EXCEPT !.storedGenerations = @ \ {generation}]
+    /\ UNCHANGED <<release, health, install, syncOwners, path>>
 
 Next ==
-    \/ DiscoverCandidate \/ MainMoves \/ BeginHold \/ VerifyMigration
-    \/ HoldExpires \/ HoldMismatches \/ WatchdogRecover
-    \/ WatchdogBlockedByHoldOrSwitch \/ FenceSupervisor \/ CaptureBaseline
-    \/ InstallQuiescedSupervisor \/ ActivateSupervisor \/ FailInstall
-    \/ RecoverInstall \/ StaleSupervisorAttempt \/ CompletePrepare
-    \/ RequestRetryableEvidence \/ RetryEvidence \/ BlockEvidence
-    \/ PassEvidence \/ CorruptCandidateIdentity \/ BeginForwardSwitch
-    \/ BeginReturnToPrevious \/ ApplySwitch \/ ObserveSuccess
-    \/ ObserveFailure \/ ApplyRecoverySwitch \/ ObserveRecovery
-    \/ PrepareGeneration \/ ActivateGeneration \/ CleanupObsolete
-    \/ RestartMachine
+    \/ DiscoverCandidate \/ MainMoves \/ CorruptCandidateIdentity
+    \/ DegradeHealth \/ RestoreHealth
+    \/ BeginHold \/ VerifyMigration \/ HoldExpires \/ WatchdogRecoversSync
+    \/ BeginInstall \/ CaptureBaseline \/ BeginBundleSwap
+    \/ CompleteBundleSwap \/ StartQuiescedSupervisor
+    \/ VerifyNormalInstall \/ ActivateNormalInstall
+    \/ \E checkpoint \in DeathCheckpoints: InstallerDiesAt(checkpoint)
+    \/ \E fact \in RecoveryFacts: InvalidateRecoveryFact(fact)
+    \/ RepairInterruptedBundle \/ StartRecoveredQuiesced
+    \/ VerifyAbandonedInstall \/ ActivateRecoveredInstall
+    \/ RejectAbandonedInstall \/ RestorePreviousInstall
+    \/ CompletePrepare \/ PassEvidence \/ BeginForwardSwitch
+    \/ ApplySwitch \/ FailSwitch \/ ObserveSuccess \/ ObserveFailure
+    \/ ApplyRecoverySwitch \/ ObserveRecovery
+    \/ PrepareGeneration \/ StageLegacyCorrect
+    \/ \E kind \in {"MISSING", "EXTRA"}: StageLegacyInvalid(kind)
+    \/ RepairStagedLegacy \/ ActivateGeneration
+    \/ \E generation \in Generations: CleanupObsolete(generation)
 
 Spec ==
     /\ Init
     /\ [][Next]_vars
+    /\ WF_vars(RestoreHealth)
     /\ WF_vars(VerifyMigration)
-    /\ WF_vars(WatchdogRecover)
+    /\ WF_vars(WatchdogRecoversSync)
     /\ WF_vars(CaptureBaseline)
-    /\ WF_vars(InstallQuiescedSupervisor)
-    /\ WF_vars(ActivateSupervisor)
-    /\ WF_vars(RecoverInstall)
+    /\ WF_vars(BeginBundleSwap)
+    /\ WF_vars(CompleteBundleSwap)
+    /\ WF_vars(StartQuiescedSupervisor)
+    /\ WF_vars(VerifyNormalInstall)
+    /\ WF_vars(ActivateNormalInstall)
+    /\ WF_vars(RepairInterruptedBundle)
+    /\ WF_vars(StartRecoveredQuiesced)
+    /\ WF_vars(VerifyAbandonedInstall)
+    /\ WF_vars(ActivateRecoveredInstall)
+    /\ WF_vars(RejectAbandonedInstall)
+    /\ WF_vars(RestorePreviousInstall)
     /\ WF_vars(CompletePrepare)
-    /\ WF_vars(RetryEvidence)
     /\ SF_vars(PassEvidence)
     /\ SF_vars(BeginForwardSwitch)
-    /\ WF_vars(ApplySwitch)
-    /\ WF_vars(ObserveSuccess)
+    /\ SF_vars(ApplySwitch)
+    /\ SF_vars(FailSwitch)
+    /\ SF_vars(ObserveSuccess)
+    /\ SF_vars(ObserveFailure)
     /\ SF_vars(ApplyRecoverySwitch)
     /\ SF_vars(ObserveRecovery)
 
 TypeOK ==
-    /\ stable \in {StableId, CandidateId, NextId}
-    /\ previous \in Identities
-    /\ candidate \in Identities
-    /\ candidateGit \in Identities
-    /\ candidateWorker \in Identities
-    /\ candidateWindows \in Identities
-    /\ mainGit \in {CandidateId, NextId}
-    /\ phase \in {"STABLE", "PREPARE", "VERIFY", "SWITCH", "OBSERVE"}
-    /\ gate \in {"UNTESTED", "REVIEW_RETRY", "REVIEW_BLOCKED", "PASSED", "FAILED"}
-    /\ switchTarget \in Identities
-    /\ switchOrigin \in Identities
-    /\ switchKind \in {"NONE", "FORWARD", "RETURN", "RECOVER"}
-    /\ syncState \in {"RUNNING", "STOPPED"}
+    /\ release.stable \in {StableId, CandidateId, NextId}
+    /\ release.previous \in Identities
+    /\ release.candidate \in Identities
+    /\ release.main \in {CandidateId, NextId}
+    /\ release.phase \in {"STABLE", "PREPARE", "VERIFY", "SWITCH", "OBSERVE"}
+    /\ release.gate \in {"UNTESTED", "PASSED", "FAILED"}
+    /\ release.target \in Identities
+    /\ release.origin \in Identities
+    /\ release.kind \in {"NONE", "FORWARD", "RECOVER"}
+    /\ release.hold \in {"NONE", "ACTIVE", "EXPIRED"}
+    /\ health \in {"GOOD", "BAD"}
+    /\ install.step \in InstallSteps
+    /\ install.mode \in {"ACTIVE", "QUIESCED", "NONE"}
+    /\ install.epoch \in 0..1
+    /\ install.actorEpoch \in 0..1
+    /\ install.replacementOwners \in 0..2
+    /\ install.deathCheckpoint \in DeathCheckpoints \cup {None}
     /\ syncOwners \in 0..1
-    /\ hold \in {"NONE", "ACTIVE", "EXPIRED", "MISMATCHED"}
-    /\ supervisorMode \in {"ACTIVE", "QUIESCED", "NONE"}
-    /\ supervisionEpoch \in 0..1
-    /\ actorEpoch \in 0..1
-    /\ installStep \in {"IDLE", "FENCED", "BASELINED", "NEW_QUIESCED", "FAILED"}
+    /\ news.currentGeneration \in Generations
+    /\ news.activeLegacyGeneration \in Generations
+    /\ news.stagingGeneration \in Generations
+    /\ news.stagedLegacyGeneration \in Generations
+    /\ news.currentIds \subseteq NewsIdentities
+    /\ news.activeLegacyIds \subseteq NewsIdentities
+    /\ news.stagingIds \subseteq NewsIdentities
+    /\ news.stagedLegacyIds \subseteq NewsIdentities
+    /\ news.storedGenerations \subseteq Generations
 
 AtMostOneProductionWriter == syncOwners <= 1
-ActiveHoldOwnsStoppedSync == hold = "ACTIVE" => syncState = "STOPPED" /\ syncOwners = 0
-ExpiredOrMismatchedHoldHasNoAuthority ==
-    hold \in {"EXPIRED", "MISMATCHED"} => (syncOwners = 0 \/ syncState = "RUNNING")
-BaselineRequiresFence == installStep \in {"BASELINED", "NEW_QUIESCED"} => supervisorMode = "QUIESCED"
-StaleSupervisorIsFenced == actorEpoch # supervisionEpoch => ~CurrentSupervisorCanMutate
-PassedIdentityIsExact == gate = "PASSED" => ExactCandidate
-ReviewIsNotPassed == gate \in {"REVIEW_RETRY", "REVIEW_BLOCKED"} => gate # "PASSED"
-AcceptedEvidenceIsRequired == gate = "PASSED" => acceptedEvidence
-SwitchRequiresAcceptance == switchKind = "FORWARD" /\ transaction => gate = "PASSED" /\ acceptedEvidence
-StableUnchangedDuringSwitchAndObserve == transaction => stable = switchOrigin
-SingleTransaction == transaction <=> phase \in {"SWITCH", "OBSERVE"}
-CurrentAndFreshStagingSurviveCleanup == currentPresent /\ (stagingFresh => currentPresent)
-CurrentKeepsReverseCompatibility == ~stagingFresh => reverseCompatible
-UnknownIdentityFailsClosed == ~ExactCandidate => gate # "PASSED"
+ActiveHoldOwnsStoppedSync == release.hold = "ACTIVE" => syncOwners = 0
+StaleSupervisorIsFenced == install.actorEpoch # install.epoch => ~CurrentSupervisorCanMutate
+PassedIdentityIsExact == release.gate = "PASSED" => ExactCandidate
+AcceptedEvidenceIsRequired == release.gate = "PASSED" => release.accepted
+SwitchRequiresAcceptance == release.kind = "FORWARD" /\ release.transaction =>
+    release.gate = "PASSED" /\ release.accepted
+StableUnchangedDuringSwitchAndObserve == release.transaction => release.stable = release.origin
+SingleTransaction == release.transaction <=> release.phase \in {"SWITCH", "OBSERVE"}
+ActiveLegacyEqualsCurrent == ReverseStableCompatible
+CurrentIdentitySetMatchesGeneration ==
+    news.currentIds = GenerationIds(news.currentGeneration)
+FreshStagingIdentitySetMatchesGeneration ==
+    news.stagingPresent => news.stagingIds = GenerationIds(news.stagingGeneration)
+CurrentGenerationCannotBeCleaned == news.currentGeneration \in news.storedGenerations
+FreshStagingCannotBeCleaned == news.stagingPresent =>
+    news.stagingGeneration \in news.storedGenerations
+InvalidStagedLegacyCannotActivate ==
+    news.stagingPresent /\ news.stagedLegacyPresent /\ ~FreshStagingCompatible =>
+        news.currentGeneration # news.stagingGeneration
+RecoveredActivationRequiresIndependentChecks ==
+    install.step = "ABANDONED_VERIFIED" =>
+        install.checksPassed /\ AbandonedActivationFacts
+ActiveRecoveredSupervisorIsSafe ==
+    ~install.installerAlive /\ install.step = "IDLE" /\ install.mode = "ACTIVE" =>
+        install.bundleValid /\ install.replacementOwners = 1
 
 StableChangesOnlyAfterObservation ==
-    [][(stable' # stable) => ObserveSuccess]_vars
+    [][(release.stable' # release.stable) => ObserveSuccess]_vars
 
-ValidTargetEventuallyStable ==
-    [](HealthyExternal /\ phase = "VERIFY" /\ gate = "PASSED"
-       /\ acceptedEvidence /\ ExactCandidate => <> (phase = "STABLE" /\ ~transaction))
+ObservedFailureEventuallyRestoresPrevious ==
+    [](path.observeFailed /\ ~path.recoveryCompleted =>
+       <> (path.recoveryCompleted /\ release.phase = "STABLE" /\ ~release.transaction))
 
-RetryableReviewEventuallyExits ==
-    [](HealthyExternal /\ phase = "VERIFY" /\ gate = "REVIEW_RETRY"
-       => <> (gate = "UNTESTED" \/ gate = "PASSED"))
+SwitchFailureEventuallyTerminates ==
+    [](path.switchFailed /\ ~path.recoveryCompleted =>
+       <> (path.recoveryCompleted /\ release.phase = "STABLE" /\ ~release.transaction))
 
-InstallEventuallyRecovers ==
-    [](installStep = "FAILED" => <> (installStep = "IDLE" /\ supervisorMode = "ACTIVE"))
+TransactionEventuallyTerminates ==
+    [](release.transaction => <> (~release.transaction /\ release.phase = "STABLE"))
 
-StoppedSyncEventuallyResumes ==
-    [](HealthyExternal /\ syncState = "STOPPED" /\ hold # "ACTIVE"
-       => <> (syncState = "RUNNING" /\ syncOwners = 1))
-
-SwitchEventuallyTerminates ==
-    [](HealthyExternal /\ transaction => <> (~transaction /\ phase = "STABLE"))
+AbandonedInstallEventuallySafe ==
+    [](~install.installerAlive /\ install.step # "IDLE" =>
+       <> (install.step = "IDLE" /\ install.mode = "ACTIVE"))
 
 =============================================================================

@@ -62,6 +62,8 @@ def main() -> int:
                 "-cleanup",
                 "-noGenerateSpecTE",
                 "-deadlock",
+                "-coverage",
+                "1",
                 "-workers",
                 "1",
                 "-metadir",
