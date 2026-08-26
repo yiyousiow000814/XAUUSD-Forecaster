@@ -48,9 +48,11 @@ from xauusd_forecaster.dashboard_summaries import (
     dashboard_valid_outcome_summary,
 )
 from xauusd_forecaster.news_projection import (
+    NEWS_PROJECTION_CONTRACT_VERSION,
     NEWS_PROJECTION_MAX_ITEMS,
     NewsProjectionGeneration,
     build_news_projection_generation,
+    receipt_digest,
 )
 from scripts.run_dashboard_sync import _learning_summary, market_chart_snapshot
 from xauusd_forecaster.news_scheduler import (  # noqa: E402
@@ -90,6 +92,7 @@ _NEWS_PROJECTION_CACHE_LOCK = threading.Lock()
 _NEWS_PROJECTION_CACHE: dict[str, object] = {}
 NEWS_PROJECTION_SOURCE_REFRESH_SECONDS = 300.0
 NEWS_PROJECTION_SOURCE_RETRY_SECONDS = 30.0
+NEWS_PROJECTION_GENERATION_FILE = "dashboard-news-projection-generation-v3.json.gz"
 _NEWS_EVIDENCE_VOLATILE_FIELDS = frozenset({"economic_age_minutes"})
 _NEWS_EVIDENCE_MANIFEST_VERSION = "local-news-evidence-generation-v2"
 
@@ -1538,9 +1541,125 @@ def _build_news_projection_source_from_database(
         connection.close()
 
 
+def _news_projection_generation_path(database: Path) -> Path:
+    return database.parent / NEWS_PROJECTION_GENERATION_FILE
+
+
+def _news_projection_generation_payload(
+    generation: NewsProjectionGeneration,
+) -> dict:
+    return {
+        "manifest": generation.manifest,
+        "index_rows": list(generation.index_rows),
+        "detail_rows": list(generation.detail_rows),
+        "index_batches": [list(batch) for batch in generation.index_batches],
+        "detail_batches": [list(batch) for batch in generation.detail_batches],
+    }
+
+
+def _news_projection_payload_digest(payload: dict) -> str:
+    return hashlib.sha256(json.dumps(
+        payload, ensure_ascii=False, allow_nan=False, sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+
+
+def _news_projection_generation_from_payload(
+    payload: object,
+) -> NewsProjectionGeneration:
+    if not isinstance(payload, dict):
+        raise ValueError("persisted news generation payload is invalid")
+    manifest = payload.get("manifest")
+    index_rows = payload.get("index_rows")
+    detail_rows = payload.get("detail_rows")
+    index_batches = payload.get("index_batches")
+    detail_batches = payload.get("detail_batches")
+    if not isinstance(manifest, dict) or any(
+        not isinstance(value, list)
+        for value in (index_rows, detail_rows, index_batches, detail_batches)
+    ):
+        raise ValueError("persisted news generation shape is invalid")
+    if any(
+        not isinstance(batch, list)
+        for batch in [*index_batches, *detail_batches]
+    ):
+        raise ValueError("persisted news generation batch shape is invalid")
+    if manifest.get("contract_version") != NEWS_PROJECTION_CONTRACT_VERSION:
+        raise ValueError("persisted news generation contract is incompatible")
+    if (
+        len(index_rows) != int(manifest.get("expected_index_count", -1))
+        or len(detail_rows) != int(manifest.get("expected_detail_count", -1))
+    ):
+        raise ValueError("persisted news generation count is invalid")
+    if (
+        [item for batch in index_batches for item in batch] != index_rows
+        or [item for batch in detail_batches for item in batch] != detail_rows
+    ):
+        raise ValueError("persisted news generation batches do not match rows")
+    if receipt_digest(detail_batches, index_batches) != manifest.get(
+        "expected_receipt_digest"
+    ):
+        raise ValueError("persisted news generation receipt is invalid")
+    return NewsProjectionGeneration(
+        manifest=dict(manifest),
+        index_rows=tuple(index_rows),
+        detail_rows=tuple(detail_rows),
+        index_batches=tuple(tuple(batch) for batch in index_batches),
+        detail_batches=tuple(tuple(batch) for batch in detail_batches),
+    )
+
+
+def _read_persisted_news_projection_generation(
+    database: Path,
+) -> NewsProjectionGeneration | None:
+    path = _news_projection_generation_path(database)
+    if not path.exists():
+        return None
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        envelope = json.load(handle)
+    if not isinstance(envelope, dict) or envelope.get("schema_version") != 1:
+        raise ValueError("persisted news generation envelope is invalid")
+    payload = envelope.get("generation")
+    if (
+        not isinstance(payload, dict)
+        or envelope.get("sha256") != _news_projection_payload_digest(payload)
+    ):
+        raise ValueError("persisted news generation digest is invalid")
+    return _news_projection_generation_from_payload(payload)
+
+
+def _write_persisted_news_projection_generation(
+    database: Path, generation: NewsProjectionGeneration,
+) -> None:
+    path = _news_projection_generation_path(database)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _news_projection_generation_payload(generation)
+    envelope = {
+        "schema_version": 1,
+        "sha256": _news_projection_payload_digest(payload),
+        "generation": payload,
+    }
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with gzip.open(temporary, "wt", encoding="utf-8", newline="") as handle:
+        json.dump(
+            envelope, handle, ensure_ascii=False, allow_nan=False,
+            sort_keys=True, separators=(",", ":"),
+        )
+    os.replace(temporary, path)
+
+
 def _finish_news_projection_source_build(database: Path) -> None:
     try:
         candidate = _build_news_projection_source_from_database(database)
+        with _NEWS_PROJECTION_CACHE_LOCK:
+            cached = _NEWS_PROJECTION_CACHE.get("generation")
+            replace_generation = (
+                not isinstance(cached, NewsProjectionGeneration)
+                or candidate.manifest["source_digest"]
+                != cached.manifest["source_digest"]
+            )
+        if replace_generation:
+            _write_persisted_news_projection_generation(database, candidate)
     except Exception as error:
         with _NEWS_PROJECTION_CACHE_LOCK:
             _NEWS_PROJECTION_CACHE["error"] = type(error).__name__
@@ -1550,12 +1669,7 @@ def _finish_news_projection_source_build(database: Path) -> None:
             _NEWS_PROJECTION_CACHE["building"] = False
         return
     with _NEWS_PROJECTION_CACHE_LOCK:
-        cached = _NEWS_PROJECTION_CACHE.get("generation")
-        if (
-            not isinstance(cached, NewsProjectionGeneration)
-            or candidate.manifest["source_digest"]
-            != cached.manifest["source_digest"]
-        ):
+        if replace_generation:
             _NEWS_PROJECTION_CACHE["generation"] = candidate
         _NEWS_PROJECTION_CACHE["built_at"] = time.monotonic()
         _NEWS_PROJECTION_CACHE.pop("error", None)
@@ -1570,6 +1684,11 @@ def _news_projection_source_for_request(
     fallback: NewsProjectionGeneration | None = None
     with _NEWS_PROJECTION_CACHE_LOCK:
         cached = _NEWS_PROJECTION_CACHE.get("generation")
+        if not isinstance(cached, NewsProjectionGeneration):
+            cached = _read_persisted_news_projection_generation(database)
+            if isinstance(cached, NewsProjectionGeneration):
+                _NEWS_PROJECTION_CACHE["generation"] = cached
+                _NEWS_PROJECTION_CACHE["built_at"] = time.monotonic()
         built_at = float(_NEWS_PROJECTION_CACHE.get("built_at") or 0.0)
         if isinstance(cached, NewsProjectionGeneration):
             snapshot_id = str(cached.manifest["snapshot_id"])

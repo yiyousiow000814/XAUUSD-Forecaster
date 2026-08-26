@@ -16,6 +16,11 @@
   they require the bridge credential and are not browser or public APIs.
 - A source snapshot is immutable while it is being replayed. Source changes
   create a replacement generation; they never alter an in-flight generation.
+- The local producer persists the accepted frozen generation atomically before
+  exposing it for replay. Process or machine restart restores that exact
+  snapshot and its batches; a newer source snapshot is discovered only after
+  the frozen snapshot has reached `CURRENT`. Ordinary source advancement never
+  authorizes abandonment of a healthy in-flight generation.
 
 ## Generation lifecycle
 
