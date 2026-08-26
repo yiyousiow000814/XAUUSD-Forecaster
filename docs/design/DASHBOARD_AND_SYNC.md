@@ -37,6 +37,9 @@ interpretation of current runtime heartbeats, decision cadence, broker session,
 and materialized semantic health. The source files and SQLite rows remain
 authoritative under their existing runtime and evidence owners; operational
 alert aggregation remains separate.
+`xauusd_forecaster.dashboard.resource_contracts` owns deterministic learning,
+news, market, critical-status, and audit serialization plus their item and byte
+bounds. It owns no transport, cursor, schedule, thread, or durable state.
 `run_dashboard_sync.py` owns D1 mirroring and per-target progress. The
 scheduler remains the state-transition owner for audited retry overrides.
 
@@ -74,7 +77,9 @@ SQLite/quote files -> DashboardReadModelOwner (off request)
 
 Audit, learning, and market-chart GETs read durable models rather than running
 their growing builders in request threads. Critical payload orchestration calls
-the fixed-work health projections before aggregation and serialization.
+the fixed-work health projections before aggregation and serialization. API,
+Sync, Preview assembly, and release-fixture construction consume one canonical
+resource-contract implementation; entry scripts do not own those serializers.
 
 ## 7. Critical path
 
@@ -149,6 +154,9 @@ collapse all optional resources into one restart burst.
 - `xauusd_forecaster/dashboard/health_projection.py`: read-only Collector,
   decision-output, and semantic-pipeline component projections from bounded
   current inputs.
+- `xauusd_forecaster/dashboard/resource_contracts.py`: deterministic bounded
+  resource projections, exact JSON encoding, learning-history records, and
+  market/news/audit serialization.
 - `xauusd_forecaster/dashboard_payloads.py`: critical and audit contracts.
 - `xauusd_forecaster/dashboard_summaries.py`: indexed summary queries.
 - `xauusd_forecaster/learning_curves.py`: learning resource.
@@ -158,6 +166,7 @@ collapse all optional resources into one restart burst.
 ## 14. Relevant tests
 
 `tests/test_dashboard_health_projection.py`,
+`tests/test_dashboard_resource_contracts.py`,
 `tests/test_dashboard_status_cache.py`, `tests/test_dashboard_api.py`,
 `tests/test_dashboard_payloads.py`,
 `tests/test_dashboard_sync.py`, `tests/test_operational_health.py`,
@@ -175,10 +184,11 @@ audited retry semantics.
 
 ## 16. Known current gaps
 
-Both entry scripts contain extensive serialization, query, transport,
-scheduling, and domain logic. `run_dashboard_api.py` imports selected sync
-builders, so the entry-point dependency direction is not yet clean. The large
-API/sync tests group several resource families in single files. The lazy local
+Both entry scripts still contain extensive query, transport, scheduling, and
+domain logic. The shared resource serializers are package-owned in the
+pending C2 stack, but two build commands retain transitional Sync entry-point
+imports until C4. The large API/sync tests group several resource families in
+single files. The lazy local
 market-history route has bounded output but growing source enumeration/merge
 work in its request path.
 

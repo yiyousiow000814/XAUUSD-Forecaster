@@ -1920,7 +1920,9 @@ test("reads the bounded learning first page before the compact live relay", () =
 
 test("stores growing learning history as bounded idempotent D1 records", () => {
   const route = readFileSync(new URL("../app/api/learning-history/route.ts", import.meta.url), "utf8");
-  const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
+  const contracts = readFileSync(
+    new URL("../../xauusd_forecaster/dashboard/resource_contracts.py", import.meta.url), "utf8",
+  );
   assert.match(route, /MAX_INGEST_BYTES = 350_000/);
   assert.match(route, /readBoundedBody\(request, MAX_INGEST_BYTES\)/);
   assert.match(route, /json_each\(json_extract\(doc,'\$\.records'\)\)/);
@@ -1935,13 +1937,13 @@ test("stores growing learning history as bounded idempotent D1 records", () => {
   assert.match(route, /type LearningCursor/);
   assert.match(route, /watermarkEpoch/);
   assert.match(route, /source\.sort_epoch<watermark\.sort_epoch/);
-  assert.match(sync, /LEARNING_HISTORY_CONTRACT_VERSION = "learning-history-d1-v2"/);
+  assert.match(contracts, /LEARNING_HISTORY_CONTRACT_VERSION = "learning-history-d1-v2"/);
   assert.match(route, /resource='curve-overview'/);
   assert.match(route, /resource='version-overview'/);
   assert.doesNotMatch(route, /row_number\(\) OVER \(PARTITION BY model_identity/);
-  assert.match(sync, /learning_history_records/);
-  assert.match(sync, /LEARNING_SUMMARY_GROUPS_PER_IDENTITY = 6/);
-  assert.match(sync, /LEARNING_SUMMARY_CURVE_POINTS = 48/);
+  assert.match(contracts, /learning_history_records/);
+  assert.match(contracts, /LEARNING_SUMMARY_GROUPS_PER_IDENTITY = 6/);
+  assert.match(contracts, /LEARNING_SUMMARY_CURVE_POINTS = 48/);
 });
 
 test("uses one D1-validated writer for every large dashboard snapshot", () => {

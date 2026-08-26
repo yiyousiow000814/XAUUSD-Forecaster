@@ -72,7 +72,10 @@ from xauusd_forecaster.news_projection import (
     NewsProjectionGeneration,
     build_news_projection_generation,
 )
-from scripts.run_dashboard_sync import _learning_summary, market_chart_snapshot
+from xauusd_forecaster.dashboard.resource_contracts import (
+    _learning_summary,
+    market_chart_snapshot,
+)
 from xauusd_forecaster.news_scheduler import (  # noqa: E402
     RetryScheduleConflict,
     apply_retry_schedule_override,

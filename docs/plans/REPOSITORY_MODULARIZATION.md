@@ -15,6 +15,11 @@ The first Phase C extraction is implemented by the next stacked change but
 also remains `PENDING` until merge. It must not be read as selection or
 authorization of a Phase 4 boundary.
 
+The modularization completion campaign is tracked in
+[`MODULARIZATION_EXECUTION.md`](MODULARIZATION_EXECUTION.md). Its C2 resource
+contract extraction remains `PENDING`; later rows remain `TARGET` until their
+own stacked PR exists.
+
 The baseline was measured at
 `b763a96f5b862b72a0fbb34419ff01909e450338` on 2026-08-23. Generated types,
 lockfiles, generated migration manifests, fixtures, and vendor files were
@@ -181,6 +186,26 @@ files. Preserve family-level coverage for point-in-time correctness, append-only
 history, failure isolation, restart recovery, scale/boundedness, and
 cross-runtime schemas. Keep a specific regression only when a broader family
 contract does not subsume its failure mode.
+
+### Phase C-2 — Shared Dashboard resource contracts
+
+Implementation status: `PENDING` until the C2 stacked change merges.
+
+- **Exact responsibility:** deterministic learning-history records and
+  summaries, news mirror projections/batches, bounded market-chart projection,
+  and critical/audit resource JSON serialization.
+- **Target module:**
+  `xauusd_forecaster/dashboard/resource_contracts.py`.
+- **Compatibility:** `run_dashboard_sync.py` imports and exposes the canonical
+  objects during handover; `run_dashboard_api.py` imports the package owner
+  directly. Preview/release build imports are removed by C4.
+- **Focused tests:** direct byte/item/history projection cases live in
+  `tests/test_dashboard_resource_contracts.py`; transport, ordering, target
+  isolation, and route integration remain in the API/Sync suites.
+- **Rollback:** revert the extraction commit; no state, schema, cursor, or
+  transport migration is involved.
+- **Non-goals:** no payload byte, key order, omission, limit, cadence, route,
+  cursor, remote transport, or production-state change.
 
 ## Priority method
 
