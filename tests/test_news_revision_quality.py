@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.news import collect_direct_full_text_html_news
+from xauusd_forecaster.news.collection.intake import collect_direct_full_text_html_news
 
 
 def test_listing_poll_does_not_supersede_existing_full_text(tmp_path) -> None:

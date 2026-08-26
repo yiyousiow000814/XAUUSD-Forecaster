@@ -22,11 +22,11 @@ from xauusd_forecaster.assistant_routing import (
     plan_assistant_route,
 )
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.model_gateway import (
+from xauusd_forecaster.ai.model_gateway import (
     ModelGatewayCapacityExhausted,
     ModelRequestUsage,
 )
-from xauusd_forecaster.news_scheduler import (
+from xauusd_forecaster.news.scheduler.state import (
     PREEMPTIBLE_POOL,
     ROUTINE_POOL,
     ApiCredential,
@@ -403,7 +403,7 @@ def sqlite3_connection():
     from xauusd_forecaster.assistant_capacity import (
         install_assistant_capacity_schema,
     )
-    from xauusd_forecaster.news_scheduler import install_scheduler_schema
+    from xauusd_forecaster.news.scheduler.state import install_scheduler_schema
 
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row

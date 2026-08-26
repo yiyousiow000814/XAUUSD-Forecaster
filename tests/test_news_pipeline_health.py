@@ -7,11 +7,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster import news_pipeline_health
-from xauusd_forecaster.annotation import DEFAULT_GEMINI_MODEL, PROMPT_VERSION
-from xauusd_forecaster.critical_annotation_state import record_annotation_completion
-from xauusd_forecaster.news_impact import IMPACT_MODEL, IMPACT_PROMPT_VERSION
-from xauusd_forecaster.news_scheduler import (
+from xauusd_forecaster.news.scheduler import health as news_pipeline_health
+from xauusd_forecaster.news.annotation.product import DEFAULT_GEMINI_MODEL, PROMPT_VERSION
+from xauusd_forecaster.news.semantics.critical_state import record_annotation_completion
+from xauusd_forecaster.news.annotation.impact import IMPACT_MODEL, IMPACT_PROMPT_VERSION
+from xauusd_forecaster.news.scheduler.state import (
     ApiCredential,
     CONTRACT_BACKFILL_LANE,
     LIVE_LANE,

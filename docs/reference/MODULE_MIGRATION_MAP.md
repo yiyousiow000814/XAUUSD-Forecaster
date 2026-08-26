@@ -35,6 +35,46 @@ merges.
 | `xauusd_forecaster/training_v2.py` | `xauusd_forecaster/training/generation.py` | Generation fitting/publication owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
 | `xauusd_forecaster/training_owner.py` | `xauusd_forecaster/training/runtime.py` | Background training lease/runtime owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
 | `xauusd_forecaster/ridge.py` | `xauusd_forecaster/training/ridge.py` | Ridge artifact/fitting owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster.news` legacy flat module | `xauusd_forecaster/news/collection/intake.py` | News collection intake | NONE; namespace is now side-effect-free | Legacy direct symbol imports must migrate to the concrete collection owner |
+| `xauusd_forecaster/news_collection_owner.py` | `xauusd_forecaster/news/collection/runtime.py` | News collection runtime owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/source_polling.py` | `xauusd_forecaster/news/collection/source_polling.py` | News source polling owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/news_source_registry.py` | `xauusd_forecaster/news/collection/source_registry.py` | News source registry owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/content.py` | `xauusd_forecaster/news/collection/content.py` | News content intake owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/macro_release.py` | `xauusd_forecaster/news/collection/macro_release.py` | Macro release evidence owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/news_pruning.py` | `xauusd_forecaster/news/collection/pruning.py` | News maintenance owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/news_semantics.py` | `xauusd_forecaster/news/semantics/contracts.py` | News semantic contracts owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/news_time.py` | `xauusd_forecaster/news/semantics/time.py` | News event-time qualification owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/news_relevance.py` | `xauusd_forecaster/news/semantics/relevance.py` | News relevance intake owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/news_contracts.py` | `xauusd_forecaster/news/semantics/model_contracts.py` | News model contract owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/semantic_transition.py` | `xauusd_forecaster/news/semantics/transitions.py` | Semantic transition owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/critical_annotation_state.py` | `xauusd_forecaster/news/semantics/critical_state.py` | Critical annotation state owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/news_input_coverage.py` | `xauusd_forecaster/news/semantics/input_coverage.py` | News input coverage owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/news_features_v2.py` | `xauusd_forecaster/news/semantics/features.py` | News feature evidence owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/news_evidence.py` | `xauusd_forecaster/news/semantics/evidence.py` | News event evidence owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/news_qa.py` | `xauusd_forecaster/news/semantics/qa.py` | News QA owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/news_contract_migration.py` | `xauusd_forecaster/news/semantics/migration.py` | News contract migration owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/annotation.py` | `xauusd_forecaster/news/annotation/product.py` | Annotation product owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/news_impact.py` | `xauusd_forecaster/news/annotation/impact.py` | Impact product owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/storylines.py` | `xauusd_forecaster/news/annotation/storylines.py` | Storyline projection owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/news_scheduler.py` | `xauusd_forecaster/news/scheduler/state.py` | Durable scheduler state owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/news_scheduler_runtime.py` | `xauusd_forecaster/news/scheduler/runtime.py` | Scheduler execution runtime owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/ai_task_registry.py` | `xauusd_forecaster/news/scheduler/task_registry.py` | Scheduler task registry owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/scheduler_model_gateway.py` | `xauusd_forecaster/news/scheduler/model_gateway.py` | Scheduler model routing owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/news_pipeline_health.py` | `xauusd_forecaster/news/scheduler/health.py` | News pipeline health owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/news_retrieval.py` | `xauusd_forecaster/news/retrieval/search.py` | News identity retrieval owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/news_identity.py` | `xauusd_forecaster/news/retrieval/identity.py` | News source identity owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/news_event_identity.py` | `xauusd_forecaster/news/retrieval/event_identity.py` | Canonical event identity owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/gemini_embeddings.py` | `xauusd_forecaster/news/retrieval/gemini_embeddings.py` | Gemini Embedding 2 retrieval owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/local_embeddings.py` | `xauusd_forecaster/news/retrieval/local_embeddings.py` | Offline retrieval test embedding owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/news_retrieval_benchmark.py` | `xauusd_forecaster/news/retrieval/benchmark.py` | Retrieval benchmark owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/named_reference_benchmark.py` | `xauusd_forecaster/news/retrieval/named_reference_benchmark.py` | Named-reference benchmark owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/daily_brief.py` | `xauusd_forecaster/news/brief/product.py` | Daily Brief lifecycle owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/daily_brief_runtime.py` | `xauusd_forecaster/news/brief/runtime.py` | Daily Brief runtime owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/ai_provider_registry.py` | `xauusd_forecaster/ai/provider_registry.py` | AI provider registry owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/model_gateway.py` | `xauusd_forecaster/ai/model_gateway.py` | Provider-neutral model gateway owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/gemini_quota.py` | `xauusd_forecaster/ai/quota.py` | AI quota accounting owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/credential_identity.py` | `xauusd_forecaster/ai/credentials.py` | Credential identity owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/model_limits.py` | `xauusd_forecaster/ai/model_limits.py` | Model output limits owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
 
 Future Phase D rows must name every retained flat facade. `THIN_SHIM` means the
 legacy Python file contains only a docstring, explicit canonical imports,

@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .annotation import DEFAULT_GEMMA_MODEL, generate_metered_json
+from xauusd_forecaster.news.annotation.product import DEFAULT_GEMMA_MODEL, generate_metered_json
 from .assistant_routing import (
     GOOGLE_GENERATIVE_LANGUAGE,
     OLLAMA_LOCAL,
     apply_provider_thinking_level,
     conservative_assistant_token_estimate,
 )
-from .model_gateway import ModelRequestAccountant, OllamaAssistantGateway
+from xauusd_forecaster.ai.model_gateway import ModelRequestAccountant, OllamaAssistantGateway
 
 
 ASSISTANT_COMPACTION_PROMPT_VERSION = "assistant-compaction-v1"

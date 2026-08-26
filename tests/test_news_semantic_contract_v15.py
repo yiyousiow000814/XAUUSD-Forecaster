@@ -5,15 +5,15 @@ from datetime import UTC, datetime
 
 import pytest
 
-from xauusd_forecaster import annotation as annotation_module
-from xauusd_forecaster.annotation import (
+from xauusd_forecaster.news.annotation import product as annotation_module
+from xauusd_forecaster.news.annotation.product import (
     annotate_pending_news,
     pending_annotation_records,
 )
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
-from xauusd_forecaster.model_gateway import GeminiModelGateway
-from xauusd_forecaster.news_semantics import (
+from xauusd_forecaster.ai.quota import GeminiQuotaLedger
+from xauusd_forecaster.ai.model_gateway import GeminiModelGateway
+from xauusd_forecaster.news.semantics.contracts import (
     CURRENT_NEWS_PROMPT_VERSION,
     LEGACY_NEWS_PROMPT_VERSION,
     LEGACY_SEMANTIC_NEWS_PROMPT_VERSION,
@@ -22,8 +22,8 @@ from xauusd_forecaster.news_semantics import (
     news_annotation_schema,
     validate_news_annotation,
 )
-from xauusd_forecaster.news_evidence import event_evidence_rows
-from xauusd_forecaster.news_impact import (
+from xauusd_forecaster.news.semantics.evidence import event_evidence_rows
+from xauusd_forecaster.news.annotation.impact import (
     IMPACT_PROMPT_VERSION,
     pending_impact_records,
 )

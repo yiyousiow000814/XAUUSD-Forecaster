@@ -34,8 +34,8 @@ from xauusd_forecaster.assistant_tools import (
     AssistantToolRegistry,
 )
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.model_gateway import ModelRequestUsage
-from xauusd_forecaster.news_scheduler import PREEMPTIBLE_POOL, ApiCredential
+from xauusd_forecaster.ai.model_gateway import ModelRequestUsage
+from xauusd_forecaster.news.scheduler.state import PREEMPTIBLE_POOL, ApiCredential
 
 
 NOW = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)

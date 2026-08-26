@@ -5,10 +5,10 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 
-from .ai_provider_registry import AI_QUOTA_SURFACES
+from xauusd_forecaster.ai.provider_registry import AI_QUOTA_SURFACES
 from xauusd_forecaster.decision.inference import MODEL_IDENTITIES
-from .news_scheduler import quota_day
-from .news_source_registry import NEWS_SOURCE_REGISTRY
+from xauusd_forecaster.news.scheduler.state import quota_day
+from xauusd_forecaster.news.collection.source_registry import NEWS_SOURCE_REGISTRY
 
 PAYLOAD_LIMIT_EXCEEDED = "PAYLOAD_LIMIT_EXCEEDED"
 PAYLOAD_CONTRACT_REJECTED = "PAYLOAD_CONTRACT_REJECTED"

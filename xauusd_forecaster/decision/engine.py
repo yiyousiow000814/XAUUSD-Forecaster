@@ -10,7 +10,7 @@ from xauusd_forecaster.evidence.executable_label import build_executable_label_v
 from xauusd_forecaster.evidence.ledger import ForwardLedger, canonical_hash
 from xauusd_forecaster.inference import build_shadow_predictions
 from xauusd_forecaster.market import MarketProvider, build_forward_snapshot
-from xauusd_forecaster.news import collect_official_news
+from xauusd_forecaster.news.collection.intake import collect_official_news
 from xauusd_forecaster.u5_state import U5State
 
 
@@ -88,7 +88,7 @@ class ForwardEngine:
             }
         )
         from xauusd_forecaster.decision.live import append_live_decision_v2
-        from xauusd_forecaster.news_pipeline_health import news_semantic_pipeline_health_at
+        from xauusd_forecaster.news.scheduler.health import news_semantic_pipeline_health_at
 
         coverage_health = news_semantic_pipeline_health_at(
             self.ledger, observed_at=decision_time,

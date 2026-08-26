@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from xauusd_forecaster.annotation import PROMPT_VERSION
+from xauusd_forecaster.news.annotation.product import PROMPT_VERSION
 from xauusd_forecaster.evidence.ledger import ForwardLedger
 
 

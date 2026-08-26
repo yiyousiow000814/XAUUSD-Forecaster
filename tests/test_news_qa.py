@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from tests.model_accounting_fakes import CallbackModelAccountant
-from xauusd_forecaster import news_qa
+from xauusd_forecaster.news.semantics import qa as news_qa
 
 
 def _news(evidence_id: str = "evidence-1", **overrides) -> dict:

@@ -24,33 +24,34 @@ from xauusd_forecaster.decision.live import (
     append_live_outcome_v2,
 )
 from xauusd_forecaster.market import MarketObservation
-from xauusd_forecaster.macro_release import (
+from xauusd_forecaster.news.collection.macro_release import (
     macro_release_features_at,
     macro_release_packets_at,
 )
-from xauusd_forecaster.news_evidence import EVIDENCE_POLICY_VERSION, event_evidence_rows
-from xauusd_forecaster.news_identity import canonical_source_organization
-from xauusd_forecaster.news_contracts import (
+from xauusd_forecaster.news.semantics.evidence import EVIDENCE_POLICY_VERSION, event_evidence_rows
+from xauusd_forecaster.news.retrieval.identity import canonical_source_organization
+from xauusd_forecaster.news.semantics.model_contracts import (
     CURRENT_NEWS_CONTRACT,
     NewsContract,
 )
-from xauusd_forecaster.news_features_v2 import (
+from xauusd_forecaster.news.semantics.features import (
     aggregate_news_features_v2,
     event_raw_weight,
 )
-from xauusd_forecaster.news_impact import impact_time_rule, pending_impact_records
-from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
-from xauusd_forecaster.news_semantics import (
+from xauusd_forecaster.news.annotation.impact import impact_time_rule, pending_impact_records
+from xauusd_forecaster.news.collection.source_registry import NEWS_SOURCE_REGISTRY
+from xauusd_forecaster.news.semantics.contracts import (
     CURRENT_NEWS_PROMPT_VERSION,
     annotation_topics,
     effective_record_kind,
 )
-from xauusd_forecaster.news_time import assess_news_time, category_time_rule
+from xauusd_forecaster.news.semantics.time import assess_news_time, category_time_rule
 from xauusd_forecaster.repair_v2 import immutable_table_hash
 from xauusd_forecaster.decision import inference as inference_v2
 from xauusd_forecaster.training import generation as training_v2
+from xauusd_forecaster.news.semantics import migration as news_contract_migration
 from xauusd_forecaster import (
-    execution_learning, news_contract_migration,
+    execution_learning,
 )
 from xauusd_forecaster.u5_state import U5State, U5_VERSION
 from xauusd_forecaster.execution_learning import (

@@ -14,7 +14,7 @@ from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Any
 
-from .news_qa import build_news_evidence_packet
+from xauusd_forecaster.news.semantics.qa import build_news_evidence_packet
 
 
 ASSISTANT_TOOL_REGISTRY_VERSION = "assistant-tool-registry-v1"

@@ -12,13 +12,13 @@ from xauusd_forecaster.evidence.schema import (
 )
 from xauusd_forecaster.evidence.ledger import canonical_hash
 from xauusd_forecaster.decision.inference import append_live_predictions_v2
-from xauusd_forecaster.news_contracts import (
+from xauusd_forecaster.news.semantics.model_contracts import (
     CORE_EVIDENCE_STORAGE_LANE,
     NEWS_CONTRACT_BY_ELIGIBILITY,
 )
-from xauusd_forecaster.news_features_v2 import aggregate_news_features_v2
-from xauusd_forecaster.news_input_coverage import news_input_coverage_at
-from xauusd_forecaster.news_evidence import EVIDENCE_POLICY_VERSION
+from xauusd_forecaster.news.semantics.features import aggregate_news_features_v2
+from xauusd_forecaster.news.semantics.input_coverage import news_input_coverage_at
+from xauusd_forecaster.news.semantics.evidence import EVIDENCE_POLICY_VERSION
 from xauusd_forecaster.repair_v2 import LANE_RULE_VERSION, TRAINING_ELIGIBILITY_VERSION
 from xauusd_forecaster.training.materialization import MARKET_FEATURES
 from xauusd_forecaster.u5_state import U5_VERSION

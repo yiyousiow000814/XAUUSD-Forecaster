@@ -22,14 +22,14 @@ from typing import Callable
 
 from bs4 import BeautifulSoup
 
-from .content import (
+from xauusd_forecaster.news.collection.content import (
     extract_article_full_text,
     extract_federal_reserve_full_text,
 )
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from .news_relevance import google_news_item_is_relevant
-from .news_time import assess_publication_receipt_clock
-from .source_polling import (
+from xauusd_forecaster.news.semantics.relevance import google_news_item_is_relevant
+from xauusd_forecaster.news.semantics.time import assess_publication_receipt_clock
+from xauusd_forecaster.news.collection.source_polling import (
     PollFailureClassification,
     classified_poll_error,
     source_poll_gate,

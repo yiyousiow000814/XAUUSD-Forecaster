@@ -3,13 +3,13 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime, timedelta
 
-from xauusd_forecaster.ai_task_registry import AI_TASK_ROUTE_BY_TYPE
-from xauusd_forecaster.annotation import (
+from xauusd_forecaster.news.scheduler.task_registry import AI_TASK_ROUTE_BY_TYPE
+from xauusd_forecaster.news.annotation.product import (
     IMPACT_PROMPT_VERSION,
     PROMPT_VERSION,
 )
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.news_scheduler import (
+from xauusd_forecaster.news.scheduler.state import (
     CONTRACT_BACKFILL_LANE,
     LIVE_LANE,
     WORK_PROVENANCE_VERSION,
@@ -87,7 +87,7 @@ def test_ai_route_registry_declares_every_workload_origin() -> None:
 def test_historical_annotation_provenance_survives_impact_and_title_discovery(
     tmp_path, monkeypatch,
 ) -> None:
-    import xauusd_forecaster.annotation as annotation
+    import xauusd_forecaster.news.annotation.product as annotation
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     records = []
@@ -138,7 +138,7 @@ def test_historical_annotation_provenance_survives_impact_and_title_discovery(
 def test_live_annotation_provenance_survives_downstream_discovery(
     tmp_path, monkeypatch,
 ) -> None:
-    import xauusd_forecaster.annotation as annotation
+    import xauusd_forecaster.news.annotation.product as annotation
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     annotation_id = _seed_annotation_origin(ledger, "live", lane=LIVE_LANE)
@@ -176,7 +176,7 @@ def test_live_annotation_provenance_survives_downstream_discovery(
 def test_unresolved_annotation_origin_never_defaults_downstream_to_live(
     tmp_path, monkeypatch,
 ) -> None:
-    import xauusd_forecaster.annotation as annotation
+    import xauusd_forecaster.news.annotation.product as annotation
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     annotation_id = _seed_annotation_origin(ledger, "unknown", lane=LIVE_LANE)

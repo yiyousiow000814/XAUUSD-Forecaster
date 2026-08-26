@@ -5,8 +5,8 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
-from .critical_annotation_state import news_current_counts, scheduler_state_counts
-from .news_scheduler import TASKS, WORK_PROVENANCE_VERSION
+from xauusd_forecaster.news.semantics.critical_state import news_current_counts, scheduler_state_counts
+from xauusd_forecaster.news.scheduler.state import TASKS, WORK_PROVENANCE_VERSION
 from .operational_taxonomy import normalize_operational_event
 
 

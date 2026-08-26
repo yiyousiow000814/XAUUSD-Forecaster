@@ -6,13 +6,13 @@ from email.utils import format_datetime
 import pytest
 
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.news import (
+from xauusd_forecaster.news.collection.intake import (
     BEA_API_SOURCE,
     EIA_API_SOURCE,
     FRED_POLL_SOURCE,
     GDELT_SOURCE,
 )
-from xauusd_forecaster.source_polling import (
+from xauusd_forecaster.news.collection.source_polling import (
     MAX_PROVIDER_RETRY_AFTER_SECONDS,
     classified_poll_error,
     source_poll_gate,

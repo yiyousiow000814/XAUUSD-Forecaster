@@ -6,11 +6,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-import xauusd_forecaster.annotation as annotation_contract
-import xauusd_forecaster.critical_annotation_state as critical_state
-import xauusd_forecaster.news_scheduler as scheduler
-from xauusd_forecaster.annotation import PROMPT_VERSION
-from xauusd_forecaster.critical_annotation_state import (
+import xauusd_forecaster.news.annotation.product as annotation_contract
+import xauusd_forecaster.news.semantics.critical_state as critical_state
+import xauusd_forecaster.news.scheduler.state as scheduler
+from xauusd_forecaster.news.annotation.product import PROMPT_VERSION
+from xauusd_forecaster.news.semantics.critical_state import (
     INSTALL_VERSION,
     annotation_materialization_contract,
     annotation_queue_snapshot,
@@ -20,7 +20,7 @@ from xauusd_forecaster.critical_annotation_state import (
 )
 from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.operational_health import scheduler_health_snapshot
-from xauusd_forecaster.news_scheduler import (
+from xauusd_forecaster.news.scheduler.state import (
     ROUTINE_POOL,
     backoff_job,
     claim_job,

@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.ai_provider_registry import (
+from xauusd_forecaster.ai.provider_registry import (
     DEFAULT_GEMINI_MODEL,
     DEFAULT_GEMMA_MODEL,
     FALLBACK_GEMINI_MODEL,
     GEMINI_EMBEDDING_MODEL,
 )
-from xauusd_forecaster.model_gateway import (
+from xauusd_forecaster.ai.model_gateway import (
     GeminiModelGateway,
     OllamaAssistantGateway,
     ModelGatewayCapacityExhausted,
@@ -539,13 +539,15 @@ def test_google_model_transport_has_one_source_of_truth() -> None:
                 owners.append(path.relative_to(root).as_posix())
             if "GeminiModelGateway(" in source:
                 constructors.append(path.relative_to(root).as_posix())
-    annotation_source = (package / "annotation.py").read_text(encoding="utf-8")
+    annotation_source = (
+        package / "news" / "annotation" / "product.py"
+    ).read_text(encoding="utf-8")
 
-    assert owners == ["xauusd_forecaster/ai_provider_registry.py"]
-    assert constructors == ["xauusd_forecaster/annotation.py"]
+    assert owners == ["xauusd_forecaster/ai/provider_registry.py"]
+    assert constructors == ["xauusd_forecaster/news/annotation/product.py"]
     assert "def _call_gemini" not in annotation_source
     assert "x-goog-api-key" not in annotation_source
-    gateway_source = (package / "model_gateway.py").read_text(encoding="utf-8")
+    gateway_source = (package / "ai" / "model_gateway.py").read_text(encoding="utf-8")
     assert "google_generation_endpoint_for_model(model)" in gateway_source
     assert "google_embedding_endpoint_for_model(model)" in gateway_source
     assert "urllib.parse" not in gateway_source

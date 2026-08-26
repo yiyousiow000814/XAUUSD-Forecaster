@@ -6,10 +6,10 @@ import pytest
 
 from xauusd_forecaster.decision import inference as inference_v2
 from xauusd_forecaster.training import generation as training_v2
-from xauusd_forecaster.news_input_coverage import classify_news_input_coverage
-from xauusd_forecaster.news_input_coverage import news_source_observability_summary
+from xauusd_forecaster.news.semantics.input_coverage import classify_news_input_coverage
+from xauusd_forecaster.news.semantics.input_coverage import news_source_observability_summary
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
+from xauusd_forecaster.news.collection.source_registry import NEWS_SOURCE_REGISTRY
 
 
 NOW = datetime(2026, 8, 18, 10, 0, tzinfo=UTC)

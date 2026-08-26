@@ -160,9 +160,10 @@ def _publication_receipt_comparisons(tree: ast.AST) -> list[int]:
 def test_publication_receipt_comparison_is_owned_by_news_time() -> None:
     """Reject aliased publication/receipt policy comparisons outside the owner."""
     offenders: list[str] = []
+    owner = ROOT / "xauusd_forecaster" / "news" / "semantics" / "time.py"
     for root in (ROOT / "xauusd_forecaster", ROOT / "scripts"):
         for path in root.rglob("*.py"):
-            if path == ROOT / "xauusd_forecaster" / "news_time.py":
+            if path == owner:
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             offenders.extend(
@@ -171,7 +172,7 @@ def test_publication_receipt_comparison_is_owned_by_news_time() -> None:
             )
 
     assert offenders == [], (
-        "publication-vs-receipt admission belongs in news_time.py: "
+        "publication-vs-receipt admission belongs in news/semantics/time.py: "
         + ", ".join(offenders)
     )
 

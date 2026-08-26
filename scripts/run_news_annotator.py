@@ -18,18 +18,18 @@ MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.news_scheduler import (
+from xauusd_forecaster.news.scheduler.state import (
     ApiCredential, configured_api_credentials, scheduler_counts, sync_pending_jobs,
 )
 from xauusd_forecaster.runtime_health import RuntimeHeartbeatPulse, write_runtime_heartbeat
-from xauusd_forecaster import news_scheduler_runtime as scheduler_runtime
-from xauusd_forecaster.news_scheduler_runtime import (
+from xauusd_forecaster.news.scheduler import runtime as scheduler_runtime
+from xauusd_forecaster.news.scheduler.runtime import (
     EMBEDDING_PREREQUISITE_FAILURE_CODES, MAINTENANCE_DEFERRAL_CODES,
     PRODUCTION_LANES_PER_ACCOUNT, _credentials_for_job, _execute_job,
     _execute_job_safely, _may_try_another_credential, _next_retry,
     _run_scheduled_lane, _scheduler_sleep_seconds, _with_scheduler_failure_code,
 )
-from xauusd_forecaster.daily_brief_runtime import run_daily_brief_batch
+from xauusd_forecaster.news.brief.runtime import run_daily_brief_batch
 
 
 

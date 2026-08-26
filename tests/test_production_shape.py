@@ -5,11 +5,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES
+from xauusd_forecaster.ai.provider_registry import AI_QUOTA_SURFACES
 from xauusd_forecaster.decision.inference import MODEL_IDENTITIES
-from xauusd_forecaster.news_scheduler import reserve_account_request
-from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
-from xauusd_forecaster.news import RUNTIME_NEWS_POLL_SOURCES
+from xauusd_forecaster.news.scheduler.state import reserve_account_request
+from xauusd_forecaster.news.collection.source_registry import NEWS_SOURCE_REGISTRY
+from xauusd_forecaster.news.collection.intake import RUNTIME_NEWS_POLL_SOURCES
 from xauusd_forecaster.production_shape import (
     production_contract_snapshot,
     production_shape_violations,

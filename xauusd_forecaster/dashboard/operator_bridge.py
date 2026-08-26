@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Mapping
 
-from xauusd_forecaster.news_scheduler import (
+from xauusd_forecaster.news.scheduler.state import (
     RetryScheduleConflict,
     apply_retry_schedule_override,
     install_scheduler_schema,

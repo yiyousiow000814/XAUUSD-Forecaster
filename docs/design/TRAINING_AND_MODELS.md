@@ -118,7 +118,7 @@ rerun. Dirty revisions and publication records survive restart.
 - `xauusd_forecaster/training/runtime.py`: durable background lifecycle.
 - `xauusd_forecaster/training/materialization.py`: shared market/news training operations.
 - `xauusd_forecaster/training/ridge.py`: bounded Ridge artifact implementation.
-- `xauusd_forecaster/news_contracts.py`: current complete-generation contract.
+- `xauusd_forecaster/news/semantics/model_contracts.py`: current complete-generation contract.
 - `xauusd_forecaster/decision/inference.py`: active-generation validation and reads.
 - `xauusd_forecaster/execution_learning.py`: separate execution models.
 

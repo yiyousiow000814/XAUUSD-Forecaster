@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.news_retrieval_benchmark import (
+from xauusd_forecaster.news.retrieval.benchmark import (
     BENCHMARK_SCHEMA_VERSION,
     load_benchmark_manifest,
     score_candidate_rankings,

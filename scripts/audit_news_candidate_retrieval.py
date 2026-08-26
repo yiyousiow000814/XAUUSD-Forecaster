@@ -13,11 +13,11 @@ from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 
-from xauusd_forecaster.news_retrieval_benchmark import (  # noqa: E402
+from xauusd_forecaster.news.retrieval.benchmark import (  # noqa: E402
     evaluate_candidate_retrieval,
     load_benchmark_manifest,
 )
-from xauusd_forecaster.news_retrieval import (  # noqa: E402
+from xauusd_forecaster.news.retrieval.search import (  # noqa: E402
     latest_embedding_profile,
 )
 

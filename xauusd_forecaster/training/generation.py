@@ -15,14 +15,14 @@ from xauusd_forecaster.evidence.schema import (
 )
 from xauusd_forecaster.factors import NEWS_FEATURES
 from xauusd_forecaster.evidence.ledger import canonical_hash
-from xauusd_forecaster.news_contracts import (
+from xauusd_forecaster.news.semantics.model_contracts import (
     CORE_EVIDENCE_STORAGE_LANE,
     CORE_MODEL_STORAGE_PERMISSION,
     CURRENT_NEWS_CONTRACT,
     generation_matches_contract,
 )
-from xauusd_forecaster.news_evidence import BROAD_NEWS_FEATURES, EVIDENCE_POLICY_VERSION
-from xauusd_forecaster.news_features_v2 import EVIDENCE_GRADE_WEIGHT
+from xauusd_forecaster.news.semantics.evidence import BROAD_NEWS_FEATURES, EVIDENCE_POLICY_VERSION
+from xauusd_forecaster.news.semantics.features import EVIDENCE_GRADE_WEIGHT
 from xauusd_forecaster.training.ridge import RidgeArtifact, train_ridge
 from xauusd_forecaster.training.materialization import MARKET_FEATURES
 

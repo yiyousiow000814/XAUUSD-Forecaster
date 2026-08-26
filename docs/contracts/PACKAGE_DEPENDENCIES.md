@@ -7,9 +7,10 @@ This contract governs Python source dependencies during and after the
 `d4103fbe61e0c025b9d246d35804fecb2a3c3fdb` graph rather than an idealized
 green-field layout.
 
-The audited repository has a flat root package, one 14-module SCC, no package
-import from `scripts`, and three script-to-script shared-library call sites.
-Flat modules remain transitional until their owning Phase D PR moves them.
+The audited campaign base had a flat root package, one 14-module SCC, no
+package import from `scripts`, and three script-to-script shared-library call
+sites. Canonical owner moves preserve those facts as baseline evidence rather
+than describing the pending stack as already merged architecture.
 
 ## Enforced rules
 
@@ -57,6 +58,20 @@ The following reverse edges are prohibited regardless of migration status:
 Dashboard is a terminal read/projection layer. Runtime entry points orchestrate
 owners but are outside the canonical dependency graph. Assistant remains
 separately bounded and is not a forecasting critical-path dependency.
+
+## Shared-store bootstrap component
+
+After canonical News/AI placement, the import inventory contains one 13-module
+component, reduced from the 14-module baseline. It is explicitly retained as a
+co-resident SQLite schema-bootstrap contract: `evidence.ledger` installs the
+News scheduler/semantic and retained Assistant schemas, while those owners use
+the same ledger type. Market/session contracts also participate through the
+point-in-time news clock. The imports are local at schema-install or transition
+boundaries and do not create a second module instance, process, store, or
+runtime owner. Removing this true shared-store bootstrap component requires a
+separate schema-composition boundary and is not safe to disguise as an import
+move. No Dashboard, Training, Decision runtime, Cloudflare, or entry-point
+module participates in the component.
 
 ## Compatibility handover
 

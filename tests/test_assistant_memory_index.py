@@ -11,7 +11,7 @@ from xauusd_forecaster.assistant_memory_index import (
     build_assistant_memory_index_result,
     tokenize_assistant_memory,
 )
-from xauusd_forecaster.local_embeddings import (
+from xauusd_forecaster.news.retrieval.local_embeddings import (
     LOCAL_EMBEDDING_MODEL_DIGEST,
     EmbeddingProfile,
 )

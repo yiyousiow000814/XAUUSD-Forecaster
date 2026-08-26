@@ -8,7 +8,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
-from .annotation import DEFAULT_GEMMA_MODEL
+from xauusd_forecaster.news.annotation.product import DEFAULT_GEMMA_MODEL
 
 
 ASSISTANT_ROUTING_POLICY_VERSION = "assistant-routing-v2"

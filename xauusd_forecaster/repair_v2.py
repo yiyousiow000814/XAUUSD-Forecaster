@@ -23,7 +23,7 @@ from xauusd_forecaster.evidence.executable_label import build_executable_label_v
 from xauusd_forecaster.evidence.ledger import ForwardLedger, canonical_hash
 from .m1 import aggregate_xautk002_batch
 from .market import MarketObservation, build_forward_snapshot
-from .news_features_v2 import aggregate_news_features_v2, frozen_rule_rows
+from xauusd_forecaster.news.semantics.features import aggregate_news_features_v2, frozen_rule_rows
 from .u5_state import U5State, U5_VERSION
 
 

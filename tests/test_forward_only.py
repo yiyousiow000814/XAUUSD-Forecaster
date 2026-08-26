@@ -12,13 +12,13 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pytest
-import xauusd_forecaster.annotation as annotation_module
-import xauusd_forecaster.news_relevance as news_relevance_module
-import xauusd_forecaster.news_time as news_time_module
+import xauusd_forecaster.news.annotation.product as annotation_module
+import xauusd_forecaster.news.semantics.relevance as news_relevance_module
+import xauusd_forecaster.news.semantics.time as news_time_module
 
 from xauusd_forecaster.decision.engine import ForwardEngine
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.content import (
+from xauusd_forecaster.news.collection.content import (
     extract_article_full_text,
     extract_federal_reserve_full_text,
     fetch_content,
@@ -26,18 +26,18 @@ from xauusd_forecaster.content import (
     hydrate_pending_non_fed_content,
 )
 from xauusd_forecaster.inference import build_shadow_predictions
-from xauusd_forecaster.annotation import (
+from xauusd_forecaster.news.annotation.product import (
     annotate_pending_news,
     assess_pending_news_impacts,
     translate_pending_headlines,
 )
 from xauusd_forecaster.factors import aggregate_news_features, factor_coverage
-from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
-from xauusd_forecaster.local_embeddings import EmbeddingProfile
-from xauusd_forecaster.model_gateway import GeminiModelGateway
-from xauusd_forecaster.news_impact import pending_impact_records
-from xauusd_forecaster.news_scheduler import LIVE_OPERATIONAL_WORKLOAD
-from xauusd_forecaster.news_semantics import PREVIOUS_NEWS_PROMPT_VERSION
+from xauusd_forecaster.ai.quota import GeminiQuotaLedger
+from xauusd_forecaster.news.retrieval.local_embeddings import EmbeddingProfile
+from xauusd_forecaster.ai.model_gateway import GeminiModelGateway
+from xauusd_forecaster.news.annotation.impact import pending_impact_records
+from xauusd_forecaster.news.scheduler.state import LIVE_OPERATIONAL_WORKLOAD
+from xauusd_forecaster.news.semantics.contracts import PREVIOUS_NEWS_PROMPT_VERSION
 from xauusd_forecaster.maintenance import (
     archive_completed_quote_days,
     backup_forward_ledger,
@@ -47,7 +47,7 @@ from xauusd_forecaster.market import (
     MarketObservation,
     build_forward_snapshot,
 )
-from xauusd_forecaster.news import (
+from xauusd_forecaster.news.collection.intake import (
     BLS_SOURCE,
     DIRECT_FULL_TEXT_RSS_SOURCES,
     FRED_POLL_SOURCE,
@@ -71,9 +71,9 @@ from xauusd_forecaster.news import (
     extract_world_gold_council_article,
     parse_rss,
 )
-from xauusd_forecaster.news_features_v2 import aggregate_news_features_v2
-from xauusd_forecaster.news_relevance import google_news_item_is_relevant
-from xauusd_forecaster.news_time import (
+from xauusd_forecaster.news.semantics.features import aggregate_news_features_v2
+from xauusd_forecaster.news.semantics.relevance import google_news_item_is_relevant
+from xauusd_forecaster.news.semantics.time import (
     MIXED_PRECISE_OR_BATCH_PROXY_TIME,
     PublicationReceiptClockAssessment,
     SOURCE_REPORTED_TIME,
@@ -697,7 +697,7 @@ def test_article_fetch_uses_browser_document_headers(monkeypatch) -> None:
         captured["timeout"] = timeout
         return Response()
 
-    import xauusd_forecaster.content as content_module
+    import xauusd_forecaster.news.collection.content as content_module
 
     monkeypatch.setattr(content_module.urllib.request, "urlopen", open_request)
     assert fetch_content("https://publisher.example/article") == b"publisher article"
@@ -1754,7 +1754,7 @@ def test_generic_article_extractor_reads_pdf(monkeypatch) -> None:
     class Reader:
         pages = [Page()]
 
-    import xauusd_forecaster.content as content_module
+    import xauusd_forecaster.news.collection.content as content_module
 
     monkeypatch.setattr(content_module, "PdfReader", lambda _: Reader())
     text, source = extract_article_full_text(
@@ -4537,7 +4537,7 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
         def embed(self, _texts, _profile):
             pytest.fail("preselected deterministic fallback called embedding")
 
-    import xauusd_forecaster.news_retrieval as retrieval_module
+    import xauusd_forecaster.news.retrieval.search as retrieval_module
     monkeypatch.setattr(
         retrieval_module, "GeminiEmbeddingClient", CappedEmbeddingClient,
     )

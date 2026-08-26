@@ -14,17 +14,17 @@ MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 
 from xauusd_forecaster.evidence.ledger import ForwardLedger  # noqa: E402
-from xauusd_forecaster.news_impact import (  # noqa: E402
+from xauusd_forecaster.news.annotation.impact import (  # noqa: E402
     IDENTITY_CANDIDATE_UNIVERSE_LIMIT,
     load_identity_candidate_universe,
 )
-from xauusd_forecaster.news_retrieval import (  # noqa: E402
+from xauusd_forecaster.news.retrieval.search import (  # noqa: E402
     NEWS_EMBEDDING_MODEL,
     append_missing_embeddings,
     load_embeddings,
 )
-from xauusd_forecaster.gemini_embeddings import GeminiEmbeddingClient  # noqa: E402
-from xauusd_forecaster.news_scheduler import (  # noqa: E402
+from xauusd_forecaster.news.retrieval.gemini_embeddings import GeminiEmbeddingClient  # noqa: E402
+from xauusd_forecaster.news.scheduler.state import (  # noqa: E402
     CONTRACT_BACKFILL_WORKLOAD,
 )
 
