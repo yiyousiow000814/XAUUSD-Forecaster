@@ -9,11 +9,11 @@ below. Latest integrated main is
 
 | PR | Boundary | Exact base | Exact head |
 |---:|---|---|---|
-| #321 | Deterministic source compiler | `304831b1353821a71ccbac16d220280ceef0d270` | `e44a80a3dd81dd52024be2d0890fcba4d03c9818` |
-| #324 | Contract evidence registry | `e44a80a3dd81dd52024be2d0890fcba4d03c9818` | `64a1fdab1c25efe5de93055af441d5965be1147f` |
-| #325 | Targeted mutation audit | `64a1fdab1c25efe5de93055af441d5965be1147f` | `021d767c869a219625a4b4cc1dc40d9526e1a815` |
-| #328 | Private generated-evidence Explorer | `021d767c869a219625a4b4cc1dc40d9526e1a815` | `f231101e460934707c70a1d288bbe8e6273c7eb2` |
-| #302 | Documentation-only closure | `f231101e460934707c70a1d288bbe8e6273c7eb2` | live PR #302 head OID |
+| #321 | Deterministic source compiler | `304831b1353821a71ccbac16d220280ceef0d270` | `29753df324460214b8f4ee94b480a42a5df31209` |
+| #324 | Contract evidence registry | `29753df324460214b8f4ee94b480a42a5df31209` | `844d42306b06acee0fa109c35915a646e48c1f9e` |
+| #325 | Targeted mutation audit | `844d42306b06acee0fa109c35915a646e48c1f9e` | `40fe5b8e91290f4345936c3a727862d2a0e908f3` |
+| #328 | Private generated-evidence Explorer | `40fe5b8e91290f4345936c3a727862d2a0e908f3` | `c761e87a5778afc1adc762d55f16c9a668774609` |
+| #302 | Documentation-only closure | `c761e87a5778afc1adc762d55f16c9a668774609` | live PR #302 head OID |
 
 All rows remain Draft and `PENDING`. Merge order is the repaired table in
 `docs/audits/REPOSITORY_MODULARIZATION_CLOSURE_2026_08_24.md`, ending
