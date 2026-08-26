@@ -2432,8 +2432,9 @@ def test_optional_resource_families_degrade_only_their_owner(
                if name not in {failed_resource})
 
 
+@pytest.mark.parametrize("source_mode", ["local_api", "frozen_generation"])
 def test_news_generation_resumes_remote_offsets_and_bounds_each_cycle(
-    monkeypatch, tmp_path,
+    monkeypatch, tmp_path, source_mode,
 ) -> None:
     module = _sync_module()
     generation = _projection_fixture(25)
@@ -2442,9 +2443,16 @@ def test_news_generation_resumes_remote_offsets_and_bounds_each_cycle(
     active = False
     actions: list[str] = []
 
-    monkeypatch.setattr(
-        module, "_get_local_json", lambda url: _projection_local_get(generation, url),
-    )
+    if source_mode == "local_api":
+        monkeypatch.setattr(
+            module, "_get_local_json",
+            lambda url: _projection_local_get(generation, url),
+        )
+    else:
+        monkeypatch.setattr(
+            module, "_get_local_json",
+            lambda _url: pytest.fail("frozen replay must not call the Stable API"),
+        )
 
     def post(_url, body, _config):
         nonlocal active
@@ -2484,20 +2492,24 @@ def test_news_generation_resumes_remote_offsets_and_bounds_each_cycle(
         "news_state_file": str(tmp_path / "news-state.json"),
     }
 
-    module._sync_news({}, config)
+    sync_options = (
+        {} if source_mode == "local_api"
+        else {"frozen_generation": generation}
+    )
+    module._sync_news({}, config, **sync_options)
     assert actions == ["prepare"] + ["stage_details"] * 4
     first_state = json.loads(Path(config["news_state_file"]).read_text(encoding="utf-8"))
     assert first_state["projection_state"] == "REPLAYING"
     actions.clear()
-    module._sync_news({}, config)
+    module._sync_news({}, config, **sync_options)
     assert actions == ["prepare"] + ["stage_index"] * 4
     actions.clear()
-    module._sync_news({}, config)
+    module._sync_news({}, config, **sync_options)
     assert actions == ["prepare"] + ["stage_index"] * 3 + ["activate", "verify"]
     assert active is True
 
     actions.clear()
-    module._sync_news({}, config)
+    module._sync_news({}, config, **sync_options)
     assert actions == ["prepare"]
 
 

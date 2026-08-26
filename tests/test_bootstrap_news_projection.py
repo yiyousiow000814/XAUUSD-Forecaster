@@ -61,3 +61,58 @@ def test_bootstrap_keeps_partial_replay_then_requires_verified_current(
     assert result["status"] == "PASSED"
     assert result["cycles"] == 2
     assert result["missing_detail_count"] == 0
+
+
+def test_bootstrap_reuses_one_frozen_generation_without_stable_api(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    frozen = object()
+    observed = []
+    states = [
+        {"contract_version": MODULE.NEWS_MIRROR_CONTRACT_VERSION,
+         "projection_state": "REPLAYING"},
+        {"contract_version": MODULE.NEWS_MIRROR_CONTRACT_VERSION,
+         "projection_state": "CURRENT"},
+    ]
+    monkeypatch.setattr(
+        MODULE, "_sync_news",
+        lambda *_args, **kwargs: observed.append(kwargs["frozen_generation"]),
+    )
+    monkeypatch.setattr(MODULE, "_read_news_sync_state", lambda _path: states.pop(0))
+    monkeypatch.setattr(MODULE, "_get_json", lambda *_args, **_kwargs: {
+        "status": "OK", "projection_state": "CURRENT", "verified_complete": True,
+        "active_generation_id": "a" * 64, "snapshot_id": "b" * 64,
+        "index_count": 12, "detail_count": 12,
+        "source_digest": "c" * 64, "receipt_digest": "d" * 64,
+        "missing_detail_count": 0, "invariant_violation_count": 0,
+    })
+
+    result = MODULE.bootstrap(
+        base_config={},
+        origin="https://abc12345-aurum-signal-room.example.workers.dev",
+        token="secret", state_file=tmp_path / "state.json",
+        max_cycles=2, retry_seconds=0, frozen_generation=frozen,
+    )
+
+    assert result["status"] == "PASSED"
+    assert observed == [frozen, frozen]
+
+
+def test_bootstrap_does_not_retry_deterministic_source_contract_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    attempts = []
+
+    def reject(*_args, **_kwargs):
+        attempts.append(1)
+        raise MODULE.PayloadContractError("local news projection manifest is missing")
+
+    monkeypatch.setattr(MODULE, "_sync_news", reject)
+    with pytest.raises(MODULE.PayloadContractError, match="manifest is missing"):
+        MODULE.bootstrap(
+            base_config={"local_status_url": "http://127.0.0.1:8765/api/status"},
+            origin="https://abc12345-aurum-signal-room.example.workers.dev",
+            token="secret", state_file=tmp_path / "state.json",
+            max_cycles=1_000, retry_seconds=0,
+        )
+    assert attempts == [1]

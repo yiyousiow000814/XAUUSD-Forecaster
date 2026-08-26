@@ -90,11 +90,18 @@ npx wrangler d1 migrations apply aurum-signal-room --remote
 python ../scripts/bootstrap_news_projection.py `
   --config ../.local/forward/dashboard-sync.json `
   --version-host $candidateVersionHost `
-  --state-file ../.local/release-control/first-news-current.json
+  --state-file first-news-current.json `
+  --source-database ../.local/forward/forward-evidence.sqlite3
 ```
 
+The bootstrap takes one SQLite online backup and builds the frozen generation
+with Candidate code. It does not depend on the still-active Stable API
+understanding the Candidate News source protocol, and it never starts a second
+production Sync owner.
+
 The bootstrap fails closed unless the target is an exact production Worker
-Version origin, the source is the localhost Dashboard API, and the remote state
+Version origin, the source is an explicit local SQLite snapshot or compatible
+localhost Dashboard API, and the remote state
 is receipt-verified `CURRENT` with zero missing details and zero invariant
 violations. Preserve its generation, snapshot, source digest, receipt digest,
 and exact counts as release evidence. Walk the Candidate News pagination and

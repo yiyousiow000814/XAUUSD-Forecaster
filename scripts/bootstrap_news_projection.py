@@ -6,7 +6,9 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import sys
+import tempfile
 import time
 import urllib.parse
 from pathlib import Path
@@ -16,11 +18,17 @@ sys.path.insert(0, str(MODULE_ROOT))
 
 from scripts.run_dashboard_sync import (  # noqa: E402
     NEWS_MIRROR_CONTRACT_VERSION,
+    PayloadContractError,
     _get_json,
     _read_news_sync_state,
     _sync_news,
     _validated_sync_state_path,
 )
+from scripts.run_dashboard_api import (  # noqa: E402
+    _build_news_projection_source_from_database,
+)
+from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
+from xauusd_forecaster.news_projection import NewsProjectionGeneration  # noqa: E402
 
 VERSION_HOST = re.compile(
     r"^[a-z0-9-]+-aurum-signal-room\.[a-z0-9-]+\.workers\.dev$"
@@ -44,10 +52,16 @@ def _version_origin(value: str) -> str:
 def bootstrap(
     *, base_config: dict, origin: str, token: str, state_file: Path,
     max_cycles: int, retry_seconds: float,
+    frozen_generation: NewsProjectionGeneration | None = None,
 ) -> dict:
     if not token.strip():
         raise ValueError("ingest token is missing")
-    if not str(base_config.get("local_status_url") or "").startswith("http://127.0.0.1:"):
+    if (
+        frozen_generation is None
+        and not str(base_config.get("local_status_url") or "").startswith(
+            "http://127.0.0.1:"
+        )
+    ):
         raise ValueError("bootstrap requires the local Dashboard API authority")
     config = {
         **base_config,
@@ -62,7 +76,9 @@ def bootstrap(
     config.pop("targets", None)
     for cycle in range(1, max_cycles + 1):
         try:
-            _sync_news({}, config)
+            _sync_news({}, config, frozen_generation=frozen_generation)
+        except PayloadContractError:
+            raise
         except Exception:
             if cycle >= max_cycles:
                 raise
@@ -100,11 +116,33 @@ def bootstrap(
     raise RuntimeError("first CURRENT did not complete within the cycle bound")
 
 
+def _freeze_news_projection_generation(
+    source_database: Path,
+) -> NewsProjectionGeneration:
+    """Build Candidate source semantics from one online SQLite snapshot."""
+    source_database = source_database.resolve()
+    if not source_database.is_file():
+        raise ValueError("authoritative source database is missing")
+    with tempfile.TemporaryDirectory(prefix="xauusd-news-bootstrap-") as temp_root:
+        snapshot = Path(temp_root) / "forward-evidence.sqlite3"
+        source = sqlite3.connect(source_database.as_uri() + "?mode=ro", uri=True)
+        destination = sqlite3.connect(snapshot)
+        try:
+            source.backup(destination)
+        finally:
+            destination.close()
+            source.close()
+        ledger = ForwardLedger(snapshot)
+        ledger.close()
+        return _build_news_projection_source_from_database(snapshot)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--version-host", required=True)
     parser.add_argument("--state-file", type=Path, required=True)
+    parser.add_argument("--source-database", type=Path)
     parser.add_argument("--token-env", default="CLOUDFLARE_INGEST_TOKEN")
     parser.add_argument("--max-cycles", type=int, default=1_000)
     parser.add_argument("--retry-seconds", type=float, default=2.0)
@@ -112,6 +150,10 @@ def main() -> int:
     if args.max_cycles < 1 or args.retry_seconds < 0:
         parser.error("cycle and retry bounds are invalid")
     config = json.loads(args.config.read_text(encoding="utf-8"))
+    frozen_generation = (
+        _freeze_news_projection_generation(args.source_database)
+        if args.source_database else None
+    )
     result = bootstrap(
         base_config=config,
         origin=_version_origin(args.version_host),
@@ -119,6 +161,7 @@ def main() -> int:
         state_file=_validated_sync_state_path(args.state_file),
         max_cycles=args.max_cycles,
         retry_seconds=args.retry_seconds,
+        frozen_generation=frozen_generation,
     )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
