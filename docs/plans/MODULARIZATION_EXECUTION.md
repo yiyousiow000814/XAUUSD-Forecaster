@@ -4,16 +4,16 @@
 
 This 2026-08-26 refresh supersedes older replacement SHA and merge-order rows
 below. Latest integrated main is
-`1994ca9f83c88a23baaafd1980fc250d967b9a5f`. The repaired existing stack ends at
-#304 `304831b1353821a71ccbac16d220280ceef0d270`, followed linearly by:
+`6a2428f7de405408850132e0c7734cb900715aab`. The repaired existing stack ends at
+#304 `48cb32a60c803e7f7b97290209933b9041d5750a`, followed linearly by:
 
 | PR | Boundary | Exact base | Exact head |
 |---:|---|---|---|
-| #321 | Deterministic source compiler | `304831b1353821a71ccbac16d220280ceef0d270` | `29753df324460214b8f4ee94b480a42a5df31209` |
-| #324 | Contract evidence registry | `29753df324460214b8f4ee94b480a42a5df31209` | `844d42306b06acee0fa109c35915a646e48c1f9e` |
-| #325 | Targeted mutation audit | `844d42306b06acee0fa109c35915a646e48c1f9e` | `40fe5b8e91290f4345936c3a727862d2a0e908f3` |
-| #328 | Private generated-evidence Explorer | `40fe5b8e91290f4345936c3a727862d2a0e908f3` | `c761e87a5778afc1adc762d55f16c9a668774609` |
-| #302 | Documentation-only closure | `c761e87a5778afc1adc762d55f16c9a668774609` | live PR #302 head OID |
+| #321 | Deterministic source compiler | `48cb32a60c803e7f7b97290209933b9041d5750a` | `fd57fe7468bb74a8fc35386ac697d0deac69fba2` |
+| #324 | Contract evidence registry | `fd57fe7468bb74a8fc35386ac697d0deac69fba2` | `1c8f1fa2d675f0aac14a71ad09d567f15680c889` |
+| #325 | Targeted mutation audit | `1c8f1fa2d675f0aac14a71ad09d567f15680c889` | `056a2bf4421af9a6a9ff46107c3c4ecd0b50dd7b` |
+| #328 | Private generated-evidence Explorer | `056a2bf4421af9a6a9ff46107c3c4ecd0b50dd7b` | `64ac434d97d557ec9857bb4a465a4de9c5c3554b` |
+| #302 | Documentation-only closure | `64ac434d97d557ec9857bb4a465a4de9c5c3554b` | live PR #302 head OID |
 
 All rows remain Draft and `PENDING`. Merge order is the repaired table in
 `docs/audits/REPOSITORY_MODULARIZATION_CLOSURE_2026_08_24.md`, ending
