@@ -491,8 +491,9 @@ function Enter-ReleaseTransactionLock {
                 -ProcessId ([int]$owner.owner_pid)
             $ownerAlive = [bool]($ownerProcess -and (
                 -not [string]$owner.owner_process_start_token -or
-                [string]$owner.owner_process_start_token -eq
-                    [string]$ownerProcess.process_start_token
+                (Test-ControlPlaneStartTokenEqual `
+                    -Left $owner.owner_process_start_token `
+                    -Right $ownerProcess.process_start_token)
             ))
         }
         $acquired = ConvertTo-ReleaseTimestampUtc -Value $owner.acquired_at
@@ -689,6 +690,17 @@ function ConvertTo-ReleaseTimestampUtc {
         return $parsed.ToUniversalTime()
     }
     return [DateTimeOffset]::MinValue
+}
+
+function Test-ControlPlaneStartTokenEqual {
+    param([AllowNull()][object]$Left, [AllowNull()][object]$Right)
+    $leftInstant = ConvertTo-ReleaseTimestampUtc -Value $Left
+    $rightInstant = ConvertTo-ReleaseTimestampUtc -Value $Right
+    return [bool](
+        $leftInstant -ne [DateTimeOffset]::MinValue -and
+        $rightInstant -ne [DateTimeOffset]::MinValue -and
+        $leftInstant.UtcTicks -eq $rightInstant.UtcTicks
+    )
 }
 
 function Get-ReleaseVersionPreviewUrl {
@@ -6512,7 +6524,9 @@ function Assert-CurrentWatchdogHeartbeat {
         ([DateTimeOffset]::UtcNow - $observedAt).TotalSeconds -gt 120 -or
         [int]$heartbeat.process_id -ne [int]$Owner.process_id -or
         ([string]$heartbeat.process_start_token -and
-         [string]$heartbeat.process_start_token -ne [string]$Owner.process_start_token) -or
+         -not (Test-ControlPlaneStartTokenEqual `
+            -Left $heartbeat.process_start_token `
+            -Right $Owner.process_start_token)) -or
         [string]$heartbeat.control_bundle_revision -ne $ExpectedRevision -or
         -not [bool]$heartbeat.control_bundle_exact_revision -or
         -not [bool]$heartbeat.control_bundle_hash_verified) {
@@ -6586,8 +6600,9 @@ function Repair-AbandonedControlPlaneBundleForWatchdog {
         $observed = Get-ControlPlaneProcessIdentity `
             -ProcessId ([int]$installer.process_id)
         $installerAlive = [bool]($observed -and
-            [string]$observed.process_start_token -eq
-                [string]$installer.process_start_token)
+            (Test-ControlPlaneStartTokenEqual `
+                -Left $observed.process_start_token `
+                -Right $installer.process_start_token))
     }
     if ($current) {
         if ([string]$current.source_revision -eq [string]$state.target_revision) {
@@ -6650,8 +6665,9 @@ function Get-ControlPlaneInstallOwnerAlive {
     $observed = Get-ControlPlaneProcessIdentity `
         -ProcessId ([int]$installer.process_id)
     return [bool]($observed -and
-        [string]$observed.process_start_token -eq
-            [string]$installer.process_start_token)
+        (Test-ControlPlaneStartTokenEqual `
+            -Left $observed.process_start_token `
+            -Right $installer.process_start_token))
 }
 
 function Assert-AbandonedControlPlaneInstallActivation {
@@ -6680,16 +6696,18 @@ function Assert-AbandonedControlPlaneInstallActivation {
     }
     $oldObserved = Get-ControlPlaneProcessIdentity `
         -ProcessId ([int]$oldOwner.process_id)
-    if ($oldObserved -and [string]$oldObserved.process_start_token -eq
-            [string]$oldOwner.process_start_token) {
+    if ($oldObserved -and (Test-ControlPlaneStartTokenEqual `
+            -Left $oldObserved.process_start_token `
+            -Right $oldOwner.process_start_token)) {
         throw "CONTROL_PLANE_OLD_WATCHDOG_STILL_OWNS"
     }
     $owners = @(Get-VerifiedWatchdogOwners)
     $currentIdentity = Get-ControlPlaneProcessIdentity -ProcessId $PID
     if ($owners.Count -ne 1 -or -not $currentIdentity -or
         [int]$owners[0].process_id -ne $PID -or
-        [string]$owners[0].process_start_token -ne
-            [string]$currentIdentity.process_start_token) {
+        -not (Test-ControlPlaneStartTokenEqual `
+            -Left $owners[0].process_start_token `
+            -Right $currentIdentity.process_start_token)) {
         throw "CONTROL_PLANE_RECOVERY_EXACTLY_ONE_REPLACEMENT_REQUIRED"
     }
     if (-not (Test-Path -LiteralPath $watchdogHeartbeatPath)) {
@@ -6708,8 +6726,9 @@ function Assert-AbandonedControlPlaneInstallActivation {
         -not [bool]$heartbeat.control_bundle_exact_revision -or
         -not [bool]$heartbeat.control_bundle_hash_verified -or
         [int]$heartbeat.process_id -ne $PID -or
-        [string]$heartbeat.process_start_token -ne
-            [string]$currentIdentity.process_start_token) {
+        -not (Test-ControlPlaneStartTokenEqual `
+            -Left $heartbeat.process_start_token `
+            -Right $currentIdentity.process_start_token)) {
         throw "CONTROL_PLANE_RECOVERY_QUIESCED_ACK_MISMATCH"
     }
     $release = Get-ReleaseControlState
@@ -6726,8 +6745,9 @@ function Assert-AbandonedControlPlaneInstallActivation {
         if (-not $lockOwner -or
             [int]$lockOwner.owner_pid -ne
                 [int]$State.install_owner_identity.process_id -or
-            [string]$lockOwner.owner_process_start_token -ne
-                [string]$State.install_owner_identity.process_start_token) {
+            -not (Test-ControlPlaneStartTokenEqual `
+                -Left $lockOwner.owner_process_start_token `
+                -Right $State.install_owner_identity.process_start_token)) {
             throw "CONTROL_PLANE_RECOVERY_CONCURRENT_RELEASE_LOCK"
         }
     }
@@ -6797,8 +6817,9 @@ function Assert-ControlPlaneIsolationSnapshot {
         for ($index = 0; $index -lt $beforeProcesses.Count; $index++) {
             if ([int]$beforeProcesses[$index].process_id -ne
                     [int]$afterProcesses[$index].process_id -or
-                [string]$beforeProcesses[$index].process_start_token -ne
-                    [string]$afterProcesses[$index].process_start_token) {
+                -not (Test-ControlPlaneStartTokenEqual `
+                    -Left $beforeProcesses[$index].process_start_token `
+                    -Right $afterProcesses[$index].process_start_token)) {
                 throw "CONTROL_PLANE_INSTALL_CHANGED_SERVICE_$($service.Key.ToUpperInvariant())"
             }
         }
@@ -6891,7 +6912,9 @@ function Stop-VerifiedWatchdogOwner {
     param([Parameter(Mandatory = $true)][object]$Identity)
     $current = Get-ControlPlaneProcessIdentity -ProcessId ([int]$Identity.process_id)
     if (-not $current -or
-        [string]$current.process_start_token -ne [string]$Identity.process_start_token -or
+        -not (Test-ControlPlaneStartTokenEqual `
+            -Left $current.process_start_token `
+            -Right $Identity.process_start_token) -or
         $current.name -ne "powershell.exe" -or
         $current.command_line -notmatch '(?i)-Action\s+Watchdog') {
         throw "CONTROL_PLANE_WATCHDOG_IDENTITY_CHANGED"
@@ -6907,8 +6930,9 @@ function Stop-VerifiedWatchdogOwner {
     if ($launcher -and $launcher.name -eq "wscript.exe") {
         $expectedLauncher = Join-Path $repositoryRoot `
             ".local\runtime-control\xauusd_watchdog_launcher.vbs"
-        if ([string]$launcher.process_start_token -ne
-                [string]$expectedLauncherIdentity.process_start_token -or
+        if (-not (Test-ControlPlaneStartTokenEqual `
+                -Left $launcher.process_start_token `
+                -Right $expectedLauncherIdentity.process_start_token) -or
             -not $launcher.command_line.Contains($expectedLauncher) -or
             -not $launcher.command_line.Contains($moduleRoot) -or
             -not $launcher.command_line.Contains($repositoryRoot)) {
@@ -6973,11 +6997,13 @@ function Wait-VerifiedWatchdogHandoff {
         if ($owners.Count -ne 1) { continue }
         $owner = $owners[0]
         if ([int]$owner.process_id -ne [int]$heartbeat.process_id -or
-            [string]$owner.process_start_token -ne
-                [string]$heartbeat.process_start_token -or
+            -not (Test-ControlPlaneStartTokenEqual `
+                -Left $owner.process_start_token `
+                -Right $heartbeat.process_start_token) -or
             ([int]$owner.process_id -eq [int]$PreviousIdentity.process_id -and
-             [string]$owner.process_start_token -eq
-                [string]$PreviousIdentity.process_start_token)) { continue }
+             (Test-ControlPlaneStartTokenEqual `
+                -Left $owner.process_start_token `
+                -Right $PreviousIdentity.process_start_token))) { continue }
         return $owner
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
     throw "CONTROL_PLANE_NEW_WATCHDOG_HEARTBEAT_TIMEOUT"

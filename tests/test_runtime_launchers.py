@@ -3163,18 +3163,38 @@ def test_pwsh_json_dates_share_one_culture_invariant_control_boundary(tmp_path) 
     )
 
 
+def test_control_process_start_tokens_compare_as_exact_instants(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "[Globalization.CultureInfo]::CurrentCulture='zh-SG';"
+        "$json='{\"token\":\"2026-08-26T11:22:48.0603020+08:00\"}'|ConvertFrom-Json;"
+        "$same='2026-08-26T03:22:48.0603020+00:00';"
+        "$different='2026-08-26T03:22:48.0603021+00:00';"
+        "$checks=@("
+        "(Test-ControlPlaneStartTokenEqual $json.token $same),"
+        "(Test-ControlPlaneStartTokenEqual $same $different),"
+        "(Test-ControlPlaneStartTokenEqual 'not-a-token' $same),"
+        "(Test-ControlPlaneStartTokenEqual $null $same));"
+        'Write-Output ($checks -join ",")',
+        powershell="pwsh.exe",
+    )
+    assert result == "True,False,False,False"
+
+
 def test_pwsh_installer_accepts_fresh_exact_watchdog_json_identity(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
         "[Globalization.CultureInfo]::CurrentCulture='zh-SG';"
         "$stamp=[DateTimeOffset]::UtcNow.ToString('o');"
         "$json='{\"observed_at\":\"'+$stamp+'\",\"process_id\":123,'"
+        "+'\"process_start_token\":\"2026-08-26T11:22:48.0603020+08:00\",'"
         "+'\"control_bundle_revision\":\"'+('a'*40)+'\",'"
         "+'\"control_bundle_exact_revision\":true,'"
         "+'\"control_bundle_hash_verified\":true}';"
         "New-Item -ItemType Directory -Path (Split-Path $watchdogHeartbeatPath) "
         "-Force|Out-Null;Set-Content $watchdogHeartbeatPath $json -Encoding UTF8;"
-        "$owner=[pscustomobject]@{process_id=123;process_start_token=''};"
+        "$owner=[pscustomobject]@{process_id=123;"
+        "process_start_token='2026-08-26T03:22:48.0603020+00:00'};"
         "$heartbeat=Assert-CurrentWatchdogHeartbeat -Owner $owner "
         "-ExpectedRevision ('a'*40);"
         'Write-Output "$($heartbeat.process_id),$($heartbeat.control_bundle_hash_verified)"',
