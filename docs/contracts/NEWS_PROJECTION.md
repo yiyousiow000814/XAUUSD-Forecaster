@@ -44,6 +44,11 @@
   review-state, category, and parsed-count summary for that exact generation;
   every future generation repeats this step, so a one-time migration backfill
   is not activation authority.
+- The legacy Reverse-Stable index is also replaced only inside that activation
+  transaction. STAGING index batches cannot change its active identity set.
+  Superseded legacy rows and global derived details with no retained generation
+  reference are deleted when their superseded generation is cleaned; the local
+  SQLite authority, not D1, retains historical news evidence.
 - `CURRENT`, `RECOVERY_REQUIRED`, `REPLAYING`, `VERIFYING`, and `DEGRADED` are
   user-visible truth states. Only a receipt-matched, verified `CURRENT`
   generation may claim a complete 60-day total.
@@ -60,6 +65,8 @@
   short-lived `SUPERSEDED` generation. A new prepare removes older superseded
   data. Staging expires after 24 hours and may be abandoned only by exact
   generation identity; `CURRENT` cannot be abandoned.
+- Global content-addressed details are bounded by those retained generations
+  and the active Reverse-Stable set. They are not an append-forever archive.
 - Health reads use generation metadata, counts, progress, and digests. Routine
   health MUST NOT scan or deserialize all news bodies. An explicit verification
   step may perform bounded indexed count and relationship checks before or
