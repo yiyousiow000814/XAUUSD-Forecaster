@@ -7,7 +7,6 @@ scheduler, process, thread, or authoritative state ownership.
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
 import math
 from datetime import UTC, datetime
@@ -19,6 +18,18 @@ from xauusd_forecaster.dashboard_payloads import (
     audit_status_payload,
     critical_status_payload,
 )
+from xauusd_forecaster.news_projection import (
+    NEWS_DETAIL_BATCH_ITEMS,
+    NEWS_DETAIL_BATCH_LIMIT_BYTES,
+    NEWS_INDEX_FIELDS,
+    NEWS_INDEX_BATCH_LIMIT_BYTES,
+    NEWS_MIRROR_CONTRACT_VERSION,
+    NEWS_INDEX_BATCH_ITEMS as NEWS_WRITE_BATCH_ITEMS,
+    bounded_batches as _projection_bounded_batches,
+    sha256_json as _projection_json_hash,
+    split_news_rows,
+    stable_news_key,
+)
 
 REMOTE_PAYLOAD_LIMIT_BYTES = 750_000
 
@@ -28,17 +39,7 @@ REMOTE_DECISION_LIMIT = 20
 
 REMOTE_DAILY_BRIEF_LIMIT = 14
 
-NEWS_DETAIL_BATCH_LIMIT_BYTES = 160_000
-
-NEWS_INDEX_BATCH_LIMIT_BYTES = 100_000
-
-NEWS_WRITE_BATCH_ITEMS = 4
-
-NEWS_DETAIL_BATCH_ITEMS = 8
-
 NEWS_READER_WINDOW_DAYS = 60
-
-NEWS_MIRROR_CONTRACT_VERSION = "news-60-day-incremental-v10-publication-clock-skew"
 
 LEARNING_HISTORY_CONTRACT_VERSION = "learning-history-d1-v2"
 
@@ -75,19 +76,6 @@ class PayloadContractError(ValueError):
 
     error_code = "PAYLOAD_CONTRACT_REJECTED"
 
-NEWS_INDEX_FIELDS = (
-    "category", "source", "source_item_id", "revision_number", "cluster_id",
-    "source_published_time", "collector_first_seen_time", "headline",
-    "content_characters", "content_status", "content_fetch_status",
-    "content_error_type", "annotation_status", "annotation_reason_code",
-    "annotation_reason",
-    "model_visibility", "parsed_at", "emerging_topic_zh",
-    "impact_status", "impact_class", "impact_event_state",
-    "impact_update_type", "impact_assessed_at", "impact_expires_at",
-    "impact_event_at", "impact_clock_source", "impact_reason_zh",
-    "mirror_updated_at",
-)
-
 MARKET_DECISION_FIELDS = (
     "source_decision_id", "decision_time", "model_identity",
     "recommended_action", "outcome_status", "ev_long_u5", "ev_short_u5",
@@ -95,11 +83,7 @@ MARKET_DECISION_FIELDS = (
 )
 
 def _stable_news_key(row: dict) -> str:
-    identity = "\0".join((
-        str(row.get("source", "")), str(row.get("source_item_id", "")),
-        str(row.get("revision_number", "")),
-    ))
-    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return stable_news_key(row)
 
 def news_withdrawal_keys(payload: dict) -> list[str]:
     """Return stable keys withdrawn by a completed semantic decision."""
@@ -116,48 +100,22 @@ def news_withdrawal_keys(payload: dict) -> list[str]:
     return keys
 
 def _json_hash(value: object) -> str:
-    encoded = json.dumps(
-        value, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return _projection_json_hash(value, sort_keys=True)
 
 def news_mirror_parts(payload: dict) -> tuple[list[dict], list[dict]]:
     """Split the complete news rows into a compact index and lazy details."""
-    index_rows = []
-    detail_rows = []
     rows = payload.get("items")
     if not isinstance(rows, list):
         rows = payload.get("recent_news", [])[:REMOTE_NEWS_LIMIT]
-    for row in rows:
-        detail_key = _stable_news_key(row)
-        detail_payload = {
-            key: value for key, value in row.items() if key not in NEWS_INDEX_FIELDS
-        }
-        encoded_detail = json.dumps(
-            detail_payload, ensure_ascii=False, allow_nan=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        detail_hash = hashlib.sha256(encoded_detail).hexdigest()
-        index_rows.append({
-            **{key: row.get(key) for key in NEWS_INDEX_FIELDS},
-            "detail_key": detail_key,
-            "mirror_contract": NEWS_MIRROR_CONTRACT_VERSION,
-        })
-        detail_rows.append({
-            "detail_key": detail_key,
-            "detail_hash": detail_hash,
-            "payload": detail_payload,
-        })
-    return index_rows, detail_rows
+    return split_news_rows(rows)
 
 def news_detail_batches(rows: list[dict]) -> list[list[dict]]:
-    return _bounded_item_batches(
+    return _projection_bounded_batches(
         rows, NEWS_DETAIL_BATCH_LIMIT_BYTES, max_items=NEWS_DETAIL_BATCH_ITEMS,
     )
 
 def news_index_batches(rows: list[dict]) -> list[list[dict]]:
-    return _bounded_item_batches(
+    return _projection_bounded_batches(
         rows, NEWS_INDEX_BATCH_LIMIT_BYTES, max_items=NEWS_WRITE_BATCH_ITEMS,
     )
 

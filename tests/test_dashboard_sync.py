@@ -747,7 +747,7 @@ def test_sync_status_reports_optional_resource_degradation(tmp_path) -> None:
 
 
 def test_news_projection_health_verifies_exact_generation_receipt(monkeypatch) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resource_protocols as module
     requested = []
     manifest = {
         "generation_id": "a" * 64, "snapshot_id": "b" * 64,
@@ -773,7 +773,8 @@ def test_news_projection_health_verifies_exact_generation_receipt(monkeypatch) -
 
 
 def test_news_projection_health_reports_exact_contradictions(monkeypatch) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import progress
+    from xauusd_forecaster.dashboard.sync import resource_protocols as module
     monkeypatch.setattr(module, "_get_json", lambda *_a, **_k: {
         "status": "OK", "projection_state": "CURRENT", "verified_complete": True,
         "active_generation_id": "a" * 64, "snapshot_id": "b" * 64,
@@ -792,7 +793,7 @@ def test_news_projection_health_reports_exact_contradictions(monkeypatch) -> Non
             "https://worker.example/api/news-index", {"token": "test"}, manifest,
         )
 
-    assert module.sync_error_code(captured.value) == "NEWS_PROJECTION_HEALTH_MISMATCH"
+    assert progress.sync_error_code(captured.value) == "NEWS_PROJECTION_HEALTH_MISMATCH"
     assert captured.value.evidence["violation_count"] == 1
     assert captured.value.evidence["contradictions"]["receipt_digest"] == {
         "expected": "d" * 64, "received": "0" * 64,
@@ -911,7 +912,7 @@ def test_all_rejected_heartbeat_targets_preserve_structured_failures(
 def test_configured_targets_adds_independent_cloudflare_mirror(
     monkeypatch, tmp_path
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import transport as module
     monkeypatch.setattr(module, "SYNC_STATE_ROOT", tmp_path.resolve())
     monkeypatch.setenv(
         "CLOUDFLARE_INGEST_URL", "https://example.workers.dev/api/ingest"
@@ -941,7 +942,7 @@ def test_configured_targets_adds_independent_cloudflare_mirror(
 def test_configured_targets_can_disable_retired_sites_mirror(
     monkeypatch, tmp_path
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import transport as module
     monkeypatch.setattr(module, "SYNC_STATE_ROOT", tmp_path.resolve())
     monkeypatch.setenv(
         "CLOUDFLARE_INGEST_URL", "https://example.workers.dev/api/ingest"
@@ -968,7 +969,7 @@ def test_configured_targets_can_disable_retired_sites_mirror(
 def test_configured_targets_rejects_every_state_path_outside_runtime_root(
     monkeypatch, tmp_path
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import transport as module
     state_root = tmp_path / "private-state"
     state_root.mkdir()
     monkeypatch.setattr(module, "SYNC_STATE_ROOT", state_root.resolve())
@@ -1003,7 +1004,7 @@ def test_configured_targets_rejects_every_state_path_outside_runtime_root(
 def test_sync_state_path_rejects_traversal_and_non_json_names(
     monkeypatch, tmp_path, value
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import transport as module
     monkeypatch.setattr(module, "SYNC_STATE_ROOT", tmp_path.resolve())
 
     with pytest.raises(ValueError, match="must be one JSON file under"):
@@ -1054,10 +1055,11 @@ def test_sites_bypass_header_is_shared_by_get_and_post_but_not_cloudflare(
 
 
 def test_ingest_response_records_valid_main_revision(tmp_path, monkeypatch) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import progress
+    from xauusd_forecaster.dashboard.sync import transport as module
     revision = "a" * 40
     signal = tmp_path / "remote-main-signal.json"
-    monkeypatch.setattr(module, "DEFAULT_RUNTIME_SIGNAL", signal)
+    monkeypatch.setattr(progress, "DEFAULT_RUNTIME_SIGNAL", signal)
 
     class Response:
         status = 200
@@ -1086,7 +1088,7 @@ def test_ingest_response_records_valid_main_revision(tmp_path, monkeypatch) -> N
 
 
 def test_audit_sync_owns_four_independently_bounded_resources(monkeypatch) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resource_protocols as module
     payload = {
         "generated_at": "2026-08-20T00:00:00+00:00",
         "news_metrics": {"events": 2},
@@ -1156,7 +1158,7 @@ def test_audit_sync_owns_four_independently_bounded_resources(monkeypatch) -> No
 def test_learning_history_is_durable_before_summary_and_retries_idempotently(
     monkeypatch, tmp_path,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resource_protocols as module
     payload = {
         "learning_curves": {
             "models": [],
@@ -1225,7 +1227,7 @@ def _projection_local_get(generation, url: str) -> dict:
 def test_news_generation_stages_all_details_before_index_and_activation(
     monkeypatch, tmp_path,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resource_protocols as module
     generation = _projection_fixture()
     state_file = tmp_path / "news-state.json"
     posted: list[tuple[str, dict]] = []
@@ -1277,7 +1279,7 @@ def test_news_generation_stages_all_details_before_index_and_activation(
 
 
 def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_path) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resource_protocols as module
     generation = _projection_fixture(1)
     state_file = tmp_path / "news-state.json"
     posted: list[str] = []
@@ -1307,7 +1309,7 @@ def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_pat
 def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
     monkeypatch, tmp_path,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resource_protocols as module
     snapshot_id = "a" * 64
     rows = [{
         "event_key": f"{index:064x}",
@@ -1510,7 +1512,7 @@ def test_news_evidence_sync_drains_old_snapshot_before_admitting_replacement(
 def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_fields(
     monkeypatch, tmp_path,
 ) -> None:
-    sync = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resource_protocols as sync
     api = _dashboard_module()
     rows = [{
         "event_key": f"{index:064x}",
@@ -1653,7 +1655,7 @@ def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_field
 def test_news_evidence_activation_acknowledgement_replays_idempotently(
     monkeypatch, tmp_path,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resource_protocols as module
     snapshot_id = "a" * 64
     row = {
         "event_key": "b" * 64,
@@ -1997,7 +1999,7 @@ def test_optional_resource_families_degrade_only_their_owner(
 def test_news_generation_resumes_remote_offsets_and_bounds_each_cycle(
     monkeypatch, tmp_path,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resource_protocols as module
     generation = _projection_fixture(25)
     manifest = generation.manifest
     offsets = {"detail": 0, "index": 0}
@@ -2066,7 +2068,7 @@ def test_news_generation_resumes_remote_offsets_and_bounds_each_cycle(
 def test_news_generation_preserves_foreign_staging_owner(
     monkeypatch, tmp_path,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resource_protocols as module
     generation = _projection_fixture(1)
     orphan = "f" * 64
     actions: list[tuple[str, str | None]] = []
@@ -2297,7 +2299,7 @@ def test_assistant_sync_surfaces_are_paused_without_network_or_model_calls(
 
 
 def test_operator_retry_sync_mirrors_claims_applies_and_finishes(monkeypatch) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resource_protocols as module
     job = {
         "job_id": "a" * 64, "task_type": "ACTIVE_IMPACT", "title": "Gold",
         "state": "BACKING_OFF", "priority": "NORMAL",
@@ -2465,7 +2467,7 @@ def test_local_operator_bridge_transport_requires_dedicated_secret(monkeypatch) 
 
 
 def test_operator_retry_bridge_auth_failure_leaves_cloud_lease_reclaimable(monkeypatch) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resource_protocols as module
     job = {
         "job_id": "e" * 64, "task_type": "ACTIVE_IMPACT", "title": "Gold",
         "state": "BACKING_OFF", "priority": "NORMAL",
@@ -2508,7 +2510,7 @@ def test_operator_retry_bridge_auth_failure_leaves_cloud_lease_reclaimable(monke
 def test_operator_retry_state_races_finish_with_explicit_terminal_result(
     monkeypatch, status, code,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resource_protocols as module
     job = {
         "job_id": "f" * 64, "task_type": "ACTIVE_IMPACT", "title": "Gold",
         "state": "BACKING_OFF", "priority": "NORMAL",

@@ -13,11 +13,7 @@ from pathlib import Path
 PACKAGE_ROOT = Path("xauusd_forecaster")
 SCRIPTS_ROOT = Path("scripts")
 MIGRATION_MAP = Path("docs/reference/MODULE_MIGRATION_MAP.md")
-TRANSITIONAL_SCRIPT_IMPORTS = frozenset({
-    ("scripts.bootstrap_news_projection", "scripts.run_dashboard_sync"),
-    ("scripts.build_preview_bundle", "scripts.run_dashboard_sync"),
-    ("scripts.build_release_validation_fixtures", "scripts.run_dashboard_sync"),
-})
+TRANSITIONAL_SCRIPT_IMPORTS = frozenset()
 CANONICAL_AREAS = frozenset({
     "ai", "assistant", "dashboard", "decision", "evidence", "news",
     "runtime", "training",

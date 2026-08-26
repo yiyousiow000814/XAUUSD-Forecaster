@@ -14,11 +14,17 @@ from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 
-from scripts.run_dashboard_sync import (  # noqa: E402
+from xauusd_forecaster.dashboard.resource_contracts import (  # noqa: E402
     NEWS_MIRROR_CONTRACT_VERSION,
-    _get_json,
+)
+from xauusd_forecaster.dashboard.sync.progress import (  # noqa: E402
     _read_news_sync_state,
+)
+from xauusd_forecaster.dashboard.sync.resource_protocols import (  # noqa: E402
     _sync_news,
+)
+from xauusd_forecaster.dashboard.sync.transport import (  # noqa: E402
+    _get_json,
     _validated_sync_state_path,
 )
 

@@ -283,6 +283,29 @@ Implementation status: `PENDING` until the C3d stacked change merges.
 - **Non-goals:** no auth policy, route, payload, status code, batch limit,
   scheduler transition, schema, credential, or production-state change.
 
+### Phase C-4 — Dashboard Sync protocols and progress
+
+Implementation status: `PENDING` until the C4 stacked change merges.
+
+- **Exact responsibility:** durable cursor/checkpoint and cadence state,
+  authenticated target-isolated transport, and bounded per-resource mirror
+  protocols.
+- **Target modules:** `dashboard/sync/progress.py`, `dashboard/sync/transport.py`,
+  and `dashboard/sync/resource_protocols.py`.
+- **Entry boundary:** `run_dashboard_sync.py` retains CLI/config loading,
+  heartbeat-first orchestration, control/heavy lane lifecycle, retry, shutdown,
+  and structured top-level logging.
+- **Compatibility:** the entry script exposes canonical names during handover;
+  Preview and release builders import package owners directly, leaving zero
+  production script-to-script library imports.
+- **Focused tests:** direct protocol tests call package owners; cross-resource
+  isolation, heartbeat ordering, lane shutdown, and production-shape cases stay
+  in `tests/test_dashboard_sync.py`.
+- **Rollback:** revert the extraction commit; checkpoint schemas and files are
+  unchanged and require no migration.
+- **Non-goals:** no cadence, backoff, cursor, page, byte, auth, endpoint,
+  heartbeat, lane, retry, shutdown, payload, or production-state change.
+
 ## Priority method
 
 File size is only an inventory signal. Rank a proposed split using:

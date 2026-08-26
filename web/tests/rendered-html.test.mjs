@@ -1995,7 +1995,9 @@ test("activates only complete paged news-evidence generations outside status", (
   const store = readFileSync(
     new URL("../app/api/_shared/news-evidence-store.ts", import.meta.url), "utf8",
   );
-  const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
+  const sync = readFileSync(
+    new URL("../../xauusd_forecaster/dashboard/sync/resource_protocols.py", import.meta.url), "utf8",
+  );
   const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
   assert.match(migration, /PRIMARY KEY\(`snapshot_id`, `event_key`\)/);
   assert.match(migration, /news_evidence_snapshot_eligible_idx/);
@@ -2839,7 +2841,9 @@ test("keeps the legacy news Q&A queue protected and paused without a duplicate s
   );
   const queue = readFileSync(new URL("../app/api/_shared/news-questions.ts", import.meta.url), "utf8");
   const auth = readFileSync(new URL("../app/api/_shared/dashboard-operator-auth.ts", import.meta.url), "utf8");
-  const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
+  const sync = readFileSync(
+    new URL("../../xauusd_forecaster/dashboard/sync/resource_protocols.py", import.meta.url), "utf8",
+  );
 
   assert.doesNotMatch(view, /view === "qa"/);
   assert.doesNotMatch(view, /PRIVATE · EVIDENCE GROUNDED|私有问答|\/api\/news-questions/);
@@ -2930,7 +2934,9 @@ test("separates Access-owned human APIs from the ingest worker control plane", (
   ].map(name => readFileSync(
     new URL(`../app/admin/api/${name}/route.ts`, import.meta.url), "utf8",
   ));
-  const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
+  const sync = readFileSync(
+    new URL("../../xauusd_forecaster/dashboard/sync/resource_protocols.py", import.meta.url), "utf8",
+  );
   const chatWorker = readFileSync(
     new URL("../../xauusd_forecaster/assistant_chat_worker.py", import.meta.url), "utf8",
   );
