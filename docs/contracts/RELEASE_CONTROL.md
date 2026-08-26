@@ -232,6 +232,15 @@ empty required legacy evidence, stale receipts, receipt tampering, or any live
 identity drift fail closed. Candidate validation rechecks the live evidence;
 the receipt cannot be copied to another Git SHA or Worker Version.
 
+Before reading coordinated-migration evidence, **Verify Migration** records a
+two-hour Sync hold for the exact main production Candidate and stops the sole
+Dashboard Sync owner. The watchdog respects `STOPPED` only while that exact,
+unexpired hold is authoritative; it continues to recover a running Sync error.
+An expired hold, a different Candidate, or an explicit service start restores
+normal supervision. This freezes the legacy and generation projections while
+the receipt and directed validation are produced, without creating a second
+writer or weakening live D1 verification.
+
 ## Promotion transaction
 
 Promotion is one durable, serialized transaction:

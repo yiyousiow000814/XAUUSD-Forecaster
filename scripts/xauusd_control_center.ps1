@@ -1338,6 +1338,80 @@ function Assert-CoordinatedMigrationReceipt {
     return $receipt
 }
 
+function Test-CoordinatedMigrationSyncHold {
+    param([object]$ReleaseState)
+    if (-not $ReleaseState -or -not $ReleaseState.candidate -or
+        -not $ReleaseState.migration_sync_hold) {
+        return $false
+    }
+    $candidate = $ReleaseState.candidate
+    $hold = $ReleaseState.migration_sync_hold
+    if ([string]$candidate.artifact_kind -ne $productionCandidateArtifactKind -or
+        [string]$candidate.branch -ne "main" -or
+        [string]$hold.validation_key -ne [string]$candidate.validation_key) {
+        return $false
+    }
+    $expiresAt = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse([string]$hold.expires_at, [ref]$expiresAt) -or
+        $expiresAt -le [DateTimeOffset]::UtcNow) {
+        return $false
+    }
+    return $true
+}
+
+function Test-WatchdogRecoverySuppressed {
+    param(
+        [Parameter(Mandatory = $true)][string]$ServiceKey,
+        [Parameter(Mandatory = $true)][string]$ServiceState,
+        [object]$ReleaseState
+    )
+    return [bool]($ServiceKey -eq "sync" -and $ServiceState -eq "STOPPED" -and
+        (Test-CoordinatedMigrationSyncHold -ReleaseState $ReleaseState))
+}
+
+function Enter-CoordinatedMigrationSyncHold {
+    param(
+        [Parameter(Mandatory = $true)][object]$State,
+        [Parameter(Mandatory = $true)][object]$Candidate
+    )
+    $enteredAt = [DateTimeOffset]::UtcNow
+    $hold = [pscustomobject]@{
+        validation_key = [string]$Candidate.validation_key
+        reason = "COORDINATED_STORAGE_MIGRATION_VERIFICATION"
+        entered_at = $enteredAt.ToString("o")
+        expires_at = $enteredAt.AddHours(2).ToString("o")
+    }
+    if ($State.PSObject.Properties['migration_sync_hold']) {
+        $State.migration_sync_hold = $hold
+    } else {
+        $State | Add-Member -NotePropertyName migration_sync_hold `
+            -NotePropertyValue $hold
+    }
+    $State.updated_at = $enteredAt.ToString("o")
+    Write-ReleaseControlState -State $State
+    $syncService = $services | Where-Object Key -eq "sync" | Select-Object -First 1
+    if ($syncService) { Stop-ForecasterService $syncService }
+    Write-ReleaseHistory -Event "COORDINATED_STORAGE_MIGRATION_SYNC_HELD" `
+        -Release $Candidate -Detail @{
+            validation_key = [string]$Candidate.validation_key
+            expires_at = [string]$hold.expires_at
+        }
+    return $hold
+}
+
+function Exit-CoordinatedMigrationSyncHold {
+    $state = Get-ReleaseControlState
+    if (-not $state -or -not $state.migration_sync_hold) { return }
+    $validationKey = [string]$state.migration_sync_hold.validation_key
+    $state.migration_sync_hold = $null
+    $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+    Write-ReleaseControlState -State $state
+    if ($state.candidate) {
+        Write-ReleaseHistory -Event "COORDINATED_STORAGE_MIGRATION_SYNC_RELEASED" `
+            -Release $state.candidate -Detail @{ validation_key = $validationKey }
+    }
+}
+
 function Verify-CandidateCoordinatedMigration {
     $state = Get-ReleaseControlState
     if (-not $state -or -not $state.candidate -or -not $state.stable) {
@@ -1360,6 +1434,7 @@ function Verify-CandidateCoordinatedMigration {
         -CandidateRevision ([string]$candidate.git_sha))
     $files = @(Get-CoordinatedMigrationFiles -ChangedFiles $changed `
         -CandidateRevision ([string]$candidate.git_sha))
+    $null = Enter-CoordinatedMigrationSyncHold -State $state -Candidate $candidate
     $evidence = Get-CoordinatedMigrationLiveEvidence -Candidate $candidate `
         -Stable $state.stable -MigrationFiles $files
     $receipt = New-CoordinatedMigrationReceipt -Evidence $evidence
@@ -6388,8 +6463,14 @@ function Invoke-ForecasterWatchdog {
                 return 0
             }
             $status = @(Get-ForecasterStatus)
+            $releaseState = Get-ReleaseControlState
             foreach ($service in $services) {
                 $row = $status | Where-Object Key -eq $service.Key
+                if (Test-WatchdogRecoverySuppressed -ServiceKey $service.Key `
+                    -ServiceState $row.State -ReleaseState $releaseState) {
+                    $failureCounts[$service.Key] = 0
+                    continue
+                }
                 $unhealthy = if ($service.Key -eq "broadcast") {
                     (Test-BroadcastPublisherEnabled) -and $row.State -eq "DEGRADED"
                 } else {
@@ -7182,6 +7263,7 @@ function Invoke-ControlCenterOperationAction {
         "ServiceStart" {
             $target = $services | Where-Object Key -eq $ServiceKey
             if (-not $target) { throw "Unknown service key: $ServiceKey" }
+            if ($target.Key -eq "sync") { Exit-CoordinatedMigrationSyncHold }
             Start-ForecasterService $target
             return $target
         }
