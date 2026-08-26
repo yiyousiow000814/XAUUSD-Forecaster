@@ -13,8 +13,8 @@ import numpy as np
 from xauusd_forecaster.evidence.ledger import canonical_hash
 from .execution_costs import net_shadow_log_return
 from .market import MarketObservation
-from .ridge import RidgeArtifact, train_ridge
-from .training import MARKET_FEATURES
+from xauusd_forecaster.training.ridge import RidgeArtifact, train_ridge
+from xauusd_forecaster.training.materialization import MARKET_FEATURES
 
 
 UTC = timezone.utc

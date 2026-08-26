@@ -31,6 +31,10 @@ merges.
 | `xauusd_forecaster/forward_ledger.py` | `xauusd_forecaster/evidence/ledger.py` | Append-only evidence-store owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
 | `xauusd_forecaster/evidence_v2.py` | `xauusd_forecaster/evidence/schema.py` | V2 evidence schema/integrity owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
 | `xauusd_forecaster/executable_label.py` | `xauusd_forecaster/evidence/executable_label.py` | Executable-price evidence label owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/training/__init__.py` legacy training import surface | `xauusd_forecaster/training/materialization.py` | Training materialization owner | Package facade contains explicit imports and `__all__` only | Retain while external callers use the historical training module surface |
+| `xauusd_forecaster/training_v2.py` | `xauusd_forecaster/training/generation.py` | Generation fitting/publication owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/training_owner.py` | `xauusd_forecaster/training/runtime.py` | Background training lease/runtime owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/ridge.py` | `xauusd_forecaster/training/ridge.py` | Ridge artifact/fitting owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
 
 Future Phase D rows must name every retained flat facade. `THIN_SHIM` means the
 legacy Python file contains only a docstring, explicit canonical imports,

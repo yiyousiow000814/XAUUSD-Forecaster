@@ -14,8 +14,8 @@ contract.
 | Five-minute decision | `scripts/run_forward_collector.py` | Collector process loop | `xauusd_forecaster/collector_runtime.py`, `xauusd_forecaster/decision/engine.py`, `xauusd_forecaster/decision/live.py`, `xauusd_forecaster/decision/inference.py` | `tests/test_decision.py`, `tests/test_forward_only.py` | [Decision and Evidence](../design/DECISION_AND_EVIDENCE.md) |
 | Quote or session handling | `ctrader/XauusdForwardQuoteBridge/XauusdForwardQuoteBridge.cs` | Quote Bridge | `xauusd_forecaster/market.py`, `xauusd_forecaster/market_session.py` | `tests/test_quotes_and_labeling.py`, `tests/test_market_session.py` | [Forward-only Evidence](../contracts/FORWARD_ONLY.md) |
 | Outcome labeling | `xauusd_forecaster/decision/live.py` | Collector settlement loop | `xauusd_forecaster/evidence/executable_label.py`, `xauusd_forecaster/execution_costs.py` | `tests/test_quotes_and_labeling.py`, `tests/test_execution_costs.py` | [System Boundaries](../contracts/SYSTEM_BOUNDARIES.md) |
-| Training materialization | `xauusd_forecaster/training_v2.py` | BackgroundTrainingOwner | `xauusd_forecaster/training_owner.py`, `xauusd_forecaster/forward_ledger.py` | `tests/test_training_owner.py`, `tests/test_evidence_integrity_v2.py` | [Training and Models](../design/TRAINING_AND_MODELS.md) |
-| Model training or publish | `xauusd_forecaster/training_v2.py` | BackgroundTrainingOwner | `xauusd_forecaster/ridge.py`, `xauusd_forecaster/news_contracts.py` | `tests/test_evidence_integrity_v2.py`, `tests/test_production_shape.py` | [Training and Models](../design/TRAINING_AND_MODELS.md) |
+| Training materialization | `xauusd_forecaster/training/materialization.py` | BackgroundTrainingOwner | `xauusd_forecaster/training/runtime.py`, `xauusd_forecaster/evidence/ledger.py` | `tests/test_training_owner.py`, `tests/test_evidence_integrity_v2.py` | [Training and Models](../design/TRAINING_AND_MODELS.md) |
+| Model training or publish | `xauusd_forecaster/training/generation.py` | BackgroundTrainingOwner | `xauusd_forecaster/training/ridge.py`, `xauusd_forecaster/news_contracts.py` | `tests/test_evidence_integrity_v2.py`, `tests/test_production_shape.py` | [Training and Models](../design/TRAINING_AND_MODELS.md) |
 | News collection | `xauusd_forecaster/news_collection_owner.py` | NewsCollectionOwner | `xauusd_forecaster/news.py`, `xauusd_forecaster/source_polling.py` | `tests/test_news_collection_owner.py`, `tests/test_source_polling.py` | [News and AI](../design/NEWS_AND_AI.md) |
 | Annotation | `xauusd_forecaster/annotation.py` | Annotator scheduler | `xauusd_forecaster/news_semantics.py`, `scripts/run_news_annotator.py` | `tests/test_news_semantic_contract_v15.py`, `tests/test_critical_annotation_state.py` | [News Evidence](../contracts/NEWS_EVIDENCE.md) |
 | Impact and event identity | `xauusd_forecaster/news_impact.py` | Annotator scheduler | `xauusd_forecaster/news_identity.py`, `xauusd_forecaster/news_event_identity.py` | `tests/test_news_event_identity.py`, `tests/test_news_hybrid_retrieval.py` | [News Evidence](../contracts/NEWS_EVIDENCE.md) |
@@ -133,11 +133,11 @@ contract.
 
 ### Training and models
 
-- `xauusd_forecaster/training_owner.py` — owns background claim/lease/recovery.
-- `xauusd_forecaster/training_v2.py` — owns dirty materialization, due checks,
+- `xauusd_forecaster/training/runtime.py` — owns background claim/lease/recovery.
+- `xauusd_forecaster/training/generation.py` — owns dirty materialization, due checks,
   fits, manifests and generation publication.
-- `xauusd_forecaster/training.py` — provides shared market/news fit operations.
-- `xauusd_forecaster/ridge.py` — defines the regularized linear artifact.
+- `xauusd_forecaster/training/materialization.py` — provides shared market/news fit operations.
+- `xauusd_forecaster/training/ridge.py` — defines the regularized linear artifact.
 - `xauusd_forecaster/news_contracts.py` — defines the required generation
   membership and active news contract.
 

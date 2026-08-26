@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster import training_owner
+from xauusd_forecaster.training import runtime as training_owner
 from xauusd_forecaster.market import BrokerMarketSession, MarketObservation
 from xauusd_forecaster.runtime_health import write_runtime_heartbeat
 from xauusd_forecaster.collector_runtime import append_current_grid_events

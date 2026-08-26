@@ -8,9 +8,9 @@ from pathlib import Path
 
 import numpy as np
 
-from .factors import NEWS_FEATURES, aggregate_news_features
+from xauusd_forecaster.factors import NEWS_FEATURES, aggregate_news_features
 from xauusd_forecaster.evidence.ledger import ForwardLedger, canonical_hash
-from .ridge import RidgeArtifact, train_ridge
+from xauusd_forecaster.training.ridge import RidgeArtifact, train_ridge
 
 
 UTC = timezone.utc

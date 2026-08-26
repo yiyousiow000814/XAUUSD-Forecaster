@@ -20,8 +20,8 @@ from xauusd_forecaster.news_contracts import (
 )
 from xauusd_forecaster.news_evidence import EVIDENCE_POLICY_VERSION
 from xauusd_forecaster.news_input_coverage import NEWS_INPUT_STATES
-from xauusd_forecaster.ridge import RidgeArtifact
-from xauusd_forecaster.training import MARKET_FEATURES
+from xauusd_forecaster.training.ridge import RidgeArtifact
+from xauusd_forecaster.training.materialization import MARKET_FEATURES
 
 
 MIN_CALIBRATION_BLOCKS = 20
