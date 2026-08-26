@@ -1083,7 +1083,7 @@ def test_routine_only_account_generates_daily_brief(tmp_path, monkeypatch) -> No
 def test_daily_brief_reranks_account_headroom_for_each_date(
     tmp_path, monkeypatch,
 ) -> None:
-    from scripts import run_news_annotator as runner
+    from xauusd_forecaster import daily_brief_runtime as runner
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     credentials = (

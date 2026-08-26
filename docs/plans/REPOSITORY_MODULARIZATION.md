@@ -306,6 +306,27 @@ Implementation status: `PENDING` until the C4 stacked change merges.
 - **Non-goals:** no cadence, backoff, cursor, page, byte, auth, endpoint,
   heartbeat, lane, retry, shutdown, payload, or production-state change.
 
+### Phase C-5 — News Annotator runtime
+
+Implementation status: `PENDING` until the C5 stacked change merges.
+
+- **Exact responsibility:** one-job provider dispatch, account/model routing,
+  durable scheduled-batch transitions, lock retry, scheduler sleep, and the
+  bounded Daily Brief backlog cycle.
+- **Target modules:** transitional `news_scheduler_runtime.py` and
+  `daily_brief_runtime.py`; D3 moves these behind final News package paths.
+- **Entry boundary:** `run_news_annotator.py` retains CLI/config, heartbeat,
+  account thread-pool construction, startup/shutdown, and top-level cycle calls.
+- **Compatibility:** entry wrappers preserve existing callable names and inject
+  the script-owned thread-pool constructor into the batch runtime.
+- **Focused tests:** scheduler and Brief families patch/test the canonical
+  runtime owners; process-cycle and heartbeat cases retain the entry script.
+- **Rollback:** revert the extraction commit; no job, quota, attempt, Brief, or
+  heartbeat state is migrated.
+- **Non-goals:** no provider call, claim order, lane/account allocation,
+  attempt, backoff, terminal transition, retry timestamp, Brief finalization,
+  heartbeat, concurrency, credential, or production-state change.
+
 ## Priority method
 
 File size is only an inventory signal. Rank a proposed split using:
