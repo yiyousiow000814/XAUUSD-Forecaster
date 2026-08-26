@@ -31,11 +31,16 @@ source control only.
 `scripts/install_control_plane.ps1` installs the exact fetched `origin/main`
 revision through a detached clean staging worktree and verifies the complete
 runtime-control bundle before an ordered watchdog handoff. The installed
-`scripts/xauusd_control_center.ps1` child is the release and local supervision
-owner and is the only normal owner allowed to Promote or Reverse Stable. Child
-path, installed control revision and bundle hashes must match the parent Control
-Plane identity. Each Business Runtime service owns its own heartbeat; Control
-Plane installation preserves its revision and processes.
+`scripts/xauusd_control_center.ps1` child is the stable CLI, `Action`, and
+`ServiceKey` entry path. It dot-sources three same-process owners:
+`xauusd_control_center_runtime.ps1` for supervision and runtime identity,
+`xauusd_control_center_release.ps1` for Candidate validation and release
+transactions, and `xauusd_control_center_presentation.ps1` for diagnostics and
+WPF/WinForms presentation. The release owner is the only normal owner allowed
+to Promote or Reverse Stable. Child path, installed control revision and bundle
+hashes must match the parent Control Plane identity. Each Business Runtime
+service owns its own heartbeat; Control Plane installation preserves its
+revision and processes while the watchdog observes the service contracts.
 
 ## 4. Inputs and outputs
 
@@ -125,6 +130,9 @@ failures remain owned and visible in WPF rather than switching release engines.
 
 - `scripts/xauusd_control_center.ps1`
 - `scripts/install_control_plane.ps1`
+- `scripts/xauusd_control_center_runtime.ps1`
+- `scripts/xauusd_control_center_release.ps1`
+- `scripts/xauusd_control_center_presentation.ps1`
 - `scripts/xauusd_control_center_launcher.vbs`
 - `scripts/xauusd_watchdog_launcher.vbs`
 - `scripts/xauusd_watchdog_guard.ps1`
@@ -136,6 +144,12 @@ failures remain owned and visible in WPF rather than switching release engines.
 ## 13. Core modules
 
 - `xauusd_forecaster/runtime_health.py`: atomic service heartbeat writer.
+- `scripts/xauusd_control_center_runtime.ps1`: process discovery, service
+  supervision, runtime identity, watchdog, shortcut and autostart behavior.
+- `scripts/xauusd_control_center_release.ps1`: release persistence, Candidate
+  validation, Promote/Reverse transaction ordering and recovery.
+- `scripts/xauusd_control_center_presentation.ps1`: bounded diagnostics and the
+  WPF/WinForms shells.
 - `xauusd_forecaster/production_shape.py`: preflight state contract.
 - `scripts/check_production_shape.py`: one-shot production-shape CLI.
 - `scripts/check_public_health.py`: bounded public health probe.
@@ -162,11 +176,11 @@ boundaries.
 
 ## 16. Known current gaps
 
-`xauusd_control_center.ps1` combines service supervision, Candidate discovery,
-Git/CI checks, Cloudflare validation, release transactions, coordinated
-migration evidence, database preflight, WPF/WinForms UI, and operator
-diagnostics. Its change surface and rollback risk remain high; repository review
-discipline now requires architecture and sibling-boundary evidence for changes.
+The runtime, release, and presentation owner files still share one PowerShell
+process and script scope by design, so they are not independent failure
+domains. The thin entry script remains their composition root. Changes must
+continue to review shared state and sibling boundaries even though ownership is
+now visible in separate files.
 
 ## 17. Links back to System Architecture
 

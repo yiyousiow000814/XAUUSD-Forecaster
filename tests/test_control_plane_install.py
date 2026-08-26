@@ -19,6 +19,9 @@ pytestmark = pytest.mark.skipif(
 ROOT = Path(__file__).resolve().parents[1]
 CONTROL_FILES = (
     "xauusd_control_center.ps1",
+    "xauusd_control_center_runtime.ps1",
+    "xauusd_control_center_release.ps1",
+    "xauusd_control_center_presentation.ps1",
     "control_center.xaml",
     "xauusd_control_center_launcher.vbs",
     "xauusd_watchdog_launcher.vbs",
@@ -33,12 +36,18 @@ def _run_contract(tmp_path: Path, body: str) -> str:
     runtime.mkdir(exist_ok=True)
     repository.mkdir(exist_ok=True)
     script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    owner_load = "; ".join(
+        f". '{ROOT / 'scripts' / name}'"
+        for name in CONTROL_FILES[1:4]
+    )
     command = (
         f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{runtime}' "
-        f"-RepositoryRoot '{repository}'; {body}"
+        f"-RepositoryRoot '{repository}'; {owner_load}; {body}"
     )
+    contract_script = tmp_path / "control-plane-contract.ps1"
+    contract_script.write_text(command, encoding="utf-8")
     result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", contract_script],
         capture_output=True,
         text=True,
         check=False,
@@ -119,6 +128,7 @@ def _state_machine_mocks(old_revision: str, target_revision: str) -> str:
           $p=[pscustomobject]@{{process_id=10;process_start_token='service-token'}};
           [pscustomobject]@{{business_runtime_revision='runtime';services=[pscustomobject]@{{quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@($p);broadcast=@()}}}}
         }};
+        function Test-BroadcastPublisherEnabled {{ return $false }};
         function Assert-ControlPlaneIsolationSnapshot {{ param($Before,$After); $script:timeline+='isolation' }};
         function New-VerifiedRuntimeControlBundleStage {{ param($SourceRoot,$SourceRevision,$StageRoot,[switch]$RequireImmutableSource); $script:timeline+='stage'; [pscustomobject]@{{source_revision='{target_revision}'}} }};
         function Suspend-ControlPlaneSupervision {{ $script:timeline+='suspend'; @{{}} }};
@@ -346,7 +356,10 @@ def test_release_transaction_blocks_control_plane_install(tmp_path: Path) -> Non
 
 
 def test_control_plane_isolation_and_visible_identity_are_explicit() -> None:
-    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    source = "\n".join(
+        (ROOT / "scripts" / name).read_text(encoding="utf-8")
+        for name in CONTROL_FILES[:4]
+    )
     xaml = (ROOT / "scripts" / "control_center.xaml").read_text(encoding="utf-8")
     launcher = (ROOT / "scripts" / "xauusd_control_center_launcher.vbs").read_text(encoding="utf-8")
     install_body = source.split("function Invoke-ControlPlaneInstall", 1)[1].split(

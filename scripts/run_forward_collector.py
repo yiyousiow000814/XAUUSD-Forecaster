@@ -17,18 +17,10 @@ sys.path.insert(0, str(MODULE_ROOT))
 from xauusd_forecaster.forward_engine import ForwardEngine, floor_five_minutes  # noqa: E402
 from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
 from xauusd_forecaster.market import JsonlMarketProvider, NullMarketProvider  # noqa: E402
-from xauusd_forecaster.market_session import skipped_grid_reason  # noqa: E402
 from xauusd_forecaster.u5_state import U5State  # noqa: E402
 from xauusd_forecaster.maintenance import (  # noqa: E402
     archive_completed_quote_days,
     backup_forward_ledger,
-)
-from xauusd_forecaster.training_v2 import (  # noqa: E402
-    require_current_contract_generation,
-    train_due_v2,
-)
-from xauusd_forecaster.news_contract_migration import (  # noqa: E402
-    append_missing_current_news_snapshots,
 )
 from xauusd_forecaster.execution_learning import (  # noqa: E402
     append_due_exit_predictions,
@@ -44,102 +36,27 @@ from xauusd_forecaster.training_owner import (  # noqa: E402
     install_training_owner_schema,
     request_background_training,
 )
+from xauusd_forecaster.collector_runtime import (  # noqa: E402
+    NEWS_CONTRACT_RECONCILE_SECONDS,
+    append_current_grid_events,
+    append_due_grid_events,
+    reconcile_news_contract,
+    startup_reconciliation_plan,
+)
 
 
 UTC = timezone.utc
-NEWS_CONTRACT_RECONCILE_SECONDS = 300
 
 
-def reconcile_news_contract(ledger, cutoff: datetime, artifact_root: Path) -> dict:
-    """Migrate PIT news snapshots and build any missing current generation."""
-    migration = append_missing_current_news_snapshots(ledger, cutoff)
-    training = train_due_v2(ledger, cutoff, artifact_root)
-    generation_id = require_current_contract_generation(ledger.connection)
-    return {
-        "migration": migration,
-        "training": training,
-        "active_generation_id": generation_id,
-    }
 
 
-def startup_reconciliation_plan(connection) -> dict:
-    """Choose the bounded startup path without weakening generation safety."""
-    try:
-        generation_id = require_current_contract_generation(connection)
-    except RuntimeError:
-        return {"synchronous": True, "active_generation_id": None}
-    return {"synchronous": False, "active_generation_id": generation_id}
 
 
 DEFAULT_LOCAL_ROOT = MODULE_ROOT / ".local" / "forward"
 
 
-def append_due_grid_events(
-    ledger: ForwardLedger,
-    engine: ForwardEngine,
-    provider: JsonlMarketProvider | NullMarketProvider,
-    last_decision: datetime,
-    boundary: datetime,
-    collected_at: datetime,
-    news_status: list[dict[str, object]],
-) -> tuple[datetime, list[tuple[datetime, str, str]], dict[str, int]]:
-    """Append only broker-confirmed, quote-backed live decision grids."""
-    try:
-        visible_observations = provider.observations(boundary)
-    except (OSError, ValueError, json.JSONDecodeError):
-        visible_observations = []
-    try:
-        broker_session = provider.market_session(collected_at)
-    except (OSError, ValueError, KeyError, json.JSONDecodeError):
-        broker_session = None
-    appended: list[tuple[datetime, str, str]] = []
-    skipped_grids: dict[str, int] = {}
-    candidate = last_decision + timedelta(minutes=5)
-    while candidate <= boundary:
-        if candidate >= ledger.forward_epoch:
-            skip_reason = skipped_grid_reason(
-                candidate, boundary, visible_observations,
-                broker_session, collected_at,
-            )
-            if skip_reason:
-                skipped_grids[skip_reason] = skipped_grids.get(skip_reason, 0) + 1
-            else:
-                snapshot_id, decision_id = engine.append_clock_event(
-                    candidate, collected_at, news_status
-                )
-                appended.append((candidate, snapshot_id, decision_id))
-        last_decision = candidate
-        candidate += timedelta(minutes=5)
-    return last_decision, appended, skipped_grids
 
 
-def append_current_grid_events(
-    ledger: ForwardLedger,
-    engine: ForwardEngine,
-    provider: JsonlMarketProvider | NullMarketProvider,
-    last_decision: datetime,
-    news_status: list[dict[str, object]],
-    *,
-    clock=lambda: datetime.now(UTC),
-) -> tuple[
-    datetime,
-    datetime,
-    list[tuple[datetime, str, str]],
-    dict[str, int],
-]:
-    """Append due grids against a timestamp taken after blocking maintenance."""
-    collected_at = clock()
-    boundary = floor_five_minutes(collected_at)
-    next_decision, appended, skipped = append_due_grid_events(
-        ledger,
-        engine,
-        provider,
-        last_decision,
-        boundary,
-        collected_at,
-        news_status,
-    )
-    return collected_at, next_decision, appended, skipped
 
 
 def main() -> int:

@@ -22,12 +22,12 @@ Architecture documents affected: SYSTEM_ARCHITECTURE, RUNTIME_AND_RELEASE, CODEB
 ### Pre-integration snapshot
 
 - Verification date: 2026-08-24.
-- Latest main: `17b71467d95dbde12ed59cda2537a4e4b5f32a1e`.
+- Latest main: `c2df79bff1fac75e324f12f2cdf0d97edadbaf96`.
 - Rebuild reason: the pending modularization stack predates the Control Plane,
   bounded repository retry, exact child identity/WPF lifecycle, and deterministic
   structured Control Center operation-result contracts merged by #284, #286,
-  #293, and #300.
-- Latest-main collection: 1,547 tests.
+  #293, #300, #303, #305, and #306.
+- Latest-main collection: 1,569 tests.
 - Pre-rebase Closure collection: 1,512 tests.
 - Assistant remains `PAUSED`.
 
@@ -53,6 +53,24 @@ Architecture documents affected: SYSTEM_ARCHITECTURE, RUNTIME_AND_RELEASE, CODEB
 
 Replacement heads and semantic conflict ownership are recorded as each Draft
 PR is repaired. A replacement head remains `PENDING` until its PR is merged.
+
+### Semantic integration evidence
+
+- #287 tracker add/add: retained both this latest-main integration snapshot and
+  the original Phase C execution tracker; no runtime boundary was involved.
+- #295 Control Center: `c2df79bff1fac75e324f12f2cdf0d97edadbaf96`
+  was the behavioral source, including #303 Candidate static-asset validation
+  and #305 local release-observability credential loading, plus #306 persisted
+  failed platform evidence. PowerShell AST comparison mapped all 205 functions
+  exactly once with zero normalized-body hash changes: 72 runtime/Control Plane,
+  90 release/validation,
+  and 43 presentation/structured-result definitions.
+  The stable entry retains the complete latest-main parameter block, constants,
+  service inventory, `Action`/`ServiceKey` dispatch, and three dot-source paths.
+- The runtime-control bundle adds all three split owners to the latest-main
+  exact-revision/hash transaction; Control Plane tests build and restore the
+  complete nine-file bundle. Business Runtime processes and Stable remain
+  untouched by this source-only reconstruction.
 ## Original campaign execution tracker
 
 ## Status and baseline
@@ -86,8 +104,8 @@ described by the campaign are `TARGET` until the corresponding row is merged.
 | 4 | C3c `refactor/dashboard-api-optional-resources` | C3b | Current status and optional read-resource composition | Status resource owner, API compatibility imports, focused tests/maps | API, audit and release-read tests; full Python | Revert mechanical owner move | DRAFT PR OPEN | #290 / `496423da5e245b844ef0c8afb1f227867ef7d560` |
 | 5 | C3d `refactor/dashboard-operator-bridge` | C3c | Audited local scheduler operator bridge | Auth/list/apply service owner and HTTP adapter | Retry authorization/transition tests; full Python | Revert bridge extraction | DRAFT PR OPEN | #291 / `a6fe7ad59f079f008795377ed2022fdeda19d2e4` |
 | 6 | C4 `refactor/dashboard-sync-runtime` | C3d | Sync progress, cadence, transport, and lane runtime | `dashboard/sync/` owners, thin script, focused tests/maps | Sync isolation/protocol tests; full Python | Revert package extraction | DRAFT PR OPEN | #292 / `0657ede025d15ec5d3a59f576c848ad946fbdadd` |
-| 7 | C5 `refactor/news-annotator-runtime` | C4 | Durable annotator batch execution and Brief-cycle orchestration | News scheduler/Brief runtime owners, thin script, focused tests/maps | Scheduler, annotation, retrieval, Brief; full Python | Revert package extraction | IN PROGRESS | Pending validation |
-| 8 | C6 `refactor/control-center-boundaries` | C5 | Control Center release/supervision modules behind stable entry path | PowerShell owner files, bundle manifest, launcher tests/maps | Windows runtime and release fixtures | Revert dot-source extraction and manifest change | PLANNED | TBD |
+| 7 | C5 `refactor/news-annotator-runtime` | C4 | Durable annotator batch execution and Brief-cycle orchestration | News scheduler/Brief runtime owners, thin script, focused tests/maps | Scheduler, annotation, retrieval, Brief; full Python | Revert package extraction | DRAFT PR OPEN | #294 / `57d65b75aa14d3d4a3e87be28c068a113d72d045` |
+| 8 | C6 `refactor/control-center-boundaries` | C5 | Collector domain runtime and Control Center release/supervision/presentation owners behind stable entry paths | Python runtime owner, PowerShell owner files, bundle manifest, launcher tests/maps | Collector contracts plus Windows runtime and release fixtures | Revert owner extraction and manifest change | IN PROGRESS | Pending validation; PR #279 conflict anticipated and must be resolved by rebase, not cherry-pick |
 | 9 | D1 `refactor/decision-evidence-packages` | C6 | Canonical Decision and Evidence packages | Canonical modules, narrow shims, migration map/tests | Decision/evidence/forward-only/production-shape; full Python | Restore canonical files to legacy paths | PLANNED | TBD |
 | 10 | D2 `refactor/training-package` | D1 | Canonical Training package | Training modules, narrow shims, migration map/tests | Training/evidence integrity; full Python | Restore canonical files to legacy paths | PLANNED | TBD |
 | 11 | D3 `refactor/news-ai-packages` | D2 | Canonical News and AI packages and SCC reduction | News/AI modules, narrow shims, migration map/tests | Scheduler/annotation/retrieval/Brief/AI; full Python | Restore canonical files to legacy paths | PLANNED | TBD |

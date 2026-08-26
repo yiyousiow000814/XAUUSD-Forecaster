@@ -14,14 +14,27 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNTIME_CONTROL_FILES = (
+CONTROL_CENTER_OWNER_FILES = (
     "xauusd_control_center.ps1",
+    "xauusd_control_center_release.ps1",
+    "xauusd_control_center_runtime.ps1",
+    "xauusd_control_center_presentation.ps1",
+)
+RUNTIME_CONTROL_FILES = (
+    *CONTROL_CENTER_OWNER_FILES,
     "control_center.xaml",
     "xauusd_control_center_launcher.vbs",
     "xauusd_watchdog_launcher.vbs",
     "xauusd_watchdog_guard.ps1",
     "xauusd_watchdog_guard_launcher.vbs",
 )
+
+
+def _read_control_center_sources() -> str:
+    return "\n".join(
+        (ROOT / "scripts" / name).read_text(encoding="utf-8")
+        for name in CONTROL_CENTER_OWNER_FILES
+    )
 
 
 def test_quote_bridge_uses_standalone_local_configuration() -> None:
@@ -40,9 +53,7 @@ def test_quote_bridge_uses_standalone_local_configuration() -> None:
 
 
 def test_control_center_treats_weekly_close_as_healthy() -> None:
-    control_center = (
-        ROOT / "scripts" / "xauusd_control_center.ps1"
-    ).read_text(encoding="utf-8")
+    control_center = _read_control_center_sources()
 
     assert "Test-ExpectedWeeklyMarketClosure" in control_center
     assert "Get-BrokerMarketSession" in control_center
@@ -54,9 +65,7 @@ def test_control_center_treats_weekly_close_as_healthy() -> None:
 
 
 def test_control_center_loads_collector_keys_without_exposing_them() -> None:
-    control_center = (
-        ROOT / "scripts" / "xauusd_control_center.ps1"
-    ).read_text(encoding="utf-8")
+    control_center = _read_control_center_sources()
 
     assert 'function Get-CollectorSecret' in control_center
     assert '.local\\secrets\\collector-keys.json' in control_center
@@ -350,7 +359,7 @@ def test_repository_local_release_secret_path_is_gitignored() -> None:
 
 def test_control_center_stages_releases_without_main_driven_activation() -> None:
     path = ROOT / "scripts" / "xauusd_control_center.ps1"
-    control_center = path.read_text(encoding="utf-8")
+    control_center = _read_control_center_sources()
 
     assert (
         '$reloadableServiceKeys = @('
@@ -396,9 +405,7 @@ def test_control_center_stages_releases_without_main_driven_activation() -> None
 
 
 def test_local_assistant_worker_is_not_installed_or_supervised() -> None:
-    control_center = (
-        ROOT / "scripts" / "xauusd_control_center.ps1"
-    ).read_text(encoding="utf-8")
+    control_center = _read_control_center_sources()
 
     assert not (ROOT / "scripts" / "run_assistant_worker.py").exists()
     assert not (ROOT / "xauusd_forecaster" / "assistant_local_runtime.py").exists()
@@ -418,12 +425,20 @@ def _run_control_center_contract(tmp_path, body: str) -> str:
         encoding="utf-8",
     )
     script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    owner_load = "; ".join(
+        f". '{ROOT / 'scripts' / name}'"
+        for name in CONTROL_CENTER_OWNER_FILES[1:]
+    )
     command = (
         f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{runtime}' "
-        f"-RepositoryRoot '{repository}'; {body}"
+        f"-RepositoryRoot '{repository}'; {owner_load}; {body}"
     )
+    contract_script = tmp_path / "control-center-contract.ps1"
+    # Windows PowerShell 5 treats BOM-less script files as the active ANSI
+    # code page, so preserve non-ASCII contract fixtures with an explicit BOM.
+    contract_script.write_text(command, encoding="utf-8-sig")
     result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", contract_script],
         capture_output=True, text=True, check=False,
     )
     if result.returncode:
@@ -1247,9 +1262,7 @@ def test_control_center_launcher_and_shortcut_use_verified_bundle_path(tmp_path)
 
 
 def test_control_center_records_wpf_and_bounded_fallback_diagnostics() -> None:
-    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
-        encoding="utf-8",
-    )
+    source = _read_control_center_sources()
     assert 'event = "CONTROL_CENTER_UI_STARTED"' in source
     assert 'Write-ControlCenterUiStarted -Mode "WPF"' in source
     assert 'Write-ControlCenterUiStarted -Mode "WINFORMS_FALLBACK"' in source
@@ -1257,9 +1270,7 @@ def test_control_center_records_wpf_and_bounded_fallback_diagnostics() -> None:
 
 
 def test_candidate_auth_evidence_uses_formal_access_host_only() -> None:
-    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
-        encoding="utf-8"
-    )
+    source = _read_control_center_sources()
     body = source.split("function Get-CandidateAuthInspection", 1)[1].split(
         "function Invoke-AutomaticCandidateValidation", 1
     )[0]
@@ -1283,7 +1294,7 @@ def test_wpf_shell_is_bundled_with_winforms_fallback_and_release_controls() -> N
         "CandidateTechnicalEvidence",
     ):
         assert name in serialized
-    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    source = _read_control_center_sources()
     assert "function Show-WpfControlCenter" in source
     assert "if (Show-WpfControlCenter)" in source
     assert "using WinForms fallback" in source
@@ -1292,18 +1303,14 @@ def test_wpf_shell_is_bundled_with_winforms_fallback_and_release_controls() -> N
 
 
 def test_control_center_route_status_is_not_inherited_from_another_gate() -> None:
-    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
-        encoding="utf-8",
-    )
+    source = _read_control_center_sources()
     assert '$apiRouteState = if ($directed.tested -gt 0)' in source
     assert '$contractCheck = if ($directed.tested -gt 0)' in source
     assert '"API routes: $contractCheck | $($directed.passed)/$($directed.tested)"' in source
 
 
 def test_release_gui_actions_are_tracked_single_flight_in_both_shells() -> None:
-    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
-        encoding="utf-8",
-    )
+    source = _read_control_center_sources()
     wpf = source[source.index("function Show-WpfControlCenter"):source.index(
         "function Show-ControlCenter"
     )]
@@ -1576,9 +1583,7 @@ def test_sibling_gui_operations_share_explicit_structured_exit_contract(
 
 
 def test_gui_operation_lifecycle_prevents_orphan_and_duplicate_children() -> None:
-    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
-        encoding="utf-8"
-    )
+    source = _read_control_center_sources()
     wpf = source[source.index("function Show-WpfControlCenter"):source.index(
         "function Show-ControlCenter"
     )]
@@ -1606,9 +1611,7 @@ def test_gui_operation_lifecycle_prevents_orphan_and_duplicate_children() -> Non
 
 
 def test_wpf_post_render_failures_cannot_enter_winforms_fallback() -> None:
-    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
-        encoding="utf-8"
-    )
+    source = _read_control_center_sources()
     wpf = source[source.index("function Show-WpfControlCenter"):source.index(
         "function Show-ControlCenter"
     )]
@@ -1640,9 +1643,7 @@ def test_gui_children_are_bound_to_installed_script_and_parent_revision(tmp_path
         'Write-Output "$pass,$stale,$revision"',
     )
     assert result == "True,False,False"
-    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
-        encoding="utf-8"
-    )
+    source = _read_control_center_sources()
     assert source.count('"-ExpectedControlScriptPath"') >= 2
     assert source.count('"-ExpectedControlRevision"') >= 2
     assert "EXACT | HASH VERIFIED" in source
@@ -1676,9 +1677,7 @@ def test_wpf_runtime_loads_and_keeps_release_controls_reachable() -> None:
 
 def test_wpf_resource_is_utf8_and_footer_has_no_mojibake() -> None:
     xaml = (ROOT / "scripts" / "control_center.xaml").read_text(encoding="utf-8")
-    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
-        encoding="utf-8"
-    )
+    source = _read_control_center_sources()
     assert "Decision support only · never authorizes trading" in xaml
     assert "Decision support only Â· never authorizes trading" not in xaml
     assert "[IO.File]::ReadAllText" in source
@@ -2016,9 +2015,7 @@ def test_observation_timeout_matches_the_thirty_minute_decision_window(
 
 
 def test_watchdog_autostart_uses_one_windowless_registration_path(tmp_path) -> None:
-    control_center = (
-        ROOT / "scripts" / "xauusd_control_center.ps1"
-    ).read_text(encoding="utf-8")
+    control_center = _read_control_center_sources()
     launcher = ROOT / "scripts" / "xauusd_watchdog_launcher.vbs"
     launcher_text = launcher.read_text(encoding="utf-8")
     guard_launcher = ROOT / "scripts" / "xauusd_watchdog_guard_launcher.vbs"
@@ -2629,9 +2626,7 @@ def test_failed_directed_validation_persists_bounded_route_receipt(tmp_path) -> 
 
 
 def test_candidate_cpu_evidence_comes_from_one_raw_event_universe() -> None:
-    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
-        encoding="utf-8",
-    )
+    source = _read_control_center_sources()
 
     assert "function Get-CandidateCpuEvidence" not in source
     assert "function Get-CandidatePlatformEvidence" not in source
@@ -3155,7 +3150,7 @@ def test_reverse_restores_both_identities_without_d1_mutation(tmp_path) -> None:
         "$ok=Invoke-ReverseStable;$final=Get-ReleaseControlState;"
         'Write-Output "$ok,$($final.stable.git_sha),$script:worker,$script:windows"',
     )
-    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    source = _read_control_center_sources()
     reverse_body = source.split("function Invoke-ReverseStable", 1)[1].split(
         "function Reconcile-ReleaseControlState", 1,
     )[0]
@@ -3183,15 +3178,33 @@ def test_release_drift_is_detected_without_changing_stable(tmp_path) -> None:
 def test_release_requires_exactly_one_owner_for_every_side_effect_service(
     tmp_path,
 ) -> None:
-    result = _run_control_center_contract(
-        tmp_path,
-        "function Get-ForecasterProcesses { param($Service); "
-        "if ($Service.Key -eq 'sync') { return @([pscustomobject]@{ProcessId=1},[pscustomobject]@{ProcessId=2}) }; "
-        "return [pscustomobject]@{ProcessId=1} }; "
-        "$duplicate=Test-SingleProductionOwner; "
-        "function Get-ForecasterProcesses { param($Service); return [pscustomobject]@{ProcessId=1} }; "
-        "$single=Test-SingleProductionOwner; Write-Output \"$duplicate,$single\"",
+    source = (ROOT / "scripts" / "xauusd_control_center_release.ps1").read_text(
+        encoding="utf-8"
     )
+    contract = source[source.index("function Test-SingleProductionOwner"):source.index(
+        "function Invoke-WorkersObservabilityQuery"
+    )]
+    script = tmp_path / "single-production-owner-contract.ps1"
+    script.write_text(
+        "$services=@('collector','annotator','api','sync')|ForEach-Object {"
+        "[pscustomobject]@{Key=$_}};"
+        "$reloadableServiceKeys=@('collector','annotator','api','sync');"
+        + contract
+        + "function Get-ForecasterProcesses { param($Service);"
+        "if($Service.Key -eq 'sync'){return @([pscustomobject]@{ProcessId=1},"
+        "[pscustomobject]@{ProcessId=2})};return [pscustomobject]@{ProcessId=1}};"
+        "$duplicate=Test-SingleProductionOwner;"
+        "Set-Item Function:script:Get-ForecasterProcesses -Value {"
+        "param($Service);return [pscustomobject]@{ProcessId=1}};"
+        "$single=Test-SingleProductionOwner;Write-Output \"$duplicate,$single\"",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
 
     assert result == "False,True"
 
@@ -3992,7 +4005,7 @@ def test_legacy_reference_evidence_is_readable_but_never_promotable(tmp_path) ->
 
 
 def test_normal_release_control_never_applies_or_provisions_storage() -> None:
-    control = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    control = _read_control_center_sources()
     runbook = (ROOT / "docs" / "runbooks" / "CLOUDFLARE_DEPLOYMENT.md").read_text(
         encoding="utf-8"
     )
@@ -4080,7 +4093,7 @@ def test_reverse_observation_commits_only_after_active_runtime_evidence(tmp_path
 
 
 def test_business_transitions_do_not_call_control_bundle_installer() -> None:
-    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    source = _read_control_center_sources()
     for start, end in (
         ("function Update-RuntimeCheckout", "function Get-RuntimeCodeState"),
         ("function Invoke-RuntimeRollback", "function Test-CloudflareReleasePlacement"),
@@ -4092,7 +4105,7 @@ def test_business_transitions_do_not_call_control_bundle_installer() -> None:
 
 
 def test_release_gui_exposes_only_explicit_stable_candidate_controls() -> None:
-    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    source = _read_control_center_sources()
 
     assert 'New-ReleaseCard -Title "Stable"' in source
     assert 'New-ReleaseCard -Title "Release Candidate" -Emphasized $true' in source
