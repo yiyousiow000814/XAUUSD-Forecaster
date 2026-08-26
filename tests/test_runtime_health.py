@@ -2,7 +2,7 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from xauusd_forecaster.runtime_health import (
+from xauusd_forecaster.runtime.health import (
     RuntimeHeartbeatPulse,
     write_runtime_heartbeat,
 )

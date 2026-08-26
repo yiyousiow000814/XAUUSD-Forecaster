@@ -21,7 +21,7 @@ from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.news.scheduler.state import (
     ApiCredential, configured_api_credentials, scheduler_counts, sync_pending_jobs,
 )
-from xauusd_forecaster.runtime_health import RuntimeHeartbeatPulse, write_runtime_heartbeat
+from xauusd_forecaster.runtime.health import RuntimeHeartbeatPulse, write_runtime_heartbeat
 from xauusd_forecaster.news.scheduler import runtime as scheduler_runtime
 from xauusd_forecaster.news.scheduler.runtime import (
     EMBEDDING_PREREQUISITE_FAILURE_CODES, MAINTENANCE_DEFERRAL_CODES,

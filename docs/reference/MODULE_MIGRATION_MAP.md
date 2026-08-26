@@ -75,6 +75,26 @@ merges.
 | `xauusd_forecaster/gemini_quota.py` | `xauusd_forecaster/ai/quota.py` | AI quota accounting owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
 | `xauusd_forecaster/credential_identity.py` | `xauusd_forecaster/ai/credentials.py` | Credential identity owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
 | `xauusd_forecaster/model_limits.py` | `xauusd_forecaster/ai/model_limits.py` | Model output limits owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/assistant_agent.py` | `xauusd_forecaster/assistant/agent.py` | Assistant agent contract owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/assistant_capacity.py` | `xauusd_forecaster/assistant/capacity.py` | Assistant capacity owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/assistant_chat_worker.py` | `xauusd_forecaster/assistant/chat_worker.py` | Retained Assistant chat execution contract owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/assistant_compaction.py` | `xauusd_forecaster/assistant/compaction.py` | Assistant compaction owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/assistant_content.py` | `xauusd_forecaster/assistant/content.py` | Assistant content owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/assistant_events.py` | `xauusd_forecaster/assistant/events.py` | Assistant event ledger owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/assistant_evidence.py` | `xauusd_forecaster/assistant/evidence.py` | Assistant evidence owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/assistant_memory_index.py` | `xauusd_forecaster/assistant/memory_index.py` | Assistant memory index owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/assistant_routing.py` | `xauusd_forecaster/assistant/routing.py` | Assistant routing owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/assistant_titles.py` | `xauusd_forecaster/assistant/titles.py` | Assistant titles owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/assistant_tools.py` | `xauusd_forecaster/assistant/tools.py` | Assistant tools owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/runtime_health.py` | `xauusd_forecaster/runtime/health.py` | Runtime heartbeat owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/operational_health.py` | `xauusd_forecaster/runtime/operational_health.py` | Operational health owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/operational_taxonomy.py` | `xauusd_forecaster/runtime/taxonomy.py` | Operational taxonomy owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/production_shape.py` | `xauusd_forecaster/runtime/production_shape.py` | Production-shape validation owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/dashboard_payloads.py` | `xauusd_forecaster/dashboard/payloads.py` | Dashboard payload owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/dashboard_read_models.py` | `xauusd_forecaster/dashboard/read_models.py` | Dashboard read model owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/dashboard_summaries.py` | `xauusd_forecaster/dashboard/summaries.py` | Dashboard summary owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/learning_curves.py` | `xauusd_forecaster/dashboard/learning_curves.py` | Dashboard learning curve owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
+| `xauusd_forecaster/collector_runtime.py` | `xauusd_forecaster/decision/collector_runtime.py` | Collector decision runtime owner | THIN_SHIM | Remove after external callers migrate from the legacy module |
 
 Future Phase D rows must name every retained flat facade. `THIN_SHIM` means the
 legacy Python file contains only a docstring, explicit canonical imports,

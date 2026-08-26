@@ -547,24 +547,12 @@ class ForwardLedger:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA busy_timeout=60000")
         self.connection.executescript(SCHEMA)
-        from xauusd_forecaster.assistant_capacity import install_assistant_capacity_schema
-        from xauusd_forecaster.news.semantics.critical_state import (
-            install_critical_annotation_state_schema,
+        from xauusd_forecaster.shared_store_schema import (
+            install_shared_store_owner_schemas,
+            install_shared_store_post_metadata_schema,
         )
-        from xauusd_forecaster.dashboard_summaries import (
-            install_dashboard_critical_activity_schema,
-            install_dashboard_summary_schema,
-        )
-        from xauusd_forecaster.dashboard_read_models import install_dashboard_read_model_schema
-        from xauusd_forecaster.evidence.schema import install_v2_schema
-        from xauusd_forecaster.news.scheduler.state import install_scheduler_schema
 
-        install_v2_schema(self.connection)
-        install_scheduler_schema(self.connection)
-        install_assistant_capacity_schema(self.connection)
-        install_dashboard_summary_schema(self.connection)
-        install_dashboard_critical_activity_schema(self.connection)
-        install_dashboard_read_model_schema(self.connection)
+        install_shared_store_owner_schemas(self.connection)
         self._install_source_poll_schema()
         self._install_daily_brief_lifecycle_schema()
         self._install_append_only_triggers()
@@ -574,7 +562,7 @@ class ForwardLedger:
                 "INSERT OR IGNORE INTO runtime_metadata VALUES (?, ?, ?)",
                 ("FORWARD_EPOCH", _iso(created), _iso(created)),
             )
-        install_critical_annotation_state_schema(self.connection)
+        install_shared_store_post_metadata_schema(self.connection)
 
     def close(self) -> None:
         self.connection.close()

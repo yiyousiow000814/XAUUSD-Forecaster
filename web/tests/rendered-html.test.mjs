@@ -2651,7 +2651,7 @@ test("explains training rows separately from independent news events", () => {
 
 test("live room reports articles and independent events instead of revision rows", async () => {
   const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
-  const payloads = readFileSync(new URL("../../xauusd_forecaster/dashboard_payloads.py", import.meta.url), "utf8");
+  const payloads = readFileSync(new URL("../../xauusd_forecaster/dashboard/payloads.py", import.meta.url), "utf8");
   assert.match(source, /NEWS ARTICLES/);
   assert.match(source, /newsMetrics\.articles\.received/);
   assert.match(source, /newsMetrics\.events\.independent/);
@@ -2938,7 +2938,7 @@ test("separates Access-owned human APIs from the ingest worker control plane", (
     new URL("../../xauusd_forecaster/dashboard/sync/resource_protocols.py", import.meta.url), "utf8",
   );
   const chatWorker = readFileSync(
-    new URL("../../xauusd_forecaster/assistant_chat_worker.py", import.meta.url), "utf8",
+    new URL("../../xauusd_forecaster/assistant/chat_worker.py", import.meta.url), "utf8",
   );
   const security = readFileSync(
     new URL("../../docs/contracts/ASSISTANT_SECURITY.md", import.meta.url), "utf8",

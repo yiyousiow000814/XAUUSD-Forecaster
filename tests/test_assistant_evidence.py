@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.assistant_evidence import (
+from xauusd_forecaster.assistant.evidence import (
     AssistantEvidenceValidationError,
     validate_assistant_evidence_claims,
     validate_assistant_evidence_model_text,

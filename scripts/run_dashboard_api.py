@@ -15,7 +15,7 @@ from pathlib import Path
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
-from xauusd_forecaster.dashboard_payloads import critical_status_payload
+from xauusd_forecaster.dashboard.payloads import critical_status_payload
 from xauusd_forecaster.dashboard.status_cache import (
     STATUS_SNAPSHOT_MAX_STALE_SECONDS,
     STATUS_SNAPSHOT_TTL_SECONDS,
@@ -36,7 +36,7 @@ from xauusd_forecaster.dashboard.health_projection import (
     _materialized_semantic_health,
     _semantic_pipeline_component,
 )
-from xauusd_forecaster.dashboard_read_models import (
+from xauusd_forecaster.dashboard.read_models import (
     DashboardReadModelOwner,
     DashboardReadModelUnavailable,
     read_dashboard_read_model,
@@ -125,7 +125,7 @@ from xauusd_forecaster.dashboard.status_resources import (
     _parse_utc,
     _runtime_heartbeat,
 )
-from xauusd_forecaster.operational_health import extend_with_component_alerts
+from xauusd_forecaster.runtime.operational_health import extend_with_component_alerts
 DEFAULT_DATABASE = MODULE_ROOT / ".local" / "forward" / "forward-evidence.sqlite3"
 
 

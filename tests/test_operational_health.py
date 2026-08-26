@@ -11,7 +11,7 @@ from xauusd_forecaster.news.scheduler.state import (
     enqueue_job,
     install_scheduler_schema,
 )
-from xauusd_forecaster.operational_health import (
+from xauusd_forecaster.runtime.operational_health import (
     extend_with_component_alerts,
     scheduler_health_snapshot,
 )

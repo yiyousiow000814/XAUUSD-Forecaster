@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.assistant_memory_index import (
+from xauusd_forecaster.assistant.memory_index import (
     ASSISTANT_MEMORY_INDEX_VERSION,
     build_assistant_memory_index_result,
     tokenize_assistant_memory,

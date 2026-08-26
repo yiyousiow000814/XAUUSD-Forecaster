@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from xauusd_forecaster.assistant_routing import (
+from xauusd_forecaster.assistant.routing import (
     ASSISTANT_ROUTING_POLICY_VERSION,
     GOOGLE_GENERATIVE_LANGUAGE,
     OLLAMA_LOCAL,

@@ -6,8 +6,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-import xauusd_forecaster.assistant_agent as assistant_agent_module
-from xauusd_forecaster.assistant_agent import (
+import xauusd_forecaster.assistant.agent as assistant_agent_module
+from xauusd_forecaster.assistant.agent import (
     DEFAULT_ASSISTANT_AGENT_BUDGETS,
     AssistantAgentContractError,
     AssistantAgentRequest,
@@ -20,13 +20,13 @@ from xauusd_forecaster.assistant_agent import (
     ollama_openai_payload,
     run_bounded_assistant_agent,
 )
-from xauusd_forecaster.assistant_capacity import AssistantCapacityPolicy
-from xauusd_forecaster.assistant_routing import (
+from xauusd_forecaster.assistant.capacity import AssistantCapacityPolicy
+from xauusd_forecaster.assistant.routing import (
     GOOGLE_GENERATIVE_LANGUAGE,
     ModelCapacityClass,
     ModelProfile,
 )
-from xauusd_forecaster.assistant_tools import (
+from xauusd_forecaster.assistant.tools import (
     AssistantToolActor,
     AssistantToolCall,
     AssistantToolCapability,

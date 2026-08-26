@@ -15,7 +15,7 @@ from xauusd_forecaster.news.semantics.contracts import (
     CURRENT_NEWS_PROMPT_VERSION,
     PREVIOUS_NEWS_PROMPT_VERSION,
 )
-from xauusd_forecaster.operational_health import scheduler_health_snapshot
+from xauusd_forecaster.runtime.operational_health import scheduler_health_snapshot
 
 
 NOW = datetime(2026, 8, 12, 2, 0, tzinfo=UTC)

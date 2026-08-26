@@ -143,14 +143,14 @@ failures remain owned and visible in WPF rather than switching release engines.
 
 ## 13. Core modules
 
-- `xauusd_forecaster/runtime_health.py`: atomic service heartbeat writer.
+- `xauusd_forecaster/runtime/health.py`: atomic service heartbeat writer.
 - `scripts/xauusd_control_center_runtime.ps1`: process discovery, service
   supervision, runtime identity, watchdog, shortcut and autostart behavior.
 - `scripts/xauusd_control_center_release.ps1`: release persistence, Candidate
   validation, Promote/Reverse transaction ordering and recovery.
 - `scripts/xauusd_control_center_presentation.ps1`: bounded diagnostics and the
   WPF/WinForms shells.
-- `xauusd_forecaster/production_shape.py`: preflight state contract.
+- `xauusd_forecaster/runtime/production_shape.py`: preflight state contract.
 - `scripts/check_production_shape.py`: one-shot production-shape CLI.
 - `scripts/check_public_health.py`: bounded public health probe.
 - `.github/workflows/quality-gates.yml`: validation only.

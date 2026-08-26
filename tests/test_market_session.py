@@ -9,7 +9,7 @@ from xauusd_forecaster.market_session import (
 )
 from xauusd_forecaster.decision.engine import ForwardEngine
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.collector_runtime import (
+from xauusd_forecaster.decision.collector_runtime import (
     append_current_grid_events,
     append_due_grid_events,
     startup_reconciliation_plan,
@@ -21,7 +21,7 @@ UTC = timezone.utc
 
 def test_current_generation_makes_startup_reconciliation_background(monkeypatch) -> None:
     monkeypatch.setattr(
-        "xauusd_forecaster.collector_runtime.require_current_contract_generation",
+        "xauusd_forecaster.decision.collector_runtime.require_current_contract_generation",
         lambda _connection: "generation-current",
     )
     assert startup_reconciliation_plan(object()) == {
@@ -34,7 +34,7 @@ def test_missing_generation_keeps_startup_fail_closed(monkeypatch) -> None:
     def missing(_connection):
         raise RuntimeError("missing current generation")
     monkeypatch.setattr(
-        "xauusd_forecaster.collector_runtime.require_current_contract_generation", missing,
+        "xauusd_forecaster.decision.collector_runtime.require_current_contract_generation", missing,
     )
     assert startup_reconciliation_plan(object())["synchronous"] is True
 

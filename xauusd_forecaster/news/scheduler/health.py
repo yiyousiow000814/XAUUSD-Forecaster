@@ -136,7 +136,7 @@ def _pending_operational_reason(
     observed_at: datetime,
 ) -> str | None:
     """Classify operator action without weakening decision-time readiness."""
-    from xauusd_forecaster.operational_health import TASK_QUEUE_SLA
+    from xauusd_forecaster.runtime.operational_health import TASK_QUEUE_SLA
 
     state = str(row.get("job_state") or "")
     prefix = (
@@ -376,7 +376,7 @@ def news_semantic_pipeline_health_at(
     authoritative provenance classification selects operational membership;
     it is classification metadata, not later execution evidence.
     """
-    from xauusd_forecaster.operational_health import TASK_QUEUE_SLA
+    from xauusd_forecaster.runtime.operational_health import TASK_QUEUE_SLA
 
     cutoff = observed_at.isoformat()
     query_cutoff = observed_at.isoformat(timespec="microseconds")

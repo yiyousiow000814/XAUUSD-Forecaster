@@ -63,15 +63,16 @@ separately bounded and is not a forecasting critical-path dependency.
 
 After canonical News/AI placement, the import inventory contains one 13-module
 component, reduced from the 14-module baseline. It is explicitly retained as a
-co-resident SQLite schema-bootstrap contract: `evidence.ledger` installs the
-News scheduler/semantic and retained Assistant schemas, while those owners use
-the same ledger type. Market/session contracts also participate through the
-point-in-time news clock. The imports are local at schema-install or transition
-boundaries and do not create a second module instance, process, store, or
-runtime owner. Removing this true shared-store bootstrap component requires a
-separate schema-composition boundary and is not safe to disguise as an import
-move. No Dashboard, Training, Decision runtime, Cloudflare, or entry-point
-module participates in the component.
+co-resident SQLite schema-bootstrap contract. The foundational
+`shared_store_schema.py` composer names that real dependency and installs the
+Evidence, News, Dashboard and retained Assistant schemas in their historical
+order; owners still implement their own schemas and use the same ledger type.
+Market/session contracts also participate through the point-in-time news clock.
+The imports are local at schema-install or transition boundaries and do not
+create a second module instance, process, store, or runtime owner. Removing the
+remaining true shared-store component requires a separate schema ownership
+design and is not safe to disguise as an import move. No Training, Decision
+runtime, Cloudflare, or entry-point module participates in the component.
 
 ## Compatibility handover
 

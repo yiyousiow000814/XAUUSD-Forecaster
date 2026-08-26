@@ -7,14 +7,14 @@ import urllib.parse
 from typing import Any
 
 from xauusd_forecaster.news.annotation.product import DEFAULT_GEMMA_MODEL, generate_metered_json
-from xauusd_forecaster.assistant_evidence import (
+from xauusd_forecaster.assistant.evidence import (
     MAX_CLAIM_CHARACTERS,
     MAX_EVIDENCE_CLAIMS,
     MAX_EVIDENCE_PER_CLAIM,
     insufficient_evidence_validation,
     validate_assistant_evidence_claims,
 )
-from xauusd_forecaster.assistant_routing import apply_provider_thinking_level
+from xauusd_forecaster.assistant.routing import apply_provider_thinking_level
 from xauusd_forecaster.ai.model_gateway import ModelRequestAccountant
 
 

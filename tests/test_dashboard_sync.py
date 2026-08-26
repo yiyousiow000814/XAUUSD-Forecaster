@@ -56,7 +56,8 @@ def _dashboard_module():
 
 
 def _stub_assistant_capacity_route(monkeypatch, accountant_value: str) -> list[dict]:
-    from xauusd_forecaster import assistant_capacity, assistant_routing
+    from xauusd_forecaster.assistant import capacity as assistant_capacity
+    from xauusd_forecaster.assistant import routing as assistant_routing
 
     calls: list[dict] = []
 

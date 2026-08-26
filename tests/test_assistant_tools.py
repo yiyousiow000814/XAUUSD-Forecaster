@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from xauusd_forecaster.assistant_tools import (
+from xauusd_forecaster.assistant.tools import (
     NEWS_SEARCH_TOOL_NAME,
     AssistantToolActor,
     AssistantToolCall,

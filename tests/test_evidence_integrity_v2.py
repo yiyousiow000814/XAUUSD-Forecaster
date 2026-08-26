@@ -17,7 +17,7 @@ from xauusd_forecaster.evidence.schema import (
 from xauusd_forecaster.evidence.executable_label import build_executable_label_v2
 from xauusd_forecaster.execution_costs import net_shadow_log_return
 from xauusd_forecaster.evidence.ledger import ForwardLedger, canonical_hash
-from xauusd_forecaster.learning_curves import _bounded_curve, _stage, learning_curve_payload
+from xauusd_forecaster.dashboard.learning_curves import _bounded_curve, _stage, learning_curve_payload
 from xauusd_forecaster.decision.live import (
     _append_news_visibility_receipts,
     append_live_decision_v2,
