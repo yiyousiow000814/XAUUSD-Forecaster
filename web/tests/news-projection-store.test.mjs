@@ -170,6 +170,37 @@ test("partial replacement never displaces the last verified current generation",
   );
 });
 
+test("staging and abandonment cannot change the active legacy reverse projection", async () => {
+  const db = database();
+  const currentDetails = [detail("1")];
+  const currentIndexes = [index("1")];
+  await prepareNewsProjection(db, await manifest("a", currentDetails, currentIndexes));
+  await stageNewsProjectionBatch(db, "detail", id("a"), 0, currentDetails);
+  await stageNewsProjectionBatch(db, "index", id("a"), 0, currentIndexes);
+  await activateNewsProjection(db, id("a"));
+
+  const stagingDetails = [detail("2")];
+  const stagingIndexes = [index("2")];
+  await prepareNewsProjection(db, await manifest("b", stagingDetails, stagingIndexes));
+  await stageNewsProjectionBatch(db, "detail", id("b"), 0, stagingDetails);
+  await stageNewsProjectionBatch(db, "index", id("b"), 0, stagingIndexes);
+  assert.deepEqual(
+    db.database.prepare("SELECT detail_key FROM news_index ORDER BY detail_key").all()
+      .map(row => row.detail_key),
+    [id("1")],
+    "STAGING membership is not visible through the reverse-stable projection",
+  );
+
+  await abandonNewsProjection(db, id("b"));
+  assert.equal(
+    db.database.prepare("SELECT count(*) total FROM news_details WHERE detail_key=?")
+      .get(id("2")).total,
+    0,
+    "abandonment removes an unreferenced derived detail",
+  );
+  assert.equal((await readNewsProjectionHealth(db)).active_generation_id, id("a"));
+});
+
 test("materializes every generation's review totals and keeps page reads bounded", async () => {
   const db = database();
   const details = ["1", "2", "3", "4"].map(detail);
@@ -269,6 +300,18 @@ test("retains only current plus one staging while preparing a third generation",
   assert.equal(generations.filter(row => row.state === "STAGING").length, 1);
   assert.equal(generations.some(row => row.generation_id === id("a")), false);
   assert.equal(generations.some(row => row.generation_id === id("b")), true);
+  assert.equal(
+    db.database.prepare("SELECT count(*) total FROM news_index WHERE detail_key=?")
+      .get(id("1")).total,
+    0,
+    "obsolete superseded reverse rows are deleted after their generation is cleaned",
+  );
+  assert.equal(
+    db.database.prepare("SELECT count(*) total FROM news_details WHERE detail_key=?")
+      .get(id("1")).total,
+    0,
+    "obsolete unreferenced derived bodies are deleted with the superseded generation",
+  );
 });
 
 test("keeps the rollback legacy identity set equal across replacement activations", async () => {

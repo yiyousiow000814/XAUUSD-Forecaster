@@ -287,6 +287,25 @@ async function deleteGenerationStatements(
     binding.prepare("DELETE FROM news_projection_receipts_v2 WHERE generation_id=?").bind(generationId),
     binding.prepare("DELETE FROM news_projection_batches WHERE generation_id=?").bind(generationId),
     binding.prepare("DELETE FROM news_projection_generations WHERE generation_id=?").bind(generationId),
+    binding.prepare(
+      `DELETE FROM news_index
+        WHERE COALESCE(json_extract(payload,'$.annotation_status'),'')='SUPERSEDED_CONTRACT'
+          AND NOT EXISTS (
+            SELECT 1 FROM news_projection_index retained
+             WHERE retained.detail_key=news_index.detail_key
+          )`,
+    ),
+    binding.prepare(
+      `DELETE FROM news_details
+        WHERE NOT EXISTS (
+                SELECT 1 FROM news_index retained
+                 WHERE retained.detail_key=news_details.detail_key
+              )
+          AND NOT EXISTS (
+                SELECT 1 FROM news_projection_index retained
+                 WHERE retained.detail_key=news_details.detail_key
+              )`,
+    ),
   ];
 }
 
@@ -545,32 +564,6 @@ export async function stageNewsProjectionBatch(
         item.mirror_contract, await sha256(serialized), serialized, now,
       ));
     }
-    statements.push(binding.prepare(
-      `INSERT INTO news_index
-         (detail_key,category,cluster_id,published_time,collector_first_seen_time,
-          parsed,model_candidate,impact_expires_at,mirror_contract,payload,received_at)
-       SELECT detail_key,category,cluster_id,published_time,collector_first_seen_time,
-              parsed,model_candidate,impact_expires_at,mirror_contract,payload,received_at
-         FROM news_projection_index
-        WHERE generation_id=? AND ordinal>=? AND ordinal<?
-       ON CONFLICT(detail_key) DO UPDATE SET
-         category=excluded.category,cluster_id=excluded.cluster_id,
-         published_time=excluded.published_time,
-         collector_first_seen_time=excluded.collector_first_seen_time,
-         parsed=excluded.parsed,model_candidate=excluded.model_candidate,
-         impact_expires_at=excluded.impact_expires_at,
-         mirror_contract=excluded.mirror_contract,payload=excluded.payload,
-         received_at=excluded.received_at
-       WHERE news_index.category IS NOT excluded.category
-          OR news_index.cluster_id IS NOT excluded.cluster_id
-          OR news_index.published_time IS NOT excluded.published_time
-          OR news_index.collector_first_seen_time IS NOT excluded.collector_first_seen_time
-          OR news_index.parsed IS NOT excluded.parsed
-          OR news_index.model_candidate IS NOT excluded.model_candidate
-          OR news_index.impact_expires_at IS NOT excluded.impact_expires_at
-          OR news_index.mirror_contract IS NOT excluded.mirror_contract
-          OR news_index.payload IS NOT excluded.payload`,
-    ).bind(generationId, offset, offset + items.length));
   }
   statements.push(binding.prepare(
     `INSERT INTO news_projection_receipts_v2
@@ -698,6 +691,31 @@ export async function activateNewsProjection(
          item_count=excluded.item_count,parsed_count=excluded.parsed_count,
          candidate_expiries=excluded.candidate_expiries`,
     ).bind(generationId, generationId, generationId),
+    binding.prepare(
+      `INSERT INTO news_index
+         (detail_key,category,cluster_id,published_time,collector_first_seen_time,
+          parsed,model_candidate,impact_expires_at,mirror_contract,payload,received_at)
+       SELECT detail_key,category,cluster_id,published_time,collector_first_seen_time,
+              parsed,model_candidate,impact_expires_at,mirror_contract,payload,received_at
+         FROM news_projection_index WHERE generation_id=?
+       ON CONFLICT(detail_key) DO UPDATE SET
+         category=excluded.category,cluster_id=excluded.cluster_id,
+         published_time=excluded.published_time,
+         collector_first_seen_time=excluded.collector_first_seen_time,
+         parsed=excluded.parsed,model_candidate=excluded.model_candidate,
+         impact_expires_at=excluded.impact_expires_at,
+         mirror_contract=excluded.mirror_contract,payload=excluded.payload,
+         received_at=excluded.received_at
+       WHERE news_index.category IS NOT excluded.category
+          OR news_index.cluster_id IS NOT excluded.cluster_id
+          OR news_index.published_time IS NOT excluded.published_time
+          OR news_index.collector_first_seen_time IS NOT excluded.collector_first_seen_time
+          OR news_index.parsed IS NOT excluded.parsed
+          OR news_index.model_candidate IS NOT excluded.model_candidate
+          OR news_index.impact_expires_at IS NOT excluded.impact_expires_at
+          OR news_index.mirror_contract IS NOT excluded.mirror_contract
+          OR news_index.payload IS NOT excluded.payload`,
+    ).bind(generationId),
     binding.prepare(
       `UPDATE news_projection_generations SET state='SUPERSEDED',updated_at=?
         WHERE state='CURRENT' AND generation_id<>?`,

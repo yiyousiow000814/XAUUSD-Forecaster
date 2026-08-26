@@ -145,7 +145,7 @@ function releaseIndexValidation(
       || Number(checked.item_valid) !== total
       || Number(checked.review_valid) !== total
     ) return null;
-    return { items: total, prepared_statements: total + 3 };
+    return { items: total, prepared_statements: total + 2 };
   }
   if (["activate", "verify", "abandon"].includes(checked.action)) {
     return {
