@@ -595,6 +595,7 @@ def _write_coordinated_migration_files(tmp_path) -> None:
         "0024_seed_bounded_audit_news_metrics.sql",
         "0025_seed_legacy_news_reverse_projection.sql",
         "0026_reconcile_legacy_news_current_identity.sql",
+        "0027_materialize_news_projection_counts.sql",
     ):
         (target / name).write_text(
             (ROOT / "web" / "drizzle" / name).read_text(encoding="utf-8"),
@@ -619,7 +620,8 @@ def _coordinated_migration_contract_body(*, capability_overrides: str = "") -> s
         "'web/drizzle/0023_operator_retry_sync_digest.sql',"
         "'web/drizzle/0024_seed_bounded_audit_news_metrics.sql',"
         "'web/drizzle/0025_seed_legacy_news_reverse_projection.sql',"
-        "'web/drizzle/0026_reconcile_legacy_news_current_identity.sql')}};"
+        "'web/drizzle/0026_reconcile_legacy_news_current_identity.sql',"
+        "'web/drizzle/0027_materialize_news_projection_counts.sql')}};"
         "'READ_CANDIDATE_MIGRATION_BLOB'{return [pscustomobject]@{passed=$true;output=@(('1'*40))}};"
         "'READ_CANDIDATE_MIGRATION'{return [pscustomobject]@{passed=$true;output=@('CREATE TABLE safe (id integer);')}};"
         "default{return [pscustomobject]@{passed=$false;output=@()}}}};"
@@ -634,14 +636,19 @@ def _coordinated_migration_contract_body(*, capability_overrides: str = "") -> s
         "[pscustomobject]@{name='0023_operator_retry_sync_digest.sql';applied_at='now'},"
         "[pscustomobject]@{name='0024_seed_bounded_audit_news_metrics.sql';applied_at='now'},"
         "[pscustomobject]@{name='0025_seed_legacy_news_reverse_projection.sql';applied_at='now'},"
-        "[pscustomobject]@{name='0026_reconcile_legacy_news_current_identity.sql';applied_at='now'})};"
-        "$row=[pscustomobject]@{projection_tables=5;projection_indexes=4;retry_columns=4;"
+        "[pscustomobject]@{name='0026_reconcile_legacy_news_current_identity.sql';applied_at='now'},"
+        "[pscustomobject]@{name='0027_materialize_news_projection_counts.sql';applied_at='now'})};"
+        "$row=[pscustomobject]@{projection_tables=7;projection_indexes=6;"
+        "projection_count_columns=6;projection_receipt_columns=8;retry_columns=4;"
         "legacy_tables=4;legacy_decisions=20;projection_state='CURRENT';"
         "legacy_current_index_count=4117;legacy_current_detail_count=4117;"
         "legacy_missing_detail_count=0;legacy_review_violation_count=0;"
         "legacy_parsed_flag_mismatch_count=0;"
         "legacy_candidate_flag_mismatch_count=0;legacy_duplicate_cluster_count=0;"
         "legacy_extra_current_index_count=0;"
+        "summary_all_count=4117;summary_review_count=4117;"
+        "summary_category_count=4117;summary_parsed_count=2000;current_parsed_count=2000;"
+        "summary_candidate_count=125;current_candidate_count=125;invalid_candidate_expiry_count=0;"
         "active_generation_id=('c'*64);snapshot_id=('d'*64);source_digest=('e'*64);"
         "receipt_digest=('f'*64);index_count=4117;detail_count=4117;"
         "missing_detail_count=0;invariant_violation_count=0;generation_state='CURRENT';"
@@ -661,7 +668,8 @@ def _coordinated_migration_contract_body(*, capability_overrides: str = "") -> s
         "'web/drizzle/0023_operator_retry_sync_digest.sql',"
         "'web/drizzle/0024_seed_bounded_audit_news_metrics.sql',"
         "'web/drizzle/0025_seed_legacy_news_reverse_projection.sql',"
-        "'web/drizzle/0026_reconcile_legacy_news_current_identity.sql');"
+        "'web/drizzle/0026_reconcile_legacy_news_current_identity.sql',"
+        "'web/drizzle/0027_materialize_news_projection_counts.sql');"
     )
 
 
@@ -3550,12 +3558,13 @@ def test_migration_contract_reads_the_exact_candidate_not_stable_checkout(
         "'web/drizzle/0023_operator_retry_sync_digest.sql',"
         "'web/drizzle/0024_seed_bounded_audit_news_metrics.sql',"
         "'web/drizzle/0025_seed_legacy_news_reverse_projection.sql',"
-        "'web/drizzle/0026_reconcile_legacy_news_current_identity.sql');"
+        "'web/drizzle/0026_reconcile_legacy_news_current_identity.sql',"
+        "'web/drizzle/0027_materialize_news_projection_counts.sql');"
         f"$files=Get-CoordinatedMigrationFiles $changed '{candidate}';"
         f"Assert-CoordinatedMigrationCapabilityContract $files '{candidate}';"
         'Write-Output "$($files.Count),$(git -C $repositoryRoot rev-parse HEAD)"',
     )
-    assert result == f"5,{stable}"
+    assert result == f"6,{stable}"
 
 
 @pytest.mark.parametrize(
@@ -3615,7 +3624,8 @@ def test_coordinated_migration_receipt_rejects_reuse_staleness_and_tampering(
             "MIGRATION_LEDGER_PENDING:0023_operator_retry_sync_digest.sql,"
             "0024_seed_bounded_audit_news_metrics.sql,"
             "0025_seed_legacy_news_reverse_projection.sql,"
-            "0026_reconcile_legacy_news_current_identity.sql",
+            "0026_reconcile_legacy_news_current_identity.sql,"
+            "0027_materialize_news_projection_counts.sql",
         ),
         (
             "function Invoke-CoordinatedMigrationD1Query{param($Sql);"
@@ -3624,7 +3634,8 @@ def test_coordinated_migration_receipt_rejects_reuse_staleness_and_tampering(
                 "[pscustomobject]@{name='0023_operator_retry_sync_digest.sql'},"
                 "[pscustomobject]@{name='0024_seed_bounded_audit_news_metrics.sql'},"
                 "[pscustomobject]@{name='0025_seed_legacy_news_reverse_projection.sql'},"
-                "[pscustomobject]@{name='0026_reconcile_legacy_news_current_identity.sql'})};"
+                "[pscustomobject]@{name='0026_reconcile_legacy_news_current_identity.sql'},"
+                "[pscustomobject]@{name='0027_materialize_news_projection_counts.sql'})};"
             "return [pscustomobject]@{projection_tables=4;projection_indexes=4;"
             "retry_columns=4}}",
             "MIGRATION_SCHEMA_CAPABILITY_MISSING",
@@ -3636,8 +3647,10 @@ def test_coordinated_migration_receipt_rejects_reuse_staleness_and_tampering(
                 "[pscustomobject]@{name='0023_operator_retry_sync_digest.sql'},"
                 "[pscustomobject]@{name='0024_seed_bounded_audit_news_metrics.sql'},"
                 "[pscustomobject]@{name='0025_seed_legacy_news_reverse_projection.sql'},"
-                "[pscustomobject]@{name='0026_reconcile_legacy_news_current_identity.sql'})};"
-            "return [pscustomobject]@{projection_tables=5;projection_indexes=4;"
+                "[pscustomobject]@{name='0026_reconcile_legacy_news_current_identity.sql'},"
+                "[pscustomobject]@{name='0027_materialize_news_projection_counts.sql'})};"
+            "return [pscustomobject]@{projection_tables=7;projection_indexes=6;"
+            "projection_count_columns=6;projection_receipt_columns=8;"
             "retry_columns=4;legacy_tables=3;legacy_decisions=0}}",
             "MIGRATION_LEGACY_COMPATIBILITY_FAILED",
         ),
@@ -3648,8 +3661,10 @@ def test_coordinated_migration_receipt_rejects_reuse_staleness_and_tampering(
                 "[pscustomobject]@{name='0023_operator_retry_sync_digest.sql'},"
                 "[pscustomobject]@{name='0024_seed_bounded_audit_news_metrics.sql'},"
                 "[pscustomobject]@{name='0025_seed_legacy_news_reverse_projection.sql'},"
-                "[pscustomobject]@{name='0026_reconcile_legacy_news_current_identity.sql'})};"
-            "$row=[pscustomobject]@{projection_tables=5;projection_indexes=4;"
+                "[pscustomobject]@{name='0026_reconcile_legacy_news_current_identity.sql'},"
+                "[pscustomobject]@{name='0027_materialize_news_projection_counts.sql'})};"
+            "$row=[pscustomobject]@{projection_tables=7;projection_indexes=6;"
+            "projection_count_columns=6;projection_receipt_columns=8;"
             "retry_columns=4;legacy_tables=4;legacy_decisions=20;"
             "projection_state='CURRENT';active_generation_id=('c'*64);"
             "snapshot_id=('d'*64);source_digest=('e'*64);receipt_digest=('f'*64);"

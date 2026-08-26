@@ -83,7 +83,7 @@ test("rebuilds the legacy rollback News projection from verified CURRENT", () =>
   const receivedAt = "2026-08-26T00:00:00.000Z";
   const indexPayload = JSON.stringify({
     detail_key: detailKey,
-    category: "央行政策",
+    category: "央行购金",
     cluster_id: "cluster-1",
     collector_first_seen_time: receivedAt,
     source_published_time: receivedAt,
@@ -129,7 +129,7 @@ test("rebuilds the legacy rollback News projection from verified CURRENT", () =>
       (generation_id,detail_key,ordinal,category,cluster_id,published_time,
        collector_first_seen_time,parsed,model_candidate,impact_expires_at,
        mirror_contract,payload_hash,payload,received_at)
-     VALUES (?,?,0,'央行政策','cluster-1',?,?,1,1,NULL,
+     VALUES (?,?,0,'央行购金','cluster-1',?,?,1,1,NULL,
        'news-projection-generation-v3',?,?,?)`,
   ).run(
     generationId, detailKey, receivedAt, receivedAt, "1".repeat(64),
@@ -174,6 +174,8 @@ test("rebuilds the legacy rollback News projection from verified CURRENT", () =>
   ).run(receiptDigest);
   handover.applyMigration("0026_reconcile_legacy_news_current_identity.sql");
   handover.applyMigration("0026_reconcile_legacy_news_current_identity.sql");
+  handover.applyMigration("0027_materialize_news_projection_counts.sql");
+  handover.applyMigration("0027_materialize_news_projection_counts.sql");
 
   const legacyDetail = handover.database.prepare(
     "SELECT * FROM news_details WHERE detail_key=?",
@@ -184,7 +186,16 @@ test("rebuilds the legacy rollback News projection from verified CURRENT", () =>
   assert.equal(legacyDetail.detail_hash, detailHash);
   assert.equal(legacyDetail.payload, detailPayload);
   assert.equal(legacyIndex.payload, indexPayload);
-  assert.equal(legacyIndex.category, "央行政策");
+  assert.equal(legacyIndex.category, "央行购金");
+  assert.deepEqual(handover.database.prepare(
+    `SELECT review_state,category,item_count,parsed_count
+       FROM news_projection_counts WHERE generation_id=?
+       ORDER BY review_state,category`,
+  ).all(generationId).map(row => ({ ...row })), [
+    { review_state: "ALL", category: "", item_count: 1, parsed_count: 1 },
+    { review_state: "COMPLETED", category: "", item_count: 1, parsed_count: 1 },
+    { review_state: "COMPLETED", category: "央行购金", item_count: 1, parsed_count: 1 },
+  ]);
   const obsoleteIndex = handover.database.prepare(
     "SELECT * FROM news_index WHERE detail_key=?",
   ).get(obsoleteDetailKey);
@@ -715,7 +726,7 @@ test("news release dry-runs reject invalid payloads without mutation", async () 
   const before = state();
   for (const [caseIndex, [path, body, expectedStatus]] of [
     ["/api/news-index", JSON.stringify({ action: "stage_index", generation_id: "1".repeat(64), offset: 0, items: [{
-      detail_key: "1".repeat(64), category: "美国宏观", cluster_id: "cluster-1",
+      detail_key: "1".repeat(64), category: "增长/经济", cluster_id: "cluster-1",
       collector_first_seen_time: "2026-08-20T00:00:00Z",
       annotation_status: "NOT_A_REVIEW_STATE", model_visibility: "MODEL_VISIBLE",
       mirror_contract: "release-validation-v1",
@@ -728,7 +739,7 @@ test("news release dry-runs reject invalid payloads without mutation", async () 
     ["/api/news-index", JSON.stringify({
       action: "stage_index", generation_id: "1".repeat(64), offset: null,
       items: [{
-        detail_key: "1".repeat(64), category: "美国宏观", cluster_id: "cluster-1",
+        detail_key: "1".repeat(64), category: "增长/经济", cluster_id: "cluster-1",
         collector_first_seen_time: "2026-08-20T00:00:00Z",
         annotation_status: "READY", model_visibility: "MODEL_VISIBLE",
         parsed_at: "2026-08-20T00:00:00Z", mirror_contract: "release-validation-v1",
@@ -737,7 +748,7 @@ test("news release dry-runs reject invalid payloads without mutation", async () 
     ["/api/news-index", JSON.stringify({
       action: "stage_index", generation_id: "1".repeat(64), offset: 0,
       items: Array.from({ length: 5 }, (_, index) => ({
-        detail_key: String(index + 1).repeat(64), category: "美国宏观",
+        detail_key: String(index + 1).repeat(64), category: "增长/经济",
         cluster_id: `cluster-${index}`,
         collector_first_seen_time: "2026-08-20T00:00:00Z",
         annotation_status: "READY", model_visibility: "MODEL_VISIBLE",

@@ -50,7 +50,7 @@ def _news(index: int) -> dict:
     return {
         "source": "release-validation", "source_item_id": f"fixture-{index}",
         "revision_number": 1, "detail_key": key, "event_key": key,
-        "cluster_id": f"cluster-{index:04d}", "category": "美国宏观",
+        "cluster_id": f"cluster-{index:04d}", "category": "增长/经济",
         "collector_first_seen_time": at.isoformat(),
         "source_published_time": (at - timedelta(minutes=2)).isoformat(),
         "headline": (

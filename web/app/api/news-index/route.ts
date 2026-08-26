@@ -14,6 +14,7 @@ import {
   activateNewsProjection,
   NEWS_GENERATION_ID,
   NEWS_INDEX_MAX_BATCH_ITEMS,
+  NEWS_PROJECTION_CATEGORIES,
   NEWS_PROJECTION_CONTRACT_VERSION,
   NewsProjectionProtocolError,
   prepareNewsProjection,
@@ -186,9 +187,16 @@ export async function POST(request: Request) {
                          AND length(json_extract(payload,'$.detail_key'))=64
                          AND json_extract(payload,'$.detail_key') NOT GLOB '*[^0-9a-f]*'
                          AND json_type(payload,'$.category')='text'
+                         AND json_extract(payload,'$.category') IN (
+                           ${NEWS_PROJECTION_CATEGORIES.map(value => `'${value}'`).join(",")}
+                         )
                          AND json_type(payload,'$.collector_first_seen_time')='text'
                          AND json_type(payload,'$.cluster_id')='text'
                          AND json_type(payload,'$.mirror_contract')='text'
+                         AND (json_extract(payload,'$.model_visibility')<>'MODEL_VISIBLE'
+                           OR (json_type(payload,'$.impact_expires_at')='text'
+                             AND length(json_extract(payload,'$.impact_expires_at'))=32
+                             AND substr(json_extract(payload,'$.impact_expires_at'),27)='+00:00'))
                          THEN 1 ELSE 0 END),0) item_valid,
                        coalesce(sum(CASE WHEN
                          ${NEWS_REVIEW_STATE_INVARIANT_SQL}

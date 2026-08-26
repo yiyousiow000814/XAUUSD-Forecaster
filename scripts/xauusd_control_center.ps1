@@ -1008,7 +1008,8 @@ function Assert-CoordinatedMigrationCapabilityContract {
         "web/drizzle/0023_operator_retry_sync_digest.sql",
         "web/drizzle/0024_seed_bounded_audit_news_metrics.sql",
         "web/drizzle/0025_seed_legacy_news_reverse_projection.sql",
-        "web/drizzle/0026_reconcile_legacy_news_current_identity.sql"
+        "web/drizzle/0026_reconcile_legacy_news_current_identity.sql",
+        "web/drizzle/0027_materialize_news_projection_counts.sql"
     )
     $unknown = @($MigrationFiles | Where-Object { $_ -notin $supported })
     if ($unknown.Count -gt 0) {
@@ -1042,9 +1043,19 @@ function Assert-CoordinatedMigrationCapabilityContract {
             $sql -match '(?im)s\.`projection_state`\s*=\s*''CURRENT''' -and
             $sql -match '(?im)s\.`receipt_digest`\s*=\s*g\.`expected_receipt_digest`' -and
             $sql -notmatch '(?im)\b(DROP|DELETE|REPLACE|TRUNCATE|VACUUM)\b'
+        $isNewsFreePlanMaterialization =
+            $file -eq "web/drizzle/0027_materialize_news_projection_counts.sql" -and
+            $sql -match '(?im)CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+`news_projection_receipts_v2`' -and
+            $sql -match '(?im)CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+`news_projection_counts`' -and
+            $sql -match '(?im)CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+`news_projection_index_review_page_idx`' -and
+            $sql -match '(?im)CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+`news_projection_index_review_category_page_idx`' -and
+            $sql -match '(?im)`candidate_expiries`\s+text\s+NOT\s+NULL' -and
+            $sql -match '(?im)INSERT\s+INTO\s+`news_projection_counts`' -and
+            $sql -match '(?im)JOIN\s+`news_projection_state`' -and
+            $sql -notmatch '(?im)\b(DROP|DELETE|REPLACE|TRUNCATE|VACUUM)\b'
         if (($sql -match '(?im)\b(DROP|DELETE|UPDATE|REPLACE|TRUNCATE|VACUUM)\b') -and
             -not $isBoundedAuditHandover -and -not $isLegacyNewsHandover -and
-            -not $isLegacyNewsReconciliation) {
+            -not $isLegacyNewsReconciliation -and -not $isNewsFreePlanMaterialization) {
             throw "MIGRATION_REVERSE_INCOMPATIBLE:$file"
         }
     }
@@ -1173,10 +1184,18 @@ function Get-CoordinatedMigrationLiveEvidence {
 SELECT
  (SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN
   ('news_projection_generations','news_projection_index','news_projection_details',
-   'news_projection_batches','news_projection_state')) AS projection_tables,
+   'news_projection_batches','news_projection_receipts_v2','news_projection_state',
+   'news_projection_counts')) AS projection_tables,
  (SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN
   ('news_projection_generations_state_idx','news_projection_index_ordinal_idx',
-   'news_projection_index_page_idx','news_projection_index_category_idx')) AS projection_indexes,
+   'news_projection_index_page_idx','news_projection_index_category_idx',
+   'news_projection_index_review_page_idx',
+   'news_projection_index_review_category_page_idx')) AS projection_indexes,
+ (SELECT count(*) FROM pragma_table_info('news_projection_counts') WHERE name IN
+  ('generation_id','review_state','category','item_count','parsed_count','candidate_expiries')) AS projection_count_columns,
+ (SELECT count(*) FROM pragma_table_info('news_projection_receipts_v2') WHERE name IN
+  ('generation_id','batch_kind','batch_offset','item_count','payload_hash',
+   'receipt_digest','identity_digest','updated_at')) AS projection_receipt_columns,
  (SELECT count(*) FROM pragma_table_info('operator_retry_sync_state') WHERE name IN
   ('id','payload_digest','item_count','synced_at')) AS retry_columns,
  (SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN
@@ -1187,9 +1206,9 @@ SELECT
     WHERE pi.generation_id=s.active_generation_id
       AND EXISTS(SELECT 1 FROM news_index li WHERE li.detail_key=pi.detail_key))
     AS legacy_current_index_count,
-  (SELECT count(*) FROM news_projection_details pd
-    WHERE pd.generation_id=s.active_generation_id
-      AND EXISTS(SELECT 1 FROM news_details ld WHERE ld.detail_key=pd.detail_key))
+  (SELECT count(*) FROM news_projection_index pi
+    WHERE pi.generation_id=s.active_generation_id
+      AND EXISTS(SELECT 1 FROM news_details ld WHERE ld.detail_key=pi.detail_key))
     AS legacy_current_detail_count,
   (SELECT count(*) FROM news_index li
     WHERE COALESCE(json_extract(li.payload,'$.annotation_status'),'') <> 'SUPERSEDED_CONTRACT'
@@ -1235,6 +1254,29 @@ SELECT
          WHERE pi.generation_id=s.active_generation_id
            AND pi.detail_key=li.detail_key))
     AS legacy_extra_current_index_count,
+  coalesce((SELECT item_count FROM news_projection_counts c
+    WHERE c.generation_id=s.active_generation_id
+      AND c.review_state='ALL' AND c.category=''),-1) AS summary_all_count,
+  coalesce((SELECT sum(item_count) FROM news_projection_counts c
+    WHERE c.generation_id=s.active_generation_id
+      AND c.review_state<>'ALL' AND c.category=''),-1) AS summary_review_count,
+  coalesce((SELECT sum(item_count) FROM news_projection_counts c
+    WHERE c.generation_id=s.active_generation_id AND c.category<>''),-1) AS summary_category_count,
+  coalesce((SELECT parsed_count FROM news_projection_counts c
+    WHERE c.generation_id=s.active_generation_id
+      AND c.review_state='ALL' AND c.category=''),-1) AS summary_parsed_count,
+  coalesce((SELECT CASE WHEN candidate_expiries='' THEN 0 ELSE
+      1 + length(candidate_expiries) - length(replace(candidate_expiries,char(10),'')) END
+    FROM news_projection_counts c WHERE c.generation_id=s.active_generation_id
+      AND c.review_state='ALL' AND c.category=''),-1) AS summary_candidate_count,
+  (SELECT coalesce(sum(parsed),0) FROM news_projection_index i
+    WHERE i.generation_id=s.active_generation_id) AS current_parsed_count,
+  (SELECT count(*) FROM news_projection_index i
+    WHERE i.generation_id=s.active_generation_id AND i.model_candidate=1) AS current_candidate_count,
+  (SELECT count(*) FROM news_projection_index i
+    WHERE i.generation_id=s.active_generation_id AND i.model_candidate=1
+      AND (i.impact_expires_at IS NULL OR length(i.impact_expires_at)<>32
+        OR substr(i.impact_expires_at,27)<>'+00:00')) AS invalid_candidate_expiry_count,
   s.projection_state,s.active_generation_id,s.snapshot_id,s.source_digest,s.receipt_digest,
  s.index_count,s.detail_count,s.missing_detail_count,s.invariant_violation_count,
  g.state AS generation_state,g.contract_version AS generation_contract_version,
@@ -1245,8 +1287,10 @@ FROM news_projection_state s JOIN news_projection_generations g
 "@
     $capabilities = @(Invoke-CoordinatedMigrationD1Query -Sql $capabilitySql)
     if ($capabilities.Count -ne 1 -or
-        [int]$capabilities[0].projection_tables -ne 5 -or
-        [int]$capabilities[0].projection_indexes -ne 4 -or
+        [int]$capabilities[0].projection_tables -ne 7 -or
+        [int]$capabilities[0].projection_indexes -ne 6 -or
+        [int]$capabilities[0].projection_count_columns -ne 6 -or
+        [int]$capabilities[0].projection_receipt_columns -ne 8 -or
         [int]$capabilities[0].retry_columns -ne 4) {
         throw "MIGRATION_SCHEMA_CAPABILITY_MISSING"
     }
@@ -1273,6 +1317,14 @@ FROM news_projection_state s JOIN news_projection_generations g
         [int]$state.legacy_duplicate_cluster_count -ne 0 -or
         [int]$state.legacy_extra_current_index_count -ne 0) {
         throw "MIGRATION_LEGACY_NEWS_COMPATIBILITY_FAILED"
+    }
+    if ([int]$state.summary_all_count -ne [int]$state.index_count -or
+        [int]$state.summary_review_count -ne [int]$state.index_count -or
+        [int]$state.summary_category_count -ne [int]$state.index_count -or
+        [int]$state.summary_parsed_count -ne [int]$state.current_parsed_count -or
+        [int]$state.summary_candidate_count -ne [int]$state.current_candidate_count -or
+        [int]$state.invalid_candidate_expiry_count -ne 0) {
+        throw "MIGRATION_NEWS_SUMMARY_INVALID"
     }
     $endpoints = Get-CoordinatedMigrationEndpointEvidence `
         -Candidate $Candidate -Stable $Stable
@@ -1310,6 +1362,8 @@ FROM news_projection_state s JOIN news_projection_generations g
         pending_migrations = @()
         projection_tables = [int]$state.projection_tables
         projection_indexes = [int]$state.projection_indexes
+        projection_count_columns = [int]$state.projection_count_columns
+        projection_receipt_columns = [int]$state.projection_receipt_columns
         operator_retry_columns = [int]$state.retry_columns
         legacy_tables = [int]$state.legacy_tables
         legacy_decisions = [int]$state.legacy_decisions
@@ -1414,7 +1468,8 @@ function Assert-CoordinatedMigrationReceipt {
         "validation_key", "candidate_git_sha", "candidate_worker_version",
         "stable_git_sha", "stable_worker_version", "database_id", "database_name",
         "migration_files", "applied_migrations", "pending_migrations",
-        "projection_tables", "projection_indexes", "operator_retry_columns",
+        "projection_tables", "projection_indexes", "projection_count_columns",
+        "projection_receipt_columns", "operator_retry_columns",
         "legacy_tables", "stable_read", "candidate_read", "reverse_safe"
     )
     foreach ($field in $immutableFields) {

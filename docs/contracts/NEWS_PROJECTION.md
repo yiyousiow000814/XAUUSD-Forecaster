@@ -26,12 +26,24 @@
 
 - The lifecycle is `prepare -> details -> index -> reconcile -> validate ->
   CURRENT`. Details MUST be complete before any index batch is accepted.
-- Index rows and details belong to the same generation. Readers MUST select
-  only the active generation and MUST NOT combine generations.
+- Index membership belongs to one generation. Detail bodies use their immutable,
+  content-addressed `detail_key` identity in the global derived detail store, so
+  replacement generations reuse exact existing evidence instead of copying it.
+  A repeated key with a different hash or payload is a contradiction and MUST
+  fail before either evidence or batch progress changes. Readers MUST select
+  index membership only from the active generation and resolve every identity
+  to exactly that immutable detail; they MUST NOT combine index generations.
+  Detail and index batches independently advance an append-only identity digest
+  over their ordered `detail_key` values. Activation requires those final
+  digests to match, so an identity left over in the global store cannot satisfy
+  a different generation's detail membership proof.
 - Activation is one D1 transaction. The prior verified `CURRENT` generation
   remains readable until the replacement has exact counts, no missing detail,
   no review-state or active-cluster invariant violation, and a receipt digest
-  equal to its source manifest.
+  equal to its source manifest. The same transaction materializes the complete
+  review-state, category, and parsed-count summary for that exact generation;
+  every future generation repeats this step, so a one-time migration backfill
+  is not activation authority.
 - `CURRENT`, `RECOVERY_REQUIRED`, `REPLAYING`, `VERIFYING`, and `DEGRADED` are
   user-visible truth states. Only a receipt-matched, verified `CURRENT`
   generation may claim a complete 60-day total.
@@ -52,12 +64,25 @@
   health MUST NOT scan or deserialize all news bodies. An explicit verification
   step may perform bounded indexed count and relationship checks before or
   after activation.
+- Public index pagination reads materialized immutable totals and indexed page
+  rows. It MUST NOT rescan the complete CURRENT generation for filtered totals,
+  category buckets, or review buckets on every visitor request. The only
+  time-dependent aggregate is the unexpired model-candidate count. Activation
+  stores its canonical fixed-width expiry timestamps in sorted order and the
+  Worker obtains the active count by binary search, without scanning D1 rows.
 
 ## Retry and recovery
 
 - Batch offsets and receipts are idempotent. Replaying an accepted exact batch
   succeeds; changing an accepted batch is a receipt contradiction and fails
-  closed.
+  closed. The append-only batch receipt is the staging progress record; a
+  second mutable generation-progress row is not rewritten for every batch.
+  Replaying an unchanged detail performs no detail mutation; only its new
+  generation's append-only batch receipt is written. A genuinely new detail is
+  appended once and can become readable only when a receipt-complete index
+  generation activates.
+  Activation copies the final receipt-backed offsets into immutable generation
+  evidence in the same transaction that makes the generation CURRENT.
 - A retry resumes the remote detail and index offsets and preserves the prior
   `CURRENT` generation. It MUST NOT restart an accepted stage blindly.
 - Building the frozen local source universe runs outside the HTTP request path.

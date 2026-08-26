@@ -144,6 +144,15 @@ export const newsProjectionIndex = sqliteTable("news_projection_index", {
   ),
 ]);
 
+export const newsProjectionCounts = sqliteTable("news_projection_counts", {
+  generationId: text("generation_id").notNull(),
+  reviewState: text("review_state").notNull(),
+  category: text("category").notNull(),
+  itemCount: integer("item_count").notNull(),
+  parsedCount: integer("parsed_count").notNull(),
+  candidateExpiries: text("candidate_expiries").notNull(),
+}, table => [primaryKey({ columns: [table.generationId, table.reviewState, table.category] })]);
+
 export const newsProjectionDetails = sqliteTable("news_projection_details", {
   generationId: text("generation_id").notNull(),
   detailKey: text("detail_key").notNull(),
@@ -159,6 +168,17 @@ export const newsProjectionBatches = sqliteTable("news_projection_batches", {
   itemCount: integer("item_count").notNull(),
   payloadHash: text("payload_hash").notNull(),
   receiptDigest: text("receipt_digest").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, table => [primaryKey({ columns: [table.generationId, table.batchKind, table.batchOffset] })]);
+
+export const newsProjectionReceiptsV2 = sqliteTable("news_projection_receipts_v2", {
+  generationId: text("generation_id").notNull(),
+  batchKind: text("batch_kind").notNull(),
+  batchOffset: integer("batch_offset").notNull(),
+  itemCount: integer("item_count").notNull(),
+  payloadHash: text("payload_hash").notNull(),
+  receiptDigest: text("receipt_digest").notNull(),
+  identityDigest: text("identity_digest").notNull(),
   updatedAt: text("updated_at").notNull(),
 }, table => [primaryKey({ columns: [table.generationId, table.batchKind, table.batchOffset] })]);
 
