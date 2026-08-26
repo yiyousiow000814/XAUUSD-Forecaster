@@ -265,6 +265,24 @@ Implementation status: `PENDING` until the C3c stacked change merges.
 - **Non-goals:** no SQL, payload, timestamp, freshness, cache, route, scheduler,
   retry, process, or production-state change.
 
+### Phase C-3d — Dashboard operator bridge
+
+Implementation status: `PENDING` until the C3d stacked change merges.
+
+- **Exact responsibility:** dedicated loopback/non-browser authorization,
+  bounded retry-job reads, override-batch validation, and delegation to the
+  scheduler transition owner.
+- **Target module:** `xauusd_forecaster/dashboard/operator_bridge.py`.
+- **Compatibility:** the API Handler retains HTTP parsing and response writing;
+  its existing method delegates to the canonical service.
+- **Focused tests:** service authorization and fail-closed boundaries live in
+  `tests/test_dashboard_operator_bridge.py`; complete HTTP and transition
+  behavior remains covered by API and scheduler suites.
+- **Rollback:** revert the extraction commit; no scheduler or evidence state is
+  migrated.
+- **Non-goals:** no auth policy, route, payload, status code, batch limit,
+  scheduler transition, schema, credential, or production-state change.
+
 ## Priority method
 
 File size is only an inventory signal. Rank a proposed split using:

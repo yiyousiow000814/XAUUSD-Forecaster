@@ -4,15 +4,12 @@
 from __future__ import annotations
 
 import argparse
-import hmac
 import json
-import os
 import re
 import sqlite3
 import sys
 import threading
 import urllib.parse
-from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -100,6 +97,11 @@ from xauusd_forecaster.dashboard.market_resources import (
     _quote_history_files,
     _recent_market_chart,
 )
+from xauusd_forecaster.dashboard.operator_bridge import (
+    apply_retry_overrides,
+    operator_bridge_auth_error,
+    retry_jobs_response,
+)
 from xauusd_forecaster.dashboard.status_resources import (
     DEPLOYMENT_PROVENANCE,
     PAYLOAD_SCHEMA_VERSION,
@@ -123,12 +125,6 @@ from xauusd_forecaster.dashboard.status_resources import (
     _parse_utc,
     _runtime_heartbeat,
 )
-from xauusd_forecaster.news_scheduler import (  # noqa: E402
-    RetryScheduleConflict,
-    apply_retry_schedule_override,
-    install_scheduler_schema,
-    list_retry_schedule_jobs,
-)
 from xauusd_forecaster.operational_health import extend_with_component_alerts
 DEFAULT_DATABASE = MODULE_ROOT / ".local" / "forward" / "forward-evidence.sqlite3"
 
@@ -145,18 +141,14 @@ class Handler(BaseHTTPRequestHandler):
     news_evidence_cache = StatusSnapshotCache()
 
     def _operator_bridge_auth_error(self) -> tuple[int, bytes] | None:
-        if self.client_address[0] not in {"127.0.0.1", "::1"}:
-            return 403, b'{"error":"localhost operator bridge only"}'
-        # Browser-origin requests have no reason to reach this machine bridge.
-        if self.headers.get("Origin") or self.headers.get("Sec-Fetch-Mode"):
-            return 403, b'{"error":"browser origin is not permitted"}'
-        expected = os.environ.get("DASHBOARD_OPERATOR_BRIDGE_TOKEN", "").strip()
-        supplied = self.headers.get("X-Aurum-Operator-Bridge-Token", "").strip()
-        if not 32 <= len(expected) <= 512:
-            return 503, b'{"error":"operator bridge credential is not configured"}'
-        if not supplied or not hmac.compare_digest(supplied, expected):
-            return 401, b'{"error":"operator bridge authorization failed"}'
-        return None
+        return operator_bridge_auth_error(
+            client_host=self.client_address[0],
+            origin=self.headers.get("Origin"),
+            fetch_mode=self.headers.get("Sec-Fetch-Mode"),
+            supplied_token=self.headers.get(
+                "X-Aurum-Operator-Bridge-Token", "",
+            ).strip(),
+        )
 
     def _write_json(self, status: int, body: bytes, **headers: str) -> None:
         self.send_response(status)
@@ -329,20 +321,7 @@ class Handler(BaseHTTPRequestHandler):
             if auth_error:
                 self._write_json(*auth_error)
                 return
-            try:
-                connection = sqlite3.connect(
-                    f"file:{self.database}?mode=ro", uri=True, timeout=5,
-                )
-                connection.row_factory = sqlite3.Row
-                try:
-                    payload = {"items": list_retry_schedule_jobs(connection)}
-                finally:
-                    connection.close()
-                body = json.dumps(payload, allow_nan=False).encode()
-                status = 200
-            except (OSError, sqlite3.Error, TypeError, ValueError) as error:
-                body = json.dumps({"error": str(error)[:500]}).encode()
-                status = 400
+            status, body = retry_jobs_response(self.database)
             self._write_json(status, body)
             return
         if path not in {"/api/status", "/api/critical-status"}:
@@ -391,69 +370,8 @@ class Handler(BaseHTTPRequestHandler):
             if content_length < 2 or content_length > 100_000:
                 raise ValueError("retry override payload size is invalid")
             payload = json.loads(self.rfile.read(content_length))
-            if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
-                raise ValueError("retry override items are required")
-            items = payload["items"]
-            if not 1 <= len(items) <= 100:
-                raise ValueError("retry override batch size is invalid")
-            operator_id = str(payload.get("operator_id") or "").strip()
-            if not operator_id.startswith("cloudflare-access:") or len(operator_id) > 500:
-                raise ValueError("retry override operator identity is invalid")
-            connection = sqlite3.connect(self.database, timeout=10)
-            connection.row_factory = sqlite3.Row
-            try:
-                install_scheduler_schema(connection)
-                results = []
-                for item in items:
-                    if not isinstance(item, dict):
-                        results.append({"status": "REJECTED", "code": "INVALID_ITEM"})
-                        continue
-                    try:
-                        requested_at = item.get("requested_available_at")
-                        custom_time = (
-                            datetime.fromisoformat(str(requested_at))
-                            if requested_at else None
-                        )
-                        current = apply_retry_schedule_override(
-                            connection,
-                            request_id=str(item.get("request_id") or ""),
-                            job_id=str(item.get("job_id") or ""),
-                            operator_id=operator_id,
-                            mode=str(item.get("mode") or ""),
-                            reason=str(item.get("reason") or ""),
-                            expected_state=str(item.get("expected_state") or ""),
-                            expected_available_at=str(
-                                item.get("expected_available_at") or ""
-                            ),
-                            requested_available_at=custom_time,
-                        )
-                        results.append({
-                            "request_id": item.get("request_id"),
-                            "job_id": item.get("job_id"),
-                            "status": "APPLIED",
-                            "current": current,
-                        })
-                    except RetryScheduleConflict as error:
-                        results.append({
-                            "request_id": item.get("request_id"),
-                            "job_id": item.get("job_id"),
-                            "status": "CONFLICT",
-                            "code": error.code,
-                            "current": error.current,
-                        })
-                    except (TypeError, ValueError) as error:
-                        results.append({
-                            "request_id": item.get("request_id"),
-                            "job_id": item.get("job_id"),
-                            "status": "REJECTED",
-                            "code": "INVALID_REQUEST",
-                            "error": str(error)[:500],
-                        })
-            finally:
-                connection.close()
-            status = 200 if all(item["status"] == "APPLIED" for item in results) else 207
-            body = json.dumps({"results": results}, allow_nan=False).encode()
-        except (json.JSONDecodeError, OSError, sqlite3.Error, TypeError, ValueError) as error:
+            status, body = apply_retry_overrides(self.database, payload)
+        except (json.JSONDecodeError, TypeError, ValueError) as error:
             status = 400
             body = json.dumps({"error": str(error)[:500]}).encode()
         self._write_json(status, body)

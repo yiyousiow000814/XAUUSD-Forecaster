@@ -269,6 +269,15 @@ def test_dashboard_api_exposes_status_resource_owner() -> None:
     assert module._LEARNING_CACHE is status_resources._LEARNING_CACHE
 
 
+def test_dashboard_api_uses_operator_bridge_owner() -> None:
+    from xauusd_forecaster.dashboard import operator_bridge
+
+    module = _dashboard_module()
+
+    assert module.apply_retry_overrides is operator_bridge.apply_retry_overrides
+    assert module.retry_jobs_response is operator_bridge.retry_jobs_response
+
+
 def test_starting_news_collector_alert_remains_nonblocking_warning() -> None:
     module = _dashboard_module()
     now = datetime(2026, 8, 18, 8, 40, tzinfo=UTC)
@@ -1405,10 +1414,16 @@ def test_retry_operator_bridge_requires_both_loopback_and_dedicated_credential(
     base = f"http://127.0.0.1:{server.server_port}"
 
     def status(request: urllib.request.Request) -> int:
-        try:
-            urllib.request.urlopen(request, timeout=2)
-        except urllib.error.HTTPError as error:
-            return error.code
+        for attempt in range(3):
+            try:
+                urllib.request.urlopen(request, timeout=2)
+            except urllib.error.HTTPError as error:
+                return error.code
+            except (ConnectionAbortedError, ConnectionResetError):
+                if attempt == 2:
+                    raise
+                continue
+            break
         raise AssertionError("bridge request should have failed")
 
     try:
