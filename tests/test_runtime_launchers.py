@@ -3428,6 +3428,7 @@ def test_successful_coordinated_migration_acceptance_is_audited_and_exact(
         _authorized_candidate(previous, candidate)
         + _coordinated_migration_contract_body()
         + "$state=Get-ReleaseControlState;$state.candidate.validation_state='REVIEW_REQUIRED';"
+        "$state.candidate.branch='main';"
         "$state.candidate.compatibility_state='REVIEW_REQUIRED';"
         "$state.candidate|Add-Member -Force browser_url 'https://candidate.example';"
         "$state.candidate.validation=[pscustomobject]@{key=$state.candidate.validation_key;"
@@ -3441,9 +3442,77 @@ def test_successful_coordinated_migration_acceptance_is_audited_and_exact(
         'Write-Output "$($accepted.validation_state),'
         '$($final.candidate.migration_acceptance.validation_key -eq '
         '$final.candidate.validation_key),'
+        '$($final.migration_sync_hold.validation_key -eq '
+        '$final.candidate.validation_key),'
+        '$(Test-CoordinatedMigrationSyncHold $final),'
         '$($history.Contains(\'COORDINATED_STORAGE_MIGRATION_PASSED\'))"',
     )
-    assert result == "NEW,True,True"
+    assert result == "NEW,True,True,True,True"
+
+
+@pytest.mark.parametrize(
+    ("hold_override", "candidate_override"),
+    [
+        ("$state.migration_sync_hold.validation_key=('9'*40)", ""),
+        ("$state.migration_sync_hold.expires_at='2020-01-01T00:00:00Z'", ""),
+        ("", "$state.candidate.branch='feature/not-main'"),
+        ("", "$state.candidate.artifact_kind='PREVIEW'"),
+    ],
+)
+def test_coordinated_migration_sync_hold_is_exact_bounded_and_production_only(
+    tmp_path, hold_override: str, candidate_override: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$state.candidate.branch='main';"
+        "$state|Add-Member -Force migration_sync_hold ([pscustomobject]@{"
+        "validation_key=$state.candidate.validation_key;"
+        "expires_at=[DateTimeOffset]::UtcNow.AddHours(2).ToString('o')});"
+        f"{hold_override};{candidate_override};"
+        "Write-Output (Test-CoordinatedMigrationSyncHold $state)",
+    )
+    assert result == "False"
+
+
+@pytest.mark.parametrize(
+    ("service_key", "service_state", "expected"),
+    [
+        ("sync", "STOPPED", "True"),
+        ("sync", "SYNC ERROR", "False"),
+        ("api", "STOPPED", "False"),
+    ],
+)
+def test_watchdog_suppresses_only_an_explicit_migration_sync_stop(
+    tmp_path, service_key: str, service_state: str, expected: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$state.candidate.branch='main';"
+        "$state|Add-Member -Force migration_sync_hold ([pscustomobject]@{"
+        "validation_key=$state.candidate.validation_key;"
+        "expires_at=[DateTimeOffset]::UtcNow.AddHours(2).ToString('o')});"
+        f"Write-Output (Test-WatchdogRecoverySuppressed '{service_key}' "
+        f"'{service_state}' $state)",
+    )
+    assert result == expected
+
+
+def test_explicit_sync_start_releases_the_migration_hold(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$state.candidate.branch='main';"
+        "$state|Add-Member -Force migration_sync_hold ([pscustomobject]@{"
+        "validation_key=$state.candidate.validation_key;"
+        "expires_at=[DateTimeOffset]::UtcNow.AddHours(2).ToString('o')});"
+        "Write-ReleaseControlState $state;Exit-CoordinatedMigrationSyncHold;"
+        "$final=Get-ReleaseControlState;"
+        'Write-Output "$($null -eq $final.migration_sync_hold),'
+        '$(Test-CoordinatedMigrationSyncHold $final)"',
+    )
+    assert result == "True,False"
 
 
 def test_platform_compatibility_approval_is_exact_audited_and_narrow(tmp_path) -> None:

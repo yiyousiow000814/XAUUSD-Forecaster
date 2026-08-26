@@ -114,6 +114,16 @@ Candidate to `REVIEW_REQUIRED`. Resume ordinary Candidate validation only after
 the action records `COORDINATED_STORAGE_MIGRATION_PASSED` for the exact
 validation key.
 
+The action first records an exact, two-hour migration hold and stops Dashboard
+Sync. The watchdog must leave that explicitly stopped owner paused during the
+hold. If the first verification reports that the still-active legacy projection
+moved after bootstrap, rerun `bootstrap_news_projection.py` through the exact
+Candidate Version host while Sync remains stopped, then run **Verify Migration**
+again. Do not repair D1 rows manually. Keep the hold through directed Candidate
+validation; Promote resumes Sync only after Windows and Worker identities have
+cut over. `ServiceStart sync` is the explicit abort path, and an expired or
+different-Candidate hold no longer suppresses watchdog recovery.
+
 Worker-changing Candidates require a Cloudflare API token limited to read-only
 Workers Observability query access. Store it under the exact
 `CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN` key in the repository-local,
