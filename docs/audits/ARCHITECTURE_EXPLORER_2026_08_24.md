@@ -1,5 +1,33 @@
 # Private Architecture Explorer Audit — 2026-08-24
 
+## Generated evidence extension — 2026-08-26
+
+Draft PR #328 extends the accepted #304 graph, routing, camera, disclosure, and
+mobile interaction boundaries without redesigning them. It consumes compiler
+artifacts at exact Git SHA `64ac434d97d557ec9857bb4a465a4de9c5c3554b`
+and adds only private lazy evidence surfaces:
+
+- node and edge evidence status on the existing graph;
+- exact repository-relative source spans with extractor and certainty;
+- generated package/module/symbol code drill-down;
+- separate Observed Imports, Allowed Policy, and Violations views;
+- contract test execution and runtime-trace evidence;
+- a test-effectiveness panel that reports 16 verified critical contracts while
+  retaining three surviving designated mutations as explicit gaps.
+
+The exact immutable Preview is version
+`94289f83-ae70-48d6-9c33-5ebabb9b3f8d` at
+`https://94289f83-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`.
+Desktop 1440x900 and phone 390x844 / 360x800 passed. The phones retained the
+168px node, 17px primary text, 13px CSS lane-heading, 44px target, canvas-contained
+horizontal pan, and page-overflow contracts. Closing either sheet retained the
+path and viewport; Clear Path remained the only selection-clearing action.
+
+Screenshots are under
+`docs/audits/screenshots/architecture-evidence-64ac434d/`. The task-owned
+browser tab was closed and its viewport override reset. The historical #304
+evidence below remains valid for its exact older Version only.
+
 ## Outcome
 
 The first Explorer renderer was rejected because it presented a two-column
@@ -144,9 +172,16 @@ node omitted from all hints.
   pan, or zoom. Critical edge labels remain visible; background and optional
   labels appear for interaction, guidance, or sparse views while the text
   fallback always retains every label.
-- Small views permit a larger bounded fit zoom. View changes fit all nodes;
-  opening the inspector preserves zoom. Desktop close refits restored width,
-  while mobile close preserves both path and viewport without a camera command.
+- One latest-intent camera controller exclusively owns automatic Fit, Focus,
+  inspector-close refit, and manual Fit. It cancels pending frames and waits
+  for React Flow node initialization plus stable measured canvas dimensions.
+- Cross-view search and scenarios issue one final Focus rather than Fit then
+  Focus. Small views permit a larger bounded fit zoom. Opening the inspector
+  preserves zoom; desktop close waits for width transition completion before
+  one refit, while mobile close preserves both path and viewport without a
+  camera command.
+- Mobile resolves the breakpoint before React Flow mounts, so the first graph
+  is TB and performs one Fit without exposing an intermediate LR layout.
 - Keyboard nodes support Enter, Space, arrows, Escape, visible focus, and an
   `aria-live` selected-path announcement. The relationship text equivalent is
   secondary and collapsible. Reduced motion disables guided edge animation.
@@ -176,18 +211,39 @@ initial gzip regression is therefore below the 2 KiB ceiling.
 | 1440x900 | LR Overview, full 11-node layout / 6 disclosed edges, arrows, labels, MiniMap; Decision selection keeps zoom unchanged | Closed initially; 380px drawer after selection | none | at least 44px |
 | 390x844 | 574px viewport-derived TB canvas; 72px top distance; 168px node floor; first tap exposes eight-edge Decision path and dock | Controlled 72dvh sheet; close preserves all eight highlighted edges | none | at least 44px |
 | 360x800 | 544px viewport-derived TB canvas with compact two-row toolbar and internal horizontal pan | Controlled sheet; Advanced and Inspector mutually exclusive | none | at least 44px |
+| 375x812 | 552px viewport-derived TB canvas with the same readability floor | Complete tap/path/sheet/scenario/search/Fit flow passed | none | at least 44px |
 | 320x568 | 480px bounded stress canvas; first graph bound remains 72px from top | Full usable bounded sheet with visible sticky close | none | at least 44px |
+| 393x852 | 579px viewport-derived TB canvas with the same readability floor | Complete tap/path/sheet/scenario/search/Fit flow passed | none | at least 44px |
+| 430x932 | 634px viewport-derived TB canvas with the same readability floor | Complete tap/path/sheet/scenario/search/Fit flow passed | none | at least 44px |
+| 800x360 | 280px short-landscape canvas; internal graph drag retained 168px nodes | Full-height landscape sheets remain closable | none | at least 44px |
 | 844x390 | 281px short-landscape canvas and 65px single-row toolbar | Full-height landscape sheet remains closable | none | at least 44px |
 
 Browser checks exercised Decision selection/dimming, inspector close,
 subsystem membership and breadcrumbs, Training's three-lane path, package
 initial/selected/show-all disclosure, mobile beginner navigation, relationship
 fallback, responsive direction, exact 168px mobile floor, and unchanged zoom
-during Decision disclosure. The local browser ended with zero task-created
-sessions.
+during Decision disclosure. The active local QA tab closed and its viewport
+override was reset.
 Local status/session requests correctly fail without Cloudflare bindings and
-are not Explorer requests. Exact deployed Preview evidence is recorded in the
-pull request after the immutable branch build completes.
+are not Explorer requests.
+
+## Exact immutable Preview QA
+
+Cloudflare version `e4245cc6-3f15-4320-8110-f3b9ef37a537` at
+`https://e4245cc6-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`
+exposed exact build `884f1223`. All eight mobile viewports in the table passed
+the full affected flow. At 390x844 the dock/Inspector/Advanced heights were
+88/608/574px; at 360x800 they were 88/576/544px. Inspector open and close each
+retained eight path edges. Explore Advanced listed only four advanced/campaign
+destinations, while Reference exposed all views and reference controls.
+Screenshots are stored under
+`docs/audits/screenshots/architecture-explorer-884f122/`.
+
+The immutable-Preview tab closed and the viewport override was reset. The
+browser still listed one earlier localhost error interstitial whose protected
+`data:` URL prevented automated close; it remains turn-scoped. The known
+shared Admin-shell React hydration #418 remains recorded and was not expanded
+into this PR.
 
 ## Final local validation
 
