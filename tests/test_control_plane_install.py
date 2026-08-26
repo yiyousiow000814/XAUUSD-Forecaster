@@ -119,6 +119,7 @@ def _state_machine_mocks(old_revision: str, target_revision: str) -> str:
           $p=[pscustomobject]@{{process_id=10;process_start_token='service-token'}};
           [pscustomobject]@{{business_runtime_revision='runtime';services=[pscustomobject]@{{quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@($p);broadcast=@()}}}}
         }};
+        function Assert-ControlPlaneIsolationBaseline {{ param($Snapshot,$ReleaseState); $script:timeline+='baseline' }};
         function Assert-ControlPlaneIsolationSnapshot {{ param($Before,$After,$ReleaseState); $script:timeline+='isolation' }};
         function New-VerifiedRuntimeControlBundleStage {{ param($SourceRoot,$SourceRevision,$StageRoot,[switch]$RequireImmutableSource); $script:timeline+='stage'; [pscustomobject]@{{source_revision='{target_revision}'}} }};
         function Suspend-ControlPlaneSupervision {{ $script:timeline+='suspend'; @{{}} }};
@@ -126,8 +127,8 @@ def _state_machine_mocks(old_revision: str, target_revision: str) -> str:
         function Restore-ControlPlaneSupervision {{ param($State); $script:timeline+='supervision' }};
         function Stop-VerifiedWatchdogOwner {{ param($Identity); $script:timeline+='stop'; $script:owners=@() }};
         function Install-VerifiedRuntimeControlBundleStage {{ param($StageRoot,$ControlRoot,$BackupRoot); if($script:owners.Count-ne 0){{throw 'two owners'}}; $script:timeline+='install'; [pscustomobject]@{{source_revision='{target_revision}'}} }};
-        function Start-WatchdogReplacement {{ param([switch]$PassThru); if($script:owners.Count-ne 0){{throw 'two owners'}}; $script:timeline+='start'; $script:owners=@({new}); [pscustomobject]@{{Id=201}} }};
-        function Wait-VerifiedWatchdogHandoff {{ param($ExpectedRevision,$PreviousIdentity,$Timeout); if($script:owners.Count-ne 1){{throw 'owner count'}}; $script:timeline+='heartbeat'; return $script:owners[0] }};
+        function Start-WatchdogReplacement {{ param([switch]$PassThru,$InstallTransactionId); if($script:owners.Count-ne 0){{throw 'two owners'}}; $script:timeline+='start'; $script:owners=@({new}); [pscustomobject]@{{Id=201}} }};
+        function Wait-VerifiedWatchdogHandoff {{ param($ExpectedRevision,$PreviousIdentity,$ExpectedMode,$ExpectedInstallTransactionId,$Timeout); if($script:owners.Count-ne 1){{throw 'owner count'}}; $script:timeline+="heartbeat:$ExpectedMode"; return $script:owners[0] }};
         """
     ).replace("\n", " ")
 
@@ -246,6 +247,59 @@ def test_bundle_install_is_complete_and_restorable(tmp_path: Path) -> None:
     assert all((control / name).read_text() == f"old|{name}\n" for name in CONTROL_FILES)
 
 
+def test_watchdog_repairs_interrupted_bundle_copy_after_installer_exit(
+    tmp_path: Path,
+) -> None:
+    target_revision = "b" * 40
+    repository = tmp_path / "repository"
+    control = repository / ".local" / "runtime-control"
+    stage = repository / ".local" / ".cps-recovery"
+    backup = repository / ".local" / ".cpb-recovery"
+    _write_bundle(control, "a" * 40, "old")
+    _write_bundle(stage, target_revision, "new")
+    _write_bundle(backup, "a" * 40, "old")
+    (control / CONTROL_FILES[0]).write_text("interrupted\n", encoding="utf-8")
+    body = textwrap.dedent(
+        f"""
+        Write-ControlPlaneInstallState @{{transaction_id='txn';target_revision='{target_revision}';phase='INSTALL_BUNDLE';stage_root='{stage}';backup_root='{backup}';install_owner_identity=[pscustomobject]@{{process_id=999999;process_start_token='gone'}}}};
+        function Get-ControlPlaneProcessIdentity {{ param($ProcessId); return $null }};
+        $repaired=Repair-AbandonedControlPlaneBundleForWatchdog;
+        Write-Output "$($repaired.source_revision)|$((Get-ControlPlaneInstallState).recovery)"
+        """
+    ).replace("\n", " ")
+
+
+def _abandoned_activation_mocks(
+    target_revision: str,
+    phase: str,
+    *,
+    transaction_id: str = "txn",
+    bundle_verified: str = "$true",
+) -> str:
+    return textwrap.dedent(
+        f"""
+        $script:phase='{phase}'; $script:checks=@();
+        $current=[pscustomobject]@{{process_id=$PID;process_start_token='current-token'}};
+        $old=[pscustomobject]@{{process_id=100;process_start_token='old-token'}};
+        $baseline=[pscustomobject]@{{business_runtime_revision='runtime';release_state_hash='state';release_history_hash='history';services=[pscustomobject]@{{}}}};
+        $script:state=[pscustomobject]@{{transaction_id='{transaction_id}';phase=$script:phase;target_revision='{target_revision}';previous_revision='{'a' * 40}';bundle_hash_verified={bundle_verified};install_owner_identity=[pscustomobject]@{{process_id=999999;process_start_token='gone'}};old_watchdog_identity=$old;isolation_before=$baseline;backup_root='backup';supervision_state=$null}};
+        function Get-ControlPlaneInstallState {{ $script:state.phase=$script:phase; $script:state }};
+        function Write-ControlPlaneInstallState {{ param($Values); if($Values.phase){{$script:phase=[string]$Values.phase}} }};
+        function Get-ControlPlaneProcessIdentity {{ param($ProcessId); if($ProcessId-eq $PID){{$current}}else{{$null}} }};
+        function Get-RuntimeControlBundleIdentity {{ [pscustomobject]@{{source_revision='{target_revision}';exact_revision=$true}} }};
+        function Get-VerifiedWatchdogOwners {{ @($current) }};
+        function Get-ReleaseControlState {{ [pscustomobject]@{{transaction=$null}} }};
+        function Assert-ControlPlaneIsolationBaseline {{ param($Snapshot,$ReleaseState); $script:checks+='baseline' }};
+        function Get-ControlPlaneIsolationSnapshot {{ $baseline }};
+        function Assert-ControlPlaneIsolationSnapshot {{ param($Before,$After); $script:checks+='isolation' }};
+        function Write-WatchdogHeartbeat {{ param($SupervisionMode,$InstallTransactionId); New-Item -ItemType Directory -Path (Split-Path -Parent $watchdogHeartbeatPath) -Force | Out-Null; [pscustomobject]@{{install_transaction_id=$InstallTransactionId;supervision_mode=$SupervisionMode;control_bundle_revision='{target_revision}';control_bundle_exact_revision=$true;control_bundle_hash_verified=$true;process_id=$PID;process_start_token='current-token'}} | ConvertTo-Json | Set-Content -LiteralPath $watchdogHeartbeatPath }};
+        """
+    ).replace("\n", " ")
+    assert _run_contract(tmp_path, body) == (
+        f"{target_revision}|FORWARD_REPAIRED_INTERRUPTED_BUNDLE_COPY"
+    )
+
+
 def test_staged_hash_mismatch_stops_before_watchdog_termination(tmp_path: Path) -> None:
     old_revision, target_revision = "a" * 40, "b" * 40
     body = _state_machine_mocks(old_revision, target_revision) + textwrap.dedent(
@@ -267,38 +321,37 @@ def test_handoff_orders_single_ownership_and_preserves_runtime(tmp_path: Path) -
     )
     result = _run_contract(tmp_path, body)
     assert result == (
-        "COMMITTED|lock,stage,suspend,guard,stop,install,start,heartbeat,"
-        "isolation,supervision,unlock"
+        "COMMITTED|lock,stage,suspend,guard,stop,baseline,install,start,"
+        "heartbeat:QUIESCED,isolation,heartbeat:ACTIVE,supervision,unlock"
     )
 
 
-def test_install_preserves_intentionally_stopped_sync_during_exact_migration_hold(
+def test_install_fails_closed_when_stable_sync_owner_is_missing(
     tmp_path: Path,
 ) -> None:
     old_revision, target_revision = "a" * 40, "b" * 40
     body = _state_machine_mocks(old_revision, target_revision) + textwrap.dedent(
         f"""
-        $script:release=[pscustomobject]@{{candidate=[pscustomobject]@{{
-          artifact_kind='PRODUCTION_CANDIDATE';branch='main';validation_key='candidate:key'
-        }};migration_sync_hold=[pscustomobject]@{{validation_key='candidate:key';
-          expires_at=[DateTimeOffset]::UtcNow.AddHours(1).ToString('o')}}}};
-        function Get-ReleaseControlState {{ $script:release }};
         function Get-ControlPlaneIsolationSnapshot {{
           $p=[pscustomobject]@{{process_id=10;process_start_token='service-token'}};
           [pscustomobject]@{{business_runtime_revision='runtime';services=[pscustomobject]@{{
             quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@();broadcast=@()
           }}}}
         }};
-        $result=Invoke-ControlPlaneInstall -VerifiedSourceRoot 'immutable'
-          -TargetRevision '{target_revision}';
-        Write-Output "$($result.status)|$($script:timeline -join ',')"
+        function Assert-ControlPlaneIsolationBaseline {{ param($Snapshot,$ReleaseState);
+          if(@($Snapshot.services.sync).Count-ne 1){{throw 'CONTROL_PLANE_SERVICE_OWNER_REQUIRED:sync'}}
+        }};
+        try {{ Invoke-ControlPlaneInstall -VerifiedSourceRoot 'immutable'
+          -TargetRevision '{target_revision}' | Out-Null }} catch {{ $reason=$_.Exception.Message }};
+        Write-Output "$reason|$($script:timeline -join ',')"
         """
     ).replace("\n", " ")
     result = _run_contract(tmp_path, body)
-    assert result == (
-        "COMMITTED|lock,stage,suspend,guard,stop,install,start,heartbeat,"
-        "isolation,supervision,unlock"
+    assert result.startswith(
+        "CONTROL_PLANE_INSTALL_FAILED: "
+        "CONTROL_PLANE_SERVICE_OWNER_REQUIRED:sync; ROLLED_BACK|"
     )
+    assert "install" not in result
 
 
 def test_install_captures_service_isolation_only_after_old_watchdog_stops(
@@ -326,20 +379,40 @@ def test_install_captures_service_isolation_only_after_old_watchdog_stops(
     assert _run_contract(tmp_path, body) == "COMMITTED|2"
 
 
-def test_partial_supervision_quiesce_restores_task_enablement(tmp_path: Path) -> None:
+def test_install_reloads_release_context_after_old_supervisor_is_fenced(
+    tmp_path: Path,
+) -> None:
+    old_revision, target_revision = "a" * 40, "b" * 40
+    body = _state_machine_mocks(old_revision, target_revision) + textwrap.dedent(
+        f"""
+        $script:releaseReads=0;
+        function Get-ReleaseControlState {{
+          $script:releaseReads++;
+          [pscustomobject]@{{marker=if($script:releaseReads-eq 1){{'stale'}}else{{'fresh'}};transaction=$null}}
+        }};
+        function Assert-ControlPlaneIsolationBaseline {{ param($Snapshot,$ReleaseState); if($ReleaseState.marker-ne 'fresh'){{throw 'STALE_RELEASE_CONTEXT'}}; $script:timeline+='baseline' }};
+        $result=Invoke-ControlPlaneInstall -VerifiedSourceRoot 'immutable'
+          -TargetRevision '{target_revision}';
+        Write-Output "$($result.status)|$script:releaseReads"
+        """
+    ).replace("\n", " ")
+    assert _run_contract(tmp_path, body) == "COMMITTED|2"
+
+
+def test_supervision_quiesce_keeps_main_task_enabled_for_restart(tmp_path: Path) -> None:
     body = textwrap.dedent(
         """
         $script:disabled=@(); $script:enabled=@(); $script:stopped=@(); $script:mainTask=$taskName;
         function Get-ScheduledTask { param($TaskName,$ErrorAction); [pscustomobject]@{Settings=[pscustomobject]@{Enabled=$true}} };
-        function Disable-ScheduledTask { param($TaskName); $script:disabled+=$TaskName; if($TaskName-eq $script:mainTask){throw 'disable failed'} };
+        function Disable-ScheduledTask { param($TaskName); $script:disabled+=$TaskName };
         function Enable-ScheduledTask { param($TaskName); $script:enabled+=$TaskName };
         function Stop-ScheduledTask { param($TaskName,$ErrorAction); $script:stopped+=$TaskName };
-        try { Suspend-ControlPlaneSupervision | Out-Null } catch { };
+        $state=Suspend-ControlPlaneSupervision;
         Write-Output "$($script:disabled.Count),$($script:enabled.Count),$($script:stopped -join '|')"
         """
     ).replace("\n", " ")
     result = _run_contract(tmp_path, body)
-    assert result == "2,2,XAUUSD-Forecaster-Watchdog-Guard"
+    assert result == "1,0,XAUUSD-Forecaster-Watchdog-Guard"
 
 
 @pytest.mark.parametrize(
@@ -364,11 +437,135 @@ def test_heartbeat_requires_new_process_exact_revision_and_hashes(
         function Start-Sleep {{ }};
         function Get-VerifiedWatchdogOwners {{ @($owner) }};
         New-Item -ItemType Directory -Path (Split-Path -Parent $watchdogHeartbeatPath) -Force | Out-Null;
-        [pscustomobject]@{{control_bundle_revision='{revision}';control_bundle_exact_revision={exact};control_bundle_hash_verified={hashed};process_id={owner_pid};process_start_token='{heartbeat_token}'}} | ConvertTo-Json | Set-Content -LiteralPath $watchdogHeartbeatPath;
+        [pscustomobject]@{{control_bundle_revision='{revision}';control_bundle_exact_revision={exact};control_bundle_hash_verified={hashed};supervision_mode='ACTIVE';install_transaction_id=$null;process_id={owner_pid};process_start_token='{heartbeat_token}'}} | ConvertTo-Json | Set-Content -LiteralPath $watchdogHeartbeatPath;
         try {{ $accepted=Wait-VerifiedWatchdogHandoff -ExpectedRevision '{revision}' -PreviousIdentity $previous -Timeout ([TimeSpan]::FromMilliseconds(20)); Write-Output $accepted.process_start_token }} catch {{ Write-Output $_.Exception.Message }}
         """
     ).replace("\n", " ")
     assert _run_contract(tmp_path, body) == expected
+
+
+def test_handoff_requires_quiesced_ack_from_exact_install_transaction(tmp_path: Path) -> None:
+    revision = "b" * 40
+    previous = _identity(100, "old-token")
+    owner = _identity(200, "new-token")
+    body = textwrap.dedent(
+        f"""
+        $previous={previous}; $owner={owner};
+        function Start-Sleep {{ }};
+        function Get-VerifiedWatchdogOwners {{ @($owner) }};
+        New-Item -ItemType Directory -Path (Split-Path -Parent $watchdogHeartbeatPath) -Force | Out-Null;
+        [pscustomobject]@{{control_bundle_revision='{revision}';control_bundle_exact_revision=$true;control_bundle_hash_verified=$true;supervision_mode='QUIESCED';install_transaction_id='wrong';process_id=200;process_start_token='new-token'}} | ConvertTo-Json | Set-Content -LiteralPath $watchdogHeartbeatPath;
+        try {{ Wait-VerifiedWatchdogHandoff -ExpectedRevision '{revision}' -PreviousIdentity $previous -ExpectedMode 'QUIESCED' -ExpectedInstallTransactionId 'expected' -Timeout ([TimeSpan]::FromMilliseconds(20)) | Out-Null; Write-Output accepted }} catch {{ Write-Output $_.Exception.Message }}
+        """
+    ).replace("\n", " ")
+    assert _run_contract(tmp_path, body) == "CONTROL_PLANE_NEW_WATCHDOG_HEARTBEAT_TIMEOUT"
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ("START_NEW_WATCHDOG", "VERIFY_QUIESCED_HANDOFF", "ACTIVATE_NEW_WATCHDOG"),
+)
+def test_installer_death_rechecks_every_fact_before_active_grant(
+    tmp_path: Path, phase: str,
+) -> None:
+    target_revision = "b" * 40
+    body = _abandoned_activation_mocks(target_revision, phase) + textwrap.dedent(
+        """
+        $result=Wait-ControlPlaneInstallActivation -TransactionId 'txn';
+        Write-Output "$result|$script:phase|$($script:checks -join ',')"
+        """
+    ).replace("\n", " ")
+    assert _run_contract(tmp_path, body) == (
+        "RECOVERED|ACTIVATE_NEW_WATCHDOG|baseline,isolation"
+    )
+
+
+def test_installer_death_before_bundle_swap_restores_safe_supervisor_path(
+    tmp_path: Path,
+) -> None:
+    old_revision, target_revision = "a" * 40, "b" * 40
+    repository = tmp_path / "repository"
+    control = repository / ".local" / "runtime-control"
+    _write_bundle(control, old_revision, "old")
+    body = textwrap.dedent(
+        f"""
+        Write-ControlPlaneInstallState @{{transaction_id='txn';target_revision='{target_revision}';previous_revision='{old_revision}';phase='STOP_OLD_WATCHDOG';install_owner_identity=[pscustomobject]@{{process_id=999999;process_start_token='gone'}};supervision_state=[pscustomobject]@{{}}}};
+        function Get-ControlPlaneProcessIdentity {{ param($ProcessId); return $null }};
+        function Get-RuntimeControlBundleIdentity {{ Get-RuntimeControlBundleIdentityAtRoot -ControlRoot '{control}' }};
+        function Restore-ControlPlaneSupervision {{ param($State); $script:restored=$true }};
+        $bundle=Repair-AbandonedControlPlaneBundleForWatchdog;
+        $state=Get-ControlPlaneInstallState;
+        Write-Output "$($bundle.source_revision)|$($state.phase)|$script:restored"
+        """
+    ).replace("\n", " ")
+    assert _run_contract(tmp_path, body) == f"{old_revision}|ROLLED_BACK|True"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    (
+        ("$script:state.transaction_id='wrong'", "CONTROL_PLANE_INSTALL_FENCE_LOST"),
+        ("$script:state.bundle_hash_verified=$false", "CONTROL_PLANE_ABANDONED_BUNDLE_NOT_VERIFIED"),
+        ("function Get-RuntimeControlBundleIdentity { [pscustomobject]@{source_revision='wrong';exact_revision=$true} }", "CONTROL_PLANE_ABANDONED_BUNDLE_IDENTITY_MISMATCH"),
+        ("function Get-ControlPlaneProcessIdentity { param($ProcessId); if($ProcessId-eq 100){$old}elseif($ProcessId-eq $PID){$current}else{$null} }", "CONTROL_PLANE_OLD_WATCHDOG_STILL_OWNS"),
+        ("function Get-VerifiedWatchdogOwners { @($current,$current) }", "CONTROL_PLANE_RECOVERY_EXACTLY_ONE_REPLACEMENT_REQUIRED"),
+        ("function Assert-ControlPlaneIsolationSnapshot { param($Before,$After); throw 'CONTROL_PLANE_INSTALL_CHANGED_SERVICE_SYNC' }", "CONTROL_PLANE_INSTALL_CHANGED_SERVICE_SYNC"),
+        ("function Get-ReleaseControlState { [pscustomobject]@{transaction=[pscustomobject]@{type='PROMOTE'}} }", "CONTROL_PLANE_RECOVERY_RELEASE_TRANSACTION_APPEARED"),
+        ("New-Item -ItemType Directory -Path $releaseLockPath -Force | Out-Null; [pscustomobject]@{owner_pid=123} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $releaseLockPath 'owner.json')", "CONTROL_PLANE_RECOVERY_CONCURRENT_RELEASE_LOCK"),
+    ),
+)
+def test_abandoned_install_safety_facts_fail_closed(
+    tmp_path: Path, mutation: str, expected: str,
+) -> None:
+    target_revision = "b" * 40
+    body = _abandoned_activation_mocks(
+        target_revision, "VERIFY_QUIESCED_HANDOFF"
+    ) + f"Write-WatchdogHeartbeat -SupervisionMode 'QUIESCED' -InstallTransactionId 'txn'; {mutation}; try {{ Assert-AbandonedControlPlaneInstallActivation -State $script:state -TransactionId 'txn' | Out-Null; Write-Output accepted }} catch {{ Write-Output $_.Exception.Message }}"
+    assert _run_contract(tmp_path, body) == expected
+
+
+def test_abandoned_install_accepts_only_exact_dead_installer_lock_identity(
+    tmp_path: Path,
+) -> None:
+    target_revision = "b" * 40
+    body = _abandoned_activation_mocks(
+        target_revision, "VERIFY_QUIESCED_HANDOFF"
+    ) + textwrap.dedent(
+        """
+        Write-WatchdogHeartbeat -SupervisionMode 'QUIESCED' -InstallTransactionId 'txn';
+        New-Item -ItemType Directory -Path $releaseLockPath -Force | Out-Null;
+        [pscustomobject]@{owner_pid=999999;owner_process_start_token='gone'} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $releaseLockPath 'owner.json');
+        $verified=Assert-AbandonedControlPlaneInstallActivation -State $script:state -TransactionId 'txn';
+        Write-Output "$($verified.owner.process_start_token)|$($script:checks -join ',')"
+        """
+    ).replace("\n", " ")
+    assert _run_contract(tmp_path, body) == "current-token|baseline,isolation"
+
+
+def test_failed_abandoned_activation_restores_verified_backup(tmp_path: Path) -> None:
+    old_revision, target_revision = "a" * 40, "b" * 40
+    repository = tmp_path / "repository"
+    control = repository / ".local" / "runtime-control"
+    backup = repository / ".local" / ".cpb-recovery"
+    _write_bundle(control, target_revision, "new")
+    _write_bundle(backup, old_revision, "old")
+    body = _abandoned_activation_mocks(
+        target_revision, "VERIFY_QUIESCED_HANDOFF", bundle_verified="$false"
+    ) + textwrap.dedent(
+        f"""
+        $script:state.backup_root='{backup}';
+        function Restore-ControlPlaneSupervision {{ param($State); $script:restored=$true }};
+        try {{ Wait-ControlPlaneInstallActivation -TransactionId 'txn' | Out-Null }} catch {{ $message=$_.Exception.Message }};
+        $bundle=Get-RuntimeControlBundleIdentityAtRoot -ControlRoot '{control}';
+        Write-Output "$message|$($bundle.source_revision)|$script:phase|$script:restored"
+        """
+    ).replace("\n", " ")
+    result = _run_contract(tmp_path, body)
+    assert result == (
+        "CONTROL_PLANE_ABANDONED_INSTALL_ROLLED_BACK: "
+        "CONTROL_PLANE_ABANDONED_BUNDLE_NOT_VERIFIED|"
+        f"{old_revision}|ROLLED_BACK|True"
+    )
 
 
 def test_failure_starting_new_watchdog_restores_old_bundle_and_owner(tmp_path: Path) -> None:
@@ -376,7 +573,7 @@ def test_failure_starting_new_watchdog_restores_old_bundle_and_owner(tmp_path: P
     body = _state_machine_mocks(old_revision, target_revision) + textwrap.dedent(
         f"""
         $script:startCount=0;
-        function Start-WatchdogReplacement {{ param([switch]$PassThru); $script:startCount++; if($script:startCount-eq 1){{throw 'new start failed'}}; $script:timeline+='restore-start'; $script:owners=@({_identity(300, 'restored-token')}) }};
+        function Start-WatchdogReplacement {{ param([switch]$PassThru,$InstallTransactionId); $script:startCount++; if($script:startCount-eq 1){{throw 'new start failed'}}; $script:timeline+='restore-start'; $script:owners=@({_identity(300, 'restored-token')}) }};
         function Restore-RuntimeControlBundleBackup {{ param($BackupRoot,$ControlRoot); $script:timeline+='restore-bundle'; [pscustomobject]@{{source_revision='{old_revision}'}} }};
         function Wait-VerifiedWatchdogHandoff {{ param($ExpectedRevision,$PreviousIdentity,$Timeout); $script:timeline+="restore-heartbeat:$ExpectedRevision"; return $script:owners[0] }};
         try {{ Invoke-ControlPlaneInstall -VerifiedSourceRoot 'immutable' -TargetRevision '{target_revision}' | Out-Null }} catch {{ $message=$_.Exception.Message }};
@@ -385,8 +582,24 @@ def test_failure_starting_new_watchdog_restores_old_bundle_and_owner(tmp_path: P
     ).replace("\n", " ")
     result = _run_contract(tmp_path, body)
     assert "ROLLED_BACK" in result
-    assert "install,restore-bundle,restore-start" in result
+    assert "install,restore-bundle,isolation,restore-start" in result
     assert f"restore-heartbeat:{old_revision}" in result
+
+
+def test_baseline_capture_failure_can_restart_previous_supervisor(tmp_path: Path) -> None:
+    old_revision, target_revision = "a" * 40, "b" * 40
+    body = _state_machine_mocks(old_revision, target_revision) + textwrap.dedent(
+        f"""
+        function Get-ControlPlaneIsolationSnapshot {{ throw 'baseline unavailable' }};
+        function Start-WatchdogReplacement {{ param([switch]$PassThru,$InstallTransactionId); $script:timeline+='restore-start'; $script:owners=@({_identity(300, 'restored-token')}) }};
+        function Wait-VerifiedWatchdogHandoff {{ param($ExpectedRevision,$PreviousIdentity,$ExpectedMode,$ExpectedInstallTransactionId,$Timeout); $script:timeline+='restore-heartbeat'; return $script:owners[0] }};
+        try {{ Invoke-ControlPlaneInstall -VerifiedSourceRoot 'immutable' -TargetRevision '{target_revision}' | Out-Null }} catch {{ $message=$_.Exception.Message }};
+        Write-Output "$message|$($script:timeline -join ',')"
+        """
+    ).replace("\n", " ")
+    result = _run_contract(tmp_path, body)
+    assert "ROLLED_BACK" in result
+    assert "stop,restore-start,restore-heartbeat" in result
 
 
 def test_release_transaction_blocks_control_plane_install(tmp_path: Path) -> None:
@@ -397,6 +610,21 @@ def test_release_transaction_blocks_control_plane_install(tmp_path: Path) -> Non
         "catch { Write-Output $_.Exception.Message }"
     )
     assert _run_contract(tmp_path, body) == "CONTROL_PLANE_INSTALL_BLOCKED_BY_RELEASE_TRANSACTION"
+
+
+def test_operator_lifecycle_collapses_internal_release_states(tmp_path: Path) -> None:
+    body = textwrap.dedent(
+        """
+        $stable=[pscustomobject]@{deployment_status='READY';candidate=$null;transaction=$null};
+        $prepare=[pscustomobject]@{deployment_status='READY';candidate=[pscustomobject]@{validation_state='NEW';validation=$null};transaction=$null};
+        $migration=[pscustomobject]@{deployment_status='READY';candidate=[pscustomobject]@{validation_state='REVIEW_REQUIRED';validation=[pscustomobject]@{reason='COORDINATED_STORAGE_MIGRATION_REQUIRED'}};transaction=$null};
+        $verify=[pscustomobject]@{deployment_status='READY';candidate=[pscustomobject]@{validation_state='REVIEW_REQUIRED';validation=[pscustomobject]@{reason='CPU_REVIEW_REQUIRED'}};transaction=$null};
+        $switch=[pscustomobject]@{deployment_status='PROMOTING';candidate=$verify.candidate;transaction=[pscustomobject]@{phase='CUTOVER'}};
+        $observe=[pscustomobject]@{deployment_status='OBSERVING';candidate=$verify.candidate;transaction=[pscustomobject]@{phase='OBSERVING'}};
+        Write-Output (@($stable,$prepare,$migration,$verify,$switch,$observe | ForEach-Object { Get-ReleaseLifecyclePhase $_ }) -join ',')
+        """
+    ).replace("\n", " ")
+    assert _run_contract(tmp_path, body) == "STABLE,PREPARE,PREPARE,VERIFY,SWITCH,OBSERVE"
 
 
 def test_control_plane_isolation_and_visible_identity_are_explicit() -> None:
@@ -414,8 +642,9 @@ def test_control_plane_isolation_and_visible_identity_are_explicit() -> None:
     supervision = source.split("function Suspend-ControlPlaneSupervision", 1)[1].split(
         "function Restore-ControlPlaneSupervision", 1
     )[0]
-    assert 'if ($name -eq $guardTaskName)' in supervision
-    assert "Stop-ScheduledTask -TaskName $name" in supervision
+    assert "Disable-ScheduledTask -TaskName $guardTaskName" in supervision
+    assert "Stop-ScheduledTask -TaskName $guardTaskName" in supervision
+    assert "Disable-ScheduledTask -TaskName $taskName" not in supervision
     assert "ControlPlaneIdentity" in xaml
     assert "BusinessRuntimeIdentity" in xaml
     assert "EXACT | HASH VERIFIED" in source
@@ -426,8 +655,8 @@ def test_control_plane_isolation_and_visible_identity_are_explicit() -> None:
     ("enabled", "before_broadcast", "after_broadcast", "expected"),
     (
         ("$false", "@()", "@()", "PASSED"),
-        ("$false", "@($p)", "@($p)", "CONTROL_PLANE_UNEXPECTED_SERVICE_OWNER_BROADCAST"),
-        ("$true", "@()", "@()", "CONTROL_PLANE_INSTALL_CHANGED_SERVICE_BROADCAST"),
+        ("$false", "@($p)", "@($p)", "CONTROL_PLANE_UNEXPECTED_SERVICE_OWNER:broadcast"),
+        ("$true", "@()", "@()", "CONTROL_PLANE_SERVICE_OWNER_REQUIRED:broadcast"),
     ),
 )
 def test_control_plane_isolation_respects_optional_broadcast_ownership(
@@ -443,35 +672,21 @@ def test_control_plane_isolation_respects_optional_broadcast_ownership(
         $p=[pscustomobject]@{{process_id=10;process_start_token='same'}};
         $before=[pscustomobject]@{{business_runtime_revision='runtime';release_state_hash='state';release_history_hash='history';services=[pscustomobject]@{{quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@($p);broadcast={before_broadcast}}}}};
         $after=[pscustomobject]@{{business_runtime_revision='runtime';release_state_hash='state';release_history_hash='history';services=[pscustomobject]@{{quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@($p);broadcast={after_broadcast}}}}};
-        try {{ Assert-ControlPlaneIsolationSnapshot -Before $before -After $after; Write-Output 'PASSED' }} catch {{ Write-Output $_.Exception.Message }}
+        try {{ Assert-ControlPlaneIsolationBaseline -Snapshot $before; Write-Output 'PASSED' }} catch {{ Write-Output $_.Exception.Message }}
         """
     ).replace("\n", " ")
     assert _run_contract(tmp_path, body) == expected
 
 
-@pytest.mark.parametrize(
-    ("expiry", "expected"),
-    (
-        ("[DateTimeOffset]::UtcNow.AddHours(1).ToString('o')", "PASSED"),
-        ("'2020-01-01T00:00:00Z'", "CONTROL_PLANE_INSTALL_CHANGED_SERVICE_SYNC"),
-    ),
-)
-def test_control_plane_isolation_allows_stopped_sync_only_for_live_exact_hold(
+def test_control_plane_isolation_always_requires_stable_sync_owner(
     tmp_path: Path,
-    expiry: str,
-    expected: str,
 ) -> None:
     body = textwrap.dedent(
         f"""
         function Test-BroadcastPublisherEnabled {{ return $false }};
         $p=[pscustomobject]@{{process_id=10;process_start_token='same'}};
-        $release=[pscustomobject]@{{candidate=[pscustomobject]@{{
-          artifact_kind='PRODUCTION_CANDIDATE';branch='main';validation_key='candidate:key'
-        }};migration_sync_hold=[pscustomobject]@{{validation_key='candidate:key';
-          expires_at={expiry}}}}};
         $before=[pscustomobject]@{{business_runtime_revision='runtime';release_state_hash='state';release_history_hash='history';services=[pscustomobject]@{{quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@();broadcast=@()}}}};
-        $after=[pscustomobject]@{{business_runtime_revision='runtime';release_state_hash='state';release_history_hash='history';services=[pscustomobject]@{{quote=@($p);collector=@($p);annotator=@($p);api=@($p);sync=@();broadcast=@()}}}};
-        try {{ Assert-ControlPlaneIsolationSnapshot -Before $before -After $after -ReleaseState $release; Write-Output 'PASSED' }} catch {{ Write-Output $_.Exception.Message }}
+        try {{ Assert-ControlPlaneIsolationBaseline -Snapshot $before; Write-Output 'PASSED' }} catch {{ Write-Output $_.Exception.Message }}
         """
     ).replace("\n", " ")
-    assert _run_contract(tmp_path, body) == expected
+    assert _run_contract(tmp_path, body) == "CONTROL_PLANE_SERVICE_OWNER_REQUIRED:sync"

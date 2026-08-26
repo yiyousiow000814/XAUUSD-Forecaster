@@ -2,6 +2,33 @@
 
 ## Before Adding Code
 
+### Simplify and compose before implementation
+
+Do not design a safety mechanism in isolation. Simplify before adding
+coordination, and do not expose implementation complexity as operator
+complexity. Before implementing a non-trivial stateful, asynchronous,
+persistent, supervisory, lifecycle, or cross-boundary change, record the
+actors, states, transitions, mutation authority, safety invariants, liveness
+requirements, failure and retry paths, recovery and reverse paths,
+timeout/expiry behavior, restart behavior, and long-term invariant owner.
+
+Review every actor that can observe or mutate the state, including watchdogs,
+background workers, timers, leases, cleanup, migrations, bootstraps, restarts,
+operator actions, old and target versions, compatibility projections, and
+external dependencies. Ask whether check and use can be separated by another
+mutation, whether two valid rules require incompatible states, whether retry
+preserves accepted work, whether recovery works from the failed state, and who
+maintains the invariant after the immediate repair.
+
+Safety means that bad behavior cannot occur; liveness means that valid progress
+or recovery remains reachable. Both are required. Every additional durable
+state, lock, hold, exception, retry mode, or compatibility branch must justify
+why the same invariant cannot be achieved with a smaller lifecycle and one
+authoritative transaction or owner. A green test suite is not design proof when
+an actor or transition was omitted. An interaction bug requires review of the
+composition rule, not only a regression for the observed interleaving. Follow
+`docs/contracts/SAFETY_COMPOSITION.md` for the full design record.
+
 1. Find the existing source of truth.
 2. Reuse existing abstractions.
 3. Avoid duplicate logic.
@@ -17,6 +44,22 @@ repairing ownership or transport architecture over raising limits or deleting
 authoritative data.
 
 ## Problem Resolution Standard
+
+### Production recovery order
+
+When production is degraded, first identify and restore the last-known-safe
+Stable configuration through the safest supported path, while preserving the
+state, logs, receipts, and other forensic evidence needed for diagnosis. Only
+after Stable service is restored should permanent correction change the owning
+architecture. Safe recovery and permanent correction are separate obligations;
+neither substitutes for the other.
+
+A mechanism that can stop, isolate, or fence a production owner must define a
+direct legal path back to normal Stable operation when the release attempt is
+abandoned, expired, paused, invalidated, or crashes. Recovery must not depend on
+the failed precondition becoming true. If the last-known-safe configuration
+cannot be restored, fail closed, preserve evidence, and expose the exact
+recovery blocker.
 
 - Treat fail-closed behavior, error visibility, and audit evidence as safety
   requirements, not as substitutes for fixing the failed workflow.

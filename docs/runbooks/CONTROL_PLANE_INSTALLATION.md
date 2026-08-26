@@ -17,16 +17,28 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$repositoryRoot\scripts
 
 The installer requires the target to equal the freshly fetched `origin/main`.
 It stages an immutable detached worktree, verifies all bundle hashes before
-stopping the old watchdog, and disables new task/guard triggers during handoff.
-Success requires a different process-start token, exactly one watchdog owner,
-and an exact, hash-verified target heartbeat. The Business Runtime revision and
+stopping the old watchdog. It disables and stops the guard but keeps the main
+task enabled for restart recovery. The replacement first emits an exact
+transaction-bound `QUIESCED` heartbeat. Only after service isolation is
+unchanged does the installer grant activation. Success then requires a
+different process-start token, exactly one watchdog owner, and an exact,
+hash-verified `ACTIVE` target heartbeat. The Business Runtime revision and
 all five service process identities must remain unchanged.
 
 The installer fails closed when a Promote/Reverse transaction is active, the
 Control Center GUI is open, the current or staged bundle is unverifiable, or
 service ownership is ambiguous. Failure after the old watchdog stops restores
-the previous complete bundle, launches a new process from that previous bundle,
-verifies its heartbeat and single ownership, and reports `ROLLED_BACK`.
+the recorded baseline without re-running the failed contextual owner rule,
+restores the previous complete bundle, launches a new process from that bundle,
+verifies its heartbeat and single ownership, and reports `ROLLED_BACK`. After a
+machine or installer-process interruption, the main task verifies the staged or
+backup bundle and resumes the same transaction; do not start a second install.
+Installer disappearance is not an activation grant. The replacement remains
+`QUIESCED` while it independently verifies transaction ID, bundle revision and
+hash, old-owner fencing, single ownership, the recorded service baseline,
+release/hold context, and absence of another release transaction. Any mismatch
+restores the previous verified bundle and re-enables the recorded safe
+supervision path.
 
 Inspect bounded status in:
 

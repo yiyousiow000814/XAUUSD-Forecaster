@@ -174,6 +174,22 @@ def test_release_observability_failure_class_is_bounded(
     assert "classification-release-token" not in result
 
 
+def test_release_observability_events_preserves_cloudflare_page_shape(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-ReleaseSecret{return [pscustomobject]@{available=$true;"
+        "value='events-release-token';source='LOCAL_SECRET_FILE';diagnostic=$null}};"
+        "function Invoke-RestMethod{return [pscustomobject]@{success=$true;result=[pscustomobject]@{"
+        "count=1;events=@([pscustomobject]@{'$metadata'=[pscustomobject]@{id='event-1'}})}}};"
+        "$page=Invoke-WorkersObservabilityEventsQuery "
+        "-Filters @([pscustomobject]@{key='k';value='v'}) "
+        "-From ([DateTimeOffset]::UtcNow.AddMinutes(-1)) -To ([DateTimeOffset]::UtcNow);"
+        'Write-Output "$($page.count),$(@($page.events).Count),$($page.events[0].\'$metadata\'.id)"',
+    )
+
+    assert result == "1,1,event-1"
+
+
 def test_candidate_validation_retries_delayed_observability_evidence(tmp_path) -> None:
     candidate = "b" * 40
     result = _run_control_center_contract(
@@ -273,6 +289,81 @@ def test_frozen_raw_telemetry_reconciles_identical_event_universe(tmp_path) -> N
     )
 
     assert result == "2,2,2,True,64,2,2,True,2,worker,True,True,True"
+
+
+def test_frozen_raw_telemetry_reconciles_exact_310_request_universe(tmp_path) -> None:
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId 'worker' "
+        f"-WindowsRevision '{candidate}';"
+        "function Start-Sleep{};function New-Event($number){"
+        "$id=('event-{0:d3}' -f $number);$request=('request-{0:d3}' -f $number);"
+        "[pscustomobject]@{'$metadata'=[pscustomobject]@{id=$id;type='cf-worker-event'};"
+        "'$workers'=[pscustomobject]@{cpuTimeMs=1;wallTimeMs=2;outcome='ok';"
+        "scriptVersion=[pscustomobject]@{id='worker'};event=[pscustomobject]@{path='/api/status';"
+        "request=[pscustomobject]@{method='GET';headers=[pscustomobject]@{"
+        "'x-aurum-request-id'=$request;'x-aurum-validation-run'='run-310';"
+        "'x-aurum-validation-phase'='acceptance'}};response=[pscustomobject]@{status=200}}}}};"
+        "$script:queries=0;function Invoke-WorkersObservabilityEventsQuery{$script:queries++;"
+        "[pscustomobject]@{count=310;events=@(1..310|ForEach-Object{New-Event $_})}};"
+        "$expected=@(1..310|ForEach-Object{[pscustomobject]@{"
+        "request_id=('request-{0:d3}' -f $_);family='status-read';scenario='status'}});"
+        "$e=Get-CandidateFrozenPlatformEvidence -Candidate $candidate "
+        "-From ([DateTimeOffset]::UtcNow.AddMinutes(-1)) -To ([DateTimeOffset]::UtcNow) "
+        "-ExpectedRequests $expected -ValidationRun 'run-310';"
+        'Write-Output "$script:queries,$($e.invocations),$($e.stable_reads),'
+        '$($e.request_reconciliation.matched),$($e.universe_digest.Length)"',
+    )
+
+    assert result == "2,310,2,True,64"
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_diagnostic"),
+    [
+        ("duplicate_event", "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"),
+        ("duplicate_request", "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"),
+        ("missing_cpu", "OBSERVABILITY_SCHEMA_INVALID"),
+        ("wrong_version", "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"),
+        ("wrong_run", "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"),
+        ("malformed_cursor", "OBSERVABILITY_EVENT_CURSOR_INVALID"),
+    ],
+)
+def test_frozen_raw_telemetry_rejects_malformed_universes(
+    tmp_path, case: str, expected_diagnostic: str,
+) -> None:
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId 'worker' "
+        f"-WindowsRevision '{candidate}';$case='{case}';"
+        "function Start-Sleep{};function New-Event($id,$request){"
+        "$workers=[pscustomobject]@{wallTimeMs=2;outcome='ok';"
+        "scriptVersion=[pscustomobject]@{id=if($case -eq 'wrong_version'){'other'}else{'worker'}};"
+        "event=[pscustomobject]@{path='/api/status';request=[pscustomobject]@{method='GET';"
+        "headers=[pscustomobject]@{'x-aurum-request-id'=$request;"
+        "'x-aurum-validation-run'=if($case -eq 'wrong_run'){'other'}else{'run'};"
+        "'x-aurum-validation-phase'='acceptance'}};response=[pscustomobject]@{status=200}}};"
+        "if($case -ne 'missing_cpu'){$workers|Add-Member cpuTimeMs 1};"
+        "[pscustomobject]@{'$metadata'=[pscustomobject]@{id=$id;type='cf-worker-event'};"
+        "'$workers'=$workers}};"
+        "function Invoke-WorkersObservabilityEventsQuery{"
+        "if($case -eq 'malformed_cursor'){return [pscustomobject]@{count=2000;events=@("
+        "1..2000|ForEach-Object{New-Event '' ('request-'+$_)})}};"
+        "$event2=if($case -eq 'duplicate_event'){'event-1'}else{'event-2'};"
+        "$request2=if($case -eq 'duplicate_request'){'request-1'}else{'request-2'};"
+        "[pscustomobject]@{count=2;events=@((New-Event 'event-1' 'request-1'),"
+        "(New-Event $event2 $request2))}};"
+        "$expected=@([pscustomobject]@{request_id='request-1';family='status';scenario='a'},"
+        "[pscustomobject]@{request_id='request-2';family='status';scenario='a'});"
+        "$null=Get-CandidateFrozenPlatformEvidence -Candidate $candidate "
+        "-From ([DateTimeOffset]::UtcNow.AddMinutes(-1)) -To ([DateTimeOffset]::UtcNow) "
+        "-ExpectedRequests $expected -ValidationRun 'run';"
+        "Write-Output $script:lastWorkersObservabilityDiagnostic",
+    )
+
+    assert result == expected_diagnostic
 
 
 def test_frozen_raw_telemetry_paginates_without_moving_upper_bound(tmp_path) -> None:
@@ -554,6 +645,9 @@ def _coordinated_migration_contract_body(*, capability_overrides: str = "") -> s
         "active_generation_id=('c'*64);snapshot_id=('d'*64);source_digest=('e'*64);"
         "receipt_digest=('f'*64);index_count=4117;detail_count=4117;"
         "missing_detail_count=0;invariant_violation_count=0;generation_state='CURRENT';"
+        "generation_contract_version='news-projection-v3';"
+        "generation_watermark='2026-08-26T05:00:00Z';"
+        "generation_activated_at='2026-08-26T05:01:00Z';"
         "expected_receipt_digest=('f'*64);staged_index_count=4117;"
         "staged_detail_count=4117};"
         f"{capability_overrides}return $row}};"
@@ -1102,6 +1196,145 @@ def test_candidate_data_parity_rejects_unexpected_empty_dataset(tmp_path) -> Non
         'Write-Output "$($route.reason),$($result.passed),$($route.error)"',
     )
     assert result == "CANDIDATE_DATASET_UNEXPECTEDLY_EMPTY,False,"
+
+
+def _scoped_debt_parity_contract(
+    *, stable_fails: bool, candidate_fails: bool,
+    stable_fingerprint: str = "same-debt", candidate_fingerprint: str = "same-debt",
+    changed: bool = False, candidate_identity: bool = True,
+    candidate_hard_failure: bool = False,
+) -> str:
+    status_json = json.dumps(_status_payload(), separators=(",", ":"))
+    contract_routes = (
+        "@([pscustomobject]@{path='/api/audit';auth_required=$false})"
+        if changed else "@()"
+    )
+    return (
+        "$stable=[pscustomobject]@{worker_version_id='stable';git_sha='stable-git';"
+        "artifact_kind='PRODUCTION_CANDIDATE'};"
+        "$candidate=[pscustomobject]@{worker_version_id='candidate';git_sha='candidate-git'};"
+        f"$plan=[pscustomobject]@{{contract_routes={contract_routes}}};"
+        "function Get-ExactVersionJsonObservation{param($VersionId,$GitSha,$Path);"
+        f"$fails=if($VersionId -eq 'stable'){{${str(stable_fails).lower()}}}"
+        f"else{{${str(candidate_fails).lower()}}};"
+        "if($Path -eq '/api/audit' -and $fails){"
+        f"$fingerprint=if($VersionId -eq 'stable'){{'{stable_fingerprint}'}}"
+        f"else{{'{candidate_fingerprint}'}};"
+        f"$identity=if($VersionId -eq 'candidate'){{${str(candidate_identity).lower()}}}"
+        "else{$true};"
+        f"$hard=if($VersionId -eq 'candidate'){{${str(candidate_hard_failure).lower()}}}"
+        "else{$false};"
+        "return [pscustomobject]@{passed=$false;"
+        "failure_class='HTTP_503';failure_fingerprint_available=$true;"
+        "failure_fingerprint=$fingerprint;hard_safety_failure=$hard;"
+        "failure_reason_code=if($hard){'DATA_INTEGRITY_VIOLATION'}else{'UPSTREAM_TIMEOUT'};"
+        "diagnostic='bounded failure';identity_passed=$identity}};"
+        f"$payload=if($Path -eq '/api/status'){{'{status_json}'|ConvertFrom-Json}}"
+        "elseif($Path -eq '/api/audit'){[pscustomobject]@{generated_at='2026-08-21T10:20:00Z'}}"
+        "else{[pscustomobject]@{items=@(1)}};"
+        "return [pscustomobject]@{passed=$true;identity_passed=$true;payload=$payload;"
+        "observed_version_id=$VersionId;observed_git_sha=$GitSha}};"
+        "$result=Test-CandidateDataParity $stable $candidate $plan;"
+        "$audit=$result.routes|Where-Object {$_.route -eq '/api/audit'};"
+        'Write-Output "$($result.passed),$($audit.acceptance_class),'
+        '$($audit.state),$($audit.reason),$($result.stable_debt.Count)"'
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    (
+        (
+            {"stable_fails": True, "candidate_fails": True},
+            "True,C,EXISTING_STABLE_DEBT,UNCHANGED_EXISTING_STABLE_DEBT,1",
+        ),
+        (
+            {"stable_fails": True, "candidate_fails": True,
+             "candidate_fingerprint": "different-debt"},
+            "False,C,FAILED,CANDIDATE_DEBT_EQUIVALENCE_UNPROVEN,0",
+        ),
+        (
+            {"stable_fails": True, "candidate_fails": False},
+            "True,C,STABLE_DEBT_IMPROVED,CANDIDATE_IMPROVES_STABLE_DEBT,1",
+        ),
+        (
+            {"stable_fails": False, "candidate_fails": True},
+            "False,C,FAILED,CANDIDATE_REGRESSION,0",
+        ),
+        (
+            {"stable_fails": True, "candidate_fails": True, "changed": True},
+            "False,B,FAILED,CHANGED_BOUNDARY_FAILURE,0",
+        ),
+        (
+            {"stable_fails": True, "candidate_fails": True,
+             "candidate_hard_failure": True},
+            "False,C,FAILED,CANDIDATE_HARD_SAFETY_FAILURE,0",
+        ),
+        (
+            {"stable_fails": True, "candidate_fails": True,
+             "candidate_identity": False},
+            "False,C,FAILED,EXACT_VERSION_IDENTITY_MISMATCH,0",
+        ),
+    ),
+)
+def test_scoped_debt_requires_proven_equivalence_without_weakening_safety(
+    tmp_path, kwargs: dict[str, bool | str], expected: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path, _scoped_debt_parity_contract(**kwargs),
+    )
+    assert result == expected
+
+
+def test_failure_fingerprint_is_bounded_machine_evidence(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$sameA=Get-ReleaseFailureFingerprint '/api/audit' 503 '/api/audit' "
+        "'audit' 'd1_read' 'application/json; charset=utf-8' "
+        "'{\"error_code\":\"UPSTREAM_TIMEOUT\"}';"
+        "$sameB=Get-ReleaseFailureFingerprint '/api/audit' 503 '/api/audit' "
+        "'audit' 'd1_read' 'application/json; charset=utf-8' "
+        "'{\"error_code\":\"UPSTREAM_TIMEOUT\"}';"
+        "$different=Get-ReleaseFailureFingerprint '/api/audit' 503 '/api/audit' "
+        "'audit' 'exception' 'application/json' "
+        "'{\"error\":\"request failed\",\"request_id\":\"volatile\"}';"
+        "$untyped=Get-ReleaseFailureFingerprint '/api/audit' 503 '/api/audit' "
+        "'audit' 'd1_read' 'application/json' "
+        "'{\"error\":\"database unavailable\"}';"
+        "$integrity=Get-ReleaseFailureFingerprint '/api/audit' 503 '/api/audit' "
+        "'audit' 'd1_read' 'application/json' "
+        "'{\"error_code\":\"DATA_INTEGRITY_VIOLATION\"}';"
+        "$auth=Get-ReleaseFailureFingerprint '/api/audit' 403 '/api/audit' "
+        "'audit' 'authorization' 'application/json' "
+        "'{\"error_code\":\"ACCESS_DENIED\"}';"
+        'Write-Output "$($sameA.available),$($sameA.digest -eq $sameB.digest),'
+        '$($sameA.machine_reason),$($different.available),$($untyped.available),'
+        '$($integrity.hard_safety_failure),$($auth.hard_safety_failure)"',
+    )
+    assert result == "True,True,UPSTREAM_TIMEOUT,False,False,True,True"
+
+
+def test_failure_fingerprint_reads_bounded_http_response_evidence(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "Add-Type -AssemblyName System.Net.Http;"
+        "$response=[System.Net.Http.HttpResponseMessage]::new(503);"
+        "$response.Headers.Add('X-Aurum-Route','/api/audit');"
+        "$response.Headers.Add('X-Aurum-Resource','audit');"
+        "$response.Headers.Add('X-Aurum-Failure-Stage','d1_read');"
+        "$response.Content=[System.Net.Http.StringContent]::new("
+        "'{\"error_code\":\"UPSTREAM_TIMEOUT\"}',"
+        "[System.Text.Encoding]::UTF8,'application/json');"
+        "$body=Get-BoundedReleaseErrorBody $response;"
+        "$contentType=Get-ReleaseResponseHeaderValue $response 'Content-Type';"
+        "$fingerprint=Get-ReleaseFailureFingerprint '/api/audit' 503 "
+        "(Get-ReleaseResponseHeaderValue $response 'X-Aurum-Route') "
+        "(Get-ReleaseResponseHeaderValue $response 'X-Aurum-Resource') "
+        "(Get-ReleaseResponseHeaderValue $response 'X-Aurum-Failure-Stage') "
+        "$contentType $body;$response.Dispose();"
+        'Write-Output "$($fingerprint.available),$($fingerprint.machine_reason)"',
+    )
+    assert result == "True,UPSTREAM_TIMEOUT"
 
 
 def _legacy_parity_contract(
@@ -3252,6 +3485,37 @@ def test_coordinated_migration_receipt_is_exact_fresh_and_live(tmp_path) -> None
     )
 
 
+@pytest.mark.parametrize(
+    ("activation", "expected"),
+    (
+        ("2026-08-26T05:02:00Z", "PASSED"),
+        ("2026-08-26T04:59:00Z", "MIGRATION_RECEIPT_GENERATION_REGRESSION"),
+    ),
+)
+def test_migration_receipt_tolerates_only_forward_valid_current_generation(
+    tmp_path, activation: str, expected: str,
+) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _coordinated_migration_contract_body()
+        + "$evidence=Get-CoordinatedMigrationLiveEvidence $candidate $stable $files;"
+        "$receipt=New-CoordinatedMigrationReceipt $evidence;"
+        "Write-CoordinatedMigrationReceipt $receipt;"
+        "$script:next=$evidence|ConvertTo-Json -Depth 12|ConvertFrom-Json;"
+        "$script:next.news_generation_id=('9'*64);"
+        "$script:next.news_snapshot_id=('8'*64);"
+        "$script:next.news_source_digest=('7'*64);"
+        "$script:next.news_receipt_digest=('6'*64);"
+        f"$script:next.news_activated_at='{activation}';"
+        "function Get-CoordinatedMigrationLiveEvidence{return $script:next};"
+        "$reason='PASSED';try{Assert-CoordinatedMigrationReceipt "
+        "$candidate $stable $files|Out-Null}catch{$reason=$_.Exception.Message};"
+        "Write-Output $reason",
+    )
+    assert result == expected
+
+
 def test_migration_contract_reads_the_exact_candidate_not_stable_checkout(
     tmp_path,
 ) -> None:
@@ -3469,77 +3733,64 @@ def test_successful_coordinated_migration_acceptance_is_audited_and_exact(
         'Write-Output "$($accepted.validation_state),'
         '$($final.candidate.migration_acceptance.validation_key -eq '
         '$final.candidate.validation_key),'
-        '$($final.migration_sync_hold.validation_key -eq '
-        '$final.candidate.validation_key),'
-        '$(Test-CoordinatedMigrationSyncHold $final),'
+        '$($null -eq $final.PSObject.Properties[\'migration_sync_hold\']),'
         '$($history.Contains(\'COORDINATED_STORAGE_MIGRATION_PASSED\'))"',
     )
-    assert result == "NEW,True,True,True,True"
+    assert result == "NEW,True,True,True"
 
 
-@pytest.mark.parametrize(
-    ("hold_override", "candidate_override"),
-    [
-        ("$state.migration_sync_hold.validation_key=('9'*40)", ""),
-        ("$state.migration_sync_hold.expires_at='2020-01-01T00:00:00Z'", ""),
-        ("", "$state.candidate.branch='feature/not-main'"),
-        ("", "$state.candidate.artifact_kind='PREVIEW'"),
-    ],
-)
-def test_coordinated_migration_sync_hold_is_exact_bounded_and_production_only(
-    tmp_path, hold_override: str, candidate_override: str,
-) -> None:
+def test_coordinated_migration_verify_never_stops_stable_sync(tmp_path) -> None:
+    _write_coordinated_migration_files(tmp_path)
     result = _run_control_center_contract(
         tmp_path,
         _authorized_candidate("a" * 40, "b" * 40)
-        + "$state=Get-ReleaseControlState;$state.candidate.branch='main';"
-        "$state|Add-Member -Force migration_sync_hold ([pscustomobject]@{"
-        "validation_key=$state.candidate.validation_key;"
-        "expires_at=[DateTimeOffset]::UtcNow.AddHours(2).ToString('o')});"
-        f"{hold_override};{candidate_override};"
-        "Write-Output (Test-CoordinatedMigrationSyncHold $state)",
+        + _coordinated_migration_contract_body()
+        + "$state=Get-ReleaseControlState;$state.candidate.validation_state='REVIEW_REQUIRED';"
+        "$state.candidate.branch='main';"
+        "$state.candidate.validation=[pscustomobject]@{key=$state.candidate.validation_key;"
+        "reason='COORDINATED_STORAGE_MIGRATION_REQUIRED'};Write-ReleaseControlState $state;"
+        "function Get-ProductionCandidateProvenanceResult{return [pscustomobject]@{state='PASSED'}};"
+        "function Get-RequiredGitHubChecksResult{return [pscustomobject]@{state='PASSED'}};"
+        "function Get-CandidateChangedFiles{return $files};"
+        "$script:stops=0;function Stop-ForecasterService{$script:stops++};"
+        "$null=Verify-CandidateCoordinatedMigration;$final=Get-ReleaseControlState;"
+        'Write-Output "$script:stops,$($null -eq '
+        "$final.PSObject.Properties['migration_sync_hold'])\"",
     )
-    assert result == "False"
+    assert result == "0,True"
 
 
 @pytest.mark.parametrize(
-    ("service_key", "service_state", "expected"),
+    ("transaction", "expected"),
     [
-        ("sync", "STOPPED", "True"),
-        ("sync", "SYNC ERROR", "False"),
-        ("api", "STOPPED", "False"),
+        ("$null", "False"),
+        ("[pscustomobject]@{type='PROMOTE';phase='PRECHECK'}", "True"),
+        ("[pscustomobject]@{type='PROMOTE';phase='CUTOVER'}", "True"),
+        ("[pscustomobject]@{type='PROMOTE';phase='OBSERVING'}", "False"),
+        ("[pscustomobject]@{type='REVERSE';phase='REVERSING'}", "True"),
     ],
 )
-def test_watchdog_suppresses_only_an_explicit_migration_sync_stop(
-    tmp_path, service_key: str, service_state: str, expected: str,
+def test_watchdog_suppresses_stopped_sync_only_during_switch(
+    tmp_path, transaction: str, expected: str,
 ) -> None:
     result = _run_control_center_contract(
         tmp_path,
-        _authorized_candidate("a" * 40, "b" * 40)
-        + "$state=Get-ReleaseControlState;$state.candidate.branch='main';"
-        "$state|Add-Member -Force migration_sync_hold ([pscustomobject]@{"
-        "validation_key=$state.candidate.validation_key;"
-        "expires_at=[DateTimeOffset]::UtcNow.AddHours(2).ToString('o')});"
-        f"Write-Output (Test-WatchdogRecoverySuppressed '{service_key}' "
-        f"'{service_state}' $state)",
+        f"$state=[pscustomobject]@{{transaction={transaction}}};"
+        "Write-Output (Test-WatchdogRecoverySuppressed 'sync' 'STOPPED' $state)",
     )
     assert result == expected
 
 
-def test_explicit_sync_start_releases_the_migration_hold(tmp_path) -> None:
+def test_prepare_and_verify_never_suppress_sync_recovery(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
-        _authorized_candidate("a" * 40, "b" * 40)
-        + "$state=Get-ReleaseControlState;$state.candidate.branch='main';"
-        "$state|Add-Member -Force migration_sync_hold ([pscustomobject]@{"
-        "validation_key=$state.candidate.validation_key;"
-        "expires_at=[DateTimeOffset]::UtcNow.AddHours(2).ToString('o')});"
-        "Write-ReleaseControlState $state;Exit-CoordinatedMigrationSyncHold;"
-        "$final=Get-ReleaseControlState;"
-        'Write-Output "$($null -eq $final.migration_sync_hold),'
-        '$(Test-CoordinatedMigrationSyncHold $final)"',
+        "$prepare=[pscustomobject]@{transaction=$null;lifecycle_phase='PREPARE'};"
+        "$verify=[pscustomobject]@{transaction=$null;lifecycle_phase='VERIFY'};"
+        "$a=Test-WatchdogRecoverySuppressed 'sync' 'STOPPED' $prepare;"
+        "$b=Test-WatchdogRecoverySuppressed 'sync' 'STOPPED' $verify;"
+        'Write-Output "$a,$b"',
     )
-    assert result == "True,False"
+    assert result == "False,False"
 
 
 def test_platform_compatibility_approval_is_exact_audited_and_narrow(tmp_path) -> None:

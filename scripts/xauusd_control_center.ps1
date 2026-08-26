@@ -10,6 +10,7 @@ param(
     [string]$SourceRevision = "",
     [string]$ExpectedControlScriptPath = "",
     [string]$ExpectedControlRevision = "",
+    [string]$InstallTransactionId = "",
     [string]$OperationResultPath = ""
 )
 
@@ -75,6 +76,7 @@ $requiredGitHubChecks = @(
     "Web build and tests",
     "Windows runtime contracts",
     "Repository policy",
+    "Release Control TLC",
     "Analyze (actions)",
     "Analyze (csharp)",
     "Analyze (javascript-typescript)",
@@ -293,6 +295,42 @@ function Write-RuntimeUpdateState {
     Move-Item -LiteralPath $temporary -Destination $runtimeUpdateStatePath -Force
 }
 
+function Get-ReleaseLifecyclePhase {
+    param([object]$ReleaseState)
+    if (-not $ReleaseState) { return "UNAVAILABLE" }
+    if ($ReleaseState.transaction) {
+        if ([string]$ReleaseState.transaction.phase -in @(
+            "OBSERVING", "REVERSE_OBSERVING"
+        )) { return "OBSERVE" }
+        return "SWITCH"
+    }
+    if ([string]$ReleaseState.deployment_status -in @(
+        "RECOVERY_REQUIRED", "DEPLOYMENT_DRIFT"
+    )) { return "OBSERVE" }
+    if ($ReleaseState.candidate) {
+        $reason = if ($ReleaseState.candidate.validation) {
+            [string]$ReleaseState.candidate.validation.reason
+        } else { "" }
+        if ([string]$ReleaseState.candidate.validation_state -in @("NEW", "STAGING") -or
+            $reason -eq "COORDINATED_STORAGE_MIGRATION_REQUIRED") {
+            return "PREPARE"
+        }
+        return "VERIFY"
+    }
+    return "STABLE"
+}
+
+function Set-ReleaseLifecycleProjection {
+    param([Parameter(Mandatory = $true)][object]$ReleaseState)
+    $phase = Get-ReleaseLifecyclePhase -ReleaseState $ReleaseState
+    if ($ReleaseState.PSObject.Properties['lifecycle_phase']) {
+        $ReleaseState.lifecycle_phase = $phase
+    } else {
+        $ReleaseState | Add-Member -NotePropertyName lifecycle_phase `
+            -NotePropertyValue $phase
+    }
+}
+
 function Get-ReleaseControlState {
     if (-not (Test-Path -LiteralPath $releaseControlStatePath)) { return $null }
     try {
@@ -361,12 +399,14 @@ function Get-ReleaseControlState {
             }
             $state.schema_version = $releaseSchemaVersion
         }
+        Set-ReleaseLifecycleProjection -ReleaseState $state
         return $state
     } catch { $null }
 }
 
 function Write-ReleaseControlState {
     param([Parameter(Mandatory = $true)][object]$State)
+    Set-ReleaseLifecycleProjection -ReleaseState $State
     $controlBundle = Get-RuntimeControlBundleIdentity
     foreach ($field in @("control_bundle_revision", "control_bundle_exact_revision",
         "control_bundle_hash_verified")) {
@@ -447,7 +487,13 @@ function Enter-ReleaseTransactionLock {
         } catch {}
         $ownerAlive = $false
         if ($owner -and [int]$owner.owner_pid -gt 0) {
-            $ownerAlive = [bool](Get-Process -Id ([int]$owner.owner_pid) -ErrorAction SilentlyContinue)
+            $ownerProcess = Get-ControlPlaneProcessIdentity `
+                -ProcessId ([int]$owner.owner_pid)
+            $ownerAlive = [bool]($ownerProcess -and (
+                -not [string]$owner.owner_process_start_token -or
+                [string]$owner.owner_process_start_token -eq
+                    [string]$ownerProcess.process_start_token
+            ))
         }
         $acquired = [DateTimeOffset]::MinValue
         $ageKnown = $owner -and [DateTimeOffset]::TryParse(
@@ -467,8 +513,13 @@ function Enter-ReleaseTransactionLock {
     }
     try {
         New-Item -ItemType Directory -Path $releaseLockPath -ErrorAction Stop | Out-Null
+        $lockOwnerIdentity = Get-ControlPlaneProcessIdentity -ProcessId $PID
+        if (-not $lockOwnerIdentity) {
+            throw "RELEASE_LOCK_OWNER_IDENTITY_REQUIRED"
+        }
         [pscustomobject]@{
             owner_pid = $PID
+            owner_process_start_token = [string]$lockOwnerIdentity.process_start_token
             acquired_at = [DateTimeOffset]::UtcNow.ToString("o")
         } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $releaseLockPath "owner.json") -Encoding UTF8
         $script:releaseTransactionLockHeld = $true
@@ -705,6 +756,7 @@ function New-ReleaseControlState {
         previous_stable_rollback_reason = "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"
         queued_candidate = $null
         transaction = $null
+        lifecycle_phase = if ($Candidate) { "PREPARE" } else { "STABLE" }
         deployment_status = "READY"
         drift = $null
         last_candidate_check = $null
@@ -1185,8 +1237,9 @@ SELECT
     AS legacy_extra_current_index_count,
   s.projection_state,s.active_generation_id,s.snapshot_id,s.source_digest,s.receipt_digest,
  s.index_count,s.detail_count,s.missing_detail_count,s.invariant_violation_count,
- g.state AS generation_state,g.expected_receipt_digest,g.staged_index_count,
- g.staged_detail_count
+ g.state AS generation_state,g.contract_version AS generation_contract_version,
+ g.watermark AS generation_watermark,g.activated_at AS generation_activated_at,
+ g.expected_receipt_digest,g.staged_index_count,g.staged_detail_count
 FROM news_projection_state s JOIN news_projection_generations g
  ON g.generation_id=s.active_generation_id WHERE s.id=1
 "@
@@ -1270,6 +1323,9 @@ FROM news_projection_state s JOIN news_projection_generations g
         legacy_news_extra_current_index_count = [int]$state.legacy_extra_current_index_count
         stable_news_status = [string]$endpoints.stable_news_status
         news_generation_id = [string]$state.active_generation_id
+        news_contract_version = [string]$state.generation_contract_version
+        news_watermark = [string]$state.generation_watermark
+        news_activated_at = [string]$state.generation_activated_at
         news_snapshot_id = [string]$state.snapshot_id
         news_source_digest = [string]$state.source_digest
         news_receipt_digest = [string]$state.receipt_digest
@@ -1347,37 +1403,46 @@ function Assert-CoordinatedMigrationReceipt {
             [string]$Candidate.worker_version_id) {
         throw "MIGRATION_RECEIPT_CANDIDATE_MISMATCH"
     }
+    if ([string]$receipt.evidence.stable_git_sha -ne [string]$Stable.git_sha -or
+        [string]$receipt.evidence.stable_worker_version -ne
+            [string]$Stable.worker_version_id) {
+        throw "MIGRATION_RECEIPT_STABLE_MISMATCH"
+    }
     $live = Get-CoordinatedMigrationLiveEvidence -Candidate $Candidate `
         -Stable $Stable -MigrationFiles $MigrationFiles
-    $recordedDigest = Get-CoordinatedMigrationReceiptDigest -Core `
-        ([ordered]@{ schema_version="migration-evidence-v1"; evidence=$receipt.evidence })
-    $liveDigest = Get-CoordinatedMigrationReceiptDigest -Core `
-        ([ordered]@{ schema_version="migration-evidence-v1"; evidence=$live })
-    if ($recordedDigest -ne $liveDigest) {
-        throw "MIGRATION_RECEIPT_LIVE_EVIDENCE_MISMATCH"
+    $immutableFields = @(
+        "validation_key", "candidate_git_sha", "candidate_worker_version",
+        "stable_git_sha", "stable_worker_version", "database_id", "database_name",
+        "migration_files", "applied_migrations", "pending_migrations",
+        "projection_tables", "projection_indexes", "operator_retry_columns",
+        "legacy_tables", "stable_read", "candidate_read", "reverse_safe"
+    )
+    foreach ($field in $immutableFields) {
+        $recordedValue = $receipt.evidence.$field | ConvertTo-Json -Compress -Depth 12
+        $liveValue = $live.$field | ConvertTo-Json -Compress -Depth 12
+        if ($recordedValue -cne $liveValue) {
+            throw "MIGRATION_RECEIPT_LIVE_EVIDENCE_MISMATCH:$field"
+        }
+    }
+    $recordedActivation = ConvertTo-RequiredReleaseTime `
+        $receipt.evidence.news_activated_at
+    $liveActivation = ConvertTo-RequiredReleaseTime $live.news_activated_at
+    if ($liveActivation -lt $recordedActivation) {
+        throw "MIGRATION_RECEIPT_GENERATION_REGRESSION"
+    }
+    if ([string]$live.news_generation_id -eq
+            [string]$receipt.evidence.news_generation_id) {
+        foreach ($field in @(
+            "news_contract_version", "news_watermark", "news_activated_at",
+            "news_snapshot_id", "news_source_digest", "news_receipt_digest",
+            "news_index_count", "news_detail_count"
+        )) {
+            if ([string]$live.$field -cne [string]$receipt.evidence.$field) {
+                throw "MIGRATION_RECEIPT_GENERATION_MUTATED:$field"
+            }
+        }
     }
     return $receipt
-}
-
-function Test-CoordinatedMigrationSyncHold {
-    param([object]$ReleaseState)
-    if (-not $ReleaseState -or -not $ReleaseState.candidate -or
-        -not $ReleaseState.migration_sync_hold) {
-        return $false
-    }
-    $candidate = $ReleaseState.candidate
-    $hold = $ReleaseState.migration_sync_hold
-    if ([string]$candidate.artifact_kind -ne $productionCandidateArtifactKind -or
-        [string]$candidate.branch -ne "main" -or
-        [string]$hold.validation_key -ne [string]$candidate.validation_key) {
-        return $false
-    }
-    $expiresAt = [DateTimeOffset]::MinValue
-    if (-not [DateTimeOffset]::TryParse([string]$hold.expires_at, [ref]$expiresAt) -or
-        $expiresAt -le [DateTimeOffset]::UtcNow) {
-        return $false
-    }
-    return $true
 }
 
 function Test-WatchdogRecoverySuppressed {
@@ -1386,51 +1451,13 @@ function Test-WatchdogRecoverySuppressed {
         [Parameter(Mandatory = $true)][string]$ServiceState,
         [object]$ReleaseState
     )
-    return [bool]($ServiceKey -eq "sync" -and $ServiceState -eq "STOPPED" -and
-        (Test-CoordinatedMigrationSyncHold -ReleaseState $ReleaseState))
-}
-
-function Enter-CoordinatedMigrationSyncHold {
-    param(
-        [Parameter(Mandatory = $true)][object]$State,
-        [Parameter(Mandatory = $true)][object]$Candidate
-    )
-    $enteredAt = [DateTimeOffset]::UtcNow
-    $hold = [pscustomobject]@{
-        validation_key = [string]$Candidate.validation_key
-        reason = "COORDINATED_STORAGE_MIGRATION_VERIFICATION"
-        entered_at = $enteredAt.ToString("o")
-        expires_at = $enteredAt.AddHours(2).ToString("o")
-    }
-    if ($State.PSObject.Properties['migration_sync_hold']) {
-        $State.migration_sync_hold = $hold
-    } else {
-        $State | Add-Member -NotePropertyName migration_sync_hold `
-            -NotePropertyValue $hold
-    }
-    $State.updated_at = $enteredAt.ToString("o")
-    Write-ReleaseControlState -State $State
-    $syncService = $services | Where-Object Key -eq "sync" | Select-Object -First 1
-    if ($syncService) { Stop-ForecasterService $syncService }
-    Write-ReleaseHistory -Event "COORDINATED_STORAGE_MIGRATION_SYNC_HELD" `
-        -Release $Candidate -Detail @{
-            validation_key = [string]$Candidate.validation_key
-            expires_at = [string]$hold.expires_at
-        }
-    return $hold
-}
-
-function Exit-CoordinatedMigrationSyncHold {
-    $state = Get-ReleaseControlState
-    if (-not $state -or -not $state.migration_sync_hold) { return }
-    $validationKey = [string]$state.migration_sync_hold.validation_key
-    $state.migration_sync_hold = $null
-    $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
-    Write-ReleaseControlState -State $state
-    if ($state.candidate) {
-        Write-ReleaseHistory -Event "COORDINATED_STORAGE_MIGRATION_SYNC_RELEASED" `
-            -Release $state.candidate -Detail @{ validation_key = $validationKey }
-    }
+    if ($ServiceKey -ne "sync" -or $ServiceState -ne "STOPPED") { return $false }
+    return [bool]($ReleaseState -and $ReleaseState.transaction -and (
+        ([string]$ReleaseState.transaction.type -eq "PROMOTE" -and
+         [string]$ReleaseState.transaction.phase -in @("PRECHECK", "CUTOVER")) -or
+        ([string]$ReleaseState.transaction.type -eq "REVERSE" -and
+         [string]$ReleaseState.transaction.phase -eq "REVERSING")
+    ))
 }
 
 function Verify-CandidateCoordinatedMigration {
@@ -1455,7 +1482,6 @@ function Verify-CandidateCoordinatedMigration {
         -CandidateRevision ([string]$candidate.git_sha))
     $files = @(Get-CoordinatedMigrationFiles -ChangedFiles $changed `
         -CandidateRevision ([string]$candidate.git_sha))
-    $null = Enter-CoordinatedMigrationSyncHold -State $state -Candidate $candidate
     $evidence = Get-CoordinatedMigrationLiveEvidence -Candidate $candidate `
         -Stable $state.stable -MigrationFiles $files
     $receipt = New-CoordinatedMigrationReceipt -Evidence $evidence
@@ -1832,7 +1858,7 @@ function Invoke-WorkersObservabilityEventsQuery {
             return $null
         }
         $script:lastWorkersObservabilityDiagnostic = $null
-        return $response.result.events
+        return $response.result
     } catch {
         $statusCode = 0
         try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { $statusCode = 0 }
@@ -2769,6 +2795,222 @@ function Invoke-ExactVersionJson {
     }
 }
 
+function Get-ReleaseResponseHeaderValue {
+    param([object]$Response, [Parameter(Mandatory = $true)][string]$Name)
+    if (-not $Response) { return "" }
+    try {
+        $value = if ($Response.Headers.PSObject.Methods['GetValues'] -and
+            $Response.Headers.Contains($Name)) {
+            @($Response.Headers.GetValues($Name)) -join ","
+        } else { $Response.Headers[$Name] }
+        if ($value) { return [string]$value }
+    } catch {}
+    try {
+        $value = if ($Name -eq "Content-Type" -and
+            $Response.Content.Headers.ContentType) {
+            $Response.Content.Headers.ContentType.ToString()
+        } elseif ($Response.Content.Headers.PSObject.Methods['GetValues'] -and
+            $Response.Content.Headers.Contains($Name)) {
+            @($Response.Content.Headers.GetValues($Name)) -join ","
+        } else { $Response.Content.Headers[$Name] }
+        if ($value) { return [string]$value }
+    } catch {}
+    return ""
+}
+
+function Get-BoundedReleaseErrorBody {
+    param([object]$Response, [int]$MaxBytes = 65536)
+    if (-not $Response) { return $null }
+    try {
+        $body = $null
+        if ($Response.PSObject.Properties['Content'] -and
+            $Response.Content -is [string]) {
+            $body = [string]$Response.Content
+        } elseif ($Response.PSObject.Properties['Content'] -and
+            $Response.Content -and
+            $Response.Content.PSObject.Methods['ReadAsStringAsync']) {
+            $readTask = $Response.Content.ReadAsStringAsync()
+            $body = [string]$readTask.GetAwaiter().GetResult()
+        } elseif ($Response.PSObject.Methods['GetResponseStream']) {
+            $stream = $Response.GetResponseStream()
+            if ($stream) {
+                $reader = [System.IO.StreamReader]::new(
+                    $stream, [System.Text.Encoding]::UTF8, $true, 1024, $true
+                )
+                try { $body = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$body)) { return $null }
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes([string]$body)
+        if ($bytes.Length -gt $MaxBytes) { return $null }
+        return [string]$body
+    } catch { return $null }
+}
+
+function Get-ReleaseFailureFingerprint {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedPath,
+        [Parameter(Mandatory = $true)][int]$StatusCode,
+        [string]$ObservedRoute,
+        [string]$Resource,
+        [string]$FailureStage,
+        [string]$ContentType,
+        [AllowNull()][string]$Body
+    )
+    $basePath = ($ExpectedPath -split '\?', 2)[0]
+    $unsafeStages = @("exception", "framework_fallback", "ssr")
+    if ($StatusCode -lt 400 -or $ObservedRoute -cne $basePath -or
+        [string]::IsNullOrWhiteSpace($Resource) -or
+        [string]::IsNullOrWhiteSpace($FailureStage) -or
+        $FailureStage -in $unsafeStages -or
+        $ContentType -notmatch '^application/(?:[a-z0-9.+-]*\+)?json(?:\s*;|$)' -or
+        [string]::IsNullOrWhiteSpace($Body)) {
+        return [pscustomobject]@{
+            available = $false; digest = $null; machine_reason = $null
+            hard_safety_failure = $false
+        }
+    }
+    try {
+        $payload = $Body | ConvertFrom-Json -ErrorAction Stop
+        if (-not $payload -or -not $payload.PSObject.Properties) { throw "NOT_OBJECT" }
+        $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
+        if ($bodyBytes.Length -gt 65536) { throw "BODY_TOO_LARGE" }
+        $bodyDigest = Get-Sha256BytesHex -Bytes $bodyBytes
+        $machineReason = ""
+        foreach ($field in @("error_code", "code", "reason")) {
+            if ($payload.PSObject.Properties[$field] -and
+                $payload.$field -is [string] -and
+                [string]$payload.$field -match '^[A-Z][A-Z0-9_]{2,127}$') {
+                $machineReason = [string]$payload.$field
+                break
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($machineReason)) {
+            throw "MACHINE_REASON_REQUIRED"
+        }
+        $material = @(
+            "release-debt-fingerprint-v1", $basePath, [string]$StatusCode,
+            $Resource, $FailureStage, $bodyDigest
+        ) -join "`n"
+        $digest = Get-Sha256BytesHex -Bytes `
+            ([System.Text.Encoding]::UTF8.GetBytes($material))
+        $hardReason = $machineReason -match `
+            '(AUTH|UNAUTHORIZED|FORBIDDEN|IDENTITY|INTEGRITY|CORRUPT|INVARIANT|SCHEMA|CAPABILITY|MIGRATION|RECEIPT)'
+        $hardStage = $FailureStage -in @(
+            "authorization", "release_validation_identity", "json_validation"
+        )
+        return [pscustomobject]@{
+            available = $true; digest = $digest
+            machine_reason = $machineReason
+            hard_safety_failure = [bool]($hardReason -or $hardStage)
+        }
+    } catch {
+        return [pscustomobject]@{
+            available = $false; digest = $null; machine_reason = $null
+            hard_safety_failure = $false
+        }
+    }
+}
+
+function Get-ExactVersionJsonObservation {
+    param(
+        [Parameter(Mandatory = $true)][string]$VersionId,
+        [Parameter(Mandatory = $true)][string]$GitSha,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$AllowLegacyIdentity
+    )
+    try {
+        $read = Invoke-ExactVersionJson -VersionId $VersionId -Path $Path
+        $identityPassed = [bool](
+            ([string]$read.observed_version_id -eq $VersionId -or
+             ($AllowLegacyIdentity -and
+              [string]::IsNullOrWhiteSpace([string]$read.observed_version_id))) -and
+            ([string]$read.observed_git_sha -eq $GitSha -or
+             ($AllowLegacyIdentity -and
+              [string]::IsNullOrWhiteSpace([string]$read.observed_git_sha)))
+        )
+        return [pscustomobject]@{
+            passed = $true
+            identity_passed = $identityPassed
+            failure_class = $null
+            failure_fingerprint = $null
+            failure_fingerprint_available = $false
+            hard_safety_failure = $false
+            payload = $read.payload
+            observed_version_id = [string]$read.observed_version_id
+            observed_git_sha = [string]$read.observed_git_sha
+        }
+    } catch {
+        $statusCode = 0
+        $observedVersion = ""
+        $observedGit = ""
+        $observedRoute = ""
+        $resource = ""
+        $failureStage = ""
+        $contentType = ""
+        $body = $null
+        try {
+            $response = $_.Exception.Response
+            if ($response) {
+                $statusCode = [int]$response.StatusCode
+                $observedVersion = Get-ReleaseResponseHeaderValue $response `
+                    "X-Aurum-Worker-Version"
+                $observedGit = Get-ReleaseResponseHeaderValue $response "X-Aurum-Git-SHA"
+                $observedRoute = Get-ReleaseResponseHeaderValue $response "X-Aurum-Route"
+                $resource = Get-ReleaseResponseHeaderValue $response "X-Aurum-Resource"
+                $failureStage = Get-ReleaseResponseHeaderValue $response `
+                    "X-Aurum-Failure-Stage"
+                $contentType = Get-ReleaseResponseHeaderValue $response "Content-Type"
+                $body = Get-BoundedReleaseErrorBody $response
+            }
+        } catch {}
+        $fingerprint = Get-ReleaseFailureFingerprint -ExpectedPath $Path `
+            -StatusCode $statusCode -ObservedRoute $observedRoute -Resource $resource `
+            -FailureStage $failureStage -ContentType $contentType -Body $body
+        $identityPassed = [bool](
+            ([string]$observedVersion -eq $VersionId -or
+             ($AllowLegacyIdentity -and [string]::IsNullOrWhiteSpace($observedVersion))) -and
+            ([string]$observedGit -eq $GitSha -or
+             ($AllowLegacyIdentity -and [string]::IsNullOrWhiteSpace($observedGit)))
+        )
+        return [pscustomobject]@{
+            passed = $false
+            identity_passed = $identityPassed
+            failure_class = if ($statusCode -gt 0) { "HTTP_$statusCode" } `
+                else { "EXACT_VERSION_READ_FAILED" }
+            failure_fingerprint = [string]$fingerprint.digest
+            failure_fingerprint_available = [bool]$fingerprint.available
+            failure_reason_code = [string]$fingerprint.machine_reason
+            failure_stage = $failureStage
+            hard_safety_failure = [bool]$fingerprint.hard_safety_failure
+            payload = $null
+            observed_version_id = $observedVersion
+            observed_git_sha = $observedGit
+            diagnostic = Protect-PreflightDiagnosticText $_.Exception.Message
+        }
+    }
+}
+
+function Get-CandidateParityClass {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][object]$RoutePlan
+    )
+    $basePath = ([string]$Path -split '\?', 2)[0]
+    if ($basePath -eq "/api/status") { return "A" }
+    if (@($RoutePlan.contract_routes | Where-Object {
+        [string]$_.path -eq $basePath
+    }).Count -gt 0) { return "B" }
+    return "C"
+}
+
+function Test-CandidateAuthBoundaryChanged {
+    param([Parameter(Mandatory = $true)][object]$RoutePlan)
+    return [bool](@($RoutePlan.contract_routes | Where-Object {
+        [bool]$_.auth_required
+    }).Count -gt 0)
+}
+
 function Wait-CandidatePlacementPropagation {
     param([Parameter(Mandatory = $true)][object]$Candidate)
     $deadline = [DateTimeOffset]::UtcNow + $candidatePlacementPropagationTimeout
@@ -2959,7 +3201,8 @@ function Test-CandidateStatusPayload {
 
 function Test-CandidateDataParity {
     param([Parameter(Mandatory = $true)][object]$Stable,
-          [Parameter(Mandatory = $true)][object]$Candidate)
+          [Parameter(Mandatory = $true)][object]$Candidate,
+          [object]$RoutePlan = ([pscustomobject]@{ contract_routes = @() }))
     $routes = @(
         "/api/status", "/api/audit", "/api/audit-briefs",
         "/api/audit-stories", "/api/audit-decisions", "/api/learning",
@@ -3003,6 +3246,8 @@ function Test-CandidateDataParity {
     $results = @()
     $legacyAuditTime = $null
     foreach ($path in $routes) {
+        $acceptanceClass = Get-CandidateParityClass -Path $path `
+            -RoutePlan $RoutePlan
         if ($legacyMode -and $path -in @(
             "/api/audit-briefs", "/api/audit-stories", "/api/audit-decisions"
         )) {
@@ -3035,6 +3280,7 @@ function Test-CandidateDataParity {
                 $deferred = $true
                 $results += [pscustomobject]@{
                     route = $path
+                    acceptance_class = $acceptanceClass
                     state = if ($deferred) {
                         "DEFERRED_TO_POST_CUTOVER_OBSERVATION"
                     } else { "PASSED" }
@@ -3056,7 +3302,8 @@ function Test-CandidateDataParity {
                     "LEGACY_AUDIT_SPLIT_SCHEMA_MISMATCH"
                 )) { $_.Exception.Message } else { "EXACT_VERSION_READ_FAILED" }
                 $results += [pscustomobject]@{
-                    route = $path; state = "FAILED"; passed = $false; reason = $reason
+                    route = $path; acceptance_class = $acceptanceClass
+                    state = "FAILED"; passed = $false; reason = $reason
                     error = Protect-PreflightDiagnosticText $_.Exception.Message
                     stable_version_id = [string]$Stable.worker_version_id
                     candidate_version_id = [string]$Candidate.worker_version_id
@@ -3064,21 +3311,74 @@ function Test-CandidateDataParity {
             }
             continue
         }
-        try {
-            $stableRead = Invoke-ExactVersionJson `
-                -VersionId ([string]$Stable.worker_version_id) -Path $path
-            $candidateRead = Invoke-ExactVersionJson `
-                -VersionId ([string]$Candidate.worker_version_id) -Path $path
-            if ((-not $legacyMode -and
-                    [string]$stableRead.observed_version_id -ne [string]$Stable.worker_version_id) -or
-                [string]$candidateRead.observed_version_id -ne [string]$Candidate.worker_version_id -or
-                (-not $legacyMode -and (
-                    [string]::IsNullOrWhiteSpace([string]$stableRead.observed_git_sha) -or
-                    [string]$stableRead.observed_git_sha -ne [string]$Stable.git_sha)) -or
-                [string]::IsNullOrWhiteSpace([string]$candidateRead.observed_git_sha) -or
-                [string]$candidateRead.observed_git_sha -ne [string]$Candidate.git_sha) {
-                throw "EXACT_VERSION_IDENTITY_MISMATCH"
+        $stableRead = Get-ExactVersionJsonObservation `
+            -VersionId ([string]$Stable.worker_version_id) `
+            -GitSha ([string]$Stable.git_sha) -Path $path `
+            -AllowLegacyIdentity:$legacyMode
+        $candidateRead = Get-ExactVersionJsonObservation `
+            -VersionId ([string]$Candidate.worker_version_id) `
+            -GitSha ([string]$Candidate.git_sha) -Path $path
+        if (-not $candidateRead.identity_passed -or
+            (-not $legacyMode -and -not $stableRead.identity_passed)) {
+            $results += [pscustomobject]@{
+                route = $path; acceptance_class = $acceptanceClass
+                state = "FAILED"; passed = $false; blocking = $true
+                reason = "EXACT_VERSION_IDENTITY_MISMATCH"
+                stable_failure = [string]$stableRead.failure_class
+                candidate_failure = [string]$candidateRead.failure_class
             }
+            continue
+        }
+        if (-not $stableRead.passed -or -not $candidateRead.passed) {
+            $equivalentDebt = [bool](
+                $acceptanceClass -eq "C" -and -not $stableRead.passed -and
+                -not $candidateRead.passed -and
+                -not [bool]$candidateRead.hard_safety_failure -and
+                [bool]$stableRead.failure_fingerprint_available -and
+                [bool]$candidateRead.failure_fingerprint_available -and
+                [string]$stableRead.failure_fingerprint -ceq
+                    [string]$candidateRead.failure_fingerprint
+            )
+            $matchingDebt = [bool](
+                $acceptanceClass -eq "C" -and -not $stableRead.passed -and (
+                    $candidateRead.passed -or
+                    $equivalentDebt
+                )
+            )
+            $failureReason = if ($matchingDebt) {
+                if ($candidateRead.passed) { "CANDIDATE_IMPROVES_STABLE_DEBT" }
+                else { "UNCHANGED_EXISTING_STABLE_DEBT" }
+            } elseif ([bool]$candidateRead.hard_safety_failure) {
+                "CANDIDATE_HARD_SAFETY_FAILURE"
+            } elseif ($acceptanceClass -eq "B") {
+                "CHANGED_BOUNDARY_FAILURE"
+            } elseif ($acceptanceClass -eq "C" -and $stableRead.passed) {
+                "CANDIDATE_REGRESSION"
+            } elseif ($acceptanceClass -eq "C" -and -not $stableRead.passed -and
+                -not $candidateRead.passed) {
+                "CANDIDATE_DEBT_EQUIVALENCE_UNPROVEN"
+            } else { "EXACT_VERSION_READ_FAILED" }
+            $results += [pscustomobject]@{
+                route = $path; acceptance_class = $acceptanceClass
+                state = if ($matchingDebt) {
+                    if ($candidateRead.passed) { "STABLE_DEBT_IMPROVED" }
+                    else { "EXISTING_STABLE_DEBT" }
+                } else { "FAILED" }
+                passed = $matchingDebt
+                blocking = -not $matchingDebt
+                reason = $failureReason
+                stable_failure = [string]$stableRead.failure_class
+                candidate_failure = [string]$candidateRead.failure_class
+                stable_failure_fingerprint = [string]$stableRead.failure_fingerprint
+                candidate_failure_fingerprint = [string]$candidateRead.failure_fingerprint
+                stable_failure_reason_code = [string]$stableRead.failure_reason_code
+                candidate_failure_reason_code = [string]$candidateRead.failure_reason_code
+                stable_diagnostic = [string]$stableRead.diagnostic
+                candidate_diagnostic = [string]$candidateRead.diagnostic
+            }
+            continue
+        }
+        try {
             $stablePayload = $stableRead.payload
             $candidatePayload = $candidateRead.payload
             $stableProjection = ConvertTo-ReleaseSemanticProjection -Path $path -Payload $stablePayload
@@ -3111,14 +3411,16 @@ function Test-CandidateDataParity {
                 }
             }
             $results += [pscustomobject]@{
-                route = $path; state = if ($passed) { "PASSED" } else { "FAILED" }
-                passed = $passed; reason = $reason
+                route = $path; acceptance_class = $acceptanceClass
+                state = if ($passed) { "PASSED" } else { "FAILED" }
+                passed = $passed; blocking = -not $passed; reason = $reason
                 stable_version_id = if ($legacyMode) { [string]$Stable.worker_version_id } else { [string]$stableRead.observed_version_id }
                 candidate_version_id = [string]$candidateRead.observed_version_id
             }
         } catch {
             $results += [pscustomobject]@{
-                route = $path; state = "FAILED"; passed = $false
+                route = $path; acceptance_class = $acceptanceClass
+                state = "FAILED"; passed = $false; blocking = $true
                 reason = if ($_.Exception.Message -eq "EXACT_VERSION_IDENTITY_MISMATCH") {
                     "EXACT_VERSION_IDENTITY_MISMATCH"
                 } else { "EXACT_VERSION_READ_FAILED" }
@@ -3130,8 +3432,11 @@ function Test-CandidateDataParity {
         [string]$_.state -eq "DEFERRED_TO_POST_CUTOVER_OBSERVATION"
     })
     $blocking = @($results | Where-Object {
-        -not $_.passed -and [string]$_.state -ne
-            "DEFERRED_TO_POST_CUTOVER_OBSERVATION"
+        [bool]$_.blocking -or (-not $_.passed -and [string]$_.state -ne
+            "DEFERRED_TO_POST_CUTOVER_OBSERVATION")
+    })
+    $stableDebt = @($results | Where-Object {
+        [string]$_.state -in @("EXISTING_STABLE_DEBT", "STABLE_DEBT_IMPROVED")
     })
     return [pscustomobject]@{
         state = if ($blocking.Count -gt 0) { "FAILED" } elseif ($deferred.Count -gt 0) {
@@ -3142,6 +3447,7 @@ function Test-CandidateDataParity {
         stable_version_id = [string]$Stable.worker_version_id
         candidate_version_id = [string]$Candidate.worker_version_id
         routes = $results
+        stable_debt = $stableDebt
         deferred_obligations = @($deferred | ForEach-Object {
             [pscustomobject]@{
                 route = [string]$_.route
@@ -3758,7 +4064,7 @@ function Invoke-AutomaticCandidateValidation {
             }
         }
         $dataParity = Test-CandidateDataParity -Stable $state.stable `
-            -Candidate $Candidate
+            -Candidate $Candidate -RoutePlan $routePlan
         $authInspection = Get-CandidateAuthInspection -Candidate $Candidate
         if (-not $dataParity.passed) {
             $state.candidate.validation_state = "REVIEW_REQUIRED"
@@ -3766,6 +4072,22 @@ function Invoke-AutomaticCandidateValidation {
                 key = [string]$Candidate.validation_key
                 repository = "PASSED"; windows = "PASSED"; cloudflare = "PASSED"
                 reason = "SEMANTIC_DATA_PARITY_REVIEW_REQUIRED"
+                data_parity = $dataParity; auth_inspection = $authInspection
+                route_plan = $routePlan; routes = $cloudflare.routes
+                cpu_evidence = $cloudflare.cpu_evidence
+                tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            Write-ReleaseControlState -State $state
+            return $false
+        }
+        if ((Test-CandidateAuthBoundaryChanged -RoutePlan $routePlan) -and
+            [string]$authInspection.state -ne
+                "UNAUTHENTICATED_BOUNDARY_CONFIRMED") {
+            $state.candidate.validation_state = "REVIEW_REQUIRED"
+            $state.candidate.validation = [pscustomobject]@{
+                key = [string]$Candidate.validation_key
+                repository = "PASSED"; windows = "PASSED"; cloudflare = "PASSED"
+                reason = "ACCESS_BOUNDARY_REVIEW_REQUIRED"
                 data_parity = $dataParity; auth_inspection = $authInspection
                 route_plan = $routePlan; routes = $cloudflare.routes
                 cpu_evidence = $cloudflare.cpu_evidence
@@ -6004,6 +6326,10 @@ function Assert-ControlCenterProcessIdentity {
 }
 
 function Write-WatchdogHeartbeat {
+    param(
+        [ValidateSet("ACTIVE", "QUIESCED")][string]$SupervisionMode = "ACTIVE",
+        [string]$InstallTransactionId = ""
+    )
     $directory = Split-Path -Parent $watchdogHeartbeatPath
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
     $temporary = "$watchdogHeartbeatPath.tmp"
@@ -6021,6 +6347,10 @@ function Write-WatchdogHeartbeat {
         } else { $null }
         control_bundle_exact_revision = [bool]($controlBundle -and $controlBundle.exact_revision)
         control_bundle_hash_verified = [bool]$controlBundle
+        supervision_mode = $SupervisionMode
+        install_transaction_id = if ($InstallTransactionId) {
+            $InstallTransactionId
+        } else { $null }
     } | ConvertTo-Json -Compress | Set-Content -LiteralPath $temporary -Encoding UTF8
     Move-Item -LiteralPath $temporary -Destination $watchdogHeartbeatPath -Force
 }
@@ -6149,18 +6479,235 @@ function Test-ControlPlaneServiceOwnerRequired {
     if ([string]$Service.Key -eq "broadcast") {
         return [bool](Test-BroadcastPublisherEnabled)
     }
-    if ([string]$Service.Key -eq "sync" -and
-        (Test-CoordinatedMigrationSyncHold -ReleaseState $ReleaseState)) {
+    return $true
+}
+
+function Assert-ControlPlaneIsolationBaseline {
+    param(
+        [Parameter(Mandatory = $true)][object]$Snapshot,
+        [object]$ReleaseState
+    )
+    foreach ($service in $services) {
+        $owners = @($Snapshot.services.($service.Key))
+        $required = Test-ControlPlaneServiceOwnerRequired -Service $service `
+            -ReleaseState $ReleaseState
+        if ($required -and $owners.Count -ne 1) {
+            throw "CONTROL_PLANE_SERVICE_OWNER_REQUIRED:$($service.Key)"
+        }
+        if ((-not $required) -and $owners.Count -ne 0) {
+            throw "CONTROL_PLANE_UNEXPECTED_SERVICE_OWNER:$($service.Key)"
+        }
+    }
+}
+
+function Repair-AbandonedControlPlaneBundleForWatchdog {
+    $current = Get-RuntimeControlBundleIdentity
+    $state = Get-ControlPlaneInstallState
+    if (-not $state -or [string]$state.phase -in @(
+        "COMMITTED", "ROLLED_BACK", "FAILED"
+    )) {
+        if ($current) { return $current }
+        throw "CONTROL_BUNDLE_HASH_VERIFICATION_FAILED"
+    }
+    $installer = $state.install_owner_identity
+    $installerAlive = $false
+    if ($installer) {
+        $observed = Get-ControlPlaneProcessIdentity `
+            -ProcessId ([int]$installer.process_id)
+        $installerAlive = [bool]($observed -and
+            [string]$observed.process_start_token -eq
+                [string]$installer.process_start_token)
+    }
+    if ($current) {
+        if ([string]$current.source_revision -eq [string]$state.target_revision) {
+            return $current
+        }
+        if ([string]$current.source_revision -eq [string]$state.previous_revision) {
+            if ($installerAlive) { return $current }
+            Write-ControlPlaneInstallState @{
+                phase = "ROLLED_BACK"
+                completed_at = [DateTimeOffset]::UtcNow.ToString("o")
+                rollback_result = "ROLLED_BACK_BEFORE_BUNDLE_SWAP"
+                recovery = "INSTALL_OWNER_EXITED_BEFORE_BUNDLE_SWAP"
+            }
+            Restore-ControlPlaneSupervision -State $state.supervision_state
+            return $current
+        }
+        throw "CONTROL_PLANE_ABANDONED_BUNDLE_IDENTITY_MISMATCH"
+    }
+    if ($installerAlive) { throw "CONTROL_PLANE_INSTALL_OWNER_STILL_ACTIVE" }
+    $controlRoot = Join-Path $repositoryRoot ".local\runtime-control"
+    $stage = Get-RuntimeControlBundleIdentityAtRoot `
+        -ControlRoot ([string]$state.stage_root)
+    if ($stage -and [string]$stage.source_revision -eq
+            [string]$state.target_revision) {
+        foreach ($name in @($runtimeControlFileNames) + @($runtimeControlManifestName)) {
+            Copy-Item -LiteralPath (Join-Path ([string]$state.stage_root) $name) `
+                -Destination (Join-Path $controlRoot $name) -Force
+        }
+        $repaired = Get-RuntimeControlBundleIdentityAtRoot -ControlRoot $controlRoot
+        if ($repaired) {
+            Write-ControlPlaneInstallState @{
+                phase = "START_NEW_WATCHDOG"
+                recovery = "FORWARD_REPAIRED_INTERRUPTED_BUNDLE_COPY"
+            }
+            return $repaired
+        }
+    }
+    $backup = Get-RuntimeControlBundleIdentityAtRoot `
+        -ControlRoot ([string]$state.backup_root)
+    if ($backup) {
+        $restored = Restore-RuntimeControlBundleBackup `
+            -BackupRoot ([string]$state.backup_root) -ControlRoot $controlRoot
+        Write-ControlPlaneInstallState @{
+            phase = "ROLLED_BACK"
+            completed_at = [DateTimeOffset]::UtcNow.ToString("o")
+            rollback_result = "ROLLED_BACK_AFTER_INTERRUPTED_BUNDLE_COPY"
+        }
+        return $restored
+    }
+    throw "CONTROL_PLANE_ABANDONED_BUNDLE_RECOVERY_FAILED"
+}
+
+function Get-ControlPlaneInstallOwnerAlive {
+    param([Parameter(Mandatory = $true)][object]$State)
+    $installer = $State.install_owner_identity
+    if (-not $installer -or [int]$installer.process_id -le 0 -or
+        -not [string]$installer.process_start_token) {
         return $false
     }
-    return $true
+    $observed = Get-ControlPlaneProcessIdentity `
+        -ProcessId ([int]$installer.process_id)
+    return [bool]($observed -and
+        [string]$observed.process_start_token -eq
+            [string]$installer.process_start_token)
+}
+
+function Assert-AbandonedControlPlaneInstallActivation {
+    param(
+        [Parameter(Mandatory = $true)][object]$State,
+        [Parameter(Mandatory = $true)][string]$TransactionId
+    )
+    if ([string]$State.transaction_id -ne $TransactionId) {
+        throw "CONTROL_PLANE_INSTALL_FENCE_LOST"
+    }
+    if (Get-ControlPlaneInstallOwnerAlive -State $State) {
+        throw "CONTROL_PLANE_INSTALL_OWNER_STILL_ACTIVE"
+    }
+    if (-not [bool]$State.bundle_hash_verified) {
+        throw "CONTROL_PLANE_ABANDONED_BUNDLE_NOT_VERIFIED"
+    }
+    $bundle = Get-RuntimeControlBundleIdentity
+    if (-not $bundle -or
+        [string]$bundle.source_revision -ne [string]$State.target_revision -or
+        -not [bool]$bundle.exact_revision) {
+        throw "CONTROL_PLANE_ABANDONED_BUNDLE_IDENTITY_MISMATCH"
+    }
+    $oldOwner = $State.old_watchdog_identity
+    if (-not $oldOwner -or -not [string]$oldOwner.process_start_token) {
+        throw "CONTROL_PLANE_OLD_WATCHDOG_IDENTITY_MISSING"
+    }
+    $oldObserved = Get-ControlPlaneProcessIdentity `
+        -ProcessId ([int]$oldOwner.process_id)
+    if ($oldObserved -and [string]$oldObserved.process_start_token -eq
+            [string]$oldOwner.process_start_token) {
+        throw "CONTROL_PLANE_OLD_WATCHDOG_STILL_OWNS"
+    }
+    $owners = @(Get-VerifiedWatchdogOwners)
+    $currentIdentity = Get-ControlPlaneProcessIdentity -ProcessId $PID
+    if ($owners.Count -ne 1 -or -not $currentIdentity -or
+        [int]$owners[0].process_id -ne $PID -or
+        [string]$owners[0].process_start_token -ne
+            [string]$currentIdentity.process_start_token) {
+        throw "CONTROL_PLANE_RECOVERY_EXACTLY_ONE_REPLACEMENT_REQUIRED"
+    }
+    if (-not (Test-Path -LiteralPath $watchdogHeartbeatPath)) {
+        throw "CONTROL_PLANE_RECOVERY_QUIESCED_ACK_MISSING"
+    }
+    try {
+        $heartbeat = Get-Content -LiteralPath $watchdogHeartbeatPath -Raw |
+            ConvertFrom-Json
+    } catch {
+        throw "CONTROL_PLANE_RECOVERY_QUIESCED_ACK_INVALID"
+    }
+    if ([string]$heartbeat.install_transaction_id -ne $TransactionId -or
+        [string]$heartbeat.supervision_mode -ne "QUIESCED" -or
+        [string]$heartbeat.control_bundle_revision -ne
+            [string]$State.target_revision -or
+        -not [bool]$heartbeat.control_bundle_exact_revision -or
+        -not [bool]$heartbeat.control_bundle_hash_verified -or
+        [int]$heartbeat.process_id -ne $PID -or
+        [string]$heartbeat.process_start_token -ne
+            [string]$currentIdentity.process_start_token) {
+        throw "CONTROL_PLANE_RECOVERY_QUIESCED_ACK_MISMATCH"
+    }
+    $release = Get-ReleaseControlState
+    if ($release -and $release.transaction) {
+        throw "CONTROL_PLANE_RECOVERY_RELEASE_TRANSACTION_APPEARED"
+    }
+    if (Test-Path -LiteralPath $releaseLockPath) {
+        $lockOwner = $null
+        try {
+            $lockOwner = Get-Content -LiteralPath `
+                (Join-Path $releaseLockPath "owner.json") -Raw |
+                ConvertFrom-Json
+        } catch {}
+        if (-not $lockOwner -or
+            [int]$lockOwner.owner_pid -ne
+                [int]$State.install_owner_identity.process_id -or
+            [string]$lockOwner.owner_process_start_token -ne
+                [string]$State.install_owner_identity.process_start_token) {
+            throw "CONTROL_PLANE_RECOVERY_CONCURRENT_RELEASE_LOCK"
+        }
+    }
+    $baseline = $State.isolation_before
+    if (-not $baseline) {
+        throw "CONTROL_PLANE_RECOVERY_BASELINE_MISSING"
+    }
+    Assert-ControlPlaneIsolationBaseline -Snapshot $baseline `
+        -ReleaseState $release
+    $currentIsolation = Get-ControlPlaneIsolationSnapshot
+    Assert-ControlPlaneIsolationSnapshot -Before $baseline `
+        -After $currentIsolation
+    return [pscustomobject]@{
+        owner = $owners[0]
+        isolation = $currentIsolation
+    }
+}
+
+function Restore-AbandonedControlPlaneInstallForWatchdog {
+    param(
+        [Parameter(Mandatory = $true)][object]$State,
+        [Parameter(Mandatory = $true)][string]$Failure
+    )
+    $controlRoot = Join-Path $repositoryRoot ".local\runtime-control"
+    $backup = Get-RuntimeControlBundleIdentityAtRoot `
+        -ControlRoot ([string]$State.backup_root)
+    if (-not $backup -or [string]$backup.source_revision -ne
+            [string]$State.previous_revision) {
+        throw "CONTROL_PLANE_ABANDONED_SAFE_BUNDLE_UNAVAILABLE: $Failure"
+    }
+    $restored = Restore-RuntimeControlBundleBackup `
+        -BackupRoot ([string]$State.backup_root) -ControlRoot $controlRoot
+    if (-not $restored -or [string]$restored.source_revision -ne
+            [string]$State.previous_revision) {
+        throw "CONTROL_PLANE_ABANDONED_SAFE_BUNDLE_RESTORE_FAILED: $Failure"
+    }
+    Write-ControlPlaneInstallState @{
+        phase = "ROLLED_BACK"
+        completed_at = [DateTimeOffset]::UtcNow.ToString("o")
+        rollback_result = "ROLLED_BACK_BY_RECOVERY_WATCHDOG"
+        recovery = "ABANDONED_INSTALL_FAILED_INDEPENDENT_SAFETY_CHECKS"
+        failure = $Failure
+    }
+    Restore-ControlPlaneSupervision -State $State.supervision_state
+    return $restored
 }
 
 function Assert-ControlPlaneIsolationSnapshot {
     param(
         [Parameter(Mandatory = $true)][object]$Before,
-        [Parameter(Mandatory = $true)][object]$After,
-        [object]$ReleaseState
+        [Parameter(Mandatory = $true)][object]$After
     )
     if ([string]$Before.business_runtime_revision -ne
         [string]$After.business_runtime_revision) {
@@ -6173,20 +6720,25 @@ function Assert-ControlPlaneIsolationSnapshot {
     foreach ($service in $services) {
         $beforeProcesses = @($Before.services.($service.Key))
         $afterProcesses = @($After.services.($service.Key))
-        $required = Test-ControlPlaneServiceOwnerRequired -Service $service `
-            -ReleaseState $ReleaseState
-        if ((-not $required) -and
-            ($beforeProcesses.Count -ne 0 -or $afterProcesses.Count -ne 0)) {
-            throw "CONTROL_PLANE_UNEXPECTED_SERVICE_OWNER_$($service.Key.ToUpperInvariant())"
-        }
-        if ($required -and ($beforeProcesses.Count -ne 1 -or
-            $afterProcesses.Count -ne 1 -or
-            [int]$beforeProcesses[0].process_id -ne [int]$afterProcesses[0].process_id -or
-            [string]$beforeProcesses[0].process_start_token -ne
-                [string]$afterProcesses[0].process_start_token)) {
+        if ($beforeProcesses.Count -ne $afterProcesses.Count) {
             throw "CONTROL_PLANE_INSTALL_CHANGED_SERVICE_$($service.Key.ToUpperInvariant())"
         }
+        for ($index = 0; $index -lt $beforeProcesses.Count; $index++) {
+            if ([int]$beforeProcesses[$index].process_id -ne
+                    [int]$afterProcesses[$index].process_id -or
+                [string]$beforeProcesses[$index].process_start_token -ne
+                    [string]$afterProcesses[$index].process_start_token) {
+                throw "CONTROL_PLANE_INSTALL_CHANGED_SERVICE_$($service.Key.ToUpperInvariant())"
+            }
+        }
     }
+}
+
+function Get-ControlPlaneInstallState {
+    if (-not (Test-Path -LiteralPath $controlPlaneInstallStatePath)) { return $null }
+    try {
+        Get-Content -LiteralPath $controlPlaneInstallStatePath -Raw | ConvertFrom-Json
+    } catch { return $null }
 }
 
 function Write-ControlPlaneInstallState {
@@ -6217,12 +6769,11 @@ function Suspend-ControlPlaneSupervision {
         $state[$name] = [bool]$task.Settings.Enabled
     }
     try {
-        foreach ($name in @($guardTaskName, $taskName)) {
-            Disable-ScheduledTask -TaskName $name | Out-Null
-            if ($name -eq $guardTaskName) {
-                Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-            }
-        }
+        # Keep the main task enabled so a machine restart can launch the exact
+        # installed bundle and resume the durable handoff. Only the guard is
+        # disabled because it would otherwise race the intentional owner gap.
+        Disable-ScheduledTask -TaskName $guardTaskName | Out-Null
+        Stop-ScheduledTask -TaskName $guardTaskName -ErrorAction SilentlyContinue
     } catch {
         Restore-ControlPlaneSupervision -State $state
         throw
@@ -6231,10 +6782,15 @@ function Suspend-ControlPlaneSupervision {
 }
 
 function Restore-ControlPlaneSupervision {
-    param([hashtable]$State)
+    param([object]$State)
     if (-not $State) { return }
     foreach ($name in @($taskName, $guardTaskName)) {
-        if ([bool]$State[$name]) { Enable-ScheduledTask -TaskName $name | Out-Null }
+        $enabled = if ($State -is [System.Collections.IDictionary]) {
+            [bool]$State[$name]
+        } elseif ($State.PSObject.Properties[$name]) {
+            [bool]$State.$name
+        } else { $false }
+        if ($enabled) { Enable-ScheduledTask -TaskName $name | Out-Null }
     }
 }
 
@@ -6292,7 +6848,10 @@ function Stop-VerifiedWatchdogOwner {
 }
 
 function Start-WatchdogReplacement {
-    param([switch]$PassThru)
+    param(
+        [switch]$PassThru,
+        [string]$InstallTransactionId = ""
+    )
     $controlRoot = Join-Path $repositoryRoot ".local\runtime-control"
     $controlScript = Join-Path $controlRoot "xauusd_control_center.ps1"
     $launcher = Join-Path $controlRoot "xauusd_watchdog_launcher.vbs"
@@ -6301,8 +6860,13 @@ function Start-WatchdogReplacement {
         throw "Updated watchdog control files are unavailable."
     }
     $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
-    $arguments = '"{0}" "{1}" "{2}" "{3}"' -f `
-        $launcher, $controlScript, $moduleRoot, $repositoryRoot
+    $arguments = if ($InstallTransactionId) {
+        '"{0}" "{1}" "{2}" "{3}" "{4}"' -f `
+            $launcher, $controlScript, $moduleRoot, $repositoryRoot, $InstallTransactionId
+    } else {
+        '"{0}" "{1}" "{2}" "{3}"' -f `
+            $launcher, $controlScript, $moduleRoot, $repositoryRoot
+    }
     $process = Start-Process -FilePath $wscript -ArgumentList $arguments `
         -WindowStyle Hidden -PassThru
     if ($PassThru) { return $process }
@@ -6312,6 +6876,8 @@ function Wait-VerifiedWatchdogHandoff {
     param(
         [Parameter(Mandatory = $true)][string]$ExpectedRevision,
         [Parameter(Mandatory = $true)][object]$PreviousIdentity,
+        [ValidateSet("ACTIVE", "QUIESCED")][string]$ExpectedMode = "ACTIVE",
+        [string]$ExpectedInstallTransactionId = "",
         [TimeSpan]$Timeout = ([TimeSpan]::FromSeconds(90))
     )
     $deadline = [DateTimeOffset]::UtcNow.Add($Timeout)
@@ -6328,6 +6894,9 @@ function Wait-VerifiedWatchdogHandoff {
             [string]$heartbeat.control_bundle_revision -ne $ExpectedRevision -or
             -not [bool]$heartbeat.control_bundle_exact_revision -or
             -not [bool]$heartbeat.control_bundle_hash_verified -or
+            [string]$heartbeat.supervision_mode -ne $ExpectedMode -or
+            [string]$heartbeat.install_transaction_id -ne
+                $ExpectedInstallTransactionId -or
             [string]$heartbeat.process_start_token -eq "") { continue }
         $owners = @(Get-VerifiedWatchdogOwners)
         if ($owners.Count -ne 1) { continue }
@@ -6341,6 +6910,47 @@ function Wait-VerifiedWatchdogHandoff {
         return $owner
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
     throw "CONTROL_PLANE_NEW_WATCHDOG_HEARTBEAT_TIMEOUT"
+}
+
+function Wait-ControlPlaneInstallActivation {
+    param([Parameter(Mandatory = $true)][string]$TransactionId)
+    while ($true) {
+        $state = Get-ControlPlaneInstallState
+        if (-not $state -or [string]$state.transaction_id -ne $TransactionId) {
+            throw "CONTROL_PLANE_INSTALL_FENCE_LOST"
+        }
+        if ([string]$state.phase -in @("FAILED", "ROLLED_BACK", "COMMITTED")) {
+            throw "CONTROL_PLANE_INSTALL_ACTIVATION_WITHDRAWN"
+        }
+        $installerAlive = Get-ControlPlaneInstallOwnerAlive -State $state
+        Write-WatchdogHeartbeat -SupervisionMode "QUIESCED" `
+            -InstallTransactionId $TransactionId
+        if ([string]$state.phase -eq "ACTIVATE_NEW_WATCHDOG") {
+            if ($installerAlive) { return "INSTALLER_GRANTED" }
+        }
+        if (-not $installerAlive -and [string]$state.phase -in @(
+            "INSTALL_BUNDLE", "START_NEW_WATCHDOG", "VERIFY_QUIESCED_HANDOFF"
+        ) -or (-not $installerAlive -and
+            [string]$state.phase -eq "ACTIVATE_NEW_WATCHDOG")) {
+            try {
+                $verified = Assert-AbandonedControlPlaneInstallActivation `
+                    -State $state -TransactionId $TransactionId
+                Write-ControlPlaneInstallState @{
+                    phase = "ACTIVATE_NEW_WATCHDOG"
+                    recovery = "INSTALL_OWNER_EXITED_AFTER_INDEPENDENT_VERIFICATION"
+                    new_watchdog_identity = $verified.owner
+                    isolation_after = $verified.isolation
+                }
+                return "RECOVERED"
+            } catch {
+                $failure = $_.Exception.Message
+                $null = Restore-AbandonedControlPlaneInstallForWatchdog `
+                    -State $state -Failure $failure
+                throw "CONTROL_PLANE_ABANDONED_INSTALL_ROLLED_BACK: $failure"
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
 }
 
 function Invoke-ControlPlaneInstall {
@@ -6381,6 +6991,10 @@ function Invoke-ControlPlaneInstall {
     $bundleInstalled = $false
     $newOwner = $null
     $startedAt = [DateTimeOffset]::UtcNow.ToString("o")
+    $installOwnerIdentity = Get-ControlPlaneProcessIdentity -ProcessId $PID
+    if (-not $installOwnerIdentity) {
+        throw "CONTROL_PLANE_INSTALL_OWNER_IDENTITY_REQUIRED"
+    }
     Write-ControlPlaneInstallState @{
         transaction_id = $transactionId
         target_revision = $TargetRevision
@@ -6389,10 +7003,14 @@ function Invoke-ControlPlaneInstall {
         completed_at = $null
         phase = "PRECHECK"
         old_watchdog_identity = $oldOwner
+        install_owner_identity = $installOwnerIdentity
+        stage_root = $stageRoot
+        backup_root = $backupRoot
         old_watchdog_heartbeat = $oldHeartbeat
         new_watchdog_identity = $null
         bundle_hash_verified = $false
         rollback_result = $null
+        failure = $null
         isolation_before = $null
         isolation_after = $null
     }
@@ -6410,6 +7028,7 @@ function Invoke-ControlPlaneInstall {
             bundle_hash_verified = $true
         }
         $supervisionState = Suspend-ControlPlaneSupervision
+        Write-ControlPlaneInstallState @{ supervision_state = $supervisionState }
         Wait-ControlPlaneGuardQuiesced
         # Revalidate the complete stage before the first destructive process action.
         if (-not (Get-RuntimeControlBundleIdentityAtRoot -ControlRoot $stageRoot)) {
@@ -6418,6 +7037,7 @@ function Invoke-ControlPlaneInstall {
         Write-ControlPlaneInstallState @{ phase = "STOP_OLD_WATCHDOG" }
         Stop-VerifiedWatchdogOwner -Identity $oldOwner
         $oldStopped = $true
+        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         if (@(Get-VerifiedWatchdogOwners).Count -ne 0) {
             throw "CONTROL_PLANE_OLD_WATCHDOG_STILL_OWNS"
         }
@@ -6425,18 +7045,16 @@ function Invoke-ControlPlaneInstall {
         # being verified. Establish the service baseline only after supervision
         # is quiesced and the old watchdog has stopped, so no owner can mutate it
         # between the snapshot and the handoff.
-        $isolationBefore = Get-ControlPlaneIsolationSnapshot
-        foreach ($service in $services) {
-            $owners = @($isolationBefore.services.($service.Key))
-            $required = Test-ControlPlaneServiceOwnerRequired -Service $service `
-                -ReleaseState $release
-            if ($required -and $owners.Count -ne 1) {
-                throw "CONTROL_PLANE_SERVICE_OWNER_REQUIRED:$($service.Key)"
-            }
-            if ((-not $required) -and $owners.Count -ne 0) {
-                throw "CONTROL_PLANE_UNEXPECTED_SERVICE_OWNER:$($service.Key)"
-            }
+        # Release state is mutable before the transaction lock is acquired and
+        # the old supervisor is fenced. Classify the service baseline only from
+        # the fresh state at this quiesced boundary.
+        $release = Get-ReleaseControlState
+        if ($release -and $release.transaction) {
+            throw "CONTROL_PLANE_INSTALL_BLOCKED_BY_RELEASE_TRANSACTION"
         }
+        $isolationBefore = Get-ControlPlaneIsolationSnapshot
+        Assert-ControlPlaneIsolationBaseline -Snapshot $isolationBefore `
+            -ReleaseState $release
         Write-ControlPlaneInstallState @{ isolation_before = $isolationBefore }
         Write-ControlPlaneInstallState @{ phase = "INSTALL_BUNDLE" }
         $installed = Install-VerifiedRuntimeControlBundleStage `
@@ -6445,14 +7063,22 @@ function Invoke-ControlPlaneInstall {
         if ([string]$installed.source_revision -ne $TargetRevision) {
             throw "CONTROL_BUNDLE_INSTALLED_REVISION_MISMATCH"
         }
-        Write-ControlPlaneInstallState @{ phase = "START_NEW_WATCHDOG" }
-        $null = Start-WatchdogReplacement -PassThru
-        Write-ControlPlaneInstallState @{ phase = "VERIFY_NEW_HEARTBEAT" }
+        Write-ControlPlaneInstallState @{
+            phase = "START_NEW_WATCHDOG"
+            handoff_mode = "QUIESCED"
+        }
+        $null = Start-WatchdogReplacement -PassThru `
+            -InstallTransactionId $transactionId
+        Write-ControlPlaneInstallState @{ phase = "VERIFY_QUIESCED_HANDOFF" }
         $newOwner = Wait-VerifiedWatchdogHandoff -ExpectedRevision $TargetRevision `
-            -PreviousIdentity $oldOwner
+            -PreviousIdentity $oldOwner -ExpectedMode "QUIESCED" `
+            -ExpectedInstallTransactionId $transactionId
         $isolationAfter = Get-ControlPlaneIsolationSnapshot
         Assert-ControlPlaneIsolationSnapshot -Before $isolationBefore `
-            -After $isolationAfter -ReleaseState $release
+            -After $isolationAfter
+        Write-ControlPlaneInstallState @{ phase = "ACTIVATE_NEW_WATCHDOG" }
+        $newOwner = Wait-VerifiedWatchdogHandoff -ExpectedRevision $TargetRevision `
+            -PreviousIdentity $oldOwner -ExpectedMode "ACTIVE"
         Restore-ControlPlaneSupervision -State $supervisionState
         $supervisionState = $null
         Write-ControlPlaneInstallState @{
@@ -6460,6 +7086,7 @@ function Invoke-ControlPlaneInstall {
             completed_at = [DateTimeOffset]::UtcNow.ToString("o")
             new_watchdog_identity = $newOwner
             rollback_result = "NOT_REQUIRED"
+            failure = $null
             isolation_after = $isolationAfter
         }
         return [pscustomobject]@{
@@ -6476,6 +7103,7 @@ function Invoke-ControlPlaneInstall {
         $rollbackResult = "NOT_REQUIRED"
         try {
             if ($oldStopped) {
+                Write-ControlPlaneInstallState @{ phase = "ROLLING_BACK" }
                 foreach ($owner in @(Get-VerifiedWatchdogOwners)) {
                     Stop-VerifiedWatchdogOwner -Identity $owner
                 }
@@ -6483,13 +7111,18 @@ function Invoke-ControlPlaneInstall {
                     $null = Restore-RuntimeControlBundleBackup `
                         -BackupRoot $backupRoot -ControlRoot $controlRoot
                 }
+                if ($isolationBefore) {
+                    $isolationAfter = Get-ControlPlaneIsolationSnapshot
+                    Assert-ControlPlaneIsolationSnapshot -Before $isolationBefore `
+                        -After $isolationAfter
+                }
+                # Recovery proves restoration against the captured baseline.
+                # It deliberately does not re-run the contextual normal-state
+                # owner rule that may have caused the forward handoff failure.
                 $null = Start-WatchdogReplacement -PassThru
                 $restoredOwner = Wait-VerifiedWatchdogHandoff `
                     -ExpectedRevision ([string]$currentBundle.source_revision) `
                     -PreviousIdentity $oldOwner
-                $isolationAfter = Get-ControlPlaneIsolationSnapshot
-                Assert-ControlPlaneIsolationSnapshot -Before $isolationBefore `
-                    -After $isolationAfter -ReleaseState $release
                 $rollbackResult = "ROLLED_BACK"
                 $newOwner = $restoredOwner
             }
@@ -6521,6 +7154,39 @@ function Invoke-ControlPlaneInstall {
 }
 
 function Invoke-ForecasterWatchdog {
+    param([string]$InstallTransactionId = "")
+    $null = Repair-AbandonedControlPlaneBundleForWatchdog
+    $null = Assert-ActiveControlBundle
+    if (-not $InstallTransactionId) {
+        $pendingInstall = Get-ControlPlaneInstallState
+        $bundle = Get-RuntimeControlBundleIdentity
+        if ($pendingInstall -and $bundle -and
+            [string]$pendingInstall.target_revision -eq
+                [string]$bundle.source_revision -and
+            [string]$pendingInstall.phase -in @(
+                "INSTALL_BUNDLE", "START_NEW_WATCHDOG",
+                "VERIFY_QUIESCED_HANDOFF", "ACTIVATE_NEW_WATCHDOG"
+            )) {
+            $InstallTransactionId = [string]$pendingInstall.transaction_id
+        }
+    }
+    if (-not $InstallTransactionId) { Start-All }
+    if ($InstallTransactionId) {
+        $activation = Wait-ControlPlaneInstallActivation `
+            -TransactionId $InstallTransactionId
+        Write-WatchdogHeartbeat -SupervisionMode "ACTIVE"
+        if ($activation -eq "RECOVERED") {
+            $recoveredOwner = Get-ControlPlaneProcessIdentity -ProcessId $PID
+            Write-ControlPlaneInstallState @{
+                phase = "COMMITTED"
+                completed_at = [DateTimeOffset]::UtcNow.ToString("o")
+                new_watchdog_identity = $recoveredOwner
+                rollback_result = "NOT_REQUIRED"
+                recovery = "FORWARD_COMPLETED_AFTER_INSTALL_OWNER_EXIT"
+                failure = $null
+            }
+        }
+    }
     $failureCounts = @{}
     $lastRestart = @{}
     foreach ($service in $services) {
@@ -7065,6 +7731,9 @@ function Get-ControlCenterOperationState {
     param([object]$ReleaseState = $null)
     if (-not $ReleaseState) { $ReleaseState = Get-ReleaseControlState }
     [pscustomobject]@{
+        lifecycle_phase = if ($ReleaseState) {
+            Get-ReleaseLifecyclePhase -ReleaseState $ReleaseState
+        } else { "UNAVAILABLE" }
         deployment_status = if ($ReleaseState) {
             [string]$ReleaseState.deployment_status
         } else { "UNAVAILABLE" }
@@ -7348,7 +8017,6 @@ function Invoke-ControlCenterOperationAction {
         "ServiceStart" {
             $target = $services | Where-Object Key -eq $ServiceKey
             if (-not $target) { throw "Unknown service key: $ServiceKey" }
-            if ($target.Key -eq "sync") { Exit-CoordinatedMigrationSyncHold }
             Start-ForecasterService $target
             return $target
         }
@@ -8703,12 +9371,12 @@ function Show-ControlCenter {
             $stableSummary.Value.Text = "  $stableShort  "
             $stableSummary.Value.ForeColor = [System.Drawing.Color]::White
             $stableSummary.Value.BackColor = $accent
-            Set-StatusBadge -Label $stableCard.Badge -State ([string]$release.deployment_status)
+            Set-StatusBadge -Label $stableCard.Badge -State ([string]$release.lifecycle_phase)
             $stableCard.Git.Text = "Git       $(Get-ShortIdentity $release.stable.git_sha)"
             $stableCard.Worker.Text = "Worker    $(Get-ShortIdentity $release.stable.worker_version_id)"
             $stableCard.Windows.Text = "Windows   $(Get-ShortIdentity $release.stable.windows_revision)"
             $stableCard.Detail.Text = "Authoritative production release."
-            $stableCard.Detail.Text = "$($release.stable.artifact_kind) / $($release.stable.provenance_state) / $($release.deployment_status)"
+            $stableCard.Detail.Text = "$($release.stable.artifact_kind) / $($release.stable.provenance_state) / $($release.lifecycle_phase)"
             $openStableButton.Enabled = $true
             $openStableButton.Visible = $true
             $bootstrapButton.Visible = $false
@@ -9046,7 +9714,9 @@ switch ($Action) {
     "Restart" { Invoke-ControlCenterOperationAction -Operation $Action | Format-Table -AutoSize }
     "ServiceStart" { $null = Invoke-ControlCenterOperationAction -Operation $Action }
     "ServiceStop" { $null = Invoke-ControlCenterOperationAction -Operation $Action }
-    "Watchdog" { Start-All; exit (Invoke-ForecasterWatchdog) }
+    "Watchdog" {
+        exit (Invoke-ForecasterWatchdog -InstallTransactionId $InstallTransactionId)
+    }
     "DiscoverCandidate" {
         try { $null = Invoke-ControlCenterOperationAction -Operation $Action; exit 0 }
         catch { Write-Error $_.Exception.Message; exit 1 }
