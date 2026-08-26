@@ -3115,6 +3115,34 @@ def test_release_version_timestamp_normalizes_all_wrangler_shapes(tmp_path) -> N
     )
 
 
+def test_release_version_timestamp_and_watermark_are_culture_invariant(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "[Globalization.CultureInfo]::CurrentCulture='en-MY';"
+        "$version=[pscustomobject]@{id='version-new';metadata=[pscustomobject]@{"
+        "created_on='08/26/2026 18:57:10'}};"
+        "$discovery=[pscustomobject]@{watermark_created_at='08/26/2026 18:57:09';"
+        "watermark_version_id='version-old'};"
+        "$created=Get-ReleaseVersionCreatedAt $version;"
+        "$after=Test-VersionAfterDiscoveryWatermark -Version $version -Discovery $discovery;"
+        'Write-Output "$created,$after"',
+    )
+    assert result == "2026-08-26T18:57:10.0000000+00:00,True"
+
+
+def test_release_timestamp_rejects_malformed_watermark_without_throwing(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$version=[pscustomobject]@{id='version-new';metadata=[pscustomobject]@{"
+        "created_on='08/26/2026 18:57:10'}};"
+        "$discovery=[pscustomobject]@{watermark_created_at='not-a-time';"
+        "watermark_version_id='version-old'};"
+        "$after=Test-VersionAfterDiscoveryWatermark -Version $version -Discovery $discovery;"
+        'Write-Output "$after,$(Get-ReleaseVersionCreatedAt $version)"',
+    )
+    assert result == "False,2026-08-26T18:57:10.0000000+00:00"
+
+
 def test_cloudflare_version_wrapper_enumerates_top_level_wrangler_array(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
