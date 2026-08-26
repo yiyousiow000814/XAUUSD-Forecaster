@@ -7,10 +7,10 @@ closure statement below. The older sections remain only as historical evidence
 for the earlier #304 campaign boundary. The complete stack is still `PENDING`:
 all implementation PRs and this documentation-only closure PR remain Draft.
 
-- Latest integrated `main`: `ae8b4d0a28d69075d2b78ff76447345ca72bb39f`
-  (#340).
+- Latest integrated `main`: `1994ca9f83c88a23baaafd1980fc250d967b9a5f`
+  (#341).
 - Final implementation: Draft PR #328 at
-  `4becead5d1ab71e3ae73b0f052d85f1e5a53ced8`.
+  `f231101e460934707c70a1d288bbe8e6273c7eb2`.
 - Closure: Draft PR #302, documentation-only, based directly on #328.
 - Assistant remains `PAUSED`.
 - No merge, Stable movement, production data mutation, provider call, runtime
@@ -23,28 +23,28 @@ live head OID because a commit cannot embed its own hash.
 
 | Order | PR | Branch | Exact base SHA | Exact head SHA |
 |---:|---:|---|---|---|
-| 1 | #282 | `docs/architecture-baseline` | `ae8b4d0a28d69075d2b78ff76447345ca72bb39f` | `ded6337b6fabd9c9b7a8ee1c174de1b23d6d8070` |
-| 2 | #283 | `refactor/dashboard-status-cache` | `ded6337b6fabd9c9b7a8ee1c174de1b23d6d8070` | `b3a389312f4f30054fd863f690d544df40d036e8` |
-| 3 | #285 | `refactor/dashboard-health-projection` | `b3a389312f4f30054fd863f690d544df40d036e8` | `66963502f848334fbf61284e9dfc34d5e6108fc7` |
-| 4 | #287 | `refactor/dashboard-resource-contracts` | `66963502f848334fbf61284e9dfc34d5e6108fc7` | `66032d1673aaf91d3658ddc36069a0238886440f` |
-| 5 | #288 | `refactor/dashboard-api-news-resources` | `66032d1673aaf91d3658ddc36069a0238886440f` | `e14e024ebd8c21bb56086e95542fbe9006b53b3e` |
-| 6 | #289 | `refactor/dashboard-api-market-resources` | `e14e024ebd8c21bb56086e95542fbe9006b53b3e` | `b2085af610135f94fce521904bbc18b4efbdd49b` |
-| 7 | #290 | `refactor/dashboard-api-optional-resources` | `b2085af610135f94fce521904bbc18b4efbdd49b` | `00fcfd4ccbc85bcc14801de8114a0b87782b3768` |
-| 8 | #291 | `refactor/dashboard-operator-bridge` | `00fcfd4ccbc85bcc14801de8114a0b87782b3768` | `fbcdb8b07d7844a941e6ed2bca0f2980e5b3951d` |
-| 9 | #292 | `refactor/dashboard-sync-runtime` | `fbcdb8b07d7844a941e6ed2bca0f2980e5b3951d` | `98115ecc8a55f2b6437c51fa983821382f8b7cc6` |
-| 10 | #294 | `refactor/news-annotator-runtime` | `98115ecc8a55f2b6437c51fa983821382f8b7cc6` | `46393e43f30a1de22e710accf2ec1c1c131a54ea` |
-| 11 | #295 | `refactor/control-center-boundaries` | `46393e43f30a1de22e710accf2ec1c1c131a54ea` | `3a371f7d12ddcee20645d832ee1e9302779a4184` |
-| 12 | #296 | `refactor/decision-evidence-packages` | `3a371f7d12ddcee20645d832ee1e9302779a4184` | `c5029a38ad1076a850b4816cc31db12013d15d57` |
-| 13 | #297 | `refactor/training-package` | `c5029a38ad1076a850b4816cc31db12013d15d57` | `602d4b855791d114add0ec7188874309c575d4f0` |
-| 14 | #298 | `refactor/news-ai-packages` | `602d4b855791d114add0ec7188874309c575d4f0` | `5b0366443736ec2fead40f1da2979ff3689ff9f1` |
-| 15 | #299 | `refactor/assistant-runtime-dashboard-packages` | `5b0366443736ec2fead40f1da2979ff3689ff9f1` | `29e6a8ed56147842a12da43bad501dab0a907555` |
-| 16 | #301 | `refactor/test-organization` | `29e6a8ed56147842a12da43bad501dab0a907555` | `8c3db99bbef531eb1d8c72698b2b71972716113e` |
-| 17 | #304 | `feat/private-architecture-explorer` | `8c3db99bbef531eb1d8c72698b2b71972716113e` | `acb063702245745da10afd5fa36d5dcebfd69808` |
-| 18 | #321 | `feat/architecture-source-compiler` | `acb063702245745da10afd5fa36d5dcebfd69808` | `a653e4d9954c6a97f927409f5a5242612b2b01ff` |
-| 19 | #324 | `test/architecture-contract-evidence` | `a653e4d9954c6a97f927409f5a5242612b2b01ff` | `73e80b384b17b778b04f42bf50f700cdf96afa5b` |
-| 20 | #325 | `test/architecture-mutation-audit` | `73e80b384b17b778b04f42bf50f700cdf96afa5b` | `09dd80147f0668e2c53305a2ceeff55123f20add` |
-| 21 | #328 | `feat/architecture-evidence-explorer` | `09dd80147f0668e2c53305a2ceeff55123f20add` | `4becead5d1ab71e3ae73b0f052d85f1e5a53ced8` |
-| 22 | #302 | `chore/modularization-campaign-closure` | `4becead5d1ab71e3ae73b0f052d85f1e5a53ced8` | live PR #302 head OID |
+| 1 | #282 | `docs/architecture-baseline` | `1994ca9f83c88a23baaafd1980fc250d967b9a5f` | `e8f9ff273c3c1789bcf280a5c853b1f8fee031a6` |
+| 2 | #283 | `refactor/dashboard-status-cache` | `e8f9ff273c3c1789bcf280a5c853b1f8fee031a6` | `c43cb519a70ab1d1be02afb9fc1c56146b233e13` |
+| 3 | #285 | `refactor/dashboard-health-projection` | `c43cb519a70ab1d1be02afb9fc1c56146b233e13` | `04edd706c89f5143285d32bec08ad8c25da1da64` |
+| 4 | #287 | `refactor/dashboard-resource-contracts` | `04edd706c89f5143285d32bec08ad8c25da1da64` | `c43e9e16a2faa63f3ccfb3e2679c70cc20b10ca6` |
+| 5 | #288 | `refactor/dashboard-api-news-resources` | `c43e9e16a2faa63f3ccfb3e2679c70cc20b10ca6` | `bb69076c9566b532eb57f0c9119c650301329150` |
+| 6 | #289 | `refactor/dashboard-api-market-resources` | `bb69076c9566b532eb57f0c9119c650301329150` | `67684aea92e9b830b2b84b32edb64bd3f5d81bec` |
+| 7 | #290 | `refactor/dashboard-api-optional-resources` | `67684aea92e9b830b2b84b32edb64bd3f5d81bec` | `bb045cbd403b81e99aa556b3d4ae5445d81b67ce` |
+| 8 | #291 | `refactor/dashboard-operator-bridge` | `bb045cbd403b81e99aa556b3d4ae5445d81b67ce` | `abbdccf131eabeac39d6ae1a13700d3709620b83` |
+| 9 | #292 | `refactor/dashboard-sync-runtime` | `abbdccf131eabeac39d6ae1a13700d3709620b83` | `a8033d18a6606d26b54bf832fee81a1a9a8bf80d` |
+| 10 | #294 | `refactor/news-annotator-runtime` | `a8033d18a6606d26b54bf832fee81a1a9a8bf80d` | `46ee543a605cfe3ec5c407807fe1dcf71367b3e0` |
+| 11 | #295 | `refactor/control-center-boundaries` | `46ee543a605cfe3ec5c407807fe1dcf71367b3e0` | `4d634563cae941df8de499c1494d277d20b900d2` |
+| 12 | #296 | `refactor/decision-evidence-packages` | `4d634563cae941df8de499c1494d277d20b900d2` | `0b73796e42691ec48cbbff243ef05e821608b498` |
+| 13 | #297 | `refactor/training-package` | `0b73796e42691ec48cbbff243ef05e821608b498` | `102a8bb231b139dd96ca63c29f4d6c762800e639` |
+| 14 | #298 | `refactor/news-ai-packages` | `102a8bb231b139dd96ca63c29f4d6c762800e639` | `4c0b1a00ee5a365ca3ba7e2f45c2e574a5b30104` |
+| 15 | #299 | `refactor/assistant-runtime-dashboard-packages` | `4c0b1a00ee5a365ca3ba7e2f45c2e574a5b30104` | `f22c2dd92e2fdad1312917c0b22f83473de2e631` |
+| 16 | #301 | `refactor/test-organization` | `f22c2dd92e2fdad1312917c0b22f83473de2e631` | `9f9e05ba52b1f9396f361a8ebe1e257f31cb2736` |
+| 17 | #304 | `feat/private-architecture-explorer` | `9f9e05ba52b1f9396f361a8ebe1e257f31cb2736` | `304831b1353821a71ccbac16d220280ceef0d270` |
+| 18 | #321 | `feat/architecture-source-compiler` | `304831b1353821a71ccbac16d220280ceef0d270` | `e44a80a3dd81dd52024be2d0890fcba4d03c9818` |
+| 19 | #324 | `test/architecture-contract-evidence` | `e44a80a3dd81dd52024be2d0890fcba4d03c9818` | `64a1fdab1c25efe5de93055af441d5965be1147f` |
+| 20 | #325 | `test/architecture-mutation-audit` | `64a1fdab1c25efe5de93055af441d5965be1147f` | `021d767c869a219625a4b4cc1dc40d9526e1a815` |
+| 21 | #328 | `feat/architecture-evidence-explorer` | `021d767c869a219625a4b4cc1dc40d9526e1a815` | `f231101e460934707c70a1d288bbe8e6273c7eb2` |
+| 22 | #302 | `chore/modularization-campaign-closure` | `f231101e460934707c70a1d288bbe8e6273c7eb2` | live PR #302 head OID |
 
 The #326 News Evidence cleanup and #327 staging-ownership behavior were repaired
 at their lowest extracted owner in #292. #329's single-pass News validation was
@@ -67,6 +67,9 @@ that script-to-script dependency. The thin `scripts/run_dashboard_sync.py` entry
 through the replaceable transport seam; the canonical implementation remains in
 `xauusd_forecaster.dashboard.sync.resource_protocols`. The complete Dashboard
 Sync contract family passed 77/77 before descendants were replayed.
+
+#341's Audit baseline hydration fix remains owned by the Web presentation layer
+and its live-broadcast regression is preserved through the complete stack.
 
 Exact-head CI repair retains News projection ownership in #287 until #288
 extracts it; 113 Dashboard API tests pass at that intermediate boundary. #325
@@ -101,11 +104,11 @@ traversing the installed dependency target.
 The final exact non-production Version was uploaded to the separate
 `aurum-signal-room-preview` Worker. It was not deployed to traffic:
 
-- Git SHA: `4becead5d1ab71e3ae73b0f052d85f1e5a53ced8`.
-- Source digest: `3f1740dba1731d1ce38675715944c206e9ae2e3bdb12e0e5f25b7cd6a9166ad1`.
-- Version ID: `da18a1ac-a6fb-4b7e-b33c-fc997ece06e6`.
+- Git SHA: `f231101e460934707c70a1d288bbe8e6273c7eb2`.
+- Source digest: `466893f4d66cd212aee12320c59b45ab8f2c82c6f117c8e1ff9c106c725b999a`.
+- Version ID: `b5cf71f8-190c-4658-8f04-480260e94110`.
 - URL:
-  `https://da18a1ac-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`.
+  `https://b5cf71f8-aurum-signal-room-preview.yiyousiow1234.workers.dev/admin/architecture`.
 - Exact generated-SHA banner, Evidence Inspector, repository-relative source
   spans, module-to-symbol code drill-down, Observed/Allowed/Violations modes,
   and all three mutation survivors were verified on Preview.
@@ -120,9 +123,9 @@ The final exact non-production Version was uploaded to the separate
 - The temporary responsive override was reset and the task-owned browser session
   ended with zero controlled tabs.
 - Screenshots:
-  `docs/audits/screenshots/architecture-evidence-4becead5/preview-1440x900.png`,
+  `docs/audits/screenshots/architecture-evidence-f231101e/preview-1440x900.png`,
   `preview-390x844.png`, and `preview-360x800.png`.
-- Main moved twelve times during required exact-head validation. Immutable intermediate
+- Main moved thirteen times during required exact-head validation. Immutable intermediate
   Versions `c573df3a-7df4-485d-af2e-8609a8061cbe` and
   `d726c405-f59e-49d7-ae92-264c8ebd3602`, and
   `2cb46d64-b484-4f06-a790-d8e27bdd9ac6`, and
@@ -137,7 +140,8 @@ The final exact non-production Version was uploaded to the separate
   `447e1f84-5dde-4c69-abd9-ab358678c9b4`, and
   `91dc1c26-0f83-4235-b316-0f2ef15ef331`, and
   `6e020dd3-32bb-4cdc-8a02-66ab6ed9bba6`, and
-  `2dd07cc1-44b4-49e6-af7d-44c43f3403c2` remain superseded at 0% traffic; only
+  `2dd07cc1-44b4-49e6-af7d-44c43f3403c2`, and
+  `da18a1ac-a6fb-4b7e-b33c-fc997ece06e6` remain superseded at 0% traffic; only
   the final Version above is current evidence.
 
 ### Merge and rollback order
