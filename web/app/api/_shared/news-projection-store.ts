@@ -195,6 +195,24 @@ function canonicalReceiptValue(value: unknown): string {
   );
 }
 
+function jsonValuesEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (left === null || right === null || typeof left !== typeof right) return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => jsonValuesEqual(value, right[index]));
+  }
+  if (typeof left !== "object") return false;
+  const leftRow = left as Record<string, unknown>;
+  const rightRow = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRow);
+  const rightKeys = Object.keys(rightRow);
+  return leftKeys.length === rightKeys.length && leftKeys.every(key =>
+    Object.prototype.hasOwnProperty.call(rightRow, key)
+    && jsonValuesEqual(leftRow[key], rightRow[key]));
+}
+
 export async function newsProjectionPayloadHash(value: unknown) {
   return sha256(canonicalReceiptValue(value));
 }
@@ -539,7 +557,16 @@ export async function stageNewsProjectionBatch(
       const serialized = JSON.stringify(item.payload);
       const prior = byKey.get(String(item.detail_key));
       if (prior) {
-        if (prior.detail_hash !== item.detail_hash || prior.payload !== serialized) {
+        let priorPayload: unknown;
+        try {
+          priorPayload = JSON.parse(prior.payload);
+        } catch {
+          priorPayload = undefined;
+        }
+        if (
+          prior.detail_hash !== item.detail_hash
+          || !jsonValuesEqual(priorPayload, item.payload)
+        ) {
           throw new NewsProjectionProtocolError(
             "news detail contradicts immutable evidence", 409,
             "NEWS_PROJECTION_DETAIL_CONTRADICTION",

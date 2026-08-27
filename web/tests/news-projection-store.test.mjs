@@ -596,7 +596,7 @@ test("fails closed when a later generation contradicts content-addressed detail 
   await activateNewsProjection(db, id("a"));
 
   const contradiction = [{
-    ...detail("1"), detail_hash: id("f"), payload: { headline: "changed evidence" },
+    ...detail("1"), payload: { headline: "changed evidence" },
   }];
   await prepareNewsProjection(
     db, await manifest("b", contradiction, originalIndexes),
@@ -612,4 +612,54 @@ test("fails closed when a later generation contradicts content-addressed detail 
     db.database.prepare("SELECT detail_hash FROM news_details WHERE detail_key=?").get(id("1")).detail_hash,
     detail("1").detail_hash,
   );
+});
+
+test("replacement detail replay treats cross-runtime object order as non-semantic", async () => {
+  const db = database();
+  const numericVector = receiptVectors.payload_vectors[0].value[0];
+  const nestedVector = receiptVectors.payload_vectors[1].value;
+  const originalDetails = [{
+    ...detail("1"),
+    payload: { numeric: [numericVector], nested: nestedVector },
+  }];
+  const reorderedDetails = [{
+    ...detail("1"),
+    payload: {
+      nested: {
+        "emoji😀": "scalar",
+        a: [false, 2, { alpha: "first", "β": "值" }],
+        z: null,
+      },
+      numeric: [{
+        enabled: true,
+        missing: null,
+        unicode: "黄金😀é",
+        large_integer_float: 1e20,
+        decimal_threshold: 1e-6,
+        small_exponent: 1e-7,
+        fraction: 0.2,
+        one: 1.0,
+        negative_zero: -0.0,
+        zero: 0.0,
+      }],
+    },
+  }];
+  const indexes = [index("1")];
+  assert.equal(
+    await newsProjectionPayloadHash(originalDetails[0].payload),
+    await newsProjectionPayloadHash(reorderedDetails[0].payload),
+    "the shared Python/Worker canonical contract proves logical equivalence",
+  );
+
+  await prepareNewsProjection(db, await manifest("a", originalDetails, indexes));
+  await stageNewsProjectionBatch(db, "detail", id("a"), 0, originalDetails);
+  await stageNewsProjectionBatch(db, "index", id("a"), 0, indexes);
+  await activateNewsProjection(db, id("a"));
+  await prepareNewsProjection(db, await manifest("b", reorderedDetails, indexes));
+
+  const changesBefore = db.database.prepare("SELECT total_changes() total").get().total;
+  await stageNewsProjectionBatch(db, "detail", id("b"), 0, reorderedDetails);
+  const changesAfter = db.database.prepare("SELECT total_changes() total").get().total;
+  assert.equal(changesAfter - changesBefore, 1,
+    "unchanged logical detail writes only the append-only generation receipt");
 });
