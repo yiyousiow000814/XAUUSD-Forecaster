@@ -59,6 +59,7 @@ const database = () => new D1TestDatabase([
   "0003_news_index_lookup.sql", "0007_bounded_news_archive.sql",
   "0022_news_projection_generation.sql", "0027_materialize_news_projection_counts.sql",
   "0028_fence_legacy_news_current_identity.sql",
+  "0029_news_projection_receipt_index.sql",
 ]);
 
 test("shares canonical receipt vectors with the Python producer", async () => {
@@ -367,8 +368,12 @@ test("keeps the rollback legacy identity set equal across replacement activation
   const changesAfterIndex = db.database.prepare("SELECT total_changes() total").get().total;
   assert.equal(changesAfterDetails - changesBeforeReplay, 1,
     "unchanged global detail replay writes only its append-only batch receipt");
-  assert.equal(changesAfterIndex - changesAfterDetails, 2,
-    "unchanged legacy index replay writes only its generation index row and batch receipt");
+  assert.equal(changesAfterIndex - changesAfterDetails, 1,
+    "unchanged index replay writes only its append-only receipt");
+  assert.equal(db.database.prepare(
+    "SELECT count(*) total FROM news_projection_index WHERE generation_id=?",
+  ).get(id("b")).total, 0,
+  "replacement membership is receipt-backed rather than copied into an indexed staging table");
   assert.equal(
     db.database.prepare(
       "SELECT count(*) total FROM news_index WHERE json_extract(payload,'$.annotation_status')<>'SUPERSEDED_CONTRACT'",
@@ -380,23 +385,70 @@ test("keeps the rollback legacy identity set equal across replacement activation
 
   const fields = `detail_key,category,cluster_id,published_time,
     collector_first_seen_time,parsed,model_candidate,impact_expires_at,
-    mirror_contract,payload,received_at`;
+    mirror_contract,payload`;
   const legacyCurrent = db.database.prepare(
     `SELECT ${fields} FROM news_index
       WHERE json_extract(payload,'$.annotation_status')<>'SUPERSEDED_CONTRACT'
       ORDER BY detail_key`,
   ).all();
-  const projectionCurrent = db.database.prepare(
-    `SELECT ${fields} FROM news_projection_index
-      WHERE generation_id=? ORDER BY detail_key`,
+  const receiptItems = db.database.prepare(
+    `SELECT json_extract(j.value,'$.detail_key') detail_key,j.value payload
+       FROM news_projection_receipts_v2 r,json_each(r.items_json) j
+      WHERE r.generation_id=? AND r.batch_kind='index' ORDER BY detail_key`,
   ).all(id("b"));
-  assert.deepEqual(legacyCurrent, projectionCurrent);
+  assert.deepEqual(legacyCurrent.map(row => ({
+    detail_key: row.detail_key, payload: JSON.parse(row.payload),
+  })), receiptItems.map(row => ({
+    detail_key: row.detail_key, payload: JSON.parse(row.payload),
+  })));
   const superseded = JSON.parse(db.database.prepare(
     "SELECT payload FROM news_index WHERE detail_key=?",
   ).get(id("1")).payload);
   assert.equal(superseded.annotation_status, "SUPERSEDED_CONTRACT");
   assert.equal(superseded.model_visibility, "MODEL_INELIGIBLE");
   assert.equal(superseded.parsed_at, null);
+});
+
+test("unchanged replacement activation performs zero reverse-index mutation", async () => {
+  const db = database();
+  const details = [detail("1"), detail("2")];
+  const indexes = [index("1"), index("2")];
+  await prepareNewsProjection(db, await manifest("a", details, indexes));
+  await stageNewsProjectionBatch(db, "detail", id("a"), 0, details);
+  await stageNewsProjectionBatch(db, "index", id("a"), 0, indexes);
+  await activateNewsProjection(db, id("a"));
+  const receivedBefore = db.database.prepare(
+    "SELECT detail_key,received_at FROM news_index ORDER BY detail_key",
+  ).all();
+  db.database.exec(`
+    CREATE TABLE reverse_mutation_audit(kind text NOT NULL,detail_key text NOT NULL);
+    CREATE TRIGGER audit_news_insert AFTER INSERT ON news_index BEGIN
+      INSERT INTO reverse_mutation_audit VALUES ('INSERT',NEW.detail_key);
+    END;
+    CREATE TRIGGER audit_news_update AFTER UPDATE ON news_index BEGIN
+      INSERT INTO reverse_mutation_audit VALUES ('UPDATE',NEW.detail_key);
+    END;
+    CREATE TRIGGER audit_news_delete AFTER DELETE ON news_index BEGIN
+      INSERT INTO reverse_mutation_audit VALUES ('DELETE',OLD.detail_key);
+    END;
+  `);
+
+  await prepareNewsProjection(db, await manifest("b", details, indexes));
+  await stageNewsProjectionBatch(db, "detail", id("b"), 0, details);
+  await stageNewsProjectionBatch(db, "index", id("b"), 0, indexes);
+  await activateNewsProjection(db, id("b"));
+
+  assert.deepEqual(
+    db.database.prepare("SELECT * FROM reverse_mutation_audit").all(), [],
+    "a new receipt generation must not rewrite unchanged Reverse-Stable rows",
+  );
+  assert.deepEqual(
+    db.database.prepare(
+      "SELECT detail_key,received_at FROM news_index ORDER BY detail_key",
+    ).all(),
+    receivedBefore,
+    "unchanged rows preserve the authoritative received-at baseline",
+  );
 });
 
 test("fences the active reverse projection from every legacy writer mutation family", async () => {

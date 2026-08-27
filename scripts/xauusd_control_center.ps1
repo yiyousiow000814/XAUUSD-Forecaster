@@ -1061,7 +1061,8 @@ function Assert-CoordinatedMigrationCapabilityContract {
         "web/drizzle/0025_seed_legacy_news_reverse_projection.sql",
         "web/drizzle/0026_reconcile_legacy_news_current_identity.sql",
         "web/drizzle/0027_materialize_news_projection_counts.sql",
-        "web/drizzle/0028_fence_legacy_news_current_identity.sql"
+        "web/drizzle/0028_fence_legacy_news_current_identity.sql",
+        "web/drizzle/0029_news_projection_receipt_index.sql"
     )
     $unknown = @($MigrationFiles | Where-Object { $_ -notin $supported })
     if ($unknown.Count -gt 0) {
@@ -1115,10 +1116,19 @@ function Assert-CoordinatedMigrationCapabilityContract {
             $sql -match '(?im)SUPERSEDED_CONTRACT' -and
             $sql -match '(?im)s\.`projection_state`\s*=\s*''CURRENT''' -and
             $sql -notmatch '(?im)\b(DROP|REPLACE|TRUNCATE|VACUUM)\b'
+        $isNewsReceiptIndex =
+            $file -eq "web/drizzle/0029_news_projection_receipt_index.sql" -and
+            $sql -match '(?im)ALTER\s+TABLE\s+`news_projection_receipts_v2`' -and
+            $sql -match '(?im)`identity_keys_json`\s+text\s+NOT\s+NULL' -and
+            $sql -match '(?im)`items_json`\s+text\s+NOT\s+NULL' -and
+            $sql -match '(?im)CREATE\s+TRIGGER\s+IF\s+NOT\s+EXISTS\s+`legacy_news_v4_current_index_delete_fence`' -and
+            $sql -match '(?im)CREATE\s+TRIGGER\s+IF\s+NOT\s+EXISTS\s+`legacy_news_v4_current_detail_delete_fence`' -and
+            $sql -match '(?im)news-projection-generation-v4' -and
+            $sql -notmatch '(?im)\b(DROP|UPDATE|REPLACE|TRUNCATE|VACUUM)\b'
         if (($sql -match '(?im)\b(DROP|DELETE|UPDATE|REPLACE|TRUNCATE|VACUUM)\b') -and
             -not $isBoundedAuditHandover -and -not $isLegacyNewsHandover -and
             -not $isLegacyNewsReconciliation -and -not $isNewsFreePlanMaterialization -and
-            -not $isLegacyNewsWriteFence) {
+            -not $isLegacyNewsWriteFence -and -not $isNewsReceiptIndex) {
             throw "MIGRATION_REVERSE_INCOMPATIBLE:$file"
         }
     }
@@ -1245,6 +1255,24 @@ function Get-CoordinatedMigrationLiveEvidence {
         throw "MIGRATION_LEDGER_REQUIRED_MISSING:$($missingRequired -join ',')"
     }
     $capabilitySql = @"
+WITH current_projection AS (
+ SELECT json_extract(j.value,'$.detail_key') AS detail_key,
+        json_extract(j.value,'$.category') AS category,
+        json_extract(j.value,'$.cluster_id') AS cluster_id,
+        coalesce(json_extract(j.value,'$.source_published_time'),
+                 json_extract(j.value,'$.collector_first_seen_time')) AS published_time,
+        json_extract(j.value,'$.collector_first_seen_time') AS collector_first_seen_time,
+        CASE WHEN json_type(j.value,'$.parsed_at')='text' THEN 1 ELSE 0 END AS parsed,
+        CASE WHEN json_extract(j.value,'$.model_visibility')='MODEL_VISIBLE'
+             THEN 1 ELSE 0 END AS model_candidate,
+        json_extract(j.value,'$.impact_expires_at') AS impact_expires_at,
+        json_extract(j.value,'$.mirror_contract') AS mirror_contract,
+        j.value AS payload
+   FROM news_projection_receipts_v2 r,json_each(r.items_json) j
+   JOIN news_projection_state active
+     ON active.id=1 AND active.active_generation_id=r.generation_id
+  WHERE r.batch_kind='index'
+)
 SELECT
  (SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN
   ('news_projection_generations','news_projection_index','news_projection_details',
@@ -1256,27 +1284,27 @@ SELECT
    'news_projection_index_review_page_idx',
    'news_projection_index_review_category_page_idx')) AS projection_indexes,
  (SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name IN
-  ('legacy_news_current_index_delete_fence','legacy_news_current_detail_delete_fence',
-   'legacy_news_noncurrent_index_insert_fence','legacy_news_current_index_update_fence'))
+   ('legacy_news_current_index_delete_fence','legacy_news_current_detail_delete_fence',
+    'legacy_news_noncurrent_index_insert_fence','legacy_news_current_index_update_fence',
+    'legacy_news_v4_current_index_delete_fence',
+    'legacy_news_v4_current_detail_delete_fence'))
    AS projection_triggers,
  (SELECT count(*) FROM pragma_table_info('news_projection_counts') WHERE name IN
   ('generation_id','review_state','category','item_count','parsed_count','candidate_expiries')) AS projection_count_columns,
- (SELECT count(*) FROM pragma_table_info('news_projection_receipts_v2') WHERE name IN
-  ('generation_id','batch_kind','batch_offset','item_count','payload_hash',
-   'receipt_digest','identity_digest','updated_at')) AS projection_receipt_columns,
+  (SELECT count(*) FROM pragma_table_info('news_projection_receipts_v2') WHERE name IN
+   ('generation_id','batch_kind','batch_offset','item_count','payload_hash',
+    'receipt_digest','identity_digest','identity_keys_json','items_json','updated_at')) AS projection_receipt_columns,
  (SELECT count(*) FROM pragma_table_info('operator_retry_sync_state') WHERE name IN
   ('id','payload_digest','item_count','synced_at')) AS retry_columns,
  (SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN
   ('dashboard_snapshots','news_index','news_details','news_evidence_records')) AS legacy_tables,
   coalesce((SELECT json_array_length(json_extract(payload,'$.recent_decisions'))
     FROM dashboard_snapshots WHERE id=4 AND json_valid(payload)),0) AS legacy_decisions,
-  (SELECT count(*) FROM news_projection_index pi
-    WHERE pi.generation_id=s.active_generation_id
-      AND EXISTS(SELECT 1 FROM news_index li WHERE li.detail_key=pi.detail_key))
+  (SELECT count(*) FROM current_projection pi
+    WHERE EXISTS(SELECT 1 FROM news_index li WHERE li.detail_key=pi.detail_key))
     AS legacy_current_index_count,
-  (SELECT count(*) FROM news_projection_index pi
-    WHERE pi.generation_id=s.active_generation_id
-      AND EXISTS(SELECT 1 FROM news_details ld WHERE ld.detail_key=pi.detail_key))
+  (SELECT count(*) FROM current_projection pi
+    WHERE EXISTS(SELECT 1 FROM news_details ld WHERE ld.detail_key=pi.detail_key))
     AS legacy_current_detail_count,
   (SELECT count(*) FROM news_index li
     WHERE COALESCE(json_extract(li.payload,'$.annotation_status'),'') <> 'SUPERSEDED_CONTRACT'
@@ -1318,13 +1346,10 @@ SELECT
   (SELECT count(*) FROM news_index li
     WHERE COALESCE(json_extract(li.payload,'$.annotation_status'),'') <> 'SUPERSEDED_CONTRACT'
       AND NOT EXISTS(
-        SELECT 1 FROM news_projection_index pi
-         WHERE pi.generation_id=s.active_generation_id
-           AND pi.detail_key=li.detail_key))
+        SELECT 1 FROM current_projection pi WHERE pi.detail_key=li.detail_key))
     AS legacy_extra_current_index_count,
   (SELECT count(*) FROM news_index li
-    JOIN news_projection_index pi ON pi.generation_id=s.active_generation_id
-      AND pi.detail_key=li.detail_key
+    JOIN current_projection pi ON pi.detail_key=li.detail_key
    WHERE li.category IS NOT pi.category
       OR li.cluster_id IS NOT pi.cluster_id
       OR li.published_time IS NOT pi.published_time
@@ -1333,8 +1358,7 @@ SELECT
       OR li.model_candidate IS NOT pi.model_candidate
       OR li.impact_expires_at IS NOT pi.impact_expires_at
       OR li.mirror_contract IS NOT pi.mirror_contract
-      OR li.payload IS NOT pi.payload
-      OR li.received_at IS NOT pi.received_at)
+      OR li.payload IS NOT pi.payload)
     AS legacy_current_row_mismatch_count,
   coalesce((SELECT item_count FROM news_projection_counts c
     WHERE c.generation_id=s.active_generation_id
@@ -1351,12 +1375,11 @@ SELECT
       1 + length(candidate_expiries) - length(replace(candidate_expiries,char(10),'')) END
     FROM news_projection_counts c WHERE c.generation_id=s.active_generation_id
       AND c.review_state='ALL' AND c.category=''),-1) AS summary_candidate_count,
-  (SELECT coalesce(sum(parsed),0) FROM news_projection_index i
-    WHERE i.generation_id=s.active_generation_id) AS current_parsed_count,
-  (SELECT count(*) FROM news_projection_index i
-    WHERE i.generation_id=s.active_generation_id AND i.model_candidate=1) AS current_candidate_count,
-  (SELECT count(*) FROM news_projection_index i
-    WHERE i.generation_id=s.active_generation_id AND i.model_candidate=1
+  (SELECT coalesce(sum(parsed),0) FROM current_projection) AS current_parsed_count,
+  (SELECT count(*) FROM current_projection i
+    WHERE i.model_candidate=1) AS current_candidate_count,
+  (SELECT count(*) FROM current_projection i
+    WHERE i.model_candidate=1
       AND (i.impact_expires_at IS NULL OR length(i.impact_expires_at)<>32
         OR substr(i.impact_expires_at,27)<>'+00:00')) AS invalid_candidate_expiry_count,
   s.projection_state,s.active_generation_id,s.snapshot_id,s.source_digest,s.receipt_digest,
@@ -1371,9 +1394,9 @@ FROM news_projection_state s JOIN news_projection_generations g
     if ($capabilities.Count -ne 1 -or
         [int]$capabilities[0].projection_tables -ne 7 -or
         [int]$capabilities[0].projection_indexes -ne 6 -or
-        [int]$capabilities[0].projection_triggers -ne 4 -or
+        [int]$capabilities[0].projection_triggers -ne 6 -or
         [int]$capabilities[0].projection_count_columns -ne 6 -or
-        [int]$capabilities[0].projection_receipt_columns -ne 8 -or
+        [int]$capabilities[0].projection_receipt_columns -ne 10 -or
         [int]$capabilities[0].retry_columns -ne 4) {
         throw "MIGRATION_SCHEMA_CAPABILITY_MISSING"
     }

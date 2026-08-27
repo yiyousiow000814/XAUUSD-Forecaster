@@ -179,6 +179,8 @@ export const newsProjectionReceiptsV2 = sqliteTable("news_projection_receipts_v2
   payloadHash: text("payload_hash").notNull(),
   receiptDigest: text("receipt_digest").notNull(),
   identityDigest: text("identity_digest").notNull(),
+  identityKeysJson: text("identity_keys_json").notNull().default("[]"),
+  itemsJson: text("items_json").notNull().default("[]"),
   updatedAt: text("updated_at").notNull(),
 }, table => [primaryKey({ columns: [table.generationId, table.batchKind, table.batchOffset] })]);
 

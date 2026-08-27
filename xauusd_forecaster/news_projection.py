@@ -9,7 +9,7 @@ import struct
 from dataclasses import dataclass
 from typing import Iterable
 
-NEWS_PROJECTION_CONTRACT_VERSION = "news-projection-generation-v3"
+NEWS_PROJECTION_CONTRACT_VERSION = "news-projection-generation-v4"
 NEWS_MIRROR_CONTRACT_VERSION = NEWS_PROJECTION_CONTRACT_VERSION
 NEWS_PROJECTION_MAX_ITEMS = 10_000
 NEWS_INDEX_BATCH_ITEMS = 4

@@ -1,4 +1,5 @@
 import { publicNewsRecord } from "../../_lib/public-news-copy";
+import { ACTIVE_NEWS_SQL } from "../../_lib/news-review-state";
 
 export const MAX_QUERY_CHARACTERS = 80;
 export const MAX_QUERY_TOKENS = 6;
@@ -327,31 +328,41 @@ const retrieveFromD1 = async (
   preview: boolean,
 ) => {
   const state = await binding.prepare(
-    `SELECT active_generation_id FROM news_projection_state
+    `SELECT active_generation_id,contract_version FROM news_projection_state
       WHERE id=1 AND projection_state='CURRENT'
         AND missing_detail_count=0 AND invariant_violation_count=0`,
-  ).first<{ active_generation_id: string }>();
+  ).first<{ active_generation_id: string; contract_version: string }>();
   if (!state) throw new Error("current news generation is unavailable");
   if (request.generationId && request.generationId !== state.active_generation_id) {
     throw new NewsRetrievalGenerationChanged();
   }
   const { whereSql, bindings } = buildNewsRetrievalSql(request);
+  const receiptIndexed = state.contract_version === "news-projection-generation-v4";
+  const table = receiptIndexed ? "news_index" : "news_projection_index";
+  const stateJoin = receiptIndexed
+    ? `JOIN news_projection_state s ON s.id=1
+        AND s.projection_state='CURRENT' AND s.missing_detail_count=0
+        AND s.invariant_violation_count=0`
+    : `JOIN news_projection_state s ON s.active_generation_id=i.generation_id
+        AND s.projection_state='CURRENT' AND s.missing_detail_count=0
+        AND s.invariant_violation_count=0`;
+  const boundedWhere = receiptIndexed
+    ? (whereSql
+      ? whereSql.replace("WHERE ", `WHERE ${ACTIVE_NEWS_SQL} AND `)
+      : `WHERE ${ACTIVE_NEWS_SQL}`)
+    : whereSql;
   const offset = (request.page - 1) * request.pageSize;
   const [rows, count] = await Promise.all([
     binding.prepare(
-      `SELECT i.payload, i.detail_key FROM news_projection_index i
-       JOIN news_projection_state s ON s.active_generation_id=i.generation_id
-        AND s.projection_state='CURRENT' AND s.missing_detail_count=0
-        AND s.invariant_violation_count=0
-       ${whereSql}
+       `SELECT i.payload, i.detail_key FROM ${table} i
+       ${stateJoin}
+        ${boundedWhere}
        ORDER BY published_time DESC, collector_first_seen_time DESC, detail_key DESC
        LIMIT ? OFFSET ?`,
     ).bind(...bindings, request.pageSize, offset).all<D1NewsRow>(),
     binding.prepare(
-      `SELECT count(*) AS count FROM news_projection_index i
-       JOIN news_projection_state s ON s.active_generation_id=i.generation_id
-        AND s.projection_state='CURRENT' AND s.missing_detail_count=0
-        AND s.invariant_violation_count=0 ${whereSql}`,
+      `SELECT count(*) AS count FROM ${table} i
+       ${stateJoin} ${boundedWhere}`,
     )
       .bind(...bindings).first<{ count: number }>(),
   ]);
