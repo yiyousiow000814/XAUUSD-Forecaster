@@ -3752,6 +3752,21 @@ def test_coordinated_migration_receipt_rejects_reuse_staleness_and_tampering(
     assert result == expected
 
 
+def test_migration_capability_reuses_json_projection_from_one_bounded_scan() -> None:
+    control_center = (
+        ROOT / "scripts" / "xauusd_control_center.ps1"
+    ).read_text(encoding="utf-8")
+    capability_sql = control_center.split('$capabilitySql = @"', 1)[1].split(
+        '"@', 1,
+    )[0]
+
+    assert "WITH current_projection AS MATERIALIZED (" in capability_sql
+    assert "json_each(r.items_json)" in capability_sql
+    assert capability_sql.count("FROM current_projection") >= 4
+    assert "EXCEPT SELECT detail_key FROM current_projection" in capability_sql
+    assert "JOIN current_projection" not in capability_sql
+
+
 @pytest.mark.parametrize(
     ("setup", "expected"),
     (
