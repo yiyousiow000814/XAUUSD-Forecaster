@@ -99,14 +99,15 @@
   One operation must remain bounded as total authoritative state grows, and a
   complete source of truth must remain reachable without creating another
   full-history blob.
-- News projection generation v3 keeps its index arrays within 100,000 serialized
+- News projection generation v4 keeps its index arrays within 100,000 serialized
   bytes and four items; its Worker envelope is capped at 120,000 bytes.
   News-evidence staging keeps each complete request within 80,000 serialized
   bytes and eight items. The Worker enforces the matching item limits and these
   route byte bounds; the larger platform ceiling is not a normal target.
 - The retained legacy News tables are a Reverse-Stable projection, not another
-  authority. Each bounded generation batch mirrors the same accepted rows into
-  that projection in the D1 batch transaction. CURRENT activation marks
+  authority. Bounded generation batches append canonical receipts without
+  rewriting unchanged projection rows. CURRENT activation applies the receipt-
+  proven delta and marks
   legacy-only identities `SUPERSEDED_CONTRACT` in the same transaction that
   moves the generation pointer, so every completed activation restores exact
   active identity equality without replaying an unbounded serialized payload.

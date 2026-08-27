@@ -1,10 +1,12 @@
 import {
+  ACTIVE_NEWS_SQL,
   NEWS_REVIEW_STATE_CASE_SQL,
   NEWS_REVIEW_STATE_INVARIANT_SQL,
   type NewsReviewState,
 } from "../../_lib/news-review-state";
 
-export const NEWS_PROJECTION_CONTRACT_VERSION = "news-projection-generation-v3";
+export const NEWS_PROJECTION_CONTRACT_VERSION = "news-projection-generation-v4";
+const NEWS_PROJECTION_RECEIPT_INDEX_CONTRACT = "news-projection-generation-v4";
 export const NEWS_GENERATION_ID = /^[a-f0-9]{64}$/;
 export const NEWS_PROJECTION_MAX_ITEMS = 10_000;
 export const NEWS_INDEX_MAX_BATCH_ITEMS = 4;
@@ -550,41 +552,71 @@ export async function stageNewsProjectionBatch(
          VALUES (?,?,?,?)`,
       ).bind(item.detail_key, item.detail_hash, serialized, now));
     }
-  } else {
-    for (const [index, item] of (items as NewsProjectionIndexItem[]).entries()) {
-      const published = typeof item.source_published_time === "string"
-        ? item.source_published_time : String(item.collector_first_seen_time);
-      const serialized = JSON.stringify(item);
-      statements.push(binding.prepare(
-        `INSERT INTO news_projection_index
-           (generation_id,detail_key,ordinal,category,cluster_id,published_time,
-            collector_first_seen_time,parsed,model_candidate,impact_expires_at,
-            mirror_contract,payload_hash,payload,received_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      ).bind(
-        generationId, item.detail_key, offset + index, item.category, item.cluster_id,
-        published, item.collector_first_seen_time,
-        typeof item.parsed_at === "string" ? 1 : 0,
-        item.model_visibility === "MODEL_VISIBLE" ? 1 : 0,
-        typeof item.impact_expires_at === "string" ? item.impact_expires_at : null,
-        item.mirror_contract, await sha256(serialized), serialized, now,
-      ));
-    }
   }
+  const identityKeys = items.map(item => String(item.detail_key));
   statements.push(binding.prepare(
     `INSERT INTO news_projection_receipts_v2
        (generation_id,batch_kind,batch_offset,item_count,payload_hash,receipt_digest,
-        identity_digest,updated_at)
-     VALUES (?,?,?,?,?,?,?,?)`,
+        identity_digest,identity_keys_json,items_json,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`,
   ).bind(
     generationId, kind, offset, items.length, payloadHash, receiptDigest,
-    identityDigest, now,
+    identityDigest, JSON.stringify(identityKeys),
+    kind === "index" ? JSON.stringify(items) : "[]", now,
   ));
   await binding.batch(statements);
   return { status: "OK", received: items.length, receipt_digest: receiptDigest };
 }
 
-async function projectionCounts(binding: D1Database, generationId: string) {
+const receiptIndexRowsSql = `
+  SELECT r.generation_id,
+         json_extract(j.value,'$.detail_key') detail_key,
+         r.batch_offset+CAST(j.key AS INTEGER) ordinal,
+         json_extract(j.value,'$.category') category,
+         json_extract(j.value,'$.cluster_id') cluster_id,
+         COALESCE(json_extract(j.value,'$.source_published_time'),
+                  json_extract(j.value,'$.collector_first_seen_time')) published_time,
+         json_extract(j.value,'$.collector_first_seen_time') collector_first_seen_time,
+         CASE WHEN json_type(j.value,'$.parsed_at')='text' THEN 1 ELSE 0 END parsed,
+         CASE WHEN json_extract(j.value,'$.model_visibility')='MODEL_VISIBLE'
+              THEN 1 ELSE 0 END model_candidate,
+         json_extract(j.value,'$.impact_expires_at') impact_expires_at,
+         json_extract(j.value,'$.mirror_contract') mirror_contract,
+         j.value payload
+    FROM news_projection_receipts_v2 r,json_each(r.items_json) j
+   WHERE r.generation_id=? AND r.batch_kind='index'`;
+
+async function projectionCounts(
+  binding: D1Database, generationId: string, contractVersion?: string,
+) {
+  const contract = contractVersion ?? (await generation(binding, generationId))?.contract_version;
+  if (contract === NEWS_PROJECTION_RECEIPT_INDEX_CONTRACT) {
+    return binding.prepare(
+      `WITH projection AS (${receiptIndexRowsSql})
+       SELECT
+         (SELECT count(*) FROM projection) index_count,
+         (SELECT count(*) FROM projection i WHERE EXISTS (
+            SELECT 1 FROM news_details d WHERE d.detail_key=i.detail_key
+          )) detail_count,
+         (SELECT count(*) FROM projection i WHERE NOT EXISTS (
+            SELECT 1 FROM news_details d WHERE d.detail_key=i.detail_key
+          )) missing_detail_count,
+         (SELECT count(*) FROM projection WHERE (
+            NOT ${NEWS_REVIEW_STATE_INVARIANT_SQL}
+            OR category NOT IN (${NEWS_PROJECTION_CATEGORIES_SQL})
+            OR (model_candidate=1 AND (
+              impact_expires_at IS NULL OR length(impact_expires_at)<>32
+              OR substr(impact_expires_at,27)<>'+00:00'
+            ))
+          )) review_violation_count,
+         (SELECT count(*) FROM (
+            SELECT cluster_id FROM projection GROUP BY cluster_id HAVING count(*)>1
+          )) duplicate_cluster_count`,
+    ).bind(generationId).first<{
+      index_count: number; detail_count: number; missing_detail_count: number;
+      review_violation_count: number; duplicate_cluster_count: number;
+    }>();
+  }
   return binding.prepare(
     `SELECT
        (SELECT count(*) FROM news_projection_index WHERE generation_id=?) index_count,
@@ -618,6 +650,34 @@ async function projectionCounts(binding: D1Database, generationId: string) {
   }>();
 }
 
+async function reverseProjectionViolationCount(
+  binding: D1Database, generationId: string, contractVersion: string,
+) {
+  if (contractVersion !== NEWS_PROJECTION_RECEIPT_INDEX_CONTRACT) return 0;
+  const row = await binding.prepare(
+    `WITH projection AS (${receiptIndexRowsSql})
+     SELECT
+       (SELECT count(*) FROM projection p
+         WHERE NOT EXISTS (
+           SELECT 1 FROM news_index n WHERE n.detail_key=p.detail_key
+             AND ${ACTIVE_NEWS_SQL.replaceAll("payload", "n.payload")}
+             AND n.category IS p.category AND n.cluster_id IS p.cluster_id
+             AND n.published_time IS p.published_time
+             AND n.collector_first_seen_time IS p.collector_first_seen_time
+             AND n.parsed IS p.parsed AND n.model_candidate IS p.model_candidate
+             AND n.impact_expires_at IS p.impact_expires_at
+             AND n.mirror_contract IS p.mirror_contract AND n.payload IS p.payload
+         ))
+       +
+       (SELECT count(*) FROM news_index n
+         WHERE ${ACTIVE_NEWS_SQL.replaceAll("payload", "n.payload")}
+           AND NOT EXISTS (
+             SELECT 1 FROM projection p WHERE p.detail_key=n.detail_key
+           )) violation_count`,
+  ).bind(generationId).first<{ violation_count: number }>();
+  return Number(row?.violation_count ?? -1);
+}
+
 export async function activateNewsProjection(
   binding: D1Database, generationId: string,
 ) {
@@ -641,7 +701,7 @@ export async function activateNewsProjection(
     );
   }
   const progress = await generationProgress(binding, generationId);
-  const counts = await projectionCounts(binding, generationId);
+  const counts = await projectionCounts(binding, generationId, row.contract_version);
   const invariantViolations = Number(counts?.review_violation_count ?? -1)
     + Number(counts?.duplicate_cluster_count ?? -1);
   const complete = Number(progress?.next_detail_offset ?? -1) === Number(row.expected_detail_count)
@@ -669,34 +729,38 @@ export async function activateNewsProjection(
     );
   }
   const now = new Date().toISOString();
+  const projectionSource = row.contract_version === NEWS_PROJECTION_RECEIPT_INDEX_CONTRACT
+    ? receiptIndexRowsSql
+    : `SELECT generation_id,detail_key,ordinal,category,cluster_id,published_time,
+              collector_first_seen_time,parsed,model_candidate,impact_expires_at,
+              mirror_contract,payload
+         FROM news_projection_index WHERE generation_id=?`;
   await binding.batch([
     binding.prepare(
-      `INSERT INTO news_projection_counts
+      `WITH projection AS (${projectionSource})
+       INSERT INTO news_projection_counts
          (generation_id,review_state,category,item_count,parsed_count,candidate_expiries)
        SELECT generation_id,review_state,category,count(*),sum(parsed),''
          FROM (
            SELECT generation_id,category,parsed,
-                  ${NEWS_REVIEW_STATE_CASE_SQL} review_state
-             FROM news_projection_index WHERE generation_id=?
-         ) GROUP BY generation_id,review_state,category
+                   ${NEWS_REVIEW_STATE_CASE_SQL} review_state
+             FROM projection
+          ) GROUP BY generation_id,review_state,category
        UNION ALL
        SELECT generation_id,review_state,'',count(*),sum(parsed),''
          FROM (
            SELECT generation_id,parsed,
-                  ${NEWS_REVIEW_STATE_CASE_SQL} review_state
-             FROM news_projection_index WHERE generation_id=?
-         ) GROUP BY generation_id,review_state
+                   ${NEWS_REVIEW_STATE_CASE_SQL} review_state
+             FROM projection
+          ) GROUP BY generation_id,review_state
        UNION ALL
        SELECT generation_id,'ALL','',count(*),sum(parsed),
               COALESCE(group_concat(
                 CASE WHEN model_candidate=1 THEN impact_expires_at END,
                 char(10) ORDER BY impact_expires_at
               ),'')
-         FROM news_projection_index WHERE generation_id=? GROUP BY generation_id
-       ON CONFLICT(generation_id,review_state,category) DO UPDATE SET
-         item_count=excluded.item_count,parsed_count=excluded.parsed_count,
-         candidate_expiries=excluded.candidate_expiries`,
-    ).bind(generationId, generationId, generationId),
+         FROM projection GROUP BY generation_id`,
+    ).bind(generationId),
     binding.prepare(
       `UPDATE news_projection_generations SET state='SUPERSEDED',updated_at=?
         WHERE state='CURRENT' AND generation_id<>?`,
@@ -732,33 +796,34 @@ export async function activateNewsProjection(
       Number(row.expected_detail_count), 0, 0, now, now,
     ),
     binding.prepare(
-      `INSERT INTO news_index
+      `WITH projection AS (${projectionSource})
+       INSERT INTO news_index
          (detail_key,category,cluster_id,published_time,collector_first_seen_time,
-          parsed,model_candidate,impact_expires_at,mirror_contract,payload,received_at)
+           parsed,model_candidate,impact_expires_at,mirror_contract,payload,received_at)
        SELECT detail_key,category,cluster_id,published_time,collector_first_seen_time,
-              parsed,model_candidate,impact_expires_at,mirror_contract,payload,received_at
-         FROM news_projection_index WHERE generation_id=?
+               parsed,model_candidate,impact_expires_at,mirror_contract,payload,?
+          FROM projection WHERE true
        ON CONFLICT(detail_key) DO UPDATE SET
          category=excluded.category,cluster_id=excluded.cluster_id,
          published_time=excluded.published_time,
          collector_first_seen_time=excluded.collector_first_seen_time,
          parsed=excluded.parsed,model_candidate=excluded.model_candidate,
-         impact_expires_at=excluded.impact_expires_at,
-         mirror_contract=excluded.mirror_contract,payload=excluded.payload,
-         received_at=excluded.received_at
+          impact_expires_at=excluded.impact_expires_at,
+          mirror_contract=excluded.mirror_contract,payload=excluded.payload,
+          received_at=excluded.received_at
        WHERE news_index.category IS NOT excluded.category
           OR news_index.cluster_id IS NOT excluded.cluster_id
           OR news_index.published_time IS NOT excluded.published_time
           OR news_index.collector_first_seen_time IS NOT excluded.collector_first_seen_time
           OR news_index.parsed IS NOT excluded.parsed
           OR news_index.model_candidate IS NOT excluded.model_candidate
-          OR news_index.impact_expires_at IS NOT excluded.impact_expires_at
-          OR news_index.mirror_contract IS NOT excluded.mirror_contract
-          OR news_index.payload IS NOT excluded.payload
-          OR news_index.received_at IS NOT excluded.received_at`,
-    ).bind(generationId),
+           OR news_index.impact_expires_at IS NOT excluded.impact_expires_at
+           OR news_index.mirror_contract IS NOT excluded.mirror_contract
+           OR news_index.payload IS NOT excluded.payload`,
+    ).bind(generationId, now),
     binding.prepare(
-      `UPDATE news_index
+      `WITH projection AS (${projectionSource})
+       UPDATE news_index
           SET parsed=0,model_candidate=0,
               payload=json_set(
                 json_set(
@@ -769,11 +834,10 @@ export async function activateNewsProjection(
               )
         WHERE COALESCE(json_extract(payload,'$.annotation_status'),'')<>
                 'SUPERSEDED_CONTRACT'
-          AND NOT EXISTS (
-            SELECT 1 FROM news_projection_index current
-             WHERE current.generation_id=?
-               AND current.detail_key=news_index.detail_key
-          )`,
+           AND NOT EXISTS (
+             SELECT 1 FROM projection current
+              WHERE current.detail_key=news_index.detail_key
+           )`,
     ).bind(generationId),
     binding.prepare(
       `UPDATE news_projection_state SET projection_state='CURRENT'
@@ -797,10 +861,16 @@ export async function verifyNewsProjection(
       "news generation is not current", 409, "NEWS_PROJECTION_NOT_CURRENT",
     );
   }
-  const counts = await projectionCounts(binding, generationId);
+  const generationRow = await generation(binding, generationId);
+  const counts = await projectionCounts(
+    binding, generationId, generationRow?.contract_version ?? state.contract_version,
+  );
   const missing = Number(counts?.missing_detail_count ?? -1);
   const violations = Number(counts?.review_violation_count ?? -1)
-    + Number(counts?.duplicate_cluster_count ?? -1);
+    + Number(counts?.duplicate_cluster_count ?? -1)
+    + await reverseProjectionViolationCount(
+      binding, generationId, generationRow?.contract_version ?? state.contract_version,
+    );
   const current = Number(counts?.index_count ?? -1) === Number(state.index_count)
     && Number(counts?.detail_count ?? -1) === Number(state.detail_count)
     && missing === 0 && violations === 0;
@@ -930,8 +1000,12 @@ export async function readNewsProjectionPage(
       },
     );
   }
-  const conditions = ["generation_id=?", `(${NEWS_REVIEW_STATE_CASE_SQL})=?`];
-  const binds: Array<string | number> = [state.active_generation_id, options.reviewState];
+  const receiptIndexed = state.contract_version === NEWS_PROJECTION_RECEIPT_INDEX_CONTRACT;
+  const conditions = receiptIndexed
+    ? [ACTIVE_NEWS_SQL, `(${NEWS_REVIEW_STATE_CASE_SQL})=?`]
+    : ["generation_id=?", `(${NEWS_REVIEW_STATE_CASE_SQL})=?`];
+  const binds: Array<string | number> = receiptIndexed
+    ? [options.reviewState] : [state.active_generation_id, options.reviewState];
   if (options.category) {
     conditions.push("category=?"); binds.push(options.category);
   }
@@ -941,7 +1015,7 @@ export async function readNewsProjectionPage(
   const pageData = await binding.prepare(
     `WITH page_rows(payload,published_time,collector_first_seen_time,detail_key) AS (
        SELECT payload,published_time,collector_first_seen_time,detail_key
-         FROM news_projection_index WHERE ${where}
+         FROM ${receiptIndexed ? "news_index" : "news_projection_index"} WHERE ${where}
         ORDER BY published_time DESC,collector_first_seen_time DESC,detail_key DESC
         LIMIT ? OFFSET ?
      )

@@ -92,7 +92,7 @@ _NEWS_PROJECTION_CACHE_LOCK = threading.Lock()
 _NEWS_PROJECTION_CACHE: dict[str, object] = {}
 NEWS_PROJECTION_SOURCE_REFRESH_SECONDS = 300.0
 NEWS_PROJECTION_SOURCE_RETRY_SECONDS = 30.0
-NEWS_PROJECTION_GENERATION_FILE = "dashboard-news-projection-generation-v3.json.gz"
+NEWS_PROJECTION_GENERATION_FILE = "dashboard-news-projection-generation-v4.json.gz"
 _NEWS_EVIDENCE_VOLATILE_FIELDS = frozenset({"economic_age_minutes"})
 _NEWS_EVIDENCE_MANIFEST_VERSION = "local-news-evidence-generation-v2"
 

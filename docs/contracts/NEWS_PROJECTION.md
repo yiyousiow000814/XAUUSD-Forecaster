@@ -26,7 +26,10 @@
 
 - The lifecycle is `prepare -> details -> index -> reconcile -> validate ->
   CURRENT`. Details MUST be complete before any index batch is accepted.
-- Index membership belongs to one generation. Detail bodies use their immutable,
+- Index membership belongs to one generation and is retained in its append-only
+  batch receipts rather than copied into a generation-keyed indexed table.
+  Receipt payloads remain bounded and the final identity and payload digest
+  chains prove the complete ordered membership. Detail bodies use their immutable,
   content-addressed `detail_key` identity in the global derived detail store.
   The key binds both source revision identity and the exact detail payload hash,
   so a later annotation or impact update under the same source revision stages a
@@ -52,7 +55,9 @@
   every future generation repeats this step, so a one-time migration backfill
   is not activation authority.
 - The legacy Reverse-Stable index is also replaced only inside that activation
-  transaction. STAGING index batches cannot change its active identity set.
+  transaction. Activation applies only genuinely new, changed, or removed rows;
+  an unchanged row preserves its prior `received_at` and causes no index
+  mutation. STAGING index batches cannot change its active identity set.
   Superseded legacy rows and global derived details with no retained generation
   reference are deleted when their superseded generation is cleaned; the local
   SQLite authority, not D1, retains historical news evidence.
@@ -64,22 +69,23 @@
 
 - A generation contains at most 10,000 index rows and 10,000 detail rows.
   Withdrawal identities are counted within the same 10,000-source-row bound.
-- One write batch contains at most 20 rows. The local producer additionally
-  enforces 400,000 bytes for detail and index batches, below each 450,000-byte
-  Worker request bound.
+- One detail batch contains at most eight items and 400,000 serialized bytes.
+  One index batch contains at most four items and 100,000 serialized bytes; its
+  Worker envelope is capped at 120,000 bytes.
   One sync cycle advances at most four generation batches.
 - D1 retains at most one `CURRENT`, one replacement `STAGING`, and one
-  short-lived `SUPERSEDED` generation. A new prepare removes older superseded
-  data. Staging expires after 24 hours and may be abandoned only by exact
-  generation identity; `CURRENT` cannot be abandoned.
+  short-lived `SUPERSEDED` receipt generation. A new prepare removes older
+  superseded receipts and obsolete v3 staging rows. Staging expires after 24
+  hours and may be abandoned only by exact generation identity; `CURRENT`
+  cannot be abandoned.
 - Global content-addressed details are bounded by those retained generations
   and the active Reverse-Stable set. They are not an append-forever archive.
 - Health reads use generation metadata, counts, progress, and digests. Routine
   health MUST NOT scan or deserialize all news bodies. An explicit verification
   step may perform bounded indexed count and relationship checks before or
   after activation.
-- Public index pagination reads materialized immutable totals and indexed page
-  rows. It MUST NOT rescan the complete CURRENT generation for filtered totals,
+- Public index pagination reads materialized immutable totals and indexed active
+  Reverse-Stable rows. It MUST NOT rescan complete CURRENT receipts for filtered totals,
   category buckets, or review buckets on every visitor request. The only
   time-dependent aggregate is the unexpired model-candidate count. Activation
   stores its canonical fixed-width expiry timestamps in sorted order and the
@@ -91,8 +97,8 @@
   succeeds; changing an accepted batch is a receipt contradiction and fails
   closed. The append-only batch receipt is the staging progress record; a
   second mutable generation-progress row is not rewritten for every batch.
-  Replaying an unchanged detail performs no detail mutation; only its new
-  generation's append-only batch receipt is written. A genuinely new detail is
+  Replaying an unchanged detail or index performs no projection-row mutation;
+  only its new generation's append-only batch receipt is written. A genuinely new detail is
   appended once and can become readable only when a receipt-complete index
   generation activates.
   Activation copies the final receipt-backed offsets into immutable generation

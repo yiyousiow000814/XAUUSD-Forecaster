@@ -1,5 +1,5 @@
 {
-  "contract_version": "news-projection-generation-v3",
+  "contract_version": "news-projection-generation-v4",
   "payload_vectors": [
     {
       "name": "numeric_unicode_and_null",

@@ -658,7 +658,7 @@ test("production-shaped writes honor authenticated release dry-run without mutat
     ["/api/news-index", "news-index-write", {
       action: "prepare", generation_id: "1".repeat(64), manifest: {
         generation_id: "1".repeat(64), snapshot_id: "2".repeat(64),
-        contract_version: "news-projection-generation-v3",
+        contract_version: "news-projection-generation-v4",
         window_start: "2026-06-21T00:00:00Z", watermark: "2026-08-20T00:00:00Z",
         expected_index_count: 1, expected_detail_count: 1, withdrawal_count: 0,
         source_digest: "3".repeat(64), expected_receipt_digest: "4".repeat(64),
@@ -753,7 +753,7 @@ test("news release dry-runs reject invalid payloads without mutation", async () 
         collector_first_seen_time: "2026-08-20T00:00:00Z",
         annotation_status: "READY", model_visibility: "MODEL_VISIBLE",
         parsed_at: "2026-08-20T00:00:00Z",
-        mirror_contract: "news-projection-generation-v3",
+        mirror_contract: "news-projection-generation-v4",
       })),
     }), 400],
     ["/api/news-content", JSON.stringify({
