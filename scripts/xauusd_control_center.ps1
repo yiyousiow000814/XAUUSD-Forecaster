@@ -1268,7 +1268,7 @@ function Get-CoordinatedMigrationLiveEvidence {
         throw "MIGRATION_LEDGER_REQUIRED_MISSING:$($missingRequired -join ',')"
     }
     $capabilitySql = @"
-WITH current_projection AS (
+WITH current_projection AS MATERIALIZED (
  SELECT json_extract(j.value,'$.detail_key') AS detail_key,
         json_extract(j.value,'$.category') AS category,
         json_extract(j.value,'$.cluster_id') AS cluster_id,
@@ -1359,21 +1359,20 @@ SELECT
      GROUP BY cluster_id HAVING count(*) > 1))
     AS legacy_duplicate_cluster_count,
   (SELECT count(*) FROM news_index li
-    WHERE COALESCE(json_extract(li.payload,'$.annotation_status'),'') <> 'SUPERSEDED_CONTRACT'
-      AND NOT EXISTS(
-        SELECT 1 FROM current_projection pi WHERE pi.detail_key=li.detail_key))
+    WHERE li.detail_key IN (
+      SELECT detail_key FROM news_index
+       WHERE COALESCE(json_extract(payload,'$.annotation_status'),'') <> 'SUPERSEDED_CONTRACT'
+      EXCEPT SELECT detail_key FROM current_projection))
     AS legacy_extra_current_index_count,
-  (SELECT count(*) FROM news_index li
-    JOIN current_projection pi ON pi.detail_key=li.detail_key
-   WHERE li.category IS NOT pi.category
-      OR li.cluster_id IS NOT pi.cluster_id
-      OR li.published_time IS NOT pi.published_time
-      OR li.collector_first_seen_time IS NOT pi.collector_first_seen_time
-      OR li.parsed IS NOT pi.parsed
-      OR li.model_candidate IS NOT pi.model_candidate
-      OR li.impact_expires_at IS NOT pi.impact_expires_at
-      OR li.mirror_contract IS NOT pi.mirror_contract
-      OR li.payload IS NOT pi.payload)
+  (SELECT count(*) FROM (
+    SELECT detail_key,category,cluster_id,published_time,collector_first_seen_time,
+           parsed,model_candidate,impact_expires_at,mirror_contract,payload
+      FROM news_index
+     WHERE COALESCE(json_extract(payload,'$.annotation_status'),'') <> 'SUPERSEDED_CONTRACT'
+    EXCEPT
+    SELECT detail_key,category,cluster_id,published_time,collector_first_seen_time,
+           parsed,model_candidate,impact_expires_at,mirror_contract,payload
+      FROM current_projection))
     AS legacy_current_row_mismatch_count,
   coalesce((SELECT item_count FROM news_projection_counts c
     WHERE c.generation_id=s.active_generation_id
