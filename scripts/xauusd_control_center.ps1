@@ -96,6 +96,24 @@ $releaseLockOwnerGrace = [TimeSpan]::FromSeconds(30)
 $coordinatedMigrationReceiptMaxAge = [TimeSpan]::FromHours(2)
 $bootstrapAcceptedCandidateWorker = "dd823aa4-20f0-47e1-9255-1b785a4c17b0"
 $bootstrapAcceptedCandidateRevision = "14c055a35040fa963700c988f770c9bb52fa669e"
+$convertFromJsonSupportsDateKind =
+    (Get-Command ConvertFrom-Json).Parameters.ContainsKey("DateKind")
+
+function ConvertFrom-ReleaseControlJson {
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
+        [AllowEmptyString()][string]$Json
+    )
+    process {
+        # PowerShell 7.5+ otherwise turns ISO JSON strings into DateTime values,
+        # while Windows PowerShell preserves the source strings. Immutable
+        # release evidence must have identical values under both runtimes.
+        if ($convertFromJsonSupportsDateKind) {
+            return $Json | ConvertFrom-Json -DateKind String -ErrorAction Stop
+        }
+        return $Json | ConvertFrom-Json -ErrorAction Stop
+    }
+}
 
 function Get-UserEnvironmentValue {
     param([Parameter(Mandatory = $true)][string]$Name)
@@ -113,7 +131,7 @@ function Get-ReleaseSecret {
     if (Test-Path -LiteralPath $releaseSecretsPath) {
         try {
             $secrets = Get-Content -LiteralPath $releaseSecretsPath -Raw -Encoding UTF8 |
-                ConvertFrom-Json
+                ConvertFrom-ReleaseControlJson
         } catch {
             return [pscustomobject]@{
                 available = $false; value = ""; source = "UNAVAILABLE"
@@ -158,7 +176,8 @@ function Get-CollectorSecret {
     if ($userValue) { return $userValue.Trim() }
     if (-not (Test-Path -LiteralPath $collectorSecretsPath)) { return "" }
     try {
-        $secrets = Get-Content -LiteralPath $collectorSecretsPath -Raw | ConvertFrom-Json
+        $secrets = Get-Content -LiteralPath $collectorSecretsPath -Raw |
+            ConvertFrom-ReleaseControlJson
         $property = $secrets.PSObject.Properties[$Name]
         if ($property -and $property.Value) { return ([string]$property.Value).Trim() }
     } catch {
@@ -274,7 +293,8 @@ function Get-CodeRevision {
 function Get-RuntimeUpdateState {
     if (-not (Test-Path -LiteralPath $runtimeUpdateStatePath)) { return $null }
     try {
-        Get-Content -LiteralPath $runtimeUpdateStatePath -Raw | ConvertFrom-Json
+        Get-Content -LiteralPath $runtimeUpdateStatePath -Raw |
+            ConvertFrom-ReleaseControlJson
     } catch { $null }
 }
 
@@ -334,7 +354,8 @@ function Set-ReleaseLifecycleProjection {
 function Get-ReleaseControlState {
     if (-not (Test-Path -LiteralPath $releaseControlStatePath)) { return $null }
     try {
-        $state = Get-Content -LiteralPath $releaseControlStatePath -Raw | ConvertFrom-Json
+        $state = Get-Content -LiteralPath $releaseControlStatePath -Raw |
+            ConvertFrom-ReleaseControlJson
         if (-not $state.candidate_discovery) {
             $state | Add-Member -NotePropertyName candidate_discovery -NotePropertyValue (
                 [pscustomobject]@{
@@ -483,7 +504,7 @@ function Enter-ReleaseTransactionLock {
         $owner = $null
         try {
             $owner = Get-Content -LiteralPath (Join-Path $releaseLockPath "owner.json") -Raw |
-                ConvertFrom-Json
+                ConvertFrom-ReleaseControlJson
         } catch {}
         $ownerAlive = $false
         if ($owner -and [int]$owner.owner_pid -gt 0) {
@@ -553,7 +574,7 @@ function Invoke-WranglerJson {
         # rejects otherwise-valid bounded arguments at cmd.exe's lower limit.
         $output = @(& node.exe $wranglerCli @Arguments --json 2>$null)
         if ($LASTEXITCODE -ne 0) { throw "Wrangler command failed." }
-        ($output -join "`n") | ConvertFrom-Json
+        ($output -join "`n") | ConvertFrom-ReleaseControlJson
     } finally { Pop-Location }
 }
 
@@ -565,7 +586,7 @@ function Get-CloudflareVersions {
     $versions = Invoke-WranglerJson -Arguments @(
         "versions", "list", "--name", $workerName
     )
-    # ConvertFrom-Json may return its top-level JSON array as one pipeline
+    # JSON parsing may return its top-level array as one pipeline
     # object. Emit each version explicitly so sorting/filtering never treats
     # the complete Wrangler response as one synthetic version.
     foreach ($version in @($versions)) { Write-Output $version }
@@ -1179,10 +1200,10 @@ function Get-CoordinatedMigrationEndpointEvidence {
         -Uri "$workerUrl/api/status" -TimeoutSec 45
     $stableNewsHealth = Invoke-WebRequest -UseBasicParsing -Method Get `
         -Uri "$workerUrl/api/news-index?health_check=1" -TimeoutSec 45
-    $candidatePayload = $candidateStatus.Content | ConvertFrom-Json
-    $healthPayload = $candidateHealth.Content | ConvertFrom-Json
-    $stablePayload = $stableStatus.Content | ConvertFrom-Json
-    $stableNewsPayload = $stableNewsHealth.Content | ConvertFrom-Json
+    $candidatePayload = $candidateStatus.Content | ConvertFrom-ReleaseControlJson
+    $healthPayload = $candidateHealth.Content | ConvertFrom-ReleaseControlJson
+    $stablePayload = $stableStatus.Content | ConvertFrom-ReleaseControlJson
+    $stableNewsPayload = $stableNewsHealth.Content | ConvertFrom-ReleaseControlJson
     $observedVersion = [string]$candidateStatus.Headers["X-Aurum-Worker-Version"]
     $observedGit = [string]$candidateStatus.Headers["X-Aurum-Git-SHA"]
     if ([int]$candidateStatus.StatusCode -ne 200 -or
@@ -1559,14 +1580,7 @@ function Assert-CoordinatedMigrationReceipt {
         throw "MIGRATION_RECEIPT_MISSING"
     }
     $receiptJson = Get-Content -LiteralPath $coordinatedMigrationReceiptPath -Raw
-    # PowerShell 7.5+ otherwise converts ISO strings to DateTime and changes
-    # the exact JSON hash input after this required disk round trip. Earlier
-    # runtimes already preserve JSON date strings and do not expose DateKind.
-    $receipt = if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey("DateKind")) {
-        $receiptJson | ConvertFrom-Json -DateKind String
-    } else {
-        $receiptJson | ConvertFrom-Json
-    }
+    $receipt = $receiptJson | ConvertFrom-ReleaseControlJson
     $core = [ordered]@{
         schema_version = [string]$receipt.schema_version
         checked_at = [string]$receipt.checked_at
@@ -1733,7 +1747,7 @@ function Get-RequiredGitHubChecksResult {
                 diagnostic = $diagnostic
             }
         }
-        $runs = @(($json | ConvertFrom-Json -ErrorAction Stop).check_runs)
+        $runs = @(($json | ConvertFrom-ReleaseControlJson).check_runs)
         foreach ($name in $requiredGitHubChecks) {
             $matching = @($runs | Where-Object {
                 [string]$_.name -eq $name -and
@@ -2329,7 +2343,7 @@ function Get-WorkerValidationManifest {
         }
         $raw = Get-Content -LiteralPath $path -Raw -Encoding UTF8
     }
-    $manifest = $raw | ConvertFrom-Json
+    $manifest = $raw | ConvertFrom-ReleaseControlJson
     if ([int]$manifest.schema_version -ne 3 -or @($manifest.routes).Count -eq 0 -or
         -not $manifest.fixture_builder) {
         throw "WORKER_ROUTE_VALIDATION_MANIFEST_INVALID"
@@ -2730,7 +2744,7 @@ function Invoke-CandidateRouteSample {
     try {
         $response = Invoke-WebRequest @parameters
         $payload = $null
-        try { $payload = $response.Content | ConvertFrom-Json } catch {}
+        try { $payload = $response.Content | ConvertFrom-ReleaseControlJson } catch {}
         $observedVersion = [string]$response.Headers["X-Aurum-Worker-Version"]
         $observedGit = [string]$response.Headers["X-Aurum-Git-SHA"]
         $identityPassed = [bool](
@@ -2772,7 +2786,7 @@ function Invoke-CandidateRouteSample {
             [int]$errorResponse.StatusCode
         } else { 0 }
         $payload = $null
-        try { $payload = $_.ErrorDetails.Message | ConvertFrom-Json } catch {}
+        try { $payload = $_.ErrorDetails.Message | ConvertFrom-ReleaseControlJson } catch {}
         return [pscustomobject]@{
             request_id=$requestId; method=[string]$Route.method
             path="$([string]$Route.path)$([string]$Route.request_query)"
@@ -2975,7 +2989,7 @@ function Invoke-ExactVersionJson {
         throw "Exact-version read $Path returned $([int]$response.StatusCode)."
     }
     return [pscustomobject]@{
-        payload = $response.Content | ConvertFrom-Json
+        payload = $response.Content | ConvertFrom-ReleaseControlJson
         requested_version_id = $VersionId
         observed_version_id = [string]$response.Headers["X-Aurum-Worker-Version"]
         observed_git_sha = [string]$response.Headers["X-Aurum-Git-SHA"]
@@ -3059,7 +3073,7 @@ function Get-ReleaseFailureFingerprint {
         }
     }
     try {
-        $payload = $Body | ConvertFrom-Json -ErrorAction Stop
+        $payload = $Body | ConvertFrom-ReleaseControlJson
         if (-not $payload -or -not $payload.PSObject.Properties) { throw "NOT_OBJECT" }
         $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
         if ($bodyBytes.Length -gt 65536) { throw "BODY_TOO_LARGE" }
@@ -4604,7 +4618,8 @@ function Get-RuntimeControlBundleIdentityAtRoot {
     $path = Join-Path $ControlRoot $runtimeControlManifestName
     if (-not (Test-Path -LiteralPath $path)) { return $null }
     try {
-        $identity = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $identity = Get-Content -LiteralPath $path -Raw |
+            ConvertFrom-ReleaseControlJson
         if (-not [bool]$identity.exact_revision -or
             [string]$identity.source_revision -notmatch '^[0-9a-f]{40}$') {
             return $null
@@ -5187,7 +5202,8 @@ function Update-RuntimeCheckout {
 function Get-RuntimeCodeState {
     if (-not (Test-Path -LiteralPath $runtimeCodeStatePath)) { return $null }
     try {
-        return Get-Content -LiteralPath $runtimeCodeStatePath -Raw | ConvertFrom-Json
+        return Get-Content -LiteralPath $runtimeCodeStatePath -Raw |
+            ConvertFrom-ReleaseControlJson
     } catch {
         return $null
     }
@@ -5220,7 +5236,8 @@ function Get-RuntimeHeartbeat {
     )
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
     try {
-        $heartbeat = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        $heartbeat = Get-Content -LiteralPath $Path -Raw |
+            ConvertFrom-ReleaseControlJson
         $lastSuccess = ConvertTo-ReleaseTimestampUtc -Value $heartbeat.last_success
         if ([string]$heartbeat.service -ne $ServiceName -or
             [string]$heartbeat.state -notin $AllowedStates -or
@@ -5276,7 +5293,8 @@ function Test-CodeReloadHealth {
     $statusFile = Join-Path $moduleRoot ".local\forward\dashboard-sync-status.json"
     if (-not (Test-Path -LiteralPath $statusFile)) { return $false }
     try {
-        $syncStatus = Get-Content -LiteralPath $statusFile -Raw | ConvertFrom-Json
+        $syncStatus = Get-Content -LiteralPath $statusFile -Raw |
+            ConvertFrom-ReleaseControlJson
         $lastAttempt = ConvertTo-ReleaseTimestampUtc -Value $syncStatus.last_attempt
         if ($lastAttempt -eq [DateTimeOffset]::MinValue) { return $false }
         return (
@@ -5387,7 +5405,7 @@ function Test-CurrentProductionShape {
         $resultText = ($result | ForEach-Object { [string]$_ }) -join "`n"
         if ($exitCode -eq 75) {
             try {
-                $payload = $resultText | ConvertFrom-Json -ErrorAction Stop
+                $payload = $resultText | ConvertFrom-ReleaseControlJson
                 $code = [string]$payload.error_code
                 if ($code) { return "DEFERRED:$code" }
             } catch {}
@@ -5926,7 +5944,7 @@ function Test-DeferredProjectionObligations {
     $output = @(& $python @arguments 2>&1)
     try {
         return (($output | ForEach-Object { [string]$_ }) -join "`n") |
-            ConvertFrom-Json -ErrorAction Stop
+            ConvertFrom-ReleaseControlJson
     } catch {
         return [pscustomobject]@{
             state = "FAILED"; reason = "DEFERRED_PROJECTION_EVIDENCE_INVALID"
@@ -6151,7 +6169,8 @@ function Get-BrokerMarketSession {
     $path = Join-Path $moduleRoot ".local\forward\quotes\market-session.json"
     if (-not (Test-Path -LiteralPath $path)) { return $null }
     try {
-        $session = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $session = Get-Content -LiteralPath $path -Raw |
+            ConvertFrom-ReleaseControlJson
         $observedAt = ConvertTo-ReleaseTimestampUtc -Value $session.observed_at
         if ($observedAt -eq [DateTimeOffset]::MinValue) { return $null }
         $now = [DateTimeOffset]::UtcNow
@@ -6201,7 +6220,8 @@ function Get-ServiceState {
         $statusPath = Join-Path $moduleRoot ".local\forward\live-broadcast-publisher-status.json"
         if (-not (Test-Path -LiteralPath $statusPath)) { return "DEGRADED" }
         try {
-            $publisher = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
+            $publisher = Get-Content -LiteralPath $statusPath -Raw |
+                ConvertFrom-ReleaseControlJson
             $lastSuccess = ConvertTo-ReleaseTimestampUtc -Value $publisher.last_success
             $fresh = $lastSuccess -ne [DateTimeOffset]::MinValue -and
                 ([DateTimeOffset]::UtcNow - $lastSuccess) -le $broadcastFreshnessThreshold
@@ -6272,7 +6292,8 @@ function Get-ServiceState {
         $statusFile = Join-Path $moduleRoot ".local\forward\dashboard-sync-status.json"
         if (-not (Test-Path -LiteralPath $statusFile)) { return "STARTING" }
         try {
-            $syncStatus = Get-Content -LiteralPath $statusFile -Raw | ConvertFrom-Json
+            $syncStatus = Get-Content -LiteralPath $statusFile -Raw |
+                ConvertFrom-ReleaseControlJson
             $lastSuccess = if ($syncStatus.last_success) {
                 ConvertTo-ReleaseTimestampUtc -Value $syncStatus.last_success
             } else { $null }
@@ -6607,7 +6628,7 @@ function Assert-CurrentWatchdogHeartbeat {
     }
     try {
         $heartbeat = Get-Content -LiteralPath $watchdogHeartbeatPath -Raw |
-            ConvertFrom-Json
+            ConvertFrom-ReleaseControlJson
         $observedAt = ConvertTo-ReleaseTimestampUtc -Value $heartbeat.observed_at
         if ($observedAt -eq [DateTimeOffset]::MinValue) {
             throw "invalid watchdog timestamp"
@@ -6810,7 +6831,7 @@ function Assert-AbandonedControlPlaneInstallActivation {
     }
     try {
         $heartbeat = Get-Content -LiteralPath $watchdogHeartbeatPath -Raw |
-            ConvertFrom-Json
+            ConvertFrom-ReleaseControlJson
     } catch {
         throw "CONTROL_PLANE_RECOVERY_QUIESCED_ACK_INVALID"
     }
@@ -6835,7 +6856,7 @@ function Assert-AbandonedControlPlaneInstallActivation {
         try {
             $lockOwner = Get-Content -LiteralPath `
                 (Join-Path $releaseLockPath "owner.json") -Raw |
-                ConvertFrom-Json
+                ConvertFrom-ReleaseControlJson
         } catch {}
         if (-not $lockOwner -or
             [int]$lockOwner.owner_pid -ne
@@ -6924,7 +6945,8 @@ function Assert-ControlPlaneIsolationSnapshot {
 function Get-ControlPlaneInstallState {
     if (-not (Test-Path -LiteralPath $controlPlaneInstallStatePath)) { return $null }
     try {
-        Get-Content -LiteralPath $controlPlaneInstallStatePath -Raw | ConvertFrom-Json
+        Get-Content -LiteralPath $controlPlaneInstallStatePath -Raw |
+            ConvertFrom-ReleaseControlJson
     } catch { return $null }
 }
 
@@ -6934,7 +6956,7 @@ function Write-ControlPlaneInstallState {
     if (Test-Path -LiteralPath $controlPlaneInstallStatePath) {
         try {
             $prior = Get-Content -LiteralPath $controlPlaneInstallStatePath -Raw |
-                ConvertFrom-Json
+                ConvertFrom-ReleaseControlJson
             foreach ($property in $prior.PSObject.Properties) {
                 $current[$property.Name] = $property.Value
             }
@@ -7077,7 +7099,7 @@ function Wait-VerifiedWatchdogHandoff {
         try {
             if (Test-Path -LiteralPath $watchdogHeartbeatPath) {
                 $heartbeat = Get-Content -LiteralPath $watchdogHeartbeatPath -Raw |
-                    ConvertFrom-Json
+                    ConvertFrom-ReleaseControlJson
             }
         } catch {}
         if (-not $heartbeat -or
@@ -8000,7 +8022,7 @@ function Read-ControlCenterOperationResult {
     if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
     try {
         $result = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop |
-            ConvertFrom-Json -ErrorAction Stop
+            ConvertFrom-ReleaseControlJson
         if ([string]$result.schema_version -ne "control-center-operation-v1" -or
             -not $result.operation) { return $null }
         return $result
@@ -8021,7 +8043,7 @@ function Test-ControlCenterApprovalCommitted {
     foreach ($line in @(Get-Content -LiteralPath $releaseHistoryPath -Tail 1000 `
         -ErrorAction SilentlyContinue)) {
         try {
-            $entry = $line | ConvertFrom-Json -ErrorAction Stop
+            $entry = $line | ConvertFrom-ReleaseControlJson
             if ([string]$entry.event -eq "CANDIDATE_COMPATIBILITY_APPROVED" -and
                 [string]$entry.release.validation_key -eq $ValidationKey -and
                 [string]$entry.detail.validation_key -eq $ValidationKey) {
@@ -8041,7 +8063,7 @@ function Test-ControlCenterReleaseHistoryContains {
     foreach ($line in @(Get-Content -LiteralPath $releaseHistoryPath -Tail 1000 `
         -ErrorAction SilentlyContinue)) {
         try {
-            $entry = $line | ConvertFrom-Json -ErrorAction Stop
+            $entry = $line | ConvertFrom-ReleaseControlJson
             if ([string]$entry.event -eq $Event -and
                 (Test-ReleaseIdentity $entry.release $ExpectedRelease)) {
                 return $true
@@ -9730,7 +9752,10 @@ function Show-ControlCenter {
             $script:statusRefreshProcess.Dispose()
             $script:statusRefreshProcess = $null
             if (Test-Path -LiteralPath $statusSnapshotPath) {
-                try { Apply-GuiStatus (Get-Content -LiteralPath $statusSnapshotPath -Raw | ConvertFrom-Json) } catch {}
+                try {
+                    Apply-GuiStatus (Get-Content -LiteralPath $statusSnapshotPath -Raw |
+                        ConvertFrom-ReleaseControlJson)
+                } catch {}
             }
         }
         if (-not $script:statusRefreshProcess -and ((Get-Date) - $script:lastStatusRequest).TotalSeconds -ge 10) {
