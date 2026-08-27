@@ -3637,6 +3637,110 @@ def test_coordinated_migration_receipt_is_exact_fresh_and_live(
     )
 
 
+def test_release_control_json_preserves_timestamp_strings_across_runtimes(
+    tmp_path,
+) -> None:
+    payload = json.dumps({
+        "utc": "2026-08-27T16:54:04+00:00",
+        "fractional": "2026-08-27T16:54:04.029540+00:00",
+        "offset": "2026-08-28T00:54:04.029540+08:00",
+    }, separators=(",", ":"))
+    outputs = [
+        _run_control_center_contract(
+            tmp_path,
+            f"$parsed='{payload}'|ConvertFrom-ReleaseControlJson;"
+            'Write-Output "$($parsed.utc.GetType().FullName)|$($parsed.utc)|'
+            '$($parsed.fractional.GetType().FullName)|$($parsed.fractional)|'
+            '$($parsed.offset.GetType().FullName)|$($parsed.offset)"',
+            powershell=powershell,
+        )
+        for powershell in ("powershell.exe", "pwsh.exe")
+    ]
+
+    assert outputs == [outputs[0], outputs[0]]
+    assert outputs[0] == (
+        "System.String|2026-08-27T16:54:04+00:00|"
+        "System.String|2026-08-27T16:54:04.029540+00:00|"
+        "System.String|2026-08-28T00:54:04.029540+08:00"
+    )
+
+
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_d1_release_evidence_ingestion_preserves_timestamp_string(
+    tmp_path, powershell: str,
+) -> None:
+    wrangler = (
+        tmp_path / "repository" / "web" / "node_modules" / "wrangler" / "bin"
+        / "wrangler.js"
+    )
+    wrangler.parent.mkdir(parents=True, exist_ok=True)
+    wrangler.write_text("// contract fixture\n", encoding="utf-8")
+    timestamp = "2026-08-27T16:54:04.029540+00:00"
+    response = json.dumps([{
+        "success": True,
+        "results": [{"generation_watermark": timestamp}],
+    }], separators=(",", ":"))
+    result = _run_control_center_contract(
+        tmp_path,
+        "function node.exe{param($Cli,[Parameter(ValueFromRemainingArguments=$true)]$Rest);"
+        f"$global:LASTEXITCODE=0;Write-Output '{response}'}};"
+        "$row=@(Invoke-CoordinatedMigrationD1Query -Sql 'SELECT 1')[0];"
+        'Write-Output "$($row.generation_watermark.GetType().FullName)|'
+        '$($row.generation_watermark)"',
+        powershell=powershell,
+    )
+
+    assert result == f"System.String|{timestamp}"
+
+
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_migration_receipt_later_recheck_preserves_exact_timestamp(
+    tmp_path, powershell: str,
+) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _coordinated_migration_contract_body()
+        + "$evidence=Get-CoordinatedMigrationLiveEvidence $candidate $stable $files;"
+        "$script:liveJson=$evidence|ConvertTo-Json -Compress -Depth 12;"
+        "function Get-CoordinatedMigrationLiveEvidence{"
+        "return $script:liveJson|ConvertFrom-ReleaseControlJson};"
+        "$parsed=$script:liveJson|ConvertFrom-ReleaseControlJson;"
+        "$receipt=New-CoordinatedMigrationReceipt $parsed;"
+        "Write-CoordinatedMigrationReceipt $receipt;"
+        "$verified=Assert-CoordinatedMigrationReceipt $candidate $stable $files;"
+        'Write-Output "$($verified.evidence.news_watermark.GetType().FullName)|'
+        '$($verified.evidence.news_watermark)|$($verified.receipt_digest.Length)"',
+        powershell=powershell,
+    )
+
+    assert result == "System.String|2026-08-26T05:00:00Z|64"
+
+
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_migration_receipt_rejects_actual_timestamp_change_on_later_recheck(
+    tmp_path, powershell: str,
+) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _coordinated_migration_contract_body()
+        + "$evidence=Get-CoordinatedMigrationLiveEvidence $candidate $stable $files;"
+        "$receipt=New-CoordinatedMigrationReceipt $evidence;"
+        "Write-CoordinatedMigrationReceipt $receipt;"
+        "$script:next=$evidence|ConvertTo-Json -Compress -Depth 12|"
+        "ConvertFrom-ReleaseControlJson;"
+        "$script:next.news_watermark='2026-08-26T05:00:01Z';"
+        "function Get-CoordinatedMigrationLiveEvidence{return $script:next};"
+        "$reason='PASSED';try{Assert-CoordinatedMigrationReceipt "
+        "$candidate $stable $files|Out-Null}catch{$reason=$_.Exception.Message};"
+        "Write-Output $reason",
+        powershell=powershell,
+    )
+
+    assert result == "MIGRATION_RECEIPT_GENERATION_MUTATED:news_watermark"
+
+
 @pytest.mark.parametrize(
     ("activation", "expected"),
     (
@@ -3723,7 +3827,8 @@ def test_migration_contract_reads_the_exact_candidate_not_stable_checkout(
             "MIGRATION_RECEIPT_CANDIDATE_MISMATCH",
         ),
         (
-            "$saved=Get-Content $coordinatedMigrationReceiptPath -Raw|ConvertFrom-Json;"
+            "$saved=Get-Content $coordinatedMigrationReceiptPath -Raw|"
+            "ConvertFrom-ReleaseControlJson;"
             "$saved.expires_at=[DateTimeOffset]::UtcNow.AddMinutes(-1).ToString('o');"
             "$core=[ordered]@{schema_version=$saved.schema_version;checked_at=$saved.checked_at;"
             "expires_at=$saved.expires_at;evidence=$saved.evidence};"
@@ -3732,15 +3837,17 @@ def test_migration_contract_reads_the_exact_candidate_not_stable_checkout(
             "MIGRATION_RECEIPT_STALE",
         ),
         (
-            "$saved=Get-Content $coordinatedMigrationReceiptPath -Raw|ConvertFrom-Json;"
+            "$saved=Get-Content $coordinatedMigrationReceiptPath -Raw|"
+            "ConvertFrom-ReleaseControlJson;"
             "$saved.evidence.database_name='tampered';"
             "$saved|ConvertTo-Json -Depth 12|Set-Content $coordinatedMigrationReceiptPath",
             "MIGRATION_RECEIPT_TAMPERED",
         ),
     ),
 )
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
 def test_coordinated_migration_receipt_rejects_reuse_staleness_and_tampering(
-    tmp_path, mutation: str, expected: str,
+    tmp_path, mutation: str, expected: str, powershell: str,
 ) -> None:
     _write_coordinated_migration_files(tmp_path)
     result = _run_control_center_contract(
@@ -3752,6 +3859,7 @@ def test_coordinated_migration_receipt_rejects_reuse_staleness_and_tampering(
         f"{mutation};$reason='';try{{Assert-CoordinatedMigrationReceipt "
         "$candidate $stable $files|Out-Null}catch{$reason=$_.Exception.Message};"
         "Write-Output $reason",
+        powershell=powershell,
     )
     assert result == expected
 
