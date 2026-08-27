@@ -6,14 +6,17 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 
 from scripts import run_dashboard_sync as dashboard_sync
-from xauusd_forecaster.news_projection import build_news_projection_generation
+from xauusd_forecaster.news_projection import (
+    build_news_projection_generation,
+    canonicalize_news_projection_impact_clocks,
+)
 
 
 FIXED_START = datetime(2026, 8, 13, tzinfo=UTC)
@@ -44,10 +47,18 @@ def _candle(index: int) -> dict:
     }
 
 
-def _news(index: int) -> dict:
+def _news(index: int, *, impact_expiry: datetime | None = None) -> dict:
     at = FIXED_START + timedelta(minutes=index)
+    if impact_expiry is None:
+        impact_expiry = at + timedelta(hours=6)
+    if index % 3 == 1 and impact_expiry.microsecond == 0:
+        impact_expiry += timedelta(microseconds=123_456)
+    elif index % 3 == 2 and impact_expiry.utcoffset() == timedelta(0):
+        impact_expiry = impact_expiry.astimezone(
+            timezone(timedelta(hours=8))
+        )
     key = f"{index + 1:064x}"
-    return {
+    return canonicalize_news_projection_impact_clocks({
         "source": "release-validation", "source_item_id": f"fixture-{index}",
         "revision_number": 1, "detail_key": key, "event_key": key,
         "cluster_id": f"cluster-{index:04d}", "category": "增长/经济",
@@ -59,10 +70,11 @@ def _news(index: int) -> dict:
         ),
         "summary_zh": "用于候选版本验证的有界新闻证据。" * 120,
         "annotation_status": "READY", "model_visibility": "MODEL_VISIBLE",
-        "parsed_at": at.isoformat(), "impact_expires_at": (at + timedelta(hours=6)).isoformat(),
+        "parsed_at": at.isoformat(),
+        "impact_expires_at": impact_expiry.isoformat(),
         "mirror_contract": dashboard_sync.NEWS_MIRROR_CONTRACT_VERSION,
         "broad_model_eligible": True, "model_seen": index % 2 == 0,
-    }
+    })
 
 
 def _source_payload() -> dict:
