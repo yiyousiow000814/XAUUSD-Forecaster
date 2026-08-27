@@ -748,7 +748,8 @@ export async function activateNewsProjection(
           OR news_index.model_candidate IS NOT excluded.model_candidate
           OR news_index.impact_expires_at IS NOT excluded.impact_expires_at
           OR news_index.mirror_contract IS NOT excluded.mirror_contract
-          OR news_index.payload IS NOT excluded.payload`,
+          OR news_index.payload IS NOT excluded.payload
+          OR news_index.received_at IS NOT excluded.received_at`,
     ).bind(generationId),
     binding.prepare(
       `UPDATE news_index

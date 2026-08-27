@@ -347,12 +347,18 @@ test("keeps the rollback legacy identity set equal across replacement activation
   );
   await activateNewsProjection(db, id("b"));
 
+  const fields = `detail_key,category,cluster_id,published_time,
+    collector_first_seen_time,parsed,model_candidate,impact_expires_at,
+    mirror_contract,payload,received_at`;
   const legacyCurrent = db.database.prepare(
-    "SELECT detail_key FROM news_index WHERE json_extract(payload,'$.annotation_status')<>'SUPERSEDED_CONTRACT' ORDER BY detail_key",
-  ).all().map(row => row.detail_key);
+    `SELECT ${fields} FROM news_index
+      WHERE json_extract(payload,'$.annotation_status')<>'SUPERSEDED_CONTRACT'
+      ORDER BY detail_key`,
+  ).all();
   const projectionCurrent = db.database.prepare(
-    "SELECT detail_key FROM news_projection_index WHERE generation_id=? ORDER BY detail_key",
-  ).all(id("b")).map(row => row.detail_key);
+    `SELECT ${fields} FROM news_projection_index
+      WHERE generation_id=? ORDER BY detail_key`,
+  ).all(id("b"));
   assert.deepEqual(legacyCurrent, projectionCurrent);
   const superseded = JSON.parse(db.database.prepare(
     "SELECT payload FROM news_index WHERE detail_key=?",
