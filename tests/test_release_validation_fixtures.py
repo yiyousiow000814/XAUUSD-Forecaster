@@ -89,8 +89,14 @@ def test_release_news_fixture_rejects_invalid_impact_clock(value: str) -> None:
 def test_release_news_fixture_generation_identity_and_hash_are_deterministic() -> None:
     first = build_fixtures()
     second = build_fixtures()
+    golden = (
+        Path(__file__).parent
+        / "fixtures"
+        / "release_validation_news_index_stage.json"
+    ).read_bytes()
 
     assert first == second
+    assert golden == first["news-index-stage.json"]
     first_stage = json.loads(first["news-index-stage.json"])
     second_stage = json.loads(second["news-index-stage.json"])
     assert first_stage["generation_id"] == second_stage["generation_id"]
