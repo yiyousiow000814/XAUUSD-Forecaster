@@ -150,7 +150,7 @@ function releaseIndexValidation(
   if (["activate", "verify", "abandon"].includes(checked.action)) {
     return {
       generation: checked.generation_id,
-      prepared_statements: checked.action === "activate" ? 4
+      prepared_statements: checked.action === "activate" ? 7
         : checked.action === "verify" ? 2 : 4,
     };
   }

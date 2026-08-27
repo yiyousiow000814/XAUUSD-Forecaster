@@ -126,6 +126,7 @@ Init ==
         stagedLegacyPresent |-> FALSE,
         stagedLegacyGeneration |-> 0,
         stagedLegacyIds |-> {},
+        legacyWriteObserved |-> FALSE,
         storedGenerations |-> {0}
         ]
     /\ syncOwners = 1
@@ -571,10 +572,17 @@ ActivateGeneration ==
         !.currentIds = news.stagingIds,
         !.activeLegacyGeneration = news.stagedLegacyGeneration,
         !.activeLegacyIds = news.stagedLegacyIds,
+        !.legacyWriteObserved = FALSE,
         !.stagingPresent = FALSE,
         !.stagingIds = {},
         !.stagedLegacyPresent = FALSE,
         !.stagedLegacyIds = {}]
+    /\ UNCHANGED <<release, health, install, syncOwners, path>>
+
+LegacyStableWriteAttempt ==
+    /\ news.currentGeneration > 0
+    /\ ~news.legacyWriteObserved
+    /\ news' = [news EXCEPT !.legacyWriteObserved = TRUE]
     /\ UNCHANGED <<release, health, install, syncOwners, path>>
 
 CleanupObsolete(generation) ==
@@ -603,6 +611,7 @@ Next ==
     \/ PrepareGeneration \/ StageLegacyCorrect
     \/ \E kind \in {"MISSING", "EXTRA"}: StageLegacyInvalid(kind)
     \/ RepairStagedLegacy \/ ActivateGeneration
+    \/ LegacyStableWriteAttempt
     \/ \E generation \in Generations: CleanupObsolete(generation)
 
 Spec ==
@@ -662,6 +671,7 @@ TypeOK ==
     /\ news.activeLegacyIds \subseteq NewsIdentities
     /\ news.stagingIds \subseteq NewsIdentities
     /\ news.stagedLegacyIds \subseteq NewsIdentities
+    /\ news.legacyWriteObserved \in BOOLEAN
     /\ news.storedGenerations \subseteq Generations
 
 AtMostOneProductionWriter == syncOwners <= 1
@@ -689,6 +699,8 @@ SwitchRequiresAcceptance == release.kind = "FORWARD" /\ release.transaction =>
 StableUnchangedDuringSwitchAndObserve == release.transaction => release.stable = release.origin
 SingleTransaction == release.transaction <=> release.phase \in {"SWITCH", "OBSERVE"}
 ActiveLegacyEqualsCurrent == ReverseStableCompatible
+LegacyStableWritesRemainFenced ==
+    news.legacyWriteObserved => ReverseStableCompatible
 CurrentIdentitySetMatchesGeneration ==
     news.currentIds = GenerationIds(news.currentGeneration)
 FreshStagingIdentitySetMatchesGeneration ==

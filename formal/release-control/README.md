@@ -54,7 +54,7 @@ The following actions and invariants generalize the observed failure classes:
 | Snapshot/handoff TOCTOU | `StartQuiescedSupervisor`, supervision epochs, `StaleSupervisorIsFenced` |
 | Installer death skips safety | five `InstallerDiesAt` checkpoints, `VerifyAbandonedInstall`, `RejectAbandonedInstall`, `RecoveredActivationRequiresIndependentChecks` |
 | Missing/extra legacy projection identities | `StageLegacyInvalid`, `FreshStagingCompatible`, `ActivateGeneration` |
-| One-time legacy repair drifts later | generation 0 -> 1 -> 2; every `PrepareGeneration` clears staged compatibility evidence |
+| One-time legacy repair drifts later | generation 0 -> 1 -> 2; every `PrepareGeneration` clears staged compatibility evidence and `LegacyStableWriteAttempt` explicitly exercises the still-running old writer after each activation |
 | Cleanup deletes CURRENT or fresh STAGING | `CleanupObsolete`, `CurrentGenerationCannotBeCleaned`, `FreshStagingCannotBeCleaned` |
 | Existing debt blocks an improvement | `RecordStableDebt` is non-failing, while `HardSafetyFails` and `IntroduceCandidateRegression` remain blockers |
 | Main or exact identity moves | `MainMoves`, `CorruptCandidateIdentity`; neither can mutate the in-flight target or produce accepted evidence |
