@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   activateNewsEvidenceSnapshot,
   cleanupNewsEvidenceSnapshots,
+  NEWS_EVIDENCE_CLEANUP_DAILY_WRITE_RESERVATION,
   NEWS_EVIDENCE_CURSOR_STALE,
   prepareNewsEvidenceSnapshot,
   readNewsEvidencePage,
@@ -22,7 +23,10 @@ const item = (digit, minute = 0) => ({
   canonical_headline: `evidence ${digit}`,
 });
 
-const database = () => new D1TestDatabase(["0021_paged_news_evidence.sql"]);
+const database = () => new D1TestDatabase([
+  "0021_paged_news_evidence.sql",
+  "0030_news_evidence_cleanup_budget.sql",
+]);
 
 test("pages immutable Preview evidence with generation-bound cursors", () => {
   const generationA = id("a");
@@ -261,4 +265,64 @@ test("cleanup feedback remains pending until bounded debt is drained", async () 
   assert.equal(db.database.prepare(
     "SELECT count(*) AS count FROM news_evidence_records WHERE snapshot_id=?",
   ).get(activeGeneration).count, 1);
+});
+
+test("cleanup reserves a fail-closed daily physical-write budget in D1", async () => {
+  const db = database();
+  const oldGeneration = id("a");
+  const activeGeneration = id("b");
+  db.database.exec(`
+    INSERT INTO news_evidence_state
+      (id,active_snapshot_id,contract_version,record_count,activated_at)
+    VALUES (1,'${activeGeneration}','news-evidence-paged-v2',0,
+            '2026-08-27T00:00:00.000Z');
+    WITH RECURSIVE sequence(value) AS (
+      SELECT 0 UNION ALL SELECT value+1 FROM sequence WHERE value<1600
+    )
+    INSERT INTO news_evidence_records
+      (snapshot_id,event_key,ordinal,sort_time,broad_model_eligible,model_seen,
+       payload,received_at)
+    SELECT '${oldGeneration}',printf('%064x',value),value,
+           '2020-01-01T00:00:00.000Z',1,1,'{}','2020-01-01T00:00:00.000Z'
+      FROM sequence;
+  `);
+  const firstDay = new Date("2026-08-27T12:00:00.000Z");
+  for (let step = 0; step < 8; step += 1) {
+    const result = await cleanupNewsEvidenceSnapshots(
+      db, activeGeneration, firstDay,
+    );
+    assert.equal(result.deleted_records, 200);
+    assert.equal(result.cleanup_pending, true);
+  }
+  const exhausted = await cleanupNewsEvidenceSnapshots(
+    db, activeGeneration, firstDay,
+  );
+  assert.equal(exhausted.cleanup, "budget_exhausted");
+  assert.equal(exhausted.cleanup_budget_exhausted, true);
+  assert.equal(exhausted.deleted_records, 0);
+  assert.equal(db.database.prepare(
+    "SELECT count(*) count FROM news_evidence_records WHERE snapshot_id=?",
+  ).get(oldGeneration).count, 1);
+  assert.deepEqual({ ...db.database.prepare(
+    `SELECT budget_day,reserved_rows_written
+       FROM news_evidence_cleanup_budget WHERE id=1`,
+  ).get() }, {
+    budget_day: "2026-08-27",
+    reserved_rows_written: NEWS_EVIDENCE_CLEANUP_DAILY_WRITE_RESERVATION,
+  });
+
+  const clockRegression = await cleanupNewsEvidenceSnapshots(
+    db, activeGeneration, new Date("2026-08-26T23:59:59.000Z"),
+  );
+  assert.equal(clockRegression.cleanup, "budget_exhausted");
+  assert.equal(clockRegression.deleted_records, 0);
+
+  const resumed = await cleanupNewsEvidenceSnapshots(
+    db, activeGeneration, new Date("2026-08-28T00:00:01.000Z"),
+  );
+  assert.equal(resumed.deleted_records, 1);
+  assert.equal(resumed.cleanup_pending, false);
+  assert.equal(db.database.prepare(
+    "SELECT count(*) count FROM news_evidence_records WHERE snapshot_id=?",
+  ).get(oldGeneration).count, 0);
 });

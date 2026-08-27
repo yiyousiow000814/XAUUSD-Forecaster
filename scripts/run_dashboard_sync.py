@@ -1853,7 +1853,7 @@ def _local_critical_status_url(config: dict) -> str:
 def _cleanup_news_evidence_snapshots(
     remote_url: str, snapshot_id: str, config: dict,
 ) -> bool:
-    """Drain bounded cleanup debt faster than one replacement can create it."""
+    """Advance bounded cleanup debt until the D1-owned daily budget stops it."""
     payload = json.dumps({
         "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
         "cleanup_active_snapshot": snapshot_id,
@@ -1862,6 +1862,8 @@ def _cleanup_news_evidence_snapshots(
     for _ in range(NEWS_EVIDENCE_CLEANUP_STEPS_PER_CYCLE):
         result = _post_json(remote_url, payload, config)
         cleanup_pending = result.get("cleanup_pending") is True
+        if result.get("cleanup_budget_exhausted") is True:
+            return True
         if not cleanup_pending:
             return False
     return cleanup_pending
