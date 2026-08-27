@@ -692,6 +692,40 @@ export async function activateNewsProjection(
          candidate_expiries=excluded.candidate_expiries`,
     ).bind(generationId, generationId, generationId),
     binding.prepare(
+      `UPDATE news_projection_generations SET state='SUPERSEDED',updated_at=?
+        WHERE state='CURRENT' AND generation_id<>?`,
+    ).bind(now, generationId),
+    binding.prepare(
+      `UPDATE news_projection_generations
+          SET state='CURRENT',missing_detail_count=0,invariant_violation_count=0,
+              receipt_digest=?,next_detail_offset=?,next_index_offset=?,
+              staged_detail_count=?,staged_index_count=?,activated_at=?,updated_at=?
+        WHERE generation_id=? AND state='STAGING'`,
+    ).bind(
+      progress?.receipt_digest, Number(progress?.next_detail_offset),
+      Number(progress?.next_index_offset), Number(progress?.next_detail_offset),
+      Number(progress?.next_index_offset), now, now, generationId,
+    ),
+    binding.prepare(
+      `INSERT INTO news_projection_state
+         (id,active_generation_id,snapshot_id,contract_version,source_digest,
+          receipt_digest,index_count,detail_count,missing_detail_count,
+          invariant_violation_count,projection_state,activated_at,verified_at)
+       VALUES (1,?,?,?,?,?,?,?,?,?,'ACTIVATING',?,?)
+       ON CONFLICT(id) DO UPDATE SET
+         active_generation_id=excluded.active_generation_id,
+         snapshot_id=excluded.snapshot_id,contract_version=excluded.contract_version,
+         source_digest=excluded.source_digest,receipt_digest=excluded.receipt_digest,
+         index_count=excluded.index_count,detail_count=excluded.detail_count,
+         missing_detail_count=0,invariant_violation_count=0,
+         projection_state='ACTIVATING',activated_at=excluded.activated_at,
+         verified_at=excluded.verified_at`,
+    ).bind(
+      generationId, row.snapshot_id, row.contract_version, row.source_digest,
+      progress?.receipt_digest, Number(row.expected_index_count),
+      Number(row.expected_detail_count), 0, 0, now, now,
+    ),
+    binding.prepare(
       `INSERT INTO news_index
          (detail_key,category,cluster_id,published_time,collector_first_seen_time,
           parsed,model_candidate,impact_expires_at,mirror_contract,payload,received_at)
@@ -717,40 +751,6 @@ export async function activateNewsProjection(
           OR news_index.payload IS NOT excluded.payload`,
     ).bind(generationId),
     binding.prepare(
-      `UPDATE news_projection_generations SET state='SUPERSEDED',updated_at=?
-        WHERE state='CURRENT' AND generation_id<>?`,
-    ).bind(now, generationId),
-    binding.prepare(
-      `UPDATE news_projection_generations
-          SET state='CURRENT',missing_detail_count=0,invariant_violation_count=0,
-              receipt_digest=?,next_detail_offset=?,next_index_offset=?,
-              staged_detail_count=?,staged_index_count=?,activated_at=?,updated_at=?
-        WHERE generation_id=? AND state='STAGING'`,
-    ).bind(
-      progress?.receipt_digest, Number(progress?.next_detail_offset),
-      Number(progress?.next_index_offset), Number(progress?.next_detail_offset),
-      Number(progress?.next_index_offset), now, now, generationId,
-    ),
-    binding.prepare(
-      `INSERT INTO news_projection_state
-         (id,active_generation_id,snapshot_id,contract_version,source_digest,
-          receipt_digest,index_count,detail_count,missing_detail_count,
-          invariant_violation_count,projection_state,activated_at,verified_at)
-       VALUES (1,?,?,?,?,?,?,?,?,?,'CURRENT',?,?)
-       ON CONFLICT(id) DO UPDATE SET
-         active_generation_id=excluded.active_generation_id,
-         snapshot_id=excluded.snapshot_id,contract_version=excluded.contract_version,
-         source_digest=excluded.source_digest,receipt_digest=excluded.receipt_digest,
-         index_count=excluded.index_count,detail_count=excluded.detail_count,
-         missing_detail_count=0,invariant_violation_count=0,
-         projection_state='CURRENT',activated_at=excluded.activated_at,
-         verified_at=excluded.verified_at`,
-    ).bind(
-      generationId, row.snapshot_id, row.contract_version, row.source_digest,
-      progress?.receipt_digest, Number(row.expected_index_count),
-      Number(row.expected_detail_count), 0, 0, now, now,
-    ),
-    binding.prepare(
       `UPDATE news_index
           SET parsed=0,model_candidate=0,
               payload=json_set(
@@ -767,6 +767,10 @@ export async function activateNewsProjection(
              WHERE current.generation_id=?
                AND current.detail_key=news_index.detail_key
           )`,
+    ).bind(generationId),
+    binding.prepare(
+      `UPDATE news_projection_state SET projection_state='CURRENT'
+        WHERE id=1 AND active_generation_id=? AND projection_state='ACTIVATING'`,
     ).bind(generationId),
   ]);
   return {

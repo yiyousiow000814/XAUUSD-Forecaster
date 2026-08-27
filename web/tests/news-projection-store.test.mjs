@@ -58,6 +58,7 @@ const database = () => new D1TestDatabase([
   "0001_daily_epoch.sql", "0002_hard_bishop.sql",
   "0003_news_index_lookup.sql", "0007_bounded_news_archive.sql",
   "0022_news_projection_generation.sql", "0027_materialize_news_projection_counts.sql",
+  "0028_fence_legacy_news_current_identity.sql",
 ]);
 
 test("shares canonical receipt vectors with the Python producer", async () => {
@@ -359,6 +360,82 @@ test("keeps the rollback legacy identity set equal across replacement activation
   assert.equal(superseded.annotation_status, "SUPERSEDED_CONTRACT");
   assert.equal(superseded.model_visibility, "MODEL_INELIGIBLE");
   assert.equal(superseded.parsed_at, null);
+});
+
+test("fences the active reverse projection from every legacy writer mutation family", async () => {
+  const db = database();
+  const details = [detail("1")];
+  const indexes = [index("1")];
+  await prepareNewsProjection(db, await manifest("a", details, indexes));
+  await stageNewsProjectionBatch(db, "detail", id("a"), 0, details);
+  await stageNewsProjectionBatch(db, "index", id("a"), 0, indexes);
+  await activateNewsProjection(db, id("a"));
+
+  const current = db.database.prepare(
+    "SELECT * FROM news_index WHERE detail_key=?",
+  ).get(id("1"));
+  const currentDetail = db.database.prepare(
+    "SELECT * FROM news_details WHERE detail_key=?",
+  ).get(id("1"));
+  db.database.prepare(
+    "DELETE FROM news_index WHERE cluster_id=? AND detail_key<>?",
+  ).run(current.cluster_id, id("9"));
+  db.database.prepare("DELETE FROM news_index WHERE detail_key=?").run(id("1"));
+  db.database.prepare("DELETE FROM news_details WHERE detail_key=?").run(id("1"));
+  assert.deepEqual(
+    db.database.prepare("SELECT * FROM news_index WHERE detail_key=?").get(id("1")),
+    current,
+    "cluster replacement, reset, prune, and withdrawal cannot delete CURRENT",
+  );
+  assert.deepEqual(
+    db.database.prepare("SELECT * FROM news_details WHERE detail_key=?").get(id("1")),
+    currentDetail,
+    "withdrawal cannot orphan a CURRENT detail",
+  );
+
+  db.database.prepare(
+    `UPDATE news_index SET category='Other',parsed=0,model_candidate=0,
+       payload=json_set(payload,'$.annotation_status','QUEUED') WHERE detail_key=?`,
+  ).run(id("1"));
+  assert.deepEqual(
+    db.database.prepare("SELECT * FROM news_index WHERE detail_key=?").get(id("1")),
+    current,
+    "an old upsert cannot rewrite CURRENT fields or payload",
+  );
+
+  const replacement = { ...index("2"), cluster_id: current.cluster_id };
+  const changesBefore = db.database.prepare("SELECT total_changes() total").get().total;
+  db.database.prepare(
+    "INSERT INTO news_details (detail_key,detail_hash,payload,received_at) VALUES (?,?,?,?)",
+  ).run(id("2"), id("b"), JSON.stringify(detail("2").payload), "2026-08-27T00:00:00Z");
+  db.database.prepare(
+    `INSERT INTO news_index
+       (detail_key,category,cluster_id,published_time,collector_first_seen_time,
+        parsed,model_candidate,impact_expires_at,mirror_contract,payload,received_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run(
+    replacement.detail_key, replacement.category, replacement.cluster_id,
+    replacement.source_published_time, replacement.collector_first_seen_time,
+    1, 1, replacement.impact_expires_at, replacement.mirror_contract,
+    JSON.stringify(replacement), "2026-08-27T00:00:00Z",
+  );
+  const changesAfter = db.database.prepare("SELECT total_changes() total").get().total;
+  assert.equal(changesAfter - changesBefore, 1,
+    "changed legacy replay retains only its derived detail evidence");
+  assert.equal(db.database.prepare(
+    "SELECT count(*) total FROM news_index WHERE detail_key=?",
+  ).get(id("2")).total, 0);
+  assert.equal(db.database.prepare(
+    "SELECT count(*) total FROM news_details WHERE detail_key=?",
+  ).get(id("2")).total, 1);
+  assert.deepEqual(
+    db.database.prepare(
+      `SELECT detail_key FROM news_index
+        WHERE json_extract(payload,'$.annotation_status')<>'SUPERSEDED_CONTRACT'
+        ORDER BY detail_key`,
+    ).all().map(row => row.detail_key),
+    [id("1")],
+  );
 });
 
 test("activation requires the detail and index identity chains to match", async () => {

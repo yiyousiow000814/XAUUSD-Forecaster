@@ -223,6 +223,12 @@
   requires that identity equality, all D1 legacy invariants, and the real
   Stable News health endpoint to pass. Candidate and the promoted runtime
   continue to read generation storage; the legacy copy is not a normal fallback.
+  While the pre-cutover Stable writer remains active, D1 fences verified CURRENT
+  legacy index and detail identities against deletion or mutation, and rejects
+  non-CURRENT legacy index inserts without active logical mutation. Replacement
+  activation changes the CURRENT owner and its legacy mirror in one atomic
+  transaction; a one-time migration repair alone is not continuing compatibility
+  authority.
 - Candidate-era Audit split projection handover has one explicit owner record:
   Dashboard Sync is the sole execution owner; forecasting SQLite is the
   authoritative store; the active Business Runtime revision is the producer;

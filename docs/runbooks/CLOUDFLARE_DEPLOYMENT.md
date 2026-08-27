@@ -150,14 +150,17 @@ compatibility checks. A mutation of the recorded generation or an older
 watermark fails closed. Do not repair D1 rows manually. Sync is coordinated only
 inside the short final SWITCH boundary.
 
-For the initial generation handover, apply the final legacy reconciliation only
-after the bootstrap has activated its receipt-verified CURRENT generation. In
-the staged release this is migration `0026_reconcile_legacy_news_current_identity.sql`;
-the earlier `0022` through `0025` migrations must already be in the remote
-ledger, so the normal Wrangler apply command has only `0026` pending. It copies
-the final CURRENT rows and marks legacy-only identities `SUPERSEDED_CONTRACT`
-without deleting details. Never apply `0026` early and then treat its ledger
-entry as evidence that a later bootstrap was reconciled.
+For the initial generation handover, apply the legacy reconciliation only after
+the bootstrap has activated its receipt-verified CURRENT generation. Migration
+`0026_reconcile_legacy_news_current_identity.sql` repairs the then-current copy;
+`0028_fence_legacy_news_current_identity.sql` repairs any later drift and adds
+the continuing D1 write fence required while the old Stable Sync still runs.
+The fence protects CURRENT index and detail rows across legacy reset, prune,
+withdrawal, cluster replacement, and upsert paths; post-activation non-CURRENT
+index inserts are rejected without changing the active set. Never treat the
+`0026` one-time ledger entry as
+authority for a later generation. Verify all four fence triggers and exact row
+parity before accepting migration compatibility.
 
 Worker-changing Candidates require a Cloudflare API token limited to read-only
 Workers Observability query access. Store it under the exact
