@@ -82,6 +82,37 @@ test("shares canonical receipt vectors with the Python producer", async () => {
   assert.equal(await newsProjectionPayloadHash({ z: 1, a: 2 }), await newsProjectionPayloadHash({ a: 2, z: 1 }));
 });
 
+test("every receipt progress field uses the bounded generation-kind index", async () => {
+  const db = database();
+  const details = [detail("1")];
+  const source = await manifest("a", details, []);
+  await prepareNewsProjection(db, source);
+
+  let progressSql = "";
+  const originalPrepare = db.prepare.bind(db);
+  db.prepare = sql => {
+    if (sql.includes("next_detail_offset") && sql.includes("updated_at")) {
+      progressSql = sql;
+    }
+    return originalPrepare(sql);
+  };
+  await stageNewsProjectionBatch(db, "detail", id("a"), 0, details);
+  db.prepare = originalPrepare;
+
+  assert.ok(progressSql, "receipt progress query was exercised");
+  const bindings = Array.from(
+    { length: (progressSql.match(/\?/g) ?? []).length }, () => id("a"),
+  );
+  const plan = db.database.prepare(`EXPLAIN QUERY PLAN ${progressSql}`).all(...bindings);
+  const receiptReads = plan
+    .map(row => String(row.detail))
+    .filter(detailText => detailText.includes("news_projection_receipts_v2"));
+  assert.ok(receiptReads.length >= 8, "all receipt progress fields are planned");
+  assert.ok(receiptReads.every(detailText => (
+    detailText.includes("generation_id=? AND batch_kind=?")
+  )), receiptReads.join("\n"));
+});
+
 test("stages detail before index and atomically activates one receipt-backed generation", async () => {
   const db = database();
   const details = [detail("1"), detail("2")];
