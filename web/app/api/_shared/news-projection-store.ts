@@ -255,12 +255,18 @@ async function generationProgress(binding: D1Database, generationId: string) {
        COALESCE((SELECT identity_digest FROM news_projection_receipts_v2
          WHERE generation_id=? AND batch_kind='index'
          ORDER BY batch_offset DESC LIMIT 1),?) index_identity_digest,
-       COALESCE((SELECT max(updated_at) FROM news_projection_receipts_v2
-         WHERE generation_id=?),NULL) updated_at`,
+       COALESCE(
+         (SELECT updated_at FROM news_projection_receipts_v2
+           WHERE generation_id=? AND batch_kind='index'
+           ORDER BY batch_offset DESC LIMIT 1),
+         (SELECT updated_at FROM news_projection_receipts_v2
+           WHERE generation_id=? AND batch_kind='detail'
+           ORDER BY batch_offset DESC LIMIT 1),
+         NULL) updated_at`,
   ).bind(
     generationId, generationId, generationId, generationId,
     EMPTY_RECEIPT_DIGEST, generationId, EMPTY_RECEIPT_DIGEST,
-    generationId, EMPTY_RECEIPT_DIGEST, generationId,
+    generationId, EMPTY_RECEIPT_DIGEST, generationId, generationId,
   ).first<{
     next_detail_offset: number; next_index_offset: number;
     receipt_digest: string; detail_identity_digest: string;
