@@ -381,7 +381,28 @@ test("keeps the rollback legacy identity set equal across replacement activation
     2,
     "staging remains a bounded legacy upsert and does not supersede the active set",
   );
+  let activationMembershipSql = "";
+  const originalPrepare = db.prepare.bind(db);
+  db.prepare = sql => {
+    if (sql.includes("UPDATE news_index") && sql.includes("WITH projection AS")) {
+      activationMembershipSql = sql;
+    }
+    return originalPrepare(sql);
+  };
   await activateNewsProjection(db, id("b"));
+  db.prepare = originalPrepare;
+  assert.match(
+    activationMembershipSql,
+    /detail_key NOT IN \(\s*SELECT detail_key FROM projection\s*\)/,
+    "activation materializes receipt membership once instead of expanding JSON per legacy row",
+  );
+  const activationPlan = db.database.prepare(
+    `EXPLAIN QUERY PLAN ${activationMembershipSql}`,
+  ).all(id("b")).map(row => String(row.detail));
+  assert.equal(
+    activationPlan.some(detailText => detailText.includes("CORRELATED")), false,
+    activationPlan.join("\n"),
+  );
 
   const fields = `detail_key,category,cluster_id,published_time,
     collector_first_seen_time,parsed,model_candidate,impact_expires_at,
@@ -407,6 +428,21 @@ test("keeps the rollback legacy identity set equal across replacement activation
   assert.equal(superseded.annotation_status, "SUPERSEDED_CONTRACT");
   assert.equal(superseded.model_visibility, "MODEL_INELIGIBLE");
   assert.equal(superseded.parsed_at, null);
+
+  let reverseMembershipSql = "";
+  db.prepare = sql => {
+    if (sql.includes("violation_count") && sql.includes("FROM news_index n")) {
+      reverseMembershipSql = sql;
+    }
+    return originalPrepare(sql);
+  };
+  await verifyNewsProjection(db, id("b"));
+  db.prepare = originalPrepare;
+  assert.match(
+    reverseMembershipSql,
+    /n\.detail_key NOT IN \(\s*SELECT detail_key FROM projection\s*\)/,
+    "reverse verification uses the same one-time receipt membership expansion",
+  );
 });
 
 test("unchanged replacement activation performs zero reverse-index mutation", async () => {

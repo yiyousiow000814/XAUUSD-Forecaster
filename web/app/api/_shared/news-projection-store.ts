@@ -671,8 +671,8 @@ async function reverseProjectionViolationCount(
        +
        (SELECT count(*) FROM news_index n
          WHERE ${ACTIVE_NEWS_SQL.replaceAll("payload", "n.payload")}
-           AND NOT EXISTS (
-             SELECT 1 FROM projection p WHERE p.detail_key=n.detail_key
+           AND n.detail_key NOT IN (
+             SELECT detail_key FROM projection
            )) violation_count`,
   ).bind(generationId).first<{ violation_count: number }>();
   return Number(row?.violation_count ?? -1);
@@ -834,9 +834,8 @@ export async function activateNewsProjection(
               )
         WHERE COALESCE(json_extract(payload,'$.annotation_status'),'')<>
                 'SUPERSEDED_CONTRACT'
-           AND NOT EXISTS (
-             SELECT 1 FROM projection current
-              WHERE current.detail_key=news_index.detail_key
+           AND detail_key NOT IN (
+             SELECT detail_key FROM projection
            )`,
     ).bind(generationId),
     binding.prepare(
