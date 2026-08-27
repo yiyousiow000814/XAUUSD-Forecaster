@@ -707,6 +707,40 @@ test("production-shaped writes honor authenticated release dry-run without mutat
   assert.doesNotMatch(after, new RegExp(token));
 });
 
+test("accepts the exact Python News release fixture and rejects a noncanonical clock", async () => {
+  if (isPreviewBuild) return;
+  const fixture = JSON.parse(readFileSync(new URL(
+    "../../tests/fixtures/release_validation_news_index_stage.json",
+    import.meta.url,
+  ), "utf8"));
+  const validationHeaders = {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+    "X-Aurum-Release-Validation": "dry-run",
+    "X-Aurum-Validation-Run": "exact-python-news-fixture-run",
+    "X-Aurum-Request-ID": "exact-python-news-fixture-request",
+  };
+  const state = () => JSON.stringify(database.database.prepare(
+    "SELECT generation_id,detail_key,payload,received_at FROM news_projection_index ORDER BY generation_id,detail_key",
+  ).all());
+  const before = state();
+  const accepted = await invoke("/api/news-index", {
+    method: "POST", headers: validationHeaders, body: JSON.stringify(fixture),
+  });
+  assert.equal(accepted.status, 200, await accepted.clone().text());
+  assert.equal((await accepted.json()).status, "DRY_RUN_OK");
+
+  const malformed = structuredClone(fixture);
+  const visible = malformed.items.find(item => item.model_visibility === "MODEL_VISIBLE");
+  assert.ok(visible);
+  visible.impact_expires_at = "2026-08-13T06:00:00+00:00";
+  const rejected = await invoke("/api/news-index", {
+    method: "POST", headers: validationHeaders, body: JSON.stringify(malformed),
+  });
+  assert.equal(rejected.status, 400, await rejected.clone().text());
+  assert.equal(state(), before);
+});
+
 test("news release dry-runs reject invalid payloads without mutation", async () => {
   if (isPreviewBuild) return;
   const validationHeaders = {

@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from fnmatch import fnmatch
 from pathlib import Path
 
-from scripts.build_release_validation_fixtures import build_fixtures
+import pytest
+
+from scripts.build_release_validation_fixtures import _news, build_fixtures
+from xauusd_forecaster.news_projection import (
+    NEWS_PROJECTION_IMPACT_CLOCK_FIELDS,
+    canonicalize_news_projection_impact_clocks,
+)
 
 
 def test_release_validation_fixtures_are_bounded_production_contracts() -> None:
@@ -46,3 +54,52 @@ def test_release_validation_fixtures_are_bounded_production_contracts() -> None:
         "audit-decisions-write.json",
     ):
         assert len(fixtures[name]) <= 120_000
+
+
+def test_release_news_fixtures_use_production_impact_clock_contract() -> None:
+    zero = _news(0)["impact_expires_at"]
+    nonzero = _news(1)["impact_expires_at"]
+    non_utc_source = _news(
+        2,
+        impact_expiry=datetime(
+            2026, 8, 13, 14, 2, tzinfo=timezone(timedelta(hours=8)),
+        ),
+    )["impact_expires_at"]
+
+    assert zero == "2026-08-13T06:00:00.000000+00:00"
+    assert nonzero == "2026-08-13T06:01:00.123456+00:00"
+    assert non_utc_source == "2026-08-13T06:02:00.000000+00:00"
+    assert set(NEWS_PROJECTION_IMPACT_CLOCK_FIELDS) == {
+        "impact_event_at", "impact_available_at", "impact_expires_at",
+    }
+    assert {
+        field for field in NEWS_PROJECTION_IMPACT_CLOCK_FIELDS if field in _news(0)
+    } == {"impact_expires_at"}
+
+
+@pytest.mark.parametrize("value", [
+    "not-a-timestamp",
+    "2026-08-13T06:00:00.000000",
+])
+def test_release_news_fixture_rejects_invalid_impact_clock(value: str) -> None:
+    with pytest.raises(ValueError):
+        canonicalize_news_projection_impact_clocks({"impact_expires_at": value})
+
+
+def test_release_news_fixture_generation_identity_and_hash_are_deterministic() -> None:
+    first = build_fixtures()
+    second = build_fixtures()
+    golden = (
+        Path(__file__).parent
+        / "fixtures"
+        / "release_validation_news_index_stage.json"
+    ).read_bytes()
+
+    assert first == second
+    assert golden == first["news-index-stage.json"]
+    first_stage = json.loads(first["news-index-stage.json"])
+    second_stage = json.loads(second["news-index-stage.json"])
+    assert first_stage["generation_id"] == second_stage["generation_id"]
+    assert sha256(first["news-index-stage.json"]).digest() == sha256(
+        second["news-index-stage.json"]
+    ).digest()

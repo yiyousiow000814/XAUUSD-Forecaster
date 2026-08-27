@@ -7,6 +7,7 @@ import json
 import math
 import struct
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Iterable
 
 NEWS_PROJECTION_CONTRACT_VERSION = "news-projection-generation-v4"
@@ -29,6 +30,24 @@ NEWS_INDEX_FIELDS = (
     "impact_event_at", "impact_clock_source", "impact_reason_zh",
     "mirror_updated_at",
 )
+NEWS_PROJECTION_IMPACT_CLOCK_FIELDS = (
+    "impact_event_at", "impact_available_at", "impact_expires_at",
+)
+
+
+def canonicalize_news_projection_impact_clocks(item: dict) -> dict:
+    """Normalize derived impact clocks at the News projection boundary."""
+    for field in NEWS_PROJECTION_IMPACT_CLOCK_FIELDS:
+        value = item.get(field)
+        if value is None:
+            continue
+        observed = (
+            value if isinstance(value, datetime) else datetime.fromisoformat(value)
+        )
+        if observed.tzinfo is None or observed.utcoffset() is None:
+            raise ValueError(f"{field} must include an explicit UTC offset")
+        item[field] = observed.astimezone(UTC).isoformat(timespec="microseconds")
+    return item
 
 
 def compact_json(value: object, *, sort_keys: bool = False) -> str:
