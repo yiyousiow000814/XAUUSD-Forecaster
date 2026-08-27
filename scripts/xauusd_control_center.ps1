@@ -1558,8 +1558,15 @@ function Assert-CoordinatedMigrationReceipt {
     if (-not (Test-Path -LiteralPath $coordinatedMigrationReceiptPath)) {
         throw "MIGRATION_RECEIPT_MISSING"
     }
-    $receipt = Get-Content -LiteralPath $coordinatedMigrationReceiptPath -Raw |
-        ConvertFrom-Json
+    $receiptJson = Get-Content -LiteralPath $coordinatedMigrationReceiptPath -Raw
+    # PowerShell 7.5+ otherwise converts ISO strings to DateTime and changes
+    # the exact JSON hash input after this required disk round trip. Earlier
+    # runtimes already preserve JSON date strings and do not expose DateKind.
+    $receipt = if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey("DateKind")) {
+        $receiptJson | ConvertFrom-Json -DateKind String
+    } else {
+        $receiptJson | ConvertFrom-Json
+    }
     $core = [ordered]@{
         schema_version = [string]$receipt.schema_version
         checked_at = [string]$receipt.checked_at
