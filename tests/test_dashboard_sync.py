@@ -1833,16 +1833,29 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
     )]
 
 
-def test_news_evidence_cleanup_uses_feedback_to_drain_bounded_debt(
-    monkeypatch,
+@pytest.mark.parametrize(
+    ("responses", "expected_pending", "expected_calls"),
+    [
+        ([
+            {"status": "OK", "cleanup_pending": True},
+            {"status": "OK", "cleanup_pending": True},
+            {"status": "OK", "cleanup_pending": False},
+        ], False, 3),
+        ([
+            {"status": "OK", "cleanup_pending": True},
+            {
+                "status": "OK", "cleanup_pending": True,
+                "cleanup_budget_exhausted": True,
+            },
+        ], True, 2),
+    ],
+)
+def test_news_evidence_cleanup_uses_feedback_and_stops_at_daily_budget(
+    monkeypatch, responses, expected_pending, expected_calls,
 ) -> None:
     module = _sync_module()
     calls = []
-    responses = iter([
-        {"status": "OK", "cleanup_pending": True},
-        {"status": "OK", "cleanup_pending": True},
-        {"status": "OK", "cleanup_pending": False},
-    ])
+    responses = iter(responses)
 
     def post(url, body, _config):
         calls.append((url, json.loads(body)))
@@ -1854,8 +1867,8 @@ def test_news_evidence_cleanup_uses_feedback_to_drain_bounded_debt(
         "https://remote/api/news-evidence", snapshot_id, {"token": "test"},
     )
 
-    assert pending is False
-    assert len(calls) == 3
+    assert pending is expected_pending
+    assert len(calls) == expected_calls
     assert all(call[1]["cleanup_active_snapshot"] == snapshot_id for call in calls)
     assert len(calls) <= module.NEWS_EVIDENCE_CLEANUP_STEPS_PER_CYCLE
 

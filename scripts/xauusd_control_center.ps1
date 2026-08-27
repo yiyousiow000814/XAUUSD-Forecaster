@@ -1062,7 +1062,8 @@ function Assert-CoordinatedMigrationCapabilityContract {
         "web/drizzle/0026_reconcile_legacy_news_current_identity.sql",
         "web/drizzle/0027_materialize_news_projection_counts.sql",
         "web/drizzle/0028_fence_legacy_news_current_identity.sql",
-        "web/drizzle/0029_news_projection_receipt_index.sql"
+        "web/drizzle/0029_news_projection_receipt_index.sql",
+        "web/drizzle/0030_news_evidence_cleanup_budget.sql"
     )
     $unknown = @($MigrationFiles | Where-Object { $_ -notin $supported })
     if ($unknown.Count -gt 0) {
@@ -1125,10 +1126,22 @@ function Assert-CoordinatedMigrationCapabilityContract {
             $sql -match '(?im)CREATE\s+TRIGGER\s+IF\s+NOT\s+EXISTS\s+`legacy_news_v4_current_detail_delete_fence`' -and
             $sql -match '(?im)news-projection-generation-v4' -and
             $sql -notmatch '(?im)\b(DROP|UPDATE|REPLACE|TRUNCATE|VACUUM)\b'
+        $isNewsEvidenceCleanupBudget =
+            $file -eq "web/drizzle/0030_news_evidence_cleanup_budget.sql" -and
+            $sql -match '(?im)CREATE\s+TABLE\s+`news_evidence_cleanup_budget`' -and
+            $sql -match '(?im)`reserved_rows_written`\s+integer\s+NOT\s+NULL' -and
+            $sql -match '(?im)CHECK\s*\(\s*`id`\s*=\s*1\s*\)' -and
+            $sql -match '(?im)CHECK\s*\(\s*`reserved_rows_written`\s*>=\s*0\s*\)' -and
+            $sql -notmatch '(?im)\b(DROP|DELETE|UPDATE|REPLACE|TRUNCATE|VACUUM)\b'
+        if ($file -eq "web/drizzle/0030_news_evidence_cleanup_budget.sql" -and
+            -not $isNewsEvidenceCleanupBudget) {
+            throw "MIGRATION_CAPABILITY_CONTRACT_MISSING:$file"
+        }
         if (($sql -match '(?im)\b(DROP|DELETE|UPDATE|REPLACE|TRUNCATE|VACUUM)\b') -and
             -not $isBoundedAuditHandover -and -not $isLegacyNewsHandover -and
             -not $isLegacyNewsReconciliation -and -not $isNewsFreePlanMaterialization -and
-            -not $isLegacyNewsWriteFence -and -not $isNewsReceiptIndex) {
+            -not $isLegacyNewsWriteFence -and -not $isNewsReceiptIndex -and
+            -not $isNewsEvidenceCleanupBudget) {
             throw "MIGRATION_REVERSE_INCOMPATIBLE:$file"
         }
     }
@@ -1295,7 +1308,9 @@ SELECT
    ('generation_id','batch_kind','batch_offset','item_count','payload_hash',
     'receipt_digest','identity_digest','identity_keys_json','items_json','updated_at')) AS projection_receipt_columns,
  (SELECT count(*) FROM pragma_table_info('operator_retry_sync_state') WHERE name IN
-  ('id','payload_digest','item_count','synced_at')) AS retry_columns,
+   ('id','payload_digest','item_count','synced_at')) AS retry_columns,
+ (SELECT count(*) FROM sqlite_master WHERE type='table'
+   AND name='news_evidence_cleanup_budget') AS evidence_cleanup_budget_tables,
  (SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN
   ('dashboard_snapshots','news_index','news_details','news_evidence_records')) AS legacy_tables,
   coalesce((SELECT json_array_length(json_extract(payload,'$.recent_decisions'))
@@ -1397,7 +1412,8 @@ FROM news_projection_state s JOIN news_projection_generations g
         [int]$capabilities[0].projection_triggers -ne 6 -or
         [int]$capabilities[0].projection_count_columns -ne 6 -or
         [int]$capabilities[0].projection_receipt_columns -ne 10 -or
-        [int]$capabilities[0].retry_columns -ne 4) {
+        [int]$capabilities[0].retry_columns -ne 4 -or
+        [int]$capabilities[0].evidence_cleanup_budget_tables -ne 1) {
         throw "MIGRATION_SCHEMA_CAPABILITY_MISSING"
     }
     $state = $capabilities[0]
@@ -1473,6 +1489,7 @@ FROM news_projection_state s JOIN news_projection_generations g
         projection_count_columns = [int]$state.projection_count_columns
         projection_receipt_columns = [int]$state.projection_receipt_columns
         operator_retry_columns = [int]$state.retry_columns
+        evidence_cleanup_budget_tables = [int]$state.evidence_cleanup_budget_tables
         legacy_tables = [int]$state.legacy_tables
         legacy_decisions = [int]$state.legacy_decisions
         legacy_news_index_count = [int]$state.legacy_current_index_count
@@ -1579,6 +1596,7 @@ function Assert-CoordinatedMigrationReceipt {
         "migration_files", "applied_migrations", "pending_migrations",
         "projection_tables", "projection_indexes", "projection_triggers", "projection_count_columns",
         "projection_receipt_columns", "operator_retry_columns",
+        "evidence_cleanup_budget_tables",
         "legacy_tables", "stable_read", "candidate_read", "reverse_safe"
     )
     foreach ($field in $immutableFields) {

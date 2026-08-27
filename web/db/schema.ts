@@ -94,6 +94,16 @@ export const newsEvidenceBatches = sqliteTable(
   table => [primaryKey({ columns: [table.snapshotId, table.batchOffset] })],
 );
 
+export const newsEvidenceCleanupBudget = sqliteTable(
+  "news_evidence_cleanup_budget",
+  {
+    id: integer("id").primaryKey(),
+    budgetDay: text("budget_day").notNull(),
+    reservedRowsWritten: integer("reserved_rows_written").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+);
+
 export const newsProjectionGenerations = sqliteTable("news_projection_generations", {
   generationId: text("generation_id").primaryKey(),
   snapshotId: text("snapshot_id").notNull(),
