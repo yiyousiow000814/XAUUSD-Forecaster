@@ -40,6 +40,10 @@
   over their ordered `detail_key` values. Activation requires those final
   digests to match, so an identity left over in the global store cannot satisfy
   a different generation's detail membership proof.
+- Derived impact event, availability, and expiry clocks cross the projection
+  boundary as canonical UTC timestamps with microsecond precision. A source
+  timestamp may carry another explicit offset, but the materialized projection
+  must preserve the instant while normalizing its representation to `+00:00`.
 - Activation is one D1 transaction. The prior verified `CURRENT` generation
   remains readable until the replacement has exact counts, no missing detail,
   no review-state or active-cluster invariant violation, and a receipt digest

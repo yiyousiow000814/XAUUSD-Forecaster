@@ -1023,13 +1023,19 @@ def _apply_impact_status(item: dict, now: datetime) -> None:
         return
     max_age, _ = impact_time_rule(impact_class)
     expires_at = event_at + max_age
-    item["impact_event_at"] = event_at.isoformat(timespec="microseconds")
+    item["impact_event_at"] = event_at.astimezone(UTC).isoformat(
+        timespec="microseconds"
+    )
     item["impact_clock_source"] = clock_source
-    item["impact_expires_at"] = expires_at.isoformat(timespec="microseconds")
+    item["impact_expires_at"] = expires_at.astimezone(UTC).isoformat(
+        timespec="microseconds"
+    )
     first_seen = datetime.fromisoformat(str(item["collector_first_seen_time"]))
     assessed_at = datetime.fromisoformat(str(item["impact_assessed_at"]))
     available_at = max(first_seen, assessed_at)
-    item["impact_available_at"] = available_at.isoformat(timespec="microseconds")
+    item["impact_available_at"] = available_at.astimezone(UTC).isoformat(
+        timespec="microseconds"
+    )
     if first_seen >= expires_at:
         item["impact_status"] = "EXPIRED_ON_RECEIPT"
         item["model_visibility"] = "IMPACT_EXPIRED"
