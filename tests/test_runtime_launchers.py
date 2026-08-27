@@ -3615,7 +3615,10 @@ def test_compatibility_classifier_separates_storage_from_platform_review(tmp_pat
     )
 
 
-def test_coordinated_migration_receipt_is_exact_fresh_and_live(tmp_path) -> None:
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_coordinated_migration_receipt_is_exact_fresh_and_live(
+    tmp_path, powershell: str,
+) -> None:
     _write_coordinated_migration_files(tmp_path)
     result = _run_control_center_contract(
         tmp_path,
@@ -3626,6 +3629,7 @@ def test_coordinated_migration_receipt_is_exact_fresh_and_live(tmp_path) -> None
         "$verified=Assert-CoordinatedMigrationReceipt $candidate $stable $files;"
         'Write-Output "$($verified.schema_version),$($verified.evidence.database_id),'
         '$($verified.evidence.reverse_safe)"',
+        powershell=powershell,
     )
     assert result == (
         "coordinated-storage-migration-receipt-v1,"
