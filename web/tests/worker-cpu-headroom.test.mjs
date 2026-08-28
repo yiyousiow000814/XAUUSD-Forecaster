@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { D1TestDatabase } from "./d1-test-database.mjs";
 
@@ -739,6 +743,96 @@ test("accepts the exact Python News release fixture and rejects a noncanonical c
   });
   assert.equal(rejected.status, 400, await rejected.clone().text());
   assert.equal(state(), before);
+});
+
+test("accepts every exact Python-built production-shaped release fixture", async () => {
+  if (isPreviewBuild) return;
+  const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "aurum-worker-release-fixtures-"));
+  const python = process.env.PYTHON || (process.platform === "win32" ? "python.exe" : "python3");
+  try {
+    const built = spawnSync(python, [
+      join(repositoryRoot, "scripts", "build_release_validation_fixtures.py"),
+      "--output", fixtureRoot,
+    ], {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+      env: { ...process.env, PYTHONUTF8: "1" },
+    });
+    assert.equal(built.status, 0, built.stderr || built.stdout);
+
+    const manifest = JSON.parse(readFileSync(
+      join(repositoryRoot, "web", "worker-validation-manifest.json"), "utf8",
+    ));
+    const exactWrites = [];
+    for (const route of manifest.routes.filter(row =>
+      row.boundary === "WORKER_WRITE" && row.strategy === "PRODUCTION_SHAPED_DRY_RUN")) {
+      const scenarios = route.scenarios?.length
+        ? route.scenarios
+        : [{ name: "default", fixture: route.fixture }];
+      for (const scenario of scenarios) {
+        exactWrites.push({
+          path: route.path,
+          family: route.family,
+          scenario: scenario.name,
+          fixture: scenario.fixture,
+        });
+      }
+    }
+    assert.equal(exactWrites.length, 19);
+    assert.deepEqual(new Set(exactWrites.map(row => row.family)), new Set([
+      "status-ingest",
+      "audit-write",
+      "audit-briefs-write",
+      "audit-stories-write",
+      "audit-decisions-write",
+      "learning-write",
+      "market-chart-write",
+      "market-history-write",
+      "learning-history-write",
+      "news-evidence-write",
+      "news-index-write",
+      "news-content-write",
+    ]));
+
+    const state = () => JSON.stringify({
+      snapshots: database.database.prepare(
+        "SELECT id,payload,received_at FROM dashboard_snapshots ORDER BY id",
+      ).all(),
+      newsIndex: database.database.prepare(
+        "SELECT generation_id,detail_key,payload,received_at FROM news_projection_index ORDER BY generation_id,detail_key",
+      ).all(),
+      newsDetails: database.database.prepare(
+        "SELECT generation_id,detail_key,payload,received_at FROM news_projection_details ORDER BY generation_id,detail_key",
+      ).all(),
+    });
+    const before = state();
+    for (const [index, route] of exactWrites.entries()) {
+      const exactBytes = readFileSync(join(fixtureRoot, route.fixture));
+      const response = await invoke(route.path, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          "X-Aurum-Release-Validation": "dry-run",
+          "X-Aurum-Validation-Run": "exact-python-fixture-family-run",
+          "X-Aurum-Request-ID": `exact-python-fixture-${index}`,
+        },
+        body: exactBytes,
+      });
+      assert.equal(
+        response.status, 200,
+        `${route.family}/${route.scenario}: ${await response.clone().text()}`,
+      );
+      const payload = await response.json();
+      assert.equal(payload.status, "DRY_RUN_OK", route.fixture);
+      assert.equal(payload.route_family, route.family, route.fixture);
+      assert.equal(payload.mutated, false, route.fixture);
+    }
+    assert.equal(state(), before);
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
 });
 
 test("news release dry-runs reject invalid payloads without mutation", async () => {

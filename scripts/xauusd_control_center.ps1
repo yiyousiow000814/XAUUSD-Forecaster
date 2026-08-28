@@ -176,7 +176,7 @@ function Get-CollectorSecret {
     if ($userValue) { return $userValue.Trim() }
     if (-not (Test-Path -LiteralPath $collectorSecretsPath)) { return "" }
     try {
-        $secrets = Get-Content -LiteralPath $collectorSecretsPath -Raw |
+        $secrets = Get-Content -LiteralPath $collectorSecretsPath -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
         $property = $secrets.PSObject.Properties[$Name]
         if ($property -and $property.Value) { return ([string]$property.Value).Trim() }
@@ -282,8 +282,10 @@ function Get-ForecasterProcesses {
 
 function Get-CodeRevision {
     try {
-        $revision = (& git -C $moduleRoot rev-parse HEAD 2>$null).Trim()
-        if ($LASTEXITCODE -eq 0 -and $revision -match '^[0-9a-f]{40}$') {
+        $read = Invoke-Utf8NativeProcess -FilePath "git.exe" `
+            -Arguments @("-C", $moduleRoot, "rev-parse", "HEAD")
+        $revision = ([string]$read.stdout).Trim()
+        if ($read.exit_code -eq 0 -and $revision -match '^[0-9a-f]{40}$') {
             return $revision
         }
     } catch {}
@@ -293,7 +295,7 @@ function Get-CodeRevision {
 function Get-RuntimeUpdateState {
     if (-not (Test-Path -LiteralPath $runtimeUpdateStatePath)) { return $null }
     try {
-        Get-Content -LiteralPath $runtimeUpdateStatePath -Raw |
+        Get-Content -LiteralPath $runtimeUpdateStatePath -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
     } catch { $null }
 }
@@ -354,7 +356,7 @@ function Set-ReleaseLifecycleProjection {
 function Get-ReleaseControlState {
     if (-not (Test-Path -LiteralPath $releaseControlStatePath)) { return $null }
     try {
-        $state = Get-Content -LiteralPath $releaseControlStatePath -Raw |
+        $state = Get-Content -LiteralPath $releaseControlStatePath -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
         if (-not $state.candidate_discovery) {
             $state | Add-Member -NotePropertyName candidate_discovery -NotePropertyValue (
@@ -503,7 +505,7 @@ function Enter-ReleaseTransactionLock {
     if (Test-Path -LiteralPath $releaseLockPath) {
         $owner = $null
         try {
-            $owner = Get-Content -LiteralPath (Join-Path $releaseLockPath "owner.json") -Raw |
+            $owner = Get-Content -LiteralPath (Join-Path $releaseLockPath "owner.json") -Raw -Encoding UTF8 |
                 ConvertFrom-ReleaseControlJson
         } catch {}
         $ownerAlive = $false
@@ -568,14 +570,14 @@ function Invoke-WranglerJson {
     if ($argumentLength -gt 24000) {
         throw "WRANGLER_ARGUMENT_BOUND_EXCEEDED"
     }
-    Push-Location $webRoot
-    try {
-        # Invoke the pinned CLI through Node directly. npx.cmd truncates or
-        # rejects otherwise-valid bounded arguments at cmd.exe's lower limit.
-        $output = @(& node.exe $wranglerCli @Arguments --json 2>$null)
-        if ($LASTEXITCODE -ne 0) { throw "Wrangler command failed." }
-        ($output -join "`n") | ConvertFrom-ReleaseControlJson
-    } finally { Pop-Location }
+    # Invoke the pinned CLI through Node directly. npx.cmd truncates or rejects
+    # otherwise-valid bounded arguments at cmd.exe's lower limit. The release
+    # boundary owns strict UTF-8 decoding rather than inheriting a shell codepage.
+    $read = Invoke-Utf8NativeProcess -FilePath "node.exe" `
+        -Arguments (@($wranglerCli) + @($Arguments) + @("--json")) `
+        -WorkingDirectory $webRoot
+    if ($read.exit_code -ne 0) { throw "Wrangler command failed." }
+    $read.stdout | ConvertFrom-ReleaseControlJson
 }
 
 function Get-CloudflareDeployment {
@@ -950,9 +952,12 @@ function Invoke-RepositoryRead {
         [Parameter(Mandatory = $true)][string]$Operation,
         [Parameter(Mandatory = $true)][string[]]$Arguments
     )
-    $raw = @(& git @Arguments 2>&1)
-    $exitCode = [int]$LASTEXITCODE
-    $lines = @($raw | ForEach-Object { [string]$_ })
+    $native = Invoke-Utf8NativeProcess -FilePath "git.exe" -Arguments $Arguments
+    $exitCode = [int]$native.exit_code
+    $lines = @($native.stdout_lines)
+    if ($exitCode -ne 0 -and $native.stderr) {
+        $lines += @($native.stderr_lines)
+    }
     $diagnostic = if ($exitCode -ne 0) {
         Protect-PreflightDiagnosticText ($lines -join "`n")
     } else { $null }
@@ -968,11 +973,79 @@ function Invoke-RepositoryRead {
     }
 }
 
+function ConvertTo-NativeProcessArgument {
+    param([AllowEmptyString()][string]$Argument)
+    if ($Argument -and $Argument -notmatch '[\s"]') { return $Argument }
+    $escaped = [regex]::Replace([string]$Argument, '(\\*)"', '$1$1\"')
+    $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+    return '"' + $escaped + '"'
+}
+
+function ConvertFrom-NativeProcessText {
+    param([AllowEmptyString()][string]$Text)
+    if (-not $Text) { return @() }
+    $lines = @([regex]::Split($Text, '\r?\n'))
+    if ($lines.Count -gt 0 -and $lines[-1] -eq '') {
+        if ($lines.Count -eq 1) { return @() }
+        $lines = @($lines[0..($lines.Count - 2)])
+    }
+    return $lines
+}
+
+function Invoke-Utf8NativeProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$Arguments = @(),
+        [string]$WorkingDirectory = "",
+        [hashtable]$Environment = @{}
+    )
+    $command = Get-Command $FilePath -ErrorAction Stop
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = [string]$command.Source
+    $start.Arguments = @($Arguments | ForEach-Object {
+        ConvertTo-NativeProcessArgument -Argument ([string]$_)
+    }) -join " "
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    if ($WorkingDirectory) { $start.WorkingDirectory = $WorkingDirectory }
+    foreach ($name in $Environment.Keys) {
+        $start.EnvironmentVariables[[string]$name] = [string]$Environment[$name]
+    }
+    $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+    $start.StandardOutputEncoding = $strictUtf8
+    $start.StandardErrorEncoding = $strictUtf8
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $start
+    try {
+        [void]$process.Start()
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        return [pscustomobject]@{
+            exit_code = [int]$process.ExitCode
+            stdout = [string]$stdout
+            stderr = [string]$stderr
+            stdout_lines = @(ConvertFrom-NativeProcessText -Text ([string]$stdout))
+            stderr_lines = @(ConvertFrom-NativeProcessText -Text ([string]$stderr))
+        }
+    } catch [System.Text.DecoderFallbackException] {
+        throw "NATIVE_PROCESS_UTF8_INVALID"
+    } finally {
+        $process.Dispose()
+    }
+}
+
 function Get-CandidateChangedFiles {
     param([string]$StableRevision, [string]$CandidateRevision)
-    $changed = @(& git -C $repositoryRoot diff --name-only $StableRevision $CandidateRevision 2>$null)
-    if ($LASTEXITCODE -ne 0) { throw "Candidate boundary classification failed." }
-    @($changed | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    $read = Invoke-Utf8NativeProcess -FilePath "git.exe" -Arguments @(
+        "-C", $repositoryRoot, "diff", "--name-only", $StableRevision, $CandidateRevision
+    )
+    if ($read.exit_code -ne 0) { throw "Candidate boundary classification failed." }
+    @($read.stdout_lines | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
 }
 
 function Get-CandidateCompatibilityRequirement {
@@ -1579,7 +1652,7 @@ function Assert-CoordinatedMigrationReceipt {
     if (-not (Test-Path -LiteralPath $coordinatedMigrationReceiptPath)) {
         throw "MIGRATION_RECEIPT_MISSING"
     }
-    $receiptJson = Get-Content -LiteralPath $coordinatedMigrationReceiptPath -Raw
+    $receiptJson = Get-Content -LiteralPath $coordinatedMigrationReceiptPath -Raw -Encoding UTF8
     $receipt = $receiptJson | ConvertFrom-ReleaseControlJson
     $core = [ordered]@{
         schema_version = [string]$receipt.schema_version
@@ -1724,11 +1797,14 @@ function Verify-CandidateCoordinatedMigration {
 function Get-RequiredGitHubChecksResult {
     param([Parameter(Mandatory = $true)][string]$Revision)
     try {
-        $raw = @(& gh api --method GET `
-            "repos/yiyousiow000814/XAUUSD-Forecaster/commits/$Revision/check-runs?filter=latest&per_page=100" `
-            2>&1)
-        $exitCode = [int]$LASTEXITCODE
-        $json = @($raw | ForEach-Object { [string]$_ }) -join "`n"
+        $read = Invoke-Utf8NativeProcess -FilePath "gh.exe" -Arguments @(
+            "api", "--method", "GET",
+            "repos/yiyousiow000814/XAUUSD-Forecaster/commits/$Revision/check-runs?filter=latest&per_page=100"
+        )
+        $exitCode = [int]$read.exit_code
+        $json = if ($exitCode -eq 0) { [string]$read.stdout } else {
+            ((@($read.stdout_lines) + @($read.stderr_lines)) -join "`n")
+        }
         if ($exitCode -ne 0) {
             $diagnostic = Protect-PreflightDiagnosticText $json
             if (Test-TransientExternalRepositoryFailure -Operation "GITHUB_CHECKS_API" `
@@ -1814,14 +1890,18 @@ function Get-ProductionCandidateProvenanceResult {
             diagnostic = $fetch.diagnostic
         }
     }
-    & git -C $repositoryRoot cat-file -e "$([string]$Candidate.git_sha)^{commit}" 2>$null
-    if ($LASTEXITCODE -ne 0) {
+    $commit = Invoke-Utf8NativeProcess -FilePath "git.exe" -Arguments @(
+        "-C", $repositoryRoot, "cat-file", "-e", "$([string]$Candidate.git_sha)^{commit}"
+    )
+    if ($commit.exit_code -ne 0) {
         return [pscustomobject]@{
             state = "FAILED"; reason = "PRODUCTION_CANDIDATE_COMMIT_REQUIRED"
         }
     }
-    $originMain = ([string](@(& git -C $repositoryRoot rev-parse origin/main 2>$null)[0])).Trim().ToLowerInvariant()
-    if ($LASTEXITCODE -ne 0 -or $originMain -notmatch '^[0-9a-f]{40}$' -or
+    $mainRead = Invoke-Utf8NativeProcess -FilePath "git.exe" `
+        -Arguments @("-C", $repositoryRoot, "rev-parse", "origin/main")
+    $originMain = ([string]$mainRead.stdout).Trim().ToLowerInvariant()
+    if ($mainRead.exit_code -ne 0 -or $originMain -notmatch '^[0-9a-f]{40}$' -or
         $originMain -ne [string]$Candidate.git_sha) {
         return [pscustomobject]@{
             state = "FAILED"; reason = "PRODUCTION_CANDIDATE_EXACT_MAIN_REQUIRED"
@@ -1905,12 +1985,26 @@ function Invoke-WorkersObservabilityQuery {
             -Headers @{ Authorization = "Bearer $token" } `
             -ContentType "application/json" -Body ($body | ConvertTo-Json -Depth 10) `
             -TimeoutSec 30
-        if (-not $response.success) {
+        if (-not $response.success -or -not $response.result -or
+            $null -eq $response.result.PSObject.Properties['calculations']) {
             $script:lastWorkersObservabilityDiagnostic = "OBSERVABILITY_API_REJECTED"
             return $null
         }
+        $aggregates = @()
+        foreach ($calculation in @($response.result.calculations)) {
+            if ([string]::IsNullOrWhiteSpace([string]$calculation.alias) -or
+                @($calculation.aggregates).Count -ne 1 -or
+                $null -eq $calculation.aggregates[0].value) {
+                $script:lastWorkersObservabilityDiagnostic = "OBSERVABILITY_SCHEMA_INVALID"
+                return $null
+            }
+            $aggregates += [pscustomobject]@{
+                alias = [string]$calculation.alias
+                value = $calculation.aggregates[0].value
+            }
+        }
         $script:lastWorkersObservabilityDiagnostic = $null
-        return $response.result
+        return [pscustomobject]@{ aggregates = $aggregates }
     } catch {
         $statusCode = 0
         try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { $statusCode = 0 }
@@ -1918,6 +2012,8 @@ function Invoke-WorkersObservabilityQuery {
             "OBSERVABILITY_CREDENTIAL_REJECTED"
         } elseif ($statusCode -eq 429) {
             "OBSERVABILITY_RATE_LIMITED"
+        } elseif ($statusCode -in @(0, 408)) {
+            "OBSERVABILITY_TRANSIENT_API_FAILURE"
         } elseif ($statusCode -ge 500 -and $statusCode -le 599) {
             "OBSERVABILITY_TRANSIENT_API_FAILURE"
         } else { "OBSERVABILITY_QUERY_FAILED" }
@@ -1930,11 +2026,11 @@ function Invoke-WorkersObservabilityQuery {
 
 function Get-CalculationAggregate {
     param([object]$QueryResult, [string]$Alias)
-    $calculation = @($QueryResult.calculations | Where-Object {
+    $calculation = @($QueryResult.aggregates | Where-Object {
         [string]$_.alias -eq $Alias
     }) | Select-Object -First 1
-    if (-not $calculation -or @($calculation.aggregates).Count -eq 0) { return $null }
-    return $calculation.aggregates[0].value
+    if (-not $calculation) { return $null }
+    return $calculation.value
 }
 
 function Get-WorkerCpuGateState {
@@ -2055,12 +2151,48 @@ function Invoke-WorkersObservabilityEventsQuery {
             -Headers @{ Authorization = "Bearer $token" } `
             -ContentType "application/json" -Body ($body | ConvertTo-Json -Depth 12) `
             -TimeoutSec 30
-        if (-not $response.success -or -not $response.result.events) {
+        $envelope = if ($response.result) { $response.result.events } else { $null }
+        $properties = if ($envelope) { @($envelope.PSObject.Properties.Name) } else { @() }
+        if (-not $response.success -or -not $envelope -or
+            @(@('events', 'fields', 'count', 'series') |
+                Where-Object { $_ -notin $properties }).Count -gt 0) {
             $script:lastWorkersObservabilityDiagnostic = "OBSERVABILITY_API_REJECTED"
             return $null
         }
+        $providerEvents = @($envelope.events)
+        $totalCount = 0
+        if ($null -eq $envelope.count -or
+            -not [int]::TryParse([string]$envelope.count, [ref]$totalCount) -or
+            $totalCount -lt 0 -or $totalCount -lt $providerEvents.Count) {
+            $script:lastWorkersObservabilityDiagnostic = "OBSERVABILITY_SCHEMA_INVALID"
+            return $null
+        }
+        try {
+            $records = @($providerEvents | ForEach-Object {
+                ConvertTo-ReleaseTelemetryRecord -Event $_
+            })
+        } catch {
+            $script:lastWorkersObservabilityDiagnostic = "OBSERVABILITY_SCHEMA_INVALID"
+            return $null
+        }
+        $nextOffset = ""
+        if ($providerEvents.Count -gt 0 -and $totalCount -gt $providerEvents.Count) {
+            $lastMetadata = Get-ReleaseTelemetryProperty `
+                -Object $providerEvents[-1] -Name '$metadata'
+            $nextOffset = [string](Get-ReleaseTelemetryProperty `
+                -Object $lastMetadata -Name 'id')
+            if (-not $nextOffset -or $nextOffset -eq $Offset) {
+                $script:lastWorkersObservabilityDiagnostic = "OBSERVABILITY_EVENT_CURSOR_INVALID"
+                return $null
+            }
+        }
         $script:lastWorkersObservabilityDiagnostic = $null
-        return $response.result
+        return [pscustomobject]@{
+            records = $records
+            total_count = $totalCount
+            page_count = $records.Count
+            next_offset = $nextOffset
+        }
     } catch {
         $statusCode = 0
         try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { $statusCode = 0 }
@@ -2068,6 +2200,8 @@ function Invoke-WorkersObservabilityEventsQuery {
             "OBSERVABILITY_CREDENTIAL_REJECTED"
         } elseif ($statusCode -eq 429) {
             "OBSERVABILITY_RATE_LIMITED"
+        } elseif ($statusCode -in @(0, 408)) {
+            "OBSERVABILITY_TRANSIENT_API_FAILURE"
         } elseif ($statusCode -ge 500 -and $statusCode -le 599) {
             "OBSERVABILITY_TRANSIENT_API_FAILURE"
         } else { "OBSERVABILITY_QUERY_FAILED" }
@@ -2193,30 +2327,28 @@ function Get-CandidateFrozenPlatformEvidence {
         if (-not $frozen) { $frozenTo = [DateTimeOffset]::UtcNow }
         $events = @()
         $offset = ''
+        $pageComplete = $false
         for ($pageNumber = 0; $pageNumber -lt 20; $pageNumber++) {
             $page = Invoke-WorkersObservabilityEventsQuery -Filters $filters `
                 -From $From -To $frozenTo -Offset $offset
             if ($null -eq $page) { return $null }
-            $pageEvents = @($page.events)
-            $events += $pageEvents
-            if ($pageEvents.Count -lt 2000) { break }
-            $lastMetadata = Get-ReleaseTelemetryProperty -Object $pageEvents[-1] -Name '$metadata'
-            $nextOffset = [string](Get-ReleaseTelemetryProperty -Object $lastMetadata -Name 'id')
-            if (-not $nextOffset -or $nextOffset -eq $offset) {
+            $pageRecords = @($page.records)
+            $events += $pageRecords
+            if ($events.Count -ge [int]$page.total_count) {
+                $pageComplete = $true
+                break
+            }
+            if (-not $page.next_offset) {
                 $script:lastWorkersObservabilityDiagnostic = 'OBSERVABILITY_EVENT_CURSOR_INVALID'
                 return $null
             }
-            $offset = $nextOffset
+            $offset = [string]$page.next_offset
         }
-        if ($events.Count -ge 40000) {
+        if (-not $pageComplete) {
             $script:lastWorkersObservabilityDiagnostic = 'OBSERVABILITY_EVENT_PAGE_BOUND_EXCEEDED'
             return $null
         }
-        try { $candidateRecords = @($events | ForEach-Object { ConvertTo-ReleaseTelemetryRecord $_ }) }
-        catch {
-            $script:lastWorkersObservabilityDiagnostic = 'OBSERVABILITY_SCHEMA_INVALID'
-            return $null
-        }
+        $candidateRecords = @($events)
         $actualIds = @($candidateRecords | ForEach-Object { $_.request_id } | Sort-Object)
         $eventIds = @($candidateRecords | ForEach-Object { $_.event_id })
         $identityValid = @($candidateRecords | Where-Object {
@@ -2299,7 +2431,7 @@ function Get-CandidateFrozenPlatformEvidence {
         elseif ($review -or $global.gate_state -eq 'REVIEW_REQUIRED') { 'REVIEW_REQUIRED' }
         else { 'PASSED' }
     return [pscustomobject]@{
-        source = 'CLOUDFLARE_WORKERS_OBSERVABILITY_RAW_EVENTS'
+        source = 'CLOUDFLARE_WORKERS_OBSERVABILITY_NORMALIZED_EVENTS'
         credential_source = [string]$script:lastWorkersObservabilityCredentialSource
         worker_version_id = [string]$Candidate.worker_version_id
         validation_run = $ValidationRun
@@ -2332,8 +2464,10 @@ function Get-WorkerValidationManifest {
     param([string]$Revision = "")
     if ($Revision) {
         $object = "{0}:web/worker-validation-manifest.json" -f $Revision
-        $raw = (& git -C $repositoryRoot show $object 2>$null) -join "`n"
-        if ($LASTEXITCODE -ne 0 -or -not $raw) {
+        $read = Invoke-Utf8NativeProcess -FilePath "git.exe" `
+            -Arguments @("-C", $repositoryRoot, "show", $object)
+        $raw = [string]$read.stdout
+        if ($read.exit_code -ne 0 -or -not $raw) {
             throw "WORKER_ROUTE_VALIDATION_MANIFEST_UNAVAILABLE"
         }
     } else {
@@ -2453,20 +2587,26 @@ function New-CandidateValidationFixtureWorkspace {
     $stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) `
         ("aurum-release-validation-{0}" -f [guid]::NewGuid().ToString("N"))
     $fixtureRoot = Join-Path $stageRoot ".release-validation-fixtures"
-    & git -C $repositoryRoot worktree add --detach --quiet $stageRoot `
-        ([string]$Candidate.git_sha) 2>$null
-    if ($LASTEXITCODE -ne 0) { throw "Candidate fixture worktree is unavailable." }
+    $worktree = Invoke-Utf8NativeProcess -FilePath "git.exe" -Arguments @(
+        "-C", $repositoryRoot, "worktree", "add", "--detach", "--quiet",
+        $stageRoot, [string]$Candidate.git_sha
+    )
+    if ($worktree.exit_code -ne 0) { throw "Candidate fixture worktree is unavailable." }
     try {
         $python = (Get-Command python.exe -ErrorAction Stop).Source
-        & $python (Join-Path $stageRoot "scripts\build_release_validation_fixtures.py") `
-            --output $fixtureRoot | Out-Null
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $fixtureRoot)) {
+        $build = Invoke-Utf8NativeProcess -FilePath $python -Arguments @(
+            (Join-Path $stageRoot "scripts\build_release_validation_fixtures.py"),
+            "--output", $fixtureRoot
+        ) -WorkingDirectory $stageRoot -Environment @{ PYTHONUTF8 = "1" }
+        if ($build.exit_code -ne 0 -or -not (Test-Path -LiteralPath $fixtureRoot)) {
             throw "Production-shaped fixture generation failed."
         }
         return [pscustomobject]@{ stage_root=$stageRoot; fixture_root=$fixtureRoot }
     } catch {
-        & git -C $repositoryRoot worktree remove --force $stageRoot 2>$null
-        & git -C $repositoryRoot worktree prune 2>$null
+        $null = Invoke-Utf8NativeProcess -FilePath "git.exe" `
+            -Arguments @("-C", $repositoryRoot, "worktree", "remove", "--force", $stageRoot)
+        $null = Invoke-Utf8NativeProcess -FilePath "git.exe" `
+            -Arguments @("-C", $repositoryRoot, "worktree", "prune")
         throw
     }
 }
@@ -2474,8 +2614,11 @@ function New-CandidateValidationFixtureWorkspace {
 function Remove-CandidateValidationFixtureWorkspace {
     param([object]$Workspace)
     if (-not $Workspace -or -not $Workspace.stage_root) { return }
-    & git -C $repositoryRoot worktree remove --force ([string]$Workspace.stage_root) 2>$null
-    & git -C $repositoryRoot worktree prune 2>$null
+    $null = Invoke-Utf8NativeProcess -FilePath "git.exe" -Arguments @(
+        "-C", $repositoryRoot, "worktree", "remove", "--force", [string]$Workspace.stage_root
+    )
+    $null = Invoke-Utf8NativeProcess -FilePath "git.exe" `
+        -Arguments @("-C", $repositoryRoot, "worktree", "prune")
 }
 
 function Get-CandidateRouteResponseReason {
@@ -2826,6 +2969,9 @@ function Invoke-CandidateWorkerValidation {
             -NotePropertyValue ([string]$Candidate.git_sha) -Force
     }
     $results = @()
+    $expectedRequests = @()
+    $workerStartedAt = $null
+    $workerEndedAt = $null
     foreach ($route in @($RoutePlan.static_assets)) {
         $results += Invoke-CandidateStaticAssetSample -Candidate $Candidate -Route $route
     }
@@ -2964,7 +3110,59 @@ function Invoke-CandidateWorkerValidation {
         observability_diagnostic = [string]$script:lastWorkersObservabilityDiagnostic
         routes = $results
         cpu_evidence = $platform
+        telemetry_window_from = if ($workerStartedAt) { $workerStartedAt.ToString('o') } else { $null }
+        telemetry_window_to = if ($workerEndedAt) { $workerEndedAt.ToString('o') } else { $null }
+        expected_requests = @($expectedRequests)
     }
+}
+
+function Resume-CandidateWorkerPlatformEvidence {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$Validation
+    )
+    if ([string]$Validation.key -ne [string]$Candidate.validation_key -or
+        -not $Validation.validation_run -or
+        @($Validation.expected_requests).Count -eq 0 -or
+        -not $Validation.telemetry_window_from -or
+        @($Validation.routes).Count -eq 0) {
+        throw "CANDIDATE_PLATFORM_RESUME_RECEIPT_INVALID"
+    }
+    $from = ConvertTo-ReleaseTimestampUtc -Value $Validation.telemetry_window_from
+    if ($from -eq [DateTimeOffset]::MinValue) {
+        throw "CANDIDATE_PLATFORM_RESUME_RECEIPT_INVALID"
+    }
+    $script:lastWorkersObservabilityDiagnostic = $null
+    $platform = Get-CandidateFrozenPlatformEvidence -Candidate $Candidate `
+        -From $from -To ([DateTimeOffset]::UtcNow) `
+        -ExpectedRequests @($Validation.expected_requests) `
+        -ValidationRun ([string]$Validation.validation_run)
+    return [pscustomobject]@{
+        channel = "VERSION_HOST_RESULT"
+        passed = $true
+        resumed_platform_only = $true
+        validation_run = [string]$Validation.validation_run
+        expected_worker_invocations = [int]$Validation.expected_worker_invocations
+        observed_worker_invocations = if ($platform) { $platform.invocations } else { $null }
+        static_worker_invocations = [int]$Validation.static_worker_invocations
+        static_observability_state = [string]$Validation.static_observability_state
+        observability_credential_source = [string]$script:lastWorkersObservabilityCredentialSource
+        observability_diagnostic = [string]$script:lastWorkersObservabilityDiagnostic
+        routes = @($Validation.routes)
+        cpu_evidence = $platform
+        telemetry_window_from = [string]$Validation.telemetry_window_from
+        telemetry_window_to = [string]$Validation.telemetry_window_to
+        expected_requests = @($Validation.expected_requests)
+    }
+}
+
+function Test-RetryableObservabilityDiagnostic {
+    param([string]$Diagnostic)
+    return [bool]($Diagnostic -in @(
+        "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING",
+        "OBSERVABILITY_RATE_LIMITED",
+        "OBSERVABILITY_TRANSIENT_API_FAILURE"
+    ))
 }
 
 function Set-CloudflareCandidatePointer {
@@ -4138,8 +4336,19 @@ function Invoke-AutomaticCandidateValidation {
         }
         $cloudflare = [pscustomobject]@{ passed = $true; routes = @(); cpu_evidence = "NOT_REQUIRED" }
         if ($cloudflareChanged) {
-            $cloudflare = Invoke-CandidateWorkerValidation -Candidate $Candidate `
-                -RoutePlan $routePlan
+            $resumePlatformOnly = [bool](
+                $priorValidationState -eq "PLATFORM_PENDING" -and
+                [string]$state.candidate.validation.key -eq [string]$Candidate.validation_key -and
+                (Test-RetryableObservabilityDiagnostic `
+                    -Diagnostic ([string]$state.candidate.validation.observability_diagnostic))
+            )
+            $cloudflare = if ($resumePlatformOnly) {
+                Resume-CandidateWorkerPlatformEvidence -Candidate $Candidate `
+                    -Validation $state.candidate.validation
+            } else {
+                Invoke-CandidateWorkerValidation -Candidate $Candidate `
+                    -RoutePlan $routePlan
+            }
             if (-not $cloudflare.passed) {
                 $failedRoutes = @($cloudflare.routes | Where-Object { -not $_.passed })
                 $passedRoutes = @($cloudflare.routes | Where-Object { $_.passed })
@@ -4183,21 +4392,22 @@ function Invoke-AutomaticCandidateValidation {
                 return $false
             }
             if (-not $cloudflare.cpu_evidence) {
-                $telemetryPending = [bool](
-                    [string]$cloudflare.observability_diagnostic -eq
-                        "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"
-                )
+                $diagnostic = if ($cloudflare.observability_diagnostic) {
+                    [string]$cloudflare.observability_diagnostic
+                } else { "PLATFORM_CPU_EVIDENCE_REQUIRED" }
+                $telemetryPending = Test-RetryableObservabilityDiagnostic `
+                    -Diagnostic $diagnostic
                 if ($telemetryPending) {
                     $state.candidate.validation_state = "PLATFORM_PENDING"
+                } else {
+                    $state.candidate.validation_state = "FAILED"
                 }
                 $state.candidate.validation = [pscustomobject]@{
                     key = [string]$Candidate.validation_key
                     repository = "PASSED"
                     windows = "PASSED"
-                    cloudflare = if ($telemetryPending) { "PENDING" } else { "TESTING" }
-                    reason = if ($telemetryPending) {
-                        "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"
-                    } else { "PLATFORM_CPU_EVIDENCE_REQUIRED" }
+                    cloudflare = if ($telemetryPending) { "PENDING" } else { "FAILED" }
+                    reason = $diagnostic
                     validation_run = $cloudflare.validation_run
                     route_plan = $routePlan
                     routes = $cloudflare.routes
@@ -4205,7 +4415,11 @@ function Invoke-AutomaticCandidateValidation {
                     observed_worker_invocations = $cloudflare.observed_worker_invocations
                     static_observability_state = $cloudflare.static_observability_state
                     observability_credential_source = $cloudflare.observability_credential_source
-                    observability_diagnostic = $cloudflare.observability_diagnostic
+                    observability_diagnostic = $diagnostic
+                    telemetry_window_from = $cloudflare.telemetry_window_from
+                    telemetry_window_to = $cloudflare.telemetry_window_to
+                    expected_requests = @($cloudflare.expected_requests)
+                    static_worker_invocations = $cloudflare.static_worker_invocations
                     data_parity = [pscustomobject]@{ state = "NOT_RUN" }
                     cpu_headroom = [pscustomobject]@{ state = "DIAGNOSTIC_UNAVAILABLE" }
                     worker_failures = [pscustomobject]@{ state = "DIAGNOSTIC_UNAVAILABLE" }
@@ -4215,8 +4429,14 @@ function Invoke-AutomaticCandidateValidation {
                 if ($telemetryPending) {
                     Write-ReleaseHistory -Event "CANDIDATE_PLATFORM_PENDING" `
                         -Release $state.candidate -Detail @{
-                            reason = "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"
+                            reason = $diagnostic
                             retryable = $true
+                        }
+                } else {
+                    Write-ReleaseHistory -Event "CANDIDATE_FAILED" `
+                        -Release $state.candidate -Detail @{
+                            reason = $diagnostic
+                            validation_run = $cloudflare.validation_run
                         }
                 }
                 return $false
@@ -4618,7 +4838,7 @@ function Get-RuntimeControlBundleIdentityAtRoot {
     $path = Join-Path $ControlRoot $runtimeControlManifestName
     if (-not (Test-Path -LiteralPath $path)) { return $null }
     try {
-        $identity = Get-Content -LiteralPath $path -Raw |
+        $identity = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
         if (-not [bool]$identity.exact_revision -or
             [string]$identity.source_revision -notmatch '^[0-9a-f]{40}$') {
@@ -4646,21 +4866,21 @@ function New-VerifiedRuntimeControlBundleStage {
     if ($SourceRevision -notmatch '^[0-9a-f]{40}$') {
         throw "CONTROL_BUNDLE_EXACT_REVISION_REQUIRED"
     }
-    $revisionOutput = @(& git -C $SourceRoot rev-parse HEAD 2>$null)
-    $revisionExitCode = $LASTEXITCODE
-    $observedRevision = if ($revisionOutput.Count -gt 0) {
-        ([string]$revisionOutput[0]).Trim()
-    } else { "" }
-    if ($revisionExitCode -ne 0 -or $observedRevision -ne $SourceRevision) {
+    $revisionRead = Invoke-Utf8NativeProcess -FilePath "git.exe" `
+        -Arguments @("-C", $SourceRoot, "rev-parse", "HEAD")
+    $observedRevision = ([string]$revisionRead.stdout).Trim()
+    if ($revisionRead.exit_code -ne 0 -or $observedRevision -ne $SourceRevision) {
         throw "CONTROL_BUNDLE_SOURCE_REVISION_MISMATCH"
     }
     if ($RequireImmutableSource) {
-        $dirty = @(& git -C $SourceRoot status --porcelain 2>$null)
-        if ($LASTEXITCODE -ne 0 -or $dirty.Count -ne 0) {
+        $statusRead = Invoke-Utf8NativeProcess -FilePath "git.exe" `
+            -Arguments @("-C", $SourceRoot, "status", "--porcelain")
+        if ($statusRead.exit_code -ne 0 -or @($statusRead.stdout_lines).Count -ne 0) {
             throw "CONTROL_BUNDLE_IMMUTABLE_SOURCE_REQUIRED"
         }
-        & git -C $SourceRoot symbolic-ref -q HEAD 2>$null | Out-Null
-        if ($LASTEXITCODE -eq 0) {
+        $symbolicRead = Invoke-Utf8NativeProcess -FilePath "git.exe" `
+            -Arguments @("-C", $SourceRoot, "symbolic-ref", "-q", "HEAD")
+        if ($symbolicRead.exit_code -eq 0) {
             throw "CONTROL_BUNDLE_DETACHED_SOURCE_REQUIRED"
         }
     }
@@ -4758,7 +4978,12 @@ function Sync-StableRuntimeControlFiles {
     $backupRoot = Join-Path $controlParent (".rcb-{0}" -f $transactionId)
     try {
         if (-not $SourceRevision) {
-            $SourceRevision = (& git -C $SourceRoot rev-parse HEAD 2>$null | Select-Object -First 1)
+            $revisionRead = Invoke-Utf8NativeProcess -FilePath "git.exe" `
+                -Arguments @("-C", $SourceRoot, "rev-parse", "HEAD")
+            if ($revisionRead.exit_code -ne 0) {
+                throw "CONTROL_BUNDLE_EXACT_REVISION_REQUIRED"
+            }
+            $SourceRevision = ([string]$revisionRead.stdout).Trim()
         }
         $null = New-VerifiedRuntimeControlBundleStage -SourceRoot $SourceRoot `
             -SourceRevision $SourceRevision -StageRoot $stageRoot
@@ -4810,9 +5035,11 @@ finally:
     destination.close()
     source.close()
 '@
-    $result = & $Python -c $copy $SourceDatabase $TargetDatabase 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "candidate evidence copy failed: $result"
+    $read = Invoke-Utf8NativeProcess -FilePath $Python `
+        -Arguments @("-c", $copy, $SourceDatabase, $TargetDatabase) `
+        -Environment @{ PYTHONUTF8 = "1" }
+    if ($read.exit_code -ne 0) {
+        throw "candidate evidence copy failed: $((@($read.stdout_lines) + @($read.stderr_lines)) -join "`n")"
     }
 }
 
@@ -4833,9 +5060,11 @@ from xauusd_forecaster.forward_ledger import ForwardLedger
 ledger = ForwardLedger(target_path)
 ledger.close()
 '@
-    $result = & $Python -c $migration $StageRoot $TargetDatabase 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "candidate evidence migration failed: $result"
+    $read = Invoke-Utf8NativeProcess -FilePath $Python `
+        -Arguments @("-c", $migration, $StageRoot, $TargetDatabase) `
+        -Environment @{ PYTHONUTF8 = "1" }
+    if ($read.exit_code -ne 0) {
+        throw "candidate evidence migration failed: $((@($read.stdout_lines) + @($read.stderr_lines)) -join "`n")"
     }
 }
 
@@ -4913,7 +5142,8 @@ function Get-PreflightLogTail {
     param([string]$Path)
     if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
     try {
-        $tail = (Get-Content -LiteralPath $Path -Tail 40 -ErrorAction Stop) -join "`n"
+        $tail = (Get-Content -LiteralPath $Path -Tail 40 -Encoding UTF8 `
+            -ErrorAction Stop) -join "`n"
         return Protect-PreflightDiagnosticText $tail
     } catch { return $null }
 }
@@ -5062,12 +5292,18 @@ function Invoke-ProductionShapePreflight {
         Set-Content -LiteralPath $stdout -Value "" -Encoding UTF8
         Set-Content -LiteralPath $stderr -Value "" -Encoding UTF8
         $phase = "START_API"
-        $process = Start-Process -FilePath $python -ArgumentList @(
-            (Join-Path $stageRoot "scripts\run_dashboard_api.py"),
-            "--database", $candidateDatabase, "--host", "127.0.0.1",
-            "--port", [string]$preflightPort
-        ) -WorkingDirectory $stageRoot -WindowStyle Hidden -PassThru `
-            -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        $priorPythonUtf8 = $env:PYTHONUTF8
+        try {
+            $env:PYTHONUTF8 = "1"
+            $process = Start-Process -FilePath $python -ArgumentList @(
+                (Join-Path $stageRoot "scripts\run_dashboard_api.py"),
+                "--database", $candidateDatabase, "--host", "127.0.0.1",
+                "--port", [string]$preflightPort
+            ) -WorkingDirectory $stageRoot -WindowStyle Hidden -PassThru `
+                -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        } finally {
+            $env:PYTHONUTF8 = $priorPythonUtf8
+        }
         $statusUrl = "http://127.0.0.1:$preflightPort/api/critical-status"
         $phase = "WAIT_CRITICAL_STATUS"
         $readiness = Wait-CandidateCriticalStatus -Process $process `
@@ -5082,10 +5318,12 @@ function Invoke-ProductionShapePreflight {
             "--status-url", $statusUrl,
             "--allow-pending-generation-decision"
         )
-        $result = & $python @arguments 2>&1
-        if ($LASTEXITCODE -ne 0) {
+        $shape = Invoke-Utf8NativeProcess -FilePath $python -Arguments $arguments `
+            -WorkingDirectory $stageRoot -Environment @{ PYTHONUTF8 = "1" }
+        if ($shape.exit_code -ne 0) {
             $failureCode = "PRODUCTION_SHAPE_REJECTED"
-            $productionShapeOutput = Protect-PreflightDiagnosticText ($result -join "`n")
+            $productionShapeOutput = Protect-PreflightDiagnosticText `
+                ((@($shape.stdout_lines) + @($shape.stderr_lines)) -join "`n")
             throw "candidate production shape rejected"
         }
         $preflightStarted.Stop()
@@ -5202,7 +5440,7 @@ function Update-RuntimeCheckout {
 function Get-RuntimeCodeState {
     if (-not (Test-Path -LiteralPath $runtimeCodeStatePath)) { return $null }
     try {
-        return Get-Content -LiteralPath $runtimeCodeStatePath -Raw |
+        return Get-Content -LiteralPath $runtimeCodeStatePath -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
     } catch {
         return $null
@@ -5236,7 +5474,7 @@ function Get-RuntimeHeartbeat {
     )
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
     try {
-        $heartbeat = Get-Content -LiteralPath $Path -Raw |
+        $heartbeat = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
         $lastSuccess = ConvertTo-ReleaseTimestampUtc -Value $heartbeat.last_success
         if ([string]$heartbeat.service -ne $ServiceName -or
@@ -5293,7 +5531,7 @@ function Test-CodeReloadHealth {
     $statusFile = Join-Path $moduleRoot ".local\forward\dashboard-sync-status.json"
     if (-not (Test-Path -LiteralPath $statusFile)) { return $false }
     try {
-        $syncStatus = Get-Content -LiteralPath $statusFile -Raw |
+        $syncStatus = Get-Content -LiteralPath $statusFile -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
         $lastAttempt = ConvertTo-ReleaseTimestampUtc -Value $syncStatus.last_attempt
         if ($lastAttempt -eq [DateTimeOffset]::MinValue) { return $false }
@@ -5400,9 +5638,10 @@ function Test-CurrentProductionShape {
             "--status-url", "http://127.0.0.1:8765/api/critical-status",
             "--allow-pending-generation-decision"
         )
-        $result = @(& $python @arguments 2>&1)
-        $exitCode = $LASTEXITCODE
-        $resultText = ($result | ForEach-Object { [string]$_ }) -join "`n"
+        $read = Invoke-Utf8NativeProcess -FilePath $python -Arguments $arguments `
+            -WorkingDirectory $moduleRoot -Environment @{ PYTHONUTF8 = "1" }
+        $exitCode = [int]$read.exit_code
+        $resultText = ((@($read.stdout_lines) + @($read.stderr_lines)) -join "`n")
         if ($exitCode -eq 75) {
             try {
                 $payload = $resultText | ConvertFrom-ReleaseControlJson
@@ -5941,7 +6180,11 @@ function Test-DeferredProjectionObligations {
         "--required-after", $RequiredAfter.ToString("o")
     )
     foreach ($route in $routes) { $arguments += @("--route", $route) }
-    $output = @(& $python @arguments 2>&1)
+    $read = Invoke-Utf8NativeProcess -FilePath $python -Arguments $arguments `
+        -WorkingDirectory $moduleRoot -Environment @{ PYTHONUTF8 = "1" }
+    $output = if ($read.exit_code -eq 0) { @($read.stdout_lines) } else {
+        @($read.stdout_lines) + @($read.stderr_lines)
+    }
     try {
         return (($output | ForEach-Object { [string]$_ }) -join "`n") |
             ConvertFrom-ReleaseControlJson
@@ -6169,7 +6412,7 @@ function Get-BrokerMarketSession {
     $path = Join-Path $moduleRoot ".local\forward\quotes\market-session.json"
     if (-not (Test-Path -LiteralPath $path)) { return $null }
     try {
-        $session = Get-Content -LiteralPath $path -Raw |
+        $session = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
         $observedAt = ConvertTo-ReleaseTimestampUtc -Value $session.observed_at
         if ($observedAt -eq [DateTimeOffset]::MinValue) { return $null }
@@ -6220,7 +6463,7 @@ function Get-ServiceState {
         $statusPath = Join-Path $moduleRoot ".local\forward\live-broadcast-publisher-status.json"
         if (-not (Test-Path -LiteralPath $statusPath)) { return "DEGRADED" }
         try {
-            $publisher = Get-Content -LiteralPath $statusPath -Raw |
+            $publisher = Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8 |
                 ConvertFrom-ReleaseControlJson
             $lastSuccess = ConvertTo-ReleaseTimestampUtc -Value $publisher.last_success
             $fresh = $lastSuccess -ne [DateTimeOffset]::MinValue -and
@@ -6292,7 +6535,7 @@ function Get-ServiceState {
         $statusFile = Join-Path $moduleRoot ".local\forward\dashboard-sync-status.json"
         if (-not (Test-Path -LiteralPath $statusFile)) { return "STARTING" }
         try {
-            $syncStatus = Get-Content -LiteralPath $statusFile -Raw |
+            $syncStatus = Get-Content -LiteralPath $statusFile -Raw -Encoding UTF8 |
                 ConvertFrom-ReleaseControlJson
             $lastSuccess = if ($syncStatus.last_success) {
                 ConvertTo-ReleaseTimestampUtc -Value $syncStatus.last_success
@@ -6627,7 +6870,7 @@ function Assert-CurrentWatchdogHeartbeat {
         throw "CONTROL_PLANE_CURRENT_WATCHDOG_HEARTBEAT_MISSING"
     }
     try {
-        $heartbeat = Get-Content -LiteralPath $watchdogHeartbeatPath -Raw |
+        $heartbeat = Get-Content -LiteralPath $watchdogHeartbeatPath -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
         $observedAt = ConvertTo-ReleaseTimestampUtc -Value $heartbeat.observed_at
         if ($observedAt -eq [DateTimeOffset]::MinValue) {
@@ -6830,7 +7073,7 @@ function Assert-AbandonedControlPlaneInstallActivation {
         throw "CONTROL_PLANE_RECOVERY_QUIESCED_ACK_MISSING"
     }
     try {
-        $heartbeat = Get-Content -LiteralPath $watchdogHeartbeatPath -Raw |
+        $heartbeat = Get-Content -LiteralPath $watchdogHeartbeatPath -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
     } catch {
         throw "CONTROL_PLANE_RECOVERY_QUIESCED_ACK_INVALID"
@@ -6855,7 +7098,7 @@ function Assert-AbandonedControlPlaneInstallActivation {
         $lockOwner = $null
         try {
             $lockOwner = Get-Content -LiteralPath `
-                (Join-Path $releaseLockPath "owner.json") -Raw |
+                (Join-Path $releaseLockPath "owner.json") -Raw -Encoding UTF8 |
                 ConvertFrom-ReleaseControlJson
         } catch {}
         if (-not $lockOwner -or
@@ -6945,7 +7188,7 @@ function Assert-ControlPlaneIsolationSnapshot {
 function Get-ControlPlaneInstallState {
     if (-not (Test-Path -LiteralPath $controlPlaneInstallStatePath)) { return $null }
     try {
-        Get-Content -LiteralPath $controlPlaneInstallStatePath -Raw |
+        Get-Content -LiteralPath $controlPlaneInstallStatePath -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
     } catch { return $null }
 }
@@ -6955,7 +7198,7 @@ function Write-ControlPlaneInstallState {
     $current = @{}
     if (Test-Path -LiteralPath $controlPlaneInstallStatePath) {
         try {
-            $prior = Get-Content -LiteralPath $controlPlaneInstallStatePath -Raw |
+            $prior = Get-Content -LiteralPath $controlPlaneInstallStatePath -Raw -Encoding UTF8 |
                 ConvertFrom-ReleaseControlJson
             foreach ($property in $prior.PSObject.Properties) {
                 $current[$property.Name] = $property.Value
@@ -7098,7 +7341,7 @@ function Wait-VerifiedWatchdogHandoff {
         $heartbeat = $null
         try {
             if (Test-Path -LiteralPath $watchdogHeartbeatPath) {
-                $heartbeat = Get-Content -LiteralPath $watchdogHeartbeatPath -Raw |
+                $heartbeat = Get-Content -LiteralPath $watchdogHeartbeatPath -Raw -Encoding UTF8 |
                     ConvertFrom-ReleaseControlJson
             }
         } catch {}
@@ -7572,13 +7815,17 @@ function Install-ProductionRuntime {
     if ($sameCheckout -or $insideCheckout) {
         throw "RuntimeRoot must be separate from the development checkout."
     }
-    $revision = (& git -C $source rev-parse HEAD 2>$null).Trim()
-    if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
+    $revisionRead = Invoke-Utf8NativeProcess -FilePath "git.exe" `
+        -Arguments @("-C", $source, "rev-parse", "HEAD")
+    $revision = ([string]$revisionRead.stdout).Trim()
+    if ($revisionRead.exit_code -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
         throw "Cannot resolve the verified development revision."
     }
     if (Test-Path -LiteralPath $runtime) {
-        $inside = (& git -C $runtime rev-parse --is-inside-work-tree 2>$null).Trim()
-        if ($LASTEXITCODE -ne 0 -or $inside -ne "true") {
+        $insideRead = Invoke-Utf8NativeProcess -FilePath "git.exe" `
+            -Arguments @("-C", $runtime, "rev-parse", "--is-inside-work-tree")
+        $inside = ([string]$insideRead.stdout).Trim()
+        if ($insideRead.exit_code -ne 0 -or $inside -ne "true") {
             throw "Existing RuntimeRoot is not a Git worktree: $runtime"
         }
         & git -C $runtime checkout --detach --force --quiet $revision 2>$null
@@ -7937,7 +8184,7 @@ function Write-ControlCenterUiStarted {
 function Get-ControlCenterOperationText {
     param([string]$Path)
     if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return "" }
-    $content = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+    $content = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
     if ($null -eq $content) { return "" }
     return Protect-PreflightDiagnosticText -Value (([string]$content).Trim())
 }
@@ -8021,7 +8268,7 @@ function Read-ControlCenterOperationResult {
     param([string]$Path)
     if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
     try {
-        $result = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop |
+        $result = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop |
             ConvertFrom-ReleaseControlJson
         if ([string]$result.schema_version -ne "control-center-operation-v1" -or
             -not $result.operation) { return $null }
@@ -8041,7 +8288,7 @@ function Test-ControlCenterApprovalCommitted {
             $ValidationKey) { return $false }
     if (-not (Test-Path -LiteralPath $releaseHistoryPath)) { return $false }
     foreach ($line in @(Get-Content -LiteralPath $releaseHistoryPath -Tail 1000 `
-        -ErrorAction SilentlyContinue)) {
+        -Encoding UTF8 -ErrorAction SilentlyContinue)) {
         try {
             $entry = $line | ConvertFrom-ReleaseControlJson
             if ([string]$entry.event -eq "CANDIDATE_COMPATIBILITY_APPROVED" -and
@@ -8061,7 +8308,7 @@ function Test-ControlCenterReleaseHistoryContains {
     )
     if (-not (Test-Path -LiteralPath $releaseHistoryPath)) { return $false }
     foreach ($line in @(Get-Content -LiteralPath $releaseHistoryPath -Tail 1000 `
-        -ErrorAction SilentlyContinue)) {
+        -Encoding UTF8 -ErrorAction SilentlyContinue)) {
         try {
             $entry = $line | ConvertFrom-ReleaseControlJson
             if ([string]$entry.event -eq $Event -and
@@ -9753,7 +10000,7 @@ function Show-ControlCenter {
             $script:statusRefreshProcess = $null
             if (Test-Path -LiteralPath $statusSnapshotPath) {
                 try {
-                    Apply-GuiStatus (Get-Content -LiteralPath $statusSnapshotPath -Raw |
+                    Apply-GuiStatus (Get-Content -LiteralPath $statusSnapshotPath -Raw -Encoding UTF8 |
                         ConvertFrom-ReleaseControlJson)
                 } catch {}
             }
