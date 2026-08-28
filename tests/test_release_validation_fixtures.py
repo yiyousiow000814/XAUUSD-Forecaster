@@ -86,17 +86,26 @@ def test_release_news_fixture_rejects_invalid_impact_clock(value: str) -> None:
         canonicalize_news_projection_impact_clocks({"impact_expires_at": value})
 
 
-def test_release_news_fixture_generation_identity_and_hash_are_deterministic() -> None:
+def test_release_fixture_generation_identities_hashes_and_checked_bytes_are_deterministic() -> None:
     first = build_fixtures()
     second = build_fixtures()
-    golden = (
+    golden_root = (
         Path(__file__).parent
         / "fixtures"
-        / "release_validation_news_index_stage.json"
-    ).read_bytes()
+        / "release_validation"
+    )
+    golden = {
+        path.name: path.read_bytes()
+        for path in golden_root.glob("*.json")
+    }
 
     assert first == second
-    assert golden == first["news-index-stage.json"]
+    assert golden == first
+    assert {
+        name: sha256(payload).hexdigest() for name, payload in first.items()
+    } == {
+        name: sha256(payload).hexdigest() for name, payload in second.items()
+    }
     first_stage = json.loads(first["news-index-stage.json"])
     second_stage = json.loads(second["news-index-stage.json"])
     assert first_stage["generation_id"] == second_stage["generation_id"]

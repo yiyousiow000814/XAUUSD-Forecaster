@@ -11,7 +11,6 @@
     "build": "vinext build && node ./build/publish-prerendered-assets.mjs",
     "benchmark:worker-cpu": "node --import ./tests/register-cloudflare-worker-loader.mjs ./build/benchmark-worker-cpu.mjs",
     "start": "vinext start",
-    "pretest": "node ./build/install-workers-ci-python-deps.mjs",
     "test": "npm run cf:types:check && npm run build && node --import ./tests/register-cloudflare-worker-loader.mjs --test tests/acceptance-inventory.test.mjs tests/cloudflare-build-environment.test.mjs tests/admin-auth-session.test.mjs tests/admin-client.test.mjs tests/operational-incidents.test.mjs tests/dashboard-resource.test.mjs tests/live-broadcast.test.mjs tests/d1-capabilities.test.mjs tests/news-evidence-store.test.mjs tests/news-projection-store.test.mjs tests/rendered-html.test.mjs tests/responsive-scroll.test.mjs tests/market-open-window.test.mjs tests/timeline-clusters.test.mjs tests/news-retrieval.test.mjs tests/assistant-auth.test.mjs tests/assistant-conversations.test.mjs tests/assistant-events.test.mjs tests/assistant-memory.test.mjs tests/assistant-routing.test.mjs tests/assistant-content.test.mjs tests/assistant-evidence.test.mjs tests/assistant-chat.test.mjs tests/assistant-chat-client.test.mjs tests/news-questions.test.mjs tests/news-questions-route.test.mjs tests/operator-retry.test.mjs tests/operator-retry-route.test.mjs tests/worker-cpu-headroom.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
