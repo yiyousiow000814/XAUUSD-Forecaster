@@ -47,5 +47,6 @@ jobs:
           python -m pytest -q --timeout=30 --timeout-method=thread
           tests/test_runtime_health.py
           tests/test_news_scheduler.py
+          tests/test_runtime_root_ownership.py
           tests/test_runtime_launchers.py
           tests/test_control_plane_install.py

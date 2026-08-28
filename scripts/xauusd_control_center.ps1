@@ -23,7 +23,10 @@ $repositoryRoot = if ($RepositoryRoot) {
 $moduleRoot = if ($RuntimeRoot) {
     [System.IO.Path]::GetFullPath($RuntimeRoot)
 } else { $scriptRepositoryRoot }
-$logRoot = Join-Path $moduleRoot ".local\forward\logs"
+$runtimeLocalRoot = Join-Path $moduleRoot ".local"
+$runtimeForwardRoot = Join-Path $runtimeLocalRoot "forward"
+$repositoryLocalRoot = Join-Path $repositoryRoot ".local"
+$logRoot = Join-Path $runtimeForwardRoot "logs"
 $taskName = "XAUUSD-Forecaster-Autostart"
 $guardTaskName = "XAUUSD-Forecaster-Watchdog-Guard"
 $workerName = "aurum-signal-room"
@@ -35,15 +38,15 @@ $dashboardUrl = if ([Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL"
 }
 $protectedDashboardUrl = $workerUrl
 $watchdogLog = Join-Path $logRoot "control-watchdog.jsonl"
-$watchdogHeartbeatPath = Join-Path $moduleRoot ".local\forward\control-watchdog-heartbeat.json"
-$runtimeCodeStatePath = Join-Path $moduleRoot ".local\forward\runtime-code-state.json"
-$runtimeUpdateStatePath = Join-Path $moduleRoot ".local\forward\runtime-update-state.json"
-$releaseControlStatePath = Join-Path $moduleRoot ".local\forward\release-control-state.json"
-$releaseHistoryPath = Join-Path $moduleRoot ".local\forward\release-control-history.jsonl"
-$coordinatedMigrationReceiptPath = Join-Path $moduleRoot ".local\forward\coordinated-migration-receipt.json"
-$accessBoundaryReceiptRoot = Join-Path $moduleRoot ".local\forward\access-boundary-receipts"
-$releaseLockPath = Join-Path $moduleRoot ".local\forward\release-control.lock"
-$controlPlaneInstallStatePath = Join-Path $moduleRoot ".local\forward\control-plane-install-state.json"
+$watchdogHeartbeatPath = Join-Path $runtimeForwardRoot "control-watchdog-heartbeat.json"
+$runtimeCodeStatePath = Join-Path $runtimeForwardRoot "runtime-code-state.json"
+$runtimeUpdateStatePath = Join-Path $runtimeForwardRoot "runtime-update-state.json"
+$releaseControlStatePath = Join-Path $runtimeForwardRoot "release-control-state.json"
+$releaseHistoryPath = Join-Path $runtimeForwardRoot "release-control-history.jsonl"
+$coordinatedMigrationReceiptPath = Join-Path $runtimeForwardRoot "coordinated-migration-receipt.json"
+$accessBoundaryReceiptRoot = Join-Path $runtimeForwardRoot "access-boundary-receipts"
+$releaseLockPath = Join-Path $runtimeForwardRoot "release-control.lock"
+$controlPlaneInstallStatePath = Join-Path $runtimeForwardRoot "control-plane-install-state.json"
 $runtimePreflightContractVersion = "isolated-critical-status-diagnostics-v4"
 $preflightDiagnosticMaxCharacters = 2048
 $codeReloadTimeout = [TimeSpan]::FromMinutes(5)
@@ -198,7 +201,11 @@ $services = @(
         Match = "run_live_quote_bridge.ps1"
         Kind = "PowerShell"
         Script = "ctrader\XauusdForwardQuoteBridge\run_live_quote_bridge.ps1"
-        Arguments = @("-Symbol", "XAUUSD")
+        Arguments = @(
+            "-Symbol", "XAUUSD",
+            "-StateRoot", $runtimeForwardRoot,
+            "-ConfigRoot", (Join-Path $repositoryLocalRoot "config")
+        )
     },
     [pscustomobject]@{
         Key = "collector"
@@ -207,7 +214,9 @@ $services = @(
         Kind = "Python"
         Script = "scripts\run_forward_collector.py"
         Arguments = @(
-            "--market-jsonl", (Join-Path $moduleRoot ".local\forward\quotes"),
+            "--state-root", $runtimeForwardRoot,
+            "--market-jsonl", (Join-Path $runtimeForwardRoot "quotes"),
+            "--status-file", (Join-Path $runtimeForwardRoot "collector-status.json"),
             "--poll-seconds", "10",
             "--news-poll-seconds", "60",
             "--minimum-training-rows", "200",
@@ -220,7 +229,12 @@ $services = @(
         Match = "run_news_annotator.py"
         Kind = "Python"
         Script = "scripts\run_news_annotator.py"
-        Arguments = @("--interval-seconds", "60", "--batch-size", "0")
+        Arguments = @(
+            "--state-root", $runtimeForwardRoot,
+            "--database", (Join-Path $runtimeForwardRoot "forward-evidence.sqlite3"),
+            "--status-file", (Join-Path $runtimeForwardRoot "news-annotator-status.json"),
+            "--interval-seconds", "60", "--batch-size", "0"
+        )
     },
     [pscustomobject]@{
         Key = "api"
@@ -228,7 +242,10 @@ $services = @(
         Match = "run_dashboard_api.py"
         Kind = "Python"
         Script = "scripts\run_dashboard_api.py"
-        Arguments = @()
+        Arguments = @(
+            "--state-root", $runtimeForwardRoot,
+            "--database", (Join-Path $runtimeForwardRoot "forward-evidence.sqlite3")
+        )
     },
     [pscustomobject]@{
         Key = "sync"
@@ -236,7 +253,12 @@ $services = @(
         Match = "run_dashboard_sync.py"
         Kind = "Python"
         Script = "scripts\run_dashboard_sync.py"
-        Arguments = @("--interval-seconds", "30")
+        Arguments = @(
+            "--config", (Join-Path $runtimeForwardRoot "dashboard-sync.json"),
+            "--status-file", (Join-Path $runtimeForwardRoot "dashboard-sync-status.json"),
+            "--state-root", $runtimeForwardRoot,
+            "--interval-seconds", "30"
+        )
     },
     [pscustomobject]@{
         Key = "broadcast"
@@ -245,6 +267,7 @@ $services = @(
         Kind = "Python"
         Script = "scripts\run_live_broadcast_publisher.py"
         Arguments = @(
+            "--state-root", $runtimeForwardRoot,
             "--interval-seconds", "30",
             "--activate-production-publisher"
         )
@@ -5534,7 +5557,7 @@ function Invoke-ProductionShapePreflight {
     param([string]$Revision)
     $preflightRoot = Join-Path $repositoryRoot ".local\runtime-preflight"
     $stageRoot = Join-Path $preflightRoot $Revision
-    $database = Join-Path $moduleRoot ".local\forward\forward-evidence.sqlite3"
+    $database = Join-Path $runtimeForwardRoot "forward-evidence.sqlite3"
     $preflightPort = Get-AvailableLoopbackPort
     $process = $null
     $phase = "STAGE_WORKTREE"
@@ -5583,6 +5606,7 @@ function Invoke-ProductionShapePreflight {
             $env:PYTHONUTF8 = "1"
             $process = Start-Process -FilePath $python -ArgumentList @(
                 (Join-Path $stageRoot "scripts\run_dashboard_api.py"),
+                "--state-root", (Split-Path -Parent $candidateDatabase),
                 "--database", $candidateDatabase, "--host", "127.0.0.1",
                 "--port", [string]$preflightPort
             ) -WorkingDirectory $stageRoot -WindowStyle Hidden -PassThru `
@@ -5800,7 +5824,7 @@ function Test-CodeReloadHealth {
         # boundary still requires real decision cycles and rolls back a stuck
         # startup.
         $heartbeat = Get-RuntimeHeartbeat `
-            -Path (Join-Path $moduleRoot ".local\forward\$($heartbeatSpec[1])") `
+            -Path (Join-Path $runtimeForwardRoot $heartbeatSpec[1]) `
             -ServiceName $heartbeatSpec[0] -AllowedStates $AllowedWorkerStates
         if (-not $heartbeat -or $heartbeat.LastSuccess -lt $ReloadStarted) {
             return $false
@@ -5814,7 +5838,7 @@ function Test-CodeReloadHealth {
         } catch { return $false }
     }
     if ("sync" -notin $RequiredServiceKeys) { return $true }
-    $statusFile = Join-Path $moduleRoot ".local\forward\dashboard-sync-status.json"
+    $statusFile = Join-Path $runtimeForwardRoot "dashboard-sync-status.json"
     if (-not (Test-Path -LiteralPath $statusFile)) { return $false }
     try {
         $syncStatus = Get-Content -LiteralPath $statusFile -Raw -Encoding UTF8 |
@@ -6712,7 +6736,7 @@ function Test-ExpectedWeeklyMarketClosure {
 }
 
 function Get-BrokerMarketSession {
-    $path = Join-Path $moduleRoot ".local\forward\quotes\market-session.json"
+    $path = Join-Path $runtimeForwardRoot "quotes\market-session.json"
     if (-not (Test-Path -LiteralPath $path)) { return $null }
     try {
         $session = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
@@ -6763,7 +6787,7 @@ function Get-ServiceState {
             return "NOT_CONFIGURED"
         }
         if ($Processes.Count -eq 0) { return "DEGRADED" }
-        $statusPath = Join-Path $moduleRoot ".local\forward\live-broadcast-publisher-status.json"
+        $statusPath = Join-Path $runtimeForwardRoot "live-broadcast-publisher-status.json"
         if (-not (Test-Path -LiteralPath $statusPath)) { return "DEGRADED" }
         try {
             $publisher = Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8 |
@@ -6783,7 +6807,7 @@ function Get-ServiceState {
             "collector-status.json"
         } else { "news-annotator-status.json" }
         $heartbeat = Get-RuntimeHeartbeat `
-            -Path (Join-Path $moduleRoot ".local\forward\$statusName") `
+            -Path (Join-Path $runtimeForwardRoot $statusName) `
             -ServiceName $Service.Key `
             -AllowedStates @("RUNNING", "STARTING")
         $startedAt = Get-ServiceProcessStartedAt -Processes $Processes
@@ -6810,7 +6834,7 @@ function Get-ServiceState {
     if ($Service.Key -eq "quote") {
         $brokerSession = Get-BrokerMarketSession
         if ($brokerSession -and -not $brokerSession.IsOpen) { return "MARKET CLOSED" }
-        $quoteRoot = Join-Path $moduleRoot ".local\forward\quotes"
+        $quoteRoot = Join-Path $runtimeForwardRoot "quotes"
         $latestQuote = Get-ChildItem -LiteralPath $quoteRoot -Filter "*.jsonl" `
             -File -Recurse -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending |
@@ -6835,7 +6859,7 @@ function Get-ServiceState {
     }
 
     if ($Service.Key -eq "sync") {
-        $statusFile = Join-Path $moduleRoot ".local\forward\dashboard-sync-status.json"
+        $statusFile = Join-Path $runtimeForwardRoot "dashboard-sync-status.json"
         if (-not (Test-Path -LiteralPath $statusFile)) { return "STARTING" }
         try {
             $syncStatus = Get-Content -LiteralPath $statusFile -Raw -Encoding UTF8 |
@@ -6931,15 +6955,21 @@ function Start-ForecasterService {
     $stderr = Join-Path $logRoot ("control-{0}-{1}.stderr.log" -f $Service.Key, $stamp)
     if ($Service.Kind -eq "PowerShell") {
         $scriptPath = Join-Path $moduleRoot $Service.Script
-        $arguments = @(
+        $rawArguments = @(
             "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
-            "-File", ('"{0}"' -f $scriptPath)
+            "-File", $scriptPath
         ) + @($Service.Arguments)
+        $arguments = @($rawArguments | ForEach-Object {
+            ConvertTo-NativeProcessArgument -Argument ([string]$_)
+        })
         Start-Process -FilePath "powershell.exe" -ArgumentList $arguments `
             -WorkingDirectory $moduleRoot -WindowStyle Hidden `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr | Out-Null
     } else {
-        $arguments = @($Service.Script) + @($Service.Arguments)
+        $rawArguments = @($Service.Script) + @($Service.Arguments)
+        $arguments = @($rawArguments | ForEach-Object {
+            ConvertTo-NativeProcessArgument -Argument ([string]$_)
+        })
         Start-Process -FilePath "python" -ArgumentList $arguments `
             -WorkingDirectory $moduleRoot -WindowStyle Hidden `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr | Out-Null
@@ -8103,6 +8133,74 @@ function Enable-AutoStart {
         -RuntimePath $moduleRoot -SourceRepository $repositoryRoot
 }
 
+function Convert-LegacyRuntimeLocalJunction {
+    param(
+        [Parameter(Mandatory = $true)][string]$RuntimeLocal,
+        [Parameter(Mandatory = $true)][string]$SourceLocal
+    )
+    $runtimePath = [System.IO.Path]::GetFullPath($RuntimeLocal)
+    $sourcePath = [System.IO.Path]::GetFullPath($SourceLocal)
+    if (-not (Test-Path -LiteralPath $runtimePath)) {
+        New-Item -ItemType Directory -Path $runtimePath -Force | Out-Null
+        return [pscustomobject]@{ migrated = $false; state_root = $runtimePath }
+    }
+    $runtimeItem = Get-Item -LiteralPath $runtimePath -Force
+    if (-not ($runtimeItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        if (-not $runtimeItem.PSIsContainer) {
+            throw "Runtime state root is not a directory: $runtimePath"
+        }
+        return [pscustomobject]@{ migrated = $false; state_root = $runtimePath }
+    }
+    $targets = @($runtimeItem.Target)
+    if ($targets.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$targets[0])) {
+        throw "Legacy runtime state link target is unavailable."
+    }
+    $declaredTarget = [string]$targets[0]
+    $targetPath = if ([System.IO.Path]::IsPathRooted($declaredTarget)) {
+        [System.IO.Path]::GetFullPath($declaredTarget)
+    } else {
+        [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $runtimePath) $declaredTarget))
+    }
+    if (-not $targetPath.Equals($sourcePath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Runtime state link does not target the authorized repository local root."
+    }
+
+    $sourceForward = Join-Path $sourcePath "forward"
+    $migrationRoot = Join-Path (Split-Path -Parent $runtimePath) (
+        ".runtime-state-migration-{0}" -f [Guid]::NewGuid().ToString("N")
+    )
+    New-Item -ItemType Directory -Path $migrationRoot | Out-Null
+    try {
+        if (Test-Path -LiteralPath $sourceForward) {
+            Move-Item -LiteralPath $sourceForward `
+                -Destination (Join-Path $migrationRoot "forward")
+        }
+        # Windows PowerShell 5.1 can throw an internal NullReferenceException
+        # when Remove-Item targets a directory junction. Directory.Delete on
+        # the already verified link removes only the junction, never its target.
+        [System.IO.Directory]::Delete($runtimePath)
+        Move-Item -LiteralPath $migrationRoot -Destination $runtimePath
+        $migrated = Get-Item -LiteralPath $runtimePath -Force
+        if ($migrated.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            throw "Runtime state root remained a reparse point after migration."
+        }
+        return [pscustomobject]@{ migrated = $true; state_root = $runtimePath }
+    } catch {
+        if (Test-Path -LiteralPath $migrationRoot) {
+            $stagedForward = Join-Path $migrationRoot "forward"
+            if ((Test-Path -LiteralPath $stagedForward) -and
+                -not (Test-Path -LiteralPath $sourceForward)) {
+                Move-Item -LiteralPath $stagedForward -Destination $sourceForward
+            }
+            Remove-Item -LiteralPath $migrationRoot -Force -Recurse
+        }
+        if (-not (Test-Path -LiteralPath $runtimePath)) {
+            New-Item -ItemType Junction -Path $runtimePath -Target $sourcePath | Out-Null
+        }
+        throw
+    }
+}
+
 function Install-ProductionRuntime {
     $source = [System.IO.Path]::GetFullPath($repositoryRoot)
     $runtime = if ($RuntimeRoot) {
@@ -8117,6 +8215,10 @@ function Install-ProductionRuntime {
     )
     if ($sameCheckout -or $insideCheckout) {
         throw "RuntimeRoot must be separate from the development checkout."
+    }
+    $releaseBeforeInstall = Get-ReleaseControlState
+    if ($releaseBeforeInstall -and $releaseBeforeInstall.transaction) {
+        throw "Runtime state ownership cannot change during a release transaction."
     }
     $revisionRead = Invoke-Utf8NativeProcess -FilePath "git.exe" `
         -Arguments @("-C", $source, "rev-parse", "HEAD")
@@ -8140,25 +8242,25 @@ function Install-ProductionRuntime {
     $runtimeLocal = Join-Path $runtime ".local"
     $sourceLocal = Join-Path $source ".local"
     New-Item -ItemType Directory -Path $sourceLocal -Force | Out-Null
-    if (-not (Test-Path -LiteralPath $runtimeLocal)) {
-        New-Item -ItemType Junction -Path $runtimeLocal -Target $sourceLocal | Out-Null
-    }
+    Stop-ScheduledTask -TaskName $guardTaskName -ErrorAction SilentlyContinue
+    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    Stop-All
+    $stateRootResult = Convert-LegacyRuntimeLocalJunction `
+        -RuntimeLocal $runtimeLocal -SourceLocal $sourceLocal
     Write-RuntimeUpdateState @{
         bootstrap_revision = $revision
         installed_at = [DateTimeOffset]::UtcNow.ToString("o")
+        state_root_migrated = [bool]$stateRootResult.migrated
     }
     $controlRoot = Join-Path $sourceLocal "runtime-control"
     Sync-StableRuntimeControlFiles -SourceRoot $runtime -ControlRoot $controlRoot
     $stableScript = Join-Path $controlRoot "xauusd_control_center.ps1"
 
-    Stop-ScheduledTask -TaskName $guardTaskName -ErrorAction SilentlyContinue
-    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    Stop-All
     Register-AutoStartTask -ControlScript $stableScript `
         -RuntimePath $runtime -SourceRepository $source
     [pscustomobject]@{
         runtime_root = $runtime
-        state_root = $sourceLocal
+        state_root = $runtimeLocal
         installed_revision = $revision
         control_script = $stableScript
     }

@@ -38,6 +38,10 @@ from xauusd_forecaster.runtime_health import (  # noqa: E402
     RuntimeHeartbeatPulse,
     write_runtime_heartbeat,
 )
+from xauusd_forecaster.runtime_paths import (  # noqa: E402
+    logical_absolute_path,
+    runtime_child_path,
+)
 from xauusd_forecaster.news_collection_owner import NewsCollectionOwner  # noqa: E402
 from xauusd_forecaster.training_owner import (  # noqa: E402
     BackgroundTrainingOwner,
@@ -69,9 +73,6 @@ def startup_reconciliation_plan(connection) -> dict:
     except RuntimeError:
         return {"synchronous": True, "active_generation_id": None}
     return {"synchronous": False, "active_generation_id": generation_id}
-
-
-DEFAULT_LOCAL_ROOT = MODULE_ROOT / ".local" / "forward"
 
 
 def append_due_grid_events(
@@ -144,7 +145,7 @@ def append_current_grid_events(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--local-root", type=Path, default=DEFAULT_LOCAL_ROOT)
+    parser.add_argument("--state-root", type=Path, required=True)
     parser.add_argument("--market-jsonl", type=Path)
     parser.add_argument("--poll-seconds", type=float, default=10.0)
     parser.add_argument("--news-poll-seconds", type=float, default=60.0)
@@ -154,9 +155,14 @@ def main() -> int:
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
 
-    local_root = args.local_root.resolve()
+    local_root = logical_absolute_path(args.state_root)
     local_root.mkdir(parents=True, exist_ok=True)
-    status_file = args.status_file or local_root / "collector-status.json"
+    status_file = runtime_child_path(
+        local_root, args.status_file, name="collector-status.json",
+    )
+    quote_path = runtime_child_path(
+        local_root, args.market_jsonl, name="quotes",
+    )
     initialized_at = datetime.now(UTC)
     ledger = ForwardLedger(local_root / "forward-evidence.sqlite3", now=initialized_at)
     epoch_receipt = local_root / "forward-epoch.json"
@@ -176,8 +182,8 @@ def main() -> int:
             encoding="utf-8",
         )
     provider = (
-        JsonlMarketProvider(args.market_jsonl)
-        if args.market_jsonl is not None
+        JsonlMarketProvider(quote_path)
+        if quote_path.exists()
         else NullMarketProvider()
     )
     u5_path = local_root / "u5-state.json"
@@ -200,8 +206,8 @@ def main() -> int:
         )
         annotation_status = [{"status": "SEPARATE_PROCESS"}]
         quote_root = (
-            args.market_jsonl
-            if args.market_jsonl and args.market_jsonl.is_dir()
+            quote_path
+            if quote_path.is_dir()
             else None
         )
         archived_quotes = (

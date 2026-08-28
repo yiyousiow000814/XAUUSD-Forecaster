@@ -50,6 +50,20 @@ mocked, or replayed provider and network side effects. Candidate MUST NOT claim
 production jobs, fetch production news as a second collector, emit production
 decisions, write production SQLite or D1, or consume production retry commands.
 
+The Business Runtime checkout owns immutable executable code, while its explicit
+runtime state root owns mutable production state. Control Center MUST pass that
+state authority to quote, collector, annotator, API, Sync, and broadcast launch
+paths. SQLite databases, heartbeats, cursors, schedules, checkpoints, logs, and
+operational receipts remain under `RuntimeRoot/.local/forward`; their location
+MUST NOT be inferred from a Python module path, current working directory,
+repository checkout, or Candidate staging checkout. Static code and intentional
+repository configuration or secret authorities remain separate. Moving or
+revising the code checkout cannot redirect mutable state, and Switch, hidden
+watchdog recovery, Observe, and Reverse use the same service launch contract.
+An older installation whose runtime `.local` is a junction to the repository
+must be quiesced and migrated to an independent runtime directory before a new
+Business Runtime is installed; unknown link targets fail closed.
+
 Candidate detection is automatic. Required gates are selected from the changed
 boundaries and include repository checks, isolated Windows preflight, startup
 viability, ownership uniqueness, compatibility, directed 0% Worker probes, and

@@ -62,7 +62,7 @@ from xauusd_forecaster.news_scheduler import (  # noqa: E402
     install_scheduler_schema,
     list_retry_schedule_jobs,
 )
-DEFAULT_DATABASE = MODULE_ROOT / ".local" / "forward" / "forward-evidence.sqlite3"
+from xauusd_forecaster.runtime_paths import logical_absolute_path, runtime_child_path
 UTC = timezone.utc
 PAYLOAD_SCHEMA_VERSION = "xauusd-dashboard-v4-event-episode"
 MARKET_DETAIL_CANDLE_LIMIT = 7 * 288
@@ -569,7 +569,7 @@ class StatusSnapshotCache:
             return
 
     def get(self, database: Path, builder) -> tuple[bytes, str, float]:
-        database = database.resolve()
+        database = logical_absolute_path(database)
         stale_result: tuple[bytes, str, float] | None = None
         start_background_refresh = False
         with self._condition:
@@ -3829,11 +3829,14 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
+    parser.add_argument("--state-root", type=Path, required=True)
+    parser.add_argument("--database", type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
-    Handler.database = args.database.resolve()
+    Handler.database = runtime_child_path(
+        args.state_root, args.database, name="forward-evidence.sqlite3",
+    )
     read_model_owner = DashboardReadModelOwner(
         Handler.database,
         {

@@ -902,7 +902,6 @@ def test_configured_targets_adds_independent_cloudflare_mirror(
     monkeypatch, tmp_path
 ) -> None:
     module = _sync_module()
-    monkeypatch.setattr(module, "SYNC_STATE_ROOT", tmp_path.resolve())
     monkeypatch.setenv(
         "CLOUDFLARE_INGEST_URL", "https://example.workers.dev/api/ingest"
     )
@@ -918,7 +917,9 @@ def test_configured_targets_adds_independent_cloudflare_mirror(
         "resource_schedule_state_file": str(tmp_path / "schedule.json"),
     }
 
-    sites, cloudflare = module.configured_targets(config)
+    sites, cloudflare = module.configured_targets(
+        module.configure_runtime_state(config, tmp_path)
+    )
 
     assert sites["name"] == "sites"
     assert sites["learning_state_file"].endswith("learning.json")
@@ -932,7 +933,6 @@ def test_configured_targets_can_disable_retired_sites_mirror(
     monkeypatch, tmp_path
 ) -> None:
     module = _sync_module()
-    monkeypatch.setattr(module, "SYNC_STATE_ROOT", tmp_path.resolve())
     monkeypatch.setenv(
         "CLOUDFLARE_INGEST_URL", "https://example.workers.dev/api/ingest"
     )
@@ -949,7 +949,9 @@ def test_configured_targets_can_disable_retired_sites_mirror(
         "resource_schedule_state_file": str(tmp_path / "schedule.json"),
     }
 
-    targets = module.configured_targets(config)
+    targets = module.configured_targets(
+        module.configure_runtime_state(config, tmp_path)
+    )
 
     assert [target["name"] for target in targets] == ["cloudflare"]
     assert targets[0]["remote_ingest_url"].endswith("workers.dev/api/ingest")
@@ -961,7 +963,6 @@ def test_configured_targets_rejects_every_state_path_outside_runtime_root(
     module = _sync_module()
     state_root = tmp_path / "private-state"
     state_root.mkdir()
-    monkeypatch.setattr(module, "SYNC_STATE_ROOT", state_root.resolve())
     monkeypatch.setenv(
         "CLOUDFLARE_INGEST_URL", "https://example.workers.dev/api/ingest"
     )
@@ -983,7 +984,7 @@ def test_configured_targets_rejects_every_state_path_outside_runtime_root(
             state_key: str(tmp_path / "outside.json"),
         }
         with pytest.raises(ValueError, match="must be one JSON file under"):
-            module.configured_targets(config)
+            module.configure_runtime_state(config, state_root)
 
 
 @pytest.mark.parametrize("value", [
@@ -994,10 +995,9 @@ def test_sync_state_path_rejects_traversal_and_non_json_names(
     monkeypatch, tmp_path, value
 ) -> None:
     module = _sync_module()
-    monkeypatch.setattr(module, "SYNC_STATE_ROOT", tmp_path.resolve())
 
     with pytest.raises(ValueError, match="must be one JSON file under"):
-        module._validated_sync_state_path(Path(value))
+        module._validated_sync_state_path(Path(value), tmp_path)
 
 
 def test_sites_bypass_header_is_shared_by_get_and_post_but_not_cloudflare(
@@ -1078,7 +1078,6 @@ def test_ingest_response_records_valid_main_revision(tmp_path, monkeypatch) -> N
     module = _sync_module()
     revision = "a" * 40
     signal = tmp_path / "remote-main-signal.json"
-    monkeypatch.setattr(module, "DEFAULT_RUNTIME_SIGNAL", signal)
 
     class Response:
         status = 200
@@ -1097,7 +1096,8 @@ def test_ingest_response_records_valid_main_revision(tmp_path, monkeypatch) -> N
     )
 
     result = module._post_json(
-        "https://example.workers.dev/api/ingest", b"{}", {"token": "token"}
+        "https://example.workers.dev/api/ingest", b"{}",
+        {"token": "token", "runtime_signal_file": str(signal)},
     )
 
     assert result["main_revision"] == revision
