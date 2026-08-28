@@ -778,6 +778,7 @@ UnrelatedDebtIsNotFailure ==
     release.phase \in {"PREPARE", "VERIFY"} /\
     release.stableDebt /\ release.hardSafe /\ release.changedSafe /\
     ~release.candidateRegression /\ release.candidateExact /\
+    release.accessReceiptState \notin {"WRONG_KEY", "TAMPERED", "STALE"} /\
     release.main = release.candidate =>
         release.gate # "FAILED"
 SwitchRequiresAcceptance == release.kind = "FORWARD" /\ release.transaction =>
