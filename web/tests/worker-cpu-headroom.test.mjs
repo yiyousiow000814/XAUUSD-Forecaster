@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { prepareReleaseValidationFixtures } from "../build/release-validation-fixtures.mjs";
+import { releaseFixtureContractTestName } from "../build/verify-workers-release-fixtures.mjs";
 import { D1TestDatabase } from "./d1-test-database.mjs";
 
 const migrations = readdirSync(new URL("../drizzle", import.meta.url))
@@ -714,7 +714,7 @@ test("production-shaped writes honor authenticated release dry-run without mutat
 test("accepts the exact Python News release fixture and rejects a noncanonical clock", async () => {
   if (isPreviewBuild) return;
   const fixture = JSON.parse(readFileSync(new URL(
-    "../../tests/fixtures/release_validation_news_index_stage.json",
+    "../../tests/fixtures/release_validation/news-index-stage.json",
     import.meta.url,
   ), "utf8"));
   const validationHeaders = {
@@ -745,22 +745,11 @@ test("accepts the exact Python News release fixture and rejects a noncanonical c
   assert.equal(state(), before);
 });
 
-test("accepts every exact Python-built production-shaped release fixture", async () => {
+test(releaseFixtureContractTestName, async () => {
   if (isPreviewBuild) return;
   const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
-  const fixtureRoot = mkdtempSync(join(tmpdir(), "aurum-worker-release-fixtures-"));
-  const python = process.platform === "win32" ? "python.exe" : "python3";
+  const preparedFixtures = prepareReleaseValidationFixtures();
   try {
-    const built = spawnSync(python, [
-      join(repositoryRoot, "scripts", "build_release_validation_fixtures.py"),
-      "--output", fixtureRoot,
-    ], {
-      cwd: repositoryRoot,
-      encoding: "utf8",
-      env: { ...process.env, PYTHONUTF8: "1" },
-    });
-    assert.equal(built.status, 0, built.stderr || built.stdout);
-
     const manifest = JSON.parse(readFileSync(
       join(repositoryRoot, "web", "worker-validation-manifest.json"), "utf8",
     ));
@@ -808,7 +797,7 @@ test("accepts every exact Python-built production-shaped release fixture", async
     });
     const before = state();
     for (const [index, route] of exactWrites.entries()) {
-      const exactBytes = readFileSync(join(fixtureRoot, route.fixture));
+      const exactBytes = readFileSync(join(preparedFixtures.fixtureRoot, route.fixture));
       const response = await invoke(route.path, {
         method: "POST",
         headers: {
@@ -831,7 +820,7 @@ test("accepts every exact Python-built production-shaped release fixture", async
     }
     assert.equal(state(), before);
   } finally {
-    rmSync(fixtureRoot, { recursive: true, force: true });
+    preparedFixtures.dispose();
   }
 });
 
