@@ -735,6 +735,32 @@ def _authorized_candidate(previous: str, candidate: str) -> str:
     )
 
 
+def _access_review_candidate(previous: str = "a" * 40, candidate: str = "b" * 40) -> str:
+    return (
+        _authorized_candidate(previous, candidate)
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$candidate.branch='main';$candidate.validation_state='REVIEW_REQUIRED';"
+        "$candidate.compatibility_state='COORDINATED_STORAGE_MIGRATION_PASSED';"
+        "$candidate.validation=[pscustomobject]@{key=$candidate.validation_key;"
+        "repository='PASSED';windows='PASSED';cloudflare='PASSED';"
+        "reason='ACCESS_BOUNDARY_REVIEW_REQUIRED';"
+        "data_parity=[pscustomobject]@{passed=$true;state='PASSED';marker='parity-kept'};"
+        "auth_inspection=[pscustomobject]@{state='AUTH_BOUNDARY_NOT_TESTABLE';"
+        "versioned_workers_dev='UNPROTECTED_TEST_SURFACE'};"
+        "route_plan=[pscustomobject]@{contract_routes=@([pscustomobject]@{"
+        "path='/admin/api/session';auth_required=$true})};"
+        "routes=@([pscustomobject]@{family='status';state='PASSED'});"
+        "cpu_evidence=[pscustomobject]@{passed=$true;gate_state='PASSED';"
+        "p95_cpu_ms=4;p99_cpu_ms=5;max_cpu_ms=7};"
+        "validation_run='kept-run';tested_at='2026-08-28T00:00:00Z'};"
+        "$candidate|Add-Member -Force migration_acceptance ([pscustomobject]@{"
+        "validation_key=$candidate.validation_key;receipt_digest='migration-kept'});"
+        "Write-ReleaseControlState $state;"
+        "function Get-CandidateCompatibilityApprovalGate{return [pscustomobject]@{"
+        "state='PASSED';reason=$null}};"
+    )
+
+
 def _write_coordinated_migration_files(tmp_path) -> None:
     target = tmp_path / "repository" / "web" / "drizzle"
     target.mkdir(parents=True, exist_ok=True)
@@ -1707,7 +1733,7 @@ def test_candidate_auth_evidence_uses_formal_access_host_only() -> None:
     body = source.split("function Get-CandidateAuthInspection", 1)[1].split(
         "function Invoke-AutomaticCandidateValidation", 1
     )[0]
-    assert '$dashboardUrl/admin/api/session' in body
+    assert '$protectedDashboardUrl/admin/api/session' in body
     assert '$workerUrl/admin/api/session' not in body
     assert 'versioned_workers_dev = "UNPROTECTED_TEST_SURFACE"' in body
 
@@ -1723,7 +1749,7 @@ def test_wpf_shell_is_bundled_with_winforms_fallback_and_release_controls() -> N
         "ServiceList", "StableIdentity", "CandidateIdentity", "PreviousIdentity",
         "PromoteButton", "ReverseButton", "StartButton", "StopButton",
         "CandidateChecks", "OpenStableButton", "OpenCandidateButton",
-        "VerifyMigrationButton", "ApproveCompatibilityButton",
+        "VerifyMigrationButton", "ApproveCompatibilityButton", "ApproveAccessButton",
         "CandidateTechnicalEvidence",
     ):
         assert name in serialized
@@ -1760,7 +1786,7 @@ def test_release_gui_actions_are_tracked_single_flight_in_both_shells() -> None:
         "VERIFYING MIGRATION", "APPROVING", "PROMOTING", "REVERSING",
     ))
     assert all(name in wpf for name in (
-        '"VerifyMigrationButton", "ApproveCompatibilityButton", "PromoteButton", "ReverseButton"',
+        '"VerifyMigrationButton", "ApproveCompatibilityButton", "ApproveAccessButton", "PromoteButton", "ReverseButton"',
         "return [bool]$script:wpfOperation",
         "Refresh-WpfStatus",
         "$script:wpfOperation = $null",
@@ -3952,7 +3978,6 @@ def test_d1_release_evidence_ingestion_preserves_timestamp_string(
         '$($row.generation_watermark)"',
         powershell=powershell,
     )
-
     assert result == f"System.String|{timestamp}"
 
 
@@ -4936,6 +4961,212 @@ def test_explicit_review_retry_rejects_non_retryable_reason(tmp_path) -> None:
     assert result == "Only an exact retryable Candidate review can restart validation."
 
 
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_access_approval_is_exact_idempotent_and_preserves_passed_evidence(
+    tmp_path, powershell: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _access_review_candidate()
+        + "$first=Approve-CandidateAccessBoundary 'ALL_REQUIRED_ACCESS_CHECKS_PASSED';"
+        "$firstDigest=$first.access_acceptance.receipt_digest;"
+        "$second=Approve-CandidateAccessBoundary 'ALL_REQUIRED_ACCESS_CHECKS_PASSED';"
+        "$final=Get-ReleaseControlState;$receipt=Assert-AccessBoundaryAcceptanceReceipt "
+        "$final.candidate $final.stable;$history=Get-Content $releaseHistoryPath -Raw;"
+        "$count=([regex]::Matches($history,'CANDIDATE_ACCESS_BOUNDARY_ACCEPTED')).Count;"
+        'Write-Output "$($final.candidate.validation_state),'
+        '$($final.candidate.compatibility_state),'
+        '$($receipt.validation_key -eq $final.candidate.validation_key),'
+        '$($receipt.checklist.owner_login_succeeds),'
+        '$($receipt.checklist.owner_resource_accessible),'
+        '$($receipt.checklist.unauthorized_access_denied),'
+        '$($receipt.checklist.logout_succeeds),'
+        '$($receipt.checklist.access_denied_after_logout),'
+        '$($receipt.checklist.reauthentication_succeeds),'
+        '$($final.candidate.validation.validation_run),'
+        '$($final.candidate.validation.data_parity.marker),'
+        '$($final.candidate.migration_acceptance.receipt_digest),'
+        '$($firstDigest -eq $second.access_acceptance.receipt_digest),$count"',
+        powershell=powershell,
+    )
+    assert result == (
+        "PASSED,PASSED,True,True,True,True,True,True,True,kept-run,"
+        "parity-kept,migration-kept,True,1"
+    )
+
+
+def test_unobservable_protected_host_enters_access_review_without_losing_gates(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$candidate.branch='main';$candidate.validation_state='NEW';"
+        "$candidate.compatibility_state='PENDING';Write-ReleaseControlState $state;"
+        "function Test-ProductionCandidateProvenance{return $true};"
+        "function Invoke-ProductionShapePreflight{return $true};"
+        "function Test-RequiredGitHubChecks{'PASSED'};"
+        "function Get-CandidateChangedFiles{return @('docs/README.md')};"
+        "function Get-CandidateCompatibilityRequirement{return [pscustomobject]@{"
+        "state='AUTOMATIC';files=@()}};"
+        "function Get-CandidateRouteValidationPlan{return [pscustomobject]@{"
+        "worker_cpu_required=$false;requires_validation=$false;static_assets=@();"
+        "worker_reads=@();worker_writes=@();contract_routes=@([pscustomobject]@{"
+        "path='/admin/api/session';auth_required=$true})}};"
+        "function Set-CloudflareCandidatePointer{};"
+        "function Wait-CandidatePlacementPropagation{return [pscustomobject]@{"
+        "passed=$true;state='READY'}};"
+        "function Test-CandidateDataParity{return [pscustomobject]@{"
+        "passed=$true;state='PASSED'}};"
+        "function Get-CandidateAuthInspection{return [pscustomobject]@{"
+        "state='AUTH_BOUNDARY_NOT_TESTABLE';"
+        "versioned_workers_dev='UNPROTECTED_TEST_SURFACE'}};"
+        "$ok=Invoke-AutomaticCandidateValidation $candidate;"
+        "$final=Get-ReleaseControlState;$view=Get-ControlCenterReleasePresentation $final;"
+        'Write-Output "$ok,$($final.candidate.validation_state),'
+        '$($final.candidate.validation.reason),'
+        '$($final.candidate.validation.repository),'
+        '$($final.candidate.validation.windows),'
+        '$($final.candidate.validation.cloudflare),$($view.can_approve_access),'
+        '$($view.can_promote)"',
+    )
+    assert result == (
+        "False,REVIEW_REQUIRED,ACCESS_BOUNDARY_REVIEW_REQUIRED,"
+        "PASSED,PASSED,PASSED,True,False"
+    )
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    (
+        ("$candidate.git_sha=('9'*40)", "ACCESS_RECEIPT_CANDIDATE_MISMATCH"),
+        (
+            "$candidate.worker_version_id='99999999-9999-4999-8999-999999999999'",
+            "ACCESS_RECEIPT_CANDIDATE_MISMATCH",
+        ),
+        ("$candidate.validation_key='wrong-key'", "ACCESS_RECEIPT_MISSING"),
+        (
+            "$stable.worker_version_id='99999999-9999-4999-8999-999999999999'",
+            "ACCESS_RECEIPT_STABLE_MISMATCH",
+        ),
+        ("$protectedDashboardUrl='https://other-protected.example'", "ACCESS_RECEIPT_HOST_MISMATCH"),
+        (
+            "$saved=Get-Content $accessBoundaryReceiptPath -Raw|ConvertFrom-ReleaseControlJson;"
+            "$saved.accepted_at=[DateTimeOffset]::UtcNow.AddHours(-3).ToString('o');"
+            "$saved.expires_at=([DateTimeOffset]$saved.accepted_at).AddHours(2).ToString('o');"
+            "$core=[ordered]@{schema_version=$saved.schema_version;accepted_at=$saved.accepted_at;"
+            "expires_at=$saved.expires_at;accepted_by=$saved.accepted_by;"
+            "validation_key=$saved.validation_key;candidate=$saved.candidate;stable=$saved.stable;"
+            "access_boundary=$saved.access_boundary;checklist=$saved.checklist};"
+            "$saved.receipt_digest=Get-AccessBoundaryReceiptDigest $core;"
+            "$saved|ConvertTo-Json -Depth 12|Set-Content $accessBoundaryReceiptPath",
+            "ACCESS_RECEIPT_STALE",
+        ),
+        (
+            "$saved=Get-Content $accessBoundaryReceiptPath -Raw|ConvertFrom-ReleaseControlJson;"
+            "$saved.accepted_by='tampered';"
+            "$saved|ConvertTo-Json -Depth 12|Set-Content $accessBoundaryReceiptPath",
+            "ACCESS_RECEIPT_TAMPERED",
+        ),
+        (
+            "$saved=Get-Content $accessBoundaryReceiptPath -Raw|ConvertFrom-ReleaseControlJson;"
+            "$saved.checklist.PSObject.Properties.Remove('reauthentication_succeeds');"
+            "$core=[ordered]@{schema_version=$saved.schema_version;accepted_at=$saved.accepted_at;"
+            "expires_at=$saved.expires_at;accepted_by=$saved.accepted_by;"
+            "validation_key=$saved.validation_key;candidate=$saved.candidate;stable=$saved.stable;"
+            "access_boundary=$saved.access_boundary;checklist=$saved.checklist};"
+            "$saved.receipt_digest=Get-AccessBoundaryReceiptDigest $core;"
+            "$saved|ConvertTo-Json -Depth 12|Set-Content $accessBoundaryReceiptPath",
+            "ACCESS_RECEIPT_CHECKLIST_INCOMPLETE:reauthentication_succeeds",
+        ),
+    ),
+)
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_access_receipt_rejects_wrong_identity_staleness_and_tampering(
+    tmp_path, mutation: str, expected: str, powershell: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _access_review_candidate()
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;$stable=$state.stable;"
+        "$checklist=[ordered]@{owner_login_succeeds=$true;"
+        "owner_resource_accessible=$true;unauthorized_access_denied=$true;"
+        "logout_succeeds=$true;access_denied_after_logout=$true;"
+        "reauthentication_succeeds=$true};"
+        "$receipt=New-AccessBoundaryAcceptanceReceipt $candidate $stable $checklist;"
+        "Write-AccessBoundaryAcceptanceReceipt $receipt;"
+        "$accessBoundaryReceiptPath=Get-AccessBoundaryReceiptPath $receipt.validation_key;"
+        f"{mutation};$reason='';try{{Assert-AccessBoundaryAcceptanceReceipt "
+        "$candidate $stable -SkipCandidateStateBinding|Out-Null}catch{$reason=$_.Exception.Message};"
+        "Write-Output $reason",
+        powershell=powershell,
+    )
+    assert result == expected
+
+
+def test_access_approval_requires_explicit_complete_human_confirmation(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _access_review_candidate()
+        + "$reason='';try{Approve-CandidateAccessBoundary ''|Out-Null}"
+        "catch{$reason=$_.Exception.Message};Write-Output $reason",
+    )
+    assert result == "ACCESS_CHECKLIST_EXPLICIT_CONFIRMATION_REQUIRED"
+
+
+def test_access_receipt_file_is_immutable_for_one_validation_key(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _access_review_candidate()
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;$stable=$state.stable;"
+        "$checklist=[ordered]@{owner_login_succeeds=$true;"
+        "owner_resource_accessible=$true;unauthorized_access_denied=$true;"
+        "logout_succeeds=$true;access_denied_after_logout=$true;"
+        "reauthentication_succeeds=$true};"
+        "$first=New-AccessBoundaryAcceptanceReceipt $candidate $stable $checklist;"
+        "Write-AccessBoundaryAcceptanceReceipt $first;Start-Sleep -Milliseconds 2;"
+        "$second=New-AccessBoundaryAcceptanceReceipt $candidate $stable $checklist;"
+        "$reason='';try{Write-AccessBoundaryAcceptanceReceipt $second}"
+        "catch{$reason=$_.Exception.Message};Write-Output $reason",
+    )
+    assert result == "ACCESS_RECEIPT_IMMUTABLE_CONFLICT"
+
+
+def test_workers_dev_cannot_become_the_protected_access_boundary(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$protectedDashboardUrl='https://candidate.workers.dev';$reason='';"
+        "try{Get-ProtectedAccessBoundaryIdentity|Out-Null}catch{$reason=$_.Exception.Message};"
+        "Write-Output $reason",
+    )
+    assert result == "ACCESS_PROTECTED_HOST_INVALID"
+
+
+def test_wpf_and_fallback_use_the_same_access_transition() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert source.count('Invoke-WpfOperation "ApproveAccessBoundary"') == 1
+    assert source.count('Invoke-GuiOperation -Operation "ApproveAccessBoundary"') == 1
+    operation = source.split("function Invoke-ControlCenterOperationAction", 1)[1].split(
+        "function Invoke-ControlCenterStructuredOperation", 1
+    )[0]
+    assert operation.count('"ApproveAccessBoundary"') == 1
+    assert "Approve-CandidateAccessBoundary" in operation
+    assert source.count("ALL_REQUIRED_ACCESS_CHECKS_PASSED") == 1
+
+
+def test_promotion_rechecks_human_access_receipt() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
+        encoding="utf-8"
+    )
+    promotion = source.split("function Start-ReleasePromotion", 1)[1].split(
+        "function Complete-ReleasePromotion", 1
+    )[0]
+    assert '"HUMAN_ACCESS_BOUNDARY_ACCEPTED"' in promotion
+    assert "Assert-AccessBoundaryAcceptanceReceipt" in promotion
+    assert "Test-ProductionCandidateProvenance" in promotion
+
+
 def test_payload_producer_and_fixture_builder_select_worker_families(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
@@ -5023,6 +5254,7 @@ def test_release_gui_exposes_only_explicit_stable_candidate_controls() -> None:
     assert 'New-UiButton -Text "Open Stable"' in source
     assert 'New-UiButton -Text "Open Candidate"' in source
     assert 'New-UiButton `\n        -Text "Approve Compatibility"' in source
+    assert 'New-UiButton `\n        -Text "Approve Access Checks"' in source
     assert 'Git: $($state.candidate.git_sha)' in source
     assert 'Worker: $($state.candidate.worker_version_id)' in source
     assert 'Windows: $($state.candidate.windows_revision)' in source

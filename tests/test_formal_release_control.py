@@ -27,6 +27,13 @@ def test_formal_release_lifecycle_is_simplification_first() -> None:
     assert "VerifyAbandonedInstall" in model
     assert "StableChangesOnlyAfterObservation" in model
     assert "TransactionEventuallyTerminates" in model
+    assert "RequireAccessReview" in model
+    assert "RecordAccessReceipt" in model
+    assert "ApproveAccessReceipt" in model
+    assert "ApplicableAccessEvidence" in model
+    assert "InvalidAccessReceiptCannotPass" in model
+    assert "AccessApprovalIsIdempotent" in model
+    assert "accessRepeatObserved" in model
 
 
 def test_tlc_runner_and_ci_pin_one_verified_tool() -> None:

@@ -39,6 +39,7 @@ RecoveryFacts == {
     "TXN", "BUNDLE", "OLD_FENCED", "ONE_OWNER",
     "ISOLATION", "CONTEXT", "NO_RELEASE", "STALE_FENCED"
 }
+AccessReceiptStates == {"NONE", "VALID", "WRONG_KEY", "TAMPERED", "STALE"}
 
 VARIABLES release, health, install, news, syncOwners, path
 
@@ -55,6 +56,12 @@ CurrentSupervisorCanMutate ==
 ReverseStableCompatible ==
     /\ news.activeLegacyGeneration = news.currentGeneration
     /\ news.activeLegacyIds = news.currentIds
+
+ApplicableAccessEvidence ==
+    /\ release.accessAccepted
+    /\ release.accessReceiptState = "VALID"
+    /\ release.main = release.candidate
+    /\ ExactCandidate
 
 FreshStagingCompatible ==
     /\ news.stagingPresent
@@ -86,6 +93,11 @@ Init ==
         changedSafe |-> TRUE,
         stableDebt |-> FALSE,
         candidateRegression |-> FALSE,
+        accessRequired |-> FALSE,
+        accessReview |-> FALSE,
+        accessReceiptState |-> "NONE",
+        accessAccepted |-> FALSE,
+        accessApprovalCount |-> 0,
         accepted |-> FALSE,
         migrationReady |-> FALSE,
         transaction |-> FALSE,
@@ -136,10 +148,11 @@ Init ==
         observeFailed |-> FALSE,
         recoverySwitched |-> FALSE,
         recoveryCompleted |-> FALSE,
-        switchFailed |-> FALSE
+        switchFailed |-> FALSE,
+        accessRepeatObserved |-> FALSE
         ]
 
-DiscoverCandidate ==
+DiscoverCandidate(accessRequired) ==
     /\ release.phase = "STABLE"
     /\ ~release.transaction
     /\ release.candidate = None
@@ -153,14 +166,24 @@ DiscoverCandidate ==
         !.changedSafe = TRUE,
         !.stableDebt = FALSE,
         !.candidateRegression = FALSE,
+        !.accessRequired = accessRequired,
+        !.accessReview = FALSE,
+        !.accessReceiptState = "NONE",
+        !.accessAccepted = FALSE,
+        !.accessApprovalCount = 0,
         !.accepted = FALSE,
         !.migrationReady = FALSE]
-    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+    /\ path' = [path EXCEPT !.accessRepeatObserved = FALSE]
+    /\ UNCHANGED <<health, install, news, syncOwners>>
 
 MainMoves ==
     /\ AllowMainMove
+    /\ release.phase \in {"PREPARE", "VERIFY"}
     /\ release.main # NextId
-    /\ release' = [release EXCEPT !.main = NextId]
+    /\ release' = [release EXCEPT
+        !.main = NextId,
+        !.gate = "FAILED",
+        !.accepted = FALSE]
     /\ UNCHANGED <<health, install, news, syncOwners, path>>
 
 CorruptCandidateIdentity ==
@@ -222,6 +245,46 @@ HardSafetyFails ==
         !.gate = "FAILED",
         !.accepted = FALSE]
     /\ UNCHANGED <<health, install, news, syncOwners, path>>
+
+RequireAccessReview ==
+    /\ release.phase = "VERIFY"
+    /\ release.accessRequired
+    /\ ~release.accessReview
+    /\ release.gate = "UNTESTED"
+    /\ release' = [release EXCEPT !.accessReview = TRUE]
+    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+
+RecordAccessReceipt(kind) ==
+    /\ release.phase = "VERIFY"
+    /\ release.accessReview
+    /\ release.gate = "UNTESTED"
+    /\ release.accessApprovalCount = 0
+    /\ release.accessReceiptState = "NONE"
+    /\ kind \in AccessReceiptStates \ {"NONE"}
+    /\ release' = [release EXCEPT
+        !.accessReceiptState = kind,
+        !.accessAccepted = FALSE,
+        !.gate = IF kind = "VALID" THEN "UNTESTED" ELSE "FAILED"]
+    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+
+ApproveAccessReceipt ==
+    /\ release.phase = "VERIFY"
+    /\ release.accessReview
+    /\ release.accessReceiptState = "VALID"
+    /\ release.main = release.candidate
+    /\ ExactCandidate
+    /\ ~release.accessAccepted
+    /\ release' = [release EXCEPT
+        !.accessAccepted = TRUE,
+        !.accessApprovalCount = 1]
+    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+
+RepeatAccessApproval ==
+    /\ release.phase = "VERIFY"
+    /\ ApplicableAccessEvidence
+    /\ release.accessApprovalCount = 1
+    /\ path' = [path EXCEPT !.accessRepeatObserved = TRUE]
+    /\ UNCHANGED <<release, health, install, news, syncOwners>>
 
 BeginInstall ==
     /\ AllowControlInstall
@@ -398,6 +461,8 @@ PassEvidence ==
     /\ ~release.candidateRegression
     /\ ReverseStableCompatible
     /\ news.activationWatermark >= release.verifiedWatermark
+    /\ (~release.accessRequired \/
+        (release.accessReview /\ ApplicableAccessEvidence))
     /\ release' = [release EXCEPT
         !.gate = "PASSED",
         !.accepted = TRUE]
@@ -593,10 +658,14 @@ CleanupObsolete(generation) ==
     /\ UNCHANGED <<release, health, install, syncOwners, path>>
 
 Next ==
-    \/ DiscoverCandidate \/ MainMoves \/ CorruptCandidateIdentity
+    \/ \E accessRequired \in BOOLEAN: DiscoverCandidate(accessRequired)
+    \/ MainMoves \/ CorruptCandidateIdentity
     \/ DegradeHealth \/ RestoreHealth
     \/ VerifyMigration \/ RecordStableDebt
     \/ IntroduceCandidateRegression \/ HardSafetyFails
+    \/ RequireAccessReview
+    \/ \E kind \in AccessReceiptStates \ {"NONE"}: RecordAccessReceipt(kind)
+    \/ ApproveAccessReceipt \/ RepeatAccessApproval
     \/ BeginInstall \/ CaptureBaseline \/ BeginBundleSwap
     \/ CompleteBundleSwap \/ StartQuiescedSupervisor
     \/ VerifyNormalInstall \/ ActivateNormalInstall
@@ -654,6 +723,11 @@ TypeOK ==
     /\ release.kind \in {"NONE", "FORWARD", "RECOVER"}
     /\ release.verifiedGeneration \in Generations
     /\ release.verifiedWatermark \in Generations
+    /\ release.accessRequired \in BOOLEAN
+    /\ release.accessReview \in BOOLEAN
+    /\ release.accessReceiptState \in AccessReceiptStates
+    /\ release.accessAccepted \in BOOLEAN
+    /\ release.accessApprovalCount \in 0..1
     /\ health \in {"GOOD", "BAD"}
     /\ install.step \in InstallSteps
     /\ install.mode \in {"ACTIVE", "QUIESCED", "NONE"}
@@ -673,6 +747,7 @@ TypeOK ==
     /\ news.stagedLegacyIds \subseteq NewsIdentities
     /\ news.legacyWriteObserved \in BOOLEAN
     /\ news.storedGenerations \subseteq Generations
+    /\ path.accessRepeatObserved \in BOOLEAN
 
 AtMostOneProductionWriter == syncOwners <= 1
 PrepareVerifyKeepsStableSync ==
@@ -684,6 +759,16 @@ VerificationWatermarkDoesNotRegress ==
 StaleSupervisorIsFenced == install.actorEpoch # install.epoch => ~CurrentSupervisorCanMutate
 PassedIdentityIsExact == release.gate = "PASSED" => ExactCandidate
 AcceptedEvidenceIsRequired == release.gate = "PASSED" => release.accepted
+AccessEvidenceIsRequired == release.gate = "PASSED" /\ release.accessRequired =>
+    release.accessReview /\ ApplicableAccessEvidence
+InvalidAccessReceiptCannotPass ==
+    release.accessRequired /\ release.accessReceiptState \in
+        {"NONE", "WRONG_KEY", "TAMPERED", "STALE"} =>
+        release.gate # "PASSED" /\ ~release.accepted
+AccessApprovalIsIdempotent ==
+    release.accessApprovalCount <= 1 /\
+    (path.accessRepeatObserved =>
+        release.accessAccepted /\ release.accessApprovalCount = 1)
 PassedGatesAreSafe == release.gate = "PASSED" =>
     release.hardSafe /\ release.changedSafe /\ ~release.candidateRegression
 HardFailuresBlock ==
@@ -692,7 +777,9 @@ HardFailuresBlock ==
 UnrelatedDebtIsNotFailure ==
     release.phase \in {"PREPARE", "VERIFY"} /\
     release.stableDebt /\ release.hardSafe /\ release.changedSafe /\
-    ~release.candidateRegression /\ release.candidateExact =>
+    ~release.candidateRegression /\ release.candidateExact /\
+    release.accessReceiptState \notin {"WRONG_KEY", "TAMPERED", "STALE"} /\
+    release.main = release.candidate =>
         release.gate # "FAILED"
 SwitchRequiresAcceptance == release.kind = "FORWARD" /\ release.transaction =>
     release.gate = "PASSED" /\ release.accepted
