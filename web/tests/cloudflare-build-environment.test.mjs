@@ -10,6 +10,11 @@ import {
   isWorkersCi,
   prepareReleaseValidationFixtures,
 } from "../build/release-validation-fixtures.mjs";
+import {
+  releaseFixtureContractTestName,
+  requiresWorkersPreviewFixturePreflight,
+  verifyWorkersReleaseFixtures,
+} from "../build/verify-workers-release-fixtures.mjs";
 
 test("selects the checked-fixture path only for explicit Workers Builds", () => {
   assert.equal(isWorkersCi({ WORKERS_CI: "1" }), true);
@@ -87,4 +92,55 @@ test("fixture byte drift fails closed", () => {
   } finally {
     rmSync(changedRoot, { recursive: true, force: true });
   }
+});
+
+test("branch Preview validates checked fixtures through a production-shaped Worker build", () => {
+  assert.equal(requiresWorkersPreviewFixturePreflight({ WORKERS_CI: "1" }), false);
+  assert.equal(requiresWorkersPreviewFixturePreflight({
+    WORKERS_CI: "1", WORKERS_CI_BRANCH: "main",
+  }), false);
+  assert.equal(requiresWorkersPreviewFixturePreflight({
+    WORKERS_CI: "1", WORKERS_CI_BRANCH: "feature",
+  }), true);
+
+  const calls = [];
+  const result = verifyWorkersReleaseFixtures({
+    env: {
+      WORKERS_CI: "1",
+      WORKERS_CI_BRANCH: "feature",
+      WORKERS_CI_COMMIT_SHA: "a".repeat(40),
+      npm_execpath: "/fixed/npm-cli.js",
+    },
+    nodeExecutable: "/fixed/node",
+    spawn: (command, args, options) => {
+      calls.push({ command, args, options });
+      return { status: 0 };
+    },
+  });
+  assert.equal(result.verified, true);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].command, "/fixed/node");
+  assert.deepEqual(calls[0].args, ["/fixed/npm-cli.js", "run", "build"]);
+  assert.equal(calls[0].options.env.WORKERS_CI, "1");
+  assert.equal(calls[0].options.env.WORKERS_CI_BRANCH, "");
+  assert.equal(calls[0].options.env.WORKERS_CI_COMMIT_SHA, "");
+  assert.equal(calls[1].command, "/fixed/node");
+  assert.ok(calls[1].args.includes(
+    `--test-name-pattern=^${releaseFixtureContractTestName}$`,
+  ));
+  assert.equal(calls.some(call =>
+    call.command.includes("python")
+    || call.args.some(arg => arg.includes("build_release_validation_fixtures.py"))
+  ), false);
+});
+
+test("Workers Preview fixture preflight fails closed", () => {
+  assert.throws(() => verifyWorkersReleaseFixtures({
+    env: {
+      WORKERS_CI: "1",
+      WORKERS_CI_BRANCH: "feature",
+      npm_execpath: "/fixed/npm-cli.js",
+    },
+    spawn: () => ({ status: 1, stderr: "production-shaped build failed" }),
+  }), /WORKERS_RELEASE_FIXTURE_PREFLIGHT_FAILED:production-shaped build failed/);
 });

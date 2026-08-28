@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import test from "node:test";
 import { prepareReleaseValidationFixtures } from "../build/release-validation-fixtures.mjs";
+import { releaseFixtureContractTestName } from "../build/verify-workers-release-fixtures.mjs";
 import { D1TestDatabase } from "./d1-test-database.mjs";
 
 const migrations = readdirSync(new URL("../drizzle", import.meta.url))
@@ -744,7 +745,8 @@ test("accepts the exact Python News release fixture and rejects a noncanonical c
   assert.equal(state(), before);
 });
 
-test("accepts every exact production-shaped fixture across the build boundary", async () => {
+test(releaseFixtureContractTestName, async () => {
+  if (isPreviewBuild) return;
   const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
   const preparedFixtures = prepareReleaseValidationFixtures();
   try {
