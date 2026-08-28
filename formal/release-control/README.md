@@ -58,6 +58,7 @@ The following actions and invariants generalize the observed failure classes:
 | Cleanup deletes CURRENT or fresh STAGING | `CleanupObsolete`, `CurrentGenerationCannotBeCleaned`, `FreshStagingCannotBeCleaned` |
 | Existing debt blocks an improvement | `RecordStableDebt` is non-failing, while `HardSafetyFails` and `IntroduceCandidateRegression` remain blockers |
 | Main or exact identity moves | `MainMoves`, `CorruptCandidateIdentity`; neither can mutate the in-flight target or produce accepted evidence |
+| Human Access evidence is missing or invalid | `RequireAccessReview`, valid/wrong-key/tampered/stale receipt states, exact-key `ApproveAccessReceipt`, and idempotent repeated approval; Switch still requires every gate |
 
 Scenario and implementation mappings live in
 [`docs/design/RELEASE_CONTROL_STATE_MACHINE.md`](../../docs/design/RELEASE_CONTROL_STATE_MACHINE.md).

@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync", "broadcast")]
     [string]$ServiceKey = "",
@@ -11,7 +11,8 @@ param(
     [string]$ExpectedControlScriptPath = "",
     [string]$ExpectedControlRevision = "",
     [string]$InstallTransactionId = "",
-    [string]$OperationResultPath = ""
+    [string]$OperationResultPath = "",
+    [string]$AccessChecklistConfirmation = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,6 +31,7 @@ $dashboardUrl = if ([Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL"
 } else {
     "https://aurum-signal-room.yiyousiow1234.chatgpt.site"
 }
+$protectedDashboardUrl = "https://aurum-signal-room.yiyousiow1234.chatgpt.site"
 $watchdogLog = Join-Path $logRoot "control-watchdog.jsonl"
 $watchdogHeartbeatPath = Join-Path $moduleRoot ".local\forward\control-watchdog-heartbeat.json"
 $runtimeCodeStatePath = Join-Path $moduleRoot ".local\forward\runtime-code-state.json"
@@ -37,6 +39,7 @@ $runtimeUpdateStatePath = Join-Path $moduleRoot ".local\forward\runtime-update-s
 $releaseControlStatePath = Join-Path $moduleRoot ".local\forward\release-control-state.json"
 $releaseHistoryPath = Join-Path $moduleRoot ".local\forward\release-control-history.jsonl"
 $coordinatedMigrationReceiptPath = Join-Path $moduleRoot ".local\forward\coordinated-migration-receipt.json"
+$accessBoundaryReceiptRoot = Join-Path $moduleRoot ".local\forward\access-boundary-receipts"
 $releaseLockPath = Join-Path $moduleRoot ".local\forward\release-control.lock"
 $controlPlaneInstallStatePath = Join-Path $moduleRoot ".local\forward\control-plane-install-state.json"
 $runtimePreflightContractVersion = "isolated-critical-status-diagnostics-v4"
@@ -94,6 +97,8 @@ $candidateOnlyProjectionRoutes = @(
 )
 $releaseLockOwnerGrace = [TimeSpan]::FromSeconds(30)
 $coordinatedMigrationReceiptMaxAge = [TimeSpan]::FromHours(2)
+$accessBoundaryReceiptMaxAge = [TimeSpan]::FromHours(2)
+$accessChecklistConfirmationValue = "ALL_REQUIRED_ACCESS_CHECKS_PASSED"
 $bootstrapAcceptedCandidateWorker = "dd823aa4-20f0-47e1-9255-1b785a4c17b0"
 $bootstrapAcceptedCandidateRevision = "14c055a35040fa963700c988f770c9bb52fa669e"
 $convertFromJsonSupportsDateKind =
@@ -3883,7 +3888,7 @@ function Get-CandidateAuthInspection {
                 "$workerName=`"$([string]$Candidate.worker_version_id)`""
         }
         $response = Invoke-WebRequest -UseBasicParsing -Method Get `
-            -Uri "$dashboardUrl/admin/api/session" -Headers $headers `
+            -Uri "$protectedDashboardUrl/admin/api/session" -Headers $headers `
             -MaximumRedirection 0 -TimeoutSec 30
         $result.production_host_probe = "HTTP_$([int]$response.StatusCode)"
         if ([int]$response.StatusCode -in @(401, 403)) {
@@ -3900,6 +3905,283 @@ function Get-CandidateAuthInspection {
         }
     }
     return [pscustomobject]$result
+}
+
+function Get-ProtectedAccessBoundaryIdentity {
+    $uri = [Uri]$protectedDashboardUrl
+    if (-not $uri.IsAbsoluteUri -or $uri.Scheme -ne "https" -or
+        -not $uri.DnsSafeHost -or $uri.DnsSafeHost.EndsWith(".workers.dev")) {
+        throw "ACCESS_PROTECTED_HOST_INVALID"
+    }
+    return [ordered]@{
+        origin = $uri.GetLeftPart([UriPartial]::Authority).TrimEnd("/")
+        host = $uri.DnsSafeHost.ToLowerInvariant()
+        owner_resource = "/admin/api/session"
+    }
+}
+
+function Get-AccessBoundaryOperatorChecklistText {
+    param([Parameter(Mandatory = $true)][object]$Candidate)
+    $boundary = Get-ProtectedAccessBoundaryIdentity
+    return @"
+Protected URL: $([string]$boundary.origin)$([string]$boundary.owner_resource)
+Git SHA: $([string]$Candidate.git_sha)
+Worker Version: $([string]$Candidate.worker_version_id)
+Validation key: $([string]$Candidate.validation_key)
+
+Confirm every real protected-host check is complete:
+[1] Owner login succeeds.
+[2] The owner-only resource is accessible after owner login.
+[3] Non-owner or unauthorized access is denied.
+[4] Logout/session termination succeeds.
+[5] Access is denied after logout.
+[6] Reauthentication succeeds.
+
+This records human evidence only. It does not perform authentication.
+"@.Trim()
+}
+
+function Get-AccessBoundaryReceiptDigest {
+    param([Parameter(Mandatory = $true)][object]$Core)
+    $json = $Core | ConvertTo-Json -Compress -Depth 12
+    Get-Sha256BytesHex -Bytes ([System.Text.Encoding]::UTF8.GetBytes($json))
+}
+
+function Get-AccessBoundaryReceiptPath {
+    param([Parameter(Mandatory = $true)][string]$ValidationKey)
+    $keyDigest = Get-Sha256BytesHex -Bytes `
+        ([System.Text.Encoding]::UTF8.GetBytes($ValidationKey))
+    return Join-Path $accessBoundaryReceiptRoot "$keyDigest.json"
+}
+
+function New-AccessBoundaryAcceptanceReceipt {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$Stable,
+        [Parameter(Mandatory = $true)][object]$Checklist
+    )
+    $acceptedAt = [DateTimeOffset]::UtcNow
+    $boundary = Get-ProtectedAccessBoundaryIdentity
+    $core = [ordered]@{
+        schema_version = "access-boundary-acceptance-receipt-v1"
+        accepted_at = $acceptedAt.ToString("o")
+        expires_at = $acceptedAt.Add($accessBoundaryReceiptMaxAge).ToString("o")
+        accepted_by = [Environment]::UserName
+        validation_key = [string]$Candidate.validation_key
+        candidate = [ordered]@{
+            git_sha = [string]$Candidate.git_sha
+            worker_version_id = [string]$Candidate.worker_version_id
+            windows_revision = [string]$Candidate.windows_revision
+            artifact_kind = [string]$Candidate.artifact_kind
+            branch = [string]$Candidate.branch
+        }
+        stable = [ordered]@{
+            validation_key = [string]$Stable.validation_key
+            git_sha = [string]$Stable.git_sha
+            worker_version_id = [string]$Stable.worker_version_id
+            windows_revision = [string]$Stable.windows_revision
+        }
+        access_boundary = $boundary
+        checklist = $Checklist
+    }
+    return [pscustomobject]@{
+        schema_version = $core.schema_version
+        accepted_at = $core.accepted_at
+        expires_at = $core.expires_at
+        accepted_by = $core.accepted_by
+        validation_key = $core.validation_key
+        candidate = $core.candidate
+        stable = $core.stable
+        access_boundary = $core.access_boundary
+        checklist = $core.checklist
+        receipt_digest = Get-AccessBoundaryReceiptDigest -Core $core
+    }
+}
+
+function Write-AccessBoundaryAcceptanceReceipt {
+    param([Parameter(Mandatory = $true)][object]$Receipt)
+    $path = Get-AccessBoundaryReceiptPath -ValidationKey ([string]$Receipt.validation_key)
+    New-Item -ItemType Directory -Path $accessBoundaryReceiptRoot -Force | Out-Null
+    if (Test-Path -LiteralPath $path) {
+        $existing = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
+            ConvertFrom-ReleaseControlJson
+        if ([string]$existing.receipt_digest -eq [string]$Receipt.receipt_digest) {
+            return
+        }
+        throw "ACCESS_RECEIPT_IMMUTABLE_CONFLICT"
+    }
+    $temporary = "$path.tmp"
+    $Receipt | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $temporary -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination $path
+}
+
+function Assert-AccessBoundaryAcceptanceReceipt {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$Stable,
+        [switch]$SkipCandidateStateBinding
+    )
+    $path = Get-AccessBoundaryReceiptPath -ValidationKey ([string]$Candidate.validation_key)
+    if (-not (Test-Path -LiteralPath $path)) {
+        throw "ACCESS_RECEIPT_MISSING"
+    }
+    $receipt = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
+        ConvertFrom-ReleaseControlJson
+    $core = [ordered]@{
+        schema_version = [string]$receipt.schema_version
+        accepted_at = [string]$receipt.accepted_at
+        expires_at = [string]$receipt.expires_at
+        accepted_by = [string]$receipt.accepted_by
+        validation_key = [string]$receipt.validation_key
+        candidate = $receipt.candidate
+        stable = $receipt.stable
+        access_boundary = $receipt.access_boundary
+        checklist = $receipt.checklist
+    }
+    if ([string]$receipt.schema_version -ne "access-boundary-acceptance-receipt-v1" -or
+        [string]$receipt.receipt_digest -notmatch '^[0-9a-f]{64}$' -or
+        [string]$receipt.receipt_digest -cne (Get-AccessBoundaryReceiptDigest -Core $core)) {
+        throw "ACCESS_RECEIPT_TAMPERED"
+    }
+    $acceptedAt = ConvertTo-ReleaseTimestampUtc -Value $receipt.accepted_at
+    $expiresAt = ConvertTo-ReleaseTimestampUtc -Value $receipt.expires_at
+    if ($acceptedAt -eq [DateTimeOffset]::MinValue -or
+        $expiresAt -eq [DateTimeOffset]::MinValue -or
+        $acceptedAt -gt [DateTimeOffset]::UtcNow.AddMinutes(5) -or
+        $expiresAt -ne $acceptedAt.Add($accessBoundaryReceiptMaxAge) -or
+        $expiresAt -le [DateTimeOffset]::UtcNow) {
+        throw "ACCESS_RECEIPT_STALE"
+    }
+    $requiredChecks = @(
+        "owner_login_succeeds",
+        "owner_resource_accessible",
+        "unauthorized_access_denied",
+        "logout_succeeds",
+        "access_denied_after_logout",
+        "reauthentication_succeeds"
+    )
+    foreach ($name in $requiredChecks) {
+        $property = $receipt.checklist.PSObject.Properties[$name]
+        if (-not $property -or $property.Value -isnot [bool] -or
+            -not [bool]$property.Value) {
+            throw "ACCESS_RECEIPT_CHECKLIST_INCOMPLETE:$name"
+        }
+    }
+    if (@($receipt.checklist.PSObject.Properties).Count -ne $requiredChecks.Count) {
+        throw "ACCESS_RECEIPT_CHECKLIST_INVALID"
+    }
+    if ([string]$receipt.validation_key -ne [string]$Candidate.validation_key -or
+        [string]$receipt.candidate.git_sha -ne [string]$Candidate.git_sha -or
+        [string]$receipt.candidate.worker_version_id -ne [string]$Candidate.worker_version_id -or
+        [string]$receipt.candidate.windows_revision -ne [string]$Candidate.windows_revision -or
+        [string]$receipt.candidate.artifact_kind -ne [string]$Candidate.artifact_kind -or
+        [string]$receipt.candidate.branch -ne [string]$Candidate.branch) {
+        throw "ACCESS_RECEIPT_CANDIDATE_MISMATCH"
+    }
+    if ([string]$receipt.stable.validation_key -ne [string]$Stable.validation_key -or
+        [string]$receipt.stable.git_sha -ne [string]$Stable.git_sha -or
+        [string]$receipt.stable.worker_version_id -ne [string]$Stable.worker_version_id -or
+        [string]$receipt.stable.windows_revision -ne [string]$Stable.windows_revision) {
+        throw "ACCESS_RECEIPT_STABLE_MISMATCH"
+    }
+    $boundary = Get-ProtectedAccessBoundaryIdentity
+    if ([string]$receipt.access_boundary.origin -cne [string]$boundary.origin -or
+        [string]$receipt.access_boundary.host -cne [string]$boundary.host -or
+        [string]$receipt.access_boundary.owner_resource -cne [string]$boundary.owner_resource) {
+        throw "ACCESS_RECEIPT_HOST_MISMATCH"
+    }
+    if (-not $SkipCandidateStateBinding) {
+        if (-not $Candidate.access_acceptance -or
+            [string]$Candidate.access_acceptance.validation_key -ne [string]$Candidate.validation_key -or
+            [string]$Candidate.access_acceptance.receipt_digest -cne [string]$receipt.receipt_digest -or
+            [string]$Candidate.access_acceptance.protected_host -cne [string]$boundary.host -or
+            [string]$Candidate.access_acceptance.accepted_at -cne [string]$receipt.accepted_at -or
+            [string]$Candidate.access_acceptance.expires_at -cne [string]$receipt.expires_at) {
+            throw "ACCESS_RECEIPT_STATE_MISMATCH"
+        }
+    }
+    return $receipt
+}
+
+function Approve-CandidateAccessBoundary {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$ChecklistConfirmation
+    )
+    if ($ChecklistConfirmation -cne $accessChecklistConfirmationValue) {
+        throw "ACCESS_CHECKLIST_EXPLICIT_CONFIRMATION_REQUIRED"
+    }
+    $state = Get-ReleaseControlState
+    if (-not $state -or -not $state.candidate -or -not $state.stable) {
+        throw "ACCESS_CANDIDATE_UNAVAILABLE"
+    }
+    $candidate = $state.candidate
+    if ([string]$candidate.validation_state -eq "PASSED" -and
+        $candidate.access_acceptance) {
+        $null = Assert-AccessBoundaryAcceptanceReceipt -Candidate $candidate -Stable $state.stable
+        return $candidate
+    }
+    if ([string]$candidate.validation_state -ne "REVIEW_REQUIRED" -or
+        [string]$candidate.validation.reason -ne "ACCESS_BOUNDARY_REVIEW_REQUIRED" -or
+        [string]$candidate.validation.key -ne [string]$candidate.validation_key -or
+        [string]$candidate.validation.repository -ne "PASSED" -or
+        [string]$candidate.validation.windows -ne "PASSED" -or
+        [string]$candidate.validation.cloudflare -ne "PASSED" -or
+        -not [bool]$candidate.validation.data_parity.passed -or
+        [string]$candidate.validation.auth_inspection.state -ne "AUTH_BOUNDARY_NOT_TESTABLE" -or
+        -not (Test-CandidateAuthBoundaryChanged -RoutePlan $candidate.validation.route_plan)) {
+        throw "ACCESS_EXACT_REVIEW_EVIDENCE_REQUIRED"
+    }
+    $approvalGate = Get-CandidateCompatibilityApprovalGate -Candidate $candidate
+    if ([string]$approvalGate.state -ne "PASSED") {
+        throw "ACCESS_APPROVAL_REJECTED:$([string]$approvalGate.reason)"
+    }
+    $checklist = [ordered]@{
+        owner_login_succeeds = $true
+        owner_resource_accessible = $true
+        unauthorized_access_denied = $true
+        logout_succeeds = $true
+        access_denied_after_logout = $true
+        reauthentication_succeeds = $true
+    }
+    $receipt = New-AccessBoundaryAcceptanceReceipt -Candidate $candidate `
+        -Stable $state.stable -Checklist $checklist
+    Write-AccessBoundaryAcceptanceReceipt -Receipt $receipt
+    $verified = Assert-AccessBoundaryAcceptanceReceipt -Candidate $candidate `
+        -Stable $state.stable -SkipCandidateStateBinding
+    $candidate | Add-Member -Force -NotePropertyName access_acceptance `
+        -NotePropertyValue ([pscustomobject]@{
+            validation_key = [string]$candidate.validation_key
+            receipt_digest = [string]$verified.receipt_digest
+            protected_host = [string]$verified.access_boundary.host
+            accepted_at = [string]$verified.accepted_at
+            expires_at = [string]$verified.expires_at
+        })
+    $priorAuthInspection = $candidate.validation.auth_inspection
+    $candidate.validation | Add-Member -Force -NotePropertyName auth_inspection `
+        -NotePropertyValue ([pscustomobject]@{
+            state = "HUMAN_ACCESS_BOUNDARY_ACCEPTED"
+            protected_host = [string]$verified.access_boundary.host
+            protected_origin = [string]$verified.access_boundary.origin
+            receipt_digest = [string]$verified.receipt_digest
+            accepted_at = [string]$verified.accepted_at
+            provider_inspection = $priorAuthInspection
+        })
+    $candidate.validation | Add-Member -Force -NotePropertyName access_receipt_digest `
+        -NotePropertyValue ([string]$verified.receipt_digest)
+    $candidate.validation.reason = "ACCESS_BOUNDARY_ACCEPTED"
+    $candidate.validation.tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+    $candidate.compatibility_state = "PASSED"
+    $candidate.validation_state = "PASSED"
+    $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+    Write-ReleaseControlState -State $state
+    Write-ReleaseHistory -Event "CANDIDATE_ACCESS_BOUNDARY_ACCEPTED" `
+        -Release $candidate -Detail @{
+            validation_key = [string]$candidate.validation_key
+            receipt_digest = [string]$verified.receipt_digest
+            protected_host = [string]$verified.access_boundary.host
+            checklist = $verified.checklist
+        }
+    return $candidate
 }
 
 function Set-CandidateRepositoryPending {
@@ -5818,6 +6100,11 @@ function Start-ReleasePromotion {
             [string]$candidate.validation_key -ne
                 "$([string]$candidate.worker_version_id):$([string]$candidate.git_sha)") {
             throw "Candidate validation does not belong to this release."
+        }
+        if ([string]$candidate.validation.auth_inspection.state -eq
+                "HUMAN_ACCESS_BOUNDARY_ACCEPTED") {
+            $null = Assert-AccessBoundaryAcceptanceReceipt -Candidate $candidate `
+                -Stable $state.stable
         }
         if ([string]$candidate.git_sha -ne [string]$candidate.windows_revision -or
             [string]$candidate.compatibility_state -ne "PASSED") {
@@ -7977,6 +8264,7 @@ function Get-ControlCenterReleasePresentation {
             reverse_reason = "Not bootstrapped"
             can_verify_migration = $false
             can_approve_compatibility = $false
+            can_approve_access = $false
             compatibility_review_reason = "Not bootstrapped"
         }
     }
@@ -7999,6 +8287,15 @@ function Get-ControlCenterReleasePresentation {
         [string]$Release.candidate.branch -eq "main" -and
         [string]$Release.candidate.git_sha -eq [string]$Release.candidate.windows_revision -and
         [string]$Release.candidate.validation.key -eq [string]$Release.candidate.validation_key)
+    $accessAcceptanceReady = $true
+    if ($Release.candidate -and
+        [string]$Release.candidate.validation.auth_inspection.state -eq
+            "HUMAN_ACCESS_BOUNDARY_ACCEPTED") {
+        try {
+            $null = Assert-AccessBoundaryAcceptanceReceipt `
+                -Candidate $Release.candidate -Stable $Release.stable
+        } catch { $accessAcceptanceReady = $false }
+    }
     $canApproveCompatibility = [bool]($Release.candidate -and
         $candidateState -eq "REVIEW_REQUIRED" -and
         [string]$Release.candidate.validation.reason -eq "PLATFORM_CONFIG_REVIEW_REQUIRED" -and
@@ -8013,6 +8310,19 @@ function Get-ControlCenterReleasePresentation {
             "COORDINATED_STORAGE_MIGRATION_EVIDENCE_INVALID"
         ) -and
         [string]$Release.candidate.validation.key -eq [string]$Release.candidate.validation_key -and
+        $candidateKind -eq $productionCandidateArtifactKind -and
+        [string]$Release.candidate.branch -eq "main")
+    $canApproveAccess = [bool]($Release.candidate -and
+        $candidateState -eq "REVIEW_REQUIRED" -and
+        [string]$Release.candidate.validation.reason -eq
+            "ACCESS_BOUNDARY_REVIEW_REQUIRED" -and
+        [string]$Release.candidate.validation.key -eq
+            [string]$Release.candidate.validation_key -and
+        [string]$Release.candidate.validation.repository -eq "PASSED" -and
+        [string]$Release.candidate.validation.windows -eq "PASSED" -and
+        [string]$Release.candidate.validation.cloudflare -eq "PASSED" -and
+        [string]$Release.candidate.validation.auth_inspection.state -eq
+            "AUTH_BOUNDARY_NOT_TESTABLE" -and
         $candidateKind -eq $productionCandidateArtifactKind -and
         [string]$Release.candidate.branch -eq "main")
 
@@ -8049,6 +8359,8 @@ function Get-ControlCenterReleasePresentation {
         "Deployment status is $($Release.deployment_status)"
     } elseif (-not $Release.candidate) {
         "Candidate unavailable"
+    } elseif (-not $accessAcceptanceReady) {
+        "Access acceptance receipt is invalid or stale"
     } elseif ($candidateKind -ne $productionCandidateArtifactKind) {
         if ($candidateKind -eq $previewArtifactKind) {
             "Preview cannot be promoted"
@@ -8088,7 +8400,8 @@ function Get-ControlCenterReleasePresentation {
         can_promote = [bool]($deploymentReady -and -not $transactionActive -and
             $Release.candidate -and $candidateState -eq "PASSED" -and
             $candidateKind -eq $productionCandidateArtifactKind -and
-            $compatibilityPassed -and $candidateProvenanceReady -and $controlBundleReady)
+            $compatibilityPassed -and $candidateProvenanceReady -and
+            $accessAcceptanceReady -and $controlBundleReady)
         promote_reason = $promoteReason
         can_reverse = [bool]($deploymentReady -and -not $transactionActive -and
             $Release.previous_stable -and $Release.previous_stable_rollback_eligible -and
@@ -8096,6 +8409,7 @@ function Get-ControlCenterReleasePresentation {
         reverse_reason = $reverseReason
         can_verify_migration = $canVerifyMigration
         can_approve_compatibility = $canApproveCompatibility
+        can_approve_access = $canApproveAccess
         compatibility_review_reason = if ($Release.candidate -and
             $Release.candidate.validation.reason) {
             [string]$Release.candidate.validation.reason
@@ -8301,6 +8615,37 @@ function Test-ControlCenterApprovalCommitted {
     return $false
 }
 
+function Test-ControlCenterAccessApprovalCommitted {
+    param(
+        [object]$ReleaseState,
+        [Parameter(Mandatory = $true)][string]$ValidationKey
+    )
+    if (-not $ReleaseState -or -not $ReleaseState.candidate -or
+        -not $ReleaseState.stable -or
+        [string]$ReleaseState.candidate.validation_key -ne $ValidationKey -or
+        [string]$ReleaseState.candidate.validation_state -ne "PASSED" -or
+        [string]$ReleaseState.candidate.validation.auth_inspection.state -ne
+            "HUMAN_ACCESS_BOUNDARY_ACCEPTED") { return $false }
+    try {
+        $receipt = Assert-AccessBoundaryAcceptanceReceipt `
+            -Candidate $ReleaseState.candidate -Stable $ReleaseState.stable
+    } catch { return $false }
+    if (-not (Test-Path -LiteralPath $releaseHistoryPath)) { return $false }
+    foreach ($line in @(Get-Content -LiteralPath $releaseHistoryPath -Tail 1000 `
+        -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+        try {
+            $entry = $line | ConvertFrom-ReleaseControlJson
+            if ([string]$entry.event -eq "CANDIDATE_ACCESS_BOUNDARY_ACCEPTED" -and
+                [string]$entry.release.validation_key -eq $ValidationKey -and
+                [string]$entry.detail.validation_key -eq $ValidationKey -and
+                [string]$entry.detail.receipt_digest -eq [string]$receipt.receipt_digest) {
+                return $true
+            }
+        } catch {}
+    }
+    return $false
+}
+
 function Test-ControlCenterReleaseHistoryContains {
     param(
         [Parameter(Mandatory = $true)][string]$Event,
@@ -8343,6 +8688,11 @@ function Test-ControlCenterReleaseOperationCommitted {
         "ApproveCompatibility" {
             return [bool]($ExpectedValidationKey -and
                 (Test-ControlCenterApprovalCommitted -ReleaseState $ReleaseState `
+                    -ValidationKey $ExpectedValidationKey))
+        }
+        "ApproveAccessBoundary" {
+            return [bool]($ExpectedValidationKey -and
+                (Test-ControlCenterAccessApprovalCommitted -ReleaseState $ReleaseState `
                     -ValidationKey $ExpectedValidationKey))
         }
         "PromoteCandidate" {
@@ -8523,6 +8873,15 @@ function Invoke-ControlCenterOperationAction {
             try { return Approve-CandidateCompatibility }
             finally { Exit-ReleaseTransactionLock }
         }
+        "ApproveAccessBoundary" {
+            if (-not (Enter-ReleaseTransactionLock)) {
+                throw "Another release transaction is active."
+            }
+            try {
+                return Approve-CandidateAccessBoundary `
+                    -ChecklistConfirmation $AccessChecklistConfirmation
+            } finally { Exit-ReleaseTransactionLock }
+        }
         "VerifyMigrationCompatibility" {
             if (-not (Enter-ReleaseTransactionLock)) {
                 throw "Another release transaction is active."
@@ -8562,6 +8921,9 @@ function Invoke-ControlCenterStructuredOperation {
             ($Operation -eq "ApproveCompatibility" -and
                 (Test-ControlCenterApprovalCommitted -ReleaseState $after `
                     -ValidationKey $expectedValidationKey)) -or
+            ($Operation -eq "ApproveAccessBoundary" -and
+                (Test-ControlCenterAccessApprovalCommitted -ReleaseState $after `
+                    -ValidationKey $expectedValidationKey)) -or
             ($Operation -eq "VerifyMigrationCompatibility" -and
                 (Test-ControlCenterReleaseOperationCommitted -Operation $Operation `
                     -ReleaseState $after -ExpectedValidationKey $expectedValidationKey))
@@ -8584,14 +8946,14 @@ function Invoke-ControlCenterStructuredOperation {
         return 1
     }
     $committed = if ($Operation -in @(
-        "VerifyMigrationCompatibility", "ApproveCompatibility", "PromoteCandidate", "ReverseStable"
+        "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "PromoteCandidate", "ReverseStable"
     )) {
         Test-ControlCenterReleaseOperationCommitted -Operation $Operation `
             -ReleaseState $after -ExpectedRelease $expectedRelease `
             -ExpectedValidationKey $expectedValidationKey
     } else { $true }
     $semanticSuccess = [bool]($Operation -notin @(
-        "VerifyMigrationCompatibility", "ApproveCompatibility", "PromoteCandidate", "ReverseStable"
+        "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "PromoteCandidate", "ReverseStable"
     ) -or $committed)
     $result = New-ControlCenterOperationResult -Operation $Operation `
         -Success $semanticSuccess -Committed $committed `
@@ -8638,7 +9000,7 @@ function Test-WpfControlCenterLayout {
             "RootScrollViewer", "RootLayout", "ReleaseGrid", "StableCard",
             "CandidateCard", "PreviousCard", "CandidateChecks",
             "CandidateReason", "OpenStableButton", "OpenCandidateButton",
-            "VerifyMigrationButton", "ApproveCompatibilityButton", "PromoteButton", "ReverseButton",
+            "VerifyMigrationButton", "ApproveCompatibilityButton", "ApproveAccessButton", "PromoteButton", "ReverseButton",
             "CandidateTechnicalEvidence", "FooterDisclaimer",
             "ControlPlaneIdentity", "BusinessRuntimeIdentity"
         )
@@ -8667,7 +9029,7 @@ function Test-WpfControlCenterLayout {
                 $reachable = $true
                 foreach ($name in @(
                     "OpenStableButton", "OpenCandidateButton",
-                    "VerifyMigrationButton", "ApproveCompatibilityButton", "PromoteButton", "ReverseButton"
+                    "VerifyMigrationButton", "ApproveCompatibilityButton", "ApproveAccessButton", "PromoteButton", "ReverseButton"
                 )) {
                     $control = [Windows.FrameworkElement]$window.FindName($name)
                     if ($control.ActualWidth -le 0 -or $control.ActualHeight -le 0) {
@@ -8725,7 +9087,7 @@ function Show-WpfControlCenter {
             (Find-WpfControl "ServiceList").IsEnabled = -not $Busy
             if ($Busy) {
                 foreach ($name in @(
-                    "VerifyMigrationButton", "ApproveCompatibilityButton", "PromoteButton", "ReverseButton"
+                    "VerifyMigrationButton", "ApproveCompatibilityButton", "ApproveAccessButton", "PromoteButton", "ReverseButton"
                 )) {
                     (Find-WpfControl $name).IsEnabled = $false
                 }
@@ -8734,6 +9096,7 @@ function Show-WpfControlCenter {
             $state = switch ($Operation) {
                 "VerifyMigrationCompatibility" { "VERIFYING MIGRATION" }
                 "ApproveCompatibility" { "APPROVING" }
+                "ApproveAccessBoundary" { "RECORDING ACCESS EVIDENCE" }
                 "PromoteCandidate" { "PROMOTING" }
                 "ReverseStable" { "REVERSING" }
                 default { "WORKING" }
@@ -8746,7 +9109,11 @@ function Show-WpfControlCenter {
             (Find-WpfControl "CandidateReason").Text =
                 "$state | tracked background operation in progress"
         }
-        function Invoke-WpfOperation([string]$Operation, [string]$ServiceKey = "") {
+        function Invoke-WpfOperation(
+            [string]$Operation,
+            [string]$ServiceKey = "",
+            [string]$ChecklistConfirmation = ""
+        ) {
             if (Test-WpfOperationActive) { return }
             $arguments = @(
                 "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
@@ -8757,6 +9124,9 @@ function Show-WpfControlCenter {
                 "-ExpectedControlRevision", ([string]$controlIdentity.source_revision)
             )
             if ($ServiceKey) { $arguments += @("-ServiceKey", $ServiceKey) }
+            if ($ChecklistConfirmation) {
+                $arguments += @("-AccessChecklistConfirmation", $ChecklistConfirmation)
+            }
             $script:wpfOperationName = $Operation
             $script:wpfOperationOutputPath = Join-Path $env:TEMP `
                 ("xauusd-wpf-operation-{0}.out" -f ([guid]::NewGuid().ToString("N")))
@@ -8858,7 +9228,7 @@ function Show-WpfControlCenter {
                 "CPU headroom: $cpuState"
                 "5xx / 1102: $failureState"
                 "Compatibility: $([string]$(if ($release -and $release.candidate) { $release.candidate.compatibility_state } else { 'unavailable' }))"
-                "Access boundary: formal-host only"
+                "Access boundary: $([string]$(if ($validation -and $validation.auth_inspection) { $validation.auth_inspection.state } else { 'formal-host only' }))"
             ) -join "`n"
             (Find-WpfControl "CandidateTechnicalEvidence").Text = if ($release -and $release.candidate) {
                 $evidence = [ordered]@{
@@ -8866,6 +9236,7 @@ function Show-WpfControlCenter {
                     validation_run = if ($validation) { $validation.validation_run } else { $null }
                     reason = $reason
                     migration_acceptance = $release.candidate.migration_acceptance
+                    access_acceptance = $release.candidate.access_acceptance
                     first_failure = $directed.first_failure
                     routes = if ($validation) { $validation.routes } else { @() }
                 }
@@ -8875,6 +9246,7 @@ function Show-WpfControlCenter {
             (Find-WpfControl "PromoteButton").IsEnabled = [bool]($releaseView.can_promote -and -not $operationActive)
             (Find-WpfControl "VerifyMigrationButton").IsEnabled = [bool]($releaseView.can_verify_migration -and -not $operationActive)
             (Find-WpfControl "ApproveCompatibilityButton").IsEnabled = [bool]($releaseView.can_approve_compatibility -and -not $operationActive)
+            (Find-WpfControl "ApproveAccessButton").IsEnabled = [bool]($releaseView.can_approve_access -and -not $operationActive)
             (Find-WpfControl "OpenCandidateButton").IsEnabled = [bool]($release -and $release.candidate -and $release.candidate.browser_url)
             (Find-WpfControl "PreviousState").Text = if ($release -and $release.previous_stable) { "AVAILABLE" } else { "UNAVAILABLE" }
             (Find-WpfControl "PreviousIdentity").Text = Format-WpfIdentity $release.previous_stable
@@ -8936,6 +9308,20 @@ function Show-WpfControlCenter {
                     "Approve only the displayed exact compatibility evidence?",
                     "Confirm Compatibility", "YesNo", "Warning"
                 ) -eq "Yes") { Invoke-WpfOperation "ApproveCompatibility" }
+            } -OnFailure { param($message) Show-WpfCallbackFailure $message })
+        })
+        (Find-WpfControl "ApproveAccessButton").Add_Click({
+            [void](Invoke-ControlCenterUiCallback -Callback {
+                $state = Get-ReleaseControlState
+                if (-not $state -or -not $state.candidate) { return }
+                $message = Get-AccessBoundaryOperatorChecklistText `
+                    -Candidate $state.candidate
+                if ([System.Windows.MessageBox]::Show(
+                    $message, "Confirm Protected Access Checks", "YesNo", "Warning"
+                ) -eq "Yes") {
+                    Invoke-WpfOperation "ApproveAccessBoundary" "" `
+                        $accessChecklistConfirmationValue
+                }
             } -OnFailure { param($message) Show-WpfCallbackFailure $message })
         })
         $window.AddHandler(
@@ -9601,6 +9987,26 @@ function Show-ControlCenter {
     $candidateCard.Panel.Controls.Add($approveCompatibilityButton)
     [void]$actionButtons.Add($approveCompatibilityButton)
 
+    $approveAccessButton = New-UiButton `
+        -Text "Approve Access Checks" -Width 164
+    $approveAccessButton.Location = New-Object System.Drawing.Point(136, 235)
+    $approveAccessButton.Anchor = "Left,Bottom"
+    $approveAccessButton.Enabled = $false
+    $approveAccessButton.Visible = $false
+    $approveAccessButton.Add_Click({
+        $state = Get-ReleaseControlState
+        if (-not $state -or -not $state.candidate) { return }
+        $message = Get-AccessBoundaryOperatorChecklistText -Candidate $state.candidate
+        if ([System.Windows.Forms.MessageBox]::Show(
+            $message, "Confirm Protected Access Checks", "YesNo", "Warning"
+        ) -eq "Yes") {
+            Invoke-GuiOperation -Operation "ApproveAccessBoundary" `
+                -ChecklistConfirmation $accessChecklistConfirmationValue
+        }
+    })
+    $candidateCard.Panel.Controls.Add($approveAccessButton)
+    [void]$actionButtons.Add($approveAccessButton)
+
     $promoteButton = New-UiButton -Text "Promote Candidate" -Kind "Primary" -Width 112
     $promoteButton.Location = New-Object System.Drawing.Point(300, 235)
     $promoteButton.Anchor = "Left,Bottom"
@@ -9758,7 +10164,11 @@ function Show-ControlCenter {
         if (-not $Busy -and $script:lastGuiSnapshot) { Apply-GuiStatus $script:lastGuiSnapshot }
     }
     function Invoke-GuiOperation {
-        param([string]$Operation, [string]$TargetKey = "")
+        param(
+            [string]$Operation,
+            [string]$TargetKey = "",
+            [string]$ChecklistConfirmation = ""
+        )
         if ($script:guiOperation) { return }
         $arguments = @(
             "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
@@ -9769,6 +10179,9 @@ function Show-ControlCenter {
             "-ExpectedControlRevision", ([string]$controlIdentity.source_revision)
         )
         if ($TargetKey) { $arguments += @("-ServiceKey", $TargetKey) }
+        if ($ChecklistConfirmation) {
+            $arguments += @("-AccessChecklistConfirmation", $ChecklistConfirmation)
+        }
         $script:guiOperationName = $Operation
         $script:guiOperationOutputPath = Join-Path $env:TEMP `
             ("xauusd-control-operation-{0}.out" -f ([guid]::NewGuid().ToString("N")))
@@ -9792,6 +10205,7 @@ function Show-ControlCenter {
         $busyMessage = switch ($Operation) {
             "VerifyMigrationCompatibility" { "VERIFYING MIGRATION | tracked background operation in progress" }
             "ApproveCompatibility" { "APPROVING | tracked background operation in progress" }
+            "ApproveAccessBoundary" { "RECORDING ACCESS EVIDENCE | tracked background operation in progress" }
             "PromoteCandidate" { "PROMOTING | tracked background operation in progress" }
             "ReverseStable" { "REVERSING | tracked background operation in progress" }
             default { "Working in background: $Operation" }
@@ -9920,6 +10334,8 @@ function Show-ControlCenter {
             $toolTip.SetToolTip($promoteButton, $releaseView.promote_reason)
             $approveCompatibilityButton.Visible = $releaseView.can_approve_compatibility
             $approveCompatibilityButton.Enabled = $releaseView.can_approve_compatibility
+            $approveAccessButton.Visible = $releaseView.can_approve_access
+            $approveAccessButton.Enabled = $releaseView.can_approve_access
             $verifyMigrationButton.Visible = $releaseView.can_verify_migration
             $verifyMigrationButton.Enabled = $releaseView.can_verify_migration
             $toolTip.SetToolTip(
@@ -10128,7 +10544,8 @@ if ($OperationResultPath) {
     $structuredActions = @(
         "Start", "Stop", "Restart", "ServiceStart", "ServiceStop",
         "DiscoverCandidate", "RetryCandidateValidation", "ReconcileRelease", "PromoteCandidate",
-        "ReverseStable", "VerifyMigrationCompatibility", "ApproveCompatibility"
+        "ReverseStable", "VerifyMigrationCompatibility", "ApproveCompatibility",
+        "ApproveAccessBoundary"
     )
     if ($Action -notin $structuredActions) {
         [Console]::Error.WriteLine("Unsupported structured operation: $Action")
@@ -10210,6 +10627,9 @@ switch ($Action) {
         Invoke-ControlCenterOperationAction -Operation $Action | ConvertTo-Json -Depth 12
     }
     "ApproveCompatibility" {
+        Invoke-ControlCenterOperationAction -Operation $Action | ConvertTo-Json -Depth 12
+    }
+    "ApproveAccessBoundary" {
         Invoke-ControlCenterOperationAction -Operation $Action | ConvertTo-Json -Depth 12
     }
     "EnableAutoStart" { Enable-AutoStart; Write-Output "Auto-start enabled." }

@@ -101,7 +101,7 @@ safety mechanism inventory.
 | quiesced handoff and activation | `Start-WatchdogReplacement`, `Wait-VerifiedWatchdogHandoff`, `Wait-ControlPlaneInstallActivation` | acknowledged-handoff family tests | heartbeat mode, install transaction ID, bundle revision/hash, process token |
 | install recovery | `Assert-AbandonedControlPlaneInstallActivation`, `Restore-AbandonedControlPlaneInstallForWatchdog` | five-checkpoint and recovery-fact family tests | old/new owner identities, exact baseline, release context, rollback/recovery result |
 | Prepare → Verify | `Get-ReleaseLifecyclePhase`; migration/platform prerequisites inside validation | lifecycle projection contract test | operator phase plus explicit reason/evidence |
-| Verify review/retry/pass | `Invoke-AutomaticCandidateValidation`, `Retry-CandidateValidation` | exact retry and immutable-evidence contracts | validation key, prior reason, retained evidence, new evidence universe |
+| Verify review/retry/pass | `Invoke-AutomaticCandidateValidation`, `Retry-CandidateValidation`, `Approve-CandidateAccessBoundary` | exact retry, Access receipt, and immutable-evidence contracts | validation key, prior reason, retained evidence, exact protected-host checklist receipt |
 | identity fail closed | `Test-ReleaseIdentity`, provenance and exact-SHA gates | release validation/runtime tests | Git/Worker/Windows response and state identities |
 | forward Switch | `Start-ReleasePromotion`, internal `PRECHECK/CUTOVER` | switch contract and promotion tests | transaction target/previous, Windows revision, Worker placement |
 | Observe and commit | `Test-RuntimeObservation`, `Complete-ReleasePromotion` | observation/commit tests | heartbeat, API, Sync, decision cadence, deferred projection receipts |

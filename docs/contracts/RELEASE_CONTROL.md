@@ -73,6 +73,24 @@ not the Cloudflare Access boundary and is recorded as
 the protected production hostname proves the boundary. Validation never
 simulates or claims a successful human login.
 
+When the protected-host login flow cannot be exercised by Release Control, the
+exact Candidate remains `ACCESS_BOUNDARY_REVIEW_REQUIRED`. An operator may use
+the single `ApproveAccessBoundary` transition only after personally verifying
+owner login and owner-resource access, unauthorized denial, logout, denial
+after logout, and successful reauthentication on the displayed protected host.
+The transition records a time-bounded, SHA-256-protected receipt binding the
+checklist, protected host, Stable identity, exact Candidate Git SHA, Worker
+Version, Windows revision, and validation key. A missing, stale, tampered, or
+wrong-identity receipt cannot complete validation or Promote. For the same
+immutable Candidate, approval resumes only the Access-dependent decision and
+preserves passed migration, directed-validation, parity, and CPU evidence.
+Candidate replacement, `main` movement, Stable identity movement, or protected
+host movement invalidates applicability. WPF and WinForms invoke this same
+PowerShell transition; neither UI performs authentication.
+The formal protected origin is
+`https://aurum-signal-room.yiyousiow1234.chatgpt.site`; the separately
+configurable runtime dashboard URL cannot redefine this Access authority.
+
 Every parity receipt records the Worker version observed in response headers.
 Generated-at serialization differences are ignored, while status/quote and
 decision cadence, audit transitions, and unexpectedly empty learning/market
