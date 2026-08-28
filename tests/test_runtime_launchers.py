@@ -3559,6 +3559,140 @@ def test_cloudflare_version_wrapper_enumerates_top_level_wrangler_array(tmp_path
     assert result == "2,version-b"
 
 
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_rollback_target_uses_exact_view_when_recent_list_is_truncated(
+    tmp_path, powershell: str,
+) -> None:
+    stable = "11111111-1111-4111-8111-111111111111"
+    candidate = "22222222-2222-4222-8222-222222222222"
+    recent_json = json.dumps([
+        {
+            "id": f"00000000-0000-4000-8000-{index:012d}",
+            "number": index,
+            "metadata": {
+                "created_on": "2026-08-28T14:22:25Z",
+                "source": "wrangler",
+                "has_preview": True,
+            },
+        }
+        for index in range(1, 11)
+    ])
+    version_json = json.dumps({
+        "id": stable,
+        "number": 979,
+        "metadata": {
+            "created_on": "2026-08-20T04:08:20Z",
+            "source": "wrangler",
+            "has_preview": True,
+        },
+        "annotations": {"workers/triggered_by": "version_upload"},
+        "resources": {
+            "script": {"etag": "exact-etag", "handlers": ["fetch"]},
+            "bindings": [],
+        },
+    })
+    deployment_json = json.dumps({
+        "id": "deployment-id",
+        "source": "wrangler",
+        "strategy": "percentage",
+        "versions": [
+            {"version_id": stable, "percentage": 100},
+            {"version_id": candidate, "percentage": 0},
+        ],
+    })
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:listCalled=$false;"
+        f"function Get-CloudflareVersions{{$script:listCalled=$true;"
+        f"'{recent_json}'|ConvertFrom-Json}};"
+        f"function Get-CloudflareVersionDetails{{param($VersionId);"
+        f"'{version_json}'|ConvertFrom-Json}};"
+        f"function Get-CloudflareDeployment{{'{deployment_json}'|ConvertFrom-Json}};"
+        f"$target=[pscustomobject]@{{worker_version_id='{stable}'}};"
+        "$passed=Test-CloudflareRollbackTarget -Target $target;"
+        'Write-Output "$passed,$script:listCalled"',
+        powershell=powershell,
+    )
+
+    assert result == "True,False"
+
+
+@pytest.mark.parametrize(
+    "exact_lookup",
+    (
+        "throw 'VERSION_NOT_FOUND'",
+        "throw 'PROVIDER_TRANSPORT_FAILED'",
+        "[pscustomobject]@{id='22222222-2222-4222-8222-222222222222';"
+        "metadata=[pscustomobject]@{source='wrangler'};resources=[pscustomobject]@{"
+        "script=[pscustomobject]@{handlers=@('fetch')}}}",
+        "[pscustomobject]@{id='11111111-1111-4111-8111-111111111111';"
+        "metadata=[pscustomobject]@{source='wrangler'};resources=[pscustomobject]@{}}",
+        "@([pscustomobject]@{id='11111111-1111-4111-8111-111111111111';"
+        "metadata=[pscustomobject]@{source='wrangler'};resources=[pscustomobject]@{"
+        "script=[pscustomobject]@{handlers=@('fetch')}}})",
+    ),
+    ids=(
+        "missing",
+        "transport-error",
+        "candidate-stable-confusion",
+        "malformed-resources",
+        "malformed-array-envelope",
+    ),
+)
+def test_rollback_target_exact_lookup_failures_are_fail_closed(
+    tmp_path, exact_lookup: str,
+) -> None:
+    stable = "11111111-1111-4111-8111-111111111111"
+    result = _run_control_center_contract(
+        tmp_path,
+        f"function Get-CloudflareVersionDetails{{param($VersionId);{exact_lookup}}};"
+        "function Get-CloudflareDeployment{throw 'DEPLOYMENT_MUST_NOT_BE_READ'};"
+        f"$target=[pscustomobject]@{{worker_version_id='{stable}'}};"
+        "Write-Output (Test-CloudflareRollbackTarget -Target $target)",
+    )
+
+    assert result == "False"
+
+
+def test_rollback_target_rejects_deployment_identity_mismatch(tmp_path) -> None:
+    stable = "11111111-1111-4111-8111-111111111111"
+    candidate = "22222222-2222-4222-8222-222222222222"
+    version_json = json.dumps({
+        "id": stable,
+        "number": 979,
+        "metadata": {"source": "wrangler"},
+        "resources": {"script": {"handlers": ["fetch"]}},
+    })
+    deployment_json = json.dumps({
+        "versions": [{"version_id": candidate, "percentage": 100}],
+    })
+    result = _run_control_center_contract(
+        tmp_path,
+        f"function Get-CloudflareVersionDetails{{param($VersionId);"
+        f"'{version_json}'|ConvertFrom-Json}};"
+        f"function Get-CloudflareDeployment{{'{deployment_json}'|ConvertFrom-Json}};"
+        f"$target=[pscustomobject]@{{worker_version_id='{stable}'}};"
+        "Write-Output (Test-CloudflareRollbackTarget -Target $target)",
+    )
+
+    assert result == "False"
+
+
+def test_rollback_target_rejects_deployment_transport_failure(tmp_path) -> None:
+    stable = "11111111-1111-4111-8111-111111111111"
+    result = _run_control_center_contract(
+        tmp_path,
+        f"function Get-CloudflareVersionDetails{{param($VersionId);[pscustomobject]@{{"
+        f"id='{stable}';number=979;metadata=[pscustomobject]@{{source='wrangler'}};"
+        "resources=[pscustomobject]@{script=[pscustomobject]@{handlers=@('fetch')}}}};"
+        "function Get-CloudflareDeployment{throw 'PROVIDER_TRANSPORT_FAILED'};"
+        f"$target=[pscustomobject]@{{worker_version_id='{stable}'}};"
+        "Write-Output (Test-CloudflareRollbackTarget -Target $target)",
+    )
+
+    assert result == "False"
+
+
 def test_bootstrap_watermark_uses_newest_valid_timestamp_then_version_id(tmp_path) -> None:
     stable = "a" * 40
     result = _run_control_center_contract(
