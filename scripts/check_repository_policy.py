@@ -43,7 +43,7 @@ EXPECTED_CLOUDFLARE_BUILD_CONTRACT = {
         "path_excludes": [],
     },
     "commands": {
-        "build": "npm ci && npm test",
+        "build": "python3 -m pip install -e .. && npm ci && npm test",
         "deploy": (
             'npx wrangler versions upload --message '
             '"release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH '

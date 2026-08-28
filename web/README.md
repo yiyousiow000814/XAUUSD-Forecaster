@@ -157,9 +157,11 @@ For automatic deployment after a GitHub push, connect the GitHub repository in
 Cloudflare Workers Builds and match
 [`cloudflare-build-contract.json`](cloudflare-build-contract.json): production
 branch `main`, root directory `/web`, include path `*`, no exclude paths,
-`npm ci && npm test` as the build command, and immutable `wrangler versions
-upload` as the deploy command. The build must not assign Stable traffic. Keep D1
-identifiers in `wrangler.jsonc`; keep `INGEST_TOKEN` in Cloudflare secrets.
+`python3 -m pip install -e .. && npm ci && npm test` as the build command, and
+immutable `wrangler versions upload` as the deploy command. The Python install
+allows the Worker contract suite to execute the exact release fixture builder.
+The build must not assign Stable traffic. Keep D1 identifiers in
+`wrangler.jsonc`; keep `INGEST_TOKEN` in Cloudflare secrets.
 
 ## Learn More
 
