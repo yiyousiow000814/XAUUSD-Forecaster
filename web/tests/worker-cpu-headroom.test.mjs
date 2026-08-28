@@ -749,7 +749,7 @@ test("accepts every exact Python-built production-shaped release fixture", async
   if (isPreviewBuild) return;
   const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
   const fixtureRoot = mkdtempSync(join(tmpdir(), "aurum-worker-release-fixtures-"));
-  const python = process.env.PYTHON || (process.platform === "win32" ? "python.exe" : "python3");
+  const python = process.platform === "win32" ? "python.exe" : "python3";
   try {
     const built = spawnSync(python, [
       join(repositoryRoot, "scripts", "build_release_validation_fixtures.py"),
