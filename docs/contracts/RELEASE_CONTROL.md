@@ -50,6 +50,29 @@ mocked, or replayed provider and network side effects. Candidate MUST NOT claim
 production jobs, fetch production news as a second collector, emit production
 decisions, write production SQLite or D1, or consume production retry commands.
 
+The Business Runtime checkout owns immutable executable code, while its explicit
+runtime state root owns mutable production state. Control Center MUST pass that
+state authority to quote, collector, annotator, API, Sync, and broadcast launch
+paths. SQLite databases, heartbeats, cursors, schedules, checkpoints, logs, and
+operational receipts remain under `RuntimeRoot/.local/forward`; their location
+MUST NOT be inferred from a Python module path, current working directory,
+repository checkout, or Candidate staging checkout. Static code and intentional
+repository configuration or secret authorities remain separate. Moving or
+revising the code checkout cannot redirect mutable state, and Switch, hidden
+watchdog recovery, Observe, and Reverse use the same service launch contract.
+An older installation whose runtime `.local` is a junction to the repository
+must be migrated through the explicit state-only Control Center operation before
+a new Business Runtime is installed. That operation fences release entry,
+verifies the exact installed Control Plane, sole watchdog, Stable revision, and
+service-owner baseline, quiesces the watchdog and services, and then replaces
+only a junction whose exact target is the authorized repository `.local`. It
+restarts and health-checks the same frozen Stable checkout before restoring
+supervision; it MUST NOT move Git, change Worker traffic, or change release
+state. The migration lock is outside the junction being replaced, and every
+release transaction entry fails closed while it exists. Unknown link targets,
+concurrent release state, revision changes, missing owners, or failed fresh
+service evidence fail closed.
+
 Candidate detection is automatic. Required gates are selected from the changed
 boundaries and include repository checks, isolated Windows preflight, startup
 viability, ownership uniqueness, compatibility, directed 0% Worker probes, and

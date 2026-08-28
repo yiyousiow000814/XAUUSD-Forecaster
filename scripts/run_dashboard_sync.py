@@ -21,30 +21,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
-DEFAULT_CONFIG = MODULE_ROOT / ".local" / "forward" / "dashboard-sync.json"
-DEFAULT_STATUS = MODULE_ROOT / ".local" / "forward" / "dashboard-sync-status.json"
-DEFAULT_RUNTIME_SIGNAL = (
-    MODULE_ROOT / ".local" / "forward" / "remote-main-signal.json"
-)
-DEFAULT_NEWS_STATE = (
-    MODULE_ROOT / ".local" / "forward" / "dashboard-news-sync-state.json"
-)
-DEFAULT_LEARNING_STATE = (
-    MODULE_ROOT / ".local" / "forward" / "dashboard-learning-sync-state.json"
-)
-DEFAULT_LEARNING_HISTORY_STATE = (
-    MODULE_ROOT / ".local" / "forward" / "dashboard-learning-history-sync-state.json"
-)
-DEFAULT_MARKET_HISTORY_STATE = (
-    MODULE_ROOT / ".local" / "forward" / "dashboard-market-history-sync-state.json"
-)
-DEFAULT_NEWS_EVIDENCE_STATE = (
-    MODULE_ROOT / ".local" / "forward" / "dashboard-news-evidence-sync-state.json"
-)
-DEFAULT_RESOURCE_SCHEDULE_STATE = (
-    MODULE_ROOT / ".local" / "forward" / "dashboard-resource-schedule-state.json"
-)
-SYNC_STATE_ROOT = DEFAULT_CONFIG.parent.resolve()
+RUNTIME_STATE_ROOT_KEY = "_runtime_state_root"
 REMOTE_PAYLOAD_LIMIT_BYTES = 750_000
 LOCAL_STATUS_TIMEOUT_SECONDS = 20
 REMOTE_POST_TIMEOUT_SECONDS = 30
@@ -105,6 +82,11 @@ from xauusd_forecaster.news_projection import (
     sha256_json as _projection_json_hash,
     split_news_rows,
     stable_news_key,
+)
+from xauusd_forecaster.runtime_paths import (
+    authoritative_runtime_root,
+    logical_absolute_path,
+    runtime_child_path,
 )
 
 
@@ -934,13 +916,13 @@ def sync_error_code(error: Exception | None) -> str:
     return "UNCLASSIFIED"
 
 
-def _write_runtime_signal(payload: object) -> None:
+def _write_runtime_signal(payload: object, config: dict) -> None:
     if not isinstance(payload, dict):
         return
     revision = str(payload.get("main_revision") or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         return
-    target = DEFAULT_RUNTIME_SIGNAL
+    target = Path(config["runtime_signal_file"])
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(target.suffix + ".tmp")
     temporary.write_text(
@@ -994,7 +976,7 @@ def _post_json(url: str, payload: bytes, config: dict) -> dict:
         result = json.loads(body) if body else {}
     except (TypeError, ValueError):
         result = {}
-    _write_runtime_signal(result)
+    _write_runtime_signal(result, config)
     return result if isinstance(result, dict) else {}
 
 
@@ -1169,31 +1151,59 @@ def _target_state_path(path: Path, target_name: str, *, legacy: bool) -> Path:
     return path.with_name(f"{path.stem}-{safe_name}{path.suffix}")
 
 
-def _validated_sync_state_path(path: Path) -> Path:
+def _validated_sync_state_path(path: Path, state_root: Path) -> Path:
     """Keep mutable sync cursors inside the private runtime state directory."""
+    authority = logical_absolute_path(state_root)
     if path.is_absolute():
-        parent = path.parent
+        candidate = logical_absolute_path(path)
     else:
-        parent = SYNC_STATE_ROOT if path.parent == Path(".") else path.parent
-    filename = path.name
+        candidate = logical_absolute_path(
+            authority / path if path.parent == Path(".") else path
+        )
+    parent = candidate.parent
+    filename = candidate.name
     allowed_characters = frozenset(
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
     )
     if (
-        parent != SYNC_STATE_ROOT
+        parent != authority
         or not 6 <= len(filename) <= 128
         or not filename[0].isalnum()
         or not filename.endswith(".json")
         or any(character not in allowed_characters for character in filename)
     ):
         raise ValueError(
-            f"dashboard sync state path must be one JSON file under {SYNC_STATE_ROOT}"
+            f"dashboard sync state path must be one JSON file under {authority}"
         )
-    return SYNC_STATE_ROOT / filename
+    return authority / filename
+
+
+def configure_runtime_state(config: dict, state_root: Path) -> dict:
+    """Bind every mutable Sync path to one explicit runtime authority."""
+    authority = logical_absolute_path(state_root)
+    configured = {**config, RUNTIME_STATE_ROOT_KEY: str(authority)}
+    defaults = {
+        "learning_state_file": "dashboard-learning-sync-state.json",
+        "news_state_file": "dashboard-news-sync-state.json",
+        "market_history_state_file": "dashboard-market-history-sync-state.json",
+        "learning_history_state_file": "dashboard-learning-history-sync-state.json",
+        "news_evidence_state_file": "dashboard-news-evidence-sync-state.json",
+        "resource_schedule_state_file": "dashboard-resource-schedule-state.json",
+        "runtime_signal_file": "remote-main-signal.json",
+    }
+    for key, filename in defaults.items():
+        configured[key] = str(_validated_sync_state_path(
+            Path(configured.get(key, filename)), authority,
+        ))
+    return configured
 
 
 def configured_targets(config: dict) -> list[dict]:
     """Resolve legacy or multi-target mirror configuration without sharing state."""
+    raw_state_root = str(config.get(RUNTIME_STATE_ROOT_KEY) or "").strip()
+    if not raw_state_root:
+        raise ValueError("dashboard sync runtime state root is required")
+    state_root = logical_absolute_path(Path(raw_state_root))
     declared = config.get("targets")
     if not isinstance(declared, list):
         declared = [{**config, "name": config.get("name", "sites"), "legacy": True}]
@@ -1232,54 +1242,54 @@ def configured_targets(config: dict) -> list[dict]:
         scoped["learning_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "learning_state_file",
-                config.get("learning_state_file", DEFAULT_LEARNING_STATE),
+                config["learning_state_file"],
             )),
             name,
             legacy=scoped["legacy"],
-        )))
+        ), state_root))
         scoped["news_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "news_state_file",
-                config.get("news_state_file", DEFAULT_NEWS_STATE),
+                config["news_state_file"],
             )),
             name,
             legacy=scoped["legacy"],
-        )))
+        ), state_root))
         scoped["market_history_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "market_history_state_file",
-                config.get("market_history_state_file", DEFAULT_MARKET_HISTORY_STATE),
+                config["market_history_state_file"],
             )),
             name,
             legacy=scoped["legacy"],
-        )))
+        ), state_root))
         scoped["learning_history_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "learning_history_state_file",
-                config.get("learning_history_state_file", DEFAULT_LEARNING_HISTORY_STATE),
+                config["learning_history_state_file"],
             )),
             name,
             legacy=scoped["legacy"],
-        )))
+        ), state_root))
         scoped["news_evidence_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "news_evidence_state_file",
-                config.get("news_evidence_state_file", DEFAULT_NEWS_EVIDENCE_STATE),
+                config["news_evidence_state_file"],
             )),
             name,
             legacy=scoped["legacy"],
-        )))
+        ), state_root))
         scoped["resource_schedule_state_file"] = str(_validated_sync_state_path(_target_state_path(
             Path(target.get(
                 "resource_schedule_state_file",
-                config.get(
-                    "resource_schedule_state_file",
-                    DEFAULT_RESOURCE_SCHEDULE_STATE,
-                ),
+                config["resource_schedule_state_file"],
             )),
             name,
             legacy=scoped["legacy"],
-        )))
+        ), state_root))
+        scoped["runtime_signal_file"] = str(_validated_sync_state_path(
+            Path(scoped["runtime_signal_file"]), state_root,
+        ))
         targets.append(scoped)
     if not targets:
         raise ValueError("dashboard sync has no configured targets")
@@ -1315,9 +1325,7 @@ def _sync_learning_history(local_payload: dict, config: dict) -> None:
     history_url = config.get("remote_learning_history_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/learning-history"
     )
-    history_state_path = Path(config.get(
-        "learning_history_state_file", DEFAULT_LEARNING_HISTORY_STATE,
-    ))
+    history_state_path = Path(config["learning_history_state_file"])
     history_state = _read_news_sync_state(history_state_path)
     hashes = history_state.get("hashes", {})
     if not isinstance(hashes, dict):
@@ -1378,9 +1386,7 @@ def _sync_learning_summary(local_payload: dict, config: dict) -> None:
     learning_url = config.get("remote_learning_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/learning"
     )
-    learning_state_path = Path(
-        config.get("learning_state_file", DEFAULT_LEARNING_STATE)
-    )
+    learning_state_path = Path(config["learning_state_file"])
     learning_state = _read_news_sync_state(learning_state_path)
     learning_payload = learning_snapshot(local_payload)
     learning_hash = hashlib.sha256(learning_payload).hexdigest()
@@ -1525,9 +1531,7 @@ def _sync_market_history(config: dict) -> None:
     remote_url = config.get("remote_market_history_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/market-history"
     )
-    state_path = Path(config.get(
-        "market_history_state_file", DEFAULT_MARKET_HISTORY_STATE,
-    ))
+    state_path = Path(config["market_history_state_file"])
     state = _read_news_sync_state(state_path)
     cursor = (
         state.get("cursor")
@@ -1666,7 +1670,7 @@ def _sync_news(
     frozen_generation: NewsProjectionGeneration | None = None,
 ) -> None:
     """Advance one immutable generation without exposing partial replacement."""
-    state_path = Path(config.get("news_state_file", DEFAULT_NEWS_STATE))
+    state_path = Path(config["news_state_file"])
     state = _read_news_sync_state(state_path)
     if state.get("contract_version") != NEWS_MIRROR_CONTRACT_VERSION:
         state = {"contract_version": NEWS_MIRROR_CONTRACT_VERSION}
@@ -1876,9 +1880,7 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
     remote_url = config.get("remote_news_evidence_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-evidence"
     )
-    state_path = Path(config.get(
-        "news_evidence_state_file", DEFAULT_NEWS_EVIDENCE_STATE,
-    ))
+    state_path = Path(config["news_evidence_state_file"])
     state = _read_news_sync_state(state_path)
     cursor = None
     snapshot_id = None
@@ -2089,9 +2091,7 @@ def _record_resource_schedule(
 
 
 def _resource_schedule_path(config: dict) -> Path:
-    return Path(config.get(
-        "resource_schedule_state_file", DEFAULT_RESOURCE_SCHEDULE_STATE,
-    ))
+    return Path(config["resource_schedule_state_file"])
 
 
 def _persist_resource_schedule_result(
@@ -2426,23 +2426,33 @@ def run_continuous_sync(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--status-file", type=Path, default=DEFAULT_STATUS)
+    parser.add_argument("--state-root", type=Path, required=True)
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--status-file", type=Path)
     parser.add_argument("--interval-seconds", type=float, default=30.0)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
-    config = json.loads(args.config.read_text(encoding="utf-8"))
+    state_root = authoritative_runtime_root(args.state_root)
+    config_path = runtime_child_path(
+        state_root, args.config, name="dashboard-sync.json",
+    )
+    status_file = _validated_sync_state_path(
+        args.status_file or Path("dashboard-sync-status.json"), state_root,
+    )
+    config = configure_runtime_state(
+        json.loads(config_path.read_text(encoding="utf-8")), state_root,
+    )
     if not args.once:
         return run_continuous_sync(
             config,
-            status_file=args.status_file,
+            status_file=status_file,
             interval_seconds=args.interval_seconds,
         )
     while True:
         try:
             attempts_used, degraded_resources = sync_with_retry(config)
             write_sync_status(
-                args.status_file,
+                status_file,
                 success=True,
                 attempts_used=attempts_used,
                 degraded_resources=degraded_resources,
@@ -2464,7 +2474,7 @@ def main() -> int:
                 flush=True,
             )
         except Exception as error:
-            write_sync_status(args.status_file, success=False, error=error)
+            write_sync_status(status_file, success=False, error=error)
             print(
                 json.dumps(
                     {

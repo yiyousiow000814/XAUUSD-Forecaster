@@ -68,6 +68,10 @@ from xauusd_forecaster.runtime_health import (  # noqa: E402
     RuntimeHeartbeatPulse,
     write_runtime_heartbeat,
 )
+from xauusd_forecaster.runtime_paths import (  # noqa: E402
+    authoritative_runtime_root,
+    runtime_child_path,
+)
 from xauusd_forecaster.scheduler_model_gateway import (  # noqa: E402
     SchedulerModelAccountant,
 )
@@ -661,10 +665,10 @@ def run_daily_brief_batch(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--state-root", type=Path, required=True)
     parser.add_argument(
         "--database",
         type=Path,
-        default=MODULE_ROOT / ".local" / "forward" / "forward-evidence.sqlite3",
     )
     parser.add_argument("--interval-seconds", type=float, default=60.0)
     parser.add_argument(
@@ -675,21 +679,27 @@ def main() -> int:
     parser.add_argument(
         "--status-file",
         type=Path,
-        default=MODULE_ROOT / ".local" / "forward" / "news-annotator-status.json",
     )
     args = parser.parse_args()
-    ledger = ForwardLedger(args.database)
+    state_root = authoritative_runtime_root(args.state_root)
+    database = runtime_child_path(
+        state_root, args.database, name="forward-evidence.sqlite3",
+    )
+    status_file = runtime_child_path(
+        state_root, args.status_file, name="news-annotator-status.json",
+    )
+    ledger = ForwardLedger(database)
     try:
         completed_cycle = False
         while True:
             limit = None if args.batch_size <= 0 else args.batch_size
             write_heartbeat(
-                args.status_file,
+                status_file,
                 work_items=0,
                 state="RUNNING" if completed_cycle else "STARTING",
             )
             with RuntimeHeartbeatPulse(
-                args.status_file,
+                status_file,
                 service="annotator",
                 state="RUNNING",
             ) as heartbeat:
@@ -729,7 +739,7 @@ def main() -> int:
             )
             work_items = len(statuses)
             completed_cycle = True
-            write_heartbeat(args.status_file, work_items=work_items)
+            write_heartbeat(status_file, work_items=work_items)
             if args.once:
                 break
             time.sleep(_scheduler_sleep_seconds(

@@ -1,8 +1,10 @@
 param(
     [string]$Symbol = 'XAUUSD',
+    [string]$StateRoot = '',
     [string]$OutputDirectory = '',
     [string]$CliPath = '',
     [string]$SecretRoot = '',
+    [string]$ConfigRoot = '',
     [switch]$BuildOnly
 )
 
@@ -11,11 +13,29 @@ $projectRoot = $PSScriptRoot
 $moduleRoot = Split-Path (Split-Path $projectRoot -Parent) -Parent
 $project = Join-Path $projectRoot 'XauusdForwardQuoteBridge.csproj'
 
-if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
-    $OutputDirectory = Join-Path $moduleRoot '.local\forward\quotes'
+if (-not $BuildOnly) {
+    $profileRoot = [Environment]::GetFolderPath('UserProfile')
+    $authorityRoot = [System.IO.Path]::GetFullPath((Join-Path $profileRoot (
+        'XAUUSD-Forecaster-runtime\.local\forward'
+    )))
+    if ([string]::IsNullOrWhiteSpace($StateRoot)) {
+        throw 'StateRoot is required for the production quote bridge.'
+    }
+    $StateRoot = [System.IO.Path]::GetFullPath($StateRoot)
+    if (-not $StateRoot.Equals(
+            $authorityRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'StateRoot does not match the launcher authority.'
+    }
+    $StateRoot = $authorityRoot
+    $expectedOutput = Join-Path $StateRoot 'quotes'
+    if (-not [string]::IsNullOrWhiteSpace($OutputDirectory) -and
+        -not ([System.IO.Path]::GetFullPath($OutputDirectory)).Equals(
+            $expectedOutput, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "OutputDirectory must be $expectedOutput"
+    }
+    $OutputDirectory = $expectedOutput
+    New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 }
-$OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
-New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 
 $source = Get-Content -LiteralPath (Join-Path $projectRoot 'XauusdForwardQuoteBridge.cs') -Raw
 $forbidden = @('ExecuteMarketOrder', 'PlaceLimitOrder', 'PlaceStopOrder', 'ModifyPosition', 'ClosePosition')
@@ -46,7 +66,10 @@ if ([string]::IsNullOrWhiteSpace($SecretRoot)) {
     $SecretRoot = [Environment]::GetEnvironmentVariable('CTRADER_SECRET_ROOT', 'User')
 }
 
-$localConfigRoot = Join-Path $moduleRoot '.local\config'
+if ([string]::IsNullOrWhiteSpace($ConfigRoot)) {
+    $ConfigRoot = Join-Path $moduleRoot '.local\config'
+}
+$localConfigRoot = [System.IO.Path]::GetFullPath($ConfigRoot)
 if ([string]::IsNullOrWhiteSpace($CliPath)) {
     $cliPathFile = Join-Path $localConfigRoot 'windows_cli_path.txt'
     if (Test-Path -LiteralPath $cliPathFile) {
