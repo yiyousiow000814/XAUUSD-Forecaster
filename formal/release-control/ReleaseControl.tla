@@ -259,10 +259,12 @@ RecordAccessReceipt(kind) ==
     /\ release.accessReview
     /\ release.gate = "UNTESTED"
     /\ release.accessApprovalCount = 0
+    /\ release.accessReceiptState = "NONE"
     /\ kind \in AccessReceiptStates \ {"NONE"}
     /\ release' = [release EXCEPT
         !.accessReceiptState = kind,
-        !.accessAccepted = FALSE]
+        !.accessAccepted = FALSE,
+        !.gate = IF kind = "VALID" THEN "UNTESTED" ELSE "FAILED"]
     /\ UNCHANGED <<health, install, news, syncOwners, path>>
 
 ApproveAccessReceipt ==
