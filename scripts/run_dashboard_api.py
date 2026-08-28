@@ -62,7 +62,11 @@ from xauusd_forecaster.news_scheduler import (  # noqa: E402
     install_scheduler_schema,
     list_retry_schedule_jobs,
 )
-from xauusd_forecaster.runtime_paths import logical_absolute_path, runtime_child_path
+from xauusd_forecaster.runtime_paths import (
+    authoritative_runtime_root,
+    logical_absolute_path,
+    runtime_child_path,
+)
 UTC = timezone.utc
 PAYLOAD_SCHEMA_VERSION = "xauusd-dashboard-v4-event-episode"
 MARKET_DETAIL_CANDLE_LIMIT = 7 * 288
@@ -3834,8 +3838,9 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
+    state_root = authoritative_runtime_root(args.state_root)
     Handler.database = runtime_child_path(
-        args.state_root, args.database, name="forward-evidence.sqlite3",
+        state_root, args.database, name="forward-evidence.sqlite3",
     )
     read_model_owner = DashboardReadModelOwner(
         Handler.database,

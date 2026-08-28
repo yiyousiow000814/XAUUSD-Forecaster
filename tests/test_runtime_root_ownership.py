@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -138,6 +139,7 @@ def _write_sync_rehearsal(code_root: Path, runtime_root: Path) -> Path:
     result = subprocess.run(
         [sys.executable, str(runner)],
         cwd=code_root,
+        env={**os.environ, "XAUUSD_RUNTIME_STATE_ROOT": str(state_root)},
         capture_output=True,
         text=True,
         check=False,
@@ -197,6 +199,7 @@ def test_sync_entrypoint_rejects_status_outside_runtime_authority(tmp_path: Path
         capture_output=True,
         text=True,
         check=False,
+        env={**os.environ, "XAUUSD_RUNTIME_STATE_ROOT": str(state_root)},
     )
 
     assert result.returncode != 0
@@ -226,6 +229,21 @@ def test_fixed_runtime_children_reject_another_authority(
     assert runtime_child_path(state_root, None, name=name) == state_root / name
 
 
+def test_runtime_root_requires_exact_launcher_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xauusd_forecaster.runtime_paths import authoritative_runtime_root
+
+    authority = tmp_path / "runtime" / ".local" / "forward"
+    monkeypatch.delenv("XAUUSD_RUNTIME_STATE_ROOT", raising=False)
+    with pytest.raises(ValueError, match="XAUUSD_RUNTIME_STATE_ROOT is required"):
+        authoritative_runtime_root(authority)
+    monkeypatch.setenv("XAUUSD_RUNTIME_STATE_ROOT", str(authority))
+    assert authoritative_runtime_root(authority) == authority
+    with pytest.raises(ValueError, match="does not match launcher authority"):
+        authoritative_runtime_root(tmp_path / "candidate" / ".local" / "forward")
+
+
 def test_quote_bridge_rejects_output_outside_runtime_authority(tmp_path: Path) -> None:
     state_root = tmp_path / "runtime" / ".local" / "forward"
     outside = tmp_path / "candidate" / "quotes"
@@ -241,6 +259,7 @@ def test_quote_bridge_rejects_output_outside_runtime_authority(tmp_path: Path) -
         capture_output=True,
         text=True,
         check=False,
+        env={**os.environ, "XAUUSD_RUNTIME_STATE_ROOT": str(state_root)},
     )
 
     assert result.returncode != 0

@@ -83,7 +83,11 @@ from xauusd_forecaster.news_projection import (
     split_news_rows,
     stable_news_key,
 )
-from xauusd_forecaster.runtime_paths import logical_absolute_path
+from xauusd_forecaster.runtime_paths import (
+    authoritative_runtime_root,
+    logical_absolute_path,
+    runtime_child_path,
+)
 
 
 class PayloadContractError(ValueError):
@@ -2428,8 +2432,10 @@ def main() -> int:
     parser.add_argument("--interval-seconds", type=float, default=30.0)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
-    state_root = logical_absolute_path(args.state_root)
-    config_path = args.config or state_root / "dashboard-sync.json"
+    state_root = authoritative_runtime_root(args.state_root)
+    config_path = runtime_child_path(
+        state_root, args.config, name="dashboard-sync.json",
+    )
     status_file = _validated_sync_state_path(
         args.status_file or Path("dashboard-sync-status.json"), state_root,
     )

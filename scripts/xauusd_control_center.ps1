@@ -5602,8 +5602,10 @@ function Invoke-ProductionShapePreflight {
         Set-Content -LiteralPath $stderr -Value "" -Encoding UTF8
         $phase = "START_API"
         $priorPythonUtf8 = $env:PYTHONUTF8
+        $priorRuntimeStateRoot = $env:XAUUSD_RUNTIME_STATE_ROOT
         try {
             $env:PYTHONUTF8 = "1"
+            $env:XAUUSD_RUNTIME_STATE_ROOT = Split-Path -Parent $candidateDatabase
             $process = Start-Process -FilePath $python -ArgumentList @(
                 (Join-Path $stageRoot "scripts\run_dashboard_api.py"),
                 "--state-root", (Split-Path -Parent $candidateDatabase),
@@ -5613,6 +5615,7 @@ function Invoke-ProductionShapePreflight {
                 -RedirectStandardOutput $stdout -RedirectStandardError $stderr
         } finally {
             $env:PYTHONUTF8 = $priorPythonUtf8
+            $env:XAUUSD_RUNTIME_STATE_ROOT = $priorRuntimeStateRoot
         }
         $statusUrl = "http://127.0.0.1:$preflightPort/api/critical-status"
         $phase = "WAIT_CRITICAL_STATUS"
@@ -6925,6 +6928,7 @@ function Start-ForecasterService {
         $env:LIVE_BROADCAST_PUBLISH_TOKEN = $publisherToken
     }
     New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+    $env:XAUUSD_RUNTIME_STATE_ROOT = $runtimeForwardRoot
     if ($Service.Key -in @("annotator", "api")) {
         $env:GEMINI_API_KEY = [Environment]::GetEnvironmentVariable("GEMINI_API_KEY", "User")
         $env:GEMINI_API_KEYS = [Environment]::GetEnvironmentVariable("GEMINI_API_KEYS", "User")

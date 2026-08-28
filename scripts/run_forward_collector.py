@@ -39,7 +39,7 @@ from xauusd_forecaster.runtime_health import (  # noqa: E402
     write_runtime_heartbeat,
 )
 from xauusd_forecaster.runtime_paths import (  # noqa: E402
-    logical_absolute_path,
+    authoritative_runtime_root,
     runtime_child_path,
 )
 from xauusd_forecaster.news_collection_owner import NewsCollectionOwner  # noqa: E402
@@ -155,7 +155,7 @@ def main() -> int:
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
 
-    local_root = logical_absolute_path(args.state_root)
+    local_root = authoritative_runtime_root(args.state_root)
     local_root.mkdir(parents=True, exist_ok=True)
     status_file = runtime_child_path(
         local_root, args.status_file, name="collector-status.json",

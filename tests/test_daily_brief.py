@@ -1120,6 +1120,7 @@ def test_annotator_cycle_reconciles_jobs_before_brief_and_reserves_capacity(
     from scripts import run_news_annotator as runner
 
     calls: list[str] = []
+    monkeypatch.setenv("XAUUSD_RUNTIME_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(
         runner, "sync_pending_jobs",
         lambda connection, **kwargs: calls.append("reconcile") or {},
@@ -1153,6 +1154,7 @@ def test_capacity_blocked_brief_leaves_gemma_window_for_retry(
     from scripts import run_news_annotator as runner
 
     scheduled: list[frozenset[str]] = []
+    monkeypatch.setenv("XAUUSD_RUNTIME_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(
         runner, "run_daily_brief_batch",
         lambda ledger: [{

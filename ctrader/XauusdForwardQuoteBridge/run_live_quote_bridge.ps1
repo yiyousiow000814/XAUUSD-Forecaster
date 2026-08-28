@@ -14,10 +14,20 @@ $moduleRoot = Split-Path (Split-Path $projectRoot -Parent) -Parent
 $project = Join-Path $projectRoot 'XauusdForwardQuoteBridge.csproj'
 
 if (-not $BuildOnly) {
+    $authorityRoot = [Environment]::GetEnvironmentVariable('XAUUSD_RUNTIME_STATE_ROOT')
+    if ([string]::IsNullOrWhiteSpace($authorityRoot)) {
+        throw 'XAUUSD_RUNTIME_STATE_ROOT is required for the production quote bridge.'
+    }
+    $authorityRoot = [System.IO.Path]::GetFullPath($authorityRoot)
     if ([string]::IsNullOrWhiteSpace($StateRoot)) {
         throw 'StateRoot is required for the production quote bridge.'
     }
     $StateRoot = [System.IO.Path]::GetFullPath($StateRoot)
+    if (-not $StateRoot.Equals(
+            $authorityRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'StateRoot does not match the launcher authority.'
+    }
+    $StateRoot = $authorityRoot
     $expectedOutput = Join-Path $StateRoot 'quotes'
     if (-not [string]::IsNullOrWhiteSpace($OutputDirectory) -and
         -not ([System.IO.Path]::GetFullPath($OutputDirectory)).Equals(

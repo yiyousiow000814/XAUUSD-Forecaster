@@ -69,7 +69,7 @@ from xauusd_forecaster.runtime_health import (  # noqa: E402
     write_runtime_heartbeat,
 )
 from xauusd_forecaster.runtime_paths import (  # noqa: E402
-    logical_absolute_path,
+    authoritative_runtime_root,
     runtime_child_path,
 )
 from xauusd_forecaster.scheduler_model_gateway import (  # noqa: E402
@@ -681,7 +681,7 @@ def main() -> int:
         type=Path,
     )
     args = parser.parse_args()
-    state_root = logical_absolute_path(args.state_root)
+    state_root = authoritative_runtime_root(args.state_root)
     database = runtime_child_path(
         state_root, args.database, name="forward-evidence.sqlite3",
     )

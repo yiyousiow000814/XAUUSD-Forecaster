@@ -22,7 +22,7 @@ from xauusd_forecaster.live_broadcast import (  # noqa: E402
     ContinuousLivePublisher,
     LiveSequenceStore,
 )
-from xauusd_forecaster.runtime_paths import logical_absolute_path  # noqa: E402
+from xauusd_forecaster.runtime_paths import authoritative_runtime_root  # noqa: E402
 
 LOCAL_STATUS_URL = "http://127.0.0.1:8765/api/status"
 DEFAULT_INTERVAL_SECONDS = 30
@@ -104,7 +104,7 @@ def main() -> int:
         "--state-root", type=Path, required=True,
     )
     args = parser.parse_args()
-    state_root = logical_absolute_path(args.state_root)
+    state_root = authoritative_runtime_root(args.state_root)
     if not args.activate_production_publisher:
         parser.error("production publisher activation flag is required")
     if args.interval_seconds < 5:
