@@ -15,11 +15,11 @@ The checked-in desired state is
 Repository policy requires its exact immutable production configuration. The
 Cloudflare Workers Builds project must match it: GitHub repository
 `yiyousiow000814/XAUUSD-Forecaster`, production branch `main`, root `/web`, build
-command `python3 -m pip install -e .. && npm ci && npm test`, include path `*`,
-no exclude paths, and no direct production deploy. Installing the repository's
-Python package is required because the release-validation Worker tests execute
-the exact production fixture builder. The production command MUST NOT be
-`wrangler deploy`:
+command `npm ci && npm test`, include path `*`, no exclude paths, and no direct
+production deploy. The `npm test` pretest hook installs the repository's Python
+package only in production Workers CI because release validation executes the
+exact Python fixture builder. The production command MUST NOT be `wrangler
+deploy`:
 
 ```text
 Production:     npx wrangler versions upload --message "release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH artifact_kind:PRODUCTION_CANDIDATE"
