@@ -87,9 +87,11 @@ preserves passed migration, directed-validation, parity, and CPU evidence.
 Candidate replacement, `main` movement, Stable identity movement, or protected
 host movement invalidates applicability. WPF and WinForms invoke this same
 PowerShell transition; neither UI performs authentication.
-The formal protected origin is
-`https://aurum-signal-room.yiyousiow1234.chatgpt.site`; the separately
-configurable runtime dashboard URL cannot redefine this Access authority.
+The formal protected origin is the canonical production Worker origin,
+`https://aurum-signal-room.yiyousiow1234.workers.dev`. Its `/admin*` routes are
+owned by the production Cloudflare Access application. Immutable Version hosts
+remain unprotected validation surfaces, and the separately configurable runtime
+dashboard URL cannot redefine this Access authority.
 
 Every parity receipt records the Worker version observed in response headers.
 Generated-at serialization differences are ignored, while status/quote and
