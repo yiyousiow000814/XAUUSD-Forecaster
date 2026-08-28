@@ -5,22 +5,35 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-RUNTIME_STATE_ROOT_ENV = "XAUUSD_RUNTIME_STATE_ROOT"
-
 
 def logical_absolute_path(path: str | Path) -> Path:
     """Normalize traversal without dereferencing the declared state authority."""
     return Path(os.path.abspath(os.fspath(path)))
 
 
-def authoritative_runtime_root(declared: str | Path) -> Path:
-    """Bind a service declaration to the launcher's inherited authority."""
-    inherited = os.environ.get(RUNTIME_STATE_ROOT_ENV, "").strip()
-    if not inherited:
-        raise ValueError(f"{RUNTIME_STATE_ROOT_ENV} is required")
-    authority = logical_absolute_path(inherited)
+PRODUCTION_RUNTIME_STATE_ROOT = logical_absolute_path(
+    Path.home() / "XAUUSD-Forecaster-runtime" / ".local" / "forward"
+)
+PREFLIGHT_RUNTIME_STATE_ROOT = logical_absolute_path(
+    Path.home() / "XAUUSD-Forecaster-runtime" / ".local" / "preflight"
+)
+
+
+def authoritative_runtime_root(
+    declared: str | Path,
+    *,
+    role: str = "production",
+) -> Path:
+    """Bind a service declaration to one contract-owned Windows authority."""
+    authorities = {
+        "production": PRODUCTION_RUNTIME_STATE_ROOT,
+        "preflight": PREFLIGHT_RUNTIME_STATE_ROOT,
+    }
+    if role not in authorities:
+        raise ValueError("runtime role is invalid")
+    authority = authorities[role]
     if logical_absolute_path(declared) != authority:
-        raise ValueError("declared runtime state root does not match launcher authority")
+        raise ValueError("declared runtime state root does not match contract authority")
     return authority
 
 

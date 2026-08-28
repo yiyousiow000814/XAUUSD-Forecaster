@@ -14,11 +14,10 @@ $moduleRoot = Split-Path (Split-Path $projectRoot -Parent) -Parent
 $project = Join-Path $projectRoot 'XauusdForwardQuoteBridge.csproj'
 
 if (-not $BuildOnly) {
-    $authorityRoot = [Environment]::GetEnvironmentVariable('XAUUSD_RUNTIME_STATE_ROOT')
-    if ([string]::IsNullOrWhiteSpace($authorityRoot)) {
-        throw 'XAUUSD_RUNTIME_STATE_ROOT is required for the production quote bridge.'
-    }
-    $authorityRoot = [System.IO.Path]::GetFullPath($authorityRoot)
+    $profileRoot = [Environment]::GetFolderPath('UserProfile')
+    $authorityRoot = [System.IO.Path]::GetFullPath((Join-Path $profileRoot (
+        'XAUUSD-Forecaster-runtime\.local\forward'
+    )))
     if ([string]::IsNullOrWhiteSpace($StateRoot)) {
         throw 'StateRoot is required for the production quote bridge.'
     }

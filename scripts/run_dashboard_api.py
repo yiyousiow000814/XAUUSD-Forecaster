@@ -3834,11 +3834,15 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--state-root", type=Path, required=True)
+    parser.add_argument(
+        "--runtime-role", choices=("production", "preflight"),
+        default="production",
+    )
     parser.add_argument("--database", type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
-    state_root = authoritative_runtime_root(args.state_root)
+    state_root = authoritative_runtime_root(args.state_root, role=args.runtime_role)
     Handler.database = runtime_child_path(
         state_root, args.database, name="forward-evidence.sqlite3",
     )

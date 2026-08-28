@@ -5585,7 +5585,8 @@ function Invoke-ProductionShapePreflight {
         & git -C $repositoryRoot worktree add --detach --quiet $stageRoot $Revision 2>$null
         if ($LASTEXITCODE -ne 0) { throw "cannot stage candidate worktree" }
         $python = (Get-Command python.exe -ErrorAction Stop).Source
-        $candidateDatabase = Join-Path $stageRoot ".local\preflight\forward-evidence.sqlite3"
+        $candidateStateRoot = Join-Path $runtimeLocalRoot "preflight"
+        $candidateDatabase = Join-Path $candidateStateRoot "forward-evidence.sqlite3"
         $phase = "COPY_DATABASE"
         Copy-CandidatePreflightDatabase -Python $python `
             -SourceDatabase $database -TargetDatabase $candidateDatabase
@@ -5602,20 +5603,18 @@ function Invoke-ProductionShapePreflight {
         Set-Content -LiteralPath $stderr -Value "" -Encoding UTF8
         $phase = "START_API"
         $priorPythonUtf8 = $env:PYTHONUTF8
-        $priorRuntimeStateRoot = $env:XAUUSD_RUNTIME_STATE_ROOT
         try {
             $env:PYTHONUTF8 = "1"
-            $env:XAUUSD_RUNTIME_STATE_ROOT = Split-Path -Parent $candidateDatabase
             $process = Start-Process -FilePath $python -ArgumentList @(
                 (Join-Path $stageRoot "scripts\run_dashboard_api.py"),
-                "--state-root", (Split-Path -Parent $candidateDatabase),
+                "--state-root", $candidateStateRoot,
+                "--runtime-role", "preflight",
                 "--database", $candidateDatabase, "--host", "127.0.0.1",
                 "--port", [string]$preflightPort
             ) -WorkingDirectory $stageRoot -WindowStyle Hidden -PassThru `
                 -RedirectStandardOutput $stdout -RedirectStandardError $stderr
         } finally {
             $env:PYTHONUTF8 = $priorPythonUtf8
-            $env:XAUUSD_RUNTIME_STATE_ROOT = $priorRuntimeStateRoot
         }
         $statusUrl = "http://127.0.0.1:$preflightPort/api/critical-status"
         $phase = "WAIT_CRITICAL_STATUS"
@@ -5697,6 +5696,9 @@ function Invoke-ProductionShapePreflight {
         }
         if (Test-Path -LiteralPath $stageRoot) {
             & git -C $repositoryRoot worktree remove --force $stageRoot 2>$null
+        }
+        if ($candidateStateRoot -and (Test-Path -LiteralPath $candidateStateRoot)) {
+            Remove-Item -LiteralPath $candidateStateRoot -Recurse -Force
         }
         & git -C $repositoryRoot worktree prune 2>$null
     }
@@ -6928,7 +6930,6 @@ function Start-ForecasterService {
         $env:LIVE_BROADCAST_PUBLISH_TOKEN = $publisherToken
     }
     New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
-    $env:XAUUSD_RUNTIME_STATE_ROOT = $runtimeForwardRoot
     if ($Service.Key -in @("annotator", "api")) {
         $env:GEMINI_API_KEY = [Environment]::GetEnvironmentVariable("GEMINI_API_KEY", "User")
         $env:GEMINI_API_KEYS = [Environment]::GetEnvironmentVariable("GEMINI_API_KEYS", "User")

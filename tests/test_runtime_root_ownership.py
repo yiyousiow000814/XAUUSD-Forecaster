@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -116,8 +115,11 @@ def _write_sync_rehearsal(code_root: Path, runtime_root: Path) -> Path:
             f"""
             import importlib.util
             import sys
+            from pathlib import Path
+            from xauusd_forecaster import runtime_paths
 
             script = {str(code_root / 'scripts' / 'run_dashboard_sync.py')!r}
+            runtime_paths.PRODUCTION_RUNTIME_STATE_ROOT = Path({str(state_root)!r})
             spec = importlib.util.spec_from_file_location("runtime_sync", script)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
@@ -139,7 +141,6 @@ def _write_sync_rehearsal(code_root: Path, runtime_root: Path) -> Path:
     result = subprocess.run(
         [sys.executable, str(runner)],
         cwd=code_root,
-        env={**os.environ, "XAUUSD_RUNTIME_STATE_ROOT": str(state_root)},
         capture_output=True,
         text=True,
         check=False,
@@ -184,22 +185,20 @@ def test_sync_entrypoint_rejects_status_outside_runtime_authority(tmp_path: Path
     config = state_root / "dashboard-sync.json"
     config.write_text("{}", encoding="utf-8")
     outside = tmp_path / "candidate" / "dashboard-sync-status.json"
+    probe = (
+        "import runpy,sys;from pathlib import Path;"
+        "from xauusd_forecaster import runtime_paths;"
+        f"runtime_paths.PRODUCTION_RUNTIME_STATE_ROOT=Path({str(state_root)!r});"
+        f"sys.argv=['run_dashboard_sync.py','--state-root',{str(state_root)!r},"
+        f"'--config',{str(config)!r},'--status-file',{str(outside)!r},'--once'];"
+        f"runpy.run_path({str(ROOT / 'scripts' / 'run_dashboard_sync.py')!r},run_name='__main__')"
+    )
     result = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts" / "run_dashboard_sync.py"),
-            "--state-root",
-            str(state_root),
-            "--config",
-            str(config),
-            "--status-file",
-            str(outside),
-            "--once",
-        ],
+        [sys.executable, "-c", probe],
+        cwd=ROOT,
         capture_output=True,
         text=True,
         check=False,
-        env={**os.environ, "XAUUSD_RUNTIME_STATE_ROOT": str(state_root)},
     )
 
     assert result.returncode != 0
@@ -232,20 +231,21 @@ def test_fixed_runtime_children_reject_another_authority(
 def test_runtime_root_requires_exact_launcher_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from xauusd_forecaster.runtime_paths import authoritative_runtime_root
+    from xauusd_forecaster import runtime_paths
 
     authority = tmp_path / "runtime" / ".local" / "forward"
-    monkeypatch.delenv("XAUUSD_RUNTIME_STATE_ROOT", raising=False)
-    with pytest.raises(ValueError, match="XAUUSD_RUNTIME_STATE_ROOT is required"):
-        authoritative_runtime_root(authority)
-    monkeypatch.setenv("XAUUSD_RUNTIME_STATE_ROOT", str(authority))
-    assert authoritative_runtime_root(authority) == authority
-    with pytest.raises(ValueError, match="does not match launcher authority"):
-        authoritative_runtime_root(tmp_path / "candidate" / ".local" / "forward")
+    monkeypatch.setattr(runtime_paths, "PRODUCTION_RUNTIME_STATE_ROOT", authority)
+    assert runtime_paths.authoritative_runtime_root(authority) == authority
+    with pytest.raises(ValueError, match="does not match contract authority"):
+        runtime_paths.authoritative_runtime_root(
+            tmp_path / "candidate" / ".local" / "forward"
+        )
 
 
 def test_quote_bridge_rejects_output_outside_runtime_authority(tmp_path: Path) -> None:
-    state_root = tmp_path / "runtime" / ".local" / "forward"
+    state_root = (
+        Path.home() / "XAUUSD-Forecaster-runtime" / ".local" / "forward"
+    )
     outside = tmp_path / "candidate" / "quotes"
     launcher = (
         ROOT / "ctrader" / "XauusdForwardQuoteBridge" / "run_live_quote_bridge.ps1"
@@ -259,7 +259,6 @@ def test_quote_bridge_rejects_output_outside_runtime_authority(tmp_path: Path) -
         capture_output=True,
         text=True,
         check=False,
-        env={**os.environ, "XAUUSD_RUNTIME_STATE_ROOT": str(state_root)},
     )
 
     assert result.returncode != 0
