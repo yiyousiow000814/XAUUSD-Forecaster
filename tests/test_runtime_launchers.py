@@ -1736,6 +1736,8 @@ def test_candidate_auth_evidence_uses_formal_access_host_only() -> None:
     assert '$protectedDashboardUrl/admin/api/session' in body
     assert '$workerUrl/admin/api/session' not in body
     assert 'versioned_workers_dev = "UNPROTECTED_TEST_SURFACE"' in body
+    assert '$protectedDashboardUrl = $workerUrl' in source
+    assert 'aurum-signal-room.yiyousiow1234.chatgpt.site' not in source
 
 
 def test_wpf_shell_is_bundled_with_winforms_fallback_and_release_controls() -> None:
@@ -5048,7 +5050,7 @@ def test_unobservable_protected_host_enters_access_review_without_losing_gates(
             "$stable.worker_version_id='99999999-9999-4999-8999-999999999999'",
             "ACCESS_RECEIPT_STABLE_MISMATCH",
         ),
-        ("$protectedDashboardUrl='https://other-protected.example'", "ACCESS_RECEIPT_HOST_MISMATCH"),
+        ("$protectedDashboardUrl='https://other-protected.example'", "ACCESS_PROTECTED_HOST_INVALID"),
         (
             "$saved=Get-Content $accessBoundaryReceiptPath -Raw|ConvertFrom-ReleaseControlJson;"
             "$saved.accepted_at=[DateTimeOffset]::UtcNow.AddHours(-3).ToString('o');"
@@ -5131,10 +5133,39 @@ def test_access_receipt_file_is_immutable_for_one_validation_key(tmp_path) -> No
     assert result == "ACCESS_RECEIPT_IMMUTABLE_CONFLICT"
 
 
-def test_workers_dev_cannot_become_the_protected_access_boundary(tmp_path) -> None:
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_protected_access_boundary_is_exact_canonical_production_origin(
+    tmp_path, powershell: str,
+) -> None:
     result = _run_control_center_contract(
         tmp_path,
-        "$protectedDashboardUrl='https://candidate.workers.dev';$reason='';"
+        "$dashboardUrl='https://arbitrary-dashboard.example';"
+        "$boundary=Get-ProtectedAccessBoundaryIdentity;"
+        'Write-Output "$($boundary.origin),$($boundary.host),'
+        '$($boundary.owner_resource)"',
+        powershell=powershell,
+    )
+    assert result == (
+        "https://aurum-signal-room.yiyousiow1234.workers.dev,"
+        "aurum-signal-room.yiyousiow1234.workers.dev,/admin/api/session"
+    )
+
+
+@pytest.mark.parametrize(
+    "protected_origin",
+    (
+        "https://candidate.workers.dev",
+        "https://aurum-signal-room.yiyousiow1234.workers.dev.example",
+        "https://aurum-signal-room.yiyousiow1234.workers.dev/other",
+        "http://aurum-signal-room.yiyousiow1234.workers.dev",
+    ),
+)
+def test_noncanonical_host_cannot_become_the_protected_access_boundary(
+    tmp_path, protected_origin: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$protectedDashboardUrl='{protected_origin}';$reason='';"
         "try{Get-ProtectedAccessBoundaryIdentity|Out-Null}catch{$reason=$_.Exception.Message};"
         "Write-Output $reason",
     )

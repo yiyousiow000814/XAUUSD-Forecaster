@@ -26,12 +26,14 @@ $moduleRoot = if ($RuntimeRoot) {
 $logRoot = Join-Path $moduleRoot ".local\forward\logs"
 $taskName = "XAUUSD-Forecaster-Autostart"
 $guardTaskName = "XAUUSD-Forecaster-Watchdog-Guard"
+$workerName = "aurum-signal-room"
+$workerUrl = "https://aurum-signal-room.yiyousiow1234.workers.dev"
 $dashboardUrl = if ([Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL", "User")) {
     [Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL", "User")
 } else {
-    "https://aurum-signal-room.yiyousiow1234.chatgpt.site"
+    $workerUrl
 }
-$protectedDashboardUrl = "https://aurum-signal-room.yiyousiow1234.chatgpt.site"
+$protectedDashboardUrl = $workerUrl
 $watchdogLog = Join-Path $logRoot "control-watchdog.jsonl"
 $watchdogHeartbeatPath = Join-Path $moduleRoot ".local\forward\control-watchdog-heartbeat.json"
 $runtimeCodeStatePath = Join-Path $moduleRoot ".local\forward\runtime-code-state.json"
@@ -62,8 +64,6 @@ $runtimeControlManifestName = "runtime-control-bundle.json"
 $collectorSecretsPath = Join-Path $repositoryRoot ".local\secrets\collector-keys.json"
 $releaseSecretsRoot = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot ".local\secrets"))
 $releaseSecretsPath = [System.IO.Path]::GetFullPath((Join-Path $releaseSecretsRoot "cloudflare-release.json"))
-$workerName = "aurum-signal-room"
-$workerUrl = "https://aurum-signal-room.yiyousiow1234.workers.dev"
 $broadcastHealthUrl = "https://aurum-live-broadcast.yiyousiow1234.workers.dev/health"
 $broadcastPublishDryRunUrl = "https://aurum-live-broadcast.yiyousiow1234.workers.dev/publish?dry_run=true"
 $broadcastFreshnessThreshold = [TimeSpan]::FromSeconds(90)
@@ -3909,13 +3909,17 @@ function Get-CandidateAuthInspection {
 
 function Get-ProtectedAccessBoundaryIdentity {
     $uri = [Uri]$protectedDashboardUrl
+    $production = [Uri]$workerUrl
     if (-not $uri.IsAbsoluteUri -or $uri.Scheme -ne "https" -or
-        -not $uri.DnsSafeHost -or $uri.DnsSafeHost.EndsWith(".workers.dev")) {
+        -not $uri.DnsSafeHost -or
+        $uri.DnsSafeHost -ine $production.DnsSafeHost -or
+        $uri.Port -ne $production.Port -or $uri.AbsolutePath -ne "/" -or
+        $uri.Query -or $uri.Fragment) {
         throw "ACCESS_PROTECTED_HOST_INVALID"
     }
     return [ordered]@{
-        origin = $uri.GetLeftPart([UriPartial]::Authority).TrimEnd("/")
-        host = $uri.DnsSafeHost.ToLowerInvariant()
+        origin = $production.GetLeftPart([UriPartial]::Authority).TrimEnd("/")
+        host = $production.DnsSafeHost.ToLowerInvariant()
         owner_resource = "/admin/api/session"
     }
 }
