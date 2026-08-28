@@ -734,14 +734,34 @@ test("accepts the exact Python News release fixture and rejects a noncanonical c
   assert.equal(accepted.status, 200, await accepted.clone().text());
   assert.equal((await accepted.json()).status, "DRY_RUN_OK");
 
-  const malformed = structuredClone(fixture);
-  const visible = malformed.items.find(item => item.model_visibility === "MODEL_VISIBLE");
-  assert.ok(visible);
-  visible.impact_expires_at = "2026-08-13T06:00:00+00:00";
-  const rejected = await invoke("/api/news-index", {
-    method: "POST", headers: validationHeaders, body: JSON.stringify(malformed),
-  });
-  assert.equal(rejected.status, 400, await rejected.clone().text());
+  const invalidMutations = [
+    item => { item.detail_key = "not-a-digest"; },
+    item => { item.category = "UNKNOWN"; },
+    item => { delete item.collector_first_seen_time; },
+    item => { delete item.cluster_id; },
+    item => { item.mirror_contract = null; },
+    item => {
+      item.annotation_status = "READY";
+      item.model_visibility = "NOT_YET_PARSED";
+      item.parsed_at = "2026-08-20T00:00:00Z";
+    },
+    item => {
+      item.annotation_status = "READY";
+      item.model_visibility = "MODEL_VISIBLE";
+      item.parsed_at = "2026-08-20T00:00:00Z";
+      item.impact_expires_at = "2026-08-13T06:00:00+00:00";
+    },
+  ];
+  for (const [index, mutate] of invalidMutations.entries()) {
+    const malformed = structuredClone(fixture);
+    mutate(malformed.items[0]);
+    const rejected = await invoke("/api/news-index", {
+      method: "POST",
+      headers: { ...validationHeaders, "X-Aurum-Request-ID": `invalid-projected-field-${index}` },
+      body: JSON.stringify(malformed),
+    });
+    assert.equal(rejected.status, 400, `${index}: ${await rejected.clone().text()}`);
+  }
   assert.equal(state(), before);
 });
 

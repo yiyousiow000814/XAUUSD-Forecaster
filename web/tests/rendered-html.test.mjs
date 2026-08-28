@@ -1192,8 +1192,11 @@ test("keeps the 60-day news archive inside bounded D1 work", () => {
   assert.match(store, /activeCandidateCount/);
   assert.match(store, /candidate_expiries/);
   assert.match(index, /model_visibility: "IMPACT_EXPIRED"/);
-  assert.match(reviewState, /annotation_status'\)='NOT_REQUIRED'/);
-  assert.match(reviewState, /model_visibility'\)='NOT_YET_PARSED'/);
+  assert.match(reviewState, /newsReviewStateInvariantSql/);
+  assert.match(reviewState, /\$\{annotationStatus\}='NOT_REQUIRED'/);
+  assert.match(reviewState, /\$\{modelVisibility\}='NOT_YET_PARSED'/);
+  assert.match(reviewState, /\$\{parsedAt\} IS NULL/);
+  assert.match(reviewState, /NEWS_REVIEW_STATE_INVARIANT_SQL = newsReviewStateInvariantSql/);
   assert.match(index, /health_check/);
   assert.match(store, /missing_detail_count/);
   assert.match(store, /review_violation_count/);
@@ -3202,9 +3205,27 @@ test("production-shaped release validation reaches work before every mutation", 
     ].filter(index => index >= 0));
     assert.ok(auth >= 0 && bodyRead > auth && releaseWork > bodyRead, path);
     assert.ok(response > bodyRead && firstMutation > response, path);
-    assert.match(source, /batch_checks AS \([\s\S]*FROM batch[\s\S]*CROSS JOIN batch_checks/);
+    const batchSource = path.includes("news-index") ? "item_fields" : "batch";
+    assert.match(
+      source,
+      new RegExp(`batch_checks AS \\([\\s\\S]*FROM ${batchSource}[\\s\\S]*CROSS JOIN batch_checks`),
+    );
     assert.equal(source.match(/json_each\(/g)?.length, 1, path);
     assert.match(source, /\.bind\(bounded\.serialized\)\.first/);
+  }
+
+  const newsIndexSource = readFileSync(
+    new URL("../app/api/news-index/route.ts", import.meta.url), "utf8",
+  );
+  assert.match(newsIndexSource, /item_fields AS MATERIALIZED \(/);
+  assert.match(newsIndexSource, /FROM item_fields/);
+  for (const field of ["detail_key", "category", "model_visibility",
+    "impact_expires_at", "annotation_status", "parsed_at"]) {
+    assert.equal(
+      newsIndexSource.match(new RegExp(`json_extract\\(payload,'\\$\\.${field}'\\)`, "g"))?.length,
+      1,
+      field,
+    );
   }
 });
 
