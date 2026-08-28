@@ -26,8 +26,8 @@ import {
   type NewsProjectionIndexItem,
 } from "../_shared/news-projection-store";
 import {
-  NEWS_REVIEW_STATE_INVARIANT_SQL,
   NEWS_REVIEW_STATES,
+  newsReviewStateInvariantSql,
   parseNewsReviewState,
 } from "../../_lib/news-review-state";
 import { publicNewsRecord } from "../../_lib/public-news-copy";
@@ -35,6 +35,11 @@ import { publicNewsRecord } from "../../_lib/public-news-copy";
 export const dynamic = "force-dynamic";
 
 const MAX_WRITE_BYTES = 120_000;
+const NEWS_RELEASE_VALIDATION_REVIEW_INVARIANT_SQL = newsReviewStateInvariantSql({
+  annotationStatus: "annotation_status",
+  modelVisibility: "model_visibility",
+  parsedAt: "parsed_at",
+});
 
 function failure(reason: unknown) {
   if (reason instanceof D1CapabilityError) {
@@ -179,29 +184,45 @@ export async function POST(request: Request) {
               batch(payload) AS (
                 SELECT value FROM root,json_each(json_extract(doc,'$.items'))
               ),
+              item_fields AS MATERIALIZED (
+                SELECT json_type(payload) object_type,
+                       json_type(payload,'$.detail_key') detail_key_type,
+                       json_extract(payload,'$.detail_key') detail_key,
+                       json_type(payload,'$.category') category_type,
+                       json_extract(payload,'$.category') category,
+                       json_type(payload,'$.collector_first_seen_time') first_seen_type,
+                       json_type(payload,'$.cluster_id') cluster_id_type,
+                       json_type(payload,'$.mirror_contract') mirror_contract_type,
+                       json_extract(payload,'$.model_visibility') model_visibility,
+                       json_type(payload,'$.impact_expires_at') impact_expires_at_type,
+                       json_extract(payload,'$.impact_expires_at') impact_expires_at,
+                       json_extract(payload,'$.annotation_status') annotation_status,
+                       json_extract(payload,'$.parsed_at') parsed_at
+                  FROM batch
+              ),
               batch_checks AS (
                 SELECT count(*) item_total,
                        coalesce(sum(CASE WHEN
-                         json_type(payload)='object'
-                         AND json_type(payload,'$.detail_key')='text'
-                         AND length(json_extract(payload,'$.detail_key'))=64
-                         AND json_extract(payload,'$.detail_key') NOT GLOB '*[^0-9a-f]*'
-                         AND json_type(payload,'$.category')='text'
-                         AND json_extract(payload,'$.category') IN (
+                         object_type='object'
+                         AND detail_key_type='text'
+                         AND length(detail_key)=64
+                         AND detail_key NOT GLOB '*[^0-9a-f]*'
+                         AND category_type='text'
+                         AND category IN (
                            ${NEWS_PROJECTION_CATEGORIES.map(value => `'${value}'`).join(",")}
                          )
-                         AND json_type(payload,'$.collector_first_seen_time')='text'
-                         AND json_type(payload,'$.cluster_id')='text'
-                         AND json_type(payload,'$.mirror_contract')='text'
-                         AND (json_extract(payload,'$.model_visibility')<>'MODEL_VISIBLE'
-                           OR (json_type(payload,'$.impact_expires_at')='text'
-                             AND length(json_extract(payload,'$.impact_expires_at'))=32
-                             AND substr(json_extract(payload,'$.impact_expires_at'),27)='+00:00'))
+                         AND first_seen_type='text'
+                         AND cluster_id_type='text'
+                         AND mirror_contract_type='text'
+                         AND (model_visibility<>'MODEL_VISIBLE'
+                           OR (impact_expires_at_type='text'
+                             AND length(impact_expires_at)=32
+                             AND substr(impact_expires_at,27)='+00:00'))
                          THEN 1 ELSE 0 END),0) item_valid,
                        coalesce(sum(CASE WHEN
-                         ${NEWS_REVIEW_STATE_INVARIANT_SQL}
+                         ${NEWS_RELEASE_VALIDATION_REVIEW_INVARIANT_SQL}
                          THEN 1 ELSE 0 END),0) review_valid
-                  FROM batch
+                  FROM item_fields
               )
          SELECT json_extract(doc,'$.action') action,
                 json_extract(doc,'$.generation_id') generation_id,

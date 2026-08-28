@@ -35,23 +35,37 @@ type NewsReviewStateFields = {
 export const ACTIVE_NEWS_SQL =
   "COALESCE(json_extract(payload, '$.annotation_status'), '') <> 'SUPERSEDED_CONTRACT'";
 
-export const NEWS_REVIEW_STATE_INVARIANT_SQL = `(
-  (json_extract(payload, '$.annotation_status')='NOT_REQUIRED'
-    AND json_extract(payload, '$.model_visibility')='MODEL_INELIGIBLE'
-    AND json_extract(payload, '$.parsed_at') IS NULL)
-  OR (json_extract(payload, '$.annotation_status')='QUEUED'
-    AND json_extract(payload, '$.model_visibility')='NOT_YET_PARSED'
-    AND json_extract(payload, '$.parsed_at') IS NULL)
-  OR (json_extract(payload, '$.annotation_status')='READY'
-    AND json_extract(payload, '$.model_visibility')<>'NOT_YET_PARSED'
-    AND json_extract(payload, '$.parsed_at') IS NOT NULL)
-  OR (json_extract(payload, '$.annotation_status') IN (
+type NewsReviewStateSqlFields = {
+  annotationStatus: string;
+  modelVisibility: string;
+  parsedAt: string;
+};
+
+/** Build the shared review invariant for either JSON fields or projected columns. */
+export const newsReviewStateInvariantSql = ({
+  annotationStatus, modelVisibility, parsedAt,
+}: NewsReviewStateSqlFields) => `(
+  (${annotationStatus}='NOT_REQUIRED'
+    AND ${modelVisibility}='MODEL_INELIGIBLE'
+    AND ${parsedAt} IS NULL)
+  OR (${annotationStatus}='QUEUED'
+    AND ${modelVisibility}='NOT_YET_PARSED'
+    AND ${parsedAt} IS NULL)
+  OR (${annotationStatus}='READY'
+    AND ${modelVisibility}<>'NOT_YET_PARSED'
+    AND ${parsedAt} IS NOT NULL)
+  OR (${annotationStatus} IN (
       ${sqlValues(ALIGNED_UNPARSED_ANNOTATION_STATUSES)}
     )
-    AND json_extract(payload, '$.model_visibility') =
-        json_extract(payload, '$.annotation_status')
-    AND json_extract(payload, '$.parsed_at') IS NULL)
+    AND ${modelVisibility} = ${annotationStatus}
+    AND ${parsedAt} IS NULL)
 )`;
+
+export const NEWS_REVIEW_STATE_INVARIANT_SQL = newsReviewStateInvariantSql({
+  annotationStatus: "json_extract(payload, '$.annotation_status')",
+  modelVisibility: "json_extract(payload, '$.model_visibility')",
+  parsedAt: "json_extract(payload, '$.parsed_at')",
+});
 
 /** One public row cannot simultaneously claim incompatible workflow states. */
 export const newsReviewStateInvariantHolds = (
