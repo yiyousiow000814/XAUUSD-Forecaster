@@ -1,5 +1,6 @@
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import base64
 import json
 import socket
 import sqlite3
@@ -148,6 +149,7 @@ def test_release_observability_token_is_not_persisted(tmp_path) -> None:
 @pytest.mark.parametrize(
     ("status", "diagnostic"),
     [
+        (400, "OBSERVABILITY_QUERY_FAILED"),
         (403, "OBSERVABILITY_CREDENTIAL_REJECTED"),
         (429, "OBSERVABILITY_RATE_LIMITED"),
         (503, "OBSERVABILITY_TRANSIENT_API_FAILURE"),
@@ -174,20 +176,62 @@ def test_release_observability_failure_class_is_bounded(
     assert "classification-release-token" not in result
 
 
-def test_release_observability_events_preserves_cloudflare_page_shape(tmp_path) -> None:
+def test_observability_retry_classifier_excludes_deterministic_query_failure(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$transient=Test-RetryableObservabilityDiagnostic "
+        "-Diagnostic 'OBSERVABILITY_TRANSIENT_API_FAILURE';"
+        "$pending=Test-RetryableObservabilityDiagnostic "
+        "-Diagnostic 'OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING';"
+        "$failed=Test-RetryableObservabilityDiagnostic "
+        "-Diagnostic 'OBSERVABILITY_QUERY_FAILED';"
+        'Write-Output "$transient,$pending,$failed"',
+    )
+
+    assert result == "True,True,False"
+
+
+def test_release_observability_events_normalizes_real_cloudflare_envelope(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
         "function Get-ReleaseSecret{return [pscustomobject]@{available=$true;"
         "value='events-release-token';source='LOCAL_SECRET_FILE';diagnostic=$null}};"
-        "function Invoke-RestMethod{return [pscustomobject]@{success=$true;result=[pscustomobject]@{"
-        "count=1;events=@([pscustomobject]@{'$metadata'=[pscustomobject]@{id='event-1'}})}}};"
+        "function Invoke-RestMethod{$event=[pscustomobject]@{'$metadata'=[pscustomobject]@{"
+        "id='event-1';type='cf-worker-event'};'$workers'=[pscustomobject]@{cpuTimeMs=2;"
+        "wallTimeMs=3;outcome='ok';scriptVersion=[pscustomobject]@{id='worker'};"
+        "event=[pscustomobject]@{path='/api/status';request=[pscustomobject]@{method='GET';"
+        "headers=[pscustomobject]@{'x-aurum-request-id'='request-1';"
+        "'x-aurum-validation-run'='run';'x-aurum-validation-phase'='acceptance'}};"
+        "response=[pscustomobject]@{status=200}}}};return [pscustomobject]@{success=$true;"
+        "result=[pscustomobject]@{events=[pscustomobject]@{count=2;events=@($event);"
+        "fields=@();series=@()}}}};"
         "$page=Invoke-WorkersObservabilityEventsQuery "
         "-Filters @([pscustomobject]@{key='k';value='v'}) "
         "-From ([DateTimeOffset]::UtcNow.AddMinutes(-1)) -To ([DateTimeOffset]::UtcNow);"
-        'Write-Output "$($page.count),$(@($page.events).Count),$($page.events[0].\'$metadata\'.id)"',
+        'Write-Output "$($page.total_count),$($page.page_count),'
+        '$($page.records[0].event_id),$($page.records[0].cpu_ms),$($page.next_offset)"',
     )
 
-    assert result == "1,1,event-1"
+    assert result == "2,1,event-1,2,event-1"
+
+
+def test_release_observability_calculation_adapter_returns_internal_aggregate(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-ReleaseSecret{return [pscustomobject]@{available=$true;"
+        "value='calculation-release-token';source='LOCAL_SECRET_FILE';diagnostic=$null}};"
+        "function Invoke-RestMethod{return [pscustomobject]@{success=$true;result=[pscustomobject]@{"
+        "run=[pscustomobject]@{};statistics=[pscustomobject]@{};calculations=@("
+        "[pscustomobject]@{alias='invocations';aggregates=@([pscustomobject]@{value=310})})}}};"
+        "$result=Invoke-WorkersObservabilityQuery "
+        "-Filters @([pscustomobject]@{key='k';value='v'}) "
+        "-Calculations @([pscustomobject]@{operator='count';alias='invocations'}) "
+        "-From ([DateTimeOffset]::UtcNow.AddMinutes(-1)) -To ([DateTimeOffset]::UtcNow);"
+        "$value=Get-CalculationAggregate -QueryResult $result -Alias 'invocations';"
+        'Write-Output "$(@($result.PSObject.Properties.Name)-join \',\'),$value"',
+    )
+
+    assert result == "aggregates,310"
 
 
 def test_candidate_validation_retries_delayed_observability_evidence(tmp_path) -> None:
@@ -260,19 +304,17 @@ def test_frozen_raw_telemetry_reconciles_identical_event_universe(tmp_path) -> N
         f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId 'worker' "
         f"-WindowsRevision '{candidate}';"
         "function Start-Sleep{};function New-Event($id,$request,$cpu){"
-        "[pscustomobject]@{'$metadata'=[pscustomobject]@{id=$id;type='cf-worker-event'};"
-        "'$workers'=[pscustomobject]@{cpuTimeMs=$cpu;wallTimeMs=2;outcome='ok';"
-        "scriptVersion=[pscustomobject]@{id='worker'};event=[pscustomobject]@{path='/api/status';"
-        "request=[pscustomobject]@{method='GET';headers=[pscustomobject]@{"
-        "'x-aurum-request-id'=$request;'x-aurum-validation-run'='run';"
-        "'x-aurum-validation-phase'='acceptance'}};response=[pscustomobject]@{status=200}}}}};"
+        "[pscustomobject]@{event_id=$id;event_type='cf-worker-event';worker_version_id='worker';"
+        "request_id=$request;validation_run='run';validation_phase='acceptance';method='GET';"
+        "path='/api/status';status=200;outcome='ok';cpu_ms=$cpu;wall_ms=2}};"
         "$script:queries=0;$script:observedVersions=@();$script:observedKeys=@();"
         "function Invoke-WorkersObservabilityEventsQuery{param($Filters);"
         "$script:queries++;"
         "$script:observedVersions+=@($Filters|Where-Object key -eq '$workers.scriptVersion.id')[0].value;"
         "$script:observedKeys+=@($Filters|ForEach-Object key);"
-        "[pscustomobject]@{count=2;events=@("
-        "(New-Event 'event-1' 'request-1' 0),(New-Event 'event-2' 'request-2' 2))}};"
+        "[pscustomobject]@{total_count=2;page_count=2;records=@("
+        "(New-Event 'event-1' 'request-1' 0),(New-Event 'event-2' 'request-2' 2));"
+        "next_offset=''}};"
         "$expected=@([pscustomobject]@{request_id='request-1';family='status-read';scenario='a'},"
         "[pscustomobject]@{request_id='request-2';family='status-read';scenario='a'});"
         "$e=Get-CandidateFrozenPlatformEvidence -Candidate $candidate "
@@ -299,14 +341,12 @@ def test_frozen_raw_telemetry_reconciles_exact_310_request_universe(tmp_path) ->
         f"-WindowsRevision '{candidate}';"
         "function Start-Sleep{};function New-Event($number){"
         "$id=('event-{0:d3}' -f $number);$request=('request-{0:d3}' -f $number);"
-        "[pscustomobject]@{'$metadata'=[pscustomobject]@{id=$id;type='cf-worker-event'};"
-        "'$workers'=[pscustomobject]@{cpuTimeMs=1;wallTimeMs=2;outcome='ok';"
-        "scriptVersion=[pscustomobject]@{id='worker'};event=[pscustomobject]@{path='/api/status';"
-        "request=[pscustomobject]@{method='GET';headers=[pscustomobject]@{"
-        "'x-aurum-request-id'=$request;'x-aurum-validation-run'='run-310';"
-        "'x-aurum-validation-phase'='acceptance'}};response=[pscustomobject]@{status=200}}}}};"
+        "[pscustomobject]@{event_id=$id;event_type='cf-worker-event';worker_version_id='worker';"
+        "request_id=$request;validation_run='run-310';validation_phase='acceptance';method='GET';"
+        "path='/api/status';status=200;outcome='ok';cpu_ms=1;wall_ms=2}};"
         "$script:queries=0;function Invoke-WorkersObservabilityEventsQuery{$script:queries++;"
-        "[pscustomobject]@{count=310;events=@(1..310|ForEach-Object{New-Event $_})}};"
+        "[pscustomobject]@{total_count=310;page_count=310;records=@(1..310|ForEach-Object{New-Event $_});"
+        "next_offset=''}};"
         "$expected=@(1..310|ForEach-Object{[pscustomobject]@{"
         "request_id=('request-{0:d3}' -f $_);family='status-read';scenario='status'}});"
         "$e=Get-CandidateFrozenPlatformEvidence -Candidate $candidate "
@@ -324,10 +364,8 @@ def test_frozen_raw_telemetry_reconciles_exact_310_request_universe(tmp_path) ->
     [
         ("duplicate_event", "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"),
         ("duplicate_request", "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"),
-        ("missing_cpu", "OBSERVABILITY_SCHEMA_INVALID"),
         ("wrong_version", "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"),
         ("wrong_run", "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING"),
-        ("malformed_cursor", "OBSERVABILITY_EVENT_CURSOR_INVALID"),
     ],
 )
 def test_frozen_raw_telemetry_rejects_malformed_universes(
@@ -339,27 +377,59 @@ def test_frozen_raw_telemetry_rejects_malformed_universes(
         f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId 'worker' "
         f"-WindowsRevision '{candidate}';$case='{case}';"
         "function Start-Sleep{};function New-Event($id,$request){"
-        "$workers=[pscustomobject]@{wallTimeMs=2;outcome='ok';"
-        "scriptVersion=[pscustomobject]@{id=if($case -eq 'wrong_version'){'other'}else{'worker'}};"
-        "event=[pscustomobject]@{path='/api/status';request=[pscustomobject]@{method='GET';"
-        "headers=[pscustomobject]@{'x-aurum-request-id'=$request;"
-        "'x-aurum-validation-run'=if($case -eq 'wrong_run'){'other'}else{'run'};"
-        "'x-aurum-validation-phase'='acceptance'}};response=[pscustomobject]@{status=200}}};"
-        "if($case -ne 'missing_cpu'){$workers|Add-Member cpuTimeMs 1};"
-        "[pscustomobject]@{'$metadata'=[pscustomobject]@{id=$id;type='cf-worker-event'};"
-        "'$workers'=$workers}};"
+        "[pscustomobject]@{event_id=$id;event_type='cf-worker-event';"
+        "worker_version_id=if($case -eq 'wrong_version'){'other'}else{'worker'};"
+        "request_id=$request;validation_run=if($case -eq 'wrong_run'){'other'}else{'run'};"
+        "validation_phase='acceptance';method='GET';path='/api/status';status=200;"
+        "outcome='ok';cpu_ms=1;wall_ms=2}};"
         "function Invoke-WorkersObservabilityEventsQuery{"
-        "if($case -eq 'malformed_cursor'){return [pscustomobject]@{count=2000;events=@("
-        "1..2000|ForEach-Object{New-Event '' ('request-'+$_)})}};"
         "$event2=if($case -eq 'duplicate_event'){'event-1'}else{'event-2'};"
         "$request2=if($case -eq 'duplicate_request'){'request-1'}else{'request-2'};"
-        "[pscustomobject]@{count=2;events=@((New-Event 'event-1' 'request-1'),"
-        "(New-Event $event2 $request2))}};"
+        "[pscustomobject]@{total_count=2;page_count=2;records=@((New-Event 'event-1' 'request-1'),"
+        "(New-Event $event2 $request2));next_offset=''}};"
         "$expected=@([pscustomobject]@{request_id='request-1';family='status';scenario='a'},"
         "[pscustomobject]@{request_id='request-2';family='status';scenario='a'});"
         "$null=Get-CandidateFrozenPlatformEvidence -Candidate $candidate "
         "-From ([DateTimeOffset]::UtcNow.AddMinutes(-1)) -To ([DateTimeOffset]::UtcNow) "
         "-ExpectedRequests $expected -ValidationRun 'run';"
+        "Write-Output $script:lastWorkersObservabilityDiagnostic",
+    )
+
+    assert result == expected_diagnostic
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_diagnostic"),
+    [
+        ("missing_cpu", "OBSERVABILITY_SCHEMA_INVALID"),
+        ("nonnumeric_count", "OBSERVABILITY_SCHEMA_INVALID"),
+        ("malformed_cursor", "OBSERVABILITY_EVENT_CURSOR_INVALID"),
+    ],
+)
+def test_observability_adapter_rejects_malformed_provider_pages(
+    tmp_path, case: str, expected_diagnostic: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$case='{case}';"
+        "function Get-ReleaseSecret{return [pscustomobject]@{available=$true;"
+        "value='adapter-release-token';source='LOCAL_SECRET_FILE';diagnostic=$null}};"
+        "function Invoke-RestMethod{$workers=[pscustomobject]@{wallTimeMs=2;outcome='ok';"
+        "scriptVersion=[pscustomobject]@{id='worker'};event=[pscustomobject]@{path='/api/status';"
+        "request=[pscustomobject]@{method='GET';headers=[pscustomobject]@{"
+        "'x-aurum-request-id'='request';'x-aurum-validation-run'='run';"
+        "'x-aurum-validation-phase'='acceptance'}};response=[pscustomobject]@{status=200}}};"
+        "if($case -ne 'missing_cpu'){$workers|Add-Member cpuTimeMs 1};"
+        "$event=[pscustomobject]@{'$metadata'=[pscustomobject]@{id='same';type='cf-worker-event'};"
+        "'$workers'=$workers};$events=if($case -eq 'missing_cpu'){@($event)}"
+        "else{@(1..2000|ForEach-Object{$event})};return [pscustomobject]@{success=$true;"
+        "result=[pscustomobject]@{events=[pscustomobject]@{count=$(if($case -eq 'malformed_cursor'){2001}"
+        "elseif($case -eq 'nonnumeric_count'){'bad'}else{$events.Count});events=$events;"
+        "fields=@();series=@()}}}};"
+        "$null=Invoke-WorkersObservabilityEventsQuery "
+        "-Filters @([pscustomobject]@{key='k';value='v'}) "
+        "-From ([DateTimeOffset]::UtcNow.AddMinutes(-1)) -To ([DateTimeOffset]::UtcNow) "
+        "-Offset $(if($case -eq 'malformed_cursor'){'same'}else{''});"
         "Write-Output $script:lastWorkersObservabilityDiagnostic",
     )
 
@@ -374,16 +444,14 @@ def test_frozen_raw_telemetry_paginates_without_moving_upper_bound(tmp_path) -> 
         f"-WindowsRevision '{candidate}';"
         "function Start-Sleep{};function New-Event($number){"
         "$id=('event-{0:d4}' -f $number);$request=('request-{0:d4}' -f $number);"
-        "[pscustomobject]@{'$metadata'=[pscustomobject]@{id=$id;type='cf-worker-event'};"
-        "'$workers'=[pscustomobject]@{cpuTimeMs=0;wallTimeMs=1;outcome='ok';"
-        "scriptVersion=[pscustomobject]@{id='worker'};event=[pscustomobject]@{path='/api/status';"
-        "request=[pscustomobject]@{method='GET';headers=[pscustomobject]@{"
-        "'x-aurum-request-id'=$request;'x-aurum-validation-run'='run';"
-        "'x-aurum-validation-phase'='acceptance'}};response=[pscustomobject]@{status=200}}}}};"
+        "[pscustomobject]@{event_id=$id;event_type='cf-worker-event';worker_version_id='worker';"
+        "request_id=$request;validation_run='run';validation_phase='acceptance';method='GET';"
+        "path='/api/status';status=200;outcome='ok';cpu_ms=0;wall_ms=1}};"
         "$script:queries=0;$script:bounds=@();function Invoke-WorkersObservabilityEventsQuery{"
         "param($To,$Offset);$script:queries++;$script:bounds+=$To.ToString('o');"
-        "if($Offset){[pscustomobject]@{count=2001;events=@((New-Event 2001))}}"
-        "else{[pscustomobject]@{count=2001;events=@(1..2000|ForEach-Object{New-Event $_})}}};"
+        "if($Offset){[pscustomobject]@{total_count=2001;page_count=1;records=@((New-Event 2001));next_offset=''}}"
+        "else{[pscustomobject]@{total_count=2001;page_count=2000;records=@(1..2000|ForEach-Object{New-Event $_});"
+        "next_offset='event-2000'}}};"
         "$expected=@(1..2001|ForEach-Object{[pscustomobject]@{"
         "request_id=('request-{0:d4}' -f $_);family='status-read';scenario='status'}});"
         "$e=Get-CandidateFrozenPlatformEvidence -Candidate $candidate "
@@ -417,18 +485,97 @@ def test_delayed_platform_telemetry_keeps_exact_candidate_retryable(tmp_path) ->
         "observed_worker_invocations=$null;static_observability_state='PASSED';"
         "observability_credential_source='LOCAL_SECRET_FILE';"
         "observability_diagnostic='OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING';"
-        "routes=@();cpu_evidence=$null}};"
+        "telemetry_window_from='2026-08-27T20:00:00Z';telemetry_window_to='2026-08-27T20:01:00Z';"
+        "expected_requests=@([pscustomobject]@{request_id='request-1';family='status-read';"
+        "scenario='status';method='GET';path='/api/status'});"
+        "routes=@([pscustomobject]@{route='/api/status';boundary='WORKER_READ';passed=$true});"
+        "cpu_evidence=$null}};"
         "Invoke-AutomaticCandidateValidation -Candidate $candidate|Out-Null;"
         "$saved=Get-ReleaseControlState;$history=Get-Content $releaseHistoryPath -Raw;"
         'Write-Output "$($saved.candidate.validation_state),'
         '$($saved.candidate.validation.windows),$($saved.candidate.validation.cloudflare),'
         '$($saved.candidate.validation.reason),'
+        '$(@($saved.candidate.validation.expected_requests).Count),'
+        '$([bool]$saved.candidate.validation.telemetry_window_from),'
         '$($history.Contains(\'CANDIDATE_PLATFORM_PENDING\'))"',
     )
     assert result == (
         "PLATFORM_PENDING,PASSED,PENDING,"
-        "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING,True"
+        "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING,1,True,True"
     )
+
+
+def test_platform_retry_resumes_exact_telemetry_receipt_without_replaying_routes(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$state.candidate.compatibility_state='APPROVED';"
+        "$state.candidate.validation_state='PLATFORM_PENDING';"
+        "$state.candidate.validation=[pscustomobject]@{key=$candidate.validation_key;"
+        "repository='PASSED';windows='PASSED';cloudflare='PENDING';"
+        "reason='OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING';"
+        "observability_diagnostic='OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING';"
+        "validation_run='run-resume';expected_worker_invocations=1;static_worker_invocations=0;"
+        "static_observability_state='PASSED';telemetry_window_from='2026-08-27T20:00:00Z';"
+        "telemetry_window_to='2026-08-27T20:01:00Z';"
+        "expected_requests=@([pscustomobject]@{request_id='request-1';family='status-read';"
+        "scenario='status';method='GET';path='/api/status'});"
+        "routes=@([pscustomobject]@{route='/api/status';boundary='WORKER_READ';passed=$true})};"
+        "Write-ReleaseControlState $state;"
+        "function Test-ProductionCandidateProvenance{return $true};"
+        "function Test-RequiredGitHubChecks{'PASSED'};"
+        "function Get-CandidateChangedFiles{return @('web/app/api/status/route.ts')};"
+        "function Get-CandidateCompatibilityRequirement{return [pscustomobject]@{state='AUTOMATIC';files=@()}};"
+        "function Get-CandidateRouteValidationPlan{return [pscustomobject]@{worker_cpu_required=$true;"
+        "requires_validation=$true;static_assets=@();worker_reads=@();worker_writes=@()}};"
+        "function Set-CloudflareCandidatePointer{};"
+        "function Wait-CandidatePlacementPropagation{return [pscustomobject]@{passed=$true}};"
+        "function Invoke-CandidateWorkerValidation{throw 'ROUTES_REPLAYED'};"
+        "$script:evidenceCalls=0;function Get-CandidateFrozenPlatformEvidence{"
+        "param($ExpectedRequests,$ValidationRun);$script:evidenceCalls++;"
+        "return [pscustomobject]@{invocations=1;passed=$true;gate_state='PASSED';"
+        "expected_invocations=1;responses_5xx=0;responses_1102=0;exceeded_cpu=0}};"
+        "function Test-CandidateDataParity{return [pscustomobject]@{passed=$true}};"
+        "function Get-CandidateAuthInspection{return [pscustomobject]@{state='NOT_REQUIRED'}};"
+        "function Test-CandidateAuthBoundaryChanged{return $false};"
+        "$passed=Invoke-AutomaticCandidateValidation -Candidate $candidate;"
+        "$saved=Get-ReleaseControlState;"
+        'Write-Output "$passed,$script:evidenceCalls,$($saved.candidate.validation_state),'
+        '$($saved.candidate.validation.routes[0].route)"',
+    )
+
+    assert result == "True,1,PASSED,/api/status"
+
+
+def test_deterministic_observability_contract_failure_is_terminal(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$state.candidate.validation_state='NEW';$state.candidate.compatibility_state='APPROVED';"
+        "Write-ReleaseControlState $state;"
+        "function Test-ProductionCandidateProvenance{return $true};"
+        "function Invoke-ProductionShapePreflight{return $true};"
+        "function Test-RequiredGitHubChecks{'PASSED'};"
+        "function Get-CandidateChangedFiles{return @('web/app/api/status/route.ts')};"
+        "function Get-CandidateCompatibilityRequirement{return [pscustomobject]@{state='AUTOMATIC';files=@()}};"
+        "function Get-CandidateRouteValidationPlan{return [pscustomobject]@{worker_cpu_required=$true;"
+        "requires_validation=$true;static_assets=@();worker_reads=@();worker_writes=@()}};"
+        "function Set-CloudflareCandidatePointer{};"
+        "function Wait-CandidatePlacementPropagation{return [pscustomobject]@{passed=$true}};"
+        "function Invoke-CandidateWorkerValidation{return [pscustomobject]@{passed=$true;"
+        "validation_run='run-schema';expected_worker_invocations=1;static_worker_invocations=0;"
+        "static_observability_state='PASSED';observability_credential_source='LOCAL_SECRET_FILE';"
+        "observability_diagnostic='OBSERVABILITY_SCHEMA_INVALID';routes=@();"
+        "expected_requests=@();cpu_evidence=$null}};"
+        "$null=Invoke-AutomaticCandidateValidation -Candidate $candidate;"
+        "$saved=Get-ReleaseControlState;$history=Get-Content -Raw -Encoding UTF8 $releaseHistoryPath;"
+        'Write-Output "$($saved.candidate.validation_state),$($saved.candidate.validation.reason),'
+        '$($saved.candidate.validation.cloudflare),$($history.Contains(\'CANDIDATE_FAILED\'))"',
+    )
+
+    assert result == "FAILED,OBSERVABILITY_SCHEMA_INVALID,FAILED,True"
 
 
 def test_repository_local_release_secret_path_is_gitignored() -> None:
@@ -729,9 +876,10 @@ def test_wrangler_json_bypasses_cmd_and_preserves_bounded_long_argument(
     result = _run_control_center_contract(
         tmp_path,
         "$script:nodeArguments=$null;"
-        "function node.exe{param($Cli,[Parameter(ValueFromRemainingArguments=$true)]$Rest);"
-        "$script:nodeArguments=@($Rest);$global:LASTEXITCODE=0;"
-        "Write-Output '{\"value\":1}'};"
+        "function Invoke-Utf8NativeProcess{param($FilePath,$Arguments);"
+        "$script:nodeArguments=@($Arguments[1..($Arguments.Count-1)]);"
+        "return [pscustomobject]@{exit_code=0;stdout='{\"value\":1}';stderr='';"
+        "stdout_lines=@('{\"value\":1}');stderr_lines=@()}};"
         "$long='x'*7000;$result=Invoke-WranglerJson -Arguments @('probe',$long);"
         'Write-Output "$($result.value)|$($script:nodeArguments[0])|'
         '$($script:nodeArguments[1].Length)|$($script:nodeArguments[2])"',
@@ -2361,6 +2509,58 @@ def test_watchdog_autostart_uses_one_windowless_registration_path(tmp_path) -> N
     )
 
 
+def test_hidden_watchdog_and_pwsh_load_identical_utf8_manifest_markers(tmp_path) -> None:
+    repository = tmp_path / "repository \u4e2d\u6587 path"
+    runtime = tmp_path / "runtime"
+    (repository / "web").mkdir(parents=True)
+    runtime.mkdir()
+    manifest = ROOT / "web" / "worker-validation-manifest.json"
+    (repository / "web" / manifest.name).write_bytes(manifest.read_bytes())
+    subprocess.run(["git", "init", "--quiet"], cwd=repository, check=True)
+    subprocess.run(["git", "config", "user.email", "release@test.invalid"], cwd=repository, check=True)
+    subprocess.run(["git", "config", "user.name", "Release Test"], cwd=repository, check=True)
+    subprocess.run(["git", "add", "web/worker-validation-manifest.json"], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "fixture"], cwd=repository, check=True)
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    control = ROOT / "scripts" / "xauusd_control_center.ps1"
+    launcher = ROOT / "scripts" / "xauusd_watchdog_launcher.vbs"
+    probe = tmp_path / "manifest-probe.ps1"
+    result5 = tmp_path / "manifest-ps5.json"
+    result7 = tmp_path / "manifest-ps7.json"
+    probe.write_text(textwrap.dedent(f'''\
+        param([string]$Action,[string]$RuntimeRoot,[string]$RepositoryRoot)
+        $invokedAction = $Action
+        $null = . '{control}' -Action CodeRevision -RuntimeRoot $RuntimeRoot `
+            -RepositoryRoot $RepositoryRoot
+        $manifest = Get-WorkerValidationManifest -Revision '{revision}'
+        $target = if ($PSVersionTable.PSVersion.Major -le 5) {{ '{result5}' }} else {{ '{result7}' }}
+        $json = [pscustomobject]@{{
+            action = $invokedAction
+            markers = @($manifest.static_assets | ForEach-Object {{ [string]$_.marker }})
+        }} | ConvertTo-Json -Depth 5 -Compress
+        [IO.File]::WriteAllText($target, $json, [Text.UTF8Encoding]::new($false))
+    '''), encoding="utf-8")
+
+    subprocess.run([
+        "cscript.exe", "//NoLogo", str(launcher), str(probe), str(runtime), str(repository),
+    ], check=True)
+    subprocess.run([
+        "pwsh.exe", "-NoProfile", "-NonInteractive", "-File", str(probe),
+        "-Action", "Watchdog", "-RuntimeRoot", str(runtime), "-RepositoryRoot", str(repository),
+    ], check=True)
+    ps5 = json.loads(result5.read_text(encoding="utf-8"))
+    ps7 = json.loads(result7.read_text(encoding="utf-8"))
+    expected = json.loads(manifest.read_text(encoding="utf-8"))
+
+    assert ps5["action"] == ps7["action"] == "Watchdog"
+    assert ps5["markers"] == ps7["markers"] == [
+        row["marker"] or "" for row in expected["static_assets"]
+    ]
+
+
 def test_broker_closed_heartbeat_is_healthy_without_fresh_ticks(tmp_path) -> None:
     repo = tmp_path / "repo"
     quotes = repo / ".local" / "forward" / "quotes"
@@ -2856,6 +3056,68 @@ def test_static_manifest_rejects_missing_or_wrong_typed_contract_fields(tmp_path
     )
 
 
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_revision_manifest_and_native_diagnostics_are_strict_utf8_across_shells(
+    tmp_path, powershell: str,
+) -> None:
+    repository = tmp_path / "repository"
+    runtime = tmp_path / "runtime"
+    (repository / "web").mkdir(parents=True)
+    runtime.mkdir()
+    manifest = ROOT / "web" / "worker-validation-manifest.json"
+    (repository / "web" / manifest.name).write_bytes(manifest.read_bytes())
+    (repository / "native-boundary.txt").write_text(
+        "first\n\n\u4e2d\u6587 marker\n", encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "--quiet"], cwd=repository, check=True)
+    subprocess.run(["git", "config", "user.email", "release@test.invalid"], cwd=repository, check=True)
+    subprocess.run(["git", "config", "user.name", "Release Test"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "add", "web/worker-validation-manifest.json", "native-boundary.txt"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(["git", "commit", "--quiet", "-m", "fixture"], cwd=repository, check=True)
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    command = (
+        f"$null=. '{script}' -Action CodeRevision -RuntimeRoot '{runtime}' "
+        f"-RepositoryRoot '{repository}';"
+        "$prior=[Console]::OutputEncoding;[Console]::OutputEncoding=[Text.Encoding]::GetEncoding(437);"
+        f"$manifest=Get-WorkerValidationManifest -Revision '{revision}';"
+        "$native=Invoke-Utf8NativeProcess -FilePath 'git.exe' -Arguments "
+        f"@('-C','{repository}','show','{revision}:native-boundary.txt');"
+        "$bad=Invoke-Utf8NativeProcess -FilePath 'git.exe' -Arguments "
+        f"@('-C','{repository}','show','missing-release-object');"
+        "$invalid=try{Invoke-Utf8NativeProcess -FilePath 'python.exe' -Arguments "
+        "@('-c','import os; os.write(1, bytes([255]))')|Out-Null;'PASS'}"
+        "catch{$_.Exception.Message};"
+        "$payload=[pscustomobject]@{version=$PSVersionTable.PSVersion.ToString();"
+        "markers=@($manifest.static_assets|ForEach-Object{$_.marker});"
+        "native_lines=@($native.stdout_lines);"
+        "bad_exit=$bad.exit_code;bad_stderr=[bool]$bad.stderr};"
+        "$payload|Add-Member invalid_utf8 $invalid;"
+        "$json=$payload|ConvertTo-Json -Depth 5 -Compress;"
+        "[Console]::OutputEncoding=$prior;"
+        "Write-Output ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)))"
+    )
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, check=True,
+    )
+    payload = json.loads(base64.b64decode(completed.stdout.strip()).decode("utf-8"))
+    expected = json.loads(manifest.read_text(encoding="utf-8"))
+
+    assert payload["markers"] == [row["marker"] for row in expected["static_assets"]]
+    assert payload["native_lines"] == ["first", "", "\u4e2d\u6587 marker"]
+    assert payload["bad_exit"] != 0
+    assert payload["bad_stderr"] is True
+    assert payload["invalid_utf8"] == "NATIVE_PROCESS_UTF8_INVALID"
+
+
 def test_directed_route_sample_fails_closed_on_exact_identity_mismatch(tmp_path) -> None:
     candidate = "b" * 40
     result = _run_control_center_contract(
@@ -2932,7 +3194,7 @@ def test_candidate_cpu_evidence_comes_from_one_raw_event_universe() -> None:
     assert "function Get-CandidateCpuEvidence" not in source
     assert "function Get-CandidatePlatformEvidence" not in source
     assert "Get-CandidateFrozenPlatformEvidence -Candidate $Candidate" in source
-    assert "CLOUDFLARE_WORKERS_OBSERVABILITY_RAW_EVENTS" in source
+    assert "CLOUDFLARE_WORKERS_OBSERVABILITY_NORMALIZED_EVENTS" in source
     assert "universe_digest = $stableDigest" in source
 
 
@@ -3682,8 +3944,9 @@ def test_d1_release_evidence_ingestion_preserves_timestamp_string(
     }], separators=(",", ":"))
     result = _run_control_center_contract(
         tmp_path,
-        "function node.exe{param($Cli,[Parameter(ValueFromRemainingArguments=$true)]$Rest);"
-        f"$global:LASTEXITCODE=0;Write-Output '{response}'}};"
+        "function Invoke-Utf8NativeProcess{"
+        f"return [pscustomobject]@{{exit_code=0;stdout='{response}';stderr='';"
+        f"stdout_lines=@('{response}');stderr_lines=@()}}}};"
         "$row=@(Invoke-CoordinatedMigrationD1Query -Sql 'SELECT 1')[0];"
         'Write-Output "$($row.generation_watermark.GetType().FullName)|'
         '$($row.generation_watermark)"',
@@ -4190,7 +4453,8 @@ def test_compatibility_approval_transient_failure_preserves_review_evidence(
         mocks = (
             "function Get-ProductionCandidateProvenanceResult{"
             "return [pscustomobject]@{state='PASSED'}};"
-            f"function gh{{$global:LASTEXITCODE=1;'{diagnostic}'}};"
+            "function Invoke-Utf8NativeProcess{return [pscustomobject]@{exit_code=1;stdout='';"
+            f"stderr='{diagnostic}';stdout_lines=@();stderr_lines=@('{diagnostic}')}}}};"
         )
     result = _run_control_center_contract(
         tmp_path,
@@ -4250,7 +4514,8 @@ def test_required_github_gate_set_is_exact_and_missing_gate_stays_pending(tmp_pa
         "id=1;name=$_;head_sha=('a'*40);started_at='2026-08-23T01:00:00Z';"
         "status='completed';conclusion='success'} });"
         "$script:payload=[pscustomobject]@{check_runs=$runs}|ConvertTo-Json -Depth 5;"
-        "function gh { $global:LASTEXITCODE=0; return $script:payload };"
+        "function Invoke-Utf8NativeProcess{return [pscustomobject]@{exit_code=0;stdout=$script:payload;"
+        "stderr='';stdout_lines=@($script:payload);stderr_lines=@()}};"
         "$all=Test-RequiredGitHubChecks -Revision ('a'*40);"
         "$script:payload=[pscustomobject]@{check_runs=@($runs | Where-Object name -ne 'Web build and tests')}|ConvertTo-Json -Depth 5;"
         "$missing=Test-RequiredGitHubChecks -Revision ('a'*40);"
@@ -4272,7 +4537,8 @@ def test_required_github_gate_uses_latest_exact_sha_attempt(tmp_path) -> None:
         "$new=[pscustomobject]@{id=3;name=$requiredGitHubChecks[0];head_sha=('a'*40);"
         "started_at='2026-08-23T03:00:00Z';status='completed';conclusion='success'};"
         "$script:payload=[pscustomobject]@{check_runs=@($base)+@($old,$new)}|ConvertTo-Json -Depth 5;"
-        "function gh{$global:LASTEXITCODE=0;$script:payload};"
+        "function Invoke-Utf8NativeProcess{return [pscustomobject]@{exit_code=0;stdout=$script:payload;"
+        "stderr='';stdout_lines=@($script:payload);stderr_lines=@()}};"
         "$recovered=Test-RequiredGitHubChecks -Revision ('a'*40);"
         "$new.status='in_progress';$new.conclusion=$null;"
         "$script:payload=[pscustomobject]@{check_runs=@($base)+@($old,$new)}|ConvertTo-Json -Depth 5;"
@@ -4320,9 +4586,12 @@ def test_repository_transport_failure_classifier_is_bounded(
 def test_github_cli_auth_and_invalid_payload_are_not_retryable(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
-        "function gh{$global:LASTEXITCODE=1;'HTTP 401 authentication failed'};"
+        "function Invoke-Utf8NativeProcess{return [pscustomobject]@{exit_code=1;stdout='';"
+        "stderr='HTTP 401 authentication failed';stdout_lines=@();"
+        "stderr_lines=@('HTTP 401 authentication failed')}};"
         "$auth=Get-RequiredGitHubChecksResult -Revision ('a'*40);"
-        "function gh{$global:LASTEXITCODE=0;'not-json'};"
+        "function Invoke-Utf8NativeProcess{return [pscustomobject]@{exit_code=0;stdout='not-json';"
+        "stderr='';stdout_lines=@('not-json');stderr_lines=@()}};"
         "$invalid=Get-RequiredGitHubChecksResult -Revision ('a'*40);"
         'Write-Output "$($auth.state),$($auth.reason),$($invalid.state),$($invalid.reason)"',
     )
@@ -4547,9 +4816,10 @@ def test_production_candidate_requires_exact_current_main(tmp_path) -> None:
         "$sha=('b'*40);$candidate=New-ReleaseIdentity -GitSha $sha "
         "-WorkerVersionId 'worker' -WindowsRevision $sha -Branch 'feature' "
         "-ArtifactKind 'PRODUCTION_CANDIDATE';"
-        "$script:exact=$true;function git {"
-        "$global:LASTEXITCODE=0;if($args -contains 'rev-parse'){"
-        "if($script:exact){'b'*40}else{'c'*40}}};"
+        "$script:exact=$true;function Invoke-Utf8NativeProcess{param($Arguments);"
+        "$stdout=if($Arguments -contains 'rev-parse'){if($script:exact){'b'*40}else{'c'*40}}else{''};"
+        "return [pscustomobject]@{exit_code=0;stdout=$stdout;stderr='';"
+        "stdout_lines=if($stdout){@($stdout)}else{@()};stderr_lines=@()}};"
         "$feature=Test-ProductionCandidateProvenance $candidate;"
         "$candidate.artifact_kind='PREVIEW';$preview=Test-ProductionCandidateProvenance $candidate;"
         "$candidate.artifact_kind='UNKNOWN';$unknown=Test-ProductionCandidateProvenance $candidate;"

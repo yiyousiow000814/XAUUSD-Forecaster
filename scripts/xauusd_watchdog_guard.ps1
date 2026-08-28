@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 function Get-WatchdogHeartbeat {
     if (-not (Test-Path -LiteralPath $HeartbeatPath)) { return $null }
     try {
-        $heartbeat = Get-Content -LiteralPath $HeartbeatPath -Raw | ConvertFrom-Json
+        $heartbeat = Get-Content -LiteralPath $HeartbeatPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $observedAt = [DateTimeOffset]::MinValue
         if (-not [DateTimeOffset]::TryParse(
             [string]$heartbeat.observed_at, [ref]$observedAt
