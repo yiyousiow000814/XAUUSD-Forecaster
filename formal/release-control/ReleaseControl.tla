@@ -258,6 +258,7 @@ RecordAccessReceipt(kind) ==
     /\ release.phase = "VERIFY"
     /\ release.accessReview
     /\ release.gate = "UNTESTED"
+    /\ release.accessApprovalCount = 0
     /\ kind \in AccessReceiptStates \ {"NONE"}
     /\ release' = [release EXCEPT
         !.accessReceiptState = kind,
