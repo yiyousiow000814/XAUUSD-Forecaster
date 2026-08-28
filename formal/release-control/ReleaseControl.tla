@@ -773,7 +773,8 @@ HardFailuresBlock ==
 UnrelatedDebtIsNotFailure ==
     release.phase \in {"PREPARE", "VERIFY"} /\
     release.stableDebt /\ release.hardSafe /\ release.changedSafe /\
-    ~release.candidateRegression /\ release.candidateExact =>
+    ~release.candidateRegression /\ release.candidateExact /\
+    release.main = release.candidate =>
         release.gate # "FAILED"
 SwitchRequiresAcceptance == release.kind = "FORWARD" /\ release.transaction =>
     release.gate = "PASSED" /\ release.accepted
