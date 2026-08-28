@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "MigrateRuntimeStateRoot")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync", "broadcast")]
     [string]$ServiceKey = "",
@@ -46,6 +46,7 @@ $releaseHistoryPath = Join-Path $runtimeForwardRoot "release-control-history.jso
 $coordinatedMigrationReceiptPath = Join-Path $runtimeForwardRoot "coordinated-migration-receipt.json"
 $accessBoundaryReceiptRoot = Join-Path $runtimeForwardRoot "access-boundary-receipts"
 $releaseLockPath = Join-Path $runtimeForwardRoot "release-control.lock"
+$runtimeStateMigrationLockPath = Join-Path $moduleRoot ".runtime-state-migration.lock"
 $controlPlaneInstallStatePath = Join-Path $runtimeForwardRoot "control-plane-install-state.json"
 $runtimePreflightContractVersion = "isolated-critical-status-diagnostics-v4"
 $preflightDiagnosticMaxCharacters = 2048
@@ -530,6 +531,7 @@ function Test-ReleaseIdentity {
 }
 
 function Enter-ReleaseTransactionLock {
+    if (Test-Path -LiteralPath $runtimeStateMigrationLockPath) { return $false }
     if (Test-Path -LiteralPath $releaseLockPath) {
         $owner = $null
         try {
@@ -8206,6 +8208,192 @@ function Convert-LegacyRuntimeLocalJunction {
     }
 }
 
+function Enter-RuntimeStateMigrationLock {
+    if (Test-Path -LiteralPath $runtimeStateMigrationLockPath) { return $false }
+    try {
+        New-Item -ItemType Directory -Path $runtimeStateMigrationLockPath `
+            -ErrorAction Stop | Out-Null
+        $owner = Get-ControlPlaneProcessIdentity -ProcessId $PID
+        if (-not $owner) { throw "RUNTIME_STATE_MIGRATION_OWNER_REQUIRED" }
+        [pscustomobject]@{
+            owner_pid = $PID
+            owner_process_start_token = [string]$owner.process_start_token
+            acquired_at = [DateTimeOffset]::UtcNow.ToString("o")
+        } | ConvertTo-Json | Set-Content -LiteralPath `
+            (Join-Path $runtimeStateMigrationLockPath "owner.json") -Encoding UTF8
+        $script:runtimeStateMigrationLockHeld = $true
+        return $true
+    } catch {
+        Remove-Item -LiteralPath $runtimeStateMigrationLockPath -Recurse -Force `
+            -ErrorAction SilentlyContinue
+        return $false
+    }
+}
+
+function Exit-RuntimeStateMigrationLock {
+    if ($script:runtimeStateMigrationLockHeld -and
+        (Test-Path -LiteralPath $runtimeStateMigrationLockPath)) {
+        Remove-Item -LiteralPath $runtimeStateMigrationLockPath -Recurse -Force `
+            -ErrorAction SilentlyContinue
+    }
+    $script:runtimeStateMigrationLockHeld = $false
+}
+
+function Invoke-RuntimeStateRootMigration {
+    $bundle = Assert-ControlCenterProcessIdentity
+    $runtime = [System.IO.Path]::GetFullPath($moduleRoot)
+    $source = [System.IO.Path]::GetFullPath($repositoryRoot)
+    if ($runtime.Equals($source, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $runtime.StartsWith(
+            $source + [System.IO.Path]::DirectorySeparatorChar,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "RUNTIME_STATE_ROOT_MUST_BE_SEPARATE_FROM_CODE_CHECKOUT"
+    }
+    if (-not (Enter-RuntimeStateMigrationLock)) {
+        throw "RUNTIME_STATE_MIGRATION_ALREADY_ACTIVE"
+    }
+
+    $supervisionState = $null
+    $oldWatchdog = $null
+    $watchdogStopped = $false
+    $migrationCompleted = $false
+    try {
+        $release = Get-ReleaseControlState
+        if (($release -and $release.transaction) -or
+            (Test-Path -LiteralPath $releaseLockPath)) {
+            throw "RUNTIME_STATE_MIGRATION_BLOCKED_BY_RELEASE_TRANSACTION"
+        }
+        $owners = @(Get-VerifiedWatchdogOwners)
+        if ($owners.Count -ne 1) {
+            throw "RUNTIME_STATE_MIGRATION_EXACTLY_ONE_WATCHDOG_REQUIRED"
+        }
+        $oldWatchdog = $owners[0]
+        $null = Assert-CurrentWatchdogHeartbeat -Owner $oldWatchdog `
+            -ExpectedRevision ([string]$bundle.source_revision)
+        $before = Get-ControlPlaneIsolationSnapshot
+        Assert-ControlPlaneIsolationBaseline -Snapshot $before -ReleaseState $release
+        $stableRevision = [string]$before.business_runtime_revision
+        if ($stableRevision -notmatch '^[0-9a-f]{40}$') {
+            throw "RUNTIME_STATE_MIGRATION_STABLE_REVISION_REQUIRED"
+        }
+
+        $supervisionState = Suspend-ControlPlaneSupervision
+        Wait-ControlPlaneGuardQuiesced
+        Stop-VerifiedWatchdogOwner -Identity $oldWatchdog
+        $watchdogStopped = $true
+        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+
+        # Recheck after fencing the watchdog. The migration lock prevents every
+        # normal release entrypoint from acquiring its transaction lock.
+        $releaseAfterFence = Get-ReleaseControlState
+        if (($releaseAfterFence -and $releaseAfterFence.transaction) -or
+            (Test-Path -LiteralPath $releaseLockPath)) {
+            throw "RUNTIME_STATE_MIGRATION_RELEASE_TRANSACTION_APPEARED"
+        }
+
+        Stop-All
+        $stopDeadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
+        do {
+            $remaining = @()
+            foreach ($service in $services) {
+                $remaining += @(Get-ForecasterProcesses -Service $service)
+            }
+            if ($remaining.Count -eq 0) { break }
+            Start-Sleep -Milliseconds 250
+        } while ([DateTimeOffset]::UtcNow -lt $stopDeadline)
+        if ($remaining.Count -ne 0) {
+            throw "RUNTIME_STATE_MIGRATION_SERVICE_QUIESCE_FAILED"
+        }
+
+        $result = Convert-LegacyRuntimeLocalJunction `
+            -RuntimeLocal $runtimeLocalRoot -SourceLocal $repositoryLocalRoot
+        $runtimeItem = Get-Item -LiteralPath $runtimeLocalRoot -Force
+        if ($runtimeItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            throw "RUNTIME_STATE_MIGRATION_REPARSE_POINT_REMAINED"
+        }
+        if (Test-Path -LiteralPath (Join-Path $repositoryLocalRoot "forward")) {
+            throw "RUNTIME_STATE_MIGRATION_CODE_ROOT_STATE_REMAINED"
+        }
+        $migrationCompleted = $true
+
+        $reloadStarted = [DateTimeOffset]::UtcNow
+        foreach ($service in $services) {
+            if (@($before.services.($service.Key)).Count -eq 1) {
+                Start-ForecasterService -Service $service -SkipExistingCheck
+            }
+        }
+        $deadline = [DateTimeOffset]::UtcNow.Add($serviceStartupTimeout)
+        do {
+            Start-Sleep -Milliseconds 500
+            $healthy = Test-CodeReloadHealth -ReloadStarted $reloadStarted
+        } while (-not $healthy -and [DateTimeOffset]::UtcNow -lt $deadline)
+        if (-not $healthy) {
+            throw "RUNTIME_STATE_MIGRATION_SERVICE_HEALTH_FAILED"
+        }
+        foreach ($service in $services) {
+            $expectedOwners = @($before.services.($service.Key)).Count
+            if (@(Get-ForecasterProcesses -Service $service).Count -ne $expectedOwners) {
+                throw "RUNTIME_STATE_MIGRATION_SERVICE_OWNER_MISMATCH:$($service.Key)"
+            }
+        }
+        if ([string](Get-CodeRevision) -ne $stableRevision) {
+            throw "RUNTIME_STATE_MIGRATION_CHANGED_STABLE_REVISION"
+        }
+        $releaseAfter = Get-ReleaseControlState
+        $currentReleaseStateHash = if (Test-Path -LiteralPath $releaseControlStatePath) {
+            Get-Sha256Hex -LiteralPath $releaseControlStatePath
+        } else { $null }
+        $currentReleaseHistoryHash = if (Test-Path -LiteralPath $releaseHistoryPath) {
+            Get-Sha256Hex -LiteralPath $releaseHistoryPath
+        } else { $null }
+        if ([string]$before.release_state_hash -ne [string]$currentReleaseStateHash -or
+            [string]$before.release_history_hash -ne [string]$currentReleaseHistoryHash -or
+            ($releaseAfter -and $releaseAfter.transaction)) {
+            throw "RUNTIME_STATE_MIGRATION_CHANGED_RELEASE_STATE"
+        }
+        Write-RuntimeUpdateState @{
+            state_root_migrated = [bool]$result.migrated
+            state_root_migrated_at = [DateTimeOffset]::UtcNow.ToString("o")
+            state_root = $runtimeLocalRoot
+            preserved_revision = $stableRevision
+        }
+
+        $null = Start-WatchdogReplacement -PassThru
+        $newWatchdog = Wait-VerifiedWatchdogHandoff `
+            -ExpectedRevision ([string]$bundle.source_revision) `
+            -PreviousIdentity $oldWatchdog
+        $watchdogStopped = $false
+        Restore-ControlPlaneSupervision -State $supervisionState
+        return [pscustomobject]@{
+            migrated = [bool]$result.migrated
+            runtime_state_root = $runtimeLocalRoot
+            preserved_revision = $stableRevision
+            watchdog_process_id = [int]$newWatchdog.process_id
+        }
+    } catch {
+        $failure = $_.Exception.Message
+        if ($migrationCompleted) {
+            # Independent runtime-root ownership is safe to retain. Recovery
+            # restarts the same frozen Stable checkout; it never moves Git.
+            foreach ($service in $services) {
+                try {
+                    if (@(Get-ForecasterProcesses -Service $service).Count -eq 0) {
+                        Start-ForecasterService -Service $service -SkipExistingCheck
+                    }
+                } catch {}
+            }
+        }
+        if ($watchdogStopped) {
+            try { $null = Start-WatchdogReplacement -PassThru } catch {}
+        }
+        try { Restore-ControlPlaneSupervision -State $supervisionState } catch {}
+        throw $failure
+    } finally {
+        Exit-RuntimeStateMigrationLock
+    }
+}
+
 function Install-ProductionRuntime {
     $source = [System.IO.Path]::GetFullPath($repositoryRoot)
     $runtime = if ($RuntimeRoot) {
@@ -10765,6 +10953,9 @@ switch ($Action) {
         Invoke-ControlPlaneInstall -VerifiedSourceRoot `
             ([System.IO.Path]::GetFullPath($SourceRoot)) `
             -TargetRevision $SourceRevision | Format-List
+    }
+    "MigrateRuntimeStateRoot" {
+        Invoke-RuntimeStateRootMigration | Format-List
     }
     "InstallShortcut" { Write-Output (Install-ControlShortcut) }
     default { Show-ControlCenter }

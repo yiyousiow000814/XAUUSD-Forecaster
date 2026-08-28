@@ -353,6 +353,113 @@ def test_unknown_runtime_state_link_target_fails_closed(tmp_path: Path) -> None:
     assert runtime_local.is_dir()
 
 
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_controlled_state_migration_preserves_stable_code_and_restarts_services(
+    tmp_path: Path, powershell: str,
+) -> None:
+    runtime, repository = _prepare_roots(tmp_path)
+    source_local = repository / ".local"
+    source_forward = source_local / "forward"
+    source_forward.mkdir(parents=True)
+    (source_forward / "release-control-state.json").write_text(
+        '{"transaction":null}', encoding="utf-8",
+    )
+    runtime_local = runtime / ".local"
+    setup = subprocess.run(
+        [
+            powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+            f"New-Item -ItemType Junction -Path '{runtime_local}' "
+            f"-Target '{source_local}' | Out-Null",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if setup.returncode:
+        pytest.skip(f"junction creation unavailable: {setup.stderr}")
+
+    stable_revision = "a" * 40
+    bundle_revision = "b" * 40
+    body = (
+        f"function Assert-ControlCenterProcessIdentity {{ [pscustomobject]@{{"
+        f"source_revision='{bundle_revision}'}} }};"
+        "function Get-ReleaseControlState { $null };"
+        "function Get-VerifiedWatchdogOwners { [pscustomobject]@{process_id=41} };"
+        "function Assert-CurrentWatchdogHeartbeat { [pscustomobject]@{} };"
+        "$owned=[pscustomobject][ordered]@{};"
+        "foreach($service in $services){$owned | Add-Member -NotePropertyName "
+        "$service.Key -NotePropertyValue @([pscustomobject]@{process_id=1})};"
+        f"function Get-ControlPlaneIsolationSnapshot {{ [pscustomobject]@{{"
+        f"business_runtime_revision='{stable_revision}';services=$owned;"
+        "release_state_hash=(Get-Sha256Hex -LiteralPath $releaseControlStatePath);"
+        "release_history_hash=$null} };"
+        "function Assert-ControlPlaneIsolationBaseline {};"
+        "function Suspend-ControlPlaneSupervision { @{} };"
+        "function Wait-ControlPlaneGuardQuiesced {};"
+        "function Stop-VerifiedWatchdogOwner {};"
+        "function Stop-ScheduledTask {};"
+        "$script:active=@{};"
+        "function Stop-All {$script:active=@{}};"
+        "function Get-ForecasterProcesses {param($Service);"
+        "if($script:active[$Service.Key]){@([pscustomobject]@{ProcessId=7})}else{@()}};"
+        "function Start-ForecasterService {param($Service,[switch]$SkipExistingCheck);"
+        "$script:active[$Service.Key]=$true};"
+        "function Test-CodeReloadHealth {$true};"
+        f"function Get-CodeRevision {{'{stable_revision}'}};"
+        "function Start-WatchdogReplacement {[pscustomobject]@{Id=88}};"
+        "function Wait-VerifiedWatchdogHandoff {[pscustomobject]@{process_id=88}};"
+        "function Restore-ControlPlaneSupervision {};"
+        "$result=Invoke-RuntimeStateRootMigration;"
+        "$item=Get-Item -LiteralPath $runtimeLocalRoot -Force;"
+        "[pscustomobject]@{migrated=$result.migrated;"
+        "preserved_revision=$result.preserved_revision;"
+        "reparse=[bool]($item.Attributes -band "
+        "[System.IO.FileAttributes]::ReparsePoint);"
+        "started=@($script:active.Keys | Sort-Object)} | ConvertTo-Json -Depth 4"
+    )
+    output = _run_control_contract(tmp_path, body, powershell=powershell)
+    evidence = json.loads(output)
+
+    assert evidence == {
+        "migrated": True,
+        "preserved_revision": stable_revision,
+        "reparse": False,
+        "started": sorted(MUTABLE_SERVICE_FILES),
+    }
+    assert not source_forward.exists()
+    assert (runtime_local / "forward" / "release-control-state.json").exists()
+    update = json.loads(
+        (runtime_local / "forward" / "runtime-update-state.json").read_text(
+            encoding="utf-8-sig"
+        )
+    )
+    assert update["preserved_revision"] == stable_revision
+
+
+def test_release_entrypoints_fail_closed_while_state_root_migrates(
+    tmp_path: Path,
+) -> None:
+    output = _run_control_contract(
+        tmp_path,
+        "New-Item -ItemType Directory -Path $runtimeStateMigrationLockPath | Out-Null;"
+        "Write-Output (Enter-ReleaseTransactionLock)",
+    )
+
+    assert output == "False"
+
+
+def test_state_only_migration_never_moves_the_runtime_checkout() -> None:
+    source = CONTROL_CENTER.read_text(encoding="utf-8")
+    start = source.index("function Invoke-RuntimeStateRootMigration")
+    end = source.index("function Install-ProductionRuntime", start)
+    migration = source[start:end]
+
+    assert "git -C" not in migration
+    assert '"git.exe"' not in migration
+    assert "checkout --detach" not in migration.lower()
+    assert "RUNTIME_STATE_MIGRATION_CHANGED_STABLE_REVISION" in migration
+
+
 def test_watchdog_promote_and_rollback_share_the_global_service_contract() -> None:
     source = CONTROL_CENTER.read_text(encoding="utf-8")
 

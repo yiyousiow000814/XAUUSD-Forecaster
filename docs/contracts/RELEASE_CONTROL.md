@@ -61,8 +61,17 @@ repository configuration or secret authorities remain separate. Moving or
 revising the code checkout cannot redirect mutable state, and Switch, hidden
 watchdog recovery, Observe, and Reverse use the same service launch contract.
 An older installation whose runtime `.local` is a junction to the repository
-must be quiesced and migrated to an independent runtime directory before a new
-Business Runtime is installed; unknown link targets fail closed.
+must be migrated through the explicit state-only Control Center operation before
+a new Business Runtime is installed. That operation fences release entry,
+verifies the exact installed Control Plane, sole watchdog, Stable revision, and
+service-owner baseline, quiesces the watchdog and services, and then replaces
+only a junction whose exact target is the authorized repository `.local`. It
+restarts and health-checks the same frozen Stable checkout before restoring
+supervision; it MUST NOT move Git, change Worker traffic, or change release
+state. The migration lock is outside the junction being replaced, and every
+release transaction entry fails closed while it exists. Unknown link targets,
+concurrent release state, revision changes, missing owners, or failed fresh
+service evidence fail closed.
 
 Candidate detection is automatic. Required gates are selected from the changed
 boundaries and include repository checks, isolated Windows preflight, startup
