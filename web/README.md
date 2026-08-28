@@ -158,8 +158,10 @@ Cloudflare Workers Builds and match
 [`cloudflare-build-contract.json`](cloudflare-build-contract.json): production
 branch `main`, root directory `/web`, include path `*`, no exclude paths,
 `npm ci && npm test` as the build command, and immutable `wrangler versions
-upload` as the deploy command. The build must not assign Stable traffic. Keep D1
-identifiers in `wrangler.jsonc`; keep `INGEST_TOKEN` in Cloudflare secrets.
+upload` as the deploy command. In production Workers CI, the `npm test` pretest
+hook installs the repository Python package before the exact release fixture
+builder runs. The build must not assign Stable traffic. Keep D1 identifiers in
+`wrangler.jsonc`; keep `INGEST_TOKEN` in Cloudflare secrets.
 
 ## Learn More
 
