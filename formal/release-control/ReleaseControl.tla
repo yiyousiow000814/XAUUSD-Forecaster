@@ -178,6 +178,7 @@ DiscoverCandidate(accessRequired) ==
 
 MainMoves ==
     /\ AllowMainMove
+    /\ release.phase \in {"PREPARE", "VERIFY"}
     /\ release.main # NextId
     /\ release' = [release EXCEPT
         !.main = NextId,
