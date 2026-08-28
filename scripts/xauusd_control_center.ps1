@@ -6072,14 +6072,26 @@ function Test-CloudflareReleasePlacement {
 
 function Test-CloudflareRollbackTarget {
     param([Parameter(Mandatory = $true)][object]$Target)
-    if (-not $Target.worker_version_id) { return $false }
-    $known = @(Get-CloudflareVersions | Where-Object {
-        [string]$_.id -eq [string]$Target.worker_version_id
-    })
-    if ($known.Count -ne 1) { return $false }
-    $deployment = Get-CloudflareDeployment
+    $targetVersionId = [string]$Target.worker_version_id
+    if ([string]::IsNullOrWhiteSpace($targetVersionId)) { return $false }
+    try {
+        $version = Get-CloudflareVersionDetails -VersionId $targetVersionId
+        if (-not $version -or $version -is [System.Array] -or
+            -not $version.PSObject.Properties['id'] -or
+            [string]$version.id -cne $targetVersionId -or
+            -not $version.PSObject.Properties['metadata'] -or
+            -not $version.metadata -or
+            -not $version.PSObject.Properties['resources'] -or
+            -not $version.resources -or
+            -not $version.resources.PSObject.Properties['script'] -or
+            -not $version.resources.script -or
+            'fetch' -notin @($version.resources.script.handlers)) {
+            return $false
+        }
+        $deployment = Get-CloudflareDeployment
+    } catch { return $false }
     return @($deployment.versions | Where-Object {
-        [string]$_.version_id -eq [string]$Target.worker_version_id -and
+        [string]$_.version_id -ceq $targetVersionId -and
         [double]$_.percentage -in @(0, 100)
     }).Count -eq 1
 }
