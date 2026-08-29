@@ -45,9 +45,12 @@ stopping a service, then temporarily quiesces the exact captured service trees,
 performs a reversible rename of the real state directory, and restores and
 health-checks the same Stable owners. Only a `PASSED` result for that real path
 authorizes `MigrateRuntimeStateRoot`. Holder diagnostics are bounded to process
-ID, process name, handle kind, safe path, and access mask; close the reported
-external application and rerun preflight rather than terminating it through the
-controller.
+ID, process name, handle kind, safe path, and access mask. When every external
+holder is an Explorer directory handle contained by the migration tree, the
+preflight closes only matching Explorer windows and rechecks. If the handle is
+orphaned, it may restart only the verified Explorer shell after proving that no
+Explorer file operation is active. Every non-Explorer or mixed holder set stays
+fail-closed and must be resolved outside the controller.
 
 After every `main` merge, confirm a Workers Build exists for that exact SHA.
 Build initialization may queue for several minutes; queue latency is not a

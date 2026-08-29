@@ -8471,6 +8471,15 @@ public sealed class XauusdRuntimeStateHandleInfo
     public int ProbeError;
 }
 
+public sealed class XauusdTopLevelWindowInfo
+{
+    public long HandleValue;
+    public int ProcessId;
+    public bool Visible;
+    public string ClassName;
+    public string Title;
+}
+
 public static class XauusdRuntimeStateNativeProbe
 {
     private const int ProcessBasicInformation = 0;
@@ -8484,6 +8493,9 @@ public static class XauusdRuntimeStateNativeProbe
     private const uint FileAttributeDirectory = 0x0010;
     private const uint OpenExisting = 3;
     private const uint FileFlagBackupSemantics = 0x02000000;
+    private const uint WmClose = 0x0010;
+
+    private delegate bool EnumWindowsCallback(IntPtr window, IntPtr parameter);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct ProcessBasicInformationValue
@@ -8557,6 +8569,29 @@ public static class XauusdRuntimeStateNativeProbe
     private static extern int NtQueryInformationProcess(
         IntPtr process, int informationClass, IntPtr information,
         int informationLength, out int returnLength);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(
+        EnumWindowsCallback callback, IntPtr parameter);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(
+        IntPtr window, out uint processId);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr window);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(
+        IntPtr window, StringBuilder className, int capacity);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(
+        IntPtr window, StringBuilder title, int capacity);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool PostMessage(
+        IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
 
     private static string NormalizePath(string path)
     {
@@ -8722,6 +8757,46 @@ public static class XauusdRuntimeStateNativeProbe
         CloseHandle(handle);
         return 0;
     }
+
+    public static XauusdTopLevelWindowInfo[] GetTopLevelWindows(int[] processIds)
+    {
+        var allowed = new HashSet<int>(processIds ?? new int[0]);
+        var windows = new List<XauusdTopLevelWindowInfo>();
+        EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+            uint processId;
+            GetWindowThreadProcessId(window, out processId);
+            if (!allowed.Contains((int)processId)) return true;
+            var className = new StringBuilder(512);
+            var title = new StringBuilder(2048);
+            GetClassName(window, className, className.Capacity);
+            GetWindowText(window, title, title.Capacity);
+            windows.Add(new XauusdTopLevelWindowInfo {
+                HandleValue = window.ToInt64(),
+                ProcessId = (int)processId,
+                Visible = IsWindowVisible(window),
+                ClassName = className.ToString(),
+                Title = title.ToString()
+            });
+            return true;
+        }, IntPtr.Zero);
+        return windows.ToArray();
+    }
+
+    public static int RequestGracefulClose(int[] processIds)
+    {
+        int requested = 0;
+        foreach (var window in GetTopLevelWindows(processIds))
+        {
+            if (window.ClassName != "Shell_TrayWnd" &&
+                window.ClassName != "CabinetWClass")
+                continue;
+            if (PostMessage(
+                new IntPtr(window.HandleValue), WmClose,
+                IntPtr.Zero, IntPtr.Zero))
+                requested++;
+        }
+        return requested;
+    }
 }
 '@
     Add-Type -TypeDefinition $source -ErrorAction Stop
@@ -8811,6 +8886,291 @@ function ConvertTo-RuntimeStateHolderDiagnostic {
         truncated = @($Holders).Count -gt $bounded.Count
         holders = $bounded
     } | ConvertTo-Json -Depth 5 -Compress
+}
+
+function Test-RuntimeStatePathContained {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$StateTree
+    )
+    try {
+        $candidate = [System.IO.Path]::GetFullPath($Path).TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar
+        )
+        $root = [System.IO.Path]::GetFullPath($StateTree).TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar
+        )
+        return $candidate.Equals(
+            $root, [System.StringComparison]::OrdinalIgnoreCase
+        ) -or $candidate.StartsWith(
+            $root + [System.IO.Path]::DirectorySeparatorChar,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    } catch { return $false }
+}
+
+function ConvertFrom-ExplorerLocationUrl {
+    param([string]$LocationUrl)
+    if ([string]::IsNullOrWhiteSpace($LocationUrl)) { return $null }
+    try {
+        $uri = [Uri]$LocationUrl
+        if (-not $uri.IsFile) { return $null }
+        return [System.IO.Path]::GetFullPath($uri.LocalPath)
+    } catch { return $null }
+}
+
+function Get-ExplorerShellWindowInventory {
+    $shell = $null
+    try {
+        $shell = New-Object -ComObject Shell.Application
+        return @($shell.Windows() | ForEach-Object {
+            $applicationPath = [string]$_.FullName
+            if ([System.IO.Path]::GetFileName($applicationPath) -ieq "explorer.exe") {
+                [pscustomobject]@{
+                    hwnd = [long]$_.HWND
+                    busy = [bool]$_.Busy
+                    location_name = [string]$_.LocationName
+                    location_url = [string]$_.LocationURL
+                    location_path = ConvertFrom-ExplorerLocationUrl `
+                        -LocationUrl ([string]$_.LocationURL)
+                    shell_window = $_
+                }
+            }
+        })
+    } finally {
+        if ($shell -and [Runtime.InteropServices.Marshal]::IsComObject($shell)) {
+            $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
+        }
+    }
+}
+
+function Close-ExplorerShellWindowsForStateTree {
+    param([Parameter(Mandatory = $true)][string]$StateTree)
+    $windows = @(Get-ExplorerShellWindowInventory)
+    $closed = 0
+    try {
+        foreach ($window in $windows) {
+            if (-not $window.location_path -or -not (
+                Test-RuntimeStatePathContained -Path ([string]$window.location_path) `
+                    -StateTree $StateTree
+            )) { continue }
+            $window.shell_window.Quit()
+            $closed += 1
+        }
+    } finally {
+        foreach ($window in $windows) {
+            $owner = $window.shell_window
+            if ($owner -and [Runtime.InteropServices.Marshal]::IsComObject($owner)) {
+                $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($owner)
+            }
+        }
+    }
+    return [pscustomobject]@{
+        examined_count = $windows.Count
+        closed_count = $closed
+    }
+}
+
+function Get-ExplorerTopLevelWindowInventory {
+    param([Parameter(Mandatory = $true)][int[]]$ProcessIds)
+    Initialize-RuntimeStateNativeProbe
+    return @([XauusdRuntimeStateNativeProbe]::GetTopLevelWindows($ProcessIds) |
+        ForEach-Object {
+            [pscustomobject]@{
+                hwnd = [long]$_.HandleValue
+                process_id = [int]$_.ProcessId
+                visible = [bool]$_.Visible
+                class_name = [string]$_.ClassName
+                title = [string]$_.Title
+            }
+        })
+}
+
+function Test-ExplorerFileOperationActive {
+    param([Parameter(Mandatory = $true)][int[]]$ProcessIds)
+    $operations = @(Get-ExplorerTopLevelWindowInventory -ProcessIds $ProcessIds |
+        Where-Object {
+            $_.class_name -eq "OperationStatusWindow" -and (
+                $_.visible -or (
+                    -not [string]::IsNullOrWhiteSpace([string]$_.title) -and
+                    [string]$_.title -notmatch '^\s*100%\s+complete\s*$'
+                )
+            )
+        })
+    return $operations.Count -ne 0
+}
+
+function Assert-ExplorerRuntimeStateHolderSet {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Holders,
+        [Parameter(Mandatory = $true)][string]$StateTree
+    )
+    if ($Holders.Count -eq 0) { return $true }
+    $invalid = @($Holders | Where-Object {
+        [string]$_.process_name -ine "explorer.exe" -or
+        [string]$_.kind -ne "DIRECTORY" -or
+        -not (Test-RuntimeStatePathContained -Path ([string]$_.path) `
+            -StateTree $StateTree)
+    })
+    if ($invalid.Count -ne 0) {
+        throw ("RUNTIME_STATE_EXTERNAL_HOLDER_ACTIVE:" +
+            (ConvertTo-RuntimeStateHolderDiagnostic -Holders $Holders))
+    }
+    return $true
+}
+
+function Get-ExternalRuntimeStateHolderInventory {
+    param(
+        [Parameter(Mandatory = $true)][string]$StateTree,
+        [Parameter(Mandatory = $true)][object]$ProcessPlan
+    )
+    $null = Update-RuntimeProcessQuiescencePlan -Plan $ProcessPlan
+    $controlledIds = @($ProcessPlan.entries | ForEach-Object { [int]$_.process_id })
+    $inventory = Get-RuntimeStateHolderInventory -StateTree $StateTree `
+        -ControlledProcessIds $controlledIds
+    return [pscustomobject]@{
+        inventory = $inventory
+        external = @($inventory.holders | Where-Object { -not $_.controlled })
+    }
+}
+
+function Request-ExplorerGracefulShutdown {
+    param([Parameter(Mandatory = $true)][int[]]$ProcessIds)
+    Initialize-RuntimeStateNativeProbe
+    return [XauusdRuntimeStateNativeProbe]::RequestGracefulClose($ProcessIds)
+}
+
+function Stop-VerifiedExplorerProcesses {
+    param([Parameter(Mandatory = $true)][object[]]$Identities)
+    foreach ($identity in $Identities) {
+        $current = Get-ControlPlaneProcessIdentity -ProcessId ([int]$identity.process_id)
+        if (-not $current -or [string]$current.name -ine "explorer.exe" -or
+            -not (Test-ControlPlaneStartTokenEqual `
+                -Left ([string]$current.process_start_token) `
+                -Right ([string]$identity.process_start_token))) {
+            throw "RUNTIME_STATE_EXPLORER_IDENTITY_CHANGED"
+        }
+        Stop-Process -Id ([int]$identity.process_id) -Force -ErrorAction Stop
+    }
+}
+
+function Start-ExplorerShell {
+    $explorer = Join-Path $env:WINDIR "explorer.exe"
+    Start-Process -FilePath $explorer | Out-Null
+}
+
+function Test-ExplorerShellHealthy {
+    Initialize-RuntimeStateNativeProbe
+    $sessionId = (Get-Process -Id $PID -ErrorAction Stop).SessionId
+    $processes = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" |
+        Where-Object { [int]$_.SessionId -eq [int]$sessionId })
+    if ($processes.Count -eq 0) { return $false }
+    return @(Get-ExplorerTopLevelWindowInventory `
+        -ProcessIds @($processes.ProcessId) | Where-Object {
+            $_.class_name -eq "Shell_TrayWnd"
+        }).Count -ne 0
+}
+
+function Wait-ExplorerShellHealthy {
+    param([TimeSpan]$Timeout = [TimeSpan]::FromSeconds(15))
+    $deadline = [DateTimeOffset]::UtcNow.Add($Timeout)
+    do {
+        if (Test-ExplorerShellHealthy) { return $true }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+    throw "RUNTIME_STATE_EXPLORER_SHELL_RESTART_FAILED"
+}
+
+function Repair-ExplorerRuntimeStateHolders {
+    param(
+        [Parameter(Mandatory = $true)][string]$StateTree,
+        [Parameter(Mandatory = $true)][object]$ProcessPlan,
+        [Parameter(Mandatory = $true)][object[]]$InitialHolders
+    )
+    $null = Assert-ExplorerRuntimeStateHolderSet `
+        -Holders $InitialHolders -StateTree $StateTree
+    $processIds = @($InitialHolders.process_id | ForEach-Object { [int]$_ } |
+        Sort-Object -Unique)
+
+    $windowResult = Close-ExplorerShellWindowsForStateTree -StateTree $StateTree
+    Start-Sleep -Milliseconds 750
+    $observed = Get-ExternalRuntimeStateHolderInventory `
+        -StateTree $StateTree -ProcessPlan $ProcessPlan
+    if ($observed.external.Count -eq 0) {
+        return [pscustomobject]@{
+            repaired = $true
+            method = "MATCHING_WINDOW_CLOSED"
+            closed_window_count = [int]$windowResult.closed_count
+            shell_restarted = $false
+            inventory = $observed.inventory
+        }
+    }
+
+    $null = Assert-ExplorerRuntimeStateHolderSet `
+        -Holders $observed.external -StateTree $StateTree
+    $processIds = @($observed.external.process_id | ForEach-Object { [int]$_ } |
+        Sort-Object -Unique)
+    if (Test-ExplorerFileOperationActive -ProcessIds $processIds) {
+        throw "RUNTIME_STATE_EXPLORER_FILE_OPERATION_ACTIVE"
+    }
+    $identities = @($processIds | ForEach-Object {
+        $identity = Get-ControlPlaneProcessIdentity -ProcessId $_
+        if (-not $identity -or [string]$identity.name -ine "explorer.exe") {
+            throw "RUNTIME_STATE_EXPLORER_IDENTITY_UNAVAILABLE"
+        }
+        $identity
+    })
+
+    $null = Request-ExplorerGracefulShutdown -ProcessIds $processIds
+    Start-Sleep -Seconds 2
+    $observed = Get-ExternalRuntimeStateHolderInventory `
+        -StateTree $StateTree -ProcessPlan $ProcessPlan
+    if ($observed.external.Count -eq 0) {
+        if (-not (Test-ExplorerShellHealthy)) {
+            Start-ExplorerShell
+            $null = Wait-ExplorerShellHealthy
+        }
+        return [pscustomobject]@{
+            repaired = $true
+            method = "GRACEFUL_SHELL_CLOSE"
+            closed_window_count = [int]$windowResult.closed_count
+            shell_restarted = $true
+            inventory = $observed.inventory
+        }
+    }
+
+    $null = Assert-ExplorerRuntimeStateHolderSet `
+        -Holders $observed.external -StateTree $StateTree
+    $remainingIds = @($observed.external.process_id | ForEach-Object { [int]$_ } |
+        Sort-Object -Unique)
+    if (@(Compare-Object $processIds $remainingIds).Count -ne 0) {
+        throw "RUNTIME_STATE_EXPLORER_HOLDER_IDENTITY_CHANGED"
+    }
+    if (Test-ExplorerFileOperationActive -ProcessIds $remainingIds) {
+        throw "RUNTIME_STATE_EXPLORER_FILE_OPERATION_ACTIVE"
+    }
+    try {
+        Stop-VerifiedExplorerProcesses -Identities $identities
+    } finally {
+        Start-ExplorerShell
+    }
+    $null = Wait-ExplorerShellHealthy
+    Start-Sleep -Seconds 1
+    $observed = Get-ExternalRuntimeStateHolderInventory `
+        -StateTree $StateTree -ProcessPlan $ProcessPlan
+    if ($observed.external.Count -ne 0) {
+        $null = Assert-ExplorerRuntimeStateHolderSet `
+            -Holders $observed.external -StateTree $StateTree
+        throw ("RUNTIME_STATE_EXPLORER_HOLDER_PERSISTED:" +
+            (ConvertTo-RuntimeStateHolderDiagnostic -Holders $observed.external))
+    }
+    return [pscustomobject]@{
+        repaired = $true
+        method = "CONTROLLED_SHELL_RESTART"
+        closed_window_count = [int]$windowResult.closed_count
+        shell_restarted = $true
+        inventory = $observed.inventory
+    }
 }
 
 function Assert-RuntimeStatePermissions {
@@ -9006,14 +9366,20 @@ function Assert-NoExternalRuntimeStateHolders {
         [Parameter(Mandatory = $true)][string]$StateTree,
         [Parameter(Mandatory = $true)][object]$ProcessPlan
     )
-    $null = Update-RuntimeProcessQuiescencePlan -Plan $ProcessPlan
-    $controlledIds = @($ProcessPlan.entries | ForEach-Object { [int]$_.process_id })
-    $inventory = Get-RuntimeStateHolderInventory -StateTree $StateTree `
-        -ControlledProcessIds $controlledIds
-    $external = @($inventory.holders | Where-Object { -not $_.controlled })
+    $observed = Get-ExternalRuntimeStateHolderInventory `
+        -StateTree $StateTree -ProcessPlan $ProcessPlan
+    $inventory = $observed.inventory
+    $external = @($observed.external)
     if ($external.Count -ne 0) {
-        throw ("RUNTIME_STATE_EXTERNAL_HOLDER_ACTIVE:" +
-            (ConvertTo-RuntimeStateHolderDiagnostic -Holders $external))
+        $repair = Repair-ExplorerRuntimeStateHolders -StateTree $StateTree `
+            -ProcessPlan $ProcessPlan -InitialHolders $external
+        $inventory = $repair.inventory
+        $inventory | Add-Member -NotePropertyName explorer_repair -NotePropertyValue `
+            ([pscustomobject]@{
+                method = [string]$repair.method
+                closed_window_count = [int]$repair.closed_window_count
+                shell_restarted = [bool]$repair.shell_restarted
+            }) -Force
     }
     return $inventory
 }
@@ -9352,6 +9718,7 @@ function Invoke-RuntimeStateRootMigration {
                 initial_controlled_holder_count = @($initialInventory.holders).Count
                 final_holder_count = [int]$quiescence.holder_count
                 rename_capable = [bool]$quiescence.rename_capable
+                explorer_repair = $initialInventory.explorer_repair
                 recovered_revision = [string]$recovered.revision
                 watchdog_process_id = [int]$newWatchdog.process_id
             }
@@ -9433,6 +9800,7 @@ function Invoke-RuntimeStateRootMigration {
             migrated = [bool]$result.migrated
             runtime_state_root = $runtimeLocalRoot
             preserved_revision = $stableRevision
+            explorer_repair = $initialInventory.explorer_repair
             watchdog_process_id = [int]$newWatchdog.process_id
         }
     } catch {
