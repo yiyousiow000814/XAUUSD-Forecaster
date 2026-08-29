@@ -50,7 +50,7 @@ jobs:
         run: echo "No authoritative shard ownership matched this change."
       - name: Run bounded TLC shard
         if: matrix.id != 'no-modeled-impact'
-        run: python scripts/run_tla_model.py --shard "${{ matrix.id }}" --report "formal-results/${{ matrix.id }}.json"
+        run: python scripts/run_tla_model.py --shard "${{ matrix.id }}" --output ci
       - name: Upload bounded shard evidence
         if: always() && matrix.id != 'no-modeled-impact'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

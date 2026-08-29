@@ -48,7 +48,7 @@ ignored `.local/tools` directory and verifies SHA-256
 Run one authoritative shard:
 
 ```text
-python scripts/run_tla_model.py --shard cpu-evidence-safety --report .local/formal-results/cpu-evidence-safety.json
+python scripts/run_tla_model.py --shard cpu-evidence-safety --output local
 ```
 
 The JSON report records elapsed time, generated and distinct states, maximum

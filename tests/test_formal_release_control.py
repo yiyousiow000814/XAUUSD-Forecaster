@@ -100,6 +100,8 @@ def test_runner_pins_tool_and_emits_machine_readable_measurements() -> None:
     assert "eabd140a70f49eb9305a3bd3f3df944eddf87e5a90d329789085f8953a80533a" in runner
     assert '"-workers", "auto"' in runner
     assert '"-coverage"' not in runner
+    assert 'choices=("local", "ci")' in runner
+    assert 'add_argument("--report"' not in runner
     for field in ("elapsed_seconds", "generated_states", "distinct_states", "maximum_queue_depth", "properties"):
         assert field in runner
 

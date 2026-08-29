@@ -61,18 +61,21 @@ def _number(value: str) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--shard", required=True)
-    parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument("--output", choices=("local", "ci"), required=True)
     args = parser.parse_args()
     if shutil.which("java") is None:
         raise RuntimeError("JAVA_11_OR_NEWER_REQUIRED")
     shard = _load_shard(args.shard)
+    safe_shard_id = str(shard["id"])
     jar = _ensure_tools((ROOT / ".local" / "tools").resolve())
-    args.report.parent.mkdir(parents=True, exist_ok=True)
+    output_root = ROOT / (".local/formal-results" if args.output == "local" else "formal-results")
+    report_path = output_root / f"{safe_shard_id}.json"
+    output_root.mkdir(parents=True, exist_ok=True)
     generated = distinct = 0
     max_queue: int | None = None
     started = time.monotonic()
-    log_path = args.report.with_suffix(".log")
-    with tempfile.TemporaryDirectory(prefix=f"xauusd-tlc-{args.shard}-") as model_dir:
+    log_path = report_path.with_suffix(".log")
+    with tempfile.TemporaryDirectory(prefix=f"xauusd-tlc-{safe_shard_id}-") as model_dir:
         command = [
             "java", "-XX:+UseParallelGC", "-cp", str(jar), "tlc2.TLC",
             "-cleanup", "-noGenerateSpecTE", "-deadlock", "-workers", "auto",
@@ -96,14 +99,14 @@ def main() -> int:
                         max_queue = max(max_queue or 0, queued)
         return_code = process.wait()
     report = {
-        "shard": args.shard, "module": shard["module"], "config": shard["config"],
+        "shard": safe_shard_id, "module": shard["module"], "config": shard["config"],
         "kind": shard["kind"], "elapsed_seconds": round(time.monotonic() - started, 3),
         "generated_states": generated, "distinct_states": distinct,
         "maximum_queue_depth": max_queue,
         "result": "PASS" if return_code == 0 else "FAIL",
         "properties": shard["properties"],
     }
-    args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, sort_keys=True), flush=True)
     return return_code
 
