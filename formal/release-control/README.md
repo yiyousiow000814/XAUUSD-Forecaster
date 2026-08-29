@@ -64,7 +64,7 @@ The following actions and invariants generalize the observed failure classes:
 | Human Access evidence is missing or invalid | `RequireAccessReview`, valid/wrong-key/tampered/stale receipt states, exact-key `ApproveAccessReceipt`, and idempotent repeated approval; Switch still requires every gate |
 | Provider CPU evidence is delayed or incomplete | `AcceptCpuIndependentStages`, `BeginCpuEvidence`, `ProviderEvidenceArrives`, `TargetedCpuTopUp`, `ProviderEvidenceInsufficient`, and later recovery; pending evidence is not Candidate failure, accepted stages survive, and the evidence set only grows within a run |
 | CPU hard failure hidden by tolerance | `ProviderCpuHardFailure`, `QualifyCpuEvidence`, and `CpuHardFailureCannotQualify` |
-| Unrelated Git movement repeats CPU qualification | `ReuseCpuQualification`, `ChangeCpuArtifact`, and `ReusedCpuEvidenceMatchesArtifact`; exact artifact-key equality is required, and an artifact-key change revokes any already-passed release evidence |
+| Unrelated Git movement repeats CPU qualification | `ReuseCpuQualification`, `ChangeCpuArtifact`, and `ReusedCpuEvidenceMatchesArtifact`; the qualification key is chosen before validation, exact artifact-key equality is required, and a changed artifact cannot reuse the previous receipt |
 
 Scenario and implementation mappings live in
 [`docs/design/RELEASE_CONTROL_STATE_MACHINE.md`](../../docs/design/RELEASE_CONTROL_STATE_MACHINE.md).

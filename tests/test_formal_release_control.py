@@ -34,6 +34,18 @@ def test_formal_release_lifecycle_is_simplification_first() -> None:
     assert "InvalidAccessReceiptCannotPass" in model
     assert "AccessApprovalIsIdempotent" in model
     assert "accessRepeatObserved" in model
+    assert 'ChangeCpuArtifact ==\n    /\\ release.phase = "PREPARE"' in model
+    assert 'AcceptCpuIndependentStages ==\n    /\\ release.phase = "PREPARE"' in model
+    assert 'ReuseCpuQualification ==\n    /\\ release.phase = "VERIFY"' in model
+    assert 'BeginCpuEvidence ==\n    /\\ release.phase = "VERIFY"' in model
+    complete_prepare = model.split("CompletePrepare ==", 1)[1].split(
+        "PassEvidence", 1
+    )[0]
+    assert "cpu.independentStages = CpuIndependentStages" in complete_prepare
+    require_access = model.split("RequireAccessReview ==", 1)[1].split(
+        "RecordAccessReceipt", 1
+    )[0]
+    assert "cpu.qualified" in require_access
 
 
 def test_tlc_runner_and_ci_pin_one_verified_tool() -> None:

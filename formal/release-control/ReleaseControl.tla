@@ -275,6 +275,7 @@ RequireAccessReview ==
     /\ release.accessRequired
     /\ ~release.accessReview
     /\ release.gate = "UNTESTED"
+    /\ cpu.qualified
     /\ release' = [release EXCEPT !.accessReview = TRUE]
     /\ UNCHANGED <<health, install, news, syncOwners, path, cpu>>
 
@@ -467,8 +468,11 @@ RestorePreviousInstall ==
     /\ UNCHANGED <<release, health, news, syncOwners, path, cpu>>
 
 ChangeCpuArtifact ==
-    /\ release.phase \in {"PREPARE", "VERIFY"}
+    /\ release.phase = "PREPARE"
+    /\ ~release.migrationReady
     /\ cpu.artifactKey = "ARTIFACT_A"
+    /\ cpu.state = "NONE"
+    /\ cpu.independentStages = {}
     /\ release' = [release EXCEPT
         !.gate = "UNTESTED",
         !.accepted = FALSE]
@@ -484,14 +488,17 @@ ChangeCpuArtifact ==
     /\ UNCHANGED <<health, install, news, syncOwners, path>>
 
 AcceptCpuIndependentStages ==
-    /\ release.phase \in {"PREPARE", "VERIFY"}
+    /\ release.phase = "PREPARE"
+    /\ release.migrationReady
+    /\ release.gate = "UNTESTED"
     /\ cpu.state = "NONE"
     /\ cpu.independentStages = {}
     /\ cpu' = [cpu EXCEPT !.independentStages = CpuIndependentStages]
     /\ UNCHANGED <<release, health, install, news, syncOwners, path>>
 
 ReuseCpuQualification ==
-    /\ release.phase \in {"PREPARE", "VERIFY"}
+    /\ release.phase = "VERIFY"
+    /\ release.gate = "UNTESTED"
     /\ cpu.state = "NONE"
     /\ cpu.independentStages = CpuIndependentStages
     /\ cpu.receiptValid
@@ -503,13 +510,16 @@ ReuseCpuQualification ==
     /\ UNCHANGED <<release, health, install, news, syncOwners, path>>
 
 BeginCpuEvidence ==
-    /\ release.phase \in {"PREPARE", "VERIFY"}
+    /\ release.phase = "VERIFY"
+    /\ release.gate = "UNTESTED"
     /\ cpu.state = "NONE"
     /\ cpu.independentStages = CpuIndependentStages
     /\ cpu' = [cpu EXCEPT !.state = "PENDING"]
     /\ UNCHANGED <<release, health, install, news, syncOwners, path>>
 
 ProviderEvidenceArrives(sample) ==
+    /\ release.phase = "VERIFY"
+    /\ release.gate = "UNTESTED"
     /\ sample \in CpuSamples \ cpu.evidence
     /\ cpu.state \in {"PENDING", "INSUFFICIENT"}
     /\ ~cpu.hardFailure
@@ -519,6 +529,8 @@ ProviderEvidenceArrives(sample) ==
     /\ UNCHANGED <<release, health, install, news, syncOwners, path>>
 
 TargetedCpuTopUp ==
+    /\ release.phase = "VERIFY"
+    /\ release.gate = "UNTESTED"
     /\ cpu.state = "PENDING"
     /\ cpu.evidence # CpuSamples
     /\ cpu.topUps = 0
@@ -526,6 +538,8 @@ TargetedCpuTopUp ==
     /\ UNCHANGED <<release, health, install, news, syncOwners, path>>
 
 ProviderEvidenceInsufficient ==
+    /\ release.phase = "VERIFY"
+    /\ release.gate = "UNTESTED"
     /\ cpu.state = "PENDING"
     /\ cpu.evidence # CpuSamples
     /\ cpu.topUps = 1
@@ -533,6 +547,8 @@ ProviderEvidenceInsufficient ==
     /\ UNCHANGED <<release, health, install, news, syncOwners, path>>
 
 ProviderCpuHardFailure ==
+    /\ release.phase = "VERIFY"
+    /\ release.gate = "UNTESTED"
     /\ cpu.state \in {"PENDING", "INSUFFICIENT"}
     /\ ~cpu.hardFailure
     /\ cpu' = [cpu EXCEPT
@@ -542,6 +558,8 @@ ProviderCpuHardFailure ==
     /\ UNCHANGED <<release, health, install, news, syncOwners, path>>
 
 QualifyCpuEvidence ==
+    /\ release.phase = "VERIFY"
+    /\ release.gate = "UNTESTED"
     /\ cpu.state = "PENDING"
     /\ cpu.evidence = CpuSamples
     /\ ~cpu.hardFailure
@@ -555,6 +573,7 @@ QualifyCpuEvidence ==
 CompletePrepare ==
     /\ release.phase = "PREPARE"
     /\ release.migrationReady
+    /\ cpu.independentStages = CpuIndependentStages
     /\ install.step = "IDLE"
     /\ CurrentSupervisorCanMutate
     /\ release' = [release EXCEPT !.phase = "VERIFY"]
