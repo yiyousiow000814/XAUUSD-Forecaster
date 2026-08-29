@@ -469,6 +469,9 @@ RestorePreviousInstall ==
 ChangeCpuArtifact ==
     /\ release.phase \in {"PREPARE", "VERIFY"}
     /\ cpu.artifactKey = "ARTIFACT_A"
+    /\ release' = [release EXCEPT
+        !.gate = "UNTESTED",
+        !.accepted = FALSE]
     /\ cpu' = [cpu EXCEPT
         !.artifactKey = "ARTIFACT_B",
         !.state = "NONE",
@@ -478,7 +481,7 @@ ChangeCpuArtifact ==
         !.qualified = FALSE,
         !.reused = FALSE,
         !.independentStages = {}]
-    /\ UNCHANGED <<release, health, install, news, syncOwners, path>>
+    /\ UNCHANGED <<health, install, news, syncOwners, path>>
 
 AcceptCpuIndependentStages ==
     /\ release.phase \in {"PREPARE", "VERIFY"}
