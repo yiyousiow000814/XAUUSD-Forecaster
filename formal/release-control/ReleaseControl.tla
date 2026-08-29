@@ -938,6 +938,7 @@ CpuQualificationRequiredForPass == release.gate = "PASSED" => cpu.qualified
 ProviderPendingIsNotCandidateFailure ==
     (cpu.state \in {"PENDING", "INSUFFICIENT"} /\
      release.hardSafe /\ release.changedSafe /\ ~release.candidateRegression /\
+     release.accessReceiptState \notin {"WRONG_KEY", "TAMPERED", "STALE"} /\
      release.main = release.candidate /\ ExactCandidate) => release.gate # "FAILED"
 CpuRetryBudgetIsBounded == cpu.topUps <= 1
 CpuHardFailureCannotQualify == cpu.hardFailure => ~cpu.qualified
