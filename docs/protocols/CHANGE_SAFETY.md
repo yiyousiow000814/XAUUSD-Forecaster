@@ -40,6 +40,46 @@ The implementer's assumptions are not independent evidence. For large changes,
 use non-overlapping architecture, recovery, or final-evidence review when
 delegation is authorized and useful; do not duplicate broad scans.
 
+## Control-Proportional Assurance
+
+Required assurance is proportional to control. Classify each material evidence
+source before assigning it to a gate:
+
+- **Controlled exact:** the system owns production, identity, persistence, and
+  completeness. Required safety facts are deterministic, unexplained absence or
+  corruption fails closed, and receipts bind the exact transaction.
+- **External authoritative/eventual:** returned values are authoritative, but
+  delivery, propagation, ordering, pagination, sampling, or temporary
+  availability belongs to a provider. Declare required observed coverage,
+  uncertainty and tolerance budgets, maximum active wait, monotonic
+  accumulation, narrow retry, corroboration, and the terminal non-success state.
+- **External advisory:** useful diagnostic or corroborating evidence that cannot
+  become the sole safety authority or silently invent missing facts.
+
+Exact internal invariants stay exact. Tolerance for an external delivery channel
+does not weaken product thresholds, reduce required observed samples, conceal a
+hard failure, or pretend omitted evidence exists. Accepted external evidence is
+accumulated monotonically; later partial, reordered, or duplicated queries do
+not erase it, while conflicting identity or values fail closed.
+
+Retry only the deficient stage or family, preserve independent accepted stages,
+and persist budgets across restart. Reuse evidence only when a versioned key
+contains every input capable of changing the measured behavior; unrelated Git
+movement is not invalidation authority, while any behavior-affecting mismatch
+requires fresh evidence. Distinguish provider delay or unavailability from a
+system failure in state, UI, and audit history.
+
+Human intervention is reserved for an actual human-authority gate, a
+deterministic safety blocker, or ambiguity outside the declared external
+uncertainty budget. Routine provider delay, omission, or retry must not ask a
+person to certify machine evidence.
+
+The reusable escaped-blocker lesson is: do not make a best-effort or eventually
+consistent external telemetry channel the sole exact transaction ledger, and do
+not demand completeness stronger than its contract. Preserve exact internally
+controlled evidence and apply an explicit confidence model to external
+measurements.
+
 ## Pre-mortem
 
 - What failure appears only after all earlier gates pass?

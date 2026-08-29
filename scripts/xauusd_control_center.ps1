@@ -108,6 +108,8 @@ $bootstrapAcceptedCandidateRevision = "14c055a35040fa963700c988f770c9bb52fa669e"
 $convertFromJsonSupportsDateKind =
     (Get-Command ConvertFrom-Json).Parameters.ContainsKey("DateKind")
 
+. (Join-Path $PSScriptRoot "worker_cpu_evidence.ps1")
+
 function ConvertFrom-ReleaseControlJson {
     param(
         [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
@@ -2157,7 +2159,9 @@ function Get-WorkerCpuGateState {
 
 function Get-WorkerPlatformFailureReason {
     param([Parameter(Mandatory = $true)][object]$Evidence)
-    if ([int]$Evidence.invocations -ne [int]$Evidence.expected_invocations) {
+    $quotaPolicyEvidence = [bool]$Evidence.PSObject.Properties['qualification_state']
+    if (-not $quotaPolicyEvidence -and
+        [int]$Evidence.invocations -ne [int]$Evidence.expected_invocations) {
         return "WORKER_INVOCATION_COUNT_MISMATCH"
     }
     if ([int]$Evidence.responses_5xx -gt 0) { return "WORKER_5XX_OBSERVED" }
@@ -2165,7 +2169,8 @@ function Get-WorkerPlatformFailureReason {
         return "WORKER_PLATFORM_LIMIT_EXCEEDED"
     }
     if ([double]$Evidence.p99_cpu_ms -gt $workerCpuPassMaxMs -or
-        [double]$Evidence.max_cpu_ms -gt $workerCpuPassMaxMs) {
+        [double]$Evidence.max_cpu_ms -gt $workerCpuPassMaxMs -or
+        ($quotaPolicyEvidence -and [double]$Evidence.max_cpu_ms -ge 10)) {
         return "WORKER_CPU_HEADROOM_FAILED"
     }
     return "WORKER_PLATFORM_EVIDENCE_FAILED"
@@ -2362,7 +2367,7 @@ function ConvertTo-ReleaseTelemetryRecord {
 }
 
 function Get-ReleaseTelemetryDigest {
-    param([Parameter(Mandatory = $true)][object[]]$Records)
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Records)
     $lines = @($Records | Sort-Object event_id | ForEach-Object {
         @($_.event_id, $_.request_id, $_.worker_version_id, $_.validation_run,
             $_.validation_phase, $_.method, $_.path, $_.status, $_.outcome,
@@ -2419,153 +2424,144 @@ function Get-CandidateFrozenPlatformEvidence {
         [Parameter(Mandatory = $true)][string]$ValidationRun
     )
     $filters = @(Get-CandidateObservabilityFilters -Candidate $Candidate -ValidationRun $ValidationRun)
-    $expectedIds = @($ExpectedRequests | ForEach-Object { [string]$_.request_id } | Sort-Object)
-    if (@($expectedIds | Where-Object { -not $_ }).Count -gt 0 -or
+    $expectedIds = @($ExpectedRequests | Where-Object { [string]$_.phase -eq "acceptance" } |
+        ForEach-Object { [string]$_.request_id } | Sort-Object)
+    if ($expectedIds.Count -eq 0 -or @($expectedIds | Where-Object { -not $_ }).Count -gt 0 -or
         @($expectedIds | Select-Object -Unique).Count -ne $expectedIds.Count) {
-        $script:lastWorkersObservabilityDiagnostic = 'EXPECTED_REQUEST_UNIVERSE_INVALID'
+        $script:lastWorkersObservabilityDiagnostic = "EXPECTED_REQUEST_UNIVERSE_INVALID"
         return $null
     }
-    $stableDigest = ''
-    $stableEventIds = ''
-    $stableRequestIds = ''
-    $stableReads = 0
-    $records = @()
-    $frozenTo = $To
-    $frozen = $false
-    for ($attempt = 0; $attempt -lt 24; $attempt++) {
-        if (-not $frozen) { $frozenTo = [DateTimeOffset]::UtcNow }
+    $stored = Read-WorkerCpuRunArtifact -ValidationRun $ValidationRun -Name "provider-evidence.json"
+    $records = if ($stored) { @($stored.records) } else { @() }
+    $recovery = if ($stored -and $stored.recovery) { $stored.recovery } else {
+        [pscustomobject]@{ active_reads=0; background_reads=0; deficit_top_ups=0; headroom_top_ups=0 }
+    }
+    $policy = Get-WorkerCpuEvidencePolicy
+    $decision = $null
+    $aggregate = $null
+    $delays = @()
+    $activeBackoff = @($policy.active_read_backoff_seconds)
+    if ([int]$recovery.active_reads -lt $activeBackoff.Count) {
+        $firstActiveRead = [int]$recovery.active_reads
+        $delays = @($activeBackoff[$firstActiveRead..($activeBackoff.Count - 1)])
+    } else {
+        $lastRead = ConvertTo-ReleaseTimestampUtc -Value ([string]$recovery.last_read_at)
+        $backgroundDue = $lastRead -eq [DateTimeOffset]::MinValue -or
+            ([DateTimeOffset]::UtcNow - $lastRead).TotalSeconds -ge
+                [int]$policy.background_read_interval_seconds
+        if ([int]$recovery.background_reads -lt [int]$policy.maximum_background_reads -and $backgroundDue) {
+            $delays = @(0)
+        }
+    }
+    foreach ($delay in $delays) {
+        if ([int]$delay -gt 0) { Start-Sleep -Seconds ([int]$delay) }
         $events = @()
-        $offset = ''
-        $pageComplete = $false
+        $offset = ""
+        $page = $null
         for ($pageNumber = 0; $pageNumber -lt 20; $pageNumber++) {
-            $page = Invoke-WorkersObservabilityEventsQuery -Filters $filters `
-                -From $From -To $frozenTo -Offset $offset
-            if ($null -eq $page) { return $null }
-            $pageRecords = @($page.records)
-            $events += $pageRecords
-            if ($events.Count -ge [int]$page.total_count) {
-                $pageComplete = $true
-                break
-            }
+            $page = Invoke-WorkersObservabilityEventsQuery -Filters $filters -From $From -To $To -Offset $offset
+            if ($null -eq $page) { break }
+            $events += @($page.records)
+            if ($events.Count -ge [int]$page.total_count) { $offset = ""; break }
             if (-not $page.next_offset) {
-                $script:lastWorkersObservabilityDiagnostic = 'OBSERVABILITY_EVENT_CURSOR_INVALID'
+                $script:lastWorkersObservabilityDiagnostic = "OBSERVABILITY_EVENT_CURSOR_INVALID"
                 return $null
             }
             $offset = [string]$page.next_offset
         }
-        if (-not $pageComplete) {
-            $script:lastWorkersObservabilityDiagnostic = 'OBSERVABILITY_EVENT_PAGE_BOUND_EXCEEDED'
+        if ($offset) {
+            $script:lastWorkersObservabilityDiagnostic = "OBSERVABILITY_EVENT_PAGE_BOUND_EXCEEDED"
             return $null
         }
-        $candidateRecords = @($events)
-        $actualIds = @($candidateRecords | ForEach-Object { $_.request_id } | Sort-Object)
-        $eventIds = @($candidateRecords | ForEach-Object { $_.event_id })
-        $identityValid = @($candidateRecords | Where-Object {
-            $_.worker_version_id -ne [string]$Candidate.worker_version_id -or
-            $_.validation_run -ne $ValidationRun -or $_.validation_phase -ne 'acceptance' -or
-            $_.event_type -ne 'cf-worker-event'
-        }).Count -eq 0
-        $complete = $identityValid -and $actualIds.Count -eq $expectedIds.Count -and
-            @($actualIds | Select-Object -Unique).Count -eq $actualIds.Count -and
-            @($eventIds | Select-Object -Unique).Count -eq $eventIds.Count -and
-            (($actualIds -join "`n") -ceq ($expectedIds -join "`n"))
-        if ($complete) {
-            $frozen = $true
-            $digest = Get-ReleaseTelemetryDigest -Records $candidateRecords
-            $eventIdSet = @($eventIds | Sort-Object) -join "`n"
-            $requestIdSet = $actualIds -join "`n"
-            if ($digest -eq $stableDigest -and $eventIdSet -ceq $stableEventIds -and
-                $requestIdSet -ceq $stableRequestIds) {
-                $stableReads++
-            } else {
-                $stableDigest = $digest
-                $stableEventIds = $eventIdSet
-                $stableRequestIds = $requestIdSet
-                $stableReads = 1
+        $providerReadSucceeded = $null -ne $page
+        if ($providerReadSucceeded) {
+            try {
+                $records = @(Merge-WorkerCpuProviderEvidence -AcceptedRecords $records -NewRecords $events `
+                    -ExpectedRequests $ExpectedRequests -CandidateWorkerVersion ([string]$Candidate.worker_version_id) `
+                    -ValidationRun $ValidationRun)
+            } catch {
+                $script:lastWorkersObservabilityDiagnostic = [string]$_.Exception.Message
+                throw
             }
-            if ($stableReads -ge 2) { $records = $candidateRecords; break }
-        } else {
-            $stableDigest = ''
-            $stableEventIds = ''
-            $stableRequestIds = ''
-            $stableReads = 0
         }
-        if ($attempt -lt 23) { Start-Sleep -Seconds 10 }
+        if ([int]$recovery.active_reads -lt $activeBackoff.Count) {
+            $recovery.active_reads = [int]$recovery.active_reads + 1
+        } else {
+            $recovery.background_reads = [int]$recovery.background_reads + 1
+        }
+        $recovery | Add-Member -NotePropertyName last_read_at `
+            -NotePropertyValue ([DateTimeOffset]::UtcNow.ToString("o")) -Force
+        $stored = Write-WorkerCpuProviderEvidence -ValidationRun $ValidationRun `
+            -Records @($records) -RecoveryState $recovery
+        if ($providerReadSucceeded) {
+            $count = Get-CandidateInvocationCount -Candidate $Candidate -From $From -To $To -ValidationRun $ValidationRun
+            if ($null -ne $count) {
+                $aggregate = [pscustomobject]@{
+                    source="CLOUDFLARE_WORKERS_OBSERVABILITY_CALCULATIONS"
+                    evidence_class="EXTERNAL_ADVISORY"
+                    invocations=[int]$count
+                }
+            }
+        }
+        $decision = Get-WorkerCpuQualificationDecision -ExpectedRequests $ExpectedRequests `
+            -ProviderRecords $records -DirectResponsesComplete $true -AggregateEvidence $aggregate
+        if ([string]$decision.state -notin @("PROVIDER_EVIDENCE_PENDING")) { break }
     }
-    if ($records.Count -ne $expectedIds.Count) {
-        $script:lastWorkersObservabilityDiagnostic = 'OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING'
+    if (-not $decision -or [string]$decision.state -eq "PROVIDER_EVIDENCE_PENDING") {
+        $decision = Get-WorkerCpuQualificationDecision -ExpectedRequests $ExpectedRequests `
+            -ProviderRecords $records -DirectResponsesComplete $true `
+            -RecoveryBudgetExhausted ([bool]([int]$recovery.background_reads -ge
+                [int]$policy.maximum_background_reads))
+    }
+    if ([string]$decision.state -in @("PROVIDER_EVIDENCE_PENDING", "PROVIDER_EVIDENCE_INSUFFICIENT")) {
+        $script:lastWorkersObservabilityDiagnostic = [string]$decision.state
         return $null
     }
-    $expectedById = @{}
-    foreach ($expected in $ExpectedRequests) { $expectedById[[string]$expected.request_id] = $expected }
-    $families = @()
-    foreach ($group in @($records | Group-Object { [string]$expectedById[$_.request_id].family })) {
-        $familyExpected = @($ExpectedRequests | Where-Object { [string]$_.family -eq $group.Name }).Count
-        $families += Get-ReleaseTelemetryMetrics -Records @($group.Group) `
-            -RouteFamily $group.Name -ExpectedInvocations $familyExpected
+    $global = $decision.global
+    $gateState = switch ([string]$decision.state) {
+        "QUALIFIED" { "PASSED" }
+        "QUALIFIED_WITH_PROVIDER_OMISSION" { "PASSED" }
+        "HEADROOM_REVIEW" { "REVIEW_REQUIRED" }
+        default { "FAILED" }
     }
-    $familyReconciliation = @($ExpectedRequests | Group-Object { [string]$_.family } |
-        ForEach-Object {
-            $name = [string]$_.Name
-            $expectedCount = $_.Count
-            $actualCount = @($records | Where-Object {
-                [string]$expectedById[$_.request_id].family -eq $name
-            }).Count
-            [pscustomobject]@{
-                family = $name; expected = $expectedCount; actual = $actualCount
-                matched = [bool]($expectedCount -eq $actualCount)
-            }
-        })
-    $scenarioReconciliation = @($ExpectedRequests | Group-Object {
-            "{0}|{1}" -f [string]$_.family, [string]$_.scenario
-        } | ForEach-Object {
-            $family = [string]$_.Group[0].family
-            $scenario = [string]$_.Group[0].scenario
-            $expectedCount = $_.Count
-            $actualCount = @($records | Where-Object {
-                $row = $expectedById[$_.request_id]
-                [string]$row.family -eq $family -and [string]$row.scenario -eq $scenario
-            }).Count
-            [pscustomobject]@{
-                family = $family; scenario = $scenario
-                expected = $expectedCount; actual = $actualCount
-                matched = [bool]($expectedCount -eq $actualCount)
-            }
-        })
-    $global = Get-ReleaseTelemetryMetrics -Records $records -RouteFamily 'GLOBAL' `
-        -ExpectedInvocations $expectedIds.Count
-    $failed = @($families | Where-Object { $_.gate_state -eq 'FAILED' }).Count -gt 0
-    $review = @($families | Where-Object { $_.gate_state -eq 'REVIEW_REQUIRED' }).Count -gt 0
-    $gateState = if ($failed -or $global.gate_state -eq 'FAILED') { 'FAILED' }
-        elseif ($review -or $global.gate_state -eq 'REVIEW_REQUIRED') { 'REVIEW_REQUIRED' }
-        else { 'PASSED' }
     return [pscustomobject]@{
-        source = 'CLOUDFLARE_WORKERS_OBSERVABILITY_NORMALIZED_EVENTS'
+        source = "CLOUDFLARE_WORKERS_OBSERVABILITY_MONOTONIC_EVENTS"
+        evidence_class = "EXTERNAL_AUTHORITATIVE_EVENTUAL"
+        qualification_state = [string]$decision.state
         credential_source = [string]$script:lastWorkersObservabilityCredentialSource
         worker_version_id = [string]$Candidate.worker_version_id
         validation_run = $ValidationRun
-        frozen_from = $From.ToString('o')
-        frozen_to = $frozenTo.ToString('o')
-        universe_digest = $stableDigest
-        stable_reads = $stableReads
+        frozen_from = $From.ToString("o")
+        frozen_to = $To.ToString("o")
+        universe_digest = Get-ReleaseTelemetryDigest -Records $records
         expected_invocations = $expectedIds.Count
         invocations = $records.Count
         expected_requests = @($ExpectedRequests)
-        request_reconciliation = [pscustomobject]@{ expected=$expectedIds.Count; actual=$records.Count; matched=$true }
-        family_reconciliation = $familyReconciliation
-        scenario_reconciliation = $scenarioReconciliation
+        missing_request_ids = @($decision.missing_request_ids)
+        family_reconciliation = @($decision.groups)
+        scenario_reconciliation = @($decision.groups)
         global = $global
-        routes = $families
+        routes = @($decision.groups | ForEach-Object {
+            $metric = $_.metrics
+            [pscustomobject]@{
+                route_family=$_.family; scenario=$_.scenario; invocations=$_.observed
+                sent=$_.sent; required=$_.required; reserve=$_.reserve; missing=$_.missing
+                p95_cpu_ms=$metric.p95_cpu_ms; p99_cpu_ms=$metric.p99_cpu_ms
+                max_cpu_ms=$metric.max_cpu_ms; responses_5xx=$metric.responses_5xx
+                responses_1102=$metric.responses_1102; exceeded_cpu=$metric.exceeded_cpu
+                exceeded_memory=$metric.exceeded_memory
+            }
+        })
+        provider_corroboration = $aggregate
         max_cpu_ms = $global.max_cpu_ms
         p95_cpu_ms = $global.p95_cpu_ms
         p99_cpu_ms = $global.p99_cpu_ms
-        max_wall_ms = $global.max_wall_ms
         exceeded_cpu = $global.exceeded_cpu
         exceeded_memory = $global.exceeded_memory
         responses_1102 = $global.responses_1102
         responses_5xx = $global.responses_5xx
         gate_state = $gateState
-        passed = [bool]($gateState -eq 'PASSED')
+        passed = [bool]($gateState -eq "PASSED")
     }
 }
 
@@ -2587,8 +2583,11 @@ function Get-WorkerValidationManifest {
         $raw = Get-Content -LiteralPath $path -Raw -Encoding UTF8
     }
     $manifest = $raw | ConvertFrom-ReleaseControlJson
-    if ([int]$manifest.schema_version -ne 3 -or @($manifest.routes).Count -eq 0 -or
-        -not $manifest.fixture_builder) {
+    $cpuPolicy = Get-WorkerCpuEvidencePolicy
+    if ([int]$manifest.schema_version -ne 4 -or @($manifest.routes).Count -eq 0 -or
+        -not $manifest.fixture_builder -or -not $manifest.cpu_evidence_policy -or
+        (Get-WorkerCpuCanonicalDigest -Value $manifest.cpu_evidence_policy) -ne
+            (Get-WorkerCpuCanonicalDigest -Value $cpuPolicy)) {
         throw "WORKER_ROUTE_VALIDATION_MANIFEST_INVALID"
     }
     $staticPaths = @($manifest.static_assets | ForEach-Object { [string]$_.path })
@@ -2637,7 +2636,7 @@ function Test-ValidationRouteOwnedByChange {
 }
 
 function Get-CandidateRouteValidationPlan {
-    param([string[]]$ChangedFiles, [string]$Revision = "")
+    param([string[]]$ChangedFiles, [string]$Revision = "", [switch]$AllCpuRoutes)
     $manifest = Get-WorkerValidationManifest -Revision $Revision
     $manifestChanged = "web/worker-validation-manifest.json" -in $ChangedFiles
     $fixtureBuilderChanged = @($ChangedFiles | Where-Object {
@@ -2651,11 +2650,11 @@ function Get-CandidateRouteValidationPlan {
         }).Count -gt 0
     }).Count -gt 0
     $selectedRoutes = @($manifest.routes | Where-Object {
-        [bool]$_.cpu_required -and (
+        [bool]$_.cpu_required -and ($AllCpuRoutes -or (
             $manifestChanged -or $fixtureBuilderChanged -or
             (Test-ValidationRouteOwnedByChange -Route $_ -ChangedFiles $ChangedFiles) -or
             ($workerCodeChanged -and [bool]$_.baseline)
-        )
+        ))
     })
     $selected = @()
     foreach ($route in $selectedRoutes) {
@@ -2682,6 +2681,7 @@ function Get-CandidateRouteValidationPlan {
     }).Count -gt 0
     [pscustomobject]@{
         manifest_schema_version = [int]$manifest.schema_version
+        cpu_evidence_policy = $manifest.cpu_evidence_policy
         static_assets = @($manifest.static_assets)
         worker_reads = @($selected | Where-Object { [string]$_.boundary -eq "WORKER_READ" })
         worker_writes = @($selected | Where-Object { [string]$_.boundary -eq "WORKER_WRITE" })
@@ -2963,9 +2963,10 @@ function Invoke-CandidateRouteSample {
         [Parameter(Mandatory = $true)][string]$ValidationRun,
         [Parameter(Mandatory = $true)][string]$FixtureRoot,
         [string]$IngestToken = "",
-        [ValidateSet("warmup", "acceptance")][string]$ValidationPhase = "acceptance"
+        [ValidateSet("warmup", "acceptance")][string]$ValidationPhase = "acceptance",
+        [string]$RequestId = ""
     )
-    $requestId = [guid]::NewGuid().ToString()
+    $requestId = if ($RequestId) { $RequestId } else { [guid]::NewGuid().ToString() }
     $headers = @{} + $VersionHeaders
     $headers["X-Aurum-Validation-Run"] = $ValidationRun
     $headers["X-Aurum-Validation-Phase"] = $ValidationPhase
@@ -3031,6 +3032,10 @@ function Invoke-CandidateRouteSample {
             failure_stage=[string]$response.Headers["X-Aurum-Failure-Stage"]
             server_timing=[string]$response.Headers["Server-Timing"]
             validation_run=$ValidationRun
+            response_content_digest=Get-WorkerCpuCanonicalDigest -Value ([string]$response.Content)
+            mutated=if ($payload -and $null -ne $payload.PSObject.Properties['mutated']) {
+                [bool]$payload.mutated
+            } else { $false }
         }
     } catch {
         $errorResponse = $_.Exception.Response
@@ -3056,8 +3061,90 @@ function Invoke-CandidateRouteSample {
             failure_stage=if ($errorResponse) { [string]$errorResponse.Headers["X-Aurum-Failure-Stage"] } else { "request" }
             server_timing=if ($errorResponse) { [string]$errorResponse.Headers["Server-Timing"] } else { "" }
             validation_run=$ValidationRun
+            response_content_digest=if ($_.ErrorDetails.Message) {
+                Get-WorkerCpuCanonicalDigest -Value ([string]$_.ErrorDetails.Message)
+            } else { "" }
         }
     }
+}
+
+function Invoke-CandidateTargetedCpuSamples {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$RoutePlan,
+        [Parameter(Mandatory = $true)][object]$RequestPlan,
+        [Parameter(Mandatory = $true)][object[]]$Groups,
+        [ValidateSet("deficit_top_up", "headroom_top_up")]
+        [Parameter(Mandatory = $true)][string]$SampleKind,
+        [Parameter(Mandatory = $true)][int]$CountPerGroup,
+        [Parameter(Mandatory = $true)][string]$FixtureRoot,
+        [string]$IngestToken = ""
+    )
+    $routes = @($RoutePlan.worker_reads) + @($RoutePlan.worker_writes)
+    $planned = @(Add-WorkerCpuPlannedRequests -Plan $RequestPlan -Groups $Groups `
+        -SampleKind $SampleKind -CountPerGroup $CountPerGroup)
+    $headers = @{
+        "Cloudflare-Workers-Version-Overrides" =
+            "$workerName=`"$([string]$Candidate.worker_version_id)`""
+    }
+    $responses = @()
+    foreach ($request in $planned) {
+        $route = @($routes | Where-Object {
+            [string]$_.family -eq [string]$request.family -and
+            [string]$_.scenario -eq [string]$request.scenario
+        }) | Select-Object -First 1
+        if (-not $route) { throw "WORKER_CPU_TARGETED_ROUTE_UNAVAILABLE" }
+        $null = Add-WorkerCpuRequestSend -ValidationRun ([string]$RequestPlan.validation_run) `
+            -Request $request -CandidateWorkerVersion ([string]$Candidate.worker_version_id) `
+            -QualificationKey ([string]$RequestPlan.qualification_key)
+        $sample = Invoke-CandidateRouteSample -Route $route -VersionHeaders $headers `
+            -ValidationRun ([string]$RequestPlan.validation_run) -FixtureRoot $FixtureRoot `
+            -IngestToken $IngestToken -ValidationPhase "acceptance" `
+            -RequestId ([string]$request.request_id)
+        $receipt = Add-WorkerCpuDirectResponse -ValidationRun ([string]$RequestPlan.validation_run) `
+            -Request $request -Response $sample
+        $responses += $receipt
+        if (-not $sample.passed) { throw "TARGETED_DIRECTED_WORKER_VALIDATION_FAILED" }
+    }
+    return [pscustomobject]@{ requests=$planned; responses=$responses; completed_at=[DateTimeOffset]::UtcNow }
+}
+
+function Write-CandidateCpuInFlightState {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$RoutePlan,
+        [Parameter(Mandatory = $true)][object]$RequestPlan,
+        [Parameter(Mandatory = $true)][object]$Qualification,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$WindowFrom
+    )
+    $state = Get-ReleaseControlState
+    if (-not $state -or -not $state.candidate -or
+        [string]$state.candidate.validation_key -ne [string]$Candidate.validation_key -or
+        [string]$state.candidate.worker_version_id -ne [string]$Candidate.worker_version_id) {
+        throw "WORKER_CPU_IN_FLIGHT_CANDIDATE_MISMATCH"
+    }
+    $state.candidate.validation_state = "PLATFORM_PENDING"
+    $state.candidate.validation = [pscustomobject]@{
+        key=[string]$Candidate.validation_key; repository="PASSED"; windows="PASSED"
+        cloudflare="PENDING"; reason="WORKER_CPU_DIRECTED_LEDGER_IN_PROGRESS"
+        observability_diagnostic="PROVIDER_EVIDENCE_PENDING"
+        validation_run=[string]$RequestPlan.validation_run
+        telemetry_window_from=$WindowFrom.ToString("o")
+        telemetry_window_to=$WindowFrom.ToString("o")
+        expected_worker_invocations=@($RequestPlan.requests | Where-Object { $_.phase -eq "acceptance" }).Count
+        expected_requests=@($RequestPlan.requests | Where-Object { $_.phase -eq "acceptance" })
+        routes=@(@($RoutePlan.worker_reads) + @($RoutePlan.worker_writes))
+        cpu_route_plan=$RoutePlan; worker_qualification=$Qualification
+        directed_request_ledger=[pscustomobject]@{
+            evidence_class="CONTROLLED_EXACT"; request_universe_digest=[string]$RequestPlan.request_universe_digest
+            planned=@($RequestPlan.requests).Count; completed=0; passed=0
+        }
+        cpu_qualification_mode=$null
+        tested_at=[DateTimeOffset]::UtcNow.ToString("o")
+    }
+    Write-ReleaseControlState -State $state
+    Write-ReleaseHistory -Event "WORKER_CPU_DIRECTED_LEDGER_FROZEN" -Release $state.candidate `
+        -Detail @{ validation_run=[string]$RequestPlan.validation_run; qualification_key=[string]$Qualification.key; planned=@($RequestPlan.requests).Count }
 }
 
 function Invoke-CandidateWorkerValidation {
@@ -3121,19 +3208,56 @@ function Invoke-CandidateWorkerValidation {
     }
     $workspace = $null
     $validationRun = [guid]::NewGuid().ToString()
+    $qualification = $null
+    $reusedQualificationReceipt = $null
+    $requestPlan = $null
+    $directResponses = @()
     $ingestToken = [Environment]::GetEnvironmentVariable("CLOUDFLARE_INGEST_TOKEN", "User")
     try {
         if (@($RoutePlan.worker_writes).Count -gt 0) {
             $workspace = New-CandidateValidationFixtureWorkspace -Candidate $Candidate
         }
         $fixtureRoot = if ($workspace) { [string]$workspace.fixture_root } else { "" }
+        $fixtureDigestSet = if ($fixtureRoot) {
+            @(Get-WorkerCpuFixtureDigestSet -FixtureRoot $fixtureRoot)
+        } else { @() }
+        $qualification = Get-WorkerCpuQualificationIdentity -Candidate $Candidate `
+            -RoutePlan $RoutePlan -FixtureDigestSet $fixtureDigestSet
+        $reusedQualificationReceipt = Get-WorkerCpuQualificationReceipt `
+            -QualificationKey ([string]$qualification.key)
+        $planArguments = @{
+            Routes=$workerRoutes; ValidationRun=$validationRun
+            CandidateWorkerVersion=[string]$Candidate.worker_version_id
+            QualificationKey=[string]$qualification.key
+            ValidationPlanDigest=(Get-WorkerCpuValidationPlanDigest -RoutePlan $RoutePlan)
+            FixtureDigestSet=$fixtureDigestSet
+        }
+        $requestPlan = if ($reusedQualificationReceipt) {
+            New-WorkerDirectedCorrectnessPlan @planArguments
+        } else {
+            New-WorkerCpuRequestPlan @planArguments
+        }
+        $workerStartedAt = [DateTimeOffset]::UtcNow
+        Write-CandidateCpuInFlightState -Candidate $Candidate -RoutePlan $RoutePlan `
+            -RequestPlan $requestPlan -Qualification $qualification -WindowFrom $workerStartedAt
         foreach ($route in $workerRoutes) {
             $warmups = @()
-            for ($index = 0; $index -lt [int]$route.warmup_samples; $index++) {
-                $warmups += Invoke-CandidateRouteSample -Route $route `
+            $plannedWarmups = @($requestPlan.requests | Where-Object {
+                [string]$_.family -eq [string]$route.family -and
+                [string]$_.scenario -eq [string]$route.scenario -and
+                [string]$_.phase -eq "warmup"
+            })
+            foreach ($planned in $plannedWarmups) {
+                $null = Add-WorkerCpuRequestSend -ValidationRun $validationRun -Request $planned `
+                    -CandidateWorkerVersion ([string]$Candidate.worker_version_id) `
+                    -QualificationKey ([string]$qualification.key)
+                $sample = Invoke-CandidateRouteSample -Route $route `
                     -VersionHeaders $header -ValidationRun $validationRun `
                     -FixtureRoot $fixtureRoot -IngestToken $ingestToken `
-                    -ValidationPhase "warmup"
+                    -ValidationPhase "warmup" -RequestId ([string]$planned.request_id)
+                $warmups += $sample
+                $directResponses += Add-WorkerCpuDirectResponse -ValidationRun $validationRun `
+                    -Request $planned -Response $sample
             }
             if (@($warmups | Where-Object { -not $_.passed }).Count -gt 0) {
                 $firstWarmupFailure = @($warmups | Where-Object { -not $_.passed })[0]
@@ -3146,14 +3270,24 @@ function Invoke-CandidateWorkerValidation {
                 }
             }
         }
-        $workerStartedAt = [DateTimeOffset]::UtcNow
         foreach ($route in $workerRoutes) {
             $samples = @()
-            for ($index = 0; $index -lt [int]$route.acceptance_samples; $index++) {
-                $samples += Invoke-CandidateRouteSample -Route $route `
+            $plannedAcceptance = @($requestPlan.requests | Where-Object {
+                [string]$_.family -eq [string]$route.family -and
+                [string]$_.scenario -eq [string]$route.scenario -and
+                [string]$_.phase -eq "acceptance"
+            })
+            foreach ($planned in $plannedAcceptance) {
+                $null = Add-WorkerCpuRequestSend -ValidationRun $validationRun -Request $planned `
+                    -CandidateWorkerVersion ([string]$Candidate.worker_version_id) `
+                    -QualificationKey ([string]$qualification.key)
+                $sample = Invoke-CandidateRouteSample -Route $route `
                     -VersionHeaders $header -ValidationRun $validationRun `
                     -FixtureRoot $fixtureRoot -IngestToken $ingestToken `
-                    -ValidationPhase "acceptance"
+                    -ValidationPhase "acceptance" -RequestId ([string]$planned.request_id)
+                $samples += $sample
+                $directResponses += Add-WorkerCpuDirectResponse -ValidationRun $validationRun `
+                    -Request $planned -Response $sample
             }
             $failures = @($samples | Where-Object { -not $_.passed })
             $sampleReason = if ($failures.Count) {
@@ -3177,34 +3311,98 @@ function Invoke-CandidateWorkerValidation {
         $workerEndedAt = [DateTimeOffset]::UtcNow
         $platform = $null
         if (@($results | Where-Object { -not $_.passed }).Count -eq 0) {
-            $expectedInvocations = [int](($workerRoutes |
-                Measure-Object -Property acceptance_samples -Sum).Sum)
-            $expectedRequests = @($results | Where-Object {
-                $_.boundary -in @('WORKER_READ', 'WORKER_WRITE') -and $_.request_ids
-            } | ForEach-Object {
-                $result = $_
-                @($result.request_ids | ForEach-Object {
-                    [pscustomobject]@{
-                        request_id = [string]$_
-                        family = [string]$result.family
-                        scenario = [string]$result.scenario
-                        method = [string]$result.method
-                        path = [string]$result.route
-                    }
-                })
-            })
-            Start-Sleep -Seconds 8
-            $platform = Get-CandidateFrozenPlatformEvidence -Candidate $Candidate `
-                -From $workerStartedAt -To ([DateTimeOffset]::UtcNow) `
-                -ExpectedRequests $expectedRequests -ValidationRun $validationRun
+            $expectedRequests = @($requestPlan.requests | Where-Object { [string]$_.phase -eq "acceptance" })
+            $expectedInvocations = $expectedRequests.Count
+            if ($reusedQualificationReceipt) {
+                $platform = New-ReusedWorkerCpuEvidence -Receipt $reusedQualificationReceipt `
+                    -Candidate $Candidate -Qualification $qualification
+                Add-WorkerCpuLedgerEvent -ValidationRun $validationRun `
+                    -Event "CPU_QUALIFICATION_REUSED" -Detail ([pscustomobject]@{
+                        qualification_key=[string]$qualification.key
+                        receipt_digest=[string]$reusedQualificationReceipt.receipt_digest
+                        current_worker_version=[string]$Candidate.worker_version_id
+                        current_git_sha=[string]$Candidate.git_sha
+                    })
+            } else {
+                Start-Sleep -Seconds 8
+                $platform = Get-CandidateFrozenPlatformEvidence -Candidate $Candidate `
+                    -From $workerStartedAt -To $workerEndedAt `
+                    -ExpectedRequests $expectedRequests -ValidationRun $validationRun
+            }
+            if (-not $reusedQualificationReceipt -and -not $platform -and
+                [string]$script:lastWorkersObservabilityDiagnostic -eq "PROVIDER_EVIDENCE_PENDING") {
+                $storedEvidence = Read-WorkerCpuRunArtifact -ValidationRun $validationRun `
+                    -Name "provider-evidence.json"
+                $deficitDecision = Get-WorkerCpuQualificationDecision `
+                    -ExpectedRequests $expectedRequests -ProviderRecords @($storedEvidence.records) `
+                    -DirectResponsesComplete $true
+                if ([string]$deficitDecision.state -eq "PROVIDER_EVIDENCE_PENDING" -and
+                    @($storedEvidence.records).Count -gt 0 -and
+                    @($deficitDecision.deficient_groups).Count -eq 1 -and
+                    [int]$storedEvidence.recovery.deficit_top_ups -lt 1) {
+                    $topUp = Invoke-CandidateTargetedCpuSamples -Candidate $Candidate `
+                        -RoutePlan $RoutePlan -RequestPlan $requestPlan `
+                        -Groups @($deficitDecision.deficient_groups) -SampleKind "deficit_top_up" `
+                        -CountPerGroup 4 -FixtureRoot $fixtureRoot -IngestToken $ingestToken
+                    $expectedRequests = @($requestPlan.requests | Where-Object { [string]$_.phase -eq "acceptance" })
+                    $directResponses += @($topUp.responses)
+                    $workerEndedAt = $topUp.completed_at
+                    $storedEvidence.recovery.active_reads = 0
+                    $storedEvidence.recovery.deficit_top_ups = [int]$storedEvidence.recovery.deficit_top_ups + 1
+                    $null = Write-WorkerCpuProviderEvidence -ValidationRun $validationRun `
+                        -Records @($storedEvidence.records) -RecoveryState $storedEvidence.recovery
+                    $platform = Get-CandidateFrozenPlatformEvidence -Candidate $Candidate `
+                        -From $workerStartedAt -To $workerEndedAt -ExpectedRequests $expectedRequests `
+                        -ValidationRun $validationRun
+                }
+            }
+            if (-not $reusedQualificationReceipt -and $platform -and
+                [string]$platform.gate_state -eq "REVIEW_REQUIRED") {
+                $storedEvidence = Read-WorkerCpuRunArtifact -ValidationRun $validationRun `
+                    -Name "provider-evidence.json"
+                $reviewDecision = Get-WorkerCpuQualificationDecision `
+                    -ExpectedRequests $expectedRequests -ProviderRecords @($storedEvidence.records) `
+                    -DirectResponsesComplete $true -AggregateEvidence $platform.provider_corroboration
+                if ([string]$reviewDecision.state -eq "HEADROOM_REVIEW" -and
+                    @($reviewDecision.review_groups).Count -eq 1 -and
+                    [int]$storedEvidence.recovery.headroom_top_ups -lt 1) {
+                    $topUp = Invoke-CandidateTargetedCpuSamples -Candidate $Candidate `
+                        -RoutePlan $RoutePlan -RequestPlan $requestPlan `
+                        -Groups @($reviewDecision.review_groups) -SampleKind "headroom_top_up" `
+                        -CountPerGroup 10 -FixtureRoot $fixtureRoot -IngestToken $ingestToken
+                    $expectedRequests = @($requestPlan.requests | Where-Object { [string]$_.phase -eq "acceptance" })
+                    $directResponses += @($topUp.responses)
+                    $workerEndedAt = $topUp.completed_at
+                    $storedEvidence.recovery.active_reads = 0
+                    $storedEvidence.recovery.headroom_top_ups = [int]$storedEvidence.recovery.headroom_top_ups + 1
+                    $null = Write-WorkerCpuProviderEvidence -ValidationRun $validationRun `
+                        -Records @($storedEvidence.records) -RecoveryState $storedEvidence.recovery
+                    $platform = Get-CandidateFrozenPlatformEvidence -Candidate $Candidate `
+                        -From $workerStartedAt -To $workerEndedAt -ExpectedRequests $expectedRequests `
+                        -ValidationRun $validationRun
+                }
+            }
+            if ($platform -and $platform.passed -and -not $reusedQualificationReceipt) {
+                $decision = Get-WorkerCpuQualificationDecision -ExpectedRequests $expectedRequests `
+                    -ProviderRecords @((Read-WorkerCpuRunArtifact -ValidationRun $validationRun `
+                        -Name "provider-evidence.json").records) -DirectResponsesComplete $true `
+                    -AggregateEvidence $platform.provider_corroboration
+                $receipt = Write-WorkerCpuQualificationReceipt -Qualification $qualification `
+                    -ValidationRun $validationRun -Decision $decision
+                $platform | Add-Member -NotePropertyName qualification_receipt_digest `
+                    -NotePropertyValue ([string]$receipt.receipt_digest) -Force
+                $platform | Add-Member -NotePropertyName qualification_mode `
+                    -NotePropertyValue "CPU_QUALIFICATION_FRESH" -Force
+                $platform | Add-Member -NotePropertyName qualification_key `
+                    -NotePropertyValue ([string]$qualification.key) -Force
+            }
         } else {
             $platform = "NOT_RUN"
         }
     } finally {
         Remove-CandidateValidationFixtureWorkspace -Workspace $workspace
     }
-    $expectedInvocations = [int](($workerRoutes |
-        Measure-Object -Property acceptance_samples -Sum).Sum)
+    $expectedInvocations = @($expectedRequests).Count
     [pscustomobject]@{
         channel = "VERSION_HOST_RESULT"
         passed = [bool](@($results | Where-Object { -not $_.passed }).Count -eq 0)
@@ -3222,6 +3420,19 @@ function Invoke-CandidateWorkerValidation {
         telemetry_window_from = if ($workerStartedAt) { $workerStartedAt.ToString('o') } else { $null }
         telemetry_window_to = if ($workerEndedAt) { $workerEndedAt.ToString('o') } else { $null }
         expected_requests = @($expectedRequests)
+        directed_request_ledger = if ($requestPlan) {
+            [pscustomobject]@{
+                evidence_class="CONTROLLED_EXACT"
+                request_universe_digest=[string]$requestPlan.request_universe_digest
+                planned=@($requestPlan.requests).Count
+                completed=@($directResponses).Count
+                passed=@($directResponses | Where-Object { $_.passed }).Count
+            }
+        } else { $null }
+        worker_qualification = $qualification
+        cpu_qualification_mode = if ($platform -and $platform -ne "NOT_RUN" -and $platform.passed) {
+            if ($reusedQualificationReceipt) { "CPU_QUALIFICATION_REUSED" } else { "CPU_QUALIFICATION_FRESH" }
+        } else { $null }
     }
 }
 
@@ -3232,20 +3443,142 @@ function Resume-CandidateWorkerPlatformEvidence {
     )
     if ([string]$Validation.key -ne [string]$Candidate.validation_key -or
         -not $Validation.validation_run -or
-        @($Validation.expected_requests).Count -eq 0 -or
+        @($Validation.expected_requests).Count -eq 0 -or -not $Validation.cpu_route_plan -or
         -not $Validation.telemetry_window_from -or
         @($Validation.routes).Count -eq 0) {
         throw "CANDIDATE_PLATFORM_RESUME_RECEIPT_INVALID"
     }
     $from = ConvertTo-ReleaseTimestampUtc -Value $Validation.telemetry_window_from
-    if ($from -eq [DateTimeOffset]::MinValue) {
+    $to = ConvertTo-ReleaseTimestampUtc -Value $Validation.telemetry_window_to
+    if ($from -eq [DateTimeOffset]::MinValue -or $to -eq [DateTimeOffset]::MinValue -or $to -lt $from) {
         throw "CANDIDATE_PLATFORM_RESUME_RECEIPT_INVALID"
     }
     $script:lastWorkersObservabilityDiagnostic = $null
+    $expectedRequests = @($Validation.expected_requests)
+    $plan = Read-WorkerCpuRunArtifact -ValidationRun ([string]$Validation.validation_run) -Name "plan.json"
+    $storedEvidence = Read-WorkerCpuRunArtifact -ValidationRun ([string]$Validation.validation_run) `
+        -Name "provider-evidence.json"
+    if (-not $plan) { throw "CANDIDATE_PLATFORM_RESUME_LEDGER_UNAVAILABLE" }
+    $receipts = @(Get-WorkerCpuDirectResponseReceipts -ValidationRun ([string]$Validation.validation_run))
+    if (@($receipts | Where-Object { -not $_.passed }).Count -gt 0) {
+        throw "CANDIDATE_PLATFORM_RESUME_DIRECT_FAILURE"
+    }
+    $completedIds = @($receipts | ForEach-Object { [string]$_.request_id })
+    $unsent = @($plan.requests | Where-Object { [string]$_.request_id -notin $completedIds })
+    if ($unsent.Count -gt 0) {
+        $workspace = $null
+        try {
+            if (@($Validation.cpu_route_plan.worker_writes).Count -gt 0) {
+                $workspace = New-CandidateValidationFixtureWorkspace -Candidate $Candidate
+            }
+            $fixtureRoot = if ($workspace) { [string]$workspace.fixture_root } else { "" }
+            $routes = @($Validation.cpu_route_plan.worker_reads) + @($Validation.cpu_route_plan.worker_writes)
+            $headers = @{ "Cloudflare-Workers-Version-Overrides" = "$workerName=`"$([string]$Candidate.worker_version_id)`"" }
+            $ingestToken = [Environment]::GetEnvironmentVariable("CLOUDFLARE_INGEST_TOKEN", "User")
+            foreach ($request in $unsent) {
+                $route = @($routes | Where-Object {
+                    [string]$_.family -eq [string]$request.family -and
+                    [string]$_.scenario -eq [string]$request.scenario
+                }) | Select-Object -First 1
+                if (-not $route) { throw "CANDIDATE_PLATFORM_RESUME_ROUTE_UNAVAILABLE" }
+                $route | Add-Member expected_worker_version ([string]$Candidate.worker_version_id) -Force
+                $route | Add-Member expected_git_sha ([string]$Candidate.git_sha) -Force
+                $null = Add-WorkerCpuRequestSend -ValidationRun ([string]$Validation.validation_run) `
+                    -Request $request -CandidateWorkerVersion ([string]$Candidate.worker_version_id) `
+                    -QualificationKey ([string]$plan.qualification_key)
+                $sample = Invoke-CandidateRouteSample -Route $route -VersionHeaders $headers `
+                    -ValidationRun ([string]$Validation.validation_run) -FixtureRoot $fixtureRoot `
+                    -IngestToken $ingestToken -ValidationPhase ([string]$request.phase) `
+                    -RequestId ([string]$request.request_id)
+                $receipt = Add-WorkerCpuDirectResponse -ValidationRun ([string]$Validation.validation_run) `
+                    -Request $request -Response $sample
+                if (-not $receipt.passed) { throw "CANDIDATE_PLATFORM_RESUME_DIRECT_FAILURE" }
+            }
+            $to = [DateTimeOffset]::UtcNow
+        } finally { Remove-CandidateValidationFixtureWorkspace -Workspace $workspace }
+        $receipts = @(Get-WorkerCpuDirectResponseReceipts -ValidationRun ([string]$Validation.validation_run))
+    }
+    $expectedRequests = @($plan.requests | Where-Object { [string]$_.phase -eq "acceptance" })
+    if ($receipts.Count -ne @($plan.requests).Count) { throw "CANDIDATE_PLATFORM_RESUME_LEDGER_INCOMPLETE" }
+    if ($plan -and $storedEvidence) {
+        $pendingDecision = Get-WorkerCpuQualificationDecision -ExpectedRequests $expectedRequests `
+            -ProviderRecords @($storedEvidence.records) -DirectResponsesComplete $true
+        $policy = Get-WorkerCpuEvidencePolicy
+        if ([string]$pendingDecision.state -eq "HEADROOM_REVIEW" -and
+            @($pendingDecision.review_groups).Count -eq 1 -and
+            [int]$storedEvidence.recovery.headroom_top_ups -lt [int]$policy.maximum_headroom_top_ups) {
+            $workspace = $null
+            try {
+                if (@($Validation.cpu_route_plan.worker_writes).Count -gt 0) {
+                    $workspace = New-CandidateValidationFixtureWorkspace -Candidate $Candidate
+                }
+                $topUpFixtureRoot = if ($workspace) { [string]$workspace.fixture_root } else { "" }
+                $topUp = Invoke-CandidateTargetedCpuSamples -Candidate $Candidate `
+                    -RoutePlan $Validation.cpu_route_plan -RequestPlan $plan `
+                    -Groups @($pendingDecision.review_groups) -SampleKind "headroom_top_up" `
+                    -CountPerGroup ([int]$policy.headroom_top_up_acceptance) `
+                    -FixtureRoot $topUpFixtureRoot `
+                    -IngestToken ([Environment]::GetEnvironmentVariable("CLOUDFLARE_INGEST_TOKEN", "User"))
+                $expectedRequests = @($plan.requests | Where-Object { [string]$_.phase -eq "acceptance" })
+                $to = $topUp.completed_at
+                $storedEvidence.recovery.active_reads = 0
+                $storedEvidence.recovery.headroom_top_ups = [int]$storedEvidence.recovery.headroom_top_ups + 1
+                $null = Write-WorkerCpuProviderEvidence -ValidationRun ([string]$Validation.validation_run) `
+                    -Records @($storedEvidence.records) -RecoveryState $storedEvidence.recovery
+                $pendingDecision = [pscustomobject]@{ state="PROVIDER_EVIDENCE_PENDING" }
+            } finally { Remove-CandidateValidationFixtureWorkspace -Workspace $workspace }
+        }
+        if ([string]$pendingDecision.state -eq "PROVIDER_EVIDENCE_PENDING" -and
+            @($storedEvidence.records).Count -gt 0 -and
+            @($pendingDecision.deficient_groups).Count -eq 1 -and
+            [int]$storedEvidence.recovery.active_reads -ge @($policy.active_read_backoff_seconds).Count -and
+            [int]$storedEvidence.recovery.deficit_top_ups -lt [int]$policy.maximum_deficit_top_ups) {
+            $workspace = $null
+            try {
+                if (@($Validation.cpu_route_plan.worker_writes).Count -gt 0) {
+                    $workspace = New-CandidateValidationFixtureWorkspace -Candidate $Candidate
+                }
+                $topUpFixtureRoot = if ($workspace) { [string]$workspace.fixture_root } else { "" }
+                $topUp = Invoke-CandidateTargetedCpuSamples -Candidate $Candidate `
+                    -RoutePlan $Validation.cpu_route_plan -RequestPlan $plan `
+                    -Groups @($pendingDecision.deficient_groups) -SampleKind "deficit_top_up" `
+                    -CountPerGroup ([int]$policy.deficit_top_up_acceptance) `
+                    -FixtureRoot $topUpFixtureRoot `
+                    -IngestToken ([Environment]::GetEnvironmentVariable("CLOUDFLARE_INGEST_TOKEN", "User"))
+                $expectedRequests = @($plan.requests | Where-Object { [string]$_.phase -eq "acceptance" })
+                $to = $topUp.completed_at
+                $storedEvidence.recovery.active_reads = 0
+                $storedEvidence.recovery.deficit_top_ups = [int]$storedEvidence.recovery.deficit_top_ups + 1
+                $null = Write-WorkerCpuProviderEvidence -ValidationRun ([string]$Validation.validation_run) `
+                    -Records @($storedEvidence.records) -RecoveryState $storedEvidence.recovery
+            } finally { Remove-CandidateValidationFixtureWorkspace -Workspace $workspace }
+        }
+    }
     $platform = Get-CandidateFrozenPlatformEvidence -Candidate $Candidate `
-        -From $from -To ([DateTimeOffset]::UtcNow) `
-        -ExpectedRequests @($Validation.expected_requests) `
+        -From $from -To $to `
+        -ExpectedRequests $expectedRequests `
         -ValidationRun ([string]$Validation.validation_run)
+    $qualificationMode = [string]$Validation.cpu_qualification_mode
+    if ($platform -and $platform.passed -and -not $qualificationMode) {
+        if (-not $Validation.worker_qualification) {
+            throw "CANDIDATE_PLATFORM_RESUME_QUALIFICATION_UNAVAILABLE"
+        }
+        $storedEvidence = Read-WorkerCpuRunArtifact -ValidationRun ([string]$Validation.validation_run) `
+            -Name "provider-evidence.json"
+        if (-not $storedEvidence) { throw "CANDIDATE_PLATFORM_RESUME_EVIDENCE_UNAVAILABLE" }
+        $decision = Get-WorkerCpuQualificationDecision -ExpectedRequests $expectedRequests `
+            -ProviderRecords @($storedEvidence.records) -DirectResponsesComplete $true `
+            -AggregateEvidence $platform.provider_corroboration
+        $receipt = Write-WorkerCpuQualificationReceipt -Qualification $Validation.worker_qualification `
+            -ValidationRun ([string]$Validation.validation_run) -Decision $decision
+        $qualificationMode = "CPU_QUALIFICATION_FRESH"
+        $platform | Add-Member -NotePropertyName qualification_receipt_digest `
+            -NotePropertyValue ([string]$receipt.receipt_digest) -Force
+        $platform | Add-Member -NotePropertyName qualification_mode `
+            -NotePropertyValue $qualificationMode -Force
+        $platform | Add-Member -NotePropertyName qualification_key `
+            -NotePropertyValue ([string]$Validation.worker_qualification.key) -Force
+    }
     return [pscustomobject]@{
         channel = "VERSION_HOST_RESULT"
         passed = $true
@@ -3260,15 +3593,24 @@ function Resume-CandidateWorkerPlatformEvidence {
         routes = @($Validation.routes)
         cpu_evidence = $platform
         telemetry_window_from = [string]$Validation.telemetry_window_from
-        telemetry_window_to = [string]$Validation.telemetry_window_to
-        expected_requests = @($Validation.expected_requests)
+        telemetry_window_to = $to.ToString('o')
+        expected_requests = @($expectedRequests)
+        cpu_route_plan = $Validation.cpu_route_plan
+        worker_qualification = $Validation.worker_qualification
+        directed_request_ledger = [pscustomobject]@{
+            evidence_class="CONTROLLED_EXACT"; request_universe_digest=[string]$plan.request_universe_digest
+            planned=@($plan.requests).Count; completed=$receipts.Count
+            passed=@($receipts | Where-Object { $_.passed }).Count
+        }
+        cpu_qualification_mode = $qualificationMode
     }
 }
 
 function Test-RetryableObservabilityDiagnostic {
     param([string]$Diagnostic)
     return [bool]($Diagnostic -in @(
-        "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING",
+        "PROVIDER_EVIDENCE_PENDING",
+        "PROVIDER_EVIDENCE_INSUFFICIENT",
         "OBSERVABILITY_RATE_LIMITED",
         "OBSERVABILITY_TRANSIENT_API_FAILURE"
     ))
@@ -4702,8 +5044,12 @@ function Invoke-AutomaticCandidateValidation {
         }
         $routePlan = Get-CandidateRouteValidationPlan -ChangedFiles $changed `
             -Revision ([string]$Candidate.git_sha)
+        $cpuRoutePlan = Get-CandidateRouteValidationPlan -ChangedFiles $changed `
+            -Revision ([string]$Candidate.git_sha) -AllCpuRoutes
+        $cpuRoutePlan.static_assets = @($routePlan.static_assets)
         $workerChanged = [bool]$routePlan.worker_cpu_required
-        $cloudflareChanged = [bool]$routePlan.requires_validation
+        $cloudflareChanged = [bool]($routePlan.requires_validation -or
+            @($cpuRoutePlan.worker_reads).Count -gt 0 -or @($cpuRoutePlan.worker_writes).Count -gt 0)
         Set-CloudflareCandidatePointer -Stable $state.stable -Candidate $Candidate
         $placementPropagation = Wait-CandidatePlacementPropagation -Candidate $Candidate
         if (-not $placementPropagation.passed) {
@@ -4726,6 +5072,24 @@ function Invoke-AutomaticCandidateValidation {
         }
         $cloudflare = [pscustomobject]@{ passed = $true; routes = @(); cpu_evidence = "NOT_REQUIRED" }
         if ($cloudflareChanged) {
+            if ($priorValidationState -eq "PLATFORM_PENDING" -and
+                [string]$state.candidate.validation.observability_diagnostic -eq
+                    "OBSERVABILITY_TELEMETRY_PROPAGATION_PENDING") {
+                $legacyRun = [string]$state.candidate.validation.validation_run
+                if ($legacyRun -match '^[0-9a-fA-F-]{36}$') {
+                    Add-WorkerCpuLedgerEvent -ValidationRun $legacyRun `
+                        -Event "LEGACY_PROVIDER_INCOMPLETE_FORENSIC_CLOSED" `
+                        -Detail ([pscustomobject]@{
+                            prior_policy="exact-provider-universe"
+                            reinterpreted=$false; further_polling=$false
+                        })
+                }
+                Write-ReleaseHistory -Event "LEGACY_WORKER_CPU_PROVIDER_RUN_CLOSED" `
+                    -Release $state.candidate -Detail @{
+                        validation_run=$legacyRun; preserved_forensic=$true
+                        reinterpreted=$false; further_polling=$false
+                    }
+            }
             $resumePlatformOnly = [bool](
                 $priorValidationState -eq "PLATFORM_PENDING" -and
                 [string]$state.candidate.validation.key -eq [string]$Candidate.validation_key -and
@@ -4737,7 +5101,7 @@ function Invoke-AutomaticCandidateValidation {
                     -Validation $state.candidate.validation
             } else {
                 Invoke-CandidateWorkerValidation -Candidate $Candidate `
-                    -RoutePlan $routePlan
+                    -RoutePlan $cpuRoutePlan
             }
             if (-not $cloudflare.passed) {
                 $failedRoutes = @($cloudflare.routes | Where-Object { -not $_.passed })
@@ -4809,6 +5173,10 @@ function Invoke-AutomaticCandidateValidation {
                     telemetry_window_from = $cloudflare.telemetry_window_from
                     telemetry_window_to = $cloudflare.telemetry_window_to
                     expected_requests = @($cloudflare.expected_requests)
+                    cpu_route_plan = $cpuRoutePlan
+                    worker_qualification = $cloudflare.worker_qualification
+                    directed_request_ledger = $cloudflare.directed_request_ledger
+                    cpu_qualification_mode = $cloudflare.cpu_qualification_mode
                     static_worker_invocations = $cloudflare.static_worker_invocations
                     data_parity = [pscustomobject]@{ state = "NOT_RUN" }
                     cpu_headroom = [pscustomobject]@{ state = "DIAGNOSTIC_UNAVAILABLE" }
@@ -4839,6 +5207,18 @@ function Invoke-AutomaticCandidateValidation {
                     cloudflare = "REVIEW_REQUIRED"
                     reason = "WORKER_CPU_HEADROOM_REVIEW_REQUIRED"
                     route_plan = $routePlan; routes = $cloudflare.routes
+                    cpu_route_plan = $cpuRoutePlan
+                    validation_run = $cloudflare.validation_run
+                    expected_worker_invocations = $cloudflare.expected_worker_invocations
+                    expected_requests = @($cloudflare.expected_requests)
+                    telemetry_window_from = $cloudflare.telemetry_window_from
+                    telemetry_window_to = $cloudflare.telemetry_window_to
+                    static_worker_invocations = $cloudflare.static_worker_invocations
+                    static_observability_state = $cloudflare.static_observability_state
+                    observability_diagnostic = "PROVIDER_EVIDENCE_PENDING"
+                    worker_qualification = $cloudflare.worker_qualification
+                    directed_request_ledger = $cloudflare.directed_request_ledger
+                    cpu_qualification_mode = $cloudflare.cpu_qualification_mode
                     cpu_evidence = $cloudflare.cpu_evidence
                     tested_at = [DateTimeOffset]::UtcNow.ToString("o")
                 }
@@ -4893,6 +5273,9 @@ function Invoke-AutomaticCandidateValidation {
                 data_parity = $dataParity; auth_inspection = $authInspection
                 route_plan = $routePlan; routes = $cloudflare.routes
                 cpu_evidence = $cloudflare.cpu_evidence
+                worker_qualification = $cloudflare.worker_qualification
+                cpu_qualification_mode = $cloudflare.cpu_qualification_mode
+                directed_request_ledger = $cloudflare.directed_request_ledger
                 tested_at = [DateTimeOffset]::UtcNow.ToString("o")
             }
             Write-ReleaseControlState -State $state
@@ -4909,6 +5292,9 @@ function Invoke-AutomaticCandidateValidation {
                 data_parity = $dataParity; auth_inspection = $authInspection
                 route_plan = $routePlan; routes = $cloudflare.routes
                 cpu_evidence = $cloudflare.cpu_evidence
+                worker_qualification = $cloudflare.worker_qualification
+                cpu_qualification_mode = $cloudflare.cpu_qualification_mode
+                directed_request_ledger = $cloudflare.directed_request_ledger
                 tested_at = [DateTimeOffset]::UtcNow.ToString("o")
             }
             Write-ReleaseControlState -State $state
@@ -4926,6 +5312,9 @@ function Invoke-AutomaticCandidateValidation {
             route_plan = $routePlan
             routes = $cloudflare.routes
             cpu_evidence = $cloudflare.cpu_evidence
+            worker_qualification = $cloudflare.worker_qualification
+            cpu_qualification_mode = $cloudflare.cpu_qualification_mode
+            directed_request_ledger = $cloudflare.directed_request_ledger
             data_parity = $dataParity
             auth_inspection = $authInspection
             tested_at = [DateTimeOffset]::UtcNow.ToString("o")
@@ -5114,6 +5503,32 @@ function Retry-CandidateValidation {
         throw "Only an exact retryable Candidate review can restart validation."
     }
     $priorTestedAt = [string]$candidate.validation.tested_at
+    if ($reason -eq "WORKER_CPU_HEADROOM_REVIEW_REQUIRED") {
+        if (-not $candidate.validation.validation_run -or
+            @($candidate.validation.expected_requests).Count -eq 0 -or
+            -not $candidate.validation.cpu_route_plan -or
+            -not $candidate.validation.worker_qualification) {
+            throw "CPU review cannot resume without its exact persisted qualification ledger."
+        }
+        $candidate.validation_state = "PLATFORM_PENDING"
+        $candidate.validation.cloudflare = "PENDING"
+        $candidate.validation.reason = "PROVIDER_EVIDENCE_PENDING"
+        $candidate.validation | Add-Member -NotePropertyName observability_diagnostic `
+            -NotePropertyValue "PROVIDER_EVIDENCE_PENDING" -Force
+        $candidate.validation | Add-Member -NotePropertyName prior_reason `
+            -NotePropertyValue $reason -Force
+        $candidate.validation.tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+        $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "CANDIDATE_CPU_TARGETED_RETRY_REQUESTED" `
+            -Release $candidate -Detail @{
+                validation_key=[string]$candidate.validation_key
+                validation_run=[string]$candidate.validation.validation_run
+                qualification_key=[string]$candidate.validation.worker_qualification.key
+                full_matrix_replay=$false
+            }
+        return Invoke-AutomaticCandidateValidation -Candidate $candidate
+    }
     $candidate.validation_state = "NEW"
     $candidate.validation = [pscustomobject]@{
         key = [string]$candidate.validation_key

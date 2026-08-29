@@ -40,10 +40,14 @@ RecoveryFacts == {
     "ISOLATION", "CONTEXT", "NO_RELEASE", "STALE_FENCED"
 }
 AccessReceiptStates == {"NONE", "VALID", "WRONG_KEY", "TAMPERED", "STALE"}
+CpuKeys == {"ARTIFACT_A", "ARTIFACT_B"}
+CpuEvidenceStates == {"NONE", "PENDING", "INSUFFICIENT", "QUALIFIED", "HARD_FAILURE"}
+CpuSamples == {1, 2}
+CpuIndependentStages == {"MIGRATION", "DIRECTED"}
 
-VARIABLES release, health, install, news, syncOwners, path
+VARIABLES release, health, install, news, syncOwners, path, cpu
 
-vars == <<release, health, install, news, syncOwners, path>>
+vars == <<release, health, install, news, syncOwners, path, cpu>>
 
 ExactCandidate ==
     /\ release.candidate # None
@@ -151,6 +155,18 @@ Init ==
         switchFailed |-> FALSE,
         accessRepeatObserved |-> FALSE
         ]
+    /\ cpu = [
+        artifactKey |-> "ARTIFACT_A",
+        receiptKey |-> "ARTIFACT_A",
+        receiptValid |-> TRUE,
+        state |-> "NONE",
+        evidence |-> {},
+        topUps |-> 0,
+        hardFailure |-> FALSE,
+        qualified |-> FALSE,
+        reused |-> FALSE,
+        independentStages |-> {}
+        ]
 
 DiscoverCandidate(accessRequired) ==
     /\ release.phase = "STABLE"
@@ -174,6 +190,14 @@ DiscoverCandidate(accessRequired) ==
         !.accepted = FALSE,
         !.migrationReady = FALSE]
     /\ path' = [path EXCEPT !.accessRepeatObserved = FALSE]
+    /\ cpu' = [cpu EXCEPT
+        !.state = "NONE",
+        !.evidence = {},
+        !.topUps = 0,
+        !.hardFailure = FALSE,
+        !.qualified = FALSE,
+        !.reused = FALSE,
+        !.independentStages = {}]
     /\ UNCHANGED <<health, install, news, syncOwners>>
 
 MainMoves ==
@@ -184,7 +208,7 @@ MainMoves ==
         !.main = NextId,
         !.gate = "FAILED",
         !.accepted = FALSE]
-    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+    /\ UNCHANGED <<health, install, news, syncOwners, path, cpu>>
 
 CorruptCandidateIdentity ==
     /\ AllowIdentityDrift
@@ -194,19 +218,19 @@ CorruptCandidateIdentity ==
         !.candidateExact = FALSE,
         !.gate = "FAILED",
         !.accepted = FALSE]
-    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+    /\ UNCHANGED <<health, install, news, syncOwners, path, cpu>>
 
 DegradeHealth ==
     /\ health = "GOOD"
     /\ release.transaction
     /\ release.phase \in {"SWITCH", "OBSERVE"}
     /\ health' = "BAD"
-    /\ UNCHANGED <<release, install, news, syncOwners, path>>
+    /\ UNCHANGED <<release, install, news, syncOwners, path, cpu>>
 
 RestoreHealth ==
     /\ health = "BAD"
     /\ health' = "GOOD"
-    /\ UNCHANGED <<release, install, news, syncOwners, path>>
+    /\ UNCHANGED <<release, install, news, syncOwners, path, cpu>>
 
 VerifyMigration ==
     /\ release.phase = "PREPARE"
@@ -217,13 +241,13 @@ VerifyMigration ==
         !.migrationReady = TRUE,
         !.verifiedGeneration = news.currentGeneration,
         !.verifiedWatermark = news.activationWatermark]
-    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+    /\ UNCHANGED <<health, install, news, syncOwners, path, cpu>>
 
 RecordStableDebt ==
     /\ release.phase \in {"PREPARE", "VERIFY"}
     /\ ~release.stableDebt
     /\ release' = [release EXCEPT !.stableDebt = TRUE]
-    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+    /\ UNCHANGED <<health, install, news, syncOwners, path, cpu>>
 
 IntroduceCandidateRegression ==
     /\ release.phase \in {"PREPARE", "VERIFY"}
@@ -234,7 +258,7 @@ IntroduceCandidateRegression ==
         !.changedSafe = FALSE,
         !.gate = "FAILED",
         !.accepted = FALSE]
-    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+    /\ UNCHANGED <<health, install, news, syncOwners, path, cpu>>
 
 HardSafetyFails ==
     /\ release.phase \in {"PREPARE", "VERIFY"}
@@ -244,7 +268,7 @@ HardSafetyFails ==
         !.hardSafe = FALSE,
         !.gate = "FAILED",
         !.accepted = FALSE]
-    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+    /\ UNCHANGED <<health, install, news, syncOwners, path, cpu>>
 
 RequireAccessReview ==
     /\ release.phase = "VERIFY"
@@ -252,7 +276,7 @@ RequireAccessReview ==
     /\ ~release.accessReview
     /\ release.gate = "UNTESTED"
     /\ release' = [release EXCEPT !.accessReview = TRUE]
-    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+    /\ UNCHANGED <<health, install, news, syncOwners, path, cpu>>
 
 RecordAccessReceipt(kind) ==
     /\ release.phase = "VERIFY"
@@ -265,7 +289,7 @@ RecordAccessReceipt(kind) ==
         !.accessReceiptState = kind,
         !.accessAccepted = FALSE,
         !.gate = IF kind = "VALID" THEN "UNTESTED" ELSE "FAILED"]
-    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+    /\ UNCHANGED <<health, install, news, syncOwners, path, cpu>>
 
 ApproveAccessReceipt ==
     /\ release.phase = "VERIFY"
@@ -277,14 +301,14 @@ ApproveAccessReceipt ==
     /\ release' = [release EXCEPT
         !.accessAccepted = TRUE,
         !.accessApprovalCount = 1]
-    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+    /\ UNCHANGED <<health, install, news, syncOwners, path, cpu>>
 
 RepeatAccessApproval ==
     /\ release.phase = "VERIFY"
     /\ ApplicableAccessEvidence
     /\ release.accessApprovalCount = 1
     /\ path' = [path EXCEPT !.accessRepeatObserved = TRUE]
-    /\ UNCHANGED <<release, health, install, news, syncOwners>>
+    /\ UNCHANGED <<release, health, install, news, syncOwners, cpu>>
 
 BeginInstall ==
     /\ AllowControlInstall
@@ -302,13 +326,13 @@ BeginInstall ==
         !.mode = "QUIESCED",
         !.epoch = 1 - @,
         !.deathCheckpoint = None]
-    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+    /\ UNCHANGED <<release, health, news, syncOwners, path, cpu>>
 
 CaptureBaseline ==
     /\ install.step = "FENCED"
     /\ install.installerAlive
     /\ install' = [install EXCEPT !.step = "BASELINED"]
-    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+    /\ UNCHANGED <<release, health, news, syncOwners, path, cpu>>
 
 BeginBundleSwap ==
     /\ install.step = "BASELINED"
@@ -316,7 +340,7 @@ BeginBundleSwap ==
     /\ install' = [install EXCEPT
         !.step = "BUNDLE_SWAPPING",
         !.bundleValid = FALSE]
-    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+    /\ UNCHANGED <<release, health, news, syncOwners, path, cpu>>
 
 CompleteBundleSwap ==
     /\ install.step = "BUNDLE_SWAPPING"
@@ -324,7 +348,7 @@ CompleteBundleSwap ==
     /\ install' = [install EXCEPT
         !.step = "BUNDLE_INSTALLED",
         !.bundleValid = TRUE]
-    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+    /\ UNCHANGED <<release, health, news, syncOwners, path, cpu>>
 
 StartQuiescedSupervisor ==
     /\ install.step = "BUNDLE_INSTALLED"
@@ -333,7 +357,7 @@ StartQuiescedSupervisor ==
         !.step = "NEW_QUIESCED",
         !.replacementOwners = 1,
         !.actorEpoch = install.epoch]
-    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+    /\ UNCHANGED <<release, health, news, syncOwners, path, cpu>>
 
 VerifyNormalInstall ==
     /\ install.step = "NEW_QUIESCED"
@@ -342,7 +366,7 @@ VerifyNormalInstall ==
     /\ install' = [install EXCEPT
         !.step = "ISOLATION_VERIFIED",
         !.checksPassed = TRUE]
-    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+    /\ UNCHANGED <<release, health, news, syncOwners, path, cpu>>
 
 ActivateNormalInstall ==
     /\ install.step = "ISOLATION_VERIFIED"
@@ -353,7 +377,7 @@ ActivateNormalInstall ==
         !.step = "IDLE",
         !.installerAlive = FALSE,
         !.mode = "ACTIVE"]
-    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+    /\ UNCHANGED <<release, health, news, syncOwners, path, cpu>>
 
 InstallerDiesAt(checkpoint) ==
     /\ checkpoint \in DeathCheckpoints
@@ -362,7 +386,7 @@ InstallerDiesAt(checkpoint) ==
     /\ install' = [install EXCEPT
         !.installerAlive = FALSE,
         !.deathCheckpoint = checkpoint]
-    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+    /\ UNCHANGED <<release, health, news, syncOwners, path, cpu>>
 
 InvalidateRecoveryFact(fact) ==
     /\ fact \in RecoveryFacts
@@ -379,7 +403,7 @@ InvalidateRecoveryFact(fact) ==
           [] fact = "CONTEXT" -> [install EXCEPT !.releaseContextCompatible = FALSE]
           [] fact = "NO_RELEASE" -> [install EXCEPT !.concurrentRelease = TRUE]
           [] OTHER -> [install EXCEPT !.staleActorFenced = FALSE]
-    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+    /\ UNCHANGED <<release, health, news, syncOwners, path, cpu>>
 
 RepairInterruptedBundle ==
     /\ ~install.installerAlive
@@ -388,7 +412,7 @@ RepairInterruptedBundle ==
     /\ install' = [install EXCEPT
         !.step = "BUNDLE_INSTALLED",
         !.bundleValid = TRUE]
-    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+    /\ UNCHANGED <<release, health, news, syncOwners, path, cpu>>
 
 StartRecoveredQuiesced ==
     /\ ~install.installerAlive
@@ -398,7 +422,7 @@ StartRecoveredQuiesced ==
         !.step = "NEW_QUIESCED",
         !.replacementOwners = 1,
         !.actorEpoch = install.epoch]
-    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+    /\ UNCHANGED <<release, health, news, syncOwners, path, cpu>>
 
 VerifyAbandonedInstall ==
     /\ ~install.installerAlive
@@ -407,7 +431,7 @@ VerifyAbandonedInstall ==
     /\ install' = [install EXCEPT
         !.step = "ABANDONED_VERIFIED",
         !.checksPassed = TRUE]
-    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+    /\ UNCHANGED <<release, health, news, syncOwners, path, cpu>>
 
 ActivateRecoveredInstall ==
     /\ ~install.installerAlive
@@ -417,7 +441,7 @@ ActivateRecoveredInstall ==
     /\ install' = [install EXCEPT
         !.step = "IDLE",
         !.mode = "ACTIVE"]
-    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+    /\ UNCHANGED <<release, health, news, syncOwners, path, cpu>>
 
 RejectAbandonedInstall ==
     /\ ~install.installerAlive
@@ -429,7 +453,7 @@ RejectAbandonedInstall ==
         !.mode = "NONE",
         !.replacementOwners = 0,
         !.checksPassed = FALSE]
-    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+    /\ UNCHANGED <<release, health, news, syncOwners, path, cpu>>
 
 RestorePreviousInstall ==
     /\ install.step = "ROLLING_BACK"
@@ -440,7 +464,90 @@ RestorePreviousInstall ==
         !.mode = "ACTIVE",
         !.actorEpoch = install.epoch,
         !.concurrentRelease = FALSE]
-    /\ UNCHANGED <<release, health, news, syncOwners, path>>
+    /\ UNCHANGED <<release, health, news, syncOwners, path, cpu>>
+
+ChangeCpuArtifact ==
+    /\ release.phase \in {"PREPARE", "VERIFY"}
+    /\ cpu.artifactKey = "ARTIFACT_A"
+    /\ cpu' = [cpu EXCEPT
+        !.artifactKey = "ARTIFACT_B",
+        !.state = "NONE",
+        !.evidence = {},
+        !.topUps = 0,
+        !.hardFailure = FALSE,
+        !.qualified = FALSE,
+        !.reused = FALSE,
+        !.independentStages = {}]
+    /\ UNCHANGED <<release, health, install, news, syncOwners, path>>
+
+AcceptCpuIndependentStages ==
+    /\ release.phase \in {"PREPARE", "VERIFY"}
+    /\ cpu.state = "NONE"
+    /\ cpu.independentStages = {}
+    /\ cpu' = [cpu EXCEPT !.independentStages = CpuIndependentStages]
+    /\ UNCHANGED <<release, health, install, news, syncOwners, path>>
+
+ReuseCpuQualification ==
+    /\ release.phase \in {"PREPARE", "VERIFY"}
+    /\ cpu.state = "NONE"
+    /\ cpu.independentStages = CpuIndependentStages
+    /\ cpu.receiptValid
+    /\ cpu.receiptKey = cpu.artifactKey
+    /\ cpu' = [cpu EXCEPT
+        !.state = "QUALIFIED",
+        !.qualified = TRUE,
+        !.reused = TRUE]
+    /\ UNCHANGED <<release, health, install, news, syncOwners, path>>
+
+BeginCpuEvidence ==
+    /\ release.phase \in {"PREPARE", "VERIFY"}
+    /\ cpu.state = "NONE"
+    /\ cpu.independentStages = CpuIndependentStages
+    /\ cpu' = [cpu EXCEPT !.state = "PENDING"]
+    /\ UNCHANGED <<release, health, install, news, syncOwners, path>>
+
+ProviderEvidenceArrives(sample) ==
+    /\ sample \in CpuSamples \ cpu.evidence
+    /\ cpu.state \in {"PENDING", "INSUFFICIENT"}
+    /\ ~cpu.hardFailure
+    /\ cpu' = [cpu EXCEPT
+        !.evidence = @ \cup {sample},
+        !.state = "PENDING"]
+    /\ UNCHANGED <<release, health, install, news, syncOwners, path>>
+
+TargetedCpuTopUp ==
+    /\ cpu.state = "PENDING"
+    /\ cpu.evidence # CpuSamples
+    /\ cpu.topUps = 0
+    /\ cpu' = [cpu EXCEPT !.topUps = 1]
+    /\ UNCHANGED <<release, health, install, news, syncOwners, path>>
+
+ProviderEvidenceInsufficient ==
+    /\ cpu.state = "PENDING"
+    /\ cpu.evidence # CpuSamples
+    /\ cpu.topUps = 1
+    /\ cpu' = [cpu EXCEPT !.state = "INSUFFICIENT"]
+    /\ UNCHANGED <<release, health, install, news, syncOwners, path>>
+
+ProviderCpuHardFailure ==
+    /\ cpu.state \in {"PENDING", "INSUFFICIENT"}
+    /\ ~cpu.hardFailure
+    /\ cpu' = [cpu EXCEPT
+        !.state = "HARD_FAILURE",
+        !.hardFailure = TRUE,
+        !.qualified = FALSE]
+    /\ UNCHANGED <<release, health, install, news, syncOwners, path>>
+
+QualifyCpuEvidence ==
+    /\ cpu.state = "PENDING"
+    /\ cpu.evidence = CpuSamples
+    /\ ~cpu.hardFailure
+    /\ cpu' = [cpu EXCEPT
+        !.state = "QUALIFIED",
+        !.qualified = TRUE,
+        !.receiptKey = cpu.artifactKey,
+        !.receiptValid = TRUE]
+    /\ UNCHANGED <<release, health, install, news, syncOwners, path>>
 
 CompletePrepare ==
     /\ release.phase = "PREPARE"
@@ -448,7 +555,7 @@ CompletePrepare ==
     /\ install.step = "IDLE"
     /\ CurrentSupervisorCanMutate
     /\ release' = [release EXCEPT !.phase = "VERIFY"]
-    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+    /\ UNCHANGED <<health, install, news, syncOwners, path, cpu>>
 
 PassEvidence ==
     /\ health = "GOOD"
@@ -458,6 +565,7 @@ PassEvidence ==
     /\ release.migrationReady
     /\ release.hardSafe
     /\ release.changedSafe
+    /\ cpu.qualified
     /\ ~release.candidateRegression
     /\ ReverseStableCompatible
     /\ news.activationWatermark >= release.verifiedWatermark
@@ -467,7 +575,7 @@ PassEvidence ==
         !.gate = "PASSED",
         !.accepted = TRUE]
     /\ path' = [path EXCEPT !.verifyPassed = TRUE]
-    /\ UNCHANGED <<health, install, news, syncOwners>>
+    /\ UNCHANGED <<health, install, news, syncOwners, cpu>>
 
 BeginForwardSwitch ==
     /\ release.phase = "VERIFY"
@@ -485,7 +593,7 @@ BeginForwardSwitch ==
         !.kind = "FORWARD",
         !.applied = FALSE]
     /\ syncOwners' = 0
-    /\ UNCHANGED <<health, install, news, path>>
+    /\ UNCHANGED <<health, install, news, path, cpu>>
 
 ApplySwitch ==
     /\ health = "GOOD"
@@ -498,7 +606,7 @@ ApplySwitch ==
         !.applied = TRUE]
     /\ syncOwners' = 1
     /\ path' = [path EXCEPT !.forwardObserve = TRUE]
-    /\ UNCHANGED <<health, install, news>>
+    /\ UNCHANGED <<health, install, news, cpu>>
 
 FailSwitch ==
     /\ health = "BAD"
@@ -512,7 +620,7 @@ FailSwitch ==
         !.gate = "FAILED",
         !.accepted = FALSE]
     /\ path' = [path EXCEPT !.switchFailed = TRUE]
-    /\ UNCHANGED <<health, install, news, syncOwners>>
+    /\ UNCHANGED <<health, install, news, syncOwners, cpu>>
 
 ObserveSuccess ==
     /\ health = "GOOD"
@@ -537,7 +645,7 @@ ObserveSuccess ==
         !.changedSafe = TRUE,
         !.stableDebt = FALSE,
         !.candidateRegression = FALSE]
-    /\ UNCHANGED <<health, install, news, syncOwners, path>>
+    /\ UNCHANGED <<health, install, news, syncOwners, path, cpu>>
 
 ObserveFailure ==
     /\ health = "BAD"
@@ -554,7 +662,7 @@ ObserveFailure ==
         !.accepted = FALSE]
     /\ syncOwners' = 0
     /\ path' = [path EXCEPT !.observeFailed = TRUE]
-    /\ UNCHANGED <<health, install, news>>
+    /\ UNCHANGED <<health, install, news, cpu>>
 
 ApplyRecoverySwitch ==
     /\ health = "GOOD"
@@ -567,7 +675,7 @@ ApplyRecoverySwitch ==
         !.applied = TRUE]
     /\ syncOwners' = 1
     /\ path' = [path EXCEPT !.recoverySwitched = TRUE]
-    /\ UNCHANGED <<health, install, news>>
+    /\ UNCHANGED <<health, install, news, cpu>>
 
 ObserveRecovery ==
     /\ health = "GOOD"
@@ -584,7 +692,7 @@ ObserveRecovery ==
         !.kind = "NONE",
         !.applied = FALSE]
     /\ path' = [path EXCEPT !.recoveryCompleted = TRUE]
-    /\ UNCHANGED <<health, install, news, syncOwners>>
+    /\ UNCHANGED <<health, install, news, syncOwners, cpu>>
 
 PrepareGeneration ==
     /\ ~news.stagingPresent
@@ -596,7 +704,7 @@ PrepareGeneration ==
         !.stagedLegacyPresent = FALSE,
         !.stagedLegacyIds = {},
         !.storedGenerations = @ \cup {news.currentGeneration + 1}]
-    /\ UNCHANGED <<release, health, install, syncOwners, path>>
+    /\ UNCHANGED <<release, health, install, syncOwners, path, cpu>>
 
 StageLegacyCorrect ==
     /\ news.stagingPresent
@@ -605,7 +713,7 @@ StageLegacyCorrect ==
         !.stagedLegacyPresent = TRUE,
         !.stagedLegacyGeneration = news.stagingGeneration,
         !.stagedLegacyIds = news.stagingIds]
-    /\ UNCHANGED <<release, health, install, syncOwners, path>>
+    /\ UNCHANGED <<release, health, install, syncOwners, path, cpu>>
 
 StageLegacyInvalid(kind) ==
     /\ kind \in {"MISSING", "EXTRA"}
@@ -615,7 +723,7 @@ StageLegacyInvalid(kind) ==
         !.stagedLegacyPresent = TRUE,
         !.stagedLegacyGeneration = news.stagingGeneration,
         !.stagedLegacyIds = IF kind = "MISSING" THEN {} ELSE news.stagingIds \cup {ExtraNews}]
-    /\ UNCHANGED <<release, health, install, syncOwners, path>>
+    /\ UNCHANGED <<release, health, install, syncOwners, path, cpu>>
 
 RepairStagedLegacy ==
     /\ news.stagingPresent
@@ -624,7 +732,7 @@ RepairStagedLegacy ==
     /\ news' = [news EXCEPT
         !.stagedLegacyGeneration = news.stagingGeneration,
         !.stagedLegacyIds = news.stagingIds]
-    /\ UNCHANGED <<release, health, install, syncOwners, path>>
+    /\ UNCHANGED <<release, health, install, syncOwners, path, cpu>>
 
 ActivateGeneration ==
     /\ FreshStagingCompatible
@@ -642,26 +750,31 @@ ActivateGeneration ==
         !.stagingIds = {},
         !.stagedLegacyPresent = FALSE,
         !.stagedLegacyIds = {}]
-    /\ UNCHANGED <<release, health, install, syncOwners, path>>
+    /\ UNCHANGED <<release, health, install, syncOwners, path, cpu>>
 
 LegacyStableWriteAttempt ==
     /\ news.currentGeneration > 0
     /\ ~news.legacyWriteObserved
     /\ news' = [news EXCEPT !.legacyWriteObserved = TRUE]
-    /\ UNCHANGED <<release, health, install, syncOwners, path>>
+    /\ UNCHANGED <<release, health, install, syncOwners, path, cpu>>
 
 CleanupObsolete(generation) ==
     /\ generation \in news.storedGenerations
     /\ generation # news.currentGeneration
     /\ (~news.stagingPresent \/ generation # news.stagingGeneration)
     /\ news' = [news EXCEPT !.storedGenerations = @ \ {generation}]
-    /\ UNCHANGED <<release, health, install, syncOwners, path>>
+    /\ UNCHANGED <<release, health, install, syncOwners, path, cpu>>
 
 Next ==
     \/ \E accessRequired \in BOOLEAN: DiscoverCandidate(accessRequired)
     \/ MainMoves \/ CorruptCandidateIdentity
     \/ DegradeHealth \/ RestoreHealth
     \/ VerifyMigration \/ RecordStableDebt
+    \/ ChangeCpuArtifact \/ AcceptCpuIndependentStages
+    \/ ReuseCpuQualification \/ BeginCpuEvidence
+    \/ \E sample \in CpuSamples: ProviderEvidenceArrives(sample)
+    \/ TargetedCpuTopUp \/ ProviderEvidenceInsufficient
+    \/ ProviderCpuHardFailure \/ QualifyCpuEvidence
     \/ IntroduceCandidateRegression \/ HardSafetyFails
     \/ RequireAccessReview
     \/ \E kind \in AccessReceiptStates \ {"NONE"}: RecordAccessReceipt(kind)
@@ -688,6 +801,10 @@ Spec ==
     /\ [][Next]_vars
     /\ WF_vars(RestoreHealth)
     /\ WF_vars(VerifyMigration)
+    /\ WF_vars(AcceptCpuIndependentStages)
+    /\ WF_vars(BeginCpuEvidence)
+    /\ WF_vars(ReuseCpuQualification)
+    /\ WF_vars(QualifyCpuEvidence)
     /\ WF_vars(CaptureBaseline)
     /\ WF_vars(BeginBundleSwap)
     /\ WF_vars(CompleteBundleSwap)
@@ -748,6 +865,16 @@ TypeOK ==
     /\ news.legacyWriteObserved \in BOOLEAN
     /\ news.storedGenerations \subseteq Generations
     /\ path.accessRepeatObserved \in BOOLEAN
+    /\ cpu.artifactKey \in CpuKeys
+    /\ cpu.receiptKey \in CpuKeys
+    /\ cpu.receiptValid \in BOOLEAN
+    /\ cpu.state \in CpuEvidenceStates
+    /\ cpu.evidence \subseteq CpuSamples
+    /\ cpu.topUps \in 0..1
+    /\ cpu.hardFailure \in BOOLEAN
+    /\ cpu.qualified \in BOOLEAN
+    /\ cpu.reused \in BOOLEAN
+    /\ cpu.independentStages \subseteq CpuIndependentStages
 
 AtMostOneProductionWriter == syncOwners <= 1
 PrepareVerifyKeepsStableSync ==
@@ -804,9 +931,24 @@ RecoveredActivationRequiresIndependentChecks ==
 ActiveRecoveredSupervisorIsSafe ==
     ~install.installerAlive /\ install.step = "IDLE" /\ install.mode = "ACTIVE" =>
         install.bundleValid /\ install.replacementOwners = 1
+CpuQualificationRequiredForPass == release.gate = "PASSED" => cpu.qualified
+ProviderPendingIsNotCandidateFailure ==
+    (cpu.state \in {"PENDING", "INSUFFICIENT"} /\
+     release.hardSafe /\ release.changedSafe /\ ~release.candidateRegression /\
+     release.main = release.candidate /\ ExactCandidate) => release.gate # "FAILED"
+CpuRetryBudgetIsBounded == cpu.topUps <= 1
+CpuHardFailureCannotQualify == cpu.hardFailure => ~cpu.qualified
+ReusedCpuEvidenceMatchesArtifact ==
+    cpu.reused => cpu.receiptValid /\ cpu.receiptKey = cpu.artifactKey /\ cpu.qualified
+CpuRecoveryPreservesIndependentStages ==
+    cpu.qualified => cpu.independentStages = CpuIndependentStages
 
 StableChangesOnlyAfterObservation ==
     [][(release.stable' # release.stable) => ObserveSuccess]_vars
+
+CpuEvidenceOnlyGrows ==
+    [][(cpu.artifactKey' = cpu.artifactKey /\ cpu.state' # "NONE") =>
+       cpu.evidence \subseteq cpu.evidence']_vars
 
 ObservedFailureEventuallyRestoresPrevious ==
     [](path.observeFailed /\ ~path.recoveryCompleted =>

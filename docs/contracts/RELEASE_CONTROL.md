@@ -258,37 +258,83 @@ Their bounds come from the current manifest contract rather than historical
 payload sizes. The response must state `mutated: false`; an invalid body still fails the normal
 contract. The validation header never bypasses authentication. Every Worker
 probe has a unique request ID and one validation-run ID.
-Evidence records the exact Version, validation run, acceptance phase, frozen
-time bounds, route family/scenario, expected request IDs, and exact expected
-Worker invocation count. Static requests are excluded. Release control reads
-the raw `cf-worker-event` universe, advances the upper bound only until the
-expected request set is complete, then freezes it. Consecutive complete reads
-must have identical event IDs, request IDs, and a SHA-256 universe digest.
-Pagination, when required, retains that frozen upper bound. Noise, duplicate
-IDs, a missing expected request, or an identity mismatch fails closed.
+### Worker CPU qualification and provider uncertainty
 
-Worker-changing candidates first receive excluded warm-up requests. Acceptance
-then records at least ten platform samples for every selected hot path and at
-least fifty samples overall through the baseline route set. All global and
-route-family counts, maximum, p95, and p99 CPU, maximum wall time,
-`exceededCpu`, `exceededMemory`, 1102, and 5xx counts are derived locally from
-that one raw universe. A numeric zero CPU value is a valid sample. Independent
-Cloudflare calculation queries must not be combined into one release result.
-A failed route family fails the whole Candidate even when the global result
-appears safe.
-The Free-plan CPU gate
-is `PASSED` only with the exact invocation count, zero failures, p95 at most
-6 ms, p99 at most 8 ms, and maximum below 10 ms. Zero failures with CPU still
-within 10 ms but without that headroom is `REVIEW_REQUIRED`. Count contamination,
-any failure, p99 above 10 ms, or a sample above 10 ms is `FAILED`; p99 18 ms can
-never pass. Missing observability authority leaves Candidate in TESTING. The
-read-only API token is protected and never serialized into release state.
-An explicit validation retry may resume only an exact Candidate whose prior
-reason is CPU-headroom or semantic-parity review and whose repository and
-isolated Windows gates already passed. The retry records the prior reason,
-preserves exact migration acceptance and the accepted Windows preflight, and
-collects a new Cloudflare evidence universe; ordinary discovery never silently
-retries a terminal review.
+Worker request execution and Worker CPU measurement have separate authorities.
+Before any directed request is sent, Release Control persists one
+`CONTROLLED_EXACT` ledger containing the validation run, Candidate Version,
+Worker qualification key, plan and fixture digests, and every request ID with
+family, scenario, phase, sample kind, and planned time. Each direct response adds
+its exact observed Version and Git identity, HTTP status, bounded semantic
+result, `mutated` value, response digest, and completion time. This ledger proves
+which requests completed; Cloudflare logs do not.
+
+Cloudflare raw invocation telemetry is `EXTERNAL_AUTHORITATIVE_EVENTUAL`.
+Returned CPU, wall, status, outcome, event, request, run, and Version values are
+authoritative, but delivery completeness and latency are not internal
+invariants. Provider evidence is persisted as a monotonic union keyed by run,
+request, event, and Version. Pagination retains exact frozen bounds. Later
+shorter or reordered results cannot erase accepted events; duplicate identities
+with identical values deduplicate, while conflicting events, multiple events for
+one request, unknown requests, or identity contamination fail closed. A
+calculation-query count is `EXTERNAL_ADVISORY`: it corroborates the same
+run/Version/window, cannot invent per-family samples, cannot override a raw hard
+failure, and a contradiction fails closed.
+
+`worker-cpu-policy-v1` applies independently to every required family/scenario:
+
+- two warmups are excluded;
+- ten observed acceptance samples remain required;
+- two reserve requests are sent once;
+- one deficient family may receive one four-request targeted top-up;
+- one headroom-review family may receive one ten-request targeted top-up;
+- all observed valid acceptance events, including reserve and top-up events,
+  enter the metrics; no subset may be selected;
+- no family or scenario may be absent, and missing provider request IDs remain
+  explicit.
+
+`QUALIFIED` requires the normal complete observed result. A missing reserve event
+may produce `QUALIFIED_WITH_PROVIDER_OMISSION` only when every family still has
+at least ten observed samples, every direct response passed exactly, provider
+corroboration is non-contradictory, every existing p95/p99 threshold passes, and
+each affected family's observed maximum is at most 8 ms. This retains two
+milliseconds of headroom to the 10 ms Free-plan hard ceiling; it never treats a
+missing required sample as present. Any observed CPU at or above 10 ms, 5xx,
+1102, `exceededCpu`, `exceededMemory`, or Worker identity mismatch is an
+immediate hard failure. Global and family gates still require p95 at most 6 ms,
+p99 at most 8 ms, and maximum below 10 ms. A numeric zero CPU value is valid.
+
+Active provider recovery uses six persisted reads with 5, 10, 20, 30, 45, and
+60 second backoff. If quota remains deficient, only the deficient families may
+use their single top-up, followed by the same bounded read budget. Release
+Control then performs at most four read-only background reconciliations, fifteen
+minutes apart. Budgets and the exact request ledger survive controller or
+watchdog restart. Exhaustion produces stable non-promotable
+`PROVIDER_EVIDENCE_INSUFFICIENT`, not Candidate failure and not a human approval
+request. Quota satisfaction stops provider queries without waiting for optional
+reserve events.
+
+CPU evidence is stored independently from release identity. The versioned
+`worker-cpu-qualification-v1` records the exact deployed script ETag as the
+per-release Candidate binding. Because the executable embeds Git provenance,
+that raw ETag is not itself the reusable CPU behavior key. The reusable key
+hashes runtime/compatibility/assets/binding configuration, Worker route and locked
+toolchain closure, validation manifest, generated fixture byte digests and
+builder closure, CPU policy, D1 schema/capability migrations, and bounded route
+data-shape contract. It excludes PowerShell, Control Plane, Windows runtime, and
+documentation. The source receipt retains its exact Worker, Git, and ETag, while
+the current release records its own exact Worker, Git, and ETag. An immutable
+receipt may be reused only on a complete behavior-key match; the current release
+still binds that qualification to the exact current Candidate and labels it
+`CPU_QUALIFICATION_REUSED`. Fresh measurement is labeled
+`CPU_QUALIFICATION_FRESH`. Any CPU-affecting mismatch forces fresh evidence.
+
+Retry preserves passed migration, directed correctness, parity, and unrelated
+family evidence. It resumes unsent preplanned request IDs and provider evidence
+from the durable ledger, then targets only a deficient or headroom family. A
+full matrix restarts only when the qualification key changes or evidence is
+contaminated. The read-only provider token is never serialized into release
+state.
 
 PR #268 acceptance is retained only as labeled legacy manual evidence: 104
 samples, p50 2 ms, p95 4 ms, p99 4 ms, maximum 5 ms, and zero exceeded CPU,

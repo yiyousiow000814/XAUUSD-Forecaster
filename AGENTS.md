@@ -52,6 +52,13 @@ authoritative data.
 
 ## Problem Resolution Standard
 
+Required assurance must be proportional to control. Internally controlled
+safety invariants may require exact deterministic evidence. External-provider
+evidence must declare its delivery/completeness contract, uncertainty budget,
+bounded retry, corroboration, and fallback; do not manufacture false precision
+by requiring guarantees the provider does not contractually supply. Follow
+`docs/protocols/CHANGE_SAFETY.md`.
+
 ### Production recovery order
 
 When production is degraded, first identify and restore the last-known-safe

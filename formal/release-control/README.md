@@ -7,7 +7,10 @@ release-attempt lifecycle phases are `PREPARE`, `VERIFY`, `SWITCH`, and
 internal operations. It still abstracts exact identity, immutable acceptance,
 mutable dependency health, Sync ownership, watchdog epochs, Control Plane
 handoff, CURRENT/Reverse-Stable identity compatibility, cleanup, return, and
-recovery.
+recovery. Worker CPU qualification is also explicit: provider evidence may
+arrive incrementally or remain insufficient, one targeted top-up is bounded,
+hard failure cannot be hidden, and an immutable receipt is reusable only when
+its artifact key matches exactly.
 
 ## Run
 
@@ -59,6 +62,9 @@ The following actions and invariants generalize the observed failure classes:
 | Existing debt blocks an improvement | `RecordStableDebt` is non-failing, while `HardSafetyFails` and `IntroduceCandidateRegression` remain blockers |
 | Main or exact identity moves | `MainMoves`, `CorruptCandidateIdentity`; neither can mutate the in-flight target or produce accepted evidence |
 | Human Access evidence is missing or invalid | `RequireAccessReview`, valid/wrong-key/tampered/stale receipt states, exact-key `ApproveAccessReceipt`, and idempotent repeated approval; Switch still requires every gate |
+| Provider CPU evidence is delayed or incomplete | `AcceptCpuIndependentStages`, `BeginCpuEvidence`, `ProviderEvidenceArrives`, `TargetedCpuTopUp`, `ProviderEvidenceInsufficient`, and later recovery; pending evidence is not Candidate failure, accepted stages survive, and the evidence set only grows within a run |
+| CPU hard failure hidden by tolerance | `ProviderCpuHardFailure`, `QualifyCpuEvidence`, and `CpuHardFailureCannotQualify` |
+| Unrelated Git movement repeats CPU qualification | `ReuseCpuQualification`, `ChangeCpuArtifact`, and `ReusedCpuEvidenceMatchesArtifact`; exact artifact-key equality is required |
 
 Scenario and implementation mappings live in
 [`docs/design/RELEASE_CONTROL_STATE_MACHINE.md`](../../docs/design/RELEASE_CONTROL_STATE_MACHINE.md).
