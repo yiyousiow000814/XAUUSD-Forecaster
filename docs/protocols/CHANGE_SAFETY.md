@@ -40,6 +40,24 @@ The implementer's assumptions are not independent evidence. For large changes,
 use non-overlapping architecture, recovery, or final-evidence review when
 delegation is authorized and useful; do not duplicate broad scans.
 
+## Verification latency and composition
+
+Required verification has an explicit latency budget. Extending a timeout is
+not a correction for state-space explosion or inefficient test architecture.
+Formal models must prove invariants at the smallest correct abstraction and
+compose bounded subsystem proofs instead of exhaustively multiplying independent
+implementation state. Before changing a verification timeout, ask:
+
+- Is verification modeling the invariant or simulating implementation detail?
+- Are independent subsystems being multiplied unnecessarily?
+- Can the proof be decomposed without weakening coverage?
+- Does the required gate meet its latency budget?
+- Is a timeout increase hiding a modeling defect?
+
+Any state-space reduction assumption must be explicit, documented, and owned by
+another verified shard or interface contract. Required safety and liveness may
+run independently when they do not require the same state dimensions.
+
 ## Control-Proportional Assurance
 
 Required assurance is proportional to control. Classify each material evidence

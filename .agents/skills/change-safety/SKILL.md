@@ -35,3 +35,9 @@ revision.
 After an escaped blocker, identify the generic protocol question that should
 have exposed it and improve that question rather than recording only an incident
 literal. Keep authorization and task scope unchanged.
+
+Treat required-verification latency as a change-safety contract. Do not extend a
+timeout to conceal state-space explosion or inefficient verification design.
+Prove each invariant at the smallest correct abstraction, compose independently
+bounded subsystem proofs, keep safety and liveness state separate when possible,
+and verify that required gates meet their declared latency budget.
