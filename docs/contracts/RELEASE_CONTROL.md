@@ -86,9 +86,14 @@ requires bounded, exact process and filesystem-handle quiescence before the
 first move. The controller captures revision-owned service roots and their child
 identities, waits on those exact process handles, and inventories file,
 directory, and process-current-directory handles under the state tree. An
-external holder fails before watchdog or service suspension; the controller
-never terminates it. Effective delete/delete-child access and a reversible
-rename of the real state directory must pass. A separate preflight executes the
+external holder fails before watchdog or service suspension. The only automatic
+repair exception is a set made exclusively of Explorer directory handles whose
+paths are contained by the exact migration tree: the controller closes only
+matching shell windows, rechecks the native inventory, and may restart only the
+verified Explorer shell when no file operation is active. Any other holder, an
+identity change, or an active Explorer file operation remains fail-closed.
+Effective delete/delete-child access and a reversible rename of the real state
+directory must pass. A separate preflight executes the
 same real-path quiesce, rename, Stable recovery, owner, and health contract
 without moving state or changing release evidence; migration is not authorized
 until that preflight passes.

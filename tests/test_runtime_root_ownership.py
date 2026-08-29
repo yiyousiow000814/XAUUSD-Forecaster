@@ -918,6 +918,215 @@ def test_external_directory_holder_fails_before_controlled_shutdown(
 
 
 @pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_explorer_window_release_closes_only_matching_locations(
+    tmp_path: Path, powershell: str,
+) -> None:
+    state = tmp_path / "state tree"
+    relevant = state / "logs"
+    unrelated = tmp_path / "unrelated"
+    body = (
+        "$script:closed=@();"
+        "function New-FakeExplorerWindow{param($Id,$Path);"
+        "$owner=[pscustomobject]@{id=$Id};"
+        "$owner|Add-Member -MemberType ScriptMethod -Name Quit -Value "
+        "{$script:closed+=@($this.id)};"
+        "[pscustomobject]@{hwnd=$Id;busy=$false;location_name=$Id;"
+        "location_url='';location_path=$Path;shell_window=$owner}};"
+        "function Get-ExplorerShellWindowInventory{@("
+        f"(New-FakeExplorerWindow 'target-root' '{state}'),"
+        f"(New-FakeExplorerWindow 'target-child' '{relevant}'),"
+        f"(New-FakeExplorerWindow 'unrelated' '{unrelated}'))}};"
+        f"$result=Close-ExplorerShellWindowsForStateTree -StateTree '{state}';"
+        "[pscustomobject]@{closed=@($script:closed|Sort-Object);"
+        "closed_count=$result.closed_count;examined=$result.examined_count}|"
+        "ConvertTo-Json -Compress"
+    )
+    evidence = json.loads(
+        _run_control_contract(tmp_path, body, powershell=powershell)
+    )
+
+    assert evidence == {
+        "closed": ["target-child", "target-root"],
+        "closed_count": 2,
+        "examined": 3,
+    }
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_explorer_holder_persistence_uses_controlled_shell_restart(
+    tmp_path: Path, powershell: str,
+) -> None:
+    state = tmp_path / "state tree"
+    held = state / "logs"
+    body = (
+        "$holder=[pscustomobject]@{process_id=41;process_name='explorer.exe';"
+        f"controlled=$false;kind='DIRECTORY';path='{held}';"
+        "handle_count=2;granted_access='0x00100081'};"
+        "$script:reads=0;$script:graceful=0;$script:stopped=0;"
+        "$script:started=0;$script:healthy=0;"
+        "function Start-Sleep{};"
+        "function Close-ExplorerShellWindowsForStateTree{"
+        "[pscustomobject]@{closed_count=0;examined_count=2}};"
+        "function Get-ExternalRuntimeStateHolderInventory{"
+        "$script:reads+=1;$external=if($script:reads -lt 3){@($holder)}else{@()};"
+        "[pscustomobject]@{external=$external;"
+        "inventory=[pscustomobject]@{holders=$external}}};"
+        "function Test-ExplorerFileOperationActive{$false};"
+        "function Get-ControlPlaneProcessIdentity{param($ProcessId);"
+        "[pscustomobject]@{process_id=$ProcessId;name='explorer.exe';"
+        "process_start_token='2026-01-01T00:00:00.0000000+00:00'}};"
+        "function Test-ControlPlaneStartTokenEqual{$true};"
+        "function Request-ExplorerGracefulShutdown{$script:graceful+=1;1};"
+        "function Stop-VerifiedExplorerProcesses{$script:stopped+=1};"
+        "function Start-ExplorerShell{$script:started+=1};"
+        "function Wait-ExplorerShellHealthy{$script:healthy+=1;$true};"
+        "$plan=[pscustomobject]@{entries=@()};"
+        f"$result=Repair-ExplorerRuntimeStateHolders -StateTree '{state}' "
+        "-ProcessPlan $plan -InitialHolders @($holder);"
+        "[pscustomobject]@{method=$result.method;reads=$script:reads;"
+        "graceful=$script:graceful;stopped=$script:stopped;"
+        "started=$script:started;healthy=$script:healthy;"
+        "remaining=@($result.inventory.holders).Count}|ConvertTo-Json -Compress"
+    )
+    evidence = json.loads(
+        _run_control_contract(tmp_path, body, powershell=powershell)
+    )
+
+    assert evidence == {
+        "method": "CONTROLLED_SHELL_RESTART",
+        "reads": 3,
+        "graceful": 1,
+        "stopped": 1,
+        "started": 1,
+        "healthy": 1,
+        "remaining": 0,
+    }
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_matching_explorer_window_release_avoids_shell_restart(
+    tmp_path: Path, powershell: str,
+) -> None:
+    state = tmp_path / "state tree"
+    held = state / "logs"
+    body = (
+        "$holder=[pscustomobject]@{process_id=41;process_name='explorer.exe';"
+        f"controlled=$false;kind='DIRECTORY';path='{held}';"
+        "handle_count=1;granted_access='0x00100081'};"
+        "$script:stopped=0;$script:started=0;"
+        "function Start-Sleep{};"
+        "function Close-ExplorerShellWindowsForStateTree{"
+        "[pscustomobject]@{closed_count=1;examined_count=2}};"
+        "function Get-ExternalRuntimeStateHolderInventory{"
+        "[pscustomobject]@{external=@();inventory=[pscustomobject]@{holders=@()}}};"
+        "function Stop-VerifiedExplorerProcesses{$script:stopped+=1};"
+        "function Start-ExplorerShell{$script:started+=1};"
+        "$plan=[pscustomobject]@{entries=@()};"
+        f"$result=Repair-ExplorerRuntimeStateHolders -StateTree '{state}' "
+        "-ProcessPlan $plan -InitialHolders @($holder);"
+        "[pscustomobject]@{method=$result.method;closed=$result.closed_window_count;"
+        "stopped=$script:stopped;started=$script:started}|ConvertTo-Json -Compress"
+    )
+    evidence = json.loads(
+        _run_control_contract(tmp_path, body, powershell=powershell)
+    )
+
+    assert evidence == {
+        "method": "MATCHING_WINDOW_CLOSED",
+        "closed": 1,
+        "stopped": 0,
+        "started": 0,
+    }
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_non_explorer_holder_is_never_auto_terminated(
+    tmp_path: Path, powershell: str,
+) -> None:
+    state = tmp_path / "state tree"
+    held = state / "logs"
+    body = (
+        "$holder=[pscustomobject]@{process_id=41;process_name='python.exe';"
+        f"controlled=$false;kind='DIRECTORY';path='{held}';"
+        "handle_count=1;granted_access='0x00100081'};"
+        "$script:stopped=0;"
+        "function Stop-VerifiedExplorerProcesses{$script:stopped+=1};"
+        "$plan=[pscustomobject]@{entries=@()};"
+        f"try{{Repair-ExplorerRuntimeStateHolders -StateTree '{state}' "
+        "-ProcessPlan $plan -InitialHolders @($holder)|Out-Null}"
+        "catch{$failure=$_.Exception.Message};"
+        "[pscustomobject]@{failure=$failure;stopped=$script:stopped}|"
+        "ConvertTo-Json -Compress"
+    )
+    evidence = json.loads(
+        _run_control_contract(tmp_path, body, powershell=powershell)
+    )
+
+    assert evidence["failure"].startswith("RUNTIME_STATE_EXTERNAL_HOLDER_ACTIVE:")
+    assert evidence["stopped"] == 0
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_explorer_file_operation_blocks_shell_restart(
+    tmp_path: Path, powershell: str,
+) -> None:
+    state = tmp_path / "state tree"
+    held = state / "logs"
+    body = (
+        "$holder=[pscustomobject]@{process_id=41;process_name='explorer.exe';"
+        f"controlled=$false;kind='DIRECTORY';path='{held}';"
+        "handle_count=1;granted_access='0x00100081'};"
+        "$script:stopped=0;"
+        "function Start-Sleep{};"
+        "function Close-ExplorerShellWindowsForStateTree{"
+        "[pscustomobject]@{closed_count=0;examined_count=1}};"
+        "function Get-ExternalRuntimeStateHolderInventory{"
+        "[pscustomobject]@{external=@($holder);"
+        "inventory=[pscustomobject]@{holders=@($holder)}}};"
+        "function Test-ExplorerFileOperationActive{$true};"
+        "function Stop-VerifiedExplorerProcesses{$script:stopped+=1};"
+        "$plan=[pscustomobject]@{entries=@()};"
+        f"try{{Repair-ExplorerRuntimeStateHolders -StateTree '{state}' "
+        "-ProcessPlan $plan -InitialHolders @($holder)|Out-Null}"
+        "catch{$failure=$_.Exception.Message};"
+        "[pscustomobject]@{failure=$failure;stopped=$script:stopped}|"
+        "ConvertTo-Json -Compress"
+    )
+    evidence = json.loads(
+        _run_control_contract(tmp_path, body, powershell=powershell)
+    )
+
+    assert evidence == {
+        "failure": "RUNTIME_STATE_EXPLORER_FILE_OPERATION_ACTIVE",
+        "stopped": 0,
+    }
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_explorer_operation_window_detection_ignores_completed_hidden_window(
+    tmp_path: Path, powershell: str,
+) -> None:
+    body = (
+        "function Get-ExplorerTopLevelWindowInventory{param($ProcessIds);"
+        "if($script:active){@([pscustomobject]@{class_name='OperationStatusWindow';"
+        "visible=$true;title='Copying 12 items'})}else{"
+        "@([pscustomobject]@{class_name='OperationStatusWindow';"
+        "visible=$false;title='100% complete'})}};"
+        "$script:active=$false;$completed=Test-ExplorerFileOperationActive "
+        "-ProcessIds @(41);"
+        "$script:active=$true;$active=Test-ExplorerFileOperationActive "
+        "-ProcessIds @(41);"
+        "[pscustomobject]@{completed=$completed;active=$active}|"
+        "ConvertTo-Json -Compress"
+    )
+    evidence = json.loads(
+        _run_control_contract(tmp_path, body, powershell=powershell)
+    )
+
+    assert evidence == {"completed": False, "active": True}
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
 def test_multiple_holders_are_reported_without_state_mutation(
     tmp_path: Path, powershell: str,
 ) -> None:
