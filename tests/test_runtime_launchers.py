@@ -2,6 +2,7 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import base64
 import json
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -1207,6 +1208,7 @@ def test_business_switch_never_invokes_control_bundle_copy(
         + "$script:checkouts = @(); "
         f"function Get-CodeRevision {{ return '{previous}' }}; "
         "function Invoke-ProductionShapePreflight { return $true }; "
+        "function Resolve-ServiceLaunchContracts { return $services }; "
         "function git { if ($args -contains 'checkout') { "
         "$script:checkouts += [string]$args[-1] }; $global:LASTEXITCODE = 0 }; "
         "function Copy-Item { throw 'copy failed' }; "
@@ -1230,6 +1232,7 @@ def test_candidate_switch_preserves_reviewed_runtime_control_bundle(tmp_path) ->
         _authorized_candidate(previous, candidate)
         + f"function Get-CodeRevision {{ return '{previous}' }}; "
         "function Invoke-ProductionShapePreflight { return $true }; "
+        "function Resolve-ServiceLaunchContracts { return $services }; "
         "function git { if ($args -contains 'checkout') { foreach ($name in "
         "$runtimeControlFileNames) { Set-Content -LiteralPath "
         "(Join-Path $moduleRoot ('scripts\\' + $name)) "
@@ -1251,6 +1254,10 @@ def test_candidate_switch_preserves_reviewed_runtime_control_bundle(tmp_path) ->
 def test_runtime_control_bundle_records_exact_source_revision_and_hashes(tmp_path) -> None:
     runtime = tmp_path / "runtime"
     _write_control_bundle(runtime, "reviewed", scripts_dir=True)
+    shutil.copy2(
+        ROOT / "scripts" / "windows-service-launch-contract.json",
+        runtime / "scripts" / "windows-service-launch-contract.json",
+    )
     subprocess.run(["git", "init", "-q"], cwd=runtime, check=True)
     subprocess.run(["git", "config", "user.name", "Contract Test"], cwd=runtime, check=True)
     subprocess.run(
@@ -2172,6 +2179,7 @@ def test_business_switch_ignores_control_copy_failure_hook(
         + "$script:failedCandidateCopy = $false; "
         f"function Get-CodeRevision {{ return '{previous}' }}; "
         "function Invoke-ProductionShapePreflight { return $true }; "
+        "function Resolve-ServiceLaunchContracts { return $services }; "
         "function git { if ($args -contains 'checkout') { $revision = [string]$args[-1]; "
         "foreach ($name in $runtimeControlFileNames) { Set-Content -LiteralPath "
         "(Join-Path $moduleRoot ('scripts\\' + $name)) "
@@ -2212,6 +2220,7 @@ def test_business_switch_never_moves_control_bundle_files(
         + "$script:failedCandidateMove = $false; "
         f"function Get-CodeRevision {{ return '{previous}' }}; "
         "function Invoke-ProductionShapePreflight { return $true }; "
+        "function Resolve-ServiceLaunchContracts { return $services }; "
         "function git { if ($args -contains 'checkout') { $revision = [string]$args[-1]; "
         "foreach ($name in $runtimeControlFileNames) { Set-Content -LiteralPath "
         "(Join-Path $moduleRoot ('scripts\\' + $name)) "
@@ -2248,6 +2257,12 @@ def test_observation_rollback_preserves_independent_control_bundle(
     )
     result = _run_control_center_contract(
         tmp_path,
+        f"$script:rollbackState=[pscustomobject]@{{transaction=[pscustomobject]@{{"
+        f"type='TEST';recovery_plan=[pscustomobject]@{{body=[pscustomobject]@{{"
+        f"stable_revision='{previous}'}}}}}}}}; "
+        "function Get-ReleaseControlState { return $script:rollbackState }; "
+        "function Restore-RuntimeRecoveryPlan { return $true }; "
+        "function Wait-RuntimeRecoveryPlanHealth { return $true }; "
         "function git { $global:LASTEXITCODE = 0 }; "
         "function Restart-CodeReloadableServices {}; "
         "function Write-RuntimeCodeState {}; function Write-RuntimeUpdateFailure {}; "
@@ -3839,6 +3854,8 @@ def test_passed_candidate_promotes_only_after_observation_commit(tmp_path) -> No
         "function Test-CloudflareReleasePlacement { return $true }; "
         f"function Get-RuntimeCodeState {{ return [pscustomobject]@{{applied_revision='{previous}'}} }}; "
         "function Test-SingleProductionOwner { return $true }; "
+        f"function New-RuntimeRecoveryPlan {{ return [pscustomobject]@{{body="
+        f"[pscustomobject]@{{stable_revision='{previous}'}};digest=('0' * 64)}} }}; "
         "function Update-RuntimeCheckout { return $true }; "
         "$script:cutover=@(); "
         "function Restart-CodeReloadableServices { $script:cutover += 'windows-with-sync-paused'; return [DateTimeOffset]::UtcNow }; "
@@ -3957,6 +3974,8 @@ def test_reverse_restores_both_identities_without_d1_mutation(tmp_path) -> None:
         "function Assert-ActiveControlBundle { return [pscustomobject]@{exact_revision=$true} };"
         "function Test-CloudflareRollbackTarget { return $true };"
         "function Test-SingleProductionOwner { return $true };"
+        f"function New-RuntimeRecoveryPlan {{ return [pscustomobject]@{{body="
+        f"[pscustomobject]@{{stable_revision='{current}'}};digest=('0' * 64)}} }};"
         "function Stop-ForecasterService {};"
         "function Start-RuntimeObservation {};"
         "$script:worker='';$script:windows='';"

@@ -195,85 +195,160 @@ function Get-CollectorSecret {
     return ""
 }
 
-$services = @(
+function Get-BusinessRuntimeRevision {
+    param([string]$CodeRoot = $moduleRoot)
+    try {
+        $revision = (& git.exe -C $CodeRoot rev-parse HEAD 2>$null).Trim()
+        if ($LASTEXITCODE -eq 0 -and $revision -match '^[0-9a-f]{40}$') {
+            return $revision
+        }
+    } catch {}
+    throw "BUSINESS_RUNTIME_REVISION_UNAVAILABLE"
+}
+
+function New-ServiceLaunchContract {
+    param(
+        [string]$Revision, [string]$Key, [string]$Label,
+        [ValidateSet("PowerShell", "Python")][string]$Kind,
+        [string]$Script, [string[]]$Arguments, [string]$CodeRoot = $moduleRoot
+    )
+    $scriptPath = [System.IO.Path]::GetFullPath((Join-Path $CodeRoot $Script))
+    if (-not $scriptPath.StartsWith(
+        [System.IO.Path]::GetFullPath($CodeRoot) + [System.IO.Path]::DirectorySeparatorChar,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) { throw "SERVICE_LAUNCH_SCRIPT_OUTSIDE_REVISION:$Key" }
     [pscustomobject]@{
-        Key = "quote"
-        Label = "cTrader XAUUSD Local Algo"
-        Match = "run_live_quote_bridge.ps1"
-        Kind = "PowerShell"
-        Script = "ctrader\XauusdForwardQuoteBridge\run_live_quote_bridge.ps1"
-        Arguments = @(
-            "-Symbol", "XAUUSD",
-            "-StateRoot", $runtimeForwardRoot,
-            "-ConfigRoot", (Join-Path $repositoryLocalRoot "config")
-        )
-    },
-    [pscustomobject]@{
-        Key = "collector"
-        Label = "XAUUSD Collector"
-        Match = "run_forward_collector.py"
-        Kind = "Python"
-        Script = "scripts\run_forward_collector.py"
-        Arguments = @(
-            "--state-root", $runtimeForwardRoot,
-            "--market-jsonl", (Join-Path $runtimeForwardRoot "quotes"),
-            "--status-file", (Join-Path $runtimeForwardRoot "collector-status.json"),
-            "--poll-seconds", "10",
-            "--news-poll-seconds", "60",
-            "--minimum-training-rows", "200",
-            "--retrain-interval", "50"
-        )
-    },
-    [pscustomobject]@{
-        Key = "annotator"
-        Label = "Gemini News Annotator"
-        Match = "run_news_annotator.py"
-        Kind = "Python"
-        Script = "scripts\run_news_annotator.py"
-        Arguments = @(
-            "--state-root", $runtimeForwardRoot,
-            "--database", (Join-Path $runtimeForwardRoot "forward-evidence.sqlite3"),
-            "--status-file", (Join-Path $runtimeForwardRoot "news-annotator-status.json"),
-            "--interval-seconds", "60", "--batch-size", "0"
-        )
-    },
-    [pscustomobject]@{
-        Key = "api"
-        Label = "Dashboard API"
-        Match = "run_dashboard_api.py"
-        Kind = "Python"
-        Script = "scripts\run_dashboard_api.py"
-        Arguments = @(
-            "--state-root", $runtimeForwardRoot,
-            "--database", (Join-Path $runtimeForwardRoot "forward-evidence.sqlite3")
-        )
-    },
-    [pscustomobject]@{
-        Key = "sync"
-        Label = "Dashboard Mirrors"
-        Match = "run_dashboard_sync.py"
-        Kind = "Python"
-        Script = "scripts\run_dashboard_sync.py"
-        Arguments = @(
-            "--config", (Join-Path $runtimeForwardRoot "dashboard-sync.json"),
-            "--status-file", (Join-Path $runtimeForwardRoot "dashboard-sync-status.json"),
-            "--state-root", $runtimeForwardRoot,
-            "--interval-seconds", "30"
-        )
-    },
-    [pscustomobject]@{
-        Key = "broadcast"
-        Label = "Live Broadcast Publisher"
-        Match = "run_live_broadcast_publisher.py"
-        Kind = "Python"
-        Script = "scripts\run_live_broadcast_publisher.py"
-        Arguments = @(
-            "--state-root", $runtimeForwardRoot,
-            "--interval-seconds", "30",
-            "--activate-production-publisher"
-        )
+        Revision = $Revision; CodeRoot = [System.IO.Path]::GetFullPath($CodeRoot)
+        Key = $Key; Label = $Label; Match = [System.IO.Path]::GetFileName($Script)
+        Kind = $Kind; Script = $Script; ScriptPath = $scriptPath
+        Arguments = @($Arguments)
     }
-)
+}
+
+function Resolve-ServiceContractArgument {
+    param([string]$Value)
+    $resolved = $Value.Replace("{runtime_forward_root}", $runtimeForwardRoot)
+    $resolved = $resolved.Replace(
+        "{repository_config_root}", (Join-Path $repositoryLocalRoot "config")
+    )
+    if ($resolved -match '\{[^}]+\}') { throw "SERVICE_LAUNCH_TOKEN_UNKNOWN:$Value" }
+    return $resolved
+}
+
+function Get-LegacyQuoteAuthorityPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$EnvironmentName,
+        [Parameter(Mandatory = $true)][string]$ConfigFileName
+    )
+    $value = ([string](Get-UserEnvironmentValue -Name $EnvironmentName)).Trim()
+    if (-not $value) {
+        $path = Join-Path (Join-Path $repositoryLocalRoot "config") $ConfigFileName
+        if (Test-Path -LiteralPath $path) {
+            $value = (Get-Content -LiteralPath $path -Raw -Encoding UTF8).Trim()
+        }
+    }
+    if (-not $value) { return "" }
+    return [System.IO.Path]::GetFullPath($value)
+}
+
+function Get-LegacyStableServiceLaunchContracts {
+    param([string]$Revision, [string]$CodeRoot = $moduleRoot)
+    if ($Revision -ne "783d25314b090dd7fbbf124777c3b8de517d2b85") {
+        throw "LEGACY_SERVICE_LAUNCH_REVISION_UNKNOWN:$Revision"
+    }
+    $legacyQuoteArguments = @(
+        "-Symbol","XAUUSD","-OutputDirectory",(Join-Path $runtimeForwardRoot "quotes")
+    )
+    $legacyCliPath = Get-LegacyQuoteAuthorityPath `
+        -EnvironmentName "CTRADER_CLI_PATH" -ConfigFileName "windows_cli_path.txt"
+    $legacySecretRoot = Get-LegacyQuoteAuthorityPath `
+        -EnvironmentName "CTRADER_SECRET_ROOT" -ConfigFileName "windows_secret_path.txt"
+    if ($legacyCliPath) { $legacyQuoteArguments += @("-CliPath", $legacyCliPath) }
+    if ($legacySecretRoot) { $legacyQuoteArguments += @("-SecretRoot", $legacySecretRoot) }
+    @(
+        New-ServiceLaunchContract -Revision $Revision -CodeRoot $CodeRoot `
+            -Key "quote" -Label "cTrader XAUUSD Local Algo" -Kind "PowerShell" `
+            -Script "ctrader\XauusdForwardQuoteBridge\run_live_quote_bridge.ps1" `
+            -Arguments $legacyQuoteArguments
+        New-ServiceLaunchContract -Revision $Revision -CodeRoot $CodeRoot `
+            -Key "collector" -Label "XAUUSD Collector" -Kind "Python" `
+            -Script "scripts\run_forward_collector.py" -Arguments @(
+                "--local-root",$runtimeForwardRoot,"--market-jsonl",(Join-Path $runtimeForwardRoot "quotes"),
+                "--status-file",(Join-Path $runtimeForwardRoot "collector-status.json"),
+                "--poll-seconds","10","--news-poll-seconds","60",
+                "--minimum-training-rows","200","--retrain-interval","50")
+        New-ServiceLaunchContract -Revision $Revision -CodeRoot $CodeRoot `
+            -Key "annotator" -Label "Gemini News Annotator" -Kind "Python" `
+            -Script "scripts\run_news_annotator.py" -Arguments @(
+                "--database",(Join-Path $runtimeForwardRoot "forward-evidence.sqlite3"),
+                "--status-file",(Join-Path $runtimeForwardRoot "news-annotator-status.json"),
+                "--interval-seconds","60","--batch-size","0")
+        New-ServiceLaunchContract -Revision $Revision -CodeRoot $CodeRoot `
+            -Key "api" -Label "Dashboard API" -Kind "Python" `
+            -Script "scripts\run_dashboard_api.py" -Arguments @(
+                "--database",(Join-Path $runtimeForwardRoot "forward-evidence.sqlite3"))
+        New-ServiceLaunchContract -Revision $Revision -CodeRoot $CodeRoot `
+            -Key "sync" -Label "Dashboard Mirrors" -Kind "Python" `
+            -Script "scripts\run_dashboard_sync.py" -Arguments @(
+                "--config",(Join-Path $runtimeForwardRoot "dashboard-sync.json"),
+                "--status-file",(Join-Path $runtimeForwardRoot "dashboard-sync-status.json"),
+                "--interval-seconds","30")
+    )
+}
+
+function Resolve-ServiceLaunchContracts {
+    param([Parameter(Mandatory = $true)][string]$Revision, [string]$CodeRoot = $moduleRoot)
+    $observed = Get-BusinessRuntimeRevision -CodeRoot $CodeRoot
+    if ($observed -ne $Revision) {
+        throw ("SERVICE_LAUNCH_REVISION_MISMATCH:{0}:{1}" -f $observed, $Revision)
+    }
+    $manifestPath = Join-Path $CodeRoot "scripts\windows-service-launch-contract.json"
+    if (-not (Test-Path -LiteralPath $manifestPath)) {
+        return @(Get-LegacyStableServiceLaunchContracts -Revision $Revision -CodeRoot $CodeRoot)
+    }
+    $manifestSpec = "${Revision}:scripts/windows-service-launch-contract.json"
+    $expectedBlob = (& git.exe -C $CodeRoot rev-parse $manifestSpec 2>$null).Trim()
+    $observedBlob = (& git.exe -C $CodeRoot hash-object --path `
+        "scripts/windows-service-launch-contract.json" $manifestPath 2>$null).Trim()
+    if ($LASTEXITCODE -ne 0 -or $expectedBlob -notmatch '^[0-9a-f]{40,64}$' -or
+        $observedBlob -ne $expectedBlob) {
+        throw "SERVICE_LAUNCH_MANIFEST_REVISION_MISMATCH"
+    }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 |
+        ConvertFrom-ReleaseControlJson
+    if ([string]$manifest.schema_version -ne "windows-service-launch-contract-v1") {
+        throw "SERVICE_LAUNCH_MANIFEST_SCHEMA_INVALID"
+    }
+    $contracts = @()
+    foreach ($entry in @($manifest.services)) {
+        $arguments = @($entry.arguments | ForEach-Object {
+            Resolve-ServiceContractArgument -Value ([string]$_)
+        })
+        $contracts += New-ServiceLaunchContract -Revision $Revision -CodeRoot $CodeRoot `
+            -Key ([string]$entry.key) -Label ([string]$entry.label) `
+            -Kind ([string]$entry.kind) -Script ([string]$entry.script) `
+            -Arguments $arguments
+    }
+    $keys = @($contracts.Key)
+    if ($keys.Count -ne 6 -or @($keys | Sort-Object -Unique).Count -ne 6 -or
+        @($keys | Where-Object { $_ -notin @("quote","collector","annotator","api","sync","broadcast") }).Count) {
+        throw "SERVICE_LAUNCH_MANIFEST_SERVICE_SET_INVALID"
+    }
+    return $contracts
+}
+
+$serviceContractCodeRoot = $moduleRoot
+try {
+    $serviceContractRevision = Get-BusinessRuntimeRevision -CodeRoot $serviceContractCodeRoot
+} catch {
+    # Install/test harnesses can load the controller before RuntimeRoot is a
+    # Git checkout. They use the controller's own exact revision contract;
+    # production launch/recovery still requires an exact business checkout.
+    $serviceContractCodeRoot = $scriptRepositoryRoot
+    $serviceContractRevision = Get-BusinessRuntimeRevision -CodeRoot $serviceContractCodeRoot
+}
+$services = @(Resolve-ServiceLaunchContracts -Revision $serviceContractRevision `
+    -CodeRoot $serviceContractCodeRoot)
 
 function Test-BroadcastPublisherEnabled {
     [string](Get-UserEnvironmentValue -Name "AURUM_LIVE_BROADCAST_PUBLISHER_ENABLED") -eq "1"
@@ -5731,6 +5806,7 @@ function Update-RuntimeCheckout {
         & git -C $moduleRoot checkout --detach --force --quiet $Revision 2>$null
         if ($LASTEXITCODE -ne 0) { throw "verified revision checkout failed" }
         $checkoutChanged = $true
+        $script:services = @(Resolve-ServiceLaunchContracts -Revision $Revision)
         Write-RuntimeUpdateState @{
             previous_revision = $previousRevision
             staged_revision = $Revision
@@ -5747,6 +5823,7 @@ function Update-RuntimeCheckout {
                     -Message "Candidate switch preparation failed and the previous checkout could not be restored: $reason"
                 return $false
             }
+            $script:services = @(Resolve-ServiceLaunchContracts -Revision $previousRevision)
         }
         Write-RuntimeUpdateFailure -Revision $Revision -Status "SWITCH_FAILED" `
             -Message "Candidate switch failed before service reload; the current version is still running: $reason"
@@ -5825,6 +5902,7 @@ function Test-CodeReloadHealth {
         @("collector", "collector-status.json"),
         @("annotator", "news-annotator-status.json")
     )) {
+        if ([string]$heartbeatSpec[0] -notin $RequiredServiceKeys) { continue }
         # Collector reconciliation can temporarily keep the annotator waiting
         # on SQLite during a coordinated reload.  A fresh STARTING heartbeat
         # proves either candidate process launched; the subsequent observation
@@ -6022,9 +6100,22 @@ function Invoke-RuntimeRollback {
         if (-not $PreviousRevision -or $PreviousRevision -notmatch '^[0-9a-f]{40}$') {
             throw "previous revision is unavailable"
         }
-        & git -C $moduleRoot checkout --detach --force --quiet $PreviousRevision 2>$null
-        if ($LASTEXITCODE -ne 0) { throw "cannot restore previous revision" }
-        Restart-CodeReloadableServices -Revision $PreviousRevision
+        $rollbackState = Get-ReleaseControlState
+        $recoveryPlan = if ($rollbackState -and $rollbackState.transaction) {
+            $rollbackState.transaction.recovery_plan
+        } else { $null }
+        if (-not $recoveryPlan -or
+            [string]$recoveryPlan.body.stable_revision -ne $PreviousRevision) {
+            throw "RUNTIME_ROLLBACK_CAPTURED_AUTHORITY_REQUIRED"
+        }
+        $recoveryStarted = [DateTimeOffset]::UtcNow
+        $null = Restore-RuntimeRecoveryPlan -Plan $recoveryPlan
+        try {
+            $null = Wait-RuntimeRecoveryPlanHealth -Plan $recoveryPlan `
+                -RecoveryStarted $recoveryStarted
+        } catch {
+            throw "RUNTIME_ROLLBACK_HEALTH_FAILED:$($_.Exception.Message)"
+        }
         Write-RuntimeCodeState -Revision $PreviousRevision
         Write-RuntimeUpdateFailure -Revision $FailedRevision -Status "ROLLED_BACK" `
             -Message "Candidate observation failed and the previous version was restored: $Reason"
@@ -6191,6 +6282,9 @@ function Start-ReleasePromotion {
             phase = "PRECHECK"
             target = $candidate
             previous = $state.stable
+            recovery_plan = New-RuntimeRecoveryPlan `
+                -StableRevision ([string]$state.stable.windows_revision) `
+                -ReleaseState $state -ServiceContracts @($services)
             deferred_projection_obligations = $deferredObligations
             started_at = [DateTimeOffset]::UtcNow.ToString("o")
         }
@@ -6297,6 +6391,7 @@ function Invoke-ReleaseWindowsRestore {
     param([Parameter(Mandatory = $true)][string]$Revision)
     & git -C $moduleRoot checkout --detach --force --quiet $Revision 2>$null
     if ($LASTEXITCODE -ne 0) { throw "Cannot restore Windows revision." }
+    $script:services = @(Resolve-ServiceLaunchContracts -Revision $Revision)
     Restart-CodeReloadableServices -Revision $Revision | Out-Null
     Write-RuntimeCodeState -Revision $Revision
 }
@@ -6321,6 +6416,9 @@ function Invoke-ReverseStable {
             phase = "REVERSING"
             target = $target
             previous = $current
+            recovery_plan = New-RuntimeRecoveryPlan `
+                -StableRevision ([string]$current.windows_revision) `
+                -ReleaseState $state -ServiceContracts @($services)
             started_at = [DateTimeOffset]::UtcNow.ToString("o")
         }
         $state.deployment_status = "REVERSING"
@@ -6343,8 +6441,32 @@ function Invoke-ReverseStable {
         Write-ReleaseHistory -Event "REVERSE_OBSERVATION_STARTED" -Release $target
         return $true
     } catch {
+        $failure = $_.Exception.Message
         $state = Get-ReleaseControlState
-        if ($state) {
+        if ($state -and $state.transaction -and $state.transaction.recovery_plan) {
+            try {
+                $recoveryStarted = [DateTimeOffset]::UtcNow
+                $null = Restore-RuntimeRecoveryPlan -Plan $state.transaction.recovery_plan
+                $null = Wait-RuntimeRecoveryPlanHealth `
+                    -Plan $state.transaction.recovery_plan `
+                    -RecoveryStarted $recoveryStarted
+                Invoke-CloudflareDeployment `
+                    -StableVersionId ([string]$state.transaction.previous.worker_version_id) `
+                    -Message "automatic reverse recovery $([string]$state.transaction.id)"
+                $state.transaction = $null
+                $state.deployment_status = "READY"
+                $state.drift = $null
+                Write-ReleaseControlState -State $state
+            } catch {
+                $state.deployment_status = "RECOVERY_REQUIRED"
+                $state.drift = [pscustomobject]@{
+                    code = "REVERSE_RECOVERY_FAILED"
+                    reason = "$failure;$($_.Exception.Message)"
+                    observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+                }
+                Write-ReleaseControlState -State $state
+            }
+        } elseif ($state) {
             $state.deployment_status = "RECOVERY_REQUIRED"
             $state.drift = [pscustomobject]@{
                 code = "REVERSE_INCOMPLETE"
@@ -6961,7 +7083,7 @@ function Start-ForecasterService {
     $stdout = Join-Path $logRoot ("control-{0}-{1}.stdout.log" -f $Service.Key, $stamp)
     $stderr = Join-Path $logRoot ("control-{0}-{1}.stderr.log" -f $Service.Key, $stamp)
     if ($Service.Kind -eq "PowerShell") {
-        $scriptPath = Join-Path $moduleRoot $Service.Script
+        $scriptPath = [string]$Service.ScriptPath
         $rawArguments = @(
             "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
             "-File", $scriptPath
@@ -6970,15 +7092,15 @@ function Start-ForecasterService {
             ConvertTo-NativeProcessArgument -Argument ([string]$_)
         })
         Start-Process -FilePath "powershell.exe" -ArgumentList $arguments `
-            -WorkingDirectory $moduleRoot -WindowStyle Hidden `
+            -WorkingDirectory ([string]$Service.CodeRoot) -WindowStyle Hidden `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr | Out-Null
     } else {
-        $rawArguments = @($Service.Script) + @($Service.Arguments)
+        $rawArguments = @([string]$Service.ScriptPath) + @($Service.Arguments)
         $arguments = @($rawArguments | ForEach-Object {
             ConvertTo-NativeProcessArgument -Argument ([string]$_)
         })
         Start-Process -FilePath "python" -ArgumentList $arguments `
-            -WorkingDirectory $moduleRoot -WindowStyle Hidden `
+            -WorkingDirectory ([string]$Service.CodeRoot) -WindowStyle Hidden `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr | Out-Null
     }
 }
@@ -8140,10 +8262,244 @@ function Enable-AutoStart {
         -RuntimePath $moduleRoot -SourceRepository $repositoryRoot
 }
 
+function New-RuntimeRecoveryPlan {
+    param(
+        [Parameter(Mandatory = $true)][string]$StableRevision,
+        [object]$ReleaseState,
+        [Parameter(Mandatory = $true)][array]$ServiceContracts
+    )
+    if ($StableRevision -notmatch '^[0-9a-f]{40}$') {
+        throw "RUNTIME_RECOVERY_STABLE_REVISION_REQUIRED"
+    }
+    $running = @()
+    $owners = [ordered]@{}
+    $contracts = @()
+    foreach ($service in $ServiceContracts) {
+        if ([string]$service.Revision -ne $StableRevision -or
+            [string]$service.CodeRoot -ne [System.IO.Path]::GetFullPath($moduleRoot)) {
+            throw "RUNTIME_RECOVERY_CONTRACT_IDENTITY_MISMATCH:$($service.Key)"
+        }
+        $processes = @(Get-ForecasterProcesses -Service $service)
+        if ($processes.Count -gt 1) {
+            throw "RUNTIME_RECOVERY_MULTIPLE_SERVICE_OWNERS:$($service.Key)"
+        }
+        if ($processes.Count -eq 1) { $running += [string]$service.Key }
+        $serviceArguments = @($service.Arguments | ForEach-Object { [string]$_ })
+        if ($StableRevision -eq "783d25314b090dd7fbbf124777c3b8de517d2b85" -and
+            [string]$service.Key -eq "quote" -and $processes.Count -eq 1) {
+            $cliIndex = [Array]::IndexOf([object[]]$serviceArguments, "-CliPath")
+            $secretIndex = [Array]::IndexOf([object[]]$serviceArguments, "-SecretRoot")
+            if ($cliIndex -lt 0 -or $secretIndex -lt 0 -or
+                $cliIndex + 1 -ge $serviceArguments.Count -or
+                $secretIndex + 1 -ge $serviceArguments.Count) {
+                throw "RUNTIME_RECOVERY_QUOTE_AUTHORITY_UNAVAILABLE"
+            }
+            $cliPath = [string]$serviceArguments[$cliIndex + 1]
+            $secretRoot = [string]$serviceArguments[$secretIndex + 1]
+            foreach ($required in @(
+                $cliPath, (Join-Path $secretRoot "ctid.txt"),
+                (Join-Path $secretRoot "account.txt"),
+                (Join-Path $secretRoot "ctrader-cli.pwd")
+            )) {
+                if (-not (Test-Path -LiteralPath $required)) {
+                    throw "RUNTIME_RECOVERY_QUOTE_AUTHORITY_UNAVAILABLE"
+                }
+            }
+        }
+        $owners[[string]$service.Key] = @($processes | ForEach-Object {
+            $identity = Get-ControlPlaneProcessIdentity -ProcessId ([int]$_.ProcessId)
+            if (-not $identity -or -not [string]$identity.process_start_token) {
+                throw "RUNTIME_RECOVERY_OWNER_IDENTITY_UNAVAILABLE:$($service.Key)"
+            }
+            [ordered]@{
+                process_id = [int]$identity.process_id
+                process_start_token = [string]$identity.process_start_token
+            }
+        })
+        $contracts += [ordered]@{
+            revision = [string]$service.Revision; code_root = [string]$service.CodeRoot
+            key = [string]$service.Key; label = [string]$service.Label
+            match = [string]$service.Match; kind = [string]$service.Kind
+            script = [string]$service.Script; script_path = [string]$service.ScriptPath
+            arguments = $serviceArguments
+        }
+    }
+    foreach ($service in $ServiceContracts) {
+        if ((Test-ControlPlaneServiceOwnerRequired -Service $service -ReleaseState $ReleaseState) -and
+            [string]$service.Key -notin $running) {
+            throw "RUNTIME_RECOVERY_REQUIRED_OWNER_MISSING:$($service.Key)"
+        }
+    }
+    $body = [ordered]@{
+        schema = "runtime-recovery-plan-v1"; stable_revision = $StableRevision
+        stable_worker_version = if ($ReleaseState -and $ReleaseState.stable) {
+            [string]$ReleaseState.stable.worker_version_id
+        } else { "NOT_RECORDED" }
+        runtime_root = [System.IO.Path]::GetFullPath($moduleRoot)
+        runtime_state_root = [System.IO.Path]::GetFullPath($runtimeForwardRoot)
+        config_root = [System.IO.Path]::GetFullPath((Join-Path $repositoryLocalRoot "config"))
+        running_service_keys = @($running | Sort-Object)
+        process_baseline = $owners; service_contracts = $contracts
+        rollback_target = $StableRevision
+    }
+    $json = $body | ConvertTo-Json -Depth 9 -Compress
+    [pscustomobject]@{
+        body = [pscustomobject]$body
+        digest = Get-Sha256BytesHex -Bytes ([Text.Encoding]::UTF8.GetBytes($json))
+    }
+}
+
+function Assert-RuntimeRecoveryPlan {
+    param([Parameter(Mandatory = $true)][object]$Plan)
+    $json = $Plan.body | ConvertTo-Json -Depth 9 -Compress
+    $digest = Get-Sha256BytesHex -Bytes ([Text.Encoding]::UTF8.GetBytes($json))
+    if ([string]$Plan.digest -ne $digest) { throw "RUNTIME_RECOVERY_PLAN_TAMPERED" }
+    if ([string]$Plan.body.stable_revision -ne [string]$Plan.body.rollback_target -or
+        [string]$Plan.body.runtime_root -ne [System.IO.Path]::GetFullPath($moduleRoot) -or
+        [string]$Plan.body.runtime_state_root -ne [System.IO.Path]::GetFullPath($runtimeForwardRoot)) {
+        throw "RUNTIME_RECOVERY_PLAN_AUTHORITY_MISMATCH"
+    }
+    if (@($Plan.body.service_contracts).Count -eq 0) {
+        throw "RUNTIME_RECOVERY_PLAN_INCOMPLETE"
+    }
+    return $true
+}
+
+function Convert-RecoveryPlanContracts {
+    param([Parameter(Mandatory = $true)][object]$Plan)
+    $null = Assert-RuntimeRecoveryPlan -Plan $Plan
+    @($Plan.body.service_contracts | ForEach-Object {
+        [pscustomobject]@{
+            Revision=[string]$_.revision; CodeRoot=[string]$_.code_root
+            Key=[string]$_.key; Label=[string]$_.label; Match=[string]$_.match
+            Kind=[string]$_.kind; Script=[string]$_.script
+            ScriptPath=[string]$_.script_path; Arguments=@($_.arguments)
+        }
+    })
+}
+
+function Restore-RuntimeRecoveryPlan {
+    param([Parameter(Mandatory = $true)][object]$Plan)
+    $contracts = @(Convert-RecoveryPlanContracts -Plan $Plan)
+    $revision = [string]$Plan.body.stable_revision
+    Stop-All
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
+    do {
+        $remaining = @($services | ForEach-Object { Get-ForecasterProcesses -Service $_ })
+        if ($remaining.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+    if ($remaining.Count -ne 0) { throw "RUNTIME_RECOVERY_SERVICE_FENCE_FAILED" }
+    & git -C $moduleRoot checkout --detach --force --quiet $revision 2>$null
+    if ($LASTEXITCODE -ne 0 -or (Get-BusinessRuntimeRevision) -ne $revision) {
+        throw "RUNTIME_RECOVERY_CHECKOUT_FAILED"
+    }
+    $script:services = $contracts
+    foreach ($service in $contracts) {
+        $expected = [string]$service.Key -in @($Plan.body.running_service_keys)
+        $count = @(Get-ForecasterProcesses -Service $service).Count
+        if ($expected -and $count -eq 0) {
+            Start-ForecasterService -Service $service -SkipExistingCheck
+        } elseif (-not $expected -and $count -ne 0) {
+            throw "RUNTIME_RECOVERY_UNEXPECTED_OWNER:$($service.Key)"
+        }
+    }
+    return $true
+}
+
+function Wait-RuntimeRecoveryPlanHealth {
+    param(
+        [Parameter(Mandatory = $true)][object]$Plan,
+        [DateTimeOffset]$RecoveryStarted = [DateTimeOffset]::UtcNow
+    )
+    $contracts = @(Convert-RecoveryPlanContracts -Plan $Plan)
+    $runningKeys = @($Plan.body.running_service_keys | ForEach-Object { [string]$_ })
+    $requiredReloadable = @($runningKeys | Where-Object { $_ -in $reloadableServiceKeys })
+    $deadline = [DateTimeOffset]::UtcNow.Add($serviceStartupTimeout)
+    do {
+        Start-Sleep -Milliseconds 500
+        $ownersHealthy = $true
+        foreach ($service in $contracts) {
+            $expectedCount = if ([string]$service.Key -in $runningKeys) { 1 } else { 0 }
+            if (@(Get-ForecasterProcesses -Service $service).Count -ne $expectedCount) {
+                $ownersHealthy = $false
+                break
+            }
+        }
+        $functionalHealthy = $ownersHealthy -and (
+            $requiredReloadable.Count -eq 0 -or
+            (Test-CodeReloadHealth -ReloadStarted $RecoveryStarted `
+                -RequiredServiceKeys $requiredReloadable)
+        )
+        if ($functionalHealthy -and "quote" -in $runningKeys) {
+            $quote = $contracts | Where-Object Key -eq "quote" | Select-Object -First 1
+            $quoteProcesses = @(Get-ForecasterProcesses -Service $quote)
+            $quoteState = Get-ServiceState -Service $quote -Processes $quoteProcesses
+            $functionalHealthy = $quoteState -in @("LIVE", "MARKET CLOSED")
+        }
+    } while (-not $functionalHealthy -and [DateTimeOffset]::UtcNow -lt $deadline)
+    if (-not $functionalHealthy) { throw "RUNTIME_RECOVERY_HEALTH_FAILED" }
+    Write-WatchdogEvent -Event "RUNTIME_RECOVERY_HEALTHY" -Service "all" `
+        -State ([string]$Plan.body.stable_revision)
+    return [pscustomobject]@{
+        revision = [string]$Plan.body.stable_revision
+        running_service_keys = @($runningKeys)
+        recovered_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+}
+
+function Wait-RuntimeStateTreeQuiesced {
+    param(
+        [Parameter(Mandatory = $true)][string]$StateTree,
+        [TimeSpan]$Timeout = [TimeSpan]::FromSeconds(30)
+    )
+    if (-not (Test-Path -LiteralPath $StateTree)) { return $true }
+    $deadline = [DateTimeOffset]::UtcNow.Add($Timeout)
+    $lastError = ""
+    do {
+        $streams = New-Object System.Collections.Generic.List[System.IDisposable]
+        $probePath = "$StateTree.quiescence-probe"
+        try {
+            foreach ($file in @(Get-ChildItem -LiteralPath $StateTree -File -Recurse -Force `
+                -ErrorAction Stop)) {
+                $streams.Add([System.IO.File]::Open(
+                    $file.FullName, [System.IO.FileMode]::Open,
+                    [System.IO.FileAccess]::Read, [System.IO.FileShare]::None
+                ))
+            }
+            foreach ($stream in $streams) { $stream.Dispose() }
+            $streams.Clear()
+            if (Test-Path -LiteralPath $probePath) {
+                throw "stale quiescence probe path exists"
+            }
+            [System.IO.Directory]::Move($StateTree, $probePath)
+            [System.IO.Directory]::Move($probePath, $StateTree)
+            return $true
+        } catch {
+            $lastError = $_.Exception.Message
+            foreach ($stream in $streams) { try { $stream.Dispose() } catch {} }
+            if ((Test-Path -LiteralPath $probePath) -and
+                -not (Test-Path -LiteralPath $StateTree)) {
+                try { [System.IO.Directory]::Move($probePath, $StateTree) } catch {}
+            }
+            Start-Sleep -Milliseconds 250
+        }
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+    throw "RUNTIME_STATE_HANDLES_NOT_QUIESCED:$lastError"
+}
+
+function Assert-RuntimeMigrationFailurePoint {
+    param([string]$FailurePhase, [string]$CurrentPhase)
+    if ($FailurePhase -and $FailurePhase -eq $CurrentPhase) {
+        throw "INJECTED_RUNTIME_MIGRATION_FAILURE:$CurrentPhase"
+    }
+}
+
 function Convert-LegacyRuntimeLocalJunction {
     param(
         [Parameter(Mandatory = $true)][string]$RuntimeLocal,
-        [Parameter(Mandatory = $true)][string]$SourceLocal
+        [Parameter(Mandatory = $true)][string]$SourceLocal,
+        [string]$FailurePhase = ""
     )
     $runtimePath = [System.IO.Path]::GetFullPath($RuntimeLocal)
     $sourcePath = [System.IO.Path]::GetFullPath($SourceLocal)
@@ -8182,11 +8538,17 @@ function Convert-LegacyRuntimeLocalJunction {
             Move-Item -LiteralPath $sourceForward `
                 -Destination (Join-Path $migrationRoot "forward")
         }
+        Assert-RuntimeMigrationFailurePoint -FailurePhase $FailurePhase `
+            -CurrentPhase "AFTER_STATE_STAGED"
         # Windows PowerShell 5.1 can throw an internal NullReferenceException
         # when Remove-Item targets a directory junction. Directory.Delete on
         # the already verified link removes only the junction, never its target.
         [System.IO.Directory]::Delete($runtimePath)
+        Assert-RuntimeMigrationFailurePoint -FailurePhase $FailurePhase `
+            -CurrentPhase "AFTER_JUNCTION_REMOVAL"
         Move-Item -LiteralPath $migrationRoot -Destination $runtimePath
+        Assert-RuntimeMigrationFailurePoint -FailurePhase $FailurePhase `
+            -CurrentPhase "AFTER_RUNTIME_ROOT_CREATION"
         $migrated = Get-Item -LiteralPath $runtimePath -Force
         if ($migrated.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
             throw "Runtime state root remained a reparse point after migration."
@@ -8240,6 +8602,14 @@ function Exit-RuntimeStateMigrationLock {
 }
 
 function Invoke-RuntimeStateRootMigration {
+    param(
+        [ValidateSet("","BEFORE_WATCHDOG_SUSPENSION","AFTER_WATCHDOG_SUSPENSION",
+            "AFTER_STOP_ALL","AFTER_STATE_STAGED","AFTER_JUNCTION_REMOVAL",
+            "AFTER_RUNTIME_ROOT_CREATION","DURING_STABLE_RESTART",
+            "AFTER_PARTIAL_RESTART","BEFORE_WATCHDOG_HANDOFF",
+            "DURING_HEALTH_VERIFICATION")]
+        [string]$FailurePhase = ""
+    )
     $bundle = Assert-ControlCenterProcessIdentity
     $runtime = [System.IO.Path]::GetFullPath($moduleRoot)
     $source = [System.IO.Path]::GetFullPath($repositoryRoot)
@@ -8258,6 +8628,8 @@ function Invoke-RuntimeStateRootMigration {
     $oldWatchdog = $null
     $watchdogStopped = $false
     $migrationCompleted = $false
+    $servicesStopped = $false
+    $recoveryPlan = $null
     try {
         $release = Get-ReleaseControlState
         if (($release -and $release.transaction) -or
@@ -8277,12 +8649,19 @@ function Invoke-RuntimeStateRootMigration {
         if ($stableRevision -notmatch '^[0-9a-f]{40}$') {
             throw "RUNTIME_STATE_MIGRATION_STABLE_REVISION_REQUIRED"
         }
+        $recoveryPlan = New-RuntimeRecoveryPlan -StableRevision $stableRevision `
+            -ReleaseState $release -ServiceContracts @($services)
+        $null = Assert-RuntimeRecoveryPlan -Plan $recoveryPlan
+        Assert-RuntimeMigrationFailurePoint -FailurePhase $FailurePhase `
+            -CurrentPhase "BEFORE_WATCHDOG_SUSPENSION"
 
         $supervisionState = Suspend-ControlPlaneSupervision
         Wait-ControlPlaneGuardQuiesced
         Stop-VerifiedWatchdogOwner -Identity $oldWatchdog
         $watchdogStopped = $true
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        Assert-RuntimeMigrationFailurePoint -FailurePhase $FailurePhase `
+            -CurrentPhase "AFTER_WATCHDOG_SUSPENSION"
 
         # Recheck after fencing the watchdog. The migration lock prevents every
         # normal release entrypoint from acquiring its transaction lock.
@@ -8293,6 +8672,7 @@ function Invoke-RuntimeStateRootMigration {
         }
 
         Stop-All
+        $servicesStopped = $true
         $stopDeadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
         do {
             $remaining = @()
@@ -8305,9 +8685,14 @@ function Invoke-RuntimeStateRootMigration {
         if ($remaining.Count -ne 0) {
             throw "RUNTIME_STATE_MIGRATION_SERVICE_QUIESCE_FAILED"
         }
+        $sourceForward = Join-Path $repositoryLocalRoot "forward"
+        $null = Wait-RuntimeStateTreeQuiesced -StateTree $sourceForward
+        Assert-RuntimeMigrationFailurePoint -FailurePhase $FailurePhase `
+            -CurrentPhase "AFTER_STOP_ALL"
 
         $result = Convert-LegacyRuntimeLocalJunction `
-            -RuntimeLocal $runtimeLocalRoot -SourceLocal $repositoryLocalRoot
+            -RuntimeLocal $runtimeLocalRoot -SourceLocal $repositoryLocalRoot `
+            -FailurePhase $FailurePhase
         $runtimeItem = Get-Item -LiteralPath $runtimeLocalRoot -Force
         if ($runtimeItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
             throw "RUNTIME_STATE_MIGRATION_REPARSE_POINT_REMAINED"
@@ -8318,11 +8703,21 @@ function Invoke-RuntimeStateRootMigration {
         $migrationCompleted = $true
 
         $reloadStarted = [DateTimeOffset]::UtcNow
+        $startedCount = 0
         foreach ($service in $services) {
             if (@($before.services.($service.Key)).Count -eq 1) {
+                if ($FailurePhase -eq "DURING_STABLE_RESTART" -and $startedCount -eq 0) {
+                    throw "INJECTED_RUNTIME_MIGRATION_FAILURE:DURING_STABLE_RESTART"
+                }
                 Start-ForecasterService -Service $service -SkipExistingCheck
+                $startedCount += 1
+                if ($FailurePhase -eq "AFTER_PARTIAL_RESTART" -and $startedCount -eq 1) {
+                    throw "INJECTED_RUNTIME_MIGRATION_FAILURE:AFTER_PARTIAL_RESTART"
+                }
             }
         }
+        Assert-RuntimeMigrationFailurePoint -FailurePhase $FailurePhase `
+            -CurrentPhase "DURING_HEALTH_VERIFICATION"
         $deadline = [DateTimeOffset]::UtcNow.Add($serviceStartupTimeout)
         do {
             Start-Sleep -Milliseconds 500
@@ -8359,6 +8754,8 @@ function Invoke-RuntimeStateRootMigration {
             preserved_revision = $stableRevision
         }
 
+        Assert-RuntimeMigrationFailurePoint -FailurePhase $FailurePhase `
+            -CurrentPhase "BEFORE_WATCHDOG_HANDOFF"
         $null = Start-WatchdogReplacement -PassThru
         $newWatchdog = Wait-VerifiedWatchdogHandoff `
             -ExpectedRevision ([string]$bundle.source_revision) `
@@ -8373,15 +8770,14 @@ function Invoke-RuntimeStateRootMigration {
         }
     } catch {
         $failure = $_.Exception.Message
-        if ($migrationCompleted) {
-            # Independent runtime-root ownership is safe to retain. Recovery
-            # restarts the same frozen Stable checkout; it never moves Git.
-            foreach ($service in $services) {
-                try {
-                    if (@(Get-ForecasterProcesses -Service $service).Count -eq 0) {
-                        Start-ForecasterService -Service $service -SkipExistingCheck
-                    }
-                } catch {}
+        if ($servicesStopped -and $recoveryPlan) {
+            try {
+                $recoveryStarted = [DateTimeOffset]::UtcNow
+                $null = Restore-RuntimeRecoveryPlan -Plan $recoveryPlan
+                $null = Wait-RuntimeRecoveryPlanHealth -Plan $recoveryPlan `
+                    -RecoveryStarted $recoveryStarted
+            } catch {
+                $failure = "${failure};RUNTIME_RECOVERY_FAILED:$($_.Exception.Message)"
             }
         }
         if ($watchdogStopped) {

@@ -31,11 +31,14 @@ jobs:
   runtime-contracts:
     name: Windows runtime contracts
     runs-on: windows-latest
-    # Recent complete runs need about five minutes including native-wheel setup.
-    # Keep per-test fail-closed bounds below and allow bounded runner variance.
-    timeout-minutes: 7
+    # The mandatory real cross-version recovery rehearsal brings the test step
+    # to about 6.5 minutes, plus native-wheel setup. Keep each test fail-closed
+    # at 30 seconds below while allowing bounded end-to-end runner variance.
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
@@ -48,5 +51,6 @@ jobs:
           tests/test_runtime_health.py
           tests/test_news_scheduler.py
           tests/test_runtime_root_ownership.py
+          tests/test_cross_version_runtime_recovery.py
           tests/test_runtime_launchers.py
           tests/test_control_plane_install.py

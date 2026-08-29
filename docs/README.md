@@ -58,6 +58,7 @@ current rules merely because they discovered one.
 
 ### Protocols
 
+- [Change safety](protocols/CHANGE_SAFETY.md)
 - [Execution-model research](protocols/EXECUTION_MODEL_RESEARCH.md)
 - [Storyline promotion](protocols/STORYLINE_PROMOTION.md)
 - [News candidate retrieval evaluation](protocols/NEWS_CANDIDATE_RETRIEVAL_EVALUATION.md)
