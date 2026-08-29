@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "shared_paths": [
+    ".github/workflows/formal-verification.yml",
+    "scripts/run_tla_model.py",
+    "scripts/select_tla_shards.py",
+    "formal/release-control/shards.json",
+    "formal/release-control/README.md",
+    "formal/release-control/DECOMPOSITION_AUDIT.md",
+    "docs/contracts/RELEASE_CONTROL.md",
+    "docs/protocols/CHANGE_SAFETY.md",
+    "AGENTS.md"
+  ],
+  "shards": [
+    {"id":"cpu-evidence-safety","module":"CpuEvidence.tla","config":"CpuEvidenceSafety.cfg","kind":"safety","paths":["scripts/worker_cpu_evidence.ps1","scripts/xauusd_control_center.ps1","formal/release-control/CpuEvidence*"],"properties":["TypeOK","CpuQualificationIsValid","CpuRetryBudgetIsBounded","ReserveEvidenceUseIsBounded","CpuHardFailureCannotQualify","ReusedCpuEvidenceMatchesArtifact","CpuRecoveryPreservesIndependentStages","EveryRequiredFamilyQuotaSatisfied","ArtifactKeyChangeInvalidatesReuse","CpuEvidenceOnlyGrows","TargetedRetryPreservesAcceptedWork"]},
+    {"id":"cpu-evidence-liveness","module":"CpuEvidence.tla","config":"CpuEvidenceLiveness.cfg","kind":"liveness","paths":["scripts/worker_cpu_evidence.ps1","scripts/xauusd_control_center.ps1","formal/release-control/CpuEvidence*"],"properties":["TypeOK","CpuQualificationIsValid","CpuRetryBudgetIsBounded","ReserveEvidenceUseIsBounded","CpuHardFailureCannotQualify","PendingEventuallyResolves"]},
+    {"id":"release-integration-safety","module":"ReleaseIntegration.tla","config":"ReleaseIntegrationSafety.cfg","kind":"safety","paths":["scripts/xauusd_control_center.ps1","formal/release-control/ReleaseIntegration*"],"properties":["TypeOK","CpuQualificationRequiredForPass","ProviderPendingIsNotCandidateFailure","CpuRecoveryPreservesIndependentStages","ArtifactMovementInvalidatesCpu","PassedIdentityIsExact","AcceptedEvidenceIsRequired","PassedGatesAreSafe","HardFailuresBlock","UnrelatedDebtIsNotFailure","PromoteRequiresPassed"]},
+    {"id":"core-release-safety","module":"CoreRelease.tla","config":"CoreReleaseSafety.cfg","kind":"safety","paths":["scripts/xauusd_control_center.ps1","formal/release-control/CoreRelease*"],"properties":["TypeOK","AtMostOneProductionWriter","PrepareVerifyKeepsStableSync","CandidatePreparationPreservesStable","SwitchRequiresAcceptance","StableUnchangedDuringSwitchAndObserve","SingleTransaction","NoPromoteFromPendingCpu","StableChangesOnlyAfterObservation"]},
+    {"id":"core-release-liveness","module":"CoreRelease.tla","config":"CoreReleaseLiveness.cfg","kind":"liveness","paths":["scripts/xauusd_control_center.ps1","formal/release-control/CoreRelease*"],"properties":["TypeOK","StableUnchangedDuringSwitchAndObserve","SingleTransaction","ObservedFailureEventuallyRestoresPrevious","SwitchFailureEventuallyTerminates","TransactionEventuallyTerminates"]},
+    {"id":"install-recovery-safety","module":"InstallRecovery.tla","config":"InstallRecoverySafety.cfg","kind":"safety","paths":["scripts/xauusd_control_center.ps1","formal/release-control/InstallRecovery*"],"properties":["TypeOK","StaleSupervisorIsFenced","RecoveredActivationRequiresIndependentChecks","ActiveRecoveredSupervisorIsSafe"]},
+    {"id":"install-recovery-liveness","module":"InstallRecovery.tla","config":"InstallRecoveryLiveness.cfg","kind":"liveness","paths":["scripts/xauusd_control_center.ps1","formal/release-control/InstallRecovery*"],"properties":["TypeOK","StaleSupervisorIsFenced","ActiveRecoveredSupervisorIsSafe","AbandonedInstallEventuallySafe"]},
+    {"id":"news-migration-safety","module":"NewsMigration.tla","config":"NewsMigrationSafety.cfg","kind":"safety","paths":["scripts/build_news_projection_generation.py","scripts/xauusd_control_center.ps1","formal/release-control/NewsMigration*"],"properties":["TypeOK","VerificationWatermarkDoesNotRegress","ActiveLegacyEqualsCurrent","LegacyStableWritesRemainFenced","CurrentIdentitySetMatchesGeneration","FreshStagingIdentitySetMatchesGeneration","CurrentGenerationCannotBeCleaned","FreshStagingCannotBeCleaned","InvalidStagedLegacyCannotActivate"]},
+    {"id":"access-evidence-safety","module":"AccessEvidence.tla","config":"AccessEvidenceSafety.cfg","kind":"safety","paths":["scripts/xauusd_control_center.ps1","formal/release-control/AccessEvidence*"],"properties":["TypeOK","AccessEvidenceIsRequired","InvalidAccessReceiptCannotPass","AccessApprovalIsIdempotent"]}
+  ]
+}

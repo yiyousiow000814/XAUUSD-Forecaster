@@ -10,23 +10,67 @@ permissions:
   contents: read
 
 concurrency:
-  group: formal-verification-${{ github.event.pull_request.number || github.ref }}
+  group: formal-verification-pr-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  release-control-model:
-    name: Release Control TLC
+  plan:
+    name: Select formal shards
     runs-on: ubuntu-latest
-    # The complete safety graph includes the post-activation legacy-writer and
-    # distinct valid, wrong-key, tampered, and stale Access receipt paths. It
-    # reaches 58.01M safety states in about 12.5 minutes; retain every path and
-    # bounded headroom for the subsequent liveness temporal-property check.
-    timeout-minutes: 20
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: select
+        name: Select authoritative impact set
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python scripts/select_tla_shards.py --base "$BASE_SHA" --github-output "$GITHUB_OUTPUT"
+
+  shards:
+    name: TLC ${{ matrix.id }}
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        if: matrix.id != 'no-modeled-impact'
         with:
           distribution: temurin
           java-version: "21"
-      - name: Check Release Control safety and liveness
-        run: python scripts/run_tla_model.py
+      - name: No modeled Release Control impact
+        if: matrix.id == 'no-modeled-impact'
+        run: echo "No authoritative shard ownership matched this change."
+      - name: Run bounded TLC shard
+        if: matrix.id != 'no-modeled-impact'
+        run: python scripts/run_tla_model.py --shard "${{ matrix.id }}" --output ci
+      - name: Upload bounded shard evidence
+        if: always() && matrix.id != 'no-modeled-impact'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tlc-${{ matrix.id }}-result
+          path: formal-results/
+          if-no-files-found: warn
+          retention-days: 7
+
+  aggregate:
+    name: Release Control TLC
+    if: always()
+    needs: [plan, shards]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every selected shard
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          SHARD_RESULT: ${{ needs.shards.result }}
+        run: |
+          test "$PLAN_RESULT" = success
+          test "$SHARD_RESULT" = success

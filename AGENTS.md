@@ -29,6 +29,16 @@ an actor or transition was omitted. An interaction bug requires review of the
 composition rule, not only a regression for the observed interleaving. Follow
 `docs/contracts/SAFETY_COMPOSITION.md` for the full design record.
 
+Required verification has an explicit latency budget. Extending a timeout is
+not a correction for state-space explosion or inefficient test architecture.
+Formal models must prove invariants at the smallest correct abstraction and
+compose bounded subsystem proofs instead of exhaustively multiplying
+independent implementation state. Ask whether verification models the invariant
+or simulates implementation detail, whether independent subsystems are being
+multiplied, whether proof can be decomposed without weakening coverage, whether
+the required gate meets its latency budget, and whether a timeout increase is
+hiding a modeling defect.
+
 1. Find the existing source of truth.
 2. Reuse existing abstractions.
 3. Avoid duplicate logic.
@@ -51,6 +61,13 @@ repairing ownership or transport architecture over raising limits or deleting
 authoritative data.
 
 ## Problem Resolution Standard
+
+Required assurance must be proportional to control. Internally controlled
+safety invariants may require exact deterministic evidence. External-provider
+evidence must declare its delivery/completeness contract, uncertainty budget,
+bounded retry, corroboration, and fallback; do not manufacture false precision
+by requiring guarantees the provider does not contractually supply. Follow
+`docs/protocols/CHANGE_SAFETY.md`.
 
 ### Production recovery order
 

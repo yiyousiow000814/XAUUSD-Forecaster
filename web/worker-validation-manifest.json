@@ -1,6 +1,22 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "fixture_builder": "scripts/build_release_validation_fixtures.py",
+  "cpu_evidence_policy": {
+    "version": "worker-cpu-policy-v1",
+    "required_observed_acceptance": 10,
+    "reserve_acceptance": 2,
+    "deficit_top_up_acceptance": 4,
+    "headroom_top_up_acceptance": 10,
+    "maximum_deficit_top_ups": 1,
+    "maximum_headroom_top_ups": 1,
+    "active_read_backoff_seconds": [5, 10, 20, 30, 45, 60],
+    "maximum_background_reads": 4,
+    "background_read_interval_seconds": 900,
+    "pass_p95_ms": 6,
+    "pass_p99_ms": 8,
+    "hard_max_ms": 10,
+    "omission_max_ms": 8
+  },
   "optional_cpu_exempt_reason": "OPTIONAL_SMALL_OR_IO_DOMINATED_CONTRACT_ROUTE",
   "bundle_runtime_roots": [
     "web/app/api/**", "web/app/_lib/**", "web/build/**", "web/worker/**", "web/package.json",
