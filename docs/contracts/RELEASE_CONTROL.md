@@ -82,8 +82,16 @@ running service set, per-service launch contract, process baseline, runtime and
 config authorities, and rollback target. Switch, Reverse, migration failure,
 hidden-watchdog recovery, and observation rollback restore from that captured
 old authority, never from Candidate CLI syntax. Runtime-state migration also
-requires bounded process and filesystem-handle quiescence, including exclusive
-file access and a reversible directory rename probe, before the first move.
+requires bounded, exact process and filesystem-handle quiescence before the
+first move. The controller captures revision-owned service roots and their child
+identities, waits on those exact process handles, and inventories file,
+directory, and process-current-directory handles under the state tree. An
+external holder fails before watchdog or service suspension; the controller
+never terminates it. Effective delete/delete-child access and a reversible
+rename of the real state directory must pass. A separate preflight executes the
+same real-path quiesce, rename, Stable recovery, owner, and health contract
+without moving state or changing release evidence; migration is not authorized
+until that preflight passes.
 For a running pre-manifest quote bridge, its external CLI and secret-root
 authorities must be resolved, verified, and frozen into the recovery contract
 before quiescence; an implicit checkout-local fallback is not recoverable

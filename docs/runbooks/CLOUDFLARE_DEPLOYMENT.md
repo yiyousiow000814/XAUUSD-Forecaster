@@ -38,6 +38,17 @@ waits for the existing decision-cycle observation. **Reverse Stable** restores
 the recorded Previous Stable identities without rolling back D1 or deleting
 SQLite evidence. See [`RELEASE_CONTROL.md`](../contracts/RELEASE_CONTROL.md).
 
+Before replacing a legacy runtime-state junction, run the installed Control
+Center action `PreflightRuntimeStateRoot`. It validates the real junction and
+permissions, rejects external file/directory/current-directory holders before
+stopping a service, then temporarily quiesces the exact captured service trees,
+performs a reversible rename of the real state directory, and restores and
+health-checks the same Stable owners. Only a `PASSED` result for that real path
+authorizes `MigrateRuntimeStateRoot`. Holder diagnostics are bounded to process
+ID, process name, handle kind, safe path, and access mask; close the reported
+external application and rerun preflight rather than terminating it through the
+controller.
+
 After every `main` merge, confirm a Workers Build exists for that exact SHA.
 Build initialization may queue for several minutes; queue latency is not a
 skipped build. Release Control records the exact main revision as

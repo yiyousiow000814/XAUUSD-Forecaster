@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "MigrateRuntimeStateRoot")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "PreflightRuntimeStateRoot", "MigrateRuntimeStateRoot")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync", "broadcast")]
     [string]$ServiceKey = "",
@@ -366,6 +366,10 @@ function Get-ForecasterProcessSnapshot {
 function Test-ForecasterServiceProcess {
     param([object]$Process, [pscustomobject]$Service)
     if (-not $Process.CommandLine) { return $false }
+    if ($Process.CommandLine.IndexOf(
+        [string]$Service.ScriptPath,
+        [System.StringComparison]::OrdinalIgnoreCase
+    ) -lt 0) { return $false }
     if ($Service.Kind -eq "Python") {
         return $Process.Name -eq "python.exe" -and
             $Process.CommandLine.Contains($Service.Match)
@@ -8448,36 +8452,615 @@ function Wait-RuntimeRecoveryPlanHealth {
     }
 }
 
+function Initialize-RuntimeStateNativeProbe {
+    if ("XauusdRuntimeStateNativeProbe" -as [type]) { return }
+    $source = @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public sealed class XauusdRuntimeStateHandleInfo
+{
+    public int ProcessId;
+    public long HandleValue;
+    public uint GrantedAccess;
+    public bool IsDirectory;
+    public bool IsCurrentDirectory;
+    public string Path;
+    public int ProbeError;
+}
+
+public static class XauusdRuntimeStateNativeProbe
+{
+    private const int ProcessBasicInformation = 0;
+    private const int ProcessHandleInformation = 51;
+    private const int StatusInfoLengthMismatch = unchecked((int)0xC0000004);
+    private const uint ProcessVmRead = 0x0010;
+    private const uint ProcessDuplicateHandle = 0x0040;
+    private const uint ProcessQueryInformation = 0x0400;
+    private const uint DuplicateSameAccess = 0x00000002;
+    private const uint FileTypeDisk = 0x0001;
+    private const uint FileAttributeDirectory = 0x0010;
+    private const uint OpenExisting = 3;
+    private const uint FileFlagBackupSemantics = 0x02000000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessBasicInformationValue
+    {
+        public IntPtr Reserved1;
+        public IntPtr PebBaseAddress;
+        public IntPtr Reserved2_0;
+        public IntPtr Reserved2_1;
+        public IntPtr UniqueProcessId;
+        public IntPtr InheritedFromUniqueProcessId;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessHandleEntry
+    {
+        public IntPtr HandleValue;
+        public UIntPtr HandleCount;
+        public UIntPtr PointerCount;
+        public uint GrantedAccess;
+        public uint ObjectTypeIndex;
+        public uint HandleAttributes;
+        public uint Reserved;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileAttributeTagInfo
+    {
+        public uint FileAttributes;
+        public uint ReparseTag;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint access, bool inherit, int processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool DuplicateHandle(
+        IntPtr sourceProcess, IntPtr sourceHandle, IntPtr targetProcess,
+        out IntPtr targetHandle, uint access, bool inherit, uint options);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetFileType(IntPtr handle);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandle(
+        IntPtr handle, StringBuilder path, uint length, uint flags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandleEx(
+        IntPtr handle, int informationClass, out FileAttributeTagInfo information,
+        uint size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool ReadProcessMemory(
+        IntPtr process, IntPtr address, byte[] buffer, int size, out IntPtr read);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool IsWow64Process(IntPtr process, out bool isWow64);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateFile(
+        string path, uint access, uint share, IntPtr security,
+        uint creation, uint flags, IntPtr template);
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtQueryInformationProcess(
+        IntPtr process, int informationClass, IntPtr information,
+        int informationLength, out int returnLength);
+
+    private static string NormalizePath(string path)
+    {
+        if (path.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+            return @"\\" + path.Substring(8);
+        if (path.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase))
+            return path.Substring(4);
+        return path;
+    }
+
+    private static IntPtr ReadPointer(IntPtr process, IntPtr address)
+    {
+        byte[] bytes = new byte[IntPtr.Size];
+        IntPtr read;
+        if (!ReadProcessMemory(process, address, bytes, bytes.Length, out read) ||
+            read.ToInt64() != bytes.Length)
+            return IntPtr.Zero;
+        return IntPtr.Size == 8
+            ? new IntPtr(BitConverter.ToInt64(bytes, 0))
+            : new IntPtr(BitConverter.ToInt32(bytes, 0));
+    }
+
+    private static IntPtr GetCurrentDirectoryHandle(IntPtr process)
+    {
+        bool isWow64;
+        if (!IsWow64Process(process, out isWow64) || isWow64 || IntPtr.Size != 8)
+            return IntPtr.Zero;
+        IntPtr buffer = Marshal.AllocHGlobal(
+            Marshal.SizeOf(typeof(ProcessBasicInformationValue)));
+        ProcessBasicInformationValue basic;
+        try
+        {
+            int returned;
+            int status = NtQueryInformationProcess(
+                process, ProcessBasicInformation, buffer,
+                Marshal.SizeOf(typeof(ProcessBasicInformationValue)), out returned);
+            if (status != 0) return IntPtr.Zero;
+            basic = (ProcessBasicInformationValue)Marshal.PtrToStructure(
+                buffer, typeof(ProcessBasicInformationValue));
+        }
+        finally { Marshal.FreeHGlobal(buffer); }
+        if (basic.PebBaseAddress == IntPtr.Zero) return IntPtr.Zero;
+        IntPtr parameters = ReadPointer(
+            process, new IntPtr(basic.PebBaseAddress.ToInt64() + 0x20));
+        if (parameters == IntPtr.Zero) return IntPtr.Zero;
+        return ReadPointer(process, new IntPtr(parameters.ToInt64() + 0x48));
+    }
+
+    private static bool IsWithin(string path, string root)
+    {
+        return path.Equals(root, StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith(root + System.IO.Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static XauusdRuntimeStateHandleInfo[] Query(
+        int[] processIds, string stateTree, int maxHandlesPerProcess)
+    {
+        var results = new List<XauusdRuntimeStateHandleInfo>();
+        string root = System.IO.Path.GetFullPath(stateTree)
+            .TrimEnd(System.IO.Path.DirectorySeparatorChar);
+        foreach (int processId in processIds)
+        {
+            IntPtr process = OpenProcess(
+                ProcessVmRead | ProcessDuplicateHandle | ProcessQueryInformation,
+                false, processId);
+            if (process == IntPtr.Zero)
+            {
+                results.Add(new XauusdRuntimeStateHandleInfo {
+                    ProcessId = processId, ProbeError = Marshal.GetLastWin32Error()
+                });
+                continue;
+            }
+            IntPtr buffer = IntPtr.Zero;
+            try
+            {
+                IntPtr currentDirectoryHandle = GetCurrentDirectoryHandle(process);
+                int size = 65536;
+                int returned;
+                int status;
+                while (true)
+                {
+                    buffer = Marshal.AllocHGlobal(size);
+                    status = NtQueryInformationProcess(
+                        process, ProcessHandleInformation, buffer, size, out returned);
+                    if (status == 0) break;
+                    Marshal.FreeHGlobal(buffer);
+                    buffer = IntPtr.Zero;
+                    if (status != StatusInfoLengthMismatch || size >= 16777216)
+                    {
+                        results.Add(new XauusdRuntimeStateHandleInfo {
+                            ProcessId = processId, ProbeError = status
+                        });
+                        break;
+                    }
+                    size = Math.Min(Math.Max(size * 2, returned + 4096), 16777216);
+                }
+                if (buffer == IntPtr.Zero) continue;
+                ulong count = (ulong)Marshal.ReadInt64(buffer);
+                if (count > (ulong)maxHandlesPerProcess)
+                {
+                    results.Add(new XauusdRuntimeStateHandleInfo {
+                        ProcessId = processId, ProbeError = 234
+                    });
+                    continue;
+                }
+                int entrySize = Marshal.SizeOf(typeof(ProcessHandleEntry));
+                long offset = IntPtr.Size * 2;
+                for (ulong index = 0; index < count; index++)
+                {
+                    IntPtr entryAddress = new IntPtr(
+                        buffer.ToInt64() + offset + (long)index * entrySize);
+                    var entry = (ProcessHandleEntry)Marshal.PtrToStructure(
+                        entryAddress, typeof(ProcessHandleEntry));
+                    IntPtr duplicate;
+                    if (!DuplicateHandle(
+                        process, entry.HandleValue, GetCurrentProcess(), out duplicate,
+                        0, false, DuplicateSameAccess))
+                        continue;
+                    try
+                    {
+                        if (GetFileType(duplicate) != FileTypeDisk) continue;
+                        var path = new StringBuilder(32768);
+                        uint length = GetFinalPathNameByHandle(
+                            duplicate, path, (uint)path.Capacity, 0);
+                        if (length == 0 || length >= path.Capacity) continue;
+                        string normalized = NormalizePath(path.ToString());
+                        if (!IsWithin(normalized, root)) continue;
+                        FileAttributeTagInfo attributes;
+                        bool isDirectory = GetFileInformationByHandleEx(
+                            duplicate, 9, out attributes,
+                            (uint)Marshal.SizeOf(typeof(FileAttributeTagInfo))) &&
+                            (attributes.FileAttributes & FileAttributeDirectory) != 0;
+                        results.Add(new XauusdRuntimeStateHandleInfo {
+                            ProcessId = processId,
+                            HandleValue = entry.HandleValue.ToInt64(),
+                            GrantedAccess = entry.GrantedAccess,
+                            IsDirectory = isDirectory,
+                            IsCurrentDirectory = currentDirectoryHandle != IntPtr.Zero &&
+                                entry.HandleValue == currentDirectoryHandle,
+                            Path = normalized,
+                            ProbeError = 0
+                        });
+                    }
+                    finally { CloseHandle(duplicate); }
+                }
+            }
+            finally
+            {
+                if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+                CloseHandle(process);
+            }
+        }
+        return results.ToArray();
+    }
+
+    public static int ProbeDirectoryAccess(string path, uint access, uint share)
+    {
+        IntPtr handle = CreateFile(
+            path, access, share, IntPtr.Zero, OpenExisting,
+            FileFlagBackupSemantics, IntPtr.Zero);
+        if (handle == new IntPtr(-1)) return Marshal.GetLastWin32Error();
+        CloseHandle(handle);
+        return 0;
+    }
+}
+'@
+    Add-Type -TypeDefinition $source -ErrorAction Stop
+}
+
+function Get-RuntimeStateHolderInventory {
+    param(
+        [Parameter(Mandatory = $true)][string]$StateTree,
+        [int[]]$ControlledProcessIds = @()
+    )
+    Initialize-RuntimeStateNativeProbe
+    $root = [System.IO.Path]::GetFullPath($StateTree).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar
+    )
+    $sessionId = (Get-Process -Id $PID -ErrorAction Stop).SessionId
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop |
+        Where-Object { [int]$_.SessionId -eq [int]$sessionId })
+    if ($processes.Count -gt 512) { throw "RUNTIME_STATE_QUIESCENCE_TIMEOUT:PROCESS_BOUND" }
+    $processById = @{}
+    foreach ($process in $processes) { $processById[[int]$process.ProcessId] = $process }
+    $controlled = @{}
+    foreach ($processId in $ControlledProcessIds) { $controlled[[int]$processId] = $true }
+    $native = @([XauusdRuntimeStateNativeProbe]::Query(
+        [int[]]@($processes.ProcessId), $root, 100000
+    ))
+    $errors = @($native | Where-Object { [int]$_.ProbeError -ne 0 })
+    $rawHolders = @($native | Where-Object { [int]$_.ProbeError -eq 0 } |
+        ForEach-Object {
+            $process = $processById[[int]$_.ProcessId]
+            [pscustomobject]@{
+                process_id = [int]$_.ProcessId
+                process_name = if ($process) { [string]$process.Name } else { "exited" }
+                controlled = [bool]$controlled.ContainsKey([int]$_.ProcessId)
+                kind = if ([bool]$_.IsCurrentDirectory) { "PROCESS_CWD" } elseif (
+                    [bool]$_.IsDirectory
+                ) { "DIRECTORY" } else { "FILE" }
+                path = [string]$_.Path
+                handle = [long]$_.HandleValue
+                granted_access = ("0x{0:x8}" -f [uint32]$_.GrantedAccess)
+            }
+        })
+    $holders = @($rawHolders | Group-Object process_id,process_name,controlled,kind,path |
+        ForEach-Object {
+            $first = $_.Group[0]
+            [pscustomobject]@{
+                process_id = [int]$first.process_id
+                process_name = [string]$first.process_name
+                controlled = [bool]$first.controlled
+                kind = [string]$first.kind
+                path = [string]$first.path
+                handle_count = $_.Count
+                granted_access = @($_.Group.granted_access | Sort-Object -Unique) -join ","
+            }
+        } | Sort-Object process_id,path,kind)
+    [pscustomobject]@{
+        state_tree = $root
+        inspected_process_count = $processes.Count
+        holders = $holders
+        probe_errors = @($errors | Select-Object -First 20 |
+            ForEach-Object {
+                $process = $processById[[int]$_.ProcessId]
+                [pscustomobject]@{
+                    process_id = [int]$_.ProcessId
+                    process_name = if ($process) { [string]$process.Name } else { "exited" }
+                    error = [int]$_.ProbeError
+                }
+            })
+    }
+}
+
+function ConvertTo-RuntimeStateHolderDiagnostic {
+    param([object[]]$Holders)
+    $bounded = @($Holders | Select-Object -First 20 | ForEach-Object {
+        [ordered]@{
+            process_id = [int]$_.process_id
+            process_name = [string]$_.process_name
+            controlled = [bool]$_.controlled
+            kind = [string]$_.kind
+            path = [string]$_.path
+            handle_count = [int]$_.handle_count
+            granted_access = [string]$_.granted_access
+        }
+    })
+    [ordered]@{
+        schema = "runtime-state-holder-v1"
+        holder_count = @($Holders).Count
+        truncated = @($Holders).Count -gt $bounded.Count
+        holders = $bounded
+    } | ConvertTo-Json -Depth 5 -Compress
+}
+
+function Assert-RuntimeStatePermissions {
+    param([Parameter(Mandatory = $true)][string]$StateTree)
+    Initialize-RuntimeStateNativeProbe
+    $tree = [System.IO.Path]::GetFullPath($StateTree)
+    $parent = [System.IO.Path]::GetFullPath((Split-Path -Parent $tree))
+    $shareAll = [uint32]7
+    $deleteError = [XauusdRuntimeStateNativeProbe]::ProbeDirectoryAccess(
+        $tree, [uint32]65536, $shareAll
+    )
+    $deleteChildError = [XauusdRuntimeStateNativeProbe]::ProbeDirectoryAccess(
+        $parent, [uint32]64, $shareAll
+    )
+    $sharingViolation = 32
+    if (($deleteError -ne 0 -and $deleteError -ne $sharingViolation) -or
+        ($deleteChildError -ne 0 -and $deleteChildError -ne $sharingViolation)) {
+        throw ("RUNTIME_STATE_PERMISSION_DENIED:" + ([ordered]@{
+            state_tree_delete_error = [int]$deleteError
+            parent_delete_child_error = [int]$deleteChildError
+        } | ConvertTo-Json -Compress))
+    }
+    $probe = Join-Path $parent (".__runtime-access-{0}" -f
+        [Guid]::NewGuid().ToString("N"))
+    $moved = "$probe-moved"
+    if ([System.IO.Path]::GetDirectoryName($probe) -ne $parent -or
+        [System.IO.Path]::GetDirectoryName($moved) -ne $parent) {
+        throw "RUNTIME_STATE_PERMISSION_DENIED:PROBE_PATH"
+    }
+    try {
+        [System.IO.Directory]::CreateDirectory($probe) | Out-Null
+        [System.IO.Directory]::Move($probe, $moved)
+        [System.IO.Directory]::Delete($moved, $false)
+    } catch {
+        throw "RUNTIME_STATE_PERMISSION_DENIED:$($_.Exception.GetBaseException().Message)"
+    } finally {
+        if ([System.IO.Directory]::Exists($probe)) {
+            [System.IO.Directory]::Delete($probe, $false)
+        }
+        if ([System.IO.Directory]::Exists($moved)) {
+            [System.IO.Directory]::Delete($moved, $false)
+        }
+    }
+    return [pscustomobject]@{
+        state_tree_delete = $deleteError -eq 0
+        parent_delete_child = $deleteChildError -eq 0
+        sharing_violation_deferred_to_holder_inventory =
+            $deleteError -eq $sharingViolation -or $deleteChildError -eq $sharingViolation
+        sibling_create_rename_delete = $true
+    }
+}
+
+function New-RuntimeProcessQuiescencePlan {
+    param([Parameter(Mandatory = $true)][object[]]$ServiceContracts)
+    $snapshot = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    $rootById = @{}
+    foreach ($service in $ServiceContracts) {
+        foreach ($process in @($snapshot | Where-Object {
+            Test-ForecasterServiceProcess -Process $_ -Service $service
+        })) {
+            $rootById[[int]$process.ProcessId] = [string]$service.Key
+        }
+    }
+    $entries = @{}
+    foreach ($rootId in @($rootById.Keys)) {
+        $pending = @([pscustomobject]@{ process_id=[int]$rootId; depth=0 })
+        while ($pending.Count -gt 0) {
+            $current = $pending[0]
+            $pending = @($pending | Select-Object -Skip 1)
+            $process = $snapshot | Where-Object ProcessId -eq $current.process_id |
+                Select-Object -First 1
+            if (-not $process) { continue }
+            if (-not $entries.ContainsKey([int]$process.ProcessId)) {
+                $identity = Get-ControlPlaneProcessIdentity -ProcessId ([int]$process.ProcessId)
+                if (-not $identity) { throw "RUNTIME_STATE_PROCESS_IDENTITY_UNAVAILABLE" }
+                $waitHandle = $null
+                try { $waitHandle = [System.Diagnostics.Process]::GetProcessById(
+                    [int]$process.ProcessId
+                ) } catch {}
+                $entries[[int]$process.ProcessId] = [pscustomobject]@{
+                    process_id = [int]$process.ProcessId
+                    parent_process_id = [int]$process.ParentProcessId
+                    process_start_token = [string]$identity.process_start_token
+                    process_name = [string]$process.Name
+                    service_key = [string]$rootById[[int]$rootId]
+                    depth = [int]$current.depth
+                    wait_handle = $waitHandle
+                }
+            }
+            foreach ($child in @($snapshot | Where-Object {
+                [int]$_.ParentProcessId -eq [int]$process.ProcessId
+            })) {
+                $pending += [pscustomobject]@{
+                    process_id = [int]$child.ProcessId
+                    depth = [int]$current.depth + 1
+                }
+            }
+        }
+    }
+    [pscustomobject]@{
+        captured_at = [DateTimeOffset]::UtcNow.ToString("o")
+        entries = @($entries.Values | Sort-Object depth -Descending)
+    }
+}
+
+function Update-RuntimeProcessQuiescencePlan {
+    param([Parameter(Mandatory = $true)][object]$Plan)
+    $entries = @{}
+    foreach ($entry in @($Plan.entries)) {
+        $entries[[int]$entry.process_id] = $entry
+    }
+    $snapshot = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    $changed = $true
+    while ($changed) {
+        $changed = $false
+        foreach ($process in $snapshot) {
+            $processId = [int]$process.ProcessId
+            $parentId = [int]$process.ParentProcessId
+            if ($entries.ContainsKey($processId) -or
+                -not $entries.ContainsKey($parentId)) { continue }
+            $parent = $entries[$parentId]
+            $identity = Get-ControlPlaneProcessIdentity -ProcessId $processId
+            if (-not $identity) { continue }
+            $waitHandle = $null
+            try {
+                $waitHandle = [System.Diagnostics.Process]::GetProcessById($processId)
+            } catch {}
+            $entries[$processId] = [pscustomobject]@{
+                process_id = $processId
+                parent_process_id = $parentId
+                process_start_token = [string]$identity.process_start_token
+                process_name = [string]$process.Name
+                service_key = [string]$parent.service_key
+                depth = [int]$parent.depth + 1
+                wait_handle = $waitHandle
+            }
+            $changed = $true
+        }
+    }
+    $Plan.entries = @($entries.Values | Sort-Object depth -Descending)
+    return $Plan
+}
+
+function Stop-CapturedRuntimeProcessIdentity {
+    param([Parameter(Mandatory = $true)][object]$Entry)
+    $identity = Get-ControlPlaneProcessIdentity -ProcessId ([int]$Entry.process_id)
+    if (-not $identity -or [string]$identity.process_start_token -ne
+        [string]$Entry.process_start_token) { return }
+    Stop-Process -Id ([int]$Entry.process_id) -ErrorAction SilentlyContinue
+}
+
+function Stop-RuntimeProcessQuiescencePlan {
+    param(
+        [Parameter(Mandatory = $true)][object]$Plan,
+        [TimeSpan]$Timeout = [TimeSpan]::FromSeconds(30)
+    )
+    $null = Update-RuntimeProcessQuiescencePlan -Plan $Plan
+    # Stop the exact captured roots first so they cannot spawn another child
+    # while the already-captured descendants are being fenced.
+    foreach ($entry in @($Plan.entries | Where-Object depth -eq 0)) {
+        Stop-CapturedRuntimeProcessIdentity -Entry $entry
+    }
+    # A child created immediately before its root terminated still retains the
+    # captured parent PID. Include that last bounded generation before waiting.
+    $null = Update-RuntimeProcessQuiescencePlan -Plan $Plan
+    foreach ($entry in @($Plan.entries | Sort-Object depth -Descending)) {
+        Stop-CapturedRuntimeProcessIdentity -Entry $entry
+    }
+    $deadline = [DateTimeOffset]::UtcNow.Add($Timeout)
+    foreach ($entry in @($Plan.entries)) {
+        $remaining = [int][Math]::Max(0, (
+            $deadline - [DateTimeOffset]::UtcNow
+        ).TotalMilliseconds)
+        if ($entry.wait_handle) {
+            try { $null = $entry.wait_handle.WaitForExit($remaining) } catch {}
+        }
+    }
+    $active = @($Plan.entries | Where-Object {
+        $identity = Get-ControlPlaneProcessIdentity -ProcessId ([int]$_.process_id)
+        $identity -and [string]$identity.process_start_token -eq
+            [string]$_.process_start_token
+    })
+    if ($active.Count -ne 0) {
+        throw ("RUNTIME_STATE_QUIESCENCE_TIMEOUT:" + (@($active |
+            Select-Object -First 20 process_id,process_name,service_key) |
+            ConvertTo-Json -Compress))
+    }
+    return $true
+}
+
+function Assert-NoExternalRuntimeStateHolders {
+    param(
+        [Parameter(Mandatory = $true)][string]$StateTree,
+        [Parameter(Mandatory = $true)][object]$ProcessPlan
+    )
+    $null = Update-RuntimeProcessQuiescencePlan -Plan $ProcessPlan
+    $controlledIds = @($ProcessPlan.entries | ForEach-Object { [int]$_.process_id })
+    $inventory = Get-RuntimeStateHolderInventory -StateTree $StateTree `
+        -ControlledProcessIds $controlledIds
+    $external = @($inventory.holders | Where-Object { -not $_.controlled })
+    if ($external.Count -ne 0) {
+        throw ("RUNTIME_STATE_EXTERNAL_HOLDER_ACTIVE:" +
+            (ConvertTo-RuntimeStateHolderDiagnostic -Holders $external))
+    }
+    return $inventory
+}
+
 function Wait-RuntimeStateTreeQuiesced {
     param(
         [Parameter(Mandatory = $true)][string]$StateTree,
+        [int[]]$ControlledProcessIds = @(),
         [TimeSpan]$Timeout = [TimeSpan]::FromSeconds(30)
     )
     if (-not (Test-Path -LiteralPath $StateTree)) { return $true }
+    $null = Assert-RuntimeStatePermissions -StateTree $StateTree
     $deadline = [DateTimeOffset]::UtcNow.Add($Timeout)
     $lastError = ""
+    $lastHolders = @()
     do {
-        $streams = New-Object System.Collections.Generic.List[System.IDisposable]
         $probePath = "$StateTree.quiescence-probe"
         try {
-            foreach ($file in @(Get-ChildItem -LiteralPath $StateTree -File -Recurse -Force `
-                -ErrorAction Stop)) {
-                $streams.Add([System.IO.File]::Open(
-                    $file.FullName, [System.IO.FileMode]::Open,
-                    [System.IO.FileAccess]::Read, [System.IO.FileShare]::None
-                ))
+            $inventory = Get-RuntimeStateHolderInventory -StateTree $StateTree `
+                -ControlledProcessIds $ControlledProcessIds
+            $lastHolders = @($inventory.holders)
+            $external = @($lastHolders | Where-Object { -not $_.controlled })
+            if ($external.Count -ne 0) {
+                throw ("RUNTIME_STATE_EXTERNAL_HOLDER_ACTIVE:" +
+                    (ConvertTo-RuntimeStateHolderDiagnostic -Holders $external))
             }
-            foreach ($stream in $streams) { $stream.Dispose() }
-            $streams.Clear()
+            if ($lastHolders.Count -ne 0) {
+                $lastError = "controlled holders remain"
+                Start-Sleep -Milliseconds 250
+                continue
+            }
             if (Test-Path -LiteralPath $probePath) {
-                throw "stale quiescence probe path exists"
+                throw "RUNTIME_STATE_QUIESCENCE_TIMEOUT:STALE_PROBE_PATH"
             }
             [System.IO.Directory]::Move($StateTree, $probePath)
             [System.IO.Directory]::Move($probePath, $StateTree)
-            return $true
+            return [pscustomobject]@{
+                quiesced = $true
+                holder_count = 0
+                rename_capable = $true
+                verified_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
         } catch {
             $lastError = $_.Exception.Message
-            foreach ($stream in $streams) { try { $stream.Dispose() } catch {} }
+            if ($lastError.StartsWith("RUNTIME_STATE_EXTERNAL_HOLDER_ACTIVE:")) {
+                throw $lastError
+            }
             if ((Test-Path -LiteralPath $probePath) -and
                 -not (Test-Path -LiteralPath $StateTree)) {
                 try { [System.IO.Directory]::Move($probePath, $StateTree) } catch {}
@@ -8485,13 +9068,63 @@ function Wait-RuntimeStateTreeQuiesced {
             Start-Sleep -Milliseconds 250
         }
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
-    throw "RUNTIME_STATE_HANDLES_NOT_QUIESCED:$lastError"
+    if ($lastHolders.Count -ne 0) {
+        $diagnostic = ConvertTo-RuntimeStateHolderDiagnostic -Holders $lastHolders
+        $code = if (@($lastHolders | Where-Object kind -eq "PROCESS_CWD").Count) {
+            "RUNTIME_STATE_PROCESS_CWD_ACTIVE"
+        } elseif (@($lastHolders | Where-Object kind -eq "DIRECTORY").Count) {
+            "RUNTIME_STATE_DIRECTORY_HANDLE_ACTIVE"
+        } else { "RUNTIME_STATE_FILE_HANDLE_ACTIVE" }
+        throw "${code}:$diagnostic"
+    }
+    throw "RUNTIME_STATE_QUIESCENCE_TIMEOUT:$lastError"
 }
 
 function Assert-RuntimeMigrationFailurePoint {
     param([string]$FailurePhase, [string]$CurrentPhase)
     if ($FailurePhase -and $FailurePhase -eq $CurrentPhase) {
         throw "INJECTED_RUNTIME_MIGRATION_FAILURE:$CurrentPhase"
+    }
+}
+
+function Assert-LegacyRuntimeStateTopology {
+    param(
+        [Parameter(Mandatory = $true)][string]$RuntimeLocal,
+        [Parameter(Mandatory = $true)][string]$SourceLocal
+    )
+    $runtimePath = [System.IO.Path]::GetFullPath($RuntimeLocal)
+    $sourcePath = [System.IO.Path]::GetFullPath($SourceLocal)
+    if (-not (Test-Path -LiteralPath $runtimePath)) {
+        throw "RUNTIME_STATE_TOPOLOGY_LEGACY_JUNCTION_REQUIRED"
+    }
+    $runtimeItem = Get-Item -LiteralPath $runtimePath -Force
+    if (-not ($runtimeItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        throw "RUNTIME_STATE_TOPOLOGY_LEGACY_JUNCTION_REQUIRED"
+    }
+    $targets = @($runtimeItem.Target)
+    if ($targets.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$targets[0])) {
+        throw "RUNTIME_STATE_TOPOLOGY_TARGET_UNAVAILABLE"
+    }
+    $declaredTarget = [string]$targets[0]
+    $targetPath = if ([System.IO.Path]::IsPathRooted($declaredTarget)) {
+        [System.IO.Path]::GetFullPath($declaredTarget)
+    } else {
+        [System.IO.Path]::GetFullPath((Join-Path `
+            (Split-Path -Parent $runtimePath) $declaredTarget))
+    }
+    if (-not $targetPath.Equals(
+        $sourcePath, [System.StringComparison]::OrdinalIgnoreCase
+    )) { throw "RUNTIME_STATE_TOPOLOGY_TARGET_MISMATCH" }
+    $sourceForward = Join-Path $sourcePath "forward"
+    if (-not (Test-Path -LiteralPath $sourceForward -PathType Container)) {
+        throw "RUNTIME_STATE_TOPOLOGY_FORWARD_REQUIRED"
+    }
+    return [pscustomobject]@{
+        runtime_local = $runtimePath
+        source_local = $sourcePath
+        source_forward = [System.IO.Path]::GetFullPath($sourceForward)
+        target = $targetPath
+        kind = "LEGACY_JUNCTION"
     }
 }
 
@@ -8608,7 +9241,8 @@ function Invoke-RuntimeStateRootMigration {
             "AFTER_RUNTIME_ROOT_CREATION","DURING_STABLE_RESTART",
             "AFTER_PARTIAL_RESTART","BEFORE_WATCHDOG_HANDOFF",
             "DURING_HEALTH_VERIFICATION")]
-        [string]$FailurePhase = ""
+        [string]$FailurePhase = "",
+        [switch]$PreflightOnly
     )
     $bundle = Assert-ControlCenterProcessIdentity
     $runtime = [System.IO.Path]::GetFullPath($moduleRoot)
@@ -8630,6 +9264,7 @@ function Invoke-RuntimeStateRootMigration {
     $migrationCompleted = $false
     $servicesStopped = $false
     $recoveryPlan = $null
+    $processPlan = $null
     try {
         $release = Get-ReleaseControlState
         if (($release -and $release.transaction) -or
@@ -8652,6 +9287,13 @@ function Invoke-RuntimeStateRootMigration {
         $recoveryPlan = New-RuntimeRecoveryPlan -StableRevision $stableRevision `
             -ReleaseState $release -ServiceContracts @($services)
         $null = Assert-RuntimeRecoveryPlan -Plan $recoveryPlan
+        $topology = Assert-LegacyRuntimeStateTopology `
+            -RuntimeLocal $runtimeLocalRoot -SourceLocal $repositoryLocalRoot
+        $sourceForward = [string]$topology.source_forward
+        $null = Assert-RuntimeStatePermissions -StateTree $sourceForward
+        $processPlan = New-RuntimeProcessQuiescencePlan -ServiceContracts @($services)
+        $initialInventory = Assert-NoExternalRuntimeStateHolders `
+            -StateTree $sourceForward -ProcessPlan $processPlan
         Assert-RuntimeMigrationFailurePoint -FailurePhase $FailurePhase `
             -CurrentPhase "BEFORE_WATCHDOG_SUSPENSION"
 
@@ -8671,24 +9313,49 @@ function Invoke-RuntimeStateRootMigration {
             throw "RUNTIME_STATE_MIGRATION_RELEASE_TRANSACTION_APPEARED"
         }
 
-        Stop-All
+        $null = Stop-RuntimeProcessQuiescencePlan -Plan $processPlan
         $servicesStopped = $true
-        $stopDeadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
-        do {
-            $remaining = @()
-            foreach ($service in $services) {
-                $remaining += @(Get-ForecasterProcesses -Service $service)
-            }
-            if ($remaining.Count -eq 0) { break }
-            Start-Sleep -Milliseconds 250
-        } while ([DateTimeOffset]::UtcNow -lt $stopDeadline)
-        if ($remaining.Count -ne 0) {
-            throw "RUNTIME_STATE_MIGRATION_SERVICE_QUIESCE_FAILED"
-        }
-        $sourceForward = Join-Path $repositoryLocalRoot "forward"
-        $null = Wait-RuntimeStateTreeQuiesced -StateTree $sourceForward
+        $quiescence = Wait-RuntimeStateTreeQuiesced -StateTree $sourceForward `
+            -ControlledProcessIds @($processPlan.entries.process_id)
         Assert-RuntimeMigrationFailurePoint -FailurePhase $FailurePhase `
             -CurrentPhase "AFTER_STOP_ALL"
+
+        if ($PreflightOnly) {
+            $recoveryStarted = [DateTimeOffset]::UtcNow
+            $null = Restore-RuntimeRecoveryPlan -Plan $recoveryPlan
+            $recovered = Wait-RuntimeRecoveryPlanHealth -Plan $recoveryPlan `
+                -RecoveryStarted $recoveryStarted
+            $servicesStopped = $false
+            $releaseAfterPreflight = Get-ReleaseControlState
+            $stateHashAfterPreflight = if (Test-Path -LiteralPath $releaseControlStatePath) {
+                Get-Sha256Hex -LiteralPath $releaseControlStatePath
+            } else { $null }
+            $historyHashAfterPreflight = if (Test-Path -LiteralPath $releaseHistoryPath) {
+                Get-Sha256Hex -LiteralPath $releaseHistoryPath
+            } else { $null }
+            if ([string]$before.release_state_hash -ne [string]$stateHashAfterPreflight -or
+                [string]$before.release_history_hash -ne [string]$historyHashAfterPreflight -or
+                ($releaseAfterPreflight -and $releaseAfterPreflight.transaction)) {
+                throw "RUNTIME_STATE_PREFLIGHT_CHANGED_RELEASE_STATE"
+            }
+            $null = Start-WatchdogReplacement -PassThru
+            $newWatchdog = Wait-VerifiedWatchdogHandoff `
+                -ExpectedRevision ([string]$bundle.source_revision) `
+                -PreviousIdentity $oldWatchdog
+            $watchdogStopped = $false
+            Restore-ControlPlaneSupervision -State $supervisionState
+            return [pscustomobject]@{
+                preflight = "PASSED"
+                topology = [string]$topology.kind
+                state_tree = $sourceForward
+                permission_checked = $true
+                initial_controlled_holder_count = @($initialInventory.holders).Count
+                final_holder_count = [int]$quiescence.holder_count
+                rename_capable = [bool]$quiescence.rename_capable
+                recovered_revision = [string]$recovered.revision
+                watchdog_process_id = [int]$newWatchdog.process_id
+            }
+        }
 
         $result = Convert-LegacyRuntimeLocalJunction `
             -RuntimeLocal $runtimeLocalRoot -SourceLocal $repositoryLocalRoot `
@@ -11349,6 +12016,9 @@ switch ($Action) {
         Invoke-ControlPlaneInstall -VerifiedSourceRoot `
             ([System.IO.Path]::GetFullPath($SourceRoot)) `
             -TargetRevision $SourceRevision | Format-List
+    }
+    "PreflightRuntimeStateRoot" {
+        Invoke-RuntimeStateRootMigration -PreflightOnly | Format-List
     }
     "MigrateRuntimeStateRoot" {
         Invoke-RuntimeStateRootMigration | Format-List
