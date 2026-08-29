@@ -28,7 +28,11 @@ Record before editing:
 10. **Observability:** distinguish delayed, unavailable, corrupt, partial, and
     provider-omitted results.
 11. **Rehearsal:** run the production-shaped real interaction unit tests cannot
-    prove.
+    prove. For every OS, filesystem, process, provider, network, or other
+    environment-sensitive assumption, name the required environment-equivalent
+    rehearsal or real-resource non-mutating preflight. A synthetic or temporary
+    resource test is supporting evidence only and cannot establish the real
+    environment invariant by itself.
 12. **Rollout and rollback:** stage the change and prove rollback before switch.
 13. **Cleanup:** state when temporary bridges and adapters are removed.
 

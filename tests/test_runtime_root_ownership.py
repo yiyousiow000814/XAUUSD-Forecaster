@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import textwrap
+import time
 
 import pytest
 
@@ -402,6 +404,7 @@ def test_controlled_state_migration_preserves_stable_code_and_restarts_services(
         f"$service.CodeRoot='{runtime}'}};"
         "$script:active=@{};foreach($service in $services){$script:active[$service.Key]=$true};"
         "function Stop-All {$script:active=@{}};"
+        "function Stop-RuntimeProcessQuiescencePlan{param($Plan);$script:active=@{};$true};"
         "function Get-ForecasterProcesses {param($Service);"
         "if($script:active[$Service.Key]){@([pscustomobject]@{ProcessId=7})}else{@()}};"
         "function Get-ControlPlaneProcessIdentity {param($ProcessId);"
@@ -439,6 +442,129 @@ def test_controlled_state_migration_preserves_stable_code_and_restarts_services(
         )
     )
     assert update["preserved_revision"] == stable_revision
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_real_path_preflight_restores_stable_without_migrating_state(
+    tmp_path: Path, powershell: str,
+) -> None:
+    runtime, repository = _prepare_roots(tmp_path)
+    source_local = repository / ".local"
+    source_forward = source_local / "forward"
+    source_forward.mkdir(parents=True)
+    state_file = source_forward / "state.json"
+    state_file.write_text('{"owner":"stable"}', encoding="utf-8")
+    runtime_local = runtime / ".local"
+    setup = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+         f"New-Item -ItemType Junction -Path '{runtime_local}' "
+         f"-Target '{source_local}' | Out-Null"],
+        capture_output=True, text=True, check=False,
+    )
+    if setup.returncode:
+        pytest.skip(f"junction creation unavailable: {setup.stderr}")
+    stable = "a" * 40
+    body = (
+        f"foreach($service in $services){{$service.Revision='{stable}';"
+        f"$service.CodeRoot='{runtime}'}};"
+        "$script:active=@{};foreach($service in $services){$script:active[$service.Key]=$true};"
+        "$script:restored=$false;$script:recoveryHealthy=$false;"
+        "function Assert-ControlCenterProcessIdentity{[pscustomobject]@{source_revision='" + "b" * 40 + "'}};"
+        "function Get-ReleaseControlState{$null};"
+        "function Get-VerifiedWatchdogOwners{[pscustomobject]@{process_id=41}};"
+        "function Assert-CurrentWatchdogHeartbeat{[pscustomobject]@{}};"
+        "$owned=[pscustomobject][ordered]@{};foreach($service in $services){"
+        "$owned|Add-Member -NotePropertyName $service.Key -NotePropertyValue @([pscustomobject]@{process_id=1})};"
+        f"function Get-ControlPlaneIsolationSnapshot{{[pscustomobject]@{{business_runtime_revision='{stable}';"
+        "services=$owned;release_state_hash=$null;release_history_hash=$null}};"
+        "function Assert-ControlPlaneIsolationBaseline{};"
+        "function Suspend-ControlPlaneSupervision{@{}};function Wait-ControlPlaneGuardQuiesced{};"
+        "function Stop-VerifiedWatchdogOwner{};function Stop-ScheduledTask{};"
+        "function Stop-All{$script:active=@{}};"
+        "function Stop-RuntimeProcessQuiescencePlan{param($Plan);$script:active=@{};$true};"
+        "function Get-ForecasterProcesses{param($Service);if($script:active[$Service.Key])"
+        "{@([pscustomobject]@{ProcessId=7;CommandLine=$Service.ScriptPath})}else{@()}};"
+        "function Get-ControlPlaneProcessIdentity{param($ProcessId);"
+        "[pscustomobject]@{process_id=$ProcessId;"
+        "process_start_token='2026-01-01T00:00:00.0000000+00:00'}};"
+        "function Restore-RuntimeRecoveryPlan{param($Plan);$script:restored=$true;$true};"
+        "function Wait-RuntimeRecoveryPlanHealth{param($Plan,$RecoveryStarted);"
+        "$script:recoveryHealthy=$true;[pscustomobject]@{revision=$Plan.body.stable_revision}};"
+        "function Start-WatchdogReplacement{[pscustomobject]@{Id=88}};"
+        "function Wait-VerifiedWatchdogHandoff{[pscustomobject]@{process_id=88}};"
+        "function Restore-ControlPlaneSupervision{};"
+        "$result=Invoke-RuntimeStateRootMigration -PreflightOnly;"
+        "$item=Get-Item -LiteralPath $runtimeLocalRoot -Force;"
+        "[pscustomobject]@{preflight=$result.preflight;restored=$script:restored;"
+        "recovery_healthy=$script:recoveryHealthy;rename_capable=$result.rename_capable;"
+        "reparse=[bool]($item.Attributes-band [System.IO.FileAttributes]::ReparsePoint);"
+        "migration_receipt=Test-Path -LiteralPath $runtimeUpdateStatePath}|"
+        "ConvertTo-Json -Compress"
+    )
+    evidence = json.loads(_run_control_contract(tmp_path, body, powershell=powershell))
+
+    assert evidence == {
+        "preflight": "PASSED",
+        "restored": True,
+        "recovery_healthy": True,
+        "rename_capable": True,
+        "reparse": True,
+        "migration_receipt": False,
+    }
+    assert state_file.read_text(encoding="utf-8") == '{"owner":"stable"}'
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_external_holder_blocks_migration_before_supervision_or_service_stop(
+    tmp_path: Path, powershell: str,
+) -> None:
+    runtime, repository = _prepare_roots(tmp_path)
+    source_local = repository / ".local"
+    source_forward = source_local / "forward"
+    held = source_forward / "logs"
+    held.mkdir(parents=True)
+    runtime_local = runtime / ".local"
+    setup = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+         f"New-Item -ItemType Junction -Path '{runtime_local}' "
+         f"-Target '{source_local}' | Out-Null"],
+        capture_output=True, text=True, check=False,
+    )
+    if setup.returncode:
+        pytest.skip(f"junction creation unavailable: {setup.stderr}")
+    holder = _start_holder(held, "directory")
+    stable = "a" * 40
+    body = (
+        f"foreach($service in $services){{$service.Revision='{stable}';"
+        f"$service.CodeRoot='{runtime}'}};"
+        "$script:suspended=$false;$script:stopped=$false;"
+        "function Assert-ControlCenterProcessIdentity{[pscustomobject]@{source_revision='" + "b" * 40 + "'}};"
+        "function Get-ReleaseControlState{$null};"
+        "function Get-VerifiedWatchdogOwners{[pscustomobject]@{process_id=41}};"
+        "function Assert-CurrentWatchdogHeartbeat{[pscustomobject]@{}};"
+        f"function Get-ControlPlaneIsolationSnapshot{{[pscustomobject]@{{business_runtime_revision='{stable}';"
+        "services=[pscustomobject][ordered]@{};release_state_hash=$null;release_history_hash=$null}};"
+        "function Assert-ControlPlaneIsolationBaseline{};"
+        "function Test-ControlPlaneServiceOwnerRequired{$false};"
+        "function Suspend-ControlPlaneSupervision{$script:suspended=$true};"
+        "function Stop-All{$script:stopped=$true};"
+        "function Stop-RuntimeProcessQuiescencePlan{$script:stopped=$true;$true};"
+        "function Get-ForecasterProcesses{@()};"
+        "try{Invoke-RuntimeStateRootMigration|Out-Null}catch{$failure=$_.Exception.Message};"
+        "[pscustomobject]@{failure=$failure;suspended=$script:suspended;"
+        "stopped=$script:stopped}|ConvertTo-Json -Compress"
+    )
+    try:
+        evidence = json.loads(
+            _run_control_contract(tmp_path, body, powershell=powershell)
+        )
+    finally:
+        _close_holder(holder)
+
+    assert evidence["failure"].startswith("RUNTIME_STATE_EXTERNAL_HOLDER_ACTIVE:")
+    assert f'"process_id":{holder.pid}' in evidence["failure"]
+    assert evidence["suspended"] is False
+    assert evidence["stopped"] is False
 
 
 def test_release_entrypoints_fail_closed_while_state_root_migrates(
@@ -557,7 +683,7 @@ def test_running_legacy_quote_without_captured_config_authority_fails_before_sto
     )
 
 
-def test_migration_has_bounded_handle_probe_and_all_failure_phases() -> None:
+def test_migration_has_bounded_native_handle_probe_and_all_failure_phases() -> None:
     source = CONTROL_CENTER.read_text(encoding="utf-8")
     phases = {
         "BEFORE_WATCHDOG_SUSPENSION", "AFTER_WATCHDOG_SUSPENSION",
@@ -567,9 +693,329 @@ def test_migration_has_bounded_handle_probe_and_all_failure_phases() -> None:
         "DURING_HEALTH_VERIFICATION",
     }
     assert all(phase in source for phase in phases)
-    assert "FileShare]::None" in source
+    assert "XauusdRuntimeStateNativeProbe" in source
+    assert "Get-RuntimeStateHolderInventory" in source
+    assert "Stop-RuntimeProcessQuiescencePlan" in source
+    assert ".WaitForExit($remaining)" in source
     assert "Directory]::Move($StateTree, $probePath)" in source
-    assert "AddSeconds(30)" in source
+    assert "RUNTIME_STATE_EXTERNAL_HOLDER_ACTIVE" in source
+    assert "RUNTIME_STATE_PROCESS_CWD_ACTIVE" in source
+    assert "RUNTIME_STATE_DIRECTORY_HANDLE_ACTIVE" in source
+    assert "RUNTIME_STATE_FILE_HANDLE_ACTIVE" in source
+    assert "RUNTIME_STATE_PERMISSION_DENIED" in source
+    assert "RUNTIME_STATE_QUIESCENCE_TIMEOUT" in source
+
+
+_HOLDER_CODE = r"""
+import ctypes
+import os
+import sys
+import time
+
+mode, path, delay = sys.argv[1], sys.argv[2], float(sys.argv[3])
+handle = None
+if mode == "cwd":
+    os.chdir(path)
+else:
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel.CreateFileW
+    create.argtypes = [
+        ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+    ]
+    create.restype = ctypes.c_void_p
+    flags = 0x02000000 if mode == "directory" else 0
+    handle = create(path, 0x80000000, 3, None, 3, flags, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+print("READY", flush=True)
+time.sleep(delay)
+if handle is not None:
+    kernel.CloseHandle(ctypes.c_void_p(handle))
+"""
+
+
+def _start_holder(path: Path, mode: str, delay: float = 30) -> subprocess.Popen[str]:
+    process = subprocess.Popen(
+        [sys.executable, "-c", _HOLDER_CODE, mode, str(path), str(delay)],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    assert process.stdout is not None
+    assert process.stdout.readline().strip() == "READY"
+    return process
+
+
+def _close_holder(process: subprocess.Popen[str]) -> None:
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_quiescence_plan_never_claims_same_named_process_from_another_code_root(
+    tmp_path: Path, powershell: str,
+) -> None:
+    actual = tmp_path / "actual" / "run_dashboard_api.py"
+    expected = tmp_path / "expected" / "run_dashboard_api.py"
+    actual.parent.mkdir()
+    expected.parent.mkdir()
+    actual.write_text("import time; time.sleep(30)\n", encoding="utf-8")
+    expected.write_text("# revision-owned expected script\n", encoding="utf-8")
+    process = subprocess.Popen(
+        [sys.executable, str(actual)], cwd=actual.parent,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    try:
+        body = (
+            "$service=[pscustomobject]@{Key='api';Kind='Python';"
+            "Match='run_dashboard_api.py';"
+            f"ScriptPath='{expected}';CodeRoot='{expected.parent}'}};"
+            "$plan=New-RuntimeProcessQuiescencePlan -ServiceContracts @($service);"
+            "@($plan.entries).Count"
+        )
+        assert _run_control_contract(tmp_path, body, powershell=powershell) == "0"
+        assert process.poll() is None
+    finally:
+        _close_holder(process)
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_quiescence_plan_captures_children_and_waits_for_real_exit_handles(
+    tmp_path: Path, powershell: str,
+) -> None:
+    state = tmp_path / "child-process-state"
+    state.mkdir()
+    held = state / "state.json"
+    held.write_text('{"owner":"stable"}', encoding="utf-8")
+    script = tmp_path / "owner" / "run_forward_collector.py"
+    script.parent.mkdir()
+    child_code = (
+        "import ctypes,sys,time;"
+        "k=ctypes.WinDLL('kernel32',use_last_error=True);"
+        "k.CreateFileW.restype=ctypes.c_void_p;"
+        "h=k.CreateFileW(sys.argv[1],0x80000000,3,None,3,0,None);"
+        "print('CHILD_READY',flush=True);time.sleep(30)"
+    )
+    script.write_text(
+        "import subprocess,sys,time\n"
+        f"child=subprocess.Popen([sys.executable,'-c',{child_code!r},sys.argv[1]], "
+        "creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))\n"
+        "print(child.pid,flush=True)\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    owner = subprocess.Popen(
+        [sys.executable, str(script), str(held)], cwd=script.parent,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    assert owner.stdout is not None
+    child_pid = int(owner.stdout.readline().strip())
+    time.sleep(0.2)
+    try:
+        body = (
+            "$service=[pscustomobject]@{Key='collector';Kind='Python';"
+            "Match='run_forward_collector.py';"
+            f"ScriptPath='{script}';CodeRoot='{script.parent}'}};"
+            "$plan=New-RuntimeProcessQuiescencePlan -ServiceContracts @($service);"
+            "$captured=@($plan.entries.process_id);"
+            "$null=Stop-RuntimeProcessQuiescencePlan -Plan $plan;"
+            "[pscustomobject]@{captured=$captured;active=@($plan.entries|Where-Object{"
+            "Get-ControlPlaneProcessIdentity -ProcessId ([int]$_.process_id)}).Count}|"
+            "ConvertTo-Json -Compress"
+        )
+        evidence = json.loads(
+            _run_control_contract(tmp_path, body, powershell=powershell)
+        )
+    finally:
+        _close_holder(owner)
+        subprocess.run(
+            ["taskkill.exe", "/PID", str(child_pid), "/T", "/F"],
+            capture_output=True, text=True, check=False,
+        )
+
+    assert set(evidence["captured"]) >= {owner.pid, child_pid}
+    assert evidence["active"] == 0
+
+
+def _quiescence_result(
+    tmp_path: Path,
+    state: Path,
+    process_ids: list[int],
+    powershell: str,
+    timeout_ms: int = 700,
+) -> str:
+    ids = ",".join(str(value) for value in process_ids)
+    body = (
+        f"try{{$result=Wait-RuntimeStateTreeQuiesced -StateTree '{state}' "
+        f"-ControlledProcessIds @({ids}) -Timeout "
+        f"([TimeSpan]::FromMilliseconds({timeout_ms}));"
+        "if($result.quiesced){'PASSED'}else{'INVALID'}}"
+        "catch{$_.Exception.Message}"
+    )
+    return _run_control_contract(tmp_path, body, powershell=powershell)
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("file", "RUNTIME_STATE_FILE_HANDLE_ACTIVE"),
+        ("directory", "RUNTIME_STATE_DIRECTORY_HANDLE_ACTIVE"),
+        ("cwd", "RUNTIME_STATE_PROCESS_CWD_ACTIVE"),
+    ],
+)
+def test_native_quiescence_classifies_real_windows_holder_family(
+    tmp_path: Path, powershell: str, mode: str, expected: str,
+) -> None:
+    state = tmp_path / f"state-{mode}"
+    state.mkdir()
+    sentinel = state / "sentinel.json"
+    sentinel.write_text('{"owner":"stable"}', encoding="utf-8")
+    held = state if mode == "cwd" else (
+        state / "child" if mode == "directory" else sentinel
+    )
+    if mode == "directory":
+        held.mkdir()
+    process = _start_holder(held, mode)
+    try:
+        result = _quiescence_result(
+            tmp_path, state, [process.pid], powershell,
+        )
+    finally:
+        _close_holder(process)
+
+    assert result.startswith(expected + ":")
+    assert f'"process_id":{process.pid}' in result
+    assert sentinel.read_text(encoding="utf-8") == '{"owner":"stable"}'
+    assert not Path(f"{state}.quiescence-probe").exists()
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_external_directory_holder_fails_before_controlled_shutdown(
+    tmp_path: Path, powershell: str,
+) -> None:
+    state = tmp_path / "external-holder-state"
+    held = state / "logs"
+    held.mkdir(parents=True)
+    process = _start_holder(held, "directory")
+    try:
+        result = _quiescence_result(tmp_path, state, [], powershell)
+    finally:
+        _close_holder(process)
+
+    assert result.startswith("RUNTIME_STATE_EXTERNAL_HOLDER_ACTIVE:")
+    assert f'"process_id":{process.pid}' in result
+    assert state.is_dir()
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_multiple_holders_are_reported_without_state_mutation(
+    tmp_path: Path, powershell: str,
+) -> None:
+    state = tmp_path / "multiple-holder-state"
+    held_directory = state / "logs"
+    held_directory.mkdir(parents=True)
+    held_file = state / "state.json"
+    held_file.write_text('{"owner":"stable"}', encoding="utf-8")
+    processes = [
+        _start_holder(held_file, "file"),
+        _start_holder(held_directory, "directory"),
+    ]
+    try:
+        result = _quiescence_result(
+            tmp_path, state, [process.pid for process in processes], powershell,
+        )
+    finally:
+        for process in processes:
+            _close_holder(process)
+
+    assert result.startswith("RUNTIME_STATE_DIRECTORY_HANDLE_ACTIVE:")
+    assert '"holder_count":2' in result
+    assert held_file.read_text(encoding="utf-8") == '{"owner":"stable"}'
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_delayed_controlled_handle_release_allows_bounded_quiescence(
+    tmp_path: Path, powershell: str,
+) -> None:
+    state = tmp_path / "delayed-release-state"
+    state.mkdir()
+    held_file = state / "state.json"
+    held_file.write_text('{"owner":"stable"}', encoding="utf-8")
+    process = _start_holder(held_file, "file", delay=0.6)
+
+    started = time.monotonic()
+    result = _quiescence_result(
+        tmp_path, state, [process.pid], powershell, timeout_ms=5000,
+    )
+    process.wait(timeout=5)
+
+    assert result == "PASSED"
+    assert time.monotonic() - started < 8
+    assert held_file.read_text(encoding="utf-8") == '{"owner":"stable"}'
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_clean_real_directory_is_rename_capable_and_preserved(
+    tmp_path: Path, powershell: str,
+) -> None:
+    state = tmp_path / "clean-state"
+    state.mkdir()
+    sentinel = state / "state.json"
+    sentinel.write_text('{"owner":"stable"}', encoding="utf-8")
+
+    assert _quiescence_result(tmp_path, state, [], powershell) == "PASSED"
+    assert sentinel.read_text(encoding="utf-8") == '{"owner":"stable"}'
+    assert not Path(f"{state}.quiescence-probe").exists()
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_acl_without_delete_right_fails_with_permission_diagnostic(
+    tmp_path: Path, powershell: str,
+) -> None:
+    parent = tmp_path / "permission-parent"
+    state = parent / "permission-state"
+    state.mkdir(parents=True)
+    sentinel = state / "state.json"
+    sentinel.write_text('{"owner":"stable"}', encoding="utf-8")
+    identity = f"{os.environ['COMPUTERNAME']}\\{os.environ['USERNAME']}"
+    deny_parent = subprocess.run(
+        ["icacls.exe", str(parent), "/deny", f"{identity}:(DC)"],
+        capture_output=True, text=True, check=False,
+    )
+    deny_state = subprocess.run(
+        ["icacls.exe", str(state), "/deny", f"{identity}:(D)"],
+        capture_output=True, text=True, check=False,
+    )
+    if deny_parent.returncode or deny_state.returncode:
+        pytest.skip("test ACL denial could not be installed")
+    try:
+        body = (
+            f"try{{$null=Assert-RuntimeStatePermissions -StateTree '{state}';'INVALID'}}"
+            "catch{$_.Exception.Message}"
+        )
+        result = _run_control_contract(tmp_path, body, powershell=powershell)
+    finally:
+        subprocess.run(
+            ["icacls.exe", str(state), "/remove:d", identity],
+            capture_output=True, text=True, check=False,
+        )
+        subprocess.run(
+            ["icacls.exe", str(parent), "/remove:d", identity],
+            capture_output=True, text=True, check=False,
+        )
+
+    assert result.startswith("RUNTIME_STATE_PERMISSION_DENIED:")
+    assert sentinel.read_text(encoding="utf-8") == '{"owner":"stable"}'
 
 
 @pytest.mark.parametrize("powershell", POWERSHELLS)
@@ -653,6 +1099,7 @@ def test_every_migration_failure_phase_retains_one_state_authority_and_recovers(
         "function Assert-ControlPlaneIsolationBaseline{};function Suspend-ControlPlaneSupervision{@{}};"
         "function Wait-ControlPlaneGuardQuiesced{};function Stop-VerifiedWatchdogOwner{};"
         "function Stop-ScheduledTask{};function Stop-All{$script:active=@{}};"
+        "function Stop-RuntimeProcessQuiescencePlan{param($Plan);$script:active=@{};$true};"
         "function Get-ForecasterProcesses{param($Service);if($script:active[$Service.Key])"
         "{@([pscustomobject]@{ProcessId=7;CommandLine=$Service.ScriptPath})}else{@()}};"
         "function Get-ControlPlaneProcessIdentity{param($ProcessId);"
