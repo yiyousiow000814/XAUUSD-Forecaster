@@ -35,6 +35,13 @@ composition rule, not only a regression for the observed interleaving. Follow
 4. Identify obsolete code.
 5. Add or update tests.
 
+For any material architecture, persistence/state, storage/database migration,
+deployment/release, process lifecycle, ownership, provider/public API,
+CLI/interface, authentication, concurrency, cross-version, background-service,
+rollback/recovery, or irreversible change, use the repository `change-safety`
+skill before implementation and follow `docs/protocols/CHANGE_SAFETY.md`. Tiny
+local behavior-preserving edits do not require this review.
+
 Before changing a cross-boundary data flow, follow
 `docs/contracts/HOSTING_BOUNDARIES.md`: identify the authoritative owner,
 classify the path as critical or optional, classify accumulated growth, keep

@@ -73,6 +73,24 @@ release transaction entry fails closed while it exists. Unknown link targets,
 concurrent release state, revision changes, missing owners, or failed fresh
 service evidence fail closed.
 
+Every Windows service launch contract is owned by the Business Runtime revision
+being launched. Current revisions carry a versioned manifest; an explicitly
+identified pre-manifest Stable may use a narrow exact-revision adapter. Before
+quiescing services or changing the checkout, Control Center captures a
+digest-protected recovery plan containing the exact Stable revision and Worker,
+running service set, per-service launch contract, process baseline, runtime and
+config authorities, and rollback target. Switch, Reverse, migration failure,
+hidden-watchdog recovery, and observation rollback restore from that captured
+old authority, never from Candidate CLI syntax. Runtime-state migration also
+requires bounded process and filesystem-handle quiescence, including exclusive
+file access and a reversible directory rename probe, before the first move.
+For a running pre-manifest quote bridge, its external CLI and secret-root
+authorities must be resolved, verified, and frozen into the recovery contract
+before quiescence; an implicit checkout-local fallback is not recoverable
+authority. Recovery is not complete at process creation: the exact captured
+owner set and fresh service heartbeat/API health must pass before the failed
+transaction can clear or supervision can resume.
+
 Candidate detection is automatic. Required gates are selected from the changed
 boundaries and include repository checks, isolated Windows preflight, startup
 viability, ownership uniqueness, compatibility, directed 0% Worker probes, and

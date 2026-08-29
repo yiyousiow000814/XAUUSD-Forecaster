@@ -1,0 +1,11 @@
+{
+  "schema_version": "windows-service-launch-contract-v1",
+  "services": [
+    {"key":"quote","label":"cTrader XAUUSD Local Algo","kind":"PowerShell","script":"ctrader\\XauusdForwardQuoteBridge\\run_live_quote_bridge.ps1","arguments":["-Symbol","XAUUSD","-StateRoot","{runtime_forward_root}","-ConfigRoot","{repository_config_root}"]},
+    {"key":"collector","label":"XAUUSD Collector","kind":"Python","script":"scripts\\run_forward_collector.py","arguments":["--state-root","{runtime_forward_root}","--market-jsonl","{runtime_forward_root}\\quotes","--status-file","{runtime_forward_root}\\collector-status.json","--poll-seconds","10","--news-poll-seconds","60","--minimum-training-rows","200","--retrain-interval","50"]},
+    {"key":"annotator","label":"Gemini News Annotator","kind":"Python","script":"scripts\\run_news_annotator.py","arguments":["--state-root","{runtime_forward_root}","--database","{runtime_forward_root}\\forward-evidence.sqlite3","--status-file","{runtime_forward_root}\\news-annotator-status.json","--interval-seconds","60","--batch-size","0"]},
+    {"key":"api","label":"Dashboard API","kind":"Python","script":"scripts\\run_dashboard_api.py","arguments":["--state-root","{runtime_forward_root}","--database","{runtime_forward_root}\\forward-evidence.sqlite3"]},
+    {"key":"sync","label":"Dashboard Mirrors","kind":"Python","script":"scripts\\run_dashboard_sync.py","arguments":["--config","{runtime_forward_root}\\dashboard-sync.json","--status-file","{runtime_forward_root}\\dashboard-sync-status.json","--state-root","{runtime_forward_root}","--interval-seconds","30"]},
+    {"key":"broadcast","label":"Live Broadcast Publisher","kind":"Python","script":"scripts\\run_live_broadcast_publisher.py","arguments":["--state-root","{runtime_forward_root}","--interval-seconds","30","--activate-production-publisher"]}
+  ]
+}

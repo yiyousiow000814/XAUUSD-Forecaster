@@ -38,7 +38,14 @@ def test_real_windows_process_identity_tracks_child_lifetime() -> None:
         child.terminate()
         child.wait(timeout=10)
         child._handle.Close()
-    assert training_owner._process_identity_alive(child.pid, token) is False
+    # Windows can retain the terminated process object briefly after the last
+    # user handle closes. The ownership contract is eventual bounded fencing,
+    # not zero-duration kernel object reclamation.
+    deadline = time.monotonic() + 2
+    while training_owner._process_identity_alive(child.pid, token):
+        if time.monotonic() >= deadline:
+            raise AssertionError("terminated Windows process identity remained live")
+        time.sleep(0.05)
 
 
 def test_blocked_training_does_not_stop_multiple_decision_cycles(

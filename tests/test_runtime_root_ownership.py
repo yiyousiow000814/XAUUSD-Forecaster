@@ -398,10 +398,15 @@ def test_controlled_state_migration_preserves_stable_code_and_restarts_services(
         "function Wait-ControlPlaneGuardQuiesced {};"
         "function Stop-VerifiedWatchdogOwner {};"
         "function Stop-ScheduledTask {};"
-        "$script:active=@{};"
+        f"foreach($service in $services){{$service.Revision='{stable_revision}';"
+        f"$service.CodeRoot='{runtime}'}};"
+        "$script:active=@{};foreach($service in $services){$script:active[$service.Key]=$true};"
         "function Stop-All {$script:active=@{}};"
         "function Get-ForecasterProcesses {param($Service);"
         "if($script:active[$Service.Key]){@([pscustomobject]@{ProcessId=7})}else{@()}};"
+        "function Get-ControlPlaneProcessIdentity {param($ProcessId);"
+        "[pscustomobject]@{process_id=$ProcessId;"
+        "process_start_token='2026-01-01T00:00:00.0000000+00:00'}};"
         "function Start-ForecasterService {param($Service,[switch]$SkipExistingCheck);"
         "$script:active[$Service.Key]=$true};"
         "function Test-CodeReloadHealth {$true};"
@@ -460,10 +465,227 @@ def test_state_only_migration_never_moves_the_runtime_checkout() -> None:
     assert "RUNTIME_STATE_MIGRATION_CHANGED_STABLE_REVISION" in migration
 
 
-def test_watchdog_promote_and_rollback_share_the_global_service_contract() -> None:
+def test_switch_and_recovery_resolve_revision_owned_service_contracts() -> None:
     source = CONTROL_CENTER.read_text(encoding="utf-8")
 
-    assert "Start-ForecasterService $service -SkipExistingCheck" in source
-    assert "Restart-CodeReloadableServices -Revision $Revision" in source
-    assert "$services | Where-Object" in source
-    assert source.count("$services = @(") == 1
+    assert "Resolve-ServiceLaunchContracts -Revision $Revision" in source
+    assert "Restore-RuntimeRecoveryPlan -Plan $recoveryPlan" in source
+    assert "RUNTIME_ROLLBACK_CAPTURED_AUTHORITY_REQUIRED" in source
+    assert "windows-service-launch-contract.json" in source
+    assert "Get-LegacyStableServiceLaunchContracts" in source
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_new_controller_resolves_exact_old_stable_cli_contract(
+    powershell: str,
+) -> None:
+    old_root = Path.home() / "XAUUSD-Forecaster-runtime"
+    if not old_root.exists() or subprocess.run(
+        ["git", "-C", str(old_root), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip() != "783d25314b090dd7fbbf124777c3b8de517d2b85":
+        pytest.skip("exact legacy Stable worktree is unavailable")
+    command = (
+        f"$null=. '{CONTROL_CENTER}' -Action CodeRevision "
+        f"-RuntimeRoot '{old_root}' -RepositoryRoot '{ROOT}';"
+        "$services|Select-Object Key,Revision,ScriptPath,Arguments|"
+        "ConvertTo-Json -Depth 6"
+    )
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, check=True,
+    )
+    services = {item["Key"]: item for item in json.loads(result.stdout)}
+
+    assert set(services) == {"quote", "collector", "annotator", "api", "sync"}
+    assert all(
+        item["Revision"] == "783d25314b090dd7fbbf124777c3b8de517d2b85"
+        for item in services.values()
+    )
+    assert "-OutputDirectory" in services["quote"]["Arguments"]
+    assert "-StateRoot" not in services["quote"]["Arguments"]
+    assert "--local-root" in services["collector"]["Arguments"]
+    for key in ("annotator", "api", "sync"):
+        assert "--state-root" not in services[key]["Arguments"]
+    assert all(str(old_root) in item["ScriptPath"] for item in services.values())
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_legacy_quote_recovery_captures_external_config_authority(
+    tmp_path: Path, powershell: str,
+) -> None:
+    runtime, _ = _prepare_roots(tmp_path)
+    cli = tmp_path / "ctrader-cli.exe"
+    secrets = tmp_path / "ctrader-secrets"
+    body = (
+        "function Get-UserEnvironmentValue{param($Name);"
+        f"if($Name -eq 'CTRADER_CLI_PATH'){{'{cli}'}}"
+        f"elseif($Name -eq 'CTRADER_SECRET_ROOT'){{'{secrets}'}}}};"
+        "$legacy=@(Get-LegacyStableServiceLaunchContracts "
+        "-Revision '783d25314b090dd7fbbf124777c3b8de517d2b85' "
+        f"-CodeRoot '{runtime}');"
+        "$legacy|Where-Object Key -eq 'quote'|Select-Object -ExpandProperty Arguments|"
+        "ConvertTo-Json -Compress"
+    )
+    arguments = json.loads(_run_control_contract(tmp_path, body, powershell=powershell))
+
+    assert arguments[arguments.index("-CliPath") + 1] == str(cli)
+    assert arguments[arguments.index("-SecretRoot") + 1] == str(secrets)
+
+
+def test_running_legacy_quote_without_captured_config_authority_fails_before_stop(
+    tmp_path: Path,
+) -> None:
+    runtime, _ = _prepare_roots(tmp_path)
+    stable = "783d25314b090dd7fbbf124777c3b8de517d2b85"
+    body = (
+        "$quote=[pscustomobject]@{"
+        f"Revision='{stable}';CodeRoot='{runtime}';Key='quote';Label='Quote';"
+        "Match='run_live_quote_bridge.ps1';Kind='PowerShell';"
+        "Script='ctrader\\XauusdForwardQuoteBridge\\run_live_quote_bridge.ps1';"
+        f"ScriptPath='{runtime / 'ctrader' / 'run_live_quote_bridge.ps1'}';"
+        f"Arguments=@('-OutputDirectory','{runtime / '.local' / 'forward' / 'quotes'}')}};"
+        "function Get-ForecasterProcesses{@([pscustomobject]@{ProcessId=7})};"
+        "function Get-ControlPlaneProcessIdentity{[pscustomobject]@{process_id=7;"
+        "process_start_token='2026-01-01T00:00:00.0000000+00:00'}};"
+        f"try{{$null=New-RuntimeRecoveryPlan -StableRevision '{stable}' "
+        "-ServiceContracts @($quote)}catch{Write-Output $_.Exception.Message}"
+    )
+
+    assert _run_control_contract(tmp_path, body) == (
+        "RUNTIME_RECOVERY_QUOTE_AUTHORITY_UNAVAILABLE"
+    )
+
+
+def test_migration_has_bounded_handle_probe_and_all_failure_phases() -> None:
+    source = CONTROL_CENTER.read_text(encoding="utf-8")
+    phases = {
+        "BEFORE_WATCHDOG_SUSPENSION", "AFTER_WATCHDOG_SUSPENSION",
+        "AFTER_STOP_ALL", "AFTER_STATE_STAGED", "AFTER_JUNCTION_REMOVAL",
+        "AFTER_RUNTIME_ROOT_CREATION", "DURING_STABLE_RESTART",
+        "AFTER_PARTIAL_RESTART", "BEFORE_WATCHDOG_HANDOFF",
+        "DURING_HEALTH_VERIFICATION",
+    }
+    assert all(phase in source for phase in phases)
+    assert "FileShare]::None" in source
+    assert "Directory]::Move($StateTree, $probePath)" in source
+    assert "AddSeconds(30)" in source
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_recovery_plan_survives_release_state_json_round_trip(
+    tmp_path: Path, powershell: str,
+) -> None:
+    runtime, _ = _prepare_roots(tmp_path)
+    state = runtime / ".local" / "forward"
+    script = runtime / "scripts" / "run_dashboard_api.py"
+    stable = "a" * 40
+    body = (
+        "$body=[ordered]@{schema='runtime-recovery-plan-v1';"
+        f"stable_revision='{stable}';stable_worker_version='worker';"
+        f"runtime_root='{runtime}';runtime_state_root='{state}';config_root='config';"
+        "running_service_keys=@('api');process_baseline=[ordered]@{"
+        "api=@([ordered]@{process_id=7;process_start_token='2026-01-01T00:00:00.0000000+00:00'})};"
+        "service_contracts=@([ordered]@{"
+        f"revision='{stable}';code_root='{runtime}';key='api';label='Dashboard API';"
+        f"match='run_dashboard_api.py';kind='Python';script='scripts\\run_dashboard_api.py';"
+        f"script_path='{script}';arguments=@('--state-root','{state}')"
+        f"}});rollback_target='{stable}'}};"
+        "$canonical=$body|ConvertTo-Json -Depth 9 -Compress;"
+        "$plan=[pscustomobject]@{body=[pscustomobject]$body;"
+        "digest=Get-Sha256BytesHex -Bytes ([Text.Encoding]::UTF8.GetBytes($canonical))};"
+        "$roundTrip=($plan|ConvertTo-Json -Depth 9 -Compress)|ConvertFrom-ReleaseControlJson;"
+        "$null=Assert-RuntimeRecoveryPlan -Plan $roundTrip;"
+        "$contracts=@(Convert-RecoveryPlanContracts -Plan $roundTrip);"
+        "[pscustomobject]@{digest=$roundTrip.digest;count=$contracts.Count;"
+        "key=$contracts[0].Key;argument_count=@($contracts[0].Arguments).Count}|"
+        "ConvertTo-Json -Compress"
+    )
+    evidence = json.loads(_run_control_contract(tmp_path, body, powershell=powershell))
+
+    assert len(evidence["digest"]) == 64
+    assert evidence["count"] == 1
+    assert evidence["key"] == "api"
+    assert evidence["argument_count"] == 2
+
+
+MIGRATION_FAILURE_PHASES = (
+    "BEFORE_WATCHDOG_SUSPENSION", "AFTER_WATCHDOG_SUSPENSION",
+    "AFTER_STOP_ALL", "AFTER_STATE_STAGED", "AFTER_JUNCTION_REMOVAL",
+    "AFTER_RUNTIME_ROOT_CREATION", "DURING_STABLE_RESTART",
+    "AFTER_PARTIAL_RESTART", "BEFORE_WATCHDOG_HANDOFF",
+    "DURING_HEALTH_VERIFICATION",
+)
+
+
+@pytest.mark.parametrize("phase", MIGRATION_FAILURE_PHASES)
+def test_every_migration_failure_phase_retains_one_state_authority_and_recovers(
+    tmp_path: Path, phase: str,
+) -> None:
+    runtime, repository = _prepare_roots(tmp_path)
+    source_local = repository / ".local"
+    source_forward = source_local / "forward"
+    source_forward.mkdir(parents=True)
+    (source_forward / "state.json").write_text('{"owner":"stable"}', encoding="utf-8")
+    runtime_local = runtime / ".local"
+    setup = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+         f"New-Item -ItemType Junction -Path '{runtime_local}' "
+         f"-Target '{source_local}' | Out-Null"],
+        capture_output=True, text=True, check=False,
+    )
+    if setup.returncode:
+        pytest.skip(f"junction creation unavailable: {setup.stderr}")
+    stable = "a" * 40
+    body = (
+        f"foreach($service in $services){{$service.Revision='{stable}';"
+        f"$service.CodeRoot='{runtime}'}};"
+        "$script:active=@{};foreach($service in $services){$script:active[$service.Key]=$true};"
+        "$script:restored=$false;$script:recoveryHealthy=$false;$script:watchdog=$false;"
+        "function Assert-ControlCenterProcessIdentity{[pscustomobject]@{source_revision='" + "b" * 40 + "'}};"
+        "function Get-ReleaseControlState{$null};"
+        "function Get-VerifiedWatchdogOwners{[pscustomobject]@{process_id=41}};"
+        "function Assert-CurrentWatchdogHeartbeat{[pscustomobject]@{}};"
+        "$owned=[pscustomobject][ordered]@{};foreach($service in $services){"
+        "$owned|Add-Member -NotePropertyName $service.Key -NotePropertyValue @([pscustomobject]@{process_id=1})};"
+        f"function Get-ControlPlaneIsolationSnapshot{{[pscustomobject]@{{business_runtime_revision='{stable}';"
+        "services=$owned;release_state_hash=$null;release_history_hash=$null}};"
+        "function Assert-ControlPlaneIsolationBaseline{};function Suspend-ControlPlaneSupervision{@{}};"
+        "function Wait-ControlPlaneGuardQuiesced{};function Stop-VerifiedWatchdogOwner{};"
+        "function Stop-ScheduledTask{};function Stop-All{$script:active=@{}};"
+        "function Get-ForecasterProcesses{param($Service);if($script:active[$Service.Key])"
+        "{@([pscustomobject]@{ProcessId=7;CommandLine=$Service.ScriptPath})}else{@()}};"
+        "function Get-ControlPlaneProcessIdentity{param($ProcessId);"
+        "[pscustomobject]@{process_id=$ProcessId;"
+        "process_start_token='2026-01-01T00:00:00.0000000+00:00'}};"
+        "function Start-ForecasterService{param($Service,[switch]$SkipExistingCheck);"
+        "$script:active[$Service.Key]=$true};function Test-CodeReloadHealth{$true};"
+        f"function Get-CodeRevision{{'{stable}'}};"
+        "function Restore-RuntimeRecoveryPlan{param($Plan);$script:restored=$true;$true};"
+        "function Wait-RuntimeRecoveryPlanHealth{param($Plan,$RecoveryStarted);"
+        "$script:recoveryHealthy=$true;[pscustomobject]@{revision=$Plan.body.stable_revision}};"
+        "function Start-WatchdogReplacement{$script:watchdog=$true;[pscustomobject]@{Id=88}};"
+        "function Wait-VerifiedWatchdogHandoff{[pscustomobject]@{process_id=88}};"
+        "function Restore-ControlPlaneSupervision{};"
+        f"try{{Invoke-RuntimeStateRootMigration -FailurePhase '{phase}'|Out-Null}}catch{{$failureText=$_.Exception.Message}};"
+        "$runtimeItem=Get-Item -LiteralPath $runtimeLocalRoot -Force;"
+        "$stateInRuntime=Test-Path -LiteralPath (Join-Path $runtimeLocalRoot 'forward\\state.json');"
+        "$stateInSource=Test-Path -LiteralPath (Join-Path $repositoryLocalRoot 'forward\\state.json');"
+        "[pscustomobject]@{error=$failureText;restored=$script:restored;"
+        "recovery_healthy=$script:recoveryHealthy;watchdog=$script:watchdog;"
+        "state_count=@($stateInRuntime,$stateInSource|Where-Object{$_}).Count;"
+        "migration_lock=Test-Path -LiteralPath $runtimeStateMigrationLockPath;"
+        "is_reparse=[bool]($runtimeItem.Attributes-band [System.IO.FileAttributes]::ReparsePoint)}|"
+        "ConvertTo-Json -Compress"
+    )
+    evidence = json.loads(_run_control_contract(tmp_path, body))
+
+    assert phase in evidence["error"]
+    assert evidence["state_count"] == (2 if evidence["is_reparse"] else 1)
+    assert evidence["migration_lock"] is False
+    if phase in {"BEFORE_WATCHDOG_SUSPENSION", "AFTER_WATCHDOG_SUSPENSION"}:
+        assert evidence["restored"] is False
+        assert evidence["recovery_healthy"] is False
+    else:
+        assert evidence["restored"] is True
+        assert evidence["recovery_healthy"] is True
