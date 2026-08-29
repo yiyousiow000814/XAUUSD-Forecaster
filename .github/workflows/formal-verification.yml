@@ -19,8 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     # CPU evidence recovery now crosses the complete release lifecycle. The old
     # 20-minute budget stopped at 79.09M generated / 12.77M distinct safety
-    # states with 4.16M still queued. Retain every path plus bounded headroom for
-    # the subsequent liveness temporal-property check.
+    # states with 4.16M still queued. TLC uses every hosted-runner core; retain
+    # every path plus bounded headroom for the subsequent liveness check.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

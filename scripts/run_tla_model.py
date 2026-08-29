@@ -65,7 +65,7 @@ def main() -> int:
                 "-coverage",
                 "10",
                 "-workers",
-                "1",
+                "auto",
                 "-metadir",
                 model_dir,
                 "-config",
