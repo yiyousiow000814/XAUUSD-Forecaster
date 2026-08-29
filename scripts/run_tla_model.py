@@ -63,7 +63,7 @@ def main() -> int:
                 "-noGenerateSpecTE",
                 "-deadlock",
                 "-coverage",
-                "1",
+                "10",
                 "-workers",
                 "1",
                 "-metadir",

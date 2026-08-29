@@ -52,3 +52,5 @@ def test_tlc_runner_and_ci_pin_one_verified_tool() -> None:
     assert 'shutil.which("java")' in runner
     assert "python scripts/run_tla_model.py" in workflow
     assert "name: Release Control TLC" in workflow
+    assert '"-coverage",\n                "10",' in runner
+    assert "timeout-minutes: 45" in workflow
