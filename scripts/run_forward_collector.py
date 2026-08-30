@@ -20,8 +20,9 @@ from xauusd_forecaster.market import JsonlMarketProvider, NullMarketProvider  # 
 from xauusd_forecaster.market_session import skipped_grid_reason  # noqa: E402
 from xauusd_forecaster.u5_state import U5State  # noqa: E402
 from xauusd_forecaster.maintenance import (  # noqa: E402
+    DailyBackupOwner,
     archive_completed_quote_days,
-    backup_forward_ledger,
+    ensure_daily_forward_backup,
 )
 from xauusd_forecaster.training_v2 import (  # noqa: E402
     require_current_contract_generation,
@@ -210,29 +211,7 @@ def main() -> int:
             if quote_path.is_dir()
             else None
         )
-        archived_quotes = (
-            archive_completed_quote_days(quote_root, initialized_at)
-            if quote_root else []
-        )
-        backup_path = backup_forward_ledger(
-            ledger, local_root / "backups", initialized_at
-        )
-    print(
-        json.dumps(
-            {
-                "event": "COLLECTOR_INITIALIZED",
-                "forward_epoch": ledger.forward_epoch.isoformat(),
-                "database": str(ledger.path),
-                "market_provider": provider.name,
-                "news_status": news_status,
-                "annotation_status": annotation_status,
-                "archived_quotes": [str(path) for path in archived_quotes],
-                "local_backup": str(backup_path),
-            },
-            sort_keys=True,
-        ),
-        flush=True,
-    )
+        archived_quotes = []
     # A valid current generation is sufficient to begin the decision clock.
     # Reconciliation is durable background work and must not make a healthy
     # restart wait behind historical materialization.  A missing/incompatible
@@ -259,12 +238,43 @@ def main() -> int:
         flush=True,
     )
     write_runtime_heartbeat(status_file, service="collector")
+    backup_result = None
+    if args.once:
+        with RuntimeHeartbeatPulse(status_file, service="collector"):
+            if quote_root:
+                archived_quotes = archive_completed_quote_days(
+                    quote_root, initialized_at,
+                )
+            backup_result = ensure_daily_forward_backup(
+                ledger.path, local_root / "backups", initialized_at,
+                source_connection=ledger.connection,
+            )
+    print(
+        json.dumps(
+            {
+                "event": "COLLECTOR_INITIALIZED",
+                "forward_epoch": ledger.forward_epoch.isoformat(),
+                "database": str(ledger.path),
+                "market_provider": provider.name,
+                "news_status": news_status,
+                "annotation_status": annotation_status,
+                "archived_quotes": [str(path) for path in archived_quotes],
+                "backup_state": (
+                    backup_result.status if backup_result else "BACKGROUND_SCHEDULED"
+                ),
+                "local_backup": str(backup_result.path) if backup_result else None,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
     if args.once:
         ledger.close()
         return 0
 
     last_news_reconciliation = datetime.now(UTC)
-    last_maintenance_day = initialized_at.date()
+    last_archive_day = initialized_at.date()
+    last_backup_observation = None
     row = ledger.connection.execute(
         "SELECT max(decision_time) AS latest FROM decision_events"
     ).fetchone()
@@ -274,6 +284,7 @@ def main() -> int:
         else floor_five_minutes(ledger.forward_epoch)
     )
     heartbeat = RuntimeHeartbeatPulse(status_file, service="collector")
+    backup_owner = DailyBackupOwner(ledger.path, local_root / "backups")
     news_owner = NewsCollectionOwner(
         ledger.path, poll_seconds=args.news_poll_seconds,
     )
@@ -282,22 +293,30 @@ def main() -> int:
         ledger.path, local_root / "models-v2",
         local_root / "execution-models-v1", quote_root,
     )
-    news_owner.start()
-    training_owner.start()
-    heartbeat.start()
-    if startup_requires_reconciliation:
-        request_background_training(
-            ledger.connection, datetime.now(UTC), reconcile=True,
-        )
-        training_owner.wake()
     try:
+        news_owner.start()
+        training_owner.start()
+        heartbeat.start()
+        if quote_root:
+            archive_completed_quote_days(quote_root, initialized_at)
+        backup_owner.start()
+        if startup_requires_reconciliation:
+            request_background_training(
+                ledger.connection, datetime.now(UTC), reconcile=True,
+            )
+            training_owner.wake()
         while True:
             now = datetime.now(UTC)
-            if now.date() != last_maintenance_day:
-                if quote_root:
-                    archive_completed_quote_days(quote_root, now)
-                backup_forward_ledger(ledger, local_root / "backups", now)
-                last_maintenance_day = now.date()
+            backup_observation = backup_owner.snapshot()
+            if backup_observation != last_backup_observation:
+                print(json.dumps(
+                    {"event": "DAILY_BACKUP_MAINTENANCE", **backup_observation},
+                    sort_keys=True,
+                ), flush=True)
+                last_backup_observation = backup_observation
+            if quote_root and now.date() != last_archive_day:
+                archive_completed_quote_days(quote_root, now)
+                last_archive_day = now.date()
             news_status = news_owner.snapshot(now)
             if ((now - last_news_reconciliation).total_seconds()
                     >= NEWS_CONTRACT_RECONCILE_SECONDS):
@@ -365,6 +384,7 @@ def main() -> int:
             )
             time.sleep(max(1.0, args.poll_seconds))
     finally:
+        backup_owner.close()
         training_owner.close()
         news_owner.close()
         heartbeat.close()
