@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "key_contract_version": "access-qualification-key-v1",
+  "protected_boundary": {
+    "origin": "https://aurum-signal-room.yiyousiow1234.workers.dev",
+    "owner_resource": "/admin/api/session",
+    "destinations": [
+      "/admin*",
+      "/assistant",
+      "/retry-jobs",
+      "/status"
+    ]
+  },
+  "repository_artifacts": [
+    "scripts/check_admin_access_boundary.py",
+    "web/app/_components/AdminAuthComplete.tsx",
+    "web/app/_components/DashboardNavigation.tsx",
+    "web/app/_components/DashboardShell.tsx",
+    "web/app/_lib/admin-auth-session.ts",
+    "web/app/admin/api/session/route.ts",
+    "web/app/admin/auth-complete/page.tsx",
+    "web/app/api/_shared/dashboard-operator-auth.ts",
+    "web/runtime-env.d.ts",
+    "web/wrangler.jsonc"
+  ],
+  "provider_boundary": {
+    "application_id": "2f91233e-cabe-4f48-806c-83699de5e713",
+    "application_audience": "4750fd9ae50ac47ae51d1d3605ca899e5603c691a7fe0c24457f3e335ed43ad1",
+    "application_name": "XAUUSD Admin Owner",
+    "application_type": "self_hosted",
+    "application_session_duration": "24h",
+    "policy_id": "d8ce9484-aca9-4c39-a211-37d2fa8ba9cf",
+    "policy_name": "Allow Assistant owner",
+    "policy_action": "allow",
+    "policy_order": 1,
+    "policy_rule_count": 1,
+    "policy_session_duration": "24h",
+    "owner_rule_sha256": "8f9feab1a920b0921878048f9c54743d2f33e681a50e6ef05bdcbb50fc126759",
+    "identity_providers": ["google"],
+    "mfa_required": false,
+    "browser_isolation": false,
+    "purpose_justification": false,
+    "temporary_authentication": false
+  }
+}

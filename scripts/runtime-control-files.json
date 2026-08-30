@@ -5,6 +5,7 @@
     "xauusd_watchdog_guard.ps1"
   ],
   "files": [
+    "access-qualification-contract.json",
     "runtime-control-files.json",
     "xauusd_control_center.ps1",
     "worker_cpu_evidence.ps1",
