@@ -21,6 +21,7 @@ from .news_contracts import (
 from .news_evidence import EVIDENCE_POLICY_VERSION
 from .news_input_coverage import NEWS_INPUT_STATES
 from .ridge import RidgeArtifact
+from .artifact_paths import require_runtime_artifact_path
 from .training import MARKET_FEATURES
 
 
@@ -462,13 +463,24 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             else:
                 predicted = None
         elif identity in {"FULL", "BROAD_FULL"}:
-            manifest = json.loads(open(update["artifact_path"], encoding="utf-8").read())
-            market_artifact = RidgeArtifact.read(manifest["market_artifact_path"])
+            runtime_forward_root = ledger.path.parent
+            manifest_path = require_runtime_artifact_path(
+                update["artifact_path"],
+                runtime_forward_root=runtime_forward_root,
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            market_artifact = RidgeArtifact.read(require_runtime_artifact_path(
+                manifest["market_artifact_path"],
+                runtime_forward_root=runtime_forward_root,
+            ))
             market_prediction = float(market_artifact.predict(
                 np.asarray([[float(v) for v in values]])
             )[0])
             if news_exposed:
-                news_artifact = RidgeArtifact.read(manifest["news_artifact_path"])
+                news_artifact = RidgeArtifact.read(require_runtime_artifact_path(
+                    manifest["news_artifact_path"],
+                    runtime_forward_root=runtime_forward_root,
+                ))
                 news_residual = float(news_artifact.predict(np.asarray([
                     [float(news_features[name]) for name in news_artifact.feature_names]
                 ]))[0])
