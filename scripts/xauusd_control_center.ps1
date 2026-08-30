@@ -3065,7 +3065,7 @@ function Invoke-CandidateRouteSample {
         [Parameter(Mandatory = $true)][object]$Route,
         [Parameter(Mandatory = $true)][hashtable]$VersionHeaders,
         [Parameter(Mandatory = $true)][string]$ValidationRun,
-        [Parameter(Mandatory = $true)][string]$FixtureRoot,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$FixtureRoot,
         [string]$IngestToken = "",
         [ValidateSet("warmup", "acceptance")][string]$ValidationPhase = "acceptance",
         [string]$RequestId = ""
@@ -3178,7 +3178,7 @@ function Invoke-CandidatePlannedCpuSamples {
         [Parameter(Mandatory = $true)][object]$RoutePlan,
         [Parameter(Mandatory = $true)][object]$RequestPlan,
         [Parameter(Mandatory = $true)][object[]]$PlannedRequests,
-        [Parameter(Mandatory = $true)][string]$FixtureRoot,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$FixtureRoot,
         [string]$IngestToken = ""
     )
     $routes = @($RoutePlan.worker_reads) + @($RoutePlan.worker_writes)
@@ -3193,6 +3193,10 @@ function Invoke-CandidatePlannedCpuSamples {
             [string]$_.scenario -eq [string]$request.scenario
         }) | Select-Object -First 1
         if (-not $route) { throw "WORKER_CPU_TARGETED_ROUTE_UNAVAILABLE" }
+        $route | Add-Member -NotePropertyName expected_worker_version `
+            -NotePropertyValue ([string]$Candidate.worker_version_id) -Force
+        $route | Add-Member -NotePropertyName expected_git_sha `
+            -NotePropertyValue ([string]$Candidate.git_sha) -Force
         $null = Add-WorkerCpuRequestSend -ValidationRun ([string]$RequestPlan.validation_run) `
             -Request $request -CandidateWorkerVersion ([string]$Candidate.worker_version_id) `
             -QualificationKey ([string]$RequestPlan.qualification_key)
@@ -3570,6 +3574,26 @@ function Resume-CandidateWorkerPlatformEvidence {
         }
     }
     $receipts = @(Get-WorkerCpuDirectResponseReceipts -ValidationRun ([string]$Validation.validation_run))
+    $resumeRoutes = @($Validation.cpu_route_plan.worker_reads) +
+        @($Validation.cpu_route_plan.worker_writes)
+    foreach ($failed in @($receipts | Where-Object { -not $_.passed })) {
+        $request = @($plan.requests | Where-Object {
+            [string]$_.request_id -eq [string]$failed.request_id
+        }) | Select-Object -First 1
+        $route = @($resumeRoutes | Where-Object {
+            [string]$_.family -eq [string]$request.family -and
+            [string]$_.scenario -eq [string]$request.scenario
+        }) | Select-Object -First 1
+        if ($request -and $route -and [string]$route.strategy -eq "DIRECT_REQUEST") {
+            $null = Repair-WorkerCpuDirectResponseIdentityExpectation `
+                -ValidationRun ([string]$Validation.validation_run) -Request $request `
+                -CandidateWorkerVersion ([string]$Candidate.worker_version_id) `
+                -CandidateGitSha ([string]$Candidate.git_sha) `
+                -QualificationKey ([string]$plan.qualification_key)
+        }
+    }
+    $receipts = @(Get-WorkerCpuDirectResponseReceipts `
+        -ValidationRun ([string]$Validation.validation_run))
     if (@($receipts | Where-Object { -not $_.passed }).Count -gt 0) {
         throw "CANDIDATE_PLATFORM_RESUME_DIRECT_FAILURE"
     }

@@ -430,6 +430,24 @@ function Apply-WorkerCpuDeficitRepairPlan {
     return @($payload.requests)
 }
 
+function Get-WorkerCpuDirectResponseReceiptDigest {
+    param([Parameter(Mandatory = $true)][object]$Receipt)
+    return Get-WorkerCpuCanonicalDigest -Value ([pscustomobject][ordered]@{
+        request_id=[string]$Receipt.request_id
+        status=[int]$Receipt.http_status
+        passed=[bool]$Receipt.passed
+        reason=[string]$Receipt.reason
+        worker=[string]$Receipt.observed_worker_version
+        git=[string]$Receipt.observed_git_sha
+        route=[string]$Receipt.route
+        resource=[string]$Receipt.resource
+        d1_operations=[string]$Receipt.d1_operations
+        request_bytes=[string]$Receipt.request_bytes
+        response_bytes=[string]$Receipt.response_bytes
+        response_content_digest=[string]$Receipt.response_content_digest
+    })
+}
+
 function Add-WorkerCpuDirectResponse {
     param(
         [Parameter(Mandatory = $true)][string]$ValidationRun,
@@ -455,24 +473,76 @@ function Add-WorkerCpuDirectResponse {
         request_bytes = [string]$Response.request_bytes
         response_bytes = [string]$Response.response_bytes
         response_content_digest = [string]$Response.response_content_digest
-        response_receipt = Get-WorkerCpuCanonicalDigest -Value ([pscustomobject][ordered]@{
-            request_id = [string]$Request.request_id
-            status = [int]$Response.status
-            passed = [bool]$Response.passed
-            reason = [string]$Response.reason
-            worker = [string]$Response.observed_worker_version
-            git = [string]$Response.observed_git_sha
-            route = [string]$Response.route
-            resource = [string]$Response.resource
-            d1_operations = [string]$Response.d1_operations
-            request_bytes = [string]$Response.request_bytes
-            response_bytes = [string]$Response.response_bytes
-            response_content_digest = [string]$Response.response_content_digest
-        })
+        response_receipt = ""
         completed_at = [DateTimeOffset]::UtcNow.ToString("o")
     }
+    $bounded.response_receipt = Get-WorkerCpuDirectResponseReceiptDigest -Receipt $bounded
     Add-WorkerCpuLedgerEvent -ValidationRun $ValidationRun -Event "DIRECT_RESPONSE_RECORDED" -Detail $bounded
     return $bounded
+}
+
+function Repair-WorkerCpuDirectResponseIdentityExpectation {
+    param(
+        [Parameter(Mandatory = $true)][string]$ValidationRun,
+        [Parameter(Mandatory = $true)][object]$Request,
+        [Parameter(Mandatory = $true)][string]$CandidateWorkerVersion,
+        [Parameter(Mandatory = $true)][string]$CandidateGitSha,
+        [Parameter(Mandatory = $true)][string]$QualificationKey
+    )
+    if ([string]$Request.sample_kind -ne "deficit_top_up" -or
+        [string]$Request.method -notin @("GET", "HEAD")) {
+        return $false
+    }
+    $path = Join-Path (Get-WorkerCpuRunRoot -ValidationRun $ValidationRun) `
+        "directed-ledger.jsonl"
+    if (-not (Test-Path -LiteralPath $path)) { return $false }
+    $entries = @(Get-Content -LiteralPath $path -Encoding UTF8 | Where-Object { $_ } |
+        ForEach-Object { $_ | ConvertFrom-ReleaseControlJson })
+    $requestId = [string]$Request.request_id
+    if (@($entries | Where-Object {
+        [string]$_.event -eq "DIRECT_RESPONSE_IDENTITY_RECONCILED" -and
+        [string]$_.detail.request_id -eq $requestId
+    }).Count -gt 0) { return $true }
+    $sends = @($entries | Where-Object {
+        [string]$_.event -eq "REQUEST_SEND_STARTED" -and
+        [string]$_.detail.request_id -eq $requestId
+    })
+    $responses = @($entries | Where-Object {
+        [string]$_.event -eq "DIRECT_RESPONSE_RECORDED" -and
+        [string]$_.detail.request_id -eq $requestId
+    })
+    if ($sends.Count -ne 1 -or $responses.Count -ne 1) { return $false }
+    $send = $sends[0].detail
+    $original = $responses[0].detail
+    if ([string]$send.candidate_worker_version -ne $CandidateWorkerVersion -or
+        [string]$send.qualification_key -ne $QualificationKey -or
+        [string]$original.expected_worker_version -ne "" -or
+        [string]$original.observed_worker_version -ne $CandidateWorkerVersion -or
+        [string]$original.observed_git_sha -ne $CandidateGitSha -or
+        [int]$original.http_status -ne 200 -or [bool]$original.passed -or
+        [string]$original.reason -ne "WORKER_IDENTITY_MISMATCH" -or
+        [bool]$original.mutated -or
+        [string]$original.response_content_digest -notmatch '^[0-9a-f]{64}$' -or
+        [string]$original.response_receipt -ne
+            [string](Get-WorkerCpuDirectResponseReceiptDigest -Receipt $original) -or
+        [string]$original.route -ne [string]$Request.path) {
+        return $false
+    }
+    $effective = $original.PSObject.Copy()
+    $effective.expected_worker_version = $CandidateWorkerVersion
+    $effective.passed = $true
+    $effective.reason = ""
+    $effective.response_receipt = Get-WorkerCpuDirectResponseReceiptDigest -Receipt $effective
+    Add-WorkerCpuLedgerEvent -ValidationRun $ValidationRun `
+        -Event "DIRECT_RESPONSE_IDENTITY_RECONCILED" `
+        -Detail ([pscustomobject][ordered]@{
+            request_id=$requestId
+            reason="RECOVERED_MISSING_CONTROLLER_EXPECTATION"
+            original_response_receipt=[string]$original.response_receipt
+            effective_receipt=$effective
+            reconciled_at=[DateTimeOffset]::UtcNow.ToString("o")
+        })
+    return $true
 }
 
 function Add-WorkerCpuRequestSend {
@@ -671,13 +741,33 @@ function Get-WorkerCpuDirectResponseReceipts {
     $path = Join-Path (Get-WorkerCpuRunRoot -ValidationRun $ValidationRun) "directed-ledger.jsonl"
     if (-not (Test-Path -LiteralPath $path)) { return @() }
     $receipts = @()
+    $reconciliations = @()
     foreach ($line in @(Get-Content -LiteralPath $path -Encoding UTF8)) {
         if (-not $line) { continue }
         $entry = $line | ConvertFrom-ReleaseControlJson
         if ([string]$entry.event -eq "DIRECT_RESPONSE_RECORDED") { $receipts += $entry.detail }
+        if ([string]$entry.event -eq "DIRECT_RESPONSE_IDENTITY_RECONCILED") {
+            $reconciliations += $entry.detail
+        }
     }
     $duplicates = @($receipts | Group-Object request_id | Where-Object { $_.Count -ne 1 })
     if ($duplicates.Count -gt 0) { throw "WORKER_CPU_DIRECT_RESPONSE_LEDGER_DUPLICATED" }
+    foreach ($reconciliation in $reconciliations) {
+        $matches = @($receipts | Where-Object {
+            [string]$_.request_id -eq [string]$reconciliation.request_id
+        })
+        if ($matches.Count -ne 1 -or
+            [string]$matches[0].response_receipt -ne
+                [string]$reconciliation.original_response_receipt -or
+            -not $reconciliation.effective_receipt -or
+            [string]$reconciliation.effective_receipt.response_receipt -ne
+                [string](Get-WorkerCpuDirectResponseReceiptDigest `
+                    -Receipt $reconciliation.effective_receipt)) {
+            throw "WORKER_CPU_DIRECT_RESPONSE_RECONCILIATION_INVALID"
+        }
+        $index = [array]::IndexOf($receipts, $matches[0])
+        $receipts[$index] = $reconciliation.effective_receipt
+    }
     return @($receipts)
 }
 
