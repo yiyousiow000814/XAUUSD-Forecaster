@@ -402,6 +402,47 @@ def test_provider_evidence_union_is_monotonic_across_delay_reorder_and_shorter_r
     assert result == "6,12,12,12"
 
 
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+def test_provider_evidence_union_canonicalizes_integral_metric_representation(
+    tmp_path, powershell: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$run='11111111-1111-1111-1111-111111111111';"
+        "$expected=@([pscustomobject]@{request_id='r-1'});"
+        "$accepted=[pscustomobject]@{event_id='e-1';event_type='worker';"
+        "request_id='r-1';worker_version_id='worker';validation_run=$run;"
+        "validation_phase='acceptance';method='GET';path='/api/status';status=200;"
+        "outcome='ok';cpu_ms=[int]1;wall_ms=[int]2};"
+        "$fresh=$accepted.PSObject.Copy();$fresh.cpu_ms=[double]1;"
+        "$fresh.wall_ms=[double]2;$merged=Merge-WorkerCpuProviderEvidence "
+        "-AcceptedRecords @($accepted) -NewRecords @($fresh) -ExpectedRequests $expected "
+        "-CandidateWorkerVersion worker -ValidationRun $run;"
+        'Write-Output "$(@($merged).Count),$(@($merged)[0].event_id)"',
+        powershell=powershell,
+    )
+
+    assert result == "1,e-1"
+
+
+def test_provider_evidence_union_rejects_logically_changed_same_event(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$run='11111111-1111-1111-1111-111111111111';"
+        "$expected=@([pscustomobject]@{request_id='r-1'});"
+        "$accepted=[pscustomobject]@{event_id='e-1';event_type='worker';"
+        "request_id='r-1';worker_version_id='worker';validation_run=$run;"
+        "validation_phase='acceptance';method='GET';path='/api/status';status=200;"
+        "outcome='ok';cpu_ms=[double]1;wall_ms=[double]2};"
+        "$changed=$accepted.PSObject.Copy();$changed.cpu_ms=[double]3;"
+        "try{$null=Merge-WorkerCpuProviderEvidence -AcceptedRecords @($accepted) "
+        "-NewRecords @($changed) -ExpectedRequests $expected -CandidateWorkerVersion worker "
+        "-ValidationRun $run;'NO_ERROR'}catch{$_.Exception.Message}",
+    )
+
+    assert result == "WORKER_CPU_PROVIDER_EVENT_CONFLICT"
+
+
 @pytest.mark.parametrize(
     ("case", "reason"),
     [

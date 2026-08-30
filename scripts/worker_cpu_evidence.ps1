@@ -584,7 +584,7 @@ function Merge-WorkerCpuProviderEvidence {
             [string]$record.validation_phase -ne "acceptance") {
             throw "WORKER_CPU_PROVIDER_EVIDENCE_CONTAMINATED"
         }
-        $digest = Get-WorkerCpuCanonicalDigest -Value $record
+        $digest = Get-ReleaseTelemetryDigest -Records @($record)
         if ($events.ContainsKey($eventId) -and [string]$events[$eventId].digest -ne $digest) {
             throw "WORKER_CPU_PROVIDER_EVENT_CONFLICT"
         }
