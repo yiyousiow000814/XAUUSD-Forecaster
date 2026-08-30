@@ -911,14 +911,13 @@ def test_platform_resume_repairs_two_families_without_replaying_complete_validat
         "function Get-CandidateDeficitRepairProviderPreflight{return [pscustomobject]@{"
         "available=$true;plateau_stable=$true;decision=$decision;provider_evidence=$stored;"
         "digest_changed=$false}};function Invoke-CandidateWorkerValidation{throw 'FULL_REPLAY'};"
-        "$script:sent=0;function Invoke-CandidatePlannedCpuSamples{param($RequestPlan,"
-        "$PlannedRequests);$script:sent=@($PlannedRequests).Count;foreach($request in "
-        "@($PlannedRequests)){$response=[pscustomobject]@{requested_worker_version='worker';"
-        "observed_worker_version='worker';observed_git_sha=('b'*40);status=200;passed=$true;"
-        "reason='';route=$request.path;resource=$request.family;d1_operations='';"
-        "request_bytes='';response_bytes='';response_content_digest=('d'*64)};"
-        "$null=Add-WorkerCpuDirectResponse -ValidationRun $run -Request $request "
-        "-Response $response};[pscustomobject]@{completed_at=[DateTimeOffset]::UtcNow}};"
+        "$script:sent=0;function Add-WorkerCpuRequestSend{$script:sent++};"
+        "function Invoke-CandidateRouteSample{param($Route,$RequestId);"
+        "[pscustomobject]@{request_id=$RequestId;requested_worker_version=$Route.expected_worker_version;"
+        "observed_worker_version='worker';observed_git_sha=('b'*40);status=200;passed=[bool]("
+        "$Route.expected_worker_version -eq 'worker' -and $Route.expected_git_sha -eq ('b'*40));"
+        "reason='';route=$Route.path;resource=$Route.family;d1_operations='';"
+        "request_bytes='';response_bytes='';response_content_digest=('d'*64)}};"
         "function Get-CandidateFrozenPlatformEvidence{return $null};"
         "$result=Resume-CandidateWorkerPlatformEvidence -Candidate $candidate "
         "-Validation $validation;$savedPlan=Read-WorkerCpuRunArtifact -ValidationRun $run "
@@ -929,6 +928,101 @@ def test_platform_resume_repairs_two_families_without_replaying_complete_validat
     )
 
     assert result == "8,10,10,10,2,10"
+
+
+def test_read_only_deficit_repair_reconciles_only_missing_controller_expectation(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$run='11111111-1111-1111-1111-111111111111';$key='a'*64;"
+        "$request=[pscustomobject]@{request_id='repair-1';family='market-history-read';"
+        "scenario='';method='GET';path='/api/market-history';phase='acceptance';"
+        "sample_kind='deficit_top_up'};$null=Add-WorkerCpuRequestSend -ValidationRun $run "
+        "-Request $request -CandidateWorkerVersion 'worker' -QualificationKey $key;"
+        "$response=[pscustomobject]@{requested_worker_version='';observed_worker_version='worker';"
+        "observed_git_sha=('b'*40);status=200;passed=$false;reason='WORKER_IDENTITY_MISMATCH';"
+        "route='/api/market-history';resource='market-history';mutated=$false;d1_operations='1';"
+        "request_bytes='0';response_bytes='10';response_content_digest=('c'*64)};"
+        "$null=Add-WorkerCpuDirectResponse -ValidationRun $run -Request $request -Response $response;"
+        "$repaired=Repair-WorkerCpuDirectResponseIdentityExpectation -ValidationRun $run "
+        "-Request $request -CandidateWorkerVersion 'worker' -CandidateGitSha ('b'*40) "
+        "-QualificationKey $key;$receipt=@(Get-WorkerCpuDirectResponseReceipts $run)[0];"
+        "$write=$request.PSObject.Copy();$write.request_id='write-1';$write.method='POST';"
+        "$writeRejected=Repair-WorkerCpuDirectResponseIdentityExpectation -ValidationRun $run "
+        "-Request $write -CandidateWorkerVersion 'worker' -CandidateGitSha ('b'*40) "
+        "-QualificationKey $key;$wrong=$request.PSObject.Copy();$wrong.request_id='wrong-1';"
+        "$null=Add-WorkerCpuRequestSend -ValidationRun $run -Request $wrong "
+        "-CandidateWorkerVersion 'worker' -QualificationKey $key;$wrongResponse=$response.PSObject.Copy();"
+        "$wrongResponse.observed_worker_version='other';$null=Add-WorkerCpuDirectResponse "
+        "-ValidationRun $run -Request $wrong -Response $wrongResponse;"
+        "$wrongRejected=Repair-WorkerCpuDirectResponseIdentityExpectation -ValidationRun $run "
+        "-Request $wrong -CandidateWorkerVersion 'worker' -CandidateGitSha ('b'*40) "
+        "-QualificationKey $key;Write-Output \"$repaired,$($receipt.passed),"
+        "$($receipt.expected_worker_version),$writeRejected,$wrongRejected\"",
+    )
+
+    assert result == "True,True,worker,False,False"
+
+
+def test_platform_resume_continues_existing_repair_after_audited_read_reconciliation(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$run='11111111-1111-1111-1111-111111111111';$key='a'*64;"
+        "$candidate=[pscustomobject]@{worker_version_id='worker';git_sha=('b'*40);"
+        "validation_key='validation'};$routes=@();$requests=@();foreach($family in @('a','b')){"
+        "$route=[pscustomobject]@{family=$family;scenario='default';method='GET';"
+        "path=('/'+$family);request_query='';fixture='';strategy='DIRECT_REQUEST'};"
+        "$routes += $route;$request=[pscustomobject]@{request_id=('original-'+$family);"
+        "family=$family;scenario='default';method='GET';path=('/'+$family);request_query='';"
+        "fixture='';phase='acceptance';sample_kind='required'};$requests += $request};"
+        "$plan=[pscustomobject]@{schema_version='worker-directed-ledger-v1';validation_run=$run;"
+        "candidate_worker_version='worker';qualification_key=$key;policy_version='policy';"
+        "requests=$requests;request_universe_digest='old'};Write-WorkerCpuAtomicJson -Path "
+        "(Join-Path (Get-WorkerCpuRunRoot $run) 'plan.json') -Value $plan;foreach($request in "
+        "$requests){$response=[pscustomobject]@{requested_worker_version='worker';"
+        "observed_worker_version='worker';observed_git_sha=('b'*40);status=200;passed=$true;"
+        "reason='';route=$request.path;resource=$request.family;mutated=$false;d1_operations='';"
+        "request_bytes='';response_bytes='';response_content_digest=('c'*64)};"
+        "$null=Add-WorkerCpuDirectResponse -ValidationRun $run -Request $request -Response $response};"
+        "$recovery=[pscustomobject]@{active_reads=6;background_reads=4;deficit_top_ups=0;"
+        "headroom_top_ups=0};$stored=Write-WorkerCpuProviderEvidence -ValidationRun $run "
+        "-Records @() -RecoveryState $recovery;$groups=@($routes|ForEach-Object{"
+        "[pscustomobject]@{family=$_.family;scenario=$_.scenario;method=$_.method;path=$_.path;"
+        "request_query='';fixture='';observed=9;required=10;missing=3}});"
+        "$repair=New-WorkerCpuDeficitRepairPlan -RequestPlan $plan -DeficientGroups $groups "
+        "-CandidateWorkerVersion 'worker' -QualificationKey $key -PriorProviderDigest ('d'*64) "
+        "-PriorObservedTotal 18;$repairRequests=@(Apply-WorkerCpuDeficitRepairPlan -RequestPlan "
+        "$plan -RepairPlan $repair);$first=$repairRequests[0];$null=Add-WorkerCpuRequestSend "
+        "-ValidationRun $run -Request $first -CandidateWorkerVersion 'worker' -QualificationKey $key;"
+        "$bad=[pscustomobject]@{requested_worker_version='';observed_worker_version='worker';"
+        "observed_git_sha=('b'*40);status=200;passed=$false;reason='WORKER_IDENTITY_MISMATCH';"
+        "route=$first.path;resource=$first.family;mutated=$false;d1_operations='';request_bytes='';"
+        "response_bytes='';response_content_digest=('e'*64)};$null=Add-WorkerCpuDirectResponse "
+        "-ValidationRun $run -Request $first -Response $bad;$validation=[pscustomobject]@{"
+        "key='validation';validation_run=$run;expected_requests=$requests;cpu_route_plan="
+        "[pscustomobject]@{worker_reads=$routes;worker_writes=@()};telemetry_window_from="
+        "'2026-08-30T00:00:00Z';telemetry_window_to='2026-08-30T00:01:00Z';routes=$routes;"
+        "worker_qualification=[pscustomobject]@{key=$key};expected_worker_invocations=2;"
+        "static_worker_invocations=0;static_observability_state='PASSED'};"
+        "$script:sent=0;function Add-WorkerCpuRequestSend{$script:sent++};"
+        "function Invoke-CandidateRouteSample{param($Route,$RequestId);[pscustomobject]@{"
+        "request_id=$RequestId;requested_worker_version=$Route.expected_worker_version;"
+        "observed_worker_version='worker';observed_git_sha=('b'*40);status=200;passed=$true;"
+        "reason='';route=$Route.path;resource=$Route.family;mutated=$false;d1_operations='';"
+        "request_bytes='';response_bytes='';response_content_digest=('f'*64)}};"
+        "function Get-CandidateFrozenPlatformEvidence{return $null};"
+        "$result=Resume-CandidateWorkerPlatformEvidence -Candidate $candidate -Validation $validation;"
+        "$receipts=@(Get-WorkerCpuDirectResponseReceipts $run);$events=@(Get-Content "
+        "(Join-Path (Get-WorkerCpuRunRoot $run) 'directed-ledger.jsonl')|ForEach-Object{$_|ConvertFrom-Json});"
+        "Write-Output \"$script:sent,$($receipts.Count),$(@($receipts|Where-Object{!$_.passed}).Count),"
+        "$(@($events|Where-Object{$_.event -eq 'DIRECT_RESPONSE_IDENTITY_RECONCILED'}).Count),"
+        "$(@((Read-WorkerCpuRunArtifact $run 'plan.json').requests).Count)\"",
+    )
+
+    assert result == "7,10,0,1,10"
 
 
 def test_deterministic_observability_contract_failure_is_terminal(tmp_path) -> None:
