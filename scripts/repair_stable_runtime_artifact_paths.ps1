@@ -29,13 +29,18 @@ $ReceiptPath = $receiptFullPath
 function Invoke-ArtifactMigrationProcess {
     param([ValidateSet("plan", "apply", "verify", "rollback")][string]$MigrationAction)
     $python = (Get-Command python.exe -ErrorAction Stop).Source
-    $output = & $python $migrationScript --database $database `
-        --runtime-root $runtimePath --receipt $ReceiptPath `
-        --action $MigrationAction 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "ARTIFACT_PATH_MIGRATION_$($MigrationAction.ToUpperInvariant())_FAILED: $output"
+    $result = Invoke-Utf8NativeProcess -FilePath $python -Arguments @(
+        $migrationScript,
+        "--database", $database,
+        "--runtime-root", $runtimePath,
+        "--receipt", $ReceiptPath,
+        "--action", $MigrationAction
+    )
+    if ($result.exit_code -ne 0) {
+        $diagnostic = @($result.stderr_lines + $result.stdout_lines) -join "`n"
+        throw "ARTIFACT_PATH_MIGRATION_$($MigrationAction.ToUpperInvariant())_FAILED: $diagnostic"
     }
-    return ($output -join "`n")
+    return [string]$result.stdout
 }
 
 function Wait-StableServiceState {

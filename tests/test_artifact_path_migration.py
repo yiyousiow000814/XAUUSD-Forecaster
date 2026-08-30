@@ -477,6 +477,32 @@ def test_real_repair_entrypoint_preserves_source_authority_and_fails_closed(
     assert database.read_bytes() == database_before
     assert runtime_marker.read_text(encoding="utf-8") == "stable"
 
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "DELETE FROM news_model_generation_members_v1 "
+        "WHERE model_identity='MARKET_ONLY'"
+    )
+    connection.commit()
+    connection.close()
+    invalid_before = database.read_bytes()
+    invalid_receipt = runtime / ".local" / "forward" / "invalid-plan.json"
+    invalid = _run_repair_entrypoint(
+        powershell=powershell, code_root=code_root,
+        runtime_root=runtime, repository_root=repository_root,
+        expected_revision=revision, receipt=invalid_receipt,
+        working_directory=working_directory,
+    )
+    assert invalid.returncode != 0
+    assert "ARTIFACT_PATH_MIGRATION_PLAN_FAILED" in (
+        invalid.stdout + invalid.stderr
+    )
+    assert "ACTIVE_GENERATION_INCOMPLETE" in (
+        invalid.stdout + invalid.stderr
+    )
+    assert not invalid_receipt.exists()
+    assert not (runtime / ".local" / "forward" / "release-control.lock").exists()
+    assert database.read_bytes() == invalid_before
+
 
 @pytest.mark.parametrize(
     ("mutation", "error"),
