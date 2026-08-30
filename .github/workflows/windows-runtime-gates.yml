@@ -54,3 +54,4 @@ jobs:
           tests/test_cross_version_runtime_recovery.py
           tests/test_runtime_launchers.py
           tests/test_control_plane_install.py
+          tests/test_artifact_path_migration.py::test_real_repair_entrypoint_preserves_source_authority_and_fails_closed

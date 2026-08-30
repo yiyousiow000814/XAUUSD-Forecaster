@@ -40,9 +40,22 @@ Determine whether accepted evidence can be reused by an exact identity made
 from every behavior-affecting artifact input rather than an unrelated repository
 revision.
 
-After an escaped blocker, identify the generic protocol question that should
-have exposed it and improve that question rather than recording only an incident
-literal. Keep authorization and task scope unchanged.
+After an escaped deterministic blocker: fix it, identify the violated generic
+invariant, inspect siblings, strengthen one family-level regression at the
+correct abstraction, and determine why design, review, or testing missed it.
+Improve durable guidance only when the lesson generalizes; do not add a rule for
+a typo, literal filename, or transient provider incident. Continue the
+authorized workflow without new user approval when the root cause is proven,
+the correction remains narrow and reversible inside the authorized family, no
+new mutation/security/identity authority is needed, no ambiguity is guessed,
+and no acceptance gate is weakened.
+
+When correctness depends on language or runtime composition, execute the real
+boundary rather than inferring it from source text. For each material changed
+entrypoint, record the runtime, caller, callee/import, parameter binding,
+filesystem roots, working directory, success case, and fail-closed case. At
+least one automated regression must execute every changed critical composition
+boundary with the real runtime involved.
 
 Treat required-verification latency as a change-safety contract. Do not extend a
 timeout to conceal state-space explosion or inefficient verification design.

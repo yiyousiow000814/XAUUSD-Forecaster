@@ -2,11 +2,12 @@ param(
     [Parameter(Mandatory = $true)][string]$RuntimeRoot,
     [Parameter(Mandatory = $true)][string]$RepositoryRoot,
     [Parameter(Mandatory = $true)][string]$ExpectedRevision,
-    [Parameter(Mandatory = $true)][string]$ReceiptPath
+    [Parameter(Mandatory = $true)][string]$ReceiptPath,
+    [switch]$PreMutationPlanOnly
 )
 
 $ErrorActionPreference = "Stop"
-$sourceRoot = Split-Path -Parent $PSScriptRoot
+$repairSourceRoot = Split-Path -Parent $PSScriptRoot
 $controlScript = Join-Path $PSScriptRoot "xauusd_control_center.ps1"
 $migrationScript = Join-Path $PSScriptRoot "migrate_runtime_artifact_paths.py"
 $runtimePath = [IO.Path]::GetFullPath($RuntimeRoot)
@@ -58,14 +59,29 @@ function Wait-StableServiceState {
 if ($ExpectedRevision -notmatch '^[0-9a-f]{40}$') {
     throw "ARTIFACT_REPAIR_EXACT_REVISION_REQUIRED"
 }
-$sourceRevision = (& git.exe -C $sourceRoot rev-parse HEAD 2>$null).Trim()
-$originMain = (& git.exe -C $sourceRoot rev-parse origin/main 2>$null).Trim()
-if ($LASTEXITCODE -ne 0 -or $sourceRevision -ne $ExpectedRevision -or
-    $originMain -ne $ExpectedRevision) {
+$repairSourceRevision = (& git.exe -C $repairSourceRoot rev-parse HEAD 2>$null).Trim()
+$repairOriginMain = (& git.exe -C $repairSourceRoot rev-parse origin/main 2>$null).Trim()
+if ($LASTEXITCODE -ne 0 -or $repairSourceRevision -ne $ExpectedRevision -or
+    $repairOriginMain -ne $ExpectedRevision) {
     throw "ARTIFACT_REPAIR_EXACT_MAIN_REQUIRED"
 }
 if (-not (Test-Path -LiteralPath $database -PathType Leaf)) {
     throw "ARTIFACT_REPAIR_DATABASE_MISSING"
+}
+if ($PreMutationPlanOnly) {
+    $null = Invoke-ArtifactMigrationProcess -MigrationAction plan
+    [pscustomobject]@{
+        schema = "xauusd.stable-artifact-repair-premutation-plan.v1"
+        status = "PLANNED"
+        repair_source_root = [IO.Path]::GetFullPath($repairSourceRoot)
+        source_revision = $repairSourceRevision
+        origin_main = $repairOriginMain
+        runtime_root = $runtimePath
+        repository_root = $repositoryPath
+        working_directory = [IO.Path]::GetFullPath((Get-Location).Path)
+        receipt = $ReceiptPath
+    } | ConvertTo-Json -Depth 4 -Compress
+    exit 0
 }
 
 $release = Get-ReleaseControlState

@@ -133,10 +133,37 @@ measurements.
 
 ## Escaped-blocker learning
 
-Do more than add a literal regression. Identify which general Change Safety
-question should have caught the blocker, improve the framework at that general
-level, and exercise siblings governed by the same rule without expanding the
-authorization boundary.
+For each escaped deterministic blocker:
+
+1. Fix the concrete blocker.
+2. Identify the violated generic invariant.
+3. Inspect siblings governed by that invariant.
+4. Strengthen one family-level regression at the correct abstraction.
+5. Determine why design, review, and testing did not expose it.
+6. Improve durable guidance only when the lesson generalizes.
+7. Continue the authorized workflow when the small-blocker conditions below
+   remain satisfied.
+
+Do not require new user authorization when the root cause is proven, the defect
+remains inside the authorized family, the correction is narrow and reversible,
+no new production mutation or security/access authority is required, no
+external ambiguity must be guessed, and no acceptance gate is weakened. Stop
+for a new failure family, changed mutation authority, destructive or
+irreversible action, human identity/Access, uncertain root cause, loss of safe
+Stable recovery, or a proposed safety-contract relaxation.
+
+## Real composition execution
+
+Static source inspection is not sufficient when correctness depends on language
+or runtime composition semantics such as dot-sourcing and scope, environment
+inheritance, CLI parsing, working directory, import resolution, subprocess
+quoting, environment precedence, or serializer/consumer wiring.
+
+Before completing a material script or orchestration change, record a compact
+execution matrix containing the actual runtime, entrypoint, caller, callee or
+import, parameter binding, filesystem roots, working directory, success case,
+and fail-closed case. At least one automated test must execute every changed
+critical composition boundary with the real runtime involved.
 
 Expected lifecycle:
 `request -> change contract -> impact graph -> compatibility/failure/recovery
