@@ -1916,7 +1916,10 @@ def test_live_generation_gate_accepts_only_the_live_stage(
     tmp_path, stage: str, accepted: bool,
 ) -> None:
     """A complete activation is not live-safe unless its stage is SHADOW."""
-    ledger = ForwardLedger(tmp_path / f"forward-{stage.lower()}.sqlite3")
+    forward_root = tmp_path / ".local" / "forward"
+    ledger = ForwardLedger(
+        forward_root / f"forward-{stage.lower()}.sqlite3"
+    )
     created_at = datetime(2026, 8, 5, 12, tzinfo=UTC)
     generation_id = f"current-{stage.lower()}"
     identities = (
@@ -1925,7 +1928,7 @@ def test_live_generation_gate_accepts_only_the_live_stage(
     )
     for identity in identities:
         model_version = f"{identity.lower()}-{stage.lower()}"
-        artifact_path = tmp_path / model_version / "artifact.json"
+        artifact_path = forward_root / "models-v2" / model_version / "artifact.json"
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
         artifact_path.write_text("{}", encoding="utf-8")
         ledger.connection.execute(
@@ -2090,9 +2093,14 @@ def test_generation_activates_all_six_models_with_broad_news_and_cold_core_lane(
     tmp_path, monkeypatch
 ) -> None:
     first_seen = datetime(2026, 8, 1, 10, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward-news-bootstrap.sqlite3", now=first_seen)
+    forward_root = tmp_path / ".local" / "forward"
+    models_root = forward_root / "models-v2"
+    ledger = ForwardLedger(
+        forward_root / "forward-news-bootstrap.sqlite3", now=first_seen
+    )
     rows = _training_rows(320)
-    market_path = tmp_path / "market.json"
+    market_path = models_root / "market.json"
+    market_path.parent.mkdir(parents=True, exist_ok=True)
     market_path.write_text("{}", encoding="utf-8")
 
     class Artifact:
@@ -2122,7 +2130,7 @@ def test_generation_activates_all_six_models_with_broad_news_and_cold_core_lane(
     monkeypatch.setattr(training_v2, "train_ridge", lambda *_: Artifact())
 
     first_result = training_v2.train_due_v2(
-        ledger, datetime(2026, 8, 2, 12, tzinfo=UTC), tmp_path / "models"
+        ledger, datetime(2026, 8, 2, 12, tzinfo=UTC), models_root
     )
     assert first_result[0]["status"] == "NEWS_GENERATION_EVIDENCE_INSUFFICIENT"
     assert ledger.connection.execute(
@@ -2137,7 +2145,7 @@ def test_generation_activates_all_six_models_with_broad_news_and_cold_core_lane(
         )
 
     second_result = training_v2.train_due_v2(
-        ledger, datetime(2026, 8, 2, 13, tzinfo=UTC), tmp_path / "models"
+        ledger, datetime(2026, 8, 2, 13, tzinfo=UTC), models_root
     )
     assert second_result[0]["status"] == "TRAINED"
     assert {

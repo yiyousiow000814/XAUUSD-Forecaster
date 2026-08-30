@@ -24,6 +24,10 @@ from .news_contracts import (
 from .news_evidence import BROAD_NEWS_FEATURES, EVIDENCE_POLICY_VERSION
 from .news_features_v2 import EVIDENCE_GRADE_WEIGHT
 from .ridge import RidgeArtifact, train_ridge
+from .artifact_paths import (
+    require_runtime_artifact_path,
+    sqlite_runtime_forward_root,
+)
 from .training import MARKET_FEATURES
 
 
@@ -888,12 +892,19 @@ def require_current_contract_generation(connection) -> str:
         WHERE m.generation_id=? AND m.model_identity='NEWS_ONLY'""",
         (generation["generation_id"],),
     ).fetchone()
-    paths = [Path(path) for path in members.values()]
+    runtime_forward_root = sqlite_runtime_forward_root(connection)
+    paths = [
+        require_runtime_artifact_path(
+            path, runtime_forward_root=runtime_forward_root,
+        )
+        for path in members.values()
+    ]
     if auxiliary is None:
         raise RuntimeError("active Core/Broad generation has no NEWS_ONLY diagnostic")
-    paths.append(Path(str(auxiliary["artifact_path"])))
-    if any(not path.is_absolute() or not path.exists() for path in paths):
-        raise RuntimeError("active Core/Broad generation has unavailable artifacts")
+    paths.append(require_runtime_artifact_path(
+        str(auxiliary["artifact_path"]),
+        runtime_forward_root=runtime_forward_root,
+    ))
     return str(generation["generation_id"])
 
 
