@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "ControlBundlePreflight", "PreflightRuntimeStateRoot", "MigrateRuntimeStateRoot")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "RegisterAccessProviderInspection", "ReuseAccessQualification", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "ControlBundlePreflight", "PreflightRuntimeStateRoot", "MigrateRuntimeStateRoot")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync", "broadcast")]
     [string]$ServiceKey = "",
@@ -12,7 +12,8 @@ param(
     [string]$ExpectedControlRevision = "",
     [string]$InstallTransactionId = "",
     [string]$OperationResultPath = "",
-    [string]$AccessChecklistConfirmation = ""
+    [string]$AccessChecklistConfirmation = "",
+    [string]$AccessProviderInspectionPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,6 +46,9 @@ $releaseControlStatePath = Join-Path $runtimeForwardRoot "release-control-state.
 $releaseHistoryPath = Join-Path $runtimeForwardRoot "release-control-history.jsonl"
 $coordinatedMigrationReceiptPath = Join-Path $runtimeForwardRoot "coordinated-migration-receipt.json"
 $accessBoundaryReceiptRoot = Join-Path $runtimeForwardRoot "access-boundary-receipts"
+$accessQualificationContractPath = Join-Path $PSScriptRoot "access-qualification-contract.json"
+$accessProviderInspectionRoot = Join-Path $runtimeForwardRoot "access-provider-inspections"
+$accessQualificationReuseReceiptRoot = Join-Path $runtimeForwardRoot "access-qualification-reuse-receipts"
 $releaseLockPath = Join-Path $runtimeForwardRoot "release-control.lock"
 $runtimeStateMigrationLockPath = Join-Path $moduleRoot ".runtime-state-migration.lock"
 $controlPlaneInstallStatePath = Join-Path $runtimeForwardRoot "control-plane-install-state.json"
@@ -2018,13 +2022,53 @@ function Get-ProductionCandidateProvenanceResult {
     $mainRead = Invoke-Utf8NativeProcess -FilePath "git.exe" `
         -Arguments @("-C", $repositoryRoot, "rev-parse", "origin/main")
     $originMain = ([string]$mainRead.stdout).Trim().ToLowerInvariant()
-    if ($mainRead.exit_code -ne 0 -or $originMain -notmatch '^[0-9a-f]{40}$' -or
-        $originMain -ne [string]$Candidate.git_sha) {
+    if ($mainRead.exit_code -ne 0 -or $originMain -notmatch '^[0-9a-f]{40}$') {
         return [pscustomobject]@{
             state = "FAILED"; reason = "PRODUCTION_CANDIDATE_EXACT_MAIN_REQUIRED"
         }
     }
-    return [pscustomobject]@{ state = "PASSED"; reason = $null }
+    if ($originMain -eq [string]$Candidate.git_sha) {
+        return [pscustomobject]@{ state = "PASSED"; reason = $null; mode = "EXACT_MAIN" }
+    }
+    $ancestor = Invoke-Utf8NativeProcess -FilePath "git.exe" -Arguments @(
+        "-C", $repositoryRoot, "merge-base", "--is-ancestor",
+        [string]$Candidate.git_sha, $originMain
+    )
+    $diff = if ([int]$ancestor.exit_code -eq 0) {
+        Invoke-Utf8NativeProcess -FilePath "git.exe" -Arguments @(
+            "-C", $repositoryRoot, "diff", "--name-only",
+            [string]$Candidate.git_sha, $originMain
+        )
+    } else { $null }
+    $changed = if ($diff -and [int]$diff.exit_code -eq 0) {
+        @($diff.stdout_lines | ForEach-Object { ([string]$_).Trim().Replace('\', '/') } |
+            Where-Object { $_ })
+    } else { @() }
+    $allowed = @($changed | Where-Object {
+        $_ -eq "AGENTS.md" -or
+        $_ -like ".agents/*" -or $_ -like ".github/*" -or
+        $_ -like "docs/*" -or $_ -like "formal/*" -or $_ -like "tests/*" -or
+        $_ -in @(
+            "scripts/access-qualification-contract.json",
+            "scripts/runtime-control-files.json",
+            "scripts/xauusd_control_center.ps1"
+        )
+    })
+    if ([int]$ancestor.exit_code -ne 0 -or -not $diff -or
+        [int]$diff.exit_code -ne 0 -or $changed.Count -eq 0 -or
+        $allowed.Count -ne $changed.Count) {
+        return [pscustomobject]@{
+            state = "FAILED"; reason = "PRODUCTION_CANDIDATE_EXACT_MAIN_REQUIRED"
+        }
+    }
+    return [pscustomobject]@{
+        state = "PASSED"
+        reason = $null
+        mode = "CONTROL_PLANE_ONLY_MAIN_ADVANCE"
+        candidate_git_sha = [string]$Candidate.git_sha
+        current_main_git_sha = $originMain
+        changed_control_artifacts = $changed
+    }
 }
 
 function Test-ProductionCandidateProvenance {
@@ -4735,6 +4779,280 @@ function Get-ProtectedAccessBoundaryIdentity {
     }
 }
 
+function Get-AccessQualificationContract {
+    if (-not (Test-Path -LiteralPath $accessQualificationContractPath)) {
+        throw "ACCESS_QUALIFICATION_CONTRACT_MISSING"
+    }
+    $contract = Get-Content -LiteralPath $accessQualificationContractPath -Raw -Encoding UTF8 |
+        ConvertFrom-ReleaseControlJson
+    if ([int]$contract.schema_version -ne 1 -or
+        [string]$contract.key_contract_version -ne "access-qualification-key-v1" -or
+        @($contract.repository_artifacts).Count -eq 0) {
+        throw "ACCESS_QUALIFICATION_CONTRACT_INVALID"
+    }
+    return $contract
+}
+
+function Get-AccessProviderBehaviorCore {
+    param([Parameter(Mandatory = $true)][object]$Inspection)
+    $destinations = @($Inspection.destinations | ForEach-Object { [string]$_ } |
+        Sort-Object -Unique)
+    $identityProviders = @($Inspection.identity_providers | ForEach-Object {
+        ([string]$_).Trim().ToLowerInvariant()
+    } | Sort-Object -Unique)
+    return [ordered]@{
+        application_id = [string]$Inspection.application_id
+        application_audience = [string]$Inspection.application_audience
+        application_name = [string]$Inspection.application_name
+        application_type = ([string]$Inspection.application_type).ToLowerInvariant()
+        application_session_duration = ([string]$Inspection.application_session_duration).ToLowerInvariant()
+        destinations = $destinations
+        policy_id = [string]$Inspection.policy_id
+        policy_name = [string]$Inspection.policy_name
+        policy_action = ([string]$Inspection.policy_action).ToLowerInvariant()
+        policy_order = [int]$Inspection.policy_order
+        policy_rule_count = [int]$Inspection.policy_rule_count
+        policy_session_duration = ([string]$Inspection.policy_session_duration).ToLowerInvariant()
+        owner_rule_sha256 = ([string]$Inspection.owner_rule_sha256).ToLowerInvariant()
+        identity_providers = $identityProviders
+        mfa_required = [bool]$Inspection.mfa_required
+        browser_isolation = [bool]$Inspection.browser_isolation
+        purpose_justification = [bool]$Inspection.purpose_justification
+        temporary_authentication = [bool]$Inspection.temporary_authentication
+    }
+}
+
+function Get-AccessProviderBehaviorFingerprint {
+    param([Parameter(Mandatory = $true)][object]$Inspection)
+    $core = Get-AccessProviderBehaviorCore -Inspection $Inspection
+    $json = $core | ConvertTo-Json -Compress -Depth 12
+    return Get-Sha256BytesHex -Bytes ([Text.Encoding]::UTF8.GetBytes($json))
+}
+
+function Assert-AccessProviderInspectionMatchesContract {
+    param([Parameter(Mandatory = $true)][object]$Inspection)
+    $required = @(
+        "application_id", "application_audience", "application_name",
+        "application_type", "application_session_duration", "destinations",
+        "policy_id", "policy_name", "policy_action", "policy_order",
+        "policy_rule_count", "policy_session_duration", "owner_rule_sha256",
+        "identity_providers", "mfa_required", "browser_isolation",
+        "purpose_justification", "temporary_authentication"
+    )
+    foreach ($name in $required) {
+        if (-not $Inspection.PSObject.Properties[$name]) {
+            throw "ACCESS_PROVIDER_INSPECTION_INVALID:$name"
+        }
+    }
+    foreach ($name in @(
+        "mfa_required", "browser_isolation", "purpose_justification",
+        "temporary_authentication"
+    )) {
+        if ($Inspection.PSObject.Properties[$name].Value -isnot [bool]) {
+            throw "ACCESS_PROVIDER_INSPECTION_INVALID:$name"
+        }
+    }
+    if ([string]$Inspection.owner_rule_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        @($Inspection.destinations).Count -eq 0 -or
+        @($Inspection.identity_providers).Count -eq 0) {
+        throw "ACCESS_PROVIDER_INSPECTION_INVALID"
+    }
+    $contract = Get-AccessQualificationContract
+    $actual = Get-AccessProviderBehaviorCore -Inspection $Inspection
+    $expectedSource = $contract.provider_boundary
+    $expected = Get-AccessProviderBehaviorCore -Inspection ([pscustomobject]@{
+        application_id = $expectedSource.application_id
+        application_audience = $expectedSource.application_audience
+        application_name = $expectedSource.application_name
+        application_type = $expectedSource.application_type
+        application_session_duration = $expectedSource.application_session_duration
+        destinations = $contract.protected_boundary.destinations
+        policy_id = $expectedSource.policy_id
+        policy_name = $expectedSource.policy_name
+        policy_action = $expectedSource.policy_action
+        policy_order = $expectedSource.policy_order
+        policy_rule_count = $expectedSource.policy_rule_count
+        policy_session_duration = $expectedSource.policy_session_duration
+        owner_rule_sha256 = $expectedSource.owner_rule_sha256
+        identity_providers = $expectedSource.identity_providers
+        mfa_required = $expectedSource.mfa_required
+        browser_isolation = $expectedSource.browser_isolation
+        purpose_justification = $expectedSource.purpose_justification
+        temporary_authentication = $expectedSource.temporary_authentication
+    })
+    if (($actual | ConvertTo-Json -Compress -Depth 12) -cne
+        ($expected | ConvertTo-Json -Compress -Depth 12)) {
+        throw "ACCESS_PROVIDER_CONFIGURATION_CHANGED"
+    }
+    return $actual
+}
+
+function Get-AccessProviderInspectionReceiptDigest {
+    param([Parameter(Mandatory = $true)][object]$Core)
+    $json = $Core | ConvertTo-Json -Compress -Depth 12
+    return Get-Sha256BytesHex -Bytes ([Text.Encoding]::UTF8.GetBytes($json))
+}
+
+function Register-AccessProviderInspection {
+    param([Parameter(Mandatory = $true)][object]$Inspection)
+    $behavior = Assert-AccessProviderInspectionMatchesContract -Inspection $Inspection
+    $observedAt = ConvertTo-ReleaseTimestampUtc -Value $Inspection.observed_at
+    $windowStart = ConvertTo-ReleaseTimestampUtc -Value $Inspection.audit_window_start
+    $windowEnd = ConvertTo-ReleaseTimestampUtc -Value $Inspection.audit_window_end
+    $policyUpdated = ConvertTo-ReleaseTimestampUtc -Value $Inspection.policy_last_updated_at
+    if ([string]$Inspection.inspection_method -ne
+            "CLOUDFLARE_AUTHENTICATED_DASHBOARD_READ_ONLY" -or
+        $observedAt -eq [DateTimeOffset]::MinValue -or
+        $windowStart -eq [DateTimeOffset]::MinValue -or
+        $windowEnd -eq [DateTimeOffset]::MinValue -or
+        $policyUpdated -eq [DateTimeOffset]::MinValue -or
+        $windowStart -gt $windowEnd -or
+        [Math]::Abs(($observedAt - $windowEnd).TotalMinutes) -gt 5 -or
+        $observedAt -gt [DateTimeOffset]::UtcNow.AddMinutes(5) -or
+        [int]$Inspection.application_change_count -ne 0 -or
+        [int]$Inspection.policy_change_count -ne 0) {
+        throw "ACCESS_PROVIDER_INSPECTION_INVALID"
+    }
+    $core = [ordered]@{
+        schema_version = "access-provider-inspection-v1"
+        observed_at = $observedAt.ToString("o")
+        inspection_method = [string]$Inspection.inspection_method
+        audit_window_start = $windowStart.ToString("o")
+        audit_window_end = $windowEnd.ToString("o")
+        application_change_count = [int]$Inspection.application_change_count
+        policy_change_count = [int]$Inspection.policy_change_count
+        policy_last_updated_at = $policyUpdated.ToString("o")
+        behavior = $behavior
+        provider_fingerprint = Get-AccessProviderBehaviorFingerprint -Inspection $behavior
+    }
+    $receipt = [pscustomobject]@{
+        schema_version = $core.schema_version
+        observed_at = $core.observed_at
+        inspection_method = $core.inspection_method
+        audit_window_start = $core.audit_window_start
+        audit_window_end = $core.audit_window_end
+        application_change_count = $core.application_change_count
+        policy_change_count = $core.policy_change_count
+        policy_last_updated_at = $core.policy_last_updated_at
+        behavior = $core.behavior
+        provider_fingerprint = $core.provider_fingerprint
+        receipt_digest = Get-AccessProviderInspectionReceiptDigest -Core $core
+    }
+    New-Item -ItemType Directory -Path $accessProviderInspectionRoot -Force | Out-Null
+    $path = Join-Path $accessProviderInspectionRoot "$($receipt.receipt_digest).json"
+    if (-not (Test-Path -LiteralPath $path)) {
+        $temporary = "$path.tmp"
+        $receipt | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $temporary -Encoding UTF8
+        Move-Item -LiteralPath $temporary -Destination $path
+    }
+    return $receipt
+}
+
+function Assert-AccessProviderInspectionReceipt {
+    param([Parameter(Mandatory = $true)][object]$Receipt)
+    $core = [ordered]@{
+        schema_version = [string]$Receipt.schema_version
+        observed_at = [string]$Receipt.observed_at
+        inspection_method = [string]$Receipt.inspection_method
+        audit_window_start = [string]$Receipt.audit_window_start
+        audit_window_end = [string]$Receipt.audit_window_end
+        application_change_count = [int]$Receipt.application_change_count
+        policy_change_count = [int]$Receipt.policy_change_count
+        policy_last_updated_at = [string]$Receipt.policy_last_updated_at
+        behavior = $Receipt.behavior
+        provider_fingerprint = [string]$Receipt.provider_fingerprint
+    }
+    if ([string]$Receipt.schema_version -ne "access-provider-inspection-v1" -or
+        [string]$Receipt.receipt_digest -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Receipt.receipt_digest -cne
+            (Get-AccessProviderInspectionReceiptDigest -Core $core) -or
+        [string]$Receipt.provider_fingerprint -cne
+            (Get-AccessProviderBehaviorFingerprint -Inspection $Receipt.behavior)) {
+        throw "ACCESS_PROVIDER_INSPECTION_TAMPERED"
+    }
+    $null = Assert-AccessProviderInspectionMatchesContract -Inspection $Receipt.behavior
+    $observedAt = ConvertTo-ReleaseTimestampUtc -Value $Receipt.observed_at
+    $windowStart = ConvertTo-ReleaseTimestampUtc -Value $Receipt.audit_window_start
+    $windowEnd = ConvertTo-ReleaseTimestampUtc -Value $Receipt.audit_window_end
+    $policyUpdated = ConvertTo-ReleaseTimestampUtc -Value $Receipt.policy_last_updated_at
+    if ([string]$Receipt.inspection_method -ne
+            "CLOUDFLARE_AUTHENTICATED_DASHBOARD_READ_ONLY" -or
+        $observedAt -eq [DateTimeOffset]::MinValue -or
+        $windowStart -eq [DateTimeOffset]::MinValue -or
+        $windowEnd -eq [DateTimeOffset]::MinValue -or
+        $policyUpdated -eq [DateTimeOffset]::MinValue -or
+        $windowStart -gt $windowEnd -or
+        [Math]::Abs(($observedAt - $windowEnd).TotalMinutes) -gt 5 -or
+        $observedAt -gt [DateTimeOffset]::UtcNow.AddMinutes(5) -or
+        [int]$Receipt.application_change_count -ne 0 -or
+        [int]$Receipt.policy_change_count -ne 0) {
+        throw "ACCESS_PROVIDER_INSPECTION_INVALID"
+    }
+    return $Receipt
+}
+
+function Get-LatestAccessProviderInspectionReceipt {
+    if (-not (Test-Path -LiteralPath $accessProviderInspectionRoot)) {
+        throw "ACCESS_PROVIDER_INSPECTION_UNAVAILABLE"
+    }
+    $valid = @()
+    foreach ($file in @(Get-ChildItem -LiteralPath $accessProviderInspectionRoot -Filter '*.json' -File)) {
+        try {
+            $receipt = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
+                ConvertFrom-ReleaseControlJson
+            $valid += Assert-AccessProviderInspectionReceipt -Receipt $receipt
+        } catch {}
+    }
+    if ($valid.Count -eq 0) { throw "ACCESS_PROVIDER_INSPECTION_UNAVAILABLE" }
+    return $valid | Sort-Object {
+        ConvertTo-ReleaseTimestampUtc -Value $_.observed_at
+    } | Select-Object -Last 1
+}
+
+function Get-AccessRepositoryArtifactIdentity {
+    param([Parameter(Mandatory = $true)][string]$GitSha)
+    if ($GitSha -notmatch '^[0-9a-f]{40}$') { throw "ACCESS_GIT_IDENTITY_INVALID" }
+    $contract = Get-AccessQualificationContract
+    $result = [ordered]@{}
+    foreach ($path in @($contract.repository_artifacts | Sort-Object -Unique)) {
+        $read = Invoke-Utf8NativeProcess -FilePath "git.exe" -Arguments @(
+            "-C", $repositoryRoot, "rev-parse", "$GitSha`:$([string]$path)"
+        )
+        $blob = ([string]$read.stdout).Trim()
+        if ([int]$read.exit_code -ne 0 -or $blob -notmatch '^[0-9a-f]{40,64}$') {
+            throw "ACCESS_ARTIFACT_UNAVAILABLE:$([string]$path)"
+        }
+        $result[[string]$path] = $blob
+    }
+    return $result
+}
+
+function Get-AccessQualificationIdentity {
+    param(
+        [Parameter(Mandatory = $true)][string]$GitSha,
+        [Parameter(Mandatory = $true)][object]$ProviderInspection
+    )
+    $contract = Get-AccessQualificationContract
+    $boundary = Get-ProtectedAccessBoundaryIdentity
+    $artifacts = Get-AccessRepositoryArtifactIdentity -GitSha $GitSha
+    $core = [ordered]@{
+        contract_version = [string]$contract.key_contract_version
+        protected_boundary = [ordered]@{
+            origin = [string]$boundary.origin
+            host = [string]$boundary.host
+            owner_resource = [string]$boundary.owner_resource
+            destinations = @($contract.protected_boundary.destinations | Sort-Object -Unique)
+        }
+        provider_fingerprint = [string]$ProviderInspection.provider_fingerprint
+        repository_artifacts = $artifacts
+    }
+    $json = $core | ConvertTo-Json -Compress -Depth 12
+    return [pscustomobject]@{
+        access_qualification_key = Get-Sha256BytesHex -Bytes ([Text.Encoding]::UTF8.GetBytes($json))
+        core = $core
+    }
+}
+
 function Get-AccessBoundaryOperatorChecklistText {
     param([Parameter(Mandatory = $true)][object]$Candidate)
     $boundary = Get-ProtectedAccessBoundaryIdentity
@@ -4916,6 +5234,302 @@ function Assert-AccessBoundaryAcceptanceReceipt {
         }
     }
     return $receipt
+}
+
+function Assert-HistoricalAccessBoundaryReceipt {
+    param([Parameter(Mandatory = $true)][object]$Receipt)
+    $core = [ordered]@{
+        schema_version = [string]$Receipt.schema_version
+        accepted_at = [string]$Receipt.accepted_at
+        expires_at = [string]$Receipt.expires_at
+        accepted_by = [string]$Receipt.accepted_by
+        validation_key = [string]$Receipt.validation_key
+        candidate = $Receipt.candidate
+        stable = $Receipt.stable
+        access_boundary = $Receipt.access_boundary
+        checklist = $Receipt.checklist
+    }
+    if ([string]$Receipt.schema_version -ne "access-boundary-acceptance-receipt-v1" -or
+        [string]$Receipt.receipt_digest -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Receipt.receipt_digest -cne (Get-AccessBoundaryReceiptDigest -Core $core)) {
+        throw "ACCESS_RECEIPT_TAMPERED"
+    }
+    $acceptedAt = ConvertTo-ReleaseTimestampUtc -Value $Receipt.accepted_at
+    $expiresAt = ConvertTo-ReleaseTimestampUtc -Value $Receipt.expires_at
+    if ($acceptedAt -eq [DateTimeOffset]::MinValue -or
+        $expiresAt -ne $acceptedAt.Add($accessBoundaryReceiptMaxAge) -or
+        $acceptedAt -gt [DateTimeOffset]::UtcNow.AddMinutes(5)) {
+        throw "ACCESS_RECEIPT_INVALID"
+    }
+    foreach ($name in @(
+        "owner_login_succeeds", "owner_resource_accessible",
+        "unauthorized_access_denied", "logout_succeeds",
+        "access_denied_after_logout", "reauthentication_succeeds"
+    )) {
+        $property = $Receipt.checklist.PSObject.Properties[$name]
+        if (-not $property -or $property.Value -isnot [bool] -or -not [bool]$property.Value) {
+            throw "ACCESS_RECEIPT_CHECKLIST_INCOMPLETE:$name"
+        }
+    }
+    if (@($Receipt.checklist.PSObject.Properties).Count -ne 6) {
+        throw "ACCESS_RECEIPT_CHECKLIST_INVALID"
+    }
+    $boundary = Get-ProtectedAccessBoundaryIdentity
+    if ([string]$Receipt.access_boundary.origin -cne [string]$boundary.origin -or
+        [string]$Receipt.access_boundary.host -cne [string]$boundary.host -or
+        [string]$Receipt.access_boundary.owner_resource -cne [string]$boundary.owner_resource -or
+        [string]$Receipt.candidate.git_sha -notmatch '^[0-9a-f]{40}$') {
+        throw "ACCESS_RECEIPT_HOST_MISMATCH"
+    }
+    return $Receipt
+}
+
+function Get-LatestHistoricalAccessBoundaryReceipt {
+    if (-not (Test-Path -LiteralPath $accessBoundaryReceiptRoot)) {
+        throw "ACCESS_HISTORICAL_RECEIPT_MISSING"
+    }
+    $valid = @()
+    foreach ($file in @(Get-ChildItem -LiteralPath $accessBoundaryReceiptRoot -Filter '*.json' -File)) {
+        try {
+            $receipt = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
+                ConvertFrom-ReleaseControlJson
+            $valid += Assert-HistoricalAccessBoundaryReceipt -Receipt $receipt
+        } catch {}
+    }
+    if ($valid.Count -eq 0) { throw "ACCESS_HISTORICAL_RECEIPT_MISSING" }
+    return $valid | Sort-Object {
+        ConvertTo-ReleaseTimestampUtc -Value $_.accepted_at
+    } | Select-Object -Last 1
+}
+
+function Test-AccessQualificationHistoryIsClean {
+    param([Parameter(Mandatory = $true)][object]$PriorReceipt)
+    if (-not (Test-Path -LiteralPath $releaseHistoryPath)) { return $false }
+    $acceptedAt = ConvertTo-ReleaseTimestampUtc -Value $PriorReceipt.accepted_at
+    $acceptedEventFound = $false
+    foreach ($line in @(Get-Content -LiteralPath $releaseHistoryPath -Tail 5000 -Encoding UTF8 `
+        -ErrorAction SilentlyContinue)) {
+        try { $entry = $line | ConvertFrom-ReleaseControlJson } catch { continue }
+        $occurredAt = ConvertTo-ReleaseTimestampUtc -Value $entry.occurred_at
+        if ($occurredAt -lt $acceptedAt) { continue }
+        if ([string]$entry.event -eq "CANDIDATE_ACCESS_BOUNDARY_ACCEPTED" -and
+            [string]$entry.detail.receipt_digest -ceq [string]$PriorReceipt.receipt_digest -and
+            [string]$entry.release.validation_key -eq [string]$PriorReceipt.validation_key) {
+            $acceptedEventFound = $true
+            continue
+        }
+        $failureText = "$([string]$entry.event)|$([string]$entry.detail.reason)|$([string]$entry.detail.state)"
+        if ($failureText -match '(?i)(ACCESS|AUTH).*(FAIL|REJECT|INVALID|TAMPER|MISMATCH|ERROR)') {
+            return $false
+        }
+    }
+    return $acceptedEventFound
+}
+
+function Get-AccessQualificationReuseReceiptDigest {
+    param([Parameter(Mandatory = $true)][object]$Core)
+    $json = $Core | ConvertTo-Json -Compress -Depth 16
+    return Get-Sha256BytesHex -Bytes ([Text.Encoding]::UTF8.GetBytes($json))
+}
+
+function Get-AccessQualificationReuseReceiptPath {
+    param([Parameter(Mandatory = $true)][string]$ValidationKey)
+    $digest = Get-Sha256BytesHex -Bytes ([Text.Encoding]::UTF8.GetBytes($ValidationKey))
+    return Join-Path $accessQualificationReuseReceiptRoot "$digest.json"
+}
+
+function New-AccessQualificationReuseReceipt {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$PriorReceipt,
+        [Parameter(Mandatory = $true)][object]$ProviderInspection,
+        [Parameter(Mandatory = $true)][object]$PriorIdentity,
+        [Parameter(Mandatory = $true)][object]$CurrentIdentity,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ChangedAccessArtifacts
+    )
+    $verifiedAt = [DateTimeOffset]::UtcNow
+    $core = [ordered]@{
+        schema_version = "access-qualification-reuse-receipt-v1"
+        state = "ACCESS_QUALIFICATION_REUSED"
+        verified_at = $verifiedAt.ToString("o")
+        expires_at = $verifiedAt.Add($accessBoundaryReceiptMaxAge).ToString("o")
+        validation_key = [string]$Candidate.validation_key
+        candidate_git_sha = [string]$Candidate.git_sha
+        candidate_worker_version_id = [string]$Candidate.worker_version_id
+        access_key = [string]$CurrentIdentity.access_qualification_key
+        prior_access_receipt_digest = [string]$PriorReceipt.receipt_digest
+        prior_access_key = [string]$PriorIdentity.access_qualification_key
+        current_access_key = [string]$CurrentIdentity.access_qualification_key
+        protected_origin = [string]$CurrentIdentity.core.protected_boundary.origin
+        provider_fingerprint = [string]$ProviderInspection.provider_fingerprint
+        provider_inspection_receipt_digest = [string]$ProviderInspection.receipt_digest
+        changed_access_artifacts = @($ChangedAccessArtifacts | Sort-Object -Unique)
+    }
+    return [pscustomobject]@{
+        schema_version = $core.schema_version
+        state = $core.state
+        verified_at = $core.verified_at
+        expires_at = $core.expires_at
+        validation_key = $core.validation_key
+        candidate_git_sha = $core.candidate_git_sha
+        candidate_worker_version_id = $core.candidate_worker_version_id
+        access_key = $core.access_key
+        prior_access_receipt_digest = $core.prior_access_receipt_digest
+        prior_access_key = $core.prior_access_key
+        current_access_key = $core.current_access_key
+        protected_origin = $core.protected_origin
+        provider_fingerprint = $core.provider_fingerprint
+        provider_inspection_receipt_digest = $core.provider_inspection_receipt_digest
+        changed_access_artifacts = $core.changed_access_artifacts
+        receipt_digest = Get-AccessQualificationReuseReceiptDigest -Core $core
+    }
+}
+
+function Write-AccessQualificationReuseReceipt {
+    param([Parameter(Mandatory = $true)][object]$Receipt)
+    $path = Get-AccessQualificationReuseReceiptPath -ValidationKey $Receipt.validation_key
+    New-Item -ItemType Directory -Path $accessQualificationReuseReceiptRoot -Force | Out-Null
+    if (Test-Path -LiteralPath $path) {
+        $existing = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
+            ConvertFrom-ReleaseControlJson
+        if ([string]$existing.receipt_digest -ceq [string]$Receipt.receipt_digest) { return }
+        throw "ACCESS_QUALIFICATION_REUSE_IMMUTABLE_CONFLICT"
+    }
+    $temporary = "$path.tmp"
+    $Receipt | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $temporary -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination $path
+}
+
+function Assert-AccessQualificationReuseReceipt {
+    param([Parameter(Mandatory = $true)][object]$Candidate)
+    $path = Get-AccessQualificationReuseReceiptPath -ValidationKey $Candidate.validation_key
+    if (-not (Test-Path -LiteralPath $path)) { throw "ACCESS_QUALIFICATION_REUSE_MISSING" }
+    $receipt = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
+        ConvertFrom-ReleaseControlJson
+    $core = [ordered]@{
+        schema_version = [string]$receipt.schema_version
+        state = [string]$receipt.state
+        verified_at = [string]$receipt.verified_at
+        expires_at = [string]$receipt.expires_at
+        validation_key = [string]$receipt.validation_key
+        candidate_git_sha = [string]$receipt.candidate_git_sha
+        candidate_worker_version_id = [string]$receipt.candidate_worker_version_id
+        access_key = [string]$receipt.access_key
+        prior_access_receipt_digest = [string]$receipt.prior_access_receipt_digest
+        prior_access_key = [string]$receipt.prior_access_key
+        current_access_key = [string]$receipt.current_access_key
+        protected_origin = [string]$receipt.protected_origin
+        provider_fingerprint = [string]$receipt.provider_fingerprint
+        provider_inspection_receipt_digest = [string]$receipt.provider_inspection_receipt_digest
+        changed_access_artifacts = @($receipt.changed_access_artifacts)
+    }
+    if ([string]$receipt.schema_version -ne "access-qualification-reuse-receipt-v1" -or
+        [string]$receipt.state -ne "ACCESS_QUALIFICATION_REUSED" -or
+        [string]$receipt.receipt_digest -notmatch '^[0-9a-f]{64}$' -or
+        [string]$receipt.receipt_digest -cne
+            (Get-AccessQualificationReuseReceiptDigest -Core $core) -or
+        [string]$receipt.validation_key -ne [string]$Candidate.validation_key -or
+        [string]$receipt.candidate_git_sha -ne [string]$Candidate.git_sha -or
+        [string]$receipt.candidate_worker_version_id -ne [string]$Candidate.worker_version_id -or
+        [string]$receipt.prior_access_key -cne [string]$receipt.current_access_key -or
+        @($receipt.changed_access_artifacts).Count -ne 0) {
+        throw "ACCESS_QUALIFICATION_REUSE_TAMPERED"
+    }
+    $verifiedAt = ConvertTo-ReleaseTimestampUtc -Value $receipt.verified_at
+    $expiresAt = ConvertTo-ReleaseTimestampUtc -Value $receipt.expires_at
+    if ($verifiedAt -eq [DateTimeOffset]::MinValue -or
+        $expiresAt -ne $verifiedAt.Add($accessBoundaryReceiptMaxAge) -or
+        $expiresAt -le [DateTimeOffset]::UtcNow) {
+        throw "ACCESS_QUALIFICATION_REUSE_STALE"
+    }
+    if (-not $Candidate.access_qualification -or
+        [string]$Candidate.access_qualification.receipt_digest -cne
+            [string]$receipt.receipt_digest -or
+        [string]$Candidate.access_qualification.access_key -cne
+            [string]$receipt.access_key) {
+        throw "ACCESS_QUALIFICATION_REUSE_STATE_MISMATCH"
+    }
+    return $receipt
+}
+
+function Invoke-CandidateAccessQualificationReuse {
+    $state = Get-ReleaseControlState
+    if (-not $state -or -not $state.candidate -or
+        [string]$state.candidate.validation_state -ne "REVIEW_REQUIRED" -or
+        [string]$state.candidate.validation.reason -ne "ACCESS_BOUNDARY_REVIEW_REQUIRED") {
+        throw "ACCESS_QUALIFICATION_REVIEW_STATE_REQUIRED"
+    }
+    $candidate = $state.candidate
+    $priorReceipt = Get-LatestHistoricalAccessBoundaryReceipt
+    if (-not (Test-AccessQualificationHistoryIsClean -PriorReceipt $priorReceipt)) {
+        throw "ACCESS_QUALIFICATION_HISTORY_INVALID"
+    }
+    $provider = Get-LatestAccessProviderInspectionReceipt
+    $acceptedAt = ConvertTo-ReleaseTimestampUtc -Value $priorReceipt.accepted_at
+    $windowStart = ConvertTo-ReleaseTimestampUtc -Value $provider.audit_window_start
+    $windowEnd = ConvertTo-ReleaseTimestampUtc -Value $provider.audit_window_end
+    $policyUpdated = ConvertTo-ReleaseTimestampUtc -Value $provider.policy_last_updated_at
+    $observedAt = ConvertTo-ReleaseTimestampUtc -Value $provider.observed_at
+    if ($windowStart -gt $acceptedAt -or $windowEnd -lt $acceptedAt -or
+        $policyUpdated -gt $acceptedAt -or
+        $observedAt -lt [DateTimeOffset]::UtcNow.Subtract($accessBoundaryReceiptMaxAge)) {
+        throw "ACCESS_PROVIDER_HISTORY_CANNOT_BE_MAPPED"
+    }
+    $priorIdentity = Get-AccessQualificationIdentity `
+        -GitSha ([string]$priorReceipt.candidate.git_sha) -ProviderInspection $provider
+    $currentIdentity = Get-AccessQualificationIdentity `
+        -GitSha ([string]$candidate.git_sha) -ProviderInspection $provider
+    $changed = @()
+    foreach ($name in @($currentIdentity.core.repository_artifacts.Keys)) {
+        if ([string]$currentIdentity.core.repository_artifacts[$name] -cne
+            [string]$priorIdentity.core.repository_artifacts[$name]) { $changed += $name }
+    }
+    if ($changed.Count -gt 0 -or
+        [string]$priorIdentity.access_qualification_key -cne
+            [string]$currentIdentity.access_qualification_key) {
+        throw "ACCESS_QUALIFICATION_KEY_CHANGED"
+    }
+    $receipt = New-AccessQualificationReuseReceipt -Candidate $candidate `
+        -PriorReceipt $priorReceipt -ProviderInspection $provider `
+        -PriorIdentity $priorIdentity -CurrentIdentity $currentIdentity `
+        -ChangedAccessArtifacts $changed
+    Write-AccessQualificationReuseReceipt -Receipt $receipt
+    $candidate | Add-Member -Force -NotePropertyName access_qualification `
+        -NotePropertyValue ([pscustomobject]@{
+            state = "ACCESS_QUALIFICATION_REUSED"
+            access_key = [string]$receipt.access_key
+            receipt_digest = [string]$receipt.receipt_digest
+            prior_access_receipt_digest = [string]$receipt.prior_access_receipt_digest
+            provider_fingerprint = [string]$receipt.provider_fingerprint
+            verified_at = [string]$receipt.verified_at
+            expires_at = [string]$receipt.expires_at
+        })
+    $priorAuthInspection = $candidate.validation.auth_inspection
+    $candidate.validation | Add-Member -Force -NotePropertyName auth_inspection `
+        -NotePropertyValue ([pscustomobject]@{
+            state = "ACCESS_QUALIFICATION_REUSED"
+            protected_host = ([Uri]$receipt.protected_origin).DnsSafeHost
+            protected_origin = [string]$receipt.protected_origin
+            access_key = [string]$receipt.access_key
+            receipt_digest = [string]$receipt.receipt_digest
+            provider_inspection = $priorAuthInspection
+        })
+    $candidate.validation.reason = "ACCESS_QUALIFICATION_REUSED"
+    $candidate.validation.tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+    $candidate.compatibility_state = "PASSED"
+    $candidate.validation_state = "PASSED"
+    $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+    Write-ReleaseControlState -State $state
+    Write-ReleaseHistory -Event "CANDIDATE_ACCESS_QUALIFICATION_REUSED" `
+        -Release $candidate -Detail @{
+            validation_key = [string]$candidate.validation_key
+            access_key = [string]$receipt.access_key
+            receipt_digest = [string]$receipt.receipt_digest
+            prior_access_receipt_digest = [string]$receipt.prior_access_receipt_digest
+            provider_fingerprint = [string]$receipt.provider_fingerprint
+            changed_access_artifacts = @()
+        }
+    return $candidate
 }
 
 function Approve-CandidateAccessBoundary {
@@ -5283,6 +5897,15 @@ function Invoke-AutomaticCandidateValidation {
                 tested_at = [DateTimeOffset]::UtcNow.ToString("o")
             }
             Write-ReleaseControlState -State $state
+            try {
+                $null = Invoke-CandidateAccessQualificationReuse
+                return $true
+            } catch {
+                Write-ReleaseHistory -Event "CANDIDATE_ACCESS_QUALIFICATION_REUSE_UNAVAILABLE" `
+                    -Release $state.candidate -Detail @{
+                        reason = Protect-PreflightDiagnosticText $_.Exception.Message
+                    }
+            }
             return $false
         }
         if ($priorValidationState -in @("CHECKS_BLOCKED", "CHECKS_PENDING")) {
@@ -7253,6 +7876,9 @@ function Start-ReleasePromotion {
                 "HUMAN_ACCESS_BOUNDARY_ACCEPTED") {
             $null = Assert-AccessBoundaryAcceptanceReceipt -Candidate $candidate `
                 -Stable $state.stable
+        } elseif ([string]$candidate.validation.auth_inspection.state -eq
+                "ACCESS_QUALIFICATION_REUSED") {
+            $null = Assert-AccessQualificationReuseReceipt -Candidate $candidate
         }
         if ([string]$candidate.git_sha -ne [string]$candidate.windows_revision -or
             [string]$candidate.compatibility_state -ne "PASSED") {
@@ -11050,6 +11676,12 @@ function Get-ControlCenterReleasePresentation {
             $null = Assert-AccessBoundaryAcceptanceReceipt `
                 -Candidate $Release.candidate -Stable $Release.stable
         } catch { $accessAcceptanceReady = $false }
+    } elseif ($Release.candidate -and
+        [string]$Release.candidate.validation.auth_inspection.state -eq
+            "ACCESS_QUALIFICATION_REUSED") {
+        try {
+            $null = Assert-AccessQualificationReuseReceipt -Candidate $Release.candidate
+        } catch { $accessAcceptanceReady = $false }
     }
     $canApproveCompatibility = [bool]($Release.candidate -and
         $candidateState -eq "REVIEW_REQUIRED" -and
@@ -11379,18 +12011,26 @@ function Test-ControlCenterAccessApprovalCommitted {
         -not $ReleaseState.stable -or
         [string]$ReleaseState.candidate.validation_key -ne $ValidationKey -or
         [string]$ReleaseState.candidate.validation_state -ne "PASSED" -or
-        [string]$ReleaseState.candidate.validation.auth_inspection.state -ne
-            "HUMAN_ACCESS_BOUNDARY_ACCEPTED") { return $false }
+        [string]$ReleaseState.candidate.validation.auth_inspection.state -notin @(
+            "HUMAN_ACCESS_BOUNDARY_ACCEPTED", "ACCESS_QUALIFICATION_REUSED"
+        )) { return $false }
+    $event = "CANDIDATE_ACCESS_BOUNDARY_ACCEPTED"
     try {
-        $receipt = Assert-AccessBoundaryAcceptanceReceipt `
-            -Candidate $ReleaseState.candidate -Stable $ReleaseState.stable
+        if ([string]$ReleaseState.candidate.validation.auth_inspection.state -eq
+                "ACCESS_QUALIFICATION_REUSED") {
+            $receipt = Assert-AccessQualificationReuseReceipt -Candidate $ReleaseState.candidate
+            $event = "CANDIDATE_ACCESS_QUALIFICATION_REUSED"
+        } else {
+            $receipt = Assert-AccessBoundaryAcceptanceReceipt `
+                -Candidate $ReleaseState.candidate -Stable $ReleaseState.stable
+        }
     } catch { return $false }
     if (-not (Test-Path -LiteralPath $releaseHistoryPath)) { return $false }
     foreach ($line in @(Get-Content -LiteralPath $releaseHistoryPath -Tail 1000 `
         -Encoding UTF8 -ErrorAction SilentlyContinue)) {
         try {
             $entry = $line | ConvertFrom-ReleaseControlJson
-            if ([string]$entry.event -eq "CANDIDATE_ACCESS_BOUNDARY_ACCEPTED" -and
+            if ([string]$entry.event -eq $event -and
                 [string]$entry.release.validation_key -eq $ValidationKey -and
                 [string]$entry.detail.validation_key -eq $ValidationKey -and
                 [string]$entry.detail.receipt_digest -eq [string]$receipt.receipt_digest) {
@@ -13386,6 +14026,20 @@ switch ($Action) {
     }
     "ApproveAccessBoundary" {
         Invoke-ControlCenterOperationAction -Operation $Action | ConvertTo-Json -Depth 12
+    }
+    "RegisterAccessProviderInspection" {
+        if (-not $AccessProviderInspectionPath -or
+            -not (Test-Path -LiteralPath $AccessProviderInspectionPath -PathType Leaf)) {
+            throw "ACCESS_PROVIDER_INSPECTION_FILE_REQUIRED"
+        }
+        $file = Get-Item -LiteralPath $AccessProviderInspectionPath
+        if ($file.Length -gt 32768) { throw "ACCESS_PROVIDER_INSPECTION_FILE_TOO_LARGE" }
+        $inspection = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
+            ConvertFrom-ReleaseControlJson
+        Register-AccessProviderInspection -Inspection $inspection | ConvertTo-Json -Depth 12
+    }
+    "ReuseAccessQualification" {
+        Invoke-CandidateAccessQualificationReuse | ConvertTo-Json -Depth 12
     }
     "EnableAutoStart" { Enable-AutoStart; Write-Output "Auto-start enabled." }
     "DisableAutoStart" { Disable-AutoStart; Write-Output "Auto-start disabled." }

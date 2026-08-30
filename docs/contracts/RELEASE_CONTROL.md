@@ -11,9 +11,15 @@ Every uploaded Worker Version declares one durable artifact kind in its
 immutable version annotation. `PREVIEW` is never promotable. Only
 `PRODUCTION_CANDIDATE` may enter Candidate validation or promotion. Missing or
 unknown provenance fails closed. A production candidate must also declare
-`main`, exist after fetch, and equal the exact current `origin/main`; artifact labels
-alone are not authority. Preview evidence never authorizes a production candidate, even when
-both artifacts originate from the same Git commit.
+`main` and exist after fetch. It normally equals the exact current
+`origin/main`; artifact labels alone are not authority. An already-validated
+immutable Candidate may remain eligible after a descendant `main` movement only
+when every intervening file is in the explicit Control Plane, formal, test, CI,
+or documentation ownership set and no Worker or Windows business-runtime
+artifact changed. The active Control Plane must still be the exact hash-verified
+new `main`. Any unclassified or product-runtime change restores the exact-main
+requirement and fails closed. Preview evidence never authorizes a production
+candidate, even when both artifacts originate from the same Git commit.
 
 Git push, pull-request merge, and `main` movement MUST NOT change Stable.
 Workers Builds may build and upload immutable Versions, but MUST NOT assign
@@ -128,19 +134,27 @@ the protected production hostname proves the boundary. Validation never
 simulates or claims a successful human login.
 
 When the protected-host login flow cannot be exercised by Release Control, the
-exact Candidate remains `ACCESS_BOUNDARY_REVIEW_REQUIRED`. An operator may use
-the single `ApproveAccessBoundary` transition only after personally verifying
-owner login and owner-resource access, unauthorized denial, logout, denial
-after logout, and successful reauthentication on the displayed protected host.
-The transition records a time-bounded, SHA-256-protected receipt binding the
-checklist, protected host, Stable identity, exact Candidate Git SHA, Worker
-Version, Windows revision, and validation key. A missing, stale, tampered, or
-wrong-identity receipt cannot complete validation or Promote. For the same
-immutable Candidate, approval resumes only the Access-dependent decision and
-preserves passed migration, directed-validation, parity, and CPU evidence.
-Candidate replacement, `main` movement, Stable identity movement, or protected
-host movement invalidates applicability. WPF and WinForms invoke this same
-PowerShell transition; neither UI performs authentication.
+Candidate first enters `ACCESS_BOUNDARY_REVIEW_REQUIRED`. A versioned Access
+qualification key owns only the protected origin and destinations, provider
+application and policy fingerprint, Access-sensitive repository artifacts, and
+the acceptance-contract version. A prior untampered six-check human receipt may
+be reused only when authenticated read-only provider inspection covers the
+interval since that acceptance, reports no application or policy change, no
+Access failure was recorded, and the prior and current qualification keys are
+identical. Reuse writes a separate immutable
+`ACCESS_QUALIFICATION_REUSED` machine receipt; it never writes or impersonates a
+human receipt. A changed, missing, unreadable, stale, or unmappable component
+fails closed and leaves the Candidate in review.
+
+When reuse is unavailable, an operator may use the single
+`ApproveAccessBoundary` transition only after personally verifying owner login
+and owner-resource access, unauthorized denial, logout, denial after logout,
+and successful reauthentication on the displayed protected host. That human
+transition retains its time-bounded, SHA-256-protected exact-Candidate receipt.
+Both paths preserve accepted migration, directed-validation, parity, and CPU
+evidence. Unrelated repository, CPU, Windows, storage, CI, or formal-model
+movement cannot invalidate Access qualification. WPF and WinForms invoke the
+same PowerShell transition; neither UI performs authentication.
 The formal protected origin is the canonical production Worker origin,
 `https://aurum-signal-room.yiyousiow1234.workers.dev`. Its `/admin*` routes are
 owned by the production Cloudflare Access application. Immutable Version hosts

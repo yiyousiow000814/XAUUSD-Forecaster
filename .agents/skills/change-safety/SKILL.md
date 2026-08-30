@@ -45,6 +45,10 @@ correctness receipts.
 Determine whether accepted evidence can be reused by an exact identity made
 from every behavior-affecting artifact input rather than an unrelated repository
 revision.
+Human acceptance follows the behavior it qualifies, not the overall repository
+identity. Include external configuration in that identity, reuse prior human
+authority only when the key and receipt remain valid, and record reuse as
+machine evidence rather than a new human action.
 
 After an escaped deterministic blocker: fix it, identify the violated generic
 invariant, inspect siblings, strengthen one family-level regression at the

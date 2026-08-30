@@ -5794,6 +5794,40 @@ def test_production_candidate_requires_exact_current_main(tmp_path) -> None:
     assert result == "False,False,False,True,False"
 
 
+@pytest.mark.parametrize(
+    ("changed", "expected_state", "expected_mode"),
+    (
+        (
+            "@('scripts/xauusd_control_center.ps1','scripts/access-qualification-contract.json','tests/test_runtime_launchers.py')",
+            "PASSED",
+            "CONTROL_PLANE_ONLY_MAIN_ADVANCE",
+        ),
+        ("@('web/app/api/status/route.ts')", "FAILED", ""),
+        ("@('scripts/run_dashboard_sync.py')", "FAILED", ""),
+    ),
+)
+def test_control_plane_only_main_movement_preserves_immutable_candidate_artifact(
+    tmp_path, changed: str, expected_state: str, expected_mode: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$candidate=New-ReleaseIdentity -GitSha ('a'*40) "
+        "-WorkerVersionId '22222222-2222-4222-8222-222222222222' "
+        "-WindowsRevision ('a'*40) -Branch 'main' -ArtifactKind 'PRODUCTION_CANDIDATE';"
+        "function Invoke-RepositoryRead{[pscustomobject]@{passed=$true;failure_class='';exit_code=0}};"
+        "function Invoke-Utf8NativeProcess{param($FilePath,$Arguments)"
+        "$op=[string]$Arguments[2];$stdout='';$lines=@();$exit=0;"
+        "if($op -eq 'rev-parse'){$stdout=('b'*40);$lines=@($stdout)}"
+        f"elseif($op -eq 'diff'){{$lines={changed};$stdout=$lines -join \"`n\"}}"
+        "elseif($op -eq 'cat-file'){$stdout='ok';$lines=@('ok')}"
+        "[pscustomobject]@{exit_code=$exit;stdout=$stdout;stderr='';"
+        "stdout_lines=$lines;stderr_lines=@()}};"
+        "$answer=Get-ProductionCandidateProvenanceResult $candidate;"
+        'Write-Output "$($answer.state),$($answer.mode)"',
+    )
+    assert result == f"{expected_state},{expected_mode}"
+
+
 def test_legacy_reference_evidence_is_readable_but_never_promotable(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
@@ -6080,6 +6114,137 @@ def test_access_approval_requires_explicit_complete_human_confirmation(tmp_path)
     assert result == "ACCESS_CHECKLIST_EXPLICIT_CONFIRMATION_REQUIRED"
 
 
+def _access_provider_inspection_contract() -> str:
+    return (
+        "$now=[DateTimeOffset]::UtcNow;"
+        "$provider=[pscustomobject]@{"
+        "inspection_method='CLOUDFLARE_AUTHENTICATED_DASHBOARD_READ_ONLY';"
+        "observed_at=$now.ToString('o');audit_window_start=$now.AddDays(-7).ToString('o');"
+        "audit_window_end=$now.ToString('o');application_change_count=0;policy_change_count=0;"
+        "policy_last_updated_at=$now.AddDays(-10).ToString('o');"
+        "application_id='2f91233e-cabe-4f48-806c-83699de5e713';"
+        "application_audience='4750fd9ae50ac47ae51d1d3605ca899e5603c691a7fe0c24457f3e335ed43ad1';"
+        "application_name='XAUUSD Admin Owner';application_type='self_hosted';"
+        "application_session_duration='24h';"
+        "destinations=@('/admin*','/assistant','/retry-jobs','/status');"
+        "policy_id='d8ce9484-aca9-4c39-a211-37d2fa8ba9cf';"
+        "policy_name='Allow Assistant owner';policy_action='allow';policy_order=1;"
+        "policy_rule_count=1;policy_session_duration='24h';"
+        "owner_rule_sha256='8f9feab1a920b0921878048f9c54743d2f33e681a50e6ef05bdcbb50fc126759';"
+        "identity_providers=@('google');mfa_required=$false;browser_isolation=$false;"
+        "purpose_justification=$false;temporary_authentication=$false};"
+    )
+
+
+def _historical_access_authority_contract() -> str:
+    return (
+        "$state=Get-ReleaseControlState;$old=New-ReleaseIdentity -GitSha ('a'*40) "
+        "-WorkerVersionId 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' "
+        "-WindowsRevision ('a'*40) -ValidationState 'PASSED' "
+        "-ArtifactKind 'PRODUCTION_CANDIDATE';"
+        "$checks=[ordered]@{owner_login_succeeds=$true;owner_resource_accessible=$true;"
+        "unauthorized_access_denied=$true;logout_succeeds=$true;"
+        "access_denied_after_logout=$true;reauthentication_succeeds=$true};"
+        "$prior=New-AccessBoundaryAcceptanceReceipt $old $state.stable $checks;"
+        "Write-AccessBoundaryAcceptanceReceipt $prior;"
+        "Write-ReleaseHistory -Event 'CANDIDATE_ACCESS_BOUNDARY_ACCEPTED' -Release $old "
+        "-Detail @{validation_key=$old.validation_key;receipt_digest=$prior.receipt_digest};"
+    )
+
+
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_access_qualification_reuse_is_machine_evidence_and_preserves_other_gates(
+    tmp_path, powershell: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _access_review_candidate()
+        + _historical_access_authority_contract()
+        + _access_provider_inspection_contract()
+        + "$inspection=Register-AccessProviderInspection $provider;"
+        "function Get-AccessQualificationIdentity{param($GitSha,$ProviderInspection)"
+        "[pscustomobject]@{access_qualification_key=('1'*64);core=[pscustomobject]@{"
+        "protected_boundary=[pscustomobject]@{origin='https://aurum-signal-room.yiyousiow1234.workers.dev'};"
+        "repository_artifacts=[ordered]@{auth='same'}}}};"
+        "$reused=Invoke-CandidateAccessQualificationReuse;$final=Get-ReleaseControlState;"
+        "$verified=Assert-AccessQualificationReuseReceipt $final.candidate;"
+        "$history=Get-Content -LiteralPath $releaseHistoryPath -Raw;"
+        "$humanCount=([regex]::Matches($history,'CANDIDATE_ACCESS_BOUNDARY_ACCEPTED')).Count;"
+        "$reuseCount=([regex]::Matches($history,'CANDIDATE_ACCESS_QUALIFICATION_REUSED')).Count;"
+        'Write-Output "$($final.candidate.validation_state),'
+        '$($final.candidate.validation.auth_inspection.state),'
+        '$($verified.prior_access_key -eq $verified.current_access_key),'
+        '$($verified.changed_access_artifacts.Count),'
+        '$($final.candidate.validation.validation_run),'
+        '$($final.candidate.validation.data_parity.marker),'
+        '$($final.candidate.migration_acceptance.receipt_digest),$humanCount,$reuseCount"',
+        powershell=powershell,
+    )
+    assert result == (
+        "PASSED,ACCESS_QUALIFICATION_REUSED,True,0,kept-run,parity-kept,"
+        "migration-kept,1,1"
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    (
+        ("$provider.policy_action='deny'", "ACCESS_PROVIDER_CONFIGURATION_CHANGED"),
+        ("$provider.application_change_count=1", "ACCESS_PROVIDER_INSPECTION_INVALID"),
+        ("$provider.inspection_method='DEPENDENCY_PROBE'", "ACCESS_PROVIDER_INSPECTION_INVALID"),
+    ),
+)
+def test_access_provider_inspection_fails_closed(
+    tmp_path, mutation: str, expected: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _access_provider_inspection_contract()
+        + f"{mutation};$reason='';try{{Register-AccessProviderInspection $provider|Out-Null}}"
+        "catch{$reason=$_.Exception.Message};Write-Output $reason",
+    )
+    assert result == expected
+
+
+def test_access_qualification_key_change_requires_human_review(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _access_review_candidate()
+        + _historical_access_authority_contract()
+        + _access_provider_inspection_contract()
+        + "$null=Register-AccessProviderInspection $provider;"
+        "function Get-AccessQualificationIdentity{param($GitSha,$ProviderInspection)"
+        "$key=if($GitSha -eq ('a'*40)){('1'*64)}else{('2'*64)};"
+        "[pscustomobject]@{access_qualification_key=$key;core=[pscustomobject]@{"
+        "protected_boundary=[pscustomobject]@{origin='https://aurum-signal-room.yiyousiow1234.workers.dev'};"
+        "repository_artifacts=[ordered]@{auth=$GitSha}}}};"
+        "$reason='';try{Invoke-CandidateAccessQualificationReuse|Out-Null}"
+        "catch{$reason=$_.Exception.Message};$final=Get-ReleaseControlState;"
+        'Write-Output "$reason,$($final.candidate.validation_state),$($final.candidate.validation.reason)"',
+    )
+    assert result == (
+        "ACCESS_QUALIFICATION_KEY_CHANGED,REVIEW_REQUIRED,ACCESS_BOUNDARY_REVIEW_REQUIRED"
+    )
+
+
+def test_access_key_uses_only_access_owned_repository_artifacts() -> None:
+    contract = json.loads(
+        (ROOT / "scripts" / "access-qualification-contract.json").read_text(encoding="utf-8")
+    )
+    old = "547b59d31cc60719a6cbdb85b3f2db8ff37f6066"
+    current = "6ba596c62aa1a89d221d08c338b1071639802250"
+    for path in contract["repository_artifacts"]:
+        old_blob = subprocess.run(
+            ["git", "rev-parse", f"{old}:{path}"], cwd=ROOT,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        current_blob = subprocess.run(
+            ["git", "rev-parse", f"{current}:{path}"], cwd=ROOT,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert old_blob == current_blob, path
+
+
 def test_access_receipt_file_is_immutable_for_one_validation_key(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
@@ -6151,7 +6316,7 @@ def test_wpf_and_fallback_use_the_same_access_transition() -> None:
     assert source.count("ALL_REQUIRED_ACCESS_CHECKS_PASSED") == 1
 
 
-def test_promotion_rechecks_human_access_receipt() -> None:
+def test_promotion_rechecks_human_or_reused_access_receipt() -> None:
     source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
         encoding="utf-8"
     )
@@ -6160,6 +6325,8 @@ def test_promotion_rechecks_human_access_receipt() -> None:
     )[0]
     assert '"HUMAN_ACCESS_BOUNDARY_ACCEPTED"' in promotion
     assert "Assert-AccessBoundaryAcceptanceReceipt" in promotion
+    assert '"ACCESS_QUALIFICATION_REUSED"' in promotion
+    assert "Assert-AccessQualificationReuseReceipt" in promotion
     assert "Test-ProductionCandidateProvenance" in promotion
 
 

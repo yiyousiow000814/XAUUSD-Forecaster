@@ -117,6 +117,13 @@ work and required confidence. Delivery tolerance never applies to CPU or other
 acceptance limits, error limits, required observed quotas, Candidate identity,
 or correctness receipts.
 
+Human acceptance is invalidated by changes to the behavior it qualifies, not by
+unrelated repository movement. Persist a versioned qualification key over the
+behavior-affecting boundary, include external configuration owned outside the
+repository, and reuse a valid human qualification only when that exact key and
+its authority remain unchanged. Reuse evidence is a distinct machine receipt;
+it never claims that a person repeated the acceptance steps.
+
 A noisy externally measured metric must not become a deterministic terminal
 failure from one successful observation when the provider contract distinguishes
 occasional overage from actual resource termination. Preserve the observation
