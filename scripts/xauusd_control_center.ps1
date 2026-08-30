@@ -2171,12 +2171,29 @@ function Get-WorkerPlatformFailureReason {
         return "WORKER_INVOCATION_COUNT_MISMATCH"
     }
     if ([int]$Evidence.responses_5xx -gt 0) { return "WORKER_5XX_OBSERVED" }
-    if ([int]$Evidence.exceeded_cpu -gt 0 -or [int]$Evidence.responses_1102 -gt 0) {
+    if ([int]$Evidence.exceeded_cpu -gt 0 -or
+        [int]$Evidence.exceeded_memory -gt 0 -or
+        [int]$Evidence.responses_1102 -gt 0) {
         return "WORKER_PLATFORM_LIMIT_EXCEEDED"
     }
-    if ([double]$Evidence.p99_cpu_ms -gt $workerCpuPassMaxMs -or
-        [double]$Evidence.max_cpu_ms -gt $workerCpuPassMaxMs -or
-        ($quotaPolicyEvidence -and [double]$Evidence.max_cpu_ms -ge 10)) {
+    if ($quotaPolicyEvidence -and
+        [string]$Evidence.qualification_state -eq "CPU_OUTLIER_REVIEW_REQUIRED") {
+        return "CPU_OUTLIER_REVIEW_REQUIRED"
+    }
+    $isolatedOutlierQualified = [bool]($quotaPolicyEvidence -and
+        [string]$Evidence.qualification_state -eq
+            "QUALIFIED_WITH_ISOLATED_CPU_OUTLIER")
+    $qualificationP99 = if ($isolatedOutlierQualified -and
+        $Evidence.qualification_global) {
+        [double]$Evidence.qualification_global.p99_cpu_ms
+    } else { [double]$Evidence.p99_cpu_ms }
+    $qualificationMax = if ($isolatedOutlierQualified -and
+        $Evidence.qualification_global) {
+        [double]$Evidence.qualification_global.max_cpu_ms
+    } else { [double]$Evidence.max_cpu_ms }
+    if ($qualificationP99 -gt $workerCpuPassMaxMs -or
+        $qualificationMax -gt $workerCpuPassMaxMs -or
+        ($quotaPolicyEvidence -and $qualificationMax -ge 10)) {
         return "WORKER_CPU_HEADROOM_FAILED"
     }
     return "WORKER_PLATFORM_EVIDENCE_FAILED"
@@ -2470,6 +2487,7 @@ function Get-CandidateFrozenPlatformEvidence {
     $recovery = if ($stored -and $stored.recovery) { $stored.recovery } else {
         [pscustomobject]@{
             active_reads=0; background_reads=0; deficit_top_ups=0; headroom_top_ups=0
+            outlier_confirmations=0
             deficit_repair_preflight_reads=0; deficit_repair_preflight_last_at=""
         }
     }
@@ -2543,6 +2561,8 @@ function Get-CandidateFrozenPlatformEvidence {
     $gateState = switch ([string]$decision.state) {
         "QUALIFIED" { "PASSED" }
         "QUALIFIED_WITH_PROVIDER_OMISSION" { "PASSED" }
+        "QUALIFIED_WITH_ISOLATED_CPU_OUTLIER" { "PASSED" }
+        "CPU_OUTLIER_REVIEW_REQUIRED" { "REVIEW_REQUIRED" }
         "HEADROOM_REVIEW" { "REVIEW_REQUIRED" }
         default { "FAILED" }
     }
@@ -2563,6 +2583,9 @@ function Get-CandidateFrozenPlatformEvidence {
         family_reconciliation = @($decision.groups)
         scenario_reconciliation = @($decision.groups)
         global = $global
+        qualification_global = $decision.qualification_global
+        isolated_cpu_outlier = $decision.isolated_cpu_outlier
+        outlier_confirmation = $decision.outlier_confirmation
         routes = @($decision.groups | ForEach-Object {
             $metric = $_.metrics
             [pscustomobject]@{
@@ -3220,7 +3243,7 @@ function Invoke-CandidateTargetedCpuSamples {
         [Parameter(Mandatory = $true)][object]$RoutePlan,
         [Parameter(Mandatory = $true)][object]$RequestPlan,
         [Parameter(Mandatory = $true)][object[]]$Groups,
-        [ValidateSet("deficit_top_up", "headroom_top_up")]
+        [ValidateSet("deficit_top_up", "headroom_top_up", "outlier_confirmation")]
         [Parameter(Mandatory = $true)][string]$SampleKind,
         [Parameter(Mandatory = $true)][int]$CountPerGroup,
         [Parameter(Mandatory = $true)][string]$FixtureRoot,
@@ -3231,6 +3254,47 @@ function Invoke-CandidateTargetedCpuSamples {
     return Invoke-CandidatePlannedCpuSamples -Candidate $Candidate -RoutePlan $RoutePlan `
         -RequestPlan $RequestPlan -PlannedRequests $planned -FixtureRoot $FixtureRoot `
         -IngestToken $IngestToken
+}
+
+function Invoke-CandidateCpuOutlierConfirmation {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$RoutePlan,
+        [Parameter(Mandatory = $true)][object]$RequestPlan,
+        [Parameter(Mandatory = $true)][object]$Decision,
+        [Parameter(Mandatory = $true)][object]$ProviderEvidence,
+        [Parameter(Mandatory = $true)][string]$QualificationKey,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$FixtureRoot,
+        [string]$IngestToken = ""
+    )
+    $policy = Get-WorkerCpuEvidencePolicy
+    if ([string]$Decision.state -ne "CPU_OUTLIER_REVIEW_REQUIRED" -or
+        @($Decision.outlier_groups).Count -ne 1 -or
+        [int]$ProviderEvidence.recovery.outlier_confirmations -ge
+            [int]$policy.maximum_outlier_confirmations -or
+        (Read-WorkerCpuOutlierConfirmationPlan `
+            -ValidationRun ([string]$RequestPlan.validation_run))) {
+        throw "WORKER_CPU_OUTLIER_CONFIRMATION_NOT_ELIGIBLE"
+    }
+    $confirmationPlan = New-WorkerCpuOutlierConfirmationPlan `
+        -RequestPlan $RequestPlan -OutlierGroup (@($Decision.outlier_groups)[0]) `
+        -CandidateWorkerVersion ([string]$Candidate.worker_version_id) `
+        -QualificationKey $QualificationKey `
+        -PriorProviderDigest ([string]$ProviderEvidence.observed_universe_digest)
+    $planned = @(Apply-WorkerCpuOutlierConfirmationPlan `
+        -RequestPlan $RequestPlan -ConfirmationPlan $confirmationPlan)
+    $result = Invoke-CandidatePlannedCpuSamples -Candidate $Candidate `
+        -RoutePlan $RoutePlan -RequestPlan $RequestPlan `
+        -PlannedRequests $planned -FixtureRoot $FixtureRoot `
+        -IngestToken $IngestToken
+    $ProviderEvidence.recovery | Add-Member `
+        -NotePropertyName outlier_confirmations -NotePropertyValue 1 -Force
+    $ProviderEvidence.recovery.active_reads = 0
+    $null = Write-WorkerCpuProviderEvidence `
+        -ValidationRun ([string]$RequestPlan.validation_run) `
+        -Records @($ProviderEvidence.records) `
+        -RecoveryState $ProviderEvidence.recovery
+    return $result
 }
 
 function Write-CandidateCpuInFlightState {
@@ -3460,7 +3524,28 @@ function Invoke-CandidateWorkerValidation {
                 $reviewDecision = Get-WorkerCpuQualificationDecision `
                     -ExpectedRequests $expectedRequests -ProviderRecords @($storedEvidence.records) `
                     -DirectResponsesComplete $true -AggregateEvidence $platform.provider_corroboration
-                if ([string]$reviewDecision.state -eq "HEADROOM_REVIEW" -and
+                if ([string]$reviewDecision.state -eq
+                    "CPU_OUTLIER_REVIEW_REQUIRED" -and
+                    [int]$storedEvidence.recovery.outlier_confirmations -lt
+                        [int]$((Get-WorkerCpuEvidencePolicy).maximum_outlier_confirmations) -and
+                    -not (Read-WorkerCpuOutlierConfirmationPlan `
+                        -ValidationRun $validationRun)) {
+                    $topUp = Invoke-CandidateCpuOutlierConfirmation `
+                        -Candidate $Candidate -RoutePlan $RoutePlan `
+                        -RequestPlan $requestPlan -Decision $reviewDecision `
+                        -ProviderEvidence $storedEvidence `
+                        -QualificationKey ([string]$qualification.key) `
+                        -FixtureRoot $fixtureRoot -IngestToken $ingestToken
+                    $expectedRequests = @($requestPlan.requests | Where-Object {
+                        [string]$_.phase -eq "acceptance"
+                    })
+                    $directResponses += @($topUp.responses)
+                    $workerEndedAt = $topUp.completed_at
+                    $platform = Get-CandidateFrozenPlatformEvidence `
+                        -Candidate $Candidate -From $workerStartedAt `
+                        -To $workerEndedAt -ExpectedRequests $expectedRequests `
+                        -ValidationRun $validationRun
+                } elseif ([string]$reviewDecision.state -eq "HEADROOM_REVIEW" -and
                     @($reviewDecision.review_groups).Count -eq 1 -and
                     [int]$storedEvidence.recovery.headroom_top_ups -lt 1) {
                     $topUp = Invoke-CandidateTargetedCpuSamples -Candidate $Candidate `
@@ -3488,8 +3573,12 @@ function Invoke-CandidateWorkerValidation {
                     -ValidationRun $validationRun -Decision $decision
                 $platform | Add-Member -NotePropertyName qualification_receipt_digest `
                     -NotePropertyValue ([string]$receipt.receipt_digest) -Force
+                $qualificationMode = if ([string]$decision.state -eq
+                    "QUALIFIED_WITH_ISOLATED_CPU_OUTLIER") {
+                    "CPU_QUALIFICATION_WITH_ISOLATED_CPU_OUTLIER"
+                } else { "CPU_QUALIFICATION_FRESH" }
                 $platform | Add-Member -NotePropertyName qualification_mode `
-                    -NotePropertyValue "CPU_QUALIFICATION_FRESH" -Force
+                    -NotePropertyValue $qualificationMode -Force
                 $platform | Add-Member -NotePropertyName qualification_key `
                     -NotePropertyValue ([string]$qualification.key) -Force
             }
@@ -3528,7 +3617,11 @@ function Invoke-CandidateWorkerValidation {
         } else { $null }
         worker_qualification = $qualification
         cpu_qualification_mode = if ($platform -and $platform -ne "NOT_RUN" -and $platform.passed) {
-            if ($reusedQualificationReceipt) { "CPU_QUALIFICATION_REUSED" } else { "CPU_QUALIFICATION_FRESH" }
+            if ($reusedQualificationReceipt) {
+                "CPU_QUALIFICATION_REUSED"
+            } elseif ($platform.qualification_mode) {
+                [string]$platform.qualification_mode
+            } else { "CPU_QUALIFICATION_FRESH" }
         } else { $null }
     }
 }
@@ -3678,7 +3771,43 @@ function Resume-CandidateWorkerPlatformEvidence {
         $pendingDecision = Get-WorkerCpuQualificationDecision -ExpectedRequests $expectedRequests `
             -ProviderRecords @($storedEvidence.records) -DirectResponsesComplete $true `
             -RecoveryBudgetExhausted $recoveryExhausted
-        if ([string]$pendingDecision.state -eq "HEADROOM_REVIEW" -and
+        if ([string]$pendingDecision.state -eq
+            "CPU_OUTLIER_REVIEW_REQUIRED" -and
+            [int]$storedEvidence.recovery.outlier_confirmations -lt
+                [int]$policy.maximum_outlier_confirmations -and
+            -not (Read-WorkerCpuOutlierConfirmationPlan `
+                -ValidationRun ([string]$Validation.validation_run))) {
+            $workspace = $null
+            try {
+                if (@($Validation.cpu_route_plan.worker_writes).Count -gt 0) {
+                    $workspace = New-CandidateValidationFixtureWorkspace `
+                        -Candidate $Candidate
+                }
+                $topUpFixtureRoot = if ($workspace) {
+                    [string]$workspace.fixture_root
+                } else { "" }
+                $topUp = Invoke-CandidateCpuOutlierConfirmation `
+                    -Candidate $Candidate `
+                    -RoutePlan $Validation.cpu_route_plan `
+                    -RequestPlan $plan -Decision $pendingDecision `
+                    -ProviderEvidence $storedEvidence `
+                    -QualificationKey ([string]$Validation.worker_qualification.key) `
+                    -FixtureRoot $topUpFixtureRoot `
+                    -IngestToken ([Environment]::GetEnvironmentVariable(
+                        "CLOUDFLARE_INGEST_TOKEN", "User"))
+                $expectedRequests = @($plan.requests | Where-Object {
+                    [string]$_.phase -eq "acceptance"
+                })
+                $receipts = @(Get-WorkerCpuDirectResponseReceipts `
+                    -ValidationRun ([string]$Validation.validation_run))
+                $to = $topUp.completed_at
+                $pendingDecision = [pscustomobject]@{
+                    state="PROVIDER_EVIDENCE_PENDING"
+                }
+            } finally {
+                Remove-CandidateValidationFixtureWorkspace -Workspace $workspace
+            }
+        } elseif ([string]$pendingDecision.state -eq "HEADROOM_REVIEW" -and
             @($pendingDecision.review_groups).Count -eq 1 -and
             [int]$storedEvidence.recovery.headroom_top_ups -lt [int]$policy.maximum_headroom_top_ups) {
             $workspace = $null
@@ -3804,7 +3933,10 @@ function Resume-CandidateWorkerPlatformEvidence {
             -AggregateEvidence $platform.provider_corroboration
         $receipt = Write-WorkerCpuQualificationReceipt -Qualification $Validation.worker_qualification `
             -ValidationRun ([string]$Validation.validation_run) -Decision $decision
-        $qualificationMode = "CPU_QUALIFICATION_FRESH"
+        $qualificationMode = if ([string]$decision.state -eq
+            "QUALIFIED_WITH_ISOLATED_CPU_OUTLIER") {
+            "CPU_QUALIFICATION_WITH_ISOLATED_CPU_OUTLIER"
+        } else { "CPU_QUALIFICATION_FRESH" }
         $platform | Add-Member -NotePropertyName qualification_receipt_digest `
             -NotePropertyValue ([string]$receipt.receipt_digest) -Force
         $platform | Add-Member -NotePropertyName qualification_mode `
@@ -5742,6 +5874,39 @@ function Retry-CandidateValidation {
             -not $candidate.validation.cpu_route_plan -or
             -not $candidate.validation.worker_qualification) {
             throw "CPU review cannot resume without its exact persisted qualification ledger."
+        }
+        $persistedPlan = Read-WorkerCpuRunArtifact `
+            -ValidationRun ([string]$candidate.validation.validation_run) `
+            -Name "plan.json"
+        $currentPolicy = Get-WorkerCpuEvidencePolicy
+        if ($persistedPlan -and [string]$persistedPlan.policy_version -ne
+            [string]$currentPolicy.version) {
+            $priorPolicy = [string]$persistedPlan.policy_version
+            $priorQualificationKey = [string]$candidate.validation.worker_qualification.key
+            $candidate.validation_state = "NEW"
+            $candidate.validation = [pscustomobject]@{
+                key = [string]$candidate.validation_key
+                repository = "PASSED"; windows = "PASSED"; cloudflare = "PENDING"
+                reason = "CPU_QUALIFICATION_POLICY_MOVED"
+                prior_reason = $reason
+                prior_policy_version = $priorPolicy
+                prior_qualification_key = $priorQualificationKey
+                tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+            Write-ReleaseControlState -State $state
+            Write-ReleaseHistory -Event "CANDIDATE_CPU_POLICY_MOVED" `
+                -Release $candidate -Detail @{
+                    validation_key=[string]$candidate.validation_key
+                    prior_validation_run=[string]$persistedPlan.validation_run
+                    prior_policy_version=$priorPolicy
+                    current_policy_version=[string]$currentPolicy.version
+                    prior_qualification_key=$priorQualificationKey
+                    qualification_reused=$false
+                    independent_acceptance_preserved=$true
+                    fresh_cpu_matrix_required=$true
+                }
+            return Invoke-AutomaticCandidateValidation -Candidate $candidate
         }
         $candidate.validation_state = "PLATFORM_PENDING"
         $candidate.validation.cloudflare = "PENDING"

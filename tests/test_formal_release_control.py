@@ -92,6 +92,29 @@ def test_cpu_formal_shard_models_one_globally_bounded_multi_family_repair() -> N
         assert prop in liveness
 
 
+def test_cpu_formal_shard_models_single_use_outlier_confirmation() -> None:
+    cpu = (FORMAL / "CpuEvidence.tla").read_text(encoding="utf-8")
+    safety = (FORMAL / "CpuEvidenceSafety.cfg").read_text(encoding="utf-8")
+    liveness = (FORMAL / "CpuEvidenceLiveness.cfg").read_text(encoding="utf-8")
+    for contract in (
+        'state = "OUTLIER_REVIEW"',
+        'state = "CONFIRMING"',
+        'qualification = "ISOLATED_OUTLIER"',
+        "confirmationUses' = 1",
+        "originalOutlierRetained' = TRUE",
+    ):
+        assert contract in cpu
+    for prop in (
+        "OutlierRequiresBoundedConfirmation",
+        "NoSecondOutlierConfirmation",
+        "OutlierConfirmationMatchesRequestShape",
+        "RepeatedCpuPressureCannotQualify",
+        "OriginalOutlierCannotBeErased",
+    ):
+        assert prop in safety
+        assert prop in liveness
+
+
 def test_formal_workflow_is_parallel_bounded_and_cancels_stale_heads() -> None:
     workflow = (ROOT / ".github" / "workflows" / "formal-verification.yml").read_text(encoding="utf-8")
     timeouts = [int(value) for value in re.findall(r"timeout-minutes:\s*(\d+)", workflow)]
@@ -140,6 +163,7 @@ def test_model_interfaces_match_the_cpu_control_implementation() -> None:
     for production_state in (
         "PROVIDER_EVIDENCE_PENDING", "PROVIDER_EVIDENCE_INSUFFICIENT",
         "HARD_FAILURE", "QUALIFIED", "QUALIFIED_WITH_PROVIDER_OMISSION",
+        "CPU_OUTLIER_REVIEW_REQUIRED", "QUALIFIED_WITH_ISOLATED_CPU_OUTLIER",
     ):
         assert production_state in evidence + controller
     assert "qualification_key" in evidence

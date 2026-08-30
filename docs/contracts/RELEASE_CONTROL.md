@@ -281,7 +281,7 @@ calculation-query count is `EXTERNAL_ADVISORY`: it corroborates the same
 run/Version/window, cannot invent per-family samples, cannot override a raw hard
 failure, and a contradiction fails closed.
 
-`worker-cpu-policy-v1` applies independently to every required family/scenario:
+`worker-cpu-policy-v2` applies independently to every required family/scenario:
 
 - two warmups are excluded;
 - ten observed acceptance samples remain required;
@@ -291,8 +291,17 @@ failure, and a contradiction fails closed.
 - the frozen round permits at most four deficient groups and four requests per
   group, for an absolute maximum of sixteen targeted requests;
 - one headroom-review family may receive one ten-request targeted top-up;
+- one successful CPU observation at or above 10 ms enters
+  `CPU_OUTLIER_REVIEW_REQUIRED` instead of becoming an immediate deterministic
+  failure when its HTTP response succeeded, its provider outcome is `ok`, and
+  no resource failure was observed;
+- that exact outlier may freeze one ten-request, same-family/scenario/request-
+  shape confirmation plan; the plan binds the validation run, Candidate,
+  qualification key, original event and request, and every confirmation request
+  ID before sending;
 - all observed valid acceptance events, including reserve and top-up events,
-  enter the metrics; no subset may be selected;
+  remain in the raw metrics and evidence; no favorable reserve or top-up subset
+  may be selected;
 - no family or scenario may be absent, and missing provider request IDs remain
   explicit.
 
@@ -302,10 +311,22 @@ at least ten observed samples, every direct response passed exactly, provider
 corroboration is non-contradictory, every existing p95/p99 threshold passes, and
 each affected family's observed maximum is at most 8 ms. This retains two
 milliseconds of headroom to the 10 ms Free-plan hard ceiling; it never treats a
-missing required sample as present. Any observed CPU at or above 10 ms, 5xx,
-1102, `exceededCpu`, `exceededMemory`, or Worker identity mismatch is an
-immediate hard failure. Global and family gates still require p95 at most 6 ms,
-p99 at most 8 ms, and maximum below 10 ms. A numeric zero CPU value is valid.
+missing required sample as present. A 5xx, 1102, `exceededCpu`,
+`exceededMemory`, other applicable provider resource failure, Worker identity
+mismatch, or repeated successful CPU observation at or above 10 ms is an
+immediate hard failure. One isolated successful CPU outlier can become
+`QUALIFIED_WITH_ISOLATED_CPU_OUTLIER` only after its single-use confirmation is
+complete, contains no observation at or above 10 ms, and the unchanged quota,
+p95 and p99 requirements pass over the confirmed qualification population. The
+receipt retains the raw global and family metrics, the original outlier, all
+confirmation IDs and metrics, and the exact Candidate identity; the original
+observation is never deleted or rewritten. Only after that classification may
+the single original outlier be excluded from the separately labeled
+qualification distribution; every other original and confirmation sample stays
+in that distribution. Confirmation omission remains
+non-promotable and cannot start a second round. Global and family qualification
+metrics still require p95 at most 6 ms, p99 at most 8 ms, and maximum below 10
+ms. A numeric zero CPU value is valid.
 
 Active provider recovery uses six persisted reads with 5, 10, 20, 30, 45, and
 60 second backoff. Release Control then performs at most four read-only
@@ -327,7 +348,7 @@ request. Quota satisfaction stops provider queries without waiting for optional
 reserve events.
 
 CPU evidence is stored independently from release identity. The versioned
-`worker-cpu-qualification-v1` records the exact deployed script ETag as the
+`worker-cpu-qualification-v2` records the exact deployed script ETag as the
 per-release Candidate binding. Because the executable embeds Git provenance,
 that raw ETag is not itself the reusable CPU behavior key. The reusable key
 hashes runtime/compatibility/assets/binding configuration, Worker route and locked
@@ -339,7 +360,11 @@ the current release records its own exact Worker, Git, and ETag. An immutable
 receipt may be reused only on a complete behavior-key match; the current release
 still binds that qualification to the exact current Candidate and labels it
 `CPU_QUALIFICATION_REUSED`. Fresh measurement is labeled
-`CPU_QUALIFICATION_FRESH`. Any CPU-affecting mismatch forces fresh evidence.
+`CPU_QUALIFICATION_FRESH`; confirmed isolated-outlier qualification is labeled
+`CPU_QUALIFICATION_WITH_ISOLATED_CPU_OUTLIER`. Any CPU-affecting mismatch,
+including a policy-key mismatch, forces fresh CPU evidence while preserving
+independently accepted migration and release stages; an older request plan is
+never resumed under the newer policy.
 
 Retry preserves passed migration, directed correctness, parity, and unrelated
 family evidence. It resumes unsent preplanned request IDs and provider evidence

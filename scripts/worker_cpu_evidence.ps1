@@ -1,6 +1,7 @@
-$workerCpuPolicyVersion = "worker-cpu-policy-v1"
-$workerCpuQualificationVersion = "worker-cpu-qualification-v1"
+$workerCpuPolicyVersion = "worker-cpu-policy-v2"
+$workerCpuQualificationVersion = "worker-cpu-qualification-v2"
 $workerCpuDeficitRepairVersion = "worker-cpu-deficit-repair-v1"
+$workerCpuOutlierConfirmationVersion = "worker-cpu-outlier-confirmation-v1"
 $workerCpuEvidenceRoot = Join-Path $runtimeForwardRoot "worker-cpu-evidence"
 
 function Get-WorkerCpuEvidencePolicy {
@@ -10,8 +11,10 @@ function Get-WorkerCpuEvidencePolicy {
         reserve_acceptance = 2
         deficit_top_up_acceptance = 4
         headroom_top_up_acceptance = 10
+        outlier_confirmation_acceptance = 10
         maximum_deficit_top_ups = 1
         maximum_headroom_top_ups = 1
+        maximum_outlier_confirmations = 1
         active_read_backoff_seconds = @(5, 10, 20, 30, 45, 60)
         maximum_background_reads = 4
         background_read_interval_seconds = 900
@@ -177,7 +180,7 @@ function New-WorkerDirectedCorrectnessPlan {
 function New-WorkerCpuPlannedRequestRecords {
     param(
         [Parameter(Mandatory = $true)][object[]]$Groups,
-        [ValidateSet("deficit_top_up", "headroom_top_up")]
+        [ValidateSet("deficit_top_up", "headroom_top_up", "outlier_confirmation")]
         [Parameter(Mandatory = $true)][string]$SampleKind,
         [Parameter(Mandatory = $true)][int]$CountPerGroup
     )
@@ -205,7 +208,7 @@ function Add-WorkerCpuPlannedRequests {
     param(
         [Parameter(Mandatory = $true)][object]$Plan,
         [Parameter(Mandatory = $true)][object[]]$Groups,
-        [ValidateSet("deficit_top_up", "headroom_top_up")]
+        [ValidateSet("deficit_top_up", "headroom_top_up", "outlier_confirmation")]
         [Parameter(Mandatory = $true)][string]$SampleKind,
         [Parameter(Mandatory = $true)][int]$CountPerGroup
     )
@@ -430,6 +433,147 @@ function Apply-WorkerCpuDeficitRepairPlan {
     return @($payload.requests)
 }
 
+function Read-WorkerCpuOutlierConfirmationPlan {
+    param([Parameter(Mandatory = $true)][string]$ValidationRun)
+    $path = Join-Path (Get-WorkerCpuRunRoot -ValidationRun $ValidationRun) `
+        "outlier-confirmation-plan.json"
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    $plan = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
+        ConvertFrom-ReleaseControlJson
+    if (-not $plan.payload -or -not $plan.plan_digest -or
+        [string]$plan.payload.schema_version -ne $workerCpuOutlierConfirmationVersion -or
+        [string]$plan.payload.validation_run -ne $ValidationRun -or
+        [string]$plan.plan_digest -ne (Get-WorkerCpuCanonicalDigest -Value $plan.payload)) {
+        throw "WORKER_CPU_OUTLIER_CONFIRMATION_PLAN_INVALID"
+    }
+    return $plan
+}
+
+function New-WorkerCpuOutlierConfirmationPlan {
+    param(
+        [Parameter(Mandatory = $true)][object]$RequestPlan,
+        [Parameter(Mandatory = $true)][object]$OutlierGroup,
+        [Parameter(Mandatory = $true)][string]$CandidateWorkerVersion,
+        [Parameter(Mandatory = $true)][string]$QualificationKey,
+        [Parameter(Mandatory = $true)][string]$PriorProviderDigest
+    )
+    $validationRun = [string]$RequestPlan.validation_run
+    $existing = Read-WorkerCpuOutlierConfirmationPlan -ValidationRun $validationRun
+    if ($existing) {
+        if ([string]$existing.payload.candidate_worker_version -ne $CandidateWorkerVersion -or
+            [string]$existing.payload.qualification_key -ne $QualificationKey) {
+            throw "WORKER_CPU_OUTLIER_CONFIRMATION_PLAN_IDENTITY_MISMATCH"
+        }
+        return $existing
+    }
+    $policy = Get-WorkerCpuEvidencePolicy
+    if ([string]$RequestPlan.candidate_worker_version -ne $CandidateWorkerVersion -or
+        [string]$RequestPlan.qualification_key -ne $QualificationKey -or
+        [string]$RequestPlan.policy_version -ne [string]$policy.version -or
+        @($OutlierGroup.outliers).Count -ne 1) {
+        throw "WORKER_CPU_OUTLIER_CONFIRMATION_NOT_ELIGIBLE"
+    }
+    $group = [pscustomobject][ordered]@{
+        family = [string]$OutlierGroup.family
+        scenario = [string]$OutlierGroup.scenario
+        method = [string]$OutlierGroup.method
+        path = [string]$OutlierGroup.path
+        request_query = [string]$OutlierGroup.request_query
+        fixture = [string]$OutlierGroup.fixture
+    }
+    $requests = @(New-WorkerCpuPlannedRequestRecords -Groups @($group) `
+        -SampleKind "outlier_confirmation" `
+        -CountPerGroup ([int]$policy.outlier_confirmation_acceptance))
+    $outlier = @($OutlierGroup.outliers)[0]
+    $payload = [pscustomobject][ordered]@{
+        schema_version = $workerCpuOutlierConfirmationVersion
+        validation_run = $validationRun
+        candidate_worker_version = $CandidateWorkerVersion
+        qualification_key = $QualificationKey
+        prior_provider_digest = $PriorProviderDigest
+        outlier = [pscustomobject][ordered]@{
+            request_id = [string]$outlier.request_id
+            event_id = [string]$outlier.event_id
+            family = [string]$OutlierGroup.family
+            scenario = [string]$OutlierGroup.scenario
+            method = [string]$OutlierGroup.method
+            path = [string]$OutlierGroup.path
+            request_query = [string]$OutlierGroup.request_query
+            cpu_ms = [double]$outlier.cpu_ms
+            wall_ms = [double]$outlier.wall_ms
+            status = [int]$outlier.status
+            outcome = [string]$outlier.outcome
+        }
+        confirmation_request_count = $requests.Count
+        requests = $requests
+        frozen_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+    $plan = [pscustomobject][ordered]@{
+        payload = $payload
+        plan_digest = Get-WorkerCpuCanonicalDigest -Value $payload
+    }
+    $path = Join-Path (Get-WorkerCpuRunRoot -ValidationRun $validationRun) `
+        "outlier-confirmation-plan.json"
+    Write-WorkerCpuAtomicJson -Path $path -Value $plan
+    Add-WorkerCpuLedgerEvent -ValidationRun $validationRun `
+        -Event "CPU_OUTLIER_CONFIRMATION_PLAN_FROZEN" -Detail ([pscustomobject]@{
+            plan_digest = [string]$plan.plan_digest
+            outlier_request_id = [string]$outlier.request_id
+            request_ids = @($requests | ForEach-Object { [string]$_.request_id })
+            qualification_key = $QualificationKey
+        })
+    return $plan
+}
+
+function Apply-WorkerCpuOutlierConfirmationPlan {
+    param(
+        [Parameter(Mandatory = $true)][object]$RequestPlan,
+        [Parameter(Mandatory = $true)][object]$ConfirmationPlan
+    )
+    $payload = $ConfirmationPlan.payload
+    if ([string]$RequestPlan.validation_run -ne [string]$payload.validation_run -or
+        [string]$RequestPlan.candidate_worker_version -ne
+            [string]$payload.candidate_worker_version -or
+        [string]$RequestPlan.qualification_key -ne [string]$payload.qualification_key) {
+        throw "WORKER_CPU_OUTLIER_CONFIRMATION_PLAN_IDENTITY_MISMATCH"
+    }
+    $existingById = @{}
+    foreach ($request in @($RequestPlan.requests)) {
+        $existingById[[string]$request.request_id] =
+            Get-WorkerCpuCanonicalDigest -Value $request
+    }
+    $added = @()
+    foreach ($request in @($payload.requests)) {
+        $id = [string]$request.request_id
+        $digest = Get-WorkerCpuCanonicalDigest -Value $request
+        if ($existingById.ContainsKey($id)) {
+            if ([string]$existingById[$id] -ne $digest) {
+                throw "WORKER_CPU_OUTLIER_CONFIRMATION_REQUEST_CONFLICT"
+            }
+            continue
+        }
+        $RequestPlan.requests = @($RequestPlan.requests) + @($request)
+        $existingById[$id] = $digest
+        $added += $request
+    }
+    $RequestPlan | Add-Member -NotePropertyName outlier_confirmation_plan_digest `
+        -NotePropertyValue ([string]$ConfirmationPlan.plan_digest) -Force
+    $RequestPlan.request_universe_digest =
+        Get-WorkerCpuCanonicalDigest -Value @($RequestPlan.requests)
+    Write-WorkerCpuAtomicJson -Path (Join-Path (Get-WorkerCpuRunRoot `
+        -ValidationRun ([string]$RequestPlan.validation_run)) "plan.json") `
+        -Value $RequestPlan
+    if ($added.Count -gt 0) {
+        Add-WorkerCpuLedgerEvent -ValidationRun ([string]$RequestPlan.validation_run) `
+            -Event "CPU_OUTLIER_CONFIRMATION_PLAN_APPLIED" -Detail ([pscustomobject]@{
+                plan_digest = [string]$ConfirmationPlan.plan_digest
+                request_universe_digest = [string]$RequestPlan.request_universe_digest
+                request_ids = @($added | ForEach-Object { [string]$_.request_id })
+            })
+    }
+    return @($payload.requests)
+}
+
 function Get-WorkerCpuDirectResponseReceiptDigest {
     param([Parameter(Mandatory = $true)][object]$Receipt)
     return Get-WorkerCpuCanonicalDigest -Value ([pscustomobject][ordered]@{
@@ -634,10 +778,29 @@ function Get-WorkerCpuQualificationDecision {
     $missingIds = @($acceptance | Where-Object { [string]$_.request_id -notin $observedIds } |
         ForEach-Object { [string]$_.request_id })
     $global = Get-WorkerCpuMetricsFromRecords -Records $ProviderRecords
-    if ($global -and ($global.max_cpu_ms -ge [double]$policy.hard_max_ms -or
-        $global.responses_5xx -gt 0 -or $global.responses_1102 -gt 0 -or
-        $global.exceeded_cpu -gt 0 -or $global.exceeded_memory -gt 0)) {
-        return [pscustomobject]@{ state="HARD_FAILURE"; reason="WORKER_CPU_OR_PLATFORM_HARD_FAILURE"; global=$global; missing_request_ids=$missingIds }
+    $resourceFailures = @($ProviderRecords | Where-Object {
+        [int]$_.status -ge 500 -or
+        [string]$_.outcome -in @("exceededCpu", "exceededMemory") -or
+        [string]$_.outcome -notin @("", "ok")
+    })
+    if ($resourceFailures.Count -gt 0) {
+        return [pscustomobject]@{
+            state="HARD_FAILURE"; reason="WORKER_CPU_OR_PLATFORM_HARD_FAILURE"
+            global=$global; resource_failures=$resourceFailures
+            missing_request_ids=$missingIds
+        }
+    }
+    $successfulOutliers = @($ProviderRecords | Where-Object {
+        [double]$_.cpu_ms -ge [double]$policy.hard_max_ms -and
+        [int]$_.status -ge 200 -and [int]$_.status -lt 300 -and
+        [string]$_.outcome -eq "ok"
+    })
+    if ($successfulOutliers.Count -gt 1) {
+        return [pscustomobject]@{
+            state="HARD_FAILURE"; reason="REPRODUCIBLE_WORKER_CPU_PRESSURE"
+            global=$global; cpu_outliers=$successfulOutliers
+            missing_request_ids=$missingIds
+        }
     }
     if ($AggregateEvidence) {
         $aggregateHardError = @("responses_5xx", "responses_1102", "exceeded_cpu", "exceeded_memory") |
@@ -648,6 +811,43 @@ function Get-WorkerCpuQualificationDecision {
             return [pscustomobject]@{ state="HARD_FAILURE"; reason="PROVIDER_CORROBORATION_CONTRADICTION"; global=$global; aggregate=$AggregateEvidence }
         }
     }
+    $confirmationExpected = @($acceptance | Where-Object {
+        [string]$_.sample_kind -eq "outlier_confirmation"
+    })
+    if ($confirmationExpected.Count -gt 0 -and $successfulOutliers.Count -eq 0) {
+        return [pscustomobject]@{
+            state="HARD_FAILURE"; reason="CPU_OUTLIER_CONFIRMATION_ORIGINAL_MISSING"
+            global=$global; missing_request_ids=$missingIds
+        }
+    }
+    $confirmationObservedIds = @($ProviderRecords | Where-Object {
+        [string]$expectedById[[string]$_.request_id].sample_kind -eq
+            "outlier_confirmation"
+    } | ForEach-Object { [string]$_.request_id })
+    $confirmationMissing = @($confirmationExpected | Where-Object {
+        [string]$_.request_id -notin $confirmationObservedIds
+    } | ForEach-Object { [string]$_.request_id })
+    if ($confirmationExpected.Count -gt 0 -and
+        $confirmationExpected.Count -ne [int]$policy.outlier_confirmation_acceptance) {
+        return [pscustomobject]@{
+            state="HARD_FAILURE"; reason="CPU_OUTLIER_CONFIRMATION_PLAN_INVALID"
+            global=$global; missing_request_ids=$missingIds
+        }
+    }
+
+    $isolatedOutlier = if ($successfulOutliers.Count -eq 1) {
+        $successfulOutliers[0]
+    } else { $null }
+    $confirmationComplete = [bool]($isolatedOutlier -and
+        $confirmationExpected.Count -eq [int]$policy.outlier_confirmation_acceptance -and
+        $confirmationMissing.Count -eq 0)
+    $effectiveRecords = if ($confirmationComplete) {
+        @($ProviderRecords | Where-Object {
+            [string]$_.request_id -ne [string]$isolatedOutlier.request_id
+        })
+    } else { @($ProviderRecords) }
+    $qualificationGlobal = Get-WorkerCpuMetricsFromRecords -Records $effectiveRecords
+
     $groups = @()
     $deficits = @()
     $reviews = @()
@@ -659,6 +859,26 @@ function Get-WorkerCpuQualificationDecision {
                 [string]$request.scenario -eq [string]$first.scenario
         })
         $metrics = Get-WorkerCpuMetricsFromRecords -Records $records
+        $groupOutliers = @($successfulOutliers | Where-Object {
+            $request = $expectedById[[string]$_.request_id]
+            [string]$request.family -eq [string]$first.family -and
+                [string]$request.scenario -eq [string]$first.scenario
+        })
+        $groupConfirmationExpected = @($group.Group | Where-Object {
+            [string]$_.sample_kind -eq "outlier_confirmation"
+        })
+        $groupConfirmationRecords = @($records | Where-Object {
+            [string]$expectedById[[string]$_.request_id].sample_kind -eq
+                "outlier_confirmation"
+        })
+        $qualificationRecords = if ($confirmationComplete -and
+            $groupOutliers.Count -eq 1) {
+            @($records | Where-Object {
+                [string]$_.request_id -ne [string]$isolatedOutlier.request_id
+            })
+        } else { @($records) }
+        $qualificationMetrics = Get-WorkerCpuMetricsFromRecords `
+            -Records $qualificationRecords
         $groupExpectedIds = @($group.Group | ForEach-Object { [string]$_.request_id })
         $groupObservedIds = @($records | ForEach-Object { [string]$_.request_id })
         $groupMissing = @($groupExpectedIds | Where-Object { $_ -notin $groupObservedIds })
@@ -675,13 +895,31 @@ function Get-WorkerCpuQualificationDecision {
             reserve = [int]$policy.reserve_acceptance
             missing = $groupMissing.Count
             metrics = $metrics
+            qualification_metrics = $qualificationMetrics
+            outliers = @($groupOutliers)
+            confirmation = if ($groupConfirmationExpected.Count -gt 0) {
+                [pscustomobject][ordered]@{
+                    planned = $groupConfirmationExpected.Count
+                    observed = $groupConfirmationRecords.Count
+                    missing_request_ids = @($groupConfirmationExpected |
+                        Where-Object { [string]$_.request_id -notin
+                            @($groupConfirmationRecords.request_id) } |
+                        ForEach-Object { [string]$_.request_id })
+                    request_ids = @($groupConfirmationExpected | ForEach-Object {
+                        [string]$_.request_id
+                    })
+                    metrics = Get-WorkerCpuMetricsFromRecords `
+                        -Records $groupConfirmationRecords
+                }
+            } else { $null }
         }
         $groups += $row
         if ($records.Count -lt [int]$policy.required_observed_acceptance) { $deficits += $row; continue }
-        if ($metrics.p95_cpu_ms -gt [double]$policy.pass_p95_ms -or
-            $metrics.p99_cpu_ms -gt [double]$policy.pass_p99_ms -or
-            $metrics.max_cpu_ms -ge [double]$policy.hard_max_ms -or
-            ($groupMissing.Count -gt 0 -and $metrics.max_cpu_ms -gt [double]$policy.omission_max_ms)) {
+        if ($qualificationMetrics.p95_cpu_ms -gt [double]$policy.pass_p95_ms -or
+            $qualificationMetrics.p99_cpu_ms -gt [double]$policy.pass_p99_ms -or
+            $qualificationMetrics.max_cpu_ms -ge [double]$policy.hard_max_ms -or
+            ($groupMissing.Count -gt 0 -and
+                $qualificationMetrics.max_cpu_ms -gt [double]$policy.omission_max_ms)) {
             $reviews += $row
         }
     }
@@ -693,12 +931,53 @@ function Get-WorkerCpuQualificationDecision {
             global = $global; missing_request_ids = $missingIds
         }
     }
-    if ($reviews.Count -gt 0 -or ($global -and ($global.p95_cpu_ms -gt [double]$policy.pass_p95_ms -or
-        $global.p99_cpu_ms -gt [double]$policy.pass_p99_ms -or $global.max_cpu_ms -ge [double]$policy.hard_max_ms))) {
-        return [pscustomobject]@{ state="HEADROOM_REVIEW"; reason="WORKER_CPU_HEADROOM_REVIEW_REQUIRED"; groups=$groups; review_groups=$reviews; global=$global; missing_request_ids=$missingIds }
+    if ($isolatedOutlier -and $confirmationExpected.Count -eq 0) {
+        $outlierRequest = $expectedById[[string]$isolatedOutlier.request_id]
+        $outlierGroups = @($groups | Where-Object {
+            [string]$_.family -eq [string]$outlierRequest.family -and
+            [string]$_.scenario -eq [string]$outlierRequest.scenario
+        })
+        return [pscustomobject]@{
+            state="CPU_OUTLIER_REVIEW_REQUIRED"
+            reason="CPU_OUTLIER_REVIEW_REQUIRED"
+            groups=$groups; outlier_groups=$outlierGroups
+            cpu_outliers=@($isolatedOutlier); global=$global
+            missing_request_ids=$missingIds
+        }
     }
-    $state = if ($missingIds.Count -gt 0) { "QUALIFIED_WITH_PROVIDER_OMISSION" } else { "QUALIFIED" }
-    return [pscustomobject]@{ state=$state; reason=$null; groups=$groups; global=$global; missing_request_ids=$missingIds; aggregate=$AggregateEvidence }
+    if ($isolatedOutlier -and -not $confirmationComplete) {
+        return [pscustomobject]@{
+            state=if($RecoveryBudgetExhausted){"PROVIDER_EVIDENCE_INSUFFICIENT"}else{"PROVIDER_EVIDENCE_PENDING"}
+            reason="CPU_OUTLIER_CONFIRMATION_EVIDENCE_INCOMPLETE"
+            groups=$groups; cpu_outliers=@($isolatedOutlier); global=$global
+            confirmation_missing_request_ids=$confirmationMissing
+            missing_request_ids=$missingIds
+        }
+    }
+    if ($reviews.Count -gt 0 -or ($qualificationGlobal -and
+        ($qualificationGlobal.p95_cpu_ms -gt [double]$policy.pass_p95_ms -or
+         $qualificationGlobal.p99_cpu_ms -gt [double]$policy.pass_p99_ms -or
+         $qualificationGlobal.max_cpu_ms -ge [double]$policy.hard_max_ms))) {
+        return [pscustomobject]@{
+            state="HEADROOM_REVIEW"; reason="WORKER_CPU_HEADROOM_REVIEW_REQUIRED"
+            groups=$groups; review_groups=$reviews; global=$global
+            qualification_global=$qualificationGlobal; missing_request_ids=$missingIds
+        }
+    }
+    $state = if ($isolatedOutlier) {
+        "QUALIFIED_WITH_ISOLATED_CPU_OUTLIER"
+    } elseif ($missingIds.Count -gt 0) {
+        "QUALIFIED_WITH_PROVIDER_OMISSION"
+    } else { "QUALIFIED" }
+    return [pscustomobject]@{
+        state=$state; reason=$null; groups=$groups; global=$global
+        qualification_global=$qualificationGlobal
+        isolated_cpu_outlier=if($isolatedOutlier){$isolatedOutlier}else{$null}
+        outlier_confirmation=if($isolatedOutlier){
+            @($groups | Where-Object { $_.confirmation })[0].confirmation
+        }else{$null}
+        missing_request_ids=$missingIds; aggregate=$AggregateEvidence
+    }
 }
 
 function Write-WorkerCpuProviderEvidence {
@@ -930,7 +1209,10 @@ function Get-WorkerCpuQualificationReceipt {
     }
     if ([string]$receipt.qualification_key -ne $QualificationKey -or
         [string]$receipt.receipt_digest -ne (Get-WorkerCpuCanonicalDigest -Value $core) -or
-        [string]$receipt.outcome -notin @("QUALIFIED", "QUALIFIED_WITH_PROVIDER_OMISSION")) {
+        [string]$receipt.outcome -notin @(
+            "QUALIFIED", "QUALIFIED_WITH_PROVIDER_OMISSION",
+            "QUALIFIED_WITH_ISOLATED_CPU_OUTLIER"
+        )) {
         throw "WORKER_CPU_QUALIFICATION_RECEIPT_INVALID"
     }
     return $receipt
@@ -942,11 +1224,14 @@ function Write-WorkerCpuQualificationReceipt {
         [Parameter(Mandatory = $true)][string]$ValidationRun,
         [Parameter(Mandatory = $true)][object]$Decision
     )
-    if ([string]$Decision.state -notin @("QUALIFIED", "QUALIFIED_WITH_PROVIDER_OMISSION")) {
+    if ([string]$Decision.state -notin @(
+        "QUALIFIED", "QUALIFIED_WITH_PROVIDER_OMISSION",
+        "QUALIFIED_WITH_ISOLATED_CPU_OUTLIER"
+    )) {
         throw "WORKER_CPU_UNQUALIFIED_RECEIPT_FORBIDDEN"
     }
     $core = [pscustomobject][ordered]@{
-        schema_version = "worker-cpu-qualification-receipt-v1"
+        schema_version = "worker-cpu-qualification-receipt-v2"
         qualification_key = [string]$Qualification.key
         qualification_fields = $Qualification.fields
         source_worker_version = [string]$Qualification.candidate_worker_version

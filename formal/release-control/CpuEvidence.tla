@@ -7,23 +7,32 @@ RequestsPerFamily == 4
 MaxRepairRequests == 16
 Keys == {"A", "B"}
 IndependentStages == {"MIGRATION", "DIRECTED", "SEMANTIC"}
-EvidenceStates == {"NONE", "PENDING", "INSUFFICIENT", "QUALIFIED", "HARD_FAILURE"}
-QualificationKinds == {"NONE", "FRESH", "REUSED"}
+EvidenceStates == {"NONE", "PENDING", "INSUFFICIENT", "OUTLIER_REVIEW",
+                   "CONFIRMING", "QUALIFIED", "HARD_FAILURE"}
+QualificationKinds == {"NONE", "FRESH", "REUSED", "ISOLATED_OUTLIER"}
+ConfirmationStates == {"NONE", "CLEAN", "REPRODUCED"}
 
 VARIABLES controlledComplete, evidence, state, reserveUses, topUps, hardFailure,
           qualification, artifactKey, receiptKey, receiptValid,
           receiptQuotasSatisfied, independentStages, repairSet, repairRequests,
-          acceptedBeforeRepair
+          acceptedBeforeRepair, outlierObserved, outlierFamily,
+          confirmationFamily, confirmationUses, confirmationState,
+          originalOutlierRetained
 
 vars == <<controlledComplete, evidence, state, reserveUses, topUps, hardFailure,
           qualification, artifactKey, receiptKey, receiptValid,
           receiptQuotasSatisfied, independentStages, repairSet, repairRequests,
-          acceptedBeforeRepair>>
+          acceptedBeforeRepair, outlierObserved, outlierFamily,
+          confirmationFamily, confirmationUses, confirmationState,
+          originalOutlierRetained>>
 
 CpuQualified == state = "QUALIFIED" /\ qualification # "NONE"
 RequiredQuotasSatisfied == evidence = Families
 ApplicableQualification ==
     \/ qualification = "FRESH"
+    \/ qualification = "ISOLATED_OUTLIER" /\ confirmationState = "CLEAN" /\
+       confirmationUses = 1 /\ originalOutlierRetained /\
+       confirmationFamily = outlierFamily
     \/ qualification = "REUSED" /\ receiptValid /\
        receiptQuotasSatisfied /\ receiptKey = artifactKey
 
@@ -43,6 +52,12 @@ Init ==
     /\ repairSet = {}
     /\ repairRequests = 0
     /\ acceptedBeforeRepair = {}
+    /\ outlierObserved = FALSE
+    /\ outlierFamily = "STATUS"
+    /\ confirmationFamily = "STATUS"
+    /\ confirmationUses = 0
+    /\ confirmationState = "NONE"
+    /\ originalOutlierRetained = FALSE
 
 AcceptIndependentStages ==
     /\ independentStages # IndependentStages
@@ -50,7 +65,9 @@ AcceptIndependentStages ==
     /\ UNCHANGED <<controlledComplete, evidence, state, reserveUses, topUps, hardFailure,
                     qualification, artifactKey, receiptKey, receiptValid,
                     receiptQuotasSatisfied, repairSet, repairRequests,
-                    acceptedBeforeRepair>>
+                    acceptedBeforeRepair, outlierObserved, outlierFamily,
+                    confirmationFamily, confirmationUses, confirmationState,
+                    originalOutlierRetained>>
 
 CompleteControlledRequests ==
     /\ independentStages = IndependentStages
@@ -60,7 +77,9 @@ CompleteControlledRequests ==
     /\ UNCHANGED <<evidence, reserveUses, topUps, hardFailure, qualification, artifactKey,
                     receiptKey, receiptValid, receiptQuotasSatisfied,
                     independentStages, repairSet, repairRequests,
-                    acceptedBeforeRepair>>
+                    acceptedBeforeRepair, outlierObserved, outlierFamily,
+                    confirmationFamily, confirmationUses, confirmationState,
+                    originalOutlierRetained>>
 
 ProviderEvidenceArrives(family) ==
     /\ controlledComplete
@@ -71,7 +90,9 @@ ProviderEvidenceArrives(family) ==
     /\ UNCHANGED <<controlledComplete, reserveUses, topUps, hardFailure, qualification,
                     artifactKey, receiptKey, receiptValid,
                     receiptQuotasSatisfied, independentStages, repairSet,
-                    repairRequests, acceptedBeforeRepair>>
+                    repairRequests, acceptedBeforeRepair, outlierObserved,
+                    outlierFamily, confirmationFamily, confirmationUses,
+                    confirmationState, originalOutlierRetained>>
 
 ReceiveAllEvidence ==
     /\ controlledComplete
@@ -82,7 +103,9 @@ ReceiveAllEvidence ==
     /\ UNCHANGED <<controlledComplete, reserveUses, topUps, hardFailure, qualification,
                     artifactKey, receiptKey, receiptValid,
                     receiptQuotasSatisfied, independentStages, repairSet,
-                    repairRequests, acceptedBeforeRepair>>
+                    repairRequests, acceptedBeforeRepair, outlierObserved,
+                    outlierFamily, confirmationFamily, confirmationUses,
+                    confirmationState, originalOutlierRetained>>
 
 MarkInsufficient ==
     /\ state = "PENDING"
@@ -91,7 +114,9 @@ MarkInsufficient ==
     /\ UNCHANGED <<controlledComplete, evidence, reserveUses, topUps, hardFailure,
                     qualification, artifactKey, receiptKey, receiptValid,
                     receiptQuotasSatisfied, independentStages, repairSet,
-                    repairRequests, acceptedBeforeRepair>>
+                    repairRequests, acceptedBeforeRepair, outlierObserved,
+                    outlierFamily, confirmationFamily, confirmationUses,
+                    confirmationState, originalOutlierRetained>>
 
 TargetedTopUp ==
     /\ state = "INSUFFICIENT"
@@ -104,7 +129,61 @@ TargetedTopUp ==
     /\ state' = "PENDING"
     /\ UNCHANGED <<controlledComplete, evidence, reserveUses, hardFailure, qualification,
                     artifactKey, receiptKey, receiptValid,
-                    receiptQuotasSatisfied, independentStages>>
+                    receiptQuotasSatisfied, independentStages, outlierObserved,
+                    outlierFamily, confirmationFamily, confirmationUses,
+                    confirmationState, originalOutlierRetained>>
+
+RecordSuccessfulOutlier(family) ==
+    /\ controlledComplete /\ RequiredQuotasSatisfied
+    /\ state = "PENDING" /\ ~outlierObserved
+    /\ family \in Families
+    /\ state' = "OUTLIER_REVIEW"
+    /\ outlierObserved' = TRUE
+    /\ outlierFamily' = family
+    /\ originalOutlierRetained' = TRUE
+    /\ UNCHANGED <<controlledComplete, evidence, reserveUses, topUps,
+                    hardFailure, qualification, artifactKey, receiptKey,
+                    receiptValid, receiptQuotasSatisfied, independentStages,
+                    repairSet, repairRequests, acceptedBeforeRepair,
+                    confirmationFamily, confirmationUses, confirmationState>>
+
+StartOutlierConfirmation ==
+    /\ state = "OUTLIER_REVIEW" /\ outlierObserved
+    /\ confirmationUses = 0
+    /\ state' = "CONFIRMING"
+    /\ confirmationUses' = 1
+    /\ confirmationFamily' = outlierFamily
+    /\ UNCHANGED <<controlledComplete, evidence, reserveUses, topUps,
+                    hardFailure, qualification, artifactKey, receiptKey,
+                    receiptValid, receiptQuotasSatisfied, independentStages,
+                    repairSet, repairRequests, acceptedBeforeRepair,
+                    outlierObserved, outlierFamily, confirmationState,
+                    originalOutlierRetained>>
+
+ConfirmIsolatedOutlier ==
+    /\ state = "CONFIRMING" /\ confirmationUses = 1
+    /\ confirmationFamily = outlierFamily /\ originalOutlierRetained
+    /\ state' = "PENDING"
+    /\ confirmationState' = "CLEAN"
+    /\ UNCHANGED <<controlledComplete, evidence, reserveUses, topUps,
+                    hardFailure, qualification, artifactKey, receiptKey,
+                    receiptValid, receiptQuotasSatisfied, independentStages,
+                    repairSet, repairRequests, acceptedBeforeRepair,
+                    outlierObserved, outlierFamily, confirmationFamily,
+                    confirmationUses, originalOutlierRetained>>
+
+ConfirmRepeatedPressure ==
+    /\ state = "CONFIRMING" /\ confirmationUses = 1
+    /\ state' = "HARD_FAILURE"
+    /\ hardFailure' = TRUE
+    /\ qualification' = "NONE"
+    /\ confirmationState' = "REPRODUCED"
+    /\ UNCHANGED <<controlledComplete, evidence, reserveUses, topUps,
+                    artifactKey, receiptKey, receiptValid,
+                    receiptQuotasSatisfied, independentStages, repairSet,
+                    repairRequests, acceptedBeforeRepair, outlierObserved,
+                    outlierFamily, confirmationFamily, confirmationUses,
+                    originalOutlierRetained>>
 
 UseReserveEvidence ==
     /\ state \in {"PENDING", "INSUFFICIENT"}
@@ -113,7 +192,9 @@ UseReserveEvidence ==
     /\ UNCHANGED <<controlledComplete, topUps, hardFailure, qualification,
                     artifactKey, receiptKey, receiptValid,
                     receiptQuotasSatisfied, independentStages, repairSet,
-                    repairRequests, acceptedBeforeRepair>>
+                    repairRequests, acceptedBeforeRepair, outlierObserved,
+                    outlierFamily, confirmationFamily, confirmationUses,
+                    confirmationState, originalOutlierRetained>>
 
 RecordHardFailure ==
     /\ controlledComplete
@@ -124,7 +205,9 @@ RecordHardFailure ==
     /\ UNCHANGED <<controlledComplete, evidence, reserveUses, topUps, artifactKey,
                     receiptKey, receiptValid, receiptQuotasSatisfied,
                     independentStages, repairSet, repairRequests,
-                    acceptedBeforeRepair>>
+                    acceptedBeforeRepair, outlierObserved, outlierFamily,
+                    confirmationFamily, confirmationUses, confirmationState,
+                    originalOutlierRetained>>
 
 QualifyFresh ==
     /\ controlledComplete
@@ -132,13 +215,18 @@ QualifyFresh ==
     /\ ~hardFailure
     /\ state # "QUALIFIED"
     /\ state' = "QUALIFIED"
-    /\ qualification' = "FRESH"
+    /\ (~outlierObserved \/
+        (confirmationUses = 1 /\ confirmationState = "CLEAN" /\
+         confirmationFamily = outlierFamily /\ originalOutlierRetained))
+    /\ qualification' = IF outlierObserved THEN "ISOLATED_OUTLIER" ELSE "FRESH"
     /\ receiptKey' = artifactKey
     /\ receiptValid' = TRUE
     /\ receiptQuotasSatisfied' = TRUE
     /\ UNCHANGED <<controlledComplete, evidence, reserveUses, topUps, hardFailure,
                     artifactKey, independentStages, repairSet, repairRequests,
-                    acceptedBeforeRepair>>
+                    acceptedBeforeRepair, outlierObserved, outlierFamily,
+                    confirmationFamily, confirmationUses, confirmationState,
+                    originalOutlierRetained>>
 
 ReuseExactQualification ==
     /\ state = "NONE"
@@ -151,7 +239,9 @@ ReuseExactQualification ==
     /\ controlledComplete' = TRUE
     /\ UNCHANGED <<reserveUses, topUps, hardFailure, artifactKey, receiptKey, receiptValid,
                     receiptQuotasSatisfied, independentStages, repairSet,
-                    repairRequests, acceptedBeforeRepair>>
+                    repairRequests, acceptedBeforeRepair, outlierObserved,
+                    outlierFamily, confirmationFamily, confirmationUses,
+                    confirmationState, originalOutlierRetained>>
 
 ChangeArtifact ==
     /\ artifactKey' \in Keys \ {artifactKey}
@@ -165,8 +255,12 @@ ChangeArtifact ==
     /\ repairSet' = {}
     /\ repairRequests' = 0
     /\ acceptedBeforeRepair' = {}
+    /\ outlierObserved' = FALSE
+    /\ confirmationUses' = 0
+    /\ confirmationState' = "NONE"
+    /\ originalOutlierRetained' = FALSE
     /\ UNCHANGED <<receiptKey, receiptValid, receiptQuotasSatisfied,
-                    independentStages>>
+                    independentStages, outlierFamily, confirmationFamily>>
 
 Next ==
     \/ AcceptIndependentStages
@@ -176,6 +270,10 @@ Next ==
     \/ MarkInsufficient
     \/ TargetedTopUp
     \/ UseReserveEvidence
+    \/ \E family \in Families: RecordSuccessfulOutlier(family)
+    \/ StartOutlierConfirmation
+    \/ ConfirmIsolatedOutlier
+    \/ ConfirmRepeatedPressure
     \/ RecordHardFailure
     \/ QualifyFresh
     \/ ReuseExactQualification
@@ -188,6 +286,8 @@ LivenessSpec ==
     /\ WF_vars(AcceptIndependentStages)
     /\ WF_vars(CompleteControlledRequests)
     /\ WF_vars(ReceiveAllEvidence)
+    /\ WF_vars(StartOutlierConfirmation)
+    /\ WF_vars(ConfirmIsolatedOutlier)
     /\ WF_vars(QualifyFresh)
 
 TypeOK ==
@@ -204,6 +304,11 @@ TypeOK ==
     /\ repairSet \subseteq Families
     /\ repairRequests \in 0..MaxRepairRequests
     /\ acceptedBeforeRepair \subseteq Families
+    /\ outlierObserved \in BOOLEAN
+    /\ outlierFamily \in Families /\ confirmationFamily \in Families
+    /\ confirmationUses \in 0..1
+    /\ confirmationState \in ConfirmationStates
+    /\ originalOutlierRetained \in BOOLEAN
 
 CpuQualificationIsValid ==
     CpuQualified => ~hardFailure /\ RequiredQuotasSatisfied /\ ApplicableQualification
@@ -219,6 +324,15 @@ DeficitRepairCannotFabricateEvidence ==
 NoSecondDeficitRepairRound == topUps <= 1
 ReserveEvidenceUseIsBounded == reserveUses <= 1
 CpuHardFailureCannotQualify == hardFailure => ~CpuQualified
+OutlierRequiresBoundedConfirmation ==
+    qualification = "ISOLATED_OUTLIER" =>
+        outlierObserved /\ confirmationUses = 1 /\
+        confirmationState = "CLEAN" /\ originalOutlierRetained
+NoSecondOutlierConfirmation == confirmationUses <= 1
+OutlierConfirmationMatchesRequestShape ==
+    confirmationUses = 1 => confirmationFamily = outlierFamily
+RepeatedCpuPressureCannotQualify ==
+    confirmationState = "REPRODUCED" => hardFailure /\ ~CpuQualified
 ReusedCpuEvidenceMatchesArtifact ==
     qualification = "REUSED" => receiptValid /\ receiptQuotasSatisfied /\
         receiptKey = artifactKey /\ CpuQualified
@@ -235,6 +349,9 @@ TargetedRetryPreservesAcceptedWork ==
         /\ acceptedBeforeRepair' = evidence
         /\ repairSet' = Families \ evidence]_vars
 ProviderEvidenceIsMonotonic == CpuEvidenceOnlyGrows
+OriginalOutlierCannotBeErased ==
+    [][(artifactKey' = artifactKey /\ outlierObserved) =>
+        outlierObserved' /\ originalOutlierRetained']_vars
 PendingEventuallyResolves ==
     [](state = "PENDING" => <> (state # "PENDING"))
 
