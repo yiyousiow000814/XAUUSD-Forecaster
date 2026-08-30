@@ -22,7 +22,9 @@ NEW_START_TOKEN = "2026-08-26T03:22:48.0603020+00:00"
 CURRENT_START_TOKEN = "2026-08-26T03:25:00.0000000+00:00"
 DEAD_INSTALLER_START_TOKEN = "2026-08-26T03:15:00.0000000+00:00"
 CONTROL_FILES = (
+    "runtime-control-files.json",
     "xauusd_control_center.ps1",
+    "worker_cpu_evidence.ps1",
     "control_center.xaml",
     "xauusd_control_center_launcher.vbs",
     "xauusd_watchdog_launcher.vbs",
@@ -55,20 +57,41 @@ def _run_contract(tmp_path: Path, body: str) -> str:
     return result.stdout.strip()
 
 
-def _write_bundle(root: Path, revision: str, label: str) -> None:
+def _write_bundle(
+    root: Path, revision: str, label: str, *, dependency_closed: bool = False,
+) -> None:
     root.mkdir(parents=True, exist_ok=True)
     hashes: dict[str, str] = {}
     for name in CONTROL_FILES:
-        payload = f"{label}|{name}\n".encode()
+        payload = (
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "entrypoints": [
+                        "xauusd_control_center.ps1",
+                        "xauusd_watchdog_guard.ps1",
+                    ],
+                    "files": list(CONTROL_FILES),
+                }
+            ).encode()
+            if name == "runtime-control-files.json"
+            else f"{label}|{name}\n".encode()
+        )
         (root / name).write_bytes(payload)
         hashes[name] = hashlib.sha256(payload).hexdigest()
+    file_digest = hashlib.sha256(
+        "\n".join(f"{name}={hashes[name]}" for name in sorted(hashes)).encode()
+    ).hexdigest()
     (root / "runtime-control-bundle.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2 if dependency_closed else 1,
                 "source_revision": revision,
                 "exact_revision": True,
                 "created_at": "2026-08-23T00:00:00+00:00",
+                "dependency_closed": dependency_closed,
+                "source_manifest_sha256": hashes["runtime-control-files.json"],
+                "bundle_digest": file_digest,
                 "files": hashes,
             }
         ),
@@ -76,11 +99,32 @@ def _write_bundle(root: Path, revision: str, label: str) -> None:
     )
 
 
-def _make_detached_source(root: Path) -> str:
+def _make_detached_source(
+    root: Path,
+    *,
+    manifest_files: tuple[str, ...] = CONTROL_FILES,
+    payloads: dict[str, str] | None = None,
+) -> str:
     scripts = root / "scripts"
     scripts.mkdir(parents=True)
-    for name in CONTROL_FILES:
-        (scripts / name).write_text(f"committed|{name}\n", encoding="utf-8")
+    payloads = payloads or {}
+    source_files = tuple(dict.fromkeys((*manifest_files, *payloads)))
+    for name in source_files:
+        payload = (
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "entrypoints": [
+                        "xauusd_control_center.ps1",
+                        "xauusd_watchdog_guard.ps1",
+                    ],
+                    "files": list(manifest_files),
+                }
+            )
+            if name == "runtime-control-files.json"
+            else payloads.get(name, f"committed|{name}\n")
+        )
+        (scripts / name).write_text(payload, encoding="utf-8")
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.name", "Contract Test"], cwd=root, check=True)
     subprocess.run(
@@ -90,6 +134,28 @@ def _make_detached_source(root: Path) -> str:
     )
     subprocess.run(["git", "add", "scripts"], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "immutable bundle"], cwd=root, check=True)
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    subprocess.run(["git", "checkout", "--detach", "-q", revision], cwd=root, check=True)
+    return revision
+
+
+def _make_real_control_source(root: Path) -> str:
+    scripts = root / "scripts"
+    scripts.mkdir(parents=True)
+    for name in CONTROL_FILES:
+        shutil.copy2(ROOT / "scripts" / name, scripts / name)
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Contract Test"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "contract-test@example.invalid"],
+        cwd=root,
+        check=True,
+    )
+    subprocess.run(["git", "add", "scripts"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "real control bundle"], cwd=root, check=True)
     revision = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=root,
         capture_output=True, text=True, check=True,
@@ -126,6 +192,7 @@ def _state_machine_mocks(old_revision: str, target_revision: str) -> str:
         function Assert-ControlPlaneIsolationBaseline {{ param($Snapshot,$ReleaseState); $script:timeline+='baseline' }};
         function Assert-ControlPlaneIsolationSnapshot {{ param($Before,$After,$ReleaseState); $script:timeline+='isolation' }};
         function New-VerifiedRuntimeControlBundleStage {{ param($SourceRoot,$SourceRevision,$StageRoot,[switch]$RequireImmutableSource); $script:timeline+='stage'; [pscustomobject]@{{source_revision='{target_revision}'}} }};
+        function Invoke-RuntimeControlBundleStartupPreflight {{ param($StageRoot,$ExpectedRevision,$RepositoryRootForPreflight); $script:timeline+='preflight'; [pscustomobject]@{{control_bundle_revision=$ExpectedRevision}} }};
         function Suspend-ControlPlaneSupervision {{ $script:timeline+='suspend'; @{{}} }};
         function Wait-ControlPlaneGuardQuiesced {{ $script:timeline+='guard' }};
         function Restore-ControlPlaneSupervision {{ param($State); $script:timeline+='supervision' }};
@@ -233,13 +300,91 @@ def test_immutable_stage_requires_exact_clean_detached_source(tmp_path: Path) ->
     assert rejected == "CONTROL_BUNDLE_IMMUTABLE_SOURCE_REQUIRED"
 
 
+def test_bundle_manifest_owns_direct_and_transitive_runtime_dependencies(
+    tmp_path: Path,
+) -> None:
+    without_worker = tuple(
+        name for name in CONTROL_FILES if name != "worker_cpu_evidence.ps1"
+    )
+    direct = tmp_path / "direct"
+    direct_revision = _make_detached_source(
+        direct,
+        manifest_files=without_worker,
+        payloads={
+            "xauusd_control_center.ps1": (
+                '. (Join-Path $PSScriptRoot "worker_cpu_evidence.ps1")\n'
+            ),
+            "worker_cpu_evidence.ps1": "# present but undeclared\n",
+        },
+    )
+    rejected = _run_contract(
+        tmp_path,
+        f"try {{ New-VerifiedRuntimeControlBundleStage -SourceRoot '{direct}' "
+        f"-SourceRevision '{direct_revision}' -StageRoot '{tmp_path / 'direct-stage'}' "
+        "| Out-Null; Write-Output accepted } catch { Write-Output $_.Exception.Message }",
+    )
+    assert rejected == (
+        "CONTROL_BUNDLE_UNDECLARED_DEPENDENCY:"
+        "xauusd_control_center.ps1:worker_cpu_evidence.ps1"
+    )
+
+    transitive = tmp_path / "transitive"
+    transitive_revision = _make_detached_source(
+        transitive,
+        payloads={
+            "worker_cpu_evidence.ps1": (
+                '. (Join-Path $PSScriptRoot "runtime_nested.ps1")\n'
+            ),
+            "runtime_nested.ps1": "# present but undeclared\n",
+        },
+    )
+    rejected = _run_contract(
+        tmp_path,
+        f"try {{ New-VerifiedRuntimeControlBundleStage -SourceRoot '{transitive}' "
+        f"-SourceRevision '{transitive_revision}' "
+        f"-StageRoot '{tmp_path / 'transitive-stage'}' | Out-Null; "
+        "Write-Output accepted } catch { Write-Output $_.Exception.Message }",
+    )
+    assert rejected == (
+        "CONTROL_BUNDLE_UNDECLARED_DEPENDENCY:"
+        "worker_cpu_evidence.ps1:runtime_nested.ps1"
+    )
+
+
+def test_clean_staged_bundle_produces_quiesced_preflight_without_checkout_fallback(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    revision = _make_real_control_source(source)
+    stage = tmp_path / "stage"
+    result = _run_contract(
+        tmp_path,
+        f"$bundle=New-VerifiedRuntimeControlBundleStage -SourceRoot '{source}' "
+        f"-SourceRevision '{revision}' -StageRoot '{stage}' -RequireImmutableSource; "
+        f"$receipt=Invoke-RuntimeControlBundleStartupPreflight -StageRoot '{stage}' "
+        f"-ExpectedRevision '{revision}' -RepositoryRootForPreflight '{ROOT}'; "
+        'Write-Output "$($receipt.supervision_mode)|$($receipt.dependency_closed)"',
+    )
+    assert result == "QUIESCED|True"
+
+    (stage / "worker_cpu_evidence.ps1").unlink()
+    rejected = _run_contract(
+        tmp_path,
+        f"try {{ Invoke-RuntimeControlBundleStartupPreflight -StageRoot '{stage}' "
+        f"-ExpectedRevision '{revision}' -RepositoryRootForPreflight '{ROOT}' "
+        "| Out-Null; Write-Output accepted } "
+        "catch { Write-Output $_.Exception.Message }",
+    )
+    assert rejected == "CONTROL_BUNDLE_STARTUP_PREFLIGHT_FAILED"
+
+
 def test_bundle_install_is_complete_and_restorable(tmp_path: Path) -> None:
     old_revision, new_revision = "a" * 40, "b" * 40
     control = tmp_path / "control"
     stage = tmp_path / "stage"
     backup = tmp_path / "backup"
     _write_bundle(control, old_revision, "old")
-    _write_bundle(stage, new_revision, "new")
+    _write_bundle(stage, new_revision, "new", dependency_closed=True)
     result = _run_contract(
         tmp_path,
         f"$new=Install-VerifiedRuntimeControlBundleStage -StageRoot '{stage}' "
@@ -248,7 +393,14 @@ def test_bundle_install_is_complete_and_restorable(tmp_path: Path) -> None:
         f"-ControlRoot '{control}'; Write-Output \"$($new.source_revision),$($old.source_revision)\"",
     )
     assert result == f"{new_revision},{old_revision}"
-    assert all((control / name).read_text() == f"old|{name}\n" for name in CONTROL_FILES)
+    assert all(
+        (control / name).read_text() == f"old|{name}\n"
+        for name in CONTROL_FILES
+        if name != "runtime-control-files.json"
+    )
+    assert json.loads((control / "runtime-control-files.json").read_text())[
+        "files"
+    ] == list(CONTROL_FILES)
 
 
 def test_watchdog_repairs_interrupted_bundle_copy_after_installer_exit(
@@ -325,7 +477,7 @@ def test_handoff_orders_single_ownership_and_preserves_runtime(tmp_path: Path) -
     )
     result = _run_contract(tmp_path, body)
     assert result == (
-        "COMMITTED|lock,stage,suspend,guard,stop,baseline,install,start,"
+        "COMMITTED|lock,stage,preflight,suspend,guard,stop,baseline,install,start,"
         "heartbeat:QUIESCED,isolation,heartbeat:ACTIVE,supervision,unlock"
     )
 

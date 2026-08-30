@@ -1421,7 +1421,13 @@ def test_candidate_switch_preserves_reviewed_runtime_control_bundle(tmp_path) ->
 
 def test_runtime_control_bundle_records_exact_source_revision_and_hashes(tmp_path) -> None:
     runtime = tmp_path / "runtime"
-    _write_control_bundle(runtime, "reviewed", scripts_dir=True)
+    source_manifest = json.loads(
+        (ROOT / "scripts" / "runtime-control-files.json").read_text(encoding="utf-8")
+    )
+    source_files = tuple(source_manifest["files"])
+    (runtime / "scripts").mkdir(parents=True)
+    for name in source_files:
+        shutil.copy2(ROOT / "scripts" / name, runtime / "scripts" / name)
     shutil.copy2(
         ROOT / "scripts" / "windows-service-launch-contract.json",
         runtime / "scripts" / "windows-service-launch-contract.json",
@@ -1450,7 +1456,7 @@ def test_runtime_control_bundle_records_exact_source_revision_and_hashes(tmp_pat
         'Write-Output "$($manifest.source_revision),$($manifest.exact_revision),$hashCount"',
     )
 
-    assert result == f"{revision},True,{len(RUNTIME_CONTROL_FILES)}"
+    assert result == f"{revision},True,{len(source_files)}"
 
 
 def _status_payload(**overrides) -> dict:
