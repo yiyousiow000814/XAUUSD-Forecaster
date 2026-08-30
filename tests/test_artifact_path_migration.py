@@ -484,6 +484,13 @@ def test_repair_orchestration_fences_all_sqlite_writers_and_preserves_bridge(
         assert f'$services | Where-Object Key -eq "{service}"' in repair
         assert f"Stop-ForecasterService -Service ${service}" in repair
         assert f"Start-ForecasterService -Service ${service}" in repair
+    expected_states = {
+        "collector": "RUNNING", "annotator": "RUNNING", "api": "API OK",
+    }
+    for service, state in expected_states.items():
+        launch = f"Wait-StableServiceState -Service ${service}"
+        assert launch in repair
+        assert f'{launch} `\n        -ExpectedState "{state}"' in repair
     assert repair.index("-MigrationAction plan") < repair.index("-MigrationAction apply")
     assert repair.index("-MigrationAction apply") < repair.index("-MigrationAction verify")
     assert repair.index("-MigrationAction verify") < repair.index(
