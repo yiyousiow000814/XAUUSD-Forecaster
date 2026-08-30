@@ -734,7 +734,7 @@ function Set-CandidateMaterializationState {
     param(
         [Parameter(Mandatory = $true)][object]$State,
         [Parameter(Mandatory = $true)][string]$Revision,
-        [Parameter(Mandatory = $true)][ValidateSet("PENDING", "MATERIALIZED")]
+        [Parameter(Mandatory = $true)][ValidateSet("PENDING", "MATERIALIZED", "PRESERVED")]
         [string]$Status,
         [string]$WorkerVersionId = ""
     )
@@ -743,6 +743,8 @@ function Set-CandidateMaterializationState {
         state = $Status
         reason = if ($Status -eq "MATERIALIZED") {
             "EXACT_MAIN_CANDIDATE_MATERIALIZED"
+        } elseif ($Status -eq "PRESERVED") {
+            "CONTROL_PLANE_ONLY_MAIN_ADVANCE_PRESERVED"
         } else { "EXACT_MAIN_CANDIDATE_PENDING" }
         worker_version_id = if ($WorkerVersionId) { $WorkerVersionId } else { $null }
         observed_at = [DateTimeOffset]::UtcNow.ToString("o")
@@ -2076,6 +2078,111 @@ function Test-ProductionCandidateProvenance {
     $script:lastRepositoryValidationResult =
         Get-ProductionCandidateProvenanceResult -Candidate $Candidate
     return [bool]($script:lastRepositoryValidationResult.state -eq "PASSED")
+}
+
+function Test-PreservedCandidateEvidenceAvailable {
+    param([Parameter(Mandatory = $true)][object]$Candidate)
+    if ([string]$Candidate.validation_key -ne
+            "$([string]$Candidate.worker_version_id):$([string]$Candidate.git_sha)" -or
+        [string]$Candidate.artifact_kind -ne $productionCandidateArtifactKind -or
+        -not $Candidate.validation -or
+        [string]$Candidate.validation.key -ne [string]$Candidate.validation_key) {
+        return $false
+    }
+    if ($Candidate.migration_acceptance -and
+        [string]$Candidate.migration_acceptance.validation_key -ne
+            [string]$Candidate.validation_key) {
+        return $false
+    }
+    $validationRun = [string]$Candidate.validation.validation_run
+    if ($validationRun) {
+        $plan = Read-WorkerCpuRunArtifact -ValidationRun $validationRun -Name "plan.json"
+        $provider = Read-WorkerCpuRunArtifact `
+            -ValidationRun $validationRun -Name "provider-evidence.json"
+        if (-not $plan -or -not $provider -or
+            [string]$plan.validation_run -ne $validationRun -or
+            [string]$provider.validation_run -ne $validationRun -or
+            [string]$Candidate.validation.worker_qualification.candidate_worker_version -ne
+                [string]$Candidate.worker_version_id -or
+            [string]$Candidate.validation.worker_qualification.candidate_git_sha -ne
+                [string]$Candidate.git_sha) {
+            return $false
+        }
+    }
+    try {
+        $version = Get-CloudflareVersionDetails `
+            -VersionId ([string]$Candidate.worker_version_id)
+        if ([string]$version.id -ne [string]$Candidate.worker_version_id -or
+            (Get-ReleaseGitShaFromVersion -Version $version) -ne
+                [string]$Candidate.git_sha -or
+            (Get-ReleaseArtifactKindFromVersion -Version $version) -ne
+                $productionCandidateArtifactKind) {
+            return $false
+        }
+    } catch { return $false }
+    return $true
+}
+
+function Get-LatestSupersededCandidateForReplacement {
+    param([Parameter(Mandatory = $true)][string]$ReplacementKey)
+    if (-not (Test-Path -LiteralPath $releaseHistoryPath)) { return $null }
+    $lines = @(Get-Content -LiteralPath $releaseHistoryPath -Tail 128 -Encoding UTF8)
+    [array]::Reverse($lines)
+    foreach ($line in $lines) {
+        try {
+            $entry = $line | ConvertFrom-ReleaseControlJson
+            if ([string]$entry.event -eq "CANDIDATE_SUPERSEDED" -and
+                [string]$entry.detail.replacement_key -eq $ReplacementKey) {
+                return $entry.release
+            }
+        } catch {}
+    }
+    return $null
+}
+
+function Restore-ControlPlaneOnlySupersededCandidate {
+    param(
+        [Parameter(Mandatory = $true)][object]$State,
+        [Parameter(Mandatory = $true)][string]$MainRevision
+    )
+    $replacement = $State.candidate
+    if (-not $replacement -or $State.transaction -or
+        [string]$replacement.git_sha -ne $MainRevision -or
+        [string]$replacement.compatibility_state -ne "PENDING" -or
+        [string]$replacement.validation_state -notin @(
+            "NEW", "CHECKS_PENDING", "CHECKS_BLOCKED"
+        ) -or $replacement.migration_acceptance -or
+        ($replacement.validation -and
+            [string]$replacement.validation.reason -notin @(
+                "REQUIRED_GITHUB_CHECKS_PENDING",
+                "REQUIRED_GITHUB_CHECKS_BLOCKED",
+                "GITHUB_TEMPORARILY_UNAVAILABLE"
+            ))) {
+        return $null
+    }
+    $prior = Get-LatestSupersededCandidateForReplacement `
+        -ReplacementKey ([string]$replacement.validation_key)
+    if (-not $prior) { return $null }
+    $provenance = Get-ProductionCandidateProvenanceResult -Candidate $prior
+    if ([string]$provenance.state -ne "PASSED" -or
+        [string]$provenance.mode -ne "CONTROL_PLANE_ONLY_MAIN_ADVANCE" -or
+        [string]$provenance.current_main_git_sha -ne $MainRevision -or
+        -not (Test-PreservedCandidateEvidenceAvailable -Candidate $prior)) {
+        return $null
+    }
+    $State.candidate = $prior
+    Set-CandidateMaterializationState -State $State -Revision $MainRevision `
+        -Status "PRESERVED" -WorkerVersionId ([string]$prior.worker_version_id)
+    $State.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+    Write-ReleaseControlState -State $State
+    Write-ReleaseHistory -Event "CANDIDATE_CONTROL_PLANE_ONLY_RESTORED" `
+        -Release $prior -Detail @{
+            superseded_replacement_key = [string]$replacement.validation_key
+            current_main_git_sha = $MainRevision
+            preservation_mode = [string]$provenance.mode
+            accepted_evidence_replayed = $false
+        }
+    return $prior
 }
 
 function Get-CandidateCompatibilityApprovalGate {
@@ -6332,10 +6439,28 @@ function Find-NewCandidateRelease {
     if (-not $state) { return $null }
     $mainRevision = Get-OriginMainRevision
     if (-not $mainRevision) { return $null }
+    $restored = Restore-ControlPlaneOnlySupersededCandidate `
+        -State $state -MainRevision $mainRevision
+    if ($restored) { $state = Get-ReleaseControlState }
+    $preserved = if ($state.candidate) {
+        Get-ProductionCandidateProvenanceResult -Candidate $state.candidate
+    } else { $null }
+    $preservationApplies = [bool](
+        $preserved -and [string]$preserved.state -eq "PASSED" -and
+        [string]$preserved.mode -eq "CONTROL_PLANE_ONLY_MAIN_ADVANCE" -and
+        [string]$preserved.current_main_git_sha -eq $mainRevision
+    )
     $versions = @(Get-CloudflareVersions | Sort-Object `
         @{ Expression = { Get-ReleaseVersionCreatedAtValue -Version $_ } }, `
         @{ Expression = { [string]$_.id } })
     if (@($versions).Count -eq 0) {
+        if ($preservationApplies) {
+            Set-CandidateMaterializationState -State $state -Revision $mainRevision `
+                -Status "PRESERVED" `
+                -WorkerVersionId ([string]$state.candidate.worker_version_id)
+            Write-ReleaseControlState -State $state
+            return $state.candidate
+        }
         Set-CandidateMaterializationState -State $state -Revision $mainRevision `
             -Status "PENDING"
         $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
@@ -6344,6 +6469,11 @@ function Find-NewCandidateRelease {
     }
     if (-not $state.candidate_discovery.initialized_at) {
         Set-CandidateDiscoveryWatermark -State $state -Version ($versions | Select-Object -Last 1)
+        if ($preservationApplies) {
+            Set-CandidateMaterializationState -State $state -Revision $mainRevision `
+                -Status "PRESERVED" `
+                -WorkerVersionId ([string]$state.candidate.worker_version_id)
+        }
         $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
         Write-ReleaseControlState -State $state
         Write-ReleaseHistory -Event "CANDIDATE_DISCOVERY_INITIALIZED" -Release $null `
@@ -6351,11 +6481,23 @@ function Find-NewCandidateRelease {
                 watermark_version_id = [string]$state.candidate_discovery.watermark_version_id
                 historical_versions_eligible = $false
             }
+        if ($preservationApplies) { return $state.candidate }
         return $null
     }
     $newVersions = @($versions | Where-Object {
         Test-VersionAfterDiscoveryWatermark -Version $_ -Discovery $state.candidate_discovery
     })
+    if ($preservationApplies) {
+        foreach ($version in $newVersions) {
+            Set-CandidateDiscoveryWatermark -State $state -Version $version
+        }
+        Set-CandidateMaterializationState -State $state -Revision $mainRevision `
+            -Status "PRESERVED" `
+            -WorkerVersionId ([string]$state.candidate.worker_version_id)
+        $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $state
+        return $state.candidate
+    }
     $discovered = $null
     foreach ($version in $newVersions) {
         Set-CandidateDiscoveryWatermark -State $state -Version $version

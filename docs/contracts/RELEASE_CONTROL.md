@@ -40,11 +40,18 @@ historical or failed candidates. A production candidate arriving during a
 transaction is queued until that transaction finishes.
 
 Release Control records materialization for the exact current `origin/main` as
-`PENDING` or `MATERIALIZED`. Only a matching immutable Worker Version may make
-it `MATERIALIZED`. An older main build that completes out of order advances the
-discovery watermark but cannot replace, validate as, or supersede the current
-main Candidate. A missing exact Version remains visible and retryable without
-changing Stable.
+`PENDING`, `MATERIALIZED`, or `PRESERVED`. Only a matching immutable Worker
+Version may make it `MATERIALIZED`. `PRESERVED` means an existing immutable
+Candidate remains authoritative across a proven Control-Plane-only descendant
+main movement; a later upload for that descendant must advance discovery but
+must not supersede or discard its independent evidence. If an unvalidated
+replacement was selected before that proof ran, recovery may restore the exact
+superseded Candidate only from authoritative history, with an exact replacement
+key, no active transaction, no accepted replacement work, exact provider
+identity, intact persisted validation artifacts, and the same provenance proof.
+An older main build that completes out of order advances the discovery watermark
+but cannot replace, validate as, or supersede the current main Candidate. A
+missing exact Version remains visible and retryable without changing Stable.
 
 ## Windows ownership and validation
 

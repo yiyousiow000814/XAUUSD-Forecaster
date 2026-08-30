@@ -5828,6 +5828,124 @@ def test_control_plane_only_main_movement_preserves_immutable_candidate_artifact
     assert result == f"{expected_state},{expected_mode}"
 
 
+def test_candidate_discovery_does_not_supersede_control_plane_only_candidate(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("0" * 40, "a" * 40)
+        + "$state=Get-ReleaseControlState;$state.candidate.branch='main';"
+        "$state.candidate.validation_state='PLATFORM_PENDING';"
+        "$state.candidate.validation=[pscustomobject]@{key=$state.candidate.validation_key;"
+        "repository='PASSED';windows='PASSED';reason='PROVIDER_EVIDENCE_PENDING'};"
+        "Write-ReleaseControlState $state;"
+        "function Get-OriginMainRevision{return ('b'*40)};"
+        "function Restore-ControlPlaneOnlySupersededCandidate{return $null};"
+        "function Get-ProductionCandidateProvenanceResult{return [pscustomobject]@{"
+        "state='PASSED';mode='CONTROL_PLANE_ONLY_MAIN_ADVANCE';"
+        "current_main_git_sha=('b'*40)}};"
+        "$script:listed=$false;function Get-CloudflareVersions{$script:listed=$true;"
+        "[pscustomobject]@{id='new-version';metadata=[pscustomobject]@{"
+        "created_on=[DateTimeOffset]::UtcNow.ToString('o')}}};"
+        "$found=Find-NewCandidateRelease;$final=Get-ReleaseControlState;"
+        'Write-Output "$($found.git_sha),$($found.validation_state),$script:listed,'
+        '$($final.candidate_materialization.state),'
+        '$($final.candidate_materialization.worker_version_id)"',
+    )
+    assert result == (
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,PLATFORM_PENDING,True,"
+        "PRESERVED,22222222-2222-4222-8222-222222222222"
+    )
+
+
+def test_unvalidated_control_plane_replacement_restores_exact_superseded_candidate(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("0" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$replacement=$state.candidate;"
+        "$replacement.branch='main';$replacement.compatibility_state='PENDING';"
+        "$replacement.validation_state='CHECKS_BLOCKED';"
+        "$replacement.validation=[pscustomobject]@{key=$replacement.validation_key;"
+        "reason='REQUIRED_GITHUB_CHECKS_BLOCKED'};Write-ReleaseControlState $state;"
+        "$prior=New-ReleaseIdentity -GitSha ('a'*40) "
+        "-WorkerVersionId 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' "
+        "-WindowsRevision ('a'*40) -Branch 'main' -ArtifactKind 'PRODUCTION_CANDIDATE';"
+        "$prior.compatibility_state='COORDINATED_STORAGE_MIGRATION_PASSED';"
+        "$prior.validation_state='PLATFORM_PENDING';"
+        "$prior.validation=[pscustomobject]@{key=$prior.validation_key;"
+        "reason='PROVIDER_EVIDENCE_INSUFFICIENT';validation_run='run-kept';"
+        "worker_qualification=[pscustomobject]@{candidate_worker_version=$prior.worker_version_id;"
+        "candidate_git_sha=$prior.git_sha}};"
+        "$prior|Add-Member -Force migration_acceptance ([pscustomobject]@{"
+        "validation_key=$prior.validation_key;receipt_digest='migration-kept'});"
+        "Write-ReleaseHistory -Event 'CANDIDATE_SUPERSEDED' -Release $prior "
+        "-Detail @{replacement_key=$replacement.validation_key};"
+        "function Get-ProductionCandidateProvenanceResult{return [pscustomobject]@{"
+        "state='PASSED';mode='CONTROL_PLANE_ONLY_MAIN_ADVANCE';"
+        "current_main_git_sha=('b'*40)}};"
+        "function Read-WorkerCpuRunArtifact{[pscustomobject]@{validation_run='run-kept'}};"
+        "function Get-CloudflareVersionDetails{param($VersionId)[pscustomobject]@{id=$VersionId}};"
+        "function Get-ReleaseGitShaFromVersion{return ('a'*40)};"
+        "function Get-ReleaseArtifactKindFromVersion{return 'PRODUCTION_CANDIDATE'};"
+        "$restored=Restore-ControlPlaneOnlySupersededCandidate $state ('b'*40);"
+        "$final=Get-ReleaseControlState;$history=Get-Content $releaseHistoryPath -Raw;"
+        'Write-Output "$($restored.worker_version_id),$($restored.validation.validation_run),'
+        '$($final.candidate_materialization.state),'
+        '$($final.candidate.migration_acceptance.receipt_digest),'
+        '$($history.Contains(\'CANDIDATE_CONTROL_PLANE_ONLY_RESTORED\'))"',
+    )
+    assert result == (
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa,run-kept,PRESERVED,"
+        "migration-kept,True"
+    )
+
+
+@pytest.mark.parametrize(
+    "unsafe_setup",
+    (
+        "$replacement.validation_state='PASSED';",
+        "$replacement|Add-Member -Force migration_acceptance ([pscustomobject]@{validation_key='x'});",
+        "$script:providerMissing=$true;",
+    ),
+)
+def test_superseded_candidate_recovery_fails_closed_when_replacement_or_evidence_moved(
+    tmp_path, unsafe_setup: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("0" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$replacement=$state.candidate;"
+        "$replacement.branch='main';$replacement.compatibility_state='PENDING';"
+        "$replacement.validation_state='CHECKS_BLOCKED';"
+        "$replacement.validation=[pscustomobject]@{key=$replacement.validation_key;"
+        "reason='REQUIRED_GITHUB_CHECKS_BLOCKED'};"
+        f"{unsafe_setup}Write-ReleaseControlState $state;"
+        "$prior=New-ReleaseIdentity -GitSha ('a'*40) "
+        "-WorkerVersionId 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' "
+        "-WindowsRevision ('a'*40) -Branch 'main' -ArtifactKind 'PRODUCTION_CANDIDATE';"
+        "$prior.validation_state='PLATFORM_PENDING';$prior.compatibility_state='PASSED';"
+        "$prior.validation=[pscustomobject]@{key=$prior.validation_key;validation_run='run-kept';"
+        "worker_qualification=[pscustomobject]@{candidate_worker_version=$prior.worker_version_id;"
+        "candidate_git_sha=$prior.git_sha}};"
+        "Write-ReleaseHistory -Event 'CANDIDATE_SUPERSEDED' -Release $prior "
+        "-Detail @{replacement_key=$replacement.validation_key};"
+        "function Get-ProductionCandidateProvenanceResult{return [pscustomobject]@{"
+        "state='PASSED';mode='CONTROL_PLANE_ONLY_MAIN_ADVANCE';current_main_git_sha=('b'*40)}};"
+        "function Read-WorkerCpuRunArtifact{param($ValidationRun,$Name)"
+        "if($script:providerMissing -and $Name -eq 'provider-evidence.json'){return $null};"
+        "[pscustomobject]@{validation_run='run-kept'}};"
+        "function Get-CloudflareVersionDetails{param($VersionId)[pscustomobject]@{id=$VersionId}};"
+        "function Get-ReleaseGitShaFromVersion{return ('a'*40)};"
+        "function Get-ReleaseArtifactKindFromVersion{return 'PRODUCTION_CANDIDATE'};"
+        "$restored=Restore-ControlPlaneOnlySupersededCandidate $state ('b'*40);"
+        "$final=Get-ReleaseControlState;"
+        'Write-Output "$($null -eq $restored),$($final.candidate.git_sha)"',
+    )
+    assert result == "True," + "b" * 40
+
+
 def test_legacy_reference_evidence_is_readable_but_never_promotable(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
