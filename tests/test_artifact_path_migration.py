@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -34,6 +35,9 @@ OLD_FORWARD = PureWindowsPath(
 AUTO_FORWARD = PureWindowsPath(
     r"C:\Users\yiyou\automated-trading\src\XAUUSD-Forecaster\.local\forward"
 )
+POWERSHELLS = [
+    shell for shell in ("powershell.exe", "pwsh.exe") if shutil.which(shell)
+]
 
 
 def _ridge(seed: str) -> RidgeArtifact:
@@ -197,6 +201,65 @@ def _database_fixture(tmp_path: Path) -> tuple[sqlite3.Connection, Path, Path, d
     return connection, database, runtime_root, files
 
 
+def _git(repository: Path, *arguments: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        capture_output=True, text=True, encoding="utf-8", check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def _prepare_repair_entrypoint_repository(tmp_path: Path) -> tuple[Path, str]:
+    repository = tmp_path / "candidate-code-checkout"
+    scripts = repository / "scripts"
+    scripts.mkdir(parents=True)
+    manifest = json.loads(
+        (MODULE_ROOT / "scripts" / "runtime-control-files.json").read_text(
+            encoding="utf-8",
+        )
+    )
+    for name in manifest["files"]:
+        shutil.copy2(MODULE_ROOT / "scripts" / name, scripts / name)
+    for name in (
+        "repair_stable_runtime_artifact_paths.ps1",
+        "migrate_runtime_artifact_paths.py",
+    ):
+        shutil.copy2(MODULE_ROOT / "scripts" / name, scripts / name)
+    shutil.copytree(
+        MODULE_ROOT / "xauusd_forecaster", repository / "xauusd_forecaster",
+    )
+    _git(repository, "init", "-b", "main")
+    _git(repository, "config", "user.email", "repair-entrypoint@example.invalid")
+    _git(repository, "config", "user.name", "Repair Entrypoint Contract")
+    _git(repository, "add", "scripts", "xauusd_forecaster")
+    _git(repository, "commit", "-m", "fixture")
+    revision = _git(repository, "rev-parse", "HEAD")
+    _git(repository, "update-ref", "refs/remotes/origin/main", revision)
+    return repository, revision
+
+
+def _run_repair_entrypoint(
+    *, powershell: str, code_root: Path, runtime_root: Path,
+    repository_root: Path, expected_revision: str, receipt: Path,
+    working_directory: Path,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            powershell, "-NoProfile", "-NonInteractive",
+            "-ExecutionPolicy", "Bypass", "-File",
+            str(code_root / "scripts" / "repair_stable_runtime_artifact_paths.ps1"),
+            "-RuntimeRoot", str(runtime_root),
+            "-RepositoryRoot", str(repository_root),
+            "-ExpectedRevision", expected_revision,
+            "-ReceiptPath", str(receipt),
+            "-PreMutationPlanOnly",
+        ],
+        cwd=working_directory, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", check=False,
+    )
+
+
 def test_plan_covers_path_family_hashes_manifests_and_active_generation(
     tmp_path: Path,
 ) -> None:
@@ -345,6 +408,74 @@ def test_repair_orchestration_fences_all_sqlite_writers_and_preserves_bridge(
     )
     assert '"PRESERVED_FOR_OLD_STABLE"' in migrate
     assert "remove_old_stable_compatibility_alias" not in migrate
+
+
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_real_repair_entrypoint_preserves_source_authority_and_fails_closed(
+    tmp_path: Path, powershell: str,
+) -> None:
+    connection, database, runtime, _ = _database_fixture(tmp_path)
+    connection.close()
+    code_root, revision = _prepare_repair_entrypoint_repository(tmp_path)
+    repository_root = tmp_path / "config-authority"
+    repository_root.mkdir()
+    working_directory = tmp_path / "unrelated-working-directory"
+    working_directory.mkdir()
+    runtime_marker = runtime / ".runtime-code-marker"
+    runtime_marker.write_text("stable", encoding="utf-8")
+    runtime_scripts = runtime / "scripts"
+    runtime_scripts.mkdir()
+    shutil.copy2(
+        MODULE_ROOT / "scripts" / "windows-service-launch-contract.json",
+        runtime_scripts / "windows-service-launch-contract.json",
+    )
+    _git(runtime, "init", "-b", "stable")
+    _git(runtime, "config", "user.email", "runtime@example.invalid")
+    _git(runtime, "config", "user.name", "Runtime Contract")
+    _git(runtime, "add", runtime_marker.name, "scripts")
+    _git(runtime, "commit", "-m", "runtime")
+    database_before = database.read_bytes()
+
+    mismatched_receipt = runtime / ".local" / "forward" / "mismatch.json"
+    mismatched = _run_repair_entrypoint(
+        powershell=powershell, code_root=code_root,
+        runtime_root=runtime, repository_root=repository_root,
+        expected_revision="0" * 40, receipt=mismatched_receipt,
+        working_directory=working_directory,
+    )
+    assert mismatched.returncode != 0
+    assert "ARTIFACT_REPAIR_EXACT_MAIN_REQUIRED" in (
+        mismatched.stdout + mismatched.stderr
+    )
+    assert not mismatched_receipt.exists()
+    assert not (runtime / ".local" / "forward" / "release-control.lock").exists()
+    assert database.read_bytes() == database_before
+
+    receipt = runtime / ".local" / "forward" / "entrypoint-plan.json"
+    matched = _run_repair_entrypoint(
+        powershell=powershell, code_root=code_root,
+        runtime_root=runtime, repository_root=repository_root,
+        expected_revision=revision, receipt=receipt,
+        working_directory=working_directory,
+    )
+    assert matched.returncode == 0, matched.stderr
+    evidence = json.loads([
+        line for line in matched.stdout.splitlines() if line.startswith("{")
+    ][-1])
+    assert evidence["schema"] == (
+        "xauusd.stable-artifact-repair-premutation-plan.v1"
+    )
+    assert evidence["status"] == "PLANNED"
+    assert Path(evidence["repair_source_root"]) == code_root.resolve()
+    assert evidence["source_revision"] == revision
+    assert evidence["origin_main"] == revision
+    assert Path(evidence["runtime_root"]) == runtime.resolve()
+    assert Path(evidence["repository_root"]) == repository_root.resolve()
+    assert Path(evidence["working_directory"]) == working_directory.resolve()
+    assert receipt.exists()
+    assert not (runtime / ".local" / "forward" / "release-control.lock").exists()
+    assert database.read_bytes() == database_before
+    assert runtime_marker.read_text(encoding="utf-8") == "stable"
 
 
 @pytest.mark.parametrize(

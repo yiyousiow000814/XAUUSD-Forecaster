@@ -85,6 +85,21 @@ the failed precondition becoming true. If the last-known-safe configuration
 cannot be restored, fail closed, preserve evidence, and expose the exact
 recovery blocker.
 
+### Small-blocker autonomy
+
+Do not require new user authorization for an escaped deterministic blocker when
+its root cause is proven, it remains inside the authorized change or release
+family, the correction is narrow and reversible, no new production mutation or
+security/access authority is needed, no external ambiguity must be guessed, and
+no acceptance gate is weakened. Fix it, inspect siblings governed by the same
+invariant, add the durable family-level regression, run exact-head gates, merge
+normally, and continue the authorized workflow.
+
+Stop when the blocker enters a new failure family, changes mutation authority,
+requires destructive or irreversible action, needs human identity or Access,
+has an uncertain root cause, risks loss of safe Stable recovery, or proposes to
+relax a safety contract. Production code remains fail closed throughout.
+
 - Treat fail-closed behavior, error visibility, and audit evidence as safety
   requirements, not as substitutes for fixing the failed workflow.
 - When the user asks to resolve a failure, completion requires a corrective path
@@ -122,6 +137,17 @@ recovery blocker.
 - When changing a test suite, preserve critical coverage for point-in-time correctness, causality, append-only evidence, immutable historical records, execution semantics, credential secrecy, fail-closed behavior, and production/Preview isolation.
 - Before deleting or consolidating a test, prove that its behavior is covered elsewhere or that the underlying requirement is obsolete.
 - A change is not complete merely because the full suite passes. Review whether the new or modified tests cover the correct abstraction level and whether equivalent sibling paths remain untested.
+- When correctness depends on language or runtime composition semantics, static
+  source inspection is not sufficient evidence. Execute the real boundary for
+  PowerShell dot-sourcing and scope, shell environment inheritance, CLI argument
+  parsing, process working directories, module/import resolution, subprocess
+  quoting, environment precedence, and serializer/consumer wiring as
+  applicable.
+- Before completing a material script or orchestration change, record a compact
+  execution matrix covering the actual runtime, entrypoint, caller, callee or
+  import, parameter binding, filesystem roots, working directory, success case,
+  and fail-closed case. At least one automated test must execute every changed
+  critical composition boundary with the real runtime involved.
 
 ## Cross-Boundary Change Discipline
 
