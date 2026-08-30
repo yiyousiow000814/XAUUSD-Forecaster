@@ -2,56 +2,88 @@ name: Windows runtime gates
 
 on:
   pull_request:
-    paths:
-      - ".github/workflows/**"
-      - "ctrader/**"
-      - "scripts/**"
-      - "xauusd_forecaster/**"
-      - "tests/**"
-      - "pyproject.toml"
   push:
     branches: [main]
-    paths:
-      - ".github/workflows/**"
-      - "ctrader/**"
-      - "scripts/**"
-      - "xauusd_forecaster/**"
-      - "tests/**"
-      - "pyproject.toml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: windows-runtime-${{ github.event.pull_request.number || github.ref }}
+  group: windows-runtime-pr-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  runtime-contracts:
-    name: Windows runtime contracts
-    runs-on: windows-latest
-    # The mandatory real cross-version recovery rehearsal brings the test step
-    # to about 6.5 minutes, plus native-wheel setup. Keep each test fail-closed
-    # at 30 seconds below while allowing bounded end-to-end runner variance.
-    timeout-minutes: 12
+  plan:
+    name: Select Windows runtime shards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - id: select
+        name: Select authoritative impact set
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python scripts/select_windows_runtime_shards.py --base "$BASE_SHA" --github-output "$GITHUB_OUTPUT"
+
+  shards:
+    name: Windows ${{ matrix.id }}
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: No Windows runtime impact
+        if: matrix.id == 'no-windows-impact'
+        run: echo "No authoritative Windows shard ownership matched this change."
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: matrix.id != 'no-windows-impact'
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install package and test runner
-        run: python -m pip install -e . pytest pytest-timeout
-      - name: Run Windows runtime contracts
-        run: >-
-          python -m pytest -q --timeout=30 --timeout-method=thread
-          tests/test_runtime_health.py
-          tests/test_news_scheduler.py
-          tests/test_runtime_root_ownership.py
-          tests/test_cross_version_runtime_recovery.py
-          tests/test_runtime_launchers.py
-          tests/test_control_plane_install.py
-          tests/test_artifact_path_migration.py::test_real_repair_entrypoint_preserves_source_authority_and_fails_closed
+      - name: Install authoritative Python test environment
+        if: matrix.id != 'no-windows-impact'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path output/windows-runtime | Out-Null
+          $elapsed = Measure-Command {
+            python -m pip install -e . pytest==9.1.1 pytest-timeout==2.4.0
+            if ($LASTEXITCODE -ne 0) { throw "Python test environment install failed" }
+          }
+          @{ schema_version = "windows-runtime-setup-v1"; setup_seconds = [math]::Round($elapsed.TotalSeconds, 3) } |
+            ConvertTo-Json | Set-Content -Encoding utf8 output/windows-runtime/setup-${{ matrix.id }}.json
+      - name: Run bounded Windows runtime shard
+        if: matrix.id != 'no-windows-impact'
+        run: python scripts/run_windows_runtime_shard.py --shard "${{ matrix.id }}" --output output/windows-runtime
+      - name: Upload bounded Windows diagnostics
+        if: always() && matrix.id != 'no-windows-impact'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-runtime-${{ matrix.id }}-result
+          path: output/windows-runtime/
+          if-no-files-found: warn
+          retention-days: 7
+
+  aggregate:
+    name: Windows runtime contracts
+    if: always()
+    needs: [plan, shards]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every selected Windows shard
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          SHARD_RESULT: ${{ needs.shards.result }}
+        run: |
+          test "$PLAN_RESULT" = success
+          test "$SHARD_RESULT" = success

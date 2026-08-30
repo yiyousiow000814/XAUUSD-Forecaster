@@ -39,6 +39,11 @@ multiplied, whether proof can be decomposed without weakening coverage, whether
 the required gate meets its latency budget, and whether a timeout increase is
 hiding a modeling defect.
 
+Organize required test gates by independent contract ownership. When an
+integration suite exceeds its latency budget, profile it and compose bounded
+parallel contract shards instead of serially repeating every historical
+regression.
+
 1. Find the existing source of truth.
 2. Reuse existing abstractions.
 3. Avoid duplicate logic.

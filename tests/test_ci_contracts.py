@@ -1,28 +1,131 @@
 import ast
+from collections import Counter
+import importlib.util
+import json
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_windows_runtime_gate_tracks_its_complete_code_dependency_family() -> None:
+WINDOWS_MANIFEST = json.loads(
+    (ROOT / ".github" / "windows-runtime-shards.json").read_text(encoding="utf-8")
+)
+
+
+def _top_level_tests(relative: str) -> list[str]:
+    tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
+    return [
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith("test_")
+    ]
+
+
+def _owned_tests(spec: dict[str, str]) -> list[str]:
+    names = _top_level_tests(spec["path"])
+    if "from" not in spec and "through" not in spec:
+        return [f'{spec["path"]}::{name}' for name in names]
+    assert set(spec) >= {"path", "from", "through"}
+    start = names.index(spec["from"])
+    end = names.index(spec["through"])
+    assert start <= end
+    return [f'{spec["path"]}::{name}' for name in names[start : end + 1]]
+
+
+def test_windows_runtime_gate_is_parallel_bounded_and_keeps_required_name() -> None:
     workflow = (
         ROOT / ".github" / "workflows" / "windows-runtime-gates.yml"
     ).read_text(encoding="utf-8")
-    expected_paths = (
-        ".github/workflows/**",
-        "ctrader/**",
-        "scripts/**",
-        "xauusd_forecaster/**",
-        "tests/**",
-        "pyproject.toml",
+    timeouts = [int(value) for value in re.findall(r"timeout-minutes:\s*(\d+)", workflow)]
+    assert timeouts and max(timeouts) <= 5
+    assert "matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}" in workflow
+    assert "fail-fast: false" in workflow
+    assert "runs-on: ${{ matrix.runner }}" in workflow
+    assert "cancel-in-progress: true" in workflow
+    assert "windows-runtime-pr-${{ github.event.pull_request.number || github.ref }}" in workflow
+    assert workflow.count("name: Windows runtime contracts") == 1
+    assert "needs: [plan, shards]" in workflow
+    assert "needs.shards.result" in workflow
+    assert "tests/test_runtime_launchers.py" not in workflow
+    assert "pytest==9.1.1 pytest-timeout==2.4.0" in workflow
+
+
+def test_windows_runtime_manifest_assigns_every_required_test_exactly_once() -> None:
+    expected: set[str] = set()
+    for relative in (
+        "tests/test_runtime_health.py",
+        "tests/test_news_scheduler.py",
+        "tests/test_runtime_root_ownership.py",
+        "tests/test_cross_version_runtime_recovery.py",
+        "tests/test_runtime_launchers.py",
+        "tests/test_control_plane_install.py",
+    ):
+        expected.update(f"{relative}::{name}" for name in _top_level_tests(relative))
+    expected.add(
+        "tests/test_artifact_path_migration.py::"
+        "test_real_repair_entrypoint_preserves_source_authority_and_fails_closed"
     )
 
-    for path in expected_paths:
-        assert workflow.count(f'- "{path}"') == 2, path
+    assignments = Counter(
+        nodeid
+        for shard in WINDOWS_MANIFEST["shards"]
+        for spec in shard["tests"]
+        for nodeid in _owned_tests(spec)
+    )
+    assert set(assignments) == expected
+    assert {nodeid: count for nodeid, count in assignments.items() if count != 1} == {}
+    assert {shard["family"] for shard in WINDOWS_MANIFEST["shards"]} == {
+        "windows-runtime-core",
+        "windows-runtime-paths",
+        "windows-runtime-release",
+        "windows-runtime-artifact-repair",
+        "windows-runtime-cross-version",
+    }
 
-    assert '"docs/**"' not in workflow
-    assert '"web/**"' not in workflow
+
+def test_windows_runtime_selector_uses_authoritative_impact_map(monkeypatch) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "select_windows_runtime_shards",
+        ROOT / "scripts" / "select_windows_runtime_shards.py",
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    monkeypatch.setattr(
+        module, "_changed_paths", lambda _base: [".github/windows-runtime-shards.json"]
+    )
+    assert {item["id"] for item in module.select("base")} == {
+        shard["id"] for shard in WINDOWS_MANIFEST["shards"]
+    }
+    monkeypatch.setattr(module, "_changed_paths", lambda _base: ["web/app/page.tsx"])
+    assert module.select("base") == [
+        {"id": "no-windows-impact", "runner": "ubuntu-latest"}
+    ]
+    monkeypatch.setattr(
+        module, "_changed_paths", lambda _base: ["scripts/worker_cpu_evidence.ps1"]
+    )
+    assert {item["id"] for item in module.select("base")} == {
+        "release-evidence",
+        "release-lifecycle",
+    }
+
+
+def test_windows_runtime_runner_emits_bounded_machine_evidence() -> None:
+    runner = (ROOT / "scripts" / "run_windows_runtime_shard.py").read_text(
+        encoding="utf-8"
+    )
+    for contract in (
+        '"--timeout=30"',
+        '"--durations=30"',
+        '"schema_version": "windows-runtime-shard-result-v1"',
+        '"elapsed_seconds"',
+        '"test_selectors"',
+    ):
+        assert contract in runner
 
 
 _PUBLICATION_CLOCK_NAMES = frozenset({

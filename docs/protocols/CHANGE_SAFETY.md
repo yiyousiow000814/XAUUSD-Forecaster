@@ -83,6 +83,11 @@ Any state-space reduction assumption must be explicit, documented, and owned by
 another verified shard or interface contract. Required safety and liveness may
 run independently when they do not require the same state dimensions.
 
+A required test gate must be organized by independent contract ownership. When
+an integration suite exceeds its latency budget, profile it and compose bounded
+parallel contract shards instead of serially repeating every historical
+regression.
+
 ## Control-Proportional Assurance
 
 Required assurance is proportional to control. Classify each material evidence
