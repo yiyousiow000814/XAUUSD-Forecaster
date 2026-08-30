@@ -49,11 +49,12 @@ Approve ==
          priorHumanValid, accessFailure, repeated, gate>>
 
 InspectProvider(kind) ==
-    /\ review /\ kind \in ProviderStates /\ providerState' = kind
-    /\ accessReused' = FALSE /\ gate' = "UNTESTED"
+    /\ review /\ ~accessAccepted /\ ~accessReused
+    /\ kind \in ProviderStates /\ providerState' = kind
+    /\ accessReused' = FALSE /\ gate' = "UNTESTED" /\ repeated' = FALSE
     /\ UNCHANGED <<accessRequired, review, humanReceiptState, releaseKey,
          humanReceiptReleaseKey, accessKey, priorAccessKey, priorHumanValid,
-         accessFailure, accessAccepted, approvalCount, repeated>>
+         accessFailure, accessAccepted, approvalCount>>
 
 ReuseQualification ==
     /\ review /\ priorHumanValid /\ ~accessFailure
@@ -103,16 +104,16 @@ ChangeAccessKey ==
          priorHumanValid, accessFailure, approvalCount>>
 RecordAccessFailure ==
     /\ ~accessFailure /\ accessFailure' = TRUE
-    /\ accessReused' = FALSE /\ gate' = "UNTESTED"
+    /\ accessReused' = FALSE /\ gate' = "UNTESTED" /\ repeated' = FALSE
     /\ UNCHANGED <<accessRequired, review, humanReceiptState, releaseKey,
          humanReceiptReleaseKey, accessKey, priorAccessKey, providerState,
-         priorHumanValid, accessAccepted, approvalCount, repeated>>
+         priorHumanValid, accessAccepted, approvalCount>>
 InvalidatePriorHuman ==
     /\ priorHumanValid /\ priorHumanValid' = FALSE
-    /\ accessReused' = FALSE /\ gate' = "UNTESTED"
+    /\ accessReused' = FALSE /\ gate' = "UNTESTED" /\ repeated' = FALSE
     /\ UNCHANGED <<accessRequired, review, humanReceiptState, releaseKey,
          humanReceiptReleaseKey, accessKey, priorAccessKey, providerState,
-         accessFailure, accessAccepted, approvalCount, repeated>>
+         accessFailure, accessAccepted, approvalCount>>
 
 Next == RequireReview \/
     (\E kind \in ReceiptStates \ {"NONE"}, key \in Keys: RecordReceipt(kind, key)) \/
