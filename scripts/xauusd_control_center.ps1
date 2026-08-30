@@ -2147,7 +2147,6 @@ function Restore-ControlPlaneOnlySupersededCandidate {
     )
     $replacement = $State.candidate
     if (-not $replacement -or $State.transaction -or
-        [string]$replacement.git_sha -ne $MainRevision -or
         [string]$replacement.compatibility_state -ne "PENDING" -or
         [string]$replacement.validation_state -notin @(
             "NEW", "CHECKS_PENDING", "CHECKS_BLOCKED"
@@ -2160,6 +2159,19 @@ function Restore-ControlPlaneOnlySupersededCandidate {
             ))) {
         return $null
     }
+    $replacementProvenance = Get-ProductionCandidateProvenanceResult `
+        -Candidate $replacement
+    $replacementTracksMain = [bool](
+        [string]$replacementProvenance.state -eq "PASSED" -and (
+            [string]$replacementProvenance.mode -eq "EXACT_MAIN" -or (
+                [string]$replacementProvenance.mode -eq
+                    "CONTROL_PLANE_ONLY_MAIN_ADVANCE" -and
+                [string]$replacementProvenance.current_main_git_sha -eq
+                    $MainRevision
+            )
+        )
+    )
+    if (-not $replacementTracksMain) { return $null }
     $prior = Get-LatestSupersededCandidateForReplacement `
         -ReplacementKey ([string]$replacement.validation_key)
     if (-not $prior) { return $null }

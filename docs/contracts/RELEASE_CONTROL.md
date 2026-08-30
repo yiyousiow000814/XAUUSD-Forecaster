@@ -49,6 +49,10 @@ replacement was selected before that proof ran, recovery may restore the exact
 superseded Candidate only from authoritative history, with an exact replacement
 key, no active transaction, no accepted replacement work, exact provider
 identity, intact persisted validation artifacts, and the same provenance proof.
+The unvalidated replacement may itself be a Control-Plane-only ancestor of the
+newest main (including the recovery correction's own merge), but it must pass
+that same explicit provenance proof independently; arbitrary stale replacement
+revisions remain ineligible.
 An older main build that completes out of order advances the discovery watermark
 but cannot replace, validate as, or supersede the current main Candidate. A
 missing exact Version remains visible and retryable without changing Stable.

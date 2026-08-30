@@ -5884,12 +5884,12 @@ def test_unvalidated_control_plane_replacement_restores_exact_superseded_candida
         "-Detail @{replacement_key=$replacement.validation_key};"
         "function Get-ProductionCandidateProvenanceResult{return [pscustomobject]@{"
         "state='PASSED';mode='CONTROL_PLANE_ONLY_MAIN_ADVANCE';"
-        "current_main_git_sha=('b'*40)}};"
+        "current_main_git_sha=('c'*40)}};"
         "function Read-WorkerCpuRunArtifact{[pscustomobject]@{validation_run='run-kept'}};"
         "function Get-CloudflareVersionDetails{param($VersionId)[pscustomobject]@{id=$VersionId}};"
         "function Get-ReleaseGitShaFromVersion{return ('a'*40)};"
         "function Get-ReleaseArtifactKindFromVersion{return 'PRODUCTION_CANDIDATE'};"
-        "$restored=Restore-ControlPlaneOnlySupersededCandidate $state ('b'*40);"
+        "$restored=Restore-ControlPlaneOnlySupersededCandidate $state ('c'*40);"
         "$final=Get-ReleaseControlState;$history=Get-Content $releaseHistoryPath -Raw;"
         'Write-Output "$($restored.worker_version_id),$($restored.validation.validation_run),'
         '$($final.candidate_materialization.state),'
@@ -5908,6 +5908,7 @@ def test_unvalidated_control_plane_replacement_restores_exact_superseded_candida
         "$replacement.validation_state='PASSED';",
         "$replacement|Add-Member -Force migration_acceptance ([pscustomobject]@{validation_key='x'});",
         "$script:providerMissing=$true;",
+        "$script:replacementStale=$true;",
     ),
 )
 def test_superseded_candidate_recovery_fails_closed_when_replacement_or_evidence_moved(
@@ -5931,7 +5932,10 @@ def test_superseded_candidate_recovery_fails_closed_when_replacement_or_evidence
         "candidate_git_sha=$prior.git_sha}};"
         "Write-ReleaseHistory -Event 'CANDIDATE_SUPERSEDED' -Release $prior "
         "-Detail @{replacement_key=$replacement.validation_key};"
-        "function Get-ProductionCandidateProvenanceResult{return [pscustomobject]@{"
+        "function Get-ProductionCandidateProvenanceResult{param($Candidate)"
+        "if($script:replacementStale -and $Candidate.git_sha -eq ('b'*40)){"
+        "return [pscustomobject]@{state='FAILED';mode='';current_main_git_sha=('b'*40)}};"
+        "return [pscustomobject]@{"
         "state='PASSED';mode='CONTROL_PLANE_ONLY_MAIN_ADVANCE';current_main_git_sha=('b'*40)}};"
         "function Read-WorkerCpuRunArtifact{param($ValidationRun,$Name)"
         "if($script:providerMissing -and $Name -eq 'provider-evidence.json'){return $null};"
