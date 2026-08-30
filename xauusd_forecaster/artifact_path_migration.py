@@ -19,6 +19,18 @@ from .ridge import RidgeArtifact
 UTC = timezone.utc
 SCHEMA = "xauusd.runtime-artifact-path-migration.v1"
 MIGRATION_VERSION = "runtime-artifact-path-v1"
+APPEND_ONLY_UPDATE_GUARDS = {
+    "model_updates_v2": (
+        "model_updates_v2_no_update",
+        "prevent_update_model_updates_v2",
+    ),
+    "execution_model_updates_v1": (
+        "prevent_update_execution_model_updates_v1",
+    ),
+    "execution_model_updates_v2": (
+        "prevent_update_execution_model_updates_v2",
+    ),
+}
 
 
 def _json_digest(value: Any) -> str:
@@ -87,6 +99,73 @@ def _record(
         "source_family": source_family,
         "disposition": disposition,
     }
+
+
+def _normalized_sql(value: str) -> str:
+    return " ".join(value.rstrip("; ").split()).casefold()
+
+
+def _expected_update_guard_sql(table: str, name: str) -> str:
+    return (
+        f"CREATE TRIGGER {name} BEFORE UPDATE ON {table} "
+        f"BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"
+    )
+
+
+def _read_append_only_update_guards(connection: sqlite3.Connection) -> list[dict]:
+    guards = []
+    for table, names in APPEND_ONLY_UPDATE_GUARDS.items():
+        rows = connection.execute(
+            "SELECT name,sql FROM sqlite_master WHERE type='trigger' "
+            "AND tbl_name=? ORDER BY name",
+            (table,),
+        ).fetchall()
+        observed = {
+            str(row[0]): str(row[1])
+            for row in rows
+            if str(row[0]) in names
+        }
+        if set(observed) != set(names):
+            raise RuntimeError(
+                f"ARTIFACT_PATH_MIGRATION_APPEND_ONLY_GUARD_MISMATCH:{table}"
+            )
+        for name in names:
+            sql = observed[name]
+            if _normalized_sql(sql) != _normalized_sql(
+                _expected_update_guard_sql(table, name)
+            ):
+                raise RuntimeError(
+                    "ARTIFACT_PATH_MIGRATION_APPEND_ONLY_GUARD_INVALID:"
+                    f"{table}:{name}"
+                )
+            guards.append({
+                "table": table,
+                "name": name,
+                "sql": sql,
+                "sql_digest": hashlib.sha256(sql.encode("utf-8")).hexdigest(),
+            })
+    return guards
+
+
+def _suspend_append_only_update_guards(
+    connection: sqlite3.Connection, receipt: dict,
+) -> list[dict]:
+    expected = receipt.get("append_only_update_guards")
+    observed = _read_append_only_update_guards(connection)
+    if expected != observed:
+        raise RuntimeError("ARTIFACT_PATH_MIGRATION_APPEND_ONLY_GUARD_DRIFT")
+    for guard in observed:
+        connection.execute(f'DROP TRIGGER "{guard["name"]}"')
+    return observed
+
+
+def _restore_append_only_update_guards(
+    connection: sqlite3.Connection, guards: list[dict],
+) -> None:
+    for guard in guards:
+        connection.execute(str(guard["sql"]))
+    if _read_append_only_update_guards(connection) != guards:
+        raise RuntimeError("ARTIFACT_PATH_MIGRATION_APPEND_ONLY_GUARD_RESTORE_FAILED")
 
 
 def build_artifact_path_migration_plan(
@@ -271,6 +350,7 @@ def build_artifact_path_migration_plan(
         "after_set_digest": _json_digest(after_records),
         "records": records,
         "manifest_locators": manifest_locators,
+        "append_only_update_guards": _read_append_only_update_guards(connection),
         "old_stable_compatibility_alias": {
             "path": str(Path(
                 r"C:\Users\yiyou\XAUUSD-Forecaster\.local\forward\models-v2"
@@ -372,6 +452,7 @@ def apply_artifact_path_migration(
         raise RuntimeError("ARTIFACT_PATH_MIGRATION_SOURCE_DRIFT")
     connection.execute("BEGIN IMMEDIATE")
     try:
+        guards = _suspend_append_only_update_guards(connection, receipt)
         for record in receipt["records"]:
             column = (
                 "artifact_paths_json"
@@ -392,6 +473,7 @@ def apply_artifact_path_migration(
                 )
         if _current_set_digest(connection, receipt["records"]) != receipt["after_set_digest"]:
             raise RuntimeError("ARTIFACT_PATH_MIGRATION_AFTER_DIGEST_MISMATCH")
+        _restore_append_only_update_guards(connection, guards)
         connection.commit()
     except Exception:
         connection.rollback()
@@ -410,6 +492,7 @@ def rollback_artifact_path_migration(
         raise RuntimeError("ARTIFACT_PATH_MIGRATION_ROLLBACK_SOURCE_DRIFT")
     connection.execute("BEGIN IMMEDIATE")
     try:
+        guards = _suspend_append_only_update_guards(connection, receipt)
         for record in receipt["records"]:
             column = (
                 "artifact_paths_json"
@@ -426,6 +509,7 @@ def rollback_artifact_path_migration(
             )
         if _current_set_digest(connection, receipt["records"]) != receipt["before_set_digest"]:
             raise RuntimeError("ARTIFACT_PATH_MIGRATION_ROLLBACK_DIGEST_MISMATCH")
+        _restore_append_only_update_guards(connection, guards)
         connection.commit()
     except Exception:
         connection.rollback()
