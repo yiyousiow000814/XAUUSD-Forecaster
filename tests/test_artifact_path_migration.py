@@ -38,6 +38,35 @@ AUTO_FORWARD = PureWindowsPath(
 POWERSHELLS = [
     shell for shell in ("powershell.exe", "pwsh.exe") if shutil.which(shell)
 ]
+ARTIFACT_UPDATE_GUARDS = {
+    "model_updates_v2_no_update": (
+        "model_updates_v2", "model_updates_v2 is append-only",
+    ),
+    "prevent_update_model_updates_v2": (
+        "model_updates_v2", "model_updates_v2 is append-only",
+    ),
+    "prevent_update_execution_model_updates_v1": (
+        "execution_model_updates_v1",
+        "execution_model_updates_v1 is append-only",
+    ),
+    "prevent_update_execution_model_updates_v2": (
+        "execution_model_updates_v2",
+        "execution_model_updates_v2 is append-only",
+    ),
+}
+
+
+def _install_artifact_update_guards(connection: sqlite3.Connection) -> None:
+    for name, (table, message) in ARTIFACT_UPDATE_GUARDS.items():
+        connection.execute(
+            f"CREATE TRIGGER {name} BEFORE UPDATE ON {table} "
+            f"BEGIN SELECT RAISE(ABORT, '{message}'); END"
+        )
+
+
+def _drop_artifact_update_guards(connection: sqlite3.Connection) -> None:
+    for name in ARTIFACT_UPDATE_GUARDS:
+        connection.execute(f'DROP TRIGGER "{name}"')
 
 
 def _ridge(seed: str) -> RidgeArtifact:
@@ -96,6 +125,7 @@ def _database_fixture(tmp_path: Path) -> tuple[sqlite3.Connection, Path, Path, d
           artifact_paths_json TEXT,artifact_hash TEXT);
         """
     )
+    _install_artifact_update_guards(connection)
     generation = "generation-active"
     connection.execute(
         "INSERT INTO news_model_generations_v1 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -302,10 +332,28 @@ def test_migration_is_atomic_idempotent_receipted_and_reversible(
     receipt = read_migration_receipt(
         receipt_path, runtime_forward_root=forward_root,
     )
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        connection.execute(
+            "UPDATE model_updates_v2 SET artifact_path='forbidden' "
+            "WHERE model_version='market'"
+        )
+    connection.rollback()
     assert apply_artifact_path_migration(connection, receipt) == "APPLIED"
     assert apply_artifact_path_migration(connection, receipt) == "NO_CHANGE"
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        connection.execute(
+            "UPDATE execution_model_updates_v1 SET artifact_path='forbidden' "
+            "WHERE model_version='legacy-execution'"
+        )
+    connection.rollback()
     assert rollback_artifact_path_migration(connection, receipt) == "ROLLED_BACK"
     assert rollback_artifact_path_migration(connection, receipt) == "NO_CHANGE"
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        connection.execute(
+            "UPDATE execution_model_updates_v2 SET artifact_paths_json='{}' "
+            "WHERE model_version='lot'"
+        )
+    connection.rollback()
     payload = json.loads(receipt_path.read_text(encoding="utf-8"))
     payload["active_generation_id"] = "tampered"
     receipt_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -313,6 +361,41 @@ def test_migration_is_atomic_idempotent_receipted_and_reversible(
         read_migration_receipt(
             receipt_path, runtime_forward_root=forward_root,
         )
+    connection.close()
+
+
+def test_failed_locator_write_restores_append_only_guards_atomically(
+    tmp_path: Path,
+) -> None:
+    connection, database, runtime, _ = _database_fixture(tmp_path)
+    receipt = build_artifact_path_migration_plan(
+        connection, database=database,
+        runtime_forward_root=runtime / ".local" / "forward",
+    )
+    assert {
+        guard["name"] for guard in receipt["append_only_update_guards"]
+    } == set(ARTIFACT_UPDATE_GUARDS)
+    before = connection.execute(
+        "SELECT artifact_path FROM model_updates_v2 WHERE model_version='market'"
+    ).fetchone()[0]
+    connection.execute(
+        "CREATE TRIGGER force_execution_locator_failure "
+        "BEFORE UPDATE ON execution_model_updates_v1 "
+        "BEGIN SELECT RAISE(ABORT, 'forced locator failure'); END"
+    )
+    connection.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced locator failure"):
+        apply_artifact_path_migration(connection, receipt)
+    assert connection.execute(
+        "SELECT artifact_path FROM model_updates_v2 WHERE model_version='market'"
+    ).fetchone()[0] == before
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        connection.execute(
+            "UPDATE model_updates_v2 SET artifact_path='forbidden' "
+            "WHERE model_version='market'"
+        )
+    connection.rollback()
     connection.close()
 
 
@@ -518,6 +601,8 @@ def test_invalid_path_hash_and_generation_fail_before_mutation(
     tmp_path: Path, mutation: str, error: str,
 ) -> None:
     connection, database, runtime, _ = _database_fixture(tmp_path)
+    if mutation != "incomplete":
+        _drop_artifact_update_guards(connection)
     if mutation == "unknown":
         connection.execute(
             "UPDATE model_updates_v2 SET artifact_path=? WHERE model_version='market'",
@@ -541,6 +626,8 @@ def test_invalid_path_hash_and_generation_fail_before_mutation(
         connection.execute(
             "DELETE FROM news_model_generation_members_v1 WHERE model_identity='MARKET_ONLY'"
         )
+    if mutation != "incomplete":
+        _install_artifact_update_guards(connection)
     connection.commit()
     with pytest.raises((RuntimeError, ValueError), match=error):
         build_artifact_path_migration_plan(
