@@ -286,7 +286,10 @@ failure, and a contradiction fails closed.
 - two warmups are excluded;
 - ten observed acceptance samples remain required;
 - two reserve requests are sent once;
-- one deficient family may receive one four-request targeted top-up;
+- after normal provider recovery reaches a stable plateau, one versioned
+  deficit-repair round may freeze and target every deficient family/scenario;
+- the frozen round permits at most four deficient groups and four requests per
+  group, for an absolute maximum of sixteen targeted requests;
 - one headroom-review family may receive one ten-request targeted top-up;
 - all observed valid acceptance events, including reserve and top-up events,
   enter the metrics; no subset may be selected;
@@ -305,11 +308,20 @@ immediate hard failure. Global and family gates still require p95 at most 6 ms,
 p99 at most 8 ms, and maximum below 10 ms. A numeric zero CPU value is valid.
 
 Active provider recovery uses six persisted reads with 5, 10, 20, 30, 45, and
-60 second backoff. If quota remains deficient, only the deficient families may
-use their single top-up, followed by the same bounded read budget. Release
-Control then performs at most four read-only background reconciliations, fifteen
-minutes apart. Budgets and the exact request ledger survive controller or
-watchdog restart. Exhaustion produces stable non-promotable
+60 second backoff. Release Control then performs at most four read-only
+background reconciliations, fifteen minutes apart. If quota remains deficient
+at a three-read stable plateau, an exact live provider preflight must succeed
+before repair. At most three such preflights are permitted, five minutes apart;
+provider outage never triggers targeted requests. The controller persists the
+exact deficient set, prior counts and digest, qualification key, request IDs,
+per-group budget, and total budget before it sends anything. It then sends four
+requests only for each frozen deficient group, accumulates all valid old and new
+events, and performs no second repair round even if delivery omits top-up events.
+The sixteen-request ceiling is derived from the 31-group full CPU manifest: no
+more than four groups (12.9%) and 16 requests (4.3% of the original 372
+acceptance-request universe) may be repaired. A larger deficient set sends
+nothing. Budgets and the exact request ledger survive controller or watchdog
+restart. Exhaustion produces stable non-promotable
 `PROVIDER_EVIDENCE_INSUFFICIENT`, not Candidate failure and not a human approval
 request. Quota satisfaction stops provider queries without waiting for optional
 reserve events.

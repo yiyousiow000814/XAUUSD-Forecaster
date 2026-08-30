@@ -36,6 +36,12 @@ permitted. Ask what the system can prove itself, what the provider guarantees,
 what is only empirical, and what happens when evidence is omitted, delayed,
 duplicated, reordered, or sampled. Do not mistake missing provider evidence for
 product failure or require certainty stronger than the source contract.
+External failures may be correlated across categories that look independent.
+Do not assume only one bucket, family, or request class can be affected unless
+the provider contract guarantees that independence. Bound recovery by total
+work and required confidence. Tolerance applies only to evidence delivery; it
+does not relax thresholds, error limits, required observed quotas, identity, or
+correctness receipts.
 Determine whether accepted evidence can be reused by an exact identity made
 from every behavior-affecting artifact input rather than an unrelated repository
 revision.

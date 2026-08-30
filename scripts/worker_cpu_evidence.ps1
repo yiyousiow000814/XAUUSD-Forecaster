@@ -1,5 +1,6 @@
 $workerCpuPolicyVersion = "worker-cpu-policy-v1"
 $workerCpuQualificationVersion = "worker-cpu-qualification-v1"
+$workerCpuDeficitRepairVersion = "worker-cpu-deficit-repair-v1"
 $workerCpuEvidenceRoot = Join-Path $runtimeForwardRoot "worker-cpu-evidence"
 
 function Get-WorkerCpuEvidencePolicy {
@@ -18,6 +19,18 @@ function Get-WorkerCpuEvidencePolicy {
         pass_p99_ms = 8
         hard_max_ms = 10
         omission_max_ms = 8
+    }
+}
+
+function Get-WorkerCpuDeficitRepairPolicy {
+    [pscustomobject][ordered]@{
+        version = $workerCpuDeficitRepairVersion
+        required_plateau_reads = 3
+        maximum_provider_preflight_reads = 3
+        provider_preflight_interval_seconds = 300
+        maximum_family_count = 4
+        requests_per_family = 4
+        maximum_total_request_count = 16
     }
 }
 
@@ -161,9 +174,8 @@ function New-WorkerDirectedCorrectnessPlan {
     return $plan
 }
 
-function Add-WorkerCpuPlannedRequests {
+function New-WorkerCpuPlannedRequestRecords {
     param(
-        [Parameter(Mandatory = $true)][object]$Plan,
         [Parameter(Mandatory = $true)][object[]]$Groups,
         [ValidateSet("deficit_top_up", "headroom_top_up")]
         [Parameter(Mandatory = $true)][string]$SampleKind,
@@ -186,6 +198,19 @@ function Add-WorkerCpuPlannedRequests {
             }
         }
     }
+    return @($newRequests)
+}
+
+function Add-WorkerCpuPlannedRequests {
+    param(
+        [Parameter(Mandatory = $true)][object]$Plan,
+        [Parameter(Mandatory = $true)][object[]]$Groups,
+        [ValidateSet("deficit_top_up", "headroom_top_up")]
+        [Parameter(Mandatory = $true)][string]$SampleKind,
+        [Parameter(Mandatory = $true)][int]$CountPerGroup
+    )
+    $newRequests = @(New-WorkerCpuPlannedRequestRecords -Groups $Groups `
+        -SampleKind $SampleKind -CountPerGroup $CountPerGroup)
     $Plan.requests = @($Plan.requests) + @($newRequests)
     $Plan.request_universe_digest = Get-WorkerCpuCanonicalDigest -Value @($Plan.requests)
     $path = Join-Path (Get-WorkerCpuRunRoot -ValidationRun ([string]$Plan.validation_run)) "plan.json"
@@ -198,6 +223,211 @@ function Add-WorkerCpuPlannedRequests {
             request_universe_digest = $Plan.request_universe_digest
         })
     return @($newRequests)
+}
+
+function Read-WorkerCpuDeficitRepairPlan {
+    param([Parameter(Mandatory = $true)][string]$ValidationRun)
+    $path = Join-Path (Get-WorkerCpuRunRoot -ValidationRun $ValidationRun) "deficit-repair-plan.json"
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    $plan = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-ReleaseControlJson
+    if (-not $plan.payload -or -not $plan.plan_digest -or
+        [string]$plan.payload.schema_version -ne $workerCpuDeficitRepairVersion -or
+        [string]$plan.payload.validation_run -ne $ValidationRun -or
+        [string]$plan.plan_digest -ne (Get-WorkerCpuCanonicalDigest -Value $plan.payload)) {
+        throw "WORKER_CPU_DEFICIT_REPAIR_PLAN_INVALID"
+    }
+    return $plan
+}
+
+function Get-WorkerCpuProviderPlateauState {
+    param(
+        [Parameter(Mandatory = $true)][string]$ValidationRun,
+        [Parameter(Mandatory = $true)][string]$CurrentDigest
+    )
+    $policy = Get-WorkerCpuDeficitRepairPolicy
+    $path = Join-Path (Get-WorkerCpuRunRoot -ValidationRun $ValidationRun) "directed-ledger.jsonl"
+    if (-not (Test-Path -LiteralPath $path)) {
+        return [pscustomobject]@{ stable=$false; matching_reads=0; digest=$CurrentDigest }
+    }
+    $reads = @(Get-Content -LiteralPath $path -Encoding UTF8 | ForEach-Object {
+        if (-not $_) { return }
+        $entry = $_ | ConvertFrom-ReleaseControlJson
+        if ([string]$entry.event -eq "PROVIDER_EVIDENCE_UNIONED" -and
+            [int]$entry.detail.background_reads -gt 0) { $entry.detail }
+    })
+    $explicitReads = @($reads | Where-Object {
+        $null -ne $_.provider_read_succeeded
+    })
+    if ($explicitReads.Count -gt 0) {
+        $reads = @($explicitReads | Where-Object {
+            [bool]$_.provider_read_succeeded
+        })
+    }
+    $matching = 0
+    for ($index = $reads.Count - 1; $index -ge 0; $index--) {
+        if ([string]$reads[$index].digest -ne $CurrentDigest) { break }
+        $matching++
+    }
+    return [pscustomobject]@{
+        stable = [bool]($matching -ge [int]$policy.required_plateau_reads)
+        matching_reads = $matching
+        digest = $CurrentDigest
+    }
+}
+
+function Get-WorkerCpuDeficitRepairEligibility {
+    param(
+        [Parameter(Mandatory = $true)][object]$Plan,
+        [Parameter(Mandatory = $true)][object]$ProviderEvidence,
+        [Parameter(Mandatory = $true)][object]$Decision,
+        [Parameter(Mandatory = $true)][object[]]$DirectResponses,
+        [Parameter(Mandatory = $true)][string]$CandidateWorkerVersion,
+        [Parameter(Mandatory = $true)][string]$QualificationKey,
+        [Parameter(Mandatory = $true)][bool]$ProviderAvailable,
+        [Parameter(Mandatory = $true)][bool]$PlateauStable
+    )
+    $cpuPolicy = Get-WorkerCpuEvidencePolicy
+    $repairPolicy = Get-WorkerCpuDeficitRepairPolicy
+    $groups = @($Decision.deficient_groups)
+    $totalRequests = $groups.Count * [int]$repairPolicy.requests_per_family
+    $existing = Read-WorkerCpuDeficitRepairPlan -ValidationRun ([string]$Plan.validation_run)
+    $reason = if ($existing -or [int]$ProviderEvidence.recovery.deficit_top_ups -gt 0) {
+        "DEFICIT_REPAIR_ALREADY_CONSUMED"
+    } elseif ([string]$Plan.candidate_worker_version -ne $CandidateWorkerVersion -or
+        [string]$Plan.qualification_key -ne $QualificationKey -or
+        [string]$Plan.policy_version -ne [string]$cpuPolicy.version) {
+        "DEFICIT_REPAIR_IDENTITY_MISMATCH"
+    } elseif (@($DirectResponses).Count -ne @($Plan.requests).Count -or
+        @($DirectResponses | Where-Object { -not $_.passed }).Count -gt 0) {
+        "DEFICIT_REPAIR_DIRECT_LEDGER_INCOMPLETE"
+    } elseif ([string]$Decision.state -ne "PROVIDER_EVIDENCE_INSUFFICIENT" -or
+        [string]$Decision.reason -ne "OBSERVED_FAMILY_QUOTA_DEFICIT" -or $groups.Count -eq 0) {
+        "DEFICIT_REPAIR_NOT_REQUIRED"
+    } elseif ([int]$ProviderEvidence.recovery.background_reads -lt
+        [int]$cpuPolicy.maximum_background_reads) {
+        "DEFICIT_REPAIR_PROVIDER_RECOVERY_NOT_EXHAUSTED"
+    } elseif (-not $PlateauStable) {
+        "DEFICIT_REPAIR_PROVIDER_PLATEAU_UNPROVEN"
+    } elseif (-not $ProviderAvailable) {
+        "DEFICIT_REPAIR_PROVIDER_UNAVAILABLE"
+    } elseif ($groups.Count -gt [int]$repairPolicy.maximum_family_count -or
+        $totalRequests -gt [int]$repairPolicy.maximum_total_request_count) {
+        "DEFICIT_REPAIR_GLOBAL_BUDGET_EXCEEDED"
+    } else { "ELIGIBLE" }
+    return [pscustomobject]@{
+        eligible = [bool]($reason -eq "ELIGIBLE")
+        reason = $reason
+        deficient_groups = $groups
+        family_count = $groups.Count
+        total_request_count = $totalRequests
+    }
+}
+
+function New-WorkerCpuDeficitRepairPlan {
+    param(
+        [Parameter(Mandatory = $true)][object]$RequestPlan,
+        [Parameter(Mandatory = $true)][object[]]$DeficientGroups,
+        [Parameter(Mandatory = $true)][string]$CandidateWorkerVersion,
+        [Parameter(Mandatory = $true)][string]$QualificationKey,
+        [Parameter(Mandatory = $true)][string]$PriorProviderDigest,
+        [Parameter(Mandatory = $true)][int]$PriorObservedTotal
+    )
+    $validationRun = [string]$RequestPlan.validation_run
+    $existing = Read-WorkerCpuDeficitRepairPlan -ValidationRun $validationRun
+    if ($existing) {
+        if ([string]$existing.payload.candidate_worker_version -ne $CandidateWorkerVersion -or
+            [string]$existing.payload.qualification_key -ne $QualificationKey) {
+            throw "WORKER_CPU_DEFICIT_REPAIR_PLAN_IDENTITY_MISMATCH"
+        }
+        return $existing
+    }
+    $policy = Get-WorkerCpuDeficitRepairPolicy
+    $groups = @($DeficientGroups | Sort-Object family, scenario)
+    $total = $groups.Count * [int]$policy.requests_per_family
+    if ($groups.Count -eq 0 -or $groups.Count -gt [int]$policy.maximum_family_count -or
+        $total -gt [int]$policy.maximum_total_request_count) {
+        throw "WORKER_CPU_DEFICIT_REPAIR_GLOBAL_BUDGET_EXCEEDED"
+    }
+    $requests = @(New-WorkerCpuPlannedRequestRecords -Groups $groups `
+        -SampleKind "deficit_top_up" -CountPerGroup ([int]$policy.requests_per_family))
+    $payload = [pscustomobject][ordered]@{
+        schema_version = [string]$policy.version
+        validation_run = $validationRun
+        candidate_worker_version = $CandidateWorkerVersion
+        qualification_key = $QualificationKey
+        prior_provider_digest = $PriorProviderDigest
+        prior_observed_total = $PriorObservedTotal
+        deficient_families = @($groups | ForEach-Object {
+            [pscustomobject][ordered]@{
+                family=[string]$_.family; scenario=[string]$_.scenario
+                observed=[int]$_.observed; required=[int]$_.required; missing=[int]$_.missing
+            }
+        })
+        per_family_request_budget = [int]$policy.requests_per_family
+        maximum_family_count = [int]$policy.maximum_family_count
+        maximum_total_request_count = [int]$policy.maximum_total_request_count
+        total_request_count = $requests.Count
+        requests = $requests
+        frozen_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+    $plan = [pscustomobject][ordered]@{
+        payload = $payload
+        plan_digest = Get-WorkerCpuCanonicalDigest -Value $payload
+    }
+    $path = Join-Path (Get-WorkerCpuRunRoot -ValidationRun $validationRun) "deficit-repair-plan.json"
+    Write-WorkerCpuAtomicJson -Path $path -Value $plan
+    Add-WorkerCpuLedgerEvent -ValidationRun $validationRun -Event "DEFICIT_REPAIR_PLAN_FROZEN" `
+        -Detail ([pscustomobject]@{
+            plan_digest=$plan.plan_digest; family_count=$groups.Count
+            total_request_count=$requests.Count
+            request_ids=@($requests | ForEach-Object { [string]$_.request_id })
+        })
+    return $plan
+}
+
+function Apply-WorkerCpuDeficitRepairPlan {
+    param(
+        [Parameter(Mandatory = $true)][object]$RequestPlan,
+        [Parameter(Mandatory = $true)][object]$RepairPlan
+    )
+    $payload = $RepairPlan.payload
+    if ([string]$RequestPlan.validation_run -ne [string]$payload.validation_run -or
+        [string]$RequestPlan.candidate_worker_version -ne [string]$payload.candidate_worker_version -or
+        [string]$RequestPlan.qualification_key -ne [string]$payload.qualification_key) {
+        throw "WORKER_CPU_DEFICIT_REPAIR_PLAN_IDENTITY_MISMATCH"
+    }
+    $existingById = @{}
+    foreach ($request in @($RequestPlan.requests)) {
+        $existingById[[string]$request.request_id] = Get-WorkerCpuCanonicalDigest -Value $request
+    }
+    $added = @()
+    foreach ($request in @($payload.requests)) {
+        $id = [string]$request.request_id
+        $digest = Get-WorkerCpuCanonicalDigest -Value $request
+        if ($existingById.ContainsKey($id)) {
+            if ([string]$existingById[$id] -ne $digest) {
+                throw "WORKER_CPU_DEFICIT_REPAIR_REQUEST_CONFLICT"
+            }
+            continue
+        }
+        $RequestPlan.requests = @($RequestPlan.requests) + @($request)
+        $existingById[$id] = $digest
+        $added += $request
+    }
+    $RequestPlan | Add-Member -NotePropertyName deficit_repair_plan_digest `
+        -NotePropertyValue ([string]$RepairPlan.plan_digest) -Force
+    $RequestPlan.request_universe_digest = Get-WorkerCpuCanonicalDigest -Value @($RequestPlan.requests)
+    Write-WorkerCpuAtomicJson -Path (Join-Path (Get-WorkerCpuRunRoot `
+        -ValidationRun ([string]$RequestPlan.validation_run)) "plan.json") -Value $RequestPlan
+    if ($added.Count -gt 0) {
+        Add-WorkerCpuLedgerEvent -ValidationRun ([string]$RequestPlan.validation_run) `
+            -Event "DEFICIT_REPAIR_PLAN_APPLIED" -Detail ([pscustomobject]@{
+                plan_digest=[string]$RepairPlan.plan_digest
+                request_universe_digest=[string]$RequestPlan.request_universe_digest
+                request_ids=@($added | ForEach-Object { [string]$_.request_id })
+            })
+    }
+    return @($payload.requests)
 }
 
 function Add-WorkerCpuDirectResponse {
@@ -405,7 +635,8 @@ function Write-WorkerCpuProviderEvidence {
     param(
         [Parameter(Mandatory = $true)][string]$ValidationRun,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Records,
-        [Parameter(Mandatory = $true)][object]$RecoveryState
+        [Parameter(Mandatory = $true)][object]$RecoveryState,
+        [AllowNull()][object]$ProviderReadSucceeded = $null
     )
     $root = Get-WorkerCpuRunRoot -ValidationRun $ValidationRun
     $payload = [pscustomobject][ordered]@{
@@ -422,6 +653,8 @@ function Write-WorkerCpuProviderEvidence {
         digest = $payload.observed_universe_digest
         active_reads = [int]$RecoveryState.active_reads
         background_reads = [int]$RecoveryState.background_reads
+        deficit_repair_preflight_reads = [int]$RecoveryState.deficit_repair_preflight_reads
+        provider_read_succeeded = $ProviderReadSucceeded
     })
     return $payload
 }

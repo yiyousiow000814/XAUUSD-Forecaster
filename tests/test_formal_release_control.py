@@ -64,6 +64,34 @@ def test_required_models_do_not_reintroduce_the_monolithic_cartesian_product() -
     assert "evidence" not in core and "topUps" not in core
 
 
+def test_cpu_formal_shard_models_one_globally_bounded_multi_family_repair() -> None:
+    cpu = (FORMAL / "CpuEvidence.tla").read_text(encoding="utf-8")
+    safety = (FORMAL / "CpuEvidenceSafety.cfg").read_text(encoding="utf-8")
+    liveness = (FORMAL / "CpuEvidenceLiveness.cfg").read_text(encoding="utf-8")
+    for contract in (
+        "MaxRepairFamilies == 4",
+        "RequestsPerFamily == 4",
+        "MaxRepairRequests == 16",
+        "repairSet' = Families \\ evidence",
+        "acceptedBeforeRepair' = evidence",
+        "DeficitRepairRequestBudgetIsBounded",
+        "DeficitRepairSetIsFrozen",
+        "QualifiedFamiliesAreNeverReplayed",
+        "DeficitRepairCannotFabricateEvidence",
+        "NoSecondDeficitRepairRound",
+    ):
+        assert contract in cpu
+    for prop in (
+        "DeficitRepairRequestBudgetIsBounded",
+        "DeficitRepairSetIsFrozen",
+        "QualifiedFamiliesAreNeverReplayed",
+        "DeficitRepairCannotFabricateEvidence",
+        "NoSecondDeficitRepairRound",
+    ):
+        assert prop in safety
+        assert prop in liveness
+
+
 def test_formal_workflow_is_parallel_bounded_and_cancels_stale_heads() -> None:
     workflow = (ROOT / ".github" / "workflows" / "formal-verification.yml").read_text(encoding="utf-8")
     timeouts = [int(value) for value in re.findall(r"timeout-minutes:\s*(\d+)", workflow)]

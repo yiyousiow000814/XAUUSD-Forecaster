@@ -105,6 +105,13 @@ hard failure, or pretend omitted evidence exists. Accepted external evidence is
 accumulated monotonically; later partial, reordered, or duplicated queries do
 not erase it, while conflicting identity or values fail closed.
 
+External failures may be correlated across categories that appear independent.
+Do not assume only one bucket, family, or request class can be affected unless
+the provider contract guarantees that independence. Bound recovery by total
+work and required confidence. Delivery tolerance never applies to CPU or other
+acceptance limits, error limits, required observed quotas, Candidate identity,
+or correctness receipts.
+
 Retry only the deficient stage or family, preserve independent accepted stages,
 and persist budgets across restart. Reuse evidence only when a versioned key
 contains every input capable of changing the measured behavior; unrelated Git
