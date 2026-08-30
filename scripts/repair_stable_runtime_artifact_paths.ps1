@@ -158,7 +158,7 @@ try {
     Start-ForecasterService -Service $api -SkipExistingCheck
     $apiStarted = $true
     $apiOwner = Wait-StableServiceState -Service $api `
-        -ExpectedState "RUNNING"
+        -ExpectedState "API OK"
     $health = Invoke-WebRequest -UseBasicParsing `
         -Uri "http://127.0.0.1:8765/api/health" -TimeoutSec 10
     if ($health.StatusCode -ne 200) { throw "ARTIFACT_REPAIR_API_UNHEALTHY" }
