@@ -3629,6 +3629,14 @@ function Resume-CandidateWorkerPlatformEvidence {
                 if (-not $receipt.passed) { throw "CANDIDATE_PLATFORM_RESUME_DIRECT_FAILURE" }
             }
             $to = [DateTimeOffset]::UtcNow
+            $storedEvidence.recovery.active_reads = 0
+            $storedEvidence.recovery.background_reads = 0
+            $storedEvidence.recovery | Add-Member -NotePropertyName last_read_at `
+                -NotePropertyValue ([DateTimeOffset]::UtcNow.ToString("o")) -Force
+            $null = Write-WorkerCpuProviderEvidence `
+                -ValidationRun ([string]$Validation.validation_run) `
+                -Records @($storedEvidence.records) `
+                -RecoveryState $storedEvidence.recovery
         } finally { Remove-CandidateValidationFixtureWorkspace -Workspace $workspace }
         $receipts = @(Get-WorkerCpuDirectResponseReceipts -ValidationRun ([string]$Validation.validation_run))
     }

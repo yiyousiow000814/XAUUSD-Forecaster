@@ -1017,12 +1017,14 @@ def test_platform_resume_continues_existing_repair_after_audited_read_reconcilia
         "$result=Resume-CandidateWorkerPlatformEvidence -Candidate $candidate -Validation $validation;"
         "$receipts=@(Get-WorkerCpuDirectResponseReceipts $run);$events=@(Get-Content "
         "(Join-Path (Get-WorkerCpuRunRoot $run) 'directed-ledger.jsonl')|ForEach-Object{$_|ConvertFrom-Json});"
+        "$resumedEvidence=Read-WorkerCpuRunArtifact $run 'provider-evidence.json';"
         "Write-Output \"$script:sent,$($receipts.Count),$(@($receipts|Where-Object{!$_.passed}).Count),"
         "$(@($events|Where-Object{$_.event -eq 'DIRECT_RESPONSE_IDENTITY_RECONCILED'}).Count),"
-        "$(@((Read-WorkerCpuRunArtifact $run 'plan.json').requests).Count)\"",
+        "$(@((Read-WorkerCpuRunArtifact $run 'plan.json').requests).Count),"
+        "$($resumedEvidence.recovery.active_reads),$($resumedEvidence.recovery.background_reads)\"",
     )
 
-    assert result == "7,10,0,1,10"
+    assert result == "7,10,0,1,10,0,0"
 
 
 def test_deterministic_observability_contract_failure_is_terminal(tmp_path) -> None:
