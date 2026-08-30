@@ -122,6 +122,11 @@ and every consumer assumption to a matching integration invariant.
 | `DeficitRepairCannotFabricateEvidence` | cpu-evidence-safety and cpu-evidence-liveness |
 | `NoSecondDeficitRepairRound` | cpu-evidence-safety and cpu-evidence-liveness |
 | `CpuHardFailureCannotQualify` | cpu-evidence-safety |
+| `OutlierRequiresBoundedConfirmation` | cpu-evidence-safety and cpu-evidence-liveness |
+| `NoSecondOutlierConfirmation` | cpu-evidence-safety and cpu-evidence-liveness |
+| `OutlierConfirmationMatchesRequestShape` | cpu-evidence-safety and cpu-evidence-liveness |
+| `RepeatedCpuPressureCannotQualify` | cpu-evidence-safety and cpu-evidence-liveness |
+| `OriginalOutlierCannotBeErased` | cpu-evidence-safety and cpu-evidence-liveness |
 | `ReusedCpuEvidenceMatchesArtifact` | cpu-evidence-safety |
 | `CpuRecoveryPreservesIndependentStages` | cpu-evidence-safety and release-integration-safety |
 | `StableChangesOnlyAfterObservation` | core-release-safety |

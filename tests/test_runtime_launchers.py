@@ -243,10 +243,11 @@ def test_cpu_recovery_policy_is_bounded_and_never_requests_user_approval(tmp_pat
         'Write-Output "$($p.active_read_backoff_seconds.Count),'
         '$([int](($p.active_read_backoff_seconds|Measure-Object -Sum).Sum)),'
         '$($p.maximum_deficit_top_ups),$($p.maximum_headroom_top_ups),'
+        '$($p.outlier_confirmation_acceptance),$($p.maximum_outlier_confirmations),'
         '$($p.maximum_background_reads),$($source -match \'Read-Host|PromptForChoice\')"',
     )
 
-    assert result == "6,170,1,1,4,False"
+    assert result == "6,170,1,1,10,1,4,False"
 
 
 def test_cpu_deficit_repair_policy_has_manifest_derived_global_bound(tmp_path) -> None:
@@ -517,7 +518,7 @@ def test_multi_family_deficit_repair_eligibility_is_globally_bounded(
         "$request=[pscustomobject]@{request_id='original';family='qualified';"
         "scenario='default';method='GET';path='/';phase='acceptance'};"
         "$plan=[pscustomobject]@{validation_run=$run;candidate_worker_version='worker';"
-        "qualification_key=$key;policy_version='worker-cpu-policy-v1';requests=@($request)};"
+        "qualification_key=$key;policy_version='worker-cpu-policy-v2';requests=@($request)};"
         "$provider=[pscustomobject]@{records=@();recovery=[pscustomobject]@{"
         "background_reads=4;deficit_top_ups=0}};"
         "$groups=@(1..$count|ForEach-Object{[pscustomobject]@{family=('f-'+$_);"
@@ -544,7 +545,7 @@ def test_deficit_repair_plan_is_frozen_before_send_and_idempotent_across_restart
         "$request=[pscustomobject]@{request_id='original';family='qualified';"
         "scenario='default';method='GET';path='/';phase='acceptance'};"
         "$plan=[pscustomobject]@{validation_run=$run;candidate_worker_version='worker';"
-        "qualification_key=$key;policy_version='worker-cpu-policy-v1';requests=@($request);"
+        "qualification_key=$key;policy_version='worker-cpu-policy-v2';requests=@($request);"
         "request_universe_digest='old'};"
         "$groups=@([pscustomobject]@{family='a';scenario='one';method='GET';path='/a';"
         "request_query='';fixture='';observed=9;required=10;missing=3},"
@@ -574,7 +575,7 @@ def test_consumed_deficit_repair_cannot_start_a_second_round(tmp_path) -> None:
         "$request=[pscustomobject]@{request_id='original';family='a';scenario='one';"
         "method='GET';path='/';phase='acceptance'};"
         "$plan=[pscustomobject]@{validation_run=$run;candidate_worker_version='worker';"
-        "qualification_key=$key;policy_version='worker-cpu-policy-v1';requests=@($request)};"
+        "qualification_key=$key;policy_version='worker-cpu-policy-v2';requests=@($request)};"
         "$provider=[pscustomobject]@{records=@();recovery=[pscustomobject]@{"
         "background_reads=4;deficit_top_ups=1}};"
         "$group=[pscustomobject]@{family='a';scenario='one';method='GET';path='/';"
@@ -601,7 +602,8 @@ def test_top_up_omission_remains_insufficient_and_observed_hard_failure_is_termi
         "{'required'}else{'deficit_top_up'}};if(($family -eq 'a' -and $_ -le 9) -or "
         "($family -eq 'b' -and $_ -le 10)){$records += [pscustomobject]@{request_id=$id;"
         "event_id=('e-'+$id);cpu_ms=if($family -eq 'b' -and $_ -eq 10){10}else{4};"
-        "wall_ms=5;status=200;outcome='ok'}}}};"
+        "wall_ms=5;status=if($family -eq 'b' -and $_ -eq 10){500}else{200};"
+        "outcome=if($family -eq 'b' -and $_ -eq 10){'exceededCpu'}else{'ok'}}}}};"
         "$hard=Get-WorkerCpuQualificationDecision -ExpectedRequests $expected "
         "-ProviderRecords $records -RecoveryBudgetExhausted $true;"
         "$records=@($records|Where-Object{$_.request_id -notlike 'b-*'});"
@@ -634,7 +636,6 @@ def test_cpu_decision_never_cherry_picks_reserve_or_top_up_samples(tmp_path) -> 
 @pytest.mark.parametrize(
     ("cpu", "status", "outcome", "expected"),
     [
-        (10, 200, "ok", "WORKER_CPU_OR_PLATFORM_HARD_FAILURE"),
         (4, 500, "ok", "WORKER_CPU_OR_PLATFORM_HARD_FAILURE"),
         (4, 200, "exceededCpu", "WORKER_CPU_OR_PLATFORM_HARD_FAILURE"),
         (4, 200, "exceededMemory", "WORKER_CPU_OR_PLATFORM_HARD_FAILURE"),
@@ -655,6 +656,196 @@ def test_cpu_tolerance_cannot_hide_observed_hard_failure(
     )
 
     assert result == expected
+
+
+def test_successful_cpu_outlier_requires_one_same_shape_confirmation(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$expected=@(1..12|%{[pscustomobject]@{request_id=('r-'+$_);family='market-history-read';"
+        "scenario='24h-30m';method='GET';path='/api/market-history';request_query='limit=500';"
+        "phase='acceptance';sample_kind='required'}});"
+        "$records=@(1..12|%{[pscustomobject]@{request_id=('r-'+$_);event_id=('e-'+$_);"
+        "cpu_ms=if($_ -eq 1){15}else{4};wall_ms=5;status=200;outcome='ok'}});"
+        "$d=Get-WorkerCpuQualificationDecision -ExpectedRequests $expected -ProviderRecords $records;"
+        'Write-Output "$($d.state),$($d.outlier_groups.Count),'
+        '$($d.cpu_outliers[0].request_id),$($d.global.max_cpu_ms)"',
+    )
+
+    assert result == "CPU_OUTLIER_REVIEW_REQUIRED,1,r-1,15"
+
+
+def test_clean_single_use_confirmation_qualifies_without_erasing_original_outlier(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$expected=@();$records=@();1..22|%{$id=('r-'+$_);$kind=if($_ -le 12)"
+        "{'required'}else{'outlier_confirmation'};$expected += [pscustomobject]@{"
+        "request_id=$id;family='market-history-read';scenario='24h-30m';method='GET';"
+        "path='/api/market-history';request_query='limit=500';phase='acceptance';"
+        "sample_kind=$kind};$records += [pscustomobject]@{request_id=$id;event_id=('e-'+$_);"
+        "cpu_ms=if($_ -eq 1){15}else{4};wall_ms=5;status=200;outcome='ok'}};"
+        "$d=Get-WorkerCpuQualificationDecision -ExpectedRequests $expected -ProviderRecords $records;"
+        'Write-Output "$($d.state),$($d.global.invocations),$($d.global.max_cpu_ms),'
+        '$($d.qualification_global.invocations),$($d.qualification_global.max_cpu_ms),'
+        '$($d.isolated_cpu_outlier.request_id),$($d.outlier_confirmation.observed),'
+        '$($d.outlier_confirmation.metrics.max_cpu_ms)"',
+    )
+
+    assert result == (
+        "QUALIFIED_WITH_ISOLATED_CPU_OUTLIER,22,15,21,4,r-1,10,4"
+    )
+
+
+@pytest.mark.parametrize(
+    ("second_cpu", "expected_reason"),
+    [
+        (10, "REPRODUCIBLE_WORKER_CPU_PRESSURE"),
+        (15, "REPRODUCIBLE_WORKER_CPU_PRESSURE"),
+    ],
+)
+def test_reproduced_cpu_pressure_during_confirmation_is_terminal(
+    tmp_path, second_cpu: int, expected_reason: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$expected=@();$records=@();1..22|%{$id=('r-'+$_);$kind=if($_ -le 12)"
+        "{'required'}else{'outlier_confirmation'};$expected += [pscustomobject]@{"
+        "request_id=$id;family='market-history-read';scenario='24h-30m';method='GET';"
+        "path='/api/market-history';request_query='limit=500';phase='acceptance';"
+        "sample_kind=$kind};$records += [pscustomobject]@{request_id=$id;event_id=('e-'+$_);"
+        f"cpu_ms=if($_ -eq 1){{15}}elseif($_ -eq 13){{{second_cpu}}}else{{4}};"
+        "wall_ms=5;status=200;outcome='ok'}};"
+        "$d=Get-WorkerCpuQualificationDecision -ExpectedRequests $expected -ProviderRecords $records;"
+        'Write-Output "$($d.state),$($d.reason),$($d.cpu_outliers.Count)"',
+    )
+
+    assert result == f"HARD_FAILURE,{expected_reason},2"
+
+
+def test_outlier_confirmation_plan_is_frozen_idempotent_and_exact_key_bound(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$run='11111111-1111-1111-1111-111111111111';$key='a'*64;"
+        "$request=[pscustomobject]@{request_id='r-1';family='market-history-read';"
+        "scenario='24h-30m';method='GET';path='/api/market-history';request_query='limit=500';"
+        "fixture='';phase='acceptance';sample_kind='required'};"
+        "$plan=[pscustomobject]@{validation_run=$run;candidate_worker_version='worker';"
+        "qualification_key=$key;policy_version='worker-cpu-policy-v2';requests=@($request);"
+        "request_universe_digest='old'};$group=[pscustomobject]@{family='market-history-read';"
+        "scenario='24h-30m';method='GET';path='/api/market-history';request_query='limit=500';"
+        "fixture='';outliers=@([pscustomobject]@{request_id='r-1';event_id='e-1';cpu_ms=15;"
+        "wall_ms=102;status=200;outcome='ok'})};"
+        "$frozen=New-WorkerCpuOutlierConfirmationPlan -RequestPlan $plan -OutlierGroup $group "
+        "-CandidateWorkerVersion worker -QualificationKey $key -PriorProviderDigest ('b'*64);"
+        "$before=Test-Path (Join-Path (Get-WorkerCpuRunRoot $run) 'outlier-confirmation-plan.json');"
+        "$first=@(Apply-WorkerCpuOutlierConfirmationPlan -RequestPlan $plan "
+        "-ConfirmationPlan $frozen);$second=@(Apply-WorkerCpuOutlierConfirmationPlan "
+        "-RequestPlan $plan -ConfirmationPlan $frozen);$mismatch='NO_ERROR';try{$null="
+        "New-WorkerCpuOutlierConfirmationPlan -RequestPlan $plan -OutlierGroup $group "
+        "-CandidateWorkerVersion worker -QualificationKey ('c'*64) "
+        "-PriorProviderDigest ('b'*64)}catch{$mismatch=$_.Exception.Message};"
+        '$sameShape=@($frozen.payload.requests|Where-Object{'
+        '$_.path -eq "/api/market-history" -and $_.request_query -eq "limit=500"}).Count;'
+        'Write-Output "$before,$($first.Count),$($second.Count),$($plan.requests.Count),'
+        '$(@($frozen.payload.requests.request_id|Sort-Object -Unique).Count),$sameShape,$mismatch"',
+    )
+
+    assert result == (
+        "True,10,10,11,10,10,WORKER_CPU_OUTLIER_CONFIRMATION_PLAN_IDENTITY_MISMATCH"
+    )
+
+
+def test_controller_sends_only_the_bounded_outlier_confirmation_requests(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$run='11111111-1111-1111-1111-111111111111';$key='a'*64;"
+        "$request=[pscustomobject]@{request_id='r-1';family='market-history-read';"
+        "scenario='24h-30m';method='GET';path='/api/market-history';request_query='limit=500';"
+        "fixture='';phase='acceptance';sample_kind='required'};"
+        "$plan=[pscustomobject]@{validation_run=$run;candidate_worker_version='worker';"
+        "qualification_key=$key;policy_version='worker-cpu-policy-v2';requests=@($request);"
+        "request_universe_digest='old'};$group=[pscustomobject]@{family='market-history-read';"
+        "scenario='24h-30m';method='GET';path='/api/market-history';request_query='limit=500';"
+        "fixture='';outliers=@([pscustomobject]@{request_id='r-1';event_id='e-1';cpu_ms=15;"
+        "wall_ms=102;status=200;outcome='ok'})};$decision=[pscustomobject]@{"
+        "state='CPU_OUTLIER_REVIEW_REQUIRED';outlier_groups=@($group)};"
+        "$provider=[pscustomobject]@{records=@();observed_universe_digest=('b'*64);"
+        "recovery=[pscustomobject]@{active_reads=4;background_reads=4;deficit_top_ups=0;"
+        "headroom_top_ups=0;outlier_confirmations=0}};$candidate=[pscustomobject]@{"
+        "worker_version_id='worker';git_sha=('c'*40)};$route=[pscustomobject]@{"
+        "family='market-history-read';scenario='24h-30m';method='GET';"
+        "path='/api/market-history';request_query='limit=500';fixture=''};"
+        "$routePlan=[pscustomobject]@{worker_reads=@($route);worker_writes=@()};"
+        "$script:sent=0;function Invoke-CandidateRouteSample{param($Route,$RequestId);"
+        "$script:sent++;[pscustomobject]@{request_id=$RequestId;requested_worker_version='worker';"
+        "observed_worker_version='worker';observed_git_sha=('c'*40);status=200;passed=$true;"
+        "reason='';route=$Route.path;resource=$Route.family;d1_operations='1';"
+        "request_bytes='0';response_bytes='10';response_content_digest=('d'*64)}};"
+        "$out=Invoke-CandidateCpuOutlierConfirmation -Candidate $candidate -RoutePlan $routePlan "
+        "-RequestPlan $plan -Decision $decision -ProviderEvidence $provider "
+        "-QualificationKey $key -FixtureRoot '';"
+        "$second='NO_ERROR';try{$null=Invoke-CandidateCpuOutlierConfirmation "
+        "-Candidate $candidate -RoutePlan $routePlan -RequestPlan $plan -Decision $decision "
+        "-ProviderEvidence $provider -QualificationKey $key -FixtureRoot ''}"
+        "catch{$second=$_.Exception.Message};"
+        'Write-Output "$script:sent,$($out.requests.Count),$($plan.requests.Count),'
+        '$($provider.recovery.outlier_confirmations),$second"',
+    )
+
+    assert result == "10,10,11,1,WORKER_CPU_OUTLIER_CONFIRMATION_NOT_ELIGIBLE"
+
+
+def test_incomplete_confirmation_is_nonqualifying_and_cannot_start_another_round(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$expected=@();$records=@();1..22|%{$id=('r-'+$_);$kind=if($_ -le 12)"
+        "{'required'}else{'outlier_confirmation'};$expected += [pscustomobject]@{"
+        "request_id=$id;family='market-history-read';scenario='24h-30m';method='GET';"
+        "path='/api/market-history';request_query='limit=500';phase='acceptance';"
+        "sample_kind=$kind};if($_ -ne 22){$records += [pscustomobject]@{request_id=$id;"
+        "event_id=('e-'+$_);cpu_ms=if($_ -eq 1){15}else{4};wall_ms=5;status=200;"
+        "outcome='ok'}}};$d=Get-WorkerCpuQualificationDecision -ExpectedRequests $expected "
+        "-ProviderRecords $records -RecoveryBudgetExhausted $true;"
+        'Write-Output "$($d.state),$($d.reason),$($d.confirmation_missing_request_ids.Count)"',
+    )
+
+    assert result == (
+        "PROVIDER_EVIDENCE_INSUFFICIENT,"
+        "CPU_OUTLIER_CONFIRMATION_EVIDENCE_INCOMPLETE,1"
+    )
+
+
+def test_isolated_outlier_receipt_retains_raw_event_and_exact_candidate_identity(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$key='a'*64;$decision=[pscustomobject]@{state='QUALIFIED_WITH_ISOLATED_CPU_OUTLIER';"
+        "global=[pscustomobject]@{invocations=22;max_cpu_ms=15};"
+        "qualification_global=[pscustomobject]@{invocations=21;max_cpu_ms=4};"
+        "isolated_cpu_outlier=[pscustomobject]@{request_id='r-1';event_id='e-1';cpu_ms=15;"
+        "status=200;outcome='ok'};outlier_confirmation=[pscustomobject]@{planned=10;"
+        "observed=10;request_ids=@(1..10|%{'c-'+$_})}};"
+        "$q=[pscustomobject]@{key=$key;fields=[pscustomobject]@{policy_digest=('b'*64)};"
+        "candidate_worker_version='worker';candidate_git_sha=('c'*40);"
+        "exact_candidate_binding=[pscustomobject]@{executable_bundle_etag=('d'*64)}};"
+        "$written=Write-WorkerCpuQualificationReceipt -Qualification $q "
+        "-ValidationRun '11111111-1111-1111-1111-111111111111' -Decision $decision;"
+        "$read=Get-WorkerCpuQualificationReceipt -QualificationKey $key;"
+        'Write-Output "$($read.outcome),$($read.source_worker_version),'
+        '$($read.source_git_sha),$($read.cpu_evidence.global.max_cpu_ms),'
+        '$($read.cpu_evidence.isolated_cpu_outlier.request_id),'
+        '$($read.cpu_evidence.outlier_confirmation.observed)"',
+    )
+
+    assert result == (
+        "QUALIFIED_WITH_ISOLATED_CPU_OUTLIER,worker," + "c" * 40 + ",15,r-1,10"
+    )
 
 
 def test_aggregate_corroboration_cannot_override_raw_and_contradiction_fails_closed(
@@ -856,7 +1047,7 @@ def test_platform_retry_resumes_exact_telemetry_receipt_without_replaying_routes
         "sample_kind='required';planned_at='2026-08-27T20:00:00Z'};"
         "$plan=[pscustomobject]@{schema_version='worker-directed-ledger-v1';validation_run=$run;"
         "candidate_worker_version=$candidate.worker_version_id;qualification_key=('a'*64);"
-        "policy_version='worker-cpu-policy-v1';validation_plan_digest=('b'*64);"
+        "policy_version='worker-cpu-policy-v2';validation_plan_digest=('b'*64);"
         "fixture_digest_set=@();requests=@($request);request_universe_digest=('c'*64)};"
         "Write-WorkerCpuAtomicJson -Path (Join-Path (Get-WorkerCpuRunRoot $run) 'plan.json') -Value $plan;"
         "$response=[pscustomobject]@{requested_worker_version=$candidate.worker_version_id;"
@@ -926,7 +1117,7 @@ def test_platform_resume_repairs_two_families_without_replaying_complete_validat
         "phase='acceptance';sample_kind='required'};$requests += $request};"
         "$plan=[pscustomobject]@{schema_version='worker-directed-ledger-v1';validation_run=$run;"
         "candidate_worker_version='worker';qualification_key=$key;"
-        "policy_version='worker-cpu-policy-v1';requests=$requests;request_universe_digest='old'};"
+        "policy_version='worker-cpu-policy-v2';requests=$requests;request_universe_digest='old'};"
         "Write-WorkerCpuAtomicJson -Path (Join-Path (Get-WorkerCpuRunRoot $run) 'plan.json') "
         "-Value $plan;foreach($request in $requests){$response=[pscustomobject]@{"
         "requested_worker_version='worker';observed_worker_version='worker';"
@@ -5684,6 +5875,41 @@ def test_explicit_cpu_review_retry_is_exact_audited_and_preserves_prior_gates(
         "True,PLATFORM_PENDING|PROVIDER_EVIDENCE_PENDING,PLATFORM_PENDING,"
         "receipt,True,True,True"
     )
+
+
+def test_cpu_policy_key_movement_forces_fresh_cpu_evidence_and_preserves_migration(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$run='11111111-1111-1111-1111-111111111111';"
+        "$candidate.validation_state='REVIEW_REQUIRED';"
+        "$candidate.validation=[pscustomobject]@{key=$candidate.validation_key;"
+        "repository='PASSED';windows='PASSED';cloudflare='REVIEW_REQUIRED';"
+        "reason='WORKER_CPU_HEADROOM_REVIEW_REQUIRED';tested_at='prior';"
+        "validation_run=$run;expected_requests=@([pscustomobject]@{request_id='request-1'});"
+        "cpu_route_plan=[pscustomobject]@{worker_reads=@();worker_writes=@()};"
+        "worker_qualification=[pscustomobject]@{key=('a'*64)}};"
+        "$candidate|Add-Member -Force migration_acceptance ([pscustomobject]@{"
+        "validation_key=$candidate.validation_key;receipt_digest='receipt'});"
+        "$oldPlan=[pscustomobject]@{validation_run=$run;policy_version='worker-cpu-policy-v1';"
+        "qualification_key=('a'*64);requests=@()};Write-WorkerCpuAtomicJson -Path "
+        "(Join-Path (Get-WorkerCpuRunRoot $run) 'plan.json') -Value $oldPlan;"
+        "Write-ReleaseControlState $state;$script:entry='';"
+        "function Invoke-AutomaticCandidateValidation{param($Candidate)"
+        "$current=Get-ReleaseControlState;$script:entry=($current.candidate.validation_state+'|' +"
+        "$current.candidate.validation.reason);return $true};"
+        "$ok=Retry-CandidateValidation;$final=Get-ReleaseControlState;"
+        "$history=Get-Content -LiteralPath $releaseHistoryPath -Raw;"
+        'Write-Output "$ok,$script:entry,$($final.candidate.migration_acceptance.receipt_digest),'
+        '$($history.Contains(\'CANDIDATE_CPU_POLICY_MOVED\')),'
+        '$($history.Contains(\'"qualification_reused":false\')),'
+        '$($history.Contains(\'"fresh_cpu_matrix_required":true\'))"',
+    )
+
+    assert result == "True,NEW|CPU_QUALIFICATION_POLICY_MOVED,receipt,True,True,True"
 
 
 def test_explicit_review_retry_rejects_non_retryable_reason(tmp_path) -> None:

@@ -117,6 +117,14 @@ work and required confidence. Delivery tolerance never applies to CPU or other
 acceptance limits, error limits, required observed quotas, Candidate identity,
 or correctness receipts.
 
+A noisy externally measured metric must not become a deterministic terminal
+failure from one successful observation when the provider contract distinguishes
+occasional overage from actual resource termination. Preserve the observation
+and use one bounded, same-shape confirmation to distinguish isolated variance
+from reproducible pressure. Confirmation never weakens internally controlled
+exact evidence, required quotas, product thresholds, identity, or actual
+resource-failure handling.
+
 Retry only the deficient stage or family, preserve independent accepted stages,
 and persist budgets across restart. Reuse evidence only when a versioned key
 contains every input capable of changing the measured behavior; unrelated Git
