@@ -2421,6 +2421,34 @@ function Get-ReleaseTelemetryMetrics {
     return $evidence
 }
 
+function Get-WorkersObservabilityEventPageSet {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Filters,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$From,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$To
+    )
+    $events = @()
+    $offset = ""
+    $page = $null
+    for ($pageNumber = 0; $pageNumber -lt 20; $pageNumber++) {
+        $page = Invoke-WorkersObservabilityEventsQuery -Filters $Filters `
+            -From $From -To $To -Offset $offset
+        if ($null -eq $page) { return $null }
+        $events += @($page.records)
+        if ($events.Count -ge [int]$page.total_count) { $offset = ""; break }
+        if (-not $page.next_offset) {
+            $script:lastWorkersObservabilityDiagnostic = "OBSERVABILITY_EVENT_CURSOR_INVALID"
+            return $null
+        }
+        $offset = [string]$page.next_offset
+    }
+    if ($offset) {
+        $script:lastWorkersObservabilityDiagnostic = "OBSERVABILITY_EVENT_PAGE_BOUND_EXCEEDED"
+        return $null
+    }
+    return [pscustomobject]@{ records=@($events); total_count=[int]$page.total_count }
+}
+
 function Get-CandidateFrozenPlatformEvidence {
     param(
         [Parameter(Mandatory = $true)][object]$Candidate,
@@ -2440,7 +2468,10 @@ function Get-CandidateFrozenPlatformEvidence {
     $stored = Read-WorkerCpuRunArtifact -ValidationRun $ValidationRun -Name "provider-evidence.json"
     $records = if ($stored) { @($stored.records) } else { @() }
     $recovery = if ($stored -and $stored.recovery) { $stored.recovery } else {
-        [pscustomobject]@{ active_reads=0; background_reads=0; deficit_top_ups=0; headroom_top_ups=0 }
+        [pscustomobject]@{
+            active_reads=0; background_reads=0; deficit_top_ups=0; headroom_top_ups=0
+            deficit_repair_preflight_reads=0; deficit_repair_preflight_last_at=""
+        }
     }
     $policy = Get-WorkerCpuEvidencePolicy
     $decision = $null
@@ -2461,28 +2492,12 @@ function Get-CandidateFrozenPlatformEvidence {
     }
     foreach ($delay in $delays) {
         if ([int]$delay -gt 0) { Start-Sleep -Seconds ([int]$delay) }
-        $events = @()
-        $offset = ""
-        $page = $null
-        for ($pageNumber = 0; $pageNumber -lt 20; $pageNumber++) {
-            $page = Invoke-WorkersObservabilityEventsQuery -Filters $filters -From $From -To $To -Offset $offset
-            if ($null -eq $page) { break }
-            $events += @($page.records)
-            if ($events.Count -ge [int]$page.total_count) { $offset = ""; break }
-            if (-not $page.next_offset) {
-                $script:lastWorkersObservabilityDiagnostic = "OBSERVABILITY_EVENT_CURSOR_INVALID"
-                return $null
-            }
-            $offset = [string]$page.next_offset
-        }
-        if ($offset) {
-            $script:lastWorkersObservabilityDiagnostic = "OBSERVABILITY_EVENT_PAGE_BOUND_EXCEEDED"
-            return $null
-        }
-        $providerReadSucceeded = $null -ne $page
+        $pageSet = Get-WorkersObservabilityEventPageSet -Filters $filters -From $From -To $To
+        $providerReadSucceeded = $null -ne $pageSet
         if ($providerReadSucceeded) {
             try {
-                $records = @(Merge-WorkerCpuProviderEvidence -AcceptedRecords $records -NewRecords $events `
+                $records = @(Merge-WorkerCpuProviderEvidence -AcceptedRecords $records `
+                    -NewRecords @($pageSet.records) `
                     -ExpectedRequests $ExpectedRequests -CandidateWorkerVersion ([string]$Candidate.worker_version_id) `
                     -ValidationRun $ValidationRun)
             } catch {
@@ -2498,7 +2513,8 @@ function Get-CandidateFrozenPlatformEvidence {
         $recovery | Add-Member -NotePropertyName last_read_at `
             -NotePropertyValue ([DateTimeOffset]::UtcNow.ToString("o")) -Force
         $stored = Write-WorkerCpuProviderEvidence -ValidationRun $ValidationRun `
-            -Records @($records) -RecoveryState $recovery
+            -Records @($records) -RecoveryState $recovery `
+            -ProviderReadSucceeded $providerReadSucceeded
         if ($providerReadSucceeded) {
             $count = Get-CandidateInvocationCount -Candidate $Candidate -From $From -To $To -ValidationRun $ValidationRun
             if ($null -ne $count) {
@@ -2568,6 +2584,88 @@ function Get-CandidateFrozenPlatformEvidence {
         responses_5xx = $global.responses_5xx
         gate_state = $gateState
         passed = [bool]($gateState -eq "PASSED")
+    }
+}
+
+function Get-CandidateDeficitRepairProviderPreflight {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$From,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$To,
+        [Parameter(Mandatory = $true)][object[]]$ExpectedRequests,
+        [Parameter(Mandatory = $true)][string]$ValidationRun
+    )
+    $stored = Read-WorkerCpuRunArtifact -ValidationRun $ValidationRun `
+        -Name "provider-evidence.json"
+    if (-not $stored) { throw "CANDIDATE_DEFICIT_REPAIR_EVIDENCE_UNAVAILABLE" }
+    $repairPolicy = Get-WorkerCpuDeficitRepairPolicy
+    $preflightReads = [int]$stored.recovery.deficit_repair_preflight_reads
+    $lastPreflight = ConvertTo-ReleaseTimestampUtc `
+        -Value ([string]$stored.recovery.deficit_repair_preflight_last_at)
+    $preflightDue = $lastPreflight -eq [DateTimeOffset]::MinValue -or
+        ([DateTimeOffset]::UtcNow - $lastPreflight).TotalSeconds -ge
+            [int]$repairPolicy.provider_preflight_interval_seconds
+    if ($preflightReads -ge [int]$repairPolicy.maximum_provider_preflight_reads -or
+        -not $preflightDue) {
+        $diagnostic = if (-not $preflightDue) {
+            "DEFICIT_REPAIR_PROVIDER_PREFLIGHT_BACKOFF"
+        } else { "DEFICIT_REPAIR_PROVIDER_PREFLIGHT_EXHAUSTED" }
+        $script:lastWorkersObservabilityDiagnostic = $diagnostic
+        return [pscustomobject]@{
+            available=$false; plateau_stable=$false; decision=$null
+            provider_evidence=$stored; digest_changed=$false; diagnostic=$diagnostic
+        }
+    }
+    $stored.recovery | Add-Member -NotePropertyName deficit_repair_preflight_reads `
+        -NotePropertyValue ($preflightReads + 1) -Force
+    $stored.recovery | Add-Member -NotePropertyName deficit_repair_preflight_last_at `
+        -NotePropertyValue ([DateTimeOffset]::UtcNow.ToString("o")) -Force
+    $stored = Write-WorkerCpuProviderEvidence -ValidationRun $ValidationRun `
+        -Records @($stored.records) -RecoveryState $stored.recovery
+    $priorDigest = [string]$stored.observed_universe_digest
+    $plateau = Get-WorkerCpuProviderPlateauState -ValidationRun $ValidationRun `
+        -CurrentDigest $priorDigest
+    $filters = @(Get-CandidateObservabilityFilters -Candidate $Candidate `
+        -ValidationRun $ValidationRun)
+    $pageSet = Get-WorkersObservabilityEventPageSet -Filters $filters -From $From -To $To
+    if (-not $pageSet) {
+        Add-WorkerCpuLedgerEvent -ValidationRun $ValidationRun `
+            -Event "DEFICIT_REPAIR_PROVIDER_PREFLIGHT_UNAVAILABLE" `
+            -Detail ([pscustomobject]@{
+                diagnostic=[string]$script:lastWorkersObservabilityDiagnostic
+                prior_provider_digest=$priorDigest
+            })
+        return [pscustomobject]@{
+            available=$false; plateau_stable=$false; decision=$null
+            provider_evidence=$stored; digest_changed=$false
+            diagnostic=[string]$script:lastWorkersObservabilityDiagnostic
+        }
+    }
+    $records = @(Merge-WorkerCpuProviderEvidence -AcceptedRecords @($stored.records) `
+        -NewRecords @($pageSet.records) -ExpectedRequests $ExpectedRequests `
+        -CandidateWorkerVersion ([string]$Candidate.worker_version_id) `
+        -ValidationRun $ValidationRun)
+    $updated = Write-WorkerCpuProviderEvidence -ValidationRun $ValidationRun `
+        -Records $records -RecoveryState $stored.recovery -ProviderReadSucceeded $true
+    $digestChanged = [string]$updated.observed_universe_digest -ne $priorDigest
+    $decision = Get-WorkerCpuQualificationDecision -ExpectedRequests $ExpectedRequests `
+        -ProviderRecords $records -DirectResponsesComplete $true `
+        -RecoveryBudgetExhausted $true
+    Add-WorkerCpuLedgerEvent -ValidationRun $ValidationRun `
+        -Event "DEFICIT_REPAIR_PROVIDER_PREFLIGHT_PASSED" `
+        -Detail ([pscustomobject]@{
+            prior_provider_digest=$priorDigest
+            observed_provider_digest=[string]$updated.observed_universe_digest
+            observed=$records.Count; digest_changed=$digestChanged
+            prior_matching_plateau_reads=[int]$plateau.matching_reads
+        })
+    return [pscustomobject]@{
+        available=$true
+        plateau_stable=[bool]($plateau.stable -and -not $digestChanged)
+        decision=$decision
+        provider_evidence=$updated
+        digest_changed=$digestChanged
+        diagnostic=$null
     }
 }
 
@@ -3074,27 +3172,22 @@ function Invoke-CandidateRouteSample {
     }
 }
 
-function Invoke-CandidateTargetedCpuSamples {
+function Invoke-CandidatePlannedCpuSamples {
     param(
         [Parameter(Mandatory = $true)][object]$Candidate,
         [Parameter(Mandatory = $true)][object]$RoutePlan,
         [Parameter(Mandatory = $true)][object]$RequestPlan,
-        [Parameter(Mandatory = $true)][object[]]$Groups,
-        [ValidateSet("deficit_top_up", "headroom_top_up")]
-        [Parameter(Mandatory = $true)][string]$SampleKind,
-        [Parameter(Mandatory = $true)][int]$CountPerGroup,
+        [Parameter(Mandatory = $true)][object[]]$PlannedRequests,
         [Parameter(Mandatory = $true)][string]$FixtureRoot,
         [string]$IngestToken = ""
     )
     $routes = @($RoutePlan.worker_reads) + @($RoutePlan.worker_writes)
-    $planned = @(Add-WorkerCpuPlannedRequests -Plan $RequestPlan -Groups $Groups `
-        -SampleKind $SampleKind -CountPerGroup $CountPerGroup)
     $headers = @{
         "Cloudflare-Workers-Version-Overrides" =
             "$workerName=`"$([string]$Candidate.worker_version_id)`""
     }
     $responses = @()
-    foreach ($request in $planned) {
+    foreach ($request in @($PlannedRequests)) {
         $route = @($routes | Where-Object {
             [string]$_.family -eq [string]$request.family -and
             [string]$_.scenario -eq [string]$request.scenario
@@ -3112,7 +3205,28 @@ function Invoke-CandidateTargetedCpuSamples {
         $responses += $receipt
         if (-not $sample.passed) { throw "TARGETED_DIRECTED_WORKER_VALIDATION_FAILED" }
     }
-    return [pscustomobject]@{ requests=$planned; responses=$responses; completed_at=[DateTimeOffset]::UtcNow }
+    return [pscustomobject]@{
+        requests=@($PlannedRequests); responses=$responses; completed_at=[DateTimeOffset]::UtcNow
+    }
+}
+
+function Invoke-CandidateTargetedCpuSamples {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$RoutePlan,
+        [Parameter(Mandatory = $true)][object]$RequestPlan,
+        [Parameter(Mandatory = $true)][object[]]$Groups,
+        [ValidateSet("deficit_top_up", "headroom_top_up")]
+        [Parameter(Mandatory = $true)][string]$SampleKind,
+        [Parameter(Mandatory = $true)][int]$CountPerGroup,
+        [Parameter(Mandatory = $true)][string]$FixtureRoot,
+        [string]$IngestToken = ""
+    )
+    $planned = @(Add-WorkerCpuPlannedRequests -Plan $RequestPlan -Groups $Groups `
+        -SampleKind $SampleKind -CountPerGroup $CountPerGroup)
+    return Invoke-CandidatePlannedCpuSamples -Candidate $Candidate -RoutePlan $RoutePlan `
+        -RequestPlan $RequestPlan -PlannedRequests $planned -FixtureRoot $FixtureRoot `
+        -IngestToken $IngestToken
 }
 
 function Write-CandidateCpuInFlightState {
@@ -3335,33 +3449,6 @@ function Invoke-CandidateWorkerValidation {
                     -From $workerStartedAt -To $workerEndedAt `
                     -ExpectedRequests $expectedRequests -ValidationRun $validationRun
             }
-            if (-not $reusedQualificationReceipt -and -not $platform -and
-                [string]$script:lastWorkersObservabilityDiagnostic -eq "PROVIDER_EVIDENCE_PENDING") {
-                $storedEvidence = Read-WorkerCpuRunArtifact -ValidationRun $validationRun `
-                    -Name "provider-evidence.json"
-                $deficitDecision = Get-WorkerCpuQualificationDecision `
-                    -ExpectedRequests $expectedRequests -ProviderRecords @($storedEvidence.records) `
-                    -DirectResponsesComplete $true
-                if ([string]$deficitDecision.state -eq "PROVIDER_EVIDENCE_PENDING" -and
-                    @($storedEvidence.records).Count -gt 0 -and
-                    @($deficitDecision.deficient_groups).Count -eq 1 -and
-                    [int]$storedEvidence.recovery.deficit_top_ups -lt 1) {
-                    $topUp = Invoke-CandidateTargetedCpuSamples -Candidate $Candidate `
-                        -RoutePlan $RoutePlan -RequestPlan $requestPlan `
-                        -Groups @($deficitDecision.deficient_groups) -SampleKind "deficit_top_up" `
-                        -CountPerGroup 4 -FixtureRoot $fixtureRoot -IngestToken $ingestToken
-                    $expectedRequests = @($requestPlan.requests | Where-Object { [string]$_.phase -eq "acceptance" })
-                    $directResponses += @($topUp.responses)
-                    $workerEndedAt = $topUp.completed_at
-                    $storedEvidence.recovery.active_reads = 0
-                    $storedEvidence.recovery.deficit_top_ups = [int]$storedEvidence.recovery.deficit_top_ups + 1
-                    $null = Write-WorkerCpuProviderEvidence -ValidationRun $validationRun `
-                        -Records @($storedEvidence.records) -RecoveryState $storedEvidence.recovery
-                    $platform = Get-CandidateFrozenPlatformEvidence -Candidate $Candidate `
-                        -From $workerStartedAt -To $workerEndedAt -ExpectedRequests $expectedRequests `
-                        -ValidationRun $validationRun
-                }
-            }
             if (-not $reusedQualificationReceipt -and $platform -and
                 [string]$platform.gate_state -eq "REVIEW_REQUIRED") {
                 $storedEvidence = Read-WorkerCpuRunArtifact -ValidationRun $validationRun `
@@ -3460,11 +3547,28 @@ function Resume-CandidateWorkerPlatformEvidence {
         throw "CANDIDATE_PLATFORM_RESUME_RECEIPT_INVALID"
     }
     $script:lastWorkersObservabilityDiagnostic = $null
+    $skipPlatformRead = $false
     $expectedRequests = @($Validation.expected_requests)
     $plan = Read-WorkerCpuRunArtifact -ValidationRun ([string]$Validation.validation_run) -Name "plan.json"
     $storedEvidence = Read-WorkerCpuRunArtifact -ValidationRun ([string]$Validation.validation_run) `
         -Name "provider-evidence.json"
-    if (-not $plan) { throw "CANDIDATE_PLATFORM_RESUME_LEDGER_UNAVAILABLE" }
+    if (-not $plan -or -not $storedEvidence -or -not $Validation.worker_qualification -or
+        [string]$plan.candidate_worker_version -ne [string]$Candidate.worker_version_id -or
+        [string]$plan.qualification_key -ne [string]$Validation.worker_qualification.key) {
+        throw "CANDIDATE_PLATFORM_RESUME_LEDGER_UNAVAILABLE"
+    }
+    $existingRepairPlan = Read-WorkerCpuDeficitRepairPlan `
+        -ValidationRun ([string]$Validation.validation_run)
+    if ($existingRepairPlan) {
+        $null = Apply-WorkerCpuDeficitRepairPlan -RequestPlan $plan `
+            -RepairPlan $existingRepairPlan
+        if ([int]$storedEvidence.recovery.deficit_top_ups -lt 1) {
+            $storedEvidence.recovery.deficit_top_ups = 1
+            $null = Write-WorkerCpuProviderEvidence `
+                -ValidationRun ([string]$Validation.validation_run) `
+                -Records @($storedEvidence.records) -RecoveryState $storedEvidence.recovery
+        }
+    }
     $receipts = @(Get-WorkerCpuDirectResponseReceipts -ValidationRun ([string]$Validation.validation_run))
     if (@($receipts | Where-Object { -not $_.passed }).Count -gt 0) {
         throw "CANDIDATE_PLATFORM_RESUME_DIRECT_FAILURE"
@@ -3507,9 +3611,12 @@ function Resume-CandidateWorkerPlatformEvidence {
     $expectedRequests = @($plan.requests | Where-Object { [string]$_.phase -eq "acceptance" })
     if ($receipts.Count -ne @($plan.requests).Count) { throw "CANDIDATE_PLATFORM_RESUME_LEDGER_INCOMPLETE" }
     if ($plan -and $storedEvidence) {
-        $pendingDecision = Get-WorkerCpuQualificationDecision -ExpectedRequests $expectedRequests `
-            -ProviderRecords @($storedEvidence.records) -DirectResponsesComplete $true
         $policy = Get-WorkerCpuEvidencePolicy
+        $recoveryExhausted = [bool]([int]$storedEvidence.recovery.background_reads -ge
+            [int]$policy.maximum_background_reads)
+        $pendingDecision = Get-WorkerCpuQualificationDecision -ExpectedRequests $expectedRequests `
+            -ProviderRecords @($storedEvidence.records) -DirectResponsesComplete $true `
+            -RecoveryBudgetExhausted $recoveryExhausted
         if ([string]$pendingDecision.state -eq "HEADROOM_REVIEW" -and
             @($pendingDecision.review_groups).Count -eq 1 -and
             [int]$storedEvidence.recovery.headroom_top_ups -lt [int]$policy.maximum_headroom_top_ups) {
@@ -3534,36 +3641,95 @@ function Resume-CandidateWorkerPlatformEvidence {
                 $pendingDecision = [pscustomobject]@{ state="PROVIDER_EVIDENCE_PENDING" }
             } finally { Remove-CandidateValidationFixtureWorkspace -Workspace $workspace }
         }
-        if ([string]$pendingDecision.state -eq "PROVIDER_EVIDENCE_PENDING" -and
-            @($storedEvidence.records).Count -gt 0 -and
-            @($pendingDecision.deficient_groups).Count -eq 1 -and
-            [int]$storedEvidence.recovery.active_reads -ge @($policy.active_read_backoff_seconds).Count -and
-            [int]$storedEvidence.recovery.deficit_top_ups -lt [int]$policy.maximum_deficit_top_ups) {
+        if ([string]$pendingDecision.state -eq "PROVIDER_EVIDENCE_INSUFFICIENT" -and
+            -not $existingRepairPlan) {
             $workspace = $null
             try {
-                if (@($Validation.cpu_route_plan.worker_writes).Count -gt 0) {
-                    $workspace = New-CandidateValidationFixtureWorkspace -Candidate $Candidate
+                $preflight = Get-CandidateDeficitRepairProviderPreflight `
+                    -Candidate $Candidate -From $from -To $to `
+                    -ExpectedRequests $expectedRequests `
+                    -ValidationRun ([string]$Validation.validation_run)
+                $storedEvidence = $preflight.provider_evidence
+                if (-not $preflight.available) {
+                    $script:lastWorkersObservabilityDiagnostic =
+                        if ($preflight.diagnostic) {
+                            [string]$preflight.diagnostic
+                        } else { "OBSERVABILITY_TRANSIENT_API_FAILURE" }
+                    $skipPlatformRead = $true
+                } elseif ($preflight.digest_changed) {
+                    $storedEvidence.recovery.background_reads = 0
+                    $storedEvidence.recovery | Add-Member -NotePropertyName last_read_at `
+                        -NotePropertyValue ([DateTimeOffset]::UtcNow.ToString("o")) -Force
+                    $null = Write-WorkerCpuProviderEvidence `
+                        -ValidationRun ([string]$Validation.validation_run) `
+                        -Records @($storedEvidence.records) -RecoveryState $storedEvidence.recovery
+                    $script:lastWorkersObservabilityDiagnostic = "PROVIDER_EVIDENCE_PENDING"
+                } else {
+                    $pendingDecision = $preflight.decision
+                    $eligibility = Get-WorkerCpuDeficitRepairEligibility `
+                        -Plan $plan -ProviderEvidence $storedEvidence -Decision $pendingDecision `
+                        -DirectResponses $receipts `
+                        -CandidateWorkerVersion ([string]$Candidate.worker_version_id) `
+                        -QualificationKey ([string]$Validation.worker_qualification.key) `
+                        -ProviderAvailable ([bool]$preflight.available) `
+                        -PlateauStable ([bool]$preflight.plateau_stable)
+                    if ([string]$eligibility.reason -eq
+                        "DEFICIT_REPAIR_GLOBAL_BUDGET_EXCEEDED") {
+                        $script:lastWorkersObservabilityDiagnostic =
+                            "PROVIDER_EVIDENCE_INSUFFICIENT"
+                    } elseif ($eligibility.eligible) {
+                        $existingRepairPlan = New-WorkerCpuDeficitRepairPlan `
+                            -RequestPlan $plan `
+                            -DeficientGroups @($eligibility.deficient_groups) `
+                            -CandidateWorkerVersion ([string]$Candidate.worker_version_id) `
+                            -QualificationKey ([string]$Validation.worker_qualification.key) `
+                            -PriorProviderDigest ([string]$storedEvidence.observed_universe_digest) `
+                            -PriorObservedTotal @($storedEvidence.records).Count
+                        $plannedRepairRequests = @(Apply-WorkerCpuDeficitRepairPlan `
+                            -RequestPlan $plan -RepairPlan $existingRepairPlan)
+                        if (@($Validation.cpu_route_plan.worker_writes).Count -gt 0) {
+                            $workspace = New-CandidateValidationFixtureWorkspace `
+                                -Candidate $Candidate
+                        }
+                        $topUpFixtureRoot = if ($workspace) {
+                            [string]$workspace.fixture_root
+                        } else { "" }
+                        $topUp = Invoke-CandidatePlannedCpuSamples `
+                            -Candidate $Candidate -RoutePlan $Validation.cpu_route_plan `
+                            -RequestPlan $plan -PlannedRequests $plannedRepairRequests `
+                            -FixtureRoot $topUpFixtureRoot `
+                            -IngestToken ([Environment]::GetEnvironmentVariable(
+                                "CLOUDFLARE_INGEST_TOKEN", "User"))
+                        $expectedRequests = @($plan.requests | Where-Object {
+                            [string]$_.phase -eq "acceptance"
+                        })
+                        $receipts = @(Get-WorkerCpuDirectResponseReceipts `
+                            -ValidationRun ([string]$Validation.validation_run))
+                        $to = $topUp.completed_at
+                        $storedEvidence.recovery.active_reads = 0
+                        $storedEvidence.recovery.background_reads = 0
+                        $storedEvidence.recovery.deficit_top_ups = 1
+                        $storedEvidence.recovery | Add-Member `
+                            -NotePropertyName last_read_at `
+                            -NotePropertyValue ([DateTimeOffset]::UtcNow.ToString("o")) -Force
+                        $null = Write-WorkerCpuProviderEvidence `
+                            -ValidationRun ([string]$Validation.validation_run) `
+                            -Records @($storedEvidence.records) `
+                            -RecoveryState $storedEvidence.recovery
+                        $pendingDecision = [pscustomobject]@{
+                            state="PROVIDER_EVIDENCE_PENDING"
+                        }
+                    }
                 }
-                $topUpFixtureRoot = if ($workspace) { [string]$workspace.fixture_root } else { "" }
-                $topUp = Invoke-CandidateTargetedCpuSamples -Candidate $Candidate `
-                    -RoutePlan $Validation.cpu_route_plan -RequestPlan $plan `
-                    -Groups @($pendingDecision.deficient_groups) -SampleKind "deficit_top_up" `
-                    -CountPerGroup ([int]$policy.deficit_top_up_acceptance) `
-                    -FixtureRoot $topUpFixtureRoot `
-                    -IngestToken ([Environment]::GetEnvironmentVariable("CLOUDFLARE_INGEST_TOKEN", "User"))
-                $expectedRequests = @($plan.requests | Where-Object { [string]$_.phase -eq "acceptance" })
-                $to = $topUp.completed_at
-                $storedEvidence.recovery.active_reads = 0
-                $storedEvidence.recovery.deficit_top_ups = [int]$storedEvidence.recovery.deficit_top_ups + 1
-                $null = Write-WorkerCpuProviderEvidence -ValidationRun ([string]$Validation.validation_run) `
-                    -Records @($storedEvidence.records) -RecoveryState $storedEvidence.recovery
             } finally { Remove-CandidateValidationFixtureWorkspace -Workspace $workspace }
         }
     }
-    $platform = Get-CandidateFrozenPlatformEvidence -Candidate $Candidate `
-        -From $from -To $to `
-        -ExpectedRequests $expectedRequests `
-        -ValidationRun ([string]$Validation.validation_run)
+    $platform = if ($skipPlatformRead) { $null } else {
+        Get-CandidateFrozenPlatformEvidence -Candidate $Candidate `
+            -From $from -To $to `
+            -ExpectedRequests $expectedRequests `
+            -ValidationRun ([string]$Validation.validation_run)
+    }
     $qualificationMode = [string]$Validation.cpu_qualification_mode
     if ($platform -and $platform.passed -and -not $qualificationMode) {
         if (-not $Validation.worker_qualification) {
@@ -3590,7 +3756,7 @@ function Resume-CandidateWorkerPlatformEvidence {
         passed = $true
         resumed_platform_only = $true
         validation_run = [string]$Validation.validation_run
-        expected_worker_invocations = [int]$Validation.expected_worker_invocations
+        expected_worker_invocations = @($expectedRequests).Count
         observed_worker_invocations = if ($platform) { $platform.invocations } else { $null }
         static_worker_invocations = [int]$Validation.static_worker_invocations
         static_observability_state = [string]$Validation.static_observability_state

@@ -249,6 +249,18 @@ def test_cpu_recovery_policy_is_bounded_and_never_requests_user_approval(tmp_pat
     assert result == "6,170,1,1,4,False"
 
 
+def test_cpu_deficit_repair_policy_has_manifest_derived_global_bound(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$p=Get-WorkerCpuDeficitRepairPolicy;"
+        'Write-Output "$($p.version),$($p.required_plateau_reads),'
+        '$($p.maximum_provider_preflight_reads),$($p.maximum_family_count),'
+        '$($p.requests_per_family),$($p.maximum_total_request_count)"',
+    )
+
+    assert result == "worker-cpu-deficit-repair-v1,3,3,4,4,16"
+
+
 def test_provider_unavailable_persists_active_and_background_retry_budget(
     tmp_path,
 ) -> None:
@@ -278,6 +290,27 @@ def test_provider_unavailable_persists_active_and_background_retry_budget(
     )
 
     assert result == "10,6,4,PROVIDER_EVIDENCE_INSUFFICIENT"
+
+
+def test_deficit_repair_plateau_counts_only_successful_provider_reads(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$run='11111111-1111-1111-1111-111111111111';$recovery=[pscustomobject]@{"
+        "active_reads=6;background_reads=0;deficit_top_ups=0;headroom_top_ups=0};"
+        "1..3|ForEach-Object{$recovery.background_reads=$_;$stored="
+        "Write-WorkerCpuProviderEvidence -ValidationRun $run -Records @() "
+        "-RecoveryState $recovery -ProviderReadSucceeded $false};"
+        "$failed=Get-WorkerCpuProviderPlateauState -ValidationRun $run "
+        "-CurrentDigest $stored.observed_universe_digest;1..3|ForEach-Object{"
+        "$recovery.background_reads=$_;$stored=Write-WorkerCpuProviderEvidence "
+        "-ValidationRun $run -Records @() -RecoveryState $recovery "
+        "-ProviderReadSucceeded $true};$passed=Get-WorkerCpuProviderPlateauState "
+        "-ValidationRun $run -CurrentDigest $stored.observed_universe_digest;"
+        'Write-Output "$($failed.stable),$($failed.matching_reads),'
+        '$($passed.stable),$($passed.matching_reads)"',
+    )
+
+    assert result == "False,0,True,3"
 
 
 def test_raw_telemetry_metrics_keep_zero_cpu_samples(tmp_path) -> None:
@@ -421,6 +454,126 @@ def test_targeted_top_up_adds_only_the_deficient_family_and_preserves_full_plan(
     )
 
     assert result == "28,32,4,0,4"
+
+
+@pytest.mark.parametrize(
+    ("deficient_count", "provider_available", "expected"),
+    [
+        (1, True, "True,ELIGIBLE,4"),
+        (2, True, "True,ELIGIBLE,8"),
+        (4, True, "True,ELIGIBLE,16"),
+        (5, True, "False,DEFICIT_REPAIR_GLOBAL_BUDGET_EXCEEDED,20"),
+        (2, False, "False,DEFICIT_REPAIR_PROVIDER_UNAVAILABLE,8"),
+    ],
+)
+def test_multi_family_deficit_repair_eligibility_is_globally_bounded(
+    tmp_path, deficient_count: int, provider_available: bool, expected: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$count={deficient_count};$available=${str(provider_available).lower()};"
+        "$run='11111111-1111-1111-1111-111111111111';$key='a'*64;"
+        "$request=[pscustomobject]@{request_id='original';family='qualified';"
+        "scenario='default';method='GET';path='/';phase='acceptance'};"
+        "$plan=[pscustomobject]@{validation_run=$run;candidate_worker_version='worker';"
+        "qualification_key=$key;policy_version='worker-cpu-policy-v1';requests=@($request)};"
+        "$provider=[pscustomobject]@{records=@();recovery=[pscustomobject]@{"
+        "background_reads=4;deficit_top_ups=0}};"
+        "$groups=@(1..$count|ForEach-Object{[pscustomobject]@{family=('f-'+$_);"
+        "scenario='default';method='GET';path=('/f/'+$_);request_query='';fixture='';"
+        "observed=9;required=10;missing=3}});"
+        "$decision=[pscustomobject]@{state='PROVIDER_EVIDENCE_INSUFFICIENT';"
+        "reason='OBSERVED_FAMILY_QUOTA_DEFICIT';deficient_groups=$groups};"
+        "$responses=@([pscustomobject]@{request_id='original';passed=$true});"
+        "$e=Get-WorkerCpuDeficitRepairEligibility -Plan $plan -ProviderEvidence $provider "
+        "-Decision $decision -DirectResponses $responses -CandidateWorkerVersion worker "
+        "-QualificationKey $key -ProviderAvailable $available -PlateauStable $true;"
+        'Write-Output "$($e.eligible),$($e.reason),$($e.total_request_count)"',
+    )
+
+    assert result == expected
+
+
+def test_deficit_repair_plan_is_frozen_before_send_and_idempotent_across_restart(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$run='11111111-1111-1111-1111-111111111111';$key='a'*64;"
+        "$request=[pscustomobject]@{request_id='original';family='qualified';"
+        "scenario='default';method='GET';path='/';phase='acceptance'};"
+        "$plan=[pscustomobject]@{validation_run=$run;candidate_worker_version='worker';"
+        "qualification_key=$key;policy_version='worker-cpu-policy-v1';requests=@($request);"
+        "request_universe_digest='old'};"
+        "$groups=@([pscustomobject]@{family='a';scenario='one';method='GET';path='/a';"
+        "request_query='';fixture='';observed=9;required=10;missing=3},"
+        "[pscustomobject]@{family='b';scenario='two';method='POST';path='/b';"
+        "request_query='';fixture='b.json';observed=9;required=10;missing=3});"
+        "$repair=New-WorkerCpuDeficitRepairPlan -RequestPlan $plan -DeficientGroups $groups "
+        "-CandidateWorkerVersion worker -QualificationKey $key -PriorProviderDigest ('b'*64) "
+        "-PriorObservedTotal 18;"
+        "$frozenBeforeApply=Test-Path (Join-Path (Get-WorkerCpuRunRoot $run) "
+        "'deficit-repair-plan.json');$first=@(Apply-WorkerCpuDeficitRepairPlan -RequestPlan $plan "
+        "-RepairPlan $repair);$countAfterFirst=@($plan.requests).Count;"
+        "$second=@(Apply-WorkerCpuDeficitRepairPlan -RequestPlan $plan -RepairPlan $repair);"
+        "$ids=@($repair.payload.requests.request_id|Sort-Object -Unique);"
+        "$read=Read-WorkerCpuDeficitRepairPlan -ValidationRun $run;"
+        'Write-Output "$frozenBeforeApply,$($first.Count),$countAfterFirst,'
+        '$($plan.requests.Count),$($ids.Count),$($read.plan_digest -eq $repair.plan_digest),'
+        '$($repair.payload.total_request_count)"',
+    )
+
+    assert result == "True,8,9,9,8,True,8"
+
+
+def test_consumed_deficit_repair_cannot_start_a_second_round(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$run='11111111-1111-1111-1111-111111111111';$key='a'*64;"
+        "$request=[pscustomobject]@{request_id='original';family='a';scenario='one';"
+        "method='GET';path='/';phase='acceptance'};"
+        "$plan=[pscustomobject]@{validation_run=$run;candidate_worker_version='worker';"
+        "qualification_key=$key;policy_version='worker-cpu-policy-v1';requests=@($request)};"
+        "$provider=[pscustomobject]@{records=@();recovery=[pscustomobject]@{"
+        "background_reads=4;deficit_top_ups=1}};"
+        "$group=[pscustomobject]@{family='a';scenario='one';method='GET';path='/';"
+        "observed=9;required=10;missing=3};$decision=[pscustomobject]@{"
+        "state='PROVIDER_EVIDENCE_INSUFFICIENT';reason='OBSERVED_FAMILY_QUOTA_DEFICIT';"
+        "deficient_groups=@($group)};$response=[pscustomobject]@{passed=$true};"
+        "$e=Get-WorkerCpuDeficitRepairEligibility -Plan $plan -ProviderEvidence $provider "
+        "-Decision $decision -DirectResponses @($response) -CandidateWorkerVersion worker "
+        "-QualificationKey $key -ProviderAvailable $true -PlateauStable $true;"
+        'Write-Output "$($e.eligible),$($e.reason)"',
+    )
+
+    assert result == "False,DEFICIT_REPAIR_ALREADY_CONSUMED"
+
+
+def test_top_up_omission_remains_insufficient_and_observed_hard_failure_is_terminal(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$expected=@();$records=@();foreach($family in @('a','b')){1..16|%{"
+        "$id=($family+'-'+$_);$expected += [pscustomobject]@{request_id=$id;family=$family;"
+        "scenario='one';method='GET';path='/';phase='acceptance';sample_kind=if($_ -le 12)"
+        "{'required'}else{'deficit_top_up'}};if(($family -eq 'a' -and $_ -le 9) -or "
+        "($family -eq 'b' -and $_ -le 10)){$records += [pscustomobject]@{request_id=$id;"
+        "event_id=('e-'+$id);cpu_ms=if($family -eq 'b' -and $_ -eq 10){10}else{4};"
+        "wall_ms=5;status=200;outcome='ok'}}}};"
+        "$hard=Get-WorkerCpuQualificationDecision -ExpectedRequests $expected "
+        "-ProviderRecords $records -RecoveryBudgetExhausted $true;"
+        "$records=@($records|Where-Object{$_.request_id -notlike 'b-*'});"
+        "$omitted=Get-WorkerCpuQualificationDecision -ExpectedRequests $expected "
+        "-ProviderRecords $records -RecoveryBudgetExhausted $true;"
+        'Write-Output "$($hard.state),$($hard.reason),$($omitted.state),'
+        '$($omitted.deficient_groups.Count)"',
+    )
+
+    assert result == (
+        "HARD_FAILURE,WORKER_CPU_OR_PLATFORM_HARD_FAILURE,"
+        "PROVIDER_EVIDENCE_INSUFFICIENT,2"
+    )
 
 
 def test_cpu_decision_never_cherry_picks_reserve_or_top_up_samples(tmp_path) -> None:
@@ -715,6 +868,67 @@ def test_platform_retry_resumes_exact_telemetry_receipt_without_replaying_routes
     assert result == (
         "True,1,PASSED,/api/status,1,CPU_QUALIFICATION_FRESH," + "e" * 64
     )
+
+
+def test_platform_resume_repairs_two_families_without_replaying_complete_validation(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$run='11111111-1111-1111-1111-111111111111';$key='a'*64;"
+        "$candidate=[pscustomobject]@{worker_version_id='worker';git_sha=('b'*40);"
+        "validation_key='validation'};$routes=@();$requests=@();foreach($family in @('a','b')){"
+        "$route=[pscustomobject]@{family=$family;scenario='default';method='GET';"
+        "path=('/'+$family);request_query='';fixture=''};$routes += $route;"
+        "$request=[pscustomobject]@{request_id=('original-'+$family);family=$family;"
+        "scenario='default';method='GET';path=('/'+$family);request_query='';fixture='';"
+        "phase='acceptance';sample_kind='required'};$requests += $request};"
+        "$plan=[pscustomobject]@{schema_version='worker-directed-ledger-v1';validation_run=$run;"
+        "candidate_worker_version='worker';qualification_key=$key;"
+        "policy_version='worker-cpu-policy-v1';requests=$requests;request_universe_digest='old'};"
+        "Write-WorkerCpuAtomicJson -Path (Join-Path (Get-WorkerCpuRunRoot $run) 'plan.json') "
+        "-Value $plan;foreach($request in $requests){$response=[pscustomobject]@{"
+        "requested_worker_version='worker';observed_worker_version='worker';"
+        "observed_git_sha=('b'*40);status=200;passed=$true;reason='';route=$request.path;"
+        "resource=$request.family;d1_operations='';request_bytes='';response_bytes='';"
+        "response_content_digest=('c'*64)};$null=Add-WorkerCpuDirectResponse "
+        "-ValidationRun $run -Request $request -Response $response};"
+        "$recovery=[pscustomobject]@{active_reads=6;background_reads=4;deficit_top_ups=0;"
+        "headroom_top_ups=0};$stored=Write-WorkerCpuProviderEvidence -ValidationRun $run "
+        "-Records @() -RecoveryState $recovery;"
+        "$groups=@($routes|ForEach-Object{[pscustomobject]@{family=$_.family;"
+        "scenario=$_.scenario;method=$_.method;path=$_.path;request_query='';fixture='';"
+        "observed=9;required=10;missing=3}});$decision=[pscustomobject]@{"
+        "state='PROVIDER_EVIDENCE_INSUFFICIENT';reason='OBSERVED_FAMILY_QUOTA_DEFICIT';"
+        "deficient_groups=$groups};"
+        "$validation=[pscustomobject]@{key='validation';validation_run=$run;"
+        "expected_requests=$requests;cpu_route_plan=[pscustomobject]@{worker_reads=$routes;"
+        "worker_writes=@()};telemetry_window_from='2026-08-30T00:00:00Z';"
+        "telemetry_window_to='2026-08-30T00:01:00Z';routes=$routes;"
+        "worker_qualification=[pscustomobject]@{key=$key};expected_worker_invocations=2;"
+        "static_worker_invocations=0;static_observability_state='PASSED'};"
+        "function Get-WorkerCpuQualificationDecision{return $decision};"
+        "function Get-CandidateDeficitRepairProviderPreflight{return [pscustomobject]@{"
+        "available=$true;plateau_stable=$true;decision=$decision;provider_evidence=$stored;"
+        "digest_changed=$false}};function Invoke-CandidateWorkerValidation{throw 'FULL_REPLAY'};"
+        "$script:sent=0;function Invoke-CandidatePlannedCpuSamples{param($RequestPlan,"
+        "$PlannedRequests);$script:sent=@($PlannedRequests).Count;foreach($request in "
+        "@($PlannedRequests)){$response=[pscustomobject]@{requested_worker_version='worker';"
+        "observed_worker_version='worker';observed_git_sha=('b'*40);status=200;passed=$true;"
+        "reason='';route=$request.path;resource=$request.family;d1_operations='';"
+        "request_bytes='';response_bytes='';response_content_digest=('d'*64)};"
+        "$null=Add-WorkerCpuDirectResponse -ValidationRun $run -Request $request "
+        "-Response $response};[pscustomobject]@{completed_at=[DateTimeOffset]::UtcNow}};"
+        "function Get-CandidateFrozenPlatformEvidence{return $null};"
+        "$result=Resume-CandidateWorkerPlatformEvidence -Candidate $candidate "
+        "-Validation $validation;$savedPlan=Read-WorkerCpuRunArtifact -ValidationRun $run "
+        "-Name 'plan.json';$repair=Read-WorkerCpuDeficitRepairPlan -ValidationRun $run;"
+        'Write-Output "$script:sent,$($result.expected_worker_invocations),'
+        '$($result.directed_request_ledger.planned),$($result.directed_request_ledger.completed),'
+        '$($repair.payload.deficient_families.Count),$($savedPlan.requests.Count)"',
+    )
+
+    assert result == "8,10,10,10,2,10"
 
 
 def test_deterministic_observability_contract_failure_is_terminal(tmp_path) -> None:

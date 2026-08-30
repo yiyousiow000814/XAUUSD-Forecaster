@@ -116,6 +116,11 @@ and every consumer assumption to a matching integration invariant.
 | `CpuQualificationRequiredForPass` | release-integration-safety |
 | `ProviderPendingIsNotCandidateFailure` | release-integration-safety |
 | `CpuRetryBudgetIsBounded` | cpu-evidence-safety |
+| `DeficitRepairRequestBudgetIsBounded` | cpu-evidence-safety and cpu-evidence-liveness |
+| `DeficitRepairSetIsFrozen` | cpu-evidence-safety and cpu-evidence-liveness |
+| `QualifiedFamiliesAreNeverReplayed` | cpu-evidence-safety and cpu-evidence-liveness |
+| `DeficitRepairCannotFabricateEvidence` | cpu-evidence-safety and cpu-evidence-liveness |
+| `NoSecondDeficitRepairRound` | cpu-evidence-safety and cpu-evidence-liveness |
 | `CpuHardFailureCannotQualify` | cpu-evidence-safety |
 | `ReusedCpuEvidenceMatchesArtifact` | cpu-evidence-safety |
 | `CpuRecoveryPreservesIndependentStages` | cpu-evidence-safety and release-integration-safety |
@@ -165,8 +170,8 @@ queue as a measured peak.
 | access-evidence-safety | 0.942 | 399 | 44 | unavailable | PASS |
 | core-release-liveness | 1.015 | 34 | 20 | unavailable | PASS |
 | core-release-safety | 0.908 | 34 | 20 | unavailable | PASS |
-| cpu-evidence-liveness | 1.087 | 415 | 120 | unavailable | PASS |
-| cpu-evidence-safety | 0.958 | 415 | 120 | unavailable | PASS |
+| cpu-evidence-liveness | 1.241 | 13,059 | 3,160 | unavailable | PASS |
+| cpu-evidence-safety | 1.090 | 13,059 | 3,160 | unavailable | PASS |
 | install-recovery-liveness | 1.229 | 33,077 | 5,928 | unavailable | PASS |
 | install-recovery-safety | 1.059 | 33,077 | 5,928 | unavailable | PASS |
 | news-migration-safety | 0.957 | 204 | 69 | unavailable | PASS |
