@@ -3599,6 +3599,7 @@ function Resume-CandidateWorkerPlatformEvidence {
     }
     $completedIds = @($receipts | ForEach-Object { [string]$_.request_id })
     $unsent = @($plan.requests | Where-Object { [string]$_.request_id -notin $completedIds })
+    $restartProviderRecovery = $false
     if ($unsent.Count -gt 0) {
         $workspace = $null
         try {
@@ -3629,16 +3630,44 @@ function Resume-CandidateWorkerPlatformEvidence {
                 if (-not $receipt.passed) { throw "CANDIDATE_PLATFORM_RESUME_DIRECT_FAILURE" }
             }
             $to = [DateTimeOffset]::UtcNow
-            $storedEvidence.recovery.active_reads = 0
-            $storedEvidence.recovery.background_reads = 0
-            $storedEvidence.recovery | Add-Member -NotePropertyName last_read_at `
-                -NotePropertyValue ([DateTimeOffset]::UtcNow.ToString("o")) -Force
-            $null = Write-WorkerCpuProviderEvidence `
-                -ValidationRun ([string]$Validation.validation_run) `
-                -Records @($storedEvidence.records) `
-                -RecoveryState $storedEvidence.recovery
+            $restartProviderRecovery = $true
         } finally { Remove-CandidateValidationFixtureWorkspace -Workspace $workspace }
         $receipts = @(Get-WorkerCpuDirectResponseReceipts -ValidationRun ([string]$Validation.validation_run))
+    }
+    if ($existingRepairPlan) {
+        $repairRequestIds = @($existingRepairPlan.payload.requests | ForEach-Object {
+            [string]$_.request_id
+        })
+        $repairReceipts = @($receipts | Where-Object {
+            [string]$_.request_id -in $repairRequestIds
+        })
+        if ($repairRequestIds.Count -gt 0 -and
+            $repairReceipts.Count -eq $repairRequestIds.Count) {
+            $latestRepairResponse = @($repairReceipts | ForEach-Object {
+                ConvertTo-ReleaseTimestampUtc -Value ([string]$_.completed_at)
+            } | Where-Object { $_ -ne [DateTimeOffset]::MinValue } |
+                Sort-Object -Descending) | Select-Object -First 1
+            if ($latestRepairResponse -and $latestRepairResponse -gt $to) {
+                $to = $latestRepairResponse
+            }
+            $lastProviderRead = ConvertTo-ReleaseTimestampUtc `
+                -Value ([string]$storedEvidence.recovery.last_read_at)
+            if ($latestRepairResponse -and
+                ($lastProviderRead -eq [DateTimeOffset]::MinValue -or
+                 $latestRepairResponse -gt $lastProviderRead)) {
+                $restartProviderRecovery = $true
+            }
+        }
+    }
+    if ($restartProviderRecovery) {
+        $storedEvidence.recovery.active_reads = 0
+        $storedEvidence.recovery.background_reads = 0
+        $storedEvidence.recovery | Add-Member -NotePropertyName last_read_at `
+            -NotePropertyValue ([DateTimeOffset]::UtcNow.ToString("o")) -Force
+        $null = Write-WorkerCpuProviderEvidence `
+            -ValidationRun ([string]$Validation.validation_run) `
+            -Records @($storedEvidence.records) `
+            -RecoveryState $storedEvidence.recovery
     }
     $expectedRequests = @($plan.requests | Where-Object { [string]$_.phase -eq "acceptance" })
     if ($receipts.Count -ne @($plan.requests).Count) { throw "CANDIDATE_PLATFORM_RESUME_LEDGER_INCOMPLETE" }
