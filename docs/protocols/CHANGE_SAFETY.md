@@ -36,6 +36,31 @@ Record before editing:
 12. **Rollout and rollback:** stage the change and prove rollback before switch.
 13. **Cleanup:** state when temporary bridges and adapters are removed.
 
+## Runtime bundles, locators, and maintenance
+
+A runtime bundle must be dependency-closed, not merely self-consistent with its
+own manifest. Derive direct and transitive runtime dependencies, require each to
+be declared, copied, hashed, and verified, and rehearse startup from an isolated
+staged root that cannot resolve omitted files from a development checkout.
+
+For every persistent filesystem locator, record:
+
+- its authoritative owner and permitted roots;
+- whether it is absolute, relative, or otherwise portable;
+- the finite relocation behavior for known old roots;
+- old-code/new-state and new-code/old-state compatibility;
+- whether its bytes participate in artifact hashes, generation identities,
+  receipts, or immutable evidence.
+
+Unknown roots and traversal fail closed. Do not rewrite immutable locator-bearing
+content without accounting for every derived identity and receipt.
+
+Heavy maintenance begins only after critical startup viability is established.
+It needs an explicit single owner, a bounded completion or failure receipt, and
+idempotent restart behavior. A crash or restart must not multiply the same heavy
+operation, and recovery may clean only temporary state proven to belong to that
+owner.
+
 The implementer's assumptions are not independent evidence. For large changes,
 use non-overlapping architecture, recovery, or final-evidence review when
 delegation is authorized and useful; do not duplicate broad scans.

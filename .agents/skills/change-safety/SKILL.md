@@ -20,6 +20,14 @@ equivalent rehearsal or a non-mutating preflight against the real resource.
 Synthetic or temporary resources are supporting evidence, not sufficient proof
 of an environment-sensitive invariant by themselves.
 
+Treat runtime packaging as a dependency graph: a deployable bundle is complete
+only when every direct and transitive runtime dependency is declared, copied,
+hashed, and verified from an isolated staged root. For every persisted
+filesystem locator, declare its authority, portability, relocation mapping,
+old/new compatibility, and hash or receipt consequences. Schedule heavy
+maintenance only after critical startup viability, behind an explicit owner,
+and make its retry behavior idempotent and bounded across restart.
+
 Classify every material evidence source as `controlled exact`, `external
 authoritative/eventual`, or `external advisory`. For external evidence, record
 the provider's actual completeness contract, an explicit uncertainty/tolerance
