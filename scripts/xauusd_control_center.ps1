@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "PreflightRuntimeStateRoot", "MigrateRuntimeStateRoot")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "ControlBundlePreflight", "PreflightRuntimeStateRoot", "MigrateRuntimeStateRoot")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync", "broadcast")]
     [string]$ServiceKey = "",
@@ -56,14 +56,20 @@ $runtimeObservationCycles = 2
 $runtimeObservationTimeout = [TimeSpan]::FromMinutes(15)
 $runtimeDecisionHorizon = [TimeSpan]::FromMinutes(30)
 $reloadableServiceKeys = @("collector", "annotator", "api", "sync")
-$runtimeControlFileNames = @(
-    "xauusd_control_center.ps1",
-    "control_center.xaml",
-    "xauusd_control_center_launcher.vbs",
-    "xauusd_watchdog_launcher.vbs",
-    "xauusd_watchdog_guard.ps1",
-    "xauusd_watchdog_guard_launcher.vbs"
-)
+$runtimeControlSourceManifestName = "runtime-control-files.json"
+$runtimeControlSourceManifestPath = Join-Path $PSScriptRoot `
+    $runtimeControlSourceManifestName
+if (-not (Test-Path -LiteralPath $runtimeControlSourceManifestPath)) {
+    throw "CONTROL_BUNDLE_SOURCE_MANIFEST_MISSING"
+}
+$runtimeControlSourceManifest = Get-Content -LiteralPath `
+    $runtimeControlSourceManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if ([int]$runtimeControlSourceManifest.schema_version -ne 1) {
+    throw "CONTROL_BUNDLE_SOURCE_MANIFEST_INVALID"
+}
+$runtimeControlFileNames = @($runtimeControlSourceManifest.files | ForEach-Object {
+    [string]$_
+})
 $runtimeControlManifestName = "runtime-control-bundle.json"
 $collectorSecretsPath = Join-Path $repositoryRoot ".local\secrets\collector-keys.json"
 $releaseSecretsRoot = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot ".local\secrets"))
@@ -5638,8 +5644,121 @@ function Get-Sha256Hex {
     }
 }
 
+function Get-Sha256TextHex {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Value)
+        return ([System.BitConverter]::ToString(
+            $algorithm.ComputeHash($bytes)
+        ) -replace "-", "").ToLowerInvariant()
+    } finally {
+        $algorithm.Dispose()
+    }
+}
+
+function Get-RuntimeControlSourceManifestAtRoot {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $path = Join-Path $Root $runtimeControlSourceManifestName
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    try {
+        $manifest = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
+            ConvertFrom-ReleaseControlJson
+        $files = @($manifest.files | ForEach-Object { [string]$_ })
+        $entrypoints = @($manifest.entrypoints | ForEach-Object { [string]$_ })
+        if ([int]$manifest.schema_version -ne 1 -or $files.Count -eq 0 -or
+            @($files | Select-Object -Unique).Count -ne $files.Count -or
+            $runtimeControlSourceManifestName -notin $files -or
+            @($entrypoints | Where-Object { $_ -notin $files }).Count -ne 0 -or
+            @($files | Where-Object {
+                [IO.Path]::GetFileName($_) -ne $_ -or $_ -match '[\\/]'
+            }).Count -ne 0) {
+            return $null
+        }
+        return [pscustomobject]@{
+            path = $path
+            files = $files
+            entrypoints = $entrypoints
+            digest = Get-Sha256Hex -LiteralPath $path
+        }
+    } catch { return $null }
+}
+
+function Get-RuntimeControlPowerShellDependencies {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        $LiteralPath, [ref]$tokens, [ref]$errors
+    )
+    if (@($errors).Count -ne 0) {
+        throw "CONTROL_BUNDLE_POWERSHELL_PARSE_FAILED:$([IO.Path]::GetFileName($LiteralPath))"
+    }
+    $commands = @($ast.FindAll({
+        param($node)
+        if ($node -isnot [System.Management.Automation.Language.CommandAst]) {
+            return $false
+        }
+        return ($node.InvocationOperator -eq
+                [System.Management.Automation.Language.TokenKind]::Dot -or
+            [string]::Equals($node.GetCommandName(), "Import-Module",
+                [StringComparison]::OrdinalIgnoreCase))
+    }, $true))
+    $dependencies = @()
+    foreach ($command in $commands) {
+        $candidates = @($command.FindAll({
+            param($node)
+            return ($node -is
+                    [System.Management.Automation.Language.StringConstantExpressionAst] -and
+                [string]$node.Value -match '(?i)\.(ps1|psm1)$')
+        }, $true) | ForEach-Object { [IO.Path]::GetFileName([string]$_.Value) } |
+            Select-Object -Unique)
+        if ($candidates.Count -ne 1) {
+            throw "CONTROL_BUNDLE_DYNAMIC_POWERSHELL_DEPENDENCY:$([IO.Path]::GetFileName($LiteralPath))"
+        }
+        $dependencies += $candidates[0]
+    }
+    return @($dependencies | Select-Object -Unique)
+}
+
+function Assert-RuntimeControlDependencyClosure {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][object]$SourceManifest
+    )
+    $declared = @($SourceManifest.files)
+    $graph = [ordered]@{}
+    foreach ($name in $declared) {
+        $path = Join-Path $Root $name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "CONTROL_BUNDLE_DECLARED_FILE_MISSING:$name"
+        }
+        if ($name -notmatch '(?i)\.(ps1|psm1)$') { continue }
+        $dependencies = @(Get-RuntimeControlPowerShellDependencies `
+            -LiteralPath $path)
+        foreach ($dependency in $dependencies) {
+            if ($dependency -notin $declared) {
+                throw "CONTROL_BUNDLE_UNDECLARED_DEPENDENCY:$name`:$dependency"
+            }
+        }
+        $graph[$name] = $dependencies
+    }
+    return [pscustomobject]$graph
+}
+
+function Get-RuntimeControlFilesDigest {
+    param([Parameter(Mandatory = $true)][hashtable]$Hashes)
+    $lines = @($Hashes.Keys | Sort-Object | ForEach-Object {
+        "{0}={1}" -f $_, [string]$Hashes[$_]
+    })
+    return Get-Sha256TextHex -Value ($lines -join "`n")
+}
+
 function Get-RuntimeControlBundleIdentityAtRoot {
-    param([Parameter(Mandatory = $true)][string]$ControlRoot)
+    param(
+        [Parameter(Mandatory = $true)][string]$ControlRoot,
+        [switch]$RequireDependencyClosure
+    )
     $path = Join-Path $ControlRoot $runtimeControlManifestName
     if (-not (Test-Path -LiteralPath $path)) { return $null }
     try {
@@ -5649,14 +5768,45 @@ function Get-RuntimeControlBundleIdentityAtRoot {
             [string]$identity.source_revision -notmatch '^[0-9a-f]{40}$') {
             return $null
         }
-        foreach ($name in $runtimeControlFileNames) {
+        $manifestFileNames = @($identity.files.PSObject.Properties.Name |
+            ForEach-Object { [string]$_ })
+        $sourceManifest = Get-RuntimeControlSourceManifestAtRoot `
+            -Root $ControlRoot
+        $dependencyClosed = ([int]$identity.schema_version -eq 2 -and
+            [bool]$identity.dependency_closed -and $sourceManifest)
+        $expectedNames = if ($dependencyClosed) {
+            @($sourceManifest.files)
+        } else {
+            # Schema 1 remains verifiable only as an independently recoverable
+            # previous bundle. It is never accepted as a new closed stage.
+            $manifestFileNames
+        }
+        if ($RequireDependencyClosure -and -not $dependencyClosed) { return $null }
+        $observedFileSet = (@($manifestFileNames | Sort-Object) -join "`n")
+        $expectedFileSet = (@($expectedNames | Sort-Object) -join "`n")
+        if ($observedFileSet -ne $expectedFileSet) { return $null }
+        $hashes = @{}
+        foreach ($name in $expectedNames) {
             $file = Join-Path $ControlRoot $name
             $expected = [string]$identity.files.$name
             if (-not (Test-Path -LiteralPath $file) -or
                 $expected -notmatch '^[0-9a-f]{64}$') { return $null }
             $actual = Get-Sha256Hex -LiteralPath $file
             if ($actual -ne $expected) { return $null }
+            $hashes[$name] = $actual
         }
+        if ($dependencyClosed) {
+            if ([string]$identity.source_manifest_sha256 -ne
+                    [string]$sourceManifest.digest -or
+                [string]$identity.bundle_digest -ne
+                    (Get-RuntimeControlFilesDigest -Hashes $hashes)) {
+                return $null
+            }
+            $null = Assert-RuntimeControlDependencyClosure `
+                -Root $ControlRoot -SourceManifest $sourceManifest
+        }
+        $identity | Add-Member -NotePropertyName dependency_closed_verified `
+            -NotePropertyValue $dependencyClosed -Force
         return $identity
     } catch { return $null }
 }
@@ -5689,8 +5839,13 @@ function New-VerifiedRuntimeControlBundleStage {
             throw "CONTROL_BUNDLE_DETACHED_SOURCE_REQUIRED"
         }
     }
+    $sourceManifest = Get-RuntimeControlSourceManifestAtRoot `
+        -Root (Join-Path $SourceRoot "scripts")
+    if (-not $sourceManifest) { throw "CONTROL_BUNDLE_SOURCE_MANIFEST_INVALID" }
+    $null = Assert-RuntimeControlDependencyClosure `
+        -Root (Join-Path $SourceRoot "scripts") -SourceManifest $sourceManifest
     New-Item -ItemType Directory -Path $StageRoot -Force | Out-Null
-    foreach ($name in $runtimeControlFileNames) {
+    foreach ($name in $sourceManifest.files) {
         $source = Join-Path $SourceRoot ("scripts\{0}" -f $name)
         if (-not (Test-Path -LiteralPath $source)) {
             throw "Missing runtime control file: $source"
@@ -5698,18 +5853,22 @@ function New-VerifiedRuntimeControlBundleStage {
         Copy-Item -LiteralPath $source -Destination (Join-Path $StageRoot $name) -Force
     }
     $hashes = @{}
-    foreach ($name in $runtimeControlFileNames) {
+    foreach ($name in $sourceManifest.files) {
         $hashes[$name] = Get-Sha256Hex -LiteralPath (Join-Path $StageRoot $name)
     }
     [pscustomobject]@{
-        schema_version = 1
+        schema_version = 2
         source_revision = $SourceRevision
         exact_revision = $true
         created_at = [DateTimeOffset]::UtcNow.ToString("o")
+        dependency_closed = $true
+        source_manifest_sha256 = [string]$sourceManifest.digest
+        bundle_digest = Get-RuntimeControlFilesDigest -Hashes $hashes
         files = $hashes
     } | ConvertTo-Json -Depth 5 | Set-Content `
         -LiteralPath (Join-Path $StageRoot $runtimeControlManifestName) -Encoding UTF8
-    $identity = Get-RuntimeControlBundleIdentityAtRoot -ControlRoot $StageRoot
+    $identity = Get-RuntimeControlBundleIdentityAtRoot -ControlRoot $StageRoot `
+        -RequireDependencyClosure
     if (-not $identity -or [string]$identity.source_revision -ne $SourceRevision) {
         throw "CONTROL_BUNDLE_STAGED_HASH_VERIFICATION_FAILED"
     }
@@ -5722,11 +5881,13 @@ function Install-VerifiedRuntimeControlBundleStage {
         [Parameter(Mandatory = $true)][string]$ControlRoot,
         [Parameter(Mandatory = $true)][string]$BackupRoot
     )
-    $stagedIdentity = Get-RuntimeControlBundleIdentityAtRoot -ControlRoot $StageRoot
+    $stagedIdentity = Get-RuntimeControlBundleIdentityAtRoot `
+        -ControlRoot $StageRoot -RequireDependencyClosure
     if (-not $stagedIdentity) { throw "CONTROL_BUNDLE_STAGED_HASH_VERIFICATION_FAILED" }
     New-Item -ItemType Directory -Path $ControlRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
-    $payloadNames = @($runtimeControlFileNames) + @($runtimeControlManifestName)
+    $payloadNames = @($stagedIdentity.files.PSObject.Properties.Name) +
+        @($runtimeControlManifestName)
     foreach ($name in $payloadNames) {
         $destination = Join-Path $ControlRoot $name
         if (Test-Path -LiteralPath $destination) {
@@ -5738,7 +5899,8 @@ function Install-VerifiedRuntimeControlBundleStage {
             Copy-Item -LiteralPath (Join-Path $StageRoot $name) `
                 -Destination (Join-Path $ControlRoot $name) -Force
         }
-        $installed = Get-RuntimeControlBundleIdentityAtRoot -ControlRoot $ControlRoot
+        $installed = Get-RuntimeControlBundleIdentityAtRoot `
+            -ControlRoot $ControlRoot -RequireDependencyClosure
         if (-not $installed -or
             [string]$installed.source_revision -ne [string]$stagedIdentity.source_revision) {
             throw "CONTROL_BUNDLE_INSTALLED_HASH_VERIFICATION_FAILED"
@@ -5757,7 +5919,9 @@ function Restore-RuntimeControlBundleBackup {
     )
     $backupIdentity = Get-RuntimeControlBundleIdentityAtRoot -ControlRoot $BackupRoot
     if (-not $backupIdentity) { throw "CONTROL_BUNDLE_BACKUP_VERIFICATION_FAILED" }
-    foreach ($name in @($runtimeControlFileNames) + @($runtimeControlManifestName)) {
+    $payloadNames = @($backupIdentity.files.PSObject.Properties.Name) +
+        @($runtimeControlManifestName)
+    foreach ($name in $payloadNames) {
         Copy-Item -LiteralPath (Join-Path $BackupRoot $name) `
             -Destination (Join-Path $ControlRoot $name) -Force
     }
@@ -5767,6 +5931,41 @@ function Restore-RuntimeControlBundleBackup {
         throw "CONTROL_BUNDLE_ROLLBACK_VERIFICATION_FAILED"
     }
     return $restored
+}
+
+function Invoke-RuntimeControlBundleStartupPreflight {
+    param(
+        [Parameter(Mandatory = $true)][string]$StageRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedRevision,
+        [Parameter(Mandatory = $true)][string]$RepositoryRootForPreflight
+    )
+    $resultPath = Join-Path $StageRoot `
+        (".bundle-preflight-{0}.json" -f ([guid]::NewGuid().ToString("N")))
+    try {
+        $controlScript = Join-Path $StageRoot "xauusd_control_center.ps1"
+        & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+            -File $controlScript -Action ControlBundlePreflight `
+            -RuntimeRoot $RepositoryRootForPreflight `
+            -RepositoryRoot $RepositoryRootForPreflight `
+            -OperationResultPath $resultPath
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $resultPath)) {
+            throw "CONTROL_BUNDLE_STARTUP_PREFLIGHT_FAILED"
+        }
+        $receipt = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 |
+            ConvertFrom-ReleaseControlJson
+        $observedAt = ConvertTo-ReleaseTimestampUtc -Value $receipt.observed_at
+        if ([string]$receipt.supervision_mode -ne "QUIESCED" -or
+            [string]$receipt.control_bundle_revision -ne $ExpectedRevision -or
+            -not [bool]$receipt.control_bundle_hash_verified -or
+            -not [bool]$receipt.dependency_closed -or
+            $observedAt -eq [DateTimeOffset]::MinValue -or
+            ([DateTimeOffset]::UtcNow - $observedAt).TotalSeconds -gt 30) {
+            throw "CONTROL_BUNDLE_STARTUP_PREFLIGHT_INVALID"
+        }
+        return $receipt
+    } finally {
+        Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Sync-StableRuntimeControlFiles {
@@ -7595,7 +7794,8 @@ function Get-RuntimeControlBundleIdentity {
 }
 
 function Assert-ActiveControlBundle {
-    $identity = Get-RuntimeControlBundleIdentity
+    $identity = Get-RuntimeControlBundleIdentityAtRoot `
+        -ControlRoot $PSScriptRoot -RequireDependencyClosure
     if (-not $identity) { throw "CONTROL_BUNDLE_HASH_VERIFICATION_FAILED" }
     if (-not [bool]$identity.exact_revision -or
         [string]$identity.source_revision -notmatch '^[0-9a-f]{40}$') {
@@ -8361,6 +8561,12 @@ function Invoke-ControlPlaneInstall {
             -SourceRoot $VerifiedSourceRoot -SourceRevision $TargetRevision `
             -StageRoot $stageRoot -RequireImmutableSource
         if (-not $staged) { throw "CONTROL_BUNDLE_STAGED_HASH_VERIFICATION_FAILED" }
+        # Execute the staged entrypoint while the old supervisor still owns
+        # production. This proves load-time dependency closure in a clean bundle
+        # before any active Control Plane process is disturbed.
+        $null = Invoke-RuntimeControlBundleStartupPreflight `
+            -StageRoot $stageRoot -ExpectedRevision $TargetRevision `
+            -RepositoryRootForPreflight $VerifiedSourceRoot
         Write-ControlPlaneInstallState @{
             phase = "QUIESCE_CONTROL_SUPERVISION"
             bundle_hash_verified = $true
@@ -12697,7 +12903,7 @@ if ($ExpectedControlScriptPath -or $ExpectedControlRevision) {
         -ExpectedRevision $ExpectedControlRevision
 }
 
-if ($OperationResultPath) {
+if ($OperationResultPath -and $Action -ne "ControlBundlePreflight") {
     $structuredActions = @(
         "Start", "Stop", "Restart", "ServiceStart", "ServiceStop",
         "DiscoverCandidate", "RetryCandidateValidation", "ReconcileRelease", "PromoteCandidate",
@@ -12799,6 +13005,25 @@ switch ($Action) {
         Invoke-ControlPlaneInstall -VerifiedSourceRoot `
             ([System.IO.Path]::GetFullPath($SourceRoot)) `
             -TargetRevision $SourceRevision | Format-List
+    }
+    "ControlBundlePreflight" {
+        if (-not $OperationResultPath) {
+            throw "OperationResultPath is required for ControlBundlePreflight."
+        }
+        $bundle = Get-RuntimeControlBundleIdentityAtRoot `
+            -ControlRoot $PSScriptRoot -RequireDependencyClosure
+        if (-not $bundle) { throw "CONTROL_BUNDLE_STARTUP_PREFLIGHT_FAILED" }
+        [pscustomobject]@{
+            schema = "xauusd.control-bundle-startup-preflight.v1"
+            observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+            process_id = $PID
+            supervision_mode = "QUIESCED"
+            control_bundle_revision = [string]$bundle.source_revision
+            control_bundle_hash_verified = $true
+            dependency_closed = [bool]$bundle.dependency_closed_verified
+            bundle_digest = [string]$bundle.bundle_digest
+        } | ConvertTo-Json -Depth 5 | Set-Content `
+            -LiteralPath $OperationResultPath -Encoding UTF8
     }
     "PreflightRuntimeStateRoot" {
         Invoke-RuntimeStateRootMigration -PreflightOnly | Format-List

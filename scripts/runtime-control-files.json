@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "entrypoints": [
+    "xauusd_control_center.ps1",
+    "xauusd_watchdog_guard.ps1"
+  ],
+  "files": [
+    "runtime-control-files.json",
+    "xauusd_control_center.ps1",
+    "worker_cpu_evidence.ps1",
+    "control_center.xaml",
+    "xauusd_control_center_launcher.vbs",
+    "xauusd_watchdog_launcher.vbs",
+    "xauusd_watchdog_guard.ps1",
+    "xauusd_watchdog_guard_launcher.vbs"
+  ]
+}
