@@ -5398,6 +5398,57 @@ def test_expired_migration_renewal_links_the_previous_immutable_lease(tmp_path) 
     assert result == "MIGRATION_QUALIFICATION_RENEWED,True,2"
 
 
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_unpersisted_fresh_migration_renewal_is_recovered_from_immutable_store(
+    tmp_path, powershell: str,
+) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _expired_migration_acceptance_body()
+        + "$rootReceipt=Assert-CoordinatedMigrationRootReceipt $candidate $stable "
+        "$files $root.receipt_digest -AllowStale;"
+        "$live=Assert-CoordinatedMigrationLiveEvidenceMatchesRoot $rootReceipt "
+        "$candidate $stable $files -RequireExactGeneration;"
+        "$orphan=New-CoordinatedMigrationRenewalReceipt $candidate $stable $rootReceipt $live;"
+        "Write-CoordinatedMigrationRenewalReceipt $orphan;"
+        "$script:migrationMutationQueries=0;"
+        "$qualification=Ensure-CoordinatedMigrationQualification $candidate $stable $files;"
+        "$count=@(Get-ChildItem $coordinatedMigrationRenewalReceiptRoot -File).Count;"
+        'Write-Output "$($qualification.state),'
+        '$($qualification.receipt.receipt_digest -eq $orphan.receipt_digest),'
+        '$($candidate.migration_qualification.receipt_digest -eq $orphan.receipt_digest),'
+        '$count,$script:migrationMutationQueries"',
+        powershell=powershell,
+    )
+    assert result == "MIGRATION_QUALIFICATION_RENEWED,True,True,1,0"
+
+
+def test_unpersisted_stale_migration_renewal_is_linked_by_next_lease(tmp_path) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _expired_migration_acceptance_body()
+        + "$rootReceipt=Assert-CoordinatedMigrationRootReceipt $candidate $stable "
+        "$files $root.receipt_digest -AllowStale;"
+        "$live=Assert-CoordinatedMigrationLiveEvidenceMatchesRoot $rootReceipt "
+        "$candidate $stable $files -RequireExactGeneration;"
+        "$fresh=New-CoordinatedMigrationRenewalReceipt $candidate $stable $rootReceipt $live;"
+        "$oldCore=Get-CoordinatedMigrationRenewalCore $fresh;"
+        "$oldChecked=[DateTimeOffset]::UtcNow.AddHours(-3);"
+        "$oldCore['checked_at']=$oldChecked.ToString('o');"
+        "$oldCore['expires_at']=$oldChecked.AddHours(2).ToString('o');"
+        "$orphan=[pscustomobject]$oldCore;$orphan|Add-Member -NotePropertyName receipt_digest "
+        "-NotePropertyValue (Get-CoordinatedMigrationRenewalReceiptDigest $oldCore);"
+        "Write-CoordinatedMigrationRenewalReceipt $orphan;"
+        "$next=Ensure-CoordinatedMigrationQualification $candidate $stable $files;"
+        "$count=@(Get-ChildItem $coordinatedMigrationRenewalReceiptRoot -File).Count;"
+        'Write-Output "$($next.state),'
+        '$($next.receipt.previous_migration_renewal_digest -eq $orphan.receipt_digest),$count"',
+    )
+    assert result == "MIGRATION_QUALIFICATION_RENEWED,True,2"
+
+
 def test_migration_renewal_cannot_move_to_another_runtime_root(tmp_path) -> None:
     _write_coordinated_migration_files(tmp_path)
     result = _run_control_center_contract(
