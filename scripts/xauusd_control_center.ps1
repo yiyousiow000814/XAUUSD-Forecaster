@@ -2052,6 +2052,7 @@ function Get-ProductionCandidateProvenanceResult {
         $_ -like "docs/*" -or $_ -like "formal/*" -or $_ -like "tests/*" -or
         $_ -in @(
             "scripts/access-qualification-contract.json",
+            "scripts/check_deferred_projection_parity.py",
             "scripts/runtime-control-files.json",
             "scripts/xauusd_control_center.ps1"
         )
@@ -8419,7 +8420,7 @@ function Test-DeferredProjectionObligations {
     }
     $python = (Get-Command python.exe -ErrorAction Stop).Source
     $arguments = @(
-        (Join-Path $moduleRoot "scripts\check_deferred_projection_parity.py"),
+        (Join-Path $PSScriptRoot "check_deferred_projection_parity.py"),
         "--version-id", ([string]$Target.worker_version_id),
         "--git-sha", ([string]$Target.git_sha),
         "--producer-revision", ([string]$Target.windows_revision),

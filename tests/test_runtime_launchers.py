@@ -4688,6 +4688,33 @@ def test_deferred_projection_obligation_blocks_stable_commit(tmp_path) -> None:
     assert result == f"OBSERVING,{previous},True,{candidate}"
 
 
+def test_deferred_projection_probe_uses_installed_control_bundle_and_runtime_authority(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$target=New-ReleaseIdentity -GitSha ('b'*40) "
+        "-WorkerVersionId '22222222-2222-4222-8222-222222222222' "
+        "-WindowsRevision ('b'*40) -Branch 'main' -ArtifactKind 'PRODUCTION_CANDIDATE';"
+        "$obligation=[pscustomobject]@{route='/api/audit-stories'};"
+        "function Invoke-Utf8NativeProcess{param($FilePath,$Arguments,$WorkingDirectory,$Environment)"
+        "$script:probePath=$Arguments[0];$script:probeWorkingDirectory=$WorkingDirectory;"
+        "[pscustomobject]@{exit_code=0;stdout_lines=@('{\"state\":\"PASSED\","
+        "\"reason\":\"PASSED\",\"routes\":[]}');stderr_lines=@()}};"
+        "$answer=Test-DeferredProjectionObligations -Obligations @($obligation) "
+        "-Target $target -RequiredAfter ([DateTimeOffset]::UtcNow) "
+        "-ValidationKey $target.validation_key;"
+        "$bundleRoot=[IO.Path]::GetDirectoryName($script:probePath);"
+        "$manifest=Get-Content -LiteralPath (Join-Path $bundleRoot "
+        "'runtime-control-files.json') -Raw -Encoding UTF8|ConvertFrom-Json;"
+        "$declared='check_deferred_projection_parity.py' -in @($manifest.files);"
+        "$bundled=$bundleRoot -ne (Join-Path $moduleRoot 'scripts');"
+        '$runtimeBound=$script:probeWorkingDirectory -eq $moduleRoot;'
+        'Write-Output "$($answer.state),$declared,$bundled,$runtimeBound"',
+    )
+    assert result == "PASSED,True,True,True"
+
+
 def test_crashed_cutover_is_reconciled_to_recovery_required(tmp_path) -> None:
     previous = "a" * 40
     candidate = "b" * 40
@@ -5798,7 +5825,7 @@ def test_production_candidate_requires_exact_current_main(tmp_path) -> None:
     ("changed", "expected_state", "expected_mode"),
     (
         (
-            "@('scripts/xauusd_control_center.ps1','scripts/access-qualification-contract.json','tests/test_runtime_launchers.py')",
+            "@('scripts/xauusd_control_center.ps1','scripts/check_deferred_projection_parity.py','scripts/access-qualification-contract.json','tests/test_runtime_launchers.py')",
             "PASSED",
             "CONTROL_PLANE_ONLY_MAIN_ADVANCE",
         ),
