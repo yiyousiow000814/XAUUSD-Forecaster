@@ -84,6 +84,15 @@ repeat unchanged human acceptance. Human qualification is invalidated by a
 behavior change; machine freshness is renewed only by a complete, continuous
 reinspection of the qualified boundary.
 
+Separate durable qualification from renewable freshness. Expiration of a
+freshness observation must not invalidate an unchanged expensive or human
+qualification. Revalidate only the smallest authority that can actually have
+changed.
+
+Release evidence should form a dependency graph keyed by behavior-affecting
+identity. A failure or change invalidates only its dependent evidence, not the
+entire release.
+
 Any state-space reduction assumption must be explicit, documented, and owned by
 another verified shard or interface contract. Required safety and liveness may
 run independently when they do not require the same state dimensions.

@@ -150,13 +150,18 @@ remote migration ledger, exact D1 UUID, required tables, indexes and columns,
 legacy Stable and Reverse reads, Candidate identity headers, the bounded legacy
 decision ledger, and News generation/snapshot/digest/count equality. It also
 requires the active legacy News identity set to equal CURRENT exactly; matching
-counts with one missing and one extra identity fail closed. It writes
-a two-hour exact-Candidate receipt and immediately rechecks it against live
-state. A changed Candidate, Worker Version, database, migration file, ledger,
-schema capability, or projection invalidates the receipt and returns the
-Candidate to `REVIEW_REQUIRED`. Resume ordinary Candidate validation only after
-the action records `COORDINATED_STORAGE_MIGRATION_PASSED` for the exact
-validation key.
+counts with one missing and one extra identity fail closed. It writes an
+immutable exact-Candidate migration acceptance receipt and immediately rechecks
+it against live state. The root acceptance is durable; its two-hour expiry is
+only the live-state freshness lease. If that lease expires with the behavior
+identities unchanged, discovery or validation reruns the bounded read-only
+checks and writes an immutable `MIGRATION_QUALIFICATION_RENEWED` receipt linked
+to the root and any prior renewal. It does not apply migrations again. A changed
+Candidate, Worker Version, Stable identity, RuntimeRoot, database, migration
+file, ledger, CURRENT generation, schema capability, Reverse projection, or
+production owner rejects renewal and returns the Candidate to
+`REVIEW_REQUIRED`. Resume ordinary Candidate validation only after the action
+records `COORDINATED_STORAGE_MIGRATION_PASSED` for the exact validation key.
 
 The action leaves the sole Stable Dashboard Sync owner running. It records the
 CURRENT generation and activation watermark, then revalidates live state. A
