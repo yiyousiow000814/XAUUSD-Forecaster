@@ -5223,6 +5223,23 @@ function Get-CloudflareAccessAuditInterval {
     }
 }
 
+function Test-AccessProviderPolicyTimestampCompatible {
+    param(
+        [Parameter(Mandatory = $true)][DateTimeOffset]$Current,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$Previous,
+        [Parameter(Mandatory = $true)][object]$PreviousInspection
+    )
+    if ($Current -eq $Previous) { return $true }
+    return [bool](
+        [string]$PreviousInspection.schema_version -eq
+            "access-provider-inspection-v1" -and
+        [string]$PreviousInspection.inspection_method -eq
+            "CLOUDFLARE_AUTHENTICATED_DASHBOARD_READ_ONLY" -and
+        $Previous.Second -eq 0 -and $Previous.Millisecond -eq 0 -and
+        $Current -ge $Previous -and $Current -lt $Previous.AddMinutes(1)
+    )
+}
+
 function ConvertFrom-CloudflareAccessResources {
     param(
         [Parameter(Mandatory = $true)][object]$Application,
@@ -5255,6 +5272,9 @@ function ConvertFrom-CloudflareAccessResources {
     $policyUpdated = ConvertTo-ReleaseTimestampUtc -Value $Policy.updated_at
     $previousUpdated = ConvertTo-ReleaseTimestampUtc `
         -Value $PreviousInspection.policy_last_updated_at
+    $policyTimestampCompatible = Test-AccessProviderPolicyTimestampCompatible `
+        -Current $policyUpdated -Previous $previousUpdated `
+        -PreviousInspection $PreviousInspection
     $behavior = [pscustomobject]@{
         application_id = [string]$Application.id
         application_audience = [string]$Application.aud
@@ -5279,7 +5299,7 @@ function ConvertFrom-CloudflareAccessResources {
     }
     if ($policyUpdated -eq [DateTimeOffset]::MinValue -or
         $previousUpdated -eq [DateTimeOffset]::MinValue -or
-        $policyUpdated -ne $previousUpdated) {
+        -not $policyTimestampCompatible) {
         throw "ACCESS_PROVIDER_CONFIGURATION_CHANGED"
     }
     return Assert-AccessProviderInspectionMatchesContract -Inspection $behavior

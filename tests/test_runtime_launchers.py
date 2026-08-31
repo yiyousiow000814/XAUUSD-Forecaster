@@ -6527,6 +6527,7 @@ def _cloudflare_access_read_stubs(audit_event: str = "$null") -> str:
         "source='LOCAL_SECRET_FILE';diagnostic=$null}};"
         f"$script:auditEvent={audit_event};"
         "$script:policyDecision='allow';"
+        "$script:policyUpdatedAt=$null;"
         "function Invoke-RestMethod{param($Method,$Uri,$Headers,$TimeoutSec);"
         "if($Uri -match '/logs/audit'){return [pscustomobject]@{success=$true;"
         "result=@($script:auditEvent|Where-Object{$null-ne$_});result_info=[pscustomobject]@{cursor=''}}};"
@@ -6535,7 +6536,8 @@ def _cloudflare_access_read_stubs(audit_event: str = "$null") -> str:
         "if($Uri -match '/policies/'){return [pscustomobject]@{success=$true;result=[pscustomobject]@{"
         "id='d8ce9484-aca9-4c39-a211-37d2fa8ba9cf';name='Allow Assistant owner';"
         "decision=$script:policyDecision;precedence=1;session_duration='24h';"
-        "updated_at=$provider.policy_last_updated_at;include=@([pscustomobject]@{email=[pscustomobject]@{"
+        "updated_at=if($script:policyUpdatedAt){$script:policyUpdatedAt}else{$provider.policy_last_updated_at};"
+        "include=@([pscustomobject]@{email=[pscustomobject]@{"
         "email='owner@example.test'}});require=@();isolation_required=$false;"
         "purpose_justification_required=$false;approval_required=$false}}};"
         "return [pscustomobject]@{success=$true;result=[pscustomobject]@{"
@@ -6583,6 +6585,41 @@ def test_access_renewal_is_idempotent_for_same_provider_inspection(tmp_path) -> 
         'Write-Output "$($first.receipt_digest -eq $second.receipt_digest),$count1,$count2"',
     )
     assert result == "True,1,1"
+
+
+def test_legacy_dashboard_minute_timestamp_renews_from_exact_api_value(tmp_path) -> None:
+    legacy_minute = (
+        "$p=ConvertTo-ReleaseTimestampUtc $provider.policy_last_updated_at;"
+        "$provider.policy_last_updated_at=([DateTimeOffset]::new($p.Year,$p.Month,$p.Day,"
+        "$p.Hour,$p.Minute,0,[TimeSpan]::Zero)).ToString('o');"
+    )
+    result = _run_control_center_contract(
+        tmp_path,
+        _stale_access_reuse_ready_for_renewal(legacy_minute)
+        + _cloudflare_access_read_stubs()
+        + "$script:policyUpdatedAt=(ConvertTo-ReleaseTimestampUtc "
+        "$provider.policy_last_updated_at).AddSeconds(4).ToString('o');"
+        "$receipt=Ensure-AccessQualificationMachineReceipt $candidate;"
+        'Write-Output $receipt.state',
+    )
+    assert result == "ACCESS_QUALIFICATION_RENEWED"
+
+
+def test_policy_timestamp_precision_compatibility_remains_fail_closed(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$legacy=[pscustomobject]@{schema_version='access-provider-inspection-v1';"
+        "inspection_method='CLOUDFLARE_AUTHENTICATED_DASHBOARD_READ_ONLY'};"
+        "$api=[pscustomobject]@{schema_version='access-provider-inspection-v2';"
+        "inspection_method='CLOUDFLARE_ACCESS_API_READ_ONLY'};"
+        "$previous=[DateTimeOffset]::Parse('2026-08-19T17:09:00Z');"
+        "$sameMinute=$previous.AddSeconds(4);$nextMinute=$previous.AddMinutes(1);"
+        "$legacyOk=Test-AccessProviderPolicyTimestampCompatible $sameMinute $previous $legacy;"
+        "$legacyNext=Test-AccessProviderPolicyTimestampCompatible $nextMinute $previous $legacy;"
+        "$apiExact=Test-AccessProviderPolicyTimestampCompatible $sameMinute $previous $api;"
+        'Write-Output "$legacyOk,$legacyNext,$apiExact"',
+    )
+    assert result == "True,False,False"
 
 
 def test_access_renewal_chain_can_repeat_without_replacing_prior_receipts(tmp_path) -> None:
