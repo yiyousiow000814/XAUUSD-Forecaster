@@ -538,6 +538,10 @@ queued and cannot alter the in-flight target.
 Failed PRECHECK, CUTOVER, observation, or automatic rollback leaves the
 pre-transaction Previous Stable pointer unchanged. Only successful
 `COMMIT_STABLE` advances Previous Stable.
+Starting a new Observe attempt clears terminal, deferred, and result fields
+owned by the prior attempt before any new probe runs. Recovery of the same
+attempt does not restart Observe and must preserve its first terminal failure
+and evidence so a replacement watchdog cannot reinterpret it.
 
 An automatic rollback caused solely by a bounded Control Plane deferred-
 projection probe timeout records a failed release attempt, not a Candidate
