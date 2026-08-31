@@ -522,9 +522,13 @@ resumed only after both identities match. This bounds the mixed-contract window
 without creating a second production owner.
 OBSERVING reuses the existing full decision-cycle observation and rollback
 policy. Deferred split-projection obligations additionally require snapshots
-published after the cutover boundary, exact `producer_revision`, exact Worker/Git
-response identity, and full production-builder semantic equality. Pending is
-bounded and retryable; a hard mismatch or timeout enters automatic rollback.
+generated after the Candidate Windows reload/health boundary and published only
+after Worker cutover, exact `producer_revision`, exact Worker/Git response
+identity, and full production-builder semantic equality. The two boundaries are
+deliberately distinct: sync remains paused while Worker traffic switches, so a
+valid Candidate snapshot may begin during the controlled switch without being
+published by the old Worker contract. Pending is bounded and retryable; a hard
+mismatch or timeout enters automatic rollback.
 The parity probe reads the hash-verified persisted audit read model from the
 explicit runtime-state root; it does not depend on rebuilding the serving
 cache. Projection code is loaded from the explicit producer code root. During
