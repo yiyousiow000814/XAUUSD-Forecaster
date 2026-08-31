@@ -17,7 +17,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$repositoryRoot\scripts
 
 The installer requires the target to equal the freshly fetched `origin/main`.
 It stages an immutable detached worktree, verifies all bundle hashes before
-stopping the old watchdog. It disables and stops the guard but keeps the main
+stopping the old watchdog. The aggregate bundle digest is a canonical commitment
+to the schema, exact revision, exact file count, and ordinally ordered relative
+path/file-hash pairs; it is independent of JSON formatting, locale, PowerShell
+version, and installation path. Existing schema-2 bundles are accepted only when
+their exact legacy ordinal `path=hash` commitment and every individual file hash
+verify; the installer always writes the current canonical schema for the target.
+It disables and stops the guard but keeps the main
 task enabled for restart recovery. The replacement first emits an exact
 transaction-bound `QUIESCED` heartbeat. Only after service isolation is
 unchanged does the installer grant activation. Success then requires a

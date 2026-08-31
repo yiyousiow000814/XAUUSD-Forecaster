@@ -76,6 +76,8 @@ $runtimeControlFileNames = @($runtimeControlSourceManifest.files | ForEach-Objec
     [string]$_
 })
 $runtimeControlManifestName = "runtime-control-bundle.json"
+$runtimeControlBundleSchemaVersion = 3
+$runtimeControlBundleDigestAlgorithm = "xauusd.control-bundle.sha256.v1"
 $collectorSecretsPath = Join-Path $repositoryRoot ".local\secrets\collector-keys.json"
 $releaseSecretsRoot = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot ".local\secrets"))
 $releaseSecretsPath = [System.IO.Path]::GetFullPath((Join-Path $releaseSecretsRoot "cloudflare-release.json"))
@@ -8033,6 +8035,62 @@ function Get-Sha256TextHex {
     }
 }
 
+function ConvertTo-RuntimeControlRelativePath {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    $normalized = $Name.Replace("\", "/").Normalize(
+        [System.Text.NormalizationForm]::FormC
+    )
+    if (-not $normalized -or [IO.Path]::GetFileName($normalized) -ne $normalized -or
+        $normalized -match '[/\r\n\t]' -or
+        [IO.Path]::IsPathRooted($normalized)) {
+        throw "CONTROL_BUNDLE_RELATIVE_PATH_INVALID:$Name"
+    }
+    return $normalized
+}
+
+function Get-RuntimeControlOrdinalNames {
+    param([Parameter(Mandatory = $true)][object[]]$Names)
+    [string[]]$names = @($Names | ForEach-Object {
+        ConvertTo-RuntimeControlRelativePath -Name ([string]$_)
+    })
+    [Array]::Sort($names, [StringComparer]::Ordinal)
+    return $names
+}
+
+function Get-RuntimeControlBundleDigest {
+    param(
+        [Parameter(Mandatory = $true)][int]$SchemaVersion,
+        [Parameter(Mandatory = $true)][string]$SourceRevision,
+        [Parameter(Mandatory = $true)][hashtable]$Hashes
+    )
+    if ($SchemaVersion -ne $runtimeControlBundleSchemaVersion -or
+        $SourceRevision -notmatch '^[0-9a-f]{40}$') {
+        throw "CONTROL_BUNDLE_DIGEST_IDENTITY_INVALID"
+    }
+    $names = @(Get-RuntimeControlOrdinalNames -Names @($Hashes.Keys))
+    $lines = @(
+        $runtimeControlBundleDigestAlgorithm
+        "schema_version=$SchemaVersion"
+        "source_revision=$SourceRevision"
+        "file_count=$($names.Count)"
+    )
+    foreach ($name in $names) {
+        $hash = ([string]$Hashes[$name]).ToLowerInvariant()
+        if ($hash -notmatch '^[0-9a-f]{64}$') {
+            throw "CONTROL_BUNDLE_FILE_HASH_INVALID:$name"
+        }
+        $lines += "file=$name`thash=$hash"
+    }
+    return Get-Sha256TextHex -Value ($lines -join "`n")
+}
+
+function Get-RuntimeControlLegacyV2Digest {
+    param([Parameter(Mandatory = $true)][hashtable]$Hashes)
+    $lines = @(Get-RuntimeControlOrdinalNames -Names @($Hashes.Keys) |
+        ForEach-Object { "{0}={1}" -f $_, ([string]$Hashes[$_]).ToLowerInvariant() })
+    return Get-Sha256TextHex -Value ($lines -join "`n")
+}
+
 function Get-RuntimeControlSourceManifestAtRoot {
     param([Parameter(Mandatory = $true)][string]$Root)
     $path = Join-Path $Root $runtimeControlSourceManifestName
@@ -8047,7 +8105,9 @@ function Get-RuntimeControlSourceManifestAtRoot {
             $runtimeControlSourceManifestName -notin $files -or
             @($entrypoints | Where-Object { $_ -notin $files }).Count -ne 0 -or
             @($files | Where-Object {
-                [IO.Path]::GetFileName($_) -ne $_ -or $_ -match '[\\/]'
+                try {
+                    (ConvertTo-RuntimeControlRelativePath -Name $_) -ne $_
+                } catch { $true }
             }).Count -ne 0) {
             return $null
         }
@@ -8122,14 +8182,6 @@ function Assert-RuntimeControlDependencyClosure {
     return [pscustomobject]$graph
 }
 
-function Get-RuntimeControlFilesDigest {
-    param([Parameter(Mandatory = $true)][hashtable]$Hashes)
-    $lines = @($Hashes.Keys | Sort-Object | ForEach-Object {
-        "{0}={1}" -f $_, [string]$Hashes[$_]
-    })
-    return Get-Sha256TextHex -Value ($lines -join "`n")
-}
-
 function Get-RuntimeControlBundleIdentityAtRoot {
     param(
         [Parameter(Mandatory = $true)][string]$ControlRoot,
@@ -8148,7 +8200,20 @@ function Get-RuntimeControlBundleIdentityAtRoot {
             ForEach-Object { [string]$_ })
         $sourceManifest = Get-RuntimeControlSourceManifestAtRoot `
             -Root $ControlRoot
-        $dependencyClosed = ([int]$identity.schema_version -eq 2 -and
+        $schemaVersion = [int]$identity.schema_version
+        $canonicalBundle = ($schemaVersion -eq $runtimeControlBundleSchemaVersion -and
+            [string]$identity.bundle_digest_algorithm -eq
+                $runtimeControlBundleDigestAlgorithm)
+        $legacyV2Bundle = ($schemaVersion -eq 2 -and
+            -not [string]$identity.bundle_digest_algorithm)
+        if ($schemaVersion -notin @(1, 2, $runtimeControlBundleSchemaVersion) -or
+            ($schemaVersion -ge 2 -and
+                (-not [bool]$identity.dependency_closed -or -not $sourceManifest)) -or
+            ($schemaVersion -eq $runtimeControlBundleSchemaVersion -and
+                -not $canonicalBundle)) {
+            return $null
+        }
+        $dependencyClosed = (($canonicalBundle -or $legacyV2Bundle) -and
             [bool]$identity.dependency_closed -and $sourceManifest)
         $expectedNames = if ($dependencyClosed) {
             @($sourceManifest.files)
@@ -8158,8 +8223,10 @@ function Get-RuntimeControlBundleIdentityAtRoot {
             $manifestFileNames
         }
         if ($RequireDependencyClosure -and -not $dependencyClosed) { return $null }
-        $observedFileSet = (@($manifestFileNames | Sort-Object) -join "`n")
-        $expectedFileSet = (@($expectedNames | Sort-Object) -join "`n")
+        $observedFileSet = (@(Get-RuntimeControlOrdinalNames `
+            -Names $manifestFileNames) -join "`n")
+        $expectedFileSet = (@(Get-RuntimeControlOrdinalNames `
+            -Names $expectedNames) -join "`n")
         if ($observedFileSet -ne $expectedFileSet) { return $null }
         $hashes = @{}
         foreach ($name in $expectedNames) {
@@ -8172,10 +8239,21 @@ function Get-RuntimeControlBundleIdentityAtRoot {
             $hashes[$name] = $actual
         }
         if ($dependencyClosed) {
+            $expectedBundleDigest = if ($canonicalBundle) {
+                Get-RuntimeControlBundleDigest -SchemaVersion $schemaVersion `
+                    -SourceRevision ([string]$identity.source_revision) `
+                    -Hashes $hashes
+            } else {
+                # Schema 2 used the same path=hash byte format, but delegated
+                # ordering to culture-sensitive Sort-Object. The versioned
+                # adapter fixes that intended legacy order to ordinal so the
+                # exact existing commitment is reproducible on PS 5 and 7.
+                Get-RuntimeControlLegacyV2Digest -Hashes $hashes
+            }
             if ([string]$identity.source_manifest_sha256 -ne
                     [string]$sourceManifest.digest -or
                 [string]$identity.bundle_digest -ne
-                    (Get-RuntimeControlFilesDigest -Hashes $hashes)) {
+                    $expectedBundleDigest) {
                 return $null
             }
             $null = Assert-RuntimeControlDependencyClosure `
@@ -8183,6 +8261,10 @@ function Get-RuntimeControlBundleIdentityAtRoot {
         }
         $identity | Add-Member -NotePropertyName dependency_closed_verified `
             -NotePropertyValue $dependencyClosed -Force
+        $identity | Add-Member -NotePropertyName canonical_bundle_digest_verified `
+            -NotePropertyValue $canonicalBundle -Force
+        $identity | Add-Member -NotePropertyName legacy_v2_digest_verified `
+            -NotePropertyValue $legacyV2Bundle -Force
         return $identity
     } catch { return $null }
 }
@@ -8233,13 +8315,16 @@ function New-VerifiedRuntimeControlBundleStage {
         $hashes[$name] = Get-Sha256Hex -LiteralPath (Join-Path $StageRoot $name)
     }
     [pscustomobject]@{
-        schema_version = 2
+        schema_version = $runtimeControlBundleSchemaVersion
         source_revision = $SourceRevision
         exact_revision = $true
         created_at = [DateTimeOffset]::UtcNow.ToString("o")
         dependency_closed = $true
+        bundle_digest_algorithm = $runtimeControlBundleDigestAlgorithm
         source_manifest_sha256 = [string]$sourceManifest.digest
-        bundle_digest = Get-RuntimeControlFilesDigest -Hashes $hashes
+        bundle_digest = Get-RuntimeControlBundleDigest `
+            -SchemaVersion $runtimeControlBundleSchemaVersion `
+            -SourceRevision $SourceRevision -Hashes $hashes
         files = $hashes
     } | ConvertTo-Json -Depth 5 | Set-Content `
         -LiteralPath (Join-Path $StageRoot $runtimeControlManifestName) -Encoding UTF8

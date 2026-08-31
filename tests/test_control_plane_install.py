@@ -33,9 +33,30 @@ CONTROL_FILES = (
     "xauusd_watchdog_guard.ps1",
     "xauusd_watchdog_guard_launcher.vbs",
 )
+BUNDLE_DIGEST_ALGORITHM = "xauusd.control-bundle.sha256.v1"
+BUNDLE_SCHEMA_VERSION = 3
 
 
-def _run_contract(tmp_path: Path, body: str) -> str:
+def _canonical_bundle_digest(revision: str, hashes: dict[str, str]) -> str:
+    lines = [
+        BUNDLE_DIGEST_ALGORITHM,
+        f"schema_version={BUNDLE_SCHEMA_VERSION}",
+        f"source_revision={revision}",
+        f"file_count={len(hashes)}",
+        *(f"file={name}\thash={hashes[name].lower()}" for name in sorted(hashes)),
+    ]
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()
+
+
+def _legacy_v2_bundle_digest(hashes: dict[str, str]) -> str:
+    return hashlib.sha256(
+        "\n".join(f"{name}={hashes[name].lower()}" for name in sorted(hashes)).encode()
+    ).hexdigest()
+
+
+def _run_contract_with_runtime(
+    tmp_path: Path, body: str, runtime_executable: str,
+) -> str:
     runtime = tmp_path / "runtime"
     repository = tmp_path / "repository"
     runtime.mkdir(exist_ok=True)
@@ -46,21 +67,37 @@ def _run_contract(tmp_path: Path, body: str) -> str:
         f"-RepositoryRoot '{repository}'; {body}"
     )
     result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        [
+            runtime_executable,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ],
         capture_output=True,
         text=True,
         check=False,
     )
     if result.returncode:
         raise AssertionError(
-            "PowerShell control-plane contract failed\n"
+            f"{runtime_executable} control-plane contract failed\n"
             f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
         )
     return result.stdout.strip()
 
 
+def _run_contract(tmp_path: Path, body: str) -> str:
+    return _run_contract_with_runtime(tmp_path, body, "powershell.exe")
+
+
 def _write_bundle(
-    root: Path, revision: str, label: str, *, dependency_closed: bool = False,
+    root: Path,
+    revision: str,
+    label: str,
+    *,
+    dependency_closed: bool = False,
+    schema_version: int | None = None,
 ) -> None:
     root.mkdir(parents=True, exist_ok=True)
     hashes: dict[str, str] = {}
@@ -81,22 +118,28 @@ def _write_bundle(
         )
         (root / name).write_bytes(payload)
         hashes[name] = hashlib.sha256(payload).hexdigest()
-    file_digest = hashlib.sha256(
-        "\n".join(f"{name}={hashes[name]}" for name in sorted(hashes)).encode()
-    ).hexdigest()
+    schema_version = schema_version or (
+        BUNDLE_SCHEMA_VERSION if dependency_closed else 1
+    )
+    file_digest = (
+        _canonical_bundle_digest(revision, hashes)
+        if schema_version == BUNDLE_SCHEMA_VERSION
+        else _legacy_v2_bundle_digest(hashes)
+    )
+    manifest = {
+        "schema_version": schema_version,
+        "source_revision": revision,
+        "exact_revision": True,
+        "created_at": "2026-08-23T00:00:00+00:00",
+        "dependency_closed": dependency_closed,
+        "source_manifest_sha256": hashes["runtime-control-files.json"],
+        "bundle_digest": file_digest,
+        "files": hashes,
+    }
+    if schema_version == BUNDLE_SCHEMA_VERSION:
+        manifest["bundle_digest_algorithm"] = BUNDLE_DIGEST_ALGORITHM
     (root / "runtime-control-bundle.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 2 if dependency_closed else 1,
-                "source_revision": revision,
-                "exact_revision": True,
-                "created_at": "2026-08-23T00:00:00+00:00",
-                "dependency_closed": dependency_closed,
-                "source_manifest_sha256": hashes["runtime-control-files.json"],
-                "bundle_digest": file_digest,
-                "files": hashes,
-            }
-        ),
+        json.dumps(manifest),
         encoding="utf-8",
     )
 
@@ -300,6 +343,204 @@ def test_immutable_stage_requires_exact_clean_detached_source(tmp_path: Path) ->
         "catch { Write-Output $_.Exception.Message }",
     )
     assert rejected == "CONTROL_BUNDLE_IMMUTABLE_SOURCE_REQUIRED"
+
+
+@pytest.mark.skipif(shutil.which("pwsh.exe") is None, reason="PowerShell 7 is required")
+def test_legacy_v2_bundle_digest_is_reconstructed_identically_across_runtimes(
+    tmp_path: Path,
+) -> None:
+    control = tmp_path / "legacy-control"
+    revision = "a" * 40
+    _write_bundle(
+        control,
+        revision,
+        "legacy",
+        dependency_closed=True,
+        schema_version=2,
+    )
+    body = (
+        f"$bundle=Get-RuntimeControlBundleIdentityAtRoot -ControlRoot '{control}' "
+        "-RequireDependencyClosure; "
+        'Write-Output "$($bundle.bundle_digest)|$($bundle.legacy_v2_digest_verified)"'
+    )
+    expected = json.loads(
+        (control / "runtime-control-bundle.json").read_text(encoding="utf-8")
+    )["bundle_digest"]
+    assert _run_contract_with_runtime(tmp_path, body, "powershell.exe") == (
+        f"{expected}|True"
+    )
+    assert _run_contract_with_runtime(tmp_path, body, "pwsh.exe") == (
+        f"{expected}|True"
+    )
+
+    manifest_path = control / "runtime-control-bundle.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["bundle_digest"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    rejected = body.replace(
+        'Write-Output "$($bundle.bundle_digest)|$($bundle.legacy_v2_digest_verified)"',
+        "if($bundle){Write-Output accepted}else{Write-Output rejected}",
+    )
+    assert _run_contract_with_runtime(tmp_path, rejected, "powershell.exe") == "rejected"
+    assert _run_contract_with_runtime(tmp_path, rejected, "pwsh.exe") == "rejected"
+
+
+@pytest.mark.skipif(shutil.which("pwsh.exe") is None, reason="PowerShell 7 is required")
+def test_canonical_bundle_install_is_runtime_format_and_root_independent(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    revision = _make_detached_source(source)
+    stage5 = tmp_path / "stage-ps5"
+    stage7 = tmp_path / "stage-ps7"
+
+    def stage_with(runtime: str, stage: Path) -> str:
+        return _run_contract_with_runtime(
+            tmp_path,
+            f"$bundle=New-VerifiedRuntimeControlBundleStage -SourceRoot '{source}' "
+            f"-SourceRevision '{revision}' -StageRoot '{stage}' "
+            "-RequireImmutableSource; Write-Output $bundle.bundle_digest",
+            runtime,
+        )
+
+    digest5 = stage_with("powershell.exe", stage5)
+    digest7 = stage_with("pwsh.exe", stage7)
+    assert digest5 == digest7
+
+    hashes = json.loads(
+        (stage5 / "runtime-control-bundle.json").read_text(encoding="utf-8-sig")
+    )["files"]
+    entries = list(reversed(list(hashes.items())))
+    powershell_entries = ";".join(
+        f"$reversed['{name}']='{digest}'" for name, digest in entries
+    )
+    digest_body = (
+        "$forward=@{};$reversed=@{};"
+        + ";".join(f"$forward['{name}']='{digest}'" for name, digest in hashes.items())
+        + ";"
+        + powershell_entries
+        + f";$a=Get-RuntimeControlBundleDigest -SchemaVersion 3 "
+        f"-SourceRevision '{revision}' -Hashes $forward;"
+        f"$b=Get-RuntimeControlBundleDigest -SchemaVersion 3 "
+        f"-SourceRevision '{revision}' -Hashes $reversed;"
+        'Write-Output "$a|$b"'
+    )
+    for runtime in ("powershell.exe", "pwsh.exe"):
+        assert _run_contract_with_runtime(tmp_path, digest_body, runtime) == (
+            f"{digest5}|{digest5}"
+        )
+
+    manifest_path = stage5 / "runtime-control-bundle.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    reordered = {
+        "files": dict(reversed(list(manifest["files"].items()))),
+        "bundle_digest": manifest["bundle_digest"],
+        "source_manifest_sha256": manifest["source_manifest_sha256"],
+        "bundle_digest_algorithm": manifest["bundle_digest_algorithm"],
+        "dependency_closed": manifest["dependency_closed"],
+        "created_at": manifest["created_at"],
+        "exact_revision": manifest["exact_revision"],
+        "source_revision": manifest["source_revision"],
+        "schema_version": manifest["schema_version"],
+    }
+    manifest_path.write_text(
+        json.dumps(reordered, indent=3).replace("\n", "\r\n") + "\r\n",
+        encoding="utf-8",
+        newline="",
+    )
+    verify_body = (
+        f"$bundle=Get-RuntimeControlBundleIdentityAtRoot -ControlRoot '{stage5}' "
+        "-RequireDependencyClosure; Write-Output $bundle.bundle_digest"
+    )
+    assert _run_contract_with_runtime(tmp_path, verify_body, "powershell.exe") == digest5
+    assert _run_contract_with_runtime(tmp_path, verify_body, "pwsh.exe") == digest5
+
+    control = tmp_path / "control"
+    backup = tmp_path / "backup"
+    _write_bundle(control, "b" * 40, "old")
+    install_body = (
+        f"$bundle=Install-VerifiedRuntimeControlBundleStage -StageRoot '{stage5}' "
+        f"-ControlRoot '{control}' -BackupRoot '{backup}'; "
+        "Write-Output $bundle.bundle_digest"
+    )
+    assert _run_contract_with_runtime(tmp_path, install_body, "pwsh.exe") == digest5
+    moved = tmp_path / "moved-control"
+    shutil.copytree(control, moved)
+    moved_body = (
+        f"$bundle=Get-RuntimeControlBundleIdentityAtRoot -ControlRoot '{moved}' "
+        "-RequireDependencyClosure; Write-Output $bundle.bundle_digest"
+    )
+    assert _run_contract_with_runtime(tmp_path, moved_body, "powershell.exe") == digest5
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "changed_file",
+        "changed_hash",
+        "changed_path",
+        "missing_file",
+        "extra_file_entry",
+        "changed_revision",
+        "malformed_manifest",
+    ),
+)
+def test_canonical_bundle_identity_mutations_fail_closed(
+    tmp_path: Path, mutation: str,
+) -> None:
+    source = tmp_path / f"source-{mutation}"
+    revision = _make_detached_source(source)
+    stage = tmp_path / f"stage-{mutation}"
+    _run_contract(
+        tmp_path,
+        f"New-VerifiedRuntimeControlBundleStage -SourceRoot '{source}' "
+        f"-SourceRevision '{revision}' -StageRoot '{stage}' "
+        "-RequireImmutableSource | Out-Null",
+    )
+    manifest_path = stage / "runtime-control-bundle.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    first = CONTROL_FILES[0]
+    if mutation == "changed_file":
+        (stage / first).write_text("tampered\n", encoding="utf-8")
+    elif mutation == "changed_hash":
+        manifest["files"][first] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    elif mutation == "changed_path":
+        manifest["files"][f"renamed-{first}"] = manifest["files"].pop(first)
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    elif mutation == "missing_file":
+        (stage / first).unlink()
+    elif mutation == "extra_file_entry":
+        manifest["files"]["unexpected.ps1"] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    elif mutation == "changed_revision":
+        manifest["source_revision"] = "f" * 40
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    elif mutation == "malformed_manifest":
+        manifest_path.write_text("{not-json", encoding="utf-8")
+    result = _run_contract(
+        tmp_path,
+        f"$bundle=Get-RuntimeControlBundleIdentityAtRoot -ControlRoot '{stage}' "
+        "-RequireDependencyClosure; if($bundle){Write-Output accepted}else{Write-Output rejected}",
+    )
+    assert result == "rejected"
+
+
+def test_canonical_digest_binds_revision_and_relative_path(tmp_path: Path) -> None:
+    first_hash = "1" * 64
+    revision = "a" * 40
+    body = (
+        f"$base=@{{'control.ps1'='{first_hash}'}};"
+        f"$renamed=@{{'renamed.ps1'='{first_hash}'}};"
+        "$a=Get-RuntimeControlBundleDigest -SchemaVersion 3 "
+        f"-SourceRevision '{revision}' -Hashes $base;"
+        "$b=Get-RuntimeControlBundleDigest -SchemaVersion 3 "
+        f"-SourceRevision '{'b' * 40}' -Hashes $base;"
+        "$c=Get-RuntimeControlBundleDigest -SchemaVersion 3 "
+        f"-SourceRevision '{revision}' -Hashes $renamed;"
+        'Write-Output "$($a-ne$b)|$($a-ne$c)"'
+    )
+    assert _run_contract(tmp_path, body) == "True|True"
 
 
 def test_bundle_manifest_owns_direct_and_transitive_runtime_dependencies(
