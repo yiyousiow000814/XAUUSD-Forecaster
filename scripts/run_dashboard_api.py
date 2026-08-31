@@ -31,6 +31,7 @@ from xauusd_forecaster.dashboard_payloads import (
 )
 from xauusd_forecaster.dashboard_read_models import (
     DashboardReadModelOwner,
+    DashboardReadModelSnapshot,
     DashboardReadModelUnavailable,
     read_dashboard_read_model,
 )
@@ -836,9 +837,12 @@ def _latest_quote_received(database: Path) -> str | None:
     return None
 
 
-def _latest_decision_created_at(database: Path) -> str | None:
-    """Read decision cadence from a new SQLite snapshot at classification time."""
-    connection = sqlite3.connect(
+def _latest_decision_created_at(
+    database: Path, snapshot_connection: sqlite3.Connection | None = None,
+) -> str | None:
+    """Read cadence from the caller's snapshot when one owns the build."""
+    owns_connection = snapshot_connection is None
+    connection = snapshot_connection or sqlite3.connect(
         f"file:{database}?mode=ro", uri=True, timeout=5,
     )
     try:
@@ -847,7 +851,8 @@ def _latest_decision_created_at(database: Path) -> str | None:
                WHERE activity_name='decision_events'"""
         ).fetchone()[0]
     finally:
-        connection.close()
+        if owns_connection:
+            connection.close()
 
 
 def _runtime_heartbeat(path: Path, *, service: str) -> dict[str, object]:
@@ -2463,6 +2468,7 @@ def _news_metrics(
 def _dashboard_payload(
     database: Path, *, clock=None, include_optional: bool = True,
     optional_resources: frozenset[str] | None = None,
+    snapshot_connection: sqlite3.Connection | None = None,
 ) -> dict:
     clock = clock or (lambda: datetime.now(UTC))
     now = clock()
@@ -2481,9 +2487,13 @@ def _dashboard_payload(
         credential.account_id for credential in credentials
     })
     scheduler_quotas = None
-    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)
+    owns_connection = snapshot_connection is None
+    connection = snapshot_connection or sqlite3.connect(
+        f"file:{database}?mode=ro", uri=True, timeout=5,
+    )
     connection.row_factory = sqlite3.Row
-    connection.execute("BEGIN")
+    if owns_connection:
+        connection.execute("BEGIN")
     try:
         latest = connection.execute(
             """SELECT d.decision_id, d.decision_time, d.effective_action, d.data_health,
@@ -2953,8 +2963,9 @@ def _dashboard_payload(
         )
         operational_health = scheduler_health_snapshot(connection, now=now)
     finally:
-        connection.rollback()
-        connection.close()
+        if owns_connection:
+            connection.rollback()
+            connection.close()
 
     latest_data = dict(latest) if latest else None
     if latest_data:
@@ -3014,7 +3025,9 @@ def _dashboard_payload(
         database.parent / "collector-status.json", service="collector",
     )
     component_times["quote_bridge"] = _latest_quote_received(database)
-    latest_decision_time = _latest_decision_created_at(database)
+    latest_decision_time = _latest_decision_created_at(
+        database, snapshot_connection,
+    )
     component_times["news_collector"] = collector_heartbeat.get("last_success")
     component_times["outcome_settler"] = (
         collector_heartbeat.get("last_success")
@@ -3476,10 +3489,15 @@ def _dashboard_payload(
     }
 
 
-def _optional_resource_payload(database: Path, resource: str) -> dict:
+def _optional_resource_payload(
+    snapshot: DashboardReadModelSnapshot, resource: str,
+) -> dict:
     """Build one optional resource without evaluating sibling producers."""
     payload = _dashboard_payload(
-        database, optional_resources=frozenset({resource}),
+        snapshot.database,
+        clock=lambda: snapshot.started_at,
+        optional_resources=frozenset({resource}),
+        snapshot_connection=snapshot.connection,
     )
     if resource == "audit":
         return audit_status_payload(payload)
@@ -3850,8 +3868,8 @@ def main() -> int:
         Handler.database,
         {
             resource: (
-                lambda database, resource=resource: _optional_resource_payload(
-                    database, resource,
+                lambda snapshot, resource=resource: _optional_resource_payload(
+                    snapshot, resource,
                 )
             )
             for resource in ("audit", "learning", "market_chart")

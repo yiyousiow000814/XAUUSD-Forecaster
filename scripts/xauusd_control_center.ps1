@@ -9162,6 +9162,12 @@ function Test-RuntimeObservation {
     }
     $revision = [string]$state.observing_revision
     $previousRevision = [string]$state.previous_revision
+    $recordedFailure = [string]$state.observation_original_failure_reason
+    if (-not [string]::IsNullOrWhiteSpace($recordedFailure)) {
+        Invoke-RuntimeRollback -FailedRevision $revision `
+            -PreviousRevision $previousRevision -Reason $recordedFailure | Out-Null
+        return $false
+    }
     $started = ConvertTo-ReleaseTimestampUtc -Value $state.observation_started_at
     $startedValid = $started -ne [DateTimeOffset]::MinValue
     if (-not $startedValid) {
@@ -9274,6 +9280,11 @@ function Test-RuntimeObservation {
         $failures = 1 + [int]$state.observation_consecutive_failures
         Write-RuntimeUpdateState @{ observation_consecutive_failures = $failures }
         if ($failures -ge 3) {
+            Write-RuntimeUpdateState @{
+                observation_original_failure_reason = $failure
+                observation_original_failure_evidence = $state.observation_deferred_projection_evidence
+                observation_original_failed_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
             Invoke-RuntimeRollback -FailedRevision $revision `
                 -PreviousRevision $previousRevision -Reason $failure | Out-Null
             return $false
