@@ -3163,10 +3163,40 @@ def test_three_consecutive_observation_failures_trigger_one_rollback(tmp_path) -
         "Write-RuntimeUpdateState @{ update_status = 'ROLLED_BACK' }; return $true }; "
         "$first = Test-RuntimeObservation; $second = Test-RuntimeObservation; "
         "$third = Test-RuntimeObservation; $state = Get-RuntimeUpdateState; "
-        'Write-Output "$first,$second,$third,$script:rollbacks,$($state.update_status)"',
+        'Write-Output "$first,$second,$third,$script:rollbacks,'
+        '$($state.update_status),$($state.observation_original_failure_reason)"',
     )
 
-    assert result == "True,True,False,1,ROLLED_BACK"
+    assert result == "True,True,False,1,ROLLED_BACK,reload health check failed"
+
+
+def test_replacement_watchdog_preserves_original_observe_failure(tmp_path) -> None:
+    original = "DEFERRED_PROJECTION_OBSERVATION_TIMEOUT"
+    evidence = {
+        "state": "PENDING",
+        "reason": "CANDIDATE_PROJECTION_PARITY_PENDING",
+    }
+    _write_runtime_observation(
+        tmp_path,
+        observation_consecutive_failures=3,
+        observation_original_failure_reason=original,
+        observation_original_failure_evidence=evidence,
+    )
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:reason = $null; function Test-CodeReloadHealth { "
+        "throw 'replacement must not rerun observation probes' }; "
+        "function Invoke-RuntimeRollback { param($FailedRevision,$PreviousRevision,$Reason); "
+        "$script:reason=$Reason; Write-RuntimeUpdateState @{ update_status='ROLLED_BACK' }; "
+        "return $true }; $answer=Test-RuntimeObservation; $state=Get-RuntimeUpdateState; "
+        'Write-Output "$answer,$script:reason,$($state.update_status),'
+        '$($state.observation_original_failure_evidence.reason)"',
+    )
+
+    assert result == (
+        "False,DEFERRED_PROJECTION_OBSERVATION_TIMEOUT,ROLLED_BACK,"
+        "CANDIDATE_PROJECTION_PARITY_PENDING"
+    )
 
 
 def test_snapshot_refresh_defers_observation_without_consuming_failure_budget(

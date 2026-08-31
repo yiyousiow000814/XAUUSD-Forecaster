@@ -24,8 +24,10 @@ from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES
 from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster.dashboard_read_models import (
     DashboardReadModelOwner,
+    DashboardReadModelSnapshot,
     DashboardReadModelUnavailable,
     READ_MODEL_CONTRACTS,
+    REFRESHED_DIRTY,
     read_dashboard_read_model,
 )
 from xauusd_forecaster.dashboard_summaries import (
@@ -1812,13 +1814,13 @@ def test_optional_api_producers_fail_independently(
     ForwardLedger(database).close()
     module.Handler.database = database
 
-    def resource(_database, name):
+    def resource(snapshot, name):
         if name == failed_resource:
             raise RuntimeError(f"{name} source failed")
-        return {"generated_at": "2026-08-19T00:00:00+00:00", "resource": name}
+        return {"generated_at": snapshot.started_at.isoformat(), "resource": name}
 
     owner = DashboardReadModelOwner(
-        database, {name: lambda database, name=name: resource(database, name)
+        database, {name: lambda snapshot, name=name: resource(snapshot, name)
                    for name in READ_MODEL_CONTRACTS},
     )
     expected_refresh = {resource: 1 for resource in READ_MODEL_CONTRACTS}
@@ -1865,10 +1867,10 @@ def test_durable_optional_read_models_are_atomic_bounded_and_incremental(
     calls = {resource: 0 for resource in READ_MODEL_CONTRACTS}
 
     def builder(resource):
-        def build(_database):
+        def build(snapshot):
             calls[resource] += 1
             return {
-                "generated_at": "2026-08-21T10:20:00+00:00",
+                "generated_at": snapshot.started_at.isoformat(),
                 "resource": resource,
                 "generation": calls[resource],
             }
@@ -1915,14 +1917,254 @@ def test_durable_optional_read_models_are_atomic_bounded_and_incremental(
     assert current == prior
 
 
+@pytest.mark.parametrize("resource", tuple(READ_MODEL_CONTRACTS))
+def test_real_optional_builder_uses_one_sqlite_snapshot(
+    monkeypatch, tmp_path, resource,
+) -> None:
+    module = _dashboard_module()
+    database = tmp_path / "forward.sqlite3"
+    ForwardLedger(database).close()
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    connection.execute("BEGIN DEFERRED")
+    snapshot = DashboardReadModelSnapshot(
+        database=database,
+        connection=connection,
+        source_revision=0,
+        started_at=datetime.now(UTC),
+    )
+    monkeypatch.setattr(
+        module.sqlite3, "connect",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("optional builder opened a second SQLite connection")
+        ),
+    )
+    try:
+        payload = module._optional_resource_payload(snapshot, resource)
+    finally:
+        connection.rollback()
+        connection.close()
+    assert payload["generated_at"] == snapshot.started_at.isoformat()
+
+
+def _insert_brief(connection: sqlite3.Connection, index: int) -> None:
+    instant = f"2026-08-31T00:{index % 60:02d}:00+00:00"
+    connection.execute(
+        "INSERT INTO daily_news_briefs VALUES (?,?,?,?,?,?,?,?)",
+        (
+            f"continuous-{index}", 1, f"hash-{index}", instant, instant,
+            "test-model", "test-prompt", '{"title":"snapshot","items":[]}',
+        ),
+    )
+
+
+def test_read_model_snapshot_publishes_during_continuous_source_writes(
+    tmp_path,
+) -> None:
+    database = tmp_path / "forward.sqlite3"
+    ForwardLedger(database).close()
+    connection = sqlite3.connect(database)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.close()
+    snapshot_read = threading.Event()
+    writes_finished = threading.Event()
+
+    def build(snapshot):
+        before = snapshot.connection.execute(
+            "SELECT count(*) FROM daily_news_briefs"
+        ).fetchone()[0]
+        snapshot_read.set()
+        assert writes_finished.wait(timeout=5)
+        after = snapshot.connection.execute(
+            "SELECT count(*) FROM daily_news_briefs"
+        ).fetchone()[0]
+        return {
+            "generated_at": snapshot.started_at.isoformat(),
+            "before": before,
+            "after": after,
+            "snapshot_revision": snapshot.source_revision,
+        }
+
+    owner = DashboardReadModelOwner(
+        database, {"audit": build}, max_snapshot_seconds=5,
+    )
+
+    def write_continuously() -> None:
+        assert snapshot_read.wait(timeout=5)
+        writer = sqlite3.connect(database, timeout=5)
+        try:
+            for index in range(24):
+                with writer:
+                    _insert_brief(writer, index)
+        finally:
+            writer.close()
+            writes_finished.set()
+
+    writer = threading.Thread(target=write_continuously)
+    writer.start()
+    wal = database.with_name(database.name + "-wal")
+    wal_before = wal.stat().st_size if wal.exists() else 0
+    assert owner.refresh_resource("audit") == REFRESHED_DIRTY
+    writer.join(timeout=5)
+    assert not writer.is_alive()
+    first_body, first_metadata = read_dashboard_read_model(database, "audit")
+    first = json.loads(first_body)
+    assert first["before"] == first["after"] == 0
+    assert first["snapshot_revision"] == first_metadata["source_revision"]
+    assert first_metadata["dirty"] is True
+
+    assert owner.refresh_resource("audit") == 1
+    final_body, final_metadata = read_dashboard_read_model(database, "audit")
+    final = json.loads(final_body)
+    assert final["before"] == final["after"] == 24
+    assert final_metadata["source_revision"] > first_metadata["source_revision"]
+    assert final_metadata["source_revision"] == final_metadata["current_source_revision"]
+    assert final_metadata["dirty"] is False
+    wal_after = wal.stat().st_size if wal.exists() else 0
+    assert wal_after - wal_before < 2_000_000
+
+
+def test_older_completed_snapshot_cannot_replace_newer_publication(tmp_path) -> None:
+    database = tmp_path / "forward.sqlite3"
+    ForwardLedger(database).close()
+    connection = sqlite3.connect(database)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.close()
+    older_started = threading.Event()
+    release_older = threading.Event()
+
+    def older_builder(snapshot):
+        count = snapshot.connection.execute(
+            "SELECT count(*) FROM daily_news_briefs"
+        ).fetchone()[0]
+        older_started.set()
+        assert release_older.wait(timeout=5)
+        return {
+            "generated_at": snapshot.started_at.isoformat(),
+            "count": count, "label": "older",
+        }
+
+    older = DashboardReadModelOwner(database, {"audit": older_builder})
+    result = []
+    thread = threading.Thread(
+        target=lambda: result.append(older.refresh_resource("audit")),
+    )
+    thread.start()
+    assert older_started.wait(timeout=5)
+    writer = sqlite3.connect(database)
+    with writer:
+        _insert_brief(writer, 1)
+    writer.close()
+
+    newer = DashboardReadModelOwner(
+        database,
+        {"audit": lambda snapshot: {
+            "generated_at": snapshot.started_at.isoformat(),
+            "count": snapshot.connection.execute(
+                "SELECT count(*) FROM daily_news_briefs"
+            ).fetchone()[0],
+            "label": "newer",
+        }},
+    )
+    assert newer.refresh_resource("audit") == 1
+    release_older.set()
+    thread.join(timeout=5)
+    assert result == [0]
+    body, metadata = read_dashboard_read_model(database, "audit")
+    decoded = json.loads(body)
+    assert decoded["count"] == 1
+    assert decoded["label"] == "newer"
+    assert metadata["source_revision"] == metadata["current_source_revision"]
+
+
+def test_read_model_snapshot_duration_is_bounded(tmp_path) -> None:
+    database = tmp_path / "forward.sqlite3"
+    ForwardLedger(database).close()
+    owner = DashboardReadModelOwner(
+        database,
+        {"audit": lambda snapshot: (
+            time.sleep(0.02) or {
+                "generated_at": snapshot.started_at.isoformat(),
+            }
+        )},
+        max_snapshot_seconds=0.01,
+    )
+    with pytest.raises(TimeoutError, match="snapshot exceeded"):
+        owner.refresh_resource("audit")
+
+
+@pytest.mark.parametrize(
+    ("builder", "message"),
+    (
+        (lambda _snapshot: {}, "generated_at is required"),
+        (
+            lambda snapshot: {
+                "generated_at": (
+                    snapshot.started_at - timedelta(seconds=6)
+                ).isoformat(),
+            },
+            "generated_at is not bound to its snapshot",
+        ),
+    ),
+)
+def test_read_model_freshness_cannot_be_manufactured(
+    tmp_path, builder, message,
+) -> None:
+    database = tmp_path / "forward.sqlite3"
+    ForwardLedger(database).close()
+    owner = DashboardReadModelOwner(database, {"audit": builder})
+    with pytest.raises(ValueError, match=message):
+        owner.refresh_resource("audit")
+
+
+def test_existing_read_model_schema_gains_snapshot_provenance(tmp_path) -> None:
+    from xauusd_forecaster.dashboard_read_models import (
+        install_dashboard_read_model_schema,
+    )
+
+    database = tmp_path / "forward.sqlite3"
+    ForwardLedger(database).close()
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """DROP TABLE dashboard_optional_read_models_v1;
+           DROP TABLE dashboard_optional_read_model_state_v1;
+           CREATE TABLE dashboard_optional_read_models_v1 (
+             resource TEXT PRIMARY KEY,
+             contract_version TEXT NOT NULL,
+             source_revision INTEGER NOT NULL,
+             generated_at TEXT NOT NULL,
+             payload_json TEXT NOT NULL,
+             payload_hash TEXT NOT NULL,
+             updated_at TEXT NOT NULL
+           );
+           CREATE TABLE dashboard_optional_read_model_state_v1 (
+             resource TEXT PRIMARY KEY,
+             source_revision INTEGER NOT NULL DEFAULT 0,
+             last_success_at TEXT,
+             last_error TEXT,
+             updated_at TEXT NOT NULL
+           );"""
+    )
+    install_dashboard_read_model_schema(connection)
+    columns = {
+        row[1] for row in connection.execute(
+            "PRAGMA table_info(dashboard_optional_read_models_v1)"
+        )
+    }
+    connection.close()
+    assert {
+        "snapshot_started_at", "snapshot_completed_at", "live_source_revision",
+    } <= columns
+
+
 def test_optional_read_model_validation_and_concurrent_reads(tmp_path) -> None:
     database = tmp_path / "forward.sqlite3"
     ForwardLedger(database).close()
     owner = DashboardReadModelOwner(
         database,
         {
-            resource: lambda _database, resource=resource: {
-                "generated_at": "2026-08-21T10:20:00+00:00",
+            resource: lambda snapshot, resource=resource: {
+                "generated_at": snapshot.started_at.isoformat(),
                 "resource": resource,
             }
             for resource in READ_MODEL_CONTRACTS
@@ -1937,7 +2179,7 @@ def test_optional_read_model_validation_and_concurrent_reads(tmp_path) -> None:
     assert len(set(results)) == 1
     _, stale = read_dashboard_read_model(
         database, "learning",
-        now=datetime(2026, 8, 22, 10, 20, tzinfo=UTC),
+        now=datetime.now(UTC) + timedelta(days=1),
     )
     assert stale["state"] == "STALE"
 
