@@ -124,6 +124,7 @@ $candidateOnlyProjectionRoutes = @(
 $releaseLockOwnerGrace = [TimeSpan]::FromSeconds(30)
 $coordinatedMigrationReceiptMaxAge = [TimeSpan]::FromHours(2)
 $coordinatedMigrationRenewalMaximumDepth = 32
+$coordinatedMigrationRenewalStoreMaximumReceipts = 128
 $accessBoundaryReceiptMaxAge = [TimeSpan]::FromHours(2)
 $accessMachineReceiptMaxAge = [TimeSpan]::FromHours(2)
 # Cloudflare documents 18-month audit-log retention. Keep automatic renewal's
@@ -2169,6 +2170,72 @@ function Assert-CoordinatedMigrationRenewalReceipt {
     return $receipt
 }
 
+function Get-LatestCoordinatedMigrationRenewalReceipt {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$Stable,
+        [Parameter(Mandatory = $true)][string[]]$MigrationFiles,
+        [Parameter(Mandatory = $true)][string]$RootDigest
+    )
+    if (-not (Test-Path -LiteralPath $coordinatedMigrationRenewalReceiptRoot)) {
+        return $null
+    }
+    $files = @(Get-ChildItem -LiteralPath $coordinatedMigrationRenewalReceiptRoot `
+        -File -Filter "*.json")
+    if ($files.Count -gt $coordinatedMigrationRenewalStoreMaximumReceipts) {
+        throw "MIGRATION_QUALIFICATION_RENEWAL_STORE_BOUND_EXCEEDED"
+    }
+    $candidates = @()
+    foreach ($file in $files) {
+        if ($file.Length -gt 131072 -or
+            $file.BaseName -notmatch '^[0-9a-f]{64}$') {
+            throw "MIGRATION_QUALIFICATION_RENEWAL_TAMPERED"
+        }
+        try {
+            $receipt = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
+                ConvertFrom-ReleaseControlJson
+        } catch { throw "MIGRATION_QUALIFICATION_RENEWAL_TAMPERED" }
+        $core = Get-CoordinatedMigrationRenewalCore -Receipt $receipt
+        if ([string]$receipt.receipt_digest -cne [string]$file.BaseName -or
+            [string]$receipt.receipt_digest -cne
+                (Get-CoordinatedMigrationRenewalReceiptDigest -Core $core)) {
+            throw "MIGRATION_QUALIFICATION_RENEWAL_TAMPERED"
+        }
+        if ([string]$receipt.root_migration_receipt_digest -cne $RootDigest -or
+            [string]$receipt.validation_key -cne [string]$Candidate.validation_key) {
+            continue
+        }
+        $valid = Assert-CoordinatedMigrationRenewalReceipt -Candidate $Candidate `
+            -Stable $Stable -MigrationFiles $MigrationFiles `
+            -Digest ([string]$receipt.receipt_digest) -RootDigest $RootDigest -AllowStale
+        $checked = ConvertTo-ReleaseTimestampUtc -Value $valid.checked_at
+        if ($checked -eq [DateTimeOffset]::MinValue) {
+            throw "MIGRATION_QUALIFICATION_RENEWAL_TAMPERED"
+        }
+        $candidates += @([pscustomobject]@{ receipt = $valid; checked_at = $checked })
+    }
+    if ($candidates.Count -eq 0) { return $null }
+    return @($candidates | Sort-Object checked_at -Descending)[0].receipt
+}
+
+function Set-CandidateMigrationQualificationFromReceipt {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$Receipt
+    )
+    $Candidate | Add-Member -Force -NotePropertyName migration_qualification `
+        -NotePropertyValue ([pscustomobject]@{
+            state = "MIGRATION_QUALIFICATION_RENEWED"
+            validation_key = [string]$Candidate.validation_key
+            root_receipt_digest = [string]$Receipt.root_migration_receipt_digest
+            previous_migration_renewal_digest =
+                [string]$Receipt.previous_migration_renewal_digest
+            receipt_digest = [string]$Receipt.receipt_digest
+            checked_at = [string]$Receipt.checked_at
+            expires_at = [string]$Receipt.expires_at
+        })
+}
+
 function Assert-CoordinatedMigrationRenewalSafety {
     param([Parameter(Mandatory = $true)][object]$Stable)
     $state = Get-ReleaseControlState
@@ -2255,14 +2322,29 @@ function Ensure-CoordinatedMigrationQualification {
     $rootDigest = [string]$Candidate.migration_acceptance.receipt_digest
     $previousRenewalDigest = ""
     $stale = $false
-    if ($Candidate.migration_qualification -and
-        [string]$Candidate.migration_qualification.state -eq
-            "MIGRATION_QUALIFICATION_RENEWED") {
-        $previousRenewalDigest = [string]$Candidate.migration_qualification.receipt_digest
+    $candidateRenewal = $null
+    if ($Candidate.migration_qualification) {
+        if ([string]$Candidate.migration_qualification.state -ne
+                "MIGRATION_QUALIFICATION_RENEWED") {
+            throw "MIGRATION_QUALIFICATION_RENEWAL_TAMPERED"
+        }
+        $candidateRenewal = Assert-CoordinatedMigrationRenewalReceipt `
+            -Candidate $Candidate -Stable $Stable -MigrationFiles $MigrationFiles `
+            -Digest ([string]$Candidate.migration_qualification.receipt_digest) `
+            -RootDigest $rootDigest -AllowStale
+    }
+    $storedRenewal = Get-LatestCoordinatedMigrationRenewalReceipt `
+        -Candidate $Candidate -Stable $Stable -MigrationFiles $MigrationFiles `
+        -RootDigest $rootDigest
+    $currentRenewal = if ($storedRenewal) { $storedRenewal } else { $candidateRenewal }
+    if ($currentRenewal) {
+        $previousRenewalDigest = [string]$currentRenewal.receipt_digest
         try {
             $current = Assert-CoordinatedMigrationRenewalReceipt -Candidate $Candidate `
                 -Stable $Stable -MigrationFiles $MigrationFiles `
                 -Digest $previousRenewalDigest -RootDigest $rootDigest
+            Set-CandidateMigrationQualificationFromReceipt `
+                -Candidate $Candidate -Receipt $current
             return [pscustomobject]@{
                 state = "MIGRATION_QUALIFICATION_RENEWED"
                 root_receipt_digest = $rootDigest
@@ -2301,16 +2383,8 @@ function Ensure-CoordinatedMigrationQualification {
         -Stable $Stable -RootReceipt $root -LiveEvidence $live `
         -PreviousRenewalDigest $previousRenewalDigest
     Write-CoordinatedMigrationRenewalReceipt -Receipt $receipt
-    $Candidate | Add-Member -Force -NotePropertyName migration_qualification `
-        -NotePropertyValue ([pscustomobject]@{
-            state = "MIGRATION_QUALIFICATION_RENEWED"
-            validation_key = [string]$Candidate.validation_key
-            root_receipt_digest = $rootDigest
-            previous_migration_renewal_digest = $previousRenewalDigest
-            receipt_digest = [string]$receipt.receipt_digest
-            checked_at = [string]$receipt.checked_at
-            expires_at = [string]$receipt.expires_at
-        })
+    Set-CandidateMigrationQualificationFromReceipt `
+        -Candidate $Candidate -Receipt $receipt
     Write-ReleaseHistory -Event "MIGRATION_QUALIFICATION_RENEWED" `
         -Release $Candidate -Detail @{
             validation_key = [string]$Candidate.validation_key
