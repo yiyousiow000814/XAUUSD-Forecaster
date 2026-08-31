@@ -2621,6 +2621,43 @@ function Test-PreservedCandidateEvidenceAvailable {
     return $true
 }
 
+function Assert-CandidateCpuQualificationReceipt {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$Validation
+    )
+    $qualificationKey = [string]$Validation.worker_qualification.key
+    if ($qualificationKey -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Validation.cpu_evidence.qualification_key -ne $qualificationKey) {
+        throw "CANDIDATE_SUPERSESSION_CPU_QUALIFICATION_KEY_INVALID"
+    }
+    $receipt = Get-WorkerCpuQualificationReceipt `
+        -QualificationKey $qualificationKey
+    if (-not $receipt -or
+        [string]$receipt.receipt_digest -ne
+            [string]$Validation.cpu_evidence.qualification_receipt_digest) {
+        throw "CANDIDATE_SUPERSESSION_CPU_RECEIPT_INVALID"
+    }
+    if ([string]$Validation.cpu_evidence.qualification_mode -eq
+            "CPU_QUALIFICATION_REUSED") {
+        if ([string]$Validation.cpu_evidence.source_worker_version -ne
+                [string]$receipt.source_worker_version -or
+            [string]$Validation.cpu_evidence.source_git_sha -ne
+                [string]$receipt.source_git_sha -or
+            [string]$Validation.cpu_evidence.worker_version_id -ne
+                [string]$Candidate.worker_version_id -or
+            [string]$Validation.cpu_evidence.candidate_git_sha -ne
+                [string]$Candidate.git_sha) {
+            throw "CANDIDATE_SUPERSESSION_CPU_REUSE_LINEAGE_INVALID"
+        }
+    } elseif ([string]$receipt.source_worker_version -ne
+            [string]$Candidate.worker_version_id -or
+        [string]$receipt.source_git_sha -ne [string]$Candidate.git_sha) {
+        throw "CANDIDATE_SUPERSESSION_CPU_RECEIPT_INVALID"
+    }
+    return $receipt
+}
+
 function Test-CandidateSupersessionIdentity {
     param([object]$Candidate)
     return [bool](
@@ -2641,10 +2678,20 @@ function Test-UnqualifiedSupersessionIntermediate {
         [Parameter(Mandatory = $true)][array]$History
     )
     if (-not (Test-CandidateSupersessionIdentity -Candidate $Candidate) -or
-        [string]$Candidate.compatibility_state -notin @("PENDING", "REVIEW_REQUIRED") -or
+        [string]$Candidate.compatibility_state -notin @(
+            "PENDING", "REVIEW_REQUIRED", "COORDINATED_STORAGE_MIGRATION_PASSED"
+        ) -or
         [string]$Candidate.validation_state -notin @(
-            "NEW", "CHECKS_PENDING", "CHECKS_BLOCKED", "TESTING", "REVIEW_REQUIRED"
-        ) -or $Candidate.migration_acceptance) {
+            "NEW", "CHECKS_PENDING", "CHECKS_BLOCKED", "TESTING", "REVIEW_REQUIRED",
+            "PLATFORM_PENDING"
+        )) {
+        return $false
+    }
+    if ($Candidate.migration_acceptance -and (
+            [string]$Candidate.migration_acceptance.validation_key -ne
+                [string]$Candidate.validation_key -or
+            [string]$Candidate.migration_acceptance.receipt_digest -notmatch
+                '^[0-9a-f]{64}$')) {
         return $false
     }
     if ($Candidate.validation -and
@@ -2654,8 +2701,8 @@ function Test-UnqualifiedSupersessionIntermediate {
     $accepted = @($History | Where-Object {
         [string]$_.release.validation_key -eq [string]$Candidate.validation_key -and
         [string]$_.event -in @(
-            "COORDINATED_STORAGE_MIGRATION_PASSED", "CANDIDATE_PASSED",
-            "CANDIDATE_ACCESS_BOUNDARY_ACCEPTED", "PROMOTION_STARTED", "STABLE_COMMITTED"
+            "CANDIDATE_PASSED", "CANDIDATE_ACCESS_BOUNDARY_ACCEPTED",
+            "PROMOTION_STARTED", "STABLE_COMMITTED"
         )
     })
     return [bool]($accepted.Count -eq 0)
@@ -2931,10 +2978,16 @@ function Restore-ControlPlaneOnlySupersededCandidate {
     )
     $replacement = $State.candidate
     if (-not $replacement -or $State.transaction -or
-        [string]$replacement.compatibility_state -notin @("PENDING", "REVIEW_REQUIRED") -or
+        [string]$replacement.compatibility_state -notin @(
+            "PENDING", "REVIEW_REQUIRED", "COORDINATED_STORAGE_MIGRATION_PASSED"
+        ) -or
         [string]$replacement.validation_state -notin @(
-            "NEW", "CHECKS_PENDING", "CHECKS_BLOCKED", "TESTING", "REVIEW_REQUIRED"
-        ) -or $replacement.migration_acceptance -or
+            "NEW", "CHECKS_PENDING", "CHECKS_BLOCKED", "TESTING", "REVIEW_REQUIRED",
+            "PLATFORM_PENDING"
+        ) -or
+        ($replacement.migration_acceptance -and
+            [string]$replacement.migration_acceptance.validation_key -ne
+                [string]$replacement.validation_key) -or
         ($replacement.validation -and [string]$replacement.validation.key -ne
             [string]$replacement.validation_key)) {
         return $null
@@ -3009,16 +3062,8 @@ function Restore-ControlPlaneOnlySupersededCandidate {
         }
     } else {
         try {
-            $cpuReceipt = Get-WorkerCpuQualificationReceipt `
-                -QualificationKey ([string]$prior.validation.worker_qualification.key)
-            if (-not $cpuReceipt -or
-                [string]$cpuReceipt.receipt_digest -ne
-                    [string]$prior.validation.cpu_evidence.qualification_receipt_digest -or
-                [string]$cpuReceipt.source_worker_version -ne
-                    [string]$prior.worker_version_id -or
-                [string]$cpuReceipt.source_git_sha -ne [string]$prior.git_sha) {
-                throw "CANDIDATE_SUPERSESSION_CPU_RECEIPT_INVALID"
-            }
+            $cpuReceipt = Assert-CandidateCpuQualificationReceipt `
+                -Candidate $prior -Validation $prior.validation
             if ([string]$prior.validation.auth_inspection.state -eq
                     "HUMAN_ACCESS_BOUNDARY_ACCEPTED") {
                 $accessReceipt = Assert-AccessBoundaryAcceptanceReceipt `
@@ -3056,7 +3101,13 @@ function Restore-ControlPlaneOnlySupersededCandidate {
             current_main_git_sha = $MainRevision
             qualification_key = [string]$reuseEvidence.qualification_key
             cpu_receipt_digest = [string]$reuseEvidence.cpu_receipt_digest
-            migration_receipt_digest = [string]$migrationReceipt.receipt_digest
+            migration_receipt_digest =
+                [string]$prior.migration_acceptance.receipt_digest
+            migration_renewal_receipt_digest = if (
+                $prior.migration_qualification -and
+                [string]$prior.migration_qualification.state -eq
+                    "MIGRATION_QUALIFICATION_RENEWED"
+            ) { [string]$prior.migration_qualification.receipt_digest } else { "" }
             access_receipt_digest = [string]$reuseEvidence.access_receipt_digest
             accepted_evidence_replayed = $false
         }
@@ -3117,16 +3168,8 @@ function Restore-ControlPlaneObservationFailedCandidate {
         return $null
     }
     try {
-        $cpuReceipt = Get-WorkerCpuQualificationReceipt `
-            -QualificationKey ([string]$priorValidation.worker_qualification.key)
-        if (-not $cpuReceipt -or
-            [string]$cpuReceipt.receipt_digest -ne
-                [string]$priorValidation.cpu_evidence.qualification_receipt_digest -or
-            [string]$cpuReceipt.source_worker_version -ne
-                [string]$candidate.worker_version_id -or
-            [string]$cpuReceipt.source_git_sha -ne [string]$candidate.git_sha) {
-            return $null
-        }
+        $cpuReceipt = Assert-CandidateCpuQualificationReceipt `
+            -Candidate $candidate -Validation $priorValidation
         if ([string]$priorValidation.auth_inspection.state -eq
                 "HUMAN_ACCESS_BOUNDARY_ACCEPTED") {
             $null = Assert-AccessBoundaryAcceptanceReceipt `

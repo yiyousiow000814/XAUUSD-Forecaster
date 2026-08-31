@@ -6323,6 +6323,32 @@ def _supersession_chain_contract(scenario: str) -> str:
             "$script:cpuReceiptInvalid=$true;"
             "Add-Edge $qualified $head;"
         ),
+        "reused_receipt": (
+            "$script:reusedCpu=$true;"
+            "$qualified.validation.cpu_evidence|Add-Member -Force qualification_mode "
+            "'CPU_QUALIFICATION_REUSED';"
+            "$qualified.validation.cpu_evidence|Add-Member -Force source_worker_version "
+            "'11111111-1111-4111-8111-111111111111';"
+            "$qualified.validation.cpu_evidence|Add-Member -Force source_git_sha ('1'*40);"
+            "$qualified.validation.cpu_evidence|Add-Member -Force worker_version_id "
+            "$qualified.worker_version_id;"
+            "$qualified.validation.cpu_evidence|Add-Member -Force candidate_git_sha "
+            "$qualified.git_sha;"
+            "Add-Edge $qualified $head;"
+        ),
+        "reused_receipt_wrong_current": (
+            "$script:reusedCpu=$true;"
+            "$qualified.validation.cpu_evidence|Add-Member -Force qualification_mode "
+            "'CPU_QUALIFICATION_REUSED';"
+            "$qualified.validation.cpu_evidence|Add-Member -Force source_worker_version "
+            "'11111111-1111-4111-8111-111111111111';"
+            "$qualified.validation.cpu_evidence|Add-Member -Force source_git_sha ('1'*40);"
+            "$qualified.validation.cpu_evidence|Add-Member -Force worker_version_id "
+            "$head.worker_version_id;"
+            "$qualified.validation.cpu_evidence|Add-Member -Force candidate_git_sha "
+            "$qualified.git_sha;"
+            "Add-Edge $qualified $head;"
+        ),
         "qualification_key_mismatch": (
             "$qualified.validation.cpu_evidence.qualification_key=('a'*64);"
             "Add-Edge $qualified $head;"
@@ -6330,6 +6356,15 @@ def _supersession_chain_contract(scenario: str) -> str:
         "accepted_intermediate": (
             "Add-Edge $mid $head;Write-ReleaseHistory -Event 'CANDIDATE_PASSED' "
             "-Release $mid;Add-Edge $qualified $mid;"
+        ),
+        "partially_validated_head": (
+            "$head.compatibility_state='COORDINATED_STORAGE_MIGRATION_PASSED';"
+            "$head.validation_state='PLATFORM_PENDING';"
+            "$head.validation.reason='WORKER_CPU_DIRECTED_LEDGER_IN_PROGRESS';"
+            "$head|Add-Member -Force migration_acceptance ([pscustomobject]@{"
+            "validation_key=$head.validation_key;receipt_digest=('7'*64)});"
+            "Write-ReleaseHistory -Event 'COORDINATED_STORAGE_MIGRATION_PASSED' "
+            "-Release $head;Add-Edge $qualified $head;"
         ),
         "worker_reused": (
             "$sameWorker=New-Intermediate ('c'*40) $mid.worker_version_id;"
@@ -6398,7 +6433,9 @@ def _supersession_chain_contract(scenario: str) -> str:
         "[pscustomobject]@{root_receipt_digest=('e'*64)}};"
         "function Get-WorkerCpuQualificationReceipt{param($QualificationKey)"
         "[pscustomobject]@{receipt_digest=$(if($script:cpuReceiptInvalid){('0'*64)}else{('e'*64)});"
-        "source_worker_version=$qualified.worker_version_id;source_git_sha=$qualified.git_sha}};"
+        "source_worker_version=$(if($script:reusedCpu){"
+        "'11111111-1111-4111-8111-111111111111'}else{$qualified.worker_version_id});"
+        "source_git_sha=$(if($script:reusedCpu){('1'*40)}else{$qualified.git_sha})}};"
         "function Assert-AccessBoundaryAcceptanceReceipt{param($Candidate,$Stable)"
         "[pscustomobject]@{receipt_digest=('1'*64)}};"
         "function Set-CloudflareCandidatePointer{};"
@@ -6425,8 +6462,11 @@ def _supersession_chain_contract(scenario: str) -> str:
         ("self_loop", "ERROR:CANDIDATE_SUPERSESSION_SELF_LOOP"),
         ("unrelated", "NONE"),
         ("receipt_mismatch", "ERROR:CANDIDATE_SUPERSESSION_QUALIFICATION_REUSE_INVALID:CANDIDATE_SUPERSESSION_CPU_RECEIPT_INVALID"),
+        ("reused_receipt", "FOUND:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee:" + "e" * 40),
+        ("reused_receipt_wrong_current", "ERROR:CANDIDATE_SUPERSESSION_QUALIFICATION_REUSE_INVALID:CANDIDATE_SUPERSESSION_CPU_REUSE_LINEAGE_INVALID"),
         ("qualification_key_mismatch", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
         ("accepted_intermediate", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+        ("partially_validated_head", "FOUND:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee:" + "e" * 40),
         ("worker_reused", "ERROR:CANDIDATE_SUPERSESSION_WORKER_REUSED"),
         ("max_depth", "ERROR:CANDIDATE_SUPERSESSION_MAX_DEPTH_EXCEEDED"),
         ("byte_bound", "ERROR:CANDIDATE_SUPERSESSION_HISTORY_BYTE_BOUND_EXCEEDED"),
@@ -6465,7 +6505,11 @@ def test_observe_probe_failure_restores_exact_qualification_and_preserves_attemp
         "worker_qualification=[pscustomobject]@{key=('d'*64);"
         "candidate_worker_version=$candidate.worker_version_id;candidate_git_sha=$candidate.git_sha};"
         "cpu_evidence=[pscustomobject]@{qualification_key=('d'*64);"
-        "qualification_receipt_digest=('e'*64)};data_parity=[pscustomobject]@{"
+        "qualification_receipt_digest=('e'*64);"
+        "qualification_mode='CPU_QUALIFICATION_REUSED';"
+        "source_worker_version='11111111-1111-4111-8111-111111111111';"
+        "source_git_sha=('1'*40);worker_version_id=$candidate.worker_version_id;"
+        "candidate_git_sha=$candidate.git_sha};data_parity=[pscustomobject]@{"
         "state='PASSED_WITH_DEFERRED_OBLIGATIONS';marker='parity-kept'};"
         "auth_inspection=[pscustomobject]@{state='ACCESS_QUALIFICATION_REUSED'}};"
         "$candidate.validation_state='FAILED';$candidate.validation=[pscustomobject]@{"
@@ -6504,8 +6548,9 @@ def test_observe_probe_failure_restores_exact_qualification_and_preserves_attemp
         "function Get-ReleaseGitShaFromVersion{return ('b'*40)};"
         "function Get-ReleaseArtifactKindFromVersion{return 'PRODUCTION_CANDIDATE'};"
         "function Get-WorkerCpuQualificationReceipt{[pscustomobject]@{"
-        "receipt_digest=('e'*64);source_worker_version=$candidate.worker_version_id;"
-        "source_git_sha=$candidate.git_sha}};"
+        "receipt_digest=('e'*64);"
+        "source_worker_version='11111111-1111-4111-8111-111111111111';"
+        "source_git_sha=('1'*40)}};"
         "function Assert-AccessQualificationReuseReceipt{return [pscustomobject]@{state='PASSED'}};"
         "$script:pointerCalls=0;function Set-CloudflareCandidatePointer{$script:pointerCalls++};"
         "function Wait-CandidatePlacementPropagation{[pscustomobject]@{passed=$true}};"
