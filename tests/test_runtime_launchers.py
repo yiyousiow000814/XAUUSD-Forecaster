@@ -6487,6 +6487,252 @@ def test_access_qualification_key_change_requires_human_review(tmp_path) -> None
     )
 
 
+def _stale_access_reuse_ready_for_renewal(ttl_setup: str = "") -> str:
+    return (
+        _access_review_candidate()
+        + _historical_access_authority_contract()
+        + _access_provider_inspection_contract()
+        + ttl_setup
+        + "$inspection=Register-AccessProviderInspection $provider;"
+        "function Get-AccessQualificationIdentity{param($GitSha,$ProviderInspection)"
+        "[pscustomobject]@{access_qualification_key=('1'*64);core=[pscustomobject]@{"
+        "protected_boundary=[pscustomobject]@{origin='https://aurum-signal-room.yiyousiow1234.workers.dev'};"
+        "repository_artifacts=[ordered]@{auth='same'}}}};"
+        "$null=Invoke-CandidateAccessQualificationReuse;$state=Get-ReleaseControlState;"
+        "$candidate=$state.candidate;$reusePath=Get-AccessQualificationReuseReceiptPath $candidate.validation_key;"
+        "$reuse=Get-Content $reusePath -Raw -Encoding UTF8|ConvertFrom-ReleaseControlJson;"
+        "$staleAt=[DateTimeOffset]::UtcNow.AddHours(-3);"
+        "$reuse.verified_at=$staleAt.ToString('o');"
+        "$reuse.expires_at=$staleAt.Add($accessMachineReceiptMaxAge).ToString('o');"
+        "$reuseCore=[ordered]@{schema_version=$reuse.schema_version;state=$reuse.state;"
+        "verified_at=$reuse.verified_at;expires_at=$reuse.expires_at;validation_key=$reuse.validation_key;"
+        "candidate_git_sha=$reuse.candidate_git_sha;candidate_worker_version_id=$reuse.candidate_worker_version_id;"
+        "access_key=$reuse.access_key;prior_access_receipt_digest=$reuse.prior_access_receipt_digest;"
+        "prior_access_key=$reuse.prior_access_key;current_access_key=$reuse.current_access_key;"
+        "protected_origin=$reuse.protected_origin;provider_fingerprint=$reuse.provider_fingerprint;"
+        "provider_inspection_receipt_digest=$reuse.provider_inspection_receipt_digest;"
+        "changed_access_artifacts=@($reuse.changed_access_artifacts)};"
+        "$reuse.receipt_digest=Get-AccessQualificationReuseReceiptDigest $reuseCore;"
+        "$reuse|ConvertTo-Json -Depth 16|Set-Content $reusePath -Encoding UTF8;"
+        "$candidate.access_qualification.receipt_digest=$reuse.receipt_digest;"
+        "$candidate.validation.auth_inspection.receipt_digest=$reuse.receipt_digest;"
+        "$state.candidate=$candidate;Write-ReleaseControlState $state;"
+        "$oldReuseBytes=Get-Content $reusePath -Raw -Encoding UTF8;"
+    )
+
+
+def _cloudflare_access_read_stubs(audit_event: str = "$null") -> str:
+    return (
+        "function Get-ReleaseSecret{return [pscustomobject]@{available=$true;value='read-token';"
+        "source='LOCAL_SECRET_FILE';diagnostic=$null}};"
+        f"$script:auditEvent={audit_event};"
+        "$script:policyDecision='allow';"
+        "function Invoke-RestMethod{param($Method,$Uri,$Headers,$TimeoutSec);"
+        "if($Uri -match '/logs/audit'){return [pscustomobject]@{success=$true;"
+        "result=@($script:auditEvent|Where-Object{$null-ne$_});result_info=[pscustomobject]@{cursor=''}}};"
+        "if($Uri -match '/identity_providers$'){return [pscustomobject]@{success=$true;"
+        "result=@([pscustomobject]@{id='google-id';type='google'})}};"
+        "if($Uri -match '/policies/'){return [pscustomobject]@{success=$true;result=[pscustomobject]@{"
+        "id='d8ce9484-aca9-4c39-a211-37d2fa8ba9cf';name='Allow Assistant owner';"
+        "decision=$script:policyDecision;precedence=1;session_duration='24h';"
+        "updated_at=$provider.policy_last_updated_at;include=@([pscustomobject]@{email=[pscustomobject]@{"
+        "email='owner@example.test'}});require=@();isolation_required=$false;"
+        "purpose_justification_required=$false;approval_required=$false}}};"
+        "return [pscustomobject]@{success=$true;result=[pscustomobject]@{"
+        "id='2f91233e-cabe-4f48-806c-83699de5e713';"
+        "aud='4750fd9ae50ac47ae51d1d3605ca899e5603c691a7fe0c24457f3e335ed43ad1';"
+        "name='XAUUSD Admin Owner';type='self_hosted';session_duration='24h';"
+        "allowed_idps=@('google-id');destinations=@("
+        "[pscustomobject]@{uri='https://aurum-signal-room.yiyousiow1234.workers.dev/admin*'},"
+        "[pscustomobject]@{uri='https://aurum-signal-room.yiyousiow1234.workers.dev/assistant'},"
+        "[pscustomobject]@{uri='https://aurum-signal-room.yiyousiow1234.workers.dev/retry-jobs'},"
+        "[pscustomobject]@{uri='https://aurum-signal-room.yiyousiow1234.workers.dev/status'})}};};"
+    )
+
+
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_stale_machine_access_evidence_renews_without_new_human_acceptance(
+    tmp_path, powershell: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _stale_access_reuse_ready_for_renewal()
+        + _cloudflare_access_read_stubs()
+        + "$receipt=Ensure-AccessQualificationMachineReceipt $candidate;"
+        "$new=Assert-AccessQualificationMachineReceipt $candidate;"
+        "$reuseUnchanged=(Get-Content $reusePath -Raw -Encoding UTF8)-ceq$oldReuseBytes;"
+        "$renewalFiles=@(Get-ChildItem $accessQualificationRenewalReceiptRoot -File).Count;"
+        "$humanEvents=([regex]::Matches((Get-Content $releaseHistoryPath -Raw),"
+        "'CANDIDATE_ACCESS_BOUNDARY_ACCEPTED')).Count;"
+        'Write-Output "$($new.state),$($new.root_human_receipt_digest -eq '
+        '$reuse.prior_access_receipt_digest),$reuseUnchanged,$renewalFiles,$humanEvents"',
+        powershell=powershell,
+    )
+    assert result == "ACCESS_QUALIFICATION_RENEWED,True,True,1,1"
+
+
+def test_access_renewal_is_idempotent_for_same_provider_inspection(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _stale_access_reuse_ready_for_renewal()
+        + _cloudflare_access_read_stubs()
+        + "$first=Ensure-AccessQualificationMachineReceipt $candidate;"
+        "$count1=@(Get-ChildItem $accessQualificationRenewalReceiptRoot -File).Count;"
+        "$second=Ensure-AccessQualificationMachineReceipt $candidate;"
+        "$count2=@(Get-ChildItem $accessQualificationRenewalReceiptRoot -File).Count;"
+        'Write-Output "$($first.receipt_digest -eq $second.receipt_digest),$count1,$count2"',
+    )
+    assert result == "True,1,1"
+
+
+def test_access_renewal_chain_can_repeat_without_replacing_prior_receipts(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _stale_access_reuse_ready_for_renewal()
+        + _cloudflare_access_read_stubs()
+        + "$script:accessNow=[DateTimeOffset]::UtcNow;"
+        "function Get-AccessEvidenceUtcNow{return $script:accessNow};"
+        "$first=Ensure-AccessQualificationMachineReceipt $candidate;"
+        "$script:accessNow=$script:accessNow.AddHours(3);"
+        "$second=Ensure-AccessQualificationMachineReceipt $candidate;"
+        "$verified=Assert-AccessQualificationMachineReceipt $candidate;"
+        "$files=@(Get-ChildItem $accessQualificationRenewalReceiptRoot -File).Count;"
+        'Write-Output "$files,$($second.previous_machine_receipt_digest -eq '
+        '$first.receipt_digest),$($verified.root_human_receipt_digest -eq '
+        '$reuse.prior_access_receipt_digest)"',
+    )
+    assert result == "2,True,True"
+
+
+def test_access_renewal_rejects_access_sensitive_identity_change(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _stale_access_reuse_ready_for_renewal()
+        + _cloudflare_access_read_stubs()
+        + "function Get-AccessQualificationIdentity{[pscustomobject]@{"
+        "access_qualification_key=('2'*64);core=[pscustomobject]@{"
+        "protected_boundary=[pscustomobject]@{origin='https://aurum-signal-room.yiyousiow1234.workers.dev'};"
+        "repository_artifacts=[ordered]@{auth='changed'}}}};"
+        "$reason='';try{Ensure-AccessQualificationMachineReceipt $candidate|Out-Null}"
+        "catch{$reason=$_.Exception.Message};Write-Output $reason",
+    )
+    assert result == "ACCESS_HUMAN_REVIEW_REQUIRED:ACCESS_QUALIFICATION_KEY_CHANGED"
+
+
+def test_access_audit_adapter_exhausts_real_cursor_envelope_and_finds_reverted_change(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:page=0;function Invoke-CloudflareAccessRead{param($PathAndQuery);$script:page++;"
+        "$event=[pscustomobject]@{action=[pscustomobject]@{type='update';result='success'};"
+        "raw=[pscustomobject]@{method='PUT';status_code=200;uri='/accounts/x/access/apps/app'};"
+        "resource=[pscustomobject]@{id='app';product='Access';type='application'}};"
+        "if($script:page -eq 1){[pscustomobject]@{success=$true;result=@($event);"
+        "result_info=[pscustomobject]@{cursor='next'}}}else{[pscustomobject]@{success=$true;"
+        "result=@();result_info=[pscustomobject]@{cursor=''}}}};"
+        "$audit=Get-CloudflareAccessAuditInterval -From ([DateTimeOffset]::UtcNow.AddHours(-1)) "
+        "-To ([DateTimeOffset]::UtcNow) -ApplicationId 'app' -PolicyId 'policy';"
+        'Write-Output "$($audit.complete),$($audit.page_count),$($audit.event_count),'
+        '$($audit.relevant_change_count),$script:page"',
+    )
+    assert result == "True,2,1,1,2"
+
+
+def test_access_machine_renewal_uses_only_read_only_cloudflare_boundaries() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
+        encoding="utf-8"
+    )
+    adapter = source.split("function Invoke-CloudflareAccessRead", 1)[1].split(
+        "function Register-AccessProviderInspection", 1
+    )[0]
+    assert 'Get-ReleaseSecret -Name "CLOUDFLARE_ACCESS_READ_TOKEN"' in adapter
+    assert "Invoke-RestMethod -Method Get" in adapter
+    assert "-Method Post" not in adapter
+    assert "/logs/audit" in adapter
+    assert "result_info.cursor" in adapter
+    assert "/access/apps/$applicationId" in adapter
+    assert "/access/identity_providers" in adapter
+    assert "CLOUDFLARE_RELEASE_OBSERVABILITY_TOKEN" not in adapter
+
+
+@pytest.mark.parametrize(
+    ("setup", "expected"),
+    (
+        (
+            "$script:policyDecision='deny';",
+            "ACCESS_HUMAN_REVIEW_REQUIRED:ACCESS_PROVIDER_CONFIGURATION_CHANGED",
+        ),
+        (
+            "$script:auditEvent=[pscustomobject]@{action=[pscustomobject]@{type='update';"
+            "result='success'};raw=[pscustomobject]@{method='PUT';status_code=200;"
+            "uri='/accounts/x/access/apps/2f91233e-cabe-4f48-806c-83699de5e713'};"
+            "resource=[pscustomobject]@{id='2f91233e-cabe-4f48-806c-83699de5e713';"
+            "product='Access';type='application'}};",
+            "ACCESS_HUMAN_REVIEW_REQUIRED:ACCESS_PROVIDER_INSPECTION_INVALID",
+        ),
+        (
+            "$accessProviderAuditMaximumLookback=[TimeSpan]::FromTicks(1);",
+            "ACCESS_HUMAN_REVIEW_REQUIRED:ACCESS_PROVIDER_AUDIT_INTERVAL_UNCOVERED",
+        ),
+    ),
+)
+def test_access_renewal_requires_human_review_for_change_revert_or_history_gap(
+    tmp_path, setup: str, expected: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _stale_access_reuse_ready_for_renewal()
+        + _cloudflare_access_read_stubs()
+        + setup
+        + "$reason='';try{Ensure-AccessQualificationMachineReceipt $candidate|Out-Null}"
+        "catch{$reason=$_.Exception.Message};Write-Output $reason",
+    )
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "$reuse.receipt_digest=('f'*64);$reuse|ConvertTo-Json -Depth 16|Set-Content $reusePath -Encoding UTF8;",
+        "$root=Get-HistoricalAccessBoundaryReceiptByDigest $reuse.prior_access_receipt_digest;"
+        "$root.receipt_digest=('f'*64);$rootPath=Get-AccessBoundaryReceiptPath $root.validation_key;"
+        "$root|ConvertTo-Json -Depth 16|Set-Content $rootPath -Encoding UTF8;",
+    ),
+)
+def test_access_renewal_fails_closed_for_corrupt_chain_or_human_root(
+    tmp_path, mutation: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _stale_access_reuse_ready_for_renewal()
+        + _cloudflare_access_read_stubs()
+        + mutation
+        + "$reason='';try{Ensure-AccessQualificationMachineReceipt $candidate|Out-Null}"
+        "catch{$reason=$_.Exception.Message};Write-Output $reason",
+    )
+    assert "TAMPERED" in result or "HISTORICAL_RECEIPT_MISSING" in result
+
+
+def test_access_renewal_fails_closed_when_previous_machine_link_is_broken(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _stale_access_reuse_ready_for_renewal()
+        + _cloudflare_access_read_stubs()
+        + "$first=Ensure-AccessQualificationMachineReceipt $candidate;"
+        "$bad=$first.PSObject.Copy();$bad.previous_machine_receipt_digest=('f'*64);"
+        "$core=Get-AccessQualificationRenewalCore $bad;"
+        "$bad.receipt_digest=Get-AccessQualificationRenewalReceiptDigest $core;"
+        "$badPath=Get-AccessQualificationRenewalReceiptPath $bad.receipt_digest;"
+        "$bad|ConvertTo-Json -Depth 16|Set-Content $badPath -Encoding UTF8;"
+        "$candidate.access_qualification.receipt_digest=$bad.receipt_digest;"
+        "$candidate.validation.auth_inspection.receipt_digest=$bad.receipt_digest;"
+        "$reason='';try{Assert-AccessQualificationMachineReceipt $candidate|Out-Null}"
+        "catch{$reason=$_.Exception.Message};Write-Output $reason",
+    )
+    assert result == "ACCESS_QUALIFICATION_RENEWAL_CHAIN_BROKEN"
+
+
 def test_access_key_uses_only_access_owned_repository_artifacts() -> None:
     contract = json.loads(
         (ROOT / "scripts" / "access-qualification-contract.json").read_text(encoding="utf-8")
@@ -6576,7 +6822,7 @@ def test_wpf_and_fallback_use_the_same_access_transition() -> None:
     assert source.count("ALL_REQUIRED_ACCESS_CHECKS_PASSED") == 1
 
 
-def test_promotion_rechecks_human_or_reused_access_receipt() -> None:
+def test_promotion_rechecks_human_or_machine_access_receipt() -> None:
     source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
         encoding="utf-8"
     )
@@ -6586,7 +6832,8 @@ def test_promotion_rechecks_human_or_reused_access_receipt() -> None:
     assert '"HUMAN_ACCESS_BOUNDARY_ACCEPTED"' in promotion
     assert "Assert-AccessBoundaryAcceptanceReceipt" in promotion
     assert '"ACCESS_QUALIFICATION_REUSED"' in promotion
-    assert "Assert-AccessQualificationReuseReceipt" in promotion
+    assert '"ACCESS_QUALIFICATION_RENEWED"' in promotion
+    assert "Ensure-AccessQualificationMachineReceipt" in promotion
     assert "Test-ProductionCandidateProvenance" in promotion
 
 

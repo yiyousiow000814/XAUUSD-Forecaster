@@ -98,6 +98,11 @@ and every consumer assumption to a matching integration invariant.
 | `AccessEvidenceIsRequired` | access-evidence-safety |
 | `InvalidAccessReceiptCannotPass` | access-evidence-safety |
 | `AccessApprovalIsIdempotent` | access-evidence-safety |
+| `RenewalRequiresContinuousAudit` | access-evidence-safety |
+| `StaleMachineEvidenceCannotPass` | access-evidence-safety |
+| `BrokenChainCannotRenew` | access-evidence-safety |
+| `RenewalKeepsHumanRoot` | access-evidence-safety |
+| `RenewalIsBounded` | access-evidence-safety |
 | `PassedGatesAreSafe` | release-integration-safety |
 | `HardFailuresBlock` | release-integration-safety |
 | `UnrelatedDebtIsNotFailure` | release-integration-safety |

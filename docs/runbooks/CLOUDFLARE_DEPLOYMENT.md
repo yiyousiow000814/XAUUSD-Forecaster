@@ -199,6 +199,14 @@ transport and read-only D1 validation but stop before authoritative mutation.
 Do not substitute `{}` fixtures or treat one invocation per route as CPU
 acceptance.
 
+Automatic renewal of unchanged Human Access qualification uses a separate
+least-privilege read token stored as `CLOUDFLARE_ACCESS_READ_TOKEN` in the same
+local secret object. Grant only `Access: Apps and Policies Read` and
+`Account Settings Read`; the latter owns account audit-log reads. The controller
+uses GET requests only, exhausts audit cursor pagination, and never persists the
+token. Do not substitute the Workers Observability token. A missing permission,
+incomplete interval, or provider error requires Human Access review.
+
 Normal release operation uses only the confirmed Control Center actions:
 **Open Candidate**, **Verify Migration** for an exact coordinated storage
 migration, **Approve Compatibility** for a narrowly eligible non-storage
