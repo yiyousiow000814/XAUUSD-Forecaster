@@ -45,6 +45,10 @@ $runtimeUpdateStatePath = Join-Path $runtimeForwardRoot "runtime-update-state.js
 $releaseControlStatePath = Join-Path $runtimeForwardRoot "release-control-state.json"
 $releaseHistoryPath = Join-Path $runtimeForwardRoot "release-control-history.jsonl"
 $coordinatedMigrationReceiptPath = Join-Path $runtimeForwardRoot "coordinated-migration-receipt.json"
+$coordinatedMigrationRootReceiptRoot = Join-Path $runtimeForwardRoot `
+    "coordinated-migration-root-receipts"
+$coordinatedMigrationRenewalReceiptRoot = Join-Path $runtimeForwardRoot `
+    "coordinated-migration-renewal-receipts"
 $accessBoundaryReceiptRoot = Join-Path $runtimeForwardRoot "access-boundary-receipts"
 $accessQualificationContractPath = Join-Path $PSScriptRoot "access-qualification-contract.json"
 $accessProviderInspectionRoot = Join-Path $runtimeForwardRoot "access-provider-inspections"
@@ -119,6 +123,7 @@ $candidateOnlyProjectionRoutes = @(
 )
 $releaseLockOwnerGrace = [TimeSpan]::FromSeconds(30)
 $coordinatedMigrationReceiptMaxAge = [TimeSpan]::FromHours(2)
+$coordinatedMigrationRenewalMaximumDepth = 32
 $accessBoundaryReceiptMaxAge = [TimeSpan]::FromHours(2)
 $accessMachineReceiptMaxAge = [TimeSpan]::FromHours(2)
 # Cloudflare documents 18-month audit-log retention. Keep automatic renewal's
@@ -1442,6 +1447,8 @@ function Get-CoordinatedMigrationEndpointEvidence {
     }
     return [ordered]@{
         stable_status = 200
+        stable_worker_version = [string]$Stable.worker_version_id
+        stable_git_sha = [string]$Stable.git_sha
         stable_decision_count_positive = $true
         stable_news_status = [string]$stableNewsPayload.status
         stable_news_violation_count = [int]$stableNewsPayload.violation_count
@@ -1469,6 +1476,17 @@ function Get-CoordinatedMigrationLiveEvidence {
         -VersionId ([string]$Candidate.worker_version_id)
     $stableVersion = Get-CloudflareVersionDetails `
         -VersionId ([string]$Stable.worker_version_id)
+    if ([string]$candidateVersion.id -cne [string]$Candidate.worker_version_id -or
+        (Get-ReleaseGitShaFromVersion -Version $candidateVersion) -cne
+            [string]$Candidate.git_sha) {
+        throw "MIGRATION_CANDIDATE_VERSION_IDENTITY_MISMATCH"
+    }
+    $stableVersionGit = Get-ReleaseGitShaFromVersion -Version $stableVersion
+    if ([string]$stableVersion.id -cne [string]$Stable.worker_version_id -or
+        ($stableVersionGit -and
+            [string]$stableVersionGit -cne [string]$Stable.git_sha)) {
+        throw "MIGRATION_STABLE_VERSION_IDENTITY_MISMATCH"
+    }
     $candidateBinding = Get-MigrationD1Binding -Version $candidateVersion
     $stableBinding = Get-MigrationD1Binding -Version $stableVersion
     if ([string]$candidateBinding.database_id -ne [string]$stableBinding.database_id) {
@@ -1701,12 +1719,17 @@ FROM news_projection_state s JOIN news_projection_generations g
             git_blob_oid = $blobId
         }
     })
+    $runtimeIdentity = Get-CoordinatedMigrationRuntimeRootIdentity
     return [ordered]@{
         validation_key = [string]$Candidate.validation_key
         candidate_git_sha = [string]$Candidate.git_sha
         candidate_worker_version = [string]$Candidate.worker_version_id
+        candidate_windows_revision = [string]$Candidate.windows_revision
         stable_git_sha = [string]$Stable.git_sha
         stable_worker_version = [string]$Stable.worker_version_id
+        stable_windows_revision = [string]$Stable.windows_revision
+        runtime_root = [string]$runtimeIdentity.path
+        runtime_root_identity = [string]$runtimeIdentity.identity
         database_id = [string]$database.uuid
         database_name = [string]$database.name
         migration_files = $migrationHashes
@@ -1752,6 +1775,22 @@ function Get-CoordinatedMigrationReceiptDigest {
     Get-Sha256BytesHex -Bytes ([System.Text.Encoding]::UTF8.GetBytes($json))
 }
 
+function Get-CoordinatedMigrationReceiptCore {
+    param([Parameter(Mandatory = $true)][object]$Receipt)
+    return [ordered]@{
+        schema_version = [string]$Receipt.schema_version
+        checked_at = [string]$Receipt.checked_at
+        expires_at = [string]$Receipt.expires_at
+        evidence = $Receipt.evidence
+    }
+}
+
+function Get-CoordinatedMigrationRootReceiptPath {
+    param([Parameter(Mandatory = $true)][string]$Digest)
+    if ($Digest -notmatch '^[0-9a-f]{64}$') { throw "MIGRATION_RECEIPT_TAMPERED" }
+    return Join-Path $coordinatedMigrationRootReceiptRoot "$Digest.json"
+}
+
 function New-CoordinatedMigrationReceipt {
     param([Parameter(Mandatory = $true)][object]$Evidence)
     $checkedAt = [DateTimeOffset]::UtcNow
@@ -1770,8 +1809,38 @@ function New-CoordinatedMigrationReceipt {
     }
 }
 
+function Write-CoordinatedMigrationRootReceipt {
+    param([Parameter(Mandatory = $true)][object]$Receipt)
+    $core = Get-CoordinatedMigrationReceiptCore -Receipt $Receipt
+    if ([string]$Receipt.schema_version -ne "coordinated-storage-migration-receipt-v1" -or
+        [string]$Receipt.receipt_digest -cne
+            (Get-CoordinatedMigrationReceiptDigest -Core $core)) {
+        throw "MIGRATION_RECEIPT_TAMPERED"
+    }
+    New-Item -ItemType Directory -Path $coordinatedMigrationRootReceiptRoot -Force |
+        Out-Null
+    $rootPath = Get-CoordinatedMigrationRootReceiptPath `
+        -Digest ([string]$Receipt.receipt_digest)
+    if (Test-Path -LiteralPath $rootPath) {
+        $existing = Get-Content -LiteralPath $rootPath -Raw -Encoding UTF8 |
+            ConvertFrom-ReleaseControlJson
+        $existingCore = Get-CoordinatedMigrationReceiptCore -Receipt $existing
+        if ([string]$existing.receipt_digest -cne [string]$Receipt.receipt_digest -or
+            [string]$existing.receipt_digest -cne
+                (Get-CoordinatedMigrationReceiptDigest -Core $existingCore)) {
+            throw "MIGRATION_ROOT_RECEIPT_IMMUTABLE_CONFLICT"
+        }
+    } else {
+        $rootTemporary = "$rootPath.tmp"
+        $Receipt | ConvertTo-Json -Depth 12 |
+            Set-Content -LiteralPath $rootTemporary -Encoding UTF8
+        Move-Item -LiteralPath $rootTemporary -Destination $rootPath
+    }
+}
+
 function Write-CoordinatedMigrationReceipt {
     param([Parameter(Mandatory = $true)][object]$Receipt)
+    Write-CoordinatedMigrationRootReceipt -Receipt $Receipt
     $directory = Split-Path -Parent $coordinatedMigrationReceiptPath
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
     $temporary = "$coordinatedMigrationReceiptPath.tmp"
@@ -1779,31 +1848,46 @@ function Write-CoordinatedMigrationReceipt {
     Move-Item -LiteralPath $temporary -Destination $coordinatedMigrationReceiptPath -Force
 }
 
-function Assert-CoordinatedMigrationReceipt {
-    param(
-        [Parameter(Mandatory = $true)][object]$Candidate,
-        [Parameter(Mandatory = $true)][object]$Stable,
-        [Parameter(Mandatory = $true)][string[]]$MigrationFiles
-    )
+function Get-CoordinatedMigrationRootReceiptByDigest {
+    param([Parameter(Mandatory = $true)][string]$Digest)
+    $path = Get-CoordinatedMigrationRootReceiptPath -Digest $Digest
+    if (Test-Path -LiteralPath $path) {
+        return Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
+            ConvertFrom-ReleaseControlJson
+    }
     if (-not (Test-Path -LiteralPath $coordinatedMigrationReceiptPath)) {
         throw "MIGRATION_RECEIPT_MISSING"
     }
-    $receiptJson = Get-Content -LiteralPath $coordinatedMigrationReceiptPath -Raw -Encoding UTF8
-    $receipt = $receiptJson | ConvertFrom-ReleaseControlJson
-    $core = [ordered]@{
-        schema_version = [string]$receipt.schema_version
-        checked_at = [string]$receipt.checked_at
-        expires_at = [string]$receipt.expires_at
-        evidence = $receipt.evidence
+    $legacy = Get-Content -LiteralPath $coordinatedMigrationReceiptPath `
+        -Raw -Encoding UTF8 | ConvertFrom-ReleaseControlJson
+    if ([string]$legacy.receipt_digest -cne $Digest) {
+        throw "MIGRATION_RECEIPT_MISSING"
     }
+    # Import the legacy single-file receipt into immutable digest-addressed
+    # storage. The original file remains untouched and remains root evidence.
+    Write-CoordinatedMigrationRootReceipt -Receipt $legacy
+    return $legacy
+}
+
+function Assert-CoordinatedMigrationRootReceipt {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$Stable,
+        [Parameter(Mandatory = $true)][string[]]$MigrationFiles,
+        [Parameter(Mandatory = $true)][string]$Digest,
+        [switch]$AllowStale
+    )
+    $receipt = Get-CoordinatedMigrationRootReceiptByDigest -Digest $Digest
+    $core = Get-CoordinatedMigrationReceiptCore -Receipt $receipt
     if ([string]$receipt.schema_version -ne "coordinated-storage-migration-receipt-v1" -or
-        [string]$receipt.receipt_digest -ne
+        [string]$receipt.receipt_digest -cne $Digest -or
+        [string]$receipt.receipt_digest -cne
             (Get-CoordinatedMigrationReceiptDigest -Core $core)) {
         throw "MIGRATION_RECEIPT_TAMPERED"
     }
     $expires = ConvertTo-ReleaseTimestampUtc -Value $receipt.expires_at
-    if ($expires -eq [DateTimeOffset]::MinValue -or
-        $expires -le [DateTimeOffset]::UtcNow) {
+    if ($expires -eq [DateTimeOffset]::MinValue) { throw "MIGRATION_RECEIPT_STALE" }
+    if (-not $AllowStale -and $expires -le [DateTimeOffset]::UtcNow) {
         throw "MIGRATION_RECEIPT_STALE"
     }
     if ([string]$receipt.evidence.validation_key -ne [string]$Candidate.validation_key -or
@@ -1817,6 +1901,41 @@ function Assert-CoordinatedMigrationReceipt {
             [string]$Stable.worker_version_id) {
         throw "MIGRATION_RECEIPT_STABLE_MISMATCH"
     }
+    if ($receipt.evidence.PSObject.Properties['candidate_windows_revision'] -and
+        [string]$receipt.evidence.candidate_windows_revision -cne
+            [string]$Candidate.windows_revision) {
+        throw "MIGRATION_RECEIPT_CANDIDATE_MISMATCH"
+    }
+    if ($receipt.evidence.PSObject.Properties['stable_windows_revision'] -and
+        [string]$receipt.evidence.stable_windows_revision -cne
+            [string]$Stable.windows_revision) {
+        throw "MIGRATION_RECEIPT_STABLE_MISMATCH"
+    }
+    if ($receipt.evidence.PSObject.Properties['runtime_root_identity']) {
+        $runtimeIdentity = Get-CoordinatedMigrationRuntimeRootIdentity
+        if ([string]$receipt.evidence.runtime_root -cne [string]$runtimeIdentity.path -or
+            [string]$receipt.evidence.runtime_root_identity -cne
+                [string]$runtimeIdentity.identity) {
+            throw "MIGRATION_RECEIPT_RUNTIME_ROOT_MISMATCH"
+        }
+    }
+    $recordedPaths = @($receipt.evidence.migration_files | ForEach-Object {
+        [string]$_.path
+    })
+    if (($recordedPaths -join "`n") -cne (@($MigrationFiles) -join "`n")) {
+        throw "MIGRATION_RECEIPT_FILE_SET_MISMATCH"
+    }
+    return $receipt
+}
+
+function Assert-CoordinatedMigrationLiveEvidenceMatchesRoot {
+    param(
+        [Parameter(Mandatory = $true)][object]$Receipt,
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$Stable,
+        [Parameter(Mandatory = $true)][string[]]$MigrationFiles,
+        [switch]$RequireExactGeneration
+    )
     $live = Get-CoordinatedMigrationLiveEvidence -Candidate $Candidate `
         -Stable $Stable -MigrationFiles $MigrationFiles
     $immutableFields = @(
@@ -1829,31 +1948,382 @@ function Assert-CoordinatedMigrationReceipt {
         "legacy_tables", "stable_read", "candidate_read", "reverse_safe"
     )
     foreach ($field in $immutableFields) {
-        $recordedValue = $receipt.evidence.$field | ConvertTo-Json -Compress -Depth 12
+        $recordedValue = $Receipt.evidence.$field | ConvertTo-Json -Compress -Depth 12
         $liveValue = $live.$field | ConvertTo-Json -Compress -Depth 12
         if ($recordedValue -cne $liveValue) {
             throw "MIGRATION_RECEIPT_LIVE_EVIDENCE_MISMATCH:$field"
         }
     }
     $recordedActivation = ConvertTo-RequiredReleaseTime `
-        $receipt.evidence.news_activated_at
+        $Receipt.evidence.news_activated_at
     $liveActivation = ConvertTo-RequiredReleaseTime $live.news_activated_at
     if ($liveActivation -lt $recordedActivation) {
         throw "MIGRATION_RECEIPT_GENERATION_REGRESSION"
     }
+    if ($RequireExactGeneration -and
+        [string]$live.news_generation_id -cne
+            [string]$Receipt.evidence.news_generation_id) {
+        throw "MIGRATION_RECEIPT_GENERATION_CHANGED"
+    }
     if ([string]$live.news_generation_id -eq
-            [string]$receipt.evidence.news_generation_id) {
+            [string]$Receipt.evidence.news_generation_id) {
         foreach ($field in @(
             "news_contract_version", "news_watermark", "news_activated_at",
             "news_snapshot_id", "news_source_digest", "news_receipt_digest",
             "news_index_count", "news_detail_count"
         )) {
-            if ([string]$live.$field -cne [string]$receipt.evidence.$field) {
+            if ([string]$live.$field -cne [string]$Receipt.evidence.$field) {
                 throw "MIGRATION_RECEIPT_GENERATION_MUTATED:$field"
             }
         }
     }
+    return $live
+}
+
+function Assert-CoordinatedMigrationReceipt {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$Stable,
+        [Parameter(Mandatory = $true)][string[]]$MigrationFiles
+    )
+    if (-not (Test-Path -LiteralPath $coordinatedMigrationReceiptPath)) {
+        throw "MIGRATION_RECEIPT_MISSING"
+    }
+    $pointer = Get-Content -LiteralPath $coordinatedMigrationReceiptPath `
+        -Raw -Encoding UTF8 | ConvertFrom-ReleaseControlJson
+    $pointerCore = Get-CoordinatedMigrationReceiptCore -Receipt $pointer
+    if ([string]$pointer.receipt_digest -cne
+            (Get-CoordinatedMigrationReceiptDigest -Core $pointerCore)) {
+        throw "MIGRATION_RECEIPT_TAMPERED"
+    }
+    $receipt = Assert-CoordinatedMigrationRootReceipt -Candidate $Candidate `
+        -Stable $Stable -MigrationFiles $MigrationFiles `
+        -Digest ([string]$pointer.receipt_digest)
+    $null = Assert-CoordinatedMigrationLiveEvidenceMatchesRoot -Receipt $receipt `
+        -Candidate $Candidate -Stable $Stable -MigrationFiles $MigrationFiles
     return $receipt
+}
+
+function Get-CoordinatedMigrationRuntimeRootIdentity {
+    $path = [System.IO.Path]::GetFullPath($moduleRoot).TrimEnd('\')
+    $authority = $path.ToUpperInvariant()
+    return [pscustomobject]@{
+        path = $path
+        identity = Get-Sha256BytesHex `
+            -Bytes ([System.Text.Encoding]::UTF8.GetBytes($authority))
+    }
+}
+
+function Get-CoordinatedMigrationLiveEvidenceDigest {
+    param([Parameter(Mandatory = $true)][object]$Evidence)
+    $json = $Evidence | ConvertTo-Json -Compress -Depth 16
+    return Get-Sha256BytesHex -Bytes ([System.Text.Encoding]::UTF8.GetBytes($json))
+}
+
+function Get-CoordinatedMigrationRenewalCore {
+    param([Parameter(Mandatory = $true)][object]$Receipt)
+    return [ordered]@{
+        schema_version = [string]$Receipt.schema_version
+        state = [string]$Receipt.state
+        root_migration_receipt_digest = [string]$Receipt.root_migration_receipt_digest
+        previous_migration_renewal_digest = [string]$Receipt.previous_migration_renewal_digest
+        validation_key = [string]$Receipt.validation_key
+        candidate_git_sha = [string]$Receipt.candidate_git_sha
+        candidate_worker_version_id = [string]$Receipt.candidate_worker_version_id
+        candidate_windows_revision = [string]$Receipt.candidate_windows_revision
+        stable_git_sha = [string]$Receipt.stable_git_sha
+        stable_worker_version_id = [string]$Receipt.stable_worker_version_id
+        stable_windows_revision = [string]$Receipt.stable_windows_revision
+        database_id = [string]$Receipt.database_id
+        database_name = [string]$Receipt.database_name
+        runtime_root = [string]$Receipt.runtime_root
+        runtime_root_identity = [string]$Receipt.runtime_root_identity
+        migration_files = @($Receipt.migration_files)
+        news_generation_id = [string]$Receipt.news_generation_id
+        news_snapshot_id = [string]$Receipt.news_snapshot_id
+        news_source_digest = [string]$Receipt.news_source_digest
+        news_receipt_digest = [string]$Receipt.news_receipt_digest
+        reverse_safe = [bool]$Receipt.reverse_safe
+        checked_at = [string]$Receipt.checked_at
+        expires_at = [string]$Receipt.expires_at
+        live_evidence_digest = [string]$Receipt.live_evidence_digest
+    }
+}
+
+function Get-CoordinatedMigrationRenewalReceiptDigest {
+    param([Parameter(Mandatory = $true)][object]$Core)
+    $json = $Core | ConvertTo-Json -Compress -Depth 16
+    return Get-Sha256BytesHex -Bytes ([System.Text.Encoding]::UTF8.GetBytes($json))
+}
+
+function Get-CoordinatedMigrationRenewalReceiptPath {
+    param([Parameter(Mandatory = $true)][string]$Digest)
+    if ($Digest -notmatch '^[0-9a-f]{64}$') {
+        throw "MIGRATION_QUALIFICATION_RENEWAL_TAMPERED"
+    }
+    return Join-Path $coordinatedMigrationRenewalReceiptRoot "$Digest.json"
+}
+
+function Write-CoordinatedMigrationRenewalReceipt {
+    param([Parameter(Mandatory = $true)][object]$Receipt)
+    $core = Get-CoordinatedMigrationRenewalCore -Receipt $Receipt
+    if ([string]$Receipt.receipt_digest -cne
+            (Get-CoordinatedMigrationRenewalReceiptDigest -Core $core)) {
+        throw "MIGRATION_QUALIFICATION_RENEWAL_TAMPERED"
+    }
+    $path = Get-CoordinatedMigrationRenewalReceiptPath `
+        -Digest ([string]$Receipt.receipt_digest)
+    New-Item -ItemType Directory -Path $coordinatedMigrationRenewalReceiptRoot -Force |
+        Out-Null
+    if (Test-Path -LiteralPath $path) {
+        $existing = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
+            ConvertFrom-ReleaseControlJson
+        $existingCore = Get-CoordinatedMigrationRenewalCore -Receipt $existing
+        if ([string]$existing.receipt_digest -ceq [string]$Receipt.receipt_digest -and
+            [string]$existing.receipt_digest -ceq
+                (Get-CoordinatedMigrationRenewalReceiptDigest -Core $existingCore)) {
+            return
+        }
+        throw "MIGRATION_QUALIFICATION_RENEWAL_IMMUTABLE_CONFLICT"
+    }
+    $temporary = "$path.tmp"
+    $Receipt | ConvertTo-Json -Depth 16 |
+        Set-Content -LiteralPath $temporary -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination $path
+}
+
+function Assert-CoordinatedMigrationRenewalReceipt {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$Stable,
+        [Parameter(Mandatory = $true)][string[]]$MigrationFiles,
+        [Parameter(Mandatory = $true)][string]$Digest,
+        [Parameter(Mandatory = $true)][string]$RootDigest,
+        [switch]$AllowStale,
+        [hashtable]$Visited = $null
+    )
+    if ($null -eq $Visited) { $Visited = @{} }
+    if ($Visited.Count -ge $coordinatedMigrationRenewalMaximumDepth) {
+        throw "MIGRATION_QUALIFICATION_RENEWAL_CHAIN_BOUND_EXCEEDED"
+    }
+    if ($Visited.ContainsKey($Digest)) {
+        throw "MIGRATION_QUALIFICATION_RENEWAL_CHAIN_BROKEN"
+    }
+    $Visited[$Digest] = $true
+    $path = Get-CoordinatedMigrationRenewalReceiptPath -Digest $Digest
+    if (-not (Test-Path -LiteralPath $path)) {
+        throw "MIGRATION_QUALIFICATION_RENEWAL_MISSING"
+    }
+    $receipt = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
+        ConvertFrom-ReleaseControlJson
+    $core = Get-CoordinatedMigrationRenewalCore -Receipt $receipt
+    if ([string]$receipt.schema_version -ne "migration-qualification-renewal-v1" -or
+        [string]$receipt.state -ne "MIGRATION_QUALIFICATION_RENEWED" -or
+        [string]$receipt.receipt_digest -cne $Digest -or
+        [string]$receipt.receipt_digest -cne
+            (Get-CoordinatedMigrationRenewalReceiptDigest -Core $core)) {
+        throw "MIGRATION_QUALIFICATION_RENEWAL_TAMPERED"
+    }
+    if ([string]$receipt.root_migration_receipt_digest -cne $RootDigest -or
+        [string]$Candidate.migration_acceptance.receipt_digest -cne $RootDigest) {
+        throw "MIGRATION_QUALIFICATION_RENEWAL_ROOT_MISMATCH"
+    }
+    $null = Assert-CoordinatedMigrationRootReceipt -Candidate $Candidate `
+        -Stable $Stable -MigrationFiles $MigrationFiles -Digest $RootDigest -AllowStale
+    if ([string]$receipt.validation_key -cne [string]$Candidate.validation_key -or
+        [string]$receipt.candidate_git_sha -cne [string]$Candidate.git_sha -or
+        [string]$receipt.candidate_worker_version_id -cne
+            [string]$Candidate.worker_version_id -or
+        [string]$receipt.candidate_windows_revision -cne
+            [string]$Candidate.windows_revision) {
+        throw "MIGRATION_QUALIFICATION_RENEWAL_CANDIDATE_MISMATCH"
+    }
+    if ([string]$receipt.stable_git_sha -cne [string]$Stable.git_sha -or
+        [string]$receipt.stable_worker_version_id -cne [string]$Stable.worker_version_id -or
+        [string]$receipt.stable_windows_revision -cne [string]$Stable.windows_revision) {
+        throw "MIGRATION_QUALIFICATION_RENEWAL_STABLE_MISMATCH"
+    }
+    $runtimeIdentity = Get-CoordinatedMigrationRuntimeRootIdentity
+    if ([string]$receipt.runtime_root -cne [string]$runtimeIdentity.path -or
+        [string]$receipt.runtime_root_identity -cne [string]$runtimeIdentity.identity) {
+        throw "MIGRATION_QUALIFICATION_RENEWAL_RUNTIME_ROOT_MISMATCH"
+    }
+    $expires = ConvertTo-ReleaseTimestampUtc -Value $receipt.expires_at
+    if ($expires -eq [DateTimeOffset]::MinValue) {
+        throw "MIGRATION_QUALIFICATION_RENEWAL_STALE"
+    }
+    if (-not $AllowStale -and $expires -le [DateTimeOffset]::UtcNow) {
+        throw "MIGRATION_QUALIFICATION_RENEWAL_STALE"
+    }
+    $previousDigest = [string]$receipt.previous_migration_renewal_digest
+    if ($previousDigest) {
+        $previous = Assert-CoordinatedMigrationRenewalReceipt -Candidate $Candidate `
+            -Stable $Stable -MigrationFiles $MigrationFiles -Digest $previousDigest `
+            -RootDigest $RootDigest -AllowStale -Visited $Visited
+        $previousChecked = ConvertTo-ReleaseTimestampUtc -Value $previous.checked_at
+        $checked = ConvertTo-ReleaseTimestampUtc -Value $receipt.checked_at
+        if ($checked -le $previousChecked) {
+            throw "MIGRATION_QUALIFICATION_RENEWAL_CHAIN_BROKEN"
+        }
+    }
+    return $receipt
+}
+
+function Assert-CoordinatedMigrationRenewalSafety {
+    param([Parameter(Mandatory = $true)][object]$Stable)
+    $state = Get-ReleaseControlState
+    if (-not $state -or $state.transaction) {
+        throw "MIGRATION_QUALIFICATION_RENEWAL_TRANSACTION_ACTIVE"
+    }
+    if (Test-Path -LiteralPath $runtimeStateMigrationLockPath) {
+        throw "MIGRATION_QUALIFICATION_RENEWAL_LOCK_ACTIVE"
+    }
+    $runtimeState = Get-RuntimeCodeState
+    if (-not $runtimeState -or
+        [string]$runtimeState.applied_revision -cne [string]$Stable.windows_revision) {
+        throw "MIGRATION_QUALIFICATION_RENEWAL_WINDOWS_IDENTITY_UNSAFE"
+    }
+    $deployment = Get-CloudflareDeployment
+    $owners = @($deployment.versions | Where-Object { [double]$_.percentage -gt 0 })
+    if ($owners.Count -ne 1 -or
+        [string]$owners[0].version_id -cne [string]$Stable.worker_version_id -or
+        [double]$owners[0].percentage -ne 100) {
+        throw "MIGRATION_QUALIFICATION_RENEWAL_PRODUCTION_OWNERSHIP_UNSAFE"
+    }
+}
+
+function New-CoordinatedMigrationRenewalReceipt {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$Stable,
+        [Parameter(Mandatory = $true)][object]$RootReceipt,
+        [Parameter(Mandatory = $true)][object]$LiveEvidence,
+        [string]$PreviousRenewalDigest = ""
+    )
+    $runtimeIdentity = Get-CoordinatedMigrationRuntimeRootIdentity
+    $checkedAt = [DateTimeOffset]::UtcNow
+    $core = [ordered]@{
+        schema_version = "migration-qualification-renewal-v1"
+        state = "MIGRATION_QUALIFICATION_RENEWED"
+        root_migration_receipt_digest = [string]$RootReceipt.receipt_digest
+        previous_migration_renewal_digest = $PreviousRenewalDigest
+        validation_key = [string]$Candidate.validation_key
+        candidate_git_sha = [string]$Candidate.git_sha
+        candidate_worker_version_id = [string]$Candidate.worker_version_id
+        candidate_windows_revision = [string]$Candidate.windows_revision
+        stable_git_sha = [string]$Stable.git_sha
+        stable_worker_version_id = [string]$Stable.worker_version_id
+        stable_windows_revision = [string]$Stable.windows_revision
+        database_id = [string]$LiveEvidence.database_id
+        database_name = [string]$LiveEvidence.database_name
+        runtime_root = [string]$runtimeIdentity.path
+        runtime_root_identity = [string]$runtimeIdentity.identity
+        migration_files = @($LiveEvidence.migration_files)
+        news_generation_id = [string]$LiveEvidence.news_generation_id
+        news_snapshot_id = [string]$LiveEvidence.news_snapshot_id
+        news_source_digest = [string]$LiveEvidence.news_source_digest
+        news_receipt_digest = [string]$LiveEvidence.news_receipt_digest
+        reverse_safe = [bool]$LiveEvidence.reverse_safe
+        checked_at = $checkedAt.ToString("o")
+        expires_at = $checkedAt.Add($coordinatedMigrationReceiptMaxAge).ToString("o")
+        live_evidence_digest = Get-CoordinatedMigrationLiveEvidenceDigest `
+            -Evidence $LiveEvidence
+    }
+    $receipt = [pscustomobject]$core
+    $receipt | Add-Member -NotePropertyName receipt_digest `
+        -NotePropertyValue (Get-CoordinatedMigrationRenewalReceiptDigest -Core $core)
+    return $receipt
+}
+
+function Ensure-CoordinatedMigrationQualification {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][object]$Stable,
+        [Parameter(Mandatory = $true)][string[]]$MigrationFiles
+    )
+    if ([string]$Candidate.windows_revision -cne [string]$Candidate.git_sha) {
+        throw "MIGRATION_QUALIFICATION_CANDIDATE_IDENTITY_INVALID"
+    }
+    if ([string]$Stable.windows_revision -cne [string]$Stable.git_sha) {
+        throw "MIGRATION_QUALIFICATION_STABLE_IDENTITY_INVALID"
+    }
+    if (-not $Candidate.migration_acceptance -or
+        [string]$Candidate.migration_acceptance.validation_key -cne
+            [string]$Candidate.validation_key) {
+        throw "MIGRATION_ACCEPTANCE_MISSING"
+    }
+    $rootDigest = [string]$Candidate.migration_acceptance.receipt_digest
+    $previousRenewalDigest = ""
+    $stale = $false
+    if ($Candidate.migration_qualification -and
+        [string]$Candidate.migration_qualification.state -eq
+            "MIGRATION_QUALIFICATION_RENEWED") {
+        $previousRenewalDigest = [string]$Candidate.migration_qualification.receipt_digest
+        try {
+            $current = Assert-CoordinatedMigrationRenewalReceipt -Candidate $Candidate `
+                -Stable $Stable -MigrationFiles $MigrationFiles `
+                -Digest $previousRenewalDigest -RootDigest $rootDigest
+            return [pscustomobject]@{
+                state = "MIGRATION_QUALIFICATION_RENEWED"
+                root_receipt_digest = $rootDigest
+                receipt = $current
+            }
+        } catch {
+            if ($_.Exception.Message -ne "MIGRATION_QUALIFICATION_RENEWAL_STALE") { throw }
+            $stale = $true
+            $null = Assert-CoordinatedMigrationRenewalReceipt -Candidate $Candidate `
+                -Stable $Stable -MigrationFiles $MigrationFiles `
+                -Digest $previousRenewalDigest -RootDigest $rootDigest -AllowStale
+        }
+    } else {
+        try {
+            $root = Assert-CoordinatedMigrationRootReceipt -Candidate $Candidate `
+                -Stable $Stable -MigrationFiles $MigrationFiles -Digest $rootDigest
+            return [pscustomobject]@{
+                state = "MIGRATION_ACCEPTED"
+                root_receipt_digest = $rootDigest
+                receipt = $root
+            }
+        } catch {
+            if ($_.Exception.Message -ne "MIGRATION_RECEIPT_STALE") { throw }
+            $stale = $true
+        }
+    }
+    if (-not $stale) { throw "MIGRATION_QUALIFICATION_RENEWAL_NOT_APPLICABLE" }
+    $root = Assert-CoordinatedMigrationRootReceipt -Candidate $Candidate `
+        -Stable $Stable -MigrationFiles $MigrationFiles -Digest $rootDigest -AllowStale
+    Assert-CoordinatedMigrationRenewalSafety -Stable $Stable
+    $live = Assert-CoordinatedMigrationLiveEvidenceMatchesRoot -Receipt $root `
+        -Candidate $Candidate -Stable $Stable -MigrationFiles $MigrationFiles `
+        -RequireExactGeneration
+    Assert-CoordinatedMigrationRenewalSafety -Stable $Stable
+    $receipt = New-CoordinatedMigrationRenewalReceipt -Candidate $Candidate `
+        -Stable $Stable -RootReceipt $root -LiveEvidence $live `
+        -PreviousRenewalDigest $previousRenewalDigest
+    Write-CoordinatedMigrationRenewalReceipt -Receipt $receipt
+    $Candidate | Add-Member -Force -NotePropertyName migration_qualification `
+        -NotePropertyValue ([pscustomobject]@{
+            state = "MIGRATION_QUALIFICATION_RENEWED"
+            validation_key = [string]$Candidate.validation_key
+            root_receipt_digest = $rootDigest
+            previous_migration_renewal_digest = $previousRenewalDigest
+            receipt_digest = [string]$receipt.receipt_digest
+            checked_at = [string]$receipt.checked_at
+            expires_at = [string]$receipt.expires_at
+        })
+    Write-ReleaseHistory -Event "MIGRATION_QUALIFICATION_RENEWED" `
+        -Release $Candidate -Detail @{
+            validation_key = [string]$Candidate.validation_key
+            root_migration_receipt_digest = $rootDigest
+            previous_migration_renewal_digest = $previousRenewalDigest
+            renewal_receipt_digest = [string]$receipt.receipt_digest
+            live_evidence_digest = [string]$receipt.live_evidence_digest
+        }
+    return [pscustomobject]@{
+        state = "MIGRATION_QUALIFICATION_RENEWED"
+        root_receipt_digest = $rootDigest
+        receipt = $receipt
+    }
 }
 
 function Test-WatchdogRecoverySuppressed {
@@ -2512,10 +2982,10 @@ function Restore-ControlPlaneOnlySupersededCandidate {
         if ([string]$compatibility.state -ne "COORDINATED_STORAGE_MIGRATION_REQUIRED") {
             throw "CANDIDATE_SUPERSESSION_MIGRATION_CONTRACT_MOVED"
         }
-        $migrationReceipt = Assert-CoordinatedMigrationReceipt `
+        $migrationQualification = Ensure-CoordinatedMigrationQualification `
             -Candidate $prior -Stable $State.stable `
             -MigrationFiles @($compatibility.files)
-        if ([string]$migrationReceipt.receipt_digest -ne
+        if ([string]$migrationQualification.root_receipt_digest -ne
             [string]$prior.migration_acceptance.receipt_digest) {
             throw "MIGRATION_RECEIPT_AUTHORITY_MISMATCH"
         }
@@ -7287,10 +7757,10 @@ function Invoke-AutomaticCandidateValidation {
                     [string]$Candidate.validation_key)
             if ($accepted) {
                 try {
-                    $receipt = Assert-CoordinatedMigrationReceipt `
+                    $qualification = Ensure-CoordinatedMigrationQualification `
                         -Candidate $Candidate -Stable $state.stable `
                         -MigrationFiles @($compatibility.files)
-                    if ([string]$receipt.receipt_digest -ne
+                    if ([string]$qualification.root_receipt_digest -ne
                         [string]$state.candidate.migration_acceptance.receipt_digest) {
                         throw "MIGRATION_RECEIPT_AUTHORITY_MISMATCH"
                     }

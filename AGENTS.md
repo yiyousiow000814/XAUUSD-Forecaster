@@ -74,6 +74,10 @@ bounded retry, corroboration, and fallback; do not manufacture false precision
 by requiring guarantees the provider does not contractually supply. Follow
 `docs/protocols/CHANGE_SAFETY.md`.
 
+Separate durable qualification from renewable freshness. Recheck only the
+smallest expired live authority, and invalidate evidence through explicit
+behavior-key dependencies rather than unrelated repository or release movement.
+
 ### Production recovery order
 
 When production is degraded, first identify and restore the last-known-safe

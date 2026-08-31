@@ -144,6 +144,20 @@ not the Cloudflare Access boundary and is recorded as
 the protected production hostname proves the boundary. Validation never
 simulates or claims a successful human login.
 
+Coordinated migration acceptance is immutable qualification for the exact
+Candidate, Stable, database, migration files, and accepted CURRENT/Reverse
+boundary. Its root receipt is stored by digest and is never overwritten. The
+two-hour expiry applies only to the live migration observation. When that lease
+expires, Release Control may write a separate immutable
+`MIGRATION_QUALIFICATION_RENEWED` receipt only after the same bounded read-only
+migration verification proves the exact Candidate and Stable identities,
+authoritative D1 identity, RuntimeRoot, migration artifacts and ledger, CURRENT
+generation, legacy Reverse projection, and single Stable production owner are
+unchanged. Renewal links the root acceptance and prior renewal digest; it never
+claims or executes another migration. A changed identity, generation, receipt
+chain, invariant, migration lock, transaction, or production owner fails closed
+without invalidating unrelated qualification evidence.
+
 When the protected-host login flow cannot be exercised by Release Control, the
 Candidate first enters `ACCESS_BOUNDARY_REVIEW_REQUIRED`. A versioned Access
 qualification key owns only the protected origin and destinations, provider
@@ -525,8 +539,11 @@ projection probe timeout records a failed release attempt, not a Candidate
 qualification failure. After a Control-Plane-only `main` advance, discovery may
 restore the exact saved pre-Switch qualification and re-stage that immutable
 Candidate at zero percent only when its validation key, provider artifact,
-migration acceptance, CPU evidence, Access receipt, and compatibility remain
-valid. The failed attempt remains append-only evidence. Any Candidate, data,
+migration acceptance or renewed live qualification, CPU evidence, Access
+receipt, and compatibility remain valid. An expired live migration lease is
+renewed from the immutable acceptance through the read-only verification above;
+it does not rerun migration or the other Candidate gates. The failed attempt
+remains append-only evidence. Any Candidate, data,
 identity, receipt, provenance, or resource failure is ineligible for this
 recovery and remains fail-closed.
 

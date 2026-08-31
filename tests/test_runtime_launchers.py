@@ -1545,7 +1545,7 @@ def _coordinated_migration_contract_body(*, capability_overrides: str = "") -> s
     database_id = "33333333-3333-4333-8333-333333333333"
     return (
         f"$script:testDatabaseId='{database_id}';"
-        "$stable=[pscustomobject]@{git_sha=('a'*40);worker_version_id="
+        "$stable=[pscustomobject]@{git_sha=('a'*40);windows_revision=('a'*40);worker_version_id="
         "'11111111-1111-4111-8111-111111111111'};"
         "$candidate=[pscustomobject]@{git_sha=('b'*40);windows_revision=('b'*40);"
         "worker_version_id='22222222-2222-4222-8222-222222222222';"
@@ -1572,11 +1572,15 @@ def _coordinated_migration_contract_body(*, capability_overrides: str = "") -> s
         "return [pscustomobject]@{passed=$true;output=@('CREATE TABLE safe (id integer);')}};"
         "default{return [pscustomobject]@{passed=$false;output=@()}}}};"
         "function Get-CloudflareVersionDetails{param($VersionId);"
-        "return [pscustomobject]@{resources=[pscustomobject]@{bindings=@("
+        "$sha=if($VersionId -eq $candidate.worker_version_id){$candidate.git_sha}else{$stable.git_sha};"
+        "return [pscustomobject]@{id=$VersionId;annotations=[pscustomobject]@{"
+        "'workers/message'=('release:'+$sha)};resources=[pscustomobject]@{bindings=@("
         "[pscustomobject]@{type='d1';name='DB';database_id=$script:testDatabaseId})}}};"
         "function Invoke-WranglerJson{param($Arguments);return [pscustomobject]@{"
         "uuid=$script:testDatabaseId;name='aurum-signal-room'}};"
+        "$script:migrationMutationQueries=0;"
         "function Invoke-CoordinatedMigrationD1Query{param($Sql);"
+        "if($Sql -notmatch '^\\s*(SELECT|WITH)\\b'){$script:migrationMutationQueries++};"
         "if($Sql -like 'SELECT name,*'){return @("
         "[pscustomobject]@{name='0022_news_projection_generation.sql';applied_at='now'},"
         "[pscustomobject]@{name='0023_operator_retry_sync_digest.sql';applied_at='now'},"
@@ -1624,6 +1628,31 @@ def _coordinated_migration_contract_body(*, capability_overrides: str = "") -> s
         "'web/drizzle/0028_fence_legacy_news_current_identity.sql',"
         "'web/drizzle/0029_news_projection_receipt_index.sql',"
         "'web/drizzle/0030_news_evidence_cleanup_budget.sql');"
+    )
+
+
+def _expired_migration_acceptance_body() -> str:
+    return (
+        _coordinated_migration_contract_body()
+        + "$evidence=Get-CoordinatedMigrationLiveEvidence $candidate $stable $files;"
+        "$checked=[DateTimeOffset]::UtcNow.AddHours(-3);"
+        "$core=[ordered]@{schema_version='coordinated-storage-migration-receipt-v1';"
+        "checked_at=$checked.ToString('o');expires_at=$checked.AddHours(2).ToString('o');"
+        "evidence=$evidence};$root=[pscustomobject]$core;"
+        "$root|Add-Member -NotePropertyName receipt_digest "
+        "-NotePropertyValue (Get-CoordinatedMigrationReceiptDigest $core);"
+        "Write-CoordinatedMigrationReceipt $root;"
+        "$candidate|Add-Member -Force migration_acceptance ([pscustomobject]@{"
+        "validation_key=$candidate.validation_key;receipt_digest=$root.receipt_digest;"
+        "checked_at=$root.checked_at;expires_at=$root.expires_at});"
+        "$state=[pscustomobject]@{transaction=$null;stable=$stable;candidate=$candidate;"
+        "updated_at=[DateTimeOffset]::UtcNow.ToString('o');"
+        "candidate_materialization=[pscustomobject]@{state='MATERIALIZED'}};"
+        "Write-ReleaseControlState $state;"
+        "function Get-RuntimeCodeState{[pscustomobject]@{"
+        "applied_revision=$stable.windows_revision}};"
+        "function Get-CloudflareDeployment{[pscustomobject]@{versions=@("
+        "[pscustomobject]@{version_id=$stable.worker_version_id;percentage=100})}};"
     )
 
 
@@ -5154,6 +5183,289 @@ def test_coordinated_migration_receipt_rejects_reuse_staleness_and_tampering(
     assert result == expected
 
 
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_expired_migration_acceptance_renews_from_exact_live_evidence(
+    tmp_path, powershell: str,
+) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _expired_migration_acceptance_body()
+        + "$rootPath=Get-CoordinatedMigrationRootReceiptPath $root.receipt_digest;"
+        "$before=[IO.File]::ReadAllBytes($rootPath);$script:migrationMutationQueries=0;"
+        "$qualification=Ensure-CoordinatedMigrationQualification $candidate $stable $files;"
+        "$after=[IO.File]::ReadAllBytes($rootPath);"
+        "$same=[Convert]::ToBase64String($before) -ceq [Convert]::ToBase64String($after);"
+        "$renewals=@(Get-ChildItem $coordinatedMigrationRenewalReceiptRoot -File);"
+        'Write-Output "$($qualification.state),$($candidate.migration_qualification.state),'
+        '$($qualification.root_receipt_digest -eq $root.receipt_digest),$same,'
+        '$script:migrationMutationQueries,$($renewals.Count)"',
+        powershell=powershell,
+    )
+    assert result == "MIGRATION_QUALIFICATION_RENEWED,MIGRATION_QUALIFICATION_RENEWED,True,True,0,1"
+
+
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_fresh_migration_acceptance_does_not_create_renewal(
+    tmp_path, powershell: str,
+) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _coordinated_migration_contract_body()
+        + "$evidence=Get-CoordinatedMigrationLiveEvidence $candidate $stable $files;"
+        "$root=New-CoordinatedMigrationReceipt $evidence;Write-CoordinatedMigrationReceipt $root;"
+        "$candidate|Add-Member -Force migration_acceptance ([pscustomobject]@{"
+        "validation_key=$candidate.validation_key;receipt_digest=$root.receipt_digest});"
+        "$state=[pscustomobject]@{transaction=$null;stable=$stable;candidate=$candidate};"
+        "Write-ReleaseControlState $state;function Get-CloudflareDeployment{throw 'unused'};"
+        "$script:migrationMutationQueries=0;"
+        "$qualification=Ensure-CoordinatedMigrationQualification $candidate $stable $files;"
+        "$count=if(Test-Path $coordinatedMigrationRenewalReceiptRoot){"
+        "@(Get-ChildItem $coordinatedMigrationRenewalReceiptRoot -File).Count}else{0};"
+        'Write-Output "$($qualification.state),$count,$script:migrationMutationQueries"',
+        powershell=powershell,
+    )
+    assert result == "MIGRATION_ACCEPTED,0,0"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    (
+        (
+            "$script:testDatabaseId='44444444-4444-4444-8444-444444444444';",
+            "MIGRATION_RECEIPT_LIVE_EVIDENCE_MISMATCH:database_id",
+        ),
+        (
+            "$candidate.windows_revision=('9'*40);",
+            "MIGRATION_QUALIFICATION_CANDIDATE_IDENTITY_INVALID",
+        ),
+        (
+            "$stable.windows_revision=('9'*40);",
+            "MIGRATION_QUALIFICATION_STABLE_IDENTITY_INVALID",
+        ),
+        (
+            "$script:changed=$evidence|ConvertTo-Json -Depth 16|ConvertFrom-ReleaseControlJson;"
+            "$script:changed.news_generation_id=('9'*64);"
+            "function Get-CoordinatedMigrationLiveEvidence{return $script:changed};",
+            "MIGRATION_RECEIPT_GENERATION_CHANGED",
+        ),
+    ),
+)
+def test_migration_renewal_rejects_changed_live_authority(
+    tmp_path, mutation: str, expected: str,
+) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _expired_migration_acceptance_body()
+        + mutation
+        + "$reason='';try{Ensure-CoordinatedMigrationQualification "
+        "$candidate $stable $files|Out-Null}catch{$reason=$_.Exception.Message};"
+        "Write-Output $reason",
+    )
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    (
+        (
+            "$state=Get-ReleaseControlState;$state.transaction=[pscustomobject]@{type='PROMOTE'};"
+            "Write-ReleaseControlState $state;",
+            "MIGRATION_QUALIFICATION_RENEWAL_TRANSACTION_ACTIVE",
+        ),
+        (
+            "New-Item -ItemType Directory -Path $runtimeStateMigrationLockPath|Out-Null;",
+            "MIGRATION_QUALIFICATION_RENEWAL_LOCK_ACTIVE",
+        ),
+        (
+            "function Get-RuntimeCodeState{[pscustomobject]@{applied_revision=('9'*40)}};",
+            "MIGRATION_QUALIFICATION_RENEWAL_WINDOWS_IDENTITY_UNSAFE",
+        ),
+        (
+            "function Get-CloudflareDeployment{[pscustomobject]@{versions=@("
+            "[pscustomobject]@{version_id=$stable.worker_version_id;percentage=50},"
+            "[pscustomobject]@{version_id=$candidate.worker_version_id;percentage=50})}};",
+            "MIGRATION_QUALIFICATION_RENEWAL_PRODUCTION_OWNERSHIP_UNSAFE",
+        ),
+    ),
+)
+def test_migration_renewal_requires_quiescent_single_owner_boundary(
+    tmp_path, mutation: str, expected: str,
+) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _expired_migration_acceptance_body()
+        + mutation
+        + "$reason='';try{Ensure-CoordinatedMigrationQualification "
+        "$candidate $stable $files|Out-Null}catch{$reason=$_.Exception.Message};"
+        "Write-Output $reason",
+    )
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    ("stable_id", "stable_message", "expected"),
+    (
+        ("$stable.worker_version_id", "$null", "PASSED"),
+        ("$stable.worker_version_id", "('release:'+('9'*40))", "MIGRATION_STABLE_VERSION_IDENTITY_MISMATCH"),
+        ("'99999999-9999-4999-8999-999999999999'", "$null", "MIGRATION_STABLE_VERSION_IDENTITY_MISMATCH"),
+    ),
+)
+def test_migration_live_evidence_uses_exact_stable_version_with_legacy_provenance(
+    tmp_path, stable_id: str, stable_message: str, expected: str,
+) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _coordinated_migration_contract_body()
+        + "function Get-CloudflareVersionDetails{param($VersionId);"
+        "$isCandidate=$VersionId -eq $candidate.worker_version_id;"
+        f"$id=if($isCandidate){{$candidate.worker_version_id}}else{{{stable_id}}};"
+        "$message=if($isCandidate){'release:'+$candidate.git_sha}else{"
+        f"{stable_message}}};$annotations=[pscustomobject]@{{'workers/message'=$message}};"
+        "[pscustomobject]@{id=$id;annotations=$annotations;resources=[pscustomobject]@{"
+        "bindings=@([pscustomobject]@{type='d1';name='DB';"
+        "database_id=$script:testDatabaseId})}}};"
+        "$reason='PASSED';try{Get-CoordinatedMigrationLiveEvidence "
+        "$candidate $stable $files|Out-Null}catch{$reason=$_.Exception.Message};"
+        "Write-Output $reason",
+    )
+    assert result == expected
+
+
+def test_migration_renewal_rejects_broken_root_receipt_digest(tmp_path) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _expired_migration_acceptance_body()
+        + "$path=Get-CoordinatedMigrationRootReceiptPath $root.receipt_digest;"
+        "$saved=Get-Content $path -Raw|ConvertFrom-ReleaseControlJson;"
+        "$saved.evidence.database_name='tampered';"
+        "$saved|ConvertTo-Json -Depth 12|Set-Content $path;"
+        "$reason='';try{Ensure-CoordinatedMigrationQualification "
+        "$candidate $stable $files|Out-Null}catch{$reason=$_.Exception.Message};"
+        "Write-Output $reason",
+    )
+    assert result == "MIGRATION_RECEIPT_TAMPERED"
+
+
+def test_migration_renewal_chain_tampering_fails_closed(tmp_path) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _expired_migration_acceptance_body()
+        + "$qualification=Ensure-CoordinatedMigrationQualification $candidate $stable $files;"
+        "$digest=$qualification.receipt.receipt_digest;"
+        "$path=Get-CoordinatedMigrationRenewalReceiptPath $digest;"
+        "$saved=Get-Content $path -Raw|ConvertFrom-ReleaseControlJson;"
+        "$saved.previous_migration_renewal_digest=('9'*64);"
+        "$saved|ConvertTo-Json -Depth 16|Set-Content $path;"
+        "$reason='';try{Ensure-CoordinatedMigrationQualification "
+        "$candidate $stable $files|Out-Null}catch{$reason=$_.Exception.Message};"
+        "Write-Output $reason",
+    )
+    assert result == "MIGRATION_QUALIFICATION_RENEWAL_TAMPERED"
+
+
+def test_expired_migration_renewal_links_the_previous_immutable_lease(tmp_path) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _expired_migration_acceptance_body()
+        + "$rootReceipt=Assert-CoordinatedMigrationRootReceipt $candidate $stable "
+        "$files $root.receipt_digest -AllowStale;"
+        "$live=Assert-CoordinatedMigrationLiveEvidenceMatchesRoot $rootReceipt "
+        "$candidate $stable $files -RequireExactGeneration;"
+        "$fresh=New-CoordinatedMigrationRenewalReceipt $candidate $stable $rootReceipt $live;"
+        "$oldCore=Get-CoordinatedMigrationRenewalCore $fresh;"
+        "$oldChecked=[DateTimeOffset]::UtcNow.AddHours(-3);"
+        "$oldCore['checked_at']=$oldChecked.ToString('o');"
+        "$oldCore['expires_at']=$oldChecked.AddHours(2).ToString('o');"
+        "$old=[pscustomobject]$oldCore;$old|Add-Member -NotePropertyName receipt_digest "
+        "-NotePropertyValue (Get-CoordinatedMigrationRenewalReceiptDigest $oldCore);"
+        "Write-CoordinatedMigrationRenewalReceipt $old;"
+        "$candidate|Add-Member -Force migration_qualification ([pscustomobject]@{"
+        "state='MIGRATION_QUALIFICATION_RENEWED';validation_key=$candidate.validation_key;"
+        "root_receipt_digest=$root.receipt_digest;receipt_digest=$old.receipt_digest});"
+        "$next=Ensure-CoordinatedMigrationQualification $candidate $stable $files;"
+        "$count=@(Get-ChildItem $coordinatedMigrationRenewalReceiptRoot -File).Count;"
+        'Write-Output "$($next.state),'
+        '$($next.receipt.previous_migration_renewal_digest -eq $old.receipt_digest),$count"',
+    )
+    assert result == "MIGRATION_QUALIFICATION_RENEWED,True,2"
+
+
+def test_migration_renewal_cannot_move_to_another_runtime_root(tmp_path) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _expired_migration_acceptance_body()
+        + "$null=Ensure-CoordinatedMigrationQualification $candidate $stable $files;"
+        "$moduleRoot=Join-Path $moduleRoot 'moved-runtime';"
+        "$reason='';try{Ensure-CoordinatedMigrationQualification "
+        "$candidate $stable $files|Out-Null}catch{$reason=$_.Exception.Message};"
+        "Write-Output $reason",
+    )
+    assert result == "MIGRATION_RECEIPT_RUNTIME_ROOT_MISMATCH"
+
+
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_supersession_recovery_entrypoint_renews_stale_migration_qualification(
+    tmp_path, powershell: str,
+) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _expired_migration_acceptance_body()
+        + "$candidate|Add-Member -Force artifact_kind 'PRODUCTION_CANDIDATE';"
+        "$candidate|Add-Member -Force compatibility_state 'PASSED';"
+        "$candidate|Add-Member -Force validation_state 'PASSED';"
+        "$candidate|Add-Member -Force validation ([pscustomobject]@{"
+        "key=$candidate.validation_key;repository='PASSED';windows='PASSED';"
+        "cloudflare='PASSED';data_parity=[pscustomobject]@{state='PASSED'};"
+        "worker_qualification=[pscustomobject]@{key=('d'*64);"
+        "candidate_worker_version=$candidate.worker_version_id;candidate_git_sha=$candidate.git_sha};"
+        "cpu_evidence=[pscustomobject]@{qualification_key=('d'*64);"
+        "qualification_receipt_digest=('e'*64)};"
+        "auth_inspection=[pscustomobject]@{state='HUMAN_ACCESS_BOUNDARY_ACCEPTED'}});"
+        "$head=New-ReleaseIdentity -GitSha ('c'*40) -WorkerVersionId "
+        "'cccccccc-cccc-4ccc-8ccc-cccccccccccc' -WindowsRevision ('c'*40) "
+        "-Branch 'main' -ArtifactKind 'PRODUCTION_CANDIDATE';"
+        "$head.compatibility_state='REVIEW_REQUIRED';$head.validation_state='REVIEW_REQUIRED';"
+        "$head.validation=[pscustomobject]@{key=$head.validation_key;"
+        "reason='COORDINATED_STORAGE_MIGRATION_REQUIRED'};"
+        "$state=Get-ReleaseControlState;$state.candidate=$head;Write-ReleaseControlState $state;"
+        "Write-ReleaseHistory -Event 'CANDIDATE_SUPERSEDED' -Release $candidate "
+        "-Detail @{replacement_key=$head.validation_key};"
+        "function Get-ProductionCandidateProvenanceResult{[pscustomobject]@{"
+        "state='PASSED';mode='CONTROL_PLANE_ONLY_MAIN_ADVANCE';"
+        "current_main_git_sha=('f'*40)}};"
+        "function Test-PreservedCandidateEvidenceAvailable{return $true};"
+        "function Get-CandidateChangedFiles{return $files};"
+        "function Get-CandidateCompatibilityRequirement{[pscustomobject]@{"
+        "state='COORDINATED_STORAGE_MIGRATION_REQUIRED';files=$files}};"
+        "function Get-WorkerCpuQualificationReceipt{[pscustomobject]@{"
+        "receipt_digest=('e'*64);source_worker_version=$candidate.worker_version_id;"
+        "source_git_sha=$candidate.git_sha}};"
+        "function Assert-AccessBoundaryAcceptanceReceipt{[pscustomobject]@{"
+        "receipt_digest=('1'*64)}};function Set-CloudflareCandidatePointer{};"
+        "function Wait-CandidatePlacementPropagation{[pscustomobject]@{passed=$true}};"
+        "$rootPath=Get-CoordinatedMigrationRootReceiptPath $root.receipt_digest;"
+        "$before=[Convert]::ToBase64String([IO.File]::ReadAllBytes($rootPath));"
+        "$restored=Restore-ControlPlaneOnlySupersededCandidate $state ('f'*40);"
+        "$after=[Convert]::ToBase64String([IO.File]::ReadAllBytes($rootPath));"
+        "$final=Get-ReleaseControlState;$history=Get-Content $releaseHistoryPath -Raw;"
+        'Write-Output "$($restored.validation_key -eq $candidate.validation_key),'
+        '$($final.candidate.migration_qualification.state),$($before -ceq $after),'
+        '$($history.Contains(\'MIGRATION_QUALIFICATION_RENEWED\'))"',
+        powershell=powershell,
+    )
+    assert result == "True,MIGRATION_QUALIFICATION_RENEWED,True,True"
+
+
 def test_migration_capability_reuses_json_projection_from_one_bounded_scan() -> None:
     control_center = (
         ROOT / "scripts" / "xauusd_control_center.ps1"
@@ -5257,7 +5569,10 @@ def test_migration_capability_reuses_json_projection_from_one_bounded_scan() -> 
             "function Get-CloudflareVersionDetails{param($VersionId);"
             "$id=if($VersionId -eq $stable.worker_version_id){"
             "'44444444-4444-4444-8444-444444444444'}else{$script:testDatabaseId};"
-            "return [pscustomobject]@{resources=[pscustomobject]@{bindings=@("
+            "$sha=if($VersionId -eq $stable.worker_version_id){$stable.git_sha}"
+            "else{$candidate.git_sha};return [pscustomobject]@{id=$VersionId;"
+            "annotations=[pscustomobject]@{'workers/message'=('release:'+$sha)};"
+            "resources=[pscustomobject]@{bindings=@("
             "[pscustomobject]@{type='d1';name='DB';database_id=$id})}}}",
             "MIGRATION_REVERSE_DATABASE_IDENTITY_MISMATCH",
         ),
@@ -5957,7 +6272,8 @@ def test_unvalidated_control_plane_replacement_restores_exact_superseded_candida
         "function Get-CandidateChangedFiles{return @('web/drizzle/required.sql')};"
         "function Get-CandidateCompatibilityRequirement{[pscustomobject]@{"
         "state='COORDINATED_STORAGE_MIGRATION_REQUIRED';files=@('web/drizzle/required.sql')}};"
-        "function Assert-CoordinatedMigrationReceipt{[pscustomobject]@{receipt_digest=('f'*64)}};"
+        "function Ensure-CoordinatedMigrationQualification{[pscustomobject]@{"
+        "root_receipt_digest=('f'*64)}};"
         "function Get-WorkerCpuQualificationReceipt{[pscustomobject]@{"
         "receipt_digest=('e'*64);source_worker_version=$prior.worker_version_id;"
         "source_git_sha=$prior.git_sha}};"
@@ -6078,8 +6394,8 @@ def _supersession_chain_contract(scenario: str) -> str:
         "function Get-CandidateChangedFiles{return @('web/drizzle/required.sql')};"
         "function Get-CandidateCompatibilityRequirement{[pscustomobject]@{"
         "state='COORDINATED_STORAGE_MIGRATION_REQUIRED';files=@('web/drizzle/required.sql')}};"
-        "function Assert-CoordinatedMigrationReceipt{param($Candidate,$Stable,$MigrationFiles)"
-        "[pscustomobject]@{receipt_digest=('e'*64)}};"
+        "function Ensure-CoordinatedMigrationQualification{param($Candidate,$Stable,$MigrationFiles)"
+        "[pscustomobject]@{root_receipt_digest=('e'*64)}};"
         "function Get-WorkerCpuQualificationReceipt{param($QualificationKey)"
         "[pscustomobject]@{receipt_digest=$(if($script:cpuReceiptInvalid){('0'*64)}else{('e'*64)});"
         "source_worker_version=$qualified.worker_version_id;source_git_sha=$qualified.git_sha}};"
@@ -6181,8 +6497,8 @@ def test_observe_probe_failure_restores_exact_qualification_and_preserves_attemp
         "function Get-CandidateChangedFiles{return @('web/drizzle/required.sql')};"
         "function Get-CandidateCompatibilityRequirement{[pscustomobject]@{"
         "state='COORDINATED_STORAGE_MIGRATION_REQUIRED';files=@('web/drizzle/required.sql')}};"
-        "function Assert-CoordinatedMigrationReceipt{[pscustomobject]@{"
-        "receipt_digest='migration-kept'}};"
+        "function Ensure-CoordinatedMigrationQualification{[pscustomobject]@{"
+        "root_receipt_digest='migration-kept'}};"
         "function Read-WorkerCpuRunArtifact{[pscustomobject]@{validation_run='run-kept'}};"
         "function Get-CloudflareVersionDetails{param($VersionId)[pscustomobject]@{id=$VersionId}};"
         "function Get-ReleaseGitShaFromVersion{return ('b'*40)};"
