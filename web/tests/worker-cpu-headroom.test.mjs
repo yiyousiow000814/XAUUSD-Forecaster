@@ -313,9 +313,9 @@ test("replays the production read route family through bounded API modules", asy
   const routes = [
     ["/api/status", 200],
     ["/api/audit", 200],
-    ["/api/audit-briefs", 200],
-    ["/api/audit-stories", 200],
-    ["/api/audit-decisions", 200],
+    ["/api/audit-briefs?__release_observe=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 200],
+    ["/api/audit-stories?__release_observe=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 200],
+    ["/api/audit-decisions?__release_observe=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 200],
     ["/api/learning", 200],
     ["/api/learning-history?resource=model&limit=6", 200],
     ["/api/market-chart", 200],

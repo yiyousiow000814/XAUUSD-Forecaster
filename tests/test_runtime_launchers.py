@@ -4729,9 +4729,14 @@ def test_deferred_projection_probe_uses_installed_control_bundle_and_runtime_aut
         "$obligation=[pscustomobject]@{route='/api/audit-stories'};"
         "function Invoke-Utf8NativeProcess{param($FilePath,$Arguments,$WorkingDirectory,$Environment)"
         "$script:probePath=$Arguments[0];$script:probeWorkingDirectory=$WorkingDirectory;"
+        "$attemptIndex=[Array]::IndexOf($Arguments,'--observe-attempt');"
+        "$script:observeAttempts += @($Arguments[$attemptIndex+1]);"
         "[pscustomobject]@{exit_code=0;stdout_lines=@('{\"state\":\"PASSED\","
         "\"reason\":\"PASSED\",\"routes\":[]}');stderr_lines=@()}};"
         "$answer=Test-DeferredProjectionObligations -Obligations @($obligation) "
+        "-Target $target -RequiredAfter ([DateTimeOffset]::UtcNow) "
+        "-ValidationKey $target.validation_key;"
+        "$second=Test-DeferredProjectionObligations -Obligations @($obligation) "
         "-Target $target -RequiredAfter ([DateTimeOffset]::UtcNow) "
         "-ValidationKey $target.validation_key;"
         "$bundleRoot=[IO.Path]::GetDirectoryName($script:probePath);"
@@ -4740,9 +4745,11 @@ def test_deferred_projection_probe_uses_installed_control_bundle_and_runtime_aut
         "$declared='check_deferred_projection_parity.py' -in @($manifest.files);"
         "$bundled=$bundleRoot -ne (Join-Path $moduleRoot 'scripts');"
         '$runtimeBound=$script:probeWorkingDirectory -eq $moduleRoot;'
-        'Write-Output "$($answer.state),$declared,$bundled,$runtimeBound"',
+        "$attemptsValid=@($script:observeAttempts|Where-Object{$_ -match '^[0-9a-f]{32}$'}).Count -eq 2;"
+        "$attemptsDistinct=$script:observeAttempts[0] -ne $script:observeAttempts[1];"
+        'Write-Output "$($answer.state),$($second.state),$declared,$bundled,$runtimeBound,$attemptsValid,$attemptsDistinct"',
     )
-    assert result == "PASSED,True,True,True"
+    assert result == "PASSED,PASSED,True,True,True,True,True"
 
 
 def test_crashed_cutover_is_reconciled_to_recovery_required(tmp_path) -> None:

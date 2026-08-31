@@ -9245,12 +9245,14 @@ function Test-DeferredProjectionObligations {
         }
     }
     $python = (Get-Command python.exe -ErrorAction Stop).Source
+    $observeAttempt = [guid]::NewGuid().ToString("N")
     $arguments = @(
         (Join-Path $PSScriptRoot "check_deferred_projection_parity.py"),
         "--version-id", ([string]$Target.worker_version_id),
         "--git-sha", ([string]$Target.git_sha),
         "--producer-revision", ([string]$Target.windows_revision),
-        "--required-after", $RequiredAfter.ToString("o")
+        "--required-after", $RequiredAfter.ToString("o"),
+        "--observe-attempt", $observeAttempt
     )
     foreach ($route in $routes) { $arguments += @("--route", $route) }
     $read = Invoke-Utf8NativeProcess -FilePath $python -Arguments $arguments `

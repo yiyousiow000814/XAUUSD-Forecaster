@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,6 +36,15 @@ REMOTE_BASE_URL = "https://aurum-signal-room.yiyousiow1234.workers.dev"
 WORKER_NAME = "aurum-signal-room"
 RELEASE_CONTROL_USER_AGENT = "XAUUSD-Forecaster-Release-Control/1"
 REMOTE_URLS = {route: REMOTE_BASE_URL + route for route in BUILDERS}
+OBSERVE_ATTEMPT_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _remote_observe_url(route: str, observe_attempt: str) -> str:
+    if not OBSERVE_ATTEMPT_PATTERN.fullmatch(observe_attempt):
+        raise ValueError("observe attempt must be a lowercase 32-character hex id")
+    return REMOTE_URLS[route] + "?" + urllib.parse.urlencode(
+        {"__release_observe": observe_attempt}
+    )
 
 
 def _read_json(url: str, *, headers: dict[str, str] | None = None) -> tuple[dict, object]:
@@ -52,7 +63,7 @@ def _read_json(url: str, *, headers: dict[str, str] | None = None) -> tuple[dict
 
 def verify(
     *, version_id: str, git_sha: str, producer_revision: str,
-    routes: list[str], required_after: datetime,
+    routes: list[str], required_after: datetime, observe_attempt: str,
 ) -> dict:
     try:
         authority, _ = _read_json(LOCAL_AUDIT_URL)
@@ -68,9 +79,13 @@ def verify(
         expected = json.loads(builder(authority, producer_revision).decode("utf-8"))
         try:
             observed, headers = _read_json(
-                REMOTE_URLS[route],
-                headers={"Cloudflare-Workers-Version-Overrides":
-                         f'{WORKER_NAME}="{version_id}"'},
+                _remote_observe_url(route, observe_attempt),
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Pragma": "no-cache",
+                    "Cloudflare-Workers-Version-Overrides":
+                        f'{WORKER_NAME}="{version_id}"',
+                },
             )
         except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError) as error:
             results.append({"route": route, "state": "PENDING",
@@ -116,6 +131,7 @@ def main() -> int:
     parser.add_argument("--git-sha", required=True)
     parser.add_argument("--producer-revision", required=True)
     parser.add_argument("--required-after", required=True)
+    parser.add_argument("--observe-attempt", required=True)
     parser.add_argument("--route", action="append", required=True)
     args = parser.parse_args()
     required_after = datetime.fromisoformat(args.required_after)
@@ -127,6 +143,7 @@ def main() -> int:
         producer_revision=args.producer_revision,
         routes=args.route,
         required_after=required_after,
+        observe_attempt=args.observe_attempt,
     )
     print(json.dumps(result, separators=(",", ":")))
     return 0 if result["state"] == "PASSED" else 1
