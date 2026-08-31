@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import urllib.error
 import urllib.request
@@ -12,7 +11,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
-RUNTIME_ROOT = Path(os.environ.get("XAUUSD_RUNTIME_ROOT", MODULE_ROOT)).resolve()
+# Release Control starts this bundled probe with the authoritative RuntimeRoot
+# as its explicit working directory. Projection builders remain owned by that
+# exact Windows revision rather than by the Control Plane bundle.
+RUNTIME_ROOT = Path.cwd().resolve()
 sys.path.insert(0, str(RUNTIME_ROOT / "scripts"))
 
 from run_dashboard_sync import (  # noqa: E402

@@ -4698,7 +4698,7 @@ def test_deferred_projection_probe_uses_installed_control_bundle_and_runtime_aut
         "-WindowsRevision ('b'*40) -Branch 'main' -ArtifactKind 'PRODUCTION_CANDIDATE';"
         "$obligation=[pscustomobject]@{route='/api/audit-stories'};"
         "function Invoke-Utf8NativeProcess{param($FilePath,$Arguments,$WorkingDirectory,$Environment)"
-        "$script:probePath=$Arguments[0];$script:probeEnvironment=$Environment;"
+        "$script:probePath=$Arguments[0];$script:probeWorkingDirectory=$WorkingDirectory;"
         "[pscustomobject]@{exit_code=0;stdout_lines=@('{\"state\":\"PASSED\","
         "\"reason\":\"PASSED\",\"routes\":[]}');stderr_lines=@()}};"
         "$answer=Test-DeferredProjectionObligations -Obligations @($obligation) "
@@ -4709,7 +4709,7 @@ def test_deferred_projection_probe_uses_installed_control_bundle_and_runtime_aut
         "'runtime-control-files.json') -Raw -Encoding UTF8|ConvertFrom-Json;"
         "$declared='check_deferred_projection_parity.py' -in @($manifest.files);"
         "$bundled=$bundleRoot -ne (Join-Path $moduleRoot 'scripts');"
-        '$runtimeBound=$script:probeEnvironment.XAUUSD_RUNTIME_ROOT -eq $moduleRoot;'
+        '$runtimeBound=$script:probeWorkingDirectory -eq $moduleRoot;'
         'Write-Output "$($answer.state),$declared,$bundled,$runtimeBound"',
     )
     assert result == "PASSED,True,True,True"

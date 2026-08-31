@@ -8428,10 +8428,7 @@ function Test-DeferredProjectionObligations {
     )
     foreach ($route in $routes) { $arguments += @("--route", $route) }
     $read = Invoke-Utf8NativeProcess -FilePath $python -Arguments $arguments `
-        -WorkingDirectory $moduleRoot -Environment @{
-            PYTHONUTF8 = "1"
-            XAUUSD_RUNTIME_ROOT = $moduleRoot
-        }
+        -WorkingDirectory $moduleRoot -Environment @{ PYTHONUTF8 = "1" }
     $output = if ($read.exit_code -eq 0) { @($read.stdout_lines) } else {
         @($read.stdout_lines) + @($read.stderr_lines)
     }
