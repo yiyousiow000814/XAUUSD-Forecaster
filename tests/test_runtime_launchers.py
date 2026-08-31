@@ -6603,6 +6603,65 @@ def test_stale_machine_access_evidence_renews_without_new_human_acceptance(
     assert result == "ACCESS_QUALIFICATION_RENEWED,True,True,1,1"
 
 
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_new_candidate_renews_from_complete_historical_machine_chain(
+    tmp_path, powershell: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _stale_access_reuse_ready_for_renewal()
+        + _cloudflare_access_read_stubs()
+        + "$first=Ensure-AccessQualificationMachineReceipt $candidate;"
+        "$firstPath=Get-AccessQualificationRenewalReceiptPath $first.receipt_digest;"
+        "$firstBytes=Get-Content $firstPath -Raw -Encoding UTF8;"
+        "$state=Get-ReleaseControlState;$old=$state.candidate;"
+        "$new=New-ReleaseIdentity -GitSha ('c'*40) "
+        "-WorkerVersionId 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' "
+        "-WindowsRevision ('c'*40) -ValidationState 'REVIEW_REQUIRED' "
+        "-ArtifactKind 'PRODUCTION_CANDIDATE';"
+        "$new.branch='main';$new.compatibility_state='COORDINATED_STORAGE_MIGRATION_PASSED';"
+        "$new.validation=$old.validation.PSObject.Copy();$new.validation.key=$new.validation_key;"
+        "$new.validation.reason='ACCESS_BOUNDARY_REVIEW_REQUIRED';"
+        "$new.validation.auth_inspection=[pscustomobject]@{"
+        "state='AUTH_BOUNDARY_NOT_TESTABLE';versioned_workers_dev='UNPROTECTED_TEST_SURFACE'};"
+        "$state.candidate=$new;Write-ReleaseControlState $state;"
+        "$script:accessNow=[DateTimeOffset]::UtcNow.AddMinutes(5);"
+        "function Get-AccessEvidenceUtcNow{return $script:accessNow};"
+        "$renewed=Invoke-CandidateAccessQualificationReuse;"
+        "$verified=Assert-AccessQualificationMachineReceipt $renewed;"
+        "$priorUnchanged=(Get-Content $firstPath -Raw -Encoding UTF8)-ceq$firstBytes;"
+        "$files=@(Get-ChildItem $accessQualificationRenewalReceiptRoot -File).Count;"
+        '$provider=Get-AccessProviderInspectionReceiptByDigest '
+        '$verified.provider_inspection_receipt_digest;'
+        'Write-Output "$($verified.state),$($renewed.validation_state),'
+        '$($verified.previous_machine_receipt_digest -eq $first.receipt_digest),'
+        '$($verified.root_human_receipt_digest -eq $first.root_human_receipt_digest),'
+        '$priorUnchanged,$files,$($provider.audit_window_start -eq $first.inspection_window_end)"',
+        powershell=powershell,
+    )
+    assert result == "ACCESS_QUALIFICATION_RENEWED,PASSED,True,True,True,2,True"
+
+
+def test_new_candidate_renewal_does_not_fall_back_past_corrupt_machine_tip(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _stale_access_reuse_ready_for_renewal()
+        + _cloudflare_access_read_stubs()
+        + "$first=Ensure-AccessQualificationMachineReceipt $candidate;"
+        "$firstPath=Get-AccessQualificationRenewalReceiptPath $first.receipt_digest;"
+        "$first.receipt_digest=('f'*64);"
+        "$first|ConvertTo-Json -Depth 16|Set-Content $firstPath -Encoding UTF8;"
+        "$reason='';try{Get-LatestHistoricalAccessMachineAuthority|Out-Null}"
+        "catch{$reason=$_.Exception.Message};Write-Output $reason",
+    )
+    assert result in {
+        "ACCESS_QUALIFICATION_RENEWAL_TAMPERED",
+        "ACCESS_QUALIFICATION_RENEWAL_MISSING",
+    }
+
+
 def test_access_renewal_is_idempotent_for_same_provider_inspection(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
