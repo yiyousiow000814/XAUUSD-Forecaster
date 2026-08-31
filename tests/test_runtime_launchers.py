@@ -5977,6 +5977,117 @@ def test_superseded_candidate_recovery_fails_closed_when_replacement_or_evidence
     assert result == "True," + "b" * 40
 
 
+def test_observe_probe_failure_restores_exact_qualification_and_preserves_attempt(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$candidate|Add-Member -Force migration_acceptance ([pscustomobject]@{"
+        "validation_key=$candidate.validation_key;receipt_digest='migration-kept'});"
+        "$prior=[pscustomobject]@{key=$candidate.validation_key;repository='PASSED';"
+        "windows='PASSED';cloudflare='PASSED';validation_run='run-kept';"
+        "worker_qualification=[pscustomobject]@{key=('d'*64);"
+        "candidate_worker_version=$candidate.worker_version_id;candidate_git_sha=$candidate.git_sha};"
+        "cpu_evidence=[pscustomobject]@{qualification_key=('d'*64);"
+        "qualification_receipt_digest=('e'*64)};data_parity=[pscustomobject]@{"
+        "state='PASSED_WITH_DEFERRED_OBLIGATIONS';marker='parity-kept'};"
+        "auth_inspection=[pscustomobject]@{state='ACCESS_QUALIFICATION_REUSED'}};"
+        "$candidate.validation_state='FAILED';$candidate.validation=[pscustomobject]@{"
+        "key=$candidate.validation_key;error='OBSERVATION_FAILED';"
+        "reason='DEFERRED_PROJECTION_OBSERVATION_TIMEOUT';prior_validation=$prior;"
+        "deferred_projection_evidence=[pscustomobject]@{state='PENDING';attempts=9};"
+        "tested_at='2026-08-31T01:02:03+00:00'};Write-ReleaseControlState $state;"
+        "function Get-ProductionCandidateProvenanceResult{[pscustomobject]@{"
+        "state='PASSED';mode='CONTROL_PLANE_ONLY_MAIN_ADVANCE';"
+        "current_main_git_sha=('c'*40)}};"
+        "function Read-WorkerCpuRunArtifact{[pscustomobject]@{validation_run='run-kept'}};"
+        "function Get-CloudflareVersionDetails{param($VersionId)[pscustomobject]@{id=$VersionId}};"
+        "function Get-ReleaseGitShaFromVersion{return ('b'*40)};"
+        "function Get-ReleaseArtifactKindFromVersion{return 'PRODUCTION_CANDIDATE'};"
+        "function Get-WorkerCpuQualificationReceipt{[pscustomobject]@{"
+        "receipt_digest=('e'*64);source_worker_version=$candidate.worker_version_id;"
+        "source_git_sha=$candidate.git_sha}};"
+        "function Assert-AccessQualificationReuseReceipt{return [pscustomobject]@{state='PASSED'}};"
+        "$script:pointerCalls=0;function Set-CloudflareCandidatePointer{$script:pointerCalls++};"
+        "function Wait-CandidatePlacementPropagation{[pscustomobject]@{passed=$true}};"
+        "$restored=Restore-ControlPlaneObservationFailedCandidate $state ('c'*40);"
+        "$final=Get-ReleaseControlState;$history=Get-Content $releaseHistoryPath -Raw;"
+        'Write-Output "$($restored.validation_state),$($restored.validation.data_parity.marker),'
+        '$($final.candidate.last_release_attempt.reason),'
+        '$($final.candidate.last_release_attempt.deferred_projection_evidence.attempts),'
+        '$script:pointerCalls,$($final.candidate_materialization.state),'
+        '$($history.Contains(\'CANDIDATE_RELEASE_ATTEMPT_FAILURE_PRESERVED\')),'
+        '$($history.Contains(\'CANDIDATE_RELEASE_ATTEMPT_RECOVERED\'))"',
+    )
+    assert result == (
+        "PASSED,parity-kept,DEFERRED_PROJECTION_OBSERVATION_TIMEOUT,9,1,"
+        "PRESERVED,True,True"
+    )
+
+
+@pytest.mark.parametrize(
+    "unsafe_setup",
+    (
+        "$candidate.validation.reason='SEMANTIC_DATA_PARITY_FAILED';",
+        "$candidate.validation.error='CANDIDATE_FAILED';",
+        "$candidate.validation.prior_validation.key='wrong-key';",
+        "$candidate.validation.prior_validation.cloudflare='FAILED';",
+        "$candidate.migration_acceptance.validation_key='wrong-key';",
+        "$script:provenanceMoved=$true;",
+        "$script:providerMissing=$true;",
+        "$script:cpuReceiptInvalid=$true;",
+        "$script:accessInvalid=$true;",
+        "$script:placementMissing=$true;",
+    ),
+)
+def test_observe_probe_qualification_recovery_fails_closed_when_authority_moved(
+    tmp_path, unsafe_setup: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$candidate|Add-Member -Force migration_acceptance ([pscustomobject]@{"
+        "validation_key=$candidate.validation_key});"
+        "$candidate.validation_state='FAILED';$candidate.validation=[pscustomobject]@{"
+        "key=$candidate.validation_key;error='OBSERVATION_FAILED';"
+        "reason='DEFERRED_PROJECTION_OBSERVATION_TIMEOUT';tested_at='failed-at';"
+        "prior_validation=[pscustomobject]@{key=$candidate.validation_key;"
+        "repository='PASSED';windows='PASSED';cloudflare='PASSED';"
+        "worker_qualification=[pscustomobject]@{key=('d'*64);"
+        "candidate_worker_version=$candidate.worker_version_id;candidate_git_sha=$candidate.git_sha};"
+        "cpu_evidence=[pscustomobject]@{qualification_key=('d'*64);"
+        "qualification_receipt_digest=('e'*64)};"
+        "data_parity=[pscustomobject]@{state='PASSED_WITH_DEFERRED_OBLIGATIONS'};"
+        "auth_inspection=[pscustomobject]@{state='ACCESS_QUALIFICATION_REUSED'}}};"
+        f"{unsafe_setup}Write-ReleaseControlState $state;"
+        "function Get-ProductionCandidateProvenanceResult{[pscustomobject]@{"
+        "state=$(if($script:provenanceMoved){'FAILED'}else{'PASSED'});"
+        "mode='CONTROL_PLANE_ONLY_MAIN_ADVANCE';current_main_git_sha=('c'*40)}};"
+        "function Get-CloudflareVersionDetails{param($VersionId)"
+        "if($script:providerMissing){throw 'missing'};[pscustomobject]@{id=$VersionId}};"
+        "function Get-ReleaseGitShaFromVersion{return ('b'*40)};"
+        "function Get-ReleaseArtifactKindFromVersion{return 'PRODUCTION_CANDIDATE'};"
+        "function Get-WorkerCpuQualificationReceipt{[pscustomobject]@{"
+        "receipt_digest=$(if($script:cpuReceiptInvalid){'wrong'}else{('e'*64)});"
+        "source_worker_version=$candidate.worker_version_id;"
+        "source_git_sha=$candidate.git_sha}};"
+        "function Assert-AccessQualificationReuseReceipt{"
+        "if($script:accessInvalid){throw 'invalid'};[pscustomobject]@{state='PASSED'}};"
+        "$script:pointerCalls=0;function Set-CloudflareCandidatePointer{$script:pointerCalls++};"
+        "function Wait-CandidatePlacementPropagation{[pscustomobject]@{"
+        "passed=(-not $script:placementMissing)}};"
+        "$restored=Restore-ControlPlaneObservationFailedCandidate $state ('c'*40);"
+        "$final=Get-ReleaseControlState;"
+        'Write-Output "$($null -eq $restored),$($final.candidate.validation_state),'
+        '$script:pointerCalls,$($null -eq $final.candidate.last_release_attempt)"',
+    )
+    expected_pointer_calls = "1" if unsafe_setup == "$script:placementMissing=$true;" else "0"
+    assert result == f"True,FAILED,{expected_pointer_calls},True"
+
+
 def test_legacy_reference_evidence_is_readable_but_never_promotable(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,

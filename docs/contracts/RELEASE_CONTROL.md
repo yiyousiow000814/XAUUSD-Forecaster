@@ -508,6 +508,16 @@ Failed PRECHECK, CUTOVER, observation, or automatic rollback leaves the
 pre-transaction Previous Stable pointer unchanged. Only successful
 `COMMIT_STABLE` advances Previous Stable.
 
+An automatic rollback caused solely by a bounded Control Plane deferred-
+projection probe timeout records a failed release attempt, not a Candidate
+qualification failure. After a Control-Plane-only `main` advance, discovery may
+restore the exact saved pre-Switch qualification and re-stage that immutable
+Candidate at zero percent only when its validation key, provider artifact,
+migration acceptance, CPU evidence, Access receipt, and compatibility remain
+valid. The failed attempt remains append-only evidence. Any Candidate, data,
+identity, receipt, provenance, or resource failure is ineligible for this
+recovery and remains fail-closed.
+
 Reverse internally uses `REVERSING -> REVERSE_OBSERVING -> READY` and commits the restored
 Stable identity only after the same owner, heartbeat, API, sync, critical-status,
 and decision-cadence observation succeeds. Restart during PROMOTING, OBSERVING,
