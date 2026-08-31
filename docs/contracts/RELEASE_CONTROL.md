@@ -525,6 +525,11 @@ policy. Deferred split-projection obligations additionally require snapshots
 published after the cutover boundary, exact `producer_revision`, exact Worker/Git
 response identity, and full production-builder semantic equality. Pending is
 bounded and retryable; a hard mismatch or timeout enters automatic rollback.
+The parity probe reads the hash-verified persisted audit read model from the
+explicit runtime-state root; it does not depend on rebuilding the serving
+cache. Projection code is loaded from the explicit producer code root. During
+Observe both roots name the activated Windows revision, while their ownership
+remains distinct and neither is inferred from the process working directory.
 `COMMIT_STABLE` is forbidden until every obligation for the exact validation key
 is `PASSED`. It records the prior Stable as Previous Stable only after all
 observation succeeds. A newly discovered Candidate during a transaction is

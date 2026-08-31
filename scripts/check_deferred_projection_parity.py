@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
+import sqlite3
 import sys
 import urllib.error
 import urllib.parse
@@ -13,11 +15,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
-# Release Control starts this bundled probe with the authoritative RuntimeRoot
-# as its explicit working directory. Projection builders remain owned by that
-# exact Windows revision rather than by the Control Plane bundle.
-RUNTIME_ROOT = Path.cwd().resolve()
-sys.path.insert(0, str(RUNTIME_ROOT / "scripts"))
+_root_parser = argparse.ArgumentParser(add_help=False)
+_root_parser.add_argument("--runtime-root")
+_root_parser.add_argument("--producer-root")
+_root_args, _ = _root_parser.parse_known_args()
+RUNTIME_ROOT = Path(_root_args.runtime_root or Path.cwd()).resolve()
+PRODUCER_ROOT = Path(_root_args.producer_root or Path.cwd()).resolve()
+# Projection builders belong to the exact Windows producer revision. Mutable
+# authority belongs to RuntimeRoot; neither location is inferred from the other.
+sys.path.insert(0, str(PRODUCER_ROOT / "scripts"))
 
 from run_dashboard_sync import (  # noqa: E402
     REMOTE_PAYLOAD_LIMIT_BYTES,
@@ -32,6 +38,8 @@ BUILDERS = {
     "/api/audit-decisions": audit_decisions_snapshot,
 }
 LOCAL_AUDIT_URL = "http://127.0.0.1:8765/api/audit"
+LOCAL_DATABASE = RUNTIME_ROOT / ".local" / "forward" / "forward-evidence.sqlite3"
+AUDIT_READ_MODEL_CONTRACT = "dashboard-audit-summary-v1"
 REMOTE_BASE_URL = "https://aurum-signal-room.yiyousiow1234.workers.dev"
 WORKER_NAME = "aurum-signal-room"
 RELEASE_CONTROL_USER_AGENT = "XAUUSD-Forecaster-Release-Control/1"
@@ -61,13 +69,64 @@ def _read_json(url: str, *, headers: dict[str, str] | None = None) -> tuple[dict
         return payload, response.headers
 
 
+def _read_persisted_audit_authority(database: Path = LOCAL_DATABASE) -> dict | None:
+    """Read the bounded audit authority without depending on the serving cache."""
+    if not database.is_file():
+        return None
+    connection = sqlite3.connect(
+        f"file:{database.resolve()}?mode=ro", uri=True, timeout=5,
+    )
+    try:
+        try:
+            row = connection.execute(
+                """SELECT contract_version,generated_at,payload_json,payload_hash
+                     FROM dashboard_optional_read_models_v1
+                    WHERE resource='audit'"""
+            ).fetchone()
+        except sqlite3.OperationalError as error:
+            if "no such table" in str(error).lower():
+                return None
+            raise
+    finally:
+        connection.close()
+    if row is None:
+        return None
+    contract_version, generated_at, raw_payload, payload_hash = row
+    if contract_version != AUDIT_READ_MODEL_CONTRACT:
+        raise ValueError("persisted audit authority contract mismatch")
+    if not isinstance(raw_payload, str):
+        raise ValueError("persisted audit authority payload is not text")
+    body = raw_payload.encode("utf-8")
+    if not body or len(body) > REMOTE_PAYLOAD_LIMIT_BYTES:
+        raise ValueError("persisted audit authority exceeds transport bound")
+    if hashlib.sha256(body).hexdigest() != payload_hash:
+        raise ValueError("persisted audit authority hash mismatch")
+    payload = json.loads(body.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("persisted audit authority is not an object")
+    if payload.get("generated_at") != generated_at:
+        raise ValueError("persisted audit authority metadata mismatch")
+    return payload
+
+
+def _read_local_authority() -> tuple[dict, str]:
+    persisted = _read_persisted_audit_authority()
+    if persisted is not None:
+        return persisted, "persisted-read-model"
+    authority, _ = _read_json(LOCAL_AUDIT_URL)
+    return authority, "local-api"
+
+
 def verify(
     *, version_id: str, git_sha: str, producer_revision: str,
     routes: list[str], required_after: datetime, observe_attempt: str,
 ) -> dict:
     try:
-        authority, _ = _read_json(LOCAL_AUDIT_URL)
-    except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError) as error:
+        authority, authority_source = _read_local_authority()
+    except (
+        OSError, sqlite3.Error, ValueError, json.JSONDecodeError,
+        urllib.error.URLError,
+    ) as error:
         return {"state": "PENDING", "reason": "LOCAL_AUDIT_AUTHORITY_UNAVAILABLE",
                 "diagnostic": str(error)[:512], "routes": []}
     results = []
@@ -122,11 +181,13 @@ def verify(
     pending = [item for item in results if item["state"] == "PENDING"]
     state = "FAILED" if failed else "PENDING" if pending else "PASSED"
     return {"state": state, "reason": (failed or pending or [{"reason": "PASSED"}])[0]["reason"],
-            "routes": results}
+            "authority_source": authority_source, "routes": results}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--runtime-root", required=True)
+    parser.add_argument("--producer-root", required=True)
     parser.add_argument("--version-id", required=True)
     parser.add_argument("--git-sha", required=True)
     parser.add_argument("--producer-revision", required=True)
