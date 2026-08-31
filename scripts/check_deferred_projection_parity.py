@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -11,7 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(MODULE_ROOT / "scripts"))
+RUNTIME_ROOT = Path(os.environ.get("XAUUSD_RUNTIME_ROOT", MODULE_ROOT)).resolve()
+sys.path.insert(0, str(RUNTIME_ROOT / "scripts"))
 
 from run_dashboard_sync import (  # noqa: E402
     REMOTE_PAYLOAD_LIMIT_BYTES,
@@ -28,11 +30,14 @@ BUILDERS = {
 LOCAL_AUDIT_URL = "http://127.0.0.1:8765/api/audit"
 REMOTE_BASE_URL = "https://aurum-signal-room.yiyousiow1234.workers.dev"
 WORKER_NAME = "aurum-signal-room"
+RELEASE_CONTROL_USER_AGENT = "XAUUSD-Forecaster-Release-Control/1"
 REMOTE_URLS = {route: REMOTE_BASE_URL + route for route in BUILDERS}
 
 
 def _read_json(url: str, *, headers: dict[str, str] | None = None) -> tuple[dict, object]:
-    request = urllib.request.Request(url, headers=headers or {})
+    request_headers = dict(headers or {})
+    request_headers["User-Agent"] = RELEASE_CONTROL_USER_AGENT
+    request = urllib.request.Request(url, headers=request_headers)
     with urllib.request.urlopen(request, timeout=15) as response:
         body = response.read(REMOTE_PAYLOAD_LIMIT_BYTES + 1)
         if len(body) > REMOTE_PAYLOAD_LIMIT_BYTES:
