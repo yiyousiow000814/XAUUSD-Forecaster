@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import sqlite3
 import urllib.error
 from urllib.parse import parse_qs, urlsplit
 
@@ -35,6 +36,35 @@ def _authority(generated_at: str) -> dict:
         "unassigned_story_events": [],
         "storyline_summary": {},
     }
+
+
+def _persisted_authority(database: Path, authority: dict, *, digest: str | None = None) -> None:
+    raw = json.dumps(authority, separators=(",", ":"))
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            """CREATE TABLE dashboard_optional_read_models_v1 (
+                   resource TEXT PRIMARY KEY,
+                   contract_version TEXT NOT NULL,
+                   generated_at TEXT NOT NULL,
+                   payload_json TEXT NOT NULL,
+                   payload_hash TEXT NOT NULL
+               )"""
+        )
+        connection.execute(
+            """INSERT INTO dashboard_optional_read_models_v1
+                      (resource,contract_version,generated_at,payload_json,payload_hash)
+               VALUES ('audit',?,?,?,?)""",
+            (
+                "dashboard-audit-summary-v1",
+                authority["generated_at"],
+                raw,
+                digest or __import__("hashlib").sha256(raw.encode()).hexdigest(),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 class _Response:
@@ -76,6 +106,84 @@ def test_exact_candidate_projection_semantics_pass(monkeypatch) -> None:
     )
     assert result["state"] == "PASSED"
     assert all(item["state"] == "PASSED" for item in result["routes"])
+
+
+def test_persisted_authority_bypasses_unavailable_local_api(monkeypatch, tmp_path) -> None:
+    module = _module()
+    revision = "b" * 40
+    version = "11111111-1111-4111-8111-111111111111"
+    generated = datetime.now(UTC)
+    authority = _authority(generated.isoformat())
+    database = tmp_path / "forward-evidence.sqlite3"
+    _persisted_authority(database, authority)
+    read_persisted = module._read_persisted_audit_authority
+    monkeypatch.setattr(
+        module, "_read_persisted_audit_authority",
+        lambda: read_persisted(database),
+    )
+
+    def read_json(url, **_kwargs):
+        assert url != module.LOCAL_AUDIT_URL
+        route = urlsplit(url).path
+        return json.loads(module.BUILDERS[route](authority, revision)), {
+            "X-Aurum-Worker-Version": version,
+            "X-Aurum-Git-SHA": revision,
+        }
+
+    monkeypatch.setattr(module, "_read_json", read_json)
+    result = module.verify(
+        version_id=version, git_sha=revision, producer_revision=revision,
+        routes=list(module.BUILDERS), required_after=generated - timedelta(seconds=1),
+        observe_attempt=OBSERVE_ATTEMPT,
+    )
+
+    assert result["state"] == "PASSED"
+    assert result["authority_source"] == "persisted-read-model"
+
+
+def test_corrupt_persisted_authority_fails_closed_without_api_fallback(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _module()
+    generated = datetime.now(UTC)
+    database = tmp_path / "forward-evidence.sqlite3"
+    _persisted_authority(database, _authority(generated.isoformat()), digest="0" * 64)
+    read_persisted = module._read_persisted_audit_authority
+    monkeypatch.setattr(
+        module, "_read_persisted_audit_authority",
+        lambda: read_persisted(database),
+    )
+    monkeypatch.setattr(
+        module, "_read_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("API fallback")),
+    )
+
+    result = module.verify(
+        version_id="11111111-1111-4111-8111-111111111111",
+        git_sha="b" * 40, producer_revision="b" * 40,
+        routes=list(module.BUILDERS), required_after=generated,
+        observe_attempt=OBSERVE_ATTEMPT,
+    )
+
+    assert result["state"] == "PENDING"
+    assert result["reason"] == "LOCAL_AUDIT_AUTHORITY_UNAVAILABLE"
+    assert result["diagnostic"] == "persisted audit authority hash mismatch"
+
+
+def test_runtime_and_producer_roots_are_independent_cli_contracts() -> None:
+    source = (ROOT / "scripts" / "check_deferred_projection_parity.py").read_text(
+        encoding="utf-8"
+    )
+    controller = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+
+    assert 'parser.add_argument("--runtime-root", required=True)' in source
+    assert 'parser.add_argument("--producer-root", required=True)' in source
+    assert 'LOCAL_DATABASE = RUNTIME_ROOT / ".local"' in source
+    assert 'sys.path.insert(0, str(PRODUCER_ROOT / "scripts"))' in source
+    assert '"--runtime-root", $moduleRoot' in controller
+    assert '"--producer-root", $moduleRoot' in controller
 
 
 def test_real_entrypoint_owns_http_identity_for_all_deferred_routes(monkeypatch) -> None:

@@ -10307,6 +10307,8 @@ function Test-DeferredProjectionObligations {
     $observeAttempt = [guid]::NewGuid().ToString("N")
     $arguments = @(
         (Join-Path $PSScriptRoot "check_deferred_projection_parity.py"),
+        "--runtime-root", $moduleRoot,
+        "--producer-root", $moduleRoot,
         "--version-id", ([string]$Target.worker_version_id),
         "--git-sha", ([string]$Target.git_sha),
         "--producer-revision", ([string]$Target.windows_revision),
