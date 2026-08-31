@@ -3111,6 +3111,44 @@ def test_observation_reuses_the_reload_health_boundary(tmp_path) -> None:
     assert result == "2026-08-12T08:00:00.0000000+00:00"
 
 
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+def test_new_observation_clears_only_prior_attempt_terminal_state(
+    tmp_path, powershell: str,
+) -> None:
+    _write_runtime_observation(
+        tmp_path,
+        observation_deferred_projection_evidence={"reason": "OLD_PENDING"},
+        observation_deferred_projection_passed_at="2026-08-12T08:01:00+00:00",
+        observation_deferred_code="OLD_DEFERRED",
+        observation_deferred_at="2026-08-12T08:02:00+00:00",
+        observation_original_failure_reason="OLD_TERMINAL_FAILURE",
+        observation_original_failure_evidence={"reason": "OLD_FAILURE"},
+        observation_original_failed_at="2026-08-12T08:03:00+00:00",
+    )
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-LatestRuntimeDecisionTime { return 'new-decision' }; "
+        "function Write-WatchdogEvent {}; "
+        "$boundary=[DateTimeOffset]::Parse('2026-08-13T08:00:00+00:00'); "
+        "Start-RuntimeObservation -Revision ('c' * 40) -PreviousRevision ('a' * 40) "
+        "-HealthBoundary $boundary -DeferredProjectionObligations @([pscustomobject]@{"
+        "route='/api/audit-briefs'}) -ValidationKey 'new-key' -ProjectionBoundary $boundary; "
+        "$state=Get-RuntimeUpdateState; $fields=@("
+        "$state.observation_deferred_projection_evidence,"
+        "$state.observation_deferred_projection_passed_at,"
+        "$state.observation_deferred_code,$state.observation_deferred_at,"
+        "$state.observation_original_failure_reason,"
+        "$state.observation_original_failure_evidence,"
+        "$state.observation_original_failed_at)|Where-Object{$null -ne $_}; "
+        "Write-Output \"$($state.update_status),$($state.observing_revision),"
+        "$($state.observation_deferred_projection_state),$($state.observation_validation_key),"
+        "$($state.observation_last_decision_time),$($fields.Count)\"",
+        powershell=powershell,
+    )
+
+    assert result == f"OBSERVING,{'c' * 40},PENDING,new-key,new-decision,0"
+
+
 def test_candidate_discovery_cannot_change_stable(tmp_path) -> None:
     previous = "a" * 40
     candidate = "b" * 40

@@ -9745,7 +9745,14 @@ function Start-RuntimeObservation {
         observation_deferred_projection_state = if (@($DeferredProjectionObligations).Count) {
             "PENDING"
         } else { "NOT_REQUIRED" }
+        observation_deferred_projection_evidence = $null
+        observation_deferred_projection_passed_at = $null
         observation_projection_boundary_at = $ProjectionBoundary.ToString("o")
+        observation_deferred_code = $null
+        observation_deferred_at = $null
+        observation_original_failure_reason = $null
+        observation_original_failure_evidence = $null
+        observation_original_failed_at = $null
         user_visible_failure = $false
         failure_message = $null
     }
