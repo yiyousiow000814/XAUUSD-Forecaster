@@ -6019,6 +6019,28 @@ function Get-AccessQualificationRenewalCore {
     }
 }
 
+function New-HistoricalAccessMachineCandidate {
+    param([Parameter(Mandatory = $true)][object]$Receipt)
+    $state = [string]$Receipt.state
+    if ($state -eq "ACCESS_QUALIFICATION_RENEWED") {
+        $accessKey = [string]$Receipt.access_qualification_key
+    } elseif ($state -eq "ACCESS_QUALIFICATION_REUSED") {
+        $accessKey = [string]$Receipt.access_key
+    } else {
+        throw "ACCESS_QUALIFICATION_MACHINE_RECEIPT_INVALID"
+    }
+    return [pscustomobject]@{
+        validation_key = [string]$Receipt.validation_key
+        git_sha = [string]$Receipt.candidate_git_sha
+        worker_version_id = [string]$Receipt.candidate_worker_version_id
+        access_qualification = [pscustomobject]@{
+            state = $state
+            access_key = $accessKey
+            receipt_digest = [string]$Receipt.receipt_digest
+        }
+    }
+}
+
 function Write-AccessQualificationRenewalReceipt {
     param([Parameter(Mandatory = $true)][object]$Receipt)
     $path = Get-AccessQualificationRenewalReceiptPath -Digest $Receipt.receipt_digest
@@ -6100,14 +6122,41 @@ function Assert-AccessQualificationRenewalReceipt {
     $previousPath = Get-AccessQualificationRenewalReceiptPath `
         -Digest ([string]$receipt.previous_machine_receipt_digest)
     if (Test-Path -LiteralPath $previousPath -PathType Leaf) {
-        $previous = Assert-AccessQualificationRenewalReceipt -Candidate $Candidate `
+        $previousRaw = Get-Content -LiteralPath $previousPath -Raw -Encoding UTF8 |
+            ConvertFrom-ReleaseControlJson
+        $previousCandidate = New-HistoricalAccessMachineCandidate `
+            -Receipt $previousRaw
+        $previous = Assert-AccessQualificationRenewalReceipt `
+            -Candidate $previousCandidate `
             -Digest ([string]$receipt.previous_machine_receipt_digest) -AllowStale `
             -SkipCandidateStateBinding -Visited $Visited
         $previousRoot = [string]$previous.root_human_receipt_digest
         $previousProviderDigest = [string]$previous.provider_inspection_receipt_digest
         $previousAccessKey = [string]$previous.access_qualification_key
     } else {
-        $previous = Assert-AccessQualificationReuseReceipt -Candidate $Candidate `
+        $reuseFiles = @(Get-ChildItem -LiteralPath $accessQualificationReuseReceiptRoot `
+            -Filter '*.json' -File -ErrorAction SilentlyContinue)
+        $previousRaw = $null
+        foreach ($file in $reuseFiles) {
+            try {
+                $candidateReceipt = Get-Content -LiteralPath $file.FullName -Raw `
+                    -Encoding UTF8 | ConvertFrom-ReleaseControlJson
+                if ([string]$candidateReceipt.receipt_digest -ceq
+                        [string]$receipt.previous_machine_receipt_digest) {
+                    $previousRaw = $candidateReceipt
+                    break
+                }
+            } catch {
+                throw "ACCESS_QUALIFICATION_RENEWAL_CHAIN_BROKEN"
+            }
+        }
+        if (-not $previousRaw) {
+            throw "ACCESS_QUALIFICATION_RENEWAL_CHAIN_BROKEN"
+        }
+        $previousCandidate = New-HistoricalAccessMachineCandidate `
+            -Receipt $previousRaw
+        $previous = Assert-AccessQualificationReuseReceipt `
+            -Candidate $previousCandidate `
             -AllowStale -SkipCandidateStateBinding
         if ([string]$previous.receipt_digest -cne
             [string]$receipt.previous_machine_receipt_digest) {
@@ -6143,6 +6192,43 @@ function Assert-AccessQualificationRenewalReceipt {
     return $receipt
 }
 
+function Get-LatestHistoricalAccessMachineAuthority {
+    $valid = @()
+    foreach ($file in @(Get-ChildItem -LiteralPath $accessQualificationRenewalReceiptRoot `
+            -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
+        try {
+            $raw = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
+                ConvertFrom-ReleaseControlJson
+            $historicalCandidate = New-HistoricalAccessMachineCandidate -Receipt $raw
+            $receipt = Assert-AccessQualificationRenewalReceipt `
+                -Candidate $historicalCandidate -Digest ([string]$raw.receipt_digest) `
+                -AllowStale -SkipCandidateStateBinding
+            $valid += [pscustomobject]@{
+                candidate = $historicalCandidate
+                receipt = $receipt
+                observed_at = ConvertTo-ReleaseTimestampUtc -Value $receipt.issued_at
+            }
+        } catch { throw }
+    }
+    foreach ($file in @(Get-ChildItem -LiteralPath $accessQualificationReuseReceiptRoot `
+            -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
+        try {
+            $raw = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
+                ConvertFrom-ReleaseControlJson
+            $historicalCandidate = New-HistoricalAccessMachineCandidate -Receipt $raw
+            $receipt = Assert-AccessQualificationReuseReceipt `
+                -Candidate $historicalCandidate -AllowStale -SkipCandidateStateBinding
+            $valid += [pscustomobject]@{
+                candidate = $historicalCandidate
+                receipt = $receipt
+                observed_at = ConvertTo-ReleaseTimestampUtc -Value $receipt.verified_at
+            }
+        } catch { throw }
+    }
+    if ($valid.Count -eq 0) { return $null }
+    return $valid | Sort-Object observed_at | Select-Object -Last 1
+}
+
 function Assert-AccessQualificationMachineReceipt {
     param(
         [Parameter(Mandatory = $true)][object]$Candidate,
@@ -6162,20 +6248,26 @@ function Assert-AccessQualificationMachineReceipt {
 }
 
 function Invoke-CandidateAccessQualificationRenewal {
-    param([Parameter(Mandatory = $true)][object]$Candidate)
-    if (-not $Candidate.access_qualification) {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [object]$PriorCandidate = $null
+    )
+    $authorityCandidate = if ($PriorCandidate) { $PriorCandidate } else { $Candidate }
+    if (-not $authorityCandidate.access_qualification) {
         throw "ACCESS_QUALIFICATION_RENEWAL_NOT_APPLICABLE"
     }
-    $priorDigest = [string]$Candidate.access_qualification.receipt_digest
-    $priorState = [string]$Candidate.access_qualification.state
+    $priorDigest = [string]$authorityCandidate.access_qualification.receipt_digest
+    $priorState = [string]$authorityCandidate.access_qualification.state
     if ($priorState -eq "ACCESS_QUALIFICATION_RENEWED") {
-        $prior = Assert-AccessQualificationRenewalReceipt -Candidate $Candidate `
+        $prior = Assert-AccessQualificationRenewalReceipt `
+            -Candidate $authorityCandidate `
             -Digest $priorDigest -AllowStale
         $rootDigest = [string]$prior.root_human_receipt_digest
         $previousProviderDigest = [string]$prior.provider_inspection_receipt_digest
         $accessKey = [string]$prior.access_qualification_key
     } elseif ($priorState -eq "ACCESS_QUALIFICATION_REUSED") {
-        $prior = Assert-AccessQualificationReuseReceipt -Candidate $Candidate -AllowStale
+        $prior = Assert-AccessQualificationReuseReceipt `
+            -Candidate $authorityCandidate -AllowStale
         $rootDigest = [string]$prior.prior_access_receipt_digest
         $previousProviderDigest = [string]$prior.provider_inspection_receipt_digest
         $accessKey = [string]$prior.access_key
@@ -6219,16 +6311,17 @@ function Invoke-CandidateAccessQualificationRenewal {
     $receipt | Add-Member -NotePropertyName receipt_digest `
         -NotePropertyValue (Get-AccessQualificationRenewalReceiptDigest -Core $core)
     Write-AccessQualificationRenewalReceipt -Receipt $receipt
-    $Candidate.access_qualification = [pscustomobject]@{
-        state = "ACCESS_QUALIFICATION_RENEWED"
-        access_key = $accessKey
-        receipt_digest = [string]$receipt.receipt_digest
-        root_human_receipt_digest = $rootDigest
-        previous_machine_receipt_digest = $priorDigest
-        provider_fingerprint = [string]$provider.provider_fingerprint
-        verified_at = [string]$receipt.issued_at
-        expires_at = [string]$receipt.expires_at
-    }
+    $Candidate | Add-Member -Force -NotePropertyName access_qualification `
+        -NotePropertyValue ([pscustomobject]@{
+            state = "ACCESS_QUALIFICATION_RENEWED"
+            access_key = $accessKey
+            receipt_digest = [string]$receipt.receipt_digest
+            root_human_receipt_digest = $rootDigest
+            previous_machine_receipt_digest = $priorDigest
+            provider_fingerprint = [string]$provider.provider_fingerprint
+            verified_at = [string]$receipt.issued_at
+            expires_at = [string]$receipt.expires_at
+        })
     $Candidate.validation.auth_inspection = [pscustomobject]@{
         state = "ACCESS_QUALIFICATION_RENEWED"
         protected_host = ([Uri]$receipt.protected_origin).DnsSafeHost
@@ -6285,6 +6378,27 @@ function Invoke-CandidateAccessQualificationReuse {
     $priorReceipt = Get-LatestHistoricalAccessBoundaryReceipt
     if (-not (Test-AccessQualificationHistoryIsClean -PriorReceipt $priorReceipt)) {
         throw "ACCESS_QUALIFICATION_HISTORY_INVALID"
+    }
+    $machineAuthority = Get-LatestHistoricalAccessMachineAuthority
+    if ($machineAuthority) {
+        $receipt = Invoke-CandidateAccessQualificationRenewal -Candidate $candidate `
+            -PriorCandidate $machineAuthority.candidate
+        $candidate.validation.tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+        $candidate.compatibility_state = "PASSED"
+        $candidate.validation_state = "PASSED"
+        $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "CANDIDATE_ACCESS_QUALIFICATION_RENEWED" `
+            -Release $candidate -Detail @{
+                validation_key = [string]$candidate.validation_key
+                access_key = [string]$receipt.access_qualification_key
+                receipt_digest = [string]$receipt.receipt_digest
+                root_human_receipt_digest = [string]$receipt.root_human_receipt_digest
+                previous_machine_receipt_digest = [string]$receipt.previous_machine_receipt_digest
+                provider_fingerprint = [string]$receipt.provider_fingerprint
+                provider_inspection_receipt_digest = [string]$receipt.provider_inspection_receipt_digest
+            }
+        return $candidate
     }
     $provider = Get-LatestAccessProviderInspectionReceipt
     $acceptedAt = ConvertTo-ReleaseTimestampUtc -Value $priorReceipt.accepted_at
