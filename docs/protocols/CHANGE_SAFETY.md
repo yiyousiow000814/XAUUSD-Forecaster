@@ -79,6 +79,11 @@ implementation state. Before changing a verification timeout, ask:
 - Does the required gate meet its latency budget?
 - Is a timeout increase hiding a modeling defect?
 
+Expiry of machine freshness evidence should renew the machine observation, not
+repeat unchanged human acceptance. Human qualification is invalidated by a
+behavior change; machine freshness is renewed only by a complete, continuous
+reinspection of the qualified boundary.
+
 Any state-space reduction assumption must be explicit, documented, and owned by
 another verified shard or interface contract. Required safety and liveness may
 run independently when they do not require the same state dimensions.

@@ -115,6 +115,29 @@ def test_cpu_formal_shard_models_single_use_outlier_confirmation() -> None:
         assert prop in liveness
 
 
+def test_access_formal_shard_models_machine_renewal_without_new_human_root() -> None:
+    access = (FORMAL / "AccessEvidence.tla").read_text(encoding="utf-8")
+    config = (FORMAL / "AccessEvidenceSafety.cfg").read_text(encoding="utf-8")
+    for contract in (
+        'machineReceiptState = "STALE"',
+        'auditState = "CLEAN"',
+        "priorHumanValid",
+        "chainValid",
+        "RenewQualification",
+        "ApplicableRenewedEvidence",
+    ):
+        assert contract in access
+    for prop in (
+        "RenewalRequiresContinuousAudit",
+        "StaleMachineEvidenceCannotPass",
+        "BrokenChainCannotRenew",
+        "RenewalKeepsHumanRoot",
+        "RenewalIsBounded",
+    ):
+        assert prop in access
+        assert prop in config
+
+
 def test_formal_workflow_is_parallel_bounded_and_cancels_stale_heads() -> None:
     workflow = (ROOT / ".github" / "workflows" / "formal-verification.yml").read_text(encoding="utf-8")
     timeouts = [int(value) for value in re.findall(r"timeout-minutes:\s*(\d+)", workflow)]

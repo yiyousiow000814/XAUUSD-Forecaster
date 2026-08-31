@@ -154,8 +154,20 @@ interval since that acceptance, reports no application or policy change, no
 Access failure was recorded, and the prior and current qualification keys are
 identical. Reuse writes a separate immutable
 `ACCESS_QUALIFICATION_REUSED` machine receipt; it never writes or impersonates a
-human receipt. A changed, missing, unreadable, stale, or unmappable component
-fails closed and leaves the Candidate in review.
+human receipt. Machine evidence keeps a two-hour freshness TTL. Expiry renews
+only the machine observation: Release Control reads the exact Access application,
+policy, and identity-provider configuration and exhausts the account audit-log
+cursor over the continuous interval beginning at the previous successful
+inspection boundary. Zero behavior-affecting changes, zero relevant failures,
+an unchanged qualification key and provider fingerprint, an intact immutable
+machine chain, and the original verified human root permit a new immutable
+`ACCESS_QUALIFICATION_RENEWED` receipt. The prior receipt is never overwritten.
+Automatic renewal limits one audit interval to 30 days, well inside the
+provider's published 18-month audit-log retention boundary, and fails closed
+instead of reading more than ten 1,000-entry pages.
+Incomplete retention coverage, incomplete pagination, change followed by
+reversion, configuration drift, broken chain or changed Access artifact requires
+human review. Unreadable or tampered evidence fails closed.
 
 When reuse is unavailable, an operator may use the single
 `ApproveAccessBoundary` transition only after personally verifying owner login
