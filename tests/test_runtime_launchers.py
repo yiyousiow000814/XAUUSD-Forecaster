@@ -5936,82 +5936,203 @@ def test_unvalidated_control_plane_replacement_restores_exact_superseded_candida
         "$prior=New-ReleaseIdentity -GitSha ('a'*40) "
         "-WorkerVersionId 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' "
         "-WindowsRevision ('a'*40) -Branch 'main' -ArtifactKind 'PRODUCTION_CANDIDATE';"
-        "$prior.compatibility_state='COORDINATED_STORAGE_MIGRATION_PASSED';"
-        "$prior.validation_state='PLATFORM_PENDING';"
+        "$prior.compatibility_state='PASSED';$prior.validation_state='PASSED';"
         "$prior.validation=[pscustomobject]@{key=$prior.validation_key;"
-        "reason='PROVIDER_EVIDENCE_INSUFFICIENT';validation_run='run-kept';"
-        "worker_qualification=[pscustomobject]@{candidate_worker_version=$prior.worker_version_id;"
-        "candidate_git_sha=$prior.git_sha}};"
+        "repository='PASSED';windows='PASSED';cloudflare='PASSED';"
+        "data_parity=[pscustomobject]@{state='PASSED'};validation_run='run-kept';"
+        "worker_qualification=[pscustomobject]@{key=('d'*64);"
+        "candidate_worker_version=$prior.worker_version_id;candidate_git_sha=$prior.git_sha};"
+        "cpu_evidence=[pscustomobject]@{qualification_key=('d'*64);"
+        "qualification_receipt_digest=('e'*64)};"
+        "auth_inspection=[pscustomobject]@{state='HUMAN_ACCESS_BOUNDARY_ACCEPTED'}};"
         "$prior|Add-Member -Force migration_acceptance ([pscustomobject]@{"
-        "validation_key=$prior.validation_key;receipt_digest='migration-kept'});"
+        "validation_key=$prior.validation_key;receipt_digest=('f'*64)});"
         "Write-ReleaseHistory -Event 'CANDIDATE_SUPERSEDED' -Release $prior "
         "-Detail @{replacement_key=$replacement.validation_key};"
-        "function Get-ProductionCandidateProvenanceResult{return [pscustomobject]@{"
+        "function Get-ProductionCandidateProvenanceResult{param($Candidate,$VerifiedOriginMainRevision)"
+        "return [pscustomobject]@{"
         "state='PASSED';mode='CONTROL_PLANE_ONLY_MAIN_ADVANCE';"
         "current_main_git_sha=('c'*40)}};"
-        "function Read-WorkerCpuRunArtifact{[pscustomobject]@{validation_run='run-kept'}};"
-        "function Get-CloudflareVersionDetails{param($VersionId)[pscustomobject]@{id=$VersionId}};"
-        "function Get-ReleaseGitShaFromVersion{return ('a'*40)};"
-        "function Get-ReleaseArtifactKindFromVersion{return 'PRODUCTION_CANDIDATE'};"
+        "function Test-PreservedCandidateEvidenceAvailable{return $true};"
+        "function Get-CandidateChangedFiles{return @('web/drizzle/required.sql')};"
+        "function Get-CandidateCompatibilityRequirement{[pscustomobject]@{"
+        "state='COORDINATED_STORAGE_MIGRATION_REQUIRED';files=@('web/drizzle/required.sql')}};"
+        "function Assert-CoordinatedMigrationReceipt{[pscustomobject]@{receipt_digest=('f'*64)}};"
+        "function Get-WorkerCpuQualificationReceipt{[pscustomobject]@{"
+        "receipt_digest=('e'*64);source_worker_version=$prior.worker_version_id;"
+        "source_git_sha=$prior.git_sha}};"
+        "function Assert-AccessBoundaryAcceptanceReceipt{[pscustomobject]@{"
+        "receipt_digest=('1'*64)}};"
+        "function Set-CloudflareCandidatePointer{};"
+        "function Wait-CandidatePlacementPropagation{[pscustomobject]@{passed=$true}};"
+        "function Get-CloudflareDeployment{[pscustomobject]@{versions=@("
+        "[pscustomobject]@{version_id=$state.stable.worker_version_id;percentage=100})}};"
         "$restored=Restore-ControlPlaneOnlySupersededCandidate $state ('c'*40);"
         "$final=Get-ReleaseControlState;$history=Get-Content $releaseHistoryPath -Raw;"
         'Write-Output "$($restored.worker_version_id),$($restored.validation.validation_run),'
         '$($final.candidate_materialization.state),'
         '$($final.candidate.migration_acceptance.receipt_digest),'
-        '$($history.Contains(\'CANDIDATE_CONTROL_PLANE_ONLY_RESTORED\'))"',
+        '$($history.Contains(\'CANDIDATE_RECOVERED_THROUGH_SUPERSESSION_CHAIN\'))"',
     )
     assert result == (
         "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa,run-kept,PRESERVED,"
-        "migration-kept,True"
+        + "f" * 64 + ",True"
+    )
+
+
+def _supersession_chain_contract(scenario: str) -> str:
+    setup = {
+        "two_hop": "Add-Edge $mid $head;Add-Edge $qualified $mid;",
+        "four_hop": (
+            "Add-Edge $mid $head;Add-Edge $mid2 $mid;"
+            "Add-Edge $mid3 $mid2;Add-Edge $qualified $mid3;"
+        ),
+        "first_qualified": (
+            "Add-Edge $qualified $head;Add-Edge $qualified2 $qualified;"
+        ),
+        "wrong_identity": (
+            "$mid.windows_revision=('f'*40);Add-Edge $mid $head;"
+            "Add-Edge $qualified $mid;"
+        ),
+        "wrong_ancestry": (
+            "$script:ancestryInvalid=$mid.validation_key;Add-Edge $mid $head;"
+            "Add-Edge $qualified $mid;"
+        ),
+        "missing_edge": "Add-Edge $mid $head;",
+        "duplicate_edge": "Add-Edge $mid $head;Add-Edge $mid2 $head;",
+        "cycle": "Add-Edge $mid $head;Add-Edge $head $mid;",
+        "self_loop": "Add-Edge $head $head;",
+        "unrelated": "Add-Edge $qualified $mid;",
+        "receipt_mismatch": (
+            "$script:cpuReceiptInvalid=$true;"
+            "Add-Edge $qualified $head;"
+        ),
+        "qualification_key_mismatch": (
+            "$qualified.validation.cpu_evidence.qualification_key=('a'*64);"
+            "Add-Edge $qualified $head;"
+        ),
+        "accepted_intermediate": (
+            "Add-Edge $mid $head;Write-ReleaseHistory -Event 'CANDIDATE_PASSED' "
+            "-Release $mid;Add-Edge $qualified $mid;"
+        ),
+        "worker_reused": (
+            "$sameWorker=New-Intermediate ('c'*40) $mid.worker_version_id;"
+            "Add-Edge $mid $head;Add-Edge $sameWorker $mid;"
+        ),
+        "max_depth": (
+            "$successor=$head;for($i=1;$i -le 17;$i++){"
+            "$sha=('{0:x}' -f $i).PadLeft(40,[char]'0');"
+            "$worker=('{0:x8}-0000-4000-8000-{0:x12}' -f $i);"
+            "$node=New-Intermediate $sha $worker;Add-Edge $node $successor;"
+            "$successor=$node};"
+        ),
+        "byte_bound": (
+            "Add-Edge $mid $head;Add-Edge $qualified $mid;"
+            "$script:candidateSupersessionHistoryByteLimit=64;"
+        ),
+    }[scenario]
+    return (
+        _authorized_candidate("0" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$head=$state.candidate;"
+        "$head.branch='main';$head.compatibility_state='REVIEW_REQUIRED';"
+        "$head.validation_state='REVIEW_REQUIRED';$head.validation=[pscustomobject]@{"
+        "key=$head.validation_key;repository='PASSED';windows='PASSED';"
+        "cloudflare='PENDING';reason='COORDINATED_STORAGE_MIGRATION_REQUIRED'};"
+        "Write-ReleaseControlState $state;"
+        "function New-Intermediate($sha,$worker){$item=New-ReleaseIdentity -GitSha $sha "
+        "-WorkerVersionId $worker -WindowsRevision $sha -Branch 'main' "
+        "-ArtifactKind 'PRODUCTION_CANDIDATE';$item.compatibility_state='PENDING';"
+        "$item.validation_state='TESTING';$item.validation=[pscustomobject]@{"
+        "key=$item.validation_key;repository='PASSED';windows='PASSED';"
+        "cloudflare='PENDING';reason='REQUIRED_GITHUB_CHECKS_PENDING'};return $item};"
+        "function Set-Qualified($item){$item.compatibility_state='PASSED';"
+        "$item.validation_state='PASSED';$item.validation=[pscustomobject]@{"
+        "key=$item.validation_key;repository='PASSED';windows='PASSED';cloudflare='PASSED';"
+        "data_parity=[pscustomobject]@{state='PASSED'};worker_qualification=[pscustomobject]@{"
+        "key=('d'*64);candidate_worker_version=$item.worker_version_id;"
+        "candidate_git_sha=$item.git_sha};cpu_evidence=[pscustomobject]@{"
+        "qualification_key=('d'*64);qualification_receipt_digest=('e'*64)};"
+        "auth_inspection=[pscustomobject]@{state='HUMAN_ACCESS_BOUNDARY_ACCEPTED'}};"
+        "$item|Add-Member -Force migration_acceptance ([pscustomobject]@{"
+        "validation_key=$item.validation_key;receipt_digest=('e'*64)});return $item};"
+        "$mid=New-Intermediate ('a'*40) 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';"
+        "$mid2=New-Intermediate ('c'*40) 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';"
+        "$mid3=New-Intermediate ('d'*40) 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';"
+        "$qualified=Set-Qualified (New-Intermediate ('e'*40) "
+        "'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee');"
+        "$qualified2=Set-Qualified (New-Intermediate ('f'*40) "
+        "'ffffffff-ffff-4fff-8fff-ffffffffffff');"
+        "function Add-Edge($prior,$successor){Write-ReleaseHistory "
+        "-Event 'CANDIDATE_SUPERSEDED' -Release $prior "
+        "-Detail @{replacement_key=$successor.validation_key}};"
+        f"{setup}"
+        "function Get-ProductionCandidateProvenanceResult{param($Candidate,$VerifiedOriginMainRevision)"
+        "[pscustomobject]@{"
+        "state='PASSED';mode='CONTROL_PLANE_ONLY_MAIN_ADVANCE';"
+        "current_main_git_sha=('9'*40)}};"
+        "function Test-CandidateSupersessionAncestry{param($Predecessor,$Successor,$MainRevision)"
+        "return [bool]($Predecessor.validation_key -ne $script:ancestryInvalid)};"
+        "function Test-PreservedCandidateEvidenceAvailable{param($Candidate)"
+        "return [bool]($Candidate.validation_state -eq 'PASSED' -and "
+        "$Candidate.validation_key -ne $script:invalidEvidenceKey)};"
+        "function Get-CandidateChangedFiles{return @('web/drizzle/required.sql')};"
+        "function Get-CandidateCompatibilityRequirement{[pscustomobject]@{"
+        "state='COORDINATED_STORAGE_MIGRATION_REQUIRED';files=@('web/drizzle/required.sql')}};"
+        "function Assert-CoordinatedMigrationReceipt{param($Candidate,$Stable,$MigrationFiles)"
+        "[pscustomobject]@{receipt_digest=('e'*64)}};"
+        "function Get-WorkerCpuQualificationReceipt{param($QualificationKey)"
+        "[pscustomobject]@{receipt_digest=$(if($script:cpuReceiptInvalid){('0'*64)}else{('e'*64)});"
+        "source_worker_version=$qualified.worker_version_id;source_git_sha=$qualified.git_sha}};"
+        "function Assert-AccessBoundaryAcceptanceReceipt{param($Candidate,$Stable)"
+        "[pscustomobject]@{receipt_digest=('1'*64)}};"
+        "function Set-CloudflareCandidatePointer{};"
+        "function Wait-CandidatePlacementPropagation{[pscustomobject]@{passed=$true}};"
+        "function Get-CloudflareDeployment{[pscustomobject]@{versions=@("
+        "[pscustomobject]@{version_id=$state.stable.worker_version_id;percentage=100})}};"
+        "try{$restored=Restore-ControlPlaneOnlySupersededCandidate $state ('9'*40);"
+        "if($restored){Write-Output ('FOUND:'+ $restored.validation_key)}"
+        "else{Write-Output 'NONE'}}catch{Write-Output ('ERROR:'+ $_.Exception.Message)}"
     )
 
 
 @pytest.mark.parametrize(
-    "unsafe_setup",
-    (
-        "$replacement.validation_state='PASSED';",
-        "$replacement|Add-Member -Force migration_acceptance ([pscustomobject]@{validation_key='x'});",
-        "$script:providerMissing=$true;",
-        "$script:replacementStale=$true;",
-    ),
+    ("scenario", "expected"),
+    [
+        ("two_hop", "FOUND:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee:" + "e" * 40),
+        ("four_hop", "FOUND:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee:" + "e" * 40),
+        ("first_qualified", "FOUND:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee:" + "e" * 40),
+        ("wrong_identity", "ERROR:CANDIDATE_SUPERSESSION_EDGE_IDENTITY_INVALID"),
+        ("wrong_ancestry", "ERROR:CANDIDATE_SUPERSESSION_ANCESTRY_INVALID"),
+        ("missing_edge", "ERROR:CANDIDATE_SUPERSESSION_PREDECESSOR_MISSING"),
+        ("duplicate_edge", "ERROR:CANDIDATE_SUPERSESSION_EDGE_AMBIGUOUS"),
+        ("cycle", "ERROR:CANDIDATE_SUPERSESSION_CYCLE"),
+        ("self_loop", "ERROR:CANDIDATE_SUPERSESSION_SELF_LOOP"),
+        ("unrelated", "NONE"),
+        ("receipt_mismatch", "ERROR:CANDIDATE_SUPERSESSION_QUALIFICATION_REUSE_INVALID:CANDIDATE_SUPERSESSION_CPU_RECEIPT_INVALID"),
+        ("qualification_key_mismatch", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+        ("accepted_intermediate", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+        ("worker_reused", "ERROR:CANDIDATE_SUPERSESSION_WORKER_REUSED"),
+        ("max_depth", "ERROR:CANDIDATE_SUPERSESSION_MAX_DEPTH_EXCEEDED"),
+        ("byte_bound", "ERROR:CANDIDATE_SUPERSESSION_HISTORY_BYTE_BOUND_EXCEEDED"),
+    ],
 )
-def test_superseded_candidate_recovery_fails_closed_when_replacement_or_evidence_moved(
-    tmp_path, unsafe_setup: str,
+def test_supersession_chain_recovery_is_bounded_and_fail_closed(
+    tmp_path, scenario: str, expected: str,
 ) -> None:
-    result = _run_control_center_contract(
-        tmp_path,
-        _authorized_candidate("0" * 40, "b" * 40)
-        + "$state=Get-ReleaseControlState;$replacement=$state.candidate;"
-        "$replacement.branch='main';$replacement.compatibility_state='PENDING';"
-        "$replacement.validation_state='CHECKS_BLOCKED';"
-        "$replacement.validation=[pscustomobject]@{key=$replacement.validation_key;"
-        "reason='REQUIRED_GITHUB_CHECKS_BLOCKED'};"
-        f"{unsafe_setup}Write-ReleaseControlState $state;"
-        "$prior=New-ReleaseIdentity -GitSha ('a'*40) "
-        "-WorkerVersionId 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' "
-        "-WindowsRevision ('a'*40) -Branch 'main' -ArtifactKind 'PRODUCTION_CANDIDATE';"
-        "$prior.validation_state='PLATFORM_PENDING';$prior.compatibility_state='PASSED';"
-        "$prior.validation=[pscustomobject]@{key=$prior.validation_key;validation_run='run-kept';"
-        "worker_qualification=[pscustomobject]@{candidate_worker_version=$prior.worker_version_id;"
-        "candidate_git_sha=$prior.git_sha}};"
-        "Write-ReleaseHistory -Event 'CANDIDATE_SUPERSEDED' -Release $prior "
-        "-Detail @{replacement_key=$replacement.validation_key};"
-        "function Get-ProductionCandidateProvenanceResult{param($Candidate)"
-        "if($script:replacementStale -and $Candidate.git_sha -eq ('b'*40)){"
-        "return [pscustomobject]@{state='FAILED';mode='';current_main_git_sha=('b'*40)}};"
-        "return [pscustomobject]@{"
-        "state='PASSED';mode='CONTROL_PLANE_ONLY_MAIN_ADVANCE';current_main_git_sha=('b'*40)}};"
-        "function Read-WorkerCpuRunArtifact{param($ValidationRun,$Name)"
-        "if($script:providerMissing -and $Name -eq 'provider-evidence.json'){return $null};"
-        "[pscustomobject]@{validation_run='run-kept'}};"
-        "function Get-CloudflareVersionDetails{param($VersionId)[pscustomobject]@{id=$VersionId}};"
-        "function Get-ReleaseGitShaFromVersion{return ('a'*40)};"
-        "function Get-ReleaseArtifactKindFromVersion{return 'PRODUCTION_CANDIDATE'};"
-        "$restored=Restore-ControlPlaneOnlySupersededCandidate $state ('b'*40);"
-        "$final=Get-ReleaseControlState;"
-        'Write-Output "$($null -eq $restored),$($final.candidate.git_sha)"',
-    )
-    assert result == "True," + "b" * 40
+    assert _run_control_center_contract(
+        tmp_path, _supersession_chain_contract(scenario),
+    ) == expected
+
+
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_supersession_chain_recovery_has_powershell_runtime_parity(
+    tmp_path, powershell: str,
+) -> None:
+    if not shutil.which(powershell):
+        pytest.skip(f"{powershell} is not installed")
+    assert _run_control_center_contract(
+        tmp_path, _supersession_chain_contract("two_hop"), powershell=powershell,
+    ) == "FOUND:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee:" + "e" * 40
 
 
 def test_observe_probe_failure_restores_exact_qualification_and_preserves_attempt(
@@ -6020,7 +6141,7 @@ def test_observe_probe_failure_restores_exact_qualification_and_preserves_attemp
     result = _run_control_center_contract(
         tmp_path,
         _authorized_candidate("a" * 40, "b" * 40)
-        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;$target=$candidate;"
         "$candidate|Add-Member -Force migration_acceptance ([pscustomobject]@{"
         "validation_key=$candidate.validation_key;receipt_digest='migration-kept'});"
         "$prior=[pscustomobject]@{key=$candidate.validation_key;repository='PASSED';"
@@ -6035,10 +6156,33 @@ def test_observe_probe_failure_restores_exact_qualification_and_preserves_attemp
         "key=$candidate.validation_key;error='OBSERVATION_FAILED';"
         "reason='DEFERRED_PROJECTION_OBSERVATION_TIMEOUT';prior_validation=$prior;"
         "deferred_projection_evidence=[pscustomobject]@{state='PENDING';attempts=9};"
-        "tested_at='2026-08-31T01:02:03+00:00'};Write-ReleaseControlState $state;"
-        "function Get-ProductionCandidateProvenanceResult{[pscustomobject]@{"
+        "tested_at='2026-08-31T01:02:03+00:00'};"
+        "$mid=New-ReleaseIdentity -GitSha ('c'*40) -WorkerVersionId "
+        "'cccccccc-cccc-4ccc-8ccc-cccccccccccc' -WindowsRevision ('c'*40) "
+        "-Branch 'main' -ArtifactKind 'PRODUCTION_CANDIDATE';"
+        "$mid.validation_state='TESTING';$mid.validation=[pscustomobject]@{"
+        "key=$mid.validation_key;repository='PASSED';windows='PASSED';cloudflare='PENDING'};"
+        "$head=New-ReleaseIdentity -GitSha ('d'*40) -WorkerVersionId "
+        "'dddddddd-dddd-4ddd-8ddd-dddddddddddd' -WindowsRevision ('d'*40) "
+        "-Branch 'main' -ArtifactKind 'PRODUCTION_CANDIDATE';"
+        "$head.compatibility_state='REVIEW_REQUIRED';$head.validation_state='REVIEW_REQUIRED';"
+        "$head.validation=[pscustomobject]@{key=$head.validation_key;repository='PASSED';"
+        "windows='PASSED';cloudflare='PENDING';reason='COORDINATED_STORAGE_MIGRATION_REQUIRED'};"
+        "$state.candidate=$head;Write-ReleaseControlState $state;"
+        "Write-ReleaseHistory -Event 'CANDIDATE_SUPERSEDED' -Release $mid "
+        "-Detail @{replacement_key=$head.validation_key};"
+        "Write-ReleaseHistory -Event 'CANDIDATE_SUPERSEDED' -Release $target "
+        "-Detail @{replacement_key=$mid.validation_key};"
+        "function Get-ProductionCandidateProvenanceResult{param($Candidate,$VerifiedOriginMainRevision)"
+        "[pscustomobject]@{"
         "state='PASSED';mode='CONTROL_PLANE_ONLY_MAIN_ADVANCE';"
-        "current_main_git_sha=('c'*40)}};"
+        "current_main_git_sha=('f'*40)}};"
+        "function Test-CandidateSupersessionAncestry{return $true};"
+        "function Get-CandidateChangedFiles{return @('web/drizzle/required.sql')};"
+        "function Get-CandidateCompatibilityRequirement{[pscustomobject]@{"
+        "state='COORDINATED_STORAGE_MIGRATION_REQUIRED';files=@('web/drizzle/required.sql')}};"
+        "function Assert-CoordinatedMigrationReceipt{[pscustomobject]@{"
+        "receipt_digest='migration-kept'}};"
         "function Read-WorkerCpuRunArtifact{[pscustomobject]@{validation_run='run-kept'}};"
         "function Get-CloudflareVersionDetails{param($VersionId)[pscustomobject]@{id=$VersionId}};"
         "function Get-ReleaseGitShaFromVersion{return ('b'*40)};"
@@ -6049,7 +6193,9 @@ def test_observe_probe_failure_restores_exact_qualification_and_preserves_attemp
         "function Assert-AccessQualificationReuseReceipt{return [pscustomobject]@{state='PASSED'}};"
         "$script:pointerCalls=0;function Set-CloudflareCandidatePointer{$script:pointerCalls++};"
         "function Wait-CandidatePlacementPropagation{[pscustomobject]@{passed=$true}};"
-        "$restored=Restore-ControlPlaneObservationFailedCandidate $state ('c'*40);"
+        "function Get-CloudflareDeployment{[pscustomobject]@{versions=@("
+        "[pscustomobject]@{version_id=$state.stable.worker_version_id;percentage=100})}};"
+        "$restored=Restore-ControlPlaneOnlySupersededCandidate $state ('f'*40);"
         "$final=Get-ReleaseControlState;$history=Get-Content $releaseHistoryPath -Raw;"
         'Write-Output "$($restored.validation_state),$($restored.validation.data_parity.marker),'
         '$($final.candidate.last_release_attempt.reason),'
