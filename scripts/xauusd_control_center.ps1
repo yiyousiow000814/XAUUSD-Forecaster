@@ -107,6 +107,11 @@ $candidateStaticAssetMaxBytes = 1048576
 $candidateDiscoveryInterval = [TimeSpan]::FromMinutes(5)
 $candidatePlacementPropagationTimeout = [TimeSpan]::FromMinutes(3)
 $candidatePlacementProbeIntervalSeconds = 5
+$candidateSupersessionHistoryLimit = 128
+$candidateSupersessionHistoryByteLimit = 32MB
+# A chain consumes at least one immutable history edge per hop. Keep traversal
+# materially below the bounded history window so missing ancestry fails closed.
+$candidateSupersessionMaxDepth = 16
 $candidateOnlyProjectionRoutes = @(
     "/api/audit-briefs", "/api/audit-stories", "/api/audit-decisions"
 )
@@ -1996,7 +2001,10 @@ function Test-RequiredGitHubChecks {
 }
 
 function Get-ProductionCandidateProvenanceResult {
-    param([Parameter(Mandatory = $true)][object]$Candidate)
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [string]$VerifiedOriginMainRevision = ""
+    )
     if ([string]$Candidate.artifact_kind -ne $productionCandidateArtifactKind -or
         [string]$Candidate.branch -ne "main" -or
         [string]$Candidate.git_sha -ne [string]$Candidate.windows_revision) {
@@ -2004,19 +2012,28 @@ function Get-ProductionCandidateProvenanceResult {
             state = "FAILED"; reason = "PRODUCTION_CANDIDATE_MAIN_PROVENANCE_REQUIRED"
         }
     }
-    $fetch = Invoke-RepositoryRead -Operation "FETCH_ORIGIN" `
-        -Arguments @("-C", $repositoryRoot, "fetch", "origin", "--quiet")
-    if (-not $fetch.passed) {
-        return [pscustomobject]@{
-            state = if ($fetch.failure_class -eq "TRANSIENT_EXTERNAL") {
-                "REPOSITORY_PENDING"
-            } else { "FAILED" }
-            reason = if ($fetch.failure_class -eq "TRANSIENT_EXTERNAL") {
-                "REPOSITORY_TRANSPORT_UNAVAILABLE"
-            } else { "PRODUCTION_CANDIDATE_MAIN_PROVENANCE_REQUIRED" }
-            operation = "FETCH_ORIGIN"
-            exit_code = [int]$fetch.exit_code
-            diagnostic = $fetch.diagnostic
+    $originMain = $VerifiedOriginMainRevision.Trim().ToLowerInvariant()
+    if ($originMain) {
+        if ($originMain -notmatch '^[0-9a-f]{40}$') {
+            return [pscustomobject]@{
+                state = "FAILED"; reason = "PRODUCTION_CANDIDATE_EXACT_MAIN_REQUIRED"
+            }
+        }
+    } else {
+        $fetch = Invoke-RepositoryRead -Operation "FETCH_ORIGIN" `
+            -Arguments @("-C", $repositoryRoot, "fetch", "origin", "--quiet")
+        if (-not $fetch.passed) {
+            return [pscustomobject]@{
+                state = if ($fetch.failure_class -eq "TRANSIENT_EXTERNAL") {
+                    "REPOSITORY_PENDING"
+                } else { "FAILED" }
+                reason = if ($fetch.failure_class -eq "TRANSIENT_EXTERNAL") {
+                    "REPOSITORY_TRANSPORT_UNAVAILABLE"
+                } else { "PRODUCTION_CANDIDATE_MAIN_PROVENANCE_REQUIRED" }
+                operation = "FETCH_ORIGIN"
+                exit_code = [int]$fetch.exit_code
+                diagnostic = $fetch.diagnostic
+            }
         }
     }
     $commit = Invoke-Utf8NativeProcess -FilePath "git.exe" -Arguments @(
@@ -2027,12 +2044,14 @@ function Get-ProductionCandidateProvenanceResult {
             state = "FAILED"; reason = "PRODUCTION_CANDIDATE_COMMIT_REQUIRED"
         }
     }
-    $mainRead = Invoke-Utf8NativeProcess -FilePath "git.exe" `
-        -Arguments @("-C", $repositoryRoot, "rev-parse", "origin/main")
-    $originMain = ([string]$mainRead.stdout).Trim().ToLowerInvariant()
-    if ($mainRead.exit_code -ne 0 -or $originMain -notmatch '^[0-9a-f]{40}$') {
-        return [pscustomobject]@{
-            state = "FAILED"; reason = "PRODUCTION_CANDIDATE_EXACT_MAIN_REQUIRED"
+    if (-not $originMain) {
+        $mainRead = Invoke-Utf8NativeProcess -FilePath "git.exe" `
+            -Arguments @("-C", $repositoryRoot, "rev-parse", "origin/main")
+        $originMain = ([string]$mainRead.stdout).Trim().ToLowerInvariant()
+        if ($mainRead.exit_code -ne 0 -or $originMain -notmatch '^[0-9a-f]{40}$') {
+            return [pscustomobject]@{
+                state = "FAILED"; reason = "PRODUCTION_CANDIDATE_EXACT_MAIN_REQUIRED"
+            }
         }
     }
     if ($originMain -eq [string]$Candidate.git_sha) {
@@ -2130,21 +2149,307 @@ function Test-PreservedCandidateEvidenceAvailable {
     return $true
 }
 
-function Get-LatestSupersededCandidateForReplacement {
-    param([Parameter(Mandatory = $true)][string]$ReplacementKey)
-    if (-not (Test-Path -LiteralPath $releaseHistoryPath)) { return $null }
-    $lines = @(Get-Content -LiteralPath $releaseHistoryPath -Tail 128 -Encoding UTF8)
-    [array]::Reverse($lines)
-    foreach ($line in $lines) {
-        try {
-            $entry = $line | ConvertFrom-ReleaseControlJson
-            if ([string]$entry.event -eq "CANDIDATE_SUPERSEDED" -and
-                [string]$entry.detail.replacement_key -eq $ReplacementKey) {
-                return $entry.release
-            }
-        } catch {}
+function Test-CandidateSupersessionIdentity {
+    param([object]$Candidate)
+    return [bool](
+        $Candidate -and
+        [string]$Candidate.worker_version_id -match
+            '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' -and
+        [string]$Candidate.git_sha -match '^[0-9a-f]{40}$' -and
+        [string]$Candidate.windows_revision -eq [string]$Candidate.git_sha -and
+        [string]$Candidate.artifact_kind -eq $productionCandidateArtifactKind -and
+        [string]$Candidate.validation_key -eq
+            "$([string]$Candidate.worker_version_id):$([string]$Candidate.git_sha)"
+    )
+}
+
+function Test-UnqualifiedSupersessionIntermediate {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][array]$History
+    )
+    if (-not (Test-CandidateSupersessionIdentity -Candidate $Candidate) -or
+        [string]$Candidate.compatibility_state -notin @("PENDING", "REVIEW_REQUIRED") -or
+        [string]$Candidate.validation_state -notin @(
+            "NEW", "CHECKS_PENDING", "CHECKS_BLOCKED", "TESTING", "REVIEW_REQUIRED"
+        ) -or $Candidate.migration_acceptance) {
+        return $false
     }
-    return $null
+    if ($Candidate.validation -and
+        [string]$Candidate.validation.key -ne [string]$Candidate.validation_key) {
+        return $false
+    }
+    $accepted = @($History | Where-Object {
+        [string]$_.release.validation_key -eq [string]$Candidate.validation_key -and
+        [string]$_.event -in @(
+            "COORDINATED_STORAGE_MIGRATION_PASSED", "CANDIDATE_PASSED",
+            "CANDIDATE_ACCESS_BOUNDARY_ACCEPTED", "PROMOTION_STARTED", "STABLE_COMMITTED"
+        )
+    })
+    return [bool]($accepted.Count -eq 0)
+}
+
+function Test-QualifiedSupersessionCandidateShape {
+    param([Parameter(Mandatory = $true)][object]$Candidate)
+    if (-not (Test-CandidateSupersessionIdentity -Candidate $Candidate) -or
+        [string]$Candidate.validation_state -ne "PASSED" -or
+        [string]$Candidate.compatibility_state -notin @(
+            "PASSED", "COORDINATED_STORAGE_MIGRATION_PASSED"
+        ) -or -not $Candidate.migration_acceptance -or
+        [string]$Candidate.migration_acceptance.validation_key -ne
+            [string]$Candidate.validation_key -or -not $Candidate.validation -or
+        [string]$Candidate.validation.key -ne [string]$Candidate.validation_key -or
+        [string]$Candidate.validation.repository -ne "PASSED" -or
+        [string]$Candidate.validation.windows -ne "PASSED" -or
+        [string]$Candidate.validation.cloudflare -ne "PASSED" -or
+        [string]$Candidate.validation.data_parity.state -notin @(
+            "PASSED", "PASSED_WITH_DEFERRED_OBLIGATIONS"
+        ) -or -not $Candidate.validation.worker_qualification -or
+        [string]$Candidate.validation.worker_qualification.key -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Candidate.validation.worker_qualification.candidate_worker_version -ne
+            [string]$Candidate.worker_version_id -or
+        [string]$Candidate.validation.worker_qualification.candidate_git_sha -ne
+            [string]$Candidate.git_sha -or -not $Candidate.validation.cpu_evidence -or
+        [string]$Candidate.validation.cpu_evidence.qualification_key -ne
+            [string]$Candidate.validation.worker_qualification.key -or
+        [string]$Candidate.validation.cpu_evidence.qualification_receipt_digest -notmatch
+            '^[0-9a-f]{64}$' -or
+        [string]$Candidate.migration_acceptance.receipt_digest -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Candidate.validation.auth_inspection.state -notin @(
+            "HUMAN_ACCESS_BOUNDARY_ACCEPTED", "ACCESS_QUALIFICATION_REUSED",
+            "ACCESS_QUALIFICATION_RENEWED"
+        )) {
+        return $false
+    }
+    return (Test-PreservedCandidateEvidenceAvailable -Candidate $Candidate)
+}
+
+function Test-ObservationFailedSupersessionCandidateShape {
+    param([Parameter(Mandatory = $true)][object]$Candidate)
+    return [bool](
+        (Test-CandidateSupersessionIdentity -Candidate $Candidate) -and
+        [string]$Candidate.validation_state -eq "FAILED" -and
+        [string]$Candidate.compatibility_state -eq "PASSED" -and
+        $Candidate.validation -and
+        [string]$Candidate.validation.key -eq [string]$Candidate.validation_key -and
+        [string]$Candidate.validation.error -eq "OBSERVATION_FAILED" -and
+        [string]$Candidate.validation.reason -eq
+            "DEFERRED_PROJECTION_OBSERVATION_TIMEOUT" -and
+        $Candidate.validation.prior_validation
+    )
+}
+
+function Get-BoundedReleaseHistoryTail {
+    param(
+        [Parameter(Mandatory = $true)][int]$MaximumLines,
+        [Parameter(Mandatory = $true)][long]$MaximumBytes
+    )
+    $stream = [System.IO.FileStream]::new(
+        $releaseHistoryPath, [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+    )
+    try {
+        $readLength = [int][Math]::Min($stream.Length, $MaximumBytes)
+        $start = $stream.Length - $readLength
+        $null = $stream.Seek($start, [System.IO.SeekOrigin]::Begin)
+        $buffer = [byte[]]::new($readLength)
+        $total = 0
+        while ($total -lt $readLength) {
+            $count = $stream.Read($buffer, $total, $readLength - $total)
+            if ($count -le 0) { break }
+            $total += $count
+        }
+    } finally { $stream.Dispose() }
+    $offset = 0
+    if ($start -gt 0) {
+        while ($offset -lt $total -and $buffer[$offset] -ne 10) { $offset++ }
+        if ($offset -ge $total) {
+            throw "CANDIDATE_SUPERSESSION_HISTORY_BYTE_BOUND_EXCEEDED"
+        }
+        $offset++
+    }
+    $text = [System.Text.Encoding]::UTF8.GetString($buffer, $offset, $total - $offset)
+    $lines = @($text -split "`n" | ForEach-Object {
+        $_.TrimEnd("`r").TrimStart([char]0xFEFF)
+    } |
+        Where-Object { $_ })
+    if ($start -gt 0 -and $lines.Count -lt $MaximumLines) {
+        throw "CANDIDATE_SUPERSESSION_HISTORY_BYTE_BOUND_EXCEEDED"
+    }
+    return @($lines | Select-Object -Last $MaximumLines)
+}
+
+function Test-CandidateSupersessionAncestry {
+    param(
+        [Parameter(Mandatory = $true)][object]$Predecessor,
+        [Parameter(Mandatory = $true)][object]$Successor,
+        [Parameter(Mandatory = $true)][string]$MainRevision
+    )
+    foreach ($revision in @(
+        [string]$Predecessor.git_sha, [string]$Successor.git_sha, $MainRevision
+    )) {
+        $exists = Invoke-Utf8NativeProcess -FilePath "git.exe" -Arguments @(
+            "-C", $repositoryRoot, "cat-file", "-e", "$revision`^{commit}"
+        )
+        if ([int]$exists.exit_code -ne 0) { return $false }
+    }
+    $edge = Invoke-Utf8NativeProcess -FilePath "git.exe" -Arguments @(
+        "-C", $repositoryRoot, "merge-base", "--is-ancestor",
+        [string]$Predecessor.git_sha, [string]$Successor.git_sha
+    )
+    $main = Invoke-Utf8NativeProcess -FilePath "git.exe" -Arguments @(
+        "-C", $repositoryRoot, "merge-base", "--is-ancestor",
+        [string]$Successor.git_sha, $MainRevision
+    )
+    return [bool]([int]$edge.exit_code -eq 0 -and [int]$main.exit_code -eq 0)
+}
+
+function Get-CandidateSupersessionRecoveryPlan {
+    param(
+        [Parameter(Mandatory = $true)][object]$Head,
+        [Parameter(Mandatory = $true)][string]$MainRevision
+    )
+    if (-not (Test-Path -LiteralPath $releaseHistoryPath)) {
+        return [pscustomobject]@{ state = "NOT_APPLICABLE"; reason = "HISTORY_MISSING" }
+    }
+    $history = @()
+    try {
+        $historyLines = @(Get-BoundedReleaseHistoryTail `
+            -MaximumLines $candidateSupersessionHistoryLimit `
+            -MaximumBytes $candidateSupersessionHistoryByteLimit)
+    } catch {
+        return [pscustomobject]@{
+            state = "FAILED"; reason = $_.Exception.Message
+        }
+    }
+    foreach ($line in $historyLines) {
+        try { $history += @($line | ConvertFrom-ReleaseControlJson) }
+        catch {
+            return [pscustomobject]@{
+                state = "FAILED"; reason = "CANDIDATE_SUPERSESSION_HISTORY_INVALID"
+            }
+        }
+    }
+    $headKey = [string]$Head.validation_key
+    $current = $Head
+    $visited = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    $visitedWorkers = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    $null = $visited.Add($headKey)
+    $null = $visitedWorkers.Add([string]$Head.worker_version_id)
+    $traversed = @()
+    for ($depth = 0; $depth -lt $candidateSupersessionMaxDepth; $depth++) {
+        if (-not (Test-UnqualifiedSupersessionIntermediate `
+                -Candidate $current -History $history)) {
+            return [pscustomobject]@{
+                state = "FAILED"; reason = "CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"
+                chain_head = $headKey; traversed = $traversed
+            }
+        }
+        $edges = @($history | Where-Object {
+            [string]$_.event -eq "CANDIDATE_SUPERSEDED" -and
+            [string]$_.detail.replacement_key -eq [string]$current.validation_key
+        })
+        if ($edges.Count -eq 0) {
+            return [pscustomobject]@{
+                state = if ($depth -eq 0) { "NOT_APPLICABLE" } else { "FAILED" }
+                reason = if ($depth -eq 0) {
+                    "CANDIDATE_SUPERSESSION_CHAIN_NOT_FOUND"
+                } else { "CANDIDATE_SUPERSESSION_PREDECESSOR_MISSING" }
+                chain_head = $headKey; traversed = $traversed
+            }
+        }
+        if ($edges.Count -ne 1) {
+            return [pscustomobject]@{
+                state = "FAILED"; reason = "CANDIDATE_SUPERSESSION_EDGE_AMBIGUOUS"
+                chain_head = $headKey; traversed = $traversed
+            }
+        }
+        $predecessor = $edges[0].release
+        if (-not (Test-CandidateSupersessionIdentity -Candidate $predecessor)) {
+            return [pscustomobject]@{
+                state = "FAILED"; reason = "CANDIDATE_SUPERSESSION_EDGE_IDENTITY_INVALID"
+                chain_head = $headKey; traversed = $traversed
+            }
+        }
+        $predecessorKey = [string]$predecessor.validation_key
+        if ($predecessorKey -eq [string]$current.validation_key) {
+            return [pscustomobject]@{
+                state = "FAILED"; reason = "CANDIDATE_SUPERSESSION_SELF_LOOP"
+                chain_head = $headKey; traversed = $traversed
+            }
+        }
+        if (-not $visited.Add($predecessorKey)) {
+            return [pscustomobject]@{
+                state = "FAILED"; reason = "CANDIDATE_SUPERSESSION_CYCLE"
+                chain_head = $headKey; traversed = $traversed
+            }
+        }
+        if (-not $visitedWorkers.Add([string]$predecessor.worker_version_id)) {
+            return [pscustomobject]@{
+                state = "FAILED"; reason = "CANDIDATE_SUPERSESSION_WORKER_REUSED"
+                chain_head = $headKey; traversed = $traversed
+            }
+        }
+        $qualified = Test-QualifiedSupersessionCandidateShape -Candidate $predecessor
+        $observationFailed = Test-ObservationFailedSupersessionCandidateShape `
+            -Candidate $predecessor
+        if ($qualified -or $observationFailed) {
+            $provenance = Get-ProductionCandidateProvenanceResult -Candidate $predecessor `
+                -VerifiedOriginMainRevision $MainRevision
+            if ([string]$provenance.state -ne "PASSED" -or
+                [string]$provenance.mode -ne "CONTROL_PLANE_ONLY_MAIN_ADVANCE" -or
+                [string]$provenance.current_main_git_sha -ne $MainRevision) {
+                return [pscustomobject]@{
+                    state = "FAILED"; reason = "CANDIDATE_SUPERSESSION_PROVENANCE_INVALID"
+                    chain_head = $headKey; traversed = $traversed
+                }
+            }
+        } elseif (-not (Test-CandidateSupersessionAncestry `
+                -Predecessor $predecessor -Successor $current `
+                -MainRevision $MainRevision)) {
+            return [pscustomobject]@{
+                state = "FAILED"; reason = "CANDIDATE_SUPERSESSION_ANCESTRY_INVALID"
+                chain_head = $headKey; traversed = $traversed
+            }
+        }
+        $traversed += @([pscustomobject]@{
+            successor_key = [string]$current.validation_key
+            predecessor_key = $predecessorKey
+            predecessor_worker_version_id = [string]$predecessor.worker_version_id
+            predecessor_git_sha = [string]$predecessor.git_sha
+            predecessor_ineligible_reason = if ($qualified -or $observationFailed) {
+                $null
+            } else {
+                "QUALIFICATION_OR_REUSABLE_EVIDENCE_UNAVAILABLE"
+            }
+        })
+        if ($qualified) {
+            return [pscustomobject]@{
+                state = "FOUND"; reason = "QUALIFIED_PREDECESSOR"
+                chain_head = $headKey; candidate = $predecessor
+                recovery_mode = "QUALIFIED"; depth = $depth + 1
+                traversed = $traversed
+            }
+        }
+        if ($observationFailed) {
+            return [pscustomobject]@{
+                state = "FOUND"; reason = "OBSERVATION_FAILED_PREDECESSOR"
+                chain_head = $headKey; candidate = $predecessor
+                recovery_mode = "OBSERVATION_FAILED"; depth = $depth + 1
+                traversed = $traversed
+            }
+        }
+        $current = $predecessor
+    }
+    return [pscustomobject]@{
+        state = "FAILED"; reason = "CANDIDATE_SUPERSESSION_MAX_DEPTH_EXCEEDED"
+        chain_head = $headKey; traversed = $traversed
+    }
 }
 
 function Restore-ControlPlaneOnlySupersededCandidate {
@@ -2154,20 +2459,16 @@ function Restore-ControlPlaneOnlySupersededCandidate {
     )
     $replacement = $State.candidate
     if (-not $replacement -or $State.transaction -or
-        [string]$replacement.compatibility_state -ne "PENDING" -or
+        [string]$replacement.compatibility_state -notin @("PENDING", "REVIEW_REQUIRED") -or
         [string]$replacement.validation_state -notin @(
-            "NEW", "CHECKS_PENDING", "CHECKS_BLOCKED"
+            "NEW", "CHECKS_PENDING", "CHECKS_BLOCKED", "TESTING", "REVIEW_REQUIRED"
         ) -or $replacement.migration_acceptance -or
-        ($replacement.validation -and
-            [string]$replacement.validation.reason -notin @(
-                "REQUIRED_GITHUB_CHECKS_PENDING",
-                "REQUIRED_GITHUB_CHECKS_BLOCKED",
-                "GITHUB_TEMPORARILY_UNAVAILABLE"
-            ))) {
+        ($replacement.validation -and [string]$replacement.validation.key -ne
+            [string]$replacement.validation_key)) {
         return $null
     }
-    $replacementProvenance = Get-ProductionCandidateProvenanceResult `
-        -Candidate $replacement
+    $replacementProvenance = Get-ProductionCandidateProvenanceResult -Candidate $replacement `
+        -VerifiedOriginMainRevision $MainRevision
     $replacementTracksMain = [bool](
         [string]$replacementProvenance.state -eq "PASSED" -and (
             [string]$replacementProvenance.mode -eq "EXACT_MAIN" -or (
@@ -2179,26 +2480,112 @@ function Restore-ControlPlaneOnlySupersededCandidate {
         )
     )
     if (-not $replacementTracksMain) { return $null }
-    $prior = Get-LatestSupersededCandidateForReplacement `
-        -ReplacementKey ([string]$replacement.validation_key)
-    if (-not $prior) { return $null }
-    $provenance = Get-ProductionCandidateProvenanceResult -Candidate $prior
-    if ([string]$provenance.state -ne "PASSED" -or
-        [string]$provenance.mode -ne "CONTROL_PLANE_ONLY_MAIN_ADVANCE" -or
-        [string]$provenance.current_main_git_sha -ne $MainRevision -or
-        -not (Test-PreservedCandidateEvidenceAvailable -Candidate $prior)) {
-        return $null
+    $deployment = Get-CloudflareDeployment
+    $productionOwners = @($deployment.versions | Where-Object {
+        [double]$_.percentage -gt 0
+    })
+    if ($productionOwners.Count -ne 1 -or
+        [string]$productionOwners[0].version_id -ne [string]$State.stable.worker_version_id -or
+        [double]$productionOwners[0].percentage -ne 100) {
+        throw "CANDIDATE_SUPERSESSION_CHAIN_PRODUCTION_OWNERSHIP_UNSAFE"
     }
-    $State.candidate = $prior
-    Set-CandidateMaterializationState -State $State -Revision $MainRevision `
-        -Status "PRESERVED" -WorkerVersionId ([string]$prior.worker_version_id)
-    $State.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
-    Write-ReleaseControlState -State $State
-    Write-ReleaseHistory -Event "CANDIDATE_CONTROL_PLANE_ONLY_RESTORED" `
+    $plan = Get-CandidateSupersessionRecoveryPlan `
+        -Head $replacement -MainRevision $MainRevision
+    if ([string]$plan.state -eq "NOT_APPLICABLE") { return $null }
+    if ([string]$plan.state -ne "FOUND") {
+        Write-ReleaseHistory -Event "CANDIDATE_SUPERSESSION_CHAIN_RECOVERY_REJECTED" `
+            -Release $replacement -Detail @{
+                reason = [string]$plan.reason
+                chain_head = [string]$plan.chain_head
+                traversed = @($plan.traversed)
+            }
+        throw [string]$plan.reason
+    }
+    $prior = $plan.candidate
+    try {
+        $changed = @(Get-CandidateChangedFiles `
+            -StableRevision ([string]$State.stable.git_sha) `
+            -CandidateRevision ([string]$prior.git_sha))
+        $compatibility = Get-CandidateCompatibilityRequirement -ChangedFiles $changed
+        if ([string]$compatibility.state -ne "COORDINATED_STORAGE_MIGRATION_REQUIRED") {
+            throw "CANDIDATE_SUPERSESSION_MIGRATION_CONTRACT_MOVED"
+        }
+        $migrationReceipt = Assert-CoordinatedMigrationReceipt `
+            -Candidate $prior -Stable $State.stable `
+            -MigrationFiles @($compatibility.files)
+        if ([string]$migrationReceipt.receipt_digest -ne
+            [string]$prior.migration_acceptance.receipt_digest) {
+            throw "MIGRATION_RECEIPT_AUTHORITY_MISMATCH"
+        }
+    } catch {
+        throw "CANDIDATE_SUPERSESSION_MIGRATION_RECEIPT_INVALID:$($_.Exception.Message)"
+    }
+    $reuseEvidence = $null
+    if ([string]$plan.recovery_mode -eq "OBSERVATION_FAILED") {
+        $trialState = $State.PSObject.Copy()
+        $trialState.candidate = $prior
+        $restored = Restore-ControlPlaneObservationFailedCandidate `
+            -State $trialState -MainRevision $MainRevision
+        if (-not $restored) {
+            throw "CANDIDATE_SUPERSESSION_QUALIFICATION_REUSE_INVALID"
+        }
+        $prior = $restored
+        $reuseEvidence = [pscustomobject]@{
+            qualification_key = [string]$prior.validation.worker_qualification.key
+            cpu_receipt_digest = [string]$prior.validation.cpu_evidence.qualification_receipt_digest
+            access_receipt_digest = [string]$prior.access_qualification.receipt_digest
+        }
+    } else {
+        try {
+            $cpuReceipt = Get-WorkerCpuQualificationReceipt `
+                -QualificationKey ([string]$prior.validation.worker_qualification.key)
+            if (-not $cpuReceipt -or
+                [string]$cpuReceipt.receipt_digest -ne
+                    [string]$prior.validation.cpu_evidence.qualification_receipt_digest -or
+                [string]$cpuReceipt.source_worker_version -ne
+                    [string]$prior.worker_version_id -or
+                [string]$cpuReceipt.source_git_sha -ne [string]$prior.git_sha) {
+                throw "CANDIDATE_SUPERSESSION_CPU_RECEIPT_INVALID"
+            }
+            if ([string]$prior.validation.auth_inspection.state -eq
+                    "HUMAN_ACCESS_BOUNDARY_ACCEPTED") {
+                $accessReceipt = Assert-AccessBoundaryAcceptanceReceipt `
+                    -Candidate $prior -Stable $State.stable
+            } else {
+                $accessReceipt = Ensure-AccessQualificationMachineReceipt -Candidate $prior
+            }
+            Set-CloudflareCandidatePointer -Stable $State.stable -Candidate $prior
+            $placement = Wait-CandidatePlacementPropagation -Candidate $prior
+            if (-not $placement.passed) {
+                throw "CANDIDATE_SUPERSESSION_PLACEMENT_UNAVAILABLE"
+            }
+            $reuseEvidence = [pscustomobject]@{
+                qualification_key = [string]$prior.validation.worker_qualification.key
+                cpu_receipt_digest = [string]$cpuReceipt.receipt_digest
+                access_receipt_digest = [string]$accessReceipt.receipt_digest
+            }
+        } catch {
+            throw "CANDIDATE_SUPERSESSION_QUALIFICATION_REUSE_INVALID:$($_.Exception.Message)"
+        }
+        $State.candidate = $prior
+        Set-CandidateMaterializationState -State $State -Revision $MainRevision `
+            -Status "PRESERVED" -WorkerVersionId ([string]$prior.worker_version_id)
+        $State.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $State
+    }
+    Write-ReleaseHistory -Event "CANDIDATE_RECOVERED_THROUGH_SUPERSESSION_CHAIN" `
         -Release $prior -Detail @{
-            superseded_replacement_key = [string]$replacement.validation_key
+            chain_head = [string]$plan.chain_head
+            traversed = @($plan.traversed)
+            recovered_candidate_key = [string]$prior.validation_key
+            recovered_worker_version_id = [string]$prior.worker_version_id
+            depth = [int]$plan.depth
+            recovery_mode = [string]$plan.recovery_mode
             current_main_git_sha = $MainRevision
-            preservation_mode = [string]$provenance.mode
+            qualification_key = [string]$reuseEvidence.qualification_key
+            cpu_receipt_digest = [string]$reuseEvidence.cpu_receipt_digest
+            migration_receipt_digest = [string]$migrationReceipt.receipt_digest
+            access_receipt_digest = [string]$reuseEvidence.access_receipt_digest
             accepted_evidence_replayed = $false
         }
     return $prior
