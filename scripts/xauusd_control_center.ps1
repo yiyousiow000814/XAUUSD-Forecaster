@@ -2198,6 +2198,120 @@ function Restore-ControlPlaneOnlySupersededCandidate {
     return $prior
 }
 
+function Restore-ControlPlaneObservationFailedCandidate {
+    param(
+        [Parameter(Mandatory = $true)][object]$State,
+        [Parameter(Mandatory = $true)][string]$MainRevision
+    )
+    $candidate = $State.candidate
+    if (-not $candidate -or $State.transaction -or
+        [string]$State.deployment_status -ne "READY" -or
+        [string]$candidate.validation_state -ne "FAILED" -or
+        [string]$candidate.compatibility_state -ne "PASSED" -or
+        -not $candidate.validation -or
+        [string]$candidate.validation.key -ne [string]$candidate.validation_key -or
+        [string]$candidate.validation.error -ne "OBSERVATION_FAILED" -or
+        [string]$candidate.validation.reason -ne
+            "DEFERRED_PROJECTION_OBSERVATION_TIMEOUT" -or
+        -not $candidate.validation.prior_validation) {
+        return $null
+    }
+    $failedAttempt = $candidate.validation
+    $priorValidation = $failedAttempt.prior_validation
+    if ([string]$priorValidation.key -ne [string]$candidate.validation_key -or
+        [string]$priorValidation.repository -ne "PASSED" -or
+        [string]$priorValidation.windows -ne "PASSED" -or
+        [string]$priorValidation.cloudflare -ne "PASSED" -or
+        [string]$priorValidation.data_parity.state -notin @(
+            "PASSED", "PASSED_WITH_DEFERRED_OBLIGATIONS"
+        ) -or -not $priorValidation.worker_qualification -or
+        [string]$priorValidation.worker_qualification.key -notmatch '^[0-9a-f]{64}$' -or
+        [string]$priorValidation.worker_qualification.candidate_worker_version -ne
+            [string]$candidate.worker_version_id -or
+        [string]$priorValidation.worker_qualification.candidate_git_sha -ne
+            [string]$candidate.git_sha -or -not $priorValidation.cpu_evidence -or
+        [string]$priorValidation.cpu_evidence.qualification_key -ne
+            [string]$priorValidation.worker_qualification.key -or
+        [string]$priorValidation.cpu_evidence.qualification_receipt_digest -notmatch
+            '^[0-9a-f]{64}$' -or -not $candidate.migration_acceptance -or
+        [string]$candidate.migration_acceptance.validation_key -ne
+            [string]$candidate.validation_key) {
+        return $null
+    }
+    $provenance = Get-ProductionCandidateProvenanceResult -Candidate $candidate
+    if ([string]$provenance.state -ne "PASSED" -or
+        [string]$provenance.mode -ne "CONTROL_PLANE_ONLY_MAIN_ADVANCE" -or
+        [string]$provenance.current_main_git_sha -ne $MainRevision) {
+        return $null
+    }
+    $qualifiedCandidate = $candidate.PSObject.Copy()
+    $qualifiedCandidate.validation_state = "PASSED"
+    $qualifiedCandidate.validation = $priorValidation
+    if (-not (Test-PreservedCandidateEvidenceAvailable `
+            -Candidate $qualifiedCandidate)) {
+        return $null
+    }
+    try {
+        $cpuReceipt = Get-WorkerCpuQualificationReceipt `
+            -QualificationKey ([string]$priorValidation.worker_qualification.key)
+        if (-not $cpuReceipt -or
+            [string]$cpuReceipt.receipt_digest -ne
+                [string]$priorValidation.cpu_evidence.qualification_receipt_digest -or
+            [string]$cpuReceipt.source_worker_version -ne
+                [string]$candidate.worker_version_id -or
+            [string]$cpuReceipt.source_git_sha -ne [string]$candidate.git_sha) {
+            return $null
+        }
+        if ([string]$priorValidation.auth_inspection.state -eq
+                "HUMAN_ACCESS_BOUNDARY_ACCEPTED") {
+            $null = Assert-AccessBoundaryAcceptanceReceipt `
+                -Candidate $qualifiedCandidate -Stable $State.stable
+        } elseif ([string]$priorValidation.auth_inspection.state -eq
+                "ACCESS_QUALIFICATION_REUSED") {
+            $null = Assert-AccessQualificationReuseReceipt `
+                -Candidate $qualifiedCandidate
+        } else { return $null }
+        Set-CloudflareCandidatePointer -Stable $State.stable `
+            -Candidate $qualifiedCandidate
+        $placement = Wait-CandidatePlacementPropagation -Candidate $qualifiedCandidate
+        if (-not $placement.passed) { return $null }
+    } catch { return $null }
+
+    Write-ReleaseHistory -Event "CANDIDATE_RELEASE_ATTEMPT_FAILURE_PRESERVED" `
+        -Release $candidate -Detail @{
+            validation_key = [string]$candidate.validation_key
+            error = [string]$failedAttempt.error
+            reason = [string]$failedAttempt.reason
+            failed_at = [string]$failedAttempt.tested_at
+            qualification_restored = $false
+        }
+    $candidate | Add-Member -Force -NotePropertyName last_release_attempt `
+        -NotePropertyValue ([pscustomobject]@{
+            state = "FAILED"
+            error = [string]$failedAttempt.error
+            reason = [string]$failedAttempt.reason
+            tested_at = [string]$failedAttempt.tested_at
+            deferred_projection_evidence = $failedAttempt.deferred_projection_evidence
+        })
+    $candidate.validation = $priorValidation
+    $candidate.validation_state = "PASSED"
+    Set-CandidateMaterializationState -State $State -Revision $MainRevision `
+        -Status "PRESERVED" -WorkerVersionId ([string]$candidate.worker_version_id)
+    $State.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+    Write-ReleaseControlState -State $State
+    Write-ReleaseHistory -Event "CANDIDATE_RELEASE_ATTEMPT_RECOVERED" `
+        -Release $candidate -Detail @{
+            validation_key = [string]$candidate.validation_key
+            prior_error = [string]$failedAttempt.error
+            prior_reason = [string]$failedAttempt.reason
+            current_main_git_sha = $MainRevision
+            preservation_mode = [string]$provenance.mode
+            accepted_evidence_replayed = $false
+            candidate_repositioned_at_zero_percent = $true
+        }
+    return $candidate
+}
+
 function Get-CandidateCompatibilityApprovalGate {
     param([Parameter(Mandatory = $true)][object]$Candidate)
     $provenance = Get-ProductionCandidateProvenanceResult -Candidate $Candidate
@@ -6455,6 +6569,9 @@ function Find-NewCandidateRelease {
     $restored = Restore-ControlPlaneOnlySupersededCandidate `
         -State $state -MainRevision $mainRevision
     if ($restored) { $state = Get-ReleaseControlState }
+    $observationRecovered = Restore-ControlPlaneObservationFailedCandidate `
+        -State $state -MainRevision $mainRevision
+    if ($observationRecovered) { $state = Get-ReleaseControlState }
     $preserved = if ($state.candidate) {
         Get-ProductionCandidateProvenanceResult -Candidate $state.candidate
     } else { $null }
