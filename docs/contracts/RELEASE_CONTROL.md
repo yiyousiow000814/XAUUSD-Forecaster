@@ -554,7 +554,14 @@ an explicit coordinated migration protocol governs the transition.
 The independently installed `.local/runtime-control` bundle owns deployment
 transactions. Business checkout, Promote, Reverse, and automatic observation
 rollback never copy control files. Their preflight verifies the active bundle's
-exact source revision and every recorded SHA-256 hash. Release diagnostics keep
+exact source revision and every recorded SHA-256 hash. The current bundle
+manifest commits to its schema, exact source revision, exact file count, and
+ordinally ordered normalized relative-path/SHA-256 pairs with one repository-owned
+UTF-8/LF canonical digest. JSON formatting, host locale, PowerShell version,
+filesystem enumeration order, and absolute installation root are not identity
+inputs. A versioned schema-2 adapter may verify an existing bundle only by
+reconstructing its exact legacy `path=hash` commitment with fixed ordinal order;
+new bundles never use that legacy format. Release diagnostics keep
 `control_bundle_revision`, `control_bundle_exact_revision`, and
 `control_bundle_hash_verified` separately from the Windows business revision.
 The Control Plane bundle revision and Business Runtime revision are independent
