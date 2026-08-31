@@ -4720,12 +4720,23 @@ def test_live_release_lock_is_never_stolen(tmp_path) -> None:
     assert result == "False"
 
 
-def test_passed_candidate_promotes_only_after_observation_commit(tmp_path) -> None:
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_passed_candidate_promotes_only_after_observation_commit(
+    tmp_path, powershell: str,
+) -> None:
     previous = "a" * 40
     candidate = "b" * 40
+    reload_boundary = "2026-08-31T18:29:12.0306041+00:00"
     result = _run_control_center_contract(
         tmp_path,
         _authorized_candidate(previous, candidate)
+        + "$state=Get-ReleaseControlState;"
+        "$state.candidate.validation|Add-Member -Force -NotePropertyName data_parity -NotePropertyValue ([pscustomobject]@{"
+        "deferred_obligations=@([pscustomobject]@{route='/api/audit-stories';"
+        "state='DEFERRED_TO_POST_CUTOVER_OBSERVATION';"
+        "validation_key=$state.candidate.validation_key;"
+        "required_producer_revision=$state.candidate.windows_revision})});"
+        "Write-ReleaseControlState $state;"
         + "function Enter-ReleaseTransactionLock { return $true }; "
         "function Exit-ReleaseTransactionLock {}; "
         "function Assert-ActiveControlBundle { return [pscustomobject]@{exact_revision=$true} }; "
@@ -4738,20 +4749,28 @@ def test_passed_candidate_promotes_only_after_observation_commit(tmp_path) -> No
         f"[pscustomobject]@{{stable_revision='{previous}'}};digest=('0' * 64)}} }}; "
         "function Update-RuntimeCheckout { return $true }; "
         "$script:cutover=@(); "
-        "function Restart-CodeReloadableServices { $script:cutover += 'windows-with-sync-paused'; return [DateTimeOffset]::UtcNow }; "
+        f"$script:reloadBoundary=[DateTimeOffset]::Parse('{reload_boundary}'); "
+        "function Restart-CodeReloadableServices { $script:cutover += 'windows-with-sync-paused'; return $script:reloadBoundary }; "
         "function Complete-DeferredServiceReload { $script:cutover += 'sync-resumed' }; "
-        "function Start-RuntimeObservation {}; "
+        "function Start-RuntimeObservation { param($Revision,$PreviousRevision,$HealthBoundary,"
+        "$DeferredProjectionObligations,$ValidationKey,$ProjectionBoundary);"
+        "$script:projectionBoundary=$ProjectionBoundary;"
+        "Write-RuntimeUpdateState @{update_status='ACTIVE';"
+        "observation_validation_key=$ValidationKey;"
+        "observation_deferred_projection_state='PASSED'} }; "
         "function Write-RuntimeCodeState {}; "
         "function Write-WatchdogEvent {}; "
         "function Invoke-CloudflareDeployment { $script:cutover += 'worker' }; "
         "$started=Start-ReleasePromotion; $during=Get-ReleaseControlState; "
         "Complete-ReleasePromotion; $after=Get-ReleaseControlState; "
-        'Write-Output "$started,$($during.stable.git_sha),$($during.transaction.phase),$($after.stable.git_sha),$($script:cutover -join \';\')"',
+        'Write-Output "$started,$($during.stable.git_sha),$($during.transaction.phase),$($after.stable.git_sha),'
+        '$($script:cutover -join \';\'),$($script:projectionBoundary.ToUniversalTime().ToString(\'o\'))"',
+        powershell=powershell,
     )
 
     assert result == (
         f"True,{previous},OBSERVING,{candidate},"
-        "windows-with-sync-paused;worker;sync-resumed"
+        f"windows-with-sync-paused;worker;sync-resumed,{reload_boundary}"
     )
 
 

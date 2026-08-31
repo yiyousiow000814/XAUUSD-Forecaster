@@ -9989,7 +9989,10 @@ function Start-ReleasePromotion {
             -StableVersionId ([string]$candidate.worker_version_id) `
             -CandidateVersionId ([string]$state.stable.worker_version_id) `
             -Message "promote release $([string]$state.transaction.id)"
-        $projectionBoundary = [DateTimeOffset]::UtcNow
+        # Candidate projection content may begin as soon as the Candidate Windows
+        # revision is active. Sync remains deferred until after Worker cutover, so
+        # publication ordering is enforced independently from content freshness.
+        $projectionBoundary = $reloadStarted
         Complete-DeferredServiceReload -ReloadStarted $reloadStarted `
             -DeferredServiceKeys @("sync")
         if ($deferredObligations.Count -gt 0) {
