@@ -42,6 +42,16 @@ from xauusd_forecaster.dashboard.deployment_provenance import (
     DeploymentProvenanceOwner,
     deployment_status,
 )
+from xauusd_forecaster.dashboard.storage_status import (
+    backup_lifecycle_status,
+    canonical_payload_digest,
+    wal_checkpoint_status,
+)
+from xauusd_forecaster.maintenance import (
+    BACKUP_RECEIPT_SCHEMA,
+    BACKUP_RETENTION_SCHEMA,
+    BACKUP_RETENTION_STATE,
+)
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
 from xauusd_forecaster.news_scheduler import (
     authorize_repairable_annotation_failures,
@@ -66,7 +76,6 @@ def _dashboard_module():
 def test_wal_checkpoint_component_accepts_only_digest_bound_runtime_state(
     tmp_path: Path,
 ) -> None:
-    module = _dashboard_module()
     payload = {
         "schema": "xauusd.forward.wal-checkpoint.v1",
         "recorded_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
@@ -82,11 +91,11 @@ def test_wal_checkpoint_component_accepts_only_digest_bound_runtime_state(
         "truncate_attempted": True,
         "error": None,
     }
-    payload["receipt_digest"] = module._canonical_payload_digest(payload)
+    payload["receipt_digest"] = canonical_payload_digest(payload)
     state = tmp_path / "wal-checkpoint-state.json"
     state.write_text(json.dumps(payload), encoding="utf-8")
 
-    accepted = module._wal_checkpoint_status(tmp_path)
+    accepted = wal_checkpoint_status(tmp_path)
     assert accepted["status"] == "OK"
     assert accepted["checkpoint_status"] == "TRUNCATED"
     assert accepted["wal_bytes"] == 0
@@ -94,9 +103,54 @@ def test_wal_checkpoint_component_accepts_only_digest_bound_runtime_state(
 
     payload["pending_frames"] = 1
     state.write_text(json.dumps(payload), encoding="utf-8")
-    rejected = module._wal_checkpoint_status(tmp_path)
+    rejected = wal_checkpoint_status(tmp_path)
     assert rejected["status"] == "ERROR"
     assert "digest" in rejected["last_error"]
+
+
+def test_backup_status_accepts_only_contained_digest_bound_inventory(
+    tmp_path: Path,
+) -> None:
+    backup = tmp_path / "forward-evidence-20260901.sqlite3"
+    backup.write_bytes(b"verified backup")
+    completed_at = datetime.now(UTC).replace(microsecond=0)
+    state = {
+        "schema": BACKUP_RETENTION_SCHEMA,
+        "completed_at": completed_at.isoformat(),
+        "retained": [backup.name],
+        "managed_count": 1,
+        "managed_bytes": backup.stat().st_size,
+        "unknown_count": 0,
+        "unknown_bytes": 0,
+    }
+    state["receipt_digest"] = canonical_payload_digest(state)
+    state_path = tmp_path / BACKUP_RETENTION_STATE
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    accepted = backup_lifecycle_status(tmp_path, clock=lambda: completed_at)
+
+    assert accepted["status"] == "OK"
+    assert accepted["managed_count"] == 1
+    assert accepted["managed_bytes"] == len(b"verified backup")
+
+    state["managed_count"] = 2
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    rejected = backup_lifecycle_status(tmp_path, clock=lambda: completed_at)
+    assert rejected["status"] == "UNKNOWN"
+    assert "digest" in rejected["last_error"]
+
+    state_path.unlink()
+    receipt = {
+        "schema": BACKUP_RECEIPT_SCHEMA,
+        "snapshot": {"path": str(backup)},
+    }
+    receipt["receipt_digest"] = canonical_payload_digest(receipt)
+    (tmp_path / f"{backup.name}.receipt.json").write_text(
+        json.dumps(receipt), encoding="utf-8",
+    )
+    pending = backup_lifecycle_status(tmp_path, clock=lambda: completed_at)
+    assert pending["status"] == "PENDING_RETENTION"
+    assert pending["managed_count"] == 1
 
 
 def _write_market_session(
