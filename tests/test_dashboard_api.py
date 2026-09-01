@@ -34,6 +34,10 @@ from xauusd_forecaster.dashboard_summaries import (
     dashboard_news_source_summary,
     install_dashboard_summary_schema,
 )
+from xauusd_forecaster.dashboard.learning_resources import (
+    LEARNING_REVISION_TABLES,
+    LearningSurfaceOwner,
+)
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
 from xauusd_forecaster.news_scheduler import (
     authorize_repairable_annotation_failures,
@@ -3629,10 +3633,9 @@ def test_dashboard_clears_historical_gdelt_429_after_successful_gkg_poll(
     assert "429" in gdelt["last_error"]
 
 
-def test_learning_surfaces_rebuild_only_when_source_counts_change(monkeypatch) -> None:
-    module = _dashboard_module()
+def test_learning_surfaces_rebuild_only_when_source_counts_change() -> None:
     connection = sqlite3.connect(":memory:")
-    for table in module._LEARNING_REVISION_TABLES:
+    for table in LEARNING_REVISION_TABLES:
         connection.execute(f"CREATE TABLE {table} (id INTEGER)")
     calls = {"learning": 0, "execution": 0}
 
@@ -3644,16 +3647,18 @@ def test_learning_surfaces_rebuild_only_when_source_counts_change(monkeypatch) -
         calls["execution"] += 1
         return {"generation": calls["execution"]}
 
-    monkeypatch.setattr(module, "learning_curve_payload", learning)
-    monkeypatch.setattr(module, "execution_learning_status", execution)
+    owner = LearningSurfaceOwner(
+        learning_builder=learning,
+        execution_builder=execution,
+    )
 
-    first = module._learning_surfaces(connection)
-    second = module._learning_surfaces(connection)
+    first = owner.surfaces(connection)
+    second = owner.surfaces(connection)
     assert first == second
     assert calls == {"learning": 1, "execution": 1}
 
     connection.execute("INSERT INTO derived_outcomes VALUES (1)")
-    third = module._learning_surfaces(connection)
+    third = owner.surfaces(connection)
     assert third != second
     assert calls == {"learning": 2, "execution": 2}
     connection.close()
