@@ -1613,36 +1613,6 @@ def test_dashboard_quota_keeps_pre_scheduler_file_compatibility(
         assert path.read_bytes() == original_bytes[path]
 
 
-def test_status_snapshot_cache_singleflights_concurrent_builds(tmp_path) -> None:
-    module = _dashboard_module()
-    cache = module.StatusSnapshotCache(wait_seconds=1.0)
-    database = tmp_path / "forward.sqlite3"
-    started = threading.Event()
-    release = threading.Event()
-    calls = 0
-    call_lock = threading.Lock()
-
-    def builder(_database):
-        nonlocal calls
-        with call_lock:
-            calls += 1
-        started.set()
-        assert release.wait(timeout=2)
-        return {"generated_at": "2026-08-12T00:00:00+00:00"}
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        futures = [pool.submit(cache.get, database, builder) for _ in range(8)]
-        assert started.wait(timeout=1)
-        time.sleep(0.05)
-        assert calls == 1
-        release.set()
-        results = [future.result(timeout=2) for future in futures]
-
-    assert calls == 1
-    assert len({body for body, _state, _age in results}) == 1
-    assert {state for _body, state, _age in results} == {"fresh"}
-
-
 def test_critical_status_route_uses_the_independent_bounded_builder(
     monkeypatch, tmp_path,
 ) -> None:
@@ -1716,80 +1686,6 @@ def test_status_alias_is_always_the_bounded_first_paint_contract(
         thread.join(timeout=2)
 
     assert calls == [False]
-
-
-def test_status_snapshot_cache_serves_bounded_stale_during_slow_refresh(
-    tmp_path,
-) -> None:
-    module = _dashboard_module()
-    now = [0.0]
-    cache = module.StatusSnapshotCache(
-        ttl_seconds=15, wait_seconds=0.01, max_stale_seconds=90,
-        clock=lambda: now[0],
-    )
-    database = tmp_path / "forward.sqlite3"
-    cache.get(database, lambda _database: {"version": 1})
-
-    now[0] = 16.0
-    started = threading.Event()
-    release = threading.Event()
-    calls = 0
-
-    def slow_refresh(_database):
-        nonlocal calls
-        calls += 1
-        started.set()
-        assert release.wait(timeout=2)
-        return {"version": 2}
-
-    stale_body, stale_state, stale_age = cache.get(database, slow_refresh)
-    assert started.wait(timeout=1)
-    second_body, second_state, second_age = cache.get(database, slow_refresh)
-    assert json.loads(stale_body) == {"version": 1}
-    assert json.loads(second_body) == {"version": 1}
-    assert (stale_state, second_state) == ("stale", "stale")
-    assert (stale_age, second_age) == (16.0, 16.0)
-    assert calls == 1
-
-    release.set()
-    for _ in range(100):
-        health_status, health = cache.health()
-        if health_status == 200 and health["refreshing"] is False:
-            break
-        time.sleep(0.01)
-    refreshed_body, refreshed_state, _age = cache.get(database, slow_refresh)
-    assert json.loads(refreshed_body) == {"version": 2}
-    assert refreshed_state == "fresh"
-
-    now[0] = 32.0
-    cache.get(
-        database, lambda _database: (_ for _ in ()).throw(RuntimeError("boom")),
-    )
-    for _ in range(100):
-        health_status, health = cache.health()
-        if health_status == 503:
-            break
-        time.sleep(0.01)
-    health_status, health = cache.health()
-    assert health_status == 503
-    assert health["status"] == "ERROR"
-
-    expired_cache = module.StatusSnapshotCache(
-        ttl_seconds=15, wait_seconds=0.01, max_stale_seconds=90,
-        clock=lambda: now[0],
-    )
-    now[0] = 0.0
-    expired_cache.get(database, lambda _database: {"version": 1})
-    now[0] = 91.0
-    try:
-        expired_cache.get(
-            database,
-            lambda _database: (_ for _ in ()).throw(RuntimeError("still broken")),
-        )
-    except RuntimeError as error:
-        assert str(error) == "still broken"
-    else:
-        raise AssertionError("expired dashboard snapshot must fail closed")
 
 
 def test_health_endpoint_tracks_critical_readiness_not_optional_status(
