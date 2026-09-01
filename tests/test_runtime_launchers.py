@@ -3093,17 +3093,28 @@ def test_observation_rollback_preserves_independent_control_bundle(
         "function Restart-CodeReloadableServices {}; "
         "function Write-RuntimeCodeState {}; function Write-RuntimeUpdateFailure {}; "
         "function Write-WatchdogEvent {}; "
+        f"$target=[pscustomobject]@{{validation_key='run:{candidate}';"
+        "worker_version_id='22222222-2222-4222-8222-222222222222';"
+        f"windows_revision='{candidate}'}};"
+        f"$obligation=[pscustomobject]@{{route='/api/audit-stories';validation_key='run:{candidate}';"
+        f"required_producer_revision='{candidate}'}};"
+        "$projectionTransaction=[pscustomobject]@{id='11111111-1111-4111-8111-111111111111';"
+        "target=$target;deferred_projection_obligations=@($obligation)};"
+        "$null=Write-DeferredProjectionSyncRequest -Transaction $projectionTransaction "
+        "-RequiredAfter ([DateTimeOffset]::UtcNow);"
         f"$restored = Invoke-RuntimeRollback -FailedRevision '{candidate}' "
         f"-PreviousRevision '{previous}' -Reason 'contract test'; "
         + _bundle_result_expression(
             "(Join-Path $repositoryRoot '.local\\runtime-control')"
         )
-        + "; Write-Output $restored",
+        + "; Write-Output \"$restored|$((Test-Path -LiteralPath "
+        "$deferredProjectionSyncCancelledPath))|$((Test-Path -LiteralPath "
+        "$deferredProjectionSyncRequestPath))\"",
     ).splitlines()
 
     assert result == [
         ",".join(f"{candidate}|{name}" for name in RUNTIME_CONTROL_FILES),
-        "True",
+        "True|True|False",
     ]
 
 
@@ -4784,6 +4795,9 @@ def test_passed_candidate_promotes_only_after_observation_commit(
         "$script:cutover=@(); "
         f"$script:reloadBoundary=[DateTimeOffset]::Parse('{reload_boundary}'); "
         "function Restart-CodeReloadableServices { $script:cutover += 'windows-with-sync-paused'; return $script:reloadBoundary }; "
+        "function Write-DeferredProjectionSyncRequest { param($Transaction,$RequiredAfter);"
+        "$script:cutover += 'projection-request';"
+        "$script:requestBoundary=$RequiredAfter;return [pscustomobject]@{state='PERSISTED'} }; "
         "function Complete-DeferredServiceReload { $script:cutover += 'sync-resumed' }; "
         "function Start-RuntimeObservation { param($Revision,$PreviousRevision,$HealthBoundary,"
         "$DeferredProjectionObligations,$ValidationKey,$ProjectionBoundary);"
@@ -4797,13 +4811,15 @@ def test_passed_candidate_promotes_only_after_observation_commit(
         "$started=Start-ReleasePromotion; $during=Get-ReleaseControlState; "
         "Complete-ReleasePromotion; $after=Get-ReleaseControlState; "
         'Write-Output "$started,$($during.stable.git_sha),$($during.transaction.phase),$($after.stable.git_sha),'
-        '$($script:cutover -join \';\'),$($script:projectionBoundary.ToUniversalTime().ToString(\'o\'))"',
+        '$($script:cutover -join \';\'),$($script:projectionBoundary.ToUniversalTime().ToString(\'o\')),'
+        '$($script:requestBoundary.ToUniversalTime().ToString(\'o\'))"',
         powershell=powershell,
     )
 
     assert result == (
         f"True,{previous},OBSERVING,{candidate},"
-        f"windows-with-sync-paused;worker;sync-resumed,{reload_boundary}"
+        f"windows-with-sync-paused;worker;projection-request;sync-resumed,"
+        f"{reload_boundary},{reload_boundary}"
     )
 
 
@@ -4951,6 +4967,47 @@ def test_deferred_projection_probe_uses_installed_control_bundle_and_runtime_aut
         'Write-Output "$($answer.state),$($second.state),$declared,$bundled,$runtimeBound,$attemptsValid,$attemptsDistinct"',
     )
     assert result == "PASSED,PASSED,True,True,True,True,True"
+
+
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_deferred_projection_request_binds_cutover_and_rollback_cancels_it(
+    tmp_path, powershell: str,
+) -> None:
+    revision = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$target=[pscustomobject]@{{validation_key='run:{revision}';"
+        "worker_version_id='22222222-2222-4222-8222-222222222222';"
+        f"windows_revision='{revision}'}};"
+        "$obligation=[pscustomobject]@{route='/api/audit-stories';"
+        f"validation_key='run:{revision}';required_producer_revision='{revision}'}};"
+        "$transaction=[pscustomobject]@{id='11111111-1111-4111-8111-111111111111';"
+        "target=$target;deferred_projection_obligations=@($obligation)};"
+        "$boundary=[DateTimeOffset]'2026-09-01T01:02:03+00:00';"
+        "$request=Write-DeferredProjectionSyncRequest -Transaction $transaction "
+        "-RequiredAfter $boundary;"
+        "$persisted=Get-Content -LiteralPath $deferredProjectionSyncRequestPath "
+        "-Raw -Encoding UTF8|ConvertFrom-Json;"
+        f"Cancel-DeferredProjectionSyncRequest -FailedRevision '{revision}';"
+        "$cancelled=Get-Content -LiteralPath $deferredProjectionSyncCancelledPath "
+        "-Raw -Encoding UTF8|ConvertFrom-Json;"
+        "$observedBoundary=ConvertTo-ReleaseTimestampUtc -Value $persisted.required_after;"
+        'Write-Output "$($persisted.schema_version),$($persisted.target),'
+        '$($observedBoundary.ToString(\'o\')),$($persisted.routes.Count),'
+        '$($cancelled.state),$((Test-Path -LiteralPath '
+        '$deferredProjectionSyncRequestPath))"', powershell=powershell,
+    )
+    assert result == (
+        "deferred-projection-sync-v1,cloudflare,"
+        "2026-09-01T01:02:03.0000000+00:00,1,CANCELLED_BY_ROLLBACK,False"
+    )
+    cancelled_path = (
+        tmp_path / "runtime" / ".local" / "forward"
+        / "deferred-projection-sync-cancelled.json"
+    )
+    raw = cancelled_path.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    assert json.loads(raw)["request"]["producer_revision"] == revision
 
 
 def test_crashed_cutover_is_reconciled_to_recovery_required(tmp_path) -> None:

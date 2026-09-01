@@ -42,6 +42,10 @@ $watchdogLog = Join-Path $logRoot "control-watchdog.jsonl"
 $watchdogHeartbeatPath = Join-Path $runtimeForwardRoot "control-watchdog-heartbeat.json"
 $runtimeCodeStatePath = Join-Path $runtimeForwardRoot "runtime-code-state.json"
 $runtimeUpdateStatePath = Join-Path $runtimeForwardRoot "runtime-update-state.json"
+$deferredProjectionSyncRequestPath = Join-Path $runtimeForwardRoot `
+    "deferred-projection-sync-request.json"
+$deferredProjectionSyncCancelledPath = Join-Path $runtimeForwardRoot `
+    "deferred-projection-sync-cancelled.json"
 $releaseControlStatePath = Join-Path $runtimeForwardRoot "release-control-state.json"
 $releaseHistoryPath = Join-Path $runtimeForwardRoot "release-control-history.jsonl"
 $releaseEvidenceRoot = Join-Path $runtimeForwardRoot "release-evidence"
@@ -9988,6 +9992,14 @@ function Invoke-RuntimeRollback {
             [string]$recoveryPlan.body.stable_revision -ne $PreviousRevision) {
             throw "RUNTIME_ROLLBACK_CAPTURED_AUTHORITY_REQUIRED"
         }
+        try {
+            Cancel-DeferredProjectionSyncRequest -FailedRevision $FailedRevision
+        } catch {
+            Write-WatchdogEvent -Event "DEFERRED_PROJECTION_SYNC_CANCEL_DEGRADED" `
+                -Service "sync" -State (
+                    Protect-PreflightDiagnosticText $_.Exception.Message
+                )
+        }
         $recoveryStarted = [DateTimeOffset]::UtcNow
         $null = Restore-RuntimeRecoveryPlan -Plan $recoveryPlan
         try {
@@ -10096,6 +10108,88 @@ function Test-CloudflareRollbackTarget {
         [string]$_.version_id -ceq $targetVersionId -and
         [double]$_.percentage -in @(0, 100)
     }).Count -eq 1
+}
+
+function Write-DeferredProjectionSyncRequest {
+    param(
+        [Parameter(Mandatory = $true)][object]$Transaction,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$RequiredAfter
+    )
+    $obligations = @($Transaction.deferred_projection_obligations |
+        Where-Object { $null -ne $_ })
+    if ($obligations.Count -eq 0) { return $null }
+    $routes = @($obligations | ForEach-Object { [string]$_.route })
+    if (@($routes | Select-Object -Unique).Count -ne $routes.Count -or
+        @($routes | Where-Object { $_ -notin $candidateOnlyProjectionRoutes }).Count) {
+        throw "DEFERRED_PROJECTION_SYNC_REQUEST_INVALID"
+    }
+    $target = $Transaction.target
+    try {
+        $transactionId = ([guid]::Parse([string]$Transaction.id)).ToString()
+        $workerVersionId = ([guid]::Parse(
+            [string]$target.worker_version_id
+        )).ToString()
+    } catch {
+        throw "DEFERRED_PROJECTION_SYNC_IDENTITY_INVALID"
+    }
+    if (-not $target -or
+        [string]$target.windows_revision -notmatch '^[0-9a-f]{40}$' -or
+        [string]::IsNullOrWhiteSpace([string]$target.validation_key) -or
+        @($obligations | Where-Object {
+            [string]$_.validation_key -ne [string]$target.validation_key -or
+            [string]$_.required_producer_revision -ne
+                [string]$target.windows_revision
+        }).Count -gt 0) {
+        throw "DEFERRED_PROJECTION_SYNC_IDENTITY_INVALID"
+    }
+    $request = [ordered]@{
+        schema_version = "deferred-projection-sync-v1"
+        request_id = [guid]::NewGuid().ToString()
+        transaction_id = $transactionId
+        validation_key = [string]$target.validation_key
+        worker_version_id = $workerVersionId
+        producer_revision = [string]$target.windows_revision
+        target = "cloudflare"
+        required_after = $RequiredAfter.ToUniversalTime().ToString("o")
+        routes = @($routes)
+        created_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+    New-Item -ItemType Directory -Path $runtimeForwardRoot -Force | Out-Null
+    $temporary = "$deferredProjectionSyncRequestPath.tmp"
+    [System.IO.File]::WriteAllText(
+        $temporary,
+        ($request | ConvertTo-Json -Depth 6 -Compress),
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    Move-Item -LiteralPath $temporary `
+        -Destination $deferredProjectionSyncRequestPath -Force
+    return [pscustomobject]$request
+}
+
+function Cancel-DeferredProjectionSyncRequest {
+    param([string]$FailedRevision)
+    if (-not (Test-Path -LiteralPath $deferredProjectionSyncRequestPath)) { return }
+    try {
+        $request = Get-Content -LiteralPath $deferredProjectionSyncRequestPath `
+            -Raw -Encoding UTF8 | ConvertFrom-ReleaseControlJson
+        if ([string]$request.producer_revision -ne $FailedRevision) { return }
+        $cancelled = [ordered]@{
+            request = $request
+            state = "CANCELLED_BY_ROLLBACK"
+            cancelled_at = [DateTimeOffset]::UtcNow.ToString("o")
+        }
+        $temporary = "$deferredProjectionSyncCancelledPath.tmp"
+        [System.IO.File]::WriteAllText(
+            $temporary,
+            ($cancelled | ConvertTo-Json -Depth 8 -Compress),
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        Move-Item -LiteralPath $temporary `
+            -Destination $deferredProjectionSyncCancelledPath -Force
+        Remove-Item -LiteralPath $deferredProjectionSyncRequestPath -Force
+    } catch {
+        throw "DEFERRED_PROJECTION_SYNC_CANCEL_FAILED:$($_.Exception.Message)"
+    }
 }
 
 function New-PromotionFreshnessStep {
@@ -10386,6 +10480,10 @@ function Start-ReleasePromotion {
         # revision is active. Sync remains deferred until after Worker cutover, so
         # publication ordering is enforced independently from content freshness.
         $projectionBoundary = $reloadStarted
+        if ($deferredObligations.Count -gt 0) {
+            $null = Write-DeferredProjectionSyncRequest `
+                -Transaction $state.transaction -RequiredAfter $projectionBoundary
+        }
         Complete-DeferredServiceReload -ReloadStarted $reloadStarted `
             -DeferredServiceKeys @("sync")
         if ($deferredObligations.Count -gt 0) {

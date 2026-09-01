@@ -22,6 +22,15 @@ from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 RUNTIME_STATE_ROOT_KEY = "_runtime_state_root"
+DEFERRED_PROJECTION_REQUEST_FILE = "deferred-projection-sync-request.json"
+DEFERRED_PROJECTION_RECEIPT_FILE = "deferred-projection-sync-receipt.json"
+DEFERRED_PROJECTION_CONTRACT = "deferred-projection-sync-v1"
+DEFERRED_PROJECTION_ROUTES = frozenset({
+    "/api/audit-briefs", "/api/audit-stories", "/api/audit-decisions",
+})
+UUID_PATTERN = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+)
 REMOTE_PAYLOAD_LIMIT_BYTES = 750_000
 LOCAL_STATUS_TIMEOUT_SECONDS = 20
 REMOTE_POST_TIMEOUT_SECONDS = 30
@@ -1190,6 +1199,8 @@ def configure_runtime_state(config: dict, state_root: Path) -> dict:
         "news_evidence_state_file": "dashboard-news-evidence-sync-state.json",
         "resource_schedule_state_file": "dashboard-resource-schedule-state.json",
         "runtime_signal_file": "remote-main-signal.json",
+        "deferred_projection_request_file": DEFERRED_PROJECTION_REQUEST_FILE,
+        "deferred_projection_receipt_file": DEFERRED_PROJECTION_RECEIPT_FILE,
     }
     for key, filename in defaults.items():
         configured[key] = str(_validated_sync_state_path(
@@ -1817,6 +1828,180 @@ def _sync_audit(local_payload: dict, config: dict) -> None:
         _post_json(f"{root}/{resource}", snapshot, config)
 
 
+def _deferred_projection_request_digest(request: dict) -> str:
+    encoded = json.dumps(
+        request, ensure_ascii=False, allow_nan=False, sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _deferred_projection_paths(config: dict) -> tuple[Path, Path]:
+    return (
+        Path(config["deferred_projection_request_file"]),
+        Path(config["deferred_projection_receipt_file"]),
+    )
+
+
+def _read_deferred_projection_request(config: dict) -> dict | None:
+    request_path, _receipt_path = _deferred_projection_paths(config)
+    if not request_path.exists():
+        return None
+    try:
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise PayloadContractError(
+            "deferred projection request is unreadable"
+        ) from error
+    if not isinstance(request, dict):
+        raise PayloadContractError("deferred projection request must be an object")
+    routes = request.get("routes")
+    if (
+        request.get("schema_version") != DEFERRED_PROJECTION_CONTRACT
+        or not re.fullmatch(
+            r"[0-9a-f]{40}", str(request.get("producer_revision") or "")
+        )
+        or not UUID_PATTERN.fullmatch(str(request.get("worker_version_id") or ""))
+        or not UUID_PATTERN.fullmatch(str(request.get("request_id") or ""))
+        or not UUID_PATTERN.fullmatch(str(request.get("transaction_id") or ""))
+        or not str(request.get("validation_key") or "")
+        or request.get("target") != "cloudflare"
+        or not isinstance(routes, list)
+        or not routes
+        or len(routes) != len(set(routes))
+        or any(route not in DEFERRED_PROJECTION_ROUTES for route in routes)
+    ):
+        raise PayloadContractError("deferred projection request contract mismatch")
+    try:
+        timestamps = [
+            datetime.fromisoformat(str(request[field]).replace("Z", "+00:00"))
+            for field in ("required_after", "created_at")
+        ]
+    except (KeyError, ValueError) as error:
+        raise PayloadContractError(
+            "deferred projection request freshness boundary is invalid"
+        ) from error
+    if any(value.tzinfo is None for value in timestamps):
+        raise PayloadContractError(
+            "deferred projection request freshness boundary must be timezone-aware"
+        )
+    return request
+
+
+def _deferred_projection_pending(config: dict) -> bool:
+    if (
+        "deferred_projection_request_file" not in config
+        or "deferred_projection_receipt_file" not in config
+    ):
+        return False
+    request = _read_deferred_projection_request(config)
+    if request is None:
+        return False
+    _request_path, receipt_path = _deferred_projection_paths(config)
+    receipt = _read_news_sync_state(receipt_path)
+    return not (
+        receipt.get("schema_version") == DEFERRED_PROJECTION_CONTRACT
+        and receipt.get("request_id") == request["request_id"]
+        and receipt.get("request_digest")
+        == _deferred_projection_request_digest(request)
+        and receipt.get("state") == "COMPLETED"
+    )
+
+
+def sync_deferred_projection_once(
+    targets: list[dict], config: dict,
+) -> SyncResourceResults:
+    """Advance one exact post-cutover projection through the existing owner."""
+    started = time.perf_counter()
+    try:
+        request = _read_deferred_projection_request(config)
+        if request is None or not _deferred_projection_pending(config):
+            return SyncResourceResults([], [])
+        producer_revision = _projection_producer_revision()
+        if producer_revision != request["producer_revision"]:
+            raise PayloadContractError(
+                "deferred projection producer revision mismatch"
+            )
+        matching_targets = [
+            target for target in targets if target.get("name") == request["target"]
+        ]
+        if len(matching_targets) != 1:
+            raise RuntimeError("deferred projection target is not healthy and unique")
+        target = matching_targets[0]
+        local_payload = _read_local_resource(target, "/api/audit")
+        generated_at = datetime.fromisoformat(
+            str(local_payload.get("generated_at") or "").replace("Z", "+00:00")
+        )
+        required_after = datetime.fromisoformat(
+            str(request["required_after"]).replace("Z", "+00:00")
+        )
+        if generated_at.tzinfo is None:
+            raise PayloadContractError(
+                "deferred projection source timestamp must be timezone-aware"
+            )
+        if generated_at.astimezone(UTC) < required_after.astimezone(UTC):
+            return SyncResourceResults([], [])
+
+        projection_bytes = {
+            "/api/audit-briefs": audit_briefs_snapshot(
+                local_payload, producer_revision,
+            ),
+            "/api/audit-stories": audit_stories_snapshot(
+                local_payload, producer_revision,
+            ),
+            "/api/audit-decisions": audit_decisions_snapshot(
+                local_payload, producer_revision,
+            ),
+        }
+        _sync_audit(local_payload, target)
+        completed_at = datetime.now(UTC)
+        _persist_resource_schedule_result(
+            _resource_schedule_path(target), "audit", 300,
+            now=completed_at, success=True,
+        )
+        _request_path, receipt_path = _deferred_projection_paths(config)
+        _write_news_sync_state(receipt_path, {
+            "schema_version": DEFERRED_PROJECTION_CONTRACT,
+            "state": "COMPLETED",
+            "request_id": request["request_id"],
+            "transaction_id": request["transaction_id"],
+            "request_digest": _deferred_projection_request_digest(request),
+            "validation_key": request["validation_key"],
+            "worker_version_id": request["worker_version_id"],
+            "producer_revision": producer_revision,
+            "required_after": required_after.astimezone(UTC).isoformat(),
+            "generated_at": generated_at.astimezone(UTC).isoformat(),
+            "routes": list(request["routes"]),
+            "projection_hashes": {
+                route: hashlib.sha256(projection_bytes[route]).hexdigest()
+                for route in request["routes"]
+            },
+            "completed_at": completed_at.isoformat(),
+        })
+        return SyncResourceResults([], [{
+            "target": request["target"],
+            "resource": "deferred_projection",
+            "status": "OK",
+            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            "completed_at": completed_at.isoformat(),
+        }])
+    except Exception as error:
+        completed_at = datetime.now(UTC).isoformat()
+        failure = {
+            "target": "cloudflare",
+            "resource": "deferred_projection",
+            "error_type": type(error).__name__,
+            "error_code": sync_error_code(error),
+            "error": str(error)[:500],
+            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
+        return SyncResourceResults([failure], [{
+            "target": "cloudflare", "resource": "deferred_projection",
+            "status": "ERROR", "duration_ms": failure["duration_ms"],
+            "completed_at": completed_at,
+        }])
+
+
 def _local_news_evidence_url(
     config: dict, cursor: str | None, *, activated_snapshot_id: str | None = None,
 ) -> str:
@@ -2317,6 +2502,22 @@ def _merge_lane_results(
     return SyncResourceResults(list(failures.values()), list(observations.values()))
 
 
+def _submit_resource_lane(
+    executor: ThreadPoolExecutor,
+    lane: str,
+    healthy: list[dict],
+    config: dict,
+) -> Future:
+    if lane == "heavy":
+        try:
+            deferred_pending = _deferred_projection_pending(config)
+        except Exception:
+            deferred_pending = True
+        if deferred_pending:
+            return executor.submit(sync_deferred_projection_once, healthy, config)
+    return executor.submit(sync_resource_lane, healthy, lane=lane)
+
+
 def run_continuous_sync(
     config: dict,
     *,
@@ -2375,8 +2576,8 @@ def run_continuous_sync(
                 )
                 for lane in futures:
                     if futures[lane] is None:
-                        futures[lane] = executors[lane].submit(
-                            sync_resource_lane, healthy, lane=lane,
+                        futures[lane] = _submit_resource_lane(
+                            executors[lane], lane, healthy, config,
                         )
                 print(json.dumps({
                     "event": "DASHBOARD_HEARTBEAT_OK",
@@ -2415,8 +2616,8 @@ def run_continuous_sync(
                         and not stop.is_set()
                         and time.monotonic() < deadline
                     ):
-                        futures[lane] = executors[lane].submit(
-                            sync_resource_lane, healthy, lane=lane,
+                        futures[lane] = _submit_resource_lane(
+                            executors[lane], lane, healthy, config,
                         )
     finally:
         for executor in executors.values():
