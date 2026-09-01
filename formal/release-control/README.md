@@ -43,7 +43,7 @@ The interface contract and the complete old-to-new property mapping are in
 
 Java 11 or newer is required. The runner downloads TLA+ tools `v1.8.0` into the
 ignored `.local/tools` directory and verifies SHA-256
-`eabd140a70f49eb9305a3bd3f3df944eddf87e5a90d329789085f8953a80533a`.
+`dbcc75552f21978a4846688b8e23be1a6b6c0b3fcee35d78fec2df167958ec94`.
 
 Run one authoritative shard:
 
