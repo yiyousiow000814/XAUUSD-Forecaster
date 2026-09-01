@@ -16,7 +16,11 @@ sys.path.insert(0, str(MODULE_ROOT))
 
 from xauusd_forecaster.forward_engine import ForwardEngine, floor_five_minutes  # noqa: E402
 from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
-from xauusd_forecaster.market import JsonlMarketProvider, NullMarketProvider  # noqa: E402
+from xauusd_forecaster.market import (  # noqa: E402
+    LIVE_QUOTE_OBSERVATION_LOOKBACK,
+    JsonlMarketProvider,
+    NullMarketProvider,
+)
 from xauusd_forecaster.market_session import skipped_grid_reason  # noqa: E402
 from xauusd_forecaster.u5_state import U5State  # noqa: E402
 from xauusd_forecaster.maintenance import (  # noqa: E402
@@ -55,6 +59,27 @@ from xauusd_forecaster.training_owner import (  # noqa: E402
 
 UTC = timezone.utc
 NEWS_CONTRACT_RECONCILE_SECONDS = 300
+GRID_INTERVAL = timedelta(minutes=5)
+
+
+def _first_grid_at_or_after(start: datetime, threshold: datetime) -> datetime:
+    """Return the first grid in ``start + n * GRID_INTERVAL`` at a threshold."""
+    if start >= threshold:
+        return start
+    steps = (threshold - start + GRID_INTERVAL - timedelta.resolution) // GRID_INTERVAL
+    return start + steps * GRID_INTERVAL
+
+
+def _grid_count_before(start: datetime, stop: datetime) -> int:
+    """Count grids in ``start + n * GRID_INTERVAL`` strictly before ``stop``."""
+    if start >= stop:
+        return 0
+    return int((stop - start + GRID_INTERVAL - timedelta.resolution) // GRID_INTERVAL)
+
+
+def _record_skipped(skipped: dict[str, int], reason: str, count: int) -> None:
+    if count:
+        skipped[reason] = skipped.get(reason, 0) + count
 
 
 def reconcile_news_contract(ledger, cutoff: datetime, artifact_root: Path) -> dict:
@@ -98,23 +123,62 @@ def append_due_grid_events(
         broker_session = None
     appended: list[tuple[datetime, str, str]] = []
     skipped_grids: dict[str, int] = {}
-    candidate = last_decision + timedelta(minutes=5)
+    candidate = last_decision + GRID_INTERVAL
+    if candidate > boundary:
+        return last_decision, appended, skipped_grids
+
+    first_eligible = _first_grid_at_or_after(candidate, ledger.forward_epoch)
+    if first_eligible > boundary:
+        return boundary, appended, skipped_grids
+
+    eligible_count = _grid_count_before(first_eligible, boundary + GRID_INTERVAL)
+    if broker_session is None or not broker_session.is_fresh(collected_at):
+        _record_skipped(
+            skipped_grids, "BROKER_MARKET_STATUS_UNAVAILABLE", eligible_count,
+        )
+        return boundary, appended, skipped_grids
+    if not broker_session.is_open:
+        _record_skipped(skipped_grids, "BROKER_MARKET_CLOSED", eligible_count)
+        return boundary, appended, skipped_grids
+
+    # JsonlMarketProvider cannot return a causally visible quote older than this
+    # boundary. Settle that provably non-actionable prefix arithmetically so a
+    # long service outage cannot turn startup into an unbounded five-minute loop.
+    detailed_start = _first_grid_at_or_after(
+        first_eligible, boundary - LIVE_QUOTE_OBSERVATION_LOOKBACK,
+    )
+    prefix_count = _grid_count_before(first_eligible, detailed_start)
+    if prefix_count:
+        estimated_close = broker_session.observed_at + broker_session.time_till_close
+        close_block_at = estimated_close - timedelta(minutes=30)
+        missed_count = _grid_count_before(
+            first_eligible, min(detailed_start, close_block_at),
+        )
+        _record_skipped(
+            skipped_grids, "MISSED_GRID_WITHOUT_POINT_IN_TIME_QUOTE", missed_count,
+        )
+        _record_skipped(
+            skipped_grids,
+            "FIXED_HORIZON_CROSSES_BROKER_CLOSE",
+            prefix_count - missed_count,
+        )
+
+    candidate = detailed_start
     while candidate <= boundary:
-        if candidate >= ledger.forward_epoch:
-            skip_reason = skipped_grid_reason(
-                candidate, boundary, visible_observations,
-                broker_session, collected_at,
+        skip_reason = skipped_grid_reason(
+            candidate, boundary, visible_observations,
+            broker_session, collected_at,
+        )
+        if skip_reason:
+            _record_skipped(skipped_grids, skip_reason, 1)
+        else:
+            snapshot_id, decision_id = engine.append_clock_event(
+                candidate, collected_at, news_status
             )
-            if skip_reason:
-                skipped_grids[skip_reason] = skipped_grids.get(skip_reason, 0) + 1
-            else:
-                snapshot_id, decision_id = engine.append_clock_event(
-                    candidate, collected_at, news_status
-                )
-                appended.append((candidate, snapshot_id, decision_id))
+            appended.append((candidate, snapshot_id, decision_id))
         last_decision = candidate
-        candidate += timedelta(minutes=5)
-    return last_decision, appended, skipped_grids
+        candidate += GRID_INTERVAL
+    return boundary, appended, skipped_grids
 
 
 def append_current_grid_events(

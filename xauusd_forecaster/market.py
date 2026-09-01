@@ -18,6 +18,7 @@ from .forward_ledger import canonical_hash
 
 UTC = timezone.utc
 FEATURE_VERSION = "forward-market-v1"
+LIVE_QUOTE_OBSERVATION_LOOKBACK = timedelta(minutes=61)
 
 
 @dataclass(frozen=True)
@@ -108,7 +109,7 @@ class JsonlMarketProvider:
     def observations(self, decision_time: datetime) -> list[MarketObservation]:
         if not self.path.exists():
             return []
-        cutoff = decision_time - timedelta(minutes=61)
+        cutoff = decision_time - LIVE_QUOTE_OBSERVATION_LOOKBACK
         files = self._source_files()
         for source in files:
             if source.suffix == ".gz":
