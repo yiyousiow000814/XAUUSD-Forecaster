@@ -44,6 +44,7 @@ $runtimeCodeStatePath = Join-Path $runtimeForwardRoot "runtime-code-state.json"
 $runtimeUpdateStatePath = Join-Path $runtimeForwardRoot "runtime-update-state.json"
 $releaseControlStatePath = Join-Path $runtimeForwardRoot "release-control-state.json"
 $releaseHistoryPath = Join-Path $runtimeForwardRoot "release-control-history.jsonl"
+$releaseEvidenceRoot = Join-Path $runtimeForwardRoot "release-evidence"
 $coordinatedMigrationReceiptPath = Join-Path $runtimeForwardRoot "coordinated-migration-receipt.json"
 $coordinatedMigrationRootReceiptRoot = Join-Path $runtimeForwardRoot `
     "coordinated-migration-root-receipts"
@@ -138,6 +139,39 @@ $convertFromJsonSupportsDateKind =
     (Get-Command ConvertFrom-Json).Parameters.ContainsKey("DateKind")
 
 . (Join-Path $PSScriptRoot "worker_cpu_evidence.ps1")
+. (Join-Path $PSScriptRoot "release_evidence_nodes.ps1")
+$releaseEvidenceContractPath = Join-Path $PSScriptRoot "release-evidence-contract.json"
+
+function Write-CandidateArtifactEvidence {
+    param([Parameter(Mandatory = $true)][object]$Candidate)
+    $completedAt = [DateTimeOffset]::Parse(
+        [string]$Candidate.discovered_at).ToUniversalTime()
+    $startedAt = $completedAt
+    if (-not [string]::IsNullOrWhiteSpace([string]$Candidate.version_created_at)) {
+        $created = [DateTimeOffset]::MinValue
+        if ([DateTimeOffset]::TryParse(
+            [string]$Candidate.version_created_at,
+            [ref]$created) -and $created -le $completedAt) {
+            $startedAt = $created.ToUniversalTime()
+        }
+    }
+    $sourceIdentity = [ordered]@{
+        validation_key = [string]$Candidate.validation_key
+        worker_version_id = [string]$Candidate.worker_version_id
+        git_sha = [string]$Candidate.git_sha
+        windows_revision = [string]$Candidate.windows_revision
+        artifact_kind = [string]$Candidate.artifact_kind
+    }
+    $behaviorKey = Get-ReleaseEvidenceSha256 -Value (
+        ConvertTo-ReleaseEvidenceJson $sourceIdentity)
+    return Write-ReleaseEvidenceNodeReceipt -Root $releaseEvidenceRoot `
+        -ContractPath $releaseEvidenceContractPath `
+        -ValidationKey ([string]$Candidate.validation_key) `
+        -Node "artifact_provenance" -BehaviorKey $behaviorKey -State "PASSED" `
+        -SourceIdentity $sourceIdentity -StartedAt $startedAt.ToString("o") `
+        -CompletedAt $completedAt.ToString("o") -ExecutionMode "FRESH" `
+        -WhyRan "IMMUTABLE_PRODUCTION_CANDIDATE_DISCOVERED"
+}
 
 function ConvertFrom-ReleaseControlJson {
     param(
@@ -564,6 +598,29 @@ function Get-ReleaseControlState {
         Set-ReleaseLifecycleProjection -ReleaseState $state
         return $state
     } catch { $null }
+}
+
+function Get-ReleaseControlStatusSnapshot {
+    $state = Get-ReleaseControlState
+    if (-not $state) { return $null }
+    $waterfall = if ($state.candidate -and
+        -not [string]::IsNullOrWhiteSpace([string]$state.candidate.validation_key)) {
+        Get-ReleaseEvidenceWaterfall -Root $releaseEvidenceRoot `
+            -ValidationKey ([string]$state.candidate.validation_key)
+    } else {
+        [pscustomobject]@{
+            schema_version = "release-evidence-waterfall-v1"
+            validation_key_digest = $null
+            node_count = 0
+            started_at = $null
+            completed_at = $null
+            elapsed_ms = 0
+            nodes = @()
+        }
+    }
+    $state | Add-Member -NotePropertyName evidence_waterfall `
+        -NotePropertyValue $waterfall -Force
+    return $state
 }
 
 function Write-ReleaseControlState {
@@ -8353,6 +8410,7 @@ function Find-NewCandidateRelease {
     Set-CandidateMaterializationState -State $state -Revision $mainRevision `
         -Status "MATERIALIZED" -WorkerVersionId ([string]$discovered.worker_version_id)
     if ($state.transaction) {
+        $null = Write-CandidateArtifactEvidence -Candidate $discovered
         $state.queued_candidate = $discovered
         $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
         Write-ReleaseControlState -State $state
@@ -8367,6 +8425,7 @@ function Find-NewCandidateRelease {
         Write-ReleaseHistory -Event "CANDIDATE_SUPERSEDED" -Release $state.candidate `
             -Detail @{ replacement_key = [string]$discovered.validation_key }
     }
+    $null = Write-CandidateArtifactEvidence -Candidate $discovered
     $state.candidate = $discovered
     $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
     Write-ReleaseControlState -State $state
@@ -16048,12 +16107,12 @@ switch ($Action) {
                 } else { "RELOAD_REQUIRED" }
                 applied_at = if ($runtimeState) { $runtimeState.applied_at } else { $null }
             }
-            release = Get-ReleaseControlState
+            release = Get-ReleaseControlStatusSnapshot
         } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $StatusPath -Encoding UTF8
     }
     "ReleaseStatusJson" {
         if (-not $StatusPath) { throw "StatusPath is required for ReleaseStatusJson." }
-        Get-ReleaseControlState | ConvertTo-Json -Depth 12 |
+        Get-ReleaseControlStatusSnapshot | ConvertTo-Json -Depth 12 |
             Set-Content -LiteralPath $StatusPath -Encoding UTF8
     }
     "CodeRevision" { Write-Output (Get-CodeRevision) }

@@ -7,6 +7,8 @@
   "files": [
     "access-qualification-contract.json",
     "check_deferred_projection_parity.py",
+    "release-evidence-contract.json",
+    "release_evidence_nodes.ps1",
     "runtime-control-files.json",
     "xauusd_control_center.ps1",
     "worker_cpu_evidence.ps1",

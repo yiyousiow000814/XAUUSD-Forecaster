@@ -18,6 +18,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_CONTROL_FILES = (
     "xauusd_control_center.ps1",
+    "release-evidence-contract.json",
+    "release_evidence_nodes.ps1",
     "control_center.xaml",
     "xauusd_control_center_launcher.vbs",
     "xauusd_watchdog_launcher.vbs",

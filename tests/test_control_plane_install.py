@@ -24,6 +24,8 @@ DEAD_INSTALLER_START_TOKEN = "2026-08-26T03:15:00.0000000+00:00"
 CONTROL_FILES = (
     "access-qualification-contract.json",
     "check_deferred_projection_parity.py",
+    "release-evidence-contract.json",
+    "release_evidence_nodes.ps1",
     "runtime-control-files.json",
     "xauusd_control_center.ps1",
     "worker_cpu_evidence.ps1",
