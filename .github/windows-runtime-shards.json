@@ -143,7 +143,28 @@
         {
           "path": "tests/test_runtime_launchers.py",
           "from": "test_candidate_cpu_evidence_separates_exact_ledger_from_monotonic_provider_evidence",
+          "through": "test_wpf_and_winforms_provider_reads_are_background_and_single_flight"
+        },
+        {
+          "path": "tests/test_runtime_launchers.py",
+          "from": "test_all_operator_and_json_consumers_preserve_membership_enum",
           "through": "test_storage_or_resource_failure_cannot_use_compatibility_approval"
+        }
+      ]
+    },
+    {
+      "id": "release-provider-parent",
+      "family": "windows-runtime-release",
+      "paths": [
+        "tests/test_runtime_launchers.py",
+        "scripts/xauusd_control_center.ps1",
+        "scripts/release_runtime_read_model.ps1"
+      ],
+      "tests": [
+        {
+          "path": "tests/test_runtime_launchers.py",
+          "from": "test_native_process_deadline_terminates_hung_child",
+          "through": "test_fresh_action_observation_never_falls_back_to_inflight_gui_cache"
         }
       ]
     },
