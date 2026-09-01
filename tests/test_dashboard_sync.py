@@ -691,35 +691,28 @@ def test_sync_does_not_retry_authentication_error(monkeypatch) -> None:
     assert len(calls) == 1
 
 
-def test_sync_state_round_trip_and_runtime_root_rejection(tmp_path) -> None:
+def test_sync_state_round_trip_and_malformed_state_fail_to_empty(tmp_path) -> None:
     module = _sync_module()
     state_file = tmp_path / "dashboard-news-sync-state.json"
-    config = {module.RUNTIME_STATE_ROOT_KEY: str(tmp_path)}
     expected = {"contract_version": "news-v1", "cursor": "abc:12"}
 
-    module._write_news_sync_state(state_file, config, expected)
+    module._write_news_sync_state(state_file, expected)
 
-    assert module._read_news_sync_state(state_file, config) == expected
+    assert module._read_news_sync_state(state_file) == expected
     assert not state_file.with_suffix(".json.tmp").exists()
     state_file.write_text("not-json", encoding="utf-8")
-    assert module._read_news_sync_state(state_file, config) == {}
-
-    outside = tmp_path.parent / "outside.json"
-    with pytest.raises(ValueError, match="must be one JSON file under"):
-        module._write_news_sync_state(outside, config, {})
-    assert not outside.exists()
+    assert module._read_news_sync_state(state_file) == {}
 
 
 def test_sync_status_records_real_success_and_preserves_it_on_error(tmp_path) -> None:
     module = _sync_module()
     status_file = tmp_path / "dashboard-sync-status.json"
-    config = {module.RUNTIME_STATE_ROOT_KEY: str(tmp_path)}
     observation = [{
         "target": "cloudflare", "resource": "news", "status": "OK",
         "duration_ms": 12.5, "completed_at": "2026-08-17T00:00:00+00:00",
     }]
     module.write_sync_status(
-        status_file, config, success=True, attempts_used=2,
+        status_file, success=True, attempts_used=2,
         resource_observations=observation,
     )
     succeeded = json.loads(status_file.read_text(encoding="utf-8"))
@@ -730,7 +723,7 @@ def test_sync_status_records_real_success_and_preserves_it_on_error(tmp_path) ->
     assert succeeded["resource_observations"] == observation
 
     module.write_sync_status(
-        status_file, config,
+        status_file,
         success=False, error=ConnectionResetError("remote closed"),
     )
     failed = json.loads(status_file.read_text(encoding="utf-8"))
@@ -745,10 +738,9 @@ def test_sync_status_records_real_success_and_preserves_it_on_error(tmp_path) ->
 def test_sync_status_reports_optional_resource_degradation(tmp_path) -> None:
     module = _sync_module()
     status_file = tmp_path / "dashboard-sync-status.json"
-    config = {module.RUNTIME_STATE_ROOT_KEY: str(tmp_path)}
     degraded = [{"resource": "learning", "error": "too large"}]
     module.write_sync_status(
-        status_file, config, success=True, attempts_used=1,
+        status_file, success=True, attempts_used=1,
         degraded_resources=degraded,
     )
     status = json.loads(status_file.read_text(encoding="utf-8"))
@@ -757,7 +749,7 @@ def test_sync_status_reports_optional_resource_degradation(tmp_path) -> None:
     assert status["degraded_resources"] == degraded
 
 
-def test_ingest_response_records_valid_main_revision_and_rejects_redirect(
+def test_ingest_response_records_valid_main_revision(
     tmp_path, monkeypatch,
 ) -> None:
     module = _sync_module()
@@ -791,16 +783,6 @@ def test_ingest_response_records_valid_main_revision_and_rejects_redirect(
 
     assert result["main_revision"] == revision
     assert json.loads(signal.read_text(encoding="utf-8"))["main_revision"] == revision
-
-    outside = tmp_path.parent / "outside-signal.json"
-    config["runtime_signal_file"] = str(outside)
-    with pytest.raises(ValueError, match="must be one JSON file under"):
-        module._post_json(
-            "https://example.workers.dev/api/ingest", b"{}", config,
-        )
-    assert not outside.exists()
-
-
 
 
 

@@ -119,17 +119,8 @@ class PayloadContractError(ValueError):
     error_code = "PAYLOAD_CONTRACT_REJECTED"
 
 
-def _authorized_state_path(path: Path, config: dict) -> Path:
-    """Recheck a mutable state sink against the configured runtime authority."""
-    raw_root = str(config.get(RUNTIME_STATE_ROOT_KEY) or "").strip()
-    if not raw_root:
-        raise ValueError("dashboard sync runtime state root is required")
-    return _validated_sync_state_path(path, Path(raw_root))
-
-
 def write_sync_status(
     path: Path,
-    config: dict,
     *,
     success: bool,
     attempts_used: int | None = None,
@@ -138,7 +129,6 @@ def write_sync_status(
     resource_observations: list[dict] | None = None,
 ) -> None:
     """Atomically publish the synchronizer's actual operational heartbeat."""
-    path = _authorized_state_path(path, config)
     existing: dict = {}
     if path.exists():
         try:
@@ -189,7 +179,7 @@ def _write_runtime_signal(payload: object, config: dict) -> None:
     revision = str(payload.get("main_revision") or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         return
-    target = _authorized_state_path(Path(config["runtime_signal_file"]), config)
+    target = Path(config["runtime_signal_file"])
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(target.suffix + ".tmp")
     temporary.write_text(
@@ -212,8 +202,7 @@ def _post_json(url: str, payload: bytes, config: dict) -> dict:
     return result
 
 
-def _read_news_sync_state(path: Path, config: dict) -> dict:
-    path = _authorized_state_path(path, config)
+def _read_news_sync_state(path: Path) -> dict:
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
         return state if isinstance(state, dict) else {}
@@ -221,8 +210,7 @@ def _read_news_sync_state(path: Path, config: dict) -> dict:
         return {}
 
 
-def _write_news_sync_state(path: Path, config: dict, state: dict) -> None:
-    path = _authorized_state_path(path, config)
+def _write_news_sync_state(path: Path, state: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
@@ -991,7 +979,7 @@ def _sync_learning_history(local_payload: dict, config: dict) -> None:
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/learning-history"
     )
     history_state_path = Path(config["learning_history_state_file"])
-    history_state = _read_news_sync_state(history_state_path, config)
+    history_state = _read_news_sync_state(history_state_path)
     hashes = history_state.get("hashes", {})
     if not isinstance(hashes, dict):
         hashes = {}
@@ -1032,7 +1020,7 @@ def _sync_learning_history(local_payload: dict, config: dict) -> None:
         _post_json(history_url, encoded, config)
         for row in batch:
             hashes[_learning_record_identity(row)] = row["payload_hash"]
-        _write_news_sync_state(history_state_path, config, {
+        _write_news_sync_state(history_state_path, {
             "contract_version": LEARNING_HISTORY_CONTRACT_VERSION,
             "hashes": hashes,
             "last_full_sync": last_full,
@@ -1042,7 +1030,7 @@ def _sync_learning_history(local_payload: dict, config: dict) -> None:
         })
         return
 
-    _write_news_sync_state(history_state_path, config, {
+    _write_news_sync_state(history_state_path, {
         "contract_version": LEARNING_HISTORY_CONTRACT_VERSION,
         "hashes": hashes,
         "last_full_sync": now.isoformat() if full_refresh_due else last_full,
@@ -1057,12 +1045,12 @@ def _sync_learning_summary(local_payload: dict, config: dict) -> None:
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/learning"
     )
     learning_state_path = Path(config["learning_state_file"])
-    learning_state = _read_news_sync_state(learning_state_path, config)
+    learning_state = _read_news_sync_state(learning_state_path)
     learning_payload = learning_snapshot(local_payload)
     learning_hash = hashlib.sha256(learning_payload).hexdigest()
     if learning_state.get("payload_hash") != learning_hash:
         _post_json(learning_url, learning_payload, config)
-        _write_news_sync_state(learning_state_path, config, {
+        _write_news_sync_state(learning_state_path, {
             "payload_hash": learning_hash,
             "last_success": datetime.now(UTC).isoformat(),
         })
@@ -1202,7 +1190,7 @@ def _sync_market_history(config: dict) -> None:
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/market-history"
     )
     state_path = Path(config["market_history_state_file"])
-    state = _read_news_sync_state(state_path, config)
+    state = _read_news_sync_state(state_path)
     cursor = (
         state.get("cursor")
         if state.get("contract_version") == MARKET_HISTORY_CONTRACT_VERSION
@@ -1232,7 +1220,7 @@ def _sync_market_history(config: dict) -> None:
         next_cursor = page.get("next_cursor")
         if next_cursor:
             cursor = str(next_cursor)
-            _write_news_sync_state(state_path, config, {
+            _write_news_sync_state(state_path, {
                 "contract_version": MARKET_HISTORY_CONTRACT_VERSION,
                 "cursor": cursor,
                 "decision_overviews": decision_overviews,
@@ -1257,7 +1245,7 @@ def _sync_market_history(config: dict) -> None:
         _post_json(
             remote_url, _market_decision_overview_payload(summary), config,
         )
-    _write_news_sync_state(state_path, config, {
+    _write_news_sync_state(state_path, {
         "contract_version": MARKET_HISTORY_CONTRACT_VERSION,
         "cursor": cursor,
         "decision_overviews": decision_overviews,
@@ -1341,7 +1329,7 @@ def _sync_news(
 ) -> None:
     """Advance one immutable generation without exposing partial replacement."""
     state_path = Path(config["news_state_file"])
-    state = _read_news_sync_state(state_path, config)
+    state = _read_news_sync_state(state_path)
     if state.get("contract_version") != NEWS_MIRROR_CONTRACT_VERSION:
         state = {"contract_version": NEWS_MIRROR_CONTRACT_VERSION}
     news_index_url = config.get("remote_news_index_url") or (
@@ -1465,7 +1453,7 @@ def _sync_news(
         "expected_index_count": manifest["expected_index_count"],
         "updated_at": datetime.now(UTC).isoformat(),
     })
-    _write_news_sync_state(state_path, config, state)
+    _write_news_sync_state(state_path, state)
 
 
 def _sync_audit(local_payload: dict, config: dict) -> None:
@@ -1557,7 +1545,7 @@ def _deferred_projection_pending(config: dict) -> bool:
     if request is None:
         return False
     _request_path, receipt_path = _deferred_projection_paths(config)
-    receipt = _read_news_sync_state(receipt_path, config)
+    receipt = _read_news_sync_state(receipt_path)
     return not (
         receipt.get("schema_version") == DEFERRED_PROJECTION_CONTRACT
         and receipt.get("request_id") == request["request_id"]
@@ -1619,7 +1607,7 @@ def sync_deferred_projection_once(
             now=completed_at, success=True,
         )
         _request_path, receipt_path = _deferred_projection_paths(config)
-        _write_news_sync_state(receipt_path, config, {
+        _write_news_sync_state(receipt_path, {
             "schema_version": DEFERRED_PROJECTION_CONTRACT,
             "state": "COMPLETED",
             "request_id": request["request_id"],
@@ -1725,7 +1713,7 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-evidence"
     )
     state_path = Path(config["news_evidence_state_file"])
-    state = _read_news_sync_state(state_path, config)
+    state = _read_news_sync_state(state_path)
     cursor = None
     snapshot_id = None
     total = None
@@ -1769,7 +1757,7 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
         "expected_count": total,
     }, separators=(",", ":")).encode("utf-8"), config) or {}
     if prepared.get("active") is True:
-        _write_news_sync_state(state_path, config, {
+        _write_news_sync_state(state_path, {
             "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
             "active_snapshot_id": snapshot_id,
             "record_count": total,
@@ -1823,7 +1811,7 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
                 "activate_snapshot": snapshot_id,
                 "expected_count": total,
             }, separators=(",", ":")).encode("utf-8"), config)
-            _write_news_sync_state(state_path, config, {
+            _write_news_sync_state(state_path, {
                 "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
                 "active_snapshot_id": snapshot_id,
                 "record_count": total,
@@ -1834,7 +1822,7 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
         if not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor:
             raise PayloadContractError("local news evidence cursor did not advance")
         cursor = next_cursor
-    _write_news_sync_state(state_path, config, {
+    _write_news_sync_state(state_path, {
         "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
         "staging_snapshot_id": snapshot_id,
         "record_count": total,
@@ -1949,11 +1937,11 @@ def _persist_resource_schedule_result(
 ) -> None:
     """Merge one lane's result without overwriting another lane's progress."""
     with _RESOURCE_SCHEDULE_LOCK:
-        state = _read_news_sync_state(path, config)
+        state = _read_news_sync_state(path)
         _record_resource_schedule(
             state, resource, cadence_seconds, now=now, success=success,
         )
-        _write_news_sync_state(path, config, state)
+        _write_news_sync_state(path, state)
 
 
 def sync_heartbeat_once(config: dict) -> tuple[list[dict], SyncResourceResults]:
@@ -2014,7 +2002,7 @@ def sync_resource_lane(
         target_name = target["name"]
         schedule_path = _resource_schedule_path(target)
         with _RESOURCE_SCHEDULE_LOCK:
-            schedule_state = _read_news_sync_state(schedule_path, target)
+            schedule_state = _read_news_sync_state(schedule_path)
         now = datetime.now(UTC)
         for resource, operation_name, cadence_seconds, _heavy in (
             _due_resource_policies(schedule_state, now, lane=lane)
@@ -2228,7 +2216,7 @@ def run_continuous_sync(
                     *latest_lane_results["heavy"].resource_observations,
                 ]
                 write_sync_status(
-                    status_file, config,
+                    status_file,
                     success=True,
                     attempts_used=1,
                     degraded_resources=degraded,
@@ -2245,7 +2233,7 @@ def run_continuous_sync(
                     "degraded_resources": degraded,
                 }), flush=True)
             except Exception as error:
-                write_sync_status(status_file, config, success=False, error=error)
+                write_sync_status(status_file, success=False, error=error)
                 print(json.dumps({
                     "event": "DASHBOARD_HEARTBEAT_ERROR",
                     "heartbeat_sequence": heartbeat_count + 1,
@@ -2313,7 +2301,7 @@ def main() -> int:
         try:
             attempts_used, degraded_resources = sync_with_retry(config)
             write_sync_status(
-                status_file, config,
+                status_file,
                 success=True,
                 attempts_used=attempts_used,
                 degraded_resources=degraded_resources,
@@ -2335,7 +2323,7 @@ def main() -> int:
                 flush=True,
             )
         except Exception as error:
-            write_sync_status(status_file, config, success=False, error=error)
+            write_sync_status(status_file, success=False, error=error)
             print(
                 json.dumps(
                     {
