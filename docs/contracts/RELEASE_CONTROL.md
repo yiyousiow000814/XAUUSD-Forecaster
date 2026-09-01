@@ -32,6 +32,26 @@ Candidate may replace the Candidate pointer, but MUST NOT inherit validation
 from another Worker Version ID or Git SHA. FAILED Candidate state never changes
 Stable.
 
+The versioned `release-runtime-read-model-v1` projection is the sole read-only
+owner for operator and JSON runtime semantics. It keeps Active Worker, Active
+Windows, Active health, Committed Stable, Previous Committed, Target, and Last
+Known Good distinct. Live observation never rewrites a committed pointer, and a
+Candidate phase never substitutes for Active or Committed health. Missing live
+facts are `UNKNOWN` and fail closed; they are not inferred from persisted
+placement or lifecycle labels.
+
+Previous recovery has three independent layers. An exact immutable Worker
+Version and revision-owned Windows launch contract establish artifact
+availability. Current deployment membership records only placement and traffic
+percentage. Reverse eligibility additionally requires current Control bundle,
+ownership, health, lock, transaction, and recovery-authority facts. Exact
+artifact availability does not claim that recovery was rehearsed or observed.
+The legacy persisted `previous_stable_rollback_eligible` and
+`previous_stable_rollback_reason` fields remain a v3 compatibility snapshot;
+new presentation, JSON, and action authority derive from the live read model.
+They may be removed only after every installed pre-read-model controller is no
+longer a supported rollback target.
+
 Candidate discovery owns a durable monotonic `(version created_at, version_id)`
 watermark. Initialization consumes all versions already present without making
 them eligible. Every later version advances the watermark whether it is Preview,
@@ -611,6 +631,15 @@ traffic and Windows runtime identity with the durable transaction. Unexplained
 mismatch is `DEPLOYMENT_DRIFT` or `RECOVERY_REQUIRED`; it MUST NOT silently
 start another transaction.
 
+WPF, WinForms, `StatusJson`, and `ReleaseStatusJson` consume the same bounded
+`release_runtime` object and presentation projection. Their `can_reverse` value
+is advisory. After the operator acts and the release lock is acquired, Reverse
+repeats the same exact Worker, Windows, bundle, owner, health, transaction, and
+lock precheck before creating a transaction. A stale GUI snapshot therefore
+cannot authorize mutation. Current traffic assignment is not an immutable
+Version existence index: an exact Version may be `AVAILABLE` while
+`worker_is_current_traffic_member` is false.
+
 The transaction lock records its process owner. A live owner is never
 preempted. An abandoned lock may be removed only after the recorded process no
 longer exists (or an incomplete owner record has exceeded its grace period);
@@ -628,6 +657,10 @@ The independently installed `.local/runtime-control` bundle owns deployment
 transactions. Business checkout, Promote, Reverse, and automatic observation
 rollback never copy control files. Their preflight verifies the active bundle's
 exact source revision and every recorded SHA-256 hash. The current bundle
+includes `release_runtime_read_model.ps1` as a declared, hashed,
+dependency-closed read-only owner. Dot-sourcing it declares functions only; it
+does not read provider state, write release state, or perform a lifecycle
+action. The bundle
 manifest commits to its schema, exact source revision, exact file count, and
 ordinally ordered normalized relative-path/SHA-256 pairs with one repository-owned
 UTF-8/LF canonical digest. JSON formatting, host locale, PowerShell version,

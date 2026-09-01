@@ -20,6 +20,7 @@ RUNTIME_CONTROL_FILES = (
     "xauusd_control_center.ps1",
     "release-evidence-contract.json",
     "release_evidence_nodes.ps1",
+    "release_runtime_read_model.ps1",
     "control_center.xaml",
     "xauusd_control_center_launcher.vbs",
     "xauusd_watchdog_launcher.vbs",
@@ -4523,7 +4524,13 @@ def test_rollback_target_uses_exact_view_when_recent_list_is_truncated(
             "source": "wrangler",
             "has_preview": True,
         },
-        "annotations": {"workers/triggered_by": "version_upload"},
+        "annotations": {
+            "workers/triggered_by": "version_upload",
+            "workers/message": (
+                f"release:{'a' * 40} branch:main "
+                "artifact_kind:PRODUCTION_CANDIDATE"
+            ),
+        },
         "resources": {
             "script": {"etag": "exact-etag", "handlers": ["fetch"]},
             "bindings": [],
@@ -4546,7 +4553,9 @@ def test_rollback_target_uses_exact_view_when_recent_list_is_truncated(
         f"function Get-CloudflareVersionDetails{{param($VersionId);"
         f"'{version_json}'|ConvertFrom-Json}};"
         f"function Get-CloudflareDeployment{{'{deployment_json}'|ConvertFrom-Json}};"
-        f"$target=[pscustomobject]@{{worker_version_id='{stable}'}};"
+        f"$target=[pscustomobject]@{{worker_version_id='{stable}';git_sha=('a'*40);"
+        "worker_git_sha=('a'*40);windows_revision=('a'*40);"
+        "artifact_kind='PRODUCTION_CANDIDATE'};"
         "$passed=Test-CloudflareRollbackTarget -Target $target;"
         'Write-Output "$passed,$script:listCalled"',
         powershell=powershell,
@@ -4592,13 +4601,16 @@ def test_rollback_target_exact_lookup_failures_are_fail_closed(
     assert result == "False"
 
 
-def test_rollback_target_rejects_deployment_identity_mismatch(tmp_path) -> None:
+def test_rollback_artifact_availability_does_not_require_deployment_membership(tmp_path) -> None:
     stable = "11111111-1111-4111-8111-111111111111"
     candidate = "22222222-2222-4222-8222-222222222222"
     version_json = json.dumps({
         "id": stable,
         "number": 979,
         "metadata": {"source": "wrangler"},
+        "annotations": {"workers/message": (
+            f"release:{'a' * 40} branch:main artifact_kind:PRODUCTION_CANDIDATE"
+        )},
         "resources": {"script": {"handlers": ["fetch"]}},
     })
     deployment_json = json.dumps({
@@ -4609,26 +4621,31 @@ def test_rollback_target_rejects_deployment_identity_mismatch(tmp_path) -> None:
         f"function Get-CloudflareVersionDetails{{param($VersionId);"
         f"'{version_json}'|ConvertFrom-Json}};"
         f"function Get-CloudflareDeployment{{'{deployment_json}'|ConvertFrom-Json}};"
-        f"$target=[pscustomobject]@{{worker_version_id='{stable}'}};"
+        f"$target=[pscustomobject]@{{worker_version_id='{stable}';git_sha=('a'*40);"
+        "worker_git_sha=('a'*40);windows_revision=('a'*40);"
+        "artifact_kind='PRODUCTION_CANDIDATE'};"
         "Write-Output (Test-CloudflareRollbackTarget -Target $target)",
     )
 
-    assert result == "False"
+    assert result == "True"
 
 
-def test_rollback_target_rejects_deployment_transport_failure(tmp_path) -> None:
+def test_rollback_artifact_lookup_does_not_consume_deployment_transport(tmp_path) -> None:
     stable = "11111111-1111-4111-8111-111111111111"
     result = _run_control_center_contract(
         tmp_path,
         f"function Get-CloudflareVersionDetails{{param($VersionId);[pscustomobject]@{{"
         f"id='{stable}';number=979;metadata=[pscustomobject]@{{source='wrangler'}};"
+        "annotations=[pscustomobject]@{'workers/message'=('release:'+('a'*40)+' branch:main artifact_kind:PRODUCTION_CANDIDATE')};"
         "resources=[pscustomobject]@{script=[pscustomobject]@{handlers=@('fetch')}}}};"
         "function Get-CloudflareDeployment{throw 'PROVIDER_TRANSPORT_FAILED'};"
-        f"$target=[pscustomobject]@{{worker_version_id='{stable}'}};"
+        f"$target=[pscustomobject]@{{worker_version_id='{stable}';git_sha=('a'*40);"
+        "worker_git_sha=('a'*40);windows_revision=('a'*40);"
+        "artifact_kind='PRODUCTION_CANDIDATE'};"
         "Write-Output (Test-CloudflareRollbackTarget -Target $target)",
     )
 
-    assert result == "False"
+    assert result == "True"
 
 
 def test_bootstrap_watermark_uses_newest_valid_timestamp_then_version_id(tmp_path) -> None:
@@ -5077,7 +5094,8 @@ def test_reverse_restores_both_identities_without_d1_mutation(tmp_path) -> None:
         "$state.stable=$state.candidate;$state.candidate=$null;Write-ReleaseControlState $state;"
         "function Enter-ReleaseTransactionLock { return $true };function Exit-ReleaseTransactionLock {};"
         "function Assert-ActiveControlBundle { return [pscustomobject]@{exact_revision=$true} };"
-        "function Test-CloudflareRollbackTarget { return $true };"
+        "function Get-CurrentReleaseRuntimeReadModel { return [pscustomobject]@{previous="
+        "[pscustomobject]@{reverse_precheck=[pscustomobject]@{can_reverse=$true;reason='READY'}}} };"
         "function Test-SingleProductionOwner { return $true };"
         f"function New-RuntimeRecoveryPlan {{ return [pscustomobject]@{{body="
         f"[pscustomobject]@{{stable_revision='{current}'}};digest=('0' * 64)}} }};"
@@ -5097,6 +5115,37 @@ def test_reverse_restores_both_identities_without_d1_mutation(tmp_path) -> None:
     assert result == f"True,{current},11111111-1111-4111-8111-111111111111,{previous}"
     assert "D1" not in reverse_body
     assert "database" not in reverse_body.lower()
+
+
+@pytest.mark.parametrize("persisted_eligible", ("$true", "$false"))
+def test_reverse_action_rechecks_live_authority_before_transaction(
+    tmp_path, persisted_eligible: str,
+) -> None:
+    previous = "a" * 40
+    current = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, current)
+        + "$state=Get-ReleaseControlState;$state.previous_stable=$state.stable;"
+        "$state.stable=$state.candidate;$state.candidate=$null;"
+        f"$state.previous_stable_rollback_eligible={persisted_eligible};"
+        "$before=($state|ConvertTo-Json -Depth 12 -Compress);Write-ReleaseControlState $state;"
+        "function Enter-ReleaseTransactionLock{$script:releaseTransactionLockHeld=$true;return $true};"
+        "function Exit-ReleaseTransactionLock{$script:releaseTransactionLockHeld=$false};"
+        "function Assert-ActiveControlBundle{return [pscustomobject]@{exact_revision=$true}};"
+        "function Get-CurrentReleaseRuntimeReadModel{return [pscustomobject]@{previous="
+        "[pscustomobject]@{reverse_precheck=[pscustomobject]@{can_reverse=$false;"
+        "reason='WORKER_VERSION_PROVIDER_UNKNOWN'}}}};"
+        "$reason='';try{$null=Invoke-ReverseStable}catch{$reason=$_.Exception.Message};"
+        "$final=Get-ReleaseControlState;"
+        'Write-Output "$reason,$($null -eq $final.transaction),$($final.deployment_status),'
+        '$($final.previous_stable_rollback_eligible)"',
+    )
+
+    assert result == (
+        "REVERSE_PRECHECK_BLOCKED:WORKER_VERSION_PROVIDER_UNKNOWN,True,READY,"
+        + ("True" if persisted_eligible == "$true" else "False")
+    )
 
 
 def test_release_drift_is_detected_without_changing_stable(tmp_path) -> None:
@@ -8060,6 +8109,11 @@ def test_release_gui_presentation_explains_action_eligibility(tmp_path) -> None:
         "$release.previous_stable=New-ReleaseIdentity -GitSha ('c'*40) "
         "-WorkerVersionId 'previous-worker' -WindowsRevision ('c'*40);"
         "$release.previous_stable_rollback_eligible=$true;"
+        "$release|Add-Member -Force release_runtime ([pscustomobject]@{"
+        "drift_status='MATCHED';active=[pscustomobject]@{health='HEALTHY'};"
+        "previous=[pscustomobject]@{worker_artifact=[pscustomobject]@{status='AVAILABLE'};"
+        "worker_is_current_traffic_member=$false;reverse_precheck=[pscustomobject]@{"
+        "can_reverse=$true;reason='READY'}}});"
         "$passed=Get-ControlCenterReleasePresentation $release;"
         "$release.candidate.artifact_kind='PREVIEW';"
         "$preview=Get-ControlCenterReleasePresentation $release;"

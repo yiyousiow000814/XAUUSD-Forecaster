@@ -107,7 +107,9 @@
       "family": "windows-runtime-release",
       "paths": [
         "tests/test_runtime_launchers.py",
+        "tests/test_release_runtime_read_model.py",
         "scripts/xauusd_control_center.ps1",
+        "scripts/release_runtime_read_model.ps1",
         "scripts/xauusd_control_center_launcher.vbs",
         "scripts/control_center.xaml",
         "scripts/runtime_paths.ps1",
@@ -119,6 +121,7 @@
         "web/worker-validation-manifest.json"
       ],
       "tests": [
+        {"path": "tests/test_release_runtime_read_model.py"},
         {
           "path": "tests/test_runtime_launchers.py",
           "from": "test_control_center_stages_releases_without_main_driven_activation",
@@ -133,6 +136,7 @@
         "tests/test_runtime_launchers.py",
         "scripts/worker_cpu_evidence.ps1",
         "scripts/xauusd_control_center.ps1",
+        "scripts/release_runtime_read_model.ps1",
         "scripts/runtime_paths.ps1"
       ],
       "tests": [

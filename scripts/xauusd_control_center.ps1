@@ -145,6 +145,7 @@ $convertFromJsonSupportsDateKind =
 
 . (Join-Path $PSScriptRoot "worker_cpu_evidence.ps1")
 . (Join-Path $PSScriptRoot "release_evidence_nodes.ps1")
+. (Join-Path $PSScriptRoot "release_runtime_read_model.ps1")
 $releaseEvidenceContractPath = Join-Path $PSScriptRoot "release-evidence-contract.json"
 
 function Write-CandidateArtifactEvidence {
@@ -497,27 +498,7 @@ function Write-RuntimeUpdateState {
 
 function Get-ReleaseLifecyclePhase {
     param([object]$ReleaseState)
-    if (-not $ReleaseState) { return "UNAVAILABLE" }
-    if ($ReleaseState.transaction) {
-        if ([string]$ReleaseState.transaction.phase -in @(
-            "OBSERVING", "REVERSE_OBSERVING"
-        )) { return "OBSERVE" }
-        return "SWITCH"
-    }
-    if ([string]$ReleaseState.deployment_status -in @(
-        "RECOVERY_REQUIRED", "DEPLOYMENT_DRIFT"
-    )) { return "OBSERVE" }
-    if ($ReleaseState.candidate) {
-        $reason = if ($ReleaseState.candidate.validation) {
-            [string]$ReleaseState.candidate.validation.reason
-        } else { "" }
-        if ([string]$ReleaseState.candidate.validation_state -in @("NEW", "STAGING") -or
-            $reason -eq "COORDINATED_STORAGE_MIGRATION_REQUIRED") {
-            return "PREPARE"
-        }
-        return "VERIFY"
-    }
-    return "STABLE"
+    Get-ReleaseRuntimeLifecyclePhase -ReleaseState $ReleaseState
 }
 
 function Set-ReleaseLifecycleProjection {
@@ -608,6 +589,7 @@ function Get-ReleaseControlState {
 function Get-ReleaseControlStatusSnapshot {
     $state = Get-ReleaseControlState
     if (-not $state) { return $null }
+    $runtimeReadModel = Get-CurrentReleaseRuntimeReadModel -PersistedState $state
     $waterfall = if ($state.candidate -and
         -not [string]::IsNullOrWhiteSpace([string]$state.candidate.validation_key)) {
         Get-ReleaseEvidenceWaterfall -Root $releaseEvidenceRoot `
@@ -625,6 +607,8 @@ function Get-ReleaseControlStatusSnapshot {
     }
     $state | Add-Member -NotePropertyName evidence_waterfall `
         -NotePropertyValue $waterfall -Force
+    $state | Add-Member -NotePropertyName release_runtime `
+        -NotePropertyValue $runtimeReadModel -Force
     return $state
 }
 
@@ -10086,28 +10070,192 @@ function Test-CloudflareReleasePlacement {
 
 function Test-CloudflareRollbackTarget {
     param([Parameter(Mandatory = $true)][object]$Target)
+    $observation = Get-CloudflareRollbackArtifactObservation -Target $Target
+    return [string]$observation.status -eq "AVAILABLE"
+}
+
+function Get-CloudflareRollbackArtifactObservation {
+    param([Parameter(Mandatory = $true)][object]$Target)
     $targetVersionId = [string]$Target.worker_version_id
-    if ([string]::IsNullOrWhiteSpace($targetVersionId)) { return $false }
+    if ([string]::IsNullOrWhiteSpace($targetVersionId)) {
+        return New-ReleaseWorkerArtifactObservation -Target $Target `
+            -VersionDetails $null -ProviderStatus "UNKNOWN"
+    }
     try {
         $version = Get-CloudflareVersionDetails -VersionId $targetVersionId
-        if (-not $version -or $version -is [System.Array] -or
-            -not $version.PSObject.Properties['id'] -or
-            [string]$version.id -cne $targetVersionId -or
-            -not $version.PSObject.Properties['metadata'] -or
-            -not $version.metadata -or
-            -not $version.PSObject.Properties['resources'] -or
-            -not $version.resources -or
-            -not $version.resources.PSObject.Properties['script'] -or
-            -not $version.resources.script -or
-            'fetch' -notin @($version.resources.script.handlers)) {
-            return $false
+        return New-ReleaseWorkerArtifactObservation -Target $Target `
+            -VersionDetails $version -ProviderStatus "AVAILABLE" `
+            -ProviderScopeVerified $true
+    } catch {
+        $status = if ($_.Exception.Message -match '(?i)not.found|404|missing') {
+            "UNAVAILABLE"
+        } else { "UNKNOWN" }
+        return New-ReleaseWorkerArtifactObservation -Target $Target `
+            -VersionDetails $null -ProviderStatus $status
+    }
+}
+
+function Get-ReleaseTrafficObservation {
+    param(
+        [AllowNull()][object]$Deployment,
+        [AllowNull()][object]$Previous,
+        [string]$Status = "AVAILABLE"
+    )
+    if ($Status -ne "AVAILABLE" -or -not $Deployment -or
+        -not $Deployment.PSObject.Properties['versions']) {
+        return [pscustomobject]@{
+            status = "UNKNOWN"; version_id = $null; git_sha = $null
+            traffic_percent = $null; previous_is_member = $false
+            previous_traffic_percent = $null
         }
-        $deployment = Get-CloudflareDeployment
-    } catch { return $false }
-    return @($deployment.versions | Where-Object {
-        [string]$_.version_id -ceq $targetVersionId -and
-        [double]$_.percentage -in @(0, 100)
-    }).Count -eq 1
+    }
+    $versions = @($Deployment.versions | Where-Object { $null -ne $_ })
+    $active = @($versions | Where-Object { [double]$_.percentage -eq 100 })
+    if ($active.Count -ne 1 -or
+        [string]::IsNullOrWhiteSpace([string]$active[0].version_id)) {
+        return [pscustomobject]@{
+            status = "UNKNOWN"; version_id = $null; git_sha = $null
+            traffic_percent = $null; previous_is_member = $false
+            previous_traffic_percent = $null
+        }
+    }
+    $previousId = if ($Previous) { [string]$Previous.worker_version_id } else { "" }
+    $previousRows = @($versions | Where-Object {
+        $previousId -and [string]$_.version_id -ceq $previousId
+    })
+    [pscustomobject]@{
+        status = "AVAILABLE"
+        version_id = [string]$active[0].version_id
+        git_sha = if ($active[0].PSObject.Properties['git_sha']) {
+            [string]$active[0].git_sha
+        } else { $null }
+        traffic_percent = [double]$active[0].percentage
+        previous_is_member = [bool]($previousRows.Count -eq 1)
+        previous_traffic_percent = if ($previousRows.Count -eq 1) {
+            [double]$previousRows[0].percentage
+        } else { $null }
+    }
+}
+
+function Get-ReleaseWindowsArtifactObservation {
+    param([AllowNull()][object]$Target)
+    if (-not $Target) {
+        return New-ReleaseWindowsArtifactObservation -Target $null `
+            -Status "NOT_APPLICABLE"
+    }
+    $revision = [string]$Target.windows_revision
+    if ($revision -notmatch '^[0-9a-f]{40}$' -or
+        ([string]$Target.git_sha -match '^[0-9a-f]{40}$' -and
+            [string]$Target.git_sha -cne $revision)) {
+        return New-ReleaseWindowsArtifactObservation -Target $Target `
+            -Status "MISMATCH" -Reason "WINDOWS_REVISION_IDENTITY_MISMATCH"
+    }
+    try {
+        $commit = Invoke-Utf8NativeProcess -FilePath "git.exe" -Arguments @(
+            "-C", $repositoryRoot, "cat-file", "-e", "$revision^{commit}"
+        )
+        if ($commit.exit_code -ne 0) {
+            return New-ReleaseWindowsArtifactObservation -Target $Target `
+                -Status "UNAVAILABLE" -Reason "WINDOWS_REVISION_UNAVAILABLE"
+        }
+        $manifest = Invoke-Utf8NativeProcess -FilePath "git.exe" -Arguments @(
+            "-C", $repositoryRoot, "show", "${revision}:scripts/windows-service-launch-contract.json"
+        )
+        if ($manifest.exit_code -eq 0) {
+            $contract = ([string]$manifest.stdout) | ConvertFrom-ReleaseControlJson
+            $keys = @($contract.services | ForEach-Object { [string]$_.key })
+            if ([string]$contract.schema_version -ne "windows-service-launch-contract-v1" -or
+                $keys.Count -ne 6 -or @($keys | Sort-Object -Unique).Count -ne 6 -or
+                @($keys | Where-Object {
+                    $_ -notin @("quote","collector","annotator","api","sync","broadcast")
+                }).Count) {
+                return New-ReleaseWindowsArtifactObservation -Target $Target `
+                    -Status "MISMATCH" -Reason "WINDOWS_LAUNCH_CONTRACT_INVALID"
+            }
+            return New-ReleaseWindowsArtifactObservation -Target $Target `
+                -Status "AVAILABLE" -Reason "REVISION_OWNED_LAUNCH_CONTRACT_AVAILABLE"
+        }
+        if ($revision -eq "783d25314b090dd7fbbf124777c3b8de517d2b85" -and
+            [string]$Target.artifact_kind -eq "LEGACY_BOOTSTRAP_STABLE") {
+            return New-ReleaseWindowsArtifactObservation -Target $Target `
+                -Status "AVAILABLE" -Reason "KNOWN_NARROW_LEGACY_ADAPTER_AVAILABLE"
+        }
+        return New-ReleaseWindowsArtifactObservation -Target $Target `
+            -Status "UNAVAILABLE" -Reason "WINDOWS_LAUNCH_CONTRACT_UNAVAILABLE"
+    } catch {
+        return New-ReleaseWindowsArtifactObservation -Target $Target `
+            -Status "UNKNOWN" -Reason "WINDOWS_ARTIFACT_OBSERVATION_UNAVAILABLE"
+    }
+}
+
+function Get-ReleaseActiveHealthObservation {
+    $ownerStatus = if (Test-SingleProductionOwner) { "SINGLE_OWNER" } else { "INVALID" }
+    $healthy = Test-CurrentStableRuntimeHealth
+    [pscustomobject]@{
+        status = if ($healthy) { "HEALTHY" } else { "DEGRADED" }
+        reason = if ($healthy) { "CURRENT_RUNTIME_HEALTHY" } elseif ($ownerStatus -ne
+            "SINGLE_OWNER") { "PRODUCTION_OWNER_UNIQUENESS_FAILED" } else {
+            "LOCAL_API_OR_RUNTIME_HEALTH_FAILED"
+        }
+        ownership_status = $ownerStatus
+    }
+}
+
+function Get-CurrentReleaseRuntimeReadModel {
+    param(
+        [AllowNull()][object]$PersistedState = $null,
+        [DateTimeOffset]$ObservedAt = [DateTimeOffset]::UtcNow,
+        [switch]$ReleaseLockOwnedByCaller
+    )
+    if (-not $PersistedState) { $PersistedState = Get-ReleaseControlState }
+    if (-not $PersistedState) { return $null }
+    $deployment = $null
+    $deploymentStatus = "AVAILABLE"
+    try { $deployment = Get-CloudflareDeployment } catch { $deploymentStatus = "UNKNOWN" }
+    $traffic = Get-ReleaseTrafficObservation -Deployment $deployment `
+        -Previous $PersistedState.previous_stable -Status $deploymentStatus
+    if ([string]$traffic.status -eq "AVAILABLE") {
+        try {
+            $activeVersion = Get-CloudflareVersionDetails `
+                -VersionId ([string]$traffic.version_id)
+            if ($activeVersion -and $activeVersion -isnot [System.Array] -and
+                [string]$activeVersion.id -ceq [string]$traffic.version_id) {
+                $traffic.git_sha = Get-ReleaseGitShaFromVersion -Version $activeVersion
+            }
+        } catch { $traffic.git_sha = $null }
+    }
+    $runtime = Get-RuntimeCodeState
+    $windowsObservation = if ($runtime -and $runtime.applied_revision) {
+        [pscustomobject]@{
+            status = "AVAILABLE"
+            revision = [string]$runtime.applied_revision
+        }
+    } else { $null }
+    $health = Get-ReleaseActiveHealthObservation
+    $previousWorker = if ($PersistedState.previous_stable) {
+        Get-CloudflareRollbackArtifactObservation -Target $PersistedState.previous_stable
+    } else {
+        New-ReleaseWorkerArtifactObservation -Target $null -VersionDetails $null
+    }
+    $previousWindows = Get-ReleaseWindowsArtifactObservation `
+        -Target $PersistedState.previous_stable
+    $bundle = Get-RuntimeControlBundleIdentity
+    $bundleStatus = if ($bundle -and [bool]$bundle.exact_revision) {
+        "AVAILABLE"
+    } else { "UNAVAILABLE" }
+    $reverse = New-ReleaseReversePrecheck -Previous $PersistedState.previous_stable `
+        -WorkerArtifact $previousWorker -WindowsArtifact $previousWindows `
+        -ControlBundleStatus $bundleStatus `
+        -TransactionActive ([bool]$PersistedState.transaction) `
+        -ReleaseLockActive ([bool]((Test-Path -LiteralPath $releaseLockPath) -and
+            -not $ReleaseLockOwnedByCaller)) `
+        -OwnershipStatus ([string]$health.ownership_status) `
+        -ActiveHealthStatus ([string]$health.status)
+    return New-ReleaseRuntimeReadModel -PersistedState $PersistedState `
+        -ActiveWorkerObservation $traffic -ActiveWindowsObservation $windowsObservation `
+        -HealthObservation $health -PreviousWorkerArtifact $previousWorker `
+        -PreviousWindowsArtifact $previousWindows -ReversePrecheck $reverse `
+        -ObservedAt $ObservedAt
 }
 
 function Write-DeferredProjectionSyncRequest {
@@ -10581,10 +10729,20 @@ function Invoke-ReverseStable {
             throw "Previous Stable is unavailable."
         }
         Assert-ActiveControlBundle
-        if (-not (Test-CloudflareRollbackTarget -Target $state.previous_stable)) {
-            throw "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"
+        # The GUI value is advisory only. Re-read exact provider, runtime,
+        # bundle, ownership, transaction, and lock facts while this caller owns
+        # the serialized action boundary, before creating a transaction.
+        $runtimeReadModel = Get-CurrentReleaseRuntimeReadModel `
+            -PersistedState $state -ReleaseLockOwnedByCaller
+        $reversePrecheck = if ($runtimeReadModel -and $runtimeReadModel.previous) {
+            $runtimeReadModel.previous.reverse_precheck
+        } else { $null }
+        if (-not $reversePrecheck -or -not [bool]$reversePrecheck.can_reverse) {
+            $reason = if ($reversePrecheck) {
+                [string]$reversePrecheck.reason
+            } else { "RUNTIME_READ_MODEL_UNAVAILABLE" }
+            throw "REVERSE_PRECHECK_BLOCKED:$reason"
         }
-        if (-not (Test-SingleProductionOwner)) { throw "Exactly one Windows production owner is required." }
         $current = $state.stable
         $target = $state.previous_stable
         $state.transaction = [pscustomobject]@{
@@ -10643,7 +10801,7 @@ function Invoke-ReverseStable {
                 }
                 Write-ReleaseControlState -State $state
             }
-        } elseif ($state) {
+        } elseif ($state -and $state.transaction) {
             $state.deployment_status = "RECOVERY_REQUIRED"
             $state.drift = [pscustomobject]@{
                 code = "REVERSE_INCOMPLETE"
@@ -14206,6 +14364,9 @@ function Get-ControlCenterReleasePresentation {
         }
     }
 
+    $runtimeReadModel = if ($Release.PSObject.Properties['release_runtime']) {
+        $Release.release_runtime
+    } else { $null }
     $transactionActive = [bool]$Release.transaction
     $deploymentReady = [string]$Release.deployment_status -eq "READY"
     $candidateState = if ($Release.candidate) {
@@ -14328,17 +14489,24 @@ function Get-ControlCenterReleasePresentation {
         "Candidate has not passed validation"
     } else { "Ready to promote" }
 
+    $reversePrecheck = if ($runtimeReadModel -and $runtimeReadModel.previous) {
+        $runtimeReadModel.previous.reverse_precheck
+    } else { $null }
     $reverseReason = if ($transactionActive) {
-        "A release transaction is already in progress"
-    } elseif (-not $controlBundleReady) {
-        "CONTROL_BUNDLE_HASH_VERIFICATION_FAILED"
-    } elseif (-not $deploymentReady) {
-        "Deployment status is $($Release.deployment_status)"
-    } elseif (-not $Release.previous_stable) {
-        "Previous Stable unavailable"
-    } elseif (-not [bool]$Release.previous_stable_rollback_eligible) {
-        "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"
-    } else { "Ready to reverse" }
+        "RELEASE_TRANSACTION_ACTIVE"
+    } elseif ($reversePrecheck) {
+        [string]$reversePrecheck.reason
+    } else { "RUNTIME_READ_MODEL_UNAVAILABLE" }
+    $stableState = if (-not $runtimeReadModel) {
+        "UNKNOWN"
+    } elseif ([string]$runtimeReadModel.drift_status -eq "DRIFT") {
+        "DRIFT"
+    } elseif ([string]$runtimeReadModel.active.health -eq "DEGRADED") {
+        "DEGRADED"
+    } elseif ([string]$runtimeReadModel.active.health -eq "HEALTHY" -and
+        [bool]$runtimeReadModel.active_matches_committed) {
+        "STABLE"
+    } else { "UNKNOWN" }
 
     [pscustomobject]@{
         candidate_state = $candidateState
@@ -14350,9 +14518,18 @@ function Get-ControlCenterReleasePresentation {
             $compatibilityPassed -and $candidateProvenanceReady -and
             $accessAcceptanceReady -and $controlBundleReady)
         promote_reason = $promoteReason
-        can_reverse = [bool]($deploymentReady -and -not $transactionActive -and
-            $Release.previous_stable -and $Release.previous_stable_rollback_eligible -and
-            $controlBundleReady)
+        stable_state = $stableState
+        active_health = if ($runtimeReadModel) {
+            [string]$runtimeReadModel.active.health
+        } else { "UNKNOWN" }
+        previous_artifact_status = if ($runtimeReadModel -and
+            $runtimeReadModel.previous.worker_artifact) {
+            [string]$runtimeReadModel.previous.worker_artifact.status
+        } else { "UNKNOWN" }
+        previous_traffic_member = [bool]($runtimeReadModel -and
+            $runtimeReadModel.previous.worker_is_current_traffic_member)
+        can_reverse = [bool](-not $transactionActive -and $reversePrecheck -and
+            $reversePrecheck.can_reverse)
         reverse_reason = $reverseReason
         can_verify_migration = $canVerifyMigration
         can_approve_compatibility = $canApproveCompatibility
@@ -15148,8 +15325,11 @@ function Show-WpfControlCenter {
             $bad = @($status | Where-Object { $_.State -match "STOPPED|ERROR|STALE|OFFLINE" }).Count
             (Find-WpfControl "OverallState").Text = if ($bad) { "DEGRADED" } else { "HEALTHY" }
             (Find-WpfControl "RefreshTime").Text = [DateTime]::Now.ToString("HH:mm:ss")
-            $release = Get-ReleaseControlState
-            (Find-WpfControl "StableState").Text = if ($release -and $release.stable) { "STABLE" } else { "UNAVAILABLE" }
+            $release = Get-ReleaseControlStatusSnapshot
+            $releaseView = Get-ControlCenterReleasePresentation -Release $release
+            (Find-WpfControl "StableState").Text = if ($release -and $release.stable) {
+                [string]$releaseView.stable_state
+            } else { "UNAVAILABLE" }
             (Find-WpfControl "StableIdentity").Text = Format-WpfIdentity $release.stable
             (Find-WpfControl "CandidateState").Text = if ($release -and $release.candidate) { [string]$release.candidate.validation_state } else { "UNAVAILABLE" }
             (Find-WpfControl "CandidateIdentity").Text = Format-WpfIdentity $release.candidate
@@ -15158,7 +15338,6 @@ function Show-WpfControlCenter {
                 elseif ($release.candidate.validation.error) { [string]$release.candidate.validation.error }
                 else { "Validation evidence is available." }
             } else { "Candidate validation is unavailable." }
-            $releaseView = Get-ControlCenterReleasePresentation -Release $release
             (Find-WpfControl "CandidateReason").Text = if ($releaseView.can_promote) {
                 "Ready for explicit manual promotion."
             } else { "Cannot promote: $reason" }
@@ -15215,7 +15394,12 @@ function Show-WpfControlCenter {
             (Find-WpfControl "ApproveCompatibilityButton").IsEnabled = [bool]($releaseView.can_approve_compatibility -and -not $operationActive)
             (Find-WpfControl "ApproveAccessButton").IsEnabled = [bool]($releaseView.can_approve_access -and -not $operationActive)
             (Find-WpfControl "OpenCandidateButton").IsEnabled = [bool]($release -and $release.candidate -and $release.candidate.browser_url)
-            (Find-WpfControl "PreviousState").Text = if ($release -and $release.previous_stable) { "AVAILABLE" } else { "UNAVAILABLE" }
+            (Find-WpfControl "PreviousState").Text = if ($release -and
+                $release.previous_stable) {
+                "$($releaseView.previous_artifact_status) / $(if (
+                    $releaseView.previous_traffic_member
+                ) { 'ASSIGNED' } else { 'NOT ASSIGNED' })"
+            } else { "UNAVAILABLE" }
             (Find-WpfControl "PreviousIdentity").Text = Format-WpfIdentity $release.previous_stable
             (Find-WpfControl "ReverseButton").IsEnabled = [bool]($releaseView.can_reverse -and -not $operationActive)
             if ($operationActive) {
@@ -16214,7 +16398,8 @@ function Show-ControlCenter {
             $stableSummary.Value.Text = "  $stableShort  "
             $stableSummary.Value.ForeColor = [System.Drawing.Color]::White
             $stableSummary.Value.BackColor = $accent
-            Set-StatusBadge -Label $stableCard.Badge -State ([string]$release.lifecycle_phase)
+            $releaseView = Get-ControlCenterReleasePresentation -Release $release
+            Set-StatusBadge -Label $stableCard.Badge -State $releaseView.stable_state
             $stableCard.Git.Text = "Git       $(Get-ShortIdentity $release.stable.git_sha)"
             $stableCard.Worker.Text = "Worker    $(Get-ShortIdentity $release.stable.worker_version_id)"
             $stableCard.Windows.Text = "Windows   $(Get-ShortIdentity $release.stable.windows_revision)"
@@ -16224,7 +16409,6 @@ function Show-ControlCenter {
             $openStableButton.Visible = $true
             $bootstrapButton.Visible = $false
 
-            $releaseView = Get-ControlCenterReleasePresentation -Release $release
             if ($release.candidate) {
                 Set-StatusBadge -Label $candidateCard.Badge -State $releaseView.candidate_state
                 $candidateCard.Git.Text = "Git       $(Get-ShortIdentity $release.candidate.git_sha)"
@@ -16310,11 +16494,18 @@ function Show-ControlCenter {
             )
 
             if ($release.previous_stable) {
-                Set-StatusBadge -Label $previousCard.Badge -State "AVAILABLE"
+                Set-StatusBadge -Label $previousCard.Badge `
+                    -State $releaseView.previous_artifact_status
                 $previousCard.Git.Text = "Git       $(Get-ShortIdentity $release.previous_stable.git_sha)"
                 $previousCard.Worker.Text = "Worker    $(Get-ShortIdentity $release.previous_stable.worker_version_id)"
                 $previousCard.Windows.Text = "Windows   $(Get-ShortIdentity $release.previous_stable.windows_revision)"
-                $previousCard.Detail.Text = "Reverse restores this exact Worker and Windows pair."
+                $assignment = if ($releaseView.previous_traffic_member) {
+                    "ASSIGNED"
+                } else { "NOT ASSIGNED" }
+                $previousCard.Detail.Text = (
+                    "$($releaseView.previous_artifact_status) / $assignment / " +
+                    "precheck $($releaseView.reverse_reason); recovery is not implied."
+                )
             } else {
                 Set-StatusBadge -Label $previousCard.Badge -State "UNAVAILABLE"
                 $previousCard.Git.Text = "Git       --"
