@@ -691,6 +691,116 @@ def test_sync_does_not_retry_authentication_error(monkeypatch) -> None:
     assert len(calls) == 1
 
 
+def test_sync_state_round_trip_and_runtime_root_rejection(tmp_path) -> None:
+    module = _sync_module()
+    state_file = tmp_path / "dashboard-news-sync-state.json"
+    config = {module.RUNTIME_STATE_ROOT_KEY: str(tmp_path)}
+    expected = {"contract_version": "news-v1", "cursor": "abc:12"}
+
+    module._write_news_sync_state(state_file, config, expected)
+
+    assert module._read_news_sync_state(state_file, config) == expected
+    assert not state_file.with_suffix(".json.tmp").exists()
+    state_file.write_text("not-json", encoding="utf-8")
+    assert module._read_news_sync_state(state_file, config) == {}
+
+    outside = tmp_path.parent / "outside.json"
+    with pytest.raises(ValueError, match="must be one JSON file under"):
+        module._write_news_sync_state(outside, config, {})
+    assert not outside.exists()
+
+
+def test_sync_status_records_real_success_and_preserves_it_on_error(tmp_path) -> None:
+    module = _sync_module()
+    status_file = tmp_path / "dashboard-sync-status.json"
+    config = {module.RUNTIME_STATE_ROOT_KEY: str(tmp_path)}
+    observation = [{
+        "target": "cloudflare", "resource": "news", "status": "OK",
+        "duration_ms": 12.5, "completed_at": "2026-08-17T00:00:00+00:00",
+    }]
+    module.write_sync_status(
+        status_file, config, success=True, attempts_used=2,
+        resource_observations=observation,
+    )
+    succeeded = json.loads(status_file.read_text(encoding="utf-8"))
+    assert datetime.fromisoformat(succeeded["last_success"])
+    assert succeeded["attempts_used"] == 2
+    assert succeeded["last_error"] is None
+    assert succeeded["status"] == "OK"
+    assert succeeded["resource_observations"] == observation
+
+    module.write_sync_status(
+        status_file, config,
+        success=False, error=ConnectionResetError("remote closed"),
+    )
+    failed = json.loads(status_file.read_text(encoding="utf-8"))
+    assert failed["last_success"] == succeeded["last_success"]
+    assert failed["last_error_type"] == "ConnectionResetError"
+    assert failed["last_error"] == "remote closed"
+    assert failed["last_error_code"] == "TRANSPORT_UNAVAILABLE"
+    assert failed["degraded_resources"] == []
+    assert failed["status"] == "ERROR"
+
+
+def test_sync_status_reports_optional_resource_degradation(tmp_path) -> None:
+    module = _sync_module()
+    status_file = tmp_path / "dashboard-sync-status.json"
+    config = {module.RUNTIME_STATE_ROOT_KEY: str(tmp_path)}
+    degraded = [{"resource": "learning", "error": "too large"}]
+    module.write_sync_status(
+        status_file, config, success=True, attempts_used=1,
+        degraded_resources=degraded,
+    )
+    status = json.loads(status_file.read_text(encoding="utf-8"))
+    assert status["status"] == "DEGRADED"
+    assert status["last_error"] is None
+    assert status["degraded_resources"] == degraded
+
+
+def test_ingest_response_records_valid_main_revision_and_rejects_redirect(
+    tmp_path, monkeypatch,
+) -> None:
+    module = _sync_module()
+    revision = "a" * 40
+
+    class Response:
+        status = 200
+
+        def read(self):
+            return json.dumps({"status": "OK", "main_revision": revision}).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        module.urllib.request, "urlopen", lambda *_args, **_kwargs: Response(),
+    )
+    signal = tmp_path / "remote-main-signal.json"
+    config = {
+        "token": "token",
+        module.RUNTIME_STATE_ROOT_KEY: str(tmp_path),
+        "runtime_signal_file": str(signal),
+    }
+
+    result = module._post_json(
+        "https://example.workers.dev/api/ingest", b"{}", config,
+    )
+
+    assert result["main_revision"] == revision
+    assert json.loads(signal.read_text(encoding="utf-8"))["main_revision"] == revision
+
+    outside = tmp_path.parent / "outside-signal.json"
+    config["runtime_signal_file"] = str(outside)
+    with pytest.raises(ValueError, match="must be one JSON file under"):
+        module._post_json(
+            "https://example.workers.dev/api/ingest", b"{}", config,
+        )
+    assert not outside.exists()
+
+
 
 
 

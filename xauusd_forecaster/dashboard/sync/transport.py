@@ -13,7 +13,7 @@ from pathlib import Path
 
 from xauusd_forecaster.runtime_paths import logical_absolute_path
 
-from .progress import RUNTIME_STATE_ROOT_KEY, _write_runtime_signal
+from .progress import RUNTIME_STATE_ROOT_KEY
 
 
 DEFERRED_PROJECTION_REQUEST_FILE = "deferred-projection-sync-request.json"
@@ -85,7 +85,6 @@ def _post_json(url: str, payload: bytes, config: dict) -> dict:
         result = json.loads(body) if body else {}
     except (TypeError, ValueError):
         result = {}
-    _write_runtime_signal(result, config)
     return result if isinstance(result, dict) else {}
 
 

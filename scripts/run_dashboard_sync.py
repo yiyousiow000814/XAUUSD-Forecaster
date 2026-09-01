@@ -95,10 +95,7 @@ from xauusd_forecaster.dashboard.sync.progress import (
     RUNTIME_STATE_ROOT_KEY,
     AllTargetsRejected,
     SyncResourceResults,
-    _read_news_sync_state,
-    _write_news_sync_state,
     sync_error_code,
-    write_sync_status,
 )
 from xauusd_forecaster.dashboard.sync.transport import (
     LOCAL_STATUS_TIMEOUT_SECONDS,
@@ -108,7 +105,7 @@ from xauusd_forecaster.dashboard.sync.transport import (
     _get_local_json,
     _local_retry_url,
     _operator_retry_worker_url,
-    _post_json,
+    _post_json as _transport_post_json,
     _post_local_json,
     _validated_sync_state_path,
     configure_runtime_state,
@@ -120,6 +117,116 @@ class PayloadContractError(ValueError):
     """A bounded payload still violates the remote transport contract."""
 
     error_code = "PAYLOAD_CONTRACT_REJECTED"
+
+
+def _authorized_state_path(path: Path, config: dict) -> Path:
+    """Recheck a mutable state sink against the configured runtime authority."""
+    raw_root = str(config.get(RUNTIME_STATE_ROOT_KEY) or "").strip()
+    if not raw_root:
+        raise ValueError("dashboard sync runtime state root is required")
+    return _validated_sync_state_path(path, Path(raw_root))
+
+
+def write_sync_status(
+    path: Path,
+    config: dict,
+    *,
+    success: bool,
+    attempts_used: int | None = None,
+    error: Exception | None = None,
+    degraded_resources: list[dict] | None = None,
+    resource_observations: list[dict] | None = None,
+) -> None:
+    """Atomically publish the synchronizer's actual operational heartbeat."""
+    path = _authorized_state_path(path, config)
+    existing: dict = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+    now = datetime.now(UTC).isoformat()
+    if success:
+        degraded_resources = degraded_resources or []
+        existing.update(
+            {
+                "last_success": now,
+                "last_attempt": now,
+                "last_error": None,
+                "last_error_type": None,
+                "last_error_code": None,
+                "attempts_used": attempts_used,
+                "status": "DEGRADED" if degraded_resources else "OK",
+                "degraded_resources": degraded_resources,
+                "resource_observations": resource_observations or [],
+            }
+        )
+    else:
+        current_degraded = list(getattr(error, "degraded_resources", None) or [])
+        current_observations = list(
+            getattr(error, "resource_observations", None) or []
+        )
+        existing.update(
+            {
+                "last_attempt": now,
+                "last_error": str(error)[:500] if error else "Unknown sync error",
+                "last_error_type": type(error).__name__ if error else "UnknownError",
+                "last_error_code": sync_error_code(error),
+                "status": "ERROR",
+                "degraded_resources": current_degraded,
+                "resource_observations": current_observations,
+            }
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(existing, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _write_runtime_signal(payload: object, config: dict) -> None:
+    if not isinstance(payload, dict):
+        return
+    revision = str(payload.get("main_revision") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        return
+    target = _authorized_state_path(Path(config["runtime_signal_file"]), config)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(
+            {
+                "main_revision": revision,
+                "observed_at": datetime.now(UTC).isoformat(),
+                "source": "CLOUDFLARE_MAIN_DEPLOYMENT",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    temporary.replace(target)
+
+
+def _post_json(url: str, payload: bytes, config: dict) -> dict:
+    result = _transport_post_json(url, payload, config)
+    _write_runtime_signal(result, config)
+    return result
+
+
+def _read_news_sync_state(path: Path, config: dict) -> dict:
+    path = _authorized_state_path(path, config)
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+        return state if isinstance(state, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_news_sync_state(path: Path, config: dict, state: dict) -> None:
+    path = _authorized_state_path(path, config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(path)
 
 
 MARKET_DECISION_FIELDS = (
