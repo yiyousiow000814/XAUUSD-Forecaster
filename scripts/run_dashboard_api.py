@@ -1931,6 +1931,56 @@ def _all_market_candles(database: Path) -> list[dict]:
     return [history_by_time[key] for key in sorted(history_by_time)]
 
 
+def _quote_file_day(path: Path):
+    value = path.name.split(".jsonl", 1)[0].removeprefix("xauusd-quotes-")
+    try:
+        return datetime.strptime(value, "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def _market_history_endpoint(sources: list[Path], *, newest: bool) -> str | None:
+    ordered = reversed(sources) if newest else iter(sources)
+    for source in ordered:
+        candles = _quote_file_candles(source)
+        if candles:
+            return candles[-1 if newest else 0]["time"]
+    return None
+
+
+def _market_history_candles(
+    database: Path, after: str | None, limit: int,
+) -> tuple[list[dict], str | None, str | None, str | None]:
+    """Read at most one bounded cursor page plus exact history endpoints."""
+    sources = _quote_history_files(database.parent / "quotes")
+    after_day = None
+    if after:
+        try:
+            after_day = datetime.fromisoformat(
+                after.replace("Z", "+00:00")
+            ).astimezone(UTC).date()
+        except ValueError:
+            pass
+    candidates = []
+    for source in sources:
+        source_day = _quote_file_day(source)
+        if after_day is None or source_day is None or source_day >= after_day:
+            candidates.append(source)
+    rows_by_time = {}
+    for source in candidates:
+        for candle in _quote_file_candles(source):
+            if not after or candle["time"] > after:
+                rows_by_time[candle["time"]] = candle
+        if len(rows_by_time) > limit:
+            break
+    rows = [rows_by_time[key] for key in sorted(rows_by_time)]
+    return (
+        rows[:limit], rows[limit]["time"] if len(rows) > limit else None,
+        _market_history_endpoint(sources, newest=False),
+        _market_history_endpoint(sources, newest=True),
+    )
+
+
 def _market_decisions(
     connection: sqlite3.Connection, start_time: str, end_time: str | None = None,
 ) -> list[dict]:
@@ -2018,25 +2068,20 @@ def _market_history_page(
     database: Path, connection: sqlite3.Connection, after: str | None, limit: int,
 ) -> dict:
     """Return an ordered, replay-safe page for incremental remote ingestion."""
-    history = _all_market_candles(database)
-    start_index = 0
-    if after:
-        while start_index < len(history) and history[start_index]["time"] <= after:
-            start_index += 1
-    candles = history[start_index:start_index + limit]
+    candles, next_time, history_start, history_end = _market_history_candles(
+        database, after, limit,
+    )
     if not candles:
         return {"candles": [], "decisions": [], "next_cursor": after, "has_more": False}
-    end_index = start_index + len(candles)
-    end_time = history[end_index]["time"] if end_index < len(history) else None
     return {
         "candles": candles,
         "decisions": _market_decisions(
-            connection, candles[0]["time"], end_time,
+            connection, candles[0]["time"], next_time,
         ),
         "next_cursor": candles[-1]["time"],
-        "has_more": end_index < len(history),
-        "history_start": history[0]["time"],
-        "history_end": history[-1]["time"],
+        "has_more": next_time is not None,
+        "history_start": history_start,
+        "history_end": history_end,
     }
 
 
