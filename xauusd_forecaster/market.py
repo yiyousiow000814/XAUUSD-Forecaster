@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import gzip
+import json
 import math
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from collections import deque
 from typing import Protocol
 
 import numpy as np
@@ -33,6 +33,24 @@ class MarketObservation:
         for value in (self.event_time, self.received_time):
             if value.tzinfo is None or value.utcoffset() is None:
                 raise ValueError("market observation times must be timezone-aware")
+
+
+def parse_quote_line(
+    line: str, source: Path, expected_symbol: str = "XAUUSD",
+) -> MarketObservation:
+    """Parse one authoritative quote JSONL record with symbol validation."""
+    item = json.loads(line)
+    symbol = str(item.get("symbol", expected_symbol))
+    if symbol.casefold() != expected_symbol.casefold():
+        raise ValueError(
+            f"unexpected quote symbol {symbol!r} in {source}; "
+            f"expected {expected_symbol!r}"
+        )
+    event = datetime.fromisoformat(item["event_time"].replace("Z", "+00:00"))
+    received = datetime.fromisoformat(
+        item["received_time"].replace("Z", "+00:00")
+    )
+    return MarketObservation(event, received, float(item["bid"]), float(item["ask"]))
 
 
 @dataclass(frozen=True)
@@ -179,18 +197,7 @@ class JsonlMarketProvider:
             self._offsets[source] = handle.tell()
 
     def _parse_line(self, line: str, source: Path) -> MarketObservation:
-        item = json.loads(line)
-        symbol = str(item.get("symbol", self.expected_symbol))
-        if symbol.casefold() != self.expected_symbol.casefold():
-            raise ValueError(
-                f"unexpected quote symbol {symbol!r} in {source}; "
-                f"expected {self.expected_symbol!r}"
-            )
-        event = datetime.fromisoformat(item["event_time"].replace("Z", "+00:00"))
-        received = datetime.fromisoformat(
-            item["received_time"].replace("Z", "+00:00")
-        )
-        return MarketObservation(event, received, float(item["bid"]), float(item["ask"]))
+        return parse_quote_line(line, source, self.expected_symbol)
 
 
 def _at_or_before(
