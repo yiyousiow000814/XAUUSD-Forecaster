@@ -646,6 +646,30 @@ Version existence index: an exact Version may be `AVAILABLE` while
 `worker_traffic_membership_status` is `NOT_ASSIGNED`. The compatibility Boolean
 is not authoritative for `UNKNOWN` or `MISMATCH`.
 
+Persisted Committed, Previous, and Target identities pass through one pure
+resolver before any runtime observation. Only a `COMPLETE` resolved identity may
+enter an exact Worker lookup, Windows artifact lookup, Reverse precheck, or
+Reverse transaction. The legacy bootstrap exception is one fixed,
+non-recombinable Worker/Git/Windows/provenance pair; a legacy label is never
+authority. Invalid Committed and Previous identities fail closed independently.
+
+Active health separates business health from production ownership. `STABLE`
+requires explicit available Worker and Windows observations, a complete Active
+identity matching Committed, healthy business runtime, exactly one production
+owner, and no unresolved drift. Degraded business health does not by itself
+remove otherwise valid Reverse authority, while invalid or unknown ownership
+always prevents a stable presentation and blocks Reverse.
+
+Operator refresh has two cadences. Local service and operation state may refresh
+every five to ten seconds. Mutable provider deployment observation refreshes no
+more often than every thirty seconds, and immutable exact Version facts are
+reused by Version ID inside the observing process. WinForms keeps its ten-second
+local snapshot in a child process but owns provider observation in the persistent
+GUI process, so the local timer cannot query the provider. Provider caches are
+advisory and process-local only. Manual refresh may
+request one fresh provider observation, while Reverse always bypasses UI caches
+after acquiring the release lock.
+
 The transaction lock records its process owner. A live owner is never
 preempted. An abandoned lock may be removed only after the recorded process no
 longer exists (or an incomplete owner record has exceeded its grace period);

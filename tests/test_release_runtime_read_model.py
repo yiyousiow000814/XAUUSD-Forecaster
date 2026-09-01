@@ -52,7 +52,10 @@ def _identity(letter: str, worker: str, *, kind: str = "PRODUCTION_CANDIDATE") -
 
 def _projection_script(state: dict, *, active: dict | None, health: str) -> str:
     state_json = json.dumps(state, separators=(",", ":"))
-    active_json = json.dumps(active, separators=(",", ":")) if active else "null"
+    active_payload = dict(active) if active else None
+    if active_payload is not None:
+        active_payload.setdefault("status", "AVAILABLE")
+    active_json = json.dumps(active_payload, separators=(",", ":")) if active_payload else "null"
     previous = state.get("previous_stable")
     worker = {
         "status": "AVAILABLE" if previous else "NOT_APPLICABLE",
@@ -75,8 +78,9 @@ def _projection_script(state: dict, *, active: dict | None, health: str) -> str:
     return (
         f"$state='{state_json}'|ConvertFrom-Json;"
         f"$active='{active_json}'|ConvertFrom-Json;"
-        "$windows=if($active){[pscustomobject]@{revision=[string]$active.windows_revision}}else{$null};"
-        f"$health=[pscustomobject]@{{status='{health}';reason='TEST_HEALTH'}};"
+        "$windows=if($active){[pscustomobject]@{status='AVAILABLE';revision=[string]$active.windows_revision}}else{$null};"
+        f"$health=[pscustomobject]@{{status='{health}';business_health_status='{health}';"
+        "business_health_reason='TEST_HEALTH';reason='TEST_HEALTH';ownership_status='SINGLE_OWNER'};"
         f"$worker='{json.dumps(worker)}'|ConvertFrom-Json;"
         f"$previousWindows='{json.dumps(windows)}'|ConvertFrom-Json;"
         f"$reverse='{json.dumps(reverse)}'|ConvertFrom-Json;"
@@ -217,7 +221,7 @@ def test_malformed_recognized_stable_cannot_become_lkg(mutation) -> None:
              "deployment_status": "READY"}
     model = json.loads(_run(_projection_script(state, active=None, health="UNKNOWN")))
     assert model["committed_stable"] is None
-    assert model["committed_identity_status"] == "INCOMPLETE"
+    assert model["committed_identity_status"] in {"INCOMPLETE", "MISMATCH"}
     assert model["last_known_good"] is None
     assert model["last_known_good_source"] == "UNKNOWN"
 
@@ -282,6 +286,78 @@ def test_active_observation_and_business_health_remain_independent() -> None:
     assert model["active"]["health"] == "HEALTHY"
 
 
+@pytest.mark.parametrize(
+    ("worker_status", "windows_status", "expected"),
+    (
+        (None, "AVAILABLE", "UNKNOWN"),
+        ("AVAILABLE", None, "UNKNOWN"),
+        ("ILLEGAL", "AVAILABLE", "UNKNOWN"),
+        ("AVAILABLE", "OLD_ADAPTER", "UNKNOWN"),
+        ("AVAILABLE", "AVAILABLE", "AVAILABLE"),
+    ),
+)
+def test_observation_availability_requires_explicit_legal_status(
+    worker_status: str | None, windows_status: str | None, expected: str,
+) -> None:
+    stable = _identity("a", "stable")
+    state = {
+        "schema_version": "stable-candidate-release-v3", "stable": stable,
+        "previous_stable": None, "candidate": None, "transaction": None,
+    }
+    worker = {
+        "version_id": stable["worker_version_id"], "git_sha": stable["git_sha"],
+        "traffic_percent": 100,
+    }
+    windows = {"revision": stable["windows_revision"]}
+    if worker_status is not None:
+        worker["status"] = worker_status
+    if windows_status is not None:
+        windows["status"] = windows_status
+    body = (
+        f"$state='{json.dumps(state)}'|ConvertFrom-Json;"
+        f"$worker='{json.dumps(worker)}'|ConvertFrom-Json;"
+        f"$windows='{json.dumps(windows)}'|ConvertFrom-Json;"
+        "$health=[pscustomobject]@{business_health_status='HEALTHY';"
+        "business_health_reason='OK';ownership_status='SINGLE_OWNER'};"
+        "$model=New-ReleaseRuntimeReadModel -PersistedState $state "
+        "-ActiveWorkerObservation $worker -ActiveWindowsObservation $windows "
+        "-HealthObservation $health -ObservedAt ([DateTimeOffset]::UtcNow);"
+        "$model.active.observation_status"
+    )
+    assert _run(body) == expected
+
+
+@pytest.mark.parametrize(
+    ("business", "ownership", "overall"),
+    (
+        ("HEALTHY", "SINGLE_OWNER", "HEALTHY"),
+        ("DEGRADED", "SINGLE_OWNER", "DEGRADED"),
+        ("HEALTHY", "INVALID", "DEGRADED"),
+        ("HEALTHY", "UNKNOWN", "UNKNOWN"),
+    ),
+)
+def test_active_health_composes_business_health_and_ownership(
+    business: str, ownership: str, overall: str,
+) -> None:
+    state = {
+        "schema_version": "stable-candidate-release-v3",
+        "stable": _identity("a", "stable"), "previous_stable": None,
+        "candidate": None, "transaction": None,
+    }
+    body = (
+        f"$state='{json.dumps(state)}'|ConvertFrom-Json;"
+        f"$health=[pscustomobject]@{{business_health_status='{business}';"
+        f"business_health_reason='TEST';ownership_status='{ownership}'}};"
+        "$model=New-ReleaseRuntimeReadModel -PersistedState $state "
+        "-HealthObservation $health -ObservedAt ([DateTimeOffset]::UtcNow);"
+        "$model.active|ConvertTo-Json -Compress"
+    )
+    active = json.loads(_run(body))
+    assert active["business_health_status"] == business
+    assert active["ownership_status"] == ownership
+    assert active["health"] == overall
+
+
 def _worker_version(target: dict, *, version_id: str | None = None, message: str | None = None) -> dict:
     return {
         "id": version_id or target["worker_version_id"],
@@ -307,7 +383,8 @@ def test_exact_artifact_availability_is_independent_from_traffic_membership(
         f"$target='{json.dumps(target)}'|ConvertFrom-Json;"
         f"$version='{json.dumps(version)}'|ConvertFrom-Json;"
         f"$deployment='{json.dumps(deployment)}'|ConvertFrom-Json;"
-        "$artifact=New-ReleaseWorkerArtifactObservation -Target $target "
+        "$resolution=Resolve-ReleaseRuntimeIdentity $target;"
+        "$artifact=New-ReleaseWorkerArtifactObservation -IdentityResolution $resolution "
         "-VersionDetails $version -ProviderStatus AVAILABLE -ProviderScopeVerified $true;"
         "$traffic=$deployment.versions|?{$_.version_id -eq $target.worker_version_id};"
         '[pscustomobject]@{status=$artifact.status;member=[bool]$traffic}|ConvertTo-Json -Compress'
@@ -334,7 +411,8 @@ def test_worker_artifact_malformed_or_wrong_identity_fails_closed(
     body = (
         f"$target='{json.dumps(target)}'|ConvertFrom-Json;"
         f"$version='{json.dumps(version)}'|ConvertFrom-Json;{mutation};"
-        "$result=New-ReleaseWorkerArtifactObservation -Target $target "
+        "$resolution=Resolve-ReleaseRuntimeIdentity $target;"
+        "$result=New-ReleaseWorkerArtifactObservation -IdentityResolution $resolution "
         "-VersionDetails $version -ProviderStatus AVAILABLE -ProviderScopeVerified $true;"
         "$result|ConvertTo-Json -Compress"
     )
@@ -349,7 +427,8 @@ def test_worker_artifact_provider_scope_must_be_exact() -> None:
     body = (
         f"$target='{json.dumps(target)}'|ConvertFrom-Json;"
         f"$version='{json.dumps(version)}'|ConvertFrom-Json;"
-        "$result=New-ReleaseWorkerArtifactObservation -Target $target "
+        "$resolution=Resolve-ReleaseRuntimeIdentity $target;"
+        "$result=New-ReleaseWorkerArtifactObservation -IdentityResolution $resolution "
         "-VersionDetails $version -ProviderStatus AVAILABLE -ProviderScopeVerified $false;"
         "$result|ConvertTo-Json -Compress"
     )
@@ -376,7 +455,8 @@ def test_worker_artifact_requires_exact_main_branch(
     version = _worker_version(target, message=message)
     body = (f"$target='{json.dumps(target)}'|ConvertFrom-Json;"
             f"$version='{json.dumps(version)}'|ConvertFrom-Json;"
-            "$result=New-ReleaseWorkerArtifactObservation -Target $target "
+            "$resolution=Resolve-ReleaseRuntimeIdentity $target;"
+            "$result=New-ReleaseWorkerArtifactObservation -IdentityResolution $resolution "
             "-VersionDetails $version -ProviderStatus AVAILABLE -ProviderScopeVerified $true;"
             "$result|ConvertTo-Json -Compress")
     result_obj = json.loads(_run(body))
@@ -384,17 +464,60 @@ def test_worker_artifact_requires_exact_main_branch(
     assert result_obj["reason"] == reason
 
 
-def test_narrow_legacy_worker_artifact_keeps_explicit_exception() -> None:
-    target = _identity("a", "11111111-1111-4111-8111-111111111111",
-                       kind="LEGACY_BOOTSTRAP_STABLE")
-    target["worker_git_sha"] = "NOT_RECORDED"
+LEGACY_REVISION = "783d25314b090dd7fbbf124777c3b8de517d2b85"
+LEGACY_WORKER = "76d314fc-e484-4f50-8ace-3689e0896709"
+
+
+def _legacy_identity() -> dict:
+    return {
+        "git_sha": LEGACY_REVISION,
+        "worker_git_sha": "NOT_RECORDED",
+        "worker_version_id": LEGACY_WORKER,
+        "windows_revision": LEGACY_REVISION,
+        "artifact_kind": "LEGACY_BOOTSTRAP_STABLE",
+        "branch": "main",
+        "validation_key": "legacy-bootstrap",
+        "provenance_state": "LEGACY_EXACT_WORKER_WINDOWS_PAIR",
+    }
+
+
+@pytest.mark.parametrize(
+    ("case", "mutation", "expected"),
+    (
+        ("exact_pair", lambda value: None, "AVAILABLE"),
+        ("arbitrary_worker", lambda value: value.__setitem__(
+            "worker_version_id", "11111111-1111-4111-8111-111111111111"), "MISMATCH"),
+        ("wrong_revision", lambda value: (
+            value.__setitem__("git_sha", "a" * 40),
+            value.__setitem__("windows_revision", "a" * 40)), "MISMATCH"),
+        ("missing_provenance", lambda value: value.pop("provenance_state"), "MISMATCH"),
+        ("wrong_provenance", lambda value: value.__setitem__(
+            "provenance_state", "ARBITRARY_LABEL"), "MISMATCH"),
+        ("arbitrary_legacy_label", lambda value: value.update({
+            "git_sha": "b" * 40,
+            "windows_revision": "b" * 40,
+            "worker_version_id": "22222222-2222-4222-8222-222222222222",
+        }), "MISMATCH"),
+        ("unknown_legacy_artifact", lambda value: value.__setitem__(
+            "worker_git_sha", "UNKNOWN"), "MISMATCH"),
+    ),
+)
+def test_narrow_legacy_worker_artifact_requires_exact_nonrecombinable_pair(
+    case: str, mutation, expected: str,
+) -> None:
+    target = _legacy_identity()
+    mutation(target)
     version = _worker_version(target, message="legacy artifact without branch")
     body = (f"$target='{json.dumps(target)}'|ConvertFrom-Json;"
             f"$version='{json.dumps(version)}'|ConvertFrom-Json;"
-            "$result=New-ReleaseWorkerArtifactObservation -Target $target "
+            "$resolution=Resolve-ReleaseRuntimeIdentity $target;"
+            "$result=New-ReleaseWorkerArtifactObservation -IdentityResolution $resolution "
             "-VersionDetails $version -ProviderStatus AVAILABLE -ProviderScopeVerified $true;"
-            "$result|ConvertTo-Json -Compress")
-    assert json.loads(_run(body))["status"] == "AVAILABLE"
+            "[pscustomobject]@{case='" + case + "';resolution=$resolution.status;"
+            "artifact=$result.status}|ConvertTo-Json -Compress")
+    result = json.loads(_run(body))
+    assert result["artifact"] == expected
+    assert result["resolution"] == ("COMPLETE" if expected == "AVAILABLE" else "MISMATCH")
 
 
 @pytest.mark.parametrize(
@@ -421,7 +544,9 @@ def test_reverse_precheck_is_live_fail_closed_composition(
         "$previous=[pscustomobject]@{worker_version_id='previous';windows_revision=('a'*40)};"
         f"$worker=[pscustomobject]@{{status='{worker}';reason='WORKER_{worker}'}};"
         f"$windows=[pscustomobject]@{{status='{windows}';reason='WINDOWS_{windows}'}};"
-        "$result=New-ReleaseReversePrecheck -Previous $previous -WorkerArtifact $worker "
+        "$result=New-ReleaseReversePrecheck -PreviousIdentity $previous "
+        "-CommittedIdentityStatus COMPLETE -PreviousIdentityStatus COMPLETE "
+        "-WorkerArtifact $worker "
         f"-WindowsArtifact $windows -ControlBundleStatus '{bundle}' "
         f"-TransactionActive ${str(transaction).lower()} -ReleaseLockActive ${str(lock).lower()} "
         f"-OwnershipStatus '{owners}' -ActiveObservationStatus '{active_observation}' "
@@ -432,6 +557,35 @@ def test_reverse_precheck_is_live_fail_closed_composition(
     assert result["can_reverse"] is ready
     assert result["status"] == ("READY" if ready else "BLOCKED")
     assert result["reason"] == reason
+
+
+@pytest.mark.parametrize(
+    ("committed", "previous", "expected"),
+    (
+        ("INCOMPLETE", "COMPLETE", "COMMITTED_IDENTITY_INVALID"),
+        ("MISMATCH", "COMPLETE", "COMMITTED_IDENTITY_INVALID"),
+        ("COMPLETE", "INCOMPLETE", "PREVIOUS_IDENTITY_INVALID"),
+        ("COMPLETE", "UNKNOWN", "PREVIOUS_IDENTITY_INVALID"),
+        ("COMPLETE", "MISMATCH", "PREVIOUS_IDENTITY_MISMATCH"),
+    ),
+)
+def test_reverse_precheck_blocks_invalid_committed_or_previous_identity(
+    committed: str, previous: str, expected: str,
+) -> None:
+    body = (
+        "$identity=[pscustomobject]@{worker_version_id='previous'};"
+        "$artifact=[pscustomobject]@{status='AVAILABLE';reason='AVAILABLE'};"
+        "$result=New-ReleaseReversePrecheck -PreviousIdentity $identity "
+        f"-CommittedIdentityStatus '{committed}' -PreviousIdentityStatus '{previous}' "
+        "-WorkerArtifact $artifact -WindowsArtifact $artifact "
+        "-ControlBundleStatus AVAILABLE -OwnershipStatus SINGLE_OWNER "
+        "-ActiveObservationStatus AVAILABLE -ActiveIdentityStatus COMPLETE "
+        "-ActiveMatchesCommitted $true;"
+        "$result|ConvertTo-Json -Compress"
+    )
+    result = json.loads(_run(body))
+    assert result["can_reverse"] is False
+    assert result["reason"] == expected
 
 
 @pytest.mark.parametrize("health", ("HEALTHY", "DEGRADED"))

@@ -4555,7 +4555,7 @@ def test_rollback_target_uses_exact_view_when_recent_list_is_truncated(
         f"function Get-CloudflareDeployment{{'{deployment_json}'|ConvertFrom-Json}};"
         f"$target=[pscustomobject]@{{worker_version_id='{stable}';git_sha=('a'*40);"
         "worker_git_sha=('a'*40);windows_revision=('a'*40);"
-        "artifact_kind='PRODUCTION_CANDIDATE'};"
+        "artifact_kind='PRODUCTION_CANDIDATE';branch='main'};"
         "$passed=Test-CloudflareRollbackTarget -Target $target;"
         'Write-Output "$passed,$script:listCalled"',
         powershell=powershell,
@@ -4622,8 +4622,11 @@ def test_rollback_exact_lookup_provider_failure_taxonomy(
     result = _run_control_center_contract(
         tmp_path,
         f"function Get-CloudflareVersionDetails{{throw '{diagnostic}'}};"
-        "$target=[pscustomobject]@{worker_version_id='11111111-1111-4111-8111-111111111111'};"
-        "$result=Get-CloudflareRollbackArtifactObservation $target;"
+        "$target=[pscustomobject]@{worker_version_id='11111111-1111-4111-8111-111111111111';"
+        "git_sha=('a'*40);worker_git_sha=('a'*40);windows_revision=('a'*40);"
+        "artifact_kind='PRODUCTION_CANDIDATE';branch='main'};"
+        "$identity=Resolve-ReleaseRuntimeIdentity $target;"
+        "$result=Get-CloudflareRollbackArtifactObservation -IdentityResolution $identity -ForceFresh;"
         'Write-Output "$($result.status),$($result.reason)"',
     )
     assert result == f"{expected},WORKER_VERSION_PROVIDER_{expected}"
@@ -4744,6 +4747,137 @@ def test_runtime_composition_allows_degraded_safe_reverse(
     assert result == "DEGRADED,True,True,READY"
 
 
+@pytest.mark.parametrize(
+    "powershell", [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
+def test_provider_observation_cache_bounds_fast_gui_refreshes(
+    tmp_path, powershell: str,
+) -> None:
+    active = "11111111-1111-4111-8111-111111111111"
+    previous = "22222222-2222-4222-8222-222222222222"
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:deployReads=0;$script:versionReads=0;"
+        f"function Get-CloudflareDeployment{{$script:deployReads++;[pscustomobject]@{{versions=@("
+        f"[pscustomobject]@{{version_id='{active}';percentage=100}})}}}};"
+        "function Get-CloudflareVersionDetails{param($VersionId);$script:versionReads++;"
+        "[pscustomobject]@{id=$VersionId;metadata=[pscustomobject]@{source='wrangler'};"
+        "annotations=[pscustomobject]@{'workers/message'=('release:'+('a'*40)+' branch:main artifact_kind:PRODUCTION_CANDIDATE')};"
+        "resources=[pscustomobject]@{script=[pscustomobject]@{handlers=@('fetch')}}}};"
+        "function Get-RuntimeCodeState{[pscustomobject]@{applied_revision=('a'*40)}};"
+        "function Get-ReleaseActiveHealthObservation{[pscustomobject]@{status='HEALTHY';"
+        "business_health_status='HEALTHY';business_health_reason='OK';"
+        "reason='OK';ownership_status='SINGLE_OWNER'}};"
+        "function Get-ReleaseWindowsArtifactObservation{[pscustomobject]@{status='AVAILABLE';reason='OK'}};"
+        "function Get-RuntimeControlBundleIdentity{[pscustomobject]@{exact_revision=$true}};"
+        f"$stable=[pscustomobject]@{{git_sha=('a'*40);worker_git_sha=('a'*40);worker_version_id='{active}';"
+        "windows_revision=('a'*40);branch='main';artifact_kind='PRODUCTION_CANDIDATE'};"
+        f"$previous=[pscustomobject]@{{git_sha=('a'*40);worker_git_sha=('a'*40);worker_version_id='{previous}';"
+        "windows_revision=('a'*40);branch='main';artifact_kind='PRODUCTION_CANDIDATE'};"
+        "$state=[pscustomobject]@{schema_version='stable-candidate-release-v3';stable=$stable;"
+        "previous_stable=$previous;candidate=$null;transaction=$null};"
+        "1..6|%{$null=Get-CurrentReleaseRuntimeReadModel -PersistedState $state};"
+        "$null=Get-CurrentReleaseRuntimeReadModel -PersistedState $state -ForceProviderRefresh;"
+        'Write-Output "$script:deployReads,$script:versionReads"', powershell=powershell,
+    )
+    assert result == "2,4"
+
+
+@pytest.mark.parametrize(
+    "powershell", [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
+def test_immutable_exact_version_fact_survives_independent_transport_failure(
+    tmp_path, powershell: str,
+) -> None:
+    version = "11111111-1111-4111-8111-111111111111"
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:reads=0;"
+        f"function Get-CloudflareVersionDetails{{param($VersionId);$script:reads++;"
+        f"[pscustomobject]@{{id='{version}'}}}};"
+        f"$first=Get-ReleaseExactVersionProviderObservation -VersionId '{version}';"
+        "function Get-CloudflareVersionDetails{param($VersionId);$script:reads++;throw 'transport'};"
+        f"$failed=Get-ReleaseExactVersionProviderObservation -VersionId '{version}' -ForceFresh;"
+        f"$reused=Get-ReleaseExactVersionProviderObservation -VersionId '{version}';"
+        'Write-Output "$($first.status),$($failed.status),$($reused.status),$script:reads"',
+        powershell=powershell,
+    )
+    assert result == "AVAILABLE,UNKNOWN,AVAILABLE,2"
+
+
+def test_exact_version_lookup_binds_account_worker_and_script_scope(tmp_path) -> None:
+    version = "11111111-1111-4111-8111-111111111111"
+    result = _run_control_center_contract(
+        tmp_path,
+        "$cli=Join-Path $repositoryRoot 'web\\node_modules\\wrangler\\bin\\wrangler.js';"
+        "New-Item -ItemType Directory -Path (Split-Path -Parent $cli) -Force|Out-Null;"
+        "New-Item -ItemType File -Path $cli -Force|Out-Null;"
+        "[Environment]::SetEnvironmentVariable('CLOUDFLARE_ACCOUNT_ID','prior','Process');"
+        "$script:seenAccount='';$script:seenArguments=@();"
+        "function Invoke-Utf8NativeProcess{param($FilePath,$Arguments,$WorkingDirectory);"
+        "$script:seenAccount=[Environment]::GetEnvironmentVariable('CLOUDFLARE_ACCOUNT_ID','Process');"
+        "$script:seenArguments=@($Arguments);"
+        f"[pscustomobject]@{{exit_code=0;stdout='{{\"id\":\"{version}\"}}'}}}};"
+        f"$result=Get-CloudflareVersionDetails -VersionId '{version}';"
+        "$restored=[Environment]::GetEnvironmentVariable('CLOUDFLARE_ACCOUNT_ID','Process');"
+        'Write-Output "$script:seenAccount|$restored|$($script:seenArguments -join \'|\')"',
+    )
+    assert result == (
+        "48ce531f39e2310b4c858c8916a01d51|prior|"
+        f"{tmp_path / 'repository' / 'web' / 'node_modules' / 'wrangler' / 'bin' / 'wrangler.js'}"
+        f"|versions|view|{version}|--name|aurum-signal-room|--json"
+    )
+
+
+def test_mutable_deployment_observation_refreshes_after_ttl(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:reads=0;function Get-CloudflareDeployment{$script:reads++;"
+        "[pscustomobject]@{versions=@()}};"
+        "$null=Get-ReleaseDeploymentProviderObservation;"
+        "$script:releaseDeploymentObservationCache.attempted_at="
+        "([DateTimeOffset]::UtcNow-[TimeSpan]::FromMinutes(2)).ToString('o');"
+        "$null=Get-ReleaseDeploymentProviderObservation;Write-Output $script:reads",
+    )
+    assert result == "2"
+
+
+def test_winforms_splits_fast_local_and_slow_provider_refreshes() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    winforms = source.split("function Show-ControlCenter {", 1)[1]
+    assert '"-SkipProviderObservation"' in winforms
+    assert "function Request-GuiReleaseStatus" in winforms
+    assert "$releaseProviderObservationInterval.TotalSeconds" in winforms
+    assert "if ($script:winFormsProviderRefreshInFlight) { return }" in winforms
+    assert "Get-ReleaseControlStatusSnapshot `" in winforms
+    assert "Request-GuiStatus -ForceProviderRefresh" in winforms
+
+
+def test_reverse_action_bypasses_provider_cache_after_lock() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    body = source.split("function Invoke-ReverseStable", 1)[1].split(
+        "function Reconcile-ReleaseControlState", 1,
+    )[0]
+    assert body.index("Enter-ReleaseTransactionLock") < body.index("-ForceProviderRefresh")
+    assert "$target = $runtimeReadModel.previous_committed" in body
+    assert "$target = $state.previous_stable" not in body
+
+
+def test_fresh_action_observation_never_falls_back_to_inflight_gui_cache(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:releaseProviderRefreshInFlight=$true;"
+        "$script:releaseDeploymentObservationCache=[pscustomobject]@{status='AVAILABLE';"
+        "value=[pscustomobject]@{versions=@()};observed_at=[DateTimeOffset]::UtcNow.ToString('o');"
+        "attempted_at=[DateTimeOffset]::UtcNow.ToString('o')};"
+        "$state=[pscustomobject]@{schema_version='stable-candidate-release-v3';"
+        "stable=$null;previous_stable=$null;candidate=$null;transaction=$null};"
+        "$model=Get-CurrentReleaseRuntimeReadModel -PersistedState $state -ForceProviderRefresh;"
+        'Write-Output "$($model.active.observation_status),$($model.previous.reverse_precheck.reason)"',
+    )
+    assert result == "UNKNOWN,COMMITTED_IDENTITY_INVALID"
+
+
 def test_all_operator_and_json_consumers_preserve_membership_enum() -> None:
     source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
     assert source.count("previous_traffic_membership_status") >= 3
@@ -4752,6 +4886,39 @@ def test_all_operator_and_json_consumers_preserve_membership_enum() -> None:
     release_json = source.split('"ReleaseStatusJson" {', 1)[1].split('"CodeRevision" {', 1)[0]
     assert "Get-ReleaseControlStatusSnapshot" in status_json
     assert "Get-ReleaseControlStatusSnapshot" in release_json
+    wpf = source.split("function Show-WpfControlCenter", 1)[1].split(
+        "function Show-ControlCenter", 1,
+    )[0]
+    winforms = source.split("function Show-ControlCenter", 1)[1]
+    assert "Get-ControlCenterReleasePresentation" in wpf
+    assert "Get-ControlCenterReleasePresentation" in winforms
+
+
+@pytest.mark.parametrize(
+    ("business", "ownership", "overall", "expected"),
+    (
+        ("HEALTHY", "SINGLE_OWNER", "HEALTHY", "STABLE"),
+        ("DEGRADED", "SINGLE_OWNER", "DEGRADED", "DEGRADED"),
+        ("HEALTHY", "INVALID", "DEGRADED", "DEGRADED"),
+        ("HEALTHY", "UNKNOWN", "UNKNOWN", "UNKNOWN"),
+    ),
+)
+def test_shared_presenter_requires_health_and_single_ownership_for_stable(
+    tmp_path, business: str, ownership: str, overall: str, expected: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$stable=[pscustomobject]@{git_sha=('a'*40)};"
+        "$runtime=[pscustomobject]@{drift_status='MATCHED';active_matches_committed=$true;"
+        f"active=[pscustomobject]@{{observation_status='AVAILABLE';identity_status='COMPLETE';"
+        f"health='{overall}';business_health_status='{business}';ownership_status='{ownership}'}};"
+        "previous=[pscustomobject]@{reverse_precheck=[pscustomobject]@{can_reverse=$true;reason='READY'}}};"
+        "$release=[pscustomobject]@{stable=$stable;candidate=$null;transaction=$null;"
+        "deployment_status='READY';release_runtime=$runtime};"
+        "$view=Get-ControlCenterReleasePresentation -Release $release;"
+        'Write-Output "$($view.stable_state),$($view.active_business_health),$($view.active_ownership_status)"',
+    )
+    assert result == f"{expected},{business},{ownership}"
 
 
 def test_rollback_artifact_availability_does_not_require_deployment_membership(tmp_path) -> None:
@@ -4776,7 +4943,7 @@ def test_rollback_artifact_availability_does_not_require_deployment_membership(t
         f"function Get-CloudflareDeployment{{'{deployment_json}'|ConvertFrom-Json}};"
         f"$target=[pscustomobject]@{{worker_version_id='{stable}';git_sha=('a'*40);"
         "worker_git_sha=('a'*40);windows_revision=('a'*40);"
-        "artifact_kind='PRODUCTION_CANDIDATE'};"
+        "artifact_kind='PRODUCTION_CANDIDATE';branch='main'};"
         "Write-Output (Test-CloudflareRollbackTarget -Target $target)",
     )
 
@@ -4794,11 +4961,39 @@ def test_rollback_artifact_lookup_does_not_consume_deployment_transport(tmp_path
         "function Get-CloudflareDeployment{throw 'PROVIDER_TRANSPORT_FAILED'};"
         f"$target=[pscustomobject]@{{worker_version_id='{stable}';git_sha=('a'*40);"
         "worker_git_sha=('a'*40);windows_revision=('a'*40);"
-        "artifact_kind='PRODUCTION_CANDIDATE'};"
+        "artifact_kind='PRODUCTION_CANDIDATE';branch='main'};"
         "Write-Output (Test-CloudflareRollbackTarget -Target $target)",
     )
 
     assert result == "True"
+
+
+@pytest.mark.parametrize(
+    "powershell", [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
+def test_windows_legacy_adapter_consumes_exact_resolved_pair(
+    tmp_path, powershell: str,
+) -> None:
+    revision = "783d25314b090dd7fbbf124777c3b8de517d2b85"
+    worker = "76d314fc-e484-4f50-8ace-3689e0896709"
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Invoke-Utf8NativeProcess{param($FilePath,$Arguments);"
+        "if('show' -in $Arguments){[pscustomobject]@{exit_code=1;stdout=''}}"
+        "else{[pscustomobject]@{exit_code=0;stdout=''}}};"
+        f"$exact=[pscustomobject]@{{git_sha='{revision}';worker_git_sha='NOT_RECORDED';"
+        f"worker_version_id='{worker}';windows_revision='{revision}';"
+        "artifact_kind='LEGACY_BOOTSTRAP_STABLE';branch='main';"
+        "provenance_state='LEGACY_EXACT_WORKER_WINDOWS_PAIR'};"
+        "$wrong=$exact|Select-Object *;$wrong.provenance_state='ARBITRARY';"
+        "$exactResult=Get-ReleaseWindowsArtifactObservation -IdentityResolution "
+        "(Resolve-ReleaseRuntimeIdentity $exact);"
+        "$wrongResult=Get-ReleaseWindowsArtifactObservation -IdentityResolution "
+        "(Resolve-ReleaseRuntimeIdentity $wrong);"
+        'Write-Output "$($exactResult.status),$($wrongResult.status)"',
+        powershell=powershell,
+    )
+    assert result == "AVAILABLE,MISMATCH"
 
 
 def test_bootstrap_watermark_uses_newest_valid_timestamp_then_version_id(tmp_path) -> None:
@@ -5247,7 +5442,9 @@ def test_reverse_restores_both_identities_without_d1_mutation(tmp_path) -> None:
         "$state.stable=$state.candidate;$state.candidate=$null;Write-ReleaseControlState $state;"
         "function Enter-ReleaseTransactionLock { return $true };function Exit-ReleaseTransactionLock {};"
         "function Assert-ActiveControlBundle { return [pscustomobject]@{exact_revision=$true} };"
-        "function Get-CurrentReleaseRuntimeReadModel { return [pscustomobject]@{previous="
+        "function Get-CurrentReleaseRuntimeReadModel { $live=Get-ReleaseControlState;"
+        "return [pscustomobject]@{committed_stable=$live.stable;"
+        "previous_committed=$live.previous_stable;previous="
         "[pscustomobject]@{reverse_precheck=[pscustomobject]@{can_reverse=$true;reason='READY'}}} };"
         "function Test-SingleProductionOwner { return $true };"
         f"function New-RuntimeRecoveryPlan {{ return [pscustomobject]@{{body="

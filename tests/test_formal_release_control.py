@@ -207,6 +207,12 @@ def test_runtime_read_model_formal_shard_separates_observation_from_authority() 
         "UnknownActiveObservationFailsClosed",
         "ActiveDriftFailsClosed",
         "DegradedAuthorityAllowsReverse",
+        "InvalidCommittedIdentityFailsClosed",
+        "InvalidPreviousIdentityFailsClosed",
+        "ArbitraryLegacyLabelFailsClosed",
+        "ExactNarrowLegacyReachesArtifactEvaluation",
+        "InvalidOwnershipFailsClosed",
+        "MissingObservationStatusIsNotAvailable",
         "ReadObservationDoesNotMutateRelease",
         "ReadModelNeverChangesCommittedOrLkg",
     ):
