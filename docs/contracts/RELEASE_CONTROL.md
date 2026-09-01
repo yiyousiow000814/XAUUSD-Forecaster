@@ -653,7 +653,9 @@ Reverse transaction. The legacy bootstrap exception is one fixed,
 non-recombinable Worker/Git/Windows/provenance pair; a legacy label is never
 authority. Invalid Committed and Previous identities fail closed independently.
 
-Active health separates business health from production ownership. `STABLE`
+Active health composes one business-health observation and one production-owner
+observation; the business probe never reads ownership or recovery authority.
+`STABLE`
 requires explicit available Worker and Windows observations, a complete Active
 identity matching Committed, healthy business runtime, exactly one production
 owner, and no unresolved drift. Degraded business health does not by itself
@@ -662,13 +664,19 @@ always prevents a stable presentation and blocks Reverse.
 
 Operator refresh has two cadences. Local service and operation state may refresh
 every five to ten seconds. Mutable provider deployment observation refreshes no
-more often than every thirty seconds, and immutable exact Version facts are
-reused by Version ID inside the observing process. WinForms keeps its ten-second
-local snapshot in a child process but owns provider observation in the persistent
-GUI process, so the local timer cannot query the provider. Provider caches are
-advisory and process-local only. Manual refresh may
-request one fresh provider observation, while Reverse always bypasses UI caches
-after acquiring the release lock.
+more often than every thirty seconds. WPF and WinForms execute provider reads in
+one shared single-flight background child with a hard wall-clock deadline;
+timeout terminates that exact process tree, returns `UNKNOWN`, and does not stop
+the local timer. Temporary result files are unique, bounded, removed on every
+completion path, and never become release authority. Only a minimally validated
+exact Version envelope (exact ID, metadata, script resource, and `fetch` handler)
+may enter the process-local immutable cache; malformed or mismatched responses
+remain retryable. Provider caches are advisory and process-local only. Manual
+refresh may request one fresh provider observation without creating a concurrent
+read, while Reverse always performs a separately bounded fresh observation after
+acquiring the release lock. Each deployment row requires a nonempty Version ID
+and a finite invariant-culture percentage in `[0, 100]`; malformed placement or
+non-singular production ownership is `MISMATCH`.
 
 The transaction lock records its process owner. A live owner is never
 preempted. An abandoned lock may be removed only after the recorded process no

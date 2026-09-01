@@ -120,6 +120,8 @@ $candidateStaticAssetMaxBytes = 1048576
 $candidateDiscoveryInterval = [TimeSpan]::FromMinutes(5)
 $releaseProviderObservationInterval = [TimeSpan]::FromSeconds(30)
 $releaseProviderObservationMaximumStaleAge = [TimeSpan]::FromSeconds(60)
+$releaseProviderCommandTimeoutMilliseconds = 20000
+$releaseProviderBackgroundDeadline = [TimeSpan]::FromSeconds(25)
 $script:releaseProviderRefreshInFlight = $false
 $script:releaseDeploymentObservationCache = $null
 $script:releaseExactVersionObservationCache = @{}
@@ -780,13 +782,30 @@ function Invoke-WranglerJson {
         )
         $read = Invoke-Utf8NativeProcess -FilePath "node.exe" `
             -Arguments (@($wranglerCli) + @($Arguments) + @("--json")) `
-            -WorkingDirectory $webRoot
+            -WorkingDirectory $webRoot `
+            -TimeoutMilliseconds $releaseProviderCommandTimeoutMilliseconds
     } finally {
         [Environment]::SetEnvironmentVariable(
             "CLOUDFLARE_ACCOUNT_ID", $priorAccountScope, "Process"
         )
     }
-    if ($read.exit_code -ne 0) { throw "Wrangler command failed." }
+    if ($read.exit_code -ne 0) {
+        $diagnostic = Protect-PreflightDiagnosticText (
+            @([string]$read.stdout, [string]$read.stderr) -join "`n"
+        )
+        $classification = if ($diagnostic -cmatch '(^|[^A-Z0-9_])VERSION_NOT_FOUND([^A-Z0-9_]|$)') {
+            "CLOUDFLARE_VERSION_NOT_FOUND"
+        } elseif ($diagnostic -match '(?i)\bHTTP(?:_STATUS| STATUS| STATUS CODE)?[ :=]+404\b') {
+            "CLOUDFLARE_HTTP_404"
+        } elseif ($diagnostic -match '(?i)\bHTTP(?:_STATUS| STATUS| STATUS CODE)?[ :=]+401\b') {
+            "CLOUDFLARE_HTTP_401"
+        } elseif ($diagnostic -match '(?i)\bHTTP(?:_STATUS| STATUS| STATUS CODE)?[ :=]+403\b') {
+            "CLOUDFLARE_HTTP_403"
+        } elseif ($diagnostic -match '(?i)(\bHTTP(?:_STATUS| STATUS| STATUS CODE)?[ :=]+429\b|rate limit)') {
+            "CLOUDFLARE_RATE_LIMITED"
+        } else { "CLOUDFLARE_WRANGLER_COMMAND_FAILED" }
+        throw $classification
+    }
     $read.stdout | ConvertFrom-ReleaseControlJson
 }
 
@@ -1209,7 +1228,8 @@ function Invoke-Utf8NativeProcess {
         [Parameter(Mandatory = $true)][string]$FilePath,
         [string[]]$Arguments = @(),
         [string]$WorkingDirectory = "",
-        [hashtable]$Environment = @{}
+        [hashtable]$Environment = @{},
+        [ValidateRange(1, 300000)][int]$TimeoutMilliseconds = 30000
     )
     $command = Get-Command $FilePath -ErrorAction Stop
     $start = New-Object System.Diagnostics.ProcessStartInfo
@@ -1234,7 +1254,10 @@ function Invoke-Utf8NativeProcess {
         [void]$process.Start()
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
-        $process.WaitForExit()
+        if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+            Stop-NativeProcessTree -Process $process
+            throw "NATIVE_PROCESS_TIMEOUT"
+        }
         $stdout = $stdoutTask.GetAwaiter().GetResult()
         $stderr = $stderrTask.GetAwaiter().GetResult()
         return [pscustomobject]@{
@@ -10100,6 +10123,24 @@ function Test-CloudflareRollbackTarget {
     return [string]$observation.status -eq "AVAILABLE"
 }
 
+function Stop-NativeProcessTree {
+    param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
+    try { if ($Process.HasExited) { return } } catch { return }
+    try {
+        $taskkill = Get-Command "taskkill.exe" -ErrorAction Stop
+        $start = New-Object System.Diagnostics.ProcessStartInfo
+        $start.FileName = [string]$taskkill.Source
+        $start.Arguments = "/PID $($Process.Id) /T /F"
+        $start.UseShellExecute = $false
+        $start.CreateNoWindow = $true
+        $killer = [System.Diagnostics.Process]::Start($start)
+        try { [void]$killer.WaitForExit(5000) } finally { $killer.Dispose() }
+    } catch {
+        try { $Process.Kill() } catch {}
+    }
+    try { [void]$Process.WaitForExit(5000) } catch {}
+}
+
 function Get-ReleaseDeploymentProviderObservation {
     param([switch]$ForceFresh, [switch]$NoRefresh)
     $now = [DateTimeOffset]::UtcNow
@@ -10128,22 +10169,49 @@ function Get-ReleaseDeploymentProviderObservation {
         }
         return $cached
     }
+    $attemptedAt = [DateTimeOffset]::UtcNow
     try {
         $value = Get-CloudflareDeployment
+        $completedAt = [DateTimeOffset]::UtcNow
         $cached = [pscustomobject]@{
             status = "AVAILABLE"; value = $value
-            observed_at = $now.ToString("o"); attempted_at = $now.ToString("o")
+            observed_at = $completedAt.ToString("o")
+            attempted_at = $attemptedAt.ToString("o")
             reason = "CLOUDFLARE_DEPLOYMENT_OBSERVED"
         }
     } catch {
+        $completedAt = [DateTimeOffset]::UtcNow
         $cached = [pscustomobject]@{
             status = "UNKNOWN"; value = $null
-            observed_at = $now.ToString("o"); attempted_at = $now.ToString("o")
+            observed_at = $completedAt.ToString("o")
+            attempted_at = $attemptedAt.ToString("o")
             reason = "CLOUDFLARE_DEPLOYMENT_OBSERVATION_UNAVAILABLE"
         }
     }
     $script:releaseDeploymentObservationCache = $cached
     return $cached
+}
+
+function Test-ReleaseExactVersionProviderEnvelope {
+    param(
+        [Parameter(Mandatory = $true)][string]$RequestedVersionId,
+        [AllowNull()][object]$Value
+    )
+    if (-not $Value -or $Value -is [System.Array] -or
+        -not $Value.PSObject.Properties['id'] -or
+        [string]::IsNullOrWhiteSpace([string]$Value.id)) {
+        return "UNKNOWN"
+    }
+    if ([string]$Value.id -cne $RequestedVersionId) { return "MISMATCH" }
+    if (-not $Value.PSObject.Properties['metadata'] -or -not $Value.metadata -or
+        -not $Value.PSObject.Properties['resources'] -or -not $Value.resources -or
+        -not $Value.resources.PSObject.Properties['script'] -or
+        -not $Value.resources.script -or
+        -not $Value.resources.script.PSObject.Properties['handlers'] -or
+        'fetch' -notin @($Value.resources.script.handlers)) {
+        return "UNKNOWN"
+    }
+    return "AVAILABLE"
 }
 
 function Get-ReleaseExactVersionProviderObservation {
@@ -10171,22 +10239,40 @@ function Get-ReleaseExactVersionProviderObservation {
             $releaseProviderObservationInterval) {
         return $cached
     }
+    $attemptedAt = [DateTimeOffset]::UtcNow
     try {
         $value = Get-CloudflareVersionDetails -VersionId $VersionId
-        $cached = [pscustomobject]@{
-            status = "AVAILABLE"; value = $value
-            observed_at = $now.ToString("o"); attempted_at = $now.ToString("o")
-            reason = "EXACT_WORKER_VERSION_OBSERVED"
+        $completedAt = [DateTimeOffset]::UtcNow
+        $envelopeStatus = Test-ReleaseExactVersionProviderEnvelope `
+            -RequestedVersionId $VersionId -Value $value
+        $next = [pscustomobject]@{
+            status = $envelopeStatus
+            value = if ($envelopeStatus -eq "AVAILABLE") { $value } else { $null }
+            observed_at = $completedAt.ToString("o")
+            attempted_at = $attemptedAt.ToString("o")
+            reason = if ($envelopeStatus -eq "AVAILABLE") {
+                "EXACT_WORKER_VERSION_OBSERVED"
+            } elseif ($envelopeStatus -eq "MISMATCH") {
+                "EXACT_WORKER_VERSION_IDENTITY_MISMATCH"
+            } else { "EXACT_WORKER_VERSION_RESPONSE_MALFORMED" }
         }
+        if ($envelopeStatus -ne "AVAILABLE" -and $cached -and
+            [string]$cached.status -eq "AVAILABLE") {
+            return $next
+        }
+        $cached = $next
     } catch {
         $diagnostic = [string]$_.Exception.Message
-        $status = if ($diagnostic -match '(?i)(^|[:\s])(?:CLOUDFLARE_EXACT_)?VERSION_NOT_FOUND(?:[:\s]|$)' -or
+        $status = if ($diagnostic -match '(?i)(^|[:\s])(?:CLOUDFLARE_)?VERSION_NOT_FOUND(?:[:\s]|$)' -or
+            $diagnostic -eq "CLOUDFLARE_HTTP_404" -or
             $diagnostic -match '(?i)\bHTTP(?:_STATUS| STATUS| STATUS CODE)?[ :=]+404\b') {
             "UNAVAILABLE"
         } else { "UNKNOWN" }
+        $completedAt = [DateTimeOffset]::UtcNow
         $failure = [pscustomobject]@{
             status = $status; value = $null
-            observed_at = $now.ToString("o"); attempted_at = $now.ToString("o")
+            observed_at = $completedAt.ToString("o")
+            attempted_at = $attemptedAt.ToString("o")
             reason = "EXACT_WORKER_VERSION_$status"
         }
         if ($status -eq "UNKNOWN" -and $cached -and
@@ -10224,6 +10310,28 @@ function Get-CloudflareRollbackArtifactObservation {
     return $artifact
 }
 
+function ConvertFrom-ReleaseTrafficPercentage {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value -or
+        [string]::IsNullOrWhiteSpace([string]$Value)) {
+        return [pscustomobject]@{ valid = $false; value = $null }
+    }
+    $parsed = 0.0
+    $valid = [double]::TryParse(
+        [string]$Value,
+        [Globalization.NumberStyles]::Float,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [ref]$parsed
+    )
+    $valid = [bool]($valid -and -not [double]::IsNaN($parsed) -and
+        -not [double]::IsInfinity($parsed) -and $parsed -ge 0.0 -and
+        $parsed -le 100.0)
+    return [pscustomobject]@{
+        valid = $valid
+        value = if ($valid) { [double]$parsed } else { $null }
+    }
+}
+
 function Get-ReleaseTrafficObservation {
     param(
         [AllowNull()][object]$Deployment,
@@ -10242,34 +10350,61 @@ function Get-ReleaseTrafficObservation {
         }
     }
     $versions = @($Deployment.versions | Where-Object { $null -ne $_ })
-    $active = @($versions | Where-Object {
-        try { [double]$_.percentage -eq 100 } catch { $false }
+    $parsedVersions = @()
+    foreach ($version in $versions) {
+        if (-not $version.PSObject.Properties['version_id'] -or
+            [string]::IsNullOrWhiteSpace([string]$version.version_id) -or
+            -not $version.PSObject.Properties['percentage']) {
+            return [pscustomobject]@{
+                status = "MISMATCH"; version_id = $null; git_sha = $null
+                traffic_percent = $null; previous_is_member = $false
+                previous_membership_status = "MISMATCH"
+                previous_traffic_percent = $null
+            }
+        }
+        $percentage = ConvertFrom-ReleaseTrafficPercentage $version.percentage
+        if (-not $percentage.valid) {
+            return [pscustomobject]@{
+                status = "MISMATCH"; version_id = $null; git_sha = $null
+                traffic_percent = $null; previous_is_member = $false
+                previous_membership_status = "MISMATCH"
+                previous_traffic_percent = $null
+            }
+        }
+        $parsedVersions += [pscustomobject]@{
+            version_id = [string]$version.version_id
+            percentage = [double]$percentage.value
+            raw = $version
+        }
+    }
+    $active = @($parsedVersions | Where-Object { $_.percentage -eq 100.0 })
+    $otherPositive = @($parsedVersions | Where-Object {
+        $_.percentage -gt 0.0 -and $_.percentage -lt 100.0
     })
-    if ($active.Count -ne 1 -or
-        [string]::IsNullOrWhiteSpace([string]$active[0].version_id)) {
+    if ($active.Count -ne 1 -or $otherPositive.Count -gt 0) {
         return [pscustomobject]@{
-            status = if ($active.Count -gt 1) { "MISMATCH" } else { "UNKNOWN" }
+            status = "MISMATCH"
             version_id = $null; git_sha = $null
             traffic_percent = $null; previous_is_member = $false
-            previous_membership_status = $notObservedMembership
+            previous_membership_status = if ($previousId) { "MISMATCH" } else {
+                "NOT_APPLICABLE"
+            }
             previous_traffic_percent = $null
         }
     }
-    $previousRows = @($versions | Where-Object {
+    $previousRows = @($parsedVersions | Where-Object {
         $previousId -and [string]$_.version_id -ceq $previousId
     })
     $membershipStatus = if (-not $previousId) {
         "NOT_APPLICABLE"
     } elseif ($previousRows.Count -eq 0) {
         "NOT_ASSIGNED"
-    } elseif ($previousRows.Count -eq 1) {
-        try { $null = [double]$previousRows[0].percentage; "ASSIGNED" } catch { "MISMATCH" }
-    } else { "MISMATCH" }
+    } elseif ($previousRows.Count -eq 1) { "ASSIGNED" } else { "MISMATCH" }
     [pscustomobject]@{
         status = "AVAILABLE"
         version_id = [string]$active[0].version_id
-        git_sha = if ($active[0].PSObject.Properties['git_sha']) {
-            [string]$active[0].git_sha
+        git_sha = if ($active[0].raw.PSObject.Properties['git_sha']) {
+            [string]$active[0].raw.git_sha
         } else { $null }
         traffic_percent = [double]$active[0].percentage
         previous_is_member = [bool]($membershipStatus -eq "ASSIGNED")
@@ -10341,7 +10476,7 @@ function Get-ReleaseWindowsArtifactObservation {
 
 function Get-ReleaseActiveHealthObservation {
     $ownerStatus = if (Test-SingleProductionOwner) { "SINGLE_OWNER" } else { "INVALID" }
-    $healthy = Test-CurrentStableRuntimeHealth
+    $healthy = Test-CurrentBusinessRuntimeHealth
     $businessStatus = if ($healthy) { "HEALTHY" } else { "DEGRADED" }
     $businessReason = if ($healthy) {
         "CURRENT_RUNTIME_HEALTHY"
@@ -10574,13 +10709,17 @@ function New-PromotionFreshnessStep {
     }
 }
 
-function Test-CurrentStableRuntimeHealth {
-    if (-not (Test-SingleProductionOwner)) { return $false }
+function Test-CurrentBusinessRuntimeHealth {
     try {
         $response = Invoke-WebRequest -UseBasicParsing `
             -Uri "http://127.0.0.1:8765/api/health" -TimeoutSec 2
         return [int]$response.StatusCode -eq 200
     } catch { return $false }
+}
+
+function Test-CurrentStableRuntimeHealth {
+    return [bool]((Test-CurrentBusinessRuntimeHealth) -and
+        (Test-SingleProductionOwner))
 }
 
 function Invoke-PromotionFreshnessCoordinator {
@@ -14792,12 +14931,14 @@ function Get-ControlCenterSummaryPresentation {
         [string]$Snapshot.release.deployment_status
     } else { "UNAVAILABLE" }
     $overall = if (
+        [string]$releaseView.stable_state -eq "DRIFT" -or
         $deploymentState -match "FAILED|DRIFT|RECOVERY" -or
         ($serviceRows.Count -gt 0 -and $unhealthyCount -eq $serviceRows.Count)
     ) {
         "FAILED"
     } elseif (
         $unhealthyCount -gt 0 -or $deploymentState -ne "READY" -or
+        [string]$releaseView.stable_state -ne "STABLE" -or
         $releaseView.candidate_state -in @("FAILED", "CHECKS_BLOCKED")
     ) {
         "DEGRADED"
@@ -14818,6 +14959,104 @@ function Get-ControlCenterSummaryPresentation {
         candidate_state = $releaseView.candidate_state
         last_refresh = $captured
     }
+}
+
+function Start-ControlCenterProviderObservationProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedControlRevision
+    )
+    $identity = [guid]::NewGuid().ToString("N")
+    $resultPath = Join-Path $env:TEMP "xauusd-provider-observation-$identity.json"
+    $outputPath = Join-Path $env:TEMP "xauusd-provider-observation-$identity.out"
+    $errorPath = Join-Path $env:TEMP "xauusd-provider-observation-$identity.err"
+    $arguments = @(
+        "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
+        "-File", ('"{0}"' -f $PSCommandPath), "-Action", "ReleaseStatusJson",
+        "-StatusPath", ('"{0}"' -f $resultPath),
+        "-RuntimeRoot", ('"{0}"' -f $moduleRoot),
+        "-RepositoryRoot", ('"{0}"' -f $repositoryRoot),
+        "-ExpectedControlScriptPath", ('"{0}"' -f $PSCommandPath),
+        "-ExpectedControlRevision", $ExpectedControlRevision
+    )
+    try {
+        $process = Start-Process -FilePath "powershell.exe" `
+            -ArgumentList $arguments -WorkingDirectory $moduleRoot `
+            -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput $outputPath -RedirectStandardError $errorPath
+        $startedAt = [DateTimeOffset]::UtcNow
+        return [pscustomobject]@{
+            process = $process
+            result_path = $resultPath
+            output_path = $outputPath
+            error_path = $errorPath
+            attempted_at = $startedAt.ToString("o")
+            deadline_at = $startedAt.Add($releaseProviderBackgroundDeadline).ToString("o")
+        }
+    } catch {
+        Remove-Item -LiteralPath $resultPath,$outputPath,$errorPath `
+            -Force -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
+function Complete-ControlCenterProviderObservationProcess {
+    param([Parameter(Mandatory = $true)][object]$Observation)
+    $process = $Observation.process
+    $completedAt = [DateTimeOffset]::UtcNow
+    if (-not $process.HasExited -and $completedAt -lt
+        [DateTimeOffset]::Parse([string]$Observation.deadline_at)) {
+        return [pscustomobject]@{ state = "PENDING"; release = $null }
+    }
+    $state = "UNKNOWN"
+    $release = $null
+    try {
+        if (-not $process.HasExited) {
+            Stop-NativeProcessTree -Process $process
+            $state = "TIMEOUT"
+        } else {
+            $process.WaitForExit()
+            if ([int]$process.ExitCode -eq 0 -and
+                (Test-Path -LiteralPath $Observation.result_path)) {
+                $release = Get-Content -LiteralPath $Observation.result_path `
+                    -Raw -Encoding UTF8 | ConvertFrom-ReleaseControlJson
+                if ($release) { $state = "COMPLETED" }
+            }
+        }
+    } catch { $state = "UNKNOWN" } finally {
+        try { $process.Dispose() } catch {}
+        Remove-Item -LiteralPath `
+            $Observation.result_path,$Observation.output_path,$Observation.error_path `
+            -Force -ErrorAction SilentlyContinue
+    }
+    return [pscustomobject]@{
+        state = $state
+        release = $release
+        attempted_at = [string]$Observation.attempted_at
+        observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+}
+
+function Merge-ControlCenterProviderObservation {
+    param(
+        [AllowNull()][object]$LocalRelease,
+        [AllowNull()][object]$ProviderRelease
+    )
+    if (-not $LocalRelease -or -not $ProviderRelease -or
+        -not $ProviderRelease.release_runtime) { return $LocalRelease }
+    $sameStable = Test-ReleaseRuntimeIdentityEqual `
+        $LocalRelease.stable $ProviderRelease.stable
+    $samePrevious = if (-not $LocalRelease.previous_stable -and
+        -not $ProviderRelease.previous_stable) {
+        $true
+    } else {
+        Test-ReleaseRuntimeIdentityEqual `
+            $LocalRelease.previous_stable $ProviderRelease.previous_stable
+    }
+    if ($sameStable -and $samePrevious) {
+        $LocalRelease | Add-Member -NotePropertyName release_runtime `
+            -NotePropertyValue $ProviderRelease.release_runtime -Force
+    }
+    return $LocalRelease
 }
 
 function Import-WpfControlCenterWindow {
@@ -15454,6 +15693,9 @@ function Show-WpfControlCenter {
         $script:wpfOperationResultPath = ""
         $script:wpfOperationExpectedRelease = $null
         $script:wpfOperationValidationKey = ""
+        $script:wpfProviderObservation = $null
+        $script:wpfLastProviderRequest = [DateTime]::MinValue
+        $script:wpfLastProviderRelease = $null
         function Test-WpfOperationActive {
             return [bool]$script:wpfOperation
         }
@@ -15543,8 +15785,29 @@ function Show-WpfControlCenter {
                     (Protect-PreflightDiagnosticText $_.Exception.Message)
             }
         }
+        function Request-WpfProviderRefresh {
+            param([switch]$ForceFresh)
+            if ($script:wpfProviderObservation) { return }
+            if (-not $ForceFresh -and
+                ((Get-Date) - $script:wpfLastProviderRequest).TotalSeconds -lt
+                    $releaseProviderObservationInterval.TotalSeconds) { return }
+            $script:wpfProviderObservation =
+                Start-ControlCenterProviderObservationProcess `
+                    -ExpectedControlRevision ([string]$controlIdentity.source_revision)
+            $script:wpfLastProviderRequest = Get-Date
+        }
+        function Update-WpfProviderObservation {
+            if (-not $script:wpfProviderObservation) { return }
+            $result = Complete-ControlCenterProviderObservationProcess `
+                -Observation $script:wpfProviderObservation
+            if ([string]$result.state -eq "PENDING") { return }
+            $script:wpfProviderObservation = $null
+            if ([string]$result.state -eq "COMPLETED") {
+                $script:wpfLastProviderRelease = $result.release
+            }
+            Refresh-WpfStatus
+        }
         function Refresh-WpfStatus {
-            param([switch]$ForceProviderRefresh)
             $status = @(Get-ForecasterStatus)
             $controlBundle = Get-RuntimeControlBundleIdentity
             (Find-WpfControl "ControlPlaneIdentity").Text = if ($controlBundle) {
@@ -15556,11 +15819,19 @@ function Show-WpfControlCenter {
             (Find-WpfControl "ServiceList").ItemsSource = @($status | ForEach-Object {
                 [pscustomobject]@{ Key = $_.Key; Name = $_.Component; State = $_.State }
             })
-            $bad = @($status | Where-Object { $_.State -match "STOPPED|ERROR|STALE|OFFLINE" }).Count
-            (Find-WpfControl "OverallState").Text = if ($bad) { "DEGRADED" } else { "HEALTHY" }
             (Find-WpfControl "RefreshTime").Text = [DateTime]::Now.ToString("HH:mm:ss")
-            $release = Get-ReleaseControlStatusSnapshot `
-                -ForceProviderRefresh:$ForceProviderRefresh
+            $release = Get-ReleaseControlStatusSnapshot -SkipProviderObservation
+            $release = Merge-ControlCenterProviderObservation `
+                -LocalRelease $release `
+                -ProviderRelease $script:wpfLastProviderRelease
+            $summary = Get-ControlCenterSummaryPresentation -Snapshot (
+                [pscustomobject]@{
+                    captured_at = [DateTimeOffset]::UtcNow.ToString("o")
+                    services = $status
+                    release = $release
+                }
+            )
+            (Find-WpfControl "OverallState").Text = [string]$summary.overall
             $releaseView = Get-ControlCenterReleasePresentation -Release $release
             (Find-WpfControl "StableState").Text = if ($release -and $release.stable) {
                 [string]$releaseView.stable_state
@@ -15650,7 +15921,8 @@ function Show-WpfControlCenter {
         }
         (Find-WpfControl "RefreshButton").Add_Click({
             [void](Invoke-ControlCenterUiCallback -Callback {
-                Refresh-WpfStatus -ForceProviderRefresh
+                Request-WpfProviderRefresh -ForceFresh
+                Refresh-WpfStatus
             } `
                 -OnFailure { param($message) Show-WpfCallbackFailure $message })
         })
@@ -15742,13 +16014,17 @@ function Show-WpfControlCenter {
         $timer = New-Object Windows.Threading.DispatcherTimer
         $timer.Interval = [TimeSpan]::FromSeconds(5)
         $timer.Add_Tick({
-            [void](Invoke-ControlCenterUiCallback -Callback { Refresh-WpfStatus } `
+            [void](Invoke-ControlCenterUiCallback -Callback {
+                Request-WpfProviderRefresh
+                Refresh-WpfStatus
+            } `
                 -OnFailure { param($message) Show-WpfCallbackFailure $message })
         })
         $operationTimer = New-Object Windows.Threading.DispatcherTimer
         $operationTimer.Interval = [TimeSpan]::FromMilliseconds(400)
         $operationTimer.Add_Tick({
             [void](Invoke-ControlCenterUiCallback -Callback {
+                Update-WpfProviderObservation
                 if (-not $script:wpfOperation -or -not $script:wpfOperation.HasExited) {
                     return
                 }
@@ -15823,7 +16099,16 @@ function Show-WpfControlCenter {
                 } catch {}
             }
         })
-        $window.Add_Closed({ $timer.Stop(); $operationTimer.Stop() })
+        $window.Add_Closed({
+            $timer.Stop()
+            $operationTimer.Stop()
+            if ($script:wpfProviderObservation) {
+                Stop-NativeProcessTree -Process $script:wpfProviderObservation.process
+                $null = Complete-ControlCenterProviderObservationProcess `
+                    -Observation $script:wpfProviderObservation
+                $script:wpfProviderObservation = $null
+            }
+        })
         $window.Add_ContentRendered({
             if (-not $script:wpfUiStartedRecorded) {
                 $script:wpfUiStartedRecorded = $true
@@ -15832,6 +16117,7 @@ function Show-WpfControlCenter {
                 })
             }
         })
+        Request-WpfProviderRefresh
         Refresh-WpfStatus
         $timer.Start()
         $operationTimer.Start()
@@ -16615,7 +16901,7 @@ function Show-ControlCenter {
 
     $statusSnapshotPath = Join-Path $env:TEMP ("xauusd-control-status-{0}.json" -f $PID)
     $script:statusRefreshProcess = $null
-    $script:winFormsProviderRefreshInFlight = $false
+    $script:winFormsProviderObservation = $null
     $script:lastStatusRequest = [DateTime]::MinValue
     $script:lastReleaseRequest = [DateTime]::MinValue
     $script:lastGuiRelease = $null
@@ -16786,18 +17072,29 @@ function Show-ControlCenter {
     }
     function Request-GuiReleaseStatus {
         param([switch]$ForceProviderRefresh)
-        if ($script:winFormsProviderRefreshInFlight) { return }
-        $script:winFormsProviderRefreshInFlight = $true
+        if ($script:winFormsProviderObservation) { return }
+        if (-not $ForceProviderRefresh -and
+            ((Get-Date) - $script:lastReleaseRequest).TotalSeconds -lt
+                $releaseProviderObservationInterval.TotalSeconds) { return }
         $script:lastReleaseRequest = Get-Date
-        try {
-            $script:lastGuiRelease = Get-ReleaseControlStatusSnapshot `
-                -ForceProviderRefresh:$ForceProviderRefresh
-            if ($script:lastGuiSnapshot) {
-                $script:lastGuiSnapshot.release = $script:lastGuiRelease
-                Apply-GuiStatus $script:lastGuiSnapshot
-            }
-        } finally {
-            $script:winFormsProviderRefreshInFlight = $false
+        $script:winFormsProviderObservation =
+            Start-ControlCenterProviderObservationProcess `
+                -ExpectedControlRevision ([string]$controlIdentity.source_revision)
+    }
+    function Update-GuiReleaseStatus {
+        if (-not $script:winFormsProviderObservation) { return }
+        $result = Complete-ControlCenterProviderObservationProcess `
+            -Observation $script:winFormsProviderObservation
+        if ([string]$result.state -eq "PENDING") { return }
+        $script:winFormsProviderObservation = $null
+        if ([string]$result.state -eq "COMPLETED") {
+            $script:lastGuiRelease = $result.release
+        }
+        if ($script:lastGuiSnapshot) {
+            $localRelease = Get-ReleaseControlStatusSnapshot -SkipProviderObservation
+            $script:lastGuiSnapshot.release = Merge-ControlCenterProviderObservation `
+                -LocalRelease $localRelease -ProviderRelease $script:lastGuiRelease
+            Apply-GuiStatus $script:lastGuiSnapshot
         }
     }
     function Request-GuiStatus {
@@ -16839,7 +17136,9 @@ function Show-ControlCenter {
                     $snapshot = Get-Content -LiteralPath $statusSnapshotPath -Raw -Encoding UTF8 |
                         ConvertFrom-ReleaseControlJson
                     if ($script:lastGuiRelease) {
-                        $snapshot.release = $script:lastGuiRelease
+                        $snapshot.release = Merge-ControlCenterProviderObservation `
+                            -LocalRelease $snapshot.release `
+                            -ProviderRelease $script:lastGuiRelease
                     }
                     Apply-GuiStatus $snapshot
                 } catch {}
@@ -16848,7 +17147,8 @@ function Show-ControlCenter {
         if (-not $script:statusRefreshProcess -and ((Get-Date) - $script:lastStatusRequest).TotalSeconds -ge 10) {
             Request-GuiStatus
         }
-        if (-not $script:winFormsProviderRefreshInFlight -and
+        Update-GuiReleaseStatus
+        if (-not $script:winFormsProviderObservation -and
             ((Get-Date) - $script:lastReleaseRequest).TotalSeconds -ge
                 $releaseProviderObservationInterval.TotalSeconds) {
             Request-GuiReleaseStatus
@@ -16947,6 +17247,13 @@ function Show-ControlCenter {
         $operationTimer.Stop()
         $activationTimer.Stop()
         $activationEvent.Dispose()
+        if ($script:winFormsProviderObservation) {
+            Stop-NativeProcessTree `
+                -Process $script:winFormsProviderObservation.process
+            $null = Complete-ControlCenterProviderObservationProcess `
+                -Observation $script:winFormsProviderObservation
+            $script:winFormsProviderObservation = $null
+        }
         Remove-Item -LiteralPath $statusSnapshotPath -Force `
             -ErrorAction SilentlyContinue
     })

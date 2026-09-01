@@ -11,21 +11,26 @@ HealthStates == {"HEALTHY", "DEGRADED", "UNKNOWN"}
 OwnershipStates == {"SINGLE_OWNER", "INVALID", "UNKNOWN"}
 
 VARIABLES committed, active, lkg, artifactStatus, trafficMembership, exactLookup,
-          activeObservationStatus, activeMatchesCommitted, controlAuthority,
+          activeObservationStatus, controlAuthority,
           businessHealth, ownershipStatus, committedIdentityValid,
           previousIdentityValid, previousIsLegacy, exactNarrowLegacyPair,
           explicitObservationStatus, transaction, observationEpoch
 vars == <<committed, active, lkg, artifactStatus, trafficMembership, exactLookup,
-          activeObservationStatus, activeMatchesCommitted, controlAuthority,
+          activeObservationStatus, controlAuthority,
           businessHealth, ownershipStatus, committedIdentityValid,
           previousIdentityValid, previousIsLegacy, exactNarrowLegacyPair,
           explicitObservationStatus, transaction, observationEpoch>>
+
+ActiveMatchesCommitted ==
+    /\ activeObservationStatus = "AVAILABLE"
+    /\ explicitObservationStatus
+    /\ active = committed
 
 SafeReverseAuthority ==
     /\ exactLookup = "EXISTS"
     /\ artifactStatus = "AVAILABLE"
     /\ activeObservationStatus = "AVAILABLE"
-    /\ activeMatchesCommitted
+    /\ ActiveMatchesCommitted
     /\ controlAuthority = "READY"
     /\ committedIdentityValid
     /\ previousIdentityValid
@@ -37,7 +42,7 @@ Init ==
     /\ committed = "OLD" /\ active = "OLD" /\ lkg = "OLD"
     /\ artifactStatus = "UNKNOWN" /\ trafficMembership = "UNKNOWN"
     /\ exactLookup = "PENDING" /\ activeObservationStatus = "UNKNOWN"
-    /\ activeMatchesCommitted = FALSE /\ controlAuthority = "BLOCKED"
+    /\ controlAuthority = "BLOCKED"
     /\ businessHealth = "UNKNOWN" /\ ownershipStatus = "UNKNOWN"
     /\ committedIdentityValid = FALSE /\ previousIdentityValid = FALSE
     /\ previousIsLegacy = FALSE /\ exactNarrowLegacyPair = FALSE
@@ -51,7 +56,6 @@ ObserveActive ==
             /\ activeObservationStatus' \in ObservationStates
        \/ /\ explicitObservationStatus' = FALSE
             /\ activeObservationStatus' = "UNKNOWN"
-    /\ activeMatchesCommitted' \in BOOLEAN
     /\ controlAuthority' \in AuthorityStates
     /\ businessHealth' \in HealthStates
     /\ ownershipStatus' \in OwnershipStates
@@ -69,7 +73,7 @@ ObserveIdentity ==
     /\ observationEpoch' = ~observationEpoch
     /\ UNCHANGED <<committed, active, lkg, artifactStatus, trafficMembership,
                     exactLookup, activeObservationStatus,
-                    activeMatchesCommitted, controlAuthority, businessHealth,
+                    controlAuthority, businessHealth,
                     ownershipStatus, explicitObservationStatus, transaction>>
 
 ExactArtifactExists ==
@@ -79,7 +83,7 @@ ExactArtifactExists ==
     /\ exactLookup' = "EXISTS" /\ artifactStatus' = "AVAILABLE"
     /\ observationEpoch' = ~observationEpoch
     /\ UNCHANGED <<committed, active, lkg, trafficMembership,
-                    activeObservationStatus, activeMatchesCommitted,
+                    activeObservationStatus,
                     controlAuthority, businessHealth, ownershipStatus,
                     committedIdentityValid, previousIdentityValid,
                     previousIsLegacy, exactNarrowLegacyPair,
@@ -90,7 +94,7 @@ ExactArtifactFails ==
     /\ artifactStatus' \in {"UNAVAILABLE", "MISMATCH", "UNKNOWN"}
     /\ observationEpoch' = ~observationEpoch
     /\ UNCHANGED <<committed, active, lkg, trafficMembership,
-                    activeObservationStatus, activeMatchesCommitted,
+                    activeObservationStatus,
                     controlAuthority, businessHealth, ownershipStatus,
                     committedIdentityValid, previousIdentityValid,
                     previousIsLegacy, exactNarrowLegacyPair,
@@ -100,7 +104,7 @@ ObservePlacement ==
     /\ ~transaction /\ trafficMembership' \in MembershipStates
     /\ observationEpoch' = ~observationEpoch
     /\ UNCHANGED <<committed, active, lkg, artifactStatus, exactLookup,
-                    activeObservationStatus, activeMatchesCommitted,
+                    activeObservationStatus,
                     controlAuthority, businessHealth, ownershipStatus,
                     committedIdentityValid, previousIdentityValid,
                     previousIsLegacy, exactNarrowLegacyPair,
@@ -111,7 +115,7 @@ BeginReverse ==
     /\ transaction' = TRUE
     /\ UNCHANGED <<committed, active, lkg, artifactStatus, trafficMembership,
                     exactLookup, activeObservationStatus,
-                    activeMatchesCommitted, controlAuthority, businessHealth,
+                    controlAuthority, businessHealth,
                     ownershipStatus, committedIdentityValid,
                     previousIdentityValid, previousIsLegacy,
                     exactNarrowLegacyPair, explicitObservationStatus,
@@ -121,7 +125,7 @@ FinishReverse ==
     /\ transaction /\ transaction' = FALSE
     /\ UNCHANGED <<committed, active, lkg, artifactStatus, trafficMembership,
                     exactLookup, activeObservationStatus,
-                    activeMatchesCommitted, controlAuthority, businessHealth,
+                    controlAuthority, businessHealth,
                     ownershipStatus, committedIdentityValid,
                     previousIdentityValid, previousIsLegacy,
                     exactNarrowLegacyPair, explicitObservationStatus,
@@ -138,7 +142,6 @@ TypeOK ==
     /\ trafficMembership \in MembershipStates
     /\ exactLookup \in LookupStates
     /\ activeObservationStatus \in ObservationStates
-    /\ activeMatchesCommitted \in BOOLEAN
     /\ controlAuthority \in AuthorityStates
     /\ businessHealth \in HealthStates
     /\ ownershipStatus \in OwnershipStates
@@ -157,7 +160,9 @@ NotAssignedAloneDoesNotMeanArtifactMissing ==
 ReverseAttemptRequiresSafeAuthority == transaction => SafeReverseAuthority
 FailedOrUnknownLookupFailsClosed == exactLookup # "EXISTS" => ~transaction
 UnknownActiveObservationFailsClosed == activeObservationStatus # "AVAILABLE" => ~transaction
-ActiveDriftFailsClosed == ~activeMatchesCommitted => ~transaction
+ActiveDriftFailsClosed == active # committed => ~transaction
+ReverseTransactionRequiresActualActiveCommittedEquality ==
+    transaction => active = committed
 SingleTransaction == transaction \in BOOLEAN
 DegradedAuthorityAllowsReverse ==
     businessHealth = "DEGRADED" /\ SafeReverseAuthority /\ ~transaction => ENABLED BeginReverse

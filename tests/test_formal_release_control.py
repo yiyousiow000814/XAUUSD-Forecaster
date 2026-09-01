@@ -206,6 +206,7 @@ def test_runtime_read_model_formal_shard_separates_observation_from_authority() 
         "FailedOrUnknownLookupFailsClosed",
         "UnknownActiveObservationFailsClosed",
         "ActiveDriftFailsClosed",
+        "ReverseTransactionRequiresActualActiveCommittedEquality",
         "DegradedAuthorityAllowsReverse",
         "InvalidCommittedIdentityFailsClosed",
         "InvalidPreviousIdentityFailsClosed",
@@ -222,3 +223,6 @@ def test_runtime_read_model_formal_shard_separates_observation_from_authority() 
     assert "accessReceipt" not in model
     assert "stagingGeneration" not in model
     assert "CommitAfterSuccessfulObservation" not in model
+    assert "activeMatchesCommitted" not in model
+    assert '/\\ active = committed' in model
+    assert "transaction => active = committed" in model

@@ -637,3 +637,24 @@ def test_owner_dot_source_declares_functions_without_io_or_filesystem_mutation(t
     )
     assert result == "Function"
     assert list(tmp_path.iterdir()) == before
+
+
+@pytest.mark.parametrize("membership", (None, "", "ILLEGAL", "assigned"))
+def test_pure_read_model_whitelists_membership_status(membership: str | None) -> None:
+    state = {
+        "schema_version": "stable-candidate-release-v3",
+        "stable": _identity("a", "stable"),
+        "previous_stable": _identity("c", "previous"),
+        "candidate": None,
+        "transaction": None,
+    }
+    active = {
+        "version_id": WORKER_IDS["stable"],
+        "git_sha": "a" * 40,
+        "windows_revision": "a" * 40,
+        "traffic_percent": 100,
+        "previous_is_member": False,
+        "previous_membership_status": membership,
+    }
+    model = json.loads(_run(_projection_script(state, active=active, health="HEALTHY")))
+    assert model["previous"]["worker_traffic_membership_status"] == "UNKNOWN"

@@ -470,6 +470,16 @@ function New-ReleaseRuntimeReadModel {
     } elseif ($healthStatus -eq "UNKNOWN") {
         "ACTIVE_HEALTH_UNKNOWN"
     } else { $null }
+    $membershipStatus = [string](
+        Get-ReleaseRuntimeProperty $ActiveWorkerObservation "previous_membership_status"
+    )
+    if (-not $previousRaw) {
+        $membershipStatus = "NOT_APPLICABLE"
+    } elseif ($membershipStatus -cnotin @(
+        "ASSIGNED", "NOT_ASSIGNED", "UNKNOWN", "MISMATCH", "NOT_APPLICABLE"
+    )) {
+        $membershipStatus = "UNKNOWN"
+    }
     [pscustomobject]@{
         schema_version = $script:ReleaseRuntimeReadModelSchema
         observed_at = $ObservedAt.ToUniversalTime().ToString("o")
@@ -521,11 +531,7 @@ function New-ReleaseRuntimeReadModel {
             worker_is_current_traffic_member = [bool](
                 Get-ReleaseRuntimeProperty $ActiveWorkerObservation "previous_is_member"
             )
-            worker_traffic_membership_status = if (
-                Get-ReleaseRuntimeProperty $ActiveWorkerObservation "previous_membership_status"
-            ) { [string]$ActiveWorkerObservation.previous_membership_status } elseif (-not $previousRaw) {
-                "NOT_APPLICABLE"
-            } else { "UNKNOWN" }
+            worker_traffic_membership_status = $membershipStatus
             current_traffic_percent = Get-ReleaseRuntimeProperty (
                 $ActiveWorkerObservation
             ) "previous_traffic_percent"
