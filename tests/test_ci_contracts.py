@@ -5,12 +5,17 @@ import json
 from pathlib import Path
 import re
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 WINDOWS_MANIFEST = json.loads(
     (ROOT / ".github" / "windows-runtime-shards.json").read_text(encoding="utf-8")
+)
+PYTHON_MANIFEST = json.loads(
+    (ROOT / ".github" / "python-test-shards.json").read_text(encoding="utf-8")
 )
 
 
@@ -127,6 +132,81 @@ def test_windows_runtime_runner_emits_bounded_machine_evidence() -> None:
         '"test_selectors"',
     ):
         assert contract in runner
+
+
+def test_python_gate_is_parallel_bounded_and_keeps_required_name() -> None:
+    workflow = (
+        ROOT / ".github" / "workflows" / "quality-gates.yml"
+    ).read_text(encoding="utf-8")
+    timeouts = [int(value) for value in re.findall(r"timeout-minutes:\s*(\d+)", workflow)]
+    assert timeouts and max(timeouts) <= 5
+    assert "matrix: ${{ fromJSON(needs.plan-python.outputs.matrix) }}" in workflow
+    assert "fail-fast: false" in workflow
+    assert "cancel-in-progress: true" in workflow
+    assert workflow.count("name: Python regression suite") == 1
+    assert "needs: [plan-python, python-shards]" in workflow
+    assert "needs.python-shards.result" in workflow
+    assert "python -m pytest -q" not in workflow
+    assert "pytest==9.1.1 pytest-timeout==2.4.0" in workflow
+
+
+def test_python_shard_manifest_assigns_every_platform_test_file_exactly_once() -> None:
+    excluded = {
+        "tests/test_runtime_launchers.py",
+        "tests/test_control_plane_install.py",
+    }
+    expected = {
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "tests").glob("test_*.py")
+    } - excluded
+    assignments = Counter(
+        path
+        for shard in PYTHON_MANIFEST["shards"]
+        for path in shard["tests"]
+    )
+
+    assert PYTHON_MANIFEST["schema_version"] == "python-test-shards-v1"
+    assert set(assignments) == expected
+    assert {path: count for path, count in assignments.items() if count != 1} == {}
+    assert len({shard["id"] for shard in PYTHON_MANIFEST["shards"]}) == len(
+        PYTHON_MANIFEST["shards"]
+    )
+
+
+def test_python_shard_selector_and_runner_use_authoritative_manifest() -> None:
+    selector_spec = importlib.util.spec_from_file_location(
+        "select_python_test_shards",
+        ROOT / "scripts" / "select_python_test_shards.py",
+    )
+    assert selector_spec and selector_spec.loader
+    selector = importlib.util.module_from_spec(selector_spec)
+    selector_spec.loader.exec_module(selector)
+    assert selector.matrix() == [
+        {"id": shard["id"]} for shard in PYTHON_MANIFEST["shards"]
+    ]
+
+    runner_spec = importlib.util.spec_from_file_location(
+        "run_python_test_shard", ROOT / "scripts" / "run_python_test_shard.py",
+    )
+    assert runner_spec and runner_spec.loader
+    runner = importlib.util.module_from_spec(runner_spec)
+    runner_spec.loader.exec_module(runner)
+    first = PYTHON_MANIFEST["shards"][0]
+    assert runner.shard_paths(first["id"]) == first["tests"]
+    with pytest.raises(ValueError, match="unknown or duplicate"):
+        runner.shard_paths("not-a-shard")
+
+    source = (ROOT / "scripts" / "run_python_test_shard.py").read_text(
+        encoding="utf-8"
+    )
+    for contract in (
+        '"--timeout=30"',
+        '"--durations=30"',
+        '"schema_version": "python-test-shard-result-v1"',
+        '"elapsed_seconds"',
+        '"test_paths"',
+    ):
+        assert contract in source
 
 
 _PUBLICATION_CLOCK_NAMES = frozenset({
