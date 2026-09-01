@@ -667,8 +667,13 @@ every five to ten seconds. Mutable provider deployment observation refreshes no
 more often than every thirty seconds. WPF and WinForms execute provider reads in
 one shared single-flight background child with a hard wall-clock deadline;
 the parent retains one non-durable observation envelope containing state,
-attempt/completion time, last-success time, release, and the complete persisted
-authority fingerprint. A completed `TIMEOUT` or `UNKNOWN` replaces current
+attempt/completion time, last-success time, provider-owned deployment, active
+Worker traffic/exact-Version, Previous Worker artifact facts, and the complete
+persisted authority fingerprint. It never caches or replaces the mixed runtime
+read model. Every local refresh probes Windows runtime, business health,
+production ownership, Previous Windows artifact, Control Bundle, lock, and
+transaction state once, then one pure composer combines those fresh local facts
+with eligible provider facts. A completed `TIMEOUT` or `UNKNOWN` replaces current
 availability immediately. While a replacement read is `PENDING`, a prior
 success may be presented for at most sixty seconds; it then becomes `UNKNOWN`.
 Provider runtime data may merge only while the envelope is available or within
@@ -677,8 +682,12 @@ normalized provenance fields, and transaction-active state exactly match the
 current persisted authority.
 
 Timeout termination succeeds only after the exact root and observed descendant
-tree are proven exited. A non-zero or timed-out `taskkill` result enters a
-bounded verified fallback. If termination cannot be proven, the envelope is
+tree are proven exited. Nested native work is bound by a temporary PID plus
+process-start-token ownership receipt, so provider-root exit alone is not tree
+completion. A non-zero or timed-out `taskkill` result enters a bounded verified
+fallback. Termination runs in a separate hidden worker; GUI timer and close
+callbacks only request or poll that state machine and keep local refreshes
+responsive. If termination cannot be proven, the envelope is
 `TERMINATION_UNRESOLVED`, temporary evidence and the single-flight slot remain
 owned, no second provider child may start, and the local timer continues. Files
 are removed only after a proved completion or termination and never become
