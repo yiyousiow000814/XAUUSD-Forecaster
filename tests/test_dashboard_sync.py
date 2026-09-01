@@ -1593,6 +1593,53 @@ def test_learning_history_is_durable_before_summary_and_retries_idempotently(
     assert posted == []
 
 
+def test_learning_history_state_drops_hashes_outside_current_source_universe(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    payload = {
+        "learning_curves": {
+            "models": [],
+            "version_groups": [{
+                "model_identity": "FULL", "training_dataset_hash": "hash-1",
+                "created_at": "2026-08-10T01:00:00+00:00", "generation": 1,
+            }],
+            "identity_curves": [],
+        },
+        "execution_learning": {"models": []},
+    }
+    records = module.learning_history_records(payload)
+    hashes = {
+        module._learning_record_identity(row): row["payload_hash"]
+        for row in records
+    }
+    hashes.update({f"obsolete\0{index}": f"hash-{index}" for index in range(1_000)})
+    state_path = tmp_path / "history.json"
+    state_path.write_text(json.dumps({
+        "contract_version": module.LEARNING_HISTORY_CONTRACT_VERSION,
+        "hashes": hashes,
+        "last_full_sync": datetime.now(timezone.utc).isoformat(),
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        module, "_post_json",
+        lambda *_args: pytest.fail("unchanged current records must not be reposted"),
+    )
+    config = {
+        "remote_ingest_url": "https://worker.example/api/ingest",
+        "token": "test",
+        "learning_history_state_file": str(state_path),
+    }
+
+    module._sync_learning_history(payload, config)
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["hashes"] == {
+        module._learning_record_identity(row): row["payload_hash"]
+        for row in records
+    }
+    assert state["pending_record_count"] == 0
+
+
 def _projection_fixture(count: int = 10):
     from xauusd_forecaster.news_projection import build_news_projection_generation
 
