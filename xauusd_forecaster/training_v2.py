@@ -647,6 +647,19 @@ def _write_market_artifact(rows: list[dict], artifact_root: Path, cutoff: dateti
     return version, artifact, path, dataset_hash
 
 
+def _persisted_crossfit_record(record) -> dict:
+    return {
+        "decision_id": str(record["source_decision_id"]),
+        "fold": int(record["fold_number"]),
+        "training_cutoff": str(record["training_cutoff"]),
+        "purged_through": str(record["purged_through"]),
+        "prediction": float(record["predicted_direction_u5"]),
+        "target": float(record["target_direction_u5"]),
+        "residual": float(record["residual_u5"]),
+        "artifact_hash": str(record["artifact_hash"]),
+    }
+
+
 def chronological_crossfit_market(ledger, rows: list[dict], artifact_root: Path,
                                   created_at: datetime) -> list[dict]:
     """Produce expanding-window predictions with a purged 30-minute boundary."""
@@ -667,21 +680,15 @@ def chronological_crossfit_market(ledger, rows: list[dict], artifact_root: Path,
             break
         test_start = datetime.fromisoformat(test[0]["decision_time"])
         purge_cutoff = test_start - timedelta(minutes=30)
-        train = [row for row in rows[:start] if datetime.fromisoformat(row["decision_time"]) < purge_cutoff]
-        if len(train) < minimum_train:
-            continue
         cached = [persisted.get(str(row["decision_id"])) for row in test]
         if all(record is not None for record in cached):
-            predictions.extend({
-                "decision_id": str(record["source_decision_id"]),
-                "fold": int(record["fold_number"]),
-                "training_cutoff": str(record["training_cutoff"]),
-                "purged_through": str(record["purged_through"]),
-                "prediction": float(record["predicted_direction_u5"]),
-                "target": float(record["target_direction_u5"]),
-                "residual": float(record["residual_u5"]),
-                "artifact_hash": str(record["artifact_hash"]),
-            } for record in cached)
+            predictions.extend(_persisted_crossfit_record(record) for record in cached)
+            continue
+        train = [
+            row for row in rows[:start]
+            if datetime.fromisoformat(row["decision_time"]) < purge_cutoff
+        ]
+        if len(train) < minimum_train:
             continue
         train_hash = canonical_hash([row["receipt"] for row in train])
         artifact = train_ridge(
@@ -690,7 +697,10 @@ def chronological_crossfit_market(ledger, rows: list[dict], artifact_root: Path,
         )
         values = artifact.predict(np.asarray([row["market"] for row in test]))
         fold = start // fold_size
-        for row, predicted in zip(test, values):
+        for row, predicted, cached_record in zip(test, values, cached, strict=True):
+            if cached_record is not None:
+                predictions.append(_persisted_crossfit_record(cached_record))
+                continue
             residual = float(row["target"] - predicted)
             record = {
                 "decision_id": row["decision_id"], "fold": fold,
