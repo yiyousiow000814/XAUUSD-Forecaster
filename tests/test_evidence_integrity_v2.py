@@ -2231,11 +2231,79 @@ def test_market_crossfit_reuses_immutable_persisted_predictions(
         raise AssertionError("an immutable crossfit receipt must be reused")
 
     monkeypatch.setattr(training_v2, "train_ridge", unexpected_retrain)
+    decision_time_reads = 0
+
+    class CountedRow(dict):
+        def __getitem__(self, key):
+            nonlocal decision_time_reads
+            if key == "decision_time":
+                decision_time_reads += 1
+            return super().__getitem__(key)
+
     second = training_v2.chronological_crossfit_market(
-        ledger, rows, tmp_path, datetime(2026, 8, 6, tzinfo=UTC)
+        ledger, [CountedRow(row) for row in rows], tmp_path,
+        datetime(2026, 8, 6, tzinfo=UTC),
     )
 
     assert second == first
+    assert decision_time_reads <= 60
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM market_crossfit_predictions"
+    ).fetchone()[0] == len(first)
+    ledger.close()
+
+
+def test_market_crossfit_partial_cache_never_replaces_immutable_predictions(
+    tmp_path, monkeypatch,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    rows = _training_rows(120)
+
+    class FirstArtifact:
+        artifact_hash = "first-crossfit-artifact"
+
+        def predict(self, values):
+            return [0.25] * len(values)
+
+    monkeypatch.setattr(training_v2, "train_ridge", lambda *_args: FirstArtifact())
+    first = training_v2.chronological_crossfit_market(
+        ledger, rows, tmp_path, datetime(2026, 8, 5, tzinfo=UTC)
+    )
+    deleted = first[0]
+    sibling = next(
+        row for row in first
+        if row["fold"] == deleted["fold"] and row != deleted
+    )
+    ledger.close()
+    ledger = ForwardLedger(tmp_path / "partial.sqlite3")
+    for record in first[1:]:
+        ledger.connection.execute(
+            "INSERT INTO market_crossfit_predictions VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                record["decision_id"], training_v2.CROSSFIT_VERSION,
+                record["fold"], record["training_cutoff"],
+                record["purged_through"], record["prediction"], record["target"],
+                record["residual"], record["artifact_hash"],
+                datetime(2026, 8, 5, tzinfo=UTC).isoformat(),
+            ),
+        )
+    ledger.connection.commit()
+
+    class RepairArtifact:
+        artifact_hash = "repair-crossfit-artifact"
+
+        def predict(self, values):
+            return [0.75] * len(values)
+
+    monkeypatch.setattr(training_v2, "train_ridge", lambda *_args: RepairArtifact())
+    repaired = training_v2.chronological_crossfit_market(
+        ledger, rows, tmp_path, datetime(2026, 8, 6, tzinfo=UTC)
+    )
+    by_id = {row["decision_id"]: row for row in repaired}
+
+    assert by_id[deleted["decision_id"]]["prediction"] == 0.75
+    assert by_id[deleted["decision_id"]]["artifact_hash"] == "repair-crossfit-artifact"
+    assert by_id[sibling["decision_id"]] == sibling
     assert ledger.connection.execute(
         "SELECT count(*) FROM market_crossfit_predictions"
     ).fetchone()[0] == len(first)
