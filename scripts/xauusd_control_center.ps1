@@ -64,6 +64,7 @@ $codeReloadTimeout = [TimeSpan]::FromMinutes(5)
 $serviceStartupTimeout = [TimeSpan]::FromMinutes(15)
 $runtimeObservationCycles = 2
 $runtimeObservationTimeout = [TimeSpan]::FromMinutes(15)
+$promotionFreshnessMinimumLifetime = $serviceStartupTimeout + $runtimeObservationTimeout
 $runtimeDecisionHorizon = [TimeSpan]::FromMinutes(30)
 $reloadableServiceKeys = @("collector", "annotator", "api", "sync")
 $runtimeControlSourceManifestName = "runtime-control-files.json"
@@ -2363,7 +2364,8 @@ function Ensure-CoordinatedMigrationQualification {
     param(
         [Parameter(Mandatory = $true)][object]$Candidate,
         [Parameter(Mandatory = $true)][object]$Stable,
-        [Parameter(Mandatory = $true)][string[]]$MigrationFiles
+        [Parameter(Mandatory = $true)][string[]]$MigrationFiles,
+        [TimeSpan]$MinimumRemaining = [TimeSpan]::Zero
     )
     if ([string]$Candidate.windows_revision -cne [string]$Candidate.git_sha) {
         throw "MIGRATION_QUALIFICATION_CANDIDATE_IDENTITY_INVALID"
@@ -2400,13 +2402,21 @@ function Ensure-CoordinatedMigrationQualification {
             $current = Assert-CoordinatedMigrationRenewalReceipt -Candidate $Candidate `
                 -Stable $Stable -MigrationFiles $MigrationFiles `
                 -Digest $previousRenewalDigest -RootDigest $rootDigest
-            Set-CandidateMigrationQualificationFromReceipt `
-                -Candidate $Candidate -Receipt $current
-            return [pscustomobject]@{
-                state = "MIGRATION_QUALIFICATION_RENEWED"
-                root_receipt_digest = $rootDigest
-                receipt = $current
+            $expiresAt = ConvertTo-ReleaseTimestampUtc -Value $current.expires_at
+            if ($MinimumRemaining -le [TimeSpan]::Zero -or
+                $expiresAt -gt [DateTimeOffset]::UtcNow.Add($MinimumRemaining)) {
+                Set-CandidateMigrationQualificationFromReceipt `
+                    -Candidate $Candidate -Receipt $current
+                return [pscustomobject]@{
+                    state = "MIGRATION_QUALIFICATION_RENEWED"
+                    root_receipt_digest = $rootDigest
+                    receipt = $current
+                }
             }
+            $stale = $true
+            $null = Assert-CoordinatedMigrationRenewalReceipt -Candidate $Candidate `
+                -Stable $Stable -MigrationFiles $MigrationFiles `
+                -Digest $previousRenewalDigest -RootDigest $rootDigest -AllowStale
         } catch {
             if ($_.Exception.Message -ne "MIGRATION_QUALIFICATION_RENEWAL_STALE") { throw }
             $stale = $true
@@ -2418,11 +2428,16 @@ function Ensure-CoordinatedMigrationQualification {
         try {
             $root = Assert-CoordinatedMigrationRootReceipt -Candidate $Candidate `
                 -Stable $Stable -MigrationFiles $MigrationFiles -Digest $rootDigest
-            return [pscustomobject]@{
-                state = "MIGRATION_ACCEPTED"
-                root_receipt_digest = $rootDigest
-                receipt = $root
+            $expiresAt = ConvertTo-ReleaseTimestampUtc -Value $root.expires_at
+            if ($MinimumRemaining -le [TimeSpan]::Zero -or
+                $expiresAt -gt [DateTimeOffset]::UtcNow.Add($MinimumRemaining)) {
+                return [pscustomobject]@{
+                    state = "MIGRATION_ACCEPTED"
+                    root_receipt_digest = $rootDigest
+                    receipt = $root
+                }
             }
+            $stale = $true
         } catch {
             if ($_.Exception.Message -ne "MIGRATION_RECEIPT_STALE") { throw }
             $stale = $true
@@ -7370,8 +7385,18 @@ function Invoke-CandidateAccessQualificationRenewal {
 }
 
 function Ensure-AccessQualificationMachineReceipt {
-    param([Parameter(Mandatory = $true)][object]$Candidate)
-    try { return Assert-AccessQualificationMachineReceipt -Candidate $Candidate }
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [TimeSpan]$MinimumRemaining = [TimeSpan]::Zero
+    )
+    try {
+        $current = Assert-AccessQualificationMachineReceipt -Candidate $Candidate
+        $expiresAt = ConvertTo-ReleaseTimestampUtc -Value $current.expires_at
+        if ($MinimumRemaining -le [TimeSpan]::Zero -or
+            $expiresAt -gt (Get-AccessEvidenceUtcNow).Add($MinimumRemaining)) {
+            return $current
+        }
+    }
     catch {
         if ($_.Exception.Message -notin @(
                 "ACCESS_QUALIFICATION_REUSE_STALE",
@@ -10073,6 +10098,215 @@ function Test-CloudflareRollbackTarget {
     }).Count -eq 1
 }
 
+function New-PromotionFreshnessStep {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$StartedAt,
+        [Parameter(Mandatory = $true)][string]$ExecutionMode,
+        [Parameter(Mandatory = $true)][string]$State,
+        [string]$ReceiptDigest = ""
+    )
+    $completedAt = [DateTimeOffset]::UtcNow
+    return [pscustomobject]@{
+        name = $Name
+        state = $State
+        execution_mode = $ExecutionMode
+        receipt_digest = $ReceiptDigest
+        started_at = $StartedAt.ToString("o")
+        completed_at = $completedAt.ToString("o")
+        elapsed_ms = [long][Math]::Round(($completedAt - $StartedAt).TotalMilliseconds)
+    }
+}
+
+function Test-CurrentStableRuntimeHealth {
+    if (-not (Test-SingleProductionOwner)) { return $false }
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing `
+            -Uri "http://127.0.0.1:8765/api/health" -TimeoutSec 2
+        return [int]$response.StatusCode -eq 200
+    } catch { return $false }
+}
+
+function Invoke-PromotionFreshnessCoordinator {
+    param([Parameter(Mandatory = $true)][object]$State)
+    $startedAt = [DateTimeOffset]::UtcNow
+    $steps = @()
+    $candidate = $State.candidate
+    $stable = $State.stable
+    $currentStepName = "identity"
+    $currentStepStarted = $startedAt
+    try {
+        if (-not $candidate -or -not $stable -or $State.transaction -or
+            [string]$candidate.validation_state -ne "PASSED" -or
+            [string]$candidate.validation.key -cne [string]$candidate.validation_key) {
+            throw "PROMOTION_FRESHNESS_IDENTITY_INVALID"
+        }
+
+        $stepStarted = [DateTimeOffset]::UtcNow
+        $currentStepName = "migration_live_lease"
+        $currentStepStarted = $stepStarted
+        $changed = @(Get-CandidateChangedFiles `
+            -StableRevision ([string]$stable.git_sha) `
+            -CandidateRevision ([string]$candidate.git_sha))
+        $compatibility = Get-CandidateCompatibilityRequirement -ChangedFiles $changed
+        if ([string]$compatibility.state -eq "COORDINATED_STORAGE_MIGRATION_REQUIRED") {
+            if (-not $candidate.migration_acceptance -or
+                [string]$candidate.migration_acceptance.validation_key -cne
+                    [string]$candidate.validation_key) {
+                throw "MIGRATION_ACCEPTANCE_MISSING"
+            }
+            $beforeDigest = if ($candidate.migration_qualification) {
+                [string]$candidate.migration_qualification.receipt_digest
+            } else { [string]$candidate.migration_acceptance.receipt_digest }
+            $qualification = Ensure-CoordinatedMigrationQualification `
+                -Candidate $candidate -Stable $stable `
+                -MigrationFiles @($compatibility.files) `
+                -MinimumRemaining $promotionFreshnessMinimumLifetime
+            if ([string]$qualification.root_receipt_digest -cne
+                [string]$candidate.migration_acceptance.receipt_digest) {
+                throw "MIGRATION_RECEIPT_AUTHORITY_MISMATCH"
+            }
+            $afterDigest = [string]$qualification.receipt.receipt_digest
+            $mode = if ($afterDigest -cne $beforeDigest) { "RENEWED" } else { "REUSED" }
+            $steps += New-PromotionFreshnessStep -Name "migration_live_lease" `
+                -StartedAt $stepStarted -ExecutionMode $mode `
+                -State ([string]$qualification.state) -ReceiptDigest $afterDigest
+            $State.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+            Write-ReleaseControlState -State $State
+        } else {
+            $steps += New-PromotionFreshnessStep -Name "migration_live_lease" `
+                -StartedAt $stepStarted -ExecutionMode "NOT_REQUIRED" -State "NOT_REQUIRED"
+        }
+
+        $stepStarted = [DateTimeOffset]::UtcNow
+        $currentStepName = "access_provider_lease"
+        $currentStepStarted = $stepStarted
+        $accessState = [string]$candidate.validation.auth_inspection.state
+        if ($accessState -eq "HUMAN_ACCESS_BOUNDARY_ACCEPTED") {
+            $receipt = Assert-AccessBoundaryAcceptanceReceipt -Candidate $candidate -Stable $stable
+            $expiresAt = ConvertTo-ReleaseTimestampUtc -Value $receipt.expires_at
+            if ($expiresAt -le [DateTimeOffset]::UtcNow.Add($promotionFreshnessMinimumLifetime)) {
+                throw "ACCESS_HUMAN_RECEIPT_INSUFFICIENT_LIFETIME"
+            }
+            $steps += New-PromotionFreshnessStep -Name "access_provider_lease" `
+                -StartedAt $stepStarted -ExecutionMode "FRESH" `
+                -State $accessState -ReceiptDigest ([string]$receipt.receipt_digest)
+        } elseif ($accessState -in @(
+                "ACCESS_QUALIFICATION_REUSED", "ACCESS_QUALIFICATION_RENEWED")) {
+            $beforeDigest = [string]$candidate.access_qualification.receipt_digest
+            $receipt = Ensure-AccessQualificationMachineReceipt -Candidate $candidate `
+                -MinimumRemaining $promotionFreshnessMinimumLifetime
+            $mode = if ([string]$receipt.receipt_digest -cne $beforeDigest) {
+                "RENEWED"
+            } else { "REUSED" }
+            $steps += New-PromotionFreshnessStep -Name "access_provider_lease" `
+                -StartedAt $stepStarted -ExecutionMode $mode `
+                -State ([string]$receipt.state) `
+                -ReceiptDigest ([string]$receipt.receipt_digest)
+            $State.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+            Write-ReleaseControlState -State $State
+        } else {
+            $steps += New-PromotionFreshnessStep -Name "access_provider_lease" `
+                -StartedAt $stepStarted -ExecutionMode "NOT_REQUIRED" -State "NOT_REQUIRED"
+        }
+
+        $stepStarted = [DateTimeOffset]::UtcNow
+        $currentStepName = "candidate_placement"
+        $currentStepStarted = $stepStarted
+        if (-not (Test-CloudflareReleasePlacement -Stable $stable -Candidate $candidate)) {
+            throw "Cloudflare Stable/Candidate placement drifted."
+        }
+        $steps += New-PromotionFreshnessStep -Name "candidate_placement" `
+            -StartedAt $stepStarted -ExecutionMode "FRESH" -State "PASSED"
+
+        $stepStarted = [DateTimeOffset]::UtcNow
+        $currentStepName = "rollback_precheck"
+        $currentStepStarted = $stepStarted
+        if (-not (Test-CloudflareRollbackTarget -Target $stable)) {
+            throw "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"
+        }
+        $steps += New-PromotionFreshnessStep -Name "rollback_precheck" `
+            -StartedAt $stepStarted -ExecutionMode "FRESH" -State "PASSED"
+
+        $stepStarted = [DateTimeOffset]::UtcNow
+        $currentStepName = "current_owner_health"
+        $currentStepStarted = $stepStarted
+        $runtime = Get-RuntimeCodeState
+        if (-not $runtime -or
+            [string]$runtime.applied_revision -cne [string]$stable.windows_revision) {
+            throw "Windows Stable revision drifted."
+        }
+        if (-not (Test-CurrentStableRuntimeHealth)) {
+            throw "CURRENT_STABLE_RUNTIME_UNHEALTHY"
+        }
+        $steps += New-PromotionFreshnessStep -Name "current_owner_health" `
+            -StartedAt $stepStarted -ExecutionMode "FRESH" -State "PASSED"
+
+        $completedAt = [DateTimeOffset]::UtcNow
+        $summary = [pscustomobject]@{
+            schema_version = "promotion-freshness-coordinator-v1"
+            validation_key = [string]$candidate.validation_key
+            minimum_remaining_seconds =
+                [int]$promotionFreshnessMinimumLifetime.TotalSeconds
+            state = "PASSED"
+            started_at = $startedAt.ToString("o")
+            completed_at = $completedAt.ToString("o")
+            elapsed_ms = [long][Math]::Round(($completedAt - $startedAt).TotalMilliseconds)
+            steps = @($steps)
+        }
+        $candidate | Add-Member -Force -NotePropertyName promotion_freshness `
+            -NotePropertyValue $summary
+        $State.updated_at = $completedAt.ToString("o")
+        Write-ReleaseControlState -State $State
+        Write-ReleaseHistory -Event "PROMOTION_FRESHNESS_PASSED" `
+            -Release $candidate -Detail @{
+                schema_version = [string]$summary.schema_version
+                validation_key = [string]$summary.validation_key
+                minimum_remaining_seconds = [int]$summary.minimum_remaining_seconds
+                state = [string]$summary.state
+                started_at = [string]$summary.started_at
+                completed_at = [string]$summary.completed_at
+                elapsed_ms = [long]$summary.elapsed_ms
+                steps = @($summary.steps)
+            }
+        return $summary
+    } catch {
+        $failureReason = Protect-PreflightDiagnosticText $_.Exception.Message
+        $steps += New-PromotionFreshnessStep -Name $currentStepName `
+            -StartedAt $currentStepStarted -ExecutionMode "ATTEMPTED" `
+            -State "FAILED"
+        $failedAt = [DateTimeOffset]::UtcNow
+        $failedSummary = [pscustomobject]@{
+            schema_version = "promotion-freshness-coordinator-v1"
+            validation_key = [string]$candidate.validation_key
+            minimum_remaining_seconds =
+                [int]$promotionFreshnessMinimumLifetime.TotalSeconds
+            state = "FAILED"
+            reason = $failureReason
+            started_at = $startedAt.ToString("o")
+            completed_at = $failedAt.ToString("o")
+            elapsed_ms = [long][Math]::Round(($failedAt - $startedAt).TotalMilliseconds)
+            steps = @($steps)
+        }
+        if ($candidate -and -not $State.transaction) {
+            $candidate | Add-Member -Force -NotePropertyName promotion_freshness `
+                -NotePropertyValue $failedSummary
+            $State.updated_at = $failedAt.ToString("o")
+            Write-ReleaseControlState -State $State
+        }
+        Write-ReleaseHistory -Event "PROMOTION_FRESHNESS_FAILED" `
+            -Release $candidate -Detail @{
+                validation_key = [string]$candidate.validation_key
+                started_at = [string]$failedSummary.started_at
+                completed_at = [string]$failedSummary.completed_at
+                elapsed_ms = [long]$failedSummary.elapsed_ms
+                reason = $failureReason
+                completed_steps = @($steps)
+            }
+        throw
+    }
+}
+
 function Start-ReleasePromotion {
     if (-not (Enter-ReleaseTransactionLock)) { throw "Another release transaction is active." }
     try {
@@ -10094,21 +10328,6 @@ function Start-ReleasePromotion {
                 "$([string]$candidate.worker_version_id):$([string]$candidate.git_sha)") {
             throw "Candidate validation does not belong to this release."
         }
-        if ([string]$candidate.validation.auth_inspection.state -eq
-                "HUMAN_ACCESS_BOUNDARY_ACCEPTED") {
-            $null = Assert-AccessBoundaryAcceptanceReceipt -Candidate $candidate `
-                -Stable $state.stable
-        } elseif ([string]$candidate.validation.auth_inspection.state -in @(
-                "ACCESS_QUALIFICATION_REUSED", "ACCESS_QUALIFICATION_RENEWED"
-            )) {
-            $priorAccessState = [string]$candidate.validation.auth_inspection.state
-            $null = Ensure-AccessQualificationMachineReceipt -Candidate $candidate
-            if ($priorAccessState -ne
-                [string]$candidate.validation.auth_inspection.state) {
-                $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
-                Write-ReleaseControlState -State $state
-            }
-        }
         if ([string]$candidate.git_sha -ne [string]$candidate.windows_revision -or
             [string]$candidate.compatibility_state -ne "PASSED") {
             throw "Worker and Windows compatibility is not authorized."
@@ -10116,17 +10335,9 @@ function Start-ReleasePromotion {
         if ([string]$state.deployment_status -ne "READY") {
             throw "Release control is not deployment-ready."
         }
-        if (-not (Test-CloudflareReleasePlacement -Stable $state.stable -Candidate $candidate)) {
-            throw "Cloudflare Stable/Candidate placement drifted."
-        }
-        if (-not (Test-CloudflareRollbackTarget -Target $state.stable)) {
-            throw "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"
-        }
-        $runtime = Get-RuntimeCodeState
-        if (-not $runtime -or [string]$runtime.applied_revision -ne [string]$state.stable.windows_revision) {
-            throw "Windows Stable revision drifted."
-        }
-        if (-not (Test-SingleProductionOwner)) { throw "Exactly one Windows production owner is required." }
+        $null = Invoke-PromotionFreshnessCoordinator -State $state
+        $state = Get-ReleaseControlState
+        $candidate = $state.candidate
         $deferredObligations = @(
             $candidate.validation.data_parity.deferred_obligations |
                 Where-Object { $null -ne $_ }
