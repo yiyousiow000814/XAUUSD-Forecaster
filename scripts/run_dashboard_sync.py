@@ -576,6 +576,10 @@ def learning_history_batches(rows: list[dict]) -> list[list[dict]]:
     )
 
 
+def _learning_record_identity(row: dict) -> str:
+    return f"{row['resource']}\0{row['record_key']}"
+
+
 def _learning_summary(payload: dict) -> dict:
     """Return a fixed-size first page; D1 owns every older learning record."""
     learning = copy.deepcopy(payload.get("learning_curves") or {})
@@ -1358,9 +1362,14 @@ def _sync_learning_history(local_payload: dict, config: dict) -> None:
         history_state["full_refresh_started_at"] = now.isoformat()
 
     records = learning_history_records(local_payload)
+    current_keys = {_learning_record_identity(row) for row in records}
+    hashes = {
+        key: value for key, value in hashes.items()
+        if key in current_keys
+    }
     pending = [
         row for row in records
-        if hashes.get(f"{row['resource']}\0{row['record_key']}")
+        if hashes.get(_learning_record_identity(row))
         != row["payload_hash"]
     ]
     batches = learning_history_batches(pending)
@@ -1372,7 +1381,7 @@ def _sync_learning_history(local_payload: dict, config: dict) -> None:
         ).encode("utf-8")
         _post_json(history_url, encoded, config)
         for row in batch:
-            hashes[f"{row['resource']}\0{row['record_key']}"] = row["payload_hash"]
+            hashes[_learning_record_identity(row)] = row["payload_hash"]
         _write_news_sync_state(history_state_path, {
             "contract_version": LEARNING_HISTORY_CONTRACT_VERSION,
             "hashes": hashes,
