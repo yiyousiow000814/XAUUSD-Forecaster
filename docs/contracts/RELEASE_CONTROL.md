@@ -666,9 +666,23 @@ Operator refresh has two cadences. Local service and operation state may refresh
 every five to ten seconds. Mutable provider deployment observation refreshes no
 more often than every thirty seconds. WPF and WinForms execute provider reads in
 one shared single-flight background child with a hard wall-clock deadline;
-timeout terminates that exact process tree, returns `UNKNOWN`, and does not stop
-the local timer. Temporary result files are unique, bounded, removed on every
-completion path, and never become release authority. Only a minimally validated
+the parent retains one non-durable observation envelope containing state,
+attempt/completion time, last-success time, release, and the complete persisted
+authority fingerprint. A completed `TIMEOUT` or `UNKNOWN` replaces current
+availability immediately. While a replacement read is `PENDING`, a prior
+success may be presented for at most sixty seconds; it then becomes `UNKNOWN`.
+Provider runtime data may merge only while the envelope is available or within
+that pending grace period and its schema, resolved Stable/Previous identities,
+normalized provenance fields, and transaction-active state exactly match the
+current persisted authority.
+
+Timeout termination succeeds only after the exact root and observed descendant
+tree are proven exited. A non-zero or timed-out `taskkill` result enters a
+bounded verified fallback. If termination cannot be proven, the envelope is
+`TERMINATION_UNRESOLVED`, temporary evidence and the single-flight slot remain
+owned, no second provider child may start, and the local timer continues. Files
+are removed only after a proved completion or termination and never become
+release authority. Only a minimally validated
 exact Version envelope (exact ID, metadata, script resource, and `fetch` handler)
 may enter the process-local immutable cache; malformed or mismatched responses
 remain retryable. Provider caches are advisory and process-local only. Manual

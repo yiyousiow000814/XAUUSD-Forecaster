@@ -10123,22 +10123,147 @@ function Test-CloudflareRollbackTarget {
     return [string]$observation.status -eq "AVAILABLE"
 }
 
-function Stop-NativeProcessTree {
-    param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
-    try { if ($Process.HasExited) { return } } catch { return }
+function Get-NativeDescendantProcessIds {
+    param(
+        [Parameter(Mandatory = $true)][int]$RootProcessId,
+        [Parameter(Mandatory = $true)][ref]$InventoryAvailable
+    )
+    $InventoryAvailable.Value = $false
+    try {
+        $rows = @(Get-CimInstance Win32_Process -OperationTimeoutSec 2 `
+            -ErrorAction Stop |
+            Select-Object ProcessId,ParentProcessId)
+    } catch { return @() }
+    $InventoryAvailable.Value = $true
+    $pending = @($RootProcessId)
+    $result = New-Object System.Collections.Generic.List[int]
+    while ($pending.Count -gt 0) {
+        $parent = [int]$pending[0]
+        $pending = @($pending | Select-Object -Skip 1)
+        foreach ($row in @($rows | Where-Object {
+            [int]$_.ParentProcessId -eq $parent
+        })) {
+            $child = [int]$row.ProcessId
+            if (-not $result.Contains($child)) {
+                $result.Add($child)
+                $pending += $child
+            }
+        }
+    }
+    return @($result)
+}
+
+function Test-NativeProcessIdsExited {
+    param([int[]]$ProcessIds)
+    foreach ($processIdValue in @($ProcessIds | Select-Object -Unique)) {
+        if (Get-Process -Id $processIdValue -ErrorAction SilentlyContinue) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Invoke-NativeTreeTerminationCommand {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [int]$TimeoutMilliseconds = 5000
+    )
+    $killer = $null
     try {
         $taskkill = Get-Command "taskkill.exe" -ErrorAction Stop
         $start = New-Object System.Diagnostics.ProcessStartInfo
         $start.FileName = [string]$taskkill.Source
-        $start.Arguments = "/PID $($Process.Id) /T /F"
+        $start.Arguments = "/PID $ProcessId /T /F"
         $start.UseShellExecute = $false
         $start.CreateNoWindow = $true
         $killer = [System.Diagnostics.Process]::Start($start)
-        try { [void]$killer.WaitForExit(5000) } finally { $killer.Dispose() }
+        if (-not $killer.WaitForExit($TimeoutMilliseconds)) {
+            try { $killer.Kill() } catch {}
+            try { [void]$killer.WaitForExit(1000) } catch {}
+            return [pscustomobject]@{ state = "COMMAND_TIMEOUT"; exit_code = $null }
+        }
+        return [pscustomobject]@{
+            state = if ([int]$killer.ExitCode -eq 0) {
+                "COMMAND_SUCCEEDED"
+            } else { "COMMAND_NONZERO" }
+            exit_code = [int]$killer.ExitCode
+        }
     } catch {
-        try { $Process.Kill() } catch {}
+        return [pscustomobject]@{ state = "COMMAND_START_FAILED"; exit_code = $null }
+    } finally {
+        if ($killer) { try { $killer.Dispose() } catch {} }
     }
-    try { [void]$Process.WaitForExit(5000) } catch {}
+}
+
+function Stop-NativeProcessTree {
+    param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
+    try {
+        if ($Process.HasExited) {
+            return [pscustomobject]@{
+                state = "ALREADY_EXITED"; root_exited = $true
+                descendants_exited = $true; command_state = "NOT_REQUIRED"
+            }
+        }
+        $rootId = [int]$Process.Id
+    } catch {
+        return [pscustomobject]@{
+            state = "ALREADY_EXITED"; root_exited = $true
+            descendants_exited = $true; command_state = "NOT_REQUIRED"
+        }
+    }
+    $inventoryAvailable = $false
+    $descendantIds = @(Get-NativeDescendantProcessIds -RootProcessId $rootId `
+        -InventoryAvailable ([ref]$inventoryAvailable))
+    $trackedIds = @($rootId) + $descendantIds
+    $command = Invoke-NativeTreeTerminationCommand -ProcessId $rootId `
+        -TimeoutMilliseconds 5000
+    try { [void]$Process.WaitForExit(1000) } catch {}
+    if ((Test-NativeProcessIdsExited -ProcessIds $trackedIds) -and
+        ($inventoryAvailable -or [string]$command.state -eq "COMMAND_SUCCEEDED")) {
+        return [pscustomobject]@{
+            state = "TERMINATED"; root_exited = $true
+            descendants_exited = $true; command_state = [string]$command.state
+        }
+    }
+
+    # A non-zero or timed-out taskkill is not evidence of termination. Capture
+    # the still-owned tree again, kill descendants before the root, then prove
+    # every observed member is gone.
+    $fallbackInventoryAvailable = $false
+    $descendantIds = @($descendantIds) + @(
+        Get-NativeDescendantProcessIds -RootProcessId $rootId `
+            -InventoryAvailable ([ref]$fallbackInventoryAvailable)
+    ) | Select-Object -Unique
+    $trackedIds = @($rootId) + @($descendantIds)
+    $fallbackIds = @($descendantIds)
+    [array]::Reverse($fallbackIds)
+    foreach ($processIdValue in $fallbackIds) {
+        try {
+            $descendant = [System.Diagnostics.Process]::GetProcessById(
+                [int]$processIdValue
+            )
+            try { $descendant.Kill() } finally { $descendant.Dispose() }
+        } catch {}
+    }
+    try { $Process.Kill() } catch {}
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+    while ([DateTimeOffset]::UtcNow -lt $deadline -and
+        -not (Test-NativeProcessIdsExited -ProcessIds $trackedIds)) {
+        Start-Sleep -Milliseconds 50
+    }
+    $rootExited = -not [bool](Get-Process -Id $rootId -ErrorAction SilentlyContinue)
+    $treeInventoryAvailable = [bool]($inventoryAvailable -or
+        $fallbackInventoryAvailable)
+    $descendantsExited = [bool]($treeInventoryAvailable -and
+        (Test-NativeProcessIdsExited -ProcessIds $descendantIds))
+    return [pscustomobject]@{
+        state = if ($rootExited -and $descendantsExited) {
+            "TERMINATED"
+        } else { "TERMINATION_FAILED" }
+        root_exited = $rootExited
+        descendants_exited = $descendantsExited
+        command_state = [string]$command.state
+    }
 }
 
 function Get-ReleaseDeploymentProviderObservation {
@@ -14961,6 +15086,105 @@ function Get-ControlCenterSummaryPresentation {
     }
 }
 
+function Get-ControlCenterProviderAuthorityFingerprint {
+    param([AllowNull()][object]$Release)
+    if (-not $Release) {
+        return [pscustomobject]@{ valid = $false; digest = $null; value = $null }
+    }
+    $schema = [string](Get-ReleaseRuntimeProperty $Release "schema_version")
+    $stable = Resolve-ReleaseRuntimeIdentity `
+        (Get-ReleaseRuntimeProperty $Release "stable") $schema
+    $previousIdentity = Get-ReleaseRuntimeProperty $Release "previous_stable"
+    $previous = if ($previousIdentity) {
+        Resolve-ReleaseRuntimeIdentity $previousIdentity $schema
+    } else {
+        [pscustomobject]@{ status = "ABSENT"; identity = $null }
+    }
+    function ConvertTo-ControlCenterFingerprintIdentity {
+        param([AllowNull()][object]$Resolution)
+        $identity = if ($Resolution) { $Resolution.identity } else { $null }
+        return [ordered]@{
+            status = if ($Resolution) { [string]$Resolution.status } else { "UNKNOWN" }
+            git_sha = [string](Get-ReleaseRuntimeProperty $identity "git_sha")
+            worker_version_id = [string](Get-ReleaseRuntimeProperty $identity "worker_version_id")
+            windows_revision = [string](Get-ReleaseRuntimeProperty $identity "windows_revision")
+            artifact_kind = [string](Get-ReleaseRuntimeProperty $identity "artifact_kind")
+            branch = [string](Get-ReleaseRuntimeProperty $identity "branch")
+            worker_git_sha = [string](Get-ReleaseRuntimeProperty $identity "worker_git_sha")
+            provenance_state = [string](Get-ReleaseRuntimeProperty $identity "provenance_state")
+        }
+    }
+    $value = [ordered]@{
+        schema_version = $schema
+        stable = ConvertTo-ControlCenterFingerprintIdentity $stable
+        previous = ConvertTo-ControlCenterFingerprintIdentity $previous
+        transaction_active = [bool](Get-ReleaseRuntimeProperty $Release "transaction")
+    }
+    $valid = [bool]([string]$stable.status -eq "COMPLETE" -and
+        [string]$previous.status -in @("COMPLETE", "ABSENT"))
+    $canonical = $value | ConvertTo-Json -Compress -Depth 8
+    return [pscustomobject]@{
+        valid = $valid
+        digest = if ($valid) { Get-Sha256TextHex -Value $canonical } else { $null }
+        value = [pscustomobject]$value
+    }
+}
+
+function New-ControlCenterProviderObservationEnvelope {
+    param(
+        [ValidateSet("PENDING", "AVAILABLE", "UNKNOWN", "TIMEOUT", "TERMINATION_UNRESOLVED")]
+        [string]$State,
+        [AllowNull()][object]$Release = $null,
+        [AllowNull()][object]$PriorObservation = $null,
+        [AllowNull()][object]$AttemptedAt = $null,
+        [AllowNull()][object]$ObservedAt = $null
+    )
+    $attempted = if ($AttemptedAt) {
+        ([DateTimeOffset]$AttemptedAt).ToUniversalTime().ToString("o")
+    } else { [DateTimeOffset]::UtcNow.ToString("o") }
+    $completed = if ($State -ne "PENDING") {
+        if ($ObservedAt) {
+            ([DateTimeOffset]$ObservedAt).ToUniversalTime().ToString("o")
+        }
+        else { [DateTimeOffset]::UtcNow.ToString("o") }
+    } else { $null }
+    $lastRelease = $null
+    $lastSuccess = $null
+    $fingerprint = $null
+    if ($State -eq "AVAILABLE" -and $Release) {
+        $authority = Get-ControlCenterProviderAuthorityFingerprint $Release
+        $runtime = Get-ReleaseRuntimeProperty $Release "release_runtime"
+        $activeObservation = [string](Get-ReleaseRuntimeProperty (
+            Get-ReleaseRuntimeProperty $runtime "active"
+        ) "observation_status")
+        if (-not $authority.valid -or $activeObservation -ne "AVAILABLE") {
+            $State = "UNKNOWN"
+        }
+        else {
+            $lastRelease = $Release
+            $lastSuccess = $completed
+            $fingerprint = [string]$authority.digest
+        }
+    }
+    if (-not $lastRelease -and $PriorObservation) {
+        $lastRelease = Get-ReleaseRuntimeProperty $PriorObservation "release"
+        $lastSuccess = [string](
+            Get-ReleaseRuntimeProperty $PriorObservation "last_success_at"
+        )
+        $fingerprint = [string](
+            Get-ReleaseRuntimeProperty $PriorObservation "authority_fingerprint"
+        )
+    }
+    return [pscustomobject]@{
+        state = $State
+        release = $lastRelease
+        attempted_at = $attempted
+        observed_at = $completed
+        last_success_at = $lastSuccess
+        authority_fingerprint = $fingerprint
+    }
+}
+
 function Start-ControlCenterProviderObservationProcess {
     param(
         [Parameter(Mandatory = $true)][string]$ExpectedControlRevision
@@ -15009,10 +15233,16 @@ function Complete-ControlCenterProviderObservationProcess {
     }
     $state = "UNKNOWN"
     $release = $null
+    $cleanup = $true
     try {
         if (-not $process.HasExited) {
-            Stop-NativeProcessTree -Process $process
-            $state = "TIMEOUT"
+            $termination = Stop-NativeProcessTree -Process $process
+            if ([string]$termination.state -in @("TERMINATED", "ALREADY_EXITED")) {
+                $state = "TIMEOUT"
+            } else {
+                $state = "TERMINATION_UNRESOLVED"
+                $cleanup = $false
+            }
         } else {
             $process.WaitForExit()
             if ([int]$process.ExitCode -eq 0 -and
@@ -15023,39 +15253,91 @@ function Complete-ControlCenterProviderObservationProcess {
             }
         }
     } catch { $state = "UNKNOWN" } finally {
-        try { $process.Dispose() } catch {}
-        Remove-Item -LiteralPath `
-            $Observation.result_path,$Observation.output_path,$Observation.error_path `
-            -Force -ErrorAction SilentlyContinue
+        if ($cleanup) {
+            try { $process.Dispose() } catch {}
+            Remove-Item -LiteralPath `
+                $Observation.result_path,$Observation.output_path,$Observation.error_path `
+                -Force -ErrorAction SilentlyContinue
+        }
     }
     return [pscustomobject]@{
         state = $state
         release = $release
         attempted_at = [string]$Observation.attempted_at
         observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+        release_slot = if ($cleanup) { "CLEAR" } else { "PRESERVE" }
     }
+}
+
+function Set-ControlCenterProviderUnknownReadModel {
+    param(
+        [AllowNull()][object]$Release,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+    if (-not $Release) { return $Release }
+    $unknown = [pscustomobject]@{
+        drift_status = "UNKNOWN"
+        active_matches_committed = $false
+        active = [pscustomobject]@{
+            observation_status = "UNKNOWN"; identity_status = "UNKNOWN"
+            health = "UNKNOWN"; business_health_status = "UNKNOWN"
+            ownership_status = "UNKNOWN"
+        }
+        previous = [pscustomobject]@{
+            worker_artifact = [pscustomobject]@{ status = "UNKNOWN" }
+            worker_is_current_traffic_member = $false
+            worker_traffic_membership_status = "UNKNOWN"
+            reverse_precheck = [pscustomobject]@{
+                can_reverse = $false; reason = $Reason
+            }
+        }
+    }
+    $Release | Add-Member -NotePropertyName release_runtime `
+        -NotePropertyValue $unknown -Force
+    return $Release
 }
 
 function Merge-ControlCenterProviderObservation {
     param(
         [AllowNull()][object]$LocalRelease,
-        [AllowNull()][object]$ProviderRelease
+        [AllowNull()][object]$ProviderObservation,
+        [DateTimeOffset]$Now = [DateTimeOffset]::UtcNow
     )
-    if (-not $LocalRelease -or -not $ProviderRelease -or
-        -not $ProviderRelease.release_runtime) { return $LocalRelease }
-    $sameStable = Test-ReleaseRuntimeIdentityEqual `
-        $LocalRelease.stable $ProviderRelease.stable
-    $samePrevious = if (-not $LocalRelease.previous_stable -and
-        -not $ProviderRelease.previous_stable) {
-        $true
-    } else {
-        Test-ReleaseRuntimeIdentityEqual `
-            $LocalRelease.previous_stable $ProviderRelease.previous_stable
+    if (-not $LocalRelease) { return $LocalRelease }
+    $state = if ($ProviderObservation) {
+        [string]$ProviderObservation.state
+    } else { "UNKNOWN" }
+    $reason = switch ($state) {
+        "TIMEOUT" { "PROVIDER_OBSERVATION_TIMEOUT" }
+        "TERMINATION_UNRESOLVED" { "PROVIDER_TERMINATION_UNRESOLVED" }
+        "PENDING" { "PROVIDER_OBSERVATION_PENDING" }
+        default { "PROVIDER_OBSERVATION_UNKNOWN" }
     }
-    if ($sameStable -and $samePrevious) {
-        $LocalRelease | Add-Member -NotePropertyName release_runtime `
-            -NotePropertyValue $ProviderRelease.release_runtime -Force
+    if (-not $ProviderObservation -or
+        $state -notin @("AVAILABLE", "PENDING")) {
+        return Set-ControlCenterProviderUnknownReadModel $LocalRelease $reason
     }
+    $lastSuccess = ConvertTo-ReleaseTimestampUtc `
+        -Value $ProviderObservation.last_success_at
+    if ($lastSuccess -eq [DateTimeOffset]::MinValue -or
+        ($Now - $lastSuccess) -gt $releaseProviderObservationMaximumStaleAge) {
+        return Set-ControlCenterProviderUnknownReadModel $LocalRelease `
+            "PROVIDER_OBSERVATION_STALE"
+    }
+    $providerRelease = $ProviderObservation.release
+    if (-not $providerRelease -or -not $providerRelease.release_runtime) {
+        return Set-ControlCenterProviderUnknownReadModel $LocalRelease `
+            "PROVIDER_OBSERVATION_UNKNOWN"
+    }
+    $localAuthority = Get-ControlCenterProviderAuthorityFingerprint $LocalRelease
+    if (-not $localAuthority.valid -or
+        [string]$localAuthority.digest -cne
+            [string]$ProviderObservation.authority_fingerprint) {
+        return Set-ControlCenterProviderUnknownReadModel $LocalRelease `
+            "PROVIDER_AUTHORITY_FINGERPRINT_MISMATCH"
+    }
+    $LocalRelease | Add-Member -NotePropertyName release_runtime `
+        -NotePropertyValue $providerRelease.release_runtime -Force
     return $LocalRelease
 }
 
@@ -15695,7 +15977,8 @@ function Show-WpfControlCenter {
         $script:wpfOperationValidationKey = ""
         $script:wpfProviderObservation = $null
         $script:wpfLastProviderRequest = [DateTime]::MinValue
-        $script:wpfLastProviderRelease = $null
+        $script:wpfProviderSnapshot = New-ControlCenterProviderObservationEnvelope `
+            -State UNKNOWN
         function Test-WpfOperationActive {
             return [bool]$script:wpfOperation
         }
@@ -15794,6 +16077,11 @@ function Show-WpfControlCenter {
             $script:wpfProviderObservation =
                 Start-ControlCenterProviderObservationProcess `
                     -ExpectedControlRevision ([string]$controlIdentity.source_revision)
+            $script:wpfProviderSnapshot = New-ControlCenterProviderObservationEnvelope `
+                -State PENDING -PriorObservation $script:wpfProviderSnapshot `
+                -AttemptedAt ([DateTimeOffset]::Parse(
+                    [string]$script:wpfProviderObservation.attempted_at
+                ))
             $script:wpfLastProviderRequest = Get-Date
         }
         function Update-WpfProviderObservation {
@@ -15801,9 +16089,16 @@ function Show-WpfControlCenter {
             $result = Complete-ControlCenterProviderObservationProcess `
                 -Observation $script:wpfProviderObservation
             if ([string]$result.state -eq "PENDING") { return }
-            $script:wpfProviderObservation = $null
-            if ([string]$result.state -eq "COMPLETED") {
-                $script:wpfLastProviderRelease = $result.release
+            $envelopeState = if ([string]$result.state -eq "COMPLETED") {
+                "AVAILABLE"
+            } else { [string]$result.state }
+            $script:wpfProviderSnapshot = New-ControlCenterProviderObservationEnvelope `
+                -State $envelopeState -Release $result.release `
+                -PriorObservation $script:wpfProviderSnapshot `
+                -AttemptedAt ([DateTimeOffset]::Parse([string]$result.attempted_at)) `
+                -ObservedAt ([DateTimeOffset]::Parse([string]$result.observed_at))
+            if ([string]$result.release_slot -eq "CLEAR") {
+                $script:wpfProviderObservation = $null
             }
             Refresh-WpfStatus
         }
@@ -15823,7 +16118,7 @@ function Show-WpfControlCenter {
             $release = Get-ReleaseControlStatusSnapshot -SkipProviderObservation
             $release = Merge-ControlCenterProviderObservation `
                 -LocalRelease $release `
-                -ProviderRelease $script:wpfLastProviderRelease
+                -ProviderObservation $script:wpfProviderSnapshot
             $summary = Get-ControlCenterSummaryPresentation -Snapshot (
                 [pscustomobject]@{
                     captured_at = [DateTimeOffset]::UtcNow.ToString("o")
@@ -16098,16 +16393,31 @@ function Show-WpfControlCenter {
                     ) | Out-Null
                 } catch {}
             }
+            if (-not $eventArgs.Cancel -and $script:wpfProviderObservation) {
+                $termination = Stop-NativeProcessTree `
+                    -Process $script:wpfProviderObservation.process
+                if ([string]$termination.state -notin @(
+                    "TERMINATED", "ALREADY_EXITED"
+                )) {
+                    $script:wpfProviderSnapshot =
+                        New-ControlCenterProviderObservationEnvelope `
+                            -State TERMINATION_UNRESOLVED `
+                            -PriorObservation $script:wpfProviderSnapshot `
+                            -ObservedAt ([DateTimeOffset]::UtcNow)
+                    $eventArgs.Cancel = $true
+                    Refresh-WpfStatus
+                } else {
+                    $completed = Complete-ControlCenterProviderObservationProcess `
+                        -Observation $script:wpfProviderObservation
+                    if ([string]$completed.release_slot -eq "CLEAR") {
+                        $script:wpfProviderObservation = $null
+                    }
+                }
+            }
         })
         $window.Add_Closed({
             $timer.Stop()
             $operationTimer.Stop()
-            if ($script:wpfProviderObservation) {
-                Stop-NativeProcessTree -Process $script:wpfProviderObservation.process
-                $null = Complete-ControlCenterProviderObservationProcess `
-                    -Observation $script:wpfProviderObservation
-                $script:wpfProviderObservation = $null
-            }
         })
         $window.Add_ContentRendered({
             if (-not $script:wpfUiStartedRecorded) {
@@ -16904,7 +17214,8 @@ function Show-ControlCenter {
     $script:winFormsProviderObservation = $null
     $script:lastStatusRequest = [DateTime]::MinValue
     $script:lastReleaseRequest = [DateTime]::MinValue
-    $script:lastGuiRelease = $null
+    $script:winFormsProviderSnapshot = New-ControlCenterProviderObservationEnvelope `
+        -State UNKNOWN
     function Apply-GuiStatus {
         param([pscustomobject]$Snapshot)
         $script:lastGuiSnapshot = $Snapshot
@@ -17080,20 +17391,33 @@ function Show-ControlCenter {
         $script:winFormsProviderObservation =
             Start-ControlCenterProviderObservationProcess `
                 -ExpectedControlRevision ([string]$controlIdentity.source_revision)
+        $script:winFormsProviderSnapshot = New-ControlCenterProviderObservationEnvelope `
+            -State PENDING -PriorObservation $script:winFormsProviderSnapshot `
+            -AttemptedAt ([DateTimeOffset]::Parse(
+                [string]$script:winFormsProviderObservation.attempted_at
+            ))
     }
     function Update-GuiReleaseStatus {
         if (-not $script:winFormsProviderObservation) { return }
         $result = Complete-ControlCenterProviderObservationProcess `
             -Observation $script:winFormsProviderObservation
         if ([string]$result.state -eq "PENDING") { return }
-        $script:winFormsProviderObservation = $null
-        if ([string]$result.state -eq "COMPLETED") {
-            $script:lastGuiRelease = $result.release
+        $envelopeState = if ([string]$result.state -eq "COMPLETED") {
+            "AVAILABLE"
+        } else { [string]$result.state }
+        $script:winFormsProviderSnapshot = New-ControlCenterProviderObservationEnvelope `
+            -State $envelopeState -Release $result.release `
+            -PriorObservation $script:winFormsProviderSnapshot `
+            -AttemptedAt ([DateTimeOffset]::Parse([string]$result.attempted_at)) `
+            -ObservedAt ([DateTimeOffset]::Parse([string]$result.observed_at))
+        if ([string]$result.release_slot -eq "CLEAR") {
+            $script:winFormsProviderObservation = $null
         }
         if ($script:lastGuiSnapshot) {
             $localRelease = Get-ReleaseControlStatusSnapshot -SkipProviderObservation
             $script:lastGuiSnapshot.release = Merge-ControlCenterProviderObservation `
-                -LocalRelease $localRelease -ProviderRelease $script:lastGuiRelease
+                -LocalRelease $localRelease `
+                -ProviderObservation $script:winFormsProviderSnapshot
             Apply-GuiStatus $script:lastGuiSnapshot
         }
     }
@@ -17135,11 +17459,9 @@ function Show-ControlCenter {
                 try {
                     $snapshot = Get-Content -LiteralPath $statusSnapshotPath -Raw -Encoding UTF8 |
                         ConvertFrom-ReleaseControlJson
-                    if ($script:lastGuiRelease) {
-                        $snapshot.release = Merge-ControlCenterProviderObservation `
-                            -LocalRelease $snapshot.release `
-                            -ProviderRelease $script:lastGuiRelease
-                    }
+                    $snapshot.release = Merge-ControlCenterProviderObservation `
+                        -LocalRelease $snapshot.release `
+                        -ProviderObservation $script:winFormsProviderSnapshot
                     Apply-GuiStatus $snapshot
                 } catch {}
             }
@@ -17247,13 +17569,6 @@ function Show-ControlCenter {
         $operationTimer.Stop()
         $activationTimer.Stop()
         $activationEvent.Dispose()
-        if ($script:winFormsProviderObservation) {
-            Stop-NativeProcessTree `
-                -Process $script:winFormsProviderObservation.process
-            $null = Complete-ControlCenterProviderObservationProcess `
-                -Observation $script:winFormsProviderObservation
-            $script:winFormsProviderObservation = $null
-        }
         Remove-Item -LiteralPath $statusSnapshotPath -Force `
             -ErrorAction SilentlyContinue
     })
@@ -17267,6 +17582,35 @@ function Show-ControlCenter {
                     "Operation in progress", "OK", "Warning"
                 ) | Out-Null
             } catch {}
+        }
+        if (-not $eventArgs.Cancel -and $script:winFormsProviderObservation) {
+            $termination = Stop-NativeProcessTree `
+                -Process $script:winFormsProviderObservation.process
+            if ([string]$termination.state -notin @(
+                "TERMINATED", "ALREADY_EXITED"
+            )) {
+                $script:winFormsProviderSnapshot =
+                    New-ControlCenterProviderObservationEnvelope `
+                        -State TERMINATION_UNRESOLVED `
+                        -PriorObservation $script:winFormsProviderSnapshot `
+                        -ObservedAt ([DateTimeOffset]::UtcNow)
+                $eventArgs.Cancel = $true
+                if ($script:lastGuiSnapshot) {
+                    $localRelease = Get-ReleaseControlStatusSnapshot `
+                        -SkipProviderObservation
+                    $script:lastGuiSnapshot.release =
+                        Merge-ControlCenterProviderObservation `
+                            -LocalRelease $localRelease `
+                            -ProviderObservation $script:winFormsProviderSnapshot
+                    Apply-GuiStatus $script:lastGuiSnapshot
+                }
+            } else {
+                $completed = Complete-ControlCenterProviderObservationProcess `
+                    -Observation $script:winFormsProviderObservation
+                if ([string]$completed.release_slot -eq "CLEAR") {
+                    $script:winFormsProviderObservation = $null
+                }
+            }
         }
     })
     [void]$form.ShowDialog()
