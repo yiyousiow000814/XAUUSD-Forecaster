@@ -55,6 +55,42 @@ def _dashboard_module():
     return module
 
 
+def test_wal_checkpoint_component_accepts_only_digest_bound_runtime_state(
+    tmp_path: Path,
+) -> None:
+    module = _dashboard_module()
+    payload = {
+        "schema": "xauusd.forward.wal-checkpoint.v1",
+        "recorded_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+        "database": str(tmp_path / "forward-evidence.sqlite3"),
+        "status": "TRUNCATED",
+        "log_frames": 0,
+        "checkpointed_frames": 0,
+        "pending_frames": 0,
+        "wal_bytes_before": 2_721_169_392,
+        "wal_bytes_after": 0,
+        "journal_size_limit_bytes": 64 * 1024**2,
+        "busy_timeout_ms": 250,
+        "truncate_attempted": True,
+        "error": None,
+    }
+    payload["receipt_digest"] = module._canonical_payload_digest(payload)
+    state = tmp_path / "wal-checkpoint-state.json"
+    state.write_text(json.dumps(payload), encoding="utf-8")
+
+    accepted = module._wal_checkpoint_status(tmp_path)
+    assert accepted["status"] == "OK"
+    assert accepted["checkpoint_status"] == "TRUNCATED"
+    assert accepted["wal_bytes"] == 0
+    assert accepted["journal_size_limit_bytes"] == 64 * 1024**2
+
+    payload["pending_frames"] = 1
+    state.write_text(json.dumps(payload), encoding="utf-8")
+    rejected = module._wal_checkpoint_status(tmp_path)
+    assert rejected["status"] == "ERROR"
+    assert "digest" in rejected["last_error"]
+
+
 def _write_market_session(
     root: Path, *, observed_at: datetime, is_open: bool,
     next_close_time: datetime | None = None,

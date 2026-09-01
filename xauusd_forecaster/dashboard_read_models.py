@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .sqlite_wal import open_forward_writer_connection
+
 
 READ_MODEL_CONTRACTS = {
     "audit": "dashboard-audit-summary-v1",
@@ -215,9 +217,7 @@ class DashboardReadModelOwner:
         self._refresh_lock = threading.Lock()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database, timeout=60)
-        connection.execute("PRAGMA busy_timeout=60000")
-        return connection
+        return open_forward_writer_connection(self.database, timeout=60)
 
     def _snapshot_connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(

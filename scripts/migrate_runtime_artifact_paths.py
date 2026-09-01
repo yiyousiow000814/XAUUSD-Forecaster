@@ -26,6 +26,9 @@ from xauusd_forecaster.artifact_path_migration import (  # noqa: E402
 from xauusd_forecaster.training_v2 import (  # noqa: E402
     require_current_contract_generation,
 )
+from xauusd_forecaster.sqlite_wal import (  # noqa: E402
+    open_forward_writer_connection,
+)
 
 
 UTC = timezone.utc
@@ -42,8 +45,15 @@ def main() -> int:
     args = parser.parse_args()
     database = args.database.resolve()
     runtime_forward = (args.runtime_root.resolve() / ".local" / "forward")
-    connection = sqlite3.connect(database, timeout=5)
-    connection.row_factory = sqlite3.Row
+    if args.action in {"apply", "rollback"}:
+        connection = open_forward_writer_connection(
+            database, timeout=5, row_factory=sqlite3.Row,
+        )
+    else:
+        connection = sqlite3.connect(
+            f"file:{database}?mode=ro", uri=True, timeout=5,
+        )
+        connection.row_factory = sqlite3.Row
     try:
         if args.action == "plan":
             receipt = build_artifact_path_migration_plan(

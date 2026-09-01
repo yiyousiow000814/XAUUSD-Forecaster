@@ -13,6 +13,7 @@ from .forward_ledger import canonical_hash
 from .news_evidence import EVIDENCE_POLICY_VERSION
 from .news_relevance import google_news_item_is_relevant, is_google_news_source
 from .news_time import assess_news_time
+from .sqlite_wal import open_forward_writer_connection
 
 
 @dataclass(frozen=True)
@@ -137,9 +138,9 @@ def prune_unused_news(
     """Append visibility classifications; raw revisions always remain intact."""
     database_path = database_path.resolve()
     del backup_directory
-    connection = sqlite3.connect(database_path, timeout=60)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA busy_timeout=60000")
+    connection = open_forward_writer_connection(
+        database_path, timeout=60, row_factory=sqlite3.Row,
+    )
     install_v2_schema(connection)
     epoch_row = connection.execute(
         "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
