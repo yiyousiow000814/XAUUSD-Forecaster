@@ -259,6 +259,16 @@
   evidence, blocks Stable commit, and is isolated from forecasting SQLite.
   Pending evidence retries within observation; hard failure or timeout uses the
   release rollback. A second pre-promotion Sync owner is forbidden.
+- A post-cutover deferred projection request binds the exact transaction,
+  validation key, Worker Version, producer revision, route set, and freshness
+  boundary before the deferred Sync service starts. The existing background
+  read-model owner remains the sole local producer, and the existing serial
+  Sync owner gives that exact request priority over its steady-state heavy
+  cadence only after the durable model reaches the required boundary. Sync
+  retains the normal projection bytes and hashes in a bounded receipt; Worker
+  parity remains the release authority. Rollback cancels an incomplete request
+  before restoring the prior producer, and no second producer or Sync owner is
+  introduced.
 - Local `/api/status` and `/api/critical-status` are the same bounded
   first-paint contract. They include only the fixed recent 90-minute decision
   window and the fixed `news_metrics` aggregate required by the Live headline;

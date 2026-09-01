@@ -3154,6 +3154,113 @@ def test_continuous_heavy_owner_drains_overdue_queue_before_next_heartbeat(
     ]
 
 
+def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    config = module.configure_runtime_state({}, tmp_path)
+    schedule_path = tmp_path / "resource-schedule-cloudflare.json"
+    target = {
+        "name": "cloudflare",
+        "local_status_url": "http://127.0.0.1:8765/api/status",
+        "remote_ingest_url": "https://worker.example/api/ingest",
+        "resource_schedule_state_file": str(schedule_path),
+    }
+    revision = "b" * 40
+    required_after = datetime(2026, 9, 1, 1, 2, 3, tzinfo=timezone.utc)
+    request = {
+        "schema_version": module.DEFERRED_PROJECTION_CONTRACT,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "transaction_id": "22222222-2222-4222-8222-222222222222",
+        "validation_key": f"run:{revision}",
+        "worker_version_id": "33333333-3333-4333-8333-333333333333",
+        "producer_revision": revision,
+        "target": "cloudflare",
+        "required_after": required_after.isoformat(),
+        "routes": sorted(module.DEFERRED_PROJECTION_ROUTES),
+        "created_at": required_after.isoformat(),
+    }
+    Path(config["deferred_projection_request_file"]).write_text(
+        json.dumps(request), encoding="utf-8",
+    )
+    stale = {"generated_at": (required_after - timedelta(seconds=1)).isoformat()}
+    fresh = {
+        "generated_at": (required_after + timedelta(seconds=1)).isoformat(),
+        "news_metrics": {"events": 2},
+        "daily_news_brief_summary": {"brief_date": "2026-09-01"},
+        "daily_news_briefs": [], "recent_decisions": [],
+        "storylines": [], "story_event_candidates": [],
+        "unassigned_story_events": [],
+    }
+    payloads = iter((stale, fresh))
+    writes = []
+    monkeypatch.setattr(module, "_projection_producer_revision", lambda: revision)
+    monkeypatch.setattr(module, "_read_local_resource", lambda *_a: next(payloads))
+    monkeypatch.setattr(
+        module, "_post_json",
+        lambda url, body, _target: writes.append((url, body)) or {},
+    )
+
+    pending = module.sync_deferred_projection_once([target], config)
+    completed = module.sync_deferred_projection_once([target], config)
+    repeated = module.sync_deferred_projection_once([target], config)
+
+    assert pending.resource_observations == []
+    assert len(writes) == 4
+    assert [url.rsplit("/api/", 1)[-1] for url, _body in writes] == [
+        "audit", "audit-briefs", "audit-stories", "audit-decisions",
+    ]
+    assert repeated.resource_observations == []
+    receipt = json.loads(Path(
+        config["deferred_projection_receipt_file"]
+    ).read_text(encoding="utf-8"))
+    assert receipt["state"] == "COMPLETED"
+    assert receipt["request_id"] == request["request_id"]
+    assert receipt["producer_revision"] == revision
+    assert receipt["generated_at"] == fresh["generated_at"]
+    assert set(receipt["projection_hashes"]) == module.DEFERRED_PROJECTION_ROUTES
+    posted = {"/api/" + url.rsplit("/api/", 1)[-1]: body for url, body in writes}
+    assert receipt["projection_hashes"] == {
+        route: module.hashlib.sha256(posted[route]).hexdigest()
+        for route in module.DEFERRED_PROJECTION_ROUTES
+    }
+    assert completed.resource_observations[0]["resource"] == "deferred_projection"
+    schedule = json.loads(schedule_path.read_text(encoding="utf-8"))
+    assert schedule["resources"]["audit"]["last_success_at"]
+
+
+def test_deferred_projection_identity_mismatch_fails_without_publication(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    config = module.configure_runtime_state({}, tmp_path)
+    request = {
+        "schema_version": module.DEFERRED_PROJECTION_CONTRACT,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "transaction_id": "22222222-2222-4222-8222-222222222222",
+        "validation_key": "run:" + "b" * 40,
+        "worker_version_id": "33333333-3333-4333-8333-333333333333",
+        "producer_revision": "b" * 40,
+        "target": "cloudflare",
+        "required_after": "2026-09-01T01:02:03+00:00",
+        "routes": ["/api/audit-stories"],
+        "created_at": "2026-09-01T01:02:03+00:00",
+    }
+    Path(config["deferred_projection_request_file"]).write_text(
+        json.dumps(request), encoding="utf-8",
+    )
+    publications = []
+    monkeypatch.setattr(module, "_projection_producer_revision", lambda: "a" * 40)
+    monkeypatch.setattr(module, "_sync_audit", lambda *_a: publications.append(True))
+
+    result = module.sync_deferred_projection_once([], config)
+
+    assert publications == []
+    assert result[0]["resource"] == "deferred_projection"
+    assert "producer revision mismatch" in result[0]["error"]
+    assert not Path(config["deferred_projection_receipt_file"]).exists()
+
+
 def test_local_operator_bridge_transport_requires_dedicated_secret(monkeypatch) -> None:
     module = _sync_module()
     monkeypatch.delenv("DASHBOARD_OPERATOR_BRIDGE_TOKEN", raising=False)
