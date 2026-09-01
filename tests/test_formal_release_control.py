@@ -202,13 +202,17 @@ def test_runtime_read_model_formal_shard_separates_observation_from_authority() 
         "ActiveMismatchDoesNotMoveCommittedOrLkg",
         "ArtifactExistenceIndependentFromPlacement",
         "NotAssignedAloneDoesNotMeanArtifactMissing",
-        "ReverseAttemptRequiresReadyPrecheck",
+        "ReverseAttemptRequiresSafeAuthority",
         "FailedOrUnknownLookupFailsClosed",
+        "UnknownActiveObservationFailsClosed",
+        "ActiveDriftFailsClosed",
+        "DegradedAuthorityAllowsReverse",
         "ReadObservationDoesNotMutateRelease",
-        "CommittedChangesOnlyAfterSuccessfulObservation",
+        "ReadModelNeverChangesCommittedOrLkg",
     ):
         assert contract in model
         assert contract in config
     assert "CpuSamples" not in model
     assert "accessReceipt" not in model
     assert "stagingGeneration" not in model
+    assert "CommitAfterSuccessfulObservation" not in model

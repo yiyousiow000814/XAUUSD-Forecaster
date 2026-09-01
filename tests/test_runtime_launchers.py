@@ -4601,6 +4601,159 @@ def test_rollback_target_exact_lookup_failures_are_fail_closed(
     assert result == "False"
 
 
+@pytest.mark.parametrize(
+    ("diagnostic", "expected"),
+    (
+        ("VERSION_NOT_FOUND", "UNAVAILABLE"),
+        ("HTTP STATUS 404", "UNAVAILABLE"),
+        ("HTTP STATUS 401", "UNKNOWN"),
+        ("HTTP STATUS 403", "UNKNOWN"),
+        ("credentials missing", "UNKNOWN"),
+        ("version not found", "UNKNOWN"),
+        ("Wrangler CLI is unavailable", "UNKNOWN"),
+        ("provider transport timeout", "UNKNOWN"),
+        ("HTTP STATUS 429", "UNKNOWN"),
+        ("temporary provider unavailable", "UNKNOWN"),
+    ),
+)
+def test_rollback_exact_lookup_provider_failure_taxonomy(
+    tmp_path, diagnostic: str, expected: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        f"function Get-CloudflareVersionDetails{{throw '{diagnostic}'}};"
+        "$target=[pscustomobject]@{worker_version_id='11111111-1111-4111-8111-111111111111'};"
+        "$result=Get-CloudflareRollbackArtifactObservation $target;"
+        'Write-Output "$($result.status),$($result.reason)"',
+    )
+    assert result == f"{expected},WORKER_VERSION_PROVIDER_{expected}"
+
+
+@pytest.mark.parametrize(
+    ("versions", "has_previous", "expected"),
+    (
+        ([{"version_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "percentage": 100},
+          {"version_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "percentage": 0}],
+         True, "ASSIGNED"),
+        ([{"version_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "percentage": 100}],
+         True, "NOT_ASSIGNED"),
+        ([{"version_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "percentage": 100},
+          {"version_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "percentage": 0},
+          {"version_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "percentage": 25}],
+         True, "MISMATCH"),
+        ([{"version_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "percentage": 100}],
+         False, "NOT_APPLICABLE"),
+    ),
+)
+def test_traffic_membership_is_authoritative_enum(
+    tmp_path, versions: list[dict], has_previous: bool, expected: str,
+) -> None:
+    deployment = json.dumps({"versions": versions})
+    previous = ("[pscustomobject]@{worker_version_id="
+                "'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'}") if has_previous else "$null"
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$deployment='{deployment}'|ConvertFrom-Json;$previous={previous};"
+        "$result=Get-ReleaseTrafficObservation -Deployment $deployment -Previous $previous;"
+        'Write-Output "$($result.previous_membership_status),$($result.previous_is_member)"',
+    )
+    assert result == f"{expected},{'True' if expected == 'ASSIGNED' else 'False'}"
+
+
+def test_provider_unknown_membership_is_not_not_assigned(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$previous=[pscustomobject]@{worker_version_id='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'};"
+        "$result=Get-ReleaseTrafficObservation -Deployment $null -Previous $previous -Status UNKNOWN;"
+        'Write-Output "$($result.previous_membership_status),$($result.previous_is_member)"',
+    )
+    assert result == "UNKNOWN,False"
+
+
+@pytest.mark.parametrize(
+    "powershell",
+    [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
+def test_runtime_composition_and_presenter_preserve_unknown_membership(
+    tmp_path, powershell: str,
+) -> None:
+    stable = "11111111-1111-4111-8111-111111111111"
+    previous = "22222222-2222-4222-8222-222222222222"
+    identity = ("[pscustomobject]@{git_sha=('a'*40);worker_git_sha=('a'*40);"
+                f"worker_version_id='{stable}';windows_revision=('a'*40);branch='main';"
+                "artifact_kind='PRODUCTION_CANDIDATE';validation_key='key'}")
+    previous_identity = ("[pscustomobject]@{git_sha=('b'*40);worker_git_sha=('b'*40);"
+                         f"worker_version_id='{previous}';windows_revision=('b'*40);branch='main';"
+                         "artifact_kind='PRODUCTION_CANDIDATE';validation_key='previous-key'}")
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-CloudflareDeployment{throw 'provider unavailable'};"
+        "function Get-RuntimeCodeState{[pscustomobject]@{applied_revision=('a'*40)}};"
+        "function Get-ReleaseActiveHealthObservation{[pscustomobject]@{status='DEGRADED';"
+        "reason='TEST';ownership_status='SINGLE_OWNER'}};"
+        "function Get-CloudflareRollbackArtifactObservation{[pscustomobject]@{status='AVAILABLE';reason='OK'}};"
+        "function Get-ReleaseWindowsArtifactObservation{[pscustomobject]@{status='AVAILABLE';reason='OK'}};"
+        "function Get-RuntimeControlBundleIdentity{[pscustomobject]@{exact_revision=$true}};"
+        f"$state=[pscustomobject]@{{schema_version='stable-candidate-release-v3';stable={identity};"
+        f"previous_stable={previous_identity};candidate=$null;transaction=$null;"
+        "deployment_status='READY';control_bundle_hash_verified=$true;"
+        "control_bundle_exact_revision=$true;control_bundle_revision=('a'*40)};"
+        "$model=Get-CurrentReleaseRuntimeReadModel -PersistedState $state;"
+        "$state|Add-Member release_runtime $model;$view=Get-ControlCenterReleasePresentation $state;"
+        'Write-Output "$($model.previous.worker_traffic_membership_status),'
+        '$($view.previous_traffic_membership_status),$($view.can_reverse),'
+        '$($model.previous.reverse_precheck.reason)"',
+        powershell=powershell,
+    )
+    assert result == "UNKNOWN,UNKNOWN,False,ACTIVE_OBSERVATION_UNAVAILABLE"
+
+
+@pytest.mark.parametrize(
+    "powershell",
+    [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
+def test_runtime_composition_allows_degraded_safe_reverse(
+    tmp_path, powershell: str,
+) -> None:
+    stable = "11111111-1111-4111-8111-111111111111"
+    previous = "22222222-2222-4222-8222-222222222222"
+    result = _run_control_center_contract(
+        tmp_path,
+        f"function Get-CloudflareDeployment{{[pscustomobject]@{{versions=@("
+        f"[pscustomobject]@{{version_id='{stable}';percentage=100}})}}}};"
+        f"function Get-CloudflareVersionDetails{{[pscustomobject]@{{id='{stable}';"
+        "annotations=[pscustomobject]@{'workers/message'=('release:'+('a'*40)+' branch:main artifact_kind:PRODUCTION_CANDIDATE')}}};"
+        "function Get-RuntimeCodeState{[pscustomobject]@{applied_revision=('a'*40)}};"
+        "function Get-ReleaseActiveHealthObservation{[pscustomobject]@{status='DEGRADED';"
+        "reason='LOCAL_API_OR_RUNTIME_HEALTH_FAILED';ownership_status='SINGLE_OWNER'}};"
+        "function Get-CloudflareRollbackArtifactObservation{[pscustomobject]@{status='AVAILABLE';reason='OK'}};"
+        "function Get-ReleaseWindowsArtifactObservation{[pscustomobject]@{status='AVAILABLE';reason='OK'}};"
+        "function Get-RuntimeControlBundleIdentity{[pscustomobject]@{exact_revision=$true}};"
+        f"$stable=[pscustomobject]@{{git_sha=('a'*40);worker_git_sha=('a'*40);worker_version_id='{stable}';"
+        "windows_revision=('a'*40);branch='main';artifact_kind='PRODUCTION_CANDIDATE';validation_key='key'};"
+        f"$previous=[pscustomobject]@{{git_sha=('b'*40);worker_git_sha=('b'*40);worker_version_id='{previous}';"
+        "windows_revision=('b'*40);branch='main';artifact_kind='PRODUCTION_CANDIDATE';validation_key='previous-key'};"
+        "$state=[pscustomobject]@{schema_version='stable-candidate-release-v3';stable=$stable;"
+        "previous_stable=$previous;candidate=$null;transaction=$null;deployment_status='READY';"
+        "control_bundle_hash_verified=$true;control_bundle_exact_revision=$true;control_bundle_revision=('a'*40)};"
+        "$model=Get-CurrentReleaseRuntimeReadModel -PersistedState $state;"
+        'Write-Output "$($model.active.health),$($model.active_matches_committed),'
+        '$($model.previous.reverse_precheck.can_reverse),$($model.previous.reverse_precheck.reason)"',
+        powershell=powershell,
+    )
+    assert result == "DEGRADED,True,True,READY"
+
+
+def test_all_operator_and_json_consumers_preserve_membership_enum() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    assert source.count("previous_traffic_membership_status") >= 3
+    assert '$releaseView.previous_traffic_membership_status.Replace' in source
+    status_json = source.split('"StatusJson" {', 1)[1].split('"ReleaseStatusJson" {', 1)[0]
+    release_json = source.split('"ReleaseStatusJson" {', 1)[1].split('"CodeRevision" {', 1)[0]
+    assert "Get-ReleaseControlStatusSnapshot" in status_json
+    assert "Get-ReleaseControlStatusSnapshot" in release_json
+
+
 def test_rollback_artifact_availability_does_not_require_deployment_membership(tmp_path) -> None:
     stable = "11111111-1111-4111-8111-111111111111"
     candidate = "22222222-2222-4222-8222-222222222222"
@@ -5118,8 +5271,12 @@ def test_reverse_restores_both_identities_without_d1_mutation(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("persisted_eligible", ("$true", "$false"))
+@pytest.mark.parametrize(
+    "live_reason",
+    ("ACTIVE_OBSERVATION_UNAVAILABLE", "ACTIVE_COMMITTED_MISMATCH_REQUIRES_RECOVERY_MODE"),
+)
 def test_reverse_action_rechecks_live_authority_before_transaction(
-    tmp_path, persisted_eligible: str,
+    tmp_path, persisted_eligible: str, live_reason: str,
 ) -> None:
     previous = "a" * 40
     current = "b" * 40
@@ -5135,7 +5292,7 @@ def test_reverse_action_rechecks_live_authority_before_transaction(
         "function Assert-ActiveControlBundle{return [pscustomobject]@{exact_revision=$true}};"
         "function Get-CurrentReleaseRuntimeReadModel{return [pscustomobject]@{previous="
         "[pscustomobject]@{reverse_precheck=[pscustomobject]@{can_reverse=$false;"
-        "reason='WORKER_VERSION_PROVIDER_UNKNOWN'}}}};"
+        f"reason='{live_reason}'}}}}}}}};"
         "$reason='';try{$null=Invoke-ReverseStable}catch{$reason=$_.Exception.Message};"
         "$final=Get-ReleaseControlState;"
         'Write-Output "$reason,$($null -eq $final.transaction),$($final.deployment_status),'
@@ -5143,7 +5300,7 @@ def test_reverse_action_rechecks_live_authority_before_transaction(
     )
 
     assert result == (
-        "REVERSE_PRECHECK_BLOCKED:WORKER_VERSION_PROVIDER_UNKNOWN,True,READY,"
+        f"REVERSE_PRECHECK_BLOCKED:{live_reason},True,READY,"
         + ("True" if persisted_eligible == "$true" else "False")
     )
 

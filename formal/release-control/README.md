@@ -39,9 +39,12 @@ The interface contract and the complete old-to-new property mapping are in
 5. CPU-only recovery preserves independently accepted stages.
 6. Provider pending remains non-promotable without becoming a false Candidate
    regression.
-7. The runtime read-model shard guarantees that read-only observations do not
-   mutate Committed Stable/LKG, and that Reverse entry consumes a fresh
-   `READY` precheck rather than placement membership or a persisted UI snapshot.
+7. The runtime read-model shard guarantees that read-only observations never
+   mutate Committed Stable/LKG; Reverse requires available Active observation,
+   exact Active-to-Committed identity, exact rollback artifact lookup, and
+   control authority. Business health is independent, so `DEGRADED` does not
+   block otherwise-safe recovery. `CoreRelease` alone owns the proof that Stable
+   changes only after successful Observe.
 
 ## Local execution
 

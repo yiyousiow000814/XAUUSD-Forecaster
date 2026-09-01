@@ -22,10 +22,45 @@ function ConvertTo-ReleaseRuntimeIdentity {
         artifact_kind = [string](
             Get-ReleaseRuntimeProperty $Identity "artifact_kind"
         )
+        branch = [string](Get-ReleaseRuntimeProperty $Identity "branch")
+        worker_git_sha = [string](
+            Get-ReleaseRuntimeProperty $Identity "worker_git_sha"
+        )
         validation_key = [string](
             Get-ReleaseRuntimeProperty $Identity "validation_key"
         )
     }
+}
+
+function Test-ReleaseRuntimeIdentityComplete {
+    param(
+        [AllowNull()][object]$Identity,
+        [string]$PersistedSchemaVersion = "stable-candidate-release-v3"
+    )
+    if (-not $Identity -or $PersistedSchemaVersion -notmatch
+        '^stable-candidate-release-v[123]$') { return $false }
+    $git = [string](Get-ReleaseRuntimeProperty $Identity "git_sha")
+    $workerGit = [string](Get-ReleaseRuntimeProperty $Identity "worker_git_sha")
+    $worker = [string](Get-ReleaseRuntimeProperty $Identity "worker_version_id")
+    $windows = [string](Get-ReleaseRuntimeProperty $Identity "windows_revision")
+    $kind = [string](Get-ReleaseRuntimeProperty $Identity "artifact_kind")
+    $branch = [string](Get-ReleaseRuntimeProperty $Identity "branch")
+    if ($git -notmatch '^[0-9a-f]{40}$' -or
+        $windows -notmatch '^[0-9a-f]{40}$' -or
+        $worker -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' -or
+        $git -cne $windows -or $branch -cne "main") { return $false }
+    if ($kind -eq "PRODUCTION_CANDIDATE") {
+        return [bool](-not $workerGit -or
+            ($workerGit -match '^[0-9a-f]{40}$' -and $workerGit -ceq $git))
+    }
+    if ($kind -eq "LEGACY_BOOTSTRAP_STABLE") {
+        return [bool]($workerGit -ceq "NOT_RECORDED" -and
+            $git -ceq "783d25314b090dd7fbbf124777c3b8de517d2b85" -and
+            $worker -ceq "76d314fc-e484-4f50-8ace-3689e0896709" -and
+            [string](Get-ReleaseRuntimeProperty $Identity "provenance_state") -ceq
+                "LEGACY_EXACT_WORKER_WINDOWS_PAIR")
+    }
+    return $false
 }
 
 function Test-ReleaseRuntimeIdentityEqual {
@@ -151,6 +186,14 @@ function New-ReleaseWorkerArtifactObservation {
                 identity_status = "MATCH"; provenance_status = "MISMATCH"
             }
         }
+        if ($message -notmatch '(?i)(?:^|\s)branch:([^\s]+)' -or
+            [string]$matches[1] -cne "main") {
+            return [pscustomobject]@{
+                status = "MISMATCH"; reason = "WORKER_BRANCH_PROVENANCE_MISMATCH"
+                requested_version_id = $targetId; observed_version_id = $observedId
+                identity_status = "MATCH"; provenance_status = "MISMATCH"
+            }
+        }
     }
     return [pscustomobject]@{
         status = "AVAILABLE"; reason = "EXACT_WORKER_VERSION_AVAILABLE"
@@ -184,7 +227,9 @@ function New-ReleaseReversePrecheck {
         [bool]$TransactionActive = $false,
         [bool]$ReleaseLockActive = $false,
         [string]$OwnershipStatus = "UNKNOWN",
-        [string]$ActiveHealthStatus = "UNKNOWN",
+        [string]$ActiveObservationStatus = "UNKNOWN",
+        [string]$ActiveIdentityStatus = "INCOMPLETE",
+        [bool]$ActiveMatchesCommitted = $false,
         [string]$RecoveryObservationStatus = "NOT_OBSERVED"
     )
     $reason = if (-not $Previous) {
@@ -193,6 +238,12 @@ function New-ReleaseReversePrecheck {
         "RELEASE_TRANSACTION_ACTIVE"
     } elseif ($ReleaseLockActive) {
         "RELEASE_LOCK_ACTIVE"
+    } elseif ($ActiveObservationStatus -ne "AVAILABLE") {
+        "ACTIVE_OBSERVATION_UNAVAILABLE"
+    } elseif ($ActiveIdentityStatus -ne "COMPLETE") {
+        "ACTIVE_IDENTITY_INCOMPLETE"
+    } elseif (-not $ActiveMatchesCommitted) {
+        "ACTIVE_COMMITTED_MISMATCH_REQUIRES_RECOVERY_MODE"
     } elseif ([string]$WorkerArtifact.status -ne "AVAILABLE") {
         [string]$WorkerArtifact.reason
     } elseif ([string]$WindowsArtifact.status -ne "AVAILABLE") {
@@ -201,8 +252,6 @@ function New-ReleaseReversePrecheck {
         "CONTROL_BUNDLE_$ControlBundleStatus"
     } elseif ($OwnershipStatus -ne "SINGLE_OWNER") {
         "PRODUCTION_OWNERSHIP_$OwnershipStatus"
-    } elseif ($ActiveHealthStatus -ne "HEALTHY") {
-        "ACTIVE_HEALTH_$ActiveHealthStatus"
     } else { "READY" }
     [pscustomobject]@{
         status = if ($reason -eq "READY") { "READY" } else { "BLOCKED" }
@@ -223,18 +272,21 @@ function New-ReleaseRuntimeReadModel {
         [AllowNull()][object]$ReversePrecheck,
         [Parameter(Mandatory = $true)][DateTimeOffset]$ObservedAt
     )
-    $committed = ConvertTo-ReleaseRuntimeIdentity (
-        Get-ReleaseRuntimeProperty $PersistedState "stable"
-    )
-    $previous = ConvertTo-ReleaseRuntimeIdentity (
-        Get-ReleaseRuntimeProperty $PersistedState "previous_stable"
-    )
-    $target = ConvertTo-ReleaseRuntimeIdentity (
-        Get-ReleaseRuntimeProperty $PersistedState "candidate"
-    )
+    $schema = [string](Get-ReleaseRuntimeProperty $PersistedState "schema_version")
+    $committedRaw = Get-ReleaseRuntimeProperty $PersistedState "stable"
+    $previousRaw = Get-ReleaseRuntimeProperty $PersistedState "previous_stable"
+    $targetRaw = Get-ReleaseRuntimeProperty $PersistedState "candidate"
+    $committedValid = Test-ReleaseRuntimeIdentityComplete $committedRaw $schema
+    $previousValid = Test-ReleaseRuntimeIdentityComplete $previousRaw $schema
+    $targetValid = Test-ReleaseRuntimeIdentityComplete $targetRaw $schema
+    $committed = if ($committedValid) { ConvertTo-ReleaseRuntimeIdentity $committedRaw } else { $null }
+    $previous = if ($previousValid) { ConvertTo-ReleaseRuntimeIdentity $previousRaw } else { $null }
+    $target = if ($targetValid) { ConvertTo-ReleaseRuntimeIdentity $targetRaw } else { $null }
     $transaction = Get-ReleaseRuntimeProperty $PersistedState "transaction"
     if ($transaction -and (Get-ReleaseRuntimeProperty $transaction "target")) {
-        $target = ConvertTo-ReleaseRuntimeIdentity $transaction.target
+        $target = if (Test-ReleaseRuntimeIdentityComplete $transaction.target $schema) {
+            ConvertTo-ReleaseRuntimeIdentity $transaction.target
+        } else { $null }
     }
     $activeWorkerId = [string](Get-ReleaseRuntimeProperty $ActiveWorkerObservation "version_id")
     $activeWindowsRevision = [string](
@@ -248,8 +300,9 @@ function New-ReleaseRuntimeReadModel {
         }
     } else { $null }
     $activeComplete = [bool]($activeIdentity -and
-        [string]$activeIdentity.worker_version_id -and
-        [string]$activeIdentity.windows_revision -and
+        [string]$activeIdentity.worker_version_id -match
+            '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' -and
+        [string]$activeIdentity.windows_revision -match '^[0-9a-f]{40}$' -and
         [string]$activeIdentity.git_sha -match '^[0-9a-f]{40}$')
     $workerObservationStatus = [string](
         Get-ReleaseRuntimeProperty $ActiveWorkerObservation "status"
@@ -263,8 +316,7 @@ function New-ReleaseRuntimeReadModel {
     if (-not $windowsObservationStatus -and $ActiveWindowsObservation) {
         $windowsObservationStatus = "AVAILABLE"
     }
-    $activeObservationStatus = if ($activeComplete -and
-        $workerObservationStatus -eq "AVAILABLE" -and
+    $activeObservationStatus = if ($workerObservationStatus -eq "AVAILABLE" -and
         $windowsObservationStatus -eq "AVAILABLE") {
         "AVAILABLE"
     } else { "UNKNOWN" }
@@ -276,24 +328,24 @@ function New-ReleaseRuntimeReadModel {
     if ($healthStatus -notin @("HEALTHY", "DEGRADED", "UNKNOWN")) {
         $healthStatus = "UNKNOWN"
     }
-    if ($activeObservationStatus -ne "AVAILABLE") {
-        $healthStatus = "UNKNOWN"
-    }
-    $driftStatus = if (-not $committed -or -not $activeComplete) {
+    $driftStatus = if (-not $committed -or $activeObservationStatus -ne "AVAILABLE" -or
+        -not $activeComplete) {
         "UNKNOWN"
     } elseif ($activeMatches) {
         "MATCHED"
     } else { "DRIFT" }
     $phase = Get-ReleaseRuntimeLifecyclePhase $PersistedState
-    $lkg = if ($committed -and [string](
-        Get-ReleaseRuntimeProperty $PersistedState "schema_version"
-    ) -match '^stable-candidate-release-v[123]$') { $committed } else { $null }
+    $lkg = if ($committedValid) { $committed } else { $null }
     $recoveryReason = if ($driftStatus -eq "DRIFT") {
-        "ACTIVE_COMMITTED_IDENTITY_MISMATCH"
+        "ACTIVE_COMMITTED_MISMATCH_REQUIRES_RECOVERY_MODE"
     } elseif ($healthStatus -eq "DEGRADED") {
         [string](Get-ReleaseRuntimeProperty $HealthObservation "reason")
-    } elseif ($driftStatus -eq "UNKNOWN" -or $healthStatus -eq "UNKNOWN") {
-        "ACTIVE_OBSERVATION_INCOMPLETE"
+    } elseif ($activeObservationStatus -ne "AVAILABLE") {
+        "ACTIVE_OBSERVATION_UNAVAILABLE"
+    } elseif (-not $activeComplete) {
+        "ACTIVE_IDENTITY_INCOMPLETE"
+    } elseif ($healthStatus -eq "UNKNOWN") {
+        "ACTIVE_HEALTH_UNKNOWN"
     } else { $null }
     [pscustomobject]@{
         schema_version = $script:ReleaseRuntimeReadModelSchema
@@ -304,6 +356,7 @@ function New-ReleaseRuntimeReadModel {
         phase = $phase
         transaction_active = [bool]$transaction
         committed_stable = $committed
+        committed_identity_status = if ($committedValid) { "COMPLETE" } else { "INCOMPLETE" }
         previous_committed = $previous
         target = $target
         active = [pscustomobject]@{
@@ -316,6 +369,7 @@ function New-ReleaseRuntimeReadModel {
             ) "traffic_percent"
             windows_revision = $activeWindowsRevision
             observation_status = $activeObservationStatus
+            identity_status = if ($activeComplete) { "COMPLETE" } else { "INCOMPLETE" }
             observation_source = "CLOUDFLARE_DEPLOYMENT+WINDOWS_RUNTIME"
             health = $healthStatus
             health_reason = [string](
@@ -335,6 +389,11 @@ function New-ReleaseRuntimeReadModel {
             worker_is_current_traffic_member = [bool](
                 Get-ReleaseRuntimeProperty $ActiveWorkerObservation "previous_is_member"
             )
+            worker_traffic_membership_status = if (
+                Get-ReleaseRuntimeProperty $ActiveWorkerObservation "previous_membership_status"
+            ) { [string]$ActiveWorkerObservation.previous_membership_status } elseif (-not $previousRaw) {
+                "NOT_APPLICABLE"
+            } else { "UNKNOWN" }
             current_traffic_percent = Get-ReleaseRuntimeProperty (
                 $ActiveWorkerObservation
             ) "previous_traffic_percent"

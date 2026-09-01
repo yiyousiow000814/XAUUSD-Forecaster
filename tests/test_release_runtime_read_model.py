@@ -29,13 +29,23 @@ def _run(body: str, powershell: str = "powershell.exe") -> str:
     return result.stdout.strip()
 
 
+WORKER_IDS = {
+    "stable": "11111111-1111-4111-8111-111111111111",
+    "candidate": "22222222-2222-4222-8222-222222222222",
+    "previous": "33333333-3333-4333-8333-333333333333",
+    "drifted": "44444444-4444-4444-8444-444444444444",
+}
+
+
 def _identity(letter: str, worker: str, *, kind: str = "PRODUCTION_CANDIDATE") -> dict:
+    worker = WORKER_IDS.get(worker, worker)
     return {
         "git_sha": letter * 40,
         "worker_git_sha": letter * 40,
         "worker_version_id": worker,
         "windows_revision": letter * 40,
         "artifact_kind": kind,
+        "branch": "main",
         "validation_key": f"{worker}:{letter * 40}",
     }
 
@@ -52,10 +62,14 @@ def _projection_script(state: dict, *, active: dict | None, health: str) -> str:
         "status": "AVAILABLE" if previous else "NOT_APPLICABLE",
         "reason": "REVISION_OWNED_LAUNCH_CONTRACT_AVAILABLE" if previous else "PREVIOUS_IDENTITY_UNAVAILABLE",
     }
+    active_matches = bool(active and state.get("stable") and
+                          active.get("version_id") == state["stable"]["worker_version_id"] and
+                          active.get("git_sha") == state["stable"]["git_sha"] and
+                          active.get("windows_revision") == state["stable"]["windows_revision"])
     reverse = {
-        "status": "READY" if previous and health == "HEALTHY" else "BLOCKED",
-        "can_reverse": bool(previous and health == "HEALTHY"),
-        "reason": "READY" if previous and health == "HEALTHY" else "ACTIVE_HEALTH_DEGRADED",
+        "status": "READY" if previous and active_matches else "BLOCKED",
+        "can_reverse": bool(previous and active_matches),
+        "reason": "READY" if previous and active_matches else "ACTIVE_COMMITTED_MISMATCH_REQUIRES_RECOVERY_MODE",
         "recovery_observation_status": "NOT_OBSERVED",
     }
     return (
@@ -103,8 +117,8 @@ def test_v3_projection_separates_active_committed_previous_and_target(powershell
     assert model["drift_status"] == "MATCHED"
     assert model["phase"] == "VERIFY"
     assert model["active"]["health"] == "HEALTHY"
-    assert model["last_known_good"]["worker_version_id"] == "stable"
-    assert model["target"]["worker_version_id"] == "candidate"
+    assert model["last_known_good"]["worker_version_id"] == WORKER_IDS["stable"]
+    assert model["target"]["worker_version_id"] == WORKER_IDS["candidate"]
     assert model["previous"]["worker_artifact"]["status"] == "AVAILABLE"
     assert model["previous"]["worker_is_current_traffic_member"] is False
     assert model["previous"]["reverse_precheck"]["can_reverse"] is True
@@ -131,7 +145,7 @@ def test_active_health_and_identity_drift_are_independent(
         "deployment_status": "READY",
     }
     active = {
-        "version_id": "stable" if active_letter == "a" else "drifted",
+        "version_id": WORKER_IDS["stable" if active_letter == "a" else "drifted"],
         "git_sha": active_letter * 40,
         "windows_revision": active_letter * 40,
         "traffic_percent": 100,
@@ -185,7 +199,68 @@ def test_unknown_old_state_does_not_invent_lkg_or_health() -> None:
     assert model["active"]["health"] == "UNKNOWN"
 
 
-def test_unavailable_required_active_observation_cannot_report_healthy() -> None:
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda identity: identity.clear(),
+        lambda identity: identity.pop("worker_version_id"),
+        lambda identity: identity.__setitem__("git_sha", "bad"),
+        lambda identity: identity.__setitem__("windows_revision", "bad"),
+        lambda identity: identity.__setitem__("artifact_kind", "UNKNOWN"),
+    ),
+)
+def test_malformed_recognized_stable_cannot_become_lkg(mutation) -> None:
+    stable = _identity("a", "stable")
+    mutation(stable)
+    state = {"schema_version": "stable-candidate-release-v3", "stable": stable,
+             "previous_stable": None, "candidate": None, "transaction": None,
+             "deployment_status": "READY"}
+    model = json.loads(_run(_projection_script(state, active=None, health="UNKNOWN")))
+    assert model["committed_stable"] is None
+    assert model["committed_identity_status"] == "INCOMPLETE"
+    assert model["last_known_good"] is None
+    assert model["last_known_good_source"] == "UNKNOWN"
+
+
+def test_explicit_narrow_legacy_identity_is_valid_lkg() -> None:
+    revision = "783d25314b090dd7fbbf124777c3b8de517d2b85"
+    legacy = _identity("a", "76d314fc-e484-4f50-8ace-3689e0896709",
+                       kind="LEGACY_BOOTSTRAP_STABLE")
+    legacy["git_sha"] = revision
+    legacy["windows_revision"] = revision
+    legacy["worker_git_sha"] = "NOT_RECORDED"
+    legacy["provenance_state"] = "LEGACY_EXACT_WORKER_WINDOWS_PAIR"
+    state = {"schema_version": "stable-candidate-release-v3", "stable": legacy,
+             "previous_stable": None, "candidate": None, "transaction": None,
+             "deployment_status": "READY"}
+    model = json.loads(_run(_projection_script(state, active=None, health="UNKNOWN")))
+    assert model["committed_identity_status"] == "COMPLETE"
+    assert model["last_known_good"]["artifact_kind"] == "LEGACY_BOOTSTRAP_STABLE"
+
+
+def test_current_identity_uses_git_as_worker_provenance_when_legacy_field_absent() -> None:
+    stable = _identity("a", "stable")
+    stable.pop("worker_git_sha")
+    state = {"schema_version": "stable-candidate-release-v3", "stable": stable,
+             "previous_stable": None, "candidate": None, "transaction": None,
+             "deployment_status": "READY"}
+    model = json.loads(_run(_projection_script(state, active=None, health="UNKNOWN")))
+    assert model["committed_identity_status"] == "COMPLETE"
+    assert model["last_known_good"]["git_sha"] == "a" * 40
+
+
+def test_arbitrary_legacy_label_does_not_bypass_identity_contract() -> None:
+    legacy = _identity("a", "stable", kind="LEGACY_BOOTSTRAP_STABLE")
+    legacy["worker_git_sha"] = "NOT_RECORDED"
+    legacy["provenance_state"] = "LEGACY_EXACT_WORKER_WINDOWS_PAIR"
+    state = {"schema_version": "stable-candidate-release-v3", "stable": legacy,
+             "previous_stable": None, "candidate": None, "transaction": None,
+             "deployment_status": "READY"}
+    model = json.loads(_run(_projection_script(state, active=None, health="UNKNOWN")))
+    assert model["last_known_good"] is None
+
+
+def test_active_observation_and_business_health_remain_independent() -> None:
     stable = _identity("a", "stable")
     state = {
         "schema_version": "stable-candidate-release-v3",
@@ -204,7 +279,7 @@ def test_unavailable_required_active_observation_cannot_report_healthy() -> None
     }
     model = json.loads(_run(_projection_script(state, active=active, health="HEALTHY")))
     assert model["active"]["observation_status"] == "UNKNOWN"
-    assert model["active"]["health"] == "UNKNOWN"
+    assert model["active"]["health"] == "HEALTHY"
 
 
 def _worker_version(target: dict, *, version_id: str | None = None, message: str | None = None) -> dict:
@@ -284,21 +359,63 @@ def test_worker_artifact_provider_scope_must_be_exact() -> None:
 
 
 @pytest.mark.parametrize(
-    ("worker", "windows", "bundle", "transaction", "lock", "owners", "health", "ready"),
+    ("message", "status", "reason"),
     (
-        ("AVAILABLE", "AVAILABLE", "AVAILABLE", False, False, "SINGLE_OWNER", "HEALTHY", True),
-        ("UNKNOWN", "AVAILABLE", "AVAILABLE", False, False, "SINGLE_OWNER", "HEALTHY", False),
-        ("AVAILABLE", "UNAVAILABLE", "AVAILABLE", False, False, "SINGLE_OWNER", "HEALTHY", False),
-        ("AVAILABLE", "AVAILABLE", "UNAVAILABLE", False, False, "SINGLE_OWNER", "HEALTHY", False),
-        ("AVAILABLE", "AVAILABLE", "AVAILABLE", True, False, "SINGLE_OWNER", "HEALTHY", False),
-        ("AVAILABLE", "AVAILABLE", "AVAILABLE", False, True, "SINGLE_OWNER", "HEALTHY", False),
-        ("AVAILABLE", "AVAILABLE", "AVAILABLE", False, False, "INVALID", "HEALTHY", False),
-        ("AVAILABLE", "AVAILABLE", "AVAILABLE", False, False, "SINGLE_OWNER", "DEGRADED", False),
+        (f"release:{'a' * 40} branch:main artifact_kind:PRODUCTION_CANDIDATE",
+         "AVAILABLE", "EXACT_WORKER_VERSION_AVAILABLE"),
+        (f"release:{'a' * 40} branch:feature artifact_kind:PRODUCTION_CANDIDATE",
+         "MISMATCH", "WORKER_BRANCH_PROVENANCE_MISMATCH"),
+        (f"release:{'a' * 40} artifact_kind:PRODUCTION_CANDIDATE",
+         "MISMATCH", "WORKER_BRANCH_PROVENANCE_MISMATCH"),
+    ),
+)
+def test_worker_artifact_requires_exact_main_branch(
+    message: str, status: str, reason: str,
+) -> None:
+    target = _identity("a", "11111111-1111-4111-8111-111111111111")
+    version = _worker_version(target, message=message)
+    body = (f"$target='{json.dumps(target)}'|ConvertFrom-Json;"
+            f"$version='{json.dumps(version)}'|ConvertFrom-Json;"
+            "$result=New-ReleaseWorkerArtifactObservation -Target $target "
+            "-VersionDetails $version -ProviderStatus AVAILABLE -ProviderScopeVerified $true;"
+            "$result|ConvertTo-Json -Compress")
+    result_obj = json.loads(_run(body))
+    assert result_obj["status"] == status
+    assert result_obj["reason"] == reason
+
+
+def test_narrow_legacy_worker_artifact_keeps_explicit_exception() -> None:
+    target = _identity("a", "11111111-1111-4111-8111-111111111111",
+                       kind="LEGACY_BOOTSTRAP_STABLE")
+    target["worker_git_sha"] = "NOT_RECORDED"
+    version = _worker_version(target, message="legacy artifact without branch")
+    body = (f"$target='{json.dumps(target)}'|ConvertFrom-Json;"
+            f"$version='{json.dumps(version)}'|ConvertFrom-Json;"
+            "$result=New-ReleaseWorkerArtifactObservation -Target $target "
+            "-VersionDetails $version -ProviderStatus AVAILABLE -ProviderScopeVerified $true;"
+            "$result|ConvertTo-Json -Compress")
+    assert json.loads(_run(body))["status"] == "AVAILABLE"
+
+
+@pytest.mark.parametrize(
+    ("worker", "windows", "bundle", "transaction", "lock", "owners", "active_observation", "identity", "matches", "ready", "reason"),
+    (
+        ("AVAILABLE", "AVAILABLE", "AVAILABLE", False, False, "SINGLE_OWNER", "AVAILABLE", "COMPLETE", True, True, "READY"),
+        ("UNKNOWN", "AVAILABLE", "AVAILABLE", False, False, "SINGLE_OWNER", "AVAILABLE", "COMPLETE", True, False, "WORKER_UNKNOWN"),
+        ("AVAILABLE", "UNAVAILABLE", "AVAILABLE", False, False, "SINGLE_OWNER", "AVAILABLE", "COMPLETE", True, False, "WINDOWS_UNAVAILABLE"),
+        ("AVAILABLE", "AVAILABLE", "UNAVAILABLE", False, False, "SINGLE_OWNER", "AVAILABLE", "COMPLETE", True, False, "CONTROL_BUNDLE_UNAVAILABLE"),
+        ("AVAILABLE", "AVAILABLE", "AVAILABLE", True, False, "SINGLE_OWNER", "AVAILABLE", "COMPLETE", True, False, "RELEASE_TRANSACTION_ACTIVE"),
+        ("AVAILABLE", "AVAILABLE", "AVAILABLE", False, True, "SINGLE_OWNER", "AVAILABLE", "COMPLETE", True, False, "RELEASE_LOCK_ACTIVE"),
+        ("AVAILABLE", "AVAILABLE", "AVAILABLE", False, False, "INVALID", "AVAILABLE", "COMPLETE", True, False, "PRODUCTION_OWNERSHIP_INVALID"),
+        ("AVAILABLE", "AVAILABLE", "AVAILABLE", False, False, "SINGLE_OWNER", "UNKNOWN", "COMPLETE", True, False, "ACTIVE_OBSERVATION_UNAVAILABLE"),
+        ("AVAILABLE", "AVAILABLE", "AVAILABLE", False, False, "SINGLE_OWNER", "AVAILABLE", "INCOMPLETE", False, False, "ACTIVE_IDENTITY_INCOMPLETE"),
+        ("AVAILABLE", "AVAILABLE", "AVAILABLE", False, False, "SINGLE_OWNER", "AVAILABLE", "COMPLETE", False, False, "ACTIVE_COMMITTED_MISMATCH_REQUIRES_RECOVERY_MODE"),
     ),
 )
 def test_reverse_precheck_is_live_fail_closed_composition(
     worker: str, windows: str, bundle: str, transaction: bool, lock: bool,
-    owners: str, health: str, ready: bool,
+    owners: str, active_observation: str, identity: str, matches: bool,
+    ready: bool, reason: str,
 ) -> None:
     body = (
         "$previous=[pscustomobject]@{worker_version_id='previous';windows_revision=('a'*40)};"
@@ -307,12 +424,33 @@ def test_reverse_precheck_is_live_fail_closed_composition(
         "$result=New-ReleaseReversePrecheck -Previous $previous -WorkerArtifact $worker "
         f"-WindowsArtifact $windows -ControlBundleStatus '{bundle}' "
         f"-TransactionActive ${str(transaction).lower()} -ReleaseLockActive ${str(lock).lower()} "
-        f"-OwnershipStatus '{owners}' -ActiveHealthStatus '{health}';"
+        f"-OwnershipStatus '{owners}' -ActiveObservationStatus '{active_observation}' "
+        f"-ActiveIdentityStatus '{identity}' -ActiveMatchesCommitted ${str(matches).lower()};"
         "$result|ConvertTo-Json -Compress"
     )
     result = json.loads(_run(body))
     assert result["can_reverse"] is ready
     assert result["status"] == ("READY" if ready else "BLOCKED")
+    assert result["reason"] == reason
+
+
+@pytest.mark.parametrize("health", ("HEALTHY", "DEGRADED"))
+def test_business_health_does_not_block_safe_reverse_authority(health: str) -> None:
+    state = {
+        "schema_version": "stable-candidate-release-v3",
+        "stable": _identity("a", "stable"),
+        "previous_stable": _identity("c", "previous"),
+        "candidate": None,
+        "transaction": None,
+        "deployment_status": "READY",
+    }
+    stable = state["stable"]
+    active = {"version_id": stable["worker_version_id"], "git_sha": stable["git_sha"],
+              "windows_revision": stable["windows_revision"], "traffic_percent": 100,
+              "previous_membership_status": "NOT_ASSIGNED"}
+    model = json.loads(_run(_projection_script(state, active=active, health=health)))
+    assert model["active"]["health"] == health
+    assert model["previous"]["reverse_precheck"]["can_reverse"] is True
 
 
 def test_read_model_is_bounded_and_does_not_copy_validation_or_history() -> None:

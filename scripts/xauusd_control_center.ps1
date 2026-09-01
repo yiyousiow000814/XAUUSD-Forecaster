@@ -10087,7 +10087,9 @@ function Get-CloudflareRollbackArtifactObservation {
             -VersionDetails $version -ProviderStatus "AVAILABLE" `
             -ProviderScopeVerified $true
     } catch {
-        $status = if ($_.Exception.Message -match '(?i)not.found|404|missing') {
+        $diagnostic = [string]$_.Exception.Message
+        $status = if ($diagnostic -match '(?i)(^|[:\s])(?:CLOUDFLARE_EXACT_)?VERSION_NOT_FOUND(?:[:\s]|$)' -or
+            $diagnostic -match '(?i)\bHTTP(?:_STATUS| STATUS| STATUS CODE)?[ :=]+404\b') {
             "UNAVAILABLE"
         } else { "UNKNOWN" }
         return New-ReleaseWorkerArtifactObservation -Target $Target `
@@ -10101,28 +10103,41 @@ function Get-ReleaseTrafficObservation {
         [AllowNull()][object]$Previous,
         [string]$Status = "AVAILABLE"
     )
+    $previousId = if ($Previous) { [string]$Previous.worker_version_id } else { "" }
+    $notObservedMembership = if ($previousId) { "UNKNOWN" } else { "NOT_APPLICABLE" }
     if ($Status -ne "AVAILABLE" -or -not $Deployment -or
         -not $Deployment.PSObject.Properties['versions']) {
         return [pscustomobject]@{
             status = "UNKNOWN"; version_id = $null; git_sha = $null
             traffic_percent = $null; previous_is_member = $false
+            previous_membership_status = $notObservedMembership
             previous_traffic_percent = $null
         }
     }
     $versions = @($Deployment.versions | Where-Object { $null -ne $_ })
-    $active = @($versions | Where-Object { [double]$_.percentage -eq 100 })
+    $active = @($versions | Where-Object {
+        try { [double]$_.percentage -eq 100 } catch { $false }
+    })
     if ($active.Count -ne 1 -or
         [string]::IsNullOrWhiteSpace([string]$active[0].version_id)) {
         return [pscustomobject]@{
-            status = "UNKNOWN"; version_id = $null; git_sha = $null
+            status = if ($active.Count -gt 1) { "MISMATCH" } else { "UNKNOWN" }
+            version_id = $null; git_sha = $null
             traffic_percent = $null; previous_is_member = $false
+            previous_membership_status = $notObservedMembership
             previous_traffic_percent = $null
         }
     }
-    $previousId = if ($Previous) { [string]$Previous.worker_version_id } else { "" }
     $previousRows = @($versions | Where-Object {
         $previousId -and [string]$_.version_id -ceq $previousId
     })
+    $membershipStatus = if (-not $previousId) {
+        "NOT_APPLICABLE"
+    } elseif ($previousRows.Count -eq 0) {
+        "NOT_ASSIGNED"
+    } elseif ($previousRows.Count -eq 1) {
+        try { $null = [double]$previousRows[0].percentage; "ASSIGNED" } catch { "MISMATCH" }
+    } else { "MISMATCH" }
     [pscustomobject]@{
         status = "AVAILABLE"
         version_id = [string]$active[0].version_id
@@ -10130,8 +10145,9 @@ function Get-ReleaseTrafficObservation {
             [string]$active[0].git_sha
         } else { $null }
         traffic_percent = [double]$active[0].percentage
-        previous_is_member = [bool]($previousRows.Count -eq 1)
-        previous_traffic_percent = if ($previousRows.Count -eq 1) {
+        previous_is_member = [bool]($membershipStatus -eq "ASSIGNED")
+        previous_membership_status = $membershipStatus
+        previous_traffic_percent = if ($membershipStatus -eq "ASSIGNED") {
             [double]$previousRows[0].percentage
         } else { $null }
     }
@@ -10250,7 +10266,16 @@ function Get-CurrentReleaseRuntimeReadModel {
         -ReleaseLockActive ([bool]((Test-Path -LiteralPath $releaseLockPath) -and
             -not $ReleaseLockOwnedByCaller)) `
         -OwnershipStatus ([string]$health.ownership_status) `
-        -ActiveHealthStatus ([string]$health.status)
+        -ActiveObservationStatus $(if ([string]$traffic.status -eq "AVAILABLE" -and
+            $windowsObservation) { "AVAILABLE" } else { "UNKNOWN" }) `
+        -ActiveIdentityStatus $(if ($traffic.version_id -match
+            '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' -and
+            $traffic.git_sha -match '^[0-9a-f]{40}$' -and
+            $windowsObservation.revision -match '^[0-9a-f]{40}$') { "COMPLETE" } else { "INCOMPLETE" }) `
+        -ActiveMatchesCommitted ([bool]($PersistedState.stable -and
+            [string]$traffic.version_id -ceq [string]$PersistedState.stable.worker_version_id -and
+            [string]$traffic.git_sha -ceq [string]$PersistedState.stable.git_sha -and
+            [string]$windowsObservation.revision -ceq [string]$PersistedState.stable.windows_revision))
     return New-ReleaseRuntimeReadModel -PersistedState $PersistedState `
         -ActiveWorkerObservation $traffic -ActiveWindowsObservation $windowsObservation `
         -HealthObservation $health -PreviousWorkerArtifact $previousWorker `
@@ -14528,6 +14553,10 @@ function Get-ControlCenterReleasePresentation {
         } else { "UNKNOWN" }
         previous_traffic_member = [bool]($runtimeReadModel -and
             $runtimeReadModel.previous.worker_is_current_traffic_member)
+        previous_traffic_membership_status = if ($runtimeReadModel -and
+            $runtimeReadModel.previous.worker_traffic_membership_status) {
+            [string]$runtimeReadModel.previous.worker_traffic_membership_status
+        } else { "UNKNOWN" }
         can_reverse = [bool](-not $transactionActive -and $reversePrecheck -and
             $reversePrecheck.can_reverse)
         reverse_reason = $reverseReason
@@ -15396,9 +15425,7 @@ function Show-WpfControlCenter {
             (Find-WpfControl "OpenCandidateButton").IsEnabled = [bool]($release -and $release.candidate -and $release.candidate.browser_url)
             (Find-WpfControl "PreviousState").Text = if ($release -and
                 $release.previous_stable) {
-                "$($releaseView.previous_artifact_status) / $(if (
-                    $releaseView.previous_traffic_member
-                ) { 'ASSIGNED' } else { 'NOT ASSIGNED' })"
+                "$($releaseView.previous_artifact_status) / $($releaseView.previous_traffic_membership_status.Replace('_', ' '))"
             } else { "UNAVAILABLE" }
             (Find-WpfControl "PreviousIdentity").Text = Format-WpfIdentity $release.previous_stable
             (Find-WpfControl "ReverseButton").IsEnabled = [bool]($releaseView.can_reverse -and -not $operationActive)
@@ -16499,9 +16526,7 @@ function Show-ControlCenter {
                 $previousCard.Git.Text = "Git       $(Get-ShortIdentity $release.previous_stable.git_sha)"
                 $previousCard.Worker.Text = "Worker    $(Get-ShortIdentity $release.previous_stable.worker_version_id)"
                 $previousCard.Windows.Text = "Windows   $(Get-ShortIdentity $release.previous_stable.windows_revision)"
-                $assignment = if ($releaseView.previous_traffic_member) {
-                    "ASSIGNED"
-                } else { "NOT ASSIGNED" }
+                $assignment = $releaseView.previous_traffic_membership_status.Replace('_', ' ')
                 $previousCard.Detail.Text = (
                     "$($releaseView.previous_artifact_status) / $assignment / " +
                     "precheck $($releaseView.reverse_reason); recovery is not implied."

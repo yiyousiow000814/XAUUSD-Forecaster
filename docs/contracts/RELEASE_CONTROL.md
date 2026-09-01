@@ -42,9 +42,14 @@ placement or lifecycle labels.
 
 Previous recovery has three independent layers. An exact immutable Worker
 Version and revision-owned Windows launch contract establish artifact
-availability. Current deployment membership records only placement and traffic
-percentage. Reverse eligibility additionally requires current Control bundle,
-ownership, health, lock, transaction, and recovery-authority facts. Exact
+availability. Current deployment membership is the explicit `ASSIGNED`,
+`NOT_ASSIGNED`, `UNKNOWN`, `MISMATCH`, or `NOT_APPLICABLE` placement fact;
+provider failure is never presented as `NOT_ASSIGNED`. Reverse eligibility
+additionally requires an available and complete Active observation that exactly
+matches Committed Stable, plus current Control bundle, ownership, lock,
+transaction, and recovery-authority facts. Business health remains independent:
+`DEGRADED` explains why recovery may be needed but does not by itself block a
+safe Reverse. Exact
 artifact availability does not claim that recovery was rehearsed or observed.
 The legacy persisted `previous_stable_rollback_eligible` and
 `previous_stable_rollback_reason` fields remain a v3 compatibility snapshot;
@@ -634,11 +639,12 @@ start another transaction.
 WPF, WinForms, `StatusJson`, and `ReleaseStatusJson` consume the same bounded
 `release_runtime` object and presentation projection. Their `can_reverse` value
 is advisory. After the operator acts and the release lock is acquired, Reverse
-repeats the same exact Worker, Windows, bundle, owner, health, transaction, and
-lock precheck before creating a transaction. A stale GUI snapshot therefore
+repeats the same exact Worker, Windows, Active-to-Committed identity, bundle,
+owner, transaction, and lock precheck before creating a transaction. A stale GUI snapshot therefore
 cannot authorize mutation. Current traffic assignment is not an immutable
 Version existence index: an exact Version may be `AVAILABLE` while
-`worker_is_current_traffic_member` is false.
+`worker_traffic_membership_status` is `NOT_ASSIGNED`. The compatibility Boolean
+is not authoritative for `UNKNOWN` or `MISMATCH`.
 
 The transaction lock records its process owner. A live owner is never
 preempted. An abandoned lock may be removed only after the recorded process no
