@@ -5,7 +5,7 @@ import os
 import sqlite3
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -14,6 +14,7 @@ from xauusd_forecaster import maintenance
 from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster.training_owner import _process_start_token
 from scripts import run_forward_collector as collector
+from scripts import run_dashboard_api as dashboard_api
 
 
 UTC = timezone.utc
@@ -69,6 +70,8 @@ def test_same_day_backup_is_receipted_and_heavy_work_runs_once(
     assert receipt["schema"] == maintenance.BACKUP_RECEIPT_SCHEMA
     assert receipt["integrity_contract"].startswith("SQLITE_ONLINE_BACKUP")
     assert receipt["receipt_digest"]
+    assert not first.path.with_suffix(first.path.suffix + "-wal").exists()
+    assert not first.path.with_suffix(first.path.suffix + "-shm").exists()
     ledger.close()
 
 
@@ -271,6 +274,181 @@ def test_failed_heavy_attempt_is_receipted_and_not_repeated_on_restart(
         )
     assert heavy_calls == 1
     assert list(backup_root.glob("*.failure.json"))
+    ledger.close()
+
+
+def _create_daily_backups(
+    ledger: ForwardLedger, backup_root: Path, *, count: int,
+) -> list[maintenance.DailyBackupResult]:
+    return [
+        maintenance.ensure_daily_forward_backup(
+            ledger.path,
+            backup_root,
+            NOW - timedelta(days=offset),
+            source_connection=ledger.connection,
+        )
+        for offset in reversed(range(count))
+    ]
+
+
+def test_retention_bounds_only_verified_daily_pairs_and_reports_unknown(
+    tmp_path: Path,
+) -> None:
+    ledger = _ledger(tmp_path)
+    backup_root = tmp_path / "backup-root"
+    _create_daily_backups(ledger, backup_root, count=30)
+    legacy = backup_root / "forward-evidence-20260701.sqlite3"
+    legacy.write_bytes(b"legacy-without-receipt")
+    special = backup_root / "pre-repair-v2-20260701.sqlite3"
+    special.write_bytes(b"special")
+    temporary = backup_root / ".forward-evidence-old.tmp"
+    temporary.write_bytes(b"unknown-temp")
+
+    result = maintenance.apply_backup_retention(
+        ledger.path,
+        backup_root,
+        NOW,
+        source_connection=ledger.connection,
+    )
+
+    assert result.status == "DELETED"
+    assert result.managed_count <= 14
+    assert result.deleted_count >= 16
+    assert result.unknown_count == 3
+    assert legacy.read_bytes() == b"legacy-without-receipt"
+    assert special.read_bytes() == b"special"
+    assert temporary.read_bytes() == b"unknown-temp"
+    state = json.loads(result.state_path.read_text(encoding="utf-8"))
+    digest = state.pop("receipt_digest")
+    assert digest == maintenance._json_digest(state)
+    assert state["policy"]["maximum_total_bytes"] == 128 * 1024**3
+    assert len(state["retained"]) == result.managed_count
+    ledger.close()
+
+
+def test_interrupted_retention_resumes_exact_persisted_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger = _ledger(tmp_path)
+    backup_root = tmp_path / "backup-root"
+    created = _create_daily_backups(ledger, backup_root, count=16)
+    oldest = created[0]
+    original_unlink = Path.unlink
+    interrupted = False
+
+    def interrupt_receipt(path: Path, *args, **kwargs):
+        nonlocal interrupted
+        if (
+            path == oldest.receipt_path
+            and not oldest.path.exists()
+            and not interrupted
+        ):
+            interrupted = True
+            raise OSError("simulated retention interruption")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", interrupt_receipt)
+    with pytest.raises(OSError, match="simulated retention interruption"):
+        maintenance.apply_backup_retention(
+            ledger.path,
+            backup_root,
+            NOW,
+            source_connection=ledger.connection,
+        )
+    assert (backup_root / maintenance.BACKUP_RETENTION_PLAN).is_file()
+    assert not oldest.path.exists()
+    assert oldest.receipt_path.is_file()
+
+    monkeypatch.setattr(Path, "unlink", original_unlink)
+    resumed = maintenance.apply_backup_retention(
+        ledger.path,
+        backup_root,
+        NOW,
+        source_connection=ledger.connection,
+    )
+    assert resumed.deleted_count >= 1
+    assert not oldest.receipt_path.exists()
+    assert not (backup_root / maintenance.BACKUP_RETENTION_PLAN).exists()
+    ledger.close()
+
+
+def test_retention_byte_budget_fails_closed_without_deleting_newest(
+    tmp_path: Path,
+) -> None:
+    ledger = _ledger(tmp_path)
+    backup_root = tmp_path / "backup-root"
+    created = _create_daily_backups(ledger, backup_root, count=2)
+    policy = maintenance.BackupRetentionPolicy(maximum_total_bytes=1)
+
+    with pytest.raises(
+        RuntimeError, match="BACKUP_RETENTION_NEWEST_EXCEEDS_BYTE_BUDGET"
+    ):
+        maintenance.apply_backup_retention(
+            ledger.path,
+            backup_root,
+            NOW,
+            source_connection=ledger.connection,
+            policy=policy,
+        )
+    assert all(item.path.is_file() and item.receipt_path.is_file() for item in created)
+    ledger.close()
+
+
+def test_changed_receipted_snapshot_is_unknown_and_never_deleted(
+    tmp_path: Path,
+) -> None:
+    ledger = _ledger(tmp_path)
+    backup_root = tmp_path / "backup-root"
+    created = _create_daily_backups(ledger, backup_root, count=16)
+    changed = created[0]
+    with changed.path.open("ab") as handle:
+        handle.write(b"changed-after-receipt")
+
+    result = maintenance.apply_backup_retention(
+        ledger.path,
+        backup_root,
+        NOW,
+        source_connection=ledger.connection,
+    )
+
+    assert changed.path.is_file()
+    assert changed.receipt_path.is_file()
+    assert result.unknown_count == 2
+    assert result.deleted_count >= 1
+    ledger.close()
+
+
+def test_dashboard_reports_only_receipt_owned_backup_lifecycle(
+    tmp_path: Path,
+) -> None:
+    ledger = _ledger(tmp_path)
+    backup_root = ledger.path.parent / "backups"
+    legacy = backup_root / "forward-evidence-20260701.sqlite3"
+    backup_root.mkdir()
+    legacy.write_bytes(b"unverified")
+    assert dashboard_api._backup_lifecycle_status(backup_root)["status"] == "UNKNOWN"
+
+    maintenance.ensure_daily_forward_backup(
+        ledger.path,
+        backup_root,
+        NOW,
+        source_connection=ledger.connection,
+    )
+    maintenance.apply_backup_retention(
+        ledger.path,
+        backup_root,
+        NOW,
+        source_connection=ledger.connection,
+    )
+    status = dashboard_api._backup_lifecycle_status(backup_root)
+    assert status["status"] == "OK"
+    assert status["managed_count"] == 1
+    assert status["unknown_count"] == 1
+    assert status["last_verified_backup"] is not None
+    next(backup_root.glob("forward-evidence-20260830.sqlite3")).unlink()
+    missing = dashboard_api._backup_lifecycle_status(backup_root)
+    assert missing["status"] == "UNKNOWN"
+    assert "retained backup identity" in missing["last_error"]
     ledger.close()
 
 

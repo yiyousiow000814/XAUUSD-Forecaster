@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import threading
 import uuid
@@ -20,6 +21,36 @@ from .training_owner import _process_identity_alive, _process_start_token
 UTC = timezone.utc
 BACKUP_RECEIPT_SCHEMA = "xauusd.forward.daily-backup-receipt.v2"
 BACKUP_TEMP_PREFIX = ".daily-backup-v2-"
+BACKUP_RETENTION_SCHEMA = "xauusd.forward.backup-retention.v1"
+BACKUP_RETENTION_PLAN_SCHEMA = "xauusd.forward.backup-retention-plan.v1"
+BACKUP_RETENTION_STATE = "daily-backup-retention-state.json"
+BACKUP_RETENTION_PLAN = ".daily-backup-retention-plan.json"
+BACKUP_RETENTION_OWNER = ".daily-backup-retention-owner"
+DAILY_BACKUP_NAME = re.compile(r"^forward-evidence-(\d{8})\.sqlite3$")
+
+
+@dataclass(frozen=True)
+class BackupRetentionPolicy:
+    daily: int = 7
+    weekly: int = 4
+    monthly: int = 3
+    maximum_snapshots: int = 14
+    maximum_total_bytes: int = 128 * 1024**3
+    maximum_age_days: int = 100
+
+    def __post_init__(self) -> None:
+        if (
+            self.daily < 1
+            or self.weekly < 0
+            or self.monthly < 0
+            or self.maximum_snapshots < 1
+            or self.maximum_total_bytes < 1
+            or self.maximum_age_days < 1
+        ):
+            raise ValueError("backup retention policy values must be positive")
+
+
+DEFAULT_BACKUP_RETENTION_POLICY = BackupRetentionPolicy()
 
 
 @dataclass(frozen=True)
@@ -29,6 +60,19 @@ class DailyBackupResult:
     receipt_path: Path
     heavy_operation: bool
     recovered_interrupted_owner: bool = False
+
+
+@dataclass(frozen=True)
+class BackupRetentionResult:
+    status: str
+    managed_count: int
+    retained_count: int
+    deleted_count: int
+    unknown_count: int
+    managed_bytes: int
+    unknown_bytes: int
+    disk_gib_days: float
+    state_path: Path
 
 
 def _json_digest(payload: dict) -> str:
@@ -113,7 +157,11 @@ def _source_identity(connection: sqlite3.Connection, database: Path) -> dict:
 
 def _snapshot_identity(path: Path) -> dict:
     stat = path.stat()
-    connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    # A finalized snapshot is immutable. Without immutable=1, merely reading a
+    # WAL-mode backup can create new -wal/-shm sidecars in the backup estate.
+    connection = sqlite3.connect(
+        f"file:{path.as_posix()}?mode=ro&immutable=1", uri=True,
+    )
     try:
         page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
         page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
@@ -217,6 +265,315 @@ def _validate_completion_receipt(
             raise RuntimeError(f"BACKUP_STALE_SOURCE:{field}")
     if payload.get("snapshot") != _snapshot_identity(target):
         raise RuntimeError("BACKUP_SNAPSHOT_IDENTITY_CHANGED")
+
+
+def _retention_policy_payload(policy: BackupRetentionPolicy) -> dict:
+    return {
+        "daily": policy.daily,
+        "weekly": policy.weekly,
+        "monthly": policy.monthly,
+        "maximum_snapshots": policy.maximum_snapshots,
+        "maximum_total_bytes": policy.maximum_total_bytes,
+        "maximum_age_days": policy.maximum_age_days,
+    }
+
+
+def _stable_source_identity(source: dict) -> dict:
+    return {
+        field: source[field]
+        for field in ("path", "device", "file_id", "forward_epoch")
+    }
+
+
+def _managed_backup_entries(
+    backup_root: Path, *, source: dict,
+) -> tuple[list[dict], list[dict]]:
+    managed: list[dict] = []
+    owned_names = {
+        BACKUP_RETENTION_STATE,
+        BACKUP_RETENTION_PLAN,
+    }
+    for target in sorted(backup_root.glob("forward-evidence-*.sqlite3")):
+        match = DAILY_BACKUP_NAME.fullmatch(target.name)
+        if match is None:
+            continue
+        receipt_path = _receipt_path(target)
+        if not receipt_path.is_file():
+            continue
+        try:
+            _validate_completion_receipt(
+                receipt_path,
+                target=target,
+                day=match.group(1),
+                source=source,
+            )
+        except (OSError, ValueError, RuntimeError, json.JSONDecodeError):
+            # A changed or malformed pair is not deletion authority. Leave both
+            # objects outside owned_names so the inventory reports them as
+            # UNKNOWN and retention cannot unlink either one.
+            continue
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        managed.append({
+            "day": match.group(1),
+            "target": target,
+            "receipt": receipt_path,
+            "bytes": target.stat().st_size,
+            "modified_at": datetime.fromtimestamp(
+                target.stat().st_mtime, UTC,
+            ).isoformat(),
+            "snapshot": receipt["snapshot"],
+            "receipt_digest": receipt["receipt_digest"],
+        })
+        owned_names.update((target.name, receipt_path.name))
+
+    unknown = []
+    for path in sorted(backup_root.iterdir()):
+        if path.is_file() and path.name not in owned_names:
+            unknown.append({
+                "name": path.name,
+                "bytes": path.stat().st_size,
+                "modified_at": datetime.fromtimestamp(
+                    path.stat().st_mtime, UTC,
+                ).isoformat(),
+            })
+    return managed, unknown
+
+
+def _retained_backup_names(
+    entries: list[dict], policy: BackupRetentionPolicy, now: datetime,
+) -> set[str]:
+    ordered = sorted(entries, key=lambda item: item["day"], reverse=True)
+    keep: list[dict] = []
+
+    def add_unique(candidates: list[dict], count: int, key) -> None:
+        seen = set()
+        for item in candidates:
+            value = key(datetime.strptime(item["day"], "%Y%m%d").date())
+            if value in seen:
+                continue
+            seen.add(value)
+            keep.append(item)
+            if len(seen) >= count:
+                break
+
+    keep.extend(ordered[:policy.daily])
+    remaining = [item for item in ordered if item not in keep]
+    add_unique(
+        remaining,
+        policy.weekly,
+        lambda day: day.isocalendar()[:2],
+    )
+    remaining = [item for item in ordered if item not in keep]
+    add_unique(remaining, policy.monthly, lambda day: (day.year, day.month))
+
+    horizon = now.astimezone(UTC).date() - timedelta(days=policy.maximum_age_days)
+    keep = [
+        item for item in keep
+        if datetime.strptime(item["day"], "%Y%m%d").date() >= horizon
+    ][:policy.maximum_snapshots]
+    while sum(item["bytes"] for item in keep) > policy.maximum_total_bytes:
+        if len(keep) <= 1:
+            raise RuntimeError("BACKUP_RETENTION_NEWEST_EXCEEDS_BYTE_BUDGET")
+        keep.pop()
+    return {item["target"].name for item in keep}
+
+
+def _retention_owner_paths(backup_root: Path) -> tuple[Path, Path]:
+    root = backup_root / BACKUP_RETENTION_OWNER
+    return root, root / "owner.json"
+
+
+def _acquire_retention_owner(backup_root: Path) -> tuple[Path, bool] | None:
+    owner_root, owner_path = _retention_owner_paths(backup_root)
+    recovered = False
+    for _ in range(2):
+        try:
+            owner_root.mkdir()
+        except FileExistsError:
+            try:
+                owner = json.loads(owner_path.read_text(encoding="utf-8"))
+                process_id = int(owner["process_id"])
+                token = str(owner["process_start_token"])
+                if owner.get("schema") != "xauusd.forward.backup-retention-owner.v1":
+                    raise ValueError("owner schema")
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+                raise RuntimeError("BACKUP_RETENTION_OWNER_EVIDENCE_INVALID") from exc
+            alive = _process_identity_alive(process_id, token)
+            if alive is True:
+                return None
+            if alive is not False:
+                raise RuntimeError("BACKUP_RETENTION_OWNER_LIVENESS_UNKNOWN")
+            owner_path.unlink()
+            owner_root.rmdir()
+            recovered = True
+            continue
+        process_id = os.getpid()
+        token, alive = _process_start_token(process_id)
+        if alive is not True or not token:
+            owner_root.rmdir()
+            raise RuntimeError("BACKUP_RETENTION_OWNER_IDENTITY_UNAVAILABLE")
+        _atomic_json(owner_path, {
+            "schema": "xauusd.forward.backup-retention-owner.v1",
+            "process_id": process_id,
+            "process_start_token": token,
+            "acquired_at": datetime.now(UTC).isoformat(timespec="microseconds"),
+        })
+        return owner_root, recovered
+    raise RuntimeError("BACKUP_RETENTION_OWNER_RECOVERY_FAILED")
+
+
+def _validated_retention_plan(
+    path: Path, *, source: dict, policy: BackupRetentionPolicy,
+) -> dict:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    digest = str(payload.pop("plan_digest", ""))
+    if not digest or digest != _json_digest(payload):
+        raise RuntimeError("BACKUP_RETENTION_PLAN_TAMPERED")
+    if payload.get("schema") != BACKUP_RETENTION_PLAN_SCHEMA:
+        raise RuntimeError("BACKUP_RETENTION_PLAN_SCHEMA_INVALID")
+    if payload.get("source_database") != _stable_source_identity(source):
+        raise RuntimeError("BACKUP_RETENTION_PLAN_SOURCE_CHANGED")
+    if payload.get("policy") != _retention_policy_payload(policy):
+        raise RuntimeError("BACKUP_RETENTION_PLAN_POLICY_CHANGED")
+    payload["plan_digest"] = digest
+    return payload
+
+
+def apply_backup_retention(
+    database: Path,
+    backup_root: Path,
+    now: datetime,
+    *,
+    source_connection: sqlite3.Connection | None = None,
+    policy: BackupRetentionPolicy = DEFAULT_BACKUP_RETENTION_POLICY,
+) -> BackupRetentionResult:
+    """Prune only receipt-owned daily snapshots under one crash-safe plan."""
+    database = database.resolve()
+    backup_root = backup_root.resolve()
+    backup_root.mkdir(parents=True, exist_ok=True)
+    acquired = _acquire_retention_owner(backup_root)
+    state_path = backup_root / BACKUP_RETENTION_STATE
+    if acquired is None:
+        return BackupRetentionResult(
+            "IN_PROGRESS", 0, 0, 0, 0, 0, 0, 0.0, state_path,
+        )
+    owner_root, recovered_owner = acquired
+    owned_connection = source_connection is None
+    connection = source_connection or sqlite3.connect(
+        f"file:{database.as_posix()}?mode=ro", uri=True,
+    )
+    plan_path = backup_root / BACKUP_RETENTION_PLAN
+    deleted: list[dict] = []
+    try:
+        source = _source_identity(connection, database)
+        if plan_path.exists():
+            plan = _validated_retention_plan(
+                plan_path, source=source, policy=policy,
+            )
+        else:
+            managed, _ = _managed_backup_entries(backup_root, source=source)
+            retained = _retained_backup_names(managed, policy, now)
+            candidates = [
+                {
+                    "target": item["target"].name,
+                    "receipt": item["receipt"].name,
+                    "day": item["day"],
+                    "bytes": item["bytes"],
+                    "snapshot": item["snapshot"],
+                    "receipt_digest": item["receipt_digest"],
+                }
+                for item in managed if item["target"].name not in retained
+            ]
+            plan = {
+                "schema": BACKUP_RETENTION_PLAN_SCHEMA,
+                "created_at": now.astimezone(UTC).isoformat(timespec="microseconds"),
+                "source_database": _stable_source_identity(source),
+                "policy": _retention_policy_payload(policy),
+                "delete": candidates,
+            }
+            plan["plan_digest"] = _json_digest(plan)
+            if candidates:
+                _atomic_json(plan_path, plan)
+
+        for item in plan["delete"]:
+            target = backup_root / item["target"]
+            receipt_path = backup_root / item["receipt"]
+            if target.exists():
+                if not receipt_path.is_file():
+                    raise RuntimeError("BACKUP_RETENTION_RECEIPT_MISSING")
+                _validate_completion_receipt(
+                    receipt_path, target=target, day=item["day"], source=source,
+                )
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                if (
+                    receipt["receipt_digest"] != item["receipt_digest"]
+                    or receipt["snapshot"] != item["snapshot"]
+                ):
+                    raise RuntimeError("BACKUP_RETENTION_IDENTITY_CHANGED")
+                target.unlink()
+            if receipt_path.exists():
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                if receipt.get("receipt_digest") != item["receipt_digest"]:
+                    raise RuntimeError("BACKUP_RETENTION_RECEIPT_CHANGED")
+                receipt_path.unlink()
+            deleted.append(item)
+
+        managed, unknown = _managed_backup_entries(backup_root, source=source)
+        now_utc = now.astimezone(UTC)
+        managed_gib_days = sum(
+            (item["bytes"] / 1024**3)
+            * max(0.0, (now_utc.date() - datetime.strptime(
+                item["day"], "%Y%m%d"
+            ).date()).days)
+            for item in managed
+        )
+        unknown_gib_days = sum(
+            (item["bytes"] / 1024**3)
+            * max(0.0, (
+                now_utc - datetime.fromisoformat(item["modified_at"])
+            ).total_seconds() / 86400)
+            for item in unknown
+        )
+        state = {
+            "schema": BACKUP_RETENTION_SCHEMA,
+            "completed_at": now_utc.isoformat(timespec="microseconds"),
+            "source_database": source,
+            "policy": _retention_policy_payload(policy),
+            "plan_digest": plan["plan_digest"],
+            "recovered_interrupted_owner": recovered_owner,
+            "managed_count": len(managed),
+            "retained_count": len(managed),
+            "deleted_count": len(deleted),
+            "managed_bytes": sum(item["bytes"] for item in managed),
+            "unknown_count": len(unknown),
+            "unknown_bytes": sum(item["bytes"] for item in unknown),
+            "managed_gib_days": round(managed_gib_days, 6),
+            "unknown_gib_days": round(unknown_gib_days, 6),
+            "disk_gib_days": round(
+                managed_gib_days + unknown_gib_days, 6,
+            ),
+            "retained": [item["target"].name for item in managed],
+            "deleted": deleted,
+        }
+        state["receipt_digest"] = _json_digest(state)
+        _atomic_json(state_path, state)
+        plan_path.unlink(missing_ok=True)
+        return BackupRetentionResult(
+            "DELETED" if deleted else "NO_CHANGE",
+            len(managed),
+            len(managed),
+            len(deleted),
+            len(unknown),
+            state["managed_bytes"],
+            state["unknown_bytes"],
+            state["disk_gib_days"],
+            state_path,
+        )
+    finally:
+        if owned_connection:
+            connection.close()
+        (owner_root / "owner.json").unlink(missing_ok=True)
+        owner_root.rmdir()
 
 
 def _owner_paths(backup_root: Path, target: Path) -> tuple[Path, Path]:
@@ -421,6 +778,7 @@ class DailyBackupOwner:
             target=self._run, name="daily-forward-backup", daemon=True,
         )
         self.last_result: DailyBackupResult | None = None
+        self.last_retention: BackupRetentionResult | None = None
         self.last_error: str | None = None
         self._last_day: str | None = None
 
@@ -433,15 +791,18 @@ class DailyBackupOwner:
                     result = ensure_daily_forward_backup(
                         self.database, self.backup_root, now,
                     )
+                    retention = apply_backup_retention(
+                        self.database, self.backup_root, now,
+                    )
                     with self._state_lock:
                         self.last_result = result
+                        self.last_retention = retention
                         self.last_error = None
+                    self._last_day = day
                 except Exception as exc:
                     with self._state_lock:
                         self.last_result = None
                         self.last_error = f"{type(exc).__name__}:{exc}"
-                finally:
-                    self._last_day = day
             self._stop.wait(self.poll_seconds)
 
     def start(self) -> None:
@@ -450,11 +811,19 @@ class DailyBackupOwner:
     def snapshot(self) -> dict:
         with self._state_lock:
             result = self.last_result
+            retention = self.last_retention
             error = self.last_error
         return {
             "status": result.status if result else "PENDING",
             "path": str(result.path) if result else None,
             "heavy_operation": result.heavy_operation if result else False,
+            "retention_status": retention.status if retention else "PENDING",
+            "retention_managed_count": (
+                retention.managed_count if retention else None
+            ),
+            "retention_unknown_bytes": (
+                retention.unknown_bytes if retention else None
+            ),
             "error": error,
         }
 

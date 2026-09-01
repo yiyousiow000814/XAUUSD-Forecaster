@@ -21,6 +21,7 @@ from xauusd_forecaster.market_session import skipped_grid_reason  # noqa: E402
 from xauusd_forecaster.u5_state import U5State  # noqa: E402
 from xauusd_forecaster.maintenance import (  # noqa: E402
     DailyBackupOwner,
+    apply_backup_retention,
     archive_completed_quote_days,
     ensure_daily_forward_backup,
 )
@@ -247,6 +248,12 @@ def main() -> int:
                 )
             backup_result = ensure_daily_forward_backup(
                 ledger.path, local_root / "backups", initialized_at,
+                source_connection=ledger.connection,
+            )
+            apply_backup_retention(
+                ledger.path,
+                local_root / "backups",
+                initialized_at,
                 source_connection=ledger.connection,
             )
     print(

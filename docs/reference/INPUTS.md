@@ -79,8 +79,11 @@ treated as available.
 
 Confirmed: retain evidence permanently for the pilot. Completed UTC quote days
 are losslessly compressed with a checksum receipt, while SQLite uses its online
-backup API and passes an integrity check. Both remain under the ignored local
-Forward tree for now. This protects against file corruption or an accidental
-working-file change, but same-disk backup does not protect against disk loss.
+backup API and passes an integrity check. SQLite rows remain the permanent
+evidence authority; same-disk daily snapshots are bounded recovery artifacts
+under the [local storage lifecycle contract](../contracts/LOCAL_STORAGE_LIFECYCLE.md).
+Both remain under the ignored local Forward tree for now. This protects against
+file corruption or an accidental working-file change, but same-disk backup does
+not protect against disk loss.
 VPS, Web UI, API, Telegram, and cTrader display integration remain later
 surfaces. Champion promotion is manual and owned by the user.
