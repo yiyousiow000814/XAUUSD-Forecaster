@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import math
 import uuid
+from bisect import bisect_right
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -12,7 +14,7 @@ import numpy as np
 
 from .forward_ledger import canonical_hash
 from .execution_costs import net_shadow_log_return
-from .market import MarketObservation
+from .market import MarketObservation, parse_quote_line
 from .ridge import RidgeArtifact, train_ridge
 from .training import MARKET_FEATURES
 
@@ -34,6 +36,7 @@ RETRAIN_INTERVAL = 50
 FEATURE_VERSION = "execution-follows-broad-full-v2"
 LOT_LABEL_VERSION = "candidate-utility-u5-v2"
 EXIT_LABEL_VERSION = "sequential-continuation-u5-v2"
+EXECUTION_QUOTE_WINDOW = timedelta(minutes=31, seconds=20)
 
 
 def _uuid(kind: str, value: str) -> str:
@@ -124,10 +127,64 @@ def append_execution_examples(ledger, *, decision_id: str, appended_at: datetime
     return cursor.rowcount
 
 
+def _quote_days(start: datetime, end: datetime) -> tuple[str, ...]:
+    current = start.astimezone(UTC).date()
+    final = end.astimezone(UTC).date()
+    days = []
+    while current <= final:
+        days.append(current.strftime("%Y%m%d"))
+        current += timedelta(days=1)
+    return tuple(days)
+
+
+def _read_execution_quote_windows(
+    quote_root: Path, decision_times: list[datetime], cutoff: datetime,
+) -> dict[datetime, list[MarketObservation]]:
+    """Read only UTC-day quote partitions needed by execution label windows."""
+    required_days = {
+        day
+        for decision_time in decision_times
+        for day in _quote_days(decision_time, decision_time + EXECUTION_QUOTE_WINDOW)
+    }
+    partitions: dict[str, tuple[list[datetime], list[MarketObservation]]] = {}
+    for day in sorted(required_days):
+        rows = []
+        sources = [
+            source
+            for source in (
+                quote_root / f"xauusd-quotes-{day}.jsonl",
+                quote_root / f"xauusd-quotes-{day}.jsonl.gz",
+            )
+            if source.exists()
+        ]
+        for source in sources:
+            opener = gzip.open if source.suffix == ".gz" else open
+            with opener(source, "rt", encoding="utf-8") as handle:
+                for line in handle:
+                    quote = parse_quote_line(line, source)
+                    if quote.received_time <= cutoff:
+                        rows.append(quote)
+        rows.sort(key=lambda row: (row.received_time, row.event_time))
+        partitions[day] = ([row.received_time for row in rows], rows)
+
+    windows = {}
+    for decision_time in decision_times:
+        end = decision_time + EXECUTION_QUOTE_WINDOW
+        visible = []
+        for day in _quote_days(decision_time, end):
+            received_times, rows = partitions[day]
+            left = bisect_right(received_times, decision_time)
+            right = bisect_right(received_times, end)
+            visible.extend(rows[left:right])
+        windows[decision_time] = sorted(
+            visible, key=lambda row: (row.received_time, row.event_time)
+        )
+    return windows
+
+
 def bootstrap_execution_examples(ledger, quote_root: str | Path, cutoff: datetime) -> int:
     """Build training material only from frozen predictions and retained quotes."""
     from .executable_label import build_executable_label_v2
-    from .repair_v2 import _read_quotes
 
     missing = ledger.connection.execute(
         """SELECT o.source_decision_id,o.decision_time,o.recomputed_at,o.source_evidence_hash
@@ -143,15 +200,15 @@ def bootstrap_execution_examples(ledger, quote_root: str | Path, cutoff: datetim
     ).fetchall()
     if not missing:
         return 0
-    quotes = _read_quotes(Path(quote_root), cutoff)
+    decision_times = [datetime.fromisoformat(row["decision_time"]) for row in missing]
+    quote_windows = _read_execution_quote_windows(
+        Path(quote_root), decision_times, cutoff
+    )
     inserted = 0
-    for row in missing:
-        decision_time = datetime.fromisoformat(row["decision_time"])
-        visible = [quote for quote in quotes if (
-            decision_time < quote.received_time
-            <= decision_time + timedelta(minutes=31, seconds=20)
-        )]
-        label = build_executable_label_v2(decision_time=decision_time, quotes=visible)
+    for row, decision_time in zip(missing, decision_times, strict=True):
+        label = build_executable_label_v2(
+            decision_time=decision_time, quotes=quote_windows[decision_time]
+        )
         inserted += append_execution_examples(
             ledger, decision_id=row["source_decision_id"],
             appended_at=datetime.fromisoformat(row["recomputed_at"]), label=label,
