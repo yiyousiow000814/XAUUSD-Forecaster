@@ -31,6 +31,18 @@ function Get-ReleaseEvidenceSha256 {
     } finally { $sha.Dispose() }
 }
 
+function ConvertTo-ReleaseEvidenceNativePath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if ($env:OS -ne "Windows_NT" -or $fullPath.StartsWith("\\?\")) {
+        return $fullPath
+    }
+    if ($fullPath.StartsWith("\\")) {
+        return "\\?\UNC\$($fullPath.Substring(2))"
+    }
+    return "\\?\$fullPath"
+}
+
 function Write-ReleaseEvidenceUtf8Atomic {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -38,11 +50,13 @@ function Write-ReleaseEvidenceUtf8Atomic {
         [switch]$CreateNew
     )
     $directory = Split-Path -Parent $Path
-    [System.IO.Directory]::CreateDirectory($directory) | Out-Null
+    $nativeDirectory = ConvertTo-ReleaseEvidenceNativePath -Path $directory
+    $nativePath = ConvertTo-ReleaseEvidenceNativePath -Path $Path
+    [System.IO.Directory]::CreateDirectory($nativeDirectory) | Out-Null
     $encoding = New-Object System.Text.UTF8Encoding($false)
     if ($CreateNew) {
         $stream = [System.IO.File]::Open(
-            $Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write,
+            $nativePath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write,
             [System.IO.FileShare]::Read)
         try {
             $writer = [System.IO.StreamWriter]::new($stream, $encoding)
@@ -51,12 +65,22 @@ function Write-ReleaseEvidenceUtf8Atomic {
         return
     }
     $temporary = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
-    [System.IO.File]::WriteAllText($temporary, $Content, $encoding)
+    $nativeTemporary = ConvertTo-ReleaseEvidenceNativePath -Path $temporary
+    $backup = "$Path.$([guid]::NewGuid().ToString('N')).bak"
+    $nativeBackup = ConvertTo-ReleaseEvidenceNativePath -Path $backup
+    [System.IO.File]::WriteAllText($nativeTemporary, $Content, $encoding)
     try {
-        Move-Item -LiteralPath $temporary -Destination $Path -Force
+        if ([System.IO.File]::Exists($nativePath)) {
+            [System.IO.File]::Replace($nativeTemporary, $nativePath, $nativeBackup)
+        } else {
+            [System.IO.File]::Move($nativeTemporary, $nativePath)
+        }
     } finally {
-        if (Test-Path -LiteralPath $temporary) {
-            Remove-Item -LiteralPath $temporary -Force
+        if ([System.IO.File]::Exists($nativeTemporary)) {
+            [System.IO.File]::Delete($nativeTemporary)
+        }
+        if ([System.IO.File]::Exists($nativeBackup)) {
+            [System.IO.File]::Delete($nativeBackup)
         }
     }
 }
@@ -227,11 +251,13 @@ function Write-ReleaseEvidenceNodeReceipt {
     foreach ($dependency in @($preimage.dependencies)) {
         $dependencyPath = Join-Path $Root `
             "$validationKeyDigest\$([string]$dependency.node)\$([string]$dependency.receipt_digest).json"
-        if (-not (Test-Path -LiteralPath $dependencyPath)) {
+        $nativeDependencyPath = ConvertTo-ReleaseEvidenceNativePath -Path $dependencyPath
+        if (-not [System.IO.File]::Exists($nativeDependencyPath)) {
             throw "RELEASE_EVIDENCE_DEPENDENCY_RECEIPT_MISSING"
         }
-        $dependencyReceipt = Get-Content -LiteralPath $dependencyPath -Raw -Encoding UTF8 |
-            ConvertFrom-ReleaseEvidenceJson
+        $dependencyReceipt = [System.IO.File]::ReadAllText(
+            $nativeDependencyPath, [System.Text.Encoding]::UTF8) |
+                ConvertFrom-ReleaseEvidenceJson
         if (-not (Test-ReleaseEvidenceNodeReceipt -Receipt $dependencyReceipt) -or
             [string]$dependencyReceipt.node -cne [string]$dependency.node -or
             [string]$dependencyReceipt.receipt_digest -cne [string]$dependency.receipt_digest) {
@@ -248,9 +274,11 @@ function Write-ReleaseEvidenceNodeReceipt {
     foreach ($entry in $preimage.GetEnumerator()) { $receipt[$entry.Key] = $entry.Value }
     $receipt.receipt_digest = $digest
     $receiptPath = Join-Path $Root "$validationKeyDigest\$Node\$digest.json"
+    $nativeReceiptPath = ConvertTo-ReleaseEvidenceNativePath -Path $receiptPath
     $json = ConvertTo-ReleaseEvidenceJson $receipt
-    if (Test-Path -LiteralPath $receiptPath) {
-        $existing = [System.IO.File]::ReadAllText($receiptPath, [System.Text.Encoding]::UTF8)
+    if ([System.IO.File]::Exists($nativeReceiptPath)) {
+        $existing = [System.IO.File]::ReadAllText(
+            $nativeReceiptPath, [System.Text.Encoding]::UTF8)
         if ($existing -cne $json) { throw "RELEASE_EVIDENCE_IMMUTABLE_COLLISION" }
     } else {
         Write-ReleaseEvidenceUtf8Atomic -Path $receiptPath -Content $json -CreateNew
@@ -296,12 +324,15 @@ function Get-ReleaseEvidenceWaterfall {
     )
     $validationKeyDigest = Get-ReleaseEvidenceSha256 -Value $ValidationKey
     $currentRoot = Join-Path $Root "$validationKeyDigest\current"
+    $nativeCurrentRoot = ConvertTo-ReleaseEvidenceNativePath -Path $currentRoot
     $entries = @()
-    if (Test-Path -LiteralPath $currentRoot) {
-        foreach ($indexPath in @(Get-ChildItem -LiteralPath $currentRoot -Filter "*.json" -File)) {
-            $index = Get-Content -LiteralPath $indexPath.FullName -Raw -Encoding UTF8 |
-                ConvertFrom-ReleaseEvidenceJson
-            $indexNode = [System.IO.Path]::GetFileNameWithoutExtension($indexPath.Name)
+    if ([System.IO.Directory]::Exists($nativeCurrentRoot)) {
+        foreach ($indexPath in @([System.IO.Directory]::EnumerateFiles(
+                $nativeCurrentRoot, "*.json", [System.IO.SearchOption]::TopDirectoryOnly))) {
+            $index = [System.IO.File]::ReadAllText(
+                $indexPath, [System.Text.Encoding]::UTF8) |
+                    ConvertFrom-ReleaseEvidenceJson
+            $indexNode = [System.IO.Path]::GetFileNameWithoutExtension($indexPath)
             $indexDigest = [string]$index.receipt_digest
             $expectedReceiptPath = "$indexNode/$indexDigest.json"
             if ([string]$index.schema_version -ne "release-evidence-current-index-v1" -or
@@ -313,8 +344,13 @@ function Get-ReleaseEvidenceWaterfall {
             }
             $receiptPath = Join-Path (Split-Path -Parent $currentRoot) `
                 ([string]$index.receipt_path -replace '/', '\')
-            $receipt = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 |
-                ConvertFrom-ReleaseEvidenceJson
+            $nativeReceiptPath = ConvertTo-ReleaseEvidenceNativePath -Path $receiptPath
+            if (-not [System.IO.File]::Exists($nativeReceiptPath)) {
+                throw "RELEASE_EVIDENCE_RECEIPT_MISSING"
+            }
+            $receipt = [System.IO.File]::ReadAllText(
+                $nativeReceiptPath, [System.Text.Encoding]::UTF8) |
+                    ConvertFrom-ReleaseEvidenceJson
             if (-not (Test-ReleaseEvidenceNodeReceipt -Receipt $receipt)) {
                 throw "RELEASE_EVIDENCE_RECEIPT_TAMPERED"
             }

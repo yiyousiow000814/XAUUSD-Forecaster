@@ -131,6 +131,35 @@ nodes=$waterfall.node_count;waterfall_elapsed=$waterfall.elapsed_ms}}|ConvertTo-
     assert receipt_files[0].read_bytes()[:3] != b"\xef\xbb\xbf"
 
 
+@pytest.mark.parametrize("shell", ("powershell.exe", "pwsh.exe"))
+def test_evidence_store_supports_long_authoritative_runtime_root(
+    tmp_path: Path, shell: str,
+) -> None:
+    evidence_root = (
+        tmp_path
+        / "physically-distinct-production-runtime-state-authority"
+        / ".local"
+        / "forward"
+        / "release-evidence"
+    )
+    output = _run_module(
+        tmp_path,
+        shell,
+        f"""
+$source=[ordered]@{{validation_key='worker:git';worker_version_id='worker';git_sha='git'}}
+$receipt=Write-ReleaseEvidenceNodeReceipt -Root {_ps_literal(evidence_root)} `
+ -ContractPath {_ps_literal(CONTRACT)} -ValidationKey 'worker:git' `
+ -Node 'artifact_provenance' -BehaviorKey 'artifact-key' -State 'PASSED' `
+ -SourceIdentity $source -StartedAt '2026-09-01T00:00:00Z' `
+ -CompletedAt '2026-09-01T00:00:01Z' -ExecutionMode 'FRESH' -WhyRan 'DISCOVERED'
+$waterfall=Get-ReleaseEvidenceWaterfall -Root {_ps_literal(evidence_root)} -ValidationKey 'worker:git'
+[ordered]@{{valid=(Test-ReleaseEvidenceNodeReceipt $receipt);nodes=$waterfall.node_count}}|
+ ConvertTo-Json -Compress
+""",
+    )
+    assert json.loads(output) == {"valid": True, "nodes": 1}
+
+
 def test_receipt_digest_and_dependency_validation_fail_closed(tmp_path: Path) -> None:
     evidence_root = tmp_path.parent / "re-tamper"
     output = _run_module(
