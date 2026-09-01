@@ -62,6 +62,7 @@ def test_windows_runtime_manifest_assigns_every_required_test_exactly_once() -> 
         "tests/test_cross_version_runtime_recovery.py",
         "tests/test_runtime_launchers.py",
         "tests/test_control_plane_install.py",
+        "tests/test_release_evidence_nodes.py",
     ):
         expected.update(f"{relative}::{name}" for name in _top_level_tests(relative))
     expected.add(

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "receipt_schema": "release-evidence-node-receipt-v1",
+  "nodes": [
+    {"id":"artifact_provenance","owner":"ReleaseArtifactOwner","dependencies":[],"behavior_inputs":["worker_version_id","git_sha","windows_revision","artifact_kind"]},
+    {"id":"exact_head_ci","owner":"RepositoryQualificationOwner","dependencies":["artifact_provenance"],"behavior_inputs":["git_sha","required_check_contract"]},
+    {"id":"windows_runtime","owner":"WindowsRuntimeQualificationOwner","dependencies":["artifact_provenance"],"behavior_inputs":["windows_revision","runtime_contract"]},
+    {"id":"migration_acceptance","owner":"MigrationQualificationOwner","dependencies":["artifact_provenance"],"behavior_inputs":["candidate","stable","database","migration_files","current_generation"]},
+    {"id":"migration_live_lease","owner":"MigrationLeaseOwner","dependencies":["migration_acceptance"],"behavior_inputs":["migration_root_receipt","live_owner","current_generation"]},
+    {"id":"candidate_placement","owner":"CandidatePlacementOwner","dependencies":["artifact_provenance"],"behavior_inputs":["candidate_worker","stable_worker","traffic_assignment"]},
+    {"id":"directed_worker","owner":"DirectedWorkerValidationOwner","dependencies":["candidate_placement"],"behavior_inputs":["worker_qualification_key","route_manifest","fixture_digests"]},
+    {"id":"worker_cpu","owner":"WorkerCpuQualificationOwner","dependencies":["directed_worker"],"behavior_inputs":["worker_qualification_key","cpu_policy","required_family_quotas"]},
+    {"id":"semantic_contract","owner":"SemanticContractOwner","dependencies":["directed_worker"],"behavior_inputs":["worker_behavior_key","semantic_contract_version","data_shape_contract"]},
+    {"id":"free_plan","owner":"FreePlanQualificationOwner","dependencies":[],"behavior_inputs":["worker_bundle_config","sql_behavior","workload_manifest","data_shape_contract","cadence","provider_limits_version"]},
+    {"id":"human_access_root","owner":"HumanAccessQualificationOwner","dependencies":[],"behavior_inputs":["protected_origin","provider_application_policy","access_artifacts","acceptance_contract"]},
+    {"id":"access_provider_lease","owner":"AccessProviderLeaseOwner","dependencies":["human_access_root"],"behavior_inputs":["access_root_receipt","provider_fingerprint","audit_interval"]},
+    {"id":"rollback_precheck","owner":"RollbackPrecheckOwner","dependencies":["candidate_placement","migration_live_lease"],"behavior_inputs":["rollback_worker","stable_windows_revision","live_owner_health"]},
+    {"id":"promote_attempt","owner":"PromoteTransactionOwner","dependencies":["exact_head_ci","windows_runtime","migration_live_lease","directed_worker","worker_cpu","semantic_contract","free_plan","access_provider_lease","candidate_placement","rollback_precheck"],"behavior_inputs":["transaction_id","target_identity","dependency_receipts"]},
+    {"id":"observe_attempt","owner":"ObserveTransactionOwner","dependencies":["promote_attempt"],"behavior_inputs":["transaction_id","target_identity","observe_contract"]}
+  ]
+}

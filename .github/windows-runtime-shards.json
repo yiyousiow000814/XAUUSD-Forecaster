@@ -85,12 +85,16 @@
       "family": "windows-runtime-release",
       "paths": [
         "tests/test_runtime_launchers.py",
+        "tests/test_release_evidence_nodes.py",
+        "scripts/release_evidence_nodes.ps1",
+        "scripts/release-evidence-contract.json",
         "scripts/worker_cpu_evidence.ps1",
         "scripts/xauusd_control_center.ps1",
         "scripts/build_release_validation_fixtures.py",
         "web/worker-validation-manifest.json"
       ],
       "tests": [
+        {"path": "tests/test_release_evidence_nodes.py"},
         {
           "path": "tests/test_runtime_launchers.py",
           "from": "test_quote_bridge_uses_standalone_local_configuration",

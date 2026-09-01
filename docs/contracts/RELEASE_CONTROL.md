@@ -127,6 +127,27 @@ viability, ownership uniqueness, compatibility, directed 0% Worker probes, and
 actual Cloudflare CPU/error evidence when Worker execution changed. PASSED means
 every required gate belongs to the exact release key.
 
+Release evidence is decomposed by the authoritative node set in
+`scripts/release-evidence-contract.json`. Each immutable node receipt binds its
+owner, behavior-affecting key, exact source identity, dependency receipt digests,
+state, start and completion time, elapsed time, and whether the work was fresh,
+reused, or renewed. Reuse and renewal must link the prior receipt; invalidation
+must state the changed behavior input. Receipts are stored beneath the mutable
+RuntimeRoot, keyed by a digest of the exact validation key, while a small mutable
+index selects the current immutable receipt for each node. The initial
+foundation mirrors artifact/provenance evidence without replacing the existing
+promotion authority. Promotion authority moves node by node only after its
+producer, invalidation, and retry contracts have production-shaped coverage;
+the aggregate Candidate validation object remains authoritative during that
+handover.
+
+Dependency direction is behavior-specific rather than a blanket Git edge.
+Worker CPU depends on directed Worker evidence, not Windows qualification;
+Human Access and Free-plan roots have no artifact dependency and are reused by
+their own behavior keys. Therefore a Control Plane-only revision cannot by
+itself invalidate CPU, an Access-unrelated Git movement cannot invalidate the
+human root, and an Observe probe change cannot invalidate migration acceptance.
+
 An isolated preflight may observe a live decision after its durable decision row
 is appended but before the complete model family is appended. Its explicit
 pending-generation mode treats that partial latest boundary like a not-yet-made
