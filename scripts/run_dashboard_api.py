@@ -2490,6 +2490,8 @@ def _backup_lifecycle_status(backup_root: Path) -> dict:
         "managed_gib_days": 0.0,
         "unknown_gib_days": 0.0,
         "disk_gib_days": 0.0,
+        "proven_stale_reclaimed_count": 0,
+        "proven_stale_reclaimed_bytes": 0,
         "policy": None,
         "last_error": "Backup retention state is not available",
     }
@@ -2540,6 +2542,12 @@ def _backup_lifecycle_status(backup_root: Path) -> dict:
                     state.get("unknown_gib_days") or 0.0
                 ),
                 "disk_gib_days": float(state.get("disk_gib_days") or 0.0),
+                "proven_stale_reclaimed_count": int(
+                    state.get("proven_stale_reclaimed_count") or 0
+                ),
+                "proven_stale_reclaimed_bytes": int(
+                    state.get("proven_stale_reclaimed_bytes") or 0
+                ),
                 "policy": state.get("policy"),
                 "last_error": None,
             })

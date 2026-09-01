@@ -27,6 +27,17 @@ BACKUP_RETENTION_STATE = "daily-backup-retention-state.json"
 BACKUP_RETENTION_PLAN = ".daily-backup-retention-plan.json"
 BACKUP_RETENTION_OWNER = ".daily-backup-retention-owner"
 DAILY_BACKUP_NAME = re.compile(r"^forward-evidence-(\d{8})\.sqlite3$")
+LEGACY_BACKUP_TEMP_NAME = re.compile(
+    r"^\.(forward-evidence-\d{8}\.sqlite3)\.(\d+)\.([0-9a-f]{32})\.tmp$"
+)
+BACKUP_RECLAIM_PLAN = ".proven-stale-backup-reclaim-plan.json"
+BACKUP_RECLAIM_STATE = "proven-stale-backup-reclaim-state.json"
+BACKUP_RECLAIM_PLAN_SCHEMA = "xauusd.forward.proven-stale-reclaim-plan.v1"
+BACKUP_RECLAIM_STATE_SCHEMA = "xauusd.forward.proven-stale-reclaim.v1"
+BACKUP_RECLAIM_GRACE = timedelta(hours=48)
+BACKUP_RECLAIM_REFERENCE_FILE_LIMIT = 512
+BACKUP_RECLAIM_REFERENCE_BYTE_LIMIT = 64 * 1024**2
+BACKUP_RECLAIM_HISTORY_LIMIT = 64
 
 
 @dataclass(frozen=True)
@@ -292,6 +303,8 @@ def _managed_backup_entries(
     owned_names = {
         BACKUP_RETENTION_STATE,
         BACKUP_RETENTION_PLAN,
+        BACKUP_RECLAIM_STATE,
+        BACKUP_RECLAIM_PLAN,
     }
     for target in sorted(backup_root.glob("forward-evidence-*.sqlite3")):
         match = DAILY_BACKUP_NAME.fullmatch(target.name)
@@ -439,6 +452,294 @@ def _validated_retention_plan(
     return payload
 
 
+def _has_delete_capability(path: Path) -> bool | None:
+    """Return whether the OS grants DELETE access without disturbing the file."""
+    if os.name != "nt":
+        try:
+            descriptor = os.open(path, os.O_RDONLY)
+        except OSError:
+            return False
+        os.close(descriptor)
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.argtypes = (
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        )
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.CreateFileW(
+            str(path),
+            0x00010000,  # DELETE
+            0x00000001 | 0x00000002 | 0x00000004,
+            None,
+            3,  # OPEN_EXISTING
+            0,
+            None,
+        )
+        invalid = wintypes.HANDLE(-1).value
+        if handle == invalid:
+            error = ctypes.get_last_error()
+            if error in (5, 32, 33):
+                return False
+            return None
+        kernel32.CloseHandle(handle)
+        return True
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def _runtime_json_reference_names(
+    runtime_root: Path, names: set[str], *, excluded: set[Path],
+) -> set[str]:
+    referenced: set[str] = set()
+    inspected_files = 0
+    inspected_bytes = 0
+    authority_files = list(runtime_root.glob("*.json"))
+    for directory in runtime_root.iterdir():
+        if directory.is_dir() and (
+            directory.name.endswith("receipts")
+            or directory.name.endswith("inspections")
+        ):
+            authority_files.extend(directory.glob("*.json"))
+    for path in sorted(set(authority_files)):
+        resolved = path.resolve()
+        if resolved in excluded:
+            continue
+        inspected_files += 1
+        if inspected_files > BACKUP_RECLAIM_REFERENCE_FILE_LIMIT:
+            raise RuntimeError("BACKUP_RECLAIM_REFERENCE_FILE_BOUND_EXCEEDED")
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            raise RuntimeError("BACKUP_RECLAIM_REFERENCE_STAT_FAILED") from exc
+        inspected_bytes += size
+        if inspected_bytes > BACKUP_RECLAIM_REFERENCE_BYTE_LIMIT:
+            raise RuntimeError("BACKUP_RECLAIM_REFERENCE_BYTE_BOUND_EXCEEDED")
+        try:
+            content = path.read_bytes()
+        except OSError as exc:
+            raise RuntimeError("BACKUP_RECLAIM_REFERENCE_READ_FAILED") from exc
+        for name in names - referenced:
+            if name.encode("ascii") in content:
+                referenced.add(name)
+    return referenced
+
+
+def _legacy_temp_families(
+    backup_root: Path, now: datetime,
+) -> tuple[list[dict], list[dict]]:
+    candidates: list[dict] = []
+    unknown: list[dict] = []
+    roots = []
+    for path in sorted(backup_root.iterdir()):
+        match = LEGACY_BACKUP_TEMP_NAME.fullmatch(path.name)
+        if path.is_file() and match:
+            roots.append((path, match))
+    if not roots:
+        return [], []
+    names = {path.name for path, _ in roots}
+    referenced = _runtime_json_reference_names(
+        backup_root.parent,
+        names,
+        excluded={
+            (backup_root / BACKUP_RECLAIM_PLAN).resolve(),
+            (backup_root / BACKUP_RECLAIM_STATE).resolve(),
+        },
+    )
+    now_utc = now.astimezone(UTC)
+    for path, match in roots:
+        reason = None
+        stat = path.stat()
+        modified = datetime.fromtimestamp(stat.st_mtime, UTC)
+        process_id = int(match.group(2))
+        _, alive = _process_start_token(process_id)
+        final = backup_root / match.group(1)
+        family = [
+            item for item in (
+                path.with_name(path.name + "-journal"),
+                path.with_name(path.name + "-wal"),
+                path.with_name(path.name + "-shm"),
+                path,
+            )
+            if item.is_file()
+        ]
+        if now_utc - modified < BACKUP_RECLAIM_GRACE:
+            reason = "GRACE_ACTIVE"
+        elif alive is True:
+            reason = "OWNER_PID_ACTIVE"
+        elif alive is None:
+            reason = "OWNER_PID_UNKNOWN"
+        elif not final.is_file():
+            reason = "FINAL_TARGET_MISSING"
+        elif path.name in referenced:
+            reason = "RUNTIME_REFERENCE_ACTIVE"
+        elif any(_has_delete_capability(item) is not True for item in family):
+            reason = "BLOCKING_HANDLE_OR_DELETE_AUTHORITY_UNKNOWN"
+        record = {
+            "root": path.name,
+            "owner_process_id": process_id,
+            "final_target": final.name,
+            "files": [
+                {
+                    "name": item.name,
+                    "bytes": item.stat().st_size,
+                    "modified_ns": item.stat().st_mtime_ns,
+                }
+                for item in family
+            ],
+        }
+        if reason:
+            record["reason"] = reason
+            unknown.append(record)
+        else:
+            record["proof"] = {
+                "naming_contract": "legacy-online-backup-temp-v1",
+                "grace_hours": int(BACKUP_RECLAIM_GRACE.total_seconds() / 3600),
+                "owner_pid_absent": True,
+                "final_target_exists": True,
+                "runtime_reference_absent": True,
+                "delete_capability": True,
+            }
+            candidates.append(record)
+    return candidates, unknown
+
+
+def _validated_reclaim_plan(path: Path, backup_root: Path) -> dict:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    digest = str(payload.pop("plan_digest", ""))
+    if not digest or digest != _json_digest(payload):
+        raise RuntimeError("BACKUP_RECLAIM_PLAN_TAMPERED")
+    if payload.get("schema") != BACKUP_RECLAIM_PLAN_SCHEMA:
+        raise RuntimeError("BACKUP_RECLAIM_PLAN_SCHEMA_INVALID")
+    if Path(str(payload.get("backup_root"))).resolve() != backup_root.resolve():
+        raise RuntimeError("BACKUP_RECLAIM_PLAN_ROOT_CHANGED")
+    payload["plan_digest"] = digest
+    return payload
+
+
+def _validated_reclaim_state(path: Path, backup_root: Path) -> dict:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    digest = str(payload.pop("receipt_digest", ""))
+    if not digest or digest != _json_digest(payload):
+        raise RuntimeError("BACKUP_RECLAIM_STATE_TAMPERED")
+    if payload.get("schema") != BACKUP_RECLAIM_STATE_SCHEMA:
+        raise RuntimeError("BACKUP_RECLAIM_STATE_SCHEMA_INVALID")
+    if Path(str(payload.get("backup_root"))).resolve() != backup_root.resolve():
+        raise RuntimeError("BACKUP_RECLAIM_STATE_ROOT_CHANGED")
+    payload["receipt_digest"] = digest
+    return payload
+
+
+def reclaim_proven_stale_backup_temps(
+    backup_root: Path, now: datetime,
+) -> dict:
+    """Remove only abandoned legacy backup temp families with complete proof."""
+    backup_root = backup_root.resolve()
+    plan_path = backup_root / BACKUP_RECLAIM_PLAN
+    state_path = backup_root / BACKUP_RECLAIM_STATE
+    prior = (
+        _validated_reclaim_state(state_path, backup_root)
+        if state_path.is_file() else None
+    )
+    if plan_path.is_file():
+        plan = _validated_reclaim_plan(plan_path, backup_root)
+        if prior and prior.get("plan_digest") == plan["plan_digest"]:
+            plan_path.unlink()
+            return prior
+        if plan.get("previous_receipt_digest") != (
+            prior.get("receipt_digest") if prior else None
+        ):
+            raise RuntimeError("BACKUP_RECLAIM_PREVIOUS_RECEIPT_CHANGED")
+    else:
+        candidates, initial_unknown = _legacy_temp_families(backup_root, now)
+        if not candidates and not initial_unknown and prior:
+            return prior
+        plan = {
+            "schema": BACKUP_RECLAIM_PLAN_SCHEMA,
+            "created_at": now.astimezone(UTC).isoformat(timespec="microseconds"),
+            "backup_root": str(backup_root),
+            "previous_receipt_digest": (
+                prior.get("receipt_digest") if prior else None
+            ),
+            "candidates": candidates,
+        }
+        plan["plan_digest"] = _json_digest(plan)
+        if candidates:
+            _atomic_json(plan_path, plan)
+
+    planned_names = {item["root"] for item in plan["candidates"]}
+    references = _runtime_json_reference_names(
+        backup_root.parent,
+        planned_names,
+        excluded={plan_path.resolve(), state_path.resolve()},
+    ) if planned_names else set()
+    reclaimed = []
+    for candidate in plan["candidates"]:
+        _, alive = _process_start_token(int(candidate["owner_process_id"]))
+        if alive is not False:
+            raise RuntimeError("BACKUP_RECLAIM_OWNER_NO_LONGER_ABSENT")
+        if not (backup_root / candidate["final_target"]).is_file():
+            raise RuntimeError("BACKUP_RECLAIM_FINAL_TARGET_CHANGED")
+        if candidate["root"] in references:
+            raise RuntimeError("BACKUP_RECLAIM_REFERENCE_APPEARED")
+        for item in candidate["files"]:
+            path = backup_root / item["name"]
+            if path.parent.resolve() != backup_root:
+                raise RuntimeError("BACKUP_RECLAIM_PATH_OUTSIDE_ROOT")
+            if path.exists():
+                stat = path.stat()
+                if (
+                    stat.st_size != item["bytes"]
+                    or stat.st_mtime_ns != item["modified_ns"]
+                    or _has_delete_capability(path) is not True
+                ):
+                    raise RuntimeError("BACKUP_RECLAIM_IDENTITY_CHANGED")
+                path.unlink()
+        reclaimed.append(candidate)
+
+    remaining_candidates, remaining_unknown = _legacy_temp_families(
+        backup_root, now,
+    )
+    if remaining_candidates:
+        raise RuntimeError("BACKUP_RECLAIM_CANDIDATE_REMAINED")
+    reclaimed_history = [
+        *(prior.get("reclaimed", []) if prior else []),
+        *reclaimed,
+    ]
+    if len(reclaimed_history) > BACKUP_RECLAIM_HISTORY_LIMIT:
+        raise RuntimeError("BACKUP_RECLAIM_HISTORY_BOUND_EXCEEDED")
+    state = {
+        "schema": BACKUP_RECLAIM_STATE_SCHEMA,
+        "completed_at": now.astimezone(UTC).isoformat(timespec="microseconds"),
+        "backup_root": str(backup_root),
+        "plan_digest": plan["plan_digest"],
+        "previous_receipt_digest": (
+            prior.get("receipt_digest") if prior else None
+        ),
+        "last_reclaimed_count": len(reclaimed),
+        "last_reclaimed_bytes": sum(
+            item["bytes"] for candidate in reclaimed for item in candidate["files"]
+        ),
+        "reclaimed_count": len(reclaimed_history),
+        "reclaimed_bytes": sum(
+            item["bytes"]
+            for candidate in reclaimed_history for item in candidate["files"]
+        ),
+        "reclaimed": reclaimed_history,
+        "unknown": remaining_unknown,
+    }
+    state["receipt_digest"] = _json_digest(state)
+    _atomic_json(state_path, state)
+    plan_path.unlink(missing_ok=True)
+    return state
+
+
 def apply_backup_retention(
     database: Path,
     backup_root: Path,
@@ -518,6 +819,7 @@ def apply_backup_retention(
                 receipt_path.unlink()
             deleted.append(item)
 
+        reclaim_state = reclaim_proven_stale_backup_temps(backup_root, now)
         managed, unknown = _managed_backup_entries(backup_root, source=source)
         now_utc = now.astimezone(UTC)
         managed_gib_days = sum(
@@ -547,6 +849,8 @@ def apply_backup_retention(
             "managed_bytes": sum(item["bytes"] for item in managed),
             "unknown_count": len(unknown),
             "unknown_bytes": sum(item["bytes"] for item in unknown),
+            "proven_stale_reclaimed_count": reclaim_state["reclaimed_count"],
+            "proven_stale_reclaimed_bytes": reclaim_state["reclaimed_bytes"],
             "managed_gib_days": round(managed_gib_days, 6),
             "unknown_gib_days": round(unknown_gib_days, 6),
             "disk_gib_days": round(

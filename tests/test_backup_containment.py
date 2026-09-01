@@ -452,6 +452,103 @@ def test_dashboard_reports_only_receipt_owned_backup_lifecycle(
     ledger.close()
 
 
+def _legacy_backup_temp_family(
+    tmp_path: Path, *, process_id: int = 2147483647,
+) -> tuple[Path, Path, Path]:
+    backup_root = tmp_path / "production-runtime" / ".local" / "forward" / "backups"
+    backup_root.mkdir(parents=True, exist_ok=True)
+    final = backup_root / "forward-evidence-20260820.sqlite3"
+    final.write_bytes(b"verified-final-placeholder")
+    temporary = backup_root / (
+        ".forward-evidence-20260820.sqlite3."
+        f"{process_id}.0123456789abcdef0123456789abcdef.tmp"
+    )
+    temporary.write_bytes(b"interrupted-temporary")
+    sidecar = temporary.with_name(temporary.name + "-journal")
+    sidecar.write_bytes(b"journal")
+    old = (NOW - timedelta(days=3)).timestamp()
+    os.utime(temporary, (old, old))
+    os.utime(sidecar, (old, old))
+    return backup_root, temporary, sidecar
+
+
+def test_proven_stale_legacy_temp_family_is_reclaimed_with_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backup_root, temporary, sidecar = _legacy_backup_temp_family(tmp_path)
+    monkeypatch.setattr(maintenance, "_has_delete_capability", lambda _path: True)
+
+    state = maintenance.reclaim_proven_stale_backup_temps(backup_root, NOW)
+
+    assert not temporary.exists()
+    assert not sidecar.exists()
+    assert state["reclaimed_count"] == 1
+    assert state["reclaimed_bytes"] == len(b"interrupted-temporaryjournal")
+    digest = state["receipt_digest"]
+    unsigned = {key: value for key, value in state.items() if key != "receipt_digest"}
+    assert digest == maintenance._json_digest(unsigned)
+    repeated = maintenance.reclaim_proven_stale_backup_temps(backup_root, NOW)
+    assert repeated["receipt_digest"] == digest
+    assert repeated["reclaimed_count"] == 1
+
+
+def test_legacy_temp_with_live_owner_reference_or_blocking_handle_is_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live_root, live, _ = _legacy_backup_temp_family(
+        tmp_path / "live", process_id=os.getpid(),
+    )
+    monkeypatch.setattr(maintenance, "_has_delete_capability", lambda _path: True)
+    live_state = maintenance.reclaim_proven_stale_backup_temps(live_root, NOW)
+    assert live.is_file()
+    assert live_state["unknown"][0]["reason"] == "OWNER_PID_ACTIVE"
+
+    ref_root, referenced, _ = _legacy_backup_temp_family(tmp_path / "reference")
+    (ref_root.parent / "runtime-state.json").write_text(
+        json.dumps({"temporary": referenced.name}), encoding="utf-8",
+    )
+    ref_state = maintenance.reclaim_proven_stale_backup_temps(ref_root, NOW)
+    assert referenced.is_file()
+    assert ref_state["unknown"][0]["reason"] == "RUNTIME_REFERENCE_ACTIVE"
+
+    held_root, held, _ = _legacy_backup_temp_family(tmp_path / "held")
+    monkeypatch.setattr(maintenance, "_has_delete_capability", lambda _path: False)
+    held_state = maintenance.reclaim_proven_stale_backup_temps(held_root, NOW)
+    assert held.is_file()
+    assert held_state["unknown"][0]["reason"] == (
+        "BLOCKING_HANDLE_OR_DELETE_AUTHORITY_UNKNOWN"
+    )
+
+
+def test_interrupted_stale_reclaim_resumes_only_exact_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backup_root, temporary, sidecar = _legacy_backup_temp_family(tmp_path)
+    monkeypatch.setattr(maintenance, "_has_delete_capability", lambda _path: True)
+    original_unlink = Path.unlink
+    interrupted = False
+
+    def interrupt(path: Path, *args, **kwargs):
+        nonlocal interrupted
+        if path == temporary and not interrupted:
+            interrupted = True
+            raise OSError("simulated stale reclaim interruption")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", interrupt)
+    with pytest.raises(OSError, match="simulated stale reclaim interruption"):
+        maintenance.reclaim_proven_stale_backup_temps(backup_root, NOW)
+    assert not sidecar.exists()
+    assert temporary.exists()
+    assert (backup_root / maintenance.BACKUP_RECLAIM_PLAN).is_file()
+
+    monkeypatch.setattr(Path, "unlink", original_unlink)
+    state = maintenance.reclaim_proven_stale_backup_temps(backup_root, NOW)
+    assert state["reclaimed_count"] == 1
+    assert not temporary.exists()
+    assert not (backup_root / maintenance.BACKUP_RECLAIM_PLAN).exists()
+
+
 def test_collector_backup_is_eligible_only_after_generation_and_heartbeat() -> None:
     source = (
         Path(__file__).resolve().parents[1]

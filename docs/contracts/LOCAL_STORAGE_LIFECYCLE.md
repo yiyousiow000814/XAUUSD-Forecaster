@@ -58,6 +58,23 @@ idempotent and produces no additional deletion.
 
 ## Separate lifecycle families
 
-WAL checkpoint ownership, legacy/temporary backup recovery, quote archive
-retention, Git worktree cleanup, and release-evidence retention are separate
-lifecycle families. This contract does not authorize deleting those objects.
+Historical v1 backup temporaries use the exact form
+`.forward-evidence-YYYYMMDD.sqlite3.PID.UUID.tmp`. They are never recovery
+authority before the online-backup integrity check and atomic final-name swap.
+The retention owner may classify that temp family as `PROVEN_STALE` only when:
+
+- at least 48 hours have elapsed since its last write;
+- the encoded owner PID is absent, not merely unrecognized;
+- the corresponding final daily target exists;
+- no bounded runtime JSON authority references the temp name;
+- the exact temp and sidecars still match a persisted reclaim plan; and
+- the OS grants DELETE access, proving that no blocking handle exists.
+
+The owner persists the exact reclaim plan before deletion and publishes a
+digest-bound fixed state receipt after completion. Any failed bound, changed
+identity, active/reused PID, reference, missing final target, or blocking handle
+leaves the complete family `UNKNOWN`. No other temp naming family is implied.
+
+WAL checkpoint ownership, ordinary backup adoption, quote archive retention,
+Git worktree cleanup, and release-evidence retention are separate lifecycle
+families. This contract does not authorize deleting those objects.
