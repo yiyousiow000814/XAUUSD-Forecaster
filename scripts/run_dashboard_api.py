@@ -73,6 +73,11 @@ from xauusd_forecaster.maintenance import (
     BACKUP_RETENTION_SCHEMA,
     BACKUP_RETENTION_STATE,
 )
+from xauusd_forecaster.sqlite_wal import (
+    FORWARD_WAL_CHECKPOINT_SCHEMA,
+    FORWARD_WAL_CHECKPOINT_STATE,
+    open_forward_writer_connection,
+)
 UTC = timezone.utc
 PAYLOAD_SCHEMA_VERSION = "xauusd-dashboard-v4-event-episode"
 MARKET_DETAIL_CANDLE_LIMIT = 7 * 288
@@ -2585,6 +2590,58 @@ def _backup_lifecycle_status(backup_root: Path) -> dict:
     return result
 
 
+def _wal_checkpoint_status(state_root: Path) -> dict:
+    state_path = state_root / FORWARD_WAL_CHECKPOINT_STATE
+    result = {
+        "status": "UNKNOWN",
+        "last_success": None,
+        "age_seconds": None,
+        "pending_frames": None,
+        "wal_bytes": None,
+        "journal_size_limit_bytes": None,
+        "last_error": "WAL checkpoint state is not available",
+    }
+    if not state_path.is_file():
+        return result
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        digest = str(state.pop("receipt_digest", ""))
+        if not digest or digest != _canonical_payload_digest(state):
+            raise ValueError("WAL checkpoint receipt digest")
+        if state.get("schema") != FORWARD_WAL_CHECKPOINT_SCHEMA:
+            raise ValueError("WAL checkpoint receipt schema")
+        recorded_at = datetime.fromisoformat(str(state["recorded_at"]))
+        age_seconds = max(0.0, (datetime.now(UTC) - recorded_at).total_seconds())
+        checkpoint_status = str(state.get("status") or "UNKNOWN")
+        if checkpoint_status in {"CHECKPOINTED", "TRUNCATED"}:
+            component_status = "OK"
+        elif checkpoint_status in {
+            "CHECKPOINT_BUSY", "READER_PINNED", "TRUNCATE_BUSY",
+            "TRUNCATE_INCOMPLETE",
+        }:
+            component_status = "WARN"
+        else:
+            component_status = "ERROR"
+        if age_seconds > 300:
+            component_status = "ERROR"
+        result.update({
+            "status": component_status,
+            "checkpoint_status": checkpoint_status,
+            "last_success": state.get("recorded_at"),
+            "age_seconds": age_seconds,
+            "pending_frames": int(state.get("pending_frames") or 0),
+            "wal_bytes": int(state.get("wal_bytes_after") or 0),
+            "journal_size_limit_bytes": int(
+                state.get("journal_size_limit_bytes") or 0
+            ),
+            "last_error": state.get("error"),
+        })
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        result["status"] = "ERROR"
+        result["last_error"] = f"Invalid WAL checkpoint state: {exc}"
+    return result
+
+
 def _dashboard_payload(
     database: Path, *, clock=None, include_optional: bool = True,
     optional_resources: frozenset[str] | None = None,
@@ -3218,6 +3275,7 @@ def _dashboard_payload(
         except (OSError, json.JSONDecodeError):
             pass
     backup_lifecycle = _backup_lifecycle_status(database.parent / "backups")
+    wal_checkpoint = _wal_checkpoint_status(database.parent)
     backup_time = backup_lifecycle["last_verified_backup"]
     component_times["sites_synchronizer"] = sync_time
     component_times["sqlite_backup"] = backup_time
@@ -3362,6 +3420,7 @@ def _dashboard_payload(
         # integrity check succeeds. Reuse that durable proof.
         "integrity_check": backup_integrity_component,
         "backup_retention": backup_lifecycle,
+        "sqlite_wal_checkpoint": wal_checkpoint,
     }
     if market_session in {"CLOSED", "WEEKLY_CLOSED"}:
         for component_name in (
@@ -3907,8 +3966,9 @@ class Handler(BaseHTTPRequestHandler):
             operator_id = str(payload.get("operator_id") or "").strip()
             if not operator_id.startswith("cloudflare-access:") or len(operator_id) > 500:
                 raise ValueError("retry override operator identity is invalid")
-            connection = sqlite3.connect(self.database, timeout=10)
-            connection.row_factory = sqlite3.Row
+            connection = open_forward_writer_connection(
+                self.database, timeout=10, row_factory=sqlite3.Row,
+            )
             try:
                 install_scheduler_schema(connection)
                 results = []

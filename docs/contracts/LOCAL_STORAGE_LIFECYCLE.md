@@ -6,10 +6,34 @@ The active `forward-evidence.sqlite3` database is the append-only forecasting
 evidence authority. Daily SQLite snapshots are same-disk recovery artifacts;
 they are not an additional evidence authority and do not change row retention.
 
-The Forward Collector is the sole daily-backup and backup-retention execution
-owner. Maintenance starts only after Collector startup viability and heartbeat
-publication. Restart, retry, or a second process must not multiply a backup or
-retention operation.
+The Forward Collector is the sole daily-backup, backup-retention, and WAL
+checkpoint execution owner. Maintenance starts only after Collector startup
+viability and heartbeat publication. Restart, retry, or a second process must
+not multiply a backup, retention, or checkpoint operation.
+
+## WAL checkpoint ownership
+
+All production write connections disable connection-owned automatic
+checkpointing and apply a 64 MiB post-reset journal size limit. This limit is
+16 times the former 1,000-page automatic-checkpoint target at the production
+4 KiB page size: it avoids normal truncate churn while bounding retained WAL
+capacity after a reset. Because both settings are connection-local, every
+Forward writer must use the shared writer-connection boundary.
+
+Only the Collector-supervised background checkpoint owner may perform recurring
+checkpoints. It runs independently from decision, annotation, training, and API
+commit paths. Each round first uses a non-blocking passive checkpoint. A
+truncate is attempted only when that round reports every valid WAL frame
+backfilled and the physical file exceeds the size limit. Lock acquisition for
+the truncate is capped at 250 milliseconds; a concurrent reader or writer is a
+visible retryable state, not authority to block a critical writer or discard a
+frame.
+
+The owner publishes a digest-bound fixed state receipt beneath the runtime root
+with frame counts, pending frames, physical bytes, size limit, lock timeout,
+truncate decision, and error state. Long readers remain bounded by their own
+snapshot contracts. Owner restart retries from SQLite's durable WAL state; the
+receipt is observability evidence and is never used as database authority.
 
 ## Managed daily snapshots
 
@@ -75,6 +99,6 @@ digest-bound fixed state receipt after completion. Any failed bound, changed
 identity, active/reused PID, reference, missing final target, or blocking handle
 leaves the complete family `UNKNOWN`. No other temp naming family is implied.
 
-WAL checkpoint ownership, ordinary backup adoption, quote archive retention,
-Git worktree cleanup, and release-evidence retention are separate lifecycle
-families. This contract does not authorize deleting those objects.
+Ordinary backup adoption, quote archive retention, Git worktree cleanup, and
+release-evidence retention are separate lifecycle families. This contract does
+not authorize deleting those objects.

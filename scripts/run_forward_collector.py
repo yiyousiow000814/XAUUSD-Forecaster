@@ -44,6 +44,7 @@ from xauusd_forecaster.runtime_paths import (  # noqa: E402
     authoritative_runtime_root,
     runtime_child_path,
 )
+from xauusd_forecaster.sqlite_wal import ForwardWalCheckpointOwner  # noqa: E402
 from xauusd_forecaster.news_collection_owner import NewsCollectionOwner  # noqa: E402
 from xauusd_forecaster.training_owner import (  # noqa: E402
     BackgroundTrainingOwner,
@@ -282,6 +283,7 @@ def main() -> int:
     last_news_reconciliation = datetime.now(UTC)
     last_archive_day = initialized_at.date()
     last_backup_observation = None
+    last_wal_checkpoint_observation = None
     row = ledger.connection.execute(
         "SELECT max(decision_time) AS latest FROM decision_events"
     ).fetchone()
@@ -292,6 +294,7 @@ def main() -> int:
     )
     heartbeat = RuntimeHeartbeatPulse(status_file, service="collector")
     backup_owner = DailyBackupOwner(ledger.path, local_root / "backups")
+    wal_checkpoint_owner = ForwardWalCheckpointOwner(ledger.path, local_root)
     news_owner = NewsCollectionOwner(
         ledger.path, poll_seconds=args.news_poll_seconds,
     )
@@ -307,6 +310,7 @@ def main() -> int:
         if quote_root:
             archive_completed_quote_days(quote_root, initialized_at)
         backup_owner.start()
+        wal_checkpoint_owner.start()
         if startup_requires_reconciliation:
             request_background_training(
                 ledger.connection, datetime.now(UTC), reconcile=True,
@@ -321,6 +325,13 @@ def main() -> int:
                     sort_keys=True,
                 ), flush=True)
                 last_backup_observation = backup_observation
+            wal_checkpoint_observation = wal_checkpoint_owner.snapshot()
+            if wal_checkpoint_observation != last_wal_checkpoint_observation:
+                print(json.dumps(
+                    {"event": "FORWARD_WAL_CHECKPOINT", **wal_checkpoint_observation},
+                    sort_keys=True,
+                ), flush=True)
+                last_wal_checkpoint_observation = wal_checkpoint_observation
             if quote_root and now.date() != last_archive_day:
                 archive_completed_quote_days(quote_root, now)
                 last_archive_day = now.date()
@@ -391,6 +402,7 @@ def main() -> int:
             )
             time.sleep(max(1.0, args.poll_seconds))
     finally:
+        wal_checkpoint_owner.close()
         backup_owner.close()
         training_owner.close()
         news_owner.close()

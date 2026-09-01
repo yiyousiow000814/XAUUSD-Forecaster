@@ -32,6 +32,7 @@ from .news_scheduler import (
     PROVIDER_DISPATCH_INITIAL_INTERVAL_MS,
     register_provider_dispatch_demand,
 )
+from .sqlite_wal import open_forward_writer_connection
 
 
 NEWS_EMBEDDING_MODEL = "gemini-embedding-2"
@@ -171,9 +172,9 @@ def _open_backfill_lease_connection(
     )
     if not database_path:
         raise ValueError("embedding backfill leases require a file-backed ledger")
-    lease_connection = sqlite3.connect(database_path, timeout=30.0)
-    lease_connection.row_factory = sqlite3.Row
-    return lease_connection
+    return open_forward_writer_connection(
+        database_path, timeout=30.0, row_factory=sqlite3.Row,
+    )
 
 
 def _claim_backfill_lease(

@@ -18,6 +18,7 @@ from .news_semantics import (
     news_annotation_schema,
     validate_news_annotation,
 )
+from .sqlite_wal import open_forward_writer_connection
 
 
 UTC = timezone.utc
@@ -67,7 +68,6 @@ IMMUTABLE_TABLES = (
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
 
 CREATE TABLE IF NOT EXISTS runtime_metadata (
     key TEXT PRIMARY KEY,
@@ -543,9 +543,9 @@ class ForwardLedger:
         # Collector and annotator are independent long-running writers.  A
         # brief WAL writer collision must wait for the current transaction,
         # not terminate either service during a code reload or normal polling.
-        self.connection = sqlite3.connect(self.path, timeout=60.0)
-        self.connection.row_factory = sqlite3.Row
-        self.connection.execute("PRAGMA busy_timeout=60000")
+        self.connection = open_forward_writer_connection(
+            self.path, timeout=60.0, row_factory=sqlite3.Row,
+        )
         self.connection.executescript(SCHEMA)
         from .assistant_capacity import install_assistant_capacity_schema
         from .critical_annotation_state import (
