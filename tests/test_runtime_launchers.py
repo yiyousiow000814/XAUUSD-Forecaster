@@ -4777,6 +4777,7 @@ def test_passed_candidate_promotes_only_after_observation_commit(
         "function Test-CloudflareReleasePlacement { return $true }; "
         f"function Get-RuntimeCodeState {{ return [pscustomobject]@{{applied_revision='{previous}'}} }}; "
         "function Test-SingleProductionOwner { return $true }; "
+        "function Invoke-PromotionFreshnessCoordinator { return [pscustomobject]@{state='PASSED'} }; "
         f"function New-RuntimeRecoveryPlan {{ return [pscustomobject]@{{body="
         f"[pscustomobject]@{{stable_revision='{previous}'}};digest=('0' * 64)}} }}; "
         "function Update-RuntimeCheckout { return $true }; "
@@ -4804,6 +4805,88 @@ def test_passed_candidate_promotes_only_after_observation_commit(
         f"True,{previous},OBSERVING,{candidate},"
         f"windows-with-sync-paused;worker;sync-resumed,{reload_boundary}"
     )
+
+
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_promotion_freshness_coordinator_renews_only_live_leases(
+    tmp_path, powershell: str,
+) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, candidate)
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$candidate.validation|Add-Member -Force auth_inspection ([pscustomobject]@{"
+        "state='ACCESS_QUALIFICATION_REUSED'});"
+        "$candidate|Add-Member -Force access_qualification ([pscustomobject]@{"
+        "state='ACCESS_QUALIFICATION_REUSED';receipt_digest=('d'*64)});"
+        "$candidate|Add-Member -Force migration_acceptance ([pscustomobject]@{"
+        "validation_key=$candidate.validation_key;receipt_digest=('a'*64)});"
+        "$candidate|Add-Member -Force migration_qualification ([pscustomobject]@{"
+        "state='MIGRATION_QUALIFICATION_RENEWED';receipt_digest=('b'*64)});"
+        "Write-ReleaseControlState $state;$script:migrationCalls=0;$script:accessCalls=0;"
+        "function Get-CandidateChangedFiles{return @('web/drizzle/0030_news_evidence_cleanup_budget.sql')};"
+        "function Get-CandidateCompatibilityRequirement{return [pscustomobject]@{"
+        "state='COORDINATED_STORAGE_MIGRATION_REQUIRED';files=@('web/drizzle/0030_news_evidence_cleanup_budget.sql')}};"
+        "function Ensure-CoordinatedMigrationQualification{param($Candidate,$Stable,$MigrationFiles,$MinimumRemaining);"
+        "$script:migrationCalls++;$Candidate.migration_qualification.receipt_digest=('c'*64);"
+        "return [pscustomobject]@{state='MIGRATION_QUALIFICATION_RENEWED';"
+        "root_receipt_digest=('a'*64);receipt=[pscustomobject]@{receipt_digest=('c'*64)}}};"
+        "function Ensure-AccessQualificationMachineReceipt{param($Candidate,$MinimumRemaining);"
+        "$script:accessCalls++;$Candidate.access_qualification.receipt_digest=('e'*64);"
+        "return [pscustomobject]@{state='ACCESS_QUALIFICATION_RENEWED';receipt_digest=('e'*64)}};"
+        "function Test-CloudflareReleasePlacement{return $true};"
+        "function Test-CloudflareRollbackTarget{return $true};"
+        f"function Get-RuntimeCodeState{{return [pscustomobject]@{{applied_revision='{previous}'}}}};"
+        "function Test-CurrentStableRuntimeHealth{return $true};"
+        "function Invoke-AutomaticCandidateValidation{throw 'broad validation must not run'};"
+        "$summary=Invoke-PromotionFreshnessCoordinator $state;$saved=Get-ReleaseControlState;"
+        "$m=$summary.steps|Where-Object name -eq 'migration_live_lease';"
+        "$a=$summary.steps|Where-Object name -eq 'access_provider_lease';"
+        'Write-Output "$($summary.state),$($summary.minimum_remaining_seconds),'
+        '$($m.execution_mode),$($a.execution_mode),$script:migrationCalls,$script:accessCalls,'
+        '$($null -eq $saved.transaction),$($saved.candidate.validation_state)"',
+        powershell=powershell,
+    )
+    assert result == "PASSED,1800,RENEWED,RENEWED,1,1,True,PASSED"
+
+
+@pytest.mark.parametrize(
+    ("failed_check", "expected"),
+    (
+        ("placement", "Cloudflare Stable/Candidate placement drifted."),
+        ("rollback", "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"),
+        ("health", "CURRENT_STABLE_RUNTIME_UNHEALTHY"),
+    ),
+)
+def test_promotion_freshness_failure_never_starts_transaction(
+    tmp_path, failed_check: str, expected: str,
+) -> None:
+    previous = "a" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, "b" * 40)
+        + f"$script:failed='{failed_check}';"
+        "function Get-CandidateChangedFiles{return @('docs/README.md')};"
+        "function Get-CandidateCompatibilityRequirement{return [pscustomobject]@{state='PASSED';files=@()}};"
+        "function Test-CloudflareReleasePlacement{return $script:failed -ne 'placement'};"
+        "function Test-CloudflareRollbackTarget{return $script:failed -ne 'rollback'};"
+        f"function Get-RuntimeCodeState{{return [pscustomobject]@{{applied_revision='{previous}'}}}};"
+        "function Test-CurrentStableRuntimeHealth{return $script:failed -ne 'health'};"
+        "$state=Get-ReleaseControlState;$reason='';"
+        "try{Invoke-PromotionFreshnessCoordinator $state|Out-Null}catch{$reason=$_.Exception.Message};"
+        "$saved=Get-ReleaseControlState;"
+        '$failedStep=$saved.candidate.promotion_freshness.steps|Select-Object -Last 1;'
+        'Write-Output "$reason,$($null -eq $saved.transaction),$($saved.deployment_status),'
+        '$($saved.candidate.promotion_freshness.state),$($failedStep.name),$($failedStep.state)"',
+    )
+    expected_step = {
+        "placement": "candidate_placement",
+        "rollback": "rollback_precheck",
+        "health": "current_owner_health",
+    }[failed_check]
+    assert result == f"{expected},True,READY,FAILED,{expected_step},FAILED"
 
 
 def test_deferred_projection_obligation_blocks_stable_commit(tmp_path) -> None:
@@ -5316,6 +5399,32 @@ def test_fresh_migration_acceptance_does_not_create_renewal(
         powershell=powershell,
     )
     assert result == "MIGRATION_ACCEPTED,0,0"
+
+
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_near_expiry_migration_acceptance_renews_before_promotion(
+    tmp_path, powershell: str,
+) -> None:
+    _write_coordinated_migration_files(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        _coordinated_migration_contract_body()
+        + "$evidence=Get-CoordinatedMigrationLiveEvidence $candidate $stable $files;"
+        "$root=New-CoordinatedMigrationReceipt $evidence;Write-CoordinatedMigrationReceipt $root;"
+        "$candidate|Add-Member -Force migration_acceptance ([pscustomobject]@{"
+        "validation_key=$candidate.validation_key;receipt_digest=$root.receipt_digest});"
+        "$state=[pscustomobject]@{transaction=$null;stable=$stable;candidate=$candidate};"
+        "Write-ReleaseControlState $state;$script:migrationMutationQueries=0;"
+        "function Get-RuntimeCodeState{[pscustomobject]@{applied_revision=$stable.windows_revision}};"
+        "function Get-CloudflareDeployment{[pscustomobject]@{versions=@("
+        "[pscustomobject]@{version_id=$stable.worker_version_id;percentage=100})}};"
+        "$qualification=Ensure-CoordinatedMigrationQualification $candidate $stable $files "
+        "-MinimumRemaining ([TimeSpan]::FromHours(3));"
+        "$count=@(Get-ChildItem $coordinatedMigrationRenewalReceiptRoot -File).Count;"
+        'Write-Output "$($qualification.state),$count,$script:migrationMutationQueries"',
+        powershell=powershell,
+    )
+    assert result == "MIGRATION_QUALIFICATION_RENEWED,1,0"
 
 
 @pytest.mark.parametrize(
@@ -7393,6 +7502,28 @@ def test_stale_machine_access_evidence_renews_without_new_human_acceptance(
 
 
 @pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_near_expiry_access_machine_lease_renews_before_promotion(
+    tmp_path, powershell: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _stale_access_reuse_ready_for_renewal()
+        + _cloudflare_access_read_stubs()
+        + "$script:accessNow=[DateTimeOffset]::UtcNow;"
+        "function Get-AccessEvidenceUtcNow{return $script:accessNow};"
+        "$first=Ensure-AccessQualificationMachineReceipt $candidate;"
+        "$script:accessNow=(ConvertTo-ReleaseTimestampUtc $first.issued_at).AddMinutes(105);"
+        "$second=Ensure-AccessQualificationMachineReceipt $candidate "
+        "-MinimumRemaining ([TimeSpan]::FromMinutes(30));"
+        "$count=@(Get-ChildItem $accessQualificationRenewalReceiptRoot -File).Count;"
+        'Write-Output "$($second.state),$($second.previous_machine_receipt_digest -eq '
+        '$first.receipt_digest),$count"',
+        powershell=powershell,
+    )
+    assert result == "ACCESS_QUALIFICATION_RENEWED,True,2"
+
+
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
 def test_new_candidate_renews_from_complete_historical_machine_chain(
     tmp_path, powershell: str,
 ) -> None:
@@ -7741,14 +7872,18 @@ def test_promotion_rechecks_human_or_machine_access_receipt() -> None:
     source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
         encoding="utf-8"
     )
+    coordinator = source.split("function Invoke-PromotionFreshnessCoordinator", 1)[1].split(
+        "function Start-ReleasePromotion", 1
+    )[0]
     promotion = source.split("function Start-ReleasePromotion", 1)[1].split(
         "function Complete-ReleasePromotion", 1
     )[0]
-    assert '"HUMAN_ACCESS_BOUNDARY_ACCEPTED"' in promotion
-    assert "Assert-AccessBoundaryAcceptanceReceipt" in promotion
-    assert '"ACCESS_QUALIFICATION_REUSED"' in promotion
-    assert '"ACCESS_QUALIFICATION_RENEWED"' in promotion
-    assert "Ensure-AccessQualificationMachineReceipt" in promotion
+    assert '"HUMAN_ACCESS_BOUNDARY_ACCEPTED"' in coordinator
+    assert "Assert-AccessBoundaryAcceptanceReceipt" in coordinator
+    assert '"ACCESS_QUALIFICATION_REUSED"' in coordinator
+    assert '"ACCESS_QUALIFICATION_RENEWED"' in coordinator
+    assert "Ensure-AccessQualificationMachineReceipt" in coordinator
+    assert "Invoke-PromotionFreshnessCoordinator" in promotion
     assert "Test-ProductionCandidateProvenance" in promotion
 
 

@@ -189,8 +189,9 @@ interval since that acceptance, reports no application or policy change, no
 Access failure was recorded, and the prior and current qualification keys are
 identical. Reuse writes a separate immutable
 `ACCESS_QUALIFICATION_REUSED` machine receipt; it never writes or impersonates a
-human receipt. Machine evidence keeps a two-hour freshness TTL. Expiry renews
-only the machine observation: Release Control reads the exact Access application,
+human receipt. Machine evidence keeps a two-hour freshness TTL. Expiry, or
+insufficient remaining lifetime for the bounded Switch and Observe budgets,
+renews only the machine observation: Release Control reads the exact Access application,
 policy, and identity-provider configuration and exhausts the account audit-log
 cursor over the continuous interval beginning at the previous successful
 inspection boundary. Zero behavior-affecting changes, zero relevant failures,
@@ -203,6 +204,17 @@ instead of reading more than ten 1,000-entry pages.
 Incomplete retention coverage, incomplete pagination, change followed by
 reversion, configuration drift, broken chain or changed Access artifact requires
 human review. Unreadable or tampered evidence fails closed.
+
+Immediately before a Promote transaction is created, one freshness coordinator
+reserves 30 minutes of live-evidence lifetime, derived from the 15-minute
+service-startup and 15-minute Observe budgets. It renews only a required
+migration live lease or Access provider lease that lacks that headroom; immutable
+migration acceptance, the human Access root, CPU evidence, and other root
+qualifications are not rerun. The same pass freshly verifies Candidate zero
+percent placement, exact rollback-target availability, the recorded Stable
+Windows revision, single production ownership, and local API health. Any failure
+occurs while the transaction is still absent. Each check records its execution
+mode and timing in the Candidate state and append-only release history.
 
 When reuse is unavailable, an operator may use the single
 `ApproveAccessBoundary` transition only after personally verifying owner login
