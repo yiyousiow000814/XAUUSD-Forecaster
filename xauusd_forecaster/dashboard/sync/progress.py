@@ -16,29 +16,32 @@ OPERATOR_RETRY_COMMANDS_PER_CYCLE = 10
 RUNTIME_STATE_ROOT_KEY = "_runtime_state_root"
 
 
-def _authorized_runtime_state_file(path: Path, config: dict) -> Path:
-    """Revalidate one mutable file at the filesystem sink boundary."""
+def _runtime_state_coordinates(path: Path, config: dict) -> tuple[str, str, str]:
+    """Normalize the authority and candidate before sink-local validation."""
     raw_root = str(config.get(RUNTIME_STATE_ROOT_KEY) or "").strip()
     if not raw_root:
         raise ValueError("dashboard sync runtime state root is required")
     authority = os.path.realpath(raw_root)
     candidate = os.path.realpath(os.fspath(path))
-    filename = os.path.basename(candidate)
+    return authority, candidate, os.path.basename(candidate)
+
+
+def _runtime_state_path_error(authority: str) -> ValueError:
+    return ValueError(
+        f"dashboard sync state path must be one JSON file under {authority}"
+    )
+
+
+def _filename_is_valid(filename: str) -> bool:
     allowed_characters = frozenset(
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
     )
-    if (
-        os.path.normcase(os.path.dirname(candidate))
-        != os.path.normcase(authority)
-        or not 6 <= len(filename) <= 128
-        or not filename[0].isalnum()
-        or not filename.endswith(".json")
-        or any(character not in allowed_characters for character in filename)
-    ):
-        raise ValueError(
-            f"dashboard sync state path must be one JSON file under {authority}"
-        )
-    return Path(candidate)
+    return (
+        6 <= len(filename) <= 128
+        and filename[0].isalnum()
+        and filename.endswith(".json")
+        and all(character in allowed_characters for character in filename)
+    )
 
 
 class AllTargetsRejected(RuntimeError):
@@ -90,7 +93,17 @@ def write_sync_status(
     resource_observations: list[dict] | None = None,
 ) -> None:
     """Atomically publish the synchronizer's actual operational heartbeat."""
-    path = _authorized_runtime_state_file(path, config)
+    authority, candidate, filename = _runtime_state_coordinates(path, config)
+    if (
+        not os.path.normcase(candidate).startswith(
+            os.path.normcase(authority + os.sep)
+        )
+        or os.path.normcase(os.path.dirname(candidate))
+        != os.path.normcase(authority)
+        or not _filename_is_valid(filename)
+    ):
+        raise _runtime_state_path_error(authority)
+    path = Path(candidate)
     existing: dict = {}
     if path.exists():
         try:
@@ -170,9 +183,19 @@ def _write_runtime_signal(payload: object, config: dict) -> None:
     revision = str(payload.get("main_revision") or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         return
-    target = _authorized_runtime_state_file(
+    authority, candidate, filename = _runtime_state_coordinates(
         Path(config["runtime_signal_file"]), config,
     )
+    if (
+        not os.path.normcase(candidate).startswith(
+            os.path.normcase(authority + os.sep)
+        )
+        or os.path.normcase(os.path.dirname(candidate))
+        != os.path.normcase(authority)
+        or not _filename_is_valid(filename)
+    ):
+        raise _runtime_state_path_error(authority)
+    target = Path(candidate)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(target.suffix + ".tmp")
     temporary.write_text(
@@ -190,7 +213,17 @@ def _write_runtime_signal(payload: object, config: dict) -> None:
 
 
 def _read_news_sync_state(path: Path, config: dict) -> dict:
-    path = _authorized_runtime_state_file(path, config)
+    authority, candidate, filename = _runtime_state_coordinates(path, config)
+    if (
+        not os.path.normcase(candidate).startswith(
+            os.path.normcase(authority + os.sep)
+        )
+        or os.path.normcase(os.path.dirname(candidate))
+        != os.path.normcase(authority)
+        or not _filename_is_valid(filename)
+    ):
+        raise _runtime_state_path_error(authority)
+    path = Path(candidate)
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
         return state if isinstance(state, dict) else {}
@@ -199,7 +232,17 @@ def _read_news_sync_state(path: Path, config: dict) -> dict:
 
 
 def _write_news_sync_state(path: Path, config: dict, state: dict) -> None:
-    path = _authorized_runtime_state_file(path, config)
+    authority, candidate, filename = _runtime_state_coordinates(path, config)
+    if (
+        not os.path.normcase(candidate).startswith(
+            os.path.normcase(authority + os.sep)
+        )
+        or os.path.normcase(os.path.dirname(candidate))
+        != os.path.normcase(authority)
+        or not _filename_is_valid(filename)
+    ):
+        raise _runtime_state_path_error(authority)
+    path = Path(candidate)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
