@@ -54,6 +54,7 @@ from xauusd_forecaster.dashboard.runtime_status import (
 from xauusd_forecaster.dashboard.news_source_health import (
     news_source_health as _news_source_health,
 )
+from xauusd_forecaster.dashboard.learning_resources import LearningSurfaceOwner
 from xauusd_forecaster.dashboard_read_models import (
     DashboardReadModelOwner,
     DashboardReadModelSnapshot,
@@ -152,7 +153,6 @@ from xauusd_forecaster.ai_provider_registry import (  # noqa: E402
     GEMINI_EMBEDDING_REQUESTS_PER_DAY_PER_ACCOUNT,
 )
 from xauusd_forecaster.model_limits import GEMMA_PROVIDER_LANES_PER_ACCOUNT  # noqa: E402
-from xauusd_forecaster.learning_curves import learning_curve_payload  # noqa: E402
 from xauusd_forecaster.news_evidence import (  # noqa: E402
     EVIDENCE_POLICY_VERSION, event_evidence_rows_from_connection,
     resolve_event_clock,
@@ -179,7 +179,6 @@ from xauusd_forecaster.news_impact import (  # noqa: E402
     impact_time_rule,
 )
 from xauusd_forecaster.storylines import STORYLINE_POLICY_VERSION, temporal_event_graph  # noqa: E402
-from xauusd_forecaster.execution_learning import execution_learning_status  # noqa: E402
 
 
 def _deployment_status(
@@ -228,43 +227,7 @@ def _deployment_provenance(generated_at: datetime, database_epoch: str | None) -
 
 DEPLOYMENT_PROVENANCE = _deployment_provenance(datetime.now(UTC), None)
 
-_LEARNING_REVISION_TABLES = (
-    "derived_outcomes",
-    "model_updates_v2",
-    "predictions_v2",
-    "prediction_scores_v2",
-    "execution_training_examples_v2",
-    "execution_model_updates_v2",
-    "execution_predictions_v2",
-    "execution_position_scores_v2",
-)
-_LEARNING_CACHE_LOCK = threading.Lock()
-_LEARNING_CACHE: dict[str, object] = {}
-
-
-def _learning_revision(connection: sqlite3.Connection) -> tuple[object, ...]:
-    database_row = connection.execute("PRAGMA database_list").fetchone()
-    database_identity = database_row[2] if database_row and database_row[2] else id(connection)
-    counts = tuple(
-        int(connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
-        for table in _LEARNING_REVISION_TABLES
-    )
-    return (database_identity, *counts)
-
-
-def _learning_surfaces(connection: sqlite3.Connection) -> tuple[dict, dict]:
-    """Rebuild learning surfaces only when append-only source counts change."""
-    revision = _learning_revision(connection)
-    with _LEARNING_CACHE_LOCK:
-        if _LEARNING_CACHE.get("revision") != revision:
-            _LEARNING_CACHE.update({
-                "revision": revision,
-                "learning": learning_curve_payload(connection),
-                "execution": execution_learning_status(
-                    SimpleNamespace(connection=connection)
-                ),
-            })
-        return _LEARNING_CACHE["learning"], _LEARNING_CACHE["execution"]
+_LEARNING_SURFACE_OWNER = LearningSurfaceOwner()
 
 
 NEWS_CATEGORY_LABELS = {
@@ -2045,7 +2008,7 @@ def _dashboard_payload(
             connection, tuple(sorted(FACTOR_COVERAGE_NEWS_SOURCES)),
         )
         if include_learning:
-            learning, execution_learning = _learning_surfaces(connection)
+            learning, execution_learning = _LEARNING_SURFACE_OWNER.surfaces(connection)
             counts["live_oos_model_groups"] = len({
                 str(row.get("model_identity") or "")
                 for row in learning.get("models", [])
