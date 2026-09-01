@@ -45,6 +45,7 @@ current rules merely because they discovered one.
 - [Daily Brief](contracts/DAILY_BRIEF.md)
 - [Operational health](contracts/OPERATIONAL_HEALTH.md)
 - [Live broadcast](contracts/LIVE_BROADCAST.md)
+- [Architecture rules](contracts/ARCHITECTURE_RULES.md)
 
 ### Specifications
 
@@ -75,6 +76,7 @@ current rules merely because they discovered one.
 - [Assistant architecture](design/ASSISTANT_ARCHITECTURE.md)
 - [Assistant implementation status](design/ASSISTANT_IMPLEMENTATION_STATUS.md)
 - [Shared live broadcast](design/LIVE_BROADCAST.md)
+- [System architecture](design/SYSTEM_ARCHITECTURE.md)
 
 ### Architecture decisions
 
@@ -100,6 +102,7 @@ current rules merely because they discovered one.
 ### Historical evidence
 
 - Audits: [test suite](audits/TEST_SUITE.md),
+  [current-main architecture 2026-09-01](audits/CURRENT_MAIN_ARCHITECTURE_2026_09_01.md),
   [Release Control progressive delivery 2026-08-26](audits/RELEASE_CONTROL_PROGRESSIVE_DELIVERY_2026_08_26.md),
   [Release Control install handoff 2026-08-26](audits/RELEASE_CONTROL_INSTALL_HANDOFF_2026_08_26.md),
   [release-control ownership 2026-08-20](audits/RELEASE_CONTROL_2026_08_20.md),
