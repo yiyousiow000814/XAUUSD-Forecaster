@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "RegisterAccessProviderInspection", "ReuseAccessQualification", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "ControlBundlePreflight", "PreflightRuntimeStateRoot", "MigrateRuntimeStateRoot")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "RetrySemantic", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "RegisterAccessProviderInspection", "ReuseAccessQualification", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "ControlBundlePreflight", "PreflightRuntimeStateRoot", "MigrateRuntimeStateRoot")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync", "broadcast")]
     [string]$ServiceKey = "",
@@ -8233,6 +8233,7 @@ function Invoke-AutomaticCandidateValidation {
                 worker_qualification = $cloudflare.worker_qualification
                 cpu_qualification_mode = $cloudflare.cpu_qualification_mode
                 directed_request_ledger = $cloudflare.directed_request_ledger
+                validation_run = [string]$cloudflare.validation_run
                 tested_at = [DateTimeOffset]::UtcNow.ToString("o")
             }
             Write-ReleaseControlState -State $state
@@ -8252,6 +8253,7 @@ function Invoke-AutomaticCandidateValidation {
                 worker_qualification = $cloudflare.worker_qualification
                 cpu_qualification_mode = $cloudflare.cpu_qualification_mode
                 directed_request_ledger = $cloudflare.directed_request_ledger
+                validation_run = [string]$cloudflare.validation_run
                 tested_at = [DateTimeOffset]::UtcNow.ToString("o")
             }
             Write-ReleaseControlState -State $state
@@ -8272,6 +8274,7 @@ function Invoke-AutomaticCandidateValidation {
             worker_qualification = $cloudflare.worker_qualification
             cpu_qualification_mode = $cloudflare.cpu_qualification_mode
             directed_request_ledger = $cloudflare.directed_request_ledger
+            validation_run = [string]$cloudflare.validation_run
             data_parity = $dataParity
             auth_inspection = $authInspection
             tested_at = [DateTimeOffset]::UtcNow.ToString("o")
@@ -8499,6 +8502,9 @@ function Retry-CandidateValidation {
         [string]$candidate.validation.windows -ne "PASSED") {
         throw "Only an exact retryable Candidate review can restart validation."
     }
+    if ($reason -eq "SEMANTIC_DATA_PARITY_REVIEW_REQUIRED") {
+        return Retry-CandidateSemanticValidation
+    }
     $priorTestedAt = [string]$candidate.validation.tested_at
     if ($reason -eq "WORKER_CPU_HEADROOM_REVIEW_REQUIRED") {
         if (-not $candidate.validation.validation_run -or
@@ -8583,6 +8589,123 @@ function Retry-CandidateValidation {
                     [string]$candidate.validation_key)
         }
     return Invoke-AutomaticCandidateValidation -Candidate $candidate
+}
+
+function Retry-CandidateSemanticValidation {
+    $state = Get-ReleaseControlState
+    if (-not $state -or -not $state.candidate) {
+        throw "No Candidate is available for semantic retry."
+    }
+    $candidate = $state.candidate
+    $prior = $candidate.validation
+    if ([string]$candidate.validation_state -ne "REVIEW_REQUIRED" -or
+        -not $prior -or
+        [string]$prior.reason -ne "SEMANTIC_DATA_PARITY_REVIEW_REQUIRED" -or
+        [string]$prior.key -cne [string]$candidate.validation_key -or
+        [string]$prior.repository -ne "PASSED" -or
+        [string]$prior.windows -ne "PASSED" -or
+        [string]$prior.cloudflare -ne "PASSED" -or
+        -not $prior.route_plan) {
+        throw "SEMANTIC_RETRY_EXACT_REVIEW_EVIDENCE_REQUIRED"
+    }
+    if (-not (Test-PreservedCandidateEvidenceAvailable -Candidate $candidate)) {
+        throw "SEMANTIC_RETRY_PRESERVED_EVIDENCE_UNAVAILABLE"
+    }
+    $hasCpuQualification = [bool](
+        $prior.worker_qualification -or
+        ($prior.cpu_evidence -and $prior.cpu_evidence -isnot [string])
+    )
+    if ($hasCpuQualification) {
+        if (-not $prior.worker_qualification -or -not $prior.cpu_evidence -or
+            -not [bool]$prior.cpu_evidence.passed) {
+            throw "SEMANTIC_RETRY_CPU_QUALIFICATION_INVALID"
+        }
+        if (-not $prior.directed_request_ledger) {
+            throw "SEMANTIC_RETRY_DIRECTED_LEDGER_INVALID"
+        }
+        $null = Assert-CandidateCpuQualificationReceipt `
+            -Candidate $candidate -Validation $prior
+    }
+    if ($prior.directed_request_ledger) {
+        $ledger = $prior.directed_request_ledger
+        if ([string]$ledger.evidence_class -ne "CONTROLLED_EXACT" -or
+            [int]$ledger.planned -le 0 -or
+            [int]$ledger.completed -ne [int]$ledger.planned -or
+            [int]$ledger.passed -ne [int]$ledger.planned) {
+            throw "SEMANTIC_RETRY_DIRECTED_LEDGER_INVALID"
+        }
+    }
+
+    $startedAt = [DateTimeOffset]::UtcNow
+    Write-ReleaseHistory -Event "CANDIDATE_SEMANTIC_RETRY_REQUESTED" `
+        -Release $candidate -Detail @{
+            validation_key = [string]$candidate.validation_key
+            prior_tested_at = [string]$prior.tested_at
+            validation_run = [string]$prior.validation_run
+            directed_replayed = $false
+            cpu_replayed = $false
+            windows_replayed = $false
+            repository_replayed = $false
+        }
+    $dataParity = Test-CandidateDataParity -Stable $state.stable `
+        -Candidate $candidate -RoutePlan $prior.route_plan
+    $authInspection = Get-CandidateAuthInspection -Candidate $candidate
+    $completedAt = [DateTimeOffset]::UtcNow
+    $semanticRetry = [pscustomobject]@{
+        started_at = $startedAt.ToString("o")
+        completed_at = $completedAt.ToString("o")
+        elapsed_ms = [long][Math]::Round(($completedAt - $startedAt).TotalMilliseconds)
+        execution_mode = "FRESH"
+        why_ran = "SEMANTIC_DATA_PARITY_REVIEW_REQUIRED"
+        prior_tested_at = [string]$prior.tested_at
+        preserved_validation_run = [string]$prior.validation_run
+    }
+    $next = [ordered]@{
+        key = [string]$candidate.validation_key
+        repository = "PASSED"
+        windows = "PASSED"
+        cloudflare = "PASSED"
+        route_plan = $prior.route_plan
+        routes = @($prior.routes)
+        cpu_evidence = $prior.cpu_evidence
+        worker_qualification = $prior.worker_qualification
+        cpu_qualification_mode = $prior.cpu_qualification_mode
+        directed_request_ledger = $prior.directed_request_ledger
+        validation_run = [string]$prior.validation_run
+        data_parity = $dataParity
+        auth_inspection = $authInspection
+        semantic_retry = $semanticRetry
+        tested_at = $completedAt.ToString("o")
+    }
+    $event = "CANDIDATE_SEMANTIC_RETRY_PASSED"
+    $passed = $false
+    if (-not [bool]$dataParity.passed) {
+        $candidate.validation_state = "REVIEW_REQUIRED"
+        $next.reason = "SEMANTIC_DATA_PARITY_REVIEW_REQUIRED"
+        $event = "CANDIDATE_SEMANTIC_RETRY_REVIEW_REQUIRED"
+    } elseif ((Test-CandidateAuthBoundaryChanged -RoutePlan $prior.route_plan) -and
+        [string]$authInspection.state -ne "UNAUTHENTICATED_BOUNDARY_CONFIRMED") {
+        $candidate.validation_state = "REVIEW_REQUIRED"
+        $next.reason = "ACCESS_BOUNDARY_REVIEW_REQUIRED"
+        $event = "CANDIDATE_ACCESS_BOUNDARY_REVIEW_REQUIRED"
+    } else {
+        $candidate.compatibility_state = "PASSED"
+        $candidate.validation_state = "PASSED"
+        $next.reason = "SEMANTIC_DATA_PARITY_PASSED"
+        $passed = $true
+    }
+    $candidate.validation = [pscustomobject]$next
+    $state.updated_at = $completedAt.ToString("o")
+    Write-ReleaseControlState -State $state
+    Write-ReleaseHistory -Event $event -Release $candidate -Detail @{
+        validation_key = [string]$candidate.validation_key
+        validation_run = [string]$prior.validation_run
+        elapsed_ms = [long]$semanticRetry.elapsed_ms
+        directed_replayed = $false
+        cpu_replayed = $false
+        result = [string]$candidate.validation.reason
+    }
+    return $passed
 }
 
 function Invoke-CandidateDiscovery {
@@ -14379,6 +14502,13 @@ function Invoke-ControlCenterOperationAction {
             try { return Retry-CandidateValidation }
             finally { Exit-ReleaseTransactionLock }
         }
+        "RetrySemantic" {
+            if (-not (Enter-ReleaseTransactionLock)) {
+                throw "Another release transaction is active."
+            }
+            try { return Retry-CandidateSemanticValidation }
+            finally { Exit-ReleaseTransactionLock }
+        }
         "ReconcileRelease" {
             if (-not (Enter-ReleaseTransactionLock)) {
                 throw "Another release transaction is active."
@@ -16071,7 +16201,7 @@ if ($ExpectedControlScriptPath -or $ExpectedControlRevision) {
 if ($OperationResultPath -and $Action -ne "ControlBundlePreflight") {
     $structuredActions = @(
         "Start", "Stop", "Restart", "ServiceStart", "ServiceStop",
-        "DiscoverCandidate", "RetryCandidateValidation", "ReconcileRelease", "PromoteCandidate",
+        "DiscoverCandidate", "RetryCandidateValidation", "RetrySemantic", "ReconcileRelease", "PromoteCandidate",
         "ReverseStable", "VerifyMigrationCompatibility", "ApproveCompatibility",
         "ApproveAccessBoundary"
     )
@@ -16132,6 +16262,10 @@ switch ($Action) {
         catch { Write-Error $_.Exception.Message; exit 1 }
     }
     "RetryCandidateValidation" {
+        try { $null = Invoke-ControlCenterOperationAction -Operation $Action; exit 0 }
+        catch { Write-Error $_.Exception.Message; exit 1 }
+    }
+    "RetrySemantic" {
         try { $null = Invoke-ControlCenterOperationAction -Operation $Action; exit 0 }
         catch { Write-Error $_.Exception.Message; exit 1 }
     }

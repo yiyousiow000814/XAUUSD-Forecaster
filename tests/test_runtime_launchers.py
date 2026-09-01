@@ -1523,6 +1523,36 @@ def _access_review_candidate(previous: str = "a" * 40, candidate: str = "b" * 40
     )
 
 
+def _semantic_review_candidate(
+    previous: str = "a" * 40, candidate: str = "b" * 40,
+) -> str:
+    return (
+        _authorized_candidate(previous, candidate)
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$candidate.validation_state='REVIEW_REQUIRED';"
+        "$candidate.compatibility_state='COORDINATED_STORAGE_MIGRATION_PASSED';"
+        "$candidate.validation=[pscustomobject]@{key=$candidate.validation_key;"
+        "repository='PASSED';windows='PASSED';cloudflare='PASSED';"
+        "reason='SEMANTIC_DATA_PARITY_REVIEW_REQUIRED';"
+        "route_plan=[pscustomobject]@{contract_routes=@()};"
+        "routes=@([pscustomobject]@{family='status';passed=$true});"
+        "validation_run='11111111-1111-4111-8111-111111111111';"
+        "worker_qualification=[pscustomobject]@{key=('d'*64);"
+        "candidate_worker_version=$candidate.worker_version_id;"
+        "candidate_git_sha=$candidate.git_sha};"
+        "cpu_evidence=[pscustomobject]@{passed=$true;qualification_key=('d'*64);"
+        "qualification_receipt_digest=('e'*64);p95_cpu_ms=4;p99_cpu_ms=5;max_cpu_ms=7};"
+        "cpu_qualification_mode='CPU_QUALIFICATION_FRESH';"
+        "directed_request_ledger=[pscustomobject]@{evidence_class='CONTROLLED_EXACT';"
+        "request_universe_digest=('f'*64);planned=12;completed=12;passed=12};"
+        "data_parity=[pscustomobject]@{passed=$false;state='REVIEW_REQUIRED'};"
+        "tested_at='2026-08-28T00:00:00Z'};"
+        "$candidate|Add-Member -Force migration_acceptance ([pscustomobject]@{"
+        "validation_key=$candidate.validation_key;receipt_digest='migration-kept'});"
+        "Write-ReleaseControlState $state;"
+    )
+
+
 def _write_coordinated_migration_files(tmp_path) -> None:
     target = tmp_path / "repository" / "web" / "drizzle"
     target.mkdir(parents=True, exist_ok=True)
@@ -6858,6 +6888,141 @@ def test_cpu_policy_key_movement_forces_fresh_cpu_evidence_and_preserves_migrati
     )
 
     assert result == "True,NEW|CPU_QUALIFICATION_POLICY_MOVED,receipt,True,True,True"
+
+
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_semantic_retry_preserves_exact_directed_cpu_and_windows_evidence(
+    tmp_path, powershell: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _semantic_review_candidate()
+        + "$script:semanticCalls=0;$script:cpuReceiptCalls=0;"
+        "function Test-PreservedCandidateEvidenceAvailable{return $true};"
+        "function Assert-CandidateCpuQualificationReceipt{param($Candidate,$Validation)"
+        "$script:cpuReceiptCalls++;[pscustomobject]@{receipt_digest=('e'*64)}};"
+        "function Test-CandidateDataParity{param($Stable,$Candidate,$RoutePlan)"
+        "$script:semanticCalls++;[pscustomobject]@{passed=$true;state='PASSED';marker='fresh'}};"
+        "function Get-CandidateAuthInspection{[pscustomobject]@{"
+        "state='UNAUTHENTICATED_BOUNDARY_CONFIRMED'}};"
+        "function Test-CandidateAuthBoundaryChanged{return $false};"
+        "function Invoke-AutomaticCandidateValidation{throw 'broad retry forbidden'};"
+        "$ok=Retry-CandidateValidation;$final=Get-ReleaseControlState;"
+        "$history=Get-Content $releaseHistoryPath -Raw;"
+        'Write-Output "$ok,$($final.candidate.validation_state),'
+        '$($final.candidate.validation.reason),$script:semanticCalls,$script:cpuReceiptCalls,'
+        '$($final.candidate.validation.validation_run),'
+        '$($final.candidate.validation.directed_request_ledger.completed),'
+        '$($final.candidate.validation.cpu_evidence.max_cpu_ms),'
+        '$($final.candidate.migration_acceptance.receipt_digest),'
+        '$($history.Contains(\'"directed_replayed":false\')),'
+        '$($history.Contains(\'"cpu_replayed":false\'))"',
+        powershell=powershell,
+    )
+    assert result == (
+        "True,PASSED,SEMANTIC_DATA_PARITY_PASSED,1,1,"
+        "11111111-1111-4111-8111-111111111111,12,7,migration-kept,True,True"
+    )
+
+
+def test_semantic_retry_remains_review_required_without_replaying_accepted_work(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _semantic_review_candidate()
+        + "function Test-PreservedCandidateEvidenceAvailable{return $true};"
+        "function Assert-CandidateCpuQualificationReceipt{[pscustomobject]@{"
+        "receipt_digest=('e'*64)}};"
+        "function Test-CandidateDataParity{[pscustomobject]@{passed=$false;"
+        "state='REVIEW_REQUIRED';reason='CANDIDATE_QUOTE_STALE'}};"
+        "function Get-CandidateAuthInspection{[pscustomobject]@{state='NOT_REQUIRED'}};"
+        "$ok=Retry-CandidateSemanticValidation;$final=Get-ReleaseControlState;"
+        'Write-Output "$ok,$($final.candidate.validation_state),'
+        '$($final.candidate.validation.reason),'
+        '$($final.candidate.validation.data_parity.reason),'
+        '$($final.candidate.validation.directed_request_ledger.completed)"',
+    )
+    assert result == (
+        "False,REVIEW_REQUIRED,SEMANTIC_DATA_PARITY_REVIEW_REQUIRED,"
+        "CANDIDATE_QUOTE_STALE,12"
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("$candidate.validation.key='wrong';", "SEMANTIC_RETRY_EXACT_REVIEW_EVIDENCE_REQUIRED"),
+        ("$candidate.validation.cpu_evidence.passed=$false;", "SEMANTIC_RETRY_CPU_QUALIFICATION_INVALID"),
+        ("$candidate.validation.directed_request_ledger=$null;", "SEMANTIC_RETRY_DIRECTED_LEDGER_INVALID"),
+        ("$candidate.validation.directed_request_ledger.completed=11;", "SEMANTIC_RETRY_DIRECTED_LEDGER_INVALID"),
+    ],
+)
+def test_semantic_retry_fails_closed_before_live_probe(
+    tmp_path, mutation: str, expected: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _semantic_review_candidate()
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        + mutation
+        + "Write-ReleaseControlState $state;$script:semanticCalls=0;"
+        "function Test-PreservedCandidateEvidenceAvailable{return $true};"
+        "function Assert-CandidateCpuQualificationReceipt{[pscustomobject]@{"
+        "receipt_digest=('e'*64)}};"
+        "function Test-CandidateDataParity{$script:semanticCalls++;throw 'must not run'};"
+        "$reason='';try{Retry-CandidateSemanticValidation|Out-Null}"
+        "catch{$reason=$_.Exception.Message};"
+        'Write-Output "$reason,$script:semanticCalls"',
+    )
+    assert result == f"{expected},0"
+
+
+def test_semantic_retry_preserves_access_boundary_review_after_parity_passes(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _semantic_review_candidate()
+        + "function Test-PreservedCandidateEvidenceAvailable{return $true};"
+        "function Assert-CandidateCpuQualificationReceipt{[pscustomobject]@{"
+        "receipt_digest=('e'*64)}};"
+        "function Test-CandidateDataParity{[pscustomobject]@{passed=$true;state='PASSED'}};"
+        "function Get-CandidateAuthInspection{[pscustomobject]@{"
+        "state='AUTH_BOUNDARY_NOT_TESTABLE'}};"
+        "function Test-CandidateAuthBoundaryChanged{return $true};"
+        "$ok=Retry-CandidateSemanticValidation;$final=Get-ReleaseControlState;"
+        'Write-Output "$ok,$($final.candidate.validation_state),'
+        '$($final.candidate.validation.reason),'
+        '$($final.candidate.validation.auth_inspection.state)"',
+    )
+    assert result == (
+        "False,REVIEW_REQUIRED,ACCESS_BOUNDARY_REVIEW_REQUIRED,"
+        "AUTH_BOUNDARY_NOT_TESTABLE"
+    )
+
+
+def test_semantic_retry_does_not_invent_cpu_requirement_for_non_worker_change(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _semantic_review_candidate()
+        + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
+        "$candidate.validation.worker_qualification=$null;"
+        "$candidate.validation.cpu_evidence='NOT_REQUIRED';"
+        "$candidate.validation.directed_request_ledger=$null;"
+        "Write-ReleaseControlState $state;"
+        "function Test-PreservedCandidateEvidenceAvailable{return $true};"
+        "function Assert-CandidateCpuQualificationReceipt{throw 'CPU must not be required'};"
+        "function Test-CandidateDataParity{[pscustomobject]@{passed=$true;state='PASSED'}};"
+        "function Get-CandidateAuthInspection{[pscustomobject]@{state='NOT_REQUIRED'}};"
+        "function Test-CandidateAuthBoundaryChanged{return $false};"
+        "$ok=Retry-CandidateSemanticValidation;$final=Get-ReleaseControlState;"
+        'Write-Output "$ok,$($final.candidate.validation.cpu_evidence),'
+        '$($final.candidate.validation_state)"',
+    )
+    assert result == "True,NOT_REQUIRED,PASSED"
 
 
 def test_explicit_review_retry_rejects_non_retryable_reason(tmp_path) -> None:
