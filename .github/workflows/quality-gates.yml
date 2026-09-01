@@ -14,28 +14,59 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  python-regression-suite:
-    name: Python regression suite
+  plan-python:
+    name: Select Python test shards
     runs-on: ubuntu-latest
-    # The platform-neutral suite now covers more than 1,300 contracts and can
-    # cross seven minutes on a cold hosted runner. Keep the per-test timeout
-    # below as the hang detector while leaving enough room for the complete gate.
-    timeout-minutes: 10
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: select
+        name: Select authoritative Python test shards
+        run: python scripts/select_python_test_shards.py --github-output "$GITHUB_OUTPUT"
+
+  python-shards:
+    name: Python ${{ matrix.id }}
+    needs: plan-python
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan-python.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install package and test runner
-        run: python -m pip install -e . pytest pytest-timeout
-      - name: Run the complete Python suite
-        # PowerShell/cscript behavior is covered by the bounded Windows runtime
-        # workflow; every platform-neutral test remains in this fast full gate.
-        run: >-
-          python -m pytest -q --timeout=30 --timeout-method=thread
-          --ignore=tests/test_runtime_launchers.py
-          --ignore=tests/test_control_plane_install.py
+      - name: Install authoritative Python test environment
+        run: python -m pip install -e . pytest==9.1.1 pytest-timeout==2.4.0
+      - name: Run bounded Python shard
+        run: python scripts/run_python_test_shard.py --shard "${{ matrix.id }}" --output output/python-tests
+      - name: Upload bounded Python diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: python-${{ matrix.id }}-result
+          path: output/python-tests/
+          if-no-files-found: warn
+          retention-days: 7
+
+  python-regression-suite:
+    name: Python regression suite
+    if: always()
+    needs: [plan-python, python-shards]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every Python shard
+        env:
+          PLAN_RESULT: ${{ needs.plan-python.result }}
+          SHARD_RESULT: ${{ needs.python-shards.result }}
+        run: |
+          test "$PLAN_RESULT" = success
+          test "$SHARD_RESULT" = success
 
   web-build-and-tests:
     name: Web build and tests
