@@ -445,6 +445,16 @@ full matrix restarts only when the qualification key changes or evidence is
 contaminated. The read-only provider token is never serialized into release
 state.
 
+Semantic parity is an independently retryable node. An exact
+`SEMANTIC_DATA_PARITY_REVIEW_REQUIRED` Candidate may run `RetrySemantic` only
+after the controller revalidates the persisted Candidate identity, controlled
+directed-request ledger, and CPU qualification receipt. That retry performs no
+repository, Windows, directed-request, or CPU work. It runs the current semantic
+comparison once, retains the accepted evidence identities in the next state, and
+then either passes, remains at semantic review, or advances to the unchanged
+Access boundary review. Missing, partial, or mismatched prerequisite evidence
+fails closed before the live semantic probe.
+
 PR #268 acceptance is retained only as labeled legacy manual evidence: 104
 samples, p50 2 ms, p95 4 ms, p99 4 ms, maximum 5 ms, and zero exceeded CPU,
 1102, or 5xx. Its source did not record a bootstrap timestamp; release control
