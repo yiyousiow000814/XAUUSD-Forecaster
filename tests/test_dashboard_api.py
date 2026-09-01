@@ -47,6 +47,7 @@ from xauusd_forecaster.dashboard.storage_status import (
     canonical_payload_digest,
     wal_checkpoint_status,
 )
+from xauusd_forecaster.dashboard.operator_bridge import operator_bridge_auth_error
 from xauusd_forecaster.maintenance import (
     BACKUP_RECEIPT_SCHEMA,
     BACKUP_RETENTION_SCHEMA,
@@ -2042,11 +2043,12 @@ def test_retry_operator_bridge_requires_both_loopback_and_dedicated_credential(
             },
         )) == 400
 
-        direct = type("DirectRequest", (), {
-            "client_address": ("192.0.2.8", 1234),
-            "headers": {"X-Aurum-Operator-Bridge-Token": bridge_token},
-        })()
-        assert module.Handler._operator_bridge_auth_error(direct)[0] == 403
+        assert operator_bridge_auth_error(
+            client_host="192.0.2.8",
+            browser_origin=False,
+            expected_token=bridge_token,
+            supplied_token=bridge_token,
+        )[0] == 403
         connection = sqlite3.connect(database)
         try:
             assert connection.execute(
@@ -2056,6 +2058,29 @@ def test_retry_operator_bridge_requires_both_loopback_and_dedicated_credential(
             connection.close()
     finally:
         server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+
+@pytest.mark.parametrize(
+    ("client_host", "browser_origin", "expected", "supplied", "status"),
+    (
+        ("127.0.0.1", False, "x" * 32, "x" * 32, None),
+        ("::1", False, "x" * 32, "x" * 32, None),
+        ("192.0.2.8", False, "x" * 32, "x" * 32, 403),
+        ("127.0.0.1", True, "x" * 32, "x" * 32, 403),
+        ("127.0.0.1", False, "", "", 503),
+        ("127.0.0.1", False, "x" * 32, "wrong", 401),
+    ),
+)
+def test_operator_bridge_auth_contract(
+    client_host, browser_origin, expected, supplied, status,
+) -> None:
+    result = operator_bridge_auth_error(
+        client_host=client_host,
+        browser_origin=browser_origin,
+        expected_token=expected,
+        supplied_token=supplied,
+    )
+    assert (result[0] if result else None) == status
 
 
 def test_dashboard_status_does_not_scan_live_database_integrity(
