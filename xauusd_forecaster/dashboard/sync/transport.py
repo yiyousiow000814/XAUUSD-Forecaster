@@ -13,10 +13,9 @@ from pathlib import Path
 
 from xauusd_forecaster.runtime_paths import logical_absolute_path
 
-from .progress import _write_runtime_signal
+from .progress import RUNTIME_STATE_ROOT_KEY, _write_runtime_signal
 
 
-RUNTIME_STATE_ROOT_KEY = "_runtime_state_root"
 DEFERRED_PROJECTION_REQUEST_FILE = "deferred-projection-sync-request.json"
 DEFERRED_PROJECTION_RECEIPT_FILE = "deferred-projection-sync-receipt.json"
 LOCAL_STATUS_TIMEOUT_SECONDS = 20

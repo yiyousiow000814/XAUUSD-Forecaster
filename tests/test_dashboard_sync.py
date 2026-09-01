@@ -1296,6 +1296,7 @@ def test_learning_history_is_durable_before_summary_and_retries_idempotently(
         "learning_state_file": str(tmp_path / "summary.json"),
         "learning_history_state_file": str(tmp_path / "history.json"),
     }
+    config[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
 
     module._sync_learning(payload, config)
 
@@ -1344,6 +1345,7 @@ def test_learning_history_state_drops_hashes_outside_current_source_universe(
         "token": "test",
         "learning_history_state_file": str(state_path),
     }
+    config[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
 
     module._sync_learning_history(payload, config)
 
@@ -1427,6 +1429,7 @@ def test_news_generation_stages_all_details_before_index_and_activation(
         "remote_ingest_url": "https://remote/api/ingest",
         "news_state_file": str(state_file), "token": "test",
     }
+    config[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
 
     module._sync_news({}, config)
     assert [body["action"] for _url, body in posted] == [
@@ -1462,6 +1465,7 @@ def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_pat
         "remote_ingest_url": "https://remote/api/ingest",
         "news_state_file": str(state_file), "token": "test",
     }
+    config[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
 
     with pytest.raises(TimeoutError, match="detail upload timed out"):
         module._sync_news({}, config)
@@ -1546,6 +1550,7 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
         "token": "test",
         "news_evidence_state_file": str(tmp_path / "evidence-state.json"),
     }
+    config[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
 
     module._sync_news_evidence({}, config)
     first_cycle_batches = [body for _url, body in posted if "items" in body]
@@ -1677,6 +1682,7 @@ def test_news_evidence_sync_drains_old_snapshot_before_admitting_replacement(
         "token": "test",
         "news_evidence_state_file": str(state_path),
     }
+    config[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
 
     module._sync_news_evidence({}, config)
 
@@ -1763,6 +1769,7 @@ def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_field
         "token": "test",
         "news_evidence_state_file": str(tmp_path / "evidence-state.json"),
     }
+    config[sync.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
 
     sync._sync_news_evidence({}, config)
     assert offsets[stable_snapshot] == 16
@@ -1885,6 +1892,7 @@ def test_news_evidence_activation_acknowledgement_replays_idempotently(
         "token": "test",
         "news_evidence_state_file": str(state_path),
     }
+    config[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
 
     with pytest.raises(TimeoutError, match="response was lost"):
         module._sync_news_evidence({}, config)
@@ -1930,6 +1938,7 @@ def test_optional_growing_resource_failure_does_not_block_heartbeat(
         "local_status_url": "http://local/api/status",
         "resource_schedule_state_file": str(tmp_path / "schedule.json"),
     }
+    target[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
     _schedule_only(module, tmp_path / "schedule.json", "news_evidence")
     monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
     posted = []
@@ -1994,6 +2003,7 @@ def test_growing_local_snapshot_failure_cannot_block_critical_heartbeat(
         "local_status_url": "http://local/api/status",
         "resource_schedule_state_file": str(tmp_path / "schedule.json"),
     }
+    target[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
     monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
     posted = []
     monkeypatch.setattr(
@@ -2036,6 +2046,7 @@ def test_sync_resource_budget_and_cadence_resume_from_durable_state(
         "local_status_url": "http://local/api/status",
         "resource_schedule_state_file": str(schedule),
     }
+    target[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
     monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
     monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k: Response())
     monkeypatch.setattr(module, "_post_json", lambda *_a, **_k: {})
@@ -2150,6 +2161,7 @@ def test_optional_failure_persists_backoff_without_same_cycle_retry(
         "local_status_url": "http://local/api/status",
         "resource_schedule_state_file": str(schedule),
     }
+    target[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
     monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
     monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k: Response())
     monkeypatch.setattr(module, "_post_json", lambda *_a, **_k: {})
@@ -2200,6 +2212,7 @@ def test_optional_resource_families_degrade_only_their_owner(
         "local_status_url": "http://local/api/status",
         "resource_schedule_state_file": str(tmp_path / "schedule.json"),
     }
+    target[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
     _schedule_only(module, tmp_path / "schedule.json", failed_resource)
     monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
     posted = []
@@ -2297,6 +2310,7 @@ def test_news_generation_resumes_remote_offsets_and_bounds_each_cycle(
         "remote_ingest_url": "https://remote/api/ingest", "token": "test",
         "news_state_file": str(tmp_path / "news-state.json"),
     }
+    config[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
 
     sync_options = (
         {} if source_mode == "local_api"
@@ -2344,6 +2358,7 @@ def test_news_generation_rejects_manifest_drift_without_abandoning(
 
     with pytest.raises(module.PayloadContractError, match="pinned news generation"):
         module._sync_news({}, {
+            module.RUNTIME_STATE_ROOT_KEY: str(tmp_path),
             "local_status_url": "http://local/api/status",
             "remote_ingest_url": "https://remote/api/ingest",
             "news_state_file": str(state_path), "token": "test",
@@ -2497,6 +2512,7 @@ def test_news_generation_preserves_foreign_staging_owner(
     monkeypatch.setattr(module, "_verify_news_projection_state", lambda *_a: {})
     with pytest.raises(module.RemoteInvariantViolation) as error:
         module._sync_news({}, {
+            module.RUNTIME_STATE_ROOT_KEY: str(tmp_path),
             "local_status_url": "http://local/api/status",
             "remote_ingest_url": "https://remote/api/ingest", "token": "test",
             "news_state_file": str(tmp_path / "news-state.json"),
@@ -2765,6 +2781,7 @@ def test_slow_heavy_resource_does_not_block_critical_heartbeat(
         "remote_ingest_url": "https://candidate.example/api/ingest",
         "resource_schedule_state_file": str(schedule_path),
     }
+    target[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
     monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
 
     class _Response:
@@ -2824,7 +2841,10 @@ def test_slow_heavy_resource_does_not_block_critical_heartbeat(
     monkeypatch.setattr(module, "_sync_audit", slow_audit)
 
     count = module.run_continuous_sync(
-        {"local_status_url": "http://local/api/status"},
+        {
+            module.RUNTIME_STATE_ROOT_KEY: str(tmp_path),
+            "local_status_url": "http://local/api/status",
+        },
         status_file=status_path,
         interval_seconds=30,
         stop_event=_LogicalStop(),
@@ -2916,6 +2936,7 @@ def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
         "remote_ingest_url": "https://worker.example/api/ingest",
         "resource_schedule_state_file": str(schedule_path),
     }
+    target[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
     revision = "b" * 40
     required_after = datetime(2026, 9, 1, 1, 2, 3, tzinfo=timezone.utc)
     request = {

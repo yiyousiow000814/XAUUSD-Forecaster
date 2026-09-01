@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import json
 import math
+import os
 import re
 import urllib.error
 from datetime import UTC, datetime
@@ -12,6 +13,32 @@ from pathlib import Path
 
 
 OPERATOR_RETRY_COMMANDS_PER_CYCLE = 10
+RUNTIME_STATE_ROOT_KEY = "_runtime_state_root"
+
+
+def _authorized_runtime_state_file(path: Path, config: dict) -> Path:
+    """Revalidate one mutable file at the filesystem sink boundary."""
+    raw_root = str(config.get(RUNTIME_STATE_ROOT_KEY) or "").strip()
+    if not raw_root:
+        raise ValueError("dashboard sync runtime state root is required")
+    authority = os.path.realpath(raw_root)
+    candidate = os.path.realpath(os.fspath(path))
+    filename = os.path.basename(candidate)
+    allowed_characters = frozenset(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+    )
+    if (
+        os.path.normcase(os.path.dirname(candidate))
+        != os.path.normcase(authority)
+        or not 6 <= len(filename) <= 128
+        or not filename[0].isalnum()
+        or not filename.endswith(".json")
+        or any(character not in allowed_characters for character in filename)
+    ):
+        raise ValueError(
+            f"dashboard sync state path must be one JSON file under {authority}"
+        )
+    return Path(candidate)
 
 
 class AllTargetsRejected(RuntimeError):
@@ -54,6 +81,7 @@ def operator_retry_bulk_sla_seconds(
 
 def write_sync_status(
     path: Path,
+    config: dict,
     *,
     success: bool,
     attempts_used: int | None = None,
@@ -62,6 +90,7 @@ def write_sync_status(
     resource_observations: list[dict] | None = None,
 ) -> None:
     """Atomically publish the synchronizer's actual operational heartbeat."""
+    path = _authorized_runtime_state_file(path, config)
     existing: dict = {}
     if path.exists():
         try:
@@ -141,7 +170,9 @@ def _write_runtime_signal(payload: object, config: dict) -> None:
     revision = str(payload.get("main_revision") or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         return
-    target = Path(config["runtime_signal_file"])
+    target = _authorized_runtime_state_file(
+        Path(config["runtime_signal_file"]), config,
+    )
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(target.suffix + ".tmp")
     temporary.write_text(
@@ -158,7 +189,8 @@ def _write_runtime_signal(payload: object, config: dict) -> None:
     temporary.replace(target)
 
 
-def _read_news_sync_state(path: Path) -> dict:
+def _read_news_sync_state(path: Path, config: dict) -> dict:
+    path = _authorized_runtime_state_file(path, config)
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
         return state if isinstance(state, dict) else {}
@@ -166,7 +198,8 @@ def _read_news_sync_state(path: Path) -> dict:
         return {}
 
 
-def _write_news_sync_state(path: Path, state: dict) -> None:
+def _write_news_sync_state(path: Path, config: dict, state: dict) -> None:
+    path = _authorized_runtime_state_file(path, config)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")

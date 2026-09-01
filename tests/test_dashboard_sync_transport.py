@@ -226,8 +226,46 @@ def test_ingest_response_records_valid_main_revision(tmp_path, monkeypatch) -> N
 
     result = module._post_json(
         "https://example.workers.dev/api/ingest", b"{}",
-        {"token": "token", "runtime_signal_file": str(signal)},
+        {
+            "token": "token",
+            module.RUNTIME_STATE_ROOT_KEY: str(tmp_path),
+            "runtime_signal_file": str(signal),
+        },
     )
 
     assert result["main_revision"] == revision
     assert json.loads(signal.read_text(encoding="utf-8"))["main_revision"] == revision
+
+
+def test_ingest_response_cannot_redirect_runtime_signal_outside_root(
+    tmp_path, monkeypatch,
+) -> None:
+    outside = tmp_path / "outside.json"
+
+    class Response:
+        status = 200
+
+        def read(self):
+            return json.dumps({"main_revision": "a" * 40}).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        module.urllib.request, "urlopen", lambda *_args, **_kwargs: Response()
+    )
+
+    with pytest.raises(ValueError, match="must be one JSON file under"):
+        module._post_json(
+            "https://example.workers.dev/api/ingest", b"{}",
+            {
+                "token": "token",
+                module.RUNTIME_STATE_ROOT_KEY: str(tmp_path / "runtime"),
+                "runtime_signal_file": str(outside),
+            },
+        )
+
+    assert not outside.exists()
