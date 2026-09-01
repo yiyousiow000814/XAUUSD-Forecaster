@@ -68,6 +68,11 @@ from xauusd_forecaster.runtime_paths import (
     logical_absolute_path,
     runtime_child_path,
 )
+from xauusd_forecaster.maintenance import (
+    BACKUP_RECEIPT_SCHEMA,
+    BACKUP_RETENTION_SCHEMA,
+    BACKUP_RETENTION_STATE,
+)
 UTC = timezone.utc
 PAYLOAD_SCHEMA_VERSION = "xauusd-dashboard-v4-event-episode"
 MARKET_DETAIL_CANDLE_LIMIT = 7 * 288
@@ -2465,6 +2470,113 @@ def _news_metrics(
     }
 
 
+def _canonical_payload_digest(payload: dict) -> str:
+    return hashlib.sha256(json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+
+
+def _backup_lifecycle_status(backup_root: Path) -> dict:
+    state_path = backup_root / BACKUP_RETENTION_STATE
+    result = {
+        "status": "UNKNOWN",
+        "last_success": None,
+        "age_seconds": None,
+        "last_verified_backup": None,
+        "managed_count": 0,
+        "managed_bytes": 0,
+        "unknown_count": 0,
+        "unknown_bytes": 0,
+        "managed_gib_days": 0.0,
+        "unknown_gib_days": 0.0,
+        "disk_gib_days": 0.0,
+        "policy": None,
+        "last_error": "Backup retention state is not available",
+    }
+    if state_path.is_file():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            digest = str(state.pop("receipt_digest", ""))
+            if not digest or digest != _canonical_payload_digest(state):
+                raise ValueError("retention receipt digest")
+            if state.get("schema") != BACKUP_RETENTION_SCHEMA:
+                raise ValueError("retention receipt schema")
+            retained = state.get("retained") or []
+            verified = []
+            for name in retained:
+                target = backup_root / str(name)
+                if (
+                    target.parent.resolve() != backup_root.resolve()
+                    or not re.fullmatch(
+                        r"forward-evidence-\d{8}\.sqlite3", target.name,
+                    )
+                    or not target.is_file()
+                ):
+                    raise ValueError("retained backup identity")
+                verified.append(target)
+            if len(verified) != int(state.get("managed_count") or 0):
+                raise ValueError("retained backup count")
+            result.update({
+                "status": "OK",
+                "last_success": state.get("completed_at"),
+                "age_seconds": max(0.0, (
+                    datetime.now(UTC)
+                    - datetime.fromisoformat(str(state["completed_at"]))
+                ).total_seconds()),
+                "last_verified_backup": (
+                    datetime.fromtimestamp(
+                        max(path.stat().st_mtime for path in verified), UTC,
+                    ).isoformat()
+                    if verified else None
+                ),
+                "managed_count": int(state.get("managed_count") or 0),
+                "managed_bytes": int(state.get("managed_bytes") or 0),
+                "unknown_count": int(state.get("unknown_count") or 0),
+                "unknown_bytes": int(state.get("unknown_bytes") or 0),
+                "managed_gib_days": float(
+                    state.get("managed_gib_days") or 0.0
+                ),
+                "unknown_gib_days": float(
+                    state.get("unknown_gib_days") or 0.0
+                ),
+                "disk_gib_days": float(state.get("disk_gib_days") or 0.0),
+                "policy": state.get("policy"),
+                "last_error": None,
+            })
+            return result
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            result["last_error"] = f"Invalid backup retention state: {exc}"
+            return result
+
+    verified = []
+    for receipt_path in backup_root.glob("forward-evidence-*.sqlite3.receipt.json"):
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            digest = str(receipt.pop("receipt_digest", ""))
+            if (
+                receipt.get("schema") != BACKUP_RECEIPT_SCHEMA
+                or not digest
+                or digest != _canonical_payload_digest(receipt)
+            ):
+                continue
+            target = Path(str((receipt.get("snapshot") or {}).get("path") or ""))
+            if target.parent.resolve() == backup_root.resolve() and target.is_file():
+                verified.append(target)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+    if verified:
+        result.update({
+            "status": "PENDING_RETENTION",
+            "last_verified_backup": datetime.fromtimestamp(
+                max(path.stat().st_mtime for path in verified), UTC,
+            ).isoformat(),
+            "managed_count": len(verified),
+            "managed_bytes": sum(path.stat().st_size for path in verified),
+            "last_error": "Backup retention inventory has not completed",
+        })
+    return result
+
+
 def _dashboard_payload(
     database: Path, *, clock=None, include_optional: bool = True,
     optional_resources: frozenset[str] | None = None,
@@ -3097,8 +3209,8 @@ def _dashboard_payload(
             ) or component_times["gemini_annotator"]
         except (OSError, json.JSONDecodeError):
             pass
-    backup_files = sorted((database.parent / "backups").glob("*.sqlite3"), key=lambda p: p.stat().st_mtime)
-    backup_time = datetime.fromtimestamp(backup_files[-1].stat().st_mtime, UTC).isoformat() if backup_files else None
+    backup_lifecycle = _backup_lifecycle_status(database.parent / "backups")
+    backup_time = backup_lifecycle["last_verified_backup"]
     component_times["sites_synchronizer"] = sync_time
     component_times["sqlite_backup"] = backup_time
     backup_integrity_component = component(
@@ -3241,6 +3353,7 @@ def _dashboard_payload(
         # Daily online backups are published only after the complete SQLite
         # integrity check succeeds. Reuse that durable proof.
         "integrity_check": backup_integrity_component,
+        "backup_retention": backup_lifecycle,
     }
     if market_session in {"CLOSED", "WEEKLY_CLOSED"}:
         for component_name in (

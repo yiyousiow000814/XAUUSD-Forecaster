@@ -35,6 +35,7 @@ current rules merely because they discovered one.
 - [News projection](contracts/NEWS_PROJECTION.md)
 - [Evidence lanes](contracts/EVIDENCE_LANES.md)
 - [Hosting boundaries](contracts/HOSTING_BOUNDARIES.md)
+- [Local storage lifecycle](contracts/LOCAL_STORAGE_LIFECYCLE.md)
 - [Safety composition](contracts/SAFETY_COMPOSITION.md)
 - [Release control](contracts/RELEASE_CONTROL.md)
 - [Preview isolation](contracts/PREVIEW_ISOLATION.md)
