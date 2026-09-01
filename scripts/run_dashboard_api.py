@@ -11,7 +11,6 @@ import json
 import os
 import re
 import sqlite3
-import subprocess
 import sys
 import threading
 import time
@@ -55,6 +54,9 @@ from xauusd_forecaster.dashboard.news_source_health import (
     news_source_health as _news_source_health,
 )
 from xauusd_forecaster.dashboard.learning_resources import LearningSurfaceOwner
+from xauusd_forecaster.dashboard.deployment_provenance import (
+    DeploymentProvenanceOwner,
+)
 from xauusd_forecaster.dashboard_read_models import (
     DashboardReadModelOwner,
     DashboardReadModelSnapshot,
@@ -181,51 +183,14 @@ from xauusd_forecaster.news_impact import (  # noqa: E402
 from xauusd_forecaster.storylines import STORYLINE_POLICY_VERSION, temporal_event_graph  # noqa: E402
 
 
-def _deployment_status(
-    runtime_sha: str | None, expected_sha: str | None, module_dirty: bool,
-) -> str:
-    """Keep unpublished local edits distinct from an actual deployed SHA drift."""
-    if not runtime_sha or not expected_sha:
-        return "PROVENANCE_UNKNOWN"
-    if runtime_sha != expected_sha:
-        return "DEPLOYMENT_DRIFT"
-    if module_dirty:
-        return "LOCAL_CHANGES"
-    return "MATCHED"
-
-
-def _deployment_provenance(generated_at: datetime, database_epoch: str | None) -> dict:
-    """Expose code/data identity so a stale Sites mirror cannot look current."""
-    # Git discovers the repository from the module directory in both the old
-    # nested checkout and the current standalone checkout. A fixed parent
-    # depth breaks as soon as the project is moved.
-    repo = MODULE_ROOT
-    def git(*args: str) -> str | None:
-        try:
-            result = subprocess.run(
-                ("git", *args), cwd=repo, capture_output=True, text=True,
-                timeout=5, check=True,
-            )
-            return result.stdout.strip() or None
-        except (OSError, subprocess.SubprocessError):
-            return None
-    runtime_sha = git("rev-parse", "HEAD")
-    upstream = git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
-    expected_sha = git("rev-parse", upstream or "origin/main")
-    module_dirty = bool(git("status", "--porcelain", "--", "."))
-    return {
-        "runtime_git_sha": runtime_sha,
-        "expected_git_sha": expected_sha,
-        "runtime_dirty": module_dirty,
-        "status": _deployment_status(runtime_sha, expected_sha, module_dirty),
-        "storyline_policy_version": STORYLINE_POLICY_VERSION,
-        "payload_schema_version": PAYLOAD_SCHEMA_VERSION,
-        "payload_generated_at": generated_at.isoformat(),
-        "source_database_epoch": database_epoch,
-    }
-
-
-DEPLOYMENT_PROVENANCE = _deployment_provenance(datetime.now(UTC), None)
+_DEPLOYMENT_PROVENANCE_OWNER = DeploymentProvenanceOwner(
+    repo=MODULE_ROOT,
+    storyline_policy_version=STORYLINE_POLICY_VERSION,
+    payload_schema_version=PAYLOAD_SCHEMA_VERSION,
+)
+DEPLOYMENT_PROVENANCE = _DEPLOYMENT_PROVENANCE_OWNER.provenance(
+    datetime.now(UTC), None,
+)
 
 _LEARNING_SURFACE_OWNER = LearningSurfaceOwner()
 

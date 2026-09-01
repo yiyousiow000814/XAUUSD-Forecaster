@@ -38,6 +38,10 @@ from xauusd_forecaster.dashboard.learning_resources import (
     LEARNING_REVISION_TABLES,
     LearningSurfaceOwner,
 )
+from xauusd_forecaster.dashboard.deployment_provenance import (
+    DeploymentProvenanceOwner,
+    deployment_status,
+)
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
 from xauusd_forecaster.news_scheduler import (
     authorize_repairable_annotation_failures,
@@ -271,12 +275,10 @@ def test_news_collector_uses_process_heartbeat_with_bounded_grace() -> None:
 
 
 def test_deployment_status_does_not_mislabel_local_edits_as_remote_drift() -> None:
-    module = _dashboard_module()
-
-    assert module._deployment_status("same", "same", False) == "MATCHED"
-    assert module._deployment_status("same", "same", True) == "LOCAL_CHANGES"
-    assert module._deployment_status("local", "remote", False) == "DEPLOYMENT_DRIFT"
-    assert module._deployment_status(None, "remote", False) == "PROVENANCE_UNKNOWN"
+    assert deployment_status("same", "same", False) == "MATCHED"
+    assert deployment_status("same", "same", True) == "LOCAL_CHANGES"
+    assert deployment_status("local", "remote", False) == "DEPLOYMENT_DRIFT"
+    assert deployment_status(None, "remote", False) == "PROVENANCE_UNKNOWN"
 
 
 def test_dashboard_reports_broker_close_and_reopen_time(tmp_path) -> None:
@@ -1016,35 +1018,39 @@ def test_news_evidence_display_reconciles_event_identity_handover() -> None:
 
 
 def test_deployment_provenance_discovers_git_from_standalone_module_root(
-    monkeypatch,
     tmp_path: Path,
 ) -> None:
-    module = _dashboard_module()
     calls: list[Path] = []
+    native_options: list[dict] = []
 
-    def fake_run(args, *, cwd, **_kwargs):
+    def fake_run(args, *, cwd, **kwargs):
         calls.append(Path(cwd))
+        native_options.append(kwargs)
         command = tuple(args[1:])
         outputs = {
             ("rev-parse", "HEAD"): "abc123\n",
             ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"): "origin/main\n",
             ("rev-parse", "origin/main"): "abc123\n",
-            ("status", "--porcelain", "--", "."): "",
+            ("status", "--porcelain", "--", "."): "?? 资料.txt\n",
         }
         return type("Result", (), {"stdout": outputs[command]})()
 
-    monkeypatch.setattr(module, "MODULE_ROOT", tmp_path)
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
-    provenance = module._deployment_provenance(datetime.now(UTC), None)
+    owner = DeploymentProvenanceOwner(
+        repo=tmp_path,
+        storyline_policy_version="storyline-test",
+        payload_schema_version="payload-test",
+        runner=fake_run,
+    )
+    provenance = owner.provenance(datetime.now(UTC), None)
 
-    assert provenance["status"] == "MATCHED"
+    assert provenance["status"] == "LOCAL_CHANGES"
     assert provenance["runtime_git_sha"] == "abc123"
     assert calls and set(calls) == {tmp_path}
+    assert all(options["encoding"] == "utf-8" for options in native_options)
+    assert all(options["errors"] == "strict" for options in native_options)
 
 
-def test_detached_runtime_compares_against_origin_main(tmp_path, monkeypatch) -> None:
-    module = _dashboard_module()
-
+def test_detached_runtime_compares_against_origin_main(tmp_path) -> None:
     def fake_run(args, *, cwd, **_kwargs):
         command = tuple(args[1:])
         outputs = {
@@ -1055,13 +1061,35 @@ def test_detached_runtime_compares_against_origin_main(tmp_path, monkeypatch) ->
         }
         return type("Result", (), {"stdout": outputs[command]})()
 
-    monkeypatch.setattr(module, "MODULE_ROOT", tmp_path)
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
-
-    provenance = module._deployment_provenance(datetime.now(UTC), None)
+    owner = DeploymentProvenanceOwner(
+        repo=tmp_path,
+        storyline_policy_version="storyline-test",
+        payload_schema_version="payload-test",
+        runner=fake_run,
+    )
+    provenance = owner.provenance(datetime.now(UTC), None)
 
     assert provenance["expected_git_sha"] == "abc123"
     assert provenance["status"] == "MATCHED"
+
+
+def test_deployment_provenance_fails_closed_on_native_decode_error(tmp_path) -> None:
+    def invalid_utf8(*_args, **_kwargs):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    owner = DeploymentProvenanceOwner(
+        repo=tmp_path,
+        storyline_policy_version="storyline-test",
+        payload_schema_version="payload-test",
+        runner=invalid_utf8,
+    )
+
+    provenance = owner.provenance(datetime.now(UTC), None)
+
+    assert provenance["runtime_git_sha"] is None
+    assert provenance["expected_git_sha"] is None
+    assert provenance["runtime_dirty"] is False
+    assert provenance["status"] == "PROVENANCE_UNKNOWN"
 
 
 def _basic_annotation_payload(
