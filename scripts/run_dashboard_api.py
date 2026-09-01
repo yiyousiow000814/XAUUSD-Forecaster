@@ -43,6 +43,14 @@ from xauusd_forecaster.dashboard.market_resources import (
     _market_history_page,
     _recent_market_chart,
 )
+from xauusd_forecaster.dashboard.runtime_status import (
+    broker_market_session as _broker_market_session,
+    latest_decision_created_at as _latest_decision_created_at,
+    latest_quote_received as _latest_quote_received,
+    market_session_observed_at as _market_session_observed_at,
+    market_session_status as _market_session_status,
+    runtime_heartbeat as _runtime_heartbeat,
+)
 from xauusd_forecaster.dashboard_read_models import (
     DashboardReadModelOwner,
     DashboardReadModelSnapshot,
@@ -163,7 +171,6 @@ from xauusd_forecaster.news_pipeline_health import (  # noqa: E402
 )
 from xauusd_forecaster.source_polling import source_poll_recovery_state  # noqa: E402
 from xauusd_forecaster.production_shape import production_contract_snapshot  # noqa: E402
-from xauusd_forecaster.market_session import expected_weekly_closure  # noqa: E402
 from xauusd_forecaster.operational_health import (  # noqa: E402
     extend_with_component_alerts,
     scheduler_health_snapshot,
@@ -426,115 +433,6 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
             gdelt["health"] = "FALLBACK_ACTIVE"
             gdelt["latest_status"] = "RATE_LIMITED"
     return rows
-
-
-def _latest_quote_received(database: Path) -> str | None:
-    sources = sorted((database.parent / "quotes").glob("*.jsonl"))
-    if not sources:
-        return None
-    with sources[-1].open("rb") as handle:
-        handle.seek(0, 2)
-        size = handle.tell()
-        handle.seek(max(0, size - 65_536))
-        lines = handle.read().splitlines()
-    for line in reversed(lines):
-        try:
-            return str(json.loads(line)["received_time"]).replace("Z", "+00:00")
-        except (KeyError, ValueError, json.JSONDecodeError):
-            continue
-    return None
-
-
-def _latest_decision_created_at(
-    database: Path, snapshot_connection: sqlite3.Connection | None = None,
-) -> str | None:
-    """Read cadence from the caller's snapshot when one owns the build."""
-    owns_connection = snapshot_connection is None
-    connection = snapshot_connection or sqlite3.connect(
-        f"file:{database}?mode=ro", uri=True, timeout=5,
-    )
-    try:
-        return connection.execute(
-            """SELECT activity_time FROM dashboard_latest_activity_v1
-               WHERE activity_name='decision_events'"""
-        ).fetchone()[0]
-    finally:
-        if owns_connection:
-            connection.close()
-
-
-def _runtime_heartbeat(path: Path, *, service: str) -> dict[str, object]:
-    """Read one supervised loop heartbeat without treating output as liveness."""
-    if not path.exists():
-        return {}
-    try:
-        item = json.loads(path.read_text(encoding="utf-8-sig"))
-        if not isinstance(item, dict):
-            return {}
-        if item.get("service") != service:
-            return {}
-        return item
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
-        return {}
-
-
-def _broker_market_session(database: Path, now: datetime) -> dict | None:
-    path = database.parent / "quotes" / "market-session.json"
-    if not path.exists():
-        return None
-    try:
-        item = json.loads(path.read_text(encoding="utf-8"))
-        if item.get("schema") != "xauusd.forward.market-session.v1":
-            return None
-        if str(item.get("symbol", "")).casefold() != "xauusd":
-            return None
-        observed_at = datetime.fromisoformat(
-            str(item["observed_at"]).replace("Z", "+00:00")
-        )
-        age = (now - observed_at).total_seconds()
-        if age < -5 or age > 20:
-            return None
-        session = {
-            "is_open": bool(item["is_open"]),
-            "observed_at": observed_at.isoformat(),
-            "next_open_time": item.get("next_open_time"),
-            "next_close_time": item.get("next_close_time"),
-        }
-        for field in ("opened_at", "first_quote_after_open_at"):
-            if item.get(field) is not None:
-                session[field] = item[field]
-        return session
-    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
-        return None
-
-
-def _market_session_status(
-    broker_session: dict | None,
-    *,
-    online: bool,
-    now: datetime,
-) -> str:
-    """Classify expected weekend silence without weakening open-market gates."""
-    if broker_session is not None:
-        if not broker_session["is_open"]:
-            return "CLOSED"
-        return "OPEN" if online else "DATA_UNAVAILABLE"
-    if not online and expected_weekly_closure(now):
-        return "WEEKLY_CLOSED"
-    return "DATA_UNAVAILABLE"
-
-
-def _market_session_observed_at(
-    broker_session: dict | None,
-    *,
-    market_session: str,
-    now: datetime,
-) -> str | None:
-    if broker_session is not None:
-        return str(broker_session["observed_at"])
-    if market_session == "WEEKLY_CLOSED":
-        return now.isoformat()
-    return None
 
 
 NEWS_CATEGORY_LABELS = {
