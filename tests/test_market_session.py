@@ -187,6 +187,105 @@ def test_collector_does_not_append_prediction_during_broker_close(tmp_path) -> N
     assert ledger.connection.execute("SELECT count(*) FROM decision_events").fetchone()[0] == 0
 
 
+def test_collector_arithmetically_settles_a_multi_year_unobservable_gap(
+    monkeypatch,
+) -> None:
+    boundary = datetime(2026, 8, 14, 10, 20, tzinfo=UTC)
+    start = boundary - timedelta(days=365 * 5)
+    detailed_checks: list[datetime] = []
+
+    class Provider:
+        def observations(self, _boundary):
+            return []
+
+        def market_session(self, collected_at):
+            return broker_session(collected_at, time_till_close=timedelta(hours=2))
+
+    def recording_skip_reason(*args, **kwargs):
+        detailed_checks.append(args[0])
+        return skipped_grid_reason(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "scripts.run_forward_collector.skipped_grid_reason", recording_skip_reason,
+    )
+    ledger = type("Ledger", (), {"forward_epoch": start})()
+    engine = type(
+        "Engine",
+        (),
+        {"append_clock_event": lambda *_args: (_ for _ in ()).throw(AssertionError())},
+    )()
+
+    last_decision, appended, skipped = append_due_grid_events(
+        ledger, engine, Provider(), start, boundary, boundary, [],
+    )
+
+    assert last_decision == boundary
+    assert appended == []
+    assert skipped == {
+        "MISSED_GRID_WITHOUT_POINT_IN_TIME_QUOTE": 525_597,
+        "CURRENT_GRID_WITHOUT_FRESH_QUOTE": 3,
+    }
+    assert len(detailed_checks) == 13
+    assert detailed_checks[0] == boundary - timedelta(minutes=60)
+    assert detailed_checks[-1] == boundary
+
+
+def test_collector_keeps_quote_backed_work_at_the_observation_window_edge() -> None:
+    boundary = datetime(2026, 8, 14, 10, 20, tzinfo=UTC)
+    decision = boundary - timedelta(minutes=60)
+    start = boundary - timedelta(days=365)
+    quote = MarketObservation(
+        decision - timedelta(seconds=2), decision - timedelta(seconds=1), 4300, 4300.1,
+    )
+    appended_times: list[datetime] = []
+
+    class Provider:
+        def observations(self, _boundary):
+            return [quote]
+
+        def market_session(self, collected_at):
+            return broker_session(collected_at, time_till_close=timedelta(hours=2))
+
+    class Engine:
+        def append_clock_event(self, decision_time, _collected_at, _news):
+            appended_times.append(decision_time)
+            return "snapshot", "decision"
+
+    ledger = type("Ledger", (), {"forward_epoch": start})()
+    last_decision, appended, skipped = append_due_grid_events(
+        ledger, Engine(), Provider(), start, boundary, boundary, [],
+    )
+
+    assert last_decision == boundary
+    assert appended_times == [decision]
+    assert appended == [(decision, "snapshot", "decision")]
+    assert skipped == {
+        "MISSED_GRID_WITHOUT_POINT_IN_TIME_QUOTE": 105_116,
+        "CURRENT_GRID_WITHOUT_FRESH_QUOTE": 3,
+    }
+
+
+def test_collector_aggregates_a_multi_year_closed_market_gap() -> None:
+    boundary = datetime(2026, 8, 14, 10, 20, tzinfo=UTC)
+    start = boundary - timedelta(days=365 * 2)
+
+    class Provider:
+        def observations(self, _boundary):
+            return []
+
+        def market_session(self, collected_at):
+            return broker_session(collected_at, is_open=False)
+
+    ledger = type("Ledger", (), {"forward_epoch": start})()
+    last_decision, appended, skipped = append_due_grid_events(
+        ledger, object(), Provider(), start, boundary, boundary, [],
+    )
+
+    assert last_decision == boundary
+    assert appended == []
+    assert skipped == {"BROKER_MARKET_CLOSED": 210_240}
+
+
 def test_collector_takes_decision_time_after_blocking_maintenance() -> None:
     fresh = datetime(2026, 8, 14, 10, 20, 10, tzinfo=UTC)
     observed: dict[str, datetime] = {}
