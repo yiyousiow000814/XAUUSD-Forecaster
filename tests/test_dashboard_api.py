@@ -4155,6 +4155,50 @@ def test_market_history_pages_are_complete_and_cursor_safe(tmp_path) -> None:
     assert third["next_cursor"] == times[-1]
 
 
+def test_market_history_cursor_skips_unrelated_retained_partitions(
+    tmp_path, monkeypatch,
+) -> None:
+    module = _dashboard_module()
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=datetime(2026, 8, 31, tzinfo=UTC))
+    quote_dir = tmp_path / "quotes"
+    quote_dir.mkdir()
+    start = datetime(2026, 8, 1, tzinfo=UTC)
+    for day in range(31):
+        instant = start + timedelta(days=day)
+        (quote_dir / f"xauusd-quotes-{instant:%Y%m%d}.jsonl").write_text(
+            json.dumps({
+                "received_time": instant.isoformat(),
+                "bid": 3400 + day, "ask": 3400.2 + day,
+            }) + "\n",
+            encoding="utf-8",
+        )
+    opened = []
+    original = module._quote_file_candles
+
+    def tracked(source):
+        opened.append(source.name)
+        return original(source)
+
+    monkeypatch.setattr(module, "_quote_file_candles", tracked)
+    page = module._market_history_page(
+        database, ledger.connection,
+        (start + timedelta(days=29, hours=23)).isoformat(), 500,
+    )
+
+    assert [row["time"] for row in page["candles"]] == [
+        (start + timedelta(days=30)).isoformat()
+    ]
+    assert set(opened) == {
+        "xauusd-quotes-20260801.jsonl",
+        "xauusd-quotes-20260830.jsonl",
+        "xauusd-quotes-20260831.jsonl",
+    }
+    assert page["history_start"] == start.isoformat()
+    assert page["history_end"] == (start + timedelta(days=30)).isoformat()
+    ledger.close()
+
+
 def test_learning_surfaces_rebuild_only_when_source_counts_change(monkeypatch) -> None:
     module = _dashboard_module()
     connection = sqlite3.connect(":memory:")
