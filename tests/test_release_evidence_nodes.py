@@ -18,6 +18,8 @@ def _ps_literal(value: Path | str) -> str:
 
 
 def _run_module(tmp_path: Path, shell: str, body: str) -> str:
+    if shutil.which(shell) is None:
+        pytest.skip(f"{shell} is required for this Windows release evidence contract")
     probe = tmp_path / f"probe-{Path(shell).stem}.ps1"
     probe.write_text(
         "$ErrorActionPreference='Stop'\n"
