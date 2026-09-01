@@ -31,6 +31,7 @@ from xauusd_forecaster.dashboard_read_models import (
 )
 from xauusd_forecaster.dashboard_summaries import (
     DASHBOARD_COUNT_TABLES,
+    dashboard_news_source_summary,
     install_dashboard_summary_schema,
 )
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
@@ -2016,7 +2017,7 @@ def test_critical_summary_reads_stay_fixed_as_append_only_history_grows(
 
     counts = module.dashboard_table_counts(ledger.connection)
     articles = module.dashboard_distinct_article_count(ledger.connection)
-    source = module.dashboard_news_source_summary(ledger.connection, ("fixture",))
+    source = dashboard_news_source_summary(ledger.connection, ("fixture",))
 
     assert counts["news_revisions"] == len(rows)
     assert articles == len(rows)
