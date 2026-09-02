@@ -158,13 +158,37 @@ owner, behavior-affecting key, exact source identity, dependency receipt digests
 state, start and completion time, elapsed time, and whether the work was fresh,
 reused, or renewed. Reuse and renewal must link the prior receipt; invalidation
 must state the changed behavior input. Receipts are stored beneath the mutable
-RuntimeRoot, keyed by a digest of the exact validation key, while a small mutable
-index selects the current immutable receipt for each node. The initial
-foundation mirrors artifact/provenance evidence without replacing the existing
-promotion authority. Promotion authority moves node by node only after its
-producer, invalidation, and retry contracts have production-shaped coverage;
-the aggregate Candidate validation object remains authoritative during that
-handover.
+RuntimeRoot, keyed by a digest of the exact validation key, while small bounded
+current and behavior-key indexes select immutable receipts.
+
+Every one of the fixed fifteen nodes has exactly one producer adapter and one or
+more named consumers. The Evidence Authority owns behavior-key construction,
+dependency resolution, bounded lookup, reuse, renewal, invalidation, the
+waterfall, and the qualification projection. It does not own provider transport,
+process supervision, UI, storage mutation, traffic, or transaction execution.
+The node waterfall is the Candidate and Promote authority. The aggregate
+Candidate validation object is a compatibility projection for an older
+controller and presentation only.
+
+Before transaction creation, action-time leases for migration ownership, Access
+provider state, zero-percent Candidate placement, and the exact rollback target
+are refreshed and the complete prerequisite waterfall is revalidated.
+`promote_attempt` freezes the exact target, transaction ID, and every direct
+dependency receipt digest. Observe consumes that immutable attempt identity and
+appends its first terminal result; a later attempt cannot replace the first
+terminal receipt. Stable is committed only after a PASSED Observe receipt.
+Missing producers, stale leases, moved dependency digests, behavior-key
+mismatches, and malformed or tampered receipts all fail closed.
+
+Change-family planning is deterministic and checked by
+`scripts/release-evidence-change-ownership.json`. Unknown or cross-family
+changes select the complete safe set. An unchanged node is reused only through
+an exact behavior-key lookup; `NOT_REQUIRED` is itself an explicit PASSED
+qualification and never a missing receipt. Free-plan qualification recomputes
+the bounded daily workload from immutable bundle/config, SQL, per-producer
+workload and cadence, data-shape, and versioned provider-limit inputs. Missing,
+unbounded, inconsistent, or over-limit inputs are BLOCKED rather than inferred
+to pass from current account usage.
 
 Dependency direction is behavior-specific rather than a blanket Git edge.
 Worker CPU depends on directed Worker evidence, not Windows qualification;

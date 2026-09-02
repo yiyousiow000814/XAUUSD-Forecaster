@@ -1,0 +1,15 @@
+{
+  "schema_version": "release-evidence-shadow-parity-v1",
+  "cases": [
+    {"id":"sanitized-current-passed","origin":"sanitized-current-state","legacy_state":"PASSED","legacy_promotable":true,"dag_fixture":"COMPLETE","dag_promotable":true},
+    {"id":"historical-failed","origin":"historical-candidate","legacy_state":"FAILED","legacy_promotable":false,"dag_fixture":"MISSING","dag_promotable":false},
+    {"id":"historical-review-required","origin":"historical-candidate","legacy_state":"REVIEW_REQUIRED","legacy_promotable":false,"dag_fixture":"MISSING","dag_promotable":false},
+    {"id":"historical-access-pending","origin":"historical-candidate","legacy_state":"REVIEW_REQUIRED","legacy_promotable":false,"dag_fixture":"MISSING_ACCESS","dag_promotable":false},
+    {"id":"historical-migration-required","origin":"historical-candidate","legacy_state":"REVIEW_REQUIRED","legacy_promotable":false,"dag_fixture":"MISSING_MIGRATION","dag_promotable":false},
+    {"id":"historical-cpu-pending","origin":"historical-candidate","legacy_state":"TESTING","legacy_promotable":false,"dag_fixture":"MISSING_CPU","dag_promotable":false},
+    {"id":"provider-unavailable","origin":"sanitized-current-state","legacy_state":"CHECKS_PENDING","legacy_promotable":false,"dag_fixture":"MISSING_PLACEMENT","dag_promotable":false},
+    {"id":"superseded","origin":"historical-candidate","legacy_state":"REBASE_REQUIRED","legacy_promotable":false,"dag_fixture":"MISSING","dag_promotable":false},
+    {"id":"malformed-tampered","origin":"historical-candidate","legacy_state":"FAILED","legacy_promotable":false,"dag_fixture":"TAMPERED","dag_promotable":false},
+    {"id":"restart-missing-producer","origin":"restart-recovery","legacy_state":"PASSED","legacy_promotable":true,"dag_fixture":"MISSING","dag_promotable":false}
+  ]
+}

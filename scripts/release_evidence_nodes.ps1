@@ -92,7 +92,7 @@ function Get-ReleaseEvidenceContract {
     }
     $contract = Get-Content -LiteralPath $ContractPath -Raw -Encoding UTF8 |
         ConvertFrom-ReleaseEvidenceJson
-    if ([int]$contract.schema_version -ne 1 -or
+    if ([int]$contract.schema_version -ne 2 -or
         [string]$contract.receipt_schema -ne $releaseEvidenceReceiptSchema) {
         throw "RELEASE_EVIDENCE_CONTRACT_INVALID"
     }
@@ -103,6 +103,10 @@ function Get-ReleaseEvidenceContract {
     foreach ($node in @($contract.nodes)) {
         if ([string]$node.id -notmatch '^[a-z][a-z0-9_]{0,63}$' -or
             [string]::IsNullOrWhiteSpace([string]$node.owner) -or
+            [string]$node.producer_adapter -notmatch '^([A-Z][A-Za-z0-9]+-?)+$' -or
+            @($node.consumers).Count -eq 0 -or
+            [string]$node.qualification_kind -notin @(
+                "IMMUTABLE", "LEASE", "ATTEMPT", "TERMINAL_ATTEMPT") -or
             @($node.behavior_inputs).Count -eq 0 -or
             @($node.dependencies | Where-Object { [string]$_ -notin $ids }).Count -gt 0 -or
             [string]$node.id -in @($node.dependencies)) {
@@ -236,7 +240,8 @@ function Write-ReleaseEvidenceNodeReceipt {
         [object[]]$Dependencies = @(),
         [string]$ReuseReason = "",
         [string]$PriorReceipt = "",
-        [string]$InvalidationReason = ""
+        [string]$InvalidationReason = "",
+        [switch]$PreserveCurrentIndex
     )
     if ([string]::IsNullOrWhiteSpace($ValidationKey)) {
         throw "RELEASE_EVIDENCE_VALIDATION_KEY_MISSING"
@@ -293,9 +298,11 @@ function Write-ReleaseEvidenceNodeReceipt {
         receipt_path = "$Node/$digest.json"
         updated_at = ([DateTimeOffset]::Parse($CompletedAt).ToUniversalTime().ToString("o"))
     }
-    $indexPath = Join-Path $Root "$validationKeyDigest\current\$Node.json"
-    Write-ReleaseEvidenceUtf8Atomic -Path $indexPath `
-        -Content (ConvertTo-ReleaseEvidenceJson $index)
+    if (-not $PreserveCurrentIndex) {
+        $indexPath = Join-Path $Root "$validationKeyDigest\current\$Node.json"
+        Write-ReleaseEvidenceUtf8Atomic -Path $indexPath `
+            -Content (ConvertTo-ReleaseEvidenceJson $index)
+    }
     return [pscustomobject]$receipt
 }
 

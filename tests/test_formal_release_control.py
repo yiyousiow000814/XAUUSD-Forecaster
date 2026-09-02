@@ -195,6 +195,27 @@ def test_model_interfaces_match_the_cpu_control_implementation() -> None:
     assert "NoPromoteFromPendingCpu" in (FORMAL / "CoreRelease.tla").read_text(encoding="utf-8")
 
 
+def test_release_integration_models_authoritative_receipt_waterfall() -> None:
+    integration = (FORMAL / "ReleaseIntegration.tla").read_text(encoding="utf-8")
+    config = (FORMAL / "ReleaseIntegrationSafety.cfg").read_text(encoding="utf-8")
+    for contract in (
+        "CompleteEvidenceRequiredForPass",
+        "BehaviorKeyChangeInvalidatesReuse",
+        "StaleLeaseCannotAuthorize",
+        "TamperedReceiptCannotPromote",
+        "DependencyDigestCannotBeReplaced",
+        "ImmutableReusePreservesIdentity",
+        "ReadPlanningDoesNotMutateProduction",
+        "EvidenceTransactionIsSingle",
+    ):
+        assert contract in integration
+        assert contract in config
+    for unrelated_detail in (
+        "CpuSamples", "accessReceipt", "stagingGeneration", "installCheckpoint",
+    ):
+        assert unrelated_detail not in integration
+
+
 def test_runtime_read_model_formal_shard_separates_observation_from_authority() -> None:
     model = (FORMAL / "ReleaseRuntimeReadModel.tla").read_text(encoding="utf-8")
     config = (FORMAL / "ReleaseRuntimeReadModelSafety.cfg").read_text(encoding="utf-8")

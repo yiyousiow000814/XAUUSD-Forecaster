@@ -78,6 +78,11 @@ subsystems rather than proving their interfaces.
 7. Installation, News, Access, and Windows ownership shards prove their own
    contracts. Integration models reference only their abstract accepted or
    blocked result, never their internal state.
+8. The 15-node Evidence Authority is refined by the integration shard to an
+   abstract complete/missing/tampered receipt state, exact behavior-key
+   applicability, lease freshness, immutable identity preservation, and one
+   frozen dependency digest. Concrete receipt bytes and node identities remain
+   implementation contract tests.
 
 These are explicit assume/guarantee interfaces. The shard manifest and
 implementation contract tests must assign every guarantee to a TLC property
@@ -140,6 +145,14 @@ and every consumer assumption to a matching integration invariant.
 | `SwitchFailureEventuallyTerminates` | core-release-liveness |
 | `TransactionEventuallyTerminates` | core-release-liveness |
 | `AbandonedInstallEventuallySafe` | install-recovery-liveness |
+| `CompleteEvidenceRequiredForPass` | release-integration-safety |
+| `BehaviorKeyChangeInvalidatesReuse` | release-integration-safety |
+| `StaleLeaseCannotAuthorize` | release-integration-safety |
+| `TamperedReceiptCannotPromote` | release-integration-safety |
+| `DependencyDigestCannotBeReplaced` | release-integration-safety |
+| `ImmutableReusePreservesIdentity` | release-integration-safety |
+| `ReadPlanningDoesNotMutateProduction` | release-integration-safety |
+| `EvidenceTransactionIsSingle` | release-integration-safety |
 
 New detailed CPU guarantees for controlled completion, every family quota,
 reserve evidence, bounded targeted recovery, fresh/reused applicability, and

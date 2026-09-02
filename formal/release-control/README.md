@@ -9,7 +9,7 @@ Switch/Observe state.
 | Boundary | Safety | Liveness |
 |---|---|---|
 | CPU evidence | quotas, monotonic accumulation, hard failure, top-up budget, exact-key reuse, artifact invalidation, accepted-stage preservation | provider-pending recovery |
-| Release integration | abstract CPU applicability, Candidate classification, pass and Promote gates | not applicable |
+| Release integration | abstract CPU applicability, complete receipt waterfall, behavior-key applicability, lease freshness, frozen dependency digests, pass and Promote gates | not applicable |
 | Core release | Stable ownership, Prepare/Verify isolation, Switch/Observe and rollback | Switch/Observe/recovery termination |
 | Release runtime read model | Active/Committed/LKG separation, immutable artifact lookup versus placement, and Reverse entry authority | not applicable |
 | Install recovery | fencing and independent abandoned-install checks | abandoned-install termination |
@@ -45,6 +45,10 @@ The interface contract and the complete old-to-new property mapping are in
    control authority. Business health is independent, so `DEGRADED` does not
    block otherwise-safe recovery. `CoreRelease` alone owns the proof that Stable
    changes only after successful Observe.
+8. The Evidence Authority refines the 15-node waterfall to one abstract valid,
+   missing, or tampered state. Promote requires a complete valid waterfall,
+   matching behavior keys, fresh action-time leases, and frozen dependency
+   digests; planning is modeled as mutation-free.
 
 ## Local execution
 

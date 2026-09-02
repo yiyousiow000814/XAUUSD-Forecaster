@@ -1,0 +1,16 @@
+{
+  "schema_version": "release-free-plan-proof-v1",
+  "provider_limits_version": "cloudflare-workers-free-2026-08",
+  "limits": {
+    "worker_requests_per_day": 100000,
+    "worker_compressed_bytes": 3000000,
+    "worker_subrequests_per_invocation": 50,
+    "worker_environment_variables": 64,
+    "static_assets_per_version": 20000,
+    "d1_database_bytes": 500000000,
+    "d1_account_storage_bytes": 5000000000,
+    "d1_queries_per_invocation": 50,
+    "d1_rows_read_per_day": 5000000,
+    "d1_rows_written_per_day": 100000
+  }
+}
