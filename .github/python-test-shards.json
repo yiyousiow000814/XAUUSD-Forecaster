@@ -34,7 +34,12 @@
         "tests/test_news_semantic_contract_v15.py",
         "tests/test_scheduler_model_gateway.py",
         "tests/test_assistant_events.py",
-        "tests/test_release_evidence_nodes.py",
+        "tests/test_release_evidence_nodes.py"
+      ]
+    },
+    {
+      "id": "python-5",
+      "tests": [
         "tests/test_ci_contracts.py",
         "tests/test_assistant_content.py",
         "tests/test_assistant_tools.py",
