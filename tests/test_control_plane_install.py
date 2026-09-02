@@ -21,21 +21,9 @@ OLD_START_TOKEN = "2026-08-26T03:20:00.0000000+00:00"
 NEW_START_TOKEN = "2026-08-26T03:22:48.0603020+00:00"
 CURRENT_START_TOKEN = "2026-08-26T03:25:00.0000000+00:00"
 DEAD_INSTALLER_START_TOKEN = "2026-08-26T03:15:00.0000000+00:00"
-CONTROL_FILES = (
-    "access-qualification-contract.json",
-    "check_deferred_projection_parity.py",
-    "release-evidence-contract.json",
-    "release_evidence_nodes.ps1",
-    "release_runtime_read_model.ps1",
-    "runtime-control-files.json",
-    "xauusd_control_center.ps1",
-    "worker_cpu_evidence.ps1",
-    "control_center.xaml",
-    "xauusd_control_center_launcher.vbs",
-    "xauusd_watchdog_launcher.vbs",
-    "xauusd_watchdog_guard.ps1",
-    "xauusd_watchdog_guard_launcher.vbs",
-)
+CONTROL_FILES = tuple(json.loads(
+    (ROOT / "scripts" / "runtime-control-files.json").read_text(encoding="utf-8")
+)["files"])
 BUNDLE_DIGEST_ALGORITHM = "xauusd.control-bundle.sha256.v1"
 BUNDLE_SCHEMA_VERSION = 3
 
