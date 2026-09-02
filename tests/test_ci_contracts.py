@@ -117,7 +117,8 @@ def test_windows_runtime_selector_uses_authoritative_impact_map(monkeypatch) -> 
     )
     assert {item["id"] for item in module.select("base")} == {
         "release-evidence",
-        "release-lifecycle",
+        "release-lifecycle-provider",
+        "release-lifecycle-transaction",
     }
 
 

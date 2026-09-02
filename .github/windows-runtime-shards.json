@@ -130,7 +130,7 @@
       ]
     },
     {
-      "id": "release-lifecycle",
+      "id": "release-lifecycle-provider",
       "family": "windows-runtime-release",
       "paths": [
         "tests/test_runtime_launchers.py",
@@ -144,7 +144,20 @@
           "path": "tests/test_runtime_launchers.py",
           "from": "test_candidate_cpu_evidence_separates_exact_ledger_from_monotonic_provider_evidence",
           "through": "test_wpf_and_winforms_provider_reads_are_background_and_single_flight"
-        },
+        }
+      ]
+    },
+    {
+      "id": "release-lifecycle-transaction",
+      "family": "windows-runtime-release",
+      "paths": [
+        "tests/test_runtime_launchers.py",
+        "scripts/worker_cpu_evidence.ps1",
+        "scripts/xauusd_control_center.ps1",
+        "scripts/release_runtime_read_model.ps1",
+        "scripts/runtime_paths.ps1"
+      ],
+      "tests": [
         {
           "path": "tests/test_runtime_launchers.py",
           "from": "test_all_operator_and_json_consumers_preserve_membership_enum",

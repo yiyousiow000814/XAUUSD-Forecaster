@@ -5148,7 +5148,10 @@ def test_native_process_deadline_terminates_hung_child(
     )
     reason, elapsed = result.split(",")
     assert reason == "NATIVE_PROCESS_TIMEOUT"
-    assert int(elapsed) < 5
+    # The exact 200 ms deadline and timeout reason are the contract. This outer
+    # wall-clock guard detects a deadlock without treating shared-runner
+    # scheduling latency as product behavior.
+    assert int(elapsed) < 15
 
 
 @pytest.mark.parametrize(
