@@ -20,6 +20,7 @@ RUNTIME_CONTROL_FILES = (
     "xauusd_control_center.ps1",
     "release-evidence-contract.json",
     "release_evidence_nodes.ps1",
+    "recovery_hotfix.ps1",
     "release_runtime_read_model.ps1",
     "control_center.xaml",
     "xauusd_control_center_launcher.vbs",
@@ -1437,6 +1438,129 @@ def _run_control_center_contract(
             f"stderr:\n{result.stderr}"
         )
     return result.stdout.strip()
+
+
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+def test_recovery_short_observe_requires_exact_identity_receipts_and_owner(
+    tmp_path, powershell: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$target=[pscustomobject]@{validation_key='worker:git';worker_version_id='worker';"
+        "windows_revision=('b'*40)};$refMap=[ordered]@{};"
+        "foreach($node in $releaseEvidencePrerequisiteNodes){$refMap[$node]=('a'*64)};"
+        "$refMap.worker_cpu=('b'*64);$refs=[pscustomobject]$refMap;"
+        "$tx=[pscustomobject]@{mode='RECOVERY_HOTFIX';recovery_action='APPLY_RECOVERY_HOTFIX';"
+        "observe_contract=[pscustomobject]@{budget_class='SHORT_BOUNDED'};target=$target;"
+        "previous=[pscustomobject]@{worker_version_id='stable'};evidence_receipt_refs=$refs};"
+        "$release=[pscustomobject]@{transaction=$tx};"
+        "function Get-CloudflareDeployment{return [pscustomobject]@{versions=@()}};"
+        "function Get-DeploymentVersion{return [pscustomobject]@{version_id='worker'}};"
+        "function Get-RuntimeCodeState{return [pscustomobject]@{applied_revision=('b'*40)}};"
+        "function Test-SingleProductionOwner{return $true};"
+        "function Test-CloudflareRollbackTarget{return $true};"
+        "$script:expiry='2099-01-01T00:00:00Z';"
+        "function Get-ReleaseEvidenceCurrentReceipt{param($Root,$ValidationKey,$Node);"
+        "$digest=if($Node -eq 'worker_cpu'){('b'*64)}else{('a'*64)};"
+        "return [pscustomobject]@{receipt_digest=$digest;"
+        "source_identity=[pscustomobject]@{qualification_state='PASSED';subject="
+        "[pscustomobject]@{expires_at=$script:expiry}}}};"
+        "$ok=Test-RecoveryShortObservationCycle $release ([pscustomobject]@{});"
+        "$refs.worker_cpu=('d'*64);$bad=Test-RecoveryShortObservationCycle $release ([pscustomobject]@{});"
+        "$refs.worker_cpu=('b'*64);$script:expiry='2000-01-01T00:00:00Z';"
+        "$stale=Test-RecoveryShortObservationCycle $release ([pscustomobject]@{});"
+        'Write-Output "$($ok.passed),$($ok.reason),$($bad.passed),$($bad.reason),'
+        '$($stale.passed),$($stale.reason)"',
+        powershell=powershell,
+    )
+    assert result == (
+        "True,RECOVERY_BOUNDED_CYCLE_PASSED,False,"
+        "RECOVERY_EVIDENCE_INVALID:worker_cpu,False,"
+        "RECOVERY_EVIDENCE_LEASE_STALE:migration_live_lease"
+    )
+
+
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+def test_recovery_actions_have_authoritative_structured_commit_state(
+    tmp_path, powershell: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$release=[pscustomobject]@{git_sha=('a'*40);worker_version_id='worker';"
+        "windows_revision=('a'*40)};"
+        "$hotfix=[pscustomobject]@{deployment_status='PROMOTING';transaction=[pscustomobject]@{type='PROMOTE';"
+        "mode='RECOVERY_HOTFIX';recovery_action='APPLY_RECOVERY_HOTFIX';target=$release}};"
+        "$restore=[pscustomobject]@{deployment_status='RECOVERING_LKG';transaction=[pscustomobject]@{type='RECOVERY';"
+        "mode='RECOVERY_HOTFIX';recovery_action='RESTORE_LKG';target=$release}};"
+        "$a=Test-ControlCenterReleaseOperationCommitted PromoteRecoveryHotfix $hotfix $release;"
+        "$b=Test-ControlCenterReleaseOperationCommitted RestoreLastKnownGood $restore $release;"
+        "$restore.transaction.mode='NORMAL';"
+        "$c=Test-ControlCenterReleaseOperationCommitted RestoreLastKnownGood $restore $release;"
+        'Write-Output "$a,$b,$c"',
+        powershell=powershell,
+    )
+    assert result == "True,True,False"
+
+
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+def test_recovery_action_dispatch_reaches_each_authoritative_entrypoint(
+    tmp_path, powershell: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:promote=0;$script:restore=0;$script:mode='';$script:reason='';"
+        "function Start-ReleasePromotion{param($Mode,$RecoveryReason);$script:promote++;"
+        "$script:mode=$Mode;$script:reason=$RecoveryReason;return $true};"
+        "function Invoke-RestoreLastKnownGood{$script:restore++;return $true};"
+        "function Get-ReleaseControlState{return [pscustomobject]@{ok=$true}};"
+        "$a=Invoke-ControlCenterOperationAction PromoteRecoveryHotfix;"
+        "$b=Invoke-ControlCenterOperationAction RestoreLastKnownGood;"
+        'Write-Output "$script:promote,$script:restore,$script:mode,$script:reason,'
+        '$($a.ok),$($b.ok)"',
+        powershell=powershell,
+    )
+    assert result == (
+        "1,1,RECOVERY_HOTFIX,EXPLICIT_OPERATOR_RECOVERY_HOTFIX,True,True"
+    )
+
+
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+def test_restore_lkg_completion_is_serialized_and_keeps_committed_identity(
+    tmp_path, powershell: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$target=[pscustomobject]@{git_sha=('a'*40);worker_version_id='stable';"
+        "windows_revision=('a'*40);validation_key='stable:key'};"
+        "$script:state=[pscustomobject]@{stable=$target;previous_stable=$target;drift=$null;"
+        "updated_at='';deployment_status='RECOVERY_OBSERVING';transaction=[pscustomobject]@{id='tx';"
+        "type='RECOVERY';phase='OBSERVING';mode='RECOVERY_HOTFIX';"
+        "recovery_action='RESTORE_LKG';target=$target;evidence_authority="
+        "[pscustomobject]@{validation_key='stable:key';target_identity=$target;"
+        "promote_receipt_digest=('f'*64)}}};"
+        "$script:entered=0;$script:exited=0;$script:written=$null;"
+        "function Enter-ReleaseTransactionLock{$script:entered++;"
+        "$script:releaseTransactionLockHeld=$true;return $true};"
+        "function Exit-ReleaseTransactionLock{$script:exited++;"
+        "$script:releaseTransactionLockHeld=$false};"
+        "function Get-ReleaseControlState{return $script:state};"
+        "function Get-RuntimeUpdateState{return [pscustomobject]@{update_status='ACTIVE'}};"
+        "function Test-RecoveryShortObservationCycle{return [pscustomobject]@{passed=$true}};"
+        "function Get-ReleaseEvidenceCurrentReceipt{return [pscustomobject]@{"
+        "receipt_digest=('f'*64);source_identity=[pscustomobject]@{subject="
+        "[pscustomobject]@{transaction_id='tx'}}}};"
+        "function New-ReleaseEvidenceAdapterArguments{param($Candidate,$BehaviorInputs,"
+        "$SourceIdentity,$StartedAt,$CompletedAt,$WhyRan);return [pscustomobject]@{ok=$true}};"
+        "function Publish-ObserveAttemptEvidence{param($Arguments);"
+        "return [pscustomobject]@{receipt_digest=('a'*64)}};"
+        "function Write-ReleaseControlState{param($State);$script:state=$State;$script:written=$State};"
+        "function Write-ReleaseHistory{param($Event,$Release)};"
+        "Complete-ReleaseRecovery;"
+        'Write-Output "$script:entered,$script:exited,$($null -eq $script:state.transaction),'
+        '$($script:state.stable.worker_version_id),$($script:state.deployment_status)"',
+        powershell=powershell,
+    )
+    assert result == "1,1,True,stable,READY"
 
 
 def _write_runtime_observation(tmp_path, **overrides) -> None:
@@ -6520,6 +6644,104 @@ def test_crash_after_observation_pass_commits_exact_stable(tmp_path) -> None:
     )
 
     assert result == f"READY,{candidate},True"
+
+
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+def test_crashed_lkg_recovery_resumes_bounded_observation(
+    tmp_path, powershell: str,
+) -> None:
+    stable = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(stable, candidate)
+        + "$state=Get-ReleaseControlState;$target=$state.stable;"
+        "$state.transaction=[pscustomobject]@{id='recovery';type='RECOVERY';phase='CUTOVER';"
+        "mode='RECOVERY_HOTFIX';recovery_action='RESTORE_LKG';target=$target;previous=$target};"
+        "Write-ReleaseControlState $state;$script:observed='';"
+        "function Start-RuntimeObservation{param($Revision,$PreviousRevision,$Mode,$ValidationKey);"
+        "$script:observed=\"$Revision,$PreviousRevision,$Mode,$ValidationKey\"};"
+        "function Get-CloudflareDeployment{return [pscustomobject]@{versions=@("
+        "[pscustomobject]@{version_id='11111111-1111-4111-8111-111111111111';percentage=100})}};"
+        f"function Get-RuntimeCodeState{{return [pscustomobject]@{{applied_revision='{stable}'}}}};"
+        "$final=Reconcile-ReleaseControlState;"
+        'Write-Output "$($final.transaction.phase),$($final.deployment_status)|$script:observed"',
+        powershell=powershell,
+    )
+    assert result == (
+        f"OBSERVING,RECOVERY_OBSERVING|{stable},{stable},RESTORE_LKG,"
+        "11111111-1111-4111-8111-111111111111:" + stable
+    )
+
+
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+@pytest.mark.parametrize(
+    ("worker_at_lkg", "windows_at_lkg", "expected_worker_repairs", "expected_windows_repairs"),
+    ((False, False, 1, 1), (True, False, 0, 1), (False, True, 1, 0)),
+)
+def test_crashed_lkg_partial_switch_repairs_only_missing_side_before_observe(
+    tmp_path, powershell: str, worker_at_lkg: bool, windows_at_lkg: bool,
+    expected_worker_repairs: int, expected_windows_repairs: int,
+) -> None:
+    stable = "a" * 40
+    candidate = "b" * 40
+    initial_worker = (
+        "11111111-1111-4111-8111-111111111111" if worker_at_lkg
+        else "22222222-2222-4222-8222-222222222222"
+    )
+    initial_windows = stable if windows_at_lkg else candidate
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(stable, candidate)
+        + "$state=Get-ReleaseControlState;$target=$state.stable;"
+        "$state.transaction=[pscustomobject]@{id='recovery';type='RECOVERY';phase='CUTOVER';"
+        "mode='RECOVERY_HOTFIX';recovery_action='RESTORE_LKG';target=$target;previous=$target};"
+        f"Write-ReleaseControlState $state;$script:worker='{initial_worker}';"
+        f"$script:windows='{initial_windows}';$script:workerRepairs=0;$script:windowsRepairs=0;"
+        "$script:observed=0;"
+        "function Get-CloudflareDeployment{return [pscustomobject]@{versions=@("
+        "[pscustomobject]@{version_id=$script:worker;percentage=100})}};"
+        "function Get-RuntimeCodeState{return [pscustomobject]@{applied_revision=$script:windows}};"
+        "function Test-CloudflareRollbackTarget{return $true};"
+        "function Invoke-CloudflareDeployment{param($StableVersionId,$Message);"
+        "$script:worker=$StableVersionId;$script:workerRepairs++};"
+        "function Invoke-ReleaseWindowsRestore{param($Revision);"
+        "$script:windows=$Revision;$script:windowsRepairs++};"
+        "function Test-SingleProductionOwner{return $true};"
+        "function Start-RuntimeObservation{$script:observed++};"
+        "$final=Reconcile-ReleaseControlState;"
+        'Write-Output "$script:workerRepairs,$script:windowsRepairs,$script:observed,'
+        '$($final.transaction.phase),$($final.deployment_status)"',
+        powershell=powershell,
+    )
+    assert result == (
+        f"{expected_worker_repairs},{expected_windows_repairs},1,"
+        "OBSERVING,RECOVERY_OBSERVING"
+    )
+
+
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+def test_crashed_lkg_observe_completion_reenters_authoritative_completion(
+    tmp_path, powershell: str,
+) -> None:
+    stable = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(stable, candidate)
+        + "$state=Get-ReleaseControlState;$target=$state.stable;"
+        "$state.transaction=[pscustomobject]@{id='recovery';type='RECOVERY';phase='OBSERVING';"
+        "mode='RECOVERY_HOTFIX';recovery_action='RESTORE_LKG';target=$target;previous=$target};"
+        "Write-ReleaseControlState $state;$script:completed=0;"
+        f"function Get-RuntimeUpdateState{{return [pscustomobject]@{{update_status='ACTIVE';activated_revision='{stable}'}}}};"
+        "function Complete-ReleaseRecovery{$script:completed++};"
+        "function Get-CloudflareDeployment{return [pscustomobject]@{versions=@("
+        "[pscustomobject]@{version_id='11111111-1111-4111-8111-111111111111';percentage=100})}};"
+        f"function Get-RuntimeCodeState{{return [pscustomobject]@{{applied_revision='{stable}'}}}};"
+        "$null=Reconcile-ReleaseControlState;Write-Output $script:completed",
+        powershell=powershell,
+    )
+    assert result == "1"
 
 
 def test_crashed_reverse_enters_observation_before_commit(tmp_path) -> None:

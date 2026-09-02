@@ -11,6 +11,7 @@ Switch/Observe state.
 | CPU evidence | quotas, monotonic accumulation, hard failure, top-up budget, exact-key reuse, artifact invalidation, accepted-stage preservation | provider-pending recovery |
 | Release integration | abstract CPU applicability, complete receipt waterfall, behavior-key applicability, lease freshness, frozen dependency digests, pass and Promote gates | not applicable |
 | Core release | Stable ownership, Prepare/Verify isolation, Switch/Observe and rollback | Switch/Observe/recovery termination |
+| Recovery Hotfix | orthogonal mode, exact LKG restoration, bounded eligible-family hotfix, same Evidence DAG, short Observe | recovery termination without assuming healthy Active |
 | Release runtime read model | Active/Committed/LKG separation, immutable artifact lookup versus placement, and Reverse entry authority | not applicable |
 | Install recovery | fencing and independent abandoned-install checks | abandoned-install termination |
 | News migration | CURRENT/Reverse identity compatibility, generation replacement, cleanup | not applicable |

@@ -18,6 +18,7 @@
         "tests/test_assistant_memory_index.py",
         "tests/test_news_projection.py",
         "tests/test_news_retrieval_benchmark.py",
+        "tests/test_recovery_hotfix.py",
         "tests/test_assistant_titles.py",
         "tests/test_news_revision_quality.py"
       ]
