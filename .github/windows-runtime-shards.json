@@ -163,7 +163,7 @@
       "tests": [
         {
           "path": "tests/test_runtime_launchers.py",
-          "from": "test_native_process_deadline_terminates_hung_child",
+          "from": "test_local_runtime_facts_use_explicit_previous_resolution_not_dynamic_scope",
           "through": "test_fresh_action_observation_never_falls_back_to_inflight_gui_cache"
         }
       ]

@@ -5022,6 +5022,75 @@ def test_wpf_and_winforms_provider_reads_are_background_and_single_flight() -> N
 @pytest.mark.parametrize(
     "powershell", [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
 )
+def test_local_runtime_facts_use_explicit_previous_resolution_not_dynamic_scope(
+    tmp_path, powershell: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$correct=[pscustomobject]@{status='COMPLETE';identity=[pscustomobject]@{"
+        "windows_revision=('a'*40);git_sha=('a'*40)}};"
+        "$previousResolution=[pscustomobject]@{status='COMPLETE';identity=[pscustomobject]@{"
+        "windows_revision=('b'*40);git_sha=('b'*40)}};"
+        "function Get-RuntimeCodeState{[pscustomobject]@{applied_revision=('c'*40)}};"
+        "function Get-ReleaseActiveHealthObservation{[pscustomobject]@{status='HEALTHY'}};"
+        "function Get-RuntimeControlBundleIdentity{[pscustomobject]@{exact_revision=$true}};"
+        "function Get-ReleaseWindowsArtifactObservation{param($IdentityResolution);"
+        "$script:observedResolution=$IdentityResolution;[pscustomobject]@{status='AVAILABLE'}};"
+        "$null=Get-ReleaseLocalRuntimeFacts -PersistedState ([pscustomobject]@{}) "
+        "-PreviousIdentityResolution $correct;"
+        'Write-Output "$($script:observedResolution.identity.windows_revision)"',
+        powershell=powershell,
+    )
+    assert result == "a" * 40
+
+
+@pytest.mark.parametrize(
+    "powershell", [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
+def test_local_runtime_facts_have_no_dynamic_scope_fallback_and_malformed_is_closed(
+    tmp_path, powershell: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-RuntimeCodeState{[pscustomobject]@{applied_revision=('c'*40)}};"
+        "function Get-ReleaseActiveHealthObservation{[pscustomobject]@{status='HEALTHY'}};"
+        "function Get-RuntimeControlBundleIdentity{[pscustomobject]@{exact_revision=$true}};"
+        "$malformed=[pscustomobject]@{status='MISMATCH';identity=$null};"
+        "$facts=Get-ReleaseLocalRuntimeFacts -PersistedState ([pscustomobject]@{}) "
+        "-PreviousIdentityResolution $malformed;"
+        'Write-Output "$($facts.previous_windows_artifact.status),'
+        '$($facts.previous_windows_artifact.reason)"',
+        powershell=powershell,
+    )
+    assert result == "MISMATCH,PREVIOUS_IDENTITY_MISMATCH"
+
+
+@pytest.mark.parametrize(
+    "powershell", [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
+def test_local_runtime_facts_work_without_caller_previous_resolution_variable(
+    tmp_path, powershell: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$explicit=[pscustomobject]@{status='COMPLETE';identity=[pscustomobject]@{"
+        "windows_revision=('d'*40);git_sha=('d'*40)}};"
+        "function Get-RuntimeCodeState{[pscustomobject]@{applied_revision=('c'*40)}};"
+        "function Get-ReleaseActiveHealthObservation{[pscustomobject]@{status='HEALTHY'}};"
+        "function Get-RuntimeControlBundleIdentity{[pscustomobject]@{exact_revision=$true}};"
+        "function Get-ReleaseWindowsArtifactObservation{param($IdentityResolution);"
+        "[pscustomobject]@{status='AVAILABLE';revision=$IdentityResolution.identity.windows_revision}};"
+        "$facts=Get-ReleaseLocalRuntimeFacts -PersistedState ([pscustomobject]@{}) "
+        "-PreviousIdentityResolution $explicit;"
+        "Write-Output $facts.previous_windows_artifact.revision",
+        powershell=powershell,
+    )
+    assert result == "d" * 40
+
+
+@pytest.mark.parametrize(
+    "powershell", [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
 def test_native_process_deadline_terminates_hung_child(
     tmp_path, powershell: str,
 ) -> None:
@@ -5068,6 +5137,173 @@ def test_native_process_unresolved_termination_propagates_exact_ownership(
     assert alive == "True"
     assert int(pid) > 0
     assert token == "True"
+
+
+def test_initial_native_ownership_receipt_failure_terminates_started_process(
+    tmp_path,
+) -> None:
+    receipt = tmp_path / "initial-receipt.json"
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Write-NativeProcessOwnershipReceipt{param($Path,$RootProcess);"
+        "$script:startedPid=$RootProcess.Id;throw 'injected-write-failure'};"
+        "$reason='';try{$null=Invoke-Utf8NativeProcess -FilePath 'powershell.exe' "
+        "-Arguments @('-NoProfile','-Command','Start-Sleep -Seconds 60') "
+        f"-TimeoutMilliseconds 5000 -OwnershipReceiptPath '{receipt}'"
+        "}catch{$reason=$_.Exception.Message};"
+        "$alive=[bool](Get-Process -Id $script:startedPid -ErrorAction SilentlyContinue);"
+        f"$files=@(Get-ChildItem '{tmp_path}' -Filter 'initial-receipt.json*' "
+        "-ErrorAction SilentlyContinue).Count;"
+        'Write-Output "$reason,$alive,$files"',
+    )
+    assert result == "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED,False,0"
+
+
+def test_initial_receipt_failure_with_unproved_termination_preserves_live_owner(
+    tmp_path,
+) -> None:
+    receipt = tmp_path / "unresolved-receipt.json"
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Write-NativeProcessOwnershipReceipt{param($Path,$RootProcess);"
+        "$script:startedProcess=$RootProcess;throw 'injected-write-failure'};"
+        "function Stop-NativeProcessTree{param($Process);"
+        "[pscustomobject]@{state='TERMINATION_FAILED'}};"
+        "$reason='';try{$null=Invoke-Utf8NativeProcess -FilePath 'powershell.exe' "
+        "-Arguments @('-NoProfile','-Command','Start-Sleep -Seconds 60') "
+        f"-TimeoutMilliseconds 5000 -OwnershipReceiptPath '{receipt}'"
+        "}catch{$reason=$_.Exception.Message};"
+        "$same=[bool]($script:unresolvedNativeProcess.Id -eq $script:startedProcess.Id);"
+        "$alive=[bool](Get-Process -Id $script:startedProcess.Id -ErrorAction SilentlyContinue);"
+        "$script:startedProcess.Kill();$script:startedProcess.WaitForExit();"
+        "$script:startedProcess.Dispose();"
+        'Write-Output "$reason,$same,$alive"',
+    )
+    assert result == "NATIVE_PROCESS_TERMINATION_UNRESOLVED,True,True"
+
+
+def test_native_receipt_requires_readable_root_identity(tmp_path) -> None:
+    receipt = tmp_path / "identity-receipt.json"
+    result = _run_control_center_contract(
+        tmp_path,
+        "$process=Start-Process powershell.exe -ArgumentList "
+        "@('-NoProfile','-Command','Start-Sleep -Seconds 60') -WindowStyle Hidden -PassThru;"
+        "function Get-NativeProcessIdentity{return $null};$reason='';"
+        f"try{{$null=Write-NativeProcessOwnershipReceipt -Path '{receipt}' "
+        "-RootProcess $process}catch{$reason=$_.Exception.Message};"
+        "$process.Kill();$process.WaitForExit();$process.Dispose();"
+        f'$exists=[bool](Test-Path \'{receipt}\');Write-Output "$reason,$exists"',
+    )
+    assert result == "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED,False"
+
+
+@pytest.mark.parametrize(
+    "receipt_body",
+    (
+        '{"schema_version":"wrong","root":{"pid":123,"start_token":"456"}}',
+        '{"schema_version":"native-process-ownership-v1","root":{"pid":999,"start_token":"456"}}',
+        '{"schema_version":"native-process-ownership-v1","root":{"pid":123,"start_token":"wrong"}}',
+        "{malformed",
+    ),
+)
+def test_native_receipt_readback_mismatch_fails_closed(
+    tmp_path, receipt_body: str,
+) -> None:
+    receipt = tmp_path / "readback.json"
+    receipt.write_text(receipt_body, encoding="utf-8")
+    result = _run_control_center_contract(
+        tmp_path,
+        "$reason='';try{$null=Confirm-NativeProcessOwnershipReceipt "
+        f"-Path '{receipt}' -ExpectedRoot ([pscustomobject]@{{pid=123;start_token='456'}})"
+        "}catch{$reason=$_.Exception.Message};Write-Output $reason",
+    )
+    assert result == "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED"
+
+
+def test_timeout_receipt_update_failure_still_terminates_tree(tmp_path) -> None:
+    receipt = tmp_path / "timeout-update.json"
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:realWrite=${function:Write-NativeProcessOwnershipReceipt};$script:writes=0;"
+        "function Write-NativeProcessOwnershipReceipt{param($Path,$RootProcess,$DescendantIds=@());"
+        "$script:writes++;if($script:writes -gt 1){throw 'injected-update-failure'};"
+        "& $script:realWrite -Path $Path -RootProcess $RootProcess -DescendantIds $DescendantIds};"
+        "$script:realStop=${function:Stop-NativeProcessTree};$script:stopCalled=$false;"
+        "function Stop-NativeProcessTree{param($Process);$script:stopCalled=$true;"
+        "& $script:realStop -Process $Process};$reason='';"
+        "try{$null=Invoke-Utf8NativeProcess -FilePath 'powershell.exe' "
+        "-Arguments @('-NoProfile','-Command','Start-Sleep -Seconds 60') "
+        f"-TimeoutMilliseconds 100 -OwnershipReceiptPath '{receipt}'"
+        "}catch{$reason=$_.Exception.Message};"
+        f'$exists=[bool](Test-Path \'{receipt}\');'
+        'Write-Output "$reason,$script:stopCalled,$exists"',
+    )
+    assert result == "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED,True,False"
+
+
+def test_native_ownership_receipt_uses_atomic_verified_commit() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    writer = source.split("function Write-NativeProcessOwnershipReceipt", 1)[1].split(
+        "function Test-NativeProcessIdentityAlive", 1,
+    )[0]
+    assert "[System.IO.File]::WriteAllBytes($temporary, $bytes)" in writer
+    assert "[System.IO.File]::Replace($temporary, $Path, $null, $true)" in writer
+    assert "[System.IO.File]::Move($temporary, $Path)" in writer
+    assert "Confirm-NativeProcessOwnershipReceipt" in writer
+    assert "Set-Content" not in writer
+
+
+def test_unresolved_native_work_keeps_provider_root_contained_until_exit() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    action = source.split('"ReleaseProviderFactsJson" {', 1)[1].split(
+        '"TerminateProviderObservation" {', 1,
+    )[0]
+    assert "NATIVE_PROCESS_TERMINATION_UNRESOLVED" in action
+    assert "Wait-NativeProcessContainment -Process $script:unresolvedNativeProcess" in action
+
+
+def test_provider_root_identity_failure_terminates_before_start_returns(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:providerPid=0;function Start-Process{param($FilePath,$ArgumentList,"
+        "$WorkingDirectory,$WindowStyle,[switch]$PassThru,$RedirectStandardOutput,"
+        "$RedirectStandardError);$p=Microsoft.PowerShell.Management\\Start-Process "
+        "-FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-Command',"
+        "'Start-Sleep -Seconds 60') -WindowStyle Hidden -PassThru;"
+        "$script:providerPid=$p.Id;return $p};"
+        "function Get-NativeProcessIdentity{return $null};"
+        "function Stop-NativeProcessTree{param($Process);$Process.Kill();"
+        "$Process.WaitForExit();[pscustomobject]@{state='TERMINATED'}};"
+        "$reason='';try{$null=Start-ControlCenterProviderObservationProcess "
+        "-ExpectedControlRevision ('a'*40)}catch{$reason=$_.Exception.Message};"
+        "$alive=[bool](Get-Process -Id $script:providerPid -ErrorAction SilentlyContinue);"
+        'Write-Output "$reason,$alive"',
+    )
+    assert result == "PROVIDER_OBSERVATION_PROCESS_IDENTITY_UNAVAILABLE,False"
+
+
+def test_unresolved_provider_root_identity_preserves_single_flight_until_exit(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:starts=0;function Start-Process{param($FilePath,$ArgumentList,"
+        "$WorkingDirectory,$WindowStyle,[switch]$PassThru,$RedirectStandardOutput,"
+        "$RedirectStandardError);$script:starts++;"
+        "Microsoft.PowerShell.Management\\Start-Process -FilePath 'powershell.exe' "
+        "-ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 60') "
+        "-WindowStyle Hidden -PassThru};"
+        "function Get-NativeProcessIdentity{return $null};"
+        "function Stop-NativeProcessTree{[pscustomobject]@{state='TERMINATION_FAILED'}};"
+        "$observation=Start-ControlCenterProviderObservationProcess "
+        "-ExpectedControlRevision ('a'*40);"
+        "$first=Complete-ControlCenterProviderObservationProcess $observation;"
+        "if($first.release_slot -eq 'CLEAR'){$null=Start-ControlCenterProviderObservationProcess "
+        "-ExpectedControlRevision ('a'*40)};"
+        "$observation.process.Kill();$observation.process.WaitForExit();"
+        "$last=Complete-ControlCenterProviderObservationProcess $observation;"
+        'Write-Output "$($first.state),$($first.release_slot),$script:starts,'
+        '$($last.state),$($last.release_slot)"',
+    )
+    assert result == "TERMINATION_UNRESOLVED,PRESERVE,1,UNKNOWN,CLEAR"
 
 
 def test_provider_adapters_do_not_downgrade_unresolved_native_ownership(tmp_path) -> None:
@@ -5405,7 +5641,7 @@ def test_provider_root_exit_does_not_clear_live_nested_native_owner(tmp_path) ->
         f"$limit=[DateTimeOffset]::UtcNow.AddSeconds(5);while(-not(Test-Path '{child_pid_path}')"
         "-and [DateTimeOffset]::UtcNow -lt $limit){Start-Sleep -Milliseconds 25};"
         f"$childPid=[int](Get-Content '{child_pid_path}');"
-        f"Write-NativeProcessOwnershipReceipt -Path '{receipt_path}' -RootProcess $root "
+        f"$null=Write-NativeProcessOwnershipReceipt -Path '{receipt_path}' -RootProcess $root "
         "-DescendantIds @($childPid);$root.WaitForExit();"
         f"Set-Content '{result_path}' '{{}}';Set-Content '{output_path}' '';"
         f"Set-Content '{error_path}' '';"

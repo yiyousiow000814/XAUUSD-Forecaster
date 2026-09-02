@@ -1244,19 +1244,63 @@ function Write-NativeProcessOwnershipReceipt {
         [int[]]$DescendantIds = @()
     )
     $root = Get-NativeProcessIdentity $RootProcess
-    if (-not $root) { return }
+    if (-not $root) { throw "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED" }
     $descendants = @($DescendantIds | ForEach-Object {
         try {
             $owned = [System.Diagnostics.Process]::GetProcessById([int]$_)
             try { Get-NativeProcessIdentity $owned } finally { $owned.Dispose() }
         } catch { $null }
     } | Where-Object { $_ })
-    [pscustomobject]@{
+    $receipt = [pscustomobject]@{
         schema_version = "native-process-ownership-v1"
         root = $root
         descendants = $descendants
         observed_at = [DateTimeOffset]::UtcNow.ToString("o")
-    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Path -Encoding UTF8
+    }
+    $temporary = Join-Path (Split-Path -Parent $Path) (
+        "{0}.{1}.tmp" -f (Split-Path -Leaf $Path), [guid]::NewGuid().ToString("N")
+    )
+    try {
+        $json = $receipt | ConvertTo-Json -Compress -Depth 5
+        $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        $bytes = $utf8.GetBytes($json)
+        if ($bytes.Length -gt 65536) {
+            throw "NATIVE_PROCESS_OWNERSHIP_RECEIPT_BOUND_EXCEEDED"
+        }
+        [System.IO.File]::WriteAllBytes($temporary, $bytes)
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            [System.IO.File]::Replace($temporary, $Path, $null, $true)
+        } else {
+            [System.IO.File]::Move($temporary, $Path)
+        }
+        return Confirm-NativeProcessOwnershipReceipt -Path $Path -ExpectedRoot $root
+    } catch {
+        throw "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED"
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Confirm-NativeProcessOwnershipReceipt {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][object]$ExpectedRoot
+    )
+    try {
+        $receipt = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 |
+            ConvertFrom-ReleaseControlJson
+        if (-not $receipt -or
+            [string]$receipt.schema_version -cne "native-process-ownership-v1" -or
+            -not $receipt.root -or
+            [int]$receipt.root.pid -ne [int]$ExpectedRoot.pid -or
+            [string]::IsNullOrWhiteSpace([string]$receipt.root.start_token) -or
+            [string]$receipt.root.start_token -cne [string]$ExpectedRoot.start_token) {
+            throw "NATIVE_PROCESS_OWNERSHIP_RECEIPT_MISMATCH"
+        }
+        return [pscustomobject]@{ state = "VERIFIED"; receipt = $receipt }
+    } catch {
+        throw "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED"
+    }
 }
 
 function Test-NativeProcessIdentityAlive {
@@ -1293,6 +1337,16 @@ function Get-NativeOwnershipReceiptState {
     } catch { return [pscustomobject]@{ state = "UNRESOLVED"; alive = @() } }
 }
 
+function Wait-NativeProcessContainment {
+    param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
+    while ($true) {
+        try {
+            if ($Process.HasExited) { return }
+        } catch { return }
+        Start-Sleep -Milliseconds 100
+    }
+}
+
 function Invoke-Utf8NativeProcess {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
@@ -1325,28 +1379,54 @@ function Invoke-Utf8NativeProcess {
     try {
         [void]$process.Start()
         if ($OwnershipReceiptPath) {
-            Write-NativeProcessOwnershipReceipt -Path $OwnershipReceiptPath `
-                -RootProcess $process
+            try {
+                $ownership = Write-NativeProcessOwnershipReceipt `
+                    -Path $OwnershipReceiptPath -RootProcess $process
+                if ([string]$ownership.state -cne "VERIFIED") {
+                    throw "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED"
+                }
+            } catch {
+                $termination = Stop-NativeProcessTree -Process $process
+                if ([string]$termination.state -notin @("TERMINATED", "ALREADY_EXITED")) {
+                    $preserveOwnership = $true
+                    $script:unresolvedNativeProcess = $process
+                    throw "NATIVE_PROCESS_TERMINATION_UNRESOLVED"
+                }
+                Remove-Item -LiteralPath $OwnershipReceiptPath -Force `
+                    -ErrorAction SilentlyContinue
+                throw "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED"
+            }
         }
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+            $receiptUpdateFailed = $false
             if ($OwnershipReceiptPath) {
                 $inventoryAvailable = $false
                 $descendants = @(Get-NativeDescendantProcessIds `
                     -RootProcessId $process.Id `
                     -InventoryAvailable ([ref]$inventoryAvailable))
-                Write-NativeProcessOwnershipReceipt -Path $OwnershipReceiptPath `
-                    -RootProcess $process -DescendantIds $descendants
+                try {
+                    $ownership = Write-NativeProcessOwnershipReceipt `
+                        -Path $OwnershipReceiptPath -RootProcess $process `
+                        -DescendantIds $descendants
+                    if ([string]$ownership.state -cne "VERIFIED") {
+                        throw "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED"
+                    }
+                } catch { $receiptUpdateFailed = $true }
             }
             $termination = Stop-NativeProcessTree -Process $process
             if ([string]$termination.state -notin @("TERMINATED", "ALREADY_EXITED")) {
                 $preserveOwnership = $true
+                $script:unresolvedNativeProcess = $process
                 throw "NATIVE_PROCESS_TERMINATION_UNRESOLVED"
             }
             if ($OwnershipReceiptPath) {
                 Remove-Item -LiteralPath $OwnershipReceiptPath -Force `
                     -ErrorAction SilentlyContinue
+            }
+            if ($receiptUpdateFailed) {
+                throw "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED"
             }
             throw "NATIVE_PROCESS_TIMEOUT"
         }
@@ -10821,7 +10901,7 @@ function Get-ReleaseLocalRuntimeFacts {
     } else { $null }
     $health = Get-ReleaseActiveHealthObservation
     $previousWindows = Get-ReleaseWindowsArtifactObservation `
-        -IdentityResolution $previousResolution
+        -IdentityResolution $PreviousIdentityResolution
     $bundle = Get-RuntimeControlBundleIdentity
     $bundleStatus = if ($bundle -and [bool]$bundle.exact_revision) {
         "AVAILABLE"
@@ -15477,9 +15557,19 @@ function Start-ControlCenterProviderObservationProcess {
             -RedirectStandardOutput $outputPath -RedirectStandardError $errorPath
         $startedAt = [DateTimeOffset]::UtcNow
         $processIdentity = Get-NativeProcessIdentity $process
+        $identityUnresolved = $false
+        if (-not $processIdentity) {
+            $termination = Stop-NativeProcessTree -Process $process
+            if ([string]$termination.state -in @("TERMINATED", "ALREADY_EXITED")) {
+                try { $process.Dispose() } catch {}
+                throw "PROVIDER_OBSERVATION_PROCESS_IDENTITY_UNAVAILABLE"
+            }
+            $identityUnresolved = $true
+        }
         return [pscustomobject]@{
             process = $process
             process_identity = $processIdentity
+            identity_unresolved = $identityUnresolved
             result_path = $resultPath
             output_path = $outputPath
             error_path = $errorPath
@@ -15573,6 +15663,9 @@ function Complete-ControlCenterProviderObservationProcess {
     if (-not $Observation.PSObject.Properties['process_identity']) {
         $Observation | Add-Member process_identity (Get-NativeProcessIdentity $process)
     }
+    if (-not $Observation.PSObject.Properties['identity_unresolved']) {
+        $Observation | Add-Member identity_unresolved ([bool](-not $Observation.process_identity))
+    }
     foreach ($property in @("native_receipt_path", "termination_process",
         "termination_result_path", "expected_control_revision")) {
         if (-not $Observation.PSObject.Properties[$property]) {
@@ -15580,6 +15673,25 @@ function Complete-ControlCenterProviderObservationProcess {
         }
     }
     $completedAt = [DateTimeOffset]::UtcNow
+    if ([bool]$Observation.identity_unresolved) {
+        if (-not $process.HasExited) {
+            return [pscustomobject]@{
+                state = "TERMINATION_UNRESOLVED"; provider_facts = $null
+                attempted_at = [string]$Observation.attempted_at
+                observed_at = $completedAt.ToString("o"); release_slot = "PRESERVE"
+            }
+        }
+        try { $process.Dispose() } catch {}
+        @($Observation.result_path,$Observation.output_path,$Observation.error_path,
+            $Observation.native_receipt_path | Where-Object { $_ }) | ForEach-Object {
+            Remove-Item -LiteralPath $_ -Force -ErrorAction SilentlyContinue
+        }
+        return [pscustomobject]@{
+            state = "UNKNOWN"; provider_facts = $null
+            attempted_at = [string]$Observation.attempted_at
+            observed_at = $completedAt.ToString("o"); release_slot = "CLEAR"
+        }
+    }
     $receiptState = Get-NativeOwnershipReceiptState $Observation.native_receipt_path
     $pastDeadline = [bool]($completedAt -ge
         [DateTimeOffset]::Parse([string]$Observation.deadline_at))
@@ -18094,8 +18206,18 @@ switch ($Action) {
         if (-not $providerState) { throw "RELEASE_CONTROL_STATE_UNAVAILABLE" }
         $authority = Get-ControlCenterProviderAuthorityFingerprint $providerState
         if (-not $authority.valid) { throw "PROVIDER_AUTHORITY_FINGERPRINT_INVALID" }
-        $providerFacts = Get-ReleaseProviderRuntimeFacts `
-            -PersistedState $providerState -ForceProviderRefresh
+        try {
+            $providerFacts = Get-ReleaseProviderRuntimeFacts `
+                -PersistedState $providerState -ForceProviderRefresh
+        } catch {
+            if ($_.Exception.Message -eq "NATIVE_PROCESS_TERMINATION_UNRESOLVED" -and
+                $script:unresolvedNativeProcess) {
+                try {
+                    Wait-NativeProcessContainment -Process $script:unresolvedNativeProcess
+                } finally { $script:unresolvedNativeProcess = $null }
+            }
+            throw
+        }
         $providerFacts | Add-Member -NotePropertyName authority_fingerprint `
             -NotePropertyValue ([string]$authority.digest) -Force
         $providerFacts | ConvertTo-Json -Depth 12 |
