@@ -14,6 +14,7 @@ EVIDENCE_OWNER = ROOT / "scripts" / "release_evidence_authority.ps1"
 EVIDENCE_NODES = ROOT / "scripts" / "release_evidence_nodes.ps1"
 CHANGE_OWNERSHIP = ROOT / "scripts" / "release-evidence-change-ownership.json"
 CONTROL = ROOT / "scripts" / "xauusd_control_center.ps1"
+CONTROL_OWNERS = tuple(sorted((ROOT / "scripts").glob("control_center_*.ps1")))
 MANIFEST = ROOT / "scripts" / "runtime-control-files.json"
 
 
@@ -241,7 +242,9 @@ def test_recovery_metadata_binds_inside_existing_promote_attempt_contract(
 
 def test_recovery_uses_same_evidence_dag_and_existing_phases() -> None:
     owner = OWNER.read_text(encoding="utf-8")
-    control = CONTROL.read_text(encoding="utf-8")
+    control = "\n".join(
+        path.read_text(encoding="utf-8") for path in (CONTROL, *CONTROL_OWNERS)
+    )
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     assert "recovery_hotfix.ps1" in manifest["files"]
     assert "PromoteRecoveryHotfix" in control
@@ -261,7 +264,7 @@ def test_control_center_and_recovery_owner_parse_under_both_powershells(shell: s
     if shutil.which(shell) is None:
         pytest.skip(f"{shell} unavailable")
     body = (
-        f"$files=@({_ps(OWNER)},{_ps(CONTROL)});"
+        "$files=@(" + ",".join(_ps(path) for path in (OWNER, CONTROL, *CONTROL_OWNERS)) + ");"
         "$bad=@();foreach($f in $files){$t=$null;$e=$null;"
         "[void][Management.Automation.Language.Parser]::ParseFile($f,[ref]$t,[ref]$e);"
         "if($e.Count){$bad+=$e}};if($bad.Count){$bad|% Message;exit 1};'PARSE_OK'"

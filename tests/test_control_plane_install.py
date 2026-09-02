@@ -1020,18 +1020,27 @@ def test_operator_lifecycle_collapses_internal_release_states(tmp_path: Path) ->
 
 
 def test_control_plane_isolation_and_visible_identity_are_explicit() -> None:
-    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    install_source = (
+        ROOT / "scripts" / "control_center_install.ps1"
+    ).read_text(encoding="utf-8")
+    source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            ROOT / "scripts" / "control_center_install.ps1",
+            ROOT / "scripts" / "control_center_runtime_supervision.ps1",
+            ROOT / "scripts" / "control_center_presentation.ps1",
+            ROOT / "scripts" / "xauusd_control_center.ps1",
+        )
+    )
     xaml = (ROOT / "scripts" / "control_center.xaml").read_text(encoding="utf-8")
     launcher = (ROOT / "scripts" / "xauusd_control_center_launcher.vbs").read_text(encoding="utf-8")
-    install_body = source.split("function Invoke-ControlPlaneInstall", 1)[1].split(
-        "function Invoke-ForecasterWatchdog", 1
-    )[0]
+    install_body = install_source.split("function Invoke-ControlPlaneInstall", 1)[1]
     assert "InstallRuntime" not in install_body
     assert "Stop-All" not in install_body
     assert "Restart-All" not in install_body
     assert "Restart-CodeReloadableServices" not in install_body
     assert "Assert-ControlPlaneIsolationSnapshot" in install_body
-    supervision = source.split("function Suspend-ControlPlaneSupervision", 1)[1].split(
+    supervision = install_source.split("function Suspend-ControlPlaneSupervision", 1)[1].split(
         "function Restore-ControlPlaneSupervision", 1
     )[0]
     assert "Disable-ScheduledTask -TaskName $guardTaskName" in supervision

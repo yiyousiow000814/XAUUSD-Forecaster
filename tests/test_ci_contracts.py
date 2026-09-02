@@ -69,6 +69,7 @@ def test_windows_runtime_manifest_assigns_every_required_test_exactly_once() -> 
             "tests/test_control_plane_install.py",
             "tests/test_release_evidence_nodes.py",
             "tests/test_release_runtime_read_model.py",
+            "tests/test_recovery_hotfix.py",
         ):
         expected.update(f"{relative}::{name}" for name in _top_level_tests(relative))
     expected.add(
@@ -116,10 +117,24 @@ def test_windows_runtime_selector_uses_authoritative_impact_map(monkeypatch) -> 
         module, "_changed_paths", lambda _base: ["scripts/worker_cpu_evidence.ps1"]
     )
     assert {item["id"] for item in module.select("base")} == {
-        "release-evidence",
-        "release-lifecycle-provider",
-        "release-lifecycle-transaction",
+        "evidence",
+        "provider-adapters",
+        "transaction",
     }
+    owner_shards = {
+        "scripts/control_center_persistence_gateway.ps1": "persistence",
+        "scripts/control_center_provider_adapters.ps1": "provider-adapters",
+        "scripts/control_center_runtime_supervision.ps1": "runtime-supervision",
+        "scripts/control_center_evidence_authority.ps1": "evidence",
+        "scripts/control_center_transaction_engine.ps1": "transaction",
+        "scripts/control_center_recovery_engine.ps1": "recovery",
+        "scripts/control_center_install.ps1": "control-install",
+        "scripts/control_center_presentation.ps1": "presentation",
+    }
+    for owner_path, owner_shard in owner_shards.items():
+        monkeypatch.setattr(module, "_changed_paths", lambda _base, p=owner_path: [p])
+        selected = {item["id"] for item in module.select("base")}
+        assert {"facade-composition", owner_shard}.issubset(selected)
 
 
 def test_windows_runtime_runner_emits_bounded_machine_evidence() -> None:
@@ -157,6 +172,7 @@ def test_python_shard_manifest_assigns_every_platform_test_file_exactly_once() -
         "tests/test_runtime_launchers.py",
         "tests/test_control_plane_install.py",
         "tests/test_release_runtime_read_model.py",
+        "tests/test_recovery_hotfix.py",
     }
     expected = {
         path.relative_to(ROOT).as_posix()

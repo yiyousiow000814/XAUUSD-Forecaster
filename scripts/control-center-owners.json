@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "facade": "xauusd_control_center.ps1",
+  "owners": [
+    {
+      "name": "Common",
+      "file": "control_center_common.ps1",
+      "may_depend_on": ["PersistenceGateway", "ProviderAdapters", "RuntimeSupervision"]
+    },
+    {
+      "name": "PersistenceGateway",
+      "file": "control_center_persistence_gateway.ps1",
+      "may_depend_on": ["Common", "ProviderAdapters", "RuntimeSupervision"]
+    },
+    {
+      "name": "ProviderAdapters",
+      "file": "control_center_provider_adapters.ps1",
+      "may_depend_on": ["Common", "PersistenceGateway", "RuntimeSupervision", "EvidenceAuthority", "ReleaseTransactionEngine"]
+    },
+    {
+      "name": "RuntimeSupervision",
+      "file": "control_center_runtime_supervision.ps1",
+      "may_depend_on": ["Common", "PersistenceGateway", "ProviderAdapters", "EvidenceAuthority", "ReleaseTransactionEngine", "RecoveryEngine", "ControlPlaneInstall"]
+    },
+    {
+      "name": "EvidenceAuthority",
+      "file": "control_center_evidence_authority.ps1",
+      "may_depend_on": ["Common", "PersistenceGateway", "ProviderAdapters", "RuntimeSupervision"]
+    },
+    {
+      "name": "ReleaseTransactionEngine",
+      "file": "control_center_transaction_engine.ps1",
+      "may_depend_on": ["Common", "PersistenceGateway", "ProviderAdapters", "RuntimeSupervision", "EvidenceAuthority", "RecoveryEngine"]
+    },
+    {
+      "name": "RecoveryEngine",
+      "file": "control_center_recovery_engine.ps1",
+      "may_depend_on": ["Common", "PersistenceGateway", "ProviderAdapters", "RuntimeSupervision", "EvidenceAuthority", "ReleaseTransactionEngine", "ControlPlaneInstall"]
+    },
+    {
+      "name": "ControlPlaneInstall",
+      "file": "control_center_install.ps1",
+      "may_depend_on": ["Common", "PersistenceGateway", "ProviderAdapters", "RuntimeSupervision"]
+    },
+    {
+      "name": "Presentation",
+      "file": "control_center_presentation.ps1",
+      "may_depend_on": ["Common", "PersistenceGateway", "ProviderAdapters", "RuntimeSupervision", "EvidenceAuthority", "ReleaseTransactionEngine", "RecoveryEngine", "ControlPlaneInstall"]
+    }
+  ],
+  "invariants": {
+    "provider_adapters_decide_release_eligibility": false,
+    "presentation_writes_release_authority": false,
+    "evidence_moves_traffic": false,
+    "persistence_decides_business_semantics": false,
+    "runtime_supervision_commits_stable": false
+  }
+}

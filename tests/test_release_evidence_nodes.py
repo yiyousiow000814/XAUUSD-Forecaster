@@ -11,9 +11,30 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / "scripts" / "release_evidence_nodes.ps1"
 AUTHORITY = ROOT / "scripts" / "release_evidence_authority.ps1"
+COMMON = ROOT / "scripts" / "control_center_common.ps1"
+PERSISTENCE = ROOT / "scripts" / "control_center_persistence_gateway.ps1"
 CONTRACT = ROOT / "scripts" / "release-evidence-contract.json"
 OWNERSHIP = ROOT / "scripts" / "release-evidence-change-ownership.json"
 FREE_PLAN = ROOT / "scripts" / "release-free-plan-contract.json"
+CONTROL = ROOT / "scripts" / "xauusd_control_center.ps1"
+CONTROL_OWNERS = tuple(sorted((ROOT / "scripts").glob("control_center_*.ps1")))
+
+
+def _control_source() -> str:
+    return "\n".join(
+        path.read_text(encoding="utf-8") for path in (CONTROL, *CONTROL_OWNERS)
+    )
+
+
+def _control_function(name: str) -> str:
+    marker = f"function {name}"
+    matches = []
+    for path in CONTROL_OWNERS:
+        source = path.read_text(encoding="utf-8")
+        if marker in source:
+            matches.append(marker + source.split(marker, 1)[1].split("\nfunction ", 1)[0])
+    assert len(matches) == 1
+    return matches[0]
 
 
 def _ps_literal(value: Path | str) -> str:
@@ -26,6 +47,8 @@ def _run_module(tmp_path: Path, shell: str, body: str) -> str:
     probe = tmp_path / f"probe-{Path(shell).stem}.ps1"
     probe.write_text(
         "$ErrorActionPreference='Stop'\n"
+        f". {_ps_literal(COMMON)}\n"
+        f". {_ps_literal(PERSISTENCE)}\n"
         f". {_ps_literal(MODULE)}\n"
         f". {_ps_literal(AUTHORITY)}\n"
         + body,
@@ -284,11 +307,10 @@ def test_control_bundle_and_candidate_discovery_use_evidence_owner() -> None:
     assert "release-free-plan-contract.json" in manifest["files"]
     assert "release_evidence_authority.ps1" in manifest["files"]
     assert "release_evidence_nodes.ps1" in manifest["files"]
-    control = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
-        encoding="utf-8"
-    )
-    assert '. (Join-Path $PSScriptRoot "release_evidence_nodes.ps1")' in control
-    assert '. (Join-Path $PSScriptRoot "release_evidence_authority.ps1")' in control
+    facade = CONTROL.read_text(encoding="utf-8")
+    control = _control_source()
+    assert '. (Join-Path $PSScriptRoot "release_evidence_nodes.ps1")' in facade
+    assert '. (Join-Path $PSScriptRoot "release_evidence_authority.ps1")' in facade
     assert control.count("Write-CandidateArtifactEvidence -Candidate $discovered") == 2
     assert control.count("-Root $releaseEvidenceRoot -ContractPath $releaseEvidenceContractPath") >= 2
     assert 'Join-Path $runtimeForwardRoot "release-evidence"' in control
@@ -569,15 +591,8 @@ $moved='';try{{Assert-ReleaseEvidenceQualification -Root {_ps_literal(evidence_r
 
 
 def test_promote_and_runtime_switch_no_longer_authorize_from_legacy_nested_booleans() -> None:
-    control = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
-        encoding="utf-8"
-    )
-    promotion = control.split("function Start-ReleasePromotion", 1)[1].split(
-        "function Complete-ReleasePromotion", 1
-    )[0]
-    runtime_switch = control.split("function Update-RuntimeCheckout", 1)[1].split(
-        "function Get-RuntimeCodeState", 1
-    )[0]
+    promotion = _control_function("Start-ReleasePromotion")
+    runtime_switch = _control_function("Update-RuntimeCheckout")
     assert "Assert-ReleaseEvidenceQualification" in promotion
     assert "Publish-PromoteAttemptEvidence" in promotion
     assert "dependency_receipts" in promotion
