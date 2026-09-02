@@ -12,6 +12,7 @@
     "release-free-plan-contract.json",
     "release_evidence_authority.ps1",
     "release_evidence_nodes.ps1",
+    "recovery_hotfix.ps1",
     "release_runtime_read_model.ps1",
     "runtime-control-files.json",
     "xauusd_control_center.ps1",

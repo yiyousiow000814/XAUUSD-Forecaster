@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "ReleaseProviderFactsJson", "TerminateProviderObservation", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "RetrySemantic", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "RegisterAccessProviderInspection", "RegisterFreePlanEvidence", "ReuseAccessQualification", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "ControlBundlePreflight", "PreflightRuntimeStateRoot", "MigrateRuntimeStateRoot")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "ReleaseProviderFactsJson", "TerminateProviderObservation", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "RetrySemantic", "ReconcileRelease", "PromoteCandidate", "PromoteRecoveryHotfix", "RestoreLastKnownGood", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "RegisterAccessProviderInspection", "RegisterFreePlanEvidence", "ReuseAccessQualification", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "ControlBundlePreflight", "PreflightRuntimeStateRoot", "MigrateRuntimeStateRoot")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync", "broadcast")]
     [string]$ServiceKey = "",
@@ -159,6 +159,7 @@ $convertFromJsonSupportsDateKind =
 . (Join-Path $PSScriptRoot "worker_cpu_evidence.ps1")
 . (Join-Path $PSScriptRoot "release_evidence_nodes.ps1")
 . (Join-Path $PSScriptRoot "release_evidence_authority.ps1")
+. (Join-Path $PSScriptRoot "recovery_hotfix.ps1")
 . (Join-Path $PSScriptRoot "release_runtime_read_model.ps1")
 $releaseEvidenceContractPath = Join-Path $PSScriptRoot "release-evidence-contract.json"
 $releaseEvidenceChangeOwnershipPath = Join-Path $PSScriptRoot `
@@ -10156,7 +10157,8 @@ function Start-RuntimeObservation {
         [string]$Revision,
         [string]$PreviousRevision,
         [DateTimeOffset]$HealthBoundary = [DateTimeOffset]::UtcNow,
-        [ValidateSet("PROMOTE", "REVERSE")][string]$Mode = "PROMOTE",
+        [ValidateSet("PROMOTE", "REVERSE", "RECOVERY_HOTFIX", "RESTORE_LKG")]
+        [string]$Mode = "PROMOTE",
         [array]$DeferredProjectionObligations = @(),
         [string]$ValidationKey = "",
         [DateTimeOffset]$ProjectionBoundary = [DateTimeOffset]::UtcNow
@@ -10302,6 +10304,23 @@ function Invoke-RuntimeRollback {
             Write-ReleaseControlState -State $releaseState
             Write-ReleaseHistory -Event "REVERSE_OBSERVATION_FAILED" -Release $prior `
                 -Detail @{ reason = $Reason }
+        } elseif ($releaseState -and $releaseState.transaction -and
+            [string]$releaseState.transaction.type -eq "RECOVERY") {
+            $lkg = $releaseState.transaction.previous
+            Invoke-CloudflareDeployment `
+                -StableVersionId ([string]$lkg.worker_version_id) `
+                -Message "failed recovery restore lkg $([string]$releaseState.transaction.id)"
+            $releaseState.transaction = $null
+            $releaseState.deployment_status = "RECOVERY_REQUIRED"
+            $releaseState.drift = [pscustomobject]@{
+                code = "RECOVERY_LKG_OBSERVATION_FAILED"
+                reason = $Reason
+                observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            $releaseState.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+            Write-ReleaseControlState -State $releaseState
+            Write-ReleaseHistory -Event "RECOVERY_LKG_OBSERVATION_FAILED" `
+                -Release $lkg -Detail @{ reason = $Reason }
         }
         return $true
     } catch {
@@ -11180,7 +11199,10 @@ function Test-CurrentStableRuntimeHealth {
 }
 
 function Invoke-PromotionFreshnessCoordinator {
-    param([Parameter(Mandatory = $true)][object]$State)
+    param(
+        [Parameter(Mandatory = $true)][object]$State,
+        [switch]$AllowDegradedActive
+    )
     $startedAt = [DateTimeOffset]::UtcNow
     $steps = @()
     $candidate = $State.candidate
@@ -11272,7 +11294,12 @@ function Invoke-PromotionFreshnessCoordinator {
             [string]$runtime.applied_revision -cne [string]$stable.windows_revision) {
             throw "Windows Stable revision drifted."
         }
-        if (-not (Test-CurrentStableRuntimeHealth)) {
+        if ($AllowDegradedActive) {
+            $runtimeAuthority = Get-CurrentReleaseRuntimeReadModel `
+                -PersistedState $State -ReleaseLockOwnedByCaller -ForceProviderRefresh
+            $null = Assert-RecoveryRuntimeAuthority -RuntimeReadModel $runtimeAuthority `
+                -RecoveryAction "APPLY_RECOVERY_HOTFIX"
+        } elseif (-not (Test-CurrentStableRuntimeHealth)) {
             throw "CURRENT_STABLE_RUNTIME_UNHEALTHY"
         }
         $steps += New-PromotionFreshnessStep -Name "current_owner_health" `
@@ -11280,7 +11307,8 @@ function Invoke-PromotionFreshnessCoordinator {
 
         $currentStepName = "release_evidence_authority"
         $currentStepStarted = [DateTimeOffset]::UtcNow
-        $evidenceQualification = Publish-PromotionFreshnessEvidence -State $State
+        $evidenceQualification = Publish-PromotionFreshnessEvidence -State $State `
+            -AllowDegradedActive:$AllowDegradedActive
         $steps += New-PromotionFreshnessStep -Name "release_evidence_authority" `
             -StartedAt $currentStepStarted -ExecutionMode "FRESH" `
             -State ([string]$evidenceQualification.state)
@@ -11351,6 +11379,10 @@ function Invoke-PromotionFreshnessCoordinator {
 }
 
 function Start-ReleasePromotion {
+    param(
+        [ValidateSet("NORMAL", "RECOVERY_HOTFIX")][string]$Mode = "NORMAL",
+        [string]$RecoveryReason = ""
+    )
     if (-not (Enter-ReleaseTransactionLock)) { throw "Another release transaction is active." }
     try {
         $state = Get-ReleaseControlState
@@ -11374,12 +11406,31 @@ function Start-ReleasePromotion {
         if ([string]$state.deployment_status -ne "READY") {
             throw "Release control is not deployment-ready."
         }
-        $null = Invoke-PromotionFreshnessCoordinator -State $state
+        $recoveryEligibility = $null
+        if ($Mode -eq "RECOVERY_HOTFIX") {
+            $changed = @(Get-CandidateChangedFiles `
+                -StableRevision ([string]$state.stable.git_sha) `
+                -CandidateRevision ([string]$candidate.git_sha))
+            $changePlan = Get-ReleaseEvidenceChangePlan `
+                -OwnershipPath $releaseEvidenceChangeOwnershipPath -ChangedFiles $changed
+            $recoveryEligibility = Get-RecoveryHotfixEligibility -ChangePlan $changePlan
+            if (-not $recoveryEligibility.eligible) {
+                throw "RECOVERY_HOTFIX_BLOCKED:$([string]$recoveryEligibility.reason)"
+            }
+            if ([string]::IsNullOrWhiteSpace($RecoveryReason)) {
+                $RecoveryReason = "EXPLICIT_OPERATOR_RECOVERY_HOTFIX"
+            }
+        }
+        $null = Invoke-PromotionFreshnessCoordinator -State $state `
+            -AllowDegradedActive:($Mode -eq "RECOVERY_HOTFIX")
         $state = Get-ReleaseControlState
         $candidate = $state.candidate
         $qualification = Assert-ReleaseEvidenceQualification `
             -Root $releaseEvidenceRoot -ContractPath $releaseEvidenceContractPath `
             -ValidationKey ([string]$candidate.validation_key)
+        $recoveryReceiptRefs = if ($Mode -eq "RECOVERY_HOTFIX") {
+            Get-RecoveryEvidenceReceiptReferences -Qualification $qualification
+        } else { $null }
         $semanticReceipt = $qualification.receipts.semantic_contract
         $deferredObligations = @($semanticReceipt.source_identity.subject.deferred_obligations |
             Where-Object { $null -ne $_ })
@@ -11404,6 +11455,10 @@ function Start-ReleasePromotion {
             git_sha = [string]$candidate.git_sha
             windows_revision = [string]$candidate.windows_revision
             artifact_kind = [string]$candidate.artifact_kind
+            release_mode = $Mode
+            recovery_action = if ($Mode -eq "RECOVERY_HOTFIX") {
+                "APPLY_RECOVERY_HOTFIX"
+            } else { $null }
         }
         $promoteInput = [pscustomobject][ordered]@{
             transaction_id = $transactionId
@@ -11423,6 +11478,20 @@ function Start-ReleasePromotion {
             id = $transactionId
             type = "PROMOTE"
             phase = "PRECHECK"
+            mode = $Mode
+            recovery_reason = if ($Mode -eq "RECOVERY_HOTFIX") {
+                $RecoveryReason
+            } else { $null }
+            recovery_action = if ($Mode -eq "RECOVERY_HOTFIX") {
+                "APPLY_RECOVERY_HOTFIX"
+            } else { $null }
+            eligibility_class = if ($Mode -eq "RECOVERY_HOTFIX") {
+                [string]$recoveryEligibility.eligibility_class
+            } else { "NORMAL_RELEASE" }
+            evidence_receipt_refs = $recoveryReceiptRefs
+            observe_contract = if ($Mode -eq "RECOVERY_HOTFIX") {
+                $recoveryEligibility.observe_contract
+            } else { $null }
             target = $candidate
             previous = $state.stable
             recovery_plan = New-RuntimeRecoveryPlan `
@@ -11472,11 +11541,13 @@ function Start-ReleasePromotion {
                 -HealthBoundary $reloadStarted `
                 -DeferredProjectionObligations $deferredObligations `
                 -ValidationKey ([string]$candidate.validation_key) `
-                -ProjectionBoundary $projectionBoundary
+                -ProjectionBoundary $projectionBoundary `
+                -Mode $(if ($Mode -eq "RECOVERY_HOTFIX") { "RECOVERY_HOTFIX" } else { "PROMOTE" })
         } else {
             Start-RuntimeObservation -Revision ([string]$candidate.windows_revision) `
                 -PreviousRevision ([string]$state.stable.windows_revision) `
-                -HealthBoundary $reloadStarted
+                -HealthBoundary $reloadStarted `
+                -Mode $(if ($Mode -eq "RECOVERY_HOTFIX") { "RECOVERY_HOTFIX" } else { "PROMOTE" })
         }
         Write-RuntimeCodeState -Revision ([string]$candidate.windows_revision)
         Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_APPLIED" `
@@ -11584,6 +11655,178 @@ function Complete-ReleasePromotion {
         $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
         Write-ReleaseControlState -State $state
         Write-ReleaseHistory -Event "STABLE_COMMITTED" -Release $target
+    } finally {
+        if ($releaseLockAcquiredHere) { Exit-ReleaseTransactionLock }
+    }
+}
+
+function Invoke-RestoreLastKnownGood {
+    param([string]$RecoveryReason = "ACTIVE_COMMITTED_DRIFT")
+    if (-not (Enter-ReleaseTransactionLock)) { throw "Another release transaction is active." }
+    try {
+        $state = Get-ReleaseControlState
+        if (-not $state -or $state.transaction -or -not $state.stable) {
+            throw "RECOVERY_LKG_UNAVAILABLE"
+        }
+        Assert-ActiveControlBundle
+        $runtimeReadModel = Get-CurrentReleaseRuntimeReadModel `
+            -PersistedState $state -ReleaseLockOwnedByCaller -ForceProviderRefresh
+        $authority = Assert-RecoveryRuntimeAuthority -RuntimeReadModel $runtimeReadModel `
+            -RecoveryAction "RESTORE_LKG"
+        $target = $state.stable
+        if (-not (Test-ReleaseRuntimeIdentityEqual $target $authority.last_known_good) -or
+            -not (Test-CloudflareRollbackTarget -Target $target)) {
+            throw "RECOVERY_LKG_ARTIFACT_UNAVAILABLE"
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$target.validation_key)) {
+            throw "RECOVERY_LKG_EVIDENCE_KEY_UNAVAILABLE"
+        }
+        $qualification = Publish-PromotionFreshnessEvidence -State $state `
+            -AllowDegradedActive -RecoveryAction "RESTORE_LKG" `
+            -RuntimeReadModel $runtimeReadModel
+        $receiptRefs = Get-RecoveryEvidenceReceiptReferences -Qualification $qualification
+        $transactionId = [guid]::NewGuid().ToString()
+        $targetIdentity = [pscustomobject][ordered]@{
+            validation_key = [string]$target.validation_key
+            worker_version_id = [string]$target.worker_version_id
+            git_sha = [string]$target.git_sha
+            windows_revision = [string]$target.windows_revision
+            artifact_kind = [string]$target.artifact_kind
+            release_mode = "RECOVERY_HOTFIX"
+            recovery_action = "RESTORE_LKG"
+        }
+        $promoteInput = [pscustomobject][ordered]@{
+            transaction_id = $transactionId
+            target_identity = $targetIdentity
+            dependency_receipts = $receiptRefs
+        }
+        $now = [DateTimeOffset]::UtcNow
+        $arguments = New-ReleaseEvidenceAdapterArguments -Candidate $target `
+            -BehaviorInputs $promoteInput -SourceIdentity ([pscustomobject]@{
+                qualification_state = "PASSED"; transaction_id = $transactionId
+                target_identity = $targetIdentity; dependency_receipts = $receiptRefs
+            }) -StartedAt $now -CompletedAt $now `
+            -WhyRan "RESTORE_LKG_TRANSACTION_DEPENDENCIES_FROZEN"
+        $promoteReceipt = Publish-PromoteAttemptEvidence -Arguments $arguments
+        $observeContract = [pscustomobject][ordered]@{
+            schema_version = "recovery-hotfix-observe-v1"
+            budget_class = "SHORT_BOUNDED"
+            required_consecutive_health_cycles = 2
+            require_exact_post_switch_identity = $true
+            require_affected_directed_routes = $true
+            require_zero_resource_failures = $true
+            require_single_owner = $true
+            require_affected_projection_parity = $true
+            require_rollback_readiness = $true
+        }
+        $state.transaction = [pscustomobject]@{
+            id = $transactionId; type = "RECOVERY"; phase = "CUTOVER"
+            mode = "RECOVERY_HOTFIX"; recovery_reason = $RecoveryReason
+            recovery_action = "RESTORE_LKG"; eligibility_class = "RESTORE_COMMITTED_LKG"
+            evidence_receipt_refs = $receiptRefs; observe_contract = $observeContract
+            target = $target; previous = $target
+            active_before = $authority.active
+            recovery_plan = New-RuntimeRecoveryPlan `
+                -StableRevision ([string]$target.windows_revision) `
+                -ReleaseState $state -ServiceContracts @($services)
+            evidence_authority = [pscustomobject]@{
+                schema_version = "release-evidence-transaction-authority-v1"
+                validation_key = [string]$target.validation_key
+                promote_receipt_digest = [string]$promoteReceipt.receipt_digest
+                dependency_receipts = $receiptRefs
+                target_identity = $targetIdentity
+            }
+            started_at = $now.ToString("o")
+        }
+        $state.deployment_status = "RECOVERING_LKG"
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "RECOVERY_LKG_STARTED" -Release $target `
+            -Detail @{ transaction_id = $transactionId; recovery_reason = $RecoveryReason }
+        Invoke-CloudflareDeployment -StableVersionId ([string]$target.worker_version_id) `
+            -Message "restore committed lkg $transactionId"
+        Invoke-ReleaseWindowsRestore -Revision ([string]$target.windows_revision)
+        if (-not (Test-SingleProductionOwner)) { throw "RECOVERY_SINGLE_OWNER_REQUIRED" }
+        Start-RuntimeObservation -Revision ([string]$target.windows_revision) `
+            -PreviousRevision ([string]$target.windows_revision) -Mode "RESTORE_LKG" `
+            -ValidationKey ([string]$target.validation_key)
+        $state = Get-ReleaseControlState
+        $state.transaction.phase = "OBSERVING"
+        $state.deployment_status = "RECOVERY_OBSERVING"
+        Write-ReleaseControlState -State $state
+        return $true
+    } catch {
+        $state = Get-ReleaseControlState
+        if ($state -and $state.transaction -and
+            [string]$state.transaction.type -eq "RECOVERY") {
+            $null = Invoke-RuntimeRollback `
+                -FailedRevision ([string]$state.transaction.target.windows_revision) `
+                -PreviousRevision ([string]$state.transaction.previous.windows_revision) `
+                -Reason ([string]$_.Exception.Message)
+        }
+        throw
+    } finally { Exit-ReleaseTransactionLock }
+}
+
+function Complete-ReleaseRecovery {
+    $releaseLockAcquiredHere = $false
+    if (-not $script:releaseTransactionLockHeld) {
+        if (-not (Enter-ReleaseTransactionLock)) { return }
+        $releaseLockAcquiredHere = $true
+    }
+    try {
+        $state = Get-ReleaseControlState
+        if (-not $state -or -not $state.transaction) { return }
+        if ([string]$state.transaction.type -eq "PROMOTE" -and
+            (Get-ReleaseTransactionMode $state.transaction) -eq "RECOVERY_HOTFIX") {
+            Complete-ReleasePromotion
+            return
+        }
+        if ([string]$state.transaction.type -ne "RECOVERY" -or
+            [string]$state.transaction.phase -ne "OBSERVING") { return }
+        $target = $state.transaction.target
+        $authority = $state.transaction.evidence_authority
+        if (-not $authority -or
+            [string]$authority.validation_key -cne [string]$target.validation_key -or
+            [string]$authority.target_identity.worker_version_id -cne
+                [string]$target.worker_version_id -or
+            [string]$authority.target_identity.git_sha -cne [string]$target.git_sha -or
+            [string]$authority.target_identity.windows_revision -cne
+                [string]$target.windows_revision) {
+            throw "RECOVERY_EVIDENCE_AUTHORITY_MISMATCH"
+        }
+        $cycle = Test-RecoveryShortObservationCycle -ReleaseState $state `
+            -RuntimeState (Get-RuntimeUpdateState)
+        if (-not $cycle.passed) { throw [string]$cycle.reason }
+        $promoteReceipt = Get-ReleaseEvidenceCurrentReceipt -Root $releaseEvidenceRoot `
+            -ValidationKey ([string]$target.validation_key) -Node "promote_attempt"
+        if (-not $promoteReceipt -or
+            [string]$promoteReceipt.receipt_digest -cne
+                [string]$authority.promote_receipt_digest -or
+            [string]$promoteReceipt.source_identity.subject.transaction_id -cne
+                [string]$state.transaction.id) {
+            throw "RECOVERY_PROMOTE_EVIDENCE_RECEIPT_INVALID"
+        }
+        $observeInput = [pscustomobject][ordered]@{
+            transaction_id = [string]$state.transaction.id
+            target_identity = $authority.target_identity
+            observe_contract = [pscustomobject][ordered]@{
+                terminal_state = "PASSED"; recovery_action = "RESTORE_LKG"
+                observation_cycles = 2; committed_stable_unchanged = $true
+            }
+        }
+        $now = [DateTimeOffset]::UtcNow
+        $arguments = New-ReleaseEvidenceAdapterArguments -Candidate $target `
+            -BehaviorInputs $observeInput -SourceIdentity ([pscustomobject]@{
+                qualification_state = "PASSED"; transaction_id = [string]$state.transaction.id
+                target_identity = $authority.target_identity; terminal_state = "PASSED"
+            }) -StartedAt $now -CompletedAt $now -WhyRan "RECOVERY_LKG_OBSERVE_PASSED"
+        $null = Publish-ObserveAttemptEvidence -Arguments $arguments
+        $state.transaction = $null
+        $state.deployment_status = "READY"
+        $state.drift = $null
+        $state.updated_at = $now.ToString("o")
+        Write-ReleaseControlState -State $state
+        Write-ReleaseHistory -Event "RECOVERY_LKG_OBSERVED" -Release $target
     } finally {
         if ($releaseLockAcquiredHere) { Exit-ReleaseTransactionLock }
     }
@@ -11737,6 +11980,81 @@ function Reconcile-ReleaseControlState {
             $observedWorker -eq [string]$target.worker_version_id -and
             $observedWindows -eq [string]$target.windows_revision
         )
+        if ([string]$state.transaction.type -eq "RECOVERY") {
+            if ([string]$state.transaction.phase -eq "CUTOVER") {
+                if (-not $targetObserved) {
+                    if (-not (Test-CloudflareRollbackTarget -Target $target)) {
+                        $state.deployment_status = "RECOVERY_BLOCKED"
+                        $state.drift = [pscustomobject]@{
+                            code = "RECOVERY_LKG_ARTIFACT_UNAVAILABLE"
+                            observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+                        }
+                        Write-ReleaseControlState -State $state
+                        return $state
+                    }
+                    if ($observedWorker -cne [string]$target.worker_version_id) {
+                        Invoke-CloudflareDeployment `
+                            -StableVersionId ([string]$target.worker_version_id) `
+                            -Message "resume restore lkg $([string]$state.transaction.id)"
+                    }
+                    if ($observedWindows -cne [string]$target.windows_revision) {
+                        Invoke-ReleaseWindowsRestore `
+                            -Revision ([string]$target.windows_revision)
+                    }
+                    if (-not (Test-SingleProductionOwner)) {
+                        throw "RECOVERY_SINGLE_OWNER_REQUIRED"
+                    }
+                    $verifiedDeployment = Get-CloudflareDeployment
+                    $verifiedRuntime = Get-RuntimeCodeState
+                    $verifiedWorker = [string](Get-DeploymentVersion `
+                        -Deployment $verifiedDeployment -Percentage 100).version_id
+                    if ($verifiedWorker -cne [string]$target.worker_version_id -or
+                        -not $verifiedRuntime -or
+                        [string]$verifiedRuntime.applied_revision -cne
+                            [string]$target.windows_revision) {
+                        throw "RECOVERY_POST_SWITCH_IDENTITY_MISMATCH"
+                    }
+                }
+                Start-RuntimeObservation -Revision ([string]$target.windows_revision) `
+                    -PreviousRevision ([string]$state.transaction.previous.windows_revision) `
+                    -Mode "RESTORE_LKG" -ValidationKey ([string]$target.validation_key)
+                $state.transaction.phase = "OBSERVING"
+                $state.deployment_status = "RECOVERY_OBSERVING"
+                Write-ReleaseControlState -State $state
+                return $state
+            }
+            if ([string]$state.transaction.phase -eq "OBSERVING" -and $targetObserved) {
+                $observation = Get-RuntimeUpdateState
+                if ($observation -and [string]$observation.update_status -eq "ACTIVE" -and
+                    [string]$observation.activated_revision -eq [string]$target.windows_revision) {
+                    Complete-ReleaseRecovery
+                    return Get-ReleaseControlState
+                }
+                if ($observation -and [string]$observation.update_status -eq "OBSERVING" -and
+                    [string]$observation.observing_revision -eq [string]$target.windows_revision) {
+                    Test-RuntimeObservation | Out-Null
+                    return Get-ReleaseControlState
+                }
+            }
+            if ([string]$state.transaction.phase -eq "OBSERVING" -and
+                -not $targetObserved) {
+                $null = Invoke-RuntimeRollback `
+                    -FailedRevision ([string]$target.windows_revision) `
+                    -PreviousRevision ([string]$state.transaction.previous.windows_revision) `
+                    -Reason "RECOVERY_OBSERVE_IDENTITY_DRIFT"
+                return Get-ReleaseControlState
+            }
+        }
+        if ([string]$state.transaction.type -eq "PROMOTE" -and
+            (Get-ReleaseTransactionMode $state.transaction) -eq "RECOVERY_HOTFIX" -and
+            [string]$state.transaction.phase -in @("PRECHECK", "CUTOVER") -and
+            -not $targetObserved) {
+            $null = Invoke-RuntimeRollback `
+                -FailedRevision ([string]$target.windows_revision) `
+                -PreviousRevision ([string]$state.transaction.previous.windows_revision) `
+                -Reason "RECOVERY_HOTFIX_SWITCH_INTERRUPTED"
+            return Get-ReleaseControlState
+        }
         if ([string]$state.transaction.type -eq "REVERSE" -and $targetObserved) {
             if ([string]$state.transaction.phase -eq "REVERSING") {
                 Start-RuntimeObservation -Revision ([string]$target.windows_revision) `
@@ -11870,6 +12188,67 @@ function Test-DeferredProjectionObligations {
             diagnostic = Protect-PreflightDiagnosticText ($output -join "`n")
         }
     }
+}
+
+function Test-RecoveryShortObservationCycle {
+    param(
+        [Parameter(Mandatory = $true)][object]$ReleaseState,
+        [Parameter(Mandatory = $true)][object]$RuntimeState
+    )
+    $transaction = $ReleaseState.transaction
+    if (-not (Test-RecoveryShortObserveMode -Transaction $transaction)) {
+        return [pscustomobject]@{ passed = $false; reason = "RECOVERY_OBSERVE_CONTRACT_INVALID" }
+    }
+    $target = $transaction.target
+    $deployment = Get-CloudflareDeployment
+    $active = Get-DeploymentVersion -Deployment $deployment -Percentage 100
+    $runtime = Get-RuntimeCodeState
+    if (-not $active -or -not $runtime -or
+        [string]$active.version_id -cne [string]$target.worker_version_id -or
+        [string]$runtime.applied_revision -cne [string]$target.windows_revision) {
+        return [pscustomobject]@{ passed = $false; reason = "RECOVERY_POST_SWITCH_IDENTITY_MISMATCH" }
+    }
+    if (-not (Test-SingleProductionOwner)) {
+        return [pscustomobject]@{ passed = $false; reason = "RECOVERY_SINGLE_OWNER_REQUIRED" }
+    }
+    if (-not (Test-CloudflareRollbackTarget -Target $transaction.previous)) {
+        return [pscustomobject]@{ passed = $false; reason = "RECOVERY_ROLLBACK_READINESS_LOST" }
+    }
+    $refs = $transaction.evidence_receipt_refs
+    $refNames = @($refs.PSObject.Properties | ForEach-Object { [string]$_.Name })
+    $requiredNames = @($releaseEvidencePrerequisiteNodes | ForEach-Object { [string]$_ })
+    if ($refNames.Count -ne $requiredNames.Count -or
+        @($refNames | Where-Object { $_ -notin $requiredNames }).Count -gt 0) {
+        return [pscustomobject]@{
+            passed = $false; reason = "RECOVERY_EVIDENCE_REFERENCE_SET_INVALID"
+        }
+    }
+    foreach ($node in $requiredNames) {
+        $receipt = Get-ReleaseEvidenceCurrentReceipt -Root $releaseEvidenceRoot `
+            -ValidationKey ([string]$target.validation_key) -Node $node
+        if (-not $receipt -or
+            [string]$receipt.receipt_digest -cne [string]$refs.$node -or
+            [string]$receipt.source_identity.qualification_state -cnotin @("PASSED", "NOT_REQUIRED")) {
+            return [pscustomobject]@{
+                passed = $false; reason = "RECOVERY_EVIDENCE_INVALID:$node"
+            }
+        }
+        if ($node -in @(
+                "migration_live_lease", "candidate_placement",
+                "access_provider_lease", "rollback_precheck"
+            ) -and
+            [string]$receipt.source_identity.qualification_state -cne "NOT_REQUIRED") {
+            $expiry = [DateTimeOffset]::MinValue
+            if (-not [DateTimeOffset]::TryParse(
+                    [string]$receipt.source_identity.subject.expires_at,
+                    [ref]$expiry) -or $expiry -le [DateTimeOffset]::UtcNow) {
+                return [pscustomobject]@{
+                    passed = $false; reason = "RECOVERY_EVIDENCE_LEASE_STALE:$node"
+                }
+            }
+        }
+    }
+    return [pscustomobject]@{ passed = $true; reason = "RECOVERY_BOUNDED_CYCLE_PASSED" }
 }
 
 function Test-RuntimeObservation {
@@ -12015,6 +12394,40 @@ function Test-RuntimeObservation {
             observation_deferred_code = $null
             observation_deferred_at = $null
         }
+    }
+    if ([string]$state.observation_mode -in @("RECOVERY_HOTFIX", "RESTORE_LKG")) {
+        $release = Get-ReleaseControlState
+        $cycle = if ($release -and $release.transaction) {
+            Test-RecoveryShortObservationCycle -ReleaseState $release -RuntimeState $state
+        } else {
+            [pscustomobject]@{ passed = $false; reason = "RECOVERY_TRANSACTION_UNAVAILABLE" }
+        }
+        if (-not $cycle.passed) {
+            $failures = 1 + [int]$state.observation_consecutive_failures
+            Write-RuntimeUpdateState @{ observation_consecutive_failures = $failures }
+            if ($failures -ge 3) {
+                Invoke-RuntimeRollback -FailedRevision $revision `
+                    -PreviousRevision $previousRevision -Reason ([string]$cycle.reason) | Out-Null
+                return $false
+            }
+            return $true
+        }
+        $cycles = 1 + [int]$state.observation_success_cycles
+        Write-RuntimeUpdateState @{
+            observation_success_cycles = $cycles
+            observation_consecutive_failures = 0
+        }
+        if ($cycles -ge 2) {
+            Write-RuntimeUpdateState @{
+                update_status = "ACTIVE"
+                activated_revision = $revision
+                activated_at = [DateTimeOffset]::UtcNow.ToString("o")
+                user_visible_failure = $false
+                failure_message = $null
+            }
+            Complete-ReleaseRecovery
+        }
+        return $true
     }
     $decisionTimes = @(Get-RuntimeDecisionTimes)
     $lastDecision = [string]$state.observation_last_decision_time
@@ -15402,6 +15815,15 @@ function Get-ControlCenterReleasePresentation {
         candidate_state = $candidateState
         candidate_kind = $candidateKind
         candidate_detail = $candidateDetail
+        release_mode = if ($runtimeReadModel) {
+            [string]$runtimeReadModel.release_mode
+        } else { "NORMAL" }
+        recovery_action = if ($runtimeReadModel) {
+            [string]$runtimeReadModel.recovery_action
+        } else { "" }
+        recovery_reason = if ($runtimeReadModel) {
+            [string]$runtimeReadModel.recovery_reason
+        } else { "" }
         can_promote = [bool]($deploymentReady -and -not $transactionActive -and
             $Release.candidate -and $evidenceReady -and
             $candidateKind -eq $productionCandidateArtifactKind -and
@@ -16243,6 +16665,31 @@ function Test-ControlCenterReleaseOperationCommitted {
                     ) -and
                     (Test-ReleaseIdentity $ReleaseState.transaction.target $ExpectedRelease))))
         }
+        "PromoteRecoveryHotfix" {
+            return [bool]($ExpectedRelease -and $ReleaseState -and
+                $ReleaseState.transaction -and
+                [string]$ReleaseState.transaction.type -eq "PROMOTE" -and
+                (Get-ReleaseTransactionMode $ReleaseState.transaction) -eq
+                    "RECOVERY_HOTFIX" -and
+                [string]$ReleaseState.transaction.recovery_action -eq
+                    "APPLY_RECOVERY_HOTFIX" -and
+                [string]$ReleaseState.deployment_status -in @(
+                    "PROMOTING", "OBSERVING"
+                ) -and
+                (Test-ReleaseIdentity $ReleaseState.transaction.target $ExpectedRelease))
+        }
+        "RestoreLastKnownGood" {
+            return [bool]($ExpectedRelease -and $ReleaseState -and
+                $ReleaseState.transaction -and
+                [string]$ReleaseState.transaction.type -eq "RECOVERY" -and
+                (Get-ReleaseTransactionMode $ReleaseState.transaction) -eq
+                    "RECOVERY_HOTFIX" -and
+                [string]$ReleaseState.transaction.recovery_action -eq "RESTORE_LKG" -and
+                [string]$ReleaseState.deployment_status -in @(
+                    "RECOVERING_LKG", "RECOVERY_OBSERVING"
+                ) -and
+                (Test-ReleaseIdentity $ReleaseState.transaction.target $ExpectedRelease))
+        }
         "ReverseStable" {
             return [bool]($ExpectedRelease -and $ReleaseState -and (
                 ((-not $ReleaseState.transaction) -and
@@ -16403,6 +16850,19 @@ function Invoke-ControlCenterOperationAction {
             if (-not (Start-ReleasePromotion)) { throw "Promotion did not start." }
             return Get-ReleaseControlState
         }
+        "PromoteRecoveryHotfix" {
+            if (-not (Start-ReleasePromotion -Mode "RECOVERY_HOTFIX" `
+                -RecoveryReason "EXPLICIT_OPERATOR_RECOVERY_HOTFIX")) {
+                throw "Recovery Hotfix promotion did not start."
+            }
+            return Get-ReleaseControlState
+        }
+        "RestoreLastKnownGood" {
+            if (-not (Invoke-RestoreLastKnownGood)) {
+                throw "Last Known Good recovery did not start."
+            }
+            return Get-ReleaseControlState
+        }
         "ReverseStable" {
             if (-not (Invoke-ReverseStable)) { throw "Reverse did not start." }
             return Get-ReleaseControlState
@@ -16440,8 +16900,10 @@ function Invoke-ControlCenterStructuredOperation {
         [Parameter(Mandatory = $true)][string]$ResultPath
     )
     $before = Get-ReleaseControlState
-    $expectedRelease = if ($Operation -eq "PromoteCandidate" -and $before) {
+    $expectedRelease = if ($Operation -in @("PromoteCandidate", "PromoteRecoveryHotfix") -and $before) {
         $before.candidate
+    } elseif ($Operation -eq "RestoreLastKnownGood" -and $before) {
+        $before.stable
     } elseif ($Operation -eq "ReverseStable" -and $before) {
         $before.previous_stable
     } else { $null }
@@ -16487,14 +16949,16 @@ function Invoke-ControlCenterStructuredOperation {
         return 1
     }
     $committed = if ($Operation -in @(
-        "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "PromoteCandidate", "ReverseStable"
+        "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary",
+        "PromoteCandidate", "PromoteRecoveryHotfix", "RestoreLastKnownGood", "ReverseStable"
     )) {
         Test-ControlCenterReleaseOperationCommitted -Operation $Operation `
             -ReleaseState $after -ExpectedRelease $expectedRelease `
             -ExpectedValidationKey $expectedValidationKey
     } else { $true }
     $semanticSuccess = [bool]($Operation -notin @(
-        "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "PromoteCandidate", "ReverseStable"
+        "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary",
+        "PromoteCandidate", "PromoteRecoveryHotfix", "RestoreLastKnownGood", "ReverseStable"
     ) -or $committed)
     $result = New-ControlCenterOperationResult -Operation $Operation `
         -Success $semanticSuccess -Committed $committed `
@@ -16643,6 +17107,8 @@ function Show-WpfControlCenter {
                 "ApproveCompatibility" { "APPROVING" }
                 "ApproveAccessBoundary" { "RECORDING ACCESS EVIDENCE" }
                 "PromoteCandidate" { "PROMOTING" }
+                "PromoteRecoveryHotfix" { "PROMOTING RECOVERY HOTFIX" }
+                "RestoreLastKnownGood" { "RESTORING LKG" }
                 "ReverseStable" { "REVERSING" }
                 default { "WORKING" }
             }
@@ -16685,8 +17151,10 @@ function Show-WpfControlCenter {
                 [string]$releaseBefore.candidate.validation_key
             } else { "" }
             $script:wpfOperationExpectedRelease = if (
-                $Operation -eq "PromoteCandidate" -and $releaseBefore
+                $Operation -in @("PromoteCandidate", "PromoteRecoveryHotfix") -and $releaseBefore
             ) { $releaseBefore.candidate } elseif (
+                $Operation -eq "RestoreLastKnownGood" -and $releaseBefore
+            ) { $releaseBefore.stable } elseif (
                 $Operation -eq "ReverseStable" -and $releaseBefore
             ) { $releaseBefore.previous_stable } else { $null }
             $arguments += @(
@@ -16811,6 +17279,8 @@ function Show-WpfControlCenter {
                 [string]$validation.worker_failures.state
             } else { $cpuState }
             (Find-WpfControl "CandidateChecks").Text = @(
+                "Release mode: $($releaseView.release_mode)"
+                ("Recovery: $($releaseView.recovery_action) $($releaseView.recovery_reason)").Trim()
                 "Repository: $([string]$(if ($validation) { $validation.repository } else { 'unavailable' }))"
                 "Windows preflight: $([string]$(if ($validation) { $validation.windows } else { 'unavailable' }))"
                 "API routes: $apiRouteState"
@@ -17016,7 +17486,8 @@ function Show-WpfControlCenter {
                         "$finished result unavailable", "OK", "Warning"
                     ) | Out-Null
                 } elseif ($finished -in @(
-                    "VerifyMigrationCompatibility", "ApproveCompatibility", "PromoteCandidate", "ReverseStable"
+                    "VerifyMigrationCompatibility", "ApproveCompatibility", "PromoteCandidate",
+                    "PromoteRecoveryHotfix", "RestoreLastKnownGood", "ReverseStable"
                 )) {
                     [System.Windows.MessageBox]::Show(
                         "$finished completed and authoritative state was refreshed.",
@@ -17816,8 +18287,10 @@ function Show-ControlCenter {
             [string]$releaseBefore.candidate.validation_key
         } else { "" }
         $script:guiOperationExpectedRelease = if (
-            $Operation -eq "PromoteCandidate" -and $releaseBefore
+            $Operation -in @("PromoteCandidate", "PromoteRecoveryHotfix") -and $releaseBefore
         ) { $releaseBefore.candidate } elseif (
+            $Operation -eq "RestoreLastKnownGood" -and $releaseBefore
+        ) { $releaseBefore.stable } elseif (
             $Operation -eq "ReverseStable" -and $releaseBefore
         ) { $releaseBefore.previous_stable } else { $null }
         $arguments += @(
@@ -17828,6 +18301,8 @@ function Show-ControlCenter {
             "ApproveCompatibility" { "APPROVING | tracked background operation in progress" }
             "ApproveAccessBoundary" { "RECORDING ACCESS EVIDENCE | tracked background operation in progress" }
             "PromoteCandidate" { "PROMOTING | tracked background operation in progress" }
+            "PromoteRecoveryHotfix" { "PROMOTING RECOVERY HOTFIX | tracked background operation in progress" }
+            "RestoreLastKnownGood" { "RESTORING LKG | tracked background operation in progress" }
             "ReverseStable" { "REVERSING | tracked background operation in progress" }
             default { "Working in background: $Operation" }
         }
@@ -17878,7 +18353,11 @@ function Show-ControlCenter {
             $stableCard.Worker.Text = "Worker    $(Get-ShortIdentity $release.stable.worker_version_id)"
             $stableCard.Windows.Text = "Windows   $(Get-ShortIdentity $release.stable.windows_revision)"
             $stableCard.Detail.Text = "Authoritative production release."
-            $stableCard.Detail.Text = "$($release.stable.artifact_kind) / $($release.stable.provenance_state) / $($release.lifecycle_phase)"
+            $stableCard.Detail.Text = (
+                "$($release.stable.artifact_kind) / $($release.stable.provenance_state) / " +
+                "$($release.lifecycle_phase) / $($releaseView.release_mode) / " +
+                "$($releaseView.recovery_action) $($releaseView.recovery_reason)"
+            ).Trim()
             $openStableButton.Enabled = $true
             $openStableButton.Visible = $true
             $bootstrapButton.Visible = $false
@@ -18169,7 +18648,8 @@ function Show-ControlCenter {
                 "$finished result unavailable", "OK", "Warning"
             ) | Out-Null
         } elseif ($finished -in @(
-            "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "PromoteCandidate", "ReverseStable"
+            "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "PromoteCandidate",
+            "PromoteRecoveryHotfix", "RestoreLastKnownGood", "ReverseStable"
         )) {
             [System.Windows.Forms.MessageBox]::Show(
                 "$finished completed and authoritative state was refreshed.",
@@ -18261,7 +18741,8 @@ if ($OperationResultPath -and $Action -ne "ControlBundlePreflight") {
     $structuredActions = @(
         "Start", "Stop", "Restart", "ServiceStart", "ServiceStop",
         "DiscoverCandidate", "RetryCandidateValidation", "RetrySemantic", "ReconcileRelease", "PromoteCandidate",
-        "ReverseStable", "VerifyMigrationCompatibility", "ApproveCompatibility",
+        "PromoteRecoveryHotfix", "RestoreLastKnownGood", "ReverseStable",
+        "VerifyMigrationCompatibility", "ApproveCompatibility",
         "ApproveAccessBoundary"
     )
     if ($Action -notin $structuredActions) {
@@ -18368,6 +18849,14 @@ switch ($Action) {
         Invoke-ControlCenterOperationAction -Operation $Action | ConvertTo-Json -Depth 12
     }
     "PromoteCandidate" {
+        try { $null = Invoke-ControlCenterOperationAction -Operation $Action; exit 0 }
+        catch { Write-Error $_.Exception.Message; exit 1 }
+    }
+    "PromoteRecoveryHotfix" {
+        try { $null = Invoke-ControlCenterOperationAction -Operation $Action; exit 0 }
+        catch { Write-Error $_.Exception.Message; exit 1 }
+    }
+    "RestoreLastKnownGood" {
         try { $null = Invoke-ControlCenterOperationAction -Operation $Action; exit 0 }
         catch { Write-Error $_.Exception.Message; exit 1 }
     }

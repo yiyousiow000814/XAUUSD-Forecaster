@@ -247,3 +247,27 @@ def test_runtime_read_model_formal_shard_separates_observation_from_authority() 
     assert "activeMatchesCommitted" not in model
     assert '/\\ active = committed' in model
     assert "transaction => active = committed" in model
+
+
+def test_recovery_hotfix_formal_shards_keep_mode_orthogonal_and_bounded() -> None:
+    model = (FORMAL / "RecoveryHotfix.tla").read_text(encoding="utf-8")
+    safety = (FORMAL / "RecoveryHotfixSafety.cfg").read_text(encoding="utf-8")
+    liveness = (FORMAL / "RecoveryHotfixLiveness.cfg").read_text(encoding="utf-8")
+    for contract in (
+        "ActiveUnknownCannotBegin",
+        "RestoreLkgDoesNotChangeCommitted",
+        "HotfixCommitsOnlyAfterObservation",
+        "FailedHotfixRestoresLkg",
+        "SingleRecoveryTransaction",
+        "ForbiddenFamilyCannotEnterHotfix",
+        "RecoveryUsesEvidenceDag",
+        "RecoveryModeAddsNoPhase",
+        "DegradedActiveHasRecoveryPath",
+        "DriftedActiveCanRestoreLkg",
+    ):
+        assert contract in model
+        assert contract in safety
+    assert "RecoveryEventuallyTerminates" in model
+    assert "RecoveryEventuallyTerminates" in liveness
+    assert '{"STABLE", "SWITCH", "OBSERVE"}' in model
+    assert "hotfixReceipt" not in model

@@ -129,6 +129,62 @@ def test_v3_projection_separates_active_committed_previous_and_target(powershell
     assert model["previous"]["reverse_precheck"]["recovery_observation_status"] == "NOT_OBSERVED"
 
 
+@pytest.mark.parametrize("powershell", POWERSHELLS)
+def test_transaction_mode_is_backward_compatible_and_projects_recovery_metadata(
+    powershell: str,
+) -> None:
+    stable = _identity("a", "stable")
+    target = _identity("b", "candidate")
+    active = {
+        "version_id": stable["worker_version_id"],
+        "git_sha": stable["git_sha"],
+        "windows_revision": stable["windows_revision"],
+        "traffic_percent": 100,
+        "previous_membership_status": "NOT_ASSIGNED",
+    }
+    base_state = {
+        "schema_version": "stable-candidate-release-v3",
+        "stable": stable,
+        "previous_stable": _identity("c", "previous"),
+        "candidate": target,
+        "deployment_status": "PROMOTING",
+    }
+
+    legacy_state = {
+        **base_state,
+        "transaction": {"type": "PROMOTE", "phase": "CUTOVER", "target": target},
+    }
+    legacy = json.loads(_run(
+        _projection_script(legacy_state, active=active, health="HEALTHY"), powershell,
+    ))
+    assert legacy["release_mode"] == "NORMAL"
+    assert legacy["recovery_action"] is None
+
+    recovery_state = {
+        **base_state,
+        "transaction": {
+            "type": "PROMOTE",
+            "phase": "CUTOVER",
+            "mode": "RECOVERY_HOTFIX",
+            "recovery_action": "APPLY_RECOVERY_HOTFIX",
+            "recovery_reason": "ACTIVE_BUSINESS_HEALTH_DEGRADED",
+            "target": target,
+        },
+    }
+    recovery = json.loads(_run(
+        _projection_script(recovery_state, active=active, health="DEGRADED"), powershell,
+    ))
+    assert recovery["release_mode"] == "RECOVERY_HOTFIX"
+    assert recovery["recovery_action"] == "APPLY_RECOVERY_HOTFIX"
+    assert recovery["recovery_reason"] == "ACTIVE_BUSINESS_HEALTH_DEGRADED"
+
+    recovery_state["transaction"]["mode"] = "UNRECOGNIZED"
+    malformed = json.loads(_run(
+        _projection_script(recovery_state, active=active, health="DEGRADED"), powershell,
+    ))
+    assert malformed["release_mode"] == "UNKNOWN"
+
+
 @pytest.mark.parametrize(
     ("health", "active_letter", "expected_drift", "expected_health"),
     (

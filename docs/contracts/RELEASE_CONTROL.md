@@ -197,6 +197,44 @@ their own behavior keys. Therefore a Control Plane-only revision cannot by
 itself invalidate CPU, an Access-unrelated Git movement cannot invalidate the
 human root, and an Observe probe change cannot invalidate migration acceptance.
 
+## Bounded recovery mode
+
+Release phase and release mode are orthogonal. The only phases remain `STABLE`,
+`PREPARE`, `VERIFY`, `SWITCH`, and `OBSERVE`; a missing transaction `mode` is
+read as `NORMAL`. `RECOVERY_HOTFIX` is an explicit operator-selected mode on the
+same durable transaction and the same fifteen-node Evidence DAG. It does not
+create a parallel state machine, receipt family, Last Known Good pointer, or
+automatic promotion path.
+
+`RESTORE_LKG` restores Active Worker and Windows ownership to the exact
+Committed Stable identity. It does not exchange Previous, manufacture a new
+Stable, or change Committed Stable. `APPLY_RECOVERY_HOTFIX` targets a new exact
+Candidate only for Worker route/serialization, Dashboard API or Sync,
+Windows process/runtime ownership, or release/runtime recovery-boundary
+changes. D1 or SQLite schema, data authority, Access or credential policy,
+runtime-root changes, destructive cleanup, News generation identity,
+forecasting/training/decision semantics, Assistant changes, and unknown or
+cross-family changes require `NORMAL`.
+
+Both actions acquire the normal release lock and re-read provider, runtime,
+identity, ownership, LKG artifact, and Evidence DAG authority after the lock.
+An explicitly known `DEGRADED` Active owner may recover; an `UNKNOWN` Active
+identity, unavailable LKG, competing transaction, missing receipt, or forbidden
+change family fails closed. A hotfix may reuse or renew unchanged nodes only by
+the normal behavior-key rules. It never skips artifact provenance, exact-head
+CI, Candidate placement, rollback readiness, affected directed/runtime checks,
+applicable CPU evidence, or terminal Observe evidence.
+
+Short Observe is restricted to the eligible recovery families and requires two
+consecutive bounded cycles with exact post-switch Worker and Windows identity,
+single ownership, affected directed/CPU/semantic receipt continuity, production
+shape or affected projection parity, and continuing rollback readiness. Work
+that requires a Decision horizon, settlement, training generation, News
+lifecycle, migration, Access, or evidence-causality observation uses `NORMAL`.
+Successful `RESTORE_LKG` leaves Committed Stable unchanged; a hotfix becomes
+Committed Stable only after successful Observe. Failure restores the captured
+Committed LKG and preserves terminal evidence.
+
 An isolated preflight may observe a live decision after its durable decision row
 is appended but before the complete model family is appended. Its explicit
 pending-generation mode treats that partial latest boundary like a not-yet-made

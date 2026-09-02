@@ -456,6 +456,13 @@ function New-ReleaseRuntimeReadModel {
         "MATCHED"
     } else { "DRIFT" }
     $phase = Get-ReleaseRuntimeLifecyclePhase $PersistedState
+    $transactionMode = if (-not $transaction -or
+        -not $transaction.PSObject.Properties['mode'] -or
+        [string]::IsNullOrWhiteSpace([string]$transaction.mode)) {
+        "NORMAL"
+    } elseif ([string]$transaction.mode -in @("NORMAL", "RECOVERY_HOTFIX")) {
+        [string]$transaction.mode
+    } else { "UNKNOWN" }
     $lkg = if ($committedValid) { $committed } else { $null }
     $recoveryReason = if ($driftStatus -eq "DRIFT") {
         "ACTIVE_COMMITTED_MISMATCH_REQUIRES_RECOVERY_MODE"
@@ -488,6 +495,15 @@ function New-ReleaseRuntimeReadModel {
         )
         phase = $phase
         transaction_active = [bool]$transaction
+        release_mode = $transactionMode
+        recovery_action = if ($transaction -and
+            $transaction.PSObject.Properties['recovery_action']) {
+            [string]$transaction.recovery_action
+        } else { $null }
+        recovery_reason = if ($transaction -and
+            $transaction.PSObject.Properties['recovery_reason']) {
+            [string]$transaction.recovery_reason
+        } else { $recoveryReason }
         committed_stable = $committed
         committed_identity_status = [string]$committedResolution.status
         committed_identity_reason = [string]$committedResolution.reason
@@ -524,7 +540,6 @@ function New-ReleaseRuntimeReadModel {
             "COMMITTED_STABLE_CONTRACT"
         } else { "UNKNOWN" }
         drift_status = $driftStatus
-        recovery_reason = $recoveryReason
         previous = [pscustomobject]@{
             worker_artifact = $PreviousWorkerArtifact
             windows_artifact = $PreviousWindowsArtifact

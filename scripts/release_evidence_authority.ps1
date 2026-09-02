@@ -384,8 +384,17 @@ function Write-CandidateArtifactEvidence {
 }
 
 function Publish-PromotionFreshnessEvidence {
-    param([Parameter(Mandatory = $true)][object]$State)
-    $candidate = $State.candidate
+    param(
+        [Parameter(Mandatory = $true)][object]$State,
+        [switch]$AllowDegradedActive,
+        [ValidateSet("", "RESTORE_LKG")][string]$RecoveryAction = "",
+        [object]$RuntimeReadModel = $null
+    )
+    $restoreLkg = $RecoveryAction -eq "RESTORE_LKG"
+    if ($restoreLkg -and -not $RuntimeReadModel) {
+        throw "RECOVERY_LKG_RUNTIME_READ_MODEL_REQUIRED"
+    }
+    $candidate = if ($restoreLkg) { $State.stable } else { $State.candidate }
     $stable = $State.stable
     $now = [DateTimeOffset]::UtcNow
     $expires = $now.Add($promotionFreshnessMinimumLifetime)
@@ -412,15 +421,32 @@ function Publish-PromotionFreshnessEvidence {
         }) -StartedAt $now -CompletedAt $now -WhyRan "PROMOTE_TIME_MIGRATION_LEASE"
     $null = Publish-MigrationLiveLeaseEvidence -Arguments $arguments
 
-    $placementInput = [pscustomobject][ordered]@{
-        candidate_worker = [string]$candidate.worker_version_id
-        stable_worker = [string]$stable.worker_version_id
-        traffic_assignment = [pscustomobject][ordered]@{ stable = 100; candidate = 0 }
+    $placementInput = if ($restoreLkg) {
+        [pscustomobject][ordered]@{
+            candidate_worker = [string]$candidate.worker_version_id
+            stable_worker = [string]$RuntimeReadModel.active.worker_version_id
+            traffic_assignment = [pscustomobject][ordered]@{
+                active = 100
+                target = if ([string]$RuntimeReadModel.active.worker_version_id -ceq
+                    [string]$candidate.worker_version_id) { 100 } else { 0 }
+                recovery_action = "RESTORE_LKG"
+            }
+        }
+    } else {
+        [pscustomobject][ordered]@{
+            candidate_worker = [string]$candidate.worker_version_id
+            stable_worker = [string]$stable.worker_version_id
+            traffic_assignment = [pscustomobject][ordered]@{ stable = 100; candidate = 0 }
+        }
     }
     $arguments = New-ReleaseEvidenceAdapterArguments -Candidate $candidate `
         -BehaviorInputs $placementInput -SourceIdentity ([pscustomobject]@{
             qualification_state = "PASSED"; expires_at = $expires.ToString("o")
-            candidate_percentage = 0; stable_percentage = 100
+            candidate_percentage = if ($restoreLkg) {
+                [int]$placementInput.traffic_assignment.target
+            } else { 0 }
+            stable_percentage = 100
+            recovery_action = if ($restoreLkg) { "RESTORE_LKG" } else { $null }
         }) -StartedAt $now -CompletedAt $now -WhyRan "PROMOTE_TIME_PLACEMENT_RECONCILED"
     $null = Publish-CandidatePlacementEvidence -Arguments $arguments
 
@@ -469,27 +495,36 @@ function Publish-PromotionFreshnessEvidence {
         }) -StartedAt $now -CompletedAt $now -WhyRan "PROMOTE_TIME_ACCESS_LEASE"
     $null = Publish-AccessProviderLeaseEvidence -Arguments $arguments
 
-    $runtimeReadModel = Get-CurrentReleaseRuntimeReadModel `
-        -PersistedState $State -ReleaseLockOwnedByCaller -ForceProviderRefresh
-    if (-not $runtimeReadModel -or $runtimeReadModel.transaction_active -or
-        -not [bool]$runtimeReadModel.active_matches_committed -or
-        [string]$runtimeReadModel.active.health -ne "HEALTHY" -or
-        [string]$runtimeReadModel.active.ownership_status -ne "SINGLE_OWNER" -or
-        [string]$runtimeReadModel.committed_stable.worker_version_id -cne
-            [string]$stable.worker_version_id -or
+    $runtimeReadModel = if ($RuntimeReadModel) { $RuntimeReadModel } else {
+        Get-CurrentReleaseRuntimeReadModel -PersistedState $State `
+            -ReleaseLockOwnedByCaller -ForceProviderRefresh
+    }
+    $runtimeAuthorityValid = [bool]($runtimeReadModel -and
+        -not $runtimeReadModel.transaction_active -and
+        [string]$runtimeReadModel.active.observation_status -eq "AVAILABLE" -and
+        [string]$runtimeReadModel.active.identity_status -eq "COMPLETE" -and
+        [string]$runtimeReadModel.active.health -in $(if ($AllowDegradedActive) {
+            @("HEALTHY", "DEGRADED")
+        } else { @("HEALTHY") }) -and
+        [string]$runtimeReadModel.active.ownership_status -eq "SINGLE_OWNER" -and
+        [string]$runtimeReadModel.committed_stable.worker_version_id -ceq
+            [string]$stable.worker_version_id)
+    if (-not $runtimeAuthorityValid -or
         [string]$runtimeReadModel.committed_stable.windows_revision -cne
-            [string]$stable.windows_revision) {
+            [string]$stable.windows_revision -or
+        (-not $restoreLkg -and -not [bool]$runtimeReadModel.active_matches_committed)) {
         throw "ROLLBACK_RUNTIME_READ_MODEL_INVALID"
     }
     $rollbackInput = [pscustomobject][ordered]@{
         rollback_worker = [string]$stable.worker_version_id
         stable_windows_revision = [string]$stable.windows_revision
         live_owner_health = [pscustomobject][ordered]@{
-            active_matches_committed = $true
+            active_matches_committed = [bool]$runtimeReadModel.active_matches_committed
             health = [string]$runtimeReadModel.active.health
             ownership = [string]$runtimeReadModel.active.ownership_status
             control_bundle = "VERIFIED"
             migration_authority = if ($migrationRequired) { $migrationRootDigest } else { "NOT_REQUIRED" }
+            recovery_action = if ($restoreLkg) { "RESTORE_LKG" } else { "NORMAL" }
         }
     }
     $arguments = New-ReleaseEvidenceAdapterArguments -Candidate $candidate `
