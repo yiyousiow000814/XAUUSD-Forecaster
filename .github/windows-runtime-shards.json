@@ -5,6 +5,9 @@
     ".github/windows-runtime-shards.json",
     "scripts/run_windows_runtime_shard.py",
     "scripts/select_windows_runtime_shards.py",
+    "scripts/xauusd_control_center.ps1",
+    "scripts/control-center-owners.json",
+    "scripts/runtime-control-files.json",
     "tests/test_ci_contracts.py",
     "pyproject.toml",
     "AGENTS.md",
@@ -22,8 +25,12 @@
         "scripts/run_news_annotator.py"
       ],
       "tests": [
-        {"path": "tests/test_runtime_health.py"},
-        {"path": "tests/test_news_scheduler.py"}
+        {
+          "path": "tests/test_runtime_health.py"
+        },
+        {
+          "path": "tests/test_news_scheduler.py"
+        }
       ]
     },
     {
@@ -33,6 +40,8 @@
         "tests/test_runtime_root_ownership.py",
         "scripts/runtime_paths.ps1",
         "scripts/xauusd_control_center.ps1",
+        "scripts/control_center_runtime_supervision.ps1",
+        "scripts/control_center_recovery_engine.ps1",
         "scripts/run_dashboard_sync.py",
         "scripts/run_dashboard_api.py",
         "scripts/run_forward_collector.py",
@@ -54,7 +63,9 @@
       "paths": [
         "tests/test_runtime_root_ownership.py",
         "scripts/runtime_paths.ps1",
-        "scripts/xauusd_control_center.ps1"
+        "scripts/xauusd_control_center.ps1",
+        "scripts/control_center_common.ps1",
+        "scripts/control_center_recovery_engine.ps1"
       ],
       "tests": [
         {
@@ -70,7 +81,10 @@
       "paths": [
         "tests/test_runtime_root_ownership.py",
         "scripts/runtime_paths.ps1",
-        "scripts/xauusd_control_center.ps1"
+        "scripts/xauusd_control_center.ps1",
+        "scripts/control_center_persistence_gateway.ps1",
+        "scripts/control_center_runtime_supervision.ps1",
+        "scripts/control_center_recovery_engine.ps1"
       ],
       "tests": [
         {
@@ -81,7 +95,40 @@
       ]
     },
     {
-      "id": "release-evidence",
+      "id": "facade-composition",
+      "family": "windows-runtime-release",
+      "paths": [
+        "tests/test_runtime_launchers.py",
+        "scripts/xauusd_control_center.ps1",
+        "scripts/control-center-owners.json",
+        "scripts/runtime-control-files.json",
+        "scripts/control_center_*.ps1"
+      ],
+      "tests": [
+        {
+          "path": "tests/test_runtime_launchers.py",
+          "from": "test_control_center_facade_composes_unique_canonical_owners",
+          "through": "test_control_center_composed_owner_bundle_loads_in_both_shells"
+        }
+      ]
+    },
+    {
+      "id": "persistence",
+      "family": "windows-runtime-release",
+      "paths": [
+        "tests/test_runtime_launchers.py",
+        "scripts/control_center_persistence_gateway.ps1"
+      ],
+      "tests": [
+        {
+          "path": "tests/test_runtime_launchers.py",
+          "from": "test_future_release_history_is_versioned_bounded_and_preserves_old_lines",
+          "through": "test_future_release_history_is_versioned_bounded_and_preserves_old_lines"
+        }
+      ]
+    },
+    {
+      "id": "evidence",
       "family": "windows-runtime-release",
       "paths": [
         "tests/test_runtime_launchers.py",
@@ -91,19 +138,29 @@
         "scripts/worker_cpu_evidence.ps1",
         "scripts/xauusd_control_center.ps1",
         "scripts/build_release_validation_fixtures.py",
-        "web/worker-validation-manifest.json"
+        "web/worker-validation-manifest.json",
+        "scripts/control_center_persistence_gateway.ps1",
+        "scripts/control_center_provider_adapters.ps1",
+        "scripts/control_center_evidence_authority.ps1"
       ],
       "tests": [
-        {"path": "tests/test_release_evidence_nodes.py"},
+        {
+          "path": "tests/test_release_evidence_nodes.py"
+        },
         {
           "path": "tests/test_runtime_launchers.py",
           "from": "test_quote_bridge_uses_standalone_local_configuration",
+          "through": "test_release_observability_token_is_not_persisted"
+        },
+        {
+          "path": "tests/test_runtime_launchers.py",
+          "from": "test_release_observability_failure_class_is_bounded",
           "through": "test_repository_local_release_secret_path_is_gitignored"
         }
       ]
     },
     {
-      "id": "release-runtime",
+      "id": "runtime-supervision",
       "family": "windows-runtime-release",
       "paths": [
         "tests/test_runtime_launchers.py",
@@ -118,10 +175,16 @@
         "scripts/run_forward_collector.py",
         "scripts/run_news_annotator.py",
         "scripts/run_live_broadcast_publisher.py",
-        "web/worker-validation-manifest.json"
+        "web/worker-validation-manifest.json",
+        "scripts/control_center_common.ps1",
+        "scripts/control_center_persistence_gateway.ps1",
+        "scripts/control_center_provider_adapters.ps1",
+        "scripts/control_center_runtime_supervision.ps1"
       ],
       "tests": [
-        {"path": "tests/test_release_runtime_read_model.py"},
+        {
+          "path": "tests/test_release_runtime_read_model.py"
+        },
         {
           "path": "tests/test_runtime_launchers.py",
           "from": "test_control_center_stages_releases_without_main_driven_activation",
@@ -130,14 +193,17 @@
       ]
     },
     {
-      "id": "release-lifecycle-provider",
+      "id": "provider-adapters",
       "family": "windows-runtime-release",
       "paths": [
         "tests/test_runtime_launchers.py",
         "scripts/worker_cpu_evidence.ps1",
         "scripts/xauusd_control_center.ps1",
         "scripts/release_runtime_read_model.ps1",
-        "scripts/runtime_paths.ps1"
+        "scripts/runtime_paths.ps1",
+        "scripts/control_center_common.ps1",
+        "scripts/control_center_persistence_gateway.ps1",
+        "scripts/control_center_provider_adapters.ps1"
       ],
       "tests": [
         {
@@ -148,14 +214,20 @@
       ]
     },
     {
-      "id": "release-lifecycle-transaction",
+      "id": "transaction",
       "family": "windows-runtime-release",
       "paths": [
         "tests/test_runtime_launchers.py",
         "scripts/worker_cpu_evidence.ps1",
         "scripts/xauusd_control_center.ps1",
         "scripts/release_runtime_read_model.ps1",
-        "scripts/runtime_paths.ps1"
+        "scripts/runtime_paths.ps1",
+        "scripts/control_center_common.ps1",
+        "scripts/control_center_persistence_gateway.ps1",
+        "scripts/control_center_provider_adapters.ps1",
+        "scripts/control_center_runtime_supervision.ps1",
+        "scripts/control_center_evidence_authority.ps1",
+        "scripts/control_center_transaction_engine.ps1"
       ],
       "tests": [
         {
@@ -166,12 +238,19 @@
       ]
     },
     {
-      "id": "release-provider-parent",
+      "id": "presentation",
       "family": "windows-runtime-release",
       "paths": [
         "tests/test_runtime_launchers.py",
         "scripts/xauusd_control_center.ps1",
-        "scripts/release_runtime_read_model.ps1"
+        "scripts/release_runtime_read_model.ps1",
+        "scripts/control_center_common.ps1",
+        "scripts/control_center_provider_adapters.ps1",
+        "scripts/control_center_runtime_supervision.ps1",
+        "scripts/control_center_evidence_authority.ps1",
+        "scripts/control_center_transaction_engine.ps1",
+        "scripts/control_center_recovery_engine.ps1",
+        "scripts/control_center_presentation.ps1"
       ],
       "tests": [
         {
@@ -182,19 +261,46 @@
       ]
     },
     {
-      "id": "release-acceptance",
+      "id": "compatibility",
       "family": "windows-runtime-release",
       "paths": [
         "tests/test_runtime_launchers.py",
         "scripts/xauusd_control_center.ps1",
         "scripts/check_admin_access_boundary.py",
-        "scripts/run_live_broadcast_publisher.py"
+        "scripts/run_live_broadcast_publisher.py",
+        "scripts/control_center_common.ps1",
+        "scripts/control_center_persistence_gateway.ps1",
+        "scripts/control_center_provider_adapters.ps1",
+        "scripts/control_center_runtime_supervision.ps1",
+        "scripts/control_center_evidence_authority.ps1",
+        "scripts/control_center_transaction_engine.ps1",
+        "scripts/control_center_recovery_engine.ps1"
       ],
       "tests": [
         {
           "path": "tests/test_runtime_launchers.py",
           "from": "test_required_github_gate_set_is_exact_and_missing_gate_stays_pending",
           "through": "test_broadcast_owner_starts_independently_without_reclassifying_core_services"
+        }
+      ]
+    },
+    {
+      "id": "recovery",
+      "family": "windows-runtime-release",
+      "paths": [
+        "tests/test_recovery_hotfix.py",
+        "scripts/recovery_hotfix.ps1",
+        "scripts/control_center_common.ps1",
+        "scripts/control_center_persistence_gateway.ps1",
+        "scripts/control_center_provider_adapters.ps1",
+        "scripts/control_center_runtime_supervision.ps1",
+        "scripts/control_center_evidence_authority.ps1",
+        "scripts/control_center_recovery_engine.ps1",
+        "scripts/control_center_transaction_engine.ps1"
+      ],
+      "tests": [
+        {
+          "path": "tests/test_recovery_hotfix.py"
         }
       ]
     },
@@ -207,10 +313,16 @@
         "scripts/xauusd_control_center.ps1",
         "scripts/xauusd_control_center_launcher.vbs",
         "scripts/control_center.xaml",
-        "scripts/runtime-control-files.json"
+        "scripts/runtime-control-files.json",
+        "scripts/control_center_common.ps1",
+        "scripts/control_center_persistence_gateway.ps1",
+        "scripts/control_center_runtime_supervision.ps1",
+        "scripts/control_center_install.ps1"
       ],
       "tests": [
-        {"path": "tests/test_control_plane_install.py"}
+        {
+          "path": "tests/test_control_plane_install.py"
+        }
       ]
     },
     {
@@ -225,7 +337,9 @@
         "scripts/repair_stable_runtime_artifact_paths.ps1"
       ],
       "tests": [
-        {"path": "tests/test_cross_version_runtime_recovery.py"},
+        {
+          "path": "tests/test_cross_version_runtime_recovery.py"
+        },
         {
           "path": "tests/test_artifact_path_migration.py",
           "from": "test_real_repair_entrypoint_preserves_source_authority_and_fails_closed",

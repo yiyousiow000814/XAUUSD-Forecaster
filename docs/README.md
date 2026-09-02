@@ -26,6 +26,8 @@ current rules merely because they discovered one.
 
 ## Authoritative documents
 
+Current navigation: [repository and runtime state](CURRENT_STATE.md).
+
 ### Contracts
 
 - [System boundaries](contracts/SYSTEM_BOUNDARIES.md)

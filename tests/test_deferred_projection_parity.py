@@ -174,8 +174,12 @@ def test_runtime_and_producer_roots_are_independent_cli_contracts() -> None:
     source = (ROOT / "scripts" / "check_deferred_projection_parity.py").read_text(
         encoding="utf-8"
     )
-    controller = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
-        encoding="utf-8-sig"
+    controller = "\n".join(
+        path.read_text(encoding="utf-8-sig")
+        for path in (
+            ROOT / "scripts" / "xauusd_control_center.ps1",
+            *sorted((ROOT / "scripts").glob("control_center_*.ps1")),
+        )
     )
 
     assert 'parser.add_argument("--runtime-root", required=True)' in source

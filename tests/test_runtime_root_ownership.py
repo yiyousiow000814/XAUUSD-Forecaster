@@ -17,6 +17,15 @@ pytestmark = pytest.mark.skipif(
     sys.platform != "win32", reason="Windows runtime ownership contract",
 )
 CONTROL_CENTER = ROOT / "scripts" / "xauusd_control_center.ps1"
+RUNTIME_CONTROL_FILES = tuple(
+    ROOT / "scripts" / relative
+    for relative in json.loads(
+        (ROOT / "scripts" / "runtime-control-files.json").read_text(
+            encoding="utf-8"
+        )
+    )["files"]
+    if relative.endswith(".ps1")
+)
 POWERSHELLS = [
     shell for shell in ("powershell.exe", "pwsh.exe") if shutil.which(shell)
 ]
@@ -31,6 +40,23 @@ MUTABLE_SERVICE_FILES = {
     ),
     "broadcast": (),
 }
+
+
+def _control_center_source() -> str:
+    return "\n".join(path.read_text(encoding="utf-8") for path in RUNTIME_CONTROL_FILES)
+
+
+def _control_center_function_source(name: str) -> str:
+    marker = f"function {name}"
+    for source in (
+        path.read_text(encoding="utf-8") for path in RUNTIME_CONTROL_FILES
+    ):
+        if marker not in source:
+            continue
+        start = source.index(marker)
+        next_function = source.find("\nfunction ", start + len(marker))
+        return source[start:] if next_function < 0 else source[start:next_function]
+    raise AssertionError(f"missing control-center function: {name}")
 
 
 def _prepare_roots(tmp_path: Path) -> tuple[Path, Path]:
@@ -580,10 +606,7 @@ def test_release_entrypoints_fail_closed_while_state_root_migrates(
 
 
 def test_state_only_migration_never_moves_the_runtime_checkout() -> None:
-    source = CONTROL_CENTER.read_text(encoding="utf-8")
-    start = source.index("function Invoke-RuntimeStateRootMigration")
-    end = source.index("function Install-ProductionRuntime", start)
-    migration = source[start:end]
+    migration = _control_center_function_source("Invoke-RuntimeStateRootMigration")
 
     assert "git -C" not in migration
     assert '"git.exe"' not in migration
@@ -592,7 +615,7 @@ def test_state_only_migration_never_moves_the_runtime_checkout() -> None:
 
 
 def test_switch_and_recovery_resolve_revision_owned_service_contracts() -> None:
-    source = CONTROL_CENTER.read_text(encoding="utf-8")
+    source = _control_center_source()
 
     assert "Resolve-ServiceLaunchContracts -Revision $Revision" in source
     assert "Restore-RuntimeRecoveryPlan -Plan $recoveryPlan" in source
@@ -684,7 +707,7 @@ def test_running_legacy_quote_without_captured_config_authority_fails_before_sto
 
 
 def test_migration_has_bounded_native_handle_probe_and_all_failure_phases() -> None:
-    source = CONTROL_CENTER.read_text(encoding="utf-8")
+    source = _control_center_source()
     phases = {
         "BEFORE_WATCHDOG_SUSPENSION", "AFTER_WATCHDOG_SUSPENSION",
         "AFTER_STOP_ALL", "AFTER_STATE_STAGED", "AFTER_JUNCTION_REMOVAL",

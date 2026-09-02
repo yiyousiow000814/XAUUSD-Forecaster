@@ -43,48 +43,6 @@ function ConvertTo-ReleaseEvidenceNativePath {
     return "\\?\$fullPath"
 }
 
-function Write-ReleaseEvidenceUtf8Atomic {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Content,
-        [switch]$CreateNew
-    )
-    $directory = Split-Path -Parent $Path
-    $nativeDirectory = ConvertTo-ReleaseEvidenceNativePath -Path $directory
-    $nativePath = ConvertTo-ReleaseEvidenceNativePath -Path $Path
-    [System.IO.Directory]::CreateDirectory($nativeDirectory) | Out-Null
-    $encoding = New-Object System.Text.UTF8Encoding($false)
-    if ($CreateNew) {
-        $stream = [System.IO.File]::Open(
-            $nativePath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write,
-            [System.IO.FileShare]::Read)
-        try {
-            $writer = [System.IO.StreamWriter]::new($stream, $encoding)
-            try { $writer.Write($Content) } finally { $writer.Dispose() }
-        } finally { $stream.Dispose() }
-        return
-    }
-    $temporary = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
-    $nativeTemporary = ConvertTo-ReleaseEvidenceNativePath -Path $temporary
-    $backup = "$Path.$([guid]::NewGuid().ToString('N')).bak"
-    $nativeBackup = ConvertTo-ReleaseEvidenceNativePath -Path $backup
-    [System.IO.File]::WriteAllText($nativeTemporary, $Content, $encoding)
-    try {
-        if ([System.IO.File]::Exists($nativePath)) {
-            [System.IO.File]::Replace($nativeTemporary, $nativePath, $nativeBackup)
-        } else {
-            [System.IO.File]::Move($nativeTemporary, $nativePath)
-        }
-    } finally {
-        if ([System.IO.File]::Exists($nativeTemporary)) {
-            [System.IO.File]::Delete($nativeTemporary)
-        }
-        if ([System.IO.File]::Exists($nativeBackup)) {
-            [System.IO.File]::Delete($nativeBackup)
-        }
-    }
-}
-
 function Get-ReleaseEvidenceContract {
     param([Parameter(Mandatory = $true)][string]$ContractPath)
     if (-not (Test-Path -LiteralPath $ContractPath)) {
