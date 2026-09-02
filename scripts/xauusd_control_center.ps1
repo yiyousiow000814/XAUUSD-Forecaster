@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "RetrySemantic", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "RegisterAccessProviderInspection", "ReuseAccessQualification", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "ControlBundlePreflight", "PreflightRuntimeStateRoot", "MigrateRuntimeStateRoot")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "ReleaseProviderFactsJson", "TerminateProviderObservation", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "RetrySemantic", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "RegisterAccessProviderInspection", "ReuseAccessQualification", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "ControlBundlePreflight", "PreflightRuntimeStateRoot", "MigrateRuntimeStateRoot")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync", "broadcast")]
     [string]$ServiceKey = "",
@@ -13,7 +13,11 @@ param(
     [string]$InstallTransactionId = "",
     [string]$OperationResultPath = "",
     [string]$AccessChecklistConfirmation = "",
-    [string]$AccessProviderInspectionPath = ""
+    [string]$AccessProviderInspectionPath = "",
+    [string]$NativeProcessReceiptPath = "",
+    [int]$TargetProcessId = 0,
+    [string]$TargetProcessStartToken = "",
+    [switch]$SkipProviderObservation
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,6 +28,7 @@ $repositoryRoot = if ($RepositoryRoot) {
 $moduleRoot = if ($RuntimeRoot) {
     [System.IO.Path]::GetFullPath($RuntimeRoot)
 } else { $scriptRepositoryRoot }
+$script:nativeProcessOwnershipReceiptPath = $NativeProcessReceiptPath
 $runtimeLocalRoot = Join-Path $moduleRoot ".local"
 $runtimeForwardRoot = Join-Path $runtimeLocalRoot "forward"
 $repositoryLocalRoot = Join-Path $repositoryRoot ".local"
@@ -117,6 +122,13 @@ $workerCpuPassP99Ms = 8.0
 $workerCpuPassMaxMs = 10.0
 $candidateStaticAssetMaxBytes = 1048576
 $candidateDiscoveryInterval = [TimeSpan]::FromMinutes(5)
+$releaseProviderObservationInterval = [TimeSpan]::FromSeconds(30)
+$releaseProviderObservationMaximumStaleAge = [TimeSpan]::FromSeconds(60)
+$releaseProviderCommandTimeoutMilliseconds = 20000
+$releaseProviderBackgroundDeadline = [TimeSpan]::FromSeconds(25)
+$script:releaseProviderRefreshInFlight = $false
+$script:releaseDeploymentObservationCache = $null
+$script:releaseExactVersionObservationCache = @{}
 $candidatePlacementPropagationTimeout = [TimeSpan]::FromMinutes(3)
 $candidatePlacementProbeIntervalSeconds = 5
 $candidateSupersessionHistoryLimit = 128
@@ -145,6 +157,7 @@ $convertFromJsonSupportsDateKind =
 
 . (Join-Path $PSScriptRoot "worker_cpu_evidence.ps1")
 . (Join-Path $PSScriptRoot "release_evidence_nodes.ps1")
+. (Join-Path $PSScriptRoot "release_runtime_read_model.ps1")
 $releaseEvidenceContractPath = Join-Path $PSScriptRoot "release-evidence-contract.json"
 
 function Write-CandidateArtifactEvidence {
@@ -497,27 +510,7 @@ function Write-RuntimeUpdateState {
 
 function Get-ReleaseLifecyclePhase {
     param([object]$ReleaseState)
-    if (-not $ReleaseState) { return "UNAVAILABLE" }
-    if ($ReleaseState.transaction) {
-        if ([string]$ReleaseState.transaction.phase -in @(
-            "OBSERVING", "REVERSE_OBSERVING"
-        )) { return "OBSERVE" }
-        return "SWITCH"
-    }
-    if ([string]$ReleaseState.deployment_status -in @(
-        "RECOVERY_REQUIRED", "DEPLOYMENT_DRIFT"
-    )) { return "OBSERVE" }
-    if ($ReleaseState.candidate) {
-        $reason = if ($ReleaseState.candidate.validation) {
-            [string]$ReleaseState.candidate.validation.reason
-        } else { "" }
-        if ([string]$ReleaseState.candidate.validation_state -in @("NEW", "STAGING") -or
-            $reason -eq "COORDINATED_STORAGE_MIGRATION_REQUIRED") {
-            return "PREPARE"
-        }
-        return "VERIFY"
-    }
-    return "STABLE"
+    Get-ReleaseRuntimeLifecyclePhase -ReleaseState $ReleaseState
 }
 
 function Set-ReleaseLifecycleProjection {
@@ -606,8 +599,15 @@ function Get-ReleaseControlState {
 }
 
 function Get-ReleaseControlStatusSnapshot {
+    param(
+        [switch]$ForceProviderRefresh,
+        [switch]$SkipProviderObservation
+    )
     $state = Get-ReleaseControlState
     if (-not $state) { return $null }
+    $runtimeReadModel = Get-CurrentReleaseRuntimeReadModel -PersistedState $state `
+        -ForceProviderRefresh:$ForceProviderRefresh `
+        -SkipProviderObservation:$SkipProviderObservation
     $waterfall = if ($state.candidate -and
         -not [string]::IsNullOrWhiteSpace([string]$state.candidate.validation_key)) {
         Get-ReleaseEvidenceWaterfall -Root $releaseEvidenceRoot `
@@ -625,6 +625,8 @@ function Get-ReleaseControlStatusSnapshot {
     }
     $state | Add-Member -NotePropertyName evidence_waterfall `
         -NotePropertyValue $waterfall -Force
+    $state | Add-Member -NotePropertyName release_runtime `
+        -NotePropertyValue $runtimeReadModel -Force
     return $state
 }
 
@@ -775,10 +777,39 @@ function Invoke-WranglerJson {
     # Invoke the pinned CLI through Node directly. npx.cmd truncates or rejects
     # otherwise-valid bounded arguments at cmd.exe's lower limit. The release
     # boundary owns strict UTF-8 decoding rather than inheriting a shell codepage.
-    $read = Invoke-Utf8NativeProcess -FilePath "node.exe" `
-        -Arguments (@($wranglerCli) + @($Arguments) + @("--json")) `
-        -WorkingDirectory $webRoot
-    if ($read.exit_code -ne 0) { throw "Wrangler command failed." }
+    $priorAccountScope = [Environment]::GetEnvironmentVariable(
+        "CLOUDFLARE_ACCOUNT_ID", "Process"
+    )
+    try {
+        [Environment]::SetEnvironmentVariable(
+            "CLOUDFLARE_ACCOUNT_ID", $cloudflareAccountId, "Process"
+        )
+        $read = Invoke-Utf8NativeProcess -FilePath "node.exe" `
+            -Arguments (@($wranglerCli) + @($Arguments) + @("--json")) `
+            -WorkingDirectory $webRoot `
+            -TimeoutMilliseconds $releaseProviderCommandTimeoutMilliseconds
+    } finally {
+        [Environment]::SetEnvironmentVariable(
+            "CLOUDFLARE_ACCOUNT_ID", $priorAccountScope, "Process"
+        )
+    }
+    if ($read.exit_code -ne 0) {
+        $diagnostic = Protect-PreflightDiagnosticText (
+            @([string]$read.stdout, [string]$read.stderr) -join "`n"
+        )
+        $classification = if ($diagnostic -cmatch '(^|[^A-Z0-9_])VERSION_NOT_FOUND([^A-Z0-9_]|$)') {
+            "CLOUDFLARE_VERSION_NOT_FOUND"
+        } elseif ($diagnostic -match '(?i)\bHTTP(?:_STATUS| STATUS| STATUS CODE)?[ :=]+404\b') {
+            "CLOUDFLARE_HTTP_404"
+        } elseif ($diagnostic -match '(?i)\bHTTP(?:_STATUS| STATUS| STATUS CODE)?[ :=]+401\b') {
+            "CLOUDFLARE_HTTP_401"
+        } elseif ($diagnostic -match '(?i)\bHTTP(?:_STATUS| STATUS| STATUS CODE)?[ :=]+403\b') {
+            "CLOUDFLARE_HTTP_403"
+        } elseif ($diagnostic -match '(?i)(\bHTTP(?:_STATUS| STATUS| STATUS CODE)?[ :=]+429\b|rate limit)') {
+            "CLOUDFLARE_RATE_LIMITED"
+        } else { "CLOUDFLARE_WRANGLER_COMMAND_FAILED" }
+        throw $classification
+    }
     $read.stdout | ConvertFrom-ReleaseControlJson
 }
 
@@ -1196,12 +1227,134 @@ function ConvertFrom-NativeProcessText {
     return $lines
 }
 
+function Get-NativeProcessIdentity {
+    param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
+    try {
+        [pscustomobject]@{
+            pid = [int]$Process.Id
+            start_token = ([DateTimeOffset]$Process.StartTime.ToUniversalTime()).Ticks.ToString()
+        }
+    } catch { return $null }
+}
+
+function Write-NativeProcessOwnershipReceipt {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][System.Diagnostics.Process]$RootProcess,
+        [int[]]$DescendantIds = @()
+    )
+    $root = Get-NativeProcessIdentity $RootProcess
+    if (-not $root) { throw "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED" }
+    $descendants = @($DescendantIds | ForEach-Object {
+        try {
+            $owned = [System.Diagnostics.Process]::GetProcessById([int]$_)
+            try { Get-NativeProcessIdentity $owned } finally { $owned.Dispose() }
+        } catch { $null }
+    } | Where-Object { $_ })
+    $receipt = [pscustomobject]@{
+        schema_version = "native-process-ownership-v1"
+        root = $root
+        descendants = $descendants
+        observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+    $temporary = Join-Path (Split-Path -Parent $Path) (
+        "{0}.{1}.tmp" -f (Split-Path -Leaf $Path), [guid]::NewGuid().ToString("N")
+    )
+    try {
+        $json = $receipt | ConvertTo-Json -Compress -Depth 5
+        $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        $bytes = $utf8.GetBytes($json)
+        if ($bytes.Length -gt 65536) {
+            throw "NATIVE_PROCESS_OWNERSHIP_RECEIPT_BOUND_EXCEEDED"
+        }
+        [System.IO.File]::WriteAllBytes($temporary, $bytes)
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            [System.IO.File]::Replace($temporary, $Path, $null, $true)
+        } else {
+            [System.IO.File]::Move($temporary, $Path)
+        }
+        return Confirm-NativeProcessOwnershipReceipt -Path $Path -ExpectedRoot $root
+    } catch {
+        throw "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED"
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Confirm-NativeProcessOwnershipReceipt {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][object]$ExpectedRoot
+    )
+    try {
+        $receipt = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 |
+            ConvertFrom-ReleaseControlJson
+        if (-not $receipt -or
+            [string]$receipt.schema_version -cne "native-process-ownership-v1" -or
+            -not $receipt.root -or
+            [int]$receipt.root.pid -ne [int]$ExpectedRoot.pid -or
+            [string]::IsNullOrWhiteSpace([string]$receipt.root.start_token) -or
+            [string]$receipt.root.start_token -cne [string]$ExpectedRoot.start_token) {
+            throw "NATIVE_PROCESS_OWNERSHIP_RECEIPT_MISMATCH"
+        }
+        return [pscustomobject]@{ state = "VERIFIED"; receipt = $receipt }
+    } catch {
+        throw "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED"
+    }
+}
+
+function Test-NativeProcessIdentityAlive {
+    param([AllowNull()][object]$Identity)
+    if (-not $Identity -or [int]$Identity.pid -le 0 -or
+        [string]::IsNullOrWhiteSpace([string]$Identity.start_token)) { return $false }
+    try {
+        $process = [System.Diagnostics.Process]::GetProcessById([int]$Identity.pid)
+        try {
+            return [string](([DateTimeOffset]$process.StartTime.ToUniversalTime()).Ticks) -ceq
+                [string]$Identity.start_token
+        } finally { $process.Dispose() }
+    } catch { return $false }
+}
+
+function Get-NativeOwnershipReceiptState {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [pscustomobject]@{ state = "CLEAR"; alive = @() }
+    }
+    try {
+        $receipt = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 |
+            ConvertFrom-ReleaseControlJson
+        if ([string]$receipt.schema_version -ne "native-process-ownership-v1") {
+            return [pscustomobject]@{ state = "UNRESOLVED"; alive = @() }
+        }
+        $alive = @(@($receipt.root) + @($receipt.descendants) | Where-Object {
+            Test-NativeProcessIdentityAlive $_
+        })
+        [pscustomobject]@{
+            state = if ($alive.Count -eq 0) { "CLEAR" } else { "ACTIVE" }
+            alive = $alive
+        }
+    } catch { return [pscustomobject]@{ state = "UNRESOLVED"; alive = @() } }
+}
+
+function Wait-NativeProcessContainment {
+    param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
+    while ($true) {
+        try {
+            if ($Process.HasExited) { return }
+        } catch { return }
+        Start-Sleep -Milliseconds 100
+    }
+}
+
 function Invoke-Utf8NativeProcess {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
         [string[]]$Arguments = @(),
         [string]$WorkingDirectory = "",
-        [hashtable]$Environment = @{}
+        [hashtable]$Environment = @{},
+        [ValidateRange(1, 300000)][int]$TimeoutMilliseconds = 30000,
+        [string]$OwnershipReceiptPath = $script:nativeProcessOwnershipReceiptPath
     )
     $command = Get-Command $FilePath -ErrorAction Stop
     $start = New-Object System.Diagnostics.ProcessStartInfo
@@ -1222,11 +1375,61 @@ function Invoke-Utf8NativeProcess {
     $start.StandardErrorEncoding = $strictUtf8
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $start
+    $preserveOwnership = $false
     try {
         [void]$process.Start()
+        if ($OwnershipReceiptPath) {
+            try {
+                $ownership = Write-NativeProcessOwnershipReceipt `
+                    -Path $OwnershipReceiptPath -RootProcess $process
+                if ([string]$ownership.state -cne "VERIFIED") {
+                    throw "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED"
+                }
+            } catch {
+                $termination = Stop-NativeProcessTree -Process $process
+                if ([string]$termination.state -notin @("TERMINATED", "ALREADY_EXITED")) {
+                    $preserveOwnership = $true
+                    $script:unresolvedNativeProcess = $process
+                    throw "NATIVE_PROCESS_TERMINATION_UNRESOLVED"
+                }
+                Remove-Item -LiteralPath $OwnershipReceiptPath -Force `
+                    -ErrorAction SilentlyContinue
+                throw "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED"
+            }
+        }
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
-        $process.WaitForExit()
+        if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+            $receiptUpdateFailed = $false
+            if ($OwnershipReceiptPath) {
+                $inventoryAvailable = $false
+                $descendants = @(Get-NativeDescendantProcessIds `
+                    -RootProcessId $process.Id `
+                    -InventoryAvailable ([ref]$inventoryAvailable))
+                try {
+                    $ownership = Write-NativeProcessOwnershipReceipt `
+                        -Path $OwnershipReceiptPath -RootProcess $process `
+                        -DescendantIds $descendants
+                    if ([string]$ownership.state -cne "VERIFIED") {
+                        throw "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED"
+                    }
+                } catch { $receiptUpdateFailed = $true }
+            }
+            $termination = Stop-NativeProcessTree -Process $process
+            if ([string]$termination.state -notin @("TERMINATED", "ALREADY_EXITED")) {
+                $preserveOwnership = $true
+                $script:unresolvedNativeProcess = $process
+                throw "NATIVE_PROCESS_TERMINATION_UNRESOLVED"
+            }
+            if ($OwnershipReceiptPath) {
+                Remove-Item -LiteralPath $OwnershipReceiptPath -Force `
+                    -ErrorAction SilentlyContinue
+            }
+            if ($receiptUpdateFailed) {
+                throw "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED"
+            }
+            throw "NATIVE_PROCESS_TIMEOUT"
+        }
         $stdout = $stdoutTask.GetAwaiter().GetResult()
         $stderr = $stderrTask.GetAwaiter().GetResult()
         return [pscustomobject]@{
@@ -1239,7 +1442,13 @@ function Invoke-Utf8NativeProcess {
     } catch [System.Text.DecoderFallbackException] {
         throw "NATIVE_PROCESS_UTF8_INVALID"
     } finally {
-        $process.Dispose()
+        if (-not $preserveOwnership) {
+            if ($OwnershipReceiptPath) {
+                Remove-Item -LiteralPath $OwnershipReceiptPath -Force `
+                    -ErrorAction SilentlyContinue
+            }
+            $process.Dispose()
+        }
     }
 }
 
@@ -10086,28 +10295,736 @@ function Test-CloudflareReleasePlacement {
 
 function Test-CloudflareRollbackTarget {
     param([Parameter(Mandatory = $true)][object]$Target)
-    $targetVersionId = [string]$Target.worker_version_id
-    if ([string]::IsNullOrWhiteSpace($targetVersionId)) { return $false }
+    $resolution = Resolve-ReleaseRuntimeIdentity $Target $releaseSchemaVersion
+    $observation = Get-CloudflareRollbackArtifactObservation `
+        -IdentityResolution $resolution -ForceFresh
+    return [string]$observation.status -eq "AVAILABLE"
+}
+
+function Get-NativeDescendantProcessIds {
+    param(
+        [Parameter(Mandatory = $true)][int]$RootProcessId,
+        [Parameter(Mandatory = $true)][ref]$InventoryAvailable
+    )
+    $InventoryAvailable.Value = $false
     try {
-        $version = Get-CloudflareVersionDetails -VersionId $targetVersionId
-        if (-not $version -or $version -is [System.Array] -or
-            -not $version.PSObject.Properties['id'] -or
-            [string]$version.id -cne $targetVersionId -or
-            -not $version.PSObject.Properties['metadata'] -or
-            -not $version.metadata -or
-            -not $version.PSObject.Properties['resources'] -or
-            -not $version.resources -or
-            -not $version.resources.PSObject.Properties['script'] -or
-            -not $version.resources.script -or
-            'fetch' -notin @($version.resources.script.handlers)) {
+        $rows = @(Get-CimInstance Win32_Process -OperationTimeoutSec 2 `
+            -ErrorAction Stop |
+            Select-Object ProcessId,ParentProcessId)
+    } catch { return @() }
+    $InventoryAvailable.Value = $true
+    $pending = @($RootProcessId)
+    $result = New-Object System.Collections.Generic.List[int]
+    while ($pending.Count -gt 0) {
+        $parent = [int]$pending[0]
+        $pending = @($pending | Select-Object -Skip 1)
+        foreach ($row in @($rows | Where-Object {
+            [int]$_.ParentProcessId -eq $parent
+        })) {
+            $child = [int]$row.ProcessId
+            if (-not $result.Contains($child)) {
+                $result.Add($child)
+                $pending += $child
+            }
+        }
+    }
+    return @($result)
+}
+
+function Test-NativeProcessIdsExited {
+    param([int[]]$ProcessIds)
+    foreach ($processIdValue in @($ProcessIds | Select-Object -Unique)) {
+        if (Get-Process -Id $processIdValue -ErrorAction SilentlyContinue) {
             return $false
         }
-        $deployment = Get-CloudflareDeployment
-    } catch { return $false }
-    return @($deployment.versions | Where-Object {
-        [string]$_.version_id -ceq $targetVersionId -and
-        [double]$_.percentage -in @(0, 100)
-    }).Count -eq 1
+    }
+    return $true
+}
+
+function Invoke-NativeTreeTerminationCommand {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [int]$TimeoutMilliseconds = 5000
+    )
+    $killer = $null
+    try {
+        $taskkill = Get-Command "taskkill.exe" -ErrorAction Stop
+        $start = New-Object System.Diagnostics.ProcessStartInfo
+        $start.FileName = [string]$taskkill.Source
+        $start.Arguments = "/PID $ProcessId /T /F"
+        $start.UseShellExecute = $false
+        $start.CreateNoWindow = $true
+        $killer = [System.Diagnostics.Process]::Start($start)
+        if (-not $killer.WaitForExit($TimeoutMilliseconds)) {
+            try { $killer.Kill() } catch {}
+            try { [void]$killer.WaitForExit(1000) } catch {}
+            return [pscustomobject]@{ state = "COMMAND_TIMEOUT"; exit_code = $null }
+        }
+        return [pscustomobject]@{
+            state = if ([int]$killer.ExitCode -eq 0) {
+                "COMMAND_SUCCEEDED"
+            } else { "COMMAND_NONZERO" }
+            exit_code = [int]$killer.ExitCode
+        }
+    } catch {
+        return [pscustomobject]@{ state = "COMMAND_START_FAILED"; exit_code = $null }
+    } finally {
+        if ($killer) { try { $killer.Dispose() } catch {} }
+    }
+}
+
+function Stop-NativeProcessTree {
+    param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
+    try {
+        if ($Process.HasExited) {
+            return [pscustomobject]@{
+                state = "ALREADY_EXITED"; root_exited = $true
+                descendants_exited = $true; command_state = "NOT_REQUIRED"
+            }
+        }
+        $rootId = [int]$Process.Id
+    } catch {
+        return [pscustomobject]@{
+            state = "ALREADY_EXITED"; root_exited = $true
+            descendants_exited = $true; command_state = "NOT_REQUIRED"
+        }
+    }
+    $inventoryAvailable = $false
+    $descendantIds = @(Get-NativeDescendantProcessIds -RootProcessId $rootId `
+        -InventoryAvailable ([ref]$inventoryAvailable))
+    $trackedIds = @($rootId) + $descendantIds
+    $command = Invoke-NativeTreeTerminationCommand -ProcessId $rootId `
+        -TimeoutMilliseconds 5000
+    try { [void]$Process.WaitForExit(1000) } catch {}
+    if ((Test-NativeProcessIdsExited -ProcessIds $trackedIds) -and
+        ($inventoryAvailable -or [string]$command.state -eq "COMMAND_SUCCEEDED")) {
+        return [pscustomobject]@{
+            state = "TERMINATED"; root_exited = $true
+            descendants_exited = $true; command_state = [string]$command.state
+        }
+    }
+
+    # A non-zero or timed-out taskkill is not evidence of termination. Capture
+    # the still-owned tree again, kill descendants before the root, then prove
+    # every observed member is gone.
+    $fallbackInventoryAvailable = $false
+    $descendantIds = @($descendantIds) + @(
+        Get-NativeDescendantProcessIds -RootProcessId $rootId `
+            -InventoryAvailable ([ref]$fallbackInventoryAvailable)
+    ) | Select-Object -Unique
+    $trackedIds = @($rootId) + @($descendantIds)
+    $fallbackIds = @($descendantIds)
+    [array]::Reverse($fallbackIds)
+    foreach ($processIdValue in $fallbackIds) {
+        try {
+            $descendant = [System.Diagnostics.Process]::GetProcessById(
+                [int]$processIdValue
+            )
+            try { $descendant.Kill() } finally { $descendant.Dispose() }
+        } catch {}
+    }
+    try { $Process.Kill() } catch {}
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+    while ([DateTimeOffset]::UtcNow -lt $deadline -and
+        -not (Test-NativeProcessIdsExited -ProcessIds $trackedIds)) {
+        Start-Sleep -Milliseconds 50
+    }
+    $rootExited = -not [bool](Get-Process -Id $rootId -ErrorAction SilentlyContinue)
+    $treeInventoryAvailable = [bool]($inventoryAvailable -or
+        $fallbackInventoryAvailable)
+    $descendantsExited = [bool]($treeInventoryAvailable -and
+        (Test-NativeProcessIdsExited -ProcessIds $descendantIds))
+    return [pscustomobject]@{
+        state = if ($rootExited -and $descendantsExited) {
+            "TERMINATED"
+        } else { "TERMINATION_FAILED" }
+        root_exited = $rootExited
+        descendants_exited = $descendantsExited
+        command_state = [string]$command.state
+    }
+}
+
+function Get-ReleaseDeploymentProviderObservation {
+    param([switch]$ForceFresh, [switch]$NoRefresh)
+    $now = [DateTimeOffset]::UtcNow
+    $cached = $script:releaseDeploymentObservationCache
+    if ($NoRefresh) {
+        if ($cached -and [string]$cached.status -eq "AVAILABLE" -and
+            ($now - [DateTimeOffset]::Parse([string]$cached.observed_at)) -le
+                $releaseProviderObservationMaximumStaleAge) {
+            return $cached
+        }
+        return [pscustomobject]@{
+            status = "UNKNOWN"; value = $null
+            observed_at = $now.ToString("o"); reason = "PROVIDER_OBSERVATION_NOT_REFRESHED"
+        }
+    }
+    if (-not $ForceFresh -and $cached -and
+        ($now - [DateTimeOffset]::Parse([string]$cached.attempted_at)) -lt
+            $releaseProviderObservationInterval) {
+        if ([string]$cached.status -eq "AVAILABLE" -and
+            ($now - [DateTimeOffset]::Parse([string]$cached.observed_at)) -gt
+                $releaseProviderObservationMaximumStaleAge) {
+            return [pscustomobject]@{
+                status = "UNKNOWN"; value = $null
+                observed_at = $now.ToString("o"); reason = "PROVIDER_OBSERVATION_STALE"
+            }
+        }
+        return $cached
+    }
+    $attemptedAt = [DateTimeOffset]::UtcNow
+    try {
+        $value = Get-CloudflareDeployment
+        $completedAt = [DateTimeOffset]::UtcNow
+        $cached = [pscustomobject]@{
+            status = "AVAILABLE"; value = $value
+            observed_at = $completedAt.ToString("o")
+            attempted_at = $attemptedAt.ToString("o")
+            reason = "CLOUDFLARE_DEPLOYMENT_OBSERVED"
+        }
+    } catch {
+        if ([string]$_.Exception.Message -eq
+            "NATIVE_PROCESS_TERMINATION_UNRESOLVED") { throw }
+        $completedAt = [DateTimeOffset]::UtcNow
+        $cached = [pscustomobject]@{
+            status = "UNKNOWN"; value = $null
+            observed_at = $completedAt.ToString("o")
+            attempted_at = $attemptedAt.ToString("o")
+            reason = "CLOUDFLARE_DEPLOYMENT_OBSERVATION_UNAVAILABLE"
+        }
+    }
+    $script:releaseDeploymentObservationCache = $cached
+    return $cached
+}
+
+function Test-ReleaseExactVersionProviderEnvelope {
+    param(
+        [Parameter(Mandatory = $true)][string]$RequestedVersionId,
+        [AllowNull()][object]$Value
+    )
+    if (-not $Value -or $Value -is [System.Array] -or
+        -not $Value.PSObject.Properties['id'] -or
+        [string]::IsNullOrWhiteSpace([string]$Value.id)) {
+        return "UNKNOWN"
+    }
+    if ([string]$Value.id -cne $RequestedVersionId) { return "MISMATCH" }
+    if (-not $Value.PSObject.Properties['metadata'] -or -not $Value.metadata -or
+        -not $Value.PSObject.Properties['resources'] -or -not $Value.resources -or
+        -not $Value.resources.PSObject.Properties['script'] -or
+        -not $Value.resources.script -or
+        -not $Value.resources.script.PSObject.Properties['handlers'] -or
+        'fetch' -notin @($Value.resources.script.handlers)) {
+        return "UNKNOWN"
+    }
+    return "AVAILABLE"
+}
+
+function Get-ReleaseExactVersionProviderObservation {
+    param(
+        [Parameter(Mandatory = $true)][string]$VersionId,
+        [switch]$ForceFresh,
+        [switch]$NoRefresh
+    )
+    $now = [DateTimeOffset]::UtcNow
+    $cached = if ($script:releaseExactVersionObservationCache.ContainsKey($VersionId)) {
+        $script:releaseExactVersionObservationCache[$VersionId]
+    } else { $null }
+    if (-not $ForceFresh -and $cached -and [string]$cached.status -eq "AVAILABLE") {
+        return $cached
+    }
+    if ($NoRefresh) {
+        if ($cached -and [string]$cached.status -eq "AVAILABLE") { return $cached }
+        return [pscustomobject]@{
+            status = "UNKNOWN"; value = $null
+            observed_at = $now.ToString("o"); reason = "EXACT_VERSION_NOT_REFRESHED"
+        }
+    }
+    if (-not $ForceFresh -and $cached -and
+        ($now - [DateTimeOffset]::Parse([string]$cached.attempted_at)) -lt
+            $releaseProviderObservationInterval) {
+        return $cached
+    }
+    $attemptedAt = [DateTimeOffset]::UtcNow
+    try {
+        $value = Get-CloudflareVersionDetails -VersionId $VersionId
+        $completedAt = [DateTimeOffset]::UtcNow
+        $envelopeStatus = Test-ReleaseExactVersionProviderEnvelope `
+            -RequestedVersionId $VersionId -Value $value
+        $next = [pscustomobject]@{
+            status = $envelopeStatus
+            value = if ($envelopeStatus -eq "AVAILABLE") { $value } else { $null }
+            observed_at = $completedAt.ToString("o")
+            attempted_at = $attemptedAt.ToString("o")
+            reason = if ($envelopeStatus -eq "AVAILABLE") {
+                "EXACT_WORKER_VERSION_OBSERVED"
+            } elseif ($envelopeStatus -eq "MISMATCH") {
+                "EXACT_WORKER_VERSION_IDENTITY_MISMATCH"
+            } else { "EXACT_WORKER_VERSION_RESPONSE_MALFORMED" }
+        }
+        if ($envelopeStatus -ne "AVAILABLE" -and $cached -and
+            [string]$cached.status -eq "AVAILABLE") {
+            return $next
+        }
+        $cached = $next
+    } catch {
+        if ([string]$_.Exception.Message -eq
+            "NATIVE_PROCESS_TERMINATION_UNRESOLVED") { throw }
+        $diagnostic = [string]$_.Exception.Message
+        $status = if ($diagnostic -match '(?i)(^|[:\s])(?:CLOUDFLARE_)?VERSION_NOT_FOUND(?:[:\s]|$)' -or
+            $diagnostic -eq "CLOUDFLARE_HTTP_404" -or
+            $diagnostic -match '(?i)\bHTTP(?:_STATUS| STATUS| STATUS CODE)?[ :=]+404\b') {
+            "UNAVAILABLE"
+        } else { "UNKNOWN" }
+        $completedAt = [DateTimeOffset]::UtcNow
+        $failure = [pscustomobject]@{
+            status = $status; value = $null
+            observed_at = $completedAt.ToString("o")
+            attempted_at = $attemptedAt.ToString("o")
+            reason = "EXACT_WORKER_VERSION_$status"
+        }
+        if ($status -eq "UNKNOWN" -and $cached -and
+            [string]$cached.status -eq "AVAILABLE") {
+            return $failure
+        }
+        $cached = $failure
+    }
+    $script:releaseExactVersionObservationCache[$VersionId] = $cached
+    return $cached
+}
+
+function Get-CloudflareRollbackArtifactObservation {
+    param(
+        [Parameter(Mandatory = $true)][object]$IdentityResolution,
+        [switch]$ForceFresh,
+        [switch]$NoRefresh
+    )
+    $Target = $IdentityResolution.identity
+    $targetVersionId = [string]$Target.worker_version_id
+    if ([string]$IdentityResolution.status -ne "COMPLETE" -or
+        [string]::IsNullOrWhiteSpace($targetVersionId)) {
+        return New-ReleaseWorkerArtifactObservation `
+            -IdentityResolution $IdentityResolution -VersionDetails $null `
+            -ProviderStatus "UNKNOWN"
+    }
+    $provider = Get-ReleaseExactVersionProviderObservation `
+        -VersionId $targetVersionId -ForceFresh:$ForceFresh -NoRefresh:$NoRefresh
+    $artifact = New-ReleaseWorkerArtifactObservation `
+        -IdentityResolution $IdentityResolution -VersionDetails $provider.value `
+        -ProviderStatus ([string]$provider.status) `
+        -ProviderScopeVerified ([bool]([string]$provider.status -eq "AVAILABLE"))
+    $artifact | Add-Member -NotePropertyName provider_observed_at `
+        -NotePropertyValue ([string]$provider.observed_at) -Force
+    return $artifact
+}
+
+function ConvertFrom-ReleaseTrafficPercentage {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value -or
+        [string]::IsNullOrWhiteSpace([string]$Value)) {
+        return [pscustomobject]@{ valid = $false; value = $null }
+    }
+    $parsed = 0.0
+    $valid = [double]::TryParse(
+        [string]$Value,
+        [Globalization.NumberStyles]::Float,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [ref]$parsed
+    )
+    $valid = [bool]($valid -and -not [double]::IsNaN($parsed) -and
+        -not [double]::IsInfinity($parsed) -and $parsed -ge 0.0 -and
+        $parsed -le 100.0)
+    return [pscustomobject]@{
+        valid = $valid
+        value = if ($valid) { [double]$parsed } else { $null }
+    }
+}
+
+function Get-ReleaseTrafficObservation {
+    param(
+        [AllowNull()][object]$Deployment,
+        [AllowNull()][object]$Previous,
+        [string]$Status = "AVAILABLE"
+    )
+    $previousId = if ($Previous) { [string]$Previous.worker_version_id } else { "" }
+    $notObservedMembership = if ($previousId) { "UNKNOWN" } else { "NOT_APPLICABLE" }
+    if ($Status -ne "AVAILABLE" -or -not $Deployment -or
+        -not $Deployment.PSObject.Properties['versions']) {
+        return [pscustomobject]@{
+            status = "UNKNOWN"; version_id = $null; git_sha = $null
+            traffic_percent = $null; previous_is_member = $false
+            previous_membership_status = $notObservedMembership
+            previous_traffic_percent = $null
+        }
+    }
+    $versions = @($Deployment.versions | Where-Object { $null -ne $_ })
+    $parsedVersions = @()
+    foreach ($version in $versions) {
+        if (-not $version.PSObject.Properties['version_id'] -or
+            [string]::IsNullOrWhiteSpace([string]$version.version_id) -or
+            -not $version.PSObject.Properties['percentage']) {
+            return [pscustomobject]@{
+                status = "MISMATCH"; version_id = $null; git_sha = $null
+                traffic_percent = $null; previous_is_member = $false
+                previous_membership_status = "MISMATCH"
+                previous_traffic_percent = $null
+            }
+        }
+        $percentage = ConvertFrom-ReleaseTrafficPercentage $version.percentage
+        if (-not $percentage.valid) {
+            return [pscustomobject]@{
+                status = "MISMATCH"; version_id = $null; git_sha = $null
+                traffic_percent = $null; previous_is_member = $false
+                previous_membership_status = "MISMATCH"
+                previous_traffic_percent = $null
+            }
+        }
+        $parsedVersions += [pscustomobject]@{
+            version_id = [string]$version.version_id
+            percentage = [double]$percentage.value
+            raw = $version
+        }
+    }
+    $active = @($parsedVersions | Where-Object { $_.percentage -eq 100.0 })
+    $otherPositive = @($parsedVersions | Where-Object {
+        $_.percentage -gt 0.0 -and $_.percentage -lt 100.0
+    })
+    if ($active.Count -ne 1 -or $otherPositive.Count -gt 0) {
+        return [pscustomobject]@{
+            status = "MISMATCH"
+            version_id = $null; git_sha = $null
+            traffic_percent = $null; previous_is_member = $false
+            previous_membership_status = if ($previousId) { "MISMATCH" } else {
+                "NOT_APPLICABLE"
+            }
+            previous_traffic_percent = $null
+        }
+    }
+    $previousRows = @($parsedVersions | Where-Object {
+        $previousId -and [string]$_.version_id -ceq $previousId
+    })
+    $membershipStatus = if (-not $previousId) {
+        "NOT_APPLICABLE"
+    } elseif ($previousRows.Count -eq 0) {
+        "NOT_ASSIGNED"
+    } elseif ($previousRows.Count -eq 1) { "ASSIGNED" } else { "MISMATCH" }
+    [pscustomobject]@{
+        status = "AVAILABLE"
+        version_id = [string]$active[0].version_id
+        git_sha = if ($active[0].raw.PSObject.Properties['git_sha']) {
+            [string]$active[0].raw.git_sha
+        } else { $null }
+        traffic_percent = [double]$active[0].percentage
+        previous_is_member = [bool]($membershipStatus -eq "ASSIGNED")
+        previous_membership_status = $membershipStatus
+        previous_traffic_percent = if ($membershipStatus -eq "ASSIGNED") {
+            [double]$previousRows[0].percentage
+        } else { $null }
+    }
+}
+
+function Get-ReleaseWindowsArtifactObservation {
+    param([Parameter(Mandatory = $true)][object]$IdentityResolution)
+    $Target = $IdentityResolution.identity
+    if ([string]$IdentityResolution.status -ne "COMPLETE" -or -not $Target) {
+        return New-ReleaseWindowsArtifactObservation `
+            -IdentityResolution $IdentityResolution `
+            -Status "NOT_APPLICABLE"
+    }
+    $revision = [string]$Target.windows_revision
+    if ($revision -notmatch '^[0-9a-f]{40}$' -or
+        ([string]$Target.git_sha -match '^[0-9a-f]{40}$' -and
+            [string]$Target.git_sha -cne $revision)) {
+        return New-ReleaseWindowsArtifactObservation `
+            -IdentityResolution $IdentityResolution `
+            -Status "MISMATCH" -Reason "WINDOWS_REVISION_IDENTITY_MISMATCH"
+    }
+    try {
+        $commit = Invoke-Utf8NativeProcess -FilePath "git.exe" -Arguments @(
+            "-C", $repositoryRoot, "cat-file", "-e", "$revision^{commit}"
+        )
+        if ($commit.exit_code -ne 0) {
+            return New-ReleaseWindowsArtifactObservation `
+                -IdentityResolution $IdentityResolution `
+                -Status "UNAVAILABLE" -Reason "WINDOWS_REVISION_UNAVAILABLE"
+        }
+        $manifest = Invoke-Utf8NativeProcess -FilePath "git.exe" -Arguments @(
+            "-C", $repositoryRoot, "show", "${revision}:scripts/windows-service-launch-contract.json"
+        )
+        if ($manifest.exit_code -eq 0) {
+            $contract = ([string]$manifest.stdout) | ConvertFrom-ReleaseControlJson
+            $keys = @($contract.services | ForEach-Object { [string]$_.key })
+            if ([string]$contract.schema_version -ne "windows-service-launch-contract-v1" -or
+                $keys.Count -ne 6 -or @($keys | Sort-Object -Unique).Count -ne 6 -or
+                @($keys | Where-Object {
+                    $_ -notin @("quote","collector","annotator","api","sync","broadcast")
+                }).Count) {
+                return New-ReleaseWindowsArtifactObservation `
+                    -IdentityResolution $IdentityResolution `
+                    -Status "MISMATCH" -Reason "WINDOWS_LAUNCH_CONTRACT_INVALID"
+            }
+            return New-ReleaseWindowsArtifactObservation `
+                -IdentityResolution $IdentityResolution `
+                -Status "AVAILABLE" -Reason "REVISION_OWNED_LAUNCH_CONTRACT_AVAILABLE"
+        }
+        if ([string]$IdentityResolution.identity_kind -eq "NARROW_LEGACY") {
+            return New-ReleaseWindowsArtifactObservation `
+                -IdentityResolution $IdentityResolution `
+                -Status "AVAILABLE" -Reason "KNOWN_NARROW_LEGACY_ADAPTER_AVAILABLE"
+        }
+        return New-ReleaseWindowsArtifactObservation `
+            -IdentityResolution $IdentityResolution `
+            -Status "UNAVAILABLE" -Reason "WINDOWS_LAUNCH_CONTRACT_UNAVAILABLE"
+    } catch {
+        return New-ReleaseWindowsArtifactObservation `
+            -IdentityResolution $IdentityResolution `
+            -Status "UNKNOWN" -Reason "WINDOWS_ARTIFACT_OBSERVATION_UNAVAILABLE"
+    }
+}
+
+function Get-ReleaseActiveHealthObservation {
+    $ownerStatus = if (Test-SingleProductionOwner) { "SINGLE_OWNER" } else { "INVALID" }
+    $healthy = Test-CurrentBusinessRuntimeHealth
+    $businessStatus = if ($healthy) { "HEALTHY" } else { "DEGRADED" }
+    $businessReason = if ($healthy) {
+        "CURRENT_RUNTIME_HEALTHY"
+    } else { "LOCAL_API_OR_RUNTIME_HEALTH_FAILED" }
+    [pscustomobject]@{
+        status = if ($businessStatus -eq "HEALTHY" -and
+            $ownerStatus -eq "SINGLE_OWNER") { "HEALTHY" } else { "DEGRADED" }
+        reason = if ($ownerStatus -ne "SINGLE_OWNER") {
+            "PRODUCTION_OWNER_UNIQUENESS_FAILED"
+        } else {
+            $businessReason
+        }
+        business_health_status = $businessStatus
+        business_health_reason = $businessReason
+        ownership_status = $ownerStatus
+    }
+}
+
+function Get-ReleaseProviderRuntimeFacts {
+    param(
+        [Parameter(Mandatory = $true)][object]$PersistedState,
+        [switch]$ForceProviderRefresh,
+        [switch]$SkipProviderObservation
+    )
+    $schema = [string]$PersistedState.schema_version
+    $previousResolution = Resolve-ReleaseRuntimeIdentity `
+        $PersistedState.previous_stable $schema
+    $freshRefreshBlocked = [bool]($ForceProviderRefresh -and
+        $script:releaseProviderRefreshInFlight)
+    $cacheOnly = [bool]($SkipProviderObservation -or
+        $script:releaseProviderRefreshInFlight)
+    if (-not $cacheOnly) { $script:releaseProviderRefreshInFlight = $true }
+    try {
+        $deploymentObservation = Get-ReleaseDeploymentProviderObservation `
+            -ForceFresh:$ForceProviderRefresh -NoRefresh:$cacheOnly
+        if ($freshRefreshBlocked) {
+            $deploymentObservation = [pscustomobject]@{
+                status = "UNKNOWN"; value = $null
+                observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+                reason = "FRESH_PROVIDER_OBSERVATION_ALREADY_IN_FLIGHT"
+            }
+        }
+        $deployment = $deploymentObservation.value
+        $deploymentStatus = [string]$deploymentObservation.status
+        $traffic = Get-ReleaseTrafficObservation -Deployment $deployment `
+            -Previous $previousResolution.identity -Status $deploymentStatus
+        $traffic | Add-Member -NotePropertyName provider_observed_at `
+            -NotePropertyValue ([string]$deploymentObservation.observed_at) -Force
+        $activeFact = [pscustomobject]@{
+            status = "NOT_APPLICABLE"; requested_version_id = $null
+            observed_version_id = $null; git_sha = $null; observed_at = $null
+        }
+        if ([string]$traffic.status -eq "AVAILABLE") {
+            $activeProvider = Get-ReleaseExactVersionProviderObservation `
+                -VersionId ([string]$traffic.version_id) `
+                -ForceFresh:$ForceProviderRefresh -NoRefresh:$cacheOnly
+            $activeVersion = $activeProvider.value
+            if ([string]$activeProvider.status -eq "AVAILABLE" -and
+                $activeVersion -and $activeVersion -isnot [System.Array] -and
+                [string]$activeVersion.id -ceq [string]$traffic.version_id) {
+                $traffic.git_sha = Get-ReleaseGitShaFromVersion -Version $activeVersion
+            } else { $traffic.git_sha = $null }
+            $traffic | Add-Member -NotePropertyName version_observed_at `
+                -NotePropertyValue ([string]$activeProvider.observed_at) -Force
+            $activeFact = [pscustomobject]@{
+                status = [string]$activeProvider.status
+                requested_version_id = [string]$traffic.version_id
+                observed_version_id = if ($activeVersion -and
+                    $activeVersion -isnot [System.Array]) {
+                    [string]$activeVersion.id
+                } else { $null }
+                git_sha = [string]$traffic.git_sha
+                observed_at = [string]$activeProvider.observed_at
+            }
+        }
+        $previousWorker = if ($freshRefreshBlocked) {
+            New-ReleaseWorkerArtifactObservation `
+                -IdentityResolution $previousResolution -VersionDetails $null `
+                -ProviderStatus "UNKNOWN"
+        } else {
+            Get-CloudflareRollbackArtifactObservation `
+                -IdentityResolution $previousResolution `
+                -ForceFresh:$ForceProviderRefresh -NoRefresh:$cacheOnly
+        }
+    } finally {
+        if (-not $cacheOnly) { $script:releaseProviderRefreshInFlight = $false }
+    }
+    return [pscustomobject]@{
+        schema_version = "control-center-provider-facts-v1"
+        status = if ([string]$traffic.status -eq "AVAILABLE" -and
+            [string]$activeFact.status -eq "AVAILABLE") { "AVAILABLE" } else { "UNKNOWN" }
+        deployment_observation = [pscustomobject]@{
+            status = [string]$deploymentObservation.status
+            observed_at = [string]$deploymentObservation.observed_at
+            reason = [string]$deploymentObservation.reason
+        }
+        active_worker_observation = $traffic
+        active_exact_version_fact = $activeFact
+        previous_worker_artifact = $previousWorker
+    }
+}
+
+function Get-ReleaseLocalRuntimeFacts {
+    param(
+        [Parameter(Mandatory = $true)][object]$PersistedState,
+        [Parameter(Mandatory = $true)][object]$PreviousIdentityResolution,
+        [switch]$ReleaseLockOwnedByCaller
+    )
+    $runtime = Get-RuntimeCodeState
+    $windowsObservation = if ($runtime -and $runtime.applied_revision) {
+        [pscustomobject]@{
+            status = "AVAILABLE"
+            revision = [string]$runtime.applied_revision
+        }
+    } else { $null }
+    $health = Get-ReleaseActiveHealthObservation
+    $previousWindows = Get-ReleaseWindowsArtifactObservation `
+        -IdentityResolution $PreviousIdentityResolution
+    $bundle = Get-RuntimeControlBundleIdentity
+    $bundleStatus = if ($bundle -and [bool]$bundle.exact_revision) {
+        "AVAILABLE"
+    } else { "UNAVAILABLE" }
+    return [pscustomobject]@{
+        schema_version = "control-center-local-runtime-facts-v1"
+        active_windows_observation = $windowsObservation
+        health_observation = $health
+        previous_windows_artifact = $previousWindows
+        control_bundle_status = $bundleStatus
+        release_lock_active = [bool]((Test-Path -LiteralPath $releaseLockPath) -and
+            -not $ReleaseLockOwnedByCaller)
+    }
+}
+
+function New-UnknownReleaseProviderFacts {
+    param([string]$Reason = "PROVIDER_OBSERVATION_UNKNOWN")
+    [pscustomobject]@{
+        schema_version = "control-center-provider-facts-v1"
+        status = "UNKNOWN"
+        deployment_observation = [pscustomobject]@{
+            status = "UNKNOWN"; value = $null; observed_at = $null; reason = $Reason
+        }
+        active_worker_observation = [pscustomobject]@{
+            status = "UNKNOWN"; version_id = $null; git_sha = $null
+            traffic_percent = $null; previous_is_member = $false
+            previous_membership_status = "UNKNOWN"; previous_traffic_percent = $null
+        }
+        active_exact_version_fact = [pscustomobject]@{
+            status = "UNKNOWN"; requested_version_id = $null
+            observed_version_id = $null; git_sha = $null; observed_at = $null
+        }
+        previous_worker_artifact = [pscustomobject]@{ status = "UNKNOWN"; reason = $Reason }
+    }
+}
+
+function Join-ReleaseRuntimeFacts {
+    param(
+        [Parameter(Mandatory = $true)][object]$PersistedState,
+        [Parameter(Mandatory = $true)][object]$ProviderFacts,
+        [Parameter(Mandatory = $true)][object]$LocalFacts,
+        [DateTimeOffset]$ObservedAt = [DateTimeOffset]::UtcNow
+    )
+    $schema = [string]$PersistedState.schema_version
+    $committedResolution = Resolve-ReleaseRuntimeIdentity $PersistedState.stable $schema
+    $previousResolution = Resolve-ReleaseRuntimeIdentity $PersistedState.previous_stable $schema
+    $targetRaw = if ($PersistedState.transaction -and $PersistedState.transaction.target) {
+        $PersistedState.transaction.target
+    } else { $PersistedState.candidate }
+    $targetResolution = Resolve-ReleaseRuntimeIdentity $targetRaw $schema
+    $traffic = Get-ReleaseRuntimeProperty $ProviderFacts "active_worker_observation"
+    if (-not $traffic) {
+        $traffic = (New-UnknownReleaseProviderFacts).active_worker_observation
+    }
+    $previousWorker = Get-ReleaseRuntimeProperty $ProviderFacts "previous_worker_artifact"
+    if (-not $previousWorker) {
+        $previousWorker = [pscustomobject]@{
+            status = "UNKNOWN"; reason = "PREVIOUS_WORKER_ARTIFACT_UNKNOWN"
+        }
+    }
+    $windowsObservation = Get-ReleaseRuntimeProperty $LocalFacts "active_windows_observation"
+    $health = Get-ReleaseRuntimeProperty $LocalFacts "health_observation"
+    $previousWindows = Get-ReleaseRuntimeProperty $LocalFacts "previous_windows_artifact"
+    if (-not $previousWindows) {
+        $previousWindows = [pscustomobject]@{
+            status = "UNKNOWN"; reason = "PREVIOUS_WINDOWS_ARTIFACT_UNKNOWN"
+        }
+    }
+    $reverse = New-ReleaseReversePrecheck `
+        -PreviousIdentity $previousResolution.identity `
+        -CommittedIdentityStatus ([string]$committedResolution.status) `
+        -PreviousIdentityStatus ([string]$previousResolution.status) `
+        -WorkerArtifact $previousWorker -WindowsArtifact $previousWindows `
+        -ControlBundleStatus ([string]$LocalFacts.control_bundle_status) `
+        -TransactionActive ([bool]$PersistedState.transaction) `
+        -ReleaseLockActive ([bool]$LocalFacts.release_lock_active) `
+        -OwnershipStatus ([string]$health.ownership_status) `
+        -ActiveObservationStatus $(if ([string]$traffic.status -eq "AVAILABLE" -and
+            [string]$windowsObservation.status -eq "AVAILABLE") {
+            "AVAILABLE"
+        } else { "UNKNOWN" }) `
+        -ActiveIdentityStatus $(if ($traffic.version_id -match
+            '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' -and
+            $traffic.git_sha -match '^[0-9a-f]{40}$' -and
+            $windowsObservation.revision -match '^[0-9a-f]{40}$') { "COMPLETE" } else { "INCOMPLETE" }) `
+        -ActiveMatchesCommitted ([bool]($committedResolution.identity -and
+            [string]$traffic.version_id -ceq [string]$committedResolution.identity.worker_version_id -and
+            [string]$traffic.git_sha -ceq [string]$committedResolution.identity.git_sha -and
+            [string]$windowsObservation.revision -ceq [string]$committedResolution.identity.windows_revision))
+    $model = New-ReleaseRuntimeReadModel -PersistedState $PersistedState `
+        -ActiveWorkerObservation $traffic -ActiveWindowsObservation $windowsObservation `
+        -HealthObservation $health -PreviousWorkerArtifact $previousWorker `
+        -PreviousWindowsArtifact $previousWindows -ReversePrecheck $reverse `
+        -CommittedIdentityResolution $committedResolution `
+        -PreviousIdentityResolution $previousResolution `
+        -TargetIdentityResolution $targetResolution `
+        -ObservedAt $ObservedAt
+    $model | Add-Member -NotePropertyName local_facts `
+        -NotePropertyValue $LocalFacts -Force
+    return $model
+}
+
+function Get-CurrentReleaseRuntimeReadModel {
+    param(
+        [AllowNull()][object]$PersistedState = $null,
+        [DateTimeOffset]$ObservedAt = [DateTimeOffset]::UtcNow,
+        [switch]$ReleaseLockOwnedByCaller,
+        [switch]$ForceProviderRefresh,
+        [switch]$SkipProviderObservation
+    )
+    if (-not $PersistedState) { $PersistedState = Get-ReleaseControlState }
+    if (-not $PersistedState) { return $null }
+    $schema = [string]$PersistedState.schema_version
+    $previousResolution = Resolve-ReleaseRuntimeIdentity `
+        $PersistedState.previous_stable $schema
+    $providerFacts = Get-ReleaseProviderRuntimeFacts -PersistedState $PersistedState `
+        -ForceProviderRefresh:$ForceProviderRefresh `
+        -SkipProviderObservation:$SkipProviderObservation
+    $localFacts = Get-ReleaseLocalRuntimeFacts -PersistedState $PersistedState `
+        -PreviousIdentityResolution $previousResolution `
+        -ReleaseLockOwnedByCaller:$ReleaseLockOwnedByCaller
+    return Join-ReleaseRuntimeFacts -PersistedState $PersistedState `
+        -ProviderFacts $providerFacts -LocalFacts $localFacts -ObservedAt $ObservedAt
 }
 
 function Write-DeferredProjectionSyncRequest {
@@ -10212,13 +11129,17 @@ function New-PromotionFreshnessStep {
     }
 }
 
-function Test-CurrentStableRuntimeHealth {
-    if (-not (Test-SingleProductionOwner)) { return $false }
+function Test-CurrentBusinessRuntimeHealth {
     try {
         $response = Invoke-WebRequest -UseBasicParsing `
             -Uri "http://127.0.0.1:8765/api/health" -TimeoutSec 2
         return [int]$response.StatusCode -eq 200
     } catch { return $false }
+}
+
+function Test-CurrentStableRuntimeHealth {
+    return [bool]((Test-CurrentBusinessRuntimeHealth) -and
+        (Test-SingleProductionOwner))
 }
 
 function Invoke-PromotionFreshnessCoordinator {
@@ -10581,12 +11502,26 @@ function Invoke-ReverseStable {
             throw "Previous Stable is unavailable."
         }
         Assert-ActiveControlBundle
-        if (-not (Test-CloudflareRollbackTarget -Target $state.previous_stable)) {
-            throw "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"
+        # The GUI value is advisory only. Re-read exact provider, runtime,
+        # bundle, ownership, transaction, and lock facts while this caller owns
+        # the serialized action boundary, before creating a transaction.
+        $runtimeReadModel = Get-CurrentReleaseRuntimeReadModel `
+            -PersistedState $state -ReleaseLockOwnedByCaller `
+            -ForceProviderRefresh
+        $reversePrecheck = if ($runtimeReadModel -and $runtimeReadModel.previous) {
+            $runtimeReadModel.previous.reverse_precheck
+        } else { $null }
+        if (-not $reversePrecheck -or -not [bool]$reversePrecheck.can_reverse) {
+            $reason = if ($reversePrecheck) {
+                [string]$reversePrecheck.reason
+            } else { "RUNTIME_READ_MODEL_UNAVAILABLE" }
+            throw "REVERSE_PRECHECK_BLOCKED:$reason"
         }
-        if (-not (Test-SingleProductionOwner)) { throw "Exactly one Windows production owner is required." }
-        $current = $state.stable
-        $target = $state.previous_stable
+        $current = $runtimeReadModel.committed_stable
+        $target = $runtimeReadModel.previous_committed
+        if (-not $current -or -not $target) {
+            throw "REVERSE_PRECHECK_BLOCKED:VALIDATED_IDENTITY_UNAVAILABLE"
+        }
         $state.transaction = [pscustomobject]@{
             id = [guid]::NewGuid().ToString()
             type = "REVERSE"
@@ -10643,7 +11578,7 @@ function Invoke-ReverseStable {
                 }
                 Write-ReleaseControlState -State $state
             }
-        } elseif ($state) {
+        } elseif ($state -and $state.transaction) {
             $state.deployment_status = "RECOVERY_REQUIRED"
             $state.drift = [pscustomobject]@{
                 code = "REVERSE_INCOMPLETE"
@@ -14206,6 +15141,9 @@ function Get-ControlCenterReleasePresentation {
         }
     }
 
+    $runtimeReadModel = if ($Release.PSObject.Properties['release_runtime']) {
+        $Release.release_runtime
+    } else { $null }
     $transactionActive = [bool]$Release.transaction
     $deploymentReady = [string]$Release.deployment_status -eq "READY"
     $candidateState = if ($Release.candidate) {
@@ -14328,17 +15266,29 @@ function Get-ControlCenterReleasePresentation {
         "Candidate has not passed validation"
     } else { "Ready to promote" }
 
+    $reversePrecheck = if ($runtimeReadModel -and $runtimeReadModel.previous) {
+        $runtimeReadModel.previous.reverse_precheck
+    } else { $null }
     $reverseReason = if ($transactionActive) {
-        "A release transaction is already in progress"
-    } elseif (-not $controlBundleReady) {
-        "CONTROL_BUNDLE_HASH_VERIFICATION_FAILED"
-    } elseif (-not $deploymentReady) {
-        "Deployment status is $($Release.deployment_status)"
-    } elseif (-not $Release.previous_stable) {
-        "Previous Stable unavailable"
-    } elseif (-not [bool]$Release.previous_stable_rollback_eligible) {
-        "PREVIOUS_STABLE_ROLLBACK_UNAVAILABLE"
-    } else { "Ready to reverse" }
+        "RELEASE_TRANSACTION_ACTIVE"
+    } elseif ($reversePrecheck) {
+        [string]$reversePrecheck.reason
+    } else { "RUNTIME_READ_MODEL_UNAVAILABLE" }
+    $stableState = if (-not $runtimeReadModel) {
+        "UNKNOWN"
+    } elseif ([string]$runtimeReadModel.drift_status -eq "DRIFT") {
+        "DRIFT"
+    } elseif ([string]$runtimeReadModel.active.health -eq "DEGRADED") {
+        "DEGRADED"
+    } elseif ([string]$runtimeReadModel.active.observation_status -eq "AVAILABLE" -and
+        [string]$runtimeReadModel.active.identity_status -eq "COMPLETE" -and
+        [string]$runtimeReadModel.active.health -eq "HEALTHY" -and
+        [string]$runtimeReadModel.active.business_health_status -eq "HEALTHY" -and
+        [string]$runtimeReadModel.active.ownership_status -eq "SINGLE_OWNER" -and
+        [string]$runtimeReadModel.drift_status -eq "MATCHED" -and
+        [bool]$runtimeReadModel.active_matches_committed) {
+        "STABLE"
+    } else { "UNKNOWN" }
 
     [pscustomobject]@{
         candidate_state = $candidateState
@@ -14350,9 +15300,28 @@ function Get-ControlCenterReleasePresentation {
             $compatibilityPassed -and $candidateProvenanceReady -and
             $accessAcceptanceReady -and $controlBundleReady)
         promote_reason = $promoteReason
-        can_reverse = [bool]($deploymentReady -and -not $transactionActive -and
-            $Release.previous_stable -and $Release.previous_stable_rollback_eligible -and
-            $controlBundleReady)
+        stable_state = $stableState
+        active_health = if ($runtimeReadModel) {
+            [string]$runtimeReadModel.active.health
+        } else { "UNKNOWN" }
+        active_business_health = if ($runtimeReadModel) {
+            [string]$runtimeReadModel.active.business_health_status
+        } else { "UNKNOWN" }
+        active_ownership_status = if ($runtimeReadModel) {
+            [string]$runtimeReadModel.active.ownership_status
+        } else { "UNKNOWN" }
+        previous_artifact_status = if ($runtimeReadModel -and
+            $runtimeReadModel.previous.worker_artifact) {
+            [string]$runtimeReadModel.previous.worker_artifact.status
+        } else { "UNKNOWN" }
+        previous_traffic_member = [bool]($runtimeReadModel -and
+            $runtimeReadModel.previous.worker_is_current_traffic_member)
+        previous_traffic_membership_status = if ($runtimeReadModel -and
+            $runtimeReadModel.previous.worker_traffic_membership_status) {
+            [string]$runtimeReadModel.previous.worker_traffic_membership_status
+        } else { "UNKNOWN" }
+        can_reverse = [bool](-not $transactionActive -and $reversePrecheck -and
+            $reversePrecheck.can_reverse)
         reverse_reason = $reverseReason
         can_verify_migration = $canVerifyMigration
         can_approve_compatibility = $canApproveCompatibility
@@ -14382,12 +15351,14 @@ function Get-ControlCenterSummaryPresentation {
         [string]$Snapshot.release.deployment_status
     } else { "UNAVAILABLE" }
     $overall = if (
+        [string]$releaseView.stable_state -eq "DRIFT" -or
         $deploymentState -match "FAILED|DRIFT|RECOVERY" -or
         ($serviceRows.Count -gt 0 -and $unhealthyCount -eq $serviceRows.Count)
     ) {
         "FAILED"
     } elseif (
         $unhealthyCount -gt 0 -or $deploymentState -ne "READY" -or
+        [string]$releaseView.stable_state -ne "STABLE" -or
         $releaseView.candidate_state -in @("FAILED", "CHECKS_BLOCKED")
     ) {
         "DEGRADED"
@@ -14408,6 +15379,502 @@ function Get-ControlCenterSummaryPresentation {
         candidate_state = $releaseView.candidate_state
         last_refresh = $captured
     }
+}
+
+function Get-ControlCenterProviderAuthorityFingerprint {
+    param([AllowNull()][object]$Release)
+    if (-not $Release) {
+        return [pscustomobject]@{ valid = $false; digest = $null; value = $null }
+    }
+    $schema = [string](Get-ReleaseRuntimeProperty $Release "schema_version")
+    $stable = Resolve-ReleaseRuntimeIdentity `
+        (Get-ReleaseRuntimeProperty $Release "stable") $schema
+    $previousIdentity = Get-ReleaseRuntimeProperty $Release "previous_stable"
+    $previous = if ($previousIdentity) {
+        Resolve-ReleaseRuntimeIdentity $previousIdentity $schema
+    } else {
+        [pscustomobject]@{ status = "ABSENT"; identity = $null }
+    }
+    function ConvertTo-ControlCenterFingerprintIdentity {
+        param([AllowNull()][object]$Resolution)
+        $identity = if ($Resolution) { $Resolution.identity } else { $null }
+        return [ordered]@{
+            status = if ($Resolution) { [string]$Resolution.status } else { "UNKNOWN" }
+            git_sha = [string](Get-ReleaseRuntimeProperty $identity "git_sha")
+            worker_version_id = [string](Get-ReleaseRuntimeProperty $identity "worker_version_id")
+            windows_revision = [string](Get-ReleaseRuntimeProperty $identity "windows_revision")
+            artifact_kind = [string](Get-ReleaseRuntimeProperty $identity "artifact_kind")
+            branch = [string](Get-ReleaseRuntimeProperty $identity "branch")
+            worker_git_sha = [string](Get-ReleaseRuntimeProperty $identity "worker_git_sha")
+            validation_key = [string](Get-ReleaseRuntimeProperty $identity "validation_key")
+            provenance_state = [string](Get-ReleaseRuntimeProperty $identity "provenance_state")
+        }
+    }
+    $value = [ordered]@{
+        schema_version = $schema
+        stable = ConvertTo-ControlCenterFingerprintIdentity $stable
+        previous = ConvertTo-ControlCenterFingerprintIdentity $previous
+        transaction_active = [bool](Get-ReleaseRuntimeProperty $Release "transaction")
+    }
+    $valid = [bool]([string]$stable.status -eq "COMPLETE" -and
+        [string]$previous.status -in @("COMPLETE", "ABSENT"))
+    $canonical = $value | ConvertTo-Json -Compress -Depth 8
+    return [pscustomobject]@{
+        valid = $valid
+        digest = if ($valid) { Get-Sha256TextHex -Value $canonical } else { $null }
+        value = [pscustomobject]$value
+    }
+}
+
+function ConvertTo-ControlCenterProviderFacts {
+    param([AllowNull()][object]$Release)
+    $runtime = Get-ReleaseRuntimeProperty $Release "release_runtime"
+    $active = Get-ReleaseRuntimeProperty $runtime "active"
+    $previous = Get-ReleaseRuntimeProperty $runtime "previous"
+    if (-not $active) { return $null }
+    [pscustomobject]@{
+        schema_version = "control-center-provider-facts-v1"
+        status = if ([string]$active.observation_status -eq "AVAILABLE") {
+            "AVAILABLE"
+        } else { "UNKNOWN" }
+        deployment_observation = [pscustomobject]@{
+            status = [string]$active.observation_status; value = $null
+            observed_at = [string](Get-ReleaseRuntimeProperty $runtime "observed_at")
+            reason = $null
+        }
+        active_worker_observation = [pscustomobject]@{
+            status = if ([string]$active.observation_status -eq "AVAILABLE") {
+                "AVAILABLE"
+            } else { "UNKNOWN" }
+            version_id = [string]$active.worker_version_id
+            git_sha = [string]$active.worker_git_sha
+            traffic_percent = Get-ReleaseRuntimeProperty $active "worker_traffic_percent"
+            previous_is_member = [bool](Get-ReleaseRuntimeProperty $previous "worker_is_current_traffic_member")
+            previous_membership_status = [string](Get-ReleaseRuntimeProperty $previous "worker_traffic_membership_status")
+            previous_traffic_percent = Get-ReleaseRuntimeProperty $previous "current_traffic_percent"
+        }
+        active_exact_version_fact = [pscustomobject]@{
+            status = [string]$active.observation_status
+            requested_version_id = [string]$active.worker_version_id
+            observed_version_id = [string]$active.worker_version_id
+            git_sha = [string]$active.worker_git_sha
+            observed_at = [string](Get-ReleaseRuntimeProperty $runtime "observed_at")
+        }
+        previous_worker_artifact = if (Get-ReleaseRuntimeProperty $previous "worker_artifact") {
+            Get-ReleaseRuntimeProperty $previous "worker_artifact"
+        } elseif ([string](Get-ReleaseRuntimeProperty (
+            Get-ReleaseRuntimeProperty $previous "reverse_precheck"
+        ) "reason") -eq "READY") {
+            [pscustomobject]@{ status = "AVAILABLE"; reason = "TESTED_AVAILABLE" }
+        } else { [pscustomobject]@{ status = "UNKNOWN"; reason = "UNKNOWN" } }
+    }
+}
+
+function New-ControlCenterProviderObservationEnvelope {
+    param(
+        [ValidateSet("PENDING", "AVAILABLE", "UNKNOWN", "TIMEOUT", "TERMINATING", "TERMINATION_UNRESOLVED")]
+        [string]$State,
+        [AllowNull()][object]$ProviderFacts = $null,
+        [AllowNull()][object]$Release = $null,
+        [AllowNull()][object]$PriorObservation = $null,
+        [AllowNull()][object]$AttemptedAt = $null,
+        [AllowNull()][object]$ObservedAt = $null
+    )
+    $attempted = if ($AttemptedAt) {
+        ([DateTimeOffset]$AttemptedAt).ToUniversalTime().ToString("o")
+    } else { [DateTimeOffset]::UtcNow.ToString("o") }
+    $completed = if ($State -ne "PENDING") {
+        if ($ObservedAt) {
+            ([DateTimeOffset]$ObservedAt).ToUniversalTime().ToString("o")
+        }
+        else { [DateTimeOffset]::UtcNow.ToString("o") }
+    } else { $null }
+    if (-not $ProviderFacts -and $Release) {
+        $ProviderFacts = ConvertTo-ControlCenterProviderFacts $Release
+    }
+    $lastFacts = $null
+    $lastSuccess = $null
+    $fingerprint = $null
+    if ($State -eq "AVAILABLE" -and $ProviderFacts) {
+        if ([string]$ProviderFacts.status -ne "AVAILABLE") {
+            $State = "UNKNOWN"
+        }
+        else {
+            $lastFacts = $ProviderFacts
+            $lastSuccess = $completed
+            if ($Release) {
+                $authority = Get-ControlCenterProviderAuthorityFingerprint $Release
+                if (-not $authority.valid) { $State = "UNKNOWN" }
+                else { $fingerprint = [string]$authority.digest }
+            } elseif ($ProviderFacts.PSObject.Properties['authority_fingerprint']) {
+                $fingerprint = [string]$ProviderFacts.authority_fingerprint
+            }
+            if ([string]::IsNullOrWhiteSpace($fingerprint)) { $State = "UNKNOWN" }
+        }
+    }
+    if (-not $lastFacts -and $PriorObservation) {
+        $lastFacts = Get-ReleaseRuntimeProperty $PriorObservation "provider_facts"
+        $lastSuccess = [string](
+            Get-ReleaseRuntimeProperty $PriorObservation "last_success_at"
+        )
+        $fingerprint = [string](
+            Get-ReleaseRuntimeProperty $PriorObservation "authority_fingerprint"
+        )
+    }
+    return [pscustomobject]@{
+        state = $State
+        provider_facts = $lastFacts
+        attempted_at = $attempted
+        observed_at = $completed
+        last_success_at = $lastSuccess
+        authority_fingerprint = $fingerprint
+    }
+}
+
+function Start-ControlCenterProviderObservationProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedControlRevision
+    )
+    $identity = [guid]::NewGuid().ToString("N")
+    $resultPath = Join-Path $env:TEMP "xauusd-provider-observation-$identity.json"
+    $outputPath = Join-Path $env:TEMP "xauusd-provider-observation-$identity.out"
+    $errorPath = Join-Path $env:TEMP "xauusd-provider-observation-$identity.err"
+    $nativeReceiptPath = Join-Path $env:TEMP "xauusd-provider-native-$identity.json"
+    $arguments = @(
+        "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
+        "-File", ('"{0}"' -f $PSCommandPath), "-Action", "ReleaseProviderFactsJson",
+        "-StatusPath", ('"{0}"' -f $resultPath),
+        "-NativeProcessReceiptPath", ('"{0}"' -f $nativeReceiptPath),
+        "-RuntimeRoot", ('"{0}"' -f $moduleRoot),
+        "-RepositoryRoot", ('"{0}"' -f $repositoryRoot),
+        "-ExpectedControlScriptPath", ('"{0}"' -f $PSCommandPath),
+        "-ExpectedControlRevision", $ExpectedControlRevision
+    )
+    try {
+        $process = Start-Process -FilePath "powershell.exe" `
+            -ArgumentList $arguments -WorkingDirectory $moduleRoot `
+            -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput $outputPath -RedirectStandardError $errorPath
+        $startedAt = [DateTimeOffset]::UtcNow
+        $processIdentity = Get-NativeProcessIdentity $process
+        $identityUnresolved = $false
+        if (-not $processIdentity) {
+            $termination = Stop-NativeProcessTree -Process $process
+            if ([string]$termination.state -in @("TERMINATED", "ALREADY_EXITED")) {
+                try { $process.Dispose() } catch {}
+                throw "PROVIDER_OBSERVATION_PROCESS_IDENTITY_UNAVAILABLE"
+            }
+            $identityUnresolved = $true
+        }
+        return [pscustomobject]@{
+            process = $process
+            process_identity = $processIdentity
+            identity_unresolved = $identityUnresolved
+            result_path = $resultPath
+            output_path = $outputPath
+            error_path = $errorPath
+            native_receipt_path = $nativeReceiptPath
+            termination_process = $null
+            termination_result_path = $null
+            expected_control_revision = $ExpectedControlRevision
+            attempted_at = $startedAt.ToString("o")
+            deadline_at = $startedAt.Add($releaseProviderBackgroundDeadline).ToString("o")
+        }
+    } catch {
+        Remove-Item -LiteralPath $resultPath,$outputPath,$errorPath,$nativeReceiptPath `
+            -Force -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
+function Invoke-ControlCenterProviderTermination {
+    param(
+        [int]$ProcessId,
+        [string]$ProcessStartToken,
+        [string]$NativeReceiptPath
+    )
+    $rootState = "ALREADY_EXITED"
+    try {
+        $root = [System.Diagnostics.Process]::GetProcessById($ProcessId)
+        $identity = Get-NativeProcessIdentity $root
+        if ($identity -and [string]$identity.start_token -ceq $ProcessStartToken) {
+            $rootState = [string](Stop-NativeProcessTree -Process $root).state
+        }
+        $root.Dispose()
+    } catch {}
+    $receiptState = Get-NativeOwnershipReceiptState $NativeReceiptPath
+    foreach ($identity in @($receiptState.alive)) {
+        try {
+            $owned = [System.Diagnostics.Process]::GetProcessById([int]$identity.pid)
+            try {
+                if ([string](Get-NativeProcessIdentity $owned).start_token -ceq
+                    [string]$identity.start_token) { $owned.Kill() }
+            } finally { $owned.Dispose() }
+        } catch {}
+    }
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+    do {
+        $receiptState = Get-NativeOwnershipReceiptState $NativeReceiptPath
+        if ([string]$receiptState.state -eq "CLEAR") { break }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+    $rootAlive = Test-NativeProcessIdentityAlive ([pscustomobject]@{
+        pid = $ProcessId; start_token = $ProcessStartToken
+    })
+    [pscustomobject]@{
+        state = if (-not $rootAlive -and [string]$receiptState.state -eq "CLEAR" -and
+            $rootState -in @("TERMINATED", "ALREADY_EXITED")) {
+            "TERMINATED"
+        } else { "TERMINATION_FAILED" }
+        root_state = $rootState
+        receipt_state = [string]$receiptState.state
+    }
+}
+
+function Start-ControlCenterProviderTerminationProcess {
+    param([Parameter(Mandatory = $true)][object]$Observation)
+    $identity = [guid]::NewGuid().ToString("N")
+    $resultPath = Join-Path $env:TEMP "xauusd-provider-termination-$identity.json"
+    $arguments = @(
+        "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
+        "-File", ('"{0}"' -f $PSCommandPath), "-Action", "TerminateProviderObservation",
+        "-StatusPath", ('"{0}"' -f $resultPath),
+        "-TargetProcessId", [string]$Observation.process_identity.pid,
+        "-TargetProcessStartToken", [string]$Observation.process_identity.start_token,
+        "-NativeProcessReceiptPath", ('"{0}"' -f $Observation.native_receipt_path),
+        "-RuntimeRoot", ('"{0}"' -f $moduleRoot),
+        "-RepositoryRoot", ('"{0}"' -f $repositoryRoot)
+    )
+    if ($Observation.expected_control_revision) {
+        $arguments += @(
+            "-ExpectedControlScriptPath", ('"{0}"' -f $PSCommandPath),
+            "-ExpectedControlRevision", [string]$Observation.expected_control_revision
+        )
+    }
+    $worker = Start-Process -FilePath "powershell.exe" -ArgumentList $arguments `
+        -WorkingDirectory $moduleRoot -WindowStyle Hidden -PassThru
+    $Observation.termination_process = $worker
+    $Observation.termination_result_path = $resultPath
+}
+
+function Complete-ControlCenterProviderObservationProcess {
+    param([Parameter(Mandatory = $true)][object]$Observation)
+    $process = $Observation.process
+    if (-not $Observation.PSObject.Properties['process_identity']) {
+        $Observation | Add-Member process_identity (Get-NativeProcessIdentity $process)
+    }
+    if (-not $Observation.PSObject.Properties['identity_unresolved']) {
+        $Observation | Add-Member identity_unresolved ([bool](-not $Observation.process_identity))
+    }
+    foreach ($property in @("native_receipt_path", "termination_process",
+        "termination_result_path", "expected_control_revision")) {
+        if (-not $Observation.PSObject.Properties[$property]) {
+            $Observation | Add-Member -NotePropertyName $property -NotePropertyValue $null
+        }
+    }
+    $completedAt = [DateTimeOffset]::UtcNow
+    if ([bool]$Observation.identity_unresolved) {
+        if (-not $process.HasExited) {
+            return [pscustomobject]@{
+                state = "TERMINATION_UNRESOLVED"; provider_facts = $null
+                attempted_at = [string]$Observation.attempted_at
+                observed_at = $completedAt.ToString("o"); release_slot = "PRESERVE"
+            }
+        }
+        try { $process.Dispose() } catch {}
+        @($Observation.result_path,$Observation.output_path,$Observation.error_path,
+            $Observation.native_receipt_path | Where-Object { $_ }) | ForEach-Object {
+            Remove-Item -LiteralPath $_ -Force -ErrorAction SilentlyContinue
+        }
+        return [pscustomobject]@{
+            state = "UNKNOWN"; provider_facts = $null
+            attempted_at = [string]$Observation.attempted_at
+            observed_at = $completedAt.ToString("o"); release_slot = "CLEAR"
+        }
+    }
+    $receiptState = Get-NativeOwnershipReceiptState $Observation.native_receipt_path
+    $pastDeadline = [bool]($completedAt -ge
+        [DateTimeOffset]::Parse([string]$Observation.deadline_at))
+    $needsTermination = [bool]((-not $process.HasExited -and $pastDeadline) -or
+        ($process.HasExited -and [string]$receiptState.state -ne "CLEAR"))
+    if ($needsTermination -and -not $Observation.termination_process) {
+        Start-ControlCenterProviderTerminationProcess -Observation $Observation
+        return [pscustomobject]@{
+            state = "TERMINATING"; provider_facts = $null
+            attempted_at = [string]$Observation.attempted_at
+            observed_at = $completedAt.ToString("o"); release_slot = "PRESERVE"
+        }
+    }
+    if ($Observation.termination_process) {
+        if (-not $Observation.termination_process.HasExited) {
+            return [pscustomobject]@{
+                state = "TERMINATING"; provider_facts = $null
+                attempted_at = [string]$Observation.attempted_at
+                observed_at = $completedAt.ToString("o"); release_slot = "PRESERVE"
+            }
+        }
+        $termination = $null
+        try {
+            $Observation.termination_process.WaitForExit()
+            if ([int]$Observation.termination_process.ExitCode -eq 0 -and
+                (Test-Path -LiteralPath $Observation.termination_result_path)) {
+                $termination = Get-Content -LiteralPath $Observation.termination_result_path `
+                    -Raw -Encoding UTF8 | ConvertFrom-ReleaseControlJson
+            }
+        } catch {}
+        $receiptState = Get-NativeOwnershipReceiptState $Observation.native_receipt_path
+        $rootStillAlive = Test-NativeProcessIdentityAlive $Observation.process_identity
+        if ($rootStillAlive -or [string]$receiptState.state -ne "CLEAR") {
+            return [pscustomobject]@{
+                state = "TERMINATION_UNRESOLVED"; provider_facts = $null
+                attempted_at = [string]$Observation.attempted_at
+                observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+                release_slot = "PRESERVE"
+            }
+        }
+        try { $Observation.termination_process.Dispose() } catch {}
+        try { $process.Dispose() } catch {}
+        @($Observation.result_path,$Observation.output_path,$Observation.error_path,
+            $Observation.native_receipt_path,$Observation.termination_result_path |
+            Where-Object { $_ }) | ForEach-Object {
+            Remove-Item -LiteralPath $_ -Force -ErrorAction SilentlyContinue
+        }
+        return [pscustomobject]@{
+            state = if ($pastDeadline) { "TIMEOUT" } else { "UNKNOWN" }
+            provider_facts = $null; attempted_at = [string]$Observation.attempted_at
+            observed_at = [DateTimeOffset]::UtcNow.ToString("o"); release_slot = "CLEAR"
+        }
+    }
+    if (-not $process.HasExited) {
+        return [pscustomobject]@{ state = "PENDING"; provider_facts = $null }
+    }
+    $state = "UNKNOWN"
+    $providerFacts = $null
+    $cleanup = $true
+    try {
+        $process.WaitForExit()
+        if ([int]$process.ExitCode -eq 0 -and
+            (Test-Path -LiteralPath $Observation.result_path)) {
+            $providerFacts = Get-Content -LiteralPath $Observation.result_path `
+                -Raw -Encoding UTF8 | ConvertFrom-ReleaseControlJson
+            if ($providerFacts) { $state = "COMPLETED" }
+        }
+    } catch { $state = "UNKNOWN" } finally {
+        if ($cleanup) {
+            try { $process.Dispose() } catch {}
+            @($Observation.result_path,$Observation.output_path,
+                $Observation.error_path,$Observation.native_receipt_path |
+                Where-Object { $_ }) | ForEach-Object {
+                Remove-Item -LiteralPath $_ -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    return [pscustomobject]@{
+        state = $state
+        provider_facts = $providerFacts
+        attempted_at = [string]$Observation.attempted_at
+        observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+        release_slot = if ($cleanup) { "CLEAR" } else { "PRESERVE" }
+    }
+}
+
+function Set-ControlCenterProviderUnknownReadModel {
+    param(
+        [AllowNull()][object]$Release,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+    if (-not $Release) { return $Release }
+    $localFacts = Get-ControlCenterLocalFactsFromRelease $Release
+    $unknown = Join-ReleaseRuntimeFacts -PersistedState $Release `
+        -ProviderFacts (New-UnknownReleaseProviderFacts -Reason $Reason) `
+        -LocalFacts $localFacts
+    $unknown.previous.reverse_precheck.can_reverse = $false
+    $unknown.previous.reverse_precheck.status = "BLOCKED"
+    $unknown.previous.reverse_precheck.reason = $Reason
+    $Release | Add-Member -NotePropertyName release_runtime `
+        -NotePropertyValue $unknown -Force
+    return $Release
+}
+
+function Get-ControlCenterLocalFactsFromRelease {
+    param([Parameter(Mandatory = $true)][object]$Release)
+    $runtime = Get-ReleaseRuntimeProperty $Release "release_runtime"
+    $facts = Get-ReleaseRuntimeProperty $runtime "local_facts"
+    if ($facts) { return $facts }
+    $active = Get-ReleaseRuntimeProperty $runtime "active"
+    $previous = Get-ReleaseRuntimeProperty $runtime "previous"
+    $reverse = Get-ReleaseRuntimeProperty $previous "reverse_precheck"
+    return [pscustomobject]@{
+        schema_version = "control-center-local-runtime-facts-v1"
+        active_windows_observation = [pscustomobject]@{
+            status = if ([string]$active.windows_revision) { "AVAILABLE" } else { "UNKNOWN" }
+            revision = [string]$active.windows_revision
+        }
+        health_observation = [pscustomobject]@{
+            status = [string]$active.health
+            reason = [string]$active.health_reason
+            business_health_status = [string]$active.business_health_status
+            business_health_reason = [string]$active.business_health_reason
+            ownership_status = [string]$active.ownership_status
+        }
+        previous_windows_artifact = if (Get-ReleaseRuntimeProperty $previous "windows_artifact") {
+            Get-ReleaseRuntimeProperty $previous "windows_artifact"
+        } elseif ([string]$reverse.reason -eq "READY") {
+            [pscustomobject]@{ status = "AVAILABLE"; reason = "TESTED_AVAILABLE" }
+        } else { [pscustomobject]@{ status = "UNKNOWN"; reason = "UNKNOWN" } }
+        control_bundle_status = if ([string]$reverse.reason -eq "READY") {
+            "AVAILABLE"
+        } else { "UNAVAILABLE" }
+        release_lock_active = $false
+    }
+}
+
+function Merge-ControlCenterProviderObservation {
+    param(
+        [AllowNull()][object]$LocalRelease,
+        [AllowNull()][object]$ProviderObservation,
+        [DateTimeOffset]$Now = [DateTimeOffset]::UtcNow
+    )
+    if (-not $LocalRelease) { return $LocalRelease }
+    $state = if ($ProviderObservation) {
+        [string]$ProviderObservation.state
+    } else { "UNKNOWN" }
+    $reason = switch ($state) {
+        "TIMEOUT" { "PROVIDER_OBSERVATION_TIMEOUT" }
+        "TERMINATING" { "PROVIDER_OBSERVATION_TERMINATING" }
+        "TERMINATION_UNRESOLVED" { "PROVIDER_TERMINATION_UNRESOLVED" }
+        "PENDING" { "PROVIDER_OBSERVATION_PENDING" }
+        default { "PROVIDER_OBSERVATION_UNKNOWN" }
+    }
+    if (-not $ProviderObservation -or
+        $state -notin @("AVAILABLE", "PENDING")) {
+        return Set-ControlCenterProviderUnknownReadModel $LocalRelease $reason
+    }
+    $lastSuccess = ConvertTo-ReleaseTimestampUtc `
+        -Value $ProviderObservation.last_success_at
+    if ($lastSuccess -eq [DateTimeOffset]::MinValue -or
+        ($Now - $lastSuccess) -gt $releaseProviderObservationMaximumStaleAge) {
+        return Set-ControlCenterProviderUnknownReadModel $LocalRelease `
+            "PROVIDER_OBSERVATION_STALE"
+    }
+    $providerFacts = $ProviderObservation.provider_facts
+    if (-not $providerFacts) {
+        return Set-ControlCenterProviderUnknownReadModel $LocalRelease `
+            "PROVIDER_OBSERVATION_UNKNOWN"
+    }
+    $localAuthority = Get-ControlCenterProviderAuthorityFingerprint $LocalRelease
+    if (-not $localAuthority.valid -or
+        [string]$localAuthority.digest -cne
+            [string]$ProviderObservation.authority_fingerprint) {
+        return Set-ControlCenterProviderUnknownReadModel $LocalRelease `
+            "PROVIDER_AUTHORITY_FINGERPRINT_MISMATCH"
+    }
+    $localFacts = Get-ControlCenterLocalFactsFromRelease $LocalRelease
+    $composed = Join-ReleaseRuntimeFacts -PersistedState $LocalRelease `
+        -ProviderFacts $providerFacts -LocalFacts $localFacts -ObservedAt $Now
+    $LocalRelease | Add-Member -NotePropertyName release_runtime `
+        -NotePropertyValue $composed -Force
+    return $LocalRelease
 }
 
 function Import-WpfControlCenterWindow {
@@ -15044,6 +16511,10 @@ function Show-WpfControlCenter {
         $script:wpfOperationResultPath = ""
         $script:wpfOperationExpectedRelease = $null
         $script:wpfOperationValidationKey = ""
+        $script:wpfProviderObservation = $null
+        $script:wpfLastProviderRequest = [DateTime]::MinValue
+        $script:wpfProviderSnapshot = New-ControlCenterProviderObservationEnvelope `
+            -State UNKNOWN
         function Test-WpfOperationActive {
             return [bool]$script:wpfOperation
         }
@@ -15133,6 +16604,40 @@ function Show-WpfControlCenter {
                     (Protect-PreflightDiagnosticText $_.Exception.Message)
             }
         }
+        function Request-WpfProviderRefresh {
+            param([switch]$ForceFresh)
+            if ($script:wpfProviderObservation) { return }
+            if (-not $ForceFresh -and
+                ((Get-Date) - $script:wpfLastProviderRequest).TotalSeconds -lt
+                    $releaseProviderObservationInterval.TotalSeconds) { return }
+            $script:wpfProviderObservation =
+                Start-ControlCenterProviderObservationProcess `
+                    -ExpectedControlRevision ([string]$controlIdentity.source_revision)
+            $script:wpfProviderSnapshot = New-ControlCenterProviderObservationEnvelope `
+                -State PENDING -PriorObservation $script:wpfProviderSnapshot `
+                -AttemptedAt ([DateTimeOffset]::Parse(
+                    [string]$script:wpfProviderObservation.attempted_at
+                ))
+            $script:wpfLastProviderRequest = Get-Date
+        }
+        function Update-WpfProviderObservation {
+            if (-not $script:wpfProviderObservation) { return }
+            $result = Complete-ControlCenterProviderObservationProcess `
+                -Observation $script:wpfProviderObservation
+            if ([string]$result.state -eq "PENDING") { return }
+            $envelopeState = if ([string]$result.state -eq "COMPLETED") {
+                "AVAILABLE"
+            } else { [string]$result.state }
+            $script:wpfProviderSnapshot = New-ControlCenterProviderObservationEnvelope `
+                -State $envelopeState -ProviderFacts $result.provider_facts `
+                -PriorObservation $script:wpfProviderSnapshot `
+                -AttemptedAt ([DateTimeOffset]::Parse([string]$result.attempted_at)) `
+                -ObservedAt ([DateTimeOffset]::Parse([string]$result.observed_at))
+            if ([string]$result.release_slot -eq "CLEAR") {
+                $script:wpfProviderObservation = $null
+            }
+            Refresh-WpfStatus
+        }
         function Refresh-WpfStatus {
             $status = @(Get-ForecasterStatus)
             $controlBundle = Get-RuntimeControlBundleIdentity
@@ -15145,11 +16650,23 @@ function Show-WpfControlCenter {
             (Find-WpfControl "ServiceList").ItemsSource = @($status | ForEach-Object {
                 [pscustomobject]@{ Key = $_.Key; Name = $_.Component; State = $_.State }
             })
-            $bad = @($status | Where-Object { $_.State -match "STOPPED|ERROR|STALE|OFFLINE" }).Count
-            (Find-WpfControl "OverallState").Text = if ($bad) { "DEGRADED" } else { "HEALTHY" }
             (Find-WpfControl "RefreshTime").Text = [DateTime]::Now.ToString("HH:mm:ss")
-            $release = Get-ReleaseControlState
-            (Find-WpfControl "StableState").Text = if ($release -and $release.stable) { "STABLE" } else { "UNAVAILABLE" }
+            $release = Get-ReleaseControlStatusSnapshot -SkipProviderObservation
+            $release = Merge-ControlCenterProviderObservation `
+                -LocalRelease $release `
+                -ProviderObservation $script:wpfProviderSnapshot
+            $summary = Get-ControlCenterSummaryPresentation -Snapshot (
+                [pscustomobject]@{
+                    captured_at = [DateTimeOffset]::UtcNow.ToString("o")
+                    services = $status
+                    release = $release
+                }
+            )
+            (Find-WpfControl "OverallState").Text = [string]$summary.overall
+            $releaseView = Get-ControlCenterReleasePresentation -Release $release
+            (Find-WpfControl "StableState").Text = if ($release -and $release.stable) {
+                [string]$releaseView.stable_state
+            } else { "UNAVAILABLE" }
             (Find-WpfControl "StableIdentity").Text = Format-WpfIdentity $release.stable
             (Find-WpfControl "CandidateState").Text = if ($release -and $release.candidate) { [string]$release.candidate.validation_state } else { "UNAVAILABLE" }
             (Find-WpfControl "CandidateIdentity").Text = Format-WpfIdentity $release.candidate
@@ -15158,7 +16675,6 @@ function Show-WpfControlCenter {
                 elseif ($release.candidate.validation.error) { [string]$release.candidate.validation.error }
                 else { "Validation evidence is available." }
             } else { "Candidate validation is unavailable." }
-            $releaseView = Get-ControlCenterReleasePresentation -Release $release
             (Find-WpfControl "CandidateReason").Text = if ($releaseView.can_promote) {
                 "Ready for explicit manual promotion."
             } else { "Cannot promote: $reason" }
@@ -15215,7 +16731,10 @@ function Show-WpfControlCenter {
             (Find-WpfControl "ApproveCompatibilityButton").IsEnabled = [bool]($releaseView.can_approve_compatibility -and -not $operationActive)
             (Find-WpfControl "ApproveAccessButton").IsEnabled = [bool]($releaseView.can_approve_access -and -not $operationActive)
             (Find-WpfControl "OpenCandidateButton").IsEnabled = [bool]($release -and $release.candidate -and $release.candidate.browser_url)
-            (Find-WpfControl "PreviousState").Text = if ($release -and $release.previous_stable) { "AVAILABLE" } else { "UNAVAILABLE" }
+            (Find-WpfControl "PreviousState").Text = if ($release -and
+                $release.previous_stable) {
+                "$($releaseView.previous_artifact_status) / $($releaseView.previous_traffic_membership_status.Replace('_', ' '))"
+            } else { "UNAVAILABLE" }
             (Find-WpfControl "PreviousIdentity").Text = Format-WpfIdentity $release.previous_stable
             (Find-WpfControl "ReverseButton").IsEnabled = [bool]($releaseView.can_reverse -and -not $operationActive)
             if ($operationActive) {
@@ -15232,7 +16751,10 @@ function Show-WpfControlCenter {
             } catch { Write-Warning "WPF callback failed: $Diagnostic" }
         }
         (Find-WpfControl "RefreshButton").Add_Click({
-            [void](Invoke-ControlCenterUiCallback -Callback { Refresh-WpfStatus } `
+            [void](Invoke-ControlCenterUiCallback -Callback {
+                Request-WpfProviderRefresh -ForceFresh
+                Refresh-WpfStatus
+            } `
                 -OnFailure { param($message) Show-WpfCallbackFailure $message })
         })
         (Find-WpfControl "StartButton").Add_Click({
@@ -15323,13 +16845,17 @@ function Show-WpfControlCenter {
         $timer = New-Object Windows.Threading.DispatcherTimer
         $timer.Interval = [TimeSpan]::FromSeconds(5)
         $timer.Add_Tick({
-            [void](Invoke-ControlCenterUiCallback -Callback { Refresh-WpfStatus } `
+            [void](Invoke-ControlCenterUiCallback -Callback {
+                Request-WpfProviderRefresh
+                Refresh-WpfStatus
+            } `
                 -OnFailure { param($message) Show-WpfCallbackFailure $message })
         })
         $operationTimer = New-Object Windows.Threading.DispatcherTimer
         $operationTimer.Interval = [TimeSpan]::FromMilliseconds(400)
         $operationTimer.Add_Tick({
             [void](Invoke-ControlCenterUiCallback -Callback {
+                Update-WpfProviderObservation
                 if (-not $script:wpfOperation -or -not $script:wpfOperation.HasExited) {
                     return
                 }
@@ -15403,8 +16929,28 @@ function Show-WpfControlCenter {
                     ) | Out-Null
                 } catch {}
             }
+            if (-not $eventArgs.Cancel -and $script:wpfProviderObservation) {
+                $script:wpfProviderObservation.deadline_at = `
+                    [DateTimeOffset]::UtcNow.AddMilliseconds(-1).ToString("o")
+                $completed = Complete-ControlCenterProviderObservationProcess `
+                    -Observation $script:wpfProviderObservation
+                if ([string]$completed.release_slot -ne "CLEAR") {
+                    $script:wpfProviderSnapshot =
+                        New-ControlCenterProviderObservationEnvelope `
+                            -State ([string]$completed.state) `
+                            -PriorObservation $script:wpfProviderSnapshot `
+                            -ObservedAt ([DateTimeOffset]::UtcNow)
+                    $eventArgs.Cancel = $true
+                    Refresh-WpfStatus
+                } else {
+                    $script:wpfProviderObservation = $null
+                }
+            }
         })
-        $window.Add_Closed({ $timer.Stop(); $operationTimer.Stop() })
+        $window.Add_Closed({
+            $timer.Stop()
+            $operationTimer.Stop()
+        })
         $window.Add_ContentRendered({
             if (-not $script:wpfUiStartedRecorded) {
                 $script:wpfUiStartedRecorded = $true
@@ -15413,6 +16959,7 @@ function Show-WpfControlCenter {
                 })
             }
         })
+        Request-WpfProviderRefresh
         Refresh-WpfStatus
         $timer.Start()
         $operationTimer.Start()
@@ -16196,7 +17743,11 @@ function Show-ControlCenter {
 
     $statusSnapshotPath = Join-Path $env:TEMP ("xauusd-control-status-{0}.json" -f $PID)
     $script:statusRefreshProcess = $null
+    $script:winFormsProviderObservation = $null
     $script:lastStatusRequest = [DateTime]::MinValue
+    $script:lastReleaseRequest = [DateTime]::MinValue
+    $script:winFormsProviderSnapshot = New-ControlCenterProviderObservationEnvelope `
+        -State UNKNOWN
     function Apply-GuiStatus {
         param([pscustomobject]$Snapshot)
         $script:lastGuiSnapshot = $Snapshot
@@ -16214,7 +17765,8 @@ function Show-ControlCenter {
             $stableSummary.Value.Text = "  $stableShort  "
             $stableSummary.Value.ForeColor = [System.Drawing.Color]::White
             $stableSummary.Value.BackColor = $accent
-            Set-StatusBadge -Label $stableCard.Badge -State ([string]$release.lifecycle_phase)
+            $releaseView = Get-ControlCenterReleasePresentation -Release $release
+            Set-StatusBadge -Label $stableCard.Badge -State $releaseView.stable_state
             $stableCard.Git.Text = "Git       $(Get-ShortIdentity $release.stable.git_sha)"
             $stableCard.Worker.Text = "Worker    $(Get-ShortIdentity $release.stable.worker_version_id)"
             $stableCard.Windows.Text = "Windows   $(Get-ShortIdentity $release.stable.windows_revision)"
@@ -16224,7 +17776,6 @@ function Show-ControlCenter {
             $openStableButton.Visible = $true
             $bootstrapButton.Visible = $false
 
-            $releaseView = Get-ControlCenterReleasePresentation -Release $release
             if ($release.candidate) {
                 Set-StatusBadge -Label $candidateCard.Badge -State $releaseView.candidate_state
                 $candidateCard.Git.Text = "Git       $(Get-ShortIdentity $release.candidate.git_sha)"
@@ -16310,11 +17861,16 @@ function Show-ControlCenter {
             )
 
             if ($release.previous_stable) {
-                Set-StatusBadge -Label $previousCard.Badge -State "AVAILABLE"
+                Set-StatusBadge -Label $previousCard.Badge `
+                    -State $releaseView.previous_artifact_status
                 $previousCard.Git.Text = "Git       $(Get-ShortIdentity $release.previous_stable.git_sha)"
                 $previousCard.Worker.Text = "Worker    $(Get-ShortIdentity $release.previous_stable.worker_version_id)"
                 $previousCard.Windows.Text = "Windows   $(Get-ShortIdentity $release.previous_stable.windows_revision)"
-                $previousCard.Detail.Text = "Reverse restores this exact Worker and Windows pair."
+                $assignment = $releaseView.previous_traffic_membership_status.Replace('_', ' ')
+                $previousCard.Detail.Text = (
+                    "$($releaseView.previous_artifact_status) / $assignment / " +
+                    "precheck $($releaseView.reverse_reason); recovery is not implied."
+                )
             } else {
                 Set-StatusBadge -Label $previousCard.Badge -State "UNAVAILABLE"
                 $previousCard.Git.Text = "Git       --"
@@ -16357,8 +17913,54 @@ function Show-ControlCenter {
         $clockState = if ($Snapshot.windows_time_running) { "RUNNING" } else { "ISSUE" }
         $systemMetaLabel.Text = "Windows Time: $clockState  /  Auto-start: $autoState  /  Last refresh: $($summary.last_refresh)"
     }
+    function Request-GuiReleaseStatus {
+        param([switch]$ForceProviderRefresh)
+        if ($script:winFormsProviderObservation) { return }
+        if (-not $ForceProviderRefresh -and
+            ((Get-Date) - $script:lastReleaseRequest).TotalSeconds -lt
+                $releaseProviderObservationInterval.TotalSeconds) { return }
+        $script:lastReleaseRequest = Get-Date
+        $script:winFormsProviderObservation =
+            Start-ControlCenterProviderObservationProcess `
+                -ExpectedControlRevision ([string]$controlIdentity.source_revision)
+        $script:winFormsProviderSnapshot = New-ControlCenterProviderObservationEnvelope `
+            -State PENDING -PriorObservation $script:winFormsProviderSnapshot `
+            -AttemptedAt ([DateTimeOffset]::Parse(
+                [string]$script:winFormsProviderObservation.attempted_at
+            ))
+    }
+    function Update-GuiReleaseStatus {
+        if (-not $script:winFormsProviderObservation) { return }
+        $result = Complete-ControlCenterProviderObservationProcess `
+            -Observation $script:winFormsProviderObservation
+        if ([string]$result.state -eq "PENDING") { return }
+        $envelopeState = if ([string]$result.state -eq "COMPLETED") {
+            "AVAILABLE"
+        } else { [string]$result.state }
+        $script:winFormsProviderSnapshot = New-ControlCenterProviderObservationEnvelope `
+            -State $envelopeState -ProviderFacts $result.provider_facts `
+            -PriorObservation $script:winFormsProviderSnapshot `
+            -AttemptedAt ([DateTimeOffset]::Parse([string]$result.attempted_at)) `
+            -ObservedAt ([DateTimeOffset]::Parse([string]$result.observed_at))
+        if ([string]$result.release_slot -eq "CLEAR") {
+            $script:winFormsProviderObservation = $null
+        }
+        if ($script:lastGuiSnapshot) {
+            $localRelease = Get-ReleaseControlStatusSnapshot -SkipProviderObservation
+            $script:lastGuiSnapshot.release = Merge-ControlCenterProviderObservation `
+                -LocalRelease $localRelease `
+                -ProviderObservation $script:winFormsProviderSnapshot
+            Apply-GuiStatus $script:lastGuiSnapshot
+        }
+    }
     function Request-GuiStatus {
-        if ($script:statusRefreshProcess) { return }
+        param([switch]$ForceProviderRefresh)
+        if ($script:statusRefreshProcess) {
+            if ($ForceProviderRefresh) {
+                Request-GuiReleaseStatus -ForceProviderRefresh
+            }
+            return
+        }
         $arguments = @(
             "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
             "-File", ('"{0}"' -f $PSCommandPath), "-Action", "StatusJson",
@@ -16366,14 +17968,18 @@ function Show-ControlCenter {
             "-RuntimeRoot", ('"{0}"' -f $moduleRoot),
             "-RepositoryRoot", ('"{0}"' -f $repositoryRoot),
             "-ExpectedControlScriptPath", ('"{0}"' -f $PSCommandPath),
-            "-ExpectedControlRevision", ([string]$controlIdentity.source_revision)
+            "-ExpectedControlRevision", ([string]$controlIdentity.source_revision),
+            "-SkipProviderObservation"
         )
         $script:lastStatusRequest = Get-Date
         $script:statusRefreshProcess = Start-Process -FilePath "powershell.exe" `
             -ArgumentList $arguments -WorkingDirectory $moduleRoot `
             -WindowStyle Hidden -PassThru
+        if ($ForceProviderRefresh) {
+            Request-GuiReleaseStatus -ForceProviderRefresh
+        }
     }
-    $refreshButton.Add_Click({ Request-GuiStatus })
+    $refreshButton.Add_Click({ Request-GuiStatus -ForceProviderRefresh })
 
     $statusTimer = New-Object System.Windows.Forms.Timer
     $statusTimer.Interval = 500
@@ -16383,17 +17989,28 @@ function Show-ControlCenter {
             $script:statusRefreshProcess = $null
             if (Test-Path -LiteralPath $statusSnapshotPath) {
                 try {
-                    Apply-GuiStatus (Get-Content -LiteralPath $statusSnapshotPath -Raw -Encoding UTF8 |
-                        ConvertFrom-ReleaseControlJson)
+                    $snapshot = Get-Content -LiteralPath $statusSnapshotPath -Raw -Encoding UTF8 |
+                        ConvertFrom-ReleaseControlJson
+                    $snapshot.release = Merge-ControlCenterProviderObservation `
+                        -LocalRelease $snapshot.release `
+                        -ProviderObservation $script:winFormsProviderSnapshot
+                    Apply-GuiStatus $snapshot
                 } catch {}
             }
         }
         if (-not $script:statusRefreshProcess -and ((Get-Date) - $script:lastStatusRequest).TotalSeconds -ge 10) {
             Request-GuiStatus
         }
+        Update-GuiReleaseStatus
+        if (-not $script:winFormsProviderObservation -and
+            ((Get-Date) - $script:lastReleaseRequest).TotalSeconds -ge
+                $releaseProviderObservationInterval.TotalSeconds) {
+            Request-GuiReleaseStatus
+        }
     })
     $statusTimer.Start()
     Request-GuiStatus
+    Request-GuiReleaseStatus
 
     $operationTimer = New-Object System.Windows.Forms.Timer
     $operationTimer.Interval = 400
@@ -16484,7 +18101,8 @@ function Show-ControlCenter {
         $operationTimer.Stop()
         $activationTimer.Stop()
         $activationEvent.Dispose()
-        Remove-Item -LiteralPath $statusSnapshotPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $statusSnapshotPath -Force `
+            -ErrorAction SilentlyContinue
     })
     $form.Add_FormClosing({
         param($sender, $eventArgs)
@@ -16496,6 +18114,31 @@ function Show-ControlCenter {
                     "Operation in progress", "OK", "Warning"
                 ) | Out-Null
             } catch {}
+        }
+        if (-not $eventArgs.Cancel -and $script:winFormsProviderObservation) {
+            $script:winFormsProviderObservation.deadline_at = `
+                [DateTimeOffset]::UtcNow.AddMilliseconds(-1).ToString("o")
+            $completed = Complete-ControlCenterProviderObservationProcess `
+                -Observation $script:winFormsProviderObservation
+            if ([string]$completed.release_slot -ne "CLEAR") {
+                $script:winFormsProviderSnapshot =
+                    New-ControlCenterProviderObservationEnvelope `
+                        -State ([string]$completed.state) `
+                        -PriorObservation $script:winFormsProviderSnapshot `
+                        -ObservedAt ([DateTimeOffset]::UtcNow)
+                $eventArgs.Cancel = $true
+                if ($script:lastGuiSnapshot) {
+                    $localRelease = Get-ReleaseControlStatusSnapshot `
+                        -SkipProviderObservation
+                    $script:lastGuiSnapshot.release =
+                        Merge-ControlCenterProviderObservation `
+                            -LocalRelease $localRelease `
+                            -ProviderObservation $script:winFormsProviderSnapshot
+                    Apply-GuiStatus $script:lastGuiSnapshot
+                }
+            } else {
+                $script:winFormsProviderObservation = $null
+            }
         }
     })
     [void]$form.ShowDialog()
@@ -16546,13 +18189,49 @@ switch ($Action) {
                 } else { "RELOAD_REQUIRED" }
                 applied_at = if ($runtimeState) { $runtimeState.applied_at } else { $null }
             }
-            release = Get-ReleaseControlStatusSnapshot
+            release = Get-ReleaseControlStatusSnapshot `
+                -SkipProviderObservation:$SkipProviderObservation
         } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $StatusPath -Encoding UTF8
     }
     "ReleaseStatusJson" {
         if (-not $StatusPath) { throw "StatusPath is required for ReleaseStatusJson." }
         Get-ReleaseControlStatusSnapshot | ConvertTo-Json -Depth 12 |
             Set-Content -LiteralPath $StatusPath -Encoding UTF8
+    }
+    "ReleaseProviderFactsJson" {
+        if (-not $StatusPath) {
+            throw "StatusPath is required for ReleaseProviderFactsJson."
+        }
+        $providerState = Get-ReleaseControlState
+        if (-not $providerState) { throw "RELEASE_CONTROL_STATE_UNAVAILABLE" }
+        $authority = Get-ControlCenterProviderAuthorityFingerprint $providerState
+        if (-not $authority.valid) { throw "PROVIDER_AUTHORITY_FINGERPRINT_INVALID" }
+        try {
+            $providerFacts = Get-ReleaseProviderRuntimeFacts `
+                -PersistedState $providerState -ForceProviderRefresh
+        } catch {
+            if ($_.Exception.Message -eq "NATIVE_PROCESS_TERMINATION_UNRESOLVED" -and
+                $script:unresolvedNativeProcess) {
+                try {
+                    Wait-NativeProcessContainment -Process $script:unresolvedNativeProcess
+                } finally { $script:unresolvedNativeProcess = $null }
+            }
+            throw
+        }
+        $providerFacts | Add-Member -NotePropertyName authority_fingerprint `
+            -NotePropertyValue ([string]$authority.digest) -Force
+        $providerFacts | ConvertTo-Json -Depth 12 |
+            Set-Content -LiteralPath $StatusPath -Encoding UTF8
+    }
+    "TerminateProviderObservation" {
+        if (-not $StatusPath -or $TargetProcessId -le 0 -or
+            [string]::IsNullOrWhiteSpace($TargetProcessStartToken)) {
+            throw "PROVIDER_TERMINATION_IDENTITY_REQUIRED"
+        }
+        Invoke-ControlCenterProviderTermination -ProcessId $TargetProcessId `
+            -ProcessStartToken $TargetProcessStartToken `
+            -NativeReceiptPath $NativeProcessReceiptPath |
+            ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $StatusPath -Encoding UTF8
     }
     "CodeRevision" { Write-Output (Get-CodeRevision) }
     "WpfLayoutSmoke" {

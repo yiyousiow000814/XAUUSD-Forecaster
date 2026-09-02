@@ -11,6 +11,7 @@ Switch/Observe state.
 | CPU evidence | quotas, monotonic accumulation, hard failure, top-up budget, exact-key reuse, artifact invalidation, accepted-stage preservation | provider-pending recovery |
 | Release integration | abstract CPU applicability, Candidate classification, pass and Promote gates | not applicable |
 | Core release | Stable ownership, Prepare/Verify isolation, Switch/Observe and rollback | Switch/Observe/recovery termination |
+| Release runtime read model | Active/Committed/LKG separation, immutable artifact lookup versus placement, and Reverse entry authority | not applicable |
 | Install recovery | fencing and independent abandoned-install checks | abandoned-install termination |
 | News migration | CURRENT/Reverse identity compatibility, generation replacement, cleanup | not applicable |
 | Access evidence | exact receipt validity and idempotent approval | not applicable |
@@ -38,6 +39,12 @@ The interface contract and the complete old-to-new property mapping are in
 5. CPU-only recovery preserves independently accepted stages.
 6. Provider pending remains non-promotable without becoming a false Candidate
    regression.
+7. The runtime read-model shard guarantees that read-only observations never
+   mutate Committed Stable/LKG; Reverse requires available Active observation,
+   exact Active-to-Committed identity, exact rollback artifact lookup, and
+   control authority. Business health is independent, so `DEGRADED` does not
+   block otherwise-safe recovery. `CoreRelease` alone owns the proof that Stable
+   changes only after successful Observe.
 
 ## Local execution
 

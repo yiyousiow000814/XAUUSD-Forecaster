@@ -32,6 +32,31 @@ Candidate may replace the Candidate pointer, but MUST NOT inherit validation
 from another Worker Version ID or Git SHA. FAILED Candidate state never changes
 Stable.
 
+The versioned `release-runtime-read-model-v1` projection is the sole read-only
+owner for operator and JSON runtime semantics. It keeps Active Worker, Active
+Windows, Active health, Committed Stable, Previous Committed, Target, and Last
+Known Good distinct. Live observation never rewrites a committed pointer, and a
+Candidate phase never substitutes for Active or Committed health. Missing live
+facts are `UNKNOWN` and fail closed; they are not inferred from persisted
+placement or lifecycle labels.
+
+Previous recovery has three independent layers. An exact immutable Worker
+Version and revision-owned Windows launch contract establish artifact
+availability. Current deployment membership is the explicit `ASSIGNED`,
+`NOT_ASSIGNED`, `UNKNOWN`, `MISMATCH`, or `NOT_APPLICABLE` placement fact;
+provider failure is never presented as `NOT_ASSIGNED`. Reverse eligibility
+additionally requires an available and complete Active observation that exactly
+matches Committed Stable, plus current Control bundle, ownership, lock,
+transaction, and recovery-authority facts. Business health remains independent:
+`DEGRADED` explains why recovery may be needed but does not by itself block a
+safe Reverse. Exact
+artifact availability does not claim that recovery was rehearsed or observed.
+The legacy persisted `previous_stable_rollback_eligible` and
+`previous_stable_rollback_reason` fields remain a v3 compatibility snapshot;
+new presentation, JSON, and action authority derive from the live read model.
+They may be removed only after every installed pre-read-model controller is no
+longer a supported rollback target.
+
 Candidate discovery owns a durable monotonic `(version created_at, version_id)`
 watermark. Initialization consumes all versions already present without making
 them eligible. Every later version advances the watermark whether it is Preview,
@@ -611,6 +636,71 @@ traffic and Windows runtime identity with the durable transaction. Unexplained
 mismatch is `DEPLOYMENT_DRIFT` or `RECOVERY_REQUIRED`; it MUST NOT silently
 start another transaction.
 
+WPF, WinForms, `StatusJson`, and `ReleaseStatusJson` consume the same bounded
+`release_runtime` object and presentation projection. Their `can_reverse` value
+is advisory. After the operator acts and the release lock is acquired, Reverse
+repeats the same exact Worker, Windows, Active-to-Committed identity, bundle,
+owner, transaction, and lock precheck before creating a transaction. A stale GUI snapshot therefore
+cannot authorize mutation. Current traffic assignment is not an immutable
+Version existence index: an exact Version may be `AVAILABLE` while
+`worker_traffic_membership_status` is `NOT_ASSIGNED`. The compatibility Boolean
+is not authoritative for `UNKNOWN` or `MISMATCH`.
+
+Persisted Committed, Previous, and Target identities pass through one pure
+resolver before any runtime observation. Only a `COMPLETE` resolved identity may
+enter an exact Worker lookup, Windows artifact lookup, Reverse precheck, or
+Reverse transaction. The legacy bootstrap exception is one fixed,
+non-recombinable Worker/Git/Windows/provenance pair; a legacy label is never
+authority. Invalid Committed and Previous identities fail closed independently.
+
+Active health composes one business-health observation and one production-owner
+observation; the business probe never reads ownership or recovery authority.
+`STABLE`
+requires explicit available Worker and Windows observations, a complete Active
+identity matching Committed, healthy business runtime, exactly one production
+owner, and no unresolved drift. Degraded business health does not by itself
+remove otherwise valid Reverse authority, while invalid or unknown ownership
+always prevents a stable presentation and blocks Reverse.
+
+Operator refresh has two cadences. Local service and operation state may refresh
+every five to ten seconds. Mutable provider deployment observation refreshes no
+more often than every thirty seconds. WPF and WinForms execute provider reads in
+one shared single-flight background child with a hard wall-clock deadline;
+the parent retains one non-durable observation envelope containing state,
+attempt/completion time, last-success time, provider-owned deployment, active
+Worker traffic/exact-Version, Previous Worker artifact facts, and the complete
+persisted authority fingerprint. It never caches or replaces the mixed runtime
+read model. Every local refresh probes Windows runtime, business health,
+production ownership, Previous Windows artifact, Control Bundle, lock, and
+transaction state once, then one pure composer combines those fresh local facts
+with eligible provider facts. A completed `TIMEOUT` or `UNKNOWN` replaces current
+availability immediately. While a replacement read is `PENDING`, a prior
+success may be presented for at most sixty seconds; it then becomes `UNKNOWN`.
+Provider runtime data may merge only while the envelope is available or within
+that pending grace period and its schema, resolved Stable/Previous identities,
+normalized provenance fields, and transaction-active state exactly match the
+current persisted authority.
+
+Timeout termination succeeds only after the exact root and observed descendant
+tree are proven exited. Nested native work is bound by a temporary PID plus
+process-start-token ownership receipt, so provider-root exit alone is not tree
+completion. A non-zero or timed-out `taskkill` result enters a bounded verified
+fallback. Termination runs in a separate hidden worker; GUI timer and close
+callbacks only request or poll that state machine and keep local refreshes
+responsive. If termination cannot be proven, the envelope is
+`TERMINATION_UNRESOLVED`, temporary evidence and the single-flight slot remain
+owned, no second provider child may start, and the local timer continues. Files
+are removed only after a proved completion or termination and never become
+release authority. Only a minimally validated
+exact Version envelope (exact ID, metadata, script resource, and `fetch` handler)
+may enter the process-local immutable cache; malformed or mismatched responses
+remain retryable. Provider caches are advisory and process-local only. Manual
+refresh may request one fresh provider observation without creating a concurrent
+read, while Reverse always performs a separately bounded fresh observation after
+acquiring the release lock. Each deployment row requires a nonempty Version ID
+and a finite invariant-culture percentage in `[0, 100]`; malformed placement or
+non-singular production ownership is `MISMATCH`.
+
 The transaction lock records its process owner. A live owner is never
 preempted. An abandoned lock may be removed only after the recorded process no
 longer exists (or an incomplete owner record has exceeded its grace period);
@@ -628,6 +718,10 @@ The independently installed `.local/runtime-control` bundle owns deployment
 transactions. Business checkout, Promote, Reverse, and automatic observation
 rollback never copy control files. Their preflight verifies the active bundle's
 exact source revision and every recorded SHA-256 hash. The current bundle
+includes `release_runtime_read_model.ps1` as a declared, hashed,
+dependency-closed read-only owner. Dot-sourcing it declares functions only; it
+does not read provider state, write release state, or perform a lifecycle
+action. The bundle
 manifest commits to its schema, exact source revision, exact file count, and
 ordinally ordered normalized relative-path/SHA-256 pairs with one repository-owned
 UTF-8/LF canonical digest. JSON formatting, host locale, PowerShell version,

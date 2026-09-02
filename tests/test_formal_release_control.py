@@ -193,3 +193,36 @@ def test_model_interfaces_match_the_cpu_control_implementation() -> None:
     assert "RetryCandidateValidation" in controller
     assert "CpuQualificationRequiredForPass" in (FORMAL / "ReleaseIntegration.tla").read_text(encoding="utf-8")
     assert "NoPromoteFromPendingCpu" in (FORMAL / "CoreRelease.tla").read_text(encoding="utf-8")
+
+
+def test_runtime_read_model_formal_shard_separates_observation_from_authority() -> None:
+    model = (FORMAL / "ReleaseRuntimeReadModel.tla").read_text(encoding="utf-8")
+    config = (FORMAL / "ReleaseRuntimeReadModelSafety.cfg").read_text(encoding="utf-8")
+    for contract in (
+        "ActiveMismatchDoesNotMoveCommittedOrLkg",
+        "ArtifactExistenceIndependentFromPlacement",
+        "NotAssignedAloneDoesNotMeanArtifactMissing",
+        "ReverseAttemptRequiresSafeAuthority",
+        "FailedOrUnknownLookupFailsClosed",
+        "UnknownActiveObservationFailsClosed",
+        "ActiveDriftFailsClosed",
+        "ReverseTransactionRequiresActualActiveCommittedEquality",
+        "DegradedAuthorityAllowsReverse",
+        "InvalidCommittedIdentityFailsClosed",
+        "InvalidPreviousIdentityFailsClosed",
+        "ArbitraryLegacyLabelFailsClosed",
+        "ExactNarrowLegacyReachesArtifactEvaluation",
+        "InvalidOwnershipFailsClosed",
+        "MissingObservationStatusIsNotAvailable",
+        "ReadObservationDoesNotMutateRelease",
+        "ReadModelNeverChangesCommittedOrLkg",
+    ):
+        assert contract in model
+        assert contract in config
+    assert "CpuSamples" not in model
+    assert "accessReceipt" not in model
+    assert "stagingGeneration" not in model
+    assert "CommitAfterSuccessfulObservation" not in model
+    assert "activeMatchesCommitted" not in model
+    assert '/\\ active = committed' in model
+    assert "transaction => active = committed" in model

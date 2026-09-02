@@ -20,6 +20,7 @@ RUNTIME_CONTROL_FILES = (
     "xauusd_control_center.ps1",
     "release-evidence-contract.json",
     "release_evidence_nodes.ps1",
+    "release_runtime_read_model.ps1",
     "control_center.xaml",
     "xauusd_control_center_launcher.vbs",
     "xauusd_watchdog_launcher.vbs",
@@ -1723,7 +1724,7 @@ def test_wrangler_json_bypasses_cmd_and_preserves_bounded_long_argument(
     result = _run_control_center_contract(
         tmp_path,
         "$script:nodeArguments=$null;"
-        "function Invoke-Utf8NativeProcess{param($FilePath,$Arguments);"
+        "function Invoke-Utf8NativeProcess{param($FilePath,$Arguments,$WorkingDirectory,$TimeoutMilliseconds);"
         "$script:nodeArguments=@($Arguments[1..($Arguments.Count-1)]);"
         "return [pscustomobject]@{exit_code=0;stdout='{\"value\":1}';stderr='';"
         "stdout_lines=@('{\"value\":1}');stderr_lines=@()}};"
@@ -4523,7 +4524,13 @@ def test_rollback_target_uses_exact_view_when_recent_list_is_truncated(
             "source": "wrangler",
             "has_preview": True,
         },
-        "annotations": {"workers/triggered_by": "version_upload"},
+        "annotations": {
+            "workers/triggered_by": "version_upload",
+            "workers/message": (
+                f"release:{'a' * 40} branch:main "
+                "artifact_kind:PRODUCTION_CANDIDATE"
+            ),
+        },
         "resources": {
             "script": {"etag": "exact-etag", "handlers": ["fetch"]},
             "bindings": [],
@@ -4546,7 +4553,9 @@ def test_rollback_target_uses_exact_view_when_recent_list_is_truncated(
         f"function Get-CloudflareVersionDetails{{param($VersionId);"
         f"'{version_json}'|ConvertFrom-Json}};"
         f"function Get-CloudflareDeployment{{'{deployment_json}'|ConvertFrom-Json}};"
-        f"$target=[pscustomobject]@{{worker_version_id='{stable}'}};"
+        f"$target=[pscustomobject]@{{worker_version_id='{stable}';git_sha=('a'*40);"
+        "worker_git_sha=('a'*40);windows_revision=('a'*40);"
+        "artifact_kind='PRODUCTION_CANDIDATE';branch='main'};"
         "$passed=Test-CloudflareRollbackTarget -Target $target;"
         'Write-Output "$passed,$script:listCalled"',
         powershell=powershell,
@@ -4592,13 +4601,1365 @@ def test_rollback_target_exact_lookup_failures_are_fail_closed(
     assert result == "False"
 
 
-def test_rollback_target_rejects_deployment_identity_mismatch(tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("diagnostic", "expected"),
+    (
+        ("VERSION_NOT_FOUND", "UNAVAILABLE"),
+        ("HTTP STATUS 404", "UNAVAILABLE"),
+        ("HTTP STATUS 401", "UNKNOWN"),
+        ("HTTP STATUS 403", "UNKNOWN"),
+        ("credentials missing", "UNKNOWN"),
+        ("version not found", "UNKNOWN"),
+        ("Wrangler CLI is unavailable", "UNKNOWN"),
+        ("provider transport timeout", "UNKNOWN"),
+        ("HTTP STATUS 429", "UNKNOWN"),
+        ("temporary provider unavailable", "UNKNOWN"),
+    ),
+)
+def test_rollback_exact_lookup_provider_failure_taxonomy(
+    tmp_path, diagnostic: str, expected: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        f"function Get-CloudflareVersionDetails{{throw '{diagnostic}'}};"
+        "$target=[pscustomobject]@{worker_version_id='11111111-1111-4111-8111-111111111111';"
+        "git_sha=('a'*40);worker_git_sha=('a'*40);windows_revision=('a'*40);"
+        "artifact_kind='PRODUCTION_CANDIDATE';branch='main'};"
+        "$identity=Resolve-ReleaseRuntimeIdentity $target;"
+        "$result=Get-CloudflareRollbackArtifactObservation -IdentityResolution $identity -ForceFresh;"
+        'Write-Output "$($result.status),$($result.reason)"',
+    )
+    assert result == f"{expected},WORKER_VERSION_PROVIDER_{expected}"
+
+
+@pytest.mark.parametrize(
+    ("native_behavior", "expected"),
+    (
+        ("return [pscustomobject]@{exit_code=1;stdout='';stderr='HTTP STATUS 404';stdout_lines=@();stderr_lines=@('HTTP STATUS 404')}", "UNAVAILABLE"),
+        ("return [pscustomobject]@{exit_code=1;stdout='';stderr='Bearer secret HTTP STATUS 401';stdout_lines=@();stderr_lines=@()}", "UNKNOWN"),
+        ("return [pscustomobject]@{exit_code=1;stdout='';stderr='HTTP STATUS 429 rate limit';stdout_lines=@();stderr_lines=@()}", "UNKNOWN"),
+        ("return [pscustomobject]@{exit_code=1;stdout='';stderr='version not found';stdout_lines=@();stderr_lines=@()}", "UNKNOWN"),
+        ("throw 'NATIVE_PROCESS_TIMEOUT'", "UNKNOWN"),
+    ),
+)
+def test_real_wrangler_wrapper_preserves_bounded_provider_taxonomy(
+    tmp_path, native_behavior: str, expected: str,
+) -> None:
+    version = "11111111-1111-4111-8111-111111111111"
+    result = _run_control_center_contract(
+        tmp_path,
+        "$cli=Join-Path $repositoryRoot 'web\\node_modules\\wrangler\\bin\\wrangler.js';"
+        "New-Item -ItemType Directory -Path (Split-Path -Parent $cli) -Force|Out-Null;"
+        "New-Item -ItemType File -Path $cli -Force|Out-Null;"
+        "function Invoke-Utf8NativeProcess{param($FilePath,$Arguments,$WorkingDirectory,$TimeoutMilliseconds);"
+        f"{native_behavior}}};"
+        f"$target=[pscustomobject]@{{worker_version_id='{version}';git_sha=('a'*40);"
+        "worker_git_sha=('a'*40);windows_revision=('a'*40);"
+        "artifact_kind='PRODUCTION_CANDIDATE';branch='main'};"
+        "$identity=Resolve-ReleaseRuntimeIdentity $target;"
+        "$result=Get-CloudflareRollbackArtifactObservation $identity -ForceFresh;"
+        'Write-Output "$($result.status),$($result.reason)"',
+    )
+    assert result == f"{expected},WORKER_VERSION_PROVIDER_{expected}"
+
+
+@pytest.mark.parametrize(
+    ("versions", "has_previous", "expected"),
+    (
+        ([{"version_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "percentage": 100},
+          {"version_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "percentage": 0}],
+         True, "ASSIGNED"),
+        ([{"version_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "percentage": 100}],
+         True, "NOT_ASSIGNED"),
+        ([{"version_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "percentage": 100},
+          {"version_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "percentage": 0},
+          {"version_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "percentage": 25}],
+         True, "MISMATCH"),
+        ([{"version_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "percentage": 100}],
+         False, "NOT_APPLICABLE"),
+    ),
+)
+def test_traffic_membership_is_authoritative_enum(
+    tmp_path, versions: list[dict], has_previous: bool, expected: str,
+) -> None:
+    deployment = json.dumps({"versions": versions})
+    previous = ("[pscustomobject]@{worker_version_id="
+                "'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'}") if has_previous else "$null"
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$deployment='{deployment}'|ConvertFrom-Json;$previous={previous};"
+        "$result=Get-ReleaseTrafficObservation -Deployment $deployment -Previous $previous;"
+        'Write-Output "$($result.previous_membership_status),$($result.previous_is_member)"',
+    )
+    assert result == f"{expected},{'True' if expected == 'ASSIGNED' else 'False'}"
+
+
+@pytest.mark.parametrize(
+    ("value", "valid", "parsed"),
+    (
+        ("$null", False, ""), ("''", False, ""), ("'NaN'", False, ""),
+        ("'Infinity'", False, ""), ("-1", False, ""), ("101", False, ""),
+        ("0", True, "0"), ("100", True, "100"),
+    ),
+)
+def test_traffic_percentage_parser_is_finite_invariant_and_bounded(
+    tmp_path, value: str, valid: bool, parsed: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$result=ConvertFrom-ReleaseTrafficPercentage {value};"
+        'Write-Output "$($result.valid),$($result.value)"',
+    )
+    assert result == f"{'True' if valid else 'False'},{parsed}"
+
+
+@pytest.mark.parametrize(
+    "row",
+    (
+        "[pscustomobject]@{version_id='a'}",
+        "[pscustomobject]@{version_id='a';percentage=$null}",
+        "[pscustomobject]@{version_id='a';percentage=''}",
+        "[pscustomobject]@{version_id='a';percentage='NaN'}",
+        "[pscustomobject]@{version_id='a';percentage='Infinity'}",
+        "[pscustomobject]@{version_id='a';percentage=-1}",
+        "[pscustomobject]@{version_id='a';percentage=101}",
+        "[pscustomobject]@{version_id='';percentage=100}",
+    ),
+)
+def test_malformed_deployment_row_fails_membership_closed(tmp_path, row: str) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$deployment=[pscustomobject]@{{versions=@({row})}};"
+        "$previous=[pscustomobject]@{worker_version_id='b'};"
+        "$result=Get-ReleaseTrafficObservation $deployment $previous;"
+        'Write-Output "$($result.status),$($result.previous_membership_status)"',
+    )
+    assert result == "MISMATCH,MISMATCH"
+
+
+def test_positive_split_traffic_cannot_claim_singular_active_owner(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$deployment=[pscustomobject]@{versions=@("
+        "[pscustomobject]@{version_id='active';percentage=100},"
+        "[pscustomobject]@{version_id='other';percentage=25})};"
+        "$result=Get-ReleaseTrafficObservation $deployment $null;"
+        'Write-Output "$($result.status),$($result.version_id)"',
+    )
+    assert result == "MISMATCH,"
+
+
+def test_provider_unknown_membership_is_not_not_assigned(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$previous=[pscustomobject]@{worker_version_id='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'};"
+        "$result=Get-ReleaseTrafficObservation -Deployment $null -Previous $previous -Status UNKNOWN;"
+        'Write-Output "$($result.previous_membership_status),$($result.previous_is_member)"',
+    )
+    assert result == "UNKNOWN,False"
+
+
+@pytest.mark.parametrize(
+    "powershell",
+    [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
+def test_runtime_composition_and_presenter_preserve_unknown_membership(
+    tmp_path, powershell: str,
+) -> None:
+    stable = "11111111-1111-4111-8111-111111111111"
+    previous = "22222222-2222-4222-8222-222222222222"
+    identity = ("[pscustomobject]@{git_sha=('a'*40);worker_git_sha=('a'*40);"
+                f"worker_version_id='{stable}';windows_revision=('a'*40);branch='main';"
+                "artifact_kind='PRODUCTION_CANDIDATE';validation_key='key'}")
+    previous_identity = ("[pscustomobject]@{git_sha=('b'*40);worker_git_sha=('b'*40);"
+                         f"worker_version_id='{previous}';windows_revision=('b'*40);branch='main';"
+                         "artifact_kind='PRODUCTION_CANDIDATE';validation_key='previous-key'}")
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-CloudflareDeployment{throw 'provider unavailable'};"
+        "function Get-RuntimeCodeState{[pscustomobject]@{applied_revision=('a'*40)}};"
+        "function Get-ReleaseActiveHealthObservation{[pscustomobject]@{status='DEGRADED';"
+        "reason='TEST';ownership_status='SINGLE_OWNER'}};"
+        "function Get-CloudflareRollbackArtifactObservation{[pscustomobject]@{status='AVAILABLE';reason='OK'}};"
+        "function Get-ReleaseWindowsArtifactObservation{[pscustomobject]@{status='AVAILABLE';reason='OK'}};"
+        "function Get-RuntimeControlBundleIdentity{[pscustomobject]@{exact_revision=$true}};"
+        f"$state=[pscustomobject]@{{schema_version='stable-candidate-release-v3';stable={identity};"
+        f"previous_stable={previous_identity};candidate=$null;transaction=$null;"
+        "deployment_status='READY';control_bundle_hash_verified=$true;"
+        "control_bundle_exact_revision=$true;control_bundle_revision=('a'*40)};"
+        "$model=Get-CurrentReleaseRuntimeReadModel -PersistedState $state;"
+        "$state|Add-Member release_runtime $model;$view=Get-ControlCenterReleasePresentation $state;"
+        'Write-Output "$($model.previous.worker_traffic_membership_status),'
+        '$($view.previous_traffic_membership_status),$($view.can_reverse),'
+        '$($model.previous.reverse_precheck.reason)"',
+        powershell=powershell,
+    )
+    assert result == "UNKNOWN,UNKNOWN,False,ACTIVE_OBSERVATION_UNAVAILABLE"
+
+
+@pytest.mark.parametrize(
+    "powershell",
+    [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
+def test_runtime_composition_allows_degraded_safe_reverse(
+    tmp_path, powershell: str,
+) -> None:
+    stable = "11111111-1111-4111-8111-111111111111"
+    previous = "22222222-2222-4222-8222-222222222222"
+    result = _run_control_center_contract(
+        tmp_path,
+        f"function Get-CloudflareDeployment{{[pscustomobject]@{{versions=@("
+        f"[pscustomobject]@{{version_id='{stable}';percentage=100}})}}}};"
+            f"function Get-CloudflareVersionDetails{{[pscustomobject]@{{id='{stable}';"
+            "metadata=[pscustomobject]@{source='wrangler'};"
+            "resources=[pscustomobject]@{script=[pscustomobject]@{handlers=@('fetch')}};"
+            "annotations=[pscustomobject]@{'workers/message'=('release:'+('a'*40)+' branch:main artifact_kind:PRODUCTION_CANDIDATE')}}};"
+        "function Get-RuntimeCodeState{[pscustomobject]@{applied_revision=('a'*40)}};"
+        "function Get-ReleaseActiveHealthObservation{[pscustomobject]@{status='DEGRADED';"
+        "reason='LOCAL_API_OR_RUNTIME_HEALTH_FAILED';ownership_status='SINGLE_OWNER'}};"
+        "function Get-CloudflareRollbackArtifactObservation{[pscustomobject]@{status='AVAILABLE';reason='OK'}};"
+        "function Get-ReleaseWindowsArtifactObservation{[pscustomobject]@{status='AVAILABLE';reason='OK'}};"
+        "function Get-RuntimeControlBundleIdentity{[pscustomobject]@{exact_revision=$true}};"
+        f"$stable=[pscustomobject]@{{git_sha=('a'*40);worker_git_sha=('a'*40);worker_version_id='{stable}';"
+        "windows_revision=('a'*40);branch='main';artifact_kind='PRODUCTION_CANDIDATE';validation_key='key'};"
+        f"$previous=[pscustomobject]@{{git_sha=('b'*40);worker_git_sha=('b'*40);worker_version_id='{previous}';"
+        "windows_revision=('b'*40);branch='main';artifact_kind='PRODUCTION_CANDIDATE';validation_key='previous-key'};"
+        "$state=[pscustomobject]@{schema_version='stable-candidate-release-v3';stable=$stable;"
+        "previous_stable=$previous;candidate=$null;transaction=$null;deployment_status='READY';"
+        "control_bundle_hash_verified=$true;control_bundle_exact_revision=$true;control_bundle_revision=('a'*40)};"
+        "$model=Get-CurrentReleaseRuntimeReadModel -PersistedState $state;"
+        'Write-Output "$($model.active.health),$($model.active_matches_committed),'
+        '$($model.previous.reverse_precheck.can_reverse),$($model.previous.reverse_precheck.reason)"',
+        powershell=powershell,
+    )
+    assert result == "DEGRADED,True,True,READY"
+
+
+@pytest.mark.parametrize(
+    "powershell", [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
+def test_provider_observation_cache_bounds_fast_gui_refreshes(
+    tmp_path, powershell: str,
+) -> None:
+    active = "11111111-1111-4111-8111-111111111111"
+    previous = "22222222-2222-4222-8222-222222222222"
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:deployReads=0;$script:versionReads=0;"
+        f"function Get-CloudflareDeployment{{$script:deployReads++;[pscustomobject]@{{versions=@("
+        f"[pscustomobject]@{{version_id='{active}';percentage=100}})}}}};"
+        "function Get-CloudflareVersionDetails{param($VersionId);$script:versionReads++;"
+        "[pscustomobject]@{id=$VersionId;metadata=[pscustomobject]@{source='wrangler'};"
+        "annotations=[pscustomobject]@{'workers/message'=('release:'+('a'*40)+' branch:main artifact_kind:PRODUCTION_CANDIDATE')};"
+        "resources=[pscustomobject]@{script=[pscustomobject]@{handlers=@('fetch')}}}};"
+        "function Get-RuntimeCodeState{[pscustomobject]@{applied_revision=('a'*40)}};"
+        "function Get-ReleaseActiveHealthObservation{[pscustomobject]@{status='HEALTHY';"
+        "business_health_status='HEALTHY';business_health_reason='OK';"
+        "reason='OK';ownership_status='SINGLE_OWNER'}};"
+        "function Get-ReleaseWindowsArtifactObservation{[pscustomobject]@{status='AVAILABLE';reason='OK'}};"
+        "function Get-RuntimeControlBundleIdentity{[pscustomobject]@{exact_revision=$true}};"
+        f"$stable=[pscustomobject]@{{git_sha=('a'*40);worker_git_sha=('a'*40);worker_version_id='{active}';"
+        "windows_revision=('a'*40);branch='main';artifact_kind='PRODUCTION_CANDIDATE'};"
+        f"$previous=[pscustomobject]@{{git_sha=('a'*40);worker_git_sha=('a'*40);worker_version_id='{previous}';"
+        "windows_revision=('a'*40);branch='main';artifact_kind='PRODUCTION_CANDIDATE'};"
+        "$state=[pscustomobject]@{schema_version='stable-candidate-release-v3';stable=$stable;"
+        "previous_stable=$previous;candidate=$null;transaction=$null};"
+        "1..6|%{$null=Get-CurrentReleaseRuntimeReadModel -PersistedState $state};"
+        "$null=Get-CurrentReleaseRuntimeReadModel -PersistedState $state -ForceProviderRefresh;"
+        'Write-Output "$script:deployReads,$script:versionReads"', powershell=powershell,
+    )
+    assert result == "2,4"
+
+
+@pytest.mark.parametrize(
+    "powershell", [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
+def test_immutable_exact_version_fact_survives_independent_transport_failure(
+    tmp_path, powershell: str,
+) -> None:
+    version = "11111111-1111-4111-8111-111111111111"
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:reads=0;"
+        f"function Get-CloudflareVersionDetails{{param($VersionId);$script:reads++;"
+        f"[pscustomobject]@{{id='{version}';metadata=[pscustomobject]@{{source='wrangler'}};"
+        "resources=[pscustomobject]@{script=[pscustomobject]@{handlers=@('fetch')}}}};"
+        f"$first=Get-ReleaseExactVersionProviderObservation -VersionId '{version}';"
+        "function Get-CloudflareVersionDetails{param($VersionId);$script:reads++;throw 'transport'};"
+        f"$failed=Get-ReleaseExactVersionProviderObservation -VersionId '{version}' -ForceFresh;"
+        f"$reused=Get-ReleaseExactVersionProviderObservation -VersionId '{version}';"
+        'Write-Output "$($first.status),$($failed.status),$($reused.status),$script:reads"',
+        powershell=powershell,
+    )
+    assert result == "AVAILABLE,UNKNOWN,AVAILABLE,2"
+
+
+@pytest.mark.parametrize("first_shape", ("MALFORMED", "WRONG_ID"))
+def test_invalid_exact_envelope_retries_and_recovers_after_interval(
+    tmp_path, first_shape: str,
+) -> None:
+    version = "11111111-1111-4111-8111-111111111111"
+    first = (
+        f"[pscustomobject]@{{id='{version}'}}"
+        if first_shape == "MALFORMED"
+        else "[pscustomobject]@{id='22222222-2222-4222-8222-222222222222';"
+             "metadata=[pscustomobject]@{source='wrangler'};resources=[pscustomobject]@{"
+             "script=[pscustomobject]@{handlers=@('fetch')}}}"
+    )
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:reads=0;function Get-CloudflareVersionDetails{param($VersionId);"
+        "$script:reads++;if($script:reads -eq 1){return " + first + "};"
+        f"[pscustomobject]@{{id='{version}';metadata=[pscustomobject]@{{source='wrangler'}};"
+        "resources=[pscustomobject]@{script=[pscustomobject]@{handlers=@('fetch')}}}};"
+        f"$first=Get-ReleaseExactVersionProviderObservation -VersionId '{version}';"
+        f"$script:releaseExactVersionObservationCache['{version}'].attempted_at="
+        "[DateTimeOffset]::UtcNow.AddMinutes(-2).ToString('o');"
+        f"$second=Get-ReleaseExactVersionProviderObservation -VersionId '{version}';"
+        'Write-Output "$($first.status),$($second.status),$script:reads"',
+    )
+    expected_first = "UNKNOWN" if first_shape == "MALFORMED" else "MISMATCH"
+    assert result == f"{expected_first},AVAILABLE,2"
+
+
+def test_validated_exact_version_envelope_is_immutable_and_reused(tmp_path) -> None:
+    version = "11111111-1111-4111-8111-111111111111"
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:reads=0;function Get-CloudflareVersionDetails{param($VersionId);$script:reads++;"
+        f"[pscustomobject]@{{id='{version}';metadata=[pscustomobject]@{{source='wrangler'}};"
+        "resources=[pscustomobject]@{script=[pscustomobject]@{handlers=@('fetch')}}}};"
+        f"$first=Get-ReleaseExactVersionProviderObservation -VersionId '{version}';"
+        f"$second=Get-ReleaseExactVersionProviderObservation -VersionId '{version}';"
+        'Write-Output "$($first.status),$($second.status),$script:reads"',
+    )
+    assert result == "AVAILABLE,AVAILABLE,1"
+
+
+def test_force_fresh_malformed_response_does_not_overwrite_validated_ui_fact(
+    tmp_path,
+) -> None:
+    version = "11111111-1111-4111-8111-111111111111"
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:reads=0;function Get-CloudflareVersionDetails{param($VersionId);$script:reads++;"
+        f"if($script:reads -eq 1){{return [pscustomobject]@{{id='{version}';"
+        "metadata=[pscustomobject]@{source='wrangler'};resources=[pscustomobject]@{"
+        "script=[pscustomobject]@{handlers=@('fetch')}}}};"
+        f"return [pscustomobject]@{{id='{version}'}}}};"
+        f"$valid=Get-ReleaseExactVersionProviderObservation -VersionId '{version}';"
+        f"$fresh=Get-ReleaseExactVersionProviderObservation -VersionId '{version}' -ForceFresh;"
+        f"$ui=Get-ReleaseExactVersionProviderObservation -VersionId '{version}';"
+        'Write-Output "$($valid.status),$($fresh.status),$($ui.status),$script:reads"',
+    )
+    assert result == "AVAILABLE,UNKNOWN,AVAILABLE,2"
+
+
+def test_exact_version_lookup_binds_account_worker_and_script_scope(tmp_path) -> None:
+    version = "11111111-1111-4111-8111-111111111111"
+    result = _run_control_center_contract(
+        tmp_path,
+        "$cli=Join-Path $repositoryRoot 'web\\node_modules\\wrangler\\bin\\wrangler.js';"
+        "New-Item -ItemType Directory -Path (Split-Path -Parent $cli) -Force|Out-Null;"
+        "New-Item -ItemType File -Path $cli -Force|Out-Null;"
+        "[Environment]::SetEnvironmentVariable('CLOUDFLARE_ACCOUNT_ID','prior','Process');"
+        "$script:seenAccount='';$script:seenArguments=@();"
+        "function Invoke-Utf8NativeProcess{param($FilePath,$Arguments,$WorkingDirectory,$TimeoutMilliseconds);"
+        "$script:seenAccount=[Environment]::GetEnvironmentVariable('CLOUDFLARE_ACCOUNT_ID','Process');"
+        "$script:seenArguments=@($Arguments);"
+        f"[pscustomobject]@{{exit_code=0;stdout='{{\"id\":\"{version}\"}}'}}}};"
+        f"$result=Get-CloudflareVersionDetails -VersionId '{version}';"
+        "$restored=[Environment]::GetEnvironmentVariable('CLOUDFLARE_ACCOUNT_ID','Process');"
+        'Write-Output "$script:seenAccount|$restored|$($script:seenArguments -join \'|\')"',
+    )
+    assert result == (
+        "48ce531f39e2310b4c858c8916a01d51|prior|"
+        f"{tmp_path / 'repository' / 'web' / 'node_modules' / 'wrangler' / 'bin' / 'wrangler.js'}"
+        f"|versions|view|{version}|--name|aurum-signal-room|--json"
+    )
+
+
+def test_mutable_deployment_observation_refreshes_after_ttl(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:reads=0;function Get-CloudflareDeployment{$script:reads++;"
+        "[pscustomobject]@{versions=@()}};"
+        "$null=Get-ReleaseDeploymentProviderObservation;"
+        "$script:releaseDeploymentObservationCache.attempted_at="
+        "([DateTimeOffset]::UtcNow-[TimeSpan]::FromMinutes(2)).ToString('o');"
+        "$null=Get-ReleaseDeploymentProviderObservation;Write-Output $script:reads",
+    )
+    assert result == "2"
+
+
+def test_winforms_splits_fast_local_and_slow_provider_refreshes() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    winforms = source.split("function Show-ControlCenter {", 1)[1]
+    assert '"-SkipProviderObservation"' in winforms
+    assert "function Request-GuiReleaseStatus" in winforms
+    assert "$releaseProviderObservationInterval.TotalSeconds" in winforms
+    assert "if ($script:winFormsProviderObservation) { return }" in winforms
+    assert "Start-ControlCenterProviderObservationProcess" in winforms
+    assert "Complete-ControlCenterProviderObservationProcess" in winforms
+    assert "Request-GuiStatus -ForceProviderRefresh" in winforms
+
+
+def test_wpf_and_winforms_provider_reads_are_background_and_single_flight() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    wpf = source.split("function Show-WpfControlCenter", 1)[1].split(
+        "function Show-ControlCenter", 1,
+    )[0]
+    winforms = source.split("function Show-ControlCenter", 1)[1]
+    assert "Start-ControlCenterProviderObservationProcess" in wpf
+    assert "Complete-ControlCenterProviderObservationProcess" in wpf
+    assert "if ($script:wpfProviderObservation) { return }" in wpf
+    assert "Start-ControlCenterProviderObservationProcess" in winforms
+    assert "if ($script:winFormsProviderObservation) { return }" in winforms
+    assert "Get-ReleaseControlStatusSnapshot -SkipProviderObservation" in wpf
+    assert '"-SkipProviderObservation"' in winforms
+
+
+@pytest.mark.parametrize(
+    "powershell", [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
+def test_local_runtime_facts_use_explicit_previous_resolution_not_dynamic_scope(
+    tmp_path, powershell: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$correct=[pscustomobject]@{status='COMPLETE';identity=[pscustomobject]@{"
+        "windows_revision=('a'*40);git_sha=('a'*40)}};"
+        "$previousResolution=[pscustomobject]@{status='COMPLETE';identity=[pscustomobject]@{"
+        "windows_revision=('b'*40);git_sha=('b'*40)}};"
+        "function Get-RuntimeCodeState{[pscustomobject]@{applied_revision=('c'*40)}};"
+        "function Get-ReleaseActiveHealthObservation{[pscustomobject]@{status='HEALTHY'}};"
+        "function Get-RuntimeControlBundleIdentity{[pscustomobject]@{exact_revision=$true}};"
+        "function Get-ReleaseWindowsArtifactObservation{param($IdentityResolution);"
+        "$script:observedResolution=$IdentityResolution;[pscustomobject]@{status='AVAILABLE'}};"
+        "$null=Get-ReleaseLocalRuntimeFacts -PersistedState ([pscustomobject]@{}) "
+        "-PreviousIdentityResolution $correct;"
+        'Write-Output "$($script:observedResolution.identity.windows_revision)"',
+        powershell=powershell,
+    )
+    assert result == "a" * 40
+
+
+@pytest.mark.parametrize(
+    "powershell", [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
+def test_local_runtime_facts_have_no_dynamic_scope_fallback_and_malformed_is_closed(
+    tmp_path, powershell: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-RuntimeCodeState{[pscustomobject]@{applied_revision=('c'*40)}};"
+        "function Get-ReleaseActiveHealthObservation{[pscustomobject]@{status='HEALTHY'}};"
+        "function Get-RuntimeControlBundleIdentity{[pscustomobject]@{exact_revision=$true}};"
+        "$malformed=[pscustomobject]@{status='MISMATCH';identity=$null};"
+        "$facts=Get-ReleaseLocalRuntimeFacts -PersistedState ([pscustomobject]@{}) "
+        "-PreviousIdentityResolution $malformed;"
+        'Write-Output "$($facts.previous_windows_artifact.status),'
+        '$($facts.previous_windows_artifact.reason)"',
+        powershell=powershell,
+    )
+    assert result == "MISMATCH,PREVIOUS_IDENTITY_MISMATCH"
+
+
+@pytest.mark.parametrize(
+    "powershell", [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
+def test_local_runtime_facts_work_without_caller_previous_resolution_variable(
+    tmp_path, powershell: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$explicit=[pscustomobject]@{status='COMPLETE';identity=[pscustomobject]@{"
+        "windows_revision=('d'*40);git_sha=('d'*40)}};"
+        "function Get-RuntimeCodeState{[pscustomobject]@{applied_revision=('c'*40)}};"
+        "function Get-ReleaseActiveHealthObservation{[pscustomobject]@{status='HEALTHY'}};"
+        "function Get-RuntimeControlBundleIdentity{[pscustomobject]@{exact_revision=$true}};"
+        "function Get-ReleaseWindowsArtifactObservation{param($IdentityResolution);"
+        "[pscustomobject]@{status='AVAILABLE';revision=$IdentityResolution.identity.windows_revision}};"
+        "$facts=Get-ReleaseLocalRuntimeFacts -PersistedState ([pscustomobject]@{}) "
+        "-PreviousIdentityResolution $explicit;"
+        "Write-Output $facts.previous_windows_artifact.revision",
+        powershell=powershell,
+    )
+    assert result == "d" * 40
+
+
+@pytest.mark.parametrize(
+    "powershell", [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
+def test_native_process_deadline_terminates_hung_child(
+    tmp_path, powershell: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$watch=[Diagnostics.Stopwatch]::StartNew();$reason='';"
+        "try{$null=Invoke-Utf8NativeProcess -FilePath 'powershell.exe' "
+        "-Arguments @('-NoProfile','-Command','Start-Sleep -Seconds 60') "
+        "-TimeoutMilliseconds 200}catch{$reason=$_.Exception.Message};"
+        "$watch.Stop();"
+        'Write-Output "$reason,$([int]$watch.Elapsed.TotalSeconds)"',
+        powershell=powershell,
+    )
+    reason, elapsed = result.split(",")
+    assert reason == "NATIVE_PROCESS_TIMEOUT"
+    assert int(elapsed) < 5
+
+
+@pytest.mark.parametrize(
+    "powershell", [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
+def test_native_process_unresolved_termination_propagates_exact_ownership(
+    tmp_path, powershell: str,
+) -> None:
+    receipt = tmp_path / "native-ownership.json"
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Stop-NativeProcessTree{param($Process);"
+        "[pscustomobject]@{state='TERMINATION_FAILED';root_exited=$false;"
+        "descendants_exited=$false}};"
+        "$reason='';try{$null=Invoke-Utf8NativeProcess -FilePath 'powershell.exe' "
+        "-Arguments @('-NoProfile','-Command','Start-Sleep -Seconds 60') "
+        f"-TimeoutMilliseconds 100 -OwnershipReceiptPath '{receipt}'"
+        "}catch{$reason=$_.Exception.Message};"
+        f"$owned=Get-Content '{receipt}' -Raw|ConvertFrom-Json;"
+        "$alive=Test-NativeProcessIdentityAlive $owned.root;"
+        "if($alive){Stop-Process -Id $owned.root.pid -Force};"
+        f"Remove-Item '{receipt}' -Force;"
+        'Write-Output "$reason,$alive,$($owned.root.pid),$($owned.root.start_token.Length -gt 0)"',
+        powershell=powershell,
+    )
+    reason, alive, pid, token = result.split(",")
+    assert reason == "NATIVE_PROCESS_TERMINATION_UNRESOLVED"
+    assert alive == "True"
+    assert int(pid) > 0
+    assert token == "True"
+
+
+def test_initial_native_ownership_receipt_failure_terminates_started_process(
+    tmp_path,
+) -> None:
+    receipt = tmp_path / "initial-receipt.json"
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Write-NativeProcessOwnershipReceipt{param($Path,$RootProcess);"
+        "$script:startedPid=$RootProcess.Id;throw 'injected-write-failure'};"
+        "$reason='';try{$null=Invoke-Utf8NativeProcess -FilePath 'powershell.exe' "
+        "-Arguments @('-NoProfile','-Command','Start-Sleep -Seconds 60') "
+        f"-TimeoutMilliseconds 5000 -OwnershipReceiptPath '{receipt}'"
+        "}catch{$reason=$_.Exception.Message};"
+        "$alive=[bool](Get-Process -Id $script:startedPid -ErrorAction SilentlyContinue);"
+        f"$files=@(Get-ChildItem '{tmp_path}' -Filter 'initial-receipt.json*' "
+        "-ErrorAction SilentlyContinue).Count;"
+        'Write-Output "$reason,$alive,$files"',
+    )
+    assert result == "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED,False,0"
+
+
+def test_initial_receipt_failure_with_unproved_termination_preserves_live_owner(
+    tmp_path,
+) -> None:
+    receipt = tmp_path / "unresolved-receipt.json"
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Write-NativeProcessOwnershipReceipt{param($Path,$RootProcess);"
+        "$script:startedProcess=$RootProcess;throw 'injected-write-failure'};"
+        "function Stop-NativeProcessTree{param($Process);"
+        "[pscustomobject]@{state='TERMINATION_FAILED'}};"
+        "$reason='';try{$null=Invoke-Utf8NativeProcess -FilePath 'powershell.exe' "
+        "-Arguments @('-NoProfile','-Command','Start-Sleep -Seconds 60') "
+        f"-TimeoutMilliseconds 5000 -OwnershipReceiptPath '{receipt}'"
+        "}catch{$reason=$_.Exception.Message};"
+        "$same=[bool]($script:unresolvedNativeProcess.Id -eq $script:startedProcess.Id);"
+        "$alive=[bool](Get-Process -Id $script:startedProcess.Id -ErrorAction SilentlyContinue);"
+        "$script:startedProcess.Kill();$script:startedProcess.WaitForExit();"
+        "$script:startedProcess.Dispose();"
+        'Write-Output "$reason,$same,$alive"',
+    )
+    assert result == "NATIVE_PROCESS_TERMINATION_UNRESOLVED,True,True"
+
+
+def test_native_receipt_requires_readable_root_identity(tmp_path) -> None:
+    receipt = tmp_path / "identity-receipt.json"
+    result = _run_control_center_contract(
+        tmp_path,
+        "$process=Start-Process powershell.exe -ArgumentList "
+        "@('-NoProfile','-Command','Start-Sleep -Seconds 60') -WindowStyle Hidden -PassThru;"
+        "function Get-NativeProcessIdentity{return $null};$reason='';"
+        f"try{{$null=Write-NativeProcessOwnershipReceipt -Path '{receipt}' "
+        "-RootProcess $process}catch{$reason=$_.Exception.Message};"
+        "$process.Kill();$process.WaitForExit();$process.Dispose();"
+        f'$exists=[bool](Test-Path \'{receipt}\');Write-Output "$reason,$exists"',
+    )
+    assert result == "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED,False"
+
+
+@pytest.mark.parametrize(
+    "receipt_body",
+    (
+        '{"schema_version":"wrong","root":{"pid":123,"start_token":"456"}}',
+        '{"schema_version":"native-process-ownership-v1","root":{"pid":999,"start_token":"456"}}',
+        '{"schema_version":"native-process-ownership-v1","root":{"pid":123,"start_token":"wrong"}}',
+        "{malformed",
+    ),
+)
+def test_native_receipt_readback_mismatch_fails_closed(
+    tmp_path, receipt_body: str,
+) -> None:
+    receipt = tmp_path / "readback.json"
+    receipt.write_text(receipt_body, encoding="utf-8")
+    result = _run_control_center_contract(
+        tmp_path,
+        "$reason='';try{$null=Confirm-NativeProcessOwnershipReceipt "
+        f"-Path '{receipt}' -ExpectedRoot ([pscustomobject]@{{pid=123;start_token='456'}})"
+        "}catch{$reason=$_.Exception.Message};Write-Output $reason",
+    )
+    assert result == "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED"
+
+
+def test_timeout_receipt_update_failure_still_terminates_tree(tmp_path) -> None:
+    receipt = tmp_path / "timeout-update.json"
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:realWrite=${function:Write-NativeProcessOwnershipReceipt};$script:writes=0;"
+        "function Write-NativeProcessOwnershipReceipt{param($Path,$RootProcess,$DescendantIds=@());"
+        "$script:writes++;if($script:writes -gt 1){throw 'injected-update-failure'};"
+        "& $script:realWrite -Path $Path -RootProcess $RootProcess -DescendantIds $DescendantIds};"
+        "$script:realStop=${function:Stop-NativeProcessTree};$script:stopCalled=$false;"
+        "function Stop-NativeProcessTree{param($Process);$script:stopCalled=$true;"
+        "& $script:realStop -Process $Process};$reason='';"
+        "try{$null=Invoke-Utf8NativeProcess -FilePath 'powershell.exe' "
+        "-Arguments @('-NoProfile','-Command','Start-Sleep -Seconds 60') "
+        f"-TimeoutMilliseconds 100 -OwnershipReceiptPath '{receipt}'"
+        "}catch{$reason=$_.Exception.Message};"
+        f'$exists=[bool](Test-Path \'{receipt}\');'
+        'Write-Output "$reason,$script:stopCalled,$exists"',
+    )
+    assert result == "NATIVE_PROCESS_OWNERSHIP_RECEIPT_FAILED,True,False"
+
+
+def test_native_ownership_receipt_uses_atomic_verified_commit() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    writer = source.split("function Write-NativeProcessOwnershipReceipt", 1)[1].split(
+        "function Test-NativeProcessIdentityAlive", 1,
+    )[0]
+    assert "[System.IO.File]::WriteAllBytes($temporary, $bytes)" in writer
+    assert "[System.IO.File]::Replace($temporary, $Path, $null, $true)" in writer
+    assert "[System.IO.File]::Move($temporary, $Path)" in writer
+    assert "Confirm-NativeProcessOwnershipReceipt" in writer
+    assert "Set-Content" not in writer
+
+
+def test_unresolved_native_work_keeps_provider_root_contained_until_exit() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    action = source.split('"ReleaseProviderFactsJson" {', 1)[1].split(
+        '"TerminateProviderObservation" {', 1,
+    )[0]
+    assert "NATIVE_PROCESS_TERMINATION_UNRESOLVED" in action
+    assert "Wait-NativeProcessContainment -Process $script:unresolvedNativeProcess" in action
+
+
+def test_provider_root_identity_failure_terminates_before_start_returns(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:providerPid=0;function Start-Process{param($FilePath,$ArgumentList,"
+        "$WorkingDirectory,$WindowStyle,[switch]$PassThru,$RedirectStandardOutput,"
+        "$RedirectStandardError);$p=Microsoft.PowerShell.Management\\Start-Process "
+        "-FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-Command',"
+        "'Start-Sleep -Seconds 60') -WindowStyle Hidden -PassThru;"
+        "$script:providerPid=$p.Id;return $p};"
+        "function Get-NativeProcessIdentity{return $null};"
+        "function Stop-NativeProcessTree{param($Process);$Process.Kill();"
+        "$Process.WaitForExit();[pscustomobject]@{state='TERMINATED'}};"
+        "$reason='';try{$null=Start-ControlCenterProviderObservationProcess "
+        "-ExpectedControlRevision ('a'*40)}catch{$reason=$_.Exception.Message};"
+        "$alive=[bool](Get-Process -Id $script:providerPid -ErrorAction SilentlyContinue);"
+        'Write-Output "$reason,$alive"',
+    )
+    assert result == "PROVIDER_OBSERVATION_PROCESS_IDENTITY_UNAVAILABLE,False"
+
+
+def test_unresolved_provider_root_identity_preserves_single_flight_until_exit(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:starts=0;function Start-Process{param($FilePath,$ArgumentList,"
+        "$WorkingDirectory,$WindowStyle,[switch]$PassThru,$RedirectStandardOutput,"
+        "$RedirectStandardError);$script:starts++;"
+        "Microsoft.PowerShell.Management\\Start-Process -FilePath 'powershell.exe' "
+        "-ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 60') "
+        "-WindowStyle Hidden -PassThru};"
+        "function Get-NativeProcessIdentity{return $null};"
+        "function Stop-NativeProcessTree{[pscustomobject]@{state='TERMINATION_FAILED'}};"
+        "$observation=Start-ControlCenterProviderObservationProcess "
+        "-ExpectedControlRevision ('a'*40);"
+        "$first=Complete-ControlCenterProviderObservationProcess $observation;"
+        "if($first.release_slot -eq 'CLEAR'){$null=Start-ControlCenterProviderObservationProcess "
+        "-ExpectedControlRevision ('a'*40)};"
+        "$observation.process.Kill();$observation.process.WaitForExit();"
+        "$last=Complete-ControlCenterProviderObservationProcess $observation;"
+        'Write-Output "$($first.state),$($first.release_slot),$script:starts,'
+        '$($last.state),$($last.release_slot)"',
+    )
+    assert result == "TERMINATION_UNRESOLVED,PRESERVE,1,UNKNOWN,CLEAR"
+
+
+def test_provider_adapters_do_not_downgrade_unresolved_native_ownership(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-CloudflareDeployment{throw 'NATIVE_PROCESS_TERMINATION_UNRESOLVED'};"
+        "$deployment='';try{$null=Get-ReleaseDeploymentProviderObservation -ForceFresh}"
+        "catch{$deployment=$_.Exception.Message};"
+        "function Get-CloudflareVersionDetails{throw 'NATIVE_PROCESS_TERMINATION_UNRESOLVED'};"
+        "$version='';try{$null=Get-ReleaseExactVersionProviderObservation "
+        "-VersionId '11111111-1111-4111-8111-111111111111' -ForceFresh}"
+        "catch{$version=$_.Exception.Message};"
+        'Write-Output "$deployment,$version"',
+    )
+    assert result == (
+        "NATIVE_PROCESS_TERMINATION_UNRESOLVED,"
+        "NATIVE_PROCESS_TERMINATION_UNRESOLVED"
+    )
+
+
+def test_background_provider_timeout_is_bounded_and_cleans_unique_files(tmp_path) -> None:
+    result_path = tmp_path / "provider.json"
+    output_path = tmp_path / "provider.out"
+    error_path = tmp_path / "provider.err"
+    result = _run_control_center_contract(
+        tmp_path,
+        "$process=Start-Process -FilePath 'powershell.exe' -ArgumentList "
+        "@('-NoProfile','-Command','Start-Sleep -Seconds 60') -WindowStyle Hidden -PassThru;"
+        f"$resultPath='{result_path}';$outputPath='{output_path}';$errorPath='{error_path}';"
+        "Set-Content $resultPath '{}';Set-Content $outputPath '';Set-Content $errorPath '';"
+        "$observation=[pscustomobject]@{process=$process;result_path=$resultPath;"
+        "output_path=$outputPath;error_path=$errorPath;"
+        "attempted_at=[DateTimeOffset]::UtcNow.AddSeconds(-2).ToString('o');"
+        "deadline_at=[DateTimeOffset]::UtcNow.AddSeconds(-1).ToString('o')};"
+        "$pidValue=$process.Id;$watch=[Diagnostics.Stopwatch]::StartNew();"
+        "$first=Complete-ControlCenterProviderObservationProcess $observation;$watch.Stop();"
+        "$limit=[DateTimeOffset]::UtcNow.AddSeconds(15);do{Start-Sleep -Milliseconds 50;"
+        "$answer=Complete-ControlCenterProviderObservationProcess $observation}while("
+        "$answer.release_slot -ne 'CLEAR' -and [DateTimeOffset]::UtcNow -lt $limit);"
+        "$alive=[bool](Get-Process -Id $pidValue -ErrorAction SilentlyContinue);"
+        "$files=[bool]((Test-Path $resultPath)-or(Test-Path $outputPath)-or(Test-Path $errorPath));"
+        'Write-Output "$($first.state),$([int]$watch.Elapsed.TotalMilliseconds),'
+        '$($answer.state),$alive,$files"',
+    )
+    state, callback_ms, final, alive, files = result.split(",")
+    assert state == "TERMINATING"
+    assert int(callback_ms) < 1000
+    assert (final, alive, files) == ("TIMEOUT", "False", "False")
+
+
+def _provider_parent_identity_ps1(prefix: str, *, artifact: str = "PRODUCTION_CANDIDATE") -> str:
+    return (
+        "[pscustomobject]@{"
+        f"git_sha=('{prefix}'*40);worker_version_id='11111111-1111-4111-8111-111111111111';"
+        f"windows_revision=('{prefix}'*40);artifact_kind='{artifact}';branch='main';"
+        f"worker_git_sha=('{prefix}'*40);validation_key='validation-{prefix}';"
+        "provenance_state='EXACT'}"
+    )
+
+
+def _provider_parent_release_ps1(*, transaction: str = "$null") -> str:
+    stable = _provider_parent_identity_ps1("a")
+    previous = _provider_parent_identity_ps1("b")
+    return (
+        "[pscustomobject]@{schema_version='stable-candidate-release-v3';"
+        f"stable={stable};previous_stable={previous};transaction={transaction};"
+        "deployment_status='READY';release_runtime=[pscustomobject]@{"
+        "drift_status='MATCHED';active_matches_committed=$true;active=[pscustomobject]@{"
+        "worker_version_id='11111111-1111-4111-8111-111111111111';"
+        "worker_git_sha=('a'*40);worker_traffic_percent=100;windows_revision=('a'*40);"
+        "observation_status='AVAILABLE';identity_status='COMPLETE';health='HEALTHY';"
+        "business_health_status='HEALTHY';ownership_status='SINGLE_OWNER'};"
+        "previous=[pscustomobject]@{worker_artifact=[pscustomobject]@{status='AVAILABLE'};"
+        "windows_artifact=[pscustomobject]@{status='AVAILABLE'};"
+        "worker_is_current_traffic_member=$false;worker_traffic_membership_status='NOT_ASSIGNED';"
+        "reverse_precheck=[pscustomobject]@{"
+        "can_reverse=$true;reason='READY'}}}}"
+    )
+
+
+@pytest.mark.parametrize(
+    "powershell", [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
+def test_provider_parent_timeout_replaces_prior_success_and_repeated_timeouts_stay_closed(
+    tmp_path, powershell: str,
+) -> None:
+    release = _provider_parent_release_ps1()
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$local={release};$provider={release};"
+        "$success=New-ControlCenterProviderObservationEnvelope -State AVAILABLE "
+        "-Release $provider -AttemptedAt ([DateTimeOffset]::UtcNow.AddSeconds(-1)) "
+        "-ObservedAt ([DateTimeOffset]::UtcNow);"
+        "$merged=Merge-ControlCenterProviderObservation -LocalRelease $local "
+        "-ProviderObservation $success;"
+        "$before=Get-ControlCenterReleasePresentation $merged;"
+        "$timeout=New-ControlCenterProviderObservationEnvelope -State TIMEOUT "
+        "-PriorObservation $success -AttemptedAt ([DateTimeOffset]::UtcNow) "
+        "-ObservedAt ([DateTimeOffset]::UtcNow);"
+        f"$closed=Merge-ControlCenterProviderObservation -LocalRelease ({release}) "
+        "-ProviderObservation $timeout;"
+        "$after=Get-ControlCenterReleasePresentation $closed;"
+        "$summary=Get-ControlCenterSummaryPresentation ([pscustomobject]@{"
+        "captured_at=[DateTimeOffset]::UtcNow.ToString('o');services=@();release=$closed});"
+        "$again=New-ControlCenterProviderObservationEnvelope -State TIMEOUT "
+        "-PriorObservation $timeout -AttemptedAt ([DateTimeOffset]::UtcNow) "
+        "-ObservedAt ([DateTimeOffset]::UtcNow);"
+        f"$closedAgain=Merge-ControlCenterProviderObservation -LocalRelease ({release}) "
+        "-ProviderObservation $again;"
+        "$last=Get-ControlCenterReleasePresentation $closedAgain;"
+        'Write-Output "$($before.stable_state),$($before.can_reverse),'
+        '$($after.stable_state),$($after.can_reverse),$($after.reverse_reason),'
+        '$($summary.overall),$($last.stable_state),$($last.can_reverse)"',
+        powershell=powershell,
+    )
+    assert result == (
+        "STABLE,True,UNKNOWN,False,PROVIDER_OBSERVATION_TIMEOUT,DEGRADED,UNKNOWN,False"
+    )
+
+
+def test_pending_provider_snapshot_has_sixty_second_max_stale_age(tmp_path) -> None:
+    release = _provider_parent_release_ps1()
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$local={release};$provider={release};$now=[DateTimeOffset]::UtcNow;"
+        "$success=New-ControlCenterProviderObservationEnvelope -State AVAILABLE "
+        "-Release $provider -AttemptedAt $now.AddSeconds(-1) -ObservedAt $now "
+        ";"
+        "$pending=New-ControlCenterProviderObservationEnvelope -State PENDING "
+        "-PriorObservation $success -AttemptedAt $now.AddSeconds(1);"
+        f"$fresh=Merge-ControlCenterProviderObservation -LocalRelease ({release}) "
+        "-ProviderObservation $pending -Now $now.AddSeconds(59);"
+        f"$stale=Merge-ControlCenterProviderObservation -LocalRelease ({release}) "
+        "-ProviderObservation $pending -Now $now.AddSeconds(61);"
+        "$freshView=Get-ControlCenterReleasePresentation $fresh;"
+        "$staleView=Get-ControlCenterReleasePresentation $stale;"
+        'Write-Output "$($freshView.stable_state),$($freshView.can_reverse),'
+        '$($staleView.stable_state),$($staleView.can_reverse),$($staleView.reverse_reason)"',
+    )
+    assert result == "STABLE,True,UNKNOWN,False,PROVIDER_OBSERVATION_STALE"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    (
+        ("$facts.health_observation.ownership_status='INVALID'",
+         "DEGRADED,INVALID,HEALTHY,False,PRODUCTION_OWNERSHIP_INVALID"),
+        ("$facts.health_observation.business_health_status='DEGRADED';"
+         "$facts.health_observation.status='DEGRADED';"
+         "$facts.health_observation.reason='LOCAL_API_OR_RUNTIME_HEALTH_FAILED'",
+         "DEGRADED,SINGLE_OWNER,DEGRADED,True,READY"),
+        ("$facts.active_windows_observation.revision=('c'*40)",
+         "DRIFT,SINGLE_OWNER,HEALTHY,False,ACTIVE_COMMITTED_MISMATCH_REQUIRES_RECOVERY_MODE"),
+        ("$facts.control_bundle_status='UNAVAILABLE'",
+         "STABLE,SINGLE_OWNER,HEALTHY,False,CONTROL_BUNDLE_UNAVAILABLE"),
+        ("$facts.release_lock_active=$true",
+         "STABLE,SINGLE_OWNER,HEALTHY,False,RELEASE_LOCK_ACTIVE"),
+    ),
+)
+def test_cached_provider_facts_never_overwrite_fresh_local_facts(
+    tmp_path, mutation: str, expected: str,
+) -> None:
+    release = _provider_parent_release_ps1()
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$provider={release};$local={release};$now=[DateTimeOffset]::UtcNow;"
+        "$facts=Get-ControlCenterLocalFactsFromRelease $local;"
+        f"{mutation};"
+        "$local.release_runtime|Add-Member local_facts $facts -Force;"
+        "$success=New-ControlCenterProviderObservationEnvelope -State AVAILABLE "
+        "-Release $provider -AttemptedAt $now.AddSeconds(-1) -ObservedAt $now;"
+        "$pending=New-ControlCenterProviderObservationEnvelope -State PENDING "
+        "-PriorObservation $success -AttemptedAt $now;"
+        "$merged=Merge-ControlCenterProviderObservation -LocalRelease $local "
+        "-ProviderObservation $pending -Now $now.AddSeconds(5);"
+        "$view=Get-ControlCenterReleasePresentation $merged;"
+        'Write-Output "$($view.stable_state),$($view.active_ownership_status),'
+        '$($view.active_business_health),$($view.can_reverse),$($view.reverse_reason)"',
+    )
+    assert result == expected
+
+
+def test_provider_timeout_keeps_fresh_local_blocker_visible(tmp_path) -> None:
+    release = _provider_parent_release_ps1()
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$provider={release};$local={release};$now=[DateTimeOffset]::UtcNow;"
+        "$facts=Get-ControlCenterLocalFactsFromRelease $local;"
+        "$facts.health_observation.ownership_status='INVALID';"
+        "$local.release_runtime|Add-Member local_facts $facts -Force;"
+        "$success=New-ControlCenterProviderObservationEnvelope -State AVAILABLE "
+        "-Release $provider -AttemptedAt $now.AddSeconds(-1) -ObservedAt $now;"
+        "$timeout=New-ControlCenterProviderObservationEnvelope -State TIMEOUT "
+        "-PriorObservation $success -AttemptedAt $now -ObservedAt $now;"
+        "$merged=Merge-ControlCenterProviderObservation -LocalRelease $local "
+        "-ProviderObservation $timeout;"
+        "$view=Get-ControlCenterReleasePresentation $merged;"
+        'Write-Output "$($view.stable_state),$($view.active_ownership_status),'
+        '$($view.active_business_health),$($view.can_reverse),$($view.reverse_reason)"',
+    )
+    assert result == "DEGRADED,INVALID,HEALTHY,False,PROVIDER_OBSERVATION_TIMEOUT"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    (
+        ("$local.stable.artifact_kind='LEGACY_BOOTSTRAP_STABLE'", "False"),
+        ("$local.stable.provenance_state='WRONG'", "False"),
+        ("$local.stable.worker_git_sha=('c'*40)", "False"),
+        ("$local.stable.validation_key='changed-stable'", "False"),
+        ("$local.schema_version='unknown-v9'", "False"),
+        ("$local.previous_stable.artifact_kind='UNKNOWN'", "False"),
+        ("$local.previous_stable.validation_key='changed-previous'", "False"),
+        ("$local.transaction=[pscustomobject]@{phase='SWITCHING'}", "False"),
+        ("", "True"),
+    ),
+)
+def test_provider_parent_requires_complete_authority_fingerprint(
+    tmp_path, mutation: str, expected: str,
+) -> None:
+    release = _provider_parent_release_ps1()
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$local={release};$provider={release};"
+        "$snapshot=New-ControlCenterProviderObservationEnvelope -State AVAILABLE "
+        "-Release $provider -AttemptedAt ([DateTimeOffset]::UtcNow) "
+        "-ObservedAt ([DateTimeOffset]::UtcNow);"
+        f"{mutation};"
+        "if($null -eq $local){$local=$provider};"
+        "$merged=Merge-ControlCenterProviderObservation -LocalRelease $local "
+        "-ProviderObservation $snapshot;"
+        "$accepted=[bool]($merged.release_runtime.active.observation_status -eq 'AVAILABLE' -and "
+        "$merged.release_runtime.active_matches_committed);"
+        "Write-Output $accepted",
+    )
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    "powershell", [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
+def test_verified_process_tree_termination_kills_root_and_descendant(
+    tmp_path, powershell: str,
+) -> None:
+    child_pid_path = tmp_path / "descendant.pid"
+    child_command = (
+        f"$child=Start-Process powershell.exe -ArgumentList @('-NoProfile','-Command',"
+        "'Start-Sleep -Seconds 60') -WindowStyle Hidden -PassThru;"
+        f"Set-Content -LiteralPath '{child_pid_path}' -Value $child.Id;"
+        "Start-Sleep -Seconds 60"
+    )
+    result = _run_control_center_contract(
+        tmp_path,
+        "$root=Start-Process powershell.exe -ArgumentList @('-NoProfile','-Command',"
+        f"'{child_command.replace("'", "''")}') -WindowStyle Hidden -PassThru;"
+        f"$limit=[DateTimeOffset]::UtcNow.AddSeconds(5);while(-not(Test-Path '{child_pid_path}')"
+        "-and [DateTimeOffset]::UtcNow -lt $limit){Start-Sleep -Milliseconds 50};"
+        f"$descendant=[int](Get-Content '{child_pid_path}');"
+        "$answer=Stop-NativeProcessTree -Process $root;"
+        "$rootAlive=[bool](Get-Process -Id $root.Id -ErrorAction SilentlyContinue);"
+        "$childAlive=[bool](Get-Process -Id $descendant -ErrorAction SilentlyContinue);"
+        'Write-Output "$($answer.state),$rootAlive,$childAlive"',
+        powershell=powershell,
+    )
+    assert result == "TERMINATED,False,False"
+
+
+@pytest.mark.parametrize("termination_state", ("COMMAND_NONZERO", "COMMAND_TIMEOUT"))
+def test_tree_termination_command_failure_uses_verified_fallback(
+    tmp_path, termination_state: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Invoke-NativeTreeTerminationCommand{param($ProcessId,$TimeoutMilliseconds);"
+        f"[pscustomobject]@{{state='{termination_state}';exit_code=1}}}};"
+        "$root=Start-Process powershell.exe -ArgumentList @('-NoProfile','-Command',"
+        "'Start-Sleep -Seconds 60') -WindowStyle Hidden -PassThru;"
+        "$answer=Stop-NativeProcessTree -Process $root;"
+        "$alive=[bool](Get-Process -Id $root.Id -ErrorAction SilentlyContinue);"
+        'Write-Output "$($answer.state),$alive"',
+    )
+    assert result == "TERMINATED,False"
+
+
+def test_unresolved_termination_preserves_single_flight_and_temp_files(tmp_path) -> None:
+    result_path = tmp_path / "provider.json"
+    output_path = tmp_path / "provider.out"
+    error_path = tmp_path / "provider.err"
+    termination_result_path = tmp_path / "termination.json"
+    result = _run_control_center_contract(
+        tmp_path,
+        "$process=Start-Process powershell.exe -ArgumentList @('-NoProfile','-Command',"
+        "'Start-Sleep -Seconds 60') -WindowStyle Hidden -PassThru;"
+        "$termination=Start-Process powershell.exe -ArgumentList @('-NoProfile','-Command','exit 0') "
+        "-WindowStyle Hidden -PassThru;$termination.WaitForExit();"
+        f"$resultPath='{result_path}';$outputPath='{output_path}';$errorPath='{error_path}';"
+        f"$terminationResultPath='{termination_result_path}';"
+        "Set-Content $resultPath '{}';Set-Content $outputPath '';Set-Content $errorPath '';"
+        "Set-Content $terminationResultPath '{\"state\":\"TERMINATION_FAILED\"}';"
+        "$observation=[pscustomobject]@{process=$process;result_path=$resultPath;"
+        "output_path=$outputPath;error_path=$errorPath;"
+        "process_identity=(Get-NativeProcessIdentity $process);native_receipt_path=$null;"
+        "termination_process=$termination;termination_result_path=$terminationResultPath;"
+        "attempted_at=[DateTimeOffset]::UtcNow.AddSeconds(-2).ToString('o');"
+        "deadline_at=[DateTimeOffset]::UtcNow.AddSeconds(-1).ToString('o')};"
+        "$answer=Complete-ControlCenterProviderObservationProcess $observation;"
+        "$files=[bool]((Test-Path $resultPath)-and(Test-Path $outputPath)-and(Test-Path $errorPath));"
+        "$alive=[bool](Get-Process -Id $process.Id -ErrorAction SilentlyContinue);"
+        "$process.Kill();$process.WaitForExit();"
+        "$cleared=Complete-ControlCenterProviderObservationProcess $observation;"
+        "$remaining=[bool]((Test-Path $resultPath)-or(Test-Path $outputPath)-or"
+        "(Test-Path $errorPath)-or(Test-Path $terminationResultPath));"
+        'Write-Output "$($answer.state),$($answer.release_slot),$alive,$files,'
+        '$($cleared.state),$($cleared.release_slot),$remaining"',
+    )
+    assert result == "TERMINATION_UNRESOLVED,PRESERVE,True,True,TIMEOUT,CLEAR,False"
+
+
+def test_provider_root_exit_does_not_clear_live_nested_native_owner(tmp_path) -> None:
+    child_pid_path = tmp_path / "nested.pid"
+    receipt_path = tmp_path / "nested-receipt.json"
+    result_path = tmp_path / "provider.json"
+    output_path = tmp_path / "provider.out"
+    error_path = tmp_path / "provider.err"
+    child_command = (
+        f"$child=Start-Process powershell.exe -ArgumentList @('-NoProfile','-Command',"
+        "'Start-Sleep -Seconds 60') -WindowStyle Hidden -PassThru;"
+        f"Set-Content -LiteralPath '{child_pid_path}' -Value $child.Id;"
+        "Start-Sleep -Seconds 1"
+    )
+    result = _run_control_center_contract(
+        tmp_path,
+        "$root=Start-Process powershell.exe -ArgumentList @('-NoProfile','-Command',"
+        f"'{child_command.replace("'", "''")}') -WindowStyle Hidden -PassThru;"
+        f"$limit=[DateTimeOffset]::UtcNow.AddSeconds(5);while(-not(Test-Path '{child_pid_path}')"
+        "-and [DateTimeOffset]::UtcNow -lt $limit){Start-Sleep -Milliseconds 25};"
+        f"$childPid=[int](Get-Content '{child_pid_path}');"
+        f"$null=Write-NativeProcessOwnershipReceipt -Path '{receipt_path}' -RootProcess $root "
+        "-DescendantIds @($childPid);$root.WaitForExit();"
+        f"Set-Content '{result_path}' '{{}}';Set-Content '{output_path}' '';"
+        f"Set-Content '{error_path}' '';"
+        "$observation=[pscustomobject]@{process=$root;process_identity=(Get-NativeProcessIdentity $root);"
+        f"result_path='{result_path}';output_path='{output_path}';error_path='{error_path}';"
+        f"native_receipt_path='{receipt_path}';termination_process=$null;termination_result_path=$null;"
+        "expected_control_revision=$null;attempted_at=[DateTimeOffset]::UtcNow.AddSeconds(-2).ToString('o');"
+        "deadline_at=[DateTimeOffset]::UtcNow.AddMinutes(1).ToString('o')};"
+        "$first=Complete-ControlCenterProviderObservationProcess $observation;"
+        "$preserved=[bool]((Test-Path $observation.native_receipt_path)-and"
+        "(Get-Process -Id $childPid -ErrorAction SilentlyContinue));"
+        "$limit=[DateTimeOffset]::UtcNow.AddSeconds(15);do{Start-Sleep -Milliseconds 50;"
+        "$last=Complete-ControlCenterProviderObservationProcess $observation}while("
+        "$last.release_slot -ne 'CLEAR' -and [DateTimeOffset]::UtcNow -lt $limit);"
+        "$childAlive=[bool](Get-Process -Id $childPid -ErrorAction SilentlyContinue);"
+        'Write-Output "$($first.state),$($first.release_slot),$preserved,'
+        '$($last.state),$($last.release_slot),$childAlive"',
+    )
+    assert result == "TERMINATING,PRESERVE,True,UNKNOWN,CLEAR,False"
+
+
+def test_ui_poll_remains_nonblocking_while_termination_worker_blocks(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$root=Start-Process powershell.exe -ArgumentList @('-NoProfile','-Command',"
+        "'Start-Sleep -Seconds 60') -WindowStyle Hidden -PassThru;"
+        "$worker=Start-Process powershell.exe -ArgumentList @('-NoProfile','-Command',"
+        "'Start-Sleep -Seconds 5') -WindowStyle Hidden -PassThru;"
+        "$observation=[pscustomobject]@{process=$root;process_identity=(Get-NativeProcessIdentity $root);"
+        "result_path=$null;output_path=$null;error_path=$null;native_receipt_path=$null;"
+        "termination_process=$worker;termination_result_path=$null;expected_control_revision=$null;"
+        "attempted_at=[DateTimeOffset]::UtcNow.AddSeconds(-2).ToString('o');"
+        "deadline_at=[DateTimeOffset]::UtcNow.AddSeconds(-1).ToString('o')};"
+        "$workerId=$worker.Id;$localRefreshCount=0;$watch=[Diagnostics.Stopwatch]::StartNew();"
+        "1..5|ForEach-Object{$localRefreshCount++;"
+        "$answer=Complete-ControlCenterProviderObservationProcess $observation};$watch.Stop();"
+        "$sameWorker=[bool]($observation.termination_process.Id -eq $workerId);"
+        "$root.Kill();$worker.Kill();$root.WaitForExit();$worker.WaitForExit();"
+        "$root.Dispose();$worker.Dispose();"
+        'Write-Output "$($answer.state),$($answer.release_slot),$localRefreshCount,'
+        '$sameWorker,$([int]$watch.Elapsed.TotalMilliseconds)"',
+    )
+    state, slot, count, same_worker, elapsed_ms = result.split(",")
+    assert (state, slot, count, same_worker) == ("TERMINATING", "PRESERVE", "5", "True")
+    assert int(elapsed_ms) < 1000
+
+
+def test_completed_provider_read_model_with_unknown_active_observation_is_not_available(
+    tmp_path,
+) -> None:
+    release = _provider_parent_release_ps1().replace(
+        "observation_status='AVAILABLE'", "observation_status='UNKNOWN'",
+    )
+    result = _run_control_center_contract(
+        tmp_path,
+        f"$release={release};$snapshot=New-ControlCenterProviderObservationEnvelope "
+        "-State AVAILABLE -Release $release "
+        "-AttemptedAt ([DateTimeOffset]::UtcNow.AddSeconds(-1)) "
+        "-ObservedAt ([DateTimeOffset]::UtcNow);"
+        "$merged=Merge-ControlCenterProviderObservation -LocalRelease $release "
+        "-ProviderObservation $snapshot;"
+        "$view=Get-ControlCenterReleasePresentation $merged;"
+        'Write-Output "$($snapshot.state),$($view.stable_state),'
+        '$($view.can_reverse),$($view.reverse_reason)"',
+    )
+    assert result == "UNKNOWN,UNKNOWN,False,PROVIDER_OBSERVATION_UNKNOWN"
+
+
+def test_wpf_and_winforms_share_provider_snapshot_and_verified_close_contract() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    wpf = source.split("function Show-WpfControlCenter", 1)[1].split(
+        "function Show-ControlCenter", 1,
+    )[0]
+    winforms = source.split("function Show-ControlCenter", 1)[1]
+
+    assert "wpfLastProviderRelease" not in source
+    assert "lastGuiRelease" not in source
+    for gui in (wpf, winforms):
+        assert "New-ControlCenterProviderObservationEnvelope" in gui
+        assert "Merge-ControlCenterProviderObservation" in gui
+        assert 'release_slot -eq "CLEAR"' in gui
+    assert "if ($script:wpfProviderObservation) { return }" in wpf
+    assert "if ($script:winFormsProviderObservation) { return }" in winforms
+    wpf_close = wpf.split("Add_Closing", 1)[1].split("Add_Closed", 1)[0]
+    winforms_close = winforms.split("Add_FormClosing", 1)[1].split("ShowDialog", 1)[0]
+    for close_handler in (wpf_close, winforms_close):
+        assert "Complete-ControlCenterProviderObservationProcess" in close_handler
+        assert "Stop-NativeProcessTree" not in close_handler
+        assert "release_slot" in close_handler
+
+
+def test_provider_parent_contract_tracks_full_authority_and_completion_times() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    fingerprint = source.split(
+        "function Get-ControlCenterProviderAuthorityFingerprint", 1,
+    )[1].split("function New-ControlCenterProviderObservationEnvelope", 1)[0]
+    envelope = source.split(
+        "function New-ControlCenterProviderObservationEnvelope", 1,
+    )[1].split("function Start-ControlCenterProviderObservationProcess", 1)[0]
+
+    for field in (
+        "schema_version", "git_sha", "worker_version_id", "windows_revision",
+        "artifact_kind", "branch", "worker_git_sha", "validation_key", "provenance_state",
+        "transaction_active",
+    ):
+        assert field in fingerprint
+    for field in (
+        "state", "provider_facts", "attempted_at", "observed_at", "last_success_at",
+        "authority_fingerprint",
+    ):
+        assert field in envelope
+    assert '$State -ne "PENDING"' in envelope
+
+
+def test_provider_envelope_owns_only_provider_facts_and_shared_composer() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    envelope_body = source.split(
+        "function New-ControlCenterProviderObservationEnvelope", 1,
+    )[1].split("function Start-ControlCenterProviderObservationProcess", 1)[0]
+    returned = envelope_body.split("return [pscustomobject]@{", 1)[1]
+    start_body = source.split(
+        "function Start-ControlCenterProviderObservationProcess", 1,
+    )[1].split("function Invoke-ControlCenterProviderTermination", 1)[0]
+    merge_body = source.split(
+        "function Merge-ControlCenterProviderObservation", 1,
+    )[1].split("function Import-WpfControlCenterWindow", 1)[0]
+
+    assert "provider_facts = $lastFacts" in returned
+    assert "release =" not in returned
+    assert '"ReleaseProviderFactsJson"' in start_body
+    assert '"ReleaseStatusJson"' not in start_body
+    assert "Join-ReleaseRuntimeFacts" in merge_body
+    assert "providerRelease.release_runtime" not in merge_body
+
+
+def test_gui_timeout_completion_is_polled_without_ui_thread_tree_termination() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    wpf = source.split("function Show-WpfControlCenter", 1)[1].split(
+        "function Show-ControlCenter", 1,
+    )[0]
+    winforms = source.split("function Show-ControlCenter", 1)[1]
+    completion = source.split(
+        "function Complete-ControlCenterProviderObservationProcess", 1,
+    )[1].split("function Set-ControlCenterProviderUnknownReadModel", 1)[0]
+
+    assert "Start-ControlCenterProviderTerminationProcess" in completion
+    for gui in (wpf, winforms):
+        assert "Complete-ControlCenterProviderObservationProcess" in gui
+        assert "Stop-NativeProcessTree" not in gui
+        assert "release_slot" in gui
+
+
+def test_reverse_action_bypasses_provider_cache_after_lock() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    body = source.split("function Invoke-ReverseStable", 1)[1].split(
+        "function Reconcile-ReleaseControlState", 1,
+    )[0]
+    assert body.index("Enter-ReleaseTransactionLock") < body.index("-ForceProviderRefresh")
+    assert "$target = $runtimeReadModel.previous_committed" in body
+    assert "$target = $state.previous_stable" not in body
+
+
+def test_fresh_action_observation_never_falls_back_to_inflight_gui_cache(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:releaseProviderRefreshInFlight=$true;"
+        "$script:releaseDeploymentObservationCache=[pscustomobject]@{status='AVAILABLE';"
+        "value=[pscustomobject]@{versions=@()};observed_at=[DateTimeOffset]::UtcNow.ToString('o');"
+        "attempted_at=[DateTimeOffset]::UtcNow.ToString('o')};"
+        "$state=[pscustomobject]@{schema_version='stable-candidate-release-v3';"
+        "stable=$null;previous_stable=$null;candidate=$null;transaction=$null};"
+        "$model=Get-CurrentReleaseRuntimeReadModel -PersistedState $state -ForceProviderRefresh;"
+        'Write-Output "$($model.active.observation_status),$($model.previous.reverse_precheck.reason)"',
+    )
+    assert result == "UNKNOWN,COMMITTED_IDENTITY_INVALID"
+
+
+def test_all_operator_and_json_consumers_preserve_membership_enum() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    assert source.count("previous_traffic_membership_status") >= 3
+    assert '$releaseView.previous_traffic_membership_status.Replace' in source
+    status_json = source.split('"StatusJson" {', 1)[1].split('"ReleaseStatusJson" {', 1)[0]
+    release_json = source.split('"ReleaseStatusJson" {', 1)[1].split('"CodeRevision" {', 1)[0]
+    assert "Get-ReleaseControlStatusSnapshot" in status_json
+    assert "Get-ReleaseControlStatusSnapshot" in release_json
+    wpf = source.split("function Show-WpfControlCenter", 1)[1].split(
+        "function Show-ControlCenter", 1,
+    )[0]
+    winforms = source.split("function Show-ControlCenter", 1)[1]
+    assert "Get-ControlCenterReleasePresentation" in wpf
+    assert "Get-ControlCenterReleasePresentation" in winforms
+
+
+@pytest.mark.parametrize(
+    ("business", "ownership", "overall", "expected"),
+    (
+        ("HEALTHY", "SINGLE_OWNER", "HEALTHY", "STABLE"),
+        ("DEGRADED", "SINGLE_OWNER", "DEGRADED", "DEGRADED"),
+        ("HEALTHY", "INVALID", "DEGRADED", "DEGRADED"),
+        ("HEALTHY", "UNKNOWN", "UNKNOWN", "UNKNOWN"),
+    ),
+)
+def test_shared_presenter_requires_health_and_single_ownership_for_stable(
+    tmp_path, business: str, ownership: str, overall: str, expected: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$stable=[pscustomobject]@{git_sha=('a'*40)};"
+        "$runtime=[pscustomobject]@{drift_status='MATCHED';active_matches_committed=$true;"
+        f"active=[pscustomobject]@{{observation_status='AVAILABLE';identity_status='COMPLETE';"
+        f"health='{overall}';business_health_status='{business}';ownership_status='{ownership}'}};"
+        "previous=[pscustomobject]@{reverse_precheck=[pscustomobject]@{can_reverse=$true;reason='READY'}}};"
+        "$release=[pscustomobject]@{stable=$stable;candidate=$null;transaction=$null;"
+        "deployment_status='READY';release_runtime=$runtime};"
+        "$view=Get-ControlCenterReleasePresentation -Release $release;"
+        'Write-Output "$($view.stable_state),$($view.active_business_health),$($view.active_ownership_status)"',
+    )
+    assert result == f"{expected},{business},{ownership}"
+
+
+@pytest.mark.parametrize(
+    ("owner_scenario", "business_ok", "owner_ok", "business", "ownership", "overall", "reverse"),
+    (
+        ("single", True, True, "HEALTHY", "SINGLE_OWNER", "HEALTHY", "READY"),
+        ("duplicate", True, False, "HEALTHY", "INVALID", "DEGRADED", "PRODUCTION_OWNERSHIP_INVALID"),
+        ("missing", True, False, "HEALTHY", "INVALID", "DEGRADED", "PRODUCTION_OWNERSHIP_INVALID"),
+        ("single", False, True, "DEGRADED", "SINGLE_OWNER", "DEGRADED", "READY"),
+    ),
+)
+def test_real_active_health_composition_reads_business_and_owner_once(
+    tmp_path, owner_scenario: str, business_ok: bool, owner_ok: bool, business: str,
+    ownership: str, overall: str, reverse: str,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:businessReads=0;$script:ownerReads=0;"
+        f"function Test-CurrentBusinessRuntimeHealth{{$script:businessReads++;${str(business_ok).lower()}}};"
+        f"function Test-SingleProductionOwner{{$script:ownerReads++;${str(owner_ok).lower()}}};"
+        "$health=Get-ReleaseActiveHealthObservation;"
+        "$artifact=[pscustomobject]@{status='AVAILABLE';reason='OK'};"
+        "$pre=New-ReleaseReversePrecheck -PreviousIdentity ([pscustomobject]@{id='p'}) "
+        "-CommittedIdentityStatus COMPLETE -PreviousIdentityStatus COMPLETE "
+        "-WorkerArtifact $artifact -WindowsArtifact $artifact -ControlBundleStatus AVAILABLE "
+        "-OwnershipStatus $health.ownership_status -ActiveObservationStatus AVAILABLE "
+        "-ActiveIdentityStatus COMPLETE -ActiveMatchesCommitted $true;"
+        'Write-Output "$($health.business_health_status),$($health.ownership_status),'
+        '$($health.status),$($pre.reason),$script:businessReads,$script:ownerReads"',
+    )
+    assert result == f"{business},{ownership},{overall},{reverse},1,1"
+
+
+def test_business_health_helper_has_no_ownership_authority() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    business = source.split("function Test-CurrentBusinessRuntimeHealth", 1)[1].split(
+        "function Test-CurrentStableRuntimeHealth", 1,
+    )[0]
+    combined = source.split("function Test-CurrentStableRuntimeHealth", 1)[1].split(
+        "function Invoke-PromotionFreshnessCoordinator", 1,
+    )[0]
+    assert "Test-SingleProductionOwner" not in business
+    assert "Test-CurrentBusinessRuntimeHealth" in combined
+    assert "Test-SingleProductionOwner" in combined
+
+
+@pytest.mark.parametrize(
+    ("stable_state", "overall"),
+    (("STABLE", "HEALTHY"), ("DEGRADED", "DEGRADED"),
+     ("UNKNOWN", "DEGRADED"), ("DRIFT", "FAILED")),
+)
+def test_global_summary_never_hides_release_stable_state(
+    tmp_path, stable_state: str, overall: str,
+) -> None:
+    runtime = {
+        "STABLE": ("MATCHED", "HEALTHY", "HEALTHY", "SINGLE_OWNER", True),
+        "DEGRADED": ("MATCHED", "DEGRADED", "DEGRADED", "SINGLE_OWNER", True),
+        "UNKNOWN": ("UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN", False),
+        "DRIFT": ("DRIFT", "HEALTHY", "HEALTHY", "SINGLE_OWNER", False),
+    }[stable_state]
+    drift, health, business, ownership, matches = runtime
+    result = _run_control_center_contract(
+        tmp_path,
+        "$stable=[pscustomobject]@{git_sha=('a'*40)};"
+        f"$runtime=[pscustomobject]@{{drift_status='{drift}';active_matches_committed=${str(matches).lower()};"
+        f"active=[pscustomobject]@{{observation_status='AVAILABLE';identity_status='COMPLETE';"
+        f"health='{health}';business_health_status='{business}';ownership_status='{ownership}'}};"
+        "previous=[pscustomobject]@{reverse_precheck=[pscustomobject]@{can_reverse=$false;reason='BLOCKED'}}};"
+        "$release=[pscustomobject]@{stable=$stable;candidate=$null;transaction=$null;"
+        "deployment_status='READY';release_runtime=$runtime};"
+        "$snapshot=[pscustomobject]@{captured_at=[DateTimeOffset]::UtcNow.ToString('o');"
+        "services=@([pscustomobject]@{State='RUNNING'});release=$release};"
+        "$summary=Get-ControlCenterSummaryPresentation $snapshot;"
+        "$view=Get-ControlCenterReleasePresentation $release;"
+        'Write-Output "$($view.stable_state),$($summary.overall)"',
+    )
+    assert result == f"{stable_state},{overall}"
+
+
+def test_wpf_and_winforms_consume_the_shared_global_summary() -> None:
+    source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    wpf = source.split("function Show-WpfControlCenter", 1)[1].split(
+        "function Show-ControlCenter", 1,
+    )[0]
+    winforms = source.split("function Show-ControlCenter", 1)[1]
+    assert "Get-ControlCenterSummaryPresentation" in wpf
+    assert "Get-ControlCenterSummaryPresentation" in winforms
+    assert '$bad = @($status' not in wpf
+
+
+def test_rollback_artifact_availability_does_not_require_deployment_membership(tmp_path) -> None:
     stable = "11111111-1111-4111-8111-111111111111"
     candidate = "22222222-2222-4222-8222-222222222222"
     version_json = json.dumps({
         "id": stable,
         "number": 979,
         "metadata": {"source": "wrangler"},
+        "annotations": {"workers/message": (
+            f"release:{'a' * 40} branch:main artifact_kind:PRODUCTION_CANDIDATE"
+        )},
         "resources": {"script": {"handlers": ["fetch"]}},
     })
     deployment_json = json.dumps({
@@ -4609,26 +5970,59 @@ def test_rollback_target_rejects_deployment_identity_mismatch(tmp_path) -> None:
         f"function Get-CloudflareVersionDetails{{param($VersionId);"
         f"'{version_json}'|ConvertFrom-Json}};"
         f"function Get-CloudflareDeployment{{'{deployment_json}'|ConvertFrom-Json}};"
-        f"$target=[pscustomobject]@{{worker_version_id='{stable}'}};"
+        f"$target=[pscustomobject]@{{worker_version_id='{stable}';git_sha=('a'*40);"
+        "worker_git_sha=('a'*40);windows_revision=('a'*40);"
+        "artifact_kind='PRODUCTION_CANDIDATE';branch='main'};"
         "Write-Output (Test-CloudflareRollbackTarget -Target $target)",
     )
 
-    assert result == "False"
+    assert result == "True"
 
 
-def test_rollback_target_rejects_deployment_transport_failure(tmp_path) -> None:
+def test_rollback_artifact_lookup_does_not_consume_deployment_transport(tmp_path) -> None:
     stable = "11111111-1111-4111-8111-111111111111"
     result = _run_control_center_contract(
         tmp_path,
         f"function Get-CloudflareVersionDetails{{param($VersionId);[pscustomobject]@{{"
         f"id='{stable}';number=979;metadata=[pscustomobject]@{{source='wrangler'}};"
+        "annotations=[pscustomobject]@{'workers/message'=('release:'+('a'*40)+' branch:main artifact_kind:PRODUCTION_CANDIDATE')};"
         "resources=[pscustomobject]@{script=[pscustomobject]@{handlers=@('fetch')}}}};"
         "function Get-CloudflareDeployment{throw 'PROVIDER_TRANSPORT_FAILED'};"
-        f"$target=[pscustomobject]@{{worker_version_id='{stable}'}};"
+        f"$target=[pscustomobject]@{{worker_version_id='{stable}';git_sha=('a'*40);"
+        "worker_git_sha=('a'*40);windows_revision=('a'*40);"
+        "artifact_kind='PRODUCTION_CANDIDATE';branch='main'};"
         "Write-Output (Test-CloudflareRollbackTarget -Target $target)",
     )
 
-    assert result == "False"
+    assert result == "True"
+
+
+@pytest.mark.parametrize(
+    "powershell", [name for name in ("powershell.exe", "pwsh.exe") if shutil.which(name)],
+)
+def test_windows_legacy_adapter_consumes_exact_resolved_pair(
+    tmp_path, powershell: str,
+) -> None:
+    revision = "783d25314b090dd7fbbf124777c3b8de517d2b85"
+    worker = "76d314fc-e484-4f50-8ace-3689e0896709"
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Invoke-Utf8NativeProcess{param($FilePath,$Arguments,$WorkingDirectory,$TimeoutMilliseconds);"
+        "if('show' -in $Arguments){[pscustomobject]@{exit_code=1;stdout=''}}"
+        "else{[pscustomobject]@{exit_code=0;stdout=''}}};"
+        f"$exact=[pscustomobject]@{{git_sha='{revision}';worker_git_sha='NOT_RECORDED';"
+        f"worker_version_id='{worker}';windows_revision='{revision}';"
+        "artifact_kind='LEGACY_BOOTSTRAP_STABLE';branch='main';"
+        "provenance_state='LEGACY_EXACT_WORKER_WINDOWS_PAIR'};"
+        "$wrong=$exact|Select-Object *;$wrong.provenance_state='ARBITRARY';"
+        "$exactResult=Get-ReleaseWindowsArtifactObservation -IdentityResolution "
+        "(Resolve-ReleaseRuntimeIdentity $exact);"
+        "$wrongResult=Get-ReleaseWindowsArtifactObservation -IdentityResolution "
+        "(Resolve-ReleaseRuntimeIdentity $wrong);"
+        'Write-Output "$($exactResult.status),$($wrongResult.status)"',
+        powershell=powershell,
+    )
+    assert result == "AVAILABLE,MISMATCH"
 
 
 def test_bootstrap_watermark_uses_newest_valid_timestamp_then_version_id(tmp_path) -> None:
@@ -5077,7 +6471,10 @@ def test_reverse_restores_both_identities_without_d1_mutation(tmp_path) -> None:
         "$state.stable=$state.candidate;$state.candidate=$null;Write-ReleaseControlState $state;"
         "function Enter-ReleaseTransactionLock { return $true };function Exit-ReleaseTransactionLock {};"
         "function Assert-ActiveControlBundle { return [pscustomobject]@{exact_revision=$true} };"
-        "function Test-CloudflareRollbackTarget { return $true };"
+        "function Get-CurrentReleaseRuntimeReadModel { $live=Get-ReleaseControlState;"
+        "return [pscustomobject]@{committed_stable=$live.stable;"
+        "previous_committed=$live.previous_stable;previous="
+        "[pscustomobject]@{reverse_precheck=[pscustomobject]@{can_reverse=$true;reason='READY'}}} };"
         "function Test-SingleProductionOwner { return $true };"
         f"function New-RuntimeRecoveryPlan {{ return [pscustomobject]@{{body="
         f"[pscustomobject]@{{stable_revision='{current}'}};digest=('0' * 64)}} }};"
@@ -5097,6 +6494,64 @@ def test_reverse_restores_both_identities_without_d1_mutation(tmp_path) -> None:
     assert result == f"True,{current},11111111-1111-4111-8111-111111111111,{previous}"
     assert "D1" not in reverse_body
     assert "database" not in reverse_body.lower()
+
+
+@pytest.mark.parametrize("persisted_eligible", ("$true", "$false"))
+@pytest.mark.parametrize(
+    "live_reason",
+    ("ACTIVE_OBSERVATION_UNAVAILABLE", "ACTIVE_COMMITTED_MISMATCH_REQUIRES_RECOVERY_MODE"),
+)
+def test_reverse_action_rechecks_live_authority_before_transaction(
+    tmp_path, persisted_eligible: str, live_reason: str,
+) -> None:
+    previous = "a" * 40
+    current = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, current)
+        + "$state=Get-ReleaseControlState;$state.previous_stable=$state.stable;"
+        "$state.stable=$state.candidate;$state.candidate=$null;"
+        f"$state.previous_stable_rollback_eligible={persisted_eligible};"
+        "$before=($state|ConvertTo-Json -Depth 12 -Compress);Write-ReleaseControlState $state;"
+        "function Enter-ReleaseTransactionLock{$script:releaseTransactionLockHeld=$true;return $true};"
+        "function Exit-ReleaseTransactionLock{$script:releaseTransactionLockHeld=$false};"
+        "function Assert-ActiveControlBundle{return [pscustomobject]@{exact_revision=$true}};"
+        "function Get-CurrentReleaseRuntimeReadModel{return [pscustomobject]@{previous="
+        "[pscustomobject]@{reverse_precheck=[pscustomobject]@{can_reverse=$false;"
+        f"reason='{live_reason}'}}}}}}}};"
+        "$reason='';try{$null=Invoke-ReverseStable}catch{$reason=$_.Exception.Message};"
+        "$final=Get-ReleaseControlState;"
+        'Write-Output "$reason,$($null -eq $final.transaction),$($final.deployment_status),'
+        '$($final.previous_stable_rollback_eligible)"',
+    )
+
+    assert result == (
+        f"REVERSE_PRECHECK_BLOCKED:{live_reason},True,READY,"
+        + ("True" if persisted_eligible == "$true" else "False")
+    )
+
+
+def test_reverse_fresh_provider_timeout_never_creates_transaction(tmp_path) -> None:
+    previous = "a" * 40
+    current = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate(previous, current)
+        + "$state=Get-ReleaseControlState;$state.previous_stable=$state.stable;"
+        "$state.stable=$state.candidate;$state.candidate=$null;Write-ReleaseControlState $state;"
+        "function Enter-ReleaseTransactionLock{$script:releaseTransactionLockHeld=$true;return $true};"
+        "function Exit-ReleaseTransactionLock{$script:releaseTransactionLockHeld=$false};"
+        "function Assert-ActiveControlBundle{[pscustomobject]@{exact_revision=$true}};"
+        "function Get-CloudflareDeployment{throw 'NATIVE_PROCESS_TIMEOUT'};"
+        "function Get-CurrentReleaseRuntimeReadModel{"
+        "$provider=Get-ReleaseDeploymentProviderObservation -ForceFresh;"
+        "return [pscustomobject]@{previous=[pscustomobject]@{reverse_precheck="
+        "[pscustomobject]@{can_reverse=$false;reason='ACTIVE_OBSERVATION_UNAVAILABLE'}}}};"
+        "$reason='';try{$null=Invoke-ReverseStable}catch{$reason=$_.Exception.Message};"
+        "$final=Get-ReleaseControlState;"
+        'Write-Output "$reason,$($null -eq $final.transaction)"',
+    )
+    assert result == "REVERSE_PRECHECK_BLOCKED:ACTIVE_OBSERVATION_UNAVAILABLE,True"
 
 
 def test_release_drift_is_detected_without_changing_stable(tmp_path) -> None:
@@ -8060,6 +9515,11 @@ def test_release_gui_presentation_explains_action_eligibility(tmp_path) -> None:
         "$release.previous_stable=New-ReleaseIdentity -GitSha ('c'*40) "
         "-WorkerVersionId 'previous-worker' -WindowsRevision ('c'*40);"
         "$release.previous_stable_rollback_eligible=$true;"
+        "$release|Add-Member -Force release_runtime ([pscustomobject]@{"
+        "drift_status='MATCHED';active=[pscustomobject]@{health='HEALTHY'};"
+        "previous=[pscustomobject]@{worker_artifact=[pscustomobject]@{status='AVAILABLE'};"
+        "worker_is_current_traffic_member=$false;reverse_precheck=[pscustomobject]@{"
+        "can_reverse=$true;reason='READY'}}});"
         "$passed=Get-ControlCenterReleasePresentation $release;"
         "$release.candidate.artifact_kind='PREVIEW';"
         "$preview=Get-ControlCenterReleasePresentation $release;"

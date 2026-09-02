@@ -79,6 +79,14 @@ later CURRENT advancement is accepted only after independent invariant checks.
 The Switch transaction alone owns the short intentional Sync stop, and Observe
 requires that owner to resume.
 
+`release-runtime-read-model-v1` composes the operator phase with separately
+observed Active Worker, Active Windows and Active health. Committed Stable and
+its derived LKG remain the prior successful Observe result while Active moves
+during Switch/Observe. Previous Worker artifact existence is established by an
+exact immutable-version lookup; deployment membership remains a separate
+placement fact. Reverse repeats the composed live precheck after locking and
+before transaction creation, so presentation never owns mutation authority.
+
 ## Formal boundary
 
 The TLA+ model covers the four phases, exact release identity, accepted
@@ -89,6 +97,12 @@ legacy Reverse compatibility, and protected cleanup. It omits individual News
 rows, route payloads, SQL details, browser rendering, cryptography, and
 quantitative CPU/load behavior; those use the verification techniques in the
 safety mechanism inventory.
+
+The bounded `ReleaseRuntimeReadModel` safety shard composes with Core Release.
+It proves observation cannot mutate Committed/LKG, Active may differ without
+moving them, artifact existence is independent of placement, failed or unknown
+exact lookup fails closed, and Reverse entry requires a ready precheck. It does
+not carry CPU, Access, News, GUI, or provider-pagination state.
 
 ## Formal-to-production mapping
 

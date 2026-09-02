@@ -66,9 +66,10 @@ def test_windows_runtime_manifest_assigns_every_required_test_exactly_once() -> 
         "tests/test_runtime_root_ownership.py",
         "tests/test_cross_version_runtime_recovery.py",
         "tests/test_runtime_launchers.py",
-        "tests/test_control_plane_install.py",
-        "tests/test_release_evidence_nodes.py",
-    ):
+            "tests/test_control_plane_install.py",
+            "tests/test_release_evidence_nodes.py",
+            "tests/test_release_runtime_read_model.py",
+        ):
         expected.update(f"{relative}::{name}" for name in _top_level_tests(relative))
     expected.add(
         "tests/test_artifact_path_migration.py::"
@@ -154,6 +155,7 @@ def test_python_shard_manifest_assigns_every_platform_test_file_exactly_once() -
     excluded = {
         "tests/test_runtime_launchers.py",
         "tests/test_control_plane_install.py",
+        "tests/test_release_runtime_read_model.py",
     }
     expected = {
         path.relative_to(ROOT).as_posix()
