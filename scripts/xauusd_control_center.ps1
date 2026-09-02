@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "ReleaseProviderFactsJson", "TerminateProviderObservation", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "RetrySemantic", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "RegisterAccessProviderInspection", "ReuseAccessQualification", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "ControlBundlePreflight", "PreflightRuntimeStateRoot", "MigrateRuntimeStateRoot")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "ReleaseProviderFactsJson", "TerminateProviderObservation", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "RetrySemantic", "ReconcileRelease", "PromoteCandidate", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "RegisterAccessProviderInspection", "RegisterFreePlanEvidence", "ReuseAccessQualification", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "ControlBundlePreflight", "PreflightRuntimeStateRoot", "MigrateRuntimeStateRoot")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync", "broadcast")]
     [string]$ServiceKey = "",
@@ -14,6 +14,7 @@ param(
     [string]$OperationResultPath = "",
     [string]$AccessChecklistConfirmation = "",
     [string]$AccessProviderInspectionPath = "",
+    [string]$ReleaseFreePlanProofPath = "",
     [string]$NativeProcessReceiptPath = "",
     [int]$TargetProcessId = 0,
     [string]$TargetProcessStartToken = "",
@@ -157,39 +158,12 @@ $convertFromJsonSupportsDateKind =
 
 . (Join-Path $PSScriptRoot "worker_cpu_evidence.ps1")
 . (Join-Path $PSScriptRoot "release_evidence_nodes.ps1")
+. (Join-Path $PSScriptRoot "release_evidence_authority.ps1")
 . (Join-Path $PSScriptRoot "release_runtime_read_model.ps1")
 $releaseEvidenceContractPath = Join-Path $PSScriptRoot "release-evidence-contract.json"
-
-function Write-CandidateArtifactEvidence {
-    param([Parameter(Mandatory = $true)][object]$Candidate)
-    $completedAt = [DateTimeOffset]::Parse(
-        [string]$Candidate.discovered_at).ToUniversalTime()
-    $startedAt = $completedAt
-    if (-not [string]::IsNullOrWhiteSpace([string]$Candidate.version_created_at)) {
-        $created = [DateTimeOffset]::MinValue
-        if ([DateTimeOffset]::TryParse(
-            [string]$Candidate.version_created_at,
-            [ref]$created) -and $created -le $completedAt) {
-            $startedAt = $created.ToUniversalTime()
-        }
-    }
-    $sourceIdentity = [ordered]@{
-        validation_key = [string]$Candidate.validation_key
-        worker_version_id = [string]$Candidate.worker_version_id
-        git_sha = [string]$Candidate.git_sha
-        windows_revision = [string]$Candidate.windows_revision
-        artifact_kind = [string]$Candidate.artifact_kind
-    }
-    $behaviorKey = Get-ReleaseEvidenceSha256 -Value (
-        ConvertTo-ReleaseEvidenceJson $sourceIdentity)
-    return Write-ReleaseEvidenceNodeReceipt -Root $releaseEvidenceRoot `
-        -ContractPath $releaseEvidenceContractPath `
-        -ValidationKey ([string]$Candidate.validation_key) `
-        -Node "artifact_provenance" -BehaviorKey $behaviorKey -State "PASSED" `
-        -SourceIdentity $sourceIdentity -StartedAt $startedAt.ToString("o") `
-        -CompletedAt $completedAt.ToString("o") -ExecutionMode "FRESH" `
-        -WhyRan "IMMUTABLE_PRODUCTION_CANDIDATE_DISCOVERED"
-}
+$releaseEvidenceChangeOwnershipPath = Join-Path $PSScriptRoot `
+    "release-evidence-change-ownership.json"
+$releaseFreePlanContractPath = Join-Path $PSScriptRoot "release-free-plan-contract.json"
 
 function ConvertFrom-ReleaseControlJson {
     param(
@@ -8497,6 +8471,37 @@ function Invoke-AutomaticCandidateValidation {
             Write-ReleaseControlState -State $state
             return $false
         }
+        $freePlanEvidence = Get-ReleaseEvidenceCurrentReceipt -Root $releaseEvidenceRoot `
+            -ValidationKey ([string]$Candidate.validation_key) -Node "free_plan"
+        if (-not $freePlanEvidence) {
+            $state.candidate.validation_state = "REVIEW_REQUIRED"
+            $state.candidate.validation = [pscustomobject]@{
+                key = [string]$Candidate.validation_key
+                repository = "PASSED"; windows = "PASSED"; cloudflare = "PASSED"
+                reason = "FREE_PLAN_EVIDENCE_REQUIRED"
+                route_plan = $routePlan; routes = $cloudflare.routes
+                cpu_evidence = $cloudflare.cpu_evidence
+                worker_qualification = $cloudflare.worker_qualification
+                directed_request_ledger = $cloudflare.directed_request_ledger
+                validation_run = [string]$cloudflare.validation_run
+                data_parity = $dataParity; auth_inspection = $authInspection
+                tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+            Write-ReleaseControlState -State $state
+            return $false
+        }
+        $evidenceQualification = Publish-CandidateQualificationEvidence `
+            -Candidate $Candidate -Stable $state.stable -Compatibility $compatibility `
+            -RoutePlan $routePlan -Cloudflare $cloudflare -DataParity $dataParity `
+            -AuthInspection $authInspection
+        $state.candidate | Add-Member -Force -NotePropertyName evidence_authority `
+            -NotePropertyValue ([pscustomobject]@{
+                schema_version = "release-evidence-compatibility-projection-v1"
+                state = [string]$evidenceQualification.state
+                validation_key = [string]$Candidate.validation_key
+                node_count = @($evidenceQualification.receipts.PSObject.Properties).Count
+                projected_at = [DateTimeOffset]::UtcNow.ToString("o")
+            })
         $state.candidate.compatibility_state = "PASSED"
         $state.candidate.validation_state = "PASSED"
         $state.candidate.validation = [pscustomobject]@{
@@ -8651,7 +8656,8 @@ function Find-NewCandidateRelease {
     Set-CandidateMaterializationState -State $state -Revision $mainRevision `
         -Status "MATERIALIZED" -WorkerVersionId ([string]$discovered.worker_version_id)
     if ($state.transaction) {
-        $null = Write-CandidateArtifactEvidence -Candidate $discovered
+        $null = Write-CandidateArtifactEvidence -Candidate $discovered `
+            -Root $releaseEvidenceRoot -ContractPath $releaseEvidenceContractPath
         $state.queued_candidate = $discovered
         $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
         Write-ReleaseControlState -State $state
@@ -8666,7 +8672,8 @@ function Find-NewCandidateRelease {
         Write-ReleaseHistory -Event "CANDIDATE_SUPERSEDED" -Release $state.candidate `
             -Detail @{ replacement_key = [string]$discovered.validation_key }
     }
-    $null = Write-CandidateArtifactEvidence -Candidate $discovered
+    $null = Write-CandidateArtifactEvidence -Candidate $discovered `
+        -Root $releaseEvidenceRoot -ContractPath $releaseEvidenceContractPath
     $state.candidate = $discovered
     $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
     Write-ReleaseControlState -State $state
@@ -9872,12 +9879,18 @@ function Update-RuntimeCheckout {
     if (-not $RuntimeRoot) { return $false }
     $previousRevision = Get-CodeRevision
     $releaseState = Get-ReleaseControlState
-    if (-not $releaseState -or -not $releaseState.candidate -or
-        [string]$releaseState.candidate.validation_state -ne "PASSED" -or
-        [string]$releaseState.candidate.artifact_kind -ne $productionCandidateArtifactKind -or
-        [string]$releaseState.candidate.windows_revision -ne $Revision -or
-        [string]$releaseState.candidate.validation.key -ne
-            [string]$releaseState.candidate.validation_key) { return $false }
+    $transaction = if ($releaseState) { $releaseState.transaction } else { $null }
+    $authority = if ($transaction) { $transaction.evidence_authority } else { $null }
+    if (-not $releaseState -or -not $transaction -or
+        [string]$transaction.type -ne "PROMOTE" -or -not $authority -or
+        [string]$transaction.target.artifact_kind -ne $productionCandidateArtifactKind -or
+        [string]$authority.target_identity.windows_revision -ne $Revision -or
+        [string]$authority.target_identity.validation_key -ne
+            [string]$transaction.target.validation_key) { return $false }
+    $promoteReceipt = Get-ReleaseEvidenceCurrentReceipt -Root $releaseEvidenceRoot `
+        -ValidationKey ([string]$authority.validation_key) -Node "promote_attempt"
+    if (-not $promoteReceipt -or [string]$promoteReceipt.receipt_digest -cne
+        [string]$authority.promote_receipt_digest) { return $false }
     if (-not (Invoke-ProductionShapePreflight -Revision $Revision)) { return $false }
     Write-RuntimeUpdateState @{
         update_status = "SWITCHING"
@@ -10231,6 +10244,30 @@ function Invoke-RuntimeRollback {
             Invoke-CloudflareDeployment `
                 -StableVersionId ([string]$prior.worker_version_id) `
                 -Message "automatic release reverse $([string]$releaseState.transaction.id)"
+            $authority = $releaseState.transaction.evidence_authority
+            if ($authority) {
+                $observeInput = [pscustomobject][ordered]@{
+                    transaction_id = [string]$releaseState.transaction.id
+                    target_identity = $authority.target_identity
+                    observe_contract = [pscustomobject][ordered]@{
+                        terminal_state = "FAILED"
+                        reason = Protect-PreflightDiagnosticText $Reason
+                        rollback_restored_lkg = $true
+                    }
+                }
+                $observeNow = [DateTimeOffset]::UtcNow
+                $observeArguments = New-ReleaseEvidenceAdapterArguments `
+                    -Candidate $releaseState.candidate -BehaviorInputs $observeInput `
+                    -SourceIdentity ([pscustomobject]@{
+                        qualification_state = "FAILED"
+                        transaction_id = [string]$releaseState.transaction.id
+                        target_identity = $authority.target_identity
+                        terminal_state = "FAILED"
+                    }) -StartedAt $observeNow -CompletedAt $observeNow `
+                    -WhyRan "OBSERVE_TERMINAL_FAILED_LKG_RESTORED"
+                $observeArguments.State = "FAILED"
+                $null = Publish-ObserveAttemptEvidence -Arguments $observeArguments
+            }
             $releaseState.candidate.validation_state = "FAILED"
             $releaseState.candidate.validation = [pscustomobject]@{
                 key = [string]$releaseState.candidate.validation_key
@@ -11152,8 +11189,8 @@ function Invoke-PromotionFreshnessCoordinator {
     $currentStepStarted = $startedAt
     try {
         if (-not $candidate -or -not $stable -or $State.transaction -or
-            [string]$candidate.validation_state -ne "PASSED" -or
-            [string]$candidate.validation.key -cne [string]$candidate.validation_key) {
+            [string]$candidate.validation_key -cne
+                "$([string]$candidate.worker_version_id):$([string]$candidate.git_sha)") {
             throw "PROMOTION_FRESHNESS_IDENTITY_INVALID"
         }
 
@@ -11196,34 +11233,18 @@ function Invoke-PromotionFreshnessCoordinator {
         $stepStarted = [DateTimeOffset]::UtcNow
         $currentStepName = "access_provider_lease"
         $currentStepStarted = $stepStarted
-        $accessState = [string]$candidate.validation.auth_inspection.state
-        if ($accessState -eq "HUMAN_ACCESS_BOUNDARY_ACCEPTED") {
-            $receipt = Assert-AccessBoundaryAcceptanceReceipt -Candidate $candidate -Stable $stable
-            $expiresAt = ConvertTo-ReleaseTimestampUtc -Value $receipt.expires_at
-            if ($expiresAt -le [DateTimeOffset]::UtcNow.Add($promotionFreshnessMinimumLifetime)) {
-                throw "ACCESS_HUMAN_RECEIPT_INSUFFICIENT_LIFETIME"
-            }
-            $steps += New-PromotionFreshnessStep -Name "access_provider_lease" `
-                -StartedAt $stepStarted -ExecutionMode "FRESH" `
-                -State $accessState -ReceiptDigest ([string]$receipt.receipt_digest)
-        } elseif ($accessState -in @(
-                "ACCESS_QUALIFICATION_REUSED", "ACCESS_QUALIFICATION_RENEWED")) {
-            $beforeDigest = [string]$candidate.access_qualification.receipt_digest
-            $receipt = Ensure-AccessQualificationMachineReceipt -Candidate $candidate `
-                -MinimumRemaining $promotionFreshnessMinimumLifetime
-            $mode = if ([string]$receipt.receipt_digest -cne $beforeDigest) {
-                "RENEWED"
-            } else { "REUSED" }
-            $steps += New-PromotionFreshnessStep -Name "access_provider_lease" `
-                -StartedAt $stepStarted -ExecutionMode $mode `
-                -State ([string]$receipt.state) `
-                -ReceiptDigest ([string]$receipt.receipt_digest)
-            $State.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
-            Write-ReleaseControlState -State $State
-        } else {
-            $steps += New-PromotionFreshnessStep -Name "access_provider_lease" `
-                -StartedAt $stepStarted -ExecutionMode "NOT_REQUIRED" -State "NOT_REQUIRED"
+        $accessRoot = Get-ReleaseEvidenceCurrentReceipt -Root $releaseEvidenceRoot `
+            -ValidationKey ([string]$candidate.validation_key) -Node "human_access_root"
+        if (-not $accessRoot) {
+            throw "RELEASE_EVIDENCE_PRODUCER_MISSING:human_access_root"
         }
+        $accessRequired = [string]$accessRoot.source_identity.qualification_state -ne
+            "NOT_REQUIRED"
+        $steps += New-PromotionFreshnessStep -Name "access_provider_lease" `
+            -StartedAt $stepStarted `
+            -ExecutionMode $(if ($accessRequired) { "FRESH" } else { "NOT_REQUIRED" }) `
+            -State $(if ($accessRequired) { "PENDING_ACTION_TIME_RENEWAL" } else { "NOT_REQUIRED" }) `
+            -ReceiptDigest ([string]$accessRoot.receipt_digest)
 
         $stepStarted = [DateTimeOffset]::UtcNow
         $currentStepName = "candidate_placement"
@@ -11256,6 +11277,13 @@ function Invoke-PromotionFreshnessCoordinator {
         }
         $steps += New-PromotionFreshnessStep -Name "current_owner_health" `
             -StartedAt $stepStarted -ExecutionMode "FRESH" -State "PASSED"
+
+        $currentStepName = "release_evidence_authority"
+        $currentStepStarted = [DateTimeOffset]::UtcNow
+        $evidenceQualification = Publish-PromotionFreshnessEvidence -State $State
+        $steps += New-PromotionFreshnessStep -Name "release_evidence_authority" `
+            -StartedAt $currentStepStarted -ExecutionMode "FRESH" `
+            -State ([string]$evidenceQualification.state)
 
         $completedAt = [DateTimeOffset]::UtcNow
         $summary = [pscustomobject]@{
@@ -11328,9 +11356,7 @@ function Start-ReleasePromotion {
         $state = Get-ReleaseControlState
         if (-not $state -or $state.transaction) { throw "Release state is not ready." }
         $candidate = $state.candidate
-        if (-not $candidate -or [string]$candidate.validation_state -ne "PASSED") {
-            throw "Candidate has not passed validation."
-        }
+        if (-not $candidate) { throw "Candidate is unavailable." }
         if ([string]$candidate.artifact_kind -ne $productionCandidateArtifactKind) {
             throw "Preview and unknown artifacts cannot be promoted."
         }
@@ -11338,14 +11364,12 @@ function Start-ReleasePromotion {
         if (-not (Test-ProductionCandidateProvenance -Candidate $candidate)) {
             throw "PRODUCTION_CANDIDATE_MAIN_PROVENANCE_REQUIRED"
         }
-        if ([string]$candidate.validation.key -ne [string]$candidate.validation_key -or
-            [string]$candidate.validation_key -ne
+        if ([string]$candidate.validation_key -ne
                 "$([string]$candidate.worker_version_id):$([string]$candidate.git_sha)") {
-            throw "Candidate validation does not belong to this release."
+            throw "Candidate evidence key does not belong to this release."
         }
-        if ([string]$candidate.git_sha -ne [string]$candidate.windows_revision -or
-            [string]$candidate.compatibility_state -ne "PASSED") {
-            throw "Worker and Windows compatibility is not authorized."
+        if ([string]$candidate.git_sha -ne [string]$candidate.windows_revision) {
+            throw "Worker and Windows identity is inconsistent."
         }
         if ([string]$state.deployment_status -ne "READY") {
             throw "Release control is not deployment-ready."
@@ -11353,10 +11377,12 @@ function Start-ReleasePromotion {
         $null = Invoke-PromotionFreshnessCoordinator -State $state
         $state = Get-ReleaseControlState
         $candidate = $state.candidate
-        $deferredObligations = @(
-            $candidate.validation.data_parity.deferred_obligations |
-                Where-Object { $null -ne $_ }
-        )
+        $qualification = Assert-ReleaseEvidenceQualification `
+            -Root $releaseEvidenceRoot -ContractPath $releaseEvidenceContractPath `
+            -ValidationKey ([string]$candidate.validation_key)
+        $semanticReceipt = $qualification.receipts.semantic_contract
+        $deferredObligations = @($semanticReceipt.source_identity.subject.deferred_obligations |
+            Where-Object { $null -ne $_ })
         foreach ($obligation in $deferredObligations) {
             if ([string]$obligation.state -ne
                     "DEFERRED_TO_POST_CUTOVER_OBSERVATION" -or
@@ -11367,8 +11393,34 @@ function Start-ReleasePromotion {
                 throw "DEFERRED_PROJECTION_OBLIGATION_INVALID"
             }
         }
+        $transactionId = [guid]::NewGuid().ToString()
+        $dependencyReceipts = [ordered]@{}
+        foreach ($node in $releaseEvidencePromotionDependencyNodes) {
+            $dependencyReceipts[$node] = [string]$qualification.receipt_digests.$node
+        }
+        $targetIdentity = [pscustomobject][ordered]@{
+            validation_key = [string]$candidate.validation_key
+            worker_version_id = [string]$candidate.worker_version_id
+            git_sha = [string]$candidate.git_sha
+            windows_revision = [string]$candidate.windows_revision
+            artifact_kind = [string]$candidate.artifact_kind
+        }
+        $promoteInput = [pscustomobject][ordered]@{
+            transaction_id = $transactionId
+            target_identity = $targetIdentity
+            dependency_receipts = [pscustomobject]$dependencyReceipts
+        }
+        $promoteNow = [DateTimeOffset]::UtcNow
+        $promoteArguments = New-ReleaseEvidenceAdapterArguments -Candidate $candidate `
+            -BehaviorInputs $promoteInput -SourceIdentity ([pscustomobject]@{
+                qualification_state = "PASSED"; transaction_id = $transactionId
+                target_identity = $targetIdentity
+                dependency_receipts = [pscustomobject]$dependencyReceipts
+            }) -StartedAt $promoteNow -CompletedAt $promoteNow `
+            -WhyRan "PROMOTE_TRANSACTION_DEPENDENCIES_FROZEN"
+        $promoteReceipt = Publish-PromoteAttemptEvidence -Arguments $promoteArguments
         $transaction = [pscustomobject]@{
-            id = [guid]::NewGuid().ToString()
+            id = $transactionId
             type = "PROMOTE"
             phase = "PRECHECK"
             target = $candidate
@@ -11377,6 +11429,13 @@ function Start-ReleasePromotion {
                 -StableRevision ([string]$state.stable.windows_revision) `
                 -ReleaseState $state -ServiceContracts @($services)
             deferred_projection_obligations = $deferredObligations
+            evidence_authority = [pscustomobject]@{
+                schema_version = "release-evidence-transaction-authority-v1"
+                validation_key = [string]$candidate.validation_key
+                promote_receipt_digest = [string]$promoteReceipt.receipt_digest
+                dependency_receipts = [pscustomobject]$dependencyReceipts
+                target_identity = $targetIdentity
+            }
             started_at = [DateTimeOffset]::UtcNow.ToString("o")
         }
         $state.transaction = $transaction
@@ -11466,6 +11525,51 @@ function Complete-ReleasePromotion {
                 return
             }
         }
+        $authority = $state.transaction.evidence_authority
+        if (-not $authority -or
+            [string]$authority.validation_key -cne [string]$target.validation_key -or
+            [string]$authority.target_identity.worker_version_id -cne
+                [string]$target.worker_version_id -or
+            [string]$authority.target_identity.git_sha -cne [string]$target.git_sha -or
+            [string]$authority.target_identity.windows_revision -cne
+                [string]$target.windows_revision) {
+            throw "PROMOTE_EVIDENCE_AUTHORITY_MISMATCH"
+        }
+        $promoteReceipt = Get-ReleaseEvidenceCurrentReceipt -Root $releaseEvidenceRoot `
+            -ValidationKey ([string]$target.validation_key) -Node "promote_attempt"
+        if (-not $promoteReceipt -or
+            [string]$promoteReceipt.receipt_digest -cne
+                [string]$authority.promote_receipt_digest -or
+            [string]$promoteReceipt.source_identity.subject.transaction_id -cne
+                [string]$state.transaction.id) {
+            throw "PROMOTE_EVIDENCE_RECEIPT_INVALID"
+        }
+        $runtimeObservation = Get-RuntimeUpdateState
+        $observeInput = [pscustomobject][ordered]@{
+            transaction_id = [string]$state.transaction.id
+            target_identity = $authority.target_identity
+            observe_contract = [pscustomobject][ordered]@{
+                terminal_state = "PASSED"
+                runtime_update_status = [string]$runtimeObservation.update_status
+                deferred_projection_state = if ($deferred.Count -gt 0) {
+                    [string]$runtimeObservation.observation_deferred_projection_state
+                } else { "NOT_REQUIRED" }
+                observation_cycles = $runtimeObservationCycles
+            }
+        }
+        $observeNow = [DateTimeOffset]::UtcNow
+        $observeArguments = New-ReleaseEvidenceAdapterArguments -Candidate $target `
+            -BehaviorInputs $observeInput -SourceIdentity ([pscustomobject]@{
+                qualification_state = "PASSED"
+                transaction_id = [string]$state.transaction.id
+                target_identity = $authority.target_identity
+                terminal_state = "PASSED"
+            }) -StartedAt $observeNow -CompletedAt $observeNow `
+            -WhyRan "OBSERVE_TERMINAL_PASSED"
+        $observeReceipt = Publish-ObserveAttemptEvidence -Arguments $observeArguments
+        $state.transaction.evidence_authority | Add-Member -Force `
+            -NotePropertyName observe_receipt_digest `
+            -NotePropertyValue ([string]$observeReceipt.receipt_digest)
         $state.stable = $target
         $state.previous_stable = $previous
         $state.previous_stable_rollback_eligible = Test-CloudflareRollbackTarget -Target $previous
@@ -15153,6 +15257,21 @@ function Get-ControlCenterReleasePresentation {
     $candidateKind = if ($Release.candidate -and $Release.candidate.artifact_kind) {
         [string]$Release.candidate.artifact_kind
     } else { $unknownArtifactKind }
+    $evidenceReady = $false
+    $evidenceReason = "RELEASE_EVIDENCE_WATERFALL_INCOMPLETE"
+    if ($Release.candidate -and
+        -not [string]::IsNullOrWhiteSpace([string]$Release.candidate.validation_key)) {
+        try {
+            $qualification = Assert-ReleaseEvidenceQualification `
+                -Root $releaseEvidenceRoot -ContractPath $releaseEvidenceContractPath `
+                -ValidationKey ([string]$Release.candidate.validation_key) `
+                -RequiredNodes @($releaseEvidencePrerequisiteNodes | Where-Object {
+                    [string]$_ -ne "rollback_precheck"
+                })
+            $evidenceReady = [string]$qualification.state -eq "PASSED"
+            if ($evidenceReady) { $evidenceReason = "" }
+        } catch { $evidenceReason = [string]$_.Exception.Message }
+    }
     $compatibilityPassed = [bool]($Release.candidate -and
         [string]$Release.candidate.compatibility_state -eq "PASSED")
     $controlBundleReady = [bool]($Release.control_bundle_hash_verified -and
@@ -15161,7 +15280,8 @@ function Get-ControlCenterReleasePresentation {
     $candidateProvenanceReady = [bool]($Release.candidate -and
         [string]$Release.candidate.branch -eq "main" -and
         [string]$Release.candidate.git_sha -eq [string]$Release.candidate.windows_revision -and
-        [string]$Release.candidate.validation.key -eq [string]$Release.candidate.validation_key)
+        [string]$Release.candidate.validation_key -ceq
+            "$([string]$Release.candidate.worker_version_id):$([string]$Release.candidate.git_sha)")
     $accessAcceptanceReady = $true
     if ($Release.candidate -and
         [string]$Release.candidate.validation.auth_inspection.state -eq
@@ -15244,26 +15364,14 @@ function Get-ControlCenterReleasePresentation {
         "Deployment status is $($Release.deployment_status)"
     } elseif (-not $Release.candidate) {
         "Candidate unavailable"
-    } elseif (-not $accessAcceptanceReady) {
-        "Access acceptance receipt is invalid or stale"
     } elseif ($candidateKind -ne $productionCandidateArtifactKind) {
         if ($candidateKind -eq $previewArtifactKind) {
             "Preview cannot be promoted"
         } elseif ($candidateKind -eq $legacyReferenceArtifactKind) {
             "REBASE_ON_RELEASE_CONTROL_MAIN_REQUIRED"
         } else { "Artifact provenance is unknown" }
-    } elseif (-not $compatibilityPassed) {
-        "Compatibility has not passed"
-    } elseif ($candidateState -in @("TESTING", "STAGING", "NEW", "CHECKS_PENDING")) {
-        "Candidate still testing"
-    } elseif ($candidateState -eq "CHECKS_BLOCKED") {
-        "REQUIRED_GITHUB_CHECKS_BLOCKED / RETRYABLE"
-    } elseif ($candidateState -eq "FAILED") {
-        if ($Release.candidate.validation.reason) {
-            [string]$Release.candidate.validation.reason
-        } else { "Candidate failed validation" }
-    } elseif ($candidateState -ne "PASSED") {
-        "Candidate has not passed validation"
+    } elseif (-not $evidenceReady) {
+        $evidenceReason
     } else { "Ready to promote" }
 
     $reversePrecheck = if ($runtimeReadModel -and $runtimeReadModel.previous) {
@@ -15295,10 +15403,9 @@ function Get-ControlCenterReleasePresentation {
         candidate_kind = $candidateKind
         candidate_detail = $candidateDetail
         can_promote = [bool]($deploymentReady -and -not $transactionActive -and
-            $Release.candidate -and $candidateState -eq "PASSED" -and
+            $Release.candidate -and $evidenceReady -and
             $candidateKind -eq $productionCandidateArtifactKind -and
-            $compatibilityPassed -and $candidateProvenanceReady -and
-            $accessAcceptanceReady -and $controlBundleReady)
+            $candidateProvenanceReady -and $controlBundleReady)
         promote_reason = $promoteReason
         stable_state = $stableState
         active_health = if ($runtimeReadModel) {
@@ -18292,6 +18399,53 @@ switch ($Action) {
         $inspection = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
         Register-AccessProviderInspection -Inspection $inspection | ConvertTo-Json -Depth 12
+    }
+    "RegisterFreePlanEvidence" {
+        if (-not $ReleaseFreePlanProofPath) {
+            throw "FREE_PLAN_PROOF_FILE_REQUIRED"
+        }
+        $state = Get-ReleaseControlState
+        if (-not $state -or -not $state.candidate -or $state.transaction) {
+            throw "FREE_PLAN_CANDIDATE_UNAVAILABLE"
+        }
+        $receipt = Register-CandidateFreePlanEvidence -Candidate $state.candidate `
+            -ProofPath $ReleaseFreePlanProofPath
+        if ([string]$state.candidate.validation_state -eq "REVIEW_REQUIRED" -and
+            [string]$state.candidate.validation.reason -eq "FREE_PLAN_EVIDENCE_REQUIRED") {
+            $changed = @(Get-CandidateChangedFiles `
+                -StableRevision ([string]$state.stable.git_sha) `
+                -CandidateRevision ([string]$state.candidate.git_sha))
+            $compatibility = Get-CandidateCompatibilityRequirement -ChangedFiles $changed
+            $cloudflare = [pscustomobject]@{
+                routes = $state.candidate.validation.routes
+                cpu_evidence = $state.candidate.validation.cpu_evidence
+                worker_qualification = $state.candidate.validation.worker_qualification
+                directed_request_ledger = $state.candidate.validation.directed_request_ledger
+                validation_run = [string]$state.candidate.validation.validation_run
+            }
+            $qualification = Publish-CandidateQualificationEvidence `
+                -Candidate $state.candidate -Stable $state.stable `
+                -Compatibility $compatibility `
+                -RoutePlan $state.candidate.validation.route_plan `
+                -Cloudflare $cloudflare `
+                -DataParity $state.candidate.validation.data_parity `
+                -AuthInspection $state.candidate.validation.auth_inspection
+            $state.candidate.validation_state = "PASSED"
+            $state.candidate.compatibility_state = "PASSED"
+            $state.candidate.validation.reason = "RELEASE_EVIDENCE_DAG_PASSED"
+            $state.candidate.validation.tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+            $state.candidate | Add-Member -Force -NotePropertyName evidence_authority `
+                -NotePropertyValue ([pscustomobject]@{
+                    schema_version = "release-evidence-compatibility-projection-v1"
+                    state = [string]$qualification.state
+                    validation_key = [string]$state.candidate.validation_key
+                    node_count = @($qualification.receipts.PSObject.Properties).Count
+                    projected_at = [DateTimeOffset]::UtcNow.ToString("o")
+                })
+            $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+            Write-ReleaseControlState -State $state
+        }
+        $receipt | ConvertTo-Json -Depth 12
     }
     "ReuseAccessQualification" {
         Invoke-CandidateAccessQualificationReuse | ConvertTo-Json -Depth 12

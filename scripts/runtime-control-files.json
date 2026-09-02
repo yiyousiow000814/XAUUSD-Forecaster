@@ -7,7 +7,10 @@
   "files": [
     "access-qualification-contract.json",
     "check_deferred_projection_parity.py",
+    "release-evidence-change-ownership.json",
     "release-evidence-contract.json",
+    "release-free-plan-contract.json",
+    "release_evidence_authority.ps1",
     "release_evidence_nodes.ps1",
     "release_runtime_read_model.ps1",
     "runtime-control-files.json",

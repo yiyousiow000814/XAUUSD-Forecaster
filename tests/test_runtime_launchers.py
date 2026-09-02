@@ -1038,6 +1038,7 @@ def test_platform_retry_resumes_exact_telemetry_receipt_without_replaying_routes
     result = _run_control_center_contract(
         tmp_path,
         _authorized_candidate("a" * 40, "b" * 40)
+        + _mock_free_plan_and_qualification_authority()
         + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
         "$run='11111111-1111-1111-1111-111111111111';"
         "$route=[pscustomobject]@{route='/api/status';path='/api/status';request_query='';"
@@ -1498,6 +1499,43 @@ def _authorized_candidate(previous: str, candidate: str) -> str:
     )
 
 
+def _mock_free_plan_and_qualification_authority() -> str:
+    """Provide unrelated legacy validation tests with their accepted DAG inputs."""
+    return (
+        "function Get-ReleaseEvidenceCurrentReceipt{param($Root,$ValidationKey,$Node);"
+        "if($Node -eq 'free_plan'){return [pscustomobject]@{state='PASSED';"
+        "source_identity=[pscustomobject]@{subject=[pscustomobject]@{candidate="
+        "[pscustomobject]@{validation_key=$ValidationKey}}}}};return $null};"
+        "function Publish-CandidateQualificationEvidence{return [pscustomobject]@{"
+        "state='PASSED';receipts=[pscustomobject]@{artifact_provenance='accepted';"
+        "free_plan='accepted'}}};"
+    )
+
+
+def _mock_active_promote_authority() -> str:
+    """Bind direct switch/commit unit fixtures to one exact Promote receipt."""
+    return (
+        "$state=Get-ReleaseControlState;$promoteDigest=('f'*64);"
+        "$targetIdentity=[pscustomobject]@{validation_key=$state.candidate.validation_key;"
+        "worker_version_id=$state.candidate.worker_version_id;git_sha=$state.candidate.git_sha;"
+        "windows_revision=$state.candidate.windows_revision;artifact_kind=$state.candidate.artifact_kind};"
+        "$authority=[pscustomobject]@{schema_version='release-evidence-transaction-authority-v1';"
+        "validation_key=$state.candidate.validation_key;promote_receipt_digest=$promoteDigest;"
+        "dependency_receipts=[pscustomobject]@{};target_identity=$targetIdentity};"
+        "$state.transaction=[pscustomobject]@{id='11111111-1111-4111-8111-111111111111';"
+        "type='PROMOTE';phase='PRECHECK';target=$state.candidate;previous=$state.stable;"
+        "deferred_projection_obligations=@();evidence_authority=$authority};"
+        "Write-ReleaseControlState $state;"
+        "function Get-ReleaseEvidenceCurrentReceipt{param($Root,$ValidationKey,$Node);"
+        "if($Node -eq 'promote_attempt'){return [pscustomobject]@{state='PASSED';"
+        "receipt_digest=$promoteDigest;"
+        "source_identity=[pscustomobject]@{subject=[pscustomobject]@{transaction_id="
+        "'11111111-1111-4111-8111-111111111111'}}}};return $null};"
+        "function Publish-ObserveAttemptEvidence{return [pscustomobject]@{"
+        "receipt_digest=('e'*64)}};"
+    )
+
+
 def _access_review_candidate(previous: str = "a" * 40, candidate: str = "b" * 40) -> str:
     return (
         _authorized_candidate(previous, candidate)
@@ -1741,6 +1779,7 @@ def test_failed_preflight_never_switches_the_runtime_checkout(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
         _authorized_candidate(previous, candidate)
+        + _mock_active_promote_authority()
         + "$script:preflights = 0; $script:checkouts = 0; "
         f"function Get-CodeRevision {{ return '{previous}' }}; "
         "function Invoke-ProductionShapePreflight { $script:preflights += 1; return $false }; "
@@ -2026,6 +2065,7 @@ def test_business_switch_never_invokes_control_bundle_copy(
     result = _run_control_center_contract(
         tmp_path,
         _authorized_candidate(previous, candidate)
+        + _mock_active_promote_authority()
         + "$script:checkouts = @(); "
         f"function Get-CodeRevision {{ return '{previous}' }}; "
         "function Invoke-ProductionShapePreflight { return $true }; "
@@ -2051,6 +2091,7 @@ def test_candidate_switch_preserves_reviewed_runtime_control_bundle(tmp_path) ->
     result = _run_control_center_contract(
         tmp_path,
         _authorized_candidate(previous, candidate)
+        + _mock_active_promote_authority()
         + f"function Get-CodeRevision {{ return '{previous}' }}; "
         "function Invoke-ProductionShapePreflight { return $true }; "
         "function Resolve-ServiceLaunchContracts { return $services }; "
@@ -3003,6 +3044,7 @@ def test_business_switch_ignores_control_copy_failure_hook(
     result = _run_control_center_contract(
         tmp_path,
         _authorized_candidate(previous, candidate)
+        + _mock_active_promote_authority()
         + "$script:failedCandidateCopy = $false; "
         f"function Get-CodeRevision {{ return '{previous}' }}; "
         "function Invoke-ProductionShapePreflight { return $true }; "
@@ -3044,6 +3086,7 @@ def test_business_switch_never_moves_control_bundle_files(
     result = _run_control_center_contract(
         tmp_path,
         _authorized_candidate(previous, candidate)
+        + _mock_active_promote_authority()
         + "$script:failedCandidateMove = $false; "
         f"function Get-CodeRevision {{ return '{previous}' }}; "
         "function Invoke-ProductionShapePreflight { return $true }; "
@@ -3626,9 +3669,8 @@ def test_completed_promotion_records_previous_stable(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
         _authorized_candidate(previous, candidate)
-        + "$state = Get-ReleaseControlState; "
-        "$state.transaction = [pscustomobject]@{ type='PROMOTE'; phase='OBSERVING'; "
-        "target=$state.candidate; previous=$state.stable }; "
+        + _mock_active_promote_authority()
+        + "$state = Get-ReleaseControlState; $state.transaction.phase='OBSERVING'; "
         "Write-ReleaseControlState $state; "
         "function Test-CloudflareRollbackTarget { return $true }; "
         "Complete-ReleasePromotion; "
@@ -6183,6 +6225,22 @@ def test_passed_candidate_promotes_only_after_observation_commit(
         f"function Get-RuntimeCodeState {{ return [pscustomobject]@{{applied_revision='{previous}'}} }}; "
         "function Test-SingleProductionOwner { return $true }; "
         "function Invoke-PromotionFreshnessCoordinator { return [pscustomobject]@{state='PASSED'} }; "
+        "$script:dependencyDigests=[pscustomobject]@{};"
+        "$releaseEvidencePromotionDependencyNodes|ForEach-Object{"
+        "$script:dependencyDigests|Add-Member -Force -NotePropertyName $_ -NotePropertyValue ('d'*64)};"
+        "function Assert-ReleaseEvidenceQualification{"
+        "$s=Get-ReleaseControlState;"
+        "$subject=[pscustomobject]@{deferred_obligations=$s.candidate.validation.data_parity.deferred_obligations};"
+        "$source=[pscustomobject]@{subject=$subject};"
+        "$semantic=[pscustomobject]@{source_identity=$source};"
+        "return [pscustomobject]@{state='PASSED';receipt_digests=$script:dependencyDigests;"
+        "receipts=[pscustomobject]@{semantic_contract=$semantic}}};"
+        "function Publish-PromoteAttemptEvidence{return [pscustomobject]@{receipt_digest=('p'*64)}};"
+        "function Get-ReleaseEvidenceCurrentReceipt{param($Root,$ValidationKey,$Node);"
+        "if($Node -eq 'promote_attempt'){$s=Get-ReleaseControlState;return [pscustomobject]@{"
+        "receipt_digest=('p'*64);source_identity=[pscustomobject]@{subject=[pscustomobject]@{"
+        "transaction_id=$s.transaction.id}}}}};"
+        "function Publish-ObserveAttemptEvidence{return [pscustomobject]@{receipt_digest=('o'*64)}};"
         f"function New-RuntimeRecoveryPlan {{ return [pscustomobject]@{{body="
         f"[pscustomobject]@{{stable_revision='{previous}'}};digest=('0' * 64)}} }}; "
         "function Update-RuntimeCheckout { return $true }; "
@@ -6246,10 +6304,18 @@ def test_promotion_freshness_coordinator_renews_only_live_leases(
         "function Ensure-AccessQualificationMachineReceipt{param($Candidate,$MinimumRemaining);"
         "$script:accessCalls++;$Candidate.access_qualification.receipt_digest=('e'*64);"
         "return [pscustomobject]@{state='ACCESS_QUALIFICATION_RENEWED';receipt_digest=('e'*64)}};"
+        "function Get-ReleaseEvidenceCurrentReceipt{param($Root,$ValidationKey,$Node);"
+        "if($Node -eq 'human_access_root'){return [pscustomobject]@{receipt_digest=('d'*64);"
+        "source_identity=[pscustomobject]@{qualification_state='PASSED';"
+        "subject=[pscustomobject]@{root_receipt_digest=('d'*64)}}}}};"
         "function Test-CloudflareReleasePlacement{return $true};"
         "function Test-CloudflareRollbackTarget{return $true};"
         f"function Get-RuntimeCodeState{{return [pscustomobject]@{{applied_revision='{previous}'}}}};"
         "function Test-CurrentStableRuntimeHealth{return $true};"
+        "function Publish-PromotionFreshnessEvidence{param($State);"
+        "$null=Ensure-AccessQualificationMachineReceipt -Candidate $State.candidate "
+        "-MinimumRemaining ([TimeSpan]::FromMinutes(30));"
+        "return [pscustomobject]@{state='PASSED'}};"
         "function Invoke-AutomaticCandidateValidation{throw 'broad validation must not run'};"
         "$summary=Invoke-PromotionFreshnessCoordinator $state;$saved=Get-ReleaseControlState;"
         "$m=$summary.steps|Where-Object name -eq 'migration_live_lease';"
@@ -6259,7 +6325,7 @@ def test_promotion_freshness_coordinator_renews_only_live_leases(
         '$($null -eq $saved.transaction),$($saved.candidate.validation_state)"',
         powershell=powershell,
     )
-    assert result == "PASSED,1800,RENEWED,RENEWED,1,1,True,PASSED"
+    assert result == "PASSED,1800,RENEWED,FRESH,1,1,True,PASSED"
 
 
 @pytest.mark.parametrize(
@@ -6280,6 +6346,9 @@ def test_promotion_freshness_failure_never_starts_transaction(
         + f"$script:failed='{failed_check}';"
         "function Get-CandidateChangedFiles{return @('docs/README.md')};"
         "function Get-CandidateCompatibilityRequirement{return [pscustomobject]@{state='PASSED';files=@()}};"
+        "function Get-ReleaseEvidenceCurrentReceipt{param($Root,$ValidationKey,$Node);"
+        "if($Node -eq 'human_access_root'){return [pscustomobject]@{receipt_digest='NOT_REQUIRED';"
+        "source_identity=[pscustomobject]@{qualification_state='NOT_REQUIRED'}}}};"
         "function Test-CloudflareReleasePlacement{return $script:failed -ne 'placement'};"
         "function Test-CloudflareRollbackTarget{return $script:failed -ne 'rollback'};"
         f"function Get-RuntimeCodeState{{return [pscustomobject]@{{applied_revision='{previous}'}}}};"
@@ -6310,14 +6379,22 @@ def test_deferred_projection_obligation_blocks_stable_commit(tmp_path) -> None:
         "state='DEFERRED_TO_POST_CUTOVER_OBSERVATION';"
         "validation_key=$state.candidate.validation_key;"
         "required_producer_revision=$state.candidate.windows_revision};"
-        "$state.transaction=[pscustomobject]@{type='PROMOTE';phase='OBSERVING';"
+        "$targetIdentity=[pscustomobject]@{validation_key=$state.candidate.validation_key;"
+        "worker_version_id=$state.candidate.worker_version_id;git_sha=$state.candidate.git_sha;"
+        "windows_revision=$state.candidate.windows_revision};"
+        "$state.transaction=[pscustomobject]@{id='tx';type='PROMOTE';phase='OBSERVING';"
         "target=$state.candidate;previous=$state.stable;"
-        "deferred_projection_obligations=@($obligation)};Write-ReleaseControlState $state;"
+        "deferred_projection_obligations=@($obligation);evidence_authority=[pscustomobject]@{"
+        "validation_key=$state.candidate.validation_key;target_identity=$targetIdentity;"
+        "promote_receipt_digest=('p'*64)}};Write-ReleaseControlState $state;"
         "Write-RuntimeUpdateState @{update_status='ACTIVE';"
         "observation_validation_key=$state.candidate.validation_key;"
         "observation_deferred_projection_state='PENDING'};"
         "function Enter-ReleaseTransactionLock{return $true};"
         "function Exit-ReleaseTransactionLock{};function Test-CloudflareRollbackTarget{return $true};"
+        "function Get-ReleaseEvidenceCurrentReceipt{return [pscustomobject]@{receipt_digest=('p'*64);"
+        "source_identity=[pscustomobject]@{subject=[pscustomobject]@{transaction_id='tx'}}}};"
+        "function Publish-ObserveAttemptEvidence{return [pscustomobject]@{receipt_digest=('o'*64)}};"
         "Complete-ReleasePromotion;$pending=Get-ReleaseControlState;"
         "$runtime=Get-RuntimeUpdateState;"
         "$runtime.observation_deferred_projection_state='PASSED';"
@@ -6428,8 +6505,8 @@ def test_crash_after_observation_pass_commits_exact_stable(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
         _authorized_candidate(previous, candidate)
-        + "$state=Get-ReleaseControlState;"
-        "$state.transaction=[pscustomobject]@{type='PROMOTE';phase='OBSERVING';target=$state.candidate;previous=$state.stable};"
+        + _mock_active_promote_authority()
+        + "$state=Get-ReleaseControlState;$state.transaction.phase='OBSERVING';"
         "Write-ReleaseControlState $state;"
         f"Write-RuntimeUpdateState @{{update_status='ACTIVE';activated_revision='{candidate}'}};"
         "function Test-CloudflareRollbackTarget { return $true };"
@@ -7749,6 +7826,7 @@ def test_same_key_recovers_after_github_transport_without_repeating_preflight(
     result = _run_control_center_contract(
         tmp_path,
         _authorized_candidate("a" * 40, "b" * 40)
+        + _mock_free_plan_and_qualification_authority()
         + "$state=Get-ReleaseControlState;$state.candidate.validation_state='NEW';"
         "$state.candidate.compatibility_state='PENDING';"
         "$state.candidate|Add-Member compatibility_approval ([pscustomobject]@{"
@@ -7800,6 +7878,8 @@ def test_approved_candidate_reuses_only_same_key_windows_preflight(
     result = _run_control_center_contract(
         tmp_path,
         _authorized_candidate("a" * 40, "b" * 40)
+        + _mock_free_plan_and_qualification_authority()
+        + _mock_free_plan_and_qualification_authority()
         + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
         "$state.candidate.validation_state='NEW';"
         "$state.candidate.compatibility_state='APPROVED';"
@@ -7846,6 +7926,7 @@ def test_checks_blocked_candidate_recovers_on_same_sha_without_duplicate_identit
     result = _run_control_center_contract(
         tmp_path,
         _authorized_candidate("a" * 40, "b" * 40)
+        + _mock_free_plan_and_qualification_authority()
         + "$state=Get-ReleaseControlState;$state.candidate.validation_state='NEW';"
         "$state.candidate.compatibility_state='PENDING';Write-ReleaseControlState $state;"
         "$candidate=$state.candidate;$script:checksPass=$false;$script:preflights=0;"
@@ -9384,17 +9465,22 @@ def test_promotion_rechecks_human_or_machine_access_receipt() -> None:
     source = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
         encoding="utf-8"
     )
+    authority = (ROOT / "scripts" / "release_evidence_authority.ps1").read_text(
+        encoding="utf-8"
+    )
     coordinator = source.split("function Invoke-PromotionFreshnessCoordinator", 1)[1].split(
         "function Start-ReleasePromotion", 1
     )[0]
     promotion = source.split("function Start-ReleasePromotion", 1)[1].split(
         "function Complete-ReleasePromotion", 1
     )[0]
-    assert '"HUMAN_ACCESS_BOUNDARY_ACCEPTED"' in coordinator
-    assert "Assert-AccessBoundaryAcceptanceReceipt" in coordinator
-    assert '"ACCESS_QUALIFICATION_REUSED"' in coordinator
-    assert '"ACCESS_QUALIFICATION_RENEWED"' in coordinator
-    assert "Ensure-AccessQualificationMachineReceipt" in coordinator
+    assert 'Node "human_access_root"' in coordinator
+    assert '"HUMAN_ACCESS_BOUNDARY_ACCEPTED"' in authority
+    assert "Assert-AccessBoundaryAcceptanceReceipt" in authority
+    assert '"ACCESS_QUALIFICATION_REUSED"' in authority
+    assert '"ACCESS_QUALIFICATION_RENEWED"' in authority
+    assert "Ensure-AccessQualificationMachineReceipt" in authority
+    assert "ACCESS_EVIDENCE_AUTHORITY_CHANGED" in authority
     assert "Invoke-PromotionFreshnessCoordinator" in promotion
     assert "Test-ProductionCandidateProvenance" in promotion
 
@@ -9515,6 +9601,10 @@ def test_release_gui_presentation_explains_action_eligibility(tmp_path) -> None:
         "$release.previous_stable=New-ReleaseIdentity -GitSha ('c'*40) "
         "-WorkerVersionId 'previous-worker' -WindowsRevision ('c'*40);"
         "$release.previous_stable_rollback_eligible=$true;"
+        "$script:evidencePass=$true;"
+        "function Assert-ReleaseEvidenceQualification{"
+        "if(-not $script:evidencePass){throw 'RELEASE_EVIDENCE_WATERFALL_INCOMPLETE'};"
+        "return [pscustomobject]@{state='PASSED'}};"
         "$release|Add-Member -Force release_runtime ([pscustomobject]@{"
         "drift_status='MATCHED';active=[pscustomobject]@{health='HEALTHY'};"
         "previous=[pscustomobject]@{worker_artifact=[pscustomobject]@{status='AVAILABLE'};"
@@ -9527,21 +9617,28 @@ def test_release_gui_presentation_explains_action_eligibility(tmp_path) -> None:
         "$release.candidate.validation_state='FAILED';"
         "$release.candidate.validation=[pscustomobject]@{error='Worker CPU evidence failed'};"
         "$failed=Get-ControlCenterReleasePresentation $release;"
+        "$script:evidencePass=$false;"
+        "$evidenceFailed=Get-ControlCenterReleasePresentation $release;"
+        "$script:evidencePass=$true;"
         "$release.transaction=[pscustomobject]@{type='PROMOTE'};"
         "$busy=Get-ControlCenterReleasePresentation $release;"
         "$missing=Get-ControlCenterReleasePresentation $null;"
-        "@($passed,$preview,$failed,$busy,$missing) | ConvertTo-Json -Compress",
+        "@($passed,$preview,$failed,$evidenceFailed,$busy,$missing) | ConvertTo-Json -Compress",
     )
 
-    passed, preview, failed, busy, missing = json.loads(result)
+    passed, preview, failed, evidence_failed, busy, missing = json.loads(result)
     assert passed["can_promote"] is True
     assert passed["can_reverse"] is True
     assert passed["promote_reason"] == "Ready to promote"
     assert preview["can_promote"] is False
     assert preview["promote_reason"] == "Preview cannot be promoted"
-    assert failed["can_promote"] is False
+    # The nested validation object is a compatibility projection only.  The
+    # authoritative Evidence DAG remains the Promote gate.
+    assert failed["can_promote"] is True
     assert failed["candidate_detail"] == "Worker CPU evidence failed"
-    assert failed["promote_reason"] == "Candidate failed validation"
+    assert failed["promote_reason"] == "Ready to promote"
+    assert evidence_failed["can_promote"] is False
+    assert evidence_failed["promote_reason"] == "RELEASE_EVIDENCE_WATERFALL_INCOMPLETE"
     assert busy["can_promote"] is False
     assert busy["can_reverse"] is False
     assert busy["promote_reason"] == "A release transaction is already in progress"

@@ -1,0 +1,20 @@
+{
+  "schema_version": "release-evidence-change-ownership-v1",
+  "families": [
+    {"id":"docs-only","patterns":["^docs/","^README\\.md$"],"nodes":[]},
+    {"id":"tests-ci-formal-only","patterns":["^tests/","^web/tests/","^formal/","^\\.github/"],"nodes":["exact_head_ci"]},
+    {"id":"control-plane-only","patterns":["^scripts/(xauusd_control_center|xauusd_watchdog_guard|release_|worker_cpu_evidence)","^scripts/control_center\\.xaml$"],"nodes":["windows_runtime","rollback_precheck"]},
+    {"id":"static-web-ui-only","patterns":["^web/app/.*\\.(tsx|css|svg)$","^web/public/"],"nodes":["exact_head_ci","free_plan"]},
+    {"id":"worker-route-serialization","patterns":["^web/app/api/","^web/worker/","^web/worker-validation-manifest\\.json$"],"nodes":["directed_worker","worker_cpu","semantic_contract","free_plan"]},
+    {"id":"dashboard-api","patterns":["^scripts/run_dashboard_api\\.py$","^xauusd_forecaster/dashboard"],"nodes":["windows_runtime","semantic_contract"]},
+    {"id":"dashboard-sync","patterns":["^scripts/run_dashboard_sync\\.py$","^xauusd_forecaster/dashboard_payloads\\.py$"],"nodes":["windows_runtime","directed_worker","semantic_contract","free_plan"]},
+    {"id":"collector-decision","patterns":["^scripts/run_forward_collector\\.py$","^xauusd_forecaster/(forward|decision|model)"],"nodes":["windows_runtime","semantic_contract"]},
+    {"id":"annotator-news","patterns":["^scripts/run_news_annotator\\.py$","^xauusd_forecaster/news"],"nodes":["windows_runtime","directed_worker","semantic_contract","free_plan"]},
+    {"id":"d1-schema-migration","patterns":["^web/drizzle/","^web/db/schema\\.ts$"],"nodes":["migration_acceptance","migration_live_lease","directed_worker","semantic_contract","free_plan"]},
+    {"id":"access","patterns":["^scripts/access-qualification-contract\\.json$","^web/.*access","^docs/contracts/ASSISTANT_SECURITY\\.md$"],"nodes":["human_access_root","access_provider_lease"]},
+    {"id":"runtime-root-process-ownership","patterns":["^xauusd_forecaster/runtime_paths\\.py$","^scripts/run_.*\\.py$","^scripts/xauusd_watchdog"],"nodes":["windows_runtime","rollback_precheck"]},
+    {"id":"storage-lifecycle","patterns":["^xauusd_forecaster/.*(storage|ledger|sqlite)","^docs/contracts/HOSTING_BOUNDARIES\\.md$"],"nodes":["migration_acceptance","migration_live_lease","semantic_contract","free_plan"]}
+  ],
+  "unknown_family": "unknown-cross-family",
+  "unknown_nodes": ["exact_head_ci","windows_runtime","migration_acceptance","migration_live_lease","candidate_placement","directed_worker","worker_cpu","semantic_contract","free_plan","human_access_root","access_provider_lease","rollback_precheck"]
+}
