@@ -324,6 +324,217 @@ def test_control_bundle_and_candidate_discovery_use_evidence_owner() -> None:
     assert "function Publish-PromotionFreshnessEvidence" not in control
 
 
+def test_candidate_pass_projection_has_one_finalizer_owner() -> None:
+    authority = AUTHORITY.read_text(encoding="utf-8")
+    control = CONTROL.read_text(encoding="utf-8")
+    transaction = (ROOT / "scripts" / "control_center_transaction_engine.ps1").read_text(
+        encoding="utf-8"
+    )
+    evidence = (ROOT / "scripts" / "control_center_evidence_authority.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "function Finalize-CandidateQualificationEvidence" in authority
+    assert 'state = "EVIDENCE_PENDING"' in transaction
+    assert "AUTOMATIC_CANDIDATE_VALIDATION_COMPLETED" in transaction
+    assert "SEMANTIC_VALIDATION_COMPLETED" in transaction
+    assert "COMPATIBILITY_APPROVAL_COMPLETED" in transaction
+    assert "MIGRATION_COMPATIBILITY_COMPLETED" in evidence
+    assert "ACCESS_MACHINE_RENEWAL_COMPLETED" in evidence
+    assert "ACCESS_QUALIFICATION_REUSE_COMPLETED" in evidence
+    assert "HUMAN_ACCESS_ROOT_COMPLETED" in evidence
+    assert "ACCESS_PROVIDER_INSPECTION_COMPLETED" in control
+    assert "FREE_PLAN_EVIDENCE_COMPLETED" in control
+    assert '$state.candidate.validation_state = "PASSED"' not in control
+    assert '$candidate.validation_state = "PASSED"' not in _control_function(
+        "Invoke-CandidateAccessQualificationReuse"
+    )
+    assert '$candidate.validation_state = "PASSED"' not in _control_function(
+        "Approve-CandidateAccessBoundary"
+    )
+    pre_action = authority.split("$releaseEvidencePreActionNodes =", 1)[1].split(
+        "$releaseEvidencePromotionDependencyNodes", 1
+    )[0]
+    assert '"rollback_precheck"' in pre_action
+    assert '-ne "rollback_precheck"' in pre_action
+    assert "promote_attempt" not in pre_action
+    assert "observe_attempt" not in pre_action
+
+
+@pytest.mark.parametrize("shell", ("powershell.exe", "pwsh.exe"))
+def test_candidate_finalizer_is_order_independent_and_single_owner(
+    tmp_path: Path, shell: str
+) -> None:
+    output = _run_module(
+        tmp_path,
+        shell,
+        r"""
+$releaseEvidenceRoot='unused'
+$releaseEvidenceContractPath='unused'
+$releaseEvidencePreActionNodes=@(
+ 'artifact_provenance','exact_head_ci','windows_runtime','migration_acceptance',
+ 'migration_live_lease','candidate_placement','directed_worker','worker_cpu',
+ 'semantic_contract','free_plan','human_access_root','access_provider_lease')
+$script:publishCount=0
+$script:freeReady=$false
+$script:migrationReady=$false
+$script:migrationRequired=$true
+$script:allNodes=$false
+function Copy-TestValue($Value){$Value|ConvertTo-Json -Depth 30|ConvertFrom-Json}
+function Get-ReleaseControlState{return Copy-TestValue $script:testState}
+function Write-ReleaseControlState{param($State)$script:testState=Copy-TestValue $State}
+function Write-ReleaseHistory{}
+function Get-CandidateChangedFiles{return @()}
+function Get-CandidateCompatibilityRequirement{
+ if($script:migrationRequired){[pscustomobject]@{state='COORDINATED_STORAGE_MIGRATION_REQUIRED';files=@('m.sql')}}
+ else{[pscustomobject]@{state='NOT_REQUIRED';files=@()}}
+}
+function Test-CandidateAuthBoundaryChanged{return $true}
+function Get-ReleaseEvidenceCurrentReceipt{param($Root,$ValidationKey,$Node)
+ if($Node -eq 'free_plan' -and $script:freeReady){
+  return [pscustomobject]@{state='PASSED';source_identity=[pscustomobject]@{
+   subject=[pscustomobject]@{candidate=[pscustomobject]@{validation_key=$ValidationKey}}}}
+ }
+ return $null
+}
+function New-TestQualification{
+ $receipts=[ordered]@{};foreach($node in $releaseEvidencePreActionNodes){$receipts[$node]=[pscustomobject]@{
+  receipt_digest=('a'*64);behavior_key=('release-behavior-key-v1:'+('b'*64))}}
+ [pscustomobject]@{state='PASSED';receipts=[pscustomobject]$receipts}
+}
+function Assert-ReleaseEvidenceQualification{
+ if(-not $script:allNodes){throw 'RELEASE_EVIDENCE_PRODUCER_MISSING:exact_head_ci'}
+ return New-TestQualification
+}
+function Publish-CandidateQualificationEvidence{
+ $script:publishCount++;$script:allNodes=$true;return New-TestQualification
+}
+function New-TestState{
+ $stable=[pscustomobject]@{validation_key='stable:key';worker_version_id='stable';git_sha='old';windows_revision='old'}
+ $candidate=[pscustomobject]@{validation_key='candidate:key';worker_version_id='candidate';git_sha='new';windows_revision='new';
+  validation_state='EVIDENCE_PENDING';compatibility_state='PENDING';validation=[pscustomobject]@{
+   key='candidate:key';repository='PENDING';windows='PENDING';cloudflare='PENDING';
+   route_plan=[pscustomobject]@{changed_auth_boundary=$true};
+   data_parity=[pscustomobject]@{passed=$false};auth_inspection=[pscustomobject]@{state='UNKNOWN'};
+   routes=@();cpu_evidence=[pscustomobject]@{gate_state='PASSED'};
+   worker_qualification=[pscustomobject]@{qualification_key='q'};
+   directed_request_ledger=[pscustomobject]@{completed=1};validation_run='run'}}
+ [pscustomobject]@{stable=$stable;candidate=$candidate;transaction=$null;updated_at='2026-09-03T00:00:00Z'}
+}
+function Complete-TestProducer([string]$Name){
+ $state=Get-ReleaseControlState
+ switch($Name){
+  'EXACT'{$state.candidate.validation.repository='PASSED'}
+  'WINDOWS'{$state.candidate.validation.windows='PASSED'}
+  'SEMANTIC'{$state.candidate.validation.data_parity.passed=$true}
+  'PLACEMENT'{$state.candidate.validation.cloudflare='PASSED'}
+  'MIGRATION'{$script:migrationReady=$true;$state.candidate|Add-Member -Force migration_acceptance ([pscustomobject]@{validation_key='candidate:key'})}
+  'MIGRATION_NOT_REQUIRED'{$script:migrationRequired=$false}
+  'ACCESS'{$state.candidate.validation.auth_inspection.state='ACCESS_QUALIFICATION_RENEWED'}
+  'FREE'{$script:freeReady=$true}
+  'RESTART'{$state=Copy-TestValue $state}
+ }
+ Write-ReleaseControlState $state
+ return Finalize-CandidateQualificationEvidence -WhyRan $Name
+}
+$orders=@(
+ @('EXACT','WINDOWS','SEMANTIC','PLACEMENT','MIGRATION','ACCESS','FREE'),
+ @('FREE','EXACT','WINDOWS','SEMANTIC','PLACEMENT','MIGRATION','ACCESS'),
+ @('FREE','ACCESS','WINDOWS','SEMANTIC','PLACEMENT','MIGRATION','EXACT'),
+ @('FREE','ACCESS','EXACT','SEMANTIC','PLACEMENT','MIGRATION','WINDOWS'),
+ @('FREE','ACCESS','EXACT','WINDOWS','PLACEMENT','MIGRATION','SEMANTIC'),
+ @('FREE','ACCESS','EXACT','WINDOWS','SEMANTIC','MIGRATION','PLACEMENT'),
+ @('FREE','ACCESS','EXACT','WINDOWS','SEMANTIC','PLACEMENT','MIGRATION'),
+ @('FREE','EXACT','WINDOWS','SEMANTIC','PLACEMENT','MIGRATION_NOT_REQUIRED','ACCESS'),
+ @('EXACT','WINDOWS','SEMANTIC','PLACEMENT','MIGRATION','ACCESS','RESTART','FREE'),
+ @('EXACT','WINDOWS','SEMANTIC','PLACEMENT','MIGRATION','ACCESS','FREE','FREE'))
+$results=@()
+foreach($order in $orders){
+ $script:testState=New-TestState;$script:freeReady=$false;$script:migrationReady=$false
+ $script:migrationRequired=$true;$script:allNodes=$false;$script:publishCount=0
+ $earlyPass=$false;$last=$null
+ foreach($producer in $order){
+  $last=Complete-TestProducer $producer
+  if($producer -ne $order[-1] -and [string](Get-ReleaseControlState).candidate.validation_state -eq 'PASSED'){$earlyPass=$true}
+ }
+ $again=Finalize-CandidateQualificationEvidence -WhyRan 'DUPLICATE_REPLAY'
+ $final=Get-ReleaseControlState
+ $results+=,[pscustomobject]@{state=$final.candidate.validation_state;reason=$final.candidate.validation.reason;
+  node_count=$last.node_count;again=$again.state;publish_count=$script:publishCount;early_pass=$earlyPass;
+  transaction=[bool]$final.transaction}
+}
+function Set-TestReadyState{
+ $script:testState=New-TestState
+ $script:testState.candidate.validation.repository='PASSED'
+ $script:testState.candidate.validation.windows='PASSED'
+ $script:testState.candidate.validation.cloudflare='PASSED'
+ $script:testState.candidate.validation.data_parity.passed=$true
+ $script:testState.candidate.validation.auth_inspection.state='ACCESS_QUALIFICATION_RENEWED'
+ $script:testState.candidate|Add-Member -Force migration_acceptance ([pscustomobject]@{validation_key='candidate:key'})
+ $script:freeReady=$true;$script:migrationRequired=$true;$script:allNodes=$false;$script:publishCount=0
+}
+Set-TestReadyState
+$script:testState.candidate.validation.auth_inspection.state='UNKNOWN'
+$accessUnknown=Finalize-CandidateQualificationEvidence
+Set-TestReadyState
+$script:freeReady=$false
+$freeMissing=Finalize-CandidateQualificationEvidence
+Set-TestReadyState
+$script:allNodes=$true;$script:testState.candidate.validation_state='PASSED'
+function Assert-ReleaseEvidenceQualification{throw 'RELEASE_EVIDENCE_LEASE_STALE:access_provider_lease'}
+$stale=Finalize-CandidateQualificationEvidence
+$staleState=(Get-ReleaseControlState).candidate.validation_state
+Set-TestReadyState
+$script:allNodes=$true;$script:testState.candidate.validation_state='PASSED'
+$script:testState.candidate.validation.key='stale:key'
+$keyMismatch=Finalize-CandidateQualificationEvidence
+$keyMismatchState=(Get-ReleaseControlState).candidate.validation_state
+Set-TestReadyState
+function Assert-ReleaseEvidenceQualification{throw 'RELEASE_EVIDENCE_PRODUCER_MISSING:exact_head_ci'}
+function Publish-CandidateQualificationEvidence{
+ $script:publishCount++;$script:allNodes=$true;$script:testState.candidate.validation_key='replacement:key';
+ return New-TestQualification
+}
+$superseded=Finalize-CandidateQualificationEvidence
+$replacementState=(Get-ReleaseControlState).candidate.validation_state
+Set-TestReadyState
+function Publish-CandidateQualificationEvidence{
+ $script:publishCount++;$script:allNodes=$true;$script:testState.transaction=[pscustomobject]@{id='race'};
+ return New-TestQualification
+}
+$transactionRace=Finalize-CandidateQualificationEvidence
+[pscustomobject]@{permutations=$results;edges=[pscustomobject]@{
+ access_unknown=$accessUnknown.state;free_missing=$freeMissing.state;stale=$stale.state;
+ stale_state=$staleState;key_mismatch=$keyMismatch.state;key_mismatch_state=$keyMismatchState;
+ superseded=$superseded.state;replacement_state=$replacementState;
+ transaction_race=$transactionRace.state}}|ConvertTo-Json -Depth 12 -Compress
+""",
+    )
+    payload = json.loads(output)
+    results = payload["permutations"]
+    assert len(results) == 10
+    assert all(result == results[0] for result in results)
+    assert results[0] == {
+        "state": "PASSED",
+        "reason": "RELEASE_EVIDENCE_DAG_PASSED",
+        "node_count": 12,
+        "again": "PASSED",
+        "publish_count": 1,
+        "early_pass": False,
+        "transaction": False,
+    }
+    assert payload["edges"] == {
+        "access_unknown": "INCOMPLETE",
+        "free_missing": "INCOMPLETE",
+        "stale": "BLOCKED",
+        "stale_state": "REVIEW_REQUIRED",
+        "key_mismatch": "INCOMPLETE",
+        "key_mismatch_state": "REVIEW_REQUIRED",
+        "superseded": "BLOCKED",
+        "replacement_state": "EVIDENCE_PENDING",
+        "transaction_race": "BLOCKED",
+    }
+
+
 def test_real_control_center_writes_candidate_artifact_receipt(tmp_path: Path) -> None:
     runtime_root = tmp_path.parents[2] / f"xre-{tmp_path.parent.name}"
     shutil.rmtree(runtime_root, ignore_errors=True)
@@ -877,6 +1088,8 @@ try{{Register-CandidateFreePlanEvidence -Candidate $candidate -ProofPath {_ps_li
 catch{{$mismatch=$_.Exception.Message}}
 [ordered]@{{state=$receipt.state;node=$receipt.node;
  requests=$receipt.source_identity.subject.qualification.measurements.worker_requests_per_day;
+ candidate_key=$receipt.source_identity.subject.candidate.validation_key;
+ input_digest=$receipt.source_identity.subject.input_digest;
  mismatch=$mismatch}}|ConvertTo-Json -Compress
 """,
     )
@@ -884,6 +1097,8 @@ catch{{$mismatch=$_.Exception.Message}}
         "state": "PASSED",
         "node": "free_plan",
         "requests": 1440,
+        "candidate_key": "worker:git",
+        "input_digest": hashlib.sha256(proof_path.read_bytes()).hexdigest(),
         "mismatch": "FREE_PLAN_PROOF_CANDIDATE_MISMATCH",
     }
 

@@ -335,6 +335,180 @@ function Publish-CandidateQualificationEvidence {
         })
 }
 
+function Finalize-CandidateQualificationEvidence {
+    param([string]$WhyRan = "CANDIDATE_QUALIFICATION_PRODUCER_COMPLETED")
+
+    $state = Get-ReleaseControlState
+    if (-not $state -or -not $state.candidate -or -not $state.stable) {
+        return [pscustomobject][ordered]@{
+            schema_version = "candidate-qualification-finalizer-v1"
+            state = "INCOMPLETE"; reason = "CANDIDATE_AUTHORITY_UNAVAILABLE"
+            validation_key = ""; node_count = 0
+        }
+    }
+    $candidate = $state.candidate
+    $validationKey = [string]$candidate.validation_key
+    if ($state.transaction) {
+        return [pscustomobject][ordered]@{
+            schema_version = "candidate-qualification-finalizer-v1"
+            state = "BLOCKED"; reason = "RELEASE_TRANSACTION_ACTIVE"
+            validation_key = $validationKey; node_count = 0
+        }
+    }
+
+    $validation = $candidate.validation
+    if (-not $validation -or [string]$validation.key -cne $validationKey) {
+        if ([string]$candidate.validation_state -eq "PASSED") {
+            $candidate.validation_state = "REVIEW_REQUIRED"
+            if ($validation) {
+                $validation | Add-Member -Force -NotePropertyName reason `
+                    -NotePropertyValue "RELEASE_EVIDENCE_VALIDATION_KEY_MISMATCH"
+            }
+            $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+            Write-ReleaseControlState -State $state
+        }
+        return [pscustomobject][ordered]@{
+            schema_version = "candidate-qualification-finalizer-v1"
+            state = "INCOMPLETE"; reason = "PERSISTED_VALIDATION_KEY_MISMATCH"
+            validation_key = $validationKey; node_count = 0
+        }
+    }
+
+    $qualification = $null
+    try {
+        $qualification = Assert-ReleaseEvidenceQualification `
+            -Root $releaseEvidenceRoot -ContractPath $releaseEvidenceContractPath `
+            -ValidationKey $validationKey -RequiredNodes $releaseEvidencePreActionNodes
+    } catch {
+        if ($_.Exception.Message -notmatch '^RELEASE_EVIDENCE_PRODUCER_MISSING:') {
+            $candidate.validation_state = "REVIEW_REQUIRED"
+            if ($candidate.validation) {
+                $candidate.validation | Add-Member -Force -NotePropertyName reason `
+                    -NotePropertyValue "RELEASE_EVIDENCE_FINALIZATION_BLOCKED"
+            }
+            $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+            Write-ReleaseControlState -State $state
+            return [pscustomobject][ordered]@{
+                schema_version = "candidate-qualification-finalizer-v1"
+                state = "BLOCKED"; reason = [string]$_.Exception.Message
+                validation_key = $validationKey; node_count = 0
+            }
+        }
+    }
+
+    if (-not $qualification) {
+        $validationReady = [bool]($validation -and
+            [string]$validation.key -ceq $validationKey -and
+            [string]$validation.repository -eq "PASSED" -and
+            [string]$validation.windows -eq "PASSED" -and
+            [string]$validation.cloudflare -eq "PASSED" -and
+            $validation.route_plan -and $validation.data_parity -and
+            [bool]$validation.data_parity.passed -and $validation.auth_inspection)
+        if (-not $validationReady) {
+            if ([string]$candidate.validation_state -eq "PASSED") {
+                $candidate.validation_state = "REVIEW_REQUIRED"
+                $candidate.validation | Add-Member -Force -NotePropertyName reason `
+                    -NotePropertyValue "RELEASE_EVIDENCE_INCOMPLETE"
+                $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+                Write-ReleaseControlState -State $state
+            }
+            return [pscustomobject][ordered]@{
+                schema_version = "candidate-qualification-finalizer-v1"
+                state = "INCOMPLETE"; reason = "PERSISTED_VALIDATION_FACTS_INCOMPLETE"
+                validation_key = $validationKey; node_count = 0
+            }
+        }
+        if ((Test-CandidateAuthBoundaryChanged -RoutePlan $validation.route_plan) -and
+            [string]$validation.auth_inspection.state -notin @(
+                "HUMAN_ACCESS_BOUNDARY_ACCEPTED", "ACCESS_QUALIFICATION_REUSED",
+                "ACCESS_QUALIFICATION_RENEWED")) {
+            return [pscustomobject][ordered]@{
+                schema_version = "candidate-qualification-finalizer-v1"
+                state = "INCOMPLETE"; reason = "ACCESS_EVIDENCE_INCOMPLETE"
+                validation_key = $validationKey; node_count = 0
+            }
+        }
+        $freePlan = Get-ReleaseEvidenceCurrentReceipt -Root $releaseEvidenceRoot `
+            -ValidationKey $validationKey -Node "free_plan"
+        if (-not $freePlan) {
+            return [pscustomobject][ordered]@{
+                schema_version = "candidate-qualification-finalizer-v1"
+                state = "INCOMPLETE"; reason = "FREE_PLAN_EVIDENCE_REQUIRED"
+                validation_key = $validationKey; node_count = 0
+            }
+        }
+        if ([string]$freePlan.state -cne "PASSED" -or
+            [string]$freePlan.source_identity.subject.candidate.validation_key -cne
+                $validationKey) {
+            throw "FREE_PLAN_EVIDENCE_INVALID"
+        }
+
+        $changed = @(Get-CandidateChangedFiles `
+            -StableRevision ([string]$state.stable.git_sha) `
+            -CandidateRevision ([string]$candidate.git_sha))
+        $compatibility = Get-CandidateCompatibilityRequirement -ChangedFiles $changed
+        if ([string]$compatibility.state -eq "COORDINATED_STORAGE_MIGRATION_REQUIRED" -and
+            (-not $candidate.migration_acceptance -or
+             [string]$candidate.migration_acceptance.validation_key -cne $validationKey)) {
+            return [pscustomobject][ordered]@{
+                schema_version = "candidate-qualification-finalizer-v1"
+                state = "INCOMPLETE"; reason = "MIGRATION_EVIDENCE_INCOMPLETE"
+                validation_key = $validationKey; node_count = 0
+            }
+        }
+        $cloudflare = [pscustomobject]@{
+            routes = $validation.routes
+            cpu_evidence = $validation.cpu_evidence
+            worker_qualification = $validation.worker_qualification
+            cpu_qualification_mode = $validation.cpu_qualification_mode
+            directed_request_ledger = $validation.directed_request_ledger
+            validation_run = [string]$validation.validation_run
+        }
+        $qualification = Publish-CandidateQualificationEvidence `
+            -Candidate $candidate -Stable $state.stable -Compatibility $compatibility `
+            -RoutePlan $validation.route_plan -Cloudflare $cloudflare `
+            -DataParity $validation.data_parity -AuthInspection $validation.auth_inspection
+    }
+
+    $current = Get-ReleaseControlState
+    if (-not $current -or $current.transaction -or
+        -not (Test-ReleaseIdentity $current.candidate $candidate) -or
+        [string]$current.candidate.validation_key -cne $validationKey) {
+        return [pscustomobject][ordered]@{
+            schema_version = "candidate-qualification-finalizer-v1"
+            state = "BLOCKED"; reason = "CANDIDATE_AUTHORITY_MOVED"
+            validation_key = $validationKey; node_count = 0
+        }
+    }
+    $wasPassed = [string]$current.candidate.validation_state -eq "PASSED"
+    $current.candidate.validation_state = "PASSED"
+    $current.candidate.compatibility_state = "PASSED"
+    $current.candidate.validation | Add-Member -Force -NotePropertyName reason `
+        -NotePropertyValue "RELEASE_EVIDENCE_DAG_PASSED"
+    $current.candidate.validation | Add-Member -Force -NotePropertyName tested_at `
+        -NotePropertyValue ([DateTimeOffset]::UtcNow.ToString("o"))
+    $current.candidate | Add-Member -Force -NotePropertyName evidence_authority `
+        -NotePropertyValue ([pscustomobject]@{
+            schema_version = "release-evidence-compatibility-projection-v1"
+            state = [string]$qualification.state
+            validation_key = $validationKey
+            node_count = @($qualification.receipts.PSObject.Properties).Count
+            projected_at = [DateTimeOffset]::UtcNow.ToString("o")
+        })
+    $current.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+    Write-ReleaseControlState -State $current
+    if (-not $wasPassed) {
+        Write-ReleaseHistory -Event "CANDIDATE_PASSED" -Release $current.candidate `
+            -Detail @{ validation_key = $validationKey; finalizer = $WhyRan }
+    }
+    return [pscustomobject][ordered]@{
+        schema_version = "candidate-qualification-finalizer-v1"
+        state = "PASSED"; reason = "RELEASE_EVIDENCE_DAG_PASSED"
+        validation_key = $validationKey
+        node_count = @($qualification.receipts.PSObject.Properties).Count
+    }
+}
+
 function Write-CandidateArtifactEvidence {
     param(
         [Parameter(Mandatory = $true)][object]$Candidate,
@@ -548,6 +722,9 @@ $releaseEvidencePrerequisiteNodes = @(
     "directed_worker", "worker_cpu", "semantic_contract", "free_plan",
     "human_access_root", "access_provider_lease", "rollback_precheck"
 )
+$releaseEvidencePreActionNodes = @($releaseEvidencePrerequisiteNodes | Where-Object {
+    [string]$_ -ne "rollback_precheck"
+})
 $releaseEvidencePromotionDependencyNodes = @(
     "exact_head_ci", "windows_runtime", "migration_live_lease",
     "directed_worker", "worker_cpu", "semantic_contract", "free_plan",
@@ -1192,8 +1369,11 @@ function Publish-FreePlanEvidence {
     if ([string]$qualification.state -cne "PASSED") {
         throw "FREE_PLAN_QUALIFICATION_BLOCKED:$([string]$qualification.reason)"
     }
+    $registeredSource = $Arguments.SourceIdentity
     $Arguments.SourceIdentity = [pscustomobject][ordered]@{
         qualification_state = "PASSED"
+        candidate = $registeredSource.candidate
+        input_digest = [string]$registeredSource.input_digest
         qualification = $qualification
     }
     return Invoke-ReleaseEvidenceAdapter -Adapter $MyInvocation.MyCommand.Name `

@@ -1165,53 +1165,33 @@ switch ($Action) {
         if ($file.Length -gt 32768) { throw "ACCESS_PROVIDER_INSPECTION_FILE_TOO_LARGE" }
         $inspection = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
-        Register-AccessProviderInspection -Inspection $inspection | ConvertTo-Json -Depth 12
+        if (-not (Enter-ReleaseTransactionLock)) {
+            throw "Another release transaction is active."
+        }
+        try {
+            $receipt = Register-AccessProviderInspection -Inspection $inspection
+            $null = Finalize-CandidateQualificationEvidence `
+                -WhyRan "ACCESS_PROVIDER_INSPECTION_COMPLETED"
+        } finally { Exit-ReleaseTransactionLock }
+        $receipt | ConvertTo-Json -Depth 12
     }
     "RegisterFreePlanEvidence" {
         if (-not $ReleaseFreePlanProofPath) {
             throw "FREE_PLAN_PROOF_FILE_REQUIRED"
         }
-        $state = Get-ReleaseControlState
-        if (-not $state -or -not $state.candidate -or $state.transaction) {
-            throw "FREE_PLAN_CANDIDATE_UNAVAILABLE"
+        if (-not (Enter-ReleaseTransactionLock)) {
+            throw "Another release transaction is active."
         }
-        $receipt = Register-CandidateFreePlanEvidence -Candidate $state.candidate `
-            -ProofPath $ReleaseFreePlanProofPath
-        if ([string]$state.candidate.validation_state -eq "REVIEW_REQUIRED" -and
-            [string]$state.candidate.validation.reason -eq "FREE_PLAN_EVIDENCE_REQUIRED") {
-            $changed = @(Get-CandidateChangedFiles `
-                -StableRevision ([string]$state.stable.git_sha) `
-                -CandidateRevision ([string]$state.candidate.git_sha))
-            $compatibility = Get-CandidateCompatibilityRequirement -ChangedFiles $changed
-            $cloudflare = [pscustomobject]@{
-                routes = $state.candidate.validation.routes
-                cpu_evidence = $state.candidate.validation.cpu_evidence
-                worker_qualification = $state.candidate.validation.worker_qualification
-                directed_request_ledger = $state.candidate.validation.directed_request_ledger
-                validation_run = [string]$state.candidate.validation.validation_run
+        try {
+            $state = Get-ReleaseControlState
+            if (-not $state -or -not $state.candidate -or $state.transaction) {
+                throw "FREE_PLAN_CANDIDATE_UNAVAILABLE"
             }
-            $qualification = Publish-CandidateQualificationEvidence `
-                -Candidate $state.candidate -Stable $state.stable `
-                -Compatibility $compatibility `
-                -RoutePlan $state.candidate.validation.route_plan `
-                -Cloudflare $cloudflare `
-                -DataParity $state.candidate.validation.data_parity `
-                -AuthInspection $state.candidate.validation.auth_inspection
-            $state.candidate.validation_state = "PASSED"
-            $state.candidate.compatibility_state = "PASSED"
-            $state.candidate.validation.reason = "RELEASE_EVIDENCE_DAG_PASSED"
-            $state.candidate.validation.tested_at = [DateTimeOffset]::UtcNow.ToString("o")
-            $state.candidate | Add-Member -Force -NotePropertyName evidence_authority `
-                -NotePropertyValue ([pscustomobject]@{
-                    schema_version = "release-evidence-compatibility-projection-v1"
-                    state = [string]$qualification.state
-                    validation_key = [string]$state.candidate.validation_key
-                    node_count = @($qualification.receipts.PSObject.Properties).Count
-                    projected_at = [DateTimeOffset]::UtcNow.ToString("o")
-                })
-            $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
-            Write-ReleaseControlState -State $state
-        }
+            $receipt = Register-CandidateFreePlanEvidence -Candidate $state.candidate `
+                -ProofPath $ReleaseFreePlanProofPath
+            $null = Finalize-CandidateQualificationEvidence `
+                -WhyRan "FREE_PLAN_EVIDENCE_COMPLETED"
+        } finally { Exit-ReleaseTransactionLock }
         $receipt | ConvertTo-Json -Depth 12
     }
     "ReuseAccessQualification" {
