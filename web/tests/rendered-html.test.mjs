@@ -1944,7 +1944,10 @@ test("stores growing learning history as bounded idempotent D1 records", () => {
   assert.match(route, /next_cursor/);
   assert.match(route, /type LearningCursor/);
   assert.match(route, /watermarkEpoch/);
-  assert.match(route, /source\.sort_epoch<watermark\.sort_epoch/);
+  assert.match(route, /sort_epoch<watermark\.sort_epoch/);
+  assert.match(route, /FROM learning_record_counts/);
+  assert.match(route, /ORDER BY lr\.sort_epoch DESC,lr\.record_key DESC LIMIT \?/);
+  assert.doesNotMatch(route, /SELECT count\(\*\) FROM base/);
   assert.match(sync, /LEARNING_HISTORY_CONTRACT_VERSION = "learning-history-d1-v2"/);
   assert.match(route, /resource='curve-overview'/);
   assert.match(route, /resource='version-overview'/);
@@ -2138,9 +2141,16 @@ test("lets D1 validate raw snapshot JSON in the same write", async () => {
       return {
         bind(...values) {
           calls.push({ sql, values });
-          return { run: async () => ({ meta: { changes: 1 } }) };
+          return { sql, values };
         },
       };
+    },
+    async batch(statements) {
+      assert.equal(statements.length, 2);
+      return [
+        { results: [{ valid: 1 }], meta: { changes: 0 } },
+        { results: [], meta: { changes: 1 } },
+      ];
     },
   };
   const body = JSON.stringify({
@@ -2152,12 +2162,12 @@ test("lets D1 validate raw snapshot JSON in the same write", async () => {
     body,
   });
   assert.equal(await writeDashboardSnapshot(request, binding, 1), "stored");
-  assert.equal(calls.length, 1);
-  assert.match(calls[0].sql, /SELECT CAST\(\? AS TEXT\)/);
-  assert.match(calls[0].sql, /WHERE json_valid\(payload\)/);
-  assert.ok(calls[0].values[0] instanceof ArrayBuffer);
-  assert.equal(new TextDecoder().decode(calls[0].values[0]), body);
-  assert.equal(calls[0].values[1], 1);
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].sql, /SELECT json_valid\(CAST\(\? AS TEXT\)\)/);
+  assert.match(calls[1].sql, /WHERE json_valid\(payload\)/);
+  assert.ok(calls[1].values[0] instanceof ArrayBuffer);
+  assert.equal(new TextDecoder().decode(calls[1].values[0]), body);
+  assert.equal(calls[1].values[1], 1);
 });
 
 test("handles a non-JSON service failure without exposing a parser error", () => {

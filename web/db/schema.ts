@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const dashboardSnapshots = sqliteTable("dashboard_snapshots", {
@@ -517,7 +518,21 @@ export const learningRecords = sqliteTable(
     index("learning_records_resource_time_idx").on(
       table.resource, table.sortEpoch, table.recordKey,
     ),
+    index("learning_records_resource_identity_time_idx").on(
+      table.resource, sql`json_extract(${table.payload}, '$.model_identity')`,
+      table.sortEpoch, table.recordKey,
+    ),
   ],
+);
+
+export const learningRecordCounts = sqliteTable(
+  "learning_record_counts",
+  {
+    resource: text("resource").notNull(),
+    modelIdentity: text("model_identity").notNull(),
+    recordCount: integer("record_count").notNull(),
+  },
+  table => [primaryKey({ columns: [table.resource, table.modelIdentity] })],
 );
 
 export const operatorRetryJobs = sqliteTable(

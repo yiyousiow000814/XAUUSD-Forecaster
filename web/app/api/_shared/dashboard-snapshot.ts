@@ -31,7 +31,8 @@ const snapshotUpsertSql = `WITH incoming(payload) AS (SELECT CAST(? AS TEXT))
      INSERT INTO dashboard_snapshots (id, payload, received_at)
      SELECT ?, payload, ? FROM incoming WHERE json_valid(payload)
      ON CONFLICT(id) DO UPDATE SET
-       payload=excluded.payload, received_at=excluded.received_at`;
+       payload=excluded.payload, received_at=excluded.received_at
+     WHERE dashboard_snapshots.payload IS NOT excluded.payload`;
 
 // D1's bridge charges materially more Worker CPU when a larger ArrayBuffer is
 // bound than when the same already-bounded UTF-8 JSON is bound as text. Keep
@@ -171,9 +172,13 @@ export async function writeDashboardSnapshotBytes(
     return await validateJsonPayloadWithD1(binding, payload)
       ? "validated" : "invalid";
   }
-  const result = await binding.prepare(snapshotUpsertSql)
-    .bind(payload, snapshotId, new Date().toISOString()).run();
-  return Number(result.meta.changes ?? 0) > 0 ? "stored" : "invalid";
+  const [validation] = await binding.batch([
+    binding.prepare("SELECT json_valid(CAST(? AS TEXT)) AS valid").bind(payload),
+    binding.prepare(snapshotUpsertSql)
+      .bind(payload, snapshotId, new Date().toISOString()),
+  ]);
+  const valid = Number((validation.results?.[0] as { valid?: number } | undefined)?.valid ?? 0);
+  return valid === 1 ? "stored" : "invalid";
 }
 
 export async function writeDashboardStatusSnapshotBytes(
@@ -187,7 +192,9 @@ export async function writeDashboardStatusSnapshotBytes(
       ? "validated" : "invalid";
   }
   const receivedAt = new Date().toISOString();
-  const result = await binding.prepare(
+  const [validation] = await binding.batch([
+    binding.prepare("SELECT json_valid(CAST(? AS TEXT)) AS valid").bind(payload),
+    binding.prepare(
     `WITH incoming(payload, received_at) AS (SELECT CAST(? AS TEXT), ?),
           valid(payload, received_at) AS (
             SELECT payload,received_at FROM incoming WHERE json_valid(payload)
@@ -198,8 +205,11 @@ export async function writeDashboardStatusSnapshotBytes(
      SELECT 5, ${publicStatusJsonExpression()}, received_at
      FROM valid WHERE true
      ON CONFLICT(id) DO UPDATE SET
-       payload=excluded.payload, received_at=excluded.received_at`,
-  ).bind(payload, receivedAt).run();
+       payload=excluded.payload, received_at=excluded.received_at
+     WHERE dashboard_snapshots.payload IS NOT excluded.payload`,
+    ).bind(payload, receivedAt),
+  ]);
 
-  return Number(result.meta.changes ?? 0) > 0 ? "stored" : "invalid";
+  const valid = Number((validation.results?.[0] as { valid?: number } | undefined)?.valid ?? 0);
+  return valid === 1 ? "stored" : "invalid";
 }

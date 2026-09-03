@@ -5,6 +5,7 @@ import {
   activateNewsEvidenceSnapshot,
   cleanupNewsEvidenceSnapshots,
   NEWS_EVIDENCE_CLEANUP_DAILY_WRITE_RESERVATION,
+  NEWS_EVIDENCE_CLEANUP_STEP_WRITE_RESERVATION,
   NEWS_EVIDENCE_CURSOR_STALE,
   prepareNewsEvidenceSnapshot,
   readNewsEvidencePage,
@@ -277,7 +278,7 @@ test("cleanup reserves a fail-closed daily physical-write budget in D1", async (
     VALUES (1,'${activeGeneration}','news-evidence-paged-v2',0,
             '2026-08-27T00:00:00.000Z');
     WITH RECURSIVE sequence(value) AS (
-      SELECT 0 UNION ALL SELECT value+1 FROM sequence WHERE value<1600
+      SELECT 0 UNION ALL SELECT value+1 FROM sequence WHERE value<600
     )
     INSERT INTO news_evidence_records
       (snapshot_id,event_key,ordinal,sort_time,broad_model_eligible,model_seen,
@@ -287,7 +288,9 @@ test("cleanup reserves a fail-closed daily physical-write budget in D1", async (
       FROM sequence;
   `);
   const firstDay = new Date("2026-08-27T12:00:00.000Z");
-  for (let step = 0; step < 8; step += 1) {
+  const dailySteps = NEWS_EVIDENCE_CLEANUP_DAILY_WRITE_RESERVATION
+    / NEWS_EVIDENCE_CLEANUP_STEP_WRITE_RESERVATION;
+  for (let step = 0; step < dailySteps; step += 1) {
     const result = await cleanupNewsEvidenceSnapshots(
       db, activeGeneration, firstDay,
     );

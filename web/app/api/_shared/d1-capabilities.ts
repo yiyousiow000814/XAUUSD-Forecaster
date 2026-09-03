@@ -37,7 +37,13 @@ export class D1CapabilityError extends Error {
   }
 }
 
-export async function requireD1Capabilities(
+// A capability set is immutable for the lifetime of one deployed Worker
+// version. Cache only successful observations inside the isolate; a failed
+// observation is removed immediately so an additive migration can recover
+// without waiting for the isolate to be recycled.
+const capabilityObservations = new WeakMap<object, Map<string, Promise<void>>>();
+
+async function observeD1Capabilities(
   binding: D1Database,
   capabilities: readonly D1Capability[],
 ) {
@@ -55,6 +61,30 @@ export async function requireD1Capabilities(
   );
   if (missingCapabilities.length) {
     throw new D1CapabilityError(missingCapabilities, missingTables);
+  }
+}
+
+export async function requireD1Capabilities(
+  binding: D1Database,
+  capabilities: readonly D1Capability[],
+) {
+  const owner = binding as unknown as object;
+  const key = [...capabilities].sort().join("\u0000");
+  let observations = capabilityObservations.get(owner);
+  if (!observations) {
+    observations = new Map();
+    capabilityObservations.set(owner, observations);
+  }
+  let observation = observations.get(key);
+  if (!observation) {
+    observation = observeD1Capabilities(binding, capabilities);
+    observations.set(key, observation);
+  }
+  try {
+    await observation;
+  } catch (error) {
+    if (observations.get(key) === observation) observations.delete(key);
+    throw error;
   }
 }
 

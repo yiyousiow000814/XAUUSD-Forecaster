@@ -110,6 +110,44 @@ test("machine lease completion is bounded and public reads contain no secrets", 
   assert.doesNotMatch(JSON.stringify(listed), /credential|api[_-]?key/i);
 });
 
+test("a changed mirror updates only changed jobs and exact replay writes zero", async () => {
+  const database = new D1TestDatabase(retryMigrations);
+  const source = Array.from({ length: 200 }, (_, index) => ({
+    ...job((index % 10).toString()),
+    job_id: index.toString(16).padStart(64, "0"),
+    title: `Job ${index}`,
+  }));
+  let admitted = 0;
+  let cycles = 0;
+  while (admitted < source.length) {
+    const result = await syncOperatorRetryJobs(
+      database, source, new Date(Date.parse("2026-09-03T00:00:00Z") + cycles * 30_000),
+    );
+    assert.ok(result.written <= 3);
+    admitted += result.written;
+    cycles += 1;
+    assert.ok(cycles < 100);
+  }
+  assert.equal(admitted, 200);
+  assert.equal(cycles, 67, "catch-up is coalesced into a bounded delta drain");
+  const replay = await syncOperatorRetryJobs(
+    database, source, new Date("2026-09-03T00:00:30Z"),
+  );
+  assert.equal(replay.written, 0);
+  const changed = source.map((item, index) => index === 73
+    ? { ...item, title: "One changed job" } : item);
+  const delta = await syncOperatorRetryJobs(
+    database, changed, new Date("2026-09-03T00:01:00Z"),
+  );
+  assert.equal(delta.written, 1);
+  assert.equal(delta.deleted, 0);
+  const removed = await syncOperatorRetryJobs(
+    database, changed.slice(0, 199), new Date("2026-09-03T00:01:30Z"),
+  );
+  assert.equal(removed.written, 0);
+  assert.equal(removed.deleted, 1);
+});
+
 test("expired machine leases are reclaimed without duplicating the durable command", async () => {
   const database = new D1TestDatabase(retryMigrations);
   await syncOperatorRetryJobs(database, [job("d")], new Date("2026-08-19T03:00:00Z"));

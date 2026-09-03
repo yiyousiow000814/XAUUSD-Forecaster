@@ -2860,6 +2860,38 @@ def test_operator_retry_sync_mirrors_claims_applies_and_finishes(monkeypatch) ->
     assert remote_posts[2][1] == {"action": "SYNC_JOBS", "items": [applied_job]}
 
 
+def test_operator_retry_mirror_persists_exact_digest_only_after_delta_completes(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    state_path = tmp_path / "operator-retry.json"
+    config = {
+        "operator_retry_state_file": str(state_path),
+        "token": "test",
+    }
+    items = [{
+        "job_id": "a" * 64, "task_type": "ACTIVE_IMPACT", "title": "Gold",
+        "state": "BACKING_OFF", "priority": "NORMAL",
+        "available_at": "2026-09-03T00:00:00+00:00", "attempt_count": 1,
+        "last_error": None, "original_available_at": "2026-09-03T00:00:00+00:00",
+    }]
+    outcomes = iter(({"complete": False}, {"complete": True}))
+    posts = []
+    monkeypatch.setattr(
+        module, "_post_json",
+        lambda url, body, _config: posts.append((url, body)) or next(outcomes),
+    )
+
+    module._sync_operator_retry_mirror(items, "https://worker/retry", config)
+    assert not state_path.exists(), "partial remote delta is not acknowledged locally"
+    module._sync_operator_retry_mirror(items, "https://worker/retry", config)
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["contract_version"] == "operator-retry-delta-v1"
+    assert state["item_count"] == 1
+    module._sync_operator_retry_mirror(items, "https://worker/retry", config)
+    assert len(posts) == 2, "an accepted exact digest is not replayed"
+
+
 def test_slow_heavy_resource_does_not_block_critical_heartbeat(
     monkeypatch, tmp_path,
 ) -> None:

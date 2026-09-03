@@ -104,6 +104,7 @@ Current navigation: [repository and runtime state](CURRENT_STATE.md).
 ### Historical evidence
 
 - Audits: [test suite](audits/TEST_SUITE.md),
+  [Cloudflare Free capacity 2026-09-03](audits/CLOUDFLARE_FREE_CAPACITY_2026_09_03.md),
   [current-main architecture 2026-09-01](audits/CURRENT_MAIN_ARCHITECTURE_2026_09_01.md),
   [Release Control progressive delivery 2026-08-26](audits/RELEASE_CONTROL_PROGRESSIVE_DELIVERY_2026_08_26.md),
   [Release Control install handoff 2026-08-26](audits/RELEASE_CONTROL_INSTALL_HANDOFF_2026_08_26.md),
