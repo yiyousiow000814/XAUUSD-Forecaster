@@ -70,6 +70,7 @@ def test_windows_runtime_manifest_assigns_every_required_test_exactly_once() -> 
             "tests/test_release_evidence_nodes.py",
             "tests/test_release_runtime_read_model.py",
             "tests/test_recovery_hotfix.py",
+            "tests/test_watchdog_singleton.py",
         ):
         expected.update(f"{relative}::{name}" for name in _top_level_tests(relative))
     expected.add(
@@ -173,6 +174,7 @@ def test_python_shard_manifest_assigns_every_platform_test_file_exactly_once() -
         "tests/test_control_plane_install.py",
         "tests/test_release_runtime_read_model.py",
         "tests/test_recovery_hotfix.py",
+        "tests/test_watchdog_singleton.py",
     }
     expected = {
         path.relative_to(ROOT).as_posix()

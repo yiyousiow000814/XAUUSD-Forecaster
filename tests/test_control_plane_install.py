@@ -824,10 +824,13 @@ def test_heartbeat_requires_new_process_exact_revision_and_hashes(
     body = textwrap.dedent(
         f"""
         $previous={previous}; $owner={owner};
+        $receipt=[pscustomobject]@{{instance_id=('a'*32);mode='ACTIVE';install_transaction_id=$null}};
+        $owner | Add-Member -NotePropertyName watchdog_owner_receipt -NotePropertyValue $receipt -Force;
+        function Get-WatchdogOwnerReceiptDigest {{ return ('c'*64) }};
         function Start-Sleep {{ }};
         function Get-VerifiedWatchdogOwners {{ @($owner) }};
         New-Item -ItemType Directory -Path (Split-Path -Parent $watchdogHeartbeatPath) -Force | Out-Null;
-        [pscustomobject]@{{control_bundle_revision='{revision}';control_bundle_exact_revision={exact};control_bundle_hash_verified={hashed};supervision_mode='ACTIVE';install_transaction_id=$null;process_id={owner_pid};process_start_token='{heartbeat_token}'}} | ConvertTo-Json | Set-Content -LiteralPath $watchdogHeartbeatPath;
+        [pscustomobject]@{{control_bundle_revision='{revision}';control_bundle_exact_revision={exact};control_bundle_hash_verified={hashed};supervision_mode='ACTIVE';install_transaction_id=$null;process_id={owner_pid};process_start_token='{heartbeat_token}';instance_id=('a'*32);owner_receipt_digest=('c'*64)}} | ConvertTo-Json | Set-Content -LiteralPath $watchdogHeartbeatPath;
         try {{ $accepted=Wait-VerifiedWatchdogHandoff -ExpectedRevision '{revision}' -PreviousIdentity $previous -Timeout ([TimeSpan]::FromMilliseconds(20)); Write-Output $accepted.process_start_token }} catch {{ Write-Output $_.Exception.Message }}
         """
     ).replace("\n", " ")

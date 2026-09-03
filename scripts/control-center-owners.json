@@ -18,9 +18,14 @@
       "may_depend_on": ["Common", "PersistenceGateway", "RuntimeSupervision", "EvidenceAuthority", "ReleaseTransactionEngine"]
     },
     {
+      "name": "WatchdogSingleton",
+      "file": "control_center_watchdog_singleton.ps1",
+      "may_depend_on": ["PersistenceGateway", "ProviderAdapters", "RuntimeSupervision"]
+    },
+    {
       "name": "RuntimeSupervision",
       "file": "control_center_runtime_supervision.ps1",
-      "may_depend_on": ["Common", "PersistenceGateway", "ProviderAdapters", "EvidenceAuthority", "ReleaseTransactionEngine", "RecoveryEngine", "ControlPlaneInstall"]
+      "may_depend_on": ["Common", "PersistenceGateway", "ProviderAdapters", "WatchdogSingleton", "EvidenceAuthority", "ReleaseTransactionEngine", "RecoveryEngine", "ControlPlaneInstall"]
     },
     {
       "name": "EvidenceAuthority",

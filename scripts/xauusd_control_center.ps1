@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "ReleaseProviderFactsJson", "TerminateProviderObservation", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "DiscoverCandidate", "RetryCandidateValidation", "RetrySemantic", "ReconcileRelease", "PromoteCandidate", "PromoteRecoveryHotfix", "RestoreLastKnownGood", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "RegisterAccessProviderInspection", "RegisterFreePlanEvidence", "ReuseAccessQualification", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "ControlBundlePreflight", "PreflightRuntimeStateRoot", "MigrateRuntimeStateRoot")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "ReleaseProviderFactsJson", "TerminateProviderObservation", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "RepairWatchdogOwnership", "DiscoverCandidate", "RetryCandidateValidation", "RetrySemantic", "ReconcileRelease", "PromoteCandidate", "PromoteRecoveryHotfix", "RestoreLastKnownGood", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "RegisterAccessProviderInspection", "RegisterFreePlanEvidence", "ReuseAccessQualification", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "ControlBundlePreflight", "PreflightRuntimeStateRoot", "MigrateRuntimeStateRoot")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync", "broadcast")]
     [string]$ServiceKey = "",
@@ -47,6 +47,8 @@ $dashboardUrl = if ([Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL"
 $protectedDashboardUrl = $workerUrl
 $watchdogLog = Join-Path $logRoot "control-watchdog.jsonl"
 $watchdogHeartbeatPath = Join-Path $runtimeForwardRoot "control-watchdog-heartbeat.json"
+$watchdogOwnerReceiptPath = Join-Path $runtimeForwardRoot "watchdog-owner-v2.json"
+$watchdogSingletonContractVersion = "watchdog-machine-singleton-v2"
 $runtimeCodeStatePath = Join-Path $runtimeForwardRoot "runtime-code-state.json"
 $runtimeUpdateStatePath = Join-Path $runtimeForwardRoot "runtime-update-state.json"
 $deferredProjectionSyncRequestPath = Join-Path $runtimeForwardRoot `
@@ -165,6 +167,7 @@ $convertFromJsonSupportsDateKind =
 . (Join-Path $PSScriptRoot "recovery_hotfix.ps1")
 . (Join-Path $PSScriptRoot "release_runtime_read_model.ps1")
 . (Join-Path $PSScriptRoot "control_center_provider_adapters.ps1")
+. (Join-Path $PSScriptRoot "control_center_watchdog_singleton.ps1")
 . (Join-Path $PSScriptRoot "control_center_runtime_supervision.ps1")
 . (Join-Path $PSScriptRoot "control_center_evidence_authority.ps1")
 . (Join-Path $PSScriptRoot "control_center_transaction_engine.ps1")
@@ -1110,6 +1113,9 @@ switch ($Action) {
     "ServiceStop" { $null = Invoke-ControlCenterOperationAction -Operation $Action }
     "Watchdog" {
         exit (Invoke-ForecasterWatchdog -InstallTransactionId $InstallTransactionId)
+    }
+    "RepairWatchdogOwnership" {
+        Invoke-WatchdogOwnershipRepair | ConvertTo-Json -Depth 12
     }
     "DiscoverCandidate" {
         try { $null = Invoke-ControlCenterOperationAction -Operation $Action; exit 0 }

@@ -547,11 +547,6 @@ function Stop-VerifiedWatchdogOwner {
         $current.command_line -notmatch '(?i)-Action\s+Watchdog') {
         throw "CONTROL_PLANE_WATCHDOG_IDENTITY_CHANGED"
     }
-    Stop-Process -Id ([int]$current.process_id) -Force
-    Wait-Process -Id ([int]$current.process_id) -Timeout 15 -ErrorAction SilentlyContinue
-    if (Get-Process -Id ([int]$current.process_id) -ErrorAction SilentlyContinue) {
-        throw "CONTROL_PLANE_WATCHDOG_STOP_FAILED"
-    }
     $expectedLauncherIdentity = $Identity.launcher_identity
     $launcher = Get-ControlPlaneProcessIdentity `
         -ProcessId ([int]$expectedLauncherIdentity.process_id)
@@ -566,7 +561,21 @@ function Stop-VerifiedWatchdogOwner {
             -not $launcher.command_line.Contains($repositoryRoot)) {
             throw "CONTROL_PLANE_LAUNCHER_IDENTITY_MISMATCH"
         }
-        Stop-Process -Id ([int]$launcher.process_id) -Force -ErrorAction SilentlyContinue
+    } elseif ($launcher) {
+        throw "CONTROL_PLANE_LAUNCHER_IDENTITY_MISMATCH"
+    }
+    $null = Stop-WatchdogExactProcessTree -RootIdentity $current
+    if ($launcher) {
+        $deadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
+        while ((Get-ControlPlaneProcessIdentity -ProcessId ([int]$launcher.process_id)) -and
+            [DateTimeOffset]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+        $remainingLauncher = Get-ControlPlaneProcessIdentity `
+            -ProcessId ([int]$launcher.process_id)
+        if ($remainingLauncher -and (Test-ControlPlaneStartTokenEqual `
+                -Left $remainingLauncher.process_start_token `
+                -Right $expectedLauncherIdentity.process_start_token)) {
+            throw "CONTROL_PLANE_WATCHDOG_TERMINATION_UNRESOLVED"
+        }
     }
 }
 
@@ -624,6 +633,10 @@ function Wait-VerifiedWatchdogHandoff {
         $owners = @(Get-VerifiedWatchdogOwners)
         if ($owners.Count -ne 1) { continue }
         $owner = $owners[0]
+        $ownerReceipt = $owner.watchdog_owner_receipt
+        $expectedReceiptMode = if ($ExpectedMode -eq 'QUIESCED') {
+            'QUIESCED_INSTALL'
+        } else { 'ACTIVE' }
         if ([int]$owner.process_id -ne [int]$heartbeat.process_id -or
             -not (Test-ControlPlaneStartTokenEqual `
                 -Left $owner.process_start_token `
@@ -631,7 +644,14 @@ function Wait-VerifiedWatchdogHandoff {
             ([int]$owner.process_id -eq [int]$PreviousIdentity.process_id -and
              (Test-ControlPlaneStartTokenEqual `
                 -Left $owner.process_start_token `
-                -Right $PreviousIdentity.process_start_token))) { continue }
+                -Right $PreviousIdentity.process_start_token)) -or
+            -not $ownerReceipt -or
+            [string]$ownerReceipt.mode -ne $expectedReceiptMode -or
+            [string]$ownerReceipt.install_transaction_id -ne
+                $ExpectedInstallTransactionId -or
+            [string]$heartbeat.instance_id -ne [string]$ownerReceipt.instance_id -or
+            [string]$heartbeat.owner_receipt_digest -ne
+                (Get-WatchdogOwnerReceiptDigest -Receipt $ownerReceipt)) { continue }
         return $owner
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
     throw "CONTROL_PLANE_NEW_WATCHDOG_HEARTBEAT_TIMEOUT"
@@ -697,7 +717,10 @@ function Invoke-ControlPlaneInstall {
         (Test-Path -LiteralPath $releaseLockPath)) {
         throw "CONTROL_PLANE_INSTALL_BLOCKED_BY_RELEASE_TRANSACTION"
     }
-    $oldOwners = @(Get-VerifiedWatchdogOwners)
+    # A final source bundle may install over the last pre-singleton Control
+    # Plane. Permit exactly one fully shaped legacy owner only at this boundary;
+    # the replacement must establish the v2 mutex receipt before handoff passes.
+    $oldOwners = @(Get-VerifiedWatchdogOwners -AllowLegacySingleOwner)
     if ($oldOwners.Count -ne 1) {
         throw "CONTROL_PLANE_EXACTLY_ONE_WATCHDOG_REQUIRED"
     }

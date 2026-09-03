@@ -8,6 +8,7 @@ Switch/Observe state.
 
 | Boundary | Safety | Liveness |
 |---|---|---|
+| Watchdog singleton | one mutex owner, one active writer, receipt-bound authority, Guard fail-closed termination, quiesced writer exclusion | proven-empty owner replacement |
 | CPU evidence | quotas, monotonic accumulation, hard failure, top-up budget, exact-key reuse, artifact invalidation, accepted-stage preservation | provider-pending recovery |
 | Release integration | abstract CPU applicability, complete receipt waterfall, behavior-key applicability, lease freshness, frozen dependency digests, pass and Promote gates | not applicable |
 | Core release | Stable ownership, Prepare/Verify isolation, Switch/Observe and rollback | Switch/Observe/recovery termination |

@@ -305,6 +305,24 @@
       ]
     },
     {
+      "id": "watchdog-singleton",
+      "family": "windows-runtime-release",
+      "paths": [
+        "tests/test_watchdog_singleton.py",
+        "scripts/control_center_watchdog_singleton.ps1",
+        "scripts/control_center_runtime_supervision.ps1",
+        "scripts/control_center_install.ps1",
+        "scripts/xauusd_watchdog_launcher.vbs",
+        "scripts/xauusd_watchdog_guard.ps1",
+        "scripts/xauusd_watchdog_guard_launcher.vbs"
+      ],
+      "tests": [
+        {
+          "path": "tests/test_watchdog_singleton.py"
+        }
+      ]
+    },
+    {
       "id": "control-install",
       "family": "windows-runtime-artifact-repair",
       "paths": [
