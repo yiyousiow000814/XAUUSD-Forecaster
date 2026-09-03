@@ -3,6 +3,30 @@
 Updating `.local/runtime-control` is a local Control Plane transaction. It is
 not a Business Runtime Promote and must not use `InstallRuntime`.
 
+## Watchdog ownership boundary
+
+The scheduled-task `IgnoreNew` setting is defense in depth, not Watchdog
+ownership authority. Before a Watchdog reads or writes release state, emits a
+heartbeat or diagnostic, or supervises a business service, it must hold the
+machine-wide mutex derived from the Windows user SID, normalized Runtime Root,
+normalized Repository Root, and the fixed singleton contract version. Git
+revision and process ID are deliberately excluded so installation handoff
+contends on the same authority.
+
+The mutex owner atomically publishes `watchdog-owner-v2.json` under the Runtime
+Root. The bounded receipt binds its instance and process start token, canonical
+launcher identity, root hashes, mutex identity, installed Control Plane
+revision and bundle digest, and ACTIVE or transaction-bound QUIESCED_INSTALL
+mode. The heartbeat must bind the same instance and receipt digest. A duplicate
+launcher exits without touching shared state. Guard recovery trusts a verified
+receipt/process/heartbeat chain rather than Task Scheduler state, and never
+starts a replacement until an unhealthy verified tree is proven terminated.
+
+Installation may accept one fully shaped pre-v2 Watchdog only as the source
+owner for the final upgrade. Its replacement must publish and verify the v2
+receipt before the handoff is accepted. Guard remains disabled during that
+bounded legacy bridge.
+
 Close the Control Center GUI and leave the quote bridge, collector, annotator,
 Dashboard API, and Dashboard Mirrors running. Fetch `main`, resolve its exact
 revision, and call the bootstrap installer from the repository checkout:

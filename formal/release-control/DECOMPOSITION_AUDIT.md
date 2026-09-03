@@ -1,5 +1,14 @@
 # Required Formal Verification Decomposition Audit
 
+## Watchdog singleton composition
+
+The `WatchdogSingleton` safety/liveness shards own OS ownership, duplicate
+launch, Guard termination, and QUIESCED_INSTALL writer exclusion. Their
+`ActiveWriterRequiresVerifiedOwnership` guarantee is the interface assumed by
+`InstallRecovery`: install and rollback reason about one abstract replacement
+owner without multiplying process identities or launch sources through the
+install checkpoint state space.
+
 Date: 2026-08-30  
 Affected pull request: #382  
 Audited head: `36fc389083adcce144c4bd530217a527b1f529ec`

@@ -21,6 +21,7 @@ RUNTIME_CONTROL_FILES = (
     "control_center_common.ps1",
     "control_center_persistence_gateway.ps1",
     "control_center_provider_adapters.ps1",
+    "control_center_watchdog_singleton.ps1",
     "control_center_runtime_supervision.ps1",
     "control_center_evidence_authority.ps1",
     "control_center_transaction_engine.ps1",
@@ -82,7 +83,7 @@ def test_control_center_facade_composes_unique_canonical_owners() -> None:
     owner_files = [owner["file"] for owner in owner_manifest["owners"]]
     assert len(facade.splitlines()) < 7600
     assert facade.count("\nfunction ") == 0
-    assert len(owner_files) == 9
+    assert len(owner_files) == 10
     assert len(set(owner_files)) == len(owner_files)
     assert set(owner_files).issubset(runtime_manifest["files"])
     for owner_file in owner_files:
@@ -99,7 +100,7 @@ def test_control_center_facade_composes_unique_canonical_owners() -> None:
                 f"{name} is defined by both {definitions.get(name)} and {owner_file}"
             )
             definitions[name] = owner_file
-    assert 410 <= len(definitions) <= 430
+    assert 420 <= len(definitions) <= 450
 
 
 def test_control_center_owner_boundaries_keep_authority_out_of_presentation() -> None:
@@ -3882,29 +3883,43 @@ def test_fresh_quotes_without_broker_session_trigger_bridge_recovery(tmp_path) -
 
 def test_watchdog_guard_restarts_only_after_heartbeat_is_stale(tmp_path) -> None:
     heartbeat = tmp_path / "control-watchdog-heartbeat.json"
-    heartbeat.write_text(json.dumps({
-        "observed_at": datetime.now(timezone.utc).isoformat(),
-        "process_id": 0,
-    }), encoding="utf-8")
+    receipt = tmp_path / "watchdog-owner-v2.json"
     guard = ROOT / "scripts" / "xauusd_watchdog_guard.ps1"
     command = (
         f"$null = . '{guard}' -TaskName 'test-watchdog' "
-        f"-HeartbeatPath '{heartbeat}' -MaxAgeSeconds 120; "
-        "$script:starts = 0; "
+        f"-HeartbeatPath '{heartbeat}' -OwnerReceiptPath '{receipt}' "
+        f"-ControlScript 'C:\\control\\xauusd_control_center.ps1' "
+        f"-RuntimeRoot 'C:\\runtime' -RepositoryRoot 'C:\\repository' "
+        "-MaxAgeSeconds 120; "
+        "$script:starts = 0; $script:stops = 0; $script:fresh = $true; "
+        "$owner=[pscustomobject]@{process_id=123;process_start_token='2026-09-01T00:00:00+00:00'};"
+        "$receiptObject=[pscustomobject]@{instance_id='a'*32;process_id=123;"
+        "process_start_token=$owner.process_start_token;mutex_identity_hash='b'*64;"
+        "installed_control_revision=('d'*40);mode='ACTIVE';install_transaction_id=$null};"
+        "function Get-GuardWatchdogProcesses { @($owner) };"
+        "function Get-VerifiedGuardOwner { param($Receipt); return $owner };"
+        "function Get-GuardOwnerReceiptDigest { return ('c'*64) };"
+        "function Read-GuardJson { param($Path,$MaximumBytes); if($Path-eq $OwnerReceiptPath){"
+        "return $receiptObject}; $stamp=if($script:fresh){[DateTimeOffset]::UtcNow.ToString('o')}"
+        "else{'2020-01-01T00:00:00+00:00'}; [pscustomobject]@{observed_at=$stamp;"
+        "instance_id=('a'*32);mutex_identity_hash=('b'*64);owner_receipt_digest=('c'*64);"
+        "control_bundle_revision=('d'*40);control_bundle_exact_revision=$true;"
+        "control_bundle_hash_verified=$true;supervision_mode='ACTIVE';install_transaction_id=$null;"
+        "process_id=123;process_start_token=$owner.process_start_token} };"
+        "function Stop-GuardVerifiedOwnerTree { $script:stops += 1 };"
         "function Stop-ScheduledTask {}; "
         "function Start-ScheduledTask { $script:starts += 1 }; "
         "$fresh = Invoke-WatchdogGuard; "
-        f"@{{ observed_at = '2020-01-01T00:00:00+00:00'; process_id = 0 }} "
-        f"| ConvertTo-Json | Set-Content -LiteralPath '{heartbeat}'; "
+        "$script:fresh = $false; "
         "$stale = Invoke-WatchdogGuard; "
-        "Write-Output \"$fresh,$stale,$script:starts\""
+        "Write-Output \"$fresh,$stale,$script:starts,$script:stops\""
     )
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
 
-    assert result == "False,True,1"
+    assert result == "False,True,1,1"
 
 
 def test_failed_candidate_cannot_promote(tmp_path) -> None:
@@ -4791,11 +4806,22 @@ def test_pwsh_installer_accepts_fresh_exact_watchdog_json_identity(tmp_path) -> 
         "+'\"process_start_token\":\"2026-08-26T11:22:48.0603020+08:00\",'"
         "+'\"control_bundle_revision\":\"'+('a'*40)+'\",'"
         "+'\"control_bundle_exact_revision\":true,'"
-        "+'\"control_bundle_hash_verified\":true}';"
+        "+'\"control_bundle_hash_verified\":true,'"
+        "+'\"instance_id\":\"'+('b'*32)+'\",'"
+        "+'\"owner_receipt_digest\":\"'+('c'*64)+'\",'"
+        "+'\"mutex_identity_hash\":\"'+('d'*64)+'\"}';"
         "New-Item -ItemType Directory -Path (Split-Path $watchdogHeartbeatPath) "
         "-Force|Out-Null;Set-Content $watchdogHeartbeatPath $json -Encoding UTF8;"
-        "$owner=[pscustomobject]@{process_id=123;"
-        "process_start_token='2026-08-26T03:22:48.0603020+00:00'};"
+        "$receipt=[pscustomobject]@{schema_version='watchdog-owner-v2';instance_id=('b'*32);"
+        "process_id=123;process_start_token='2026-08-26T03:22:48.0603020+00:00';"
+        "launcher_pid=456;launcher_start_token='2026-08-26T03:22:47+00:00';"
+        "user_sid='sid';runtime_root_hash=('1'*64);repository_root_hash=('2'*64);"
+        "mutex_identity_hash=('d'*64);installed_control_revision=('a'*40);"
+        "bundle_digest=('3'*64);acquired_at='2026-08-26T03:22:48+00:00';"
+        "mode='ACTIVE';install_transaction_id=$null};"
+        "function Get-WatchdogOwnerReceiptDigest { return ('c'*64) };"
+        "$owner=[pscustomobject]@{process_id=123;watchdog_owner_state='ACTIVE';"
+        "watchdog_owner_receipt=$receipt;process_start_token=$receipt.process_start_token};"
         "$heartbeat=Assert-CurrentWatchdogHeartbeat -Owner $owner "
         "-ExpectedRevision ('a'*40);"
         'Write-Output "$($heartbeat.process_id),$($heartbeat.control_bundle_hash_verified)"',

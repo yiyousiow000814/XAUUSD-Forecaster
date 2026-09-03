@@ -1367,6 +1367,19 @@ function Write-WatchdogHeartbeat {
         [ValidateSet("ACTIVE", "QUIESCED")][string]$SupervisionMode = "ACTIVE",
         [string]$InstallTransactionId = ""
     )
+    $ownership = $script:watchdogOwnershipContext
+    if (-not $ownership -or -not $ownership.acquired) {
+        throw "WATCHDOG_SINGLETON_NOT_OWNED"
+    }
+    $receiptMode = if ($SupervisionMode -eq "QUIESCED") {
+        "QUIESCED_INSTALL"
+    } else { "ACTIVE" }
+    if ([string]$ownership.receipt.mode -ne $receiptMode -or
+        [string]$ownership.receipt.install_transaction_id -ne $InstallTransactionId) {
+        Update-WatchdogSingletonMode -Mode $receiptMode `
+            -InstallTransactionId $InstallTransactionId
+        $ownership = $script:watchdogOwnershipContext
+    }
     $controlBundle = Get-RuntimeControlBundleIdentity
     $processIdentity = Get-ControlPlaneProcessIdentity -ProcessId $PID
     $heartbeat = [pscustomobject]@{
@@ -1385,6 +1398,9 @@ function Write-WatchdogHeartbeat {
         install_transaction_id = if ($InstallTransactionId) {
             $InstallTransactionId
         } else { $null }
+        instance_id = [string]$ownership.receipt.instance_id
+        owner_receipt_digest = [string]$ownership.receipt_digest
+        mutex_identity_hash = [string]$ownership.descriptor.mutex_identity_hash
     }
     Write-ControlCenterJsonAtomic -Path $watchdogHeartbeatPath `
         -Value $heartbeat -Depth 6
@@ -1405,10 +1421,10 @@ function Get-ControlPlaneProcessIdentity {
     }
 }
 
-function Get-VerifiedWatchdogOwners {
+function Get-WatchdogOwnershipInventory {
     $controlRoot = Join-Path $repositoryRoot ".local\runtime-control"
     $controlScript = Join-Path $controlRoot "xauusd_control_center.ps1"
-    @(
+    $candidates = @(
         Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
             Where-Object {
                 $_.Name -eq "powershell.exe" -and $_.CommandLine -and
@@ -1416,22 +1432,78 @@ function Get-VerifiedWatchdogOwners {
                 $_.CommandLine -match '(?i)-Action\s+Watchdog' -and
                 $_.CommandLine.Contains($moduleRoot) -and
                 $_.CommandLine.Contains($repositoryRoot)
-            } | ForEach-Object {
-                $identity = Get-ControlPlaneProcessIdentity -ProcessId ([int]$_.ProcessId)
-                $launcher = Get-ControlPlaneProcessIdentity `
-                    -ProcessId ([int]$identity.parent_process_id)
-                $expectedLauncher = Join-Path $controlRoot "xauusd_watchdog_launcher.vbs"
-                if (-not $launcher -or $launcher.name -ne "wscript.exe" -or
-                    -not $launcher.command_line.Contains($expectedLauncher) -or
-                    -not $launcher.command_line.Contains($moduleRoot) -or
-                    -not $launcher.command_line.Contains($repositoryRoot)) {
-                    return
-                }
-                $identity | Add-Member -NotePropertyName launcher_identity `
-                    -NotePropertyValue $launcher
-                $identity
-            }
+            } | ForEach-Object { Get-ControlPlaneProcessIdentity -ProcessId ([int]$_.ProcessId) }
     )
+    $shaped = @()
+    $authoritative = @()
+    $duplicates = @()
+    $unknown = @()
+    $expectedLauncher = Join-Path $controlRoot "xauusd_watchdog_launcher.vbs"
+    foreach ($identity in $candidates) {
+        $launcher = Get-ControlPlaneProcessIdentity `
+            -ProcessId ([int]$identity.parent_process_id)
+        if (-not $launcher -or $launcher.name -ne "wscript.exe" -or
+            -not $launcher.command_line.Contains($expectedLauncher) -or
+            -not $launcher.command_line.Contains($moduleRoot) -or
+            -not $launcher.command_line.Contains($repositoryRoot)) {
+            $unknown += $identity
+            continue
+        }
+        $identity | Add-Member -NotePropertyName launcher_identity `
+            -NotePropertyValue $launcher
+        $shaped += $identity
+    }
+    $receipt = $null
+    try { $receipt = Read-WatchdogOwnerReceipt }
+    catch { $unknown = @($unknown) + @($shaped); $shaped = @() }
+    if ($receipt) {
+        $descriptor = Get-WatchdogSingletonDescriptor
+        if (-not (Test-WatchdogOwnerReceiptShape -Receipt $receipt -Descriptor $descriptor)) {
+            $unknown = @($unknown) + @($shaped)
+        } else {
+            foreach ($identity in $shaped) {
+                $isOwner = [int]$identity.process_id -eq [int]$receipt.process_id -and
+                    (Test-ControlPlaneStartTokenEqual -Left $identity.process_start_token `
+                        -Right $receipt.process_start_token) -and
+                    [int]$identity.launcher_identity.process_id -eq [int]$receipt.launcher_pid -and
+                    (Test-ControlPlaneStartTokenEqual `
+                        -Left $identity.launcher_identity.process_start_token `
+                        -Right $receipt.launcher_start_token)
+                if ($isOwner) {
+                    $identity | Add-Member -NotePropertyName watchdog_owner_receipt `
+                        -NotePropertyValue $receipt -Force
+                    $identity | Add-Member -NotePropertyName watchdog_owner_state `
+                        -NotePropertyValue ([string]$receipt.mode) -Force
+                    $authoritative += $identity
+                } else { $duplicates += $identity }
+            }
+        }
+    } elseif ($shaped.Count -gt 0) { $duplicates = @($shaped) }
+    [pscustomobject]@{
+        authoritative = @($authoritative)
+        duplicate_shaped = @($duplicates)
+        unknown = @($unknown)
+        receipt = $receipt
+    }
+}
+
+function Get-VerifiedWatchdogOwners {
+    param([switch]$AllowLegacySingleOwner)
+    $inventory = Get-WatchdogOwnershipInventory
+    if ($inventory.authoritative.Count -eq 1 -and
+        $inventory.duplicate_shaped.Count -eq 0 -and
+        $inventory.unknown.Count -eq 0) {
+        return @($inventory.authoritative)
+    }
+    if ($AllowLegacySingleOwner -and -not $inventory.receipt -and
+        $inventory.duplicate_shaped.Count -eq 1 -and
+        $inventory.unknown.Count -eq 0) {
+        $legacy = $inventory.duplicate_shaped[0]
+        $legacy | Add-Member -NotePropertyName watchdog_owner_state `
+            -NotePropertyValue 'LEGACY_SINGLE_OWNER' -Force
+        return @($legacy)
+    }
+    return @()
 }
 
 function Get-VerifiedControlCenterGuiOwners {
@@ -1486,6 +1558,19 @@ function Assert-CurrentWatchdogHeartbeat {
         -not [bool]$heartbeat.control_bundle_exact_revision -or
         -not [bool]$heartbeat.control_bundle_hash_verified) {
         throw "CONTROL_PLANE_CURRENT_WATCHDOG_HEARTBEAT_MISMATCH"
+    }
+    if ([string]$Owner.watchdog_owner_state -ne 'LEGACY_SINGLE_OWNER') {
+        $receipt = $Owner.watchdog_owner_receipt
+        if (-not $receipt -or
+            [string]$receipt.installed_control_revision -ne $ExpectedRevision -or
+            [string]$receipt.mode -ne 'ACTIVE' -or
+            [string]$heartbeat.instance_id -ne [string]$receipt.instance_id -or
+            [string]$heartbeat.owner_receipt_digest -ne
+                (Get-WatchdogOwnerReceiptDigest -Receipt $receipt) -or
+            [string]$heartbeat.mutex_identity_hash -ne
+                [string]$receipt.mutex_identity_hash) {
+            throw "CONTROL_PLANE_CURRENT_WATCHDOG_HEARTBEAT_MISMATCH"
+        }
     }
     return $heartbeat
 }
@@ -1781,7 +1866,7 @@ function Assert-ControlPlaneIsolationSnapshot {
     }
 }
 
-function Invoke-ForecasterWatchdog {
+function Invoke-ForecasterWatchdogOwned {
     param([string]$InstallTransactionId = "")
     $null = Repair-AbandonedControlPlaneBundleForWatchdog
     $null = Assert-ActiveControlBundle
@@ -1838,8 +1923,7 @@ function Invoke-ForecasterWatchdog {
                 # Only an explicit Promote/Reverse may change the checkout. Once
                 # that durable transaction finishes, hand supervision to its
                 # matching control bundle.
-                Start-WatchdogReplacement
-                return 0
+                return 76
             }
             $status = @(Get-ForecasterStatus)
             $releaseState = Get-ReleaseControlState
@@ -1887,6 +1971,25 @@ function Invoke-ForecasterWatchdog {
         Write-WatchdogHeartbeat
         Start-Sleep -Seconds 30
     }
+}
+
+function Invoke-ForecasterWatchdog {
+    param([string]$InstallTransactionId = "")
+    $ownership = Enter-WatchdogSingletonOwnership `
+        -InstallTransactionId $InstallTransactionId
+    if (-not $ownership.acquired) { return 0 }
+    $result = 0
+    try {
+        $result = Invoke-ForecasterWatchdogOwned `
+            -InstallTransactionId $InstallTransactionId
+    } finally {
+        Exit-WatchdogSingletonOwnership -Context $ownership
+    }
+    if ([int]$result -eq 76) {
+        Start-WatchdogReplacement
+        return 0
+    }
+    return [int]$result
 }
 
 function Test-AutoStart {
@@ -1938,8 +2041,9 @@ function Register-WatchdogGuardTask {
         throw "Missing windowless watchdog guard launcher: $launcherPath"
     }
     $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
-    $guardArguments = '"{0}" "{1}" "{2}" "{3}"' -f `
-        $launcherPath, $guardPath, $taskName, $watchdogHeartbeatPath
+    $guardArguments = '"{0}" "{1}" "{2}" "{3}" "{4}" "{5}" "{6}" "{7}"' -f `
+        $launcherPath, $guardPath, $taskName, $watchdogHeartbeatPath,
+        $watchdogOwnerReceiptPath, $ControlScript, $moduleRoot, $repositoryRoot
     $guardAction = New-ScheduledTaskAction -Execute $wscript -Argument $guardArguments
     $guardTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
         -RepetitionInterval (New-TimeSpan -Minutes 2)
@@ -1964,6 +2068,118 @@ function Ensure-WatchdogGuardTask {
         Write-WatchdogEvent -Event "WATCHDOG_GUARD_REGISTRATION_ERROR" `
             -Service "watchdog" -State $_.Exception.Message
     }
+}
+
+function Invoke-WatchdogOwnershipRepair {
+    if (-not (Enter-ReleaseTransactionLock)) {
+        throw 'WATCHDOG_REPAIR_RELEASE_LOCK_UNAVAILABLE'
+    }
+    $mainTaskWasEnabled = $false
+    $guardTaskWasEnabled = $false
+    try {
+        $release = Get-ReleaseControlState
+        if (-not $release -or $release.transaction) {
+            throw 'WATCHDOG_REPAIR_RELEASE_TRANSACTION_ACTIVE'
+        }
+        foreach ($service in $services | Where-Object { $_.Key -ne 'broadcast' }) {
+            if (@(Get-ForecasterProcesses -Service $service).Count -ne 1) {
+                throw "WATCHDOG_REPAIR_BUSINESS_OWNER_INVALID:$($service.Key)"
+            }
+        }
+        $provider = Get-ReleaseProviderRuntimeFacts -PersistedState $release `
+            -ForceProviderRefresh
+        $traffic = if ($provider) { $provider.active_worker_observation } else { $null }
+        if (-not $traffic -or [string]$traffic.status -ne 'AVAILABLE' -or
+            [double]$traffic.traffic_percent -ne 100.0 -or
+            [string]$traffic.version_id -ne
+                [string]$release.stable.worker_version_id) {
+            throw 'WATCHDOG_REPAIR_STABLE_TRAFFIC_UNPROVED'
+        }
+        $inventory = Get-WatchdogOwnershipInventory
+        if ($inventory.unknown.Count -gt 0) {
+            throw 'UNKNOWN_WATCHDOG_IDENTITY'
+        }
+        if ($inventory.authoritative.Count -eq 1 -and
+            $inventory.duplicate_shaped.Count -eq 0) {
+            $installedControlRoot = Join-Path $repositoryRoot '.local\runtime-control'
+            $bundle = Get-RuntimeControlBundleIdentityAtRoot `
+                -ControlRoot $installedControlRoot -RequireDependencyClosure
+            if (-not $bundle) { throw 'WATCHDOG_REPAIR_INSTALLED_BUNDLE_INVALID' }
+            $null = Assert-CurrentWatchdogHeartbeat `
+                -Owner $inventory.authoritative[0] `
+                -ExpectedRevision ([string]$bundle.source_revision)
+            Enable-ScheduledTask -TaskName $taskName -ErrorAction Stop
+            Enable-ScheduledTask -TaskName $guardTaskName -ErrorAction Stop
+            return [pscustomobject]@{
+                status = 'NOT_REQUIRED'
+                owner = $inventory.authoritative[0]
+                guard_enabled = $true
+            }
+        }
+        if (-not $inventory.receipt -and
+            $inventory.duplicate_shaped.Count -eq 1) {
+            # This is the bounded bridge from the last pre-v2 bundle. Do not
+            # re-enable the legacy Guard: final installation replaces this one
+            # owner with a receipt-backed owner before Guard is restored.
+            Disable-ScheduledTask -TaskName $guardTaskName -ErrorAction SilentlyContinue
+            return [pscustomobject]@{
+                status = 'LEGACY_SINGLE_OWNER_REQUIRES_CONTROL_PLANE_INSTALL'
+                owner = $inventory.duplicate_shaped[0]
+                guard_enabled = $false
+            }
+        }
+
+        $mainTask = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+        $guardTask = Get-ScheduledTask -TaskName $guardTaskName -ErrorAction Stop
+        $mainTaskWasEnabled = [bool]$mainTask.Settings.Enabled
+        $guardTaskWasEnabled = [bool]$guardTask.Settings.Enabled
+        Disable-ScheduledTask -TaskName $guardTaskName -ErrorAction Stop
+        Disable-ScheduledTask -TaskName $taskName -ErrorAction Stop
+        Stop-ScheduledTask -TaskName $guardTaskName -ErrorAction SilentlyContinue
+        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        foreach ($identity in @($inventory.authoritative) + @($inventory.duplicate_shaped)) {
+            Stop-VerifiedWatchdogOwner -Identity $identity
+        }
+        $afterStop = Get-WatchdogOwnershipInventory
+        if ($afterStop.authoritative.Count -ne 0 -or
+            $afterStop.duplicate_shaped.Count -ne 0 -or
+            $afterStop.unknown.Count -ne 0) {
+            throw 'WATCHDOG_REPAIR_TERMINATION_UNRESOLVED'
+        }
+        Remove-Item -LiteralPath $watchdogOwnerReceiptPath -Force -ErrorAction SilentlyContinue
+        $installedControlScript = Join-Path $repositoryRoot `
+            '.local\runtime-control\xauusd_control_center.ps1'
+        Register-AutoStartTask -ControlScript $installedControlScript `
+            -RuntimePath $moduleRoot -SourceRepository $repositoryRoot
+        $deadline = [DateTimeOffset]::UtcNow.AddSeconds(90)
+        $owner = $null
+        do {
+            Start-Sleep -Milliseconds 250
+            $owners = @(Get-VerifiedWatchdogOwners)
+            if ($owners.Count -eq 1) { $owner = $owners[0]; break }
+        } while ([DateTimeOffset]::UtcNow -lt $deadline)
+        if (-not $owner) { throw 'WATCHDOG_REPAIR_OWNER_START_TIMEOUT' }
+        $installedControlRoot = Join-Path $repositoryRoot '.local\runtime-control'
+        $bundle = Get-RuntimeControlBundleIdentityAtRoot `
+            -ControlRoot $installedControlRoot -RequireDependencyClosure
+        if (-not $bundle) { throw 'WATCHDOG_REPAIR_INSTALLED_BUNDLE_INVALID' }
+        $first = Assert-CurrentWatchdogHeartbeat -Owner $owner `
+            -ExpectedRevision ([string]$bundle.source_revision)
+        Start-Sleep -Seconds 31
+        $second = Assert-CurrentWatchdogHeartbeat -Owner $owner `
+            -ExpectedRevision ([string]$bundle.source_revision)
+        if ([string]$first.observed_at -eq [string]$second.observed_at) {
+            throw 'WATCHDOG_REPAIR_HEARTBEAT_NOT_ADVANCING'
+        }
+        Enable-ScheduledTask -TaskName $guardTaskName -ErrorAction Stop
+        return [pscustomobject]@{
+            status = 'REPAIRED'
+            owner = $owner
+            first_heartbeat = $first.observed_at
+            second_heartbeat = $second.observed_at
+            guard_enabled = $true
+        }
+    } finally { Exit-ReleaseTransactionLock }
 }
 
 function Enable-AutoStart {
