@@ -135,8 +135,8 @@
   serialized with all cleanup callers, survives producer and machine restart,
   and fails closed on budget exhaustion or clock regression. A claim lost to
   installer or producer death may delay cleanup but cannot be reused. Recovery
-  cleanup is limited to three 1,280-row reservations (3,840 deletion writes,
-  plus at most three ledger-row writes) per UTC day. Debt therefore remains
+  cleanup is limited to one 1,280-row reservation (1,280 deletion writes,
+  plus at most one ledger-row write) per UTC day. Debt therefore remains
   bounded independently from recurring Free-plan work; temporary Paid capacity
   is never cleanup authority.
 - A producer may abandon only the staging generation recorded in its own

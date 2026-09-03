@@ -66,7 +66,9 @@ const retryMigrations = [
 
 test("bulk admission is per-job, owner-audited, and browser replay is idempotent", async () => {
   const database = new D1TestDatabase(retryMigrations);
-  await syncOperatorRetryJobs(database, [job("a"), job("b", "LEASED")], new Date("2026-08-19T03:00:00Z"));
+  const jobs = [job("a"), job("b", "LEASED")];
+  await syncOperatorRetryJobs(database, jobs, new Date("2026-08-19T03:00:00Z"));
+  await syncOperatorRetryJobs(database, jobs, new Date("2026-08-19T03:00:30Z"));
   const input = {
     operatorId: "cloudflare-access:owner", idempotencyKey: "00000000-0000-4000-8000-000000000001",
     jobIds: ["a".repeat(64), "b".repeat(64)], mode: "IMMEDIATE",
@@ -123,13 +125,13 @@ test("a changed mirror updates only changed jobs and exact replay writes zero", 
     const result = await syncOperatorRetryJobs(
       database, source, new Date(Date.parse("2026-09-03T00:00:00Z") + cycles * 30_000),
     );
-    assert.ok(result.written <= 3);
+    assert.ok(result.written <= 1);
     admitted += result.written;
     cycles += 1;
-    assert.ok(cycles < 100);
+    assert.ok(cycles <= 200);
   }
   assert.equal(admitted, 200);
-  assert.equal(cycles, 67, "catch-up is coalesced into a bounded delta drain");
+  assert.equal(cycles, 200, "catch-up is serialized into a bounded delta drain");
   const replay = await syncOperatorRetryJobs(
     database, source, new Date("2026-09-03T00:00:30Z"),
   );

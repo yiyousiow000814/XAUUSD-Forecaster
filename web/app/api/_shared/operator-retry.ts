@@ -19,7 +19,7 @@ export class OperatorRetryInputError extends Error {
 // A full 200-row mirror can change at once after an offline period. Drain that
 // delta across control cycles instead of spending an unbounded share of the
 // account's daily D1 write allowance in one catch-up burst.
-export const OPERATOR_RETRY_SYNC_MUTATIONS_PER_INVOCATION = 3;
+export const OPERATOR_RETRY_SYNC_MUTATIONS_PER_INVOCATION = 1;
 
 const retryJobJson = (alias: string) => `json_object(
   'job_id',${alias}.job_id,'task_type',${alias}.task_type,'title',${alias}.title,

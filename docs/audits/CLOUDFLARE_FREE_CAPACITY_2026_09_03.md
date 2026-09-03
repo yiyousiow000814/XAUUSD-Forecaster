@@ -58,24 +58,29 @@ No production row was deleted or updated during this audit.
 PR A replaces the accumulated learning scan with an identity/time index,
 bounded `limit + 1` page work, and exact materialized counts. Successful D1
 capability observations are cached per isolate and failed observations remain
-retryable. Operator retry mirroring becomes a three-row delta with a local
+retryable. Operator retry mirroring becomes a one-row delta with a local
 durable source digest; unchanged snapshots issue no mirror request and cause
 zero D1 mutation. Snapshot writers update only when canonical payload bytes
-change. News-evidence cleanup is limited to three 1,280-row reservations per UTC
-day.
+change. News-evidence cleanup is limited to one 1,280-row reservation plus its
+single budget-ledger write per UTC day.
 
-The conservative recurring model is 38,640 Worker requests/day, 1,892,636 D1
-rows read/day, and 58,080 D1 rows written/day. It includes a 30,000-request
+The conservative recurring model is 38,640 Worker requests/day, 1,892,632 D1
+rows read/day, and 46,881 D1 rows written/day. It includes a 30,000-request
 public traffic envelope, the exact 30-second heartbeat/control cadence, all
 2,880 daily heavy-lane slots, per-family write amplification, and the complete
 daily cleanup reservation. It is not derived by requiring the old Stable to
 have already become compliant.
 
 The additive migration reads at most 52,273 learning rows and writes at most
-52,320 index/count records in one UTC day. With a conservative 8.6 MB migration
+52,320 index/count records in one UTC day. Cloudflare counts index creation and
+index maintenance as rows written, so the hard migration-day gate checks the
+sum rather than treating migration and recurring work independently: 1,944,905
+rows read and 99,201 rows written. With a conservative 8.6 MB migration
 allowance, pre-cutover size remains below 373 MB. Draining the observed inactive
 News-evidence debt at the bounded daily rate yields a derived steady-state below
-278 MB and a conservative 30-day projection below 292 MB. Local SQLite is not
+278 MB. The conservative 30-day hard-limit projection gives cleanup reclamation
+zero credit and rounds up `364,400,640 + 8,600,000 + 30 * 1,000,000` to 404 MB.
+Local SQLite is not
 deleted, truncated, rewritten, or downgraded.
 
 ## Decision gate

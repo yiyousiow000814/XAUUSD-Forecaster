@@ -7,6 +7,7 @@
     "https://developers.cloudflare.com/workers/platform/limits/",
     "https://developers.cloudflare.com/d1/platform/limits/",
     "https://developers.cloudflare.com/d1/platform/pricing/",
+    "https://developers.cloudflare.com/d1/best-practices/use-indexes/",
     "https://developers.cloudflare.com/changelog/product/d1/"
   ],
   "production_calibration": {
@@ -33,10 +34,10 @@
       {"id":"learning-history-first-page","rows_read":366824,"executions":8,"percent":4.62,"before":"accumulated resource scan","after":"materialized exact count plus indexed limit+1 page"}
     ],
     "top_writes": [
-      {"id":"operator-retry-full-mirror","rows_written":95049,"percent":66.22,"after":"three-row bounded delta and durable source digest"},
+      {"id":"operator-retry-full-mirror","rows_written":95049,"percent":66.22,"after":"one-row bounded delta and durable source digest"},
       {"id":"learning-records","rows_written":15126,"after":"idempotent changed rows plus count/index maintenance"},
       {"id":"market-decisions","rows_written":9711,"after":"existing bounded cursor"},
-      {"id":"news-evidence-cleanup","rows_written":8200,"after":"3840-row daily reservation"},
+      {"id":"news-evidence-cleanup","rows_written":8200,"after":"1280-row daily reservation plus one budget-ledger write"},
       {"id":"status-snapshots","rows_written":5230,"after":"canonical changed-only writes"},
       {"id":"projection-receipts","rows_written":4334,"classification":"release-validation-only"},
       {"id":"other-dashboard","rows_written":2761,"after":"existing bounded owners"}
@@ -63,7 +64,7 @@
     {"owner":"WorkerPublicRouter","route_or_producer":"GET /api/news-evidence","sql_fingerprint":"news-evidence-generation-page-v2","table":"news_evidence_records,news_evidence_state","recurring":true,"index_used":"snapshot page indexes","full_scan":false,"required":false},
     {"owner":"D1CapabilityOwner","route_or_producer":"route capability preflight","sql_fingerprint":"sqlite-schema-capability-set-v1","table":"sqlite_schema","recurring":true,"index_used":"isolate-cached successful fact","full_scan":false,"required":true},
     {"owner":"DashboardSyncHeartbeatOwner","route_or_producer":"POST /api/ingest","sql_fingerprint":"dashboard-status-changed-only-v2","table":"dashboard_snapshots","recurring":true,"index_used":"PRIMARY KEY(id)","full_scan":false,"required":true},
-    {"owner":"DashboardSyncControlLane","route_or_producer":"POST /api/operator-retry-worker SYNC_JOBS","sql_fingerprint":"operator-retry-three-row-delta-v1","table":"operator_retry_jobs,operator_retry_sync_state","recurring":true,"index_used":"PRIMARY KEY(job_id)","full_scan":false,"required":true},
+    {"owner":"DashboardSyncControlLane","route_or_producer":"POST /api/operator-retry-worker SYNC_JOBS","sql_fingerprint":"operator-retry-one-row-delta-v1","table":"operator_retry_jobs,operator_retry_sync_state","recurring":true,"index_used":"PRIMARY KEY(job_id), operator_retry_jobs_schedule_idx","full_scan":false,"required":true},
     {"owner":"DashboardSyncHeavyLane","route_or_producer":"POST /api/learning-history","sql_fingerprint":"learning-history-idempotent-upsert-v2","table":"learning_records,learning_record_counts","recurring":true,"index_used":"record PK plus identity index","full_scan":false,"required":false},
     {"owner":"DashboardSyncHeavyLane","route_or_producer":"POST /api/market-history","sql_fingerprint":"market-history-cursor-upsert-v2","table":"market_candles,market_decisions","recurring":true,"index_used":"record identities","full_scan":false,"required":false},
     {"owner":"NewsProjectionOwner","route_or_producer":"prepare,stage,verify,activate","sql_fingerprint":"news-projection-receipt-chain-v4","table":"news_projection_* and legacy news projection","recurring":false,"index_used":"generation and receipt identities","full_scan":false,"required":false},
@@ -82,7 +83,7 @@
     "producers": [
       {"id":"public-worker-traffic","execution_owner":"WorkerPublicRouter","executions_per_day":30000,"interval_seconds":3,"worker_requests_per_execution":1,"d1_rows_read_per_execution":60,"d1_rows_written_per_execution":0,"d1_queries_per_invocation":6,"subrequests_per_invocation":0,"classification":"visitor-envelope"},
       {"id":"critical-heartbeat","execution_owner":"DashboardSyncHeartbeatOwner","executions_per_day":2880,"interval_seconds":30,"worker_requests_per_execution":1,"d1_rows_read_per_execution":1,"d1_rows_written_per_execution":2,"d1_queries_per_invocation":3,"subrequests_per_invocation":0,"classification":"steady-state"},
-      {"id":"operator-retry-control","execution_owner":"DashboardSyncControlLane","executions_per_day":2880,"interval_seconds":30,"worker_requests_per_execution":1,"d1_rows_read_per_execution":4,"d1_rows_written_per_execution":7,"d1_queries_per_invocation":6,"subrequests_per_invocation":0,"classification":"conservative changed-delta"},
+      {"id":"operator-retry-control","execution_owner":"DashboardSyncControlLane","executions_per_day":2880,"interval_seconds":30,"worker_requests_per_execution":1,"d1_rows_read_per_execution":4,"d1_rows_written_per_execution":4,"d1_queries_per_invocation":6,"subrequests_per_invocation":0,"classification":"conservative one-row changed-delta including primary/schedule indexes and final sync-state write"},
       {"id":"news-questions-paused","execution_owner":"DashboardSyncControlLane","executions_per_day":288,"interval_seconds":300,"worker_requests_per_execution":0,"d1_rows_read_per_execution":0,"d1_rows_written_per_execution":0,"d1_queries_per_invocation":0,"subrequests_per_invocation":0,"classification":"paused"},
       {"id":"audit-summary","execution_owner":"DashboardSyncHeavyLane","executions_per_day":241,"interval_seconds":300,"worker_requests_per_execution":1,"d1_rows_read_per_execution":2,"d1_rows_written_per_execution":2,"d1_queries_per_invocation":3,"subrequests_per_invocation":0,"classification":"steady-state"},
       {"id":"learning-summary","execution_owner":"DashboardSyncHeavyLane","executions_per_day":240,"interval_seconds":300,"worker_requests_per_execution":1,"d1_rows_read_per_execution":2,"d1_rows_written_per_execution":2,"d1_queries_per_invocation":3,"subrequests_per_invocation":0,"classification":"changed-only"},
@@ -91,11 +92,11 @@
       {"id":"market-history","execution_owner":"DashboardSyncHeavyLane","executions_per_day":480,"interval_seconds":120,"worker_requests_per_execution":1,"d1_rows_read_per_execution":30,"d1_rows_written_per_execution":15,"d1_queries_per_invocation":4,"subrequests_per_invocation":0,"classification":"new-data cursor"},
       {"id":"news-projection","execution_owner":"DashboardSyncHeavyLane","executions_per_day":719,"interval_seconds":60,"worker_requests_per_execution":1,"d1_rows_read_per_execution":12,"d1_rows_written_per_execution":2,"d1_queries_per_invocation":5,"subrequests_per_invocation":0,"classification":"unchanged prepare or bounded generation progress"},
       {"id":"news-evidence","execution_owner":"DashboardSyncHeavyLane","executions_per_day":240,"interval_seconds":300,"worker_requests_per_execution":1,"d1_rows_read_per_execution":20,"d1_rows_written_per_execution":4,"d1_queries_per_invocation":6,"subrequests_per_invocation":0,"classification":"bounded active snapshot"},
-      {"id":"news-evidence-cleanup","execution_owner":"NewsEvidenceCleanupOwner","executions_per_day":3,"interval_seconds":28800,"worker_requests_per_execution":0,"d1_rows_read_per_execution":2,"d1_rows_written_per_execution":1280,"d1_queries_per_invocation":5,"subrequests_per_invocation":0,"classification":"cleanup debt"}
+      {"id":"news-evidence-cleanup","execution_owner":"NewsEvidenceCleanupOwner","executions_per_day":1,"interval_seconds":86400,"worker_requests_per_execution":0,"d1_rows_read_per_execution":2,"d1_rows_written_per_execution":1281,"d1_queries_per_invocation":5,"subrequests_per_invocation":0,"classification":"cleanup debt including budget-ledger write"}
     ],
-    "totals": {"worker_requests_per_day":38640,"d1_rows_read_per_day":1892636,"d1_rows_written_per_day":58080,"max_d1_queries_per_invocation":6,"max_subrequests_per_invocation":0}
+    "totals": {"worker_requests_per_day":38640,"d1_rows_read_per_day":1892632,"d1_rows_written_per_day":46881,"max_d1_queries_per_invocation":6,"max_subrequests_per_invocation":0}
   },
-  "migration": {"rows_read_per_utc_day":52273,"rows_written_per_utc_day":52320,"additional_bytes_bound":8600000,"destructive":false,"stable_compatible":true},
-  "storage_projection": {"pre_cutover_peak_bytes":373000000,"bounded_steady_state_bytes":278000000,"projected_30_day_bytes":292000000,"local_authority_deleted":false},
+  "migration": {"rows_read_per_utc_day":52273,"rows_written_per_utc_day":52320,"combined_recurring_and_migration_rows_read":1944905,"combined_recurring_and_migration_rows_written":99201,"additional_bytes_bound":8600000,"destructive":false,"stable_compatible":true},
+  "storage_projection": {"current_database_bytes":364400640,"migration_additional_bytes_bound":8600000,"genuine_retained_growth_bytes_per_day_bound":1000000,"cleanup_reclaim_credited_in_30_day_bound":0,"pre_cutover_peak_bytes":373000000,"bounded_steady_state_bytes":278000000,"projected_30_day_bytes":404000000,"formula":"ceil(current + migration + 30 * retained_growth); cleanup reclaim receives zero credit in the 30-day hard-limit bound","local_authority_deleted":false},
   "decision": "D1_ONLY_PROVISIONAL"
 }

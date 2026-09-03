@@ -528,13 +528,25 @@ def test_free_capacity_audit_recomputes_conservative_candidate_totals() -> None:
     assert audit["storage_projection"]["bounded_steady_state_bytes"] <= (
         limits["internal_targets"]["d1_steady_state_bytes"]
     )
+    assert (
+        recomputed["d1_rows_read_per_day"]
+        + audit["migration"]["rows_read_per_utc_day"]
+        == audit["migration"]["combined_recurring_and_migration_rows_read"]
+        <= limits["limits"]["d1_rows_read_per_day"]
+    )
+    assert (
+        recomputed["d1_rows_written_per_day"]
+        + audit["migration"]["rows_written_per_utc_day"]
+        == audit["migration"]["combined_recurring_and_migration_rows_written"]
+        <= limits["limits"]["d1_rows_written_per_day"]
+    )
     heavy = [
         item for item in producers
         if item["execution_owner"] == "DashboardSyncHeavyLane"
     ]
     assert sum(item["executions_per_day"] for item in heavy) == 2_880
     cleanup = next(item for item in producers if item["id"] == "news-evidence-cleanup")
-    assert cleanup["executions_per_day"] * cleanup["d1_rows_written_per_execution"] == 3_840
+    assert cleanup["executions_per_day"] * cleanup["d1_rows_written_per_execution"] == 1_281
 
 
 def test_free_plan_proof_rejects_duplicate_overflow_migration_and_storage_breaches(
@@ -624,17 +636,19 @@ function Copy-Proof{{$base|ConvertTo-Json -Depth 12|ConvertFrom-Json}}
 function Set-Digests($proof){{foreach($name in @('worker_bundle_config','sql_behavior','workload_manifest','data_shape_contract','cadence','migration_plan','production_calibration')){{$canonical=ConvertTo-ReleaseEvidenceCanonicalObject $proof.$name;$proof.proof_input_digests.$name=Get-ReleaseEvidenceSha256 (ConvertTo-ReleaseEvidenceJson $canonical)}}}}
 $proof=Copy-Proof;$proof.workload_manifest.producers=@($proof.workload_manifest.producers[0],$proof.workload_manifest.producers[0]);$proof.cadence.producers=@($proof.cadence.producers[0],$proof.cadence.producers[0]);Set-Digests $proof;$duplicate=(Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} -Proof $proof).reason
 $proof=Copy-Proof;$proof.migration_plan.rows_written_per_day=100001;Set-Digests $proof;$migration=(Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} -Proof $proof).reason
+$proof=Copy-Proof;$proof.migration_plan.rows_written_per_day=90000;Set-Digests $proof;$combinedMigration=(Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} -Proof $proof).reason
 $proof=Copy-Proof;$proof.data_shape_contract.pre_cutover_peak_bytes=400000001;Set-Digests $proof;$peak=(Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} -Proof $proof).reason
 $proof=Copy-Proof;$proof.data_shape_contract.projected_30_day_bytes=500000001;Set-Digests $proof;$projection=(Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} -Proof $proof).reason
 $proof=Copy-Proof;$proof.workload_manifest.producers[0].executions_per_day=[long]::MaxValue;$proof.workload_manifest.producers[0].worker_requests_per_execution=2;$proof.cadence.producers[0].executions_per_day=[long]::MaxValue;Set-Digests $proof;$overflow=(Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} -Proof $proof).reason
 $proof=Copy-Proof;$proof.workload_manifest.producers[0].d1_rows_read_per_execution=-1;Set-Digests $proof;$negative=(Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} -Proof $proof).reason
 $proof=Copy-Proof;Set-Digests $proof;$proof.proof_input_digests.sql_behavior=('9'*64);$digest=(Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} -Proof $proof).reason
-[ordered]@{{duplicate=$duplicate;migration=$migration;peak=$peak;projection=$projection;overflow=$overflow;negative=$negative;digest=$digest}}|ConvertTo-Json -Compress
+[ordered]@{{duplicate=$duplicate;migration=$migration;combined_migration=$combinedMigration;peak=$peak;projection=$projection;overflow=$overflow;negative=$negative;digest=$digest}}|ConvertTo-Json -Compress
 """,
     )
     result = json.loads(output)
     assert result["duplicate"] == "FREE_PLAN_PRODUCER_ID_INVALID"
-    assert "migration_rows_written_per_day" in result["migration"]
+    assert "migration_day_rows_written" in result["migration"]
+    assert "migration_day_rows_written" in result["combined_migration"]
     assert "d1_pre_cutover_peak_bytes" in result["peak"]
     assert "d1_projected_30_day_bytes" in result["projection"]
     assert result["overflow"] == "FREE_PLAN_INTEGER_OVERFLOW"

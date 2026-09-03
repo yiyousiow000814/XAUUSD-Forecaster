@@ -1023,6 +1023,10 @@ function Test-ReleaseFreePlanBoundedProof {
             migration_rows_read_per_day = & $readBound $migration "rows_read_per_day"
             migration_rows_written_per_day = & $readBound $migration "rows_written_per_day"
         }
+        $measurements.migration_day_rows_read = & $safeAdd `
+            $measurements.d1_rows_read_per_day $measurements.migration_rows_read_per_day
+        $measurements.migration_day_rows_written = & $safeAdd `
+            $measurements.d1_rows_written_per_day $measurements.migration_rows_written_per_day
         foreach ($name in @("d1_rows_read_per_day", "d1_rows_written_per_day")) {
             $null = & $readBound $Proof.production_calibration $name
         }
@@ -1040,13 +1044,13 @@ function Test-ReleaseFreePlanBoundedProof {
             (& $readBound $contract.limits "d1_database_bytes")) {
             $hardBreaches += "d1_projected_30_day_bytes"
         }
-        if ($measurements.migration_rows_read_per_day -gt
+        if ($measurements.migration_day_rows_read -gt
             (& $readBound $contract.limits "d1_rows_read_per_day")) {
-            $hardBreaches += "migration_rows_read_per_day"
+            $hardBreaches += "migration_day_rows_read"
         }
-        if ($measurements.migration_rows_written_per_day -gt
+        if ($measurements.migration_day_rows_written -gt
             (& $readBound $contract.limits "d1_rows_written_per_day")) {
-            $hardBreaches += "migration_rows_written_per_day"
+            $hardBreaches += "migration_day_rows_written"
         }
         $targetBreaches = @()
         foreach ($name in @(
