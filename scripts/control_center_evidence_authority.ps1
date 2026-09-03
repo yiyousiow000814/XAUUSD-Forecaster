@@ -1597,11 +1597,23 @@ function Get-CandidateSupersessionRecoveryPlan {
         })
         if ($edges.Count -eq 0) {
             return [pscustomobject]@{
-                state = if ($depth -eq 0) { "NOT_APPLICABLE" } else { "FAILED" }
+                state = if ($depth -eq 0) { "NOT_APPLICABLE" } else {
+                    "REUSE_UNAVAILABLE"
+                }
                 reason = if ($depth -eq 0) {
                     "CANDIDATE_SUPERSESSION_CHAIN_NOT_FOUND"
-                } else { "CANDIDATE_SUPERSESSION_PREDECESSOR_MISSING" }
+                } else {
+                    "CANDIDATE_SUPERSESSION_REUSE_PREDECESSOR_UNAVAILABLE"
+                }
                 chain_head = $headKey; traversed = $traversed
+                diagnostic_recorded = [bool](@($history | Where-Object {
+                    [string]$_.event -eq
+                        "CANDIDATE_SUPERSESSION_REUSE_UNAVAILABLE" -and
+                    [string]$_.detail.chain_head -eq $headKey -and
+                    [string]$_.detail.reason -eq
+                        "CANDIDATE_SUPERSESSION_REUSE_PREDECESSOR_UNAVAILABLE" -and
+                    [string]$_.detail.current_main -eq $MainRevision
+                }).Count -gt 0)
             }
         }
         if ($edges.Count -ne 1) {
@@ -1739,6 +1751,18 @@ function Restore-ControlPlaneOnlySupersededCandidate {
     $plan = Get-CandidateSupersessionRecoveryPlan `
         -Head $replacement -MainRevision $MainRevision
     if ([string]$plan.state -eq "NOT_APPLICABLE") { return $null }
+    if ([string]$plan.state -eq "REUSE_UNAVAILABLE") {
+        if (-not [bool]$plan.diagnostic_recorded) {
+            Write-ReleaseHistory -Event "CANDIDATE_SUPERSESSION_REUSE_UNAVAILABLE" `
+                -Release $replacement -Detail @{
+                    reason = [string]$plan.reason
+                    chain_head = [string]$plan.chain_head
+                    current_main = $MainRevision
+                    traversed = @($plan.traversed)
+                }
+        }
+        return $null
+    }
     if ([string]$plan.state -ne "FOUND") {
         Write-ReleaseHistory -Event "CANDIDATE_SUPERSESSION_CHAIN_RECOVERY_REJECTED" `
             -Release $replacement -Detail @{

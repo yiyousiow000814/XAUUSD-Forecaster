@@ -78,6 +78,10 @@ The unvalidated replacement may itself be a Control-Plane-only ancestor of the
 newest main (including the recovery correction's own merge), but it must pass
 that same explicit provenance proof independently; arbitrary stale replacement
 revisions remain ineligible.
+Supersession recovery is an optional evidence-preservation optimization. An
+incomplete but non-contradictory chain disables reuse and falls back to fresh
+validation; contradictory or unsafe chains remain fail-closed. This fallback
+does not restore an older Candidate, copy its evidence, or change Worker traffic.
 An older main build that completes out of order advances the discovery watermark
 but cannot replace, validate as, or supersede the current main Candidate. A
 missing exact Version remains visible and retryable without changing Stable.

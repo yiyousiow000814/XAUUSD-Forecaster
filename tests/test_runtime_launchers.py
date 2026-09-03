@@ -8509,6 +8509,20 @@ def _supersession_chain_contract(scenario: str) -> str:
             "Add-Edge $qualified $mid;"
         ),
         "missing_edge": "Add-Edge $mid $head;",
+        "edge_outside_tail": (
+            "Add-Edge $qualified $mid;"
+            "for($i=0;$i -lt 127;$i++){Write-ReleaseHistory "
+            "-Event 'UNRELATED_DIAGNOSTIC' -Release $null -Detail @{index=$i}};"
+            "Add-Edge $mid $head;"
+        ),
+        "old_schema_missing_edge": (
+            "$old=[pscustomobject]@{schema_version='release-history-event-v1';"
+            "event='CANDIDATE_SUPERSEDED';release=$mid;"
+            "detail=[pscustomobject]@{replacement_key=$head.validation_key}};"
+            "Add-ControlCenterUtf8Line -Path $releaseHistoryPath "
+            "-Line ($old|ConvertTo-Json -Compress -Depth 12) "
+            "-MaximumBytes $releaseHistoryMaximumEventBytes;"
+        ),
         "duplicate_edge": "Add-Edge $mid $head;Add-Edge $mid2 $head;",
         "cycle": "Add-Edge $mid $head;Add-Edge $head $mid;",
         "self_loop": "Add-Edge $head $head;",
@@ -8559,6 +8573,21 @@ def _supersession_chain_contract(scenario: str) -> str:
             "validation_key=$head.validation_key;receipt_digest=('7'*64)});"
             "Write-ReleaseHistory -Event 'COORDINATED_STORAGE_MIGRATION_PASSED' "
             "-Release $head;Add-Edge $qualified $head;"
+        ),
+        "observation_failed": (
+            "$observed=New-Intermediate ('6'*40) "
+            "'66666666-6666-4666-8666-666666666666';"
+            "$observed.compatibility_state='PASSED';"
+            "$observed.validation_state='FAILED';"
+            "$observed.validation=[pscustomobject]@{key=$observed.validation_key;"
+            "error='OBSERVATION_FAILED';"
+            "reason='DEFERRED_PROJECTION_OBSERVATION_TIMEOUT';"
+            "prior_validation=[pscustomobject]@{state='PASSED'}};"
+            "$observed|Add-Member -Force migration_acceptance ([pscustomobject]@{"
+            "validation_key=$observed.validation_key;receipt_digest=('e'*64)});"
+            "function Restore-ControlPlaneObservationFailedCandidate{"
+            "param($State,$MainRevision)return $State.candidate};"
+            "Add-Edge $observed $head;"
         ),
         "worker_reused": (
             "$sameWorker=New-Intermediate ('c'*40) $mid.worker_version_id;"
@@ -8650,7 +8679,9 @@ def _supersession_chain_contract(scenario: str) -> str:
         ("first_qualified", "FOUND:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee:" + "e" * 40),
         ("wrong_identity", "ERROR:CANDIDATE_SUPERSESSION_EDGE_IDENTITY_INVALID"),
         ("wrong_ancestry", "ERROR:CANDIDATE_SUPERSESSION_ANCESTRY_INVALID"),
-        ("missing_edge", "ERROR:CANDIDATE_SUPERSESSION_PREDECESSOR_MISSING"),
+        ("missing_edge", "NONE"),
+        ("edge_outside_tail", "NONE"),
+        ("old_schema_missing_edge", "NONE"),
         ("duplicate_edge", "ERROR:CANDIDATE_SUPERSESSION_EDGE_AMBIGUOUS"),
         ("cycle", "ERROR:CANDIDATE_SUPERSESSION_CYCLE"),
         ("self_loop", "ERROR:CANDIDATE_SUPERSESSION_SELF_LOOP"),
@@ -8661,6 +8692,7 @@ def _supersession_chain_contract(scenario: str) -> str:
         ("qualification_key_mismatch", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
         ("accepted_intermediate", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
         ("partially_validated_head", "FOUND:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee:" + "e" * 40),
+        ("observation_failed", "FOUND:66666666-6666-4666-8666-666666666666:" + "6" * 40),
         ("worker_reused", "ERROR:CANDIDATE_SUPERSESSION_WORKER_REUSED"),
         ("max_depth", "ERROR:CANDIDATE_SUPERSESSION_MAX_DEPTH_EXCEEDED"),
         ("byte_bound", "ERROR:CANDIDATE_SUPERSESSION_HISTORY_BYTE_BOUND_EXCEEDED"),
@@ -8674,15 +8706,100 @@ def test_supersession_chain_recovery_is_bounded_and_fail_closed(
     ) == expected
 
 
+@pytest.mark.parametrize("scenario,expected", (
+    ("two_hop", "FOUND:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee:" + "e" * 40),
+    ("missing_edge", "NONE"),
+))
 @pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
 def test_supersession_chain_recovery_has_powershell_runtime_parity(
-    tmp_path, powershell: str,
+    tmp_path, powershell: str, scenario: str, expected: str,
 ) -> None:
     if not shutil.which(powershell):
         pytest.skip(f"{powershell} is not installed")
     assert _run_control_center_contract(
-        tmp_path, _supersession_chain_contract("two_hop"), powershell=powershell,
-    ) == "FOUND:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee:" + "e" * 40
+        tmp_path, _supersession_chain_contract(scenario), powershell=powershell,
+    ) == expected
+
+
+def test_supersession_head_without_edge_is_not_applicable(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("0" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$head=$state.candidate;"
+        "$head.compatibility_state='PENDING';$head.validation_state='CHECKS_PENDING';"
+        "$head.validation=[pscustomobject]@{key=$head.validation_key};"
+        "Write-ReleaseHistory -Event 'UNRELATED_DIAGNOSTIC' -Release $null;"
+        "$plan=Get-CandidateSupersessionRecoveryPlan $head ('b'*40);"
+        'Write-Output "$($plan.state),$($plan.reason)"',
+    )
+    assert result == "NOT_APPLICABLE,CANDIDATE_SUPERSESSION_CHAIN_NOT_FOUND"
+
+
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+def test_unavailable_supersession_reuse_falls_back_once_without_copying_evidence(
+    tmp_path, powershell: str,
+) -> None:
+    if not shutil.which(powershell):
+        pytest.skip(f"{powershell} is not installed")
+    result = _run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("0" * 40, "b" * 40)
+        + "$state=Get-ReleaseControlState;$head=$state.candidate;"
+        "$head.branch='main';$head.compatibility_state='PENDING';"
+        "$head.validation_state='CHECKS_PENDING';"
+        "$head.validation=[pscustomobject]@{key=$head.validation_key};"
+        "$state.candidate_discovery.initialized_at='2026-09-03T00:00:00Z';"
+        "$state.candidate_discovery.watermark_created_at='2026-09-03T00:00:00Z';"
+        "$state.candidate_discovery.watermark_version_id='older';"
+        "Write-ReleaseControlState $state;"
+        "$prior=New-ReleaseIdentity -GitSha ('a'*40) "
+        "-WorkerVersionId 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' "
+        "-WindowsRevision ('a'*40) -Branch 'main' "
+        "-ArtifactKind 'PRODUCTION_CANDIDATE';"
+        "$prior.compatibility_state='PENDING';$prior.validation_state='TESTING';"
+        "$prior.validation=[pscustomobject]@{key=$prior.validation_key;"
+        "cpu_evidence=[pscustomobject]@{receipt_digest=('e'*64)}};"
+        "Write-ReleaseHistory -Event 'CANDIDATE_SUPERSEDED' -Release $prior "
+        "-Detail @{replacement_key=$head.validation_key};"
+        "function Get-OriginMainRevision{return ('b'*40)};"
+        "function Get-ProductionCandidateProvenanceResult{"
+        "[pscustomobject]@{state='PASSED';mode='EXACT_MAIN';"
+        "current_main_git_sha=('b'*40)}};"
+        "function Test-CandidateSupersessionAncestry{return $true};"
+        "function Get-CloudflareDeployment{[pscustomobject]@{versions=@("
+        "[pscustomobject]@{version_id=$state.stable.worker_version_id;percentage=100})}};"
+        "function Get-CloudflareVersions{@([pscustomobject]@{id=$head.worker_version_id;"
+        "metadata=[pscustomobject]@{created_on='2026-09-03T01:00:00Z'};"
+        "annotations=[pscustomobject]@{'workers/message'="
+        "('release:'+('b'*40)+' branch:main artifact_kind:PRODUCTION_CANDIDATE')}})};"
+        "$script:pointerCalls=0;function Set-CloudflareCandidatePointer{$script:pointerCalls++};"
+        "$script:validationCalls=0;function Invoke-AutomaticCandidateValidation{"
+        "param($Candidate)$script:validationCalls++;$s=Get-ReleaseControlState;"
+        "$s.candidate.validation_state='REVIEW_REQUIRED';"
+        "$s.candidate.validation=[pscustomobject]@{key=$s.candidate.validation_key;"
+        "reason='HUMAN_REVIEW_REQUIRED'};Write-ReleaseControlState $s;return $true};"
+        "function Enter-ReleaseTransactionLock{return $true};"
+        "function Exit-ReleaseTransactionLock{};function Reconcile-ReleaseControlState{};"
+        "$null=Invoke-CandidateDiscovery;$null=Invoke-CandidateDiscovery;"
+        "$final=Get-ReleaseControlState;"
+        "$events=@(Get-Content -LiteralPath $releaseHistoryPath|ForEach-Object{"
+        "$_|ConvertFrom-ReleaseControlJson});"
+        "$diagnostics=@($events|Where-Object{"
+        "$_.event -eq 'CANDIDATE_SUPERSESSION_REUSE_UNAVAILABLE' -and "
+        "$_.detail.chain_head -eq $head.validation_key -and "
+        "$_.detail.reason -eq 'CANDIDATE_SUPERSESSION_REUSE_PREDECESSOR_UNAVAILABLE' -and "
+        "$_.detail.current_main -eq ('b'*40)});"
+        "$hasCpu=[bool]$final.candidate.validation.PSObject.Properties['cpu_evidence'];"
+        'Write-Output "$script:validationCalls,$script:pointerCalls,'
+        '$($final.candidate.worker_version_id),$($final.candidate.git_sha),'
+        '$($final.candidate.validation_state),$($diagnostics.Count),$hasCpu,'
+        '$($null -eq $final.transaction)"',
+        powershell=powershell,
+    )
+    assert result == (
+        "1,0,22222222-2222-4222-8222-222222222222,"
+        + "b" * 40 + ",REVIEW_REQUIRED,1,False,True"
+    )
 
 
 def test_observe_probe_failure_restores_exact_qualification_and_preserves_attempt(

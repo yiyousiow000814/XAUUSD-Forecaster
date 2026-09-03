@@ -139,6 +139,10 @@ and every consumer assumption to a matching integration invariant.
 | `OriginalOutlierCannotBeErased` | cpu-evidence-safety and cpu-evidence-liveness |
 | `ReusedCpuEvidenceMatchesArtifact` | cpu-evidence-safety |
 | `CpuRecoveryPreservesIndependentStages` | cpu-evidence-safety and release-integration-safety |
+| `SupersessionReuseRequiresFound` | release-integration-safety |
+| `FreshFallbackCannotReuseSupersededEvidence` | release-integration-safety |
+| `UnsafeSupersessionBlocksFreshValidation` | release-integration-safety |
+| `SupersessionFallbackPreservesCandidateIdentity` | release-integration-safety |
 | `StableChangesOnlyAfterObservation` | core-release-safety |
 | `CpuEvidenceOnlyGrows` | cpu-evidence-safety |
 | `ObservedFailureEventuallyRestoresPrevious` | core-release-liveness |
