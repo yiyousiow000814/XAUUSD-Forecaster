@@ -148,12 +148,19 @@ def test_training_rows_materialize_incrementally_without_rescanning_history(
     )
     calls: list[list[str] | None] = []
     original = training_v2._build_training_rows
+    original_persisted = training_v2._persisted_training_row
 
     def observed_builder(owner, at, source_ids=None):
         calls.append(source_ids)
         return original(owner, at, source_ids)
 
     monkeypatch.setattr(training_v2, "_build_training_rows", observed_builder)
+
+    def observed_persisted(row, now):
+        assert ledger.connection.in_transaction is False
+        return original_persisted(row, now)
+
+    monkeypatch.setattr(training_v2, "_persisted_training_row", observed_persisted)
     first = training_v2.refresh_training_materialization_state(ledger, cutoff)
     assert first["materialization_mode"] == "FULL"
     assert first["processed_source_rows"] == 1
@@ -1439,6 +1446,68 @@ def test_news_contract_migration_is_point_in_time_and_idempotent(
     ledger.close()
 
 
+def test_news_contract_migration_is_bounded_and_aggregates_without_writer_lock(
+    tmp_path, monkeypatch,
+) -> None:
+    start = datetime(2026, 8, 5, 10, tzinfo=UTC)
+    cutoff = start + timedelta(hours=2)
+    ledger = ForwardLedger(tmp_path / "bounded-news.sqlite3", now=start)
+    for index in range(news_contract_migration.NEWS_RECONCILIATION_BATCH_ROWS + 1):
+        decision_id = f"decision-{index}"
+        decision = start + timedelta(minutes=5 * index)
+        ledger.connection.execute(
+            "INSERT INTO derived_market_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (f"market-{index}", decision_id, decision.isoformat(), "source", None,
+             "LIVE_OOS", decision.isoformat(), news_contract_migration.FEATURE_VERSION,
+             "u5", 1.0, "[]", "HEALTHY", "[]", "source", f"market-{index}"),
+        )
+        ledger.connection.execute(
+            """INSERT INTO derived_outcomes (
+            derived_outcome_id,source_decision_id,decision_time,evidence_lane,
+            recomputed_at,label_version,outcome_status,reason_codes_json,
+            ambiguity_state,commission_status,slippage_status,source_evidence_hash,
+            output_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (f"outcome-{index}", decision_id, decision.isoformat(), "LIVE_OOS",
+             cutoff.isoformat(), news_contract_migration.LABEL_VERSION, "VALID", "[]",
+             "NONE", "UNCONFIGURED", "UNAVAILABLE_SHADOW", "source",
+             f"outcome-{index}"),
+        )
+        ledger.connection.execute(
+            "INSERT INTO training_eligibility_v2 VALUES (?,?,?,?,?,?,?,?)",
+            (f"eligibility-{index}", decision_id, "LIVE_OOS", cutoff.isoformat(),
+             "test", f"market-{index}", f"outcome-{index}", None),
+        )
+    ledger.connection.commit()
+    observed = []
+
+    def aggregate(_ledger, visible_at):
+        assert ledger.connection.in_transaction is False
+        observed.append(visible_at)
+        return {
+            "features": [0.0], "model_visible_items": 0, "news_exposed": False,
+            "distinct_news_clusters": 0, "distinct_event_types": 0,
+            "source_evidence_hash": "empty", "core_visible_events": [],
+            "broad_visible_events": [], "event_snapshots": [],
+        }
+
+    monkeypatch.setattr(news_contract_migration, "aggregate_news_features_v2", aggregate)
+    first = news_contract_migration.append_missing_current_news_snapshots(ledger, cutoff)
+    assert first == {
+        "status": "MIGRATED", "candidates": 8, "appended": 8,
+        "processed": 8, "remaining": 1, "execution_mode": "BOUNDED_BATCH",
+        "feature_version": news_contract_migration.NEWS_FEATURE_VERSION,
+        "eligibility_version": news_contract_migration.ELIGIBILITY_VERSION,
+    }
+    second = news_contract_migration.append_missing_current_news_snapshots(ledger, cutoff)
+    assert second["processed"] == 1
+    assert second["remaining"] == 0
+    assert len(observed) == 9
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM derived_news_feature_snapshots"
+    ).fetchone()[0] == 9
+    ledger.close()
+
+
 def test_live_settler_is_idempotent_after_repair_created_outcome(tmp_path) -> None:
     decision = datetime(2026, 8, 5, 10, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=decision)
@@ -2192,6 +2261,7 @@ def test_market_crossfit_uses_purged_chronological_training_only(tmp_path, monke
             return [0.0] * len(values)
 
     def fake_train(_x, targets, *_args):
+        assert ledger.connection.in_transaction is False
         seen_training_targets.append(list(targets))
         return Artifact()
 

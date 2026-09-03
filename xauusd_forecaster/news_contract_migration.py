@@ -19,6 +19,7 @@ from .repair_v2 import LANE_RULE_VERSION
 
 
 UTC = timezone.utc
+NEWS_RECONCILIATION_BATCH_ROWS = 8
 
 
 def _uuid(namespace: str, value: str) -> str:
@@ -49,6 +50,7 @@ def _current_news_snapshot(decision_id: str, decision_time: datetime, news: dict
 
 def append_missing_current_news_snapshots(
     ledger, cutoff: datetime, *, recomputed_at: datetime | None = None,
+    batch_rows: int = NEWS_RECONCILIATION_BATCH_ROWS,
 ) -> dict[str, int | str]:
     """Append current-contract snapshots for already mature direction samples.
 
@@ -57,6 +59,9 @@ def append_missing_current_news_snapshots(
     snapshot versions, and without making later news visible to an old decision.
     """
     install_v2_schema(ledger.connection)
+    ledger.connection.commit()
+    if batch_rows <= 0 or batch_rows > NEWS_RECONCILIATION_BATCH_ROWS:
+        raise ValueError("news reconciliation batch exceeds bounded contract")
     cutoff = cutoff.astimezone(UTC)
     recomputed_at = (recomputed_at or datetime.now(UTC)).astimezone(UTC)
     rows = ledger.connection.execute(
@@ -71,23 +76,35 @@ def append_missing_current_news_snapshots(
          AND n.feature_version=? AND n.eligibility_version=?
         WHERE e.eligible_at<=? AND o.outcome_status='VALID'
           AND n.derived_news_snapshot_id IS NULL
-        ORDER BY m.decision_time, e.source_decision_id""",
+        ORDER BY m.decision_time, e.source_decision_id LIMIT ?""",
         (
             FEATURE_VERSION,
             LABEL_VERSION,
             NEWS_FEATURE_VERSION,
             ELIGIBILITY_VERSION,
             cutoff.isoformat(),
+            batch_rows,
         ),
     ).fetchall()
 
     appended = 0
-    with ledger.connection:
-        for row in rows:
-            decision_id = str(row["source_decision_id"])
-            decision_time = datetime.fromisoformat(str(row["decision_time"]))
-            news = aggregate_news_features_v2(ledger, decision_time)
-            snapshot = _current_news_snapshot(decision_id, decision_time, news)
+    processed = 0
+    for row in rows:
+        decision_id = str(row["source_decision_id"])
+        decision_time = datetime.fromisoformat(str(row["decision_time"]))
+        # Aggregation and serialization are deliberately outside writer ownership.
+        news = aggregate_news_features_v2(ledger, decision_time)
+        snapshot = _current_news_snapshot(decision_id, decision_time, news)
+        feature_json = json.dumps(news["features"], sort_keys=True, separators=(",", ":"))
+        prepared_events = []
+        for event in news.get("event_snapshots", []):
+            source_budget_id = str(event["source_budget_id"])
+            prepared_events.append((event, source_budget_id, canonical_hash((
+                decision_id, decision_time.isoformat(), event["event_id"],
+                event["event_version_id"], event["model_permission"],
+                event["raw_weight"], event["age_minutes"],
+            ))))
+        with ledger.connection:
             cursor = ledger.connection.execute(
                 """INSERT OR IGNORE INTO derived_news_feature_snapshots VALUES
                 (?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -99,7 +116,7 @@ def append_missing_current_news_snapshots(
                     recomputed_at.isoformat(),
                     NEWS_FEATURE_VERSION,
                     ELIGIBILITY_VERSION,
-                    json.dumps(news["features"], sort_keys=True, separators=(",", ":")),
+                    feature_json,
                     news["model_visible_items"],
                     news["news_exposed"],
                     news["distinct_news_clusters"],
@@ -108,10 +125,9 @@ def append_missing_current_news_snapshots(
                     snapshot["output_hash"],
                 ),
             )
-            if cursor.rowcount <= 0:
-                continue
-            appended += 1
-            for event in news.get("event_snapshots", []):
+            if cursor.rowcount > 0:
+                appended += 1
+            for event, source_budget_id, event_snapshot_hash in prepared_events:
                 ledger.connection.execute(
                     """INSERT OR IGNORE INTO news_event_catalog_v1 VALUES
                     (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -126,7 +142,6 @@ def append_missing_current_news_snapshots(
                         recomputed_at.isoformat(),
                     ),
                 )
-                source_budget_id = str(event["source_budget_id"])
                 ledger.connection.execute(
                     """INSERT OR IGNORE INTO news_event_source_budgets_v1
                     VALUES (?,?,?,?)""",
@@ -140,11 +155,6 @@ def append_missing_current_news_snapshots(
                         recomputed_at.isoformat(),
                     ),
                 )
-                event_snapshot_hash = canonical_hash((
-                    decision_id, decision_time.isoformat(), event["event_id"],
-                    event["event_version_id"], event["model_permission"],
-                    event["raw_weight"], event["age_minutes"],
-                ))
                 ledger.connection.execute(
                     """INSERT OR IGNORE INTO news_decision_event_snapshots_v1 VALUES
                     (?,?,?,?,?,?,?,?,?)""",
@@ -171,11 +181,31 @@ def append_missing_current_news_snapshots(
                     snapshot["output_hash"],
                 ),
             )
+        processed += 1
+
+    remaining = int(ledger.connection.execute(
+        """SELECT count(*)
+        FROM training_eligibility_v2 e
+        JOIN derived_market_snapshots m
+          ON m.source_decision_id=e.source_decision_id AND m.feature_version=?
+        JOIN derived_outcomes o
+          ON o.source_decision_id=e.source_decision_id AND o.label_version=?
+        LEFT JOIN derived_news_feature_snapshots n
+          ON n.source_decision_id=e.source_decision_id
+         AND n.feature_version=? AND n.eligibility_version=?
+        WHERE e.eligible_at<=? AND o.outcome_status='VALID'
+          AND n.derived_news_snapshot_id IS NULL""",
+        (FEATURE_VERSION, LABEL_VERSION, NEWS_FEATURE_VERSION,
+         ELIGIBILITY_VERSION, cutoff.isoformat()),
+    ).fetchone()[0])
 
     return {
         "status": "MIGRATED" if appended else "CURRENT",
         "candidates": len(rows),
         "appended": appended,
+        "processed": processed,
+        "remaining": remaining,
+        "execution_mode": "BOUNDED_BATCH",
         "feature_version": NEWS_FEATURE_VERSION,
         "eligibility_version": ELIGIBILITY_VERSION,
     }

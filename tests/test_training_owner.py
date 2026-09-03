@@ -4,19 +4,175 @@ import threading
 import time
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
 from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.forward_engine import ForwardEngine
 from xauusd_forecaster import training_owner
 from xauusd_forecaster.market import BrokerMarketSession, MarketObservation
 from xauusd_forecaster.runtime_health import write_runtime_heartbeat
 from scripts.run_forward_collector import append_current_grid_events
+from scripts.run_forward_collector import append_due_grid_events
+from xauusd_forecaster.sqlite_wal import is_forward_sqlite_contention
 
 
 UTC = timezone.utc
+
+
+def test_sqlite_contention_classifier_does_not_swallow_other_failures() -> None:
+    path = sqlite3.connect(":memory:")
+    path.execute("CREATE TABLE unique_value(value INTEGER UNIQUE)")
+    path.execute("INSERT INTO unique_value VALUES(1)")
+    try:
+        path.execute("INSERT INTO unique_value VALUES(1)")
+    except sqlite3.IntegrityError as error:
+        assert is_forward_sqlite_contention(error) is False
+    else:
+        raise AssertionError("expected a real SQLite constraint failure")
+    assert is_forward_sqlite_contention(RuntimeError("database is locked")) is False
+    path.close()
+
+
+def test_background_request_defers_during_writer_contention_and_coalesces_after_release(
+    tmp_path,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    training_owner.install_training_owner_schema(ledger.connection)
+    ledger.connection.commit()
+    ledger.connection.execute("PRAGMA busy_timeout=20")
+    blocker = sqlite3.connect(ledger.path, timeout=0.02)
+    blocker.execute("PRAGMA busy_timeout=20")
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        assert training_owner.request_background_training(
+            ledger.connection, datetime.now(UTC), reconcile=True,
+        ) == "DEFERRED"
+        assert ledger.connection.in_transaction is False
+    finally:
+        blocker.rollback()
+        blocker.close()
+    assert training_owner.request_background_training(
+        ledger.connection, datetime.now(UTC), reconcile=True,
+    ) == "REQUESTED"
+    row = ledger.connection.execute(
+        "SELECT state,reconcile FROM background_training_owner_v1"
+    ).fetchone()
+    assert tuple(row) == ("PENDING", 1)
+    ledger.close()
+
+
+def test_background_owner_claim_defers_without_killing_owner(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    training_owner.install_training_owner_schema(ledger.connection)
+    ledger.connection.commit()
+    assert training_owner.request_background_training(
+        ledger.connection, datetime.now(UTC), reconcile=True,
+    ) == "REQUESTED"
+    owner = training_owner.BackgroundTrainingOwner(
+        ledger.path, tmp_path / "models", tmp_path / "execution",
+    )
+    owner_ledger = ForwardLedger(ledger.path)
+    owner_ledger.connection.execute("PRAGMA busy_timeout=20")
+    blocker = sqlite3.connect(ledger.path, timeout=0.02)
+    blocker.execute("PRAGMA busy_timeout=20")
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        assert owner._claim(owner_ledger.connection) is None
+        assert owner_ledger.connection.in_transaction is False
+    finally:
+        blocker.rollback()
+        blocker.close()
+    assert owner._claim(owner_ledger.connection) is not None
+    owner_ledger.close()
+    ledger.close()
+
+
+def test_decision_cursor_does_not_advance_on_real_writer_contention(
+    tmp_path, monkeypatch,
+) -> None:
+    decision = datetime(2026, 8, 20, 12, 5, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=decision - timedelta(minutes=5))
+    ledger.connection.execute("PRAGMA busy_timeout=20")
+    blocker = sqlite3.connect(ledger.path, timeout=0.02)
+    blocker.execute("PRAGMA busy_timeout=20")
+    blocker.execute("BEGIN IMMEDIATE")
+    monkeypatch.setattr(
+        "scripts.run_forward_collector.skipped_grid_reason", lambda *_args: None,
+    )
+
+    class Provider:
+        name = "test-provider"
+
+        def observations(self, boundary):
+            return [MarketObservation(
+                boundary - timedelta(seconds=2), boundary - timedelta(seconds=1),
+                4500.0, 4500.1,
+            )]
+
+        def market_session(self, observed_at):
+            return BrokerMarketSession(
+                observed_at=observed_at, server_time=observed_at, is_open=True,
+                time_till_open=timedelta(0), time_till_close=timedelta(hours=2),
+                next_open_time=None, next_close_time=observed_at + timedelta(hours=2),
+            )
+
+    try:
+        last, appended, skipped = append_due_grid_events(
+            ledger, ForwardEngine(ledger, Provider()), Provider(),
+            decision - timedelta(minutes=5),
+            decision, decision, [],
+        )
+    finally:
+        blocker.rollback()
+        blocker.close()
+    assert last == decision - timedelta(minutes=5)
+    assert appended == []
+    assert skipped == {"DATABASE_CONTENTION_DEFERRED": 1}
+    assert ledger.connection.in_transaction is False
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM market_snapshots"
+    ).fetchone()[0] == 0
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM decision_events"
+    ).fetchone()[0] == 0
+    ledger.close()
+
+
+def test_collector_does_not_normalize_non_contention_sqlite_errors(monkeypatch) -> None:
+    decision = datetime(2026, 8, 20, 12, 5, tzinfo=UTC)
+
+    class Provider:
+        def observations(self, _boundary):
+            return []
+
+        def market_session(self, observed_at):
+            return BrokerMarketSession(
+                observed_at=observed_at, server_time=observed_at, is_open=True,
+                time_till_open=timedelta(0), time_till_close=timedelta(hours=2),
+                next_open_time=None, next_close_time=observed_at + timedelta(hours=2),
+            )
+
+    class Engine:
+        def append_clock_event(self, *_args):
+            raise sqlite3.IntegrityError("constraint failed")
+
+    ledger = SimpleNamespace(forward_epoch=decision, connection=SimpleNamespace())
+    monkeypatch.setattr(
+        "scripts.run_forward_collector.skipped_grid_reason", lambda *_args: None,
+    )
+    try:
+        append_due_grid_events(
+            ledger, Engine(), Provider(), decision - timedelta(minutes=5),
+            decision, decision, [],
+        )
+    except sqlite3.IntegrityError as error:
+        assert str(error) == "constraint failed"
+    else:
+        raise AssertionError("non-contention SQLite failure was swallowed")
 
 
 def test_real_windows_process_identity_tracks_child_lifetime() -> None:

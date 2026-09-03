@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -48,7 +49,10 @@ from xauusd_forecaster.runtime_paths import (  # noqa: E402
     authoritative_runtime_root,
     runtime_child_path,
 )
-from xauusd_forecaster.sqlite_wal import ForwardWalCheckpointOwner  # noqa: E402
+from xauusd_forecaster.sqlite_wal import (  # noqa: E402
+    ForwardWalCheckpointOwner,
+    is_forward_sqlite_contention,
+)
 from xauusd_forecaster.news_collection_owner import NewsCollectionOwner  # noqa: E402
 from xauusd_forecaster.training_owner import (  # noqa: E402
     BackgroundTrainingOwner,
@@ -60,6 +64,18 @@ from xauusd_forecaster.training_owner import (  # noqa: E402
 UTC = timezone.utc
 NEWS_CONTRACT_RECONCILE_SECONDS = 300
 GRID_INTERVAL = timedelta(minutes=5)
+
+
+def _database_contention(ledger, operation: str, error: sqlite3.Error) -> dict:
+    """Rollback and describe one bounded retryable writer-contention result."""
+    ledger.connection.rollback()
+    return {
+        "event": "FORWARD_SQLITE_CONTENTION",
+        "status": "DEFERRED",
+        "operation": operation,
+        "sqlite_error_code": getattr(error, "sqlite_errorcode", None),
+        "error": f"{type(error).__name__}: {str(error)[:400]}",
+    }
 
 
 def _first_grid_at_or_after(start: datetime, threshold: datetime) -> datetime:
@@ -172,13 +188,20 @@ def append_due_grid_events(
         if skip_reason:
             _record_skipped(skipped_grids, skip_reason, 1)
         else:
-            snapshot_id, decision_id = engine.append_clock_event(
-                candidate, collected_at, news_status
-            )
+            try:
+                snapshot_id, decision_id = engine.append_clock_event(
+                    candidate, collected_at, news_status
+                )
+            except sqlite3.Error as exc:
+                if not is_forward_sqlite_contention(exc):
+                    raise
+                _database_contention(ledger, "append_clock_event", exc)
+                _record_skipped(skipped_grids, "DATABASE_CONTENTION_DEFERRED", 1)
+                break
             appended.append((candidate, snapshot_id, decision_id))
         last_decision = candidate
         candidate += GRID_INTERVAL
-    return boundary, appended, skipped_grids
+    return last_decision, appended, skipped_grids
 
 
 def append_current_grid_events(
@@ -363,6 +386,7 @@ def main() -> int:
         ledger.path, poll_seconds=args.news_poll_seconds,
     )
     install_training_owner_schema(ledger.connection)
+    ledger.connection.commit()
     training_owner = BackgroundTrainingOwner(
         ledger.path, local_root / "models-v2",
         local_root / "execution-models-v1", quote_root,
@@ -376,12 +400,14 @@ def main() -> int:
         backup_owner.start()
         wal_checkpoint_owner.start()
         if startup_requires_reconciliation:
-            request_background_training(
+            startup_request = request_background_training(
                 ledger.connection, datetime.now(UTC), reconcile=True,
             )
-            training_owner.wake()
+            if startup_request == "REQUESTED":
+                training_owner.wake()
         while True:
             now = datetime.now(UTC)
+            loop_contention = False
             backup_observation = backup_owner.snapshot()
             if backup_observation != last_backup_observation:
                 print(json.dumps(
@@ -402,11 +428,24 @@ def main() -> int:
             news_status = news_owner.snapshot(now)
             if ((now - last_news_reconciliation).total_seconds()
                     >= NEWS_CONTRACT_RECONCILE_SECONDS):
-                request_background_training(
+                request_state = request_background_training(
                     ledger.connection, now, reconcile=True,
                 )
-                training_owner.wake()
-                last_news_reconciliation = now
+                if request_state == "REQUESTED":
+                    training_owner.wake()
+                    last_news_reconciliation = now
+                else:
+                    loop_contention = True
+                    diagnostic = {
+                        "event": "FORWARD_SQLITE_CONTENTION",
+                        "status": "DEFERRED",
+                        "operation": "request_background_training",
+                    }
+                    print(json.dumps(diagnostic, sort_keys=True), flush=True)
+                    heartbeat.update(
+                        state="DATABASE_CONTENTION",
+                        last_error="SQLITE_CONTENTION:request_background_training",
+                    )
             now, last_decision, appended_decisions, skipped_grids = (
                 append_current_grid_events(
                     ledger, engine, provider, last_decision, news_status,
@@ -434,12 +473,25 @@ def main() -> int:
                     ),
                     flush=True,
                 )
+            grid_contention = loop_contention or bool(
+                skipped_grids.get("DATABASE_CONTENTION_DEFERRED")
+            )
             if quote_root:
-                checkpoint_quotes = provider.observations(now)
-                checkpoint_count = append_due_exit_predictions(
-                    ledger, checkpoint_time=now, created_at=now,
-                    quotes=checkpoint_quotes,
-                )
+                try:
+                    checkpoint_quotes = provider.observations(now)
+                    checkpoint_count = append_due_exit_predictions(
+                        ledger, checkpoint_time=now, created_at=now,
+                        quotes=checkpoint_quotes,
+                    )
+                except sqlite3.Error as exc:
+                    if not is_forward_sqlite_contention(exc):
+                        raise
+                    print(json.dumps(
+                        _database_contention(ledger, "append_due_exit_predictions", exc),
+                        sort_keys=True,
+                    ), flush=True)
+                    checkpoint_count = 0
+                    grid_contention = True
                 if checkpoint_count:
                     print(
                         json.dumps(
@@ -449,7 +501,17 @@ def main() -> int:
                         ),
                         flush=True,
                     )
-            completed_outcomes = engine.settle_due_outcomes(now)
+            try:
+                completed_outcomes = engine.settle_due_outcomes(now)
+            except sqlite3.Error as exc:
+                if not is_forward_sqlite_contention(exc):
+                    raise
+                print(json.dumps(
+                    _database_contention(ledger, "settle_due_outcomes", exc),
+                    sort_keys=True,
+                ), flush=True)
+                completed_outcomes = []
+                grid_contention = True
             for decision_id in completed_outcomes:
                 print(
                     json.dumps(
@@ -459,10 +521,24 @@ def main() -> int:
                     flush=True,
                 )
             if completed_outcomes:
-                request_background_training(ledger.connection, now)
-                training_owner.wake()
+                request_state = request_background_training(ledger.connection, now)
+                if request_state == "REQUESTED":
+                    training_owner.wake()
+                else:
+                    grid_contention = True
+                    print(json.dumps({
+                        "event": "FORWARD_SQLITE_CONTENTION",
+                        "status": "DEFERRED",
+                        "operation": "request_background_training_after_outcomes",
+                    }, sort_keys=True), flush=True)
             heartbeat.update(
                 work_items=len(appended_decisions) + len(completed_outcomes),
+                state="DATABASE_CONTENTION" if grid_contention else "RUNNING",
+                last_error=(
+                    "SQLITE_CONTENTION:critical_runtime_write"
+                    if grid_contention else None
+                ),
+                clear_error=not grid_contention,
             )
             time.sleep(max(1.0, args.poll_seconds))
     finally:

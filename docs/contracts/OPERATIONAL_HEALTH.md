@@ -308,6 +308,16 @@ recover durable work only after the prior process identity is proven dead;
 incomplete or unresolvable identity fails closed as a stuck-owner diagnostic.
 Training failure remains durable evidence and cannot delay the next decision
 heartbeat.
+
+Forward SQLite writer ownership is limited to short row/state commits. News
+aggregation, Ridge fitting, quote reads, artifact writes, and payload/hash
+construction happen before a writer transaction begins. News-contract repair
+processes at most eight decisions per owner run, and crossfit commits at most
+one 24-row fold before rereading canonical cached rows. A genuine SQLite
+`BUSY`/`LOCKED` result is reported as `DATABASE_CONTENTION` while the heartbeat
+continues; background requests return `DEFERRED`, and the decision cursor is not
+advanced until the exact grid append succeeds. Other SQLite errors remain
+fail-closed and are never normalized as contention.
 Broker-native cTrader `Symbol.MarketHours` is authoritative for daily market
 closure. Its `market-session.json` heartbeat is state telemetry and must remain
 fresh on the Algo timer independently of quote ticks. Python and dashboard code
