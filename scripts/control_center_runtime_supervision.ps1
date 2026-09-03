@@ -1412,12 +1412,19 @@ function Get-ControlPlaneProcessIdentity {
         -ErrorAction SilentlyContinue
     if (-not $process) { return $null }
     $created = [DateTimeOffset]$process.CreationDate
+    $ownerSid = $null
+    try {
+        $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid `
+            -ErrorAction Stop
+        if ([int]$owner.ReturnValue -eq 0) { $ownerSid = [string]$owner.Sid }
+    } catch { $ownerSid = $null }
     [pscustomobject]@{
         process_id = [int]$process.ProcessId
         parent_process_id = [int]$process.ParentProcessId
         process_start_token = $created.ToUniversalTime().ToString("o")
         name = [string]$process.Name
         command_line = [string]$process.CommandLine
+        owner_sid = $ownerSid
     }
 }
 
@@ -1435,14 +1442,24 @@ function Get-WatchdogOwnershipInventory {
             } | ForEach-Object { Get-ControlPlaneProcessIdentity -ProcessId ([int]$_.ProcessId) }
     )
     $shaped = @()
+    $legacyOrphaned = @()
     $authoritative = @()
     $duplicates = @()
     $unknown = @()
     $expectedLauncher = Join-Path $controlRoot "xauusd_watchdog_launcher.vbs"
+    $expectedOwnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     foreach ($identity in $candidates) {
         $launcher = Get-ControlPlaneProcessIdentity `
             -ProcessId ([int]$identity.parent_process_id)
-        if (-not $launcher -or $launcher.name -ne "wscript.exe" -or
+        if (-not $launcher) {
+            if ([string]$identity.owner_sid -eq [string]$expectedOwnerSid) {
+                $legacyOrphaned += $identity
+            } else {
+                $unknown += $identity
+            }
+            continue
+        }
+        if ($launcher.name -ne "wscript.exe" -or
             -not $launcher.command_line.Contains($expectedLauncher) -or
             -not $launcher.command_line.Contains($moduleRoot) -or
             -not $launcher.command_line.Contains($repositoryRoot)) {
@@ -1454,8 +1471,17 @@ function Get-WatchdogOwnershipInventory {
         $shaped += $identity
     }
     $receipt = $null
+    $receiptReadFailed = $false
     try { $receipt = Read-WatchdogOwnerReceipt }
-    catch { $unknown = @($unknown) + @($shaped); $shaped = @() }
+    catch {
+        $receiptReadFailed = $true
+        $unknown = @($unknown) + @($shaped)
+        $shaped = @()
+    }
+    if (($receipt -or $receiptReadFailed) -and $legacyOrphaned.Count -gt 0) {
+        $unknown = @($unknown) + @($legacyOrphaned)
+        $legacyOrphaned = @()
+    }
     if ($receipt) {
         $descriptor = Get-WatchdogSingletonDescriptor
         if (-not (Test-WatchdogOwnerReceiptShape -Receipt $receipt -Descriptor $descriptor)) {
@@ -1482,6 +1508,7 @@ function Get-WatchdogOwnershipInventory {
     [pscustomobject]@{
         authoritative = @($authoritative)
         duplicate_shaped = @($duplicates)
+        legacy_orphaned = @($legacyOrphaned)
         unknown = @($unknown)
         receipt = $receipt
     }
@@ -1492,11 +1519,13 @@ function Get-VerifiedWatchdogOwners {
     $inventory = Get-WatchdogOwnershipInventory
     if ($inventory.authoritative.Count -eq 1 -and
         $inventory.duplicate_shaped.Count -eq 0 -and
+        $inventory.legacy_orphaned.Count -eq 0 -and
         $inventory.unknown.Count -eq 0) {
         return @($inventory.authoritative)
     }
     if ($AllowLegacySingleOwner -and -not $inventory.receipt -and
         $inventory.duplicate_shaped.Count -eq 1 -and
+        $inventory.legacy_orphaned.Count -eq 0 -and
         $inventory.unknown.Count -eq 0) {
         $legacy = $inventory.duplicate_shaped[0]
         $legacy | Add-Member -NotePropertyName watchdog_owner_state `
@@ -2100,7 +2129,8 @@ function Invoke-WatchdogOwnershipRepair {
             throw 'UNKNOWN_WATCHDOG_IDENTITY'
         }
         if ($inventory.authoritative.Count -eq 1 -and
-            $inventory.duplicate_shaped.Count -eq 0) {
+            $inventory.duplicate_shaped.Count -eq 0 -and
+            $inventory.legacy_orphaned.Count -eq 0) {
             $installedControlRoot = Join-Path $repositoryRoot '.local\runtime-control'
             $bundle = Get-RuntimeControlBundleIdentityAtRoot `
                 -ControlRoot $installedControlRoot -RequireDependencyClosure
@@ -2117,7 +2147,8 @@ function Invoke-WatchdogOwnershipRepair {
             }
         }
         if (-not $inventory.receipt -and
-            $inventory.duplicate_shaped.Count -eq 1) {
+            $inventory.duplicate_shaped.Count -eq 1 -and
+            $inventory.legacy_orphaned.Count -eq 0) {
             # This is the bounded bridge from the last pre-v2 bundle. Do not
             # re-enable the legacy Guard: final installation replaces this one
             # owner with a receipt-backed owner before Guard is restored.
@@ -2140,9 +2171,13 @@ function Invoke-WatchdogOwnershipRepair {
         foreach ($identity in @($inventory.authoritative) + @($inventory.duplicate_shaped)) {
             Stop-VerifiedWatchdogOwner -Identity $identity
         }
+        foreach ($identity in @($inventory.legacy_orphaned)) {
+            $null = Stop-WatchdogExactProcessTree -RootIdentity $identity
+        }
         $afterStop = Get-WatchdogOwnershipInventory
         if ($afterStop.authoritative.Count -ne 0 -or
             $afterStop.duplicate_shaped.Count -ne 0 -or
+            $afterStop.legacy_orphaned.Count -ne 0 -or
             $afterStop.unknown.Count -ne 0) {
             throw 'WATCHDOG_REPAIR_TERMINATION_UNRESOLVED'
         }
@@ -2151,11 +2186,12 @@ function Invoke-WatchdogOwnershipRepair {
             '.local\runtime-control\xauusd_control_center.ps1'
         Register-AutoStartTask -ControlScript $installedControlScript `
             -RuntimePath $moduleRoot -SourceRepository $repositoryRoot
+        Disable-ScheduledTask -TaskName $guardTaskName -ErrorAction Stop
         $deadline = [DateTimeOffset]::UtcNow.AddSeconds(90)
         $owner = $null
         do {
             Start-Sleep -Milliseconds 250
-            $owners = @(Get-VerifiedWatchdogOwners)
+            $owners = @(Get-VerifiedWatchdogOwners -AllowLegacySingleOwner)
             if ($owners.Count -eq 1) { $owner = $owners[0]; break }
         } while ([DateTimeOffset]::UtcNow -lt $deadline)
         if (-not $owner) { throw 'WATCHDOG_REPAIR_OWNER_START_TIMEOUT' }
@@ -2171,13 +2207,18 @@ function Invoke-WatchdogOwnershipRepair {
         if ([string]$first.observed_at -eq [string]$second.observed_at) {
             throw 'WATCHDOG_REPAIR_HEARTBEAT_NOT_ADVANCING'
         }
-        Enable-ScheduledTask -TaskName $guardTaskName -ErrorAction Stop
+        $legacyOwner = [string]$owner.watchdog_owner_state -eq 'LEGACY_SINGLE_OWNER'
+        if (-not $legacyOwner) {
+            Enable-ScheduledTask -TaskName $guardTaskName -ErrorAction Stop
+        }
         return [pscustomobject]@{
-            status = 'REPAIRED'
+            status = if ($legacyOwner) {
+                'LEGACY_REPAIRED_REQUIRES_CONTROL_PLANE_INSTALL'
+            } else { 'REPAIRED' }
             owner = $owner
             first_heartbeat = $first.observed_at
             second_heartbeat = $second.observed_at
-            guard_enabled = $true
+            guard_enabled = [bool](-not $legacyOwner)
         }
     } finally { Exit-ReleaseTransactionLock }
 }

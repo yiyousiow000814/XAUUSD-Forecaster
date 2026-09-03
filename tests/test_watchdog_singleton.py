@@ -298,7 +298,7 @@ function Get-ReleaseControlState {{ [pscustomobject]@{{transaction=$null;stable=
 function Get-ForecasterProcesses {{ @([pscustomobject]@{{ProcessId=900}}) }}
 function Get-ReleaseProviderRuntimeFacts {{ [pscustomobject]@{{active_worker_observation=[pscustomobject]@{{status='AVAILABLE';traffic_percent=100;version_id='11111111-1111-4111-8111-111111111111'}}}} }}
 $duplicate=[pscustomobject]@{{process_id=101;process_start_token='2026-09-01T00:00:00+00:00';launcher_identity=[pscustomobject]@{{process_id=201;process_start_token='2026-09-01T00:00:00+00:00'}}}}
-function Get-WatchdogOwnershipInventory {{ $script:inventoryRead++; if($script:inventoryRead-eq 1){{[pscustomobject]@{{authoritative=@();duplicate_shaped=@($duplicate,$duplicate,$duplicate,$duplicate);unknown=@();receipt=$null}}}}else{{[pscustomobject]@{{authoritative=@();duplicate_shaped=@();unknown=@();receipt=$null}}}} }}
+function Get-WatchdogOwnershipInventory {{ $script:inventoryRead++; if($script:inventoryRead-eq 1){{[pscustomobject]@{{authoritative=@();duplicate_shaped=@($duplicate,$duplicate,$duplicate,$duplicate);legacy_orphaned=@();unknown=@();receipt=$null}}}}else{{[pscustomobject]@{{authoritative=@();duplicate_shaped=@();legacy_orphaned=@();unknown=@();receipt=$null}}}} }}
 function Get-ScheduledTask {{ [pscustomobject]@{{Settings=[pscustomobject]@{{Enabled=$true}}}} }}
 function Disable-ScheduledTask {{ }}; function Stop-ScheduledTask {{ }}; function Enable-ScheduledTask {{ }}
 function Stop-VerifiedWatchdogOwner {{ $script:stopped++ }}
@@ -313,3 +313,77 @@ $expected=Join-Path '{repository}' '.local\runtime-control\xauusd_control_center
 Write-Output "$($result.status)|$script:stopped|$($script:registered-eq$expected)|$script:heartbeats|$script:lockExited"
 '''
     assert _run_powershell(powershell, command) == "REPAIRED|4|True|2|True"
+
+
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+def test_repair_one_verified_legacy_orphan_to_live_launcher_owner(
+    tmp_path: Path, powershell: str,
+) -> None:
+    if shutil.which(powershell) is None:
+        pytest.skip(f"{powershell} unavailable")
+    runtime = tmp_path / "runtime"
+    repository = tmp_path / "repository"
+    runtime.mkdir()
+    repository.mkdir()
+    command = rf'''
+$null=. '{CONTROL_CENTER}' -Action CodeRevision -RuntimeRoot '{runtime}' -RepositoryRoot '{repository}'
+$script:inventoryRead=0;$script:exactStops=0;$script:verifiedStops=0;$script:guardEnabled=0;$script:guardDisabled=0;$script:heartbeats=0;$script:allowLegacy=$false
+function Enter-ReleaseTransactionLock {{ return $true }}; function Exit-ReleaseTransactionLock {{ }}
+function Get-ReleaseControlState {{ [pscustomobject]@{{transaction=$null;stable=[pscustomobject]@{{worker_version_id='11111111-1111-4111-8111-111111111111'}}}} }}
+function Get-ForecasterProcesses {{ @([pscustomobject]@{{ProcessId=900}}) }}
+function Get-ReleaseProviderRuntimeFacts {{ [pscustomobject]@{{active_worker_observation=[pscustomobject]@{{status='AVAILABLE';traffic_percent=100;version_id='11111111-1111-4111-8111-111111111111'}}}} }}
+$orphan=[pscustomobject]@{{process_id=101;process_start_token='2026-09-01T00:00:00+00:00';owner_sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value}}
+function Get-WatchdogOwnershipInventory {{
+  $script:inventoryRead++
+  if($script:inventoryRead-eq 1){{[pscustomobject]@{{authoritative=@();duplicate_shaped=@();legacy_orphaned=@($orphan);unknown=@();receipt=$null}}}}
+  else{{[pscustomobject]@{{authoritative=@();duplicate_shaped=@();legacy_orphaned=@();unknown=@();receipt=$null}}}}
+}}
+function Get-ScheduledTask {{ [pscustomobject]@{{Settings=[pscustomobject]@{{Enabled=$true}}}} }}
+function Disable-ScheduledTask {{ $script:guardDisabled++ }}; function Stop-ScheduledTask {{ }}
+function Enable-ScheduledTask {{ $script:guardEnabled++ }}
+function Stop-VerifiedWatchdogOwner {{ $script:verifiedStops++ }}
+function Stop-WatchdogExactProcessTree {{ $script:exactStops++; return 'TERMINATED' }}
+function Register-AutoStartTask {{ }}
+$legacy=[pscustomobject]@{{process_id=301;process_start_token='2026-09-01T00:01:00+00:00';watchdog_owner_state='LEGACY_SINGLE_OWNER'}}
+function Get-VerifiedWatchdogOwners {{ param([switch]$AllowLegacySingleOwner);$script:allowLegacy=[bool]$AllowLegacySingleOwner;@($legacy) }}
+function Get-RuntimeControlBundleIdentityAtRoot {{ [pscustomobject]@{{source_revision=('a'*40)}} }}
+function Assert-CurrentWatchdogHeartbeat {{ $script:heartbeats++;[pscustomobject]@{{observed_at="beat-$script:heartbeats"}} }}
+function Start-Sleep {{ }}
+$result=Invoke-WatchdogOwnershipRepair
+Write-Output "$($result.status)|$script:exactStops|$script:verifiedStops|$script:allowLegacy|$script:heartbeats|$($result.guard_enabled)|$script:guardEnabled"
+'''
+    assert _run_powershell(powershell, command) == (
+        "LEGACY_REPAIRED_REQUIRES_CONTROL_PLANE_INSTALL|1|0|True|2|False|0"
+    )
+
+
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+def test_inventory_classifies_only_same_user_receiptless_orphan_as_legacy(
+    tmp_path: Path, powershell: str,
+) -> None:
+    if shutil.which(powershell) is None:
+        pytest.skip(f"{powershell} unavailable")
+    runtime = tmp_path / "runtime"
+    repository = tmp_path / "repository"
+    runtime.mkdir()
+    repository.mkdir()
+    control = repository / ".local" / "runtime-control" / "xauusd_control_center.ps1"
+    command = rf'''
+$null=. '{CONTROL_CENTER}' -Action CodeRevision -RuntimeRoot '{runtime}' -RepositoryRoot '{repository}'
+$sameSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$candidate=[pscustomobject]@{{ProcessId=101;Name='powershell.exe';CommandLine='powershell -File "{control}" -Action Watchdog -RuntimeRoot "{runtime}" -RepositoryRoot "{repository}"'}}
+function Get-CimInstance {{ param($ClassName,$Filter);if($Filter){{return $null}};@($candidate) }}
+$script:identitySid=$sameSid
+function Get-ControlPlaneProcessIdentity {{ param($ProcessId);if([int]$ProcessId-eq 101){{[pscustomobject]@{{process_id=101;parent_process_id=201;process_start_token='token';name='powershell.exe';command_line=$candidate.CommandLine;owner_sid=$script:identitySid}}}}else{{$null}} }}
+function Read-WatchdogOwnerReceipt {{ return $null }}
+$same=Get-WatchdogOwnershipInventory
+$script:identitySid='S-1-5-21-999'
+$other=Get-WatchdogOwnershipInventory
+function Read-WatchdogOwnerReceipt {{ [pscustomobject]@{{schema_version='watchdog-owner-v2'}} }}
+$script:identitySid=$sameSid
+$withReceipt=Get-WatchdogOwnershipInventory
+function Read-WatchdogOwnerReceipt {{ throw 'malformed receipt' }}
+$receiptUnreadable=Get-WatchdogOwnershipInventory
+Write-Output "$($same.legacy_orphaned.Count)|$($same.unknown.Count)|$($other.legacy_orphaned.Count)|$($other.unknown.Count)|$($withReceipt.legacy_orphaned.Count)|$($withReceipt.unknown.Count)|$($receiptUnreadable.legacy_orphaned.Count)|$($receiptUnreadable.unknown.Count)"
+'''
+    assert _run_powershell(powershell, command) == "1|0|0|1|0|1|0|1"
