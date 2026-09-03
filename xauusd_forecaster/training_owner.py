@@ -13,13 +13,14 @@ from pathlib import Path
 from .execution_learning import train_due_execution
 from .forward_ledger import ForwardLedger
 from .news_contract_migration import append_missing_current_news_snapshots
-from .sqlite_wal import open_forward_writer_connection
+from .sqlite_wal import is_forward_sqlite_contention, open_forward_writer_connection
 from .training_v2 import train_due_v2
 
 
 UTC = timezone.utc
 LEASE_SECONDS = 15 * 60
 LEASE_HEARTBEAT_SECONDS = 30.0
+BACKGROUND_REQUEST_BUSY_TIMEOUT_MS = 100
 
 
 def _windows_process_start_token(process_id: int) -> tuple[str | None, bool | None]:
@@ -126,21 +127,32 @@ def install_training_owner_schema(connection) -> None:
 
 def request_background_training(
     connection, cutoff: datetime, *, reconcile: bool = False, clock=None,
-) -> None:
+) -> str:
     """Persist coalesced work; requests arriving during a lease trigger one rerun."""
     now = (clock or (lambda: datetime.now(UTC)))().isoformat()
-    with connection:
-        install_training_owner_schema(connection)
-        connection.execute(
-            """UPDATE background_training_owner_v1 SET
-                 requested_at=?, cutoff_at=?,
-                 available_at=CASE WHEN state='RUNNING' THEN available_at ELSE ? END,
-                 reconcile=max(reconcile, ?),
-                 rerun_requested=CASE WHEN state='RUNNING' THEN 1 ELSE rerun_requested END,
-                 state=CASE WHEN state='RUNNING' THEN state ELSE 'PENDING' END
-               WHERE id=1""",
-            (now, cutoff.isoformat(), now, int(reconcile)),
-        )
+    previous_timeout = int(connection.execute("PRAGMA busy_timeout").fetchone()[0])
+    connection.execute(f"PRAGMA busy_timeout={BACKGROUND_REQUEST_BUSY_TIMEOUT_MS}")
+    try:
+        with connection:
+            install_training_owner_schema(connection)
+            connection.execute(
+                """UPDATE background_training_owner_v1 SET
+                     requested_at=?, cutoff_at=?,
+                     available_at=CASE WHEN state='RUNNING' THEN available_at ELSE ? END,
+                     reconcile=max(reconcile, ?),
+                     rerun_requested=CASE WHEN state='RUNNING' THEN 1 ELSE rerun_requested END,
+                     state=CASE WHEN state='RUNNING' THEN state ELSE 'PENDING' END
+                   WHERE id=1""",
+                (now, cutoff.isoformat(), now, int(reconcile)),
+            )
+    except sqlite3.Error as exc:
+        connection.rollback()
+        if is_forward_sqlite_contention(exc):
+            return "DEFERRED"
+        raise
+    finally:
+        connection.execute(f"PRAGMA busy_timeout={previous_timeout}")
+    return "REQUESTED"
 
 
 class BackgroundTrainingOwner:
@@ -199,8 +211,8 @@ class BackgroundTrainingOwner:
         # Schema installers and prior read-model work may leave an implicit
         # transaction open on this owner-only connection.
         connection.commit()
-        connection.execute("BEGIN IMMEDIATE")
         try:
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT * FROM background_training_owner_v1 WHERE id=1"
             ).fetchone()
@@ -249,6 +261,11 @@ class BackgroundTrainingOwner:
             )
             connection.commit()
             return {"cutoff_at": row["cutoff_at"], "reconcile": bool(row["reconcile"])}
+        except sqlite3.Error as exc:
+            connection.rollback()
+            if is_forward_sqlite_contention(exc):
+                return None
+            raise
         except BaseException:
             connection.rollback()
             raise
@@ -296,7 +313,9 @@ class BackgroundTrainingOwner:
         self._lease_stop = None
         self._lease_thread = None
 
-    def _complete(self, connection, error: str | None) -> None:
+    def _complete(
+        self, connection, error: str | None, *, durable_rerun: bool = False,
+    ) -> None:
         with connection:
             row = connection.execute(
                 """SELECT rerun_requested,lease_owner
@@ -305,7 +324,7 @@ class BackgroundTrainingOwner:
             if row is None or row["lease_owner"] != self.owner_id:
                 return
             rerun = bool(row and row["rerun_requested"])
-            pending = rerun or error is not None
+            pending = rerun or durable_rerun or error is not None
             available_at = (
                 (self.clock() + timedelta(seconds=30)).isoformat()
                 if error is not None else self.clock().isoformat()
@@ -327,6 +346,7 @@ class BackgroundTrainingOwner:
     def _run(self) -> None:
         ledger = ForwardLedger(self.ledger_path)
         install_training_owner_schema(ledger.connection)
+        ledger.connection.commit()
         try:
             while not self._stop.is_set():
                 job = self._claim(ledger.connection)
@@ -335,6 +355,7 @@ class BackgroundTrainingOwner:
                     self._wake.clear()
                     continue
                 error = None
+                migration = None
                 self._start_lease_keeper()
                 try:
                     cutoff = datetime.fromisoformat(str(job["cutoff_at"]))
@@ -358,7 +379,11 @@ class BackgroundTrainingOwner:
                     }, sort_keys=True), flush=True)
                 finally:
                     self._stop_lease_keeper()
-                self._complete(ledger.connection, error)
+                self._complete(
+                    ledger.connection,
+                    error,
+                    durable_rerun=bool(migration and migration.get("remaining", 0)),
+                )
         finally:
             self._stop_lease_keeper()
             ledger.close()

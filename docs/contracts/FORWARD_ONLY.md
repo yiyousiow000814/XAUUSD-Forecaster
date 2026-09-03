@@ -253,6 +253,12 @@ are immutable model-update fields.
   valid materialized set and dirty evidence intact. Authoritative immutable
   evidence remains the source of truth; the decision-clock owner never rebuilds
   training state.
+- Training-row JSON and hashes are constructed before the materialization
+  writer transaction. Incremental materialization retains its 200-source-row
+  ceiling and commits the corresponding rows, dirty acknowledgements, and state
+  transition atomically. Chronological crossfit trains outside SQLite writer
+  ownership and persists one bounded fold at a time; reruns consume the exact
+  immutable cache rather than replacing accepted fold rows.
 - A restart with a complete active current-contract generation begins the
   decision clock immediately and schedules reconciliation on the durable
   background owner. A missing or incompatible generation remains fail-closed

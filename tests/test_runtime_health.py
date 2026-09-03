@@ -96,3 +96,25 @@ def test_runtime_heartbeat_manual_lifecycle_supports_supervised_loops(
     assert payload["service"] == "collector"
     assert payload["state"] == "RUNNING"
     assert payload["work_items"] == 4
+
+
+def test_runtime_heartbeat_exposes_and_clears_database_contention(tmp_path) -> None:
+    path = tmp_path / "collector-status.json"
+    pulse = RuntimeHeartbeatPulse(
+        path, service="collector", interval_seconds=0.01,
+    )
+    pulse.start()
+    try:
+        pulse.update(
+            state="DATABASE_CONTENTION",
+            last_error="SQLITE_CONTENTION:append_clock_event",
+        )
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["state"] == "DATABASE_CONTENTION"
+        assert payload["last_error"] == "SQLITE_CONTENTION:append_clock_event"
+        pulse.update(state="RUNNING", clear_error=True)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["state"] == "RUNNING"
+        assert payload["last_error"] is None
+    finally:
+        pulse.close()

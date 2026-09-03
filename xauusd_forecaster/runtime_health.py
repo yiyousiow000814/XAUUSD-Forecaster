@@ -20,6 +20,7 @@ class RuntimeHeartbeatPulse:
         service: str,
         state: str = "RUNNING",
         work_items: int = 0,
+        last_error: str | None = None,
         interval_seconds: float = 30.0,
     ) -> None:
         if interval_seconds <= 0:
@@ -29,6 +30,7 @@ class RuntimeHeartbeatPulse:
         self.interval_seconds = float(interval_seconds)
         self._state = state
         self._work_items = int(work_items)
+        self._last_error = last_error
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -37,11 +39,13 @@ class RuntimeHeartbeatPulse:
         with self._lock:
             state = self._state
             work_items = self._work_items
+            last_error = self._last_error
         write_runtime_heartbeat(
             self.path,
             service=self.service,
             state=state,
             work_items=work_items,
+            last_error=last_error,
         )
 
     def _run(self) -> None:
@@ -53,12 +57,18 @@ class RuntimeHeartbeatPulse:
         *,
         work_items: int | None = None,
         state: str | None = None,
+        last_error: str | None = None,
+        clear_error: bool = False,
     ) -> None:
         with self._lock:
             if work_items is not None:
                 self._work_items = int(work_items)
             if state is not None:
                 self._state = state
+            if clear_error:
+                self._last_error = None
+            elif last_error is not None:
+                self._last_error = str(last_error)
         self._write()
 
     def __enter__(self) -> RuntimeHeartbeatPulse:
@@ -94,13 +104,14 @@ def write_runtime_heartbeat(
     service: str,
     state: str = "RUNNING",
     work_items: int = 0,
+    last_error: str | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps({
         "service": service,
         "state": state,
         "last_success": datetime.now(UTC).isoformat(),
-        "last_error": None,
+        "last_error": last_error,
         "work_items": work_items,
     })
     temporary: Path | None = None

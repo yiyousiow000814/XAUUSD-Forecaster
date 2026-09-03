@@ -287,13 +287,8 @@ def refresh_training_materialization_state(ledger, cutoff: datetime) -> dict:
             )
         ]
         rows = _build_training_rows(ledger, cutoff)
-        try:
-            _replace_materialized_training_rows(
-                ledger, rows, observed_dirty, now,
-            )
-        except Exception:
-            ledger.connection.rollback()
-            raise
+        persisted_rows = [_persisted_training_row(row, now) for row in rows]
+        materialization_action = "REPLACE"
         generation = int(previous["rebuild_generation"] if previous else 0) + 1
         mode = "FULL"
         processed = len(rows)
@@ -367,28 +362,35 @@ def refresh_training_materialization_state(ledger, cutoff: datetime) -> dict:
         rows = (
             _build_training_rows(ledger, cutoff, dirty_ids) if dirty_ids else []
         )
-        try:
-            _update_materialized_training_rows(
-                ledger, observed_dirty, rows, now,
-            )
-        except Exception:
-            ledger.connection.rollback()
-            raise
+        persisted_rows = [_persisted_training_row(row, now) for row in rows]
+        materialization_action = "UPDATE" if dirty_ids else "NONE"
         generation = int(previous["rebuild_generation"])
         mode = "INCREMENTAL" if dirty_ids else "NO_CHANGE"
         processed = len(dirty_ids)
         if dirty_ids:
-            latest = ledger.connection.execute(
-                """SELECT decision_time,source_decision_id
-                     FROM materialized_training_rows_v1
-                    ORDER BY decision_time DESC,source_decision_id DESC LIMIT 1"""
+            placeholders = ",".join("?" for _ in dirty_ids)
+            latest_existing = ledger.connection.execute(
+                f"""SELECT decision_time,source_decision_id
+                      FROM materialized_training_rows_v1
+                     WHERE source_decision_id NOT IN ({placeholders})
+                     ORDER BY decision_time DESC,source_decision_id DESC LIMIT 1""",
+                dirty_ids,
             ).fetchone()
+            latest_candidates = [
+                (str(row["decision_time"]), str(row["decision_id"])) for row in rows
+            ]
+            if latest_existing:
+                latest_candidates.append((
+                    str(latest_existing["decision_time"]),
+                    str(latest_existing["source_decision_id"]),
+                ))
+            latest = max(latest_candidates) if latest_candidates else None
             snapshot = {
                 "row_count": (
                     int(previous["row_count"]) - old_materialized_count + len(rows)
                 ),
-                "cursor_decision_time": latest["decision_time"] if latest else None,
-                "cursor_decision_id": latest["source_decision_id"] if latest else None,
+                "cursor_decision_time": latest[0] if latest else None,
+                "cursor_decision_id": latest[1] if latest else None,
             }
             receipt_hash = canonical_hash((
                 str(previous["materialization_receipt_hash"]),
@@ -404,6 +406,14 @@ def refresh_training_materialization_state(ledger, cutoff: datetime) -> dict:
             }
             receipt_hash = str(previous["materialization_receipt_hash"])
     with ledger.connection:
+        if materialization_action == "REPLACE":
+            _replace_materialized_training_rows(
+                ledger, persisted_rows, observed_dirty,
+            )
+        elif materialization_action == "UPDATE":
+            _update_materialized_training_rows(
+                ledger, observed_dirty, persisted_rows,
+            )
         ledger.connection.execute(
             """INSERT INTO training_materialization_state_v1
             VALUES(1,?,?,?,?,'CLEAN',?,?,?,?,?)
@@ -456,9 +466,8 @@ def _acknowledge_dirty_revisions(ledger, observed_dirty: list[tuple[str, int]]) 
 
 
 def _replace_materialized_training_rows(
-    ledger, rows: list[dict], observed_dirty: list[tuple[str, int]], now: str,
+    ledger, persisted: list[tuple], observed_dirty: list[tuple[str, int]],
 ) -> None:
-    persisted = [_persisted_training_row(row, now) for row in rows]
     ledger.connection.execute("DELETE FROM materialized_training_rows_v1")
     ledger.connection.executemany(
         """INSERT INTO materialized_training_rows_v1
@@ -471,13 +480,12 @@ def _replace_materialized_training_rows(
 
 
 def _update_materialized_training_rows(
-    ledger, observed_dirty: list[tuple[str, int]], rows: list[dict], now: str,
+    ledger, observed_dirty: list[tuple[str, int]], persisted: list[tuple],
 ) -> None:
     if not observed_dirty:
         return
     source_ids = [source_id for source_id, _ in observed_dirty]
     placeholders = ",".join("?" for _ in source_ids)
-    persisted = [_persisted_training_row(row, now) for row in rows]
     ledger.connection.execute(
         f"DELETE FROM materialized_training_rows_v1 "
         f"WHERE source_decision_id IN ({placeholders})",
@@ -697,9 +705,9 @@ def chronological_crossfit_market(ledger, rows: list[dict], artifact_root: Path,
         )
         values = artifact.predict(np.asarray([row["market"] for row in test]))
         fold = start // fold_size
+        new_records = []
         for row, predicted, cached_record in zip(test, values, cached, strict=True):
             if cached_record is not None:
-                predictions.append(_persisted_crossfit_record(cached_record))
                 continue
             residual = float(row["target"] - predicted)
             record = {
@@ -708,13 +716,36 @@ def chronological_crossfit_market(ledger, rows: list[dict], artifact_root: Path,
                 "prediction": float(predicted), "target": row["target"], "residual": residual,
                 "artifact_hash": artifact.artifact_hash,
             }
-            ledger.connection.execute(
+            new_records.append(record)
+        # Ridge fitting and prediction stay outside writer ownership.  One fold
+        # commits at most fold_size records, then the canonical persisted rows
+        # are read back so a crash/rerun resumes from immutable cache.
+        with ledger.connection:
+            ledger.connection.executemany(
                 "INSERT OR IGNORE INTO market_crossfit_predictions VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (row["decision_id"], CROSSFIT_VERSION, fold, record["training_cutoff"],
-                 record["purged_through"], record["prediction"], record["target"], residual,
-                 artifact.artifact_hash, created_at.isoformat()),
+                [
+                    (record["decision_id"], CROSSFIT_VERSION, record["fold"],
+                     record["training_cutoff"], record["purged_through"],
+                     record["prediction"], record["target"], record["residual"],
+                     record["artifact_hash"], created_at.isoformat())
+                    for record in new_records
+                ],
             )
-            predictions.append(record)
+        test_ids = [str(row["decision_id"]) for row in test]
+        placeholders = ",".join("?" for _ in test_ids)
+        canonical = {
+            str(record["source_decision_id"]): record
+            for record in ledger.connection.execute(
+                f"""SELECT * FROM market_crossfit_predictions
+                    WHERE crossfit_version=?
+                      AND source_decision_id IN ({placeholders})""",
+                [CROSSFIT_VERSION, *test_ids],
+            )
+        }
+        predictions.extend(
+            _persisted_crossfit_record(canonical[decision_id])
+            for decision_id in test_ids
+        )
     return predictions
 
 
@@ -1029,8 +1060,7 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
     market_version, market_artifact, market_path, market_hash = _write_market_artifact(
         training_rows, root, cutoff, stage
     )
-    with ledger.connection:
-        crossfit = chronological_crossfit_market(ledger, training_rows, root, now)
+    crossfit = chronological_crossfit_market(ledger, training_rows, root, now)
     crossfit_by_id = {row["decision_id"]: row for row in crossfit}
     core_residual = [
         row for row in news_training_rows if row["decision_id"] in crossfit_by_id

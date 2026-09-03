@@ -21,6 +21,21 @@ FORWARD_WAL_CHECKPOINT_SCHEMA = "xauusd.forward.wal-checkpoint.v1"
 FORWARD_WAL_CHECKPOINT_STATE = "wal-checkpoint-state.json"
 
 
+def is_forward_sqlite_contention(error: BaseException) -> bool:
+    """Identify only SQLite BUSY/LOCKED failures at the writer boundary."""
+    if not isinstance(error, sqlite3.Error):
+        return False
+    code = getattr(error, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return (code & 0xFF) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+    message = str(error).strip().lower()
+    return message in {
+        "database is locked",
+        "database table is locked",
+        "database schema is locked",
+    }
+
+
 def _digest(payload: dict[str, object]) -> str:
     return hashlib.sha256(json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
