@@ -60,6 +60,9 @@ function Register-CandidateFreePlanEvidence {
         workload_manifest = $proof.workload_manifest
         data_shape_contract = $proof.data_shape_contract
         cadence = $proof.cadence
+        migration_plan = $proof.migration_plan
+        production_calibration = $proof.production_calibration
+        proof_input_digests = $proof.proof_input_digests
         provider_limits_version = [string]$proof.provider_limits_version
     }
     $now = [DateTimeOffset]::UtcNow
@@ -871,14 +874,15 @@ function Test-ReleaseFreePlanBoundedProof {
     try {
         $contract = Get-Content -LiteralPath $LimitsPath -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseEvidenceJson
-        if ([string]$contract.schema_version -ne "release-free-plan-proof-v1" -or
+        if ([string]$contract.schema_version -ne "release-free-plan-proof-v2" -or
             [string]$Proof.provider_limits_version -cne
                 [string]$contract.provider_limits_version) {
             throw "FREE_PLAN_LIMITS_VERSION_MISMATCH"
         }
         foreach ($field in @(
             "worker_bundle_config", "sql_behavior", "workload_manifest",
-            "data_shape_contract", "cadence", "provider_limits_version"
+            "data_shape_contract", "cadence", "migration_plan",
+            "production_calibration", "proof_input_digests", "provider_limits_version"
         )) {
             if (-not $Proof.PSObject.Properties[$field]) {
                 throw "FREE_PLAN_INPUT_MISSING:$field"
@@ -887,25 +891,60 @@ function Test-ReleaseFreePlanBoundedProof {
         if ([string]$Proof.cadence.schema_version -ne "bounded-cadence-v1" -or
             -not [bool]$Proof.cadence.bounded -or
             [string]$Proof.workload_manifest.schema_version -ne
-                "release-workload-manifest-v1" -or
+                "release-workload-manifest-v2" -or
             [string]$Proof.worker_bundle_config.schema_version -ne
                 "worker-bundle-config-v1" -or
-            [string]$Proof.sql_behavior.schema_version -ne "sql-behavior-v1" -or
+            [string]$Proof.sql_behavior.schema_version -ne "sql-behavior-v2" -or
+            -not [bool]$Proof.sql_behavior.no_routine_accumulated_scan -or
             [string]$Proof.data_shape_contract.schema_version -ne
-                "d1-data-shape-v1") {
+                "d1-data-shape-v2" -or
+            [string]$Proof.migration_plan.schema_version -ne
+                "release-free-migration-plan-v1" -or
+            [string]$Proof.production_calibration.schema_version -ne
+                "production-usage-calibration-v1") {
             throw "FREE_PLAN_WORKLOAD_UNBOUNDED"
         }
-        foreach ($pair in @(
-            @($Proof.worker_bundle_config, @(
-                "compressed_bytes", "environment_variables", "static_assets")),
-            @($Proof.sql_behavior, @("max_d1_queries_per_invocation")),
-            @($Proof.data_shape_contract, @("database_bytes", "account_storage_bytes"))
+        $readBound = {
+            param([object]$Owner, [string]$Name)
+            if (-not $Owner -or -not $Owner.PSObject.Properties[$Name]) {
+                throw "FREE_PLAN_INPUT_MISSING:$Name"
+            }
+            $value = [decimal]0
+            if (-not [decimal]::TryParse(
+                    [string]$Owner.$Name,
+                    [Globalization.NumberStyles]::Integer,
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [ref]$value) -or
+                $value -lt 0 -or $value -gt [long]::MaxValue) {
+                throw "FREE_PLAN_INPUT_INVALID:$Name"
+            }
+            return [long]$value
+        }
+        $safeProduct = {
+            param([long]$Left, [long]$Right)
+            $value = [decimal]$Left * [decimal]$Right
+            if ($value -gt [long]::MaxValue) { throw "FREE_PLAN_INTEGER_OVERFLOW" }
+            return [long]$value
+        }
+        $safeAdd = {
+            param([long]$Left, [long]$Right)
+            $value = [decimal]$Left + [decimal]$Right
+            if ($value -gt [long]::MaxValue) { throw "FREE_PLAN_INTEGER_OVERFLOW" }
+            return [long]$value
+        }
+        foreach ($name in @(
+            "worker_bundle_config", "sql_behavior", "workload_manifest",
+            "data_shape_contract", "cadence", "migration_plan", "production_calibration"
         )) {
-            foreach ($name in @($pair[1])) {
-                if (-not $pair[0].PSObject.Properties[[string]$name] -or
-                    [long]$pair[0].$name -lt 0) {
-                    throw "FREE_PLAN_INPUT_INVALID:$name"
-                }
+            $digest = [string]$Proof.proof_input_digests.$name
+            if ($digest -notmatch '^[0-9a-f]{64}$') {
+                throw "FREE_PLAN_INPUT_DIGEST_INVALID:$name"
+            }
+            $canonical = ConvertTo-ReleaseEvidenceCanonicalObject -Value $Proof.$name
+            $actualDigest = Get-ReleaseEvidenceSha256 `
+                (ConvertTo-ReleaseEvidenceJson -Value $canonical)
+            if ($digest -cne $actualDigest) {
+                throw "FREE_PLAN_INPUT_DIGEST_MISMATCH:$name"
             }
         }
         $requests = [long]0; $rowsRead = [long]0; $rowsWritten = [long]0
@@ -918,85 +957,145 @@ function Test-ReleaseFreePlanBoundedProof {
         foreach ($producer in $producers) {
             if ([string]::IsNullOrWhiteSpace([string]$producer.id) -or
                 [string]$producer.id -notmatch '^[a-z][a-z0-9_-]{0,63}$' -or
-                [string]$producer.id -in $producerIds) {
+                [string]$producer.id -in $producerIds -or
+                [string]::IsNullOrWhiteSpace([string]$producer.execution_owner)) {
                 throw "FREE_PLAN_PRODUCER_ID_INVALID"
             }
             $producerIds += [string]$producer.id
+            $values = @{}
             foreach ($field in @(
                 "executions_per_day", "worker_requests_per_execution",
                 "d1_rows_read_per_execution", "d1_rows_written_per_execution",
                 "d1_queries_per_invocation", "subrequests_per_invocation"
             )) {
-                $value = [long]$producer.$field
-                if ($value -lt 0) { throw "FREE_PLAN_NEGATIVE_BOUND" }
+                $values[$field] = & $readBound $producer $field
             }
-            $executions = [long]$producer.executions_per_day
-            $requests += $executions * [long]$producer.worker_requests_per_execution
-            $rowsRead += $executions * [long]$producer.d1_rows_read_per_execution
-            $rowsWritten += $executions * [long]$producer.d1_rows_written_per_execution
-            $maximumQueries = [Math]::Max(
-                $maximumQueries, [long]$producer.d1_queries_per_invocation)
+            $requests = & $safeAdd $requests (& $safeProduct `
+                $values.executions_per_day $values.worker_requests_per_execution)
+            $rowsRead = & $safeAdd $rowsRead (& $safeProduct `
+                $values.executions_per_day $values.d1_rows_read_per_execution)
+            $rowsWritten = & $safeAdd $rowsWritten (& $safeProduct `
+                $values.executions_per_day $values.d1_rows_written_per_execution)
+            $maximumQueries = [Math]::Max($maximumQueries, $values.d1_queries_per_invocation)
             $maximumSubrequests = [Math]::Max(
-                $maximumSubrequests, [long]$producer.subrequests_per_invocation)
+                $maximumSubrequests, $values.subrequests_per_invocation)
         }
         $cadences = @($Proof.cadence.producers)
-        if ($cadences.Count -ne $producers.Count) {
-            throw "FREE_PLAN_CADENCE_MISMATCH"
-        }
+        if ($cadences.Count -ne $producers.Count) { throw "FREE_PLAN_CADENCE_MISMATCH" }
         foreach ($producer in $producers) {
             $cadence = @($cadences | Where-Object {
                 [string]$_.id -ceq [string]$producer.id
             })
             if ($cadence.Count -ne 1 -or
-                [long]$cadence[0].executions_per_day -ne
-                    [long]$producer.executions_per_day -or
-                [long]$cadence[0].interval_seconds -le 0) {
+                (& $readBound $cadence[0] "executions_per_day") -ne
+                    (& $readBound $producer "executions_per_day") -or
+                (& $readBound $cadence[0] "interval_seconds") -le 0) {
                 throw "FREE_PLAN_CADENCE_MISMATCH"
             }
         }
         $bundle = $Proof.worker_bundle_config
         $shape = $Proof.data_shape_contract
-        $sqlMaximum = [long]$Proof.sql_behavior.max_d1_queries_per_invocation
-        if ($sqlMaximum -ne $maximumQueries) {
-            throw "FREE_PLAN_SQL_WORKLOAD_MISMATCH"
+        $migration = $Proof.migration_plan
+        $sqlMaximum = & $readBound $Proof.sql_behavior "max_d1_queries_per_invocation"
+        if ($sqlMaximum -ne $maximumQueries) { throw "FREE_PLAN_SQL_WORKLOAD_MISMATCH" }
+        if (-not [bool]$shape.retention_plateau_bounded -or
+            -not [bool]$shape.no_local_authority_deletion -or
+            [string]$shape.storage_profile -notin @("D1_ONLY", "R2_STANDARD")) {
+            throw "FREE_PLAN_STORAGE_UNBOUNDED"
+        }
+        if ([bool]$migration.destructive -or -not [bool]$migration.stable_compatible) {
+            throw "FREE_PLAN_MIGRATION_UNSAFE"
         }
         $measurements = [ordered]@{
             worker_requests_per_day = $requests
-            worker_compressed_bytes = [long]$bundle.compressed_bytes
+            worker_compressed_bytes = & $readBound $bundle "compressed_bytes"
             worker_subrequests_per_invocation = $maximumSubrequests
-            worker_environment_variables = [long]$bundle.environment_variables
-            static_assets_per_version = [long]$bundle.static_assets
-            d1_database_bytes = [long]$shape.database_bytes
-            d1_account_storage_bytes = [long]$shape.account_storage_bytes
+            worker_environment_variables = & $readBound $bundle "environment_variables"
+            static_assets_per_version = & $readBound $bundle "static_assets"
+            d1_database_bytes = & $readBound $shape "current_database_bytes"
+            d1_account_storage_bytes = & $readBound $shape "account_storage_bytes"
             d1_queries_per_invocation = $sqlMaximum
             d1_rows_read_per_day = $rowsRead
             d1_rows_written_per_day = $rowsWritten
+            d1_pre_cutover_peak_bytes = & $readBound $shape "pre_cutover_peak_bytes"
+            d1_steady_state_bytes = & $readBound $shape "steady_state_bytes"
+            d1_projected_30_day_bytes = & $readBound $shape "projected_30_day_bytes"
+            migration_rows_read_per_day = & $readBound $migration "rows_read_per_day"
+            migration_rows_written_per_day = & $readBound $migration "rows_written_per_day"
         }
-        $breaches = @()
-        foreach ($name in $measurements.Keys) {
-            $limit = [long]$contract.limits.$name
-            if ($limit -le 0 -or [long]$measurements[$name] -gt $limit) {
-                $breaches += $name
+        $measurements.migration_day_rows_read = & $safeAdd `
+            $measurements.d1_rows_read_per_day $measurements.migration_rows_read_per_day
+        $measurements.migration_day_rows_written = & $safeAdd `
+            $measurements.d1_rows_written_per_day $measurements.migration_rows_written_per_day
+        foreach ($name in @("d1_rows_read_per_day", "d1_rows_written_per_day")) {
+            $null = & $readBound $Proof.production_calibration $name
+        }
+        $hardBreaches = @()
+        foreach ($name in @(
+            "worker_requests_per_day", "worker_compressed_bytes",
+            "worker_subrequests_per_invocation", "worker_environment_variables",
+            "static_assets_per_version", "d1_database_bytes", "d1_account_storage_bytes",
+            "d1_queries_per_invocation", "d1_rows_read_per_day", "d1_rows_written_per_day"
+        )) {
+            $limit = & $readBound $contract.limits $name
+            if ([long]$measurements[$name] -gt $limit) { $hardBreaches += $name }
+        }
+        if ($measurements.d1_projected_30_day_bytes -gt
+            (& $readBound $contract.limits "d1_database_bytes")) {
+            $hardBreaches += "d1_projected_30_day_bytes"
+        }
+        if ($measurements.migration_day_rows_read -gt
+            (& $readBound $contract.limits "d1_rows_read_per_day")) {
+            $hardBreaches += "migration_day_rows_read"
+        }
+        if ($measurements.migration_day_rows_written -gt
+            (& $readBound $contract.limits "d1_rows_written_per_day")) {
+            $hardBreaches += "migration_day_rows_written"
+        }
+        $targetBreaches = @()
+        foreach ($name in @(
+            "worker_requests_per_day", "worker_subrequests_per_invocation",
+            "d1_rows_read_per_day", "d1_rows_written_per_day"
+        )) {
+            if ([long]$measurements[$name] -gt (& $readBound $contract.internal_targets $name)) {
+                $targetBreaches += $name
             }
         }
+        if ($measurements.d1_pre_cutover_peak_bytes -gt
+            (& $readBound $contract.internal_targets "d1_pre_cutover_peak_bytes")) {
+            $targetBreaches += "d1_pre_cutover_peak_bytes"
+        }
+        if ($measurements.d1_steady_state_bytes -gt
+            (& $readBound $contract.internal_targets "d1_steady_state_bytes")) {
+            $targetBreaches += "d1_steady_state_bytes"
+        }
+        $breaches = @($hardBreaches + $targetBreaches | Select-Object -Unique)
         return [pscustomobject][ordered]@{
-            schema_version = "release-free-plan-qualification-v1"
+            schema_version = "release-free-plan-qualification-v2"
             state = if ($breaches.Count -eq 0) { "PASSED" } else { "BLOCKED" }
-            reason = if ($breaches.Count -eq 0) { "BOUNDED_PROOF_PASSED" } else {
+            reason = if ($breaches.Count -eq 0) { "CANDIDATE_TARGET_PROOF_PASSED" } else {
                 "FREE_PLAN_LIMIT_EXCEEDED:" + ($breaches -join ",")
             }
             measurements = [pscustomobject]$measurements
             limits = $contract.limits
+            internal_targets = $contract.internal_targets
             producer_count = $producers.Count
+            production_calibration_over_limit = (
+                (& $readBound $Proof.production_calibration "d1_rows_read_per_day") -gt
+                    (& $readBound $contract.limits "d1_rows_read_per_day") -or
+                (& $readBound $Proof.production_calibration "d1_rows_written_per_day") -gt
+                    (& $readBound $contract.limits "d1_rows_written_per_day"))
         }
     } catch {
         return [pscustomobject][ordered]@{
-            schema_version = "release-free-plan-qualification-v1"
+            schema_version = "release-free-plan-qualification-v2"
             state = "BLOCKED"
             reason = [string]$_.Exception.Message
             measurements = $null
             limits = $null
+            internal_targets = $null
             producer_count = 0
+            production_calibration_over_limit = $false
         }
     }
 }

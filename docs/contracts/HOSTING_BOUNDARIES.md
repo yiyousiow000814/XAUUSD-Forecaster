@@ -135,8 +135,8 @@
   serialized with all cleanup callers, survives producer and machine restart,
   and fails closed on budget exhaustion or clock regression. A claim lost to
   installer or producer death may delay cleanup but cannot be reused. Recovery
-  cleanup is limited to eight 1,280-row reservations (10,240 deletion writes,
-  plus at most eight ledger-row writes) per UTC day. Debt therefore remains
+  cleanup is limited to one 1,280-row reservation (1,280 deletion writes,
+  plus at most one ledger-row write) per UTC day. Debt therefore remains
   bounded independently from recurring Free-plan work; temporary Paid capacity
   is never cleanup authority.
 - A producer may abandon only the staging generation recorded in its own
@@ -186,6 +186,18 @@
   accumulating execution-time drift, while missed periods coalesce instead of
   creating a catch-up burst. Restarting the synchronizer must not collapse those
   independent cadences into one upload burst.
+- Operator retry presentation is a digest-owned delta mirror. An unchanged
+  authoritative scheduler snapshot creates no Worker request and no D1 write;
+  a changed snapshot advances at most three job mutations per invocation and
+  persists its local source digest only after the remote mirror reports exact
+  convergence. Restart resumes that delta instead of replacing all retained
+  jobs.
+- Learning-history pages use a composite resource/model-identity/time index and
+  an exact materialized count maintained at the D1 write boundary. Page reads
+  fetch at most `limit + 1` rows before byte bounding; visitor pagination must
+  not scan or deserialize the accumulated learning ledger. The additional
+  index and count maintenance are included in the recurring write and storage
+  capacity proof.
 - The audit landing resource is a fixed summary contract. Daily Brief bodies,
   decision inspection rows, and storyline presentation detail are separate
   lazy snapshots with independent item and serialized-byte bounds. Local

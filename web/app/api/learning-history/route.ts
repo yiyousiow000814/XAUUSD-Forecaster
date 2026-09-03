@@ -165,33 +165,50 @@ async function pagedRecords(binding: D1Database, url: URL) {
   const limit = Math.min(MAX_PAGE_ROWS, Math.max(1, Number(url.searchParams.get("limit")) || 6));
   const cursor = decodeCursor(url.searchParams.get("cursor"));
   const identityClause = identity ? "AND json_extract(payload,'$.model_identity')=?" : "";
+  const pageIdentityClause = identity
+    ? "AND json_extract(lr.payload,'$.model_identity')=?" : "";
   const positionClause = cursor
-    ? "AND (sort_epoch<? OR (sort_epoch=? AND record_key<?))" : "";
-  const values: unknown[] = [resource];
+    ? "AND (lr.sort_epoch<? OR (lr.sort_epoch=? AND lr.record_key<?))" : "";
+  const totalIdentity = identity || "";
+  const values: unknown[] = [resource, totalIdentity];
+  const watermarkSql = cursor
+    ? "SELECT ? sort_epoch,? record_key"
+    : `SELECT sort_epoch,record_key FROM learning_records
+       WHERE resource=? ${identityClause}
+       ORDER BY sort_epoch DESC,record_key DESC LIMIT 1`;
+  if (cursor) {
+    values.push(cursor.watermarkEpoch, cursor.watermarkKey);
+  } else {
+    values.push(resource);
+    if (identity) values.push(identity);
+  }
+  values.push(resource);
   if (identity) values.push(identity);
   if (cursor) values.push(
-    cursor.watermarkEpoch, cursor.watermarkKey,
     cursor.positionEpoch, cursor.positionEpoch, cursor.positionKey,
   );
+  values.push(limit + 1);
   const result = await binding.prepare(
-    `WITH source AS (
-       SELECT sort_epoch,record_key,payload FROM learning_records
-       WHERE resource=? ${identityClause}
+    `WITH total AS (
+       SELECT record_count FROM learning_record_counts
+       WHERE resource=? AND model_identity=?
      ), watermark AS (
-       ${cursor
-    ? "SELECT ? sort_epoch,? record_key"
-    : "SELECT sort_epoch,record_key FROM source ORDER BY sort_epoch DESC,record_key DESC LIMIT 1"}
-     ), base AS (
-       SELECT source.sort_epoch,source.record_key,source.payload FROM source,watermark
-       WHERE source.sort_epoch<watermark.sort_epoch
-          OR (source.sort_epoch=watermark.sort_epoch AND source.record_key<=watermark.record_key)
+       ${watermarkSql}
+     ), page_source AS (
+       SELECT lr.sort_epoch,lr.record_key,lr.payload
+       FROM learning_records lr,watermark
+       WHERE lr.resource=? ${pageIdentityClause}
+         AND (lr.sort_epoch<watermark.sort_epoch
+          OR (lr.sort_epoch=watermark.sort_epoch AND lr.record_key<=watermark.record_key))
+         ${positionClause}
+       ORDER BY lr.sort_epoch DESC,lr.record_key DESC LIMIT ?
      ), candidates AS (
        SELECT sort_epoch,record_key,payload,
               row_number() OVER (ORDER BY sort_epoch DESC,record_key DESC) sequence,
               sum(length(CAST(payload AS BLOB))+1) OVER (
                 ORDER BY sort_epoch DESC,record_key DESC
               ) running_bytes
-       FROM base WHERE 1=1 ${positionClause}
+       FROM page_source
      ), visible AS (
        SELECT sort_epoch,record_key,payload FROM candidates
        WHERE sequence<=? AND (running_bytes<=? OR sequence=1)
@@ -200,20 +217,20 @@ async function pagedRecords(binding: D1Database, url: URL) {
        COALESCE((SELECT json_group_array(json(payload)) FROM (
          SELECT payload FROM visible ORDER BY sort_epoch DESC,record_key DESC
        )),'[]') items_json,
-       (SELECT count(*) FROM base) total,
-       (SELECT count(*) FROM candidates) remaining,
+       COALESCE((SELECT record_count FROM total),0) total,
+       (SELECT count(*) FROM page_source) fetched_count,
        (SELECT count(*) FROM visible) visible_count,
        (SELECT sort_epoch FROM visible ORDER BY sort_epoch,record_key LIMIT 1) last_epoch,
        (SELECT record_key FROM visible ORDER BY sort_epoch,record_key LIMIT 1) last_key,
        (SELECT sort_epoch FROM watermark) watermark_epoch,
        (SELECT record_key FROM watermark) watermark_key`,
   ).bind(...values, limit, MAX_RESPONSE_BYTES).first<{
-    items_json: string; total: number; remaining: number; visible_count: number;
+    items_json: string; total: number; fetched_count: number; visible_count: number;
     last_epoch: number | null; last_key: string | null;
     watermark_epoch: number | null; watermark_key: string | null;
   }>();
-  if (!result) throw new Error("missing page result");
-  const hasMore = Number(result.remaining) > Number(result.visible_count);
+  if (!result) throw new Error("missing bounded learning page");
+  const hasMore = Number(result.fetched_count) > Number(result.visible_count);
   const watermark = result.watermark_epoch !== null && result.watermark_key
     ? { sort_epoch: Number(result.watermark_epoch), record_key: result.watermark_key } : null;
   const nextCursor = hasMore && result.last_epoch !== null && result.last_key && watermark

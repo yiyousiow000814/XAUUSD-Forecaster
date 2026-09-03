@@ -227,6 +227,7 @@ def configure_runtime_state(config: dict, state_root: Path) -> dict:
         "news_state_file": "dashboard-news-sync-state.json",
         "market_history_state_file": "dashboard-market-history-sync-state.json",
         "learning_history_state_file": "dashboard-learning-history-sync-state.json",
+        "operator_retry_state_file": "dashboard-operator-retry-sync-state.json",
         "news_evidence_state_file": "dashboard-news-evidence-sync-state.json",
         "resource_schedule_state_file": "dashboard-resource-schedule-state.json",
         "runtime_signal_file": "remote-main-signal.json",
@@ -309,6 +310,14 @@ def configured_targets(config: dict) -> list[dict]:
             Path(target.get(
                 "learning_history_state_file",
                 config["learning_history_state_file"],
+            )),
+            name,
+            legacy=scoped["legacy"],
+        ), state_root))
+        scoped["operator_retry_state_file"] = str(_validated_sync_state_path(_target_state_path(
+            Path(target.get(
+                "operator_retry_state_file",
+                config["operator_retry_state_file"],
             )),
             name,
             legacy=scoped["legacy"],

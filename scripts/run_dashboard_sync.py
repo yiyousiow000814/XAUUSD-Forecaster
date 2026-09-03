@@ -880,14 +880,34 @@ def _post_json(url: str, payload: bytes, config: dict) -> dict:
     return result
 
 
+def _sync_operator_retry_mirror(
+    items: object, worker_url: str, config: dict,
+) -> None:
+    jobs = items if isinstance(items, list) else []
+    payload = json.dumps(
+        {"action": "SYNC_JOBS", "items": jobs}, ensure_ascii=False,
+        allow_nan=False, separators=(",", ":"),
+    ).encode("utf-8")
+    source_digest = hashlib.sha256(payload).hexdigest()
+    state_path_value = config.get("operator_retry_state_file")
+    state_path = Path(state_path_value) if state_path_value else None
+    state = _read_news_sync_state(state_path) if state_path else {}
+    if state.get("source_digest") == source_digest:
+        return
+    result = _post_json(worker_url, payload, config)
+    if result.get("complete") is True and state_path:
+        _write_news_sync_state(state_path, {
+            "contract_version": "operator-retry-delta-v1",
+            "source_digest": source_digest,
+            "item_count": len(jobs),
+            "last_success": datetime.now(UTC).isoformat(),
+        })
+
+
 def _sync_operator_retries(_local_payload: dict, config: dict) -> None:
     local_jobs = _get_local_json(_local_retry_url(config, "/api/retry-jobs"))
     worker_url = _operator_retry_worker_url(config)
-    _post_json(
-        worker_url,
-        json.dumps({"action": "SYNC_JOBS", "items": local_jobs.get("items", [])}).encode(),
-        config,
-    )
+    _sync_operator_retry_mirror(local_jobs.get("items", []), worker_url, config)
     worker_id = _assistant_worker_id()
     processed = False
     for _ in range(OPERATOR_RETRY_COMMANDS_PER_CYCLE):
@@ -929,12 +949,8 @@ def _sync_operator_retries(_local_payload: dict, config: dict) -> None:
         # A command result and the scheduler mirror advance in the same bounded
         # sync pass; the browser need not wait for an unrelated later cycle.
         refreshed_jobs = _get_local_json(_local_retry_url(config, "/api/retry-jobs"))
-        _post_json(
-            worker_url,
-            json.dumps({
-                "action": "SYNC_JOBS", "items": refreshed_jobs.get("items", []),
-            }).encode(),
-            config,
+        _sync_operator_retry_mirror(
+            refreshed_jobs.get("items", []), worker_url, config,
         )
 
 

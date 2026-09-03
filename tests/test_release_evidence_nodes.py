@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -16,6 +17,7 @@ PERSISTENCE = ROOT / "scripts" / "control_center_persistence_gateway.ps1"
 CONTRACT = ROOT / "scripts" / "release-evidence-contract.json"
 OWNERSHIP = ROOT / "scripts" / "release-evidence-change-ownership.json"
 FREE_PLAN = ROOT / "scripts" / "release-free-plan-contract.json"
+FREE_CAPACITY_AUDIT = ROOT / "docs" / "audits" / "CLOUDFLARE_FREE_CAPACITY_2026_09_03.json"
 CONTROL = ROOT / "scripts" / "xauusd_control_center.ps1"
 CONTROL_OWNERS = tuple(sorted((ROOT / "scripts").glob("control_center_*.ps1")))
 
@@ -442,11 +444,11 @@ def test_free_plan_producer_recomputes_bounded_workload_and_fails_closed(
         shell,
         f"""
 $producers=@(
- [pscustomobject]@{{id='heartbeat';executions_per_day=2880;
+ [pscustomobject]@{{id='heartbeat';execution_owner='DashboardSync';executions_per_day=2880;
   worker_requests_per_execution=1;d1_rows_read_per_execution=4;
   d1_rows_written_per_execution=2;d1_queries_per_invocation=6;
   subrequests_per_invocation=6}},
- [pscustomobject]@{{id='history';executions_per_day=720;
+ [pscustomobject]@{{id='history';execution_owner='DashboardSync';executions_per_day=720;
   worker_requests_per_execution=1;d1_rows_read_per_execution=20;
   d1_rows_written_per_execution=25;d1_queries_per_invocation=4;
   subrequests_per_invocation=4}}
@@ -454,18 +456,25 @@ $producers=@(
 $proof=[pscustomobject][ordered]@{{
  worker_bundle_config=[pscustomobject]@{{schema_version='worker-bundle-config-v1';
   compressed_bytes=2500000;environment_variables=12;static_assets=300}};
- sql_behavior=[pscustomobject]@{{schema_version='sql-behavior-v1';max_d1_queries_per_invocation=6}};
- workload_manifest=[pscustomobject]@{{schema_version='release-workload-manifest-v1';producers=$producers}};
- data_shape_contract=[pscustomobject]@{{schema_version='d1-data-shape-v1';database_bytes=100000000;account_storage_bytes=100000000}};
+ sql_behavior=[pscustomobject]@{{schema_version='sql-behavior-v2';max_d1_queries_per_invocation=6;no_routine_accumulated_scan=$true}};
+ workload_manifest=[pscustomobject]@{{schema_version='release-workload-manifest-v2';producers=$producers}};
+ data_shape_contract=[pscustomobject]@{{schema_version='d1-data-shape-v2';current_database_bytes=100000000;account_storage_bytes=100000000;pre_cutover_peak_bytes=110000000;steady_state_bytes=90000000;projected_30_day_bytes=120000000;retention_plateau_bounded=$true;no_local_authority_deletion=$true;storage_profile='D1_ONLY'}};
  cadence=[pscustomobject]@{{schema_version='bounded-cadence-v1';bounded=$true;producers=@(
   [pscustomobject]@{{id='heartbeat';interval_seconds=30;executions_per_day=2880}},
   [pscustomobject]@{{id='history';interval_seconds=120;executions_per_day=720}})}};
- provider_limits_version='cloudflare-workers-free-2026-08'}}
+ migration_plan=[pscustomobject]@{{schema_version='release-free-migration-plan-v1';rows_read_per_day=1000;rows_written_per_day=1000;destructive=$false;stable_compatible=$true}};
+ production_calibration=[pscustomobject]@{{schema_version='production-usage-calibration-v1';d1_rows_read_per_day=7000000;d1_rows_written_per_day=130000}};
+ proof_input_digests=[pscustomobject]@{{worker_bundle_config=('a'*64);sql_behavior=('b'*64);workload_manifest=('c'*64);data_shape_contract=('d'*64);cadence=('e'*64);migration_plan=('f'*64);production_calibration=('0'*64)}};
+ provider_limits_version='cloudflare-workers-free-2026-09'}}
+foreach($name in @('worker_bundle_config','sql_behavior','workload_manifest','data_shape_contract','cadence','migration_plan','production_calibration')){{$canonical=ConvertTo-ReleaseEvidenceCanonicalObject $proof.$name;$proof.proof_input_digests.$name=Get-ReleaseEvidenceSha256 (ConvertTo-ReleaseEvidenceJson $canonical)}}
 $passed=Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} -Proof $proof
 $proof.workload_manifest.producers[1].d1_rows_written_per_execution=200
+$canonical=ConvertTo-ReleaseEvidenceCanonicalObject $proof.workload_manifest;$proof.proof_input_digests.workload_manifest=Get-ReleaseEvidenceSha256 (ConvertTo-ReleaseEvidenceJson $canonical)
 $blocked=Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} -Proof $proof
 $proof.workload_manifest.producers[1].d1_rows_written_per_execution=25
 $proof.cadence.producers[1].executions_per_day=719
+$canonical=ConvertTo-ReleaseEvidenceCanonicalObject $proof.workload_manifest;$proof.proof_input_digests.workload_manifest=Get-ReleaseEvidenceSha256 (ConvertTo-ReleaseEvidenceJson $canonical)
+$canonical=ConvertTo-ReleaseEvidenceCanonicalObject $proof.cadence;$proof.proof_input_digests.cadence=Get-ReleaseEvidenceSha256 (ConvertTo-ReleaseEvidenceJson $canonical)
 $mismatch=Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} -Proof $proof
 [ordered]@{{state=$passed.state;requests=$passed.measurements.worker_requests_per_day;
  rows_read=$passed.measurements.d1_rows_read_per_day;
@@ -482,6 +491,169 @@ $mismatch=Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} 
         "blocked": "BLOCKED",
         "mismatch": "FREE_PLAN_CADENCE_MISMATCH",
     }
+
+
+def test_free_capacity_audit_recomputes_conservative_candidate_totals() -> None:
+    audit = json.loads(FREE_CAPACITY_AUDIT.read_text(encoding="utf-8"))
+    limits = json.loads(FREE_PLAN.read_text(encoding="utf-8"))
+    producers = audit["candidate_recurring_model"]["producers"]
+
+    def total(field: str) -> int:
+        return sum(
+            item["executions_per_day"] * item[field]
+            for item in producers
+        )
+
+    recomputed = {
+        "worker_requests_per_day": total("worker_requests_per_execution"),
+        "d1_rows_read_per_day": total("d1_rows_read_per_execution"),
+        "d1_rows_written_per_day": total("d1_rows_written_per_execution"),
+        "max_d1_queries_per_invocation": max(
+            item["d1_queries_per_invocation"] for item in producers
+        ),
+        "max_subrequests_per_invocation": max(
+            item["subrequests_per_invocation"] for item in producers
+        ),
+    }
+    assert recomputed == audit["candidate_recurring_model"]["totals"]
+    assert audit["provider_limits_version"] == limits["provider_limits_version"]
+    for field in (
+        "worker_requests_per_day", "d1_rows_read_per_day",
+        "d1_rows_written_per_day",
+    ):
+        assert recomputed[field] <= limits["internal_targets"][field]
+    assert audit["storage_projection"]["pre_cutover_peak_bytes"] <= (
+        limits["internal_targets"]["d1_pre_cutover_peak_bytes"]
+    )
+    assert audit["storage_projection"]["bounded_steady_state_bytes"] <= (
+        limits["internal_targets"]["d1_steady_state_bytes"]
+    )
+    assert (
+        recomputed["d1_rows_read_per_day"]
+        + audit["migration"]["rows_read_per_utc_day"]
+        == audit["migration"]["combined_recurring_and_migration_rows_read"]
+        <= limits["limits"]["d1_rows_read_per_day"]
+    )
+    assert (
+        recomputed["d1_rows_written_per_day"]
+        + audit["migration"]["rows_written_per_utc_day"]
+        == audit["migration"]["combined_recurring_and_migration_rows_written"]
+        <= limits["limits"]["d1_rows_written_per_day"]
+    )
+    heavy = [
+        item for item in producers
+        if item["execution_owner"] == "DashboardSyncHeavyLane"
+    ]
+    assert sum(item["executions_per_day"] for item in heavy) == 2_880
+    cleanup = next(item for item in producers if item["id"] == "news-evidence-cleanup")
+    assert cleanup["executions_per_day"] * cleanup["d1_rows_written_per_execution"] == 1_281
+
+
+def test_free_plan_proof_rejects_duplicate_overflow_migration_and_storage_breaches(
+    tmp_path: Path,
+) -> None:
+    proof_path = tmp_path / "bounded-free-proof.json"
+    producer = {
+        "id": "bounded-sync",
+        "execution_owner": "DashboardSync",
+        "executions_per_day": 1_440,
+        "worker_requests_per_execution": 1,
+        "d1_rows_read_per_execution": 10,
+        "d1_rows_written_per_execution": 10,
+        "d1_queries_per_invocation": 5,
+        "subrequests_per_invocation": 5,
+    }
+    proof = {
+        "worker_bundle_config": {
+            "schema_version": "worker-bundle-config-v1",
+            "compressed_bytes": 2_000_000,
+            "environment_variables": 10,
+            "static_assets": 100,
+        },
+        "sql_behavior": {
+            "schema_version": "sql-behavior-v2",
+            "max_d1_queries_per_invocation": 5,
+            "no_routine_accumulated_scan": True,
+        },
+        "workload_manifest": {
+            "schema_version": "release-workload-manifest-v2",
+            "producers": [producer],
+        },
+        "data_shape_contract": {
+            "schema_version": "d1-data-shape-v2",
+            "current_database_bytes": 100_000_000,
+            "account_storage_bytes": 100_000_000,
+            "pre_cutover_peak_bytes": 110_000_000,
+            "steady_state_bytes": 90_000_000,
+            "projected_30_day_bytes": 120_000_000,
+            "retention_plateau_bounded": True,
+            "no_local_authority_deletion": True,
+            "storage_profile": "D1_ONLY",
+        },
+        "cadence": {
+            "schema_version": "bounded-cadence-v1",
+            "bounded": True,
+            "producers": [{
+                "id": producer["id"],
+                "interval_seconds": 60,
+                "executions_per_day": producer["executions_per_day"],
+            }],
+        },
+        "migration_plan": {
+            "schema_version": "release-free-migration-plan-v1",
+            "rows_read_per_day": 1_000,
+            "rows_written_per_day": 1_000,
+            "destructive": False,
+            "stable_compatible": True,
+        },
+        "production_calibration": {
+            "schema_version": "production-usage-calibration-v1",
+            "d1_rows_read_per_day": 7_000_000,
+            "d1_rows_written_per_day": 130_000,
+        },
+        "proof_input_digests": {},
+        "provider_limits_version": "cloudflare-workers-free-2026-09",
+    }
+    for name in (
+        "worker_bundle_config", "sql_behavior", "workload_manifest",
+        "data_shape_contract", "cadence", "migration_plan",
+        "production_calibration",
+    ):
+        value = proof[name]
+        if name in {"workload_manifest", "cadence"}:
+            value = {**value, "producers": value["producers"][0]}
+        canonical = json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8")
+        proof["proof_input_digests"][name] = hashlib.sha256(canonical).hexdigest()
+    proof_path.write_text(json.dumps(proof), encoding="utf-8")
+    output = _run_module(
+        tmp_path,
+        "powershell.exe",
+        f"""
+$base=Get-Content -LiteralPath {_ps_literal(proof_path)} -Raw -Encoding UTF8|ConvertFrom-Json
+function Copy-Proof{{$base|ConvertTo-Json -Depth 12|ConvertFrom-Json}}
+function Set-Digests($proof){{foreach($name in @('worker_bundle_config','sql_behavior','workload_manifest','data_shape_contract','cadence','migration_plan','production_calibration')){{$canonical=ConvertTo-ReleaseEvidenceCanonicalObject $proof.$name;$proof.proof_input_digests.$name=Get-ReleaseEvidenceSha256 (ConvertTo-ReleaseEvidenceJson $canonical)}}}}
+$proof=Copy-Proof;$proof.workload_manifest.producers=@($proof.workload_manifest.producers[0],$proof.workload_manifest.producers[0]);$proof.cadence.producers=@($proof.cadence.producers[0],$proof.cadence.producers[0]);Set-Digests $proof;$duplicate=(Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} -Proof $proof).reason
+$proof=Copy-Proof;$proof.migration_plan.rows_written_per_day=100001;Set-Digests $proof;$migration=(Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} -Proof $proof).reason
+$proof=Copy-Proof;$proof.migration_plan.rows_written_per_day=90000;Set-Digests $proof;$combinedMigration=(Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} -Proof $proof).reason
+$proof=Copy-Proof;$proof.data_shape_contract.pre_cutover_peak_bytes=400000001;Set-Digests $proof;$peak=(Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} -Proof $proof).reason
+$proof=Copy-Proof;$proof.data_shape_contract.projected_30_day_bytes=500000001;Set-Digests $proof;$projection=(Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} -Proof $proof).reason
+$proof=Copy-Proof;$proof.workload_manifest.producers[0].executions_per_day=[long]::MaxValue;$proof.workload_manifest.producers[0].worker_requests_per_execution=2;$proof.cadence.producers[0].executions_per_day=[long]::MaxValue;Set-Digests $proof;$overflow=(Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} -Proof $proof).reason
+$proof=Copy-Proof;$proof.workload_manifest.producers[0].d1_rows_read_per_execution=-1;Set-Digests $proof;$negative=(Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} -Proof $proof).reason
+$proof=Copy-Proof;Set-Digests $proof;$proof.proof_input_digests.sql_behavior=('9'*64);$digest=(Test-ReleaseFreePlanBoundedProof -LimitsPath {_ps_literal(FREE_PLAN)} -Proof $proof).reason
+[ordered]@{{duplicate=$duplicate;migration=$migration;combined_migration=$combinedMigration;peak=$peak;projection=$projection;overflow=$overflow;negative=$negative;digest=$digest}}|ConvertTo-Json -Compress
+""",
+    )
+    result = json.loads(output)
+    assert result["duplicate"] == "FREE_PLAN_PRODUCER_ID_INVALID"
+    assert "migration_day_rows_written" in result["migration"]
+    assert "migration_day_rows_written" in result["combined_migration"]
+    assert "d1_pre_cutover_peak_bytes" in result["peak"]
+    assert "d1_projected_30_day_bytes" in result["projection"]
+    assert result["overflow"] == "FREE_PLAN_INTEGER_OVERFLOW"
+    assert result["negative"] == "FREE_PLAN_INPUT_INVALID:d1_rows_read_per_execution"
+    assert result["digest"] == "FREE_PLAN_INPUT_DIGEST_MISMATCH:sql_behavior"
 
 
 @pytest.mark.parametrize("shell", ("powershell.exe", "pwsh.exe"))
@@ -616,6 +788,7 @@ def test_controller_registers_exact_candidate_free_plan_proof(
     }
     producer = {
         "id": "bounded-sync",
+        "execution_owner": "DashboardSync",
         "executions_per_day": 1440,
         "worker_requests_per_execution": 1,
         "d1_rows_read_per_execution": 10,
@@ -623,7 +796,7 @@ def test_controller_registers_exact_candidate_free_plan_proof(
         "d1_queries_per_invocation": 5,
         "subrequests_per_invocation": 5,
     }
-    proof_path.write_text(json.dumps({
+    proof = {
         "validation_key": candidate["validation_key"],
         "candidate": candidate,
         "worker_bundle_config": {
@@ -633,17 +806,24 @@ def test_controller_registers_exact_candidate_free_plan_proof(
             "static_assets": 100,
         },
         "sql_behavior": {
-            "schema_version": "sql-behavior-v1",
+            "schema_version": "sql-behavior-v2",
             "max_d1_queries_per_invocation": 5,
+            "no_routine_accumulated_scan": True,
         },
         "workload_manifest": {
-            "schema_version": "release-workload-manifest-v1",
+            "schema_version": "release-workload-manifest-v2",
             "producers": [producer],
         },
         "data_shape_contract": {
-            "schema_version": "d1-data-shape-v1",
-            "database_bytes": 100_000_000,
+            "schema_version": "d1-data-shape-v2",
+            "current_database_bytes": 100_000_000,
             "account_storage_bytes": 100_000_000,
+            "pre_cutover_peak_bytes": 110_000_000,
+            "steady_state_bytes": 90_000_000,
+            "projected_30_day_bytes": 120_000_000,
+            "retention_plateau_bounded": True,
+            "no_local_authority_deletion": True,
+            "storage_profile": "D1_ONLY",
         },
         "cadence": {
             "schema_version": "bounded-cadence-v1",
@@ -654,8 +834,34 @@ def test_controller_registers_exact_candidate_free_plan_proof(
                 "executions_per_day": producer["executions_per_day"],
             }],
         },
-        "provider_limits_version": "cloudflare-workers-free-2026-08",
-    }), encoding="utf-8")
+        "migration_plan": {
+            "schema_version": "release-free-migration-plan-v1",
+            "rows_read_per_day": 1_000,
+            "rows_written_per_day": 1_000,
+            "destructive": False,
+            "stable_compatible": True,
+        },
+        "production_calibration": {
+            "schema_version": "production-usage-calibration-v1",
+            "d1_rows_read_per_day": 7_000_000,
+            "d1_rows_written_per_day": 130_000,
+        },
+        "proof_input_digests": {},
+        "provider_limits_version": "cloudflare-workers-free-2026-09",
+    }
+    for name in (
+        "worker_bundle_config", "sql_behavior", "workload_manifest",
+        "data_shape_contract", "cadence", "migration_plan",
+        "production_calibration",
+    ):
+        value = proof[name]
+        if name in {"workload_manifest", "cadence"}:
+            value = {**value, "producers": value["producers"][0]}
+        canonical = json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8")
+        proof["proof_input_digests"][name] = hashlib.sha256(canonical).hexdigest()
+    proof_path.write_text(json.dumps(proof), encoding="utf-8")
     control = ROOT / "scripts" / "xauusd_control_center.ps1"
     output = _run_module(
         tmp_path,

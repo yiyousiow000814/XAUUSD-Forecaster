@@ -102,7 +102,8 @@ def test_configured_targets_rejects_every_state_path_outside_runtime_root(
     monkeypatch.setenv("CLOUDFLARE_INGEST_TOKEN", "cloudflare-token")
     state_keys = (
         "learning_state_file", "news_state_file", "market_history_state_file",
-        "learning_history_state_file", "news_evidence_state_file",
+        "learning_history_state_file", "operator_retry_state_file",
+        "news_evidence_state_file",
         "resource_schedule_state_file",
     )
     for state_key in state_keys:

@@ -16,6 +16,20 @@ export class OperatorRetryInputError extends Error {
   }
 }
 
+// A full 200-row mirror can change at once after an offline period. Drain that
+// delta across control cycles instead of spending an unbounded share of the
+// account's daily D1 write allowance in one catch-up burst.
+export const OPERATOR_RETRY_SYNC_MUTATIONS_PER_INVOCATION = 1;
+
+const retryJobJson = (alias: string) => `json_object(
+  'job_id',${alias}.job_id,'task_type',${alias}.task_type,'title',${alias}.title,
+  'state',${alias}.state,'priority',${alias}.priority,
+  'available_at',${alias}.available_at,'attempt_count',${alias}.attempt_count,
+  'last_error',${alias}.last_error,'last_failure_at',${alias}.last_failure_at,
+  'lease_expires_at',${alias}.lease_expires_at,'override_mode',${alias}.override_mode,
+  'override_requested_at',${alias}.override_requested_at,
+  'original_available_at',${alias}.original_available_at)`;
+
 const isoTime = (value: unknown, field: string) => {
   const text = String(value ?? "").trim();
   const epoch = Date.parse(text);
@@ -276,25 +290,33 @@ export async function syncOperatorRetryJobs(
   if (previous?.payload_digest === payloadDigest && Number(previous.item_count) === normalized.length) {
     return {
       count: normalized.length, accepted: normalized.length, written: 0, deleted: 0,
-      unchanged: true, synced_at: previous.synced_at,
+      unchanged: true, complete: true, synced_at: previous.synced_at,
     };
   }
   const syncedAt = now.toISOString();
   const generation = crypto.randomUUID();
+  const incomingSql = `SELECT value row,json_extract(value,'$.job_id') job_id
+    FROM json_each(?)`;
+  const changedSql = `SELECT incoming.row FROM incoming
+    LEFT JOIN operator_retry_jobs current ON current.job_id=incoming.job_id
+    WHERE current.job_id IS NULL OR ${retryJobJson("current")} IS NOT json(incoming.row)
+    ORDER BY incoming.job_id
+    LIMIT ${OPERATOR_RETRY_SYNC_MUTATIONS_PER_INVOCATION}`;
   const results = await binding.batch([
     binding.prepare(
-    `INSERT INTO operator_retry_jobs (
+    `WITH incoming AS (${incomingSql}), changed AS (${changedSql})
+     INSERT INTO operator_retry_jobs (
      job_id,task_type,title,state,priority,available_at,attempt_count,last_error,
      last_failure_at,lease_expires_at,override_mode,override_requested_at,
      original_available_at,synced_at,sync_generation)
-     SELECT json_extract(value,'$.job_id'),json_extract(value,'$.task_type'),
-       json_extract(value,'$.title'),json_extract(value,'$.state'),
-       json_extract(value,'$.priority'),json_extract(value,'$.available_at'),
-       json_extract(value,'$.attempt_count'),json_extract(value,'$.last_error'),
-       json_extract(value,'$.last_failure_at'),json_extract(value,'$.lease_expires_at'),
-       json_extract(value,'$.override_mode'),json_extract(value,'$.override_requested_at'),
-       json_extract(value,'$.original_available_at'),?,?
-     FROM json_each(?) WHERE true
+     SELECT json_extract(row,'$.job_id'),json_extract(row,'$.task_type'),
+       json_extract(row,'$.title'),json_extract(row,'$.state'),
+       json_extract(row,'$.priority'),json_extract(row,'$.available_at'),
+       json_extract(row,'$.attempt_count'),json_extract(row,'$.last_error'),
+       json_extract(row,'$.last_failure_at'),json_extract(row,'$.lease_expires_at'),
+       json_extract(row,'$.override_mode'),json_extract(row,'$.override_requested_at'),
+       json_extract(row,'$.original_available_at'),?,?
+     FROM changed WHERE true
      ON CONFLICT(job_id) DO UPDATE SET
        task_type=excluded.task_type,title=excluded.title,state=excluded.state,
        priority=excluded.priority,available_at=excluded.available_at,
@@ -302,23 +324,62 @@ export async function syncOperatorRetryJobs(
        last_failure_at=excluded.last_failure_at,lease_expires_at=excluded.lease_expires_at,
        override_mode=excluded.override_mode,override_requested_at=excluded.override_requested_at,
        original_available_at=excluded.original_available_at,synced_at=excluded.synced_at,
-       sync_generation=excluded.sync_generation`,
-    ).bind(syncedAt, generation, payload),
+       sync_generation=excluded.sync_generation
+     WHERE operator_retry_jobs.task_type IS NOT excluded.task_type
+        OR operator_retry_jobs.title IS NOT excluded.title
+        OR operator_retry_jobs.state IS NOT excluded.state
+        OR operator_retry_jobs.priority IS NOT excluded.priority
+        OR operator_retry_jobs.available_at IS NOT excluded.available_at
+        OR operator_retry_jobs.attempt_count IS NOT excluded.attempt_count
+        OR operator_retry_jobs.last_error IS NOT excluded.last_error
+        OR operator_retry_jobs.last_failure_at IS NOT excluded.last_failure_at
+        OR operator_retry_jobs.lease_expires_at IS NOT excluded.lease_expires_at
+        OR operator_retry_jobs.override_mode IS NOT excluded.override_mode
+        OR operator_retry_jobs.override_requested_at IS NOT excluded.override_requested_at
+        OR operator_retry_jobs.original_available_at IS NOT excluded.original_available_at`,
+    ).bind(payload, syncedAt, generation),
     binding.prepare(
-    "DELETE FROM operator_retry_jobs WHERE sync_generation<>?",
-    ).bind(generation),
+    `WITH incoming AS (${incomingSql}), changed AS (${changedSql})
+     DELETE FROM operator_retry_jobs
+     WHERE NOT EXISTS (SELECT 1 FROM changed)
+       AND job_id IN (
+         SELECT current.job_id FROM operator_retry_jobs current
+         WHERE NOT EXISTS (
+           SELECT 1 FROM incoming WHERE incoming.job_id=current.job_id
+         )
+         ORDER BY current.job_id
+         LIMIT ${OPERATOR_RETRY_SYNC_MUTATIONS_PER_INVOCATION}
+       )`,
+    ).bind(payload),
     binding.prepare(
       `INSERT INTO operator_retry_sync_state (id,payload_digest,item_count,synced_at)
-       VALUES (1,?,?,?) ON CONFLICT(id) DO UPDATE SET
+       SELECT 1,?,?,? WHERE
+         NOT EXISTS (
+           SELECT 1 FROM json_each(?) incoming
+           LEFT JOIN operator_retry_jobs current
+             ON current.job_id=json_extract(incoming.value,'$.job_id')
+           WHERE current.job_id IS NULL
+              OR ${retryJobJson("current")} IS NOT json(incoming.value)
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM operator_retry_jobs current
+           WHERE NOT EXISTS (
+             SELECT 1 FROM json_each(?) incoming
+             WHERE json_extract(incoming.value,'$.job_id')=current.job_id
+           )
+         )
+       ON CONFLICT(id) DO UPDATE SET
          payload_digest=excluded.payload_digest,item_count=excluded.item_count,
          synced_at=excluded.synced_at`,
-    ).bind(payloadDigest, normalized.length, syncedAt),
+    ).bind(payloadDigest, normalized.length, syncedAt, payload, payload),
   ]);
   return {
     count: normalized.length, accepted: normalized.length,
     written: Number(results[0].meta?.changes ?? 0),
     deleted: Number(results[1].meta?.changes ?? 0),
-    unchanged: false, synced_at: syncedAt,
+    unchanged: false,
+    complete: Number(results[2].meta?.changes ?? 0) > 0,
+    synced_at: Number(results[2].meta?.changes ?? 0) > 0 ? syncedAt : null,
   };
 }
 

@@ -5,6 +5,7 @@ import {
   activateNewsEvidenceSnapshot,
   cleanupNewsEvidenceSnapshots,
   NEWS_EVIDENCE_CLEANUP_DAILY_WRITE_RESERVATION,
+  NEWS_EVIDENCE_CLEANUP_STEP_WRITE_RESERVATION,
   NEWS_EVIDENCE_CURSOR_STALE,
   prepareNewsEvidenceSnapshot,
   readNewsEvidencePage,
@@ -256,10 +257,14 @@ test("cleanup feedback remains pending until bounded debt is drained", async () 
     + `WHERE snapshot_id='${oldGeneration}'`,
   );
 
-  const first = await cleanupNewsEvidenceSnapshots(db, activeGeneration);
+  const first = await cleanupNewsEvidenceSnapshots(
+    db, activeGeneration, new Date("2026-09-03T12:00:00.000Z"),
+  );
   assert.equal(first.deleted_records, 200);
   assert.equal(first.cleanup_pending, true);
-  const second = await cleanupNewsEvidenceSnapshots(db, activeGeneration);
+  const second = await cleanupNewsEvidenceSnapshots(
+    db, activeGeneration, new Date("2026-09-04T00:00:01.000Z"),
+  );
   assert.equal(second.deleted_records, 5);
   assert.equal(second.cleanup_pending, false);
   assert.equal(db.database.prepare(
@@ -277,7 +282,7 @@ test("cleanup reserves a fail-closed daily physical-write budget in D1", async (
     VALUES (1,'${activeGeneration}','news-evidence-paged-v2',0,
             '2026-08-27T00:00:00.000Z');
     WITH RECURSIVE sequence(value) AS (
-      SELECT 0 UNION ALL SELECT value+1 FROM sequence WHERE value<1600
+      SELECT 0 UNION ALL SELECT value+1 FROM sequence WHERE value<200
     )
     INSERT INTO news_evidence_records
       (snapshot_id,event_key,ordinal,sort_time,broad_model_eligible,model_seen,
@@ -287,7 +292,9 @@ test("cleanup reserves a fail-closed daily physical-write budget in D1", async (
       FROM sequence;
   `);
   const firstDay = new Date("2026-08-27T12:00:00.000Z");
-  for (let step = 0; step < 8; step += 1) {
+  const dailySteps = NEWS_EVIDENCE_CLEANUP_DAILY_WRITE_RESERVATION
+    / NEWS_EVIDENCE_CLEANUP_STEP_WRITE_RESERVATION;
+  for (let step = 0; step < dailySteps; step += 1) {
     const result = await cleanupNewsEvidenceSnapshots(
       db, activeGeneration, firstDay,
     );
