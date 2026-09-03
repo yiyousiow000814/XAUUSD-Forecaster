@@ -1,5 +1,5 @@
 --------------------------- MODULE ReleaseIntegration ---------------------------
-EXTENDS TLC
+EXTENDS TLC, Naturals
 
 CpuStates == {"NOT_REQUIRED", "PENDING", "QUALIFIED", "HARD_FAILURE"}
 Keys == {"A", "B"}
