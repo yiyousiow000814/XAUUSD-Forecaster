@@ -1785,6 +1785,19 @@ def _mock_free_plan_and_qualification_authority() -> str:
     )
 
 
+def _mock_candidate_finalizer_pass() -> str:
+    """Complete an already-proven DAG through the canonical projection owner."""
+    return (
+        "function Finalize-CandidateQualificationEvidence{"
+        "$state=Get-ReleaseControlState;"
+        "$state.candidate.validation_state='PASSED';"
+        "$state.candidate.compatibility_state='PASSED';"
+        "$state.candidate.validation|Add-Member -Force reason 'RELEASE_EVIDENCE_DAG_PASSED';"
+        "Write-ReleaseControlState $state;"
+        "[pscustomobject]@{state='PASSED';node_count=12}};"
+    )
+
+
 def _mock_active_promote_authority() -> str:
     """Bind direct switch/commit unit fixtures to one exact Promote receipt."""
     return (
@@ -8827,6 +8840,7 @@ def test_observe_probe_failure_restores_exact_qualification_and_preserves_attemp
     result = _run_control_center_contract(
         tmp_path,
         _authorized_candidate("a" * 40, "b" * 40)
+        + _mock_candidate_finalizer_pass()
         + "$state=Get-ReleaseControlState;$candidate=$state.candidate;$target=$candidate;"
         "$candidate|Add-Member -Force migration_acceptance ([pscustomobject]@{"
         "validation_key=$candidate.validation_key;receipt_digest='migration-kept'});"
@@ -9087,6 +9101,7 @@ def test_semantic_retry_preserves_exact_directed_cpu_and_windows_evidence(
     result = _run_control_center_contract(
         tmp_path,
         _semantic_review_candidate()
+        + _mock_candidate_finalizer_pass()
         + "$script:semanticCalls=0;$script:cpuReceiptCalls=0;"
         "function Test-PreservedCandidateEvidenceAvailable{return $true};"
         "function Assert-CandidateCpuQualificationReceipt{param($Candidate,$Validation)"
@@ -9110,7 +9125,7 @@ def test_semantic_retry_preserves_exact_directed_cpu_and_windows_evidence(
         powershell=powershell,
     )
     assert result == (
-        "True,PASSED,SEMANTIC_DATA_PARITY_PASSED,1,1,"
+        "True,PASSED,RELEASE_EVIDENCE_DAG_PASSED,1,1,"
         "11111111-1111-4111-8111-111111111111,12,7,migration-kept,True,True"
     )
 
@@ -9154,6 +9169,7 @@ def test_semantic_retry_fails_closed_before_live_probe(
     result = _run_control_center_contract(
         tmp_path,
         _semantic_review_candidate()
+        + _mock_candidate_finalizer_pass()
         + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
         + mutation
         + "Write-ReleaseControlState $state;$script:semanticCalls=0;"
@@ -9198,6 +9214,7 @@ def test_semantic_retry_does_not_invent_cpu_requirement_for_non_worker_change(
     result = _run_control_center_contract(
         tmp_path,
         _semantic_review_candidate()
+        + _mock_candidate_finalizer_pass()
         + "$state=Get-ReleaseControlState;$candidate=$state.candidate;"
         "$candidate.validation.worker_qualification=$null;"
         "$candidate.validation.cpu_evidence='NOT_REQUIRED';"
@@ -9238,6 +9255,7 @@ def test_access_approval_is_exact_idempotent_and_preserves_passed_evidence(
     result = _run_control_center_contract(
         tmp_path,
         _access_review_candidate()
+        + _mock_candidate_finalizer_pass()
         + "$first=Approve-CandidateAccessBoundary 'ALL_REQUIRED_ACCESS_CHECKS_PASSED';"
         "$firstDigest=$first.access_acceptance.receipt_digest;"
         "$second=Approve-CandidateAccessBoundary 'ALL_REQUIRED_ACCESS_CHECKS_PASSED';"
@@ -9430,6 +9448,7 @@ def test_access_qualification_reuse_is_machine_evidence_and_preserves_other_gate
         _access_review_candidate()
         + _historical_access_authority_contract()
         + _access_provider_inspection_contract()
+        + _mock_candidate_finalizer_pass()
         + "$inspection=Register-AccessProviderInspection $provider;"
         "function Get-AccessQualificationIdentity{param($GitSha,$ProviderInspection)"
         "[pscustomobject]@{access_qualification_key=('1'*64);core=[pscustomobject]@{"
@@ -9612,6 +9631,7 @@ def test_new_candidate_renews_from_complete_historical_machine_chain(
         tmp_path,
         _stale_access_reuse_ready_for_renewal()
         + _cloudflare_access_read_stubs()
+        + _mock_candidate_finalizer_pass()
         + "$first=Ensure-AccessQualificationMachineReceipt $candidate;"
         "$firstPath=Get-AccessQualificationRenewalReceiptPath $first.receipt_digest;"
         "$firstBytes=Get-Content $firstPath -Raw -Encoding UTF8;"

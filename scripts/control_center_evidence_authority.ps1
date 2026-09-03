@@ -1320,7 +1320,9 @@ function Verify-CandidateCoordinatedMigration {
             database_id = [string]$verified.evidence.database_id
             migration_files = @($files)
         }
-    return $candidate
+    $null = Finalize-CandidateQualificationEvidence `
+        -WhyRan "MIGRATION_COMPATIBILITY_COMPLETED"
+    return (Get-ReleaseControlState).candidate
 }
 
 function Test-PreservedCandidateEvidenceAvailable {
@@ -1974,7 +1976,7 @@ function Restore-ControlPlaneObservationFailedCandidate {
     $candidate.validation = $priorValidation
     $candidate | Add-Member -Force -NotePropertyName access_qualification `
         -NotePropertyValue $qualifiedCandidate.access_qualification
-    $candidate.validation_state = "PASSED"
+    $candidate.validation_state = "EVIDENCE_PENDING"
     Set-CandidateMaterializationState -State $State -Revision $MainRevision `
         -Status "PRESERVED" -WorkerVersionId ([string]$candidate.worker_version_id)
     $State.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
@@ -1989,7 +1991,9 @@ function Restore-ControlPlaneObservationFailedCandidate {
             accepted_evidence_replayed = $false
             candidate_repositioned_at_zero_percent = $true
         }
-    return $candidate
+    $null = Finalize-CandidateQualificationEvidence `
+        -WhyRan "AUTOMATIC_PROVIDER_RECOVERY_COMPLETED"
+    return (Get-ReleaseControlState).candidate
 }
 
 function Get-CandidateCompatibilityApprovalGate {
@@ -4796,6 +4800,18 @@ function Ensure-AccessQualificationMachineReceipt {
             provider_fingerprint = [string]$receipt.provider_fingerprint
             provider_inspection_receipt_digest = [string]$receipt.provider_inspection_receipt_digest
         }
+    $state = Get-ReleaseControlState
+    if ($state -and -not $state.transaction -and
+        (Test-ReleaseIdentity $state.candidate $Candidate) -and
+        [string]$state.candidate.validation_key -ceq [string]$Candidate.validation_key) {
+        $state.candidate.access_qualification = $Candidate.access_qualification
+        $state.candidate.validation.auth_inspection = $Candidate.validation.auth_inspection
+        $state.candidate.validation_state = "EVIDENCE_PENDING"
+        $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $state
+        $null = Finalize-CandidateQualificationEvidence `
+            -WhyRan "ACCESS_MACHINE_RENEWAL_COMPLETED"
+    }
     return $receipt
 }
 
@@ -4816,8 +4832,7 @@ function Invoke-CandidateAccessQualificationReuse {
         $receipt = Invoke-CandidateAccessQualificationRenewal -Candidate $candidate `
             -PriorCandidate $machineAuthority.candidate
         $candidate.validation.tested_at = [DateTimeOffset]::UtcNow.ToString("o")
-        $candidate.compatibility_state = "PASSED"
-        $candidate.validation_state = "PASSED"
+        $candidate.validation_state = "EVIDENCE_PENDING"
         $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
         Write-ReleaseControlState -State $state
         Write-ReleaseHistory -Event "CANDIDATE_ACCESS_QUALIFICATION_RENEWED" `
@@ -4830,7 +4845,9 @@ function Invoke-CandidateAccessQualificationReuse {
                 provider_fingerprint = [string]$receipt.provider_fingerprint
                 provider_inspection_receipt_digest = [string]$receipt.provider_inspection_receipt_digest
             }
-        return $candidate
+        $null = Finalize-CandidateQualificationEvidence `
+            -WhyRan "ACCESS_MACHINE_RENEWAL_COMPLETED"
+        return (Get-ReleaseControlState).candidate
     }
     $provider = Get-LatestAccessProviderInspectionReceipt
     $acceptedAt = ConvertTo-ReleaseTimestampUtc -Value $priorReceipt.accepted_at
@@ -4884,8 +4901,7 @@ function Invoke-CandidateAccessQualificationReuse {
         })
     $candidate.validation.reason = "ACCESS_QUALIFICATION_REUSED"
     $candidate.validation.tested_at = [DateTimeOffset]::UtcNow.ToString("o")
-    $candidate.compatibility_state = "PASSED"
-    $candidate.validation_state = "PASSED"
+    $candidate.validation_state = "EVIDENCE_PENDING"
     $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
     Write-ReleaseControlState -State $state
     Write-ReleaseHistory -Event "CANDIDATE_ACCESS_QUALIFICATION_REUSED" `
@@ -4897,7 +4913,9 @@ function Invoke-CandidateAccessQualificationReuse {
             provider_fingerprint = [string]$receipt.provider_fingerprint
             changed_access_artifacts = @()
         }
-    return $candidate
+    $null = Finalize-CandidateQualificationEvidence `
+        -WhyRan "ACCESS_QUALIFICATION_REUSE_COMPLETED"
+    return (Get-ReleaseControlState).candidate
 }
 
 function Approve-CandidateAccessBoundary {
@@ -4967,8 +4985,7 @@ function Approve-CandidateAccessBoundary {
         -NotePropertyValue ([string]$verified.receipt_digest)
     $candidate.validation.reason = "ACCESS_BOUNDARY_ACCEPTED"
     $candidate.validation.tested_at = [DateTimeOffset]::UtcNow.ToString("o")
-    $candidate.compatibility_state = "PASSED"
-    $candidate.validation_state = "PASSED"
+    $candidate.validation_state = "EVIDENCE_PENDING"
     $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
     Write-ReleaseControlState -State $state
     Write-ReleaseHistory -Event "CANDIDATE_ACCESS_BOUNDARY_ACCEPTED" `
@@ -4978,5 +4995,7 @@ function Approve-CandidateAccessBoundary {
             protected_host = [string]$verified.access_boundary.host
             checklist = $verified.checklist
         }
-    return $candidate
+    $null = Finalize-CandidateQualificationEvidence `
+        -WhyRan "HUMAN_ACCESS_ROOT_COMPLETED"
+    return (Get-ReleaseControlState).candidate
 }

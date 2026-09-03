@@ -1,9 +1,10 @@
 --------------------------- MODULE ReleaseIntegration ---------------------------
-EXTENDS TLC
+EXTENDS TLC, Naturals
 
 CpuStates == {"NOT_REQUIRED", "PENDING", "QUALIFIED", "HARD_FAILURE"}
 Keys == {"A", "B"}
 Stages == {"MIGRATION", "DIRECTED", "SEMANTIC"}
+EvidenceProducers == {"VALIDATION", "FREE_PLAN", "ACCESS"}
 SupersessionStates == {"UNCHECKED", "FOUND", "NOT_APPLICABLE",
                        "REUSE_UNAVAILABLE", "FAILED"}
 
@@ -12,13 +13,15 @@ VARIABLES phase, gate, releaseAccepted, cpuRequired, cpuState, artifactKey,
           candidateRegression, stableDebt, evidenceState, behaviorKeyMatches,
           leaseFresh, dependencyDigest, frozenDigest, transaction,
           immutableIdentityPreserved, productionMutation, supersessionState,
-          supersessionReuseApplied, freshValidationStarted
+          supersessionReuseApplied, freshValidationStarted, completedProducers,
+          finalizerRuns
 vars == <<phase, gate, releaseAccepted, cpuRequired, cpuState, artifactKey,
           qualificationKey, stages, candidateExact, hardSafe, changedSafe,
           candidateRegression, stableDebt, evidenceState, behaviorKeyMatches,
           leaseFresh, dependencyDigest, frozenDigest, transaction,
           immutableIdentityPreserved, productionMutation,
-          supersessionState, supersessionReuseApplied, freshValidationStarted>>
+          supersessionState, supersessionReuseApplied, freshValidationStarted,
+          completedProducers, finalizerRuns>>
 
 Init ==
     /\ phase = "PREPARE" /\ gate = "UNTESTED" /\ releaseAccepted = FALSE
@@ -31,6 +34,7 @@ Init ==
     /\ immutableIdentityPreserved = TRUE /\ productionMutation = FALSE
     /\ supersessionState = "UNCHECKED" /\ supersessionReuseApplied = FALSE
     /\ freshValidationStarted = FALSE
+    /\ completedProducers = {} /\ finalizerRuns = 0
 
 AcceptIndependentStages ==
     /\ stages # Stages
@@ -41,7 +45,7 @@ AcceptIndependentStages ==
                     leaseFresh, dependencyDigest, frozenDigest, transaction,
                     immutableIdentityPreserved, productionMutation,
                     supersessionState, supersessionReuseApplied,
-                    freshValidationStarted>>
+                    freshValidationStarted, completedProducers, finalizerRuns>>
 CpuPending ==
     /\ stages = Stages /\ cpuState \in {"NOT_REQUIRED", "PENDING"}
     /\ cpuState' = "PENDING"
@@ -51,7 +55,7 @@ CpuPending ==
                     behaviorKeyMatches, leaseFresh, dependencyDigest, frozenDigest,
                     transaction, immutableIdentityPreserved, productionMutation,
                     supersessionState, supersessionReuseApplied,
-                    freshValidationStarted>>
+                    freshValidationStarted, completedProducers, finalizerRuns>>
 CpuQualifies ==
     /\ stages = Stages
     /\ cpuState \in {"NOT_REQUIRED", "PENDING"}
@@ -63,7 +67,7 @@ CpuQualifies ==
                     behaviorKeyMatches, leaseFresh, dependencyDigest, frozenDigest,
                     transaction, immutableIdentityPreserved, productionMutation,
                     supersessionState, supersessionReuseApplied,
-                    freshValidationStarted>>
+                    freshValidationStarted, completedProducers, finalizerRuns>>
 CpuHardFails ==
     /\ cpuState \in {"NOT_REQUIRED", "PENDING"}
     /\ cpuState' = "HARD_FAILURE"
@@ -74,13 +78,14 @@ CpuHardFails ==
                     dependencyDigest, frozenDigest, transaction,
                     immutableIdentityPreserved, productionMutation,
                     supersessionState, supersessionReuseApplied,
-                    freshValidationStarted>>
+                    freshValidationStarted, completedProducers, finalizerRuns>>
 ChangeArtifact ==
     /\ phase = "PREPARE"
     /\ artifactKey' \in Keys \ {artifactKey}
     /\ cpuState' = "NOT_REQUIRED" /\ gate' = "UNTESTED" /\ releaseAccepted' = FALSE
     /\ evidenceState' = "MISSING" /\ behaviorKeyMatches' = FALSE
     /\ leaseFresh' = FALSE /\ frozenDigest' = "NONE"
+    /\ completedProducers' = {} /\ finalizerRuns' = 0
     /\ UNCHANGED <<phase, cpuRequired, qualificationKey, stages,
                     candidateExact, hardSafe, changedSafe, candidateRegression,
                     stableDebt, dependencyDigest, transaction,
@@ -95,7 +100,7 @@ RecordStableDebt ==
                     behaviorKeyMatches, leaseFresh, dependencyDigest, frozenDigest,
                     transaction, immutableIdentityPreserved, productionMutation,
                     supersessionState, supersessionReuseApplied,
-                    freshValidationStarted>>
+                    freshValidationStarted, completedProducers, finalizerRuns>>
 IntroduceRegression ==
     /\ phase = "PREPARE"
     /\ ~candidateRegression /\ candidateRegression' = TRUE
@@ -105,17 +110,31 @@ IntroduceRegression ==
                     evidenceState, behaviorKeyMatches, leaseFresh, dependencyDigest,
                     frozenDigest, transaction, immutableIdentityPreserved,
                     productionMutation, supersessionState,
-                    supersessionReuseApplied, freshValidationStarted>>
+                    supersessionReuseApplied, freshValidationStarted,
+                    completedProducers, finalizerRuns>>
 
-BuildCompleteEvidence ==
+CompleteEvidenceProducer(producer) ==
+    /\ phase = "PREPARE" /\ producer \in EvidenceProducers \ completedProducers
+    /\ completedProducers' = completedProducers \union {producer}
+    /\ UNCHANGED <<phase, gate, releaseAccepted, cpuRequired, cpuState, artifactKey,
+                    qualificationKey, stages, candidateExact, hardSafe, changedSafe,
+                    candidateRegression, stableDebt, evidenceState, behaviorKeyMatches,
+                    leaseFresh, dependencyDigest, frozenDigest, transaction,
+                    immutableIdentityPreserved, productionMutation,
+                    supersessionState, supersessionReuseApplied,
+                    freshValidationStarted, finalizerRuns>>
+FinalizeCompleteEvidence ==
     /\ phase = "PREPARE" /\ evidenceState = "MISSING"
+    /\ completedProducers = EvidenceProducers /\ finalizerRuns = 0
     /\ evidenceState' = "VALID" /\ behaviorKeyMatches' = TRUE /\ leaseFresh' = TRUE
     /\ dependencyDigest' = artifactKey /\ immutableIdentityPreserved' = TRUE
+    /\ finalizerRuns' = 1
     /\ UNCHANGED <<phase, gate, releaseAccepted, cpuRequired, cpuState, artifactKey,
                     qualificationKey, stages, candidateExact, hardSafe, changedSafe,
                     candidateRegression, stableDebt, frozenDigest, transaction,
                     productionMutation, supersessionState,
-                    supersessionReuseApplied, freshValidationStarted>>
+                    supersessionReuseApplied, freshValidationStarted,
+                    completedProducers>>
 ExpireLease ==
     /\ phase = "PREPARE" /\ leaseFresh /\ leaseFresh' = FALSE
     /\ gate' = "UNTESTED" /\ releaseAccepted' = FALSE
@@ -124,7 +143,8 @@ ExpireLease ==
                     stableDebt, evidenceState, behaviorKeyMatches, dependencyDigest,
                     frozenDigest, transaction, immutableIdentityPreserved,
                     productionMutation, supersessionState,
-                    supersessionReuseApplied, freshValidationStarted>>
+                    supersessionReuseApplied, freshValidationStarted,
+                    completedProducers, finalizerRuns>>
 TamperEvidence ==
     /\ phase = "PREPARE" /\ evidenceState = "VALID"
     /\ evidenceState' = "TAMPERED" /\ hardSafe' = FALSE
@@ -134,7 +154,8 @@ TamperEvidence ==
                     stableDebt, behaviorKeyMatches, leaseFresh, dependencyDigest,
                     frozenDigest, transaction, immutableIdentityPreserved,
                     productionMutation, supersessionState,
-                    supersessionReuseApplied, freshValidationStarted>>
+                    supersessionReuseApplied, freshValidationStarted,
+                    completedProducers, finalizerRuns>>
 ChangeBehaviorKey ==
     /\ phase = "PREPARE" /\ behaviorKeyMatches
     /\ behaviorKeyMatches' = FALSE /\ gate' = "UNTESTED" /\ releaseAccepted' = FALSE
@@ -143,7 +164,8 @@ ChangeBehaviorKey ==
                     stableDebt, evidenceState, leaseFresh, dependencyDigest,
                     frozenDigest, transaction, immutableIdentityPreserved,
                     productionMutation, supersessionState,
-                    supersessionReuseApplied, freshValidationStarted>>
+                    supersessionReuseApplied, freshValidationStarted,
+                    completedProducers, finalizerRuns>>
 ReadAndPlan ==
     /\ productionMutation' = FALSE
     /\ UNCHANGED <<phase, gate, releaseAccepted, cpuRequired, cpuState, artifactKey,
@@ -151,7 +173,8 @@ ReadAndPlan ==
                     candidateRegression, stableDebt, evidenceState, behaviorKeyMatches,
                     leaseFresh, dependencyDigest, frozenDigest, transaction,
                     immutableIdentityPreserved, supersessionState,
-                    supersessionReuseApplied, freshValidationStarted>>
+                    supersessionReuseApplied, freshValidationStarted,
+                    completedProducers, finalizerRuns>>
 
 ClassifySupersession ==
     /\ supersessionState = "UNCHECKED"
@@ -162,7 +185,8 @@ ClassifySupersession ==
                     hardSafe, changedSafe, candidateRegression, stableDebt,
                     evidenceState, behaviorKeyMatches, leaseFresh,
                     dependencyDigest, frozenDigest, transaction,
-                    immutableIdentityPreserved, productionMutation>>
+                    immutableIdentityPreserved, productionMutation,
+                    completedProducers, finalizerRuns>>
 ContinueFreshValidation ==
     /\ supersessionState \in {"NOT_APPLICABLE", "REUSE_UNAVAILABLE"}
     /\ ~freshValidationStarted
@@ -173,7 +197,8 @@ ContinueFreshValidation ==
                     evidenceState, behaviorKeyMatches, leaseFresh,
                     dependencyDigest, frozenDigest, transaction,
                     immutableIdentityPreserved, productionMutation,
-                    supersessionState, supersessionReuseApplied>>
+                    supersessionState, supersessionReuseApplied,
+                    completedProducers, finalizerRuns>>
 ApplySupersessionReuse ==
     /\ supersessionState = "FOUND" /\ ~supersessionReuseApplied
     /\ supersessionReuseApplied' = TRUE
@@ -183,7 +208,8 @@ ApplySupersessionReuse ==
                     evidenceState, behaviorKeyMatches, leaseFresh,
                     dependencyDigest, frozenDigest, transaction,
                     immutableIdentityPreserved, productionMutation,
-                    supersessionState, freshValidationStarted>>
+                    supersessionState, freshValidationStarted,
+                    completedProducers, finalizerRuns>>
 Pass ==
     /\ phase = "PREPARE" /\ stages = Stages
     /\ (~cpuRequired \/ cpuState = "QUALIFIED")
@@ -198,7 +224,7 @@ Pass ==
                     dependencyDigest, frozenDigest, transaction,
                     immutableIdentityPreserved, productionMutation,
                     supersessionState, supersessionReuseApplied,
-                    freshValidationStarted>>
+                    freshValidationStarted, completedProducers, finalizerRuns>>
 BeginPromote ==
     /\ phase = "PASSED" /\ gate = "PASSED" /\ releaseAccepted
     /\ (~cpuRequired \/ cpuState = "QUALIFIED")
@@ -211,11 +237,12 @@ BeginPromote ==
                     behaviorKeyMatches, leaseFresh, dependencyDigest,
                     immutableIdentityPreserved, productionMutation,
                     supersessionState, supersessionReuseApplied,
-                    freshValidationStarted>>
+                    freshValidationStarted, completedProducers, finalizerRuns>>
 
 Next == AcceptIndependentStages \/ CpuPending \/ CpuQualifies \/ CpuHardFails \/
         ChangeArtifact \/ RecordStableDebt \/ IntroduceRegression \/
-        BuildCompleteEvidence \/ ExpireLease \/ TamperEvidence \/ ChangeBehaviorKey \/
+        (\E producer \in EvidenceProducers: CompleteEvidenceProducer(producer)) \/
+        FinalizeCompleteEvidence \/ ExpireLease \/ TamperEvidence \/ ChangeBehaviorKey \/
         ReadAndPlan \/ ClassifySupersession \/ ContinueFreshValidation \/
         ApplySupersessionReuse \/ Pass \/ BeginPromote
 Spec == Init /\ [][Next]_vars
@@ -234,6 +261,7 @@ TypeOK ==
     /\ productionMutation \in BOOLEAN
     /\ supersessionState \in SupersessionStates
     /\ supersessionReuseApplied \in BOOLEAN /\ freshValidationStarted \in BOOLEAN
+    /\ completedProducers \subseteq EvidenceProducers /\ finalizerRuns \in 0..1
 CpuQualificationRequiredForPass == gate = "PASSED" /\ cpuRequired => cpuState = "QUALIFIED"
 ProviderPendingIsNotCandidateFailure ==
     cpuState = "PENDING" /\ candidateExact /\ hardSafe /\ changedSafe /\
@@ -248,6 +276,11 @@ UnrelatedDebtIsNotFailure == stableDebt /\ candidateExact /\ hardSafe /\ changed
     ~candidateRegression /\ cpuState # "HARD_FAILURE" => gate # "FAILED"
 PromoteRequiresPassed == phase = "PROMOTING" => gate = "PASSED" /\ releaseAccepted
 CompleteEvidenceRequiredForPass == gate = "PASSED" => evidenceState = "VALID"
+EveryProducerRequiredForPass == gate = "PASSED" => completedProducers = EvidenceProducers
+NoSingleProducerCommitsPassed == completedProducers # EvidenceProducers => gate # "PASSED"
+FinalizedEvidenceHasEveryProducer == evidenceState = "VALID" => completedProducers = EvidenceProducers
+FinalizerIsSingleUse == finalizerRuns <= 1
+FinalizerCreatesNoTransaction == evidenceState = "VALID" /\ phase = "PREPARE" => ~transaction
 BehaviorKeyChangeInvalidatesReuse == ~behaviorKeyMatches => gate # "PASSED"
 StaleLeaseCannotAuthorize == ~leaseFresh => phase # "PROMOTING"
 TamperedReceiptCannotPromote == evidenceState = "TAMPERED" => phase # "PROMOTING"

@@ -696,20 +696,7 @@ function Invoke-AutomaticCandidateValidation {
             Write-ReleaseControlState -State $state
             return $false
         }
-        $evidenceQualification = Publish-CandidateQualificationEvidence `
-            -Candidate $Candidate -Stable $state.stable -Compatibility $compatibility `
-            -RoutePlan $routePlan -Cloudflare $cloudflare -DataParity $dataParity `
-            -AuthInspection $authInspection
-        $state.candidate | Add-Member -Force -NotePropertyName evidence_authority `
-            -NotePropertyValue ([pscustomobject]@{
-                schema_version = "release-evidence-compatibility-projection-v1"
-                state = [string]$evidenceQualification.state
-                validation_key = [string]$Candidate.validation_key
-                node_count = @($evidenceQualification.receipts.PSObject.Properties).Count
-                projected_at = [DateTimeOffset]::UtcNow.ToString("o")
-            })
-        $state.candidate.compatibility_state = "PASSED"
-        $state.candidate.validation_state = "PASSED"
+        $state.candidate.validation_state = "EVIDENCE_PENDING"
         $state.candidate.validation = [pscustomobject]@{
             key = [string]$Candidate.validation_key
             repository = "PASSED"
@@ -730,8 +717,9 @@ function Invoke-AutomaticCandidateValidation {
         }
         $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
         Write-ReleaseControlState -State $state
-        Write-ReleaseHistory -Event "CANDIDATE_PASSED" -Release $state.candidate
-        return $true
+        $finalized = Finalize-CandidateQualificationEvidence `
+            -WhyRan "AUTOMATIC_CANDIDATE_VALIDATION_COMPLETED"
+        return [string]$finalized.state -eq "PASSED"
     } catch {
         $state = Get-ReleaseControlState
         if ($state -and (Test-ReleaseIdentity $state.candidate $Candidate)) {
@@ -930,7 +918,9 @@ function Approve-CandidateCompatibility {
     Write-ReleaseControlState -State $state
     Write-ReleaseHistory -Event "CANDIDATE_COMPATIBILITY_APPROVED" `
         -Release $candidate -Detail $approval
-    return $candidate
+    $null = Finalize-CandidateQualificationEvidence `
+        -WhyRan "COMPATIBILITY_APPROVAL_COMPLETED"
+    return (Get-ReleaseControlState).candidate
 }
 
 function Retry-CandidateValidation {
@@ -1129,7 +1119,7 @@ function Retry-CandidateSemanticValidation {
         tested_at = $completedAt.ToString("o")
     }
     $event = "CANDIDATE_SEMANTIC_RETRY_PASSED"
-    $passed = $false
+    $shouldFinalize = $false
     if (-not [bool]$dataParity.passed) {
         $candidate.validation_state = "REVIEW_REQUIRED"
         $next.reason = "SEMANTIC_DATA_PARITY_REVIEW_REQUIRED"
@@ -1140,10 +1130,9 @@ function Retry-CandidateSemanticValidation {
         $next.reason = "ACCESS_BOUNDARY_REVIEW_REQUIRED"
         $event = "CANDIDATE_ACCESS_BOUNDARY_REVIEW_REQUIRED"
     } else {
-        $candidate.compatibility_state = "PASSED"
-        $candidate.validation_state = "PASSED"
+        $candidate.validation_state = "EVIDENCE_PENDING"
         $next.reason = "SEMANTIC_DATA_PARITY_PASSED"
-        $passed = $true
+        $shouldFinalize = $true
     }
     $candidate.validation = [pscustomobject]$next
     $state.updated_at = $completedAt.ToString("o")
@@ -1156,7 +1145,12 @@ function Retry-CandidateSemanticValidation {
         cpu_replayed = $false
         result = [string]$candidate.validation.reason
     }
-    return $passed
+    if ($shouldFinalize) {
+        $finalized = Finalize-CandidateQualificationEvidence `
+            -WhyRan "SEMANTIC_VALIDATION_COMPLETED"
+        return [string]$finalized.state -eq "PASSED"
+    }
+    return $false
 }
 
 function Invoke-CandidateDiscovery {

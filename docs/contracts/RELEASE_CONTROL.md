@@ -558,6 +558,19 @@ then either passes, remains at semantic review, or advances to the unchanged
 Access boundary review. Missing, partial, or mismatched prerequisite evidence
 fails closed before the live semantic probe.
 
+Candidate qualification is finalized by one idempotent evidence owner after
+each producer completion. Validation, Free-plan, migration, placement, and
+Access producers persist only their own facts; none may set the Candidate to
+`PASSED`. The finalizer reads the current persisted Candidate identity and
+artifacts, then requires all twelve pre-action evidence nodes (through
+`access_provider_lease`) with exact behavior keys and fresh leases. Missing,
+expired, malformed, superseded, or transaction-raced evidence leaves the
+Candidate non-passed. Producer completion order therefore cannot change the
+result, and replay after a complete DAG reuses the current qualification rather
+than appending duplicate receipts. `rollback_precheck`, `promote_attempt`, and
+`observe_attempt` remain action-time evidence and are never created by this
+finalizer.
+
 PR #268 acceptance is retained only as labeled legacy manual evidence: 104
 samples, p50 2 ms, p95 4 ms, p99 4 ms, maximum 5 ms, and zero exceeded CPU,
 1102, or 5xx. Its source did not record a bootstrap timestamp; release control
