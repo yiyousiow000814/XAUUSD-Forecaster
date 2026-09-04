@@ -135,6 +135,57 @@ def test_watchdog_does_no_shared_work_before_kernel_ownership() -> None:
     assert "exitCode = 0" not in launcher.split("Loop While", 1)[1]
 
 
+def test_watchdog_replacement_has_no_recursive_kill_path() -> None:
+    production = "\n".join(
+        (ROOT / "scripts" / name).read_text(encoding="utf-8")
+        for name in (
+            "control_center_watchdog_singleton.ps1",
+            "control_center_install.ps1",
+            "control_center_runtime_supervision.ps1",
+            "control_center_recovery_engine.ps1",
+            "repair_stable_runtime_artifact_paths.ps1",
+            "xauusd_watchdog_guard.ps1",
+        )
+    )
+    assert "Stop-WatchdogExactProcessTree" not in production
+    assert "taskkill" not in production.lower()
+    assert "Stop-WatchdogControllerOwner" in production
+    assert "TerminateWatchdogOwner" in (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+def test_unknown_watchdog_descendant_blocks_root_termination(
+    tmp_path: Path, powershell: str,
+) -> None:
+    if shutil.which(powershell) is None:
+        pytest.skip(f"{powershell} unavailable")
+    runtime = tmp_path / "runtime"
+    repository = tmp_path / "repository"
+    control = repository / ".local" / "runtime-control"
+    runtime.mkdir()
+    control.mkdir(parents=True)
+    command = rf'''
+$moduleRoot='{runtime}';$repositoryRoot='{repository}'
+$releaseControlStatePath='{tmp_path / 'state.json'}';$releaseHistoryPath='{tmp_path / 'history.jsonl'}'
+$watchdogOwnerReceiptPath='{runtime / 'watchdog-owner-v2.json'}';$watchdogSingletonContractVersion='watchdog-machine-singleton-v2'
+$scriptPath=Join-Path '{control}' 'xauusd_control_center.ps1'
+$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$root=[pscustomobject]@{{process_id=101;parent_process_id=0;process_start_token='root-token';name='powershell.exe';command_line=('powershell -File "'+$scriptPath+'" -Action Watchdog -RuntimeRoot "{runtime}" -RepositoryRoot "{repository}"');owner_sid=$sid}}
+$mystery=[pscustomobject]@{{process_id=102;parent_process_id=101;process_start_token='unknown-token';name='mystery.exe';command_line='mystery';owner_sid=$sid}}
+function Test-ControlPlaneStartTokenEqual {{ param($Left,$Right);[string]$Left-eq[string]$Right }}
+function ConvertFrom-ReleaseControlJson {{ process {{ $_|ConvertFrom-Json }} }}
+function Get-ControlPlaneProcessIdentity {{ param($ProcessId);if([int]$ProcessId-eq 101){{$root}}elseif([int]$ProcessId-eq 102){{$mystery}}else{{$null}} }}
+function Get-RuntimeControlBundleIdentityAtRoot {{ [pscustomobject]@{{source_revision=('a'*40);bundle_digest=('b'*64)}} }}
+. '{MODULE}'
+function Get-WatchdogBusinessOwnerBaseline {{ @() }}
+function Get-WatchdogProcessTreeSnapshot {{ @($root,$mystery) }}
+try {{ $null=Get-WatchdogControllerTerminationPlan -RootIdentity $root -AllowLegacyReceiptless; 'WRONG' }} catch {{ $_.Exception.Message }}
+'''
+    assert _run_powershell(powershell, command) == "WATCHDOG_TERMINATION_DESCENDANT_UNKNOWN"
+
+
 @pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
 def test_guard_never_starts_over_multiple_or_unresolved_owner(
     tmp_path: Path, powershell: str,
@@ -155,7 +206,7 @@ function Read-GuardJson { param($Path,$MaximumBytes); if($Path-eq $OwnerReceiptP
  } else { [pscustomobject]@{instance_id=('a'*32);process_id=101;process_start_token=$owner.process_start_token;mutex_identity_hash=('b'*64);owner_receipt_digest=('c'*64);observed_at='2020-01-01T00:00:00+00:00'} } }
 function Get-VerifiedGuardOwner { return $owner }
 function Get-GuardOwnerReceiptDigest { return ('c'*64) }
-function Stop-GuardVerifiedOwnerTree { throw 'WATCHDOG_TERMINATION_UNRESOLVED' }
+function Stop-GuardVerifiedOwner { throw 'WATCHDOG_TERMINATION_UNRESOLVED' }
 try { Invoke-WatchdogGuard | Out-Null; $unresolved='WRONG' } catch { $unresolved=$_.Exception.Message }
 Write-Output "$multiple|$unresolved|$script:starts"
 '''
@@ -186,7 +237,7 @@ Write-Output "$started|$script:starts|$(Test-Path -LiteralPath '{receipt}')"
 
 
 @pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
-def test_verified_tree_termination_kills_root_and_descendant(
+def test_controller_root_termination_preserves_business_descendant(
     tmp_path: Path, powershell: str,
 ) -> None:
     if shutil.which(powershell) is None:
@@ -212,14 +263,19 @@ Wait-Process -Id $child.Id
         command = rf'''
 function Get-ControlPlaneProcessIdentity {{ param($ProcessId); $p=Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue; if(-not $p){{return $null}}; [pscustomobject]@{{process_id=[int]$p.ProcessId;parent_process_id=[int]$p.ParentProcessId;process_start_token=([DateTimeOffset]$p.CreationDate).ToUniversalTime().ToString('o');name=[string]$p.Name;command_line=[string]$p.CommandLine}} }}
 function Test-ControlPlaneStartTokenEqual {{ param($Left,$Right); return [string]$Left-eq[string]$Right }}
+$releaseControlStatePath='{tmp_path / 'missing-state.json'}'
+$releaseHistoryPath='{tmp_path / 'missing-history.jsonl'}'
 . '{MODULE}'
 $root=Get-ControlPlaneProcessIdentity -ProcessId {ids['root']}
-$answer=Stop-WatchdogExactProcessTree -RootIdentity $root
+$child=Get-ControlPlaneProcessIdentity -ProcessId {ids['child']}
+function Get-WatchdogControllerTerminationPlan {{ [pscustomobject]@{{root=$root;launcher=$null;business=@([pscustomobject]@{{root=$child}});control_plane_transient=@()}} }}
+function Test-WatchdogSingletonMutexAvailable {{ return $true }}
+$answer=(Stop-WatchdogControllerOwner -RootIdentity $root).status
 $rootAlive=[bool](Get-Process -Id {ids['root']} -ErrorAction SilentlyContinue)
 $childAlive=[bool](Get-Process -Id {ids['child']} -ErrorAction SilentlyContinue)
 Write-Output "$answer|$rootAlive|$childAlive"
 '''
-        assert _run_powershell(powershell, command) == "TERMINATED|False|False"
+        assert _run_powershell(powershell, command) == "TERMINATED|False|True"
     finally:
         if root.poll() is None:
             root.kill()
@@ -342,7 +398,7 @@ function Get-ScheduledTask {{ [pscustomobject]@{{Settings=[pscustomobject]@{{Ena
 function Disable-ScheduledTask {{ $script:guardDisabled++ }}; function Stop-ScheduledTask {{ }}
 function Enable-ScheduledTask {{ $script:guardEnabled++ }}
 function Stop-VerifiedWatchdogOwner {{ $script:verifiedStops++ }}
-function Stop-WatchdogExactProcessTree {{ $script:exactStops++; return 'TERMINATED' }}
+    function Stop-WatchdogControllerOwner {{ param($RootIdentity,[switch]$AllowLegacyReceiptless);$script:exactStops++; return [pscustomobject]@{{status='TERMINATED'}} }}
 function Register-AutoStartTask {{ }}
 $legacy=[pscustomobject]@{{process_id=301;process_start_token='2026-09-01T00:01:00+00:00';watchdog_owner_state='LEGACY_SINGLE_OWNER'}}
 function Get-VerifiedWatchdogOwners {{ param([switch]$AllowLegacySingleOwner);$script:allowLegacy=[bool]$AllowLegacySingleOwner;@($legacy) }}

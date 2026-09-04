@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "ReleaseProviderFactsJson", "TerminateProviderObservation", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "RepairWatchdogOwnership", "DiscoverCandidate", "RetryCandidateValidation", "RetrySemantic", "ReconcileRelease", "PromoteCandidate", "PromoteRecoveryHotfix", "RestoreLastKnownGood", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "RegisterAccessProviderInspection", "RegisterFreePlanEvidence", "ReuseAccessQualification", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "ControlBundlePreflight", "PreflightRuntimeStateRoot", "MigrateRuntimeStateRoot")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "ReleaseProviderFactsJson", "TerminateProviderObservation", "TerminateWatchdogOwner", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "RepairWatchdogOwnership", "DiscoverCandidate", "RetryCandidateValidation", "RetrySemantic", "ReconcileRelease", "PromoteCandidate", "PromoteRecoveryHotfix", "RestoreLastKnownGood", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "RegisterAccessProviderInspection", "RegisterFreePlanEvidence", "ReuseAccessQualification", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "ControlBundlePreflight", "PreflightRuntimeStateRoot", "MigrateRuntimeStateRoot")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync", "broadcast")]
     [string]$ServiceKey = "",
@@ -1101,6 +1101,25 @@ switch ($Action) {
             -ProcessStartToken $TargetProcessStartToken `
             -NativeReceiptPath $NativeProcessReceiptPath |
             ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $StatusPath -Encoding UTF8
+    }
+    "TerminateWatchdogOwner" {
+        if ($TargetProcessId -le 0 -or
+            [string]::IsNullOrWhiteSpace($TargetProcessStartToken)) {
+            throw 'WATCHDOG_TERMINATION_IDENTITY_REQUIRED'
+        }
+        $release = Get-ReleaseControlState
+        if (-not $release -or $release.transaction) {
+            throw 'WATCHDOG_TERMINATION_CONTROL_TRANSIENT_ACTIVE'
+        }
+        $inventory = Get-WatchdogOwnershipInventory
+        $owner = @($inventory.authoritative + $inventory.duplicate_shaped |
+            Where-Object {
+                [int]$_.process_id -eq $TargetProcessId -and
+                (Test-ControlPlaneStartTokenEqual -Left $_.process_start_token `
+                    -Right $TargetProcessStartToken)
+            })
+        if ($owner.Count -ne 1) { throw 'WATCHDOG_OWNER_IDENTITY_UNRESOLVED' }
+        Stop-VerifiedWatchdogOwner -Identity $owner[0] | Out-Null
     }
     "CodeRevision" { Write-Output (Get-CodeRevision) }
     "WpfLayoutSmoke" {

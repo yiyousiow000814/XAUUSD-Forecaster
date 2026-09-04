@@ -129,52 +129,19 @@ function Get-VerifiedGuardOwner {
     return $owner
 }
 
-function Stop-GuardVerifiedOwnerTree {
+function Stop-GuardVerifiedOwner {
     param([Parameter(Mandatory = $true)][object]$Owner)
-    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
-    $snapshot = @($Owner)
-    $frontier = @([int]$Owner.process_id)
-    while ($frontier.Count -gt 0) {
-        $next = @()
-        foreach ($parentId in $frontier) {
-            foreach ($child in @($all | Where-Object { [int]$_.ParentProcessId -eq $parentId })) {
-                $identity = Get-GuardProcessIdentity -ProcessId ([int]$child.ProcessId)
-                if ($identity) { $snapshot += $identity; $next += [int]$child.ProcessId }
-            }
-        }
-        $frontier = $next
-    }
-    $taskkill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
-    $killer = Start-Process -FilePath $taskkill -ArgumentList @('/PID', [string]$Owner.process_id, '/T', '/F') `
-        -WindowStyle Hidden -PassThru
-    if (-not $killer.WaitForExit(15000)) {
-        try { $killer.Kill(); $killer.WaitForExit(2000) | Out-Null } catch {}
-    }
-    if (-not $killer.HasExited -or $killer.ExitCode -ne 0) {
-        [Array]::Reverse($snapshot)
-        foreach ($expected in $snapshot) {
-            $current = Get-GuardProcessIdentity -ProcessId ([int]$expected.process_id)
-            if ($current -and (Test-GuardStartTokenEqual `
-                    $current.process_start_token $expected.process_start_token)) {
-                Stop-Process -Id ([int]$current.process_id) -Force -ErrorAction SilentlyContinue
-            }
-        }
-    }
-    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
-    while ((Get-GuardProcessIdentity -ProcessId ([int]$Owner.process_id)) -and
-        [DateTimeOffset]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
-    foreach ($expected in $snapshot) {
-        $remaining = Get-GuardProcessIdentity -ProcessId ([int]$expected.process_id)
-        if ($remaining -and (Test-GuardStartTokenEqual `
-                $remaining.process_start_token $expected.process_start_token)) {
-            throw 'WATCHDOG_TERMINATION_UNRESOLVED'
-        }
-    }
-    while ((Get-GuardProcessIdentity -ProcessId ([int]$Owner.launcher_process_id)) -and
-        [DateTimeOffset]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
-    $launcher = Get-GuardProcessIdentity -ProcessId ([int]$Owner.launcher_process_id)
-    if ($launcher -and (Test-GuardStartTokenEqual `
-            $launcher.process_start_token $Owner.launcher_start_token)) {
+    $powershell = Join-Path $PSHOME 'powershell.exe'
+    if (-not (Test-Path -LiteralPath $powershell)) { $powershell = 'powershell.exe' }
+    $process = Start-Process -FilePath $powershell -ArgumentList @(
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', ('"{0}"' -f $ControlScript), '-Action', 'TerminateWatchdogOwner',
+        '-RuntimeRoot', ('"{0}"' -f $RuntimeRoot),
+        '-RepositoryRoot', ('"{0}"' -f $RepositoryRoot),
+        '-TargetProcessId', [string]$Owner.process_id,
+        '-TargetProcessStartToken', ('"{0}"' -f $Owner.process_start_token)
+    ) -WindowStyle Hidden -PassThru
+    if (-not $process.WaitForExit(55000) -or $process.ExitCode -ne 0) {
         throw 'WATCHDOG_TERMINATION_UNRESOLVED'
     }
 }
@@ -211,7 +178,7 @@ function Invoke-WatchdogGuard {
             $observedAt -le $now.AddSeconds(30) -and
             ($now - $observedAt).TotalSeconds -le $MaxAgeSeconds
         if ($healthy) { return $false }
-        Stop-GuardVerifiedOwnerTree -Owner $owner
+        Stop-GuardVerifiedOwner -Owner $owner
     } elseif ($receipt) {
         Remove-Item -LiteralPath $OwnerReceiptPath -Force -ErrorAction Stop
     }

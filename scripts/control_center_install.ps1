@@ -564,19 +564,9 @@ function Stop-VerifiedWatchdogOwner {
     } elseif ($launcher) {
         throw "CONTROL_PLANE_LAUNCHER_IDENTITY_MISMATCH"
     }
-    $null = Stop-WatchdogExactProcessTree -RootIdentity $current
-    if ($launcher) {
-        $deadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
-        while ((Get-ControlPlaneProcessIdentity -ProcessId ([int]$launcher.process_id)) -and
-            [DateTimeOffset]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
-        $remainingLauncher = Get-ControlPlaneProcessIdentity `
-            -ProcessId ([int]$launcher.process_id)
-        if ($remainingLauncher -and (Test-ControlPlaneStartTokenEqual `
-                -Left $remainingLauncher.process_start_token `
-                -Right $expectedLauncherIdentity.process_start_token)) {
-            throw "CONTROL_PLANE_WATCHDOG_TERMINATION_UNRESOLVED"
-        }
-    }
+    $allowLegacy = -not $Identity.watchdog_owner_receipt
+    $null = Stop-WatchdogControllerOwner -RootIdentity $current `
+        -LauncherIdentity $launcher -AllowLegacyReceiptless:$allowLegacy
 }
 
 function Start-WatchdogReplacement {

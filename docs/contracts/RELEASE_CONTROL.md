@@ -88,6 +88,13 @@ missing exact Version remains visible and retryable without changing Stable.
 
 ## Windows ownership and validation
 
+Process ancestry is observational topology, not termination authority. Replacing
+the Watchdog or its launcher preserves the exact PID/start-token set of the
+Business Runtime described by the active Windows service launch contract. The
+controller stops only the verified Watchdog root and, after a bounded natural
+exit wait, its verified launcher root. An unclassified Watchdog descendant
+blocks replacement; Watchdog replacement never uses recursive process-tree kill.
+
 Exactly one Windows production owner may run collector, trainer, annotator,
 decision, retry-consumer, and dashboard-sync side effects. Candidate Windows
 code is STAGED or TESTING only. Its preflight uses an isolated checkout,
