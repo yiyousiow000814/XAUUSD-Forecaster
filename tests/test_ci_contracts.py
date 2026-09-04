@@ -93,6 +93,19 @@ def test_windows_runtime_manifest_assigns_every_required_test_exactly_once() -> 
         "windows-runtime-artifact-repair",
         "windows-runtime-cross-version",
     }
+    shard_by_id = {shard["id"]: shard for shard in WINDOWS_MANIFEST["shards"]}
+    assert "compatibility" not in shard_by_id
+    assert {
+        "compatibility-release",
+        "compatibility-boundaries",
+    }.issubset(shard_by_id)
+    compatibility_assignments = {
+        nodeid
+        for shard_id in ("compatibility-release", "compatibility-boundaries")
+        for spec in shard_by_id[shard_id]["tests"]
+        for nodeid in _owned_tests(spec)
+    }
+    assert len(compatibility_assignments) == 79
 
 
 def test_windows_runtime_selector_uses_authoritative_impact_map(monkeypatch) -> None:

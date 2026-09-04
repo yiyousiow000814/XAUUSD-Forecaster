@@ -261,7 +261,7 @@
       ]
     },
     {
-      "id": "compatibility",
+      "id": "compatibility-release",
       "family": "windows-runtime-release",
       "paths": [
         "tests/test_runtime_launchers.py",
@@ -280,6 +280,30 @@
         {
           "path": "tests/test_runtime_launchers.py",
           "from": "test_required_github_gate_set_is_exact_and_missing_gate_stays_pending",
+          "through": "test_access_provider_inspection_fails_closed"
+        }
+      ]
+    },
+    {
+      "id": "compatibility-boundaries",
+      "family": "windows-runtime-release",
+      "paths": [
+        "tests/test_runtime_launchers.py",
+        "scripts/xauusd_control_center.ps1",
+        "scripts/check_admin_access_boundary.py",
+        "scripts/run_live_broadcast_publisher.py",
+        "scripts/control_center_common.ps1",
+        "scripts/control_center_persistence_gateway.ps1",
+        "scripts/control_center_provider_adapters.ps1",
+        "scripts/control_center_runtime_supervision.ps1",
+        "scripts/control_center_evidence_authority.ps1",
+        "scripts/control_center_transaction_engine.ps1",
+        "scripts/control_center_recovery_engine.ps1"
+      ],
+      "tests": [
+        {
+          "path": "tests/test_runtime_launchers.py",
+          "from": "test_access_qualification_key_change_requires_human_review",
           "through": "test_broadcast_owner_starts_independently_without_reclassifying_core_services"
         }
       ]
