@@ -1107,19 +1107,24 @@ switch ($Action) {
             [string]::IsNullOrWhiteSpace($TargetProcessStartToken)) {
             throw 'WATCHDOG_TERMINATION_IDENTITY_REQUIRED'
         }
-        $release = Get-ReleaseControlState
-        if (-not $release -or $release.transaction) {
+        if (-not (Enter-ReleaseTransactionLock)) {
             throw 'WATCHDOG_TERMINATION_CONTROL_TRANSIENT_ACTIVE'
         }
-        $inventory = Get-WatchdogOwnershipInventory
-        $owner = @($inventory.authoritative + $inventory.duplicate_shaped |
-            Where-Object {
-                [int]$_.process_id -eq $TargetProcessId -and
-                (Test-ControlPlaneStartTokenEqual -Left $_.process_start_token `
-                    -Right $TargetProcessStartToken)
-            })
-        if ($owner.Count -ne 1) { throw 'WATCHDOG_OWNER_IDENTITY_UNRESOLVED' }
-        Stop-VerifiedWatchdogOwner -Identity $owner[0] | Out-Null
+        try {
+            $release = Get-ReleaseControlState
+            if (-not $release -or $release.transaction) {
+                throw 'WATCHDOG_TERMINATION_CONTROL_TRANSIENT_ACTIVE'
+            }
+            $inventory = Get-WatchdogOwnershipInventory
+            $owner = @($inventory.authoritative + $inventory.duplicate_shaped |
+                Where-Object {
+                    [int]$_.process_id -eq $TargetProcessId -and
+                    (Test-ControlPlaneStartTokenEqual -Left $_.process_start_token `
+                        -Right $TargetProcessStartToken)
+                })
+            if ($owner.Count -ne 1) { throw 'WATCHDOG_OWNER_IDENTITY_UNRESOLVED' }
+            Stop-VerifiedWatchdogOwner -Identity $owner[0] | Out-Null
+        } finally { Exit-ReleaseTransactionLock }
     }
     "CodeRevision" { Write-Output (Get-CodeRevision) }
     "WpfLayoutSmoke" {

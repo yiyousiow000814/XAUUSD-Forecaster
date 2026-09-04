@@ -150,9 +150,12 @@ def test_watchdog_replacement_has_no_recursive_kill_path() -> None:
     assert "Stop-WatchdogExactProcessTree" not in production
     assert "taskkill" not in production.lower()
     assert "Stop-WatchdogControllerOwner" in production
-    assert "TerminateWatchdogOwner" in (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(
-        encoding="utf-8",
-    )
+    controller = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
+    termination_action = controller.split('"TerminateWatchdogOwner" {', 1)[1].split(
+        '\n    "CodeRevision"', 1,
+    )[0]
+    assert "Enter-ReleaseTransactionLock" in termination_action
+    assert "Exit-ReleaseTransactionLock" in termination_action
 
 
 @pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
