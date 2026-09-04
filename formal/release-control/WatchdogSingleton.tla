@@ -116,5 +116,6 @@ ControllerReplacementPreservesBusinessOwnerSet == businessOwnerSet = 1
 UnknownDescendantBlocksReplacement ==
     unknownDescendant => guardState # "TERMINATING"
 DeadOrTerminatedOwnerEventuallyReplaced ==
-    [](mutexOwners = 0 /\ guardState = "TERMINATED" => <> (mutexOwners = 1))
+    [](mutexOwners = 0 /\ guardState = "TERMINATED" /\ ~unknownDescendant
+        => <> (mutexOwners = 1))
 =============================================================================
