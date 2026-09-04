@@ -147,40 +147,221 @@ function Get-WatchdogProcessTreeSnapshot {
     return @($identities)
 }
 
-function Stop-WatchdogExactProcessTree {
-    param([Parameter(Mandatory = $true)][object]$RootIdentity)
-    $snapshot = @(Get-WatchdogProcessTreeSnapshot -RootIdentity $RootIdentity)
-    $taskkill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
-    $killer = Start-Process -FilePath $taskkill -ArgumentList @(
-        '/PID', [string]$RootIdentity.process_id, '/T', '/F'
-    ) -WindowStyle Hidden -PassThru
-    $taskkillCompleted = $killer.WaitForExit(15000)
-    if (-not $taskkillCompleted) {
-        try { $killer.Kill(); $killer.WaitForExit(2000) | Out-Null } catch {}
-    }
-    $needsFallback = -not $taskkillCompleted -or
-        ($killer.HasExited -and $killer.ExitCode -ne 0)
-    if ($needsFallback) {
-        [Array]::Reverse($snapshot)
-        foreach ($expected in $snapshot) {
-            $current = Get-ControlPlaneProcessIdentity -ProcessId ([int]$expected.process_id)
-            if ($current -and (Test-ControlPlaneStartTokenEqual `
-                    -Left $current.process_start_token -Right $expected.process_start_token)) {
-                Stop-Process -Id ([int]$current.process_id) -Force -ErrorAction SilentlyContinue
+function Test-WatchdogExactIdentityAlive {
+    param([AllowNull()][object]$Identity)
+    if (-not $Identity -or [int]$Identity.process_id -le 0) { return $false }
+    $current = Get-ControlPlaneProcessIdentity -ProcessId ([int]$Identity.process_id)
+    return [bool]($current -and (Test-ControlPlaneStartTokenEqual `
+        -Left $current.process_start_token -Right $Identity.process_start_token))
+}
+
+function Get-WatchdogBusinessOwnerBaseline {
+    $baseline = @()
+    foreach ($service in @($services)) {
+        $enabled = [string]$service.Key -ne 'broadcast' -or
+            (Test-BroadcastPublisherEnabled)
+        $owners = @(Get-ForecasterProcesses -Service $service)
+        if ($enabled -and $owners.Count -ne 1) {
+            throw "WATCHDOG_TERMINATION_BUSINESS_OWNER_INVALID:$($service.Key)"
+        }
+        if (-not $enabled -and $owners.Count -gt 0) {
+            throw "WATCHDOG_TERMINATION_BUSINESS_OWNER_INVALID:$($service.Key)"
+        }
+        foreach ($owner in $owners) {
+            $identity = Get-ControlPlaneProcessIdentity -ProcessId ([int]$owner.ProcessId)
+            if (-not $identity -or -not (Test-ForecasterServiceProcess `
+                    -Process $owner -Service $service)) {
+                throw "WATCHDOG_TERMINATION_BUSINESS_IDENTITY_INVALID:$($service.Key)"
+            }
+            $tree = @(Get-WatchdogProcessTreeSnapshot -RootIdentity $identity)
+            $baseline += [pscustomobject]@{
+                service_key = [string]$service.Key
+                enabled = [bool]$enabled
+                revision = [string]$service.Revision
+                script_path = [string]$service.ScriptPath
+                root = $identity
+                subtree = $tree
             }
         }
     }
-    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
-    do {
-        $remaining = @($snapshot | Where-Object {
-            $current = Get-ControlPlaneProcessIdentity -ProcessId ([int]$_.process_id)
-            $current -and (Test-ControlPlaneStartTokenEqual `
-                -Left $current.process_start_token -Right $_.process_start_token)
-        })
-        if ($remaining.Count -eq 0) { return 'TERMINATED' }
-        Start-Sleep -Milliseconds 100
-    } while ([DateTimeOffset]::UtcNow -lt $deadline)
-    throw 'WATCHDOG_TERMINATION_UNRESOLVED'
+    return @($baseline)
+}
+
+function Get-WatchdogControllerTerminationPlan {
+    param(
+        [Parameter(Mandatory = $true)][object]$RootIdentity,
+        [AllowNull()][object]$LauncherIdentity,
+        [switch]$AllowLegacyReceiptless
+    )
+    $current = Get-ControlPlaneProcessIdentity -ProcessId ([int]$RootIdentity.process_id)
+    $expectedScript = Join-Path $repositoryRoot `
+        '.local\runtime-control\xauusd_control_center.ps1'
+    $expectedSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    if (-not $current -or -not (Test-ControlPlaneStartTokenEqual `
+            -Left $current.process_start_token -Right $RootIdentity.process_start_token) -or
+        [string]$current.name -ne 'powershell.exe' -or
+        -not $current.command_line.Contains($expectedScript) -or
+        $current.command_line -notmatch '(?i)-Action\s+Watchdog' -or
+        -not $current.command_line.Contains($moduleRoot) -or
+        -not $current.command_line.Contains($repositoryRoot) -or
+        [string]$current.owner_sid -ne [string]$expectedSid) {
+        throw 'CONTROL_PLANE_WATCHDOG_IDENTITY_CHANGED'
+    }
+    $bundleRoot = Split-Path -Parent $expectedScript
+    $bundle = Get-RuntimeControlBundleIdentityAtRoot -ControlRoot $bundleRoot `
+        -RequireDependencyClosure
+    if (-not $bundle) { throw 'WATCHDOG_TERMINATION_BUNDLE_INVALID' }
+    $receipt = $null
+    try { $receipt = Read-WatchdogOwnerReceipt } catch {
+        throw 'WATCHDOG_OWNER_RECEIPT_INVALID'
+    }
+    if ($receipt) {
+        $descriptor = Get-WatchdogSingletonDescriptor
+        if (-not (Test-WatchdogOwnerReceiptShape -Receipt $receipt `
+                -Descriptor $descriptor) -or
+            [string]$receipt.installed_control_revision -ne [string]$bundle.source_revision -or
+            [string]$receipt.bundle_digest -ne [string]$bundle.bundle_digest) {
+            throw 'WATCHDOG_OWNER_RECEIPT_INVALID'
+        }
+        $receiptMatchesRoot = [int]$receipt.process_id -eq [int]$current.process_id -and
+            (Test-ControlPlaneStartTokenEqual -Left $receipt.process_start_token `
+                -Right $current.process_start_token)
+        if (-not $receiptMatchesRoot -and -not $AllowLegacyReceiptless) {
+            throw 'WATCHDOG_OWNER_RECEIPT_INVALID'
+        }
+    } elseif (-not $AllowLegacyReceiptless) {
+        throw 'WATCHDOG_OWNER_RECEIPT_REQUIRED'
+    }
+    if ($LauncherIdentity) {
+        $launcher = Get-ControlPlaneProcessIdentity `
+            -ProcessId ([int]$LauncherIdentity.process_id)
+        if (-not $launcher -or -not (Test-ControlPlaneStartTokenEqual `
+                -Left $launcher.process_start_token `
+                -Right $LauncherIdentity.process_start_token) -or
+            -not (Test-WatchdogCanonicalLauncherIdentity -Identity $launcher)) {
+            throw 'CONTROL_PLANE_LAUNCHER_IDENTITY_MISMATCH'
+        }
+    }
+    $business = @(Get-WatchdogBusinessOwnerBaseline)
+    $preserve = @{}
+    foreach ($entry in $business) {
+        foreach ($identity in @($entry.subtree)) {
+            $preserve["$([int]$identity.process_id):$([string]$identity.process_start_token)"] = $true
+        }
+    }
+    $controllerHelpers = @()
+    $unknown = @()
+    foreach ($identity in @(Get-WatchdogProcessTreeSnapshot -RootIdentity $current | Select-Object -Skip 1)) {
+        $key = "$([int]$identity.process_id):$([string]$identity.process_start_token)"
+        if ($preserve.ContainsKey($key)) { continue }
+        # Windows attaches a console host directly to powershell.exe. It is a
+        # controller helper, not a business owner, and is never explicitly killed.
+        if ([int]$identity.parent_process_id -eq [int]$current.process_id -and
+            [string]$identity.name -eq 'conhost.exe') {
+            $controllerHelpers += $identity
+            continue
+        }
+        $unknown += $identity
+    }
+    if ($unknown.Count -gt 0) {
+        throw 'WATCHDOG_TERMINATION_DESCENDANT_UNKNOWN'
+    }
+    [pscustomobject]@{
+        root = $current
+        launcher = $LauncherIdentity
+        bundle_revision = [string]$bundle.source_revision
+        bundle_digest = [string]$bundle.bundle_digest
+        receipt = $receipt
+        business = @($business)
+        preserve_business_runtime = @($business | ForEach-Object { $_.subtree })
+        control_plane_transient = @($controllerHelpers)
+        unknown = @()
+    }
+}
+
+function Assert-WatchdogBusinessOwnerBaselineUnchanged {
+    param([Parameter(Mandatory = $true)][object[]]$Baseline)
+    foreach ($entry in $Baseline) {
+        $current = Get-ControlPlaneProcessIdentity `
+            -ProcessId ([int]$entry.root.process_id)
+        if (-not $current -or -not (Test-ControlPlaneStartTokenEqual `
+                -Left $current.process_start_token `
+                -Right $entry.root.process_start_token)) {
+            throw 'WATCHDOG_TERMINATION_CHANGED_BUSINESS_RUNTIME'
+        }
+    }
+}
+
+function Test-WatchdogSingletonMutexAvailable {
+    $descriptor = Get-WatchdogSingletonDescriptor
+    $mutex = [Threading.Mutex]::new($false, [string]$descriptor.mutex_name)
+    $acquired = $false
+    try {
+        try { $acquired = $mutex.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $acquired = $true }
+        return [bool]$acquired
+    } finally {
+        if ($acquired) { try { $mutex.ReleaseMutex() } catch {} }
+        $mutex.Dispose()
+    }
+}
+
+function Stop-WatchdogControllerOwner {
+    param(
+        [Parameter(Mandatory = $true)][object]$RootIdentity,
+        [AllowNull()][object]$LauncherIdentity,
+        [switch]$AllowLegacyReceiptless
+    )
+    $stateHash = if (Test-Path -LiteralPath $releaseControlStatePath) {
+        (Get-FileHash -LiteralPath $releaseControlStatePath -Algorithm SHA256).Hash
+    } else { $null }
+    $historyHash = if (Test-Path -LiteralPath $releaseHistoryPath) {
+        (Get-FileHash -LiteralPath $releaseHistoryPath -Algorithm SHA256).Hash
+    } else { $null }
+    $plan = Get-WatchdogControllerTerminationPlan -RootIdentity $RootIdentity `
+        -LauncherIdentity $LauncherIdentity -AllowLegacyReceiptless:$AllowLegacyReceiptless
+    Stop-Process -Id ([int]$plan.root.process_id) -Force -ErrorAction Stop
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(15)
+    while ((Test-WatchdogExactIdentityAlive -Identity $plan.root) -and
+        [DateTimeOffset]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+    if (Test-WatchdogExactIdentityAlive -Identity $plan.root) {
+        throw 'WATCHDOG_TERMINATION_UNRESOLVED'
+    }
+    if ($plan.launcher) {
+        $launcherDeadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
+        while ((Test-WatchdogExactIdentityAlive -Identity $plan.launcher) -and
+            [DateTimeOffset]::UtcNow -lt $launcherDeadline) { Start-Sleep -Milliseconds 100 }
+        if (Test-WatchdogExactIdentityAlive -Identity $plan.launcher) {
+            Stop-Process -Id ([int]$plan.launcher.process_id) -Force -ErrorAction Stop
+        }
+        if (Test-WatchdogExactIdentityAlive -Identity $plan.launcher) {
+            throw 'WATCHDOG_TERMINATION_UNRESOLVED'
+        }
+    }
+    foreach ($helper in @($plan.control_plane_transient)) {
+        $helperDeadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
+        while ((Test-WatchdogExactIdentityAlive -Identity $helper) -and
+            [DateTimeOffset]::UtcNow -lt $helperDeadline) {
+            Start-Sleep -Milliseconds 100
+        }
+        if (Test-WatchdogExactIdentityAlive -Identity $helper) {
+            throw 'WATCHDOG_TERMINATION_UNRESOLVED'
+        }
+    }
+    if (-not (Test-WatchdogSingletonMutexAvailable)) {
+        throw 'WATCHDOG_SINGLETON_MUTEX_UNAVAILABLE'
+    }
+    Assert-WatchdogBusinessOwnerBaselineUnchanged -Baseline $plan.business
+    $newStateHash = if (Test-Path -LiteralPath $releaseControlStatePath) {
+        (Get-FileHash -LiteralPath $releaseControlStatePath -Algorithm SHA256).Hash
+    } else { $null }
+    $newHistoryHash = if (Test-Path -LiteralPath $releaseHistoryPath) {
+        (Get-FileHash -LiteralPath $releaseHistoryPath -Algorithm SHA256).Hash
+    } else { $null }
+    if ($stateHash -ne $newStateHash -or $historyHash -ne $newHistoryHash) {
+        throw 'WATCHDOG_TERMINATION_CHANGED_RELEASE_EVIDENCE'
+    }
+    return [pscustomobject]@{ status = 'TERMINATED'; plan = $plan }
 }
 
 function Enter-WatchdogSingletonOwnership {

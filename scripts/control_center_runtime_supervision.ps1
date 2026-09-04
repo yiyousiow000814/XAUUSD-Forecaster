@@ -2172,7 +2172,8 @@ function Invoke-WatchdogOwnershipRepair {
             Stop-VerifiedWatchdogOwner -Identity $identity
         }
         foreach ($identity in @($inventory.legacy_orphaned)) {
-            $null = Stop-WatchdogExactProcessTree -RootIdentity $identity
+            $null = Stop-WatchdogControllerOwner -RootIdentity $identity `
+                -AllowLegacyReceiptless
         }
         $afterStop = Get-WatchdogOwnershipInventory
         if ($afterStop.authoritative.Count -ne 0 -or

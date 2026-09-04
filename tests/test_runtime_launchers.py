@@ -3906,7 +3906,7 @@ def test_watchdog_guard_restarts_only_after_heartbeat_is_stale(tmp_path) -> None
         "control_bundle_revision=('d'*40);control_bundle_exact_revision=$true;"
         "control_bundle_hash_verified=$true;supervision_mode='ACTIVE';install_transaction_id=$null;"
         "process_id=123;process_start_token=$owner.process_start_token} };"
-        "function Stop-GuardVerifiedOwnerTree { $script:stops += 1 };"
+        "function Stop-GuardVerifiedOwner { $script:stops += 1 };"
         "function Stop-ScheduledTask {}; "
         "function Start-ScheduledTask { $script:starts += 1 }; "
         "$fresh = Invoke-WatchdogGuard; "

@@ -171,7 +171,7 @@ def test_selector_uses_authoritative_ownership_and_has_a_bounded_noop(monkeypatc
 def test_runner_pins_tool_and_emits_machine_readable_measurements() -> None:
     runner = (ROOT / "scripts" / "run_tla_model.py").read_text(encoding="utf-8")
     assert 'TLA_TOOLS_VERSION = "v1.8.0"' in runner
-    assert "dbcc75552f21978a4846688b8e23be1a6b6c0b3fcee35d78fec2df167958ec94" in runner
+    assert "16b8cd970e07147ff91f126baecba7edd98202e5ab33220a42f8f4358ee94b2b" in runner
     assert '"-workers", "auto"' in runner
     assert '"-coverage"' not in runner
     assert 'choices=("local", "ci")' in runner
