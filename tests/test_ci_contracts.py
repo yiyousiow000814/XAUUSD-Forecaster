@@ -2,8 +2,12 @@ import ast
 from collections import Counter
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
+import subprocess
+import sys
+import time
 
 import pytest
 
@@ -179,6 +183,111 @@ def test_python_gate_is_parallel_bounded_and_keeps_required_name() -> None:
     assert "needs.python-shards.result" in workflow
     assert "python -m pytest -q" not in workflow
     assert "pytest==9.1.1 pytest-timeout==2.4.0" in workflow
+
+
+def test_web_gate_keeps_complete_suite_and_uses_bounded_lockfile_install() -> None:
+    workflow = (
+        ROOT / ".github" / "workflows" / "quality-gates.yml"
+    ).read_text(encoding="utf-8")
+    timeouts = [int(value) for value in re.findall(r"timeout-minutes:\s*(\d+)", workflow)]
+    assert timeouts and max(timeouts) <= 5
+    assert workflow.count("name: Web build and tests") == 1
+    assert "npm install --global npm@11.6.2" in workflow
+    assert "python ../scripts/run_bounded_web_install.py" in workflow
+    assert "--timeout-seconds 150" in workflow
+    assert "--kill-grace-seconds 10" in workflow
+    assert "python -m pip install -e .." in workflow
+    assert workflow.count("run: npm test") == 1
+
+    runner = (ROOT / "scripts" / "run_bounded_web_install.py").read_text(
+        encoding="utf-8"
+    )
+    for contract in (
+        '"ci"',
+        '"--prefer-offline"',
+        '"--no-audit"',
+        '"--no-fund"',
+        '"--fetch-retries=1"',
+        '"--fetch-retry-mintimeout=1000"',
+        '"--fetch-retry-maxtimeout=5000"',
+        '"--fetch-timeout=30000"',
+        '"WEB_DEPENDENCY_INSTALL_TIMEOUT"',
+        "package_lock_sha256=",
+        "npm_cache_path=",
+        "web_dependency_install_elapsed_seconds=",
+    ):
+        assert contract in runner
+    assert "--ignore-scripts" not in runner
+    assert "npm install" not in runner
+    assert "package-lock-only" not in runner
+
+
+def test_bounded_web_install_timeout_terminates_process_tree(tmp_path: Path) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "run_bounded_web_install", ROOT / "scripts" / "run_bounded_web_install.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    child_pid_path = tmp_path / "child.pid"
+    helper = tmp_path / "tree.py"
+    helper.write_text(
+        "import pathlib, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='ascii')\n"
+        "print('tree-ready', flush=True)\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    return_code, tail, elapsed, timed_out = module.run_bounded_command(
+        [sys.executable, str(helper), str(child_pid_path)],
+        cwd=tmp_path,
+        timeout_seconds=1,
+        kill_grace_seconds=2,
+    )
+    assert return_code == 124
+    assert timed_out is True
+    assert elapsed < 6
+    assert "tree-ready" in tail
+    child_pid = int(child_pid_path.read_text(encoding="ascii"))
+    time.sleep(0.2)
+    if os.name == "nt":
+        probe = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {child_pid}", "/FO", "CSV", "/NH"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert str(child_pid) not in probe.stdout
+    else:
+        with pytest.raises(ProcessLookupError):
+            os.kill(child_pid, 0)
+
+
+def test_bounded_web_install_propagates_success_and_failure(tmp_path: Path) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "run_bounded_web_install", ROOT / "scripts" / "run_bounded_web_install.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    success = module.run_bounded_command(
+        [sys.executable, "-c", "print('complete-suite-ready')"],
+        cwd=tmp_path,
+        timeout_seconds=5,
+        kill_grace_seconds=1,
+    )
+    failure = module.run_bounded_command(
+        [sys.executable, "-c", "raise SystemExit(23)"],
+        cwd=tmp_path,
+        timeout_seconds=5,
+        kill_grace_seconds=1,
+    )
+    assert success[0] == 0 and success[3] is False
+    assert success[1] == ("complete-suite-ready",)
+    assert failure[0] == 23 and failure[3] is False
 
 
 def test_python_shard_manifest_assigns_every_platform_test_file_exactly_once() -> None:
