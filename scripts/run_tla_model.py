@@ -17,7 +17,7 @@ MODEL_ROOT = ROOT / "formal" / "release-control"
 MANIFEST = MODEL_ROOT / "shards.json"
 TLA_TOOLS_VERSION = "v1.8.0"
 TLA_TOOLS_URL = f"https://github.com/tlaplus/tlaplus/releases/download/{TLA_TOOLS_VERSION}/tla2tools.jar"
-TLA_TOOLS_SHA256 = "dbcc75552f21978a4846688b8e23be1a6b6c0b3fcee35d78fec2df167958ec94"
+TLA_TOOLS_SHA256 = "16b8cd970e07147ff91f126baecba7edd98202e5ab33220a42f8f4358ee94b2b"
 PROGRESS = re.compile(r"(?P<generated>[\d,]+) states generated.*?(?P<distinct>[\d,]+) distinct states found.*?(?P<queued>[\d,]+) states left on queue")
 
 
