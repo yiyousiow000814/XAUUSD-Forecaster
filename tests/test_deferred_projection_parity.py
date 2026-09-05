@@ -5,11 +5,78 @@ import json
 from pathlib import Path
 import sqlite3
 import urllib.error
+import pytest
 from urllib.parse import parse_qs, urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
 OBSERVE_ATTEMPT = "c" * 32
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("valid", "PASSED"), ("pending", "PENDING"), ("wrong_worker", "FAILED"),
+    ("wrong_generation", "FAILED"), ("wrong_key", "FAILED"),
+    ("old_read", "FAILED"), ("resource_error", "PENDING"),
+    ("other_resource", "FAILED"), ("tampered_request", "FAILED"),
+])
+def test_incident_news_observe_requires_exact_normal_sync_and_remote_generation(monkeypatch, tmp_path, case, expected):
+    module = _module()
+    monkeypatch.setattr(module, "RUNTIME_ROOT", tmp_path)
+    revision = "b" * 40
+    version = "11111111-1111-4111-8111-111111111111"
+    after = datetime.now(UTC) - timedelta(seconds=10)
+    read_at = after + timedelta(seconds=2)
+    snapshot = "d" * 64
+    root = tmp_path / ".local/forward"
+    root.mkdir(parents=True)
+    request = {
+        "schema_version": "deferred-projection-sync-v1", "request_id": "22222222-2222-4222-8222-222222222222",
+        "transaction_id": "33333333-3333-4333-8333-333333333333", "validation_key": f"{version}:{revision}",
+        "target": "cloudflare", "required_after": after.isoformat(),
+        "worker_version_id": version, "producer_revision": revision,
+        "routes": ["/api/news-evidence"],
+        "collector_recovery": {"incident": "COLLECTOR_CLOCK_EVENT_ATOMICITY",
+            "broken_revision": "ffe1de29c0891cc3a3cf3d602f3d3ee657faa9b8", "target_revision": revision},
+    }
+    receipt = {
+        **request, "state": "COMPLETED", "request_digest": module._deferred_projection_request_digest(request),
+        "projection_hashes": {"/api/news-evidence": snapshot},
+        "news_recovery": {"snapshot_id": snapshot, "record_count": 7, "contract_version": "news-evidence-paged-v2",
+            "local_read_completed_at": read_at.isoformat()},
+    }
+    status = {"status": "OK", "last_success": read_at.isoformat(), "resource_observations": [{"target": "cloudflare",
+        "resource": "news_evidence", "status": "OK", "completed_at": read_at.isoformat()}]}
+    if case == "pending":
+        receipt["state"] = "PARTIAL"
+    elif case == "wrong_key":
+        receipt["validation_key"] = "wrong"
+    elif case == "old_read":
+        receipt["news_recovery"]["local_read_completed_at"] = (after-timedelta(seconds=1)).isoformat()
+    elif case == "resource_error":
+        status["resource_observations"][0]["status"] = "ERROR"
+    elif case == "other_resource":
+        status["degraded_resources"] = [{"resource": "market_history"}]
+    elif case == "tampered_request":
+        request["transaction_id"] = "changed"
+    for name, value in (("deferred-projection-sync-request.json", request),
+                        ("deferred-projection-sync-receipt.json", receipt),
+                        ("dashboard-news-evidence-sync-state-cloudflare.json", {
+                            "active_snapshot_id": snapshot, "record_count": 7,
+                            "contract_version": "news-evidence-paged-v2"}),
+                        ("dashboard-sync-status.json", status)):
+        (root / name).write_text(json.dumps(value), encoding="utf-8")
+    def remote(url, *, headers):
+        assert "limit=1" in url and "__release_observe=" in url
+        assert headers["Cloudflare-Workers-Version-Overrides"].endswith(f'="{version}"')
+        return {"snapshot_id": "e"*64 if case == "wrong_generation" else snapshot,
+                "contract_version": "news-evidence-paged-v2"}, {
+                    "X-Aurum-Worker-Version": "wrong" if case == "wrong_worker" else version,
+                    "X-Aurum-Git-SHA": revision}
+    monkeypatch.setattr(module, "_read_json", remote)
+    monkeypatch.setattr(module, "_read_local_authority", lambda: pytest.fail("unrelated Audit read"))
+    result = module.verify(version_id=version, git_sha=revision, producer_revision=revision,
+                           routes=["/api/news-evidence"], required_after=after, observe_attempt=OBSERVE_ATTEMPT)
+    assert result["state"] == expected
 
 
 def _module():

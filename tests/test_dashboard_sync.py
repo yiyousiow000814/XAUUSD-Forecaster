@@ -3048,8 +3048,9 @@ def test_continuous_heavy_owner_drains_overdue_queue_before_next_heartbeat(
     ]
 
 
+@pytest.mark.parametrize("incident,continuous", [(False, False), (True, False), (True, True)])
 def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
-    monkeypatch, tmp_path,
+    monkeypatch, tmp_path, incident, continuous,
 ) -> None:
     module = _sync_module()
     config = module.configure_runtime_state({}, tmp_path)
@@ -3075,6 +3076,30 @@ def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
         "routes": sorted(module.DEFERRED_PROJECTION_ROUTES),
         "created_at": required_after.isoformat(),
     }
+    news_calls = []
+    if incident:
+        request["routes"].append("/api/news-evidence")
+        request["collector_recovery"] = {
+            "incident": "COLLECTOR_CLOCK_EVENT_ATOMICITY",
+            "broken_revision": "ffe1de29c0891cc3a3cf3d602f3d3ee657faa9b8",
+            "target_revision": revision,
+        }
+        target["news_evidence_state_file"] = str(tmp_path / "news-state.json")
+        def advance_news(_payload, _target):
+            news_calls.append(1)
+            if len(news_calls) == 1:
+                module._write_news_sync_state(Path(target["news_evidence_state_file"]), {
+                    "contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION,
+                    "staging_snapshot_id": "d"*64, "staged_count": 4,
+                })
+            if len(news_calls) == 2:
+                module._write_news_sync_state(Path(target["news_evidence_state_file"]), {
+                    "contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION,
+                    "active_snapshot_id": "d"*64, "record_count": 8,
+                })
+        monkeypatch.setattr(module, "_sync_news_evidence", advance_news)
+        monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k:
+                            io.BytesIO(json.dumps({"snapshot_id": "d"*64}).encode()))
     Path(config["deferred_projection_request_file"]).write_text(
         json.dumps(request), encoding="utf-8",
     )
@@ -3097,7 +3122,49 @@ def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
     )
 
     pending = module.sync_deferred_projection_once([target], config)
+    if continuous:
+        logical_time = [0.0]
+        heartbeats = []
+        class LogicalStop:
+            def is_set(self):
+                return False
+
+            def wait(self, seconds):
+                logical_time[0] += seconds
+                time.sleep(0.001)
+                return False
+
+        def heartbeat(_config):
+            heartbeats.append((logical_time[0], len(news_calls)))
+            return [target], module.SyncResourceResults([], [])
+
+        monkeypatch.setattr(module.time, "monotonic", lambda: logical_time[0])
+        monkeypatch.setattr(module, "sync_heartbeat_once", heartbeat)
+        monkeypatch.setattr(module, "sync_resource_lane", lambda *_a, **_k: module.SyncResourceResults([], []))
+        monkeypatch.setattr(module, "write_sync_status", lambda *_a, **_k: None)
+        module.run_continuous_sync(config, status_file=tmp_path / "status.json",
+                                   interval_seconds=30, stop_event=LogicalStop(), max_heartbeats=2)
+        assert heartbeats == [(0.0, 0), (30.0, 2)]
+        assert json.loads(Path(config["deferred_projection_receipt_file"]).read_text())["state"] == "COMPLETED"
+        assert len(writes) == 4
+        assert not module.sync_deferred_projection_once([target], config).resource_observations
+        return
     completed = module.sync_deferred_projection_once([target], config)
+    if incident:
+        assert completed.resource_observations[0]["status"] == "PROGRESS"
+        assert len(news_calls) == 1
+        assert json.loads(Path(config["deferred_projection_receipt_file"]).read_text())["state"] == "PARTIAL"
+        retained_failure = {"target": "cloudflare", "resource": "deferred_projection", "error": "prior failure"}
+        retained = module._merge_lane_results(module.SyncResourceResults([retained_failure], []), completed)
+        assert list(retained) == [retained_failure], "page progress is not resource recovery"
+        monkeypatch.setattr(module, "_sync_news_evidence", lambda *_a: None)
+        stalled = module.sync_deferred_projection_once([target], config)
+        assert stalled.resource_observations == [], "unchanged cursor must not busy-drain"
+        monkeypatch.setattr(module, "_sync_news_evidence", advance_news)
+        # This third invocation cannot rebuild/repost accepted Audit work: the
+        # source iterator is exhausted and the write count stays exactly four.
+        completed = module.sync_deferred_projection_once([target], config)
+        assert len(news_calls) == 2
     repeated = module.sync_deferred_projection_once([target], config)
 
     assert pending.resource_observations == []
@@ -3113,13 +3180,17 @@ def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
     assert receipt["request_id"] == request["request_id"]
     assert receipt["producer_revision"] == revision
     assert receipt["generated_at"] == fresh["generated_at"]
-    assert set(receipt["projection_hashes"]) == module.DEFERRED_PROJECTION_ROUTES
+    assert set(receipt["projection_hashes"]) == set(request["routes"])
     posted = {"/api/" + url.rsplit("/api/", 1)[-1]: body for url, body in writes}
-    assert receipt["projection_hashes"] == {
+    expected_hashes = {
         route: module.hashlib.sha256(posted[route]).hexdigest()
         for route in module.DEFERRED_PROJECTION_ROUTES
     }
-    assert completed.resource_observations[0]["resource"] == "deferred_projection"
+    if incident:
+        expected_hashes["/api/news-evidence"] = "d"*64
+        assert completed.resource_observations[0]["resource"] == "news_evidence"
+    assert receipt["projection_hashes"] == expected_hashes
+    assert completed.resource_observations[-1]["resource"] == "deferred_projection"
     schedule = json.loads(schedule_path.read_text(encoding="utf-8"))
     assert schedule["resources"]["audit"]["last_success_at"]
 

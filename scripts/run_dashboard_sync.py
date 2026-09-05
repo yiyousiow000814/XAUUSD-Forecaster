@@ -1532,9 +1532,18 @@ def _read_deferred_projection_request(config: dict) -> dict | None:
         or not isinstance(routes, list)
         or not routes
         or len(routes) != len(set(routes))
-        or any(route not in DEFERRED_PROJECTION_ROUTES for route in routes)
+        or any(route not in DEFERRED_PROJECTION_ROUTES and route != "/api/news-evidence" for route in routes)
     ):
         raise PayloadContractError("deferred projection request contract mismatch")
+    if "/api/news-evidence" in routes:
+        incident = request.get("collector_recovery")
+        if not isinstance(incident, dict) or (
+            incident.get("incident") != "COLLECTOR_CLOCK_EVENT_ATOMICITY"
+            or incident.get("broken_revision") != "ffe1de29c0891cc3a3cf3d602f3d3ee657faa9b8"
+            or incident.get("target_revision") != request["producer_revision"]
+            or incident.get("target_revision") == incident.get("broken_revision")
+        ):
+            raise PayloadContractError("deferred News recovery incident mismatch")
     try:
         timestamps = [
             datetime.fromisoformat(str(request[field]).replace("Z", "+00:00"))
@@ -1591,57 +1600,115 @@ def sync_deferred_projection_once(
         if len(matching_targets) != 1:
             raise RuntimeError("deferred projection target is not healthy and unique")
         target = matching_targets[0]
-        local_payload = _read_local_resource(target, "/api/audit")
-        generated_at = datetime.fromisoformat(
-            str(local_payload.get("generated_at") or "").replace("Z", "+00:00")
-        )
         required_after = datetime.fromisoformat(
             str(request["required_after"]).replace("Z", "+00:00")
         )
-        if generated_at.tzinfo is None:
-            raise PayloadContractError(
-                "deferred projection source timestamp must be timezone-aware"
-            )
-        if generated_at.astimezone(UTC) < required_after.astimezone(UTC):
-            return SyncResourceResults([], [])
-
-        projection_bytes = {
-            "/api/audit-briefs": audit_briefs_snapshot(
-                local_payload, producer_revision,
-            ),
-            "/api/audit-stories": audit_stories_snapshot(
-                local_payload, producer_revision,
-            ),
-            "/api/audit-decisions": audit_decisions_snapshot(
-                local_payload, producer_revision,
-            ),
-        }
-        _sync_audit(local_payload, target)
-        completed_at = datetime.now(UTC)
-        _persist_resource_schedule_result(
-            _resource_schedule_path(target), target, "audit", 300,
-            now=completed_at, success=True,
-        )
         _request_path, receipt_path = _deferred_projection_paths(config)
-        _write_news_sync_state(receipt_path, {
+        prior = _read_news_sync_state(receipt_path)
+        request_digest = _deferred_projection_request_digest(request)
+        reusable = (
+            prior.get("schema_version") == DEFERRED_PROJECTION_CONTRACT
+            and prior.get("request_id") == request["request_id"]
+            and prior.get("request_digest") == request_digest
+            and prior.get("producer_revision") == producer_revision
+            and prior.get("state") == "PARTIAL"
+        )
+        hashes = dict(prior.get("projection_hashes", {})) if reusable else {}
+        audit_routes = [route for route in request["routes"] if route != "/api/news-evidence"]
+        generated_at = datetime.fromisoformat(prior["generated_at"]) if reusable else datetime.now(UTC)
+        if any(route not in hashes for route in audit_routes):
+            local_payload = _read_local_resource(target, "/api/audit")
+            generated_at = datetime.fromisoformat(
+                str(local_payload.get("generated_at") or "").replace("Z", "+00:00")
+            )
+            if generated_at.tzinfo is None:
+                raise PayloadContractError(
+                    "deferred projection source timestamp must be timezone-aware"
+                )
+            if generated_at.astimezone(UTC) < required_after.astimezone(UTC):
+                return SyncResourceResults([], [])
+            builders = {
+                "/api/audit-briefs": audit_briefs_snapshot,
+                "/api/audit-stories": audit_stories_snapshot,
+                "/api/audit-decisions": audit_decisions_snapshot,
+            }
+            hashes.update({route: hashlib.sha256(
+                builders[route](local_payload, producer_revision),
+            ).hexdigest() for route in audit_routes})
+            _sync_audit(local_payload, target)
+            _persist_resource_schedule_result(
+                _resource_schedule_path(target), target, "audit", 300,
+                now=datetime.now(UTC), success=True,
+            )
+        receipt = {
             "schema_version": DEFERRED_PROJECTION_CONTRACT,
-            "state": "COMPLETED",
+            "state": "PARTIAL",
             "request_id": request["request_id"],
             "transaction_id": request["transaction_id"],
-            "request_digest": _deferred_projection_request_digest(request),
+            "request_digest": request_digest,
             "validation_key": request["validation_key"],
             "worker_version_id": request["worker_version_id"],
             "producer_revision": producer_revision,
             "required_after": required_after.astimezone(UTC).isoformat(),
             "generated_at": generated_at.astimezone(UTC).isoformat(),
             "routes": list(request["routes"]),
-            "projection_hashes": {
-                route: hashlib.sha256(projection_bytes[route]).hexdigest()
-                for route in request["routes"]
-            },
-            "completed_at": completed_at.isoformat(),
-        })
-        return SyncResourceResults([], [{
+            "projection_hashes": hashes,
+        }
+        observations = []
+        if "/api/news-evidence" in request["routes"]:
+            # Preserve accepted Audit work while the existing News cursor moves
+            # by its normal one-page budget. There is still one serial Sync owner.
+            _write_news_sync_state(receipt_path, receipt)
+            prior_news = _read_news_sync_state(Path(target["news_evidence_state_file"]))
+            _sync_news_evidence({}, target)
+            ack = _read_news_sync_state(Path(target["news_evidence_state_file"]))
+            with urllib.request.urlopen(
+                _local_news_evidence_url(target, None), timeout=LOCAL_STATUS_TIMEOUT_SECONDS,
+            ) as response:
+                page = json.loads(response.read())
+            snapshot = str(page.get("snapshot_id") or "")
+            if not re.fullmatch(r"[a-f0-9]{64}", snapshot):
+                raise PayloadContractError("deferred News snapshot identity invalid")
+            if (
+                ack.get("contract_version") != NEWS_EVIDENCE_CONTRACT_VERSION
+                or ack.get("active_snapshot_id") != snapshot
+            ):
+                # Only real accepted page progress drains immediately. Cleanup
+                # debt or an unchanged cursor must not create a busy retry loop.
+                if (
+                    ack.get("contract_version") == NEWS_EVIDENCE_CONTRACT_VERSION
+                    and ack.get("staging_snapshot_id") == snapshot
+                    and int(ack.get("staged_count") or 0) > (
+                        int(prior_news.get("staged_count") or 0)
+                        if prior_news.get("staging_snapshot_id") == snapshot else 0
+                    )
+                ):
+                    return SyncResourceResults([], [{
+                        "target": request["target"], "resource": "deferred_projection",
+                        "status": "PROGRESS",
+                        "duration_ms": round((time.perf_counter()-started)*1000, 1),
+                        "completed_at": datetime.now(UTC).isoformat(),
+                    }])
+                return SyncResourceResults([], [])
+            hashes["/api/news-evidence"] = snapshot
+            receipt["news_recovery"] = {
+                "snapshot_id": snapshot, "record_count": ack.get("record_count"),
+                "local_read_completed_at": datetime.now(UTC).isoformat(),
+                "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
+            }
+            _persist_resource_schedule_result(
+                _resource_schedule_path(target), target, "news_evidence", 300,
+                now=datetime.now(UTC), success=True,
+            )
+            observations.append({
+                "target": request["target"], "resource": "news_evidence", "status": "OK",
+                "duration_ms": round((time.perf_counter()-started)*1000, 1),
+                "completed_at": datetime.now(UTC).isoformat(),
+            })
+        completed_at = datetime.now(UTC)
+        receipt.update(state="COMPLETED", completed_at=completed_at.isoformat())
+        _write_news_sync_state(receipt_path, receipt)
+        return SyncResourceResults([], [*observations, {
             "target": request["target"],
             "resource": "deferred_projection",
             "status": "OK",
@@ -2277,6 +2344,7 @@ def run_continuous_sync(
                     if (
                         lane == "heavy"
                         and completed.resource_observations
+                        and not completed
                         and not stop.is_set()
                         and time.monotonic() < deadline
                     ):

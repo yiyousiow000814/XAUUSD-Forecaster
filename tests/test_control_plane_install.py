@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import ctypes
+from ctypes import wintypes
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -114,6 +117,122 @@ def _isolated_windows_environment():
     }}
     environment["PSModulePath"] = str(Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/Modules")
     return environment
+
+
+def _exited_windows_child_identity():
+    """Capture the kernel creation identity before asking our child to exit."""
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        env=_isolated_windows_environment(), creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    try:
+        get_times = ctypes.WinDLL("kernel32", use_last_error=True).GetProcessTimes
+        get_times.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+        get_times.restype = wintypes.BOOL
+        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        if not get_times(int(child._handle), *(ctypes.byref(value) for value in (
+            created, exited, kernel, user,
+        ))):
+            raise ctypes.WinError(ctypes.get_last_error())
+        assert child.poll() is None, "identity fixture exited before observation"
+        ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
+        assert ticks > 0, "Windows creation time unavailable"
+        seconds, fraction = divmod(ticks, 10_000_000)
+        instant = datetime(1601, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=seconds)
+        identity = {"pid": child.pid, "token": f"{instant:%Y-%m-%dT%H:%M:%S}.{fraction:07d}Z"}
+        child.stdin.close()
+        assert child.wait(timeout=5) == 0, "identity fixture did not exit normally"
+        return identity
+    finally:
+        if not child.stdin.closed:
+            child.stdin.close()
+        if child.poll() is None:
+            child.terminate()
+            child.wait(timeout=5)
+
+
+@pytest.mark.parametrize("runtime_executable", ["powershell.exe", "pwsh.exe"])
+def test_news_incident_evidence_and_live_resource_admission(tmp_path, runtime_executable):
+    body = r'''
+    $broken='ffe1de29c0891cc3a3cf3d602f3d3ee657faa9b8'; $target='b'*40;
+    $evidence=[pscustomobject]@{
+        incident='COLLECTOR_CLOCK_EVENT_ATOMICITY';broken_revision=$broken;target_revision=$target;
+        failure=[pscustomobject]@{resource='news_evidence';route='/api/news-evidence';
+            stage='LOCAL_GET_BEFORE_REMOTE_PREPARE';root_cause='NEWS_RECEIPT_ALIAS_CORRELATED_SCAN';
+            evidence_sha256='86d7b591c06a295fa3cb4085bb47e6b42c40274878735602ea712c12b1234447'};
+        copy_rehearsal=[pscustomobject]@{target_revision=$target;state='API_SYNC_COPY_PASSED';
+            baseline_sha256='57add242f930671ff800733ef70290bf9186b8230d0134847285300dc7e3171c';
+            old_query_reproduced=$true;semantic_equality_verified=$true;ack_verified=$true;
+            records=1919;max_local_get_seconds=5.04;max_post_bytes=25972};
+        obligation='EXACT_TARGET_NEWS_READ_AND_REMOTE_ACK_BEFORE_COMMIT'
+    };
+    $report=$evidence.copy_rehearsal;
+    $report | Add-Member -NotePropertyName source_revision -NotePropertyValue $target;
+    $report | Add-Member -NotePropertyName source_dirty -NotePropertyValue $false;
+    $report | Add-Member -NotePropertyName execution_boundary -NotePropertyValue 'REAL_API_CONTINUOUS_SYNC_ISOLATED_ACK';
+    $reportJson=$report | ConvertTo-Json -Depth 8;
+    $reportPath=Join-Path $runtimeForwardRoot 'copy-rehearsal.json';
+    Write-ControlCenterJsonAtomic -Path $reportPath -Value $report -Depth 8;
+    $evidence.copy_rehearsal=[pscustomobject]@{path=$reportPath;sha256=(Get-FileHash $reportPath).Hash.ToLowerInvariant()};
+    Assert-CollectorNewsRecoveryEvidence $evidence $broken $target;
+    $original=$evidence | ConvertTo-Json -Depth 8;
+    foreach($case in @('revision','resource','stage','cause-hash','hash','ack','ack-type','timeout','nan','size','dirty','source','boundary','tampered','missing')) {
+        $bad=$original | ConvertFrom-Json;
+        $bad.copy_rehearsal=$reportJson | ConvertFrom-Json;
+        switch($case) {
+            revision {$bad.target_revision='d'*40}
+            resource {$bad.failure.resource='market_history'}
+            stage {$bad.failure.stage='REMOTE_POST'}
+            cause-hash {$bad.failure.evidence_sha256='c'*64}
+            hash {$bad.copy_rehearsal.baseline_sha256='e'*64}
+            ack {$bad.copy_rehearsal.ack_verified=$false}
+            ack-type {$bad.copy_rehearsal.ack_verified='True'}
+            timeout {$bad.copy_rehearsal.max_local_get_seconds=20}
+            nan {$bad.copy_rehearsal.max_local_get_seconds=[double]::NaN}
+            size {$bad.copy_rehearsal.max_post_bytes=80001}
+            dirty {$bad.copy_rehearsal.source_dirty=$true}
+            source {$bad.copy_rehearsal.source_revision='c'*40}
+            boundary {$bad.copy_rehearsal.execution_boundary='DIRECT_HELPER_LOOP'}
+        };
+        Write-ControlCenterJsonAtomic -Path $reportPath -Value $bad.copy_rehearsal -Depth 8;
+        $bad.copy_rehearsal=[pscustomobject]@{path=$reportPath;sha256=(Get-FileHash $reportPath).Hash.ToLowerInvariant()};
+        if($case -eq 'tampered'){$bad.copy_rehearsal.sha256='0'*64};
+        if($case -eq 'missing'){$bad.copy_rehearsal.path=Join-Path $runtimeForwardRoot 'missing.json'};
+        try {Assert-CollectorNewsRecoveryEvidence $bad $broken $target;throw 'unsafe acceptance'}
+        catch {if($_.Exception.Message -cne 'COLLECTOR_NEWS_RECOVERY_EVIDENCE_INVALID'){throw}}
+    };
+    Write-ControlCenterJsonAtomic -Path $reportPath -Value ($reportJson | ConvertFrom-Json) -Depth 8;
+    $now=[DateTimeOffset]::UtcNow.ToString('o');
+    $status=@{status='DEGRADED';last_success=$now;last_error=$null;
+        degraded_resources=@(@{target='cloudflare';resource='news_evidence';error_type='TimeoutError';error_code='TRANSPORT_UNAVAILABLE';error='timed out'});
+        resource_observations=@(@{target='cloudflare';resource='heartbeat';status='OK';completed_at=$now},
+            @{target='cloudflare';resource='news_evidence';status='ERROR';completed_at=$now})};
+    $path=Join-Path $runtimeForwardRoot 'dashboard-sync-status.json';
+    $statusJson=$status | ConvertTo-Json -Depth 8;
+    foreach($case in @('valid','stale','missing-heartbeat','other-resource','remote-invariant','second-error')) {
+        $current=$statusJson | ConvertFrom-Json;
+        switch($case) {
+            stale {$current.last_success=[DateTimeOffset]::UtcNow.AddMinutes(-3).ToString('o')}
+            missing-heartbeat {$current.resource_observations=@($current.resource_observations[1])}
+            other-resource {$current.degraded_resources[0].resource='audit'}
+            remote-invariant {$current.degraded_resources[0].error_code='REMOTE_STATE_INVARIANT_VIOLATION'}
+            second-error {$current.degraded_resources+=@($current.degraded_resources[0])}
+        };
+        Write-ControlCenterJsonAtomic -Path $path -Value $current -Depth 8;
+        $before=(Get-FileHash -LiteralPath $path).Hash;
+        try {$result=Get-CollectorNewsDegradedObservation $evidence $broken $target;
+            if($case -ne 'valid' -or $result.state -cne 'DEGRADED_RECOVERY_BASELINE'){throw 'unsafe acceptance'}}
+        catch {if($case -eq 'valid' -or $_.Exception.Message -cne 'COLLECTOR_NEWS_RECOVERY_OBSERVATION_CHANGED'){throw}};
+        if((Get-FileHash -LiteralPath $path).Hash -cne $before){throw 'status was rewritten'}
+    };
+    Write-Output 'incident evidence scoped; live observation checked; degradation retained'
+    '''
+    assert _run_contract_with_runtime(
+        tmp_path, body, runtime_executable, environment=_isolated_windows_environment(),
+    ) == (
+        "incident evidence scoped; live observation checked; degradation retained"
+    )
 
 
 @pytest.mark.parametrize("runtime_executable", ["powershell.exe", "pwsh.exe"])
@@ -397,16 +516,17 @@ def run_staged_installer_active_rehearsal(tmp_path):
         (tmp_path / "business.json").write_text(json.dumps(owners), encoding="utf-8")
         healthy = await_resource("OK")
         assert healthy["status"] == "OK"
+        prior = _exited_windows_child_identity()
         body = rf'''
         $null = . '{source / 'scripts/xauusd_control_center.ps1'}' -Action CodeRevision -RuntimeRoot '{runtime}' -RepositoryRoot '{repository}';
         $control=Join-Path $repositoryRoot '.local\runtime-control';
         $bundle=New-VerifiedRuntimeControlBundleStage -SourceRoot '{source}' -SourceRevision '{revision}' -StageRoot $control -RequireImmutableSource;
         $descriptor=Get-WatchdogSingletonDescriptor;
         $prior=[pscustomobject]@{{schema_version='watchdog-owner-v2';instance_id=[guid]::NewGuid().ToString('N');
-            process_id=999999;process_start_token='2026-09-01T00:00:00.0000000+00:00';launcher_pid=999998;launcher_start_token='2026-09-01T00:00:00.0000000+00:00';
+            process_id={prior['pid']};process_start_token='{prior['token']}';launcher_pid={prior['pid']};launcher_start_token='{prior['token']}';
             user_sid=$descriptor.user_sid;runtime_root_hash=$descriptor.runtime_root_hash;repository_root_hash=$descriptor.repository_root_hash;
             mutex_identity_hash=$descriptor.mutex_identity_hash;installed_control_revision='{revision}';bundle_digest=$bundle.bundle_digest;
-            mode='ACTIVE';acquired_at='2026-09-01T00:00:00.0000000+00:00';install_transaction_id=$null}};
+            mode='ACTIVE';acquired_at='{prior['token']}';install_transaction_id=$null}};
         $null=Write-WatchdogOwnerReceipt -Receipt $prior;
         Write-ControlCenterJsonAtomic -Path $releaseControlStatePath -Value @{{stable=@{{windows_revision='{broken}';worker_version_id='fixture-worker'}};transaction=$null}} -Depth 6;
         # Only source/provider/snapshot admission is supplied by the fixture.
@@ -932,14 +1052,7 @@ def run_staged_activation_withdrawal_rehearsal(tmp_path):
                     runtime / "scripts/windows-service-launch-contract.json")
     subprocess.run(["git", "add", "scripts/windows-service-launch-contract.json"], cwd=runtime, check=True)
     subprocess.run(["git", "commit", "-qm", "fixture runtime launch authority"], cwd=runtime, check=True)
-    dead = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-Command",
-         "$p=[Diagnostics.Process]::GetCurrentProcess();"
-         "@{pid=$PID;token=$p.StartTime.ToUniversalTime().ToString('o')}|ConvertTo-Json -Compress"],
-        capture_output=True, text=True, check=True, timeout=10,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    prior = json.loads(dead.stdout)
+    prior = _exited_windows_child_identity()
     # Living stand-ins prove preservation, not the health of real business services.
     preserved = [subprocess.Popen(
         [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
