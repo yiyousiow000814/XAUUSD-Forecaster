@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import uuid
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -73,10 +75,58 @@ class U5State:
             "performance_evaluation_allowed": False,
         }
 
+    @staticmethod
+    def write_payload(path: str | Path, payload: dict) -> None:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("x", encoding="utf-8") as handle:
+                json.dump(payload, handle, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def save(self, path: str | Path) -> None:
+        # The offline warm-up export keeps its existing caller-selected output
+        # contract. Runtime clock publication uses the bound pending checkpoint.
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(self.as_dict(), separators=(",", ":")), encoding="utf-8")
+
+    @staticmethod
+    def reconcile_checkpoint(ledger, path: str | Path) -> None:
+        """Publish a prepared U5 file only when the exact clock really committed."""
+        from .clock_commit import COMPLETION_SOURCE, read_completed_clock
+        from .forward_ledger import canonical_hash
+
+        target = Path(path)
+        pending = target.with_name(target.name + ".pending")
+        if not pending.exists():
+            return
+        if pending.stat().st_size > 512_000:
+            raise ValueError("U5_CHECKPOINT_OVERSIZED")
+        payload = json.loads(pending.read_text(encoding="utf-8"))
+        binding = payload["clock_binding"]
+        at = datetime.fromisoformat(binding["decision_time"])
+        completed = read_completed_clock(ledger, at)
+        if completed is None:
+            # Prepared but uncommitted: retain the old checkpoint, not advanced U5.
+            pending.unlink()
+            return
+        row = ledger.connection.execute(
+            "SELECT news_status_json FROM collector_runs WHERE decision_id=?", (completed[1],),
+        ).fetchone()
+        facts = [item for item in json.loads(row[0]) if item.get("source") == COMPLETION_SOURCE]
+        snapshot = ledger.connection.execute(
+            "SELECT snapshot_hash FROM market_snapshots WHERE snapshot_id=?", (completed[0],),
+        ).fetchone()
+        if (len(facts) != 1 or facts[0].get("u5_checkpoint_hash") != canonical_hash(payload)
+                or snapshot[0] != binding["snapshot_hash"]):
+            raise ValueError("U5_CHECKPOINT_COMMIT_CONFLICT")
+        os.replace(pending, target)
 
     @classmethod
     def load(cls, path: str | Path) -> "U5State":

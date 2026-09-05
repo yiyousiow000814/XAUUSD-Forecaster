@@ -1420,7 +1420,17 @@ function Invoke-PromotionFreshnessCoordinator {
             [string]$runtime.applied_revision -cne [string]$stable.windows_revision) {
             throw "Windows Stable revision drifted."
         }
-        if ($AllowDegradedActive) {
+        $incidentContext = Get-CollectorClockRecoveryContext
+        $incidentRecovery = [bool]($incidentContext -and
+            [string]$stable.windows_revision -ceq [string]$incidentContext.broken_revision)
+        if ($incidentRecovery) {
+            if ($AllowDegradedActive -or [string]$candidate.windows_revision -cne
+                [string]$incidentContext.target_revision) {
+                throw 'COLLECTOR_RECOVERY_EXACT_NORMAL_TARGET_REQUIRED'
+            }
+            # The evidence producer below owns the fresh incident admission.
+            # Missing Collector is never relabelled HEALTHY or SINGLE_OWNER.
+        } elseif ($AllowDegradedActive) {
             $runtimeAuthority = Get-CurrentReleaseRuntimeReadModel `
                 -PersistedState $State -ReleaseLockOwnedByCaller -ForceProviderRefresh
             $null = Assert-RecoveryRuntimeAuthority -RuntimeReadModel $runtimeAuthority `
@@ -1428,13 +1438,20 @@ function Invoke-PromotionFreshnessCoordinator {
         } elseif (-not (Test-CurrentStableRuntimeHealth)) {
             throw "CURRENT_STABLE_RUNTIME_UNHEALTHY"
         }
-        $steps += New-PromotionFreshnessStep -Name "current_owner_health" `
-            -StartedAt $stepStarted -ExecutionMode "FRESH" -State "PASSED"
+        $ownerCheckStarted = $stepStarted
+        if (-not $incidentRecovery) {
+            $steps += New-PromotionFreshnessStep -Name "current_owner_health" `
+                -StartedAt $stepStarted -ExecutionMode "FRESH" -State "PASSED"
+        }
 
         $currentStepName = "release_evidence_authority"
         $currentStepStarted = [DateTimeOffset]::UtcNow
         $evidenceQualification = Publish-PromotionFreshnessEvidence -State $State `
-            -AllowDegradedActive:$AllowDegradedActive
+            -AllowDegradedActive:$AllowDegradedActive -CollectorClockRecovery:$incidentRecovery
+        if ($incidentRecovery) {
+            $steps += New-PromotionFreshnessStep -Name 'current_owner_health' `
+                -StartedAt $ownerCheckStarted -ExecutionMode 'FRESH' -State 'VERIFIED_DEGRADED_BASELINE'
+        }
         $steps += New-PromotionFreshnessStep -Name "release_evidence_authority" `
             -StartedAt $currentStepStarted -ExecutionMode "FRESH" `
             -State ([string]$evidenceQualification.state)

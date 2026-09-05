@@ -261,11 +261,10 @@ function Get-RuntimeControlBundleIdentityAtRoot {
     } catch { return $null }
 }
 
-function New-VerifiedRuntimeControlBundleStage {
+function Assert-ControlPlaneSourceRevision {
     param(
         [Parameter(Mandatory = $true)][string]$SourceRoot,
         [Parameter(Mandatory = $true)][string]$SourceRevision,
-        [Parameter(Mandatory = $true)][string]$StageRoot,
         [switch]$RequireImmutableSource
     )
     if ($SourceRevision -notmatch '^[0-9a-f]{40}$') {
@@ -289,6 +288,17 @@ function New-VerifiedRuntimeControlBundleStage {
             throw "CONTROL_BUNDLE_DETACHED_SOURCE_REQUIRED"
         }
     }
+}
+
+function New-VerifiedRuntimeControlBundleStage {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceRoot,
+        [Parameter(Mandatory = $true)][string]$SourceRevision,
+        [Parameter(Mandatory = $true)][string]$StageRoot,
+        [switch]$RequireImmutableSource
+    )
+    Assert-ControlPlaneSourceRevision -SourceRoot $SourceRoot -SourceRevision $SourceRevision `
+        -RequireImmutableSource:$RequireImmutableSource
     $sourceManifest = Get-RuntimeControlSourceManifestAtRoot `
         -Root (Join-Path $SourceRoot "scripts")
     if (-not $sourceManifest) { throw "CONTROL_BUNDLE_SOURCE_MANIFEST_INVALID" }
@@ -482,6 +492,7 @@ function Write-ControlPlaneInstallState {
 }
 
 function Suspend-ControlPlaneSupervision {
+    param([switch]$CollectorClockRecovery)
     $state = @{}
     foreach ($name in @($guardTaskName, $taskName)) {
         $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
@@ -494,6 +505,10 @@ function Suspend-ControlPlaneSupervision {
         # disabled because it would otherwise race the intentional owner gap.
         Disable-ScheduledTask -TaskName $guardTaskName | Out-Null
         Stop-ScheduledTask -TaskName $guardTaskName -ErrorAction SilentlyContinue
+        if ($CollectorClockRecovery) {
+            Disable-ScheduledTask -TaskName $taskName -ErrorAction Stop | Out-Null
+            Stop-ScheduledTask -TaskName $taskName -ErrorAction Stop
+        }
     } catch {
         Restore-ControlPlaneSupervision -State $state
         throw
@@ -600,6 +615,7 @@ function Wait-VerifiedWatchdogHandoff {
         [Parameter(Mandatory = $true)][object]$PreviousIdentity,
         [ValidateSet("ACTIVE", "QUIESCED")][string]$ExpectedMode = "ACTIVE",
         [string]$ExpectedInstallTransactionId = "",
+        [switch]$RequireCompleteInventory,
         [TimeSpan]$Timeout = ([TimeSpan]::FromSeconds(90))
     )
     $deadline = [DateTimeOffset]::UtcNow.Add($Timeout)
@@ -620,7 +636,7 @@ function Wait-VerifiedWatchdogHandoff {
             [string]$heartbeat.install_transaction_id -ne
                 $ExpectedInstallTransactionId -or
             [string]$heartbeat.process_start_token -eq "") { continue }
-        $owners = @(Get-VerifiedWatchdogOwners)
+        $owners = @(Get-VerifiedWatchdogOwners -RequireCompleteInventory:$RequireCompleteInventory)
         if ($owners.Count -ne 1) { continue }
         $owner = $owners[0]
         $ownerReceipt = $owner.watchdog_owner_receipt
@@ -688,14 +704,272 @@ function Wait-ControlPlaneInstallActivation {
     }
 }
 
+function Assert-CollectorClockRecoveryContext {
+    param([Parameter(Mandatory = $true)][object]$Context)
+    $descriptor = Get-WatchdogSingletonDescriptor
+    if ([string]$Context.incident -cne 'COLLECTOR_CLOCK_EVENT_ATOMICITY' -or
+        [string]$Context.state -cne 'DEGRADED_RECOVERY_BASELINE' -or
+        [string]$Context.broken_revision -notmatch '^[0-9a-f]{40}$' -or
+        [string]$Context.target_revision -notmatch '^[0-9a-f]{40}$' -or
+        [string]$Context.broken_revision -ceq [string]$Context.target_revision -or
+        [string]$Context.user_sid -cne [string]$descriptor.user_sid -or
+        [string]$Context.runtime_root_hash -cne [string]$descriptor.runtime_root_hash -or
+        [string]$Context.repository_root_hash -cne [string]$descriptor.repository_root_hash -or
+        [string]$Context.snapshot.decision_time -cne '2026-09-04T16:05:00.000000+00:00' -or
+        [string]$Context.snapshot.snapshot_hash -cne
+            'b139c8a9d913c237e8e9e3ebc677a1144cd8ad2f9e0adee6b62ed8cd2a7fa5ee') {
+        throw 'COLLECTOR_RECOVERY_CONTEXT_INVALID'
+    }
+}
+
+function Get-CollectorClockRecoveryContext {
+    if (-not (Test-Path -LiteralPath $controlPlaneInstallStatePath)) { return $null }
+    # A corrupt persisted maintenance context must not turn a restart hold off.
+    $state = Get-Content -LiteralPath $controlPlaneInstallStatePath -Raw -Encoding UTF8 |
+        ConvertFrom-ReleaseControlJson
+    if (-not $state.collector_clock_recovery) { return $null }
+    Assert-CollectorClockRecoveryContext -Context $state.collector_clock_recovery
+    return $state.collector_clock_recovery
+}
+
+function Test-CollectorClockRecoveryHold {
+    $context = Get-CollectorClockRecoveryContext
+    if (-not $context) { return $false }
+    $revision = Get-CodeRevision
+    if ([string]$revision -ceq [string]$context.broken_revision) { return $true }
+    $release = Get-ReleaseControlState
+    if ([string]$revision -ceq [string]$context.target_revision -and (
+        ([string]$release.stable.windows_revision -ceq [string]$context.target_revision) -or
+        ($release.transaction -and [string]$release.transaction.type -ceq 'PROMOTE' -and
+         [string]$release.transaction.target.windows_revision -ceq [string]$context.target_revision)
+    )) { return $false }
+    throw 'COLLECTOR_RECOVERY_RUNTIME_TRANSITION_UNPROVED'
+}
+
+function Invoke-CollectorClockRecoveryOperation {
+    param([switch]$Apply)
+    if (-not $script:releaseTransactionLockHeld) {
+        throw 'COLLECTOR_RECOVERY_RELEASE_LOCK_REQUIRED'
+    }
+    $context = Get-CollectorClockRecoveryContext
+    if (-not $context) { throw 'COLLECTOR_RECOVERY_CONTEXT_REQUIRED' }
+    $source = Join-Path ([IO.Path]::GetTempPath()) ('xauusd-clock-recovery-' + [guid]::NewGuid().ToString('N'))
+    $added = $false
+    try {
+        $stage = Invoke-Utf8NativeProcess -FilePath 'git.exe' -Arguments @(
+            '-C', $repositoryRoot, 'worktree', 'add', '--detach', '--quiet', $source,
+            [string]$context.target_revision
+        )
+        if ($stage.exit_code -ne 0) { throw 'COLLECTOR_RECOVERY_SOURCE_STAGE_FAILED' }
+        $added = $true
+        $baseline = Get-CollectorClockRecoveryBaseline -VerifiedSourceRoot $source `
+            -TargetRevision ([string]$context.target_revision) -SupervisionRecovered
+        if (-not $Apply -and -not [bool]$baseline.snapshot.exclusion_recorded) {
+            throw 'COLLECTOR_RECOVERY_EXISTING_STATE_NOT_REPAIRED'
+        }
+        if ($Apply -and -not [bool]$baseline.snapshot.exclusion_recorded) {
+            $before = Get-ControlPlaneIsolationSnapshot -RequireCompleteInventory
+            Assert-ControlPlaneIsolationBaseline -Snapshot $before `
+                -ReleaseState (Get-ReleaseControlState) -CollectorClockRecoveryBaseline $context
+            $inspected = [pscustomobject]@{
+                business_runtime_revision = $baseline.broken_revision
+                services = $baseline.services
+                release_state_hash = $before.release_state_hash
+                release_history_hash = $before.release_history_hash
+            }
+            Assert-ControlPlaneIsolationSnapshot -Before $inspected -After $before
+            $write = Invoke-Utf8NativeProcess -FilePath 'python' -WorkingDirectory $source `
+                -Arguments @((Join-Path $source 'scripts\run_evidence_repair_v2.py'),
+                    '--local-root', $runtimeForwardRoot, '--snapshot-only-clock',
+                    [string]$context.snapshot.decision_time, '--expected-snapshot-hash',
+                    [string]$context.snapshot.snapshot_hash) -TimeoutMilliseconds 15000
+            if ($write.exit_code -ne 0) { throw 'COLLECTOR_RECOVERY_EXISTING_STATE_REPAIR_FAILED' }
+            $result = ConvertFrom-ReleaseControlJson -Json ([string]$write.stdout)
+            if ([string]$result.status -cne 'EXCLUDED_INCOMPLETE' -or
+                [string]$result.snapshot_hash -cne [string]$context.snapshot.snapshot_hash -or
+                [string]$result.decision_time -cne [string]$context.snapshot.decision_time) {
+                throw 'COLLECTOR_RECOVERY_REPAIR_RESULT_CONFLICT'
+            }
+            $after = Get-ControlPlaneIsolationSnapshot -RequireCompleteInventory
+            Assert-ControlPlaneIsolationSnapshot -Before $before -After $after
+            $baseline.snapshot.exclusion_recorded = $true
+            $baseline | Add-Member -NotePropertyName repair -NotePropertyValue $result
+        }
+        return $baseline
+    } finally {
+        if ($added -and -not $script:unresolvedNativeProcess) {
+            $cleanup = Invoke-Utf8NativeProcess -FilePath 'git.exe' -Arguments @(
+                '-C', $repositoryRoot, 'worktree', 'remove', '--force', $source
+            )
+            if ($cleanup.exit_code -ne 0) { Write-Warning "Collector inspection checkout retained: $source" }
+        }
+    }
+}
+
+function Get-CollectorClockRecoveryBaseline {
+    param(
+        [Parameter(Mandatory = $true)][string]$VerifiedSourceRoot,
+        [Parameter(Mandatory = $true)][string]$TargetRevision,
+        [switch]$SupervisionRecovered
+    )
+    # Admission for this incident only. This read-only function cannot install,
+    # repair a database, release a mutex or start a service.
+    Assert-ControlPlaneSourceRevision -SourceRoot $VerifiedSourceRoot `
+        -SourceRevision $TargetRevision -RequireImmutableSource
+    $release = Get-ReleaseControlState
+    $priorInstall = Get-ControlPlaneInstallState
+    $ownReleaseLock = $false
+    if ($SupervisionRecovered -and $script:releaseTransactionLockHeld) {
+        $lock = Get-Content -LiteralPath (Join-Path $releaseLockPath 'owner.json') -Raw -Encoding UTF8 |
+            ConvertFrom-ReleaseControlJson
+        $self = Get-ControlPlaneProcessIdentity -ProcessId $PID -RequireCompleteInventory
+        $ownReleaseLock = $self -and [int]$lock.owner_pid -eq $PID -and
+            (Test-ControlPlaneStartTokenEqual -Left $self.process_start_token -Right $lock.owner_process_start_token)
+    }
+    if (-not $release -or $release.transaction -or
+        ((Test-Path -LiteralPath $releaseLockPath) -and -not $ownReleaseLock) -or
+        ($priorInstall -and [string]$priorInstall.phase -notin @('COMMITTED', 'ROLLED_BACK', 'FAILED'))) {
+        throw 'COLLECTOR_RECOVERY_TRANSACTION_ACTIVE'
+    }
+    $revision = Get-CodeRevision
+    if ([string]$revision -notmatch '^[0-9a-f]{40}$' -or
+        [string]$revision -cne [string]$release.stable.windows_revision -or
+        $TargetRevision -notmatch '^[0-9a-f]{40}$' -or $TargetRevision -ceq $revision) {
+        throw 'COLLECTOR_RECOVERY_REVISION_MISMATCH'
+    }
+    if ($SupervisionRecovered) {
+        $context = Get-CollectorClockRecoveryContext
+        $bundle = Assert-ActiveControlBundle
+        if (-not $ownReleaseLock -or -not $context -or
+            [string]$priorInstall.phase -cne 'COMMITTED' -or
+            [string]$context.target_revision -cne $TargetRevision -or
+            [string]$context.broken_revision -cne [string]$revision -or
+            [string]$context.stable_worker -cne [string]$release.stable.worker_version_id -or
+            [string]$bundle.source_revision -cne $TargetRevision) {
+            throw 'COLLECTOR_RECOVERY_SUPERVISION_CONTEXT_UNPROVED'
+        }
+    }
+    $all = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    if (@($all | Where-Object {
+        $_.Name -in @('python.exe', 'powershell.exe', 'pwsh.exe', 'wscript.exe') -and
+        -not $_.CommandLine
+    }).Count -gt 0) { throw 'COLLECTOR_RECOVERY_PROCESS_INVENTORY_UNKNOWN' }
+    $inventory = Get-WatchdogOwnershipInventory -RequireCompleteInventory
+    if (@($inventory.authoritative).Count -ne $(if ($SupervisionRecovered) { 1 } else { 0 }) -or
+        @($inventory.duplicate_shaped).Count -ne 0 -or
+        @($inventory.legacy_orphaned).Count -ne 0 -or
+        @($inventory.unknown).Count -ne 0) {
+        throw 'COLLECTOR_RECOVERY_WATCHDOG_NOT_ABSENT'
+    }
+    $permittedProcesses = @($PID)
+    if ($SupervisionRecovered) {
+        $watchdog = $inventory.authoritative[0]
+        $null = Assert-CurrentWatchdogHeartbeat -Owner $watchdog -ExpectedRevision $TargetRevision
+        $permittedProcesses += @([int]$watchdog.process_id, [int]$watchdog.launcher_identity.process_id)
+    }
+    $controlRoot = Join-Path $repositoryRoot '.local\runtime-control'
+    if (@($all | Where-Object {
+        [int]$_.ProcessId -notin $permittedProcesses -and $_.CommandLine -and
+        ($_.CommandLine.Contains($controlRoot) -or $_.CommandLine.Contains($moduleRoot)) -and
+        (($_.Name -eq 'wscript.exe' -and $_.CommandLine.Contains($controlRoot)) -or $_.CommandLine -match
+            '(?i)-Action\s+(Watchdog|DiscoverCandidate|RetryCandidateValidation|InstallControlPlane|PromoteCandidate)\b')
+    }).Count -gt 0) { throw 'COLLECTOR_RECOVERY_CONTROL_HELPER_ACTIVE' }
+    $descriptor = Get-WatchdogSingletonDescriptor
+    if (-not $inventory.receipt -or
+        -not (Test-WatchdogOwnerReceiptShape -Receipt $inventory.receipt -Descriptor $descriptor)) {
+        throw 'COLLECTOR_RECOVERY_STALE_RECEIPT_REQUIRED'
+    }
+    $prior = Get-ControlPlaneProcessIdentity -ProcessId ([int]$inventory.receipt.process_id) `
+        -RequireCompleteInventory
+    if (-not $SupervisionRecovered -and $prior -and (Test-ControlPlaneStartTokenEqual -Left $prior.process_start_token `
+        -Right $inventory.receipt.process_start_token)) {
+        throw 'COLLECTOR_RECOVERY_PRIOR_OWNER_ALIVE'
+    }
+    $owners = [ordered]@{}
+    foreach ($service in $services) {
+        $matches = @($all | Where-Object {
+            Test-ForecasterServiceProcess -Process $_ -Service $service
+        })
+        $unclassified = @($all | Where-Object {
+            $_.CommandLine -and $_.CommandLine.Contains($runtimeForwardRoot) -and
+            $_.CommandLine.Contains([string]$service.Match) -and
+            $_.Name -in @('python.exe', 'powershell.exe', 'pwsh.exe') -and
+            -not (Test-ForecasterServiceProcess -Process $_ -Service $service)
+        })
+        if ($unclassified.Count -gt 0) {
+            throw "COLLECTOR_RECOVERY_SERVICE_IDENTITY_UNKNOWN:$($service.Key)"
+        }
+        $required = $service.Key -ne 'collector' -and
+            (Test-ControlPlaneServiceOwnerRequired -Service $service -ReleaseState $release)
+        if ($matches.Count -ne $(if ($required) { 1 } else { 0 })) {
+            throw "COLLECTOR_RECOVERY_SERVICE_OWNER_INVALID:$($service.Key)"
+        }
+        $owners[$service.Key] = @($matches | ForEach-Object {
+            $identity = Get-ControlPlaneProcessIdentity -ProcessId ([int]$_.ProcessId) `
+                -RequireCompleteInventory
+            if (-not $identity -or [string]$identity.owner_sid -cne [string]$descriptor.user_sid) {
+                throw "COLLECTOR_RECOVERY_SERVICE_IDENTITY_UNKNOWN:$($service.Key)"
+            }
+            $identity
+        })
+        if ($required) {
+            $health = Get-ServiceState -Service $service -Processes $matches
+            if ($health -notin @('RUNNING', 'LIVE', 'MARKET CLOSED', 'API OK', 'SYNC OK')) {
+                throw "COLLECTOR_RECOVERY_SERVICE_UNHEALTHY:$($service.Key):$health"
+            }
+            if ($service.Key -eq 'quote' -and -not (Get-BrokerMarketSession)) {
+                throw 'COLLECTOR_RECOVERY_SESSION_AUTHORITY_UNAVAILABLE'
+            }
+        }
+    }
+    $provider = Get-ReleaseProviderRuntimeFacts -PersistedState $release -ForceProviderRefresh
+    $traffic = $provider.active_worker_observation
+    if (-not $traffic -or [string]$traffic.status -ne 'AVAILABLE' -or
+        [double]$traffic.traffic_percent -ne 100 -or
+        [string]$traffic.version_id -cne [string]$release.stable.worker_version_id) {
+        throw 'COLLECTOR_RECOVERY_STABLE_TRAFFIC_UNPROVED'
+    }
+    $clock = '2026-09-04T16:05:00.000000+00:00'
+    $hash = 'b139c8a9d913c237e8e9e3ebc677a1144cd8ad2f9e0adee6b62ed8cd2a7fa5ee'
+    $inspection = Invoke-Utf8NativeProcess -FilePath 'python' -WorkingDirectory $VerifiedSourceRoot `
+        -Arguments @((Join-Path $VerifiedSourceRoot 'scripts\run_evidence_repair_v2.py'),
+            '--local-root', $runtimeForwardRoot, '--snapshot-only-clock', $clock,
+            '--expected-snapshot-hash', $hash, '--inspect-snapshot-only') -TimeoutMilliseconds 15000
+    if ($inspection.timed_out -or $inspection.exit_code -ne 0) {
+        throw 'COLLECTOR_RECOVERY_SNAPSHOT_INSPECTION_FAILED'
+    }
+    $evidence = ConvertFrom-ReleaseControlJson -Json ([string]$inspection.stdout)
+    if ([string]$evidence.snapshot_hash -cne $hash -or [string]$evidence.decision_time -cne $clock) {
+        throw 'COLLECTOR_RECOVERY_SNAPSHOT_INSPECTION_MISMATCH'
+    }
+    return [pscustomobject]@{
+        incident = 'COLLECTOR_CLOCK_EVENT_ATOMICITY'
+        state = 'DEGRADED_RECOVERY_BASELINE'
+        observed_at = [DateTimeOffset]::UtcNow.ToString('o')
+        broken_revision = [string]$revision
+        target_revision = $TargetRevision
+        stable_worker = [string]$release.stable.worker_version_id
+        runtime_root_hash = [string]$descriptor.runtime_root_hash
+        repository_root_hash = [string]$descriptor.repository_root_hash
+        user_sid = [string]$descriptor.user_sid
+        previous_watchdog_receipt = $inventory.receipt
+        services = [pscustomobject]$owners
+        snapshot = $evidence
+    }
+}
+
 function Invoke-ControlPlaneInstall {
     param(
         [Parameter(Mandatory = $true)][string]$VerifiedSourceRoot,
-        [Parameter(Mandatory = $true)][string]$TargetRevision
+        [Parameter(Mandatory = $true)][string]$TargetRevision,
+        [switch]$CollectorClockRecovery
     )
     if ($TargetRevision -notmatch '^[0-9a-f]{40}$') {
         throw "CONTROL_BUNDLE_EXACT_REVISION_REQUIRED"
     }
+    $bootstrapMutex = $null
+    $bootstrapMutexHeld = $false
+    try {
     $controlRoot = Join-Path $repositoryRoot ".local\runtime-control"
     $currentBundle = Get-RuntimeControlBundleIdentityAtRoot -ControlRoot $controlRoot
     if (-not $currentBundle) { throw "CONTROL_BUNDLE_CURRENT_VERIFICATION_FAILED" }
@@ -710,13 +984,31 @@ function Invoke-ControlPlaneInstall {
     # A final source bundle may install over the last pre-singleton Control
     # Plane. Permit exactly one fully shaped legacy owner only at this boundary;
     # the replacement must establish the v2 mutex receipt before handoff passes.
-    $oldOwners = @(Get-VerifiedWatchdogOwners -AllowLegacySingleOwner)
-    if ($oldOwners.Count -ne 1) {
-        throw "CONTROL_PLANE_EXACTLY_ONE_WATCHDOG_REQUIRED"
+    $incidentBaseline = $null
+    $existingIncident = Get-CollectorClockRecoveryContext
+    if ($existingIncident -and -not $CollectorClockRecovery -and
+        [string]$release.stable.windows_revision -cne [string]$existingIncident.target_revision) {
+        throw 'COLLECTOR_RECOVERY_INSTALL_IN_PROGRESS'
     }
-    $oldOwner = $oldOwners[0]
-    $oldHeartbeat = Assert-CurrentWatchdogHeartbeat -Owner $oldOwner `
-        -ExpectedRevision ([string]$currentBundle.source_revision)
+    if ($CollectorClockRecovery) {
+        $descriptor = Get-WatchdogSingletonDescriptor
+        $bootstrapMutex = [Threading.Mutex]::new($false, [string]$descriptor.mutex_name)
+        try { $bootstrapMutexHeld = $bootstrapMutex.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $bootstrapMutexHeld = $true }
+        if (-not $bootstrapMutexHeld) { throw 'COLLECTOR_RECOVERY_BOOTSTRAP_OWNER_PRESENT' }
+        $incidentBaseline = Get-CollectorClockRecoveryBaseline `
+            -VerifiedSourceRoot $VerifiedSourceRoot -TargetRevision $TargetRevision
+        $oldOwner = $incidentBaseline.previous_watchdog_receipt
+        $oldHeartbeat = $null
+    } else {
+        $oldOwners = @(Get-VerifiedWatchdogOwners -AllowLegacySingleOwner)
+        if ($oldOwners.Count -ne 1) {
+            throw "CONTROL_PLANE_EXACTLY_ONE_WATCHDOG_REQUIRED"
+        }
+        $oldOwner = $oldOwners[0]
+        $oldHeartbeat = Assert-CurrentWatchdogHeartbeat -Owner $oldOwner `
+            -ExpectedRevision ([string]$currentBundle.source_revision)
+    }
     $isolationBefore = $null
 
     $controlParent = Split-Path -Parent $controlRoot
@@ -728,6 +1020,7 @@ function Invoke-ControlPlaneInstall {
     $oldStopped = $false
     $bundleInstalled = $false
     $newOwner = $null
+    $rollbackResult = 'NOT_REQUIRED'
     $startedAt = [DateTimeOffset]::UtcNow.ToString("o")
     $installOwnerIdentity = Get-ControlPlaneProcessIdentity -ProcessId $PID
     if (-not $installOwnerIdentity) {
@@ -751,6 +1044,7 @@ function Invoke-ControlPlaneInstall {
         failure = $null
         isolation_before = $null
         isolation_after = $null
+        collector_clock_recovery = $incidentBaseline
     }
     try {
         if (-not (Enter-ReleaseTransactionLock)) {
@@ -771,7 +1065,7 @@ function Invoke-ControlPlaneInstall {
             phase = "QUIESCE_CONTROL_SUPERVISION"
             bundle_hash_verified = $true
         }
-        $supervisionState = Suspend-ControlPlaneSupervision
+        $supervisionState = Suspend-ControlPlaneSupervision -CollectorClockRecovery:$CollectorClockRecovery
         Write-ControlPlaneInstallState @{ supervision_state = $supervisionState }
         Wait-ControlPlaneGuardQuiesced
         # Revalidate the complete stage before the first destructive process action.
@@ -779,10 +1073,10 @@ function Invoke-ControlPlaneInstall {
             throw "CONTROL_BUNDLE_STAGED_HASH_VERIFICATION_FAILED"
         }
         Write-ControlPlaneInstallState @{ phase = "STOP_OLD_WATCHDOG" }
-        Stop-VerifiedWatchdogOwner -Identity $oldOwner
+        if (-not $CollectorClockRecovery) { Stop-VerifiedWatchdogOwner -Identity $oldOwner }
         $oldStopped = $true
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        if (@(Get-VerifiedWatchdogOwners).Count -ne 0) {
+        if (@(Get-VerifiedWatchdogOwners -RequireCompleteInventory:$CollectorClockRecovery).Count -ne 0) {
             throw "CONTROL_PLANE_OLD_WATCHDOG_STILL_OWNS"
         }
         # The watchdog can recover a service while the immutable bundle stage is
@@ -796,9 +1090,9 @@ function Invoke-ControlPlaneInstall {
         if ($release -and $release.transaction) {
             throw "CONTROL_PLANE_INSTALL_BLOCKED_BY_RELEASE_TRANSACTION"
         }
-        $isolationBefore = Get-ControlPlaneIsolationSnapshot
+        $isolationBefore = Get-ControlPlaneIsolationSnapshot -RequireCompleteInventory:$CollectorClockRecovery
         Assert-ControlPlaneIsolationBaseline -Snapshot $isolationBefore `
-            -ReleaseState $release
+            -ReleaseState $release -CollectorClockRecoveryBaseline $incidentBaseline
         Write-ControlPlaneInstallState @{ isolation_before = $isolationBefore }
         Write-ControlPlaneInstallState @{ phase = "INSTALL_BUNDLE" }
         $installed = Install-VerifiedRuntimeControlBundleStage `
@@ -811,18 +1105,22 @@ function Invoke-ControlPlaneInstall {
             phase = "START_NEW_WATCHDOG"
             handoff_mode = "QUIESCED"
         }
+        if ($bootstrapMutexHeld) {
+            $bootstrapMutex.ReleaseMutex()
+            $bootstrapMutexHeld = $false
+        }
         $null = Start-WatchdogReplacement -PassThru `
             -InstallTransactionId $transactionId
         Write-ControlPlaneInstallState @{ phase = "VERIFY_QUIESCED_HANDOFF" }
         $newOwner = Wait-VerifiedWatchdogHandoff -ExpectedRevision $TargetRevision `
             -PreviousIdentity $oldOwner -ExpectedMode "QUIESCED" `
-            -ExpectedInstallTransactionId $transactionId
-        $isolationAfter = Get-ControlPlaneIsolationSnapshot
+            -ExpectedInstallTransactionId $transactionId -RequireCompleteInventory:$CollectorClockRecovery
+        $isolationAfter = Get-ControlPlaneIsolationSnapshot -RequireCompleteInventory:$CollectorClockRecovery
         Assert-ControlPlaneIsolationSnapshot -Before $isolationBefore `
             -After $isolationAfter
         Write-ControlPlaneInstallState @{ phase = "ACTIVATE_NEW_WATCHDOG" }
         $newOwner = Wait-VerifiedWatchdogHandoff -ExpectedRevision $TargetRevision `
-            -PreviousIdentity $oldOwner -ExpectedMode "ACTIVE"
+            -PreviousIdentity $oldOwner -ExpectedMode "ACTIVE" -RequireCompleteInventory:$CollectorClockRecovery
         Restore-ControlPlaneSupervision -State $supervisionState
         $supervisionState = $null
         Write-ControlPlaneInstallState @{
@@ -856,30 +1154,39 @@ function Invoke-ControlPlaneInstall {
                         -BackupRoot $backupRoot -ControlRoot $controlRoot
                 }
                 if ($isolationBefore) {
-                    $isolationAfter = Get-ControlPlaneIsolationSnapshot
+                    $isolationAfter = Get-ControlPlaneIsolationSnapshot -RequireCompleteInventory:$CollectorClockRecovery
                     Assert-ControlPlaneIsolationSnapshot -Before $isolationBefore `
                         -After $isolationAfter
                 }
                 # Recovery proves restoration against the captured baseline.
                 # It deliberately does not re-run the contextual normal-state
                 # owner rule that may have caused the forward handoff failure.
-                $null = Start-WatchdogReplacement -PassThru
-                $restoredOwner = Wait-VerifiedWatchdogHandoff `
-                    -ExpectedRevision ([string]$currentBundle.source_revision) `
-                    -PreviousIdentity $oldOwner
-                $rollbackResult = "ROLLED_BACK"
-                $newOwner = $restoredOwner
+                if ($CollectorClockRecovery) {
+                    $rollbackResult = 'ROLLED_BACK_DEGRADED_BASELINE'
+                    $newOwner = $null
+                } else {
+                    $null = Start-WatchdogReplacement -PassThru
+                    $restoredOwner = Wait-VerifiedWatchdogHandoff `
+                        -ExpectedRevision ([string]$currentBundle.source_revision) `
+                        -PreviousIdentity $oldOwner
+                    $rollbackResult = "ROLLED_BACK"
+                    $newOwner = $restoredOwner
+                }
             }
         } catch {
             $rollbackResult = "ROLLBACK_FAILED: $($_.Exception.Message)"
         }
         try {
-            Restore-ControlPlaneSupervision -State $supervisionState
+            if ($CollectorClockRecovery) {
+                foreach ($name in @($taskName, $guardTaskName)) {
+                    Disable-ScheduledTask -TaskName $name -ErrorAction Stop | Out-Null
+                }
+            } else { Restore-ControlPlaneSupervision -State $supervisionState }
         } catch {
             $rollbackResult = "ROLLBACK_FAILED: supervision restore: $($_.Exception.Message)"
         }
         Write-ControlPlaneInstallState @{
-            phase = if ($rollbackResult -eq "ROLLED_BACK") { "ROLLED_BACK" } else { "FAILED" }
+            phase = if ($rollbackResult -in @('ROLLED_BACK', 'ROLLED_BACK_DEGRADED_BASELINE')) { "ROLLED_BACK" } else { "FAILED" }
             completed_at = [DateTimeOffset]::UtcNow.ToString("o")
             new_watchdog_identity = $newOwner
             rollback_result = $rollbackResult
@@ -890,9 +1197,14 @@ function Invoke-ControlPlaneInstall {
     } finally {
         if ($releaseLockHeld) { Exit-ReleaseTransactionLock }
         foreach ($path in @($stageRoot, $backupRoot)) {
+            if ($CollectorClockRecovery -and $rollbackResult -like 'ROLLBACK_FAILED*') { continue }
             if (Test-Path -LiteralPath $path) {
                 Remove-Item -LiteralPath $path -Recurse -Force
             }
         }
+    }
+    } finally {
+        if ($bootstrapMutexHeld) { $bootstrapMutex.ReleaseMutex() }
+        if ($bootstrapMutex) { $bootstrapMutex.Dispose() }
     }
 }

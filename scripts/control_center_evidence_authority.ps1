@@ -1255,6 +1255,7 @@ function Test-WatchdogRecoverySuppressed {
         [Parameter(Mandatory = $true)][string]$ServiceState,
         [object]$ReleaseState
     )
+    if ($ServiceKey -eq 'collector' -and (Test-CollectorClockRecoveryHold)) { return $true }
     if ($ServiceKey -ne "sync" -or $ServiceState -ne "STOPPED") { return $false }
     return [bool]($ReleaseState -and $ReleaseState.transaction -and (
         ([string]$ReleaseState.transaction.type -eq "PROMOTE" -and

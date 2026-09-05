@@ -153,9 +153,13 @@ def test_windows_runtime_selector_uses_authoritative_impact_map(monkeypatch) -> 
         monkeypatch.setattr(module, "_changed_paths", lambda _base, p=owner_path: [p])
         selected = {item["id"] for item in module.select("base")}
         assert {"facade-composition", owner_shard}.issubset(selected)
+    rehearsal = next(row for row in WINDOWS_MANIFEST["shards"] if row["id"] == "control-install-rehearsal")
+    for path in rehearsal["paths"]:
+        monkeypatch.setattr(module, "_changed_paths", lambda _base, p=path: [p])
+        assert "control-install-rehearsal" in {item["id"] for item in module.select("base")}
 
 
-def test_windows_runtime_runner_emits_bounded_machine_evidence() -> None:
+def test_windows_runtime_runner_emits_bounded_machine_evidence(monkeypatch, tmp_path) -> None:
     runner = (ROOT / "scripts" / "run_windows_runtime_shard.py").read_text(
         encoding="utf-8"
     )
@@ -167,6 +171,22 @@ def test_windows_runtime_runner_emits_bounded_machine_evidence() -> None:
         '"test_selectors"',
     ):
         assert contract in runner
+    spec = importlib.util.spec_from_file_location("windows_rehearsal_runner", ROOT / "scripts/run_windows_runtime_shard.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    calls = []
+
+    def execute(command, **_kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(module.subprocess, "run", execute)
+    monkeypatch.setattr(module.sys, "argv", ["runner", "--shard", "control-install-rehearsal", "--output", str(tmp_path)])
+    assert module.main() == 0
+    assert calls == [[module.sys.executable, str(ROOT / "scripts/rehearse_control_plane_takeover.py")]]
+    report = json.loads((tmp_path / "control-install-rehearsal.json").read_text())
+    assert report["result"] == "PASS"
+    assert report["rehearsal_script"] == "scripts/rehearse_control_plane_takeover.py"
 
 
 def test_python_gate_is_parallel_bounded_and_keeps_required_name() -> None:

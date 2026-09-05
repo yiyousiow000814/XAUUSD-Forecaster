@@ -24,6 +24,8 @@ from xauusd_forecaster.market import (  # noqa: E402
 )
 from xauusd_forecaster.market_session import skipped_grid_reason  # noqa: E402
 from xauusd_forecaster.u5_state import U5State  # noqa: E402
+from xauusd_forecaster.clock_recovery import ExcludedIncompleteClock  # noqa: E402
+from xauusd_forecaster.clock_commit import read_completed_clock  # noqa: E402
 from xauusd_forecaster.maintenance import (  # noqa: E402
     DailyBackupOwner,
     apply_backup_retention,
@@ -129,14 +131,6 @@ def append_due_grid_events(
     news_status: list[dict[str, object]],
 ) -> tuple[datetime, list[tuple[datetime, str, str]], dict[str, int]]:
     """Append only broker-confirmed, quote-backed live decision grids."""
-    try:
-        visible_observations = provider.observations(boundary)
-    except (OSError, ValueError, json.JSONDecodeError):
-        visible_observations = []
-    try:
-        broker_session = provider.market_session(collected_at)
-    except (OSError, ValueError, KeyError, json.JSONDecodeError):
-        broker_session = None
     appended: list[tuple[datetime, str, str]] = []
     skipped_grids: dict[str, int] = {}
     candidate = last_decision + GRID_INTERVAL
@@ -148,6 +142,10 @@ def append_due_grid_events(
         return boundary, appended, skipped_grids
 
     eligible_count = _grid_count_before(first_eligible, boundary + GRID_INTERVAL)
+    try:
+        broker_session = provider.market_session(collected_at)
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        broker_session = None
     if broker_session is None or not broker_session.is_fresh(collected_at):
         _record_skipped(
             skipped_grids, "BROKER_MARKET_STATUS_UNAVAILABLE", eligible_count,
@@ -156,6 +154,13 @@ def append_due_grid_events(
     if not broker_session.is_open:
         _record_skipped(skipped_grids, "BROKER_MARKET_CLOSED", eligible_count)
         return boundary, appended, skipped_grids
+
+    # Source-first admission: a poll tick or a closed/unknown session is not
+    # permission to read the quote window. Independent owners still run below.
+    try:
+        visible_observations = provider.observations(boundary)
+    except (OSError, ValueError, json.JSONDecodeError):
+        visible_observations = []
 
     # JsonlMarketProvider cannot return a causally visible quote older than this
     # boundary. Settle that provably non-actionable prefix arithmetically so a
@@ -192,13 +197,16 @@ def append_due_grid_events(
                 snapshot_id, decision_id = engine.append_clock_event(
                     candidate, collected_at, news_status
                 )
+            except ExcludedIncompleteClock:
+                _record_skipped(skipped_grids, "CLOCK_EVENT_EXCLUDED_INCOMPLETE", 1)
             except sqlite3.Error as exc:
                 if not is_forward_sqlite_contention(exc):
                     raise
                 _database_contention(ledger, "append_clock_event", exc)
                 _record_skipped(skipped_grids, "DATABASE_CONTENTION_DEFERRED", 1)
                 break
-            appended.append((candidate, snapshot_id, decision_id))
+            else:
+                appended.append((candidate, snapshot_id, decision_id))
         last_decision = candidate
         candidate += GRID_INTERVAL
     return last_decision, appended, skipped_grids
@@ -277,8 +285,9 @@ def main() -> int:
         else NullMarketProvider()
     )
     u5_path = local_root / "u5-state.json"
+    U5State.reconcile_checkpoint(ledger, u5_path)
     u5_state = U5State.load(u5_path) if u5_path.exists() else U5State()
-    engine = ForwardEngine(ledger, provider, u5_state)
+    engine = ForwardEngine(ledger, provider, u5_state, u5_checkpoint_path=u5_path)
     write_runtime_heartbeat(
         status_file, service="collector", state="STARTING",
     )
@@ -372,13 +381,15 @@ def main() -> int:
     last_backup_observation = None
     last_wal_checkpoint_observation = None
     row = ledger.connection.execute(
-        "SELECT max(decision_time) AS latest FROM decision_events"
+        "SELECT decision_time AS latest FROM collector_runs ORDER BY decision_time DESC LIMIT 1"
     ).fetchone()
     last_decision = (
         datetime.fromisoformat(row["latest"])
-        if row["latest"]
+        if row and row["latest"]
         else floor_five_minutes(ledger.forward_epoch)
     )
+    if row and read_completed_clock(ledger, last_decision) is None:
+        raise ValueError("COLLECTOR_COMPLETION_CURSOR_UNPROVED")
     heartbeat = RuntimeHeartbeatPulse(status_file, service="collector")
     backup_owner = DailyBackupOwner(ledger.path, local_root / "backups")
     wal_checkpoint_owner = ForwardWalCheckpointOwner(ledger.path, local_root)
@@ -464,7 +475,6 @@ def main() -> int:
                     ),
                     flush=True,
                 )
-                u5_state.save(u5_path)
             if skipped_grids:
                 print(
                     json.dumps(

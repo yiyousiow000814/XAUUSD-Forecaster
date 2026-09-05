@@ -157,15 +157,31 @@ function Test-WatchdogExactIdentityAlive {
 
 function Get-WatchdogBusinessOwnerBaseline {
     $baseline = @()
+    $incident = Get-CollectorClockRecoveryContext
+    $collectorHeld = $incident -and (Test-CollectorClockRecoveryHold)
+    $complete = if ($collectorHeld) { @(Get-ForecasterProcessSnapshot -RequireCompleteInventory) } else { @() }
     foreach ($service in @($services)) {
         $enabled = [string]$service.Key -ne 'broadcast' -or
             (Test-BroadcastPublisherEnabled)
-        $owners = @(Get-ForecasterProcesses -Service $service)
+        if ($collectorHeld -and $service.Key -eq 'collector') { $enabled = $false }
+        $owners = @(if ($collectorHeld) {
+            $complete | Where-Object { Test-ForecasterServiceProcess -Process $_ -Service $service }
+        } else { Get-ForecasterProcesses -Service $service })
         if ($enabled -and $owners.Count -ne 1) {
             throw "WATCHDOG_TERMINATION_BUSINESS_OWNER_INVALID:$($service.Key)"
         }
         if (-not $enabled -and $owners.Count -gt 0) {
             throw "WATCHDOG_TERMINATION_BUSINESS_OWNER_INVALID:$($service.Key)"
+        }
+        if ($collectorHeld -and $service.Key -eq 'collector') {
+            # Absence is part of the captured incident baseline, not a healthy
+            # owner. Preserve and revalidate it after controller termination.
+            $baseline += [pscustomobject]@{
+                service_key = 'collector'; enabled = $false; root = $null
+                subtree = @(); incident_absence = $true
+                broken_revision = [string]$incident.broken_revision
+                target_revision = [string]$incident.target_revision
+            }
         }
         foreach ($owner in $owners) {
             $identity = Get-ControlPlaneProcessIdentity -ProcessId ([int]$owner.ProcessId)
@@ -282,6 +298,21 @@ function Get-WatchdogControllerTerminationPlan {
 function Assert-WatchdogBusinessOwnerBaselineUnchanged {
     param([Parameter(Mandatory = $true)][object[]]$Baseline)
     foreach ($entry in $Baseline) {
+        if ($entry.incident_absence) {
+            $incident = Get-CollectorClockRecoveryContext
+            $collector = @($services | Where-Object Key -eq 'collector')
+            if (-not $incident -or -not (Test-CollectorClockRecoveryHold) -or
+                [string]$incident.broken_revision -cne [string]$entry.broken_revision -or
+                [string]$incident.target_revision -cne [string]$entry.target_revision -or
+                $collector.Count -ne 1) {
+                throw 'WATCHDOG_TERMINATION_CHANGED_BUSINESS_RUNTIME'
+            }
+            $appeared = @(Get-ForecasterProcessSnapshot -RequireCompleteInventory | Where-Object {
+                Test-ForecasterServiceProcess -Process $_ -Service $collector[0]
+            })
+            if ($appeared.Count -ne 0) { throw 'WATCHDOG_TERMINATION_CHANGED_BUSINESS_RUNTIME' }
+            continue
+        }
         $current = Get-ControlPlaneProcessIdentity `
             -ProcessId ([int]$entry.root.process_id)
         if (-not $current -or -not (Test-ControlPlaneStartTokenEqual `

@@ -11,7 +11,10 @@ from .evidence_v2 import (
     evaluation_epoch, install_v2_schema,
 )
 from .forward_ledger import canonical_hash
-from .inference_v2 import append_live_predictions_v2
+from .inference_v2 import (
+    prepare_live_predictions_v2, persist_live_predictions_v2, persist_calibration_rows,
+    _activated_generation_updates,
+)
 from .news_contracts import (
     CORE_EVIDENCE_STORAGE_LANE,
     NEWS_CONTRACT_BY_ELIGIBILITY,
@@ -22,7 +25,9 @@ from .news_evidence import EVIDENCE_POLICY_VERSION
 from .repair_v2 import LANE_RULE_VERSION, TRAINING_ELIGIBILITY_VERSION
 from .training import MARKET_FEATURES
 from .u5_state import U5_VERSION
-from .execution_learning import append_execution_examples, append_lot_predictions
+from .execution_learning import (
+    append_execution_examples, prepare_lot_prediction, SOURCE_MODEL_IDENTITY,
+)
 
 
 def _uuid(namespace: str, value: str) -> str:
@@ -107,14 +112,16 @@ def _append_news_visibility_receipts(
     return inserted
 
 
-def append_live_decision_v2(
+def prepare_live_decision_v2(
     ledger, *, decision_id: str, decision_time: datetime,
     created_at: datetime, snapshot: dict, news_pipeline_health: dict,
-) -> list[dict]:
-    install_v2_schema(ledger.connection)
+) -> dict | None:
     epoch = evaluation_epoch(ledger.connection)
     if epoch is None or decision_time < epoch:
-        return []
+        return None
+    generation_hash = canonical_hash([
+        dict(row) for row in _activated_generation_updates(ledger, decision_time)
+    ])
     health_observed_at = datetime.fromisoformat(
         str(news_pipeline_health["observed_at"]).replace("Z", "+00:00")
     )
@@ -150,143 +157,205 @@ def append_live_decision_v2(
         ledger, decision_time=decision_time, news_snapshot=news,
         operational_health=news_pipeline_health,
     )
-    with ledger.connection:
+    predictions, prediction_rows, calibration_rows = prepare_live_predictions_v2(
+        ledger, decision_id=decision_id, decision_time=decision_time,
+        created_at=created_at,
+        market_snapshot={"features_json": json.dumps(features), "u5": snapshot["u5"],
+                         "data_health": snapshot["data_health"], "output_hash": market_hash},
+        news_snapshot={
+            "features_json": json.dumps(news["features"]),
+            "output_hash": news_hash,
+            "news_exposed": news["news_exposed"],
+            "broad_news_exposed": news.get("broad_news_exposed", 0),
+        },
+        news_input_coverage=news_input_coverage,
+    )
+    lot_row = prepare_lot_prediction(
+        ledger, source=next((row for row in predictions
+            if row["model_identity"] == SOURCE_MODEL_IDENTITY), None), decision_id=decision_id, decision_time=decision_time,
+        created_at=created_at,
+        market_snapshot={"features_json": json.dumps(features),
+                         "data_health": snapshot["data_health"],
+                         "output_hash": market_hash},
+    )
+    return {
+        "decision_id": decision_id,
+        "decision_time": decision_time,
+        "created_at": created_at,
+        "snapshot": snapshot,
+        "news_pipeline_health": news_pipeline_health,
+        "features": features,
+        "source_hash": source_hash,
+        "market_hash": market_hash,
+        "market_id": market_id,
+        "news": news,
+        "news_hash": news_hash,
+        "news_id": news_id,
+        "news_input_coverage": news_input_coverage,
+        "health_observed_at": health_observed_at,
+        "predictions": predictions,
+        "prediction_rows": prediction_rows,
+        "calibration_rows": calibration_rows,
+        "lot_row": lot_row,
+        "generation_hash": generation_hash,
+        "evaluation_epoch": epoch,
+    }
+
+
+def persist_live_decision_v2(ledger, prepared: dict | None) -> list[dict]:
+    """Persist prepared rows only; never install schema or commit the caller."""
+    if prepared is None:
+        return []
+    if (evaluation_epoch(ledger.connection) != prepared["evaluation_epoch"]
+            or canonical_hash([
+                dict(row) for row in _activated_generation_updates(ledger, prepared["decision_time"])
+            ]) != prepared["generation_hash"]):
+        raise ValueError("CLOCK_EVENT_FROZEN_GENERATION_CHANGED")
+    decision_id = prepared["decision_id"]
+    decision_time = prepared["decision_time"]
+    created_at = prepared["created_at"]
+    snapshot = prepared["snapshot"]
+    news_pipeline_health = prepared["news_pipeline_health"]
+    features = prepared["features"]
+    source_hash = prepared["source_hash"]
+    market_hash = prepared["market_hash"]
+    market_id = prepared["market_id"]
+    news = prepared["news"]
+    news_hash = prepared["news_hash"]
+    news_id = prepared["news_id"]
+    news_input_coverage = prepared["news_input_coverage"]
+    health_observed_at = prepared["health_observed_at"]
+    predictions = prepared["predictions"]
+    ledger.connection.execute(
+        """INSERT INTO derived_market_snapshots VALUES
+        (?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?)""",
+        (market_id, decision_id, decision_time.isoformat(), snapshot["snapshot_hash"],
+         "LIVE_OOS", created_at.isoformat(), FEATURE_VERSION, U5_VERSION, snapshot["u5"],
+         json.dumps(features, sort_keys=True, separators=(",", ":")), snapshot["data_health"],
+         json.dumps(snapshot["reason_codes"], separators=(",", ":")), source_hash, market_hash),
+    )
+    ledger.connection.execute(
+        """INSERT INTO derived_news_feature_snapshots VALUES
+        (?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?)""",
+        (news_id, decision_id, decision_time.isoformat(), "LIVE_OOS", created_at.isoformat(),
+         NEWS_FEATURE_VERSION, ELIGIBILITY_VERSION,
+         json.dumps(news["features"], sort_keys=True, separators=(",", ":")),
+         news["model_visible_items"], news["news_exposed"], news["distinct_news_clusters"],
+         news["distinct_event_types"], news["source_evidence_hash"], news_hash),
+    )
+    ledger.connection.execute(
+        """INSERT INTO news_semantic_health_snapshots_v1 VALUES
+        (?,?,?,?,?,?,?,?,?)""",
+        (
+            decision_id, decision_time.isoformat(),
+            str(news_pipeline_health["observed_at"]),
+            str(news_pipeline_health["status"]),
+            json.dumps(news_pipeline_health["reason_codes"], separators=(",", ":")),
+            news_pipeline_health.get("heartbeat_at"),
+            int(news_pipeline_health.get("unresolved_items") or 0),
+            news_pipeline_health.get("oldest_unresolved_at"),
+            str(news_pipeline_health["snapshot_hash"]),
+        ),
+    )
+    ledger.connection.execute(
+        """INSERT INTO news_input_coverage_snapshots_v1 VALUES
+        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            decision_id, decision_time.isoformat(),
+            health_observed_at.isoformat(),
+            news_input_coverage["state"],
+            news_input_coverage["usable_core_event_count"],
+            news_input_coverage["usable_broad_event_count"],
+            news_input_coverage["unresolved_annotation_count"],
+            news_input_coverage["unresolved_impact_count"],
+            news_input_coverage["recovering_count"],
+            news_input_coverage["terminal_or_overdue_count"],
+            json.dumps(
+                news_input_coverage["operational_reason_codes"],
+                separators=(",", ":"),
+            ),
+            json.dumps(
+                news_input_coverage["coverage_reason_codes"],
+                separators=(",", ":"),
+            ),
+            json.dumps(
+                news_input_coverage["source_observability"],
+                sort_keys=True, separators=(",", ":"),
+            ),
+            news_input_coverage["source_evidence_hash"],
+            news_input_coverage["snapshot_hash"],
+        ),
+    )
+    for event in news["event_snapshots"]:
+        permissions = event["model_permissions"]
         ledger.connection.execute(
-            """INSERT INTO derived_market_snapshots VALUES
-            (?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?)""",
-            (market_id, decision_id, decision_time.isoformat(), snapshot["snapshot_hash"],
-             "LIVE_OOS", created_at.isoformat(), FEATURE_VERSION, U5_VERSION, snapshot["u5"],
-             json.dumps(features, sort_keys=True, separators=(",", ":")), snapshot["data_health"],
-             json.dumps(snapshot["reason_codes"], separators=(",", ":")), source_hash, market_hash),
+            """INSERT OR IGNORE INTO news_event_catalog_v1 VALUES
+            (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                event["event_version_id"], event["event_id"], event["policy_version"],
+                event["event_occurred_at"], event["event_clock_source"],
+                event["event_time_precision"], event["canonical_source"],
+                event["canonical_source_item_id"], event["source_hash"],
+                event["evidence_grade"], json.dumps(permissions, separators=(",", ":")),
+                json.dumps(event["reason_codes"], separators=(",", ":")),
+                created_at.isoformat(),
+            ),
         )
+        source_budget_id = str(event["source_budget_id"])
         ledger.connection.execute(
-            """INSERT INTO derived_news_feature_snapshots VALUES
-            (?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?)""",
-            (news_id, decision_id, decision_time.isoformat(), "LIVE_OOS", created_at.isoformat(),
-             NEWS_FEATURE_VERSION, ELIGIBILITY_VERSION,
-             json.dumps(news["features"], sort_keys=True, separators=(",", ":")),
-             news["model_visible_items"], news["news_exposed"], news["distinct_news_clusters"],
-             news["distinct_event_types"], news["source_evidence_hash"], news_hash),
+            """INSERT OR IGNORE INTO news_event_source_budgets_v1
+            VALUES (?,?,?,?)""",
+            (
+                event["event_version_id"], source_budget_id,
+                (
+                    "REPORTING_ORGANIZATION"
+                    if source_budget_id != event["canonical_source"]
+                    else "COLLECTOR_SOURCE"
+                ),
+                created_at.isoformat(),
+            ),
         )
+        event_snapshot_hash = canonical_hash((
+            decision_id, decision_time.isoformat(), event["event_id"],
+            event["event_version_id"], event["model_permission"],
+            event["raw_weight"], event["age_minutes"],
+        ))
         ledger.connection.execute(
-            """INSERT INTO news_semantic_health_snapshots_v1 VALUES
+            """INSERT OR IGNORE INTO news_decision_event_snapshots_v1 VALUES
             (?,?,?,?,?,?,?,?,?)""",
             (
-                decision_id, decision_time.isoformat(),
-                str(news_pipeline_health["observed_at"]),
-                str(news_pipeline_health["status"]),
-                json.dumps(news_pipeline_health["reason_codes"], separators=(",", ":")),
-                news_pipeline_health.get("heartbeat_at"),
-                int(news_pipeline_health.get("unresolved_items") or 0),
-                news_pipeline_health.get("oldest_unresolved_at"),
-                str(news_pipeline_health["snapshot_hash"]),
-            ),
-        )
-        ledger.connection.execute(
-            """INSERT INTO news_input_coverage_snapshots_v1 VALUES
-            (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                decision_id, decision_time.isoformat(),
-                health_observed_at.isoformat(),
-                news_input_coverage["state"],
-                news_input_coverage["usable_core_event_count"],
-                news_input_coverage["usable_broad_event_count"],
-                news_input_coverage["unresolved_annotation_count"],
-                news_input_coverage["unresolved_impact_count"],
-                news_input_coverage["recovering_count"],
-                news_input_coverage["terminal_or_overdue_count"],
-                json.dumps(
-                    news_input_coverage["operational_reason_codes"],
-                    separators=(",", ":"),
-                ),
-                json.dumps(
-                    news_input_coverage["coverage_reason_codes"],
-                    separators=(",", ":"),
-                ),
-                json.dumps(
-                    news_input_coverage["source_observability"],
-                    sort_keys=True, separators=(",", ":"),
-                ),
-                news_input_coverage["source_evidence_hash"],
-                news_input_coverage["snapshot_hash"],
-            ),
-        )
-        for event in news["event_snapshots"]:
-            permissions = event["model_permissions"]
-            ledger.connection.execute(
-                """INSERT OR IGNORE INTO news_event_catalog_v1 VALUES
-                (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    event["event_version_id"], event["event_id"], event["policy_version"],
-                    event["event_occurred_at"], event["event_clock_source"],
-                    event["event_time_precision"], event["canonical_source"],
-                    event["canonical_source_item_id"], event["source_hash"],
-                    event["evidence_grade"], json.dumps(permissions, separators=(",", ":")),
-                    json.dumps(event["reason_codes"], separators=(",", ":")),
-                    created_at.isoformat(),
-                ),
-            )
-            source_budget_id = str(event["source_budget_id"])
-            ledger.connection.execute(
-                """INSERT OR IGNORE INTO news_event_source_budgets_v1
-                VALUES (?,?,?,?)""",
-                (
-                    event["event_version_id"], source_budget_id,
-                    (
-                        "REPORTING_ORGANIZATION"
-                        if source_budget_id != event["canonical_source"]
-                        else "COLLECTOR_SOURCE"
-                    ),
-                    created_at.isoformat(),
-                ),
-            )
-            event_snapshot_hash = canonical_hash((
                 decision_id, decision_time.isoformat(), event["event_id"],
-                event["event_version_id"], event["model_permission"],
-                event["raw_weight"], event["age_minutes"],
-            ))
-            ledger.connection.execute(
-                """INSERT OR IGNORE INTO news_decision_event_snapshots_v1 VALUES
-                (?,?,?,?,?,?,?,?,?)""",
-                (
-                    decision_id, decision_time.isoformat(), event["event_id"],
-                    event["event_version_id"], event["policy_version"],
-                    event["model_permission"], event["raw_weight"],
-                    event["age_minutes"], event_snapshot_hash,
-                ),
-            )
-        _lane(ledger.connection, "DECISION", decision_id, "LIVE_OOS", created_at, market_hash)
-        _lane(ledger.connection, "DERIVED_MARKET", market_id, "LIVE_OOS", created_at, market_hash)
-        _lane(ledger.connection, "DERIVED_NEWS", news_id, "LIVE_OOS", created_at, news_hash)
-        predictions = append_live_predictions_v2(
-            ledger, decision_id=decision_id, decision_time=decision_time,
-            created_at=created_at,
-            market_snapshot={"features_json": json.dumps(features), "u5": snapshot["u5"],
-                             "data_health": snapshot["data_health"], "output_hash": market_hash},
-            news_snapshot={
-                "features_json": json.dumps(news["features"]),
-                "output_hash": news_hash,
-                "news_exposed": news["news_exposed"],
-                "broad_news_exposed": news.get("broad_news_exposed", 0),
-            },
-            news_input_coverage=news_input_coverage,
+                event["event_version_id"], event["policy_version"],
+                event["model_permission"], event["raw_weight"],
+                event["age_minutes"], event_snapshot_hash,
+            ),
         )
-        _append_news_visibility_receipts(
-            ledger.connection, decision_id=decision_id, decision_time=decision_time,
-            recorded_at=created_at, predictions=predictions,
-            news_by_eligibility={
-                ELIGIBILITY_VERSION: news,
-                f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}": news,
-            },
-        )
-        append_lot_predictions(
-            ledger, decision_id=decision_id, decision_time=decision_time,
-            created_at=created_at,
-            market_snapshot={"features_json": json.dumps(features),
-                             "data_health": snapshot["data_health"],
-                             "output_hash": market_hash},
+    _lane(ledger.connection, "DECISION", decision_id, "LIVE_OOS", created_at, market_hash)
+    _lane(ledger.connection, "DERIVED_MARKET", market_id, "LIVE_OOS", created_at, market_hash)
+    _lane(ledger.connection, "DERIVED_NEWS", news_id, "LIVE_OOS", created_at, news_hash)
+    persist_calibration_rows(ledger.connection, prepared["calibration_rows"])
+    persist_live_predictions_v2(ledger.connection, prepared["prediction_rows"])
+    _append_news_visibility_receipts(
+        ledger.connection, decision_id=decision_id, decision_time=decision_time,
+        recorded_at=created_at, predictions=predictions,
+        news_by_eligibility={
+            ELIGIBILITY_VERSION: news,
+            f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}": news,
+        },
+    )
+    if prepared["lot_row"] is not None:
+        ledger.connection.execute(
+            "INSERT INTO execution_predictions_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            prepared["lot_row"],
         )
     return predictions
+
+
+def append_live_decision_v2(ledger, **kwargs) -> list[dict]:
+    install_v2_schema(ledger.connection)
+    prepared = prepare_live_decision_v2(ledger, **kwargs)
+    with ledger.connection:
+        return persist_live_decision_v2(ledger, prepared)
 
 
 def append_live_outcome_v2(ledger, *, decision_id: str, decision_time: datetime,

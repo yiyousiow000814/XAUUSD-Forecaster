@@ -367,17 +367,16 @@ def train_due_execution(ledger, cutoff: datetime, artifact_root: str | Path,
     return statuses
 
 
-def append_lot_predictions(ledger, *, decision_id: str, decision_time: datetime,
-                           created_at: datetime, market_snapshot: dict) -> int:
-    source = _source_prediction(ledger, decision_id)
+def prepare_lot_prediction(ledger, *, decision_id: str, decision_time: datetime,
+                           created_at: datetime, market_snapshot: dict, source) -> tuple | None:
     if source is None or source["recommended_action"] not in {"LONG", "SHORT"}:
-        return 0
+        return None
     model = _latest_model(ledger, LOT_IDENTITY, decision_time)
     if model is None or market_snapshot["data_health"] != "OK":
-        return 0
+        return None
     base = _market_values(json.loads(market_snapshot["features_json"]))
     if base is None:
-        return 0
+        return None
     direction = source["recommended_action"]
     values = [*base, 1.0 if direction == "LONG" else -1.0]
     paths = json.loads(model["artifact_paths_json"])
@@ -388,16 +387,26 @@ def append_lot_predictions(ledger, *, decision_id: str, decision_time: datetime,
     selected = max(expected, key=lambda action: (expected[action], -float(action[:-1])))
     feature_hash = canonical_hash((market_snapshot["output_hash"], source["model_version"],
                                    direction, values, expected))
+    return (decision_id, model["model_version"], LOT_IDENTITY,
+            SOURCE_MODEL_IDENTITY, source["model_version"], direction, 0,
+            decision_time.isoformat(), created_at.isoformat(), expected[selected],
+            selected, None, "SHADOW_ONLY", feature_hash)
+
+
+def append_lot_predictions(ledger, *, decision_id: str, decision_time: datetime,
+                           created_at: datetime, market_snapshot: dict) -> int:
+    row = prepare_lot_prediction(
+        ledger, decision_id=decision_id, decision_time=decision_time,
+        created_at=created_at, market_snapshot=market_snapshot,
+        source=_source_prediction(ledger, decision_id),
+    )
+    if row is None:
+        return 0
     with ledger.connection:
-        cursor = ledger.connection.execute(
-            """INSERT OR IGNORE INTO execution_predictions_v2 VALUES
-            (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (decision_id, model["model_version"], LOT_IDENTITY,
-             SOURCE_MODEL_IDENTITY, source["model_version"], direction, 0,
-             decision_time.isoformat(), created_at.isoformat(), expected[selected],
-             selected, None, "SHADOW_ONLY", feature_hash),
-        )
-    return cursor.rowcount
+        return ledger.connection.execute(
+            "INSERT OR IGNORE INTO execution_predictions_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            row,
+        ).rowcount
 
 
 def _checkpoint_features(ledger, decision_id: str, direction: str, minutes: int,

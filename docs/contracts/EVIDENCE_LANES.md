@@ -41,3 +41,20 @@ receipt are stored locally.
 The local append-only SQLite database is the source of truth. Sites D1 stores
 a replaceable read-only dashboard snapshot and is not described as the full
 immutable history.
+
+## Interrupted collector clocks
+
+A snapshot committed by an older non-atomic collector without its decision is
+not a completed prediction event. When the historical prediction inputs were
+not frozen, recovery retains the exact snapshot and appends an existing-family
+repair batch with `COMPLETED_WITH_GAPS`, zero repaired rows, one unrepaired row,
+and reason `SNAPSHOT_ONLY_HISTORICAL_PREDICTION_INPUTS_NOT_FROZEN`. Its snapshot
+assignment is `LEGACY_ENGINEERING` under the versioned clock-exclusion rule.
+This is an engineering gap, not a new decision or LIVE_OOS completion.
+
+Recovery validates the canonical clock, original snapshot hash and complete
+absence of downstream event evidence before both recovery rows commit together.
+Identity, hash, lane or receipt contradictions fail closed. Repeated recovery
+returns the same batch; source rows, prices, timestamps and hashes never change.
+The collector may advance past a verified excluded clock without fabricating
+predictions, but cannot treat an unrecorded partial event as a completed clock.

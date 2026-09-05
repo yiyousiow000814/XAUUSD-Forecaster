@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "ReleaseProviderFactsJson", "TerminateProviderObservation", "TerminateWatchdogOwner", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "RepairWatchdogOwnership", "DiscoverCandidate", "RetryCandidateValidation", "RetrySemantic", "ReconcileRelease", "PromoteCandidate", "PromoteRecoveryHotfix", "RestoreLastKnownGood", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "RegisterAccessProviderInspection", "RegisterFreePlanEvidence", "ReuseAccessQualification", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "ControlBundlePreflight", "PreflightRuntimeStateRoot", "MigrateRuntimeStateRoot")]
+    [ValidateSet("Gui", "Status", "StatusJson", "ReleaseStatusJson", "ReleaseProviderFactsJson", "TerminateProviderObservation", "TerminateWatchdogOwner", "CodeRevision", "WpfLayoutSmoke", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "RepairWatchdogOwnership", "RecoverCollectorClock", "DiscoverCandidate", "RetryCandidateValidation", "RetrySemantic", "ReconcileRelease", "PromoteCandidate", "PromoteRecoveryHotfix", "RestoreLastKnownGood", "ReverseStable", "BootstrapRelease", "VerifyMigrationCompatibility", "ApproveCompatibility", "ApproveAccessBoundary", "RegisterAccessProviderInspection", "RegisterFreePlanEvidence", "ReuseAccessQualification", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime", "InstallControlPlane", "ControlBundlePreflight", "PreflightRuntimeStateRoot", "MigrateRuntimeStateRoot")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync", "broadcast")]
     [string]$ServiceKey = "",
@@ -18,7 +18,8 @@ param(
     [string]$NativeProcessReceiptPath = "",
     [int]$TargetProcessId = 0,
     [string]$TargetProcessStartToken = "",
-    [switch]$SkipProviderObservation
+    [switch]$SkipProviderObservation,
+    [switch]$CollectorClockRecovery
 )
 
 $ErrorActionPreference = "Stop"
@@ -1236,7 +1237,13 @@ switch ($Action) {
         }
         Invoke-ControlPlaneInstall -VerifiedSourceRoot `
             ([System.IO.Path]::GetFullPath($SourceRoot)) `
-            -TargetRevision $SourceRevision | Format-List
+            -TargetRevision $SourceRevision -CollectorClockRecovery:$CollectorClockRecovery | Format-List
+    }
+    "RecoverCollectorClock" {
+        if (-not (Enter-ReleaseTransactionLock)) { throw 'COLLECTOR_RECOVERY_RELEASE_LOCK_REQUIRED' }
+        try {
+            Invoke-CollectorClockRecoveryOperation -Apply | ConvertTo-Json -Depth 8
+        } finally { Exit-ReleaseTransactionLock }
     }
     "ControlBundlePreflight" {
         if (-not $OperationResultPath) {

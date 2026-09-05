@@ -286,7 +286,8 @@ def _require_complete_active_generation(
         )
 
 
-def _calibration(ledger, model_identity: str, decision_time: datetime) -> dict:
+def _calibration(ledger, model_identity: str, decision_time: datetime,
+                 *, prepared_rows: list[tuple] | None = None) -> dict:
     """Calibrate the rolling lineage using the newest model at each prior decision."""
     rows = ledger.connection.execute(
         """WITH ranked AS (
@@ -316,23 +317,23 @@ def _calibration(ledger, model_identity: str, decision_time: datetime) -> dict:
     )
     source_hash = canonical_hash([(row["decision_time"], row["residual_u5"]) for row in rows])
     version = f"rolling-lineage-day-oos-{model_identity.lower()}-{source_hash[:12]}"
-    ledger.connection.execute(
-        """INSERT OR IGNORE INTO calibration_snapshots_v2 VALUES
-        (?,?,?,?,?,?,?,?,?,?,?)""",
-        (version, model_identity, decision_time.isoformat(), decision_time.isoformat(),
+    row = (version, model_identity, decision_time.isoformat(), decision_time.isoformat(),
          "UTC_DAY_BLOCK_OOS_ABS_RESIDUAL_Q95", len(rows), len(blocks), len(days),
-         half_width, status, source_hash),
-    )
+         half_width, status, source_hash)
+    if prepared_rows is not None:
+        prepared_rows.append(row)
+    else:
+        persist_calibration_rows(ledger.connection, [row])
     return {"version": version, "rows": len(rows), "blocks": len(blocks),
             "days": len(days), "half_width": half_width, "status": status}
 
 
-def _insert_prediction(ledger, *, decision_id: str, decision_time: datetime,
+def _prediction_values(*, decision_id: str, decision_time: datetime,
                        created_at: datetime, model_version: str, model_identity: str,
                        feature_hash: str, predicted: float | None,
                        news_residual: float | None, ev_long: float | None,
                        ev_short: float | None, calibration: dict,
-                       recommended: str, status: str) -> None:
+                       recommended: str, status: str) -> tuple:
     width = calibration["half_width"]
     lcb_long = ev_long - width if width is not None and ev_long is not None else None
     lcb_short = ev_short - width if width is not None and ev_short is not None else None
@@ -342,16 +343,16 @@ def _insert_prediction(ledger, *, decision_id: str, decision_time: datetime,
             f"prediction action violates frozen post-cost EV policy: "
             f"recorded={recommended}, expected={expected_action}"
         )
-    ledger.connection.execute(
-        """INSERT INTO predictions_v2 VALUES
-        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (decision_id, model_version, model_identity, decision_time.isoformat(), created_at.isoformat(),
+    return (decision_id, model_version, model_identity, decision_time.isoformat(), created_at.isoformat(),
          "LIVE_OOS", feature_hash, predicted, news_residual, ev_long, ev_short,
          lcb_long, lcb_short, "UTC_DAY_BLOCK_OOS_ABS_RESIDUAL_Q95",
          calibration["version"], calibration["rows"], calibration["blocks"],
          calibration["days"], width * 2 if width is not None else None,
-         calibration["status"], recommended, "WAIT", status),
-    )
+         calibration["status"], recommended, "WAIT", status)
+
+
+def _insert_prediction(ledger, **kwargs) -> None:
+    persist_live_predictions_v2(ledger.connection, [_prediction_values(**kwargs)])
 
 
 def _prediction_receipt(
@@ -367,17 +368,23 @@ def _prediction_receipt(
     }
 
 
-def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datetime,
+def prepare_live_predictions_v2(ledger, *, decision_id: str, decision_time: datetime,
                                created_at: datetime, market_snapshot: dict,
                                news_snapshot: dict,
                                news_snapshots: dict[str, dict] | None = None,
-                               news_input_coverage: dict) -> list[dict]:
-    """Append only models that existed before this decision; never backfill."""
+                               news_input_coverage: dict) -> tuple[list[dict], list[tuple], list[tuple]]:
+    """Freeze inference without taking a writer lock or appending a prediction."""
+    rows = []
+    calibration_rows = []
+
+    def record(**values):
+        rows.append(_prediction_values(**values))
+
     created = []
     empty_cal = {"version": "always-wait-no-calibration", "rows": 0, "blocks": 0,
                  "days": 0, "half_width": None, "status": "NOT_APPLICABLE"}
-    _insert_prediction(
-        ledger, decision_id=decision_id, decision_time=decision_time, created_at=created_at,
+    record(
+        decision_id=decision_id, decision_time=decision_time, created_at=created_at,
         model_version="always-wait-v1", model_identity="CHAMPION_0",
         feature_hash=market_snapshot["output_hash"], predicted=0.0, news_residual=None,
         ev_long=0.0, ev_short=0.0, calibration=empty_cal, recommended="WAIT", status="READY",
@@ -398,7 +405,7 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
         news_exposed = _news_snapshot_exposed(
             identity, selected_news_snapshot, news_features,
         )
-        calibration = _calibration(ledger, identity, decision_time)
+        calibration = _calibration(ledger, identity, decision_time, prepared_rows=calibration_rows)
         gate_status = _runtime_gate_status(
             identity,
             market_healthy=(
@@ -411,8 +418,8 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             ),
         )
         if gate_status == "DATA_UNHEALTHY":
-            _insert_prediction(
-                ledger, decision_id=decision_id, decision_time=decision_time, created_at=created_at,
+            record(
+                decision_id=decision_id, decision_time=decision_time, created_at=created_at,
                 model_version=update["model_version"], model_identity=identity,
                 feature_hash=market_snapshot["output_hash"], predicted=None, news_residual=None,
                 ev_long=None, ev_short=None, calibration=calibration,
@@ -424,8 +431,8 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             ))
             continue
         if gate_status == "NEWS_INPUT_UNAVAILABLE":
-            _insert_prediction(
-                ledger, decision_id=decision_id, decision_time=decision_time,
+            record(
+                decision_id=decision_id, decision_time=decision_time,
                 created_at=created_at, model_version=update["model_version"],
                 model_identity=identity,
                 feature_hash=canonical_hash((
@@ -521,8 +528,8 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             and int(_row_value(update, "news_exposed_rows", 0) or 0) == 0
         ):
             prediction_status = "COLD_START_NO_CORE_EVIDENCE"
-        _insert_prediction(
-            ledger, decision_id=decision_id, decision_time=decision_time, created_at=created_at,
+        record(
+            decision_id=decision_id, decision_time=decision_time, created_at=created_at,
             model_version=update["model_version"], model_identity=identity,
             feature_hash=canonical_hash((
                 market_snapshot["output_hash"], selected_news_snapshot["output_hash"],
@@ -537,4 +544,34 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             calibration=calibration,
         ))
     _require_complete_active_generation(ledger, decision_time, created)
+    return created, rows, calibration_rows
+
+
+def append_live_predictions_v2(ledger, **kwargs) -> list[dict]:
+    """Compatibility entrypoint; the calling transaction owns persistence."""
+    created, rows, calibration_rows = prepare_live_predictions_v2(ledger, **kwargs)
+    persist_calibration_rows(ledger.connection, calibration_rows)
+    persist_live_predictions_v2(ledger.connection, rows)
     return created
+
+
+def persist_live_predictions_v2(connection, rows: list[tuple]) -> None:
+    for row in rows:
+        connection.execute(
+            "INSERT INTO predictions_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            row,
+        )
+
+
+def persist_calibration_rows(connection, rows: list[tuple]) -> None:
+    for row in rows:
+        connection.execute(
+            "INSERT OR IGNORE INTO calibration_snapshots_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?)", row,
+        )
+        stored = connection.execute(
+            "SELECT * FROM calibration_snapshots_v2 WHERE calibration_version=?", (row[0],),
+        ).fetchone()
+        # Reuse across clocks deliberately retains the original creation/cutoff
+        # times. All source/statistical facts must still be identical.
+        if stored is None or tuple(stored)[:2] != row[:2] or tuple(stored)[4:] != row[4:]:
+            raise ValueError("CLOCK_EVENT_CALIBRATION_CONFLICT")

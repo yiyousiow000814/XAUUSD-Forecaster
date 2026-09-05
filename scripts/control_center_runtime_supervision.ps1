@@ -140,8 +140,14 @@ function Get-BroadcastPublisherToken {
 }
 
 function Get-ForecasterProcessSnapshot {
-    @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    param([switch]$RequireCompleteInventory)
+    $enumerationErrorAction = if ($RequireCompleteInventory) { 'Stop' } else { 'SilentlyContinue' }
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction $enumerationErrorAction |
         Where-Object { $_.Name -in @("python.exe", "powershell.exe") })
+    if ($RequireCompleteInventory -and @($processes | Where-Object { -not $_.CommandLine }).Count -gt 0) {
+        throw 'RUNTIME_RECOVERY_PROCESS_INVENTORY_UNKNOWN'
+    }
+    return $processes
 }
 
 function Test-ForecasterServiceProcess {
@@ -164,8 +170,8 @@ function Test-ForecasterServiceProcess {
 }
 
 function Get-ForecasterProcesses {
-    param([pscustomobject]$Service)
-    @(Get-ForecasterProcessSnapshot |
+    param([pscustomobject]$Service, [switch]$RequireCompleteInventory)
+    @(Get-ForecasterProcessSnapshot -RequireCompleteInventory:$RequireCompleteInventory |
         Where-Object { Test-ForecasterServiceProcess -Process $_ -Service $Service })
 }
 
@@ -935,13 +941,16 @@ function Invoke-RuntimeRollback {
         $recoveryStarted = [DateTimeOffset]::UtcNow
         $null = Restore-RuntimeRecoveryPlan -Plan $recoveryPlan
         try {
-            $null = Wait-RuntimeRecoveryPlanHealth -Plan $recoveryPlan `
+            $recoveredBaseline = Wait-RuntimeRecoveryPlanHealth -Plan $recoveryPlan `
                 -RecoveryStarted $recoveryStarted
         } catch {
             throw "RUNTIME_ROLLBACK_HEALTH_FAILED:$($_.Exception.Message)"
         }
         Write-RuntimeCodeState -Revision $PreviousRevision
-        Write-RuntimeUpdateFailure -Revision $FailedRevision -Status "ROLLED_BACK" `
+        $degradedRollback = [bool]$recoveryPlan.body.collector_clock_recovery
+        Write-RuntimeUpdateFailure -Revision $FailedRevision -Status $(if ($degradedRollback) {
+            'ROLLED_BACK_DEGRADED_BASELINE'
+        } else { 'ROLLED_BACK' }) `
             -Message "Candidate observation failed and the previous version was restored: $Reason"
         Write-WatchdogEvent -Event "RUNTIME_ROLLBACK_APPLIED" `
             -Service "all" -State $PreviousRevision
@@ -962,7 +971,8 @@ function Invoke-RuntimeRollback {
                     observe_contract = [pscustomobject][ordered]@{
                         terminal_state = "FAILED"
                         reason = Protect-PreflightDiagnosticText $Reason
-                        rollback_restored_lkg = $true
+                        rollback_restored_lkg = -not $degradedRollback
+                        rollback_baseline_health = if ($degradedRollback) { 'DEGRADED_RECOVERY_BASELINE' } else { 'HEALTHY' }
                     }
                 }
                 $observeNow = [DateTimeOffset]::UtcNow
@@ -974,7 +984,7 @@ function Invoke-RuntimeRollback {
                         target_identity = $authority.target_identity
                         terminal_state = "FAILED"
                     }) -StartedAt $observeNow -CompletedAt $observeNow `
-                    -WhyRan "OBSERVE_TERMINAL_FAILED_LKG_RESTORED"
+                    -WhyRan $(if ($degradedRollback) { 'OBSERVE_TERMINAL_FAILED_DEGRADED_BASELINE_RESTORED' } else { 'OBSERVE_TERMINAL_FAILED_LKG_RESTORED' })
                 $observeArguments.State = "FAILED"
                 $null = Publish-ObserveAttemptEvidence -Arguments $observeArguments
             }
@@ -990,11 +1000,11 @@ function Invoke-RuntimeRollback {
                 tested_at = [DateTimeOffset]::UtcNow.ToString("o")
             }
             $releaseState.transaction = $null
-            $releaseState.deployment_status = "READY"
+            $releaseState.deployment_status = if ($degradedRollback) { 'RECOVERY_REQUIRED' } else { 'READY' }
             $releaseState.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
             Write-ReleaseControlState -State $releaseState
             Write-ReleaseHistory -Event "PROMOTION_REVERSED" -Release $prior `
-                -Detail @{ reason = $Reason }
+                -Detail @{ reason = $Reason; baseline_health = $recoveredBaseline.baseline_health }
         } elseif ($releaseState -and $releaseState.transaction -and
             [string]$releaseState.transaction.type -eq "REVERSE") {
             $prior = $releaseState.transaction.previous
@@ -1174,6 +1184,9 @@ function Start-ForecasterService {
         [pscustomobject]$Service,
         [switch]$SkipExistingCheck
     )
+    if ($Service.Key -eq 'collector' -and (Test-CollectorClockRecoveryHold)) {
+        throw 'COLLECTOR_CLOCK_RECOVERY_REQUIRED'
+    }
     if (-not $SkipExistingCheck -and @(Get-ForecasterProcesses $Service).Count -gt 0) {
         return
     }
@@ -1264,6 +1277,7 @@ function Stop-ForecasterService {
 function Start-All {
     $status = @(Get-ForecasterStatus)
     foreach ($service in $services) {
+        if ($service.Key -eq 'collector' -and (Test-CollectorClockRecoveryHold)) { continue }
         if ($service.Key -eq "broadcast" -and -not (Test-BroadcastPublisherEnabled)) {
             continue
         }
@@ -1401,15 +1415,30 @@ function Write-WatchdogHeartbeat {
         instance_id = [string]$ownership.receipt.instance_id
         owner_receipt_digest = [string]$ownership.receipt_digest
         mutex_identity_hash = [string]$ownership.descriptor.mutex_identity_hash
+        collector_clock_recovery = $(
+            $incidentContext = Get-CollectorClockRecoveryContext
+            if ($incidentContext) {
+                [pscustomobject]@{
+                    incident = [string]$incidentContext.incident
+                    baseline = 'DEGRADED_RECOVERY_BASELINE'
+                    broken_revision = [string]$incidentContext.broken_revision
+                    target_revision = [string]$incidentContext.target_revision
+                }
+            } else { $null }
+        )
     }
     Write-ControlCenterJsonAtomic -Path $watchdogHeartbeatPath `
         -Value $heartbeat -Depth 6
 }
 
 function Get-ControlPlaneProcessIdentity {
-    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [switch]$RequireCompleteInventory
+    )
+    $enumerationErrorAction = if ($RequireCompleteInventory) { 'Stop' } else { 'SilentlyContinue' }
     $process = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" `
-        -ErrorAction SilentlyContinue
+        -ErrorAction $enumerationErrorAction
     if (-not $process) { return $null }
     $created = [DateTimeOffset]$process.CreationDate
     $ownerSid = $null
@@ -1417,7 +1446,13 @@ function Get-ControlPlaneProcessIdentity {
         $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid `
             -ErrorAction Stop
         if ([int]$owner.ReturnValue -eq 0) { $ownerSid = [string]$owner.Sid }
-    } catch { $ownerSid = $null }
+    } catch {
+        if ($RequireCompleteInventory) { throw 'CONTROL_PLANE_PROCESS_IDENTITY_UNAVAILABLE' }
+        $ownerSid = $null
+    }
+    if ($RequireCompleteInventory -and (-not $ownerSid -or -not $process.CommandLine)) {
+        throw 'CONTROL_PLANE_PROCESS_IDENTITY_UNAVAILABLE'
+    }
     [pscustomobject]@{
         process_id = [int]$process.ProcessId
         parent_process_id = [int]$process.ParentProcessId
@@ -1429,17 +1464,26 @@ function Get-ControlPlaneProcessIdentity {
 }
 
 function Get-WatchdogOwnershipInventory {
+    param([switch]$RequireCompleteInventory)
     $controlRoot = Join-Path $repositoryRoot ".local\runtime-control"
     $controlScript = Join-Path $controlRoot "xauusd_control_center.ps1"
+    $enumerationErrorAction = if ($RequireCompleteInventory) { 'Stop' } else { 'SilentlyContinue' }
     $candidates = @(
-        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Get-CimInstance Win32_Process -ErrorAction $enumerationErrorAction |
             Where-Object {
                 $_.Name -eq "powershell.exe" -and $_.CommandLine -and
                 $_.CommandLine.Contains($controlScript) -and
                 $_.CommandLine -match '(?i)-Action\s+Watchdog' -and
                 $_.CommandLine.Contains($moduleRoot) -and
                 $_.CommandLine.Contains($repositoryRoot)
-            } | ForEach-Object { Get-ControlPlaneProcessIdentity -ProcessId ([int]$_.ProcessId) }
+            } | ForEach-Object {
+                $identity = Get-ControlPlaneProcessIdentity -ProcessId ([int]$_.ProcessId) `
+                    -RequireCompleteInventory:$RequireCompleteInventory
+                if ($RequireCompleteInventory -and -not $identity) {
+                    throw 'CONTROL_PLANE_PROCESS_INVENTORY_CHANGED'
+                }
+                $identity
+            }
     )
     $shaped = @()
     $legacyOrphaned = @()
@@ -1450,7 +1494,8 @@ function Get-WatchdogOwnershipInventory {
     $expectedOwnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     foreach ($identity in $candidates) {
         $launcher = Get-ControlPlaneProcessIdentity `
-            -ProcessId ([int]$identity.parent_process_id)
+            -ProcessId ([int]$identity.parent_process_id) `
+            -RequireCompleteInventory:$RequireCompleteInventory
         if (-not $launcher) {
             if ([string]$identity.owner_sid -eq [string]$expectedOwnerSid) {
                 $legacyOrphaned += $identity
@@ -1515,8 +1560,8 @@ function Get-WatchdogOwnershipInventory {
 }
 
 function Get-VerifiedWatchdogOwners {
-    param([switch]$AllowLegacySingleOwner)
-    $inventory = Get-WatchdogOwnershipInventory
+    param([switch]$AllowLegacySingleOwner, [switch]$RequireCompleteInventory)
+    $inventory = Get-WatchdogOwnershipInventory -RequireCompleteInventory:$RequireCompleteInventory
     if ($inventory.authoritative.Count -eq 1 -and
         $inventory.duplicate_shaped.Count -eq 0 -and
         $inventory.legacy_orphaned.Count -eq 0 -and
@@ -1605,11 +1650,25 @@ function Assert-CurrentWatchdogHeartbeat {
 }
 
 function Get-ControlPlaneIsolationSnapshot {
+    param([switch]$RequireCompleteInventory)
+    $completeSnapshot = if ($RequireCompleteInventory) {
+        @(Get-ForecasterProcessSnapshot -RequireCompleteInventory)
+    } else { @() }
     $serviceIdentities = [ordered]@{}
     foreach ($service in $services) {
+        $processes = if ($RequireCompleteInventory) {
+            @($completeSnapshot | Where-Object {
+                Test-ForecasterServiceProcess -Process $_ -Service $service
+            })
+        } else { @(Get-ForecasterProcesses -Service $service) }
         $serviceIdentities[$service.Key] = @(
-            Get-ForecasterProcesses -Service $service | ForEach-Object {
-                Get-ControlPlaneProcessIdentity -ProcessId ([int]$_.ProcessId)
+            $processes | ForEach-Object {
+                $identity = Get-ControlPlaneProcessIdentity -ProcessId ([int]$_.ProcessId) `
+                    -RequireCompleteInventory:$RequireCompleteInventory
+                if ($RequireCompleteInventory -and -not $identity) {
+                    throw 'CONTROL_PLANE_PROCESS_INVENTORY_CHANGED'
+                }
+                $identity
             }
         )
     }
@@ -1639,12 +1698,23 @@ function Test-ControlPlaneServiceOwnerRequired {
 function Assert-ControlPlaneIsolationBaseline {
     param(
         [Parameter(Mandatory = $true)][object]$Snapshot,
-        [object]$ReleaseState
+        [object]$ReleaseState,
+        [object]$CollectorClockRecoveryBaseline = $null
     )
+    if ($CollectorClockRecoveryBaseline) {
+        Assert-CollectorClockRecoveryContext -Context $CollectorClockRecoveryBaseline
+        if ([string]$Snapshot.business_runtime_revision -cne
+            [string]$CollectorClockRecoveryBaseline.broken_revision -or
+            [string]$ReleaseState.stable.windows_revision -cne
+            [string]$CollectorClockRecoveryBaseline.broken_revision) {
+            throw 'COLLECTOR_RECOVERY_BASELINE_REVISION_CHANGED'
+        }
+    }
     foreach ($service in $services) {
         $owners = @($Snapshot.services.($service.Key))
         $required = Test-ControlPlaneServiceOwnerRequired -Service $service `
             -ReleaseState $ReleaseState
+        if ($CollectorClockRecoveryBaseline -and $service.Key -eq 'collector') { $required = $false }
         if ($required -and $owners.Count -ne 1) {
             throw "CONTROL_PLANE_SERVICE_OWNER_REQUIRED:$($service.Key)"
         }
@@ -1764,13 +1834,14 @@ function Assert-AbandonedControlPlaneInstallActivation {
         throw "CONTROL_PLANE_OLD_WATCHDOG_IDENTITY_MISSING"
     }
     $oldObserved = Get-ControlPlaneProcessIdentity `
-        -ProcessId ([int]$oldOwner.process_id)
+        -ProcessId ([int]$oldOwner.process_id) `
+        -RequireCompleteInventory:([bool]$State.collector_clock_recovery)
     if ($oldObserved -and (Test-ControlPlaneStartTokenEqual `
             -Left $oldObserved.process_start_token `
             -Right $oldOwner.process_start_token)) {
         throw "CONTROL_PLANE_OLD_WATCHDOG_STILL_OWNS"
     }
-    $owners = @(Get-VerifiedWatchdogOwners)
+    $owners = @(Get-VerifiedWatchdogOwners -RequireCompleteInventory:([bool]$State.collector_clock_recovery))
     $currentIdentity = Get-ControlPlaneProcessIdentity -ProcessId $PID
     if ($owners.Count -ne 1 -or -not $currentIdentity -or
         [int]$owners[0].process_id -ne $PID -or
@@ -1825,8 +1896,9 @@ function Assert-AbandonedControlPlaneInstallActivation {
         throw "CONTROL_PLANE_RECOVERY_BASELINE_MISSING"
     }
     Assert-ControlPlaneIsolationBaseline -Snapshot $baseline `
-        -ReleaseState $release
-    $currentIsolation = Get-ControlPlaneIsolationSnapshot
+        -ReleaseState $release -CollectorClockRecoveryBaseline $State.collector_clock_recovery
+    $currentIsolation = Get-ControlPlaneIsolationSnapshot `
+        -RequireCompleteInventory:([bool]$State.collector_clock_recovery)
     Assert-ControlPlaneIsolationSnapshot -Before $baseline `
         -After $currentIsolation
     return [pscustomobject]@{
@@ -1944,7 +2016,9 @@ function Invoke-ForecasterWatchdogOwned {
             $currentRevision = Get-CodeRevision
             # Git/main and Worker version movement only discover Candidate work.
             # Production checkout and traffic remain Stable until local Promote.
-            Start-CandidateDiscovery
+            $incident = Get-CollectorClockRecoveryContext
+            if (-not $incident -or [string](Get-ReleaseControlState).stable.windows_revision -ceq
+                [string]$incident.target_revision) { Start-CandidateDiscovery }
             $observationHealthy = Test-RuntimeObservation
             $currentRevision = Get-CodeRevision
             if ($currentRevision -ne $watchdogRevisionAtStart -and

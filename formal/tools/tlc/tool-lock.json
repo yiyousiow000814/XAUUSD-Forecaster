@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "artifact": "formal/tools/tlc/tla2tools.jar",
+  "size": 4487737,
+  "sha256": "b658b4e504fdf0b721caf7066320f6b6fe5805f4dd2f717d0e47baba4097205e",
+  "upstream_repository": "https://github.com/tlaplus/tlaplus",
+  "release_id": 25926686,
+  "tag": "v1.8.0",
+  "prerelease": true,
+  "immutable": false,
+  "asset_id": 544648411,
+  "acquisition_url": "https://api.github.com/repos/tlaplus/tlaplus/releases/assets/544648411",
+  "acquired_at": "2026-09-05",
+  "manifest_implementation_version": "2.0 2026-09-04",
+  "manifest_build_timestamp": "2026-09-04T17:07:53.983Z",
+  "manifest_git_revision": "b123b22654942bd7f8b1bcadcc47da4ee2cf4c0e",
+  "source_build_proof": "UNKNOWN",
+  "attestation": "UNKNOWN; official digest attestation API returned HTTP 404",
+  "license": "MIT; bundled dependency notices retained inside the JAR"
+}

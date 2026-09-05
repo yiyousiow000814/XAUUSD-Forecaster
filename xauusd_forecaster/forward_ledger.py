@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -514,6 +515,8 @@ CREATE TABLE IF NOT EXISTS collector_runs (
     snapshot_id TEXT NOT NULL,
     decision_id TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS collector_runs_decision_identity ON collector_runs(decision_id);
+CREATE INDEX IF NOT EXISTS collector_runs_clock ON collector_runs(decision_time DESC);
 """
 
 
@@ -532,6 +535,17 @@ def canonical_hash(value: Any) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def snapshot_evidence_hash(record: dict[str, Any]) -> str:
+    """Hash the exact canonical fields owned by the stored market snapshot."""
+    return canonical_hash({
+        **record.get("features", {}),
+        "bid": float(record["bid"]) if record.get("bid") is not None else None,
+        "ask": float(record["ask"]) if record.get("ask") is not None else None,
+        "decision_time": _iso(record["decision_time"]),
+        "feature_version": record["feature_version"],
+    })
 
 
 class ForwardLedger:
@@ -578,6 +592,20 @@ class ForwardLedger:
 
     def close(self) -> None:
         self.connection.close()
+
+    @contextmanager
+    def clock_preparation(self):
+        """Freeze one WAL read view without reserving the database writer."""
+        if self.connection.in_transaction:
+            raise ValueError("CLOCK_EVENT_TRANSACTION_ALREADY_ACTIVE")
+        query_only = int(self.connection.execute("PRAGMA query_only").fetchone()[0])
+        self.connection.execute("PRAGMA query_only=ON")
+        try:
+            self.connection.execute("BEGIN")
+            yield
+        finally:
+            self.connection.rollback()
+            self.connection.execute(f"PRAGMA query_only={query_only}")
 
     @property
     def forward_epoch(self) -> datetime:
@@ -672,7 +700,9 @@ class ForwardLedger:
                    ON source_polls(source,fetched_time DESC,poll_id DESC)"""
             )
 
-    def append_snapshot(self, record: dict[str, Any]) -> None:
+    def append_snapshot(self, record: dict[str, Any], *, commit: bool = True) -> None:
+        if not commit and not self.connection.in_transaction:
+            raise ValueError("CLOCK_EVENT_TRANSACTION_REQUIRED")
         decision_time = _iso(record["decision_time"])
         role = record["data_role"]
         if role == "FORWARD" and record["decision_time"] < self.forward_epoch:
@@ -682,14 +712,7 @@ class ForwardLedger:
             raise ValueError("snapshot uses market data received after decision")
         features = record.get("features", {})
         reasons = tuple(record.get("reason_codes", ()))
-        stored = {
-            **features,
-            "bid": record.get("bid"),
-            "ask": record.get("ask"),
-            "decision_time": decision_time,
-            "feature_version": record["feature_version"],
-        }
-        with self.connection:
+        with self.connection if commit else nullcontext():
             self.connection.execute(
                 """INSERT INTO market_snapshots VALUES
                 (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -713,7 +736,7 @@ class ForwardLedger:
                     record["data_health"],
                     int(bool(record.get("active_signal"))),
                     json.dumps(reasons, separators=(",", ":")),
-                    canonical_hash(stored),
+                    snapshot_evidence_hash(record),
                 ),
             )
 
@@ -1330,7 +1353,9 @@ class ForwardLedger:
             (cutoff, cutoff),
         ).fetchall()
 
-    def append_decision(self, record: dict[str, Any]) -> None:
+    def append_decision(self, record: dict[str, Any], *, commit: bool = True) -> None:
+        if not commit and not self.connection.in_transaction:
+            raise ValueError("CLOCK_EVENT_TRANSACTION_REQUIRED")
         decision_time = record["decision_time"]
         snapshot = self.connection.execute(
             "SELECT * FROM market_snapshots WHERE snapshot_id=?",
@@ -1340,11 +1365,13 @@ class ForwardLedger:
             raise ValueError("decision requires a FORWARD snapshot")
         if decision_time < self.forward_epoch:
             raise ValueError("decision predates FORWARD_EPOCH")
-        visible = self.visible_news(decision_time)
-        visible_hash = canonical_hash(
-            [(row["source"], row["source_item_id"], row["content_hash"]) for row in visible]
-        )
-        with self.connection:
+        visible_hash = record.get("visible_news_hash")
+        if visible_hash is None:
+            visible = self.visible_news(decision_time)
+            visible_hash = canonical_hash(
+                [(row["source"], row["source_item_id"], row["content_hash"]) for row in visible]
+            )
+        with self.connection if commit else nullcontext():
             self.connection.execute(
                 "INSERT INTO decision_events VALUES (?, ?, ?, ?, ?, ?, 'WAIT', ?)",
                 (

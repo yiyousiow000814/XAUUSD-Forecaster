@@ -31,6 +31,31 @@ outcomes, training rows, performance rows, or news matches.
 - Long enters at Ask and exits at Bid. Short enters at Bid and exits at Ask.
 - An outcome is appended; it never updates its decision or prediction.
 
+## Atomic clock persistence
+
+The collector prepares market inputs, U5, News features, calibration and model
+inference in one read-only WAL snapshot without reserving the writer. One
+transaction then owns snapshot, decision, required prediction/derived families
+and the existing collector completion record. Helpers cannot commit that
+transaction or execute schema installation inside it. Frozen model-generation
+identity must still match at persistence. BUSY/LOCKED defers the clock; integrity
+contradictions do not become ordinary contention.
+
+Completion records carry exact-clock evidence hashes in their existing status
+metadata. Replay verifies those persisted families and returns canonical IDs
+without new inference or writes. A snapshot or latest decision timestamp alone
+is not completion authority. Older completion records still require their
+mandatory evidence families. Unreconstructable snapshot-only gaps follow the
+existing [evidence-lane recovery contract](EVIDENCE_LANES.md).
+
+U5 preparation does not advance live memory. A bounded pending U5 checkpoint
+is atomically written before database commit and its digest is bound to the
+collector completion. Only a verified committed clock can publish that file as
+the active U5 checkpoint. After a pre-commit crash, restart retains the previous
+checkpoint; after a post-commit crash, restart completes that publication before
+advancing the collector cursor. No wall-clock or file existence alone authorizes
+checkpoint adoption.
+
 ## Weekly market closure
 
 - News collection and annotation continue during the expected weekly XAUUSD

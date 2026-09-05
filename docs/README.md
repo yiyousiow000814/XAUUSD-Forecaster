@@ -114,7 +114,8 @@ Current navigation: [repository and runtime state](CURRENT_STATE.md).
   [repository reliability 2026-08-17](audits/REPOSITORY_RELIABILITY_2026_08_17.md),
   [legacy news irrelevance recovery](audits/NEWS_IRRELEVANCE_RECOVERY_2026_08_16.md),
   and [news candidate retrieval baseline](audits/NEWS_CANDIDATE_RETRIEVAL_2026_08_17.md)
-- Reports: [Phase 2F repair](reports/PHASE2F_REPAIR.md),
+- Reports: [TLC artifact recovery](reports/TLC_ARTIFACT_RECOVERY.md),
+  [Phase 2F repair](reports/PHASE2F_REPAIR.md),
   [initial free-data feasibility](reports/FREE_DATA_FEASIBILITY.md),
   [canonical event handover](reports/CANONICAL_EVENT_HANDOVER.md),
   [Core/Broad handover](reports/CORE_BROAD_NEWS_HANDOVER.md), and

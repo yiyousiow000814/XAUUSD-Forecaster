@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from xauusd_forecaster.market import BrokerMarketSession, MarketObservation
 from xauusd_forecaster.market_session import (
     expected_weekly_closure,
@@ -159,15 +161,12 @@ def test_missing_or_stale_broker_status_fails_closed() -> None:
 
 def test_collector_does_not_append_prediction_during_broker_close(tmp_path) -> None:
     decision = datetime(2026, 8, 11, 21, 0, tzinfo=UTC)
-    quote = MarketObservation(
-        decision - timedelta(seconds=2), decision - timedelta(seconds=1), 4300, 4300.1
-    )
 
     class ClosedProvider:
         name = "test-ctrader"
 
         def observations(self, _decision_time):
-            return [quote]
+            raise AssertionError("closed decision path must not read quote payloads")
 
         def market_session(self, _observed_at):
             return broker_session(decision, is_open=False)
@@ -185,6 +184,33 @@ def test_collector_does_not_append_prediction_during_broker_close(tmp_path) -> N
     assert appended == []
     assert skipped == {"BROKER_MARKET_CLOSED": 1}
     assert ledger.connection.execute("SELECT count(*) FROM decision_events").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("admission", ["not_due", "before_epoch", "unknown", "stale"])
+def test_collector_no_work_admission_precedes_expensive_quote_reads(admission):
+    now = datetime(2026, 8, 11, 21, 0, tzinfo=UTC)
+    calls = []
+
+    class Provider:
+        def observations(self, _):
+            raise AssertionError("ineligible clock read quote payload")
+
+        def market_session(self, at):
+            calls.append("session")
+            if admission == "unknown":
+                return None
+            return broker_session(at - timedelta(hours=1))
+
+    ledger = type("Ledger", (), {"forward_epoch": now + timedelta(minutes=5)
+                                if admission == "before_epoch" else now})()
+    last = now if admission == "not_due" else now - timedelta(minutes=5)
+    cursor, appended, skipped = append_due_grid_events(
+        ledger, object(), Provider(), last, now, now, [],
+    )
+    assert cursor == now
+    assert appended == []
+    assert calls == ([] if admission in {"not_due", "before_epoch"} else ["session"])
+    assert skipped == ({} if not calls else {"BROKER_MARKET_STATUS_UNAVAILABLE": 1})
 
 
 def test_collector_arithmetically_settles_a_multi_year_unobservable_gap(
@@ -288,6 +314,7 @@ def test_collector_aggregates_a_multi_year_closed_market_gap() -> None:
 
 def test_collector_takes_decision_time_after_blocking_maintenance() -> None:
     fresh = datetime(2026, 8, 14, 10, 20, 10, tzinfo=UTC)
+    prior = fresh.replace(second=0) - timedelta(minutes=5)
     observed: dict[str, datetime] = {}
 
     class RecordingProvider:
@@ -300,10 +327,10 @@ def test_collector_takes_decision_time_after_blocking_maintenance() -> None:
             return broker_session(collected_at)
 
     collected_at, last_decision, appended, skipped = append_current_grid_events(
-        object(),
+        type("Ledger", (), {"forward_epoch": prior})(),
         object(),
         RecordingProvider(),
-        fresh,
+        prior,
         [],
         clock=lambda: fresh,
     )
@@ -313,6 +340,6 @@ def test_collector_takes_decision_time_after_blocking_maintenance() -> None:
         "boundary": datetime(2026, 8, 14, 10, 20, tzinfo=UTC),
         "collected_at": fresh,
     }
-    assert last_decision == fresh
+    assert last_decision == fresh.replace(second=0)
     assert appended == []
-    assert skipped == {}
+    assert skipped == {"CURRENT_GRID_WITHOUT_FRESH_QUOTE": 1}
