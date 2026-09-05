@@ -177,3 +177,10 @@ Real activation withdrawal belongs to the same required rehearsal shard as
 ACTIVE takeover. Both cases execute; neither is removed to fit the unit budget.
 Hosted short-path aliases resolve to one physical fixture root before applying
 the unchanged deny boundary. Test TLS explicitly requires TLS 1.2 or newer.
+
+The real withdrawal rehearsal uses the existing production handoff deadline
+(90 seconds), not its former unit-fixture-only 20-second override. Hosted handoff
+did not satisfy that artificial override. This does not change production
+deadlines, the 30-second unit contract, or the required five-minute job budget.
+Hidden child errors and the pre-cleanup handoff observation are retained as
+bounded fixture diagnostics; a timeout or identity mismatch remains failure.

@@ -962,8 +962,7 @@ def run_staged_activation_withdrawal_rehearsal(tmp_path):
     try {{
         $launcher=Start-WatchdogReplacement -InstallTransactionId $transaction -PassThru;
         $owner=Wait-VerifiedWatchdogHandoff -ExpectedRevision '{revision}' -PreviousIdentity $old `
-            -ExpectedMode QUIESCED -ExpectedInstallTransactionId $transaction -RequireCompleteInventory `
-            -Timeout ([TimeSpan]::FromSeconds(20));
+            -ExpectedMode QUIESCED -ExpectedInstallTransactionId $transaction -RequireCompleteInventory;
         if ([int]$owner.process_id -eq [int]$old.process_id -and $owner.process_start_token -eq $old.process_start_token) {{throw 'stale owner reused'}};
         if ($owner.watchdog_owner_receipt.mode -cne 'QUIESCED_INSTALL') {{throw 'unsafe activation'}};
         Write-ControlPlaneInstallState @{{phase='FAILED';failure='fixture withdrawal before activation'}};
@@ -971,6 +970,14 @@ def run_staged_activation_withdrawal_rehearsal(tmp_path):
         if (Get-ControlPlaneProcessIdentity -ProcessId ([int]$owner.process_id)) {{throw 'watchdog survived withdrawal'}};
         if (Test-Path -LiteralPath $watchdogOwnerReceiptPath) {{throw 'receipt remained after exact exit'}};
         Write-Output 'real quiesced handoff and clean withdrawal passed'
+    }} catch {{
+        $details=[ordered]@{{failure=$_.Exception.Message;heartbeat=$null;launcher_exited=$null}};
+        if(Test-Path -LiteralPath $watchdogHeartbeatPath){{
+            $details.heartbeat=Get-Content -LiteralPath $watchdogHeartbeatPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        }};
+        if($launcher){{$details.launcher_exited=$launcher.HasExited}};
+        Write-ControlCenterJsonAtomic -Path (Join-Path $script:fixtureRoot 'handoff-failure.json') -Value $details;
+        throw
     }} finally {{
         Write-ControlPlaneInstallState @{{phase='FAILED';failure='fixture cleanup'}};
         if ($owner -and (Get-ControlPlaneProcessIdentity -ProcessId ([int]$owner.process_id))) {{

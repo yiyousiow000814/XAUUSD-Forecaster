@@ -29,6 +29,9 @@ def main() -> None:
                 diagnostic = root / phase / "child-failure.txt"
                 if diagnostic.exists():
                     print(diagnostic.read_text(encoding="utf-8")[:8192], flush=True)
+                handoff = root / phase / "handoff-failure.json"
+                if handoff.exists():
+                    print(handoff.read_text(encoding="utf-8")[:8192], flush=True)
                 state = root / phase / "runtime/.local/forward/control-watchdog-heartbeat.json"
                 if state.exists():
                     print(state.read_text(encoding="utf-8")[:8192], flush=True)
