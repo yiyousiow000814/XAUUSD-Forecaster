@@ -18,6 +18,7 @@ OBSERVE_ATTEMPT = "c" * 32
     ("wrong_generation", "FAILED"), ("wrong_key", "FAILED"),
     ("old_read", "FAILED"), ("resource_error", "PENDING"),
     ("other_resource", "FAILED"), ("tampered_request", "FAILED"),
+    ("ack_target", "FAILED"), ("ack_digest", "FAILED"), ("ack_count_type", "FAILED"),
 ])
 def test_incident_news_observe_requires_exact_normal_sync_and_remote_generation(monkeypatch, tmp_path, case, expected):
     module = _module()
@@ -46,6 +47,10 @@ def test_incident_news_observe_requires_exact_normal_sync_and_remote_generation(
     }
     status = {"status": "OK", "last_success": read_at.isoformat(), "resource_observations": [{"target": "cloudflare",
         "resource": "news_evidence", "status": "OK", "completed_at": read_at.isoformat()}]}
+    ack = {"active_snapshot_id": snapshot, "record_count": 7,
+           "contract_version": "news-evidence-paged-v2",
+           "ack_remote_url": module.REMOTE_URLS["/api/news-evidence"],
+           "ack_request_sha256": "a" * 64}
     if case == "pending":
         receipt["state"] = "PARTIAL"
     elif case == "wrong_key":
@@ -58,11 +63,15 @@ def test_incident_news_observe_requires_exact_normal_sync_and_remote_generation(
         status["degraded_resources"] = [{"resource": "market_history"}]
     elif case == "tampered_request":
         request["transaction_id"] = "changed"
+    elif case == "ack_target":
+        ack["ack_remote_url"] = "https://other.invalid/api/news-evidence"
+    elif case == "ack_digest":
+        ack.pop("ack_request_sha256")
+    elif case == "ack_count_type":
+        ack["record_count"] = 7.0
     for name, value in (("deferred-projection-sync-request.json", request),
                         ("deferred-projection-sync-receipt.json", receipt),
-                        ("dashboard-news-evidence-sync-state-cloudflare.json", {
-                            "active_snapshot_id": snapshot, "record_count": 7,
-                            "contract_version": "news-evidence-paged-v2"}),
+                        ("dashboard-news-evidence-sync-state-cloudflare.json", ack),
                         ("dashboard-sync-status.json", status)):
         (root / name).write_text(json.dumps(value), encoding="utf-8")
     def remote(url, *, headers):

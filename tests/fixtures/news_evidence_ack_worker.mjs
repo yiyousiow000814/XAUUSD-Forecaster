@@ -12,6 +12,9 @@ const db = new D1TestDatabase([
   "0021_paged_news_evidence.sql", "0030_news_evidence_cleanup_budget.sql",
 ]);
 async function execute(encoded) {
+    if (encoded?.read === true) {
+      return readNewsEvidencePage(db, { mode: "all", rawCursor: null, page: 1, pageSize: 1 });
+    }
     if (encoded?.inspect === true) {
       const active = db.database.prepare("SELECT active_snapshot_id,record_count FROM news_evidence_state WHERE id=1").get();
       const rows = active ? db.database.prepare(

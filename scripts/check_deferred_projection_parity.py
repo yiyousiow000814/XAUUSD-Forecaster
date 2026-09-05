@@ -182,7 +182,10 @@ def _verify_news_recovery(*, version_id, git_sha, producer_revision, required_af
             or ack.get("contract_version") != NEWS_EVIDENCE_CONTRACT_VERSION
             or type(news.get("record_count")) is not int
             or news["record_count"] < 0
+            or type(ack.get("record_count")) is not int
             or ack.get("record_count") != news["record_count"]
+            or ack.get("ack_remote_url") != REMOTE_URLS[route]
+            or not re.fullmatch(r"[0-9a-f]{64}", str(ack.get("ack_request_sha256") or ""))
         ):
             raise ValueError("deferred News normal ACK conflict")
         status = read_state("dashboard-sync-status.json")

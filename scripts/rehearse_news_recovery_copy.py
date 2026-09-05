@@ -111,7 +111,11 @@ def main():
     try:
         temporary_owner = tempfile.TemporaryDirectory(prefix="xauusd-news-recovery-copy-")
         with nullcontext(temporary_owner.name) as temporary:
-            runtime = Path(temporary)
+            runtime_owner = Path(temporary)
+            (runtime_owner / "fixture-owned.json").write_text(
+                json.dumps({"root": str(runtime_owner)}), encoding="utf-8")
+            runtime = runtime_owner / ".local/forward"
+            runtime.mkdir(parents=True)
             cert, key = runtime / "cert.pem", runtime / "key.pem"
             openssl = shutil.which("openssl") or str(Path(shutil.which("git")).parents[1] / "usr/bin/openssl.exe")
             subprocess.run([openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
@@ -159,6 +163,24 @@ def main():
             class Remote(BaseHTTPRequestHandler):
                 def log_message(self, *_):
                     pass
+
+                def do_GET(self):
+                    if not self.path.startswith("/api/news-evidence?"):
+                        self.send_error(403)
+                        return
+                    counts["remote_ack_reconciliation"] += 1
+                    with worker_lock:
+                        worker.stdin.write(json.dumps({"read": True}) + "\n")
+                        worker.stdin.flush()
+                        result = json.loads(responses.get(timeout=15))["result"]
+                    body = json.dumps(result).encode()
+                    self.send_response(200)
+                    # Declared provider identity adapter, never production proof.
+                    self.send_header("X-Aurum-Worker-Version", version)
+                    self.send_header("X-Aurum-Git-SHA", revision)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
 
                 def do_POST(self):
                     size = int(self.headers.get("Content-Length", "0"))
@@ -224,7 +246,7 @@ def main():
             report["configuration"] = configuration
             report["configuration_sha256"] = hashlib.sha256(json.dumps(configuration, sort_keys=True).encode()).hexdigest()
             sync._write_news_sync_state(Path(config["deferred_projection_request_file"]), request)
-            status_file = runtime / "status.json"
+            status_file = runtime / "dashboard-sync-status.json"
             def monitor():
                 while not stop.wait(.2):
                     receipt = sync._read_news_sync_state(Path(config["deferred_projection_receipt_file"]))
@@ -266,6 +288,21 @@ def main():
             report["output_equivalence"] = {"source_content_digest": source_digest, **remote_content}
             if not report["ack_verified"]:
                 raise RuntimeError("CONTINUOUS_SYNC_ACK_INCOMPLETE")
+            consumer = subprocess.run([
+                sys.executable, str(ROOT / "tests/fixtures/deferred_recovery_consumer.py"),
+                "--fixture-provider", f"https://127.0.0.1:{remote.server_port}",
+                "--runtime-root", str(runtime_owner), "--version-id", version,
+                "--git-sha", revision, "--producer-revision", revision,
+                "--required-after", now.isoformat(), "--observe-attempt", uuid.uuid4().hex,
+                "--route", "/api/news-evidence",
+            ], capture_output=True, text=True, encoding="utf-8", timeout=25, creationflags=NO_WINDOW)
+            report["independent_deferred_consumer"] = {
+                "exit_code": consumer.returncode,
+                "result": json.loads(consumer.stdout) if consumer.stdout.strip() else None,
+                "diagnostic": consumer.stderr[-2000:],
+            }
+            if consumer.returncode != 0 or report["independent_deferred_consumer"]["result"].get("state") != "PASSED":
+                raise RuntimeError("INDEPENDENT_DEFERRED_CONSUMER_REJECTED")
             if git("rev-parse", "HEAD") != revision or git("status", "--porcelain=v1", "--untracked-files=all"):
                 raise RuntimeError("SOURCE_CHANGED_DURING_REHEARSAL")
             report["state"] = "API_SYNC_COPY_PASSED"
