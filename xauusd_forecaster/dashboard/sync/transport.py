@@ -202,20 +202,15 @@ def _validated_sync_state_path(path: Path, state_root: Path) -> Path:
         )
     parent = candidate.parent
     filename = candidate.name
-    allowed_characters = frozenset(
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
-    )
+    filename_match = re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,122}\.json", filename)
     if (
         parent != authority
-        or not 6 <= len(filename) <= 128
-        or not filename[0].isalnum()
-        or not filename.endswith(".json")
-        or any(character not in allowed_characters for character in filename)
+        or filename_match is None
     ):
         raise ValueError(
             f"dashboard sync state path must be one JSON file under {authority}"
         )
-    return authority / filename
+    return authority / filename_match.group(0)
 
 
 def configure_runtime_state(config: dict, state_root: Path) -> dict:
