@@ -63,6 +63,8 @@ def _run_contract_with_runtime(
     runtime.mkdir(exist_ok=True)
     repository.mkdir(exist_ok=True)
     script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    phase_file = tmp_path / "contract-phases.txt"
+    phase_path_literal = str(phase_file).replace("'", "''")
     task_prefix = f"XAUUSD-Contract-{uuid.uuid4().hex}"
     # Temporary filesystem roots do not isolate machine-global scheduled tasks.
     # Contract tests must opt in through explicit stubs, never native mutations.
@@ -75,13 +77,15 @@ def _run_contract_with_runtime(
         function Unregister-ScheduledTask { throw 'TEST_UNMOCKED_SCHEDULER_MUTATION' };
     '''
     command = (
-        "[Console]::Error.WriteLine('CONTRACT_PHASE:load'); "
+        "function Write-ContractPhase { param([string]$Phase); "
+        f"[IO.File]::AppendAllText('{phase_path_literal}', $Phase+[Environment]::NewLine) }}; "
+        "Write-ContractPhase 'load'; "
         f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{runtime}' "
         f"-RepositoryRoot '{repository}'; "
-        "[Console]::Error.WriteLine('CONTRACT_PHASE:body'); "
+        "Write-ContractPhase 'body'; "
         f"$taskName='{task_prefix}-Main'; $guardTaskName='{task_prefix}-Guard'; "
         f"{scheduler_guard}; {body}; "
-        "[Console]::Error.WriteLine('CONTRACT_PHASE:complete')"
+        "Write-ContractPhase 'complete'"
     )
     process = subprocess.Popen(
         [
@@ -103,11 +107,18 @@ def _run_contract_with_runtime(
     try:
         stdout, stderr = process.communicate(timeout=22)
     except subprocess.TimeoutExpired as failure:
+        phases = phase_file.read_text(encoding="utf-8")[:8192] if phase_file.exists() else "NOT_STARTED"
         # Keep cleanup inside pytest's existing 30-second deadline. A root-only
         # kill cannot prove that a descendant no longer owns the captured pipes.
         try:
+            system_directory = ctypes.create_unicode_buffer(32768)
+            size = ctypes.windll.kernel32.GetSystemDirectoryW(
+                system_directory, len(system_directory),
+            )
+            if not 0 < size < len(system_directory):
+                raise RuntimeError("CONTRACT_SYSTEM_DIRECTORY_UNAVAILABLE")
             termination = subprocess.run(
-                [str(Path(os.environ["SystemRoot"]) / "System32/taskkill.exe"),
+                [str(Path(system_directory.value) / "taskkill.exe"),
                  "/PID", str(process.pid), "/T", "/F"],
                 stdin=subprocess.DEVNULL, capture_output=True, timeout=3,
                 creationflags=subprocess.CREATE_NO_WINDOW,
@@ -115,14 +126,15 @@ def _run_contract_with_runtime(
             if termination.returncode != 0:
                 raise RuntimeError("CONTRACT_TREE_TERMINATION_UNRESOLVED")
             process.wait(timeout=1)
+            stdout, stderr = process.communicate(timeout=1)
         except (subprocess.TimeoutExpired, RuntimeError) as cleanup:
             raise AssertionError(
                 f"CONTRACT_TREE_TERMINATION_UNRESOLVED pid={process.pid}; "
-                f"phases={failure.stderr!r}; cleanup={cleanup}"
+                f"phases={phases!r}; cleanup={cleanup}"
             ) from failure
         raise AssertionError(
             f"CONTRACT_CHILD_DEADLINE pid={process.pid}; "
-            f"stdout={failure.stdout!r}; phases={failure.stderr!r}"
+            f"stdout={stdout!r}; stderr={stderr!r}; phases={phases!r}"
         ) from failure
     if process.returncode:
         raise AssertionError(
@@ -214,7 +226,7 @@ def test_news_incident_evidence_and_live_resource_admission(tmp_path, runtime_ex
     Assert-CollectorNewsRecoveryEvidence $evidence $broken $target;
     $original=$evidence | ConvertTo-Json -Depth 8;
     foreach($case in @('revision','resource','stage','cause-hash','hash','ack','ack-type','timeout','nan','size','dirty','source','boundary','tampered','missing')) {
-        [Console]::Error.WriteLine("CONTRACT_PHASE:evidence:$case");
+        Write-ContractPhase "evidence:$case";
         $bad=$original | ConvertFrom-Json;
         $bad.copy_rehearsal=$reportJson | ConvertFrom-Json;
         switch($case) {
@@ -248,7 +260,7 @@ def test_news_incident_evidence_and_live_resource_admission(tmp_path, runtime_ex
     $path=Join-Path $runtimeForwardRoot 'dashboard-sync-status.json';
     $statusJson=$status | ConvertTo-Json -Depth 8;
     foreach($case in @('valid','stale','missing-heartbeat','other-resource','remote-invariant','second-error')) {
-        [Console]::Error.WriteLine("CONTRACT_PHASE:observation:$case");
+        Write-ContractPhase "observation:$case";
         $current=$statusJson | ConvertFrom-Json;
         switch($case) {
             stale {$current.last_success=[DateTimeOffset]::UtcNow.AddMinutes(-3).ToString('o')}
