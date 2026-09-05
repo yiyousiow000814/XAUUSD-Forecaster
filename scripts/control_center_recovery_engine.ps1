@@ -381,9 +381,9 @@ function New-RuntimeRecoveryPlan {
             [string]$service.CodeRoot -ne [System.IO.Path]::GetFullPath($moduleRoot)) {
             throw "RUNTIME_RECOVERY_CONTRACT_IDENTITY_MISMATCH:$($service.Key)"
         }
-        $processes = if ($incident) {
+        $processes = @(if ($incident) {
             @($incidentProcesses | Where-Object { Test-ForecasterServiceProcess -Process $_ -Service $service })
-        } else { @(Get-ForecasterProcesses -Service $service) }
+        } else { @(Get-ForecasterProcesses -Service $service) })
         if ($incident -and $service.Key -eq 'collector' -and $processes.Count -ne 0) {
             throw 'COLLECTOR_RECOVERY_BASELINE_CHANGED'
         }

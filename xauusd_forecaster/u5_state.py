@@ -90,7 +90,11 @@ class U5State:
             temporary.unlink(missing_ok=True)
 
     def save(self, path: str | Path) -> None:
-        self.write_payload(path, self.as_dict())
+        # The offline warm-up export keeps its existing caller-selected output
+        # contract. Runtime clock publication uses the bound pending checkpoint.
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(self.as_dict(), separators=(",", ":")), encoding="utf-8")
 
     @staticmethod
     def reconcile_checkpoint(ledger, path: str | Path) -> None:

@@ -97,6 +97,9 @@ def test_current_grid_live_decision_ignores_later_operational_evidence(
     assert "ANNOTATOR_HEARTBEAT_STALE" in operator_health["reason_codes"]
     assert "MODEL_CREDENTIALS_UNAVAILABLE" in operator_health["reason_codes"]
 
+    # Producer facts are committed independently before the clock owner opens
+    # its read view and atomic writer transaction, as in the real service.
+    ledger.connection.commit()
     _, decision_id = ForwardEngine(ledger, _EmptyProvider()).append_clock_event(
         decision, collected,
     )
@@ -169,6 +172,7 @@ def test_current_grid_live_decision_keeps_prior_unavailable_after_later_recovery
     after = news_semantic_pipeline_health_at(ledger, observed_at=decision)
     assert after["snapshot_hash"] == before["snapshot_hash"]
 
+    ledger.connection.commit()
     _, decision_id = ForwardEngine(ledger, _EmptyProvider()).append_clock_event(
         decision, collected,
     )

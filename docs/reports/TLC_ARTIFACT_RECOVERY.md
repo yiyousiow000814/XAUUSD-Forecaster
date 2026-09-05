@@ -21,7 +21,12 @@ Tool and formal contract tests: 23 passed in 1.21 seconds. Cold and hot caches
 used identical reviewed bytes; corrupt cache/source, HTML, truncated input,
 unavailable source and unpinned adjacent dependencies failed before Java.
 No network/latest fallback exists in the runner. Windows and CI use the same
-lock/resolver. Actual Linux exact-head CI remains outstanding.
+lock/resolver. Linux exact-head CI subsequently verified every required shard
+on `a6b8ff68c9f046d8c5f9a361766424238ae3332b` in run `33949141491`:
+workflow start 06:11:31 UTC, completed 06:12:02 UTC (31 seconds). All 14 shards
+and the required aggregator passed. The same clean local head also passed all
+14 shards with unchanged state counts. Later source changes require their own
+exact-head gates; this recorded run does not authorize another revision.
 
 | Required shard | Seconds | Generated | Distinct | Result |
 |---|---:|---:|---:|---|
