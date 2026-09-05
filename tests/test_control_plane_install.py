@@ -75,32 +75,61 @@ def _run_contract_with_runtime(
         function Unregister-ScheduledTask { throw 'TEST_UNMOCKED_SCHEDULER_MUTATION' };
     '''
     command = (
+        "[Console]::Error.WriteLine('CONTRACT_PHASE:load'); "
         f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{runtime}' "
         f"-RepositoryRoot '{repository}'; "
+        "[Console]::Error.WriteLine('CONTRACT_PHASE:body'); "
         f"$taskName='{task_prefix}-Main'; $guardTaskName='{task_prefix}-Guard'; "
-        f"{scheduler_guard}; {body}"
+        f"{scheduler_guard}; {body}; "
+        "[Console]::Error.WriteLine('CONTRACT_PHASE:complete')"
     )
-    result = subprocess.run(
+    process = subprocess.Popen(
         [
             runtime_executable,
             "-NoProfile",
+            "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
             command,
         ],
-        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        check=False,
         env=environment,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
-    if result.returncode:
+    try:
+        stdout, stderr = process.communicate(timeout=22)
+    except subprocess.TimeoutExpired as failure:
+        # Keep cleanup inside pytest's existing 30-second deadline. A root-only
+        # kill cannot prove that a descendant no longer owns the captured pipes.
+        try:
+            termination = subprocess.run(
+                [str(Path(os.environ["SystemRoot"]) / "System32/taskkill.exe"),
+                 "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=3,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            if termination.returncode != 0:
+                raise RuntimeError("CONTRACT_TREE_TERMINATION_UNRESOLVED")
+            process.wait(timeout=1)
+        except (subprocess.TimeoutExpired, RuntimeError) as cleanup:
+            raise AssertionError(
+                f"CONTRACT_TREE_TERMINATION_UNRESOLVED pid={process.pid}; "
+                f"phases={failure.stderr!r}; cleanup={cleanup}"
+            ) from failure
+        raise AssertionError(
+            f"CONTRACT_CHILD_DEADLINE pid={process.pid}; "
+            f"stdout={failure.stdout!r}; phases={failure.stderr!r}"
+        ) from failure
+    if process.returncode:
         raise AssertionError(
             f"{runtime_executable} control-plane contract failed\n"
-            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            f"stdout:\n{stdout}\nstderr:\n{stderr}"
         )
-    return result.stdout.strip()
+    return stdout.strip()
 
 
 def _run_contract(tmp_path: Path, body: str) -> str:
@@ -185,6 +214,7 @@ def test_news_incident_evidence_and_live_resource_admission(tmp_path, runtime_ex
     Assert-CollectorNewsRecoveryEvidence $evidence $broken $target;
     $original=$evidence | ConvertTo-Json -Depth 8;
     foreach($case in @('revision','resource','stage','cause-hash','hash','ack','ack-type','timeout','nan','size','dirty','source','boundary','tampered','missing')) {
+        [Console]::Error.WriteLine("CONTRACT_PHASE:evidence:$case");
         $bad=$original | ConvertFrom-Json;
         $bad.copy_rehearsal=$reportJson | ConvertFrom-Json;
         switch($case) {
@@ -218,6 +248,7 @@ def test_news_incident_evidence_and_live_resource_admission(tmp_path, runtime_ex
     $path=Join-Path $runtimeForwardRoot 'dashboard-sync-status.json';
     $statusJson=$status | ConvertTo-Json -Depth 8;
     foreach($case in @('valid','stale','missing-heartbeat','other-resource','remote-invariant','second-error')) {
+        [Console]::Error.WriteLine("CONTRACT_PHASE:observation:$case");
         $current=$statusJson | ConvertFrom-Json;
         switch($case) {
             stale {$current.last_success=[DateTimeOffset]::UtcNow.AddMinutes(-3).ToString('o')}
