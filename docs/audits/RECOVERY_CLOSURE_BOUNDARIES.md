@@ -167,3 +167,38 @@ The shared POST reader turns malformed/empty/non-object successful HTTP bodies
 into an empty object; several callers advance local state without a positive
 operation-specific ACK. Actual provider occurrence is UNKNOWN. Source-first
 changes must correct this producer-consumer ACK contract, not just cache hashes.
+
+## Clean-source resource checkpoint
+
+The versioned `rehearse_news_recovery_copy.py` now executes the real local API,
+continuous Sync, exact-byte Worker ACK boundary and an independent subprocess
+running the normal deferred consumer. The provider remains loopback TLS with
+the real Worker store on the existing in-memory SQLite D1 adapter; identity
+headers and critical-status input are declared adapters, not Cloudflare proof.
+
+Clean source `c3f35a2216da6aad26bc7de49035eaf78c6244ba` completed in 91.344s:
+1,919 rows, matching source/stored content digests, 479 local payload GETs,
+482 business POSTs, four heartbeats and an independently accepted deferred
+receipt. The GET reduction from719 removes the redundant first-page read;
+it is not source-first no-change acceptance. POST attribution is prepare240,
+stage240, activate1, cleanup1. One additional remote GET reconciles the ACK.
+D1 rows read/written are NOT_MEASURED, not inferred from HTTP counts.
+
+The earlier exact-source `7e47ca13` run had transient Windows receipt-sharing
+failure despite eventual recovery. The existing atomic Sync writer now retries
+only the exact rename with a bounded70ms sharing allowance and never repeats an
+accepted business POST for that reason. Later clean `290ddfeb` and `c3f35a22`
+resource runs observed no such failure. Earlier failed evidence is retained.
+
+Review found that HTTP handler threads also need explicit cleanup ownership.
+The producer now registers each before launch, joins them under one bounded
+deadline, and retains the temporary runtime with UNRESOLVED cleanup if any
+remain. It also resolves Windows path aliases before recording ownership.
+Evidence from earlier source remains labeled with that source, not relabeled.
+
+The existing core formal shard now models deferred pending/accepted/rejected
+or expired transitions after Switch. Commit requires the exact accepted key;
+rejection/expiry uses normal recovery. This does not complete the real
+degraded-start installation/Switch/Collector/Observe rehearsal. Old-query
+reproduction and old/new full result equivalence remain NOT_RUN in this
+producer, so it cannot authorize the incident admission or production mutation.

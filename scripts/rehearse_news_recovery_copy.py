@@ -54,6 +54,40 @@ def load(name, filename):
     return module
 
 
+class OwnedHTTPServer(ThreadingHTTPServer):
+    """Keep exact request-thread ownership, including abnormal cleanup paths."""
+    def __init__(self, *args, **kwargs):
+        self._request_owners = set()
+        self._request_lock = threading.Lock()
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        thread = threading.Thread(target=self.process_request_thread,
+                                  args=(request, client_address), daemon=True)
+        # Register before start, so shutdown cannot overlook a queued handler.
+        with self._request_lock:
+            self._request_owners.add(thread)
+            thread.start()
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            with self._request_lock:
+                self._request_owners.discard(threading.current_thread())
+
+    def owned_requests(self):
+        with self._request_lock:
+            return tuple(self._request_owners)
+
+
+def join_owned_threads(threads, timeout=5):
+    deadline = time.monotonic() + timeout
+    for thread in threads:
+        thread.join(max(0, deadline - time.monotonic()))
+    return all(not thread.is_alive() for thread in threads)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database-copy", type=Path, required=True)
@@ -109,9 +143,9 @@ def main():
     previous_cert = os.environ.get("SSL_CERT_FILE")
     started = time.monotonic()
     try:
-        temporary_owner = tempfile.TemporaryDirectory(prefix="xauusd-news-recovery-copy-")
-        with nullcontext(temporary_owner.name) as temporary:
-            runtime_owner = Path(temporary)
+        temporary_owner = tempfile.mkdtemp(prefix="xauusd-news-recovery-copy-")
+        with nullcontext(temporary_owner) as temporary:
+            runtime_owner = Path(temporary).resolve(strict=True)
             (runtime_owner / "fixture-owned.json").write_text(
                 json.dumps({"root": str(runtime_owner)}), encoding="utf-8")
             runtime = runtime_owner / ".local/forward"
@@ -210,7 +244,7 @@ def main():
                     self.end_headers()
                     self.wfile.write(body)
 
-            local, remote = ThreadingHTTPServer(("127.0.0.1", 0), Local), ThreadingHTTPServer(("127.0.0.1", 0), Remote)
+            local, remote = OwnedHTTPServer(("127.0.0.1", 0), Local), OwnedHTTPServer(("127.0.0.1", 0), Remote)
             servers.extend((local, remote))
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(cert, key)
@@ -313,6 +347,8 @@ def main():
         for server in servers:
             server.shutdown()
             server.server_close()
+        request_threads = [thread for server in servers for thread in server.owned_requests()]
+        requests_stopped = join_owned_threads(request_threads)
         if worker is not None:
             worker.stdin.close()
             try:
@@ -322,8 +358,15 @@ def main():
                 worker.wait(timeout=5)
         for thread in threads:
             thread.join(5)
-        if temporary_owner is not None and all(not thread.is_alive() for thread in threads):
-            temporary_owner.cleanup()
+        if temporary_owner is not None and requests_stopped and all(not thread.is_alive() for thread in threads):
+            owned_path = Path(temporary_owner).resolve(strict=True)
+            marker = owned_path / "fixture-owned.json"
+            if (not owned_path.name.startswith("xauusd-news-recovery-copy-")
+                    or not marker.is_file()
+                    or json.loads(marker.read_text(encoding="utf-8")) != {"root": str(owned_path)}):
+                requests_stopped = False
+            else:
+                shutil.rmtree(owned_path)
         if previous_cert is None:
             os.environ.pop("SSL_CERT_FILE", None)
         else:
@@ -333,7 +376,9 @@ def main():
                       remote_posts=len(posted_bytes), max_post_bytes=max(posted_bytes, default=0),
                       heartbeat_count=counts["remote_heartbeat"],
                       transient_failure_families=sorted(observed_failures),
-                      cleanup="PASSED" if all(not thread.is_alive() for thread in threads) else "UNRESOLVED",
+                      remaining_request_threads=sum(thread.is_alive() for thread in request_threads),
+                      retained_runtime=None if temporary_owner is None or not Path(temporary_owner).exists() else temporary_owner,
+                      cleanup="PASSED" if requests_stopped and all(not thread.is_alive() for thread in threads) else "UNRESOLVED",
                       d1_rows_read="NOT_MEASURED", d1_rows_written="NOT_MEASURED")
         if report["cleanup"] != "PASSED":
             report["state"] = "FAILED"
