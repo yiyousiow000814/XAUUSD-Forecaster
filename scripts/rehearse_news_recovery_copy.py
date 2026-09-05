@@ -247,6 +247,7 @@ def main():
             local, remote = OwnedHTTPServer(("127.0.0.1", 0), Local), OwnedHTTPServer(("127.0.0.1", 0), Remote)
             servers.extend((local, remote))
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
             context.load_cert_chain(cert, key)
             remote.socket = context.wrap_socket(remote.socket, server_side=True)
             for server in servers:

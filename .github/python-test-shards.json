@@ -42,6 +42,7 @@
       "id": "python-5",
       "tests": [
         "tests/test_ci_contracts.py",
+        "tests/test_news_recovery_rehearsal.py",
         "tests/test_clock_atomicity.py",
         "tests/test_assistant_content.py",
         "tests/test_assistant_tools.py",

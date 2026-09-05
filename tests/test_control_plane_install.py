@@ -155,6 +155,13 @@ def _exited_windows_child_identity():
 @pytest.mark.parametrize("runtime_executable", ["powershell.exe", "pwsh.exe"])
 def test_news_incident_evidence_and_live_resource_admission(tmp_path, runtime_executable):
     body = r'''
+    # This is a read/admission contract. Fixture bytes need no repeated durable
+    # writer flush; atomic persistence has its own real boundary tests.
+    $null=New-Item -ItemType Directory -Path $runtimeForwardRoot -Force;
+    function Write-IncidentFixtureJson {
+        param($Path,$Value,$Depth=8)
+        [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth $Depth), [Text.UTF8Encoding]::new($false))
+    };
     $broken='ffe1de29c0891cc3a3cf3d602f3d3ee657faa9b8'; $target='b'*40;
     $evidence=[pscustomobject]@{
         incident='COLLECTOR_CLOCK_EVENT_ATOMICITY';broken_revision=$broken;target_revision=$target;
@@ -173,7 +180,7 @@ def test_news_incident_evidence_and_live_resource_admission(tmp_path, runtime_ex
     $report | Add-Member -NotePropertyName execution_boundary -NotePropertyValue 'REAL_API_CONTINUOUS_SYNC_ISOLATED_ACK';
     $reportJson=$report | ConvertTo-Json -Depth 8;
     $reportPath=Join-Path $runtimeForwardRoot 'copy-rehearsal.json';
-    Write-ControlCenterJsonAtomic -Path $reportPath -Value $report -Depth 8;
+    Write-IncidentFixtureJson -Path $reportPath -Value $report -Depth 8;
     $evidence.copy_rehearsal=[pscustomobject]@{path=$reportPath;sha256=(Get-FileHash $reportPath).Hash.ToLowerInvariant()};
     Assert-CollectorNewsRecoveryEvidence $evidence $broken $target;
     $original=$evidence | ConvertTo-Json -Depth 8;
@@ -195,14 +202,14 @@ def test_news_incident_evidence_and_live_resource_admission(tmp_path, runtime_ex
             source {$bad.copy_rehearsal.source_revision='c'*40}
             boundary {$bad.copy_rehearsal.execution_boundary='DIRECT_HELPER_LOOP'}
         };
-        Write-ControlCenterJsonAtomic -Path $reportPath -Value $bad.copy_rehearsal -Depth 8;
+        Write-IncidentFixtureJson -Path $reportPath -Value $bad.copy_rehearsal -Depth 8;
         $bad.copy_rehearsal=[pscustomobject]@{path=$reportPath;sha256=(Get-FileHash $reportPath).Hash.ToLowerInvariant()};
         if($case -eq 'tampered'){$bad.copy_rehearsal.sha256='0'*64};
         if($case -eq 'missing'){$bad.copy_rehearsal.path=Join-Path $runtimeForwardRoot 'missing.json'};
         try {Assert-CollectorNewsRecoveryEvidence $bad $broken $target;throw 'unsafe acceptance'}
         catch {if($_.Exception.Message -cne 'COLLECTOR_NEWS_RECOVERY_EVIDENCE_INVALID'){throw}}
     };
-    Write-ControlCenterJsonAtomic -Path $reportPath -Value ($reportJson | ConvertFrom-Json) -Depth 8;
+    Write-IncidentFixtureJson -Path $reportPath -Value ($reportJson | ConvertFrom-Json) -Depth 8;
     $now=[DateTimeOffset]::UtcNow.ToString('o');
     $status=@{status='DEGRADED';last_success=$now;last_error=$null;
         degraded_resources=@(@{target='cloudflare';resource='news_evidence';error_type='TimeoutError';error_code='TRANSPORT_UNAVAILABLE';error='timed out'});
@@ -219,7 +226,7 @@ def test_news_incident_evidence_and_live_resource_admission(tmp_path, runtime_ex
             remote-invariant {$current.degraded_resources[0].error_code='REMOTE_STATE_INVARIANT_VIOLATION'}
             second-error {$current.degraded_resources+=@($current.degraded_resources[0])}
         };
-        Write-ControlCenterJsonAtomic -Path $path -Value $current -Depth 8;
+        Write-IncidentFixtureJson -Path $path -Value $current -Depth 8;
         $before=(Get-FileHash -LiteralPath $path).Hash;
         try {$result=Get-CollectorNewsDegradedObservation $evidence $broken $target;
             if($case -ne 'valid' -or $result.state -cne 'DEGRADED_RECOVERY_BASELINE'){throw 'unsafe acceptance'}}

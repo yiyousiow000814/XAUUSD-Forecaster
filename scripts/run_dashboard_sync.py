@@ -980,7 +980,7 @@ def _write_news_sync_state(path: Path, state: dict) -> None:
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", dir=path.parent,
-            prefix=path.name + ".", suffix=".tmp", delete=False,
+            prefix="dashboard-sync-state-", suffix=".tmp", delete=False,
         ) as stream:
             temporary = Path(stream.name)
             json.dump(state, stream, ensure_ascii=False)
