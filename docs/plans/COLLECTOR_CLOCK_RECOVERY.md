@@ -90,10 +90,11 @@ Normal Promote must independently revalidate this exact incident baseline and
 retain full qualification and Observe. The rollback receipt must name the
 degraded baseline rather than claiming all old business services are healthy.
 
-Implementation is under review. Offline copied-database crash/restart and the
-real staged QUIESCED launcher/receipt path passed; complete ACTIVE takeover and
-production verification remain outstanding. This is not an authorization
-receipt or evidence that production bootstrap is presently safe.
+Implementation is under review. Offline copied-database crash/restart, real
+staged QUIESCED withdrawal, installer-granted ACTIVE takeover, singleton refusal,
+and same-owner loopback Sync timeout isolation passed. Production verification
+remains outstanding. This is not an authorization receipt or evidence that
+production bootstrap is presently safe.
 
 SOURCE_READY, SUPERVISION_RECOVERED, COLLECTOR_RECOVERED and STABLE_COMMITTED are
 separate results. Offline work continues if supervision is unavailable. Production
@@ -101,3 +102,51 @@ does not proceed until the verified maintenance/switch path can preserve other
 services and report truthful rollback health. Exact qualification, Access, Free,
 Observe and Assistant PAUSED rules remain unchanged. This plan is not evidence
 that any of those gates has passed.
+
+## Remaining staged acceptance boundary
+
+The ACTIVE rehearsal must execute the real installer, bundle copy/verification,
+launcher, OS mutex, activation wait, and child-owned receipt/heartbeat. Its
+external environment is a separately identified fixture: independent roots,
+task namespace, simulated business processes, and loopback providers. Fixture
+adapters must be present in the child as well as the parent before dispatch;
+parent-only PowerShell mocks do not cross a process boundary. Test instrumentation
+is not an exact production artifact and must be reported separately from the
+unchanged lifecycle functions it exercises. No production endpoint or scheduler
+mutation is permitted by a fixture adapter. File/process mutations must reject
+targets outside the owned fixture before executing.
+
+| Phase | Dependency on production news-evidence health |
+| --- | --- |
+| Isolated staged acceptance | None; loopback success/failure is the authority |
+| Incident Control Plane install/supervision | Current strict baseline requires Sync OK; no exception proved yet |
+| Local snapshot-only exclusion | Current recovered-supervision baseline still requires Sync OK |
+| Windows switch | Exact release and recovery baseline required |
+| Candidate qualification | Applicable resource/parity/identity evidence required |
+| Promote/Observe | Original resource and evidence obligations remain required |
+
+No phase-specific degraded admission is established by this plan. An unavailable
+production resource must not block isolated testing, but heartbeat success alone
+cannot authorize production installation, exclusion, qualification or promotion.
+
+Failure coverage includes withdrawal before grant, installer disappearance,
+replacement disappearance, mutex refusal, degraded rollback and singleton
+preservation. A healthy simulated business process is preservation evidence,
+not proof of production business health. Copied-database recovery evidence stays
+separate; no new multi-gigabyte baseline is needed for process lifecycle tests.
+
+The real ACTIVE rehearsal exposed an incident rollback sibling: controller
+termination demanded a live Collector even under the exact persisted restart
+hold. Termination now captures Collector absence only under that validated hold,
+uses complete process enumeration, and rechecks the same incident identities and
+absence after stopping the exact controller. Other business owners remain
+mandatory and preserved; normal termination admission is unchanged. Missing or
+changed hold, an appearing Collector, or unavailable inventory rejects recovery.
+
+The complete real-process rehearsal is an independently required Windows shard,
+not a long unit test with a larger timeout. The existing 30-second unit-test
+deadline and five-minute job deadline remain unchanged. The authoritative shard
+map selects the rehearsal for its adapters and affected lifecycle/Sync owners;
+the existing Windows aggregator requires its successful completion. It includes
+real TLS loopback traffic and the unchanged 20-second transport timeout, without
+production secrets, network targets or scheduled-task mutations.

@@ -347,6 +347,25 @@
       ]
     },
     {
+      "id": "control-install-rehearsal",
+      "family": "windows-runtime-artifact-repair",
+      "paths": [
+        "scripts/rehearse_control_plane_takeover.py",
+        "tests/test_control_plane_install.py",
+        "tests/fixtures/control_plane_staged_boundary.ps1",
+        "tests/fixtures/staged_sync_owner.py",
+        "scripts/control_center_install.ps1",
+        "scripts/control_center_watchdog_singleton.ps1",
+        "scripts/control_center_runtime_supervision.ps1",
+        "scripts/xauusd_control_center.ps1",
+        "scripts/runtime-control-files.json",
+        "scripts/run_dashboard_sync.py",
+        "xauusd_forecaster/dashboard/sync/*"
+      ],
+      "tests": [],
+      "rehearsal_script": "scripts/rehearse_control_plane_takeover.py"
+    },
+    {
       "id": "control-install",
       "family": "windows-runtime-artifact-repair",
       "paths": [

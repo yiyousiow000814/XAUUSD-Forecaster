@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import shutil
 import subprocess
 import textwrap
 import uuid
 import sys
+import ssl
+import threading
+import time
 
 import pytest
 
@@ -48,7 +53,7 @@ def _legacy_v2_bundle_digest(hashes: dict[str, str]) -> str:
 
 
 def _run_contract_with_runtime(
-    tmp_path: Path, body: str, runtime_executable: str,
+    tmp_path: Path, body: str, runtime_executable: str, *, environment=None,
 ) -> str:
     runtime = tmp_path / "runtime"
     repository = tmp_path / "repository"
@@ -84,6 +89,8 @@ def _run_contract_with_runtime(
         capture_output=True,
         text=True,
         check=False,
+        env=environment,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if result.returncode:
         raise AssertionError(
@@ -95,6 +102,57 @@ def _run_contract_with_runtime(
 
 def _run_contract(tmp_path: Path, body: str) -> str:
     return _run_contract_with_runtime(tmp_path, body, "powershell.exe")
+
+
+def _isolated_windows_environment():
+    # A Python parent otherwise forwards PowerShell 7 module paths into 5.1.
+    # No production credentials or endpoint environment enters the fixture tree.
+    environment = {key: value for key, value in os.environ.items() if key.upper() in {
+        "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "COMSPEC", "USERPROFILE", "USERNAME",
+        "USERDOMAIN", "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)",
+        "PROGRAMDATA", "TEMP", "TMP", "PATHEXT", "PATH",
+    }}
+    environment["PSModulePath"] = str(Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/Modules")
+    return environment
+
+
+@pytest.mark.parametrize("runtime_executable", ["powershell.exe", "pwsh.exe"])
+def test_incident_termination_preserves_explicit_collector_absence(tmp_path, runtime_executable):
+    body = r'''
+    $services=@([pscustomobject]@{Key='collector'});
+    $script:held=$true; $script:present=$false;
+    function Get-CollectorClockRecoveryContext { [pscustomobject]@{broken_revision=('a'*40);target_revision=('b'*40)} };
+    function Test-CollectorClockRecoveryHold { return $script:held };
+    function Get-ForecasterProcessSnapshot { param([switch]$RequireCompleteInventory);
+        if(-not $RequireCompleteInventory){throw 'incomplete inventory'};
+        if($script:present){[pscustomobject]@{ProcessId=123}}
+    };
+    function Get-ForecasterProcesses { @() };
+    function Test-ForecasterServiceProcess { return $true };
+    $before=@(Get-WatchdogBusinessOwnerBaseline);
+    if($before.Count -ne 1 -or -not $before[0].incident_absence){throw 'absence not captured'};
+    Assert-WatchdogBusinessOwnerBaselineUnchanged -Baseline $before;
+    $script:present=$true;
+    try{Assert-WatchdogBusinessOwnerBaselineUnchanged -Baseline $before;throw 'WRONG'}catch{
+        if($_.Exception.Message -cne 'WATCHDOG_TERMINATION_CHANGED_BUSINESS_RUNTIME'){throw}
+    };
+    $script:present=$false; $script:held=$false;
+    try{$null=Get-WatchdogBusinessOwnerBaseline;throw 'WRONG'}catch{
+        if($_.Exception.Message -cne 'WATCHDOG_TERMINATION_BUSINESS_OWNER_INVALID:collector'){throw}
+    };
+    try{Assert-WatchdogBusinessOwnerBaselineUnchanged -Baseline $before;throw 'WRONG'}catch{
+        if($_.Exception.Message -cne 'WATCHDOG_TERMINATION_CHANGED_BUSINESS_RUNTIME'){throw}
+    };
+    $script:held=$true;
+    function Get-ForecasterProcessSnapshot { param([switch]$RequireCompleteInventory); throw 'INVENTORY_UNKNOWN' };
+    try{$null=Get-WatchdogBusinessOwnerBaseline;throw 'WRONG'}catch{
+        if($_.Exception.Message -cne 'INVENTORY_UNKNOWN'){throw}
+    };
+    'incident absence preserved; normal/changed/unknown rejected'
+    '''
+    assert _run_contract_with_runtime(tmp_path, body, runtime_executable) == (
+        "incident absence preserved; normal/changed/unknown rejected"
+    )
 
 
 def _write_bundle(
@@ -193,11 +251,17 @@ def _make_detached_source(
     return revision
 
 
-def _make_real_control_source(root: Path) -> str:
+def _make_real_control_source(root: Path, *, boundary: str = "") -> str:
     scripts = root / "scripts"
     scripts.mkdir(parents=True)
     for name in CONTROL_FILES:
         shutil.copy2(ROOT / "scripts" / name, scripts / name)
+    if boundary:
+        shutil.copy2(ROOT / "scripts/windows-service-launch-contract.json", scripts / "windows-service-launch-contract.json")
+        entrypoint = scripts / "xauusd_control_center.ps1"
+        source = entrypoint.read_text(encoding="utf-8")
+        assert source.count("switch ($Action) {") == 1
+        entrypoint.write_text(source.replace("switch ($Action) {", boundary + "\nswitch ($Action) {"), encoding="utf-8")
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.name", "Contract Test"], cwd=root, check=True)
     subprocess.run(
@@ -213,6 +277,223 @@ def _make_real_control_source(root: Path) -> str:
     ).stdout.strip()
     subprocess.run(["git", "checkout", "--detach", "-q", revision], cwd=root, check=True)
     return revision
+
+
+def run_staged_installer_active_rehearsal(tmp_path):
+    """Real lifecycle with child-inherited, fail-before-mutation environment adapters."""
+    boundary = (ROOT / "tests/fixtures/control_plane_staged_boundary.ps1").read_text(encoding="utf-8")
+    boundary = boundary.replace("__FIXTURE_ROOT__", str(tmp_path)).replace("__FIXTURE_ID__", uuid.uuid4().hex)
+    source = tmp_path / "source"
+    revision = _make_real_control_source(source, boundary=boundary)
+    runtime = tmp_path / "runtime"
+    broken = _make_real_control_source(runtime)
+    shutil.copyfile(ROOT / "scripts/windows-service-launch-contract.json", runtime / "scripts/windows-service-launch-contract.json")
+    subprocess.run(["git", "add", "scripts/windows-service-launch-contract.json"], cwd=runtime, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture business launch contract"], cwd=runtime, check=True)
+    broken = subprocess.run(["git", "rev-parse", "HEAD"], cwd=runtime, check=True, capture_output=True, text=True).stdout.strip()
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    sleeper = tmp_path / "business.py"
+    sleeper.write_text("import time\ntime.sleep(180)\n", encoding="utf-8")
+    sync_script = tmp_path / "staged_sync_owner.py"
+    shutil.copyfile(ROOT / "tests/fixtures/staged_sync_owner.py", sync_script)
+    owners = {}
+    children = []
+    environment = _isolated_windows_environment()
+    (tmp_path / "fixture-owned.json").write_text(json.dumps({"fixture": str(tmp_path)}), encoding="utf-8")
+    certificate, key = tmp_path / "loopback.crt", tmp_path / "loopback.key"
+    openssl = shutil.which("openssl") or str(Path(shutil.which("git")).parents[1] / "usr/bin/openssl.exe")
+    subprocess.run([openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                    "-keyout", str(key), "-out", str(certificate), "-subj", "/CN=isolated-fixture",
+                    "-addext", "subjectAltName=IP:127.0.0.1"], check=True, capture_output=True,
+                   timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+    environment["SSL_CERT_FILE"] = str(certificate)
+    timeout_mode, release_request = threading.Event(), threading.Event()
+    requests = []
+
+    class Provider(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def respond(self, value):
+            payload = json.dumps(value).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            try:
+                self.wfile.write(payload)
+            except (ConnectionError, ssl.SSLError):
+                if not (timeout_mode.is_set() and self.path.startswith("/api/news-evidence?")):
+                    raise
+                # Only the intentionally timed-out client is allowed to close.
+
+        def do_GET(self):
+            requests.append(("GET", self.path, 0))
+            if self.path == "/api/critical-status":
+                self.respond({"generated_at": "2026-09-05T00:00:00+00:00", "system": {"online": True}})
+            elif self.path.startswith("/api/news-evidence?"):
+                if timeout_mode.is_set():
+                    release_request.wait(35)
+                self.respond({"snapshot_id": "a" * 64, "total": 0, "items": [], "has_more": False})
+            else:
+                self.send_error(404)
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            assert length < 80_000
+            payload = json.loads(self.rfile.read(length))
+            requests.append(("POST", self.path, length))
+            if self.path == "/api/ingest":
+                self.respond({"ok": True})
+            elif self.path == "/api/news-evidence":
+                assert "prepare_snapshot" in payload or "cleanup_active_snapshot" in payload
+                self.respond({"active": True, "cleanup_pending": False})
+            else:
+                self.send_error(404)
+
+    provider = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certificate, key)
+    provider.socket = context.wrap_socket(provider.socket, server_side=True)
+    serving = threading.Thread(target=provider.serve_forever, daemon=True)
+    serving.start()
+    status_path = runtime / ".local/forward/dashboard-sync-status.json"
+
+    def await_resource(expected):
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline:
+            if status_path.exists():
+                try:
+                    status = json.loads(status_path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    time.sleep(0.1)
+                    continue
+                news = next((row for row in status.get("resource_observations", []) if row["resource"] == "news_evidence"), {})
+                if news.get("status") == expected:
+                    return status
+            time.sleep(0.1)
+        raise AssertionError(f"real Sync resource did not reach {expected}")
+
+    try:
+        for key in ("quote", "annotator", "api", "sync"):
+            command = [sys.executable, str(sleeper), key] if key != "sync" else [
+                sys.executable, str(sync_script), "--fixture-root", str(tmp_path),
+                "--source-root", str(ROOT), "--provider", f"https://127.0.0.1:{provider.server_port}",
+            ]
+            child = subprocess.Popen(command, creationflags=subprocess.CREATE_NO_WINDOW, env=environment,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            children.append(child)
+            owners[key] = child.pid
+        (tmp_path / "business.json").write_text(json.dumps(owners), encoding="utf-8")
+        healthy = await_resource("OK")
+        assert healthy["status"] == "OK"
+        body = rf'''
+        $null = . '{source / 'scripts/xauusd_control_center.ps1'}' -Action CodeRevision -RuntimeRoot '{runtime}' -RepositoryRoot '{repository}';
+        $control=Join-Path $repositoryRoot '.local\runtime-control';
+        $bundle=New-VerifiedRuntimeControlBundleStage -SourceRoot '{source}' -SourceRevision '{revision}' -StageRoot $control -RequireImmutableSource;
+        $descriptor=Get-WatchdogSingletonDescriptor;
+        $prior=[pscustomobject]@{{schema_version='watchdog-owner-v2';instance_id=[guid]::NewGuid().ToString('N');
+            process_id=999999;process_start_token='2026-09-01T00:00:00.0000000+00:00';launcher_pid=999998;launcher_start_token='2026-09-01T00:00:00.0000000+00:00';
+            user_sid=$descriptor.user_sid;runtime_root_hash=$descriptor.runtime_root_hash;repository_root_hash=$descriptor.repository_root_hash;
+            mutex_identity_hash=$descriptor.mutex_identity_hash;installed_control_revision='{revision}';bundle_digest=$bundle.bundle_digest;
+            mode='ACTIVE';acquired_at='2026-09-01T00:00:00.0000000+00:00';install_transaction_id=$null}};
+        $null=Write-WatchdogOwnerReceipt -Receipt $prior;
+        Write-ControlCenterJsonAtomic -Path $releaseControlStatePath -Value @{{stable=@{{windows_revision='{broken}';worker_version_id='fixture-worker'}};transaction=$null}} -Depth 6;
+        # Only source/provider/snapshot admission is supplied by the fixture.
+        # Isolation assertions, mutex reservation, install, handoff and commit are real.
+        function Get-CollectorClockRecoveryBaseline {{
+            param($VerifiedSourceRoot,$TargetRevision)
+            Assert-FixturePath $VerifiedSourceRoot;
+            $snapshot=Get-ControlPlaneIsolationSnapshot -RequireCompleteInventory;
+            [pscustomobject]@{{incident='COLLECTOR_CLOCK_EVENT_ATOMICITY';state='DEGRADED_RECOVERY_BASELINE';
+                broken_revision='{broken}';target_revision=$TargetRevision;user_sid=$descriptor.user_sid;
+                runtime_root_hash=$descriptor.runtime_root_hash;repository_root_hash=$descriptor.repository_root_hash;
+                previous_watchdog_receipt=$prior;services=$snapshot.services;
+                snapshot=[pscustomobject]@{{decision_time='2026-09-04T16:05:00.000000+00:00';snapshot_hash='b139c8a9d913c237e8e9e3ebc677a1144cd8ad2f9e0adee6b62ed8cd2a7fa5ee'}}}}
+        }};
+        $owner=$null;
+        try {{
+            $before=Get-ControlPlaneIsolationSnapshot -RequireCompleteInventory;
+            $result=Invoke-ControlPlaneInstall -VerifiedSourceRoot '{source}' -TargetRevision '{revision}' -CollectorClockRecovery;
+            if($result.status -cne 'COMMITTED'){{throw 'install not committed'}};
+            $owner=$result.new_watchdog_identity;
+            $heartbeat=Assert-CurrentWatchdogHeartbeat -Owner $owner -ExpectedRevision '{revision}';
+            if($heartbeat.supervision_mode -cne 'ACTIVE'){{throw 'not active'}};
+            Assert-ControlPlaneIsolationSnapshot -Before $before -After (Get-ControlPlaneIsolationSnapshot -RequireCompleteInventory);
+            # An additional real launcher cannot acquire the held OS mutex.
+            $second=Start-WatchdogReplacement -PassThru;
+            if(-not $second.WaitForExit(10000)){{throw 'second watchdog did not exit'}};
+            $same=@(Get-VerifiedWatchdogOwners -RequireCompleteInventory);
+            if($same.Count -ne 1 -or $same[0].process_id -ne $owner.process_id){{throw 'singleton changed'}};
+            Write-Output 'ACTIVE_COMMITTED|BUSINESS_PRESERVED|SECOND_OWNER_REJECTED';
+        }} finally {{
+            foreach($live in @(Get-VerifiedWatchdogOwners -RequireCompleteInventory)){{ Stop-VerifiedWatchdogOwner -Identity $live }};
+            if(@(Get-VerifiedWatchdogOwners -RequireCompleteInventory).Count -ne 0){{throw 'staged owner remained'}};
+        }}
+        '''
+        script = tmp_path / "installer.ps1"
+        script.write_text(body, encoding="utf-8")
+        result = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                                capture_output=True, text=True, timeout=150, creationflags=subprocess.CREATE_NO_WINDOW, env=environment)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ACTIVE_COMMITTED|BUSINESS_PRESERVED|SECOND_OWNER_REJECTED" in result.stdout
+        assert all(child.poll() is None for child in children)
+        # Advance only the isolated resource's due marker to exercise the same
+        # live owner's next legal scheduled attempt, never call its worker twice.
+        timeout_mode.set()
+        schedule_path = runtime / ".local/forward/dashboard-resource-schedule-state-fixture.json"
+        schedule = json.loads(schedule_path.read_text(encoding="utf-8"))
+        schedule["resources"]["news_evidence"]["next_run_at"] = "2000-01-01T00:00:00+00:00"
+        temporary = schedule_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(schedule), encoding="utf-8")
+        temporary.replace(schedule_path)
+        degraded = await_resource("ERROR")
+        assert degraded["status"] == "DEGRADED"
+        assert degraded["last_success"] != healthy["last_success"]
+        assert children[-1].poll() is None
+        failure = degraded["degraded_resources"]
+        assert len(failure) == 1 and failure[0]["resource"] == "news_evidence"
+        assert failure[0]["error_type"] == "TimeoutError"
+        assert failure[0]["duration_ms"] >= 19_000
+        assert len([row for row in requests if row[0] == "GET" and row[1].startswith("/api/news-evidence?")]) == 2
+    finally:
+        release_request.set()
+        (tmp_path / "stop-sync").touch()
+        # The OS owner receipt is also the emergency fixture cleanup authority.
+        # Never rely on successful installer completion to contain its children.
+        cleanup = rf'''
+        $ErrorActionPreference='Stop';
+        $fixture='{tmp_path}';
+        $path=Join-Path $fixture 'runtime\.local\forward\watchdog-owner-v2.json';
+        if(Test-Path -LiteralPath $path){{
+            $r=Get-Content -LiteralPath $path -Raw -Encoding UTF8|ConvertFrom-Json;
+            foreach($e in @(@{{id=$r.process_id;token=$r.process_start_token}},@{{id=$r.launcher_pid;token=$r.launcher_start_token}})){{
+                $p=Get-CimInstance Win32_Process -Filter ('ProcessId='+[int]$e.id);
+                if($p){{
+                    if(-not $p.CommandLine.Contains($fixture+'\') -or ([DateTimeOffset]$p.CreationDate).UtcTicks -ne ([DateTimeOffset]$e.token).UtcTicks){{throw 'FIXTURE_CLEANUP_IDENTITY_MISMATCH'}};
+                    Stop-Process -Id ([int]$e.id) -Force;
+                }}
+            }}
+        }}
+        '''
+        cleaned = subprocess.run(["powershell.exe", "-NoProfile", "-Command", cleanup],
+                                 capture_output=True, text=True, timeout=20, creationflags=subprocess.CREATE_NO_WINDOW)
+        for child in children:
+            if child.poll() is None:
+                if child.pid == owners.get("sync"):
+                    try:
+                        child.wait(timeout=8)
+                    except subprocess.TimeoutExpired:
+                        child.terminate()
+                else:
+                    child.terminate()
+            child.wait(timeout=10)
+            child.stderr.close()
+        provider.shutdown()
+        provider.server_close()
+        serving.join(timeout=3)
+        assert cleaned.returncode == 0, cleaned.stderr
 
 
 def _identity(pid: int, token: str) -> str:
@@ -629,9 +910,12 @@ def test_clean_staged_bundle_produces_quiesced_preflight_without_checkout_fallba
 
 
 def test_real_staged_zero_owner_handoff_creates_its_own_quiesced_receipt_and_preserves_processes(tmp_path):
-    """Real launcher/bundle/mutex/heartbeat; never grant ACTIVE in this shard."""
+    """Real launcher/bundle/mutex/heartbeat; withdraw before granting ACTIVE."""
     source = tmp_path / "source"
-    revision = _make_real_control_source(source)
+    boundary = (ROOT / "tests/fixtures/control_plane_staged_boundary.ps1").read_text(encoding="utf-8")
+    boundary = boundary.replace("__FIXTURE_ROOT__", str(tmp_path)).replace("__FIXTURE_ID__", uuid.uuid4().hex)
+    (tmp_path / "business.json").write_text("{}", encoding="utf-8")
+    revision = _make_real_control_source(source, boundary=boundary)
     runtime = tmp_path / "runtime"
     _make_real_control_source(runtime)
     shutil.copyfile(ROOT / "scripts/windows-service-launch-contract.json",
@@ -652,6 +936,7 @@ def test_real_staged_zero_owner_handoff_creates_its_own_quiesced_receipt_and_pre
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     ) for _ in range(4)]
     body = rf'''
+    $null = . '{source / 'scripts/xauusd_control_center.ps1'}' -Action CodeRevision -RuntimeRoot $moduleRoot -RepositoryRoot $repositoryRoot;
     $control=Join-Path $repositoryRoot '.local\runtime-control';
     $bundle=New-VerifiedRuntimeControlBundleStage -SourceRoot '{source}' -SourceRevision '{revision}' -StageRoot $control -RequireImmutableSource;
     $descriptor=Get-WatchdogSingletonDescriptor;
@@ -688,7 +973,7 @@ def test_real_staged_zero_owner_handoff_creates_its_own_quiesced_receipt_and_pre
     }}
     '''
     try:
-        assert _run_contract(tmp_path, body) == "real quiesced handoff and clean withdrawal passed"
+        assert _run_contract_with_runtime(tmp_path, body, "powershell.exe", environment=_isolated_windows_environment()) == "real quiesced handoff and clean withdrawal passed"
         assert all(process.poll() is None for process in preserved)
     finally:
         for process in preserved:
