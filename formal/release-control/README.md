@@ -54,9 +54,25 @@ The interface contract and the complete old-to-new property mapping are in
 
 ## Local execution
 
-Java 11 or newer is required. The runner downloads TLA+ tools `v1.8.0` into the
-ignored `.local/tools` directory and verifies SHA-256
-`16b8cd970e07147ff91f126baecba7edd98202e5ab33220a42f8f4358ee94b2b`.
+The install shard also explores a verified incident baseline with no old
+supervisor. `incidentBaseline` abstracts the exact incident admission checks,
+not an operator override. `Facts` remain independently required for activation.
+The installer's reservation is the existing Watchdog mutex: replacement startup
+requires its release; installer death releases that OS-owned reservation. The
+singleton shard owns mutual exclusion and business-owner preservation. Windows
+installation tests exercise that handoff with a real named kernel mutex.
+Before a replacement exists, abandoned installation restores the old bundle;
+for an incident baseline this restores verified absence, not fictitious ACTIVE
+supervision. `AbandonedInstallEventuallySafe` retains its original ACTIVE
+guarantee for normal baselines and permits only the explicitly degraded,
+zero-owner terminal state for an incident. No CPU, News or release lifecycle
+state is added to this shard. Environment-equivalent recovery rehearsals remain
+required; TLC is not proof of successful production takeover.
+
+Java 11 or newer is required. The runner resolves the checked artifact from
+`formal/tools/tlc/tool-lock.json`, verifies its size, full digest and JAR
+structure, and uses a digest-addressed `.local/tools` cache. There is no network
+or latest-release fallback. See [tool provenance](../tools/tlc/README.md).
 
 Run one authoritative shard:
 

@@ -6,6 +6,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import textwrap
+import uuid
+import sys
 
 import pytest
 
@@ -53,9 +55,22 @@ def _run_contract_with_runtime(
     runtime.mkdir(exist_ok=True)
     repository.mkdir(exist_ok=True)
     script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    task_prefix = f"XAUUSD-Contract-{uuid.uuid4().hex}"
+    # Temporary filesystem roots do not isolate machine-global scheduled tasks.
+    # Contract tests must opt in through explicit stubs, never native mutations.
+    scheduler_guard = r'''
+        function Stop-ScheduledTask { throw 'TEST_UNMOCKED_SCHEDULER_MUTATION' };
+        function Start-ScheduledTask { throw 'TEST_UNMOCKED_SCHEDULER_MUTATION' };
+        function Enable-ScheduledTask { throw 'TEST_UNMOCKED_SCHEDULER_MUTATION' };
+        function Disable-ScheduledTask { throw 'TEST_UNMOCKED_SCHEDULER_MUTATION' };
+        function Register-ScheduledTask { throw 'TEST_UNMOCKED_SCHEDULER_MUTATION' };
+        function Unregister-ScheduledTask { throw 'TEST_UNMOCKED_SCHEDULER_MUTATION' };
+    '''
     command = (
         f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{runtime}' "
-        f"-RepositoryRoot '{repository}'; {body}"
+        f"-RepositoryRoot '{repository}'; "
+        f"$taskName='{task_prefix}-Main'; $guardTaskName='{task_prefix}-Guard'; "
+        f"{scheduler_guard}; {body}"
     )
     result = subprocess.run(
         [
@@ -233,6 +248,7 @@ def _state_machine_mocks(old_revision: str, target_revision: str) -> str:
         function Wait-ControlPlaneGuardQuiesced {{ $script:timeline+='guard' }};
         function Restore-ControlPlaneSupervision {{ param($State); $script:timeline+='supervision' }};
         function Stop-VerifiedWatchdogOwner {{ param($Identity); $script:timeline+='stop'; $script:owners=@() }};
+        function Stop-ScheduledTask {{ param($TaskName); if ($TaskName -notlike 'XAUUSD-Contract-*') {{throw 'unsafe task name'}} }};
         function Install-VerifiedRuntimeControlBundleStage {{ param($StageRoot,$ControlRoot,$BackupRoot); if($script:owners.Count-ne 0){{throw 'two owners'}}; $script:timeline+='install'; [pscustomobject]@{{source_revision='{target_revision}'}} }};
         function Start-WatchdogReplacement {{ param([switch]$PassThru,$InstallTransactionId); if($script:owners.Count-ne 0){{throw 'two owners'}}; $script:timeline+='start'; $script:owners=@({new}); [pscustomobject]@{{Id=201}} }};
         function Wait-VerifiedWatchdogHandoff {{ param($ExpectedRevision,$PreviousIdentity,$ExpectedMode,$ExpectedInstallTransactionId,$Timeout); if($script:owners.Count-ne 1){{throw 'owner count'}}; $script:timeline+="heartbeat:$ExpectedMode"; return $script:owners[0] }};
@@ -612,6 +628,75 @@ def test_clean_staged_bundle_produces_quiesced_preflight_without_checkout_fallba
     assert rejected == "CONTROL_BUNDLE_STARTUP_PREFLIGHT_FAILED"
 
 
+def test_real_staged_zero_owner_handoff_creates_its_own_quiesced_receipt_and_preserves_processes(tmp_path):
+    """Real launcher/bundle/mutex/heartbeat; never grant ACTIVE in this shard."""
+    source = tmp_path / "source"
+    revision = _make_real_control_source(source)
+    runtime = tmp_path / "runtime"
+    _make_real_control_source(runtime)
+    shutil.copyfile(ROOT / "scripts/windows-service-launch-contract.json",
+                    runtime / "scripts/windows-service-launch-contract.json")
+    subprocess.run(["git", "add", "scripts/windows-service-launch-contract.json"], cwd=runtime, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture runtime launch authority"], cwd=runtime, check=True)
+    dead = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command",
+         "$p=[Diagnostics.Process]::GetCurrentProcess();"
+         "@{pid=$PID;token=$p.StartTime.ToUniversalTime().ToString('o')}|ConvertTo-Json -Compress"],
+        capture_output=True, text=True, check=True, timeout=10,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    prior = json.loads(dead.stdout)
+    # Living stand-ins prove preservation, not the health of real business services.
+    preserved = [subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    ) for _ in range(4)]
+    body = rf'''
+    $control=Join-Path $repositoryRoot '.local\runtime-control';
+    $bundle=New-VerifiedRuntimeControlBundleStage -SourceRoot '{source}' -SourceRevision '{revision}' -StageRoot $control -RequireImmutableSource;
+    $descriptor=Get-WatchdogSingletonDescriptor;
+    $old=[pscustomobject]@{{schema_version='watchdog-owner-v2';instance_id=[guid]::NewGuid().ToString('N');
+        process_id={prior['pid']};process_start_token='{prior['token']}';launcher_pid={prior['pid']};launcher_start_token='{prior['token']}';
+        user_sid=$descriptor.user_sid;runtime_root_hash=$descriptor.runtime_root_hash;repository_root_hash=$descriptor.repository_root_hash;
+        mutex_identity_hash=$descriptor.mutex_identity_hash;installed_control_revision='{revision}';bundle_digest=$bundle.bundle_digest;
+        mode='ACTIVE';acquired_at='{prior['token']}';install_transaction_id=$null}};
+    $null=Write-WatchdogOwnerReceipt -Receipt $old;
+    $transaction=[guid]::NewGuid().ToString('N');
+    $installer=Get-ControlPlaneProcessIdentity -ProcessId $PID -RequireCompleteInventory;
+    Write-ControlPlaneInstallState @{{transaction_id=$transaction;phase='VERIFY_QUIESCED_HANDOFF';target_revision='{revision}';install_owner_identity=$installer}};
+    $launcher=$null; $owner=$null;
+    try {{
+        $launcher=Start-WatchdogReplacement -InstallTransactionId $transaction -PassThru;
+        $owner=Wait-VerifiedWatchdogHandoff -ExpectedRevision '{revision}' -PreviousIdentity $old `
+            -ExpectedMode QUIESCED -ExpectedInstallTransactionId $transaction -RequireCompleteInventory `
+            -Timeout ([TimeSpan]::FromSeconds(20));
+        if ([int]$owner.process_id -eq [int]$old.process_id -and $owner.process_start_token -eq $old.process_start_token) {{throw 'stale owner reused'}};
+        if ($owner.watchdog_owner_receipt.mode -cne 'QUIESCED_INSTALL') {{throw 'unsafe activation'}};
+        Write-ControlPlaneInstallState @{{phase='FAILED';failure='fixture withdrawal before activation'}};
+        if (-not $launcher.WaitForExit(10000)) {{throw 'launcher did not exit after withdrawal'}};
+        if (Get-ControlPlaneProcessIdentity -ProcessId ([int]$owner.process_id)) {{throw 'watchdog survived withdrawal'}};
+        if (Test-Path -LiteralPath $watchdogOwnerReceiptPath) {{throw 'receipt remained after exact exit'}};
+        Write-Output 'real quiesced handoff and clean withdrawal passed'
+    }} finally {{
+        Write-ControlPlaneInstallState @{{phase='FAILED';failure='fixture cleanup'}};
+        if ($owner -and (Get-ControlPlaneProcessIdentity -ProcessId ([int]$owner.process_id))) {{
+            Stop-VerifiedWatchdogOwner -Identity $owner
+        }};
+        if ($launcher -and -not $launcher.HasExited) {{
+            if (-not $launcher.WaitForExit(10000)) {{throw 'staged launcher containment unresolved'}}
+        }}
+    }}
+    '''
+    try:
+        assert _run_contract(tmp_path, body) == "real quiesced handoff and clean withdrawal passed"
+        assert all(process.poll() is None for process in preserved)
+    finally:
+        for process in preserved:
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5)
+
+
 def test_bundle_install_is_complete_and_restorable(tmp_path: Path) -> None:
     old_revision, new_revision = "a" * 40, "b" * 40
     control = tmp_path / "control"
@@ -657,6 +742,9 @@ def test_watchdog_repairs_interrupted_bundle_copy_after_installer_exit(
         Write-Output "$($repaired.source_revision)|$((Get-ControlPlaneInstallState).recovery)"
         """
     ).replace("\n", " ")
+    assert _run_contract(tmp_path, body) == (
+        f"{target_revision}|FORWARD_REPAIRED_INTERRUPTED_BUNDLE_COPY"
+    )
 
 
 def _abandoned_activation_mocks(
@@ -685,9 +773,6 @@ def _abandoned_activation_mocks(
         function Write-WatchdogHeartbeat {{ param($SupervisionMode,$InstallTransactionId); New-Item -ItemType Directory -Path (Split-Path -Parent $watchdogHeartbeatPath) -Force | Out-Null; [pscustomobject]@{{install_transaction_id=$InstallTransactionId;supervision_mode=$SupervisionMode;control_bundle_revision='{target_revision}';control_bundle_exact_revision=$true;control_bundle_hash_verified=$true;process_id=$PID;process_start_token='{CURRENT_START_TOKEN}'}} | ConvertTo-Json | Set-Content -LiteralPath $watchdogHeartbeatPath }};
         """
     ).replace("\n", " ")
-    assert _run_contract(tmp_path, body) == (
-        f"{target_revision}|FORWARD_REPAIRED_INTERRUPTED_BUNDLE_COPY"
-    )
 
 
 def test_staged_hash_mismatch_stops_before_watchdog_termination(tmp_path: Path) -> None:
@@ -798,11 +883,11 @@ def test_supervision_quiesce_keeps_main_task_enabled_for_restart(tmp_path: Path)
         function Enable-ScheduledTask { param($TaskName); $script:enabled+=$TaskName };
         function Stop-ScheduledTask { param($TaskName,$ErrorAction); $script:stopped+=$TaskName };
         $state=Suspend-ControlPlaneSupervision;
-        Write-Output "$($script:disabled.Count),$($script:enabled.Count),$($script:stopped -join '|')"
+        Write-Output "$($script:disabled.Count),$($script:enabled.Count),$($script:stopped.Count -eq 1 -and $script:stopped[0] -ceq $guardTaskName)"
         """
     ).replace("\n", " ")
     result = _run_contract(tmp_path, body)
-    assert result == "1,0,XAUUSD-Forecaster-Watchdog-Guard"
+    assert result == "1,0,True"
 
 
 @pytest.mark.parametrize(
@@ -1048,7 +1133,9 @@ def test_control_plane_isolation_and_visible_identity_are_explicit() -> None:
     )[0]
     assert "Disable-ScheduledTask -TaskName $guardTaskName" in supervision
     assert "Stop-ScheduledTask -TaskName $guardTaskName" in supervision
-    assert "Disable-ScheduledTask -TaskName $taskName" not in supervision
+    # Normal installation retains its reboot entrypoint; the explicit zero-owner
+    # incident is covered by the executable two-mode task containment contract.
+    assert "[switch]$CollectorClockRecovery" in supervision
     assert "ControlPlaneIdentity" in xaml
     assert "BusinessRuntimeIdentity" in xaml
     assert "EXACT | HASH VERIFIED" in source
@@ -1094,3 +1181,258 @@ def test_control_plane_isolation_always_requires_stable_sync_owner(
         """
     ).replace("\n", " ")
     assert _run_contract(tmp_path, body) == "CONTROL_PLANE_SERVICE_OWNER_REQUIRED:sync"
+
+
+@pytest.mark.parametrize("runtime_executable", ["powershell.exe", "pwsh.exe"])
+def test_collector_incident_baseline_is_read_only_and_rejects_uncertain_owners(tmp_path, runtime_executable):
+    if shutil.which(runtime_executable) is None:
+        pytest.skip(f"{runtime_executable} is unavailable")
+    body = r'''
+    $script:scenario = 'valid';
+    function Assert-ControlPlaneSourceRevision { param($SourceRoot,$SourceRevision,[switch]$RequireImmutableSource); if (-not $RequireImmutableSource) {throw 'immutable source required'} };
+    function Get-ReleaseControlState { [pscustomobject]@{transaction=$null;stable=[pscustomobject]@{windows_revision=('a'*40);worker_version_id='stable'}} };
+    function Get-ControlPlaneInstallState { $null };
+    function Get-CodeRevision { 'a'*40 };
+    function Get-CimInstance {
+        [CmdletBinding()]param($ClassName, $Filter);
+        if ($script:scenario -eq 'enumeration') { throw 'enumeration failed' };
+        foreach ($key in @('quote','annotator','api','sync')) {
+            if ($script:scenario -eq 'missing' -and $key -eq 'api') { continue };
+            [pscustomobject]@{Name='python.exe';ProcessId=10;CommandLine=$key;Key=$key};
+            if ($script:scenario -eq 'duplicate' -and $key -eq 'sync') {
+                [pscustomobject]@{Name='python.exe';ProcessId=11;CommandLine=$key;Key=$key}
+            }
+        }
+    };
+    function Get-WatchdogOwnershipInventory { param([switch]$RequireCompleteInventory);
+        if (-not $RequireCompleteInventory) { throw 'strict inventory omitted' };
+        [pscustomobject]@{authoritative=@();duplicate_shaped=@();legacy_orphaned=@();unknown=@();receipt=[pscustomobject]@{process_id=99;process_start_token='old'}}
+    };
+    function Get-WatchdogSingletonDescriptor { [pscustomobject]@{user_sid='sid';runtime_root_hash='runtime';repository_root_hash='repository'} };
+    function Test-WatchdogOwnerReceiptShape { $true };
+    function Get-ControlPlaneProcessIdentity { param($ProcessId,[switch]$RequireCompleteInventory);
+        if (-not $RequireCompleteInventory) { throw 'strict identity omitted' };
+        if ($ProcessId -eq 99 -and $script:scenario -ne 'old-alive') { return $null };
+        [pscustomobject]@{process_id=$ProcessId;process_start_token='old';owner_sid='sid'}
+    };
+    function Test-ControlPlaneStartTokenEqual { $true };
+    function Test-ForecasterServiceProcess { param($Process,$Service); $Process.Key -eq $Service.Key };
+    function Test-ControlPlaneServiceOwnerRequired { param($Service); $Service.Key -ne 'broadcast' };
+    function Get-ServiceState { if ($script:scenario -eq 'unhealthy') { 'SYNC STALE' } else { 'RUNNING' } };
+    function Get-BrokerMarketSession { [pscustomobject]@{IsOpen=$false} };
+    function Get-ReleaseProviderRuntimeFacts { [pscustomobject]@{active_worker_observation=[pscustomobject]@{
+        status='AVAILABLE';traffic_percent=100;version_id=$(if ($script:scenario -eq 'traffic') {'wrong'} else {'stable'})}}
+    };
+    function Invoke-Utf8NativeProcess { param($FilePath,$Arguments,$WorkingDirectory,$TimeoutMilliseconds);
+        if ('--inspect-snapshot-only' -notin $Arguments) { throw 'mutation attempted' };
+        [pscustomobject]@{exit_code=0;stdout=(@{decision_time='2026-09-04T16:05:00.000000+00:00';snapshot_hash=$(if ($script:scenario -eq 'snapshot') {'wrong'} else {'b139c8a9d913c237e8e9e3ebc677a1144cd8ad2f9e0adee6b62ed8cd2a7fa5ee'})}|ConvertTo-Json -Compress)}
+    };
+    function Write-ControlPlaneInstallState { throw 'mutation attempted' };
+    function Start-WatchdogReplacement { throw 'mutation attempted' };
+    $expected = @{
+        valid='DEGRADED_RECOVERY_BASELINE'; enumeration='enumeration failed';
+        missing='COLLECTOR_RECOVERY_SERVICE_OWNER_INVALID:api';
+        duplicate='COLLECTOR_RECOVERY_SERVICE_OWNER_INVALID:sync';
+        'old-alive'='COLLECTOR_RECOVERY_PRIOR_OWNER_ALIVE';
+        unhealthy='COLLECTOR_RECOVERY_SERVICE_UNHEALTHY:quote:SYNC STALE';
+        traffic='COLLECTOR_RECOVERY_STABLE_TRAFFIC_UNPROVED';
+        snapshot='COLLECTOR_RECOVERY_SNAPSHOT_INSPECTION_MISMATCH'
+    };
+    foreach ($case in $expected.Keys) {
+        $script:scenario=$case;
+        try { $actual=(Get-CollectorClockRecoveryBaseline -VerifiedSourceRoot $repositoryRoot -TargetRevision ('b'*40)).state }
+        catch { $actual=$_.Exception.Message };
+        if ($actual -cne $expected[$case]) { throw "${case}: expected $($expected[$case]); actual $actual" }
+    };
+    Write-Output '8 baseline cases passed; production mutation=0'
+    '''
+    assert _run_contract_with_runtime(tmp_path, body, runtime_executable) == (
+        "8 baseline cases passed; production mutation=0"
+    )
+
+
+@pytest.mark.parametrize("runtime_executable", ["powershell.exe", "pwsh.exe"])
+def test_incident_hold_survives_reload_and_only_exact_normal_switch_can_release_it(tmp_path, runtime_executable):
+    if shutil.which(runtime_executable) is None:
+        pytest.skip(f"{runtime_executable} is unavailable")
+    body = r'''
+    function Get-WatchdogSingletonDescriptor { [pscustomobject]@{user_sid='sid';runtime_root_hash='runtime';repository_root_hash='repository'} };
+    $context = [pscustomobject]@{
+        incident='COLLECTOR_CLOCK_EVENT_ATOMICITY';state='DEGRADED_RECOVERY_BASELINE';
+        broken_revision=('a'*40);target_revision=('b'*40);user_sid='sid';
+        runtime_root_hash='runtime';repository_root_hash='repository';
+        snapshot=[pscustomobject]@{decision_time='2026-09-04T16:05:00.000000+00:00';snapshot_hash='b139c8a9d913c237e8e9e3ebc677a1144cd8ad2f9e0adee6b62ed8cd2a7fa5ee'}
+    };
+    Write-ControlPlaneInstallState @{phase='COMMITTED';collector_clock_recovery=$context};
+    $script:businessRevision='a'*40;
+    $script:release=[pscustomobject]@{stable=[pscustomobject]@{windows_revision=('a'*40)};transaction=$null};
+    function Get-CodeRevision { $script:businessRevision };
+    function Get-ReleaseControlState { $script:release };
+    if (-not (Test-CollectorClockRecoveryHold)) { throw 'old collector was not held' };
+    try { Start-ForecasterService ($services | Where-Object Key -eq collector); throw 'old collector started' }
+    catch { if ($_.Exception.Message -cne 'COLLECTOR_CLOCK_RECOVERY_REQUIRED') { throw } };
+    if (-not (Test-WatchdogRecoverySuppressed -ServiceKey collector -ServiceState STOPPED)) { throw 'watchdog may restart broken collector' };
+    $script:businessRevision='b'*40;
+    try { $null=Test-CollectorClockRecoveryHold; throw 'uncoordinated target accepted' }
+    catch { if ($_.Exception.Message -cne 'COLLECTOR_RECOVERY_RUNTIME_TRANSITION_UNPROVED') { throw } };
+    $script:release.transaction=[pscustomobject]@{type='PROMOTE';target=[pscustomobject]@{windows_revision=('b'*40)}};
+    if (Test-CollectorClockRecoveryHold) { throw 'normal exact switch did not release hold' };
+    $script:release.transaction=$null; $script:release.stable.windows_revision='b'*40;
+    if (Test-CollectorClockRecoveryHold) { throw 'committed target held' };
+    $script:businessRevision='a'*40;
+    if (-not (Test-CollectorClockRecoveryHold)) { throw 'rollback falsely restarted broken code' };
+    $context.runtime_root_hash='wrong';
+    Write-ControlPlaneInstallState @{collector_clock_recovery=$context};
+    try { $null=Get-CollectorClockRecoveryContext; throw 'wrong root accepted' }
+    catch { if ($_.Exception.Message -cne 'COLLECTOR_RECOVERY_CONTEXT_INVALID') { throw } };
+    Write-Output 'incident hold verified'
+    '''
+    assert _run_contract_with_runtime(tmp_path, body, runtime_executable) == "incident hold verified"
+
+
+@pytest.mark.parametrize("runtime_executable", ["powershell.exe", "pwsh.exe"])
+def test_install_task_containment_preserves_normal_restart_but_fences_incident_bootstrap(tmp_path, runtime_executable):
+    if shutil.which(runtime_executable) is None:
+        pytest.skip(f"{runtime_executable} is unavailable")
+    body = r'''
+    function Get-ScheduledTask { [pscustomobject]@{Settings=[pscustomobject]@{Enabled=$true}} };
+    function Disable-ScheduledTask { param($TaskName); $script:disabled+=@($TaskName) };
+    function Stop-ScheduledTask { param($TaskName); $script:stopped+=@($TaskName) };
+    foreach ($incident in @($false,$true)) {
+        $script:disabled=@(); $script:stopped=@();
+        $state=Suspend-ControlPlaneSupervision -CollectorClockRecovery:$incident;
+        $expected=@($guardTaskName); if ($incident) { $expected+=@($taskName) };
+        if (($script:disabled -join ',') -cne ($expected -join ',') -or
+            ($script:stopped -join ',') -cne ($expected -join ',')) { throw 'task containment mismatch' };
+        if (-not $state[$taskName] -or -not $state[$guardTaskName]) { throw 'prior task state lost' }
+    };
+    Write-Output 'both task containment modes passed'
+    '''
+    assert _run_contract_with_runtime(tmp_path, body, runtime_executable) == "both task containment modes passed"
+
+
+@pytest.mark.parametrize("fail_start", [False, True])
+def test_zero_owner_install_releases_real_mutex_before_handoff_and_never_starts_old_code(tmp_path, fail_start):
+    body = _state_machine_mocks("a" * 40, "b" * 40) + r'''
+    $script:owners=@();
+    $script:mutexName='Local\XAUUSD-Contract-'+[guid]::NewGuid().ToString('N');
+    function Get-WatchdogSingletonDescriptor { [pscustomobject]@{mutex_name=$script:mutexName} };
+    function Test-OtherProcessCanAcquire {
+        $command='$m=[Threading.Mutex]::new($false,"'+$script:mutexName+'");$held=$m.WaitOne(0);try{if($held){"FREE"}else{"BUSY"}}finally{if($held){$m.ReleaseMutex()};$m.Dispose()}';
+        $result=Invoke-Utf8NativeProcess -FilePath powershell.exe -Arguments @('-NoProfile','-NonInteractive','-Command',$command) -TimeoutMilliseconds 10000;
+        if ($result.exit_code -ne 0) { throw $result.stderr };
+        return $result.stdout.Trim()
+    };
+    function Get-CollectorClockRecoveryBaseline {
+        if ((Test-OtherProcessCanAcquire) -cne 'BUSY') { throw 'bootstrap reservation missing' };
+        [pscustomobject]@{incident='COLLECTOR_CLOCK_EVENT_ATOMICITY';broken_revision=('a'*40);target_revision=('b'*40);
+            previous_watchdog_receipt=[pscustomobject]@{process_id=100;process_start_token='old-token'}}
+    };
+    function Start-WatchdogReplacement {
+        if ((Test-OtherProcessCanAcquire) -cne 'FREE') { throw 'handoff deadlock' };
+        $script:timeline+='start-target';
+        if ($script:failStart) { throw 'fixture target startup failure' };
+        $script:owners=@([pscustomobject]@{process_id=200;process_start_token='new-token'})
+    };
+    function Restore-RuntimeControlBundleBackup { $script:timeline+='restore-bundle'; [pscustomobject]@{source_revision=('a'*40)} };
+    function Disable-ScheduledTask { param($TaskName); if ($TaskName -notlike 'XAUUSD-Contract-*') {throw 'unsafe task name'}; $script:disabled+=@($TaskName) };
+    $script:disabled=@();
+    ''' + f"$script:failStart=${str(fail_start).lower()};" + r'''
+    try { $result=Invoke-ControlPlaneInstall -VerifiedSourceRoot 'immutable' -TargetRevision ('b'*40) -CollectorClockRecovery }
+    catch { if (-not $script:failStart) { throw }; $failure=$_.Exception.Message };
+    if ($script:timeline -contains 'stop') { throw 'stale old PID was terminated' };
+    if (@($script:timeline | Where-Object {$_ -eq 'start-target'}).Count -ne 1) { throw 'repeated bootstrap' };
+    if ((Test-OtherProcessCanAcquire) -cne 'FREE') { throw 'mutex leak' };
+    $state=Get-ControlPlaneInstallState;
+    if ($script:failStart) {
+        if ($state.rollback_result -cne 'ROLLED_BACK_DEGRADED_BASELINE' -or
+            $script:owners.Count -ne 0 -or $script:disabled.Count -ne 2) { throw 'unsafe rollback' };
+        Write-Output 'degraded baseline restored; old collector not started'
+    } else {
+        if ($result.status -cne 'COMMITTED' -or $script:owners.Count -ne 1) { throw 'handoff failed' };
+        Write-Output 'single replacement; mutex handoff verified'
+    }
+    '''
+    expected = ("degraded baseline restored; old collector not started" if fail_start
+                else "single replacement; mutex handoff verified")
+    assert _run_contract(tmp_path, body) == expected
+
+
+@pytest.mark.parametrize("runtime_executable", ["powershell.exe", "pwsh.exe"])
+def test_clock_recovery_operation_requires_lock_and_preserves_accepted_repair(tmp_path, runtime_executable):
+    if shutil.which(runtime_executable) is None:
+        pytest.skip(f"{runtime_executable} is unavailable")
+    body = r'''
+    $script:releaseTransactionLockHeld=$false; $script:calls=@();
+    function Get-CollectorClockRecoveryContext {
+        [pscustomobject]@{target_revision=('b'*40);snapshot=[pscustomobject]@{
+            decision_time='2026-09-04T16:05:00.000000+00:00';snapshot_hash=('c'*64)}}
+    };
+    function Invoke-Utf8NativeProcess {
+        param($FilePath,$Arguments,$WorkingDirectory,$TimeoutMilliseconds);
+        $script:calls+=@($FilePath);
+        if ($FilePath -cne 'git.exe') { throw 'unexpected repair replay' };
+        [pscustomobject]@{exit_code=0;stdout=''}
+    };
+    function Get-CollectorClockRecoveryBaseline {
+        param($VerifiedSourceRoot,$TargetRevision,[switch]$SupervisionRecovered);
+        if (-not $SupervisionRecovered -or $TargetRevision -cne ('b'*40)) { throw 'wrong admission' };
+        [pscustomobject]@{snapshot=[pscustomobject]@{exclusion_recorded=$script:repaired}}
+    };
+    try { $null=Invoke-CollectorClockRecoveryOperation -Apply; throw 'lock bypass' }
+    catch { if ($_.Exception.Message -cne 'COLLECTOR_RECOVERY_RELEASE_LOCK_REQUIRED') { throw } };
+    if ($script:calls.Count -ne 0) { throw 'work started before lock' };
+    $script:releaseTransactionLockHeld=$true;
+    $script:repaired=$true;
+    foreach ($apply in @($false,$true)) {
+        $result=Invoke-CollectorClockRecoveryOperation -Apply:$apply;
+        if (-not $result.snapshot.exclusion_recorded) { throw 'accepted evidence lost' }
+    };
+    $script:repaired=$false;
+    try { $null=Invoke-CollectorClockRecoveryOperation; throw 'unrepaired baseline admitted' }
+    catch { if ($_.Exception.Message -cne 'COLLECTOR_RECOVERY_EXISTING_STATE_NOT_REPAIRED') { throw } };
+    if ($script:calls.Count -ne 6) { throw 'owned checkout cleanup missing' };
+    Write-Output 'lock required; accepted repair reused; unrepaired inspection rejected'
+    '''
+    assert _run_contract_with_runtime(tmp_path, body, runtime_executable) == (
+        "lock required; accepted repair reused; unrepaired inspection rejected"
+    )
+
+
+@pytest.mark.parametrize("runtime_executable", ["powershell.exe", "pwsh.exe"])
+def test_incident_rollback_reports_degraded_and_requires_live_session_and_inventory(tmp_path, runtime_executable):
+    if shutil.which(runtime_executable) is None:
+        pytest.skip(f"{runtime_executable} is unavailable")
+    body = r'''
+    $plan=[pscustomobject]@{body=[pscustomobject]@{stable_revision=('a'*40);
+        collector_clock_recovery=[pscustomobject]@{incident='fixture'};running_service_keys=@('quote')}};
+    function Convert-RecoveryPlanContracts { @([pscustomobject]@{Key='quote'},[pscustomobject]@{Key='collector'}) };
+    $script:scenario='valid';
+    function Get-ForecasterProcesses {
+        param($Service,[switch]$RequireCompleteInventory);
+        if (-not $RequireCompleteInventory) { throw 'strict inventory required' };
+        if ($script:scenario -eq 'enumeration') { throw 'fixture enumeration failed' };
+        if ($Service.Key -eq 'quote') { [pscustomobject]@{ProcessId=1} }
+    };
+    function Test-CodeReloadHealth { $true };
+    function Get-ServiceState { 'MARKET CLOSED' };
+    function Get-BrokerMarketSession { if ($script:scenario -ne 'stale-session') { [pscustomobject]@{IsOpen=$false} } };
+    function Write-WatchdogEvent { param($Event,$Service,$State); $script:event=$Event };
+    function Start-Sleep {};
+    $serviceStartupTimeout=[TimeSpan]::Zero;
+    $result=Wait-RuntimeRecoveryPlanHealth -Plan $plan;
+    if ($result.baseline_health -cne 'DEGRADED_RECOVERY_BASELINE' -or
+        $script:event -cne 'RUNTIME_RECOVERY_DEGRADED_BASELINE_RESTORED') { throw 'false healthy rollback' };
+    foreach ($case in @('stale-session','enumeration')) {
+        $script:scenario=$case;
+        try { $null=Wait-RuntimeRecoveryPlanHealth -Plan $plan; throw 'unsafe baseline accepted' }
+        catch {
+            $expected=if ($case -eq 'enumeration') {'fixture enumeration failed'} else {'RUNTIME_RECOVERY_HEALTH_FAILED'};
+            if ($_.Exception.Message -cne $expected) { throw }
+        }
+    };
+    Write-Output 'degraded truth preserved; unknown inventory and stale session rejected'
+    '''
+    assert _run_contract_with_runtime(tmp_path, body, runtime_executable) == (
+        "degraded truth preserved; unknown inventory and stale session rejected"
+    )

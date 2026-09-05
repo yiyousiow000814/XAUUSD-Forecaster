@@ -368,6 +368,11 @@ function New-RuntimeRecoveryPlan {
     if ($StableRevision -notmatch '^[0-9a-f]{40}$') {
         throw "RUNTIME_RECOVERY_STABLE_REVISION_REQUIRED"
     }
+    $incident = Get-CollectorClockRecoveryContext
+    if ($incident -and [string]$incident.broken_revision -cne $StableRevision) { $incident = $null }
+    $incidentProcesses = if ($incident) {
+        @(Get-ForecasterProcessSnapshot -RequireCompleteInventory)
+    } else { @() }
     $running = @()
     $owners = [ordered]@{}
     $contracts = @()
@@ -376,7 +381,12 @@ function New-RuntimeRecoveryPlan {
             [string]$service.CodeRoot -ne [System.IO.Path]::GetFullPath($moduleRoot)) {
             throw "RUNTIME_RECOVERY_CONTRACT_IDENTITY_MISMATCH:$($service.Key)"
         }
-        $processes = @(Get-ForecasterProcesses -Service $service)
+        $processes = if ($incident) {
+            @($incidentProcesses | Where-Object { Test-ForecasterServiceProcess -Process $_ -Service $service })
+        } else { @(Get-ForecasterProcesses -Service $service) }
+        if ($incident -and $service.Key -eq 'collector' -and $processes.Count -ne 0) {
+            throw 'COLLECTOR_RECOVERY_BASELINE_CHANGED'
+        }
         if ($processes.Count -gt 1) {
             throw "RUNTIME_RECOVERY_MULTIPLE_SERVICE_OWNERS:$($service.Key)"
         }
@@ -404,7 +414,8 @@ function New-RuntimeRecoveryPlan {
             }
         }
         $owners[[string]$service.Key] = @($processes | ForEach-Object {
-            $identity = Get-ControlPlaneProcessIdentity -ProcessId ([int]$_.ProcessId)
+            $identity = Get-ControlPlaneProcessIdentity -ProcessId ([int]$_.ProcessId) `
+                -RequireCompleteInventory:([bool]$incident)
             if (-not $identity -or -not [string]$identity.process_start_token) {
                 throw "RUNTIME_RECOVERY_OWNER_IDENTITY_UNAVAILABLE:$($service.Key)"
             }
@@ -422,6 +433,7 @@ function New-RuntimeRecoveryPlan {
         }
     }
     foreach ($service in $ServiceContracts) {
+        if ($incident -and [string]$service.Key -eq 'collector') { continue }
         if ((Test-ControlPlaneServiceOwnerRequired -Service $service -ReleaseState $ReleaseState) -and
             [string]$service.Key -notin $running) {
             throw "RUNTIME_RECOVERY_REQUIRED_OWNER_MISSING:$($service.Key)"
@@ -439,6 +451,7 @@ function New-RuntimeRecoveryPlan {
         process_baseline = $owners; service_contracts = $contracts
         rollback_target = $StableRevision
     }
+    if ($incident) { $body['collector_clock_recovery'] = $incident }
     $json = $body | ConvertTo-Json -Depth 9 -Compress
     [pscustomobject]@{
         body = [pscustomobject]$body
@@ -459,6 +472,14 @@ function Assert-RuntimeRecoveryPlan {
     if (@($Plan.body.service_contracts).Count -eq 0) {
         throw "RUNTIME_RECOVERY_PLAN_INCOMPLETE"
     }
+    if ($Plan.body.collector_clock_recovery) {
+        Assert-CollectorClockRecoveryContext -Context $Plan.body.collector_clock_recovery
+        if ([string]$Plan.body.stable_revision -cne
+            [string]$Plan.body.collector_clock_recovery.broken_revision -or
+            'collector' -in @($Plan.body.running_service_keys)) {
+            throw 'COLLECTOR_RECOVERY_PLAN_BASELINE_CONFLICT'
+        }
+    }
     return $true
 }
 
@@ -478,11 +499,13 @@ function Convert-RecoveryPlanContracts {
 function Restore-RuntimeRecoveryPlan {
     param([Parameter(Mandatory = $true)][object]$Plan)
     $contracts = @(Convert-RecoveryPlanContracts -Plan $Plan)
+    $inventoryArguments = @{}
+    if ($Plan.body.collector_clock_recovery) { $inventoryArguments.RequireCompleteInventory = $true }
     $revision = [string]$Plan.body.stable_revision
     Stop-All
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
     do {
-        $remaining = @($services | ForEach-Object { Get-ForecasterProcesses -Service $_ })
+        $remaining = @($services | ForEach-Object { Get-ForecasterProcesses -Service $_ @inventoryArguments })
         if ($remaining.Count -eq 0) { break }
         Start-Sleep -Milliseconds 250
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
@@ -494,7 +517,7 @@ function Restore-RuntimeRecoveryPlan {
     $script:services = $contracts
     foreach ($service in $contracts) {
         $expected = [string]$service.Key -in @($Plan.body.running_service_keys)
-        $count = @(Get-ForecasterProcesses -Service $service).Count
+        $count = @(Get-ForecasterProcesses -Service $service @inventoryArguments).Count
         if ($expected -and $count -eq 0) {
             Start-ForecasterService -Service $service -SkipExistingCheck
         } elseif (-not $expected -and $count -ne 0) {
@@ -510,6 +533,8 @@ function Wait-RuntimeRecoveryPlanHealth {
         [DateTimeOffset]$RecoveryStarted = [DateTimeOffset]::UtcNow
     )
     $contracts = @(Convert-RecoveryPlanContracts -Plan $Plan)
+    $inventoryArguments = @{}
+    if ($Plan.body.collector_clock_recovery) { $inventoryArguments.RequireCompleteInventory = $true }
     $runningKeys = @($Plan.body.running_service_keys | ForEach-Object { [string]$_ })
     $requiredReloadable = @($runningKeys | Where-Object { $_ -in $reloadableServiceKeys })
     $deadline = [DateTimeOffset]::UtcNow.Add($serviceStartupTimeout)
@@ -518,7 +543,7 @@ function Wait-RuntimeRecoveryPlanHealth {
         $ownersHealthy = $true
         foreach ($service in $contracts) {
             $expectedCount = if ([string]$service.Key -in $runningKeys) { 1 } else { 0 }
-            if (@(Get-ForecasterProcesses -Service $service).Count -ne $expectedCount) {
+            if (@(Get-ForecasterProcesses -Service $service @inventoryArguments).Count -ne $expectedCount) {
                 $ownersHealthy = $false
                 break
             }
@@ -530,18 +555,25 @@ function Wait-RuntimeRecoveryPlanHealth {
         )
         if ($functionalHealthy -and "quote" -in $runningKeys) {
             $quote = $contracts | Where-Object Key -eq "quote" | Select-Object -First 1
-            $quoteProcesses = @(Get-ForecasterProcesses -Service $quote)
+            $quoteProcesses = @(Get-ForecasterProcesses -Service $quote @inventoryArguments)
             $quoteState = Get-ServiceState -Service $quote -Processes $quoteProcesses
             $functionalHealthy = $quoteState -in @("LIVE", "MARKET CLOSED")
+            if ($Plan.body.collector_clock_recovery -and -not (Get-BrokerMarketSession)) {
+                $functionalHealthy = $false
+            }
         }
     } while (-not $functionalHealthy -and [DateTimeOffset]::UtcNow -lt $deadline)
     if (-not $functionalHealthy) { throw "RUNTIME_RECOVERY_HEALTH_FAILED" }
-    Write-WatchdogEvent -Event "RUNTIME_RECOVERY_HEALTHY" -Service "all" `
+    $baselineState = if ($Plan.body.collector_clock_recovery) { 'DEGRADED_RECOVERY_BASELINE' } else { 'HEALTHY' }
+    Write-WatchdogEvent -Event $(if ($Plan.body.collector_clock_recovery) {
+        'RUNTIME_RECOVERY_DEGRADED_BASELINE_RESTORED'
+    } else { 'RUNTIME_RECOVERY_HEALTHY' }) -Service "all" `
         -State ([string]$Plan.body.stable_revision)
     return [pscustomobject]@{
         revision = [string]$Plan.body.stable_revision
         running_service_keys = @($runningKeys)
         recovered_at = [DateTimeOffset]::UtcNow.ToString("o")
+        baseline_health = $baselineState
     }
 }
 

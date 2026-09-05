@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$TargetRevision,
     [Parameter(Mandatory = $true)][string]$RuntimeRoot,
-    [string]$RepositoryRoot = ""
+    [string]$RepositoryRoot = "",
+    [switch]$CollectorClockRecovery
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,7 +11,8 @@ function Invoke-ExactControlPlaneInstaller {
     param(
         [Parameter(Mandatory = $true)][string]$CheckoutRoot,
         [Parameter(Mandatory = $true)][string]$RuntimePath,
-        [Parameter(Mandatory = $true)][string]$Revision
+        [Parameter(Mandatory = $true)][string]$Revision,
+        [switch]$CollectorClockRecovery
     )
     if ($Revision -notmatch '^[0-9a-f]{40}$') {
         throw "CONTROL_PLANE_EXACT_REVISION_REQUIRED"
@@ -46,10 +48,11 @@ function Invoke-ExactControlPlaneInstaller {
         if (-not (Test-Path -LiteralPath $controlScript)) {
             throw "CONTROL_PLANE_INSTALL_ACTION_MISSING"
         }
-        & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+        $incidentArguments = if ($CollectorClockRecovery) { @('-CollectorClockRecovery') } else { @() }
+        & powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass `
             -File $controlScript -Action InstallControlPlane `
             -RuntimeRoot $RuntimePath -RepositoryRoot $CheckoutRoot `
-            -SourceRoot $temporaryRoot -SourceRevision $Revision
+            -SourceRoot $temporaryRoot -SourceRevision $Revision @incidentArguments
         if ($LASTEXITCODE -ne 0) {
             throw "CONTROL_PLANE_INSTALL_ACTION_FAILED:$LASTEXITCODE"
         }
@@ -71,5 +74,5 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
     Invoke-ExactControlPlaneInstaller -CheckoutRoot $checkout `
         -RuntimePath ([IO.Path]::GetFullPath($RuntimeRoot)) `
-        -Revision $TargetRevision
+        -Revision $TargetRevision -CollectorClockRecovery:$CollectorClockRecovery
 }

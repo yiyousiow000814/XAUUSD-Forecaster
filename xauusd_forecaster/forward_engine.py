@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from .executable_label import build_executable_label_v2
-from .forward_ledger import ForwardLedger, canonical_hash
+from .forward_ledger import ForwardLedger, canonical_hash, snapshot_evidence_hash
+from .clock_commit import completion_status, read_completed_clock
 from .inference import build_shadow_predictions
 from .market import MarketProvider, build_forward_snapshot
 from .news import collect_official_news
@@ -28,10 +31,12 @@ class ForwardEngine:
         ledger: ForwardLedger,
         market_provider: MarketProvider,
         u5_state: U5State | None = None,
+        *, u5_checkpoint_path: Path | None = None,
     ) -> None:
         self.ledger = ledger
         self.market_provider = market_provider
         self.u5_state = u5_state or U5State()
+        self.u5_checkpoint_path = u5_checkpoint_path
 
     def collect_news(self, now: datetime) -> list[dict[str, object]]:
         return collect_official_news(self.ledger, now)
@@ -42,65 +47,106 @@ class ForwardEngine:
         collected_at: datetime,
         news_status: list[dict[str, object]] | None = None,
     ) -> tuple[str, str]:
+        if self.ledger.connection.in_transaction:
+            raise ValueError("CLOCK_EVENT_TRANSACTION_ALREADY_ACTIVE")
+        if self.u5_checkpoint_path is not None:
+            pending = self.u5_checkpoint_path.with_name(self.u5_checkpoint_path.name + ".pending")
+            if pending.exists():
+                U5State.reconcile_checkpoint(self.ledger, self.u5_checkpoint_path)
+                if self.u5_checkpoint_path.exists():
+                    restored = U5State.load(self.u5_checkpoint_path)
+                    self.u5_state.__dict__.update(restored.__dict__)
         if decision_time != floor_five_minutes(decision_time):
             raise ValueError("decision must be on the UTC five-minute grid")
         if decision_time < self.ledger.forward_epoch:
             raise ValueError("decision predates FORWARD_EPOCH")
-        provider_error = None
-        try:
-            observations = self.market_provider.observations(decision_time)
-        except Exception as error:
-            observations = []
-            provider_error = f"{type(error).__name__}:{str(error)[:200]}"
-        completed: dict[datetime, object] = {}
-        for observation in observations:
-            minute = observation.event_time.replace(second=0, microsecond=0)
-            if minute + timedelta(minutes=1) <= decision_time:
-                completed[minute] = observation
-        for minute in sorted(completed):
-            observation = completed[minute]
-            self.u5_state.update(minute, observation.bid, observation.ask)
-        snapshot = build_forward_snapshot(
-            observations,
-            decision_time,
-            collected_at,
-            self.market_provider.name,
-            u5=self.u5_state.last_u5,
-            u5_status=self.u5_state.status,
-        )
-        if provider_error is not None:
-            snapshot["reason_codes"] = tuple(
-                dict.fromkeys((*snapshot["reason_codes"], "MARKET_PROVIDER_ERROR"))
+        decision_time = decision_time.astimezone(UTC)
+        completed_clock = read_completed_clock(self.ledger, decision_time)
+        if completed_clock is not None:
+            return completed_clock
+        with self.ledger.clock_preparation():
+            from .evidence_v2 import evaluation_epoch
+
+            prepared_epoch = evaluation_epoch(self.ledger.connection)
+            prepared_u5 = copy.deepcopy(self.u5_state)
+            provider_error = None
+            try:
+                observations = self.market_provider.observations(decision_time)
+            except Exception as error:
+                observations = []
+                provider_error = f"{type(error).__name__}:{str(error)[:200]}"
+            completed: dict[datetime, object] = {}
+            for observation in observations:
+                minute = observation.event_time.replace(second=0, microsecond=0)
+                if minute + timedelta(minutes=1) <= decision_time:
+                    completed[minute] = observation
+            for minute in sorted(completed):
+                observation = completed[minute]
+                prepared_u5.update(minute, observation.bid, observation.ask)
+            snapshot = build_forward_snapshot(
+                observations,
+                decision_time,
+                collected_at,
+                self.market_provider.name,
+                u5=prepared_u5.last_u5,
+                u5_status=prepared_u5.status,
             )
-            snapshot["features"]["market_provider_error"] = provider_error
-        self.ledger.append_snapshot(snapshot)
-        decision_id = f"XAU-{decision_time.strftime('%Y%m%dT%H%M%SZ')}"
-        predictions = build_shadow_predictions(self.ledger, snapshot, decision_time)
-        self.ledger.append_decision(
-            {
-                "decision_id": decision_id,
-                "decision_time": decision_time,
-                "snapshot_id": snapshot["snapshot_id"],
-                "created_at": collected_at,
-                "data_health": snapshot["data_health"],
-                "reason_codes": snapshot["reason_codes"],
-                "predictions": predictions,
+            if provider_error is not None:
+                snapshot["reason_codes"] = tuple(
+                    dict.fromkeys((*snapshot["reason_codes"], "MARKET_PROVIDER_ERROR"))
+                )
+                snapshot["features"]["market_provider_error"] = provider_error
+            snapshot["snapshot_hash"] = snapshot_evidence_hash(snapshot)
+            decision_id = f"XAU-{decision_time.strftime('%Y%m%dT%H%M%SZ')}"
+            predictions = build_shadow_predictions(self.ledger, snapshot, decision_time)
+            decision_record = {
+                    "decision_id": decision_id,
+                    "decision_time": decision_time,
+                    "snapshot_id": snapshot["snapshot_id"],
+                    "created_at": collected_at,
+                    "data_health": snapshot["data_health"],
+                    "reason_codes": snapshot["reason_codes"],
+                    "predictions": predictions,
+                    "visible_news_hash": canonical_hash([
+                        (row["source"], row["source_item_id"], row["content_hash"])
+                        for row in self.ledger.visible_news(decision_time)
+                    ]),
             }
-        )
-        from .live_v2 import append_live_decision_v2
-        from .news_pipeline_health import news_semantic_pipeline_health_at
+            from .live_v2 import prepare_live_decision_v2, persist_live_decision_v2
+            from .news_pipeline_health import news_semantic_pipeline_health_at
 
-        coverage_health = news_semantic_pipeline_health_at(
-            self.ledger, observed_at=decision_time,
-        )
+            coverage_health = news_semantic_pipeline_health_at(
+                self.ledger, observed_at=decision_time,
+            )
 
-        append_live_decision_v2(
-            self.ledger, decision_id=decision_id, decision_time=decision_time,
-            created_at=collected_at, snapshot=snapshot,
-            news_pipeline_health=coverage_health,
-        )
+            prepared_v2 = prepare_live_decision_v2(
+                self.ledger, decision_id=decision_id, decision_time=decision_time,
+                created_at=collected_at, snapshot=snapshot,
+                news_pipeline_health=coverage_health,
+            )
+        checkpoint_hash = None
+        if self.u5_checkpoint_path is not None:
+            payload = prepared_u5.as_dict() | {"clock_binding": {
+                "decision_time": decision_time.isoformat(),
+                "snapshot_hash": snapshot["snapshot_hash"],
+            }}
+            pending = self.u5_checkpoint_path.with_name(self.u5_checkpoint_path.name + ".pending")
+            if pending.exists():
+                raise ValueError("U5_CHECKPOINT_RECONCILIATION_REQUIRED")
+            U5State.write_payload(pending, payload)
+            checkpoint_hash = canonical_hash(payload)
         run_id = str(uuid.uuid4())
         with self.ledger.connection:
+            self.ledger.connection.execute("BEGIN IMMEDIATE")
+            if evaluation_epoch(self.ledger.connection) != prepared_epoch:
+                raise ValueError("CLOCK_EVENT_FROZEN_GENERATION_CHANGED")
+            self.ledger.append_snapshot(snapshot, commit=False)
+            self.ledger.append_decision(decision_record, commit=False)
+            persist_live_decision_v2(self.ledger, prepared_v2)
+            completion = completion_status(self.ledger.connection, decision_time)
+            if checkpoint_hash is not None:
+                completion["u5_checkpoint_hash"] = checkpoint_hash
+            statuses = [*(news_status or []), completion]
             self.ledger.connection.execute(
                 "INSERT INTO collector_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -109,11 +155,14 @@ class ForwardEngine:
                     datetime.now(UTC).isoformat(),
                     decision_time.isoformat(),
                     snapshot["data_health"],
-                    json.dumps(news_status or [], sort_keys=True, separators=(",", ":")),
+                    json.dumps(statuses, sort_keys=True, separators=(",", ":")),
                     snapshot["snapshot_id"],
                     decision_id,
                 ),
             )
+        self.u5_state.__dict__.update(prepared_u5.__dict__)
+        if self.u5_checkpoint_path is not None:
+            U5State.reconcile_checkpoint(self.ledger, self.u5_checkpoint_path)
         return snapshot["snapshot_id"], decision_id
 
     def settle_due_outcomes(self, now: datetime) -> list[str]:

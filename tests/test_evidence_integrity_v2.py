@@ -2915,20 +2915,15 @@ def test_generation_receipts_remain_complete_when_runtime_gates_force_wait(
         }
         for identity in sorted(inference_v2.MODEL_IDENTITIES)
     ]
-    inserted = []
     monkeypatch.setattr(
         inference_v2, "_activated_generation_updates", lambda *_: updates,
     )
     monkeypatch.setattr(inference_v2, "_active_updates", lambda *_: updates)
     monkeypatch.setattr(
-        inference_v2, "_calibration", lambda *_: {
+        inference_v2, "_calibration", lambda *_, **__: {
             "version": "test", "rows": 0, "blocks": 0, "days": 0,
             "half_width": None, "status": "UNCALIBRATED",
         },
-    )
-    monkeypatch.setattr(
-        inference_v2, "_insert_prediction",
-        lambda _ledger, **values: inserted.append(values),
     )
     monkeypatch.setattr(inference_v2, "_has_activated_generation", lambda *_: True)
 
@@ -2951,7 +2946,7 @@ def test_generation_receipts_remain_complete_when_runtime_gates_force_wait(
         "news_exposed": 0, "broad_news_exposed": 0,
     }
 
-    created = inference_v2.append_live_predictions_v2(
+    created, prepared_rows, _ = inference_v2.prepare_live_predictions_v2(
         object(), decision_id="decision", decision_time=datetime.now(UTC),
         created_at=datetime.now(UTC), market_snapshot=market_snapshot,
         news_snapshot=news_snapshot,
@@ -2963,14 +2958,14 @@ def test_generation_receipts_remain_complete_when_runtime_gates_force_wait(
     assert {row["model_identity"] for row in created} == {
         "CHAMPION_0", *inference_v2.MODEL_IDENTITIES,
     }
-    gated = [row for row in inserted if row["model_identity"] != "CHAMPION_0"]
+    gated = [row for row in prepared_rows if row[2] != "CHAMPION_0"]
     if expected_status == "NEWS_INPUT_UNAVAILABLE":
         gated = [
             row for row in gated
-            if row["model_identity"] in inference_v2.NEWS_MODEL_IDENTITIES
+            if row[2] in inference_v2.NEWS_MODEL_IDENTITIES
         ]
     assert gated
-    assert {row["status"] for row in gated} == {expected_status}
+    assert {row[-1] for row in gated} == {expected_status}
 
 
 def test_newest_news_policy_mismatch_blocks_older_current_model() -> None:

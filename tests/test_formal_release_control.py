@@ -4,6 +4,9 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import hashlib
+import shutil
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -170,14 +173,89 @@ def test_selector_uses_authoritative_ownership_and_has_a_bounded_noop(monkeypatc
 
 def test_runner_pins_tool_and_emits_machine_readable_measurements() -> None:
     runner = (ROOT / "scripts" / "run_tla_model.py").read_text(encoding="utf-8")
-    assert 'TLA_TOOLS_VERSION = "v1.8.0"' in runner
-    assert "16b8cd970e07147ff91f126baecba7edd98202e5ab33220a42f8f4358ee94b2b" in runner
+    lock = json.loads((ROOT / "formal/tools/tlc/tool-lock.json").read_text(encoding="utf-8"))
+    assert len(lock["sha256"]) == 64
+    assert hashlib.sha256((ROOT / lock["artifact"]).read_bytes()).hexdigest() == lock["sha256"]
+    assert "urlopen" not in runner
     assert '"-workers", "auto"' in runner
     assert '"-coverage"' not in runner
     assert 'choices=("local", "ci")' in runner
     assert 'add_argument("--report"' not in runner
     for field in ("elapsed_seconds", "generated_states", "distinct_states", "maximum_queue_depth", "properties"):
         assert field in runner
+
+
+@pytest.fixture
+def tool_runner():
+    spec = importlib.util.spec_from_file_location("run_tla_model", ROOT / "scripts/run_tla_model.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_cold_and_warm_cache_use_the_reviewed_repository_bytes(tmp_path, tool_runner):
+    lock = tool_runner._load_tool_lock()
+    cold = tool_runner._ensure_tools(tmp_path)
+    assert cold.parent.name == lock["sha256"]
+    assert cold.read_bytes() == (ROOT / lock["artifact"]).read_bytes()
+    before = cold.stat().st_mtime_ns
+    assert tool_runner._ensure_tools(tmp_path) == cold
+    assert cold.stat().st_mtime_ns == before
+    assert tool_runner._sha256(cold) == lock["sha256"]
+
+
+@pytest.mark.parametrize("failure", ["missing", "tamper", "html", "truncated", "cache-tamper", "classpath"])
+def test_invalid_or_unavailable_tool_never_starts_java(tmp_path, monkeypatch, tool_runner, failure):
+    lock = tool_runner._load_tool_lock()
+    source = tmp_path / lock["artifact"]
+    source.parent.mkdir(parents=True)
+    shutil.copyfile(ROOT / lock["artifact"], source)
+    monkeypatch.setattr(tool_runner, "ROOT", tmp_path)
+    monkeypatch.setattr(tool_runner, "_load_tool_lock", lambda: lock)
+    cache = tmp_path / ".local/tools"
+    if failure in {"cache-tamper", "classpath"}:
+        cached = tool_runner._ensure_tools(cache)
+        if failure == "cache-tamper":
+            cached.write_bytes(b"corrupt cache")
+        else:
+            (cached.parent / "CommunityModules.jar").write_bytes(b"unreviewed dependency")
+    elif failure == "missing":
+        source.unlink()
+    elif failure == "html":
+        source.write_bytes(b"<html>upstream unavailable</html>")
+    elif failure == "truncated":
+        source.write_bytes(source.read_bytes()[:2000])
+    else:
+        payload = bytearray(source.read_bytes())
+        payload[100] ^= 1
+        source.write_bytes(payload)
+    def forbidden(*args, **kwargs):
+        pytest.fail("Java/native execution occurred before tool verification")
+    monkeypatch.setattr(tool_runner.subprocess, "run", forbidden)
+    monkeypatch.setattr(tool_runner.subprocess, "Popen", forbidden)
+    with pytest.raises(tool_runner.ToolError) as raised:
+        tool_runner._execute(MANIFEST["shards"][0], {}, tmp_path / "model.log")
+    assert raised.value.state == ("TOOL_UNAVAILABLE" if failure == "missing" else "TOOL_INTEGRITY_FAILED")
+
+
+@pytest.mark.parametrize("payload", [b"<html>error</html>", b"PK\x03\x04truncated"])
+def test_matching_digest_is_not_a_substitute_for_jar_structure(tmp_path, tool_runner, payload):
+    path = tmp_path / "invalid.jar"
+    path.write_bytes(payload)
+    fixture_lock = {"size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+    with pytest.raises(tool_runner.ToolError, match="TOOL_INTEGRITY_FAILED"):
+        tool_runner._verify_jar(path, fixture_lock)
+
+
+@pytest.mark.parametrize("mode", ["local", "ci"])
+def test_tool_failure_report_is_not_model_pass(tmp_path, monkeypatch, tool_runner, mode):
+    monkeypatch.setattr(tool_runner, "ROOT", tmp_path)
+    monkeypatch.setattr(tool_runner.sys, "argv", ["runner", "--shard", MANIFEST["shards"][0]["id"], "--output", mode])
+    assert tool_runner.main() != 0
+    reports = tmp_path / (".local/formal-results" if mode == "local" else "formal-results")
+    report = json.loads(next(reports.glob("*.json")).read_text(encoding="utf-8"))
+    assert report["result"] == "TOOL_UNAVAILABLE"
+    assert report["tool_identity"]["sha256"] == tool_runner._load_tool_lock()["sha256"]
 
 
 def test_model_interfaces_match_the_cpu_control_implementation() -> None:

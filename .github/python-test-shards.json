@@ -26,6 +26,7 @@
       "id": "python-2",
       "tests": [
         "tests/test_evidence_integrity_v2.py",
+        "tests/test_clock_recovery.py",
         "tests/test_daily_brief.py",
         "tests/test_news_event_identity.py",
         "tests/test_model_gateway.py",
@@ -41,6 +42,7 @@
       "id": "python-5",
       "tests": [
         "tests/test_ci_contracts.py",
+        "tests/test_clock_atomicity.py",
         "tests/test_assistant_content.py",
         "tests/test_assistant_tools.py",
         "tests/test_execution_quote_windows.py",

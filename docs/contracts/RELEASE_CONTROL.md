@@ -866,6 +866,34 @@ verified bundle and recorded safe supervision path. Current bounded evidence is 
 history or Stable/Candidate identities. The operator procedure is
 [`CONTROL_PLANE_INSTALLATION.md`](../runbooks/CONTROL_PLANE_INSTALLATION.md).
 
+### Explicit collector clock recovery baseline
+
+The bounded collector clock-atomicity incident admits a separately verified
+`DEGRADED_RECOVERY_BASELINE`: absent Collector and Watchdog, a qualified stale
+Watchdog receipt, unchanged Stable Business Runtime and 100% Stable Worker
+placement, no conflicting transaction or control helper, and healthy exact
+single owners for every other required service. Failed or incomplete process
+enumeration is not proof of absence. The existing snapshot-only recovery must
+bind the recorded clock and immutable snapshot hash; it cannot fabricate a
+historical prediction or LIVE_OOS eligibility.
+
+Installation reserves the existing Watchdog mutex while verifying absence and
+disabling both canonical bootstrap tasks. It releases that reservation before
+the normal replacement QUIESCED handoff; all independent activation proofs
+remain required. The existing install state retains the incident binding to
+runtime/repository roots, user, broken/target revisions and recovery evidence.
+While the broken Business Runtime remains active, Collector auto-restart and
+automatic Candidate discovery remain held across restart. Other healthy service
+owners must be preserved. Only a qualified exact-target NORMAL Promote or that
+target's committed Stable identity permits the corrected Collector to start.
+
+Failure restores the verified prior bundle and captured business-owner baseline
+without restarting the broken Collector/supervisor; bootstrap remains disabled
+and the result is explicitly degraded, not a healthy rollback. Installing the
+new Control Plane establishes supervision only. Database exclusion, Candidate
+qualification, NORMAL Promote and real progress through Observe remain separate
+gates. Access, CPU, Free capacity and Assistant PAUSED requirements are unchanged.
+
 Candidate at 0% MUST NOT own background, scheduled, queue, or other duplicate
 production side effects. Directed Version Override requests are the only normal
 Candidate Worker traffic; this project does not use random percentage canaries.

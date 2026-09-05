@@ -564,6 +564,7 @@ function Publish-PromotionFreshnessEvidence {
     param(
         [Parameter(Mandatory = $true)][object]$State,
         [switch]$AllowDegradedActive,
+        [switch]$CollectorClockRecovery,
         [ValidateSet("", "RESTORE_LKG")][string]$RecoveryAction = "",
         [object]$RuntimeReadModel = $null
     )
@@ -676,14 +677,25 @@ function Publish-PromotionFreshnessEvidence {
         Get-CurrentReleaseRuntimeReadModel -PersistedState $State `
             -ReleaseLockOwnedByCaller -ForceProviderRefresh
     }
+    $incidentBaseline = $null
+    if ($CollectorClockRecovery) {
+        $context = Get-CollectorClockRecoveryContext
+        if ($restoreLkg -or $AllowDegradedActive -or -not $context -or
+            [string]$candidate.windows_revision -cne [string]$context.target_revision -or
+            [string]$stable.windows_revision -cne [string]$context.broken_revision) {
+            throw 'COLLECTOR_RECOVERY_EXACT_NORMAL_TARGET_REQUIRED'
+        }
+        $incidentBaseline = Invoke-CollectorClockRecoveryOperation
+    }
     $runtimeAuthorityValid = [bool]($runtimeReadModel -and
         -not $runtimeReadModel.transaction_active -and
         [string]$runtimeReadModel.active.observation_status -eq "AVAILABLE" -and
         [string]$runtimeReadModel.active.identity_status -eq "COMPLETE" -and
-        [string]$runtimeReadModel.active.health -in $(if ($AllowDegradedActive) {
+        [string]$runtimeReadModel.active.health -in $(if ($AllowDegradedActive -or $incidentBaseline) {
             @("HEALTHY", "DEGRADED")
         } else { @("HEALTHY") }) -and
-        [string]$runtimeReadModel.active.ownership_status -eq "SINGLE_OWNER" -and
+        ([string]$runtimeReadModel.active.ownership_status -eq "SINGLE_OWNER" -or
+            ($incidentBaseline -and [string]$runtimeReadModel.active.ownership_status -eq 'INVALID')) -and
         [string]$runtimeReadModel.committed_stable.worker_version_id -ceq
             [string]$stable.worker_version_id)
     if (-not $runtimeAuthorityValid -or
@@ -703,6 +715,18 @@ function Publish-PromotionFreshnessEvidence {
             migration_authority = if ($migrationRequired) { $migrationRootDigest } else { "NOT_REQUIRED" }
             recovery_action = if ($restoreLkg) { "RESTORE_LKG" } else { "NORMAL" }
         }
+    }
+    if ($incidentBaseline) {
+        $rollbackInput.live_owner_health.recovery_action = 'COLLECTOR_CLOCK_RECOVERY'
+        $rollbackInput.live_owner_health | Add-Member -NotePropertyName incident_baseline -NotePropertyValue ([pscustomobject]@{
+            state = 'DEGRADED_RECOVERY_BASELINE'
+            expected_absent = @('collector')
+            observed_at = [string]$incidentBaseline.observed_at
+            snapshot = $incidentBaseline.snapshot
+            services = $incidentBaseline.services
+            watchdog = $incidentBaseline.previous_watchdog_receipt
+            target_revision = [string]$incidentBaseline.target_revision
+        })
     }
     $arguments = New-ReleaseEvidenceAdapterArguments -Candidate $candidate `
         -BehaviorInputs $rollbackInput -SourceIdentity ([pscustomobject]@{
