@@ -301,7 +301,7 @@ def run_staged_installer_active_rehearsal(tmp_path):
     repository = tmp_path / "repository"
     repository.mkdir()
     sleeper = tmp_path / "business.py"
-    sleeper.write_text("import time\ntime.sleep(180)\n", encoding="utf-8")
+    sleeper.write_text("import sys\nsys.stdin.buffer.read()\n", encoding="utf-8")
     sync_script = tmp_path / "staged_sync_owner.py"
     shutil.copyfile(ROOT / "tests/fixtures/staged_sync_owner.py", sync_script)
     owners = {}
@@ -390,6 +390,7 @@ def run_staged_installer_active_rehearsal(tmp_path):
                 "--source-root", str(ROOT), "--provider", f"https://127.0.0.1:{provider.server_port}",
             ]
             child = subprocess.Popen(command, creationflags=subprocess.CREATE_NO_WINDOW, env=environment,
+                                     stdin=subprocess.PIPE if key != "sync" else subprocess.DEVNULL,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             children.append(child)
             owners[key] = child.pid
@@ -495,7 +496,7 @@ def run_staged_installer_active_rehearsal(tmp_path):
                     except subprocess.TimeoutExpired:
                         child.terminate()
                 else:
-                    child.terminate()
+                    child.stdin.close()
             child.wait(timeout=10)
             child.stderr.close()
         provider.shutdown()
@@ -941,7 +942,8 @@ def run_staged_activation_withdrawal_rehearsal(tmp_path):
     prior = json.loads(dead.stdout)
     # Living stand-ins prove preservation, not the health of real business services.
     preserved = [subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)"],
+        [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+        stdin=subprocess.PIPE,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     ) for _ in range(4)]
     body = rf'''
@@ -993,8 +995,12 @@ def run_staged_activation_withdrawal_rehearsal(tmp_path):
         assert all(process.poll() is None for process in preserved)
     finally:
         for process in preserved:
+            process.stdin.close()
             if process.poll() is None:
-                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
             process.wait(timeout=5)
 
 

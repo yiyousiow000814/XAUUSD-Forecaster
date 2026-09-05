@@ -184,3 +184,9 @@ did not satisfy that artificial override. This does not change production
 deadlines, the 30-second unit contract, or the required five-minute job budget.
 Hidden child errors and the pre-cleanup handoff observation are retained as
 bounded fixture diagnostics; a timeout or identity mismatch remains failure.
+
+Business stand-ins stay alive while the rehearsal parent holds their stdin pipe;
+cleanup closes it, and parent death also closes it. A fixed sleep lifetime is
+not a business-preservation contract: the former 60-second stand-in could exit
+on its own during a valid hosted handoff. Both real-process scenarios retain
+their living-owner assertions and explicit bounded cleanup.
