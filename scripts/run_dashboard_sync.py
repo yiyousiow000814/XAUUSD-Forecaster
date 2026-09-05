@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -975,9 +976,27 @@ def _read_news_sync_state(path: Path) -> dict:
 
 def _write_news_sync_state(path: Path, state: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
-    temporary.replace(path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent,
+            prefix=path.name + ".", suffix=".tmp", delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            json.dump(state, stream, ensure_ascii=False)
+        # Windows readers may briefly deny delete sharing. Retry only the
+        # atomic replace (never the accepted HTTP operation), for <=70 ms.
+        for delay in (0.01, 0.02, 0.04, None):
+            try:
+                temporary.replace(path)
+                return
+            except PermissionError as error:
+                if getattr(error, "winerror", None) not in {5, 32, 33} or delay is None:
+                    raise
+                time.sleep(delay)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _learning_payload(local_payload: dict, config: dict) -> dict:
@@ -1667,6 +1686,10 @@ def sync_deferred_projection_once(
             if (
                 ack.get("contract_version") != NEWS_EVIDENCE_CONTRACT_VERSION
                 or ack.get("active_snapshot_id") != snapshot
+                or ack.get("ack_remote_url") != (target.get("remote_news_evidence_url") or (
+                    target["remote_ingest_url"].rsplit("/", 1)[0] + "/news-evidence"
+                ))
+                or not re.fullmatch(r"[a-f0-9]{64}", str(ack.get("ack_request_sha256") or ""))
             ):
                 # Only real accepted page progress drains immediately. Cleanup
                 # debt or an unchanged cursor must not create a busy retry loop.

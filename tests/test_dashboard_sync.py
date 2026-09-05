@@ -1565,6 +1565,56 @@ def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_pat
     assert posted == ["prepare", "stage_details"]
 
 
+@pytest.mark.parametrize("release_after", [1, 3, None])
+def test_sync_state_atomic_replace_bounds_windows_sharing_retry(monkeypatch, tmp_path, release_after):
+    module = _sync_module()
+    path = tmp_path / "state.json"
+    path.write_text('{"cursor":4}', encoding="utf-8")
+    original_replace = Path.replace
+    attempts, delays = [], []
+    def replace(source, target):
+        attempts.append(source)
+        assert json.loads(path.read_text(encoding="utf-8")) == {"cursor": 4}
+        assert json.loads(source.read_text(encoding="utf-8")) == {"cursor": 8}
+        if release_after is None or len(attempts) <= release_after:
+            error = PermissionError("fixture sharing conflict")
+            error.winerror = 32
+            raise error
+        return original_replace(source, target)
+    monkeypatch.setattr(Path, "replace", replace)
+    monkeypatch.setattr(module.time, "sleep", delays.append)
+    if release_after is None:
+        with pytest.raises(PermissionError, match="sharing conflict"):
+            module._write_news_sync_state(path, {"cursor": 8})
+        assert json.loads(path.read_text()) == {"cursor": 4}
+        assert len(attempts) == 4
+    else:
+        module._write_news_sync_state(path, {"cursor": 8})
+        assert json.loads(path.read_text()) == {"cursor": 8}
+        assert len(attempts) == release_after + 1
+    assert sum(delays) <= .071
+    assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Windows delete-sharing boundary")
+def test_sync_state_replaces_after_real_windows_reader_releases(tmp_path):
+    import threading
+    module = _sync_module()
+    path = tmp_path / "state.json"
+    path.write_text('{"cursor":4}', encoding="utf-8")
+    reader = path.open("rb")
+    timer = threading.Timer(.025, reader.close)
+    timer.start()
+    try:
+        module._write_news_sync_state(path, {"cursor": 8})
+    finally:
+        reader.close()
+        timer.join(1)
+    assert not timer.is_alive()
+    assert json.loads(path.read_text()) == {"cursor": 8}
+    assert list(tmp_path.iterdir()) == [path]
+
+
 def _evidence_ack(body: bytes, result: dict) -> dict:
     """The additive HTTP ACK envelope; operation results remain explicit."""
     request = json.loads(body)
@@ -3297,6 +3347,8 @@ def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
                 module._write_news_sync_state(Path(target["news_evidence_state_file"]), {
                     "contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION,
                     "active_snapshot_id": "d"*64, "record_count": 8,
+                    "ack_remote_url": target["remote_ingest_url"].rsplit("/", 1)[0] + "/news-evidence",
+                    "ack_request_sha256": "e" * 64,
                 })
             return "d" * 64
         monkeypatch.setattr(module, "_sync_news_evidence", advance_news)

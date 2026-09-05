@@ -28,6 +28,37 @@ The historical 126.935-second receipt-sharing failure and dirty-source
 90.184-second resource run remain retained diagnostic evidence, not clean-source
 release acceptance.
 
+The clean `82bd1dcc` resource run completed in 90.672 seconds. The clean
+`7e47ca13` run additionally compared all 1,919 source/stored records through the
+existing canonical digest and completed in 91.324 seconds. Both used 479 local
+News GETs, 240 prepare, 240 stage, one activate and one cleanup POST, plus four
+independent heartbeats. The second run again exposed a transient Windows
+receipt-sharing failure before final recovery. Neither run proves the complete
+degraded lifecycle. Later source changes invalidate exact-target reuse.
+
+The existing Sync JSON writer now retries only its atomic replace on transient
+Windows sharing/access errors for at most 70 milliseconds. It uses an owned
+unique temporary file and preserves the previous checkpoint on persistent
+failure. It never replays an accepted HTTP request to resolve a local file
+sharing conflict. Real Windows reader-hold and persistent-conflict tests cover
+this boundary; the producer retains observed transient failure families.
+
+## Remaining connected rehearsal work
+
+Use the existing NORMAL `Start-ReleasePromotion` chain, not a second engine.
+The staged fixture still overrides runtime health and process matching and
+does not run real Switch/Observe. A full isolated source history, real service
+launches, exact receipt producers and captured degraded rollback are still
+required. Provider/scheduler adapters must be declared, including a deny-by-
+default network boundary and loopback port translation. Do not execute the
+fixed production API port or user scheduled-task names in a fixture.
+
+Collector snapshot-only exclusion belongs to the existing controlled repair
+entrypoint; launching Collector alone does not perform that repair. Retain its
+order in the connected chain. NORMAL Observe requires actual decision cycles;
+closed-market observation pauses rather than inventing decisions. Existing TLC
+passes do not yet prove the newly added deferred-ACK/progress integration.
+
 ## Initial problem table
 
 | Boundary / inspected source | Confirmed result | Required correction and evidence |

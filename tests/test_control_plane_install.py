@@ -468,13 +468,20 @@ def run_staged_installer_active_rehearsal(tmp_path):
         def do_POST(self):
             length = int(self.headers.get("Content-Length", 0))
             assert length < 80_000
-            payload = json.loads(self.rfile.read(length))
+            raw = self.rfile.read(length)
+            payload = json.loads(raw)
             requests.append(("POST", self.path, length))
             if self.path == "/api/ingest":
                 self.respond({"ok": True})
             elif self.path == "/api/news-evidence":
                 assert "prepare_snapshot" in payload or "cleanup_active_snapshot" in payload
-                self.respond({"active": True, "cleanup_pending": False})
+                result = ({"active": True, "next_offset": 0} if "prepare_snapshot" in payload else {
+                    "cleanup": "advanced", "cleanup_pending": False,
+                    "deleted_records": 0, "deleted_batches": 0, "deleted_staging": 0,
+                })
+                self.respond({**result, "status": "OK", "snapshot_id": "a" * 64,
+                              "contract_version": "news-evidence-paged-v2",
+                              "request_sha256": hashlib.sha256(raw).hexdigest()})
             else:
                 self.send_error(404)
 

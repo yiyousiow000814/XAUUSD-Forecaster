@@ -101,6 +101,7 @@ def main():
         raise RuntimeError("NODE_UNAVAILABLE")
     report["node"] = subprocess.check_output([node, "--version"], timeout=5, creationflags=NO_WINDOW).decode().strip()
     counts, reads, posted_bytes = Counter(), [], []
+    observed_failures = set()
     stop = threading.Event()
     servers, threads = [], []
     worker = None
@@ -228,6 +229,8 @@ def main():
                 while not stop.wait(.2):
                     receipt = sync._read_news_sync_state(Path(config["deferred_projection_receipt_file"]))
                     status = sync._read_news_sync_state(status_file)
+                    for failure in status.get("degraded_resources", []):
+                        observed_failures.add((str(failure.get("resource")), str(failure.get("error_type"))))
                     observations = {row.get("resource"): row.get("status") for row in status.get("resource_observations", [])}
                     if (receipt.get("state") == "COMPLETED" and status.get("status") == "OK"
                             and observations.get("news_evidence") == "OK"
@@ -292,6 +295,7 @@ def main():
                       local_get_count=len(reads), max_local_get_seconds=max(reads, default=0),
                       remote_posts=len(posted_bytes), max_post_bytes=max(posted_bytes, default=0),
                       heartbeat_count=counts["remote_heartbeat"],
+                      transient_failure_families=sorted(observed_failures),
                       cleanup="PASSED" if all(not thread.is_alive() for thread in threads) else "UNRESOLVED",
                       d1_rows_read="NOT_MEASURED", d1_rows_written="NOT_MEASURED")
         if report["cleanup"] != "PASSED":
