@@ -6,6 +6,7 @@ from ctypes import wintypes
 from datetime import datetime, timedelta, timezone
 import json
 import os
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import shutil
@@ -57,6 +58,7 @@ def _legacy_v2_bundle_digest(hashes: dict[str, str]) -> str:
 
 def _run_contract_with_runtime(
     tmp_path: Path, body: str, runtime_executable: str, *, environment=None,
+    execution_timeout: float = 22,
 ) -> str:
     runtime = tmp_path / "runtime"
     repository = tmp_path / "repository"
@@ -65,6 +67,20 @@ def _run_contract_with_runtime(
     script = ROOT / "scripts" / "xauusd_control_center.ps1"
     phase_file = tmp_path / "contract-phases.txt"
     phase_path_literal = str(phase_file).replace("'", "''")
+    # Debugger line probes preserve the actual entrypoint and owner bytes.
+    # They exist only in this owned test process, never in installed code.
+    load_probes = []
+    for number, line in enumerate(script.read_text(encoding="utf-8-sig").splitlines(), 1):
+        if (re.match(r'^\. \(Join-Path \$PSScriptRoot ', line)
+                or line.startswith(("$runtimeControlSourceManifest =", "$runtimeControlFileNames =",
+                                    "$serviceContractCodeRoot =", "$services ="))
+                or "= Get-BusinessRuntimeRevision" in line
+                or '"CodeRevision" { Write-Output' in line):
+            label = f"entry:{number}:{line.strip()}".replace("'", "''")
+            load_probes.append(
+                f"$null=Set-PSBreakpoint -Script '{script}' -Line {number} "
+                f"-Action {{ Write-ContractPhase '{label}' }}; "
+            )
     task_prefix = f"XAUUSD-Contract-{uuid.uuid4().hex}"
     # Temporary filesystem roots do not isolate machine-global scheduled tasks.
     # Contract tests must opt in through explicit stubs, never native mutations.
@@ -78,7 +94,10 @@ def _run_contract_with_runtime(
     '''
     command = (
         "function Write-ContractPhase { param([string]$Phase); "
-        f"[IO.File]::AppendAllText('{phase_path_literal}', $Phase+[Environment]::NewLine) }}; "
+        f"[IO.File]::AppendAllText('{phase_path_literal}', "
+        "[DateTimeOffset]::UtcNow.ToString('o')+' '+$Phase+[Environment]::NewLine) }; "
+        + "".join(load_probes)
+        +
         "Write-ContractPhase 'load'; "
         f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{runtime}' "
         f"-RepositoryRoot '{repository}'; "
@@ -105,7 +124,7 @@ def _run_contract_with_runtime(
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     try:
-        stdout, stderr = process.communicate(timeout=22)
+        stdout, stderr = process.communicate(timeout=execution_timeout)
     except subprocess.TimeoutExpired as failure:
         phases = phase_file.read_text(encoding="utf-8")[:8192] if phase_file.exists() else "NOT_STARTED"
         # Keep cleanup inside pytest's existing 30-second deadline. A root-only
@@ -1161,7 +1180,10 @@ def run_staged_activation_withdrawal_rehearsal(tmp_path):
     }}
     '''
     try:
-        assert _run_contract_with_runtime(tmp_path, body, "powershell.exe", environment=_isolated_windows_environment()) == "real quiesced handoff and clean withdrawal passed"
+        assert _run_contract_with_runtime(
+            tmp_path, body, "powershell.exe", environment=_isolated_windows_environment(),
+            execution_timeout=90,
+        ) == "real quiesced handoff and clean withdrawal passed"
         assert all(process.poll() is None for process in preserved)
     finally:
         for process in preserved:

@@ -704,6 +704,37 @@ def test_sync_state_round_trip_and_malformed_state_fail_to_empty(tmp_path) -> No
     assert module._read_news_sync_state(state_file) == {}
 
 
+@pytest.mark.parametrize("form", ["absolute", "bare", "normalized", "hardlink", "symlink"])
+def test_validated_state_write_stays_in_authority(tmp_path, form):
+    module = _sync_module()
+    authority = tmp_path / "authority"
+    authority.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"original":true}', encoding="utf-8")
+    target = authority / "state.json"
+    supplied = target
+    if form == "bare":
+        supplied = Path("state.json")
+    elif form == "normalized":
+        supplied = authority / "child" / ".." / "state.json"
+    elif form == "hardlink":
+        import os
+        os.link(outside, target)
+    elif form == "symlink":
+        try:
+            target.symlink_to(outside)
+        except OSError as error:
+            pytest.skip(f"symlink privilege unavailable: {error}")
+    checked = module._validated_sync_state_path(supplied, authority)
+    module._write_news_sync_state(checked, {"cursor": 8})
+    assert json.loads(target.read_text(encoding="utf-8")) == {"cursor": 8}
+    assert outside.read_text(encoding="utf-8") == '{"original":true}'
+    assert set(authority.iterdir()) == {target}
+    assert not target.is_symlink()
+    with pytest.raises(ValueError, match="sync state path"):
+        module._validated_sync_state_path(authority / ".." / "outside.json", authority)
+
+
 def test_sync_status_records_real_success_and_preserves_it_on_error(tmp_path) -> None:
     module = _sync_module()
     status_file = tmp_path / "dashboard-sync-status.json"
