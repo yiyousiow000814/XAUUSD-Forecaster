@@ -136,6 +136,7 @@ def compare_news_queries(database, api, instant, *, deadline_seconds=30, row_bud
         result = {"frozen_at": instant.isoformat(), "receipt_count": receipt_count,
             "compared_display_count": len(optimized), "semantic_equality_verified": optimized == independent,
             "optimized_digest": digest(optimized), "independent_digest": digest(independent),
+            "durable_digest": digest(api._durable_news_evidence_rows(optimized)),
             "sql_sha256": digest(captured["sql"]), "parameters_sha256": digest(captured["parameters"])}
         legacy = captured["sql"][captured["sql"].index("SELECT canonical_event_key AS event_key"):].replace(
             "LEFT JOIN event_aliases AS alias", "LEFT JOIN json_each(?) AS alias")
@@ -198,6 +199,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database-copy", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--historical-failure-evidence", type=Path,
+                        help="Retained reviewed incident artifact; never a new timeout assertion")
     parser.add_argument("--query-comparison-only", action="store_true",
                         help="Development query evidence only; never a release admission receipt")
     args = parser.parse_args()
@@ -251,11 +254,20 @@ def main():
         "dependency_inputs": {str(path.relative_to(ROOT)): digest_file(path)
                               for path in (ROOT / "pyproject.toml", ROOT / "web/package-lock.json")},
         "full_switch_observe": "NOT_RUN", "old_query_reproduced": "NOT_RUN",
+        "historical_failure_evidence_sha256": "NOT_RUN",
         "semantic_equality_verified": "NOT_RUN", "production_evidence": False,
         "provider_boundary": "real Worker store with in-memory SQLite D1 test adapter",
         "critical_status_boundary": "declared synthetic session/heartbeat input",
         "cleanup": "NOT_RUN",
     }
+    if args.historical_failure_evidence is not None:
+        historical = args.historical_failure_evidence.resolve(strict=True)
+        if not 0 < historical.stat().st_size <= 262144:
+            raise ValueError("HISTORICAL_FAILURE_EVIDENCE_SIZE_INVALID")
+        historical_digest = digest_file(historical)
+        if historical_digest != "86d7b591c06a295fa3cb4085bb47e6b42c40274878735602ea712c12b1234447":
+            raise ValueError("HISTORICAL_FAILURE_EVIDENCE_IDENTITY_INVALID")
+        report["historical_failure_evidence_sha256"] = historical_digest
     sys.path.insert(0, str(ROOT))
     api, sync = load("recovery_copy_api", "run_dashboard_api.py"), load("recovery_copy_sync", "run_dashboard_sync.py")
     from xauusd_forecaster.news_projection import receipt_payload_hash
@@ -265,6 +277,8 @@ def main():
     report["node"] = subprocess.check_output([node, "--version"], timeout=5, creationflags=NO_WINDOW).decode().strip()
     counts, reads, posted_bytes = Counter(), [], []
     observed_failures = set()
+    input_stat = database.stat()
+    frozen_at = datetime.now(UTC)
     stop = threading.Event()
     servers, threads = [], []
     worker = None
@@ -279,6 +293,18 @@ def main():
                 json.dumps({"root": str(runtime_owner)}), encoding="utf-8")
             runtime = runtime_owner / ".local/forward"
             runtime.mkdir(parents=True)
+            # Only time and the mutable manifest location are isolated. Execute
+            # the real resource builder on demand, without prewarming the API.
+            real_builder = api._build_news_evidence_resource
+            def frozen_builder(source, **kwargs):
+                return real_builder(source, **{**kwargs, "clock": lambda: frozen_at,
+                    "manifest_path": runtime / "news-generation.json"})
+            api._build_news_evidence_resource = frozen_builder
+            report["resource_time_boundary"] = {
+                "frozen_at": frozen_at.isoformat(),
+                "wall_started_at": datetime.now(UTC).isoformat(),
+                "manifest_boundary": "fresh isolated runtime; not the retained database directory",
+            }
             cert, key = runtime / "cert.pem", runtime / "key.pem"
             openssl = shutil.which("openssl") or str(Path(shutil.which("git")).parents[1] / "usr/bin/openssl.exe")
             subprocess.run([openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
@@ -467,6 +493,21 @@ def main():
             }
             if consumer.returncode != 0 or report["independent_deferred_consumer"]["result"].get("state") != "PASSED":
                 raise RuntimeError("INDEPENDENT_DEFERRED_CONSUMER_REJECTED")
+            # Run after measured API/Sync work, using its exact frozen input.
+            # Legacy SQL timing is not an HTTP timeout and is reported separately.
+            comparison = compare_news_queries(database, api, frozen_at)
+            report["query_comparison"] = comparison
+            report["semantic_equality_verified"] = bool(
+                comparison["semantic_equality_verified"]
+                and comparison["legacy_query_state"] == "COMPLETED"
+                and comparison["legacy_display_equal"] is True
+                and comparison["durable_digest"] == receipt.get("news_recovery", {}).get("snapshot_id")
+                and comparison["compared_display_count"] == report["records"])
+            final_stat = database.stat()
+            report["input_stat_unchanged"] = (input_stat.st_size, input_stat.st_mtime_ns) == (
+                final_stat.st_size, final_stat.st_mtime_ns)
+            if not report["semantic_equality_verified"] or not report["input_stat_unchanged"]:
+                raise RuntimeError("SAME_INPUT_QUERY_EQUIVALENCE_NOT_PROVEN")
             if git("rev-parse", "HEAD") != revision or git("status", "--porcelain=v1", "--untracked-files=all"):
                 raise RuntimeError("SOURCE_CHANGED_DURING_REHEARSAL")
             report["state"] = "API_SYNC_COPY_PASSED"

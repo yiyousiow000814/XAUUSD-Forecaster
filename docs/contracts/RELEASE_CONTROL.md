@@ -907,6 +907,16 @@ remote invariant errors or changed identity are not covered. The existing
 install incident context retains this evidence across the repeated snapshot
 repair and action-time checks; no status file is rewritten to make it healthy.
 
+Historical failure support, same-input result equivalence, target API/Sync
+performance, and injected-failure recovery are distinct evidence claims. The
+copied-data producer hashes the retained reviewed historical artifact and the
+consumer requires that identity to match the incident reference. A new natural
+timeout is not mandatory: a legacy query completing now does not invalidate
+the retained failure. SQL elapsed time is not HTTP latency, and injected timeout
+is never described as natural reproduction. Exact-target clean-source identity,
+same-input full equality, actual API/Sync budgets and verified ACK remain
+mandatory; an old or partial report cannot satisfy them by changing its label.
+
 The existing deferred projection request may include `/api/news-evidence` only
 for that exact incident target. The sole Sync owner advances its normal bounded
 News operation and retains accepted Audit work between pages. Observe requires

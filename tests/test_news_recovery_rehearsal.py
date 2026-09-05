@@ -53,6 +53,7 @@ def test_query_oracle_compares_real_duplicate_null_receipts(tmp_path, row_budget
         assert result["legacy_query_state"] == "COMPLETED"
         assert result["legacy_display_equal"] is True
         assert result["optimized_digest"] == result["independent_digest"]
+        assert len(result["durable_digest"]) == 64
 
 
 def test_request_handler_must_exit_before_rehearsal_cleanup_can_pass():

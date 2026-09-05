@@ -58,31 +58,15 @@ def _legacy_v2_bundle_digest(hashes: dict[str, str]) -> str:
 
 def _run_contract_with_runtime(
     tmp_path: Path, body: str, runtime_executable: str, *, environment=None,
-    execution_timeout: float = 22,
+    execution_timeout: float = 22, controller_script: Path | None = None,
 ) -> str:
     runtime = tmp_path / "runtime"
     repository = tmp_path / "repository"
     runtime.mkdir(exist_ok=True)
     repository.mkdir(exist_ok=True)
-    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    script = controller_script or ROOT / "scripts" / "xauusd_control_center.ps1"
     phase_file = tmp_path / "contract-phases.txt"
     phase_path_literal = str(phase_file).replace("'", "''")
-    # Debugger line probes preserve the actual entrypoint and owner bytes.
-    # They exist only in this owned test process, never in installed code.
-    load_probes = []
-    for number, line in enumerate(script.read_text(encoding="utf-8-sig").splitlines(), 1):
-        if (re.match(r'^\. \(Join-Path \$PSScriptRoot ', line)
-                or line.startswith(("$runtimeControlSourceManifest =", "$runtimeControlFileNames =",
-                                    "$serviceContractCodeRoot =", "$services ="))
-                or "= Get-BusinessRuntimeRevision" in line
-                or '"CodeRevision" { Write-Output' in line):
-            label = f"entry:{number}:{line.strip()}".replace("'", "''")
-            load_probes.append(
-                f"Write-ContractPhase 'probe-register:{number}'; "
-                f"$null=Set-PSBreakpoint -Script '{script}' -Line {number} "
-                f"-Action {{ Write-ContractPhase '{label}' }}; "
-                f"Write-ContractPhase 'probe-registered:{number}'; "
-            )
     task_prefix = f"XAUUSD-Contract-{uuid.uuid4().hex}"
     # Temporary filesystem roots do not isolate machine-global scheduled tasks.
     # Contract tests must opt in through explicit stubs, never native mutations.
@@ -99,8 +83,6 @@ def _run_contract_with_runtime(
         f"[IO.File]::AppendAllText('{phase_path_literal}', "
         "[DateTimeOffset]::UtcNow.ToString('o')+' '+$Phase+[Environment]::NewLine) }; "
         "Write-ContractPhase 'harness-start'; "
-        + "".join(load_probes)
-        +
         "Write-ContractPhase 'load'; "
         f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{runtime}' "
         f"-RepositoryRoot '{repository}'; "
@@ -233,7 +215,9 @@ def test_news_incident_evidence_and_live_resource_admission(tmp_path, runtime_ex
             evidence_sha256='86d7b591c06a295fa3cb4085bb47e6b42c40274878735602ea712c12b1234447'};
         copy_rehearsal=[pscustomobject]@{target_revision=$target;state='API_SYNC_COPY_PASSED';
             baseline_sha256='57add242f930671ff800733ef70290bf9186b8230d0134847285300dc7e3171c';
-            old_query_reproduced=$true;semantic_equality_verified=$true;ack_verified=$true;
+            old_query_reproduced='NOT_RUN';
+            historical_failure_evidence_sha256='86d7b591c06a295fa3cb4085bb47e6b42c40274878735602ea712c12b1234447';
+            semantic_equality_verified=$true;ack_verified=$true;
             records=1919;max_local_get_seconds=5.04;max_post_bytes=25972};
         obligation='EXACT_TARGET_NEWS_READ_AND_REMOTE_ACK_BEFORE_COMMIT'
     };
@@ -247,7 +231,7 @@ def test_news_incident_evidence_and_live_resource_admission(tmp_path, runtime_ex
     $evidence.copy_rehearsal=[pscustomobject]@{path=$reportPath;sha256=(Get-FileHash $reportPath).Hash.ToLowerInvariant()};
     Assert-CollectorNewsRecoveryEvidence $evidence $broken $target;
     $original=$evidence | ConvertTo-Json -Depth 8;
-    foreach($case in @('revision','resource','stage','cause-hash','hash','ack','ack-type','timeout','nan','size','dirty','source','boundary','tampered','missing')) {
+    foreach($case in @('revision','resource','stage','cause-hash','history','hash','ack','ack-type','timeout','nan','size','dirty','source','boundary','tampered','missing')) {
         Write-ContractPhase "evidence:$case";
         $bad=$original | ConvertFrom-Json;
         $bad.copy_rehearsal=$reportJson | ConvertFrom-Json;
@@ -256,6 +240,7 @@ def test_news_incident_evidence_and_live_resource_admission(tmp_path, runtime_ex
             resource {$bad.failure.resource='market_history'}
             stage {$bad.failure.stage='REMOTE_POST'}
             cause-hash {$bad.failure.evidence_sha256='c'*64}
+            history {$bad.copy_rehearsal.historical_failure_evidence_sha256='c'*64}
             hash {$bad.copy_rehearsal.baseline_sha256='e'*64}
             ack {$bad.copy_rehearsal.ack_verified=$false}
             ack-type {$bad.copy_rehearsal.ack_verified='True'}
@@ -448,13 +433,45 @@ def _make_real_control_source(root: Path, *, boundary: str = "") -> str:
     for name in CONTROL_FILES:
         shutil.copy2(ROOT / "scripts" / name, scripts / name)
     if boundary:
+        pattern = re.compile(r'\[Environment\]::GetEnvironmentVariable\(\s*("[^"]+"|\$Name)\s*,\s*"User"\s*\)')
+        configuration = root.parent / "fixture-user-environment.json"
+        values = {name: "" for name in (
+            "XAUUSD_DASHBOARD_URL", "GEMINI_API_KEY", "GEMINI_API_KEYS", "SITES_BYPASS_TOKEN",
+            "CLOUDFLARE_INGEST_URL", "CLOUDFLARE_INGEST_TOKEN", "DASHBOARD_OPERATOR_BRIDGE_TOKEN",
+            "AURUM_LIVE_BROADCAST_PUBLISHER_ENABLED", "LIVE_BROADCAST_PUBLISH_TOKEN",
+            "BLS_API_KEY", "BEA_API_KEY", "FRED_API_KEY", "EIA_API_KEY",
+        )}
+        values["GEMINI_API_KEY"] = "synthetic-configuration-sentinel"
+        fixture_id = uuid.uuid4().hex
+        configuration.write_text(json.dumps({"schema_version": 1, "fixture_id": fixture_id,
+                                              "values": values}), encoding="utf-8")
+        attestation_root = root.parent / "environment-attestations"
+        attestation_root.mkdir(exist_ok=True)
+        prelude = (ROOT / "tests/fixtures/control_plane_user_environment.ps1").read_text(encoding="utf-8")
+        for marker, value in {"__CONFIG_PATH__": str(configuration),
+                              "__CONFIG_DIGEST__": hashlib.sha256(configuration.read_bytes()).hexdigest(),
+                              "__FIXTURE_ID__": fixture_id,
+                              "__ATTESTATION_ROOT__": str(attestation_root)}.items():
+            prelude = prelude.replace(marker, value.replace("'", "''"))
+        replaced = 0
+        for name in CONTROL_FILES:
+            if not name.endswith(".ps1"):
+                continue
+            path = scripts / name
+            text = path.read_text(encoding="utf-8-sig")
+            text, count = pattern.subn(r'(Get-FixtureUserEnvironmentValue -Name \1)', text)
+            replaced += count
+            if re.search(r'GetEnvironmentVariable\([^)]*,\s*["\'](?:User|Machine)["\']', text):
+                raise AssertionError(f"uncontained persistent environment read in {name}")
+            path.write_text(text, encoding="utf-8")
+        assert replaced == 14, "review changed persistent-environment ownership before fixture execution"
         shutil.copy2(ROOT / "scripts/windows-service-launch-contract.json", scripts / "windows-service-launch-contract.json")
         entrypoint = scripts / "xauusd_control_center.ps1"
         source = entrypoint.read_text(encoding="utf-8")
         assert source.count("switch ($Action) {") == 1
         diagnostic, boundary = boundary.split("$null = Get-Command Get-FileHash -ErrorAction Stop", 1)
         source = source.replace('$ErrorActionPreference = "Stop"',
-                                '$ErrorActionPreference = "Stop"\n' + diagnostic, 1)
+                                '$ErrorActionPreference = "Stop"\n' + diagnostic + "\n" + prelude, 1)
         boundary = "$null = Get-Command Get-FileHash -ErrorAction Stop" + boundary
         entrypoint.write_text(source.replace("switch ($Action) {", boundary + "\nswitch ($Action) {"), encoding="utf-8")
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
@@ -472,6 +489,37 @@ def _make_real_control_source(root: Path, *, boundary: str = "") -> str:
     ).stdout.strip()
     subprocess.run(["git", "checkout", "--detach", "-q", revision], cwd=root, check=True)
     return revision
+
+
+@pytest.mark.parametrize("runtime_executable", ["powershell.exe", "pwsh.exe"])
+@pytest.mark.parametrize("case", ["configured", "missing", "tampered", "unknown"])
+def test_generated_bundle_user_environment_is_explicit(tmp_path, runtime_executable, case):
+    boundary = (ROOT / "tests/fixtures/control_plane_staged_boundary.ps1").read_text(encoding="utf-8")
+    boundary = boundary.replace("__FIXTURE_ROOT__", str(tmp_path)).replace("__FIXTURE_ID__", uuid.uuid4().hex)
+    source = tmp_path / "source"
+    _make_real_control_source(source, boundary=boundary)
+    (tmp_path / "business.json").write_text("{}", encoding="utf-8")
+    environment = _isolated_windows_environment()
+    environment["XAUUSD_FIXTURE_CONFIGURATION"] = str(tmp_path / "fixture-user-environment.json")
+    environment["GEMINI_API_KEY"] = "synthetic-process-decoy"
+    if case == "missing":
+        environment.pop("XAUUSD_FIXTURE_CONFIGURATION")
+    elif case == "tampered":
+        with (tmp_path / "fixture-user-environment.json").open("ab") as stream:
+            stream.write(b" ")
+    body = "Get-FixtureUserEnvironmentValue -Name 'GEMINI_API_KEY'"
+    if case == "unknown":
+        body = "Get-FixtureUserEnvironmentValue -Name 'UNDECLARED_SENTINEL'"
+    if case == "configured":
+        assert _run_contract_with_runtime(tmp_path, body, runtime_executable,
+            environment=environment, controller_script=source / "scripts/xauusd_control_center.ps1") == "synthetic-configuration-sentinel"
+    else:
+        reason = {"missing": "FIXTURE_CONFIGURATION_REQUIRED",
+                  "tampered": "FIXTURE_CONFIGURATION_IDENTITY_MISMATCH",
+                  "unknown": "FIXTURE_ENVIRONMENT_KEY_UNDECLARED"}[case]
+        with pytest.raises(AssertionError, match=reason):
+            _run_contract_with_runtime(tmp_path, body, runtime_executable,
+                environment=environment, controller_script=source / "scripts/xauusd_control_center.ps1")
 
 
 def run_staged_installer_active_rehearsal(tmp_path):
@@ -498,6 +546,8 @@ def run_staged_installer_active_rehearsal(tmp_path):
     owners = {}
     children = []
     environment = _isolated_windows_environment()
+    environment["XAUUSD_FIXTURE_CONFIGURATION"] = str(tmp_path / "fixture-user-environment.json")
+    environment["GEMINI_API_KEY"] = "synthetic-process-decoy"
     (tmp_path / "fixture-owned.json").write_text(json.dumps({"fixture": str(tmp_path)}), encoding="utf-8")
     certificate, key = tmp_path / "loopback.crt", tmp_path / "loopback.key"
     openssl = shutil.which("openssl") or str(Path(shutil.which("git")).parents[1] / "usr/bin/openssl.exe")
@@ -1183,9 +1233,12 @@ def run_staged_activation_withdrawal_rehearsal(tmp_path):
     }}
     '''
     try:
+        environment = _isolated_windows_environment()
+        environment["XAUUSD_FIXTURE_CONFIGURATION"] = str(tmp_path / "fixture-user-environment.json")
+        environment["GEMINI_API_KEY"] = "synthetic-process-decoy"
         assert _run_contract_with_runtime(
-            tmp_path, body, "powershell.exe", environment=_isolated_windows_environment(),
-            execution_timeout=90,
+            tmp_path, body, "powershell.exe", environment=environment,
+            execution_timeout=90, controller_script=source / "scripts/xauusd_control_center.ps1",
         ) == "real quiesced handoff and clean withdrawal passed"
         assert all(process.poll() is None for process in preserved)
     finally:

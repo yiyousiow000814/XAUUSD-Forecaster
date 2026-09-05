@@ -752,7 +752,7 @@ function Assert-CollectorNewsRecoveryEvidence {
         [string]$rehearsal.state -cne 'API_SYNC_COPY_PASSED' -or
         [string]$rehearsal.baseline_sha256 -cne
             '57add242f930671ff800733ef70290bf9186b8230d0134847285300dc7e3171c' -or
-        $rehearsal.old_query_reproduced -isnot [bool] -or -not $rehearsal.old_query_reproduced -or
+        [string]$rehearsal.historical_failure_evidence_sha256 -cne [string]$failure.evidence_sha256 -or
         $rehearsal.semantic_equality_verified -isnot [bool] -or -not $rehearsal.semantic_equality_verified -or
         $rehearsal.ack_verified -isnot [bool] -or -not $rehearsal.ack_verified -or
         [int]$rehearsal.records -le 0 -or

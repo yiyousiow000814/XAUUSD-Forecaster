@@ -11,6 +11,9 @@ trap {
     throw $_
 }
 $null = Get-Command Get-FileHash -ErrorAction Stop
+if ((Get-UserEnvironmentValue -Name 'GEMINI_API_KEY') -cne 'synthetic-configuration-sentinel') {
+    throw 'STAGED_CONFIGURATION_SOURCE_MISMATCH'
+}
 $script:fixtureTaskPath = '\XAUUSD-Contract-__FIXTURE_ID__\'
 $taskName = 'XAUUSD-Contract-__FIXTURE_ID__-Main'
 $guardTaskName = 'XAUUSD-Contract-__FIXTURE_ID__-Guard'
