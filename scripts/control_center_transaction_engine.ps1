@@ -1231,8 +1231,9 @@ function Write-DeferredProjectionSyncRequest {
         Where-Object { $null -ne $_ })
     if ($obligations.Count -eq 0) { return $null }
     $routes = @($obligations | ForEach-Object { [string]$_.route })
+    $allowedRoutes = @(Get-ReleaseDeferredProjectionRoutes -Target $Transaction.target)
     if (@($routes | Select-Object -Unique).Count -ne $routes.Count -or
-        @($routes | Where-Object { $_ -notin $candidateOnlyProjectionRoutes }).Count) {
+        @($routes | Where-Object { $_ -notin $allowedRoutes }).Count) {
         throw "DEFERRED_PROJECTION_SYNC_REQUEST_INVALID"
     }
     $target = $Transaction.target
@@ -1265,6 +1266,14 @@ function Write-DeferredProjectionSyncRequest {
         required_after = $RequiredAfter.ToUniversalTime().ToString("o")
         routes = @($routes)
         created_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+    if ('/api/news-evidence' -in $routes) {
+        $incident = Get-CollectorClockRecoveryContext
+        $request['collector_recovery'] = @{
+            incident = [string]$incident.incident
+            broken_revision = [string]$incident.broken_revision
+            target_revision = [string]$incident.target_revision
+        }
     }
     Write-ControlCenterJsonAtomic -Path $deferredProjectionSyncRequestPath `
         -Value $request -Depth 6
@@ -1577,15 +1586,20 @@ function Start-ReleasePromotion {
         $semanticReceipt = $qualification.receipts.semantic_contract
         $deferredObligations = @($semanticReceipt.source_identity.subject.deferred_obligations |
             Where-Object { $null -ne $_ })
+        $allowedDeferredRoutes = @(Get-ReleaseDeferredProjectionRoutes -Target $candidate)
         foreach ($obligation in $deferredObligations) {
             if ([string]$obligation.state -ne
                     "DEFERRED_TO_POST_CUTOVER_OBSERVATION" -or
                 [string]$obligation.validation_key -ne [string]$candidate.validation_key -or
                 [string]$obligation.required_producer_revision -ne
                     [string]$candidate.windows_revision -or
-                [string]$obligation.route -notin $candidateOnlyProjectionRoutes) {
+                [string]$obligation.route -notin $allowedDeferredRoutes) {
                 throw "DEFERRED_PROJECTION_OBLIGATION_INVALID"
             }
+        }
+        if ('/api/news-evidence' -in $allowedDeferredRoutes -and
+            '/api/news-evidence' -notin @($deferredObligations.route)) {
+            throw 'COLLECTOR_NEWS_RECOVERY_OBLIGATION_REQUIRED'
         }
         $transactionId = [guid]::NewGuid().ToString()
         $dependencyReceipts = [ordered]@{}
@@ -2298,7 +2312,8 @@ function Test-DeferredProjectionObligations {
     if ($routes.Count -eq 0) {
         return [pscustomobject]@{ state = "PASSED"; reason = "NOT_REQUIRED"; routes = @() }
     }
-    if (@($routes | Where-Object { $_ -notin $candidateOnlyProjectionRoutes }).Count -gt 0 -or
+    $allowedRoutes = @(Get-ReleaseDeferredProjectionRoutes -Target $Target)
+    if (@($routes | Where-Object { $_ -notin $allowedRoutes }).Count -gt 0 -or
         @($routes | Select-Object -Unique).Count -ne $routes.Count) {
         return [pscustomobject]@{
             state = "FAILED"; reason = "DEFERRED_PROJECTION_ROUTE_NOT_ALLOWED"

@@ -894,6 +894,43 @@ new Control Plane establishes supervision only. Database exclusion, Candidate
 qualification, NORMAL Promote and real progress through Observe remain separate
 gates. Access, CPU, Free capacity and Assistant PAUSED requirements are unchanged.
 
+For the same incident only, the recorded old local News evidence GET timeout
+may be retained as a degraded starting fact. Admission requires reviewed
+evidence bound to the broken and target revisions, the local GET stage and
+correlated-alias-scan cause, the retained database baseline, copied-database
+semantic and API-to-Sync acceptance, and a post-cutover recovery obligation.
+The target must contain the already-merged atomicity and News query correction.
+`SYNC DEGRADED` alone is not admission authority. Exact single owners, fresh
+heartbeat, basic API health, snapshot integrity, provider placement and absence
+of conflicting transactions remain unconditional. Other resource failures,
+remote invariant errors or changed identity are not covered. The existing
+install incident context retains this evidence across the repeated snapshot
+repair and action-time checks; no status file is rewritten to make it healthy.
+
+Historical failure support, same-input result equivalence, target API/Sync
+performance, and injected-failure recovery are distinct evidence claims. The
+copied-data producer hashes the retained reviewed historical artifact and the
+consumer requires that identity to match the incident reference. A new natural
+timeout is not mandatory: a legacy query completing now does not invalidate
+the retained failure. SQL elapsed time is not HTTP latency, and injected timeout
+is never described as natural reproduction. Exact-target clean-source identity,
+same-input full equality, actual API/Sync budgets and verified ACK remain
+mandatory; an old or partial report cannot satisfy them by changing its label.
+
+The existing deferred projection request may include `/api/news-evidence` only
+for that exact incident target. The sole Sync owner advances its normal bounded
+News operation and retains accepted Audit work between pages. Observe requires
+the existing serial heavy owner to drain accepted page progress independently
+of heartbeat cadence. Progress is not resource success: an unchanged cursor or
+error cannot trigger an immediate repeated operation, and progress cannot clear
+a retained failure or complete the recovery receipt. Observe requires
+the exact request and transaction, new producer identity and post-cutover local
+read, normal Sync activation ACK, normal resource success, and matching exact
+Worker generation. Missing evidence remains pending under the existing Observe
+deadline; contradictions fail. No Stable commit is permitted without this
+obligation passing. An old-runtime rollback is explicitly a degraded baseline,
+not a claim that the old SQL or absent Collector has recovered.
+
 Candidate at 0% MUST NOT own background, scheduled, queue, or other duplicate
 production side effects. Directed Version Override requests are the only normal
 Candidate Worker traffic; this project does not use random percentage canaries.

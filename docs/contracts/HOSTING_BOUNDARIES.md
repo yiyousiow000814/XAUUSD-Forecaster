@@ -144,6 +144,14 @@
   cleanup excludes fresh staging snapshots. Prepare reconciles staging receipts
   with the actual contiguous persisted prefix and replays only from the first
   gap.
+- News-evidence write acknowledgements bind the exact bounded UTF-8 request
+  SHA-256, snapshot identity and transport contract after the operation succeeds.
+  Sync checks operation-specific booleans, counts and offsets before advancing
+  its checkpoint. HTTP success with malformed, missing or contradictory ACK
+  fields is not acceptance. The request digest does not replace the store's
+  persisted contiguous-prefix and duplicate-batch checks; it avoids a second
+  cross-language JSON canonicalization rule. Older senders may ignore additive
+  ACK fields, but a strict sender must fail closed against an older responder.
 - Pre-promotion News bootstrap freezes one online backup of the authoritative
   production SQLite database with Candidate source semantics and atomically
   persists that exact generation before remote prepare, then advances it through
@@ -281,6 +289,13 @@
   parity remains the release authority. Rollback cancels an incomplete request
   before restoring the prior producer, and no second producer or Sync owner is
   introduced.
+- Pending deferred work does not monopolize the serial heavy lane: alternate
+  admission turns first offer one bounded operation to the earliest due
+  unrelated resource. If none is due, the deferred page may proceed. The
+  resources owned by the pending request are excluded from ordinary admission,
+  avoiding duplicate work. Unchanged progress and failures wait for the next
+  bounded wakeup; progress alone does not clear a recorded failure. Every turn
+  retains the existing per-operation item/byte budgets and independent heartbeat.
 - Local `/api/status` and `/api/critical-status` are the same bounded
   first-paint contract. They include only the fixed recent 90-minute decision
   window and the fixed `news_metrics` aggregate required by the Live headline;

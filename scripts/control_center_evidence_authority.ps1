@@ -3656,6 +3656,19 @@ function Test-CandidateDataParity {
             }
         }
     }
+    if ('/api/news-evidence' -in @(Get-ReleaseDeferredProjectionRoutes -Target $Candidate)) {
+        $results += [pscustomobject]@{
+            route = '/api/news-evidence'
+            acceptance_class = 'INCIDENT_PRODUCER_RECOVERY'
+            state = 'DEFERRED_TO_POST_CUTOVER_OBSERVATION'
+            passed = $false
+            blocking = $false
+            reason = 'EXACT_TARGET_NEWS_READ_AND_REMOTE_ACK_BEFORE_COMMIT'
+            validation_key = [string]$Candidate.validation_key
+            required_producer_revision = [string]$Candidate.windows_revision
+            authority_generated_at = $null
+        }
+    }
     $deferred = @($results | Where-Object {
         [string]$_.state -eq "DEFERRED_TO_POST_CUTOVER_OBSERVATION"
     })

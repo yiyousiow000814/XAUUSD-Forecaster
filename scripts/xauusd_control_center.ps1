@@ -19,7 +19,8 @@ param(
     [int]$TargetProcessId = 0,
     [string]$TargetProcessStartToken = "",
     [switch]$SkipProviderObservation,
-    [switch]$CollectorClockRecovery
+    [switch]$CollectorClockRecovery,
+    [string]$CollectorRecoveryEvidencePath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -1235,9 +1236,19 @@ switch ($Action) {
         if (-not $SourceRoot -or -not $SourceRevision) {
             throw "SourceRoot and SourceRevision are required for InstallControlPlane."
         }
+        $newsEvidence = $null
+        if ($CollectorRecoveryEvidencePath) {
+            if (-not $CollectorClockRecovery -or
+                (Get-Item -LiteralPath $CollectorRecoveryEvidencePath -ErrorAction Stop).Length -gt 65536) {
+                throw 'COLLECTOR_NEWS_RECOVERY_EVIDENCE_INVALID'
+            }
+            $newsEvidence = Get-Content -LiteralPath $CollectorRecoveryEvidencePath -Raw -Encoding UTF8 |
+                ConvertFrom-ReleaseControlJson
+        }
         Invoke-ControlPlaneInstall -VerifiedSourceRoot `
             ([System.IO.Path]::GetFullPath($SourceRoot)) `
-            -TargetRevision $SourceRevision -CollectorClockRecovery:$CollectorClockRecovery | Format-List
+            -TargetRevision $SourceRevision -CollectorClockRecovery:$CollectorClockRecovery `
+            -NewsRecoveryEvidence $newsEvidence | Format-List
     }
     "RecoverCollectorClock" {
         if (-not (Enter-ReleaseTransactionLock)) { throw 'COLLECTOR_RECOVERY_RELEASE_LOCK_REQUIRED' }

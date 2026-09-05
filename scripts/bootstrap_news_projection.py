@@ -35,6 +35,7 @@ from scripts.run_dashboard_api import (  # noqa: E402
 )
 from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
 from xauusd_forecaster.news_projection import NewsProjectionGeneration  # noqa: E402
+from xauusd_forecaster.runtime_paths import PRODUCTION_RUNTIME_STATE_ROOT  # noqa: E402
 
 VERSION_HOST = re.compile(
     r"^[a-z0-9-]+-aurum-signal-room\.[a-z0-9-]+\.workers\.dev$"
@@ -259,7 +260,7 @@ def main() -> int:
     if args.max_cycles < 1 or args.retry_seconds < 0:
         parser.error("cycle and retry bounds are invalid")
     config = json.loads(args.config.read_text(encoding="utf-8"))
-    state_file = _validated_sync_state_path(args.state_file)
+    state_file = _validated_sync_state_path(args.state_file, PRODUCTION_RUNTIME_STATE_ROOT)
     artifact_path = state_file.with_name(
         f"{state_file.stem}-generation.json.gz"
     )

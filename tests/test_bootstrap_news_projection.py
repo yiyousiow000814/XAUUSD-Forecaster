@@ -17,6 +17,27 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(MODULE)
 
 
+@pytest.mark.parametrize("authorized", [True, False])
+def test_cli_state_path_uses_runtime_authority(tmp_path, monkeypatch, authorized):
+    authority = tmp_path / "runtime"
+    authority.mkdir()
+    config = tmp_path / "config.json"
+    config.write_text("{}", encoding="utf-8")
+    state = (authority if authorized else tmp_path) / "bootstrap.json"
+    monkeypatch.setattr(MODULE, "PRODUCTION_RUNTIME_STATE_ROOT", authority)
+    monkeypatch.setattr(MODULE.sys, "argv", [
+        "bootstrap_news_projection.py", "--config", str(config),
+        "--state-file", str(state), "--version-host", "not-a-version",
+    ])
+    # Origin rejection happens only after the real runtime-path validation;
+    # neither branch can make a network call or write state.
+    with pytest.raises(ValueError, match=(
+        "version host" if authorized else "sync state path"
+    )):
+        MODULE.main()
+    assert not state.exists()
+
+
 @pytest.mark.parametrize("value", [
     "https://abc12345-aurum-signal-room.example.workers.dev",
     "https://01abc234-aurum-signal-room.example.workers.dev/",

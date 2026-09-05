@@ -704,6 +704,117 @@ function Wait-ControlPlaneInstallActivation {
     }
 }
 
+function Assert-CollectorNewsRecoveryEvidence {
+    param(
+        [Parameter(Mandatory = $true)][object]$Evidence,
+        [Parameter(Mandatory = $true)][string]$BrokenRevision,
+        [Parameter(Mandatory = $true)][string]$TargetRevision
+    )
+    # This is the recorded, reviewed incident, not a generic degraded-service
+    # allowance. Evidence is retained in the existing install incident context.
+    $failure = $Evidence.failure
+    # A supplied PASS label is not an execution artifact. Consume the retained
+    # measured report bytes, and require exact identity before using its facts.
+    $rehearsal = $null
+    try {
+        $artifact = $Evidence.copy_rehearsal
+        if ([string]$artifact.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+            -not [IO.Path]::IsPathRooted([string]$artifact.path)) { throw 'invalid artifact reference' }
+        $file = Get-Item -LiteralPath ([string]$artifact.path) -ErrorAction Stop
+        if ($file.PSIsContainer -or $file.Length -le 0 -or $file.Length -gt 65536) {
+            throw 'invalid artifact size'
+        }
+        $bytes = [IO.File]::ReadAllBytes($file.FullName)
+        $hasher = [Security.Cryptography.SHA256]::Create()
+        try { $digest = ([BitConverter]::ToString($hasher.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+        finally { $hasher.Dispose() }
+        if ($digest -cne [string]$artifact.sha256) { throw 'artifact integrity mismatch' }
+        $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+        $rehearsal = ConvertFrom-ReleaseControlJson -Json $text
+        if ($rehearsal.source_dirty -isnot [bool] -or $rehearsal.source_dirty -or
+            [string]$rehearsal.source_revision -cne $TargetRevision -or
+            [string]$rehearsal.execution_boundary -cne 'REAL_API_CONTINUOUS_SYNC_ISOLATED_ACK') {
+            throw 'artifact execution identity mismatch'
+        }
+    } catch { throw 'COLLECTOR_NEWS_RECOVERY_EVIDENCE_INVALID' }
+    if ([string]$Evidence.incident -cne 'COLLECTOR_CLOCK_EVENT_ATOMICITY' -or
+        $BrokenRevision -cne 'ffe1de29c0891cc3a3cf3d602f3d3ee657faa9b8' -or
+        [string]$Evidence.broken_revision -cne $BrokenRevision -or
+        [string]$Evidence.target_revision -cne $TargetRevision -or
+        $TargetRevision -notmatch '^[0-9a-f]{40}$' -or $TargetRevision -ceq $BrokenRevision -or
+        [string]$failure.resource -cne 'news_evidence' -or
+        [string]$failure.route -cne '/api/news-evidence' -or
+        [string]$failure.stage -cne 'LOCAL_GET_BEFORE_REMOTE_PREPARE' -or
+        [string]$failure.root_cause -cne 'NEWS_RECEIPT_ALIAS_CORRELATED_SCAN' -or
+        [string]$failure.evidence_sha256 -cne
+            '86d7b591c06a295fa3cb4085bb47e6b42c40274878735602ea712c12b1234447' -or
+        [string]$rehearsal.target_revision -cne $TargetRevision -or
+        [string]$rehearsal.state -cne 'API_SYNC_COPY_PASSED' -or
+        [string]$rehearsal.baseline_sha256 -cne
+            '57add242f930671ff800733ef70290bf9186b8230d0134847285300dc7e3171c' -or
+        [string]$rehearsal.historical_failure_evidence_sha256 -cne [string]$failure.evidence_sha256 -or
+        $rehearsal.semantic_equality_verified -isnot [bool] -or -not $rehearsal.semantic_equality_verified -or
+        $rehearsal.ack_verified -isnot [bool] -or -not $rehearsal.ack_verified -or
+        [int]$rehearsal.records -le 0 -or
+        [double]::IsNaN([double]$rehearsal.max_local_get_seconds) -or
+        [double]::IsInfinity([double]$rehearsal.max_local_get_seconds) -or
+        [double]$rehearsal.max_local_get_seconds -le 0 -or
+        [double]$rehearsal.max_local_get_seconds -ge 20 -or
+        [int]$rehearsal.max_post_bytes -le 0 -or
+        [int]$rehearsal.max_post_bytes -gt 80000 -or
+        [string]$Evidence.obligation -cne 'EXACT_TARGET_NEWS_READ_AND_REMOTE_ACK_BEFORE_COMMIT') {
+        throw 'COLLECTOR_NEWS_RECOVERY_EVIDENCE_INVALID'
+    }
+}
+
+function Get-CollectorNewsDegradedObservation {
+    param(
+        [Parameter(Mandatory = $true)][object]$Evidence,
+        [Parameter(Mandatory = $true)][string]$BrokenRevision,
+        [Parameter(Mandatory = $true)][string]$TargetRevision
+    )
+    Assert-CollectorNewsRecoveryEvidence -Evidence $Evidence `
+        -BrokenRevision $BrokenRevision -TargetRevision $TargetRevision
+    $status = Get-Content -LiteralPath (Join-Path $runtimeForwardRoot 'dashboard-sync-status.json') `
+        -Raw -Encoding UTF8 | ConvertFrom-ReleaseControlJson
+    $now = [DateTimeOffset]::UtcNow
+    $heartbeat = ConvertTo-ReleaseTimestampUtc -Value $status.last_success
+    $failed = @($status.degraded_resources | Where-Object { $null -ne $_ })
+    $observations = @($status.resource_observations | Where-Object {
+        [string]$_.status -cne 'OK'
+    })
+    $heartbeatObservation = @($status.resource_observations | Where-Object {
+        [string]$_.target -ceq 'cloudflare' -and [string]$_.resource -ceq 'heartbeat' -and
+        [string]$_.status -ceq 'OK'
+    })
+    $heartbeatCompleted = if ($heartbeatObservation.Count -eq 1) {
+        ConvertTo-ReleaseTimestampUtc -Value $heartbeatObservation[0].completed_at
+    } else { [DateTimeOffset]::MinValue }
+    if ([string]$status.status -cne 'DEGRADED' -or $status.last_error -or
+        $heartbeat -eq [DateTimeOffset]::MinValue -or $heartbeat -gt $now -or
+        ($now - $heartbeat).TotalSeconds -gt 120 -or
+        $heartbeatCompleted -eq [DateTimeOffset]::MinValue -or $heartbeatCompleted -gt $now -or
+        ($now - $heartbeatCompleted).TotalSeconds -gt 120 -or
+        $failed.Count -ne 1 -or $observations.Count -ne 1 -or
+        [string]$failed[0].target -cne 'cloudflare' -or
+        [string]$failed[0].resource -cne 'news_evidence' -or
+        [string]$failed[0].error_type -cne 'TimeoutError' -or
+        [string]$failed[0].error_code -cne 'TRANSPORT_UNAVAILABLE' -or
+        [string]$failed[0].error -cne 'timed out' -or
+        [string]$observations[0].target -cne 'cloudflare' -or
+        [string]$observations[0].resource -cne 'news_evidence' -or
+        [string]$observations[0].status -cne 'ERROR') {
+        throw 'COLLECTOR_NEWS_RECOVERY_OBSERVATION_CHANGED'
+    }
+    return [pscustomobject]@{
+        state = 'DEGRADED_RECOVERY_BASELINE'
+        observed_at = $now.ToString('o')
+        heartbeat_at = $heartbeat.ToString('o')
+        failure = $failed[0]
+        resource_observation = $observations[0]
+    }
+}
+
 function Assert-CollectorClockRecoveryContext {
     param([Parameter(Mandatory = $true)][object]$Context)
     $descriptor = Get-WatchdogSingletonDescriptor
@@ -720,6 +831,10 @@ function Assert-CollectorClockRecoveryContext {
             'b139c8a9d913c237e8e9e3ebc677a1144cd8ad2f9e0adee6b62ed8cd2a7fa5ee') {
         throw 'COLLECTOR_RECOVERY_CONTEXT_INVALID'
     }
+    if ($Context.news_recovery_evidence) {
+        Assert-CollectorNewsRecoveryEvidence -Evidence $Context.news_recovery_evidence `
+            -BrokenRevision ([string]$Context.broken_revision) -TargetRevision ([string]$Context.target_revision)
+    }
 }
 
 function Get-CollectorClockRecoveryContext {
@@ -730,6 +845,17 @@ function Get-CollectorClockRecoveryContext {
     if (-not $state.collector_clock_recovery) { return $null }
     Assert-CollectorClockRecoveryContext -Context $state.collector_clock_recovery
     return $state.collector_clock_recovery
+}
+
+function Get-ReleaseDeferredProjectionRoutes {
+    param([Parameter(Mandatory = $true)][object]$Target)
+    $allowed = @($candidateOnlyProjectionRoutes)
+    $context = Get-CollectorClockRecoveryContext
+    if ($context -and $context.news_recovery_evidence -and
+        [string]$context.target_revision -ceq [string]$Target.windows_revision) {
+        $allowed += '/api/news-evidence'
+    }
+    return $allowed
 }
 
 function Test-CollectorClockRecoveryHold {
@@ -810,7 +936,8 @@ function Get-CollectorClockRecoveryBaseline {
     param(
         [Parameter(Mandatory = $true)][string]$VerifiedSourceRoot,
         [Parameter(Mandatory = $true)][string]$TargetRevision,
-        [switch]$SupervisionRecovered
+        [switch]$SupervisionRecovered,
+        [object]$NewsRecoveryEvidence = $null
     )
     # Admission for this incident only. This read-only function cannot install,
     # repair a database, release a mutex or start a service.
@@ -848,7 +975,20 @@ function Get-CollectorClockRecoveryBaseline {
             [string]$bundle.source_revision -cne $TargetRevision) {
             throw 'COLLECTOR_RECOVERY_SUPERVISION_CONTEXT_UNPROVED'
         }
+        $NewsRecoveryEvidence = $context.news_recovery_evidence
     }
+    if ($NewsRecoveryEvidence) {
+        Assert-CollectorNewsRecoveryEvidence -Evidence $NewsRecoveryEvidence `
+            -BrokenRevision ([string]$revision) -TargetRevision $TargetRevision
+        $lineage = Invoke-Utf8NativeProcess -FilePath 'git.exe' -Arguments @(
+            '-C', $VerifiedSourceRoot, 'merge-base', '--is-ancestor',
+            '5d3803087c435402c12369713f6a4dc136711cff', $TargetRevision
+        ) -TimeoutMilliseconds 15000
+        if ($lineage.timed_out -or $lineage.exit_code -ne 0) {
+            throw 'COLLECTOR_RECOVERY_TARGET_FIXES_UNPROVED'
+        }
+    }
+    $newsObservation = $null
     $all = @(Get-CimInstance Win32_Process -ErrorAction Stop)
     if (@($all | Where-Object {
         $_.Name -in @('python.exe', 'powershell.exe', 'pwsh.exe', 'wscript.exe') -and
@@ -914,7 +1054,10 @@ function Get-CollectorClockRecoveryBaseline {
         })
         if ($required) {
             $health = Get-ServiceState -Service $service -Processes $matches
-            if ($health -notin @('RUNNING', 'LIVE', 'MARKET CLOSED', 'API OK', 'SYNC OK')) {
+            if ($service.Key -eq 'sync' -and $health -ceq 'SYNC DEGRADED' -and $NewsRecoveryEvidence) {
+                $newsObservation = Get-CollectorNewsDegradedObservation -Evidence $NewsRecoveryEvidence `
+                    -BrokenRevision ([string]$revision) -TargetRevision $TargetRevision
+            } elseif ($health -notin @('RUNNING', 'LIVE', 'MARKET CLOSED', 'API OK', 'SYNC OK')) {
                 throw "COLLECTOR_RECOVERY_SERVICE_UNHEALTHY:$($service.Key):$health"
             }
             if ($service.Key -eq 'quote' -and -not (Get-BrokerMarketSession)) {
@@ -955,6 +1098,8 @@ function Get-CollectorClockRecoveryBaseline {
         previous_watchdog_receipt = $inventory.receipt
         services = [pscustomobject]$owners
         snapshot = $evidence
+        news_recovery_evidence = $NewsRecoveryEvidence
+        news_degraded_observation = $newsObservation
     }
 }
 
@@ -962,7 +1107,8 @@ function Invoke-ControlPlaneInstall {
     param(
         [Parameter(Mandatory = $true)][string]$VerifiedSourceRoot,
         [Parameter(Mandatory = $true)][string]$TargetRevision,
-        [switch]$CollectorClockRecovery
+        [switch]$CollectorClockRecovery,
+        [object]$NewsRecoveryEvidence = $null
     )
     if ($TargetRevision -notmatch '^[0-9a-f]{40}$') {
         throw "CONTROL_BUNDLE_EXACT_REVISION_REQUIRED"
@@ -997,7 +1143,8 @@ function Invoke-ControlPlaneInstall {
         catch [Threading.AbandonedMutexException] { $bootstrapMutexHeld = $true }
         if (-not $bootstrapMutexHeld) { throw 'COLLECTOR_RECOVERY_BOOTSTRAP_OWNER_PRESENT' }
         $incidentBaseline = Get-CollectorClockRecoveryBaseline `
-            -VerifiedSourceRoot $VerifiedSourceRoot -TargetRevision $TargetRevision
+            -VerifiedSourceRoot $VerifiedSourceRoot -TargetRevision $TargetRevision `
+            -NewsRecoveryEvidence $NewsRecoveryEvidence
         $oldOwner = $incidentBaseline.previous_watchdog_receipt
         $oldHeartbeat = $null
     } else {

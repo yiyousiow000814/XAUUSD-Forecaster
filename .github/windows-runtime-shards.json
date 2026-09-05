@@ -353,6 +353,7 @@
         "scripts/rehearse_control_plane_takeover.py",
         "tests/test_control_plane_install.py",
         "tests/fixtures/control_plane_staged_boundary.ps1",
+        "tests/fixtures/control_plane_user_environment.ps1",
         "tests/fixtures/staged_sync_owner.py",
         "scripts/control_center_install.ps1",
         "scripts/control_center_watchdog_singleton.ps1",
