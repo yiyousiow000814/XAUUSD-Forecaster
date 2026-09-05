@@ -891,7 +891,10 @@ def _news_evidence_display_rows(
                     event_key_aliases[event_key] = canonical_key
 
         visibility_rows = connection.execute(
-            f"""SELECT canonical_event_key AS event_key,
+            f"""WITH event_aliases AS MATERIALIZED (
+                   SELECT key,value FROM json_each(?)
+               )
+               SELECT canonical_event_key AS event_key,
                       count(*) AS frozen_model_uses,
                       count(DISTINCT source_decision_id) AS frozen_decisions,
                       count(DISTINCT event_source_hash) AS frozen_versions,
@@ -904,7 +907,7 @@ def _news_evidence_display_rows(
                         COALESCE(alias.value, receipt.event_key)
                           AS canonical_event_key
                  FROM {receipt_source} AS receipt
-                 LEFT JOIN json_each(?) AS alias
+                 LEFT JOIN event_aliases AS alias
                    ON alias.key=receipt.event_key
                )
                GROUP BY canonical_event_key""",

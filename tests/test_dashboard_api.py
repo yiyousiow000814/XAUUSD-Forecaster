@@ -995,9 +995,31 @@ def test_news_evidence_display_orders_events_by_latest_publication_time() -> Non
     assert [row["event_key"] for row in rows] == ["new-unseen", "old-used"]
 
 
-def test_news_evidence_display_reconciles_event_identity_handover() -> None:
+@pytest.mark.parametrize("include_auxiliary", [False, True])
+def test_news_evidence_display_reconciles_event_identity_handover(include_auxiliary) -> None:
     module = _dashboard_module()
-    connection = sqlite3.connect(":memory:")
+
+    class MeasuredConnection(sqlite3.Connection):
+        reference = False
+        visibility_steps = 0
+
+        def execute(self, sql, parameters=(), /):
+            if "SELECT canonical_event_key AS event_key" not in sql:
+                return super().execute(sql, parameters)
+            if self.reference:
+                # Prior query is a semantic oracle, never a production fallback.
+                sql = sql[sql.index("SELECT canonical_event_key AS event_key"):]
+                sql = sql.replace("LEFT JOIN event_aliases AS alias", "LEFT JOIN json_each(?) AS alias")
+            self.visibility_steps = 0
+
+            def count_work():
+                self.visibility_steps += 100
+                return 0
+
+            self.set_progress_handler(count_work, 100)
+            return super().execute(sql, parameters)
+
+    connection = sqlite3.connect(":memory:", factory=MeasuredConnection)
     connection.row_factory = sqlite3.Row
     connection.executescript(
         """
@@ -1070,6 +1092,30 @@ def test_news_evidence_display_reconciles_event_identity_handover() -> None:
     other = next(row for row in rows if row["event_key"] == "other-key")
     assert other["frozen_model_uses"] == 2
     assert other["frozen_decisions"] == 2
+
+    # Preserve handover aggregation (including shared decisions and both receipt
+    # owners), while avoiding a scan of all aliases for every historical use.
+    connection.set_progress_handler(None, 0)
+    if include_auxiliary:
+        connection.execute("CREATE TABLE news_only_visibility_receipts_v1 AS SELECT * FROM news_model_visibility_receipts_v1 WHERE 0")
+    for alias in range(64):
+        connection.execute("INSERT INTO news_model_visibility_events_v1 VALUES (?,?,?,?,?,?,?,?)",
+                           (f"hash-{alias}", f"alias-{alias}", *article, "[]", "SINGLE_RELIABLE"))
+        table = "news_only_visibility_receipts_v1" if include_auxiliary and alias % 2 else "news_model_visibility_receipts_v1"
+        connection.executemany(f"INSERT INTO {table} VALUES (?,?,?,?,?,?)", [
+            (f"shared-{decision}", "2026-08-10T02:00:00+00:00", "FULL", "model-v1",
+             f"alias-{alias}", f"hash-{alias}") for decision in range(32)
+        ])
+    optimized = module._news_evidence_display_rows(connection, current)
+    optimized_steps = connection.visibility_steps
+    connection.set_progress_handler(None, 0)
+    connection.reference = True
+    reference = module._news_evidence_display_rows(connection, current)
+    reference_steps = connection.visibility_steps
+    connection.set_progress_handler(None, 0)
+    assert optimized == reference
+    assert 0 < optimized_steps < reference_steps / 3
+    connection.close()
 
 
 def test_deployment_provenance_discovers_git_from_standalone_module_root(

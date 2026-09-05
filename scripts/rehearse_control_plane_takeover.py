@@ -15,7 +15,14 @@ def main() -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     with tempfile.TemporaryDirectory(prefix="xauusd-staged-active-") as temporary:
-        module.run_staged_installer_active_rehearsal(Path(temporary))
+        root = Path(temporary).resolve(strict=True)
+        withdrawal = root / "withdrawal"
+        withdrawal.mkdir()
+        module.run_staged_activation_withdrawal_rehearsal(withdrawal)
+        print("STAGED_ACTIVATION_WITHDRAWAL_PASSED", flush=True)
+        active = root / "active"
+        active.mkdir()
+        module.run_staged_installer_active_rehearsal(active)
     print("STAGED_ACTIVE_TAKEOVER_PASSED; SYNC_TIMEOUT_ISOLATED; OWNED_PROCESSES_CLEANED")
 
 

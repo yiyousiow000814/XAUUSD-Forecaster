@@ -23,7 +23,7 @@ function Assert-FixturePath {
     }
     if ($resolved -ine $script:fixtureRoot -and
         -not $resolved.StartsWith($script:fixtureRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'STAGED_PATH_OUTSIDE_OWNERSHIP'
+        throw "STAGED_PATH_OUTSIDE_OWNERSHIP: target=$resolved; root=$script:fixtureRoot"
     }
 }
 Assert-FixturePath $moduleRoot

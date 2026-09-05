@@ -281,6 +281,9 @@ def _make_real_control_source(root: Path, *, boundary: str = "") -> str:
 
 def run_staged_installer_active_rehearsal(tmp_path):
     """Real lifecycle with child-inherited, fail-before-mutation environment adapters."""
+    # Hosted Windows TEMP can use an 8.3 user alias while PowerShell resolves
+    # the same directory to its long name. Compare one physical root identity.
+    tmp_path = tmp_path.resolve(strict=True)
     boundary = (ROOT / "tests/fixtures/control_plane_staged_boundary.ps1").read_text(encoding="utf-8")
     boundary = boundary.replace("__FIXTURE_ROOT__", str(tmp_path)).replace("__FIXTURE_ID__", uuid.uuid4().hex)
     source = tmp_path / "source"
@@ -354,6 +357,7 @@ def run_staged_installer_active_rehearsal(tmp_path):
 
     provider = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(certificate, key)
     provider.socket = context.wrap_socket(provider.socket, server_side=True)
     serving = threading.Thread(target=provider.serve_forever, daemon=True)
@@ -909,8 +913,9 @@ def test_clean_staged_bundle_produces_quiesced_preflight_without_checkout_fallba
     assert rejected == "CONTROL_BUNDLE_STARTUP_PREFLIGHT_FAILED"
 
 
-def test_real_staged_zero_owner_handoff_creates_its_own_quiesced_receipt_and_preserves_processes(tmp_path):
+def run_staged_activation_withdrawal_rehearsal(tmp_path):
     """Real launcher/bundle/mutex/heartbeat; withdraw before granting ACTIVE."""
+    tmp_path = tmp_path.resolve(strict=True)
     source = tmp_path / "source"
     boundary = (ROOT / "tests/fixtures/control_plane_staged_boundary.ps1").read_text(encoding="utf-8")
     boundary = boundary.replace("__FIXTURE_ROOT__", str(tmp_path)).replace("__FIXTURE_ID__", uuid.uuid4().hex)

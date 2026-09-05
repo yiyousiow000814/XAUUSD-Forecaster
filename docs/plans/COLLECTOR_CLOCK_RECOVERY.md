@@ -150,3 +150,30 @@ map selects the rehearsal for its adapters and affected lifecycle/Sync owners;
 the existing Windows aggregator requires its successful completion. It includes
 real TLS loopback traffic and the unchanged 20-second transport timeout, without
 production secrets, network targets or scheduled-task mutations.
+
+## Proven News evidence timeout boundary
+
+A bounded nonblocking stack capture of the existing production owners' scheduled
+retry on 5 September 2026, 15:40:56–15:41:15 Kuala Lumpur, identified the initial
+local News evidence GET, before any remote prepare/stage/activate. The API was
+executing the visibility aggregation in `_news_evidence_display_rows`; the Sync
+owner was waiting for response headers. The resource's normal failure path then
+recorded its 58th failure and one-hour backoff. Heartbeat success did not clear it.
+
+The copied-database query plan scans the JSON alias virtual table for each
+receipt. Materializing that same alias relation once within the statement allows
+an automatic indexed lookup. This changes no canonical identity, aggregation,
+schema, data, timeout, receipt or publication contract. Existing handover tests
+now compare exact output with the former query for both receipt owners and
+measure SQLite VM work; they do not substitute wall-clock timing for correctness.
+
+On the independent existing database copy, the corrected exact resource builder
+completed in 5.150 seconds and produced 1,919 records. This is copied-data
+execution evidence, not production recovery or full source-first efficiency
+acceptance. The query still aggregates historical receipts when a generation
+must be built; unrelated Sync revision/ACK optimizations remain outstanding.
+
+Real activation withdrawal belongs to the same required rehearsal shard as
+ACTIVE takeover. Both cases execute; neither is removed to fit the unit budget.
+Hosted short-path aliases resolve to one physical fixture root before applying
+the unchanged deny boundary. Test TLS explicitly requires TLS 1.2 or newer.
