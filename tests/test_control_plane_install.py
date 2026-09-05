@@ -261,6 +261,10 @@ def _make_real_control_source(root: Path, *, boundary: str = "") -> str:
         entrypoint = scripts / "xauusd_control_center.ps1"
         source = entrypoint.read_text(encoding="utf-8")
         assert source.count("switch ($Action) {") == 1
+        diagnostic, boundary = boundary.split("$null = Get-Command Get-FileHash -ErrorAction Stop", 1)
+        source = source.replace('$ErrorActionPreference = "Stop"',
+                                '$ErrorActionPreference = "Stop"\n' + diagnostic, 1)
+        boundary = "$null = Get-Command Get-FileHash -ErrorAction Stop" + boundary
         entrypoint.write_text(source.replace("switch ($Action) {", boundary + "\nswitch ($Action) {"), encoding="utf-8")
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.name", "Contract Test"], cwd=root, check=True)

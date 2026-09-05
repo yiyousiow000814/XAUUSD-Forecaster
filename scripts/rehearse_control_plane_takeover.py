@@ -18,11 +18,21 @@ def main() -> None:
         root = Path(temporary).resolve(strict=True)
         withdrawal = root / "withdrawal"
         withdrawal.mkdir()
-        module.run_staged_activation_withdrawal_rehearsal(withdrawal)
-        print("STAGED_ACTIVATION_WITHDRAWAL_PASSED", flush=True)
-        active = root / "active"
-        active.mkdir()
-        module.run_staged_installer_active_rehearsal(active)
+        try:
+            module.run_staged_activation_withdrawal_rehearsal(withdrawal)
+            print("STAGED_ACTIVATION_WITHDRAWAL_PASSED", flush=True)
+            active = root / "active"
+            active.mkdir()
+            module.run_staged_installer_active_rehearsal(active)
+        except Exception:
+            for phase in ("withdrawal", "active"):
+                diagnostic = root / phase / "child-failure.txt"
+                if diagnostic.exists():
+                    print(diagnostic.read_text(encoding="utf-8")[:8192], flush=True)
+                state = root / phase / "runtime/.local/forward/control-watchdog-heartbeat.json"
+                if state.exists():
+                    print(state.read_text(encoding="utf-8")[:8192], flush=True)
+            raise
     print("STAGED_ACTIVE_TAKEOVER_PASSED; SYNC_TIMEOUT_ISOLATED; OWNED_PROCESSES_CLEANED")
 
 

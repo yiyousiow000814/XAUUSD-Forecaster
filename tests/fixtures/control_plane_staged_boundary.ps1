@@ -1,6 +1,15 @@
 # Test-only external-environment adapter, inserted before fixture dispatch.
 # Installer, activation, mutex, bundle and heartbeat implementations stay real.
 $script:fixtureRoot = '__FIXTURE_ROOT__'
+trap {
+    # Child exceptions otherwise disappear behind the hidden canonical launcher.
+    # This fixed fixture-only path contains no HTTP payloads or environment data.
+    $diagnostic = ([string]$_.Exception.Message) + [Environment]::NewLine + $_.ScriptStackTrace
+    if ($diagnostic.Length -gt 8192) { $diagnostic = $diagnostic.Substring(0,8192) }
+    [IO.File]::WriteAllText((Join-Path $script:fixtureRoot 'child-failure.txt'), $diagnostic,
+        [Text.UTF8Encoding]::new($false))
+    throw $_
+}
 $null = Get-Command Get-FileHash -ErrorAction Stop
 $script:fixtureTaskPath = '\XAUUSD-Contract-__FIXTURE_ID__\'
 $taskName = 'XAUUSD-Contract-__FIXTURE_ID__-Main'
