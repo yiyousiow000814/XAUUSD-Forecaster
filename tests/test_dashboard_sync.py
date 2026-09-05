@@ -1655,6 +1655,51 @@ def test_news_evidence_malformed_http_success_never_acknowledges(monkeypatch, wi
         module._post_news_evidence("https://fixture.invalid", body, {"token": "fixture"})
 
 
+@pytest.mark.parametrize("deferred_state", ["PROGRESS", "PENDING", "ERROR"])
+def test_deferred_heavy_turns_yield_to_due_resources_without_duplicate_owners(
+    monkeypatch, tmp_path, deferred_state,
+):
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import UTC, datetime, timedelta
+
+    module = _sync_module()
+    config = module.configure_runtime_state({
+        "local_status_url": "http://127.0.0.1:1/api/status",
+        "targets": [{"name": "cloudflare", "token": "fixture",
+                     "remote_ingest_url": "https://127.0.0.1:2/api/ingest"}],
+    }, tmp_path)
+    target = module.configured_targets(config)[0]
+    now = datetime.now(UTC)
+    module._write_news_sync_state(Path(target["resource_schedule_state_file"]), {
+        "schema_version": 1, "resources": {policy[0]: {"next_run_at": (
+            now - timedelta(seconds=10) if policy[0] in
+            {"learning", "market_chart", "news_evidence", "audit"} else now + timedelta(hours=1)
+        ).isoformat()} for policy in module.RESOURCE_POLICIES},
+    })
+    calls = []
+    monkeypatch.setattr(module, "_deferred_projection_pending", lambda _: True)
+    monkeypatch.setattr(module, "_read_deferred_projection_request", lambda _: {
+        "routes": ["/api/news-evidence", "/api/audit-briefs"],
+    })
+    def deferred(*_):
+        calls.append("deferred")
+        return module.SyncResourceResults(
+            [{"resource": "deferred_projection"}] if deferred_state == "ERROR" else [],
+            [] if deferred_state == "PENDING" else [{"target": "cloudflare",
+                "resource": "deferred_projection", "status": deferred_state}],
+        )
+    monkeypatch.setattr(module, "sync_deferred_projection_once", deferred)
+    monkeypatch.setattr(module, "_sync_learning_summary", lambda *_: calls.append("learning"))
+    monkeypatch.setattr(module, "_sync_market", lambda *_: calls.append("market_chart"))
+    monkeypatch.setattr(module, "_sync_news_evidence", lambda *_: pytest.fail("second News owner"))
+    monkeypatch.setattr(module, "_sync_audit", lambda *_: pytest.fail("replayed accepted Audit"))
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        for turn in range(5):
+            module._submit_resource_lane(executor, "heavy", [target], config,
+                                         prefer_regular=bool(turn % 2)).result(timeout=5)
+    assert calls == ["deferred", "learning", "deferred", "market_chart", "deferred"]
+
+
 def test_news_evidence_python_bytes_worker_store_and_ack_consumer(monkeypatch):
     import base64
     import shutil
@@ -1681,13 +1726,19 @@ def test_news_evidence_python_bytes_worker_store_and_ack_consumer(monkeypatch):
                          ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
               for request in requests]
     result = subprocess.run(
-        [node, str(module.MODULE_ROOT / "tests/fixtures/news_evidence_ack_worker.mjs")],
+        [node, "--import", (module.MODULE_ROOT / "web/tests/register-cloudflare-worker-loader.mjs").as_uri(),
+         str(module.MODULE_ROOT / "tests/fixtures/news_evidence_ack_worker.mjs")],
         input=json.dumps([base64.b64encode(body).decode("ascii") for body in bodies]),
         capture_output=True, text=True, encoding="utf-8", timeout=15, check=True,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     observed = json.loads(result.stdout)
     assert observed["page"]["items"] == items
+    from xauusd_forecaster.news_projection import receipt_payload_hash
+    assert observed["inspection"] == {
+        "snapshot_id": snapshot, "count": 1, "expected_count": 1,
+        "content_digest": receipt_payload_hash(items),
+    }
     for body, ack in zip(bodies, observed["results"], strict=True):
         monkeypatch.setattr(module, "_post_json", lambda *_, ack=ack: ack)
         assert module._post_news_evidence("https://fixture.invalid", body, {}) == ack

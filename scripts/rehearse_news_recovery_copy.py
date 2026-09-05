@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
+import importlib.metadata
 import json
 import os
 from pathlib import Path
@@ -77,6 +78,11 @@ def main():
         "execution_boundary": "REAL_API_CONTINUOUS_SYNC_ISOLATED_ACK",
         "producer": "scripts/rehearse_news_recovery_copy.py",
         "python": sys.version, "platform": platform.platform(),
+        "installed_python_dependencies": dict(sorted(
+            (distribution.metadata["Name"], distribution.version)
+            for distribution in importlib.metadata.distributions()
+            if distribution.metadata.get("Name")
+        )),
         "input_database_copy": {"path": str(database), "size": database.stat().st_size,
                                 "sha256": digest_file(database)},
         "dependency_inputs": {str(path.relative_to(ROOT)): digest_file(path)
@@ -89,6 +95,7 @@ def main():
     }
     sys.path.insert(0, str(ROOT))
     api, sync = load("recovery_copy_api", "run_dashboard_api.py"), load("recovery_copy_sync", "run_dashboard_sync.py")
+    from xauusd_forecaster.news_projection import receipt_payload_hash
     node = shutil.which("node")
     if not node:
         raise RuntimeError("NODE_UNAVAILABLE")
@@ -113,7 +120,8 @@ def main():
             os.environ["SSL_CERT_FILE"] = str(cert)
             responses = queue.Queue(maxsize=2)
             worker = subprocess.Popen(
-                [node, str(ROOT / "tests/fixtures/news_evidence_ack_worker.mjs"), "--serve"],
+                [node, "--import", (ROOT / "web/tests/register-cloudflare-worker-loader.mjs").as_uri(),
+                 str(ROOT / "tests/fixtures/news_evidence_ack_worker.mjs"), "--serve"],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, encoding="utf-8", creationflags=NO_WINDOW,
             )
@@ -207,10 +215,13 @@ def main():
                 "collector_recovery": {"incident": "COLLECTOR_CLOCK_EVENT_ATOMICITY",
                     "broken_revision": "ffe1de29c0891cc3a3cf3d602f3d3ee657faa9b8", "target_revision": revision},
             }
-            report["configuration_sha256"] = hashlib.sha256(json.dumps({
+            configuration = {
+                "config": config,
                 "interval_seconds": 30, "schedule": schedule, "request": request,
                 "local_boundary": "loopback", "provider_boundary": "loopback TLS",
-            }, sort_keys=True).encode()).hexdigest()
+            }
+            report["configuration"] = configuration
+            report["configuration_sha256"] = hashlib.sha256(json.dumps(configuration, sort_keys=True).encode()).hexdigest()
             sync._write_news_sync_state(Path(config["deferred_projection_request_file"]), request)
             status_file = runtime / "status.json"
             def monitor():
@@ -229,11 +240,27 @@ def main():
             ack = sync._read_news_sync_state(Path(target["news_evidence_state_file"]))
             receipt = sync._read_news_sync_state(Path(config["deferred_projection_receipt_file"]))
             status = sync._read_news_sync_state(status_file)
+            with worker_lock:
+                worker.stdin.write(json.dumps({"inspect": True}) + "\n")
+                worker.stdin.flush()
+                remote_content = json.loads(responses.get(timeout=15))["result"]
+            with api._NEWS_EVIDENCE_CACHE_LOCK:
+                source_rows = list(api._NEWS_EVIDENCE_CACHE["items"])
+            source_digest = receipt_payload_hash(source_rows)
+            observations = {row.get("resource"): row.get("status")
+                            for row in status.get("resource_observations", [])}
             report.update(ack_verified=bool(
                 receipt.get("state") == "COMPLETED" and ack.get("active_snapshot_id")
                 and ack.get("active_snapshot_id") == receipt.get("news_recovery", {}).get("snapshot_id")
-                and status.get("status") == "OK"), records=ack.get("record_count"),
+                and status.get("status") == "OK"
+                and observations.get("news_evidence") == "OK"
+                and observations.get("deferred_projection") == "OK"
+                and counts["remote_heartbeat"] >= 2
+                and remote_content["snapshot_id"] == ack.get("active_snapshot_id")
+                and remote_content["count"] == remote_content["expected_count"] == ack.get("record_count")
+                and remote_content["content_digest"] == source_digest), records=ack.get("record_count"),
                 snapshot=ack.get("active_snapshot_id"), final_sync_status=status.get("status"))
+            report["output_equivalence"] = {"source_content_digest": source_digest, **remote_content}
             if not report["ack_verified"]:
                 raise RuntimeError("CONTINUOUS_SYNC_ACK_INCOMPLETE")
             if git("rev-parse", "HEAD") != revision or git("status", "--porcelain=v1", "--untracked-files=all"):

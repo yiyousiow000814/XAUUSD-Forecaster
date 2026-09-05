@@ -6,11 +6,22 @@ import {
 } from "../../web/app/api/_shared/news-evidence-store.ts";
 import { D1TestDatabase } from "../../web/tests/d1-test-database.mjs";
 import { createInterface } from "node:readline";
+import { newsProjectionPayloadHash } from "../../web/app/api/_shared/news-projection-store.ts";
 
 const db = new D1TestDatabase([
   "0021_paged_news_evidence.sql", "0030_news_evidence_cleanup_budget.sql",
 ]);
 async function execute(encoded) {
+    if (encoded?.inspect === true) {
+      const active = db.database.prepare("SELECT active_snapshot_id,record_count FROM news_evidence_state WHERE id=1").get();
+      const rows = active ? db.database.prepare(
+        "SELECT payload FROM news_evidence_records WHERE snapshot_id=? ORDER BY ordinal LIMIT 8193",
+      ).all(active.active_snapshot_id) : [];
+      if (rows.length > 8192) throw new Error("fixture inspection exceeds bound");
+      return { snapshot_id: active?.active_snapshot_id, count: rows.length,
+        expected_count: active?.record_count,
+        content_digest: await newsProjectionPayloadHash(rows.map(row => JSON.parse(row.payload))) };
+    }
     if (typeof encoded !== "string" || encoded.length > 110_000) throw new Error("fixture request exceeds bound");
     const serialized = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(encoded, "base64"));
     const request = JSON.parse(serialized);
@@ -49,7 +60,7 @@ try {
     const results = [];
     for (const encoded of JSON.parse(input)) results.push(await execute(encoded));
     const page = await readNewsEvidencePage(db, { mode: "all", rawCursor: null, page: 1, pageSize: 8 });
-    process.stdout.write(JSON.stringify({ results, page }));
+    process.stdout.write(JSON.stringify({ results, page, inspection: await execute({ inspect: true }) }));
   }
 } finally {
   db.database.close();

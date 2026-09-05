@@ -289,6 +289,13 @@
   parity remains the release authority. Rollback cancels an incomplete request
   before restoring the prior producer, and no second producer or Sync owner is
   introduced.
+- Pending deferred work does not monopolize the serial heavy lane: alternate
+  admission turns first offer one bounded operation to the earliest due
+  unrelated resource. If none is due, the deferred page may proceed. The
+  resources owned by the pending request are excluded from ordinary admission,
+  avoiding duplicate work. Unchanged progress and failures wait for the next
+  bounded wakeup; progress alone does not clear a recorded failure. Every turn
+  retains the existing per-operation item/byte budgets and independent heartbeat.
 - Local `/api/status` and `/api/critical-status` are the same bounded
   first-paint contract. They include only the fixed recent 90-minute decision
   window and the fixed `news_metrics` aggregate required by the Live headline;

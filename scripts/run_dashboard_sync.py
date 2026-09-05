@@ -2002,6 +2002,7 @@ def _schedule_epoch(value: object) -> float:
 
 def _due_resource_policies(
     state: dict, now: datetime, *, lane: str | None = None,
+    excluded: frozenset[str] = frozenset(),
 ) -> list[tuple]:
     resources = state.get("resources")
     if not isinstance(resources, dict):
@@ -2009,6 +2010,8 @@ def _due_resource_policies(
     due = []
     for policy_index, policy in enumerate(RESOURCE_POLICIES):
         resource = policy[0]
+        if resource in excluded:
+            continue
         resource_state = resources.get(resource)
         if not isinstance(resource_state, dict):
             resource_state = {}
@@ -2140,6 +2143,7 @@ def sync_heartbeat_once(config: dict) -> tuple[list[dict], SyncResourceResults]:
 
 def sync_resource_lane(
     targets: list[dict], *, lane: str | None = None,
+    excluded: frozenset[str] = frozenset(),
 ) -> SyncResourceResults:
     """Advance control or accumulated resources independently of heartbeat."""
     degraded = []
@@ -2151,7 +2155,7 @@ def sync_resource_lane(
             schedule_state = _read_news_sync_state(schedule_path)
         now = datetime.now(UTC)
         for resource, operation_name, cadence_seconds, _heavy in (
-            _due_resource_policies(schedule_state, now, lane=lane)
+            _due_resource_policies(schedule_state, now, lane=lane, excluded=excluded)
         ):
             started = time.perf_counter()
             try:
@@ -2301,6 +2305,8 @@ def _submit_resource_lane(
     lane: str,
     healthy: list[dict],
     config: dict,
+    *,
+    prefer_regular: bool = False,
 ) -> Future:
     if lane == "heavy":
         try:
@@ -2308,6 +2314,24 @@ def _submit_resource_lane(
         except Exception:
             deferred_pending = True
         if deferred_pending:
+            if prefer_regular:
+                def regular_or_deferred():
+                    # One heavy operation still owns each turn. The deferred
+                    # owner alone handles its resources until completion.
+                    request = _read_deferred_projection_request(config)
+                    routes = request.get("routes", []) if request else []
+                    excluded = set()
+                    if "/api/news-evidence" in routes:
+                        excluded.add("news_evidence")
+                    if any(route in DEFERRED_PROJECTION_ROUTES for route in routes):
+                        excluded.add("audit")
+                    regular = sync_resource_lane(
+                        healthy, lane="heavy", excluded=frozenset(excluded),
+                    )
+                    if regular or regular.resource_observations:
+                        return regular
+                    return sync_deferred_projection_once(healthy, config)
+                return executor.submit(regular_or_deferred)
             return executor.submit(sync_deferred_projection_once, healthy, config)
     return executor.submit(sync_resource_lane, healthy, lane=lane)
 
@@ -2338,6 +2362,17 @@ def run_continuous_sync(
         for lane in futures
     }
     heartbeat_count = 0
+    heavy_turn = 0
+
+    def submit(lane, healthy):
+        nonlocal heavy_turn
+        prefer_regular = lane == "heavy" and heavy_turn % 2 == 1
+        if lane == "heavy":
+            heavy_turn += 1
+        return _submit_resource_lane(
+            executors[lane], lane, healthy, config, prefer_regular=prefer_regular,
+        )
+
     try:
         while not stop.is_set():
             cycle_started = time.monotonic()
@@ -2370,9 +2405,7 @@ def run_continuous_sync(
                 )
                 for lane in futures:
                     if futures[lane] is None:
-                        futures[lane] = _submit_resource_lane(
-                            executors[lane], lane, healthy, config,
-                        )
+                        futures[lane] = submit(lane, healthy)
                 print(json.dumps({
                     "event": "DASHBOARD_HEARTBEAT_OK",
                     "heartbeat_sequence": heartbeat_count + 1,
@@ -2411,9 +2444,7 @@ def run_continuous_sync(
                         and not stop.is_set()
                         and time.monotonic() < deadline
                     ):
-                        futures[lane] = _submit_resource_lane(
-                            executors[lane], lane, healthy, config,
-                        )
+                        futures[lane] = submit(lane, healthy)
     finally:
         for executor in executors.values():
             executor.shutdown(wait=True, cancel_futures=False)
