@@ -1660,14 +1660,9 @@ def sync_deferred_projection_once(
             # by its normal one-page budget. There is still one serial Sync owner.
             _write_news_sync_state(receipt_path, receipt)
             prior_news = _read_news_sync_state(Path(target["news_evidence_state_file"]))
-            _sync_news_evidence({}, target)
+            snapshot = _sync_news_evidence({}, target)
             ack = _read_news_sync_state(Path(target["news_evidence_state_file"]))
-            with urllib.request.urlopen(
-                _local_news_evidence_url(target, None), timeout=LOCAL_STATUS_TIMEOUT_SECONDS,
-            ) as response:
-                page = json.loads(response.read())
-            snapshot = str(page.get("snapshot_id") or "")
-            if not re.fullmatch(r"[a-f0-9]{64}", snapshot):
+            if not isinstance(snapshot, str) or not re.fullmatch(r"[a-f0-9]{64}", snapshot):
                 raise PayloadContractError("deferred News snapshot identity invalid")
             if (
                 ack.get("contract_version") != NEWS_EVIDENCE_CONTRACT_VERSION
@@ -1769,6 +1764,59 @@ def _local_critical_status_url(config: dict) -> str:
     return _local_resource_url(config, "/api/critical-status")
 
 
+def _post_news_evidence(remote_url: str, payload: bytes, config: dict) -> dict:
+    """Advance only on an exact, operation-complete remote acknowledgement."""
+    request = json.loads(payload)
+    result = _post_json(remote_url, payload, config)
+    snapshot_id = next((request[key] for key in (
+        "prepare_snapshot", "snapshot_id", "activate_snapshot", "cleanup_active_snapshot",
+    ) if key in request), None)
+
+    def require(condition: bool) -> None:
+        if not condition:
+            raise PayloadContractError("NEWS_EVIDENCE_ACK_INVALID")
+
+    def integer(name: str, maximum: int) -> int:
+        value = result.get(name)
+        require(type(value) is int and 0 <= value <= maximum)
+        return value
+
+    require(isinstance(result, dict))
+    require(result.get("status") == "OK")
+    require(result.get("contract_version") == NEWS_EVIDENCE_CONTRACT_VERSION)
+    require(result.get("snapshot_id") == snapshot_id)
+    require(result.get("request_sha256") == hashlib.sha256(payload).hexdigest())
+    if "prepare_snapshot" in request:
+        total = request["expected_count"]
+        offset = integer("next_offset", total)
+        require(type(result.get("active")) is bool)
+        require(not result["active"] or offset == total)
+        if "repaired_from" in result:
+            require(not result["active"] and integer("repaired_from", total) > offset)
+    elif "items" in request:
+        require(integer("received", len(request["items"])) == len(request["items"]))
+        if "duplicate" in result:
+            require(type(result["duplicate"]) is bool)
+    elif "activate_snapshot" in request:
+        require(result.get("activated") == snapshot_id)
+        require(integer("count", request["expected_count"]) == request["expected_count"])
+    else:
+        require(result.get("cleanup") in {"advanced", "budget_exhausted"})
+        require(type(result.get("cleanup_pending")) is bool)
+        for field, limit in (("deleted_records", 200), ("deleted_batches", 20),
+                             ("deleted_staging", 20)):
+            integer(field, limit)
+        if "cleanup_budget_exhausted" in result:
+            require(type(result["cleanup_budget_exhausted"]) is bool)
+        exhausted = result.get("cleanup_budget_exhausted") is True
+        require(exhausted == (result["cleanup"] == "budget_exhausted"))
+        require(not exhausted or (result["cleanup_pending"] and all(
+            result[field] == 0 for field in
+            ("deleted_records", "deleted_batches", "deleted_staging")
+        )))
+    return result
+
+
 def _cleanup_news_evidence_snapshots(
     remote_url: str, snapshot_id: str, config: dict,
 ) -> bool:
@@ -1779,7 +1827,7 @@ def _cleanup_news_evidence_snapshots(
     }, separators=(",", ":")).encode("utf-8")
     cleanup_pending = False
     for _ in range(NEWS_EVIDENCE_CLEANUP_STEPS_PER_CYCLE):
-        result = _post_json(remote_url, payload, config)
+        result = _post_news_evidence(remote_url, payload, config)
         cleanup_pending = result.get("cleanup_pending") is True
         if result.get("cleanup_budget_exhausted") is True:
             return True
@@ -1788,7 +1836,7 @@ def _cleanup_news_evidence_snapshots(
     return cleanup_pending
 
 
-def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
+def _sync_news_evidence(_local_payload: dict, config: dict) -> str | None:
     """Advance a bounded staging window and activate only a complete snapshot."""
     if not config.get("local_status_url"):
         return
@@ -1797,6 +1845,9 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
     )
     state_path = Path(config["news_evidence_state_file"])
     state = _read_news_sync_state(state_path)
+    # Older target-owned state still owns cleanup debt, but cannot use the
+    # no-change fast path until a complete new acknowledgement is obtained.
+    ack_target_matches = state.get("ack_remote_url", remote_url) == remote_url
     cursor = None
     snapshot_id = None
     total = None
@@ -1809,6 +1860,7 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
             activated_snapshot_id=(
                 str(state.get("active_snapshot_id"))
                 if state.get("contract_version") == NEWS_EVIDENCE_CONTRACT_VERSION
+                and ack_target_matches
                 and state.get("active_snapshot_id") else None
             ),
         ),
@@ -1821,33 +1873,41 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
     active_snapshot = (
         str(state.get("active_snapshot_id"))
         if state.get("contract_version") == NEWS_EVIDENCE_CONTRACT_VERSION
+        and ack_target_matches
         and state.get("active_snapshot_id") else ""
     )
     if active_snapshot and _cleanup_news_evidence_snapshots(
         remote_url, active_snapshot, config,
     ):
-        return
+        return first_snapshot
     if (
         state.get("contract_version") == NEWS_EVIDENCE_CONTRACT_VERSION
         and state.get("active_snapshot_id") == first_snapshot
+        and state.get("ack_remote_url") == remote_url
+        and isinstance(state.get("ack_request_sha256"), str)
+        and re.fullmatch(r"[a-f0-9]{64}", state["ack_request_sha256"])
     ):
-        return
+        return first_snapshot
     snapshot_id = first_snapshot
-    total = int(first_page.get("total") or 0)
-    prepared = _post_json(remote_url, json.dumps({
+    total = first_page.get("total")
+    if type(total) is not int or total < 0:
+        raise PayloadContractError("local news evidence count is invalid")
+    prepared = _post_news_evidence(remote_url, json.dumps({
         "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
         "prepare_snapshot": snapshot_id,
         "expected_count": total,
-    }, separators=(",", ":")).encode("utf-8"), config) or {}
+    }, separators=(",", ":")).encode("utf-8"), config)
     if prepared.get("active") is True:
         _write_news_sync_state(state_path, {
             "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
             "active_snapshot_id": snapshot_id,
             "record_count": total,
+            "ack_remote_url": remote_url,
+            "ack_request_sha256": prepared["request_sha256"],
             "last_success": datetime.now(UTC).isoformat(),
         })
-        return
-    received = int(prepared.get("next_offset") or 0)
+        return snapshot_id
+    received = prepared["next_offset"]
     if received < 0 or received > total:
         raise PayloadContractError("remote news evidence staging offset is invalid")
     cursor = f"{snapshot_id}:{received}" if received else None
@@ -1881,7 +1941,7 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
                     f"news evidence batch is {len(encoded)} bytes "
                     f"(limit {NEWS_EVIDENCE_BATCH_LIMIT_BYTES})"
                 )
-            _post_json(remote_url, encoded, config)
+            _post_news_evidence(remote_url, encoded, config)
             received += len(items)
         next_cursor = page.get("next_cursor")
         if not page.get("has_more"):
@@ -1889,7 +1949,7 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
                 raise PayloadContractError(
                     f"news evidence snapshot expected {total} rows but staged {received}"
                 )
-            _post_json(remote_url, json.dumps({
+            activated = _post_news_evidence(remote_url, json.dumps({
                 "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
                 "activate_snapshot": snapshot_id,
                 "expected_count": total,
@@ -1898,10 +1958,12 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
                 "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
                 "active_snapshot_id": snapshot_id,
                 "record_count": total,
+                "ack_remote_url": remote_url,
+                "ack_request_sha256": activated["request_sha256"],
                 "last_success": datetime.now(UTC).isoformat(),
             })
             _cleanup_news_evidence_snapshots(remote_url, snapshot_id, config)
-            return
+            return snapshot_id
         if not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor:
             raise PayloadContractError("local news evidence cursor did not advance")
         cursor = next_cursor
@@ -1913,6 +1975,7 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
         "next_cursor": cursor,
         "last_progress": datetime.now(UTC).isoformat(),
     })
+    return snapshot_id
 
 
 RESOURCE_POLICIES = (

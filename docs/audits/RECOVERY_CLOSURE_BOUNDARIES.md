@@ -6,7 +6,27 @@ Initial WIP tracked binary diff SHA-256 is
 `9bbd0c4518fc82c75adea235aaac3efc50d705bf833fe8bc086b6288a1b5dad4`.
 The separate untracked recovery plan SHA-256 is
 `18eae92996602aadd85940976b4c8be0c893c3c64903409ecc30ea813375ba20`.
-These identities describe uncommitted input, not an exact committed source.
+These identities describe the initial uncommitted input. The preserved clean
+checkpoint is `b5087bbaa94094b00f369c7d0879ce57b45d5381`; subsequent changes require
+new exact-source evidence and do not inherit its identity.
+
+## Recovery ACK boundary
+
+The existing News store returns operation results, while Sync previously ignored
+stage/activation results and treated malformed HTTP success as an empty object.
+The correction adds exact-request SHA-256, snapshot and contract fields to the
+existing successful HTTP response and validates all required operation fields
+before local progress. No D1 schema or receipt family is introduced. Replayed
+batch protection remains the existing persisted store contract.
+
+The versioned `scripts/rehearse_news_recovery_copy.py` producer uses the real API,
+continuous Sync, and real Worker store with an isolated SQLite D1 adapter. It
+requires clean source and writes reports outside source. Its critical-status
+input is an explicit adapter; it is not a full lifecycle or Cloudflare proof.
+Old-query equivalence and Switch/Observe remain NOT_RUN until actually executed.
+The historical 126.935-second receipt-sharing failure and dirty-source
+90.184-second resource run remain retained diagnostic evidence, not clean-source
+release acceptance.
 
 ## Initial problem table
 

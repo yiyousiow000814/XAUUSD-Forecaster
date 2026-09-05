@@ -1565,6 +1565,136 @@ def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_pat
     assert posted == ["prepare", "stage_details"]
 
 
+def _evidence_ack(body: bytes, result: dict) -> dict:
+    """The additive HTTP ACK envelope; operation results remain explicit."""
+    request = json.loads(body)
+    snapshot = next(request[key] for key in (
+        "prepare_snapshot", "snapshot_id", "activate_snapshot", "cleanup_active_snapshot",
+    ) if key in request)
+    return {
+        **result, "contract_version": "news-evidence-paged-v2",
+        "snapshot_id": snapshot,
+        "request_sha256": __import__("hashlib").sha256(body).hexdigest(),
+    }
+
+
+def _evidence_cleanup_result(*, pending=False, exhausted=False) -> dict:
+    return {
+        "status": "OK", "cleanup": "budget_exhausted" if exhausted else "advanced",
+        "deleted_records": 0, "deleted_batches": 0, "deleted_staging": 0,
+        "cleanup_pending": pending, "cleanup_budget_exhausted": exhausted,
+    }
+
+
+@pytest.mark.parametrize("operation", ["prepare", "stage", "activate", "cleanup"])
+@pytest.mark.parametrize("corruption", [
+    "missing", "nonobject", "status", "contract", "identity", "digest",
+    "missing_result", "wrong_result_type", "wrong_result",
+])
+def test_news_evidence_ack_requires_exact_complete_response(
+    monkeypatch, operation, corruption,
+) -> None:
+    module = _sync_module()
+    snapshot = "a" * 64
+    requests = {
+        "prepare": {"prepare_snapshot": snapshot, "expected_count": 1},
+        "stage": {"snapshot_id": snapshot, "offset": 0, "items": [{"value": "中文"}]},
+        "activate": {"activate_snapshot": snapshot, "expected_count": 1},
+        "cleanup": {"cleanup_active_snapshot": snapshot},
+    }
+    results = {
+        "prepare": {"status": "OK", "active": True, "next_offset": 1},
+        "stage": {"status": "OK", "received": 1},
+        "activate": {"status": "OK", "activated": snapshot, "count": 1},
+        "cleanup": _evidence_cleanup_result(),
+    }
+    body = json.dumps({"contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION,
+                       **requests[operation]}, ensure_ascii=False).encode("utf-8")
+    good = _evidence_ack(body, results[operation])
+    monkeypatch.setattr(module, "_post_json", lambda *_: good)
+    assert module._post_news_evidence("https://fixture.invalid", body, {}) == good
+    bad = dict(good)
+    field = {"prepare": "next_offset", "stage": "received", "activate": "count",
+             "cleanup": "cleanup_pending"}[operation]
+    if corruption == "missing":
+        bad = {}
+    elif corruption == "nonobject":
+        bad = []
+    elif corruption in {"status", "contract", "identity", "digest"}:
+        bad[{"status": "status", "contract": "contract_version",
+             "identity": "snapshot_id", "digest": "request_sha256"}[corruption]] = "wrong"
+    elif corruption == "missing_result":
+        del bad[field]
+    elif corruption == "wrong_result_type":
+        bad[field] = 0 if operation == "cleanup" else True
+    elif operation == "cleanup":
+        bad["deleted_records"] = 201
+    else:
+        bad[field] = 0
+    monkeypatch.setattr(module, "_post_json", lambda *_: bad)
+    with pytest.raises(module.PayloadContractError, match="NEWS_EVIDENCE_ACK_INVALID"):
+        module._post_news_evidence("https://fixture.invalid", body, {})
+
+
+@pytest.mark.parametrize("wire_body", [b"", b"{", b"[]", b"null", b"{}"])
+def test_news_evidence_malformed_http_success_never_acknowledges(monkeypatch, wire_body):
+    module = _sync_module()
+
+    class Response:
+        status = 200
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            return False
+        def read(self):
+            return wire_body
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k: Response())
+    body = json.dumps({"prepare_snapshot": "a" * 64, "expected_count": 1}).encode()
+    with pytest.raises(module.PayloadContractError, match="NEWS_EVIDENCE_ACK_INVALID"):
+        module._post_news_evidence("https://fixture.invalid", body, {"token": "fixture"})
+
+
+def test_news_evidence_python_bytes_worker_store_and_ack_consumer(monkeypatch):
+    import base64
+    import shutil
+    import subprocess
+
+    module = _sync_module()
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required for the producer/Worker boundary")
+    snapshot = "a" * 64
+    items = [{"event_key": "b" * 64, "collector_first_seen_time": "2026-09-05T00:00:00+00:00",
+              "broad_model_eligible": True, "model_seen": False,
+              "headline": "中文 😀", "integer_float": 1.0, "negative_zero": -0.0,
+              "small": 1e-7, "missing": None}]
+    requests = [
+        {"prepare_snapshot": snapshot, "expected_count": 1},
+        {"snapshot_id": snapshot, "offset": 0, "items": items},
+        {"snapshot_id": snapshot, "offset": 0, "items": items},
+        {"activate_snapshot": snapshot, "expected_count": 1},
+        {"prepare_snapshot": snapshot, "expected_count": 1},
+        {"cleanup_active_snapshot": snapshot},
+    ]
+    bodies = [json.dumps({"contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION, **request},
+                         ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+              for request in requests]
+    result = subprocess.run(
+        [node, str(module.MODULE_ROOT / "tests/fixtures/news_evidence_ack_worker.mjs")],
+        input=json.dumps([base64.b64encode(body).decode("ascii") for body in bodies]),
+        capture_output=True, text=True, encoding="utf-8", timeout=15, check=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    observed = json.loads(result.stdout)
+    assert observed["page"]["items"] == items
+    for body, ack in zip(bodies, observed["results"], strict=True):
+        monkeypatch.setattr(module, "_post_json", lambda *_, ack=ack: ack)
+        assert module._post_news_evidence("https://fixture.invalid", body, {}) == ack
+        with pytest.raises(module.PayloadContractError, match="NEWS_EVIDENCE_ACK_INVALID"):
+            module._post_news_evidence("https://fixture.invalid", body + b" ", {})
+
+
 def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
     monkeypatch, tmp_path,
 ) -> None:
@@ -1620,19 +1750,19 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
         payload = json.loads(body)
         posted.append((url, payload))
         if "prepare_snapshot" in payload:
-            return {
+            return _evidence_ack(body, {
                 "status": "OK", "active": remote_active,
                 "next_offset": len(rows) if remote_active else remote_next_offset,
-            }
+            })
         if "items" in payload:
             assert payload["offset"] == remote_next_offset
             remote_next_offset += len(payload["items"])
-            return {"status": "OK", "received": len(payload["items"])}
+            return _evidence_ack(body, {"status": "OK", "received": len(payload["items"])})
         if "activate_snapshot" in payload:
             assert remote_next_offset == len(rows)
             remote_active = True
-            return {"status": "OK", "activated": snapshot_id, "count": len(rows)}
-        return {"status": "OK"}
+            return _evidence_ack(body, {"status": "OK", "activated": snapshot_id, "count": len(rows)})
+        return _evidence_ack(body, _evidence_cleanup_result())
 
     monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
     monkeypatch.setattr(module, "_post_json", post)
@@ -1718,7 +1848,11 @@ def test_news_evidence_cleanup_uses_feedback_and_stops_at_daily_budget(
 
     def post(url, body, _config):
         calls.append((url, json.loads(body)))
-        return next(responses)
+        result = next(responses)
+        return _evidence_ack(body, _evidence_cleanup_result(
+            pending=result["cleanup_pending"],
+            exhausted=result.get("cleanup_budget_exhausted", False),
+        ))
 
     monkeypatch.setattr(module, "_post_json", post)
     snapshot_id = "a" * 64
@@ -1764,7 +1898,7 @@ def test_news_evidence_sync_drains_old_snapshot_before_admitting_replacement(
     def post(_url, body, _config):
         payload = json.loads(body)
         posted.append(payload)
-        return {"status": "OK", "cleanup_pending": True}
+        return _evidence_ack(body, _evidence_cleanup_result(pending=True))
 
     monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
     monkeypatch.setattr(module, "_post_json", post)
@@ -1837,21 +1971,24 @@ def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_field
         snapshot = payload.get("prepare_snapshot") or payload.get("snapshot_id") \
             or payload.get("activate_snapshot") or payload.get("cleanup_active_snapshot")
         if "prepare_snapshot" in payload:
-            return {
+            return _evidence_ack(body, {
                 "status": "OK", "active": active[0] == snapshot,
                 "next_offset": offsets.get(snapshot, 0),
-            }
+            })
         if "items" in payload:
             assert payload["offset"] == offsets.get(snapshot, 0)
             received_keys.setdefault(snapshot, []).extend(
                 item["event_key"] for item in payload["items"]
             )
             offsets[snapshot] = payload["offset"] + len(payload["items"])
+            return _evidence_ack(body, {"status": "OK", "received": len(payload["items"])})
         if "activate_snapshot" in payload:
             assert offsets.get(snapshot, 0) == payload["expected_count"]
             active[0] = snapshot
             activations.append(snapshot)
-        return {"status": "OK"}
+            return _evidence_ack(body, {"status": "OK", "activated": snapshot,
+                                        "count": payload["expected_count"]})
+        return _evidence_ack(body, _evidence_cleanup_result())
 
     monkeypatch.setattr(sync.urllib.request, "urlopen", urlopen)
     monkeypatch.setattr(sync, "_post_json", post)
@@ -1927,8 +2064,9 @@ def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_field
     assert age_only_rows == changed_rows
 
 
+@pytest.mark.parametrize("failure", ["lost", "prepare_invalid", "stage_invalid", "activate_invalid"])
 def test_news_evidence_activation_acknowledgement_replays_idempotently(
-    monkeypatch, tmp_path,
+    monkeypatch, tmp_path, failure,
 ) -> None:
     module = _sync_module()
     snapshot_id = "a" * 64
@@ -1960,20 +2098,30 @@ def test_news_evidence_activation_acknowledgement_replays_idempotently(
 
     def post(_url, body, _config):
         payload = json.loads(body)
+        operation = "prepare" if "prepare_snapshot" in payload else (
+            "stage" if "items" in payload else "activate"
+        )
+        if remote["lose_ack"] and operation != "activate" and failure == f"{operation}_invalid":
+            remote["lose_ack"] = False
+            return {}
         if "prepare_snapshot" in payload:
-            return {
+            return _evidence_ack(body, {
                 "status": "OK", "active": remote["active"],
                 "next_offset": remote["next_offset"],
-            }
+            })
         if "items" in payload:
             remote["next_offset"] = 1
-            return {"status": "OK"}
+            return _evidence_ack(body, {"status": "OK", "received": 1})
         if "activate_snapshot" in payload:
             remote["active"] = True
-            if remote["lose_ack"]:
+            if remote["lose_ack"] and failure == "activate_invalid":
+                remote["lose_ack"] = False
+                return {}
+            if remote["lose_ack"] and failure == "lost":
                 remote["lose_ack"] = False
                 raise TimeoutError("activation response was lost")
-        return {"status": "OK"}
+            return _evidence_ack(body, {"status": "OK", "activated": snapshot_id, "count": 1})
+        return _evidence_ack(body, _evidence_cleanup_result())
 
     monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k: Response())
     monkeypatch.setattr(module, "_post_json", post)
@@ -1986,7 +2134,9 @@ def test_news_evidence_activation_acknowledgement_replays_idempotently(
     }
     config[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
 
-    with pytest.raises(TimeoutError, match="response was lost"):
+    error_type = TimeoutError if failure == "lost" else module.PayloadContractError
+    reason = "response was lost" if failure == "lost" else "NEWS_EVIDENCE_ACK_INVALID"
+    with pytest.raises(error_type, match=reason):
         module._sync_news_evidence({}, config)
     assert not state_path.exists() or "active_snapshot_id" not in json.loads(
         state_path.read_text(encoding="utf-8")
@@ -3097,9 +3247,10 @@ def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
                     "contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION,
                     "active_snapshot_id": "d"*64, "record_count": 8,
                 })
+            return "d" * 64
         monkeypatch.setattr(module, "_sync_news_evidence", advance_news)
         monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k:
-                            io.BytesIO(json.dumps({"snapshot_id": "d"*64}).encode()))
+                            pytest.fail("deferred owner must not reread the accepted source page"))
     Path(config["deferred_projection_request_file"]).write_text(
         json.dumps(request), encoding="utf-8",
     )
@@ -3157,7 +3308,7 @@ def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
         retained_failure = {"target": "cloudflare", "resource": "deferred_projection", "error": "prior failure"}
         retained = module._merge_lane_results(module.SyncResourceResults([retained_failure], []), completed)
         assert list(retained) == [retained_failure], "page progress is not resource recovery"
-        monkeypatch.setattr(module, "_sync_news_evidence", lambda *_a: None)
+        monkeypatch.setattr(module, "_sync_news_evidence", lambda *_a: "d" * 64)
         stalled = module.sync_deferred_projection_once([target], config)
         assert stalled.resource_observations == [], "unchanged cursor must not busy-drain"
         monkeypatch.setattr(module, "_sync_news_evidence", advance_news)
