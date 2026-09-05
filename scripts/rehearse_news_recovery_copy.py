@@ -22,6 +22,7 @@ import platform
 import queue
 import shutil
 import ssl
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -52,6 +53,111 @@ def load(name, filename):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def compare_news_queries(database, api, instant, *, deadline_seconds=30, row_budget=2_000_000):
+    """Read one frozen transaction; independently aggregate actual receipt rows.
+
+    This proves query/display equivalence, not a historical HTTP timeout.
+    The legacy SQL is retained as a bounded oracle; interruption is not equality.
+    """
+    started = time.monotonic()
+    captured = {}
+
+    class Rows:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            return self.rows
+
+    class Connection(sqlite3.Connection):
+        oracle_rows = None
+
+        def execute(self, sql, parameters=(), /):
+            if "SELECT canonical_event_key AS event_key" not in sql:
+                return super().execute(sql, parameters)
+            if self.oracle_rows is not None:
+                return Rows(self.oracle_rows)
+            result = super().execute(sql, parameters).fetchall()
+            captured.update(sql=sql, parameters=parameters, rows=[dict(row) for row in result])
+            return Rows(result)
+
+    connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, factory=Connection)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA query_only=ON")
+    connection.execute("BEGIN")
+    connection.set_progress_handler(lambda: int(time.monotonic() - started > deadline_seconds), 10000)
+    try:
+        evidence = api.event_evidence_rows_from_connection(connection, instant)
+        optimized = api._news_evidence_display_rows(connection, evidence)
+        if "sql" not in captured:
+            raise RuntimeError("OPTIMIZED_QUERY_DID_NOT_COMPLETE")
+        aliases = json.loads(captured["parameters"][0])
+        tables = ["news_model_visibility_receipts_v1"]
+        if connection.execute("SELECT 1 FROM sqlite_master WHERE name='news_only_visibility_receipts_v1'").fetchone():
+            tables.append("news_only_visibility_receipts_v1")
+        sql = " UNION ALL ".join(
+            "SELECT event_key,source_decision_id,event_source_hash,decision_time,model_identity,model_version FROM " + table
+            for table in tables
+        )
+        groups, receipt_count, distinct_count = {}, 0, 0
+        for row in connection.execute(sql):
+            receipt_count += 1
+            if receipt_count > row_budget or time.monotonic() - started > deadline_seconds:
+                raise RuntimeError("QUERY_ORACLE_BUDGET_EXHAUSTED")
+            key = aliases.get(row["event_key"], row["event_key"])
+            group = groups.setdefault(key, {"count": 0, "times": [None, None],
+                **{field: set() for field in ("source_decision_id", "event_source_hash", "model_identity", "model_version")}})
+            group["count"] += 1
+            for field in ("source_decision_id", "event_source_hash", "model_identity", "model_version"):
+                value = row[field]
+                if value is not None and value not in group[field]:
+                    group[field].add(value)
+                    distinct_count += 1
+            if distinct_count > row_budget:
+                raise RuntimeError("QUERY_ORACLE_DISTINCT_BUDGET_EXHAUSTED")
+            value = row["decision_time"]
+            if value is not None:
+                lower, upper = group["times"]
+                group["times"] = [value if lower is None else min(lower, value),
+                                  value if upper is None else max(upper, value)]
+        connection.oracle_rows = [{"event_key": key, "frozen_model_uses": group["count"],
+            "frozen_decisions": len(group["source_decision_id"]),
+            "frozen_versions": len(group["event_source_hash"]),
+            "first_model_decision_time": group["times"][0], "last_model_decision_time": group["times"][1],
+            "model_identities": ",".join(sorted(group["model_identity"])),
+            "model_versions": ",".join(sorted(group["model_version"]))}
+            for key, group in groups.items()]
+        independent = api._news_evidence_display_rows(connection, evidence)
+        def digest(value):
+            return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
+                separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+        result = {"frozen_at": instant.isoformat(), "receipt_count": receipt_count,
+            "compared_display_count": len(optimized), "semantic_equality_verified": optimized == independent,
+            "optimized_digest": digest(optimized), "independent_digest": digest(independent),
+            "sql_sha256": digest(captured["sql"]), "parameters_sha256": digest(captured["parameters"])}
+        legacy = captured["sql"][captured["sql"].index("SELECT canonical_event_key AS event_key"):].replace(
+            "LEFT JOIN event_aliases AS alias", "LEFT JOIN json_each(?) AS alias")
+        legacy_started = time.monotonic()
+        connection.set_progress_handler(lambda: int(time.monotonic() - legacy_started > deadline_seconds), 10000)
+        try:
+            legacy_rows = sqlite3.Connection.execute(connection, legacy, captured["parameters"]).fetchall()
+            connection.oracle_rows = legacy_rows
+            result["legacy_display_equal"] = api._news_evidence_display_rows(connection, evidence) == optimized
+            result["legacy_query_state"] = "COMPLETED"
+        except sqlite3.OperationalError as error:
+            if str(error) != "interrupted":
+                raise
+            result["legacy_query_state"] = "BOUNDED_INTERRUPT"
+            result["legacy_display_equal"] = "UNKNOWN"
+        result["legacy_seconds"] = round(time.monotonic() - legacy_started, 3)
+        result["elapsed_seconds"] = round(time.monotonic() - started, 3)
+        return result
+    finally:
+        connection.set_progress_handler(None, 0)
+        connection.rollback()
+        connection.close()
 
 
 class OwnedHTTPServer(ThreadingHTTPServer):
@@ -92,6 +198,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database-copy", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--query-comparison-only", action="store_true",
+                        help="Development query evidence only; never a release admission receipt")
     args = parser.parse_args()
     database, output = args.database_copy.resolve(strict=True), args.output.resolve()
     # Deliberately narrow retained-copy namespace. Never accept the production
@@ -101,10 +209,31 @@ def main():
                    for part in database.parts)
             or database.is_relative_to(ROOT) or output.is_relative_to(ROOT)):
         raise ValueError("ISOLATED_COPY_PATH_REQUIRED")
-    if git("status", "--porcelain=v1", "--untracked-files=all"):
-        raise ValueError("CLEAN_SOURCE_REQUIRED")
     if output.exists():
         raise ValueError("EVIDENCE_OUTPUT_ALREADY_EXISTS")
+    dirty = bool(git("status", "--porcelain=v1", "--untracked-files=all"))
+    if args.query_comparison_only:
+        sys.path.insert(0, str(ROOT))
+        before = database.stat()
+        result = {"state": "NOT_RUN", "source_revision": git("rev-parse", "HEAD"),
+            "source_dirty": dirty, "production_evidence": False,
+            "producer_sha256": digest_file(Path(__file__)),
+            "api_sha256": digest_file(ROOT / "scripts/run_dashboard_api.py"),
+            "input_database": {"path": str(database), "size": before.st_size,
+                "mtime_ns": before.st_mtime_ns, "whole_file_sha256": "NOT_RECOMPUTED"},
+            "old_http_timeout_reproduced": "NOT_RUN"}
+        try:
+            result["comparison"] = compare_news_queries(
+                database, load("query_comparison_api", "run_dashboard_api.py"), datetime.now(UTC))
+            result["state"] = "COMPARED" if result["comparison"]["semantic_equality_verified"] else "MISMATCH"
+        except Exception as error:
+            result.update(state="UNRESOLVED", failure=type(error).__name__ + ":" + str(error)[:1024])
+        after = database.stat()
+        result["input_stat_unchanged"] = (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns)
+        output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return
+    if dirty:
+        raise ValueError("CLEAN_SOURCE_REQUIRED")
     revision = git("rev-parse", "HEAD")
     report = {
         "state": "NOT_RUN", "source_revision": revision, "target_revision": revision,

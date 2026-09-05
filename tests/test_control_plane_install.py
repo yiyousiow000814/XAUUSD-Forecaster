@@ -78,8 +78,10 @@ def _run_contract_with_runtime(
                 or '"CodeRevision" { Write-Output' in line):
             label = f"entry:{number}:{line.strip()}".replace("'", "''")
             load_probes.append(
+                f"Write-ContractPhase 'probe-register:{number}'; "
                 f"$null=Set-PSBreakpoint -Script '{script}' -Line {number} "
                 f"-Action {{ Write-ContractPhase '{label}' }}; "
+                f"Write-ContractPhase 'probe-registered:{number}'; "
             )
     task_prefix = f"XAUUSD-Contract-{uuid.uuid4().hex}"
     # Temporary filesystem roots do not isolate machine-global scheduled tasks.
@@ -96,6 +98,7 @@ def _run_contract_with_runtime(
         "function Write-ContractPhase { param([string]$Phase); "
         f"[IO.File]::AppendAllText('{phase_path_literal}', "
         "[DateTimeOffset]::UtcNow.ToString('o')+' '+$Phase+[Environment]::NewLine) }; "
+        "Write-ContractPhase 'harness-start'; "
         + "".join(load_probes)
         +
         "Write-ContractPhase 'load'; "
