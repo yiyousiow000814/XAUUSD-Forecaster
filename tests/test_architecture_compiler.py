@@ -17,6 +17,13 @@ compiler = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(compiler)
 
 
+def test_repository_generated_architecture_is_current_in_required_python_gate():
+    result = subprocess.run([sys.executable, str(ROOT / 'scripts/compile_architecture.py'), 'check'],
+                            cwd=ROOT, capture_output=True, text=True, timeout=45,
+                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.fixture
 def source(tmp_path):
     manifest = {'schema': 'critical-path-selection-v1', 'views': {'fixture': {

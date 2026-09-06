@@ -2,8 +2,9 @@ import vinext from "vinext";
 import { defineConfig } from "vite";
 import { sites } from "./build/sites-vite-plugin";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
+import { projectCurrentSource } from "./build/architecture-current-source.mjs";
 import {
   compactPreviewLearning,
   compactPreviewNewsIndex,
@@ -38,6 +39,11 @@ export default defineConfig(async () => {
   const branch = ciBranch || git("branch", "--show-current");
   const commit = ciCommit || git("rev-parse", "HEAD");
   const isWorkerPreview = Boolean(ciBranch && ciCommit && ciBranch !== "main");
+  const architecturePath = resolve("../architecture/generated/critical-index.json");
+  if (statSync(architecturePath).size > 2 * 1024 * 1024) throw new Error("ARCHITECTURE_INDEX_BUDGET_EXCEEDED");
+  // GitHub's required Python gate regenerates/checks source. Workers Builds only
+  // consumes checked deterministic artifacts; it does not own Python/PowerShell.
+  const architecture = projectCurrentSource(JSON.parse(readFileSync(architecturePath, "utf8")));
   let previewBundle: unknown = null;
   if (isWorkerPreview) {
     const python = process.platform === "win32" ? "python" : "python3";
@@ -75,6 +81,14 @@ export default defineConfig(async () => {
       ? { watch: { useFsEvents: false, usePolling: true } }
       : undefined,
     plugins: [
+      {
+        name: "aurum-current-source-architecture",
+        resolveId(id: string) { return id.startsWith("virtual:aurum-architecture-") ? `\0${id}` : undefined; },
+        load(id: string) {
+          if (id === "\0virtual:aurum-architecture-evidence") return `export default ${JSON.stringify(architecture.evidence)};`;
+          if (id === "\0virtual:aurum-architecture-code-index") return `export default ${JSON.stringify(architecture.code)};`;
+        },
+      },
       vinext({ prerender: { routes: "*" } }),
       {
         name: "aurum-vinext-lazy-entry-prerender",
@@ -95,6 +109,7 @@ export default defineConfig(async () => {
       }),
     ],
     define: {
+      __AURUM_ARCHITECTURE_MANIFEST__: JSON.stringify(architecture.manifest),
       __AURUM_PREVIEW_BUNDLE__: JSON.stringify(previewBundle),
       __AURUM_DEPLOYMENT__: JSON.stringify({
         branch,
