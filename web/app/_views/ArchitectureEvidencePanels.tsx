@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   architectureSourceSpanHref, claimEvidence, codeModulesForNode, compactEvidenceStatus, dependencyRows,
-  evidenceBadgeLabels, loadArchitectureCodeIndex, loadArchitectureEvidence,
+  evidenceBadgeLabels, loadArchitectureCodeIndex, loadArchitectureEvidence, sourceFactsForClaim,
   type ArchitectureCodeIndex, type ArchitectureEvidenceBundle, type CodeModule,
 } from "../_lib/architecture-evidence";
 import type { ArchitectureEdge, ArchitectureManifest, ArchitectureNode } from "../_lib/architecture-explorer";
@@ -42,8 +42,8 @@ export function EvidenceInspector({ manifest, node, edge, sha, bundle, error }: 
   const status = compactEvidenceStatus(evidence.categories);
   const traces = bundle.traces.filter(trace => evidence.contracts.some(contract => contract.id === trace.contract_id));
   const mutations = bundle.mutations.filter(mutation => evidence.contracts.some(contract => contract.id === mutation.contract_id));
-  const bindings = evidence.claim?.bindings ?? [];
-  const sourceFacts = index?.facts.filter(fact => bindings.includes(String(fact.path)) && Number(fact.line) > 0).slice(0, 18) ?? [];
+  const sourceSelection = sourceFactsForClaim(index, evidence.claim);
+  const sourceFacts = sourceSelection.facts;
   return <div className={styles.evidencePanel} data-evidence-status={status.label}>
     <div className={`${styles.evidenceVerdict} ${styles[`evidenceTone${status.tone}`]}`}><b aria-hidden="true">{status.symbol}</b><div><strong>{status.label}</strong><span>Semantic declaration and observed evidence remain separate.</span></div></div>
     <div className={styles.evidenceBadges}>{badges.map(label => <span key={label}>{label === "CONTRADICTED" ? "!" : label === "STALE" ? "◷" : label === "UNRESOLVED" ? "?" : "✓"} {label}</span>)}</div>
@@ -57,7 +57,7 @@ export function EvidenceInspector({ manifest, node, edge, sha, bundle, error }: 
       <div><dt>Mutation outcomes</dt><dd>{mutations.map(item => `${item.id}: ${item.outcome}`).join(" · ") || "Not designated"}</dd></div>
       <div><dt>Architecture diff</dt><dd>UNAVAILABLE · base metadata was not supplied to this build.</dd></div>
     </dl>
-    <section className={styles.sourceEvidence}><h3>Exact source facts</h3>
+    <section className={styles.sourceEvidence}><h3>{sourceSelection.label}</h3>
       {!index ? <StateMessage error={codeError} label="Code index" /> : sourceFacts.length ? <ul>{sourceFacts.map(fact => {
         const path = String(fact.path); const line = Number(fact.line); const endLine = Number(fact.end_line);
         const href = architectureSourceSpanHref(manifest, path, sha, line, endLine);

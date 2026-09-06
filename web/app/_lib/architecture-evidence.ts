@@ -100,6 +100,18 @@ export function claimEvidence(bundle: ArchitectureEvidenceBundle | null, claimId
   return { claim, contracts, categories: [...categories] };
 }
 
+export function sourceFactsForClaim(index: ArchitectureCodeIndex | null, claim: EvidenceClaim | null) {
+  if (!index || !claim) return { label: "Source facts unavailable", facts: [] };
+  const valid = index.facts.filter(fact => Number(fact.line) > 0);
+  if (claim.selector.startsWith("slice:")) {
+    return { label: "Subsystem source overview · first 18 symbols", facts: valid.filter(fact => claim.bindings.includes(String(fact.path))).slice(0, 18) };
+  }
+  if (claim.bindings.includes(claim.selector)) {
+    return { label: "File source overview · first 18 symbols", facts: valid.filter(fact => fact.path === claim.selector).slice(0, 18) };
+  }
+  return { label: "Exact selected source symbol", facts: valid.filter(fact => fact.id === claim.selector && claim.bindings.includes(String(fact.path))) };
+}
+
 export function compactEvidenceStatus(categories: Iterable<EvidenceCategory>) {
   const values = new Set(categories);
   if (values.has("CONTRADICTED")) return { label: "CONTRADICTED", symbol: "!", tone: "danger" };

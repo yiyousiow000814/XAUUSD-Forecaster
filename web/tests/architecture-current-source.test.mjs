@@ -7,9 +7,33 @@ import { build } from 'esbuild';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { projectCurrentSource } from '../build/architecture-current-source.mjs';
 import { parseArchitectureManifest, buildArchitectureGraph } from '../app/_lib/architecture-explorer.ts';
-import { parseArchitectureEvidence, parseArchitectureCodeIndex } from '../app/_lib/architecture-evidence.ts';
+import { parseArchitectureEvidence, parseArchitectureCodeIndex, sourceFactsForClaim } from '../app/_lib/architecture-evidence.ts';
 
 const index = JSON.parse(readFileSync(new URL('../../architecture/generated/critical-index.json', import.meta.url), 'utf8'));
+
+test('actual symbol claims retain their exact source span, never the first file symbols', () => {
+  const projection = projectCurrentSource(index);
+  const code = parseArchitectureCodeIndex(projection.code);
+  const evidence = parseArchitectureEvidence(projection.evidence);
+  for (const name of ['Start-ReleasePromotion', '_sync_news_evidence']) {
+    const original = index.observed.symbols.find(symbol => symbol.name === name);
+    assert.ok(original, name);
+    const claim = evidence.claims.find(item => item.selector === original.id);
+    assert.ok(claim, name);
+    const selected = sourceFactsForClaim(code, claim);
+    assert.equal(selected.label, 'Exact selected source symbol');
+    assert.deepEqual(selected.facts.map(fact => [fact.id, fact.path, fact.line, fact.end_line]),
+      [[original.id, original.path, original.line, original.end_line]]);
+    assert.deepEqual(sourceFactsForClaim(code, { ...claim, selector: 'unknown::symbol' }).facts, []);
+    assert.deepEqual(sourceFactsForClaim(code, { ...claim, bindings: ['unrelated.py'] }).facts, []);
+    const overview = sourceFactsForClaim(code, { ...claim, selector: original.path });
+    assert.match(overview.label, /^File source overview/);
+    assert.ok(overview.facts.length <= 18 && overview.facts.every(fact => fact.path === original.path));
+  }
+  const overview = sourceFactsForClaim(code, evidence.claims.find(claim => claim.selector === 'slice:source-first-ack'));
+  assert.match(overview.label, /^Subsystem source overview/);
+  assert.ok(overview.facts.length <= 18);
+});
 
 test('rendered source rows separate keyboard selection from source navigation', async () => {
   const output = await build({
