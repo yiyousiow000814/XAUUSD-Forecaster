@@ -1,0 +1,151 @@
+"""Source truth, incomplete-analysis visibility and generated drift contracts."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location('source_architecture', ROOT / 'scripts/architecture_compiler.py')
+compiler = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(compiler)
+
+
+@pytest.fixture
+def source(tmp_path):
+    manifest = {'schema': 'critical-path-selection-v1', 'views': {'fixture': {
+        'files': ['scripts/example.py'], 'roots': ['scripts/example.py::execute'], 'tests': []}}}
+    (tmp_path / 'architecture').mkdir()
+    (tmp_path / 'scripts').mkdir()
+    (tmp_path / compiler.SELECTION).write_text(json.dumps(manifest), encoding='utf-8')
+    for relative in compiler.TOOL_INPUTS:
+        shutil.copyfile(ROOT / relative, tmp_path / relative)
+    (tmp_path / 'scripts/example.py').write_text(
+        'def execute(connection):\n    connection.execute("BEGIN IMMEDIATE")\n'
+        '    connection.execute("INSERT INTO facts VALUES (1)")\n'
+        '    connection.commit()\n    helper()\ndef helper():\n    pass\n', encoding='utf-8')
+    return tmp_path
+
+
+def test_calls_sql_and_commit_are_observed_without_invented_ownership(source):
+    index = compiler.compile_index(source)
+    edges = index['observed']['edges']
+    assert any(e['kind'] == 'sql' and e['statement'] == 'BEGIN IMMEDIATE' for e in edges)
+    assert any(e['kind'] == 'commits' and e['resolution'] == 'UNKNOWN' for e in edges)
+    helper = next(e for e in edges if e['target'] == 'helper')
+    assert helper['candidate_symbol'] == 'scripts/example.py::helper'
+    assert helper['resolution'] == 'UNKNOWN'
+    assert index['runtime'] == {'status': 'UNKNOWN', 'observations': []}
+    assert index['coverage']['transaction_atomicity'] == 'NOT_PROVEN_BY_STATIC_INDEX'
+
+
+def test_imports_and_test_spans_do_not_claim_runtime_execution(source):
+    path = source / 'scripts/example.py'
+    path.write_text('from .owner import value\nimport sqlite3\n' + path.read_text(), encoding='utf-8')
+    (source / 'tests').mkdir()
+    (source / 'tests/test_fixture.py').write_text('def test_invariant():\n    raise RuntimeError("not executed")\n', encoding='utf-8')
+    manifest_path = source / compiler.SELECTION
+    manifest = json.loads(manifest_path.read_text())
+    manifest['views']['fixture']['tests'] = ['tests/test_fixture.py']
+    manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
+    index = compiler.compile_index(source)
+    assert {e['target'] for e in index['observed']['edges'] if e['kind'] == 'requires'} == {'.owner', 'sqlite3'}
+    assert index['observed']['tests'][0]['execution'] == 'NOT_OBSERVED'
+    assert index['observed']['tests'][0]['line'] == 1
+
+
+def test_inputs_are_relocatable_and_generated_output_never_hashes_itself(source, tmp_path):
+    first = compiler.compile_index(source)
+    generated = source / 'architecture/generated'
+    generated.mkdir()
+    (generated / 'critical-index.json').write_text('old output', encoding='utf-8')
+    assert compiler.compile_index(source) == first
+    relocated = tmp_path / 'elsewhere'
+    shutil.copytree(source / 'scripts', relocated / 'scripts')
+    (relocated / 'architecture').mkdir()
+    shutil.copyfile(source / compiler.SELECTION, relocated / compiler.SELECTION)
+    assert compiler.compile_index(relocated) == first
+
+
+@pytest.mark.parametrize('mutation', ['call', 'sql', 'retry', 'syntax', 'root'])
+def test_source_changes_and_invalid_sources_fail_or_change_the_graph(source, mutation):
+    first = compiler.compile_index(source)
+    path = source / 'scripts/example.py'
+    text = path.read_text(encoding='utf-8')
+    if mutation == 'syntax':
+        path.write_text('def broken(:', encoding='utf-8')
+        with pytest.raises(SyntaxError): compiler.compile_index(source)
+        return
+    if mutation == 'root':
+        path.write_text(text.replace('def execute(', 'def renamed('), encoding='utf-8')
+        with pytest.raises(ValueError, match='ARCHITECTURE_ROOT_MISSING'): compiler.compile_index(source)
+        return
+    text = text.replace('helper()', {'call': 'different()', 'sql': 'connection.execute("DELETE FROM facts")', 'retry': 'retry(maximum=2)'}[mutation], 1)
+    path.write_text(text, encoding='utf-8')
+    changed = compiler.compile_index(source)
+    assert changed['source_input_digest'] != first['source_input_digest']
+    assert compiler.render(changed) != compiler.render(first)
+
+
+def test_build_then_check_and_tamper_are_real_cli_boundaries(source):
+    command = [sys.executable, str(source / 'scripts/compile_architecture.py')]
+    options = dict(capture_output=True, timeout=15,
+                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+    subprocess.run([*command, 'build', '--root', str(source)], check=True, **options)
+    subprocess.run([*command, 'check', '--root', str(source)], check=True, **options)
+    (source / 'architecture/generated/fixture.mmd').write_text('tampered', encoding='utf-8')
+    result = subprocess.run([*command, 'check', '--root', str(source)], text=True, **options)
+    assert result.returncode == 1
+    assert 'ARCHITECTURE_GENERATED_DRIFT' in result.stderr
+
+
+@pytest.mark.parametrize('kind', ['empty', 'missing_root', 'language', 'escape', 'view_escape'])
+def test_invalid_selection_cannot_silently_drop_coverage(source, kind):
+    path = source / compiler.SELECTION
+    manifest = json.loads(path.read_text())
+    view = manifest['views']['fixture']
+    if kind == 'empty': manifest['views'] = {}
+    if kind == 'missing_root': view['roots'] = []
+    if kind == 'language': view['files'].append('scripts/not-parsed.ts')
+    if kind == 'escape': view['files'].append('../outside.py')
+    if kind == 'view_escape': manifest['views'] = {'../outside': view}
+    path.write_text(json.dumps(manifest), encoding='utf-8')
+    with pytest.raises(ValueError, match='ARCHITECTURE_'):
+        compiler.compile_index(source)
+
+
+def test_real_cli_rejects_orphaned_view_after_rename(source):
+    command = [sys.executable, str(source / 'scripts/compile_architecture.py')]
+    options = dict(capture_output=True, timeout=15,
+                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+    subprocess.run([*command, 'build', '--root', str(source)], check=True, **options)
+    path = source / compiler.SELECTION
+    manifest = json.loads(path.read_text())
+    manifest['views']['renamed'] = manifest['views'].pop('fixture')
+    path.write_text(json.dumps(manifest), encoding='utf-8')
+    subprocess.run([*command, 'build', '--root', str(source)], check=True, **options)
+    result = subprocess.run([*command, 'check', '--root', str(source)], text=True, **options)
+    assert result.returncode == 1
+    assert 'fixture.mmd' in result.stderr
+    assert (source / 'architecture/generated/fixture.mmd').exists()
+
+
+@pytest.mark.skipif(not (shutil.which('pwsh') or shutil.which('powershell')), reason='PowerShell composition tested by architecture CI')
+def test_real_powershell_parser_emits_dynamic_calls_and_rejects_invalid_source(source):
+    manifest_path = source / compiler.SELECTION
+    manifest = json.loads(manifest_path.read_text())
+    manifest['views']['fixture']['files'].append('scripts/fixture.ps1')
+    manifest['views']['fixture']['roots'].append('scripts/fixture.ps1::Invoke-Fixture')
+    manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
+    script = source / 'scripts/fixture.ps1'
+    script.write_text('function Invoke-Fixture { & $unknown; Write-Output "中文" }', encoding='utf-8')
+    index = compiler.compile_index(source)
+    assert any(e['target'] == '<dynamic-command>' and e['resolution'] == 'UNKNOWN'
+               for e in index['observed']['edges'])
+    script.write_text('function Invoke-Fixture {', encoding='utf-8')
+    with pytest.raises(RuntimeError, match='ARCHITECTURE_PARSE_FAILED'):
+        compiler.compile_index(source)
