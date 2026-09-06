@@ -13,6 +13,7 @@ import numpy as np
 from .execution_costs import ROUND_TRIP_COMMISSION_LOG_COST
 from .ridge import train_ridge
 from .training import MARKET_FEATURES
+from .offline_model_paths import research_path
 
 IDENTITIES = ("MARKET_ONLY", "FULL", "BROAD_FULL", "NEWS_ONLY", "NEWS_RESIDUAL", "BROAD_NEWS_RESIDUAL")
 FEATURES = {
@@ -272,7 +273,7 @@ def choose_affine(past, cutoff, names, plan):
 
 
 def experiment(panel, plan, output):
-    output = Path(output)
+    output = research_path(output)
     if output.exists() and any(output.iterdir()):
         raise ValueError("OUTPUT_MUST_BE_EMPTY")
     output.mkdir(parents=True, exist_ok=True)

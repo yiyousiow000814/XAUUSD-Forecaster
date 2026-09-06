@@ -4,6 +4,14 @@ This is research-only. It does not initialize a ledger, call a provider, activat
 a generation or trade. All output directories must be new and outside the source
 and input trees. No candidate in the initial retrospective run qualified.
 
+CLI filesystem authority is limited to the immutable research checkout,
+`~/Documents/Codex`, and the OS temporary directory. Paths are normalized and
+real-link-resolved before containment checks; CLI arguments cannot expand that
+allowlist. Do not run elevated or concurrently replace its directories. This
+is a local-user research utility, not a sandbox against malicious same-user
+filesystem races. Reparse/symlink escapes are rejected. Production runtime
+directories outside these roots are never accepted as output destinations.
+
 Use the preserved online-backup identity in `facts.json`, `followup_input.json`
 and exact copied historical artifacts, not a live database or latest model.
 The extractor checks the backup's recorded file/WAL identity and requires an

@@ -3,10 +3,14 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from xauusd_forecaster.offline_model_paths import research_path
 
 
 def render(directory):
-    directory = Path(directory)
+    directory = research_path(directory)
     payload = json.loads((directory / "results.json").read_text(encoding="utf-8"))
     execution = json.loads((directory / "execution.json").read_text(encoding="utf-8"))
     if hashlib.sha256((directory / "results.json").read_bytes()).hexdigest() != execution["results_sha256"]:

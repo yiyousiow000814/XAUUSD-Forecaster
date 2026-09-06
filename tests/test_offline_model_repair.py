@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from xauusd_forecaster import offline_model_repair as research
+from xauusd_forecaster.offline_model_paths import research_path
 
 
 def row(i=0, **changes):
@@ -122,6 +123,32 @@ def test_config_replay_is_deterministic_and_output_is_append_only(tmp_path):
 def test_invalid_action_universe_fails_instead_of_silent_zip_truncation():
     with pytest.raises(ValueError, match="INVALID_ACTION_UNIVERSE"):
         research.ledger([row()], [])
+
+
+def test_research_paths_cannot_escape_declared_authority(tmp_path):
+    allowed, outside = tmp_path/"allowed", tmp_path/"outside"
+    allowed.mkdir()
+    outside.mkdir()
+    assert research_path(allowed/"run"/".."/"safe", roots=[allowed]) == allowed/"safe"
+    for path in (outside, allowed/".."/"outside", tmp_path/"allowed-sibling"):
+        with pytest.raises(ValueError, match="OUTSIDE_OFFLINE_RESEARCH_ROOT"):
+            research_path(path, roots=[allowed])
+    link = allowed/"escape"
+    if sys.platform == "win32":
+        result = subprocess.run(["cmd.exe", "/c", "mklink", "/J", str(link), str(outside)],
+                                capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+        assert result.returncode == 0, result.stderr
+    else:
+        link.symlink_to(outside, target_is_directory=True)
+    try:
+        with pytest.raises(ValueError, match="OUTSIDE_OFFLINE_RESEARCH_ROOT"):
+            research_path(link/"payload.json", roots=[allowed])
+    finally:
+        if sys.platform == "win32":
+            link.rmdir()
+        else:
+            link.unlink()
+    assert outside.is_dir()
 
 
 def test_real_cli_and_report_bind_inputs_and_reject_tampered_results(tmp_path):

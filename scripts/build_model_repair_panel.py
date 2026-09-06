@@ -5,6 +5,8 @@ Output is a research panel, not a production qualification receipt.
 """
 import argparse, collections, csv, datetime as dt, hashlib, json, math, pathlib, sqlite3, subprocess, sys, time
 import numpy as np
+sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
+from xauusd_forecaster.offline_model_paths import research_path
 
 MARKET_FEATURES=('return_1m','return_5m','return_15m','return_30m','return_60m','tick_speed_5m_per_second','quote_imbalance_60m','realized_volatility_60m')
 IDENTITIES=('MARKET_ONLY','FULL','BROAD_FULL','NEWS_ONLY','NEWS_RESIDUAL','BROAD_NEWS_RESIDUAL')
@@ -51,6 +53,9 @@ def read_checked_copy(path,expected_hash):
 
 def main():
  ap=argparse.ArgumentParser();ap.add_argument('--input-dir',type=pathlib.Path,required=True);ap.add_argument('--output-dir',type=pathlib.Path,required=True);ap.add_argument('--artifact-root',type=pathlib.Path,required=True);ap.add_argument('--artifact-inventory',type=pathlib.Path,required=True);ap.add_argument('--source-root',type=pathlib.Path,required=True);ap.add_argument('--snapshot',type=pathlib.Path,required=True);ap.add_argument('--input-sha256',required=True);ap.add_argument('--plan',type=pathlib.Path,required=True);ap.add_argument('--selected-inputs',type=pathlib.Path);ap.add_argument('--selected-sha256');a=ap.parse_args()
+ for field in ('input_dir','output_dir','artifact_root','artifact_inventory','source_root','snapshot','plan','selected_inputs'):
+  value=getattr(a,field)
+  if value is not None:setattr(a,field,research_path(value))
  o=a.output_dir
  if o.exists() and any(o.iterdir()):raise ValueError('OUTPUT_MUST_BE_EMPTY')
  if any(p.resolve().is_relative_to(o.resolve()) for p in (a.input_dir,a.snapshot,a.artifact_root,a.artifact_inventory,a.plan)):

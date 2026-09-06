@@ -10,6 +10,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from xauusd_forecaster.offline_model_repair import experiment
+from xauusd_forecaster.offline_model_paths import research_path
 
 
 def main():
@@ -18,6 +19,7 @@ def main():
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    args.panel, args.plan, args.output = (research_path(p) for p in (args.panel, args.plan, args.output))
     for source in (args.panel, args.plan):
         if source.resolve().is_relative_to(args.output.resolve()):
             parser.error("output must not own any input")
@@ -30,7 +32,7 @@ def main():
     def digest(path):
         return hashlib.sha256(path.read_bytes()).hexdigest()
     files = ["scripts/run_model_repair_offline.py", "scripts/build_model_repair_panel.py", "scripts/report_model_repair_offline.py",
-             "xauusd_forecaster/offline_model_repair.py", "xauusd_forecaster/ridge.py",
+             "xauusd_forecaster/offline_model_repair.py", "xauusd_forecaster/offline_model_paths.py", "xauusd_forecaster/ridge.py",
              "xauusd_forecaster/training.py", "xauusd_forecaster/execution_costs.py", "xauusd_forecaster/forward_ledger.py"]
     evidence = {"source_git_sha": git("rev-parse", "HEAD"), "worktree_clean": not bool(git("status", "--porcelain")),
                 "source_files_sha256": {p: digest(root/p) for p in files},
