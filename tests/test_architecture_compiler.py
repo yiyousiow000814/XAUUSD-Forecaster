@@ -6,6 +6,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from types import SimpleNamespace
+import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -149,3 +151,29 @@ def test_real_powershell_parser_emits_dynamic_calls_and_rejects_invalid_source(s
     script.write_text('function Invoke-Fixture {', encoding='utf-8')
     with pytest.raises(RuntimeError, match='ARCHITECTURE_PARSE_FAILED'):
         compiler.compile_index(source)
+
+
+@pytest.mark.parametrize('case,expected', [
+    ('exact_assertion', 'KILLED'), ('passed', 'SURVIVED'),
+    ('other_assertion', 'ERROR'), ('setup', 'ERROR'),
+    ('skip', 'ERROR'), ('wrong_count', 'ERROR'), ('body_only_marker', 'ERROR'),
+])
+def test_mutation_kill_requires_exact_executed_assertion(tmp_path, monkeypatch, case, expected):
+    monkeypatch.setitem(sys.modules, 'architecture_compiler', compiler)
+    spec = importlib.util.spec_from_file_location('mutation_runner', ROOT / 'scripts/run_architecture_mutations.py')
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    document = ET.Element('testsuite')
+    test = ET.SubElement(document, 'testcase', name='test_behavior')
+    if case == 'exact_assertion': ET.SubElement(test, 'failure', type='AssertionError', message='AssertionError: NAMED_INVARIANT')
+    if case == 'other_assertion': ET.SubElement(test, 'failure', type='AssertionError', message='something else')
+    if case == 'setup': ET.SubElement(test, 'error', message='NAMED_INVARIANT')
+    if case == 'skip': ET.SubElement(test, 'skipped')
+    if case == 'body_only_marker':
+        failure = ET.SubElement(test, 'failure', type='TypeError', message='bad fixture')
+        failure.text = 'source code contains NAMED_INVARIANT'
+    xml = tmp_path / 'result.xml'
+    ET.ElementTree(document).write(xml)
+    outcome, _ = runner.classify(SimpleNamespace(returncode=0 if case == 'passed' else 1),
+                                  xml, 2 if case == 'wrong_count' else 1, 'NAMED_INVARIANT')
+    assert outcome == expected

@@ -54,3 +54,24 @@ expectations, not recorded runtime events. Preserve that distinction while
 reusing its registry and identity checks. The historical survivors are
 `MUT-SYNC-HEARTBEAT-FIRST`, `MUT-EVIDENCE-APPEND-ONLY`, and
 `MUT-RELEASE-PREVIEW-PROMOTION`; no current result is inferred from their names.
+
+## Bounded historical-survivor execution
+
+The current mutation runner reuses #325's exact symbol replacement and
+baseline-first execution. Isolation is a disposable export of a clean tracked
+checkpoint, not an old development tree or production runtime. No database
+copy or external provider is used. The source checkout remains unchanged.
+
+The three sentinel tests target actual owners: ForwardLedger (not the separate
+PredictionLedger), ordering inside the real Sync entrypoint, and the exact
+Preview rejection boundary before unrelated Promote preconditions. PowerShell
+parses and executes only that function, with a deliberate throwing sentinel at
+the next precondition; no facade or production configuration is loaded. Both
+Windows shells must actually execute. Missing shells/cases are not a kill.
+
+Results require a passing baseline and valid mutated syntax. KILLED requires
+every selected JUnit case to fail with its exact named AssertionError. Skips,
+setup errors, other failures, missing reports and timeouts never count as kills.
+The exported source SHA and archive digest, changed-file hashes, logs and XML
+are retained outside generated architecture content. This is isolated contract
+evidence, never a production runtime trace or full release qualification.
