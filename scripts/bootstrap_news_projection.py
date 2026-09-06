@@ -27,6 +27,7 @@ from scripts.run_dashboard_sync import (  # noqa: E402
     _sync_news,
     _validated_sync_state_path,
     _write_news_sync_state,
+    RUNTIME_STATE_ROOT_KEY,
 )
 from scripts.run_dashboard_api import (  # noqa: E402
     _build_news_projection_source_from_database,
@@ -60,6 +61,7 @@ def bootstrap(
     *, base_config: dict, origin: str, token: str, state_file: Path,
     max_cycles: int, retry_seconds: float,
     frozen_generation: NewsProjectionGeneration | None = None,
+    state_root: Path,
 ) -> dict:
     if not token.strip():
         raise ValueError("ingest token is missing")
@@ -72,6 +74,7 @@ def bootstrap(
         raise ValueError("bootstrap requires the local Dashboard API authority")
     config = {
         **base_config,
+        RUNTIME_STATE_ROOT_KEY: str(state_root),
         "name": "candidate-news-bootstrap",
         "legacy": False,
         "token": token.strip(),
@@ -87,6 +90,7 @@ def bootstrap(
         except RemoteInvariantViolation as error:
             _record_recovery_required(
                 state_file, frozen_generation, error.error_code,
+                state_root=state_root,
             )
             raise
         except PayloadContractError:
@@ -166,6 +170,7 @@ def _record_recovery_required(
     state_file: Path,
     generation: NewsProjectionGeneration | None,
     error_code: str,
+    *, state_root: Path,
 ) -> None:
     state = _read_news_sync_state(state_file)
     manifest = generation.manifest if generation is not None else {}
@@ -182,10 +187,10 @@ def _record_recovery_required(
         },
         "updated_at": datetime.now(UTC).isoformat(),
     })
-    _write_news_sync_state(state_file, state)
+    _write_news_sync_state(state_file, state, state_root=state_root)
 
 
-def _require_recoverable_artifact(state_file: Path, artifact_path: Path) -> None:
+def _require_recoverable_artifact(state_file: Path, artifact_path: Path, *, state_root: Path) -> None:
     state = _read_news_sync_state(state_file)
     if (
         state.get("projection_state") in {"REPLAYING", "VERIFYING"}
@@ -194,6 +199,7 @@ def _require_recoverable_artifact(state_file: Path, artifact_path: Path) -> None
     ):
         _record_recovery_required(
             state_file, None, "FROZEN_GENERATION_ARTIFACT_MISSING",
+            state_root=state_root,
         )
         raise PayloadContractError(
             "pinned News generation artifact is missing; explicit recovery is required"
@@ -281,7 +287,7 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
     if args.source_database:
-        _require_recoverable_artifact(state_file, artifact_path)
+        _require_recoverable_artifact(state_file, artifact_path, state_root=PRODUCTION_RUNTIME_STATE_ROOT)
     frozen_generation = (
         _load_or_freeze_news_projection_generation(
             args.source_database, artifact_path,
@@ -296,6 +302,7 @@ def main() -> int:
         max_cycles=args.max_cycles,
         retry_seconds=args.retry_seconds,
         frozen_generation=frozen_generation,
+        state_root=PRODUCTION_RUNTIME_STATE_ROOT,
     )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0

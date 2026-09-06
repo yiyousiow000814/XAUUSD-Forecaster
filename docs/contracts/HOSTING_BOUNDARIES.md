@@ -38,6 +38,13 @@
 ## Target isolation
 
 - Each hosting target has independent synchronization state and health.
+- Sync state writes receive the authoritative runtime directory independently
+  from the requested filename. They revalidate direct-child containment and
+  reject directory reparse redirection before temporary-file creation and each
+  atomic replacement attempt. Terminal file links are replaced as entries,
+  never followed for writes. The runtime directory and ancestors remain under
+  their existing private ownership/permissions; path rechecks do not claim to
+  defeat a concurrently malicious actor with directory-replacement privileges.
 - Failure of one target must not stop synchronization to the other target.
 - If both targets reject the heartbeat, synchronization must expose an error.
 - Public-hosting failure must not stop local evidence collection.

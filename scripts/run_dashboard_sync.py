@@ -109,6 +109,7 @@ from xauusd_forecaster.dashboard.sync.transport import (
     _post_json as _transport_post_json,
     _post_local_json,
     _validated_sync_state_path,
+    _validated_sync_state_write_path,
     configure_runtime_state,
     configured_targets,
 )
@@ -902,7 +903,7 @@ def _sync_operator_retry_mirror(
             "source_digest": source_digest,
             "item_count": len(jobs),
             "last_success": datetime.now(UTC).isoformat(),
-        })
+        }, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
 
 
 def _sync_operator_retries(_local_payload: dict, config: dict) -> None:
@@ -974,12 +975,15 @@ def _read_news_sync_state(path: Path) -> dict:
         return {}
 
 
-def _write_news_sync_state(path: Path, state: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _write_news_sync_state(path: Path, state: dict, *, state_root: Path) -> None:
+    path = _validated_sync_state_write_path(path, state_root)
+    authority = Path(os.path.abspath(state_root))
+    authority.mkdir(parents=True, exist_ok=True)
+    path = _validated_sync_state_write_path(path, state_root)
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent,
+            mode="w", encoding="utf-8", dir=authority,
             prefix="dashboard-sync-state-", suffix=".tmp", delete=False,
         ) as stream:
             temporary = Path(stream.name)
@@ -988,6 +992,9 @@ def _write_news_sync_state(path: Path, state: dict) -> None:
         # atomic replace (never the accepted HTTP operation), for <=70 ms.
         for delay in (0.01, 0.02, 0.04, None):
             try:
+                path = _validated_sync_state_write_path(path, state_root)
+                if os.path.commonpath((path, authority)) != str(authority):
+                    raise ValueError("dashboard sync state path escapes runtime authority")
                 temporary.replace(path)
                 return
             except PermissionError as error:
@@ -996,6 +1003,7 @@ def _write_news_sync_state(path: Path, state: dict) -> None:
                 time.sleep(delay)
     finally:
         if temporary is not None:
+            _validated_sync_state_write_path(path, state_root)
             temporary.unlink(missing_ok=True)
 
 
@@ -1062,7 +1070,7 @@ def _sync_learning_history(local_payload: dict, config: dict) -> None:
             "full_refresh_started_at": history_state.get("full_refresh_started_at"),
             "pending_record_count": len(pending) - len(batch),
             "last_progress": now.isoformat(),
-        })
+        }, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
         return
 
     _write_news_sync_state(history_state_path, {
@@ -1071,7 +1079,7 @@ def _sync_learning_history(local_payload: dict, config: dict) -> None:
         "last_full_sync": now.isoformat() if full_refresh_due else last_full,
         "last_success": now.isoformat(),
         "pending_record_count": 0,
-    })
+    }, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
 
 
 def _sync_learning_summary(local_payload: dict, config: dict) -> None:
@@ -1088,7 +1096,7 @@ def _sync_learning_summary(local_payload: dict, config: dict) -> None:
         _write_news_sync_state(learning_state_path, {
             "payload_hash": learning_hash,
             "last_success": datetime.now(UTC).isoformat(),
-        })
+        }, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
 
 
 def _sync_learning(local_payload: dict, config: dict) -> None:
@@ -1260,7 +1268,7 @@ def _sync_market_history(config: dict) -> None:
                 "cursor": cursor,
                 "decision_overviews": decision_overviews,
                 "last_success": datetime.now(UTC).isoformat(),
-            })
+            }, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
         pages += 1
         if not page.get("has_more") or not next_cursor or next_cursor == after:
             break
@@ -1287,7 +1295,7 @@ def _sync_market_history(config: dict) -> None:
         "overview_offset": overview_offset,
         "has_more": bool(page.get("has_more")),
         "last_success": datetime.now(UTC).isoformat(),
-    })
+    }, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
 
 
 def _local_news_archive_url(
@@ -1488,7 +1496,7 @@ def _sync_news(
         "expected_index_count": manifest["expected_index_count"],
         "updated_at": datetime.now(UTC).isoformat(),
     })
-    _write_news_sync_state(state_path, state)
+    _write_news_sync_state(state_path, state, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
 
 
 def _sync_audit(local_payload: dict, config: dict) -> None:
@@ -1677,7 +1685,7 @@ def sync_deferred_projection_once(
         if "/api/news-evidence" in request["routes"]:
             # Preserve accepted Audit work while the existing News cursor moves
             # by its normal one-page budget. There is still one serial Sync owner.
-            _write_news_sync_state(receipt_path, receipt)
+            _write_news_sync_state(receipt_path, receipt, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
             prior_news = _read_news_sync_state(Path(target["news_evidence_state_file"]))
             snapshot = _sync_news_evidence({}, target)
             ack = _read_news_sync_state(Path(target["news_evidence_state_file"]))
@@ -1725,7 +1733,7 @@ def sync_deferred_projection_once(
             })
         completed_at = datetime.now(UTC)
         receipt.update(state="COMPLETED", completed_at=completed_at.isoformat())
-        _write_news_sync_state(receipt_path, receipt)
+        _write_news_sync_state(receipt_path, receipt, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
         return SyncResourceResults([], [*observations, {
             "target": request["target"],
             "resource": "deferred_projection",
@@ -1928,7 +1936,7 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> str | None:
             "ack_remote_url": remote_url,
             "ack_request_sha256": prepared["request_sha256"],
             "last_success": datetime.now(UTC).isoformat(),
-        })
+        }, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
         return snapshot_id
     received = prepared["next_offset"]
     if received < 0 or received > total:
@@ -1984,7 +1992,7 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> str | None:
                 "ack_remote_url": remote_url,
                 "ack_request_sha256": activated["request_sha256"],
                 "last_success": datetime.now(UTC).isoformat(),
-            })
+            }, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
             _cleanup_news_evidence_snapshots(remote_url, snapshot_id, config)
             return snapshot_id
         if not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor:
@@ -1997,7 +2005,7 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> str | None:
         "staged_count": received,
         "next_cursor": cursor,
         "last_progress": datetime.now(UTC).isoformat(),
-    })
+    }, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
     return snapshot_id
 
 
@@ -2113,7 +2121,7 @@ def _persist_resource_schedule_result(
         _record_resource_schedule(
             state, resource, cadence_seconds, now=now, success=success,
         )
-        _write_news_sync_state(path, state)
+        _write_news_sync_state(path, state, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
 
 
 def sync_heartbeat_once(config: dict) -> tuple[list[dict], SyncResourceResults]:

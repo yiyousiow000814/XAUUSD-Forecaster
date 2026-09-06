@@ -80,6 +80,7 @@ def test_bootstrap_keeps_partial_replay_then_requires_verified_current(
         origin="https://abc12345-aurum-signal-room.example.workers.dev",
         token="secret", state_file=tmp_path / "state.json",
         max_cycles=2, retry_seconds=0,
+        state_root=tmp_path,
     )
     assert result["status"] == "PASSED"
     assert result["cycles"] == 2
@@ -115,6 +116,7 @@ def test_bootstrap_reuses_one_frozen_generation_without_stable_api(
         origin="https://abc12345-aurum-signal-room.example.workers.dev",
         token="secret", state_file=tmp_path / "state.json",
         max_cycles=2, retry_seconds=0, frozen_generation=frozen,
+        state_root=tmp_path,
     )
 
     assert result["status"] == "PASSED"
@@ -143,6 +145,7 @@ def test_bootstrap_does_not_retry_deterministic_contract_failure(
             origin="https://abc12345-aurum-signal-room.example.workers.dev",
             token="secret", state_file=tmp_path / "state.json",
             max_cycles=1_000, retry_seconds=0,
+            state_root=tmp_path,
         )
     assert attempts == [1]
 
@@ -203,17 +206,33 @@ def test_missing_pinned_artifact_enters_explicit_recovery(
     recorded = []
     monkeypatch.setattr(
         MODULE, "_record_recovery_required",
-        lambda *args: recorded.append(args),
+        lambda *args, state_root: recorded.append((args, state_root)),
     )
 
     with pytest.raises(MODULE.PayloadContractError, match="explicit recovery"):
         MODULE._require_recoverable_artifact(
             state_file, tmp_path / "missing-generation.json.gz",
+            state_root=tmp_path,
         )
 
-    assert recorded == [(
+    assert recorded == [((
         state_file, None, "FROZEN_GENERATION_ARTIFACT_MISSING",
-    )]
+    ), tmp_path)]
+
+
+@pytest.mark.parametrize("outside", [False, True])
+def test_bootstrap_recovery_write_keeps_explicit_runtime_authority(tmp_path, outside):
+    authority = tmp_path / "runtime"
+    state = (tmp_path if outside else authority) / "bootstrap.json"
+    if outside:
+        with pytest.raises(ValueError, match="sync state path"):
+            MODULE._record_recovery_required(state, None, "MISSING", state_root=authority)
+        assert not state.exists()
+        assert not authority.exists()
+    else:
+        MODULE._record_recovery_required(state, None, "MISSING", state_root=authority)
+        assert json.loads(state.read_text(encoding="utf-8"))["projection_state"] == "RECOVERY_REQUIRED"
+        assert set(authority.iterdir()) == {state}
 
 
 def test_recovery_abandons_only_exact_recorded_staging(

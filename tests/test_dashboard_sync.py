@@ -696,7 +696,7 @@ def test_sync_state_round_trip_and_malformed_state_fail_to_empty(tmp_path) -> No
     state_file = tmp_path / "dashboard-news-sync-state.json"
     expected = {"contract_version": "news-v1", "cursor": "abc:12"}
 
-    module._write_news_sync_state(state_file, expected)
+    module._write_news_sync_state(state_file, expected, state_root=tmp_path)
 
     assert module._read_news_sync_state(state_file) == expected
     assert not state_file.with_suffix(".json.tmp").exists()
@@ -726,13 +726,93 @@ def test_validated_state_write_stays_in_authority(tmp_path, form):
         except OSError as error:
             pytest.skip(f"symlink privilege unavailable: {error}")
     checked = module._validated_sync_state_path(supplied, authority)
-    module._write_news_sync_state(checked, {"cursor": 8})
+    module._write_news_sync_state(checked, {"cursor": 8}, state_root=authority)
     assert json.loads(target.read_text(encoding="utf-8")) == {"cursor": 8}
     assert outside.read_text(encoding="utf-8") == '{"original":true}'
     assert set(authority.iterdir()) == {target}
     assert not target.is_symlink()
     with pytest.raises(ValueError, match="sync state path"):
         module._validated_sync_state_path(authority / ".." / "outside.json", authority)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Windows junction boundary")
+@pytest.mark.parametrize("stage", ["after-configuration", "ancestor", "replace-retry"])
+def test_sync_state_writer_rejects_actual_authority_junction(tmp_path, monkeypatch, stage):
+    module = _sync_module()
+    directory = tmp_path / "authority"
+    authority = directory / "forward" if stage == "ancestor" else directory
+    retained = tmp_path / "retained-authority"
+    outside = tmp_path / "outside"
+    authority.mkdir(parents=True)
+    outside.mkdir()
+    target = authority / "state.json"
+    target.write_text('{"prior":true}', encoding="utf-8")
+    outside_state = outside / "state.json"
+    outside_state.write_text('{"outside":true}', encoding="utf-8")
+    checked = module._validated_sync_state_path(target, authority)
+    calls = []
+
+    def shell(command):
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")
+
+    def redirect():
+        directory.rename(retained)
+        escaped_authority = str(directory).replace("'", "''")
+        escaped_outside = str(outside).replace("'", "''")
+        shell(f"$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path '{escaped_authority}' -Target '{escaped_outside}' | Out-Null")
+
+    def sharing_then_redirect(_temporary, destination):
+        calls.append(destination)
+        redirect()
+        error = PermissionError("sharing violation")
+        error.winerror = 32
+        raise error
+
+    try:
+        if stage != "replace-retry":
+            redirect()
+        else:
+            monkeypatch.setattr(Path, "replace", sharing_then_redirect)
+        with pytest.raises(ValueError, match="authority is redirected"):
+            module._write_news_sync_state(checked, {"cursor": 8}, state_root=authority)
+        assert outside_state.read_text(encoding="utf-8") == '{"outside":true}'
+        assert set(outside.iterdir()) == {outside_state}
+        assert len(calls) == (1 if stage == "replace-retry" else 0)
+        prior_path = retained / "forward" / "state.json" if stage == "ancestor" else retained / "state.json"
+        assert prior_path.read_text(encoding="utf-8") == '{"prior":true}'
+    finally:
+        # Remove only this exact junction entry; never recurse into its target.
+        if directory.exists() and directory.lstat().st_file_attributes & 0x400:
+            assert directory.parent.resolve() == tmp_path.resolve()
+            escaped = str(directory).replace("'", "''")
+            shell(f"[IO.Directory]::Delete('{escaped}')")
+        if retained.exists() and not directory.exists():
+            retained.rename(directory)
+    # A redirected owner is not safe cleanup authority. After restoring the
+    # real directory, the fixture may remove only the writer's retained temps.
+    for temporary in authority.glob("dashboard-sync-state-*.tmp"):
+        temporary.unlink()
+    assert set(authority.iterdir()) == {target}
+
+
+def test_sync_state_write_requires_independent_root_and_checks_before_io(tmp_path, monkeypatch):
+    module = _sync_module()
+    authority = tmp_path / "authority"
+    outsider = tmp_path / "outside.json"
+    calls = []
+    monkeypatch.setattr(module.tempfile, "NamedTemporaryFile", lambda **kwargs: calls.append(kwargs))
+    with pytest.raises(TypeError, match="state_root"):
+        module._write_news_sync_state(outsider, {})
+    with pytest.raises(ValueError, match="sync state path"):
+        module._write_news_sync_state(outsider, {}, state_root=authority)
+    assert calls == []
+    assert not authority.exists()
+    assert not outsider.exists()
 
 
 def test_sync_status_records_real_success_and_preserves_it_on_error(tmp_path) -> None:
@@ -1616,11 +1696,11 @@ def test_sync_state_atomic_replace_bounds_windows_sharing_retry(monkeypatch, tmp
     monkeypatch.setattr(module.time, "sleep", delays.append)
     if release_after is None:
         with pytest.raises(PermissionError, match="sharing conflict"):
-            module._write_news_sync_state(path, {"cursor": 8})
+            module._write_news_sync_state(path, {"cursor": 8}, state_root=tmp_path)
         assert json.loads(path.read_text()) == {"cursor": 4}
         assert len(attempts) == 4
     else:
-        module._write_news_sync_state(path, {"cursor": 8})
+        module._write_news_sync_state(path, {"cursor": 8}, state_root=tmp_path)
         assert json.loads(path.read_text()) == {"cursor": 8}
         assert len(attempts) == release_after + 1
     assert sum(delays) <= .071
@@ -1637,7 +1717,7 @@ def test_sync_state_replaces_after_real_windows_reader_releases(tmp_path):
     timer = threading.Timer(.025, reader.close)
     timer.start()
     try:
-        module._write_news_sync_state(path, {"cursor": 8})
+        module._write_news_sync_state(path, {"cursor": 8}, state_root=tmp_path)
     finally:
         reader.close()
         timer.join(1)
@@ -1756,7 +1836,7 @@ def test_deferred_heavy_turns_yield_to_due_resources_without_duplicate_owners(
             now - timedelta(seconds=10) if policy[0] in
             {"learning", "market_chart", "news_evidence", "audit"} else now + timedelta(hours=1)
         ).isoformat()} for policy in module.RESOURCE_POLICIES},
-    })
+    }, state_root=tmp_path)
     calls = []
     monkeypatch.setattr(module, "_deferred_projection_pending", lambda _: True)
     monkeypatch.setattr(module, "_read_deferred_projection_request", lambda _: {
@@ -3149,6 +3229,7 @@ def test_operator_retry_mirror_persists_exact_digest_only_after_delta_completes(
     state_path = tmp_path / "operator-retry.json"
     config = {
         "operator_retry_state_file": str(state_path),
+        module.RUNTIME_STATE_ROOT_KEY: str(tmp_path),
         "token": "test",
     }
     items = [{
@@ -3373,14 +3454,14 @@ def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
                 module._write_news_sync_state(Path(target["news_evidence_state_file"]), {
                     "contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION,
                     "staging_snapshot_id": "d"*64, "staged_count": 4,
-                })
+                }, state_root=tmp_path)
             if len(news_calls) == 2:
                 module._write_news_sync_state(Path(target["news_evidence_state_file"]), {
                     "contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION,
                     "active_snapshot_id": "d"*64, "record_count": 8,
                     "ack_remote_url": target["remote_ingest_url"].rsplit("/", 1)[0] + "/news-evidence",
                     "ack_request_sha256": "e" * 64,
-                })
+                }, state_root=tmp_path)
             return "d" * 64
         monkeypatch.setattr(module, "_sync_news_evidence", advance_news)
         monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k:

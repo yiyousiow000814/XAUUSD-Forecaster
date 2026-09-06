@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import stat
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -211,6 +212,25 @@ def _validated_sync_state_path(path: Path, state_root: Path) -> Path:
             f"dashboard sync state path must be one JSON file under {authority}"
         )
     return authority / filename_match.group(0)
+
+
+def _validated_sync_state_write_path(path: Path, state_root: Path) -> Path:
+    """Validate the owner and filesystem at use, without following file links."""
+    candidate = _validated_sync_state_path(path, state_root)
+    authority = logical_absolute_path(state_root)
+    for directory in (authority, *authority.parents):
+        try:
+            info = directory.lstat()
+        except FileNotFoundError:
+            continue
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or getattr(info, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            or not stat.S_ISDIR(info.st_mode)
+        ):
+            raise ValueError("dashboard sync state path authority is redirected or invalid")
+    return candidate
 
 
 def configure_runtime_state(config: dict, state_root: Path) -> dict:
