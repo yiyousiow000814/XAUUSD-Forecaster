@@ -154,7 +154,7 @@ def test_real_powershell_parser_emits_dynamic_calls_and_rejects_invalid_source(s
 
 
 @pytest.mark.parametrize('case,expected', [
-    ('exact_assertion', 'KILLED'), ('passed', 'SURVIVED'),
+    ('exact_assertion', 'KILLED'), ('pytest_junit', 'KILLED'), ('passed', 'SURVIVED'),
     ('other_assertion', 'ERROR'), ('setup', 'ERROR'),
     ('skip', 'ERROR'), ('wrong_count', 'ERROR'), ('body_only_marker', 'ERROR'),
 ])
@@ -166,6 +166,7 @@ def test_mutation_kill_requires_exact_executed_assertion(tmp_path, monkeypatch, 
     document = ET.Element('testsuite')
     test = ET.SubElement(document, 'testcase', name='test_behavior')
     if case == 'exact_assertion': ET.SubElement(test, 'failure', type='AssertionError', message='AssertionError: NAMED_INVARIANT')
+    if case == 'pytest_junit': ET.SubElement(test, 'failure', message='AssertionError: NAMED_INVARIANT')
     if case == 'other_assertion': ET.SubElement(test, 'failure', type='AssertionError', message='something else')
     if case == 'setup': ET.SubElement(test, 'error', message='NAMED_INVARIANT')
     if case == 'skip': ET.SubElement(test, 'skipped')

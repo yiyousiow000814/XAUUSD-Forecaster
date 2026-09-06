@@ -33,6 +33,7 @@ def run(command, root, timeout=45, **options):
         'APPDATA', 'LOCALAPPDATA', 'HOME', 'PATHEXT', 'PROGRAMFILES', 'PROGRAMFILES(X86)'}}
     environment['PYTHONUTF8'] = '1'
     environment['PYTHONDONTWRITEBYTECODE'] = '1'
+    environment['USERNAME'] = 'architecture-isolated-test'
     return subprocess.run(command, cwd=root, env=environment, capture_output=True,
                           timeout=timeout, creationflags=NO_WINDOW, **options)
 
@@ -53,7 +54,8 @@ def classify(result, xml, expected, marker, baseline=False):
         return 'ERROR', 'BASELINE_FAILED'
     if result.returncode == 1 and all(
         failure is not None
-        and failure.get('type', '').endswith('AssertionError')
+        and failure.get('type', 'AssertionError').endswith('AssertionError')
+        and failure.get('message', '').startswith('AssertionError:')
         and marker in failure.get('message', '')
         for failure in failures
     ):
