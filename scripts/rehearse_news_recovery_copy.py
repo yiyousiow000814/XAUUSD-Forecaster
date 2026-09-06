@@ -491,7 +491,7 @@ def main():
             now, version = datetime.now(UTC), str(uuid.uuid4())
             schedule = {"schema_version": 1, "resources": {p[0]: {
                 "next_run_at": (now + timedelta(hours=1)).isoformat()} for p in sync.RESOURCE_POLICIES}}
-            sync._write_news_sync_state(Path(target["resource_schedule_state_file"]), schedule)
+            sync._write_news_sync_state(Path(target["resource_schedule_state_file"]), schedule, state_root=runtime)
             request = {
                 "schema_version": sync.DEFERRED_PROJECTION_CONTRACT,
                 "request_id": str(uuid.uuid4()), "transaction_id": str(uuid.uuid4()),
@@ -508,7 +508,7 @@ def main():
             }
             report["configuration"] = configuration
             report["configuration_sha256"] = hashlib.sha256(json.dumps(configuration, sort_keys=True).encode()).hexdigest()
-            sync._write_news_sync_state(Path(config["deferred_projection_request_file"]), request)
+            sync._write_news_sync_state(Path(config["deferred_projection_request_file"]), request, state_root=runtime)
             status_file = runtime / "dashboard-sync-status.json"
             def monitor():
                 while not stop.wait(.2):
