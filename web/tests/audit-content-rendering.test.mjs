@@ -55,7 +55,7 @@ function selectedBody(html) {
 test("every Audit view exposes selected content or a visible initial read state", () => {
   for (const view of ["briefs", "search", "news", "evidence", "stories", "decisions", "league", "coverage"]) {
     const body = selectedBody(render(view, baseline));
-    assert.ok(body.replace(/<[^>]*>/g, "").trim().length > 0, `${view} must not be blank`);
+    assert.match(body, />[^<]*[\p{L}\p{N}][^<]*</u, `${view} must not be blank`);
     if (view in details) assert.match(body, /role="status"/, `${view} idle must be visible pending state`);
   }
 });
@@ -64,7 +64,7 @@ test("successful empty decisions and coverage have visible empty states", () => 
   for (const view of ["decisions", "coverage"]) {
     const body = selectedBody(render(view, {...baseline, ...(details[view] ? {[`/api/audit-${view}`]: details[view]} : {})}));
     assert.match(body, /role="status"/);
-    assert.ok(body.replace(/<[^>]*>/g, "").trim().length > 0);
+    assert.match(body, />[^<]*[\p{L}\p{N}][^<]*</u);
   }
 });
 
