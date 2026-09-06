@@ -19,9 +19,10 @@ def research_path(value, *, roots=None):
     resolved = os.path.realpath(os.fspath(value))
     for root in roots:
         trusted = os.path.realpath(os.fspath(root))
-        try:
-            if os.path.commonpath([trusted, resolved]) == trusted:
-                return Path(resolved)
-        except ValueError:
-            continue
+        if resolved == trusted:
+            return Path(trusted)
+        # Canonical directory prefix including its separator, never a bare
+        # string prefix (which would also admit a sibling such as root-extra).
+        if resolved.startswith(trusted + os.sep):
+            return Path(resolved)
     raise ValueError("OUTSIDE_OFFLINE_RESEARCH_ROOT")

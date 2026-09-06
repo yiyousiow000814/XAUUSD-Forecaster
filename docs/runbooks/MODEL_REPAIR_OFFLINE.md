@@ -11,6 +11,10 @@ allowlist. Do not run elevated or concurrently replace its directories. This
 is a local-user research utility, not a sandbox against malicious same-user
 filesystem races. Reparse/symlink escapes are rejected. Production runtime
 directories outside these roots are never accepted as output destinations.
+The canonical directory-prefix check includes the separator (so a similarly
+named sibling does not pass), following the
+[CodeQL path-validation guidance](https://codeql.github.com/codeql-query-help/python/py-path-injection/).
+No alert suppression or custom sanitizer model is used.
 
 Use the preserved online-backup identity in `facts.json`, `followup_input.json`
 and exact copied historical artifacts, not a live database or latest model.
