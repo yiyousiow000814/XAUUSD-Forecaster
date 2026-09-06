@@ -71,6 +71,15 @@ function ModuleList({ modules, active, onSelect }: { modules: Array<CodeModule &
   return <div className={styles.codeModuleList}>{modules.map(module => <button aria-pressed={active?.id === module.id} key={module.id} onClick={() => onSelect(module)} type="button"><b>{module.label.split("/").at(-1)}</b><span>{module.surface} · {module.children.length} symbols{module.shim ? " · THIN SHIM" : ""}</span></button>)}</div>;
 }
 
+export function CodeSymbolRow({ item, selected, href, onSelect }: {
+  item: CodeModule["children"][number]; selected: boolean; href: string | null; onSelect: (id: string) => void;
+}) {
+  return <div className={styles.symbolRow}>
+    <button aria-pressed={selected} onClick={() => onSelect(item.id)} type="button"><span>{item.type}</span><b>{item.name ?? item.route ?? item.id}</b></button>
+    {href ? <a aria-label={`Open source at line ${item.line}`} href={href} rel="noreferrer" target="_blank">L{item.line} ↗</a> : <small>L{item.line}</small>}
+  </div>;
+}
+
 export function CodeStructure({ manifest, node, sha }: { manifest: ArchitectureManifest; node: ArchitectureNode; sha: string | null }) {
   const { index, error } = useCodeIndex(); const [module, setModule] = useState<CodeModule | null>(null); const [symbolId, setSymbolId] = useState<string | null>(null);
   const modules = useMemo(() => index ? codeModulesForNode(index, node) : [], [index, node]);
@@ -84,7 +93,7 @@ export function CodeStructure({ manifest, node, sha }: { manifest: ArchitectureM
       <button className={styles.codeBack} onClick={() => { setModule(null); setSymbolId(null); }} type="button">← Modules</button>
       {active.children.length ? active.children.map(item => {
         const href = architectureSourceSpanHref(manifest, item.path, sha, item.line, item.end_line);
-        return <button aria-pressed={symbolId === item.id} key={item.id} onClick={() => setSymbolId(item.id)} type="button"><span>{item.type}</span><b>{item.name ?? item.route ?? item.id}</b>{href ? <a href={href} onClick={event => event.stopPropagation()} rel="noreferrer" target="_blank">L{item.line} ↗</a> : <small>L{item.line}</small>}</button>;
+        return <CodeSymbolRow href={href} item={item} key={item.id} onSelect={setSymbolId} selected={symbolId === item.id} />;
       }) : <p>No public top-level class or function was extracted for this module.</p>}
     </div>}
     {!modules.length ? <p>No generated module matches this semantic node&apos;s declared source bindings.</p> : null}

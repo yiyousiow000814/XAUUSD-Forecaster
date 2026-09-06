@@ -1,11 +1,47 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import { build } from 'esbuild';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { projectCurrentSource } from '../build/architecture-current-source.mjs';
 import { parseArchitectureManifest, buildArchitectureGraph } from '../app/_lib/architecture-explorer.ts';
 import { parseArchitectureEvidence, parseArchitectureCodeIndex } from '../app/_lib/architecture-evidence.ts';
 
 const index = JSON.parse(readFileSync(new URL('../../architecture/generated/critical-index.json', import.meta.url), 'utf8'));
+
+test('rendered source rows separate keyboard selection from source navigation', async () => {
+  const output = await build({
+    absWorkingDir: fileURLToPath(new URL('../', import.meta.url)),
+    entryPoints: ['./app/_views/ArchitectureEvidencePanels.tsx'],
+    bundle: true, write: false, outdir: 'unused-render-output', platform: 'node', format: 'cjs', packages: 'external', jsx: 'automatic',
+    external: ['virtual:*'],
+  });
+  const loaded = { exports: {} };
+  new Function('require', 'module', 'exports', output.outputFiles.find(file => file.path.endsWith('.js')).text)(createRequire(import.meta.url), loaded, loaded.exports);
+  const { CodeSymbolRow } = loaded.exports;
+  let selected = null;
+  const item = { id: 'actual::symbol', name: 'source_symbol', type: 'function', line: 42 };
+  for (const href of ['https://github.com/example/repo/blob/exact/file.py#L42', null]) {
+    const row = CodeSymbolRow({ item, href, selected: true, onSelect: id => { selected = id; } });
+    const [button, source] = row.props.children;
+    assert.equal(button.type, 'button');
+    assert.equal(button.props['aria-pressed'], true);
+    button.props.onClick(); assert.equal(selected, item.id);
+    assert.equal(source.type, href ? 'a' : 'small');
+    assert.equal(source.props.onClick, undefined, 'navigation must not change selected owner');
+    const html = renderToStaticMarkup(row);
+    assert.doesNotMatch(html, /<button\b[^>]*>(?:(?!<\/button>)[\s\S])*<a\b/);
+    if (href) {
+      assert.match(html, /<\/button><a /);
+      assert.match(html, /aria-label="Open source at line 42"/);
+      assert.equal(source.props.tabIndex, undefined, 'native link stays keyboard accessible');
+    } else assert.doesNotMatch(html, /<a\b/);
+  }
+  const css = readFileSync(new URL('../app/_views/ArchitectureExplorerView.module.css', import.meta.url), 'utf8');
+  assert.match(css, /\.symbolRow > a \{[^}]*min-height: 44px;[^}]*min-width: 44px;/);
+});
 
 test('actual generated source feeds the existing Explorer without runtime or permission claims', () => {
   const projection = projectCurrentSource(index);
