@@ -44,6 +44,7 @@
         "tests/test_ci_contracts.py",
         "tests/test_model_repair_replay.py",
         "tests/test_offline_model_repair.py",
+        "tests/test_offline_market_methods.py",
         "tests/test_clock_atomicity.py",
         "tests/test_assistant_content.py",
         "tests/test_assistant_tools.py",
