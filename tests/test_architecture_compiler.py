@@ -178,3 +178,44 @@ def test_mutation_kill_requires_exact_executed_assertion(tmp_path, monkeypatch, 
     outcome, _ = runner.classify(SimpleNamespace(returncode=0 if case == 'passed' else 1),
                                   xml, 2 if case == 'wrong_count' else 1, 'NAMED_INVARIANT')
     assert outcome == expected
+
+
+@pytest.mark.parametrize('change,expected', [
+    ('none', 'KILLED'), ('old_source', 'STALE'), ('body_only', 'UNRESOLVED'),
+    ('wrong_test', 'IDENTITY_MISMATCH'), ('wrong_binding', 'BINDING_MISMATCH'),
+    ('duplicate', 'IDENTITY_MISMATCH'), ('missing_family', 'UNIVERSE_MISMATCH'),
+])
+def test_retained_evidence_is_source_bound_and_does_not_invent_runtime_traces(tmp_path, monkeypatch, change, expected):
+    monkeypatch.syspath_prepend(str(ROOT / 'scripts'))
+    import architecture_evidence as evidence
+    sha = 'a' * 40
+    registry = {'mutation': [dict(id='MUT-A', test='tests/test_contract.py::test_boundary',
+                                 expected_cases=1, failure_marker='BOUNDARY_FAILED',
+                                 runtime_events=['pretend-start', 'pretend-commit'])]}
+    row = dict(id='MUT-A', test=registry['mutation'][0]['test'], source_sha=sha, outcome='KILLED')
+    report = dict(schema='architecture-mutation-report-v1', source_sha=sha, mutations=[row])
+    if change == 'wrong_binding': row['test'] = 'tests/test_other.py::test_boundary'
+    if change == 'missing_family': report['mutations'] = []
+    (tmp_path / 'mutation-report.json').write_text(json.dumps(report), encoding='utf-8')
+    folder = tmp_path / 'MUT-A'
+    folder.mkdir()
+    for phase in ('baseline', 'mutant'):
+        suite = ET.Element('testsuite')
+        case = ET.SubElement(suite, 'testcase', classname='tests.test_contract',
+                             name='test_other' if change == 'wrong_test' else 'test_boundary')
+        if change == 'duplicate': ET.SubElement(suite, 'testcase', **case.attrib)
+        if phase == 'mutant':
+            failure = ET.SubElement(case, 'failure', message='AssertionError: BOUNDARY_FAILED')
+            if change == 'body_only':
+                failure.set('message', 'TypeError: broken setup')
+                failure.text = 'BOUNDARY_FAILED'
+        ET.ElementTree(suite).write(folder / f'{phase}.xml')
+    if expected.endswith('MISMATCH'):
+        with pytest.raises(ValueError, match=expected):
+            evidence.project_mutations(tmp_path, registry, sha)
+        return
+    result = evidence.project_mutations(tmp_path, registry, 'b' * 40 if change == 'old_source' else sha)
+    assert result['mutations'][0]['status'] == expected
+    assert result['runtime'] == {'status': 'UNKNOWN', 'traces': []}
+    assert result['mutations'][0]['runtime_observed'] is False
+    assert len(result['mutations'][0]['artifacts']) == 2

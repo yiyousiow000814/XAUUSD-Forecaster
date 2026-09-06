@@ -30,3 +30,20 @@ This is DECLARED_CRITICAL_SLICES_ONLY, not the finished whole-system Explorer or
 transaction proof. The staged lifecycle remains the recovery evidence authority.
 Branch protection status: RULE_ENFORCEMENT_PENDING until coordinator verification.
 No old PR is superseded merely by this generated index.
+
+## Retained execution evidence
+
+`python scripts/architecture_evidence.py --evidence <run-directory> --source-sha <exact-sha>`
+projects an existing mutation report plus its actual baseline/mutant JUnit files.
+It validates the complete declared family set, exact test bindings, case identity,
+case counts and the named behavior assertions. A report's `KILLED` label alone is
+not sufficient. The selected SHA is explicit: evidence from another revision is
+`STALE`, not a current pass. This command does not execute tests or rewrite the
+source index. Retained bytes are hashed; this is not a signed CI attestation or
+independent proof of execution provenance.
+
+The test-binding concept is reused from PR #324. Its declared `runtime_events`
+must not produce `RUNTIME_OBSERVED` merely because a bound test passes. This
+projection keeps runtime traces `UNKNOWN`; actual trace capture and full Explorer
+composition remain separate unfinished work. A mutation result proves only the
+specific tested boundary, not complete production recovery or a release gate.
