@@ -101,13 +101,13 @@ function notifyDashboardResource(url: string): void {
 
 export async function loadDashboardResource<T>(
   url: string,
-  options: { force?: boolean; maxAgeMs?: number; timeoutMs?: number } = {},
+  options: { force?: boolean; maxAgeMs?: number; timeoutMs?: number; validate?: (body: unknown) => boolean } = {},
 ): Promise<T> {
   const entry = resources.get(url) ?? { updatedAt: 0 };
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
   const isFresh = entry.data !== undefined && Date.now() - entry.updatedAt < maxAgeMs;
 
-  if (!options.force && isFresh) return entry.data as T;
+  if (!options.force && isFresh && (!options.validate || options.validate(entry.data))) return entry.data as T;
   if (entry.pending) return entry.pending as Promise<T>;
 
   const controller = new AbortController();
@@ -149,6 +149,9 @@ export async function loadDashboardResource<T>(
           typeof details.error_code === "string" ? details.error_code : null,
           details,
         );
+      }
+      if (options.validate && !options.validate(body)) {
+        throw new DashboardResourceError("资源返回的数据格式无效，请重试", response.status, "INVALID_RESOURCE_PAYLOAD", {});
       }
       resources.set(url, { data: body, updatedAt: Date.now() });
       notifyDashboardResource(url);

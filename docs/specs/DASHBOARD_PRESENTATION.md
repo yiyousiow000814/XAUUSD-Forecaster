@@ -147,6 +147,23 @@ part of it.
     The full AI-usage payload is read only from the owner-authenticated Admin
     endpoint. Hiding Admin navigation is presentation, never authorization.
 
+## Audit content and navigation
+
+- DashboardApp owns the selected Audit URL and browser history. Audit tabs and
+  the phone picker use that navigation owner; refresh and back/forward must
+  restore the same selected view.
+- Every selected Audit view displays content, an explicit loading state, a
+  genuine empty result, a resource-specific error with retry, or an identified
+  previous snapshot. Initial idle is pending, never a blank result.
+- An unavailable or malformed resource is not an empty result. An empty page
+  does not redefine a full-history headline count as zero. Resource failures
+  remain independent and preserve previously accepted sibling results.
+- The footer reports the selected resource's supplied timestamp. A status
+  heartbeat must not advance the timestamp of audit details, news, or learning.
+- Collection/training counts describe sample and retraining progress, not
+  profitability or model capability. Coverage counts describe configured
+  coverage, not proof that every source is currently healthy.
+
 ## OOS chart windows
 
 - The long OOS chart's 24-hour, 7-day, and 30-day ranges are elapsed XAUUSD

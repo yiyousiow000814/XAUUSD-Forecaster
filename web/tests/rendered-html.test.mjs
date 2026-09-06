@@ -2431,7 +2431,8 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(page, /className="audit-tabs"/);
   assert.match(page, /className="audit-view-picker"/);
   assert.match(page, /aria-label="切换证据台页面"/);
-  assert.match(page, /pendingScrollTop\.current = window\.scrollY;[\s\S]*useLayoutEffect\(\(\) => \{[\s\S]*const cancel = settleResponsiveScroll\(options => window\.scrollTo\(options\), \(\) => window\.scrollY, pendingScrollTop\.current!\);[\s\S]*return cancel;[\s\S]*\}, \[view\]\)/);
+  assert.match(page, /navigation\.navigate\(`/);
+  assert.doesNotMatch(page, /window\.history\.(?:replaceState|pushState)/);
   assert.match(dashboard, /pendingScrollTop\.current = currentScrollTop;[\s\S]*useLayoutEffect\(\(\) => \{[\s\S]*const cancel = settleResponsiveScroll\(options => window\.scrollTo\(options\), \(\) => window\.scrollY, pendingScrollTop\.current!\);[\s\S]*return cancel;[\s\S]*\}, \[location\]\)/);
   assert.match(responsiveScroll, /matchMedia\("\(max-width: 850px\)"\)\.matches/);
   assert.match(responsiveScroll, /if \(isPhoneViewport\(\)\) \{[\s\S]*scroll\(\{ top: 0, left: 0, behavior: "instant" \}\)/);

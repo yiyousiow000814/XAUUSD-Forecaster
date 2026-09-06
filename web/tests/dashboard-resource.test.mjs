@@ -12,6 +12,7 @@ import {
   subscribeDashboardResource,
 } from "../app/_lib/dashboard-resource.ts";
 import { systemStatePresentation } from "../app/_lib/system-state.ts";
+import { validAuditDetailPayload } from "../app/_lib/audit-detail-contract.ts";
 
 const originalFetch = globalThis.fetch;
 const originalWindow = globalThis.window;
@@ -237,4 +238,27 @@ test("retains last-good private and public snapshots after service failures", as
   await assert.rejects(loadDashboardResource(publicUrl, { force: true }), /unavailable/);
   assert.deepEqual(readDashboardResource(privateUrl), { private: "last-good" });
   assert.deepEqual(readDashboardResource(publicUrl), { public: "last-good" });
+});
+
+test("audit resource family rejects malformed success envelopes and preserves accepted work for retry", async () => {
+  for (const [view, field] of [["briefs", "daily_news_briefs"], ["stories", "storylines"], ["decisions", "recent_decisions"]]) {
+    const url = `/api/audit-${view}?resource-test=accepted-envelope`;
+    const accepted = {generated_at: "2026-09-06T11:00:00Z", [field]: []};
+    const validate = body => validAuditDetailPayload(view, body);
+    globalThis.fetch = async () => jsonResponse(accepted);
+    await loadDashboardResource(url, {force: true, validate});
+    const invalidRows = view === "briefs"
+      ? [{[field]: [{model_version:"fixture",phase:3,brief:{items:[]}}]}]
+      : view === "stories" ? [{[field]: [], archived_storylines:[{}]}] : [];
+    for (const invalid of [null, [], {}, {error: "unavailable"}, {[field]: null}, {[field]: [{}]}, {[field]: [null]}, {[field]: [], generated_at: "invalid"}, ...invalidRows]) {
+      globalThis.fetch = async () => jsonResponse(invalid);
+      await assert.rejects(loadDashboardResource(url, {force: true, validate}), error => error.code === "INVALID_RESOURCE_PAYLOAD");
+      assert.deepEqual(readDashboardResource(url), accepted);
+      assert.equal(readDashboardResourceState(url).hasSnapshot, true);
+    }
+    const recovered = {...accepted, generated_at: "2026-09-06T12:00:00Z"};
+    globalThis.fetch = async () => jsonResponse(recovered);
+    assert.deepEqual(await loadDashboardResource(url, {force:true, validate}), recovered);
+    assert.equal(readDashboardResourceState(url).error, null);
+  }
 });
