@@ -44,7 +44,7 @@ def freeze_and_select(source, output, orders, panel):
             if row.get(field):
                 wanted.setdefault(row[field][:10], []).append((key, field, timestamp(row[field])))
     source = research_path(source)
-    archive_dir = output / "archives"
+    archive_dir = research_path(output / "archives")
     archive_dir.mkdir()
     order_times = sorted(timestamp(value) for value in orders)
     candidate_quotes = []
@@ -62,12 +62,12 @@ def freeze_and_select(source, output, orders, panel):
     # Inputs must already be frozen research copies. No live runtime roots.
     for day in days:
         name = f"xauusd-quotes-{day.replace('-', '')}.jsonl.gz"
-        original = source / name
+        original = research_path(source / name)
         if not original.is_file():
             manifests.append({"name": name, "status": "SOURCE_MISSING"})
             continue
         before = original.stat()
-        destination = archive_dir / name
+        destination = research_path(archive_dir / name)
         shutil.copyfile(original, destination)
         source_sha = digest(original)
         if digest(destination) != source_sha or original.stat().st_mtime_ns != before.st_mtime_ns:
@@ -143,17 +143,17 @@ def run(args):
     args.timing = research_path(args.timing)
     args.quotes = research_path(args.quotes)
     args.output = research_path(args.output)
-    if args.output.exists():
+    if research_path(args.output).exists():
         raise ValueError("OUTPUT_MUST_BE_NEW")
     if any(p.is_relative_to(args.output) for p in (args.panel, args.frozen, args.timing, args.quotes)):
         raise ValueError("OUTPUT_OWNS_INPUT")
-    old_execution = json.loads((args.frozen / "execution.json").read_text(encoding="utf-8"))
+    old_execution = json.loads(research_path(args.frozen / "execution.json").read_text(encoding="utf-8"))
     if (old_execution["source_git_sha"] != "b501da8ad73d2dc2efcd45e081ebff470c26371c"
             or digest(args.frozen / "results.json") != "999e57c4f973129d72307417f7a7439b2d011f4ad602d6997d2cf23eeb03d836"
             or digest(args.panel) != old_execution["panel_sha256"]
             or digest(args.frozen / "results.json") != old_execution["results_sha256"]):
         raise ValueError("FROZEN_BASELINE_IDENTITY_MISMATCH")
-    baseline = json.loads((args.frozen / "results.json").read_text(encoding="utf-8"))
+    baseline = json.loads(research_path(args.frozen / "results.json").read_text(encoding="utf-8"))
     strategies = {name: json.loads(research_path(args.frozen/f"{name}.json").read_text(encoding="utf-8"))
                   for name in baseline["results"]}
     ids = [r["source_decision_id"] for r in next(iter(strategies.values()))]
@@ -161,10 +161,10 @@ def run(args):
         raise ValueError("FROZEN_OPPORTUNITY_COUNT_MISMATCH")
     if any([r["source_decision_id"] for r in rows] != ids for rows in strategies.values()):
         raise ValueError("FROZEN_OPPORTUNITY_UNIVERSE_MISMATCH")
-    panel = {r["source_decision_id"]: r for r in json.loads(args.panel.read_text(encoding="utf-8"))["rows"]
+    panel = {r["source_decision_id"]: r for r in json.loads(research_path(args.panel).read_text(encoding="utf-8"))["rows"]
              if r["source_decision_id"] in set(ids)}
     verify_frozen_predictions(strategies, panel, baseline)
-    timing_payload = json.loads(args.timing.read_text(encoding="utf-8"))
+    timing_payload = json.loads(research_path(args.timing).read_text(encoding="utf-8"))
     if (timing_payload["panel_sha256"] != digest(args.panel)
             or set(timing_payload["common_test_decision_ids"]) != set(ids)
             or not timing_payload["input_identity_unchanged"]):
@@ -174,7 +174,7 @@ def run(args):
         "visibility_status": r["strict_status"],
         "consumer_visible_no_later_than": r["strict_verified_signal_available_at"],
     } for r in timing_payload["records"]}
-    args.output.mkdir(parents=True)
+    research_path(args.output).mkdir(parents=True)
     # FIRST output: exhaustive old waterfall, before quote reading/new returns.
     old_waterfall = {name: {"opportunities": len(rows), "final_states": dict(Counter(r["state"] for r in rows)),
                           "late_old_entry_intermediate": sum(
@@ -193,7 +193,7 @@ def run(args):
     write(args.output/"quote_extract.json", extract)
     write(args.output/"timing_evidence.json", timing_payload)
     results = {}
-    ledgers = args.output / "ledgers"
+    ledgers = research_path(args.output / "ledgers")
     ledgers.mkdir()
     for mode in MODES:
         for delay in DELAYS_MS:
