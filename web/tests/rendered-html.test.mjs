@@ -1345,7 +1345,9 @@ test("renders static Preview shells with embedded resources for client-side room
   const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
   assert.match(app, /parseDashboardUrl\(new URL\(window\.location\.href\)\)/);
   assert.match(app, /setLocation\(current =>/);
-  assert.match(app, /<AuditView key=\{location\.auditView\} initialView=\{location\.auditView\}/);
+  assert.match(app, /<AuditView\b[^>]*\binitialView=\{location\.auditView\}/);
+  assert.doesNotMatch(app, /<AuditView\b[^>]*\bkey=\{location\.auditView\}/,
+    "Audit subpage navigation must preserve the mounted filter/history owner");
   const audit = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   assert.match(audit, /function AuditView\(\{ initialView \}/);
   assert.doesNotMatch(audit, /useSearchParams/);
