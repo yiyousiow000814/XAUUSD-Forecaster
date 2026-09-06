@@ -166,6 +166,8 @@ def test_real_cli_and_report_bind_inputs_and_reject_tampered_results(tmp_path):
     assert evidence["panel_sha256"] and evidence["source_git_sha"] and evidence["production_mutation"] == 0
     report = run("report_model_repair_offline.py", "--results-dir", output)
     assert report.returncode == 0, report.stderr
+    assert report.stdout.strip() == "OFFLINE_MODEL_REPORT_WRITTEN"
+    assert str(output) not in report.stdout
     assert (output/"REPORT.md").is_file()
     (output/"results.json").write_text("{}")
     failure = run("report_model_repair_offline.py", "--results-dir", output)

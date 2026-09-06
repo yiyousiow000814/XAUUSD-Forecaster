@@ -75,4 +75,5 @@ def render(directory):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--results-dir", type=Path, required=True)
-    print(render(parser.parse_args().results_dir))
+    render(parser.parse_args().results_dir)
+    print("OFFLINE_MODEL_REPORT_WRITTEN")

@@ -50,3 +50,7 @@ def test_exact_checked_copy_preserves_bytes(artifact,tmp_path):
  path=tmp_path/'model.json';raw=json.dumps(artifact,indent=2).encode();path.write_bytes(raw)
  assert replay.read_checked_copy(path,replay.chash(artifact))==artifact
  assert path.read_bytes()==raw
+
+def test_digest_reader_enforces_research_root_before_file_access():
+ with pytest.raises(ValueError,match='OUTSIDE_OFFLINE_RESEARCH_ROOT'):
+  replay.sha(Path.home()/'rejected-research-input.json')

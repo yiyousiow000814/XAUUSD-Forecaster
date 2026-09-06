@@ -13,7 +13,7 @@ IDENTITIES=('MARKET_ONLY','FULL','BROAD_FULL','NEWS_ONLY','NEWS_RESIDUAL','BROAD
 ABS_TOL=1e-10
 REL_TOL=1e-8
 def canonical(x): return json.dumps(x,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode('utf-8')
-def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+def sha(p): return hashlib.sha256(research_path(p).read_bytes()).hexdigest()
 def chash(x): return hashlib.sha256(canonical(x)).hexdigest()
 def date(s): return dt.datetime.fromisoformat(s.replace('Z','+00:00')) if s else None
 def near(a,b): return a is not None and b is not None and math.isclose(a,b,abs_tol=ABS_TOL,rel_tol=REL_TOL)
