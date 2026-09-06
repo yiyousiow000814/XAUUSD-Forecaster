@@ -48,6 +48,7 @@ def freeze_and_select(source, output, orders, panel):
     archive_dir.mkdir()
     order_times = sorted(timestamp(value) for value in orders)
     candidate_quotes = []
+    endpoint_quotes = {}
     endpoint_requests = sorted((at, key, field) for requests in wanted.values() for key, field, at in requests)
     endpoint_times = [item[0] for item in endpoint_requests]
     days = set(by_day) | set(wanted)
@@ -100,18 +101,7 @@ def freeze_and_select(source, output, orders, panel):
         requests = endpoint_requests[bisect_left(endpoint_times, times[0]):bisect_right(endpoint_times, times[-1])] if times else []
         for at, key, field in requests:
             selected = rows[bisect_left(times, at):bisect_right(times, at)]
-            identities = {(q.event_time, q.bid, q.ask) for q in selected}
-            if len(identities) > 1:
-                raise ValueError("AMBIGUOUS_OLD_LABEL_ENDPOINT")
-            if len(identities) == 1 and quote_quality(selected[0]):
-                q = selected[0]
-                value = {
-                    "event_time": q.event_time.isoformat(), "received_time": q.received_time.isoformat(),
-                    "bid": q.bid, "ask": q.ask}
-                old_value = endpoints.setdefault(key, {}).get("old_"+field)
-                if old_value and old_value != value:
-                    raise ValueError("CROSS_ARCHIVE_ENDPOINT_CONFLICT")
-                endpoints[key]["old_"+field] = value
+            endpoint_quotes.setdefault((key, field), []).extend(selected)
         manifests.append({"name": name, "sha256": source_sha, "size": before.st_size,
                           "rows": len(rows), "invalid": invalid, "receipt_outside_named_day": outside_day, "status": "FROZEN",
                           "elapsed_seconds": time.monotonic()-started})
@@ -120,6 +110,15 @@ def freeze_and_select(source, output, orders, panel):
     candidate_times = [q.received_time for q in candidate_quotes]
     for order in order_times:
         fills[quote_key(order)] = first_after(candidate_quotes, candidate_times, order)
+    for (key, field), selected in endpoint_quotes.items():
+        identities = {(q.event_time, q.bid, q.ask) for q in selected}
+        if len(identities) > 1:
+            raise ValueError("AMBIGUOUS_OLD_LABEL_ENDPOINT")
+        if len(identities) == 1 and quote_quality(selected[0]):
+            q = selected[0]
+            endpoints.setdefault(key, {})["old_"+field] = {
+                "event_time": q.event_time.isoformat(), "received_time": q.received_time.isoformat(),
+                "bid": q.bid, "ask": q.ask}
     import math
     for key, row in panel.items():
         endpoint = endpoints.setdefault(key, {})

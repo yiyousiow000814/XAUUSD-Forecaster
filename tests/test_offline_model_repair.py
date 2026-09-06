@@ -169,6 +169,11 @@ def test_causal_quote_extract_real_gzip_and_cli_fail_closed(tmp_path):
         f.write(json.dumps(dict(symbol="XAUUSD", event_time="2025-12-31T23:59:00+00:00", received_time="2026-01-01T00:00:01+00:00", bid=99, ask=99.1))+"\n")
     third = cli.freeze_and_select(source, third_output, {at}, {})
     assert third["fills"][causal.quote_key(research.timestamp(at))]["reason"] == "AMBIGUOUS_QUOTE_ORDER"
+    endpoint_output = tmp_path/"endpoint"
+    endpoint_output.mkdir()
+    with pytest.raises(ValueError, match="AMBIGUOUS_OLD_LABEL_ENDPOINT"):
+        cli.freeze_and_select(source, endpoint_output, {at}, {
+            "id": {"entry_time": "2026-01-01T00:00:01+00:00", "exit_time": None, "valid": False}})
     completed = subprocess.run([sys.executable, str(script), "--panel", str(source), "--frozen", str(source),
         "--timing", str(source), "--quotes", str(source), "--output", str(output)],
         capture_output=True, text=True, timeout=10,
