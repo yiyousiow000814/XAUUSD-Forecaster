@@ -58,6 +58,9 @@ def dependencies(strategy):
         return mapping[name]
     if strategy in ("PAST_MEAN", "ALWAYS_WAIT") or strategy.startswith("RIDGE_"):
         return ()
+    if strategy in ("METHOD_STATE_RIDGE", "METHOD_BOOST8", "METHOD_BOOST_STATE",
+                    "METHOD_STATE_CALIBRATED", "METHOD_TREND", "METHOD_RANGE"):
+        return ()  # Hypothetical batch-1 methods consume only retained market inputs.
     raise ValueError("UNKNOWN_FROZEN_STRATEGY")
 
 
