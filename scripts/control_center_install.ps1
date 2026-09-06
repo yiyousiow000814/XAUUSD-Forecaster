@@ -704,6 +704,45 @@ function Wait-ControlPlaneInstallActivation {
     }
 }
 
+function Test-CollectorSqliteInputIdentity {
+    param([object]$Identity)
+    try {
+        if ([string]$Identity.schema -cne 'sqlite-main-wal-input-v1' -or
+            [string]$Identity.digest -cnotmatch '^[0-9a-f]{64}$') { return $false }
+        $files = [ordered]@{}
+        foreach ($name in @('main','wal')) {
+            $file = $Identity.files.$name
+            if (-not $file -or $file.exists -isnot [bool] -or
+                ($file.size -isnot [int] -and $file.size -isnot [long]) -or
+                ($file.mtime_ns -isnot [int] -and $file.mtime_ns -isnot [long]) -or
+                [long]$file.size -lt 0 -or [long]$file.mtime_ns -lt 0) { return $false }
+            if ($file.exists) {
+                if ([string]$file.sha256 -cnotmatch '^[0-9a-f]{64}$' -or [long]$file.mtime_ns -le 0) { return $false }
+            } elseif ($name -eq 'main' -or [long]$file.size -ne 0 -or
+                [long]$file.mtime_ns -ne 0 -or $null -ne $file.sha256) { return $false }
+            $files[$name] = [ordered]@{exists=[bool]$file.exists;mtime_ns=[long]$file.mtime_ns;
+                sha256=$file.sha256;size=[long]$file.size}
+        }
+        $logical = $Identity.logical
+        foreach ($field in @('page_count','page_size','schema_version','user_version')) {
+            if ($logical.$field -isnot [int] -and $logical.$field -isnot [long]) { return $false }
+        }
+        if (-not $logical -or [long]$logical.page_count -le 0 -or [long]$logical.page_size -le 0 -or
+            [string]$logical.journal_mode -notin @('wal','delete','truncate','persist','memory','off')) { return $false }
+        # This matches the producer's sorted, UTF-8 canonical JSON over fixed
+        # integer/string fields. No provider envelope or floating values enter it.
+        $canonical = [ordered]@{files=$files;logical=[ordered]@{
+            journal_mode=[string]$logical.journal_mode;page_count=[long]$logical.page_count;
+            page_size=[long]$logical.page_size;schema_version=[long]$logical.schema_version;
+            user_version=[long]$logical.user_version};schema='sqlite-main-wal-input-v1'}
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($canonical | ConvertTo-Json -Depth 8 -Compress))
+        $hasher = [Security.Cryptography.SHA256]::Create()
+        try { $digest = ([BitConverter]::ToString($hasher.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() }
+        finally { $hasher.Dispose() }
+        return $digest -ceq [string]$Identity.digest
+    } catch { return $false }
+}
+
 function Assert-CollectorNewsRecoveryEvidence {
     param(
         [Parameter(Mandatory = $true)][object]$Evidence,
@@ -752,6 +791,14 @@ function Assert-CollectorNewsRecoveryEvidence {
         [string]$rehearsal.state -cne 'API_SYNC_COPY_PASSED' -or
         [string]$rehearsal.baseline_sha256 -cne
             '57add242f930671ff800733ef70290bf9186b8230d0134847285300dc7e3171c' -or
+        -not (Test-CollectorSqliteInputIdentity $rehearsal.sqlite_input_identity) -or
+        [string]$rehearsal.sqlite_input_identity.files.main.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$rehearsal.sqlite_input_identity.files.main.sha256 -cne [string]$rehearsal.input_database_copy.sha256 -or
+        -not (Test-CollectorSqliteInputIdentity $rehearsal.baseline_input_identity) -or
+        [string]$rehearsal.baseline_input_identity.files.main.sha256 -cne [string]$rehearsal.baseline_sha256 -or
+        [long]$rehearsal.baseline_input_identity.files.wal.size -ne 0 -or
+        $rehearsal.sqlite_input_unchanged -isnot [bool] -or -not $rehearsal.sqlite_input_unchanged -or
+        $rehearsal.baseline_input_unchanged -isnot [bool] -or -not $rehearsal.baseline_input_unchanged -or
         [string]$rehearsal.historical_failure_evidence_sha256 -cne [string]$failure.evidence_sha256 -or
         $rehearsal.semantic_equality_verified -isnot [bool] -or -not $rehearsal.semantic_equality_verified -or
         $rehearsal.ack_verified -isnot [bool] -or -not $rehearsal.ack_verified -or

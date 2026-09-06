@@ -17,6 +17,7 @@ import sys
 import ssl
 import threading
 import time
+import socket
 
 import pytest
 
@@ -215,6 +216,9 @@ def test_news_incident_evidence_and_live_resource_admission(tmp_path, runtime_ex
             evidence_sha256='86d7b591c06a295fa3cb4085bb47e6b42c40274878735602ea712c12b1234447'};
         copy_rehearsal=[pscustomobject]@{target_revision=$target;state='API_SYNC_COPY_PASSED';
             baseline_sha256='57add242f930671ff800733ef70290bf9186b8230d0134847285300dc7e3171c';
+            baseline_input_identity=$baselineIdentity;
+            sqlite_input_identity=$workIdentity;
+            input_database_copy=@{sha256='c'*64};sqlite_input_unchanged=$true;baseline_input_unchanged=$true;
             old_query_reproduced='NOT_RUN';
             historical_failure_evidence_sha256='86d7b591c06a295fa3cb4085bb47e6b42c40274878735602ea712c12b1234447';
             semantic_equality_verified=$true;ack_verified=$true;
@@ -231,7 +235,7 @@ def test_news_incident_evidence_and_live_resource_admission(tmp_path, runtime_ex
     $evidence.copy_rehearsal=[pscustomobject]@{path=$reportPath;sha256=(Get-FileHash $reportPath).Hash.ToLowerInvariant()};
     Assert-CollectorNewsRecoveryEvidence $evidence $broken $target;
     $original=$evidence | ConvertTo-Json -Depth 8;
-    foreach($case in @('revision','resource','stage','cause-hash','history','hash','ack','ack-type','timeout','nan','size','dirty','source','boundary','tampered','missing')) {
+    foreach($case in @('revision','resource','stage','cause-hash','history','hash','wal-change','wal-missing','wal-malformed','input-digest','input-binding','ack','ack-type','timeout','nan','size','dirty','source','boundary','tampered','missing')) {
         Write-ContractPhase "evidence:$case";
         $bad=$original | ConvertFrom-Json;
         $bad.copy_rehearsal=$reportJson | ConvertFrom-Json;
@@ -242,6 +246,11 @@ def test_news_incident_evidence_and_live_resource_admission(tmp_path, runtime_ex
             cause-hash {$bad.failure.evidence_sha256='c'*64}
             history {$bad.copy_rehearsal.historical_failure_evidence_sha256='c'*64}
             hash {$bad.copy_rehearsal.baseline_sha256='e'*64}
+            wal-change {$bad.copy_rehearsal.sqlite_input_unchanged=$false}
+            wal-missing {$bad.copy_rehearsal.sqlite_input_identity.files.PSObject.Properties.Remove('wal')}
+            wal-malformed {$bad.copy_rehearsal.sqlite_input_identity.files.wal.exists='False'}
+            input-digest {$bad.copy_rehearsal.sqlite_input_identity.digest='0'*64}
+            input-binding {$bad.copy_rehearsal.sqlite_input_identity.files.main.sha256='e'*64}
             ack {$bad.copy_rehearsal.ack_verified=$false}
             ack-type {$bad.copy_rehearsal.ack_verified='True'}
             timeout {$bad.copy_rehearsal.max_local_get_seconds=20}
@@ -285,6 +294,18 @@ def test_news_incident_evidence_and_live_resource_admission(tmp_path, runtime_ex
     };
     Write-Output 'incident evidence scoped; live observation checked; degradation retained'
     '''
+    def input_identity(main_hash):
+        value = {"schema": "sqlite-main-wal-input-v1", "files": {
+            "main": {"exists": True, "size": 4096, "mtime_ns": 1788587930631337700, "sha256": main_hash},
+            "wal": {"exists": False, "size": 0, "mtime_ns": 0, "sha256": None},
+        }, "logical": {"page_size": 4096, "page_count": 1, "schema_version": 1,
+                       "user_version": 0, "journal_mode": "wal"}}
+        value["digest"] = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return value
+    baseline = input_identity("57add242f930671ff800733ef70290bf9186b8230d0134847285300dc7e3171c")
+    work = input_identity("c" * 64)
+    body = ("$baselineIdentity='" + json.dumps(baseline) + "'|ConvertFrom-Json;"
+            "$workIdentity='" + json.dumps(work) + "'|ConvertFrom-Json;" + body)
     assert _run_contract_with_runtime(
         tmp_path, body, runtime_executable, environment=_isolated_windows_environment(),
     ) == (
@@ -427,7 +448,7 @@ def _make_detached_source(
     return revision
 
 
-def _make_real_control_source(root: Path, *, boundary: str = "") -> str:
+def _make_real_control_source(root: Path, *, boundary: str = "", loopback_ports=()) -> str:
     scripts = root / "scripts"
     scripts.mkdir(parents=True)
     for name in CONTROL_FILES:
@@ -444,7 +465,7 @@ def _make_real_control_source(root: Path, *, boundary: str = "") -> str:
         values["GEMINI_API_KEY"] = "synthetic-configuration-sentinel"
         fixture_id = uuid.uuid4().hex
         configuration.write_text(json.dumps({"schema_version": 1, "fixture_id": fixture_id,
-                                              "values": values}), encoding="utf-8")
+                                              "values": values, "loopback_ports": list(loopback_ports)}), encoding="utf-8")
         attestation_root = root.parent / "environment-attestations"
         attestation_root.mkdir(exist_ok=True)
         prelude = (ROOT / "tests/fixtures/control_plane_user_environment.ps1").read_text(encoding="utf-8")
@@ -520,6 +541,194 @@ def test_generated_bundle_user_environment_is_explicit(tmp_path, runtime_executa
         with pytest.raises(AssertionError, match=reason):
             _run_contract_with_runtime(tmp_path, body, runtime_executable,
                 environment=environment, controller_script=source / "scripts/xauusd_control_center.ps1")
+
+
+def _make_isolated_business_source(root: Path, configuration: Path) -> None:
+    """Generate a declared test copy; never modify the actual business checkout.
+
+    Only the persistent credential owner is adapted. Entrypoints retain their
+    actual CLI, imports and main routines. Unknown native children fail closed;
+    this helper alone does not authorize a complete lifecycle rehearsal.
+    """
+    shutil.copytree(ROOT / "xauusd_forecaster", root / "xauusd_forecaster",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    scripts = root / "scripts"
+    scripts.mkdir(exist_ok=True)
+    bootstrap = (ROOT / "tests/fixtures/business_environment.py").read_text(encoding="utf-8")
+    for marker, value in {
+        "__CONFIG_PATH__": configuration.as_posix(),
+        "__CONFIG_DIGEST__": hashlib.sha256(configuration.read_bytes()).hexdigest(),
+        "__FIXTURE_ROOT__": root.parent.as_posix(),
+        "__GIT_PATH__": Path(shutil.which("git")).as_posix(),
+    }.items():
+        bootstrap = bootstrap.replace(marker, value)
+    (root / "fixture_business_environment.py").write_text(bootstrap, encoding="utf-8")
+    provenance = root / "xauusd_forecaster/dashboard/deployment_provenance.py"
+    provenance_source = provenance.read_text(encoding="utf-8")
+    assert provenance_source.count('("git", *args)') == 1
+    provenance.write_text(provenance_source.replace('("git", *args)',
+        f'({Path(shutil.which("git")).as_posix()!r}, *args)'), encoding="utf-8")
+    entries = ("run_forward_collector.py", "run_dashboard_api.py", "run_dashboard_sync.py",
+               "run_news_annotator.py", "run_live_broadcast_publisher.py")
+    mapping = {"dashboard/deployment_provenance.py": {
+        "source_sha256": hashlib.sha256(provenance_source.encode()).hexdigest(),
+        "boundary": "exact trusted Git executable; arguments unchanged",
+    }}
+    for name in entries:
+        original = (ROOT / "scripts" / name).read_text(encoding="utf-8")
+        marker = "sys.path.insert(0, str(MODULE_ROOT))"
+        assert original.count(marker) == 1
+        altered = original.replace(marker, marker + "\nimport fixture_business_environment  # generated isolation boundary", 1)
+        (scripts / name).write_text(altered, encoding="utf-8")
+        mapping[name] = {"source_sha256": hashlib.sha256(original.encode()).hexdigest(),
+                         "fixture_sha256": hashlib.sha256(altered.encode()).hexdigest()}
+    owner = root / "xauusd_forecaster/news_scheduler.py"
+    original = owner.read_text(encoding="utf-8")
+    start = original.index("def _runtime_environment_value(name: str) -> str:")
+    end = original.index("\ndef configured_api_credentials(", start)
+    replacement = ('def _runtime_environment_value(name: str) -> str:\n'
+                   '    from fixture_business_environment import environment_value\n'
+                   '    return environment_value(name)\n\n')
+    owner.write_text(original[:start] + replacement + original[end:], encoding="utf-8")
+    mapping["news_scheduler.py"] = {"source_sha256": hashlib.sha256(original.encode()).hexdigest(),
+                                   "boundary": "persistent environment owner only"}
+    (root.parent / "business-source-map.json").write_text(json.dumps(mapping), encoding="utf-8")
+
+
+
+
+def test_control_center_real_api_start_inherits_isolated_configuration(tmp_path):
+    """Actual controller service launcher, inherited config, API and cleanup."""
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    source = tmp_path / "source"
+    state = tmp_path / "runtime/.local/forward"
+    arguments = ["--state-root", str(state), "--host", "127.0.0.1", "--port", str(port)]
+    boundary = (ROOT / "tests/fixtures/control_plane_staged_boundary.ps1").read_text(encoding="utf-8")
+    boundary = boundary.replace("__FIXTURE_ROOT__", str(tmp_path)).replace("__FIXTURE_ID__", uuid.uuid4().hex)
+    marker = "function Start-All { throw 'STAGED_UNEXPECTED_BUSINESS_START' }"
+    assert boundary.count(marker) == 1
+    boundary = boundary.replace(marker,
+        "$script:fixtureRealBusinessStart = ${function:Start-ForecasterService}\n" + marker)
+    api_boundary = (ROOT / "tests/fixtures/control_plane_api_start_boundary.ps1").read_text(encoding="utf-8")
+    for marker, value in {"__SOURCE_ROOT__": str(source), "__PYTHON_EXE__": sys.executable,
+                          "__API_ARGUMENTS__": "|".join(arguments)}.items():
+        api_boundary = api_boundary.replace(marker, value.replace("'", "''"))
+    _make_real_control_source(source, boundary=boundary + "\n" + api_boundary, loopback_ports=[port])
+    configuration = tmp_path / "fixture-user-environment.json"
+    _make_isolated_business_source(source, configuration)
+    runtime_owner = source / "xauusd_forecaster/runtime_paths.py"
+    original = runtime_owner.read_text(encoding="utf-8")
+    marker = 'Path.home() / "XAUUSD-Forecaster-runtime"'
+    assert original.count(marker) == 2
+    runtime_owner.write_text(original.replace(marker, f'Path({str(tmp_path / "runtime")!r})'), encoding="utf-8")
+    mapping_path = tmp_path / "business-source-map.json"
+    mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+    mapping["runtime_paths.py"] = {"source_sha256": hashlib.sha256(original.encode()).hexdigest(),
+                                  "boundary": "explicit owned fixture runtime locator"}
+    mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
+    state.mkdir(parents=True)
+    (tmp_path / "business.json").write_text("{}", encoding="utf-8")
+    environment = _isolated_windows_environment()
+    environment["XAUUSD_FIXTURE_CONFIGURATION"] = str(configuration)
+    ps_args = ",".join("'" + argument.replace("'", "''") + "'" for argument in arguments)
+    body = f'''
+    $service = [pscustomobject]@{{Key='api';Kind='Python';CodeRoot='{source}';
+        ScriptPath='{source}\\scripts\\run_dashboard_api.py';Arguments=@({ps_args})}}
+    try {{
+        Start-ForecasterService -Service $service -SkipExistingCheck
+        $until = [DateTimeOffset]::UtcNow.AddSeconds(10)
+        $observed = $null
+        while ([DateTimeOffset]::UtcNow -lt $until -and -not $script:fixtureAPIProcess.HasExited) {{
+            $request = [Net.WebRequest]::Create('http://127.0.0.1:{port}/api/health')
+            $request.Timeout = 1000
+            try {{ $response = $request.GetResponse() }}
+            catch [Net.WebException] {{ $response = $_.Exception.Response }}
+            if ($response) {{
+                try {{
+                    $reader = [IO.StreamReader]::new($response.GetResponseStream())
+                    $observed = $reader.ReadToEnd() | ConvertFrom-Json
+                    if ([int]$response.StatusCode -ne 503) {{ throw 'FIXTURE_FALSE_HEALTHY' }}
+                }} finally {{ $response.Close() }}
+                break
+            }}
+            Start-Sleep -Milliseconds 100
+        }}
+        if (-not $observed -or $observed.readiness_scope -ne 'PROCESS_AND_CRITICAL_STATUS') {{
+            throw 'FIXTURE_API_HEALTH_NOT_OBSERVED'
+        }}
+        'CONTROL_CENTER_REAL_API_DEGRADED_HEALTH_OBSERVED'
+    }} finally {{
+        if ($script:fixtureAPIProcess) {{
+            $termination = Stop-NativeProcessTree -Process $script:fixtureAPIProcess
+            if ($termination.state -notin @('TERMINATED','ALREADY_EXITED')) {{
+                throw 'FIXTURE_API_TREE_TERMINATION_UNRESOLVED'
+            }}
+        }}
+    }}
+    '''
+    assert "CONTROL_CENTER_REAL_API_DEGRADED_HEALTH_OBSERVED" in _run_contract_with_runtime(
+        tmp_path, body, "powershell.exe", environment=environment,
+        controller_script=source / "scripts/xauusd_control_center.ps1")
+
+
+@pytest.mark.parametrize("runtime_executable", ["powershell.exe", "pwsh.exe"])
+def test_business_entrypoint_configuration_is_inherited_and_fail_closed(tmp_path, runtime_executable):
+    """Real PowerShell -> Python CLI startup, without invoking a business loop."""
+    configuration = tmp_path / "fixture-user-environment.json"
+    configuration.write_text(json.dumps({"schema_version": 1, "values": {
+        "GEMINI_API_KEY": "synthetic-business-sentinel", "GEMINI_API_KEYS": "",
+        "GEMINI_API_ACCOUNTS": "", "CLOUDFLARE_INGEST_URL": "",
+    }}), encoding="utf-8")
+    source = tmp_path / "source"
+    source.mkdir()
+    _make_isolated_business_source(source, configuration)
+    environment = _isolated_windows_environment()
+    environment["XAUUSD_FIXTURE_CONFIGURATION"] = str(configuration)
+    environment["GEMINI_API_KEY"] = "synthetic-process-decoy"
+    probe = tmp_path / "probe.py"
+    probe.write_text(textwrap.dedent(f'''\
+        import sys, runpy, socket, subprocess
+        sys.path.insert(0, {str(source)!r})
+        import fixture_business_environment
+        from xauusd_forecaster.news_scheduler import _runtime_environment_value
+        assert _runtime_environment_value('GEMINI_API_KEY') == 'synthetic-business-sentinel'
+        import winreg
+        for action, reason in [
+            (lambda: winreg.OpenKey(winreg.HKEY_CURRENT_USER, 'Environment'), 'FIXTURE_PERSISTENT_CONFIGURATION_DENIED'),
+            (lambda: socket.create_connection(('127.0.0.1', 8765), timeout=0.1), 'FIXTURE_NETWORK_TARGET_DENIED'),
+            (lambda: socket.getaddrinfo('example.invalid', 443), 'FIXTURE_NETWORK_TARGET_DENIED'),
+            (lambda: subprocess.Popen([sys.executable, '-c', 'pass']), 'FIXTURE_UNDECLARED_BUSINESS_CHILD')]:
+            try: action()
+            except RuntimeError as error: assert str(error) == reason
+            else: raise AssertionError('boundary allowed forbidden access')
+        for entry in ('run_forward_collector.py', 'run_dashboard_api.py', 'run_dashboard_sync.py',
+                      'run_news_annotator.py', 'run_live_broadcast_publisher.py'):
+            sys.argv = [entry, '--help']
+            try: runpy.run_path(str(__import__('pathlib').Path({str(source / 'scripts')!r}) / entry), run_name='__main__')
+            except SystemExit as result: assert result.code == 0
+            else: raise AssertionError('real business CLI did not return:' + entry)
+        print('BUSINESS_STARTUP_BOUNDARY_PASS')
+    '''), encoding="utf-8")
+    command = f"& '{sys.executable}' '{probe}'; exit $LASTEXITCODE"
+    for case in ("valid", "missing", "tampered"):
+        child_environment = dict(environment)
+        if case == "missing":
+            child_environment.pop("XAUUSD_FIXTURE_CONFIGURATION")
+        elif case == "tampered":
+            with configuration.open("ab") as stream:
+                stream.write(b" ")
+        result = subprocess.run([runtime_executable, "-NoProfile", "-NonInteractive", "-Command", command],
+            env=child_environment, capture_output=True, text=True, timeout=20,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        if case == "valid":
+            assert result.returncode == 0, result.stderr
+            assert "BUSINESS_STARTUP_BOUNDARY_PASS" in result.stdout
+        else:
+            assert result.returncode != 0
+            assert ("FIXTURE_CONFIGURATION_REQUIRED" if case == "missing" else
+                    "FIXTURE_CONFIGURATION_IDENTITY_MISMATCH") in result.stderr
 
 
 def run_staged_installer_active_rehearsal(tmp_path):

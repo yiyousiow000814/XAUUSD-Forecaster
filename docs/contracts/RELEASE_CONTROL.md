@@ -917,6 +917,18 @@ is never described as natural reproduction. Exact-target clean-source identity,
 same-input full equality, actual API/Sync budgets and verified ACK remain
 mandatory; an old or partial report cannot satisfy them by changing its label.
 
+Copied-database admission binds both the untouched online-backup baseline and
+the independently owned working input. The existing report carries the
+`sqlite-main-wal-input-v1` manifest: explicit main/WAL presence, byte digests,
+sizes, modification identities and read-only logical page metadata. The
+consumer independently recomputes its canonical digest. A missing WAL is an
+explicit absent record, not an omitted field interpreted as zero. SHM reader
+locks are not logical data authority. Main/WAL movement during the isolated
+run invalidates admission; hashing only the main file cannot qualify a live
+WAL input. This assumes exclusive fixture ownership, not an adversarial
+filesystem. The producer closes its read connections and bounds hash work;
+it never checkpoints or recopies the baseline to make evidence pass.
+
 The existing deferred projection request may include `/api/news-evidence` only
 for that exact incident target. The sole Sync owner advances its normal bounded
 News operation and retains accepted Audit work between pages. Observe requires

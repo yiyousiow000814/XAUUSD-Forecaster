@@ -12,6 +12,29 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_sqlite_input_identity_includes_committed_wal_and_ignores_reader_shm(tmp_path):
+    import sqlite3
+    spec = importlib.util.spec_from_file_location("wal_rehearsal", ROOT / "scripts/rehearse_news_recovery_copy.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    database = tmp_path / "fixture.sqlite3"
+    with sqlite3.connect(database) as writer:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("CREATE TABLE evidence (value TEXT)")
+        writer.commit()
+        first = module.sqlite_input_identity(database)
+        assert module.sqlite_input_unchanged(database, first)
+        writer.execute("INSERT INTO evidence VALUES ('new committed value')")
+        writer.commit()
+        second = module.sqlite_input_identity(database)
+        assert first["files"]["main"]["sha256"] == second["files"]["main"]["sha256"]
+        assert first["files"]["wal"]["sha256"] != second["files"]["wal"]["sha256"]
+        assert first["digest"] != second["digest"]
+        assert not module.sqlite_input_unchanged(database, first)
+        assert module.sqlite_input_unchanged(database, second)
+        assert "shm" not in second["files"]
+
+
 @pytest.mark.parametrize("row_budget", [100, 1])
 def test_query_oracle_compares_real_duplicate_null_receipts(tmp_path, row_budget, monkeypatch):
     import sqlite3

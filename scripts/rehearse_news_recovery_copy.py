@@ -42,10 +42,67 @@ def git(*args):
 
 def digest_file(path):
     digest = hashlib.sha256()
+    deadline = time.monotonic() + 120
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+            if time.monotonic() > deadline:
+                raise TimeoutError("BOUNDED_INPUT_HASH_TIMEOUT")
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def sqlite_input_identity(database):
+    """Bind the read-only main/WAL input, not merely the main filename.
+
+    SHM is an ephemeral reader-lock index and is deliberately not data authority.
+    The caller owns this isolated input exclusively; concurrent modification
+    during either hashing or the subsequent rehearsal is a rejection.
+    """
+    def observations():
+        result = {}
+        for name, path in (("main", database), ("wal", Path(str(database) + "-wal"))):
+            if path.exists():
+                stat = path.stat()
+                result[name] = {"exists": True, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+            else:
+                result[name] = {"exists": False, "size": 0, "mtime_ns": 0}
+        return result
+
+    before = observations()
+    files = {name: {**facts, "sha256": (digest_file(database if name == "main" else
+                                                Path(str(database) + "-wal")) if facts["exists"] else None)}
+             for name, facts in before.items()}
+    connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=2)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("BEGIN")
+        logical = {name: connection.execute("PRAGMA " + name).fetchone()[0]
+                   for name in ("page_size", "page_count", "schema_version", "user_version", "journal_mode")}
+        connection.rollback()
+    finally:
+        connection.close()
+    if observations() != before:
+        raise RuntimeError("ISOLATED_SQLITE_INPUT_CHANGED_DURING_IDENTITY")
+    canonical = {"schema": "sqlite-main-wal-input-v1", "files": files, "logical": logical}
+    return {**canonical, "digest": hashlib.sha256(json.dumps(
+        canonical, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
+
+
+def sqlite_input_unchanged(database, identity):
+    # No second multi-GB read: the isolated source is exclusively owned and no
+    # writer is authorized. File metadata plus complete WAL bytes detect an
+    # unintended commit/checkpoint; this is not a hostile-filesystem attestation.
+    for name, path in (("main", database), ("wal", Path(str(database) + "-wal"))):
+        prior = identity["files"][name]
+        if path.exists() != prior["exists"]:
+            return False
+        if prior["exists"]:
+            current = path.stat()
+            if (current.st_size, current.st_mtime_ns) != (prior["size"], prior["mtime_ns"]):
+                return False
+            if name == "wal" and digest_file(path) != prior["sha256"]:
+                return False
+    return True
 
 
 def load(name, filename):
@@ -199,6 +256,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database-copy", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--baseline-copy", type=Path,
+                        help="Untouched online-backup baseline; required for admission evidence")
     parser.add_argument("--historical-failure-evidence", type=Path,
                         help="Retained reviewed incident artifact; never a new timeout assertion")
     parser.add_argument("--query-comparison-only", action="store_true",
@@ -237,6 +296,17 @@ def main():
         return
     if dirty:
         raise ValueError("CLEAN_SOURCE_REQUIRED")
+    if args.baseline_copy is None:
+        raise ValueError("BASELINE_COPY_REQUIRED")
+    baseline = args.baseline_copy.resolve(strict=True)
+    if baseline != database.parent.parent / "production-online.sqlite3":
+        raise ValueError("BASELINE_COPY_IDENTITY_REQUIRED")
+    baseline_identity = sqlite_input_identity(baseline)
+    baseline_digest = baseline_identity["files"]["main"]["sha256"]
+    if (baseline_digest != "57add242f930671ff800733ef70290bf9186b8230d0134847285300dc7e3171c" or
+            baseline_identity["files"].get("wal", {}).get("size", 0) != 0):
+        raise ValueError("BASELINE_COPY_IDENTITY_MISMATCH")
+    input_identity = sqlite_input_identity(database)
     revision = git("rev-parse", "HEAD")
     report = {
         "state": "NOT_RUN", "source_revision": revision, "target_revision": revision,
@@ -249,8 +319,11 @@ def main():
             for distribution in importlib.metadata.distributions()
             if distribution.metadata.get("Name")
         )),
+        "baseline_sha256": baseline_digest,
+        "baseline_input_identity": baseline_identity,
         "input_database_copy": {"path": str(database), "size": database.stat().st_size,
-                                "sha256": digest_file(database)},
+                                "sha256": input_identity["files"]["main"]["sha256"]},
+        "sqlite_input_identity": input_identity,
         "dependency_inputs": {str(path.relative_to(ROOT)): digest_file(path)
                               for path in (ROOT / "pyproject.toml", ROOT / "web/package-lock.json")},
         "full_switch_observe": "NOT_RUN", "old_query_reproduced": "NOT_RUN",
@@ -506,7 +579,10 @@ def main():
             final_stat = database.stat()
             report["input_stat_unchanged"] = (input_stat.st_size, input_stat.st_mtime_ns) == (
                 final_stat.st_size, final_stat.st_mtime_ns)
-            if not report["semantic_equality_verified"] or not report["input_stat_unchanged"]:
+            report["sqlite_input_unchanged"] = sqlite_input_unchanged(database, input_identity)
+            report["baseline_input_unchanged"] = sqlite_input_unchanged(baseline, baseline_identity)
+            if (not report["semantic_equality_verified"] or not report["input_stat_unchanged"] or
+                    not report["sqlite_input_unchanged"] or not report["baseline_input_unchanged"]):
                 raise RuntimeError("SAME_INPUT_QUERY_EQUIVALENCE_NOT_PROVEN")
             if git("rev-parse", "HEAD") != revision or git("status", "--porcelain=v1", "--untracked-files=all"):
                 raise RuntimeError("SOURCE_CHANGED_DURING_REHEARSAL")
