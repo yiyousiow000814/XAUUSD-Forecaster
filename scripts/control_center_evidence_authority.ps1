@@ -2691,7 +2691,7 @@ function Invoke-CandidateWorkerValidation {
     $reusedQualificationReceipt = $null
     $requestPlan = $null
     $directResponses = @()
-    $ingestToken = [Environment]::GetEnvironmentVariable("CLOUDFLARE_INGEST_TOKEN", "User")
+    $ingestToken = Get-UserEnvironmentValue -Name 'CLOUDFLARE_INGEST_TOKEN'
     try {
         if (@($RoutePlan.worker_writes).Count -gt 0) {
             $workspace = New-CandidateValidationFixtureWorkspace -Candidate $Candidate
@@ -2993,7 +2993,7 @@ function Resume-CandidateWorkerPlatformEvidence {
             $fixtureRoot = if ($workspace) { [string]$workspace.fixture_root } else { "" }
             $routes = @($Validation.cpu_route_plan.worker_reads) + @($Validation.cpu_route_plan.worker_writes)
             $headers = @{ "Cloudflare-Workers-Version-Overrides" = "$workerName=`"$([string]$Candidate.worker_version_id)`"" }
-            $ingestToken = [Environment]::GetEnvironmentVariable("CLOUDFLARE_INGEST_TOKEN", "User")
+            $ingestToken = Get-UserEnvironmentValue -Name 'CLOUDFLARE_INGEST_TOKEN'
             foreach ($request in $unsent) {
                 $route = @($routes | Where-Object {
                     [string]$_.family -eq [string]$request.family -and
@@ -3084,8 +3084,7 @@ function Resume-CandidateWorkerPlatformEvidence {
                     -ProviderEvidence $storedEvidence `
                     -QualificationKey ([string]$Validation.worker_qualification.key) `
                     -FixtureRoot $topUpFixtureRoot `
-                    -IngestToken ([Environment]::GetEnvironmentVariable(
-                        "CLOUDFLARE_INGEST_TOKEN", "User"))
+                    -IngestToken (Get-UserEnvironmentValue -Name 'CLOUDFLARE_INGEST_TOKEN')
                 $expectedRequests = @($plan.requests | Where-Object {
                     [string]$_.phase -eq "acceptance"
                 })
@@ -3112,7 +3111,7 @@ function Resume-CandidateWorkerPlatformEvidence {
                     -Groups @($pendingDecision.review_groups) -SampleKind "headroom_top_up" `
                     -CountPerGroup ([int]$policy.headroom_top_up_acceptance) `
                     -FixtureRoot $topUpFixtureRoot `
-                    -IngestToken ([Environment]::GetEnvironmentVariable("CLOUDFLARE_INGEST_TOKEN", "User"))
+                    -IngestToken (Get-UserEnvironmentValue -Name 'CLOUDFLARE_INGEST_TOKEN')
                 $expectedRequests = @($plan.requests | Where-Object { [string]$_.phase -eq "acceptance" })
                 $to = $topUp.completed_at
                 $storedEvidence.recovery.active_reads = 0
@@ -3179,8 +3178,7 @@ function Resume-CandidateWorkerPlatformEvidence {
                             -Candidate $Candidate -RoutePlan $Validation.cpu_route_plan `
                             -RequestPlan $plan -PlannedRequests $plannedRepairRequests `
                             -FixtureRoot $topUpFixtureRoot `
-                            -IngestToken ([Environment]::GetEnvironmentVariable(
-                                "CLOUDFLARE_INGEST_TOKEN", "User"))
+                            -IngestToken (Get-UserEnvironmentValue -Name 'CLOUDFLARE_INGEST_TOKEN')
                         $expectedRequests = @($plan.requests | Where-Object {
                             [string]$_.phase -eq "acceptance"
                         })

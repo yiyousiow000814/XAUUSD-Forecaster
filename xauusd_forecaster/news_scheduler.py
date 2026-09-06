@@ -999,6 +999,13 @@ def _contains_raw_key(identifier: str, api_key: str) -> bool:
 
 def _runtime_environment_value(name: str) -> str:
     """Read mutable user configuration instead of a stale process snapshot."""
+    from .runtime_paths import isolated_runtime_configuration
+
+    isolated = isolated_runtime_configuration()
+    if isolated is not None:
+        if name not in isolated["values"]:
+            raise ValueError("ISOLATED_CONFIGURATION_KEY_UNDECLARED")
+        return str(isolated["values"][name])
     if os.name == "nt":
         try:
             import winreg

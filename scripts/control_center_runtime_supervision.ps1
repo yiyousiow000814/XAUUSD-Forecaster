@@ -1203,8 +1203,8 @@ function Start-ForecasterService {
     }
     New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
     if ($Service.Key -in @("annotator", "api")) {
-        $env:GEMINI_API_KEY = [Environment]::GetEnvironmentVariable("GEMINI_API_KEY", "User")
-        $env:GEMINI_API_KEYS = [Environment]::GetEnvironmentVariable("GEMINI_API_KEYS", "User")
+        $env:GEMINI_API_KEY = Get-UserEnvironmentValue -Name 'GEMINI_API_KEY'
+        $env:GEMINI_API_KEYS = Get-UserEnvironmentValue -Name 'GEMINI_API_KEYS'
     }
     if ($Service.Key -in @("api", "sync")) {
         $env:DASHBOARD_OPERATOR_BRIDGE_TOKEN = Get-UserEnvironmentValue `
@@ -1217,15 +1217,9 @@ function Start-ForecasterService {
         $env:EIA_API_KEY = Get-CollectorSecret -Name "EIA_API_KEY"
     }
     if ($Service.Key -eq "sync") {
-        $env:SITES_BYPASS_TOKEN = [Environment]::GetEnvironmentVariable(
-            "SITES_BYPASS_TOKEN", "User"
-        )
-        $env:CLOUDFLARE_INGEST_URL = [Environment]::GetEnvironmentVariable(
-            "CLOUDFLARE_INGEST_URL", "User"
-        )
-        $env:CLOUDFLARE_INGEST_TOKEN = [Environment]::GetEnvironmentVariable(
-            "CLOUDFLARE_INGEST_TOKEN", "User"
-        )
+        $env:SITES_BYPASS_TOKEN = Get-UserEnvironmentValue -Name 'SITES_BYPASS_TOKEN'
+        $env:CLOUDFLARE_INGEST_URL = Get-UserEnvironmentValue -Name 'CLOUDFLARE_INGEST_URL'
+        $env:CLOUDFLARE_INGEST_TOKEN = Get-UserEnvironmentValue -Name 'CLOUDFLARE_INGEST_TOKEN'
     }
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
     $stdout = Join-Path $logRoot ("control-{0}-{1}.stdout.log" -f $Service.Key, $stamp)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ast
 import ctypes
 from ctypes import wintypes
 from datetime import datetime, timedelta, timezone
@@ -38,6 +39,104 @@ CONTROL_FILES = tuple(json.loads(
 )["files"])
 BUNDLE_DIGEST_ALGORITHM = "xauusd.control-bundle.sha256.v1"
 BUNDLE_SCHEMA_VERSION = 3
+
+
+@pytest.mark.parametrize("locator", [r"\\unreachable.invalid\share\fixture.json", r"C:\outside\fixture.json"])
+def test_business_configuration_rejects_foreign_locator_before_filesystem(tmp_path, monkeypatch, locator):
+    text = (ROOT / "tests/fixtures/business_environment.py").read_text(encoding="utf-8")
+    owner = next(node for node in ast.parse(text).body if isinstance(node, ast.FunctionDef) and node.name == "_configuration")
+    scope = {"Path": Path, "os": os, "CONFIGURATION": tmp_path / "fixture-user-environment.json"}
+    exec(compile(ast.Module(body=[owner], type_ignores=[]), "business_environment.py", "exec"), scope)
+    monkeypatch.setenv("XAUUSD_FIXTURE_CONFIGURATION", locator)
+    calls = []
+    def denied(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError("foreign locator caused filesystem access")
+    monkeypatch.setattr(Path, "resolve", denied)
+    monkeypatch.setattr(Path, "open", denied)
+    with pytest.raises(RuntimeError, match="FIXTURE_CONFIGURATION_REQUIRED"):
+        scope["_configuration"]()
+    assert calls == []
+
+
+@pytest.mark.parametrize("case", ["valid", "tampered", "missing-digest", "missing-key", "external-url", "production-port", "wrong-root", "oversized", "junction", "production-root", "schema-type", "missing-source"])
+def test_isolated_configuration_owner_matches_python_and_powershell(tmp_path, monkeypatch, case):
+    from xauusd_forecaster.news_scheduler import _runtime_environment_value
+    identity = uuid.uuid4().hex
+    owned = tmp_path / ("xauusd-rehearsal-" + identity)
+    owned.mkdir()
+    profile = owned / "profile"
+    config = {
+        "schema_version": 1, "mode": "ISOLATED_REHEARSAL", "fixture_id": identity,
+        "owned_root": str(owned), "profile_root": str(profile),
+        "runtime_root": str(profile / "XAUUSD-Forecaster-runtime"),
+        "repository_root": str(owned / "repository"),
+        "source_root": str(owned / "source"),
+        "task_namespace": f"\\XAUUSD-Contract-{identity}\\",
+        "loopback_ports": [18321], "provider_endpoint": "http://127.0.0.1:18321",
+        "values": {"GEMINI_API_KEY": "isolated-sentinel", "XAUUSD_DASHBOARD_URL": ""},
+    }
+    if case == "missing-key":
+        config["values"] = {"OTHER": "sentinel"}
+    elif case == "external-url":
+        config["provider_endpoint"] = "https://example.invalid:18321"
+    elif case == "production-port":
+        config["loopback_ports"] = [8765]
+        config["provider_endpoint"] = "http://127.0.0.1:8765"
+    elif case == "wrong-root":
+        config["repository_root"] = str(tmp_path)
+    elif case == "oversized":
+        config["padding"] = "x" * 40000
+    elif case == "schema-type":
+        config["schema_version"] = True
+    elif case == "missing-source":
+        del config["source_root"]
+    elif case == "junction":
+        destination = tmp_path / "outside-authority"
+        destination.mkdir()
+        subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+            f"$null=New-Item -ItemType Junction -Path '{owned / 'repository'}' -Target '{destination}'"],
+            check=True, capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+    path = owned / "fixture-user-environment.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION", str(path))
+    monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION_SHA256", hashlib.sha256(path.read_bytes()).hexdigest())
+    monkeypatch.setenv("GEMINI_API_KEY", "process-decoy")
+    if case == "tampered":
+        path.write_bytes(path.read_bytes() + b" ")
+    elif case == "missing-digest":
+        monkeypatch.delenv("XAUUSD_ISOLATED_CONFIGURATION_SHA256")
+    elif case == "production-root":
+        real_profile = ctypes.create_unicode_buffer(32768)
+        assert ctypes.windll.shell32.SHGetFolderPathW(None, 0x28, None, 0, real_profile) == 0
+        forbidden = Path(real_profile.value) / "XAUUSD-Forecaster-runtime" / owned.name / path.name
+        monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION", str(forbidden))
+    if case == "valid":
+        assert _runtime_environment_value("GEMINI_API_KEY") == "isolated-sentinel"
+    else:
+        with pytest.raises(ValueError, match="ISOLATED_CONFIGURATION_"):
+            _runtime_environment_value("GEMINI_API_KEY")
+    script = owned / "consume.ps1"
+    script.write_text("$ErrorActionPreference='Stop'\n"
+        f". '{ROOT / 'scripts/control_center_common.ps1'}'\n"
+        "$releaseSecretsPath='NEVER_READ';$collectorSecretsPath='NEVER_READ'\n"
+        "(Get-ReleaseSecret -Name 'GEMINI_API_KEY').value\n"
+        "Get-CollectorSecret -Name 'GEMINI_API_KEY'\n", encoding="utf-8")
+    for shell in ("powershell.exe", "pwsh.exe"):
+        result = subprocess.run([shell, "-NoProfile", "-File", str(script)],
+            capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+        if case == "valid":
+            assert result.returncode == 0, result.stderr
+            assert result.stdout.split() == ["isolated-sentinel", "isolated-sentinel"]
+            for action, expected_context_rejection in (("CodeRevision", True), ("ControlBundlePreflight", False)):
+                context = subprocess.run([shell, "-NoProfile", "-File", str(ROOT / "scripts/xauusd_control_center.ps1"),
+                    "-Action", action, "-RuntimeRoot", config["source_root"], "-RepositoryRoot", config["source_root"]],
+                    capture_output=True, text=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+                assert context.returncode != 0
+                assert ("ISOLATED_CONFIGURATION_CONTEXT_MISMATCH" in context.stderr) == expected_context_rejection, context.stderr
+        else:
+            assert result.returncode != 0
+            assert "ISOLATED_CONFIGURATION_" in result.stderr
 
 
 def _canonical_bundle_digest(revision: str, hashes: dict[str, str]) -> str:
@@ -448,7 +547,7 @@ def _make_detached_source(
     return revision
 
 
-def _make_real_control_source(root: Path, *, boundary: str = "", loopback_ports=()) -> str:
+def _make_real_control_source(root: Path, *, boundary: str = "", loopback_ports=(), sealed_configuration=False) -> str:
     scripts = root / "scripts"
     scripts.mkdir(parents=True)
     for name in CONTROL_FILES:
@@ -463,9 +562,18 @@ def _make_real_control_source(root: Path, *, boundary: str = "", loopback_ports=
             "BLS_API_KEY", "BEA_API_KEY", "FRED_API_KEY", "EIA_API_KEY",
         )}
         values["GEMINI_API_KEY"] = "synthetic-configuration-sentinel"
-        fixture_id = uuid.uuid4().hex
-        configuration.write_text(json.dumps({"schema_version": 1, "fixture_id": fixture_id,
-                                              "values": values, "loopback_ports": list(loopback_ports)}), encoding="utf-8")
+        fixture_id = root.parent.name.removeprefix("xauusd-rehearsal-") if sealed_configuration else uuid.uuid4().hex
+        document = {"schema_version": 1, "fixture_id": fixture_id,
+                    "values": values, "loopback_ports": list(loopback_ports)}
+        if sealed_configuration:
+            document.update(mode="ISOLATED_REHEARSAL", owned_root=str(root.parent),
+                source_root=str(root),
+                profile_root=str(root.parent / "profile"),
+                runtime_root=str(root.parent / "profile/XAUUSD-Forecaster-runtime"),
+                repository_root=str(root.parent / "repository"),
+                task_namespace=f"\\XAUUSD-Contract-{fixture_id}\\",
+                provider_endpoint=f"http://127.0.0.1:{loopback_ports[0]}")
+        configuration.write_text(json.dumps(document), encoding="utf-8")
         attestation_root = root.parent / "environment-attestations"
         attestation_root.mkdir(exist_ok=True)
         prelude = (ROOT / "tests/fixtures/control_plane_user_environment.ps1").read_text(encoding="utf-8")
@@ -474,10 +582,14 @@ def _make_real_control_source(root: Path, *, boundary: str = "", loopback_ports=
                               "__FIXTURE_ID__": fixture_id,
                               "__ATTESTATION_ROOT__": str(attestation_root)}.items():
             prelude = prelude.replace(marker, value.replace("'", "''"))
+        if sealed_configuration:
+            prelude = ""  # No second credential/configuration reader before the real owner.
         replaced = 0
         for name in CONTROL_FILES:
             if not name.endswith(".ps1"):
                 continue
+            if sealed_configuration:
+                continue  # Exercise the committed shared configuration reader.
             path = scripts / name
             text = path.read_text(encoding="utf-8-sig")
             text, count = pattern.subn(r'(Get-FixtureUserEnvironmentValue -Name \1)', text)
@@ -485,10 +597,21 @@ def _make_real_control_source(root: Path, *, boundary: str = "", loopback_ports=
             if re.search(r'GetEnvironmentVariable\([^)]*,\s*["\'](?:User|Machine)["\']', text):
                 raise AssertionError(f"uncontained persistent environment read in {name}")
             path.write_text(text, encoding="utf-8")
-        assert replaced == 14, "review changed persistent-environment ownership before fixture execution"
+        assert replaced == (0 if sealed_configuration else 1), "only the shared configuration owner may read persistent user values"
         shutil.copy2(ROOT / "scripts/windows-service-launch-contract.json", scripts / "windows-service-launch-contract.json")
         entrypoint = scripts / "xauusd_control_center.ps1"
         source = entrypoint.read_text(encoding="utf-8")
+        if sealed_configuration:
+            marker = "$script:nativeProcessOwnershipReceiptPath = $NativeProcessReceiptPath"
+            assert source.count(marker) == 1
+            attestation = (
+                "if (-not $isolatedConfiguration) { throw 'ISOLATED_CONFIGURATION_REQUIRED' }\n"
+                f"[IO.File]::WriteAllText(('{attestation_root}' + '\\' + $PID + '.json'), "
+                "(@{pid=$PID;action=$Action;fixture_id=$isolatedConfiguration.fixture_id;"
+                "configuration_sha256=$env:XAUUSD_ISOLATED_CONFIGURATION_SHA256} | ConvertTo-Json -Compress),"
+                "[Text.UTF8Encoding]::new($false))\n"
+            )
+            source = source.replace(marker, attestation + marker, 1)
         assert source.count("switch ($Action) {") == 1
         diagnostic, boundary = boundary.split("$null = Get-Command Get-FileHash -ErrorAction Stop", 1)
         source = source.replace('$ErrorActionPreference = "Stop"',
@@ -731,16 +854,24 @@ def test_business_entrypoint_configuration_is_inherited_and_fail_closed(tmp_path
                     "FIXTURE_CONFIGURATION_IDENTITY_MISMATCH") in result.stderr
 
 
-def run_staged_installer_active_rehearsal(tmp_path):
+def run_staged_installer_active_rehearsal(tmp_path, *, sealed_configuration=False):
     """Real lifecycle with child-inherited, fail-before-mutation environment adapters."""
     # Hosted Windows TEMP can use an 8.3 user alias while PowerShell resolves
     # the same directory to its long name. Compare one physical root identity.
     tmp_path = tmp_path.resolve(strict=True)
+    if sealed_configuration:
+        tmp_path = tmp_path / ("xauusd-rehearsal-" + uuid.uuid4().hex)
+        tmp_path.mkdir()
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        fixture_port = reservation.getsockname()[1]
     boundary = (ROOT / "tests/fixtures/control_plane_staged_boundary.ps1").read_text(encoding="utf-8")
-    boundary = boundary.replace("__FIXTURE_ROOT__", str(tmp_path)).replace("__FIXTURE_ID__", uuid.uuid4().hex)
+    boundary_identity = tmp_path.name.removeprefix("xauusd-rehearsal-") if sealed_configuration else uuid.uuid4().hex
+    boundary = boundary.replace("__FIXTURE_ROOT__", str(tmp_path)).replace("__FIXTURE_ID__", boundary_identity)
     source = tmp_path / "source"
-    revision = _make_real_control_source(source, boundary=boundary)
-    runtime = tmp_path / "runtime"
+    revision = _make_real_control_source(source, boundary=boundary,
+        loopback_ports=[fixture_port], sealed_configuration=sealed_configuration)
+    runtime = tmp_path / ("profile/XAUUSD-Forecaster-runtime" if sealed_configuration else "runtime")
     broken = _make_real_control_source(runtime)
     shutil.copyfile(ROOT / "scripts/windows-service-launch-contract.json", runtime / "scripts/windows-service-launch-contract.json")
     subprocess.run(["git", "add", "scripts/windows-service-launch-contract.json"], cwd=runtime, check=True)
@@ -756,6 +887,12 @@ def run_staged_installer_active_rehearsal(tmp_path):
     children = []
     environment = _isolated_windows_environment()
     environment["XAUUSD_FIXTURE_CONFIGURATION"] = str(tmp_path / "fixture-user-environment.json")
+    if sealed_configuration:
+        environment["XAUUSD_ISOLATED_CONFIGURATION"] = environment["XAUUSD_FIXTURE_CONFIGURATION"]
+        environment["XAUUSD_ISOLATED_CONFIGURATION_SHA256"] = hashlib.sha256(
+            (tmp_path / "fixture-user-environment.json").read_bytes()).hexdigest()
+        environment["USERPROFILE"] = str(tmp_path / "profile")
+        environment["HOME"] = str(tmp_path / "profile")
     environment["GEMINI_API_KEY"] = "synthetic-process-decoy"
     (tmp_path / "fixture-owned.json").write_text(json.dumps({"fixture": str(tmp_path)}), encoding="utf-8")
     certificate, key = tmp_path / "loopback.crt", tmp_path / "loopback.key"
@@ -816,7 +953,7 @@ def run_staged_installer_active_rehearsal(tmp_path):
             else:
                 self.send_error(404)
 
-    provider = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    provider = ThreadingHTTPServer(("127.0.0.1", fixture_port), Provider)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(certificate, key)
@@ -902,7 +1039,8 @@ def run_staged_installer_active_rehearsal(tmp_path):
         script = tmp_path / "installer.ps1"
         script.write_text(body, encoding="utf-8")
         result = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-                                capture_output=True, text=True, timeout=150, creationflags=subprocess.CREATE_NO_WINDOW, env=environment)
+                                capture_output=True, text=True, timeout=150, creationflags=subprocess.CREATE_NO_WINDOW,
+                                env=environment, cwd=tmp_path)
         assert result.returncode == 0, result.stdout + result.stderr
         assert "ACTIVE_COMMITTED|BUSINESS_PRESERVED|SECOND_OWNER_REJECTED" in result.stdout
         assert all(child.poll() is None for child in children)
@@ -932,7 +1070,7 @@ def run_staged_installer_active_rehearsal(tmp_path):
         cleanup = rf'''
         $ErrorActionPreference='Stop';
         $fixture='{tmp_path}';
-        $path=Join-Path $fixture 'runtime\.local\forward\watchdog-owner-v2.json';
+        $path='{runtime / '.local/forward/watchdog-owner-v2.json'}';
         if(Test-Path -LiteralPath $path){{
             $r=Get-Content -LiteralPath $path -Raw -Encoding UTF8|ConvertFrom-Json;
             foreach($e in @(@{{id=$r.process_id;token=$r.process_start_token}},@{{id=$r.launcher_pid;token=$r.launcher_start_token}})){{
@@ -961,6 +1099,7 @@ def run_staged_installer_active_rehearsal(tmp_path):
         provider.server_close()
         serving.join(timeout=3)
         assert cleaned.returncode == 0, cleaned.stderr
+    return tmp_path
 
 
 def _identity(pid: int, token: str) -> str:

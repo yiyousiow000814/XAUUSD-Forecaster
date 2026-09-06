@@ -32,6 +32,16 @@ $repositoryRoot = if ($RepositoryRoot) {
 $moduleRoot = if ($RuntimeRoot) {
     [System.IO.Path]::GetFullPath($RuntimeRoot)
 } else { $scriptRepositoryRoot }
+. (Join-Path $PSScriptRoot 'control_center_common.ps1')
+$isolatedConfiguration = Get-IsolatedRuntimeConfiguration
+if ($isolatedConfiguration -and -not (
+    ($moduleRoot -ceq [string]$isolatedConfiguration.runtime_root -and
+     $repositoryRoot -ceq [string]$isolatedConfiguration.repository_root) -or
+    ($Action -ceq 'ControlBundlePreflight' -and
+     $moduleRoot -ceq [string]$isolatedConfiguration.source_root -and
+     $repositoryRoot -ceq [string]$isolatedConfiguration.source_root))) {
+    throw 'ISOLATED_CONFIGURATION_CONTEXT_MISMATCH'
+}
 $script:nativeProcessOwnershipReceiptPath = $NativeProcessReceiptPath
 $runtimeLocalRoot = Join-Path $moduleRoot ".local"
 $runtimeForwardRoot = Join-Path $runtimeLocalRoot "forward"
@@ -39,10 +49,15 @@ $repositoryLocalRoot = Join-Path $repositoryRoot ".local"
 $logRoot = Join-Path $runtimeForwardRoot "logs"
 $taskName = "XAUUSD-Forecaster-Autostart"
 $guardTaskName = "XAUUSD-Forecaster-Watchdog-Guard"
+if ($isolatedConfiguration) {
+    $taskName = 'XAUUSD-Contract-' + $isolatedConfiguration.fixture_id + '-Main'
+    $guardTaskName = 'XAUUSD-Contract-' + $isolatedConfiguration.fixture_id + '-Guard'
+}
 $workerName = "aurum-signal-room"
 $workerUrl = "https://aurum-signal-room.yiyousiow1234.workers.dev"
-$dashboardUrl = if ([Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL", "User")) {
-    [Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL", "User")
+if ($isolatedConfiguration) { $workerUrl = [string]$isolatedConfiguration.provider_endpoint }
+$dashboardUrl = if (Get-UserEnvironmentValue -Name 'XAUUSD_DASHBOARD_URL') {
+    Get-UserEnvironmentValue -Name 'XAUUSD_DASHBOARD_URL'
 } else {
     $workerUrl
 }

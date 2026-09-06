@@ -16,13 +16,113 @@ function ConvertFrom-ReleaseControlJson {
     }
 }
 
+function Assert-IsolatedConfigurationPath {
+    param([string]$Path)
+    $ancestors = @(); $cursor = [IO.Path]::GetFullPath($Path)
+    while ($cursor) { $ancestors += $cursor; $cursor = Split-Path -Parent $cursor }
+    [array]::Reverse($ancestors)
+    foreach ($ancestor in $ancestors) {
+        try { $item = Get-Item -LiteralPath $ancestor -Force -ErrorAction Stop }
+        catch [System.Management.Automation.ItemNotFoundException] { continue }
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'ISOLATED_CONFIGURATION_REPARSE_DENIED'
+        }
+    }
+}
+
+function Get-IsolatedRuntimeConfiguration {
+    $path = [Environment]::GetEnvironmentVariable('XAUUSD_ISOLATED_CONFIGURATION', 'Process')
+    $expected = [Environment]::GetEnvironmentVariable('XAUUSD_ISOLATED_CONFIGURATION_SHA256', 'Process')
+    if (-not $path -and -not $expected) { return $null }
+    if (-not $path -or $expected -cnotmatch '^[0-9a-f]{64}$') { throw 'ISOLATED_CONFIGURATION_REQUIRED' }
+    if (-not [IO.Path]::IsPathRooted($path)) { throw 'ISOLATED_CONFIGURATION_ROOT_INVALID' }
+    $path = [IO.Path]::GetFullPath($path)
+    if ($path.StartsWith('\\') -or [IO.Path]::GetFileName($path) -cne 'fixture-user-environment.json' -or
+        [IO.Path]::GetFileName((Split-Path -Parent $path)) -cnotmatch '^xauusd-rehearsal-[0-9a-f]{32}$') {
+        throw 'ISOLATED_CONFIGURATION_ROOT_INVALID'
+    }
+    $claimedRoot = Split-Path -Parent $path
+    $realProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    foreach ($name in @('XAUUSD-Forecaster', 'XAUUSD-Forecaster-runtime', 'XAUUSD-Forecaster.local', '.codex\worktrees')) {
+        $denied = Join-Path $realProfile $name
+        if ($claimedRoot -ieq $denied -or $claimedRoot.StartsWith($denied + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'ISOLATED_CONFIGURATION_PRODUCTION_ROOT_DENIED'
+        }
+    }
+    Assert-IsolatedConfigurationPath -Path $path
+    $buffer = [byte[]]::new(32769); $count = 0
+    $stream = [IO.File]::OpenRead($path)
+    try {
+        while ($count -lt $buffer.Length) {
+            $read = $stream.Read($buffer, $count, $buffer.Length - $count)
+            if ($read -eq 0) { break }; $count += $read
+        }
+    } finally { $stream.Dispose() }
+    if ($count -gt 32768) { throw 'ISOLATED_CONFIGURATION_TOO_LARGE' }
+    if ($count -eq 0) { throw 'ISOLATED_CONFIGURATION_SCHEMA_INVALID' }
+    $bytes = [byte[]]$buffer[0..($count - 1)]
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try { $digest = ([BitConverter]::ToString($hasher.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $hasher.Dispose() }
+    if ($digest -cne $expected) { throw 'ISOLATED_CONFIGURATION_IDENTITY_MISMATCH' }
+    $config = [Text.UTF8Encoding]::new($false, $true).GetString($bytes) | ConvertFrom-Json
+    if (($config.schema_version -isnot [int] -and $config.schema_version -isnot [long]) -or
+        $config.schema_version -ne 1 -or $config.mode -cne 'ISOLATED_REHEARSAL' -or
+        $config.fixture_id -cnotmatch '^[0-9a-f]{32}$' -or -not $config.values -or
+        $config.task_namespace -cne ('\XAUUSD-Contract-' + $config.fixture_id + '\')) {
+        throw 'ISOLATED_CONFIGURATION_SCHEMA_INVALID'
+    }
+    foreach ($field in @('owned_root', 'runtime_root', 'repository_root', 'profile_root', 'source_root', 'provider_endpoint')) {
+        if ($config.$field -isnot [string] -or -not $config.$field) { throw 'ISOLATED_CONFIGURATION_SCHEMA_INVALID' }
+    }
+    $root = [IO.Path]::GetFullPath([string]$config.owned_root).TrimEnd('\')
+    if ([IO.Path]::GetFileName($root) -cne ('xauusd-rehearsal-' + $config.fixture_id) -or
+        [IO.Path]::GetFullPath($path) -cne (Join-Path $root 'fixture-user-environment.json')) {
+        throw 'ISOLATED_CONFIGURATION_ROOT_INVALID'
+    }
+    foreach ($declared in @($config.runtime_root, $config.repository_root, $config.profile_root, $config.source_root)) {
+        $resolved = [IO.Path]::GetFullPath([string]$declared).TrimEnd('\')
+        if (-not $resolved.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'ISOLATED_CONFIGURATION_ROOT_INVALID'
+        }
+    }
+    if ([string]$config.runtime_root -cne (Join-Path ([string]$config.profile_root) 'XAUUSD-Forecaster-runtime')) {
+        throw 'ISOLATED_CONFIGURATION_RUNTIME_INVALID'
+    }
+    # No declared path may traverse an existing junction into another estate.
+    foreach ($declared in @($root, $config.runtime_root, $config.repository_root, $config.profile_root, $config.source_root)) {
+        Assert-IsolatedConfigurationPath -Path ([string]$declared)
+    }
+    $ports = @($config.loopback_ports)
+    if (-not $ports.Count -or @($ports | Where-Object { ($_ -isnot [int] -and $_ -isnot [long]) -or $_ -le 1024 -or $_ -gt 65535 -or $_ -eq 8765 }).Count) {
+        throw 'ISOLATED_CONFIGURATION_ENDPOINT_INVALID'
+    }
+    foreach ($url in @($config.provider_endpoint) + @($config.values.PSObject.Properties | Where-Object { $_.Name -match 'URL$' -and $_.Value } | ForEach-Object { $_.Value })) {
+        $uri = $null
+        if (-not [Uri]::TryCreate([string]$url, [UriKind]::Absolute, [ref]$uri) -or
+            $uri.Scheme -cnotin @('http', 'https') -or $uri.Host -cnotin @('127.0.0.1', 'localhost', '::1') -or
+            $uri.Port -notin $ports -or $uri.UserInfo) { throw 'ISOLATED_CONFIGURATION_ENDPOINT_INVALID' }
+    }
+    return $config
+}
+
 function Get-UserEnvironmentValue {
     param([Parameter(Mandatory = $true)][string]$Name)
+    $config = Get-IsolatedRuntimeConfiguration
+    if ($config) {
+        $property = $config.values.PSObject.Properties[$Name]
+        if (-not $property) { throw 'ISOLATED_CONFIGURATION_KEY_UNDECLARED' }
+        return [string]$property.Value
+    }
     [Environment]::GetEnvironmentVariable($Name, "User")
 }
 
 function Get-ReleaseSecret {
     param([Parameter(Mandatory = $true)][string]$Name)
+    if (Get-IsolatedRuntimeConfiguration) {
+        $value = ([string](Get-UserEnvironmentValue -Name $Name)).Trim()
+        return [pscustomobject]@{available=[bool]$value;value=$value;source='ISOLATED_CONFIGURATION';diagnostic=$null}
+    }
     if ([System.IO.Path]::GetDirectoryName($releaseSecretsPath) -ne $releaseSecretsRoot) {
         return [pscustomobject]@{
             available = $false; value = ""; source = "UNAVAILABLE"
@@ -73,8 +173,9 @@ function Get-ReleaseSecret {
 
 function Get-CollectorSecret {
     param([Parameter(Mandatory = $true)][string]$Name)
-    $userValue = [Environment]::GetEnvironmentVariable($Name, "User")
+    $userValue = Get-UserEnvironmentValue -Name $Name
     if ($userValue) { return $userValue.Trim() }
+    if (Get-IsolatedRuntimeConfiguration) { return '' }
     if (-not (Test-Path -LiteralPath $collectorSecretsPath)) { return "" }
     try {
         $secrets = Get-Content -LiteralPath $collectorSecretsPath -Raw -Encoding UTF8 |

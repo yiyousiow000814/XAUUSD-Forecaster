@@ -993,9 +993,11 @@ def _write_news_sync_state(path: Path, state: dict, *, state_root: Path) -> None
         for delay in (0.01, 0.02, 0.04, None):
             try:
                 path = _validated_sync_state_write_path(path, state_root)
-                if os.path.commonpath((path, authority)) != str(authority):
+                destination = os.path.normcase(os.path.abspath(path))
+                authority_prefix = os.path.normcase(os.path.abspath(authority)) + os.sep
+                if not destination.startswith(authority_prefix):
                     raise ValueError("dashboard sync state path escapes runtime authority")
-                temporary.replace(path)
+                temporary.replace(destination)
                 return
             except PermissionError as error:
                 if getattr(error, "winerror", None) not in {5, 32, 33} or delay is None:

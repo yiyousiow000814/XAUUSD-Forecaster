@@ -20,7 +20,9 @@ GIT_EXECUTABLE = '__GIT_PATH__'
 
 def _configuration():
     supplied = os.environ.get('XAUUSD_FIXTURE_CONFIGURATION')
-    if not supplied or Path(supplied).resolve() != CONFIGURATION.resolve():
+    # Compare the locator lexically before any filesystem access. An untrusted
+    # UNC/reparse spelling must not trigger lookup merely to reject it.
+    if not supplied or os.path.normcase(os.path.abspath(supplied)) != os.path.normcase(os.path.abspath(CONFIGURATION)):
         raise RuntimeError('FIXTURE_CONFIGURATION_REQUIRED')
     with CONFIGURATION.open('rb') as stream:
         raw = stream.read(32769)

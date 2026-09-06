@@ -5,6 +5,7 @@ import argparse
 from datetime import UTC, datetime, timedelta
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 import threading
@@ -32,7 +33,19 @@ def main() -> None:
     spec = importlib.util.spec_from_file_location("staged_sync", args.source_root / "scripts/run_dashboard_sync.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    state = root / "runtime/.local/forward"
+    from xauusd_forecaster.runtime_paths import isolated_runtime_configuration
+    isolated = isolated_runtime_configuration()
+    if isolated:
+        from xauusd_forecaster.news_scheduler import _runtime_environment_value
+        if Path(isolated["owned_root"]) != root or _runtime_environment_value("GEMINI_API_KEY") != "synthetic-configuration-sentinel":
+            raise RuntimeError("STAGED_CONFIGURATION_SOURCE_MISMATCH")
+        state = Path(isolated["runtime_root"]) / ".local/forward"
+        (root / "environment-attestations" / f"{os.getpid()}.json").write_text(json.dumps({
+            "pid": os.getpid(), "action": "BusinessSync", "fixture_id": isolated["fixture_id"],
+            "configuration_sha256": os.environ["XAUUSD_ISOLATED_CONFIGURATION_SHA256"],
+        }), encoding="utf-8")
+    else:
+        state = root / "runtime/.local/forward"
     state.mkdir(parents=True, exist_ok=True)
     config = module.configure_runtime_state({
         "local_status_url": args.provider + "/api/status",

@@ -951,3 +951,23 @@ Release mutation is local operator control, never a public HTTP endpoint.
 Cloudflare credentials stay in user-scoped authenticated tooling or protected
 secret storage and MUST NOT enter Git, command output, logs, UI payloads,
 SQLite/D1 evidence, or pull-request comments.
+
+### Isolated recovery configuration boundary
+
+An isolated rehearsal may declare `XAUUSD_ISOLATED_CONFIGURATION` and its exact
+`XAUUSD_ISOLATED_CONFIGURATION_SHA256` in the inherited process environment.
+Both are required together. The bounded existing fixture JSON must declare
+`ISOLATED_REHEARSAL`, a unique owned root, canonical profile/runtime root,
+repository root, loopback endpoints excluding port 8765, and a unique contract
+task namespace. Validate the local locator, reparse boundary, complete digest
+and declared authorities before consuming configuration. An isolated process
+must never fall back to HKCU, inherited credential decoys or local secret files
+when a declared key or configuration is missing. Defaults outside explicit
+isolated mode retain their existing production authority.
+
+This is an external configuration seam, not an operating-system sandbox or a
+release-evidence receipt. Rehearsal process/network/scheduler adapters must still
+contain their declared external boundaries. Original and adapter-derived source
+identities must remain distinct; source rewriting does not authorize reporting
+the original immutable SHA. Real locks, installation, transaction transitions,
+Collector output, Sync ACK and Observe must not be replaced by success stubs.

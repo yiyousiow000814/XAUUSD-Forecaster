@@ -24,7 +24,7 @@ def main() -> None:
             print("STAGED_ACTIVATION_WITHDRAWAL_PASSED", flush=True)
             active = root / "active"
             active.mkdir()
-            module.run_staged_installer_active_rehearsal(active)
+            active = module.run_staged_installer_active_rehearsal(active, sealed_configuration=True)
             for fixture in (withdrawal, active):
                 attestations = [json.loads(path.read_text(encoding="utf-8"))
                                for path in (fixture / "environment-attestations").glob("*.json")]
@@ -34,16 +34,24 @@ def main() -> None:
                     raise AssertionError("CHILD_CONFIGURATION_IDENTITY_MISMATCH")
                 if not any(row["action"] == "Watchdog" for row in attestations):
                     raise AssertionError("WATCHDOG_CONFIGURATION_NOT_PROVEN")
+                if fixture == active and not any(row["action"] == "BusinessSync" for row in attestations):
+                    raise AssertionError("BUSINESS_CONFIGURATION_NOT_PROVEN")
             print("CONTROL_CHILD_CONFIGURATION_INHERITANCE_PASSED", flush=True)
         except Exception:
             for phase in ("withdrawal", "active"):
-                diagnostic = root / phase / "child-failure.txt"
+                fixture = root / phase
+                if phase == "active":
+                    owned = list(fixture.glob("xauusd-rehearsal-*"))
+                    if len(owned) == 1:
+                        fixture = owned[0]
+                diagnostic = fixture / "child-failure.txt"
                 if diagnostic.exists():
                     print(diagnostic.read_text(encoding="utf-8")[:8192], flush=True)
-                handoff = root / phase / "handoff-failure.json"
+                handoff = fixture / "handoff-failure.json"
                 if handoff.exists():
                     print(handoff.read_text(encoding="utf-8")[:8192], flush=True)
-                state = root / phase / "runtime/.local/forward/control-watchdog-heartbeat.json"
+                runtime = "profile/XAUUSD-Forecaster-runtime" if phase == "active" else "runtime"
+                state = fixture / runtime / ".local/forward/control-watchdog-heartbeat.json"
                 if state.exists():
                     print(state.read_text(encoding="utf-8")[:8192], flush=True)
             raise

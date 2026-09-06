@@ -20,10 +20,11 @@ $guardTaskName = 'XAUUSD-Contract-__FIXTURE_ID__-Guard'
 $workerUrl = 'http://127.0.0.1:1'
 $dashboardUrl = $workerUrl
 $protectedDashboardUrl = $workerUrl
+$fixtureRealProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
 $script:fixtureDenyRoots = @(
-    (Join-Path $env:USERPROFILE 'XAUUSD-Forecaster'),
-    (Join-Path $env:USERPROFILE 'XAUUSD-Forecaster-runtime'),
-    (Join-Path $env:USERPROFILE 'XAUUSD-Forecaster.local')
+    (Join-Path $fixtureRealProfile 'XAUUSD-Forecaster'),
+    (Join-Path $fixtureRealProfile 'XAUUSD-Forecaster-runtime'),
+    (Join-Path $fixtureRealProfile 'XAUUSD-Forecaster.local')
 )
 function Assert-FixturePath {
     param([string]$Path)
