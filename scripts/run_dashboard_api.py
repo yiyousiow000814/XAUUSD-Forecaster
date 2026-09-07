@@ -225,7 +225,38 @@ def _news_reader_rows(
     cursor = connection.execute(
         f"""WITH candidate_changes(
               source,source_item_id,revision_number,mirror_updated_at
-            ) AS (VALUES {candidate_clause})
+            ) AS (VALUES {candidate_clause}),
+            candidate_identity AS MATERIALIZED (
+              SELECT candidate.source,candidate.source_item_id,
+                     candidate.revision_number,candidate.content_hash
+              FROM candidate_changes keys
+              JOIN news_revisions candidate
+                ON candidate.source=keys.source
+               AND candidate.source_item_id=keys.source_item_id
+               AND candidate.revision_number=keys.revision_number
+            ),
+            candidate_title_translations AS MATERIALIZED (
+              SELECT translation_id,source,source_item_id,revision_number,
+                     headline_zh,parsed_at
+              FROM news_title_translations
+              WHERE (source,source_item_id,revision_number) IN (
+                SELECT source,source_item_id,revision_number FROM candidate_changes)
+            ),
+            candidate_content_peers AS MATERIALIZED (
+              SELECT possible_peer.source,possible_peer.source_item_id,
+                     possible_peer.content_hash
+              FROM news_revisions possible_peer
+              WHERE (possible_peer.content_hash IN (
+                       SELECT content_hash FROM candidate_identity)
+                  OR possible_peer.source_item_id IN (
+                       SELECT source_item_id FROM candidate_identity))
+                AND length(trim(COALESCE(possible_peer.body,'')))>=240
+                AND NOT EXISTS (
+                  SELECT 1 FROM news_revisions peer_revision
+                  WHERE peer_revision.source=possible_peer.source
+                    AND peer_revision.source_item_id=possible_peer.source_item_id
+                    AND peer_revision.revision_number>possible_peer.revision_number)
+            )
             SELECT n.source, n.source_item_id, n.revision_number,
                    n.cluster_id, n.source_published_time,
                    n.collector_first_seen_time, n.fetched_time,
@@ -251,19 +282,12 @@ def _news_reader_rows(
                        AND checkpoint.prompt_version=?
                    ) AS has_display_checkpoint,
                    EXISTS (
-                     SELECT 1 FROM news_revisions same_content
+                     SELECT 1 FROM candidate_content_peers same_content
                      WHERE (same_content.content_hash=n.content_hash
                          OR (same_content.source<>n.source
                            AND same_content.source_item_id=n.source_item_id))
                        AND (same_content.source<>n.source
                          OR same_content.source_item_id<>n.source_item_id)
-                       AND length(trim(COALESCE(same_content.body,'')))>=240
-                       AND NOT EXISTS (
-                         SELECT 1 FROM news_revisions same_content_newer
-                         WHERE same_content_newer.source=same_content.source
-                           AND same_content_newer.source_item_id=same_content.source_item_id
-                           AND same_content_newer.revision_number>
-                               same_content.revision_number)
                    ) AS has_canonical_content_peer,
                    json_extract(a.annotation_json, '$.summary_zh') AS summary_zh,
                    json_extract(a.annotation_json, '$.primary_category') AS primary_category,
@@ -319,7 +343,7 @@ def _news_reader_rows(
              AND n.source_item_id=candidate_changes.source_item_id
              AND n.revision_number=candidate_changes.revision_number
             LEFT JOIN news_title_translations t ON t.translation_id=(
-              SELECT latest_t.translation_id FROM news_title_translations latest_t
+              SELECT latest_t.translation_id FROM candidate_title_translations latest_t
               WHERE latest_t.source=n.source
                 AND latest_t.source_item_id=n.source_item_id
                 AND latest_t.revision_number=n.revision_number

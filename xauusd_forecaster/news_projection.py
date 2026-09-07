@@ -28,6 +28,7 @@ NEWS_DETAIL_BATCH_LIMIT_BYTES = 400_000
 NEWS_INDEX_BATCH_LIMIT_BYTES = 100_000
 EMPTY_RECEIPT_DIGEST = hashlib.sha256(b"").hexdigest()
 NEWS_SOURCE_CAPTURE_VERSION = "news-projection-source-capture-v1"
+NEWS_SOURCE_CAPTURE_DERIVED_VERSION = "news-projection-source-capture-v2"
 NEWS_SOURCE_CAPTURE_PAGE_ITEMS = 128
 NEWS_SOURCE_CAPTURE_PART_BYTES = 4 * 1024 * 1024
 NEWS_SOURCE_CAPTURE_TOTAL_BYTES = 256 * 1024 * 1024
@@ -335,7 +336,8 @@ class NewsProjectionSourceCapture:
     """
 
     def __init__(self, directory: Path, *, binding: dict, watermark: str,
-                 window_start: str, epoch: str) -> None:
+                 window_start: str, epoch: str,
+                 active_producer_identity: dict | None = None) -> None:
         self.directory = Path(os.path.abspath(directory))
         self._path("manifest.json")
         identity = {
@@ -352,6 +354,7 @@ class NewsProjectionSourceCapture:
         if not binding or not epoch:
             raise ValueError("NEWS_SOURCE_CAPTURE_IDENTITY_REQUIRED")
         self.identity = identity
+        self.active_producer_identity = active_producer_identity
         self._storage_unresolved = False
 
     def _path(self, name: str) -> Path:
@@ -483,7 +486,9 @@ class NewsProjectionSourceCapture:
         envelope = json.loads(raw.decode("utf-8"))
         state = envelope.get("capture")
         if (not isinstance(state, dict) or envelope.get("sha256") != sha256_json(state)
-                or state.get("schema_version") != NEWS_SOURCE_CAPTURE_VERSION
+                or state.get("schema_version") not in {
+                    NEWS_SOURCE_CAPTURE_VERSION, NEWS_SOURCE_CAPTURE_DERIVED_VERSION,
+                }
                 or state.get("identity") != self.identity):
             raise ValueError("NEWS_SOURCE_CAPTURE_IDENTITY_MISMATCH")
         if state.get("state") not in {"BUILDING", "SOURCE_COMPLETE"}:
@@ -518,7 +523,138 @@ class NewsProjectionSourceCapture:
                 or state.get("cursor") != previous
                 or totals["canonical_bytes"] > NEWS_SOURCE_CAPTURE_TOTAL_BYTES):
             raise ValueError("NEWS_SOURCE_CAPTURE_COUNTS_INVALID")
+        self._validate_reader_segment(state)
         return state
+
+    def _validate_reader_segment(self, state: dict) -> None:
+        segment = state.get("reader_segment")
+        if state["schema_version"] == NEWS_SOURCE_CAPTURE_VERSION:
+            if segment is not None or any("reader_segment_sha256" in part for part in state["parts"]):
+                raise ValueError("NEWS_SOURCE_CAPTURE_READER_SEGMENT_INVALID")
+            return
+        if not isinstance(segment, dict):
+            raise ValueError("NEWS_SOURCE_CAPTURE_READER_SEGMENT_REQUIRED")
+        count = segment.get("prefix_part_count")
+        if type(count) is not int or not 1 <= count <= len(state["parts"]):
+            raise ValueError("NEWS_SOURCE_CAPTURE_READER_PREFIX_INVALID")
+        prefix = state["parts"][:count]
+        expected = self._reader_prefix(state, prefix)
+        if (segment.get("prefix") != expected or segment.get("capture_identity_sha256") != sha256_json(self.identity)
+                or not isinstance(segment.get("producer_identity"), dict)
+                or not segment["producer_identity"]
+                or not isinstance(segment.get("equivalence"), dict)):
+            raise ValueError("NEWS_SOURCE_CAPTURE_READER_PREFIX_INVALID")
+        equivalence = segment["equivalence"]
+        target = segment["producer_identity"].get("inputs", {}).get("scripts/run_dashboard_api.py")
+        review = equivalence.get("review_identity")
+        if (not isinstance(review, dict) or review.get("target_api_sha256") != target
+                or equivalence.get("accepted_part_sha256") not in {part["sha256"] for part in prefix}
+                or len(compact_json(segment).encode("utf-8")) > 64 * 1024):
+            raise ValueError("NEWS_SOURCE_CAPTURE_READER_PROOF_INVALID")
+        for value in (target, review.get("record_sha256"), *(equivalence.get(key) for key in (
+            "proof_report_sha256", "proof_input_sha256", "proof_producer_sha256",
+            "base_function_ast_sha256", "target_function_ast_sha256",
+        ))):
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ValueError("NEWS_SOURCE_CAPTURE_READER_PROOF_INVALID")
+        digest = sha256_json(segment)
+        if (any("reader_segment_sha256" in part for part in prefix)
+                or any(part.get("reader_segment_sha256") != digest for part in state["parts"][count:])):
+            raise ValueError("NEWS_SOURCE_CAPTURE_READER_SUFFIX_INVALID")
+
+    @staticmethod
+    def _reader_prefix(state: dict, parts: list) -> dict:
+        return {
+            "parts_sha256": sha256_json(parts), "cursor": parts[-1]["cursor"],
+            **{key: sum(part[key] for part in parts) for key in (
+                "source_count", "item_count", "withdrawal_count", "canonical_bytes",
+            )},
+        }
+
+    def derive_reader_segment(self, *, proof_report: bytes, proof_input: bytes,
+                              review_identity: dict) -> dict:
+        """Fence old code and bind one proven reader correction without SQL work.
+
+        The exact execution producer validates its source files before calling.
+        This later identity supplement does not rewrite the original proof.
+        """
+        if self._storage_unresolved:
+            raise NewsSourceCaptureStorageUnresolved("NEWS_SOURCE_CAPTURE_STORAGE_UNRESOLVED")
+        if (not isinstance(self.active_producer_identity, dict) or not self.active_producer_identity
+                or len(proof_report) > 64 * 1024 or len(proof_input) > 64 * 1024
+                or not isinstance(review_identity, dict) or not review_identity):
+            raise ValueError("NEWS_SOURCE_CAPTURE_READER_PROOF_INVALID")
+        proof = json.loads(proof_report.decode("utf-8"))
+        inputs = json.loads(proof_input.decode("utf-8"))
+        binding = self.identity["binding"]
+        original_source = binding.get("source_identity")
+        target_api = self.active_producer_identity.get("inputs", {}).get("scripts/run_dashboard_api.py")
+        if (not isinstance(original_source, dict)
+                or inputs.get("source_identity") != original_source
+                or inputs.get("input_identity") != binding.get("input_identity")
+                or inputs.get("snapshot_stat") != binding.get("snapshot_stat")
+                or inputs.get("watermark") != self.identity["watermark"]
+                or inputs.get("epoch") != self.identity["epoch"]
+                or proof.get("source_identity") != original_source
+                or proof.get("input_identity") != binding.get("input_identity")
+                or proof.get("state") != "READER_PROOF_PASSED"
+                or proof.get("equivalent") is not True or proof.get("input_stat_unchanged") is not True
+                or proof.get("mismatched_ordinals") != []
+                or proof.get("target_file_sha256") != target_api
+                or target_api == original_source.get("inputs", {}).get("scripts/run_dashboard_api.py")
+                or review_identity.get("target_api_sha256") != target_api
+                or proof.get("replacement_scope") != "_news_reader_rows only; all other API AST nodes equal"):
+            raise ValueError("NEWS_SOURCE_CAPTURE_READER_PROOF_INVALID")
+        for value in (target_api, proof.get("producer_sha256"), proof.get("base_function_ast_sha256"),
+                      proof.get("target_function_ast_sha256"), review_identity.get("record_sha256")):
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ValueError("NEWS_SOURCE_CAPTURE_READER_PROOF_INVALID")
+        with self._locked():
+            state = self.read()
+            previous = state.get("reader_segment")
+            count = previous["prefix_part_count"] if previous else len(state["parts"])
+            prefix = state["parts"][:count]
+            part = proof.get("expected_part")
+            if (not prefix or part not in prefix
+                    or proof.get("actual_canonical_sha256") != part["sha256"]
+                    or proof.get("news_result_reads") != part["source_count"]):
+                raise ValueError("NEWS_SOURCE_CAPTURE_READER_PROOF_PREFIX_MISMATCH")
+            segment = {
+                "capture_identity_sha256": sha256_json(self.identity),
+                "producer_identity": self.active_producer_identity,
+                "prefix_part_count": count, "prefix": self._reader_prefix(state, prefix),
+                "equivalence": {
+                    "proof_report_sha256": hashlib.sha256(proof_report).hexdigest(),
+                    "proof_input_sha256": hashlib.sha256(proof_input).hexdigest(),
+                    "proof_producer_sha256": proof["producer_sha256"],
+                    "base_function_ast_sha256": proof["base_function_ast_sha256"],
+                    "target_function_ast_sha256": proof["target_function_ast_sha256"],
+                    "accepted_part_sha256": part["sha256"],
+                    "review_identity": review_identity,
+                },
+            }
+            if len(compact_json(segment).encode("utf-8")) > 64 * 1024:
+                raise ValueError("NEWS_SOURCE_CAPTURE_READER_PROOF_INVALID")
+            if previous is not None:
+                if previous != segment:
+                    raise ValueError("NEWS_SOURCE_CAPTURE_READER_SEGMENT_CONFLICT")
+                return state
+            if state["state"] != "BUILDING" or state.get("source_plan") or state.get("plan_in_progress"):
+                raise ValueError("NEWS_SOURCE_CAPTURE_READER_TRANSITION_INVALID")
+            if time.time() < state["retry_not_before"]:
+                return state
+            updated = {**state, "schema_version": NEWS_SOURCE_CAPTURE_DERIVED_VERSION,
+                       "reader_segment": segment}
+            try:
+                self._save(updated)
+            except Exception as error:
+                self._publication_failed(error)
+            return updated
+
+    def _require_active_reader(self, state: dict) -> None:
+        expected = state.get("reader_segment", {}).get("producer_identity")
+        if self.active_producer_identity != expected:
+            raise ValueError("NEWS_SOURCE_CAPTURE_ACTIVE_PRODUCER_MISMATCH")
 
     def advance(self, reader: Callable[[dict], NewsSourceCapturePage]) -> dict:
         """Commit at most one complete source prefix; never retry in a loop."""
@@ -528,6 +664,7 @@ class NewsProjectionSourceCapture:
             )
         with self._locked():
             state = self.read()
+            self._require_active_reader(state)
             if (state["state"] == "SOURCE_COMPLETE"
                     or time.time() < state["retry_not_before"]):
                 return state
@@ -606,6 +743,8 @@ class NewsProjectionSourceCapture:
                     "name": name, "sha256": digest, "after": state["cursor"],
                     "cursor": cursor, "canonical_bytes": len(content), **counts,
                 }
+                if state.get("reader_segment") is not None:
+                    part["reader_segment_sha256"] = sha256_json(state["reader_segment"])
                 updated["parts"].append(part)
                 for key in counts:
                     updated[key] += counts[key]
@@ -653,7 +792,7 @@ class NewsProjectionSourceCapture:
                 )
                 offset += len(line)
 
-    def finalize_plan(self) -> dict:
+    def finalize_plan(self, *, producer_identity: dict | None = None) -> dict:
         """Derive the original global digests/batches without loading a generation.
 
         One verified part scan produces bounded key/offset metadata. Each of
@@ -663,6 +802,11 @@ class NewsProjectionSourceCapture:
         """
         if self._storage_unresolved:
             raise NewsSourceCaptureStorageUnresolved("NEWS_SOURCE_CAPTURE_STORAGE_UNRESOLVED")
+        if producer_identity is not None and (
+            not isinstance(producer_identity, dict) or not producer_identity
+            or len(compact_json(producer_identity).encode()) > 64 * 1024
+        ):
+            raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_PRODUCER_INVALID")
         with self._locked():
             state = self.read()
             if state["state"] != "SOURCE_COMPLETE":
@@ -732,7 +876,7 @@ class NewsProjectionSourceCapture:
                                 or sha256_json(detail["payload"]) != detail["detail_hash"]
                                 or content_addressed_detail_key(record["index"], detail["payload"]) != detail["detail_key"]):
                             raise ValueError("NEWS_SOURCE_CAPTURE_DETAIL_IDENTITY_MISMATCH")
-                        descriptor = (detail["detail_key"], raw_count, name, offset, length, digest)
+                        descriptor = [detail["detail_key"], raw_count, name, offset, length, digest]
                         metrics["metadata_bytes"] += len(compact_json(descriptor).encode()) + 1
                         if metrics["metadata_bytes"] > NEWS_SOURCE_CAPTURE_METADATA_BYTES:
                             raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_METADATA_BOUND")
@@ -800,7 +944,13 @@ class NewsProjectionSourceCapture:
                 )
                 metrics["elapsed_seconds"] = time.monotonic() - started
                 plan = {"manifest": manifest, "batches": batches, "metrics": metrics,
+                        "input_digest": _capture_plan_input_digest(state),
+                        "row_locations": descriptors,
                         "minimum_sync_cycles": max(1, math.ceil((len(batches["detail"]) + len(batches["index"])) / 4))}
+                if producer_identity is not None:
+                    # Derived planning may use a later, explicitly bound code
+                    # revision. Never relabel the original capture identity.
+                    plan["producer_identity"] = dict(producer_identity)
                 updated = {**state, "source_plan": plan, "plan_in_progress": False}
             except Exception as error:
                 failed = {**state, "plan_in_progress": False,
@@ -818,3 +968,122 @@ class NewsProjectionSourceCapture:
             except Exception as error:
                 self._publication_failed(error)
             return updated
+
+    def open_plan_reader(self) -> _NewsSourcePlanReader:
+        """Open bounded retained batches for inspection, never remote admission."""
+        with self._locked():
+            return _NewsSourcePlanReader(self, self.read())
+
+
+def _capture_plan_input_digest(state: dict) -> str:
+    values = {key: state[key] for key in (
+        "identity", "parts", "source_count", "item_count", "withdrawal_count", "canonical_bytes",
+    )}
+    if state.get("reader_segment") is not None:
+        values["reader_segment"] = state["reader_segment"]
+    return sha256_json(values, sort_keys=True)
+
+
+class _NewsSourcePlanReader:
+    """One validated location index; deliberately has no replay manifest.
+
+    Opening validates bounded metadata once. A batch reads only its selected
+    record ranges and never reopens source SQLite or scans earlier parts/batches.
+    The private artifact owner supplies immutability; stat is not provenance.
+    """
+
+    def __init__(self, capture: NewsProjectionSourceCapture, state: dict) -> None:
+        plan = state.get("source_plan")
+        if state["state"] != "SOURCE_COMPLETE" or not isinstance(plan, dict):
+            raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_REQUIRED")
+        locations = plan.get("row_locations")
+        if not isinstance(locations, list):
+            raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_LOCATOR_MISSING")
+        if (plan.get("input_digest") != _capture_plan_input_digest(state)
+                or len(locations) != state["item_count"]):
+            raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_LOCATOR_BINDING")
+        parts = {}
+        ordinal = 0
+        for part in state["parts"]:
+            parts[part["name"]] = (part, ordinal + 1, ordinal + part["source_count"])
+            ordinal += part["source_count"]
+        previous = None
+        ordinals = set()
+        self._locations = []
+        for location in locations:
+            if not isinstance(location, (list, tuple)) or len(location) != 6:
+                raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_LOCATOR_INVALID")
+            key, ordinal, name, offset, length, digest = location
+            if (not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key)
+                    or type(ordinal) is not int or ordinal in ordinals
+                    or not isinstance(name, str) or name not in parts
+                    or type(offset) is not int or offset < 0
+                    or type(length) is not int or length <= 0
+                    or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+                raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_LOCATOR_INVALID")
+            part, first, last = parts[name]
+            if (not first <= ordinal <= last
+                    or offset + length > part["canonical_bytes"]
+                    or previous is not None and (key, ordinal) <= previous):
+                raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_LOCATOR_INVALID")
+            previous = (key, ordinal)
+            ordinals.add(ordinal)
+            self._locations.append(tuple(location))
+        self._batches = {}
+        batches = plan.get("batches")
+        if not isinstance(batches, dict) or set(batches) != {"detail", "index"}:
+            raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_BATCH_INVALID")
+        for kind, maximum, byte_limit in (
+            ("detail", NEWS_DETAIL_BATCH_ITEMS, NEWS_DETAIL_BATCH_LIMIT_BYTES),
+            ("index", NEWS_INDEX_BATCH_ITEMS, NEWS_INDEX_BATCH_LIMIT_BYTES),
+        ):
+            offset = 0
+            lookup = {}
+            if not isinstance(batches[kind], list):
+                raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_BATCH_INVALID")
+            for batch in batches[kind]:
+                if (not isinstance(batch, dict) or type(batch.get("offset")) is not int
+                        or batch["offset"] != offset or type(batch.get("count")) is not int
+                        or not 1 <= batch["count"] <= maximum
+                        or type(batch.get("bytes")) is not int or not 2 <= batch["bytes"] <= byte_limit
+                        or not isinstance(batch.get("payload_hash"), str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", batch["payload_hash"])):
+                    raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_BATCH_INVALID")
+                lookup[offset] = dict(batch)
+                offset += batch["count"]
+            if offset != len(self._locations):
+                raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_BATCH_INVALID")
+            self._batches[kind] = lookup
+        self._capture = capture
+        self.metrics = {"record_read_bytes": 0, "file_opens": 0, "batch_reads": 0}
+
+    def batch_items(self, kind: str, offset: int) -> list[dict]:
+        if kind not in self._batches or type(offset) is not int or offset < 0:
+            raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_BATCH_BOUNDARY")
+        if offset == len(self._locations):
+            return []
+        batch = self._batches[kind].get(offset)
+        if batch is None:
+            raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_BATCH_BOUNDARY")
+        rows = []
+        for key, _ordinal, name, start, length, digest in self._locations[offset:offset + batch["count"]]:
+            with self._capture._path(name).open("rb", buffering=0) as handle:
+                self.metrics["file_opens"] += 1
+                handle.seek(start)
+                raw = handle.read(length)
+            self.metrics["record_read_bytes"] += len(raw)
+            if len(raw) != length or hashlib.sha256(raw).hexdigest() != digest:
+                raise ValueError("NEWS_SOURCE_CAPTURE_RECORD_DIGEST_MISMATCH")
+            record = json.loads(raw.decode("utf-8"))
+            detail, index = record.get("detail"), record.get("index")
+            if (not isinstance(detail, dict) or not isinstance(index, dict)
+                    or detail.get("detail_key") != key or index.get("detail_key") != key
+                    or sha256_json(detail.get("payload")) != detail.get("detail_hash")
+                    or content_addressed_detail_key(index, detail["payload"]) != key):
+                raise ValueError("NEWS_SOURCE_CAPTURE_DETAIL_IDENTITY_MISMATCH")
+            rows.append(record[kind])
+        if (len(compact_json(rows).encode()) != batch["bytes"]
+                or receipt_payload_hash(rows) != batch["payload_hash"]):
+            raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_BATCH_DIGEST_MISMATCH")
+        self.metrics["batch_reads"] += 1
+        return rows

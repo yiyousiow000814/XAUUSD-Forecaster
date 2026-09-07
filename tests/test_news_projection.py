@@ -241,6 +241,129 @@ def test_source_capture_rejects_identity_corruption_and_single_flight(tmp_path):
     assert hashlib.sha256(original).hexdigest() == state["parts"][0]["sha256"]
 
 
+def _derived_reader_fixture(tmp_path):
+    original = {"revision": "original-fixture", "inputs": {"scripts/run_dashboard_api.py": "a" * 64}}
+    corrected = {"revision": "corrected-fixture", "inputs": {"scripts/run_dashboard_api.py": "b" * 64}}
+    values = {
+        "binding": {"source_identity": original, "input_identity": {"fixture": "immutable"},
+                    "snapshot_stat": {"fixture": "unchanged"}},
+        "watermark": "2026-09-07T00:00:00+00:00", "window_start": "2026-07-09T00:00:00+00:00",
+        "epoch": "fixture-epoch",
+    }
+    directory = tmp_path / "derived.capture"
+    capture = NewsProjectionSourceCapture(directory, **values)
+    records = [_source_record(number, withdrawal=number % 3 == 0) for number in range(131)]
+    state = capture.advance(_page_reader(records, []))
+    current = NewsProjectionSourceCapture(directory, **values, active_producer_identity=corrected)
+    proof = {
+        "state": "READER_PROOF_PASSED", "equivalent": True, "input_stat_unchanged": True,
+        "mismatched_ordinals": [], "source_identity": original,
+        "input_identity": values["binding"]["input_identity"], "target_file_sha256": "b" * 64,
+        "expected_part": state["parts"][0], "actual_canonical_sha256": state["parts"][0]["sha256"],
+        "news_result_reads": 128, "producer_sha256": "c" * 64,
+        "base_function_ast_sha256": "d" * 64, "target_function_ast_sha256": "e" * 64,
+        "replacement_scope": "_news_reader_rows only; all other API AST nodes equal",
+    }
+    inputs = {**values["binding"], "watermark": values["watermark"], "epoch": values["epoch"]}
+    transition = {
+        "proof_report": compact_json(proof).encode(), "proof_input": compact_json(inputs).encode(),
+        "review_identity": {"target_api_sha256": "b" * 64, "record_sha256": "f" * 64},
+    }
+    return capture, current, records, state, transition
+
+
+@pytest.mark.parametrize("boundary", ("normal", "wrong-clock", "wrong-source", "wrong-result",
+                                     "wrong-review", "wrong-producer", "prefix", "suffix", "v1-marker"))
+def test_source_capture_derived_reader_preserves_prefix_and_fences_other_producers(tmp_path, boundary):
+    capture, current, records, original, transition = _derived_reader_fixture(tmp_path)
+    prefix_path = capture.directory / original["parts"][0]["name"]
+    prefix_bytes = prefix_path.read_bytes()
+    manifest_before = (capture.directory / "manifest.json").read_bytes()
+    if boundary in {"wrong-clock", "wrong-source", "wrong-result", "wrong-review"}:
+        if boundary == "wrong-review":
+            transition["review_identity"]["target_api_sha256"] = "0" * 64
+        elif boundary == "wrong-clock":
+            inputs = json.loads(transition["proof_input"])
+            inputs["watermark"] = "2026-09-06T00:00:00+00:00"
+            transition["proof_input"] = compact_json(inputs).encode()
+        else:
+            proof = json.loads(transition["proof_report"])
+            proof["source_identity" if boundary == "wrong-source" else "equivalent"] = False
+            transition["proof_report"] = compact_json(proof).encode()
+        with pytest.raises(ValueError, match="READER_PROOF_INVALID"):
+            current.derive_reader_segment(**transition)
+        assert (capture.directory / "manifest.json").read_bytes() == manifest_before
+        return
+    if boundary == "v1-marker":
+        original["reader_segment"] = {"unexpected": True}
+        capture._save(original)
+        with pytest.raises(ValueError, match="READER_SEGMENT_INVALID"):
+            capture.advance(lambda _state: pytest.fail("invalid v1 queried"))
+        return
+    derived = current.derive_reader_segment(**transition)
+    assert derived["identity"] == original["identity"]
+    assert derived["parts"] == original["parts"]
+    assert prefix_path.read_bytes() == prefix_bytes
+    with pytest.raises(ValueError, match="ACTIVE_PRODUCER_MISMATCH"):
+        capture.advance(lambda _state: pytest.fail("original producer queried"))
+    if boundary == "wrong-producer":
+        current.active_producer_identity = {"revision": "not-the-admitted-producer"}
+        with pytest.raises(ValueError, match="ACTIVE_PRODUCER_MISMATCH"):
+            current.advance(lambda _state: pytest.fail("wrong producer queried"))
+        return
+    calls = []
+    completed = current.advance(_page_reader(records, calls))
+    assert calls == [128]
+    assert completed["source_count"] == 131
+    assert current.derive_reader_segment(**transition) == completed
+    assert completed["parts"][0] == original["parts"][0]
+    assert prefix_path.read_bytes() == prefix_bytes
+    if boundary in {"prefix", "suffix"}:
+        if boundary == "prefix":
+            completed["reader_segment"]["prefix"]["cursor"] = None
+        else:
+            completed["parts"][-1]["reader_segment_sha256"] = "0" * 64
+        current._save(completed)
+        with pytest.raises(ValueError, match="READER_(PREFIX|SUFFIX)_INVALID"):
+            current.finalize_plan()
+        return
+    planned = current.finalize_plan(producer_identity={"planner": "actual-current-fixture"})
+    expected = build_news_projection_generation(
+        [_source_row(number) for number in range(131) if number % 3],
+        [_source_row(number, withdrawal=True) for number in range(131) if not number % 3],
+        watermark=current.identity["watermark"], window_start=current.identity["window_start"],
+    )
+    assert planned["source_plan"]["manifest"] == expected.manifest
+    assert planned["source_plan"]["producer_identity"] == {"planner": "actual-current-fixture"}
+    assert list(current.records()) == records
+
+
+@pytest.mark.parametrize("failure", ("before", "after"))
+def test_source_capture_reader_transition_reconciles_atomic_storage(tmp_path, monkeypatch, failure):
+    capture, current, _records, original, transition = _derived_reader_fixture(tmp_path)
+    original_atomic = current._atomic
+    injected = False
+
+    def interrupt(name, raw):
+        nonlocal injected
+        if not injected and name == "manifest.json":
+            injected = True
+            if failure == "after":
+                original_atomic(name, raw)
+            raise OSError("reader transition publication interruption")
+        return original_atomic(name, raw)
+
+    monkeypatch.setattr(current, "_atomic", interrupt)
+    with pytest.raises(OSError, match="publication interruption"):
+        current.derive_reader_segment(**transition)
+    actual = current.read()
+    assert actual["parts"] == original["parts"]
+    assert actual["last_failure"] == "NEWS_SOURCE_CAPTURE_STORAGE_WRITE_FAILED"
+    assert actual["retry_not_before"] > 0
+    assert ("reader_segment" in actual) == (failure == "after")
+    assert current.derive_reader_segment(**transition) == actual
+
+
 @pytest.mark.parametrize("bound", ("row", "total", "metadata"))
 def test_source_capture_storage_bounds_never_publish_a_partial_generation(tmp_path, monkeypatch, bound):
     import xauusd_forecaster.news_projection as module
@@ -347,9 +470,18 @@ def test_capture_global_plan_matches_original_generation_across_parts(tmp_path, 
         [row for row in rows if row["xauusd_relevance"] == "IRRELEVANT"],
         window_start=capture.identity["window_start"], watermark=capture.identity["watermark"],
     )
-    result = capture.finalize_plan()
+    producer_identity = {"revision": "derived-planner-test", "capture_revision": "unchanged"}
+    result = capture.finalize_plan(producer_identity=producer_identity)
     assert result["source_plan"]["manifest"] == expected.manifest
     plan = result["source_plan"]
+    assert plan["producer_identity"] == producer_identity
+    assert result["identity"] == state["identity"]
+    assert len(plan["row_locations"]) == len(expected.detail_rows)
+    reader = capture.open_plan_reader()
+    assert not isinstance(reader, NewsProjectionGeneration)
+    assert not hasattr(reader, "manifest")  # This is inspection, not admission.
+    monkeypatch.setattr(capture, "read", lambda: pytest.fail("batch reloaded complete metadata"))
+    monkeypatch.setattr(capture, "_record_locations", lambda: pytest.fail("batch rescanned retained parts"))
     assert plan["minimum_sync_cycles"] == max(1, (len(expected.detail_batches) + len(expected.index_batches) + 3) // 4)
     for kind, batches in (("detail", expected.detail_batches), ("index", expected.index_batches)):
         offset = 0
@@ -361,6 +493,15 @@ def test_capture_global_plan_matches_original_generation_across_parts(tmp_path, 
                 "payload_hash": receipt_payload_hash(batch),
             }
             offset += len(batch)
+        # Seek the final batch first, then earlier batches. No prefix payloads
+        # or entire-part reads may be hidden behind a late batch request.
+        for actual, batch in reversed(list(zip(plan["batches"][kind], batches, strict=True))):
+            before = dict(reader.metrics)
+            assert reader.batch_items(kind, actual["offset"]) == list(batch)
+            selected = plan["row_locations"][actual["offset"]:actual["offset"] + actual["count"]]
+            assert reader.metrics["record_read_bytes"] - before["record_read_bytes"] == sum(row[4] for row in selected)
+            assert reader.metrics["file_opens"] - before["file_opens"] == len(batch)
+        assert reader.batch_items(kind, offset) == []
     metrics = plan["metrics"]
     assert metrics["part_scan_bytes"] == state["canonical_bytes"]
     assert metrics["record_read_bytes"] <= 2 * state["canonical_bytes"]
@@ -370,6 +511,52 @@ def test_capture_global_plan_matches_original_generation_across_parts(tmp_path, 
     assert not isinstance(result, NewsProjectionGeneration)
     assert result["admission"] == "CAPACITY_REVIEW_REQUIRED"
     assert not list(tmp_path.glob("*.json.gz"))
+
+
+@pytest.mark.parametrize("corruption", (
+    "missing-index", "source-binding", "part", "offset", "length", "order",
+    "line-digest", "batch-digest", "same-size-content",
+))
+def test_capture_direct_batch_reader_rejects_corruption_without_source_rebuild(tmp_path, monkeypatch, corruption):
+    capture = _capture(tmp_path)
+    capture.advance(_page_reader([_source_record(i) for i in range(3)], []))
+    capture.finalize_plan()
+    state = capture.read()
+    plan = state["source_plan"]
+    locations = plan["row_locations"]
+    if corruption == "missing-index":
+        del plan["row_locations"]
+    elif corruption == "source-binding":
+        plan["input_digest"] = "0" * 64
+    elif corruption == "part":
+        locations[0][2] = "part-99999999-" + "0" * 64 + ".jsonl"
+    elif corruption == "offset":
+        locations[0][3] = -1
+    elif corruption == "length":
+        locations[0][4] = state["parts"][0]["canonical_bytes"] + 1
+    elif corruption == "order":
+        locations.reverse()
+    elif corruption == "line-digest":
+        locations[0][5] = "0" * 64
+    elif corruption == "batch-digest":
+        plan["batches"]["detail"][0]["payload_hash"] = "0" * 64
+    capture._save(state)  # Recomputed envelope cannot excuse a bad semantic index.
+    monkeypatch.setattr(capture, "_record_locations", lambda: pytest.fail("bad index rebuilt from source"))
+    if corruption in {"line-digest", "batch-digest", "same-size-content"}:
+        reader = capture.open_plan_reader()
+        if corruption == "same-size-content":
+            path = capture.directory / locations[0][2]
+            raw = path.read_bytes()
+            changed = bytearray(raw)
+            changed[locations[0][3] + 1] ^= 1
+            path.write_bytes(changed)
+            assert len(changed) == len(raw)
+        monkeypatch.setattr(capture, "read", lambda: pytest.fail("batch reread complete manifest"))
+        with pytest.raises(ValueError, match="DIGEST_MISMATCH"):
+            reader.batch_items("detail", 0)
+    else:
+        with pytest.raises(ValueError, match="PLAN_LOCATOR"):
+            capture.open_plan_reader()
 
 
 def test_capture_plan_failure_retains_capture_without_automatic_loop(tmp_path, monkeypatch):

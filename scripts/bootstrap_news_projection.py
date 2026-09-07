@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -173,6 +174,8 @@ def _load_or_freeze_news_projection_generation(
 def advance_frozen_source_capture(
     *, frozen_database: Path, input_identity: dict, source_identity: dict,
     watermark: datetime, epoch: str, state_file: Path, state_root: Path,
+    active_producer_identity: dict | None = None,
+    reader_transition: dict | None = None,
 ) -> dict:
     """Capture one step from the bootstrap owner's retained immutable input.
 
@@ -187,6 +190,23 @@ def advance_frozen_source_capture(
         raise ValueError("NEWS_SOURCE_CAPTURE_PROVENANCE_REQUIRED")
     if watermark.utcoffset() is None:
         raise ValueError("NEWS_SOURCE_CAPTURE_TIME_INVALID")
+    from scripts import run_dashboard_api as source_owner
+    from xauusd_forecaster import news_projection as capture_owner
+
+    actual_files = {
+        "scripts/bootstrap_news_projection.py": Path(__file__),
+        "scripts/run_dashboard_api.py": Path(source_owner.__file__),
+        "xauusd_forecaster/news_projection.py": Path(capture_owner.__file__),
+    }
+    executing_identity = active_producer_identity if active_producer_identity is not None else source_identity
+    if (Path(source_owner._news_reader_rows.__code__.co_filename).resolve()
+            != actual_files["scripts/run_dashboard_api.py"].resolve()
+            or any(hashlib.sha256(path.read_bytes()).hexdigest()
+                   != executing_identity.get("inputs", {}).get(name)
+                   for name, path in actual_files.items())):
+        raise ValueError("NEWS_SOURCE_CAPTURE_EXECUTING_PRODUCER_MISMATCH")
+    if active_producer_identity is None and reader_transition is not None:
+        raise ValueError("NEWS_SOURCE_CAPTURE_ACTIVE_PRODUCER_REQUIRED")
     directory = state_file.with_name(f"{state_file.stem}-generation.capture")
     capture = NewsProjectionSourceCapture(
         directory,
@@ -196,11 +216,16 @@ def advance_frozen_source_capture(
         },
         watermark=watermark.isoformat(),
         window_start=(watermark - timedelta(days=60)).isoformat(), epoch=epoch,
+        active_producer_identity=active_producer_identity,
     )
-    if capture.read()["state"] == "SOURCE_COMPLETE":
+    if reader_transition is not None:
+        return capture.derive_reader_segment(**reader_transition)
+    state = capture.read()
+    capture._require_active_reader(state)
+    if state["state"] == "SOURCE_COMPLETE":
         # Source stepping and final canonical planning have independent bounded
         # turns. Neither turn can invoke prepare or replace the pinned artifact.
-        return capture.finalize_plan()
+        return capture.finalize_plan(producer_identity=active_producer_identity)
     return _advance_news_projection_capture(frozen_database, capture)
 
 

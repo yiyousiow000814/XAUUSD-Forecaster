@@ -146,6 +146,37 @@
   backoff even when no attempt was committed. No digest or plan is published
   until the entire calculation succeeds. Batch boundaries may
   cross capture parts and preserve the existing global receipt chain exactly.
+- The same committed plan retains its sorted detail-key, original-ordinal,
+  part, byte-offset, length and record-digest index. Detail and index batches
+  share those locations; bodies are not copied into another artifact. Opening
+  a reader validates bounded metadata once. Reading a later batch seeks only
+  its at-most-eight or at-most-four records and verifies original record,
+  detail identity, batch bytes and receipt hash; it must not rescan previous
+  batches, complete parts, or source SQLite.
+- A later derived planner records its actual producer identity separately from
+  the original source-capture identity. It cannot relabel old input or old
+  evidence as a new source run. An older plan without locations needs explicit
+  retained-input enrichment, not silent source recapture. A plan reader alone
+  is not an admitted generation and cannot authorize remote prepare.
+- A proven query-only reader correction may continue an incomplete capture
+  through one explicit derived capture schema. The original capture identity,
+  fixed clocks, input lineage and accepted parts remain unchanged. The same
+  manifest records the original prefix counters, cursor and descriptor digest,
+  corrected execution identity, exact retained-page canonical proof, and
+  independent semantic-review identity. A later clock/input supplement binds
+  the original input bytes; it does not alter the earlier observed proof report.
+  The atomic schema transition must make the actual unchanged old reader reject
+  before querying or appending. New code verifies its executing API, bootstrap
+  and capture files against the active producer identity before source work.
+- Derived parts bind that single reader segment; all readers verify the original
+  prefix and complete derived suffix. A retry after suffix progress reuses the
+  original transition, not a newly calculated current-prefix authority. A
+  conflicting or second transition is refused. Publication failure follows the
+  same atomic reconciliation and backoff rules. There is no automatic downgrade
+  or relabeling; old published generation artifacts and production Stable remain
+  untouched. Final planning includes the segment in its input digest while
+  preserving the separate original and derived producer identities. Capture
+  schema migration does not alter projection semantics or remote admission.
 
 - Batch offsets and receipts are idempotent. Replaying an accepted exact batch
   succeeds; changing an accepted batch is a receipt contradiction and fails

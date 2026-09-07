@@ -196,11 +196,14 @@ def test_bootstrap_persists_generation_before_first_replay(
     assert writes == [(artifact, frozen)]
 
 
-@pytest.mark.parametrize("source_state", ("checkpointed", "nonempty-wal"))
+@pytest.mark.parametrize("source_state", ("checkpointed", "nonempty-wal", "executing-mismatch",
+                                        "implicit-derivation", "omitted-transition"))
 def test_bootstrap_capture_retains_input_and_never_calls_remote_or_initializer(
     tmp_path, monkeypatch, source_state,
 ):
     from xauusd_forecaster.forward_ledger import ForwardLedger
+    from scripts import run_dashboard_api as api_owner
+    from xauusd_forecaster import news_projection as capture_owner
 
     now = datetime(2026, 9, 7, tzinfo=UTC)
     database = tmp_path / "retained-input.sqlite3"
@@ -215,7 +218,7 @@ def test_bootstrap_capture_retains_input_and_never_calls_remote_or_initializer(
     epoch = str(ledger.connection.execute(
         "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
     ).fetchone()[0])
-    if source_state == "checkpointed":
+    if source_state != "nonempty-wal":
         ledger.close()
     state_root = tmp_path / "runtime-state"
     state_root.mkdir()
@@ -230,12 +233,55 @@ def test_bootstrap_capture_retains_input_and_never_calls_remote_or_initializer(
     arguments = {
         "frozen_database": database,
         "input_identity": {"fixture": "test-owned retained consistent SQLite"},
-        "source_identity": {"fixture": "current imported test source"},
+        "source_identity": {"fixture": "current imported test source", "inputs": {
+            name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in {
+                "scripts/bootstrap_news_projection.py": Path(MODULE.__file__),
+                "scripts/run_dashboard_api.py": Path(api_owner.__file__),
+                "xauusd_forecaster/news_projection.py": Path(capture_owner.__file__),
+            }.items()
+        }},
         "watermark": now, "epoch": epoch, "state_file": state_file,
         "state_root": state_root,
     }
     try:
-        if source_state == "nonempty-wal":
+        if source_state == "omitted-transition":
+            arguments["source_identity"]["inputs"]["scripts/run_dashboard_api.py"] = "0" * 64
+            existing = capture_owner.NewsProjectionSourceCapture(
+                state_root / "bootstrap-generation.capture",
+                binding={"snapshot_stat": before, "input_identity": arguments["input_identity"],
+                         "source_identity": arguments["source_identity"]},
+                watermark=now.isoformat(), window_start=(now - timedelta(days=60)).isoformat(), epoch=epoch,
+            )
+            record = capture_owner.news_source_capture_record(
+                {"source": "bea_economic_releases", "source_item_id": "frozen", "revision_number": 1,
+                 "headline": "frozen", "body": body},
+                [now.isoformat(), "bea_economic_releases", "frozen", 1],
+            )
+            retained = existing.advance(lambda _state: capture_owner.NewsSourceCapturePage(iter([record]), True))
+            manifest_path = existing.directory / "manifest.json"
+            manifest_bytes = manifest_path.read_bytes()
+            monkeypatch.setattr(MODULE, "_advance_news_projection_capture",
+                                lambda *_args: pytest.fail("changed source reached legacy v1 reader"))
+            with pytest.raises(ValueError, match="EXECUTING_PRODUCER_MISMATCH"):
+                MODULE.advance_frozen_source_capture(**arguments)
+            assert retained["schema_version"] == "news-projection-source-capture-v1"
+            assert manifest_path.read_bytes() == manifest_bytes
+        elif source_state in {"executing-mismatch", "implicit-derivation"}:
+            arguments["active_producer_identity"] = {"inputs": {
+                name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in {
+                    "scripts/bootstrap_news_projection.py": Path(MODULE.__file__),
+                    "scripts/run_dashboard_api.py": Path(api_owner.__file__),
+                    "xauusd_forecaster/news_projection.py": Path(capture_owner.__file__),
+                }.items()
+            }}
+            if source_state == "executing-mismatch":
+                arguments["active_producer_identity"]["inputs"]["scripts/run_dashboard_api.py"] = "0" * 64
+            monkeypatch.setattr(MODULE, "_advance_news_projection_capture",
+                                lambda *_args: pytest.fail("unadmitted executing producer queried"))
+            with pytest.raises(ValueError, match=("EXECUTING_PRODUCER_MISMATCH" if source_state == "executing-mismatch"
+                                                  else "ACTIVE_PRODUCER_MISMATCH")):
+                MODULE.advance_frozen_source_capture(**arguments)
+        elif source_state == "nonempty-wal":
             assert before["wal_size"] > 0
             with pytest.raises(ValueError, match="CHECKPOINTED_SNAPSHOT_REQUIRED"):
                 MODULE.advance_frozen_source_capture(**arguments)
@@ -252,7 +298,7 @@ def test_bootstrap_capture_retains_input_and_never_calls_remote_or_initializer(
             assert MODULE.advance_frozen_source_capture(**arguments) == planned
             with pytest.raises(ValueError, match="IDENTITY_MISMATCH"):
                 MODULE.advance_frozen_source_capture(**{
-                    **arguments, "source_identity": {"fixture": "wrong source"},
+                    **arguments, "source_identity": {**arguments["source_identity"], "fixture": "wrong source"},
                 })
         assert MODULE._news_projection_snapshot_stat(database) == before
         assert old_artifact.read_bytes() == old_bytes

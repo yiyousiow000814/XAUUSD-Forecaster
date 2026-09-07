@@ -2517,6 +2517,12 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
             "parsed_at": now + timedelta(seconds=1),
         }
     )
+    ledger.append_title_translation(
+        {
+            **common, "translation_id": "valid-z", "headline_zh": "六月个人收入与支出正式报告",
+            "prompt_version": "headline-zh-tie-test", "parsed_at": now,
+        }
+    )
     _append_basic_annotation(
         ledger,
         source="bea_economic_releases",
@@ -2532,8 +2538,14 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    payload = _dashboard_module()._dashboard_payload(database)
-    assert payload["recent_news"][0]["headline"] == "2026年6月个人收入与支出"
+    module = _dashboard_module()
+    payload = module._dashboard_payload(database)
+    assert payload["recent_news"][0]["headline"] == "六月个人收入与支出正式报告"
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        archive = module._news_reader_rows(connection, now + timedelta(seconds=3))
+        assert len(archive) == 1
+        assert archive[0]["headline"] == payload["recent_news"][0]["headline"]
     assert {row["source"] for row in payload["news_source_health"]} == {
         spec.source for spec in NEWS_SOURCE_REGISTRY
     }
@@ -3441,6 +3453,52 @@ def test_duplicate_collection_copy_is_not_reported_as_queue_anomaly() -> None:
 
     assert code == "CANONICAL_COPY_HANDLES_ANNOTATION"
     assert "不会重复消耗模型配额" in reason
+
+
+@pytest.mark.parametrize("peer_kind,expected", (
+    ("self", False), ("other-source-item", True), ("same-source-hash", True),
+    ("short", False), ("newer-short", False), ("newer-unmatched", False),
+))
+def test_news_reader_global_peer_lookup_preserves_out_of_page_latest_semantics(tmp_path, peer_kind, expected):
+    module = _dashboard_module()
+    now = datetime(2026, 9, 7, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=90))
+    source, item = "google_news_fed_rates", "candidate"
+    body = "Complete candidate evidence for the reader. " * 20
+    digest = hashlib.sha256(body.encode()).hexdigest()
+
+    def append(owner, identifier, text, stamp):
+        return ledger.append_news_revision({
+            "source": owner, "source_item_id": identifier,
+            "source_published_time": stamp, "collector_first_seen_time": stamp,
+            "fetched_time": stamp, "headline": identifier, "body": text,
+            "content_hash": hashlib.sha256(text.encode()).hexdigest(),
+            "cluster_id": owner + ":" + identifier,
+        })
+
+    append(source, item, body, now)
+    if peer_kind != "self":
+        owner = source if peer_kind == "same-source-hash" else "google_news_gold_context"
+        identifier = item if peer_kind in {"other-source-item", "short", "newer-short"} else "peer"
+        text = ("short" if peer_kind == "short" else "Different complete source body. " * 20
+                if peer_kind in {"other-source-item", "newer-short"} else body)
+        append(owner, identifier, text, now - timedelta(days=70))
+        if peer_kind in {"newer-short", "newer-unmatched"}:
+            append(owner, identifier, "short" if peer_kind == "newer-short" else "Replacement different body. " * 20,
+                   now - timedelta(days=69))
+    # Unrelated global identities never become peers, while the real peer above
+    # remains relevant despite being outside the page and its sixty-day window.
+    for number in range(12):
+        append("example", str(number), ("Unrelated evidence " + str(number)) * 30, now - timedelta(days=80))
+    keys = [(source, item, 1, now.isoformat())]
+    try:
+        rows = module._news_reader_rows(ledger.connection, now, candidate_keys=keys, limit=1)
+        assert [(row["source"], row["source_item_id"], row["revision_number"]) for row in rows] == [(source, item, 1)]
+        assert bool(rows[0]["has_canonical_content_peer"]) is expected
+        assert rows[0]["body"] == body
+        assert rows[0]["content_hash"] == digest
+    finally:
+        ledger.close()
 
 
 def test_news_archive_materializes_late_discovery_canonical_annotation(
