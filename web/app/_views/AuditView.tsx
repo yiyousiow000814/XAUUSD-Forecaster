@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CountValue from "../_components/CountValue";
-import type { AuditViewName } from "../_components/DashboardNavigation";
+import { useDashboardNavigation, type AuditViewName } from "../_components/DashboardNavigation";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
 import {
   DashboardResourceError, loadDashboardResource, readDashboardResource,
@@ -13,13 +13,15 @@ import { statusFieldPhase } from "../_lib/current-data-provenance";
 import { PREVIEW_NEWS_PAGE_SIZE } from "../_lib/preview-manifest";
 import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
 import { authoritativeNewsTotals, type NewsTotalsScope } from "../_lib/news-index-contract";
-import { settleResponsiveScroll } from "../_lib/responsive-scroll";
 import type { NewsReviewState } from "../_lib/news-review-state";
 import { formatExactCount, progressCountPresentation } from "../_lib/count-format";
 import { publicImpactReason } from "../_lib/public-news-copy";
+import { validAuditDetailPayload } from "../_lib/audit-detail-contract";
 import { sortNewsEvidenceByTime } from "../_lib/news-evidence-order";
 import type { VersionEvaluationStatus } from "../_lib/version-result-state";
 import LearningGraphModal from "../audit/LearningGraphModal";
+
+declare const __AURUM_DEPLOYMENT__: { is_preview: boolean };
 
 type Prediction = {
   model_identity: string;
@@ -463,6 +465,8 @@ type Payload = {
 };
 
 type NewsIndexResponse = {
+  activated_at?: string;
+  generated_at?: string;
   items: News[];
   total: number;
   all_total: number;
@@ -850,17 +854,25 @@ function NewsRow({
 export default function AuditView({ initialView }: { initialView: AuditDeskView }) {
   const cachedStatus = readDashboardResource<Payload>("/api/status");
   const cachedAudit = readDashboardResource<Partial<Payload>>("/api/audit");
-  const cachedAuditBriefs = readDashboardResource<Partial<Payload>>(AUDIT_DETAIL_RESOURCES.briefs);
-  const cachedAuditStories = readDashboardResource<Partial<Payload>>(AUDIT_DETAIL_RESOURCES.stories);
-  const cachedAuditDecisions = readDashboardResource<Partial<Payload>>(AUDIT_DETAIL_RESOURCES.decisions);
+  const detailSnapshot = (detailView: AuditDetailView) => {
+    const body = readDashboardResource<Partial<Payload>>(AUDIT_DETAIL_RESOURCES[detailView]);
+    return validAuditDetailPayload(detailView, body) ? body : null;
+  };
+  const cachedAuditBriefs = detailSnapshot("briefs");
+  const cachedAuditStories = detailSnapshot("stories");
+  const cachedAuditDecisions = detailSnapshot("decisions");
   const cachedLearning = readDashboardResource<Partial<Payload>>("/api/learning");
   const cachedNewsIndex = readDashboardResource<NewsIndexResponse>(`/api/news-index?page=1&limit=${NEWS_PER_PAGE}&review_state=COMPLETED`);
-  const [payload, setPayload] = useState<Payload | null>(() => cachedStatus
+  const [summaryPayload, setPayload] = useState<Payload | null>(() => cachedStatus
     ? ({
         ...cachedStatus, ...cachedAudit, ...cachedLearning,
         ...cachedAuditBriefs, ...cachedAuditStories, ...cachedAuditDecisions,
       } as Payload)
     : null);
+  const payload = useMemo(() => summaryPayload || cachedAudit || cachedLearning || cachedAuditBriefs || cachedAuditStories || cachedAuditDecisions
+    ? ({ ...summaryPayload, ...cachedAudit, ...cachedLearning,
+        ...cachedAuditBriefs, ...cachedAuditStories, ...cachedAuditDecisions } as Payload)
+    : null, [summaryPayload, cachedAudit, cachedLearning, cachedAuditBriefs, cachedAuditStories, cachedAuditDecisions]);
   const [newsIndex, setNewsIndex] = useState<NewsIndexResponse>(() => (
     cachedNewsIndex ?? {
       items: [], total: 0, all_total: 0, category_counts: {}, page: 1,
@@ -874,9 +886,6 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
   );
   const [learningState, setLearningState] = useState<CurrentDataPhase | "idle">(
     cachedLearning?.learning_preview_summary ? "loading" : cachedLearning ? "ready" : "idle",
-  );
-  const [auditState, setAuditState] = useState<CurrentDataPhase | "idle">(
-    cachedAudit ? "ready" : "idle",
   );
   const [auditDetailState, setAuditDetailState] = useState<Record<AuditDetailView, CurrentDataPhase | "idle">>({
     briefs: cachedAuditBriefs ? "ready" : "idle",
@@ -892,8 +901,8 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
   const [evidenceError, setEvidenceError] = useState<string | null>(null);
   const [newsError, setNewsError] = useState<string | null>(null);
   const [newsDetails, setNewsDetails] = useState<Record<string, Partial<News>>>({});
-  const [view, setView] = useState<AuditDeskView>(initialView);
-  const pendingScrollTop = useRef<number | null>(null);
+  const view = initialView;
+  const navigation = useDashboardNavigation();
   const [briefDate, setBriefDate] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
   const [searchTimeField, setSearchTimeField] = useState<"published" | "received">("published");
@@ -998,14 +1007,11 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
   }, []);
 
   const refreshAudit = useCallback(async (force = false) => {
-    setAuditState(previous => previous === "ready" ? previous : "loading");
     try {
       const body = await loadDashboardResource<Partial<Payload>>("/api/audit", { force });
       setPayload(previous => ({ ...previous, ...body }) as Payload);
-      setAuditState("ready");
       setAuditError(null);
     } catch (reason) {
-      setAuditState("error");
       setAuditError(reason instanceof Error ? reason.message : "无法读取审计首屏");
     }
   }, []);
@@ -1019,7 +1025,9 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     }));
     try {
       const body = await loadDashboardResource<Partial<Payload>>(
-        AUDIT_DETAIL_RESOURCES[detailView], { force },
+        AUDIT_DETAIL_RESOURCES[detailView], {
+          force, validate: body => validAuditDetailPayload(detailView, body),
+        },
       );
       setPayload(previous => ({ ...previous, ...body }) as Payload);
       setAuditDetailState(previous => ({ ...previous, [detailView]: "ready" }));
@@ -1163,30 +1171,29 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
 
   const selectedAuditDetailState = view in AUDIT_DETAIL_RESOURCES
     ? auditDetailState[view as AuditDetailView] : null;
+  const auditDetailResourceMode = __AURUM_DEPLOYMENT__.is_preview ? "build-snapshot" : "current";
 
   useEffect(() => {
     return scheduleDashboardRefresh(
-      () => void refreshAudit(auditState !== "ready"),
+      () => void refreshAudit(false),
       () => void refreshAudit(true),
       DASHBOARD_REFRESH_INTERVALS.status,
       "current",
       "audit",
     );
-  }, [auditState, refreshAudit]);
+  }, [refreshAudit]);
 
   useEffect(() => {
     if (!(view in AUDIT_DETAIL_RESOURCES)) return;
     const detailView = view as AuditDetailView;
     return scheduleDashboardRefresh(
-      () => void refreshAuditDetail(
-        detailView, selectedAuditDetailState !== "ready",
-      ),
+      () => void refreshAuditDetail(detailView, false),
       () => void refreshAuditDetail(detailView, true),
       DASHBOARD_REFRESH_INTERVALS.status,
-      "current",
+      auditDetailResourceMode,
       `audit-detail:${detailView}`,
     );
-  }, [refreshAuditDetail, selectedAuditDetailState, view]);
+  }, [auditDetailResourceMode, refreshAuditDetail, view]);
 
   useEffect(() => {
     if (view !== "evidence") return;
@@ -1206,17 +1213,10 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
   };
 
   const selectView = (next: AuditDeskView) => {
-    pendingScrollTop.current = window.scrollY;
-    setView(next);
-    window.history.replaceState(null, "", `/audit?view=${next}`);
+    if (next === view) return;
+    if (navigation) void navigation.navigate(`/audit?view=${next}`);
+    else window.location.assign(`/audit?view=${next}`);
   };
-
-  useLayoutEffect(() => {
-    if (pendingScrollTop.current === null) return;
-    const cancel = settleResponsiveScroll(options => window.scrollTo(options), () => window.scrollY, pendingScrollTop.current!);
-    pendingScrollTop.current = null;
-    return cancel;
-  }, [view]);
 
   const runNewsSearch = async (page = 1, applied?: NewsSearchResponse) => {
     const query = applied?.query ?? searchInput.trim();
@@ -1423,6 +1423,27 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     ?? (storylinesUnavailable ? null : 0);
   const activeEventTotal = continuedEventTotal === null || singleEventTotal === null
     ? null : continuedEventTotal + singleEventTotal;
+  const selectedResource = view in AUDIT_DETAIL_RESOURCES
+    ? AUDIT_DETAIL_RESOURCES[view as AuditDetailView]
+    : view === "league" ? "/api/learning"
+      : view === "evidence" ? evidenceUrl
+        : view === "news" || view === "search" ? null : "/api/status";
+  const selectedResourceSnapshot = selectedResource
+    ? readDashboardResource<{ generated_at?: string; activated_at?: string }>(selectedResource)
+    : null;
+  const selectedResourceTime = view === "news"
+    ? newsIndex.activated_at ?? newsIndex.generated_at
+    : view === "coverage" && coveragePhase === "snapshot"
+      ? payload?.preview?.branch_snapshot?.generated_at
+      : selectedResourceSnapshot?.activated_at ?? selectedResourceSnapshot?.generated_at;
+  const detailLabel = ({ briefs: "每日简报", stories: "事件脉络", decisions: "决策与30分钟结果" } as const)[view as AuditDetailView];
+  const secondaryResourceError = view === "news" ? newsError : view === "evidence" ? evidenceError : view === "league" ? learningError : null;
+  const secondaryResourceLabel = view === "news" ? "新闻索引" : view === "evidence" ? "新闻证据" : "学习进度";
+  const retrySecondaryResource = () => {
+    if (view === "evidence") void refreshEvidence(true);
+    else if (view === "league") void refreshLearning(true);
+    else void refreshNews(true).catch(reason => setNewsError(reason instanceof Error ? reason.message : "无法读取新闻索引"));
+  };
   return (
     <main className={`audit-main audit-view-${view}`}>
       <section className="audit-intro">
@@ -1454,7 +1475,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         </div>
       </section>
 
-      {combinedErrors && <div className="error-banner">{combinedErrors}。页面会保留上一份成功数据并自动重试。</div>}
+      {combinedErrors && <div className="error-banner">{combinedErrors}。{selectedAuditDetailState !== null && auditDetailError[view as AuditDetailView] && auditDetailResourceMode === "build-snapshot" ? "构建快照不会自动刷新；可手动重读当前快照，资料更新需要新构建。" : "可稍后重新载入页面。"}已有成功资料按各自资源保留。</div>}
       <CurrentDataNotice
         phase={currentPagePhase}
         snapshotKind={pageUsesBranchSnapshot ? "branch" : "fallback"}
@@ -1491,8 +1512,9 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         </select>
       </label>
 
-      {selectedAuditDetailState === "loading" && <div className="current-data-notice is-loading" role="status"><b>审计详情读取中</b><span>当前页面尚未加载，不会显示为零或空资料。</span></div>}
-      {selectedAuditDetailState === "error" && <div className="current-data-notice is-error" role="alert"><b>审计详情暂不可用</b><span>页面会自动重试，不会把缺失资料解释为空。</span></div>}
+      {(selectedAuditDetailState === "idle" || selectedAuditDetailState === "loading") && <div className="current-data-notice is-loading" role="status"><b>{detailLabel}读取中</b><span>当前页面尚未加载，不会显示为零或空资料。</span></div>}
+      {selectedAuditDetailState !== null && auditDetailError[view as AuditDetailView] && <div className="current-data-notice audit-resource-notice is-error" role="alert"><b>{detailLabel}暂不可用</b><span>{auditDetailError[view as AuditDetailView]}{selectedAuditDetailState === "ready" ? ` · 保留最近成功资料，资源时间 ${time(selectedResourceTime)}` : " · 尚无成功资料。"}</span><button type="button" onClick={() => void refreshAuditDetail(view as AuditDetailView, true)}>重试{detailLabel}</button></div>}
+      {secondaryResourceError && <div className="current-data-notice audit-resource-notice is-error" role="alert"><b>{secondaryResourceLabel}暂不可用</b><span>{secondaryResourceError}{selectedResourceTime ? ` · 最近成功资源时间 ${time(selectedResourceTime)}` : " · 尚未取得资源时间。"}</span><button type="button" onClick={retrySecondaryResource}>重试{secondaryResourceLabel}</button></div>}
 
       {view === "briefs" && selectedAuditDetailState === "ready" && (() => {
         const briefs = payload?.daily_news_briefs ?? [];
@@ -1649,6 +1671,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         </section>
         <section className="news-table">
           <header className="news-table-head"><span>分类 / 发布时间</span><span>新闻与来源</span><span>正文 / 状态</span></header>
+          {archiveTotals && visibleNews.length === 0 && !newsError && <div className="current-data-notice" role="status"><b>本页没有符合筛选条件的新闻</b><span>这是当前审核区域与分类的查询结果，不代表所有新闻或事件数量为零。</span></div>}
           {visibleNews.map(row => <NewsRow
             key={`${row.source}-${row.source_item_id}-${row.revision_number}`}
             row={row}
@@ -1741,6 +1764,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
       </section>}
 
       {view === "decisions" && selectedAuditDetailState === "ready" && <section className="decision-audit">
+        {(payload?.recent_decisions ?? []).length === 0 && <div className="current-data-notice" role="status"><b>本页没有决策记录</b><span>决策详情资源已返回空结果；上方计数属于完整历史，不代表本页已经载入明细。</span></div>}
         {(payload?.recent_decisions ?? []).map((row) => {
           const full = row.predictions.find(item => item.model_identity === "BROAD_FULL")
             ?? row.predictions.find(item => item.model_identity === "FULL");
@@ -1814,6 +1838,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
       </section>}
 
       {view === "coverage" && <section className="coverage-grid">
+        {(payload?.factor_coverage ?? []).length === 0 && <div className="current-data-notice audit-resource-notice" role={statusState === "error" ? "alert" : "status"}><b>{statusState === "loading" ? "大视野覆盖读取中" : statusState === "error" ? "大视野覆盖暂不可用" : "本页没有覆盖记录"}</b><span>{statusState === "error" ? statusError : statusState === "loading" ? "等待覆盖资源返回。" : "当前资源未提供覆盖记录；未知状态不代表来源健康。"}</span>{statusState === "error" && <button type="button" onClick={() => void refreshStatus(true)}>重试大视野覆盖</button>}</div>}
         {(payload?.factor_coverage ?? []).map(row => <article key={row.domain} className={`coverage-card status-${row.status.toLowerCase().replaceAll("_", "-")}`}>
           <div><span>{row.cadence}</span><b>{COVERAGE_STATUS_LABELS[row.status] ?? row.status}</b></div><h2>{row.domain}</h2><p>{row.source ?? "尚未连接可靠的 point-in-time 数据源"}</p>
           {row.value !== null && row.value !== undefined && <strong className="coverage-value">{number(row.value, 3)} <small>{row.unit}</small></strong>}
@@ -1821,7 +1846,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         </article>)}
       </section>}
 
-      <footer className="audit-footer"><span>最后同步 {time(payload?.generated_at)}</span><span>SHADOW ONLY · APPEND ONLY</span></footer>
+      <footer className="audit-footer"><span>{view === "search" ? "搜索结果按本次查询显示" : `所选资源时间 ${selectedResourceTime ? time(selectedResourceTime) : "尚未提供"}`}</span><span>SHADOW ONLY · APPEND ONLY</span></footer>
     </main>
   );
 }

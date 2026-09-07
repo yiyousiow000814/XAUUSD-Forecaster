@@ -185,14 +185,15 @@ def test_preview_bundle_uses_split_resources_with_narrow_legacy_fallback(
     module = _preview_module()
     decisions = [{
         "decision_id": str(index), "decision_time": f"2026-08-23T{index:02d}:00:00Z",
-        "features": {"private": index}, "predictions": list(range(20)),
+        "features": {"private": index}, "predictions": [{"model_identity": str(value)} for value in range(20)],
     } for index in range(20)]
     legacy_audit = {
         "generated_at": "2026-08-23T05:00:00+00:00",
         "recent_decisions": decisions,
         "daily_news_briefs": [],
         "daily_news_brief_summary": {"brief_date": "2026-08-23"},
-        "storylines": [{"storyline_id": "story-1"}],
+        "storylines": [{"storyline_id": "story-1", "covered_roles": [], "missing_roles": [],
+                        "timeline": [], "market_reactions": [], "commentary": [], "background": []}],
         "storyline_summary": {"total": 1, "candidate_total": 0},
         "market_narrative_candidates": [], "archived_storylines": [],
         "archived_story_event_candidates": [], "story_event_candidates": [],
@@ -240,7 +241,7 @@ def test_preview_bundle_uses_split_resources_with_narrow_legacy_fallback(
     assert resources["recent_decisions"]["source_path"] == "/api/audit"
     assert resources["recent_decisions"]["compatibility_fallback"] is True
     assert resources["audit_stories"]["availability"] == "AVAILABLE"
-    assert bundle["audit_stories"]["storylines"] == [{"storyline_id": "story-1"}]
+    assert bundle["audit_stories"]["storylines"] == legacy_audit["storylines"]
     assert bundle["audit"]["news_metrics"]["events"]["currently_model_eligible"] == 84
     assert bundle["news_evidence"]["items"][0]["event_key"] == "a" * 64
 
@@ -252,9 +253,10 @@ def test_preview_legacy_projection_is_not_coupled_to_sync_transport_limit(
     large = "x" * (module.dashboard_sync.AUDIT_DETAIL_LIMIT_BYTES + 1)
     legacy_audit = {
         "generated_at": "2026-08-23T05:00:00+00:00",
-        "recent_decisions": [{"decision_id": "decision-1", "reason": large}],
-        "daily_news_briefs": [{"brief_date": "2026-08-23", "body": large}],
-        "storylines": [{"storyline_id": "story-1", "body": large}],
+        "recent_decisions": [{"decision_id": "decision-1", "reason": large, "predictions": []}],
+        "daily_news_briefs": [{"brief_date": "2026-08-23", "body": large, "model_version": "test", "brief": {"items": []}}],
+        "storylines": [{"storyline_id": "story-1", "body": large, "covered_roles": [], "missing_roles": [],
+                        "timeline": [], "market_reactions": [], "commentary": [], "background": []}],
         "storyline_summary": {"total": 1},
     }
     status = {
@@ -317,11 +319,11 @@ def test_preview_bundle_keeps_unavailable_distinct_from_real_zero(monkeypatch) -
             if path == "/api/market-chart":
                 return {}
             if modern_zero and path == "/api/audit-briefs":
-                return {"daily_news_briefs": []}
+                return {"daily_news_briefs": [], "projection_contract": "audit-detail-source-v1"}
             if modern_zero and path == "/api/audit-stories":
-                return {"storylines": [], "storyline_summary": {"total": 0}}
+                return {"storylines": [], "storyline_summary": {"total": 0}, "projection_contract": "audit-detail-source-v1"}
             if modern_zero and path == "/api/audit-decisions":
-                return {"recent_decisions": []}
+                return {"recent_decisions": [], "projection_contract": "audit-detail-source-v1"}
             if modern_zero and path.startswith("/api/news-evidence"):
                 return {"items": []}
             if path.startswith("/api/learning-history"):
@@ -1059,6 +1061,7 @@ def test_critical_status_excludes_growing_resources_and_keeps_references() -> No
             {"brief_date": f"2026-08-{20 - index:02d}", "revision_number": 1}
             for index in range(5)
         ],
+        "storylines": [],
         "news_evidence": [
             {"id": index, "model_seen": index < 97}
             for index in range(202)
@@ -1185,6 +1188,52 @@ def test_audit_sync_owns_four_independently_bounded_resources(monkeypatch) -> No
         len(module.audit_stories_snapshot(payload, producer_revision)),
         len(module.audit_decisions_snapshot(payload, producer_revision)),
     ]
+
+
+@pytest.mark.parametrize("family,field", [
+    ("briefs", "daily_news_briefs"), ("stories", "storylines"),
+    ("decisions", "recent_decisions"),
+])
+@pytest.mark.parametrize("bad", [{}, None, "invalid", [None], []])
+def test_audit_sync_invalid_source_cannot_publish_false_empty(monkeypatch, family, field, bad):
+    module = _sync_module()
+    timestamp = "2026-09-06T00:00:00+00:00"
+    fields = {"briefs": "daily_news_briefs", "stories": "storylines", "decisions": "recent_decisions"}
+
+    def read(_config, route):
+        if route == "/api/audit":
+            return {"generated_at": timestamp}
+        current = route.removeprefix("/api/audit-")
+        return {"generated_at": timestamp, field: bad} if current == family else {
+            "generated_at": timestamp, "projection_contract": "audit-detail-source-v1", fields[current]: [],
+        }
+
+    monkeypatch.setattr(module, "_read_local_resource", read)
+    monkeypatch.setattr(module, "_projection_producer_revision", lambda: "b" * 40)
+    posted = []
+    monkeypatch.setattr(module, "_post_json", lambda *_args: posted.append(True))
+    with pytest.raises(module.PayloadContractError, match="source snapshot is unavailable or changed"):
+        module._sync_audit({}, {"local_status_url": "http://127.0.0.1:1/api/status"})
+    assert posted == []
+
+
+@pytest.mark.parametrize("family,field", [
+    ("briefs", "daily_news_briefs"), ("stories", "storylines"),
+    ("decisions", "recent_decisions"),
+])
+def test_preview_http_200_ambiguous_detail_is_not_available(monkeypatch, family, field):
+    module = _preview_module()
+    route = f"/api/audit-{family}"
+    for payload in ({}, {field: []}, {field: [None]}, {field: "invalid"}):
+        monkeypatch.setattr(module, "_read_json", lambda *_args: payload)
+        body, provenance = module._read_optional_json("https://example.test", route)
+        assert body is None
+        assert provenance["availability"] == module.UNAVAILABLE_IN_BUILD_SNAPSHOT
+    payload = {field: [], "projection_contract": "audit-detail-source-v1"}
+    monkeypatch.setattr(module, "_read_json", lambda *_args: payload)
+    body, provenance = module._read_optional_json("https://example.test", route)
+    assert body == payload
+    assert provenance["availability"] == "AVAILABLE"
 
 
 def test_audit_story_projection_keeps_production_shaped_detail_below_transport_limit() -> None:
@@ -3481,7 +3530,12 @@ def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
     payloads = iter((stale, fresh))
     writes = []
     monkeypatch.setattr(module, "_projection_producer_revision", lambda: revision)
-    monkeypatch.setattr(module, "_read_local_resource", lambda *_a: next(payloads))
+    def read_resource(_target, route):
+        if route == "/api/audit":
+            return next(payloads)
+        return {**fresh, "projection_contract": "audit-detail-source-v1"}
+
+    monkeypatch.setattr(module, "_read_local_resource", read_resource)
     monkeypatch.setattr(
         module, "_post_json",
         lambda url, body, _target: writes.append((url, body)) or {},

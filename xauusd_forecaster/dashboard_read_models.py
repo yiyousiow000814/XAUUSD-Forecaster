@@ -16,7 +16,7 @@ from .sqlite_wal import open_forward_writer_connection
 
 
 READ_MODEL_CONTRACTS = {
-    "audit": "dashboard-audit-summary-v1",
+    "audit": "dashboard-audit-resources-v2",
     "learning": "dashboard-learning-summary-v1",
     "market_chart": "dashboard-market-chart-summary-v1",
 }
@@ -363,7 +363,7 @@ class DashboardReadModelOwner:
                     raise RuntimeError(f"{resource} read model state is unavailable")
                 live_source_revision = int(latest[0])
                 current = connection.execute(
-                    """SELECT source_revision,payload_json,payload_hash
+                    """SELECT source_revision,payload_json,payload_hash,contract_version
                          FROM dashboard_optional_read_models_v1
                         WHERE resource=?""",
                     (resource,),
@@ -373,6 +373,7 @@ class DashboardReadModelOwner:
                 if (
                     current is not None
                     and int(current[0]) == source_revision
+                    and str(current[3]) == contract
                     and _payload_hash(str(current[1]).encode("utf-8")) == str(current[2])
                 ):
                     return 0

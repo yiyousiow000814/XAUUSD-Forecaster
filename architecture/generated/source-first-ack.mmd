@@ -1,0 +1,347 @@
+%% Generated source syntax, not runtime/transaction proof.
+%% input 0296cba22aae0d30492bf8d235fb5d26429069e099b4690a8c1beeed292ce7b1
+flowchart LR
+  n1b45e824161850e6["(now - datetime.fromisoformat(str(last_full))).total_seconds"]
+  n4a0f2af877b45521["(urllib.parse.urlsplit(config['remote_ingest_url']).hostname or '').lower"]
+  nbb55256ef1fbcd33["(urllib.parse.urlsplit(config['remote_ingest_url']).hostname or '').lower().endswith"]
+  n62fa5a5b0d3c3188["Path"]
+  n16a21d770d950531["RuntimeError"]
+  n0a9875d1075898f6["_assistant_worker_id"]
+  n67522a44871eeaf7["_get_json"]
+  ne951c57a9373bbdb["_get_json(f'{worker_url}?{urllib.parse.urlencode({'worker_id': worker_id})}', config).get"]
+  n09aeda2341bdb5da["_get_local_json"]
+  n6f2bb1955b053e49["_local_retry_url"]
+  nac1746d41ff83d1e["_operator_retry_worker_url"]
+  nea1f82f4fcacd6d5["_post_local_json"]
+  nb760f44fa5965c24["bool"]
+  n055ab52eaa4dcb72["command.get"]
+  neac09a1068751075["config.get"]
+  n7da6f44d2aaccd49["config['remote_ingest_url'].rsplit"]
+  n4d91af0970b3db9e["datetime.fromisoformat"]
+  n90c9566511564fc6["datetime.now"]
+  nfb8fe2a8e8bc8eba["datetime.now(UTC).isoformat"]
+  nf9ca90e88e9ccf9b["decision_overviews.items"]
+  n62d13efbc6e5d9e5["error.read"]
+  n5c7305956ff3dc6a["failure.get"]
+  n29ba819ecca80605["first_page.get"]
+  ne79ecc50a0bfb74c["hashes.get"]
+  nb1cdea77622ea43e["hashes.items"]
+  nc79769d749f01ed5["hashlib.sha256"]
+  n8a2a6de9a130cf32["hashlib.sha256(learning_payload).hexdigest"]
+  n2eadc1a9f1710487["history_state.get"]
+  n6da88c34ba124c41["int"]
+  n4a11dbf513153980["isinstance"]
+  nae23da37330152c6["json.dumps"]
+  ndae3dda25acdde05["json.dumps({'action': 'FINISH', 'request_id': command.get('request_id'), 'lease_token': command.get('lease_token'), 'status': status, 'result': result}).encode"]
+  n9f58c5d89822a79f["json.dumps({'contract_version': NEWS_EVIDENCE_CONTRACT_VERSION, 'activate_snapshot': snapshot_id, 'expected_count': total}, separators=(',', ':')).encode"]
+  n8dedb5c95ad03493["json.dumps({'contract_version': NEWS_EVIDENCE_CONTRACT_VERSION, 'prepare_snapshot': snapshot_id, 'expected_count': total}, separators=(',', ':')).encode"]
+  n2f9de537618b7a11["json.dumps({'contract_version': NEWS_EVIDENCE_CONTRACT_VERSION, 'snapshot_id': snapshot_id, 'offset': received, 'items': items}, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode"]
+  n3ddd81a6a68ec187["json.dumps({'overview': overview}, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode"]
+  na7a9f85e50c884f8["json.dumps({'records': batch}, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode"]
+  n11633437248876a8["json.loads"]
+  n237f85721b641cc2["learning_state.get"]
+  n71fa9faaa6f884aa["len"]
+  na7f6cadca3ccf093["local_jobs.get"]
+  n5104470c63115060["local_result.get"]
+  nd6afe945577752cf["market.get"]
+  n1f6fa6f69d185e60["min"]
+  n263e118c42d0eee5["now.isoformat"]
+  n6c9238c2ea89624f["page.get"]
+  nee5f7cf08af477ff["prepared.get"]
+  n2269c0be009b610c["range"]
+  n418c41d41a2f4d0d["re.fullmatch"]
+  n8bc7a6e550cc4f0a["refreshed_jobs.get"]
+  n2cd7b50dd4e202b8["remote_host.lower"]
+  n1ad1e5fce7bac0e3["remote_host.lower().endswith"]
+  n156e77d9e1b5eff6["response.read"]
+  nb3975ad5bd7e65af["result.get"]
+  n32b0452b29e1e3d5["scripts/run_dashboard_sync.py::PayloadContractError"]
+  n63e988ea85e39b38["scripts/run_dashboard_sync.py::_cleanup_news_evidence_snapshots"]
+  nea80636bf16f22ab["scripts/run_dashboard_sync.py::_downsample_market_overview"]
+  n664d26959c39068b["scripts/run_dashboard_sync.py::_learning_payload"]
+  n29b341b71c91abf6["scripts/run_dashboard_sync.py::_learning_record_identity"]
+  nbfaf92237069069e["scripts/run_dashboard_sync.py::_local_market_history_url"]
+  ned7602a40de918d0["scripts/run_dashboard_sync.py::_local_news_evidence_url"]
+  n9317f82c37ef0fea["scripts/run_dashboard_sync.py::_market_decision_overview_payload"]
+  nbdb4668d8d68d16d["scripts/run_dashboard_sync.py::_market_history_payloads"]
+  na379e0262054ecd0["scripts/run_dashboard_sync.py::_overlap_cursor"]
+  n70b15407b624f197["scripts/run_dashboard_sync.py::_post_json"]
+  na84ae8d33b6bda49["scripts/run_dashboard_sync.py::_post_news_evidence"]
+  n95ba1970bfb4a818["scripts/run_dashboard_sync.py::_read_local_resource"]
+  n6f07931ba10600e3["scripts/run_dashboard_sync.py::_read_news_sync_state"]
+  n7324debbb36b23f3["scripts/run_dashboard_sync.py::_sync_learning_history"]
+  nc25280168b608f65["scripts/run_dashboard_sync.py::_sync_learning_summary"]
+  nc1d8261a14c8bc70["scripts/run_dashboard_sync.py::_sync_market"]
+  n78ba47a0df61a11b["scripts/run_dashboard_sync.py::_sync_market_history"]
+  n1453c9eaf842157f["scripts/run_dashboard_sync.py::_sync_news_evidence"]
+  n5fe8db9ac2d0913a["scripts/run_dashboard_sync.py::_sync_operator_retries"]
+  nb73a1eda821ab15a["scripts/run_dashboard_sync.py::_sync_operator_retry_mirror"]
+  n180c6aca6fadb2f8["scripts/run_dashboard_sync.py::_update_decision_overviews"]
+  nd3c88a08c50364f1["scripts/run_dashboard_sync.py::_write_news_sync_state"]
+  ndb8cdf994ed0edff["scripts/run_dashboard_sync.py::learning_history_batches"]
+  n388e88adc50128b1["scripts/run_dashboard_sync.py::learning_history_records"]
+  na5d96aaa4e31fb01["scripts/run_dashboard_sync.py::learning_snapshot"]
+  na5fb8ccb30f0fe53["scripts/run_dashboard_sync.py::market_chart_snapshot"]
+  n2cd1a5b6ee447b22["selected_summaries.append"]
+  ndb8cf3338c29849e["sorted"]
+  n20a6f754231bae5a["state.get"]
+  n8c25cb3686462e9a["str"]
+  n1303c06b0b014d0c["type"]
+  nbf6abce77c47c1bf["urllib.parse.urlencode"]
+  ned9e58d4e8ac164b["urllib.parse.urlsplit"]
+  n73f81be130fb457b["urllib.request.Request"]
+  n4fcaa76499f37996["urllib.request.urlopen"]
+  nb99eace5a35a0785["xauusd_forecaster/dashboard/sync/transport.py::RemoteInvariantViolation"]
+  n5824b418e1c884ae["xauusd_forecaster/dashboard/sync/transport.py::_post_json"]
+  n7d1a41e39e5278c1["xauusd_forecaster/dashboard/sync/transport.py::_remote_request_headers"]
+  n7324debbb36b23f3 -->|"calls L1027 UNKNOWN"| n664d26959c39068b
+  n7324debbb36b23f3 -->|"calls L1028 UNKNOWN"| ned9e58d4e8ac164b
+  n7324debbb36b23f3 -->|"calls L1029 UNKNOWN"| n2cd7b50dd4e202b8
+  n7324debbb36b23f3 -->|"calls L1029 UNKNOWN"| n1ad1e5fce7bac0e3
+  n7324debbb36b23f3 -->|"calls L1031 UNKNOWN"| neac09a1068751075
+  n7324debbb36b23f3 -->|"calls L1032 UNKNOWN"| n7da6f44d2aaccd49
+  n7324debbb36b23f3 -->|"calls L1034 UNKNOWN"| n62fa5a5b0d3c3188
+  n7324debbb36b23f3 -->|"calls L1035 UNKNOWN"| n6f07931ba10600e3
+  n7324debbb36b23f3 -->|"calls L1036 UNKNOWN"| n2eadc1a9f1710487
+  n7324debbb36b23f3 -->|"calls L1037 UNKNOWN"| n4a11dbf513153980
+  n7324debbb36b23f3 -->|"calls L1039 UNKNOWN"| n90c9566511564fc6
+  n7324debbb36b23f3 -->|"calls L1040 UNKNOWN"| n2eadc1a9f1710487
+  n7324debbb36b23f3 -->|"calls L1041 UNKNOWN"| nb760f44fa5965c24
+  n7324debbb36b23f3 -->|"calls L1041 UNKNOWN"| n2eadc1a9f1710487
+  n7324debbb36b23f3 -->|"calls L1044 UNKNOWN"| n2eadc1a9f1710487
+  n7324debbb36b23f3 -->|"calls L1046 UNKNOWN"| n1b45e824161850e6
+  n7324debbb36b23f3 -->|"calls L1046 UNKNOWN"| n4d91af0970b3db9e
+  n7324debbb36b23f3 -->|"calls L1046 UNKNOWN"| n8c25cb3686462e9a
+  n7324debbb36b23f3 -->|"calls L1053 UNKNOWN"| n263e118c42d0eee5
+  n7324debbb36b23f3 -->|"calls L1055 UNKNOWN"| n388e88adc50128b1
+  n7324debbb36b23f3 -->|"calls L1056 UNKNOWN"| n29b341b71c91abf6
+  n7324debbb36b23f3 -->|"calls L1058 UNKNOWN"| nb1cdea77622ea43e
+  n7324debbb36b23f3 -->|"calls L1063 UNKNOWN"| n29b341b71c91abf6
+  n7324debbb36b23f3 -->|"calls L1063 UNKNOWN"| ne79ecc50a0bfb74c
+  n7324debbb36b23f3 -->|"calls L1066 UNKNOWN"| ndb8cdf994ed0edff
+  n7324debbb36b23f3 -->|"calls L1069 UNKNOWN"| nae23da37330152c6
+  n7324debbb36b23f3 -->|"calls L1069 UNKNOWN"| na7a9f85e50c884f8
+  n7324debbb36b23f3 -->|"calls L1073 UNKNOWN"| n70b15407b624f197
+  n7324debbb36b23f3 -->|"calls L1075 UNKNOWN"| n29b341b71c91abf6
+  n7324debbb36b23f3 -->|"calls L1076 UNKNOWN"| nd3c88a08c50364f1
+  n7324debbb36b23f3 -->|"calls L1080 UNKNOWN"| n2eadc1a9f1710487
+  n7324debbb36b23f3 -->|"calls L1081 UNKNOWN"| n71fa9faaa6f884aa
+  n7324debbb36b23f3 -->|"calls L1081 UNKNOWN"| n71fa9faaa6f884aa
+  n7324debbb36b23f3 -->|"calls L1082 UNKNOWN"| n263e118c42d0eee5
+  n7324debbb36b23f3 -->|"calls L1083 UNKNOWN"| n62fa5a5b0d3c3188
+  n7324debbb36b23f3 -->|"calls L1086 UNKNOWN"| nd3c88a08c50364f1
+  n7324debbb36b23f3 -->|"calls L1089 UNKNOWN"| n263e118c42d0eee5
+  n7324debbb36b23f3 -->|"calls L1090 UNKNOWN"| n263e118c42d0eee5
+  n7324debbb36b23f3 -->|"calls L1092 UNKNOWN"| n62fa5a5b0d3c3188
+  nc25280168b608f65 -->|"calls L1096 UNKNOWN"| n664d26959c39068b
+  nc25280168b608f65 -->|"calls L1097 UNKNOWN"| neac09a1068751075
+  nc25280168b608f65 -->|"calls L1098 UNKNOWN"| n7da6f44d2aaccd49
+  nc25280168b608f65 -->|"calls L1100 UNKNOWN"| n62fa5a5b0d3c3188
+  nc25280168b608f65 -->|"calls L1101 UNKNOWN"| n6f07931ba10600e3
+  nc25280168b608f65 -->|"calls L1102 UNKNOWN"| na5d96aaa4e31fb01
+  nc25280168b608f65 -->|"calls L1103 UNKNOWN"| nc79769d749f01ed5
+  nc25280168b608f65 -->|"calls L1103 UNKNOWN"| n8a2a6de9a130cf32
+  nc25280168b608f65 -->|"calls L1104 UNKNOWN"| n237f85721b641cc2
+  nc25280168b608f65 -->|"calls L1105 UNKNOWN"| n70b15407b624f197
+  nc25280168b608f65 -->|"calls L1106 UNKNOWN"| nd3c88a08c50364f1
+  nc25280168b608f65 -->|"calls L1108 UNKNOWN"| n90c9566511564fc6
+  nc25280168b608f65 -->|"calls L1108 UNKNOWN"| nfb8fe2a8e8bc8eba
+  nc25280168b608f65 -->|"calls L1109 UNKNOWN"| n62fa5a5b0d3c3188
+  nc1d8261a14c8bc70 -->|"calls L1120 UNKNOWN"| neac09a1068751075
+  nc1d8261a14c8bc70 -->|"calls L1121 UNKNOWN"| n95ba1970bfb4a818
+  nc1d8261a14c8bc70 -->|"calls L1122 UNKNOWN"| neac09a1068751075
+  nc1d8261a14c8bc70 -->|"calls L1123 UNKNOWN"| n7da6f44d2aaccd49
+  nc1d8261a14c8bc70 -->|"calls L1125 UNKNOWN"| na5fb8ccb30f0fe53
+  nc1d8261a14c8bc70 -->|"calls L1126 UNKNOWN"| n70b15407b624f197
+  nc1d8261a14c8bc70 -->|"calls L1127 UNKNOWN"| n4a0f2af877b45521
+  nc1d8261a14c8bc70 -->|"calls L1127 UNKNOWN"| nbb55256ef1fbcd33
+  nc1d8261a14c8bc70 -->|"calls L1127 UNKNOWN"| ned9e58d4e8ac164b
+  nc1d8261a14c8bc70 -->|"calls L1131 UNKNOWN"| n11633437248876a8
+  nc1d8261a14c8bc70 -->|"calls L1132 UNKNOWN"| nea80636bf16f22ab
+  nc1d8261a14c8bc70 -->|"calls L1132 UNKNOWN"| nd6afe945577752cf
+  nc1d8261a14c8bc70 -->|"calls L1133 UNKNOWN"| nd6afe945577752cf
+  nc1d8261a14c8bc70 -->|"calls L1135 UNKNOWN"| neac09a1068751075
+  nc1d8261a14c8bc70 -->|"calls L1136 UNKNOWN"| n7da6f44d2aaccd49
+  nc1d8261a14c8bc70 -->|"calls L1140 UNKNOWN"| n6da88c34ba124c41
+  nc1d8261a14c8bc70 -->|"calls L1140 UNKNOWN"| n71fa9faaa6f884aa
+  nc1d8261a14c8bc70 -->|"calls L1140 UNKNOWN"| nd6afe945577752cf
+  nc1d8261a14c8bc70 -->|"calls L1141 UNKNOWN"| nd6afe945577752cf
+  nc1d8261a14c8bc70 -->|"calls L1142 UNKNOWN"| nd6afe945577752cf
+  nc1d8261a14c8bc70 -->|"calls L1144 UNKNOWN"| n70b15407b624f197
+  nc1d8261a14c8bc70 -->|"calls L1144 UNKNOWN"| nae23da37330152c6
+  nc1d8261a14c8bc70 -->|"calls L1144 UNKNOWN"| n3ddd81a6a68ec187
+  n78ba47a0df61a11b -->|"calls L1239 UNKNOWN"| ned9e58d4e8ac164b
+  n78ba47a0df61a11b -->|"calls L1240 UNKNOWN"| n2cd7b50dd4e202b8
+  n78ba47a0df61a11b -->|"calls L1240 UNKNOWN"| n1ad1e5fce7bac0e3
+  n78ba47a0df61a11b -->|"calls L1242 UNKNOWN"| neac09a1068751075
+  n78ba47a0df61a11b -->|"calls L1243 UNKNOWN"| n7da6f44d2aaccd49
+  n78ba47a0df61a11b -->|"calls L1245 UNKNOWN"| n62fa5a5b0d3c3188
+  n78ba47a0df61a11b -->|"calls L1246 UNKNOWN"| n6f07931ba10600e3
+  n78ba47a0df61a11b -->|"calls L1248 UNKNOWN"| n20a6f754231bae5a
+  n78ba47a0df61a11b -->|"calls L1249 UNKNOWN"| n20a6f754231bae5a
+  n78ba47a0df61a11b -->|"calls L1253 UNKNOWN"| n20a6f754231bae5a
+  n78ba47a0df61a11b -->|"calls L1254 UNKNOWN"| n20a6f754231bae5a
+  n78ba47a0df61a11b -->|"calls L1258 UNKNOWN"| na379e0262054ecd0
+  n78ba47a0df61a11b -->|"calls L1261 UNKNOWN"| n4fcaa76499f37996
+  n78ba47a0df61a11b -->|"calls L1262 UNKNOWN"| nbfaf92237069069e
+  n78ba47a0df61a11b -->|"calls L1265 UNKNOWN"| n11633437248876a8
+  n78ba47a0df61a11b -->|"calls L1265 UNKNOWN"| n156e77d9e1b5eff6
+  n78ba47a0df61a11b -->|"calls L1266 UNKNOWN"| n4a11dbf513153980
+  n78ba47a0df61a11b -->|"calls L1266 UNKNOWN"| n6c9238c2ea89624f
+  n78ba47a0df61a11b -->|"calls L1266 UNKNOWN"| n6c9238c2ea89624f
+  n78ba47a0df61a11b -->|"calls L1267 UNKNOWN"| n4a11dbf513153980
+  n78ba47a0df61a11b -->|"calls L1267 UNKNOWN"| n6c9238c2ea89624f
+  n78ba47a0df61a11b -->|"calls L1267 UNKNOWN"| n6c9238c2ea89624f
+  n78ba47a0df61a11b -->|"calls L1268 UNKNOWN"| n180c6aca6fadb2f8
+  n78ba47a0df61a11b -->|"calls L1271 UNKNOWN"| nbdb4668d8d68d16d
+  n78ba47a0df61a11b -->|"calls L1272 UNKNOWN"| n70b15407b624f197
+  n78ba47a0df61a11b -->|"calls L1273 UNKNOWN"| n6c9238c2ea89624f
+  n78ba47a0df61a11b -->|"calls L1275 UNKNOWN"| n8c25cb3686462e9a
+  n78ba47a0df61a11b -->|"calls L1276 UNKNOWN"| nd3c88a08c50364f1
+  n78ba47a0df61a11b -->|"calls L1280 UNKNOWN"| n90c9566511564fc6
+  n78ba47a0df61a11b -->|"calls L1280 UNKNOWN"| nfb8fe2a8e8bc8eba
+  n78ba47a0df61a11b -->|"calls L1281 UNKNOWN"| n62fa5a5b0d3c3188
+  n78ba47a0df61a11b -->|"calls L1283 UNKNOWN"| n6c9238c2ea89624f
+  n78ba47a0df61a11b -->|"calls L1285 UNKNOWN"| n8c25cb3686462e9a
+  n78ba47a0df61a11b -->|"calls L1286 UNKNOWN"| nf9ca90e88e9ccf9b
+  n78ba47a0df61a11b -->|"calls L1286 UNKNOWN"| ndb8cf3338c29849e
+  n78ba47a0df61a11b -->|"calls L1287 UNKNOWN"| n6da88c34ba124c41
+  n78ba47a0df61a11b -->|"calls L1287 UNKNOWN"| n20a6f754231bae5a
+  n78ba47a0df61a11b -->|"calls L1290 UNKNOWN"| n71fa9faaa6f884aa
+  n78ba47a0df61a11b -->|"calls L1290 UNKNOWN"| n1f6fa6f69d185e60
+  n78ba47a0df61a11b -->|"calls L1290 UNKNOWN"| n2269c0be009b610c
+  n78ba47a0df61a11b -->|"calls L1291 UNKNOWN"| n2cd1a5b6ee447b22
+  n78ba47a0df61a11b -->|"calls L1292 UNKNOWN"| n71fa9faaa6f884aa
+  n78ba47a0df61a11b -->|"calls L1295 UNKNOWN"| n71fa9faaa6f884aa
+  n78ba47a0df61a11b -->|"calls L1296 UNKNOWN"| n71fa9faaa6f884aa
+  n78ba47a0df61a11b -->|"calls L1298 UNKNOWN"| n70b15407b624f197
+  n78ba47a0df61a11b -->|"calls L1299 UNKNOWN"| n9317f82c37ef0fea
+  n78ba47a0df61a11b -->|"calls L1301 UNKNOWN"| nd3c88a08c50364f1
+  n78ba47a0df61a11b -->|"calls L1306 UNKNOWN"| nb760f44fa5965c24
+  n78ba47a0df61a11b -->|"calls L1306 UNKNOWN"| n6c9238c2ea89624f
+  n78ba47a0df61a11b -->|"calls L1307 UNKNOWN"| n90c9566511564fc6
+  n78ba47a0df61a11b -->|"calls L1307 UNKNOWN"| nfb8fe2a8e8bc8eba
+  n78ba47a0df61a11b -->|"calls L1308 UNKNOWN"| n62fa5a5b0d3c3188
+  n1453c9eaf842157f -->|"calls L1904 UNKNOWN"| neac09a1068751075
+  n1453c9eaf842157f -->|"calls L1906 UNKNOWN"| neac09a1068751075
+  n1453c9eaf842157f -->|"calls L1907 UNKNOWN"| n7da6f44d2aaccd49
+  n1453c9eaf842157f -->|"calls L1909 UNKNOWN"| n62fa5a5b0d3c3188
+  n1453c9eaf842157f -->|"calls L1910 UNKNOWN"| n6f07931ba10600e3
+  n1453c9eaf842157f -->|"calls L1913 UNKNOWN"| n20a6f754231bae5a
+  n1453c9eaf842157f -->|"calls L1919 UNKNOWN"| n4fcaa76499f37996
+  n1453c9eaf842157f -->|"calls L1920 UNKNOWN"| ned7602a40de918d0
+  n1453c9eaf842157f -->|"calls L1924 UNKNOWN"| n20a6f754231bae5a
+  n1453c9eaf842157f -->|"calls L1924 UNKNOWN"| n8c25cb3686462e9a
+  n1453c9eaf842157f -->|"calls L1925 UNKNOWN"| n20a6f754231bae5a
+  n1453c9eaf842157f -->|"calls L1927 UNKNOWN"| n20a6f754231bae5a
+  n1453c9eaf842157f -->|"calls L1932 UNKNOWN"| n11633437248876a8
+  n1453c9eaf842157f -->|"calls L1932 UNKNOWN"| n156e77d9e1b5eff6
+  n1453c9eaf842157f -->|"calls L1933 UNKNOWN"| n29ba819ecca80605
+  n1453c9eaf842157f -->|"calls L1933 UNKNOWN"| n8c25cb3686462e9a
+  n1453c9eaf842157f -->|"calls L1934 UNKNOWN"| n418c41d41a2f4d0d
+  n1453c9eaf842157f -->|"calls L1935 UNKNOWN"| n32b0452b29e1e3d5
+  n1453c9eaf842157f -->|"calls L1937 UNKNOWN"| n20a6f754231bae5a
+  n1453c9eaf842157f -->|"calls L1937 UNKNOWN"| n8c25cb3686462e9a
+  n1453c9eaf842157f -->|"calls L1938 UNKNOWN"| n20a6f754231bae5a
+  n1453c9eaf842157f -->|"calls L1940 UNKNOWN"| n20a6f754231bae5a
+  n1453c9eaf842157f -->|"calls L1942 UNKNOWN"| n63e988ea85e39b38
+  n1453c9eaf842157f -->|"calls L1947 UNKNOWN"| n20a6f754231bae5a
+  n1453c9eaf842157f -->|"calls L1948 UNKNOWN"| n20a6f754231bae5a
+  n1453c9eaf842157f -->|"calls L1949 UNKNOWN"| n20a6f754231bae5a
+  n1453c9eaf842157f -->|"calls L1950 UNKNOWN"| n4a11dbf513153980
+  n1453c9eaf842157f -->|"calls L1950 UNKNOWN"| n20a6f754231bae5a
+  n1453c9eaf842157f -->|"calls L1951 UNKNOWN"| n418c41d41a2f4d0d
+  n1453c9eaf842157f -->|"calls L1955 UNKNOWN"| n29ba819ecca80605
+  n1453c9eaf842157f -->|"calls L1956 UNKNOWN"| n1303c06b0b014d0c
+  n1453c9eaf842157f -->|"calls L1957 UNKNOWN"| n32b0452b29e1e3d5
+  n1453c9eaf842157f -->|"calls L1958 UNKNOWN"| na84ae8d33b6bda49
+  n1453c9eaf842157f -->|"calls L1958 UNKNOWN"| nae23da37330152c6
+  n1453c9eaf842157f -->|"calls L1958 UNKNOWN"| n8dedb5c95ad03493
+  n1453c9eaf842157f -->|"calls L1963 UNKNOWN"| nee5f7cf08af477ff
+  n1453c9eaf842157f -->|"calls L1964 UNKNOWN"| nd3c88a08c50364f1
+  n1453c9eaf842157f -->|"calls L1970 UNKNOWN"| n90c9566511564fc6
+  n1453c9eaf842157f -->|"calls L1970 UNKNOWN"| nfb8fe2a8e8bc8eba
+  n1453c9eaf842157f -->|"calls L1971 UNKNOWN"| n62fa5a5b0d3c3188
+  n1453c9eaf842157f -->|"calls L1975 UNKNOWN"| n32b0452b29e1e3d5
+  n1453c9eaf842157f -->|"calls L1978 UNKNOWN"| n2269c0be009b610c
+  n1453c9eaf842157f -->|"calls L1982 UNKNOWN"| n4fcaa76499f37996
+  n1453c9eaf842157f -->|"calls L1983 UNKNOWN"| ned7602a40de918d0
+  n1453c9eaf842157f -->|"calls L1986 UNKNOWN"| n11633437248876a8
+  n1453c9eaf842157f -->|"calls L1986 UNKNOWN"| n156e77d9e1b5eff6
+  n1453c9eaf842157f -->|"calls L1987 UNKNOWN"| n6c9238c2ea89624f
+  n1453c9eaf842157f -->|"calls L1987 UNKNOWN"| n8c25cb3686462e9a
+  n1453c9eaf842157f -->|"calls L1988 UNKNOWN"| n418c41d41a2f4d0d
+  n1453c9eaf842157f -->|"calls L1989 UNKNOWN"| n32b0452b29e1e3d5
+  n1453c9eaf842157f -->|"calls L1991 UNKNOWN"| n32b0452b29e1e3d5
+  n1453c9eaf842157f -->|"calls L1992 UNKNOWN"| n6c9238c2ea89624f
+  n1453c9eaf842157f -->|"calls L1993 UNKNOWN"| n4a11dbf513153980
+  n1453c9eaf842157f -->|"calls L1994 UNKNOWN"| n32b0452b29e1e3d5
+  n1453c9eaf842157f -->|"calls L1996 UNKNOWN"| nae23da37330152c6
+  n1453c9eaf842157f -->|"calls L1996 UNKNOWN"| n2f9de537618b7a11
+  n1453c9eaf842157f -->|"calls L2002 UNKNOWN"| n71fa9faaa6f884aa
+  n1453c9eaf842157f -->|"calls L2003 UNKNOWN"| n32b0452b29e1e3d5
+  n1453c9eaf842157f -->|"calls L2004 UNKNOWN"| n71fa9faaa6f884aa
+  n1453c9eaf842157f -->|"calls L2007 UNKNOWN"| na84ae8d33b6bda49
+  n1453c9eaf842157f -->|"calls L2008 UNKNOWN"| n71fa9faaa6f884aa
+  n1453c9eaf842157f -->|"calls L2009 UNKNOWN"| n6c9238c2ea89624f
+  n1453c9eaf842157f -->|"calls L2010 UNKNOWN"| n6c9238c2ea89624f
+  n1453c9eaf842157f -->|"calls L2012 UNKNOWN"| n32b0452b29e1e3d5
+  n1453c9eaf842157f -->|"calls L2015 UNKNOWN"| na84ae8d33b6bda49
+  n1453c9eaf842157f -->|"calls L2015 UNKNOWN"| nae23da37330152c6
+  n1453c9eaf842157f -->|"calls L2015 UNKNOWN"| n9f58c5d89822a79f
+  n1453c9eaf842157f -->|"calls L2020 UNKNOWN"| nd3c88a08c50364f1
+  n1453c9eaf842157f -->|"calls L2026 UNKNOWN"| n90c9566511564fc6
+  n1453c9eaf842157f -->|"calls L2026 UNKNOWN"| nfb8fe2a8e8bc8eba
+  n1453c9eaf842157f -->|"calls L2027 UNKNOWN"| n62fa5a5b0d3c3188
+  n1453c9eaf842157f -->|"calls L2028 UNKNOWN"| n63e988ea85e39b38
+  n1453c9eaf842157f -->|"calls L2030 UNKNOWN"| n4a11dbf513153980
+  n1453c9eaf842157f -->|"calls L2031 UNKNOWN"| n32b0452b29e1e3d5
+  n1453c9eaf842157f -->|"calls L2033 UNKNOWN"| nd3c88a08c50364f1
+  n1453c9eaf842157f -->|"calls L2039 UNKNOWN"| n90c9566511564fc6
+  n1453c9eaf842157f -->|"calls L2039 UNKNOWN"| nfb8fe2a8e8bc8eba
+  n1453c9eaf842157f -->|"calls L2040 UNKNOWN"| n62fa5a5b0d3c3188
+  n5fe8db9ac2d0913a -->|"calls L918 UNKNOWN"| n09aeda2341bdb5da
+  n5fe8db9ac2d0913a -->|"calls L918 UNKNOWN"| n6f2bb1955b053e49
+  n5fe8db9ac2d0913a -->|"calls L919 UNKNOWN"| nac1746d41ff83d1e
+  n5fe8db9ac2d0913a -->|"calls L920 UNKNOWN"| nb73a1eda821ab15a
+  n5fe8db9ac2d0913a -->|"calls L920 UNKNOWN"| na7f6cadca3ccf093
+  n5fe8db9ac2d0913a -->|"calls L921 UNKNOWN"| n0a9875d1075898f6
+  n5fe8db9ac2d0913a -->|"calls L923 UNKNOWN"| n2269c0be009b610c
+  n5fe8db9ac2d0913a -->|"calls L924 UNKNOWN"| n67522a44871eeaf7
+  n5fe8db9ac2d0913a -->|"calls L924 UNKNOWN"| ne951c57a9373bbdb
+  n5fe8db9ac2d0913a -->|"calls L925 UNKNOWN"| nbf6abce77c47c1bf
+  n5fe8db9ac2d0913a -->|"calls L927 UNKNOWN"| n4a11dbf513153980
+  n5fe8db9ac2d0913a -->|"calls L929 UNKNOWN"| nea1f82f4fcacd6d5
+  n5fe8db9ac2d0913a -->|"calls L930 UNKNOWN"| n6f2bb1955b053e49
+  n5fe8db9ac2d0913a -->|"calls L932 UNKNOWN"| n055ab52eaa4dcb72
+  n5fe8db9ac2d0913a -->|"calls L934 UNKNOWN"| n055ab52eaa4dcb72
+  n5fe8db9ac2d0913a -->|"calls L935 UNKNOWN"| n055ab52eaa4dcb72
+  n5fe8db9ac2d0913a -->|"calls L936 UNKNOWN"| n055ab52eaa4dcb72
+  n5fe8db9ac2d0913a -->|"calls L937 UNKNOWN"| n055ab52eaa4dcb72
+  n5fe8db9ac2d0913a -->|"calls L938 UNKNOWN"| n055ab52eaa4dcb72
+  n5fe8db9ac2d0913a -->|"calls L939 UNKNOWN"| n055ab52eaa4dcb72
+  n5fe8db9ac2d0913a -->|"calls L940 UNKNOWN"| n055ab52eaa4dcb72
+  n5fe8db9ac2d0913a -->|"calls L944 UNKNOWN"| n5104470c63115060
+  n5fe8db9ac2d0913a -->|"calls L945 UNKNOWN"| nb3975ad5bd7e65af
+  n5fe8db9ac2d0913a -->|"calls L945 UNKNOWN"| n8c25cb3686462e9a
+  n5fe8db9ac2d0913a -->|"calls L946 UNKNOWN"| n70b15407b624f197
+  n5fe8db9ac2d0913a -->|"calls L948 UNKNOWN"| nae23da37330152c6
+  n5fe8db9ac2d0913a -->|"calls L948 UNKNOWN"| ndae3dda25acdde05
+  n5fe8db9ac2d0913a -->|"calls L950 UNKNOWN"| n055ab52eaa4dcb72
+  n5fe8db9ac2d0913a -->|"calls L951 UNKNOWN"| n055ab52eaa4dcb72
+  n5fe8db9ac2d0913a -->|"calls L961 UNKNOWN"| n09aeda2341bdb5da
+  n5fe8db9ac2d0913a -->|"calls L961 UNKNOWN"| n6f2bb1955b053e49
+  n5fe8db9ac2d0913a -->|"calls L962 UNKNOWN"| nb73a1eda821ab15a
+  n5fe8db9ac2d0913a -->|"calls L963 UNKNOWN"| n8bc7a6e550cc4f0a
+  n5824b418e1c884ae -->|"calls L66 UNKNOWN"| n7d1a41e39e5278c1
+  n5824b418e1c884ae -->|"calls L69 UNKNOWN"| n73f81be130fb457b
+  n5824b418e1c884ae -->|"calls L71 UNKNOWN"| n4fcaa76499f37996
+  n5824b418e1c884ae -->|"calls L75 UNKNOWN"| n16a21d770d950531
+  n5824b418e1c884ae -->|"calls L76 UNKNOWN"| n156e77d9e1b5eff6
+  n5824b418e1c884ae -->|"calls L79 UNKNOWN"| n62d13efbc6e5d9e5
+  n5824b418e1c884ae -->|"calls L79 UNKNOWN"| n11633437248876a8
+  n5824b418e1c884ae -->|"calls L82 UNKNOWN"| n5c7305956ff3dc6a
+  n5824b418e1c884ae -->|"calls L82 UNKNOWN"| n4a11dbf513153980
+  n5824b418e1c884ae -->|"calls L83 UNKNOWN"| nb99eace5a35a0785
+  n5824b418e1c884ae -->|"calls L86 UNKNOWN"| n11633437248876a8
+  n5824b418e1c884ae -->|"calls L89 UNKNOWN"| n4a11dbf513153980

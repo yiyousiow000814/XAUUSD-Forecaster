@@ -73,6 +73,7 @@ from xauusd_forecaster.dashboard_payloads import (
     audit_stories_payload,
     audit_status_payload,
     critical_status_payload,
+    valid_audit_detail_payload,
 )
 from xauusd_forecaster.news_projection import (
     NEWS_DETAIL_BATCH_ITEMS,
@@ -767,35 +768,42 @@ def _with_projection_producer(snapshot: dict, producer_revision: str | None) -> 
 def audit_briefs_snapshot(
     payload: dict, producer_revision: str | None = None,
 ) -> bytes:
-    return _bounded_audit_snapshot(
+    return _audit_detail_snapshot(
         _with_projection_producer(
             audit_briefs_payload(payload, brief_limit=REMOTE_DAILY_BRIEF_LIMIT),
             producer_revision,
         ),
-        label="audit briefs", limit=AUDIT_DETAIL_LIMIT_BYTES,
+        family="briefs",
     )
 
 
 def audit_decisions_snapshot(
     payload: dict, producer_revision: str | None = None,
 ) -> bytes:
-    return _bounded_audit_snapshot(
+    return _audit_detail_snapshot(
         _with_projection_producer(
             audit_decisions_payload(payload, decision_limit=REMOTE_DECISION_LIMIT),
             producer_revision,
         ),
-        label="audit decisions", limit=AUDIT_DETAIL_LIMIT_BYTES,
+        family="decisions",
     )
 
 
 def audit_stories_snapshot(
     payload: dict, producer_revision: str | None = None,
 ) -> bytes:
-    return _bounded_audit_snapshot(
+    return _audit_detail_snapshot(
         _with_projection_producer(
             audit_stories_payload(payload), producer_revision,
-        ), label="audit stories",
-        limit=AUDIT_DETAIL_LIMIT_BYTES,
+        ), family="stories",
+    )
+
+
+def _audit_detail_snapshot(payload: dict, *, family: str) -> bytes:
+    if not valid_audit_detail_payload(payload, family):
+        raise PayloadContractError(f"audit {family} source detail is unavailable or invalid")
+    return _bounded_audit_snapshot(
+        payload, label=f"audit {family}", limit=AUDIT_DETAIL_LIMIT_BYTES,
     )
 
 
@@ -1501,23 +1509,45 @@ def _sync_news(
     _write_news_sync_state(state_path, state, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
 
 
-def _sync_audit(local_payload: dict, config: dict) -> None:
-    if not local_payload and config.get("local_status_url"):
+def _audit_projection_bytes(
+    local_payload: dict, config: dict, *, read_local_details: bool = False,
+) -> dict[str, bytes]:
+    """Read each bounded local resource; a landing summary is never detail."""
+    from_local = not local_payload and bool(config.get("local_status_url"))
+    if from_local:
         local_payload = _read_local_resource(config, "/api/audit")
-    audit_url = config.get("remote_audit_url") or (
-        config["remote_ingest_url"].rsplit("/", 1)[0] + "/audit"
-    )
-    _post_json(audit_url, audit_snapshot(local_payload), config)
-    root = audit_url.rsplit("/", 1)[0]
+    read_local_details = read_local_details or from_local
     producer_revision = _projection_producer_revision()
     if not producer_revision:
         raise PayloadContractError("projection producer revision is unavailable")
-    for resource, snapshot in (
-        ("audit-briefs", audit_briefs_snapshot(local_payload, producer_revision)),
-        ("audit-stories", audit_stories_snapshot(local_payload, producer_revision)),
-        ("audit-decisions", audit_decisions_snapshot(local_payload, producer_revision)),
+    projected = {"/api/audit": audit_snapshot(local_payload)}
+    for family, builder in (
+        ("briefs", audit_briefs_snapshot),
+        ("stories", audit_stories_snapshot),
+        ("decisions", audit_decisions_snapshot),
     ):
-        _post_json(f"{root}/{resource}", snapshot, config)
+        route = f"/api/audit-{family}"
+        detail = _read_local_resource(config, route) if read_local_details else local_payload
+        if read_local_details and (
+            not valid_audit_detail_payload(detail, family)
+            or detail.get("generated_at") != local_payload.get("generated_at")
+        ):
+            raise PayloadContractError(f"{route} source snapshot is unavailable or changed")
+        projected[route] = builder(detail, producer_revision)
+    return projected
+
+
+def _publish_audit_projection_bytes(projected: dict[str, bytes], config: dict) -> None:
+    audit_url = config.get("remote_audit_url") or (
+        config["remote_ingest_url"].rsplit("/", 1)[0] + "/audit"
+    )
+    root = audit_url.rsplit("/", 1)[0]
+    for route, body in projected.items():
+        _post_json(f"{root}/{route.rsplit('/', 1)[-1]}", body, config)
+
+
+def _sync_audit(local_payload: dict, config: dict) -> None:
+    _publish_audit_projection_bytes(_audit_projection_bytes(local_payload, config), config)
 
 
 def _deferred_projection_request_digest(request: dict) -> str:
@@ -1656,15 +1686,15 @@ def sync_deferred_projection_once(
                 )
             if generated_at.astimezone(UTC) < required_after.astimezone(UTC):
                 return SyncResourceResults([], [])
-            builders = {
-                "/api/audit-briefs": audit_briefs_snapshot,
-                "/api/audit-stories": audit_stories_snapshot,
-                "/api/audit-decisions": audit_decisions_snapshot,
-            }
+            # Preserve resumable accepted routes, while the audit producer owns
+            # the actual full-detail bytes and common pinned snapshot identity.
+            projection_bytes = _audit_projection_bytes(
+                local_payload, target, read_local_details=True,
+            )
             hashes.update({route: hashlib.sha256(
-                builders[route](local_payload, producer_revision),
+                projection_bytes[route],
             ).hexdigest() for route in audit_routes})
-            _sync_audit(local_payload, target)
+            _publish_audit_projection_bytes(projection_bytes, target)
             _persist_resource_schedule_result(
                 _resource_schedule_path(target), target, "audit", 300,
                 now=datetime.now(UTC), success=True,

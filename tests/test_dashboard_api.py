@@ -4,6 +4,7 @@ import concurrent.futures
 import hashlib
 import importlib.util
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -63,6 +64,31 @@ from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
 
 
 UTC = timezone.utc
+
+
+@pytest.fixture(autouse=True)
+def _isolated_dashboard_credentials(monkeypatch: pytest.MonkeyPatch):
+    # API projections inspect quota configuration even when no provider request
+    # is sent. Tests must not consult inherited or Windows User credentials;
+    # credential-specific cases supply their own explicit fake source below.
+    from xauusd_forecaster import news_scheduler
+
+    monkeypatch.setattr(news_scheduler, "_runtime_environment_value", lambda _name: "")
+    user_reads = []
+    if os.name == "nt":
+        import winreg
+
+        original_open = winreg.OpenKey
+
+        def forbid_user_environment(root, subkey, *args, **kwargs):
+            if root == winreg.HKEY_CURRENT_USER and str(subkey).lower() == "environment":
+                user_reads.append(subkey)
+                raise AssertionError("dashboard tests must not read Windows User credentials")
+            return original_open(root, subkey, *args, **kwargs)
+
+        monkeypatch.setattr(winreg, "OpenKey", forbid_user_environment)
+    yield
+    assert user_reads == []
 
 
 def _dashboard_module():
@@ -1702,6 +1728,74 @@ def _insert_brief(connection: sqlite3.Connection, index: int) -> None:
             "test-model", "test-prompt", '{"title":"snapshot","items":[]}',
         ),
     )
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_audit_source_build_http_sync_preserves_each_detail_once(monkeypatch, tmp_path, empty):
+    from scripts import run_dashboard_sync as sync
+    from scripts.build_release_validation_fixtures import _source_payload
+
+    module = _dashboard_module()
+    database = tmp_path / "forward.sqlite3"
+    ForwardLedger(database).close()
+    module.Handler.database = database
+    source = _source_payload()
+    if empty:
+        for field in ("daily_news_briefs", "storylines", "recent_decisions"):
+            source[field] = []
+    builds = []
+
+    def build(_database, **kwargs):
+        assert kwargs["snapshot_connection"].in_transaction
+        assert kwargs["optional_resources"] == frozenset({"audit"})
+        builds.append(kwargs["snapshot_connection"])
+        return {**source, "generated_at": kwargs["clock"]().isoformat()}
+
+    monkeypatch.setattr(module, "_dashboard_payload", build)
+    owner = DashboardReadModelOwner(database, {
+        "audit": lambda snapshot: module._optional_resource_payload(snapshot, "audit"),
+    })
+    assert owner.refresh_resource("audit") == 1
+    assert owner.refresh_resource("audit") == 0
+    # Contract movement must rebuild even when the source revision is unchanged.
+    connection = sqlite3.connect(database)
+    with connection:
+        connection.execute("UPDATE dashboard_optional_read_models_v1 SET contract_version='dashboard-audit-summary-v1' WHERE resource='audit'")
+    connection.close()
+    assert owner.refresh_resource("audit") == 1
+    assert owner.refresh_resource("audit") == 0
+    assert len(builds) == 2
+
+    server = module.ThreadingHTTPServer(("127.0.0.1", 0), module.Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    posted = {}
+    monkeypatch.setattr(sync, "_projection_producer_revision", lambda: "b" * 40)
+    monkeypatch.setattr(sync, "_post_json", lambda url, body, _config: posted.setdefault(url, body))
+    try:
+        sync._sync_audit({}, {
+            "local_status_url": f"http://127.0.0.1:{server.server_port}/api/status",
+            "remote_ingest_url": "https://worker.invalid/api/ingest",
+        })
+        assert len(posted) == 4
+        summary = json.loads(posted["https://worker.invalid/api/audit"])
+        assert "detail_resources" not in summary
+        assert "recent_decisions" not in summary
+        for family, field, expected_count in (
+            ("briefs", "daily_news_briefs", 8), ("stories", "storylines", 12),
+            ("decisions", "recent_decisions", 20),
+        ):
+            body = posted[f"https://worker.invalid/api/audit-{family}"]
+            detail = json.loads(body)
+            assert len(body) <= sync.AUDIT_DETAIL_LIMIT_BYTES
+            assert detail["generated_at"] == summary["generated_at"]
+            assert detail["projection_contract"] == "audit-detail-source-v1"
+            assert len(detail[field]) == (0 if empty else expected_count)
+        assert len(builds) == 2  # GET and Sync did not rebuild or scan source detail.
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_read_model_snapshot_publishes_during_continuous_source_writes(

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import math
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 
@@ -29,6 +31,12 @@ AUDIT_STORYLINE_LIMIT = 12
 AUDIT_STORY_TIMELINE_LIMIT = 6
 AUDIT_STORY_CANDIDATE_LIMIT = 12
 AUDIT_STORY_STREAM_LIMIT = 8
+AUDIT_DETAIL_SOURCE_CONTRACT = "audit-detail-source-v1"
+AUDIT_DETAIL_ARRAYS = {
+    "briefs": "daily_news_briefs",
+    "stories": "storylines",
+    "decisions": "recent_decisions",
+}
 DAILY_BRIEF_SUMMARY_FIELDS = (
     "brief_date", "phase", "received_items", "reviewed_items", "pending_items",
     "terminal_failure_items", "latest_revision", "last_generated_at",
@@ -51,7 +59,7 @@ def critical_status_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     # the paged market/audit resources.
     snapshot["recent_decisions"] = audit_decisions_payload(
         payload, decision_limit=18, prediction_limit=8,
-    )["recent_decisions"]
+    ).get("recent_decisions", [])
     snapshot.update({
         "learning_resource": "/api/learning",
         "news_index_resource": "/api/news-index",
@@ -101,13 +109,14 @@ def audit_briefs_payload(
     payload: Mapping[str, Any], *, brief_limit: int = 3,
 ) -> dict[str, Any]:
     """Keep a bounded set of rendered briefs without duplicate raw JSON."""
-    rows = copy.deepcopy(payload.get("daily_news_briefs", []))
-    if not isinstance(rows, list):
-        rows = []
+    if not _audit_detail_source_present(payload, "briefs"):
+        return {"generated_at": payload.get("generated_at")}
+    rows = copy.deepcopy(payload["daily_news_briefs"])
     for row in rows[:brief_limit]:
         if isinstance(row, dict):
             row.pop("brief_json", None)
     return {
+        "projection_contract": AUDIT_DETAIL_SOURCE_CONTRACT,
         "generated_at": payload.get("generated_at"),
         "daily_news_briefs": rows[:brief_limit],
     }
@@ -118,9 +127,9 @@ def audit_decisions_payload(
     prediction_limit: int = 8,
 ) -> dict[str, Any]:
     """Keep recent decision presentation evidence, excluding unused features."""
-    rows = copy.deepcopy(payload.get("recent_decisions", []))
-    if not isinstance(rows, list):
-        rows = []
+    if not _audit_detail_source_present(payload, "decisions"):
+        return {"generated_at": payload.get("generated_at")}
+    rows = copy.deepcopy(payload["recent_decisions"])
     compact = []
     for row in rows[:decision_limit]:
         if not isinstance(row, dict):
@@ -131,9 +140,85 @@ def audit_decisions_payload(
             row["predictions"] = predictions[:prediction_limit]
         compact.append(row)
     return {
+        "projection_contract": AUDIT_DETAIL_SOURCE_CONTRACT,
         "generated_at": payload.get("generated_at"),
         "recent_decisions": compact,
     }
+
+
+def _audit_detail_source_present(payload: Mapping[str, Any], family: str) -> bool:
+    rows = payload.get(AUDIT_DETAIL_ARRAYS[family])
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        return False
+    if family == "stories":
+        return all(
+            field not in payload or (
+                isinstance(payload[field], list)
+                and all(isinstance(row, dict) for row in payload[field])
+            )
+            for field in AUDIT_STORY_FIELDS if field != "storyline_summary"
+        )
+    return True
+
+
+def _renderable_audit_row(row: dict, family: str) -> bool:
+    def records(value):
+        return isinstance(value, list) and all(isinstance(item, dict) for item in value)
+
+    def strings(value):
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+    def numbers(source, fields):
+        return all(source.get(field) is None or (
+            type(source[field]) in (int, float) and math.isfinite(source[field])
+        ) for field in fields)
+
+    if family == "briefs":
+        brief = row.get("brief")
+        return (isinstance(row.get("model_version"), str)
+                and (row.get("phase") is None or isinstance(row["phase"], str))
+                and isinstance(brief, dict) and records(brief.get("items"))
+                and all(isinstance(item.get("headline"), str)
+                        and isinstance(item.get("summary"), str)
+                        and strings(item.get("evidence_ids")) for item in brief["items"])
+                and (brief.get("drivers") is None or strings(brief["drivers"]))
+                and all(brief.get(field) is None or isinstance(brief[field], str)
+                        for field in ("overview", "watch_next")))
+    if family == "stories":
+        return all(records(row.get(field)) for field in (
+            "covered_roles", "missing_roles", "timeline", "market_reactions", "commentary", "background",
+        ))
+    return (records(row.get("predictions"))
+            and numbers(row, ("bid", "ask", "long_return", "short_return"))
+            and (row.get("outcome_status") in (None, "VALID") or strings(row.get("outcome_reason_codes")))
+            and all(numbers(prediction, (
+                "predicted_direction_u5", "predicted_news_residual_u5", "ev_long_u5", "ev_short_u5", "uncertainty_u5",
+            )) for prediction in row["predictions"]))
+
+
+def valid_audit_detail_payload(payload: Any, family: str, *, renderable: bool = False) -> bool:
+    """Distinguish proven empty detail from old summary-derived placeholders."""
+    if not isinstance(payload, dict) or "error" in payload:
+        return False
+    if not _audit_detail_source_present(payload, family):
+        return False
+    if renderable:
+        if not all(_renderable_audit_row(row, family) for row in payload[AUDIT_DETAIL_ARRAYS[family]]):
+            return False
+        if family == "stories" and not all(
+            _renderable_audit_row(row, family) for row in payload.get("archived_storylines", [])
+        ):
+            return False
+        if "generated_at" in payload:
+            try:
+                datetime.fromisoformat(payload["generated_at"].replace("Z", "+00:00"))
+            except (AttributeError, TypeError, ValueError):
+                return False
+    contract = payload.get("projection_contract")
+    return contract in (None, AUDIT_DETAIL_SOURCE_CONTRACT) and (
+        bool(payload[AUDIT_DETAIL_ARRAYS[family]])
+        or contract == AUDIT_DETAIL_SOURCE_CONTRACT
+    )
 
 
 def _bounded_storyline(row: Any, *, timeline_limit: int) -> Any:
@@ -158,6 +243,8 @@ def audit_stories_payload(
     stream_limit: int = AUDIT_STORY_STREAM_LIMIT,
 ) -> dict[str, Any]:
     """Project bounded story presentation detail and retain exact totals."""
+    if not _audit_detail_source_present(payload, "stories"):
+        return {"generated_at": payload.get("generated_at")}
     snapshot = {
         key: copy.deepcopy(payload[key])
         for key in AUDIT_STORY_FIELDS if key in payload
@@ -183,6 +270,7 @@ def audit_stories_payload(
         if isinstance(rows, list):
             snapshot[field] = rows[:stream_limit]
     snapshot["generated_at"] = payload.get("generated_at")
+    snapshot["projection_contract"] = AUDIT_DETAIL_SOURCE_CONTRACT
     return snapshot
 
 

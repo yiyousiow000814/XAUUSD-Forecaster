@@ -1,0 +1,20 @@
+{
+  "schema": "critical-path-selection-v1",
+  "views": {
+    "clock-transaction": {
+      "files": ["scripts/run_forward_collector.py", "xauusd_forecaster/forward_engine.py", "xauusd_forecaster/clock_commit.py", "xauusd_forecaster/clock_recovery.py", "xauusd_forecaster/u5_state.py"],
+      "roots": ["scripts/run_forward_collector.py::append_due_grid_events", "xauusd_forecaster/forward_engine.py::ForwardEngine.append_clock_event", "xauusd_forecaster/clock_commit.py::read_completed_clock"],
+      "tests": ["tests/test_clock_atomicity.py", "tests/test_clock_recovery.py", "tests/test_market_session.py"]
+    },
+    "install-switch-recovery": {
+      "files": ["scripts/control_center_install.ps1", "scripts/control_center_transaction_engine.ps1"],
+      "roots": ["scripts/control_center_install.ps1::Invoke-ControlPlaneInstall", "scripts/control_center_install.ps1::Get-CollectorClockRecoveryBaseline", "scripts/control_center_transaction_engine.ps1::Start-ReleasePromotion", "scripts/control_center_transaction_engine.ps1::Complete-ReleasePromotion", "scripts/control_center_transaction_engine.ps1::Complete-ReleaseRecovery"],
+      "tests": ["tests/test_control_plane_install.py"]
+    },
+    "source-first-ack": {
+      "files": ["scripts/run_dashboard_sync.py", "xauusd_forecaster/dashboard/sync/transport.py", "xauusd_forecaster/dashboard/learning_resources.py"],
+      "roots": ["scripts/run_dashboard_sync.py::_sync_learning_summary", "scripts/run_dashboard_sync.py::_sync_learning_history", "scripts/run_dashboard_sync.py::_sync_market", "scripts/run_dashboard_sync.py::_sync_market_history", "scripts/run_dashboard_sync.py::_sync_operator_retries", "scripts/run_dashboard_sync.py::_sync_news_evidence", "xauusd_forecaster/dashboard/sync/transport.py::_post_json"],
+      "tests": ["tests/test_dashboard_sync.py"]
+    }
+  }
+}

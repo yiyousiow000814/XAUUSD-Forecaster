@@ -115,7 +115,12 @@ def _authority(generated_at: str) -> dict:
 
 
 def _persisted_authority(database: Path, authority: dict, *, digest: str | None = None) -> None:
-    raw = json.dumps(authority, separators=(",", ":"))
+    module = _module()
+    bundle = {"generated_at": authority["generated_at"], "detail_resources": {
+        route.rsplit("/", 1)[-1]: json.loads(builder(authority))
+        for route, builder in module.BUILDERS.items()
+    }}
+    raw = json.dumps(bundle, separators=(",", ":"))
     connection = sqlite3.connect(database)
     try:
         connection.execute(
@@ -132,7 +137,7 @@ def _persisted_authority(database: Path, authority: dict, *, digest: str | None 
                       (resource,contract_version,generated_at,payload_json,payload_hash)
                VALUES ('audit',?,?,?,?)""",
             (
-                "dashboard-audit-summary-v1",
+                module.AUDIT_READ_MODEL_CONTRACT,
                 authority["generated_at"],
                 raw,
                 digest or __import__("hashlib").sha256(raw.encode()).hexdigest(),
@@ -158,13 +163,28 @@ class _Response:
         return self._body[:limit]
 
 
+def _local_responses(module, authority):
+    return [(authority, {})] + [
+        (json.loads(builder(authority)), {}) for builder in module.BUILDERS.values()
+    ]
+
+
+def _local_http_response(module, authority, request):
+    if urlsplit(request.full_url).netloc != urlsplit(module.LOCAL_AUDIT_URL).netloc:
+        return None
+    route = urlsplit(request.full_url).path
+    if route == "/api/audit":
+        return _Response({"generated_at": authority["generated_at"]}, {})
+    return _Response(json.loads(module.BUILDERS[route](authority)), {})
+
+
 def test_exact_candidate_projection_semantics_pass(monkeypatch) -> None:
     module = _module()
     revision = "b" * 40
     version = "11111111-1111-4111-8111-111111111111"
     generated = datetime.now(UTC)
     authority = _authority(generated.isoformat())
-    responses = [(authority, {})]
+    responses = _local_responses(module, authority)
     for route in module.BUILDERS:
         payload = __import__("json").loads(
             module.BUILDERS[route](authority, revision).decode("utf-8")
@@ -277,8 +297,9 @@ def test_real_entrypoint_owns_http_identity_for_all_deferred_routes(monkeypatch)
     def urlopen(request, *, timeout):
         assert timeout == 15
         requests.append(request)
-        if request.full_url == module.LOCAL_AUDIT_URL:
-            return _Response(authority, {})
+        local = _local_http_response(module, authority, request)
+        if local is not None:
+            return local
         parsed = urlsplit(request.full_url)
         route = parsed.path
         assert parse_qs(parsed.query) == {"__release_observe": [OBSERVE_ATTEMPT]}
@@ -299,21 +320,22 @@ def test_real_entrypoint_owns_http_identity_for_all_deferred_routes(monkeypatch)
     )
 
     assert result["state"] == "PASSED"
-    assert [urlsplit(request.full_url).path for request in requests[1:]] == list(
+    assert [urlsplit(request.full_url).path for request in requests[1:4]] == list(module.BUILDERS)
+    assert [urlsplit(request.full_url).path for request in requests[4:]] == list(
         module.BUILDERS
     )
     assert all(
         request.get_header("User-agent") == module.RELEASE_CONTROL_USER_AGENT
         for request in requests
     )
-    assert requests[0].get_header("Cloudflare-workers-version-overrides") is None
+    assert all(request.get_header("Cloudflare-workers-version-overrides") is None for request in requests[:4])
     assert all(
         request.get_header("Cloudflare-workers-version-overrides")
         == f'{module.WORKER_NAME}="{version}"'
-        for request in requests[1:]
+        for request in requests[4:]
     )
-    assert all(request.get_header("Cache-control") == "no-cache" for request in requests[1:])
-    assert all(request.get_header("Pragma") == "no-cache" for request in requests[1:])
+    assert all(request.get_header("Cache-control") == "no-cache" for request in requests[4:])
+    assert all(request.get_header("Pragma") == "no-cache" for request in requests[4:])
 
 
 def test_remote_403_remains_pending(monkeypatch) -> None:
@@ -322,8 +344,9 @@ def test_remote_403_remains_pending(monkeypatch) -> None:
     authority = _authority(generated.isoformat())
 
     def urlopen(request, *, timeout):
-        if request.full_url == module.LOCAL_AUDIT_URL:
-            return _Response(authority, {})
+        local = _local_http_response(module, authority, request)
+        if local is not None:
+            return local
         raise urllib.error.HTTPError(
             request.full_url, 403, "Forbidden", {}, io.BytesIO(b"error code: 1010")
         )
@@ -348,8 +371,9 @@ def test_http_200_with_wrong_candidate_identity_fails_closed(monkeypatch) -> Non
     route = "/api/audit-decisions"
 
     def urlopen(request, *, timeout):
-        if request.full_url == module.LOCAL_AUDIT_URL:
-            return _Response(authority, {})
+        local = _local_http_response(module, authority, request)
+        if local is not None:
+            return local
         payload = json.loads(module.BUILDERS[route](authority, revision).decode("utf-8"))
         return _Response(payload, {
             "X-Aurum-Worker-Version": "22222222-2222-4222-8222-222222222222",
@@ -378,8 +402,9 @@ def test_response_parity_mismatch_remains_pending(monkeypatch) -> None:
     observed["daily_news_briefs"] = [{"unexpected": True}]
 
     def urlopen(request, *, timeout):
-        if request.full_url == module.LOCAL_AUDIT_URL:
-            return _Response(authority, {})
+        local = _local_http_response(module, authority, request)
+        if local is not None:
+            return local
         return _Response(observed, {
             "X-Aurum-Worker-Version": version,
             "X-Aurum-Git-SHA": revision,
@@ -407,7 +432,7 @@ def test_old_producer_projection_remains_pending(monkeypatch) -> None:
         module.BUILDERS[route](authority, "a" * 40).decode("utf-8")
     )
     responses = [
-        (authority, {}),
+        *_local_responses(module, authority),
         (observed, {"X-Aurum-Worker-Version": version,
                     "X-Aurum-Git-SHA": revision}),
     ]
@@ -434,8 +459,9 @@ def test_distinct_observe_attempt_escapes_stale_cached_projection(monkeypatch) -
 
     def urlopen(request, *, timeout):
         nonlocal current_authority
-        if request.full_url == module.LOCAL_AUDIT_URL:
-            return _Response(current_authority, {})
+        local = _local_http_response(module, current_authority, request)
+        if local is not None:
+            return local
         if request.full_url not in cache:
             route = urlsplit(request.full_url).path
             payload = json.loads(
@@ -480,7 +506,7 @@ def test_genuinely_stale_generated_at_remains_pending(monkeypatch) -> None:
     authority = _authority(generated.isoformat())
     route = "/api/audit-briefs"
     responses = [
-        (authority, {}),
+        *_local_responses(module, authority),
         (json.loads(module.BUILDERS[route](authority, revision).decode("utf-8")), {
             "X-Aurum-Worker-Version": version,
             "X-Aurum-Git-SHA": revision,

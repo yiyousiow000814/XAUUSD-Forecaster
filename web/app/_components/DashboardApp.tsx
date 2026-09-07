@@ -13,6 +13,7 @@ import {
   type DashboardRoom,
 } from "./DashboardNavigation";
 import DashboardShell from "./DashboardShell";
+import DashboardContentBoundary from "./DashboardContentBoundary";
 
 const loadStatusView = () => import("../_views/StatusView");
 const loadHealthView = () => import("../_views/HealthView");
@@ -80,12 +81,13 @@ export default function DashboardApp({
 }) {
   primeDashboardResources(initialResources);
   const [location, setLocation] = useState(initialLocation);
+  const [navigationFailure, setNavigationFailure] = useState<string | null>(null);
   const navigationSequence = useRef(0);
   const pendingScrollTop = useRef<number | null>(null);
 
   const preload = useCallback((href: string) => {
     const destination = parseDashboardUrl(new URL(href, window.location.href));
-    if (destination) void preloadRoom(destination.room);
+    if (destination) void preloadRoom(destination.room).catch(() => undefined);
   }, []);
 
   const navigate = useCallback(async (href: string, replace = false) => {
@@ -98,12 +100,18 @@ export default function DashboardApp({
       return;
     }
     const sequence = ++navigationSequence.current;
-    await preloadRoom(destination.room);
+    try {
+      await preloadRoom(destination.room);
+    } catch {
+      if (sequence === navigationSequence.current) setNavigationFailure(canonicalHref(destination));
+      return;
+    }
     if (sequence !== navigationSequence.current) return;
     const nextHref = canonicalHref(destination);
     if (replace) window.history.replaceState(null, "", nextHref);
     else window.history.pushState(null, "", nextHref);
     pendingScrollTop.current = currentScrollTop;
+    setNavigationFailure(null);
     setLocation(destination);
   }, []);
 
@@ -143,15 +151,15 @@ export default function DashboardApp({
   }, [location]);
 
   useEffect(() => {
-    void loadHealthView();
+    void loadHealthView().catch(() => undefined);
     if (["admin", "assistant", "retry", "status"].includes(location.room)) {
-      void loadStatusView();
-      void loadRetryView();
-      void loadAdminOverviewView();
-      void loadAssistantView();
+      void loadStatusView().catch(() => undefined);
+      void loadRetryView().catch(() => undefined);
+      void loadAdminOverviewView().catch(() => undefined);
+      void loadAssistantView().catch(() => undefined);
       return;
     }
-    const prepareAudit = () => void loadAuditView();
+    const prepareAudit = () => void loadAuditView().catch(() => undefined);
     if ("requestIdleCallback" in window) {
       const idleId = window.requestIdleCallback(prepareAudit, { timeout: 2_000 });
       return () => window.cancelIdleCallback(idleId);
@@ -166,12 +174,18 @@ export default function DashboardApp({
       if (!destination) return;
       const sequence = ++navigationSequence.current;
       void preloadRoom(destination.room).then(() => {
-        if (sequence === navigationSequence.current) setLocation(destination);
+        if (sequence !== navigationSequence.current) return;
+        setNavigationFailure(null);
+        setLocation(destination);
+      }).catch(() => {
+        if (sequence !== navigationSequence.current) return;
+        window.history.replaceState(null, "", canonicalHref(location));
+        setNavigationFailure(canonicalHref(destination));
       });
     };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, []);
+  }, [location]);
 
   const navigation = useMemo(() => ({ navigate, preload }), [navigate, preload]);
   const initialStatus = initialResources["/api/status"] as HealthStatusPayload | undefined;
@@ -179,15 +193,18 @@ export default function DashboardApp({
 
   return <DashboardNavigationProvider value={navigation}>
     <DashboardShell location={location}>
-      <Suspense fallback={<main className="app-view-loading" aria-label="正在打开页面"><i /></main>}>
+      {navigationFailure && <div className="current-data-notice audit-resource-notice is-error" role="alert"><b>目标页面暂不可用</b><span>页面文件加载失败，当前内容已保留。</span><button type="button" onClick={() => window.location.assign(navigationFailure)}>重新打开目标页面</button></div>}
+      <DashboardContentBoundary href={canonicalHref(location)}>
+      <Suspense fallback={<main className="app-view-loading" role="status" aria-label="正在打开页面"><span>正在打开页面…</span><i /></main>}>
         {location.room === "live" && <LiveRoomView />}
         {location.room === "status" && <StatusView initialPayload={initialAdminStatus} />}
         {location.room === "health" && <HealthView initialPayload={initialStatus} />}
         {location.room === "admin" && <AdminOverviewView />}
         {location.room === "retry" && <RetryView />}
-        {location.room === "audit" && <AuditView key={location.auditView} initialView={location.auditView} />}
+        {location.room === "audit" && <AuditView initialView={location.auditView} />}
         {location.room === "assistant" && <AssistantView />}
       </Suspense>
+      </DashboardContentBoundary>
     </DashboardShell>
   </DashboardNavigationProvider>;
 }

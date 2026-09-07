@@ -890,7 +890,7 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   assert.match(previewResources, /\[PREVIEW_RESOURCES\.status\]: publicDashboardStatus\(previewBundle\.status\)/);
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
   assert.match(resources, /DEFAULT_TIMEOUT_MS = 10_000/);
-  assert.match(resources, /数据读取超时，页面会自动重试/);
+  assert.match(resources, /数据读取超时，请稍后重读/);
 });
 
 test("uses one current-data contract across every dashboard surface", () => {
@@ -1345,7 +1345,9 @@ test("renders static Preview shells with embedded resources for client-side room
   const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
   assert.match(app, /parseDashboardUrl\(new URL\(window\.location\.href\)\)/);
   assert.match(app, /setLocation\(current =>/);
-  assert.match(app, /<AuditView key=\{location\.auditView\} initialView=\{location\.auditView\}/);
+  assert.match(app, /<AuditView\b[^>]*\binitialView=\{location\.auditView\}/);
+  assert.doesNotMatch(app, /<AuditView\b[^>]*\bkey=\{location\.auditView\}/,
+    "Audit subpage navigation must preserve the mounted filter/history owner");
   const audit = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   assert.match(audit, /function AuditView\(\{ initialView \}/);
   assert.doesNotMatch(audit, /useSearchParams/);
@@ -1783,7 +1785,6 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /stories: "\/api\/audit-stories"/);
   assert.match(source, /decisions: "\/api\/audit-decisions"/);
   assert.match(source, /当前页面尚未加载，不会显示为零或空资料/);
-  assert.match(source, /页面会自动重试，不会把缺失资料解释为空/);
   assert.match(source, /if \(view !== "news"\) \{[\s\S]*?fullNewsIndexReadyRef\.current[\s\S]*?refreshNews\(true\)/);
   assert.match(source, /Do not poll off-screen/);
   assert.doesNotMatch(source, /if \(view !== "league"\) return/);
@@ -1796,7 +1797,6 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /MODEL_LABELS\[identity\] \?\? identity/);
   assert.match(source, /读取中…/);
   assert.match(source, /学习数据暂不可用|暂不可用/);
-  assert.match(source, /页面会保留上一份成功数据并自动重试/);
   assert.doesNotMatch(source, /payload\?\.system\.online && !error/);
   assert.match(source, /api\/news-content\?keys=/);
   assert.doesNotMatch(source, /这些新闻处理到哪里了/);
@@ -1868,7 +1868,6 @@ test("switches dashboard rooms locally and reuses client data between views", ()
   assert.match(css, /\.dashboard-global-link\.is-navigating::after/);
   assert.match(css, /prefers-reduced-motion:reduce/);
   assert.match(cache, /const resources = new Map/);
-  assert.match(cache, /if \(!options\.force && isFresh\)/);
   assert.match(cache, /if \(entry\.pending\)/);
   assert.match(cache, /cache: "no-store"/);
 });
@@ -2431,7 +2430,8 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(page, /className="audit-tabs"/);
   assert.match(page, /className="audit-view-picker"/);
   assert.match(page, /aria-label="切换证据台页面"/);
-  assert.match(page, /pendingScrollTop\.current = window\.scrollY;[\s\S]*useLayoutEffect\(\(\) => \{[\s\S]*const cancel = settleResponsiveScroll\(options => window\.scrollTo\(options\), \(\) => window\.scrollY, pendingScrollTop\.current!\);[\s\S]*return cancel;[\s\S]*\}, \[view\]\)/);
+  assert.match(page, /navigation\.navigate\(`/);
+  assert.doesNotMatch(page, /window\.history\.(?:replaceState|pushState)/);
   assert.match(dashboard, /pendingScrollTop\.current = currentScrollTop;[\s\S]*useLayoutEffect\(\(\) => \{[\s\S]*const cancel = settleResponsiveScroll\(options => window\.scrollTo\(options\), \(\) => window\.scrollY, pendingScrollTop\.current!\);[\s\S]*return cancel;[\s\S]*\}, \[location\]\)/);
   assert.match(responsiveScroll, /matchMedia\("\(max-width: 850px\)"\)\.matches/);
   assert.match(responsiveScroll, /if \(isPhoneViewport\(\)\) \{[\s\S]*scroll\(\{ top: 0, left: 0, behavior: "instant" \}\)/);

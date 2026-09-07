@@ -1,3 +1,4 @@
 web/drizzle/*.sql text eol=lf
+web/worker-configuration.d.ts text eol=lf
 formal/tools/tlc/tla2tools.jar binary
 docs/plans/MODEL_METHOD_BATCH1.json text eol=lf

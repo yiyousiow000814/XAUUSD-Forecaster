@@ -88,7 +88,14 @@ def _resource_evidence(
 
 def _read_optional_json(base_url: str, path: str) -> tuple[dict | None, dict]:
     try:
-        return _read_json(base_url, path), _resource_evidence(
+        payload = _read_json(base_url, path)
+        if path.startswith("/api/audit-") and not dashboard_sync.valid_audit_detail_payload(
+            payload, path.removeprefix("/api/audit-"), renderable=True,
+        ):
+            return None, _resource_evidence(
+                path, available=False, reason="INVALID_AUDIT_DETAIL_SOURCE",
+            )
+        return payload, _resource_evidence(
             path, available=True, source=path,
         )
     except (OSError, RuntimeError, json.JSONDecodeError) as error:
@@ -101,8 +108,11 @@ def _legacy_resource(
     path: str, legacy: dict, required_fields: tuple[str, ...],
     projector,
 ) -> tuple[dict | None, dict]:
-    if all(field in legacy for field in required_fields):
-        return projector(legacy), _resource_evidence(
+    projected = projector(legacy) if all(field in legacy for field in required_fields) else None
+    if projected is not None and dashboard_sync.valid_audit_detail_payload(
+        projected, path.removeprefix("/api/audit-"), renderable=True,
+    ):
+        return projected, _resource_evidence(
             path, available=True, source="/api/audit",
             compatibility=True, reason="LEGACY_STABLE_SPLIT_ROUTE_ABSENT",
         )

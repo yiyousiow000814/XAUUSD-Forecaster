@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { createRequire } from "node:module";
 import test from "node:test";
 import { prepareReleaseValidationFixtures } from "../build/release-validation-fixtures.mjs";
 import { releaseFixtureContractTestName } from "../build/verify-workers-release-fixtures.mjs";
 import { D1TestDatabase } from "./d1-test-database.mjs";
+import { AUDIT_DETAIL_PROJECTION_CONTRACT, validAuditDetailPayload } from "../app/_lib/audit-detail-contract.ts";
+import { admitPreviewAuditDetails } from "../build/preview-learning.ts";
 
 const migrations = readdirSync(new URL("../drizzle", import.meta.url))
   .filter(name => name.endsWith(".sql"))
@@ -36,6 +39,99 @@ function insertSnapshot(id, payload, receivedAt = new Date().toISOString()) {
     `INSERT INTO dashboard_snapshots(id,payload,received_at) VALUES(?,?,?)
      ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,received_at=excluded.received_at`,
   ).run(id, payload, receivedAt);
+}
+
+const knownEmptyDetail = fields => ({ projection_contract: AUDIT_DETAIL_PROJECTION_CONTRACT, ...fields });
+const storyDetailRow = fields => ({
+  covered_roles: [], missing_roles: [], timeline: [], market_reactions: [], commentary: [], background: [], ...fields,
+});
+const briefDetailRow = fields => ({model_version: "fixture", brief: {items: []}, ...fields});
+
+const mixedReadRoutes = [
+  "/api/status", "/api/audit", "/api/audit-briefs", "/api/audit-stories",
+  "/api/audit-decisions", "/api/learning", "/api/market-chart",
+];
+const auditDetailFamilies = new Map(["briefs", "stories", "decisions"].map(
+  family => [`/api/audit-${family}`, family],
+));
+
+function mixedReadExpectations(preview, status, gitSha) {
+  const expected = new Map(mixedReadRoutes.map(path => [path, {status: 200}]));
+  if (!preview) return expected;
+  assert.equal(status?.preview?.is_preview, true, "missing Preview source identity");
+  assert.match(gitSha ?? "", /^[0-9a-f]{40}$/, "invalid compiled source identity");
+  assert.equal(status.preview.commit_sha, gitSha, "frozen/compiled source identity mismatch");
+  for (const [path, family] of auditDetailFamilies) {
+    // Independent frozen capture/admission provenance, not the tested detail's
+    // response, decides whether this optional snapshot can legitimately exist.
+    const resource = status.preview.resources?.[`audit_${family}`];
+    assert.equal(resource?.requested_path, path, `${path}: missing/wrong frozen resource`);
+    assert.ok(["AVAILABLE", "UNAVAILABLE_IN_BUILD_SNAPSHOT"].includes(resource.availability),
+      `${path}: unknown frozen availability`);
+    if (resource.availability === "UNAVAILABLE_IN_BUILD_SNAPSHOT") {
+      assert.equal(resource.source_path, null, `${path}: unavailable source contradiction`);
+      assert.ok(typeof resource.reason === "string" && resource.reason.length > 0,
+        `${path}: unavailable source requires a recorded reason`);
+    } else {
+      assert.ok([path, "/api/audit"].includes(resource.source_path),
+        `${path}: unexpected frozen detail authority`);
+    }
+    expected.set(path, {
+      status: resource.availability === "AVAILABLE" ? 200 : 503,
+      family, preview: true,
+    });
+  }
+  return expected;
+}
+
+async function assertMixedReadPayload(response, path, expected) {
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  let body;
+  if (expected.family || response.status !== expected.status) {
+    try { body = JSON.parse(new TextDecoder().decode(bytes)); } catch { /* Report the bounded shape below. */ }
+  }
+  const diagnostic = JSON.stringify({
+    path, expected: expected.status, actual: response.status, bytes: bytes.length,
+    resource: response.headers.get("x-aurum-resource"),
+    preview: response.headers.get("x-aurum-preview"),
+    stage: response.headers.get("x-aurum-failure-stage"),
+    error: typeof body?.error === "string" ? body.error.slice(0, 160) : null,
+    availability: body?.availability ?? null,
+  });
+  assert.equal(response.status, expected.status, diagnostic);
+  if (!expected.family) return;
+  if (expected.status === 200) {
+    assert.ok(bytes.length <= 120_000, diagnostic);
+    assert.equal(response.headers.get("x-aurum-preview"), "immutable-build-snapshot", diagnostic);
+    assert.equal(validAuditDetailPayload(expected.family, body), true, diagnostic);
+  } else {
+    assert.ok(bytes.length <= 512, diagnostic);
+    assert.equal(response.headers.get("x-aurum-preview"), "unavailable-build-snapshot-resource", diagnostic);
+    assert.deepEqual(Object.keys(body ?? {}).sort(), ["availability", "error"], diagnostic);
+    assert.equal(body.availability, "UNAVAILABLE_IN_BUILD_SNAPSHOT", diagnostic);
+    assert.ok(typeof body.error === "string" && body.error.length > 0, diagnostic);
+  }
+}
+
+async function compileAuditPreviewRoutes(preview = true) {
+  const dependencyPackage = process.env.AURUM_TEST_DEPENDENCY_PACKAGE
+    ?? fileURLToPath(new URL("../package.json",import.meta.url));
+  const require = createRequire(dependencyPackage);
+  const {build} = require("esbuild");
+  const builtRoutes = await build({
+    bundle:true,write:false,platform:"node",format:"esm",
+    nodePaths:[join(dirname(dependencyPackage),"node_modules")],
+    external:["cloudflare:workers"],
+    alias:{"next/server":join(dirname(dependencyPackage),"node_modules/vinext/dist/shims/server.js")},
+    define:{__AURUM_PREVIEW_BUNDLE__:preview ? "globalThis.__AURUM_AUDIT_CONTRACT_PREVIEW" : "null"},
+    stdin:{resolveDir:fileURLToPath(new URL("..",import.meta.url)),loader:"ts",contents:
+      `export * as briefs from './app/api/audit-briefs/route.ts';
+       export * as stories from './app/api/audit-stories/route.ts';
+       export * as decisions from './app/api/audit-decisions/route.ts';`},
+  });
+  // Each isolated bundle must capture its own frozen input, not a prior test's
+  // module-cache instance of the same compiled route bytes.
+  return import(`data:text/javascript;base64,${Buffer.from(builtRoutes.outputFiles[0].contents).toString("base64")}#${crypto.randomUUID()}`);
 }
 
 test("seeds missing bounded audit metrics exactly once during storage handover", () => {
@@ -294,9 +390,9 @@ test("replays the production read route family through bounded API modules", asy
   insertSnapshot(2, jsonOfBytes(390_000, { candles: [] }));
   insertSnapshot(3, jsonOfBytes(208_000, { models: [] }));
   insertSnapshot(9, jsonOfBytes(16_000, { news_metrics: {} }));
-  insertSnapshot(6, jsonOfBytes(58_000, { recent_decisions: [] }));
-  insertSnapshot(7, jsonOfBytes(24_000, { daily_news_briefs: [] }));
-  insertSnapshot(8, jsonOfBytes(80_000, { storylines: [] }));
+  insertSnapshot(6, jsonOfBytes(58_000, knownEmptyDetail({ recent_decisions: [] })));
+  insertSnapshot(7, jsonOfBytes(24_000, knownEmptyDetail({ daily_news_briefs: [] })));
+  insertSnapshot(8, jsonOfBytes(80_000, knownEmptyDetail({ storylines: [] })));
   database.database.prepare(
     "INSERT OR REPLACE INTO market_history_overview(overview_key,payload,received_at) VALUES('all',?,?)",
   ).run(JSON.stringify({
@@ -423,9 +519,9 @@ test("uses the freshest compatible audit source during split-snapshot transition
   if (isPreviewBuild) return;
   const older = "2026-08-20T00:00:01Z";
   const newer = "2026-08-20T00:00:02Z";
-  insertSnapshot(6, JSON.stringify({ generated_at: older, recent_decisions: [{ decision_id: "split" }] }), older);
-  insertSnapshot(7, JSON.stringify({ generated_at: older, daily_news_briefs: [{ brief_date: "split" }] }), older);
-  insertSnapshot(8, JSON.stringify({ generated_at: older, storylines: [{ storyline_id: "split" }] }), older);
+  insertSnapshot(6, JSON.stringify({ generated_at: older, recent_decisions: [{ decision_id: "split", predictions: [] }] }), older);
+  insertSnapshot(7, JSON.stringify({ generated_at: older, daily_news_briefs: [briefDetailRow({ brief_date: "split" })] }), older);
+  insertSnapshot(8, JSON.stringify({ generated_at: older, storylines: [storyDetailRow({ storyline_id: "split" })] }), older);
   insertSnapshot(9, JSON.stringify({ generated_at: older, news_metrics: { source: "split" } }), older);
   insertSnapshot(4, JSON.stringify({
     generated_at: newer,
@@ -434,8 +530,8 @@ test("uses the freshest compatible audit source during split-snapshot transition
       decision_id: "legacy", features: { growing: "x".repeat(2_000) },
       predictions: Array.from({ length: 20 }, (_, index) => ({ index })),
     }],
-    daily_news_briefs: [{ brief_date: "legacy", brief_json: "not-copied-to-JS" }],
-    storylines: [{ storyline_id: "legacy" }],
+    daily_news_briefs: [briefDetailRow({ brief_date: "legacy", brief_json: "not-copied-to-JS" })],
+    storylines: [storyDetailRow({ storyline_id: "legacy" })],
   }), newer);
 
   assert.equal((await (await invoke("/api/audit")).json()).news_metrics.source, "legacy");
@@ -458,12 +554,12 @@ test("oversized fresh legacy stories stay ahead of stale split validation data a
   const newer = "2026-08-20T00:00:02Z";
   insertSnapshot(8, JSON.stringify({
     generated_at: older,
-    storylines: [{ storyline_id: "validation-fixture" }],
+    storylines: [storyDetailRow({ storyline_id: "validation-fixture" })],
   }), older);
   insertSnapshot(4, JSON.stringify({
     generated_at: newer,
     storyline_summary: { total: 500 },
-    storylines: Array.from({ length: 20 }, (_, index) => ({
+    storylines: Array.from({ length: 20 }, (_, index) => storyDetailRow({
       storyline_id: `authority-${index}`,
       timeline: Array.from({ length: 8 }, () => ({ headline: "黄金".repeat(100) })),
     })),
@@ -483,6 +579,58 @@ test("oversized fresh legacy stories stay ahead of stale split validation data a
   assert.equal(stories.story_event_candidates.length, 12);
   assert.equal(stories.unassigned_story_events.length, 12);
   assert.equal(stories.storyline_summary.total, 500);
+});
+
+test("audit detail selection skips ambiguous or malformed split data without relabeling legacy time", async () => {
+  if (isPreviewBuild) return;
+  const older = "2026-08-20T00:00:01Z";
+  const newer = "2026-08-20T00:00:02Z";
+  for (const [view, id, field, row] of [
+    ["decisions", 6, "recent_decisions", {decision_id:"legacy", predictions:[]}],
+    ["briefs", 7, "daily_news_briefs", briefDetailRow({brief_date:"legacy"})],
+    ["stories", 8, "storylines", storyDetailRow({storyline_id:"legacy"})],
+  ]) {
+    const legacy = {generated_at:older, [field]:[row]};
+    insertSnapshot(4, JSON.stringify(legacy), older);
+    for (const invalid of [
+      {}, {[field]:[]}, {[field]:null}, {[field]:[{}]}, {[field]:["bad"]},
+      knownEmptyDetail({[field]:null}), {...knownEmptyDetail({[field]:[]}), projection_contract:"unknown"},
+    ]) {
+      insertSnapshot(id, JSON.stringify({generated_at:newer, ...invalid}), newer);
+      const response = await invoke(`/api/audit-${view}`);
+      const accepted = await response.json();
+      assert.equal(response.status, 200, `${view}/${JSON.stringify(invalid)}`);
+      assert.equal(response.headers.get("x-aurum-d1-operations"), "1");
+      assert.deepEqual(accepted[field], legacy[field]);
+      assert.equal(accepted.generated_at, older);
+      assert.equal(validAuditDetailPayload(view, accepted), true);
+    }
+    const explicitEmpty = knownEmptyDetail({generated_at:newer, [field]:[]});
+    insertSnapshot(id, JSON.stringify(explicitEmpty), newer);
+    assert.deepEqual(await (await invoke(`/api/audit-${view}`)).json(), explicitEmpty);
+    insertSnapshot(id, "{}", newer);
+    insertSnapshot(4, JSON.stringify({generated_at:older}), older);
+    assert.equal((await invoke(`/api/audit-${view}`)).status, 503, "missing legacy source is not projected as []");
+  }
+});
+
+test("audit detail real and dry-run writes reject incomplete sources without replacing accepted bytes", async () => {
+  if (isPreviewBuild) return;
+  for (const [view, id, field] of [["decisions",6,"recent_decisions"], ["briefs",7,"daily_news_briefs"], ["stories",8,"storylines"]]) {
+    const accepted = JSON.stringify(knownEmptyDetail({generated_at:"2026-09-06T11:00:00Z", [field]:[]}));
+    insertSnapshot(id, accepted);
+    for (const invalid of ["{invalid", JSON.stringify({[field]:[]}), JSON.stringify({[field]:[{}]}), JSON.stringify(knownEmptyDetail({[field]:["invalid"]}))]) {
+      for (const dryRun of [false, true]) {
+        const response = await invoke(`/api/audit-${view}`, {
+          method:"POST", body:invalid,
+          headers:{Authorization:`Bearer ${token}`, "Content-Type":"application/json",
+            ...(dryRun ? {"X-Aurum-Release-Validation":"dry-run", "X-Aurum-Validation-Run":"audit-boundary", "X-Aurum-Request-ID":`audit-${view}`} : {})},
+        });
+        assert.equal(response.status,400,`${view}/${dryRun}/${invalid}`);
+        assert.equal(database.row(id,"dashboard_snapshots").payload,accepted);
+      }
+    }
+  }
 });
 
 test("keeps migrated market history schema out of the request hot path", () => {
@@ -618,9 +766,9 @@ test("bounds empty, oversized, maximum legal, and concurrent snapshot writes", a
 
   for (const [path, limit, fields] of [
     ["/api/audit", 16_000, { news_metrics: {} }],
-    ["/api/audit-briefs", 120_000, { daily_news_briefs: [] }],
-    ["/api/audit-stories", 120_000, { storylines: [] }],
-    ["/api/audit-decisions", 120_000, { recent_decisions: [] }],
+    ["/api/audit-briefs", 120_000, knownEmptyDetail({ daily_news_briefs: [] })],
+    ["/api/audit-stories", 120_000, knownEmptyDetail({ storylines: [] })],
+    ["/api/audit-decisions", 120_000, knownEmptyDetail({ recent_decisions: [] })],
   ]) {
     const bounded = await invoke(path, {
       method: "POST", headers, body: jsonOfBytes(limit, fields),
@@ -654,9 +802,9 @@ test("production-shaped writes honor authenticated release dry-run without mutat
   const routes = [
     ["/api/ingest", "status-ingest", { generated_at: new Date().toISOString(), system: {} }, "1"],
     ["/api/audit", "audit-write", { news_metrics: {} }, "1"],
-    ["/api/audit-briefs", "audit-briefs-write", { daily_news_briefs: [] }, "1"],
-    ["/api/audit-stories", "audit-stories-write", { storylines: [] }, "1"],
-    ["/api/audit-decisions", "audit-decisions-write", { recent_decisions: [] }, "1"],
+    ["/api/audit-briefs", "audit-briefs-write", knownEmptyDetail({ daily_news_briefs: [] }), "1"],
+    ["/api/audit-stories", "audit-stories-write", knownEmptyDetail({ storylines: [] }), "1"],
+    ["/api/audit-decisions", "audit-decisions-write", knownEmptyDetail({ recent_decisions: [] }), "1"],
     ["/api/learning", "learning-write", { models: [] }, "1"],
     ["/api/market-chart", "market-chart-write", { candles: [] }, "1"],
     ["/api/news-index", "news-index-write", {
@@ -839,8 +987,152 @@ test(releaseFixtureContractTestName, async () => {
       assert.equal(payload.mutated, false, route.fixture);
     }
     assert.equal(state(), before);
+    for (const [view, id] of [["briefs",7], ["stories",8], ["decisions",6]]) {
+      const exactBytes = readFileSync(join(preparedFixtures.fixtureRoot, `audit-${view}-write.json`));
+      insertSnapshot(id, exactBytes.toString("utf8"), "2099-01-01T00:00:00Z");
+      const read = await invoke(`/api/audit-${view}`);
+      assert.equal(read.status,200,view);
+      assert.equal(validAuditDetailPayload(view,await read.json()),true,view);
+    }
   } finally {
     preparedFixtures.dispose();
+  }
+});
+
+test("exact Python-built Audit fixtures cross real Preview routes with source identity and strict row validation", async () => {
+  const preparedFixtures = prepareReleaseValidationFixtures();
+  const previousBundle = globalThis.__AURUM_AUDIT_CONTRACT_PREVIEW;
+  const previousEnvironment = globalThis.__AURUM_TEST_WORKER_ENV;
+  const bundle = {};
+  globalThis.__AURUM_AUDIT_CONTRACT_PREVIEW = bundle;
+  globalThis.__AURUM_TEST_WORKER_ENV = new Proxy({}, {
+    get() { throw new Error("Preview Audit read/write must not touch production bindings"); },
+  });
+  try {
+    const routes = await compileAuditPreviewRoutes();
+    for (const [view,field] of [["briefs","daily_news_briefs"],["stories","storylines"],["decisions","recent_decisions"]]) {
+      const exactBytes = readFileSync(join(preparedFixtures.fixtureRoot,`audit-${view}-write.json`));
+      const source = JSON.parse(exactBytes.toString("utf8"));
+      bundle[`audit_${view}`] = source;
+      const response = await routes[view].GET();
+      const body = await response.json();
+      assert.equal(response.status,200,view);
+      assert.equal(response.headers.get("x-aurum-preview"),"immutable-build-snapshot");
+      assert.equal(validAuditDetailPayload(view,body),true,view);
+      assert.deepEqual(body[field],source[field]);
+      assert.equal(body.generated_at,source.generated_at);
+      assert.equal(body.projection_contract,source.projection_contract);
+      assert.equal(body.producer_revision,source.producer_revision);
+      for (const invalid of [null,{}, {[field]:[]}, {...source,[field]:[{}]}, {...source,[field]:["bad"]}, {...source,projection_contract:"unsupported"}]) {
+        bundle[`audit_${view}`] = invalid;
+        const rejected = await routes[view].GET();
+        assert.equal(rejected.status,503,`${view}/${JSON.stringify(invalid)}`);
+        assert.equal((await rejected.json()).availability,"UNAVAILABLE_IN_BUILD_SNAPSHOT");
+      }
+      bundle[`audit_${view}`] = knownEmptyDetail({generated_at:"2026-09-06T11:00:00Z",[field]:[]});
+      const empty = await routes[view].GET();
+      assert.equal(empty.status,200);
+      assert.equal(validAuditDetailPayload(view,await empty.json()),true);
+      assert.equal((await routes[view].POST(new Request(`https://example.test/api/audit-${view}`,{method:"POST",body:"invalid"}))).status,403);
+    }
+  } finally {
+    preparedFixtures.dispose();
+    globalThis.__AURUM_AUDIT_CONTRACT_PREVIEW = previousBundle;
+    globalThis.__AURUM_TEST_WORKER_ENV = previousEnvironment;
+  }
+});
+
+test("actual Audit Next read handlers reject malformed and oversized split snapshots before HTTP success", async () => {
+  const previousEnvironment = globalThis.__AURUM_TEST_WORKER_ENV;
+  const local = new D1TestDatabase([]);
+  local.database.exec("CREATE TABLE dashboard_snapshots(id INTEGER PRIMARY KEY,payload TEXT,received_at TEXT)");
+  globalThis.__AURUM_TEST_WORKER_ENV = {DB:local};
+  try {
+    const routes = await compileAuditPreviewRoutes(false);
+    for (const [view,id,field] of [["briefs",7,"daily_news_briefs"],["stories",8,"storylines"],["decisions",6,"recent_decisions"]]) {
+      const bounded = jsonOfBytes(120_000,knownEmptyDetail({generated_at:"2026-09-06T11:00:00Z",[field]:[]}));
+      const set = value => local.database.prepare("INSERT OR REPLACE INTO dashboard_snapshots VALUES(?,?,?)").run(id,value,"2026-09-06T11:00:00Z");
+      set(bounded);
+      const accepted = await routes[view].GET();
+      assert.equal(accepted.status,200,view);
+      assert.equal(await accepted.text(),bounded);
+      for (const raw of ["{invalid","{}",JSON.stringify({[field]:[]}),JSON.stringify({[field]:[{}]}),jsonOfBytes(120_001,knownEmptyDetail({[field]:[]}))]) {
+        set(raw);
+        const rejected = await routes[view].GET();
+        assert.equal(rejected.status,503,`${view}/${raw.length}`);
+      }
+    }
+  } finally {
+    local.database.close();
+    globalThis.__AURUM_TEST_WORKER_ENV = previousEnvironment;
+  }
+});
+
+test("mixed-read expectations independently reconcile frozen Audit availability without permitting arbitrary failures", async () => {
+  const fixtures = prepareReleaseValidationFixtures();
+  const previousBundle = globalThis.__AURUM_AUDIT_CONTRACT_PREVIEW;
+  const previousEnvironment = globalThis.__AURUM_TEST_WORKER_ENV;
+  const gitSha = "a".repeat(40);
+  const bundle = {status: {preview: {is_preview: true, commit_sha: gitSha, resources: {}}}};
+  globalThis.__AURUM_AUDIT_CONTRACT_PREVIEW = bundle;
+  globalThis.__AURUM_TEST_WORKER_ENV = new Proxy({}, {
+    get() { throw new Error("frozen Audit availability must not touch production bindings"); },
+  });
+  try {
+    const routes = await compileAuditPreviewRoutes();
+    for (const [path, family] of auditDetailFamilies) {
+      const field = {briefs: "daily_news_briefs", stories: "storylines", decisions: "recent_decisions"}[family];
+      const source = JSON.parse(readFileSync(join(fixtures.fixtureRoot, `audit-${family}-write.json`), "utf8"));
+      for (const [label, value, expectedStatus] of [
+        ["exact Python bytes", source, 200],
+        ["authoritative empty", {...source, [field]: []}, 200],
+        ["missing source", null, 503],
+        ["ambiguous old empty", {[field]: []}, 503],
+        ["malformed source", {...source, [field]: [{}]}, 503],
+      ]) {
+        bundle[`audit_${family}`] = value;
+        bundle.status.preview.resources[`audit_${family}`] = {
+          requested_path: path, availability: "AVAILABLE", source_path: path,
+          compatibility_fallback: false, reason: null,
+        };
+        // Execute real build admission before the actual Preview route. The
+        // oracle reads its independently published provenance, never response.
+        admitPreviewAuditDetails(bundle);
+        const expected = mixedReadExpectations(true, bundle.status, gitSha);
+        assert.equal(expected.get(path).status, expectedStatus, `${family}/${label}`);
+        const response = await routes[family].GET();
+        await assertMixedReadPayload(response.clone(), path, expected.get(path));
+        if (expectedStatus === 503) {
+          await assert.rejects(assertMixedReadPayload(response.clone(), path,
+            mixedReadExpectations(false).get(path)), /actual.*503/);
+          await assert.rejects(assertMixedReadPayload(response, path,
+            {status: 200, family, preview: true}), /actual.*503/);
+        }
+      }
+    }
+    const validStatus = structuredClone(bundle.status);
+    for (const mutate of [
+      status => { delete status.preview.resources.audit_briefs; },
+      status => { status.preview.resources.audit_briefs.availability = "UNKNOWN"; },
+      status => { status.preview.resources.audit_briefs.requested_path = "/api/audit"; },
+      status => { status.preview.commit_sha = "b".repeat(40); },
+    ]) {
+      const invalid = structuredClone(validStatus);
+      mutate(invalid);
+      assert.throws(() => mixedReadExpectations(true, invalid, gitSha));
+    }
+    for (const response of [
+      Response.json({error: "request failed"}, {status: 503}),
+      Response.json({error: "missing", availability: "UNAVAILABLE_IN_BUILD_SNAPSHOT", storylines: []},
+        {status: 503, headers: {"X-Aurum-Preview": "unavailable-build-snapshot-resource"}}),
+    ]) {
+      await assert.rejects(assertMixedReadPayload(response, "/api/audit-stories",
+        {status: 503, family: "stories", preview: true}));
+    }
+  } finally {
+    fixtures.dispose();
+    globalThis.__AURUM_AUDIT_CONTRACT_PREVIEW = previousBundle;
+    globalThis.__AURUM_TEST_WORKER_ENV = previousEnvironment;
   }
 });
 
@@ -940,20 +1232,29 @@ test("turns a temporary D1 failure into a bounded resource-owned 503", async () 
   }
 });
 
-test("soaks mixed reads without framework fallback or 5xx responses", async () => {
+test("soaks mixed reads with stable declared availability and no framework fallback", async () => {
   const oldLog = console.log;
   console.log = () => {};
   try {
-    const routes = [
-      "/api/status", "/api/audit", "/api/audit-briefs",
-      "/api/audit-stories", "/api/audit-decisions",
-      "/api/learning", "/api/market-chart",
-    ];
+    let expected;
+    let gitSha;
     for (let cycle = 0; cycle < 100; cycle += 1) {
-      const responses = await Promise.all(routes.map(path => invoke(path)));
-      assert.ok(responses.every(response => response.status === 200));
-      assert.ok(responses.every(response => response.headers.get("x-aurum-resource") !== "unmatched-api"));
-      await Promise.all(responses.map(response => response.arrayBuffer()));
+      const responses = await Promise.all(mixedReadRoutes.map(path => invoke(path)));
+      if (cycle === 0) {
+        assert.equal(responses[0].status, 200, `/api/status: ${(await responses[0].clone().text()).slice(0, 256)}`);
+        gitSha = responses[0].headers.get("x-aurum-git-sha");
+        expected = mixedReadExpectations(isPreviewBuild, await responses[0].clone().json(), gitSha);
+      }
+      for (const [index, response] of responses.entries()) {
+        const path = mixedReadRoutes[index];
+        await assertMixedReadPayload(response, path, expected.get(path));
+        assert.equal(response.headers.get("x-aurum-route"), path, `cycle ${cycle}: ${path}`);
+        assert.equal(response.headers.get("x-aurum-resource"), path.slice(5), `cycle ${cycle}: ${path}`);
+        assert.equal(response.headers.get("x-aurum-git-sha"), gitSha, `cycle ${cycle}: ${path}`);
+        assert.equal(response.headers.get("x-aurum-worker-version"), "test-worker-version", path);
+        assert.equal(response.headers.get("x-aurum-failure-stage"),
+          expected.get(path).status === 503 ? "route_handler" : null, `cycle ${cycle}: ${path}`);
+      }
     }
   } finally {
     console.log = oldLog;
