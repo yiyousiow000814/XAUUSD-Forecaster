@@ -197,8 +197,11 @@ def _qualification_entrypoint():
         _owned_existing_path(entry)
         _require_target_revision(root)
         return entry
-    if entry.name == 'bootstrap_news_projection.py':
-        if entry != SOURCE_ROOT / 'scripts/bootstrap_news_projection.py':
+    if entry.name in {'bootstrap_news_projection.py', 'retained_news_bootstrap.py'}:
+        retained = entry.name == 'retained_news_bootstrap.py'
+        declared_caller = values.get('BOOTSTRAP_CALLER_PATH', '')
+        if (retained and (not declared_caller or entry != Path(os.path.abspath(declared_caller)))
+                or not retained and entry != SOURCE_ROOT / 'scripts/bootstrap_news_projection.py'):
             raise RuntimeError('FIXTURE_QUALIFICATION_PATH_UNDECLARED')
         expected = json.loads(values.get('BOOTSTRAP_ARGUMENTS_JSON', 'null'))
         if not isinstance(expected, list) or sys.argv[1:] != expected:
@@ -211,7 +214,18 @@ def _qualification_entrypoint():
         if not any(row == {'origin': pairs['--version-host'][0], 'method': 'POST',
                            'path_query': '/api/news-index'} for row in declarations):
             raise RuntimeError('FIXTURE_QUALIFICATION_ORIGIN_UNDECLARED')
-        state_root = Path(DOCUMENT['runtime_root']) / '.local/forward'
+        if retained:
+            caller = _owned_existing_path(entry)
+            with caller.open('rb') as stream:
+                raw = stream.read(65537)
+            if (not raw or len(raw) > 65536
+                    or hashlib.sha256(raw).hexdigest() != values.get('BOOTSTRAP_CALLER_SHA256')):
+                raise RuntimeError('FIXTURE_QUALIFICATION_SCRIPT_MISMATCH')
+            if '--source-database' in pairs or not values.get('BOOTSTRAP_STATE_ROOT'):
+                raise RuntimeError('FIXTURE_QUALIFICATION_PATH_UNDECLARED')
+            state_root = _owned_existing_path(values['BOOTSTRAP_STATE_ROOT'])
+        else:
+            state_root = Path(DOCUMENT['runtime_root']) / '.local/forward'
         state = Path(os.path.abspath(pairs['--state-file'][0]))
         if (state.parent != state_root or state.suffix != '.json'
                 or '--source-database' in pairs and Path(os.path.abspath(pairs['--source-database'][0]))
@@ -222,6 +236,8 @@ def _qualification_entrypoint():
         _owned_existing_path(state_root)
         if state.is_symlink() or state.is_junction():
             raise RuntimeError('FIXTURE_QUALIFICATION_REPARSE_DENIED')
+        if retained:
+            _owned_existing_path(state.with_name(state.stem + '-generation.capture'))
         if '--source-database' in pairs:
             _owned_existing_path(pairs['--source-database'][0])
         _require_target_revision(SOURCE_ROOT)

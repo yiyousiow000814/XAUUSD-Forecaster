@@ -137,6 +137,11 @@ def test_qualification_business_boundary_executes_exact_git_paths_and_http(reque
     shutil.copyfile(source / "scripts/check_deferred_projection_parity.py", bundle / "check_deferred_projection_parity.py")
     bootstrap_config = owned / "sync.json"
     bootstrap_config.write_text("{}", encoding="utf-8")
+    retained_root = owned / "retained"
+    (retained_root / "bootstrap-generation.capture").mkdir(parents=True)
+    retained_caller = owned / "retained_news_bootstrap.py"
+    retained_caller.write_text("# Sealed fixture caller identity\n", encoding="utf-8")
+    retained_caller_sha = hashlib.sha256(retained_caller.read_bytes()).hexdigest()
     captured = []
     class Provider(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -217,6 +222,20 @@ def test_qualification_business_boundary_executes_exact_git_paths_and_http(reque
         assert boundary._qualification_entrypoint()==Path(sys.argv[0])
         sys.argv[2]={str(owned.parent / 'outside.json')!r}
         reject(boundary._qualification_entrypoint,'FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
+        retained_args = list({bootstrap_args!r})
+        retained_args[retained_args.index('--state-file') + 1] = {str(retained_root / 'bootstrap.json')!r}
+        boundary.DOCUMENT['values'].update(BOOTSTRAP_CALLER_PATH={str(retained_caller)!r},
+            BOOTSTRAP_CALLER_SHA256={retained_caller_sha!r}, BOOTSTRAP_STATE_ROOT={str(retained_root)!r},
+            BOOTSTRAP_ARGUMENTS_JSON=__import__('json').dumps(retained_args))
+        sys.argv=[{str(retained_caller)!r}, *retained_args]
+        assert boundary._qualification_entrypoint()==Path(sys.argv[0])
+        boundary.DOCUMENT['values']['BOOTSTRAP_CALLER_SHA256']='0'*64
+        reject(boundary._qualification_entrypoint,'FIXTURE_QUALIFICATION_SCRIPT_MISMATCH')
+        boundary.DOCUMENT['values']['BOOTSTRAP_CALLER_SHA256']={retained_caller_sha!r}
+        boundary.DOCUMENT['values']['BOOTSTRAP_STATE_ROOT']={str(link)!r}
+        reject(boundary._qualification_entrypoint,'FIXTURE_QUALIFICATION_REPARSE_DENIED')
+        boundary.DOCUMENT['values']['BOOTSTRAP_STATE_ROOT']={str(outside)!r}
+        reject(boundary._qualification_entrypoint,'FIXTURE_QUALIFICATION_PATH_UNDECLARED')
         sys.argv=[{str(bundle / 'check_deferred_projection_parity.py')!r},'--runtime-root',{str(runtime)!r},'--producer-root',{str(runtime)!r},
             '--version-id',{worker!r},'--git-sha',{revision!r},'--producer-revision',{revision!r},
             '--required-after','2026-09-07T00:00:00+00:00','--observe-attempt','a'*32,'--route','/api/news-evidence']
@@ -250,6 +269,44 @@ def test_qualification_business_boundary_executes_exact_git_paths_and_http(reque
     finally:
         cleanup_http()
         cleanup_junction()
+
+
+def test_connected_worker_session_budget_reconciles_actual_manifest():
+    manifest_path = ROOT / "web/worker-validation-manifest.json"
+    declaration = {
+        "schema": "connected-recovery-session-v1",
+        "input_sha256": {"manifest": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+                         "capture": "a" * 64, "plan": "b" * 64, "resource_evidence": "c" * 64},
+        "bootstrap": {"index_count": 7186, "detail_count": 7186,
+                      "index_batches": 1797, "detail_batches": 899},
+        "news_evidence": {"records": 1908, "pages": 239},
+        "phases": {"setup": 2, "cpu": 470, "static": 17, "qualification_reads": 91,
+                   "migration": 7, "bootstrap": 3374, "news_evidence": 568,
+                   "heartbeat": 91, "deferred_audit": 4, "observe": 124, "inspection": 2},
+        "maximum_commands": 4750,
+    }
+    code = "\n".join((
+        "import assert from 'node:assert/strict';",
+        f"import {{sessionCommandBudget}} from {json.dumps((ROOT / 'tests/fixtures/connected_worker_adapter.mjs').as_uri())};",
+        f"const plan={json.dumps(declaration)};",
+        "assert.equal(sessionCommandBudget().maximum_commands,1024);",
+        "assert.equal(sessionCommandBudget(plan).maximum_commands,4750);",
+        "for (const change of [p=>p.maximum_commands++,p=>p.phases.bootstrap++,p=>p.phases.extra=1]) {",
+        "const p=structuredClone(plan);change(p);assert.throws(()=>sessionCommandBudget(p),{code:'WORKER_ADAPTER_SESSION_FORMULA_MISMATCH'});}",
+        "for (const change of [p=>p.bootstrap.detail_count=10001,p=>p.bootstrap.index_batches=1,p=>p.news_evidence.pages=238,p=>p.news_evidence.records=true]) {",
+        "const p=structuredClone(plan);change(p);assert.throws(()=>sessionCommandBudget(p),{code:'WORKER_ADAPTER_SESSION_COUNTS_INVALID'});}",
+        "for(const key of ['manifest','capture','plan','resource_evidence']){",
+        "const p=structuredClone(plan);p.input_sha256[key]='invalid';assert.throws(()=>sessionCommandBudget(p),{code:'WORKER_ADAPTER_SESSION_IDENTITY_INVALID'});}",
+        "const smaller=structuredClone(plan);Object.assign(smaller.bootstrap,{index_count:8,detail_count:8,index_batches:2,detail_batches:1});",
+        "smaller.phases.bootstrap=8;smaller.maximum_commands=1384;assert.equal(sessionCommandBudget(smaller).maximum_commands,1384);",
+        "console.log('BOUNDED_SESSION_FORMULAS_PASSED');",
+    ))
+    result = subprocess.run([shutil.which("node"), "--import",
+        (ROOT / "web/tests/register-cloudflare-worker-loader.mjs").as_uri(), "--input-type=module", "-e", code],
+        cwd=ROOT, env=_isolated_windows_environment(), stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+    assert result.returncode == 0, result.stderr
+    assert 'BOUNDED_SESSION_FORMULAS_PASSED' in result.stderr
 
 
 def test_connected_asset_provider_uses_built_redirects_and_rejects_unknown_rules(tmp_path):

@@ -35,9 +35,11 @@ import { syncBuiltinESMExports } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { D1TestDatabase } from "../../web/tests/d1-test-database.mjs";
+import { NEWS_PROJECTION_MAX_ITEMS, NEWS_INDEX_MAX_BATCH_ITEMS, NEWS_DETAIL_MAX_BATCH_ITEMS } from "../../web/app/api/_shared/news-projection-store.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const MAX_COMMANDS = 1024;
+let maximumCommands = MAX_COMMANDS;
 const MAX_BODY_BYTES = 800_000;
 const MAX_RESPONSE_BYTES = 2_000_000;
 const MAX_LINE_BYTES = 1_100_000;
@@ -301,6 +303,54 @@ async function invokeWorker(target, request) {
   }
 }
 
+export function sessionCommandBudget(declaration) {
+  if (declaration === undefined) return { maximum_commands: MAX_COMMANDS };
+  if (!declaration || declaration.schema !== "connected-recovery-session-v1"
+    || Buffer.byteLength(JSON.stringify(declaration)) > 8192) fail("WORKER_ADAPTER_SESSION_BUDGET_INVALID");
+  const raw = readFileSync(contained(ROOT, ["web", "worker-validation-manifest.json"], { limit: 150_000 }));
+  const manifest = JSON.parse(raw.toString("utf8"));
+  const hashes = declaration.input_sha256;
+  if (!hashes || hashes.manifest !== sha256(raw)
+    || ![hashes.capture, hashes.plan, hashes.resource_evidence].every(validDigest)
+    || manifest.schema_version !== 4 || manifest.cpu_evidence_policy?.version !== "worker-cpu-policy-v2") {
+    fail("WORKER_ADAPTER_SESSION_IDENTITY_INVALID");
+  }
+  const bootstrap = declaration.bootstrap, resource = declaration.news_evidence;
+  const bounded = (value, minimum, maximum) => Number.isSafeInteger(value) && value >= minimum && value <= maximum;
+  if (!bootstrap || !resource || bootstrap.index_count !== bootstrap.detail_count
+    || !bounded(resource.records, 0, NEWS_PROJECTION_MAX_ITEMS)
+    || !bounded(resource.pages, Math.ceil(resource.records / 8), Math.max(1, resource.records))) {
+    fail("WORKER_ADAPTER_SESSION_COUNTS_INVALID");
+  }
+  for (const [kind, batchSize] of [["index", NEWS_INDEX_MAX_BATCH_ITEMS], ["detail", NEWS_DETAIL_MAX_BATCH_ITEMS]]) {
+    const count = bootstrap[kind + "_count"], batches = bootstrap[kind + "_batches"];
+    if (!bounded(count, 0, NEWS_PROJECTION_MAX_ITEMS)
+      || !bounded(batches, Math.ceil(count / batchSize), count)) fail("WORKER_ADAPTER_SESSION_COUNTS_INVALID");
+  }
+  const policy = manifest.cpu_evidence_policy;
+  const directed = manifest.routes.filter(route => route.cpu_required).reduce((total, route) => total
+    + Math.max(1, route.scenarios?.length ?? 0) * (route.warmup_samples + route.acceptance_samples + policy.reserve_acceptance), 0);
+  const batches = bootstrap.index_batches + bootstrap.detail_batches;
+  // This is one declared 2700s rehearsal, including the real 900s Observe.
+  // Counts come from bounded input plans; no production CPU/quota is changed.
+  const phases = { setup: 2, cpu: directed + 16 + policy.headroom_top_up_acceptance + policy.outlier_confirmation_acceptance,
+    static: manifest.static_assets.length + manifest.static_assets.filter(row => row.redirect_path).length,
+    qualification_reads: 37 + 3 * 4 + 2 * 20 + 2, migration: 7,
+    bootstrap: Math.max(1, Math.ceil(batches / 4)) + batches + 4,
+    // Normal 300-second polling may perform eight bounded cleanup requests
+    // before its unchanged fast return, including the initial poll.
+    news_evidence: 2 * resource.pages + 10 + (1 + 2700 / 300) * 8,
+    heartbeat: 1 + 2700 / 30,
+    deferred_audit: 4, observe: 4 * (1 + 900 / 30), inspection: 2 };
+  const maximum = Object.values(phases).reduce((sum, value) => sum + value, 0);
+  if (!Number.isSafeInteger(maximum) || declaration.maximum_commands !== maximum
+    || Object.keys(declaration.phases ?? {}).length !== Object.keys(phases).length
+    || Object.entries(phases).some(([name, value]) => declaration.phases[name] !== value)) {
+    fail("WORKER_ADAPTER_SESSION_FORMULA_MISMATCH");
+  }
+  return { maximum_commands: maximum, phases, input_sha256: hashes };
+}
+
 async function initialize(command) {
   if (initialized || database) fail("WORKER_ADAPTER_ALREADY_INITIALIZED");
   if (command.origin !== "https://connected-worker.invalid"
@@ -311,6 +361,7 @@ async function initialize(command) {
     || (command.defer_migration !== undefined && command.defer_migration !== MIGRATION)) {
     fail("WORKER_ADAPTER_CONFIG_INVALID");
   }
+  const sessionBudget = sessionCommandBudget(command.session_budget);
   origin = command.origin;
   for (const item of command.workers) {
     if (!["stable", "candidate"].includes(item.role) || workers.has(item.role)
@@ -355,7 +406,9 @@ async function initialize(command) {
     await readBoundedBody(probe);
   }
   initialized = true;
+  maximumCommands = sessionBudget.maximum_commands;
   return { state: "READY", evidence: "ISOLATED_WORKER_SQLITE_NOT_CLOUDFLARE_CPU",
+    session_budget: sessionBudget,
     migrations_sha256: migrationsDigest, capabilities_sql_sha256: capabilityDigest,
     migration_applied: migrationApplied,
     workers: [...workers.values()].map(({ role, git_sha, worker_version_id, entry_sha256, bundleVerified, inputsVerified }) =>
@@ -453,7 +506,7 @@ try {
     while (true) {
       const newline = buffered.indexOf(10);
       if (newline < 0) break;
-      if (newline > MAX_LINE_BYTES || ++count > MAX_COMMANDS) fail("WORKER_ADAPTER_COMMAND_BOUND");
+      if (newline > MAX_LINE_BYTES || ++count > maximumCommands) fail("WORKER_ADAPTER_COMMAND_BOUND");
       const line = buffered.subarray(0, newline);
       buffered = buffered.subarray(newline + 1);
       try {
