@@ -7648,9 +7648,9 @@ def test_migration_renewal_rejects_broken_root_receipt_digest(tmp_path) -> None:
         tmp_path,
         _expired_migration_acceptance_body()
         + "$path=Get-CoordinatedMigrationRootReceiptPath $root.receipt_digest;"
-        "$saved=Get-Content $path -Raw|ConvertFrom-ReleaseControlJson;"
+        "$saved=Get-Content -LiteralPath $path -Raw|ConvertFrom-ReleaseControlJson;"
         "$saved.evidence.database_name='tampered';"
-        "$saved|ConvertTo-Json -Depth 12|Set-Content $path;"
+        "$saved|ConvertTo-Json -Depth 12|Set-Content -LiteralPath $path;"
         "$reason='';try{Ensure-CoordinatedMigrationQualification "
         "$candidate $stable $files|Out-Null}catch{$reason=$_.Exception.Message};"
         "Write-Output $reason",
@@ -7666,9 +7666,9 @@ def test_migration_renewal_chain_tampering_fails_closed(tmp_path) -> None:
         + "$qualification=Ensure-CoordinatedMigrationQualification $candidate $stable $files;"
         "$digest=$qualification.receipt.receipt_digest;"
         "$path=Get-CoordinatedMigrationRenewalReceiptPath $digest;"
-        "$saved=Get-Content $path -Raw|ConvertFrom-ReleaseControlJson;"
+        "$saved=Get-Content -LiteralPath $path -Raw|ConvertFrom-ReleaseControlJson;"
         "$saved.previous_migration_renewal_digest=('9'*64);"
-        "$saved|ConvertTo-Json -Depth 16|Set-Content $path;"
+        "$saved|ConvertTo-Json -Depth 16|Set-Content -LiteralPath $path;"
         "$reason='';try{Ensure-CoordinatedMigrationQualification "
         "$candidate $stable $files|Out-Null}catch{$reason=$_.Exception.Message};"
         "Write-Output $reason",
@@ -9839,7 +9839,7 @@ def _stale_access_reuse_ready_for_renewal(ttl_setup: str = "") -> str:
         "repository_artifacts=[ordered]@{auth='same'}}}};"
         "$null=Invoke-CandidateAccessQualificationReuse;$state=Get-ReleaseControlState;"
         "$candidate=$state.candidate;$reusePath=Get-AccessQualificationReuseReceiptPath $candidate.validation_key;"
-        "$reuse=Get-Content $reusePath -Raw -Encoding UTF8|ConvertFrom-ReleaseControlJson;"
+        "$reuse=Get-Content -LiteralPath $reusePath -Raw -Encoding UTF8|ConvertFrom-ReleaseControlJson;"
         "$staleAt=[DateTimeOffset]::UtcNow.AddHours(-3);"
         "$reuse.verified_at=$staleAt.ToString('o');"
         "$reuse.expires_at=$staleAt.Add($accessMachineReceiptMaxAge).ToString('o');"
@@ -9852,11 +9852,11 @@ def _stale_access_reuse_ready_for_renewal(ttl_setup: str = "") -> str:
         "provider_inspection_receipt_digest=$reuse.provider_inspection_receipt_digest;"
         "changed_access_artifacts=@($reuse.changed_access_artifacts)};"
         "$reuse.receipt_digest=Get-AccessQualificationReuseReceiptDigest $reuseCore;"
-        "$reuse|ConvertTo-Json -Depth 16|Set-Content $reusePath -Encoding UTF8;"
+        "$reuse|ConvertTo-Json -Depth 16|Set-Content -LiteralPath $reusePath -Encoding UTF8;"
         "$candidate.access_qualification.receipt_digest=$reuse.receipt_digest;"
         "$candidate.validation.auth_inspection.receipt_digest=$reuse.receipt_digest;"
         "$state.candidate=$candidate;Write-ReleaseControlState $state;"
-        "$oldReuseBytes=Get-Content $reusePath -Raw -Encoding UTF8;"
+        "$oldReuseBytes=Get-Content -LiteralPath $reusePath -Raw -Encoding UTF8;"
     )
 
 
@@ -9901,7 +9901,7 @@ def test_stale_machine_access_evidence_renews_without_new_human_acceptance(
         + _cloudflare_access_read_stubs()
         + "$receipt=Ensure-AccessQualificationMachineReceipt $candidate;"
         "$new=Assert-AccessQualificationMachineReceipt $candidate;"
-        "$reuseUnchanged=(Get-Content $reusePath -Raw -Encoding UTF8)-ceq$oldReuseBytes;"
+        "$reuseUnchanged=(Get-Content -LiteralPath $reusePath -Raw -Encoding UTF8)-ceq$oldReuseBytes;"
         "$renewalFiles=@(Get-ChildItem $accessQualificationRenewalReceiptRoot -File).Count;"
         "$humanEvents=([regex]::Matches((Get-Content $releaseHistoryPath -Raw),"
         "'CANDIDATE_ACCESS_BOUNDARY_ACCEPTED')).Count;"
@@ -9945,7 +9945,7 @@ def test_new_candidate_renews_from_complete_historical_machine_chain(
         + _mock_candidate_finalizer_pass()
         + "$first=Ensure-AccessQualificationMachineReceipt $candidate;"
         "$firstPath=Get-AccessQualificationRenewalReceiptPath $first.receipt_digest;"
-        "$firstBytes=Get-Content $firstPath -Raw -Encoding UTF8;"
+        "$firstBytes=Get-Content -LiteralPath $firstPath -Raw -Encoding UTF8;"
         "$state=Get-ReleaseControlState;$old=$state.candidate;"
         "$new=New-ReleaseIdentity -GitSha ('c'*40) "
         "-WorkerVersionId 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' "
@@ -9961,7 +9961,7 @@ def test_new_candidate_renews_from_complete_historical_machine_chain(
         "function Get-AccessEvidenceUtcNow{return $script:accessNow};"
         "$renewed=Invoke-CandidateAccessQualificationReuse;"
         "$verified=Assert-AccessQualificationMachineReceipt $renewed;"
-        "$priorUnchanged=(Get-Content $firstPath -Raw -Encoding UTF8)-ceq$firstBytes;"
+        "$priorUnchanged=(Get-Content -LiteralPath $firstPath -Raw -Encoding UTF8)-ceq$firstBytes;"
         "$files=@(Get-ChildItem $accessQualificationRenewalReceiptRoot -File).Count;"
         '$provider=Get-AccessProviderInspectionReceiptByDigest '
         '$verified.provider_inspection_receipt_digest;'
@@ -9984,7 +9984,7 @@ def test_new_candidate_renewal_does_not_fall_back_past_corrupt_machine_tip(
         + "$first=Ensure-AccessQualificationMachineReceipt $candidate;"
         "$firstPath=Get-AccessQualificationRenewalReceiptPath $first.receipt_digest;"
         "$first.receipt_digest=('f'*64);"
-        "$first|ConvertTo-Json -Depth 16|Set-Content $firstPath -Encoding UTF8;"
+        "$first|ConvertTo-Json -Depth 16|Set-Content -LiteralPath $firstPath -Encoding UTF8;"
         "$reason='';try{Get-LatestHistoricalAccessMachineAuthority|Out-Null}"
         "catch{$reason=$_.Exception.Message};Write-Output $reason",
     )
@@ -10150,10 +10150,10 @@ def test_access_renewal_requires_human_review_for_change_revert_or_history_gap(
 @pytest.mark.parametrize(
     "mutation",
     (
-        "$reuse.receipt_digest=('f'*64);$reuse|ConvertTo-Json -Depth 16|Set-Content $reusePath -Encoding UTF8;",
+        "$reuse.receipt_digest=('f'*64);$reuse|ConvertTo-Json -Depth 16|Set-Content -LiteralPath $reusePath -Encoding UTF8;",
         "$root=Get-HistoricalAccessBoundaryReceiptByDigest $reuse.prior_access_receipt_digest;"
         "$root.receipt_digest=('f'*64);$rootPath=Get-AccessBoundaryReceiptPath $root.validation_key;"
-        "$root|ConvertTo-Json -Depth 16|Set-Content $rootPath -Encoding UTF8;",
+        "$root|ConvertTo-Json -Depth 16|Set-Content -LiteralPath $rootPath -Encoding UTF8;",
     ),
 )
 def test_access_renewal_fails_closed_for_corrupt_chain_or_human_root(
@@ -10180,7 +10180,7 @@ def test_access_renewal_fails_closed_when_previous_machine_link_is_broken(tmp_pa
         "$core=Get-AccessQualificationRenewalCore $bad;"
         "$bad.receipt_digest=Get-AccessQualificationRenewalReceiptDigest $core;"
         "$badPath=Get-AccessQualificationRenewalReceiptPath $bad.receipt_digest;"
-        "$bad|ConvertTo-Json -Depth 16|Set-Content $badPath -Encoding UTF8;"
+        "$bad|ConvertTo-Json -Depth 16|Set-Content -LiteralPath $badPath -Encoding UTF8;"
         "$candidate.access_qualification.receipt_digest=$bad.receipt_digest;"
         "$candidate.validation.auth_inspection.receipt_digest=$bad.receipt_digest;"
         "$reason='';try{Assert-AccessQualificationMachineReceipt $candidate|Out-Null}"
