@@ -63,17 +63,49 @@ function Invoke-RestMethod {
     Microsoft.PowerShell.Utility\Invoke-RestMethod @PSBoundParameters -MaximumRedirection 0
 }
 function Get-ScheduledTask {
+    [CmdletBinding()]
     param($TaskName,$TaskPath)
     $config = Get-IsolatedRuntimeConfiguration
     $prefix = 'XAUUSD-Contract-' + $config.fixture_id
-    if ($TaskName -cnotin @($prefix+'-Main',$prefix+'-Guard') -or
+    if ($TaskName -cnotin @(($prefix+'-Main'),($prefix+'-Guard')) -or
         ($TaskPath -and $TaskPath -cne $config.task_namespace)) { throw 'CONNECTED_TASK_UNDECLARED' }
-    [pscustomobject]@{TaskName=$TaskName;TaskPath=$config.task_namespace;State='Ready';Settings=[pscustomobject]@{Enabled=$true}}
+    $path = Join-Path ([string]$config.owned_root) ('scheduler-' + $TaskName + '.json')
+    Assert-IsolatedConfigurationPath -Path $path
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or
+        (Get-Item -LiteralPath $path).Length -gt 4096) { throw 'CONNECTED_TASK_STATE_UNDECLARED' }
+    $task = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-ReleaseControlJson
+    if ($task.TaskName -cne $TaskName -or $task.TaskPath -cne $config.task_namespace -or
+        $task.Settings.Enabled -isnot [bool] -or $task.State -cnotin @('Ready','Disabled')) {
+        throw 'CONNECTED_TASK_STATE_UNDECLARED'
+    }
+    return $task
 }
 function Start-ScheduledTask { throw 'CONNECTED_TASK_START_UNDECLARED' }
-function Stop-ScheduledTask { param($TaskName,$TaskPath); $null = Get-ScheduledTask @PSBoundParameters }
-function Enable-ScheduledTask { throw 'CONNECTED_TASK_ENABLE_UNDECLARED' }
-function Disable-ScheduledTask { throw 'CONNECTED_TASK_DISABLE_UNDECLARED' }
+function Stop-ScheduledTask {
+    [CmdletBinding()]
+    param($TaskName,$TaskPath)
+    # No scheduler-launched process exists in this declared fixture. The actual
+    # installer still inventories/waits for real guard and Watchdog processes.
+    $null = Get-ScheduledTask @PSBoundParameters
+}
+function Enable-ScheduledTask {
+    [CmdletBinding()]
+    param($TaskName,$TaskPath)
+    $task = Get-ScheduledTask @PSBoundParameters
+    $task.Settings.Enabled = $true; $task.State = 'Ready'
+    $path = Join-Path ([string](Get-IsolatedRuntimeConfiguration).owned_root) ('scheduler-' + $TaskName + '.json')
+    Write-ControlCenterJsonAtomic -Path $path -Value $task -Depth 5
+    return Get-ScheduledTask @PSBoundParameters
+}
+function Disable-ScheduledTask {
+    [CmdletBinding()]
+    param($TaskName,$TaskPath)
+    $task = Get-ScheduledTask @PSBoundParameters
+    $task.Settings.Enabled = $false; $task.State = 'Disabled'
+    $path = Join-Path ([string](Get-IsolatedRuntimeConfiguration).owned_root) ('scheduler-' + $TaskName + '.json')
+    Write-ControlCenterJsonAtomic -Path $path -Value $task -Depth 5
+    return Get-ScheduledTask @PSBoundParameters
+}
 function Register-ScheduledTask { throw 'CONNECTED_TASK_REGISTER_UNDECLARED' }
 function Unregister-ScheduledTask { throw 'CONNECTED_TASK_UNREGISTER_UNDECLARED' }
 function Get-AvailableLoopbackPort {
@@ -97,9 +129,10 @@ function Start-Process {
         Join-Path $controlRoot 'xauusd_watchdog_launcher.vbs'), (
         Join-Path $controlRoot 'xauusd_control_center.ps1'), $config.runtime_root, $config.repository_root
     # Match the entire actual Start-WatchdogReplacement command, including its
-    # optional transaction UUID; no ignored UNC, unquoted or trailing argument.
-    $pattern = '^' + [regex]::Escape($expectedArguments) + '( "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")?$'
-    if ([string]$FilePath -ceq $expectedExecutable -and [string]$ArgumentList -cmatch $pattern -and
+    # optional installer GUID (N format); no ignored UNC, unquoted or trailing
+    # argument. No-transaction restart remains the same exact four paths.
+    $pattern = '^' + [regex]::Escape($expectedArguments) + '( "[0-9a-fA-F]{32}")?$'
+    if ([string]$FilePath -ieq $expectedExecutable -and [string]$ArgumentList -cmatch $pattern -and
         -not $WorkingDirectory -and -not $RedirectStandardOutput -and -not $RedirectStandardError) {
         Assert-IsolatedConfigurationPath -Path $controlRoot
         return Microsoft.PowerShell.Management\Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WindowStyle Hidden -PassThru:$PassThru

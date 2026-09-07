@@ -194,7 +194,7 @@ def test_isolated_configuration_owner_matches_python_and_powershell(tmp_path, mo
             assert "ISOLATED_CONFIGURATION_" in result.stderr
 
 
-@pytest.mark.parametrize("case", ["valid", "mapped-loopback", "business-api", "business-preflight", "tampered", "critical-override", "top-level-code", "incomplete"])
+@pytest.mark.parametrize("case", ["valid", "mapped-loopback", "business-api", "business-preflight", "installer-external", "tampered", "critical-override", "top-level-code", "incomplete"])
 def test_connected_external_adapter_preserves_control_owners(tmp_path, monkeypatch, case, request):
     owned = _new_sealed_fixture_root(request)
     identity = owned.name.removeprefix("xauusd-rehearsal-")
@@ -254,6 +254,43 @@ def test_connected_external_adapter_preserves_control_owners(tmp_path, monkeypat
     if case == "tampered":
         template.write_text(payload + "\n# unaccepted bytes\n", encoding="utf-8")
     business_body = ""
+    if case == "installer-external":
+        control = Path(config["repository_root"]) / ".local/runtime-control"
+        control.mkdir(parents=True)
+        # This unit probe verifies the real VBS process and exact argument
+        # vector only. It does not claim to execute the Watchdog lifecycle.
+        (control / "xauusd_control_center.ps1").write_text("# launcher-vector probe\n", encoding="utf-8")
+        (control / "xauusd_watchdog_launcher.vbs").write_text(
+            'If WScript.Arguments.Count <> 3 And WScript.Arguments.Count <> 4 Then WScript.Quit 8\n'
+            'If WScript.Arguments.Count = 4 Then\n'
+            ' If WScript.Arguments(3) <> "' + "a" * 32 + '" Then WScript.Quit 9\n'
+            'End If\nWScript.Quit 0\n', encoding="utf-8")
+        for suffix in ("Main", "Guard"):
+            name = f"XAUUSD-Contract-{identity}-{suffix}"
+            (owned / f"scheduler-{name}.json").write_text(json.dumps({"TaskName": name,
+                "TaskPath": config["task_namespace"], "State": "Ready", "Settings": {"Enabled": True}}), encoding="utf-8")
+        business_body = f"""
+        $repositoryRoot='{config['repository_root']}';$moduleRoot='{config['runtime_root']}'
+        $taskName='XAUUSD-Contract-{identity}-Main';$guardTaskName='XAUUSD-Contract-{identity}-Guard'
+        $saved=Suspend-ControlPlaneSupervision -CollectorClockRecovery
+        foreach($name in @($taskName,$guardTaskName)){{
+            if((Get-ScheduledTask -TaskName $name).Settings.Enabled){{throw 'TASK_NOT_QUIESCED'}}
+        }}
+        Wait-ControlPlaneGuardQuiesced
+        Restore-ControlPlaneSupervision -State $saved
+        foreach($name in @($taskName,$guardTaskName)){{
+            if(-not (Get-ScheduledTask -TaskName $name).Settings.Enabled){{throw 'TASK_NOT_RESTORED'}}
+        }}
+        $denied=$false
+        try{{Disable-ScheduledTask -TaskName 'XAUUSD-Forecaster-Autostart'}}
+        catch{{if($_.Exception.Message -cne 'CONNECTED_TASK_UNDECLARED'){{throw}};$denied=$true}}
+        if(-not $denied){{throw 'PRODUCTION_TASK_ACCEPTED'}}
+        foreach($transaction in @('',('a'*32))){{
+            $child=Start-WatchdogReplacement -PassThru -InstallTransactionId $transaction
+            try{{if(-not $child.WaitForExit(5000) -or $child.ExitCode -ne 0){{throw 'INSTALLER_VECTOR_FAILED'}}}}
+            finally{{if(-not $child.HasExited){{$null=Stop-NativeProcessTree -Process $child}};$child.Dispose()}}
+        }}
+        """
     business_case = case in ("business-api", "business-preflight")
     if business_case:
         with socket.socket() as reservation:
@@ -380,6 +417,8 @@ def test_connected_external_adapter_preserves_control_owners(tmp_path, monkeypat
         f". '{ROOT / 'scripts/control_center_provider_adapters.ps1'}'\n"
         f". '{ROOT / 'scripts/control_center_runtime_supervision.ps1'}'\n"
         f". '{ROOT / 'scripts/control_center_transaction_engine.ps1'}'\n"
+        f". '{ROOT / 'scripts/control_center_persistence_gateway.ps1'}'\n"
+        f". '{ROOT / 'scripts/control_center_install.ps1'}'\n"
         "$prior=@{};Get-ChildItem function:|ForEach-Object{$prior[$_.Name]=$_.Definition}\n"
         "foreach($definition in @(Get-IsolatedExternalAdapterDefinitions)){"
         "Set-Item -Path ('function:'+ $definition.name) -Value ([scriptblock]::Create($definition.body))}\n"
@@ -415,9 +454,9 @@ def test_connected_external_adapter_preserves_control_owners(tmp_path, monkeypat
                       if shell == "powershell.exe" else Path(shutil.which(shell)).parent)
         shell_environment["PSModulePath"] = str(shell_home / "Modules")
         result = subprocess.run([shell, "-NoProfile", "-File", str(script)], capture_output=True,
-            text=True, env=shell_environment, timeout=22 if business_case else 10,
+            text=True, env=shell_environment, timeout=22 if business_case or case == "installer-external" else 10,
             creationflags=subprocess.CREATE_NO_WINDOW)
-        if case in ("valid", "mapped-loopback", "business-api", "business-preflight"):
+        if case in ("valid", "mapped-loopback", "business-api", "business-preflight", "installer-external"):
             assert result.returncode == 0, result.stderr
             assert result.stdout.strip() == "OWNERS_PRESERVED_UNKNOWN_DENIED"
         else:

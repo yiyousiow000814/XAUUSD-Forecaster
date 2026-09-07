@@ -982,6 +982,10 @@ accepts only the complete named external-function set, not arbitrary startup
 code or lifecycle overrides. Provider adapters return raw provider data through
 the existing acceptance consumers; unknown operations fail before external I/O.
 Tests compare all non-external function definitions before and after composition.
+The scheduler fixture keeps only its two declared task states in owned files,
+so suspension and restoration are visible to every child without registering
+production tasks. Replacement still runs the real hidden WScript command and
+uses the install owner's exact 32-hex transaction ID.
 
 The real quote launcher uses this same explicit configuration before build or
 credential reads. Its code root must equal the declared runtime root, mutable
