@@ -30,6 +30,8 @@ BRIEF_EVIDENCE_LIMIT = 60
 BRIEF_INPUT_TOKEN_BUDGET = 12_000
 BRIEF_OUTPUT_TOKEN_BUDGET = 8_192
 BRIEF_BACKLOG_LIMIT = 14
+BRIEF_DATE_DISCOVERY_CONTRACT = "brief-date-discovery-v1"
+BRIEF_DATE_DISCOVERY_CACHE_BYTES = 4_096
 # The existing 30-minute news/Brief progress boundary is the policy quantum.
 # Adaptive refresh uses several multiples of it rather than one debounce timer.
 BRIEF_PROGRESS_BOUNDARY = timedelta(minutes=30)
@@ -914,6 +916,140 @@ def brief_dates_to_process(
     """Return current receipt day plus a bounded newest-first unfinished backlog."""
     instant = now or datetime.now(UTC)
     current_day = instant.astimezone(KUALA_LUMPUR).date().isoformat()
+    if type(limit) is not int or not 1 <= limit <= BRIEF_BACKLOG_LIMIT:
+        return _uncached_brief_dates(connection, instant, current_day, limit)
+
+    # Compute the token and dates in one read snapshot. Publishing only after
+    # releasing it avoids upgrading a stale WAL reader into a writer. A late
+    # cache still carries the exact old token, so a newer source rejects it.
+    caller_transaction = connection.in_transaction
+    connection.execute("SAVEPOINT brief_date_discovery")
+    try:
+        result, publication = _discover_brief_dates(connection, instant, current_day, limit)
+        connection.execute("RELEASE SAVEPOINT brief_date_discovery")
+    except BaseException:
+        connection.execute("ROLLBACK TO SAVEPOINT brief_date_discovery")
+        connection.execute("RELEASE SAVEPOINT brief_date_discovery")
+        raise
+    # Never commit or publish a caller's potentially uncommitted source. Its
+    # normal next call after commit can establish the cache from committed data.
+    if publication is not None and not caller_transaction:
+        busy_timeout = int(connection.execute("PRAGMA busy_timeout").fetchone()[0])
+        try:
+            # A disposable optimization must not queue behind a business writer.
+            # This connection is thread-affine; restore its normal writer budget.
+            connection.execute("PRAGMA busy_timeout=0")
+            with connection:
+                connection.execute(
+                    """UPDATE daily_news_brief_refresh_state SET date_discovery_cache_json=?
+                       WHERE brief_date=?""", (publication, current_day),
+                )
+        except sqlite3.OperationalError as error:
+            # Only this optional publication can yield to an ordinary writer or
+            # readonly consumer. Source reads, extended errors, AUTH and damaged
+            # storage are not converted into cache misses or successful work.
+            if getattr(error, "sqlite_errorcode", None) not in {
+                sqlite3.SQLITE_READONLY, sqlite3.SQLITE_BUSY,
+            }:
+                raise
+        finally:
+            connection.execute(f"PRAGMA busy_timeout={busy_timeout}")
+    return result
+
+
+def _brief_date_source_token(connection: sqlite3.Connection) -> list | None:
+    """Read bounded scalar tails, never payloads, from the immutable inputs."""
+    inputs = (
+        ("news_revisions", ("source", "source_item_id", "revision_number",
+                            "content_hash", "collector_first_seen_time")),
+        ("daily_news_brief_finalizations_v1", (
+            "brief_date", "revision_number", "final_status", "cutoff_at", "finalized_at")),
+        ("daily_news_brief_finalization_corrections_v1", (
+            "correction_id", "brief_date", "recovery_version", "revision_number",
+            "final_status", "cutoff_at", "finalized_at")),
+    )
+    tails = []
+    for table, columns in inputs:
+        scalars = ",".join(
+            column if column == "revision_number" else
+            f"CASE WHEN length(CAST({column} AS BLOB))<=512 THEN {column} END"
+            for column in columns
+        )
+        row = connection.execute(
+            f"SELECT rowid,{scalars} FROM {table} ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        if row is not None and any(
+            value is None and column != "revision_number"
+            for column, value in zip(columns, row[1:])
+        ):
+            return None
+        tails.append(list(row) if row is not None else None)
+    return tails
+
+
+def _discover_brief_dates(
+    connection: sqlite3.Connection, instant: datetime, current_day: str, limit: int,
+) -> tuple[list[str], str | None]:
+    try:
+        state = connection.execute(
+            """SELECT CASE WHEN length(CAST(date_discovery_cache_json AS BLOB))<=?
+                       THEN date_discovery_cache_json END
+               FROM daily_news_brief_refresh_state WHERE brief_date=?""",
+            (BRIEF_DATE_DISCOVERY_CACHE_BYTES, current_day),
+        ).fetchone()
+    except sqlite3.OperationalError as error:
+        if str(error) != "no such column: date_discovery_cache_json":
+            raise
+        state = None  # Old schema: ordinary selector, not an implicit migration.
+    sqlite_day = connection.execute(
+        "SELECT date(julianday(?),'+8 hours')", (_iso(instant),),
+    ).fetchone()[0]
+    # Never synthesize a lifecycle row to hold a cache. Within one agreeing day,
+    # newly due receipts can only add today, which is already always returned.
+    if state is None or sqlite_day != current_day:
+        return _uncached_brief_dates(connection, instant, current_day, limit), None
+    epoch = connection.execute(
+        """SELECT CASE WHEN length(CAST(value AS BLOB))<=128 THEN value END
+           FROM runtime_metadata WHERE key='FORWARD_EPOCH'""",
+    ).fetchone()
+    tails = _brief_date_source_token(connection)
+    if epoch is None or epoch[0] is None or tails is None:
+        return _uncached_brief_dates(connection, instant, current_day, limit), None
+    key = [BRIEF_DATE_DISCOVERY_CONTRACT, str(epoch[0]), BRIEF_RECOVERY_VERSION,
+           current_day, limit, tails]
+    if state[0]:
+        try:
+            cached = json.loads(str(state[0]))
+            dates = cached["dates"]
+            observed = datetime.fromisoformat(cached["observed_at"])
+            if (
+                set(cached) == {"key", "dates", "observed_at"}
+                and cached["key"] == key and observed.tzinfo is not None
+                and _iso(observed) == cached["observed_at"]
+                and observed.astimezone(KUALA_LUMPUR).date().isoformat() == current_day
+                and observed <= instant.astimezone(UTC)
+                and isinstance(dates, list) and 1 <= len(dates) <= limit
+                and dates[0] == current_day
+                and all(isinstance(day, str) and date.fromisoformat(day).isoformat() == day
+                        and day < current_day for day in dates[1:])
+                and dates[1:] == sorted(set(dates[1:]), reverse=True)
+            ):
+                return dates, None
+        except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
+            pass  # A disposable cache cannot make invalid state authoritative.
+    dates = _uncached_brief_dates(connection, instant, current_day, limit)
+    serialized = json.dumps(
+        {"key": key, "observed_at": _iso(instant), "dates": dates},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    return dates, (
+        serialized if len(serialized.encode("utf-8")) <= BRIEF_DATE_DISCOVERY_CACHE_BYTES else None
+    )
+
+
+def _uncached_brief_dates(
+    connection: sqlite3.Connection, instant: datetime, current_day: str, limit: int,
+) -> list[str]:
     rows = connection.execute(
         """WITH receipt_days AS (
              SELECT DISTINCT substr(datetime(collector_first_seen_time,'+8 hours'),1,10) AS day
@@ -1324,6 +1460,7 @@ def daily_brief_summary(
                 "next_retry_at": None,
                 "is_final": False, "total_brief_days": total}
     result = dict(row)
+    result.pop("date_discovery_cache_json", None)
     latest_failure = (
         connection.execute(
             """SELECT failure_evidence_json FROM daily_news_brief_failures_v1
