@@ -1,5 +1,6 @@
 """Source truth, incomplete-analysis visibility and generated drift contracts."""
 import importlib.util
+import hashlib
 import io
 import json
 import os
@@ -635,19 +636,458 @@ def test_typescript_runtime_is_explicit_in_each_existing_required_owner():
     assert 'npm ci' not in architecture  # only the bounded one-package owner acquires the tool
 
 
-def test_generated_transport_compacts_without_discarding_facts_or_raising_bound(typescript_source):
+def test_generated_transport_composes_complete_facts_with_explicit_finite_budgets(typescript_source, tmp_path):
     index = compiler.compile_index(typescript_source)
-    content = compiler.render(index)['critical-index.json']
-    assert json.loads(content) == index
-    assert len(content.encode()) < len(compiler.encoded(index).encode())
+    outputs = compiler.render(index)
+    generated = tmp_path / 'bounded-generated'
+    compiler.write_outputs(generated, outputs)
+    assert compiler.read_generated_index(generated) == index
+    manifest = json.loads(outputs['critical-index.json'])
+    assert manifest['schema'] == compiler.TRANSPORT_VERSION
+    assert sum(row['bytes'] for row in manifest['parts']) + len(outputs['critical-index.json'].encode()) <= compiler.MAXIMUM_TRANSPORT_BYTES
+    assert len(manifest['parts']) <= compiler.MAXIMUM_PARTS
+    assert sum(manifest['counts'].values()) <= compiler.MAXIMUM_RECORDS
     assert compiler.MAXIMUM_INDEX_BYTES == 2 * 1024 * 1024
+    assert compiler.MAXIMUM_TRANSPORT_BYTES == 3 * 1024 * 1024
+    assert compiler.MAXIMUM_PARTS == 32
+    assert compiler.MAXIMUM_RECORDS == 10_240
     index['unexpected_large_fact'] = 'x' * compiler.MAXIMUM_INDEX_BYTES
     with pytest.raises(ValueError, match='ARCHITECTURE_INDEX_BUDGET_EXCEEDED'):
         compiler.render(index)
 
 
+def _decode_with_real_node(generated):
+    loader = (ROOT / 'web/build/architecture-current-source.mjs').as_uri()
+    result = subprocess.run(['node', '--input-type=module', '-e',
+        f'import {{readCurrentSourceIndex}} from {json.dumps(loader)}; '
+        'process.stdout.write(JSON.stringify(readCurrentSourceIndex(process.argv[1])));',
+        str(generated / 'critical-index.json')], capture_output=True, encoding='utf-8',
+        errors='strict', timeout=15,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize('target_family', ['manifest', 'part'])
+@pytest.mark.parametrize('fault', [
+    'unchanged', 'replaced_before_validation', 'replaced_after_validation',
+    'fstat_failure', 'lstat_failure', 'realpath_failure', 'directory_redirect',
+])
+def test_real_node_reader_validates_opened_identity_before_reading(source, tmp_path, target_family, fault):
+    index = compiler.compile_index(source)
+    generated = tmp_path / 'descriptor-wire'
+    compiler.write_outputs(generated, compiler.render(index))
+    manifest = json.loads((generated / 'critical-index.json').read_text())
+    target = generated / ('critical-index.json' if target_family == 'manifest' else manifest['parts'][0]['file'])
+    expected = tmp_path / 'expected.json'
+    expected.write_text(compiler.canonical(index), encoding='utf-8')
+    # Isolated real Node process: wrap its built-in fs boundary only to place
+    # actual renames/junctions at a deterministic point. The production module
+    # is imported unchanged; no test-only filesystem interface is exported.
+    script = r'''
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { dirname, join, resolve } from 'node:path';
+const [loader, manifest, target, expectedPath, fault] = process.argv.slice(1);
+const { readCurrentSourceIndex } = await import(loader);
+const original = Object.fromEntries(['openSync', 'fstatSync', 'lstatSync', 'realpathSync',
+  'readSync', 'closeSync', 'renameSync', 'writeFileSync', 'readFileSync', 'symlinkSync', 'unlinkSync']
+  .map(name => [name, fs[name]]));
+const expected = JSON.parse(original.readFileSync(expectedPath, 'utf8'));
+const directory = dirname(target);
+const parkedFile = join(dirname(directory), 'owned-parked.json');
+const parkedDirectory = join(dirname(directory), 'owned-parked-directory');
+let targetFd, targetClosed = false, swappedFile = false, redirected = false;
+let reads = 0, closes = 0, allocations = 0;
+const operations = [];
+const watched = fd => targetFd !== undefined && fd === targetFd && !targetClosed;
+const replaceFile = () => {
+  original.renameSync(target, parkedFile); swappedFile = true;
+  original.writeFileSync(target, 'replacement is deliberately not valid JSON');
+};
+fs.openSync = (path, ...args) => {
+  if (resolve(path) === target && fault === 'directory_redirect') {
+    // Redirect after the reader's initial root check but before acquisition:
+    // Windows does not permit renaming a directory containing this open fd.
+    original.renameSync(directory, parkedDirectory); redirected = true;
+    original.symlinkSync(parkedDirectory, directory, process.platform === 'win32' ? 'junction' : 'dir');
+  }
+  const fd = original.openSync(path, ...args);
+  if (resolve(path) === target) {
+    targetFd = fd; operations.push('open');
+    if (fault === 'replaced_before_validation') replaceFile();
+  }
+  return fd;
+};
+fs.fstatSync = (fd, ...args) => {
+  if (watched(fd)) {
+    operations.push('fstat');
+    if (fault === 'fstat_failure') throw new Error('INJECTED_FSTAT_FAILURE');
+  }
+  return original.fstatSync(fd, ...args);
+};
+fs.lstatSync = (path, ...args) => {
+  if (resolve(path) === target) {
+    operations.push('lstat');
+    if (fault === 'lstat_failure') throw new Error('INJECTED_LSTAT_FAILURE');
+  }
+  return original.lstatSync(path, ...args);
+};
+fs.realpathSync = (path, ...args) => {
+  if (resolve(path) === target) {
+    operations.push('realpath');
+    if (fault === 'realpath_failure') throw new Error('INJECTED_REALPATH_FAILURE');
+  }
+  return original.realpathSync(path, ...args);
+};
+fs.readSync = (fd, ...args) => {
+  if (watched(fd)) {
+    reads += 1; operations.push('read');
+    if (fault === 'replaced_after_validation' && !swappedFile) replaceFile();
+  }
+  return original.readSync(fd, ...args);
+};
+fs.closeSync = (fd, ...args) => {
+  if (watched(fd)) { closes += 1; targetClosed = true; }
+  return original.closeSync(fd, ...args);
+};
+const allocate = Buffer.alloc;
+Buffer.alloc = (...args) => { if (watched(targetFd)) allocations += 1; return allocate(...args); };
+syncBuiltinESMExports();
+try {
+  if (fault === 'unchanged' || fault === 'replaced_after_validation') {
+    assert.deepEqual(readCurrentSourceIndex(manifest), expected);
+    assert.ok(reads > 0); assert.equal(allocations, 1);
+    assert.deepEqual(operations.slice(0, 4), ['open', 'fstat', 'lstat', 'realpath']);
+  } else {
+    const reason = fault.endsWith('_failure')
+      ? `INJECTED_${fault.toUpperCase()}` : 'ARCHITECTURE_INDEX_TRANSPORT_INVALID';
+    assert.throws(() => readCurrentSourceIndex(manifest), error => error.message === reason);
+    assert.equal(reads, 0); assert.equal(allocations, 0);
+  }
+  assert.notEqual(targetFd, undefined, 'path validation never precedes descriptor acquisition');
+  assert.equal(closes, 1, 'every acquired descriptor is closed, including validation failures');
+  assert.throws(() => original.fstatSync(targetFd), error => error.code === 'EBADF');
+  process.stdout.write(JSON.stringify({ fault, reads, allocations, closes, operations }));
+} finally {
+  Buffer.alloc = allocate;
+  Object.assign(fs, original); syncBuiltinESMExports();
+  if (redirected) { original.unlinkSync(directory); original.renameSync(parkedDirectory, directory); }
+  if (swappedFile) { original.unlinkSync(target); original.renameSync(parkedFile, target); }
+}
+'''
+    result = subprocess.run(['node', '--input-type=module', '-e', script,
+        (ROOT / 'web/build/architecture-current-source.mjs').as_uri(),
+        str(generated / 'critical-index.json'), str(target), str(expected), fault],
+        capture_output=True, encoding='utf-8', errors='strict', timeout=15,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+    assert result.returncode == 0, result.stderr
+    measurement = json.loads(result.stdout)
+    assert measurement['closes'] == 1
+    assert compiler.read_generated_index(generated) == index, 'owned fixture restored after the race'
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX FIFO/NOFOLLOW semantics; Windows uses the real junction family')
+@pytest.mark.parametrize('target_family', ['manifest', 'part'])
+@pytest.mark.parametrize('replacement', ['fifo', 'symlink'])
+def test_real_node_reader_rejects_nonregular_open_without_blocking(source, tmp_path, target_family, replacement):
+    index = compiler.compile_index(source)
+    generated = tmp_path / 'fifo-wire'
+    compiler.write_outputs(generated, compiler.render(index))
+    manifest = json.loads((generated / 'critical-index.json').read_text())
+    target = generated / ('critical-index.json' if target_family == 'manifest' else manifest['parts'][0]['file'])
+    fifo = tmp_path / 'owned-fifo'
+    if replacement == 'fifo':
+        os.mkfifo(fifo)
+    else:
+        fifo.symlink_to(str(fifo) + '.original')
+    script = r'''
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const [loader, manifest, target, fifo, replacement] = process.argv.slice(1);
+const {readCurrentSourceIndex} = await import(loader);
+let reads = 0, closes = 0, targetFd;
+const original = { open: fs.openSync, read: fs.readSync, close: fs.closeSync };
+fs.openSync = (path, ...args) => {
+  if (path === target) {
+    fs.renameSync(target, `${fifo}.original`);
+    fs.renameSync(fifo, target);
+    targetFd = original.open(path, ...args);
+    return targetFd;
+  }
+  return original.open(path, ...args);
+};
+fs.readSync = (fd, ...args) => { if (fd === targetFd) reads += 1; return original.read(fd, ...args); };
+fs.closeSync = (fd, ...args) => { if (fd === targetFd) closes += 1; return original.close(fd, ...args); };
+syncBuiltinESMExports();
+if (replacement === 'fifo') {
+  assert.throws(() => readCurrentSourceIndex(manifest), /ARCHITECTURE_INDEX_TRANSPORT_INVALID/);
+  assert.notEqual(targetFd, undefined); assert.equal(closes, 1);
+} else {
+  assert.throws(() => readCurrentSourceIndex(manifest), error => error.code === 'ELOOP');
+  assert.equal(targetFd, undefined); assert.equal(closes, 0);
+}
+assert.equal(reads, 0);
+process.stdout.write(JSON.stringify({ rejected: true, reads, closes }));
+'''
+    result = subprocess.run(['node', '--input-type=module', '-e', script,
+        (ROOT / 'web/build/architecture-current-source.mjs').as_uri(),
+        str(generated / 'critical-index.json'), str(target), str(fifo), replacement],
+        capture_output=True, encoding='utf-8', errors='strict', timeout=3)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)['rejected'] is True
+
+
+def test_python_parts_real_node_preserves_exact_order_duplicates_and_unicode(source, tmp_path):
+    index = compiler.compile_index(source)
+    index['inputs']['scripts/other.py'] = 'b' * 64
+    first = dict(index['observed']['edges'][0], **{'\U00010000': '中文\U0001f600', '\ue000': 2, '10': 10, '2': 2})
+    other = dict(first, source='scripts/other.py::owner')
+    # Deliberately interleave sources and preserve a duplicate with tied sort
+    # keys. A regroup/sort, Set, UTF-16 key sort or JS object-key order is wrong.
+    index['observed']['edges'] = [other, first, dict(first), other, first]
+    original = json.loads(compiler.canonical(index))
+    outputs = compiler.render(index)
+    generated = tmp_path / 'unicode-wire'
+    compiler.write_outputs(generated, outputs)
+    assert compiler.read_generated_index(generated) == original
+    assert _decode_with_real_node(generated) == original
+    assert index == original, 'transport must not mutate logical source facts'
+    assert outputs == compiler.render(index), 'parts and logical identity are deterministic'
+
+
+def test_source_growth_splits_only_at_complete_records_and_retains_all_facts(source, tmp_path):
+    index = compiler.compile_index(source)
+    edge = index['observed']['edges'][0]
+    index['observed']['edges'] = [dict(edge, statement='中' * 230_000, sequence=i) for i in range(4)]
+    assert len(compiler.canonical(index).encode('utf-8')) > compiler.MAXIMUM_INDEX_BYTES
+    outputs = compiler.render(index)
+    manifest = json.loads(outputs['critical-index.json'])
+    assert len(manifest['parts']) == 2
+    assert len({part['source_path'] for part in manifest['parts']}) == 1
+    assert all(len(value.encode('utf-8')) <= compiler.MAXIMUM_INDEX_BYTES
+               for name, value in outputs.items() if name.endswith('.json'))
+    generated = tmp_path / 'large-wire'
+    compiler.write_outputs(generated, outputs)
+    assert compiler.read_generated_index(generated) == index
+    assert _decode_with_real_node(generated) == index
+    # Shrinking a source retires only the exact old-manifest-owned part.
+    reduced = dict(index, observed=dict(index['observed'], edges=index['observed']['edges'][:1]))
+    compiler.write_outputs(generated, compiler.render(reduced))
+    assert compiler.read_generated_index(generated) == reduced
+    assert not (generated / 'critical-facts-00001.json').exists()
+
+
+@pytest.mark.parametrize('kind,reason', [
+    ('record', 'ARCHITECTURE_INDEX_BUDGET_EXCEEDED'),
+    ('total', 'ARCHITECTURE_TRANSPORT_TOTAL_BUDGET_EXCEEDED'),
+    ('parts', 'ARCHITECTURE_TRANSPORT_PART_BUDGET_EXCEEDED'),
+    ('records', 'ARCHITECTURE_TRANSPORT_RECORD_BUDGET_EXCEEDED'),
+    ('float', 'ARCHITECTURE_TRANSPORT_VALUE_INVALID'),
+    ('unsafe_integer', 'ARCHITECTURE_TRANSPORT_VALUE_INVALID'),
+])
+def test_transport_growth_has_independent_hard_limits(source, kind, reason):
+    index = compiler.compile_index(source)
+    edge = index['observed']['edges'][0]
+    if kind == 'record':
+        index['observed']['edges'] = [dict(edge, statement='x' * compiler.MAXIMUM_INDEX_BYTES)]
+    elif kind == 'total':
+        index['observed']['edges'] = [dict(edge, statement='x' * 810_000) for _ in range(4)]
+    elif kind == 'parts':
+        paths = [f'scripts/owner_{i}.py' for i in range(33)]
+        index['inputs'].update({path: 'a' * 64 for path in paths})
+        index['observed']['edges'] = [dict(edge, source=path + '::owner') for path in paths]
+    elif kind == 'records':
+        index['observed']['edges'] = [edge] * (compiler.MAXIMUM_RECORDS + 1)
+    else:
+        index['numeric_fact'] = 0.5 if kind == 'float' else 9_007_199_254_740_992
+    with pytest.raises(ValueError, match=reason):
+        compiler.render(index)
+
+
+def test_producer_stops_serializing_the_record_tail_when_aggregate_bytes_are_exhausted(source, monkeypatch):
+    index = compiler.compile_index(source)
+    edge = dict(index['observed']['edges'][0], statement='x' * 500_000)
+    index['observed']['edges'] = [edge] * 9
+    original, ordinals = compiler.canonical, []
+    def spy(value, *args, **kwargs):
+        if isinstance(value, list) and len(value) == 2 and isinstance(value[0], int):
+            ordinals.append(value[0])
+        return original(value, *args, **kwargs)
+    monkeypatch.setattr(compiler, 'canonical', spy)
+    with pytest.raises(ValueError, match='ARCHITECTURE_TRANSPORT_TOTAL_BUDGET_EXCEEDED'):
+        compiler.render_transport(index)
+    # Symbols are encoded first; inspect only the statement-bearing edge tail.
+    edge_ordinals = ordinals[-7:]
+    assert edge_ordinals == list(range(7))
+    assert 7 not in ordinals and 8 not in ordinals
+
+
+@pytest.mark.parametrize('character,count,accepted', [('中', 200_000, True),
+    ('x', 2 * 1024 * 1024, False), ('中', 1_000_000, False), ('\x00', 1_000_000, False)],
+    ids=['valid-unicode', 'oversized-ascii', 'oversized-utf8', 'escaped-controls'])
+def test_large_logical_strings_never_require_one_unbounded_escaped_allocation(monkeypatch, character, count, accepted):
+    text = character * count
+    original = json.dumps
+    expected = original({'text': text}, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n' if accepted else None
+    def bounded_dump(value, *args, **kwargs):
+        assert value is not text, 'do not hand the complete oversized logical string to the scalar encoder'
+        return original(value, *args, **kwargs)
+    monkeypatch.setattr(json, 'dumps', bounded_dump)
+    if accepted:
+        assert compiler.canonical({'text': text}, compiler.MAXIMUM_INDEX_BYTES) == expected
+    else:
+        with pytest.raises(ValueError, match='ARCHITECTURE_INDEX_BUDGET_EXCEEDED'):
+            compiler.canonical({'text': text}, compiler.MAXIMUM_INDEX_BYTES)
+
+
+@pytest.mark.parametrize('kind,reason', [
+    ('parts', 'ARCHITECTURE_TRANSPORT_PART_BUDGET_EXCEEDED'),
+    ('records', 'ARCHITECTURE_TRANSPORT_RECORD_BUDGET_EXCEEDED'),
+    ('total', 'ARCHITECTURE_TRANSPORT_TOTAL_BUDGET_EXCEEDED'),
+])
+def test_consumer_rejects_aggregate_budget_before_any_part_read(source, tmp_path, monkeypatch, kind, reason):
+    index = compiler.compile_index(source)
+    manifest = json.loads(compiler.render(index)['critical-index.json'])
+    if kind == 'parts':
+        manifest['parts'] *= 33
+    elif kind == 'records':
+        manifest['counts']['edges'] = compiler.MAXIMUM_RECORDS + 1
+    else:
+        descriptor = manifest['parts'][0]
+        descriptor['bytes'] = compiler.MAXIMUM_INDEX_BYTES
+        manifest['parts'].append(dict(descriptor, file='critical-facts-00001.json'))
+        manifest['counts'] = {family: count * 2 for family, count in descriptor['counts'].items()}
+    generated = tmp_path / 'rejected-wire'
+    generated.mkdir()
+    (generated / 'critical-index.json').write_text(compiler.canonical(manifest), encoding='utf-8', newline='\n')
+    actual_read, reads = compiler._read_generated, []
+    def bounded_read(directory, name, *args):
+        reads.append(name)
+        return actual_read(directory, name, *args)
+    monkeypatch.setattr(compiler, '_read_generated', bounded_read)
+    with pytest.raises(ValueError, match=reason):
+        compiler.read_generated_index(generated)
+    assert reads == ['critical-index.json']
+
+
+@pytest.mark.parametrize('kind', ['duplicate', 'gap', 'source', 'digest', 'unknown_output'])
+def test_transport_identity_cannot_replace_order_or_discard_unknown_files(source, tmp_path, kind):
+    index = compiler.compile_index(source)
+    generated = tmp_path / 'corrupt-wire'
+    compiler.write_outputs(generated, compiler.render(index))
+    manifest_path = generated / 'critical-index.json'
+    manifest = json.loads(manifest_path.read_text())
+    descriptor = manifest['parts'][0]
+    path = generated / descriptor['file']
+    part = json.loads(path.read_text())
+    if kind == 'unknown_output':
+        unknown = generated / 'not-generator-owned.txt'
+        unknown.write_text('preserve me')
+        with pytest.raises(ValueError, match='ARCHITECTURE_GENERATED_DRIFT'):
+            compiler.read_generated_index(generated)
+        with pytest.raises(ValueError, match='ARCHITECTURE_GENERATED_UNOWNED_OUTPUT'):
+            compiler.write_outputs(generated, compiler.render(index))
+        assert unknown.read_text() == 'preserve me'
+        return
+    if kind == 'duplicate': part['observed']['edges'][1][0] = part['observed']['edges'][0][0]
+    elif kind == 'gap': part['observed']['edges'][0][0] = manifest['counts']['edges']
+    elif kind == 'source': part['source_path'] = 'other.py'
+    elif kind == 'digest': manifest['logical_sha256'] = '0' * 64
+    raw = compiler.canonical(part).encode('utf-8')
+    path.write_bytes(raw)
+    descriptor.update(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+    manifest_path.write_text(compiler.canonical(manifest), encoding='utf-8', newline='\n')
+    with pytest.raises(ValueError, match='ARCHITECTURE_TRANSPORT_'):
+        compiler.read_generated_index(generated)
+
+
+def test_exact_generated_bytes_survive_real_git_autocrlf_checkout(source, tmp_path):
+    checkout = tmp_path / 'checkout'
+    checkout.mkdir()
+    shutil.copyfile(ROOT / '.gitattributes', checkout / '.gitattributes')
+    generated = checkout / 'architecture/generated'
+    index = compiler.compile_index(source)
+    compiler.write_outputs(generated, compiler.render(index))
+    before = {path.name: path.read_bytes() for path in generated.glob('*.json')}
+    options = dict(cwd=checkout, capture_output=True, check=True, timeout=5,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+    subprocess.run(['git', 'init', '--quiet'], **options)
+    subprocess.run(['git', 'config', 'core.autocrlf', 'true'], **options)
+    subprocess.run(['git', 'add', '.gitattributes', 'architecture/generated'], **options)
+    for name, raw in before.items():
+        (generated / name).write_bytes(raw.replace(b'\n', b'\r\n'))
+    subprocess.run(['git', 'checkout-index', '--all', '--force'], **options)
+    assert {name: (generated / name).read_bytes() for name in before} == before
+    assert _decode_with_real_node(generated) == index
+
+
+@pytest.mark.parametrize('interruption', ['torn_part', 'torn_manifest', 'next_part_before_manifest'])
+def test_fresh_producer_repairs_its_exact_outputs_without_trusting_partial_old_bytes(source, tmp_path, interruption):
+    original = compiler.compile_index(source)
+    generated = tmp_path / 'recoverable-wire'
+    compiler.write_outputs(generated, compiler.render(original))
+    target = json.loads(compiler.canonical(original))
+    if interruption == 'next_part_before_manifest':
+        target['inputs']['scripts/other.py'] = 'a' * 64
+        target['observed']['edges'].append(dict(target['observed']['edges'][0], source='scripts/other.py::owner'))
+    outputs = compiler.render(target)
+    if interruption == 'torn_manifest':
+        (generated / 'critical-index.json').write_text('{torn', encoding='utf-8')
+    elif interruption == 'torn_part':
+        (generated / 'critical-facts-00000.json').write_text('{torn', encoding='utf-8')
+    else:
+        (generated / 'critical-facts-00001.json').write_text(outputs['critical-facts-00001.json'], encoding='utf-8', newline='\n')
+    with pytest.raises((ValueError, KeyError)):
+        compiler.read_generated_index(generated)
+    compiler.write_outputs(generated, outputs)
+    assert compiler.read_generated_index(generated) == target
+    assert _decode_with_real_node(generated) == target
+
+
+def test_retired_part_requires_its_own_proven_identity_before_deletion(source, tmp_path):
+    original = compiler.compile_index(source)
+    extended = json.loads(compiler.canonical(original))
+    extended['inputs']['scripts/other.py'] = 'a' * 64
+    extended['observed']['edges'].append(dict(extended['observed']['edges'][0], source='scripts/other.py::owner'))
+    generated = tmp_path / 'retirement-wire'
+    compiler.write_outputs(generated, compiler.render(extended))
+    retired = generated / 'critical-facts-00001.json'
+    # Same-sized valid JSON is no longer the old manifest's proven artifact.
+    content = retired.read_bytes().replace(b'owner', b'other')
+    retired.write_bytes(content)
+    manifest_before = (generated / 'critical-index.json').read_bytes()
+    with pytest.raises(ValueError, match='ARCHITECTURE_TRANSPORT_PART_IDENTITY_INVALID'):
+        compiler.write_outputs(generated, compiler.render(original))
+    assert retired.read_bytes() == content
+    assert (generated / 'critical-index.json').read_bytes() == manifest_before
+
+
+def test_generated_directory_junction_cannot_redirect_producer_or_python_consumer(source, tmp_path):
+    physical, alias = tmp_path / 'physical-generated', tmp_path / 'alias-generated'
+    outputs = compiler.render(compiler.compile_index(source))
+    compiler.write_outputs(physical, outputs)
+    before = {path.name: path.read_bytes() for path in physical.iterdir()}
+    if os.name == 'nt':
+        subprocess.run(['cmd.exe', '/c', 'mklink', '/J', str(alias), str(physical)],
+            check=True, capture_output=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
+    else:
+        alias.symlink_to(physical, target_is_directory=True)
+    try:
+        with pytest.raises(ValueError, match='ARCHITECTURE_OUTPUT_PATH_ESCAPE'):
+            compiler.read_generated_index(alias)
+        with pytest.raises(ValueError, match='ARCHITECTURE_OUTPUT_PATH_ESCAPE'):
+            compiler.write_outputs(alias, outputs)
+        assert {path.name: path.read_bytes() for path in physical.iterdir()} == before
+    finally:
+        if os.name == 'nt': alias.rmdir()
+        else: alias.unlink()
+
+
 def test_current_news_worker_audit_view_keeps_independent_transports_and_dynamic_binding():
-    index = json.loads((ROOT / 'architecture/generated/critical-index.json').read_text(encoding='utf-8'))
+    index = compiler.read_generated_index(ROOT / 'architecture/generated')
     roots = set(index['allowed']['views']['news-worker-audit']['roots'])
     symbols = {row['id'] for row in index['observed']['symbols']}
     edges = index['observed']['edges']

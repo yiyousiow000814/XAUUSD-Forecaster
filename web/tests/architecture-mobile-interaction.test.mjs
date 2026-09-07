@@ -22,9 +22,9 @@ import {
   lockArchitecturePageScroll,
   restoreArchitecturePageScroll,
 } from "../app/_lib/architecture-mobile-interaction.ts";
-import { projectCurrentSource } from "../build/architecture-current-source.mjs";
+import { projectCurrentSource, readCurrentSourceIndex } from "../build/architecture-current-source.mjs";
 
-const index = JSON.parse(readFileSync(new URL("../../architecture/generated/critical-index.json", import.meta.url), "utf8"));
+const index = readCurrentSourceIndex(new URL("../../architecture/generated/critical-index.json", import.meta.url));
 const manifest = parseArchitectureManifest(projectCurrentSource(index).manifest);
 assert.ok(manifest);
 const viewSource = readFileSync(new URL("../app/_views/ArchitectureExplorerView.tsx", import.meta.url), "utf8");
