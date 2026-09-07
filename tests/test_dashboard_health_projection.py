@@ -42,17 +42,35 @@ def _open_session(now: datetime, *, closes_in: timedelta = timedelta(hours=1)):
 
 def test_semantic_projection_separates_freshness_and_readiness() -> None:
     now = datetime(2026, 8, 17, 6, 0, tzinfo=UTC)
+    missing = semantic_pipeline_component(None, now=now)
+    assert missing["status"] == "STALE"
+    assert missing["last_success"] is None
+    assert missing["age_seconds"] is None
+    assert missing["reason_codes"] == []
+    assert missing["actionable_failure_counts"] == {}
+
     base = {
         "observed_at": (now - timedelta(seconds=18)).isoformat(),
         "heartbeat_at": (now - timedelta(seconds=10)).isoformat(),
         "status": "UNHEALTHY",
     }
 
-    pending = semantic_pipeline_component({
-        **base,
-        "reason_codes_json": json.dumps(["ACTIONABLE_NEWS_SEMANTICS_PENDING"]),
-    }, now=now)
-    assert (pending["status"], pending["age_seconds"]) == ("WARN", 18)
+    counts = {"pending": 2, "recovering": 1}
+    for reasons in (
+        ["ACTIONABLE_NEWS_SEMANTICS_PENDING"],
+        ["ACTIONABLE_NEWS_SEMANTICS_RECOVERING"],
+        ["ACTIONABLE_NEWS_SEMANTICS_PENDING", "ACTIONABLE_NEWS_SEMANTICS_RECOVERING"],
+    ):
+        for evidence, expected_counts in (
+            ({"reason_codes": reasons, "actionable_failure_counts": counts}, counts),
+            ({"reason_codes_json": json.dumps(reasons),
+              "actionable_failure_counts_json": json.dumps(counts)}, counts),
+            ({"reason_codes_json": json.dumps(reasons)}, {}),
+        ):
+            pending = semantic_pipeline_component({**base, **evidence}, now=now)
+            assert (pending["status"], pending["age_seconds"]) == ("WARN", 18)
+            assert pending["reason_codes"] == reasons
+            assert pending["actionable_failure_counts"] == expected_counts
 
     for reason in ("ANNOTATOR_HEARTBEAT_STALE", "NEWS_COLLECTOR_POLL_MISSING"):
         assert semantic_pipeline_component({
@@ -90,21 +108,33 @@ def test_semantic_projection_separates_freshness_and_readiness() -> None:
         (10, "STARTING", "WARN"),
         (300.1, "STARTING", "STALE"),
         (10, "ERROR", "STALE"),
+        (None, "RUNNING", "STALE"),
+        ("malformed", "RUNNING", "STALE"),
     ],
 )
 def test_collector_projection_uses_bounded_heartbeat_grace(
-    age: float, state: str, expected: str,
+    age: float | str | None, state: str, expected: str,
 ) -> None:
     now = datetime(2026, 8, 18, 8, 40, tzinfo=UTC)
+    heartbeat = _heartbeat(now, state=state)
+    if age is None:
+        heartbeat.pop("last_success")
+    elif isinstance(age, str):
+        heartbeat["last_success"] = age
+    else:
+        heartbeat = _heartbeat(now, age=age, state=state)
 
     component = collector_component(
-        _heartbeat(now, age=age, state=state),
+        heartbeat,
         latest_poll=(now - timedelta(hours=1)).isoformat(),
         now=now,
     )
 
     assert component["status"] == expected
     assert component["source_poll_age_seconds"] == 3600
+    if age is None or isinstance(age, str):
+        assert component["age_seconds"] is None
+        assert component["last_success"] is None
 
 
 @pytest.mark.parametrize(
@@ -192,9 +222,15 @@ def test_decision_projection_waits_through_first_post_reopen_grid() -> None:
     assert stalled["decision_output_status"] == "STALLED"
 
 
-def test_materialized_semantic_health_decodes_current_row() -> None:
+def test_materialized_semantic_health_reads_only_a_known_decision() -> None:
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row
+    statements = []
+    connection.set_trace_callback(statements.append)
+    # Missing decision identity must not query any table, even before it exists.
+    for decision_id in (None, ""):
+        assert materialized_semantic_health(connection, decision_id) is None
+    assert statements == []
     connection.execute(
         """CREATE TABLE news_semantic_health_snapshots_v1 (
                source_decision_id TEXT PRIMARY KEY,
@@ -213,7 +249,10 @@ def test_materialized_semantic_health_decodes_current_row() -> None:
         ),
     )
 
+    statements.clear()
+    assert materialized_semantic_health(connection, "missing-decision") is None
     result = materialized_semantic_health(connection, "decision-1")
+    assert len(statements) == 2
     connection.close()
 
     assert result["reason_codes"] == ["ACTIONABLE_NEWS_SEMANTICS_PENDING"]
