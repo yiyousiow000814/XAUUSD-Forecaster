@@ -296,9 +296,14 @@ def source_path(root, relative):
     return path
 
 
+def parse_python(path, relative):
+    """One Python syntax boundary for the source index and import policy."""
+    return ast.parse(path.read_text(encoding='utf-8-sig'), filename=relative)
+
+
 def extract_python(path, relative):
     """Preserve nested/class qualification; do not guess object dispatch."""
-    tree = ast.parse(path.read_text(encoding='utf-8-sig'), filename=relative)
+    tree = parse_python(path, relative)
     symbols, edges = [], []
 
     class Visitor(ast.NodeVisitor):
