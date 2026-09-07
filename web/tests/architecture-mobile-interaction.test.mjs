@@ -177,6 +177,19 @@ test("mobile 19: node selection issues no duplicate Fit", () => {
   assert.doesNotMatch(viewSource, /NODE_TAP[\s\S]{0,180}FIT_VIEW/);
 });
 
+test("canvas overlays reserve separate control, minimap and information corners", () => {
+  // React Flow panels at the same corner share a z-index and intercept each
+  // other's clicks. Preserve both desktop controls, not a higher z-index cover.
+  assert.match(viewSource, /<Controls position=\{mobile \? "bottom-right" : "top-left"\} showInteractive=\{false\}/);
+  assert.match(viewSource, /\{!mobile \? <MiniMap[^>]*position="bottom-right"[^>]*pannable zoomable/);
+  assert.match(cssSource, /\.legend \{[^}]*left: 14px;[^}]*bottom: 14px;/);
+  assert.match(cssSource, /\.keyboardHint \{[^}]*top: 12px;[^}]*right: 14px;/);
+  // Phone controls stay above the full-width legend; MiniMap keeps its existing
+  // mobile exclusion, including short landscape, rather than stealing targets.
+  assert.match(cssSource, /\.canvas :global\(\.react-flow__controls\) \{ bottom: 58px; \}/);
+  assert.match(viewSource, /max-height: 500px\) and \(max-width: 900px/);
+});
+
 test("mobile 20: visual viewport changes are coalesced and only orientation requests Fit", () => {
   assert.match(viewSource, /window\.cancelAnimationFrame\(frame\)[\s\S]*window\.requestAnimationFrame/);
   assert.match(viewSource, /if \(orientation === orientationRef\.current\) return;[\s\S]*camera\.request\(\{ type: "FIT_VIEW"/);

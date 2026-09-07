@@ -77,6 +77,12 @@ Verify actual transformed targets on desktop, 390x844 and 360x800 Preview surfac
 after initial Fit and at minimum user zoom. Source/layout math is supporting
 evidence, not a substitute for deployed geometry.
 
+Canvas overlays reserve separate hit regions: desktop zoom/Fit controls use the
+top-left, the MiniMap the bottom-right, the legend the bottom-left and keyboard
+hints the top-right. Mobile keeps its existing MiniMap exclusion and controls
+above the legend. Verify actual control clicks as well as target dimensions;
+raising one overlay's z-index must not merely block a different control.
+
 ## Operator-facing time
 
 - Durable records and API payloads retain canonical timezone-aware timestamps.

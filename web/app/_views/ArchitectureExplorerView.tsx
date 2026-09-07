@@ -586,8 +586,8 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
           onPaneClick={() => { if (mobile && interaction.mobilePanel === "NONE") clearPath(); }}
           panOnDrag preventScrolling={!mobile} zoomOnPinch zoomOnScroll={!mobile} proOptions={{ hideAttribution: true }}>
           <Background color="#b7c3c5" gap={22} size={1} />
-          <Controls position="bottom-right" showInteractive={false} />
-          {!mobile ? <MiniMap aria-label="Architecture minimap" pannable zoomable nodeColor={node => {
+          <Controls position={mobile ? "bottom-right" : "top-left"} showInteractive={false} />
+          {!mobile ? <MiniMap aria-label="Architecture minimap" position="bottom-right" pannable zoomable nodeColor={node => {
             const architectureNode = node.data.node as ArchitectureNode | undefined;
             if (!architectureNode) return "#d7e2e0";
             return architectureNode.runtime_state === "PAUSED" ? "#a88b55" : "#137d74";
