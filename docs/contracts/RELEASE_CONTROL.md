@@ -982,3 +982,24 @@ accepts only the complete named external-function set, not arbitrary startup
 code or lifecycle overrides. Provider adapters return raw provider data through
 the existing acceptance consumers; unknown operations fail before external I/O.
 Tests compare all non-external function definitions before and after composition.
+
+The real quote launcher uses this same explicit configuration before build or
+credential reads. Its code root must equal the declared runtime root, mutable
+output must equal that root's `.local/forward/quotes`, and config must equal the
+declared repository's `.local/config`. CLI and secret paths must match the
+declared values exactly, remain under the owned fixture and have no reparse
+ancestors. Missing or conflicting values fail before native execution. A
+declared external broker adapter may produce quote/session inputs only; it is
+not proof of real broker connectivity and cannot produce Collector or release
+success state. Unconfigured production launch authority remains unchanged.
+
+The connected fixture reserves its preflight port through a real bind/release
+on one configuration-declared loopback port. Preflight process arguments and the
+two inline SQLite copy/migration programs must match their actual source owner
+and private destinations before execution. This does not replace preflight,
+installation, lifecycle, or Observe checks.
+Long quote input is bound to the same original scenario deadline across process
+restarts, with a 45-minute external-fixture ceiling (the existing two 15-minute
+startup/Observe budgets, five-minute reload, and bounded preparation/cleanup).
+This is not a production or CI timeout increase; a timed-out scenario remains
+incomplete and its verified owned tree must be cleaned up.

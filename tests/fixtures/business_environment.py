@@ -6,6 +6,7 @@ configuration may fall back to process credentials or the interactive user hive.
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import winreg
@@ -42,11 +43,20 @@ def _configuration():
 DOCUMENT = _configuration()
 sys.dont_write_bytecode = True
 CODE_ROOTS = {SOURCE_ROOT}
+PREFLIGHT_ROOT = None
 if DOCUMENT.get('runtime_root'):
     runtime = Path(DOCUMENT['runtime_root']).resolve()
     if not runtime.is_relative_to(FIXTURE_ROOT):
         raise RuntimeError('FIXTURE_RUNTIME_ROOT_UNDECLARED')
     CODE_ROOTS.add(runtime)
+if DOCUMENT.get('values', {}).get('PREFLIGHT_API_PORT'):
+    revision = DOCUMENT['values'].get('TARGET_SOURCE_REVISION', '')
+    if not re.fullmatch('[0-9a-f]{40}', revision):
+        raise RuntimeError('FIXTURE_PREFLIGHT_REVISION_UNDECLARED')
+    PREFLIGHT_ROOT = Path(DOCUMENT['repository_root']) / '.local/runtime-preflight' / revision
+    if not PREFLIGHT_ROOT.is_relative_to(FIXTURE_ROOT):
+        raise RuntimeError('FIXTURE_PREFLIGHT_ROOT_UNDECLARED')
+    CODE_ROOTS.add(PREFLIGHT_ROOT)
 
 
 def environment_value(name):
@@ -133,13 +143,52 @@ subprocess.run = _run_with_exact_git
 # Explicit old-code external configuration adaptation only. The original source
 # and its Git identity stay intact; this separately hashed adapter is part of
 # the declared execution environment, not an unmodified production execution.
-if DOCUMENT.get('legacy_configuration_revision'):
+if sys.argv[0] == '-c':
+    # These are the two existing controller preflight producers, not arbitrary
+    # inline Python. Bind the full code/argument vector before either can run.
+    if PREFLIGHT_ROOT is None or len(sys.orig_argv) != 5 or sys.orig_argv[1] != '-c':
+        raise RuntimeError('FIXTURE_INLINE_COMMAND_UNDECLARED')
+    owner = (SOURCE_ROOT / 'scripts/control_center_runtime_supervision.ps1').read_text(encoding='utf-8')
+    bodies = {name: re.findall(r'\$' + name + r" = @'\n(.*?)\n'@", owner, re.DOTALL)
+              for name in ('copy', 'migration')}
+    if any(len(rows) != 1 for rows in bodies.values()):
+        raise RuntimeError('FIXTURE_INLINE_SOURCE_UNDECLARED')
+    state = Path(DOCUMENT['runtime_root']) / '.local'
+    allowed = (
+        (bodies['copy'][0], str(state / 'forward/forward-evidence.sqlite3'),
+         str(state / 'preflight/forward-evidence.sqlite3')),
+        (bodies['migration'][0], str(PREFLIGHT_ROOT), str(state / 'preflight/forward-evidence.sqlite3')),
+    )
+    observed = (sys.orig_argv[2].replace('\r\n', '\n'), *sys.orig_argv[3:])
+    if observed not in allowed:
+        raise RuntimeError('FIXTURE_INLINE_COMMAND_UNDECLARED')
+elif DOCUMENT.get('legacy_configuration_revision'):
     # Bind the adapter to the executable entrypoint, not mutable runtime-root
     # placement: target code intentionally runs outside the old code checkout.
-    entrypoint = Path(sys.argv[0]).resolve()
-    code_root = entrypoint.parent.parent
-    if code_root not in CODE_ROOTS or entrypoint.parent != code_root / 'scripts':
+    # Select an exact declared entrypoint lexically before any resolve/stat.
+    # Unknown UNC/reparse paths must not cause a filesystem lookup to reject them.
+    entrypoints = {
+        os.path.normcase(os.path.abspath(root / 'scripts' / name)): root / 'scripts' / name
+        for root in CODE_ROOTS for name in (
+            'run_dashboard_api.py', 'run_dashboard_sync.py', 'run_forward_collector.py',
+            'run_news_annotator.py', 'run_live_broadcast_publisher.py', 'check_production_shape.py',
+            'run_evidence_repair_v2.py',
+        )
+    }
+    entrypoint = entrypoints.get(os.path.normcase(os.path.abspath(sys.argv[0])))
+    if entrypoint is None or entrypoint.resolve() != entrypoint:
         raise RuntimeError('FIXTURE_LEGACY_ENTRYPOINT_UNDECLARED')
+    code_root = entrypoint.parent.parent
+    if entrypoint.name == 'check_production_shape.py' and sys.argv[1:] == [
+            '--status-url', 'http://127.0.0.1:8765/api/critical-status', '--allow-pending-generation-decision']:
+        base = urlsplit(DOCUMENT['values'].get('LOCAL_API_BASE_URL', ''))
+        if (base.scheme != 'http' or base.hostname != '127.0.0.1' or
+                base.port not in DOCUMENT.get('loopback_ports', []) or base.port == 8765 or
+                base.path not in ('', '/') or base.query or base.fragment or base.username):
+            raise RuntimeError('FIXTURE_STATUS_TARGET_UNDECLARED')
+        # The real checker and its result remain unchanged; remap only its
+        # existing exact production URL before argparse or any socket call.
+        sys.argv[2] = f'http://127.0.0.1:{base.port}/api/critical-status'
     observed = subprocess.run([GIT_EXECUTABLE, 'rev-parse', 'HEAD'], cwd=code_root,
         check=True, capture_output=True, text=True, timeout=5,
         creationflags=subprocess.CREATE_NO_WINDOW).stdout.strip()

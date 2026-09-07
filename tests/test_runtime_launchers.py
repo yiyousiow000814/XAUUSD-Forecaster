@@ -100,7 +100,7 @@ def test_control_center_facade_composes_unique_canonical_owners() -> None:
                 f"{name} is defined by both {definitions.get(name)} and {owner_file}"
             )
             definitions[name] = owner_file
-    assert 420 <= len(definitions) <= 450
+    assert set(definitions.values()) == set(owner_files)
 
 
 def test_control_center_owner_boundaries_keep_authority_out_of_presentation() -> None:

@@ -109,6 +109,10 @@ function Get-IsolatedRuntimeConfiguration {
             $uri.Scheme -cnotin @('http', 'https') -or $uri.Host -cnotin @('127.0.0.1', 'localhost', '::1') -or
             $uri.Port -notin $ports -or $uri.UserInfo) { throw 'ISOLATED_CONFIGURATION_ENDPOINT_INVALID' }
     }
+    $config.owned_root = $root
+    foreach ($field in @('runtime_root', 'repository_root', 'profile_root', 'source_root')) {
+        $config.$field = [IO.Path]::GetFullPath([string]$config.$field).TrimEnd('\')
+    }
     return $config
 }
 
@@ -143,7 +147,7 @@ function Get-IsolatedExternalAdapterDefinitions {
     $allowed = @('Invoke-GitHubChecksRead', 'Invoke-WranglerJson', 'Invoke-WranglerDeploymentCommand',
         'Invoke-WebRequest', 'Invoke-RestMethod', 'Get-ScheduledTask', 'Start-ScheduledTask',
         'Stop-ScheduledTask', 'Enable-ScheduledTask', 'Disable-ScheduledTask',
-        'Register-ScheduledTask', 'Unregister-ScheduledTask', 'Start-Process')
+        'Register-ScheduledTask', 'Unregister-ScheduledTask', 'Start-Process', 'Get-AvailableLoopbackPort')
     if ($errors.Count -or $ast.BeginBlock -or $ast.ProcessBlock -or $ast.ParamBlock) {
         throw 'ISOLATED_EXTERNAL_ADAPTER_DEFINITIONS_INVALID'
     }
@@ -157,7 +161,12 @@ function Get-IsolatedExternalAdapterDefinitions {
     }
     # Reject an incomplete boundary rather than allowing an unmatched live call.
     if ($seen.Count -ne $allowed.Count) { throw 'ISOLATED_EXTERNAL_ADAPTER_INCOMPLETE' }
-    foreach ($statement in $ast.EndBlock.Statements) { Write-Output $statement.Extent.Text }
+    foreach ($statement in $ast.EndBlock.Statements) {
+        # Install a validated function body, not a dynamically located module.
+        # The complete function name set and source bytes were checked above.
+        $body = $statement.Body.Extent.Text
+        [pscustomobject]@{ name=$statement.Name; body=$body.Substring(1, $body.Length - 2) }
+    }
 }
 
 function Get-UserEnvironmentValue {

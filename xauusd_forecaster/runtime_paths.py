@@ -101,6 +101,12 @@ def isolated_runtime_configuration() -> dict | None:
         url = urlsplit(value)
         if url.scheme not in {"http", "https"} or url.hostname not in {"127.0.0.1", "localhost", "::1"} or url.port not in ports or url.username:
             raise ValueError("ISOLATED_CONFIGURATION_ENDPOINT_INVALID")
+    # Consumers receive precisely the normalized, reparse-checked locators,
+    # never a raw spelling whose filesystem traversal was not validated.
+    config.update(owned_root=str(root), **dict(zip(
+        ("runtime_root", "repository_root", "profile_root", "source_root"),
+        map(str, declared), strict=True,
+    )))
     return config
 
 

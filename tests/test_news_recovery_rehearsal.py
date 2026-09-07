@@ -12,6 +12,27 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize("case", ["retained", "sealed", "missing-config", "wrong-child", "source-output"])
+def test_recovery_producer_accepts_only_the_declared_existing_copy(tmp_path, monkeypatch, case):
+    from xauusd_forecaster import runtime_paths
+    spec = importlib.util.spec_from_file_location("copy_paths", ROOT / "scripts/rehearse_news_recovery_copy.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    runtime = tmp_path / "profile/XAUUSD-Forecaster-runtime"
+    config = None if case == "missing-config" else {"runtime_root": str(runtime)}
+    monkeypatch.setattr(runtime_paths, "isolated_runtime_configuration", lambda: config)
+    database = (tmp_path / "rehearsal/production-online.sqlite3" if case == "retained" else
+                runtime / ".local/forward/forward-evidence.sqlite3")
+    if case == "wrong-child":
+        database = runtime / ".local/preflight/forward-evidence.sqlite3"
+    output = ROOT / "unexpected.json" if case == "source-output" else tmp_path / "result.json"
+    if case in ("retained", "sealed"):
+        module.validate_copy_paths(database, output, isolated_runtime_copy=case != "retained")
+    else:
+        with pytest.raises(ValueError, match="ISOLATED_COPY_PATH_REQUIRED"):
+            module.validate_copy_paths(database, output, isolated_runtime_copy=True)
+
+
 def test_sqlite_input_identity_includes_committed_wal_and_ignores_reader_shm(tmp_path):
     import sqlite3
     spec = importlib.util.spec_from_file_location("wal_rehearsal", ROOT / "scripts/rehearse_news_recovery_copy.py")

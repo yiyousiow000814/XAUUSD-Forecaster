@@ -252,6 +252,23 @@ def join_owned_threads(threads, timeout=5):
     return all(not thread.is_alive() for thread in threads)
 
 
+def validate_copy_paths(database, output, *, isolated_runtime_copy=False):
+    if database.is_relative_to(ROOT) or output.is_relative_to(ROOT):
+        raise ValueError("ISOLATED_COPY_PATH_REQUIRED")
+    if isolated_runtime_copy:
+        sys.path.insert(0, str(ROOT))
+        from xauusd_forecaster.runtime_paths import isolated_runtime_configuration
+        configuration = isolated_runtime_configuration()
+        if configuration is None or database != (
+                Path(configuration["runtime_root"]) / ".local/forward/forward-evidence.sqlite3"):
+            raise ValueError("ISOLATED_COPY_PATH_REQUIRED")
+        return
+    if (database.parent.name != "rehearsal" or database.name != "production-online.sqlite3"
+            or any(part.lower() in {".local", "forward", "xauusd-forecaster-runtime"}
+                   for part in database.parts)):
+        raise ValueError("ISOLATED_COPY_PATH_REQUIRED")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database-copy", type=Path, required=True)
@@ -262,15 +279,13 @@ def main():
                         help="Retained reviewed incident artifact; never a new timeout assertion")
     parser.add_argument("--query-comparison-only", action="store_true",
                         help="Development query evidence only; never a release admission receipt")
+    parser.add_argument("--isolated-runtime-copy", action="store_true",
+                        help="Use only the existing sealed-configuration runtime working copy")
     args = parser.parse_args()
     database, output = args.database_copy.resolve(strict=True), args.output.resolve()
     # Deliberately narrow retained-copy namespace. Never accept the production
     # repository/runtime, a source checkout, or an arbitrary SQLite filename.
-    if (database.parent.name != "rehearsal" or database.name != "production-online.sqlite3"
-            or any(part.lower() in {".local", "forward", "xauusd-forecaster-runtime"}
-                   for part in database.parts)
-            or database.is_relative_to(ROOT) or output.is_relative_to(ROOT)):
-        raise ValueError("ISOLATED_COPY_PATH_REQUIRED")
+    validate_copy_paths(database, output, isolated_runtime_copy=args.isolated_runtime_copy)
     if output.exists():
         raise ValueError("EVIDENCE_OUTPUT_ALREADY_EXISTS")
     dirty = bool(git("status", "--porcelain=v1", "--untracked-files=all"))
@@ -299,7 +314,9 @@ def main():
     if args.baseline_copy is None:
         raise ValueError("BASELINE_COPY_REQUIRED")
     baseline = args.baseline_copy.resolve(strict=True)
-    if baseline != database.parent.parent / "production-online.sqlite3":
+    if (not args.isolated_runtime_copy and baseline != database.parent.parent / "production-online.sqlite3") or (
+            args.isolated_runtime_copy and (baseline.name != "production-online.sqlite3" or
+                baseline.parent.name != "collector-atomicity" or baseline.is_relative_to(ROOT))):
         raise ValueError("BASELINE_COPY_IDENTITY_REQUIRED")
     baseline_identity = sqlite_input_identity(baseline)
     baseline_digest = baseline_identity["files"]["main"]["sha256"]

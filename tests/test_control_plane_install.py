@@ -11,6 +11,7 @@ import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import shutil
+import site
 import subprocess
 import textwrap
 import uuid
@@ -59,6 +60,29 @@ def test_business_configuration_rejects_foreign_locator_before_filesystem(tmp_pa
     assert calls == []
 
 
+@pytest.mark.parametrize("entrypoint", [r"\\unreachable.invalid\share\run_dashboard_api.py",
+    r"C:\outside\scripts\run_dashboard_api.py", "unknown-script.py"])
+def test_legacy_entrypoint_rejection_precedes_filesystem_resolution(tmp_path, monkeypatch, entrypoint):
+    source = (ROOT / "tests/fixtures/business_environment.py").read_text(encoding="utf-8")
+    boundary = next(node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Call) and isinstance(node.test.func, ast.Attribute)
+        and isinstance(node.test.func.value, ast.Name) and node.test.func.value.id == "DOCUMENT"
+        and node.test.args and isinstance(node.test.args[0], ast.Constant)
+        and node.test.args[0].value == "legacy_configuration_revision")
+    # Execute the real selection/check before its later exact Git lookup.
+    body = boundary.body[:4]
+    scope = {"Path": Path, "os": os, "sys": type("Args", (), {"argv": [entrypoint]}),
+        "CODE_ROOTS": {tmp_path / "source"}}
+    calls = []
+    def denied(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError("unknown entrypoint caused filesystem resolution")
+    monkeypatch.setattr(Path, "resolve", denied)
+    with pytest.raises(RuntimeError, match="FIXTURE_LEGACY_ENTRYPOINT_UNDECLARED"):
+        exec(compile(ast.Module(body=body, type_ignores=[]), "business_environment.py", "exec"), scope)
+    assert calls == []
+
+
 def _new_sealed_fixture_root(request=None) -> Path:
     from xauusd_forecaster.runtime_paths import isolated_rehearsal_root
     owned = isolated_rehearsal_root() / ("xauusd-rehearsal-" + uuid.uuid4().hex)
@@ -73,7 +97,7 @@ def _new_sealed_fixture_root(request=None) -> Path:
     return owned
 
 
-@pytest.mark.parametrize("case", ["valid", "tampered", "missing-digest", "missing-key", "external-url", "production-port", "wrong-root", "oversized", "junction", "production-root", "schema-type", "missing-source", "outside-authority", "utf16", "utf32"])
+@pytest.mark.parametrize("case", ["valid", "normalized", "tampered", "missing-digest", "missing-key", "external-url", "production-port", "wrong-root", "oversized", "junction", "production-root", "schema-type", "missing-source", "outside-authority", "utf16", "utf32"])
 def test_isolated_configuration_owner_matches_python_and_powershell(tmp_path, monkeypatch, case, request):
     from xauusd_forecaster.news_scheduler import _runtime_environment_value
     owned = _new_sealed_fixture_root(request)
@@ -89,7 +113,9 @@ def test_isolated_configuration_owner_matches_python_and_powershell(tmp_path, mo
         "loopback_ports": [18321], "provider_endpoint": "http://127.0.0.1:18321",
         "values": {"GEMINI_API_KEY": "isolated-sentinel", "XAUUSD_DASHBOARD_URL": ""},
     }
-    if case == "missing-key":
+    if case == "normalized":
+        config["repository_root"] = str(owned / "never-traversed" / ".." / "repository")
+    elif case == "missing-key":
         config["values"] = {"OTHER": "sentinel"}
     elif case == "external-url":
         config["provider_endpoint"] = "https://example.invalid:18321"
@@ -129,8 +155,11 @@ def test_isolated_configuration_owner_matches_python_and_powershell(tmp_path, mo
     elif case == "outside-authority":
         # A plausible UUID/leaf spelling is not a positive read authority.
         monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION", str(tmp_path / owned.name / path.name))
-    if case == "valid":
+    if case in ("valid", "normalized"):
         assert _runtime_environment_value("GEMINI_API_KEY") == "isolated-sentinel"
+        from xauusd_forecaster.runtime_paths import isolated_runtime_configuration
+        assert isolated_runtime_configuration()["repository_root"] == str(owned / "repository")
+        assert not (owned / "never-traversed").exists()
     else:
         with monkeypatch.context() as reads:
             if case == "outside-authority":
@@ -144,12 +173,14 @@ def test_isolated_configuration_owner_matches_python_and_powershell(tmp_path, mo
     script.write_text("$ErrorActionPreference='Stop'\n"
         f". '{ROOT / 'scripts/control_center_common.ps1'}'\n"
         "$releaseSecretsPath='NEVER_READ';$collectorSecretsPath='NEVER_READ'\n"
+        "if((Get-IsolatedRuntimeConfiguration).repository_root -ne "
+        f"'{owned / 'repository'}'){{throw 'UNVALIDATED_RAW_PATH_RETURNED'}}\n"
         "(Get-ReleaseSecret -Name 'GEMINI_API_KEY').value\n"
         "Get-CollectorSecret -Name 'GEMINI_API_KEY'\n", encoding="utf-8")
     for shell in ("powershell.exe", "pwsh.exe"):
         result = subprocess.run([shell, "-NoProfile", "-File", str(script)],
             capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
-        if case == "valid":
+        if case in ("valid", "normalized"):
             assert result.returncode == 0, result.stderr
             assert result.stdout.split() == ["isolated-sentinel", "isolated-sentinel"]
             for action, expected_context_rejection in (("CodeRevision", True), ("ControlBundlePreflight", False)):
@@ -163,7 +194,7 @@ def test_isolated_configuration_owner_matches_python_and_powershell(tmp_path, mo
             assert "ISOLATED_CONFIGURATION_" in result.stderr
 
 
-@pytest.mark.parametrize("case", ["valid", "tampered", "critical-override", "top-level-code", "incomplete"])
+@pytest.mark.parametrize("case", ["valid", "mapped-loopback", "business-api", "business-preflight", "tampered", "critical-override", "top-level-code", "incomplete"])
 def test_connected_external_adapter_preserves_control_owners(tmp_path, monkeypatch, case, request):
     owned = _new_sealed_fixture_root(request)
     identity = owned.name.removeprefix("xauusd-rehearsal-")
@@ -192,10 +223,155 @@ def test_connected_external_adapter_preserves_control_owners(tmp_path, monkeypat
                 "head_sha": "a" * 40, "status": "completed", "conclusion": "success"}]}),
             "WRANGLER_READ_RESPONSES_JSON": "[]"},
     }
+    requests = []
+    if case == "mapped-loopback":
+        class Provider(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+            def do_GET(self):
+                requests.append(self.path)
+                raw = json.dumps({"recent_decisions": [{"decision_time": "provider-owned-sentinel"}],
+                    "boundary": "RAW_PROVIDER_BYTES"}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(raw)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        def cleanup_server():
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+            assert not thread.is_alive()
+        request.addfinalizer(cleanup_server)
+        port = server.server_address[1]
+        assert port != 8765
+        config["loopback_ports"] = [port]
+        config["provider_endpoint"] = f"http://127.0.0.1:{port}"
+        config["values"]["LOCAL_API_BASE_URL"] = config["provider_endpoint"]
     if case == "tampered":
         template.write_text(payload + "\n# unaccepted bytes\n", encoding="utf-8")
+    business_body = ""
+    business_case = case in ("business-api", "business-preflight")
+    if business_case:
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        assert port != 8765
+        config["loopback_ports"] = [port]
+        config["provider_endpoint"] = f"http://127.0.0.1:{port}"
+        runtime = Path(config["runtime_root"])
+        config["values"].update(LOCAL_API_BASE_URL=f"http://127.0.0.1:{port}",
+            PYTHON_EXECUTABLE=sys.executable, PYTHON_STARTUP_GUARD=str(runtime),
+            **{key: "" for key in ("GEMINI_API_KEY", "GEMINI_API_KEYS", "GEMINI_API_ACCOUNTS",
+                "GEMINI_PRO_API_KEYS", "GEMINI_FLASH_API_KEYS", "GEMINI_FLASH_LITE_API_KEYS",
+                "DASHBOARD_OPERATOR_BRIDGE_TOKEN")})
+        launch = "Start-ForecasterService -Service $services[0] -SkipExistingCheck"
+        preflight_setup = ""
+        if case == "business-preflight":
+            config["values"]["PREFLIGHT_API_PORT"] = str(port)
+            stage = Path(config["repository_root"]) / ".local/runtime-preflight" / ("a" * 40)
+            preflight_setup = f"""
+            $candidateState=Join-Path $moduleRoot '.local\\preflight'
+            $candidateDatabase=Join-Path $candidateState 'forward-evidence.sqlite3'
+            New-CandidatePreflightDatabase -Python '{sys.executable}' -StageRoot '{stage}' `
+                -SourceDatabase (Join-Path $runtimeForwardRoot 'forward-evidence.sqlite3') -TargetDatabase $candidateDatabase
+            $services[0].ScriptPath='{stage}\\scripts\\run_dashboard_api.py'
+            if((Get-AvailableLoopbackPort) -ne {port}){{throw 'PREFLIGHT_PORT_IDENTITY_CHANGED'}}
+            """
+            launch = f"""$ownedProcess=Start-Process -FilePath '{sys.executable}' -ArgumentList @(
+                $services[0].ScriptPath,'--state-root',$candidateState,'--runtime-role','preflight',
+                '--database',$candidateDatabase,'--host','127.0.0.1','--port','{port}') `
+                -WorkingDirectory '{stage}' -WindowStyle Hidden -PassThru `
+                -RedirectStandardOutput (Join-Path $logRoot 'runtime-preflight.stdout.log') `
+                -RedirectStandardError (Join-Path $logRoot 'runtime-preflight.stderr.log')"""
+        business_body = f"""
+        $moduleRoot='{runtime}'; $runtimeForwardRoot=Join-Path $moduleRoot '.local\\forward'
+        $logRoot=Join-Path $runtimeForwardRoot 'logs'
+        $services=@([pscustomobject]@{{Key='api';Kind='Python';CodeRoot=$moduleRoot;
+            ScriptPath=(Join-Path $moduleRoot 'scripts\\run_dashboard_api.py');
+            Arguments=@('--state-root',$runtimeForwardRoot)}})
+        $ownedProcess=$null
+        New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+        {preflight_setup}
+        try {{
+            {launch}
+            $until=[DateTimeOffset]::UtcNow.AddSeconds(10); $observed=$null
+            while([DateTimeOffset]::UtcNow -lt $until) {{
+                $owned=@(Get-CimInstance Win32_Process | Where-Object {{
+                    $_.Name -ceq 'python.exe' -and $_.CommandLine -and
+                    $_.CommandLine.Contains($services[0].ScriptPath)}})
+                if($owned.Count -gt 1) {{throw 'CONCURRENT_API_OWNER'}}
+                if($owned.Count -eq 1) {{$ownedProcess=Get-Process -Id $owned[0].ProcessId}}
+                try {{
+                    $reply=Invoke-WebRequest -Uri 'http://127.0.0.1:8765/api/health' -UseBasicParsing -TimeoutSec 1
+                    if('{case}' -cne 'business-preflight'){{throw 'EMPTY_API_FALSE_HEALTHY'}}
+                    if([int]$reply.StatusCode -ne 200){{throw 'UNEXPECTED_API_STATUS'}}
+                    $observed=$reply.Content | ConvertFrom-Json
+                }} catch {{
+                    if($_.Exception.Message -cin @('EMPTY_API_FALSE_HEALTHY','UNEXPECTED_API_STATUS')){{throw}}
+                    $reply=$_.Exception.Response
+                    if($reply) {{
+                        if([int]$reply.StatusCode -ne 503) {{throw 'UNEXPECTED_API_STATUS'}}
+                        # Both IWR implementations consume the error response;
+                        # the actual body is retained in ErrorDetails, not an
+                        # already-drained WebResponse stream in Desktop PS.
+                        if($_.ErrorDetails.Message) {{$observed=$_.ErrorDetails.Message | ConvertFrom-Json}}
+                    }}
+                }}
+                if($observed) {{break}}
+                Start-Sleep -Milliseconds 100
+            }}
+            if(-not $ownedProcess -or -not $observed -or
+                $observed.readiness_scope -cne 'PROCESS_AND_CRITICAL_STATUS') {{
+                $tails=@(Get-ChildItem -LiteralPath $logRoot -Filter '*.log' | ForEach-Object {{
+                    $_.Name + ':' + ((Get-Content -LiteralPath $_.FullName -Tail 12) -join '|')}})
+                throw ('REAL_API_BOUNDARY_NOT_EXECUTED:owner=' + [bool]$ownedProcess + ';body=' +
+                    ($observed | ConvertTo-Json -Compress) + ';' + ($tails -join ';'))
+            }}
+        }} finally {{
+            if($ownedProcess) {{
+                $ended=Stop-NativeProcessTree -Process $ownedProcess
+                if($ended.state -cnotin @('TERMINATED','ALREADY_EXITED')) {{throw 'API_CLEANUP_UNRESOLVED'}}
+            }}
+        }}
+        $priorGuard=$env:XAUUSD_FIXTURE_STARTUP_GUARD_SHA256
+        try {{
+            $env:XAUUSD_FIXTURE_STARTUP_GUARD_SHA256='0'*64
+            $denied=$false
+            try {{{launch}}}
+            catch {{if($_.Exception.Message -cne 'CONNECTED_BUSINESS_GUARD_UNDECLARED'){{throw}};$denied=$true}}
+            if(-not $denied){{throw 'UNVERIFIED_BUSINESS_CHILD_STARTED'}}
+        }} finally {{$env:XAUUSD_FIXTURE_STARTUP_GUARD_SHA256=$priorGuard}}
+        """
     path = owned / "fixture-user-environment.json"
     path.write_text(json.dumps(config), encoding="utf-8")
+    if business_case:
+        _make_isolated_business_source(runtime, path)
+        if case == "business-preflight":
+            import sqlite3
+            _make_isolated_business_source(stage, path)
+            (source / "scripts").mkdir(exist_ok=True)
+            shutil.copyfile(ROOT / "scripts/control_center_runtime_supervision.ps1",
+                            source / "scripts/control_center_runtime_supervision.ps1")
+            (runtime / ".local/forward").mkdir(parents=True)
+            with sqlite3.connect(runtime / ".local/forward/forward-evidence.sqlite3") as connection:
+                connection.execute("CREATE TABLE fixture_original (value INTEGER)")
+                connection.execute("INSERT INTO fixture_original VALUES (42)")
+            connection.close()
+        (runtime / "sitecustomize.py").write_text(
+            "import os,sys\ntry:\n import fixture_business_environment\n"
+            "except BaseException as error:\n sys.stderr.write(type(error).__name__+':'+str(error)[:160]+'\\n');sys.stderr.flush();os._exit(78)\n", encoding="utf-8")
+        monkeypatch.setenv("PYTHONPATH", os.pathsep.join((str(runtime), site.getusersitepackages())))
+        monkeypatch.setenv("USERPROFILE", str(profile))
+        monkeypatch.setenv("HOME", str(profile))
+        monkeypatch.setenv("NO_PROXY", "*")
+        monkeypatch.setenv("XAUUSD_FIXTURE_CONFIGURATION", str(path))
+        for name, key in (("sitecustomize.py", "XAUUSD_FIXTURE_STARTUP_GUARD_SHA256"),
+                          ("fixture_business_environment.py", "XAUUSD_FIXTURE_BUSINESS_GUARD_SHA256")):
+            monkeypatch.setenv(key, hashlib.sha256((runtime / name).read_bytes()).hexdigest())
     monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION", str(path))
     monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION_SHA256", hashlib.sha256(path.read_bytes()).hexdigest())
     script = owned / "consume.ps1"
@@ -205,10 +381,11 @@ def test_connected_external_adapter_preserves_control_owners(tmp_path, monkeypat
         f". '{ROOT / 'scripts/control_center_runtime_supervision.ps1'}'\n"
         f". '{ROOT / 'scripts/control_center_transaction_engine.ps1'}'\n"
         "$prior=@{};Get-ChildItem function:|ForEach-Object{$prior[$_.Name]=$_.Definition}\n"
-        "foreach($definition in @(Get-IsolatedExternalAdapterDefinitions)){. ([scriptblock]::Create($definition))}\n"
+        "foreach($definition in @(Get-IsolatedExternalAdapterDefinitions)){"
+        "Set-Item -Path ('function:'+ $definition.name) -Value ([scriptblock]::Create($definition.body))}\n"
         "$allowed=@('Invoke-GitHubChecksRead','Invoke-WranglerJson','Invoke-WranglerDeploymentCommand',"
         "'Invoke-WebRequest','Invoke-RestMethod','Get-ScheduledTask','Start-ScheduledTask','Stop-ScheduledTask',"
-        "'Enable-ScheduledTask','Disable-ScheduledTask','Register-ScheduledTask','Unregister-ScheduledTask','Start-Process')\n"
+        "'Enable-ScheduledTask','Disable-ScheduledTask','Register-ScheduledTask','Unregister-ScheduledTask','Start-Process','Get-AvailableLoopbackPort')\n"
         "foreach($name in $prior.Keys){if($name -notin $allowed -and (Get-Item ('function:'+ $name)).Definition -cne $prior[$name]){throw 'OWNER_CHANGED'}}\n"
         "$requiredGitHubChecks=@('real-required');$convertFromJsonSupportsDateKind=$false\n"
         "if((Get-RequiredGitHubChecksResult -Revision ('a'*40)).state -cne 'PASSED'){throw 'RAW_GATE_NOT_EXECUTED'}\n"
@@ -216,22 +393,156 @@ def test_connected_external_adapter_preserves_control_owners(tmp_path, monkeypat
         "$denied=0;try{Invoke-WranglerJson -Arguments @('unknown')}catch{if($_.Exception.Message -eq 'CONNECTED_WRANGLER_REQUEST_UNDECLARED'){$denied++}else{throw}}\n"
         "try{Invoke-WebRequest -Uri 'http://127.0.0.1:8765'}catch{if($_.Exception.Message -eq 'CONNECTED_NETWORK_TARGET_UNDECLARED'){$denied++}else{throw}}\n"
         "if($denied -ne 2){throw 'EXTERNAL_FALLBACK'}\n"
+        f"if((Get-IsolatedRuntimeConfiguration).values.LOCAL_API_BASE_URL -and '{case}' -cnotlike 'business-*'){{"
+        "if((Get-LatestRuntimeDecisionTime) -cne 'provider-owned-sentinel'){throw 'REAL_OWNER_REMAP_FAILED'};"
+        "if((Invoke-WebRequest -Uri 'http://127.0.0.1:8765/api/health' -UseBasicParsing).Content -notmatch 'RAW_PROVIDER_BYTES'){throw 'RAW_BYTES_CHANGED'};"
+        "if((Invoke-RestMethod -Uri 'http://127.0.0.1:8765/api/critical-status').boundary -cne 'RAW_PROVIDER_BYTES'){throw 'RAW_BODY_CHANGED'};"
+        "$rejected=0;try{Invoke-RestMethod -Uri 'http://127.0.0.1:8765/api/health' -Method Post}catch{$rejected++};"
+        "try{Invoke-WebRequest -Uri 'http://127.0.0.1:8765/api/status?extra=1'}catch{$rejected++};"
+        "if($rejected -ne 2){throw 'UNDECLARED_REMAP_ACCEPTED'}}\n"
         "$badArguments='\"\\\\server\\share\\outside.vbs\" \"'+(Get-IsolatedRuntimeConfiguration).owned_root+'\\inside\"';"
         "$processDenied=0;foreach($executable in @('C:\\outside\\wscript.exe',(Join-Path ([Environment]::SystemDirectory) 'wscript.exe'))){"
         "try{Start-Process -FilePath $executable -ArgumentList $badArguments}catch{"
         "if($_.Exception.Message -cne 'CONNECTED_PROCESS_START_UNDECLARED'){throw};$processDenied++}};"
         "if($processDenied -ne 2){throw 'UNTRACKED_PROCESS_START'}\n"
+        + business_body +
         "'OWNERS_PRESERVED_UNKNOWN_DENIED'\n", encoding="utf-8")
     for shell in ("powershell.exe", "pwsh.exe"):
+        shell_environment = dict(os.environ)
+        # A PS7 parent can otherwise make PS5 load Utility 7 (Core-only), where
+        # Desktop Get-FileHash is absent. Pin only this child to its own modules.
+        shell_home = (Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0"
+                      if shell == "powershell.exe" else Path(shutil.which(shell)).parent)
+        shell_environment["PSModulePath"] = str(shell_home / "Modules")
         result = subprocess.run([shell, "-NoProfile", "-File", str(script)], capture_output=True,
-            text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
-        if case == "valid":
+            text=True, env=shell_environment, timeout=22 if business_case else 10,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        if case in ("valid", "mapped-loopback", "business-api", "business-preflight"):
             assert result.returncode == 0, result.stderr
             assert result.stdout.strip() == "OWNERS_PRESERVED_UNKNOWN_DENIED"
         else:
             assert result.returncode != 0
             assert "ISOLATED_EXTERNAL_ADAPTER_" in result.stderr
             assert "TOP_LEVEL_MUST_NOT_EXECUTE" not in result.stderr
+        if case == "business-preflight":
+            with sqlite3.connect(runtime / ".local/preflight/forward-evidence.sqlite3") as connection:
+                assert connection.execute("SELECT value FROM fixture_original").fetchall() == [(42,)]
+                assert connection.execute("SELECT count(*) FROM market_snapshots").fetchone() == (0,)
+            connection.close()
+    if case == "mapped-loopback":
+        assert requests == ["/api/status", "/api/health", "/api/critical-status"] * 2
+
+
+@pytest.mark.parametrize("duration,budget,elapsed,expected", [
+    (120, None, 0, 120), (121, None, 0, "INVALID"),
+    (2700, 2700, 0, 2700), (2700, 2700, 100, 2600),
+    (2701, 2701, 0, "INVALID"), (1000, 1200, 0, "INVALID"),
+    (2700, 2700, 2700, "EXHAUSTED"), (2700, 2700, -1, "INVALID"),
+])
+def test_quote_input_restart_cannot_renew_connected_scenario_budget(duration, budget, elapsed, expected):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("quote_budget", ROOT / "tests/fixtures/quote_session_input.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    started = datetime(2026, 9, 4, 12, tzinfo=timezone.utc)
+    config = {"quote_input_seconds": duration}
+    if budget is not None:
+        config.update(connected_scenario_timeout_seconds=budget,
+                      connected_scenario_started_at=started.isoformat())
+    now = started + timedelta(seconds=elapsed)
+    if isinstance(expected, int):
+        assert module.remaining_input_seconds(config, now) == expected
+    else:
+        with pytest.raises(RuntimeError, match="QUOTE_INPUT_BUDGET_" + expected):
+            module.remaining_input_seconds(config, now)
+
+
+@pytest.mark.parametrize("case", ["valid", "build-only", "wrong-state", "wrong-config", "wrong-code",
+    "missing-key", "outside-secret", "explicit-cli-mismatch", "missing-secret-file", "junction"])
+def test_quote_launcher_uses_exact_isolated_authority_before_native_work(monkeypatch, request, case):
+    owned = _new_sealed_fixture_root(request)
+    identity = owned.name.removeprefix("xauusd-rehearsal-")
+    profile = owned / "profile"
+    runtime = profile / "XAUUSD-Forecaster-runtime"
+    repository = owned / "repository"
+    source = owned / "source"
+    code = source if case in ("wrong-code", "build-only") else runtime
+    project = code / "ctrader/XauusdForwardQuoteBridge"
+    project.mkdir(parents=True)
+    (code / "scripts").mkdir()
+    for name in ("run_live_quote_bridge.ps1", "XauusdForwardQuoteBridge.cs"):
+        shutil.copyfile(ROOT / "ctrader/XauusdForwardQuoteBridge" / name, project / name)
+    shutil.copyfile(ROOT / "scripts/control_center_common.ps1", code / "scripts/control_center_common.ps1")
+    cli = owned / "broker-adapter.exe"
+    cli.write_bytes(b"not-executed-at-this-contract-boundary")
+    secrets = owned / "sentinel-secrets"
+    secrets.mkdir()
+    for name in ("ctid.txt", "account.txt", "ctrader-cli.pwd"):
+        (secrets / name).write_text("isolated-sentinel", encoding="utf-8")
+    if case == "missing-secret-file":
+        (secrets / "ctrader-cli.pwd").unlink()
+    elif case == "junction":
+        link = owned / "linked-secrets"
+        subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+            f"$null=New-Item -ItemType Junction -Path '{link}' -Target '{secrets}'"],
+            check=True, capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+        secrets = link
+    config = {
+        "schema_version": 1, "mode": "ISOLATED_REHEARSAL", "fixture_id": identity,
+        "owned_root": str(owned), "profile_root": str(profile), "runtime_root": str(runtime),
+        "repository_root": str(repository), "source_root": str(source),
+        "task_namespace": f"\\XAUUSD-Contract-{identity}\\", "loopback_ports": [18321],
+        "provider_endpoint": "http://127.0.0.1:18321",
+        "values": {"CTRADER_CLI_PATH": str(cli), "CTRADER_SECRET_ROOT": str(secrets)},
+    }
+    if case == "missing-key":
+        del config["values"]["CTRADER_CLI_PATH"]
+    elif case == "build-only":
+        config["values"] = {"BUILD_ONLY": "NO_BROKER_CREDENTIALS"}
+    elif case == "outside-secret":
+        config["values"]["CTRADER_SECRET_ROOT"] = str(owned.parent / "never-read-secrets")
+    path = owned / "fixture-user-environment.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION", str(path))
+    monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION_SHA256", hashlib.sha256(path.read_bytes()).hexdigest())
+    monkeypatch.setenv("CTRADER_CLI_PATH", "process-decoy-must-not-run")
+    monkeypatch.setenv("CTRADER_SECRET_ROOT", "process-decoy-must-not-read")
+    state = owned / "wrong-state" if case == "wrong-state" else runtime / ".local/forward"
+    args = f"-StateRoot '{state}'"
+    if case == "build-only":
+        args = "-BuildOnly"
+    elif case == "wrong-config":
+        args += f" -ConfigRoot '{owned / 'wrong-config'}'"
+    elif case == "explicit-cli-mismatch":
+        args += f" -CliPath '{owned / 'wrong-cli.exe'}'"
+    script = owned / "quote-boundary.ps1"
+    script.write_text("$ErrorActionPreference='Stop';$buildCalls=0\n"
+        "function dotnet {$script:buildCalls++;throw 'BUILD_BOUNDARY_REACHED'}\n"
+        f"try {{ . '{project / 'run_live_quote_bridge.ps1'}' {args};throw 'UNEXPECTED_EXECUTION' }}"
+        " catch {$reason=$_.Exception.Message}\n"
+        "@{reason=$reason;build_calls=$buildCalls;state=$StateRoot;output=$OutputDirectory;"
+        "cli=$CliPath;secret=$SecretRoot;config=$ConfigRoot}|ConvertTo-Json -Compress\n", encoding="utf-8")
+    for shell in ("powershell.exe", "pwsh.exe"):
+        result = subprocess.run([shell, "-NoProfile", "-File", str(script)], capture_output=True,
+            text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+        assert result.returncode == 0, result.stderr
+        observed = json.loads(result.stdout)
+        if case in ("valid", "build-only"):
+            # Only the configuration/native boundary is exercised here. The real
+            # build and external quote stream remain separate rehearsal evidence.
+            assert observed["reason"] == "BUILD_BOUNDARY_REACHED"
+            assert observed["build_calls"] == 1
+            if case == "build-only":
+                assert not (state / "quotes").exists()
+                assert observed["cli"] == observed["secret"] == ""
+                continue
+            for field, expected in (("state", state), ("output", state / "quotes"),
+                    ("cli", cli), ("secret", secrets), ("config", repository / ".local/config")):
+                assert Path(observed[field]) == expected
+        else:
+            assert observed["build_calls"] == 0, observed
+            assert observed["reason"] != "BUILD_BOUNDARY_REACHED"
+            assert not (state / "quotes").exists()
 
 
 def _canonical_bundle_digest(revision: str, hashes: dict[str, str]) -> str:
@@ -776,7 +1087,7 @@ def _make_isolated_business_source(root: Path, configuration: Path) -> None:
     for marker, value in {
         "__CONFIG_PATH__": configuration.as_posix(),
         "__CONFIG_DIGEST__": hashlib.sha256(configuration.read_bytes()).hexdigest(),
-        "__FIXTURE_ROOT__": root.parent.as_posix(),
+        "__FIXTURE_ROOT__": configuration.parent.as_posix(),
         "__GIT_PATH__": Path(shutil.which("git")).as_posix(),
     }.items():
         bootstrap = bootstrap.replace(marker, value)

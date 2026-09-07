@@ -1030,7 +1030,8 @@ $services = @(Resolve-ServiceLaunchContracts -Revision $serviceContractRevision 
 
 
 foreach ($externalDefinition in @(Get-IsolatedExternalAdapterDefinitions)) {
-    . ([scriptblock]::Create($externalDefinition))
+    Set-Item -Path ('function:' + $externalDefinition.name) `
+        -Value ([scriptblock]::Create($externalDefinition.body))
 }
 
 if ($ExpectedControlScriptPath -or $ExpectedControlRevision) {

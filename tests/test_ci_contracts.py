@@ -109,7 +109,11 @@ def test_windows_runtime_manifest_assigns_every_required_test_exactly_once() -> 
         for spec in shard_by_id[shard_id]["tests"]
         for nodeid in _owned_tests(spec)
     }
-    assert len(compatibility_assignments) == 79
+    assert compatibility_assignments == set(_owned_tests({
+        "path": "tests/test_runtime_launchers.py",
+        "from": "test_required_github_gate_set_is_exact_and_missing_gate_stays_pending",
+        "through": "test_broadcast_owner_starts_independently_without_reclassifying_core_services",
+    }))
 
 
 def test_windows_runtime_selector_uses_authoritative_impact_map(monkeypatch) -> None:
