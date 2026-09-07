@@ -54,6 +54,42 @@ the unfinished-date authority, independently of the rows newly discovered in
 that cycle, so later cross-date peers cannot retire already-owned reviews.
 Once the date is effectively finalized, normal supersession rules apply.
 
+The same job-count mutation owner maintains two fixed operational metadata keys:
+`NEWS_JOB_INPUT_REVISION_V1` and `NEWS_JOB_RECONCILIATION_CACHE_V1`. They are
+discardable, rebuildable optimization metadata, not immutable evidence or remote
+ACKs. Only their values may be updated; key renames, creation-time updates and
+replacement over an existing key are rejected. `FORWARD_EPOCH`, all pre-existing
+metadata keys, and even a schema-valid null key keep their original immutable
+UPDATE/DELETE protection. No general mutable metadata namespace is introduced.
+
+The job version changes in the same transaction as each relevant job insertion,
+deletion or field change, including changes that leave aggregate counts equal.
+Rollback rolls back both. Installing the hooks acquires the writer lock before
+checking their exact definitions, atomically replaces old hooks and invalidates
+prior reconciliation acceptance before repairing missing authority. Installation
+inside an active caller transaction is rejected without committing it. Old
+positional count-metadata writes and old `CREATE IF NOT EXISTS` installers remain
+compatible. Missing, noncanonical or overflowing versions cannot authorize reuse.
+This global version is not a per-date synthesis or Sync acceptance authority.
+
+Global job reconciliation may return unchanged only when its exact post-work
+job version, four immutable source tails, eligibility/materialization contract,
+Forward epoch and protected receipt-day set match accepted local work. Its
+bounded cache is read with those inputs in one snapshot. A changed or missing
+input, changed contract, corrupted/oversized metadata or backward clock runs the
+original completion and retirement rules. Reconciliation does not use current
+time to make source eligibility decisions; claim, backoff and synthesis due
+times still belong to their existing owners. A hit creates no new observation
+timestamp, job transition or cache write and reads no article/annotation payload.
+
+Acceptance is published only after both real reconciliation statements, using
+their post-transition version inside the same writer transaction. Caller-owned
+transactions and explicit unmanaged calls retain the original uncached path;
+they do not publish optimization acceptance. Mixed-source restores and direct
+non-owner rowid reuse cannot use tail-token acceptance; restore a coherent
+database or invalidate the disposable cache. No global reconciliation counter
+is substituted for a date-specific synthesis input or a remote Sync ACK.
+
 Protected discovery must also leave ordinary contract backfill able to advance
 without increasing the total allowance. When at least two historical slots are
 available, one is reserved for the durable ordinary cursor. With a single slot,

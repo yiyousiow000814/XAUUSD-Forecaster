@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -31,6 +32,449 @@ from xauusd_forecaster.news_scheduler import (
 
 
 NOW = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("column,value,dirty", [
+    ("task_type", "TITLE_TRANSLATION", True),
+    ("source", "another-source", True),
+    ("source_item_id", "another-item", True),
+    ("revision_number", 2, True),
+    ("annotation_id", "another-annotation", True),
+    ("prompt_version", "another-prompt", True),
+    ("state", "BACKING_OFF", True),
+    ("last_error", "ANOTHER_ERROR", True),
+    ("state", "QUEUED", False),
+    ("updated_at", "2026-08-19T12:01:00+00:00", False),
+    ("available_at", "2026-08-19T12:01:00+00:00", False),
+])
+def test_job_input_version_tracks_reconciliation_fields_not_poll_time(
+    tmp_path, column, value, dirty,
+) -> None:
+    with closing(ForwardLedger(tmp_path / "version.sqlite3", now=NOW)) as ledger:
+        connection = ledger.connection
+        _insert_lane_fixture_jobs(connection, live=1, backfill=0, unclassified=0)
+        before = critical_state.news_job_input_revision(connection)
+        assert before == 1
+        with connection:
+            connection.execute(f"UPDATE news_ai_jobs_v1 SET {column}=?", (value,))
+        assert critical_state.news_job_input_revision(connection) == before + int(dirty)
+
+
+def test_job_input_version_survives_equal_counts_old_insert_and_restart(tmp_path) -> None:
+    database = tmp_path / "version.sqlite3"
+    with closing(ForwardLedger(database, now=NOW)) as ledger:
+        connection = ledger.connection
+        _insert_lane_fixture_jobs(connection, live=2, backfill=0, unclassified=0)
+        with connection:
+            connection.execute("UPDATE news_ai_jobs_v1 SET state='BACKING_OFF' WHERE job_id='job-live-00000'")
+        before_counts = [tuple(row) for row in connection.execute(
+            "SELECT * FROM dashboard_annotation_job_counts_v1 ORDER BY state",
+        )]
+        before_revision = critical_state.news_job_input_revision(connection)
+        with connection:
+            connection.execute("""UPDATE news_ai_jobs_v1 SET state=CASE
+                WHEN state='QUEUED' THEN 'BACKING_OFF' ELSE 'QUEUED' END""")
+            # Original Stable's one-column positional metadata INSERT remains legal.
+            connection.execute("INSERT INTO dashboard_job_count_metadata_v1 VALUES ('old-writer-fixture')")
+        assert before_counts == [tuple(row) for row in connection.execute(
+            "SELECT * FROM dashboard_annotation_job_counts_v1 ORDER BY state",
+        )]
+        assert critical_state.news_job_input_revision(connection) == before_revision + 2
+        expected = before_revision + 2
+    with closing(ForwardLedger(database, now=NOW)) as ledger:
+        assert critical_state.news_job_input_revision(ledger.connection) == expected
+
+
+def test_job_input_version_rollback_and_delete_are_transaction_owned(tmp_path) -> None:
+    with closing(ForwardLedger(tmp_path / "version.sqlite3", now=NOW)) as ledger:
+        connection = ledger.connection
+        _insert_lane_fixture_jobs(connection, live=1, backfill=0, unclassified=0)
+        before = critical_state.news_job_input_revision(connection)
+        connection.execute("SAVEPOINT caller")
+        connection.execute("UPDATE news_ai_jobs_v1 SET state='BACKING_OFF'")
+        assert critical_state.news_job_input_revision(connection) == before + 1
+        connection.execute("ROLLBACK TO caller")
+        connection.execute("RELEASE caller")
+        assert critical_state.news_job_input_revision(connection) == before
+        with connection:
+            connection.execute("DELETE FROM news_ai_jobs_v1")
+        assert critical_state.news_job_input_revision(connection) == before + 1
+
+
+@pytest.mark.parametrize("lost_authority", [
+    "revision", "insert-trigger", "old-update-trigger", "partial-update-trigger",
+])
+def test_job_version_reinitialization_invalidates_old_acceptance(tmp_path, lost_authority) -> None:
+    with closing(ForwardLedger(tmp_path / "version.sqlite3", now=NOW)) as ledger:
+        connection = ledger.connection
+        with connection:
+            connection.execute("""INSERT INTO runtime_metadata(key,value,created_at)
+                VALUES (?,'{"accepted_revision":0}',?)""",
+                (critical_state.NEWS_RECONCILIATION_CACHE_KEY, NOW.isoformat()))
+            if lost_authority == "revision":
+                connection.execute("DELETE FROM runtime_metadata WHERE key=?",
+                                   (critical_state.NEWS_JOB_REVISION_KEY,))
+            elif lost_authority == "insert-trigger":
+                connection.execute("DROP TRIGGER dashboard_job_count_insert_v1")
+            else:
+                connection.execute("DROP TRIGGER dashboard_job_count_update_v1")
+                if lost_authority == "old-update-trigger":
+                    connection.execute("""CREATE TRIGGER dashboard_job_count_update_v1
+                        AFTER UPDATE ON news_ai_jobs_v1 BEGIN SELECT 1; END""")
+                else:
+                    connection.execute(f"""CREATE TRIGGER dashboard_job_count_update_v1
+                        AFTER UPDATE OF state ON news_ai_jobs_v1 BEGIN
+                          UPDATE runtime_metadata SET value=CAST(value AS INTEGER)+1
+                          WHERE key='{critical_state.NEWS_JOB_REVISION_KEY}'; END""")
+        if lost_authority == "insert-trigger":
+            # Real source mutation during the lost-hook interval leaves stale
+            # counts; reinstall must repair counts as well as the cache key.
+            _insert_lane_fixture_jobs(connection, live=0, backfill=1, unclassified=0)
+        critical_state.install_annotation_job_count_schema(connection)
+        assert critical_state.news_job_input_revision(connection) == 0
+        assert connection.execute("SELECT value FROM runtime_metadata WHERE key=?",
+            (critical_state.NEWS_RECONCILIATION_CACHE_KEY,)).fetchone()[0] == "null"
+        assert connection.execute("SELECT COALESCE(sum(job_count),0) "
+            "FROM dashboard_annotation_job_counts_v1").fetchone()[0] == int(lost_authority == "insert-trigger")
+        _insert_lane_fixture_jobs(connection, live=1, backfill=0, unclassified=0)
+        assert critical_state.news_job_input_revision(connection) == 1
+
+
+@pytest.mark.parametrize("invalid", [
+    "invalid", "01", "+1", " 1", "1 ", "1e0", "9" * 20, "-1", "9223372036854775808",
+])
+def test_corrupt_job_version_is_unavailable_not_reset_by_mutation(tmp_path, invalid) -> None:
+    with closing(ForwardLedger(tmp_path / "version.sqlite3", now=NOW)) as ledger:
+        connection = ledger.connection
+        with connection:
+            connection.execute("UPDATE runtime_metadata SET value=? WHERE key=?",
+                               (invalid, critical_state.NEWS_JOB_REVISION_KEY))
+        assert critical_state.news_job_input_revision(connection) is None
+        _insert_lane_fixture_jobs(connection, live=1, backfill=0, unclassified=0)
+        assert critical_state.news_job_input_revision(connection) is None
+        critical_state.install_annotation_job_count_schema(connection)
+        assert critical_state.news_job_input_revision(connection) is None
+
+
+def test_job_input_version_overflow_cannot_be_reused(tmp_path) -> None:
+    with closing(ForwardLedger(tmp_path / "version.sqlite3", now=NOW)) as ledger:
+        with ledger.connection:
+            ledger.connection.execute("UPDATE runtime_metadata SET value=? WHERE key=?",
+                (str(2**63 - 1), critical_state.NEWS_JOB_REVISION_KEY))
+        assert critical_state.news_job_input_revision(ledger.connection) == 2**63 - 1
+        _insert_lane_fixture_jobs(ledger.connection, live=1, backfill=0, unclassified=0)
+        assert critical_state.news_job_input_revision(ledger.connection) is None
+
+
+def test_job_input_version_reader_old_schema_and_readonly(tmp_path) -> None:
+    with closing(sqlite3.connect(":memory:")) as old:
+        assert critical_state.news_job_input_revision(old) is None
+    database = tmp_path / "readonly.sqlite3"
+    with closing(ForwardLedger(database, now=NOW)) as ledger:
+        _insert_lane_fixture_jobs(ledger.connection, live=1, backfill=0, unclassified=0)
+    with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as readonly:
+        assert critical_state.news_job_input_revision(readonly) == 1
+        assert readonly.total_changes == 0
+
+
+@pytest.mark.parametrize("key", [
+    None, "FORWARD_EPOCH", "ANOTHER_IMMUTABLE_FIXTURE",
+    critical_state.NEWS_JOB_REVISION_KEY, critical_state.NEWS_RECONCILIATION_CACHE_KEY,
+])
+def test_job_input_version_metadata_exception_does_not_unlock_evidence(tmp_path, key) -> None:
+    with closing(ForwardLedger(tmp_path / "guards.sqlite3", now=NOW)) as ledger:
+        connection = ledger.connection
+        mutable = key in {critical_state.NEWS_JOB_REVISION_KEY,
+                          critical_state.NEWS_RECONCILIATION_CACHE_KEY}
+        with connection:
+            connection.execute("INSERT INTO runtime_metadata(key,value,created_at) "
+                "SELECT ?,'initial',? WHERE NOT EXISTS (SELECT 1 FROM runtime_metadata WHERE key IS ?)",
+                (key, NOW.isoformat(), key))
+        before = tuple(connection.execute("SELECT * FROM runtime_metadata WHERE key IS ?", (key,)).fetchone())
+        invalid_updates = [
+            ("key", "RENAMED_KEY"), ("created_at", "changed"),
+            ("key", critical_state.NEWS_RECONCILIATION_CACHE_KEY),
+        ]
+        if not mutable:
+            invalid_updates.append(("value", "changed"))
+        for column, value in invalid_updates:
+            if column == "key" and value == key:
+                continue
+            with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+                with connection:
+                    connection.execute(f"UPDATE runtime_metadata SET {column}=? WHERE key IS ?", (value, key))
+            assert tuple(connection.execute("SELECT * FROM runtime_metadata WHERE key IS ?", (key,)).fetchone()) == before
+        if mutable:
+            with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+                with connection:
+                    connection.execute("INSERT OR REPLACE INTO runtime_metadata VALUES (?,'replacement','changed')", (key,))
+            with connection:
+                connection.execute("UPDATE runtime_metadata SET value='changed' WHERE key=?", (key,))
+            assert connection.execute("SELECT created_at FROM runtime_metadata WHERE key=?", (key,)).fetchone()[0] == before[2]
+        else:
+            with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+                with connection:
+                    connection.execute("DELETE FROM runtime_metadata WHERE key IS ?", (key,))
+
+
+def test_job_input_version_installer_preserves_transaction_and_rolls_back_failure(tmp_path) -> None:
+    with closing(ForwardLedger(tmp_path / "installer.sqlite3", now=NOW)) as ledger:
+        connection = ledger.connection
+        connection.execute("SAVEPOINT caller")
+        with pytest.raises(ValueError, match="NEWS_JOB_SCHEMA_TRANSACTION_ALREADY_ACTIVE"):
+            critical_state.install_annotation_job_count_schema(connection)
+        assert connection.in_transaction
+        connection.execute("ROLLBACK TO caller")
+        connection.execute("RELEASE caller")
+        with connection:
+            connection.execute("DROP TRIGGER runtime_metadata_no_update")
+            connection.execute("""CREATE TRIGGER runtime_metadata_no_update
+                BEFORE UPDATE ON runtime_metadata BEGIN
+                SELECT RAISE(ABORT,'runtime_metadata is append-only'); END""")
+        old_guard = connection.execute("SELECT sql FROM sqlite_master WHERE name='runtime_metadata_no_update'").fetchone()[0]
+
+        def refuse_metadata_update(action, table, *_):
+            return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_UPDATE and table == "runtime_metadata" else sqlite3.SQLITE_OK
+
+        connection.set_authorizer(refuse_metadata_update)
+        try:
+            with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+                critical_state.install_annotation_job_count_schema(connection)
+        finally:
+            connection.set_authorizer(None)
+        assert not connection.in_transaction
+        assert connection.execute("SELECT sql FROM sqlite_master WHERE name='runtime_metadata_no_update'").fetchone()[0] == old_guard
+        critical_state.install_annotation_job_count_schema(connection)
+        _insert_lane_fixture_jobs(connection, live=1, backfill=0, unclassified=0)
+        assert critical_state.news_job_input_revision(connection) == 1
+        # An old installer uses CREATE IF NOT EXISTS, so it cannot replace the
+        # new scoped evidence guard or remove the job hook's extended fields.
+        connection.execute("""CREATE TRIGGER IF NOT EXISTS runtime_metadata_no_update
+            BEFORE UPDATE ON runtime_metadata BEGIN SELECT RAISE(ABORT,'old'); END""")
+        before = connection.total_changes
+        critical_state.install_annotation_job_count_schema(connection)
+        assert connection.total_changes == before
+        with connection:
+            connection.execute("UPDATE news_ai_jobs_v1 SET annotation_id='changed'")
+        assert critical_state.news_job_input_revision(connection) == 2
+
+
+@pytest.mark.parametrize("change", [
+    "none", "source", "annotation", "title", "impact", "job", "protected", "clock",
+    "corrupt-cache", "deep-cache",
+])
+def test_reconciliation_source_first_preserves_rules_without_unchanged_body_reads(
+    tmp_path, change, record_property,
+) -> None:
+    from tests.test_daily_brief import _seed_news, _seed_news_item
+
+    with closing(ForwardLedger(tmp_path / "reconciliation.sqlite3", now=NOW - timedelta(days=30))) as ledger:
+        connection = ledger.connection
+        _seed_news(ledger)
+        job_id = enqueue_job(connection, task_type="ACTIVE_ANNOTATION", source="Reuters",
+            source_item_id="item-1", revision_number=1, annotation_id="",
+            prompt_version=PROMPT_VERSION, priority="NORMAL", now=NOW)
+        assert reconcile_completed_jobs(connection, now=NOW) == 1
+        body_reads = []
+        statements = []
+
+        def measured_length(value):
+            if value == "x" * 300:
+                body_reads.append(300)
+            return len(value) if value is not None else None
+
+        connection.create_function("length", 1, measured_length, deterministic=True)
+        connection.set_trace_callback(statements.append)
+        before = connection.total_changes
+        assert reconcile_completed_jobs(connection, now=NOW + timedelta(minutes=1)) == 0
+        assert body_reads == []
+        assert connection.total_changes == before
+        assert not any("UPDATE news_ai_jobs_v1 AS j" in sql for sql in statements)
+        record_property("unchanged_reconciliation", {
+            "body_evaluations": 0, "body_bytes_evaluated": 0,
+            "sqlite_changes": 0, "metadata_selects": sum(sql.lstrip().startswith("SELECT") for sql in statements),
+            "statement_count": len(statements), "http_business_post": 0,
+            "measurement": "SQLite expression evaluation, not physical disk or D1 rows",
+        })
+        connection.set_trace_callback(None)
+        if change == "source":
+            _seed_news_item(ledger, "new-item", minute=2)
+        elif change == "annotation":
+            columns = [str(row[1]) for row in connection.execute("PRAGMA table_info(news_annotations)")]
+            values = list(connection.execute("SELECT * FROM news_annotations LIMIT 1").fetchone())
+            values[columns.index("annotation_id")] = "new-annotation"
+            values[columns.index("llm_model_version")] = "declared-other-model"
+            with connection:
+                connection.execute(f"INSERT INTO news_annotations VALUES ({','.join('?' for _ in values)})", values)
+        elif change == "title":
+            with connection:
+                connection.execute("INSERT INTO news_title_translations VALUES (?,?,?,?,?,?,?,?,?,?)", (
+                    "new-title", "Reuters", "item-1", 1, "hash-item-1", "新的标题",
+                    "declared-model", PROMPT_VERSION, NOW.isoformat(), NOW.isoformat(),
+                ))
+        elif change == "impact":
+            with connection:
+                connection.execute("INSERT INTO news_impact_assessments_v1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+                    "new-impact", "Reuters", "item-1", 1, "hash-item-1", "annotation-item-1",
+                    "declared-model", "declared-impact-prompt", NOW.isoformat(), NOW.isoformat(),
+                    "SAME_DAY", "ACTIVE", "NEW_EVENT", 0.8, "隔离测试影响",
+                ))
+        elif change == "job":
+            with connection:
+                connection.execute("UPDATE news_ai_jobs_v1 SET last_error='PRIOR_FAILURE' WHERE job_id=?", (job_id,))
+        elif change in {"corrupt-cache", "deep-cache"}:
+            with connection:
+                connection.execute("UPDATE runtime_metadata SET value=? WHERE key=?",
+                    ("malformed" if change == "corrupt-cache" else "[" * 1500 + "]" * 1500,
+                     critical_state.NEWS_RECONCILIATION_CACHE_KEY))
+        statements.clear()
+        body_reads.clear()
+        connection.set_trace_callback(statements.append)
+        try:
+            assert reconcile_completed_jobs(connection,
+                now=NOW - timedelta(seconds=1) if change == "clock" else NOW + timedelta(minutes=2),
+                protected_receipt_days=("2026-08-10",) if change == "protected" else (),
+            ) == 0
+        finally:
+            connection.set_trace_callback(None)
+        assert bool(body_reads) == (change != "none")
+        assert any("UPDATE news_ai_jobs_v1 AS j" in sql for sql in statements) == (change != "none")
+        assert connection.execute("SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone()[0] == "COMPLETED"
+        if change == "job":
+            assert connection.execute("SELECT last_error FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone()[0] == "PRIOR_FAILURE"
+
+
+def test_reconciliation_source_first_caller_rollback_does_not_publish_acceptance(tmp_path) -> None:
+    from tests.test_daily_brief import _seed_news
+
+    with closing(ForwardLedger(tmp_path / "rollback.sqlite3", now=NOW - timedelta(days=30))) as ledger:
+        connection = ledger.connection
+        _seed_news(ledger)
+        job_id = enqueue_job(connection, task_type="ACTIVE_ANNOTATION", source="Reuters",
+            source_item_id="item-1", revision_number=1, annotation_id="",
+            prompt_version=PROMPT_VERSION, priority="NORMAL", now=NOW)
+        assert reconcile_completed_jobs(connection, now=NOW) == 1
+        accepted = connection.execute("SELECT value FROM runtime_metadata WHERE key=?",
+                                     (critical_state.NEWS_RECONCILIATION_CACHE_KEY,)).fetchone()[0]
+        version = critical_state.news_job_input_revision(connection)
+        connection.execute("SAVEPOINT caller")
+        connection.execute("UPDATE news_ai_jobs_v1 SET state='QUEUED' WHERE job_id=?", (job_id,))
+        assert reconcile_completed_jobs(connection, now=NOW, manage_transaction=False) == 1
+        assert connection.in_transaction
+        assert connection.execute("SELECT value FROM runtime_metadata WHERE key=?",
+            (critical_state.NEWS_RECONCILIATION_CACHE_KEY,)).fetchone()[0] == accepted
+        connection.execute("ROLLBACK TO caller")
+        connection.execute("RELEASE caller")
+        assert critical_state.news_job_input_revision(connection) == version
+        before = connection.total_changes
+        assert reconcile_completed_jobs(connection, now=NOW) == 0
+        assert connection.total_changes == before
+
+
+@pytest.mark.parametrize("error_code,cache_only,skips", [
+    (sqlite3.SQLITE_BUSY, True, True), (sqlite3.SQLITE_READONLY, True, True),
+    (sqlite3.SQLITE_BUSY_SNAPSHOT, True, False), (sqlite3.SQLITE_AUTH, True, False),
+    (sqlite3.SQLITE_CORRUPT, True, False), (sqlite3.SQLITE_IOERR, True, False),
+    (sqlite3.SQLITE_BUSY, False, False), (sqlite3.SQLITE_IOERR, "source-read", False),
+])
+def test_reconciliation_source_first_optional_cache_error_is_not_source_success(
+    tmp_path, error_code, cache_only, skips,
+) -> None:
+    from tests.test_daily_brief import _seed_news
+
+    with closing(ForwardLedger(tmp_path / "failure.sqlite3", now=NOW - timedelta(days=30))) as ledger:
+        connection = ledger.connection
+        _seed_news(ledger)
+        job_id = enqueue_job(connection, task_type="ACTIVE_ANNOTATION", source="Reuters",
+            source_item_id="item-1", revision_number=1, annotation_id="",
+            prompt_version=PROMPT_VERSION, priority="NORMAL", now=NOW)
+
+        class DeclaredSqlFailure:
+            def __getattr__(self, name):
+                return getattr(connection, name)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return connection.__exit__(*args)
+
+            def execute(self, sql, parameters=()):
+                target = (sql.startswith("SELECT rowid,") if cache_only == "source-read"
+                          else sql.startswith("INSERT INTO runtime_metadata") if cache_only
+                          else "UPDATE news_ai_jobs_v1 AS j" in sql)
+                if target:
+                    if error_code == sqlite3.SQLITE_IOERR:
+                        # Explicitly inject SQLite's whole-transaction-aborted
+                        # error shape; cleanup must retain the original error.
+                        connection.rollback()
+                    error = sqlite3.OperationalError("DECLARED_SQLITE_FAILURE")
+                    error.sqlite_errorcode = error_code
+                    raise error
+                return connection.execute(sql, parameters)
+
+        if skips:
+            assert reconcile_completed_jobs(DeclaredSqlFailure(), now=NOW) == 1
+        else:
+            with pytest.raises(sqlite3.OperationalError, match="DECLARED_SQLITE_FAILURE"):
+                reconcile_completed_jobs(DeclaredSqlFailure(), now=NOW)
+        assert not connection.in_transaction
+        assert connection.execute("SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone()[0] == (
+            "COMPLETED" if skips else "QUEUED")
+        assert connection.execute("SELECT value FROM runtime_metadata WHERE key=?",
+            (critical_state.NEWS_RECONCILIATION_CACHE_KEY,)).fetchone() is None
+        # Genuine work can establish acceptance on the next normal owner call;
+        # a skipped cache write never invents completion or causes an inner retry.
+        assert reconcile_completed_jobs(connection, now=NOW) == (0 if skips else 1)
+
+
+def test_reconciliation_source_first_survives_restart_and_coherent_restore(tmp_path) -> None:
+    from tests.test_daily_brief import _seed_news
+
+    original = tmp_path / "original.sqlite3"
+    restored = tmp_path / "restored.sqlite3"
+    with closing(ForwardLedger(original, now=NOW - timedelta(days=30))) as ledger:
+        _seed_news(ledger)
+        enqueue_job(ledger.connection, task_type="ACTIVE_ANNOTATION", source="Reuters",
+            source_item_id="item-1", revision_number=1, annotation_id="",
+            prompt_version=PROMPT_VERSION, priority="NORMAL", now=NOW)
+        assert reconcile_completed_jobs(ledger.connection, now=NOW) == 1
+        with closing(sqlite3.connect(restored)) as target:
+            ledger.connection.backup(target)
+    for database in (original, restored):
+        with closing(ForwardLedger(database, now=NOW)) as ledger:
+            statements = []
+            ledger.connection.set_trace_callback(statements.append)
+            before = ledger.connection.total_changes
+            assert reconcile_completed_jobs(ledger.connection, now=NOW) == 0
+            assert ledger.connection.total_changes == before
+            assert not any("UPDATE news_ai_jobs_v1 AS j" in sql for sql in statements)
+            ledger.connection.set_trace_callback(None)
+
+
+@pytest.mark.parametrize("source_rows", [8, 256])
+def test_reconciliation_source_first_hot_work_is_bounded_by_tails_not_history(
+    tmp_path, source_rows, record_property,
+) -> None:
+    with closing(ForwardLedger(tmp_path / "tails.sqlite3", now=NOW)) as ledger:
+        connection = ledger.connection
+        _insert_unclassified_revisions(connection, historical=source_rows, live=0)
+        assert reconcile_completed_jobs(connection, now=NOW) == 0
+        steps = []
+
+        def bounded_steps():
+            steps.append(1)
+            return int(len(steps) > 1024)
+
+        before = connection.total_changes
+        connection.set_progress_handler(bounded_steps, 1)
+        try:
+            assert reconcile_completed_jobs(connection, now=NOW) == 0
+        finally:
+            connection.set_progress_handler(None, 0)
+        assert connection.total_changes == before
+        record_property("reconciliation_tail_budget", {"source_rows": source_rows,
+                        "sqlite_vm_steps": len(steps), "max_vm_steps": 1024})
 
 
 def _snapshot(connection: sqlite3.Connection, now: datetime = NOW) -> dict[str, int]:

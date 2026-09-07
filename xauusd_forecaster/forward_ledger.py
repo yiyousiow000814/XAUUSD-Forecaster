@@ -618,6 +618,10 @@ class ForwardLedger:
     def _install_append_only_triggers(self) -> None:
         statements = []
         for table in IMMUTABLE_TABLES:
+            if table == "runtime_metadata":
+                # The existing job-count installer already installs its exact
+                # evidence guard plus two narrowly named operational values.
+                continue
             statements.extend(
                 [
                     f"CREATE TRIGGER IF NOT EXISTS {table}_no_update "
