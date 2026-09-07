@@ -363,8 +363,31 @@ function options() { accept({ headers: { run() { fifth(); } } }); accept({ heade
         assert by_call[call].endswith('>.headers.run')
 
 
-def test_typescript_sources_and_tool_identity_are_relocatable_without_unrelated_lock_churn(typescript_source, tmp_path):
+@pytest.mark.parametrize('layout,reason', [
+    ('web', 'ARCHITECTURE_TOOL_INTEGRITY_FAILED:installed-package'),
+    ('cache', 'ARCHITECTURE_TOOL_UNAVAILABLE:run architecture_typescript_tool.py first'),
+])
+def test_typescript_sources_and_tool_identity_are_relocatable_without_unrelated_lock_churn(typescript_source, tmp_path, tmp_path_factory, monkeypatch, layout, reason):
+    import architecture_typescript_tool as tool
+    real_package, identity = tool.resolve_package(ROOT)
+    tool_root = tmp_path_factory.mktemp('owned-parser')
+    project = (tool_root / 'web' if layout == 'web' else
+               tool_root / '.local/tools/architecture-typescript' / tool.identity_key(identity))
+    installed = project / 'node_modules/typescript'
+    (installed / 'lib').mkdir(parents=True)
+    (project / 'package-lock.json').write_text(json.dumps({'packages': {'node_modules/typescript': identity}}))
+    for relative in ('package.json', 'lib/typescript.js'):
+        shutil.copyfile(real_package / relative, installed / relative)
+    monkeypatch.setattr(tool, 'TOOL_ROOT', tool_root)
+    parser_calls = []
+    original_run = compiler.subprocess.run
+    def run(command, **options):
+        if len(command) > 1 and str(command[1]).endswith('extract_architecture_typescript.mjs'):
+            parser_calls.append(command)
+        return original_run(command, **options)
+    monkeypatch.setattr(compiler.subprocess, 'run', run)
     first = compiler.compile_index(typescript_source)
+    assert len(parser_calls) == 1  # The real pinned parser, not a mocked result.
     copy = tmp_path / 'relocated'
     shutil.copytree(typescript_source, copy)
     file = copy / 'web/owner.ts'
@@ -375,10 +398,14 @@ def test_typescript_sources_and_tool_identity_are_relocatable_without_unrelated_
     lock['packages']['node_modules/unrelated'] = {'version': '999.0.0'}
     lock_path.write_text(json.dumps(lock), encoding='utf-8')
     assert compiler.compile_index(copy) == first
+    assert len(parser_calls) == 3
     lock['packages']['node_modules/typescript']['integrity'] = 'sha512-' + 'A' * 86 + '=='
     lock_path.write_text(json.dumps(lock), encoding='utf-8')
-    with pytest.raises(RuntimeError, match='ARCHITECTURE_TOOL_INTEGRITY_FAILED'):
+    # Fixed Web finds a mismatched installed lock; cache-only seeks a new digest
+    # with no installed package. Both fail before launching a parser.
+    with pytest.raises(RuntimeError, match=reason):
         compiler.compile_index(copy)
+    assert len(parser_calls) == 3
 
 
 @pytest.mark.parametrize('change', ['wrong_version', 'wrong_lock', 'missing_entry', 'malformed_metadata'])
