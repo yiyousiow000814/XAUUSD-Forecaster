@@ -1,6 +1,47 @@
 {
   "schema": "critical-path-selection-v1",
   "views": {
+    "news-worker-audit": {
+      "files": [
+        "scripts/run_dashboard_sync.py",
+        "xauusd_forecaster/news_projection.py",
+        "web/worker/api-router.ts",
+        "web/app/api/news-index/route.ts",
+        "web/app/api/news-content/route.ts",
+        "web/app/api/news-evidence/route.ts",
+        "web/app/api/_shared/news-projection-store.ts",
+        "web/app/api/_shared/news-evidence-store.ts",
+        "web/app/_views/AuditView.tsx",
+        "web/app/_lib/dashboard-resource.ts",
+        "web/app/_lib/news-index-contract.ts"
+      ],
+      "roots": [
+        "xauusd_forecaster/news_projection.py::build_news_projection_generation",
+        "scripts/run_dashboard_sync.py::_sync_news",
+        "scripts/run_dashboard_sync.py::_sync_news_evidence",
+        "scripts/run_dashboard_sync.py::_sync_audit",
+        "web/worker/api-router.ts::routeApiRequest",
+        "web/worker/api-router.ts::genericRoute",
+        "web/app/api/news-index/route.ts::POST",
+        "web/app/api/news-content/route.ts::POST",
+        "web/app/api/news-evidence/route.ts::POST",
+        "web/app/api/_shared/news-projection-store.ts::activateNewsProjection",
+        "web/app/api/_shared/news-evidence-store.ts::activateNewsEvidenceSnapshot",
+        "web/app/_views/AuditView.tsx::AuditView.refreshNews",
+        "web/app/_views/AuditView.tsx::AuditView.refreshEvidence",
+        "web/app/_views/AuditView.tsx::AuditView.refreshAudit",
+        "web/app/_views/AuditView.tsx::AuditView.refreshAuditDetail",
+        "web/app/_lib/dashboard-resource.ts::loadDashboardResource",
+        "web/app/_lib/news-index-contract.ts::authoritativeNewsTotals"
+      ],
+      "tests": [
+        "tests/test_news_projection.py",
+        "tests/test_dashboard_sync.py",
+        "web/tests/news-projection-store.test.mjs",
+        "web/tests/news-evidence-store.test.mjs",
+        "web/tests/audit-content-rendering.test.mjs"
+      ]
+    },
     "clock-transaction": {
       "files": ["scripts/run_forward_collector.py", "xauusd_forecaster/forward_engine.py", "xauusd_forecaster/clock_commit.py", "xauusd_forecaster/clock_recovery.py", "xauusd_forecaster/u5_state.py"],
       "roots": ["scripts/run_forward_collector.py::append_due_grid_events", "xauusd_forecaster/forward_engine.py::ForwardEngine.append_clock_event", "xauusd_forecaster/clock_commit.py::read_completed_clock"],
