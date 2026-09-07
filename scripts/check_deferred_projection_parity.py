@@ -26,11 +26,15 @@ PRODUCER_ROOT = Path(_root_args.producer_root or Path.cwd()).resolve()
 sys.path.insert(0, str(PRODUCER_ROOT / "scripts"))
 
 from run_dashboard_sync import (  # noqa: E402
+    AUDIT_DETAIL_LIMIT_BYTES,
+    AUDIT_FIRST_PAGE_LIMIT_BYTES,
     REMOTE_PAYLOAD_LIMIT_BYTES,
     audit_briefs_snapshot,
     audit_decisions_snapshot,
     audit_stories_snapshot,
+    valid_audit_detail_payload,
 )
+from xauusd_forecaster.dashboard_read_models import READ_MODEL_CONTRACTS  # noqa: E402
 
 BUILDERS = {
     "/api/audit-briefs": audit_briefs_snapshot,
@@ -39,7 +43,8 @@ BUILDERS = {
 }
 LOCAL_AUDIT_URL = "http://127.0.0.1:8765/api/audit"
 LOCAL_DATABASE = RUNTIME_ROOT / ".local" / "forward" / "forward-evidence.sqlite3"
-AUDIT_READ_MODEL_CONTRACT = "dashboard-audit-summary-v1"
+AUDIT_READ_MODEL_CONTRACT = READ_MODEL_CONTRACTS["audit"]
+AUDIT_LOCAL_BUNDLE_LIMIT_BYTES = AUDIT_FIRST_PAGE_LIMIT_BYTES + 3 * AUDIT_DETAIL_LIMIT_BYTES + 256
 REMOTE_BASE_URL = "https://aurum-signal-room.yiyousiow1234.workers.dev"
 WORKER_NAME = "aurum-signal-room"
 RELEASE_CONTROL_USER_AGENT = "XAUUSD-Forecaster-Release-Control/1"
@@ -97,7 +102,7 @@ def _read_persisted_audit_authority(database: Path = LOCAL_DATABASE) -> dict | N
     if not isinstance(raw_payload, str):
         raise ValueError("persisted audit authority payload is not text")
     body = raw_payload.encode("utf-8")
-    if not body or len(body) > REMOTE_PAYLOAD_LIMIT_BYTES:
+    if not body or len(body) > AUDIT_LOCAL_BUNDLE_LIMIT_BYTES:
         raise ValueError("persisted audit authority exceeds transport bound")
     if hashlib.sha256(body).hexdigest() != payload_hash:
         raise ValueError("persisted audit authority hash mismatch")
@@ -114,6 +119,12 @@ def _read_local_authority() -> tuple[dict, str]:
     if persisted is not None:
         return persisted, "persisted-read-model"
     authority, _ = _read_json(LOCAL_AUDIT_URL)
+    authority["detail_resources"] = {}
+    for route in BUILDERS:
+        detail, _ = _read_json(LOCAL_AUDIT_URL.rsplit("/", 1)[0] + route.removeprefix("/api"))
+        if detail.get("generated_at") != authority.get("generated_at"):
+            raise ValueError("audit detail source snapshot changed")
+        authority["detail_resources"][route.rsplit("/", 1)[-1]] = detail
     return authority, "local-api"
 
 
@@ -135,7 +146,17 @@ def verify(
         if builder is None:
             return {"state": "FAILED", "reason": "DEFERRED_PROJECTION_ROUTE_NOT_ALLOWED",
                     "routes": results}
-        expected = json.loads(builder(authority, producer_revision).decode("utf-8"))
+        detail = authority.get("detail_resources", {}).get(route.rsplit("/", 1)[-1])
+        if (not isinstance(detail, dict)
+            or not valid_audit_detail_payload(detail, route.removeprefix("/api/audit-"))
+            or detail.get("generated_at") != authority.get("generated_at")):
+            return {"state": "PENDING", "reason": "LOCAL_AUDIT_AUTHORITY_UNAVAILABLE",
+                    "diagnostic": "audit detail source is unavailable or changed", "routes": results}
+        try:
+            expected = json.loads(builder(detail, producer_revision).decode("utf-8"))
+        except ValueError as error:
+            return {"state": "PENDING", "reason": "LOCAL_AUDIT_AUTHORITY_UNAVAILABLE",
+                    "diagnostic": str(error)[:512], "routes": results}
         try:
             observed, headers = _read_json(
                 _remote_observe_url(route, observe_attempt),

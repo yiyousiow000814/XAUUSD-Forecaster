@@ -4,6 +4,8 @@ import {
   AUDIT_DETAIL_SNAPSHOT_BYTES,
   AUDIT_SNAPSHOT_IDS,
   AUDIT_SUMMARY_SNAPSHOT_BYTES,
+  auditDetailPayloadSql,
+  auditDetailSourceSql,
   MAX_DASHBOARD_SNAPSHOT_BYTES,
   publicStatusJsonExpression,
   readBoundedBodyBytes,
@@ -61,32 +63,46 @@ const SNAPSHOT_ROUTES: Record<string, SnapshotRoute> = {
 function legacyAuditProjection(fields: Record<string, number | null>) {
   const arrayValue = (field: string) => {
     if (field === "recent_decisions") {
-      return `json_set(json_remove(item.item_value, '$.features'), '$.predictions', json(coalesce(`
+      return `CASE WHEN item.item_type != 'object' THEN item.item_value
+        WHEN json_type(item.item_value, '$.predictions') != 'array'
+          OR json_type(item.item_value, '$.predictions') IS NULL
+        THEN json_remove(item.item_value, '$.features')
+        ELSE json_set(json_remove(item.item_value, '$.features'), '$.predictions', json(coalesce(`
         + `(SELECT json_group_array(json(prediction_value)) FROM (`
-        + `SELECT prediction.value AS prediction_value FROM json_each(item.item_value, '$.predictions') prediction LIMIT 8)), '[]')))`;
+        + `SELECT CASE WHEN prediction.type IN ('object','array') THEN prediction.value ELSE json_quote(prediction.value) END AS prediction_value FROM json_each(item.item_value, '$.predictions') prediction LIMIT 8)), '[]'))) END`;
     }
-    if (field === "daily_news_briefs") return `json_remove(item.item_value, '$.brief_json')`;
-    return "json(item.item_value)";
+    if (field === "daily_news_briefs") return `CASE WHEN item.item_type = 'object' THEN json_remove(item.item_value, '$.brief_json') ELSE item.item_value END`;
+    return "CASE WHEN item.item_type IN ('object','array') THEN json(item.item_value) ELSE item.item_value END";
   };
   return `json_object(${Object.entries(fields).flatMap(([field, limit]) => [
     `'${field}'`, limit === null
       ? `json_extract(payload, '$.${field}')`
-      : `json(coalesce((SELECT json_group_array(${arrayValue(field)}) FROM (`
-        + `SELECT value AS item_value FROM json_each(payload, '$.${field}') LIMIT ${limit}) item), '[]'))`,
+      : `CASE WHEN json_type(payload, '$.${field}') = 'array' THEN json(coalesce((SELECT json_group_array(${arrayValue(field)}) FROM (`
+        + `SELECT value AS item_value, type AS item_type FROM json_each(payload, '$.${field}') LIMIT ${limit}) item), '[]'))`
+        + ` WHEN json_type(payload, '$.${field}') IS NULL THEN json('[]') ELSE json_extract(payload, '$.${field}') END`,
   ]).join(", ")})`;
 }
 
 function auditSnapshotSql(route: SnapshotRoute) {
   if (!route.legacyFields) return null;
+  const projection = legacyAuditProjection(route.legacyFields);
+  // Retain the selected source's identity; never assign the current heartbeat
+  // timestamp to a historical detail or invent empty source authority.
+  const legacy = route.id === AUDIT_SNAPSHOT_IDS.summary ? projection
+    : `json_patch(${projection}, json_object(
+        'projection_contract', json_extract(payload, '$.projection_contract'),
+        'producer_revision', json_extract(payload, '$.producer_revision')))`;
   return `WITH candidates(payload, received_at, preference) AS (
     SELECT payload, received_at, 0 FROM dashboard_snapshots
      WHERE id=${route.id} AND json_valid(payload)
     UNION ALL
-    SELECT ${legacyAuditProjection(route.legacyFields)}, received_at, 1
-      FROM dashboard_snapshots WHERE id=4 AND json_valid(payload)
+    SELECT ${legacy}, received_at, 1
+      FROM dashboard_snapshots WHERE id=4 AND CASE WHEN json_valid(payload)
+        THEN ${auditDetailSourceSql(route.id)} ELSE 0 END
   ), selected(payload) AS (
     SELECT payload FROM candidates
-     WHERE length(CAST(payload AS BLOB)) <= ${route.maxBytes}
+     WHERE CASE WHEN length(CAST(payload AS BLOB)) <= ${route.maxBytes}
+       THEN ${auditDetailPayloadSql(route.id)} ELSE 0 END
      ORDER BY julianday(received_at) DESC, preference ASC LIMIT 1
   )
   SELECT payload, length(CAST(payload AS BLOB)) AS payload_bytes FROM selected`;

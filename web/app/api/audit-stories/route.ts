@@ -3,7 +3,7 @@ import { AUDIT_SNAPSHOT_IDS } from "../_shared/dashboard-snapshot";
 
 export const dynamic = "force-dynamic";
 const fields = [
-  "generated_at", "storylines", "market_narrative_candidates",
+  "generated_at", "producer_revision", "projection_contract", "storylines", "market_narrative_candidates",
   "archived_storylines", "archived_story_event_candidates",
   "story_event_candidates", "market_reaction_streams", "theme_streams",
   "unassigned_story_events", "storyline_summary",

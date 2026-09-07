@@ -129,6 +129,13 @@ product requirement.
   public audit snapshot and labels that resource as a compatibility source.
   Absence of both sources is `UNAVAILABLE_IN_BUILD_SNAPSHOT`, never an empty
   collection.
+  HTTP success alone is not admission: the required array and renderable row
+  fields must validate. Empty split detail requires the explicit
+  `audit-detail-source-v1` source contract; older unmarked empty placeholders
+  remain unavailable unless an independently valid legacy source is present.
+  The build and route use the same detail validator as the browser. A coverage
+  snapshot's displayed time belongs to the branch snapshot, not a later live
+  status heartbeat.
 - Recent decisions and the Live OOS model-group summary retain real zero values.
   If no authoritative public source exists, the fields are omitted and their
   per-resource provenance reports `UNAVAILABLE_IN_BUILD_SNAPSHOT`; presentation

@@ -43,9 +43,9 @@ const baseline = {
   "/api/learning": {generated_at: generatedAt, learning_curves: {models: []}},
 };
 const details = {
-  briefs: {generated_at: generatedAt, daily_news_briefs: []},
-  stories: {generated_at: generatedAt, storylines: []},
-  decisions: {generated_at: generatedAt, recent_decisions: []},
+  briefs: {projection_contract: "audit-detail-source-v1", generated_at: generatedAt, daily_news_briefs: []},
+  stories: {projection_contract: "audit-detail-source-v1", generated_at: generatedAt, storylines: []},
+  decisions: {projection_contract: "audit-detail-source-v1", generated_at: generatedAt, recent_decisions: []},
 };
 
 function selectedBody(html) {
@@ -69,13 +69,19 @@ test("successful empty decisions and coverage have visible empty states", () => 
 });
 
 test("audit footer uses its resource timestamp independently of status heartbeat", () => {
-  const resources = {...baseline, "/api/audit-decisions": details.decisions};
   const footer = html => html.slice(html.indexOf('<footer class="audit-footer">'));
-  const before = footer(render("decisions", resources));
-  const after = footer(render("decisions", {...resources, "/api/status": {...baseline["/api/status"], generated_at:"2026-09-06T13:00:00Z"}}));
-  assert.equal(before, after);
-  assert.match(before, /19:00:00/);
-  assert.doesNotMatch(before, /2026-09-06T/);
+  for (const view of ["decisions", "coverage"]) {
+    const status = {...baseline["/api/status"], preview: {
+      is_preview: true,
+      branch_snapshot: {generated_at: generatedAt, status_paths: ["factor_coverage"]},
+    }};
+    const resources = {...baseline, "/api/status": status, "/api/audit-decisions": details.decisions};
+    const before = footer(render(view, resources));
+    const after = footer(render(view, {...resources, "/api/status": {...status, generated_at:"2026-09-06T13:00:00Z"}}));
+    assert.equal(before, after, `${view} must retain its own source timestamp`);
+    assert.match(before, /19:00:00/);
+    assert.doesNotMatch(before, /2026-09-06T/);
+  }
 });
 
 test("accepted detail content is independent of missing or compact status data", () => {

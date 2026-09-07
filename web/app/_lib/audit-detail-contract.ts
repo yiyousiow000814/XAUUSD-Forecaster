@@ -1,10 +1,17 @@
 export type AuditDetailResource = "briefs" | "stories" | "decisions";
 
-const requiredArray = {
+export const AUDIT_DETAIL_PROJECTION_CONTRACT = "audit-detail-source-v1";
+
+export const auditDetailRequiredArray = {
   briefs: "daily_news_briefs",
   stories: "storylines",
   decisions: "recent_decisions",
 } as const;
+
+export const auditStorySiblingArrays = [
+  "market_narrative_candidates", "archived_storylines", "archived_story_event_candidates",
+  "story_event_candidates", "market_reaction_streams", "theme_streams", "unassigned_story_events",
+] as const;
 
 const record = (value: unknown): value is Record<string, unknown> => (
   Boolean(value) && typeof value === "object" && !Array.isArray(value)
@@ -41,10 +48,14 @@ function validRow(view: AuditDetailResource, row: Record<string, unknown>): bool
 export function validAuditDetailPayload(view: AuditDetailResource, value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const body = value as Record<string, unknown>;
-  const rows = body[requiredArray[view]];
+  const rows = body[auditDetailRequiredArray[view]];
   if ("error" in body || !records(rows) || !rows.every(row => validRow(view, row))) return false;
-  if (view === "stories" && ["market_narrative_candidates", "archived_storylines", "archived_story_event_candidates", "story_event_candidates", "market_reaction_streams", "theme_streams", "unassigned_story_events"]
-    .some(field => body[field] != null && !records(body[field]))) return false;
+  if (body.projection_contract !== undefined && body.projection_contract !== AUDIT_DETAIL_PROJECTION_CONTRACT) return false;
+  // Older compact projections cannot distinguish an omitted detail from a
+  // genuinely empty source. Only the explicit producer contract owns zero.
+  if (rows.length === 0 && body.projection_contract !== AUDIT_DETAIL_PROJECTION_CONTRACT) return false;
+  if (view === "stories" && auditStorySiblingArrays
+    .some(field => field in body && !records(body[field]))) return false;
   if (view === "stories" && records(body.archived_storylines)
     && !body.archived_storylines.every(row => validRow(view, row))) return false;
   return body.generated_at === undefined || (typeof body.generated_at === "string"

@@ -11,6 +11,79 @@ export const AUDIT_SNAPSHOT_IDS = Object.freeze({
 });
 
 import { validateJsonPayloadWithD1 } from "./release-validation";
+import {
+  AUDIT_DETAIL_PROJECTION_CONTRACT, auditDetailRequiredArray, auditStorySiblingArrays,
+  type AuditDetailResource,
+} from "../../_lib/audit-detail-contract";
+
+function auditDetailResource(snapshotId: number): AuditDetailResource | null {
+  if (snapshotId === AUDIT_SNAPSHOT_IDS.briefs) return "briefs";
+  if (snapshotId === AUDIT_SNAPSHOT_IDS.stories) return "stories";
+  if (snapshotId === AUDIT_SNAPSHOT_IDS.decisions) return "decisions";
+  return null;
+}
+
+/** Check the source before legacy projection can turn an absent array into []. */
+export function auditDetailSourceSql(snapshotId: number, payload = "payload"): string {
+  const resource = auditDetailResource(snapshotId);
+  if (!resource) return "1";
+  const field = auditDetailRequiredArray[resource];
+  return `(json_type(${payload}, '$.error') IS NULL
+    AND json_type(${payload}, '$.${field}') = 'array'
+    AND (json_type(${payload}, '$.projection_contract') IS NULL
+      OR json_extract(${payload}, '$.projection_contract') = '${AUDIT_DETAIL_PROJECTION_CONTRACT}')
+    AND (json_array_length(${payload}, '$.${field}') > 0
+      OR json_extract(${payload}, '$.projection_contract') = '${AUDIT_DETAIL_PROJECTION_CONTRACT}'))`;
+}
+
+/** Match the UI row contract in D1, without decoding the bounded JSON in JS. */
+export function auditDetailPayloadSql(snapshotId: number, payload = "payload"): string {
+  const resource = auditDetailResource(snapshotId);
+  if (!resource) return `json_valid(${payload})`;
+  const field = auditDetailRequiredArray[resource];
+  const array = (value: string, path: string, rowType = "object") => (
+    `(json_type(${value}, '$.${path}') = 'array' AND NOT EXISTS (
+      SELECT 1 FROM json_each(${value}, '$.${path}') WHERE type != '${rowType}'))`
+  );
+  const optional = (value: string, path: string, valid: string) => (
+    `(json_type(${value}, '$.${path}') IS NULL OR json_type(${value}, '$.${path}') = 'null' OR ${valid})`
+  );
+  const numeric = (value: string, path: string) => optional(
+    value, path, `json_type(${value}, '$.${path}') IN ('integer','real')`,
+  );
+  const storyRow = (value: string) => [
+    "covered_roles", "missing_roles", "timeline", "market_reactions", "commentary", "background",
+  ].map(path => array(value, path)).join(" AND ");
+  const row = "detail.value";
+  const rowValid = resource === "stories" ? storyRow(row)
+    : resource === "briefs" ? `json_type(${row}, '$.model_version') = 'text'
+      AND ${optional(row, "phase", `json_type(${row}, '$.phase') = 'text'`)}
+      AND json_type(${row}, '$.brief') = 'object'
+      AND ${array(row, "brief.items")}
+      AND NOT EXISTS (SELECT 1 FROM json_each(${row}, '$.brief.items') brief_item
+        WHERE NOT CASE WHEN brief_item.type = 'object' THEN coalesce((json_type(brief_item.value, '$.headline') = 'text'
+          AND json_type(brief_item.value, '$.summary') = 'text'
+          AND ${array("brief_item.value", "evidence_ids", "text")}), 0) ELSE 0 END)
+      AND ${optional(row, "brief.drivers", array(row, "brief.drivers", "text"))}
+      AND ${["brief.overview", "brief.watch_next"].map(path => optional(row, path, `json_type(${row}, '$.${path}') = 'text'`)).join(" AND ")}`
+    : `${array(row, "predictions")}
+      AND ${["bid", "ask", "long_return", "short_return"].map(path => numeric(row, path)).join(" AND ")}
+      AND ${optional(row, "outcome_status", `(json_extract(${row}, '$.outcome_status') = 'VALID' OR ${array(row, "outcome_reason_codes", "text")})`)}
+      AND NOT EXISTS (SELECT 1 FROM json_each(${row}, '$.predictions') prediction
+        WHERE NOT CASE WHEN prediction.type = 'object' THEN coalesce((${["predicted_direction_u5", "predicted_news_residual_u5", "ev_long_u5", "ev_short_u5", "uncertainty_u5"].map(path => numeric("prediction.value", path)).join(" AND ")}), 0) ELSE 0 END)`;
+  const siblings = resource === "stories" ? auditStorySiblingArrays.map(path => (
+    `(json_type(${payload}, '$.${path}') IS NULL OR ${array(payload, path)})`
+  )).join(" AND ") + ` AND NOT EXISTS (
+    SELECT 1 FROM json_each(${payload}, '$.archived_storylines') detail
+    WHERE NOT CASE WHEN detail.type = 'object' THEN coalesce((${storyRow(row)}), 0) ELSE 0 END)` : "1";
+  return `CASE WHEN json_valid(${payload}) THEN coalesce((
+    ${auditDetailSourceSql(snapshotId, payload)}
+    AND (json_type(${payload}, '$.generated_at') IS NULL OR
+      (json_type(${payload}, '$.generated_at') = 'text' AND julianday(json_extract(${payload}, '$.generated_at')) IS NOT NULL))
+    AND NOT EXISTS (SELECT 1 FROM json_each(${payload}, '$.${field}') detail
+      WHERE NOT CASE WHEN detail.type = 'object' THEN coalesce((${rowValid}), 0) ELSE 0 END)
+    AND ${siblings}), 0) ELSE 0 END`;
+}
 
 export type SnapshotWriteResult = "stored" | "validated" | "invalid" | "too_large";
 
@@ -27,12 +100,26 @@ export const PUBLIC_STATUS_PRIVATE_FIELDS = [
   "gemma_quota", "gemini_embedding_quota", "llm_routing",
 ] as const;
 
-const snapshotUpsertSql = `WITH incoming(payload) AS (SELECT CAST(? AS TEXT))
+const snapshotUpsertSql = (valid: string) => `WITH incoming(payload) AS (SELECT CAST(? AS TEXT))
      INSERT INTO dashboard_snapshots (id, payload, received_at)
-     SELECT ?, payload, ? FROM incoming WHERE json_valid(payload)
+     SELECT ?, payload, ? FROM incoming WHERE ${valid}
      ON CONFLICT(id) DO UPDATE SET
        payload=excluded.payload, received_at=excluded.received_at
      WHERE dashboard_snapshots.payload IS NOT excluded.payload`;
+
+const auditDetailWriteStatements = new Map<number, {validation: string; upsert: string}>([
+  AUDIT_SNAPSHOT_IDS.briefs, AUDIT_SNAPSHOT_IDS.stories, AUDIT_SNAPSHOT_IDS.decisions,
+].map(id => {
+  const valid = auditDetailPayloadSql(id);
+  return [id, {
+    validation: `WITH incoming(payload) AS (SELECT CAST(? AS TEXT)) SELECT ${valid} AS valid FROM incoming`,
+    upsert: snapshotUpsertSql(valid),
+  }];
+}));
+const genericSnapshotWriteStatements = {
+  validation: "SELECT json_valid(CAST(? AS TEXT)) AS valid",
+  upsert: snapshotUpsertSql("json_valid(payload)"),
+};
 
 // D1's bridge charges materially more Worker CPU when a larger ArrayBuffer is
 // bound than when the same already-bounded UTF-8 JSON is bound as text. Keep
@@ -168,13 +255,18 @@ export async function writeDashboardSnapshotBytes(
 ): Promise<SnapshotWriteResult> {
   const payload = snapshotD1Payload(bytes);
   if (payload === null) return "invalid";
+  const statements = auditDetailWriteStatements.get(snapshotId) ?? genericSnapshotWriteStatements;
   if (options.dryRun) {
+    if (auditDetailResource(snapshotId)) {
+      const validation = await binding.prepare(statements.validation).bind(payload).first<{ valid: number }>();
+      return Number(validation?.valid) === 1 ? "validated" : "invalid";
+    }
     return await validateJsonPayloadWithD1(binding, payload)
       ? "validated" : "invalid";
   }
   const [validation] = await binding.batch([
-    binding.prepare("SELECT json_valid(CAST(? AS TEXT)) AS valid").bind(payload),
-    binding.prepare(snapshotUpsertSql)
+    binding.prepare(statements.validation).bind(payload),
+    binding.prepare(statements.upsert)
       .bind(payload, snapshotId, new Date().toISOString()),
   ]);
   const valid = Number((validation.results?.[0] as { valid?: number } | undefined)?.valid ?? 0);

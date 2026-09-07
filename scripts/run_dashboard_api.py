@@ -97,7 +97,10 @@ from xauusd_forecaster.news_projection import (
     build_news_projection_generation,
     receipt_digest,
 )
-from scripts.run_dashboard_sync import _learning_summary, market_chart_snapshot
+from scripts.run_dashboard_sync import (
+    _learning_summary, audit_briefs_snapshot, audit_decisions_snapshot,
+    audit_snapshot, audit_stories_snapshot, market_chart_snapshot,
+)
 from xauusd_forecaster.runtime_paths import (
     authoritative_runtime_root,
     runtime_child_path,
@@ -2257,7 +2260,13 @@ def _optional_resource_payload(
         snapshot_connection=snapshot.connection,
     )
     if resource == "audit":
-        return audit_status_payload(payload)
+        summary = json.loads(audit_snapshot(payload))
+        summary["detail_resources"] = {
+            "audit-briefs": json.loads(audit_briefs_snapshot(payload)),
+            "audit-stories": json.loads(audit_stories_snapshot(payload)),
+            "audit-decisions": json.loads(audit_decisions_snapshot(payload)),
+        }
+        return summary
     if resource == "learning":
         summary = {
             key: payload[key] for key in (
@@ -2444,6 +2453,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         read_model_resources = {
             "/api/audit": "audit",
+            "/api/audit-briefs": "audit",
+            "/api/audit-stories": "audit",
+            "/api/audit-decisions": "audit",
             "/api/learning": "learning",
             "/api/market-chart": "market_chart",
         }
@@ -2452,6 +2464,19 @@ class Handler(BaseHTTPRequestHandler):
                 body, metadata = read_dashboard_read_model(
                     self.database, read_model_resources[path],
                 )
+                if read_model_resources[path] == "audit":
+                    audit = json.loads(body)
+                    details = audit.pop("detail_resources", {})
+                    if path != "/api/audit":
+                        audit = details.get(path.rsplit("/", 1)[-1])
+                        if not isinstance(audit, dict):
+                            raise DashboardReadModelUnavailable(
+                                f"{path} source detail is unavailable"
+                            )
+                    body = json.dumps(
+                        audit, ensure_ascii=False, allow_nan=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
                 status = 200
                 headers = {
                     "X_Dashboard_Read_Model": str(metadata["state"]),

@@ -7,6 +7,7 @@ import {
   writeDashboardSnapshot,
 } from "./dashboard-snapshot";
 import { isIngestAuthorized } from "./ingest-auth";
+import { validAuditDetailPayload } from "../../_lib/audit-detail-contract";
 import {
   authorizeReleaseValidation,
   isReleaseValidationContext,
@@ -26,7 +27,9 @@ export async function readAuditDetailSnapshot(
         : snapshotId === AUDIT_SNAPSHOT_IDS.decisions
           ? previewBundle.audit_decisions
           : null;
-    if (!resource) {
+    const detail = snapshotId === AUDIT_SNAPSHOT_IDS.briefs ? "briefs"
+      : snapshotId === AUDIT_SNAPSHOT_IDS.stories ? "stories" : "decisions";
+    if (!resource || !validAuditDetailPayload(detail, resource)) {
       return previewJson({
         error: unavailableLabel,
         availability: "UNAVAILABLE_IN_BUILD_SNAPSHOT",

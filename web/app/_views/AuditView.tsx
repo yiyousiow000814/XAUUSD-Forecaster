@@ -1430,7 +1430,9 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     : null;
   const selectedResourceTime = view === "news"
     ? newsIndex.activated_at ?? newsIndex.generated_at
-    : selectedResourceSnapshot?.activated_at ?? selectedResourceSnapshot?.generated_at;
+    : view === "coverage" && coveragePhase === "snapshot"
+      ? payload?.preview?.branch_snapshot?.generated_at
+      : selectedResourceSnapshot?.activated_at ?? selectedResourceSnapshot?.generated_at;
   const detailLabel = ({ briefs: "每日简报", stories: "事件脉络", decisions: "决策与30分钟结果" } as const)[view as AuditDetailView];
   const secondaryResourceError = view === "news" ? newsError : view === "evidence" ? evidenceError : view === "league" ? learningError : null;
   const secondaryResourceLabel = view === "news" ? "新闻索引" : view === "evidence" ? "新闻证据" : "学习进度";

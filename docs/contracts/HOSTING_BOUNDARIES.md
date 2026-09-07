@@ -204,6 +204,14 @@
   SQLite remains the complete authority; D1 contains only those bounded
   display projections. A detail snapshot that has not loaded or is unavailable
   must not be represented as an empty collection or zero count.
+  Its existing local optional owner builds one pinned source snapshot and stores
+  the summary plus all three byte-bounded details atomically in the same derived
+  audit row. Local GET selects only the requested resource; Sync reads those
+  detail endpoints instead of projecting the summary again. A derived-contract
+  change forces replacement even at an unchanged source revision.
+  `audit-detail-source-v1` marks a projection whose required source array exists
+  and is structurally valid. A marked empty array is a real empty result;
+  missing/malformed fields and unmarked empty split rows are not empty authority.
 - A bounded News index page is projected in one D1 query after the current
   generation identity is established. Review/category/parsed counts that cannot
   change inside an immutable generation are materialized atomically at every
@@ -221,6 +229,10 @@
   item-bounded inside D1 JSON1; a Worker must not deserialize the growing
   legacy document merely to decide freshness. Invalid or oversized candidates
   are skipped, and absence of a valid bounded source fails closed.
+  Eligibility checks the original required detail array before projection.
+  An old ambiguous empty split row cannot hide complete legacy detail merely
+  because its `received_at` is newer. Valid legacy detail retains the legacy
+  source time and bounded projection; no fresh timestamp is synthesized.
 - The storyline display projection retains at most 12 current storylines, 12
   candidates per candidate family, eight streams per stream family, and six
   first/last timeline events per storyline. Exact aggregate totals remain in

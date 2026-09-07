@@ -12,7 +12,10 @@ import {
   subscribeDashboardResource,
 } from "../app/_lib/dashboard-resource.ts";
 import { systemStatePresentation } from "../app/_lib/system-state.ts";
-import { validAuditDetailPayload } from "../app/_lib/audit-detail-contract.ts";
+import { AUDIT_DETAIL_PROJECTION_CONTRACT, validAuditDetailPayload } from "../app/_lib/audit-detail-contract.ts";
+import { writeDashboardSnapshotBytes } from "../app/api/_shared/dashboard-snapshot.ts";
+import { D1TestDatabase } from "./d1-test-database.mjs";
+import { admitPreviewAuditDetails } from "../build/preview-learning.ts";
 
 const originalFetch = globalThis.fetch;
 const originalWindow = globalThis.window;
@@ -243,14 +246,14 @@ test("retains last-good private and public snapshots after service failures", as
 test("audit resource family rejects malformed success envelopes and preserves accepted work for retry", async () => {
   for (const [view, field] of [["briefs", "daily_news_briefs"], ["stories", "storylines"], ["decisions", "recent_decisions"]]) {
     const url = `/api/audit-${view}?resource-test=accepted-envelope`;
-    const accepted = {generated_at: "2026-09-06T11:00:00Z", [field]: []};
+    const accepted = {projection_contract: AUDIT_DETAIL_PROJECTION_CONTRACT, generated_at: "2026-09-06T11:00:00Z", [field]: []};
     const validate = body => validAuditDetailPayload(view, body);
     globalThis.fetch = async () => jsonResponse(accepted);
     await loadDashboardResource(url, {force: true, validate});
     const invalidRows = view === "briefs"
       ? [{[field]: [{model_version:"fixture",phase:3,brief:{items:[]}}]}]
       : view === "stories" ? [{[field]: [], archived_storylines:[{}]}] : [];
-    for (const invalid of [null, [], {}, {error: "unavailable"}, {[field]: null}, {[field]: [{}]}, {[field]: [null]}, {[field]: [], generated_at: "invalid"}, ...invalidRows]) {
+    for (const invalid of [null, [], {}, {error: "unavailable"}, {[field]: []}, {...accepted, projection_contract:"unknown"}, {...accepted, projection_contract:null}, {[field]: null}, {[field]: [{}]}, {[field]: [null]}, {[field]: [], generated_at: "invalid"}, ...invalidRows]) {
       globalThis.fetch = async () => jsonResponse(invalid);
       await assert.rejects(loadDashboardResource(url, {force: true, validate}), error => error.code === "INVALID_RESOURCE_PAYLOAD");
       assert.deepEqual(readDashboardResource(url), accepted);
@@ -260,5 +263,78 @@ test("audit resource family rejects malformed success envelopes and preserves ac
     globalThis.fetch = async () => jsonResponse(recovered);
     assert.deepEqual(await loadDashboardResource(url, {force:true, validate}), recovered);
     assert.equal(readDashboardResourceState(url).error, null);
+  }
+});
+
+test("Audit UI and the actual D1 writer agree on explicit source and nested row validity", async () => {
+  const database = new D1TestDatabase([]);
+  database.database.exec("CREATE TABLE dashboard_snapshots(id INTEGER PRIMARY KEY,payload TEXT,received_at TEXT)");
+  try {
+    for (const [view,id,field,row] of [
+      ["briefs",7,"daily_news_briefs",{model_version:"v",brief:{items:[{headline:"headline",summary:"summary",evidence_ids:["e1"]}]}}],
+      ["stories",8,"storylines",{covered_roles:[],missing_roles:[],timeline:[],market_reactions:[],commentary:[],background:[]}],
+      ["decisions",6,"recent_decisions",{predictions:[{ev_long_u5:0.1}],bid:5000,ask:5001}],
+    ]) {
+      const baseline = {projection_contract:AUDIT_DETAIL_PROJECTION_CONTRACT,generated_at:"2026-09-06T11:00:00Z",[field]:[row]};
+      const bytes = new TextEncoder().encode(JSON.stringify(baseline));
+      assert.equal(await writeDashboardSnapshotBytes(bytes,database,id),"stored");
+      const before = database.row(id,"dashboard_snapshots");
+      const familyInvalid = view === "briefs" ? [
+        {...baseline,[field]:[{...row,brief:{items:["bad"]}}]},
+        {...baseline,[field]:[{...row,brief:{items:[{headline:"h",summary:"s",evidence_ids:[1]}]}}]},
+      ] : view === "stories" ? [
+        {...baseline,theme_streams:null}, {...baseline,story_event_candidates:{}},
+        {...baseline,archived_storylines:[{}]}, {...baseline,[field]:[{...row,timeline:["bad"]}]},
+      ] : [
+        {...baseline,[field]:[{predictions:["bad"]}]},
+        {...baseline,[field]:[{predictions:[{ev_long_u5:"wrong-unit-type"}]}]},
+        {...baseline,[field]:[{predictions:[],bid:"5000"}]},
+      ];
+      const valid = [baseline,{[field]:[row]},{...baseline,[field]:[]}];
+      const invalid = [{},null,[],{[field]:[]},{...baseline,projection_contract:null},
+        {...baseline,projection_contract:"unsupported"},{...baseline,[field]:[{}]},
+        {...baseline,[field]:["bad"]},{...baseline,[field]:null},...familyInvalid];
+      for (const [expected, cases] of [[true,valid],[false,invalid]]) {
+        for (const value of cases) {
+          assert.equal(validAuditDetailPayload(view,value),expected,`${view}/${JSON.stringify(value)}`);
+          assert.equal(await writeDashboardSnapshotBytes(new TextEncoder().encode(JSON.stringify(value)),database,id,{dryRun:true}),expected ? "validated" : "invalid");
+          assert.deepEqual(database.row(id,"dashboard_snapshots"),before);
+          if (!expected) {
+            assert.equal(await writeDashboardSnapshotBytes(new TextEncoder().encode(JSON.stringify(value)),database,id),"invalid");
+            assert.deepEqual(database.row(id,"dashboard_snapshots"),before);
+          }
+        }
+      }
+    }
+  } finally {
+    database.database.close();
+  }
+});
+
+test("Preview build admission preserves source time and fallback provenance only for valid detail", () => {
+  for (const [view,field,row] of [
+    ["briefs","daily_news_briefs",{model_version:"v",brief:{items:[]}}],
+    ["stories","storylines",{covered_roles:[],missing_roles:[],timeline:[],market_reactions:[],commentary:[],background:[]}],
+    ["decisions","recent_decisions",{predictions:[]}],
+  ]) {
+    const key = `audit_${view}`;
+    const provenance = {availability:"AVAILABLE",source_path:"/api/audit",compatibility_fallback:true};
+    const valid = {generated_at:"2026-09-01T11:00:00Z",[field]:[row]};
+    for (const detail of [valid,{...valid,projection_contract:AUDIT_DETAIL_PROJECTION_CONTRACT,[field]:[]}]) {
+      const bundle = {status:{generated_at:"2026-09-06T11:00:00Z",preview:{resources:{[key]:provenance}}},[key]:detail};
+      admitPreviewAuditDetails(bundle);
+      assert.equal(bundle[key],detail);
+      assert.equal(bundle[key].generated_at,"2026-09-01T11:00:00Z");
+      assert.equal(bundle.status.preview.resources[key],provenance);
+    }
+    for (const detail of [null,{}, {[field]:[]}, {...valid,[field]:[{}]}, {...valid,[field]:["bad"]}]) {
+      const bundle = {status:{preview:{resources:{[key]:provenance}}},[key]:detail};
+      admitPreviewAuditDetails(bundle);
+      assert.equal(bundle[key],null);
+      assert.deepEqual(bundle.status.preview.resources[key],{
+        availability:"UNAVAILABLE_IN_BUILD_SNAPSHOT",requested_path:`/api/audit-${view}`,
+        source_path:null,compatibility_fallback:false,reason:"INVALID_AUDIT_DETAIL_SOURCE",
+      });
+    }
   }
 });
