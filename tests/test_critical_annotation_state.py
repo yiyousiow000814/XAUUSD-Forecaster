@@ -344,6 +344,47 @@ def test_reconciliation_source_first_preserves_rules_without_unchanged_body_read
             assert connection.execute("SELECT last_error FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone()[0] == "PRIOR_FAILURE"
 
 
+def test_reconciliation_source_first_live_old_hook_cannot_preserve_false_acceptance(tmp_path) -> None:
+    from tests.test_daily_brief import _seed_news
+
+    with closing(ForwardLedger(tmp_path / "old-hook.sqlite3", now=NOW - timedelta(days=30))) as ledger:
+        connection = ledger.connection
+        _seed_news(ledger)
+        job = enqueue_job(connection, task_type="ACTIVE_ANNOTATION", source="Reuters",
+            source_item_id="item-1", revision_number=1, annotation_id="",
+            prompt_version=PROMPT_VERSION, priority="NORMAL", now=NOW)
+        assert reconcile_completed_jobs(connection, now=NOW) == 1
+        revision = critical_state.news_job_input_revision(connection)
+        cache = connection.execute("SELECT value FROM runtime_metadata WHERE key=?",
+            (critical_state.NEWS_RECONCILIATION_CACHE_KEY,)).fetchone()[0]
+        assert cache
+        # The pre-revision schema variant really maintains the same job counts,
+        # but cannot advance a counter introduced by a newer running reader.
+        old_update = next(sql for sql in critical_state._annotation_job_count_statements(
+            has_runtime_metadata=False, has_brief_cache=False,
+        ) if sql.startswith("CREATE TRIGGER IF NOT EXISTS dashboard_job_count_update_v1"))
+        with connection:
+            connection.execute("DROP TRIGGER dashboard_job_count_update_v1")
+            connection.execute(old_update)
+            connection.execute("UPDATE news_ai_jobs_v1 SET state='QUEUED' WHERE job_id=?", (job,))
+        assert int(connection.execute("SELECT value FROM runtime_metadata WHERE key=?",
+            (critical_state.NEWS_JOB_REVISION_KEY,)).fetchone()[0]) == revision
+        assert critical_state.news_job_input_revision(connection) is None
+        assert reconcile_completed_jobs(connection, now=NOW + timedelta(seconds=1)) == 1
+        assert connection.execute("SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (job,)).fetchone()[0] == "COMPLETED"
+        assert connection.execute("SELECT value FROM runtime_metadata WHERE key=?",
+            (critical_state.NEWS_RECONCILIATION_CACHE_KEY,)).fetchone()[0] == cache
+        assert not critical_state.news_job_source_hooks_are_current(connection)
+        critical_state.install_annotation_job_count_schema(connection)
+        assert critical_state.news_job_input_revision(connection) == revision
+        assert connection.execute("SELECT value FROM runtime_metadata WHERE key=?",
+            (critical_state.NEWS_RECONCILIATION_CACHE_KEY,)).fetchone()[0] == "null"
+        assert reconcile_completed_jobs(connection, now=NOW + timedelta(seconds=2)) == 0
+        changes = connection.total_changes
+        assert reconcile_completed_jobs(connection, now=NOW + timedelta(seconds=3)) == 0
+        assert connection.total_changes == changes
+
+
 def test_reconciliation_source_first_caller_rollback_does_not_publish_acceptance(tmp_path) -> None:
     from tests.test_daily_brief import _seed_news
 
@@ -460,21 +501,34 @@ def test_reconciliation_source_first_hot_work_is_bounded_by_tails_not_history(
         connection = ledger.connection
         _insert_unclassified_revisions(connection, historical=source_rows, live=0)
         assert reconcile_completed_jobs(connection, now=NOW) == 0
-        steps = []
+        # SQLite's schema catalog has no name index. Canonical hook verification
+        # scans this fixed metadata, not the historical source tables. Keep its
+        # measured allowance separate from the original source-read budget.
+        schema_objects = connection.execute("SELECT count(*) FROM sqlite_master").fetchone()[0]
+        limits = {"source": 1024, "schema": min(8192, 8 * schema_objects + 128)}
+        steps = {"source": 0, "schema": 0}
+        current = ["source"]
+
+        def classify_statement(sql):
+            current[0] = "schema" if "FROM sqlite_master" in sql else "source"
 
         def bounded_steps():
-            steps.append(1)
-            return int(len(steps) > 1024)
+            kind = current[0]
+            steps[kind] += 1
+            return int(steps[kind] > limits[kind])
 
         before = connection.total_changes
+        connection.set_trace_callback(classify_statement)
         connection.set_progress_handler(bounded_steps, 1)
         try:
             assert reconcile_completed_jobs(connection, now=NOW) == 0
         finally:
             connection.set_progress_handler(None, 0)
+            connection.set_trace_callback(None)
         assert connection.total_changes == before
         record_property("reconciliation_tail_budget", {"source_rows": source_rows,
-                        "sqlite_vm_steps": len(steps), "max_vm_steps": 1024})
+                        "schema_objects": schema_objects,
+                        "sqlite_vm_steps": steps, "max_vm_steps": limits})
 
 
 def _snapshot(connection: sqlite3.Connection, now: datetime = NOW) -> dict[str, int]:

@@ -75,16 +75,10 @@ def install_annotation_job_count_schema(connection: sqlite3.Connection) -> None:
         raise
 
 
-def _install_annotation_job_count_schema(connection: sqlite3.Connection) -> None:
-    # Preserve the existing one-column marker table: old installers use a
-    # positional INSERT. Only the same job-count owner maintains these two
-    # fixed runtime-metadata names; no growing revision/event log is created.
-    has_runtime_metadata = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_metadata'"
-    ).fetchone() is not None
+def _annotation_job_count_schema(*, has_runtime_metadata: bool, has_brief_cache: bool) -> str:
+    """One canonical definition for installation and live cache applicability."""
     revision_update = ""
     if has_runtime_metadata:
-        _install_news_job_metadata_guards(connection)
         revision_update = f"""
           UPDATE runtime_metadata SET value=CASE
             WHEN value<>'' AND value NOT GLOB '*[^0-9]*'
@@ -93,17 +87,6 @@ def _install_annotation_job_count_schema(connection: sqlite3.Connection) -> None
             THEN CAST(CAST(value AS INTEGER)+1 AS TEXT) ELSE 'INVALID' END
           WHERE key='{NEWS_JOB_REVISION_KEY}';
         """
-        connection.execute(
-            "UPDATE runtime_metadata SET value='null' WHERE key=? AND NOT EXISTS "
-            "(SELECT 1 FROM runtime_metadata WHERE key=?)",
-            (NEWS_RECONCILIATION_CACHE_KEY, NEWS_JOB_REVISION_KEY),
-        )
-        connection.execute(
-            "INSERT INTO runtime_metadata(key,value,created_at) "
-            "SELECT ?,'0',CURRENT_TIMESTAMP WHERE NOT EXISTS "
-            "(SELECT 1 FROM runtime_metadata WHERE key=?)",
-            (NEWS_JOB_REVISION_KEY, NEWS_JOB_REVISION_KEY),
-        )
     changed_job = " OR ".join(
         f"OLD.{column} IS NOT NEW.{column}" for column in (
             "task_type", "source", "source_item_id", "revision_number",
@@ -114,6 +97,19 @@ def _install_annotation_job_count_schema(connection: sqlite3.Connection) -> None
         f"WHERE key='{NEWS_JOB_REVISION_KEY}';",
         f"WHERE key='{NEWS_JOB_REVISION_KEY}' AND ({changed_job});",
     )
+    def invalidate_brief(prefix: str, condition: str = "1") -> str:
+        if not has_brief_cache:
+            return ""
+        # Only a real existing receipt-day owner is invalidated. No new day,
+        # WAITING state, counter namespace or append-only evidence is created.
+        return f"""
+          UPDATE daily_news_brief_refresh_state SET synthesis_source_cache_json=NULL
+          WHERE synthesis_source_cache_json IS NOT NULL AND ({condition})
+            AND brief_date=(
+              SELECT date(n.collector_first_seen_time,'+8 hours') FROM news_revisions n
+              WHERE n.source={prefix}.source AND n.source_item_id={prefix}.source_item_id
+                AND n.revision_number={prefix}.revision_number);
+        """
     schema = f"""
         CREATE TABLE IF NOT EXISTS dashboard_annotation_job_counts_v1 (
             task_type TEXT NOT NULL,
@@ -148,6 +144,7 @@ def _install_annotation_job_count_schema(connection: sqlite3.Connection) -> None
                       work_lane,state,retired)
           DO UPDATE SET job_count=job_count+1;
           {revision_update}
+          {invalidate_brief('NEW', "NEW.task_type='ACTIVE_ANNOTATION' AND NEW.state='DEAD_LETTER'")}
         END;
         CREATE TRIGGER IF NOT EXISTS dashboard_job_count_update_v1
         AFTER UPDATE OF task_type,prompt_version,lane_classified,
@@ -176,6 +173,8 @@ def _install_annotation_job_count_schema(connection: sqlite3.Connection) -> None
                       work_lane,state,retired)
           DO UPDATE SET job_count=job_count+1;
           {changed_revision_update}
+          {invalidate_brief('OLD', f"({changed_job}) AND OLD.task_type='ACTIVE_ANNOTATION' AND OLD.state='DEAD_LETTER'")}
+          {invalidate_brief('NEW', f"({changed_job}) AND NEW.task_type='ACTIVE_ANNOTATION' AND NEW.state='DEAD_LETTER'")}
         END;
         CREATE TRIGGER IF NOT EXISTS dashboard_job_count_delete_v1
         AFTER DELETE ON news_ai_jobs_v1 BEGIN
@@ -188,17 +187,79 @@ def _install_annotation_job_count_schema(connection: sqlite3.Connection) -> None
              AND state=OLD.state AND retired=CASE
                WHEN OLD.last_error='{RETIRED_ERROR}' THEN 1 ELSE 0 END;
           {revision_update}
+          {invalidate_brief('OLD', "OLD.task_type='ACTIVE_ANNOTATION' AND OLD.state='DEAD_LETTER'")}
         END;
         """
-    # Execute complete fixed statements separately: executescript would commit
-    # a caller transaction before running and break atomic hook replacement.
+    return schema
+
+
+def _annotation_job_count_statements(*, has_runtime_metadata: bool, has_brief_cache: bool):
     statement = ""
-    for line in schema.splitlines(keepends=True):
+    for line in _annotation_job_count_schema(
+        has_runtime_metadata=has_runtime_metadata, has_brief_cache=has_brief_cache,
+    ).splitlines(keepends=True):
         statement += line
         if not sqlite3.complete_statement(statement):
             continue
         sql = statement.strip()
         statement = ""
+        yield sql
+
+
+def news_job_source_hooks_are_current(connection: sqlite3.Connection) -> bool:
+    """An old writer may reinstall its hooks while this reader stays alive."""
+    expected = {
+        sql.split()[5]: sql.replace(" IF NOT EXISTS", "").rstrip(";")
+        for sql in _annotation_job_count_statements(
+            has_runtime_metadata=True, has_brief_cache=True,
+        ) if sql.startswith("CREATE TRIGGER")
+    }
+    rows = connection.execute(
+        "SELECT name,CASE WHEN length(CAST(sql AS BLOB))<=8192 THEN sql END "
+        "FROM sqlite_master WHERE type='trigger' AND name IN (?,?,?)",
+        tuple(expected),
+    ).fetchall()
+    return len(rows) == len(expected) and all(
+        isinstance(sql, str) and sql.strip() == expected[name] for name, sql in rows
+    )
+
+
+def _install_annotation_job_count_schema(connection: sqlite3.Connection) -> None:
+    # Preserve the existing one-column marker table: old installers use a
+    # positional INSERT. Only the same job-count owner maintains these two
+    # fixed runtime-metadata names; no growing revision/event log is created.
+    has_runtime_metadata = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_metadata'"
+    ).fetchone() is not None
+    has_brief_cache = any(
+        str(row[1]) == "synthesis_source_cache_json" for row in connection.execute(
+            "PRAGMA table_info(daily_news_brief_refresh_state)"
+        )
+    )
+    if has_brief_cache and has_runtime_metadata:
+        connection.execute(
+            "UPDATE daily_news_brief_refresh_state SET synthesis_source_cache_json=NULL "
+            "WHERE synthesis_source_cache_json IS NOT NULL AND NOT EXISTS "
+            "(SELECT 1 FROM runtime_metadata WHERE key=?)", (NEWS_JOB_REVISION_KEY,),
+        )
+    if has_runtime_metadata:
+        _install_news_job_metadata_guards(connection)
+        connection.execute(
+            "UPDATE runtime_metadata SET value='null' WHERE key=? AND NOT EXISTS "
+            "(SELECT 1 FROM runtime_metadata WHERE key=?)",
+            (NEWS_RECONCILIATION_CACHE_KEY, NEWS_JOB_REVISION_KEY),
+        )
+        connection.execute(
+            "INSERT INTO runtime_metadata(key,value,created_at) "
+            "SELECT ?,'0',CURRENT_TIMESTAMP WHERE NOT EXISTS "
+            "(SELECT 1 FROM runtime_metadata WHERE key=?)",
+            (NEWS_JOB_REVISION_KEY, NEWS_JOB_REVISION_KEY),
+        )
+    # Execute fixed statements separately: executescript would commit a caller
+    # transaction and break atomic hook replacement.
+    for sql in _annotation_job_count_statements(
+        has_runtime_metadata=has_runtime_metadata, has_brief_cache=has_brief_cache,
+    ):
         if sql.startswith("CREATE TRIGGER"):
             name = sql.split()[5]
             existing = connection.execute(
@@ -206,12 +267,22 @@ def _install_annotation_job_count_schema(connection: sqlite3.Connection) -> None
             ).fetchone()
             canonical = sql.replace(" IF NOT EXISTS", "").rstrip(";")
             if existing and str(existing[0]).strip() != canonical:
+                if has_brief_cache:
+                    connection.execute(
+                        "UPDATE daily_news_brief_refresh_state SET synthesis_source_cache_json=NULL "
+                        "WHERE synthesis_source_cache_json IS NOT NULL"
+                    )
                 if has_runtime_metadata:
                     connection.execute("UPDATE runtime_metadata SET value='null' WHERE key=?",
                                        (NEWS_RECONCILIATION_CACHE_KEY,))
                 connection.execute(f"DROP TRIGGER {name}")
                 connection.execute("DELETE FROM dashboard_job_count_metadata_v1")
             elif not existing and has_runtime_metadata:
+                if has_brief_cache:
+                    connection.execute(
+                        "UPDATE daily_news_brief_refresh_state SET synthesis_source_cache_json=NULL "
+                        "WHERE synthesis_source_cache_json IS NOT NULL"
+                    )
                 connection.execute("UPDATE runtime_metadata SET value='null' WHERE key=?",
                                    (NEWS_RECONCILIATION_CACHE_KEY,))
                 connection.execute("DELETE FROM dashboard_job_count_metadata_v1")
@@ -285,7 +356,11 @@ def _install_news_job_metadata_guards(connection: sqlite3.Connection) -> None:
 
 
 def news_job_input_revision(connection: sqlite3.Connection) -> int | None:
-    """Return exact mutation identity, never substitute an equal state count."""
+    """Return a counter only while its canonical mutation authority is installed.
+
+    An old schema/hook variant is intentionally cold for both optimizations;
+    the unchanged business paths still work without installing from a reader.
+    """
     try:
         row = connection.execute(
             """SELECT CASE WHEN length(CAST(value AS BLOB))<=19 THEN value END
@@ -301,7 +376,9 @@ def news_job_input_revision(connection: sqlite3.Connection) -> int | None:
         value = int(row[0])
     except (TypeError, ValueError):
         return None
-    return value if 0 <= value < 2**63 and str(value) == row[0] else None
+    if not (0 <= value < 2**63 and str(value) == row[0]):
+        return None
+    return value if news_job_source_hooks_are_current(connection) else None
 
 
 def record_annotation_completion(

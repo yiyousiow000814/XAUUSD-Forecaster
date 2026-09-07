@@ -197,6 +197,81 @@ immediately visible, and progressively discloses the remainder. Historical
 revisions that predate the structured synthesis remain readable without
 inventing missing drivers or watch items.
 
+## Source-first synthesis preparation
+
+The existing date refresh row may hold one disposable, at most 32 KiB synthesis
+source cache. It is local optimization state, not an immutable Brief, a remote
+ACK, or a new date owner. A hit must not update `last_observed_at`, clear a
+failure, advance a Sync checkpoint, or fabricate a new revision. Public summary
+output excludes this internal field. Missing, malformed, future-dated or
+inapplicable state uses the genuine business path.
+Actual finalization retires this new disposable cache without deleting Brief
+revisions or source evidence; interrupted optional cleanup may resume later.
+
+Applicability binds the receipt date and current civil day, Forward epoch,
+annotation and synthesis contracts, recovery version, effective input budget,
+the existing latest revision/finalization and refresh state, and scalar tail
+identities from revisions, annotations, translations, impacts and event
+resolutions. Each identity is read in the same SQLite snapshot. These source
+families retain their append-only implicit-rowid contract. Coherent backup and
+restore preserve both source and optimization state; a partial/mixed restore
+must invalidate the cache. A rewind, unknown identity or backward clock is not
+unchanged evidence.
+
+If immutable tails moved, at most 128 appended scalar identities across all
+five families may be examined before deciding dated relevance. An unrelated-day
+append may advance these examined tails without rebuilding a packet. Impacts
+are traced through their actual annotation foreign key, and event resolutions
+through assessment to annotation; duplicated source fields are not substituted
+for those relationships. Delta overflow uses the uncached path, not a truncated
+claim that the day is unchanged.
+
+Existing future timestamps require a separate visibility deadline even when no
+row is appended. Initialization and due-time refill inspect a conservative
+scalar superset across the five families, without body or annotation JSON. Each
+materialized family is bounded, and more than 1,024 total facts withholds cache
+acceptance. This limit does not truncate the authoritative population or change
+model eligibility. Due work or unproven cache applicability uses the existing
+complete population; partial scalar inspection is not accepted as unchanged. An
+indexed MIN returning one scalar does not make its input work constant.
+
+The three performance-only access paths are receipt Julian day, translation
+revision/content plus parse time, and event-resolution assessment plus resolve
+time. They add no uniqueness or data authority. Initial index construction
+visits existing table keys and can allocate storage or take a writer lock;
+rollout must budget that separately from hot no-change reads. Installation is
+additive and retry-safe; completed DDL can remain after an autocommit failure.
+It must never rewrite old source evidence. Missing or unrecognized access paths
+do not trigger an optional full-history initialization scan.
+
+The existing job-count mutation hooks invalidate only an already-present
+affected receipt-day cache when an ACTIVE_ANNOTATION DEAD_LETTER membership or
+its identity can change the population. A normal lease transition does not
+invalidate unchanged synthesis content. Invalidation shares the job transaction;
+rollback cannot publish it. A live reader checks all three canonical hook
+definitions in the same source snapshot and again during publication. Missing,
+oversized or old-writer definitions make the cache inapplicable; readers never
+repair schema. The same job-revision reader gates global reconciliation, so an
+old hook cannot leave either optimization trusting a stale counter. Old schema
+variants intentionally retain their ordinary uncached business paths. The
+existing installer invalidates stale optimization before
+repairing lost/replaced hooks or missing job-version metadata. Publication checks the
+exact observed job version and state under a short writer transaction, so a
+concurrent invalidation cannot be overwritten by an earlier prepared result.
+SQLite catalogs have no name index: canonical-hook inspection reads fixed schema
+metadata and returns at most three 8 KiB definitions. Its work is reported
+separately from historical source reads; it is not advertised as an indexed
+constant-time seek. No schema catalog or history mutation occurs on a cache hit.
+
+An unchanged successful candidate set bypasses population/packet work. A failure
+whose unchanged input still waits for its retry retains its reason, counter and
+deadline. Adaptive pending work reuses only the accepted bounded event snapshot
+and runs the existing adaptive decision with current backlog/provider/time
+facts; it does not invent a second policy or freeze cooldown and aging. At the
+actual due boundary the normal builder and generation path run. Optional cache
+publication uses a zero-wait writer acquisition; exact BUSY/READONLY can defer
+only that optimization. Source reads and other storage errors still surface.
+
 ## Capacity and failure
 
 `DAILY_BRIEF` has a declared model route. The background worker uses only
