@@ -8803,6 +8803,24 @@ def _supersession_chain_contract(scenario: str) -> str:
             "Add-Edge $mid $head;Write-ReleaseHistory -Event 'CANDIDATE_PASSED' "
             "-Release $mid;Add-Edge $qualified $mid;"
         ),
+        "failed_unaccepted_predecessor": (
+            "$mid.validation_state='FAILED';"
+            "$mid.validation=[pscustomobject]@{key=$mid.validation_key;"
+            "error='Candidate fixture worktree is unavailable.'};"
+            "Add-Edge $mid $head;"
+        ),
+        "failed_accepted_predecessor": (
+            "$mid.validation_state='FAILED';Add-Edge $mid $head;"
+            "Write-ReleaseHistory -Event 'CANDIDATE_PASSED' -Release $mid;"
+        ),
+        "failed_mismatched_predecessor": (
+            "$mid.validation_state='FAILED';$mid.validation.key='wrong';"
+            "Add-Edge $mid $head;"
+        ),
+        "failed_predecessor_with_older_edge": (
+            "$mid.validation_state='FAILED';Add-Edge $mid $head;"
+            "Add-Edge $qualified $mid;"
+        ),
         "partially_validated_head": (
             "$head.compatibility_state='COORDINATED_STORAGE_MIGRATION_PASSED';"
             "$head.validation_state='PLATFORM_PENDING';"
@@ -8929,6 +8947,10 @@ def _supersession_chain_contract(scenario: str) -> str:
         ("reused_receipt_wrong_current", "ERROR:CANDIDATE_SUPERSESSION_QUALIFICATION_REUSE_INVALID:CANDIDATE_SUPERSESSION_CPU_REUSE_LINEAGE_INVALID"),
         ("qualification_key_mismatch", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
         ("accepted_intermediate", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+        ("failed_unaccepted_predecessor", "NONE"),
+        ("failed_accepted_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+        ("failed_mismatched_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+        ("failed_predecessor_with_older_edge", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
         ("partially_validated_head", "FOUND:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee:" + "e" * 40),
         ("observation_failed", "FOUND:66666666-6666-4666-8666-666666666666:" + "6" * 40),
         ("worker_reused", "ERROR:CANDIDATE_SUPERSESSION_WORKER_REUSED"),
@@ -8947,6 +8969,9 @@ def test_supersession_chain_recovery_is_bounded_and_fail_closed(
 @pytest.mark.parametrize("scenario,expected", (
     ("two_hop", "FOUND:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee:" + "e" * 40),
     ("missing_edge", "NONE"),
+    ("failed_unaccepted_predecessor", "NONE"),
+    ("failed_accepted_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+    ("failed_mismatched_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
 ))
 @pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
 def test_supersession_chain_recovery_has_powershell_runtime_parity(
@@ -8974,8 +8999,9 @@ def test_supersession_head_without_edge_is_not_applicable(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("prior_state", ("TESTING", "FAILED"))
 def test_unavailable_supersession_reuse_falls_back_once_without_copying_evidence(
-    tmp_path, powershell: str,
+    tmp_path, powershell: str, prior_state: str,
 ) -> None:
     if not shutil.which(powershell):
         pytest.skip(f"{powershell} is not installed")
@@ -8994,7 +9020,7 @@ def test_unavailable_supersession_reuse_falls_back_once_without_copying_evidence
         "-WorkerVersionId 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' "
         "-WindowsRevision ('a'*40) -Branch 'main' "
         "-ArtifactKind 'PRODUCTION_CANDIDATE';"
-        "$prior.compatibility_state='PENDING';$prior.validation_state='TESTING';"
+        f"$prior.compatibility_state='PENDING';$prior.validation_state='{prior_state}';"
         "$prior.validation=[pscustomobject]@{key=$prior.validation_key;"
         "cpu_evidence=[pscustomobject]@{receipt_digest=('e'*64)}};"
         "Write-ReleaseHistory -Event 'CANDIDATE_SUPERSEDED' -Release $prior "

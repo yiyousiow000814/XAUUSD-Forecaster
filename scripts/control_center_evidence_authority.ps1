@@ -1417,6 +1417,17 @@ function Test-CandidateSupersessionIdentity {
     )
 }
 
+function Test-CandidateSupersessionAccepted {
+    param([object]$Candidate, [array]$History)
+    return [bool](@($History | Where-Object {
+        [string]$_.release.validation_key -eq [string]$Candidate.validation_key -and
+        [string]$_.event -in @(
+            "CANDIDATE_PASSED", "CANDIDATE_ACCESS_BOUNDARY_ACCEPTED",
+            "PROMOTION_STARTED", "STABLE_COMMITTED"
+        )
+    }).Count -gt 0)
+}
+
 function Test-UnqualifiedSupersessionIntermediate {
     param(
         [Parameter(Mandatory = $true)][object]$Candidate,
@@ -1443,14 +1454,7 @@ function Test-UnqualifiedSupersessionIntermediate {
         [string]$Candidate.validation.key -ne [string]$Candidate.validation_key) {
         return $false
     }
-    $accepted = @($History | Where-Object {
-        [string]$_.release.validation_key -eq [string]$Candidate.validation_key -and
-        [string]$_.event -in @(
-            "CANDIDATE_PASSED", "CANDIDATE_ACCESS_BOUNDARY_ACCEPTED",
-            "PROMOTION_STARTED", "STABLE_COMMITTED"
-        )
-    })
-    return [bool]($accepted.Count -eq 0)
+    return -not (Test-CandidateSupersessionAccepted -Candidate $Candidate -History $History)
 }
 
 function Test-QualifiedSupersessionCandidateShape {
@@ -1607,17 +1611,22 @@ function Get-CandidateSupersessionRecoveryPlan {
     $null = $visitedWorkers.Add([string]$Head.worker_version_id)
     $traversed = @()
     for ($depth = 0; $depth -lt $candidateSupersessionMaxDepth; $depth++) {
-        if (-not (Test-UnqualifiedSupersessionIntermediate `
+        $edges = @($history | Where-Object {
+            [string]$_.event -eq "CANDIDATE_SUPERSEDED" -and
+            [string]$_.detail.replacement_key -eq [string]$current.validation_key
+        })
+        $failedPredecessor = [bool]($depth -gt 0 -and $edges.Count -eq 0 -and
+            [string]$current.validation_state -eq "FAILED" -and
+            $current.validation -and
+            [string]$current.validation.key -eq [string]$current.validation_key -and
+            -not (Test-CandidateSupersessionAccepted -Candidate $current -History $history))
+        if (-not $failedPredecessor -and -not (Test-UnqualifiedSupersessionIntermediate `
                 -Candidate $current -History $history)) {
             return [pscustomobject]@{
                 state = "FAILED"; reason = "CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"
                 chain_head = $headKey; traversed = $traversed
             }
         }
-        $edges = @($history | Where-Object {
-            [string]$_.event -eq "CANDIDATE_SUPERSEDED" -and
-            [string]$_.detail.replacement_key -eq [string]$current.validation_key
-        })
         if ($edges.Count -eq 0) {
             return [pscustomobject]@{
                 state = if ($depth -eq 0) { "NOT_APPLICABLE" } else {

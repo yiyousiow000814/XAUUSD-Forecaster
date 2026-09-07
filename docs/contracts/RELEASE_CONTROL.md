@@ -82,6 +82,10 @@ Supersession recovery is an optional evidence-preservation optimization. An
 incomplete but non-contradictory chain disables reuse and falls back to fresh
 validation; contradictory or unsafe chains remain fail-closed. This fallback
 does not restore an older Candidate, copy its evidence, or change Worker traffic.
+A traversed failed predecessor without an older supersession edge, with a matching
+validation key and no prior Candidate, Access, Promote or Stable acceptance ends optional reuse as unavailable;
+the new head still requires complete fresh qualification. Accepted or mismatched
+failed predecessors remain unsafe. This does not retry or reclassify the failed identity.
 An older main build that completes out of order advances the discovery watermark
 but cannot replace, validate as, or supersede the current main Candidate. A
 missing exact Version remains visible and retryable without changing Stable.
