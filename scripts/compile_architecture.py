@@ -2,7 +2,7 @@
 """Build/check/explain the current-source critical path index."""
 import argparse
 from pathlib import Path
-from architecture_compiler import compile_index, render, check_outputs, encoded
+from architecture_compiler import compile_index, render, check_outputs, write_outputs, encoded
 
 
 def main():
@@ -19,9 +19,7 @@ def main():
     if any((directory / name).is_symlink() for name in outputs):
         parser.exit(1, 'ARCHITECTURE_OUTPUT_SYMLINK\n')
     if args.command == 'build':
-        directory.mkdir(parents=True, exist_ok=True)
-        for name, value in outputs.items():
-            (directory / name).write_text(value, encoding='utf-8', newline='\n')
+        write_outputs(directory, outputs)
     elif args.command == 'check':
         stale = check_outputs(directory, outputs)
         if stale:

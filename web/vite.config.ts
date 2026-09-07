@@ -2,8 +2,8 @@ import vinext from "vinext";
 import { defineConfig } from "vite";
 import { sites } from "./build/sites-vite-plugin";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
+import { vinextRootAssets } from "./build/vinext-root-assets.mjs";
 import { projectCurrentSource, readCurrentSourceIndex } from "./build/architecture-current-source.mjs";
 import {
   compactPreviewLearning,
@@ -91,18 +91,7 @@ export default defineConfig(async () => {
         },
       },
       vinext({ prerender: { routes: "*" } }),
-      {
-        name: "aurum-vinext-lazy-entry-prerender",
-        closeBundle() {
-          const source = resolve("dist/server/vinext-client-assets.js");
-          const destination = resolve(
-            "dist/server/_next/static/vinext-client-assets.js",
-          );
-          if (!existsSync(source)) return;
-          mkdirSync(resolve("dist/server/_next/static"), { recursive: true });
-          copyFileSync(source, destination);
-        },
-      },
+      vinextRootAssets(),
       sites(),
       cloudflare({
         viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
