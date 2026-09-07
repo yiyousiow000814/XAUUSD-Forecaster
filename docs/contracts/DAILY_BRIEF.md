@@ -61,6 +61,48 @@ each exact owned job leaves discovery, so a fixed finite protected population
 drains before ordinary discovery resumes. This is not a guarantee under an
 unbounded stream of new historical inputs; provider dispatch quotas are unchanged.
 
+Date-list discovery may reuse one disposable, at-most-4,096-byte JSON value in
+the existing current-date refresh row. It must not create a lifecycle row just
+to hold this cache or expose the internal field in the public Brief summary.
+The key binds the selector contract, Forward epoch, recovery version, requested
+limit, local day, and bounded exact scalar tails of `news_revisions`, original
+finalizations, and recovery corrections. These inputs remain append-only and
+their owners allocate implicit increasing rowids; no payload, COUNT, MAX or
+historical DISTINCT is needed on an unchanged hit. The cache is supported for
+the existing bounded backlog limit; other limits retain the ordinary selector.
+
+Within a day, newly due receipts can only add the current day, which is already
+returned before the newest unfinished historical dates. Thus future receipts
+do not require another full-history deadline scan. Local midnight, a time before
+the cached observation, contract/limit movement, and any changed input tail
+invalidate reuse. SQLite and Python must agree on the current receipt day;
+ambiguous clock interpretation uses the ordinary selector. This says nothing
+about generation, retry, leases, reconciliation or other owners' due work.
+
+The source token and selected dates must come from one SQLite read snapshot.
+Release that snapshot before an independent short cache UPDATE, so normal WAL
+appends cannot cause a read-to-write upgrade failure. A late publication retains
+its original token: a newer source must reject it, not treat it as current.
+Inside a caller-owned transaction, return its snapshot result without publishing
+or committing any cache; rollback cannot leak an uncommitted source revision.
+Normal read-only consumers may compute without caching. Independent cache
+publication uses a zero-wait writer budget and restores the connection's normal
+budget afterward. An ordinary busy writer or read-only consumer may leave the
+cache unpublished, with no immediate retry or loss of the computed result.
+This tolerance is confined to optional publication: source-read, authorization,
+extended moved-database and storage failures remain visible. Missing old-schema
+state or malformed/oversized cache values use the ordinary computation; they do
+not imply completed work.
+
+Cache validity assumes the existing coherent SQLite backup/restore boundary:
+immutable evidence and its derived state are copied together. The Forward epoch
+and tail token are not a globally unique database identity or proof of arbitrary
+history integrity. Independently transplanting a cache between databases, or
+restoring inputs while retaining unrelated derived state, is not supported.
+The nullable field is installed by the existing additive lifecycle migration;
+old named-column Brief writers preserve it and old readers need not use it.
+No production migration is implied by an isolated compatibility test.
+
 Frequent worker checks do not imply generation. For a changed live-day packet,
 the durable refresh decision combines age since the last successful revision,
 new canonical event or episode identities, material updates, major-event

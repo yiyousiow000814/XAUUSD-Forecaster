@@ -182,7 +182,8 @@ CREATE TABLE IF NOT EXISTS daily_news_brief_refresh_state (
     last_generated_event_snapshot_json TEXT,
     pending_event_snapshot_json TEXT,
     dispatch_pressure_json TEXT,
-    scheduler_deferral_count INTEGER NOT NULL DEFAULT 0
+    scheduler_deferral_count INTEGER NOT NULL DEFAULT 0,
+    date_discovery_cache_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS daily_news_brief_finalizations_v1 (
@@ -648,6 +649,7 @@ class ForwardLedger:
             "pending_event_snapshot_json": "TEXT",
             "dispatch_pressure_json": "TEXT",
             "scheduler_deferral_count": "INTEGER NOT NULL DEFAULT 0",
+            "date_discovery_cache_json": "TEXT",
         }
         existing = {
             str(row["name"])
