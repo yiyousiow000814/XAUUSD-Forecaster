@@ -97,6 +97,77 @@ def _new_sealed_fixture_root(request=None) -> Path:
     return owned
 
 
+@pytest.mark.parametrize("redirected_component", [None, ".local", "forward", "environment-attestations"])
+def test_staged_sync_checks_derived_directories_at_write(tmp_path, monkeypatch, redirected_component):
+    """Execute the actual fixture consumer and production writer, including NTFS junctions."""
+    import importlib.util
+    import runpy
+    from xauusd_forecaster import runtime_paths, news_scheduler
+
+    root = tmp_path.resolve()
+    (root / "fixture-owned.json").write_text("{}", encoding="utf-8")
+    runtime = root / "runtime"
+    runtime.mkdir()
+    outside = root / "outside"
+    outside.mkdir()
+    retained = outside / "retained.json"
+    retained.write_text('{"unchanged":true}', encoding="utf-8")
+    link = None
+    if redirected_component:
+        link = (root / "environment-attestations" if redirected_component == "environment-attestations"
+                else runtime / ".local" if redirected_component == ".local"
+                else runtime / ".local/forward")
+        link.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+            f"$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path '{link}' -Target '{outside}' | Out-Null"],
+            capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+        assert result.returncode == 0, result.stderr
+        assert link.is_junction()
+    monkeypatch.setattr(runtime_paths, "isolated_runtime_configuration", lambda: {
+        "owned_root": str(root), "runtime_root": str(runtime), "fixture_id": "fixture",
+    })
+    monkeypatch.setattr(news_scheduler, "_runtime_environment_value", lambda _name: "synthetic-configuration-sentinel")
+    monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION_SHA256", "a" * 64)
+    calls = []
+    original_spec = importlib.util.spec_from_file_location
+
+    def load_real_sync_with_bounded_loop(name, *args, **kwargs):
+        spec = original_spec(name, *args, **kwargs)
+        if name == "staged_sync":
+            original_load = spec.loader.exec_module
+            def execute(module):
+                original_load(module)
+                # Network/continuous-loop behavior is covered by the real
+                # ACTIVE rehearsal. This test's boundary is filesystem writes.
+                module.run_continuous_sync = lambda *arguments, **options: calls.append((arguments, options))
+            spec.loader.exec_module = execute
+        return spec
+
+    monkeypatch.setattr(importlib.util, "spec_from_file_location", load_real_sync_with_bounded_loop)
+    monkeypatch.setattr(sys, "argv", ["staged_sync_owner.py", "--fixture-root", str(root),
+        "--source-root", str(ROOT), "--provider", "https://127.0.0.1:18443"])
+    try:
+        if redirected_component:
+            with pytest.raises(ValueError, match="authority is redirected"):
+                runpy.run_path(str(ROOT / "tests/fixtures/staged_sync_owner.py"), run_name="__main__")
+            assert calls == []
+        else:
+            runpy.run_path(str(ROOT / "tests/fixtures/staged_sync_owner.py"), run_name="__main__")
+            assert len(calls) == 1
+            state = runtime / ".local/forward"
+            schedule = next(state.glob("dashboard-resource-schedule-state*.json"))
+            document = json.loads(schedule.read_text(encoding="utf-8"))
+            assert "news_evidence" not in document["resources"]
+            assert not list(state.glob("*.tmp"))
+        assert retained.read_text(encoding="utf-8") == '{"unchanged":true}'
+        assert set(outside.iterdir()) == {retained}
+    finally:
+        if link and link.is_junction():
+            assert link.is_relative_to(root)
+            # Delete only the owned junction entry, never recurse into its target.
+            link.rmdir()
+
+
 @pytest.mark.parametrize("case", ["valid", "normalized", "tampered", "missing-digest", "missing-key", "external-url", "production-port", "wrong-root", "oversized", "junction", "production-root", "schema-type", "missing-source", "outside-authority", "utf16", "utf32"])
 def test_isolated_configuration_owner_matches_python_and_powershell(tmp_path, monkeypatch, case, request):
     from xauusd_forecaster.news_scheduler import _runtime_environment_value
