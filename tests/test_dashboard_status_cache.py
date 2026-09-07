@@ -32,6 +32,11 @@ def test_status_snapshot_cache_singleflights_concurrent_builds(tmp_path) -> None
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         futures = [pool.submit(cache.get, database, builder) for _ in range(8)]
         assert started.wait(timeout=1)
+        assert cache.health() == (503, {
+            "status": "STARTING",
+            "snapshot_age_seconds": None,
+            "last_error": None,
+        })
         time.sleep(0.05)
         assert calls == 1
         release.set()
@@ -42,8 +47,9 @@ def test_status_snapshot_cache_singleflights_concurrent_builds(tmp_path) -> None
     assert {state for _body, state, _age in results} == {"fresh"}
 
 
+@pytest.mark.parametrize("refresh_fails", [False, True], ids=["success", "failure"])
 def test_status_snapshot_cache_serves_bounded_stale_during_slow_refresh(
-    tmp_path,
+    tmp_path, refresh_fails: bool,
 ) -> None:
     now = [0.0]
     cache = StatusSnapshotCache(
@@ -63,6 +69,8 @@ def test_status_snapshot_cache_serves_bounded_stale_during_slow_refresh(
         calls += 1
         started.set()
         assert release.wait(timeout=2)
+        if refresh_fails:
+            raise ValueError("background refresh failed")
         return {"version": 2}
 
     stale_body, stale_state, stale_age = cache.get(database, slow_refresh)
@@ -77,9 +85,50 @@ def test_status_snapshot_cache_serves_bounded_stale_during_slow_refresh(
     release.set()
     for _ in range(100):
         health_status, health = cache.health()
-        if health_status == 200 and health["refreshing"] is False:
+        if health.get("status") == "ERROR" or health.get("refreshing") is False:
             break
         time.sleep(0.01)
+    else:
+        pytest.fail("background refresh did not finish within its bounded wait")
+
+    if refresh_fails:
+        assert (health_status, health) == (503, {
+            "status": "ERROR",
+            "snapshot_age_seconds": 16.0,
+            "last_error": "ValueError: background refresh failed",
+        })
+        # A retry after failure still serves exactly the last accepted body.
+        retained_body, retained_state, retained_age = cache.get(
+            database, lambda _database: {"version": 3},
+        )
+        assert retained_body == stale_body
+        assert (retained_state, retained_age) == ("stale", 16.0)
+        for _ in range(100):
+            health_status, health = cache.health()
+            if health_status == 200 and health.get("refreshing") is False:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("background retry did not restore readiness")
+        body, state, age = cache.get(database, slow_refresh)
+        assert (json.loads(body), state, age) == ({"version": 3}, "fresh", 0.0)
+        assert calls == 1
+
+        # Even the successfully recovered body cannot be served after expiry.
+        now[0] = 107.0
+        with pytest.raises(ValueError, match="^background refresh failed$"):
+            cache.get(database, slow_refresh)
+        assert calls == 2
+        assert cache.health()[0] == 503
+
+        # A later successful build recovers readiness without replacing the cache.
+        body, state, age = cache.get(database, lambda _database: {"version": 4})
+        assert (json.loads(body), state, age) == ({"version": 4}, "fresh", 0.0)
+        assert cache.health() == (200, {
+            "status": "OK", "snapshot_age_seconds": 0.0, "refreshing": False,
+        })
+        return
+
     refreshed_body, refreshed_state, _age = cache.get(database, slow_refresh)
     assert json.loads(refreshed_body) == {"version": 2}
     assert refreshed_state == "fresh"
