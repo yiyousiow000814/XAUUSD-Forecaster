@@ -210,11 +210,26 @@ test("mobile 23: Inspector owns dialog, close, scrolling, safe area, and focus r
   assert.match(cssSource, /\.inspectorBody \{[^}]*overflow-y: auto;[^}]*safe-area-inset-bottom/);
   assert.match(viewSource, /const returnFocus = returnFocusRef\.current/);
   assert.match(viewSource, /returnFocus\?\.focus/);
+  // Long function/component names stay complete. Their min-content width must
+  // not push the shared 44px close button outside desktop or phone panels.
+  assert.match(viewSource, /<h2 id="architecture-inspector-title">\{edge \? edge\.label : node\.label\}<\/h2>/);
+  assert.match(cssSource, /\.inspector > header > div \{[^}]*min-width: 0;[^}]*flex: 1 1 0;[^}]*overflow-wrap: anywhere;/);
+  assert.match(cssSource, /\.inspector > header button \{[^}]*width: 44px;[^}]*height: 44px;[^}]*flex: 0 0 auto;/);
+  assert.match(cssSource, /\.inspector \{[^}]*display: flex;[^}]*flex-direction: column;/);
+  assert.match(cssSource, /\.inspector > header \{[^}]*flex-shrink: 0;/);
+  assert.match(cssSource, /\.inspectorBody \{[^}]*flex: 1 1 auto;[^}]*min-height: 0;[^}]*overflow: auto;/);
+  // A wrapped header has intrinsic height. No responsive sibling may deduct
+  // an assumed one-line header height and clip the last scrollable control.
+  for (const [, declarations] of cssSource.matchAll(/\.inspectorBody\s*\{([^}]*)\}/g)) {
+    assert.doesNotMatch(declarations, /(?:^|;)\s*height\s*:/);
+  }
 });
 
 test("mobile 24: Advanced owns a controlled dialog, backdrop, close, and focus return", () => {
   assert.doesNotMatch(viewSource, /<details className=\{styles\.advancedMenu\}>/);
   assert.match(viewSource, /architecture-advanced-title/); assert.match(viewSource, /sheetBackdrop/); assert.match(viewSource, /aria-label="关闭高级视图"/);
+  assert.match(viewSource, /className=\{`\$\{styles\.inspector\} \$\{styles\.advancedSheet\}`\}/);
+  assert.match(viewSource, /<h2 id="architecture-advanced-title">高级视图<\/h2>/);
 });
 
 test("mobile 25: scroll lock restores exact prior body style and scroll position", () => {
