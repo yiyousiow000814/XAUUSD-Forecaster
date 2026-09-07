@@ -295,20 +295,30 @@ def test_retained_and_materialized_consumers_share_exact_batch_contract(tmp_path
 @pytest.mark.parametrize("corruption", (
     None, "identity", "digest", "manifest", "budget", "missing", "location", "target",
 ))
-def test_retained_artifact_restart_is_exact_and_does_not_materialize_bodies(tmp_path, monkeypatch, corruption):
+@pytest.mark.parametrize("source_kind", ("original", "derived"))
+def test_retained_artifact_restart_is_exact_and_does_not_materialize_bodies(tmp_path, monkeypatch, corruption, source_kind):
     import gzip
     from scripts import run_dashboard_api as api
-    capture = _capture(tmp_path)
-    capture.advance(_page_reader([_source_record(i) for i in range(9)], []))
+    if source_kind == "derived":
+        _, capture, records, _, transition = _derived_reader_fixture(tmp_path)
+        capture.derive_reader_segment(**transition)
+        capture.advance(_page_reader(records, []))
+    else:
+        capture = _capture(tmp_path)
+        capture.advance(_page_reader([_source_record(i) for i in range(9)], []))
     capture.finalize_plan()
-    generation = capture.open_replay_generation(maximum_batches=8)
-    path = tmp_path / "candidate-generation.json.gz"
+    manifest_before = (capture.directory / "manifest.json").read_bytes()
+    generation = capture.open_replay_generation(maximum_batches=64)
+    path = capture.directory.with_suffix(".json.gz")
     target = {"origin": "https://candidate.example", "contract_version": generation.manifest["contract_version"]}
     monkeypatch.setattr(api, "_news_projection_generation_payload", lambda *_: pytest.fail("materialized retained bodies"))
     api._write_news_projection_generation_artifact(path, generation, target=target)
     with gzip.open(path, "rt", encoding="utf-8") as handle:
         envelope = json.load(handle)
     payload = envelope["generation"]
+    if source_kind == "derived":
+        assert payload["capture_identity"] == capture.identity
+        assert compact_json(payload["capture_identity"]) != compact_json(capture.identity)
     assert set(payload) == {"storage", "manifest", "capture_identity", "input_digest", "maximum_batches"}
     if corruption == "identity":
         payload["capture_identity"]["binding"] = {"snapshot_identity": "wrong"}
@@ -340,6 +350,7 @@ def test_retained_artifact_restart_is_exact_and_does_not_materialize_bodies(tmp_
         restored = api._read_news_projection_generation_artifact(path, expected_target=target)
         assert restored.manifest == generation.manifest
         assert restored.batch_items("detail", 8) == generation.batch_items("detail", 8)
+        assert (capture.directory / "manifest.json").read_bytes() == manifest_before
 
 
 def test_bootstrap_retained_pin_requires_current_budget_target_and_recoverable_source(tmp_path, monkeypatch):
@@ -441,9 +452,12 @@ def _derived_reader_fixture(tmp_path):
 
 
 @pytest.mark.parametrize("boundary", ("normal", "wrong-clock", "wrong-source", "wrong-result",
-                                     "wrong-review", "wrong-producer", "prefix", "suffix", "v1-marker"))
+                                     "wrong-review", "wrong-producer", "prefix", "suffix", "v1-marker",
+                                     "reordered-binding", "identity-order"))
 def test_source_capture_derived_reader_preserves_prefix_and_fences_other_producers(tmp_path, boundary):
     capture, current, records, original, transition = _derived_reader_fixture(tmp_path)
+    if boundary == "reordered-binding":
+        current.identity = json.loads(json.dumps(current.identity, sort_keys=True))
     prefix_path = capture.directory / original["parts"][0]["name"]
     prefix_bytes = prefix_path.read_bytes()
     manifest_before = (capture.directory / "manifest.json").read_bytes()
@@ -486,9 +500,11 @@ def test_source_capture_derived_reader_preserves_prefix_and_fences_other_produce
     assert current.derive_reader_segment(**transition) == completed
     assert completed["parts"][0] == original["parts"][0]
     assert prefix_path.read_bytes() == prefix_bytes
-    if boundary in {"prefix", "suffix"}:
+    if boundary in {"prefix", "suffix", "identity-order"}:
         if boundary == "prefix":
             completed["reader_segment"]["prefix"]["cursor"] = None
+        elif boundary == "identity-order":
+            completed["identity"] = dict(reversed(list(completed["identity"].items())))
         else:
             completed["parts"][-1]["reader_segment_sha256"] = "0" * 64
         current._save(completed)

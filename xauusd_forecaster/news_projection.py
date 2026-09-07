@@ -554,7 +554,9 @@ class NewsProjectionSourceCapture:
             raise ValueError("NEWS_SOURCE_CAPTURE_READER_PREFIX_INVALID")
         prefix = state["parts"][:count]
         expected = self._reader_prefix(state, prefix)
-        if (segment.get("prefix") != expected or segment.get("capture_identity_sha256") != sha256_json(self.identity)
+        # The proof hashes the identity bytes in the validated capture, not the
+        # key order of an equivalent caller binding restored from another JSON envelope.
+        if (segment.get("prefix") != expected or segment.get("capture_identity_sha256") != sha256_json(state["identity"])
                 or not isinstance(segment.get("producer_identity"), dict)
                 or not segment["producer_identity"]
                 or not isinstance(segment.get("equivalence"), dict)):
@@ -635,7 +637,7 @@ class NewsProjectionSourceCapture:
                     or proof.get("news_result_reads") != part["source_count"]):
                 raise ValueError("NEWS_SOURCE_CAPTURE_READER_PROOF_PREFIX_MISMATCH")
             segment = {
-                "capture_identity_sha256": sha256_json(self.identity),
+                "capture_identity_sha256": sha256_json(state["identity"]),
                 "producer_identity": self.active_producer_identity,
                 "prefix_part_count": count, "prefix": self._reader_prefix(state, prefix),
                 "equivalence": {

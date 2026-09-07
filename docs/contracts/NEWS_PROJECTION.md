@@ -190,7 +190,12 @@
   before querying or appending. New code verifies its executing API, bootstrap
   and capture files against the active producer identity before source work.
 - Derived parts bind that single reader segment; all readers verify the original
-  prefix and complete derived suffix. A retry after suffix progress reuses the
+  prefix and complete derived suffix. The identity proof hashes the original
+  identity serialization in the validated capture manifest. A caller restored
+  through another JSON envelope must match its identity values exactly, but
+  cannot replace those proof bytes with its own object-key ordering. Altering
+  the stored identity serialization still invalidates the original proof.
+  A retry after suffix progress reuses the
   original transition, not a newly calculated current-prefix authority. A
   conflicting or second transition is refused. Publication failure follows the
   same atomic reconciliation and backoff rules. There is no automatic downgrade

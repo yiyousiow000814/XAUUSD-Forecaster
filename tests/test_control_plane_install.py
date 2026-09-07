@@ -879,6 +879,7 @@ def test_connected_external_adapter_preserves_control_owners(tmp_path, monkeypat
 
 @pytest.mark.parametrize("duration,budget,elapsed,expected", [
     (120, None, 0, 120), (121, None, 0, "INVALID"),
+    (2, 2, 1, 1), (2, 2, 2, "EXHAUSTED"),
     (2700, 2700, 0, 2700), (2700, 2700, 100, 2600),
     (2701, 2701, 0, "INVALID"), (1000, 1200, 0, "INVALID"),
     (2700, 2700, 2700, "EXHAUSTED"), (2700, 2700, -1, "INVALID"),
@@ -899,6 +900,162 @@ def test_quote_input_restart_cannot_renew_connected_scenario_budget(duration, bu
     else:
         with pytest.raises(RuntimeError, match="QUOTE_INPUT_BUDGET_" + expected):
             module.remaining_input_seconds(config, now)
+
+
+def _quote_input_fixture(request, monkeypatch, *, seconds=2):
+    """The existing sealed authority, with no production credentials or data."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("synthetic_quote_input", ROOT / "tests/fixtures/quote_session_input.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    owned = _new_sealed_fixture_root(request)
+    identity = owned.name.removeprefix("xauusd-rehearsal-")
+    profile = owned / "profile"
+    runtime = profile / "XAUUSD-Forecaster-runtime"
+    output = runtime / ".local/forward/quotes"
+    output.mkdir(parents=True)
+    secret = owned / "sentinel-secrets"
+    secret.mkdir()
+    config = {
+        "schema_version": 1, "mode": "ISOLATED_REHEARSAL", "fixture_id": identity,
+        "owned_root": str(owned), "profile_root": str(profile), "runtime_root": str(runtime),
+        "repository_root": str(owned / "repository"), "source_root": str(owned / "source"),
+        "task_namespace": f"\\XAUUSD-Contract-{identity}\\", "loopback_ports": [18321],
+        "provider_endpoint": "http://127.0.0.1:18321",
+        "values": {"CTRADER_SECRET_ROOT": str(secret)},
+        "quote_input_seconds": seconds, "connected_scenario_timeout_seconds": seconds,
+        "connected_scenario_started_at": datetime.now(timezone.utc).isoformat(),
+        "quote_input_session": "OPEN", "quote_input_kind": module.SYNTHETIC_INPUT,
+        "quote_input_bid": 2500.0, "quote_input_ask": 2500.2,
+    }
+    path = owned / "fixture-user-environment.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION", str(path))
+    monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION_SHA256", hashlib.sha256(path.read_bytes()).hexdigest())
+    artifact = runtime / "ctrader/XauusdForwardQuoteBridge/bin/Release/net6.0/XauusdForwardQuoteBridge.algo"
+    arguments = ["run", str(artifact), "--ctid", "isolated-sentinel", "--pwd-file",
+        str(secret / "ctrader-cli.pwd"), "--account", "isolated-sentinel", "--symbol", "XAUUSD",
+        "--period", "m1", "--full-access", "--exit-on-stop", f"--OutputDirectory={output}",
+        "--ExpectedSymbol=XAUUSD", "--FlushIntervalSeconds=1"]
+    monkeypatch.setattr(module.sys, "argv", [str(ROOT / "tests/fixtures/quote_session_input.py"), *arguments])
+    return module, config, output, path, arguments
+
+
+@pytest.mark.parametrize("case", ["OPEN", "CLOSED", "missing-config", "changed-config",
+    "undeclared-open", "missing-price", "crossed-price", "missing-shared-deadline"])
+def test_quote_input_real_cli_is_sealed_and_only_emits_declared_current_inputs(request, monkeypatch, case):
+    from xauusd_forecaster.market import JsonlMarketProvider
+    from xauusd_forecaster.market_session import skipped_grid_reason
+    module, config, output, path, arguments = _quote_input_fixture(request, monkeypatch)
+    baseline = output / "xauusd-quotes-20200101.jsonl"
+    original = (b'{"schema":"xauusd.forward.quote.v1","source":"retained-test-input",'
+        b'"symbol":"XAUUSD","event_time":"2020-01-01T00:00:00+00:00",'
+        b'"received_time":"2020-01-01T00:00:00+00:00","bid":2000.0,"ask":2000.2,"sequence":1}\n')
+    baseline.write_bytes(original)
+    if case == "CLOSED":
+        config["quote_input_session"] = "CLOSED"
+        for name in ("quote_input_kind", "quote_input_bid", "quote_input_ask"):
+            del config[name]
+    elif case == "undeclared-open":
+        del config["quote_input_kind"]
+    elif case == "missing-price":
+        del config["quote_input_bid"]
+    elif case == "crossed-price":
+        config["quote_input_ask"] = 2499.0
+    elif case == "missing-shared-deadline":
+        del config["connected_scenario_timeout_seconds"]
+    path.write_text(json.dumps(config), encoding="utf-8")
+    if case != "changed-config":
+        monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION_SHA256", hashlib.sha256(path.read_bytes()).hexdigest())
+    else:
+        path.write_text(path.read_text(encoding="utf-8") + " ", encoding="utf-8")
+    if case == "missing-config":
+        monkeypatch.delenv("XAUUSD_ISOLATED_CONFIGURATION")
+        monkeypatch.delenv("XAUUSD_ISOLATED_CONFIGURATION_SHA256")
+    before = datetime.now(timezone.utc)
+    result = subprocess.run([sys.executable, "-B", str(ROOT / "tests/fixtures/quote_session_input.py"), *arguments],
+        capture_output=True, text=True, timeout=8, creationflags=subprocess.CREATE_NO_WINDOW)
+    after = datetime.now(timezone.utc)
+    assert baseline.read_bytes() == original
+    assert not list(output.glob("*.tmp"))
+    assert not list(Path(config["owned_root"]).rglob("*.sqlite*"))
+    quotes = list(output.glob("*-synthetic-*.jsonl"))
+    if case not in {"OPEN", "CLOSED"}:
+        assert result.returncode != 0
+        expected = {"missing-config": "QUOTE_INPUT_CONFIGURATION_REQUIRED",
+            "changed-config": "ISOLATED_CONFIGURATION_IDENTITY_MISMATCH",
+            "undeclared-open": "QUOTE_INPUT_SYNTHETIC_DECLARATION_REQUIRED",
+            "missing-price": "QUOTE_INPUT_PRICE_INVALID", "crossed-price": "QUOTE_INPUT_PRICE_INVALID",
+            "missing-shared-deadline": "QUOTE_INPUT_SYNTHETIC_DECLARATION_REQUIRED"}[case]
+        assert expected in result.stderr
+        assert not quotes and not (output / "market-session.json").exists()
+        return
+    assert result.returncode == 0, result.stderr
+    session = JsonlMarketProvider(output).market_session(after)
+    assert session is not None and session.is_fresh(after)
+    assert session.is_open == (case == "OPEN")
+    if case == "CLOSED":
+        assert not quotes
+        return
+    assert len(quotes) == 1
+    rows = [json.loads(line) for line in quotes[0].read_bytes().splitlines()]
+    assert 1 <= len(rows) <= config["quote_input_seconds"]
+    assert quotes[0].stat().st_size <= config["quote_input_seconds"] * module.MAX_INPUT_RECORD_BYTES
+    for row in rows:
+        assert row["input_contract"] == module.SYNTHETIC_INPUT
+        assert row["source"] == "isolated-synthetic" and row["fixture_id"] == config["fixture_id"]
+        assert row["configuration_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+        assert before <= datetime.fromisoformat(row["event_time"]) <= datetime.fromisoformat(row["received_time"]) <= after
+    assert len({row["sequence"] for row in rows}) == len(rows)
+    # Use the actual quote consumer, but do not call these synthetic inputs
+    # real broker evidence or manufacture a Collector/Observe success.
+    provider = JsonlMarketProvider(output)
+    observations = provider.observations(after)
+    assert len(observations) == len(rows)
+    assert all(item.bid == 2500.0 and item.ask == 2500.2 for item in observations)
+    assert skipped_grid_reason(after, after, observations,
+        broker_session=session, session_observed_at=after) is None
+
+
+@pytest.mark.parametrize("case", ["restart", "restart-rate", "torn-tail", "foreign-identity",
+    "invalid-first-time", "byte-cap", "clock-regression"])
+def test_synthetic_quote_restart_preserves_inputs_and_shared_bounds(request, monkeypatch, case):
+    module, config, output, _, _ = _quote_input_fixture(request, monkeypatch, seconds=3)
+    started = datetime.fromisoformat(config["connected_scenario_started_at"])
+    path = output / ("xauusd-quotes-synthetic-" + config["fixture_id"] + ".jsonl")
+    first_time = started + timedelta(milliseconds=990) if case == "restart-rate" else started
+    assert module._append_synthetic_quote(path, Path(config["owned_root"]), config, started, first_time, [2500.0, 2500.2])[0]
+    original = path.read_bytes()
+    # No replay in the same elapsed second; no in-memory cursor authority.
+    assert not module._append_synthetic_quote(path, Path(config["owned_root"]), config,
+        started, first_time + timedelta(milliseconds=20), [2500.0, 2500.2])[0]
+    assert path.read_bytes() == original
+    if case == "torn-tail":
+        with path.open("ab") as stream:
+            stream.write(b'{"partial":')
+    elif case == "foreign-identity":
+        path.write_bytes(original.replace(config["fixture_id"].encode(), b"f" * 32))
+    elif case == "invalid-first-time":
+        row = json.loads(original)
+        row["event_time"] = None
+        path.write_bytes(json.dumps(row).encode() + b"\n")
+    elif case == "byte-cap":
+        path.write_bytes(b" " * (3 * module.MAX_INPUT_RECORD_BYTES + 1))
+    before_retry = path.read_bytes()
+    if case in {"restart", "restart-rate"}:
+        assert module._append_synthetic_quote(path, Path(config["owned_root"]), config,
+            started, first_time + timedelta(seconds=1), [2500.0, 2500.2])[0]
+        assert path.read_bytes().startswith(original)
+        with pytest.raises(RuntimeError, match="QUOTE_INPUT_BUDGET_EXHAUSTED"):
+            module._input_policy(config, started + timedelta(seconds=3))
+    else:
+        expected = {"torn-tail": "RESTART_RECORD_INVALID", "foreign-identity": "RESTART_RECORD_INVALID",
+            "invalid-first-time": "RESTART_RECORD_INVALID",
+            "byte-cap": "TOTAL_BYTES_EXCEEDED", "clock-regression": "CLOCK_REGRESSION"}[case]
+        instant = started - timedelta(seconds=1) if case == "clock-regression" else started + timedelta(seconds=1)
+        with pytest.raises(RuntimeError, match="QUOTE_INPUT_" + expected):
+            module._append_synthetic_quote(path, Path(config["owned_root"]), config, started, instant, [2500.0, 2500.2])
+        assert path.read_bytes() == before_retry
 
 
 @pytest.mark.parametrize("case", ["valid", "build-only", "wrong-state", "wrong-config", "wrong-code",
