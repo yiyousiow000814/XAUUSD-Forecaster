@@ -15,8 +15,11 @@ import subprocess
 
 SELECTION = 'architecture/critical-paths.json'
 TOOL_INPUTS = ('scripts/architecture_compiler.py', 'scripts/compile_architecture.py',
-               'scripts/extract_architecture_powershell.ps1')
+               'scripts/extract_architecture_powershell.ps1',
+               'scripts/extract_architecture_typescript.mjs',
+               'scripts/architecture_typescript_tool.py')
 VERSION = 'critical-source-index-v1'
+MAXIMUM_INDEX_BYTES = 2 * 1024 * 1024
 
 
 def encoded(value):
@@ -99,13 +102,14 @@ def compile_index(root: Path):
             raise ValueError('ARCHITECTURE_VIEW_NAME_INVALID')
         if not view.get('roots') or not view.get('files'):
             raise ValueError('ARCHITECTURE_SELECTION_INVALID')
-        if any(not name.endswith(('.py', '.ps1')) for name in view['files']):
+        if any(not name.endswith(('.py', '.ps1', '.ts', '.tsx', '.mts', '.cts')) for name in view['files']):
             raise ValueError('ARCHITECTURE_LANGUAGE_UNSUPPORTED')
     files = sorted({file for view in selection['views'].values() for file in view['files']})
     inputs = sorted(set(files + [SELECTION, *TOOL_INPUTS] +
                         [file for view in selection['views'].values() for file in view['tests']]))
     hashes = {name: hashlib.sha256(source_path(root, name).read_text(encoding='utf-8-sig').replace('\r\n', '\n').encode()).hexdigest() for name in inputs}
     symbols, edges = [], []
+    tools = {}
     for name in files:
         if name.endswith('.py'):
             found, calls = extract_python(source_path(root, name), name)
@@ -122,6 +126,32 @@ def compile_index(root: Path):
             raise RuntimeError('ARCHITECTURE_PARSE_FAILED:' + result.stderr[:1000])
         parsed = json.loads(result.stdout)
         symbols.extend(parsed['symbols']); edges.extend(parsed['edges'])
+    typescript_files = [name for name in files if name.endswith(('.ts', '.tsx', '.mts', '.cts'))]
+    if typescript_files:
+        # This is an explicit tool dependency, never a dependency-detection skip.
+        from architecture_typescript_tool import resolve_package
+        package, identity = resolve_package(root)
+        node = shutil.which('node')
+        if not node:
+            raise RuntimeError('ARCHITECTURE_TOOL_UNAVAILABLE:node')
+        request = dict(package=str(package), version=identity['version'], files=[
+            dict(path=name, content=source_path(root, name).read_text(encoding='utf-8-sig'))
+            for name in typescript_files])
+        result = subprocess.run([node, str(root / 'scripts/extract_architecture_typescript.mjs')],
+            input=json.dumps(request), capture_output=True, encoding='utf-8', errors='strict',
+            timeout=30, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+        if result.returncode:
+            reason = ('ARCHITECTURE_TOOL_INTEGRITY_FAILED' if 'ARCHITECTURE_TOOL_INTEGRITY_FAILED' in result.stderr
+                      else 'ARCHITECTURE_PARSE_FAILED')
+            raise RuntimeError(reason + ':' + result.stderr[:1000])
+        parsed = json.loads(result.stdout)
+        if parsed.get('tool') != dict(name='typescript', version=identity['version']):
+            raise RuntimeError('ARCHITECTURE_TOOL_INTEGRITY_FAILED:parser-identity')
+        symbols.extend(parsed['symbols']); edges.extend(parsed['edges'])
+        tools['typescript'] = identity
+        # Only this package's locked identity affects parser behavior. Unrelated
+        # Web dependency edits cannot churn the source index's tool identity.
+        hashes['tool:typescript:web/package-lock.json'] = hashlib.sha256(encoded(identity).encode()).hexdigest()
     ids = {symbol['id'] for symbol in symbols}
     if len(ids) != len(symbols):
         raise ValueError('ARCHITECTURE_SYMBOL_ID_AMBIGUOUS')
@@ -147,13 +177,17 @@ def compile_index(root: Path):
         edges=sorted(edges, key=lambda e:(e['source'], e['line'], e['kind'], e['target'])),
         tests=sorted(tests, key=lambda s:s['id'])),
         allowed=dict(status='NOT_EVALUATED', views=selection['views']),
-        runtime=dict(status='UNKNOWN', observations=[]),
+        runtime=dict(status='UNKNOWN', observations=[]), tools=tools,
         coverage=dict(scope='DECLARED_CRITICAL_SLICES_ONLY', ownership='UNKNOWN',
                       transaction_atomicity='NOT_PROVEN_BY_STATIC_INDEX'))
 
 
 def render(index):
-    outputs = {'critical-index.json': encoded(index)}
+    # This shared static transport retains every fact. Whitespace is not source
+    # coverage; explain and Mermaid remain readable without raising the budget.
+    outputs = {'critical-index.json': json.dumps(index, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n'}
+    if len(outputs['critical-index.json'].encode('utf-8')) > MAXIMUM_INDEX_BYTES:
+        raise ValueError('ARCHITECTURE_INDEX_BUDGET_EXCEEDED')
     for name, view in index['allowed']['views'].items():
         roots = set(view['roots'])
         edges = [e for e in index['observed']['edges'] if e['source'] in roots]

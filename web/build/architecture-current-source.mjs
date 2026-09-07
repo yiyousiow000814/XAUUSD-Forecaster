@@ -70,7 +70,7 @@ export function projectCurrentSource(index) {
       navigation: { role: 'ADVANCED', audience: 'ADVANCED', parent_view: 'system-overview' },
       disclosure: { default_mode: 'SELECTED_NODE', always_visible_edge_ids: [], secondary_edge_ids: edgeIds, allow_show_all: true } };
   });
-  views.unshift({ id: 'system-overview', label: 'Critical source slices', summary: 'Three selected paths, not the full system. Runtime, allowed dependencies and transaction semantics remain UNKNOWN.',
+  views.unshift({ id: 'system-overview', label: 'Critical source slices', summary: `${selections.length} selected paths, not the full system. Runtime, allowed dependencies and transaction semantics remain UNKNOWN.`,
     layout_direction: 'LR', node_ids: overviewIds, edge_ids: [], entry_node: overviewIds[0], primary_path: [overviewIds[0]],
     layout_hints: { mode: 'SEMANTIC_GRID', auto_place_unlisted: true,
       rank_groups: overviewIds.map((id, ordinal) => ({ id: `display-order-${ordinal}`, node_ids: [id] })),

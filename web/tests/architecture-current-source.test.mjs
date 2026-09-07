@@ -102,7 +102,7 @@ test('actual generated source feeds the existing Explorer without runtime or per
   }
   const phone = buildArchitectureGraph(manifest, 'system-overview', 'TB');
   assert.equal(new Set(phone.nodes.map(node => node.position.x)).size, 1);
-  assert.equal(new Set(phone.nodes.map(node => node.position.y)).size, 3);
+  assert.equal(new Set(phone.nodes.map(node => node.position.y)).size, Object.keys(index.allowed.views).length);
   assert.equal(phone.edges.length, 0, 'display ordering must not invent execution edges');
 });
 
