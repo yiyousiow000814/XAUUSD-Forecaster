@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 import urllib.parse
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
@@ -30,12 +30,16 @@ from scripts.run_dashboard_sync import (  # noqa: E402
     RUNTIME_STATE_ROOT_KEY,
 )
 from scripts.run_dashboard_api import (  # noqa: E402
+    _advance_news_projection_capture,
     _build_news_projection_source_from_database,
+    _news_projection_snapshot_stat,
     _read_news_projection_generation_artifact,
     _write_news_projection_generation_artifact,
 )
 from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
-from xauusd_forecaster.news_projection import NewsProjectionGeneration  # noqa: E402
+from xauusd_forecaster.news_projection import (  # noqa: E402
+    NewsProjectionGeneration, NewsProjectionSourceCapture,
+)
 from xauusd_forecaster.runtime_paths import PRODUCTION_RUNTIME_STATE_ROOT  # noqa: E402
 
 VERSION_HOST = re.compile(
@@ -164,6 +168,40 @@ def _load_or_freeze_news_projection_generation(
     frozen = _freeze_news_projection_generation(source_database)
     _write_news_projection_generation_artifact(artifact_path, frozen)
     return frozen
+
+
+def advance_frozen_source_capture(
+    *, frozen_database: Path, input_identity: dict, source_identity: dict,
+    watermark: datetime, epoch: str, state_file: Path, state_root: Path,
+) -> dict:
+    """Capture one step from the bootstrap owner's retained immutable input.
+
+    The execution producer supplies its already-verified WAL-aware input and
+    exact source identities. This function binds them; filesystem stat alone
+    does not establish provenance. It never backs up a live database, rewrites
+    a pinned generation, initializes schema, or invokes remote Sync. The online
+    backup owner must retain a completed snapshot before calling this entrypoint.
+    """
+    state_file = _validated_sync_state_path(state_file, state_root)
+    if not input_identity or not source_identity:
+        raise ValueError("NEWS_SOURCE_CAPTURE_PROVENANCE_REQUIRED")
+    if watermark.utcoffset() is None:
+        raise ValueError("NEWS_SOURCE_CAPTURE_TIME_INVALID")
+    directory = state_file.with_name(f"{state_file.stem}-generation.capture")
+    capture = NewsProjectionSourceCapture(
+        directory,
+        binding={
+            "snapshot_stat": _news_projection_snapshot_stat(frozen_database),
+            "input_identity": input_identity, "source_identity": source_identity,
+        },
+        watermark=watermark.isoformat(),
+        window_start=(watermark - timedelta(days=60)).isoformat(), epoch=epoch,
+    )
+    if capture.read()["state"] == "SOURCE_COMPLETE":
+        # Source stepping and final canonical planning have independent bounded
+        # turns. Neither turn can invoke prepare or replace the pinned artifact.
+        return capture.finalize_plan()
+    return _advance_news_projection_capture(frozen_database, capture)
 
 
 def _record_recovery_required(

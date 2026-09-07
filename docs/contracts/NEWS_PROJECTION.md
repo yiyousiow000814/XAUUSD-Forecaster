@@ -93,6 +93,60 @@
 
 ## Retry and recovery
 
+- A bootstrap source capture is not a replay generation. Its bounded local
+  artifact progresses from `BUILDING` to `SOURCE_COMPLETE` over one retained,
+  checkpoint-complete SQLite input. Exact input lineage, source identity, epoch,
+  60-day window and watermark are bound before progress; nonempty WAL is never
+  silently excluded from that input. Ordinary API refresh does not acquire a
+  full-database-copy responsibility from this bootstrap boundary.
+- Capture uses at most 128 source identities per step, scopes the existing
+  annotation claimability predicate to those identities, and steps the actual
+  detail cursor without a full page `fetchall`. All SQLite work in one step
+  shares a 15-second / 40-million-VM-operation refusal budget. Actual elapsed
+  time and sampled memory are reported; this is not an OS memory sandbox or a
+  claim that SQLite interruption is an exact wall-clock deadline.
+- Each accepted immutable part contains at most 4 MiB of canonical content;
+  total local capture content is bounded at 256 MiB and metadata at 32 MiB.
+  The owned directory has a separate 324 MiB physical-byte ceiling: 256 MiB
+  content plus two 32 MiB manifest copies and one 4 MiB incoming atomic part.
+  Bounded name/stat accounting includes temporary files and unreferenced parts
+  before reserving another write; interrupted output is not silently deleted.
+  SQLite row length is limited to 2 MiB, its page cache to 8 MiB, and observed
+  process memory above 512 MiB refuses source work. These are local capture
+  safety limits, not larger remote generation limits or Free-plan evidence.
+- Progress commits the last accepted raw cursor, including withdrawal
+  identities, only after its part is atomically written and read back. A crash
+  before manifest commit cannot advance progress; a crash after commit cannot
+  roll it back. Failures retain the prior prefix and a 30-second backoff; later
+  progress does not erase the recorded failure. Restart restores the same
+  frozen input rather than reopening newer live data under its identity.
+- A publication error reconciles the actually committed manifest before
+  recording failure/backoff; it cannot overwrite a newly committed prefix with
+  old state. If storage cannot persist even that decision, the result is
+  non-retryable `NEWS_SOURCE_CAPTURE_STORAGE_UNRESOLVED`. The caller must stop
+  automatic retries and repair the storage condition. An in-memory refusal is
+  not claimed as a durable retry receipt when the storage itself is unwritable.
+- Capture never overwrites the published schema-1 generation artifact. A
+  complete capture over the existing combined 10,000-source-row bound remains
+  explicitly non-admitted. `SOURCE_COMPLETE` alone cannot be passed to Sync,
+  remote prepare, qualification or CURRENT; global ordering, exact source and
+  receipt digests, batch plans and applicable capacity gates are separate
+  obligations. Original detail payload key order and its existing detail hash
+  remain unchanged; recursive sorting applies only to the source digest.
+- Canonical planning verifies each retained part once, sorts only bounded
+  detail-key/byte-offset metadata, and streams the original globally ordered
+  detail then index batches. It reads exact records through at most eight file
+  handles, not a whole-part cache refill for each shuffled key. Reported logical
+  content reads are one complete part scan plus two exact item-record streams;
+  they are not claimed as physical disk reads or D1 rows. Finalization has its
+  own 15-second refusal budget and sampled memory ceiling. A durable attempt
+  marker precedes retained-byte reads; interrupted/failed planning retains source
+  parts and requires explicit recovery, rather than restarting the hash pass.
+  Publication failure reconciles the committed plan and observes storage
+  backoff even when no attempt was committed. No digest or plan is published
+  until the entire calculation succeeds. Batch boundaries may
+  cross capture parts and preserve the existing global receipt chain exactly.
+
 - Batch offsets and receipts are idempotent. Replaying an accepted exact batch
   succeeds; changing an accepted batch is a receipt contradiction and fails
   closed. The append-only batch receipt is the staging progress record; a

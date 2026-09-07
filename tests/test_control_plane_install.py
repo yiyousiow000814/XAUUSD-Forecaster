@@ -1662,8 +1662,40 @@ def test_generated_bundle_user_environment_is_explicit(tmp_path, runtime_executa
     if case == "unknown":
         body = "Get-FixtureUserEnvironmentValue -Name 'UNDECLARED_SENTINEL'"
     if case == "configured":
+        # Exercise real native descendants, not just the parent harness that
+        # already resets its own module authority. No service action is invoked.
+        # CodeRevision reads the separate runtime checkout, not the controller.
+        runtime = tmp_path / "runtime"
+        _make_real_control_source(runtime)
+        shutil.copyfile(ROOT / "scripts/windows-service-launch-contract.json",
+                        runtime / "scripts/windows-service-launch-contract.json")
+        hidden = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.run(["git", "add", "scripts/windows-service-launch-contract.json"], cwd=runtime, check=True, creationflags=hidden)
+        subprocess.run(["git", "commit", "-qm", "fixture runtime launch authority"], cwd=runtime, check=True, creationflags=hidden)
+        revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=runtime, text=True, creationflags=hidden).strip()
+        body = rf'''
+        foreach ($childRuntime in @('powershell.exe', 'pwsh.exe')) {{
+            $child = Invoke-Utf8NativeProcess -FilePath $childRuntime -TimeoutMilliseconds 10000 `
+                -OwnershipReceiptPath '' -Arguments @('-NoProfile','-NonInteractive',
+                    '-ExecutionPolicy','Bypass','-File','{source / "scripts/xauusd_control_center.ps1"}',
+                    '-Action','CodeRevision','-RuntimeRoot',$moduleRoot,'-RepositoryRoot',$repositoryRoot);
+            if ($child.exit_code -ne 0 -or $child.stdout.Trim() -cne '{revision}') {{
+                throw ('FIXTURE_NATIVE_CONFIGURATION_FAILED:' + $childRuntime + ':' + $child.stderr)
+            }}
+        }}
+        Get-FixtureUserEnvironmentValue -Name 'GEMINI_API_KEY'
+        '''
         assert _run_contract_with_runtime(tmp_path, body, runtime_executable,
             environment=environment, controller_script=source / "scripts/xauusd_control_center.ps1") == "synthetic-configuration-sentinel"
+        observed = [json.loads(path.read_text(encoding="utf-8-sig")) for path in
+                    (tmp_path / "environment-attestations").glob("*.json")]
+        assert len(observed) == 3
+        assert len({row["pid"] for row in observed}) == 3
+        assert len({row["configuration_sha256"] for row in observed}) == 1
+        assert {row["runtime_version"].split(".")[0] for row in observed} == {"5", "7"}
+        for row in observed:
+            assert Path(row["module_path"]) == Path(row["runtime_home"]) / "Modules"
+            assert ";" not in row["module_path"]
     else:
         reason = {"missing": "FIXTURE_CONFIGURATION_REQUIRED",
                   "tampered": "FIXTURE_CONFIGURATION_IDENTITY_MISMATCH",
@@ -2523,7 +2555,7 @@ def test_clean_staged_bundle_produces_quiesced_preflight_without_checkout_fallba
     assert rejected == "CONTROL_BUNDLE_STARTUP_PREFLIGHT_FAILED"
 
 
-def run_staged_activation_withdrawal_rehearsal(tmp_path):
+def run_staged_activation_withdrawal_rehearsal(tmp_path, *, runtime_executable="powershell.exe"):
     """Real launcher/bundle/mutex/heartbeat; withdraw before granting ACTIVE."""
     tmp_path = tmp_path.resolve(strict=True)
     source = tmp_path / "source"
@@ -2545,9 +2577,14 @@ def run_staged_activation_withdrawal_rehearsal(tmp_path):
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     ) for _ in range(4)]
     body = rf'''
+    Write-ContractPhase 'withdrawal-controller-load-enter';
     $null = . '{source / 'scripts/xauusd_control_center.ps1'}' -Action CodeRevision -RuntimeRoot $moduleRoot -RepositoryRoot $repositoryRoot;
+    Write-ContractPhase 'withdrawal-controller-load-return';
     $control=Join-Path $repositoryRoot '.local\runtime-control';
+    Write-ContractPhase 'withdrawal-bundle-enter';
     $bundle=New-VerifiedRuntimeControlBundleStage -SourceRoot '{source}' -SourceRevision '{revision}' -StageRoot $control -RequireImmutableSource;
+    Write-ContractPhase 'withdrawal-bundle-return';
+    Write-ContractPhase 'withdrawal-authority-enter';
     $descriptor=Get-WatchdogSingletonDescriptor;
     $old=[pscustomobject]@{{schema_version='watchdog-owner-v2';instance_id=[guid]::NewGuid().ToString('N');
         process_id={prior['pid']};process_start_token='{prior['token']}';launcher_pid={prior['pid']};launcher_start_token='{prior['token']}';
@@ -2558,17 +2595,24 @@ def run_staged_activation_withdrawal_rehearsal(tmp_path):
     $transaction=[guid]::NewGuid().ToString('N');
     $installer=Get-ControlPlaneProcessIdentity -ProcessId $PID -RequireCompleteInventory;
     Write-ControlPlaneInstallState @{{transaction_id=$transaction;phase='VERIFY_QUIESCED_HANDOFF';target_revision='{revision}';install_owner_identity=$installer}};
+    Write-ContractPhase 'withdrawal-authority-return';
     $launcher=$null; $owner=$null;
     try {{
+        Write-ContractPhase 'withdrawal-replacement-start-enter';
         $launcher=Start-WatchdogReplacement -InstallTransactionId $transaction -PassThru;
+        Write-ContractPhase 'withdrawal-replacement-start-return';
+        Write-ContractPhase 'withdrawal-quiesced-enter';
         $owner=Wait-VerifiedWatchdogHandoff -ExpectedRevision '{revision}' -PreviousIdentity $old `
             -ExpectedMode QUIESCED -ExpectedInstallTransactionId $transaction -RequireCompleteInventory;
+        Write-ContractPhase 'withdrawal-quiesced-return';
         if ([int]$owner.process_id -eq [int]$old.process_id -and $owner.process_start_token -eq $old.process_start_token) {{throw 'stale owner reused'}};
         if ($owner.watchdog_owner_receipt.mode -cne 'QUIESCED_INSTALL') {{throw 'unsafe activation'}};
+        Write-ContractPhase 'withdrawal-stop-enter';
         Write-ControlPlaneInstallState @{{phase='FAILED';failure='fixture withdrawal before activation'}};
         if (-not $launcher.WaitForExit(10000)) {{throw 'launcher did not exit after withdrawal'}};
         if (Get-ControlPlaneProcessIdentity -ProcessId ([int]$owner.process_id)) {{throw 'watchdog survived withdrawal'}};
         if (Test-Path -LiteralPath $watchdogOwnerReceiptPath) {{throw 'receipt remained after exact exit'}};
+        Write-ContractPhase 'withdrawal-stop-return';
         Write-Output 'real quiesced handoff and clean withdrawal passed'
     }} catch {{
         $details=[ordered]@{{failure=$_.Exception.Message;heartbeat=$null;launcher_exited=$null}};
@@ -2579,6 +2623,7 @@ def run_staged_activation_withdrawal_rehearsal(tmp_path):
         Write-ControlCenterJsonAtomic -Path (Join-Path $script:fixtureRoot 'handoff-failure.json') -Value $details;
         throw
     }} finally {{
+        Write-ContractPhase 'withdrawal-cleanup-enter';
         Write-ControlPlaneInstallState @{{phase='FAILED';failure='fixture cleanup'}};
         if ($owner -and (Get-ControlPlaneProcessIdentity -ProcessId ([int]$owner.process_id))) {{
             Stop-VerifiedWatchdogOwner -Identity $owner
@@ -2586,6 +2631,7 @@ def run_staged_activation_withdrawal_rehearsal(tmp_path):
         if ($launcher -and -not $launcher.HasExited) {{
             if (-not $launcher.WaitForExit(10000)) {{throw 'staged launcher containment unresolved'}}
         }}
+        Write-ContractPhase 'withdrawal-cleanup-return';
     }}
     '''
     try:
@@ -2593,7 +2639,7 @@ def run_staged_activation_withdrawal_rehearsal(tmp_path):
         environment["XAUUSD_FIXTURE_CONFIGURATION"] = str(tmp_path / "fixture-user-environment.json")
         environment["GEMINI_API_KEY"] = "synthetic-process-decoy"
         assert _run_contract_with_runtime(
-            tmp_path, body, "powershell.exe", environment=environment,
+            tmp_path, body, runtime_executable, environment=environment,
             execution_timeout=90, controller_script=source / "scripts/xauusd_control_center.ps1",
         ) == "real quiesced handoff and clean withdrawal passed"
         assert all(process.poll() is None for process in preserved)

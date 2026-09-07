@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import hashlib
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -192,6 +194,72 @@ def test_bootstrap_persists_generation_before_first_replay(
 
     assert result is frozen
     assert writes == [(artifact, frozen)]
+
+
+@pytest.mark.parametrize("source_state", ("checkpointed", "nonempty-wal"))
+def test_bootstrap_capture_retains_input_and_never_calls_remote_or_initializer(
+    tmp_path, monkeypatch, source_state,
+):
+    from xauusd_forecaster.forward_ledger import ForwardLedger
+
+    now = datetime(2026, 9, 7, tzinfo=UTC)
+    database = tmp_path / "retained-input.sqlite3"
+    ledger = ForwardLedger(database, now=now - timedelta(days=1))
+    body = "Retained frozen source, never a live source rewrite. " * 20
+    ledger.append_news_revision({
+        "source": "bea_economic_releases", "source_item_id": "frozen",
+        "source_published_time": now, "collector_first_seen_time": now,
+        "fetched_time": now, "headline": "frozen", "body": body,
+        "content_hash": hashlib.sha256(body.encode()).hexdigest(), "cluster_id": "frozen",
+    })
+    epoch = str(ledger.connection.execute(
+        "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
+    ).fetchone()[0])
+    if source_state == "checkpointed":
+        ledger.close()
+    state_root = tmp_path / "runtime-state"
+    state_root.mkdir()
+    state_file = state_root / "bootstrap.json"
+    old_artifact = state_root / "bootstrap-generation.json.gz"
+    old_bytes = b"existing pinned bytes stay unchanged during replacement capture"
+    old_artifact.write_bytes(old_bytes)
+    before = MODULE._news_projection_snapshot_stat(database)
+    monkeypatch.setattr(MODULE, "ForwardLedger", lambda *_a, **_k: pytest.fail("capture initialized schema"))
+    monkeypatch.setattr(MODULE, "_sync_news", lambda *_a, **_k: pytest.fail("capture called remote Sync"))
+    monkeypatch.setattr(MODULE, "_freeze_news_projection_generation", lambda *_a, **_k: pytest.fail("capture copied the input"))
+    arguments = {
+        "frozen_database": database,
+        "input_identity": {"fixture": "test-owned retained consistent SQLite"},
+        "source_identity": {"fixture": "current imported test source"},
+        "watermark": now, "epoch": epoch, "state_file": state_file,
+        "state_root": state_root,
+    }
+    try:
+        if source_state == "nonempty-wal":
+            assert before["wal_size"] > 0
+            with pytest.raises(ValueError, match="CHECKPOINTED_SNAPSHOT_REQUIRED"):
+                MODULE.advance_frozen_source_capture(**arguments)
+        else:
+            result = MODULE.advance_frozen_source_capture(**arguments)
+            assert result["state"] == "SOURCE_COMPLETE"
+            assert result["source_count"] == result["item_count"] == 1
+            assert result["admission"] == "CAPACITY_REVIEW_REQUIRED"
+            assert not isinstance(result, MODULE.NewsProjectionGeneration)
+            planned = MODULE.advance_frozen_source_capture(**arguments)
+            assert planned["source_count"] == result["source_count"]
+            assert planned["source_plan"]["manifest"]["expected_index_count"] == 1
+            assert planned["source_plan"]["minimum_sync_cycles"] == 1
+            assert MODULE.advance_frozen_source_capture(**arguments) == planned
+            with pytest.raises(ValueError, match="IDENTITY_MISMATCH"):
+                MODULE.advance_frozen_source_capture(**{
+                    **arguments, "source_identity": {"fixture": "wrong source"},
+                })
+        assert MODULE._news_projection_snapshot_stat(database) == before
+        assert old_artifact.read_bytes() == old_bytes
+        assert not state_file.exists()
+    finally:
+        if source_state == "nonempty-wal":
+            ledger.close()
 
 
 def test_missing_pinned_artifact_enters_explicit_recovery(

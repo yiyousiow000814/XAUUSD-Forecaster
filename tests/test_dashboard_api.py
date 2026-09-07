@@ -2945,6 +2945,85 @@ def test_news_projection_scans_candidate_universe_once_across_detail_pages(
     assert generation.manifest["expected_index_count"] == 1_001
 
 
+def test_news_capture_uses_fixed_input_scoped_identity_and_real_cursor(tmp_path, monkeypatch):
+    module = _dashboard_module()
+    now = datetime(2026, 9, 7, tzinfo=UTC)
+
+    class FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(module, "datetime", FrozenClock)
+    monkeypatch.setattr(module, "NEWS_SOURCE_CAPTURE_PAGE_ITEMS", 2)
+    database = tmp_path / "owned-snapshot.sqlite3"
+    ledger = ForwardLedger(database, now=now - timedelta(days=1))
+    for number in range(5):
+        text = f"Exact frozen article {number}. " * 20
+        ledger.append_news_revision({
+            "source": "bea_economic_releases", "source_item_id": f"item-{number}",
+            "source_published_time": now, "collector_first_seen_time": now,
+            "fetched_time": now, "headline": f"item-{number}", "body": text,
+            "content_hash": hashlib.sha256(text.encode()).hexdigest(),
+            "cluster_id": f"item-{number}",
+        })
+    epoch = str(ledger.connection.execute(
+        "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
+    ).fetchone()[0])
+    original = module._build_news_projection_source(ledger.connection)
+    ledger.close()
+    stat_before = module._news_projection_snapshot_stat(database)
+    capture = module.NewsProjectionSourceCapture(
+        tmp_path / "source.capture", binding={"snapshot_stat": stat_before},
+        watermark=now.isoformat(), window_start=(now - timedelta(days=60)).isoformat(),
+        epoch=epoch,
+    )
+    pending = module.pending_annotation_records
+    source_reader = module._news_reader_rows
+    seen_keys = []
+    cursors = []
+
+    def scoped(connection, **kwargs):
+        assert kwargs["identity_only"] is True
+        assert 0 < len(kwargs["source_keys"]) <= 2
+        seen_keys.extend(kwargs["source_keys"])
+        rows = pending(connection, **kwargs)
+        assert all("body" not in row and "annotation_json" not in row for row in rows)
+        return rows
+
+    def streamed(*args, **kwargs):
+        assert kwargs["stream"] is True
+        rows = source_reader(*args, **kwargs)
+        assert isinstance(rows, sqlite3.Cursor)
+        cursors.append(rows)
+        return rows
+
+    monkeypatch.setattr(module, "pending_annotation_records", scoped)
+    monkeypatch.setattr(module, "_news_reader_rows", streamed)
+    for expected in (2, 4, 5):
+        state = module._advance_news_projection_capture(database, capture)
+        assert state["source_count"] == expected
+        assert state["last_source_step"]["vm_steps"] < 40_000_000
+        assert state["last_source_step"]["sampled_rss_max_bytes"] < 512 * 1024 * 1024
+        # A fresh process would reconstruct this same small artifact identity.
+        capture = module.NewsProjectionSourceCapture(
+            capture.directory, binding=capture.identity["binding"],
+            watermark=capture.identity["watermark"], window_start=capture.identity["window_start"],
+            epoch=epoch,
+        )
+    assert state["state"] == "SOURCE_COMPLETE"
+    assert len(set(seen_keys)) == len(seen_keys) == 5
+    for cursor in cursors:
+        with pytest.raises(sqlite3.ProgrammingError):
+            cursor.fetchone()
+    retained = sorted(capture.records(), key=lambda row: row["detail"]["detail_key"])
+    assert [row["index"] for row in retained] == list(original.index_rows)
+    assert [row["detail"] for row in retained] == list(original.detail_rows)
+    assert module._news_projection_snapshot_stat(database) == stat_before
+    monkeypatch.setattr(module.sqlite3, "connect", lambda *_args, **_kwargs: pytest.fail("completed input reopened"))
+    assert module._advance_news_projection_capture(database, capture) == state
+
+
 def test_news_projection_request_starts_one_background_build(monkeypatch, tmp_path) -> None:
     module = _dashboard_module()
     module._NEWS_PROJECTION_CACHE.clear()

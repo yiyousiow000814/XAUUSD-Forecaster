@@ -1,4 +1,8 @@
 # Injected only into a generated, isolated test bundle before any user read.
+# Every nested test shell owns its module authority; a PS7 parent can otherwise
+# leave its PS7-only module root in a Windows PowerShell child.
+$fixtureInheritedModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Process')
+[Environment]::SetEnvironmentVariable('PSModulePath', [IO.Path]::Combine($PSHOME, 'Modules'), 'Process')
 $fixtureConfigurationPath = [Environment]::GetEnvironmentVariable('XAUUSD_FIXTURE_CONFIGURATION', 'Process')
 if (-not $fixtureConfigurationPath -or
     [IO.Path]::GetFullPath($fixtureConfigurationPath) -cne '__CONFIG_PATH__') {
@@ -20,7 +24,10 @@ if ($script:fixtureUserConfiguration.schema_version -ne 1 -or
 }
 # One bounded, per-process record; no credential values are recorded.
 [IO.File]::WriteAllText(('__ATTESTATION_ROOT__\' + $PID + '.json'),
-    (@{pid=$PID;action=$Action;fixture_id='__FIXTURE_ID__';configuration_sha256=$fixtureConfigurationDigest} |
+    (@{pid=$PID;action=$Action;fixture_id='__FIXTURE_ID__';configuration_sha256=$fixtureConfigurationDigest;
+        runtime_home=$PSHOME;runtime_version=$PSVersionTable.PSVersion.ToString();
+        inherited_module_path=$fixtureInheritedModulePath;
+        module_path=[Environment]::GetEnvironmentVariable('PSModulePath', 'Process')} |
         ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
 function Get-FixtureUserEnvironmentValue {
     param([Parameter(Mandatory=$true)][string]$Name)

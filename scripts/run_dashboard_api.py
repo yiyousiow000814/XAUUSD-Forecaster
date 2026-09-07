@@ -94,6 +94,11 @@ from xauusd_forecaster.news_projection import (
     NEWS_PROJECTION_CONTRACT_VERSION,
     NEWS_PROJECTION_MAX_ITEMS,
     NewsProjectionGeneration,
+    NewsProjectionSourceCapture,
+    NewsSourceCapturePage,
+    NEWS_SOURCE_CAPTURE_PAGE_ITEMS,
+    news_source_capture_record,
+    news_projection_capture_rss as _news_projection_capture_rss,
     build_news_projection_generation,
     receipt_digest,
 )
@@ -201,7 +206,8 @@ def _news_reader_rows(
     after: str | None = None,
     limit: int = 200,
     candidate_keys: list[tuple[str, str, int, str]] | None = None,
-) -> list[sqlite3.Row]:
+    stream: bool = False,
+) -> list[sqlite3.Row] | sqlite3.Cursor:
     """Read one bounded page from the canonical 60-day reader archive."""
     cutoff = (now - timedelta(days=NEWS_READER_WINDOW_DAYS)).isoformat(
         timespec="microseconds"
@@ -216,7 +222,7 @@ def _news_reader_rows(
     candidate_parameters = tuple(
         value for key in candidate_keys for value in key
     )
-    return connection.execute(
+    cursor = connection.execute(
         f"""WITH candidate_changes(
               source,source_item_id,revision_number,mirror_updated_at
             ) AS (VALUES {candidate_clause})
@@ -391,7 +397,8 @@ def _news_reader_rows(
             HANDOVER_IMPACT_PROMPT_VERSION, IMPACT_PROMPT_VERSION,
             PROMPT_VERSION, cutoff, limit,
         ),
-    ).fetchall()
+    )
+    return cursor if stream else cursor.fetchall()
 
 
 def _serialize_news_rows(
@@ -602,6 +609,127 @@ def _build_news_projection_source_from_database(
         return _build_news_projection_source(connection)
     finally:
         connection.close()
+
+
+def _news_projection_snapshot_stat(database: Path) -> dict:
+    """Change detection for an already-owned frozen input, not its provenance."""
+    database = database.resolve(strict=True)
+    source = database.stat()
+    wal = database.with_name(database.name + "-wal")
+    wal_stat = wal.stat() if wal.exists() else None
+    return {
+        "path": str(database), "size": source.st_size,
+        "mtime_ns": source.st_mtime_ns,
+        "wal_size": wal_stat.st_size if wal_stat else 0,
+        "wal_mtime_ns": wal_stat.st_mtime_ns if wal_stat else None,
+    }
+
+
+def _advance_news_projection_capture(
+    database: Path, capture: NewsProjectionSourceCapture,
+) -> dict:
+    """Advance one immutable source page; no HTTP, generation or D1 admission."""
+    def reader(state: dict) -> NewsSourceCapturePage:
+        identity = state["identity"]
+        expected_stat = identity["binding"].get("snapshot_stat")
+        if expected_stat != _news_projection_snapshot_stat(database):
+            raise ValueError("NEWS_SOURCE_CAPTURE_SNAPSHOT_MISMATCH")
+        if expected_stat["wal_size"] != 0:
+            raise ValueError("NEWS_SOURCE_CAPTURE_CHECKPOINTED_SNAPSHOT_REQUIRED")
+        now = datetime.fromisoformat(identity["watermark"])
+        started = time.monotonic()
+        vm_steps = 0
+        metrics = {"vm_steps": 0, "sampled_rss_max_bytes": _news_projection_capture_rss()}
+        if metrics["sampled_rss_max_bytes"] > 512 * 1024 * 1024:
+            raise ValueError("NEWS_SOURCE_CAPTURE_MEMORY_BOUND")
+
+        def within_sql_budget() -> int:
+            nonlocal vm_steps
+            vm_steps += 1_000
+            metrics["vm_steps"] = vm_steps
+            if vm_steps % 1_000_000 == 0:
+                metrics["sampled_rss_max_bytes"] = max(
+                    metrics["sampled_rss_max_bytes"], _news_projection_capture_rss(),
+                )
+            return int(
+                vm_steps > 40_000_000 or time.monotonic() - started > 15
+                or metrics["sampled_rss_max_bytes"] > 512 * 1024 * 1024
+            )
+
+        # The producer must have completed this owned snapshot's backup and
+        # checkpoint. immutable=1 must never conceal a nonempty WAL.
+        connection = sqlite3.connect(
+            database.resolve().as_uri() + "?mode=ro&immutable=1", uri=True, timeout=1,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 2 * 1024 * 1024)
+        connection.set_progress_handler(within_sql_budget, 1_000)
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("PRAGMA cache_size=-8192")
+            connection.execute("BEGIN")
+            epoch = connection.execute(
+                "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
+            ).fetchone()
+            if epoch is None or str(epoch[0]) != identity["epoch"]:
+                raise ValueError("NEWS_SOURCE_CAPTURE_EPOCH_MISMATCH")
+            keys = _news_mirror_candidate_keys(
+                connection, cutoff=datetime.fromisoformat(identity["window_start"]).isoformat(timespec="microseconds"),
+                after=json.dumps(state["cursor"]) if state["cursor"] is not None else None,
+                limit=NEWS_SOURCE_CAPTURE_PAGE_ITEMS + 1,
+            )
+            page_keys = keys[:NEWS_SOURCE_CAPTURE_PAGE_ITEMS]
+            claimable = {
+                (str(row["source"]), str(row["source_item_id"]), int(row["revision_number"]))
+                for row in pending_annotation_records(
+                    connection, observed_at=now,
+                    received_from=datetime.fromisoformat(identity["window_start"]),
+                    limit=NEWS_SOURCE_CAPTURE_PAGE_ITEMS,
+                    source_keys=tuple((source, item, revision) for source, item, revision, _ in page_keys),
+                    identity_only=True,
+                )
+            }
+            rows = _news_reader_rows(
+                connection, now, limit=len(page_keys), candidate_keys=page_keys,
+                stream=True,
+            )
+        except BaseException:
+            connection.close()
+            raise
+
+        def records():
+            try:
+                position = 0
+                for row in rows:
+                    metrics["sampled_rss_max_bytes"] = max(
+                        metrics["sampled_rss_max_bytes"], _news_projection_capture_rss(),
+                    )
+                    if metrics["sampled_rss_max_bytes"] > 512 * 1024 * 1024:
+                        raise ValueError("NEWS_SOURCE_CAPTURE_MEMORY_BOUND")
+                    if time.monotonic() - started > 15:
+                        raise ValueError("NEWS_SOURCE_CAPTURE_STEP_TIME_BOUND")
+                    if position >= len(page_keys):
+                        raise ValueError("NEWS_SOURCE_CAPTURE_DUPLICATE_ROW")
+                    source, item, revision, changed = page_keys[position]
+                    cursor = [changed, source, item, revision]
+                    if (row["source"], row["source_item_id"], row["revision_number"], row["mirror_updated_at"]) != (source, item, revision, changed):
+                        raise ValueError("NEWS_SOURCE_CAPTURE_ROW_MEMBERSHIP_MISMATCH")
+                    serialized = _serialize_news_rows([row], now, identity["epoch"], claimable)
+                    if len(serialized) != 1:
+                        raise ValueError("NEWS_SOURCE_CAPTURE_MISSING_ROW")
+                    position += 1
+                    yield news_source_capture_record(serialized[0], cursor)
+                if position != len(page_keys):
+                    raise ValueError("NEWS_SOURCE_CAPTURE_MISSING_ROW")
+            finally:
+                connection.close()
+                metrics["source_step_seconds"] = time.monotonic() - started
+                if expected_stat != _news_projection_snapshot_stat(database):
+                    raise ValueError("NEWS_SOURCE_CAPTURE_SNAPSHOT_MISMATCH")
+
+        return NewsSourceCapturePage(iter(records()), len(keys) > len(page_keys), metrics)
+
+    return capture.advance(reader)
 
 
 def _news_projection_generation_path(database: Path) -> Path:
