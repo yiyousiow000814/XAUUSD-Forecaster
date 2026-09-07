@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 
 SELECTION = 'architecture/critical-paths.json'
@@ -20,10 +21,233 @@ TOOL_INPUTS = ('scripts/architecture_compiler.py', 'scripts/compile_architecture
                'scripts/architecture_typescript_tool.py')
 VERSION = 'critical-source-index-v1'
 MAXIMUM_INDEX_BYTES = 2 * 1024 * 1024
+MAXIMUM_TRANSPORT_BYTES = 3 * 1024 * 1024
+MAXIMUM_PARTS = 32
+MAXIMUM_RECORDS = 10_240
+TRANSPORT_VERSION = 'critical-source-index-parts-v1'
+PART_VERSION = 'critical-source-facts-v1'
+FAMILIES = ('symbols', 'edges', 'tests')
 
 
 def encoded(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + '\n'
+
+
+def canonical(value):
+    """The wire/hash domain is Unicode scalar JSON with safe integer numbers.
+
+    Code-point key order (not JavaScript UTF-16 order), original array order and
+    multiplicity are part of the logical identity. Floating point is not a
+    current source fact and cannot silently gain a cross-runtime hash meaning.
+    """
+    def validate(item, depth=0):
+        if depth > 32:
+            raise ValueError('ARCHITECTURE_TRANSPORT_VALUE_INVALID')
+        if item is None or isinstance(item, bool):
+            return
+        if isinstance(item, str):
+            item.encode('utf-8', errors='strict')
+        elif isinstance(item, int) and abs(item) <= 9_007_199_254_740_991:
+            return
+        elif isinstance(item, list):
+            for child in item:
+                validate(child, depth + 1)
+        elif isinstance(item, dict) and all(isinstance(key, str) for key in item):
+            for key, child in item.items():
+                validate(key, depth + 1)
+                validate(child, depth + 1)
+        else:
+            raise ValueError('ARCHITECTURE_TRANSPORT_VALUE_INVALID')
+    validate(value)
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n'
+
+
+def _part_name(ordinal):
+    return f'critical-facts-{ordinal:05d}.json'
+
+
+def _record_source(family, record):
+    return record['source'].split('::', 1)[0] if family == 'edges' else record['path']
+
+
+def _counts(value):
+    if (not isinstance(value, dict) or set(value) != set(FAMILIES)
+            or any(type(count) is not int or not 0 <= count <= MAXIMUM_RECORDS
+                   for count in value.values()) or sum(value.values()) > MAXIMUM_RECORDS):
+        raise ValueError('ARCHITECTURE_TRANSPORT_RECORD_BUDGET_EXCEEDED')
+    return value
+
+
+def render_transport(index):
+    """Bounded source-owned parts; no extraction, filtering or sorting of facts."""
+    observed = index['observed']
+    counts = _counts({family: len(observed[family]) for family in FAMILIES})
+    if set(observed) != set(FAMILIES):
+        raise ValueError('ARCHITECTURE_TRANSPORT_FAMILY_INVALID')
+    groups = {}
+    # Serialize each complete record once for linear packing, retaining its
+    # global ordinal instead of relying on a later sort to recover stable ties.
+    for family in FAMILIES:
+        for ordinal, record in enumerate(observed[family]):
+            source = _record_source(family, record)
+            if source not in index['inputs']:
+                raise ValueError('ARCHITECTURE_TRANSPORT_SOURCE_INVALID')
+            pair = [ordinal, record]
+            size = len(canonical(pair).encode('utf-8')) - 1
+            if size >= MAXIMUM_INDEX_BYTES:
+                raise ValueError('ARCHITECTURE_INDEX_BUDGET_EXCEEDED')
+            groups.setdefault(source, []).append((family, pair, size))
+    outputs, descriptors = {}, []
+    total = 0
+
+    def emit(source, part):
+        nonlocal total
+        if len(descriptors) >= MAXIMUM_PARTS:
+            raise ValueError('ARCHITECTURE_TRANSPORT_PART_BUDGET_EXCEEDED')
+        name = _part_name(len(descriptors))
+        content = canonical(part)
+        raw = content.encode('utf-8')
+        if len(raw) > MAXIMUM_INDEX_BYTES:
+            raise ValueError('ARCHITECTURE_INDEX_BUDGET_EXCEEDED')
+        total += len(raw)
+        if total > MAXIMUM_TRANSPORT_BYTES:
+            raise ValueError('ARCHITECTURE_TRANSPORT_TOTAL_BUDGET_EXCEEDED')
+        outputs[name] = content
+        descriptors.append(dict(file=name, source_path=source, bytes=len(raw),
+            sha256=hashlib.sha256(raw).hexdigest(),
+            counts={family: len(part['observed'][family]) for family in FAMILIES}))
+
+    for source in sorted(groups):
+        def empty_part():
+            return dict(schema=PART_VERSION, source_input_digest=index['source_input_digest'],
+                        source_path=source, observed={family: [] for family in FAMILIES})
+        part = empty_part()
+        size = len(canonical(part).encode('utf-8'))
+        for family, pair, pair_size in groups[source]:
+            extra = pair_size + bool(part['observed'][family])
+            if size + extra > MAXIMUM_INDEX_BYTES:
+                if not any(part['observed'].values()):
+                    raise ValueError('ARCHITECTURE_INDEX_BUDGET_EXCEEDED')
+                emit(source, part)
+                part = empty_part()
+                size = len(canonical(part).encode('utf-8'))
+                extra = pair_size
+            if size + extra > MAXIMUM_INDEX_BYTES:
+                raise ValueError('ARCHITECTURE_INDEX_BUDGET_EXCEEDED')
+            part['observed'][family].append(pair)
+            size += extra
+        emit(source, part)
+    manifest = dict(schema=TRANSPORT_VERSION,
+        index={key: value for key, value in index.items() if key != 'observed'},
+        counts=counts, logical_sha256=hashlib.sha256(canonical(index).encode('utf-8')).hexdigest(),
+        parts=descriptors)
+    content = canonical(manifest)
+    size = len(content.encode('utf-8'))
+    if size > MAXIMUM_INDEX_BYTES:
+        raise ValueError('ARCHITECTURE_INDEX_BUDGET_EXCEEDED')
+    if total + size > MAXIMUM_TRANSPORT_BYTES:
+        raise ValueError('ARCHITECTURE_TRANSPORT_TOTAL_BUDGET_EXCEEDED')
+    outputs['critical-index.json'] = content
+    return outputs
+
+
+def _read_generated(directory, name, maximum_bytes=MAXIMUM_INDEX_BYTES):
+    """Fixed generated names only; never accept a manifest-provided locator."""
+    if name != 'critical-index.json' and not re.fullmatch(r'critical-facts-[0-9]{5}\.json', name):
+        raise ValueError('ARCHITECTURE_OUTPUT_PATH_ESCAPE')
+    if directory.resolve() != directory.absolute():
+        raise ValueError('ARCHITECTURE_OUTPUT_PATH_ESCAPE')
+    path = directory / name
+    if path.is_symlink() or path.resolve().parent != directory.resolve():
+        raise ValueError('ARCHITECTURE_OUTPUT_PATH_ESCAPE')
+    before = path.stat(follow_symlinks=False)
+    if not stat.S_ISREG(before.st_mode):
+        raise ValueError('ARCHITECTURE_OUTPUT_PATH_ESCAPE')
+    with path.open('rb') as stream:
+        opened = os.fstat(stream.fileno())
+        if not stat.S_ISREG(opened.st_mode) or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+            raise ValueError('ARCHITECTURE_OUTPUT_PATH_ESCAPE')
+        raw = stream.read(maximum_bytes + 1)
+    if len(raw) > maximum_bytes:
+        raise ValueError('ARCHITECTURE_INDEX_BUDGET_EXCEEDED')
+    return raw, json.loads(raw.decode('utf-8', errors='strict'))
+
+
+def _admit_manifest(raw, manifest):
+    """Shared bounded admission, without opening or trusting any fact part."""
+    if canonical(manifest).encode('utf-8') != raw:
+        raise ValueError('ARCHITECTURE_TRANSPORT_ENCODING_INVALID')
+    if (set(manifest) != {'schema', 'index', 'counts', 'logical_sha256', 'parts'}
+            or manifest['schema'] != TRANSPORT_VERSION
+            or manifest['index'].get('schema') != VERSION
+            or 'observed' in manifest['index']):
+        raise ValueError('ARCHITECTURE_TRANSPORT_MANIFEST_INVALID')
+    counts = _counts(manifest['counts'])
+    parts = manifest['parts']
+    if not isinstance(parts, list) or len(parts) > MAXIMUM_PARTS:
+        raise ValueError('ARCHITECTURE_TRANSPORT_PART_BUDGET_EXCEEDED')
+    total = len(raw)
+    totals = dict.fromkeys(FAMILIES, 0)
+    for ordinal, part in enumerate(parts):
+        if (set(part) != {'file', 'source_path', 'bytes', 'sha256', 'counts'}
+                or part['file'] != _part_name(ordinal)
+                or part['source_path'] not in manifest['index']['inputs']
+                or type(part['bytes']) is not int or not 0 < part['bytes'] <= MAXIMUM_INDEX_BYTES
+                or not re.fullmatch('[0-9a-f]{64}', part['sha256'])):
+            raise ValueError('ARCHITECTURE_TRANSPORT_DESCRIPTOR_INVALID')
+        for family, count in _counts(part['counts']).items():
+            totals[family] += count
+        total += part['bytes']
+    if total > MAXIMUM_TRANSPORT_BYTES:
+        raise ValueError('ARCHITECTURE_TRANSPORT_TOTAL_BUDGET_EXCEEDED')
+    if totals != counts:
+        raise ValueError('ARCHITECTURE_TRANSPORT_COUNTS_INVALID')
+    return counts, parts
+
+
+def read_generated_index(directory):
+    """Independent persisted-artifact validation for CLI/test consumers."""
+    raw, manifest = _read_generated(directory, 'critical-index.json')
+    counts, parts = _admit_manifest(raw, manifest)
+    # All aggregate admission checks precede part reads and restored-array allocation.
+    observed = {family: [None] * count for family, count in counts.items()}
+    for descriptor in parts:
+        part_raw, part = _read_generated(directory, descriptor['file'], descriptor['bytes'])
+        if len(part_raw) != descriptor['bytes'] or hashlib.sha256(part_raw).hexdigest() != descriptor['sha256']:
+            raise ValueError('ARCHITECTURE_TRANSPORT_PART_IDENTITY_INVALID')
+        if canonical(part).encode('utf-8') != part_raw:
+            raise ValueError('ARCHITECTURE_TRANSPORT_ENCODING_INVALID')
+        if (set(part) != {'schema', 'source_input_digest', 'source_path', 'observed'}
+                or part['schema'] != PART_VERSION
+                or part['source_input_digest'] != manifest['index']['source_input_digest']
+                or part['source_path'] != descriptor['source_path']
+                or set(part['observed']) != set(FAMILIES)):
+            raise ValueError('ARCHITECTURE_TRANSPORT_PART_IDENTITY_INVALID')
+        for family in FAMILIES:
+            pairs = part['observed'][family]
+            if not isinstance(pairs, list) or len(pairs) != descriptor['counts'][family]:
+                raise ValueError('ARCHITECTURE_TRANSPORT_COUNTS_INVALID')
+            for pair in pairs:
+                if (not isinstance(pair, list) or len(pair) != 2 or type(pair[0]) is not int
+                        or not 0 <= pair[0] < counts[family]
+                        or observed[family][pair[0]] is not None
+                        or _record_source(family, pair[1]) != part['source_path']):
+                    raise ValueError('ARCHITECTURE_TRANSPORT_ORDINAL_INVALID')
+                observed[family][pair[0]] = pair[1]
+    if any(record is None for rows in observed.values() for record in rows):
+        raise ValueError('ARCHITECTURE_TRANSPORT_ORDINAL_INVALID')
+    expected = {part['file'] for part in parts} | {'critical-index.json'}
+    for name in manifest['index']['allowed']['views']:
+        if not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', name):
+            raise ValueError('ARCHITECTURE_VIEW_NAME_INVALID')
+        expected.add(name + '.mmd')
+    for path in directory.iterdir():
+        if path.name not in expected:
+            raise ValueError('ARCHITECTURE_GENERATED_DRIFT')
+    index = dict(manifest['index'], observed=observed)
+    if hashlib.sha256(canonical(index).encode('utf-8')).hexdigest() != manifest['logical_sha256']:
+        raise ValueError('ARCHITECTURE_TRANSPORT_LOGICAL_IDENTITY_INVALID')
+    return index
 
 
 def source_path(root, relative):
@@ -206,11 +430,7 @@ def compile_index(root: Path):
 
 
 def render(index):
-    # This shared static transport retains every fact. Whitespace is not source
-    # coverage; explain and Mermaid remain readable without raising the budget.
-    outputs = {'critical-index.json': json.dumps(index, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n'}
-    if len(outputs['critical-index.json'].encode('utf-8')) > MAXIMUM_INDEX_BYTES:
-        raise ValueError('ARCHITECTURE_INDEX_BUDGET_EXCEEDED')
+    outputs = render_transport(index)
     for name, view in index['allowed']['views'].items():
         roots = set(view['roots'])
         edges = [e for e in index['observed']['edges'] if e['source'] in roots]
@@ -234,3 +454,64 @@ def check_outputs(directory, outputs):
     if directory.is_dir():
         stale.extend(path.name for path in directory.iterdir() if path.name not in outputs)
     return sorted(stale)
+
+
+def write_outputs(directory, outputs):
+    """Publish a checked flat set; only retire parts proven by the prior manifest.
+
+    Build is offline, not an atomic multi-file release. The manifest is written
+    last; interrupted/mixed sets fail both consumers. Unknown files are never
+    deleted or silently overwritten as cleanup, including abandoned temp files.
+    """
+    if directory.resolve() != directory.absolute():
+        raise ValueError('ARCHITECTURE_OUTPUT_PATH_ESCAPE')
+    # Fresh producer names authorize correction of known files after an
+    # interrupted build; their existing bytes are not acceptance evidence.
+    known = set(outputs)
+    old_parts = {}
+    if directory.exists() and (directory / 'critical-index.json').exists():
+        try:
+            raw, previous = _read_generated(directory, 'critical-index.json')
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            previous = {}
+        previous_index = {}
+        if isinstance(previous, dict) and previous.get('schema') == TRANSPORT_VERSION:
+            try:
+                _, parts = _admit_manifest(raw, previous)
+            except (ValueError, TypeError, KeyError, AttributeError):
+                # A malformed old manifest cannot authorize removal. The
+                # exact fresh outputs may still repair their own fixed names.
+                parts = []
+            else:
+                previous_index = previous['index']
+            old_parts = {part['file']: part for part in parts}
+        elif isinstance(previous, dict) and previous.get('schema') == VERSION:
+            # One-way build migration only. Runtime/build readers do not accept
+            # the retired single-file transport as a successful fallback.
+            previous_index = previous
+        views = previous_index.get('allowed', {}).get('views', {})
+        if any(not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', name) for name in views):
+            raise ValueError('ARCHITECTURE_VIEW_NAME_INVALID')
+        known.update({'critical-index.json', *old_parts, *(name + '.mmd' for name in views)})
+    if directory.exists():
+        for path in directory.iterdir():
+            if path.name not in known or path.is_symlink() or not path.is_file():
+                raise ValueError('ARCHITECTURE_GENERATED_UNOWNED_OUTPUT:' + path.name)
+    retired = set(old_parts) - set(outputs)
+    for name in sorted(retired):
+        if not (directory / name).exists():
+            continue  # An interrupted prior attempt already retired this part.
+        descriptor = old_parts[name]
+        raw, _ = _read_generated(directory, name, descriptor['bytes'])
+        if len(raw) != descriptor['bytes'] or hashlib.sha256(raw).hexdigest() != descriptor['sha256']:
+            raise ValueError('ARCHITECTURE_TRANSPORT_PART_IDENTITY_INVALID')
+    directory.mkdir(parents=True, exist_ok=True)
+    # Every output name is derived by this producer, not accepted from a source path.
+    for name in sorted(set(outputs) - {'critical-index.json'}):
+        (directory / name).write_text(outputs[name], encoding='utf-8', newline='\n')
+    for name in sorted(retired):
+        # A fixed, individually verified old part; never recursive/glob cleanup.
+        (directory / name).unlink(missing_ok=True)
+    # Retire before publishing so interruption preserves deletion authority in
+    # the old manifest; restart can finish rather than orphaning extra files.
+    (directory / 'critical-index.json').write_text(outputs['critical-index.json'], encoding='utf-8', newline='\n')

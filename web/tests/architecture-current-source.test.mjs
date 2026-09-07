@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync, writeFileSync, unlinkSync, rmdirSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync, unlinkSync, readdirSync, rmdirSync, symlinkSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -11,22 +12,158 @@ import { projectCurrentSource, readCurrentSourceIndex } from '../build/architect
 import { parseArchitectureManifest, buildArchitectureGraph } from '../app/_lib/architecture-explorer.ts';
 import { parseArchitectureEvidence, parseArchitectureCodeIndex, sourceFactsForClaim } from '../app/_lib/architecture-evidence.ts';
 
-const index = JSON.parse(readFileSync(new URL('../../architecture/generated/critical-index.json', import.meta.url), 'utf8'));
+let generatedIndex;
+const currentIndex = () => (generatedIndex ??= readCurrentSourceIndex(new URL('../../architecture/generated/critical-index.json', import.meta.url)));
+const families = ['symbols', 'edges', 'tests'];
+const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+const canonical = value => {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const keys = Object.keys(value).sort((a, b) => {
+      const left = Array.from(a, letter => letter.codePointAt(0));
+      const right = Array.from(b, letter => letter.codePointAt(0));
+      for (let i = 0; i < Math.min(left.length, right.length); i += 1) {
+        if (left[i] !== right[i]) return left[i] - right[i];
+      }
+      return left.length - right.length;
+    });
+    return `{${keys.map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+};
+const encoded = value => Buffer.from(`${canonical(value)}\n`);
 
-test('build reader bounds the actual bytes read, rejecting oversized and malformed sources', () => {
+function transportFixture() {
   const directory = mkdtempSync(join(tmpdir(), 'architecture-reader-'));
-  const path = join(directory, 'index.json');
+  const path = join(directory, 'critical-index.json');
+  const logical = { schema: 'critical-source-index-v1', source_input_digest: 'a'.repeat(64),
+    inputs: { 'alpha.py': '1'.repeat(64), 'beta.py': '2'.repeat(64) }, allowed: { views: {} },
+    observed: { symbols: [
+      { id: 'alpha.py::中文', path: 'alpha.py', name: '中文', extra: { '\uE000': 'BMP', '𐀀': 'non-BMP', 10: 'ten', 2: 'two' } },
+      { id: 'beta.py::second', path: 'beta.py', name: 'second' },
+      { id: 'alpha.py::中文', path: 'alpha.py', name: '中文', extra: { '\uE000': 'BMP', '𐀀': 'non-BMP', 10: 'ten', 2: 'two' } },
+    ], edges: [
+      { source: 'beta.py::second', kind: 'calls', target: 'alpha.py::中文' },
+      { source: 'alpha.py::中文', kind: 'calls', target: 'beta.py::second' },
+    ], tests: [{ id: 'alpha.py::test', path: 'alpha.py', name: 'test' }] } };
+  const { observed, ...index } = logical;
+  const manifest = { schema: 'critical-source-index-parts-v1', index,
+    counts: Object.fromEntries(families.map(family => [family, observed[family].length])),
+    logical_sha256: hash(encoded(logical)), parts: [] };
+  const parts = ['alpha.py', 'beta.py'].map((source, ordinal) => {
+    const part = { schema: 'critical-source-facts-v1', source_input_digest: logical.source_input_digest,
+      source_path: source, observed: Object.fromEntries(families.map(family => [family,
+        observed[family].map((record, position) => [position, record]).filter(([, record]) =>
+          (family === 'edges' ? record.source.split('::')[0] : record.path) === source)])) };
+    const bytes = encoded(part);
+    manifest.parts.push({ file: `critical-facts-${String(ordinal).padStart(5, '0')}.json`, source_path: source,
+      bytes: bytes.length, sha256: hash(bytes),
+      counts: Object.fromEntries(families.map(family => [family, part.observed[family].length])) });
+    writeFileSync(join(directory, manifest.parts[ordinal].file), bytes);
+    return part;
+  });
+  const writeManifest = () => writeFileSync(path, encoded(manifest));
+  const writePart = ordinal => {
+    const bytes = encoded(parts[ordinal]);
+    manifest.parts[ordinal].bytes = bytes.length;
+    manifest.parts[ordinal].sha256 = hash(bytes);
+    writeFileSync(join(directory, manifest.parts[ordinal].file), bytes);
+    writeManifest();
+  };
+  writeManifest();
+  return { directory, path, logical, manifest, parts, writeManifest, writePart,
+    cleanup: () => { for (const file of readdirSync(directory)) unlinkSync(join(directory, file)); rmdirSync(directory); } };
+}
+
+test('build reader restores exact array order, duplicate facts, raw Unicode and unchanged logical fields', () => {
+  const fixture = transportFixture();
   try {
-    writeFileSync(path, JSON.stringify(index));
-    assert.deepEqual(readCurrentSourceIndex(path), index);
-    writeFileSync(path, Buffer.alloc(2 * 1024 * 1024 + 1, 32));
-    assert.throws(() => readCurrentSourceIndex(path), /ARCHITECTURE_INDEX_BUDGET_EXCEEDED/);
-    writeFileSync(path, '{truncated');
-    assert.throws(() => readCurrentSourceIndex(path), SyntaxError);
-  } finally { unlinkSync(path); rmdirSync(directory); }
+    assert.deepEqual(readCurrentSourceIndex(fixture.path), fixture.logical);
+    assert.match(readFileSync(fixture.path, 'utf8'), /critical-source-index-parts-v1/);
+    const text = readFileSync(join(fixture.directory, fixture.manifest.parts[0].file), 'utf8');
+    assert.ok(text.includes('"10":"ten","2":"two","\uE000":"BMP","𐀀":"non-BMP"'));
+    fixture.parts[0].observed.symbols.reverse();
+    fixture.writePart(0);
+    assert.deepEqual(readCurrentSourceIndex(fixture.path), fixture.logical, 'part order is not logical array order');
+  } finally { fixture.cleanup(); }
+});
+
+test('build reader rejects malformed, noncanonical and lossy physical JSON', () => {
+  const fixture = transportFixture();
+  try {
+    for (const bytes of [Buffer.from('{truncated'), Buffer.from([0xff]),
+      Buffer.from('{"schema":"first","schema":"second"}\n'),
+      Buffer.from('{"value":9007199254740992}\n'), Buffer.from('{"value":1.5}\n'),
+      Buffer.from('{"value":-0}\n'), Buffer.from('{"value":"\\ud800"}\n'),
+      Buffer.from(`${'['.repeat(34)}0${']'.repeat(34)}\n`),
+      Buffer.from(JSON.stringify(fixture.manifest)), Buffer.from(`${canonical(fixture.manifest)}\r\n`),
+      encoded(fixture.logical)]) {
+      writeFileSync(fixture.path, bytes);
+      assert.throws(() => readCurrentSourceIndex(fixture.path));
+    }
+    writeFileSync(fixture.path, Buffer.alloc(2 * 1024 * 1024 + 1, 32));
+    assert.throws(() => readCurrentSourceIndex(fixture.path), /ARCHITECTURE_INDEX_BUDGET_EXCEEDED/);
+  } finally { fixture.cleanup(); }
+});
+
+test('descriptor byte, work and part budgets fail before missing parts are read', () => {
+  const cases = [
+    manifest => { manifest.parts[0].bytes = 2 * 1024 * 1024 + 1; },
+    manifest => { manifest.parts.forEach(part => { part.bytes = 2 * 1024 * 1024; }); },
+    manifest => { manifest.counts.symbols = 10241; },
+    manifest => { manifest.counts = { symbols: 6000, edges: 6000, tests: 0 }; },
+    manifest => { manifest.parts = Array(33).fill(manifest.parts[0]); },
+    manifest => { manifest.parts[0].bytes = Number.MAX_SAFE_INTEGER; },
+  ];
+  for (const mutate of cases) {
+    const fixture = transportFixture();
+    try {
+      for (const part of fixture.manifest.parts) unlinkSync(join(fixture.directory, part.file));
+      mutate(fixture.manifest); fixture.writeManifest();
+      assert.throws(() => readCurrentSourceIndex(fixture.path), /ARCHITECTURE_INDEX_BUDGET_EXCEEDED/);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test('complete source binding rejects missing, extra, mixed, corrupt and wrong-ordinal parts', () => {
+  const cases = [
+    fixture => { unlinkSync(join(fixture.directory, fixture.manifest.parts[0].file)); },
+    fixture => { writeFileSync(join(fixture.directory, 'critical-facts-00002.json'), '{}'); },
+    fixture => { fixture.manifest.parts[0].file = '../outside.json'; fixture.writeManifest(); },
+    fixture => { fixture.manifest.parts[0].source_path = 'absent.py'; fixture.writeManifest(); },
+    fixture => { fixture.manifest.parts[0].sha256 = 'f'.repeat(64); fixture.writeManifest(); },
+    fixture => { fixture.manifest.logical_sha256 = 'f'.repeat(64); fixture.writeManifest(); },
+    fixture => { fixture.parts[0].source_input_digest = 'b'.repeat(64); fixture.writePart(0); },
+    fixture => { fixture.parts[0].source_path = 'beta.py'; fixture.writePart(0); },
+    fixture => { fixture.parts[0].observed.symbols[0][1].path = 'beta.py'; fixture.writePart(0); },
+    fixture => { fixture.parts[0].observed.symbols[1][0] = 0; fixture.writePart(0); },
+    fixture => { fixture.parts[0].observed.symbols[1][0] = 3; fixture.writePart(0); },
+    fixture => { fixture.parts[0].observed.symbols[0][0] = 1; fixture.writePart(0); },
+    fixture => { fixture.parts[0].observed.symbols.pop(); fixture.writePart(0); },
+    fixture => { fixture.parts[0].observed.symbols[0][1].name = 'changed'; fixture.writePart(0); },
+    fixture => { const part = join(fixture.directory, fixture.manifest.parts[0].file); writeFileSync(part, readFileSync(part).subarray(0, 20)); },
+    fixture => { const part = join(fixture.directory, fixture.manifest.parts[0].file); writeFileSync(part, Buffer.alloc(fixture.manifest.parts[0].bytes + 1, 32)); },
+    fixture => { writeFileSync(join(fixture.directory, 'unexpected.json'), '{}'); },
+  ];
+  for (const mutate of cases) {
+    const fixture = transportFixture();
+    try { mutate(fixture); assert.throws(() => readCurrentSourceIndex(fixture.path)); }
+    finally { fixture.cleanup(); }
+  }
+});
+
+test('real generated-directory links cannot redirect the build reader outside its trusted root', () => {
+  const fixture = transportFixture();
+  const container = mkdtempSync(join(tmpdir(), 'architecture-link-'));
+  const link = join(container, 'generated');
+  try {
+    symlinkSync(fixture.directory, link, process.platform === 'win32' ? 'junction' : 'dir');
+    assert.throws(() => readCurrentSourceIndex(join(link, 'critical-index.json')), /ARCHITECTURE_INDEX_TRANSPORT_INVALID/);
+  } finally { unlinkSync(link); rmdirSync(container); fixture.cleanup(); }
 });
 
 test('actual symbol claims retain their exact source span, never the first file symbols', () => {
+  const index = currentIndex();
   const projection = projectCurrentSource(index);
   const code = parseArchitectureCodeIndex(projection.code);
   const evidence = parseArchitectureEvidence(projection.evidence);
@@ -84,6 +221,7 @@ test('rendered source rows separate keyboard selection from source navigation', 
 });
 
 test('actual generated source feeds the existing Explorer without runtime or permission claims', () => {
+  const index = currentIndex();
   const projection = projectCurrentSource(index);
   const manifest = parseArchitectureManifest(projection.manifest);
   assert.ok(manifest);
@@ -124,6 +262,7 @@ test('actual generated source feeds the existing Explorer without runtime or per
 });
 
 test('browser projection excludes raw SQL, native arguments and unselected operational data', () => {
+  const index = currentIndex();
   const shaped = structuredClone(index);
   shaped.runtime = { events: [{ secret: 'RUNTIME_SECRET_MUST_NOT_SHIP' }] };
   shaped.observed.edges.push({ kind: 'sql', source: shaped.observed.symbols[0].id, target: 'SELECT PRIVATE_SQL_MUST_NOT_SHIP' });
@@ -134,6 +273,7 @@ test('browser projection excludes raw SQL, native arguments and unselected opera
 });
 
 test('broken generated index cannot silently become an empty or declared-success Explorer', () => {
+  const index = currentIndex();
   assert.throws(() => projectCurrentSource({}), /ARCHITECTURE_CURRENT_SOURCE_INVALID/);
   const shaped = structuredClone(index);
   shaped.allowed.views['clock-transaction'].roots[0] = 'missing::symbol';

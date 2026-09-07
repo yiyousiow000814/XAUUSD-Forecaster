@@ -11,8 +11,9 @@ required for selected TS/TSX sources. With no Web installation, run
 package with an npm-ci projection of the existing lock, SRI verification and
 lifecycle scripts disabled; it does not install the Web application. A missing,
 malformed or mismatched tool fails, never omits TypeScript coverage.
-Obsolete generated files also fail check. Build preserves rather than silently
-deleting them; review and remove the retired generated view when renaming it.
+Obsolete or unknown generated files also fail check. Build removes only retired
+fact parts verified against the previous manifest; it never recursively cleans
+the directory. Review and remove a retired generated view when renaming it.
 
 The first slice uses the AST extraction approach from PR #321, adapted to current
 source rather than the obsolete classification branch. Its shared JSON and selected
@@ -68,10 +69,85 @@ or TOOL_INTEGRITY_FAILED; syntax failures remain ARCHITECTURE_PARSE_FAILED.
 The npm lock is acquisition integrity, not a signed provenance claim for a
 manually modified installation.
 
-The shared JSON uses canonical compact UTF-8 serialization without deleting
-fields. Both producer and browser reader enforce the unchanged 2MiB maximum.
-Mermaid and `explain` retain readable projections; generated whitespace is not
-source coverage.
+## Bounded source transport composition
+
+The logical interface remains `critical-source-index-v1`, including all fields,
+observed records, original array order and duplicate occurrences. The former
+**2 MiB total single-file index** could not carry independently growing selected
+sources: the unchanged-scope C input measured 2,098,781 compact bytes; A's retained
+recovery input measured 2,237,725 compact bytes. Their historical single-file
+render failures remain failures, not retroactive passes. This composition
+explicitly replaces that total-single-file restriction with finite aggregate
+admission; it does not claim the old total limit was met.
+
+| Bound | Producer and build-consumer contract |
+| --- | --- |
+| Any manifest or part | 2,097,152 physical UTF-8 bytes, unchanged per-file limit |
+| Manifest plus every referenced part | 3,145,728 bytes total |
+| Fact parts | At most 32 |
+| Complete symbols + edges + tests | At most 10,240 records |
+| JSON structure | At most 32 nesting levels; Unicode scalar strings and safe integer numbers only |
+| Public Explorer manifest | Existing 300,000-byte bound, unchanged |
+
+The aggregate envelope is based on the measured A input's 7,848 records and 27
+source groups, C's 59-record / 16,515-byte increment over its base, and one
+largest existing source group's 1,926 records / 575,077 compact bytes. The
+record envelope rounds 9,833 up to the next 1,024; 32 parts accommodates the 27
+current groups plus bounded splitting/growth. Three MiB covers those bytes and
+measured carrier overhead, not an arbitrary number of new modules. Actual A
+transport is 2,302,433 bytes in 27 parts (largest 588,422), including the 15,109-byte
+manifest. These are retained-input codec measurements, not runtime/Cloudflare
+performance evidence. Growth beyond any bound fails without dropping facts or
+automatically increasing limits.
+
+`critical-index.json` is now a `critical-source-index-parts-v1` manifest. Its
+`index` retains every original field except `observed`; `counts` binds each
+observed family, and `logical_sha256` binds the complete reconstructed logical
+object. Ordered `parts` descriptors contain only `file`, `source_path`, exact
+`bytes`, `sha256` and per-family `counts`. Filenames are producer-derived
+`critical-facts-00000.json` ordinals, not arbitrary source paths or URLs.
+
+Each `critical-source-facts-v1` part contains `source_input_digest`,
+`source_path` and `observed`. Every family entry is `[global_ordinal, record]`;
+the record is unchanged. Source grouping and complete-record splitting never
+sort or deduplicate the reconstructed arrays. A split source retains the same
+input identity in each part. Packing accounts for each serialized record once,
+not repeated full-prefix serialization. An indivisible oversized record fails.
+
+Canonical encoding is compact UTF-8, Unicode-code-point-sorted object keys,
+original array order and one final LF. Integer-looking and non-BMP keys follow
+this order, not JavaScript object iteration or UTF-16 sorting. Floats, unsafe
+integers, unpaired surrogates, malformed UTF-8 and noncanonical physical JSON
+are rejected. `.gitattributes` pins generated JSON to LF so a Windows checkout
+cannot silently change content-addressed bytes. Readers do not normalize an
+incorrect artifact into an apparent match.
+
+The existing build reader admits descriptor/count/total budgets before reading
+parts or allocating the restored arrays. Each read uses one verified owned file
+descriptor and a declared-byte-plus-one limit. Missing, extra, mixed, reordered,
+duplicate-ordinal, truncated, corrupted or escaped parts fail; a partial union
+is never returned. Source paths label facts and cannot choose filesystem roots.
+The logical digest and exact ordinal coverage are checked before projection.
+There is no legacy-file runtime fallback or unverified-part cache.
+
+The CLI can migrate the prior single-file artifact during `build` only. Fresh
+producer-derived filenames authorize repair of torn or mixed expected outputs;
+their old bytes never count as acceptance. Only a valid previous manifest and
+each retired part's verified bytes/hash authorize deletion of an old-only part.
+Unknown files are rejected and preserved. A malformed old manifest cannot grant
+extra cleanup authority. Parts are written, verified old-only parts retired,
+then the final manifest published. Interruption before publication preserves
+the previous deletion authority, so the next build can finish. This offline
+build is not an atomic multi-file publication; partial sets cannot pass the
+reader/check gate. Both Python and Node reject a redirected generated directory
+or leaf, including a junction to another directory inside the checkout.
+Mermaid and `explain` still use the complete in-memory logical index.
+
+The Node adapter reconstructs the unchanged logical interface **at build time**.
+The existing `projectCurrentSource` and manifest/code/evidence virtual modules
+remain the only public projection. Visitors do not fetch these raw source
+parts; this does not introduce an API, runtime fan-out, storage service, registry
+or new authority. Raw SQL/native strings remain outside the public projection.
 
 This is DECLARED_CRITICAL_SLICES_ONLY, not the finished whole-system index or
 transaction proof. The staged lifecycle remains the recovery evidence authority.
