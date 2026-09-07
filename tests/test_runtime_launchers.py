@@ -127,6 +127,8 @@ def test_control_center_owner_boundaries_keep_authority_out_of_presentation() ->
     assert "Complete-ReleasePromotion" not in runtime
     assert "function Write-ReleaseEvidenceUtf8Atomic" in persistence
     assert "function Write-ReleaseEvidenceUtf8Atomic" not in evidence_nodes
+    assert "function ConvertTo-ReleaseEvidenceNativePath" in persistence
+    assert "function ConvertTo-ReleaseEvidenceNativePath" not in evidence_nodes
     for non_owner in (presentation, providers):
         assert "Set-Content" not in non_owner
         assert "[System.IO.File]::WriteAllText" not in non_owner
@@ -7424,20 +7426,20 @@ def test_migration_contract_reads_the_exact_candidate_not_stable_checkout(
             "MIGRATION_RECEIPT_CANDIDATE_MISMATCH",
         ),
         (
-            "$saved=Get-Content $coordinatedMigrationReceiptPath -Raw|"
+            "$saved=Get-Content -LiteralPath $coordinatedMigrationReceiptPath -Raw|"
             "ConvertFrom-ReleaseControlJson;"
             "$saved.expires_at=[DateTimeOffset]::UtcNow.AddMinutes(-1).ToString('o');"
             "$core=[ordered]@{schema_version=$saved.schema_version;checked_at=$saved.checked_at;"
             "expires_at=$saved.expires_at;evidence=$saved.evidence};"
             "$saved.receipt_digest=Get-CoordinatedMigrationReceiptDigest $core;"
-            "$saved|ConvertTo-Json -Depth 12|Set-Content $coordinatedMigrationReceiptPath",
+            "$saved|ConvertTo-Json -Depth 12|Set-Content -LiteralPath $coordinatedMigrationReceiptPath",
             "MIGRATION_RECEIPT_STALE",
         ),
         (
-            "$saved=Get-Content $coordinatedMigrationReceiptPath -Raw|"
+            "$saved=Get-Content -LiteralPath $coordinatedMigrationReceiptPath -Raw|"
             "ConvertFrom-ReleaseControlJson;"
             "$saved.evidence.database_name='tampered';"
-            "$saved|ConvertTo-Json -Depth 12|Set-Content $coordinatedMigrationReceiptPath",
+            "$saved|ConvertTo-Json -Depth 12|Set-Content -LiteralPath $coordinatedMigrationReceiptPath",
             "MIGRATION_RECEIPT_TAMPERED",
         ),
     ),
@@ -9636,7 +9638,7 @@ def test_unobservable_protected_host_enters_access_review_without_losing_gates(
         ),
         ("$protectedDashboardUrl='https://other-protected.example'", "ACCESS_PROTECTED_HOST_INVALID"),
         (
-            "$saved=Get-Content $accessBoundaryReceiptPath -Raw|ConvertFrom-ReleaseControlJson;"
+            "$saved=Get-Content -LiteralPath $accessBoundaryReceiptPath -Raw|ConvertFrom-ReleaseControlJson;"
             "$saved.accepted_at=[DateTimeOffset]::UtcNow.AddHours(-3).ToString('o');"
             "$saved.expires_at=([DateTimeOffset]$saved.accepted_at).AddHours(2).ToString('o');"
             "$core=[ordered]@{schema_version=$saved.schema_version;accepted_at=$saved.accepted_at;"
@@ -9644,24 +9646,24 @@ def test_unobservable_protected_host_enters_access_review_without_losing_gates(
             "validation_key=$saved.validation_key;candidate=$saved.candidate;stable=$saved.stable;"
             "access_boundary=$saved.access_boundary;checklist=$saved.checklist};"
             "$saved.receipt_digest=Get-AccessBoundaryReceiptDigest $core;"
-            "$saved|ConvertTo-Json -Depth 12|Set-Content $accessBoundaryReceiptPath",
+            "$saved|ConvertTo-Json -Depth 12|Set-Content -LiteralPath $accessBoundaryReceiptPath",
             "ACCESS_RECEIPT_STALE",
         ),
         (
-            "$saved=Get-Content $accessBoundaryReceiptPath -Raw|ConvertFrom-ReleaseControlJson;"
+            "$saved=Get-Content -LiteralPath $accessBoundaryReceiptPath -Raw|ConvertFrom-ReleaseControlJson;"
             "$saved.accepted_by='tampered';"
-            "$saved|ConvertTo-Json -Depth 12|Set-Content $accessBoundaryReceiptPath",
+            "$saved|ConvertTo-Json -Depth 12|Set-Content -LiteralPath $accessBoundaryReceiptPath",
             "ACCESS_RECEIPT_TAMPERED",
         ),
         (
-            "$saved=Get-Content $accessBoundaryReceiptPath -Raw|ConvertFrom-ReleaseControlJson;"
+            "$saved=Get-Content -LiteralPath $accessBoundaryReceiptPath -Raw|ConvertFrom-ReleaseControlJson;"
             "$saved.checklist.PSObject.Properties.Remove('reauthentication_succeeds');"
             "$core=[ordered]@{schema_version=$saved.schema_version;accepted_at=$saved.accepted_at;"
             "expires_at=$saved.expires_at;accepted_by=$saved.accepted_by;"
             "validation_key=$saved.validation_key;candidate=$saved.candidate;stable=$saved.stable;"
             "access_boundary=$saved.access_boundary;checklist=$saved.checklist};"
             "$saved.receipt_digest=Get-AccessBoundaryReceiptDigest $core;"
-            "$saved|ConvertTo-Json -Depth 12|Set-Content $accessBoundaryReceiptPath",
+            "$saved|ConvertTo-Json -Depth 12|Set-Content -LiteralPath $accessBoundaryReceiptPath",
             "ACCESS_RECEIPT_CHECKLIST_INCOMPLETE:reauthentication_succeeds",
         ),
     ),

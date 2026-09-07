@@ -1718,8 +1718,8 @@ function Register-AccessProviderInspection {
         $receipt | Add-Member -NotePropertyName access_failure_count `
             -NotePropertyValue $core.access_failure_count
     }
-    New-Item -ItemType Directory -Path $accessProviderInspectionRoot -Force | Out-Null
-    $path = Join-Path $accessProviderInspectionRoot "$($receipt.receipt_digest).json"
+    $path = ConvertTo-ReleaseEvidenceNativePath -Path (
+        Join-Path $accessProviderInspectionRoot "$($receipt.receipt_digest).json")
     if (-not (Test-Path -LiteralPath $path)) {
         Write-ControlCenterJsonAtomic -Path $path -Value $receipt `
             -Depth 12 -Immutable

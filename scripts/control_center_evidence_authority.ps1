@@ -631,7 +631,7 @@ function Get-CoordinatedMigrationReceiptCore {
 function Get-CoordinatedMigrationRootReceiptPath {
     param([Parameter(Mandatory = $true)][string]$Digest)
     if ($Digest -notmatch '^[0-9a-f]{64}$') { throw "MIGRATION_RECEIPT_TAMPERED" }
-    return Join-Path $coordinatedMigrationRootReceiptRoot "$Digest.json"
+    return ConvertTo-ReleaseEvidenceNativePath -Path (Join-Path $coordinatedMigrationRootReceiptRoot "$Digest.json")
 }
 
 function New-CoordinatedMigrationReceipt {
@@ -660,8 +660,6 @@ function Write-CoordinatedMigrationRootReceipt {
             (Get-CoordinatedMigrationReceiptDigest -Core $core)) {
         throw "MIGRATION_RECEIPT_TAMPERED"
     }
-    New-Item -ItemType Directory -Path $coordinatedMigrationRootReceiptRoot -Force |
-        Out-Null
     $rootPath = Get-CoordinatedMigrationRootReceiptPath `
         -Digest ([string]$Receipt.receipt_digest)
     if (Test-Path -LiteralPath $rootPath) {
@@ -900,7 +898,7 @@ function Get-CoordinatedMigrationRenewalReceiptPath {
     if ($Digest -notmatch '^[0-9a-f]{64}$') {
         throw "MIGRATION_QUALIFICATION_RENEWAL_TAMPERED"
     }
-    return Join-Path $coordinatedMigrationRenewalReceiptRoot "$Digest.json"
+    return ConvertTo-ReleaseEvidenceNativePath -Path (Join-Path $coordinatedMigrationRenewalReceiptRoot "$Digest.json")
 }
 
 function Write-CoordinatedMigrationRenewalReceipt {
@@ -912,8 +910,6 @@ function Write-CoordinatedMigrationRenewalReceipt {
     }
     $path = Get-CoordinatedMigrationRenewalReceiptPath `
         -Digest ([string]$Receipt.receipt_digest)
-    New-Item -ItemType Directory -Path $coordinatedMigrationRenewalReceiptRoot -Force |
-        Out-Null
     if (Test-Path -LiteralPath $path) {
         $existing = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
@@ -1013,10 +1009,10 @@ function Get-LatestCoordinatedMigrationRenewalReceipt {
         [Parameter(Mandatory = $true)][string[]]$MigrationFiles,
         [Parameter(Mandatory = $true)][string]$RootDigest
     )
-    if (-not (Test-Path -LiteralPath $coordinatedMigrationRenewalReceiptRoot)) {
+    if (-not (Test-Path -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $coordinatedMigrationRenewalReceiptRoot))) {
         return $null
     }
-    $files = @(Get-ChildItem -LiteralPath $coordinatedMigrationRenewalReceiptRoot `
+    $files = @(Get-ChildItem -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $coordinatedMigrationRenewalReceiptRoot) `
         -File -Filter "*.json")
     if ($files.Count -gt $coordinatedMigrationRenewalStoreMaximumReceipts) {
         throw "MIGRATION_QUALIFICATION_RENEWAL_STORE_BOUND_EXCEEDED"
@@ -1028,7 +1024,7 @@ function Get-LatestCoordinatedMigrationRenewalReceipt {
             throw "MIGRATION_QUALIFICATION_RENEWAL_TAMPERED"
         }
         try {
-            $receipt = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
+            $receipt = Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $file.FullName) -Raw -Encoding UTF8 |
                 ConvertFrom-ReleaseControlJson
         } catch { throw "MIGRATION_QUALIFICATION_RENEWAL_TAMPERED" }
         $core = Get-CoordinatedMigrationRenewalCore -Receipt $receipt
@@ -3928,13 +3924,13 @@ function Assert-AccessProviderInspectionReceipt {
 }
 
 function Get-LatestAccessProviderInspectionReceipt {
-    if (-not (Test-Path -LiteralPath $accessProviderInspectionRoot)) {
+    if (-not (Test-Path -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $accessProviderInspectionRoot))) {
         throw "ACCESS_PROVIDER_INSPECTION_UNAVAILABLE"
     }
     $valid = @()
-    foreach ($file in @(Get-ChildItem -LiteralPath $accessProviderInspectionRoot -Filter '*.json' -File)) {
+    foreach ($file in @(Get-ChildItem -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $accessProviderInspectionRoot) -Filter '*.json' -File)) {
         try {
-            $receipt = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
+            $receipt = Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $file.FullName) -Raw -Encoding UTF8 |
                 ConvertFrom-ReleaseControlJson
             $valid += Assert-AccessProviderInspectionReceipt -Receipt $receipt
         } catch {}
@@ -4020,7 +4016,7 @@ function Get-AccessBoundaryReceiptPath {
     param([Parameter(Mandatory = $true)][string]$ValidationKey)
     $keyDigest = Get-Sha256BytesHex -Bytes `
         ([System.Text.Encoding]::UTF8.GetBytes($ValidationKey))
-    return Join-Path $accessBoundaryReceiptRoot "$keyDigest.json"
+    return ConvertTo-ReleaseEvidenceNativePath -Path (Join-Path $accessBoundaryReceiptRoot "$keyDigest.json")
 }
 
 function New-AccessBoundaryAcceptanceReceipt {
@@ -4070,7 +4066,6 @@ function New-AccessBoundaryAcceptanceReceipt {
 function Write-AccessBoundaryAcceptanceReceipt {
     param([Parameter(Mandatory = $true)][object]$Receipt)
     $path = Get-AccessBoundaryReceiptPath -ValidationKey ([string]$Receipt.validation_key)
-    New-Item -ItemType Directory -Path $accessBoundaryReceiptRoot -Force | Out-Null
     if (Test-Path -LiteralPath $path) {
         $existing = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
@@ -4220,13 +4215,13 @@ function Assert-HistoricalAccessBoundaryReceipt {
 }
 
 function Get-LatestHistoricalAccessBoundaryReceipt {
-    if (-not (Test-Path -LiteralPath $accessBoundaryReceiptRoot)) {
+    if (-not (Test-Path -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $accessBoundaryReceiptRoot))) {
         throw "ACCESS_HISTORICAL_RECEIPT_MISSING"
     }
     $valid = @()
-    foreach ($file in @(Get-ChildItem -LiteralPath $accessBoundaryReceiptRoot -Filter '*.json' -File)) {
+    foreach ($file in @(Get-ChildItem -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $accessBoundaryReceiptRoot) -Filter '*.json' -File)) {
         try {
-            $receipt = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
+            $receipt = Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $file.FullName) -Raw -Encoding UTF8 |
                 ConvertFrom-ReleaseControlJson
             $valid += Assert-HistoricalAccessBoundaryReceipt -Receipt $receipt
         } catch {}
@@ -4269,7 +4264,7 @@ function Get-AccessQualificationReuseReceiptDigest {
 function Get-AccessQualificationReuseReceiptPath {
     param([Parameter(Mandatory = $true)][string]$ValidationKey)
     $digest = Get-Sha256BytesHex -Bytes ([Text.Encoding]::UTF8.GetBytes($ValidationKey))
-    return Join-Path $accessQualificationReuseReceiptRoot "$digest.json"
+    return ConvertTo-ReleaseEvidenceNativePath -Path (Join-Path $accessQualificationReuseReceiptRoot "$digest.json")
 }
 
 function New-AccessQualificationReuseReceipt {
@@ -4322,7 +4317,6 @@ function New-AccessQualificationReuseReceipt {
 function Write-AccessQualificationReuseReceipt {
     param([Parameter(Mandatory = $true)][object]$Receipt)
     $path = Get-AccessQualificationReuseReceiptPath -ValidationKey $Receipt.validation_key
-    New-Item -ItemType Directory -Path $accessQualificationReuseReceiptRoot -Force | Out-Null
     if (Test-Path -LiteralPath $path) {
         $existing = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
@@ -4410,13 +4404,13 @@ function Get-AccessProviderInspectionReceiptByDigest {
 function Get-HistoricalAccessBoundaryReceiptByDigest {
     param([Parameter(Mandatory = $true)][string]$Digest)
     if ($Digest -notmatch '^[0-9a-f]{64}$' -or
-        -not (Test-Path -LiteralPath $accessBoundaryReceiptRoot)) {
+        -not (Test-Path -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $accessBoundaryReceiptRoot))) {
         throw "ACCESS_HISTORICAL_RECEIPT_MISSING"
     }
-    foreach ($file in @(Get-ChildItem -LiteralPath $accessBoundaryReceiptRoot `
+    foreach ($file in @(Get-ChildItem -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $accessBoundaryReceiptRoot) `
             -Filter '*.json' -File)) {
         try {
-            $receipt = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
+            $receipt = Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $file.FullName) -Raw -Encoding UTF8 |
                 ConvertFrom-ReleaseControlJson
             if ([string]$receipt.receipt_digest -ceq $Digest) {
                 return Assert-HistoricalAccessBoundaryReceipt -Receipt $receipt
@@ -4437,7 +4431,7 @@ function Get-AccessQualificationRenewalReceiptPath {
     if ($Digest -notmatch '^[0-9a-f]{64}$') {
         throw "ACCESS_QUALIFICATION_RENEWAL_TAMPERED"
     }
-    return Join-Path $accessQualificationRenewalReceiptRoot "$Digest.json"
+    return ConvertTo-ReleaseEvidenceNativePath -Path (Join-Path $accessQualificationRenewalReceiptRoot "$Digest.json")
 }
 
 function Get-AccessQualificationRenewalCore {
@@ -4488,8 +4482,6 @@ function New-HistoricalAccessMachineCandidate {
 function Write-AccessQualificationRenewalReceipt {
     param([Parameter(Mandatory = $true)][object]$Receipt)
     $path = Get-AccessQualificationRenewalReceiptPath -Digest $Receipt.receipt_digest
-    New-Item -ItemType Directory -Path $accessQualificationRenewalReceiptRoot -Force |
-        Out-Null
     if (Test-Path -LiteralPath $path) {
         $existing = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
@@ -4577,12 +4569,12 @@ function Assert-AccessQualificationRenewalReceipt {
         $previousProviderDigest = [string]$previous.provider_inspection_receipt_digest
         $previousAccessKey = [string]$previous.access_qualification_key
     } else {
-        $reuseFiles = @(Get-ChildItem -LiteralPath $accessQualificationReuseReceiptRoot `
+        $reuseFiles = @(Get-ChildItem -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $accessQualificationReuseReceiptRoot) `
             -Filter '*.json' -File -ErrorAction SilentlyContinue)
         $previousRaw = $null
         foreach ($file in $reuseFiles) {
             try {
-                $candidateReceipt = Get-Content -LiteralPath $file.FullName -Raw `
+                $candidateReceipt = Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $file.FullName) -Raw `
                     -Encoding UTF8 | ConvertFrom-ReleaseControlJson
                 if ([string]$candidateReceipt.receipt_digest -ceq
                         [string]$receipt.previous_machine_receipt_digest) {
@@ -4637,10 +4629,10 @@ function Assert-AccessQualificationRenewalReceipt {
 
 function Get-LatestHistoricalAccessMachineAuthority {
     $valid = @()
-    foreach ($file in @(Get-ChildItem -LiteralPath $accessQualificationRenewalReceiptRoot `
+    foreach ($file in @(Get-ChildItem -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $accessQualificationRenewalReceiptRoot) `
             -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
         try {
-            $raw = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
+            $raw = Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $file.FullName) -Raw -Encoding UTF8 |
                 ConvertFrom-ReleaseControlJson
             $historicalCandidate = New-HistoricalAccessMachineCandidate -Receipt $raw
             $receipt = Assert-AccessQualificationRenewalReceipt `
@@ -4653,10 +4645,10 @@ function Get-LatestHistoricalAccessMachineAuthority {
             }
         } catch { throw }
     }
-    foreach ($file in @(Get-ChildItem -LiteralPath $accessQualificationReuseReceiptRoot `
+    foreach ($file in @(Get-ChildItem -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $accessQualificationReuseReceiptRoot) `
             -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
         try {
-            $raw = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
+            $raw = Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $file.FullName) -Raw -Encoding UTF8 |
                 ConvertFrom-ReleaseControlJson
             $historicalCandidate = New-HistoricalAccessMachineCandidate -Receipt $raw
             $receipt = Assert-AccessQualificationReuseReceipt `

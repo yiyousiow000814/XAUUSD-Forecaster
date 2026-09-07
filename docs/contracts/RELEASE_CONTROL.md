@@ -642,6 +642,13 @@ replace that origin or erase the derived URL. All isolated requests remain
 subject to exact declared origin/method/path matching and owned loopback
 forwarding; deriving an identity grants no additional network authority.
 
+Control JSON and receipt publication share one UTF-8 atomic persistence owner.
+Mutable replacement and create-new publication expose complete documents;
+immutable collisions preserve the accepted bytes. Digest-named receipts must
+remain readable and discoverable beyond Win32 MAX_PATH, using native I/O path
+representations without changing stored root identities, receipt names or
+content digests. Reader path handling is part of the same contract as writing.
+
 **Verify Migration** does not stop Dashboard Sync. It binds the receipt to the
 CURRENT generation and its activation watermark, then independently revalidates
 the live CURRENT, schema, ledger, Stable/Candidate reads, and Reverse projection.

@@ -181,8 +181,18 @@ nodes=$waterfall.node_count;waterfall_elapsed=$waterfall.elapsed_ms}}|ConvertTo-
 
 
 @pytest.mark.parametrize("shell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize(
+    ("factory", "root_variable", "argument", "identity"),
+    [
+        ("Get-CoordinatedMigrationRootReceiptPath", "coordinatedMigrationRootReceiptRoot", "Digest", "a" * 64),
+        ("Get-CoordinatedMigrationRenewalReceiptPath", "coordinatedMigrationRenewalReceiptRoot", "Digest", "a" * 64),
+        ("Get-AccessBoundaryReceiptPath", "accessBoundaryReceiptRoot", "ValidationKey", "worker:git"),
+        ("Get-AccessQualificationReuseReceiptPath", "accessQualificationReuseReceiptRoot", "ValidationKey", "worker:git"),
+        ("Get-AccessQualificationRenewalReceiptPath", "accessQualificationRenewalReceiptRoot", "Digest", "a" * 64),
+    ],
+)
 def test_evidence_store_supports_long_authoritative_runtime_root(
-    tmp_path: Path, shell: str,
+    tmp_path: Path, shell: str, factory: str, root_variable: str, argument: str, identity: str,
 ) -> None:
     evidence_root = (
         tmp_path
@@ -190,11 +200,25 @@ def test_evidence_store_supports_long_authoritative_runtime_root(
         / ".local"
         / "forward"
         / "release-evidence"
+        / ("retained-authority-" + "x" * 48)
     )
     output = _run_module(
         tmp_path,
         shell,
         f"""
+{_control_function("Get-Sha256BytesHex")}
+{_control_function(factory)}
+${root_variable}={_ps_literal(evidence_root)}
+$jsonPath={factory} -{argument} {_ps_literal(identity)}
+$mutablePath=ConvertTo-ReleaseEvidenceNativePath -Path (Join-Path {_ps_literal(evidence_root)} (('b'*64)+'.json'))
+Write-ControlCenterJsonAtomic -Path $jsonPath -Value @{{value='retained'}} -Immutable
+$collision=$false
+try {{Write-ControlCenterJsonAtomic -Path $jsonPath -Value @{{value='wrong'}} -Immutable}}
+catch {{$collision=$true}}
+$immutable=Get-Content -LiteralPath $jsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
+Write-ControlCenterJsonAtomic -Path $mutablePath -Value @{{value='old'}}
+Write-ControlCenterJsonAtomic -Path $mutablePath -Value @{{value='new'}}
+$mutable=Get-Content -LiteralPath $mutablePath -Raw -Encoding UTF8 | ConvertFrom-Json
 $source=[ordered]@{{validation_key='worker:git';worker_version_id='worker';git_sha='git'}}
 $receipt=Write-ReleaseEvidenceNodeReceipt -Root {_ps_literal(evidence_root)} `
  -ContractPath {_ps_literal(CONTRACT)} -ValidationKey 'worker:git' `
@@ -202,11 +226,15 @@ $receipt=Write-ReleaseEvidenceNodeReceipt -Root {_ps_literal(evidence_root)} `
  -SourceIdentity $source -StartedAt '2026-09-01T00:00:00Z' `
  -CompletedAt '2026-09-01T00:00:01Z' -ExecutionMode 'FRESH' -WhyRan 'DISCOVERED'
 $waterfall=Get-ReleaseEvidenceWaterfall -Root {_ps_literal(evidence_root)} -ValidationKey 'worker:git'
-[ordered]@{{valid=(Test-ReleaseEvidenceNodeReceipt $receipt);nodes=$waterfall.node_count}}|
+[ordered]@{{valid=(Test-ReleaseEvidenceNodeReceipt $receipt);nodes=$waterfall.node_count;
+ path_length=$jsonPath.Length;collision=$collision;immutable=$immutable.value;mutable=$mutable.value}}|
  ConvertTo-Json -Compress
 """,
     )
-    assert json.loads(output) == {"valid": True, "nodes": 1}
+    result = json.loads(output)
+    assert result.pop("path_length") > 260
+    assert result == {"valid": True, "nodes": 1, "collision": True,
+                      "immutable": "retained", "mutable": "new"}
 
 
 def test_receipt_digest_and_dependency_validation_fail_closed(tmp_path: Path) -> None:

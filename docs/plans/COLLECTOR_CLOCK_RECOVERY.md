@@ -344,3 +344,50 @@ Extend the existing actual-PowerShell version URL family across normal and
 loopback transport, PS5.1/PS7, valid and invalid metadata. Execute the connected
 installed entry point and real built Candidate status route afterward. Never
 patch Candidate.browser_url in persisted state or relax the request allowlist.
+
+
+## Shared atomic persistence on long runtime roots
+
+Installed 0d4b364c reached migration receipt publication after the prior gates,
+but Write-ControlCenterJsonAtomic failed at Move-Item for the digest-named
+receipt. Its separate cmdlet implementation does not share the native-path
+support already used by Write-ReleaseEvidenceUtf8Atomic.
+
+Compose JSON serialization with the existing UTF-8 persistence owner. Move the
+native-path converter into that owner and publish CreateNew through a completed
+temporary file plus atomic no-overwrite move. Mutable replacement continues to
+use File.Replace; first publication uses File.Move. Reuse the short temporary
+leaf and existing bounded serializer. No new storage root, receipt schema,
+lock, state or authority is introduced; existing callers retain their immutable
+or mutable mode. Do not change global Windows path policy or relocate evidence.
+
+Actors include migration/qualification receipt writers, release/runtime state,
+watchdog state, immutable evidence-node writers and their readers. Before
+publication readers see the previous complete document or absence; after it,
+they see the complete new document. Immutable collision retains original bytes.
+Timeout/crash leaves at most an unreferenced temporary file, never a partial
+final receipt. Existing serialized lifecycle ownership and caller containment
+remain authoritative. Cleanup targets only the unique temporary/backup files
+of the current call; historical evidence remains untouched.
+
+Old/new readers use unchanged UTF-8 JSON and paths. No migration, service
+switch, provider permission or recovery ownership changes; reverse uses the
+same persisted records. Native converter and writer must load from the same
+persistence module so standalone consumers do not gain a hidden import.
+
+Extend the existing long-root evidence family for actual PS5.1/PS7 JSON create,
+mutable replacement, immutable collision and complete reader round trip. Keep
+existing evidence immutability/renewal and installation/state tests. Execute the
+installed migration receipt writer and subsequent reader in the full fixture.
+This consolidates two implementations of the same atomicity invariant rather
+than introducing a new persistence mechanism. Independent review is required.
+
+
+The extended regression also reproduced reader failure in PS5.1 after native
+publication succeeded. Migration root/renewal and Access boundary/reuse/renewal
+path constructors now return the existing native I/O representation; receipt
+enumerators normalize their file reads the same way. Provider-inspection receipt
+publication/retrieval follows this sibling rule. Existing receipt bytes, path
+names, root identity and acceptance checks remain unchanged. Ten long-path
+create/read/replace/collision cases pass across the five locator families and
+both PowerShell runtimes; broader consumer gates remain required.

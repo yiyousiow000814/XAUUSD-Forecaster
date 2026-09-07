@@ -4,6 +4,18 @@
 $releaseHistoryEventSchema = "release-history-event-v2"
 $releaseHistoryMaximumEventBytes = 65536
 
+function ConvertTo-ReleaseEvidenceNativePath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if ($env:OS -ne "Windows_NT" -or $fullPath.StartsWith("\\?\")) {
+        return $fullPath
+    }
+    if ($fullPath.StartsWith("\\")) {
+        return "\\?\UNC\$($fullPath.Substring(2))"
+    }
+    return "\\?\$fullPath"
+}
+
 function Write-ControlCenterJsonAtomic {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -11,26 +23,8 @@ function Write-ControlCenterJsonAtomic {
         [ValidateRange(2, 32)][int]$Depth = 12,
         [switch]$Immutable
     )
-    $directory = Split-Path -Parent $Path
-    New-Item -ItemType Directory -Path $directory -Force | Out-Null
-    # Keep the temporary leaf short: receipt paths already contain a 64-byte
-    # digest and Windows PowerShell 5.1 still encounters legacy path limits.
-    $temporary = Join-Path $directory (
-        ".cc-{0}.tmp" -f [guid]::NewGuid().ToString("N")
-    )
-    try {
-        $json = $Value | ConvertTo-Json -Depth $Depth
-        [System.IO.File]::WriteAllText(
-            $temporary, $json, [System.Text.UTF8Encoding]::new($false)
-        )
-        if ($Immutable) {
-            Move-Item -LiteralPath $temporary -Destination $Path -ErrorAction Stop
-        } else {
-            Move-Item -LiteralPath $temporary -Destination $Path -Force -ErrorAction Stop
-        }
-    } finally {
-        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
-    }
+    $json = $Value | ConvertTo-Json -Depth $Depth
+    Write-ReleaseEvidenceUtf8Atomic -Path $Path -Content $json -CreateNew:$Immutable
 }
 
 function Write-ReleaseEvidenceUtf8Atomic {
@@ -39,28 +33,18 @@ function Write-ReleaseEvidenceUtf8Atomic {
         [Parameter(Mandatory = $true)][string]$Content,
         [switch]$CreateNew
     )
-    $directory = Split-Path -Parent $Path
-    $nativeDirectory = ConvertTo-ReleaseEvidenceNativePath -Path $directory
     $nativePath = ConvertTo-ReleaseEvidenceNativePath -Path $Path
+    $nativeDirectory = [System.IO.Path]::GetDirectoryName($nativePath)
     [System.IO.Directory]::CreateDirectory($nativeDirectory) | Out-Null
     $encoding = New-Object System.Text.UTF8Encoding($false)
-    if ($CreateNew) {
-        $stream = [System.IO.File]::Open(
-            $nativePath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write,
-            [System.IO.FileShare]::Read)
-        try {
-            $writer = [System.IO.StreamWriter]::new($stream, $encoding)
-            try { $writer.Write($Content) } finally { $writer.Dispose() }
-        } finally { $stream.Dispose() }
-        return
-    }
-    $temporary = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
-    $nativeTemporary = ConvertTo-ReleaseEvidenceNativePath -Path $temporary
-    $backup = "$Path.$([guid]::NewGuid().ToString('N')).bak"
-    $nativeBackup = ConvertTo-ReleaseEvidenceNativePath -Path $backup
-    [System.IO.File]::WriteAllText($nativeTemporary, $Content, $encoding)
+    $nativeTemporary = [System.IO.Path]::Combine(
+        $nativeDirectory, (".cc-{0}.tmp" -f [guid]::NewGuid().ToString("N")))
+    $nativeBackup = "$nativePath.$([guid]::NewGuid().ToString('N')).bak"
     try {
-        if ([System.IO.File]::Exists($nativePath)) {
+        [System.IO.File]::WriteAllText($nativeTemporary, $Content, $encoding)
+        if ($CreateNew) {
+            [System.IO.File]::Move($nativeTemporary, $nativePath)
+        } elseif ([System.IO.File]::Exists($nativePath)) {
             [System.IO.File]::Replace($nativeTemporary, $nativePath, $nativeBackup)
         } else {
             [System.IO.File]::Move($nativeTemporary, $nativePath)

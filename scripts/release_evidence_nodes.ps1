@@ -31,18 +31,6 @@ function Get-ReleaseEvidenceSha256 {
     } finally { $sha.Dispose() }
 }
 
-function ConvertTo-ReleaseEvidenceNativePath {
-    param([Parameter(Mandatory = $true)][string]$Path)
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
-    if ($env:OS -ne "Windows_NT" -or $fullPath.StartsWith("\\?\")) {
-        return $fullPath
-    }
-    if ($fullPath.StartsWith("\\")) {
-        return "\\?\UNC\$($fullPath.Substring(2))"
-    }
-    return "\\?\$fullPath"
-}
-
 function Get-ReleaseEvidenceContract {
     param([Parameter(Mandatory = $true)][string]$ContractPath)
     if (-not (Test-Path -LiteralPath $ContractPath)) {
