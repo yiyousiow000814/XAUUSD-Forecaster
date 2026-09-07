@@ -1025,6 +1025,100 @@ def test_aggregate_corroboration_cannot_override_raw_and_contradiction_fails_clo
     )
 
 
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+def test_cpu_version_metadata_uses_exact_provider_adapter_and_fails_closed(
+    tmp_path, monkeypatch, powershell: str,
+) -> None:
+    version = "11111111-1111-4111-8111-111111111111"
+    revision = "a" * 40
+    message = f"release:{revision} branch:main artifact_kind:PRODUCTION_CANDIDATE"
+    raw = {
+        "id": version, "number": 979,
+        "metadata": {"created_on": "2026-08-20T04:08:20Z", "source": "wrangler", "has_preview": True},
+        "annotations": {"workers/message": message, "workers/triggered_by": "version_upload"},
+        "resources": {
+            "script": {"etag": "exact-etag", "handlers": ["fetch"]},
+            "script_runtime": {"compatibility_date": "2026-08-07",
+                "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+                "assets": {"serve_directly": True}},
+            "bindings": [
+                {"name": "VECTOR", "type": "vectorize", "index_name": "index-exact"},
+                {"name": "DB", "type": "d1", "database_id": "database-exact"},
+                {"name": "CACHE", "type": "kv_namespace", "namespace_id": "namespace-exact"},
+            ],
+        },
+    }
+    cases = []
+    for name in ("valid", "wrong-version", "wrong-git", "missing-etag", "malformed", "null", "transport"):
+        response = json.loads(json.dumps(raw))
+        if name == "wrong-version":
+            response["id"] = "22222222-2222-4222-8222-222222222222"
+        elif name == "wrong-git":
+            response["annotations"]["workers/message"] = f"release:{'b' * 40} branch:main"
+        elif name == "missing-etag":
+            del response["resources"]["script"]["etag"]
+        elif name == "malformed":
+            response = {"unexpected_provider_envelope": raw}
+        elif name == "null":
+            response = None
+        cases.append({"name": name, "response": response})
+    encoded = base64.b64encode(json.dumps(cases).encode("utf-8")).decode("ascii")
+    # Reuse the real facade loader; only its outer test process gets a finite,
+    # hidden launch. Provider response replacement happens after real loading.
+    run = subprocess.run
+    def hidden_bounded_run(*args, **kwargs):
+        kwargs.setdefault("timeout", 22)
+        kwargs["creationflags"] = kwargs.get("creationflags", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        return run(*args, **kwargs)
+    monkeypatch.setattr(subprocess, "run", hidden_bounded_run)
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:rawReads=0;$script:nativeReads=0;"
+        "function Invoke-Utf8NativeProcess{$script:nativeReads++;throw 'UNDECLARED_NATIVE_FALLBACK'};"
+        "function Invoke-WranglerJson{param([string[]]$Arguments);"
+        "$script:rawReads++;"
+        f"if(($Arguments -join '|') -cne 'versions|view|{version}|--name|aurum-signal-room')"
+        "{throw 'WRONG_EXACT_VERSION_REQUEST'};"
+        "$owners=@((Get-PSCallStack).FunctionName);"
+        "if('Get-CloudflareVersionDetails' -notin $owners -or "
+        "'Get-WorkerVersionQualificationMetadata' -notin $owners){throw 'PROVIDER_OWNER_BYPASSED'};"
+        "if($script:rawCase.name -ceq 'transport'){throw 'CLOUDFLARE_WRANGLER_COMMAND_FAILED'};"
+        "return $script:rawCase.response};"
+        "if(Test-Path -LiteralPath (Join-Path $repositoryRoot 'web\\node_modules'))"
+        "{throw 'TEST_MUST_NOT_DEPEND_ON_INSTALLED_WRANGLER'};"
+        f"$candidate=[pscustomobject]@{{worker_version_id='{version}';git_sha='{revision}'}};"
+        f"$cases=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'))|ConvertFrom-ReleaseControlJson;"
+        "$observed=@();foreach($case in $cases){$script:rawCase=$case;$value=$null;$reason=$null;"
+        "try{$value=Get-WorkerVersionQualificationMetadata -Candidate $candidate}"
+        "catch{$reason=$_.Exception.Message};"
+        "$observed += [pscustomobject]@{name=$case.name;value=$value;reason=$reason}};"
+        "[pscustomobject]@{observed=$observed;raw_reads=$script:rawReads;native_reads=$script:nativeReads}"
+        "|ConvertTo-Json -Depth 20 -Compress",
+        powershell=powershell,
+    )
+    observed = json.loads(result)
+    assert observed["raw_reads"] == len(cases)
+    assert observed["native_reads"] == 0
+    assert observed["observed"][0] == {
+        "name": "valid", "reason": None, "value": {
+            "worker_version_id": version, "executable_bundle_etag": "exact-etag",
+            "compatibility_date": "2026-08-07",
+            "compatibility_flags": ["global_fetch_strictly_public", "nodejs_compat"],
+            "assets": {"serve_directly": True},
+            "bindings": [
+                {"name": "CACHE", "type": "kv_namespace", "resource": ""},
+                {"name": "DB", "type": "d1", "resource": "database-exact"},
+                {"name": "VECTOR", "type": "vectorize", "resource": "index-exact"},
+            ],
+            "provenance_message": message,
+        },
+    }
+    for item in observed["observed"][1:]:
+        assert item["value"] is None
+        assert item["reason"] == ("CLOUDFLARE_WRANGLER_COMMAND_FAILED"
+            if item["name"] == "transport" else "WORKER_CPU_VERSION_METADATA_MISMATCH"), item
+
+
 def test_control_plane_only_git_and_provenance_etag_change_reuse_cpu_behavior_key(
     tmp_path,
 ) -> None:

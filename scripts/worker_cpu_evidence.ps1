@@ -1064,14 +1064,8 @@ function Get-WorkerCpuGitTreeDigest {
 
 function Get-WorkerVersionQualificationMetadata {
     param([Parameter(Mandatory = $true)][object]$Candidate)
-    $wrangler = Join-Path $repositoryRoot "web\node_modules\.bin\wrangler.cmd"
-    if (-not (Test-Path -LiteralPath $wrangler)) { throw "WORKER_CPU_WRANGLER_UNAVAILABLE" }
-    $result = Invoke-Utf8NativeProcess -FilePath $wrangler -Arguments @(
-        "versions", "view", [string]$Candidate.worker_version_id,
-        "--name", $workerName, "--json"
-    ) -WorkingDirectory (Join-Path $repositoryRoot "web")
-    if ($result.exit_code -ne 0 -or -not $result.stdout) { throw "WORKER_CPU_VERSION_METADATA_UNAVAILABLE" }
-    $version = [string]$result.stdout | ConvertFrom-ReleaseControlJson
+    $version = Get-CloudflareVersionDetails `
+        -VersionId ([string]$Candidate.worker_version_id)
     $message = [string]$version.annotations.'workers/message'
     if ([string]$version.id -ne [string]$Candidate.worker_version_id -or
         $message -notmatch ("release:{0}(?:\s|$)" -f [regex]::Escape([string]$Candidate.git_sha)) -or
