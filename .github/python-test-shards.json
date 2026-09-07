@@ -89,6 +89,7 @@
       "tests": [
         "tests/test_news_scheduler.py",
         "tests/test_dashboard_sync.py",
+        "tests/test_dashboard_resource_contracts.py",
         "tests/test_storylines.py",
         "tests/test_source_polling.py",
         "tests/test_assistant_capacity.py",
