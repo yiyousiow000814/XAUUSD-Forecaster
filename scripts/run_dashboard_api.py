@@ -1144,10 +1144,16 @@ def _news_evidence_page(cursor: str | None, limit: int) -> dict:
     page_items: list[dict] = []
     for row in items[offset:offset + limit]:
         candidate = [*page_items, row]
+        candidate_offset = offset + len(candidate)
+        candidate_has_more = candidate_offset < len(items)
         candidate_payload = {
             "snapshot_id": snapshot_id,
             "items": candidate,
             "total": len(items),
+            "has_more": candidate_has_more,
+            "next_cursor": (
+                f"{snapshot_id}:{candidate_offset}" if candidate_has_more else None
+            ),
         }
         encoded = json.dumps(
             candidate_payload, ensure_ascii=False, allow_nan=False,
