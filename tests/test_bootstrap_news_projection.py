@@ -59,31 +59,48 @@ def test_rejects_non_version_or_preview_origins(value: str) -> None:
         MODULE._version_origin(value)
 
 
+@pytest.mark.parametrize("corruption", [None, "active_generation_id", "receipt_digest", "index_count", "verified_complete", "malformed"])
 def test_bootstrap_keeps_partial_replay_then_requires_verified_current(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, corruption,
 ) -> None:
     states = [
         {"contract_version": MODULE.NEWS_MIRROR_CONTRACT_VERSION,
          "projection_state": "REPLAYING"},
         {"contract_version": MODULE.NEWS_MIRROR_CONTRACT_VERSION,
-         "projection_state": "CURRENT"},
+         "projection_state": "CURRENT", "generation_id": "a" * 64,
+         "snapshot_id": "b" * 64, "source_digest": "c" * 64,
+         "expected_receipt_digest": "d" * 64,
+         "expected_index_count": 12, "expected_detail_count": 12},
     ]
     monkeypatch.setattr(MODULE, "_sync_news", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(MODULE, "_read_news_sync_state", lambda _path: states.pop(0))
-    monkeypatch.setattr(MODULE, "_get_json", lambda *_args, **_kwargs: {
+    health = {
         "status": "OK", "projection_state": "CURRENT", "verified_complete": True,
         "active_generation_id": "a" * 64, "snapshot_id": "b" * 64,
         "index_count": 12, "detail_count": 12,
         "source_digest": "c" * 64, "receipt_digest": "d" * 64,
         "missing_detail_count": 0, "invariant_violation_count": 0,
-    })
-    result = MODULE.bootstrap(
+    }
+    if corruption == "malformed":
+        health = []
+    elif corruption:
+        health[corruption] = {
+            "active_generation_id": "e" * 64, "receipt_digest": "f" * 64,
+            "index_count": 12.0, "verified_complete": 1,
+        }[corruption]
+    monkeypatch.setattr(MODULE, "_get_json", lambda *_args, **_kwargs: health)
+    arguments = dict(
         base_config={"local_status_url": "http://127.0.0.1:8765/api/status"},
         origin="https://abc12345-aurum-signal-room.example.workers.dev",
         token="secret", state_file=tmp_path / "state.json",
         max_cycles=2, retry_seconds=0,
         state_root=tmp_path,
     )
+    if corruption:
+        with pytest.raises(MODULE.PayloadContractError, match="final health"):
+            MODULE.bootstrap(**arguments)
+        return
+    result = MODULE.bootstrap(**arguments)
     assert result["status"] == "PASSED"
     assert result["cycles"] == 2
     assert result["missing_detail_count"] == 0
@@ -98,7 +115,10 @@ def test_bootstrap_reuses_one_frozen_generation_without_stable_api(
         {"contract_version": MODULE.NEWS_MIRROR_CONTRACT_VERSION,
          "projection_state": "REPLAYING"},
         {"contract_version": MODULE.NEWS_MIRROR_CONTRACT_VERSION,
-         "projection_state": "CURRENT"},
+         "projection_state": "CURRENT", "generation_id": "a" * 64,
+         "snapshot_id": "b" * 64, "source_digest": "c" * 64,
+         "expected_receipt_digest": "d" * 64,
+         "expected_index_count": 12, "expected_detail_count": 12},
     ]
     monkeypatch.setattr(
         MODULE, "_sync_news",

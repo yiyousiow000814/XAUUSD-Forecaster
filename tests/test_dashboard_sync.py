@@ -926,14 +926,21 @@ def test_news_projection_health_verifies_exact_generation_receipt(monkeypatch) -
     assert requested == ["https://worker.example/api/news-index?health_check=1"]
 
 
-def test_news_projection_health_reports_exact_contradictions(monkeypatch) -> None:
+@pytest.mark.parametrize("field,value", (
+    ("receipt_digest", "0" * 64),
+    ("verified_complete", 1),
+    ("index_count", 2.0),
+    ("missing_detail_count", False),
+))
+def test_news_projection_health_reports_exact_contradictions(monkeypatch, field, value) -> None:
     module = _sync_module()
     monkeypatch.setattr(module, "_get_json", lambda *_a, **_k: {
         "status": "OK", "projection_state": "CURRENT", "verified_complete": True,
         "active_generation_id": "a" * 64, "snapshot_id": "b" * 64,
-        "source_digest": "c" * 64, "receipt_digest": "0" * 64,
+        "source_digest": "c" * 64, "receipt_digest": "d" * 64,
         "index_count": 2, "detail_count": 2,
         "missing_detail_count": 0, "invariant_violation_count": 0,
+        field: value,
     })
     manifest = {
         "generation_id": "a" * 64, "snapshot_id": "b" * 64,
@@ -948,9 +955,7 @@ def test_news_projection_health_reports_exact_contradictions(monkeypatch) -> Non
 
     assert module.sync_error_code(captured.value) == "NEWS_PROJECTION_HEALTH_MISMATCH"
     assert captured.value.evidence["violation_count"] == 1
-    assert captured.value.evidence["contradictions"]["receipt_digest"] == {
-        "expected": "d" * 64, "received": "0" * 64,
-    }
+    assert captured.value.evidence["contradictions"][field]["received"] == value
 
 
 
@@ -1641,6 +1646,32 @@ def _projection_local_get(generation, url: str) -> dict:
     return {"items": [], "offset": offset, "next_offset": offset}
 
 
+def _projection_provider_ack(generation, offsets, payload, *, active=False):
+    from xauusd_forecaster.news_projection import receipt_digest
+    accepted = {}
+    for kind in ("detail", "index"):
+        count = 0
+        accepted[kind] = []
+        for batch in getattr(generation, f"{kind}_batches"):
+            count += len(batch)
+            if count <= offsets[kind]:
+                accepted[kind].append(batch)
+    digest = receipt_digest(accepted["detail"], accepted["index"])
+    identity = generation.manifest["generation_id"]
+    action = payload["action"]
+    if action == "prepare":
+        return {"status": "OK", "active": active, "generation_id": identity,
+                "next_detail_offset": offsets["detail"], "next_index_offset": offsets["index"],
+                "receipt_digest": digest}
+    if action in {"stage_details", "stage_index"}:
+        return {"status": "OK", "received": len(payload["items"]), "receipt_digest": digest}
+    if action == "activate":
+        return {"status": "OK", "activated": identity,
+                "index_count": generation.manifest["expected_index_count"],
+                "detail_count": generation.manifest["expected_detail_count"]}
+    return {"status": "OK", "generation_id": identity}
+
+
 def test_news_generation_stages_all_details_before_index_and_activation(
     monkeypatch, tmp_path,
 ) -> None:
@@ -1654,16 +1685,12 @@ def test_news_generation_stages_all_details_before_index_and_activation(
         payload = json.loads(body)
         posted.append((url, payload))
         if payload["action"] == "prepare":
-            return {"status": "OK", "active": False,
-                    "next_detail_offset": offsets["detail"],
-                    "next_index_offset": offsets["index"]}
+            return _projection_provider_ack(generation, offsets, payload)
         if payload["action"] == "stage_details":
             offsets["detail"] += len(payload["items"])
-            return {"status": "OK", "received": len(payload["items"])}
         if payload["action"] == "stage_index":
             offsets["index"] += len(payload["items"])
-            return {"status": "OK", "received": len(payload["items"])}
-        return {"status": "OK"}
+        return _projection_provider_ack(generation, offsets, payload)
 
     manifest = generation.manifest
     monkeypatch.setattr(module, "_get_local_json", lambda url: _projection_local_get(generation, url))
@@ -1708,8 +1735,7 @@ def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_pat
         posted.append(action)
         if action == "stage_details":
             raise TimeoutError("detail upload timed out")
-        return {"status": "OK", "active": False, "next_detail_offset": 0,
-                "next_index_offset": 0}
+        return _projection_provider_ack(generation, {"detail": 0, "index": 0}, {"action": action})
 
     monkeypatch.setattr(module, "_post_json", fail_detail)
     config = {
@@ -2782,22 +2808,20 @@ def test_news_generation_resumes_remote_offsets_and_bounds_each_cycle(
         action = payload["action"]
         actions.append(action)
         if action == "prepare":
-            return {"status": "OK", "active": active,
-                    "next_detail_offset": offsets["detail"],
-                    "next_index_offset": offsets["index"]}
+            return _projection_provider_ack(generation, offsets, payload, active=active)
         if action == "stage_details":
             assert payload["offset"] == offsets["detail"]
             offsets["detail"] += len(payload["items"])
-            return {"status": "OK", "received": len(payload["items"])}
+            return _projection_provider_ack(generation, offsets, payload)
         if action == "stage_index":
             assert offsets["detail"] == 25
             assert payload["offset"] == offsets["index"]
             offsets["index"] += len(payload["items"])
-            return {"status": "OK", "received": len(payload["items"])}
+            return _projection_provider_ack(generation, offsets, payload)
         if action == "activate":
             assert offsets == {"detail": 25, "index": 25}
             active = True
-        return {"status": "OK"}
+        return _projection_provider_ack(generation, offsets, payload)
 
     monkeypatch.setattr(module, "_post_json", post)
     monkeypatch.setattr(module, "_get_json", lambda *_a, **_k: {
@@ -2823,7 +2847,18 @@ def test_news_generation_resumes_remote_offsets_and_bounds_each_cycle(
     assert actions == ["prepare"] + ["stage_details"] * 4
     first_state = json.loads(Path(config["news_state_file"]).read_text(encoding="utf-8"))
     assert first_state["projection_state"] == "REPLAYING"
+    assert first_state["target_binding"] == {
+        "index_url": "https://remote/api/news-index",
+        "detail_url": "https://remote/api/news-content",
+        "contract_version": module.NEWS_MIRROR_CONTRACT_VERSION,
+    }
     actions.clear()
+    with pytest.raises(module.PayloadContractError, match="target changed"):
+        module._sync_news({}, {
+            **config, "remote_ingest_url": "https://other/api/ingest",
+        }, **sync_options)
+    assert actions == []
+    assert json.loads(Path(config["news_state_file"]).read_text(encoding="utf-8")) == first_state
     module._sync_news({}, config, **sync_options)
     assert actions == ["prepare"] + ["stage_index"] * 4
     actions.clear()
@@ -2834,6 +2869,57 @@ def test_news_generation_resumes_remote_offsets_and_bounds_each_cycle(
     actions.clear()
     module._sync_news({}, config, **sync_options)
     assert actions == ["prepare"]
+
+
+@pytest.mark.parametrize("action,field,value", (
+    ("prepare", "generation_id", "wrong"),
+    ("prepare", "active", "false"),
+    ("prepare", "next_detail_offset", True),
+    ("prepare", "next_index_offset", 1),
+    ("prepare", "receipt_digest", None),
+    ("stage_details", "received", "1"),
+    ("stage_details", "receipt_digest", "0" * 64),
+    ("stage_details", "status", "ERROR"),
+    ("stage_index", "received", True),
+    ("stage_index", "receipt_digest", None),
+    ("activate", "activated", "wrong"),
+    ("activate", "index_count", "1"),
+    ("verify", "generation_id", "wrong"),
+    ("verify", None, None),
+))
+def test_news_generation_invalid_success_ack_never_advances_checkpoint(
+    monkeypatch, tmp_path, action, field, value,
+):
+    module = _sync_module()
+    generation = _projection_fixture(1)
+    offsets = {"detail": 0, "index": 0}
+    state_path = tmp_path / "news-state.json"
+    prior = json.dumps({"projection_state": "REPLAYING", "generation_id": generation.manifest["generation_id"]})
+    state_path.write_text(prior, encoding="utf-8")
+    calls = []
+
+    def post(_url, body, _config):
+        payload = json.loads(body)
+        calls.append(payload["action"])
+        for kind, stage in (("detail", "stage_details"), ("index", "stage_index")):
+            if payload["action"] == stage:
+                offsets[kind] += len(payload["items"])
+        result = _projection_provider_ack(generation, offsets, payload)
+        if payload["action"] == action:
+            if field is None:
+                return []
+            result[field] = value
+        return result
+
+    monkeypatch.setattr(module, "_post_json", post)
+    monkeypatch.setattr(module, "_get_json", lambda *_: pytest.fail("invalid ACK proceeded to health"))
+    with pytest.raises(module.PayloadContractError):
+        module._sync_news({}, {
+            "remote_ingest_url": "https://remote/api/ingest", "token": "test",
+            "news_state_file": str(state_path), module.RUNTIME_STATE_ROOT_KEY: str(tmp_path),
+        }, frozen_generation=generation)
+    assert calls[-1] == action
+    assert state_path.read_text(encoding="utf-8") == prior
 
 
 def test_news_generation_rejects_manifest_drift_without_abandoning(

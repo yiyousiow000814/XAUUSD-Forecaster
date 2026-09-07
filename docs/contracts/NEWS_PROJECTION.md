@@ -67,8 +67,12 @@
 
 ## Bounds and retention
 
-- A generation contains at most 10,000 index rows and 10,000 detail rows.
-  Withdrawal identities are counted within the same 10,000-source-row bound.
+- A generation contains at most 10,000 index rows and 10,000 detail rows, plus
+  at most 10,000 unique withdrawal identities. Raw source processing is not
+  materialized D1 membership: withdrawals contribute to the exact source digest
+  and manifest count, not a second set of staged rows. Source capture has its
+  independent byte, metadata and per-step work bounds below. This does not
+  increase Worker batch limits or establish D1 storage/Free-plan acceptance.
 - One detail batch contains at most eight items and 400,000 serialized bytes.
   One index batch contains at most four items and 100,000 serialized bytes; its
   Worker envelope is capped at 120,000 bytes.
@@ -126,13 +130,30 @@
   non-retryable `NEWS_SOURCE_CAPTURE_STORAGE_UNRESOLVED`. The caller must stop
   automatic retries and repair the storage condition. An in-memory refusal is
   not claimed as a durable retry receipt when the storage itself is unwritable.
-- Capture never overwrites the published schema-1 generation artifact. A
-  complete capture over the existing combined 10,000-source-row bound remains
-  explicitly non-admitted. `SOURCE_COMPLETE` alone cannot be passed to Sync,
+- Capture never overwrites the published schema-1 generation artifact.
+  `SOURCE_COMPLETE` alone cannot be passed to Sync,
   remote prepare, qualification or CURRENT; global ordering, exact source and
   receipt digests, batch plans and applicable capacity gates are separate
   obligations. Original detail payload key order and its existing detail hash
   remain unchanged; recursive sorting applies only to the source digest.
+- The existing owner may expose a retained replay view only after validating
+  the complete plan, original/derived identity, distinct detail keys, equal
+  index/detail counts, unique withdrawal capacity, exact manifest and receipt
+  chain, and the caller's finite total batch budget. Old diagnostic admission
+  labels remain historical facts, not current policy decisions. This read-only
+  conversion never changes the v4 generation identity or invents an ACK. API and
+  Sync share the same direct batch accessor; an ordinary inspection reader still
+  has no replay manifest. Actual D1 peak storage, retained generations, cleanup,
+  resource failure and final release gates remain separate prerequisites.
+- Bootstrap pins an admitted retained view in the existing schema-1 generation
+  envelope before replay. The envelope binds the exact version origin and
+  projection contract; its payload binds the original capture identity, plan
+  input digest, complete manifest and finite work budget. The capture location
+  is derived as a fixed sibling, not accepted as an arbitrary stored path.
+  Reopening revalidates the retained plan and the current caller's budget;
+  a previous larger budget does not authorize a smaller caller to exceed it.
+  Missing or contradictory pinned input requires explicit recovery, never a
+  fallback to a newer source. Older materialized envelopes remain readable.
 - Canonical planning verifies each retained part once, sorts only bounded
   detail-key/byte-offset metadata, and streams the original globally ordered
   detail then index batches. It reads exact records through at most eight file
@@ -190,6 +211,15 @@
   evidence in the same transaction that makes the generation CURRENT.
 - A retry resumes the remote detail and index offsets and preserves the prior
   `CURRENT` generation. It MUST NOT restart an accepted stage blindly.
+- HTTP success alone cannot advance Sync state. Prepare requires exact
+  generation identity and typed progress; every staged ACK must match the
+  actual item count and cumulative canonical receipt. Activation and final
+  health require exact identity, counts, digests and booleans without coercion.
+  A malformed or contradictory response preserves the prior local checkpoint;
+  the next bounded attempt reconciles the remote accepted prefix. Local state
+  binds both target routes and the projection contract. A mismatched target
+  requires explicit recovery; older unbound state obtains fresh remote facts
+  before establishing that binding.
 - Building the frozen local source universe runs outside the HTTP request path.
   Before the first source exists, manifest reads return `REPLAYING` with a retry
   interval. Later refreshes keep returning the frozen source that backs

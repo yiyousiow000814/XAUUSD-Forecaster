@@ -82,6 +82,8 @@ from xauusd_forecaster.news_projection import (
     NEWS_INDEX_BATCH_LIMIT_BYTES,
     NEWS_MIRROR_CONTRACT_VERSION,
     NewsProjectionGeneration,
+    NewsProjectionRetainedGeneration,
+    receipt_payload_hash,
     NEWS_INDEX_BATCH_ITEMS as NEWS_WRITE_BATCH_ITEMS,
     bounded_batches as _projection_bounded_batches,
     sha256_json as _projection_json_hash,
@@ -1333,6 +1335,8 @@ def _verify_news_projection_state(
     news_index_url: str, config: dict, manifest: dict,
 ) -> dict:
     payload = _get_json(news_index_url + "?health_check=1", config)
+    if not isinstance(payload, dict):
+        raise PayloadContractError("remote news health acknowledgment malformed")
     expected = {
         "status": "OK",
         "projection_state": "CURRENT",
@@ -1348,7 +1352,8 @@ def _verify_news_projection_state(
     }
     contradictions = {
         key: {"expected": value, "received": payload.get(key)}
-        for key, value in expected.items() if payload.get(key) != value
+        for key, value in expected.items()
+        if type(payload.get(key)) is not type(value) or payload.get(key) != value
     }
     if contradictions:
         raise RemoteInvariantViolation({
@@ -1359,26 +1364,34 @@ def _verify_news_projection_state(
 
 
 def _frozen_news_projection_batch(
-    generation: NewsProjectionGeneration, *, kind: str, offset: int,
+    generation: NewsProjectionGeneration | NewsProjectionRetainedGeneration,
+    *, kind: str, offset: int,
 ) -> list[dict]:
-    batches = (
-        generation.detail_batches if kind == "detail"
-        else generation.index_batches if kind == "index"
-        else None
-    )
-    if batches is None or offset < 0:
-        raise PayloadContractError("frozen news generation batch request is invalid")
-    next_offset = 0
-    for batch in batches:
-        if next_offset == offset:
-            return list(batch)
-        next_offset += len(batch)
-    raise PayloadContractError("frozen news generation offset is not contiguous")
+    try:
+        return generation.batch_items(kind, offset)
+    except ValueError as error:
+        raise PayloadContractError(str(error)) from error
+
+
+def _require_news_ack(result: object, expected: dict, *, action: str) -> dict:
+    """HTTP success is not acceptance; never coerce missing or mistyped facts."""
+    if not isinstance(result, dict) or any(
+        type(result.get(key)) is not type(value) or result.get(key) != value
+        for key, value in {"status": "OK", **expected}.items()
+    ):
+        raise PayloadContractError(f"remote news {action} acknowledgment mismatched")
+    return result
+
+
+def _news_stage_receipt(previous: str, kind: str, offset: int, items: list) -> str:
+    return hashlib.sha256(
+        f"{previous}\n{kind}|{offset}|{len(items)}|{receipt_payload_hash(items)}".encode()
+    ).hexdigest()
 
 
 def _sync_news(
     _local_payload: dict, config: dict, *,
-    frozen_generation: NewsProjectionGeneration | None = None,
+    frozen_generation: NewsProjectionGeneration | NewsProjectionRetainedGeneration | None = None,
 ) -> None:
     """Advance one immutable generation without exposing partial replacement."""
     state_path = Path(config["news_state_file"])
@@ -1391,8 +1404,19 @@ def _sync_news(
     news_url = config.get("remote_news_ingest_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-content"
     )
+    target_binding = {
+        "index_url": news_index_url, "detail_url": news_url,
+        "contract_version": NEWS_MIRROR_CONTRACT_VERSION,
+    }
+    if state.get("target_binding") is not None and state["target_binding"] != target_binding:
+        raise PayloadContractError("pinned news target changed; explicit recovery is required")
 
     if frozen_generation is not None:
+        if isinstance(frozen_generation, NewsProjectionRetainedGeneration):
+            frozen_generation.require_target(
+                index_url=news_index_url, detail_url=news_url,
+                contract_version=NEWS_MIRROR_CONTRACT_VERSION,
+            )
         manifest = frozen_generation.manifest
     elif config.get("local_status_url"):
         manifest_page = _get_local_json(_local_news_archive_url(
@@ -1424,9 +1448,27 @@ def _sync_news(
     # still-active Stable mirror while a Candidate bootstrap is replaying).
     # Preserve a foreign staging generation and let the caller retry after the
     # owning producer advances it. Abandonment requires explicit recovery.
-    prepare = _post_json(news_index_url, prepare_payload, config)
-    detail_offset = int(prepare.get("next_detail_offset", 0))
-    index_offset = int(prepare.get("next_index_offset", 0))
+    prepare = _require_news_ack(
+        _post_json(news_index_url, prepare_payload, config),
+        {"generation_id": generation_id}, action="prepare",
+    )
+    detail_offset = prepare.get("next_detail_offset")
+    index_offset = prepare.get("next_index_offset")
+    if (type(prepare.get("active")) is not bool
+            or type(detail_offset) is not int or type(index_offset) is not int
+            or not 0 <= detail_offset <= manifest["expected_detail_count"]
+            or not 0 <= index_offset <= manifest["expected_index_count"]
+            or index_offset > 0 and detail_offset != manifest["expected_detail_count"]
+            or prepare["active"] and (
+                detail_offset != manifest["expected_detail_count"]
+                or index_offset != manifest["expected_index_count"]
+            )):
+        raise PayloadContractError("remote news prepare progress mismatched")
+    receipt = prepare.get("receipt_digest")
+    if not prepare["active"] and (
+        not isinstance(receipt, str) or not re.fullmatch(r"[0-9a-f]{64}", receipt)
+    ):
+        raise PayloadContractError("remote news prepare receipt missing")
     work = 0
     snapshot_id = str(manifest["snapshot_id"])
     while (
@@ -1449,9 +1491,11 @@ def _sync_news(
             "action": "stage_details", "generation_id": generation_id,
             "offset": detail_offset, "items": items,
         }, ensure_ascii=False, separators=(",", ":")).encode(), config)
+        receipt = _news_stage_receipt(receipt, "detail", detail_offset, items)
+        _require_news_ack(result, {
+            "received": len(items), "receipt_digest": receipt,
+        }, action="stage_details")
         detail_offset += len(items)
-        if int(result.get("received", -1)) != len(items):
-            raise PayloadContractError("remote news detail receipt count mismatched")
         work += 1
     while (
         not prepare.get("active") and work < NEWS_PROJECTION_BATCHES_PER_CYCLE
@@ -1474,9 +1518,11 @@ def _sync_news(
             "action": "stage_index", "generation_id": generation_id,
             "offset": index_offset, "items": items,
         }, ensure_ascii=False, separators=(",", ":")).encode(), config)
+        receipt = _news_stage_receipt(receipt, "index", index_offset, items)
+        _require_news_ack(result, {
+            "received": len(items), "receipt_digest": receipt,
+        }, action="stage_index")
         index_offset += len(items)
-        if int(result.get("received", -1)) != len(items):
-            raise PayloadContractError("remote news index receipt count mismatched")
         work += 1
 
     complete = (
@@ -1484,12 +1530,19 @@ def _sync_news(
         and index_offset == int(manifest["expected_index_count"])
     )
     if not prepare.get("active") and complete:
-        _post_json(news_index_url, json.dumps({
+        if receipt != manifest["expected_receipt_digest"]:
+            raise PayloadContractError("remote news completed receipt mismatched")
+        activation = _post_json(news_index_url, json.dumps({
             "action": "activate", "generation_id": generation_id,
         }, separators=(",", ":")).encode(), config)
-        _post_json(news_index_url, json.dumps({
+        _require_news_ack(activation, {
+            "activated": generation_id, "index_count": manifest["expected_index_count"],
+            "detail_count": manifest["expected_detail_count"],
+        }, action="activate")
+        verification = _post_json(news_index_url, json.dumps({
             "action": "verify", "generation_id": generation_id,
         }, separators=(",", ":")).encode(), config)
+        _require_news_ack(verification, {"generation_id": generation_id}, action="verify")
     if prepare.get("active") or complete:
         _verify_news_projection_state(news_index_url, config, manifest)
         state["active_snapshot_id"] = snapshot_id
@@ -1498,6 +1551,7 @@ def _sync_news(
     else:
         state["projection_state"] = "REPLAYING"
     state.update({
+        "target_binding": target_binding,
         "generation_id": generation_id, "snapshot_id": snapshot_id,
         "source_digest": manifest["source_digest"],
         "expected_receipt_digest": manifest["expected_receipt_digest"],

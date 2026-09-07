@@ -94,6 +94,7 @@ from xauusd_forecaster.news_projection import (
     NEWS_PROJECTION_CONTRACT_VERSION,
     NEWS_PROJECTION_MAX_ITEMS,
     NewsProjectionGeneration,
+    NewsProjectionRetainedGeneration,
     NewsProjectionSourceCapture,
     NewsSourceCapturePage,
     NEWS_SOURCE_CAPTURE_PAGE_ITEMS,
@@ -825,8 +826,8 @@ def _news_projection_generation_from_payload(
 
 
 def _read_news_projection_generation_artifact(
-    path: Path,
-) -> NewsProjectionGeneration | None:
+    path: Path, *, expected_target: dict | None = None,
+) -> NewsProjectionGeneration | NewsProjectionRetainedGeneration | None:
     if not path.exists():
         return None
     with gzip.open(path, "rt", encoding="utf-8") as handle:
@@ -834,11 +835,17 @@ def _read_news_projection_generation_artifact(
     if not isinstance(envelope, dict) or envelope.get("schema_version") != 1:
         raise ValueError("persisted news generation envelope is invalid")
     payload = envelope.get("generation")
+    retained = isinstance(payload, dict) and payload.get("storage") == "retained-source-plan-v1"
+    digest_input = {"generation": payload, "target": envelope.get("target")} if retained else payload
     if (
         not isinstance(payload, dict)
-        or envelope.get("sha256") != _news_projection_payload_digest(payload)
+        or envelope.get("sha256") != _news_projection_payload_digest(digest_input)
     ):
         raise ValueError("persisted news generation digest is invalid")
+    if payload.get("storage") == "retained-source-plan-v1":
+        if not expected_target or envelope.get("target") != expected_target:
+            raise ValueError("NEWS_SOURCE_CAPTURE_ARTIFACT_TARGET_MISMATCH")
+        return NewsProjectionRetainedGeneration.from_artifact_payload(path, payload, target=expected_target)
     return _news_projection_generation_from_payload(payload)
 
 
@@ -851,15 +858,25 @@ def _read_persisted_news_projection_generation(
 
 
 def _write_news_projection_generation_artifact(
-    path: Path, generation: NewsProjectionGeneration,
+    path: Path, generation: NewsProjectionGeneration | NewsProjectionRetainedGeneration,
+    *, target: dict | None = None,
 ) -> None:
+    if isinstance(generation, NewsProjectionRetainedGeneration) and not target:
+        raise ValueError("NEWS_SOURCE_CAPTURE_ARTIFACT_TARGET_REQUIRED")
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = _news_projection_generation_payload(generation)
+    payload = (
+        generation.artifact_payload(path)
+        if isinstance(generation, NewsProjectionRetainedGeneration)
+        else _news_projection_generation_payload(generation)
+    )
     envelope = {
         "schema_version": 1,
         "sha256": _news_projection_payload_digest(payload),
         "generation": payload,
     }
+    if isinstance(generation, NewsProjectionRetainedGeneration):
+        envelope["target"] = target
+        envelope["sha256"] = _news_projection_payload_digest({"generation": payload, "target": target})
     temporary = path.with_suffix(path.suffix + ".tmp")
     with gzip.open(temporary, "wt", encoding="utf-8", newline="") as handle:
         json.dump(
@@ -950,38 +967,16 @@ def _news_projection_source_for_request(
 
 
 def _news_projection_batch(
-    generation: NewsProjectionGeneration, kind: str, offset: int,
+    generation: NewsProjectionGeneration | NewsProjectionRetainedGeneration,
+    kind: str, offset: int,
 ) -> dict:
-    batches = (
-        generation.detail_batches if kind == "detail"
-        else generation.index_batches if kind == "index"
-        else None
-    )
-    if batches is None or offset < 0:
-        raise ValueError("invalid news projection batch request")
-    next_offset = 0
-    for batch in batches:
-        if next_offset == offset:
-            items = list(batch)
-            return {
-                "generation_id": generation.manifest["generation_id"],
-                "snapshot_id": generation.manifest["snapshot_id"],
-                "kind": kind,
-                "offset": offset,
-                "items": items,
-                "next_offset": offset + len(items),
-            }
-        next_offset += len(batch)
-    expected = generation.manifest[
-        "expected_detail_count" if kind == "detail" else "expected_index_count"
-    ]
-    if offset == expected:
-        return {
-            "generation_id": generation.manifest["generation_id"],
-            "snapshot_id": generation.manifest["snapshot_id"],
-            "kind": kind, "offset": offset, "items": [], "next_offset": offset,
-        }
-    raise ValueError("news projection offset is not a frozen batch boundary")
+    items = generation.batch_items(kind, offset)
+    return {
+        "generation_id": generation.manifest["generation_id"],
+        "snapshot_id": generation.manifest["snapshot_id"],
+        "kind": kind, "offset": offset, "items": items,
+        "next_offset": offset + len(items),
+    }
 
 
 

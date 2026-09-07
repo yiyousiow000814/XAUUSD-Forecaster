@@ -20,11 +20,13 @@ sys.path.insert(0, str(MODULE_ROOT))
 
 from scripts.run_dashboard_sync import (  # noqa: E402
     NEWS_MIRROR_CONTRACT_VERSION,
+    NEWS_PROJECTION_BATCHES_PER_CYCLE,
     PayloadContractError,
     RemoteInvariantViolation,
     _get_json,
     _post_json,
     _read_news_sync_state,
+    _require_news_ack,
     _sync_news,
     _validated_sync_state_path,
     _write_news_sync_state,
@@ -39,7 +41,7 @@ from scripts.run_dashboard_api import (  # noqa: E402
 )
 from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
 from xauusd_forecaster.news_projection import (  # noqa: E402
-    NewsProjectionGeneration, NewsProjectionSourceCapture,
+    NewsProjectionGeneration, NewsProjectionRetainedGeneration, NewsProjectionSourceCapture,
 )
 from xauusd_forecaster.runtime_paths import PRODUCTION_RUNTIME_STATE_ROOT  # noqa: E402
 
@@ -65,11 +67,19 @@ def _version_origin(value: str) -> str:
 def bootstrap(
     *, base_config: dict, origin: str, token: str, state_file: Path,
     max_cycles: int, retry_seconds: float,
-    frozen_generation: NewsProjectionGeneration | None = None,
+    frozen_generation: NewsProjectionGeneration | NewsProjectionRetainedGeneration | None = None,
     state_root: Path,
 ) -> dict:
     if not token.strip():
         raise ValueError("ingest token is missing")
+    if isinstance(frozen_generation, NewsProjectionRetainedGeneration):
+        frozen_generation.require_target(
+            index_url=origin + "/api/news-index", detail_url=origin + "/api/news-content",
+            contract_version=NEWS_MIRROR_CONTRACT_VERSION,
+        )
+        if type(max_cycles) is not int or max_cycles < 1:
+            raise ValueError("NEWS_SOURCE_CAPTURE_REPLAY_WORK_BOUND")
+        frozen_generation.require_work_budget(max_cycles * NEWS_PROJECTION_BATCHES_PER_CYCLE)
     if (
         frozen_generation is None
         and not str(base_config.get("local_status_url") or "").startswith(
@@ -115,13 +125,14 @@ def bootstrap(
                 "status": "OK", "projection_state": "CURRENT",
                 "verified_complete": True, "missing_detail_count": 0,
                 "invariant_violation_count": 0,
+                "active_generation_id": state["generation_id"],
+                "snapshot_id": state["snapshot_id"],
+                "source_digest": state["source_digest"],
+                "receipt_digest": state["expected_receipt_digest"],
+                "index_count": state["expected_index_count"],
+                "detail_count": state["expected_detail_count"],
             }
-            mismatches = {
-                key: {"expected": expected, "actual": health.get(key)}
-                for key, expected in required.items() if health.get(key) != expected
-            }
-            if mismatches:
-                raise RuntimeError(f"first CURRENT verification failed: {mismatches}")
+            _require_news_ack(health, required, action="bootstrap final health")
             return {
                 "status": "PASSED", "version_host": origin,
                 "cycles": cycle,
@@ -160,15 +171,54 @@ def _freeze_news_projection_generation(
 
 def _load_or_freeze_news_projection_generation(
     source_database: Path, artifact_path: Path,
-) -> NewsProjectionGeneration:
+    *, origin: str | None = None,
+) -> NewsProjectionGeneration | NewsProjectionRetainedGeneration:
     if artifact_path.exists():
-        restored = _read_news_projection_generation_artifact(artifact_path)
+        restored = (
+            _read_news_projection_generation_artifact(artifact_path, expected_target={
+                "origin": _version_origin(origin), "contract_version": NEWS_MIRROR_CONTRACT_VERSION,
+            }) if origin is not None else _read_news_projection_generation_artifact(artifact_path)
+        )
         if restored is None:
             raise ValueError("frozen News generation artifact is missing")
         return restored
     frozen = _freeze_news_projection_generation(source_database)
     _write_news_projection_generation_artifact(artifact_path, frozen)
     return frozen
+
+
+def pin_frozen_source_capture(
+    *, capture: NewsProjectionSourceCapture, state_file: Path, state_root: Path,
+    origin: str, max_cycles: int,
+) -> NewsProjectionRetainedGeneration:
+    """Explicit local admission; never recapture or overwrite an existing pin."""
+    state_file = _validated_sync_state_path(state_file, state_root)
+    origin = _version_origin(origin)
+    if type(max_cycles) is not int or max_cycles < 1:
+        raise ValueError("NEWS_SOURCE_CAPTURE_REPLAY_WORK_BOUND")
+    artifact = state_file.with_name(f"{state_file.stem}-generation.json.gz")
+    target = {"origin": origin, "contract_version": NEWS_MIRROR_CONTRACT_VERSION}
+    maximum_batches = max_cycles * NEWS_PROJECTION_BATCHES_PER_CYCLE
+    candidate = capture.open_replay_generation(maximum_batches=maximum_batches)
+    # This checks both the authorized sibling location and the current complete
+    # plan before an old artifact can be interpreted as the requested source.
+    payload = candidate.artifact_payload(artifact)
+    _require_recoverable_artifact(state_file, artifact, state_root=state_root)
+    if artifact.exists():
+        restored = _read_news_projection_generation_artifact(artifact, expected_target=target)
+        if not isinstance(restored, NewsProjectionRetainedGeneration):
+            raise ValueError("NEWS_SOURCE_CAPTURE_ARTIFACT_FORMAT_MISMATCH")
+        # A stored work allowance cannot authorize a larger current invocation.
+        # Content/source binding is exact; only the caller's allowance may differ.
+        prior = restored.artifact_payload(artifact)
+        if any(prior[key] != value for key, value in payload.items() if key != "maximum_batches"):
+            raise ValueError("NEWS_SOURCE_CAPTURE_ARTIFACT_BINDING_MISMATCH")
+        return restored
+    _write_news_projection_generation_artifact(artifact, candidate, target=target)
+    restored = _read_news_projection_generation_artifact(artifact, expected_target=target)
+    if not isinstance(restored, NewsProjectionRetainedGeneration):
+        raise ValueError("NEWS_SOURCE_CAPTURE_ARTIFACT_FORMAT_MISMATCH")
+    return restored
 
 
 def advance_frozen_source_capture(
@@ -353,7 +403,7 @@ def main() -> int:
         _require_recoverable_artifact(state_file, artifact_path, state_root=PRODUCTION_RUNTIME_STATE_ROOT)
     frozen_generation = (
         _load_or_freeze_news_projection_generation(
-            args.source_database, artifact_path,
+            args.source_database, artifact_path, origin=origin,
         )
         if args.source_database else None
     )

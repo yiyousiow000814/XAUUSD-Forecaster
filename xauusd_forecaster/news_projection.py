@@ -14,7 +14,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Iterable, Iterator
@@ -241,6 +241,19 @@ class NewsProjectionGeneration:
     index_batches: tuple[tuple[dict, ...], ...]
     detail_batches: tuple[tuple[dict, ...], ...]
 
+    def batch_items(self, kind: str, offset: int) -> list[dict]:
+        batches = self.detail_batches if kind == "detail" else self.index_batches if kind == "index" else None
+        if batches is None or type(offset) is not int or offset < 0:
+            raise ValueError("invalid news projection batch request")
+        cursor = 0
+        for batch in batches:
+            if cursor == offset:
+                return list(batch)
+            cursor += len(batch)
+        if cursor == offset:
+            return []
+        raise ValueError("news projection offset is not a batch boundary")
+
 
 def build_news_projection_generation(
     rows: list[dict], withdrawals: list[dict], *, window_start: str, watermark: str,
@@ -249,6 +262,8 @@ def build_news_projection_generation(
         raise ValueError("news projection exceeds the 10,000-row generation bound")
     index_rows, detail_rows = split_news_rows(rows)
     withdrawal_keys = sorted({stable_news_key(row) for row in withdrawals})
+    if len(withdrawal_keys) > NEWS_PROJECTION_MAX_ITEMS:
+        raise ValueError("news projection exceeds the 10,000-withdrawal generation bound")
     source_digest = sha256_json({
         "index": index_rows, "details": detail_rows,
         "withdrawal_keys": withdrawal_keys,
@@ -974,6 +989,57 @@ class NewsProjectionSourceCapture:
         with self._locked():
             return _NewsSourcePlanReader(self, self.read())
 
+    def open_replay_generation(self, *, maximum_batches: int) -> NewsProjectionRetainedGeneration:
+        """Admit one bounded local replay view, not a production release.
+
+        Source rows include withdrawals; materialized rows and unique withdrawals
+        have separate existing Worker limits. Local capture limits still apply.
+        The caller's finite command budget and later D1/release gates remain
+        independent. No artifact, source identity or prior failure is rewritten.
+        """
+        with self._locked():
+            state = self.read()
+            if (state.get("plan_in_progress") or state.get("plan_failure")
+                    or time.time() < state["retry_not_before"]):
+                raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_RECOVERY_REQUIRED")
+            reader = _NewsSourcePlanReader(self, state)
+            plan = state["source_plan"]
+            manifest = plan.get("manifest")
+            if not isinstance(manifest, dict):
+                raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_MANIFEST_INVALID")
+            counts = [manifest.get(key) for key in (
+                "expected_index_count", "expected_detail_count", "withdrawal_count",
+            )]
+            if any(type(value) is not int or not 0 <= value <= NEWS_PROJECTION_MAX_ITEMS for value in counts):
+                raise ValueError("NEWS_PROJECTION_GENERATION_CAPACITY_EXCEEDED")
+            if (counts[0] != counts[1] or counts[0] != state["item_count"]
+                    or counts[2] > state["withdrawal_count"]
+                    or len({row[0] for row in reader._locations}) != counts[0]):
+                raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_MEMBERSHIP_INVALID")
+            chain = EMPTY_RECEIPT_DIGEST
+            number = 0
+            for kind in ("detail", "index"):
+                for batch in plan["batches"][kind]:
+                    number += 1
+                    chain = hashlib.sha256(
+                        f"{chain}\n{kind}|{batch['offset']}|{batch['count']}|{batch['payload_hash']}".encode()
+                    ).hexdigest()
+            if type(maximum_batches) is not int or maximum_batches < 1 or number > maximum_batches:
+                raise ValueError("NEWS_SOURCE_CAPTURE_REPLAY_WORK_BOUND")
+            source_digest = manifest.get("source_digest")
+            if not isinstance(source_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", source_digest):
+                raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_MANIFEST_INVALID")
+            expected = _news_projection_manifest(
+                window_start=self.identity["window_start"], watermark=self.identity["watermark"],
+                source_digest=source_digest, item_count=counts[0], withdrawal_count=counts[2],
+                expected_receipt_digest=chain,
+            )
+            if manifest != expected:
+                raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_MANIFEST_INVALID")
+            return NewsProjectionRetainedGeneration(
+                dict(manifest), reader, plan["input_digest"], maximum_batches,
+            )
+
 
 def _capture_plan_input_digest(state: dict) -> str:
     values = {key: state[key] for key in (
@@ -1087,3 +1153,70 @@ class _NewsSourcePlanReader:
             raise ValueError("NEWS_SOURCE_CAPTURE_PLAN_BATCH_DIGEST_MISMATCH")
         self.metrics["batch_reads"] += 1
         return rows
+
+
+@dataclass(frozen=True)
+class NewsProjectionRetainedGeneration:
+    """An admitted local container; exact remote ACK/release checks still apply."""
+
+    manifest: dict
+    _reader: _NewsSourcePlanReader
+    input_digest: str
+    maximum_batches: int
+    _replay_target: tuple[str, str] | None = None
+
+    def require_target(self, *, index_url: str, detail_url: str, contract_version: str) -> None:
+        if (self._replay_target is None
+                or self._replay_target[1] != contract_version
+                or index_url != self._replay_target[0] + "/api/news-index"
+                or detail_url != self._replay_target[0] + "/api/news-content"):
+            raise ValueError("NEWS_SOURCE_CAPTURE_ARTIFACT_TARGET_MISMATCH")
+
+    def require_work_budget(self, maximum_batches: int) -> None:
+        count = sum(len(batches) for batches in self._reader._batches.values())
+        if type(maximum_batches) is not int or maximum_batches < 1 or count > maximum_batches:
+            raise ValueError("NEWS_SOURCE_CAPTURE_REPLAY_WORK_BOUND")
+
+    def artifact_payload(self, artifact_path: Path) -> dict:
+        """Pin existing retained bytes, without copying bodies into gzip rows."""
+        expected = artifact_path.with_name(
+            artifact_path.name.removesuffix(".json.gz") + ".capture"
+        )
+        capture = self._reader._capture
+        if capture.directory != Path(os.path.abspath(expected)):
+            raise ValueError("NEWS_SOURCE_CAPTURE_ARTIFACT_LOCATION_MISMATCH")
+        return {
+            "storage": "retained-source-plan-v1",
+            "manifest": self.manifest,
+            "capture_identity": capture.identity,
+            "input_digest": self.input_digest,
+            "maximum_batches": self.maximum_batches,
+        }
+
+    @classmethod
+    def from_artifact_payload(cls, artifact_path: Path, payload: dict, *, target: dict) -> NewsProjectionRetainedGeneration:
+        identity = payload.get("capture_identity")
+        if (not isinstance(identity, dict) or not isinstance(identity.get("binding"), dict)
+                or any(not isinstance(identity.get(key), str) for key in (
+                    "watermark", "window_start", "epoch",
+                ))):
+            raise ValueError("NEWS_SOURCE_CAPTURE_ARTIFACT_IDENTITY_INVALID")
+        expected = artifact_path.with_name(
+            artifact_path.name.removesuffix(".json.gz") + ".capture"
+        )
+        capture = NewsProjectionSourceCapture(
+            expected, binding=identity.get("binding"), watermark=identity.get("watermark"),
+            window_start=identity.get("window_start"), epoch=identity.get("epoch"),
+        )
+        if capture.identity != identity:
+            raise ValueError("NEWS_SOURCE_CAPTURE_ARTIFACT_IDENTITY_INVALID")
+        generation = capture.open_replay_generation(maximum_batches=payload.get("maximum_batches"))
+        if generation.artifact_payload(artifact_path) != payload:
+            raise ValueError("NEWS_SOURCE_CAPTURE_ARTIFACT_BINDING_MISMATCH")
+        if (not isinstance(target.get("origin"), str) or not target["origin"]
+                or target.get("contract_version") != NEWS_MIRROR_CONTRACT_VERSION):
+            raise ValueError("NEWS_SOURCE_CAPTURE_ARTIFACT_TARGET_MISMATCH")
+        return replace(generation, _replay_target=(target["origin"], target["contract_version"]))
+
+    def batch_items(self, kind: str, offset: int) -> list[dict]:
+        return self._reader.batch_items(kind, offset)

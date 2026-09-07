@@ -203,9 +203,9 @@ def test_source_capture_failures_preserve_prefix_and_backoff(tmp_path, monkeypat
     assert complete["source_count"] == 129
 
 
-def test_complete_source_over_existing_capacity_cannot_become_a_generation(tmp_path):
-    # The local capture limit is byte/work based. The existing combined remote
-    # source quota is still exact, including withdrawals; it is not raised.
+def test_complete_source_needs_explicit_materialized_capacity_admission(tmp_path):
+    # Raw source work and retained generation have different bounds. Preserve
+    # the capture fact; only full planning and explicit admission enable replay.
     records = [_source_record(i, withdrawal=i > 0) for i in range(10_001)]
     capture = _capture(tmp_path)
     state = capture.read()
@@ -217,6 +217,174 @@ def test_complete_source_over_existing_capacity_cannot_become_a_generation(tmp_p
     assert state["admission"] == "SOURCE_ROW_CAPACITY_EXCEEDED"
     assert not isinstance(state, NewsProjectionGeneration)
     assert not list(tmp_path.glob("*.json.gz"))
+    capture.finalize_plan()
+    admitted = capture.open_replay_generation(maximum_batches=4)
+    assert admitted.manifest["expected_index_count"] == 1
+    assert admitted.manifest["withdrawal_count"] == 10_000
+    assert capture.read()["source_count"] == 10_001
+    assert capture.read()["admission"] == "SOURCE_ROW_CAPACITY_EXCEEDED"
+
+
+@pytest.mark.parametrize("corruption", (
+    "incomplete", "plan-failed", "pending-plan", "budget", "index-count",
+    "withdrawal-count", "receipt", "source", "window", "duplicate-key",
+))
+def test_retained_generation_admission_rejects_before_replay(tmp_path, corruption):
+    capture = _capture(tmp_path)
+    capture.advance(_page_reader([_source_record(i) for i in range(3)], []))
+    capture.finalize_plan()
+    state = capture.read()
+    manifest = state["source_plan"]["manifest"]
+    maximum_batches = 4
+    if corruption == "incomplete":
+        state["state"] = "BUILDING"
+    elif corruption == "plan-failed":
+        state["plan_failure"] = "NEWS_SOURCE_CAPTURE_PLAN_TIME_BOUND"
+    elif corruption == "pending-plan":
+        state["plan_in_progress"] = True
+    elif corruption == "budget":
+        maximum_batches = 1
+    elif corruption == "index-count":
+        manifest["expected_index_count"] += 1
+    elif corruption == "withdrawal-count":
+        manifest["withdrawal_count"] = 10_001
+    elif corruption == "receipt":
+        manifest["expected_receipt_digest"] = "0" * 64
+    elif corruption == "source":
+        manifest["source_digest"] = "0" * 64
+    elif corruption == "window":
+        manifest["watermark"] = "2026-09-08T00:00:00+00:00"
+    else:
+        locations = state["source_plan"]["row_locations"]
+        locations[1][0] = locations[0][0]
+    capture._save(state)
+    before = (capture.directory / "manifest.json").read_bytes()
+    with pytest.raises(ValueError, match="NEWS_SOURCE_CAPTURE_|NEWS_PROJECTION_GENERATION_"):
+        capture.open_replay_generation(maximum_batches=maximum_batches)
+    assert (capture.directory / "manifest.json").read_bytes() == before
+
+
+def test_retained_and_materialized_consumers_share_exact_batch_contract(tmp_path, monkeypatch):
+    from scripts.run_dashboard_api import _news_projection_batch
+    from scripts.run_dashboard_sync import _frozen_news_projection_batch
+
+    rows = [_source_row(i, withdrawal=i % 3 == 0) for i in range(17)]
+    records = [news_source_capture_record(row, [
+        "2026-09-07T00:00:00+00:00", row["source"], row["source_item_id"], row["revision_number"],
+    ]) for row in rows]
+    capture = _capture(tmp_path)
+    capture.advance(_page_reader(records, []))
+    plan = capture.finalize_plan()["source_plan"]
+    retained = capture.open_replay_generation(maximum_batches=8)
+    materialized = build_news_projection_generation(
+        [row for row in rows if row["xauusd_relevance"] != "IRRELEVANT"],
+        [row for row in rows if row["xauusd_relevance"] == "IRRELEVANT"],
+        window_start=capture.identity["window_start"], watermark=capture.identity["watermark"],
+    )
+    assert retained.manifest == materialized.manifest
+    monkeypatch.setattr(capture, "read", lambda: pytest.fail("reloaded metadata per batch"))
+    monkeypatch.setattr(capture, "_record_locations", lambda: pytest.fail("rescanned accepted source"))
+    for kind in ("detail", "index"):
+        for batch in reversed(plan["batches"][kind]):
+            offset = batch["offset"]
+            expected = materialized.batch_items(kind, offset)
+            assert _frozen_news_projection_batch(retained, kind=kind, offset=offset) == expected
+            assert _news_projection_batch(retained, kind, offset)["items"] == expected
+
+
+@pytest.mark.parametrize("corruption", (
+    None, "identity", "digest", "manifest", "budget", "missing", "location", "target",
+))
+def test_retained_artifact_restart_is_exact_and_does_not_materialize_bodies(tmp_path, monkeypatch, corruption):
+    import gzip
+    from scripts import run_dashboard_api as api
+    capture = _capture(tmp_path)
+    capture.advance(_page_reader([_source_record(i) for i in range(9)], []))
+    capture.finalize_plan()
+    generation = capture.open_replay_generation(maximum_batches=8)
+    path = tmp_path / "candidate-generation.json.gz"
+    target = {"origin": "https://candidate.example", "contract_version": generation.manifest["contract_version"]}
+    monkeypatch.setattr(api, "_news_projection_generation_payload", lambda *_: pytest.fail("materialized retained bodies"))
+    api._write_news_projection_generation_artifact(path, generation, target=target)
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        envelope = json.load(handle)
+    payload = envelope["generation"]
+    assert set(payload) == {"storage", "manifest", "capture_identity", "input_digest", "maximum_batches"}
+    if corruption == "identity":
+        payload["capture_identity"]["binding"] = {"snapshot_identity": "wrong"}
+    elif corruption == "digest":
+        payload["input_digest"] = "0" * 64
+    elif corruption == "manifest":
+        payload["manifest"]["generation_id"] = "0" * 64
+    elif corruption == "budget":
+        payload["maximum_batches"] = 1
+    elif corruption == "missing":
+        (capture.directory / "manifest.json").unlink()
+    elif corruption == "location":
+        with pytest.raises(ValueError, match="ARTIFACT_LOCATION"):
+            api._write_news_projection_generation_artifact(tmp_path / "other.json.gz", generation, target=target)
+        return
+    elif corruption == "target":
+        envelope["target"] = {**target, "origin": "https://wrong.example"}
+    envelope["sha256"] = api._news_projection_payload_digest({
+        "generation": payload, "target": target,
+    })
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        json.dump(envelope, handle)
+    if corruption:
+        with pytest.raises(ValueError):
+            api._read_news_projection_generation_artifact(path, expected_target=target)
+    else:
+        with pytest.raises(ValueError, match="TARGET_MISMATCH"):
+            api._read_news_projection_generation_artifact(path)
+        restored = api._read_news_projection_generation_artifact(path, expected_target=target)
+        assert restored.manifest == generation.manifest
+        assert restored.batch_items("detail", 8) == generation.batch_items("detail", 8)
+
+
+def test_bootstrap_retained_pin_requires_current_budget_target_and_recoverable_source(tmp_path, monkeypatch):
+    from scripts import bootstrap_news_projection as bootstrap_owner
+    pin_frozen_source_capture = bootstrap_owner.pin_frozen_source_capture
+    capture = _capture(tmp_path)
+    capture.advance(_page_reader([_source_record(i) for i in range(9)], []))
+    capture.finalize_plan()
+    arguments = {
+        "capture": capture, "state_file": tmp_path / "candidate.json", "state_root": tmp_path,
+        "origin": "https://candidate-aurum-signal-room.fixture.workers.dev", "max_cycles": 2,
+    }
+    generation = pin_frozen_source_capture(**arguments)
+    artifact = tmp_path / "candidate-generation.json.gz"
+    pinned = artifact.read_bytes()
+    with pytest.raises(ValueError, match="REPLAY_WORK_BOUND"):
+        pin_frozen_source_capture(**{**arguments, "max_cycles": 1})
+    with pytest.raises(ValueError, match="TARGET_MISMATCH"):
+        pin_frozen_source_capture(**{**arguments, "origin": "https://other-aurum-signal-room.fixture.workers.dev"})
+    resumed = pin_frozen_source_capture(**{**arguments, "max_cycles": 3})
+    assert resumed.manifest == generation.manifest
+    assert artifact.read_bytes() == pinned
+    seen = []
+    def observed_sync(*args, **kwargs):
+        seen.append(kwargs["frozen_generation"].manifest["generation_id"])
+        raise bootstrap_owner.PayloadContractError("test boundary reached")
+    monkeypatch.setattr(bootstrap_owner, "_sync_news", observed_sync)
+    for candidate, origin, expected in (
+        (generation, "https://other-aurum-signal-room.fixture.workers.dev", "TARGET_MISMATCH"),
+        (capture.open_replay_generation(maximum_batches=8), arguments["origin"], "TARGET_MISMATCH"),
+        (resumed, arguments["origin"], "test boundary reached"),
+    ):
+        with pytest.raises((ValueError, bootstrap_owner.PayloadContractError), match=expected):
+            bootstrap_owner.bootstrap(
+                base_config={}, origin=origin, token="fixture", state_file=arguments["state_file"],
+                max_cycles=2, retry_seconds=0, frozen_generation=candidate, state_root=tmp_path,
+            )
+    assert seen == [generation.manifest["generation_id"]]
+    arguments["state_file"].write_text(json.dumps({
+        "projection_state": "REPLAYING", "generation_id": generation.manifest["generation_id"],
+    }), encoding="utf-8")
+    artifact.unlink()
+    with pytest.raises(ValueError, match="explicit recovery"):
+        pin_frozen_source_capture(**arguments)
+    assert not artifact.exists()
 
 
 def test_source_capture_rejects_identity_corruption_and_single_flight(tmp_path):
