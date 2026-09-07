@@ -1,0 +1,55 @@
+name: Current source architecture
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: architecture-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  architecture:
+    name: Current source architecture
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install bounded tool tests
+        run: python -m pip install pytest==9.1.1
+      - name: Require real PowerShell parser
+        run: pwsh -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()'
+      - name: Verify tool contracts and generated source identity
+        run: |
+          python -m pytest tests/test_architecture_compiler.py -q
+          python scripts/compile_architecture.py check
+      - name: Record exact execution source outside generated content
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: echo "source_sha=$SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+  historical-mutations:
+    name: Architecture historical mutation contracts
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install repository test dependencies
+        run: python -m pip install -e . pytest==9.1.1
+      - name: Execute three bounded baseline and mutation pairs
+        run: python scripts/run_architecture_mutations.py --output "${{ runner.temp }}/architecture-mutations"
+      - name: Retain actual assertion and mutation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: architecture-historical-mutations
+          path: ${{ runner.temp }}/architecture-mutations/
+          retention-days: 7
+          if-no-files-found: warn

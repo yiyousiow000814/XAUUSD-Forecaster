@@ -4082,6 +4082,7 @@ def test_preview_evidence_cannot_authorize_production_candidate(tmp_path) -> Non
 
 def test_version_host_routes_distinguish_static_assets_from_worker_redirects(tmp_path) -> None:
     candidate = "b" * 40
+    manifest = json.loads((ROOT / 'web/worker-validation-manifest.json').read_text(encoding='utf-8'))
     result = _run_control_center_contract(
         tmp_path,
         "$dashboardUrl='https://aurum-signal-room.yiyousiow1234.chatgpt.site'; "
@@ -4100,10 +4101,10 @@ def test_version_host_routes_distinguish_static_assets_from_worker_redirects(tmp
         "content_type='';body_bytes=[byte[]]@();cf_cache_status='';etag='';age='';"
         "worker_version=$candidate.worker_version_id;git_sha=$candidate.git_sha;"
         "route=$RequestUri.AbsolutePath}};"
+        "$manifest=Get-Content -LiteralPath (Join-Path $repositoryRoot 'web/worker-validation-manifest.json') -Raw -Encoding UTF8|ConvertFrom-Json; "
+        "$asset=@($manifest.static_assets|Where-Object{$_.path -eq $RequestUri.AbsolutePath})[0]; "
         "$text=if($RequestUri.AbsolutePath -eq '/favicon.svg'){'<svg/>'}else{"
-        "'<meta charset=\"utf-8\">Aurum Signal Room 系统健康状态 新闻与决策 "
-        "OWNER OPERATIONS PRIVATE OPERATOR QUEUE AI 模型使用状态 ASSISTANT PAUSED "
-        "管理员认证已完成'}; "
+        "'<meta charset=\"utf-8\">'+$asset.marker}; "
         "$type=if($RequestUri.AbsolutePath -eq '/favicon.svg'){'image/svg+xml'}else{'text/html'}; "
         "return [pscustomobject]@{status=200;location='';content_type=$type;"
         "body_bytes=[Text.Encoding]::UTF8.GetBytes($text);cf_cache_status='HIT';etag='x';age='1'} }; "
@@ -4113,7 +4114,7 @@ def test_version_host_routes_distinguish_static_assets_from_worker_redirects(tmp
     )
 
     assert result == (
-        "12,3,NOT_REQUIRED,True,"
+        f"{len(manifest['static_assets'])},3,NOT_REQUIRED,True,"
         "11111111-aurum-signal-room.yiyousiow1234.workers.dev"
     )
 
@@ -4295,6 +4296,7 @@ def test_directed_summary_reports_counts_and_exact_static_predicate(tmp_path) ->
 
 
 def test_manifest_selects_baseline_and_affected_route_sample_families(tmp_path) -> None:
+    manifest = json.loads((ROOT / 'web/worker-validation-manifest.json').read_text(encoding='utf-8'))
     result = _run_control_center_contract(
         tmp_path,
         "$heavy=Get-CandidateRouteValidationPlan "
@@ -4318,7 +4320,8 @@ def test_manifest_selects_baseline_and_affected_route_sample_families(tmp_path) 
         '$($shared.worker_writes.Count)"',
     )
 
-    assert result == "7,70,31,310,0,False,43,43,12,19"
+    total = len(manifest['static_assets']) + 31
+    assert result == f"7,70,31,310,0,False,{total},{total},12,19"
 
 
 def test_static_manifest_rejects_missing_or_wrong_typed_contract_fields(tmp_path) -> None:

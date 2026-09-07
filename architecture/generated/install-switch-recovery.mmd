@@ -1,0 +1,237 @@
+%% Generated source syntax, not runtime/transaction proof.
+%% input f6d5be187982044cf62ab1331aa32a7ea64602f99eca700561cca956426974a5
+flowchart LR
+  n4987bef641aa6182["Add-Member"]
+  nea49279cc3f4ff04["Assert-ActiveControlBundle"]
+  nd23e535778123b39["Assert-ControlPlaneIsolationBaseline"]
+  n323da358bbc5fdaa["Assert-ControlPlaneIsolationSnapshot"]
+  n8f1cb16c31ea07d8["Assert-CurrentWatchdogHeartbeat"]
+  n126e1696a487142c["Assert-ReleaseEvidenceQualification"]
+  ne54303278c130807["Complete-DeferredServiceReload"]
+  n1ad94dfaff0631bd["ConvertFrom-ReleaseControlJson"]
+  nf9a3e5a4c3bbd46f["Disable-ScheduledTask"]
+  n37e3d0e30aa0f576["Enter-ReleaseTransactionLock"]
+  n95cecba2f46a3511["Exit-ReleaseTransactionLock"]
+  nbe85043807a3659c["ForEach-Object"]
+  nb3c6cd1bb5a10dca["Get-BrokerMarketSession"]
+  nf1523f30bd8b9d5b["Get-CandidateChangedFiles"]
+  n797b2276689da67e["Get-CimInstance"]
+  n1883a5f0b34a9710["Get-CodeRevision"]
+  n92929e49fcb6a8df["Get-Content"]
+  nd03463879c248af2["Get-ControlPlaneIsolationSnapshot"]
+  n498cae2f3e1d362a["Get-ControlPlaneProcessIdentity"]
+  nd0889d6e00ea27bb["Get-RecoveryEvidenceReceiptReferences"]
+  nedaa43d78e9667e2["Get-RecoveryHotfixEligibility"]
+  nb4acb59c1d50e680["Get-ReleaseControlState"]
+  n25750b599634926a["Get-ReleaseEvidenceChangePlan"]
+  n32b473aaf1b55b93["Get-ReleaseEvidenceCurrentReceipt"]
+  n916eb9e71424a049["Get-ReleaseProviderRuntimeFacts"]
+  nf23981261ad8d50f["Get-ReleaseTransactionMode"]
+  nff6788ff6cda9de1["Get-RuntimeUpdateState"]
+  n92062114c3c97c84["Get-ServiceState"]
+  n9e27c57c0a55bc80["Get-VerifiedControlCenterGuiOwners"]
+  nd1bdf9f898cafefd["Get-VerifiedWatchdogOwners"]
+  n71d4f38e549e40fd["Get-WatchdogOwnershipInventory"]
+  na90f1099dd9ac5fd["Get-WatchdogSingletonDescriptor"]
+  ncea2339d01e4c5e4["Invoke-CloudflareDeployment"]
+  n9e1b99bec3f86d0f["Invoke-RuntimeRollback"]
+  n354ba5bc2305a86b["Invoke-Utf8NativeProcess"]
+  n312cc0fc5363a59d["Join-Path"]
+  n902d318420547eb5["New-ReleaseEvidenceAdapterArguments"]
+  n2b5365ea0217afff["New-RuntimeRecoveryPlan"]
+  ne2ada56e7567b573["Out-Null"]
+  nc601a2cd6b73a524["Publish-ObserveAttemptEvidence"]
+  n9904f5809e9cb933["Publish-PromoteAttemptEvidence"]
+  ndf423aee8c96a341["Remove-Item"]
+  n29ec954dd8336d4e["Restart-CodeReloadableServices"]
+  nb3b7599824b53fb0["Split-Path"]
+  ncbc8be96ea3daa32["Start-RuntimeObservation"]
+  n047cb64df070f45e["Stop-ScheduledTask"]
+  n9d21f69ca2f518fd["Test-CloudflareRollbackTarget"]
+  nf5d4d876dbb93400["Test-ControlPlaneServiceOwnerRequired"]
+  ne94ff271b12a062d["Test-ControlPlaneStartTokenEqual"]
+  nae3574de8bc678d1["Test-ForecasterServiceProcess"]
+  n9821a5fd1b8ea5a9["Test-Path"]
+  n30f5d6e80ef0506f["Test-ProductionCandidateProvenance"]
+  nad7c83616e9ec14c["Test-RecoveryShortObservationCycle"]
+  n9535930a93eb9cde["Test-WatchdogOwnerReceiptShape"]
+  n94dfbdc422a64d2d["Update-RuntimeCheckout"]
+  ne1a8c5f56833aae7["Where-Object"]
+  nd01d20362b61731b["Write-ReleaseControlState"]
+  n754105fafc2358d5["Write-ReleaseHistory"]
+  nb07799ff7f0eec05["Write-RuntimeCodeState"]
+  n32e8bf19ad04378b["Write-WatchdogEvent"]
+  n0bdd830c1e73599d["scripts/control_center_install.ps1::Assert-ControlPlaneSourceRevision"]
+  na0475ddb8c67c7ba["scripts/control_center_install.ps1::Get-CollectorClockRecoveryBaseline"]
+  nd8fbeaeb0c358076["scripts/control_center_install.ps1::Get-CollectorClockRecoveryContext"]
+  n487074de53508903["scripts/control_center_install.ps1::Get-ControlPlaneInstallState"]
+  n0dece3a560fea2ad["scripts/control_center_install.ps1::Get-RuntimeControlBundleIdentityAtRoot"]
+  n995ee18f5f0209ad["scripts/control_center_install.ps1::Install-VerifiedRuntimeControlBundleStage"]
+  na733fe46def7fa9e["scripts/control_center_install.ps1::Invoke-ControlPlaneInstall"]
+  n6215b4a33f497c49["scripts/control_center_install.ps1::Invoke-RuntimeControlBundleStartupPreflight"]
+  n0568c150f6cb8f31["scripts/control_center_install.ps1::New-VerifiedRuntimeControlBundleStage"]
+  na3a3e6965aafe94c["scripts/control_center_install.ps1::Restore-ControlPlaneSupervision"]
+  n780fc5f561d96b77["scripts/control_center_install.ps1::Restore-RuntimeControlBundleBackup"]
+  n5283c5c2b37bd8b8["scripts/control_center_install.ps1::Start-WatchdogReplacement"]
+  n2d91d7329ecd03c4["scripts/control_center_install.ps1::Stop-VerifiedWatchdogOwner"]
+  n39e8fa04bbcb4da2["scripts/control_center_install.ps1::Suspend-ControlPlaneSupervision"]
+  n16a7c8b6c7ab99a6["scripts/control_center_install.ps1::Wait-ControlPlaneGuardQuiesced"]
+  n9a139f34e4cc0cbc["scripts/control_center_install.ps1::Wait-VerifiedWatchdogHandoff"]
+  nd68a2abfba1b1cbf["scripts/control_center_install.ps1::Write-ControlPlaneInstallState"]
+  ne2a7d986b99858b2["scripts/control_center_transaction_engine.ps1::Complete-ReleasePromotion"]
+  n05b126a638489209["scripts/control_center_transaction_engine.ps1::Complete-ReleaseRecovery"]
+  n9e044a11d2994c67["scripts/control_center_transaction_engine.ps1::Invoke-PromotionFreshnessCoordinator"]
+  n4b9b3011bdcc4244["scripts/control_center_transaction_engine.ps1::Start-ReleasePromotion"]
+  n15b58ad5b631512e["scripts/control_center_transaction_engine.ps1::Write-DeferredProjectionSyncRequest"]
+  na0475ddb8c67c7ba -->|"calls L817 UNKNOWN"| n0bdd830c1e73599d
+  na0475ddb8c67c7ba -->|"calls L819 UNKNOWN"| nb4acb59c1d50e680
+  na0475ddb8c67c7ba -->|"calls L820 UNKNOWN"| n487074de53508903
+  na0475ddb8c67c7ba -->|"calls L823 UNKNOWN"| n92929e49fcb6a8df
+  na0475ddb8c67c7ba -->|"calls L823 UNKNOWN"| n312cc0fc5363a59d
+  na0475ddb8c67c7ba -->|"calls L824 UNKNOWN"| n1ad94dfaff0631bd
+  na0475ddb8c67c7ba -->|"calls L825 UNKNOWN"| n498cae2f3e1d362a
+  na0475ddb8c67c7ba -->|"calls L827 UNKNOWN"| ne94ff271b12a062d
+  na0475ddb8c67c7ba -->|"calls L830 UNKNOWN"| n9821a5fd1b8ea5a9
+  na0475ddb8c67c7ba -->|"calls L834 UNKNOWN"| n1883a5f0b34a9710
+  na0475ddb8c67c7ba -->|"calls L841 UNKNOWN"| nd8fbeaeb0c358076
+  na0475ddb8c67c7ba -->|"calls L842 UNKNOWN"| nea49279cc3f4ff04
+  na0475ddb8c67c7ba -->|"calls L852 UNKNOWN"| n797b2276689da67e
+  na0475ddb8c67c7ba -->|"calls L853 UNKNOWN"| ne1a8c5f56833aae7
+  na0475ddb8c67c7ba -->|"calls L857 UNKNOWN"| n71d4f38e549e40fd
+  na0475ddb8c67c7ba -->|"calls L867 UNKNOWN"| n8f1cb16c31ea07d8
+  na0475ddb8c67c7ba -->|"calls L870 UNKNOWN"| n312cc0fc5363a59d
+  na0475ddb8c67c7ba -->|"calls L871 UNKNOWN"| ne1a8c5f56833aae7
+  na0475ddb8c67c7ba -->|"calls L877 UNKNOWN"| na90f1099dd9ac5fd
+  na0475ddb8c67c7ba -->|"calls L879 UNKNOWN"| n9535930a93eb9cde
+  na0475ddb8c67c7ba -->|"calls L882 UNKNOWN"| n498cae2f3e1d362a
+  na0475ddb8c67c7ba -->|"calls L884 UNKNOWN"| ne94ff271b12a062d
+  na0475ddb8c67c7ba -->|"calls L890 UNKNOWN"| ne1a8c5f56833aae7
+  na0475ddb8c67c7ba -->|"calls L891 UNKNOWN"| nae3574de8bc678d1
+  na0475ddb8c67c7ba -->|"calls L893 UNKNOWN"| ne1a8c5f56833aae7
+  na0475ddb8c67c7ba -->|"calls L897 UNKNOWN"| nae3574de8bc678d1
+  na0475ddb8c67c7ba -->|"calls L903 UNKNOWN"| nf5d4d876dbb93400
+  na0475ddb8c67c7ba -->|"calls L907 UNKNOWN"| nbe85043807a3659c
+  na0475ddb8c67c7ba -->|"calls L908 UNKNOWN"| n498cae2f3e1d362a
+  na0475ddb8c67c7ba -->|"calls L916 UNKNOWN"| n92062114c3c97c84
+  na0475ddb8c67c7ba -->|"calls L920 UNKNOWN"| nb3c6cd1bb5a10dca
+  na0475ddb8c67c7ba -->|"calls L925 UNKNOWN"| n916eb9e71424a049
+  na0475ddb8c67c7ba -->|"calls L934 UNKNOWN"| n354ba5bc2305a86b
+  na0475ddb8c67c7ba -->|"calls L935 UNKNOWN"| n312cc0fc5363a59d
+  na0475ddb8c67c7ba -->|"calls L941 UNKNOWN"| n1ad94dfaff0631bd
+  na733fe46def7fa9e -->|"calls L973 UNKNOWN"| n312cc0fc5363a59d
+  na733fe46def7fa9e -->|"calls L974 UNKNOWN"| n0dece3a560fea2ad
+  na733fe46def7fa9e -->|"calls L976 UNKNOWN"| n9e27c57c0a55bc80
+  na733fe46def7fa9e -->|"calls L979 UNKNOWN"| nb4acb59c1d50e680
+  na733fe46def7fa9e -->|"calls L981 UNKNOWN"| n9821a5fd1b8ea5a9
+  na733fe46def7fa9e -->|"calls L988 UNKNOWN"| nd8fbeaeb0c358076
+  na733fe46def7fa9e -->|"calls L994 UNKNOWN"| na90f1099dd9ac5fd
+  na733fe46def7fa9e -->|"calls L999 UNKNOWN"| na0475ddb8c67c7ba
+  na733fe46def7fa9e -->|"calls L1004 UNKNOWN"| nd1bdf9f898cafefd
+  na733fe46def7fa9e -->|"calls L1009 UNKNOWN"| n8f1cb16c31ea07d8
+  na733fe46def7fa9e -->|"calls L1014 UNKNOWN"| nb3b7599824b53fb0
+  na733fe46def7fa9e -->|"calls L1016 UNKNOWN"| n312cc0fc5363a59d
+  na733fe46def7fa9e -->|"calls L1017 UNKNOWN"| n312cc0fc5363a59d
+  na733fe46def7fa9e -->|"calls L1025 UNKNOWN"| n498cae2f3e1d362a
+  na733fe46def7fa9e -->|"calls L1029 UNKNOWN"| nd68a2abfba1b1cbf
+  na733fe46def7fa9e -->|"calls L1050 UNKNOWN"| n37e3d0e30aa0f576
+  na733fe46def7fa9e -->|"calls L1054 UNKNOWN"| n0568c150f6cb8f31
+  na733fe46def7fa9e -->|"calls L1061 UNKNOWN"| n6215b4a33f497c49
+  na733fe46def7fa9e -->|"calls L1064 UNKNOWN"| nd68a2abfba1b1cbf
+  na733fe46def7fa9e -->|"calls L1068 UNKNOWN"| n39e8fa04bbcb4da2
+  na733fe46def7fa9e -->|"calls L1069 UNKNOWN"| nd68a2abfba1b1cbf
+  na733fe46def7fa9e -->|"calls L1070 UNKNOWN"| n16a7c8b6c7ab99a6
+  na733fe46def7fa9e -->|"calls L1072 UNKNOWN"| n0dece3a560fea2ad
+  na733fe46def7fa9e -->|"calls L1075 UNKNOWN"| nd68a2abfba1b1cbf
+  na733fe46def7fa9e -->|"calls L1076 UNKNOWN"| n2d91d7329ecd03c4
+  na733fe46def7fa9e -->|"calls L1078 UNKNOWN"| n047cb64df070f45e
+  na733fe46def7fa9e -->|"calls L1079 UNKNOWN"| nd1bdf9f898cafefd
+  na733fe46def7fa9e -->|"calls L1089 UNKNOWN"| nb4acb59c1d50e680
+  na733fe46def7fa9e -->|"calls L1093 UNKNOWN"| nd03463879c248af2
+  na733fe46def7fa9e -->|"calls L1094 UNKNOWN"| nd23e535778123b39
+  na733fe46def7fa9e -->|"calls L1096 UNKNOWN"| nd68a2abfba1b1cbf
+  na733fe46def7fa9e -->|"calls L1097 UNKNOWN"| nd68a2abfba1b1cbf
+  na733fe46def7fa9e -->|"calls L1098 UNKNOWN"| n995ee18f5f0209ad
+  na733fe46def7fa9e -->|"calls L1104 UNKNOWN"| nd68a2abfba1b1cbf
+  na733fe46def7fa9e -->|"calls L1112 UNKNOWN"| n5283c5c2b37bd8b8
+  na733fe46def7fa9e -->|"calls L1114 UNKNOWN"| nd68a2abfba1b1cbf
+  na733fe46def7fa9e -->|"calls L1115 UNKNOWN"| n9a139f34e4cc0cbc
+  na733fe46def7fa9e -->|"calls L1118 UNKNOWN"| nd03463879c248af2
+  na733fe46def7fa9e -->|"calls L1119 UNKNOWN"| n323da358bbc5fdaa
+  na733fe46def7fa9e -->|"calls L1121 UNKNOWN"| nd68a2abfba1b1cbf
+  na733fe46def7fa9e -->|"calls L1122 UNKNOWN"| n9a139f34e4cc0cbc
+  na733fe46def7fa9e -->|"calls L1124 UNKNOWN"| na3a3e6965aafe94c
+  na733fe46def7fa9e -->|"calls L1126 UNKNOWN"| nd68a2abfba1b1cbf
+  na733fe46def7fa9e -->|"calls L1148 UNKNOWN"| nd68a2abfba1b1cbf
+  na733fe46def7fa9e -->|"calls L1149 UNKNOWN"| nd1bdf9f898cafefd
+  na733fe46def7fa9e -->|"calls L1150 UNKNOWN"| n2d91d7329ecd03c4
+  na733fe46def7fa9e -->|"calls L1153 UNKNOWN"| n780fc5f561d96b77
+  na733fe46def7fa9e -->|"calls L1157 UNKNOWN"| nd03463879c248af2
+  na733fe46def7fa9e -->|"calls L1158 UNKNOWN"| n323da358bbc5fdaa
+  na733fe46def7fa9e -->|"calls L1168 UNKNOWN"| n5283c5c2b37bd8b8
+  na733fe46def7fa9e -->|"calls L1169 UNKNOWN"| n9a139f34e4cc0cbc
+  na733fe46def7fa9e -->|"calls L1182 UNKNOWN"| nf9a3e5a4c3bbd46f
+  na733fe46def7fa9e -->|"calls L1182 UNKNOWN"| ne2ada56e7567b573
+  na733fe46def7fa9e -->|"calls L1184 UNKNOWN"| na3a3e6965aafe94c
+  na733fe46def7fa9e -->|"calls L1188 UNKNOWN"| nd68a2abfba1b1cbf
+  na733fe46def7fa9e -->|"calls L1198 UNKNOWN"| n95cecba2f46a3511
+  na733fe46def7fa9e -->|"calls L1201 UNKNOWN"| n9821a5fd1b8ea5a9
+  na733fe46def7fa9e -->|"calls L1202 UNKNOWN"| ndf423aee8c96a341
+  ne2a7d986b99858b2 -->|"calls L1720 UNKNOWN"| n37e3d0e30aa0f576
+  ne2a7d986b99858b2 -->|"calls L1724 UNKNOWN"| nb4acb59c1d50e680
+  ne2a7d986b99858b2 -->|"calls L1731 UNKNOWN"| ne1a8c5f56833aae7
+  ne2a7d986b99858b2 -->|"calls L1733 UNKNOWN"| nff6788ff6cda9de1
+  ne2a7d986b99858b2 -->|"calls L1752 UNKNOWN"| n32b473aaf1b55b93
+  ne2a7d986b99858b2 -->|"calls L1761 UNKNOWN"| nff6788ff6cda9de1
+  ne2a7d986b99858b2 -->|"calls L1775 UNKNOWN"| n902d318420547eb5
+  ne2a7d986b99858b2 -->|"calls L1783 UNKNOWN"| nc601a2cd6b73a524
+  ne2a7d986b99858b2 -->|"calls L1784 UNKNOWN"| n4987bef641aa6182
+  ne2a7d986b99858b2 -->|"calls L1789 UNKNOWN"| n9d21f69ca2f518fd
+  ne2a7d986b99858b2 -->|"calls L1799 UNKNOWN"| nd01d20362b61731b
+  ne2a7d986b99858b2 -->|"calls L1800 UNKNOWN"| n754105fafc2358d5
+  ne2a7d986b99858b2 -->|"calls L1802 UNKNOWN"| n95cecba2f46a3511
+  n05b126a638489209 -->|"calls L1916 UNKNOWN"| n37e3d0e30aa0f576
+  n05b126a638489209 -->|"calls L1920 UNKNOWN"| nb4acb59c1d50e680
+  n05b126a638489209 -->|"calls L1923 UNKNOWN"| nf23981261ad8d50f
+  n05b126a638489209 -->|"calls L1924 UNKNOWN"| ne2a7d986b99858b2
+  n05b126a638489209 -->|"calls L1940 UNKNOWN"| nad7c83616e9ec14c
+  n05b126a638489209 -->|"calls L1941 UNKNOWN"| nff6788ff6cda9de1
+  n05b126a638489209 -->|"calls L1943 UNKNOWN"| n32b473aaf1b55b93
+  n05b126a638489209 -->|"calls L1961 UNKNOWN"| n902d318420547eb5
+  n05b126a638489209 -->|"calls L1966 UNKNOWN"| nc601a2cd6b73a524
+  n05b126a638489209 -->|"calls L1971 UNKNOWN"| nd01d20362b61731b
+  n05b126a638489209 -->|"calls L1972 UNKNOWN"| n754105fafc2358d5
+  n05b126a638489209 -->|"calls L1974 UNKNOWN"| n95cecba2f46a3511
+  n4b9b3011bdcc4244 -->|"calls L1529 UNKNOWN"| n37e3d0e30aa0f576
+  n4b9b3011bdcc4244 -->|"calls L1531 UNKNOWN"| nb4acb59c1d50e680
+  n4b9b3011bdcc4244 -->|"calls L1538 UNKNOWN"| nea49279cc3f4ff04
+  n4b9b3011bdcc4244 -->|"calls L1539 UNKNOWN"| n30f5d6e80ef0506f
+  n4b9b3011bdcc4244 -->|"calls L1554 UNKNOWN"| nf1523f30bd8b9d5b
+  n4b9b3011bdcc4244 -->|"calls L1557 UNKNOWN"| n25750b599634926a
+  n4b9b3011bdcc4244 -->|"calls L1559 UNKNOWN"| nedaa43d78e9667e2
+  n4b9b3011bdcc4244 -->|"calls L1567 UNKNOWN"| n9e044a11d2994c67
+  n4b9b3011bdcc4244 -->|"calls L1569 UNKNOWN"| nb4acb59c1d50e680
+  n4b9b3011bdcc4244 -->|"calls L1571 UNKNOWN"| n126e1696a487142c
+  n4b9b3011bdcc4244 -->|"calls L1575 UNKNOWN"| nd0889d6e00ea27bb
+  n4b9b3011bdcc4244 -->|"calls L1579 UNKNOWN"| ne1a8c5f56833aae7
+  n4b9b3011bdcc4244 -->|"calls L1612 UNKNOWN"| n902d318420547eb5
+  n4b9b3011bdcc4244 -->|"calls L1619 UNKNOWN"| n9904f5809e9cb933
+  n4b9b3011bdcc4244 -->|"calls L1640 UNKNOWN"| n2b5365ea0217afff
+  n4b9b3011bdcc4244 -->|"calls L1655 UNKNOWN"| nd01d20362b61731b
+  n4b9b3011bdcc4244 -->|"calls L1656 UNKNOWN"| n754105fafc2358d5
+  n4b9b3011bdcc4244 -->|"calls L1658 UNKNOWN"| n94dfbdc422a64d2d
+  n4b9b3011bdcc4244 -->|"calls L1661 UNKNOWN"| nb4acb59c1d50e680
+  n4b9b3011bdcc4244 -->|"calls L1663 UNKNOWN"| nd01d20362b61731b
+  n4b9b3011bdcc4244 -->|"calls L1664 UNKNOWN"| n29ec954dd8336d4e
+  n4b9b3011bdcc4244 -->|"calls L1667 UNKNOWN"| ncea2339d01e4c5e4
+  n4b9b3011bdcc4244 -->|"calls L1676 UNKNOWN"| n15b58ad5b631512e
+  n4b9b3011bdcc4244 -->|"calls L1679 UNKNOWN"| ne54303278c130807
+  n4b9b3011bdcc4244 -->|"calls L1682 UNKNOWN"| ncbc8be96ea3daa32
+  n4b9b3011bdcc4244 -->|"calls L1690 UNKNOWN"| ncbc8be96ea3daa32
+  n4b9b3011bdcc4244 -->|"calls L1695 UNKNOWN"| nb07799ff7f0eec05
+  n4b9b3011bdcc4244 -->|"calls L1696 UNKNOWN"| n32e8bf19ad04378b
+  n4b9b3011bdcc4244 -->|"calls L1699 UNKNOWN"| nb4acb59c1d50e680
+  n4b9b3011bdcc4244 -->|"calls L1702 UNKNOWN"| nd01d20362b61731b
+  n4b9b3011bdcc4244 -->|"calls L1706 UNKNOWN"| nb4acb59c1d50e680
+  n4b9b3011bdcc4244 -->|"calls L1708 UNKNOWN"| n9e1b99bec3f86d0f
+  n4b9b3011bdcc4244 -->|"calls L1711 UNKNOWN"| ne2ada56e7567b573
+  n4b9b3011bdcc4244 -->|"calls L1714 UNKNOWN"| n95cecba2f46a3511
