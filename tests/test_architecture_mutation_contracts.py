@@ -56,16 +56,14 @@ def test_forward_ledger_rejects_real_update_and_delete(tmp_path):
         ledger.close()
 
 
-@pytest.mark.parametrize('shell_name', ['powershell.exe', 'pwsh'])
-def test_preview_guard_rejects_at_exact_boundary_before_later_preconditions(tmp_path, shell_name):
+def _run_preview_guard_contract(tmp_path, shell_name, source):
     shell = shutil.which(shell_name)
     if not shell:
         pytest.skip(f'{shell_name} unavailable; Windows mutation job requires both shells')
-    source = ROOT / 'scripts/control_center_transaction_engine.ps1'
     script = tmp_path / 'guard.ps1'
     phase_file = tmp_path / 'guard-phases.txt'
-    # Only parse and execute the exact function. No facade load, environment
-    # secrets, runtime config, services, provider calls or writes are possible.
+    # Load the real definition-only owner as the production facade does, without
+    # loading that facade or executing any service/provider/configuration path.
     script.write_text(r'''
 param([string]$Source,[string]$PhasePath)
 $ErrorActionPreference='Stop'
@@ -88,9 +86,18 @@ Write-ContractPhase 'find-before'
 $function=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Start-ReleasePromotion'},$true))
 Write-ContractPhase 'find-after'
 if ($function.Count -ne 1) { throw 'GUARD_SOURCE_AMBIGUOUS' }
-Write-ContractPhase 'define-before'
-Invoke-Expression $function[0].Extent.Text
-Write-ContractPhase 'define-after'
+$topLevel=@($ast.EndBlock.Statements)
+if ($ast.ParamBlock -or $ast.BeginBlock -or $ast.ProcessBlock -or
+    $ast.DynamicParamBlock -or $ast.CleanBlock -or $ast.ScriptRequirements -or
+    $ast.EndBlock.Traps.Count -or $ast.UsingStatements.Count -or
+    $ast.Attributes.Count -or @($topLevel | Where-Object {
+        $_ -isnot [Management.Automation.Language.FunctionDefinitionAst] -or
+        $_.IsWorkflow -or $_.IsFilter
+    }).Count) { throw 'GUARD_OWNER_DECLARATIONS_ONLY' }
+Write-ContractPhase 'owner-load-before'
+. $Source
+Write-ContractPhase 'owner-load-after'
+if (${function:Start-ReleasePromotion}.File -cne $Source) { throw 'GUARD_OWNER_SOURCE_MISMATCH' }
 $productionCandidateArtifactKind='PRODUCTION_CANDIDATE'
 $script:kind='PREVIEW';$script:later=0;$script:unlocked=0
 function Enter-ReleaseTransactionLock { return $true }
@@ -153,3 +160,33 @@ if ($production -ne 'LATER_PRECONDITION_REACHED' -or $script:later -ne 1 -or $sc
         print(f'GUARD_DIAGNOSTICS pid={process.pid} observed_exit={observed_exit} '
               f'final_exit={process.poll()} cleanup={cleanup} phases={phases!r} '
               f'stdout={stdout[:8192]!r} stderr={stderr[:8192]!r}')
+
+
+@pytest.mark.parametrize('shell_name', ['powershell.exe', 'pwsh'])
+def test_preview_guard_rejects_at_exact_boundary_before_later_preconditions(tmp_path, shell_name):
+    _run_preview_guard_contract(
+        tmp_path, shell_name, ROOT / 'scripts/control_center_transaction_engine.ps1')
+
+
+@pytest.mark.parametrize('shell_name', ['powershell.exe', 'pwsh'])
+@pytest.mark.parametrize('side_effect', ['statement', 'required-module', 'trap'])
+def test_preview_guard_owner_rejects_top_level_side_effects_before_loading(tmp_path, shell_name, side_effect):
+    source = tmp_path / 'unsafe-owner.ps1'
+    marker = tmp_path / 'must-not-exist.txt'
+    original = (ROOT / 'scripts/control_center_transaction_engine.ps1').read_text(encoding='utf-8-sig')
+    # The only possible injected side effect is confined to this test's own root.
+    escaped_marker = str(marker).replace("'", "''")
+    write = f"[IO.File]::WriteAllText('{escaped_marker}', 'executed')"
+    if side_effect == 'required-module':
+        module = tmp_path / 'owned-module.psm1'
+        module.write_text(write + '\n', encoding='utf-8')
+        escaped_module = str(module).replace("'", "''")
+        changed = f"#Requires -Modules '{escaped_module}'\n" + original
+    elif side_effect == 'trap':
+        changed = original + '\ntrap { ' + write + '; continue }\n'
+    else:
+        changed = original + '\n' + write + '\n'
+    source.write_text(changed, encoding='utf-8')
+    with pytest.raises(AssertionError, match='GUARD_OWNER_DECLARATIONS_ONLY'):
+        _run_preview_guard_contract(tmp_path, shell_name, source)
+    assert not marker.exists(), 'GUARD_OWNER_TOP_LEVEL_EXECUTED'
