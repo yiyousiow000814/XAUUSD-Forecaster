@@ -248,7 +248,7 @@ test("graph publication does not re-enter synchronous node measurement", () => {
 
 test("mobile 27: Explore Advanced lists only the current source slices", () => {
   assert.deepEqual(manifest.views.filter(view => ["ADVANCED", "CAMPAIGN"].includes(view.navigation.role)).map(view => view.id),
-    ["clock-transaction", "install-switch-recovery", "source-first-ack"]);
+    Object.keys(index.allowed.views));
 });
 
 test("mobile 28: Explore Advanced does not repeat beginner subsystem destinations", () => {
@@ -267,7 +267,24 @@ test("mobile 30: selected-node dock reaches subsystem drill-down", () => {
   assert.match(viewSource, /className=\{styles\.selectedDock\}[\s\S]*打开子系统/);
 });
 
-test("mobile 31: breadcrumb back remains available after subsystem drill-down", () => {
+test("mobile 31: breadcrumb navigation preserves return paths and minimum targets", () => {
   assert.match(viewSource, /setViewHistory\(items => \[\.\.\.items, viewId\]\)/);
   assert.match(viewSource, />Back<\/button>/); assert.match(viewSource, /items\.slice\(0, -1\)/);
+  // The shared rules serve desktop Inspector and phone modal navigation.
+  // Inspect every matching rule so a responsive override cannot shrink them.
+  for (const [owner, rules, minimumWidth] of [
+    ['view breadcrumb', /\.breadcrumbs button\s*\{([^}]*)\}/g, false],
+    ['code breadcrumb', /\.codeStructure > nav button\s*\{([^}]*)\}/g, true],
+  ]) {
+    const declarations = [...cssSource.matchAll(rules)].map(([, body]) => body);
+    for (const property of minimumWidth ? ['min-height', 'min-width'] : ['min-height']) {
+      const values = declarations.flatMap(body => [...body.matchAll(new RegExp(`(?:^|;)\\s*${property}:\\s*([^;]+)`, 'g'))].map(([, value]) => value.trim()));
+      assert.ok(values.length, `${owner}: shared ${property} exists`);
+      for (const value of values) {
+        const pixels = value.match(/^([\d.]+)px$/);
+        assert.ok(pixels && Number(pixels[1]) >= 44, `${owner}: minimum target ${property}`);
+      }
+    }
+    if (minimumWidth) assert.ok(declarations.some(body => /(?:^|;)\s*flex-shrink:\s*0\s*(?:;|$)/.test(body)), 'long code breadcrumbs retain their text width and scroll');
+  }
 });
