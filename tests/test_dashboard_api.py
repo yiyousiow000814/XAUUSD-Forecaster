@@ -4,6 +4,7 @@ import concurrent.futures
 import hashlib
 import importlib.util
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -63,6 +64,31 @@ from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
 
 
 UTC = timezone.utc
+
+
+@pytest.fixture(autouse=True)
+def _isolated_dashboard_credentials(monkeypatch: pytest.MonkeyPatch):
+    # API projections inspect quota configuration even when no provider request
+    # is sent. Tests must not consult inherited or Windows User credentials;
+    # credential-specific cases supply their own explicit fake source below.
+    from xauusd_forecaster import news_scheduler
+
+    monkeypatch.setattr(news_scheduler, "_runtime_environment_value", lambda _name: "")
+    user_reads = []
+    if os.name == "nt":
+        import winreg
+
+        original_open = winreg.OpenKey
+
+        def forbid_user_environment(root, subkey, *args, **kwargs):
+            if root == winreg.HKEY_CURRENT_USER and str(subkey).lower() == "environment":
+                user_reads.append(subkey)
+                raise AssertionError("dashboard tests must not read Windows User credentials")
+            return original_open(root, subkey, *args, **kwargs)
+
+        monkeypatch.setattr(winreg, "OpenKey", forbid_user_environment)
+    yield
+    assert user_reads == []
 
 
 def _dashboard_module():

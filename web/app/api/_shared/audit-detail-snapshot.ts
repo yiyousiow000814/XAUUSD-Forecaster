@@ -4,6 +4,7 @@ import { previewBundle, previewJson, rejectPreviewWrite } from "./preview";
 import {
   AUDIT_SNAPSHOT_IDS,
   AUDIT_DETAIL_SNAPSHOT_BYTES,
+  auditDetailPayloadSql,
   writeDashboardSnapshot,
 } from "./dashboard-snapshot";
 import { isIngestAuthorized } from "./ingest-auth";
@@ -44,7 +45,9 @@ export async function readAuditDetailSnapshot(
   try {
     const binding = env.DB as D1Database | undefined;
     const row = binding ? await binding.prepare(
-      "SELECT payload FROM dashboard_snapshots WHERE id = ?",
+      `SELECT payload FROM dashboard_snapshots WHERE id = ?
+       AND CASE WHEN length(CAST(payload AS BLOB)) <= ${AUDIT_DETAIL_SNAPSHOT_BYTES}
+         THEN ${auditDetailPayloadSql(snapshotId)} ELSE 0 END`,
     ).bind(snapshotId).first<{ payload: string }>() : null;
     if (row) return new Response(row.payload, {
       headers: {

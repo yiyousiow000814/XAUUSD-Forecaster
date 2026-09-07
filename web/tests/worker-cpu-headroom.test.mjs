@@ -46,23 +46,23 @@ const storyDetailRow = fields => ({
 });
 const briefDetailRow = fields => ({model_version: "fixture", brief: {items: []}, ...fields});
 
-async function compileAuditPreviewRoutes() {
+async function compileAuditPreviewRoutes(preview = true) {
   const dependencyPackage = process.env.AURUM_TEST_DEPENDENCY_PACKAGE
     ?? fileURLToPath(new URL("../package.json",import.meta.url));
   const require = createRequire(dependencyPackage);
   const {build} = require("esbuild");
-  const module = await build({
+  const builtRoutes = await build({
     bundle:true,write:false,platform:"node",format:"esm",
     nodePaths:[join(dirname(dependencyPackage),"node_modules")],
     external:["cloudflare:workers"],
     alias:{"next/server":join(dirname(dependencyPackage),"node_modules/vinext/dist/shims/server.js")},
-    define:{__AURUM_PREVIEW_BUNDLE__:"globalThis.__AURUM_AUDIT_CONTRACT_PREVIEW"},
+    define:{__AURUM_PREVIEW_BUNDLE__:preview ? "globalThis.__AURUM_AUDIT_CONTRACT_PREVIEW" : "null"},
     stdin:{resolveDir:fileURLToPath(new URL("..",import.meta.url)),loader:"ts",contents:
       `export * as briefs from './app/api/audit-briefs/route.ts';
        export * as stories from './app/api/audit-stories/route.ts';
        export * as decisions from './app/api/audit-decisions/route.ts';`},
   });
-  return import(`data:text/javascript;base64,${Buffer.from(module.outputFiles[0].contents).toString("base64")}`);
+  return import(`data:text/javascript;base64,${Buffer.from(builtRoutes.outputFiles[0].contents).toString("base64")}`);
 }
 
 test("seeds missing bounded audit metrics exactly once during storage handover", () => {
@@ -969,6 +969,32 @@ test("exact Python-built Audit fixtures cross real Preview routes with source id
   } finally {
     preparedFixtures.dispose();
     globalThis.__AURUM_AUDIT_CONTRACT_PREVIEW = previousBundle;
+    globalThis.__AURUM_TEST_WORKER_ENV = previousEnvironment;
+  }
+});
+
+test("actual Audit Next read handlers reject malformed and oversized split snapshots before HTTP success", async () => {
+  const previousEnvironment = globalThis.__AURUM_TEST_WORKER_ENV;
+  const local = new D1TestDatabase([]);
+  local.database.exec("CREATE TABLE dashboard_snapshots(id INTEGER PRIMARY KEY,payload TEXT,received_at TEXT)");
+  globalThis.__AURUM_TEST_WORKER_ENV = {DB:local};
+  try {
+    const routes = await compileAuditPreviewRoutes(false);
+    for (const [view,id,field] of [["briefs",7,"daily_news_briefs"],["stories",8,"storylines"],["decisions",6,"recent_decisions"]]) {
+      const bounded = jsonOfBytes(120_000,knownEmptyDetail({generated_at:"2026-09-06T11:00:00Z",[field]:[]}));
+      const set = value => local.database.prepare("INSERT OR REPLACE INTO dashboard_snapshots VALUES(?,?,?)").run(id,value,"2026-09-06T11:00:00Z");
+      set(bounded);
+      const accepted = await routes[view].GET();
+      assert.equal(accepted.status,200,view);
+      assert.equal(await accepted.text(),bounded);
+      for (const raw of ["{invalid","{}",JSON.stringify({[field]:[]}),JSON.stringify({[field]:[{}]}),jsonOfBytes(120_001,knownEmptyDetail({[field]:[]}))]) {
+        set(raw);
+        const rejected = await routes[view].GET();
+        assert.equal(rejected.status,503,`${view}/${raw.length}`);
+      }
+    }
+  } finally {
+    local.database.close();
     globalThis.__AURUM_TEST_WORKER_ENV = previousEnvironment;
   }
 });

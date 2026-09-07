@@ -21,6 +21,8 @@ import { sortNewsEvidenceByTime } from "../_lib/news-evidence-order";
 import type { VersionEvaluationStatus } from "../_lib/version-result-state";
 import LearningGraphModal from "../audit/LearningGraphModal";
 
+declare const __AURUM_DEPLOYMENT__: { is_preview: boolean };
+
 type Prediction = {
   model_identity: string;
   model_version: string;
@@ -1169,6 +1171,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
 
   const selectedAuditDetailState = view in AUDIT_DETAIL_RESOURCES
     ? auditDetailState[view as AuditDetailView] : null;
+  const auditDetailResourceMode = __AURUM_DEPLOYMENT__.is_preview ? "build-snapshot" : "current";
 
   useEffect(() => {
     return scheduleDashboardRefresh(
@@ -1187,10 +1190,10 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
       () => void refreshAuditDetail(detailView, false),
       () => void refreshAuditDetail(detailView, true),
       DASHBOARD_REFRESH_INTERVALS.status,
-      "current",
+      auditDetailResourceMode,
       `audit-detail:${detailView}`,
     );
-  }, [refreshAuditDetail, view]);
+  }, [auditDetailResourceMode, refreshAuditDetail, view]);
 
   useEffect(() => {
     if (view !== "evidence") return;
