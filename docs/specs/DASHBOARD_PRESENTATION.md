@@ -90,6 +90,12 @@ body consumes the actual space below the header, not a fixed deduction for a
 presumed one-line title. Check long function/component names, the final body
 control, close and focus return on desktop, both phone widths and short
 landscape; wrapping must not trade horizontal clipping for unreachable content.
+While either mobile sheet is open, reserve the measured top Preview-banner band
+as well as the safe area. The mandatory Preview identity stays visible above the
+sheet; neither its height nor the number of banner instances is assumed. Ignore
+unrelated in-page banners below that band. Remeasure on viewport/banner changes,
+and stop observation on close. On short landscape, verify the entire close target
+with corner hit-tests, not only its center.
 
 ## Operator-facing time
 

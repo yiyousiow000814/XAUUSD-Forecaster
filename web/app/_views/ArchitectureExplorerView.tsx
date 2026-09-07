@@ -24,6 +24,7 @@ import {
   architectureMobileInteractionReducer,
   architectureSheetTabIndex,
   lockArchitecturePageScroll,
+  observeArchitectureSheetPreviewInset,
   restoreArchitecturePageScroll,
   type ArchitectureMobilePanel,
 } from "../_lib/architecture-mobile-interaction";
@@ -195,13 +196,14 @@ function useMobileSheetLifecycle(
   onClose: () => void,
   returnFocusRef: RefObject<HTMLButtonElement | null>,
 ) {
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (panel === "NONE") return;
     const scrollY = window.scrollY;
     const body = document.body;
     const returnFocus = returnFocusRef.current;
     const scrollLock = lockArchitecturePageScroll(body.style, scrollY, document.documentElement.clientWidth);
     const layer = document.querySelector<HTMLElement>(`[data-mobile-sheet="${panel}"]`);
+    const stopPreviewInset = layer ? observeArchitectureSheetPreviewInset(layer) : undefined;
     const focusable = () => Array.from(layer?.querySelectorAll<HTMLElement>(
       'button:not([disabled]), select:not([disabled]), input:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
     ) ?? []);
@@ -219,6 +221,7 @@ function useMobileSheetLifecycle(
     };
     document.addEventListener("keydown", keydown);
     return () => {
+      stopPreviewInset?.();
       document.removeEventListener("keydown", keydown);
       window.scrollTo({ top: restoreArchitecturePageScroll(body.style, scrollLock), behavior: "auto" });
       window.requestAnimationFrame(() => returnFocus?.focus({ preventScroll: true }));
