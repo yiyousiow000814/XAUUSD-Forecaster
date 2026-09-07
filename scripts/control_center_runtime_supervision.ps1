@@ -233,7 +233,7 @@ finally:
 '@
     $read = Invoke-Utf8NativeProcess -FilePath $Python `
         -Arguments @("-c", $copy, $SourceDatabase, $TargetDatabase) `
-        -Environment @{ PYTHONUTF8 = "1" }
+        -Environment @{ PYTHONUTF8 = "1" } -TimeoutMilliseconds 120000
     if ($read.exit_code -ne 0) {
         throw "candidate evidence copy failed: $((@($read.stdout_lines) + @($read.stderr_lines)) -join "`n")"
     }

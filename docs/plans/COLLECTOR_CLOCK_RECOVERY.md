@@ -231,3 +231,49 @@ failure history, and unchanged CPU/semantic retries. Exercise PS5.1 and PS7
 through the actual operation dispatcher. Rehearse the exact installed owner
 with the retained input and actual native copy. Existing independent review
 requirements remain; author testing is not independent approval.
+
+
+## Measured database-copy execution budget
+
+The complete installed rehearsal at source `0dce57e3` recorded two continuously
+growing copies of the 6,955,085,824-byte working database. Progress reached
+6,018,481,600 bytes after about 25 seconds on the first attempt; the retry
+reached full file length only around the generic 30-second deadline. Both native
+children were terminated before successful completion. File length alone is not
+a consistent-copy receipt. The earlier guarded baseline-only copy completed in
+28.317 seconds. These observations expose an unsuitable generic subprocess
+budget for a real full-database backup, not test state-space growth or repeated
+historical test work. No database size reduction or new copy is required for
+unrelated changes.
+
+Change only the existing Copy-CandidatePreflightDatabase invocation to a fixed
+120-second operation budget. The generic native timeout remains 30 seconds and
+its maximum remains 300 seconds. Two minutes bounds this single required online
+backup, including destination close/flush, under running-owner I/O variability;
+it is an execution allowance, not a promised storage throughput. Migration,
+API preflight, CI, qualification and observation deadlines do not change.
+
+The serialized controller remains the sole owner. Both its direct preflight
+call and New-CandidatePreflightDatabase compose the same copy helper, real
+Python/SQLite backup and native process-tree cleanup. Source remains read-only;
+partial destinations never qualify. The current business runtime stays active.
+No durable state, lock, retry loop, schema, locator or mutation authority is
+added. Success still requires native exit 0, followed by migration and the full
+existing validation path. Timeout remains explicit same-identity review with
+preserved failure history; other errors retain existing classification.
+
+New controller/old runtime and new controller/old database use the same backup
+interface; old controller/new runtime or rollback retains its former bounded
+copy behavior and remains fail closed. A crash uses existing owned-child and
+partial-preflight cleanup. No switch has occurred during copy, so Stable
+recovery does not depend on finishing it. This is controlled local OS/SQLite
+work; provider and human evidence are unaffected.
+
+Verification: extend the existing consistent-copy/migration contract for both
+Windows PowerShell and pwsh, recording the actual native binding while executing
+real Python/SQLite and preserving source data/schema. Existing native timeout
+termination and preflight failure cleanup contracts remain mandatory. Execute
+the exact installed controller against the retained production-shaped database
+with no other local build/test workload; require successful copy, migration,
+API preflight and subsequent qualification. Independent review and real
+production eligibility remain separate requirements.

@@ -2198,7 +2198,8 @@ def test_preflight_selects_an_available_loopback_port(tmp_path) -> None:
     assert result != occupied_port
 
 
-def test_candidate_preflight_migrates_an_isolated_consistent_copy(tmp_path) -> None:
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+def test_candidate_preflight_migrates_an_isolated_consistent_copy(tmp_path, powershell) -> None:
     source = tmp_path / "legacy.sqlite3"
     target = tmp_path / "candidate" / "forward.sqlite3"
     connection = sqlite3.connect(source)
@@ -2226,14 +2227,20 @@ def test_candidate_preflight_migrates_an_isolated_consistent_copy(tmp_path) -> N
 
     result = _run_control_center_contract(
         tmp_path,
+        "$script:actualCopyNative=(Get-Command Invoke-Utf8NativeProcess).ScriptBlock;"
+        "$script:copyBudgets=@();"
+        "function Invoke-Utf8NativeProcess {param($FilePath,$Arguments,$WorkingDirectory,"
+        "$Environment,[int]$TimeoutMilliseconds=30000);"
+        "$script:copyBudgets+= $TimeoutMilliseconds; & $script:actualCopyNative @PSBoundParameters};"
         f"New-CandidatePreflightDatabase -Python '{sys.executable}' "
         f"-StageRoot '{ROOT}' -SourceDatabase '{source}' "
         f"-TargetDatabase '{target}'; Copy-CandidatePreflightState "
         f"-SourceDatabase '{source}' -TargetDatabase '{target}'; "
-        "Write-Output 'prepared'",
+        "Write-Output ('prepared:'+($script:copyBudgets -join ','))",
+        powershell=powershell,
     )
 
-    assert result == "prepared"
+    assert result == "prepared:120000,30000"
     source_connection = sqlite3.connect(source)
     target_connection = sqlite3.connect(target)
     assert source_connection.execute(

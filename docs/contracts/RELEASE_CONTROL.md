@@ -415,6 +415,15 @@ qualification. Repeated timeouts return to review, without changing the native
 deadline or any later CI, Worker, Access, compatibility or promotion gate.
 Other preflight failures retain their existing classification.
 
+The isolated SQLite database backup has a fixed 120-second native execution
+budget, including destination close/flush. The generic subprocess default,
+migration and later qualification budgets are unchanged. Online backup must
+finish successfully; file length or partial data never qualifies. Native
+process-tree termination and partial-preflight cleanup apply on expiry. Both
+preflight entry points use this same copy owner; retry does not renew or extend
+the per-attempt allowance. This budget covers real retained-database I/O, not
+additional test scenarios or repeated verification work.
+
 Required CI is repository trust evidence, not deployed Stable runtime debt.
 Progressive delivery never converts a red latest exact-SHA check into Class C.
 If a repository test represents a known production defect, its fixture must
