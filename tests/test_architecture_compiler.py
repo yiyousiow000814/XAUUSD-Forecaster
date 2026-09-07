@@ -735,6 +735,42 @@ def test_transport_growth_has_independent_hard_limits(source, kind, reason):
         compiler.render(index)
 
 
+def test_producer_stops_serializing_the_record_tail_when_aggregate_bytes_are_exhausted(source, monkeypatch):
+    index = compiler.compile_index(source)
+    edge = dict(index['observed']['edges'][0], statement='x' * 500_000)
+    index['observed']['edges'] = [edge] * 9
+    original, ordinals = compiler.canonical, []
+    def spy(value, *args, **kwargs):
+        if isinstance(value, list) and len(value) == 2 and isinstance(value[0], int):
+            ordinals.append(value[0])
+        return original(value, *args, **kwargs)
+    monkeypatch.setattr(compiler, 'canonical', spy)
+    with pytest.raises(ValueError, match='ARCHITECTURE_TRANSPORT_TOTAL_BUDGET_EXCEEDED'):
+        compiler.render_transport(index)
+    # Symbols are encoded first; inspect only the statement-bearing edge tail.
+    edge_ordinals = ordinals[-7:]
+    assert edge_ordinals == list(range(7))
+    assert 7 not in ordinals and 8 not in ordinals
+
+
+@pytest.mark.parametrize('character,count,accepted', [('中', 200_000, True),
+    ('x', 2 * 1024 * 1024, False), ('中', 1_000_000, False), ('\x00', 1_000_000, False)],
+    ids=['valid-unicode', 'oversized-ascii', 'oversized-utf8', 'escaped-controls'])
+def test_large_logical_strings_never_require_one_unbounded_escaped_allocation(monkeypatch, character, count, accepted):
+    text = character * count
+    original = json.dumps
+    expected = original({'text': text}, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n' if accepted else None
+    def bounded_dump(value, *args, **kwargs):
+        assert value is not text, 'do not hand the complete oversized logical string to the scalar encoder'
+        return original(value, *args, **kwargs)
+    monkeypatch.setattr(json, 'dumps', bounded_dump)
+    if accepted:
+        assert compiler.canonical({'text': text}, compiler.MAXIMUM_INDEX_BYTES) == expected
+    else:
+        with pytest.raises(ValueError, match='ARCHITECTURE_INDEX_BUDGET_EXCEEDED'):
+            compiler.canonical({'text': text}, compiler.MAXIMUM_INDEX_BYTES)
+
+
 @pytest.mark.parametrize('kind,reason', [
     ('parts', 'ARCHITECTURE_TRANSPORT_PART_BUDGET_EXCEEDED'),
     ('records', 'ARCHITECTURE_TRANSPORT_RECORD_BUDGET_EXCEEDED'),

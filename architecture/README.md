@@ -112,7 +112,13 @@ Each `critical-source-facts-v1` part contains `source_input_digest`,
 the record is unchanged. Source grouping and complete-record splitting never
 sort or deduplicate the reconstructed arrays. A split source retains the same
 input identity in each part. Packing accounts for each serialized record once,
-not repeated full-prefix serialization. An indivisible oversized record fails.
+not repeated full-prefix serialization. Record-byte admission stops collecting
+the remaining tail when the aggregate budget is exhausted. Canonical emission
+also checks fragment bytes incrementally and escapes long strings in finite
+chunks, rather than first allocating an arbitrarily large escaped value. The
+logical AST/index already exists in memory; this is a serialization work bound,
+not a claim that compilation or peak process memory equals the wire budget.
+An indivisible oversized record fails.
 
 Canonical encoding is compact UTF-8, Unicode-code-point-sorted object keys,
 original array order and one final LF. Integer-looking and non-BMP keys follow

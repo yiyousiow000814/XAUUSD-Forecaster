@@ -33,33 +33,68 @@ def encoded(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + '\n'
 
 
-def canonical(value):
+def canonical(value, maximum_bytes=MAXIMUM_TRANSPORT_BYTES):
     """The wire/hash domain is Unicode scalar JSON with safe integer numbers.
 
     Code-point key order (not JavaScript UTF-16 order), original array order and
     multiplicity are part of the logical identity. Floating point is not a
     current source fact and cannot silently gain a cross-runtime hash meaning.
     """
-    def validate(item, depth=0):
+    pieces, size = [], 1  # Reserve the final LF before encoding any value.
+    reason = ('ARCHITECTURE_INDEX_BUDGET_EXCEEDED' if maximum_bytes == MAXIMUM_INDEX_BYTES
+              else 'ARCHITECTURE_TRANSPORT_TOTAL_BUDGET_EXCEEDED')
+    def write(fragment):
+        nonlocal size
+        size += len(fragment.encode('utf-8', errors='strict'))
+        if size > maximum_bytes:
+            raise ValueError(reason)
+        pieces.append(fragment)
+
+    def emit(item, depth=0):
         if depth > 32:
             raise ValueError('ARCHITECTURE_TRANSPORT_VALUE_INVALID')
         if item is None or isinstance(item, bool):
-            return
-        if isinstance(item, str):
-            item.encode('utf-8', errors='strict')
+            write('null' if item is None else 'true' if item else 'false')
+        elif isinstance(item, str):
+            # The logical input already exists. Do not allocate one enormous
+            # escaped JSON string before discovering that its wire cannot fit.
+            if len(item) + 2 > maximum_bytes - size:
+                raise ValueError(reason)
+            if len(item) <= 1024:
+                write(json.dumps(item, ensure_ascii=False))
+            else:
+                write('"')
+                for offset in range(0, len(item), 1024):
+                    write(json.dumps(item[offset:offset + 1024], ensure_ascii=False)[1:-1])
+                write('"')
         elif isinstance(item, int) and abs(item) <= 9_007_199_254_740_991:
-            return
+            write(str(item))
         elif isinstance(item, list):
-            for child in item:
-                validate(child, depth + 1)
-        elif isinstance(item, dict) and all(isinstance(key, str) for key in item):
-            for key, child in item.items():
-                validate(key, depth + 1)
-                validate(child, depth + 1)
+            if 2 * len(item) + 1 > maximum_bytes - size:
+                raise ValueError(reason)
+            write('[')
+            for ordinal, child in enumerate(item):
+                if ordinal: write(',')
+                emit(child, depth + 1)
+            write(']')
+        elif isinstance(item, dict):
+            # At least five bytes per key/value prevents sorting an unbounded
+            # key set which could never satisfy this wire's byte admission.
+            if 5 * len(item) + 1 > maximum_bytes - size:
+                raise ValueError(reason)
+            if not all(isinstance(key, str) for key in item):
+                raise ValueError('ARCHITECTURE_TRANSPORT_VALUE_INVALID')
+            write('{')
+            for ordinal, key in enumerate(sorted(item)):
+                if ordinal: write(',')
+                emit(key, depth + 1)
+                write(':')
+                emit(item[key], depth + 1)
+            write('}')
         else:
             raise ValueError('ARCHITECTURE_TRANSPORT_VALUE_INVALID')
-    validate(value)
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n'
+    emit(value)
+    return ''.join(pieces) + '\n'
 
 
 def _part_name(ordinal):
@@ -85,6 +120,7 @@ def render_transport(index):
     if set(observed) != set(FAMILIES):
         raise ValueError('ARCHITECTURE_TRANSPORT_FAMILY_INVALID')
     groups = {}
+    record_bytes = 0
     # Serialize each complete record once for linear packing, retaining its
     # global ordinal instead of relying on a later sort to recover stable ties.
     for family in FAMILIES:
@@ -93,9 +129,12 @@ def render_transport(index):
             if source not in index['inputs']:
                 raise ValueError('ARCHITECTURE_TRANSPORT_SOURCE_INVALID')
             pair = [ordinal, record]
-            size = len(canonical(pair).encode('utf-8')) - 1
+            size = len(canonical(pair, MAXIMUM_INDEX_BYTES).encode('utf-8')) - 1
             if size >= MAXIMUM_INDEX_BYTES:
                 raise ValueError('ARCHITECTURE_INDEX_BUDGET_EXCEEDED')
+            record_bytes += size
+            if record_bytes > MAXIMUM_TRANSPORT_BYTES:
+                raise ValueError('ARCHITECTURE_TRANSPORT_TOTAL_BUDGET_EXCEEDED')
             groups.setdefault(source, []).append((family, pair, size))
     outputs, descriptors = {}, []
     total = 0
@@ -105,7 +144,7 @@ def render_transport(index):
         if len(descriptors) >= MAXIMUM_PARTS:
             raise ValueError('ARCHITECTURE_TRANSPORT_PART_BUDGET_EXCEEDED')
         name = _part_name(len(descriptors))
-        content = canonical(part)
+        content = canonical(part, MAXIMUM_INDEX_BYTES)
         raw = content.encode('utf-8')
         if len(raw) > MAXIMUM_INDEX_BYTES:
             raise ValueError('ARCHITECTURE_INDEX_BUDGET_EXCEEDED')
@@ -141,7 +180,7 @@ def render_transport(index):
         index={key: value for key, value in index.items() if key != 'observed'},
         counts=counts, logical_sha256=hashlib.sha256(canonical(index).encode('utf-8')).hexdigest(),
         parts=descriptors)
-    content = canonical(manifest)
+    content = canonical(manifest, MAXIMUM_INDEX_BYTES)
     size = len(content.encode('utf-8'))
     if size > MAXIMUM_INDEX_BYTES:
         raise ValueError('ARCHITECTURE_INDEX_BUDGET_EXCEEDED')
