@@ -203,6 +203,19 @@ def test_python_gate_is_parallel_bounded_and_keeps_required_name() -> None:
     assert "needs.python-shards.result" in workflow
     assert "python -m pytest -q" not in workflow
     assert "pytest==9.1.1 pytest-timeout==2.4.0" in workflow
+    diagnostic_owners = (
+        "quality-gates.yml", "windows-runtime-gates.yml", "formal-verification.yml",
+    )
+    uploader_identities = set()
+    for owner in diagnostic_owners:
+        source = (ROOT / ".github" / "workflows" / owner).read_text(encoding="utf-8")
+        pins = re.findall(r"uses: actions/upload-artifact@([0-9a-f]{40})\s+# (v\S+)", source)
+        assert len(pins) == 1, owner
+        uploader_identities.update(pins)
+        assert "retention-days: 7" in source
+        assert "include-hidden-files: true" not in source
+        assert max(map(int, re.findall(r"timeout-minutes:\s*(\d+)", source))) <= 5
+    assert len(uploader_identities) == 1
 
 
 def test_web_gate_keeps_complete_suite_and_uses_bounded_lockfile_install() -> None:
@@ -218,6 +231,16 @@ def test_web_gate_keeps_complete_suite_and_uses_bounded_lockfile_install() -> No
     assert "--kill-grace-seconds 10" in workflow
     assert "python -m pip install -e .." in workflow
     assert workflow.count("run: npm test") == 1
+    package = json.loads((ROOT / "web" / "package.json").read_text(encoding="utf-8"))
+    lock = json.loads((ROOT / "web" / "package-lock.json").read_text(encoding="utf-8"))
+    assert package["packageManager"] == "npm@11.6.2"
+    for kind in ("dependencies", "devDependencies"):
+        assert lock["packages"][""][kind] == package[kind]
+        for name, version in package[kind].items():
+            assert re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version), name
+            resolved = lock["packages"][f"node_modules/{name}"]
+            assert resolved["version"] == version, name
+            assert resolved["integrity"].startswith("sha512-"), name
 
     runner = (ROOT / "scripts" / "run_bounded_web_install.py").read_text(
         encoding="utf-8"
