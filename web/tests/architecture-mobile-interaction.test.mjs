@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { getViewportForBounds } from "@xyflow/react";
 
 import { createArchitectureCameraController } from "../app/_lib/architecture-camera.ts";
 import {
+  ARCHITECTURE_MIN_ZOOM,
+  ARCHITECTURE_NODE_BOX,
   architectureCanvasHeight,
+  architectureFitOptions,
   architectureGraphBounds,
   architectureMobileViewport,
   buildArchitectureGraph,
@@ -133,6 +137,39 @@ test("mobile 18: automatic framing places meaningful graph bounds near the top",
     const topDistance = bounds.y * viewport.zoom + viewport.y;
     assert.ok(topDistance <= 574 * .25, `${view.id} top distance ${topDistance}`); assert.ok(topDistance >= 0);
   }
+});
+
+test("graph fit and minimum user zoom preserve physical hit targets in every node state", () => {
+  const borders = [...cssSource.matchAll(/\.graphNode(?:\.[\w-]+)*\s*\{([^}]*)\}/g)].flatMap(([, declarations]) => {
+    const border = declarations.match(/(?:^|;)\s*border(?:-width)?\s*:\s*([^;]+)/);
+    if (!border) return [];
+    const pixels = border[1].match(/^([\d.]+)px(?:\s|$)/);
+    assert.ok(pixels, 'node border must retain a measurable pixel inset');
+    return [Number(pixels[1])];
+  });
+  assert.equal(Math.max(...borders), ARCHITECTURE_NODE_BOX.maximumBorder);
+  let denseGraphRequiresPanning = false;
+  for (const view of manifest.views) for (const direction of ['LR', 'TB']) {
+    const graph = buildArchitectureGraph(manifest, view.id, direction);
+    const bounds = architectureGraphBounds(graph.nodes, graph.laneBoxes);
+    for (const [width, height, mobile] of [[1200, 650, false], [390, 574, true], [360, 544, true]]) {
+      const options = architectureFitOptions(graph.nodes.length, mobile);
+      const fitted = getViewportForBounds(bounds, width, height, options.minZoom, options.maxZoom, options.padding);
+      const automaticMobile = architectureMobileViewport(graph.nodes, graph.laneBoxes, width, height);
+      for (const zoom of [ARCHITECTURE_MIN_ZOOM, fitted.zoom, automaticMobile.zoom]) {
+        for (const node of graph.nodes) for (const border of borders) {
+          assert.ok((node.width - border * 2) * zoom >= 44, `${view.id}: target width`);
+          assert.ok((node.height - border * 2) * zoom >= 44, `${view.id}: target height`);
+        }
+      }
+      if (bounds.width * fitted.zoom > width || bounds.height * fitted.zoom > height) denseGraphRequiresPanning = true;
+    }
+  }
+  assert.ok(denseGraphRequiresPanning, 'readable interaction scale is not a promise to show the whole graph');
+  assert.match(viewSource, /elementsSelectable minZoom=\{ARCHITECTURE_MIN_ZOOM\}/);
+  assert.match(viewSource, /flow\.fitView\(\{ \.\.\.architectureFitOptions\(/);
+  assert.match(viewSource, /const zoom = Math\.max\(ARCHITECTURE_MIN_ZOOM, current\.flow\.getZoom\(\)\)/);
+  assert.match(viewSource, /panOnDrag preventScrolling/);
 });
 
 test("mobile 19: node selection issues no duplicate Fit", () => {

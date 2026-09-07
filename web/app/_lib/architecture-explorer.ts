@@ -80,6 +80,13 @@ export const ARCHITECTURE_LANE_GAP = { LR: 24, TB: 20 } as const;
 export const ARCHITECTURE_EDGE_OVERLAP_TOLERANCE = 6;
 export const ARCHITECTURE_MOBILE_NODE_WIDTH_FLOOR = 168;
 export const ARCHITECTURE_SEMANTIC_LAYOUT_PASSES = 8;
+export const ARCHITECTURE_NODE_BOX = { LR: 190, TB: 238, height: 124, maximumBorder: 2 } as const;
+// Selection/failure borders consume two pixels per side inside the node box.
+// Round upward so browser transform precision cannot turn 44px into 43.999px.
+export const ARCHITECTURE_MIN_ZOOM = Math.ceil(
+  44 / (Math.min(ARCHITECTURE_NODE_BOX.LR, ARCHITECTURE_NODE_BOX.TB, ARCHITECTURE_NODE_BOX.height)
+    - 2 * ARCHITECTURE_NODE_BOX.maximumBorder) * 100,
+) / 100;
 
 const STATES = new Set<ArchitectureState>(["UNKNOWN", "CURRENT", "PENDING", "TARGET", "PAUSED", "RETAINED"]);
 const PATH_STATES = new Set<ArchitecturePathState>(["SOURCE_ONLY", "CURRENT_PATH", "PENDING_PATH", "LEGACY_SHIM", "TARGET_PATH"]);
@@ -299,7 +306,7 @@ export function architectureFailureImpact(manifest: ArchitectureManifest, nodeId
 
 export function architectureFitOptions(nodeCount: number, mobile: boolean) {
   const maxZoom = nodeCount <= 5 ? (mobile ? 1.12 : 1.3) : nodeCount <= 9 ? (mobile ? 1 : 1.12) : (mobile ? .9 : 1);
-  return { padding: mobile ? .08 : .07, maxZoom, duration: 280 } as const;
+  return { padding: mobile ? .08 : .07, minZoom: ARCHITECTURE_MIN_ZOOM, maxZoom, duration: 280 } as const;
 }
 
 export function architectureGraphBounds(nodes: ArchitectureGraphNode[], lanes: ArchitectureGraphLane[]): ArchitectureGraphBounds {
@@ -324,7 +331,7 @@ export function architectureMobileViewport(
   const minimumNodeWidth = Math.min(...nodes.map(node => node.width));
   const readabilityZoom = ARCHITECTURE_MOBILE_NODE_WIDTH_FLOOR / minimumNodeWidth;
   const fitZoom = Math.min((canvasWidth - 28) / bounds.width, (canvasHeight - 96) / bounds.height, 1);
-  const zoom = Math.max(readabilityZoom, fitZoom);
+  const zoom = Math.max(ARCHITECTURE_MIN_ZOOM, readabilityZoom, fitZoom);
   const boundsCenterX = bounds.x + bounds.width / 2;
   const convergenceNodes = nodes.filter(node => node.data.incomingPorts.length > 1);
   const convergenceCenterX = convergenceNodes.length
@@ -615,7 +622,7 @@ export function architectureRouteLabelPoint(points: ArchitecturePoint[]) {
 export function buildArchitectureGraph(manifest: ArchitectureManifest, viewId: string, direction?: "LR" | "TB") {
   const view = manifest.views.find(item => item.id === viewId) ?? manifest.views[0];
   const rankdir = direction ?? view.layout_direction;
-  const width = rankdir === "TB" ? 238 : 190; const height = 124;
+  const width = ARCHITECTURE_NODE_BOX[rankdir]; const height = ARCHITECTURE_NODE_BOX.height;
   const graph = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
   graph.setGraph({ rankdir, ranker: "network-simplex", nodesep: rankdir === "TB" ? 24 : 30, ranksep: rankdir === "TB" ? 72 : 66, marginx: 24, marginy: 24 });
   const nodeById = new Map(manifest.nodes.map(item => [item.id, item]));

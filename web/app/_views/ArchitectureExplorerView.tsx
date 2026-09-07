@@ -13,6 +13,7 @@ import {
   type ArchitectureCameraIntent,
 } from "../_lib/architecture-camera";
 import {
+  ARCHITECTURE_MIN_ZOOM,
   architectureCanvasHeight, architectureCommitSha, architectureFailureImpact, architectureFitOptions, architectureGithubHref, architectureRelations,
   architectureEdgeRoute, architectureMobileViewport, architectureRouteLabelPoint, architectureRoutePath,
   architectureDisclosedEdgeIds, architectureDisclosedGraph, bestViewForNode, buildArchitectureGraph, bundledArchitectureManifest, searchArchitectureNodes,
@@ -321,7 +322,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
         }
         const item = current.graph.nodes.find(node => node.id === intent.nodeId);
         if (!item) return;
-        const zoom = current.flow.getZoom();
+        const zoom = Math.max(ARCHITECTURE_MIN_ZOOM, current.flow.getZoom());
         if (current.mobile) {
           const canvasWidth = canvasRef.current?.clientWidth ?? window.innerWidth;
           current.flow.setViewport({
@@ -578,7 +579,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
       <div className={styles.canvas} data-graph-direction={graph.direction} data-testid="architecture-graph" ref={canvasRef} style={{ height: canvasHeight }}
         onTransitionEnd={event => { if (event.propertyName === "width") { canvasTransitionCompleteRef.current = true; camera.layoutChanged(); } }}>
         <ReactFlow<ArchitectureCanvasNode, ArchitectureFlowEdge> defaultNodes={flowElements} defaultEdges={flowEdges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
-          elementsSelectable minZoom={0.25} maxZoom={1.6} nodesConnectable={false} nodesDraggable={false}
+          elementsSelectable minZoom={ARCHITECTURE_MIN_ZOOM} maxZoom={1.6} nodesConnectable={false} nodesDraggable={false}
           onInit={initializeFlow}
           onEdgeClick={(_, edge) => selectEdge(edge.id)}
           onEdgeMouseEnter={(_, edge) => setHoveredEdgeId(edge.id)} onEdgeMouseLeave={() => setHoveredEdgeId(null)}
