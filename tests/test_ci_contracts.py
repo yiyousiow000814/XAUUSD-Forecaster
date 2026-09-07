@@ -205,6 +205,7 @@ def test_python_gate_is_parallel_bounded_and_keeps_required_name() -> None:
     assert "pytest==9.1.1 pytest-timeout==2.4.0" in workflow
     diagnostic_owners = (
         "quality-gates.yml", "windows-runtime-gates.yml", "formal-verification.yml",
+        "architecture.yml",
     )
     uploader_identities = set()
     for owner in diagnostic_owners:

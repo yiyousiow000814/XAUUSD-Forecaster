@@ -62,6 +62,27 @@ that a visible line is continuous after cascade and responsive overrides.
   native keyboard and `aria-expanded` state. Cards and technical evidence must
   not cause horizontal overflow at desktop, 390x844, or 360x800.
 
+## Architecture graph interaction scale
+
+Graph node buttons retain at least a 44x44 CSS-pixel target after the canvas
+transform, including the thicker selected/failure borders. A pre-transform CSS
+minimum alone is insufficient. Automatic Fit, manual Fit, user zoom and custom
+mobile framing share the same minimum interaction scale; mobile may retain its
+higher readability floor.
+
+Large source graphs need not fit completely on one screen at that scale. Keep
+panning, zooming, search, keyboard selection and source/detail navigation
+available rather than shrinking targets to force the whole graph into view.
+Verify actual transformed targets on desktop, 390x844 and 360x800 Preview surfaces
+after initial Fit and at minimum user zoom. Source/layout math is supporting
+evidence, not a substitute for deployed geometry.
+
+Canvas overlays reserve separate hit regions: desktop zoom/Fit controls use the
+top-left, the MiniMap the bottom-right, the legend the bottom-left and keyboard
+hints the top-right. Mobile keeps its existing MiniMap exclusion and controls
+above the legend. Verify actual control clicks as well as target dimensions;
+raising one overlay's z-index must not merely block a different control.
+
 ## Operator-facing time
 
 - Durable records and API payloads retain canonical timezone-aware timestamps.
