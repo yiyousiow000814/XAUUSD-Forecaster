@@ -45,9 +45,13 @@ UTF-8 BOM and CRLF/LF for Windows/Linux parity. The CI summary records source SH
 separately. Test sources are inputs but their presence is not a test PASS.
 The parser identity includes TypeScript's exact version, resolved archive and
 full SRI from the existing Web lock. Unrelated package-lock entries do not churn
-that identity. The local Web installation or explicit
-`ARCHITECTURE_TYPESCRIPT_PACKAGE` must have the same owning npm lock and installed
-version before parser execution. The isolated tool cache is keyed by the full
+that identity. Parser execution accepts only the executing tool checkout's fixed
+Web installation or digest-keyed cache, including physical path containment
+before reading package metadata. The retired `ARCHITECTURE_TYPESCRIPT_PACKAGE`
+environment variable is ignored; it cannot select an installation root or provide
+a missing-dependency fallback. The owning npm lock and installed version must also match
+before parser execution. An explicit installer `--cache` is an acquisition output,
+not authority for the parser to load that location. The isolated tool cache is keyed by the full
 locked identity, not just the version. Acquisition errors are TOOL_UNAVAILABLE
 or TOOL_INTEGRITY_FAILED; syntax failures remain ARCHITECTURE_PARSE_FAILED.
 The npm lock is acquisition integrity, not a signed provenance claim for a

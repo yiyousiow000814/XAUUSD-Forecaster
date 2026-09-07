@@ -48,7 +48,7 @@ jobs:
           node-version: '24'
       - name: Install the architecture owner's lock-bound TypeScript parser
         if: matrix.id == 'python-4'
-        run: python scripts/architecture_typescript_tool.py --github-env "$GITHUB_ENV"
+        run: python scripts/architecture_typescript_tool.py
       - name: Run bounded Python shard
         run: python scripts/run_python_test_shard.py --shard "${{ matrix.id }}" --output output/python-tests
       - name: Upload bounded Python diagnostics

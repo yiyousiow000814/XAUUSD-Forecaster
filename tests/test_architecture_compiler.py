@@ -134,7 +134,14 @@ def test_build_then_check_and_tamper_are_real_cli_boundaries(request, fixture_na
     if fixture_name == 'typescript_source':
         import architecture_typescript_tool as tool
         package, _ = tool.resolve_package(ROOT)
-        monkeypatch.setenv(tool.PACKAGE_ENV, str(package))
+        # The copied real CLI owns its own fixed installation, not an environment
+        # override pointing back to the original checkout. TypeScript's parser
+        # entry is self-contained; do not clone unrelated Web dependencies.
+        installed = source / 'web/node_modules/typescript'
+        (installed / 'lib').mkdir(parents=True)
+        for relative in ('package.json', 'lib/typescript.js'):
+            shutil.copyfile(package / relative, installed / relative)
+        monkeypatch.setenv('ARCHITECTURE_TYPESCRIPT_PACKAGE', str(source / 'untrusted-tool'))
     command = [sys.executable, str(source / 'scripts/compile_architecture.py')]
     options = dict(capture_output=True, timeout=15,
                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
@@ -378,7 +385,8 @@ def test_typescript_sources_and_tool_identity_are_relocatable_without_unrelated_
 def test_typescript_package_mismatch_fails_before_any_parser_code(typescript_source, tmp_path, monkeypatch, change):
     import architecture_typescript_tool as tool
     identity = tool.tool_identity(typescript_source)
-    project = tmp_path / 'tool'
+    monkeypatch.setattr(tool, 'TOOL_ROOT', typescript_source)
+    project = typescript_source / '.local/tools/architecture-typescript' / tool.identity_key(identity)
     package = project / 'node_modules/typescript'
     (package / 'lib').mkdir(parents=True)
     metadata = {'name': 'typescript', 'version': identity['version']}
@@ -390,9 +398,45 @@ def test_typescript_package_mismatch_fails_before_any_parser_code(typescript_sou
     sentinel = tmp_path / 'PARSER_EXECUTED'
     if change != 'missing_entry':
         (package / 'lib/typescript.js').write_text(f'require("node:fs").writeFileSync({json.dumps(str(sentinel))},"bad");')
-    monkeypatch.setenv(tool.PACKAGE_ENV, str(package))
     with pytest.raises(RuntimeError, match='ARCHITECTURE_TOOL_INTEGRITY_FAILED'):
         compiler.compile_index(typescript_source)
+    assert not sentinel.exists()
+
+
+@pytest.mark.parametrize('locator', ['environment', 'directory_link'])
+def test_external_matching_package_cannot_authorize_its_own_installation(typescript_source, tmp_path, tmp_path_factory, monkeypatch, locator):
+    import architecture_typescript_tool as tool
+    identity = tool.tool_identity(typescript_source)
+    project = tmp_path_factory.mktemp('external-parser')
+    package = project / 'node_modules/typescript'
+    (package / 'lib').mkdir(parents=True)
+    (project / 'package-lock.json').write_text(json.dumps({'packages': {'node_modules/typescript': identity}}))
+    (package / 'package.json').write_text(json.dumps({'name': 'typescript', 'version': identity['version']}))
+    sentinel = tmp_path / 'UNTRUSTED_PARSER_EXECUTED'
+    (package / 'lib/typescript.js').write_text(f'require("node:fs").writeFileSync({json.dumps(str(sentinel))},"bad");')
+    monkeypatch.setattr(tool, 'TOOL_ROOT', typescript_source)
+    if locator == 'environment':
+        # This retired environment name is ignored, never a runtime authority or
+        # a missing-dependency fallback. Exact copied metadata cannot change it.
+        monkeypatch.setenv('ARCHITECTURE_TYPESCRIPT_PACKAGE', str(package))
+        reason = 'ARCHITECTURE_TOOL_UNAVAILABLE'
+    else:
+        alias = typescript_source / 'web/node_modules'
+        if os.name == 'nt':
+            subprocess.run(['cmd.exe', '/c', 'mklink', '/J', str(alias), str(project / 'node_modules')],
+                           check=True, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        else:
+            alias.symlink_to(project / 'node_modules', target_is_directory=True)
+        reason = 'ARCHITECTURE_TOOL_INTEGRITY_FAILED:package-owner'
+    original_read = tool.read_json
+    reads = []
+    def read(path):
+        reads.append(path.resolve())
+        return original_read(path)
+    monkeypatch.setattr(tool, 'read_json', read)
+    with pytest.raises(RuntimeError, match=reason):
+        compiler.compile_index(typescript_source)
+    assert all(not path.is_relative_to(project) for path in reads)
     assert not sentinel.exists()
 
 
@@ -448,9 +492,11 @@ def test_typescript_runtime_is_explicit_in_each_existing_required_owner():
     assert owners == ['python-4']
     quality = (ROOT / '.github/workflows/quality-gates.yml').read_text()
     assert "if: matrix.id == 'python-4'" in quality
-    assert 'python scripts/architecture_typescript_tool.py --github-env "$GITHUB_ENV"' in quality
+    assert 'run: python scripts/architecture_typescript_tool.py\n' in quality
     architecture = (ROOT / '.github/workflows/architecture.yml').read_text()
-    assert architecture.count('python scripts/architecture_typescript_tool.py --github-env') == 2
+    assert architecture.count('run: python scripts/architecture_typescript_tool.py\n') == 2
+    assert '--github-env' not in quality + architecture
+    assert 'ARCHITECTURE_TYPESCRIPT_PACKAGE' not in quality + architecture
     assert 'npm ci' not in architecture  # only the bounded one-package owner acquires the tool
 
 

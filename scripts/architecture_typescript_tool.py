@@ -17,7 +17,6 @@ import subprocess
 import sys
 import time
 
-PACKAGE_ENV = 'ARCHITECTURE_TYPESCRIPT_PACKAGE'
 TOOL_ROOT = Path(__file__).resolve().parents[1]
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
 
@@ -59,10 +58,11 @@ def identity_key(identity):
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
-def validate_package(package, identity):
-    """Check the owning npm lock and installed version before loading any JS."""
+def validate_package(package, identity, owner_root):
+    """Enforce independently selected installation authority before metadata/JS."""
     package = package.resolve()
-    if package.name != 'typescript' or package.parent.name != 'node_modules':
+    if (not package.is_relative_to(owner_root.resolve())
+            or package.name != 'typescript' or package.parent.name != 'node_modules'):
         raise RuntimeError('ARCHITECTURE_TOOL_INTEGRITY_FAILED:package-owner')
     lock = read_json(package.parent.parent / 'package-lock.json')
     metadata = read_json(package / 'package.json')
@@ -81,14 +81,11 @@ def validate_package(package, identity):
 
 def resolve_package(root):
     identity = tool_identity(root)
-    explicit = os.environ.get(PACKAGE_ENV)
-    if explicit:
-        return validate_package(Path(explicit), identity), identity
     local = TOOL_ROOT / 'web/node_modules/typescript'
     cached = TOOL_ROOT / '.local/tools/architecture-typescript' / identity_key(identity) / 'node_modules/typescript'
     for path in (local, cached):
         if path.exists():
-            return validate_package(path, identity), identity
+            return validate_package(path, identity, TOOL_ROOT), identity
     raise RuntimeError('ARCHITECTURE_TOOL_UNAVAILABLE:run architecture_typescript_tool.py first')
 
 
@@ -98,7 +95,7 @@ def install(root, cache):
     package = project / 'node_modules/typescript'
     started = time.monotonic()
     if package.exists():
-        return validate_package(package, identity), dict(state='AVAILABLE', cache='HOT', seconds=0, **identity)
+        return validate_package(package, identity, cache), dict(state='AVAILABLE', cache='HOT', seconds=0, **identity)
     node, npm = shutil.which('node'), shutil.which('npm')
     if not node or not npm:
         raise RuntimeError('ARCHITECTURE_TOOL_UNAVAILABLE:node/npm')
@@ -125,19 +122,15 @@ def install(root, cache):
     if result.returncode:
         reason = 'INTEGRITY_FAILED' if b'EINTEGRITY' in result.stderr else 'UNAVAILABLE'
         raise RuntimeError(f'ARCHITECTURE_TOOL_{reason}:npm-ci')
-    validated = validate_package(package, identity)
+    validated = validate_package(package, identity, cache)
     return validated, dict(state='AVAILABLE', cache='COLD', seconds=round(time.monotonic() - started, 3), **identity)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--cache', type=Path, default=TOOL_ROOT / '.local/tools/architecture-typescript')
-    parser.add_argument('--github-env', type=Path)
     args = parser.parse_args()
     package, report = install(TOOL_ROOT, args.cache)
-    if args.github_env:
-        with args.github_env.open('a', encoding='utf-8') as stream:
-            stream.write(f'{PACKAGE_ENV}={package}\n')
     print(json.dumps(dict(report, package=str(package)), sort_keys=True))
 
 

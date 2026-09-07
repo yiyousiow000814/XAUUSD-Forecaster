@@ -25,7 +25,7 @@ jobs:
         with:
           node-version: '24'
       - name: Install only the lock-bound TypeScript parser
-        run: python scripts/architecture_typescript_tool.py --github-env "$GITHUB_ENV"
+        run: python scripts/architecture_typescript_tool.py
       - name: Require real PowerShell parser
         run: pwsh -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()'
       - name: Verify tool contracts and generated source identity
@@ -52,7 +52,7 @@ jobs:
         with:
           node-version: '24'
       - name: Install only the lock-bound TypeScript parser
-        run: python scripts/architecture_typescript_tool.py --github-env "$env:GITHUB_ENV"
+        run: python scripts/architecture_typescript_tool.py
       - name: Execute three bounded baseline and mutation pairs
         run: python scripts/run_architecture_mutations.py --output "${{ runner.temp }}/architecture-mutations"
       - name: Retain actual assertion and mutation evidence
