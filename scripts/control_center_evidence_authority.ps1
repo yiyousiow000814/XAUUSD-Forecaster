@@ -1573,6 +1573,15 @@ function Test-CandidateSupersessionAncestry {
     return [bool]([int]$edge.exit_code -eq 0 -and [int]$main.exit_code -eq 0)
 }
 
+function Test-UnacceptedFailedSupersessionCandidate {
+    param([object]$Candidate, [array]$History)
+    return [bool]($Candidate -and
+        [string]$Candidate.validation_state -eq "FAILED" -and
+        $Candidate.validation -and
+        [string]$Candidate.validation.key -eq [string]$Candidate.validation_key -and
+        -not (Test-CandidateSupersessionAccepted -Candidate $Candidate -History $History))
+}
+
 function Get-CandidateSupersessionRecoveryPlan {
     param(
         [Parameter(Mandatory = $true)][object]$Head,
@@ -1615,11 +1624,10 @@ function Get-CandidateSupersessionRecoveryPlan {
             [string]$_.event -eq "CANDIDATE_SUPERSEDED" -and
             [string]$_.detail.replacement_key -eq [string]$current.validation_key
         })
-        $failedPredecessor = [bool]($depth -gt 0 -and $edges.Count -eq 0 -and
-            [string]$current.validation_state -eq "FAILED" -and
-            $current.validation -and
-            [string]$current.validation.key -eq [string]$current.validation_key -and
-            -not (Test-CandidateSupersessionAccepted -Candidate $current -History $history))
+        $failedPredecessor = [bool]($depth -gt 0 -and
+            (Test-UnacceptedFailedSupersessionCandidate -Candidate $current -History $history) -and
+            ($edges.Count -eq 0 -or ($edges.Count -eq 1 -and
+                (Test-UnacceptedFailedSupersessionCandidate -Candidate $edges[0].release -History $history))))
         if (-not $failedPredecessor -and -not (Test-UnqualifiedSupersessionIntermediate `
                 -Candidate $current -History $history)) {
             return [pscustomobject]@{

@@ -124,6 +124,43 @@ function ConvertTo-BoundedReleaseHistoryValue {
     return [pscustomobject]$answer
 }
 
+function ConvertTo-ReleaseHistoryValidation {
+    param([Parameter(Mandatory = $true)][object]$Release)
+    $validation = $Release.validation
+    $projection = ConvertTo-BoundedReleaseHistoryValue -Value $validation
+    if (-not $validation -or $null -eq $validation.expected_requests -or
+        @($validation.expected_requests).Count -eq 0 -or
+        [string]$validation.validation_run -notmatch '^[0-9a-fA-F-]{36}$' -or
+        [string]$validation.key -cne [string]$Release.validation_key) {
+        return $projection
+    }
+    $plan = Read-WorkerCpuRunArtifact -ValidationRun ([string]$validation.validation_run) -Name "plan.json"
+    if (-not $plan -or
+        [string]$plan.validation_run -cne [string]$validation.validation_run -or
+        [string]$plan.candidate_worker_version -cne [string]$Release.worker_version_id -or
+        [string]$plan.qualification_key -cne [string]$validation.worker_qualification.key) {
+        return $projection
+    }
+    $acceptance = @($plan.requests | Where-Object { [string]$_.phase -eq "acceptance" })
+    $digest = Get-WorkerCpuCanonicalDigest -Value @($validation.expected_requests)
+    if ((Get-WorkerCpuCanonicalDigest -Value $acceptance) -cne $digest -or
+        (Get-WorkerCpuCanonicalDigest -Value @($plan.requests)) -cne [string]$plan.request_universe_digest) {
+        return $projection
+    }
+    $projection.PSObject.Properties.Remove("expected_requests")
+    $projection | Add-Member -Force -NotePropertyName expected_requests_reference -NotePropertyValue (
+        [pscustomobject]@{
+            validation_run = [string]$plan.validation_run
+            artifact = "plan.json"
+            request_count = @($plan.requests).Count
+            request_universe_digest = [string]$plan.request_universe_digest
+            acceptance_count = $acceptance.Count
+            acceptance_digest = $digest
+        }
+    )
+    return $projection
+}
+
 function ConvertTo-ReleaseHistoryProjection {
     param([AllowNull()][object]$Release)
     if (-not $Release) { return $null }
@@ -139,8 +176,11 @@ function ConvertTo-ReleaseHistoryProjection {
         "validation"
     )) {
         if ($Release.PSObject.Properties[$name]) {
-            $projection[$name] = ConvertTo-BoundedReleaseHistoryValue `
-                -Value $Release.$name
+            $projection[$name] = if ($name -eq "validation") {
+                ConvertTo-ReleaseHistoryValidation -Release $Release
+            } else {
+                ConvertTo-BoundedReleaseHistoryValue -Value $Release.$name
+            }
         }
     }
     return [pscustomobject]$projection

@@ -82,8 +82,11 @@ Supersession recovery is an optional evidence-preservation optimization. An
 incomplete but non-contradictory chain disables reuse and falls back to fresh
 validation; contradictory or unsafe chains remain fail-closed. This fallback
 does not restore an older Candidate, copy its evidence, or change Worker traffic.
-A traversed failed predecessor without an older supersession edge, with a matching
-validation key and no prior Candidate, Access, Promote or Stable acceptance ends optional reuse as unavailable;
+A chain of traversed failed predecessors, each with a matching validation key
+and no prior Candidate, Access, Promote or Stable acceptance, may end optional
+reuse as unavailable when no older supersession edge remains. Every edge still
+requires identity, ancestry, uniqueness, cycle and depth checks. A failed
+intermediate leading to a qualified or accepted predecessor remains unsafe;
 the new head still requires complete fresh qualification. Accepted or mismatched
 failed predecessors remain unsafe. This does not retry or reclassify the failed identity.
 An older main build that completes out of order advances the discovery watermark
@@ -1073,3 +1076,7 @@ restarts, with a 45-minute external-fixture ceiling (the existing two 15-minute
 startup/Observe budgets, five-minute reload, and bounded preparation/cleanup).
 This is not a production or CI timeout increase; a timed-out scenario remains
 incomplete and its verified owned tree must be cleaned up.
+
+## Bounded release-history request references
+
+Release history retains its 64 KiB per-event limit. The complete current validation and CPU request plan remain authoritative in their existing stores. A history projection may replace expected_requests with expected_requests_reference only after matching the persisted plan's run, Candidate Worker, qualification key, full request-universe digest and exact acceptance-request digest. The reference names plan.json and retains the run, complete request count, request-universe digest, acceptance count and acceptance digest. Later targeted requests append to the plan; an older reference resolves exactly its recorded request-count prefix and verifies both digests. Existing prefix records must not be rewritten. Missing or mismatched authority cannot justify compaction. Current-state arrays, complete plans, directed ledgers and prior history bytes remain unchanged. Runtime resume reads current state and the plan; history is not a substitute for pending execution state or an independent qualification receipt.

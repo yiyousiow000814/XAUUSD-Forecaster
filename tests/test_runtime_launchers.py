@@ -305,6 +305,89 @@ def test_future_release_history_is_versioned_bounded_and_preserves_old_lines(
     assert fields[4:] == ["tx-1", "True", "False"]
 
 
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("plan_case", ("matching", "missing", "wrong-worker", "wrong-universe", "misbound-run", "no-expected", "production-inflight", "later-append"))
+def test_release_history_cpu_request_reference_preserves_authority(tmp_path, powershell, plan_case):
+    setup = {
+        "matching": "",
+        "missing": "$release.validation.validation_run=[guid]::NewGuid().ToString();",
+        "wrong-worker": "$release.worker_version_id='22222222-2222-4222-8222-222222222222';",
+        "wrong-universe": "$release.validation.expected_requests[0].request_query='changed';",
+        "misbound-run": "$plan.validation_run=[guid]::NewGuid().ToString();"
+        "Write-WorkerCpuAtomicJson -Path $planPath -Value $plan;"
+        "$planBefore=Get-Sha256Hex -LiteralPath $planPath;",
+        "no-expected": "$release.validation.PSObject.Properties.Remove('expected_requests');",
+        "production-inflight": "",
+        "later-append": "",
+    }[plan_case]
+    production_routes = (
+        "New-Item -ItemType Directory -Path (Join-Path $repositoryRoot 'web') -Force|Out-Null;"
+        f"Copy-Item -LiteralPath '{ROOT / 'web/worker-validation-manifest.json'}' "
+        "-Destination (Join-Path $repositoryRoot 'web/worker-validation-manifest.json');"
+        "$routePlan=Get-CandidateRouteValidationPlan -ChangedFiles @('web/worker-validation-manifest.json') -AllCpuRoutes;"
+        "$routes=@($routePlan.worker_reads)+@($routePlan.worker_writes);"
+    ) if plan_case == "production-inflight" else ""
+    publish = (
+        "$state=New-ReleaseControlState -Stable $release;$state.candidate=$release;Write-ReleaseControlState $state;"
+        "Write-CandidateCpuInFlightState -Candidate $release -RoutePlan $routePlan -RequestPlan $plan "
+        "-Qualification $release.validation.worker_qualification -WindowFrom ([DateTimeOffset]::UtcNow);"
+        "$saved=Get-ReleaseControlState;if(@($saved.candidate.validation.expected_requests).Count -ne 372)"
+        "{throw 'LIVE_REQUESTS_CHANGED'};"
+    ) if plan_case == "production-inflight" else "Write-ReleaseHistory -Event 'CPU_PLAN_BOUNDARY' -Release $release;"
+    later_append = (
+        "$null=Add-WorkerCpuPlannedRequests -Plan $plan -Groups @($routes[0]) "
+        "-SampleKind deficit_top_up -CountPerGroup 1;"
+    ) if plan_case == "later-append" else ""
+    result = _run_control_center_contract(
+        tmp_path,
+        "$release=New-ReleaseIdentity -GitSha ('a'*40) "
+        "-WorkerVersionId '11111111-1111-4111-8111-111111111111' "
+        "-WindowsRevision ('a'*40) -ArtifactKind 'PRODUCTION_CANDIDATE';"
+        "$run=[guid]::NewGuid().ToString();$routes=@(1..31|ForEach-Object{"
+        "[pscustomobject]@{family='status';scenario=[string]$_;method='GET';"
+        "path='/api/status';request_query=('q'*1000);fixture='';warmup_samples=2}});"
+        + production_routes +
+        "$plan=New-WorkerCpuRequestPlan -Routes $routes -ValidationRun $run "
+        "-CandidateWorkerVersion $release.worker_version_id -QualificationKey ('b'*64) "
+        "-ValidationPlanDigest ('c'*64) -FixtureDigestSet @();"
+        "$planPath=Join-Path (Get-WorkerCpuRunRoot $run) 'plan.json';"
+        "$planBefore=Get-Sha256Hex -LiteralPath $planPath;"
+        "$release.validation=[pscustomobject]@{key=$release.validation_key;validation_run=$run;"
+        "worker_qualification=[pscustomobject]@{key=('b'*64)};"
+        "expected_requests=@($plan.requests|Where-Object phase -eq 'acceptance')};"
+        + setup +
+        "$before=Get-WorkerCpuCanonicalDigest $release.validation;"
+        "$reason='PASSED';try{" + publish + "}"
+        "catch{$reason=$_.Exception.Message};"
+        "$sourceSame=(Get-WorkerCpuCanonicalDigest $release.validation)-ceq$before;"
+        "$planSame=(Get-Sha256Hex -LiteralPath $planPath)-ceq$planBefore;"
+        "$count=0;$bytes=0;$linked=$false;"
+        "if($reason -eq 'PASSED'){$line=Get-Content -LiteralPath $releaseHistoryPath -Raw;"
+        "$event=$line|ConvertFrom-ReleaseControlJson;$ref=$event.release.validation.expected_requests_reference;"
+        "$bytes=[Text.Encoding]::UTF8.GetByteCount($line);if($ref){"
+        + later_append +
+        "$stored=Read-WorkerCpuRunArtifact -ValidationRun $ref.validation_run -Name $ref.artifact;"
+        "$prefix=@($stored.requests|Select-Object -First ([int]$ref.request_count));"
+        "$requests=@($prefix|Where-Object phase -eq 'acceptance');"
+        "$count=$requests.Count;$bytes=[Text.Encoding]::UTF8.GetByteCount($line);"
+        "$linked=($ref.acceptance_count -eq $count -and "
+        "$ref.acceptance_digest -ceq (Get-WorkerCpuCanonicalDigest $requests) -and "
+        "$ref.request_universe_digest -ceq (Get-WorkerCpuCanonicalDigest $prefix))}};"
+        'Write-Output "$reason,$sourceSame,$planSame,$count,$bytes,$linked"',
+        powershell=powershell,
+    )
+    reason, source_same, plan_same, count, size, linked = result.split(",")
+    assert (source_same, plan_same) == ("True", "True")
+    if plan_case in {"matching", "production-inflight", "later-append"}:
+        assert reason == "PASSED"
+        assert (count, linked) == ("372", "True")
+        assert int(size) <= 65536
+    elif plan_case == "no-expected":
+        assert (reason, count, linked) == ("PASSED", "0", "False")
+    else:
+        assert reason == "PERSISTENCE_EVENT_TOO_LARGE"
+
+
 @pytest.mark.parametrize(
     ("status", "diagnostic"),
     [
@@ -8821,6 +8904,15 @@ def _supersession_chain_contract(scenario: str) -> str:
             "$mid.validation_state='FAILED';Add-Edge $mid $head;"
             "Add-Edge $qualified $mid;"
         ),
+        "consecutive_failed_predecessors": (
+            "$mid.validation_state='FAILED';$mid2.validation_state='FAILED';"
+            "Add-Edge $mid $head;Add-Edge $mid2 $mid;"
+        ),
+        "consecutive_failed_accepted": (
+            "$mid.validation_state='FAILED';$mid2.validation_state='FAILED';"
+            "Add-Edge $mid $head;Add-Edge $mid2 $mid;"
+            "Write-ReleaseHistory -Event 'CANDIDATE_PASSED' -Release $mid2;"
+        ),
         "partially_validated_head": (
             "$head.compatibility_state='COORDINATED_STORAGE_MIGRATION_PASSED';"
             "$head.validation_state='PLATFORM_PENDING';"
@@ -8951,6 +9043,8 @@ def _supersession_chain_contract(scenario: str) -> str:
         ("failed_accepted_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
         ("failed_mismatched_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
         ("failed_predecessor_with_older_edge", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+        ("consecutive_failed_predecessors", "NONE"),
+        ("consecutive_failed_accepted", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
         ("partially_validated_head", "FOUND:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee:" + "e" * 40),
         ("observation_failed", "FOUND:66666666-6666-4666-8666-666666666666:" + "6" * 40),
         ("worker_reused", "ERROR:CANDIDATE_SUPERSESSION_WORKER_REUSED"),
@@ -8972,6 +9066,8 @@ def test_supersession_chain_recovery_is_bounded_and_fail_closed(
     ("failed_unaccepted_predecessor", "NONE"),
     ("failed_accepted_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
     ("failed_mismatched_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+    ("consecutive_failed_predecessors", "NONE"),
+    ("consecutive_failed_accepted", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
 ))
 @pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
 def test_supersession_chain_recovery_has_powershell_runtime_parity(

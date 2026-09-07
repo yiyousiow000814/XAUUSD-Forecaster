@@ -123,7 +123,7 @@
         {
           "path": "tests/test_runtime_launchers.py",
           "from": "test_future_release_history_is_versioned_bounded_and_preserves_old_lines",
-          "through": "test_future_release_history_is_versioned_bounded_and_preserves_old_lines"
+          "through": "test_release_history_cpu_request_reference_preserves_authority"
         }
       ]
     },
@@ -160,7 +160,7 @@
       ]
     },
     {
-      "id": "runtime-supervision",
+      "id": "runtime-ownership",
       "family": "windows-runtime-release",
       "paths": [
         "tests/test_runtime_launchers.py",
@@ -188,6 +188,36 @@
         {
           "path": "tests/test_runtime_launchers.py",
           "from": "test_control_center_stages_releases_without_main_driven_activation",
+          "through": "test_runtime_control_bundle_records_exact_source_revision_and_hashes"
+        }
+      ]
+    },
+    {
+      "id": "runtime-candidate-validation",
+      "family": "windows-runtime-release",
+      "paths": [
+        "tests/test_runtime_launchers.py",
+        "tests/test_release_runtime_read_model.py",
+        "scripts/xauusd_control_center.ps1",
+        "scripts/release_runtime_read_model.ps1",
+        "scripts/xauusd_control_center_launcher.vbs",
+        "scripts/control_center.xaml",
+        "scripts/runtime_paths.ps1",
+        "scripts/run_dashboard_sync.py",
+        "scripts/run_dashboard_api.py",
+        "scripts/run_forward_collector.py",
+        "scripts/run_news_annotator.py",
+        "scripts/run_live_broadcast_publisher.py",
+        "web/worker-validation-manifest.json",
+        "scripts/control_center_common.ps1",
+        "scripts/control_center_persistence_gateway.ps1",
+        "scripts/control_center_provider_adapters.ps1",
+        "scripts/control_center_runtime_supervision.ps1"
+      ],
+      "tests": [
+        {
+          "path": "tests/test_runtime_launchers.py",
+          "from": "test_candidate_status_parity_fails_closed",
           "through": "test_failed_directed_validation_persists_bounded_route_receipt"
         }
       ]
