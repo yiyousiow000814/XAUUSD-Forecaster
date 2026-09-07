@@ -32,6 +32,12 @@ BRIEF_OUTPUT_TOKEN_BUDGET = 8_192
 BRIEF_BACKLOG_LIMIT = 14
 BRIEF_DATE_DISCOVERY_CONTRACT = "brief-date-discovery-v1"
 BRIEF_DATE_DISCOVERY_CACHE_BYTES = 4_096
+BRIEF_SYNTHESIS_SOURCE_CONTRACT = "brief-synthesis-source-v1"
+BRIEF_SYNTHESIS_CACHE_BYTES = 32_768
+BRIEF_SOURCE_DELTA_LIMIT = 128
+# Optional initialization inspects at most this many scalar facts in total.
+# A larger receipt day retains the uncached business path, never a partial PASS.
+BRIEF_SOURCE_GATE_LIMIT = 1_024
 # The existing 30-minute news/Brief progress boundary is the policy quantum.
 # Adaptive refresh uses several multiples of it rather than one debounce timer.
 BRIEF_PROGRESS_BOUNDARY = timedelta(minutes=30)
@@ -377,8 +383,9 @@ def _adaptive_refresh_decision(
     ledger: ForwardLedger, *, instant: datetime, day: str, current_day: str,
     latest, state, candidates: list[dict],
     prompt_changed: bool, counts: dict[str, int],
+    event_snapshot: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
-    current = _event_snapshot(candidates)
+    current = _event_snapshot(candidates) if event_snapshot is None else event_snapshot
     previous = _json_snapshot(
         state["last_generated_event_snapshot_json"] if state else None
     )
@@ -1070,10 +1077,395 @@ def _uncached_brief_dates(
     return [current_day, *backlog[: max(0, limit - 1)]]
 
 
+_SYNTHESIS_STATE_COLUMNS = (
+    "brief_date", "last_generated_candidate_hash", "pending_source_hash",
+    "pending_candidate_hash", "pending_since", "last_observed_at", "phase",
+    "received_items", "reviewed_items", "pending_items", "terminal_failure_items",
+    "latest_revision", "last_generated_at", "next_retry_at", "finalized_at",
+    "generation_failure_count", "last_failure_code", "last_failure_at",
+    "last_generated_event_snapshot_json", "pending_event_snapshot_json",
+    "dispatch_pressure_json", "scheduler_deferral_count",
+)
+_SYNTHESIS_INPUTS = (
+    ("news_revisions", ("source", "source_item_id", "revision_number", "content_hash"),
+     "s.collector_first_seen_time"),
+    ("news_annotations", ("annotation_id",),
+     "(SELECT n.collector_first_seen_time FROM news_revisions n WHERE "
+     "n.source=s.source AND n.source_item_id=s.source_item_id AND "
+     "n.revision_number=s.revision_number AND n.content_hash=s.raw_content_hash)"),
+    ("news_title_translations", ("translation_id",),
+     "(SELECT n.collector_first_seen_time FROM news_revisions n WHERE "
+     "n.source=s.source AND n.source_item_id=s.source_item_id AND "
+     "n.revision_number=s.revision_number AND n.content_hash=s.raw_content_hash)"),
+    ("news_impact_assessments_v1", ("assessment_id",),
+     "(SELECT n.collector_first_seen_time FROM news_annotations a "
+     "JOIN news_revisions n ON n.source=a.source AND n.source_item_id=a.source_item_id "
+     "AND n.revision_number=a.revision_number AND n.content_hash=a.raw_content_hash "
+     "WHERE a.annotation_id=s.annotation_id)"),
+    ("news_event_identity_resolutions_v1", ("resolution_id",),
+     "(SELECT n.collector_first_seen_time FROM news_impact_assessments_v1 i "
+     "JOIN news_annotations a ON a.annotation_id=i.annotation_id "
+     "JOIN news_revisions n ON n.source=a.source AND n.source_item_id=a.source_item_id "
+     "AND n.revision_number=a.revision_number AND n.content_hash=a.raw_content_hash "
+     "WHERE i.assessment_id=s.assessment_id)"),
+)
+
+
+def _brief_input_budget(request_accountant: ModelRequestAccountant | None) -> int:
+    base = GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL
+    if request_accountant is not None:
+        base = request_accountant.effective_base_input_token_budget(
+            ModelRequestUsage(model=DEFAULT_GEMMA_MODEL, purpose="daily-news-brief",
+                              input_tokens=0, prompt_contract=BRIEF_PROMPT_VERSION),
+            input_tokens_per_minute=GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
+        )
+    return min(BRIEF_INPUT_TOKEN_BUDGET, max(0, base - 512))
+
+
+def _synthesis_context(connection, day, instant, budget):
+    """Read only bounded owner state and immutable tail identities."""
+    from .critical_annotation_state import (
+        annotation_materialization_contract, news_job_input_revision,
+    )
+    columns = ",".join(
+        f"CASE WHEN length(CAST({key} AS BLOB))<={BRIEF_SYNTHESIS_CACHE_BYTES} "
+        f"THEN {key} END AS {key}" for key in _SYNTHESIS_STATE_COLUMNS
+    )
+    oversized = " OR ".join(
+        f"length(CAST({key} AS BLOB))>{BRIEF_SYNTHESIS_CACHE_BYTES}"
+        for key in _SYNTHESIS_STATE_COLUMNS
+    )
+    try:
+        row = connection.execute(
+            f"SELECT {columns},CASE WHEN length(CAST(synthesis_source_cache_json AS BLOB))<=? "
+            f"THEN synthesis_source_cache_json END AS cached,CASE WHEN ({oversized}) "
+            "THEN 1 ELSE 0 END AS oversized FROM "
+            "daily_news_brief_refresh_state WHERE brief_date=?",
+            (BRIEF_SYNTHESIS_CACHE_BYTES, day),
+        ).fetchone()
+    except sqlite3.OperationalError as error:
+        if str(error) == "no such column: synthesis_source_cache_json":
+            return None
+        raise
+    if row and row["oversized"]:
+        return None
+    state = {key: row[key] for key in _SYNTHESIS_STATE_COLUMNS} if row else None
+    if state and len(json.dumps(state, ensure_ascii=True).encode()) > BRIEF_SYNTHESIS_CACHE_BYTES:
+        return None
+    job_version = news_job_input_revision(connection)
+    epoch = connection.execute(
+        "SELECT CASE WHEN length(CAST(value AS BLOB))<=256 THEN value END "
+        "FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
+    ).fetchone()
+    if job_version is None or not epoch or not epoch[0]:
+        return None
+    heads = []
+    for table, identity, _ in _SYNTHESIS_INPUTS:
+        fields = ",".join(
+            f"CASE WHEN length(CAST({field} AS BLOB))<=256 THEN {field} END"
+            for field in identity
+        )
+        tail = connection.execute(
+            f"SELECT rowid,{fields} FROM {table} ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        if tail is not None and any(value is None for value in tail):
+            return None
+        heads.append(list(tail) if tail else [0])
+    latest = connection.execute(
+        "SELECT brief_date,revision_number,source_hash,cutoff_at,generated_at,"
+        "model_version,prompt_version FROM daily_news_briefs WHERE brief_date=? "
+        "ORDER BY revision_number DESC LIMIT 1", (day,),
+    ).fetchone()
+    finalized = _effective_finalization(connection, day)
+    key = {
+        "contract": BRIEF_SYNTHESIS_SOURCE_CONTRACT, "day": day,
+        "current_day": instant.astimezone(KUALA_LUMPUR).date().isoformat(),
+        "annotation": annotation_materialization_contract().fingerprint,
+        "prompt": BRIEF_PROMPT_VERSION, "recovery": BRIEF_RECOVERY_VERSION,
+        "budget": budget, "epoch": str(epoch[0]),
+        "state": state, "latest": dict(latest) if latest else None,
+        "finalized": dict(finalized) if finalized else None,
+    }
+    return {"key": _source_hash([key]), "heads": heads, "job_version": job_version,
+            "state": state, "latest": latest, "finalized": finalized,
+            "cached": row["cached"] if row else None}
+
+
+def _synthesis_delta_is_unrelated(connection, old_heads, new_heads, day) -> bool:
+    """Inspect at most 128 new scalar identities, never all history or bodies."""
+    if not isinstance(old_heads, list) or len(old_heads) != len(_SYNTHESIS_INPUTS):
+        return False
+    start, end = _day_bounds(day)
+    remaining = BRIEF_SOURCE_DELTA_LIMIT
+    for (table, _, receipt), old, new in zip(_SYNTHESIS_INPUTS, old_heads, new_heads):
+        if not isinstance(old, list) or not old or type(old[0]) is not int:
+            return False
+        if old == new:
+            continue
+        if old[0] >= new[0] or old[0] < 0:
+            return False
+        rows = connection.execute(
+            f"SELECT s.rowid,julianday({receipt}) FROM {table} s "
+            "WHERE s.rowid>? AND s.rowid<=? ORDER BY s.rowid LIMIT ?",
+            (old[0], new[0], remaining + 1),
+        ).fetchall()
+        if len(rows) > remaining:
+            return False
+        remaining -= len(rows)
+        bounds = connection.execute("SELECT julianday(?),julianday(?)",
+                                    (_iso(start), _iso(end))).fetchone()
+        if any(row[1] is not None and bounds[0] <= row[1] < bounds[1] for row in rows):
+            return False
+    return True
+
+
+def _next_synthesis_visibility(connection, day, instant):
+    """Seed/refill a bounded scalar superset; overflow cannot qualify reuse."""
+    expected_indexes = {
+        "news_revisions_receipt_clock_v1":
+            "news_revisions(julianday(collector_first_seen_time))",
+        "news_title_translations_revision_clock_v1":
+            "news_title_translations(source,source_item_id,revision_number,raw_content_hash,julianday(parsed_at))",
+        "news_event_identity_resolutions_assessment_clock_v1":
+            "news_event_identity_resolutions_v1(assessment_id,julianday(resolved_at))",
+    }
+    indexes = {str(row[0]): "".join(str(row[1]).split()).casefold()
+               for row in connection.execute(
+                   "SELECT name,CASE WHEN length(CAST(sql AS BLOB))<=1024 THEN sql END "
+                   "FROM sqlite_master WHERE type='index' AND name IN (?,?,?)",
+                   tuple(expected_indexes),
+               )}
+    if any(indexes.get(name) != f"createindex{name}on{definition}".casefold()
+           for name, definition in expected_indexes.items()):
+        # Old/read-only/partially installed schemas remain correct cold readers;
+        # they must not launch a history scan to establish optional acceptance.
+        return False, None
+    start, end = _day_bounds(day)
+    row = connection.execute(
+        """WITH n AS MATERIALIZED (
+          SELECT source,source_item_id,revision_number,content_hash,
+                 julianday(collector_first_seen_time) AS at
+          FROM news_revisions
+          WHERE julianday(collector_first_seen_time)>=julianday(:start)
+            AND julianday(collector_first_seen_time)<julianday(:end)
+          ORDER BY julianday(collector_first_seen_time),rowid LIMIT :limit
+        ), a AS MATERIALIZED (
+          SELECT x.annotation_id,julianday(x.parsed_at) AS at
+          FROM n CROSS JOIN news_annotations x
+          ON x.source=n.source AND x.source_item_id=n.source_item_id
+            AND x.revision_number=n.revision_number AND x.raw_content_hash=n.content_hash
+          WHERE x.prompt_version=:prompt AND x.llm_model_version IN (:primary,:fallback)
+          LIMIT :limit
+        ), t AS MATERIALIZED (
+          SELECT julianday(x.parsed_at) AS at FROM n CROSS JOIN news_title_translations x
+          ON x.source=n.source AND x.source_item_id=n.source_item_id
+            AND x.revision_number=n.revision_number AND x.raw_content_hash=n.content_hash
+          LIMIT :limit
+        ), i AS MATERIALIZED (
+          SELECT x.assessment_id,julianday(x.assessed_at) AS at
+          FROM a CROSS JOIN news_impact_assessments_v1 x ON x.annotation_id=a.annotation_id
+          LIMIT :limit
+        ), r AS MATERIALIZED (
+          SELECT julianday(x.resolved_at) AS at FROM i
+          CROSS JOIN news_event_identity_resolutions_v1 x ON x.assessment_id=i.assessment_id
+          LIMIT :limit
+        ), gates AS (
+          SELECT at FROM n UNION ALL SELECT at FROM a UNION ALL SELECT at FROM t
+          UNION ALL SELECT at FROM i UNION ALL SELECT at FROM r
+        ) SELECT MIN(CASE WHEN at>julianday(:cutoff) THEN at END),COUNT(*) FROM gates""",
+        {"start": _iso(start), "end": _iso(end), "cutoff": _iso(instant),
+         "prompt": PROMPT_VERSION, "primary": DEFAULT_GEMINI_MODEL,
+         "fallback": FALLBACK_GEMINI_MODEL, "limit": BRIEF_SOURCE_GATE_LIMIT + 1},
+    ).fetchone()
+    return (True, row[0]) if row[1] <= BRIEF_SOURCE_GATE_LIMIT else (False, None)
+
+
+def _cached_synthesis_reply(ledger, context, cached, instant, day):
+    state, latest = context["state"], context["latest"]
+    if state is None:
+        return None
+    counts = {key: int(state[key]) for key in (
+        "received_items", "reviewed_items", "pending_items", "terminal_failure_items",
+    )}
+    kind = cached.get("kind")
+    if (kind == "RETRY" and state["phase"] == "DEFERRED"
+            and state["last_failure_code"] and state["next_retry_at"]):
+        if instant < datetime.fromisoformat(str(state["next_retry_at"])):
+            result = {"status": "DEFERRED", "phase": "DEFERRED", "brief_date": day,
+                      "reason": state["last_failure_code"],
+                      "next_retry_at": state["next_retry_at"], **counts}
+            return result
+        return None
+    if kind in {"UNCHANGED", "ADAPTIVE"}:
+        eligible, candidates = cached.get("eligible_items"), cached.get("candidate_items")
+        if (type(eligible) is not int or type(candidates) is not int
+                or not 0 <= candidates <= min(eligible, BRIEF_EVIDENCE_LIMIT)
+                or not 0 <= eligible <= counts["reviewed_items"] or not latest):
+            return None
+        if kind == "UNCHANGED":
+            if (state["phase"] != "UPDATING" or state["last_failure_code"]
+                    or latest["prompt_version"] != BRIEF_PROMPT_VERSION
+                    or latest["model_version"] == "system-degraded-fallback"
+                    or state["last_generated_candidate_hash"] != latest["source_hash"]):
+                return None
+            if state["pending_candidate_hash"] and (
+                state["pending_candidate_hash"] != state["last_generated_candidate_hash"]
+            ):
+                return None
+            return {"status": "UNCHANGED", "phase": state["phase"], "brief_date": day,
+                    "reason": "CANDIDATES_UNCHANGED", "eligible_items": eligible,
+                    "candidate_items": candidates, **counts}
+        events = cached.get("events")
+        if (state["phase"] != "UPDATING" or state["last_failure_code"]
+                or not isinstance(events, list) or len(events) != candidates
+                or events != _json_snapshot(state["pending_event_snapshot_json"])
+                or any(not isinstance(item, dict)
+                       or set(item) != {"identity", "evidence_id", "information_hash", "material", "major"}
+                       or type(item["material"]) is not bool or type(item["major"]) is not bool
+                       or any(not isinstance(item[key], str) for key in (
+                           "identity", "evidence_id", "information_hash"))
+                       for item in events)):
+            return None
+        refresh = _adaptive_refresh_decision(
+            ledger, instant=instant, day=day,
+            current_day=instant.astimezone(KUALA_LUMPUR).date().isoformat(),
+            latest=latest, state=state, candidates=[], prompt_changed=False,
+            counts=counts, event_snapshot=events,
+        )
+        if refresh["eligible"]:
+            return None
+        return {"status": "DEFERRED", "phase": "UPDATING", "brief_date": day,
+                "reason": refresh["reason"], "next_retry_at": _iso(refresh["next_eligible_at"]),
+                "new_distinct_events": refresh["new_distinct_events"],
+                "material_events": refresh["material_events"],
+                "major_events": refresh["major_events"], **counts}
+    if kind == "NO_NEWS" and not counts["received_items"]:
+        return {"status": kind, "phase": state["phase"], "brief_date": day, **counts}
+    if kind == "NO_REVIEWED_NEWS" and not counts["reviewed_items"]:
+        return {"status": kind, "phase": state["phase"], "brief_date": day, **counts}
+    return None
+
+
+def _publish_synthesis_cache(connection, day, instant, budget, context, value):
+    encoded = (json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+                          allow_nan=False) if value is not None else None)
+    if (encoded is not None and len(encoded.encode()) > BRIEF_SYNTHESIS_CACHE_BYTES
+            or connection.in_transaction):
+        return
+    timeout = int(connection.execute("PRAGMA busy_timeout").fetchone()[0])
+    phase = "acquire"
+    try:
+        connection.execute("PRAGMA busy_timeout=0")
+        connection.execute("BEGIN IMMEDIATE")
+        phase = "source"
+        current = _synthesis_context(connection, day, instant, budget)
+        # A later job/state write must not be overwritten by older acceptance.
+        # Source appends remain detectable from the recorded immutable tails.
+        if (current is not None and current["key"] == context["key"]
+                and current["job_version"] == context["job_version"]):
+            phase = "publish"
+            connection.execute(
+                "UPDATE daily_news_brief_refresh_state SET synthesis_source_cache_json=? "
+                "WHERE brief_date=? AND synthesis_source_cache_json IS NOT ?",
+                (encoded, day, encoded),
+            )
+        connection.commit()
+    except sqlite3.OperationalError as error:
+        connection.rollback()
+        if phase == "source" or getattr(error, "sqlite_errorcode", None) not in {
+            sqlite3.SQLITE_READONLY, sqlite3.SQLITE_BUSY,
+        }:
+            raise
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.execute(f"PRAGMA busy_timeout={timeout}")
+
+
 def update_daily_brief(
     ledger: ForwardLedger, *, api_key: str | None,
     request_accountant: ModelRequestAccountant | None,
     now: datetime | None = None, brief_date: str | None = None,
+) -> dict[str, object]:
+    """Consult the existing day's source/clock authority before payload work."""
+    instant = now or datetime.now(UTC)
+    day = brief_date or instant.astimezone(KUALA_LUMPUR).date().isoformat()
+    date.fromisoformat(day)
+    budget = _brief_input_budget(request_accountant)
+    connection = ledger.connection
+    context, future, reply, advancement = None, (False, None), None, None
+    if not connection.in_transaction:
+        connection.execute("SAVEPOINT brief_synthesis_source")
+        try:
+            context = _synthesis_context(connection, day, instant, budget)
+            if context is not None and not context["finalized"]:
+                try:
+                    cached = json.loads(context["cached"] or "null")
+                    clock = connection.execute("SELECT julianday(?)", (_iso(instant),)).fetchone()[0]
+                    valid = (isinstance(cached, dict) and cached.get("key") == context["key"]
+                             and datetime.fromisoformat(cached["observed_at"]) <= instant
+                             and (cached["next_visible_jd"] is None
+                                  or clock < cached["next_visible_jd"]))
+                    if valid and _synthesis_delta_is_unrelated(
+                        connection, cached.get("heads"), context["heads"], day,
+                    ):
+                        reply = _cached_synthesis_reply(ledger, context, cached, instant, day)
+                        if reply is not None and cached["heads"] != context["heads"]:
+                            advancement = {**cached, "heads": context["heads"]}
+                except (ValueError, TypeError, KeyError, RecursionError, OverflowError):
+                    # Malformed disposable metadata is not accepted source evidence.
+                    reply = None
+                if reply is None:
+                    future = _next_synthesis_visibility(connection, day, instant)
+        finally:
+            if connection.in_transaction:
+                connection.execute("RELEASE SAVEPOINT brief_synthesis_source")
+    if reply is not None:
+        if advancement is not None:
+            _publish_synthesis_cache(connection, day, instant, budget, context, advancement)
+        return reply
+    details = {} if context is not None and future[0] else None
+    result = _update_daily_brief(
+        ledger, api_key=api_key, request_accountant=request_accountant,
+        now=instant, brief_date=day, input_token_budget=budget, source_details=details,
+    )
+    retire = context is not None and context["cached"] and result["phase"] in {
+        "FINAL", "DEGRADED", "EMPTY",
+    }
+    if (details is not None or retire) and not connection.in_transaction:
+        connection.execute("SAVEPOINT brief_synthesis_result")
+        try:
+            accepted = _synthesis_context(connection, day, instant, budget)
+        finally:
+            if connection.in_transaction:
+                connection.execute("RELEASE SAVEPOINT brief_synthesis_result")
+        if (accepted is not None and accepted["state"] is not None
+                and accepted["job_version"] == context["job_version"]):
+            if accepted["finalized"]:
+                # This new disposable field is not retained as historical evidence.
+                _publish_synthesis_cache(connection, day, instant, budget, accepted, None)
+                return result
+            if details is None:
+                return result
+            kind = result["status"]
+            if kind == "OK":
+                kind = "UNCHANGED"
+            if kind == "DEFERRED":
+                kind = "RETRY" if result["phase"] == "DEFERRED" else "ADAPTIVE"
+            if kind in {"UNCHANGED", "RETRY", "ADAPTIVE", "NO_NEWS", "NO_REVIEWED_NEWS"}:
+                value = {"key": accepted["key"], "heads": context["heads"], "kind": kind,
+                         "observed_at": _iso(instant), "next_visible_jd": future[1], **details}
+                _publish_synthesis_cache(connection, day, instant, budget, accepted, value)
+    return result
+
+
+def _update_daily_brief(
+    ledger: ForwardLedger, *, api_key: str | None,
+    request_accountant: ModelRequestAccountant | None,
+    now: datetime | None = None, brief_date: str | None = None,
+    input_token_budget: int,
+    source_details: dict | None = None,
 ) -> dict[str, object]:
     """Advance one date without mutating any prior brief revision."""
     instant = now or datetime.now(UTC)
@@ -1112,25 +1504,12 @@ def update_daily_brief(
     counts = _counts(rows)
     reviewed = _reviewed_rows(rows)
     candidates = _candidate_rows(reviewed)
-    request_base_budget = GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL
-    if request_accountant is not None:
-        request_base_budget = request_accountant.effective_base_input_token_budget(
-            ModelRequestUsage(
-                model=DEFAULT_GEMMA_MODEL,
-                purpose="daily-news-brief",
-                input_tokens=0,
-                prompt_contract=BRIEF_PROMPT_VERSION,
-            ),
-            input_tokens_per_minute=GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
-        )
     packet = _budgeted_evidence_packet(
-        day,
-        candidates,
-        input_token_budget=min(
-            BRIEF_INPUT_TOKEN_BUDGET,
-            max(0, request_base_budget - 512),
-        ),
+        day, candidates, input_token_budget=input_token_budget,
     )
+    if source_details is not None:
+        source_details.update(eligible_items=len(reviewed), candidate_items=len(candidates),
+                              events=_event_snapshot(candidates))
     population_hash = _population_hash(rows)
     candidate_hash = _source_hash([
         {"prompt_version": BRIEF_PROMPT_VERSION},
@@ -1461,6 +1840,7 @@ def daily_brief_summary(
                 "is_final": False, "total_brief_days": total}
     result = dict(row)
     result.pop("date_discovery_cache_json", None)
+    result.pop("synthesis_source_cache_json", None)
     latest_failure = (
         connection.execute(
             """SELECT failure_evidence_json FROM daily_news_brief_failures_v1

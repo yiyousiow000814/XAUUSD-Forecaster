@@ -3856,6 +3856,80 @@ def _reopen_protected_annotation_jobs(
     return recovered
 
 
+def _reconciliation_input_key(
+    connection: sqlite3.Connection, *, forward_epoch: str,
+    protected_days: tuple[str, ...],
+) -> str | None:
+    from .annotation import INVALID_CHINESE_TITLE
+    from .critical_annotation_state import (
+        annotation_materialization_contract, news_job_input_revision,
+    )
+
+    job_revision = news_job_input_revision(connection)
+    if job_revision is None:
+        return None
+    # These four append-only owners allocate increasing implicit rowids. Each
+    # lookup is a terminal-row seek, not a history/body/count scan. Restore is
+    # supported only for a coherent database, including this disposable cache.
+    heads = []
+    for table, identity in (
+        ("news_revisions", "source,source_item_id,revision_number,content_hash"),
+        ("news_annotations", "annotation_id"),
+        ("news_title_translations", "translation_id"),
+        ("news_impact_assessments_v1", "assessment_id"),
+    ):
+        fields = ",".join(
+            f"CASE WHEN length(CAST({column} AS BLOB))<=256 THEN {column} END"
+            for column in identity.split(",")
+        )
+        row = connection.execute(
+            f"SELECT rowid,{fields} FROM {table} ORDER BY rowid DESC LIMIT 1",
+        ).fetchone()
+        if row is not None and any(value is None for value in row):
+            return None
+        heads.append(list(row) if row else [])
+    encoded = json.dumps({
+        "contract": "news-job-reconciliation-input-v1",
+        "annotation_contract": annotation_materialization_contract().fingerprint,
+        "invalid_title": INVALID_CHINESE_TITLE,
+        "forward_epoch": forward_epoch, "protected_days": sorted(protected_days),
+        "job_revision": job_revision, "source_heads": heads,
+    }, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return encoded if len(encoded.encode("utf-8")) <= 6144 else None
+
+
+def _reconciliation_is_unchanged(
+    connection: sqlite3.Connection, *, forward_epoch: str,
+    protected_days: tuple[str, ...], timestamp: str,
+) -> bool:
+    from .critical_annotation_state import NEWS_RECONCILIATION_CACHE_KEY
+
+    # The caller only enables this optimization without an incoming transaction.
+    # Never mix a pre-append token with a post-append acceptance row.
+    connection.execute("SAVEPOINT news_reconciliation_read")
+    try:
+        key = _reconciliation_input_key(
+            connection, forward_epoch=forward_epoch, protected_days=protected_days,
+        )
+        if key is None:
+            return False
+        row = connection.execute(
+            """SELECT CASE WHEN length(CAST(value AS BLOB))<=8192 THEN value END
+               FROM runtime_metadata WHERE key=?""", (NEWS_RECONCILIATION_CACHE_KEY,),
+        ).fetchone()
+        try:
+            cached = json.loads(row[0]) if row and row[0] else None
+            return (isinstance(cached, dict) and cached.get("key") == key
+                    and isinstance(cached.get("observed_at"), str)
+                    and datetime.fromisoformat(cached["observed_at"])
+                    <= datetime.fromisoformat(timestamp))
+        except (ValueError, TypeError, RecursionError):
+            return False
+    finally:
+        if connection.in_transaction:
+            connection.execute("RELEASE news_reconciliation_read")
+
+
 def reconcile_completed_jobs(
     connection: sqlite3.Connection,
     *,
@@ -3884,6 +3958,12 @@ def reconcile_completed_jobs(
         "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
     ).fetchone()[0])
     protected_days = tuple(dict.fromkeys(protected_receipt_days))
+    cache_enabled = manage_transaction and not connection.in_transaction
+    if cache_enabled and _reconciliation_is_unchanged(
+        connection, forward_epoch=forward_epoch, protected_days=protected_days,
+        timestamp=timestamp,
+    ):
+        return 0
     protected_membership = (
         "substr(datetime(current.collector_first_seen_time,'+8 hours'),1,10) IN ("
         + ",".join("?" for _ in protected_days) + ")"
@@ -4001,6 +4081,44 @@ def reconcile_completed_jobs(
                 forward_epoch, forward_epoch, *(protected_days * 2),
             ),
         )
+        if cache_enabled:
+            from .critical_annotation_state import NEWS_RECONCILIATION_CACHE_KEY
+
+            # Both business statements have executed under this writer lock.
+            # Bind acceptance to their post-transition job version and the same
+            # source snapshot; publish before the existing owner commits.
+            key = _reconciliation_input_key(
+                connection, forward_epoch=forward_epoch, protected_days=protected_days,
+            )
+            if key is not None:
+                encoded = json.dumps({"key": key, "observed_at": timestamp},
+                                     ensure_ascii=True, separators=(",", ":"))
+                if len(encoded.encode("utf-8")) <= 8192:
+                    connection.execute("SAVEPOINT news_reconciliation_cache")
+                    try:
+                        connection.execute(
+                            "INSERT INTO runtime_metadata(key,value,created_at) "
+                            "SELECT ?,?,? WHERE NOT EXISTS "
+                            "(SELECT 1 FROM runtime_metadata WHERE key=?)",
+                            (NEWS_RECONCILIATION_CACHE_KEY, encoded, timestamp,
+                             NEWS_RECONCILIATION_CACHE_KEY),
+                        )
+                        connection.execute(
+                            "UPDATE runtime_metadata SET value=? WHERE key=? AND value IS NOT ?",
+                            (encoded, NEWS_RECONCILIATION_CACHE_KEY, encoded),
+                        )
+                    except sqlite3.OperationalError as error:
+                        if not connection.in_transaction or getattr(error, "sqlite_errorcode", None) not in {
+                            sqlite3.SQLITE_BUSY, sqlite3.SQLITE_READONLY,
+                        }:
+                            # The failing statement may already have aborted the
+                            # transaction; preserve it rather than masking it with
+                            # a second "no such savepoint" cleanup failure.
+                            raise
+                        connection.execute("ROLLBACK TO news_reconciliation_cache")
+                        connection.execute("RELEASE news_reconciliation_cache")
+                    else:
+                        connection.execute("RELEASE news_reconciliation_cache")
     return completed.rowcount + obsolete.rowcount
 
 
