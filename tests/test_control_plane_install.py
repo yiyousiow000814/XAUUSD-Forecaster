@@ -922,7 +922,7 @@ def test_quote_input_restart_cannot_renew_connected_scenario_budget(duration, bu
             module.remaining_input_seconds(config, now)
 
 
-def _quote_input_fixture(request, monkeypatch, *, seconds=2):
+def _quote_input_fixture(request, monkeypatch, *, seconds=2, start_clock=True):
     """The existing sealed authority, with no production credentials or data."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("synthetic_quote_input", ROOT / "tests/fixtures/quote_session_input.py")
@@ -944,10 +944,11 @@ def _quote_input_fixture(request, monkeypatch, *, seconds=2):
         "provider_endpoint": "http://127.0.0.1:18321",
         "values": {"CTRADER_SECRET_ROOT": str(secret)},
         "quote_input_seconds": seconds, "connected_scenario_timeout_seconds": seconds,
-        "connected_scenario_started_at": datetime.now(timezone.utc).isoformat(),
         "quote_input_session": "OPEN", "quote_input_kind": module.SYNTHETIC_INPUT,
         "quote_input_bid": 2500.0, "quote_input_ask": 2500.2,
     }
+    if start_clock:
+        config["connected_scenario_started_at"] = datetime.now(timezone.utc).isoformat()
     path = owned / "fixture-user-environment.json"
     path.write_text(json.dumps(config), encoding="utf-8")
     monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION", str(path))
@@ -962,11 +963,14 @@ def _quote_input_fixture(request, monkeypatch, *, seconds=2):
 
 
 @pytest.mark.parametrize("case", ["OPEN", "CLOSED", "missing-config", "changed-config",
-    "undeclared-open", "missing-price", "crossed-price", "missing-shared-deadline"])
+    "undeclared-open", "missing-price", "crossed-price", "missing-shared-deadline", "expired-shared-deadline"])
 def test_quote_input_real_cli_is_sealed_and_only_emits_declared_current_inputs(request, monkeypatch, case):
     from xauusd_forecaster.market import JsonlMarketProvider
     from xauusd_forecaster.market_session import skipped_grid_reason
-    module, config, output, path, arguments = _quote_input_fixture(request, monkeypatch)
+    # This integration checks real CLI isolation/output, not a two-second cold
+    # start SLA. Deterministic deadline/restart arithmetic is covered separately.
+    module, config, output, path, arguments = _quote_input_fixture(
+        request, monkeypatch, seconds=5, start_clock=False)
     baseline = output / "xauusd-quotes-20200101.jsonl"
     original = (b'{"schema":"xauusd.forward.quote.v1","source":"retained-test-input",'
         b'"symbol":"XAUUSD","event_time":"2020-01-01T00:00:00+00:00",'
@@ -984,6 +988,12 @@ def test_quote_input_real_cli_is_sealed_and_only_emits_declared_current_inputs(r
         config["quote_input_ask"] = 2499.0
     elif case == "missing-shared-deadline":
         del config["connected_scenario_timeout_seconds"]
+    # Initialize the one scenario deadline only after setup, before sealing.
+    # A restart consumes this same sealed value; it never renews the deadline.
+    started = datetime.now(timezone.utc)
+    if case == "expired-shared-deadline":
+        started -= timedelta(seconds=config["quote_input_seconds"] + 1)
+    config["connected_scenario_started_at"] = started.isoformat()
     path.write_text(json.dumps(config), encoding="utf-8")
     if case != "changed-config":
         monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION_SHA256", hashlib.sha256(path.read_bytes()).hexdigest())
@@ -1006,7 +1016,8 @@ def test_quote_input_real_cli_is_sealed_and_only_emits_declared_current_inputs(r
             "changed-config": "ISOLATED_CONFIGURATION_IDENTITY_MISMATCH",
             "undeclared-open": "QUOTE_INPUT_SYNTHETIC_DECLARATION_REQUIRED",
             "missing-price": "QUOTE_INPUT_PRICE_INVALID", "crossed-price": "QUOTE_INPUT_PRICE_INVALID",
-            "missing-shared-deadline": "QUOTE_INPUT_SYNTHETIC_DECLARATION_REQUIRED"}[case]
+            "missing-shared-deadline": "QUOTE_INPUT_SYNTHETIC_DECLARATION_REQUIRED",
+            "expired-shared-deadline": "QUOTE_INPUT_BUDGET_EXHAUSTED"}[case]
         assert expected in result.stderr
         assert not quotes and not (output / "market-session.json").exists()
         return

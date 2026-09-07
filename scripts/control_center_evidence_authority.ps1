@@ -4371,6 +4371,10 @@ function Assert-AccessQualificationReuseReceipt {
         @($receipt.changed_access_artifacts).Count -ne 0) {
         throw "ACCESS_QUALIFICATION_REUSE_TAMPERED"
     }
+    $boundary = Get-ProtectedAccessBoundaryIdentity
+    if ([string]$receipt.protected_origin -cne [string]$boundary.origin) {
+        throw "ACCESS_RECEIPT_HOST_MISMATCH"
+    }
     $verifiedAt = ConvertTo-ReleaseTimestampUtc -Value $receipt.verified_at
     $expiresAt = ConvertTo-ReleaseTimestampUtc -Value $receipt.expires_at
     if ($verifiedAt -eq [DateTimeOffset]::MinValue -or

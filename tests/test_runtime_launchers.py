@@ -9582,21 +9582,29 @@ def _historical_access_authority_contract() -> str:
 
 
 @pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("copied_origin", (False, True))
 def test_access_qualification_reuse_is_machine_evidence_and_preserves_other_gates(
-    tmp_path, powershell: str,
+    tmp_path, powershell: str, copied_origin: bool,
 ) -> None:
     result = _run_control_center_contract(
         tmp_path,
         _access_review_candidate()
+        + ("$workerUrl='https://127.0.0.1:45443';$protectedDashboardUrl=$workerUrl;" if copied_origin else "")
         + _historical_access_authority_contract()
         + _access_provider_inspection_contract()
         + _mock_candidate_finalizer_pass()
         + "$inspection=Register-AccessProviderInspection $provider;"
         "function Get-AccessQualificationIdentity{param($GitSha,$ProviderInspection)"
         "[pscustomobject]@{access_qualification_key=('1'*64);core=[pscustomobject]@{"
-        "protected_boundary=[pscustomobject]@{origin='https://aurum-signal-room.yiyousiow1234.workers.dev'};"
+        "protected_boundary=[pscustomobject]@{origin=$workerUrl};"
         "repository_artifacts=[ordered]@{auth='same'}}}};"
         "$reused=Invoke-CandidateAccessQualificationReuse;$final=Get-ReleaseControlState;"
+        + ("$workerUrl='https://aurum-signal-room.yiyousiow1234.workers.dev';"
+           "$protectedDashboardUrl=$workerUrl;"
+           "try{Assert-AccessQualificationReuseReceipt $final.candidate|Out-Null;"
+           "throw 'COPIED_ORIGIN_ACCEPTED'}catch{Write-Output $_.Exception.Message;return};"
+           if copied_origin else "")
+        +
         "$verified=Assert-AccessQualificationReuseReceipt $final.candidate;"
         "$history=Get-Content -LiteralPath $releaseHistoryPath -Raw;"
         "$humanCount=([regex]::Matches($history,'CANDIDATE_ACCESS_BOUNDARY_ACCEPTED')).Count;"
@@ -9610,6 +9618,9 @@ def test_access_qualification_reuse_is_machine_evidence_and_preserves_other_gate
         '$($final.candidate.migration_acceptance.receipt_digest),$humanCount,$reuseCount"',
         powershell=powershell,
     )
+    if copied_origin:
+        assert result == "ACCESS_RECEIPT_HOST_MISMATCH"
+        return
     assert result == (
         "PASSED,ACCESS_QUALIFICATION_REUSED,True,0,kept-run,parity-kept,"
         "migration-kept,1,1"

@@ -383,6 +383,10 @@ function Copy-TestValue($Value){$Value|ConvertTo-Json -Depth 30|ConvertFrom-Json
 function Get-ReleaseControlState{return Copy-TestValue $script:testState}
 function Write-ReleaseControlState{param($State)$script:testState=Copy-TestValue $State}
 function Write-ReleaseHistory{}
+function Get-HistoricalAccessBoundaryReceiptByDigest{param($Digest)
+ if($script:foreignAccessOrigin){throw 'ACCESS_RECEIPT_HOST_MISMATCH'}
+ return [pscustomobject]@{receipt_digest=$Digest}
+}
 function Get-CandidateChangedFiles{return @()}
 function Get-CandidateCompatibilityRequirement{
  if($script:migrationRequired){[pscustomobject]@{state='COORDINATED_STORAGE_MIGRATION_REQUIRED';files=@('m.sql')}}
@@ -429,7 +433,9 @@ function Complete-TestProducer([string]$Name){
   'PLACEMENT'{$state.candidate.validation.cloudflare='PASSED'}
   'MIGRATION'{$script:migrationReady=$true;$state.candidate|Add-Member -Force migration_acceptance ([pscustomobject]@{validation_key='candidate:key'})}
   'MIGRATION_NOT_REQUIRED'{$script:migrationRequired=$false}
-  'ACCESS'{$state.candidate.validation.auth_inspection.state='ACCESS_QUALIFICATION_RENEWED'}
+  'ACCESS'{$state.candidate.validation.auth_inspection.state='ACCESS_QUALIFICATION_RENEWED';
+   $state.candidate|Add-Member -Force access_qualification ([pscustomobject]@{
+    root_human_receipt_digest=('a'*64);provider_fingerprint=('b'*64)})}
   'FREE'{$script:freeReady=$true}
   'RESTART'{$state=Copy-TestValue $state}
  }
@@ -468,10 +474,18 @@ function Set-TestReadyState{
  $script:testState.candidate.validation.windows='PASSED'
  $script:testState.candidate.validation.cloudflare='PASSED'
  $script:testState.candidate.validation.data_parity.passed=$true
- $script:testState.candidate.validation.auth_inspection.state='ACCESS_QUALIFICATION_RENEWED'
+$script:testState.candidate.validation.auth_inspection.state='ACCESS_QUALIFICATION_RENEWED'
+ $script:testState.candidate|Add-Member -Force access_qualification ([pscustomobject]@{
+  root_human_receipt_digest=('a'*64);provider_fingerprint=('b'*64)})
  $script:testState.candidate|Add-Member -Force migration_acceptance ([pscustomobject]@{validation_key='candidate:key'})
  $script:freeReady=$true;$script:migrationRequired=$true;$script:allNodes=$false;$script:publishCount=0
 }
+Set-TestReadyState
+$script:allNodes=$true;$script:testState.candidate.validation_state='PASSED'
+$script:foreignAccessOrigin=$true
+$foreign=Finalize-CandidateQualificationEvidence
+$foreignState=(Get-ReleaseControlState).candidate.validation_state
+$script:foreignAccessOrigin=$false
 Set-TestReadyState
 $script:testState.candidate.validation.auth_inspection.state='UNKNOWN'
 $accessUnknown=Finalize-CandidateQualificationEvidence
@@ -503,6 +517,7 @@ function Publish-CandidateQualificationEvidence{
 }
 $transactionRace=Finalize-CandidateQualificationEvidence
 [pscustomobject]@{permutations=$results;edges=[pscustomobject]@{
+ foreign=$foreign.reason;foreign_state=$foreignState;
  access_unknown=$accessUnknown.state;free_missing=$freeMissing.state;stale=$stale.state;
  stale_state=$staleState;key_mismatch=$keyMismatch.state;key_mismatch_state=$keyMismatchState;
  superseded=$superseded.state;replacement_state=$replacementState;
@@ -523,6 +538,8 @@ $transactionRace=Finalize-CandidateQualificationEvidence
         "transaction": False,
     }
     assert payload["edges"] == {
+        "foreign": "ACCESS_RECEIPT_HOST_MISMATCH",
+        "foreign_state": "REVIEW_REQUIRED",
         "access_unknown": "INCOMPLETE",
         "free_missing": "INCOMPLETE",
         "stale": "BLOCKED",

@@ -379,6 +379,12 @@ function Finalize-CandidateQualificationEvidence {
         $qualification = Assert-ReleaseEvidenceQualification `
             -Root $releaseEvidenceRoot -ContractPath $releaseEvidenceContractPath `
             -ValidationKey $validationKey -RequiredNodes $releaseEvidencePreActionNodes
+        $accessAuthority = Resolve-ReleaseAccessEvidenceAuthority `
+            -Candidate $candidate -AuthInspection $validation.auth_inspection
+        if ($accessAuthority.required) {
+            Get-HistoricalAccessBoundaryReceiptByDigest `
+                -Digest $accessAuthority.root_receipt_digest | Out-Null
+        }
     } catch {
         if ($_.Exception.Message -notmatch '^RELEASE_EVIDENCE_PRODUCER_MISSING:') {
             $candidate.validation_state = "REVIEW_REQUIRED"

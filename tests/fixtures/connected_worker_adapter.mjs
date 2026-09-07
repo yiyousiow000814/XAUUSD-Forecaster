@@ -24,7 +24,7 @@
 //   headers:{...}, body_base64:"", surface:"worker"|"assets"}
 // inspect_news and migrate_learning_history require the same exact identity.
 // EOF closes the in-memory database. Restart never claims retained remote state.
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { Console } from "node:console";
 import { lstatSync, opendirSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import http from "node:http";
@@ -178,9 +178,47 @@ if (capabilityMatches.length !== 1 || !controllerSource.includes(`"${ledgerSql}"
 const capabilitySql = capabilityMatches[0][1].replace(/\r\n|\n|\r/g, " ").trim();
 const capabilityDigest = sha256(capabilitySql);
 
-function denyNetwork() {
+// Disposable external inputs only: the production JWT verifier remains intact.
+// No key, token or synthetic approval is written to a production authority.
+export function isolatedAccessInputs() {
+  const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const issuer = "https://connected-access.invalid";
+  const audience = "connected-recovery-only";
+  const jwk = { ...publicKey.export({ format: "jwk" }), kid: "isolated-key", alg: "RS256", use: "sig" };
+  const encode = value => Buffer.from(JSON.stringify(value)).toString("base64url");
+  let reads = 0;
+  return {
+    env: { CF_ACCESS_TEAM_DOMAIN: "connected-access.invalid", CF_ACCESS_AUD: audience,
+      DASHBOARD_OPERATOR_OWNER_SUBJECTS: "isolated-owner",
+      DASHBOARD_OPERATOR_OWNER_EMAILS: "owner@connected-access.invalid" },
+    fetch(input, options) {
+      const request = new Request(input, options);
+      if (request.url !== `${issuer}/cdn-cgi/access/certs` || request.method !== "GET"
+        || request.headers.has("authorization") || request.headers.has("cookie") || ++reads > 4) {
+        fail("WORKER_ADAPTER_EXTERNAL_NETWORK_FORBIDDEN");
+      }
+      return Promise.resolve(Response.json({ keys: [jwk] }));
+    },
+    token(kind) {
+      if (!["valid", "invalid", "expired", "wrong-owner"].includes(kind)) fail("WORKER_ADAPTER_ACCESS_INPUT_INVALID");
+      const now = Math.floor(Date.now() / 1000);
+      const wrong = kind === "wrong-owner";
+      const header = encode({ alg: "RS256", kid: jwk.kid, typ: "JWT" });
+      const payload = encode({ iss: issuer, aud: audience, type: "app", iat: now - 120,
+        exp: kind === "expired" ? now - 60 : now + 300,
+        sub: wrong ? "isolated-other" : "isolated-owner",
+        email: wrong ? "other@connected-access.invalid" : "owner@connected-access.invalid" });
+      const input = `${header}.${payload}`;
+      const signature = sign("RSA-SHA256", Buffer.from(input), privateKey);
+      if (kind === "invalid") signature[0] ^= 1;
+      return `${input}.${signature.toString("base64url")}`;
+    },
+  };
+}
+
+function denyNetwork(accessInputs = null) {
   const denied = () => fail("WORKER_ADAPTER_EXTERNAL_NETWORK_FORBIDDEN");
-  globalThis.fetch = async () => denied();
+  globalThis.fetch = accessInputs ? (input, options) => accessInputs.fetch(input, options) : async () => denied();
   globalThis.WebSocket = class { constructor() { denied(); } };
   http.request = http.get = https.request = https.get = denied;
   net.connect = net.createConnection = tls.connect = denied;
@@ -268,6 +306,8 @@ let origin = null;
 const workers = new Map();
 let initialized = false;
 let migrationApplied = false;
+let accessInputs = null;
+const accessCasesUsed = new Set();
 
 async function invokeWorker(target, request) {
   globalThis.__AURUM_TEST_WORKER_ENV = target.env;
@@ -358,7 +398,8 @@ async function initialize(command) {
     || command.ingest_token.length > 128 || command.migrations_sha256 !== migrationsDigest
     || command.capabilities_sql_sha256 !== capabilityDigest
     || !Array.isArray(command.workers) || command.workers.length < 1 || command.workers.length > 2
-    || (command.defer_migration !== undefined && command.defer_migration !== MIGRATION)) {
+    || (command.defer_migration !== undefined && command.defer_migration !== MIGRATION)
+    || (command.access_inputs !== undefined && command.access_inputs !== "ISOLATED_JWT_INPUTS_NOT_ACCESS_APPROVAL")) {
     fail("WORKER_ADAPTER_CONFIG_INVALID");
   }
   const sessionBudget = sessionCommandBudget(command.session_budget);
@@ -379,7 +420,8 @@ async function initialize(command) {
     if (!Array.isArray(externals) || externals.length !== 0) fail("WORKER_ADAPTER_UNDECLARED_BUILD_EXTERNALS");
     workers.set(item.role, { ...item, root, entry, bundleVerified, inputsVerified });
   }
-  denyNetwork();
+  accessInputs = command.access_inputs ? isolatedAccessInputs() : null;
+  denyNetwork(accessInputs);
   const appliedNames = migrationNames.filter(name => name !== command.defer_migration);
   database = new D1TestDatabase(appliedNames);
   // Wrangler's external ledger is a declared fixture boundary. Record a row
@@ -393,6 +435,7 @@ async function initialize(command) {
       CF_VERSION_METADATA: { id: target.worker_version_id },
       ASSETS: { fetch: request => Promise.resolve(assetFetch(target.root, request)) },
       IMAGES: {}, ASSISTANT_MEMORY_VECTOR: {},
+      ...(accessInputs?.env ?? {}),
     };
     globalThis.__AURUM_TEST_WORKER_ENV = target.env;
     target.worker = (await import(pathToFileURL(target.entry).href)).default;
@@ -476,6 +519,14 @@ async function execute(command) {
   };
   if (command.command === "initialize") return initialize(command);
   const target = exactTarget(command);
+  if (command.command === "access_input_probe") {
+    if (!accessInputs || target.role !== "candidate" || accessCasesUsed.has(command.kind)) fail("WORKER_ADAPTER_ACCESS_INPUT_INVALID");
+    const token = accessInputs.token(command.kind);
+    accessCasesUsed.add(command.kind);
+    const result = await request({ method: "GET", url: `${origin}/admin/api/session`,
+      headers: { "cf-access-jwt-assertion": token } }, target);
+    return { ...result, kind: command.kind, classification: "ISOLATED_JWT_INPUT_NOT_ACCESS_APPROVAL" };
+  }
   if (command.command === "request") return request(command, target);
   if (command.command === "inspect_news") return inspectNews();
   if (command.command === "d1_query" && ["ledger", "capabilities"].includes(command.key)) {
