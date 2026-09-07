@@ -83,6 +83,20 @@ hints the top-right. Mobile keeps its existing MiniMap exclusion and controls
 above the legend. Verify actual control clicks as well as target dimensions;
 raising one overlay's z-index must not merely block a different control.
 
+Inspector and Advanced share one header/body layout. Long source identifiers
+wrap inside the title's available width without truncating their identity or
+pushing the nonshrinking 44x44 close control outside the panel. The scrollable
+body consumes the actual space below the header, not a fixed deduction for a
+presumed one-line title. Check long function/component names, the final body
+control, close and focus return on desktop, both phone widths and short
+landscape; wrapping must not trade horizontal clipping for unreachable content.
+While either mobile sheet is open, reserve the measured top Preview-banner band
+as well as the safe area. The mandatory Preview identity stays visible above the
+sheet; neither its height nor the number of banner instances is assumed. Ignore
+unrelated in-page banners below that band. Remeasure on viewport/banner changes,
+and stop observation on close. On short landscape, verify the entire close target
+with corner hit-tests, not only its center.
+
 ## Operator-facing time
 
 - Durable records and API payloads retain canonical timezone-aware timestamps.

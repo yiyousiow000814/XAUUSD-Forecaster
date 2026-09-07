@@ -71,6 +71,28 @@ new import cycle requires an explicit contract change and a smaller shared
 abstraction; moving files without removing the cycle is not an architecture
 correction.
 
+### Dashboard resource serialization
+
+`xauusd_forecaster/dashboard/resource_contracts.py` owns pure, bounded
+Critical, Audit, Learning, Market chart, and News batch serialization. API
+and Sync consume that owner; it reuses the field projections in
+`xauusd_forecaster/dashboard_payloads.py` and the News generation contract in
+`xauusd_forecaster/news_projection.py`. It accepts already-read source values
+and an explicit optional producer revision. It must not discover a runtime
+root, query Git or a database, perform HTTP, advance an ACK, or schedule work.
+Field selection, input validity and transport limits remain governed by
+[Hosting boundaries](HOSTING_BOUNDARIES.md), not by the location of the code.
+
+The explicit serializer re-exports in `scripts/run_dashboard_sync.py` preserve
+existing build and runtime callers with the same function and exception
+objects; they introduce no second implementation or mutable state. Remove
+compatibility-only aliases after every external importer (including immutable
+Preview and release fixture builders) has moved to the package owner and the caller
+compatibility tests have been updated. Internal Sync calls retain the imports
+they use. Sync still owns orchestration, source I/O, producer-revision
+discovery, retry and checkpoint state. Moving pure
+serialization does not qualify the remaining entrypoint logic as extracted.
+
 ## Safety boundaries
 
 - The product is Shadow research only and has no order-submission authority.

@@ -28,6 +28,8 @@
         "tests/test_evidence_integrity_v2.py",
         "tests/test_clock_recovery.py",
         "tests/test_daily_brief.py",
+        "tests/test_brief_date_discovery.py",
+        "tests/test_brief_synthesis_source_first.py",
         "tests/test_news_event_identity.py",
         "tests/test_model_gateway.py",
         "tests/test_news_pipeline_health.py",
@@ -88,6 +90,7 @@
       "tests": [
         "tests/test_news_scheduler.py",
         "tests/test_dashboard_sync.py",
+        "tests/test_dashboard_resource_contracts.py",
         "tests/test_storylines.py",
         "tests/test_source_polling.py",
         "tests/test_assistant_capacity.py",

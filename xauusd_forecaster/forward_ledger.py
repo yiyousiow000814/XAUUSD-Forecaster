@@ -182,7 +182,9 @@ CREATE TABLE IF NOT EXISTS daily_news_brief_refresh_state (
     last_generated_event_snapshot_json TEXT,
     pending_event_snapshot_json TEXT,
     dispatch_pressure_json TEXT,
-    scheduler_deferral_count INTEGER NOT NULL DEFAULT 0
+    scheduler_deferral_count INTEGER NOT NULL DEFAULT 0,
+    date_discovery_cache_json TEXT,
+    synthesis_source_cache_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS daily_news_brief_finalizations_v1 (
@@ -617,6 +619,10 @@ class ForwardLedger:
     def _install_append_only_triggers(self) -> None:
         statements = []
         for table in IMMUTABLE_TABLES:
+            if table == "runtime_metadata":
+                # The existing job-count installer already installs its exact
+                # evidence guard plus two narrowly named operational values.
+                continue
             statements.extend(
                 [
                     f"CREATE TRIGGER IF NOT EXISTS {table}_no_update "
@@ -648,6 +654,8 @@ class ForwardLedger:
             "pending_event_snapshot_json": "TEXT",
             "dispatch_pressure_json": "TEXT",
             "scheduler_deferral_count": "INTEGER NOT NULL DEFAULT 0",
+            "date_discovery_cache_json": "TEXT",
+            "synthesis_source_cache_json": "TEXT",
         }
         existing = {
             str(row["name"])
@@ -673,6 +681,22 @@ class ForwardLedger:
                     "ALTER TABLE daily_news_brief_failures_v1 "
                     "ADD COLUMN failure_evidence_json TEXT"
                 )
+            # Performance-only access paths for the dated scalar future-gate
+            # query. Initial construction reads historical index keys; an
+            # already installed index is reused without rebuilding evidence.
+            self.connection.execute(
+                """CREATE INDEX IF NOT EXISTS news_revisions_receipt_clock_v1
+                   ON news_revisions(julianday(collector_first_seen_time))"""
+            )
+            self.connection.execute(
+                """CREATE INDEX IF NOT EXISTS news_title_translations_revision_clock_v1
+                   ON news_title_translations(source,source_item_id,revision_number,
+                                              raw_content_hash,julianday(parsed_at))"""
+            )
+            self.connection.execute(
+                """CREATE INDEX IF NOT EXISTS news_event_identity_resolutions_assessment_clock_v1
+                   ON news_event_identity_resolutions_v1(assessment_id,julianday(resolved_at))"""
+            )
 
     def _install_source_poll_schema(self) -> None:
         """Add safe transport metadata without rewriting poll evidence."""

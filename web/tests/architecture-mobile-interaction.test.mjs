@@ -19,12 +19,14 @@ import {
   architectureMobileInteractionIsValid as valid,
   architectureMobileInteractionReducer as reduce,
   architectureSheetTabIndex,
+  architecturePreviewTopInset,
   lockArchitecturePageScroll,
+  observeArchitectureSheetPreviewInset,
   restoreArchitecturePageScroll,
 } from "../app/_lib/architecture-mobile-interaction.ts";
-import { projectCurrentSource } from "../build/architecture-current-source.mjs";
+import { projectCurrentSource, readCurrentSourceIndex } from "../build/architecture-current-source.mjs";
 
-const index = JSON.parse(readFileSync(new URL("../../architecture/generated/critical-index.json", import.meta.url), "utf8"));
+const index = readCurrentSourceIndex(new URL("../../architecture/generated/critical-index.json", import.meta.url));
 const manifest = parseArchitectureManifest(projectCurrentSource(index).manifest);
 assert.ok(manifest);
 const viewSource = readFileSync(new URL("../app/_views/ArchitectureExplorerView.tsx", import.meta.url), "utf8");
@@ -210,11 +212,96 @@ test("mobile 23: Inspector owns dialog, close, scrolling, safe area, and focus r
   assert.match(cssSource, /\.inspectorBody \{[^}]*overflow-y: auto;[^}]*safe-area-inset-bottom/);
   assert.match(viewSource, /const returnFocus = returnFocusRef\.current/);
   assert.match(viewSource, /returnFocus\?\.focus/);
+  // Long function/component names stay complete. Their min-content width must
+  // not push the shared 44px close button outside desktop or phone panels.
+  assert.match(viewSource, /<h2 id="architecture-inspector-title">\{edge \? edge\.label : node\.label\}<\/h2>/);
+  assert.match(cssSource, /\.inspector > header > div \{[^}]*min-width: 0;[^}]*flex: 1 1 0;[^}]*overflow-wrap: anywhere;/);
+  assert.match(cssSource, /\.inspector > header button \{[^}]*width: 44px;[^}]*height: 44px;[^}]*flex: 0 0 auto;/);
+  assert.match(cssSource, /\.inspector \{[^}]*display: flex;[^}]*flex-direction: column;/);
+  assert.match(cssSource, /\.inspector > header \{[^}]*flex-shrink: 0;/);
+  assert.match(cssSource, /\.inspectorBody \{[^}]*flex: 1 1 auto;[^}]*min-height: 0;[^}]*overflow: auto;/);
+  // A wrapped header has intrinsic height. No responsive sibling may deduct
+  // an assumed one-line header height and clip the last scrollable control.
+  for (const [, declarations] of cssSource.matchAll(/\.inspectorBody\s*\{([^}]*)\}/g)) {
+    assert.doesNotMatch(declarations, /(?:^|;)\s*height\s*:/);
+  }
 });
 
 test("mobile 24: Advanced owns a controlled dialog, backdrop, close, and focus return", () => {
   assert.doesNotMatch(viewSource, /<details className=\{styles\.advancedMenu\}>/);
   assert.match(viewSource, /architecture-advanced-title/); assert.match(viewSource, /sheetBackdrop/); assert.match(viewSource, /aria-label="关闭高级视图"/);
+  assert.match(viewSource, /className=\{`\$\{styles\.inspector\} \$\{styles\.advancedSheet\}`\}/);
+  assert.match(viewSource, /<h2 id="architecture-advanced-title">高级视图<\/h2>/);
+});
+
+test("mobile sheets reserve only the actual top Preview band, not unrelated in-page banners", () => {
+  const rect = (top, bottom, width = 844) => ({ top, bottom, width });
+  for (const [name, rectangles, height, expected] of [
+    ["production", [], 390, 0],
+    ["landscape Preview", [rect(0, 34)], 390, 34],
+    ["overlap and in-page copy", [rect(180, 214), rect(0, 34), rect(0, 34)], 390, 34],
+    ["stacked top bands", [rect(34, 67.5), rect(0, 34)], 390, 68],
+    ["partially scrolled top", [rect(-8, 26)], 390, 26],
+    ["offscreen and display-none", [rect(-70, -36), rect(500, 534), rect(0, 0), rect(0, 34, 0)], 390, 0],
+    ["viewport bound", [rect(0, 1000)], 390, 390],
+  ]) assert.equal(architecturePreviewTopInset(rectangles, height), expected, name);
+  const sharedInset = 'max(env(safe-area-inset-top), var(--architecture-preview-inset, 0px))';
+  const mobileInspectors = [...cssSource.matchAll(/\.inspector\s*\{([^}]*)\}/g)]
+    .map(([, body]) => body).filter(body => body.includes('position: fixed'));
+  assert.equal(mobileInspectors.length, 2, 'portrait and short-landscape share the same inset authority');
+  for (const body of mobileInspectors) assert.ok(body.includes(`max-height: calc(100dvh - ${sharedInset})`));
+  assert.match(viewSource, /const stopPreviewInset = layer \? observeArchitectureSheetPreviewInset\(layer\) : undefined/);
+  assert.match(viewSource, /stopPreviewInset\?\.\(\);/);
+  assert.match(readFileSync(new URL('../app/globals.css', import.meta.url), 'utf8'), /\.preview-banner\{[^}]*z-index:1000/);
+});
+
+test("mobile Preview measurement follows late banner/viewport changes and owns cleanup", () => {
+  // Execute the real lifecycle helper against explicit DOM geometry/events.
+  // Browser stacking and hit-testing remain deployed Preview acceptance.
+  const styles = new Map();
+  const frames = new Map();
+  const observed = new Set();
+  let nextFrame = 1; let resize; let disconnected = 0; let reads = 0;
+  const view = Object.assign(new EventTarget(), {
+    innerHeight: 390, visualViewport: new EventTarget(),
+    getComputedStyle: banner => ({ visibility: banner.visibility ?? 'visible' }),
+    requestAnimationFrame: callback => { const id = nextFrame++; frames.set(id, callback); return id; },
+    cancelAnimationFrame: id => frames.delete(id),
+    ResizeObserver: class {
+      constructor(callback) { resize = callback; }
+      observe(element) { observed.add(element); }
+      disconnect() { disconnected++; observed.clear(); }
+    },
+  });
+  const banners = [];
+  const document = { defaultView: view, body: {}, querySelectorAll: selector => {
+    assert.equal(selector, '.preview-banner'); reads++; return banners;
+  } };
+  const layer = { ownerDocument: document, style: {
+    setProperty: (key, value) => styles.set(key, value), removeProperty: key => styles.delete(key),
+  } };
+  const property = '--architecture-preview-inset';
+  const flush = () => { const pending = [...frames.values()]; frames.clear(); pending.forEach(callback => callback()); };
+  const stop = observeArchitectureSheetPreviewInset(layer);
+  assert.equal(styles.get(property), '0px'); assert.ok(observed.has(document.body));
+  let bottom = 34;
+  const banner = { getBoundingClientRect: () => ({ top: 0, bottom, width: 844 }) };
+  banners.push(banner);
+  resize(); resize(); view.dispatchEvent(new Event('resize')); view.visualViewport.dispatchEvent(new Event('resize'));
+  assert.equal(frames.size, 1, 'layout notifications coalesce, not a polling loop');
+  flush(); assert.equal(styles.get(property), '34px'); assert.ok(observed.has(banner));
+  bottom = 51.5; resize(); flush(); assert.equal(styles.get(property), '52px');
+  banner.visibility = 'hidden'; resize(); flush(); assert.equal(styles.get(property), '0px');
+  banner.visibility = 'visible'; view.dispatchEvent(new Event('resize')); flush();
+  assert.equal(styles.get(property), '52px');
+  resize(); assert.equal(frames.size, 1); stop();
+  assert.equal(disconnected, 1); assert.equal(observed.size, 0); assert.equal(frames.size, 0); assert.equal(styles.has(property), false);
+  const finalReads = reads;
+  resize(); view.dispatchEvent(new Event('resize')); view.visualViewport.dispatchEvent(new Event('resize')); flush();
+  assert.equal(reads, finalReads); assert.equal(frames.size, 0, 'closed sheet cannot schedule work');
+  bottom = 29; const stopReopened = observeArchitectureSheetPreviewInset(layer);
+  assert.equal(styles.get(property), '29px', 'reopen measures current geometry, not the prior inset');
+  stopReopened();
 });
 
 test("mobile 25: scroll lock restores exact prior body style and scroll position", () => {

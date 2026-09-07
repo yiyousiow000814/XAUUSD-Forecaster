@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
+import { resolveVinextRootAssetImports, vinextRootAssets } from "../build/vinext-root-assets.mjs";
 
 import {
   assertExactFixtureBytes,
@@ -143,4 +145,62 @@ test("Workers Preview fixture preflight fails closed", () => {
     },
     spawn: () => ({ status: 1, stderr: "production-shaped build failed" }),
   }), /WORKERS_RELEASE_FIXTURE_PREFLIGHT_FAILED:production-shaped build failed/);
+});
+
+test("RSC chunks resolve generated assets to their one authoritative root", async () => {
+  for (const fileName of ["entry.mjs", "_next/static/entry.mjs", "_next\\static\\entry.mjs", "nested/deeper/chunks/entry.mjs"]) {
+    const root = mkdtempSync(join(tmpdir(), "aurum-vinext-root-assets-"));
+    try {
+      writeFileSync(join(root, "package.json"), '{"type":"module"}', "utf8");
+      const assets = join(root, "vinext-client-assets.js");
+      const manifest = join(root, "__vinext_cacheability_manifest.js");
+      writeFileSync(assets, 'export default "before-client-finalization";', "utf8");
+      writeFileSync(manifest, 'export default "authoritative-cache-policy";', "utf8");
+      const code = 'import assets from "./vinext-client-assets.js";\n'
+        + 'export {default as manifest} from "./__vinext_cacheability_manifest.js";\n'
+        + 'export const dynamic = () => import("./vinext-client-assets.js");\n'
+        + 'export default assets;\n';
+      const plugin = vinextRootAssets();
+      assert.equal(plugin.renderChunk.call({ environment: { name: "client" } }, code, { fileName }), null);
+      const result = plugin.renderChunk.call({ environment: { name: "rsc" } }, code, { fileName });
+      const entry = join(root, ...fileName.replaceAll("\\", "/").split("/"));
+      mkdirSync(dirname(entry), { recursive: true });
+      writeFileSync(entry, result?.code ?? code, "utf8");
+      // Exercise the real late producer boundary: no copied pre-finalization bytes.
+      writeFileSync(assets, 'export default "final-client-assets";', "utf8");
+      const loaded = await import(pathToFileURL(entry).href);
+      assert.equal(loaded.default, "final-client-assets");
+      assert.equal((await loaded.dynamic()).default, "final-client-assets");
+      assert.equal(loaded.manifest, "authoritative-cache-policy");
+      if (dirname(entry) !== root) {
+        for (const asset of ["vinext-client-assets.js", "__vinext_cacheability_manifest.js"]) {
+          assert.throws(() => readFileSync(join(dirname(entry), asset)), { code: "ENOENT" });
+        }
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("RSC asset correction changes only exact module specifiers and rejects path escape", async () => {
+  const untouched = 'import x from "./other/vinext-client-assets.js";\n'
+    + 'export const text = "./vinext-client-assets.js";\n'
+    + '// import x from "./__vinext_cacheability_manifest.js";\n';
+  assert.equal(resolveVinextRootAssetImports(untouched, "_next/static/entry.mjs"), null);
+  const code = 'import "./__vinext_cacheability_manifest.js";';
+  assert.ok(resolveVinextRootAssetImports(`${untouched}\n${code}`, "_next/static/entry.mjs").code.startsWith(untouched));
+  for (const fileName of ["", "../entry.js", "a/../../entry.js", "..\\entry.js", "/entry.js", "C:\\entry.js", "a//entry.js"]) {
+    assert.throws(() => resolveVinextRootAssetImports(code, fileName), /VINEXT_PRERENDER_CHUNK_PATH_INVALID/);
+  }
+  assert.throws(() => resolveVinextRootAssetImports(`${code} broken(`, "entry.js"), /VINEXT_PRERENDER_IMPORT_PARSE_FAILED/);
+  const root = mkdtempSync(join(tmpdir(), "aurum-vinext-root-missing-"));
+  try {
+    const entry = join(root, "nested", "entry.mjs");
+    mkdirSync(dirname(entry));
+    writeFileSync(entry, resolveVinextRootAssetImports(code, "nested/entry.mjs").code, "utf8");
+    await assert.rejects(import(pathToFileURL(entry).href), { code: "ERR_MODULE_NOT_FOUND" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

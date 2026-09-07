@@ -54,12 +54,90 @@ the unfinished-date authority, independently of the rows newly discovered in
 that cycle, so later cross-date peers cannot retire already-owned reviews.
 Once the date is effectively finalized, normal supersession rules apply.
 
+The same job-count mutation owner maintains two fixed operational metadata keys:
+`NEWS_JOB_INPUT_REVISION_V1` and `NEWS_JOB_RECONCILIATION_CACHE_V1`. They are
+discardable, rebuildable optimization metadata, not immutable evidence or remote
+ACKs. Only their values may be updated; key renames, creation-time updates and
+replacement over an existing key are rejected. `FORWARD_EPOCH`, all pre-existing
+metadata keys, and even a schema-valid null key keep their original immutable
+UPDATE/DELETE protection. No general mutable metadata namespace is introduced.
+
+The job version changes in the same transaction as each relevant job insertion,
+deletion or field change, including changes that leave aggregate counts equal.
+Rollback rolls back both. Installing the hooks acquires the writer lock before
+checking their exact definitions, atomically replaces old hooks and invalidates
+prior reconciliation acceptance before repairing missing authority. Installation
+inside an active caller transaction is rejected without committing it. Old
+positional count-metadata writes and old `CREATE IF NOT EXISTS` installers remain
+compatible. Missing, noncanonical or overflowing versions cannot authorize reuse.
+This global version is not a per-date synthesis or Sync acceptance authority.
+
+Global job reconciliation may return unchanged only when its exact post-work
+job version, four immutable source tails, eligibility/materialization contract,
+Forward epoch and protected receipt-day set match accepted local work. Its
+bounded cache is read with those inputs in one snapshot. A changed or missing
+input, changed contract, corrupted/oversized metadata or backward clock runs the
+original completion and retirement rules. Reconciliation does not use current
+time to make source eligibility decisions; claim, backoff and synthesis due
+times still belong to their existing owners. A hit creates no new observation
+timestamp, job transition or cache write and reads no article/annotation payload.
+
+Acceptance is published only after both real reconciliation statements, using
+their post-transition version inside the same writer transaction. Caller-owned
+transactions and explicit unmanaged calls retain the original uncached path;
+they do not publish optimization acceptance. Mixed-source restores and direct
+non-owner rowid reuse cannot use tail-token acceptance; restore a coherent
+database or invalidate the disposable cache. No global reconciliation counter
+is substituted for a date-specific synthesis input or a remote Sync ACK.
+
 Protected discovery must also leave ordinary contract backfill able to advance
 without increasing the total allowance. When at least two historical slots are
 available, one is reserved for the durable ordinary cursor. With a single slot,
 each exact owned job leaves discovery, so a fixed finite protected population
 drains before ordinary discovery resumes. This is not a guarantee under an
 unbounded stream of new historical inputs; provider dispatch quotas are unchanged.
+
+Date-list discovery may reuse one disposable, at-most-4,096-byte JSON value in
+the existing current-date refresh row. It must not create a lifecycle row just
+to hold this cache or expose the internal field in the public Brief summary.
+The key binds the selector contract, Forward epoch, recovery version, requested
+limit, local day, and bounded exact scalar tails of `news_revisions`, original
+finalizations, and recovery corrections. These inputs remain append-only and
+their owners allocate implicit increasing rowids; no payload, COUNT, MAX or
+historical DISTINCT is needed on an unchanged hit. The cache is supported for
+the existing bounded backlog limit; other limits retain the ordinary selector.
+
+Within a day, newly due receipts can only add the current day, which is already
+returned before the newest unfinished historical dates. Thus future receipts
+do not require another full-history deadline scan. Local midnight, a time before
+the cached observation, contract/limit movement, and any changed input tail
+invalidate reuse. SQLite and Python must agree on the current receipt day;
+ambiguous clock interpretation uses the ordinary selector. This says nothing
+about generation, retry, leases, reconciliation or other owners' due work.
+
+The source token and selected dates must come from one SQLite read snapshot.
+Release that snapshot before an independent short cache UPDATE, so normal WAL
+appends cannot cause a read-to-write upgrade failure. A late publication retains
+its original token: a newer source must reject it, not treat it as current.
+Inside a caller-owned transaction, return its snapshot result without publishing
+or committing any cache; rollback cannot leak an uncommitted source revision.
+Normal read-only consumers may compute without caching. Independent cache
+publication uses a zero-wait writer budget and restores the connection's normal
+budget afterward. An ordinary busy writer or read-only consumer may leave the
+cache unpublished, with no immediate retry or loss of the computed result.
+This tolerance is confined to optional publication: source-read, authorization,
+extended moved-database and storage failures remain visible. Missing old-schema
+state or malformed/oversized cache values use the ordinary computation; they do
+not imply completed work.
+
+Cache validity assumes the existing coherent SQLite backup/restore boundary:
+immutable evidence and its derived state are copied together. The Forward epoch
+and tail token are not a globally unique database identity or proof of arbitrary
+history integrity. Independently transplanting a cache between databases, or
+restoring inputs while retaining unrelated derived state, is not supported.
+The nullable field is installed by the existing additive lifecycle migration;
+old named-column Brief writers preserve it and old readers need not use it.
+No production migration is implied by an isolated compatibility test.
 
 Frequent worker checks do not imply generation. For a changed live-day packet,
 the durable refresh decision combines age since the last successful revision,
@@ -118,6 +196,81 @@ presents the synthesis first, keeps the two highest-ranked developments
 immediately visible, and progressively discloses the remainder. Historical
 revisions that predate the structured synthesis remain readable without
 inventing missing drivers or watch items.
+
+## Source-first synthesis preparation
+
+The existing date refresh row may hold one disposable, at most 32 KiB synthesis
+source cache. It is local optimization state, not an immutable Brief, a remote
+ACK, or a new date owner. A hit must not update `last_observed_at`, clear a
+failure, advance a Sync checkpoint, or fabricate a new revision. Public summary
+output excludes this internal field. Missing, malformed, future-dated or
+inapplicable state uses the genuine business path.
+Actual finalization retires this new disposable cache without deleting Brief
+revisions or source evidence; interrupted optional cleanup may resume later.
+
+Applicability binds the receipt date and current civil day, Forward epoch,
+annotation and synthesis contracts, recovery version, effective input budget,
+the existing latest revision/finalization and refresh state, and scalar tail
+identities from revisions, annotations, translations, impacts and event
+resolutions. Each identity is read in the same SQLite snapshot. These source
+families retain their append-only implicit-rowid contract. Coherent backup and
+restore preserve both source and optimization state; a partial/mixed restore
+must invalidate the cache. A rewind, unknown identity or backward clock is not
+unchanged evidence.
+
+If immutable tails moved, at most 128 appended scalar identities across all
+five families may be examined before deciding dated relevance. An unrelated-day
+append may advance these examined tails without rebuilding a packet. Impacts
+are traced through their actual annotation foreign key, and event resolutions
+through assessment to annotation; duplicated source fields are not substituted
+for those relationships. Delta overflow uses the uncached path, not a truncated
+claim that the day is unchanged.
+
+Existing future timestamps require a separate visibility deadline even when no
+row is appended. Initialization and due-time refill inspect a conservative
+scalar superset across the five families, without body or annotation JSON. Each
+materialized family is bounded, and more than 1,024 total facts withholds cache
+acceptance. This limit does not truncate the authoritative population or change
+model eligibility. Due work or unproven cache applicability uses the existing
+complete population; partial scalar inspection is not accepted as unchanged. An
+indexed MIN returning one scalar does not make its input work constant.
+
+The three performance-only access paths are receipt Julian day, translation
+revision/content plus parse time, and event-resolution assessment plus resolve
+time. They add no uniqueness or data authority. Initial index construction
+visits existing table keys and can allocate storage or take a writer lock;
+rollout must budget that separately from hot no-change reads. Installation is
+additive and retry-safe; completed DDL can remain after an autocommit failure.
+It must never rewrite old source evidence. Missing or unrecognized access paths
+do not trigger an optional full-history initialization scan.
+
+The existing job-count mutation hooks invalidate only an already-present
+affected receipt-day cache when an ACTIVE_ANNOTATION DEAD_LETTER membership or
+its identity can change the population. A normal lease transition does not
+invalidate unchanged synthesis content. Invalidation shares the job transaction;
+rollback cannot publish it. A live reader checks all three canonical hook
+definitions in the same source snapshot and again during publication. Missing,
+oversized or old-writer definitions make the cache inapplicable; readers never
+repair schema. The same job-revision reader gates global reconciliation, so an
+old hook cannot leave either optimization trusting a stale counter. Old schema
+variants intentionally retain their ordinary uncached business paths. The
+existing installer invalidates stale optimization before
+repairing lost/replaced hooks or missing job-version metadata. Publication checks the
+exact observed job version and state under a short writer transaction, so a
+concurrent invalidation cannot be overwritten by an earlier prepared result.
+SQLite catalogs have no name index: canonical-hook inspection reads fixed schema
+metadata and returns at most three 8 KiB definitions. Its work is reported
+separately from historical source reads; it is not advertised as an indexed
+constant-time seek. No schema catalog or history mutation occurs on a cache hit.
+
+An unchanged successful candidate set bypasses population/packet work. A failure
+whose unchanged input still waits for its retry retains its reason, counter and
+deadline. Adaptive pending work reuses only the accepted bounded event snapshot
+and runs the existing adaptive decision with current backlog/provider/time
+facts; it does not invent a second policy or freeze cooldown and aging. At the
+actual due boundary the normal builder and generation path run. Optional cache
+publication uses a zero-wait writer acquisition; exact BUSY/READONLY can defer
+only that optimization. Source reads and other storage errors still surface.
 
 ## Capacity and failure
 
