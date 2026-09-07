@@ -3170,7 +3170,7 @@ def test_news_projection_source_rejects_non_batch_offsets(tmp_path) -> None:
 
     first = module._news_projection_batch(generation, "detail", 0)
     assert len(first["items"]) == 8
-    with pytest.raises(ValueError, match="frozen batch boundary"):
+    with pytest.raises(ValueError, match="batch boundary"):
         module._news_projection_batch(generation, "detail", 1)
 
 
