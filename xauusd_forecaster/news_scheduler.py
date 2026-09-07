@@ -3403,6 +3403,7 @@ def _contract_backfill_page(
         received_before=activated_at,
         before_cursor=cursor,
         selection_order="receipt_desc",
+        discovery_only=True,
     )
     selected = [
         row for row in scanned
@@ -3676,10 +3677,21 @@ def sync_pending_jobs(
         prompt_version=PROMPT_VERSION,
         priority_receipt_days=tuple(brief_backlog),
         received_from=activated_at,
+        discovery_only=True,
     )
     model_review_backfill = transition.kind == MODEL_REVIEW_REQUIRED
+    ordinary_state = connection.execute(
+        "SELECT state FROM news_annotation_contract_backfill_v1 WHERE prompt_version=?",
+        (PROMPT_VERSION,),
+    ).fetchone()
+    ordinary_active = bool(ordinary_state and str(ordinary_state[0]) != "COMPLETE")
+    # Reserve progress without increasing the total discovery allowance. With
+    # only one historical slot, discovery-only selection drains the fixed
+    # protected population once, rather than rereading already owned jobs.
+    ordinary_reserve = int(ordinary_active and backfill_capacity > 1)
     protected_capacity = (
-        backfill_capacity if brief_backlog and model_review_backfill else 0
+        backfill_capacity - ordinary_reserve
+        if brief_backlog and model_review_backfill else 0
     )
     protected_annotations = pending_annotation_records(
         connection,
@@ -3688,6 +3700,7 @@ def sync_pending_jobs(
         prompt_version=PROMPT_VERSION,
         priority_receipt_days=tuple(brief_backlog),
         received_before=activated_at,
+        discovery_only=True,
     ) if protected_capacity else []
     backfill_annotations = (
         _contract_backfill_page(
@@ -3797,7 +3810,9 @@ def sync_pending_jobs(
             )
             enqueued += 1
         discovered[task_type] = enqueued
-    reconcile_completed_jobs(connection, now=instant)
+    reconcile_completed_jobs(
+        connection, now=instant, protected_receipt_days=tuple(brief_backlog),
+    )
     _reopen_protected_annotation_jobs(
         connection, protected_annotations, prompt_version=PROMPT_VERSION,
         now=instant,
@@ -3846,6 +3861,7 @@ def reconcile_completed_jobs(
     *,
     now: datetime | None = None,
     manage_transaction: bool = True,
+    protected_receipt_days: tuple[str, ...] = (),
 ) -> int:
     """Close jobs already satisfied or superseded by immutable evidence."""
     from contextlib import nullcontext
@@ -3867,6 +3883,39 @@ def reconcile_completed_jobs(
     forward_epoch = str(connection.execute(
         "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
     ).fetchone()[0])
+    protected_days = tuple(dict.fromkeys(protected_receipt_days))
+    protected_membership = (
+        "substr(datetime(current.collector_first_seen_time,'+8 hours'),1,10) IN ("
+        + ",".join("?" for _ in protected_days) + ")"
+        if protected_days else "0"
+    )
+    # Protected reconciliation must not depend on this tick's newly discovered
+    # array: an already owned job can still require the same receipt-day rules.
+    # Match the pending reader's same-day revision/peer scope using scalar
+    # identity/time facts, without rematerializing its source payloads.
+    newer_scope = f"""AND (
+        j.task_type<>'ACTIVE_ANNOTATION' OR NOT EXISTS (
+          SELECT 1 FROM news_revisions current
+          WHERE current.source=j.source AND current.source_item_id=j.source_item_id
+            AND current.revision_number=j.revision_number AND {protected_membership}
+        ) OR substr(datetime(newer.collector_first_seen_time,'+8 hours'),1,10)=(
+          SELECT substr(datetime(current.collector_first_seen_time,'+8 hours'),1,10)
+          FROM news_revisions current
+          WHERE current.source=j.source AND current.source_item_id=j.source_item_id
+            AND current.revision_number=j.revision_number)
+        )""" if protected_days else ""
+    peer_scope = (
+        f"AND (NOT ({protected_membership}) OR "
+        "substr(datetime(peer.collector_first_seen_time,'+8 hours'),1,10)="
+        "substr(datetime(current.collector_first_seen_time,'+8 hours'),1,10))"
+        if protected_days else ""
+    )
+    peer_revision_scope = (
+        f"AND (NOT ({protected_membership}) OR "
+        "substr(datetime(peer_newer.collector_first_seen_time,'+8 hours'),1,10)="
+        "substr(datetime(current.collector_first_seen_time,'+8 hours'),1,10))"
+        if protected_days else ""
+    )
     transaction = connection if manage_transaction else nullcontext()
     with transaction:
         completed = connection.execute(
@@ -3913,7 +3962,7 @@ def reconcile_completed_jobs(
                      SELECT 1 FROM news_revisions newer
                      WHERE newer.source=j.source
                        AND newer.source_item_id=j.source_item_id
-                       AND newer.revision_number>j.revision_number)
+                       AND newer.revision_number>j.revision_number {newer_scope})
                    OR (j.task_type='ACTIVE_ANNOTATION' AND EXISTS (
                      SELECT 1 FROM news_revisions current
                      WHERE current.source=j.source
@@ -3935,19 +3984,21 @@ def reconcile_completed_jobs(
                          SELECT 1 FROM news_revisions peer
                          WHERE peer.cluster_id=current.cluster_id
                            AND {semantic_eligibility_sql_predicate('peer')}
+                           {peer_scope}
                            AND NOT EXISTS (
                              SELECT 1 FROM news_revisions peer_newer
                              WHERE peer_newer.source=peer.source
                                AND peer_newer.source_item_id=peer.source_item_id
-                               AND peer_newer.revision_number>peer.revision_number)
+                               AND peer_newer.revision_number>peer.revision_number
+                               {peer_revision_scope})
                            AND {preferred_cluster_peer_predicate('peer', 'current')}
                          )
                        )
                    ))
                  )""",
             (
-                timestamp, timestamp, PROMPT_VERSION,
-                forward_epoch, forward_epoch,
+                timestamp, timestamp, PROMPT_VERSION, *protected_days,
+                forward_epoch, forward_epoch, *(protected_days * 2),
             ),
         )
     return completed.rowcount + obsolete.rowcount

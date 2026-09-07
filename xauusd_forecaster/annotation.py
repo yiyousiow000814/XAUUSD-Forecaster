@@ -304,6 +304,7 @@ def pending_annotation_records(
     received_before: datetime | None = None,
     before_cursor: tuple[str, str, str, int] | None = None,
     selection_order: str = "default",
+    discovery_only: bool = False,
 ) -> list[dict[str, object]]:
     """Return exactly the rows that the current annotator may claim.
 
@@ -385,6 +386,20 @@ def pending_annotation_records(
         "COALESCE(n.source_published_time,n.collector_first_seen_time) DESC, "
         "n.collector_first_seen_time,n.source,n.source_item_id"
     )
+    # Discovery does not need the source payload again once an exact job owns
+    # the work. Claim/lease resolution must still use the normal reader. CASE
+    # short-circuits body/peer eligibility for tracked identities; moving a
+    # predicate earlier in AND alone would not establish that read boundary.
+    discovery_guard = """CASE WHEN EXISTS (
+        SELECT 1 FROM news_ai_jobs_v1 j
+        WHERE j.task_type='ACTIVE_ANNOTATION'
+          AND j.source=n.source AND j.source_item_id=n.source_item_id
+          AND j.revision_number=n.revision_number AND j.annotation_id=''
+          AND j.prompt_version=?
+          AND (j.state IN ('QUEUED','LEASED','BACKING_OFF')
+            OR (j.state='DEAD_LETTER' AND COALESCE(j.last_error,'')<>
+                'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'))
+        ) THEN 0 ELSE (""" if discovery_only else ""
     rows = connection.execute(
         f"""SELECT n.* FROM news_revisions n
         LEFT JOIN news_annotations a
@@ -392,7 +407,7 @@ def pending_annotation_records(
          AND a.revision_number=n.revision_number
          AND a.llm_model_version IN (?, ?) AND a.prompt_version IN (?, ?)
          AND {model_usable_annotation_predicate('a')}
-        WHERE a.annotation_id IS NULL
+        WHERE {discovery_guard} a.annotation_id IS NULL
           AND {semantic_eligibility_sql_predicate('n')}
           AND length(trim(COALESCE(n.body, ''))) >= {ANNOTATION_BODY_MIN_CHARACTERS}
           {scope_clause}
@@ -432,10 +447,12 @@ def pending_annotation_records(
                   AND f2.prompt_version=f.prompt_version)
               {recovery_clause}
               AND (f.is_terminal=1 OR f.next_retry_at > ?))
+        {") END" if discovery_only else ""}
         ORDER BY {ordering}
         LIMIT ?""",
         (
             *compatible_models, prompt_version, prompt_version,
+            *((prompt_version,) if discovery_only else ()),
             forward_epoch.isoformat(),
             *scope_parameters,
             *(prioritized_days * 3),
