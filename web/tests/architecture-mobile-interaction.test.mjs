@@ -248,7 +248,7 @@ test("graph publication does not re-enter synchronous node measurement", () => {
 
 test("mobile 27: Explore Advanced lists only the current source slices", () => {
   assert.deepEqual(manifest.views.filter(view => ["ADVANCED", "CAMPAIGN"].includes(view.navigation.role)).map(view => view.id),
-    ["clock-transaction", "install-switch-recovery", "source-first-ack"]);
+    Object.keys(index.allowed.views));
 });
 
 test("mobile 28: Explore Advanced does not repeat beginner subsystem destinations", () => {

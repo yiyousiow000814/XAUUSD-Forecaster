@@ -128,7 +128,13 @@ def test_source_changes_and_invalid_sources_fail_or_change_the_graph(source, mut
     assert compiler.render(changed) != compiler.render(first)
 
 
-def test_build_then_check_and_tamper_are_real_cli_boundaries(source):
+@pytest.mark.parametrize('fixture_name', ['source', 'typescript_source'])
+def test_build_then_check_and_tamper_are_real_cli_boundaries(request, fixture_name, monkeypatch):
+    source = request.getfixturevalue(fixture_name)
+    if fixture_name == 'typescript_source':
+        import architecture_typescript_tool as tool
+        package, _ = tool.resolve_package(ROOT)
+        monkeypatch.setenv(tool.PACKAGE_ENV, str(package))
     command = [sys.executable, str(source / 'scripts/compile_architecture.py')]
     options = dict(capture_output=True, timeout=15,
                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
@@ -149,7 +155,7 @@ def test_invalid_selection_cannot_silently_drop_coverage(source, kind):
     view = manifest['views']['fixture']
     if kind == 'empty': manifest['views'] = {}
     if kind == 'missing_root': view['roots'] = []
-    if kind == 'language': view['files'].append('scripts/not-parsed.ts')
+    if kind == 'language': view['files'].append('scripts/not-parsed.rb')
     if kind == 'escape': view['files'].append('../outside.py')
     if kind == 'view_escape': manifest['views'] = {'../outside': view}
     path.write_text(json.dumps(manifest), encoding='utf-8')
@@ -256,3 +262,239 @@ def test_retained_evidence_is_source_bound_and_does_not_invent_runtime_traces(tm
     assert result['runtime'] == {'status': 'UNKNOWN', 'traces': []}
     assert result['mutations'][0]['runtime_observed'] is False
     assert len(result['mutations'][0]['artifacts']) == 2
+
+
+@pytest.fixture
+def typescript_source(source, monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT / 'scripts'))
+    (source / 'web').mkdir()
+    for name in ('package.json', 'package-lock.json'):
+        shutil.copyfile(ROOT / 'web' / name, source / 'web' / name)
+    manifest_path = source / compiler.SELECTION
+    manifest = json.loads(manifest_path.read_text())
+    manifest['views']['fixture']['files'].extend(['web/owner.ts', 'web/View.tsx'])
+    manifest['views']['fixture']['roots'].extend(['web/owner.ts::Owner.execute', 'web/View.tsx::View.refresh'])
+    manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
+    (source / 'web/owner.ts').write_text('''import type { Input } from './types';
+import { fetch as alias } from './transport';
+// ignoredGhost() must never become an observed call.
+export interface Shape { value: number }
+export class Owner {
+  execute(db: unknown, value: Input) {
+    db.prepare(`SELECT 中文 FROM records`).bind(value);
+    db.prepare(`SELECT ${value} FROM records`);
+    alias('/api/news-index');
+    this[value.method]();
+    return import(value.module);
+  }
+}
+export async function GET() { return alias('/api/news-content'); }
+const notExecuted = () => { throw new Error('not run'); };
+''', encoding='utf-8')
+    (source / 'web/View.tsx').write_text('''import { useCallback } from 'react';
+import { GET } from './owner';
+export function GET() { return 2; }
+export default function View() {
+  const refresh = useCallback(async () => GET(), []);
+  return <Panel title="中文"><button onClick={refresh}>Open</button></Panel>;
+}
+''', encoding='utf-8')
+    return source
+
+
+def test_real_typescript_parser_preserves_symbols_calls_jsx_and_unknown_dispatch(typescript_source):
+    index = compiler.compile_index(typescript_source)
+    symbols = {row['id']: row for row in index['observed']['symbols']}
+    assert {'web/owner.ts::GET', 'web/View.tsx::GET', 'web/owner.ts::Owner.execute',
+            'web/owner.ts::Shape', 'web/View.tsx::View.refresh'} <= symbols.keys()
+    method = symbols['web/owner.ts::Owner.execute']
+    assert (method['line'], method['end_line']) == (6, 12)
+    assert method['syntax_kind'] == 'MethodDeclaration'
+    edges = index['observed']['edges']
+    assert not any('ignoredGhost' in row['target'] for row in edges)
+    assert any(row['kind'] == 'requires' and row['type_only'] for row in edges if 'type_only' in row)
+    assert any(row['kind'] == 'renders' and row['target'] == 'Panel' for row in edges)
+    assert any(row['target'] == 'this[<dynamic>]' and row['resolution'] == 'UNKNOWN' for row in edges)
+    assert any(row['kind'] == 'requires' and row['target'] == '<dynamic-module>' for row in edges)
+    assert any(row.get('statement') == 'SELECT 中文 FROM records' and row['resolution'] == 'LITERAL' for row in edges)
+    assert any(row.get('statement') == '<dynamic SQL>' and row['resolution'] == 'UNKNOWN' for row in edges)
+    assert next(row for row in edges if row.get('first_argument_literal') == '/api/news-index')['resolution'] == 'UNKNOWN'
+    assert index['runtime'] == {'status': 'UNKNOWN', 'observations': []}
+    assert index['tools']['typescript']['version'] == json.loads((ROOT / 'web/package.json').read_text())['devDependencies']['typescript']
+
+
+def test_typescript_parse_failure_and_source_drift_are_not_partial_success(typescript_source):
+    first = compiler.compile_index(typescript_source)
+    file = typescript_source / 'web/View.tsx'
+    file.write_text(file.read_text().replace('<Panel ', '<OtherPanel '), encoding='utf-8')
+    with pytest.raises(RuntimeError, match='ARCHITECTURE_PARSE_FAILED'):
+        compiler.compile_index(typescript_source)  # mismatched JSX end tag
+    file.write_text('export default function View() { const refresh = () => changed(); return null; }', encoding='utf-8')
+    changed = compiler.compile_index(typescript_source)
+    assert first['source_input_digest'] != changed['source_input_digest']
+    assert any(row['target'] == 'changed' for row in changed['observed']['edges'])
+
+
+def test_typescript_nested_object_and_class_property_methods_have_distinct_owners(typescript_source):
+    file = typescript_source / 'web/owner.ts'
+    with file.open('a', encoding='utf-8') as stream:
+        stream.write('''
+const handlers = { a: { run() { first(); } }, b: { run() { second(); } } };
+class Nested { handlers = { a: { run() { third(); } }, [dynamic]: { run() { fourth(); } } }; }
+function options() { accept({ headers: { run() { fifth(); } } }); accept({ headers: { run() { sixth(); } } }); }
+''')
+    index = compiler.compile_index(typescript_source)
+    by_call = {row['target']: row['source'] for row in index['observed']['edges'] if row['kind'] == 'calls'}
+    assert by_call['first'] == 'web/owner.ts::handlers.a.run'
+    assert by_call['second'] == 'web/owner.ts::handlers.b.run'
+    assert by_call['third'] == 'web/owner.ts::Nested.handlers.a.run'
+    assert by_call['fourth'].startswith('web/owner.ts::Nested.handlers.<computed@')
+    assert by_call['fourth'].endswith('>.run')
+    assert by_call['fifth'] != by_call['sixth']
+    for call in ('fifth', 'sixth'):
+        assert by_call[call].startswith('web/owner.ts::options.<object@')
+        assert by_call[call].endswith('>.headers.run')
+
+
+def test_typescript_sources_and_tool_identity_are_relocatable_without_unrelated_lock_churn(typescript_source, tmp_path):
+    first = compiler.compile_index(typescript_source)
+    copy = tmp_path / 'relocated'
+    shutil.copytree(typescript_source, copy)
+    file = copy / 'web/owner.ts'
+    file.write_bytes(file.read_bytes().replace(b'\r\n', b'\n').replace(b'\n', b'\r\n'))
+    assert compiler.compile_index(copy) == first
+    lock_path = copy / 'web/package-lock.json'
+    lock = json.loads(lock_path.read_text())
+    lock['packages']['node_modules/unrelated'] = {'version': '999.0.0'}
+    lock_path.write_text(json.dumps(lock), encoding='utf-8')
+    assert compiler.compile_index(copy) == first
+    lock['packages']['node_modules/typescript']['integrity'] = 'sha512-' + 'A' * 86 + '=='
+    lock_path.write_text(json.dumps(lock), encoding='utf-8')
+    with pytest.raises(RuntimeError, match='ARCHITECTURE_TOOL_INTEGRITY_FAILED'):
+        compiler.compile_index(copy)
+
+
+@pytest.mark.parametrize('change', ['wrong_version', 'wrong_lock', 'missing_entry', 'malformed_metadata'])
+def test_typescript_package_mismatch_fails_before_any_parser_code(typescript_source, tmp_path, monkeypatch, change):
+    import architecture_typescript_tool as tool
+    identity = tool.tool_identity(typescript_source)
+    project = tmp_path / 'tool'
+    package = project / 'node_modules/typescript'
+    (package / 'lib').mkdir(parents=True)
+    metadata = {'name': 'typescript', 'version': identity['version']}
+    locked = dict(identity)
+    if change == 'wrong_version': metadata['version'] = '0.0.0'
+    if change == 'wrong_lock': locked['integrity'] = 'incorrect'
+    (project / 'package-lock.json').write_text(json.dumps({'packages': {'node_modules/typescript': locked}}))
+    (package / 'package.json').write_text('{' if change == 'malformed_metadata' else json.dumps(metadata))
+    sentinel = tmp_path / 'PARSER_EXECUTED'
+    if change != 'missing_entry':
+        (package / 'lib/typescript.js').write_text(f'require("node:fs").writeFileSync({json.dumps(str(sentinel))},"bad");')
+    monkeypatch.setenv(tool.PACKAGE_ENV, str(package))
+    with pytest.raises(RuntimeError, match='ARCHITECTURE_TOOL_INTEGRITY_FAILED'):
+        compiler.compile_index(typescript_source)
+    assert not sentinel.exists()
+
+
+def test_parser_installer_projects_one_lock_with_sri_and_reuses_valid_hot_cache(typescript_source, tmp_path, monkeypatch):
+    import architecture_typescript_tool as tool
+    identity = tool.tool_identity(typescript_source)
+    observed = []
+    def npm(command, **options):
+        observed.append(command)
+        project = options['cwd']
+        package = json.loads((project / 'package.json').read_text())
+        lock = json.loads((project / 'package-lock.json').read_text())
+        assert package['devDependencies'] == {'typescript': identity['version']}
+        assert set(lock['packages']) == {'', 'node_modules/typescript'}
+        assert {key: lock['packages']['node_modules/typescript'][key] for key in identity} == identity
+        assert '--ignore-scripts' in command and '--fetch-retries=0' in command
+        assert '--fetch-timeout=30000' in command and options['timeout'] == 60
+        assert options['creationflags'] == tool.NO_WINDOW
+        installed = project / 'node_modules/typescript'
+        (installed / 'lib').mkdir(parents=True)
+        (installed / 'package.json').write_text(json.dumps({'name': 'typescript', 'version': identity['version']}))
+        (installed / 'lib/typescript.js').write_text('// acquisition-contract fixture; not used for parser execution')
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(tool.subprocess, 'run', npm)
+    package, cold = tool.install(typescript_source, tmp_path / 'cache')
+    again, hot = tool.install(typescript_source, tmp_path / 'cache')
+    assert package == again and len(observed) == 1
+    assert cold['cache'] == 'COLD' and hot['cache'] == 'HOT'
+    changed = dict(identity, integrity='sha512-' + 'A' * 86 + '==')
+    assert tool.identity_key(identity) != tool.identity_key(changed)
+
+
+@pytest.mark.parametrize('failure,reason', [
+    ('network', 'ARCHITECTURE_TOOL_UNAVAILABLE'),
+    ('integrity', 'ARCHITECTURE_TOOL_INTEGRITY_FAILED'),
+    ('timeout', 'ARCHITECTURE_TOOL_UNAVAILABLE'),
+    ('empty_success', 'ARCHITECTURE_TOOL_INTEGRITY_FAILED'),
+])
+def test_parser_acquisition_failures_never_become_source_success(typescript_source, tmp_path, monkeypatch, failure, reason):
+    import architecture_typescript_tool as tool
+    def npm(command, **_options):
+        if failure == 'timeout': raise subprocess.TimeoutExpired(command, 60)
+        return SimpleNamespace(returncode=0 if failure == 'empty_success' else 1,
+                               stderr=b'EINTEGRITY' if failure == 'integrity' else b'network unavailable')
+    monkeypatch.setattr(tool.subprocess, 'run', npm)
+    with pytest.raises(RuntimeError, match=reason):
+        tool.install(typescript_source, tmp_path / 'cache')
+
+
+def test_typescript_runtime_is_explicit_in_each_existing_required_owner():
+    shards = json.loads((ROOT / '.github/python-test-shards.json').read_text())['shards']
+    owners = [row['id'] for row in shards if 'tests/test_architecture_compiler.py' in row['tests']]
+    assert owners == ['python-4']
+    quality = (ROOT / '.github/workflows/quality-gates.yml').read_text()
+    assert "if: matrix.id == 'python-4'" in quality
+    assert 'python scripts/architecture_typescript_tool.py --github-env "$GITHUB_ENV"' in quality
+    architecture = (ROOT / '.github/workflows/architecture.yml').read_text()
+    assert architecture.count('python scripts/architecture_typescript_tool.py --github-env') == 2
+    assert 'npm ci' not in architecture  # only the bounded one-package owner acquires the tool
+
+
+def test_generated_transport_compacts_without_discarding_facts_or_raising_bound(typescript_source):
+    index = compiler.compile_index(typescript_source)
+    content = compiler.render(index)['critical-index.json']
+    assert json.loads(content) == index
+    assert len(content.encode()) < len(compiler.encoded(index).encode())
+    assert compiler.MAXIMUM_INDEX_BYTES == 2 * 1024 * 1024
+    index['unexpected_large_fact'] = 'x' * compiler.MAXIMUM_INDEX_BYTES
+    with pytest.raises(ValueError, match='ARCHITECTURE_INDEX_BUDGET_EXCEEDED'):
+        compiler.render(index)
+
+
+def test_current_news_worker_audit_view_keeps_independent_transports_and_dynamic_binding():
+    index = json.loads((ROOT / 'architecture/generated/critical-index.json').read_text(encoding='utf-8'))
+    roots = set(index['allowed']['views']['news-worker-audit']['roots'])
+    symbols = {row['id'] for row in index['observed']['symbols']}
+    edges = index['observed']['edges']
+    def calls(owner):
+        return {row['target'] for row in edges if row['source'] == owner and row['kind'] == 'calls'}
+    def url_fragments(owner):
+        return {part for row in edges if row['source'] == owner
+                for part in ([row['first_argument_literal']] if 'first_argument_literal' in row
+                             else row.get('first_argument_template', []))}
+    assert roots <= symbols
+    for family in ('index', 'content', 'evidence'):
+        path = f'web/app/api/news-{family}/route.ts'
+        assert {f'{path}::GET', f'{path}::POST'} <= symbols
+    assert {'prepareNewsProjection', 'stageNewsProjectionBatch', 'activateNewsProjection', 'verifyNewsProjection'} <= calls('web/app/api/news-index/route.ts::POST')
+    assert 'stageNewsProjectionBatch' in calls('web/app/api/news-content/route.ts::POST')
+    assert 'activateNewsEvidenceSnapshot' in calls('web/app/api/news-evidence/route.ts::POST')
+    snapshots = {row['target'] for row in edges if row['source'] == 'web/worker/api-router.ts::SNAPSHOT_ROUTES'
+                 and row['kind'] == 'declares_member'}
+    assert {'/api/audit', '/api/audit-decisions', '/api/audit-briefs', '/api/audit-stories'} <= snapshots
+    assert not snapshots & {'/api/news-index', '/api/news-content', '/api/news-evidence'}
+    assert {'snapshotRead', 'snapshotWrite', 'genericRoute'} <= calls('web/worker/api-router.ts::routeApiRequest')
+    generic = [row for row in edges if row['source'] == 'web/worker/api-router.ts::genericRoute' and row['target'] in {'loader', 'handler'}]
+    assert len(generic) == 2 and all(row['resolution'] == 'UNKNOWN' for row in generic)
+    assert '/api/news-index?' in url_fragments('web/app/_views/AuditView.tsx::AuditView.refreshNews')
+    assert '/api/audit' in url_fragments('web/app/_views/AuditView.tsx::AuditView.refreshAudit')
+    assert 'loadDashboardResource' in calls('web/app/_views/AuditView.tsx::AuditView.refreshEvidence')
+    detail_validators = [row for row in edges if row['source'].startswith('web/app/_views/AuditView.tsx::AuditView.refreshAuditDetail.')
+                         and row['source'].endswith('.validate') and row['target'] == 'validAuditDetailPayload']
+    assert len(detail_validators) == 1
+    assert 'authoritativeNewsTotals' in calls('web/app/_views/AuditView.tsx::AuditView.refreshNews')
+    assert not any(row['source'].startswith('web/') and row['resolution'] not in {'UNKNOWN', 'LITERAL'} for row in edges)
