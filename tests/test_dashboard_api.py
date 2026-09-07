@@ -2153,7 +2153,8 @@ def test_retry_operator_bridge_requires_both_loopback_and_dedicated_credential(
         try:
             urllib.request.urlopen(request, timeout=2)
         except urllib.error.HTTPError as error:
-            return error.code
+            with error:
+                return error.code
         raise AssertionError("bridge request should have failed")
 
     try:
@@ -2162,23 +2163,27 @@ def test_retry_operator_bridge_requires_both_loopback_and_dedicated_credential(
             f"{base}/api/retry-jobs",
             headers={"X-Aurum-Operator-Bridge-Token": "wrong" * 10},
         )) == 401
-        payload = b'{"items":[]}'
+        # These gates reject headers before reading a body. Send headers only:
+        # closing a Windows socket with unread POST bytes can reset the client
+        # before it observes the rejection. An eager body read must still time out.
         assert status(urllib.request.Request(
-            f"{base}/api/retry-overrides", method="POST", data=payload,
+            f"{base}/api/retry-overrides", method="POST",
             headers={
                 "Content-Type": "application/json",
                 "X-Aurum-Operator-Bridge-Token": bridge_token,
                 "Origin": "https://attacker.example",
+                "Content-Length": "12",
             },
         )) == 403
         assert status(urllib.request.Request(
-            f"{base}/api/retry-overrides", method="POST", data=payload,
-            headers={"X-Aurum-Operator-Bridge-Token": bridge_token},
+            f"{base}/api/retry-overrides", method="POST",
+            headers={"X-Aurum-Operator-Bridge-Token": bridge_token, "Content-Length": "12"},
         )) == 415
         assert status(urllib.request.Request(
-            f"{base}/api/retry-overrides", method="POST", data=b"{" + b"x" * 100_001,
+            f"{base}/api/retry-overrides", method="POST",
             headers={
                 "Content-Type": "application/json",
+                "Content-Length": "100002",
                 "X-Aurum-Operator-Bridge-Token": bridge_token,
             },
         )) == 400
@@ -4048,7 +4053,10 @@ def test_learning_surfaces_rebuild_only_when_source_counts_change() -> None:
     connection.close()
 
 
-def test_news_evidence_pages_are_byte_bounded_and_complete_at_large_scale() -> None:
+@pytest.mark.parametrize("tight_envelope", [False, True])
+def test_news_evidence_pages_are_byte_bounded_and_complete_at_large_scale(
+    monkeypatch, tmp_path, tight_envelope,
+) -> None:
     module = _dashboard_module()
     rows = [{
         "event_key": f"{index:064x}",
@@ -4056,11 +4064,19 @@ def test_news_evidence_pages_are_byte_bounded_and_complete_at_large_scale() -> N
         "source_published_time": None,
         "broad_model_eligible": index % 2 == 0,
         "model_seen": index % 3 == 0,
-        "canonical_headline": f"event {index}",
+        "canonical_headline": f"事件 {index}",
         "reason_codes": ["TEST_EVIDENCE"],
         "detail": "x" * 3_000,
     } for index in range(1_000)]
-    module._publish_news_evidence_snapshot(rows)
+    published = module._publish_news_evidence_snapshot(rows)
+    if tight_envelope:
+        two_rows = {
+            "snapshot_id": published, "items": rows[:2], "total": len(rows),
+            "has_more": True, "next_cursor": f"{published}:2",
+        }
+        monkeypatch.setattr(module, "NEWS_EVIDENCE_PAGE_LIMIT_BYTES", len(json.dumps(
+            two_rows, ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8")) - 1)
 
     cursor = None
     received = []
@@ -4082,6 +4098,26 @@ def test_news_evidence_pages_are_byte_bounded_and_complete_at_large_scale() -> N
     assert received == rows
     assert len(received) == 1_000
     assert len({row["event_key"] for row in received}) == len(rows)
+
+    # The HTTP serializer must emit the same complete bounded envelope.
+    module.Handler.database = tmp_path / "forward.sqlite3"
+    monkeypatch.setattr(module.Handler.news_evidence_cache, "get", lambda *_args: {})
+    server = module.ThreadingHTTPServer(("127.0.0.1", 0), module.Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for requested_cursor in (None, cursor):
+            query = urllib.parse.urlencode({"cursor": requested_cursor}) if requested_cursor else ""
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/api/news-evidence?{query}", timeout=2,
+            ) as response:
+                wire = response.read()
+            assert len(wire) <= module.NEWS_EVIDENCE_PAGE_LIMIT_BYTES
+            assert json.loads(wire) == module._news_evidence_page(requested_cursor, 50)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_news_evidence_generation_freezes_until_activation_then_tracks_current_state(
