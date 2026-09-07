@@ -9,6 +9,7 @@ import os
 import re
 from pathlib import Path
 import sys
+import uuid
 import winreg
 import subprocess
 import socket
@@ -194,7 +195,11 @@ def _qualification_entrypoint():
             raise RuntimeError('FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
         # The command line selects a bounded workspace name, not a filesystem
         # authority. Resolve only the entry reconstructed from sealed inputs.
-        root = parent / workspace_name
+        workspace_id = uuid.UUID(hex=workspace_name[len('aurum-release-validation-'):])
+        canonical_name = 'aurum-release-validation-' + workspace_id.hex
+        if workspace_name != canonical_name:
+            raise RuntimeError('FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
+        root = parent / canonical_name
         declared_entry = root / 'scripts/build_release_validation_fixtures.py'
         if (entry != declared_entry
                 or sys.argv[1:] != ['--output', str(root / '.release-validation-fixtures')]):
