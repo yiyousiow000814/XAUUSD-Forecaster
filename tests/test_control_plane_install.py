@@ -212,13 +212,31 @@ def test_qualification_business_boundary_executes_exact_git_paths_and_http(reque
             try: action()
             except RuntimeError as error: assert str(error)==reason, str(error)
             else: raise AssertionError('expected rejection')
+        def reject_foreign_entry(foreign, reason):
+            original = sys.argv[0]
+            tail = Path(original).parts[-3:] if Path(original).name == 'build_release_validation_fixtures.py' else (Path(original).name,)
+            locators = [foreign, str(Path({str(owned)!r}) / 'undeclared' / Path(*tail)),
+                        str(Path('//unreachable.invalid/share') / Path(*tail))]
+            resolve, opener = Path.resolve, Path.open
+            def no_filesystem(*args, **kwargs):
+                raise AssertionError('undeclared entry caused filesystem access')
+            Path.resolve, Path.open = no_filesystem, no_filesystem
+            try:
+                for locator in locators:
+                    sys.argv[0] = locator
+                    reject(boundary._qualification_entrypoint, reason)
+            finally:
+                sys.argv[0] = original
+                Path.resolve, Path.open = resolve, opener
         reject(lambda: boundary._owned_existing_path({str(link / 'retained.txt')!r}),'FIXTURE_QUALIFICATION_REPARSE_DENIED')
         sys.argv = [{str(validation / 'scripts/build_release_validation_fixtures.py')!r}, '--output', {str(validation / '.release-validation-fixtures')!r}]
+        reject_foreign_entry({str(outside / validation.name / 'scripts/build_release_validation_fixtures.py')!r},'FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
         assert boundary._qualification_entrypoint() == Path(sys.argv[0])
         boundary.DOCUMENT['values']['TARGET_SOURCE_REVISION']='0'*40
         reject(boundary._qualification_entrypoint,'FIXTURE_QUALIFICATION_REVISION_MISMATCH')
         boundary.DOCUMENT['values']['TARGET_SOURCE_REVISION']={revision!r}
         sys.argv=[{str(source / 'scripts/bootstrap_news_projection.py')!r},*{bootstrap_args!r}]
+        reject_foreign_entry({str(outside / 'scripts/bootstrap_news_projection.py')!r},'FIXTURE_QUALIFICATION_PATH_UNDECLARED')
         assert boundary._qualification_entrypoint()==Path(sys.argv[0])
         sys.argv[2]={str(owned.parent / 'outside.json')!r}
         reject(boundary._qualification_entrypoint,'FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
@@ -228,6 +246,7 @@ def test_qualification_business_boundary_executes_exact_git_paths_and_http(reque
             BOOTSTRAP_CALLER_SHA256={retained_caller_sha!r}, BOOTSTRAP_STATE_ROOT={str(retained_root)!r},
             BOOTSTRAP_ARGUMENTS_JSON=__import__('json').dumps(retained_args))
         sys.argv=[{str(retained_caller)!r}, *retained_args]
+        reject_foreign_entry({str(outside / 'retained_news_bootstrap.py')!r},'FIXTURE_QUALIFICATION_PATH_UNDECLARED')
         assert boundary._qualification_entrypoint()==Path(sys.argv[0])
         boundary.DOCUMENT['values']['BOOTSTRAP_CALLER_SHA256']='0'*64
         reject(boundary._qualification_entrypoint,'FIXTURE_QUALIFICATION_SCRIPT_MISMATCH')
@@ -239,6 +258,7 @@ def test_qualification_business_boundary_executes_exact_git_paths_and_http(reque
         sys.argv=[{str(bundle / 'check_deferred_projection_parity.py')!r},'--runtime-root',{str(runtime)!r},'--producer-root',{str(runtime)!r},
             '--version-id',{worker!r},'--git-sha',{revision!r},'--producer-revision',{revision!r},
             '--required-after','2026-09-07T00:00:00+00:00','--observe-attempt','a'*32,'--route','/api/news-evidence']
+        reject_foreign_entry({str(outside / 'check_deferred_projection_parity.py')!r},'FIXTURE_QUALIFICATION_PATH_UNDECLARED')
         assert boundary._qualification_entrypoint()==Path(sys.argv[0])
         Path(sys.argv[0]).write_text('wrong installed bytes',encoding='utf-8')
         reject(boundary._qualification_entrypoint,'FIXTURE_QUALIFICATION_SCRIPT_MISMATCH')

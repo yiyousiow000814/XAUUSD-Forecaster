@@ -188,21 +188,28 @@ def _qualification_entrypoint():
     if entry.name == 'build_release_validation_fixtures.py':
         parent_value = values.get('VALIDATION_WORKSPACE_PARENT', '')
         parent = Path(os.path.abspath(parent_value))
-        root = entry.parent.parent
+        workspace_name = entry.parent.parent.name
         if (not parent_value or parent == FIXTURE_ROOT or not parent.is_relative_to(FIXTURE_ROOT)
-                or root.parent != parent or not re.fullmatch('aurum-release-validation-[0-9a-f]{32}', root.name)
-                or entry != root / 'scripts/build_release_validation_fixtures.py'
+                or not re.fullmatch('aurum-release-validation-[0-9a-f]{32}', workspace_name)):
+            raise RuntimeError('FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
+        # The command line selects a bounded workspace name, not a filesystem
+        # authority. Resolve only the entry reconstructed from sealed inputs.
+        root = parent / workspace_name
+        declared_entry = root / 'scripts/build_release_validation_fixtures.py'
+        if (entry != declared_entry
                 or sys.argv[1:] != ['--output', str(root / '.release-validation-fixtures')]):
             raise RuntimeError('FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
-        _owned_existing_path(entry)
+        declared_entry = _owned_existing_path(declared_entry)
         _require_target_revision(root)
-        return entry
+        return declared_entry
     if entry.name in {'bootstrap_news_projection.py', 'retained_news_bootstrap.py'}:
         retained = entry.name == 'retained_news_bootstrap.py'
         declared_caller = values.get('BOOTSTRAP_CALLER_PATH', '')
         if (retained and (not declared_caller or entry != Path(os.path.abspath(declared_caller)))
                 or not retained and entry != SOURCE_ROOT / 'scripts/bootstrap_news_projection.py'):
             raise RuntimeError('FIXTURE_QUALIFICATION_PATH_UNDECLARED')
+        declared_entry = (Path(os.path.abspath(declared_caller)) if retained
+                          else SOURCE_ROOT / 'scripts/bootstrap_news_projection.py')
         expected = json.loads(values.get('BOOTSTRAP_ARGUMENTS_JSON', 'null'))
         if not isinstance(expected, list) or sys.argv[1:] != expected:
             raise RuntimeError('FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
@@ -215,7 +222,7 @@ def _qualification_entrypoint():
                            'path_query': '/api/news-index'} for row in declarations):
             raise RuntimeError('FIXTURE_QUALIFICATION_ORIGIN_UNDECLARED')
         if retained:
-            caller = _owned_existing_path(entry)
+            caller = _owned_existing_path(declared_entry)
             with caller.open('rb') as stream:
                 raw = stream.read(65537)
             if (not raw or len(raw) > 65536
@@ -231,7 +238,7 @@ def _qualification_entrypoint():
                 or '--source-database' in pairs and Path(os.path.abspath(pairs['--source-database'][0]))
                     != state_root / 'forward-evidence.sqlite3'):
             raise RuntimeError('FIXTURE_QUALIFICATION_PATH_UNDECLARED')
-        _owned_existing_path(entry)
+        declared_entry = _owned_existing_path(declared_entry)
         _owned_existing_path(pairs['--config'][0])
         _owned_existing_path(state_root)
         if state.is_symlink() or state.is_junction():
@@ -241,7 +248,7 @@ def _qualification_entrypoint():
         if '--source-database' in pairs:
             _owned_existing_path(pairs['--source-database'][0])
         _require_target_revision(SOURCE_ROOT)
-        return entry
+        return declared_entry
     if entry.name == 'check_deferred_projection_parity.py':
         bundle_value = values.get('CONTROL_BUNDLE_ROOT', '')
         bundle = Path(os.path.abspath(bundle_value))
@@ -260,11 +267,11 @@ def _qualification_entrypoint():
                 or not set(pairs['--route']) <= {'/api/audit-briefs', '/api/audit-stories',
                     '/api/audit-decisions', '/api/news-evidence'}):
             raise RuntimeError('FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
-        _owned_existing_path(entry)
+        declared_entry = _owned_existing_path(bundle / 'check_deferred_projection_parity.py')
         original = _owned_existing_path(SOURCE_ROOT / 'scripts/check_deferred_projection_parity.py')
         # Installed scripts do not have a Git checkout. Bind their actual bytes
         # to the exact target source instead of inventing a bundle Git identity.
-        with entry.open('rb') as stream:
+        with declared_entry.open('rb') as stream:
             actual = stream.read(131073)
         with original.open('rb') as stream:
             wanted = stream.read(131073)
@@ -272,7 +279,7 @@ def _qualification_entrypoint():
             raise RuntimeError('FIXTURE_QUALIFICATION_SCRIPT_MISMATCH')
         _require_target_revision(SOURCE_ROOT)
         _require_target_revision(_owned_existing_path(DOCUMENT['runtime_root']))
-        return entry
+        return declared_entry
     return None
 
 
