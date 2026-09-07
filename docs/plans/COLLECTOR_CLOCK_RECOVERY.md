@@ -391,3 +391,11 @@ publication/retrieval follows this sibling rule. Existing receipt bytes, path
 names, root identity and acceptance checks remain unchanged. Ten long-path
 create/read/replace/collision cases pass across the five locator families and
 both PowerShell runtimes; broader consumer gates remain required.
+
+### Finite quote-input publication recovery
+
+Connected ceaadecf execution retained a Windows PermissionError replacing the synthetic market-session file while readers were active. The quote process exited; its absence then correctly prevented the business-preserving watchdog termination operation. The isolated launcher/watchdog and business children were subsequently identified by PID, start time and exact owned paths and stopped; original failure evidence is retained.
+
+The finite synthetic quote process remains the sole session-file writer. API and control readers can briefly hold a Windows handle. Retry only the same completed temporary session bytes after PermissionError, at 20 ms intervals for at most one second and never beyond the original scenario deadline. Do not append the accepted quote again, recompute its time, extend input lifetime, replace any production data or publish a health/ACK receipt. Permanent denial remains failure, and the writer removes only its own temporary file. Restart continues to use the existing sealed deadline and append-only quote identity. This introduces no durable state, service owner, authority or real broker behavior.
+
+Extend the existing quote-input contract family with transient lock recovery, persistent denial and non-permission failure. Verify old session bytes until atomic publication, unchanged accepted quote count, finite retries and temporary cleanup. Exercise an actual Windows reader handle for the replacement boundary. Separately, the deep isolated Git estate requires local core.longpaths=true; the same real worktree command failed with Filename too long before this fixture-only configuration and succeeded afterward. Production Git configuration is unchanged.

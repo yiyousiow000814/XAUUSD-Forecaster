@@ -209,7 +209,18 @@ def main() -> None:
         _check_owned_path(target, owned)
         try:
             temporary.write_bytes(_bounded_json(value))
-            os.replace(temporary, target)
+            publication_deadline = min(monotonic_deadline, time.monotonic() + 1.0)
+            for attempt in range(50):
+                try:
+                    os.replace(temporary, target)
+                    break
+                except PermissionError:
+                    remaining = publication_deadline - time.monotonic()
+                    if attempt == 49 or remaining <= 0:
+                        raise
+                    # A Windows reader may temporarily deny delete sharing.
+                    # Retry these bytes without repeating the accepted quote.
+                    time.sleep(min(0.02, remaining))
         finally:
             temporary.unlink(missing_ok=True)
         time.sleep(min(1, max(0, monotonic_deadline - time.monotonic())))

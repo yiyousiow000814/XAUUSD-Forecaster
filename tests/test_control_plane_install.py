@@ -1048,6 +1048,64 @@ def test_quote_input_real_cli_is_sealed_and_only_emits_declared_current_inputs(r
         broker_session=session, session_observed_at=after) is None
 
 
+@pytest.mark.parametrize("case", ["transient-reader", "persistent-reader", "other-error"])
+def test_quote_input_session_publication_preserves_accepted_input(request, monkeypatch, case):
+    import threading
+
+    module, config, output, _, _ = _quote_input_fixture(request, monkeypatch, seconds=3)
+    target = output / "market-session.json"
+    original = b'{"retained":"prior-session"}'
+    target.write_bytes(original)
+    reader = target.open("rb")
+    denied = threading.Event()
+    replace = module.os.replace
+    attempts = []
+
+    def observed_replace(source, destination):
+        attempts.append(module.time.monotonic())
+        if case == "other-error":
+            raise OSError("non-permission publication failure")
+        try:
+            return replace(source, destination)
+        except PermissionError:
+            assert target.read_bytes() == original
+            denied.set()
+            raise
+
+    monkeypatch.setattr(module.os, "replace", observed_replace)
+    release = None
+    if case == "transient-reader":
+        def release_reader():
+            if denied.wait(2):
+                reader.close()
+        release = threading.Thread(target=release_reader)
+        release.start()
+    started = module.time.monotonic()
+    try:
+        if case == "transient-reader":
+            module.main()
+            assert denied.is_set()
+            assert json.loads(target.read_bytes())["is_open"] is True
+        else:
+            with pytest.raises(OSError):
+                module.main()
+            assert target.read_bytes() == original
+            assert module.time.monotonic() - started < 2
+            assert len(attempts) <= 51
+            if case == "other-error":
+                assert len(attempts) == 1
+    finally:
+        reader.close()
+        if release is not None:
+            release.join(3)
+            assert not release.is_alive()
+    rows = [json.loads(line) for line in next(output.glob("*-synthetic-*.jsonl")).read_bytes().splitlines()]
+    assert len({row["sequence"] for row in rows}) == len(rows)
+    if case != "transient-reader":
+        assert len(rows) == 1
+    assert not list(output.glob("*.tmp"))
+
+
 @pytest.mark.parametrize("case", ["restart", "restart-rate", "torn-tail", "foreign-identity",
     "invalid-first-time", "byte-cap", "clock-regression"])
 def test_synthetic_quote_restart_preserves_inputs_and_shared_bounds(request, monkeypatch, case):
