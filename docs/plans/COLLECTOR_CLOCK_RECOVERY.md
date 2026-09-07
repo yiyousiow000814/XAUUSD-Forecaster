@@ -277,3 +277,40 @@ the exact installed controller against the retained production-shaped database
 with no other local build/test workload; require successful copy, migration,
 API preflight and subsequent qualification. Independent review and real
 production eligibility remain separate requirements.
+
+
+## Stable migration evidence follows the actual status consumer
+
+The installed 9ecef2a8 rehearsal passed copy, Windows preflight and repository
+checks, then failed MIGRATION_LEGACY_COMPATIBILITY_FAILED. The migration SQL
+reads recent_decisions from obsolete full-audit snapshot 4. The frozen actual
+Stable ffe1de29 Worker reads dashboard status from snapshot 1; its audit writer
+uses summary 9 and detail 6/7/8. Stable Python already emits bounded recent
+decisions on the critical status route. Seeding snapshot 4 solely to pass this
+check would not prove the actual Stable read path.
+
+Correct the existing legacy_decisions evidence projection to read the bounded
+critical status snapshot 1 and require an actual nonempty recent_decisions array.
+Keep its existing receipt field: legacy denotes the still-active Stable, not a
+particular retired audit storage slot. Required legacy tables, all News identity
+and receipt checks, live Stable/Candidate endpoint checks and exact source/
+Worker/database binding remain mandatory. Preserve historical snapshot 4 bytes;
+no writer, schema, cleanup, data migration or service switch is introduced.
+
+Actors are existing Stable Sync/status writer, both Worker status consumers,
+serialized migration verification, receipt renewal and Reverse qualification.
+Missing, malformed or empty current status is rejected even if historical 4 is
+nonempty. A later valid same-target heartbeat may restore required evidence;
+there is no new state, retry loop or acceptance shortcut. Old controllers retain
+their old fail-closed check; new controllers read the same status contract used
+by the recorded Stable. Existing receipts are immutable and live-evidence
+matching still applies; old source qualification is not relabeled.
+
+Extend the existing migration capability SQL family to execute its complete
+query against the real migration schema with current status present/absent,
+empty, wrong-type and malformed payloads, and independent historical 4 contents.
+Retain the one-bounded-scan assertions and actual PowerShell migration rejection/
+renewal contracts. Rehearse actual old and target built Workers against the same
+D1 fixture after real heartbeat/bootstrap writes. The reusable review failure
+is producer-to-consumer wiring: mocked capability counts hid the retired slot.
+Independent review and production eligibility remain outstanding.

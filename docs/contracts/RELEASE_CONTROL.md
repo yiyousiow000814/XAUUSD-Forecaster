@@ -628,7 +628,12 @@ the Candidate read path, the still-active Stable read path, and the normal
 Reverse target against the same live database. Pending migrations, missing
 capabilities, destructive or unknown migration contracts, non-current News,
 empty required legacy evidence, stale receipts, receipt tampering, or any live
-identity drift fail closed. Candidate validation rechecks the live evidence;
+identity drift fail closed. The retained Stable decision evidence follows the
+actual critical status consumer: snapshot 1 must contain a nonempty
+recent_decisions array. Historical full-audit snapshot 4 is preserved but cannot
+substitute for missing or malformed current status; split audit summary/detail
+slots are separate resources. The receipt field legacy_decisions records the
+still-active Stable status count. Candidate validation rechecks the live evidence;
 the receipt cannot be copied to another Git SHA or Worker Version.
 
 **Verify Migration** does not stop Dashboard Sync. It binds the receipt to the

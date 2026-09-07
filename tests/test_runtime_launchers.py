@@ -7814,7 +7814,21 @@ def test_supersession_recovery_entrypoint_renews_stale_migration_qualification(
     assert result == "True,MIGRATION_QUALIFICATION_RENEWED,True,True"
 
 
-def test_migration_capability_reuses_json_projection_from_one_bounded_scan() -> None:
+@pytest.mark.parametrize(
+    ("status_payload", "legacy_count", "expected_count"),
+    [
+        ({"recent_decisions": [{"id": "current-1"}, {"id": "current-2"}]}, 0, 2),
+        ({"recent_decisions": [{"id": "current"}]}, 5, 1),
+        (None, 5, 0),
+        ({"recent_decisions": []}, 5, 0),
+        ({"recent_decisions": "wrong type"}, 5, 0),
+        ({}, 5, 0),
+        ("malformed-json", 5, 0),
+    ],
+)
+def test_migration_capability_reuses_json_projection_from_one_bounded_scan(
+    status_payload, legacy_count, expected_count,
+) -> None:
     control_center = _control_center_source()
     capability_sql = control_center.split('$capabilitySql = @"', 1)[1].split(
         '"@', 1,
@@ -7825,6 +7839,40 @@ def test_migration_capability_reuses_json_projection_from_one_bounded_scan() -> 
     assert capability_sql.count("FROM current_projection") >= 4
     assert "EXCEPT SELECT detail_key FROM current_projection" in capability_sql
     assert "JOIN current_projection" not in capability_sql
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    try:
+        for migration in sorted((ROOT / "web" / "drizzle").glob("*.sql")):
+            connection.executescript(migration.read_text(encoding="utf-8"))
+        # A minimal CURRENT generation makes the complete production capability
+        # query return a row; this test does not claim a qualified generation.
+        connection.execute(
+            "INSERT INTO news_projection_generations VALUES "
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("generation", "snapshot", "CURRENT", "news-projection-generation-v4",
+             "2026-09-01", "2026-09-08", 0, 0, 0, "source", "receipt", "receipt",
+             0, 0, 0, 0, 0, 0, "2026-09-08", "2026-09-08", "2026-09-08"),
+        )
+        connection.execute(
+            "INSERT INTO news_projection_state VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (1, "generation", "snapshot", "news-projection-generation-v4", "source",
+             "receipt", 0, 0, 0, 0, "CURRENT", "2026-09-08", "2026-09-08"),
+        )
+        if legacy_count:
+            connection.execute(
+                "INSERT INTO dashboard_snapshots VALUES (4,?,?)",
+                (json.dumps({"recent_decisions": [{"id": "historical"}] * legacy_count}), "old"),
+            )
+        if status_payload is not None:
+            raw = status_payload if isinstance(status_payload, str) else json.dumps(status_payload)
+            connection.execute("INSERT INTO dashboard_snapshots VALUES (1,?,?)", (raw, "current"))
+        historical = connection.execute("SELECT * FROM dashboard_snapshots WHERE id=4").fetchone()
+        result = connection.execute(capability_sql).fetchone()
+        assert result["legacy_decisions"] == expected_count
+        assert connection.execute("SELECT * FROM dashboard_snapshots WHERE id=4").fetchone() == historical
+    finally:
+        connection.close()
 
 
 @pytest.mark.parametrize(

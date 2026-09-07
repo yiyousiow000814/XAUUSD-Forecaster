@@ -397,8 +397,9 @@ SELECT
     'learning_record_count_identity_update')) AS learning_count_triggers,
  (SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN
   ('dashboard_snapshots','news_index','news_details','news_evidence_records')) AS legacy_tables,
-  coalesce((SELECT json_array_length(json_extract(payload,'$.recent_decisions'))
-    FROM dashboard_snapshots WHERE id=4 AND json_valid(payload)),0) AS legacy_decisions,
+  coalesce((SELECT CASE WHEN json_type(payload,'$.recent_decisions')='array'
+    THEN json_array_length(payload,'$.recent_decisions') ELSE 0 END
+    FROM dashboard_snapshots WHERE id=1 AND json_valid(payload)),0) AS legacy_decisions,
   (SELECT count(*) FROM current_projection pi
     WHERE EXISTS(SELECT 1 FROM news_index li WHERE li.detail_key=pi.detail_key))
     AS legacy_current_index_count,
