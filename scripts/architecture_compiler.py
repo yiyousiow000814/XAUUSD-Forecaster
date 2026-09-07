@@ -105,6 +105,15 @@ def compile_index(root: Path):
         if any(not name.endswith(('.py', '.ps1', '.ts', '.tsx', '.mts', '.cts')) for name in view['files']):
             raise ValueError('ARCHITECTURE_LANGUAGE_UNSUPPORTED')
     files = sorted({file for view in selection['views'].values() for file in view['files']})
+    source_symbols = selection.get('source_symbols', {})
+    if not isinstance(source_symbols, dict):
+        raise ValueError('ARCHITECTURE_SYMBOL_SELECTION_INVALID')
+    for path, selected in source_symbols.items():
+        if (path not in files or not isinstance(selected, list) or not selected
+                or any(not isinstance(symbol, str) or not symbol.startswith(path + '::')
+                       for symbol in selected)
+                or len(set(selected)) != len(selected)):
+            raise ValueError('ARCHITECTURE_SYMBOL_SELECTION_INVALID')
     inputs = sorted(set(files + [SELECTION, *TOOL_INPUTS] +
                         [file for view in selection['views'].values() for file in view['tests']]))
     hashes = {name: hashlib.sha256(source_path(root, name).read_text(encoding='utf-8-sig').replace('\r\n', '\n').encode()).hexdigest() for name in inputs}
@@ -155,6 +164,20 @@ def compile_index(root: Path):
     ids = {symbol['id'] for symbol in symbols}
     if len(ids) != len(symbols):
         raise ValueError('ARCHITECTURE_SYMBOL_ID_AMBIGUOUS')
+    # Scope only after complete parsing and ID validation. This is a declared
+    # source slice, not inferred call closure or permission to omit parse errors.
+    for selected in source_symbols.values():
+        for symbol in selected:
+            if symbol not in ids:
+                raise ValueError(f'ARCHITECTURE_SYMBOL_SELECTION_MISSING:{symbol}')
+    retained = {symbol['id'] for symbol in symbols
+                if symbol['path'] not in source_symbols or any(
+                    symbol['id'] == selected or symbol['id'].startswith(selected + '.')
+                    for selected in source_symbols[symbol['path']])}
+    symbols = [symbol for symbol in symbols if symbol['id'] in retained]
+    edges = [edge for edge in edges if edge['source'].split('::')[0] not in source_symbols
+             or edge['source'] in retained or edge['source'].endswith('::<module>')]
+    ids = retained
     for name, view in selection['views'].items():
         for symbol in view['roots']:
             if symbol not in ids:
@@ -176,7 +199,7 @@ def compile_index(root: Path):
         inputs=hashes, observed=dict(symbols=sorted(symbols, key=lambda s:s['id']),
         edges=sorted(edges, key=lambda e:(e['source'], e['line'], e['kind'], e['target'])),
         tests=sorted(tests, key=lambda s:s['id'])),
-        allowed=dict(status='NOT_EVALUATED', views=selection['views']),
+        allowed=dict(status='NOT_EVALUATED', views=selection['views'], source_symbols=source_symbols),
         runtime=dict(status='UNKNOWN', observations=[]), tools=tools,
         coverage=dict(scope='DECLARED_CRITICAL_SLICES_ONLY', ownership='UNKNOWN',
                       transaction_atomicity='NOT_PROVEN_BY_STATIC_INDEX'))

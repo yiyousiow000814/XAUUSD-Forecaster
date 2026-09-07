@@ -95,6 +95,84 @@ def test_imports_and_test_spans_do_not_claim_runtime_execution(source):
     assert index['observed']['tests'][0]['line'] == 1
 
 
+def test_explicit_symbol_scope_retains_ast_bodies_descendants_and_unresolved_frontier(source):
+    path = source / 'scripts/example.py'
+    path.write_text('''import external
+class Owner:
+    @decorate(option())
+    async def execute(self, connection):
+        def callback():
+            connection.commit()
+        helper()
+        callback()
+    def unrelated(self):
+        outside()
+def helper():
+    expensive()
+''', encoding='utf-8')
+    selection_path = source / compiler.SELECTION
+    selection = json.loads(selection_path.read_text())
+    owner = 'scripts/example.py::Owner.execute'
+    selection['views']['fixture']['roots'] = [owner]
+    selection_path.write_text(json.dumps(selection), encoding='utf-8')
+    complete = compiler.compile_index(source)
+    selection['source_symbols'] = {'scripts/example.py': [owner]}
+    selection_path.write_text(json.dumps(selection), encoding='utf-8')
+    scoped = compiler.compile_index(source)
+    retained = {owner, owner + '.callback'}
+    assert scoped['observed']['symbols'] == [row for row in complete['observed']['symbols'] if row['id'] in retained]
+    # Out-of-scope candidates cannot survive selection, but their call syntax
+    # remains visible. Decorators/async bodies/nested definitions are AST facts.
+    expected = []
+    for row in complete['observed']['edges']:
+        if row['source'] in retained or row['source'].endswith('::<module>'):
+            row = dict(row)
+            if row.get('candidate_symbol') not in retained:
+                row.pop('candidate_symbol', None)
+                if row['kind'] == 'calls': row['binding'] = 'Runtime binding not inferred from call syntax'
+            expected.append(row)
+    assert scoped['observed']['edges'] == expected
+    assert {'helper', 'decorate', 'option', 'connection.commit'} <= {row['target'] for row in expected}
+    assert scoped['allowed']['source_symbols'] == selection['source_symbols']
+    assert scoped['inputs']['scripts/example.py'] == complete['inputs']['scripts/example.py']
+    assert scoped['source_input_digest'] != complete['source_input_digest']
+    path.write_text(path.read_text().replace('expensive()', 'changed()'), encoding='utf-8')
+    changed = compiler.compile_index(source)
+    assert changed['observed'] == scoped['observed']
+    assert changed['source_input_digest'] != scoped['source_input_digest']
+    path.write_text(path.read_text() + '\ndef malformed(:\n', encoding='utf-8')
+    with pytest.raises(SyntaxError): compiler.compile_index(source)
+
+
+@pytest.mark.parametrize('selection,reason', [
+    (None, 'ARCHITECTURE_SYMBOL_SELECTION_INVALID'),
+    ({'missing.py': ['missing.py::execute']}, 'ARCHITECTURE_SYMBOL_SELECTION_INVALID'),
+    ({'scripts/example.py': []}, 'ARCHITECTURE_SYMBOL_SELECTION_INVALID'),
+    ({'scripts/example.py': [123]}, 'ARCHITECTURE_SYMBOL_SELECTION_INVALID'),
+    ({'scripts/example.py': ['elsewhere.py::execute']}, 'ARCHITECTURE_SYMBOL_SELECTION_INVALID'),
+    ({'scripts/example.py': ['scripts/example.py::execute'] * 2}, 'ARCHITECTURE_SYMBOL_SELECTION_INVALID'),
+    ({'scripts/example.py': ['scripts/example.py::missing']}, 'ARCHITECTURE_SYMBOL_SELECTION_MISSING'),
+    ({'scripts/example.py': ['scripts/example.py::helper']}, 'ARCHITECTURE_ROOT_MISSING'),
+])
+def test_invalid_or_root_excluding_symbol_scope_fails_closed(source, selection, reason):
+    path = source / compiler.SELECTION
+    manifest = json.loads(path.read_text())
+    manifest['source_symbols'] = selection
+    path.write_text(json.dumps(manifest), encoding='utf-8')
+    with pytest.raises(ValueError, match=reason): compiler.compile_index(source)
+
+
+def test_scope_does_not_hide_ambiguous_symbol_ids_outside_the_selected_body(source):
+    path = source / compiler.SELECTION
+    manifest = json.loads(path.read_text())
+    manifest['source_symbols'] = {'scripts/example.py': ['scripts/example.py::execute']}
+    path.write_text(json.dumps(manifest), encoding='utf-8')
+    with (source / 'scripts/example.py').open('a', encoding='utf-8') as handle:
+        handle.write('\ndef helper():\n    pass\n')
+    with pytest.raises(ValueError, match='ARCHITECTURE_SYMBOL_ID_AMBIGUOUS'):
+        compiler.compile_index(source)
+
+
 def test_inputs_are_relocatable_and_generated_output_never_hashes_itself(source, tmp_path):
     first = compiler.compile_index(source)
     generated = source / 'architecture/generated'
@@ -129,8 +207,14 @@ def test_source_changes_and_invalid_sources_fail_or_change_the_graph(source, mut
 
 
 @pytest.mark.parametrize('fixture_name', ['source', 'typescript_source'])
-def test_build_then_check_and_tamper_are_real_cli_boundaries(request, fixture_name, monkeypatch):
+@pytest.mark.parametrize('scoped', [False, True])
+def test_build_then_check_and_tamper_are_real_cli_boundaries(request, fixture_name, monkeypatch, scoped):
     source = request.getfixturevalue(fixture_name)
+    if scoped:
+        manifest_path = source / compiler.SELECTION
+        selection = json.loads(manifest_path.read_text())
+        selection['source_symbols'] = {'scripts/example.py': ['scripts/example.py::execute']}
+        manifest_path.write_text(json.dumps(selection), encoding='utf-8')
     if fixture_name == 'typescript_source':
         import architecture_typescript_tool as tool
         package, _ = tool.resolve_package(ROOT)
@@ -187,17 +271,21 @@ def test_real_cli_rejects_orphaned_view_after_rename(source):
 
 
 @pytest.mark.skipif(not (shutil.which('pwsh') or shutil.which('powershell')), reason='PowerShell composition tested by architecture CI')
-def test_real_powershell_parser_emits_dynamic_calls_and_rejects_invalid_source(source):
+@pytest.mark.parametrize('scoped', [False, True])
+def test_real_powershell_parser_emits_dynamic_calls_and_rejects_invalid_source(source, scoped):
     manifest_path = source / compiler.SELECTION
     manifest = json.loads(manifest_path.read_text())
     manifest['views']['fixture']['files'].append('scripts/fixture.ps1')
     manifest['views']['fixture']['roots'].append('scripts/fixture.ps1::Invoke-Fixture')
+    if scoped:
+        manifest['source_symbols'] = {'scripts/fixture.ps1': ['scripts/fixture.ps1::Invoke-Fixture']}
     manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
     script = source / 'scripts/fixture.ps1'
-    script.write_text('function Invoke-Fixture { & $unknown; Write-Output "中文" }', encoding='utf-8')
+    script.write_text('function Invoke-Fixture { & $unknown; Write-Output "中文" }\nfunction Other { Write-Output "unselected" }', encoding='utf-8')
     index = compiler.compile_index(source)
     assert any(e['target'] == '<dynamic-command>' and e['resolution'] == 'UNKNOWN'
                for e in index['observed']['edges'])
+    assert any(row['id'] == 'scripts/fixture.ps1::Other' for row in index['observed']['symbols']) is not scoped
     script.write_text('function Invoke-Fixture {', encoding='utf-8')
     with pytest.raises(RuntimeError, match='ARCHITECTURE_PARSE_FAILED'):
         compiler.compile_index(source)
@@ -328,6 +416,26 @@ def test_real_typescript_parser_preserves_symbols_calls_jsx_and_unknown_dispatch
     assert next(row for row in edges if row.get('first_argument_literal') == '/api/news-index')['resolution'] == 'UNKNOWN'
     assert index['runtime'] == {'status': 'UNKNOWN', 'observations': []}
     assert index['tools']['typescript']['version'] == json.loads((ROOT / 'web/package.json').read_text())['devDependencies']['typescript']
+
+
+def test_symbol_scopes_use_the_same_real_typescript_qualified_ids(typescript_source):
+    complete = compiler.compile_index(typescript_source)
+    path = typescript_source / compiler.SELECTION
+    selection = json.loads(path.read_text())
+    selection['source_symbols'] = {
+        'web/owner.ts': ['web/owner.ts::Owner.execute'],
+        'web/View.tsx': ['web/View.tsx::View'],
+    }
+    path.write_text(json.dumps(selection), encoding='utf-8')
+    scoped = compiler.compile_index(typescript_source)
+    assert scoped['tools'] == complete['tools']
+    assert {row['id'] for row in scoped['observed']['symbols'] if row['path'].startswith('web/')} == {
+        'web/owner.ts::Owner.execute', 'web/View.tsx::View', 'web/View.tsx::View.refresh'}
+    assert [row for row in scoped['observed']['symbols'] if row['path'].endswith('.py')] == [
+        row for row in complete['observed']['symbols'] if row['path'].endswith('.py')]
+    assert any(row['kind'] == 'renders' and row['target'] == 'Panel' for row in scoped['observed']['edges'])
+    assert any(row['kind'] == 'requires' and row['target'] == '<dynamic-module>' for row in scoped['observed']['edges'])
+    assert not any(row.get('candidate_symbol') == 'web/View.tsx::GET' for row in scoped['observed']['edges'])
 
 
 def test_typescript_parse_failure_and_source_drift_are_not_partial_success(typescript_source):
@@ -571,3 +679,31 @@ def test_current_news_worker_audit_view_keeps_independent_transports_and_dynamic
     assert len(detail_validators) == 1
     assert 'authoritativeNewsTotals' in calls('web/app/_views/AuditView.tsx::AuditView.refreshNews')
     assert not any(row['source'].startswith('web/') and row['resolution'] not in {'UNKNOWN', 'LITERAL'} for row in edges)
+
+    api = 'scripts/run_dashboard_api.py::'
+    assert {api + name for name in ('Handler.do_GET', '_build_news_projection_source',
+        '_news_projection_source_for_request', '_finish_news_projection_source_build',
+        '_build_news_evidence_resource', '_optional_resource_payload', 'main')} <= roots
+    assert {'_news_projection_source_for_request', '_news_projection_batch',
+            '_build_news_evidence_resource', '_news_evidence_page',
+            'read_dashboard_read_model'} <= calls(api + 'Handler.do_GET')
+    assert '_news_archive_page' not in calls(api + 'Handler.do_GET')
+    assert {'_news_reader_rows', 'build_news_projection_generation'} <= calls(api + '_build_news_projection_source')
+    assert '_build_news_projection_source_from_database' in calls(api + '_finish_news_projection_source_build')
+    assert '_build_news_projection_source' in calls(api + '_build_news_projection_source_from_database')
+    assert 'threading.Thread' in calls(api + '_news_projection_source_for_request')
+    assert '_finish_news_projection_source_build' not in calls(api + '_news_projection_source_for_request'), 'callback argument is not a direct call'
+    assert {'event_evidence_rows_from_connection', '_materialize_news_evidence_generation',
+            '_publish_news_evidence_snapshot'} <= calls(api + '_build_news_evidence_resource')
+    assert {'temporary.write_text', 'temporary.replace'} <= calls(api + '_materialize_news_evidence_generation')
+    assert {'_dashboard_payload', 'audit_snapshot', 'audit_briefs_snapshot',
+            'audit_stories_snapshot', 'audit_decisions_snapshot'} <= calls(api + '_optional_resource_payload')
+    assert {'DashboardReadModelOwner', 'read_model_owner.start', 'ThreadingHTTPServer'} <= calls(api + 'main')
+    scoped_ids = {row['id'] for row in index['observed']['symbols'] if row['path'] == 'scripts/run_dashboard_api.py'}
+    selected = set(index['allowed']['source_symbols']['scripts/run_dashboard_api.py'])
+    assert selected <= scoped_ids
+    assert all(any(symbol == owner or symbol.startswith(owner + '.') for owner in selected) for symbol in scoped_ids)
+    for target in ('_news_reader_rows', '_dashboard_payload', 'build_news_projection_generation'):
+        frontier = [row for row in edges if row['source'].startswith(api) and row['target'] == target]
+        assert frontier and all(row['resolution'] == 'UNKNOWN' and 'candidate_symbol' not in row for row in frontier)
+    assert api + '_news_projection_source' not in scoped_ids
