@@ -107,6 +107,186 @@ def _new_sealed_fixture_root(request=None) -> Path:
     return owned
 
 
+def test_qualification_business_boundary_executes_exact_git_paths_and_http(request, tmp_path):
+    """Run the sealed Python boundary with real local Git and raw HTTP only."""
+    owned = _new_sealed_fixture_root(request)
+    source = owned / "source"
+    source.mkdir()
+    (source / "scripts").mkdir()
+    for name in ("build_release_validation_fixtures.py", "bootstrap_news_projection.py", "check_deferred_projection_parity.py"):
+        shutil.copyfile(ROOT / "scripts" / name, source / "scripts" / name)
+    environment = _isolated_windows_environment()
+    environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", PYTHONDONTWRITEBYTECODE="1")
+    def git(*args):
+        return subprocess.check_output([shutil.which("git"), "-C", str(source), *args],
+            env=environment, timeout=8, creationflags=subprocess.CREATE_NO_WINDOW).decode().strip()
+    git("init", "-q")
+    git("add", "scripts")
+    git("-c", "user.name=Fixture", "-c", "user.email=fixture@invalid", "commit", "-qm", "Isolated command source")
+    revision = git("rev-parse", "HEAD")
+    validation_parent = owned / "validation"
+    validation_parent.mkdir()
+    validation = validation_parent / ("aurum-release-validation-" + uuid.uuid4().hex)
+    runtime = owned / "runtime"
+    for target in (validation, runtime):
+        git("worktree", "add", "--detach", "-q", str(target), revision)
+    state_root = runtime / ".local/forward"
+    state_root.mkdir(parents=True)
+    bundle = owned / "control-bundle"
+    bundle.mkdir()
+    shutil.copyfile(source / "scripts/check_deferred_projection_parity.py", bundle / "check_deferred_projection_parity.py")
+    bootstrap_config = owned / "sync.json"
+    bootstrap_config.write_text("{}", encoding="utf-8")
+    captured = []
+    class Provider(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+        def reply(self):
+            raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            captured.append((self.command, self.path, raw, dict(self.headers)))
+            self.send_response(302 if self.path == "/redirect" else 200)
+            if self.path == "/redirect":
+                self.send_header("Location", "https://outside.invalid/forbidden")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+        do_GET = reply
+        do_POST = reply
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    def cleanup_http():
+        if thread.is_alive():
+            server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+    request.addfinalizer(cleanup_http)
+    port = server.server_address[1]
+    assert port != 8765
+    origin = "https://fixture-aurum-signal-room.fixture.workers.dev"
+    worker = "11111111-1111-4111-8111-111111111111"
+    bootstrap_args = ["--config", str(bootstrap_config), "--version-host", origin,
+                      "--state-file", str(state_root / "bootstrap.json"), "--max-cycles", "1"]
+    values = {"TARGET_SOURCE_REVISION": revision, "TARGET_WORKER_VERSION": worker,
+        "VALIDATION_WORKSPACE_PARENT": str(validation_parent), "CONTROL_BUNDLE_ROOT": str(bundle),
+        "BOOTSTRAP_ARGUMENTS_JSON": json.dumps(bootstrap_args),
+        "WORKER_LOOPBACK_BASE_URL": f"http://127.0.0.1:{port}", "LOCAL_API_BASE_URL": f"http://127.0.0.1:{port}",
+        "PROVIDER_HTTP_REQUESTS_JSON": json.dumps([
+            {"origin": origin, "method": method, "path_query": route} for method, route in
+            (("POST", "/api/news-index"), ("GET", "/api/news-evidence"), ("GET", "/redirect"))])}
+    configuration = owned / "fixture-user-environment.json"
+    configuration.write_text(json.dumps({"schema_version": 1, "runtime_root": str(runtime),
+        "values": values, "loopback_ports": [port]}), encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    retained = outside / "retained.txt"
+    retained.write_text("untouched", encoding="utf-8")
+    link = owned / "redirected"
+    junction = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+        f"$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path '{link}' -Target '{outside}' | Out-Null"],
+        capture_output=True, timeout=8, creationflags=subprocess.CREATE_NO_WINDOW)
+    assert junction.returncode == 0, junction.stderr
+    assert link.is_junction()
+    def cleanup_junction():
+        if link.is_junction():
+            assert link.parent == owned
+            link.rmdir()
+    request.addfinalizer(cleanup_junction)
+    template = (ROOT / "tests/fixtures/business_environment.py").read_text(encoding="utf-8")
+    for marker, value in {"__CONFIG_PATH__": configuration.as_posix(), "__FIXTURE_ROOT__": owned.as_posix(),
+        "__CONFIG_DIGEST__": hashlib.sha256(configuration.read_bytes()).hexdigest(), "__GIT_PATH__": Path(shutil.which("git")).as_posix()}.items():
+        template = template.replace(marker, value)
+    (owned / "fixture_business_environment.py").write_text(template, encoding="utf-8")
+    probe = owned / "probe.py"
+    probe.write_text(textwrap.dedent(f'''\
+        import sys, urllib.request
+        from pathlib import Path
+        import fixture_business_environment as boundary
+        def reject(action, reason):
+            try: action()
+            except RuntimeError as error: assert str(error)==reason, str(error)
+            else: raise AssertionError('expected rejection')
+        reject(lambda: boundary._owned_existing_path({str(link / 'retained.txt')!r}),'FIXTURE_QUALIFICATION_REPARSE_DENIED')
+        sys.argv = [{str(validation / 'scripts/build_release_validation_fixtures.py')!r}, '--output', {str(validation / '.release-validation-fixtures')!r}]
+        assert boundary._qualification_entrypoint() == Path(sys.argv[0])
+        boundary.DOCUMENT['values']['TARGET_SOURCE_REVISION']='0'*40
+        reject(boundary._qualification_entrypoint,'FIXTURE_QUALIFICATION_REVISION_MISMATCH')
+        boundary.DOCUMENT['values']['TARGET_SOURCE_REVISION']={revision!r}
+        sys.argv=[{str(source / 'scripts/bootstrap_news_projection.py')!r},*{bootstrap_args!r}]
+        assert boundary._qualification_entrypoint()==Path(sys.argv[0])
+        sys.argv[2]={str(owned.parent / 'outside.json')!r}
+        reject(boundary._qualification_entrypoint,'FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
+        sys.argv=[{str(bundle / 'check_deferred_projection_parity.py')!r},'--runtime-root',{str(runtime)!r},'--producer-root',{str(runtime)!r},
+            '--version-id',{worker!r},'--git-sha',{revision!r},'--producer-revision',{revision!r},
+            '--required-after','2026-09-07T00:00:00+00:00','--observe-attempt','a'*32,'--route','/api/news-evidence']
+        assert boundary._qualification_entrypoint()==Path(sys.argv[0])
+        Path(sys.argv[0]).write_text('wrong installed bytes',encoding='utf-8')
+        reject(boundary._qualification_entrypoint,'FIXTURE_QUALIFICATION_SCRIPT_MISMATCH')
+        body='{{"真实":"bytes"}}'.encode('utf-8')
+        override='aurum-signal-room="{worker}"'
+        request=urllib.request.Request({origin!r}+'/api/news-index',data=body,headers={{'Content-Type':'application/json','Cloudflare-Workers-Version-Overrides':override}})
+        with urllib.request.urlopen(request,timeout=2) as response: assert response.read()==body
+        headers={{'Cloudflare-Workers-Version-Overrides':override,'Cache-Control':'no-cache','Pragma':'no-cache'}}
+        with urllib.request.urlopen(urllib.request.Request({origin!r}+'/api/news-evidence?__release_observe='+('a'*32)+'&mode=all&limit=1',headers=headers),timeout=2) as response: assert response.status==200
+        with urllib.request.urlopen('http://127.0.0.1:8765/api/critical-status',timeout=2) as response: assert response.status==200
+        for url in ['https://outside.invalid/api/news-index',{origin!r}+'/api/news-index?extra=1', 'http://127.0.0.1:8765/api/unknown']:
+            reject(lambda: urllib.request.urlopen(url,timeout=2),'FIXTURE_HTTP_TARGET_UNDECLARED')
+        reject(lambda: urllib.request.urlopen({origin!r}+'/redirect',timeout=2),'FIXTURE_HTTP_REDIRECT_DENIED')
+        print('EXACT_CHILD_AND_HTTP_BOUNDARIES_PASSED')
+        '''), encoding="utf-8")
+    environment["XAUUSD_FIXTURE_CONFIGURATION"] = str(configuration)
+    try:
+        result = subprocess.run([sys.executable, str(probe)], cwd=owned, env=environment,
+            capture_output=True, text=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "EXACT_CHILD_AND_HTTP_BOUNDARIES_PASSED"
+        assert len(captured) == 4
+        assert captured[0][:3] == ("POST", "/api/news-index", '{"真实":"bytes"}'.encode("utf-8"))
+        headers = {key.lower(): value for key, value in captured[0][3].items()}
+        assert headers['x-fixture-requested-origin'] == origin
+        assert headers['cloudflare-workers-version-overrides'] == f'aurum-signal-room="{worker}"'
+        assert retained.read_text(encoding="utf-8") == "untouched"
+    finally:
+        cleanup_http()
+        cleanup_junction()
+
+
+def test_connected_asset_provider_uses_built_redirects_and_rejects_unknown_rules(tmp_path):
+    """Exercise the real isolated ASSETS provider; this is not Worker-build proof."""
+    assets = tmp_path / "web/dist/client"
+    assets.mkdir(parents=True)
+    svg = "<svg>真实 fixture</svg>".encode("utf-8")
+    (assets / "favicon.svg").write_bytes(svg)
+    code = "\n".join((
+        "import assert from 'node:assert/strict';",
+        "import {writeFileSync} from 'node:fs';",
+        f"import {{assetFetch}} from {json.dumps((ROOT / 'tests/fixtures/connected_worker_adapter.mjs').as_uri())};",
+        f"const root={json.dumps(str(tmp_path))};const path={json.dumps(str(assets / '_redirects'))};",
+        "const get=(path,method='GET')=>assetFetch(root,new Request('https://connected-worker.invalid'+path,{method}));",
+        "writeFileSync(path,'/favicon.ico /favicon.svg 301\\n');",
+        "assert.equal(get('/favicon.ico').status,301);assert.equal(get('/favicon.ico').headers.get('location'),'/favicon.svg');",
+        f"assert.deepEqual(Buffer.from(await get('/favicon.svg').arrayBuffer()),Buffer.from({json.dumps(list(svg))}));",
+        "assert.equal((await get('/favicon.svg','HEAD').arrayBuffer()).byteLength,0);assert.equal(get('/missing').status,404);",
+        "assert.equal(get('/favicon.svg','POST').status,405);",
+        "for(const rule of ['/favicon.ico https://outside.invalid/ 302','/favicon.ico /../outside 301','/* /favicon.svg 302']){",
+        "writeFileSync(path,'/favicon.ico /favicon.svg 301\\n'+rule);",
+        "assert.throws(()=>get('/favicon.ico'),{code:'WORKER_ADAPTER_REDIRECT_UNDECLARED'});}",
+        "writeFileSync(path,Array(33).fill('/favicon.ico /favicon.svg 301').join('\\n'));",
+        "assert.throws(()=>get('/favicon.ico'),{code:'WORKER_ADAPTER_REDIRECT_BOUND'});",
+        "writeFileSync(path,'x'.repeat(8193));assert.throws(()=>get('/favicon.ico'),{code:'WORKER_ADAPTER_FILE_BOUND'});",
+        "console.log('BUILT_ASSET_CONTRACT_PASSED');",
+    ))
+    environment = _isolated_windows_environment()
+    result = subprocess.run([shutil.which("node"), "--import",
+        (ROOT / "web/tests/register-cloudflare-worker-loader.mjs").as_uri(), "--input-type=module", "-e", code],
+        cwd=ROOT, env=environment, stdin=subprocess.DEVNULL, capture_output=True,
+        text=True, timeout=8, creationflags=subprocess.CREATE_NO_WINDOW)
+    assert result.returncode == 0, result.stderr
+    # The adapter deliberately routes diagnostic console output to stderr.
+    assert 'BUILT_ASSET_CONTRACT_PASSED' in result.stderr
+
+
 @pytest.mark.parametrize("redirected_component", [None, ".local", "forward", "environment-attestations"])
 def test_staged_sync_checks_derived_directories_at_write(tmp_path, monkeypatch, redirected_component):
     """Execute the actual fixture consumer and production writer, including NTFS junctions."""
@@ -896,10 +1076,16 @@ def _run_contract_with_runtime(
         function Unregister-ScheduledTask { throw 'TEST_UNMOCKED_SCHEDULER_MUTATION' };
     '''
     command = (
+        # Shell startup expands the supplied search path. Restore the actual
+        # runtime's module authority before invoking any cmdlet or controller.
+        "[Environment]::SetEnvironmentVariable('PSModulePath', "
+        "[IO.Path]::Combine($PSHOME, 'Modules'), 'Process'); "
         "function Write-ContractPhase { param([string]$Phase); "
         f"[IO.File]::AppendAllText('{phase_path_literal}', "
         "[DateTimeOffset]::UtcNow.ToString('o')+' '+$Phase+[Environment]::NewLine) }; "
         "Write-ContractPhase 'harness-start'; "
+        "Write-ContractPhase ('effective-module-path:' + "
+        "[Environment]::GetEnvironmentVariable('PSModulePath', 'Process')); "
         "Write-ContractPhase 'load'; "
         f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{runtime}' "
         f"-RepositoryRoot '{repository}'; "
@@ -987,7 +1173,9 @@ def test_controller_load_timing_preserves_real_action(tmp_path, runtime_executab
     environment["XAUUSD_ISOLATED_CONFIGURATION_SHA256"] = hashlib.sha256(configuration.read_bytes()).hexdigest()
     shell_home = (Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0"
                   if runtime_executable == "powershell.exe" else Path(shutil.which(runtime_executable)).parent)
-    environment["PSModulePath"] = str(shell_home / "Modules")
+    foreign_modules = owned / "foreign-parent-modules"
+    foreign_modules.mkdir()
+    environment["PSModulePath"] = str(foreign_modules)
     outputs = []
     for mode in ("plain", "instrumented"):
         case = owned / mode
@@ -1000,6 +1188,13 @@ def test_controller_load_timing_preserves_real_action(tmp_path, runtime_executab
             "Write-Output ((Get-CodeRevision)+':'+$services.Count)", runtime_executable, environment=child,
             controller_script=source / "scripts/xauusd_control_center.ps1",
             runtime_root=owned / "profile/XAUUSD-Forecaster-runtime", repository_root=owned / "repository"))
+        phase_labels = [line.split(" ", 1)[1] for line in
+                        (case / "contract-phases.txt").read_text(encoding="utf-8").splitlines()]
+        observed_paths = [phase.removeprefix("effective-module-path:") for phase in phase_labels
+                          if phase.startswith("effective-module-path:")]
+        assert len(observed_paths) == 1
+        assert ";" not in observed_paths[0] and Path(observed_paths[0]) == shell_home / "Modules"
+        assert phase_labels.index("effective-module-path:" + observed_paths[0]) < phase_labels.index("load")
     assert outputs[0] == outputs[1]
     assert not (owned / "plain/controller-load-source-map.json").exists()
     diagnostic = owned / "instrumented"

@@ -11,6 +11,8 @@ from pathlib import Path
 import sys
 import winreg
 import subprocess
+import socket
+import urllib.request
 from urllib.parse import unquote, urlsplit
 
 CONFIGURATION = Path('__CONFIG_PATH__')
@@ -140,6 +142,196 @@ def _run_with_exact_git(args, *positional, **keywords):
     return _run(args, *positional, **keywords)
 subprocess.run = _run_with_exact_git
 
+
+def _owned_existing_path(value):
+    # Reject a foreign lexical locator before resolving any part of it. These
+    # roots are sealed fixture inputs, not permission to follow a reparse point.
+    path = Path(os.path.abspath(value))
+    if path == FIXTURE_ROOT or not path.is_relative_to(FIXTURE_ROOT):
+        raise RuntimeError('FIXTURE_QUALIFICATION_PATH_UNDECLARED')
+    for ancestor in reversed((path, *path.parents)):
+        if not ancestor.is_relative_to(FIXTURE_ROOT):
+            continue
+        if ancestor.is_symlink() or ancestor.is_junction():
+            raise RuntimeError('FIXTURE_QUALIFICATION_REPARSE_DENIED')
+    if path.resolve(strict=True) != path:
+        raise RuntimeError('FIXTURE_QUALIFICATION_PATH_UNDECLARED')
+    return path
+
+
+def _require_target_revision(root):
+    expected = DOCUMENT['values'].get('TARGET_SOURCE_REVISION', '')
+    if not re.fullmatch('[0-9a-f]{40}', expected):
+        raise RuntimeError('FIXTURE_QUALIFICATION_REVISION_UNDECLARED')
+    CODE_ROOTS.add(root)
+    observed = subprocess.run([GIT_EXECUTABLE, 'rev-parse', 'HEAD'], cwd=root,
+        check=True, capture_output=True, text=True, timeout=5,
+        creationflags=subprocess.CREATE_NO_WINDOW).stdout.strip()
+    if observed != expected:
+        raise RuntimeError('FIXTURE_QUALIFICATION_REVISION_MISMATCH')
+
+
+def _argument_pairs(arguments, allowed, repeated=()):
+    if len(arguments) % 2:
+        raise RuntimeError('FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
+    result = {}
+    for name, value in zip(arguments[::2], arguments[1::2]):
+        if name not in allowed or name in result and name not in repeated:
+            raise RuntimeError('FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
+        result.setdefault(name, []).append(value)
+    return result
+
+
+def _qualification_entrypoint():
+    entry = Path(os.path.abspath(sys.argv[0]))
+    values = DOCUMENT['values']
+    if entry.name == 'build_release_validation_fixtures.py':
+        parent_value = values.get('VALIDATION_WORKSPACE_PARENT', '')
+        parent = Path(os.path.abspath(parent_value))
+        root = entry.parent.parent
+        if (not parent_value or parent == FIXTURE_ROOT or not parent.is_relative_to(FIXTURE_ROOT)
+                or root.parent != parent or not re.fullmatch('aurum-release-validation-[0-9a-f]{32}', root.name)
+                or entry != root / 'scripts/build_release_validation_fixtures.py'
+                or sys.argv[1:] != ['--output', str(root / '.release-validation-fixtures')]):
+            raise RuntimeError('FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
+        _owned_existing_path(entry)
+        _require_target_revision(root)
+        return entry
+    if entry.name == 'bootstrap_news_projection.py':
+        if entry != SOURCE_ROOT / 'scripts/bootstrap_news_projection.py':
+            raise RuntimeError('FIXTURE_QUALIFICATION_PATH_UNDECLARED')
+        expected = json.loads(values.get('BOOTSTRAP_ARGUMENTS_JSON', 'null'))
+        if not isinstance(expected, list) or sys.argv[1:] != expected:
+            raise RuntimeError('FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
+        pairs = _argument_pairs(expected, {'--config', '--version-host', '--state-file',
+            '--source-database', '--max-cycles', '--retry-seconds', '--token-env'})
+        if not {'--config', '--version-host', '--state-file'} <= pairs.keys():
+            raise RuntimeError('FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
+        declarations = json.loads(values.get('PROVIDER_HTTP_REQUESTS_JSON', '[]'))
+        if not any(row == {'origin': pairs['--version-host'][0], 'method': 'POST',
+                           'path_query': '/api/news-index'} for row in declarations):
+            raise RuntimeError('FIXTURE_QUALIFICATION_ORIGIN_UNDECLARED')
+        state_root = Path(DOCUMENT['runtime_root']) / '.local/forward'
+        state = Path(os.path.abspath(pairs['--state-file'][0]))
+        if (state.parent != state_root or state.suffix != '.json'
+                or '--source-database' in pairs and Path(os.path.abspath(pairs['--source-database'][0]))
+                    != state_root / 'forward-evidence.sqlite3'):
+            raise RuntimeError('FIXTURE_QUALIFICATION_PATH_UNDECLARED')
+        _owned_existing_path(entry)
+        _owned_existing_path(pairs['--config'][0])
+        _owned_existing_path(state_root)
+        if state.is_symlink() or state.is_junction():
+            raise RuntimeError('FIXTURE_QUALIFICATION_REPARSE_DENIED')
+        if '--source-database' in pairs:
+            _owned_existing_path(pairs['--source-database'][0])
+        _require_target_revision(SOURCE_ROOT)
+        return entry
+    if entry.name == 'check_deferred_projection_parity.py':
+        bundle_value = values.get('CONTROL_BUNDLE_ROOT', '')
+        bundle = Path(os.path.abspath(bundle_value))
+        if (not bundle_value or bundle == FIXTURE_ROOT or not bundle.is_relative_to(FIXTURE_ROOT)
+                or entry != bundle / 'check_deferred_projection_parity.py'):
+            raise RuntimeError('FIXTURE_QUALIFICATION_PATH_UNDECLARED')
+        pairs = _argument_pairs(sys.argv[1:], {'--runtime-root', '--producer-root', '--version-id',
+            '--git-sha', '--producer-revision', '--required-after', '--observe-attempt', '--route'}, {'--route'})
+        expected = {'--runtime-root': DOCUMENT['runtime_root'], '--producer-root': DOCUMENT['runtime_root'],
+            '--version-id': values.get('TARGET_WORKER_VERSION'), '--git-sha': values.get('TARGET_SOURCE_REVISION'),
+            '--producer-revision': values.get('TARGET_SOURCE_REVISION')}
+        if (set(pairs) != set(expected) | {'--required-after', '--observe-attempt', '--route'}
+                or any(pairs.get(key) != [value] for key, value in expected.items())
+                or not re.fullmatch('[0-9a-f]{32}', pairs['--observe-attempt'][0])
+                or len(pairs['--route']) != len(set(pairs['--route']))
+                or not set(pairs['--route']) <= {'/api/audit-briefs', '/api/audit-stories',
+                    '/api/audit-decisions', '/api/news-evidence'}):
+            raise RuntimeError('FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
+        _owned_existing_path(entry)
+        original = _owned_existing_path(SOURCE_ROOT / 'scripts/check_deferred_projection_parity.py')
+        # Installed scripts do not have a Git checkout. Bind their actual bytes
+        # to the exact target source instead of inventing a bundle Git identity.
+        with entry.open('rb') as stream:
+            actual = stream.read(131073)
+        with original.open('rb') as stream:
+            wanted = stream.read(131073)
+        if not actual or len(actual) > 131072 or actual != wanted:
+            raise RuntimeError('FIXTURE_QUALIFICATION_SCRIPT_MISMATCH')
+        _require_target_revision(SOURCE_ROOT)
+        _require_target_revision(_owned_existing_path(DOCUMENT['runtime_root']))
+        return entry
+    return None
+
+
+def _loopback_origin(name):
+    target = urlsplit(DOCUMENT['values'].get(name, ''))
+    if (target.scheme != 'http' or target.hostname != '127.0.0.1'
+            or target.port not in DOCUMENT.get('loopback_ports', []) or target.port == 8765
+            or target.path not in ('', '/') or target.query or target.fragment or target.username is not None):
+        raise RuntimeError('FIXTURE_HTTP_TARGET_UNDECLARED')
+    return f'http://127.0.0.1:{target.port}'
+
+
+class _NoFixtureRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, newurl):
+        raise RuntimeError('FIXTURE_HTTP_REDIRECT_DENIED')
+
+
+def _mapped_urlopen(url, data=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, *, context=None):
+    request = url if isinstance(url, urllib.request.Request) else urllib.request.Request(url, data=data)
+    if isinstance(url, urllib.request.Request) and data is not None:
+        request = urllib.request.Request(url.full_url, data=data, headers=dict(url.header_items()),
+                                         method=getattr(url, 'method', None))
+    original = urlsplit(request.full_url)
+    if (original.username is not None or original.fragment or '\\' in request.full_url
+            or any(ord(character) < 33 for character in request.full_url)):
+        raise RuntimeError('FIXTURE_HTTP_TARGET_UNDECLARED')
+    origin = f'{original.scheme}://{original.netloc}'
+    path_query = original.path + ('?' + original.query if original.query else '')
+    headers = dict(request.header_items())
+    lower = {name.lower(): value for name, value in headers.items()}
+    if 'x-fixture-requested-origin' in lower:
+        raise RuntimeError('FIXTURE_HTTP_HEADER_UNDECLARED')
+    method = request.get_method()
+    if original.scheme == 'https':
+        declarations = json.loads(DOCUMENT['values'].get('PROVIDER_HTTP_REQUESTS_JSON', '[]'))
+        exact = sum(row == {'origin': origin, 'method': method, 'path_query': path_query}
+                    for row in declarations)
+        # Only the existing consumer's nonce is dynamic; identities and every
+        # other part of the Observe request remain exact, not a route wildcard.
+        observe = (method == 'GET' and request.data is None and any(
+            row == {'origin': origin, 'method': 'GET', 'path_query': original.path}
+            for row in declarations) and original.path in {
+                '/api/audit-briefs', '/api/audit-stories', '/api/audit-decisions', '/api/news-evidence'}
+            and re.fullmatch('__release_observe=[0-9a-f]{32}' + (
+                '&mode=all&limit=1' if original.path == '/api/news-evidence' else ''), original.query)
+            and lower.get('cloudflare-workers-version-overrides') == 'aurum-signal-room="' +
+                DOCUMENT['values'].get('TARGET_WORKER_VERSION', '') + '"'
+            and lower.get('cache-control') == 'no-cache' and lower.get('pragma') == 'no-cache')
+        if exact != 1 and not observe:
+            raise RuntimeError('FIXTURE_HTTP_TARGET_UNDECLARED')
+        headers['X-Fixture-Requested-Origin'] = origin
+        mapped = _loopback_origin('WORKER_LOOPBACK_BASE_URL') + path_query
+    elif origin == 'http://127.0.0.1:8765':
+        if (method != 'GET' or request.data is not None or original.query
+                or original.path not in {'/api/health', '/api/status', '/api/critical-status', '/api/audit',
+                    '/api/audit-briefs', '/api/audit-stories', '/api/audit-decisions'}):
+            raise RuntimeError('FIXTURE_HTTP_TARGET_UNDECLARED')
+        mapped = _loopback_origin('LOCAL_API_BASE_URL') + original.path
+    else:
+        if (original.scheme != 'http' or original.hostname not in {'127.0.0.1', 'localhost', '::1'}
+                or original.port not in DOCUMENT.get('loopback_ports', []) or original.port == 8765):
+            raise RuntimeError('FIXTURE_HTTP_TARGET_UNDECLARED')
+        mapped = request.full_url
+    forwarded = urllib.request.Request(mapped, data=request.data, headers=headers, method=method)
+    # Do not consult the interactive user's proxy settings. A redirect is not
+    # new fixture authority and must not forward credentials to another target.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoFixtureRedirect())
+    return opener.open(forwarded, timeout=timeout)
+
+
+if DOCUMENT['values'].get('PROVIDER_HTTP_REQUESTS_JSON'):
+    urllib.request.urlopen = _mapped_urlopen
+
+QUALIFICATION_ENTRYPOINT = _qualification_entrypoint()
+
 # Explicit old-code external configuration adaptation only. The original source
 # and its Git identity stay intact; this separately hashed adapter is part of
 # the declared execution environment, not an unmodified production execution.
@@ -162,6 +354,8 @@ if sys.argv[0] == '-c':
     observed = (sys.orig_argv[2].replace('\r\n', '\n'), *sys.orig_argv[3:])
     if observed not in allowed:
         raise RuntimeError('FIXTURE_INLINE_COMMAND_UNDECLARED')
+elif QUALIFICATION_ENTRYPOINT is not None:
+    pass
 elif DOCUMENT.get('legacy_configuration_revision'):
     # Bind the adapter to the executable entrypoint, not mutable runtime-root
     # placement: target code intentionally runs outside the old code checkout.

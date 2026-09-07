@@ -193,7 +193,7 @@ const mime = {
   ".rsc": "text/x-component", ".woff2": "font/woff2",
 };
 
-function assetFetch(root, request) {
+export function assetFetch(root, request) {
   if (!["GET", "HEAD"].includes(request.method)) return new Response(null, { status: 405 });
   let pathname;
   try { pathname = decodeURIComponent(new URL(request.url).pathname); }
@@ -201,6 +201,23 @@ function assetFetch(root, request) {
   if (!pathname.startsWith("/") || /[\\\x00-\x1f:]/.test(pathname)
     || pathname.split("/").some(part => part === ".." || part === ".")) {
     fail("WORKER_ADAPTER_ASSET_PATH_INVALID");
+  }
+  const redirects = contained(root, ["web", "dist", "client", "_redirects"], { optional: true, limit: 8192 });
+  if (redirects) {
+    const rules = readFileSync(redirects, "utf8").split(/\r?\n/).map(line => line.trim())
+      .filter(line => line && !line.startsWith("#"));
+    // Only the literal redirect grammar present in the built artifacts is
+    // supported. This is declared asset-provider behavior, not a validator.
+    if (rules.length > 32) fail("WORKER_ADAPTER_REDIRECT_BOUND");
+    const parsed = rules.map(rule => {
+      const match = /^(\/[A-Za-z0-9_./-]+)\s+(\/[A-Za-z0-9_./-]+)\s+(301|302|307|308)$/.exec(rule);
+      if (!match || match[1].includes("..") || match[2].includes("..") || match[2].startsWith("//")) {
+        fail("WORKER_ADAPTER_REDIRECT_UNDECLARED");
+      }
+      return match;
+    });
+    const redirect = parsed.find(match => pathname === match[1]);
+    if (redirect) return new Response(null, { status: Number(redirect[3]), headers: { Location: redirect[2] } });
   }
   const stem = pathname === "/" ? "index.html" : pathname.slice(1).replace(/\/$/, "");
   const choices = stem.split("/").at(-1).includes(".") ? [stem] : [`${stem}.html`, `${stem}/index.html`];

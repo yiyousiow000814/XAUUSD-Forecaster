@@ -997,6 +997,13 @@ the separate Windows runtime checkout switches revision. Retain actual build
 execution and any verified copy mapping separately from byte identity. Local
 Node results and declared synthetic provider telemetry are not Cloudflare
 qualification, provider usage, human Access acceptance or production evidence.
+Python qualification children also require exact declared entrypoints, arguments
+and owned paths. Validation worktrees bind their actual Git target; installed
+Observe scripts bind their actual bytes to that source. Their HTTP adapter
+preserves the logical remote URL, request bytes and version headers while
+mapping only declared transport to loopback. Unknown operations, redirects and
+reparse paths fail closed; the adapter cannot replace qualification or ACK
+consumers. A built static redirect remains part of the verified asset bytes.
 The scheduler fixture keeps only its two declared task states in owned files,
 so suspension and restoration are visible to every child without registering
 production tasks. Replacement still runs the real hidden WScript command and
