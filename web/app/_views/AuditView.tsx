@@ -1475,7 +1475,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         </div>
       </section>
 
-      {combinedErrors && <div className="error-banner">{combinedErrors}。页面会自动重试；已有成功资料按各自资源保留。</div>}
+      {combinedErrors && <div className="error-banner">{combinedErrors}。{selectedAuditDetailState !== null && auditDetailError[view as AuditDetailView] && auditDetailResourceMode === "build-snapshot" ? "构建快照不会自动刷新；可手动重读当前快照，资料更新需要新构建。" : "可稍后重新载入页面。"}已有成功资料按各自资源保留。</div>}
       <CurrentDataNotice
         phase={currentPagePhase}
         snapshotKind={pageUsesBranchSnapshot ? "branch" : "fallback"}

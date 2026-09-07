@@ -130,8 +130,8 @@ export async function loadDashboardResource<T>(
         body = serialized ? JSON.parse(serialized) : null;
       } catch {
         throw new Error(response.ok
-          ? "数据服务正在更新，页面会自动重试"
-          : `数据服务暂时不可用（HTTP ${response.status}），页面会自动重试`);
+          ? "数据服务正在更新，请稍后重读"
+          : `数据服务暂时不可用（HTTP ${response.status}），请稍后重读`);
       }
       if (!response.ok) {
         if (url.startsWith("/admin/api/")) {
@@ -158,7 +158,7 @@ export async function loadDashboardResource<T>(
       return body as T;
     } catch (reason) {
       const error = reason instanceof DOMException && reason.name === "AbortError"
-        ? new Error("数据读取超时，页面会自动重试")
+        ? new Error("数据读取超时，请稍后重读")
         : reason instanceof Error ? reason : new Error(String(reason));
       const current = resources.get(url) ?? entry;
       resources.set(url, { ...current, pending: undefined, error });

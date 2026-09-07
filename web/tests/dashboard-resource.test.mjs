@@ -86,6 +86,26 @@ test("preserves machine-readable resource failure codes for generation recovery"
   );
 });
 
+test("single-read failures do not promise an automatic retry owned by the caller", async () => {
+  for (const [name, respond] of [
+    ["malformed-success", () => new Response("not-json", {status: 200})],
+    ["malformed-unavailable", () => new Response("not-json", {status: 503})],
+    ["timeout", () => { throw new DOMException("aborted", "AbortError"); }],
+  ]) {
+    let calls = 0;
+    globalThis.fetch = async () => { calls++; return respond(); };
+    const url = `/api/audit-stories?resource-test=${name}`;
+    await assert.rejects(loadDashboardResource(url, {force: true}), error => {
+      assert.match(error.message, /请稍后重读/);
+      assert.doesNotMatch(error.message, /自动重试|自动刷新/);
+      return true;
+    });
+    assert.equal(calls, 1);
+    assert.equal(readDashboardResourceState(url).loading, false);
+    assert.equal(readDashboardResourceState(url).hasSnapshot, false);
+  }
+});
+
 test("shares stale status with the shell subscriber and clears it after recovery", async () => {
   const url = "/api/status";
   const first = {

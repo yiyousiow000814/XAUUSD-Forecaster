@@ -890,7 +890,7 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   assert.match(previewResources, /\[PREVIEW_RESOURCES\.status\]: publicDashboardStatus\(previewBundle\.status\)/);
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
   assert.match(resources, /DEFAULT_TIMEOUT_MS = 10_000/);
-  assert.match(resources, /数据读取超时，页面会自动重试/);
+  assert.match(resources, /数据读取超时，请稍后重读/);
 });
 
 test("uses one current-data contract across every dashboard surface", () => {

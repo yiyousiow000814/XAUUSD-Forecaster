@@ -104,7 +104,8 @@ test("invalid cached detail envelopes remain pending rather than becoming succes
 
 test("actual Audit detail effects poll current data but never immutable Preview snapshots", async () => {
   // Execute the view's actual effect and scheduler with a visible, non-WebDriver
-  // clock. React SSR collects effects here; no browser or production URL opens.
+  // clock. SSR renders actual state updates from the request/effect boundary;
+  // this focused hook harness is not a browser or deployed acceptance run.
   const refreshPath = fileURLToPath(new URL("../app/_lib/dashboard-refresh.ts", import.meta.url));
   const effectBuild = await build({
     bundle: true, write: false, platform: "node", format: "esm", jsx: "automatic",
@@ -116,6 +117,14 @@ test("actual Audit detail effects poll current data but never immutable Preview 
         ? {path: "react", namespace: "audit-effects"} : null);
       builder.onLoad({filter: /.*/, namespace: "audit-effects"}, () => ({
         contents: `export * from ${JSON.stringify(require.resolve("react"))};
+          export function useState(initial) {
+            const values = globalThis.__auditStateValues;
+            const index = globalThis.__auditStateIndex++;
+            if (!(index in values)) values[index] = typeof initial === 'function' ? initial() : initial;
+            return [values[index], next => {
+              values[index] = typeof next === 'function' ? next(values[index]) : next;
+            }];
+          }
           export function useEffect(effect) { globalThis.__auditEffects.push(effect); }`,
         loader: "js", resolveDir: fileURLToPath(new URL("..", import.meta.url)),
       }));
@@ -141,22 +150,28 @@ test("actual Audit detail effects poll current data but never immutable Preview 
       contents: `import React from 'react'; import {renderToStaticMarkup} from 'react-dom/server';
         import AuditView from ${JSON.stringify(viewPath)};
         import {clearDashboardResource,updateDashboardResource} from ${JSON.stringify(resourcesPath)};
+        export function renderState(view) {
+          globalThis.__auditStateIndex = 0;
+          globalThis.__auditEffects = [];
+          return renderToStaticMarkup(React.createElement(AuditView,{initialView:view}));
+        }
         export function mountEffects(view, resources) {
           for (const url of ${JSON.stringify(resourceUrls)}) clearDashboardResource(url);
           for (const [url,body] of Object.entries(resources)) updateDashboardResource(url,()=>body);
-          renderToStaticMarkup(React.createElement(AuditView,{initialView:view}));
+          globalThis.__auditStateValues = [];
+          renderState(view);
           return globalThis.__auditEffects.map(effect => effect());
         }`,
     },
   });
   const effectModule = join(temporaryRoot, "audit-effects.mjs");
   writeFileSync(effectModule, effectBuild.outputFiles[0].contents);
-  const {mountEffects} = await import(pathToFileURL(effectModule).href);
-  const names = ["window", "document", "navigator", "fetch", "__auditEffects", "__auditSchedules", "__auditTimerKey", "__auditDeployment"];
+  const {mountEffects, renderState} = await import(pathToFileURL(effectModule).href);
+  const names = ["window", "document", "navigator", "fetch", "__auditEffects", "__auditSchedules", "__auditTimerKey", "__auditDeployment", "__auditStateValues", "__auditStateIndex"];
   const original = new Map(names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
   const originalNow = Date.now;
   try {
-    for (const preview of [false, true]) for (const statusMissing of [false, true]) for (const view of Object.keys(details)) {
+    for (const preview of [false, true]) for (const statusMissing of [false, true]) for (const failure of [false, true]) for (const view of Object.keys(details)) {
       const timers = new Map();
       const intervals = new Map();
       const storage = new Map();
@@ -173,14 +188,19 @@ test("actual Audit detail effects poll current data but never immutable Preview 
         clearInterval(id) {intervals.delete(id);},
         localStorage: {getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value)},
       };
-      globalThis.fetch = async url => {requests.push(String(url)); return Response.json(details[view]);};
+      globalThis.fetch = async url => {
+        requests.push(String(url));
+        return failure
+          ? Response.json({error: "等待审计详情", availability: "UNAVAILABLE_IN_BUILD_SNAPSHOT"}, {status: 503})
+          : Response.json(details[view]);
+      };
       globalThis.__auditEffects = [];
       globalThis.__auditSchedules = [];
       globalThis.__auditTimerKey = null;
       globalThis.__auditDeployment = {is_preview: preview};
       const cleanups = mountEffects(view, {...baseline,
         "/api/status": statusMissing ? null : {...baseline["/api/status"], preview: {is_preview: preview}},
-        [`/api/audit-${view}`]: details[view],
+        [`/api/audit-${view}`]: failure ? null : details[view],
       });
       try {
         const key = `audit-detail:${view}`;
@@ -188,12 +208,28 @@ test("actual Audit detail effects poll current data but never immutable Preview 
         assert.equal(schedule.mode, preview ? "build-snapshot" : "current");
         assert.equal(schedule.interval, 60_000);
         for (const timer of timers.values()) if (timer.key === key) timer.callback();
+        await new Promise(resolve => setImmediate(resolve));
         assert.equal(schedule.initial, 1, "both modes retain initial detail admission");
         now += 120_001;
         for (const timer of intervals.values()) if (timer.key === key) timer.callback();
         await new Promise(resolve => setImmediate(resolve));
         assert.equal(schedule.polls, preview ? 0 : 1);
-        assert.deepEqual(requests, preview ? [] : [`/api/audit-${view}`]);
+        const expectedRequests = (failure ? 1 : 0) + (preview ? 0 : 1);
+        assert.deepEqual(requests, Array(expectedRequests).fill(`/api/audit-${view}`));
+        if (failure) {
+          const html = renderState(view);
+          assert.match(html, /role="alert"/);
+          assert.match(html, /type="button"[^>]*>重试/);
+          assert.doesNotMatch(html, /页面会自动重试/);
+          if (preview) {
+            assert.match(html, /构建快照不会自动刷新/);
+            assert.match(html, /可手动重读当前快照/);
+            assert.match(html, /资料更新需要新构建/);
+          } else {
+            assert.match(html, /可稍后重新载入页面/);
+            assert.doesNotMatch(html, /资料更新需要新构建/);
+          }
+        }
       } finally {
         for (const cleanup of cleanups.reverse()) if (typeof cleanup === "function") cleanup();
       }
