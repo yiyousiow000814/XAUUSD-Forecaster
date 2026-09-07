@@ -234,7 +234,7 @@ function Get-ReleaseVersionPreviewUrl {
         (Get-ReleaseArtifactKindFromVersion -Version $Version) -ne
             $productionCandidateArtifactKind) { return "" }
     try {
-        $production = [Uri]$workerUrl
+        $production = [Uri]$workerVersionOrigin
         $workerPrefix = "$workerName."
         if (-not $production.Host.StartsWith(
             $workerPrefix, [StringComparison]::OrdinalIgnoreCase

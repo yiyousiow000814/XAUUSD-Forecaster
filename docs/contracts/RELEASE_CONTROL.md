@@ -636,6 +636,12 @@ slots are separate resources. The receipt field legacy_decisions records the
 still-active Stable status count. Candidate validation rechecks the live evidence;
 the receipt cannot be copied to another Git SHA or Worker Version.
 
+Candidate Version URL identity derives from the canonical Worker origin and
+verified version metadata. An isolated provider transport address must not
+replace that origin or erase the derived URL. All isolated requests remain
+subject to exact declared origin/method/path matching and owned loopback
+forwarding; deriving an identity grants no additional network authority.
+
 **Verify Migration** does not stop Dashboard Sync. It binds the receipt to the
 CURRENT generation and its activation watermark, then independently revalidates
 the live CURRENT, schema, ledger, Stable/Candidate reads, and Reverse projection.

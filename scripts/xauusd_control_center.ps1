@@ -54,7 +54,8 @@ if ($isolatedConfiguration) {
     $guardTaskName = 'XAUUSD-Contract-' + $isolatedConfiguration.fixture_id + '-Guard'
 }
 $workerName = "aurum-signal-room"
-$workerUrl = "https://aurum-signal-room.yiyousiow1234.workers.dev"
+$workerVersionOrigin = "https://aurum-signal-room.yiyousiow1234.workers.dev"
+$workerUrl = $workerVersionOrigin
 if ($isolatedConfiguration) { $workerUrl = [string]$isolatedConfiguration.provider_endpoint }
 $dashboardUrl = if (Get-UserEnvironmentValue -Name 'XAUUSD_DASHBOARD_URL') {
     Get-UserEnvironmentValue -Name 'XAUUSD_DASHBOARD_URL'

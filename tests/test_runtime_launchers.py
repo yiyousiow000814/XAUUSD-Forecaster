@@ -4339,23 +4339,30 @@ def test_static_asset_validation_fails_closed_for_status_body_and_host(tmp_path)
     )
 
 
-def test_candidate_version_url_is_derived_from_worker_not_formal_dashboard(tmp_path) -> None:
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+@pytest.mark.parametrize("isolated_transport", [False, True])
+@pytest.mark.parametrize("valid_metadata", [False, True])
+def test_candidate_version_url_is_derived_from_worker_not_formal_dashboard(
+    tmp_path, powershell, isolated_transport, valid_metadata,
+) -> None:
     candidate = "b" * 40
     worker = "44444444-4444-4444-4444-444444444444"
     result = _run_control_center_contract(
         tmp_path,
-        "$dashboardUrl='https://aurum-signal-room.yiyousiow1234.chatgpt.site';"
+        ("$workerUrl='https://127.0.0.1:19001';" if isolated_transport else "")
+        + "$dashboardUrl='https://aurum-signal-room.yiyousiow1234.chatgpt.site';"
         f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId '{worker}' "
         f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE';"
         f"$version=[pscustomobject]@{{id='{worker}';metadata=[pscustomobject]@{{"
-        "has_preview=$true};annotations=[pscustomobject]@{"
+        f"has_preview=${str(valid_metadata).lower()}}};annotations=[pscustomobject]@{{"
         f"'workers/message'='release:{candidate} branch:main "
         "artifact_kind:PRODUCTION_CANDIDATE'}};"
         "Write-Output (Get-ReleaseVersionPreviewUrl -Version $version -Candidate $candidate)",
+        powershell=powershell,
     )
 
     assert result == (
-        "https://44444444-aurum-signal-room.yiyousiow1234.workers.dev"
+        "https://44444444-aurum-signal-room.yiyousiow1234.workers.dev" if valid_metadata else ""
     )
 
 

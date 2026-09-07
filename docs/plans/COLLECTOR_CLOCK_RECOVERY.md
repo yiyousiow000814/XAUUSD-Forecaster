@@ -314,3 +314,33 @@ renewal contracts. Rehearse actual old and target built Workers against the same
 D1 fixture after real heartbeat/bootstrap writes. The reusable review failure
 is producer-to-consumer wiring: mocked capability counts hid the retired slot.
 Independent review and production eligibility remain outstanding.
+
+
+## Worker identity origin survives isolated transport binding
+
+Installed 205ce275 passed copy/preflight and the corrected database capability
+query, then failed the first Candidate status read because browser_url was
+empty. The isolated entry point replaces workerUrl with a loopback provider;
+Get-ReleaseVersionPreviewUrl incorrectly uses that transport endpoint to derive
+a workers.dev version identity. Production's unchanged canonical hostname and
+the verified version metadata already provide the required identity.
+
+Retain one named canonical Worker origin before applying the existing isolated
+transport override. Derive version URLs from that origin; keep Stable/provider
+requests, protected Access binding and all network interception on their existing
+transport path. No user-supplied origin, new allowed destination, DNS request,
+provider claim, durable state, receipt or mutation privilege is added. Exact
+Worker/Git/artifact/has_preview checks still precede URL construction.
+
+The entry point owns origin and transport configuration; discovery consumes the
+provider adapter's exact URL; migration/qualification consumers retain their
+existing request boundary. Old/new production behavior is identical. Only the
+isolated transport can differ, and its network wrapper must still match the
+exact declared origin/method/path before forwarding locally. Missing or invalid
+metadata remains fail closed; restart reinitializes both values from the same
+entry point. Reverse and production Stable remain unaffected.
+
+Extend the existing actual-PowerShell version URL family across normal and
+loopback transport, PS5.1/PS7, valid and invalid metadata. Execute the connected
+installed entry point and real built Candidate status route afterward. Never
+patch Candidate.browser_url in persisted state or relax the request allowlist.
