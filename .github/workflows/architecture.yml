@@ -31,6 +31,8 @@ jobs:
       - name: Verify tool contracts and generated source identity
         run: |
           python -m pytest tests/test_architecture_compiler.py -q
+          python -m pytest tests/test_architecture_imports.py -q
+          python scripts/check_architecture_imports.py
           python scripts/compile_architecture.py check
       - name: Record exact execution source outside generated content
         env:

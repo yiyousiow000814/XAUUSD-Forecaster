@@ -1,5 +1,91 @@
 {
   "schema": "critical-path-selection-v1",
+  "python_import_policy": {
+    "schema": "python-import-policy-v1",
+    "canonical_packages": {
+      "ai": "xauusd_forecaster/ai",
+      "assistant": "xauusd_forecaster/assistant",
+      "dashboard": "xauusd_forecaster/dashboard",
+      "decision": "xauusd_forecaster/decision",
+      "evidence": "xauusd_forecaster/evidence",
+      "news": "xauusd_forecaster/news",
+      "runtime": "xauusd_forecaster/runtime",
+      "training": "xauusd_forecaster/training"
+    },
+    "script_imports": [
+      {
+        "source": "scripts/bootstrap_news_projection.py",
+        "target": "scripts/run_dashboard_sync.py",
+        "reason": "Existing bounded bootstrap reuses the actual Sync protocol and state I/O.",
+        "remove_when": "The protocol and all state I/O callers move together to their package owner.",
+        "binding": "MODULE_REQUEST_ONLY"
+      },
+      {
+        "source": "scripts/bootstrap_news_projection.py",
+        "target": "scripts/run_dashboard_api.py",
+        "reason": "Existing bootstrap uses the actual source and generation artifact owner.",
+        "remove_when": "Those source/artifact owners are independently extracted and bootstrap parity passes.",
+        "binding": "MODULE_REQUEST_ONLY"
+      },
+      {
+        "source": "scripts/build_preview_bundle.py",
+        "target": "scripts/run_dashboard_sync.py",
+        "reason": "The retained immutable Preview builder consumes explicit serializer re-exports.",
+        "remove_when": "The builder imports the package owner and exact bundle byte parity passes.",
+        "binding": "MODULE_REQUEST_ONLY"
+      },
+      {
+        "source": "scripts/build_release_validation_fixtures.py",
+        "target": "scripts/run_dashboard_sync.py",
+        "reason": "The retained release fixture builder consumes explicit serializer re-exports.",
+        "remove_when": "The builder imports the package owner and all fixture bytes remain equivalent.",
+        "binding": "MODULE_REQUEST_ONLY"
+      },
+      {
+        "source": "scripts/check_deferred_projection_parity.py",
+        "target": "scripts/run_dashboard_sync.py",
+        "reason": "Producer-root-selected parity consumes that producer's Sync; local syntax is not its revision identity.",
+        "remove_when": "Producer-compatible parity has an explicit replacement interface and cross-version tests.",
+        "binding": "PARAMETERIZED_PRODUCER_ROOT"
+      },
+      {
+        "source": "scripts/architecture_compiler.py",
+        "target": "scripts/architecture_typescript_tool.py",
+        "reason": "Current compiler reuses its lock-bound parser dependency owner.",
+        "remove_when": "The owning compiler is retired or this developer tool interface moves together.",
+        "binding": "MODULE_REQUEST_ONLY"
+      },
+      {
+        "source": "scripts/architecture_evidence.py",
+        "target": "scripts/run_architecture_mutations.py",
+        "reason": "The evidence reader reuses the actual mutation result classifier.",
+        "remove_when": "The mutation/evidence developer tool interface is retired or moved together.",
+        "binding": "MODULE_REQUEST_ONLY"
+      },
+      {
+        "source": "scripts/compile_architecture.py",
+        "target": "scripts/architecture_compiler.py",
+        "reason": "The CLI composes the existing source compiler.",
+        "remove_when": "The source compiler CLI is retired or moved together.",
+        "binding": "MODULE_REQUEST_ONLY"
+      },
+      {
+        "source": "scripts/run_architecture_mutations.py",
+        "target": "scripts/architecture_compiler.py",
+        "reason": "The historical mutation runner checks actual source identities using the same compiler.",
+        "remove_when": "The source/mutation developer tool interface is retired or moved together.",
+        "binding": "MODULE_REQUEST_ONLY"
+      },
+      {
+        "source": "scripts/check_architecture_imports.py",
+        "target": "scripts/architecture_compiler.py",
+        "reason": "The import checker reuses the existing Python AST parse and source admission boundary.",
+        "remove_when": "The owning source checker is retired or moved together.",
+        "binding": "MODULE_REQUEST_ONLY"
+      }
+    ],
+    "legacy_shims": []
+  },
   "source_symbols": {
     "scripts/run_dashboard_api.py": [
       "scripts/run_dashboard_api.py::Handler.do_GET",
@@ -21,6 +107,7 @@
       "files": [
         "scripts/run_dashboard_api.py",
         "scripts/run_dashboard_sync.py",
+        "xauusd_forecaster/dashboard/resource_contracts.py",
         "xauusd_forecaster/news_projection.py",
         "web/worker/api-router.ts",
         "web/app/api/news-index/route.ts",
@@ -61,6 +148,7 @@
       "tests": [
         "tests/test_news_projection.py",
         "tests/test_dashboard_sync.py",
+        "tests/test_dashboard_resource_contracts.py",
         "web/tests/news-projection-store.test.mjs",
         "web/tests/news-evidence-store.test.mjs",
         "web/tests/audit-content-rendering.test.mjs"
@@ -77,9 +165,9 @@
       "tests": ["tests/test_control_plane_install.py"]
     },
     "source-first-ack": {
-      "files": ["scripts/run_dashboard_sync.py", "xauusd_forecaster/dashboard/sync/transport.py", "xauusd_forecaster/dashboard/learning_resources.py"],
+      "files": ["scripts/run_dashboard_sync.py", "xauusd_forecaster/dashboard/resource_contracts.py", "xauusd_forecaster/dashboard/sync/transport.py", "xauusd_forecaster/dashboard/learning_resources.py"],
       "roots": ["scripts/run_dashboard_sync.py::_sync_learning_summary", "scripts/run_dashboard_sync.py::_sync_learning_history", "scripts/run_dashboard_sync.py::_sync_market", "scripts/run_dashboard_sync.py::_sync_market_history", "scripts/run_dashboard_sync.py::_sync_operator_retries", "scripts/run_dashboard_sync.py::_sync_news_evidence", "xauusd_forecaster/dashboard/sync/transport.py::_post_json"],
-      "tests": ["tests/test_dashboard_sync.py"]
+      "tests": ["tests/test_dashboard_sync.py", "tests/test_dashboard_resource_contracts.py"]
     }
   }
 }

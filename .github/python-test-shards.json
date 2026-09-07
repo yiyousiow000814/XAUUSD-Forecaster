@@ -29,6 +29,7 @@
         "tests/test_clock_recovery.py",
         "tests/test_daily_brief.py",
         "tests/test_brief_date_discovery.py",
+        "tests/test_brief_synthesis_source_first.py",
         "tests/test_news_event_identity.py",
         "tests/test_model_gateway.py",
         "tests/test_news_pipeline_health.py",
@@ -88,6 +89,7 @@
       "tests": [
         "tests/test_news_scheduler.py",
         "tests/test_dashboard_sync.py",
+        "tests/test_dashboard_resource_contracts.py",
         "tests/test_storylines.py",
         "tests/test_source_polling.py",
         "tests/test_assistant_capacity.py",
@@ -106,6 +108,7 @@
         "tests/test_dashboard_runtime_status.py",
         "tests/test_ledger.py",
         "tests/test_architecture_docs.py",
+        "tests/test_architecture_imports.py",
         "tests/test_architecture_compiler.py",
         "tests/test_architecture_mutation_contracts.py"
       ]

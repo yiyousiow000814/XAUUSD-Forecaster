@@ -98,7 +98,7 @@ from xauusd_forecaster.news_projection import (
     build_news_projection_generation,
     receipt_digest,
 )
-from scripts.run_dashboard_sync import (
+from xauusd_forecaster.dashboard.resource_contracts import (
     _learning_summary, audit_briefs_snapshot, audit_decisions_snapshot,
     audit_snapshot, audit_stories_snapshot, market_chart_snapshot,
 )

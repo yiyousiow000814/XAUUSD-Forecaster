@@ -100,6 +100,57 @@ export function architectureSheetTabIndex(currentIndex: number, direction: 1 | -
   return (currentIndex + direction + count) % count;
 }
 
+export function architecturePreviewTopInset(
+  rectangles: Array<{ top: number; bottom: number; width: number }>, viewportHeight: number,
+) {
+  let bottom = 0;
+  for (const rect of rectangles.filter(rect => Number.isFinite(rect.top)
+    && Number.isFinite(rect.bottom) && rect.width > 0 && rect.bottom > rect.top)
+    .sort((left, right) => left.top - right.top)) {
+    // Only the continuous band intersecting the viewport top is an occluder.
+    // A second, unrelated in-page banner must not collapse the sheet.
+    if (rect.top <= bottom && rect.bottom > bottom) bottom = rect.bottom;
+  }
+  return Math.ceil(Math.min(Math.max(0, viewportHeight), bottom));
+}
+
+export function observeArchitectureSheetPreviewInset(layer: HTMLElement) {
+  const document = layer.ownerDocument;
+  const view = document.defaultView;
+  if (!view) return () => {};
+  let frame = 0;
+  let active = true;
+  const observed = new Set<Element>();
+  const update = () => {
+    if (!active) return;
+    const rectangles = Array.from(document.querySelectorAll<HTMLElement>(".preview-banner"))
+      .filter(banner => view.getComputedStyle(banner).visibility !== "hidden")
+      .map(banner => {
+        if (!observed.has(banner)) { observed.add(banner); observer.observe(banner); }
+        return banner.getBoundingClientRect();
+      });
+    layer.style.setProperty("--architecture-preview-inset", `${architecturePreviewTopInset(rectangles, view.innerHeight)}px`);
+  };
+  const schedule = () => {
+    if (!active || frame) return;
+    frame = view.requestAnimationFrame(() => { frame = 0; update(); });
+  };
+  const observer = new view.ResizeObserver(schedule);
+  // The body also changes size when the async Preview banner first appears.
+  observer.observe(document.body);
+  update();
+  view.addEventListener("resize", schedule);
+  view.visualViewport?.addEventListener("resize", schedule);
+  return () => {
+    active = false;
+    view.cancelAnimationFrame(frame);
+    observer.disconnect();
+    view.removeEventListener("resize", schedule);
+    view.visualViewport?.removeEventListener("resize", schedule);
+    layer.style.removeProperty("--architecture-preview-inset");
+  };
+}
+
 type ArchitectureScrollStyle = { overflow: string; position: string; top: string; width: string };
 
 export function lockArchitecturePageScroll(style: ArchitectureScrollStyle, scrollY: number, clientWidth?: number) {
