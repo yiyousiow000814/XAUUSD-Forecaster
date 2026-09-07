@@ -30,11 +30,11 @@
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.52.1",
     "@eslint/js": "9.39.4",
-    "@next/eslint-plugin-next": "16.3.3",
+    "@next/eslint-plugin-next": "16.3.4",
     "@tailwindcss/postcss": "4.3.3",
     "@types/node": "22.19.19",
     "@types/react": "19.2.18",
-    "@types/react-dom": "19.2.5",
+    "@types/react-dom": "19.2.7",
     "@vitejs/plugin-react": "6.0.5",
     "@vitejs/plugin-rsc": "0.5.34",
     "drizzle-kit": "0.31.10",
@@ -47,9 +47,9 @@
     "tailwindcss": "4.3.3",
     "typescript": "5.9.3",
     "typescript-eslint": "8.59.3",
-    "vinext": "1.0.0-beta.8",
+    "vinext": "1.0.0-beta.9",
     "vite": "8.2.1",
-    "wrangler": "4.127.1"
+    "wrangler": "4.129.0"
   },
   "overrides": {
     "@esbuild-kit/core-utils": {
