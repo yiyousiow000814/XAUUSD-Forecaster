@@ -956,6 +956,11 @@ SQLite/D1 evidence, or pull-request comments.
 
 An isolated rehearsal may declare `XAUUSD_ISOLATED_CONFIGURATION` and its exact
 `XAUUSD_ISOLATED_CONFIGURATION_SHA256` in the inherited process environment.
+Before opening that locator, both Windows owners require containment beneath
+`AppData/Local/Temp/XAUUSD-Forecaster-Rehearsals` of the current-token profile
+(not `USERPROFILE`). UUID-shaped names and a document's self-declared root are
+not independent read authority. This private test estate does not grant access
+to production data, endpoints, tasks or persistent credentials.
 Both are required together. The bounded existing fixture JSON must declare
 `ISOLATED_REHEARSAL`, a unique owned root, canonical profile/runtime root,
 repository root, loopback endpoints excluding port 8765, and a unique contract
@@ -971,3 +976,9 @@ contain their declared external boundaries. Original and adapter-derived source
 identities must remain distinct; source rewriting does not authorize reporting
 the original immutable SHA. Real locks, installation, transaction transitions,
 Collector output, Sync ACK and Observe must not be replaced by success stubs.
+An optional `external_adapter_sha256` binds only the reviewed connected fixture
+at `source_root/tests/fixtures/control_plane_connected_boundary.ps1`. Its loader
+accepts only the complete named external-function set, not arbitrary startup
+code or lifecycle overrides. Provider adapters return raw provider data through
+the existing acceptance consumers; unknown operations fail before external I/O.
+Tests compare all non-external function definitions before and after composition.

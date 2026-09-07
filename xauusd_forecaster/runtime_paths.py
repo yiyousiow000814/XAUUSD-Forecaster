@@ -11,6 +11,17 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 
+def isolated_rehearsal_root() -> Path:
+    """Private test estate anchored to the current Windows token, not an env override."""
+    if os.name != "nt":
+        raise ValueError("ISOLATED_CONFIGURATION_PLATFORM_UNSUPPORTED")
+    import ctypes
+    buffer = ctypes.create_unicode_buffer(32768)
+    if ctypes.windll.shell32.SHGetFolderPathW(None, 0x28, None, 0, buffer) != 0:
+        raise ValueError("ISOLATED_CONFIGURATION_PROFILE_UNAVAILABLE")
+    return Path(buffer.value) / "AppData/Local/Temp/XAUUSD-Forecaster-Rehearsals"
+
+
 def isolated_runtime_configuration() -> dict | None:
     """Read the explicit rehearsal authority, never an implicit credential fallback."""
     supplied = os.environ.get("XAUUSD_ISOLATED_CONFIGURATION")
@@ -21,7 +32,11 @@ def isolated_runtime_configuration() -> dict | None:
         raise ValueError("ISOLATED_CONFIGURATION_REQUIRED")
     if not os.path.isabs(supplied):
         raise ValueError("ISOLATED_CONFIGURATION_ROOT_INVALID")
-    locator = Path(os.path.abspath(supplied))
+    normalized_locator = os.path.normcase(os.path.abspath(supplied))
+    authority_prefix = os.path.normcase(os.path.abspath(isolated_rehearsal_root())) + os.sep
+    if not normalized_locator.startswith(authority_prefix):
+        raise ValueError("ISOLATED_CONFIGURATION_ROOT_INVALID")
+    locator = Path(normalized_locator)
     if str(locator).startswith("\\\\") or locator.name != "fixture-user-environment.json" or not re.fullmatch(r"xauusd-rehearsal-[0-9a-f]{32}", locator.parent.name):
         raise ValueError("ISOLATED_CONFIGURATION_ROOT_INVALID")
     if os.name == "nt":
@@ -41,13 +56,17 @@ def isolated_runtime_configuration() -> dict | None:
             continue
         if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & 0x400:
             raise ValueError("ISOLATED_CONFIGURATION_REPARSE_DENIED")
-    with locator.open("rb") as stream:
+    with open(normalized_locator, "rb") as stream:
         raw = stream.read(32769)
     if len(raw) > 32768:
         raise ValueError("ISOLATED_CONFIGURATION_TOO_LARGE")
     if hashlib.sha256(raw).hexdigest() != expected:
         raise ValueError("ISOLATED_CONFIGURATION_IDENTITY_MISMATCH")
-    config = json.loads(raw)
+    try:
+        serialized = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("ISOLATED_CONFIGURATION_ENCODING_INVALID") from error
+    config = json.loads(serialized)
     identity = config.get("fixture_id", "")
     if (type(config.get("schema_version")) is not int or config.get("schema_version") != 1 or config.get("mode") != "ISOLATED_REHEARSAL"
             or not re.fullmatch(r"[0-9a-f]{32}", identity)

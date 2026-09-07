@@ -8127,7 +8127,7 @@ def test_required_github_gate_uses_latest_exact_sha_attempt(tmp_path) -> None:
         "$new=[pscustomobject]@{id=3;name=$requiredGitHubChecks[0];head_sha=('a'*40);"
         "started_at='2026-08-23T03:00:00Z';status='completed';conclusion='success'};"
         "$script:payload=[pscustomobject]@{check_runs=@($base)+@($old,$new)}|ConvertTo-Json -Depth 5;"
-        "function Invoke-Utf8NativeProcess{return [pscustomobject]@{exit_code=0;stdout=$script:payload;"
+        "function Invoke-GitHubChecksRead{param($Revision);if($Revision -cne ('a'*40)){throw 'WRONG_REVISION'};return [pscustomobject]@{exit_code=0;stdout=$script:payload;"
         "stderr='';stdout_lines=@($script:payload);stderr_lines=@()}};"
         "$recovered=Test-RequiredGitHubChecks -Revision ('a'*40);"
         "$new.status='in_progress';$new.conclusion=$null;"
@@ -8171,6 +8171,25 @@ def test_repository_transport_failure_classifier_is_bounded(
         f"-ExitCode 1 -Diagnostic '{escaped}'",
     )
     assert result == str(expected)
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_deployment_raw_transport_preserves_specification_and_failure(tmp_path, exit_code) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$null=New-Item -ItemType Directory -Path (Join-Path $repositoryRoot 'web') -Force;"
+        "$prior=(Get-Location).Path;"
+        f"$script:transportExit={exit_code};"
+        "function Invoke-WranglerDeploymentCommand{param($Arguments);"
+        "$script:seen=@($Arguments);return [pscustomobject]@{exit_code=$script:transportExit;output=@()}};"
+        "$state='SUCCEEDED';try{Invoke-CloudflareDeployment -StableVersionId 'stable-id' "
+        "-CandidateVersionId 'candidate-id' -Message 'bounded fixture'}catch{"
+        "if($_.Exception.Message -cne 'Cloudflare deployment failed.'){throw};$state='FAILED'};"
+        "if((Get-Location).Path -cne $prior){throw 'WORKING_DIRECTORY_LEAK'};"
+        "if(($script:seen -join '|') -cne 'versions|deploy|stable-id@100|candidate-id@0|--name|aurum-signal-room|--yes|--message|bounded fixture'){throw 'SPECIFICATION_CHANGED'};"
+        "Write-Output $state",
+    )
+    assert result == ("SUCCEEDED" if exit_code == 0 else "FAILED")
 
 
 def test_github_cli_auth_and_invalid_payload_are_not_retryable(tmp_path) -> None:

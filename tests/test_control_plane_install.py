@@ -59,12 +59,25 @@ def test_business_configuration_rejects_foreign_locator_before_filesystem(tmp_pa
     assert calls == []
 
 
-@pytest.mark.parametrize("case", ["valid", "tampered", "missing-digest", "missing-key", "external-url", "production-port", "wrong-root", "oversized", "junction", "production-root", "schema-type", "missing-source"])
-def test_isolated_configuration_owner_matches_python_and_powershell(tmp_path, monkeypatch, case):
+def _new_sealed_fixture_root(request=None) -> Path:
+    from xauusd_forecaster.runtime_paths import isolated_rehearsal_root
+    owned = isolated_rehearsal_root() / ("xauusd-rehearsal-" + uuid.uuid4().hex)
+    owned.mkdir(parents=True)
+    if request is not None:
+        def cleanup():
+            assert owned.parent == isolated_rehearsal_root()
+            assert re.fullmatch(r"xauusd-rehearsal-[0-9a-f]{32}", owned.name)
+            assert not owned.is_symlink() and not owned.is_junction()
+            shutil.rmtree(owned)
+        request.addfinalizer(cleanup)
+    return owned
+
+
+@pytest.mark.parametrize("case", ["valid", "tampered", "missing-digest", "missing-key", "external-url", "production-port", "wrong-root", "oversized", "junction", "production-root", "schema-type", "missing-source", "outside-authority", "utf16", "utf32"])
+def test_isolated_configuration_owner_matches_python_and_powershell(tmp_path, monkeypatch, case, request):
     from xauusd_forecaster.news_scheduler import _runtime_environment_value
-    identity = uuid.uuid4().hex
-    owned = tmp_path / ("xauusd-rehearsal-" + identity)
-    owned.mkdir()
+    owned = _new_sealed_fixture_root(request)
+    identity = owned.name.removeprefix("xauusd-rehearsal-")
     profile = owned / "profile"
     config = {
         "schema_version": 1, "mode": "ISOLATED_REHEARSAL", "fixture_id": identity,
@@ -99,6 +112,8 @@ def test_isolated_configuration_owner_matches_python_and_powershell(tmp_path, mo
             check=True, capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
     path = owned / "fixture-user-environment.json"
     path.write_text(json.dumps(config), encoding="utf-8")
+    if case in ("utf16", "utf32"):
+        path.write_bytes(json.dumps(config).encode("utf-16" if case == "utf16" else "utf-32"))
     monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION", str(path))
     monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION_SHA256", hashlib.sha256(path.read_bytes()).hexdigest())
     monkeypatch.setenv("GEMINI_API_KEY", "process-decoy")
@@ -111,11 +126,20 @@ def test_isolated_configuration_owner_matches_python_and_powershell(tmp_path, mo
         assert ctypes.windll.shell32.SHGetFolderPathW(None, 0x28, None, 0, real_profile) == 0
         forbidden = Path(real_profile.value) / "XAUUSD-Forecaster-runtime" / owned.name / path.name
         monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION", str(forbidden))
+    elif case == "outside-authority":
+        # A plausible UUID/leaf spelling is not a positive read authority.
+        monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION", str(tmp_path / owned.name / path.name))
     if case == "valid":
         assert _runtime_environment_value("GEMINI_API_KEY") == "isolated-sentinel"
     else:
-        with pytest.raises(ValueError, match="ISOLATED_CONFIGURATION_"):
-            _runtime_environment_value("GEMINI_API_KEY")
+        with monkeypatch.context() as reads:
+            if case == "outside-authority":
+                def no_read(*args, **kwargs):
+                    raise AssertionError("untrusted configuration locator was opened")
+                reads.setattr("builtins.open", no_read)
+                reads.setattr(Path, "open", no_read)
+            with pytest.raises(ValueError, match="ISOLATED_CONFIGURATION_"):
+                _runtime_environment_value("GEMINI_API_KEY")
     script = owned / "consume.ps1"
     script.write_text("$ErrorActionPreference='Stop'\n"
         f". '{ROOT / 'scripts/control_center_common.ps1'}'\n"
@@ -137,6 +161,77 @@ def test_isolated_configuration_owner_matches_python_and_powershell(tmp_path, mo
         else:
             assert result.returncode != 0
             assert "ISOLATED_CONFIGURATION_" in result.stderr
+
+
+@pytest.mark.parametrize("case", ["valid", "tampered", "critical-override", "top-level-code", "incomplete"])
+def test_connected_external_adapter_preserves_control_owners(tmp_path, monkeypatch, case, request):
+    owned = _new_sealed_fixture_root(request)
+    identity = owned.name.removeprefix("xauusd-rehearsal-")
+    source = owned / "source"
+    template = source / "tests/fixtures/control_plane_connected_boundary.ps1"
+    template.parent.mkdir(parents=True)
+    payload = (ROOT / "tests/fixtures/control_plane_connected_boundary.ps1").read_text(encoding="utf-8")
+    if case == "critical-override":
+        payload += "\nfunction Test-RuntimeObservation { return $true }\n"
+    elif case == "top-level-code":
+        payload += "\nthrow 'TOP_LEVEL_MUST_NOT_EXECUTE'\n"
+    elif case == "incomplete":
+        payload = "function Invoke-GitHubChecksRead { throw 'INCOMPLETE' }"
+    template.write_text(payload, encoding="utf-8")
+    profile = owned / "profile"
+    config = {
+        "schema_version": 1, "mode": "ISOLATED_REHEARSAL", "fixture_id": identity,
+        "owned_root": str(owned), "profile_root": str(profile),
+        "runtime_root": str(profile / "XAUUSD-Forecaster-runtime"),
+        "repository_root": str(owned / "repository"), "source_root": str(source),
+        "task_namespace": f"\\XAUUSD-Contract-{identity}\\",
+        "loopback_ports": [18321], "provider_endpoint": "http://127.0.0.1:18321",
+        "external_adapter_sha256": hashlib.sha256(template.read_bytes()).hexdigest(),
+        "values": {"TARGET_SOURCE_REVISION": "a" * 40,
+            "GITHUB_CHECK_RUNS_JSON": json.dumps({"check_runs": [{"id": 1, "name": "real-required",
+                "head_sha": "a" * 40, "status": "completed", "conclusion": "success"}]}),
+            "WRANGLER_READ_RESPONSES_JSON": "[]"},
+    }
+    if case == "tampered":
+        template.write_text(payload + "\n# unaccepted bytes\n", encoding="utf-8")
+    path = owned / "fixture-user-environment.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION", str(path))
+    monkeypatch.setenv("XAUUSD_ISOLATED_CONFIGURATION_SHA256", hashlib.sha256(path.read_bytes()).hexdigest())
+    script = owned / "consume.ps1"
+    script.write_text("$ErrorActionPreference='Stop'\n"
+        f". '{ROOT / 'scripts/control_center_common.ps1'}'\n"
+        f". '{ROOT / 'scripts/control_center_provider_adapters.ps1'}'\n"
+        f". '{ROOT / 'scripts/control_center_runtime_supervision.ps1'}'\n"
+        f". '{ROOT / 'scripts/control_center_transaction_engine.ps1'}'\n"
+        "$prior=@{};Get-ChildItem function:|ForEach-Object{$prior[$_.Name]=$_.Definition}\n"
+        "foreach($definition in @(Get-IsolatedExternalAdapterDefinitions)){. ([scriptblock]::Create($definition))}\n"
+        "$allowed=@('Invoke-GitHubChecksRead','Invoke-WranglerJson','Invoke-WranglerDeploymentCommand',"
+        "'Invoke-WebRequest','Invoke-RestMethod','Get-ScheduledTask','Start-ScheduledTask','Stop-ScheduledTask',"
+        "'Enable-ScheduledTask','Disable-ScheduledTask','Register-ScheduledTask','Unregister-ScheduledTask','Start-Process')\n"
+        "foreach($name in $prior.Keys){if($name -notin $allowed -and (Get-Item ('function:'+ $name)).Definition -cne $prior[$name]){throw 'OWNER_CHANGED'}}\n"
+        "$requiredGitHubChecks=@('real-required');$convertFromJsonSupportsDateKind=$false\n"
+        "if((Get-RequiredGitHubChecksResult -Revision ('a'*40)).state -cne 'PASSED'){throw 'RAW_GATE_NOT_EXECUTED'}\n"
+        "if((Get-RequiredGitHubChecksResult -Revision ('b'*40)).state -ceq 'PASSED'){throw 'WRONG_SHA_ACCEPTED'}\n"
+        "$denied=0;try{Invoke-WranglerJson -Arguments @('unknown')}catch{if($_.Exception.Message -eq 'CONNECTED_WRANGLER_REQUEST_UNDECLARED'){$denied++}else{throw}}\n"
+        "try{Invoke-WebRequest -Uri 'http://127.0.0.1:8765'}catch{if($_.Exception.Message -eq 'CONNECTED_NETWORK_TARGET_UNDECLARED'){$denied++}else{throw}}\n"
+        "if($denied -ne 2){throw 'EXTERNAL_FALLBACK'}\n"
+        "$badArguments='\"\\\\server\\share\\outside.vbs\" \"'+(Get-IsolatedRuntimeConfiguration).owned_root+'\\inside\"';"
+        "$processDenied=0;foreach($executable in @('C:\\outside\\wscript.exe',(Join-Path ([Environment]::SystemDirectory) 'wscript.exe'))){"
+        "try{Start-Process -FilePath $executable -ArgumentList $badArguments}catch{"
+        "if($_.Exception.Message -cne 'CONNECTED_PROCESS_START_UNDECLARED'){throw};$processDenied++}};"
+        "if($processDenied -ne 2){throw 'UNTRACKED_PROCESS_START'}\n"
+        "'OWNERS_PRESERVED_UNKNOWN_DENIED'\n", encoding="utf-8")
+    for shell in ("powershell.exe", "pwsh.exe"):
+        result = subprocess.run([shell, "-NoProfile", "-File", str(script)], capture_output=True,
+            text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+        if case == "valid":
+            assert result.returncode == 0, result.stderr
+            assert result.stdout.strip() == "OWNERS_PRESERVED_UNKNOWN_DENIED"
+        else:
+            assert result.returncode != 0
+            assert "ISOLATED_EXTERNAL_ADAPTER_" in result.stderr
+            assert "TOP_LEVEL_MUST_NOT_EXECUTE" not in result.stderr
 
 
 def _canonical_bundle_digest(revision: str, hashes: dict[str, str]) -> str:
@@ -812,7 +907,7 @@ def test_business_entrypoint_configuration_is_inherited_and_fail_closed(tmp_path
     environment["GEMINI_API_KEY"] = "synthetic-process-decoy"
     probe = tmp_path / "probe.py"
     probe.write_text(textwrap.dedent(f'''\
-        import sys, runpy, socket, subprocess
+        import sys, runpy, socket, subprocess, sqlite3
         sys.path.insert(0, {str(source)!r})
         import fixture_business_environment
         from xauusd_forecaster.news_scheduler import _runtime_environment_value
@@ -822,6 +917,8 @@ def test_business_entrypoint_configuration_is_inherited_and_fail_closed(tmp_path
             (lambda: winreg.OpenKey(winreg.HKEY_CURRENT_USER, 'Environment'), 'FIXTURE_PERSISTENT_CONFIGURATION_DENIED'),
             (lambda: socket.create_connection(('127.0.0.1', 8765), timeout=0.1), 'FIXTURE_NETWORK_TARGET_DENIED'),
             (lambda: socket.getaddrinfo('example.invalid', 443), 'FIXTURE_NETWORK_TARGET_DENIED'),
+            (lambda: sqlite3.connect({str(tmp_path.parent / ('outside-' + uuid.uuid4().hex + '.sqlite3'))!r}), 'FIXTURE_DATABASE_TARGET_DENIED'),
+            (lambda: sqlite3.connect({(tmp_path.parent / ('outside-' + uuid.uuid4().hex + '.sqlite3')).as_uri()!r} + '?mode=ro', uri=True), 'FIXTURE_DATABASE_TARGET_DENIED'),
             (lambda: subprocess.Popen([sys.executable, '-c', 'pass']), 'FIXTURE_UNDECLARED_BUSINESS_CHILD')]:
             try: action()
             except RuntimeError as error: assert str(error) == reason
@@ -860,8 +957,7 @@ def run_staged_installer_active_rehearsal(tmp_path, *, sealed_configuration=Fals
     # the same directory to its long name. Compare one physical root identity.
     tmp_path = tmp_path.resolve(strict=True)
     if sealed_configuration:
-        tmp_path = tmp_path / ("xauusd-rehearsal-" + uuid.uuid4().hex)
-        tmp_path.mkdir()
+        tmp_path = _new_sealed_fixture_root()
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         fixture_port = reservation.getsockname()[1]

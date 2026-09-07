@@ -1029,6 +1029,10 @@ $services = @(Resolve-ServiceLaunchContracts -Revision $serviceContractRevision 
 
 
 
+foreach ($externalDefinition in @(Get-IsolatedExternalAdapterDefinitions)) {
+    . ([scriptblock]::Create($externalDefinition))
+}
+
 if ($ExpectedControlScriptPath -or $ExpectedControlRevision) {
     $null = Assert-ControlCenterProcessIdentity `
         -ExpectedScriptPath $ExpectedControlScriptPath `

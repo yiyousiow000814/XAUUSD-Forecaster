@@ -10,6 +10,7 @@ from pathlib import Path
 import sys
 import winreg
 import subprocess
+from urllib.parse import unquote, urlsplit
 
 CONFIGURATION = Path('__CONFIG_PATH__')
 EXPECTED_DIGEST = '__CONFIG_DIGEST__'
@@ -28,7 +29,11 @@ def _configuration():
         raw = stream.read(32769)
     if len(raw) > 32768 or hashlib.sha256(raw).hexdigest() != EXPECTED_DIGEST:
         raise RuntimeError('FIXTURE_CONFIGURATION_IDENTITY_MISMATCH')
-    document = json.loads(raw)
+    try:
+        serialized = raw.decode('utf-8')
+    except UnicodeDecodeError as error:
+        raise RuntimeError('FIXTURE_CONFIGURATION_ENCODING_INVALID') from error
+    document = json.loads(serialized)
     if document.get('schema_version') != 1 or not isinstance(document.get('values'), dict):
         raise RuntimeError('FIXTURE_CONFIGURATION_SCHEMA_INVALID')
     return document
@@ -36,6 +41,12 @@ def _configuration():
 
 DOCUMENT = _configuration()
 sys.dont_write_bytecode = True
+CODE_ROOTS = {SOURCE_ROOT}
+if DOCUMENT.get('runtime_root'):
+    runtime = Path(DOCUMENT['runtime_root']).resolve()
+    if not runtime.is_relative_to(FIXTURE_ROOT):
+        raise RuntimeError('FIXTURE_RUNTIME_ROOT_UNDECLARED')
+    CODE_ROOTS.add(runtime)
 
 
 def environment_value(name):
@@ -60,6 +71,18 @@ _git_commands = {subprocess.list2cmdline([GIT_EXECUTABLE, *args]) for args in (
 
 
 def _guard(event, arguments):
+    if event == 'sqlite3.connect':
+        database = os.fsdecode(arguments[0])
+        if database != ':memory:':
+            if database.startswith('file:'):
+                uri = urlsplit(database)
+                if uri.netloc:
+                    raise RuntimeError('FIXTURE_DATABASE_TARGET_DENIED')
+                database = unquote(uri.path)
+                if len(database) > 3 and database[0] == '/' and database[2] == ':':
+                    database = database[1:]
+            if not Path(database).resolve().is_relative_to(FIXTURE_ROOT):
+                raise RuntimeError('FIXTURE_DATABASE_TARGET_DENIED')
     # System timezone discovery (dateutil/pandas) is read-only machine metadata,
     # not a credential source. Deny opening the interactive user's hive and all
     # registry mutation; generated credential owner never falls back here.
@@ -82,7 +105,7 @@ def _guard(event, arguments):
         # full lifecycle must declare its actual child boundary before launch.
         executable, command, cwd, _ = arguments
         if (executable not in (None, GIT_EXECUTABLE) or command not in _git_commands or
-                cwd is None or Path(cwd).resolve() != SOURCE_ROOT):
+                cwd is None or Path(cwd).resolve() not in CODE_ROOTS):
             raise RuntimeError('FIXTURE_UNDECLARED_BUSINESS_CHILD')
     if event == 'open' and isinstance(arguments[0], (str, bytes, os.PathLike)):
         target = Path(os.fsdecode(arguments[0])).resolve()
@@ -97,3 +120,30 @@ def _guard(event, arguments):
 
 
 sys.addaudithook(_guard)
+
+# Route the real legacy API's bare Git command to the already verified exact
+# executable. The audit hook still checks the complete bounded arguments/cwd.
+_run = subprocess.run
+def _run_with_exact_git(args, *positional, **keywords):
+    if isinstance(args, (tuple, list)) and args and args[0] == 'git':
+        args = [GIT_EXECUTABLE, *args[1:]]
+    return _run(args, *positional, **keywords)
+subprocess.run = _run_with_exact_git
+
+# Explicit old-code external configuration adaptation only. The original source
+# and its Git identity stay intact; this separately hashed adapter is part of
+# the declared execution environment, not an unmodified production execution.
+if DOCUMENT.get('legacy_configuration_revision'):
+    # Bind the adapter to the executable entrypoint, not mutable runtime-root
+    # placement: target code intentionally runs outside the old code checkout.
+    entrypoint = Path(sys.argv[0]).resolve()
+    code_root = entrypoint.parent.parent
+    if code_root not in CODE_ROOTS or entrypoint.parent != code_root / 'scripts':
+        raise RuntimeError('FIXTURE_LEGACY_ENTRYPOINT_UNDECLARED')
+    observed = subprocess.run([GIT_EXECUTABLE, 'rev-parse', 'HEAD'], cwd=code_root,
+        check=True, capture_output=True, text=True, timeout=5,
+        creationflags=subprocess.CREATE_NO_WINDOW).stdout.strip()
+    if observed == DOCUMENT['legacy_configuration_revision']:
+        sys.path.insert(0, str(code_root))
+        from xauusd_forecaster import news_scheduler
+        news_scheduler._runtime_environment_value = environment_value

@@ -43,6 +43,10 @@ function Get-IsolatedRuntimeConfiguration {
     }
     $claimedRoot = Split-Path -Parent $path
     $realProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    $rehearsalAuthority = Join-Path $realProfile 'AppData\Local\Temp\XAUUSD-Forecaster-Rehearsals'
+    if (-not $path.StartsWith($rehearsalAuthority + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'ISOLATED_CONFIGURATION_ROOT_INVALID'
+    }
     foreach ($name in @('XAUUSD-Forecaster', 'XAUUSD-Forecaster-runtime', 'XAUUSD-Forecaster.local', '.codex\worktrees')) {
         $denied = Join-Path $realProfile $name
         if ($claimedRoot -ieq $denied -or $claimedRoot.StartsWith($denied + '\', [StringComparison]::OrdinalIgnoreCase)) {
@@ -65,7 +69,9 @@ function Get-IsolatedRuntimeConfiguration {
     try { $digest = ([BitConverter]::ToString($hasher.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
     finally { $hasher.Dispose() }
     if ($digest -cne $expected) { throw 'ISOLATED_CONFIGURATION_IDENTITY_MISMATCH' }
-    $config = [Text.UTF8Encoding]::new($false, $true).GetString($bytes) | ConvertFrom-Json
+    try { $serialized = [Text.UTF8Encoding]::new($false, $true).GetString($bytes) }
+    catch { throw 'ISOLATED_CONFIGURATION_ENCODING_INVALID' }
+    $config = $serialized | ConvertFrom-Json
     if (($config.schema_version -isnot [int] -and $config.schema_version -isnot [long]) -or
         $config.schema_version -ne 1 -or $config.mode -cne 'ISOLATED_REHEARSAL' -or
         $config.fixture_id -cnotmatch '^[0-9a-f]{32}$' -or -not $config.values -or
@@ -104,6 +110,54 @@ function Get-IsolatedRuntimeConfiguration {
             $uri.Port -notin $ports -or $uri.UserInfo) { throw 'ISOLATED_CONFIGURATION_ENDPOINT_INVALID' }
     }
     return $config
+}
+
+function Get-IsolatedExternalAdapterDefinitions {
+    $config = Get-IsolatedRuntimeConfiguration
+    if (-not $config -or -not $config.PSObject.Properties['external_adapter_sha256']) { return }
+    if ([string]$config.external_adapter_sha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'ISOLATED_EXTERNAL_ADAPTER_IDENTITY_INVALID'
+    }
+    # Reviewed repository fixture code, not an arbitrary operator script path.
+    # This config boundary is not an OS sandbox against malicious same-user code.
+    $path = Join-Path ([string]$config.source_root) 'tests\fixtures\control_plane_connected_boundary.ps1'
+    Assert-IsolatedConfigurationPath -Path $path
+    $stream = [IO.File]::OpenRead($path)
+    try {
+        $buffer = [byte[]]::new(32769); $count = 0
+        while ($count -lt $buffer.Length) {
+            $read = $stream.Read($buffer, $count, $buffer.Length - $count)
+            if ($read -eq 0) { break }; $count += $read
+        }
+    } finally { $stream.Dispose() }
+    if ($count -eq 0 -or $count -gt 32768) { throw 'ISOLATED_EXTERNAL_ADAPTER_SIZE_INVALID' }
+    $bytes = [byte[]]$buffer[0..($count - 1)]
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try { $digest = ([BitConverter]::ToString($hasher.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $hasher.Dispose() }
+    if ($digest -cne [string]$config.external_adapter_sha256) { throw 'ISOLATED_EXTERNAL_ADAPTER_IDENTITY_MISMATCH' }
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput(
+        [Text.UTF8Encoding]::new($false, $true).GetString($bytes), [ref]$tokens, [ref]$errors
+    )
+    $allowed = @('Invoke-GitHubChecksRead', 'Invoke-WranglerJson', 'Invoke-WranglerDeploymentCommand',
+        'Invoke-WebRequest', 'Invoke-RestMethod', 'Get-ScheduledTask', 'Start-ScheduledTask',
+        'Stop-ScheduledTask', 'Enable-ScheduledTask', 'Disable-ScheduledTask',
+        'Register-ScheduledTask', 'Unregister-ScheduledTask', 'Start-Process')
+    if ($errors.Count -or $ast.BeginBlock -or $ast.ProcessBlock -or $ast.ParamBlock) {
+        throw 'ISOLATED_EXTERNAL_ADAPTER_DEFINITIONS_INVALID'
+    }
+    $seen = @()
+    foreach ($statement in $ast.EndBlock.Statements) {
+        if ($statement -isnot [Management.Automation.Language.FunctionDefinitionAst] -or
+            $statement.Name -cnotin $allowed -or $statement.Name -cin $seen) {
+            throw 'ISOLATED_EXTERNAL_ADAPTER_DEFINITIONS_INVALID'
+        }
+        $seen += $statement.Name
+    }
+    # Reject an incomplete boundary rather than allowing an unmatched live call.
+    if ($seen.Count -ne $allowed.Count) { throw 'ISOLATED_EXTERNAL_ADAPTER_INCOMPLETE' }
+    foreach ($statement in $ast.EndBlock.Statements) { Write-Output $statement.Extent.Text }
 }
 
 function Get-UserEnvironmentValue {

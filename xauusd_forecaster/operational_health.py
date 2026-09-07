@@ -270,7 +270,20 @@ def scheduler_health_snapshot(
         max_claim_is_claimable = bool(summary["max_claim_is_claimable"])
         oldest_age = int(summary["oldest_age_seconds"] or 0)
         retry_candidate = connection.execute(
-            """SELECT j.job_id,j.state,j.available_at,
+            """WITH active_jobs AS MATERIALIZED (
+                 SELECT j.job_id,j.state,j.available_at,j.attempt_count,j.created_at,
+                        COALESCE((SELECT max(reset.attempt_number)
+                          FROM news_ai_job_attempts_v1 reset
+                         WHERE reset.job_id=j.job_id
+                           AND reset.outcome IN ('OK','NOT_CURRENT')),0) AS reset_at
+                   FROM news_ai_jobs_v1 j
+                  WHERE j.task_type=?
+                    AND j.state IN ('QUEUED','LEASED','BACKING_OFF')
+                    AND j.lane_classified=1 AND j.work_lane='LIVE'
+                    AND (j.task_type='ACTIVE_ANNOTATION' OR
+                         (j.provenance_resolved=1 AND j.provenance_version=?))
+               )
+               SELECT j.job_id,j.state,j.available_at,
                       j.attempt_count AS lifetime_claim_count,
                       COALESCE(sum(CASE
                         WHEN a.outcome='ERROR'
@@ -280,12 +293,6 @@ def scheduler_health_snapshot(
                          AND COALESCE(a.failure_code,'') NOT LIKE 'NEWS_EMBEDDING_%'
                          AND COALESCE(a.failure_code,'') NOT LIKE
                              'SCHEDULER_MAINTENANCE_%'
-                         AND a.attempt_number>COALESCE((
-                           SELECT max(a2.attempt_number)
-                           FROM news_ai_job_attempts_v1 a2
-                           WHERE a2.job_id=j.job_id
-                             AND a2.outcome IN ('OK','NOT_CURRENT')
-                          ),0)
                         THEN 1 ELSE 0 END),0) AS effective_failure_streak
                       ,(SELECT latest.failure_code
                           FROM news_ai_job_attempts_v1 latest
@@ -300,22 +307,13 @@ def scheduler_health_snapshot(
                                'NEWS_EMBEDDING_%'
                            AND COALESCE(latest.failure_code,'') NOT LIKE
                                'SCHEDULER_MAINTENANCE_%'
-                           AND latest.attempt_number>COALESCE((
-                             SELECT max(a3.attempt_number)
-                             FROM news_ai_job_attempts_v1 a3
-                             WHERE a3.job_id=j.job_id
-                               AND a3.outcome IN ('OK','NOT_CURRENT')
-                           ),0)
+                           AND latest.attempt_number>j.reset_at
                          ORDER BY latest.attempt_number DESC,
                                   latest.attempted_at DESC LIMIT 1
                        ) AS latest_failure_code
-               FROM news_ai_jobs_v1 j
-               LEFT JOIN news_ai_job_attempts_v1 a ON a.job_id=j.job_id
-               WHERE j.task_type=?
-                 AND j.state IN ('QUEUED','LEASED','BACKING_OFF')
-                 AND j.lane_classified=1 AND j.work_lane='LIVE'
-                 AND (j.task_type='ACTIVE_ANNOTATION' OR
-                      (j.provenance_resolved=1 AND j.provenance_version=?))
+               FROM active_jobs j
+               LEFT JOIN news_ai_job_attempts_v1 a
+                 ON a.job_id=j.job_id AND a.attempt_number>j.reset_at
                GROUP BY j.job_id
                ORDER BY effective_failure_streak DESC,j.attempt_count DESC,
                         j.created_at,j.job_id LIMIT 1""",
