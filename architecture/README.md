@@ -20,6 +20,17 @@ Mermaid views are generated from the selection, source and tool bytes. Symbols
 use path plus qualified name, independent of line movement; spans retain exact
 locations. `syntactic_owner` names the source file, not process/data authority.
 
+The optional `source_symbols` selection maps a selected file to exact parser
+symbol IDs. The compiler still parses and hashes that entire file; it retains
+the complete selected definitions, their lexical descendants and file import
+syntax. Unlisted files keep their entire existing symbol inventory. Missing or
+duplicate selectors, ambiguous parsed IDs and roots excluded by the scope fail
+closed. This is explicit source selection, not inferred call closure: calls into
+unindexed definitions remain UNKNOWN frontier edges without a candidate symbol.
+No function body is located using regular expressions or line-range declarations.
+Changing an unselected part still changes the whole-file input digest; parse
+errors there cannot be hidden by the selection.
+
 TS/TSX uses the pinned TypeScript compiler API (`createSourceFile` and AST
 visitation), not regex call extraction. Functions, classes, methods, interfaces,
 types, named object declarations and assigned callbacks retain qualified names
@@ -76,11 +87,11 @@ source, not the old classification branch. It selects three independent resource
 families meeting at the Audit UI, **not** News CURRENT flowing into one Audit
 snapshot:
 
-| Resource | Python producer / Sync | Worker consumer | Audit UI consumer |
+| Resource | Local API / projection / Sync | Worker consumer | Audit UI consumer |
 | --- | --- | --- | --- |
-| News article generation | `news_projection.py::build_news_projection_generation`; `_sync_news` | News index/content route handlers and `news-projection-store.ts` | `AuditView.refreshNews`, content requests, `authoritativeNewsTotals` |
-| Event / visibility evidence | `_sync_news_evidence` | News evidence route and `news-evidence-store.ts` | `AuditView.refreshEvidence` |
-| Audit summary / detail | `_sync_audit` and its bounded projection helpers | `api-router.ts` snapshot fast path | `AuditView.refreshAudit` / `refreshAuditDetail` |
+| News article generation | API `_build_news_projection_source`, frozen `/api/news-archive` manifest/batch handler; `news_projection.py::build_news_projection_generation`; `_sync_news` | News index/content route handlers and `news-projection-store.ts` | `AuditView.refreshNews`, content requests, `authoritativeNewsTotals` |
+| Event / visibility evidence | API `_build_news_evidence_resource`, `_materialize_news_evidence_generation`, `/api/news-evidence` page handler; `_sync_news_evidence` | News evidence route and `news-evidence-store.ts` | `AuditView.refreshEvidence` |
+| Audit summary / detail | API `main` registers `_optional_resource_payload` with `DashboardReadModelOwner`; GET reads the derived resource; `_sync_audit` | `api-router.ts` snapshot fast path | `AuditView.refreshAudit` / `refreshAuditDetail` |
 
 News generation uses its own generation, snapshot and receipt identities;
 evidence has a separate paged snapshot/cursor; Audit summary/details have separate
@@ -89,11 +100,23 @@ the dynamic `import.meta.glob` dispatch, as does Preview routing; those runtime
 bindings remain UNKNOWN. The current-source test checks their distinct declared
 interfaces and call sites, not HTTP delivery, D1 state or a successful generation.
 
-The local API's source-materialization endpoint, transitive UI imports and actual
-deployed environment are outside this selected view. Real production lineage,
-runtime traces and complete repository coverage remain UNRESOLVED. Declared
-transport relationships are explained here; generated graph arrows remain
-source-observed call syntax rather than invented cross-process execution edges.
+The local API scope retains twelve complete resource/launch definitions, not the
+entire module. `Handler.do_GET` calls the frozen article source and batch helpers;
+the older direct archive-page helper is not its production entry point. Article
+generation uses `threading.Thread(target=_finish_news_projection_source_build)`;
+the target is selected independently, not promoted into a direct-call edge.
+Evidence uses a callback passed to `news_evidence_cache.get`, not the generic
+Audit/Learning/Market read-model owner. Its freeze, publication and page helpers
+remain separate from article CURRENT. The generic owner registration is visible
+at API `main`; its internals and the broad `_dashboard_payload` builder are not
+indexed here. Raw article SQL/presentation internals, transitive imports, HTTP
+delivery and actual deployed environment also remain outside this slice.
+
+Real production lineage, runtime traces and complete repository coverage remain
+UNRESOLVED. Declared transport relationships are explained here; generated graph
+arrows remain source-observed call syntax rather than invented cross-process
+execution edges. Source tests protect the actual selected entrypoints, materializer
+calls, frontier and exact spans without importing the API or accessing SQLite.
 
 ## Retained execution evidence
 
@@ -118,8 +141,9 @@ specific tested boundary, not complete production recovery or a release gate.
 `/admin/architecture` reuses the existing #304/#328 Explorer, camera and mobile
 panel controller. Its build projection uses this same index, not a second graph
 declaration. Overview cards identify selected slices; they do not imply a flow.
-Each slice displays selected roots plus one same-file candidate call hop. Full
-selected-file symbols remain available through the lazy Code Structure panel.
+Each slice displays selected roots plus one same-file candidate call hop. All
+indexed symbols remain available through the lazy Code Structure panel; explicitly
+scoped files are not presented as whole-file coverage.
 Runtime state, operational criticality and semantic ownership remain UNKNOWN.
 No production trace or old mutation PASS is bundled implicitly.
 
@@ -145,6 +169,9 @@ This increment advances #321's language/compiler intent and exposes another
 current-source selection through the already-merged #304/#328 Explorer. #324's
 runtime/test-evidence integration and the complete original intents remain partial;
 neither this view nor a successful parser run authorizes closing those PRs.
+The local API increment closes the missing entrypoint/materializer selection for
+these News resources and exposes the Audit owner registration. It does not close
+full repository classification, transitive ownership or runtime evidence work.
 
 Graph publication runs after layout, outside React Flow's synchronous node
 measurement cycle. Camera fitting still waits for initialized nodes and stable
