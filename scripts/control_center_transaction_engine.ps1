@@ -229,8 +229,38 @@ function Invoke-AutomaticCandidateValidation {
         }
         $state.candidate.validation_state = "TESTING"
         Write-ReleaseControlState -State $state
+        $preflightAttemptStarted = [DateTimeOffset]::UtcNow
         if (-not $windowsAlreadyPassed -and
             -not (Invoke-ProductionShapePreflight -Revision ([string]$Candidate.windows_revision))) {
+            $failure = Get-RuntimeUpdateState
+            $failedAt = [DateTimeOffset]::MinValue
+            if ($failure -and
+                [DateTimeOffset]::TryParse([string]$failure.failed_at, [ref]$failedAt) -and
+                $failedAt -ge $preflightAttemptStarted -and
+                $failedAt -le [DateTimeOffset]::UtcNow -and
+                [string]$failure.failed_revision -ceq [string]$Candidate.windows_revision -and
+                [string]$failure.failure_phase -ceq "COPY_DATABASE" -and
+                [string]$failure.failure_code -ceq "COPY_DATABASE_FAILED" -and
+                [string]$failure.preflight_diagnostics.failure_detail -ceq "NATIVE_PROCESS_TIMEOUT") {
+                $state.candidate.validation_state = "REVIEW_REQUIRED"
+                $state.candidate.validation = [pscustomobject]@{
+                    key = [string]$Candidate.validation_key
+                    repository = "PENDING"; windows = "FAILED"
+                    reason = "WINDOWS_PREFLIGHT_COPY_RETRY_REQUIRED"
+                    copy_failure = [pscustomobject]@{
+                        revision = [string]$failure.failed_revision
+                        failed_at = [string]$failure.failed_at
+                        phase = [string]$failure.failure_phase
+                        code = [string]$failure.failure_code
+                        detail = [string]$failure.preflight_diagnostics.failure_detail
+                    }
+                    tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+                }
+                Write-ReleaseControlState -State $state
+                Write-ReleaseHistory -Event "CANDIDATE_COPY_RETRY_REVIEW_REQUIRED" `
+                    -Release $state.candidate -Detail @{ copy_failure = $state.candidate.validation.copy_failure }
+                return $false
+            }
             throw "Isolated Windows preflight failed."
         }
         $script:lastGitHubChecksResult = $null
@@ -932,6 +962,36 @@ function Retry-CandidateValidation {
     $reason = if ($candidate.validation) {
         [string]$candidate.validation.reason
     } else { "" }
+    if ($reason -ceq "WINDOWS_PREFLIGHT_COPY_RETRY_REQUIRED") {
+        $prior = $candidate.validation
+        $failure = $prior.copy_failure
+        $failedAt = [DateTimeOffset]::MinValue
+        if ($state.transaction -or
+            [string]$candidate.validation_state -cne "REVIEW_REQUIRED" -or
+            [string]$prior.key -cne [string]$candidate.validation_key -or
+            [string]$prior.repository -cne "PENDING" -or [string]$prior.windows -cne "FAILED" -or
+            -not $failure -or
+            [string]$failure.revision -cne [string]$candidate.windows_revision -or
+            [string]$failure.phase -cne "COPY_DATABASE" -or
+            [string]$failure.code -cne "COPY_DATABASE_FAILED" -or
+            [string]$failure.detail -cne "NATIVE_PROCESS_TIMEOUT" -or
+            -not [DateTimeOffset]::TryParse([string]$failure.failed_at, [ref]$failedAt)) {
+            throw "Only an exact recorded copy timeout outside a transaction can retry Windows preflight."
+        }
+        Write-ReleaseHistory -Event "CANDIDATE_COPY_RETRY_REQUESTED" `
+            -Release $candidate -Detail @{ copy_failure = $failure }
+        $candidate.validation_state = "NEW"
+        $candidate.validation = [pscustomobject]@{
+            key = [string]$candidate.validation_key
+            repository = "PENDING"; windows = "PENDING"
+            reason = "COPY_RETRY_REQUESTED"
+            prior_copy_failure = $failure
+            tested_at = [DateTimeOffset]::UtcNow.ToString("o")
+        }
+        $state.updated_at = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-ReleaseControlState -State $state
+        return Invoke-AutomaticCandidateValidation -Candidate $candidate
+    }
     $retryableReasons = @(
         "WORKER_CPU_HEADROOM_REVIEW_REQUIRED",
         "SEMANTIC_DATA_PARITY_REVIEW_REQUIRED"

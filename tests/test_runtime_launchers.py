@@ -9390,6 +9390,100 @@ def test_explicit_review_retry_rejects_non_retryable_reason(tmp_path) -> None:
     assert result == "Only an exact retryable Candidate review can restart validation."
 
 
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+@pytest.mark.parametrize("case", ["copy_timeout", "stale", "future", "wrong_revision", "migration", "other"])
+def test_candidate_copy_timeout_review_requires_current_exact_failure(
+    tmp_path, powershell, case,
+) -> None:
+    result = json.loads(_run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + f"$script:copyCase='{case}';"
+        "function Test-ProductionCandidateProvenance{return $true};"
+        "function Invoke-ProductionShapePreflight{param($Revision);"
+        "$phase=if($script:copyCase -eq 'migration'){'MIGRATE_DATABASE'}else{'COPY_DATABASE'};"
+        "$detail=if($script:copyCase -eq 'other'){'copy invalid'}else{'NATIVE_PROCESS_TIMEOUT'};"
+        "Write-RuntimeUpdateFailure -Revision $Revision -Status PREFLIGHT_FAILED "
+        "-Message 'copy failed' -ErrorCode ($phase+'_FAILED') -Phase $phase "
+        "-Diagnostics @{failure_detail=$detail};"
+        "if($script:copyCase -eq 'stale'){Write-RuntimeUpdateState @{failed_at='2000-01-01T00:00:00Z'}};"
+        "if($script:copyCase -eq 'future'){Write-RuntimeUpdateState @{failed_at='2099-01-01T00:00:00Z'}};"
+        "if($script:copyCase -eq 'wrong_revision'){Write-RuntimeUpdateState @{failed_revision=('c'*40)}};"
+        "return $false};"
+        "$ok=Invoke-AutomaticCandidateValidation -Candidate (Get-ReleaseControlState).candidate;"
+        "$state=Get-ReleaseControlState;"
+        "[pscustomobject]@{ok=$ok;state=$state.candidate.validation_state;"
+        "repository=$state.candidate.validation.repository;"
+        "reason=$state.candidate.validation.reason;windows=$state.candidate.validation.windows;"
+        "stable=$state.stable.git_sha;key=$state.candidate.validation.key} | ConvertTo-Json -Compress",
+        powershell=powershell,
+    ))
+    assert result["ok"] is False
+    assert result["stable"] == "a" * 40
+    assert result["key"] == "22222222-2222-4222-8222-222222222222:" + "b" * 40
+    assert result["state"] == ("REVIEW_REQUIRED" if case == "copy_timeout" else "FAILED")
+    if case == "copy_timeout":
+        assert result["reason"] == "WINDOWS_PREFLIGHT_COPY_RETRY_REQUIRED"
+        assert result["windows"] == "FAILED"
+        assert result["repository"] == "PENDING"
+
+
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+@pytest.mark.parametrize("mutation", ["none", "timeout_again", "transaction", "key", "failure"])
+def test_candidate_copy_retry_dispatcher_preserves_identity_and_failure(
+    tmp_path, powershell, mutation,
+) -> None:
+    result = json.loads(_run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + f"$script:copyCalls=0;$script:retryMutation='{mutation}';"
+        "function Test-ProductionCandidateProvenance{return $true};"
+        "function Invoke-ProductionShapePreflight{param($Revision);$script:copyCalls++;"
+        "if($script:copyCalls -gt 1 -and $script:retryMutation -ne 'timeout_again'){return $true};"
+        "Write-RuntimeUpdateFailure -Revision $Revision -Status PREFLIGHT_FAILED "
+        "-Message 'copy timed out' -ErrorCode COPY_DATABASE_FAILED -Phase COPY_DATABASE "
+        "-Diagnostics @{failure_detail='NATIVE_PROCESS_TIMEOUT'};return $false};"
+        "function Test-RequiredGitHubChecks{return 'CHECKS_BLOCKED'};"
+        "$null=Invoke-AutomaticCandidateValidation -Candidate (Get-ReleaseControlState).candidate;"
+        "function Reconcile-ReleaseControlState{return Get-ReleaseControlState};"
+        "function Find-NewCandidateRelease{return (Get-ReleaseControlState).candidate};"
+        "$null=Invoke-CandidateDiscovery;$discoveryCalls=$script:copyCalls;"
+        "$state=Get-ReleaseControlState;$prior=$state.candidate.validation.copy_failure;"
+        f"$mutation='{mutation}';"
+        "if($mutation -eq 'transaction'){$state.transaction=[pscustomobject]@{id='active';phase='OBSERVE';"
+        "type='PROMOTE';target=$state.candidate;previous=$state.stable}};"
+        "if($mutation -eq 'key'){$state.candidate.validation.key='wrong'};"
+        "if($mutation -eq 'failure'){$state.candidate.validation.copy_failure=$null};"
+        "Write-ReleaseControlState $state;$diagnostic='';"
+        "try{$null=Invoke-ControlCenterOperationAction -Operation RetryCandidateValidation}"
+        "catch{$diagnostic=$_.Exception.Message};"
+        "$state=Get-ReleaseControlState;"
+        "$history=@(Get-Content -LiteralPath $releaseHistoryPath | ForEach-Object {$_|ConvertFrom-Json});"
+        "$retry=@($history|Where-Object event -eq 'CANDIDATE_COPY_RETRY_REQUESTED');"
+        "[pscustomobject]@{calls=$script:copyCalls;discovery_calls=$discoveryCalls;state=$state.candidate.validation_state;"
+        "windows=$state.candidate.validation.windows;key=$state.candidate.validation_key;"
+        "stable=$state.stable.git_sha;error=$diagnostic;retries=$retry.Count;"
+        "prior_retained=($retry.Count -eq 1 -and $retry[0].detail.copy_failure.failed_at -eq $prior.failed_at)}"
+        "| ConvertTo-Json -Compress",
+        powershell=powershell,
+    ))
+    assert result["key"] == "22222222-2222-4222-8222-222222222222:" + "b" * 40
+    assert result["stable"] == "a" * 40
+    assert result["discovery_calls"] == 1
+    if mutation in {"none", "timeout_again"}:
+        assert result["calls"] == 2
+        assert result["state"] == ("CHECKS_BLOCKED" if mutation == "none" else "REVIEW_REQUIRED")
+        assert result["windows"] == ("PASSED" if mutation == "none" else "FAILED")
+        assert result["error"] == ""
+        assert result["retries"] == 1
+        assert result["prior_retained"] is True
+    else:
+        assert result["calls"] == 1
+        assert result["state"] == "REVIEW_REQUIRED"
+        assert "exact recorded copy timeout" in result["error"]
+        assert result["retries"] == 0
+
+
 @pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
 def test_access_approval_is_exact_idempotent_and_preserves_passed_evidence(
     tmp_path, powershell: str,

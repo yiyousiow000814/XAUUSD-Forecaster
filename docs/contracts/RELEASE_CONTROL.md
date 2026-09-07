@@ -402,6 +402,19 @@ ID and Git SHA. Authentication, authorization, malformed identity, invalid ref,
 missing commit, and main-reachability failures remain deterministic and never
 become retryable merely because a transport retry path exists.
 
+A fresh isolated Windows `COPY_DATABASE` failure caused specifically by
+`NATIVE_PROCESS_TIMEOUT` is operator-reviewable for the same exact Candidate,
+with reason `WINDOWS_PREFLIGHT_COPY_RETRY_REQUIRED`. It is not proof of a
+deterministic source defect. The current preflight attempt must bind the
+failure time and Windows revision; older untyped failures are not reclassified.
+Automatic discovery does not retry it. The existing locked
+`RetryCandidateValidation` action may retry outside a release transaction,
+preserving the original failure in release history and rerunning provenance
+and the entire Windows preflight. Failed Windows work never supplies a passed
+qualification. Repeated timeouts return to review, without changing the native
+deadline or any later CI, Worker, Access, compatibility or promotion gate.
+Other preflight failures retain their existing classification.
+
 Required CI is repository trust evidence, not deployed Stable runtime debt.
 Progressive delivery never converts a red latest exact-SHA check into Class C.
 If a repository test represents a known production defect, its fixture must

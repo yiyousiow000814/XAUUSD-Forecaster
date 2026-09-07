@@ -190,3 +190,44 @@ cleanup closes it, and parent death also closes it. A fixed sleep lifetime is
 not a business-preservation contract: the former 60-second stand-in could exit
 on its own during a valid hosted handoff. Both real-process scenarios retain
 their living-owner assertions and explicit bounded cleanup.
+
+## Copy-timeout retry boundary
+
+The connected rehearsal exposed a local copy timeout followed by a cached
+Candidate failure. An unchanged copy-only diagnostic completed in14.467s;
+the actual PowerShell copy with API/Sync/annotator running completed in27.834s
+under the unchanged30s native limit. Neither qualifies production. A timeout
+does not prove that the immutable Candidate can never complete a later copy.
+
+The correction uses the existing REVIEW_REQUIRED state and explicit
+RetryCandidateValidation action for a freshly recorded COPY_DATABASE failure
+whose detail is exactly NATIVE_PROCESS_TIMEOUT. Automatic discovery does not
+retry review states. All other preflight failures keep their existing semantics.
+No deadline, accepted gate, SQLite content, mutation privilege or service owner
+changes. This is an explicit retry of failed Windows work, not its acceptance.
+
+Actors are the serialized Control Center action, preflight native child, current
+runtime readers/writers, candidate discovery, and existing cleanup owner. Only
+the current preflight attempt may classify its own failure; stale runtime
+diagnostics cannot create retry authority. The Candidate validation key and
+Windows revision bind the retained failure. Retry appends its prior failure to
+release history and reruns provenance and the complete Windows preflight;
+Windows success is never inherited from the failed attempt. No provider or
+human acceptance is synthesized. Active transactions exclude retry.
+
+Transitions: testing -> review after a current copy timeout; explicit locked
+retry -> testing; repeated timeout -> review; complete qualification -> the
+existing later gates. A crash leaves the existing non-promotable state and
+owned-child cleanup/reconciliation contract. Review survives process/machine
+restart and has no automatic expiry or background retry. The current Stable
+runtime is retained throughout; Reverse Stable and production switch authority
+remain unchanged. Old controllers remain fail closed on the new review reason;
+new controllers do not reinterpret old untyped FAILED records.
+
+Before integration, extend the existing PowerShell preflight/retry contracts:
+fresh copy timeout, stale diagnostic rejection, migration/other failures,
+same-identity rejection then recovery, active transaction exclusion, preserved
+failure history, and unchanged CPU/semantic retries. Exercise PS5.1 and PS7
+through the actual operation dispatcher. Rehearse the exact installed owner
+with the retained input and actual native copy. Existing independent review
+requirements remain; author testing is not independent approval.
