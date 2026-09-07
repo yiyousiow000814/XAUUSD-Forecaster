@@ -12,6 +12,33 @@ function Invoke-GitHubChecksRead {
 function Invoke-WranglerJson {
     param([string[]]$Arguments)
     $config = Get-IsolatedRuntimeConfiguration
+    if ($config.values.WORKER_PLACEMENT_FILE -and
+        ($Arguments | ConvertTo-Json -Compress) -ceq '["deployments","status","--name","aurum-signal-room"]') {
+        $path = Join-Path ([string]$config.owned_root) 'worker-placement.json'
+        if ([string]$config.values.WORKER_PLACEMENT_FILE -cne $path) { throw 'CONNECTED_PLACEMENT_AUTHORITY_INVALID' }
+        Assert-IsolatedConfigurationPath -Path $path
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -gt 8192) {
+            throw 'CONNECTED_PLACEMENT_UNAVAILABLE'
+        }
+        $placement = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-ReleaseControlJson
+        $ids = @([string]$config.values.STABLE_WORKER_VERSION, [string]$config.values.TARGET_WORKER_VERSION)
+        $owners = @($placement.versions)
+        if ($ids[0] -ceq $ids[1] -or $owners.Count -notin @(1,2) -or
+            @($owners | Where-Object { [string]$_.version_id -cnotin $ids -or $_.percentage -notin @(0,100) }).Count -or
+            @($owners | Where-Object { $_.percentage -eq 100 }).Count -ne 1 -or
+            @($owners.version_id | Select-Object -Unique).Count -ne $owners.Count) {
+            throw 'CONNECTED_PLACEMENT_IDENTITY_INVALID'
+        }
+        return $placement
+    }
+    if ($Arguments.Count -eq 6 -and
+        ($Arguments[0..4] | ConvertTo-Json -Compress) -ceq '["d1","execute","DB","--remote","--command"]' -and
+        $config.values.D1_READ_COMMANDS_JSON -and $config.values.WORKER_LOOPBACK_BASE_URL) {
+        $queries = [string]$config.values.D1_READ_COMMANDS_JSON | ConvertFrom-ReleaseControlJson
+        $query = @($queries | Where-Object { [string]$_.sql -ceq $Arguments[5] -and $_.key -cin @('ledger','capabilities') })
+        if ($query.Count -ne 1) { throw 'CONNECTED_D1_QUERY_UNDECLARED' }
+        return Invoke-RestMethod -Uri (([string]$config.values.WORKER_LOOPBACK_BASE_URL) + '/fixture/d1/' + $query[0].key)
+    }
     $requests = [string]$config.values.WRANGLER_READ_RESPONSES_JSON | ConvertFrom-ReleaseControlJson
     $key = $Arguments | ConvertTo-Json -Compress
     $matched = @($requests | Where-Object { ($_.arguments | ConvertTo-Json -Compress) -ceq $key })
@@ -20,12 +47,68 @@ function Invoke-WranglerJson {
 }
 function Invoke-WranglerDeploymentCommand {
     param([string[]]$Arguments)
-    throw 'CONNECTED_DEPLOYMENT_REQUEST_UNDECLARED'
+    $config = Get-IsolatedRuntimeConfiguration
+    if (-not $config.values.WORKER_PLACEMENT_FILE -or $Arguments.Count -notin @(8,9) -or
+        $Arguments[0] -cne 'versions' -or $Arguments[1] -cne 'deploy' -or
+        ($Arguments[($Arguments.Count-5)..($Arguments.Count-2)] | ConvertTo-Json -Compress) -cne
+            '["--name","aurum-signal-room","--yes","--message"]') { throw 'CONNECTED_DEPLOYMENT_REQUEST_UNDECLARED' }
+    $stable = [string]$config.values.STABLE_WORKER_VERSION
+    $candidate = [string]$config.values.TARGET_WORKER_VERSION
+    if ($stable -cnotmatch '^[0-9a-f-]{36}$' -or $candidate -cnotmatch '^[0-9a-f-]{36}$' -or $stable -ceq $candidate) {
+        throw 'CONNECTED_DEPLOYMENT_IDENTITY_INVALID'
+    }
+    $prior = Invoke-WranglerJson -Arguments @('deployments','status','--name','aurum-signal-room')
+    $specifications = @($Arguments[2..($Arguments.Count-6)])
+    $message = $Arguments[-1]
+    $stage = $specifications.Count -eq 2 -and $specifications[0] -ceq ($stable+'@100') -and
+        $specifications[1] -ceq ($candidate+'@0') -and
+        $message -ceq ('stage release candidate '+$candidate+':'+[string]$config.values.TARGET_SOURCE_REVISION)
+    $promote = $specifications.Count -eq 2 -and $specifications[0] -ceq ($candidate+'@100') -and
+        $specifications[1] -ceq ($stable+'@0') -and $message -cmatch '^promote release [0-9a-f-]{36}$'
+    $restore = $specifications.Count -eq 1 -and $specifications[0] -ceq ($stable+'@100') -and
+        $message -cmatch '^(restore committed lkg|reverse stable|automatic reverse recovery|automatic rollback) [0-9a-f-]{36}$'
+    if (-not ($stage -or $promote -or $restore)) { throw 'CONNECTED_DEPLOYMENT_REQUEST_UNDECLARED' }
+    if (($stage -or $promote) -and @($prior.versions | Where-Object {
+            $_.version_id -ceq $stable -and $_.percentage -eq 100 }).Count -ne 1) {
+        throw 'CONNECTED_DEPLOYMENT_PRIOR_OWNER_MISMATCH'
+    }
+    if ($promote -and @($prior.versions | Where-Object {
+            $_.version_id -ceq $candidate -and $_.percentage -eq 0 }).Count -ne 1) {
+        throw 'CONNECTED_DEPLOYMENT_CANDIDATE_NOT_STAGED'
+    }
+    $placement = [pscustomobject]@{id=('isolated-'+[guid]::NewGuid().ToString('N'));source='isolated_fixture';strategy='percentage';
+        versions=@($specifications | ForEach-Object {
+            $parts = $_.Split('@'); [pscustomobject]@{version_id=$parts[0];percentage=[int]$parts[1]}
+        })}
+    Write-ControlCenterJsonAtomic -Path ([string]$config.values.WORKER_PLACEMENT_FILE) -Value $placement -Depth 5
+    [pscustomobject]@{exit_code=0;output=@('ISOLATED_PROVIDER_PLACEMENT_UPDATED')}
 }
 function Invoke-WebRequest {
     param($Uri,$Method='Get',$Headers,$Body,$ContentType,$TimeoutSec=15,[switch]$UseBasicParsing)
     $config = Get-IsolatedRuntimeConfiguration
     $target = [Uri]$Uri
+    if ($config.values.PROVIDER_HTTP_REQUESTS_JSON -and $target.Scheme -ceq 'https' -and
+        -not $target.UserInfo -and -not $target.Fragment) {
+        $declarations = [string]$config.values.PROVIDER_HTTP_REQUESTS_JSON | ConvertFrom-ReleaseControlJson
+        $matches = @($declarations | Where-Object {
+            $_.origin -ceq $target.GetLeftPart([UriPartial]::Authority) -and $_.method -ieq $Method -and
+            $_.path_query -ceq $target.PathAndQuery
+        })
+        if ($matches.Count -ne 1) { throw 'CONNECTED_NETWORK_TARGET_UNDECLARED' }
+        $base = [Uri]$config.values.WORKER_LOOPBACK_BASE_URL
+        if ($base.Scheme -cne 'http' -or $base.Host -cne '127.0.0.1' -or
+            $base.Port -notin @($config.loopback_ports) -or $base.Port -eq 8765 -or
+            $base.AbsolutePath -cne '/' -or $base.Query -or $base.Fragment -or $base.UserInfo) {
+            throw 'CONNECTED_NETWORK_TARGET_UNDECLARED'
+        }
+        $forwardHeaders = @{}
+        if ($Headers) { foreach($name in $Headers.Keys) { $forwardHeaders[$name]=$Headers[$name] } }
+        if ($forwardHeaders.ContainsKey('X-Fixture-Requested-Origin')) { throw 'CONNECTED_NETWORK_HEADER_UNDECLARED' }
+        $forwardHeaders['X-Fixture-Requested-Origin']=$target.GetLeftPart([UriPartial]::Authority)
+        $target = [Uri]($base.GetLeftPart([UriPartial]::Authority) + $target.PathAndQuery)
+        $PSBoundParameters['Uri']=$target
+        $PSBoundParameters['Headers']=$forwardHeaders
+    }
     if ([string]$Uri -cin @('http://127.0.0.1:8765/api/health',
             'http://127.0.0.1:8765/api/status', 'http://127.0.0.1:8765/api/critical-status') -and
         $Method -ieq 'Get' -and -not $Body -and $config.values.LOCAL_API_BASE_URL) {
@@ -44,23 +127,10 @@ function Invoke-WebRequest {
 }
 function Invoke-RestMethod {
     param($Uri,$Method='Get',$Headers,$Body,$ContentType,$TimeoutSec=15)
-    $config = Get-IsolatedRuntimeConfiguration
-    $target = [Uri]$Uri
-    if ([string]$Uri -cin @('http://127.0.0.1:8765/api/health',
-            'http://127.0.0.1:8765/api/status', 'http://127.0.0.1:8765/api/critical-status') -and
-        $Method -ieq 'Get' -and -not $Body -and $config.values.LOCAL_API_BASE_URL) {
-        $base = [Uri]$config.values.LOCAL_API_BASE_URL
-        if ($base.AbsolutePath -cne '/' -or $base.Query -or $base.Fragment) {
-            throw 'CONNECTED_NETWORK_TARGET_UNDECLARED'
-        }
-        $target = [Uri]($base.GetLeftPart([UriPartial]::Authority) + $target.AbsolutePath)
-        $PSBoundParameters['Uri'] = $target
-    }
-    if ($target.Scheme -cne 'http' -or $target.Host -cnotin @('127.0.0.1','localhost','::1') -or
-        $target.Port -notin @($config.loopback_ports) -or $target.Port -eq 8765 -or $target.UserInfo) {
-        throw 'CONNECTED_NETWORK_TARGET_UNDECLARED'
-    }
-    Microsoft.PowerShell.Utility\Invoke-RestMethod @PSBoundParameters -MaximumRedirection 0
+    # Same exact URI authority for both real caller families, with no network
+    # fallback. All declared REST resources in this fixture return JSON bytes.
+    $response = Invoke-WebRequest @PSBoundParameters -UseBasicParsing
+    return ($response.Content | ConvertFrom-ReleaseControlJson)
 }
 function Get-ScheduledTask {
     [CmdletBinding()]

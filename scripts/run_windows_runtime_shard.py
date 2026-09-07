@@ -4,6 +4,7 @@ import argparse
 import ast
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -84,7 +85,11 @@ def main() -> int:
         command = [sys.executable, str(ROOT / shard["rehearsal_script"])]
     started_at = datetime.now(timezone.utc)
     started = time.perf_counter()
-    completed = subprocess.run(command, cwd=ROOT, check=False)
+    environment = dict(os.environ)
+    if args.shard in {"control-install", "control-install-rehearsal"}:
+        environment["XAUUSD_CONTROL_LOAD_TIMING"] = "1"
+        environment["XAUUSD_CONTROL_LOAD_DIAGNOSTIC_OUTPUT"] = str(output / args.shard)
+    completed = subprocess.run(command, cwd=ROOT, check=False, env=environment)
     elapsed = time.perf_counter() - started
     report = {
         "schema_version": "windows-runtime-shard-result-v1",
