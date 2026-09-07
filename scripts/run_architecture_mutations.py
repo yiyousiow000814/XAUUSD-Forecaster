@@ -96,6 +96,17 @@ def measure(root, mutation, directory, baseline):
     return dict(outcome=outcome, reason=reason, seconds=round(time.perf_counter() - started, 3))
 
 
+def unpack_source_archive(content, destination):
+    destination.mkdir()
+    destination = destination.resolve()
+    with zipfile.ZipFile(io.BytesIO(content)) as zipped:
+        for item in zipped.infolist():
+            if not (destination / item.filename).resolve().is_relative_to(destination):
+                raise ValueError('ARCHIVE_PATH_ESCAPE')
+        zipped.extractall(destination)
+    return destination
+
+
 def execute(root, output):
     status = run(['git', 'status', '--porcelain'], root).stdout
     if status.strip():
@@ -109,13 +120,7 @@ def execute(root, output):
     rows = []
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='architecture-mutation-') as temporary:
-        copy = Path(temporary) / 'source'
-        copy.mkdir()
-        with zipfile.ZipFile(io.BytesIO(archive.stdout)) as zipped:
-            for item in zipped.infolist():
-                if not (copy / item.filename).resolve().is_relative_to(copy):
-                    raise ValueError('ARCHIVE_PATH_ESCAPE')
-            zipped.extractall(copy)
+        copy = unpack_source_archive(archive.stdout, Path(temporary) / 'source')
         for mutation in registry['mutation']:
             directory = output / mutation['id']
             directory.mkdir(exist_ok=True)

@@ -1,5 +1,6 @@
 """Source truth, incomplete-analysis visibility and generated drift contracts."""
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import subprocess
 import sys
 from types import SimpleNamespace
 import xml.etree.ElementTree as ET
+import zipfile
 
 import pytest
 
@@ -22,6 +24,32 @@ def test_repository_generated_architecture_is_current_in_required_python_gate():
                             cwd=ROOT, capture_output=True, text=True, timeout=45,
                             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
     assert result.returncode == 0, result.stderr
+
+
+def test_mutation_archive_uses_physical_temp_authority_and_rejects_escape(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT / 'scripts'))
+    from run_architecture_mutations import unpack_source_archive
+    physical = tmp_path / 'physical'
+    physical.mkdir()
+    alias = tmp_path / 'alias'
+    if os.name == 'nt':
+        subprocess.run(['cmd.exe', '/c', 'mklink', '/J', str(alias), str(physical)],
+                       check=True, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    else:
+        alias.symlink_to(physical, target_is_directory=True)
+    def zipped(name):
+        data = io.BytesIO()
+        with zipfile.ZipFile(data, 'w') as archive:
+            archive.writestr(name, 'owned source')
+        return data.getvalue()
+    copy = unpack_source_archive(zipped('README.md'), alias / 'source')
+    assert copy == (physical / 'source').resolve()
+    assert (copy / 'README.md').read_text() == 'owned source'
+    for ordinal, member in enumerate(['../outside.txt', str(tmp_path / 'outside.txt')]):
+        with pytest.raises(ValueError, match='ARCHIVE_PATH_ESCAPE'):
+            unpack_source_archive(zipped(member), alias / f'bad-{ordinal}')
+    assert not (physical / 'outside.txt').exists()
+    assert not (tmp_path / 'outside.txt').exists()
 
 
 @pytest.fixture
@@ -104,10 +132,12 @@ def test_build_then_check_and_tamper_are_real_cli_boundaries(source):
     command = [sys.executable, str(source / 'scripts/compile_architecture.py')]
     options = dict(capture_output=True, timeout=15,
                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-    subprocess.run([*command, 'build', '--root', str(source)], check=True, **options)
-    subprocess.run([*command, 'check', '--root', str(source)], check=True, **options)
+    subprocess.run([*command, 'build'], check=True, **options)
+    subprocess.run([*command, 'check'], check=True, **options)
+    denied = subprocess.run([*command, 'check', '--root', str(ROOT)], text=True, **options)
+    assert denied.returncode != 0 and 'unrecognized arguments' in denied.stderr
     (source / 'architecture/generated/fixture.mmd').write_text('tampered', encoding='utf-8')
-    result = subprocess.run([*command, 'check', '--root', str(source)], text=True, **options)
+    result = subprocess.run([*command, 'check'], text=True, **options)
     assert result.returncode == 1
     assert 'ARCHITECTURE_GENERATED_DRIFT' in result.stderr
 
@@ -131,13 +161,13 @@ def test_real_cli_rejects_orphaned_view_after_rename(source):
     command = [sys.executable, str(source / 'scripts/compile_architecture.py')]
     options = dict(capture_output=True, timeout=15,
                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-    subprocess.run([*command, 'build', '--root', str(source)], check=True, **options)
+    subprocess.run([*command, 'build'], check=True, **options)
     path = source / compiler.SELECTION
     manifest = json.loads(path.read_text())
     manifest['views']['renamed'] = manifest['views'].pop('fixture')
     path.write_text(json.dumps(manifest), encoding='utf-8')
-    subprocess.run([*command, 'build', '--root', str(source)], check=True, **options)
-    result = subprocess.run([*command, 'check', '--root', str(source)], text=True, **options)
+    subprocess.run([*command, 'build'], check=True, **options)
+    result = subprocess.run([*command, 'check'], text=True, **options)
     assert result.returncode == 1
     assert 'fixture.mmd' in result.stderr
     assert (source / 'architecture/generated/fixture.mmd').exists()

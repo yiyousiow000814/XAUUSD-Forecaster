@@ -9,12 +9,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['build', 'check', 'explain'])
     parser.add_argument('symbol', nargs='?')
-    parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
-    index = compile_index(args.root)
+    root = Path(__file__).resolve().parents[1]
+    index = compile_index(root)
     outputs = render(index)
-    directory = args.root / 'architecture/generated'
-    if not directory.resolve().is_relative_to(args.root.resolve()):
+    directory = root / 'architecture/generated'
+    if not directory.resolve().is_relative_to(root):
         parser.exit(1, 'ARCHITECTURE_OUTPUT_PATH_ESCAPE\n')
     if any((directory / name).is_symlink() for name in outputs):
         parser.exit(1, 'ARCHITECTURE_OUTPUT_SYMLINK\n')

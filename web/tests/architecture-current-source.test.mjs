@@ -1,15 +1,30 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync, unlinkSync, rmdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { projectCurrentSource } from '../build/architecture-current-source.mjs';
+import { projectCurrentSource, readCurrentSourceIndex } from '../build/architecture-current-source.mjs';
 import { parseArchitectureManifest, buildArchitectureGraph } from '../app/_lib/architecture-explorer.ts';
 import { parseArchitectureEvidence, parseArchitectureCodeIndex, sourceFactsForClaim } from '../app/_lib/architecture-evidence.ts';
 
 const index = JSON.parse(readFileSync(new URL('../../architecture/generated/critical-index.json', import.meta.url), 'utf8'));
+
+test('build reader bounds the actual bytes read, rejecting oversized and malformed sources', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'architecture-reader-'));
+  const path = join(directory, 'index.json');
+  try {
+    writeFileSync(path, JSON.stringify(index));
+    assert.deepEqual(readCurrentSourceIndex(path), index);
+    writeFileSync(path, Buffer.alloc(2 * 1024 * 1024 + 1, 32));
+    assert.throws(() => readCurrentSourceIndex(path), /ARCHITECTURE_INDEX_BUDGET_EXCEEDED/);
+    writeFileSync(path, '{truncated');
+    assert.throws(() => readCurrentSourceIndex(path), SyntaxError);
+  } finally { unlinkSync(path); rmdirSync(directory); }
+});
 
 test('actual symbol claims retain their exact source span, never the first file symbols', () => {
   const projection = projectCurrentSource(index);

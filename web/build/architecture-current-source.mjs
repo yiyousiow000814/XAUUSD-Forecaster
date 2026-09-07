@@ -1,5 +1,23 @@
 // Adapts the shared #321-derived source facts to the existing #304/#328 Explorer.
 // No SQL, native arguments, local paths, credentials or runtime state are bundled.
+import { openSync, readSync, closeSync } from 'node:fs';
+
+export function readCurrentSourceIndex(path) {
+  const maximum = 2 * 1024 * 1024;
+  const bytes = Buffer.alloc(maximum + 1);
+  const fd = openSync(path, 'r');
+  let count = 0;
+  try {
+    while (count < bytes.length) {
+      const read = readSync(fd, bytes, count, bytes.length - count, null);
+      if (!read) break;
+      count += read;
+    }
+  } finally { closeSync(fd); }
+  if (count > maximum) throw new Error('ARCHITECTURE_INDEX_BUDGET_EXCEEDED');
+  return JSON.parse(bytes.subarray(0, count).toString('utf8'));
+}
+
 export function projectCurrentSource(index) {
   if (index?.coverage?.scope !== 'DECLARED_CRITICAL_SLICES_ONLY'
       || !/^[a-f0-9]{64}$/.test(index.source_input_digest)

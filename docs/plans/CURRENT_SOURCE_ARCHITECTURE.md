@@ -27,6 +27,14 @@ An interrupted build is repaired by regeneration; a missing/stale graph blocks
 the tooling check, never production recovery. The coordinator alone owns
 branch protection and rollout. RULE_ENFORCEMENT_PENDING until verified remotely.
 
+The CLI source authority is the physical checkout containing the executed tool,
+not a caller-supplied root or working directory. An isolated source export runs
+its own copied CLI. The Web build reads the checked index through one descriptor,
+with a 2 MiB plus one-byte sentinel bound; a size check on a separate pathname
+is not read authority. Mutation exports normalize the newly created temporary
+directory to its physical root before both archive-member and mutation-path
+containment checks. A junction alias does not enlarge the permitted tree.
+
 Validation executes Python -> real PowerShell parser -> JSON consumer from the
 checkout, with explicit UTF-8 and bounded hidden subprocess. Tests cover parser
 failure, unresolved dispatch, source mutation, deterministic regeneration,

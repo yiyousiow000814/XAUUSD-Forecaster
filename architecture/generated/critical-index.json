@@ -66,7 +66,7 @@
   "inputs": {
     "architecture/critical-paths.json": "7a5c280be4cc485258a22ff5d4c4f854cf74f6d8a8523011b19465327ba915a4",
     "scripts/architecture_compiler.py": "672555518fc21872888f967b1782309023dfe8fd5af501f713f1231ee012657f",
-    "scripts/compile_architecture.py": "39350c916f052fc5a95d51fbd43723097627162e11a8553ab765d3dfeef85cfe",
+    "scripts/compile_architecture.py": "5b37a5a48c7f8403668e6299e5cc5333615a2a4c39ee3b25d70898200d3a80c6",
     "scripts/control_center_install.ps1": "69ba63324ce5ca01b30f0ad287bd15ecc6ca9465421cc231e0acefd472848c44",
     "scripts/control_center_transaction_engine.ps1": "32671b3f16666949b96737170923a3295099530a653485751cc77e9c3ad94593",
     "scripts/extract_architecture_powershell.ps1": "2c498f937974987467a30cdc155356676ffdad411e9886f379956eecf6010518",
@@ -26942,5 +26942,5 @@
     "status": "UNKNOWN"
   },
   "schema": "critical-source-index-v1",
-  "source_input_digest": "1fede2007f4fcfbdad16adcc8ae62635134361f981ec524adf06329480f62919"
+  "source_input_digest": "f6d5be187982044cf62ab1331aa32a7ea64602f99eca700561cca956426974a5"
 }
