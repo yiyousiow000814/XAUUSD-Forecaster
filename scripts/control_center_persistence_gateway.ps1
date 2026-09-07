@@ -128,6 +128,23 @@ function ConvertTo-ReleaseHistoryValidation {
     param([Parameter(Mandatory = $true)][object]$Release)
     $validation = $Release.validation
     $projection = ConvertTo-BoundedReleaseHistoryValue -Value $validation
+    foreach ($name in @("route_plan", "cpu_route_plan")) {
+        if (-not $validation -or -not $validation.$name) { continue }
+        $routePlan = $validation.$name
+        $projection.PSObject.Properties.Remove($name)
+        $projection | Add-Member -Force -NotePropertyName ($name + "_summary") -NotePropertyValue (
+            [pscustomobject]@{
+                canonical_digest = Get-WorkerCpuCanonicalDigest -Value $routePlan
+                manifest_schema_version = $routePlan.manifest_schema_version
+                worker_cpu_required = [bool]$routePlan.worker_cpu_required
+                requires_validation = [bool]$routePlan.requires_validation
+                static_asset_count = @($routePlan.static_assets | Where-Object { $null -ne $_ }).Count
+                worker_read_count = @($routePlan.worker_reads | Where-Object { $null -ne $_ }).Count
+                worker_write_count = @($routePlan.worker_writes | Where-Object { $null -ne $_ }).Count
+                contract_route_count = @($routePlan.contract_routes | Where-Object { $null -ne $_ }).Count
+            }
+        )
+    }
     if (-not $validation -or $null -eq $validation.expected_requests -or
         @($validation.expected_requests).Count -eq 0 -or
         [string]$validation.validation_run -notmatch '^[0-9a-fA-F-]{36}$' -or

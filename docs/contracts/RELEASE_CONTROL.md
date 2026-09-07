@@ -1079,4 +1079,12 @@ incomplete and its verified owned tree must be cleaned up.
 
 ## Bounded release-history request references
 
+History records executable route plans only as explicitly named
+`route_plan_summary` and `cpu_route_plan_summary`: canonical digest, manifest
+schema, validation flags and route counts. Complete plans remain in current
+state; history summaries cannot substitute for them during resume. Directed
+request and response evidence remains in the existing append-only ledger.
+Failure publication must preserve the original first-failure diagnostic and
+counts instead of replacing them with a serialization failure.
+
 Release history retains its 64 KiB per-event limit. The complete current validation and CPU request plan remain authoritative in their existing stores. A history projection may replace expected_requests with expected_requests_reference only after matching the persisted plan's run, Candidate Worker, qualification key, full request-universe digest and exact acceptance-request digest. The reference names plan.json and retains the run, complete request count, request-universe digest, acceptance count and acceptance digest. Later targeted requests append to the plan; an older reference resolves exactly its recorded request-count prefix and verifies both digests. Existing prefix records must not be rewritten. Missing or mismatched authority cannot justify compaction. Current-state arrays, complete plans, directed ledgers and prior history bytes remain unchanged. Runtime resume reads current state and the plan; history is not a substitute for pending execution state or an independent qualification receipt.

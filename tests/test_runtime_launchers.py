@@ -4622,11 +4622,19 @@ def test_directed_route_sample_fails_closed_on_exact_identity_mismatch(tmp_path)
     assert result == "False,WORKER_IDENTITY_MISMATCH,GET,/api/status,200,wrong-worker,status"
 
 
-def test_failed_directed_validation_persists_bounded_route_receipt(tmp_path) -> None:
+@pytest.mark.parametrize("complete_plan", (False, True))
+def test_failed_directed_validation_persists_bounded_route_receipt(tmp_path, complete_plan) -> None:
     stable = "a" * 40
     candidate = "b" * 40
+    production_plan = (
+        "New-Item -ItemType Directory -Path (Join-Path $repositoryRoot 'web') -Force|Out-Null;"
+        f"Copy-Item -LiteralPath '{ROOT / 'web/worker-validation-manifest.json'}' "
+        "-Destination (Join-Path $repositoryRoot 'web/worker-validation-manifest.json');"
+        "$script:testRoutePlan=Get-CandidateRouteValidationPlan -ChangedFiles @('web/worker-validation-manifest.json') -AllCpuRoutes;"
+    ) if complete_plan else ""
     result = _run_control_center_contract(
         tmp_path,
+        production_plan +
         f"$stable=New-ReleaseIdentity -GitSha '{stable}' -WorkerVersionId 'stable-worker' "
         f"-WindowsRevision '{stable}';"
         f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId 'candidate-worker' "
@@ -4639,10 +4647,10 @@ def test_failed_directed_validation_persists_bounded_route_receipt(tmp_path) -> 
         "function Test-RequiredGitHubChecks { return 'PASSED' };"
         "function Get-CandidateChangedFiles { return @('web/worker/api-router.ts') };"
         "function Get-CandidateCompatibilityRequirement { return [pscustomobject]@{state='COMPATIBLE';files=@()} };"
-        "function Get-CandidateRouteValidationPlan { return [pscustomobject]@{worker_cpu_required=$true;requires_validation=$true;static_assets=@();worker_reads=@();worker_writes=@()} };"
+        "function Get-CandidateRouteValidationPlan { if($script:testRoutePlan){return $script:testRoutePlan};return [pscustomobject]@{worker_cpu_required=$true;requires_validation=$true;static_assets=@();worker_reads=@();worker_writes=@()} };"
         "function Set-CloudflareCandidatePointer {};"
         "function Wait-CandidatePlacementPropagation { return [pscustomobject]@{passed=$true;state='READY'} };"
-        "function Invoke-CandidateWorkerValidation { return [pscustomobject]@{passed=$false;validation_run='run-2';"
+        "function Invoke-CandidateWorkerValidation { $answer=[pscustomobject]@{passed=$false;validation_run='run-2';"
         "expected_worker_invocations=10;observed_worker_invocations=$null;static_worker_invocations=0;"
         "static_observability_state='PASSED';cpu_evidence='NOT_RUN';routes=@([pscustomobject]@{"
         "route='/api/learning-history';path='/api/learning-history?limit=100';method='GET';passed=$false;"
@@ -4651,9 +4659,18 @@ def test_failed_directed_validation_persists_bounded_route_receipt(tmp_path) -> 
         "requested_worker_version='candidate-worker';observed_worker_version='candidate-worker';"
         f"observed_git_sha='{candidate}';resource='learning-history';d1_operations='0';"
         "request_bytes='0';response_bytes='28';failure_stage='route';request_id='request-2';"
-        "validation_run='run-2'}})} };"
+        "validation_run='run-2'}})};"
+        "if($script:testRoutePlan){$row=$answer.routes[0];"
+        "$row|Add-Member request_ids @(1..12|ForEach-Object{[guid]::NewGuid().ToString()});"
+        "$answer.routes=@(1..31|ForEach-Object{$row.PSObject.Copy()})};return $answer };"
         "Invoke-AutomaticCandidateValidation -Candidate $candidate | Out-Null;"
         "$saved=Get-ReleaseControlState; $json=$saved|ConvertTo-Json -Depth 20 -Compress;"
+        "$history=Get-Content -LiteralPath $releaseHistoryPath -Tail 1|ConvertFrom-ReleaseControlJson;"
+        "$summary=Get-DirectedWorkerValidationSummary -Validation $history.release.validation;"
+        "if($summary.failed -ne $saved.candidate.validation.routes_failed -or "
+        "$summary.first_failure.reason -ne 'INVALID_RESOURCE'){throw 'FAILURE_HISTORY_LOST'};"
+        "if($history.release.validation.route_plan -or -not $saved.candidate.validation.route_plan -or "
+        "-not $history.release.validation.route_plan_summary.canonical_digest){throw 'PLAN_SUMMARY_AUTHORITY_INVALID'};"
         'Write-Output "$($saved.candidate.validation_state),$($saved.candidate.validation.reason),'
         '$($saved.candidate.validation.cloudflare),$($saved.candidate.validation.routes_failed),'
         '$($saved.candidate.validation.first_failure.method),$($saved.candidate.validation.first_failure.path),'
@@ -4663,7 +4680,7 @@ def test_failed_directed_validation_persists_bounded_route_receipt(tmp_path) -> 
     )
 
     assert result == (
-        "FAILED,DIRECTED_WORKER_VALIDATION_FAILED,FAILED,1,GET,"
+        f"FAILED,DIRECTED_WORKER_VALIDATION_FAILED,FAILED,{31 if complete_plan else 1},GET,"
         "/api/learning-history?limit=100,400,INVALID_RESOURCE,NOT_RUN,NOT_RUN,False"
     )
 
