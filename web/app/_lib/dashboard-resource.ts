@@ -101,13 +101,13 @@ function notifyDashboardResource(url: string): void {
 
 export async function loadDashboardResource<T>(
   url: string,
-  options: { force?: boolean; maxAgeMs?: number; timeoutMs?: number } = {},
+  options: { force?: boolean; maxAgeMs?: number; timeoutMs?: number; validate?: (body: unknown) => boolean } = {},
 ): Promise<T> {
   const entry = resources.get(url) ?? { updatedAt: 0 };
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
   const isFresh = entry.data !== undefined && Date.now() - entry.updatedAt < maxAgeMs;
 
-  if (!options.force && isFresh) return entry.data as T;
+  if (!options.force && isFresh && (!options.validate || options.validate(entry.data))) return entry.data as T;
   if (entry.pending) return entry.pending as Promise<T>;
 
   const controller = new AbortController();
@@ -130,8 +130,8 @@ export async function loadDashboardResource<T>(
         body = serialized ? JSON.parse(serialized) : null;
       } catch {
         throw new Error(response.ok
-          ? "数据服务正在更新，页面会自动重试"
-          : `数据服务暂时不可用（HTTP ${response.status}），页面会自动重试`);
+          ? "数据服务正在更新，请稍后重读"
+          : `数据服务暂时不可用（HTTP ${response.status}），请稍后重读`);
       }
       if (!response.ok) {
         if (url.startsWith("/admin/api/")) {
@@ -150,12 +150,15 @@ export async function loadDashboardResource<T>(
           details,
         );
       }
+      if (options.validate && !options.validate(body)) {
+        throw new DashboardResourceError("资源返回的数据格式无效，请重试", response.status, "INVALID_RESOURCE_PAYLOAD", {});
+      }
       resources.set(url, { data: body, updatedAt: Date.now() });
       notifyDashboardResource(url);
       return body as T;
     } catch (reason) {
       const error = reason instanceof DOMException && reason.name === "AbortError"
-        ? new Error("数据读取超时，页面会自动重试")
+        ? new Error("数据读取超时，请稍后重读")
         : reason instanceof Error ? reason : new Error(String(reason));
       const current = resources.get(url) ?? entry;
       resources.set(url, { ...current, pending: undefined, error });

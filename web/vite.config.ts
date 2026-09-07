@@ -10,6 +10,7 @@ import {
   compactPreviewNewsIndex,
   compactPreviewAudit,
   compactPreviewAuditDetail,
+  admitPreviewAuditDetails,
   compactPreviewStatus,
 } from "./build/preview-learning";
 
@@ -54,6 +55,7 @@ export default defineConfig(async () => {
     previewBundle = JSON.parse(output);
     if (previewBundle && typeof previewBundle === "object") {
       const bundle = previewBundle as Record<string, unknown>;
+      admitPreviewAuditDetails(bundle);
       if (bundle.learning && typeof bundle.learning === "object") {
         bundle.learning_summary = compactPreviewLearning(bundle.learning as Record<string, unknown>);
         delete bundle.learning;

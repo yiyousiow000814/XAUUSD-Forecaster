@@ -98,18 +98,26 @@ def _source_payload() -> dict:
         "system": {"online": True, "components": {"decision_collector": {"status": "OK"}}},
         "counts": {"decision_events": len(decisions), "news": 200},
         "training": {"complete_rows": 2_500},
-        "recent_decisions": [_decision(index) for index in range(20)],
+        "recent_decisions": [{
+            "decision_id": f"release-validation-{index:04d}",
+            "decision_time": _decision(index)["decision_time"],
+            "outcome_status": "VALID", "predictions": [_decision(index)],
+        } for index in range(20)],
         "news_evidence": [_news(index) for index in range(200)],
         "recent_news": [_news(index) for index in range(200)],
         "daily_news_briefs": [{
             "brief_date": f"2026-08-{13 + index:02d}",
             "summary_zh": "候选版本有界每日简报。" * 140,
             "phase": "FINAL",
+            "model_version": "release-validation-v17",
+            "brief": {"items": [{"headline": "有界简报", "summary": "验证摘要", "evidence_ids": []}]},
         } for index in range(8)],
         "storylines": [{
             "storyline_id": f"story-{index:03d}",
             "headline": f"Production-shaped storyline {index}",
             "narrative_zh": "候选版本故事线与时间脉络证据。" * 60,
+            "covered_roles": [], "missing_roles": [], "timeline": [],
+            "market_reactions": [], "commentary": [], "background": [],
         } for index in range(24)],
         "market_reaction_streams": [{
             "stream_id": f"reaction-{index:03d}",

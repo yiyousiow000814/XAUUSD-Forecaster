@@ -23,9 +23,13 @@ export default function DashboardLink({ ariaCurrent, ariaLabel, children, classN
   const navigate = (event: MouseEvent<HTMLAnchorElement>) => {
     if (!navigation || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
-    event.currentTarget.classList.add("is-navigating");
-    event.currentTarget.setAttribute("aria-busy", "true");
-    void navigation.navigate(href, replace);
+    const link = event.currentTarget;
+    link.classList.add("is-navigating");
+    link.setAttribute("aria-busy", "true");
+    void navigation.navigate(href, replace).finally(() => {
+      link.classList.remove("is-navigating");
+      link.removeAttribute("aria-busy");
+    });
   };
 
   return <a

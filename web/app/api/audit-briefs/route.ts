@@ -2,7 +2,7 @@ import { readAuditDetailSnapshot, writeAuditDetailSnapshot } from "../_shared/au
 import { AUDIT_SNAPSHOT_IDS } from "../_shared/dashboard-snapshot";
 
 export const dynamic = "force-dynamic";
-const fields = ["generated_at", "daily_news_briefs"];
+const fields = ["generated_at", "producer_revision", "projection_contract", "daily_news_briefs"];
 
 export async function GET() {
   return readAuditDetailSnapshot(AUDIT_SNAPSHOT_IDS.briefs, fields, "等待每日简报详情首次同步");

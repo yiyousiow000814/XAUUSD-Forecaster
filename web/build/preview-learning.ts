@@ -4,8 +4,28 @@ import {
   PREVIEW_AUDIT_INLINE_KEYS,
   PREVIEW_STATUS_INLINE_KEYS,
 } from "../app/_lib/preview-manifest";
+import { validAuditDetailPayload } from "../app/_lib/audit-detail-contract";
 
 type JsonObject = Record<string, unknown>;
+
+/** Admit the same renderable resource contract used by routes and the browser. */
+export function admitPreviewAuditDetails(bundle: JsonObject): void {
+  const status = bundle.status as JsonObject | undefined;
+  const preview = status?.preview as JsonObject | undefined;
+  const resources = preview?.resources as JsonObject | undefined;
+  for (const family of ["briefs", "stories", "decisions"] as const) {
+    const key = `audit_${family}`;
+    if (validAuditDetailPayload(family, bundle[key])) continue;
+    bundle[key] = null;
+    if (resources) resources[key] = {
+      availability: "UNAVAILABLE_IN_BUILD_SNAPSHOT",
+      requested_path: `/api/audit-${family}`,
+      source_path: null,
+      compatibility_fallback: false,
+      reason: "INVALID_AUDIT_DETAIL_SOURCE",
+    };
+  }
+}
 
 const PREVIEW_AUDIT_ARRAY_LIMITS: Record<string, number> = {
   daily_news_briefs: 2,

@@ -9,6 +9,7 @@ from xauusd_forecaster.dashboard_payloads import (
     audit_stories_payload,
     bounded_evidence_window,
     critical_status_payload,
+    valid_audit_detail_payload,
 )
 
 
@@ -76,10 +77,10 @@ def test_audit_detail_projections_bound_items_and_nested_growth() -> None:
             "commentary": list(range(100)),
             "background": list(range(100)),
         } for index in range(30)],
-        "story_event_candidates": list(range(100)),
-        "unassigned_story_events": list(range(100)),
-        "theme_streams": list(range(30)),
-        "market_reaction_streams": list(range(30)),
+        "story_event_candidates": [{"id": index} for index in range(100)],
+        "unassigned_story_events": [{"id": index} for index in range(100)],
+        "theme_streams": [{"id": index} for index in range(30)],
+        "market_reaction_streams": [{"id": index} for index in range(30)],
     }
 
     briefs = audit_briefs_payload(payload, brief_limit=3)
@@ -100,6 +101,26 @@ def test_audit_detail_projections_bound_items_and_nested_growth() -> None:
     assert len(stories["unassigned_story_events"]) == 12
     assert len(stories["theme_streams"]) == 8
     assert len(stories["market_reaction_streams"]) == 8
+
+
+@pytest.mark.parametrize("family,field,projector", [
+    ("briefs", "daily_news_briefs", audit_briefs_payload),
+    ("stories", "storylines", audit_stories_payload),
+    ("decisions", "recent_decisions", audit_decisions_payload),
+])
+def test_audit_source_absence_never_becomes_authoritative_empty(family, field, projector):
+    for value in (None, {}, "missing", [None]):
+        source = {"generated_at": "2026-09-06T00:00:00Z", field: value}
+        result = projector(source)
+        assert field not in result
+        assert "projection_contract" not in result
+        assert not valid_audit_detail_payload(result, family)
+    assert not valid_audit_detail_payload({field: []}, family)
+    for rows in ([], [{"id": "source"}]):
+        result = projector({field: rows})
+        assert result[field] == rows
+        assert result["projection_contract"] == "audit-detail-source-v1"
+        assert valid_audit_detail_payload(result, family)
 
 
 @pytest.mark.parametrize(

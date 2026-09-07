@@ -4,9 +4,11 @@ import { previewBundle, previewJson, rejectPreviewWrite } from "./preview";
 import {
   AUDIT_SNAPSHOT_IDS,
   AUDIT_DETAIL_SNAPSHOT_BYTES,
+  auditDetailPayloadSql,
   writeDashboardSnapshot,
 } from "./dashboard-snapshot";
 import { isIngestAuthorized } from "./ingest-auth";
+import { validAuditDetailPayload } from "../../_lib/audit-detail-contract";
 import {
   authorizeReleaseValidation,
   isReleaseValidationContext,
@@ -26,7 +28,9 @@ export async function readAuditDetailSnapshot(
         : snapshotId === AUDIT_SNAPSHOT_IDS.decisions
           ? previewBundle.audit_decisions
           : null;
-    if (!resource) {
+    const detail = snapshotId === AUDIT_SNAPSHOT_IDS.briefs ? "briefs"
+      : snapshotId === AUDIT_SNAPSHOT_IDS.stories ? "stories" : "decisions";
+    if (!resource || !validAuditDetailPayload(detail, resource)) {
       return previewJson({
         error: unavailableLabel,
         availability: "UNAVAILABLE_IN_BUILD_SNAPSHOT",
@@ -41,7 +45,9 @@ export async function readAuditDetailSnapshot(
   try {
     const binding = env.DB as D1Database | undefined;
     const row = binding ? await binding.prepare(
-      "SELECT payload FROM dashboard_snapshots WHERE id = ?",
+      `SELECT payload FROM dashboard_snapshots WHERE id = ?
+       AND CASE WHEN length(CAST(payload AS BLOB)) <= ${AUDIT_DETAIL_SNAPSHOT_BYTES}
+         THEN ${auditDetailPayloadSql(snapshotId)} ELSE 0 END`,
     ).bind(snapshotId).first<{ payload: string }>() : null;
     if (row) return new Response(row.payload, {
       headers: {
