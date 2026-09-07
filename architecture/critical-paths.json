@@ -21,6 +21,7 @@
       "files": [
         "scripts/run_dashboard_api.py",
         "scripts/run_dashboard_sync.py",
+        "xauusd_forecaster/dashboard/resource_contracts.py",
         "xauusd_forecaster/news_projection.py",
         "web/worker/api-router.ts",
         "web/app/api/news-index/route.ts",
@@ -61,6 +62,7 @@
       "tests": [
         "tests/test_news_projection.py",
         "tests/test_dashboard_sync.py",
+        "tests/test_dashboard_resource_contracts.py",
         "web/tests/news-projection-store.test.mjs",
         "web/tests/news-evidence-store.test.mjs",
         "web/tests/audit-content-rendering.test.mjs"
@@ -77,9 +79,9 @@
       "tests": ["tests/test_control_plane_install.py"]
     },
     "source-first-ack": {
-      "files": ["scripts/run_dashboard_sync.py", "xauusd_forecaster/dashboard/sync/transport.py", "xauusd_forecaster/dashboard/learning_resources.py"],
+      "files": ["scripts/run_dashboard_sync.py", "xauusd_forecaster/dashboard/resource_contracts.py", "xauusd_forecaster/dashboard/sync/transport.py", "xauusd_forecaster/dashboard/learning_resources.py"],
       "roots": ["scripts/run_dashboard_sync.py::_sync_learning_summary", "scripts/run_dashboard_sync.py::_sync_learning_history", "scripts/run_dashboard_sync.py::_sync_market", "scripts/run_dashboard_sync.py::_sync_market_history", "scripts/run_dashboard_sync.py::_sync_operator_retries", "scripts/run_dashboard_sync.py::_sync_news_evidence", "xauusd_forecaster/dashboard/sync/transport.py::_post_json"],
-      "tests": ["tests/test_dashboard_sync.py"]
+      "tests": ["tests/test_dashboard_sync.py", "tests/test_dashboard_resource_contracts.py"]
     }
   }
 }
