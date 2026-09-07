@@ -93,6 +93,47 @@ they use. Sync still owns orchestration, source I/O, producer-revision
 discovery, retry and checkpoint state. Moving pure
 serialization does not qualify the remaining entrypoint logic as extracted.
 
+### Executable Python import policy
+
+`scripts/check_architecture_imports.py` shares the current compiler's Python
+AST parser. `architecture/critical-paths.json` declares its canonical package
+namespaces, exact script-composition edges and any legacy shims. The existing
+Current source architecture CI check executes the policy on all package Python
+files and immediate Python scripts, independently of the selected graph slices.
+It does not import application modules or infer runtime loading from syntax.
+
+- Package source must not import `scripts`, including relative and aliased
+  spelling of that namespace. Script shared-library dependencies need a precise
+  source/target declaration, reason and removal condition. Developer compiler
+  composition and temporary production compatibility are distinct reasons,
+  not permission for arbitrary new script dependencies.
+- Package initializers and declared whole-file shims contain only docstrings,
+  explicit imports and literal string-list/tuple `__all__`. They must not
+  perform inline calls, schema installation, client creation or thread startup.
+  This declaration-only rule does not prove transitive imports have no effects.
+- Within explicitly declared canonical package namespaces, non-Dashboard
+  packages may not import Dashboard; Decision may not import Assistant or Web;
+  canonical source may not import a declared legacy shim. Dashboard is the
+  terminal read/projection namespace. These are declared syntax boundaries,
+  not inferred process, timing or mutation authority.
+- Flat modules remain unclassified by this package-direction rule. For example,
+  a flat file named `decision.py` is not silently treated as an implemented
+  Decision package. The package-to-script ban still applies to every flat file.
+  Unpopulated declared namespaces do not count as completed owner extraction.
+- A shim declaration requires an existing source and distinct existing owner
+  plus an explicit removal condition. The current whole-file shim list is
+  empty. Neither the root public facade nor the mixed Sync orchestrator is a
+  whole-file shim merely because it exposes compatibility imports.
+
+All runtime module resolution remains UNKNOWN. Literal dynamic module requests
+are reported with their known requested spelling, separately from unknown
+expressions; neither proves the actual callee, loaded file or revision.
+`check_deferred_projection_parity.py` explicitly selects another producer root,
+so its declared module request never becomes current-checkout source identity.
+A passing syntax check is not a complete dynamic-import or runtime-safety proof.
+Malformed policy, missing declared files and Python parse errors fail the check.
+Current source-index coverage, UNKNOWN edges and transport budgets are unchanged.
+
 ## Safety boundaries
 
 - The product is Shadow research only and has no order-submission authority.

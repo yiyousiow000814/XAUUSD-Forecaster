@@ -109,6 +109,7 @@
         "tests/test_dashboard_runtime_status.py",
         "tests/test_ledger.py",
         "tests/test_architecture_docs.py",
+        "tests/test_architecture_imports.py",
         "tests/test_architecture_compiler.py",
         "tests/test_architecture_mutation_contracts.py"
       ]
