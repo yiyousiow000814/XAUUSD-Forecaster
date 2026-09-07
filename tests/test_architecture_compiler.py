@@ -668,6 +668,178 @@ def _decode_with_real_node(generated):
     return json.loads(result.stdout)
 
 
+@pytest.mark.parametrize('target_family', ['manifest', 'part'])
+@pytest.mark.parametrize('fault', [
+    'unchanged', 'replaced_before_validation', 'replaced_after_validation',
+    'fstat_failure', 'lstat_failure', 'realpath_failure', 'directory_redirect',
+])
+def test_real_node_reader_validates_opened_identity_before_reading(source, tmp_path, target_family, fault):
+    index = compiler.compile_index(source)
+    generated = tmp_path / 'descriptor-wire'
+    compiler.write_outputs(generated, compiler.render(index))
+    manifest = json.loads((generated / 'critical-index.json').read_text())
+    target = generated / ('critical-index.json' if target_family == 'manifest' else manifest['parts'][0]['file'])
+    expected = tmp_path / 'expected.json'
+    expected.write_text(compiler.canonical(index), encoding='utf-8')
+    # Isolated real Node process: wrap its built-in fs boundary only to place
+    # actual renames/junctions at a deterministic point. The production module
+    # is imported unchanged; no test-only filesystem interface is exported.
+    script = r'''
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { dirname, join, resolve } from 'node:path';
+const [loader, manifest, target, expectedPath, fault] = process.argv.slice(1);
+const { readCurrentSourceIndex } = await import(loader);
+const original = Object.fromEntries(['openSync', 'fstatSync', 'lstatSync', 'realpathSync',
+  'readSync', 'closeSync', 'renameSync', 'writeFileSync', 'readFileSync', 'symlinkSync', 'unlinkSync']
+  .map(name => [name, fs[name]]));
+const expected = JSON.parse(original.readFileSync(expectedPath, 'utf8'));
+const directory = dirname(target);
+const parkedFile = join(dirname(directory), 'owned-parked.json');
+const parkedDirectory = join(dirname(directory), 'owned-parked-directory');
+let targetFd, targetClosed = false, swappedFile = false, redirected = false;
+let reads = 0, closes = 0, allocations = 0;
+const operations = [];
+const watched = fd => targetFd !== undefined && fd === targetFd && !targetClosed;
+const replaceFile = () => {
+  original.renameSync(target, parkedFile); swappedFile = true;
+  original.writeFileSync(target, 'replacement is deliberately not valid JSON');
+};
+fs.openSync = (path, ...args) => {
+  if (resolve(path) === target && fault === 'directory_redirect') {
+    // Redirect after the reader's initial root check but before acquisition:
+    // Windows does not permit renaming a directory containing this open fd.
+    original.renameSync(directory, parkedDirectory); redirected = true;
+    original.symlinkSync(parkedDirectory, directory, process.platform === 'win32' ? 'junction' : 'dir');
+  }
+  const fd = original.openSync(path, ...args);
+  if (resolve(path) === target) {
+    targetFd = fd; operations.push('open');
+    if (fault === 'replaced_before_validation') replaceFile();
+  }
+  return fd;
+};
+fs.fstatSync = (fd, ...args) => {
+  if (watched(fd)) {
+    operations.push('fstat');
+    if (fault === 'fstat_failure') throw new Error('INJECTED_FSTAT_FAILURE');
+  }
+  return original.fstatSync(fd, ...args);
+};
+fs.lstatSync = (path, ...args) => {
+  if (resolve(path) === target) {
+    operations.push('lstat');
+    if (fault === 'lstat_failure') throw new Error('INJECTED_LSTAT_FAILURE');
+  }
+  return original.lstatSync(path, ...args);
+};
+fs.realpathSync = (path, ...args) => {
+  if (resolve(path) === target) {
+    operations.push('realpath');
+    if (fault === 'realpath_failure') throw new Error('INJECTED_REALPATH_FAILURE');
+  }
+  return original.realpathSync(path, ...args);
+};
+fs.readSync = (fd, ...args) => {
+  if (watched(fd)) {
+    reads += 1; operations.push('read');
+    if (fault === 'replaced_after_validation' && !swappedFile) replaceFile();
+  }
+  return original.readSync(fd, ...args);
+};
+fs.closeSync = (fd, ...args) => {
+  if (watched(fd)) { closes += 1; targetClosed = true; }
+  return original.closeSync(fd, ...args);
+};
+const allocate = Buffer.alloc;
+Buffer.alloc = (...args) => { if (watched(targetFd)) allocations += 1; return allocate(...args); };
+syncBuiltinESMExports();
+try {
+  if (fault === 'unchanged' || fault === 'replaced_after_validation') {
+    assert.deepEqual(readCurrentSourceIndex(manifest), expected);
+    assert.ok(reads > 0); assert.equal(allocations, 1);
+    assert.deepEqual(operations.slice(0, 4), ['open', 'fstat', 'lstat', 'realpath']);
+  } else {
+    const reason = fault.endsWith('_failure')
+      ? `INJECTED_${fault.toUpperCase()}` : 'ARCHITECTURE_INDEX_TRANSPORT_INVALID';
+    assert.throws(() => readCurrentSourceIndex(manifest), error => error.message === reason);
+    assert.equal(reads, 0); assert.equal(allocations, 0);
+  }
+  assert.notEqual(targetFd, undefined, 'path validation never precedes descriptor acquisition');
+  assert.equal(closes, 1, 'every acquired descriptor is closed, including validation failures');
+  assert.throws(() => original.fstatSync(targetFd), error => error.code === 'EBADF');
+  process.stdout.write(JSON.stringify({ fault, reads, allocations, closes, operations }));
+} finally {
+  Buffer.alloc = allocate;
+  Object.assign(fs, original); syncBuiltinESMExports();
+  if (redirected) { original.unlinkSync(directory); original.renameSync(parkedDirectory, directory); }
+  if (swappedFile) { original.unlinkSync(target); original.renameSync(parkedFile, target); }
+}
+'''
+    result = subprocess.run(['node', '--input-type=module', '-e', script,
+        (ROOT / 'web/build/architecture-current-source.mjs').as_uri(),
+        str(generated / 'critical-index.json'), str(target), str(expected), fault],
+        capture_output=True, encoding='utf-8', errors='strict', timeout=15,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+    assert result.returncode == 0, result.stderr
+    measurement = json.loads(result.stdout)
+    assert measurement['closes'] == 1
+    assert compiler.read_generated_index(generated) == index, 'owned fixture restored after the race'
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX FIFO/NOFOLLOW semantics; Windows uses the real junction family')
+@pytest.mark.parametrize('target_family', ['manifest', 'part'])
+@pytest.mark.parametrize('replacement', ['fifo', 'symlink'])
+def test_real_node_reader_rejects_nonregular_open_without_blocking(source, tmp_path, target_family, replacement):
+    index = compiler.compile_index(source)
+    generated = tmp_path / 'fifo-wire'
+    compiler.write_outputs(generated, compiler.render(index))
+    manifest = json.loads((generated / 'critical-index.json').read_text())
+    target = generated / ('critical-index.json' if target_family == 'manifest' else manifest['parts'][0]['file'])
+    fifo = tmp_path / 'owned-fifo'
+    if replacement == 'fifo':
+        os.mkfifo(fifo)
+    else:
+        fifo.symlink_to(str(fifo) + '.original')
+    script = r'''
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const [loader, manifest, target, fifo, replacement] = process.argv.slice(1);
+const {readCurrentSourceIndex} = await import(loader);
+let reads = 0, closes = 0, targetFd;
+const original = { open: fs.openSync, read: fs.readSync, close: fs.closeSync };
+fs.openSync = (path, ...args) => {
+  if (path === target) {
+    fs.renameSync(target, `${fifo}.original`);
+    fs.renameSync(fifo, target);
+    targetFd = original.open(path, ...args);
+    return targetFd;
+  }
+  return original.open(path, ...args);
+};
+fs.readSync = (fd, ...args) => { if (fd === targetFd) reads += 1; return original.read(fd, ...args); };
+fs.closeSync = (fd, ...args) => { if (fd === targetFd) closes += 1; return original.close(fd, ...args); };
+syncBuiltinESMExports();
+if (replacement === 'fifo') {
+  assert.throws(() => readCurrentSourceIndex(manifest), /ARCHITECTURE_INDEX_TRANSPORT_INVALID/);
+  assert.notEqual(targetFd, undefined); assert.equal(closes, 1);
+} else {
+  assert.throws(() => readCurrentSourceIndex(manifest), error => error.code === 'ELOOP');
+  assert.equal(targetFd, undefined); assert.equal(closes, 0);
+}
+assert.equal(reads, 0);
+process.stdout.write(JSON.stringify({ rejected: true, reads, closes }));
+'''
+    result = subprocess.run(['node', '--input-type=module', '-e', script,
+        (ROOT / 'web/build/architecture-current-source.mjs').as_uri(),
+        str(generated / 'critical-index.json'), str(target), str(fifo), replacement],
+        capture_output=True, encoding='utf-8', errors='strict', timeout=3)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)['rejected'] is True
+
+
 def test_python_parts_real_node_preserves_exact_order_duplicates_and_unicode(source, tmp_path):
     index = compiler.compile_index(source)
     index['inputs']['scripts/other.py'] = 'b' * 64

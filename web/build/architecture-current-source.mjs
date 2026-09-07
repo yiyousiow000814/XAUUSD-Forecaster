@@ -43,14 +43,21 @@ function canonicalJson(value, depth = 0) {
 }
 
 function readBoundedJson(path, maximum = maximumFileBytes) {
-  const before = lstatSync(path);
-  if (!before.isFile() || before.isSymbolicLink() || !samePath(realpathSync(path), path)) invalid();
-  const bytes = Buffer.alloc(maximum + 1);
-  const fd = openSync(path, constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW));
+  // Open the capability first. On POSIX a substituted FIFO must not block
+  // before fstat can reject it; no bytes are read from an unverified handle.
+  const fd = openSync(path, constants.O_RDONLY
+    | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW | constants.O_NONBLOCK));
+  let bytes;
   let count = 0;
   try {
     const opened = fstatSync(fd);
-    if (!opened.isFile() || before.dev !== opened.dev || before.ino !== opened.ino) invalid();
+    if (!opened.isFile()) invalid();
+    const current = lstatSync(path);
+    if (!current.isFile() || current.isSymbolicLink()
+        || current.dev !== opened.dev || current.ino !== opened.ino
+        || !samePath(realpathSync(dirname(path)), dirname(path))
+        || !samePath(realpathSync(path), path)) invalid();
+    bytes = Buffer.alloc(maximum + 1);
     while (count < bytes.length) {
       const read = readSync(fd, bytes, count, bytes.length - count, null);
       if (!read) break;

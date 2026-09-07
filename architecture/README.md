@@ -136,6 +136,15 @@ is never returned. Source paths label facts and cannot choose filesystem roots.
 The logical digest and exact ordinal coverage are checked before projection.
 There is no legacy-file runtime fallback or unverified-part cache.
 
+The Node reader acquires a read-only descriptor before validating its regular
+file type and reconciling its device/inode with the current physical pathname.
+It rejects redirected directories and leaves before allocating the read buffer;
+validation errors still close the descriptor. POSIX adds `O_NOFOLLOW` and
+`O_NONBLOCK`, so replacing a regular file with a FIFO cannot suspend validation
+inside `open`. After validation, reads use that same descriptor: a later rename
+cannot redirect them. This is an owned build-checkout boundary, not a claim to
+sandbox arbitrary hostile same-user ancestor mutations.
+
 The CLI can migrate the prior single-file artifact during `build` only. Fresh
 producer-derived filenames authorize repair of torn or mixed expected outputs;
 their old bytes never count as acceptance. Only a valid previous manifest and
