@@ -63,35 +63,93 @@ def test_preview_guard_rejects_at_exact_boundary_before_later_preconditions(tmp_
         pytest.skip(f'{shell_name} unavailable; Windows mutation job requires both shells')
     source = ROOT / 'scripts/control_center_transaction_engine.ps1'
     script = tmp_path / 'guard.ps1'
+    phase_file = tmp_path / 'guard-phases.txt'
     # Only parse and execute the exact function. No facade load, environment
     # secrets, runtime config, services, provider calls or writes are possible.
     script.write_text(r'''
-param([string]$Source)
+param([string]$Source,[string]$PhasePath)
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+function Write-ContractPhase { param([string]$Phase)
+    [IO.File]::AppendAllText($PhasePath,
+        [DateTimeOffset]::UtcNow.ToString('o')+' '+$Phase+' pid='+$PID+[Environment]::NewLine,
+        [Text.UTF8Encoding]::new($false))
+}
+Write-ContractPhase 'entry'
+$identity=[Diagnostics.Process]::GetCurrentProcess()
+Write-ContractPhase ('identity start_ticks='+$identity.StartTime.ToUniversalTime().Ticks)
+try {
 $tokens=$null;$errors=$null
+Write-ContractPhase 'parse-before'
 $ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+Write-ContractPhase 'parse-after'
 if (@($errors).Count) { throw 'GUARD_SOURCE_PARSE_FAILED' }
+Write-ContractPhase 'find-before'
 $function=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Start-ReleasePromotion'},$true))
+Write-ContractPhase 'find-after'
 if ($function.Count -ne 1) { throw 'GUARD_SOURCE_AMBIGUOUS' }
+Write-ContractPhase 'define-before'
 Invoke-Expression $function[0].Extent.Text
+Write-ContractPhase 'define-after'
 $productionCandidateArtifactKind='PRODUCTION_CANDIDATE'
 $script:kind='PREVIEW';$script:later=0;$script:unlocked=0
 function Enter-ReleaseTransactionLock { return $true }
 function Exit-ReleaseTransactionLock { $script:unlocked++ }
 function Get-ReleaseControlState { return [pscustomobject]@{transaction=$null;candidate=[pscustomobject]@{artifact_kind=$script:kind}} }
 function Assert-ActiveControlBundle { $script:later++;throw 'LATER_PRECONDITION_REACHED' }
+Write-ContractPhase 'preview-before'
 try { Start-ReleasePromotion; throw 'UNEXPECTED_RETURN' } catch { $preview=$_.Exception.Message }
+Write-ContractPhase 'preview-after'
 if ($preview -ne 'Preview and unknown artifacts cannot be promoted.' -or $script:later -ne 0 -or $script:unlocked -ne 1) { throw 'PREVIEW_GUARD_BOUNDARY_VIOLATED' }
 $script:kind='PRODUCTION_CANDIDATE'
+Write-ContractPhase 'production-before'
 try { Start-ReleasePromotion; throw 'UNEXPECTED_RETURN' } catch { $production=$_.Exception.Message }
+Write-ContractPhase 'production-after'
 if ($production -ne 'LATER_PRECONDITION_REACHED' -or $script:later -ne 1 -or $script:unlocked -ne 2) { throw 'GUARD_CONTROL_CASE_INVALID' }
 'EXACT_GUARD_BOUNDARY_PASSED'
+} finally { Write-ContractPhase 'exit' }
 ''', encoding='utf-8')
     environment = {key: value for key, value in os.environ.items()
                    if key.upper() in {'PATH', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'COMSPEC'}}
-    result = subprocess.run([shell, '-NoProfile', '-NonInteractive', '-File', str(script), '-Source', str(source)],
-                            env=environment, capture_output=True, encoding='utf-8', timeout=20,
-                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.strip() == 'EXACT_GUARD_BOUNDARY_PASSED'
+    process = subprocess.Popen(
+        [shell, '-NoProfile', '-NonInteractive', '-File', str(script), '-Source', str(source),
+         '-PhasePath', str(phase_file)], env=environment,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8',
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+    stdout = stderr = ''
+    observed_exit = None
+    cleanup = 'NOT_REQUIRED'
+    try:
+        try:
+            stdout, stderr = process.communicate(timeout=20)
+        except subprocess.TimeoutExpired as failure:
+            observed_exit = process.poll()  # Observe before timeout cleanup, not after kill.
+            if observed_exit is None:
+                process.kill()  # Retain subprocess.run's exact owned-root cleanup.
+            try:
+                stdout, stderr = process.communicate(timeout=3)
+                cleanup = 'OWNED_ROOT_EXITED'
+            except subprocess.TimeoutExpired as drain_failure:
+                # The stdout reader location alone cannot prove a child is alive.
+                # Retain partial streams and keep the result explicitly unresolved.
+                stdout = repr(drain_failure.stdout or failure.stdout or 'STREAM_CONTENT_UNAVAILABLE')
+                stderr = repr(drain_failure.stderr or failure.stderr or 'STREAM_CONTENT_UNAVAILABLE')
+                cleanup = 'STREAM_DRAIN_UNRESOLVED'
+            raise AssertionError('GUARD_CHILD_DEADLINE') from failure
+        assert process.returncode == 0, stdout + stderr
+        assert stdout.strip() == 'EXACT_GUARD_BOUNDARY_PASSED'
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=3)
+        raise
+    finally:
+        phases = 'PHASE_NOT_OBSERVED'
+        if phase_file.exists():
+            with phase_file.open(encoding='utf-8') as stream:
+                phases = stream.read(8192)
+        # Fixed phase writes use the existing installation-test pattern. Pytest
+        # retains this bounded block with any failure in the normal log/JUnit.
+        print(f'GUARD_DIAGNOSTICS pid={process.pid} observed_exit={observed_exit} '
+              f'final_exit={process.poll()} cleanup={cleanup} phases={phases!r} '
+              f'stdout={stdout[:8192]!r} stderr={stderr[:8192]!r}')
