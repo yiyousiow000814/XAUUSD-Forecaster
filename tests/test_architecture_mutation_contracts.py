@@ -36,22 +36,50 @@ def test_sync_publishes_heartbeat_before_optional_work(monkeypatch):
 
 
 def test_forward_ledger_rejects_real_update_and_delete(tmp_path):
-    ledger = ForwardLedger(tmp_path / 'isolated.sqlite3', now=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    recorded_at = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    ledger = ForwardLedger(tmp_path / 'isolated.sqlite3', now=recorded_at)
     try:
-        original = ledger.connection.execute("SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'").fetchone()[0]
-        for statement in (
-            "UPDATE runtime_metadata SET value='changed' WHERE key='FORWARD_EPOCH'",
-            "DELETE FROM runtime_metadata WHERE key='FORWARD_EPOCH'",
+        ledger.append_snapshot({
+            'snapshot_id': 'isolated-snapshot',
+            'decision_time': recorded_at,
+            'collected_at': recorded_at,
+            'data_role': 'FORWARD',
+            'source': 'isolated-fixture',
+            'bid': 2000.0,
+            'ask': 2000.2,
+            'feature_version': 'isolated-v1',
+            'u5_status': 'VALID',
+            'data_health': 'HEALTHY',
+        })
+        # Exercise real historical evidence as well as the separately guarded
+        # epoch. Operational metadata exceptions must not mask evidence drift.
+        for query, statements in (
+            (
+                "SELECT * FROM market_snapshots WHERE snapshot_id='isolated-snapshot'",
+                (
+                    "UPDATE market_snapshots SET bid=1999.0 WHERE snapshot_id='isolated-snapshot'",
+                    "DELETE FROM market_snapshots WHERE snapshot_id='isolated-snapshot'",
+                ),
+            ),
+            (
+                "SELECT * FROM runtime_metadata WHERE key='FORWARD_EPOCH'",
+                (
+                    "UPDATE runtime_metadata SET value='changed' WHERE key='FORWARD_EPOCH'",
+                    "DELETE FROM runtime_metadata WHERE key='FORWARD_EPOCH'",
+                ),
+            ),
         ):
-            rejected = False
-            try:
-                ledger.connection.execute(statement)
-            except sqlite3.IntegrityError as error:
-                rejected = 'append-only' in str(error)
-            finally:
-                ledger.connection.rollback()
-            assert rejected, 'FORWARD_APPEND_ONLY_VIOLATED'
-            assert ledger.connection.execute("SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'").fetchone()[0] == original
+            original = tuple(ledger.connection.execute(query).fetchone())
+            for statement in statements:
+                rejected = False
+                try:
+                    ledger.connection.execute(statement)
+                except sqlite3.IntegrityError as error:
+                    rejected = 'append-only' in str(error)
+                finally:
+                    ledger.connection.rollback()
+                assert rejected, f'FORWARD_APPEND_ONLY_VIOLATED: {statement}'
+                assert tuple(ledger.connection.execute(query).fetchone()) == original
     finally:
         ledger.close()
 
