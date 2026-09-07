@@ -46,6 +46,21 @@ The shared annotation scheduler reserves a bounded part of each discovery batch
 for those unfinished historical dates so continuous current-day arrivals cannot
 starve their remaining semantic reviews.
 
+Discovery checks the exact annotation job identity before reading its source
+body again. Queued, leased, and backing-off work remains owned by the existing
+claim/retry path; discovery must not reset its due time or failure history.
+An owned job is not a completed annotation. Protected-date reconciliation uses
+the unfinished-date authority, independently of the rows newly discovered in
+that cycle, so later cross-date peers cannot retire already-owned reviews.
+Once the date is effectively finalized, normal supersession rules apply.
+
+Protected discovery must also leave ordinary contract backfill able to advance
+without increasing the total allowance. When at least two historical slots are
+available, one is reserved for the durable ordinary cursor. With a single slot,
+each exact owned job leaves discovery, so a fixed finite protected population
+drains before ordinary discovery resumes. This is not a guarantee under an
+unbounded stream of new historical inputs; provider dispatch quotas are unchanged.
+
 Frequent worker checks do not imply generation. For a changed live-day packet,
 the durable refresh decision combines age since the last successful revision,
 new canonical event or episode identities, material updates, major-event

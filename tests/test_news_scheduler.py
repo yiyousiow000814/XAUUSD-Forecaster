@@ -234,6 +234,155 @@ def test_contract_backfill_discovery_is_bounded_resumable_and_separate(tmp_path)
     ledger.close()
 
 
+@pytest.mark.parametrize("job_state", ("QUEUED", "LEASED", "BACKING_OFF"))
+def test_annotation_discovery_uses_exact_job_before_body_but_claim_can_resolve(
+    tmp_path, job_state,
+) -> None:
+    from xauusd_forecaster.annotation import pending_annotation_records
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW - timedelta(days=1))
+    body = "Declared complete XAUUSD macro evidence for the exact discovery job. " * 8
+    ledger.append_news_revision({
+        "source": "discovery-boundary", "source_item_id": "one",
+        "source_published_time": NOW, "collector_first_seen_time": NOW,
+        "fetched_time": NOW, "headline": "Source report", "body": body,
+        "content_hash": hashlib.sha256(body.encode()).hexdigest(), "cluster_id": "one",
+    })
+    job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_ANNOTATION", source="discovery-boundary",
+        source_item_id="one", revision_number=1, prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+        priority="FAST", now=NOW,
+    )
+    if job_state != "QUEUED":
+        job = claim_job(ledger.connection, worker_id="owner", pool=ROUTINE_POOL, now=NOW)
+        assert job and job.job_id == job_id
+        if job_state == "BACKING_OFF":
+            backoff_job(
+                ledger.connection, job_id, "owner", available_at=NOW + timedelta(hours=1),
+                error="Retained provider failure",
+            )
+    before = dict(ledger.connection.execute(
+        "SELECT * FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+    ).fetchone())
+    body_length_calls = []
+
+    def measured_length(value):
+        if value == body:
+            body_length_calls.append(1)
+        return None if value is None else len(value)
+
+    ledger.connection.create_function("length", 1, measured_length)
+    for instant in (NOW, NOW + timedelta(seconds=10)):
+        assert pending_annotation_records(
+            ledger.connection, observed_at=instant, discovery_only=True,
+        ) == []
+    assert body_length_calls == []
+    assert dict(ledger.connection.execute(
+        "SELECT * FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()) == before
+    # Claim resolution intentionally does not use the discovery-only filter.
+    resolved = news_scheduler_module.pending_record_for_job(
+        ledger.connection, news_scheduler_module._job_from_row(before), now=NOW,
+    )
+    assert resolved and resolved["source_item_id"] == "one" and resolved["body"] == body
+    assert body_length_calls
+    if job_state == "BACKING_OFF":
+        assert claim_job(
+            ledger.connection, worker_id="early", pool=ROUTINE_POOL,
+            now=NOW + timedelta(seconds=10),
+        ) is None
+        due = claim_job(
+            ledger.connection, worker_id="due", pool=ROUTINE_POOL,
+            now=NOW + timedelta(hours=1),
+        )
+        assert due and due.job_id == job_id
+    ledger.close()
+
+
+@pytest.mark.parametrize("limit", (2, 4, 2_000))
+def test_protected_discovery_preserves_bounded_ordinary_progress_and_restart(
+    tmp_path, limit,
+) -> None:
+    instant = datetime(2026, 8, 12, 16, 10, tzinfo=UTC)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=instant - timedelta(days=1))
+    capacity = min(news_scheduler_module.CONTRACT_BACKFILL_PAGE_SIZE, limit // 2)
+    population = capacity + 3
+    for index in range(population):
+        received = instant - timedelta(minutes=20 + index)
+        body = f"Actual synthetic protected macro evidence number {index}. " * 8
+        ledger.append_news_revision({
+            "source": "protected-progress", "source_item_id": f"item-{index:03d}",
+            "source_published_time": received, "collector_first_seen_time": received,
+            "fetched_time": received, "headline": f"Source report {index}", "body": body,
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+            "cluster_id": f"protected-progress-{index}",
+        })
+    states = []
+    for iteration in range(population + 2):
+        discovered = sync_pending_jobs(
+            ledger.connection, now=instant + timedelta(seconds=iteration), limit=limit,
+        )
+        assert discovered["ACTIVE_ANNOTATION"] <= limit
+        state = dict(ledger.connection.execute(
+            """SELECT * FROM news_annotation_contract_backfill_v1
+               WHERE prompt_version=?""", (CURRENT_NEWS_PROMPT_VERSION,),
+        ).fetchone())
+        states.append(state)
+        if iteration == 0:
+            if capacity > 1:
+                assert state["cursor_first_seen"] is not None
+            # A fresh real connection must retain discovery's accepted progress.
+            ledger.close()
+            ledger = ForwardLedger(database, now=instant)
+            assert dict(ledger.connection.execute(
+                """SELECT * FROM news_annotation_contract_backfill_v1
+                   WHERE prompt_version=?""", (CURRENT_NEWS_PROMPT_VERSION,),
+            ).fetchone()) == state
+    jobs = ledger.connection.execute(
+        """SELECT source_item_id,state FROM news_ai_jobs_v1
+           WHERE task_type='ACTIVE_ANNOTATION'""",
+    ).fetchall()
+    assert len(jobs) == population
+    assert all(row["state"] == "QUEUED" for row in jobs)
+    assert states[-1]["state"] == "COMPLETE"
+    assert sync_pending_jobs(
+        ledger.connection, now=instant + timedelta(seconds=population + 2), limit=limit,
+    )["ACTIVE_ANNOTATION"] == 0
+    ledger.close()
+
+
+def test_annotation_discovery_does_not_reuse_another_revision_or_prompt_job(tmp_path) -> None:
+    from xauusd_forecaster.annotation import pending_annotation_records
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW - timedelta(days=1))
+    for item, revision, received in (
+        ("revised", 1, NOW), ("revised", 2, NOW + timedelta(seconds=1)),
+        ("new-contract", 1, NOW),
+    ):
+        body = f"Complete new source evidence {item} revision {revision}. " * 8
+        ledger.append_news_revision({
+            "source": "discovery-key", "source_item_id": item,
+            "source_published_time": received, "collector_first_seen_time": received,
+            "fetched_time": received, "headline": "New source report", "body": body,
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(), "cluster_id": item,
+        })
+    for item, prompt in (("revised", CURRENT_NEWS_PROMPT_VERSION),
+                         ("new-contract", PREVIOUS_NEWS_PROMPT_VERSION)):
+        enqueue_job(
+            ledger.connection, task_type="ACTIVE_ANNOTATION", source="discovery-key",
+            source_item_id=item, revision_number=1, prompt_version=prompt,
+            priority="FAST", now=NOW,
+        )
+    rows = pending_annotation_records(
+        ledger.connection, observed_at=NOW + timedelta(seconds=2), discovery_only=True,
+    )
+    assert {(row["source_item_id"], row["revision_number"]) for row in rows} == {
+        ("revised", 2), ("new-contract", 1),
+    }
+    ledger.close()
+
+
 def test_ten_thousand_record_backfill_cursor_is_bounded_and_exact(monkeypatch) -> None:
     connection = _connection()
     connection.execute(
@@ -1258,8 +1407,8 @@ def test_account_configuration_groups_keys_without_exposing_secrets() -> None:
 
 
 def test_credential_identity_is_stable_unique_and_secret_safe() -> None:
-    first = configured_api_credentials(legacy_keys=("secret-a", "secret-b"))
-    restarted = configured_api_credentials(legacy_keys=("secret-a", "secret-b"))
+    first = configured_api_credentials(raw_accounts="", legacy_keys=("secret-a", "secret-b"))
+    restarted = configured_api_credentials(raw_accounts="", legacy_keys=("secret-a", "secret-b"))
 
     assert first == restarted
     assert len({item.credential_id for item in first}) == 2
@@ -1531,7 +1680,7 @@ def test_account_configuration_rejects_one_key_in_two_accounts() -> None:
 
 
 def test_legacy_keys_are_independent_routine_accounts() -> None:
-    credentials = configured_api_credentials(legacy_keys=(
+    credentials = configured_api_credentials(raw_accounts="", legacy_keys=(
         "legacy-secret-a", "legacy-secret-b", "legacy-secret-a",
     ))
 
@@ -1924,8 +2073,10 @@ def test_pending_contract_reopens_jobs_completed_by_invalid_legacy_annotations(
     ledger.close()
 
 
+@pytest.mark.parametrize("backed_off", (False, True))
+@pytest.mark.parametrize("same_item_revision", (False, True))
 def test_protected_daily_brief_job_resolves_after_cross_date_dedup(
-    tmp_path,
+    tmp_path, backed_off, same_item_revision,
 ) -> None:
     ledger = ForwardLedger(
         tmp_path / "forward.sqlite3", now=NOW - timedelta(days=3),
@@ -1938,7 +2089,8 @@ def test_protected_daily_brief_job_resolves_after_cross_date_dedup(
     ):
         body = "x" * body_length
         ledger.append_news_revision({
-            "source": "Reuters", "source_item_id": item_id,
+            "source": "Reuters",
+            "source_item_id": "old-day" if same_item_revision else item_id,
             "source_published_time": received,
             "collector_first_seen_time": received, "fetched_time": received,
             "headline": f"Report {item_id}", "body": body,
@@ -1981,7 +2133,8 @@ def test_protected_daily_brief_job_resolves_after_cross_date_dedup(
     )
     row = ledger.connection.execute(
         """SELECT * FROM news_ai_jobs_v1
-           WHERE task_type='ACTIVE_ANNOTATION' AND source_item_id='old-day'"""
+           WHERE task_type='ACTIVE_ANNOTATION' AND source_item_id='old-day'
+             AND revision_number=1"""
     ).fetchone()
     job = news_scheduler_module._job_from_row(row)
     resolved = news_scheduler_module.pending_record_for_job(
@@ -1993,6 +2146,43 @@ def test_protected_daily_brief_job_resolves_after_cross_date_dedup(
     assert row["last_error"] is None
     assert resolved is not None
     assert resolved["source_item_id"] == "old-day"
+    if backed_off:
+        claimed = claim_job(
+            ledger.connection, worker_id="protected-retry", pool=ROUTINE_POOL,
+            now=NOW + timedelta(minutes=1),
+        )
+        assert claimed and claimed.job_id == obsolete_job_id
+        backoff_job(
+            ledger.connection, obsolete_job_id, "protected-retry",
+            available_at=NOW + timedelta(hours=1), error="Preserved protected backoff",
+        )
+    before = dict(ledger.connection.execute(
+        "SELECT * FROM news_ai_jobs_v1 WHERE job_id=?", (obsolete_job_id,),
+    ).fetchone())
+    sync_pending_jobs(ledger.connection, now=NOW + timedelta(minutes=2), limit=20)
+    after = dict(ledger.connection.execute(
+        "SELECT * FROM news_ai_jobs_v1 WHERE job_id=?", (obsolete_job_id,),
+    ).fetchone())
+    assert after == before
+    assert news_scheduler_module.pending_record_for_job(
+        ledger.connection, news_scheduler_module._job_from_row(after),
+        now=NOW + timedelta(minutes=2),
+    )["source_item_id"] == "old-day"
+    # A real finalization correction removes the prior day from protection;
+    # ordinary global supersession must then remain effective.
+    from xauusd_forecaster.daily_brief import BRIEF_RECOVERY_VERSION
+    with ledger.connection:
+        ledger.connection.execute(
+            """INSERT INTO daily_news_brief_finalization_corrections_v1
+               (correction_id,brief_date,recovery_version,revision_number,final_status,
+                received_items,reviewed_items,terminal_failure_items,cutoff_at,finalized_at)
+               VALUES ('fixture-finalization','2026-08-10',?,1,'FINAL',1,1,0,?,?)""",
+            (BRIEF_RECOVERY_VERSION, NOW.isoformat(), NOW.isoformat()),
+        )
+    sync_pending_jobs(ledger.connection, now=NOW + timedelta(minutes=3), limit=20)
+    assert tuple(ledger.connection.execute(
+        "SELECT state,last_error FROM news_ai_jobs_v1 WHERE job_id=?", (obsolete_job_id,),
+    ).fetchone()) == ("DEAD_LETTER", "CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE")
     ledger.close()
 
 
