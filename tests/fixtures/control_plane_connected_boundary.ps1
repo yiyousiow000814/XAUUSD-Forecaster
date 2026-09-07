@@ -12,15 +12,28 @@ function Invoke-GitHubChecksRead {
 function Invoke-WranglerJson {
     param([string[]]$Arguments)
     $config = Get-IsolatedRuntimeConfiguration
+    $readOwnedJson = {
+        param([string]$Path,[int]$Limit,[string]$Reason)
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw $Reason }
+        # Read one opened identity, bounded by bytes actually read. An atomic
+        # provider replacement between stat/open cannot bypass the limit.
+        $buffer = [byte[]]::new($Limit + 1); $count = 0
+        $stream = [IO.File]::OpenRead($Path)
+        try {
+            while ($count -lt $buffer.Length) {
+                $read = $stream.Read($buffer, $count, $buffer.Length - $count)
+                if ($read -eq 0) { break }; $count += $read
+            }
+        } finally { $stream.Dispose() }
+        if ($count -eq 0 -or $count -gt $Limit) { throw $Reason }
+        [Text.UTF8Encoding]::new($false, $true).GetString($buffer, 0, $count) | ConvertFrom-ReleaseControlJson
+    }
     if ($config.values.WORKER_PLACEMENT_FILE -and
         ($Arguments | ConvertTo-Json -Compress) -ceq '["deployments","status","--name","aurum-signal-room"]') {
         $path = Join-Path ([string]$config.owned_root) 'worker-placement.json'
         if ([string]$config.values.WORKER_PLACEMENT_FILE -cne $path) { throw 'CONNECTED_PLACEMENT_AUTHORITY_INVALID' }
         Assert-IsolatedConfigurationPath -Path $path
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -gt 8192) {
-            throw 'CONNECTED_PLACEMENT_UNAVAILABLE'
-        }
-        $placement = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-ReleaseControlJson
+        $placement = & $readOwnedJson $path 8192 'CONNECTED_PLACEMENT_UNAVAILABLE'
         $ids = @([string]$config.values.STABLE_WORKER_VERSION, [string]$config.values.TARGET_WORKER_VERSION)
         $owners = @($placement.versions)
         if ($ids[0] -ceq $ids[1] -or $owners.Count -notin @(1,2) -or
@@ -39,7 +52,18 @@ function Invoke-WranglerJson {
         if ($query.Count -ne 1) { throw 'CONNECTED_D1_QUERY_UNDECLARED' }
         return Invoke-RestMethod -Uri (([string]$config.values.WORKER_LOOPBACK_BASE_URL) + '/fixture/d1/' + $query[0].key)
     }
-    $requests = [string]$config.values.WRANGLER_READ_RESPONSES_JSON | ConvertFrom-ReleaseControlJson
+    if ($config.values.WRANGLER_READ_RESPONSES_FILE) {
+        # The isolated provider may publish a version after the real discovery
+        # watermark. Only this predeclared owned file can change; no fallback.
+        $path = Join-Path ([string]$config.owned_root) 'worker-read-responses.json'
+        if ([string]$config.values.WRANGLER_READ_RESPONSES_FILE -cne $path) {
+            throw 'CONNECTED_PROVIDER_READ_AUTHORITY_INVALID'
+        }
+        Assert-IsolatedConfigurationPath -Path $path
+        $requests = & $readOwnedJson $path 131072 'CONNECTED_PROVIDER_READ_UNAVAILABLE'
+    } else {
+        $requests = [string]$config.values.WRANGLER_READ_RESPONSES_JSON | ConvertFrom-ReleaseControlJson
+    }
     $key = $Arguments | ConvertTo-Json -Compress
     $matched = @($requests | Where-Object { ($_.arguments | ConvertTo-Json -Compress) -ceq $key })
     if ($matched.Count -ne 1) { throw 'CONNECTED_WRANGLER_REQUEST_UNDECLARED' }
@@ -131,6 +155,56 @@ function Invoke-RestMethod {
     # fallback. All declared REST resources in this fixture return JSON bytes.
     $response = Invoke-WebRequest @PSBoundParameters -UseBasicParsing
     return ($response.Content | ConvertFrom-ReleaseControlJson)
+}
+function Invoke-CandidateStaticAssetRequest {
+    param([Parameter(Mandatory=$true)][Uri]$RequestUri)
+    $config = Get-IsolatedRuntimeConfiguration
+    $declared = [string]$config.values.PROVIDER_HTTP_REQUESTS_JSON | ConvertFrom-ReleaseControlJson
+    $matches = @($declared | Where-Object {
+        $_.origin -ceq $RequestUri.GetLeftPart([UriPartial]::Authority) -and
+        $_.method -ceq 'GET' -and $_.path_query -ceq $RequestUri.PathAndQuery
+    })
+    if ($RequestUri.Scheme -cne 'https' -or $RequestUri.UserInfo -or $RequestUri.Fragment -or
+        $matches.Count -ne 1) { throw 'CONNECTED_STATIC_TARGET_UNDECLARED' }
+    $base = [Uri]$config.values.WORKER_LOOPBACK_BASE_URL
+    if ($base.Scheme -cne 'http' -or $base.Host -cne '127.0.0.1' -or
+        $base.Port -notin @($config.loopback_ports) -or $base.Port -eq 8765 -or
+        $base.AbsolutePath -cne '/' -or $base.UserInfo -or $base.Query -or $base.Fragment) {
+        throw 'CONNECTED_STATIC_TARGET_UNDECLARED'
+    }
+    # Preserve the actual raw byte transport, including redirects. Only the
+    # explicit provider origin becomes the owned loopback endpoint; validators
+    # above this transport remain untouched and see the original Location.
+    Add-Type -AssemblyName System.Net.Http
+    $handler = [Net.Http.HttpClientHandler]::new()
+    $handler.AllowAutoRedirect = $false
+    $handler.UseProxy = $false
+    $client = [Net.Http.HttpClient]::new($handler)
+    $client.Timeout = [TimeSpan]::FromSeconds(30)
+    $response = $null
+    try {
+        $null = $client.DefaultRequestHeaders.TryAddWithoutValidation('X-Fixture-Requested-Origin',
+            $RequestUri.GetLeftPart([UriPartial]::Authority))
+        $response = $client.GetAsync($base.GetLeftPart([UriPartial]::Authority) +
+            $RequestUri.PathAndQuery).GetAwaiter().GetResult()
+        $headers = @{}
+        foreach ($name in @('CF-Cache-Status','Age','X-Aurum-Worker-Version','X-Aurum-Git-SHA','X-Aurum-Route')) {
+            $headers[$name] = if ($response.Headers.Contains($name)) {
+                [string]($response.Headers.GetValues($name) | Select-Object -First 1)
+            } else { '' }
+        }
+        return [pscustomobject]@{
+            status=[int]$response.StatusCode; content_type=[string]$response.Content.Headers.ContentType
+            body_bytes=$response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+            location=[string]$response.Headers.Location; etag=[string]$response.Headers.ETag
+            cf_cache_status=$headers['CF-Cache-Status']; age=$headers['Age']
+            worker_version=$headers['X-Aurum-Worker-Version']; git_sha=$headers['X-Aurum-Git-SHA']
+            route=$headers['X-Aurum-Route']
+        }
+    } finally {
+        if ($response) { $response.Dispose() }
+        $client.Dispose(); $handler.Dispose()
+    }
 }
 function Get-ScheduledTask {
     [CmdletBinding()]

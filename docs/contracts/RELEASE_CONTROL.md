@@ -982,6 +982,21 @@ accepts only the complete named external-function set, not arbitrary startup
 code or lifecycle overrides. Provider adapters return raw provider data through
 the existing acceptance consumers; unknown operations fail before external I/O.
 Tests compare all non-external function definitions before and after composition.
+The raw static-asset transport is included in that boundary: only an exact
+declared HTTPS origin, method and query maps to the owned loopback listener.
+The real byte/MIME/redirect and Worker identity consumers remain unchanged.
+Isolated version publication may atomically replace the one declared
+`worker-read-responses.json` beneath the owned root after discovery's initial
+watermark; malformed, missing, oversized or redirected input never falls back
+to an earlier successful provider record.
+The connected Node fixture executes the real built Worker against its declared
+in-memory D1 adapter. Before importing code, require the complete bounded
+server/client file set and source/dependency identities, not only the entry
+file hash. Serving roots must remain immutable for the session, including when
+the separate Windows runtime checkout switches revision. Retain actual build
+execution and any verified copy mapping separately from byte identity. Local
+Node results and declared synthetic provider telemetry are not Cloudflare
+qualification, provider usage, human Access acceptance or production evidence.
 The scheduler fixture keeps only its two declared task states in owned files,
 so suspension and restoration are visible to every child without registering
 production tasks. Replacement still runs the real hidden WScript command and

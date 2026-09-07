@@ -145,7 +145,7 @@ function Get-IsolatedExternalAdapterDefinitions {
         [Text.UTF8Encoding]::new($false, $true).GetString($bytes), [ref]$tokens, [ref]$errors
     )
     $allowed = @('Invoke-GitHubChecksRead', 'Invoke-WranglerJson', 'Invoke-WranglerDeploymentCommand',
-        'Invoke-WebRequest', 'Invoke-RestMethod', 'Get-ScheduledTask', 'Start-ScheduledTask',
+        'Invoke-WebRequest', 'Invoke-RestMethod', 'Invoke-CandidateStaticAssetRequest', 'Get-ScheduledTask', 'Start-ScheduledTask',
         'Stop-ScheduledTask', 'Enable-ScheduledTask', 'Disable-ScheduledTask',
         'Register-ScheduledTask', 'Unregister-ScheduledTask', 'Start-Process', 'Get-AvailableLoopbackPort')
     if ($errors.Count -or $ast.BeginBlock -or $ast.ProcessBlock -or $ast.ParamBlock) {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 import ast
 import ctypes
 from ctypes import wintypes
@@ -310,6 +311,17 @@ def test_connected_external_adapter_preserves_control_owners(tmp_path, monkeypat
                 pass
             def do_GET(self):
                 requests.append(self.path)
+                if self.path in ("/fixture-static", "/fixture-redirect"):
+                    raw = "<html>真实 UTF-8 marker</html>".encode("utf-8")
+                    self.send_response(307 if self.path == "/fixture-redirect" else 200)
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("X-Aurum-Git-SHA", "a" * 40)
+                    if self.path == "/fixture-redirect":
+                        self.send_header("Location", "https://isolated-worker.invalid/fixture-static")
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return
                 raw = json.dumps({"recent_decisions": [{"decision_time": "provider-owned-sentinel"}],
                     "boundary": "RAW_PROVIDER_BYTES"}).encode()
                 self.send_response(200)
@@ -334,6 +346,8 @@ def test_connected_external_adapter_preserves_control_owners(tmp_path, monkeypat
         config["values"]["WORKER_LOOPBACK_BASE_URL"] = config["provider_endpoint"]
         config["values"]["PROVIDER_HTTP_REQUESTS_JSON"] = json.dumps([
             {"origin": "https://isolated-worker.invalid", "method": "GET", "path_query": "/api/ingest"},
+            {"origin": "https://isolated-worker.invalid", "method": "GET", "path_query": "/fixture-static"},
+            {"origin": "https://isolated-worker.invalid", "method": "GET", "path_query": "/fixture-redirect"},
         ])
     if case == "tampered":
         template.write_text(payload + "\n# unaccepted bytes\n", encoding="utf-8")
@@ -343,10 +357,34 @@ def test_connected_external_adapter_preserves_control_owners(tmp_path, monkeypat
         placement = owned / "worker-placement.json"
         config["values"].update(WORKER_PLACEMENT_FILE=str(placement), STABLE_WORKER_VERSION=stable,
                                 TARGET_WORKER_VERSION=candidate)
+        reads = owned / "worker-read-responses.json"
+        reads.write_text("[]", encoding="utf-8")
+        config["values"]["WRANGLER_READ_RESPONSES_FILE"] = str(reads)
+        config["values"]["WRANGLER_READ_RESPONSES_JSON"] = json.dumps([{
+            "arguments": ["versions", "list", "--name", "aurum-signal-room"],
+            "response": [{"id": "FORBIDDEN_PRIOR_FALLBACK"}],
+        }])
         placement.write_text(json.dumps({"id": "fixture-initial", "versions": [{"version_id": stable, "percentage": 100}]}), encoding="utf-8")
         Path(config["repository_root"], "web").mkdir(parents=True)
         business_body = f"""
         $repositoryRoot='{config['repository_root']}';$workerName='aurum-signal-room'
+        $readPath='{reads}'
+        $initial=@([pscustomobject]@{{arguments=@('versions','list','--name',$workerName);response=@([pscustomobject]@{{id='{stable}'}})}})
+        Write-ControlCenterJsonAtomic -Path $readPath -Value $initial -Depth 6
+        if(@(Get-CloudflareVersions).Count -ne 1){{throw 'INITIAL_PROVIDER_UNIVERSE_CHANGED'}}
+        $initial[0].response+=([pscustomobject]@{{id='{candidate}'}})
+        Write-ControlCenterJsonAtomic -Path $readPath -Value $initial -Depth 6
+        if(@(Get-CloudflareVersions).Count -ne 2){{throw 'PROVIDER_PUBLICATION_NOT_OBSERVED'}}
+        foreach($bad in @('{{',(' '*131073))){{
+            [IO.File]::WriteAllText($readPath,$bad)
+            $denied=$false;try{{$null=Invoke-WranglerJson -Arguments @('versions','list','--name',$workerName)}}catch{{$denied=$true}}
+            if(-not $denied){{throw 'MALFORMED_PROVIDER_READ_ACCEPTED'}}
+        }}
+        Remove-Item -LiteralPath $readPath
+        $denied=$false;try{{$null=Invoke-WranglerJson -Arguments @('versions','list','--name',$workerName)}}catch{{
+            if($_.Exception.Message -cne 'CONNECTED_PROVIDER_READ_UNAVAILABLE'){{throw}};$denied=$true}}
+        if(-not $denied){{throw 'MISSING_PROVIDER_READ_FELL_BACK'}}
+        [IO.File]::WriteAllText($readPath,'[]')
         $stable=[pscustomobject]@{{worker_version_id='{stable}'}}
         $candidate=[pscustomobject]@{{worker_version_id='{candidate}';validation_key='{candidate}:{'a' * 40}'}}
         Set-CloudflareCandidatePointer -Stable $stable -Candidate $candidate
@@ -363,6 +401,13 @@ def test_connected_external_adapter_preserves_control_owners(tmp_path, monkeypat
         Invoke-CloudflareDeployment -StableVersionId '{stable}' -Message 'reverse stable 33333333-3333-4333-8333-333333333333'
         $restored=Invoke-WranglerJson -Arguments @('deployments','status','--name',$workerName)
         if(@($restored.versions).Count -ne 1 -or $restored.versions[0].version_id -cne '{stable}' -or $restored.versions[0].percentage -ne 100){{throw 'FIXTURE_REVERSE_OWNER_NOT_RESTORED'}}
+        $savedPlacement=[IO.File]::ReadAllText('{placement}')
+        try {{
+            [IO.File]::WriteAllText('{placement}',(' '*8193))
+            $denied=$false;try{{$null=Invoke-WranglerJson -Arguments @('deployments','status','--name',$workerName)}}catch{{
+                if($_.Exception.Message -cne 'CONNECTED_PLACEMENT_UNAVAILABLE'){{throw}};$denied=$true}}
+            if(-not $denied){{throw 'OVERSIZED_PLACEMENT_ACCEPTED'}}
+        }} finally {{[IO.File]::WriteAllText('{placement}',$savedPlacement)}}
         """
     if case == "installer-external":
         control = Path(config["repository_root"]) / ".local/runtime-control"
@@ -533,7 +578,7 @@ def test_connected_external_adapter_preserves_control_owners(tmp_path, monkeypat
         "foreach($definition in @(Get-IsolatedExternalAdapterDefinitions)){"
         "Set-Item -Path ('function:'+ $definition.name) -Value ([scriptblock]::Create($definition.body))}\n"
         "$allowed=@('Invoke-GitHubChecksRead','Invoke-WranglerJson','Invoke-WranglerDeploymentCommand',"
-        "'Invoke-WebRequest','Invoke-RestMethod','Get-ScheduledTask','Start-ScheduledTask','Stop-ScheduledTask',"
+        "'Invoke-WebRequest','Invoke-RestMethod','Invoke-CandidateStaticAssetRequest','Get-ScheduledTask','Start-ScheduledTask','Stop-ScheduledTask',"
         "'Enable-ScheduledTask','Disable-ScheduledTask','Register-ScheduledTask','Unregister-ScheduledTask','Start-Process','Get-AvailableLoopbackPort')\n"
         "foreach($name in $prior.Keys){if($name -notin $allowed -and (Get-Item ('function:'+ $name)).Definition -cne $prior[$name]){throw 'OWNER_CHANGED'}}\n"
         "$requiredGitHubChecks=@('real-required');$convertFromJsonSupportsDateKind=$false\n"
@@ -553,7 +598,14 @@ def test_connected_external_adapter_preserves_control_owners(tmp_path, monkeypat
         "if((Invoke-RestMethod -Uri 'https://isolated-worker.invalid/api/ingest').boundary -cne 'RAW_PROVIDER_BYTES'){throw 'PROVIDER_BYTES_CHANGED'};"
         "$rejected=0;foreach($uri in @('https://isolated-worker.invalid/api/ingest?extra=1','https://outside.invalid/api/ingest')){"
         "try{Invoke-WebRequest -Uri $uri}catch{if($_.Exception.Message -cne 'CONNECTED_NETWORK_TARGET_UNDECLARED'){throw};$rejected++}};"
-        "if($rejected -ne 2){throw 'UNDECLARED_EXTERNAL_NETWORK_ACCEPTED'}}\n"
+        "if($rejected -ne 2){throw 'UNDECLARED_EXTERNAL_NETWORK_ACCEPTED'};"
+        "$raw=Invoke-CandidateStaticAssetRequest -RequestUri 'https://isolated-worker.invalid/fixture-static';"
+        f"if($raw.status -ne 200 -or $raw.git_sha -cne ('a'*40) -or [Convert]::ToBase64String($raw.body_bytes) -cne '{base64.b64encode('<html>真实 UTF-8 marker</html>'.encode()).decode()}'){{throw 'STATIC_BYTES_CHANGED'}};"
+        "$redirect=Invoke-CandidateStaticAssetRequest -RequestUri 'https://isolated-worker.invalid/fixture-redirect';"
+        "if($redirect.status -ne 307 -or $redirect.location -cne 'https://isolated-worker.invalid/fixture-static'){throw 'STATIC_REDIRECT_CHANGED'};"
+        "$denied=0;foreach($uri in @('https://outside.invalid/fixture-static','https://isolated-worker.invalid/fixture-static?extra=1')){"
+        "try{Invoke-CandidateStaticAssetRequest -RequestUri $uri}catch{if($_.Exception.Message -cne 'CONNECTED_STATIC_TARGET_UNDECLARED'){throw};$denied++}};"
+        "if($denied -ne 2){throw 'STATIC_NATIVE_NETWORK_FALLBACK'}}\n"
         "$badArguments='\"\\\\server\\share\\outside.vbs\" \"'+(Get-IsolatedRuntimeConfiguration).owned_root+'\\inside\"';"
         "$processDenied=0;foreach($executable in @('C:\\outside\\wscript.exe',(Join-Path ([Environment]::SystemDirectory) 'wscript.exe'))){"
         "try{Start-Process -FilePath $executable -ArgumentList $badArguments}catch{"
@@ -584,7 +636,8 @@ def test_connected_external_adapter_preserves_control_owners(tmp_path, monkeypat
                 assert connection.execute("SELECT count(*) FROM market_snapshots").fetchone() == (0,)
             connection.close()
     if case == "mapped-loopback":
-        assert requests == ["/api/status", "/api/health", "/api/critical-status", "/api/ingest"] * 2
+        assert requests == ["/api/status", "/api/health", "/api/critical-status", "/api/ingest",
+                            "/fixture-static", "/fixture-redirect"] * 2
 
 
 @pytest.mark.parametrize("duration,budget,elapsed,expected", [
@@ -725,7 +778,18 @@ def _controller_load_timing_copy(script: Path, directory: Path) -> Path:
     for number, line in enumerate(original.splitlines(), 1):
         stripped = line.strip()
         before = after = None
-        if stripped.startswith(". (Join-Path $PSScriptRoot "):
+        if stripped == '$ErrorActionPreference = "Stop"':
+            before = "entry-after-param"
+        elif stripped.startswith("$controlCenterEntrypointPath = "):
+            before, after = "entry-path-enter", "entry-path-return"
+        elif stripped.startswith("$scriptRepositoryRoot = Split-Path"):
+            before, after = "entry-split-enter", "entry-split-return"
+        elif stripped == "$repositoryRoot = if ($RepositoryRoot) {":
+            before = "runtime-roots-enter"
+        elif stripped.startswith(". (Join-Path $PSScriptRoot "):
+            if "'control_center_common.ps1'" in stripped:
+                mapped.append("Write-ContractPhase 'runtime-roots-return'")
+                selected.append({"source_line": number, "phase": "runtime-roots-return"})
             before, after = f"owner-enter:{number}", f"owner-return:{number}"
         elif stripped.startswith("$runtimeControlSourceManifest = Get-Content"):
             before = "manifest-enter"
@@ -752,7 +816,8 @@ def _controller_load_timing_copy(script: Path, directory: Path) -> Path:
         if after:
             mapped.append(f"Write-ContractPhase '{after}'")
             selected.append({"source_line": number, "phase": after})
-    required = {"manifest-enter", "manifest-return", "convertfromjson-command-enter",
+    required = {"entry-after-param", "entry-path-enter", "entry-path-return", "entry-split-enter", "entry-split-return",
+                "runtime-roots-enter", "runtime-roots-return", "manifest-enter", "manifest-return", "convertfromjson-command-enter",
                 "convertfromjson-command-return", "service-contract-enter", "service-contract-return", "action"}
     if not required.issubset({row["phase"] for row in selected}):
         raise AssertionError("CONTROLLER_DIAGNOSTIC_SOURCE_MAPPING_INCOMPLETE")
@@ -790,10 +855,19 @@ def _run_contract_with_runtime(
         script = _controller_load_timing_copy(script, tmp_path)
     phase_file = tmp_path / "contract-phases.txt"
     def preserve_diagnostic(stdout, stderr):
-        output = child_environment.get("XAUUSD_CONTROL_LOAD_DIAGNOSTIC_OUTPUT")
-        if not output or not (tmp_path / "controller-load-source-map.json").is_file():
+        shard = child_environment.get("XAUUSD_CONTROL_LOAD_DIAGNOSTIC_SHARD")
+        if not shard or not (tmp_path / "controller-load-source-map.json").is_file():
             return "NOT_REQUESTED"
-        destination = Path(output) / ("controller-load-" + uuid.uuid4().hex)
+        if shard == "control-install":
+            output = ROOT / "output/windows-runtime/control-install"
+        elif shard == "control-install-rehearsal":
+            output = ROOT / "output/windows-runtime/control-install-rehearsal"
+        else:
+            raise AssertionError("CONTROLLER_DIAGNOSTIC_SHARD_UNDECLARED")
+        for ancestor in (ROOT, ROOT / "output", ROOT / "output/windows-runtime", output):
+            if ancestor.is_symlink() or ancestor.is_junction() or ancestor.resolve() != ancestor:
+                raise AssertionError("CONTROLLER_DIAGNOSTIC_OUTPUT_REDIRECTED")
+        destination = output / ("controller-load-" + uuid.uuid4().hex)
         destination.mkdir(parents=True)
         for name in ("controller-load-diagnostic.ps1", "controller-load-source-map.json",
                      "controller-load-timestamp.patch", "contract-phases.txt"):
@@ -804,6 +878,8 @@ def _run_contract_with_runtime(
                 shutil.copyfile(path, destination / name)
         (destination / "process-output.json").write_text(json.dumps({
             "runtime": runtime_executable, "pid": process.pid, "exit_code": process.poll(),
+            "resolved_runtime": shutil.which(runtime_executable, path=child_environment.get("PATH")),
+            "module_path": child_environment.get("PSModulePath", "")[:4096],
             "stdout": (stdout or "")[-16384:], "stderr": (stderr or "")[-16384:],
         }, indent=2), encoding="utf-8")
         return str(destination)
@@ -897,7 +973,7 @@ def _run_contract(tmp_path: Path, body: str) -> str:
 
 
 @pytest.mark.parametrize("runtime_executable", ["powershell.exe", "pwsh.exe"])
-def test_controller_load_timing_preserves_real_action(tmp_path, runtime_executable, request):
+def test_controller_load_timing_preserves_real_action(tmp_path, runtime_executable, request, monkeypatch):
     owned = _new_sealed_fixture_root(request)
     source = owned / "source"
     _make_real_control_source(source,
@@ -931,23 +1007,57 @@ def test_controller_load_timing_preserves_real_action(tmp_path, runtime_executab
     assert mapping["kind"] == "INSTRUMENTED_DIAGNOSTIC_NOT_UNMODIFIED_ACCEPTANCE"
     assert mapping["source_sha256"] == hashlib.sha256((source / "scripts/xauusd_control_center.ps1").read_bytes()).hexdigest()
     phases = (diagnostic / "contract-phases.txt").read_text(encoding="utf-8")
-    for phase in ("manifest", "service-contract", "action"):
+    assert "entry-after-param" in phases
+    for phase in ("entry-path", "entry-split", "runtime-roots", "manifest", "service-contract", "action"):
         assert f"{phase}-enter" in phases and f"{phase}-return" in phases
     assert "body" in phases and "complete" in phases
-    child["XAUUSD_CONTROL_LOAD_DIAGNOSTIC_OUTPUT"] = str(tmp_path / "diagnostics")
+    child["XAUUSD_CONTROL_LOAD_DIAGNOSTIC_SHARD"] = "control-install"
     failure = owned / "failure"
     failure.mkdir()
-    with pytest.raises(AssertionError, match="ISOLATED_DIAGNOSTIC_FAILURE_SENTINEL"):
+    with pytest.raises(AssertionError, match="ISOLATED_DIAGNOSTIC_FAILURE_SENTINEL") as failure_result:
         _run_contract_with_runtime(failure, "throw 'ISOLATED_DIAGNOSTIC_FAILURE_SENTINEL'",
             runtime_executable, environment=child, controller_script=source / "scripts/xauusd_control_center.ps1",
             runtime_root=owned / "profile/XAUUSD-Forecaster-runtime", repository_root=owned / "repository")
-    archives = list((tmp_path / "diagnostics").iterdir())
-    assert len(archives) == 1
-    for name in ("controller-load-diagnostic.ps1", "controller-load-source-map.json",
-                 "controller-load-timestamp.patch", "contract-phases.txt"):
-        assert (archives[0] / name).read_bytes() == (failure / name).read_bytes()
-    captured = json.loads((archives[0] / "process-output.json").read_text(encoding="utf-8"))
-    assert captured["exit_code"] != 0 and "ISOLATED_DIAGNOSTIC_FAILURE_SENTINEL" in captured["stderr"]
+    archive = Path(str(failure_result.value).rsplit("diagnostic: ", 1)[1])
+    assert archive.parent == ROOT / "output/windows-runtime/control-install"
+    assert re.fullmatch(r"controller-load-[0-9a-f]{32}", archive.name)
+    assert not archive.is_symlink() and not archive.is_junction()
+    try:
+        for name in ("controller-load-diagnostic.ps1", "controller-load-source-map.json",
+                     "controller-load-timestamp.patch", "contract-phases.txt"):
+            assert (archive / name).read_bytes() == (failure / name).read_bytes()
+        captured = json.loads((archive / "process-output.json").read_text(encoding="utf-8"))
+        assert captured["exit_code"] != 0 and "ISOLATED_DIAGNOSTIC_FAILURE_SENTINEL" in captured["stderr"]
+    finally:
+        shutil.rmtree(archive)
+    child["XAUUSD_CONTROL_LOAD_DIAGNOSTIC_SHARD"] = str(tmp_path / "outside-output")
+    with pytest.raises(AssertionError, match="CONTROLLER_DIAGNOSTIC_SHARD_UNDECLARED"):
+        _run_contract_with_runtime(failure, "throw 'ISOLATED_DIAGNOSTIC_FAILURE_SENTINEL'",
+            runtime_executable, environment=child, controller_script=source / "scripts/xauusd_control_center.ps1",
+            runtime_root=owned / "profile/XAUUSD-Forecaster-runtime", repository_root=owned / "repository")
+    assert not (tmp_path / "outside-output").exists()
+    diagnostic_root = tmp_path / "diagnostic-source"
+    diagnostic_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = diagnostic_root / "output"
+    created = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+        f"New-Item -ItemType Junction -Path '{link}' -Target '{outside}' | Out-Null"],
+        capture_output=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
+    assert created.returncode == 0 and link.is_junction(), created.stderr
+    try:
+        child["XAUUSD_CONTROL_LOAD_DIAGNOSTIC_SHARD"] = "control-install"
+        with monkeypatch.context() as scope:
+            # A declared independent test root, never the repository's real
+            # artifact directory. The actual write consumer still executes.
+            scope.setattr(sys.modules[__name__], "ROOT", diagnostic_root)
+            with pytest.raises(AssertionError, match="CONTROLLER_DIAGNOSTIC_OUTPUT_REDIRECTED"):
+                _run_contract_with_runtime(failure, "throw 'ISOLATED_DIAGNOSTIC_FAILURE_SENTINEL'",
+                    runtime_executable, environment=child, controller_script=source / "scripts/xauusd_control_center.ps1",
+                    runtime_root=owned / "profile/XAUUSD-Forecaster-runtime", repository_root=owned / "repository")
+        assert list(outside.iterdir()) == []
+    finally:
+        link.rmdir()
 
 
 def _isolated_windows_environment():
@@ -957,7 +1067,7 @@ def _isolated_windows_environment():
         "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "COMSPEC", "USERPROFILE", "USERNAME",
         "USERDOMAIN", "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)",
         "PROGRAMDATA", "TEMP", "TMP", "PATHEXT", "PATH", "XAUUSD_CONTROL_LOAD_TIMING",
-        "XAUUSD_CONTROL_LOAD_DIAGNOSTIC_OUTPUT",
+        "XAUUSD_CONTROL_LOAD_DIAGNOSTIC_SHARD",
     }}
     environment["PSModulePath"] = str(Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/Modules")
     return environment
