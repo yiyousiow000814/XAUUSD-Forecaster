@@ -90,9 +90,9 @@ admission; it does not claim the old total limit was met.
 | Public Explorer manifest | Existing 300,000-byte bound, unchanged |
 
 The aggregate envelope is based on the measured A input's 7,848 records and 27
-source groups, C's 59-record / 16,515-byte increment over its base, and one
+source groups, C's 67-record / 16,515-byte increment over its base, and one
 largest existing source group's 1,926 records / 575,077 compact bytes. The
-record envelope rounds 9,833 up to the next 1,024; 32 parts accommodates the 27
+record envelope rounds 9,841 up to the next 1,024; 32 parts accommodates the 27
 current groups plus bounded splitting/growth. Three MiB covers those bytes and
 measured carrier overhead, not an arbitrary number of new modules. Actual A
 transport is 2,302,433 bytes in 27 parts (largest 588,422), including the 15,109-byte
