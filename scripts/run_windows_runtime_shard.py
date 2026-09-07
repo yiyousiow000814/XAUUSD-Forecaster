@@ -86,7 +86,7 @@ def main() -> int:
     started_at = datetime.now(timezone.utc)
     started = time.perf_counter()
     environment = dict(os.environ)
-    if args.shard in {"control-install", "control-install-rehearsal"}:
+    if args.shard in {"control-install-configuration", "control-install", "control-install-rehearsal"}:
         environment["XAUUSD_CONTROL_LOAD_TIMING"] = "1"
         environment["XAUUSD_CONTROL_LOAD_DIAGNOSTIC_SHARD"] = args.shard
     completed = subprocess.run(command, cwd=ROOT, check=False, env=environment)

@@ -367,6 +367,29 @@
       "rehearsal_script": "scripts/rehearse_control_plane_takeover.py"
     },
     {
+      "id": "control-install-configuration",
+      "family": "windows-runtime-artifact-repair",
+      "paths": [
+        "tests/test_control_plane_install.py",
+        "scripts/install_control_plane.ps1",
+        "scripts/xauusd_control_center.ps1",
+        "scripts/xauusd_control_center_launcher.vbs",
+        "scripts/control_center.xaml",
+        "scripts/runtime-control-files.json",
+        "scripts/control_center_common.ps1",
+        "scripts/control_center_persistence_gateway.ps1",
+        "scripts/control_center_runtime_supervision.ps1",
+        "scripts/control_center_install.ps1"
+      ],
+      "tests": [
+        {
+          "path": "tests/test_control_plane_install.py",
+          "from": "test_business_configuration_rejects_foreign_locator_before_filesystem",
+          "through": "test_business_entrypoint_configuration_is_inherited_and_fail_closed"
+        }
+      ]
+    },
+    {
       "id": "control-install",
       "family": "windows-runtime-artifact-repair",
       "paths": [
@@ -383,7 +406,9 @@
       ],
       "tests": [
         {
-          "path": "tests/test_control_plane_install.py"
+          "path": "tests/test_control_plane_install.py",
+          "from": "test_repository_entrypoint_bootstraps_from_exact_origin_main_worktree",
+          "through": "test_incident_rollback_reports_degraded_and_requires_live_session_and_inventory"
         }
       ]
     },

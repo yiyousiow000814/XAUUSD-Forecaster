@@ -1040,6 +1040,8 @@ def _run_contract_with_runtime(
             return "NOT_REQUESTED"
         if shard == "control-install":
             output = ROOT / "output/windows-runtime/control-install"
+        elif shard == "control-install-configuration":
+            output = ROOT / "output/windows-runtime/control-install-configuration"
         elif shard == "control-install-rehearsal":
             output = ROOT / "output/windows-runtime/control-install-rehearsal"
         else:
@@ -1206,7 +1208,8 @@ def test_controller_load_timing_preserves_real_action(tmp_path, runtime_executab
     for phase in ("entry-path", "entry-split", "runtime-roots", "manifest", "service-contract", "action"):
         assert f"{phase}-enter" in phases and f"{phase}-return" in phases
     assert "body" in phases and "complete" in phases
-    child["XAUUSD_CONTROL_LOAD_DIAGNOSTIC_SHARD"] = "control-install"
+    diagnostic_shard = "control-install-configuration" if runtime_executable == "powershell.exe" else "control-install"
+    child["XAUUSD_CONTROL_LOAD_DIAGNOSTIC_SHARD"] = diagnostic_shard
     failure = owned / "failure"
     failure.mkdir()
     with pytest.raises(AssertionError, match="ISOLATED_DIAGNOSTIC_FAILURE_SENTINEL") as failure_result:
@@ -1214,7 +1217,7 @@ def test_controller_load_timing_preserves_real_action(tmp_path, runtime_executab
             runtime_executable, environment=child, controller_script=source / "scripts/xauusd_control_center.ps1",
             runtime_root=owned / "profile/XAUUSD-Forecaster-runtime", repository_root=owned / "repository")
     archive = Path(str(failure_result.value).rsplit("diagnostic: ", 1)[1])
-    assert archive.parent == ROOT / "output/windows-runtime/control-install"
+    assert archive.parent == ROOT / "output/windows-runtime" / diagnostic_shard
     assert re.fullmatch(r"controller-load-[0-9a-f]{32}", archive.name)
     assert not archive.is_symlink() and not archive.is_junction()
     try:
@@ -1241,7 +1244,7 @@ def test_controller_load_timing_preserves_real_action(tmp_path, runtime_executab
         capture_output=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
     assert created.returncode == 0 and link.is_junction(), created.stderr
     try:
-        child["XAUUSD_CONTROL_LOAD_DIAGNOSTIC_SHARD"] = "control-install"
+        child["XAUUSD_CONTROL_LOAD_DIAGNOSTIC_SHARD"] = diagnostic_shard
         with monkeypatch.context() as scope:
             # A declared independent test root, never the repository's real
             # artifact directory. The actual write consumer still executes.
