@@ -63,7 +63,7 @@ export function projectCurrentSource(index) {
     const displayed = new Set([...roots, ...edges.filter(edge => roots.has(edge.from)).map(edge => edge.to)]);
     if (!displayed.size || [...displayed].some(key => !symbolById.has(key))) throw new Error('ARCHITECTURE_ROOT_UNRESOLVED');
     const edgeIds = edges.filter(edge => displayed.has(edge.from) && displayed.has(edge.to)).map(edge => edge.id);
-    return { id, label: id, summary: 'Selected roots + one syntactic candidate hop. Full selected-file symbols remain in Code Structure.',
+    return { id, label: id, summary: 'Selected roots + one syntactic candidate hop. Indexed symbols remain in Code Structure; explicit symbol scopes are not whole-file coverage.',
       layout_direction: 'LR', node_ids: [...displayed], edge_ids: edgeIds,
       entry_node: selection.roots[0], primary_path: [selection.roots[0]],
       lanes: [{ id: `${id}-source`, label: 'Source syntax · runtime UNKNOWN', node_ids: [...displayed] }],

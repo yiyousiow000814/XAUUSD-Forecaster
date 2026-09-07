@@ -30,7 +30,8 @@ test('actual symbol claims retain their exact source span, never the first file 
   const projection = projectCurrentSource(index);
   const code = parseArchitectureCodeIndex(projection.code);
   const evidence = parseArchitectureEvidence(projection.evidence);
-  for (const name of ['Start-ReleasePromotion', '_sync_news_evidence']) {
+  for (const name of ['Start-ReleasePromotion', '_sync_news_evidence', 'Handler.do_GET',
+    '_build_news_projection_source', '_build_news_evidence_resource']) {
     const original = index.observed.symbols.find(symbol => symbol.name === name);
     assert.ok(original, name);
     const claim = evidence.claims.find(item => item.selector === original.id);
@@ -104,6 +105,22 @@ test('actual generated source feeds the existing Explorer without runtime or per
   assert.equal(new Set(phone.nodes.map(node => node.position.x)).size, 1);
   assert.equal(new Set(phone.nodes.map(node => node.position.y)).size, Object.keys(index.allowed.views).length);
   assert.equal(phone.edges.length, 0, 'display ordering must not invent execution edges');
+
+  const api = 'scripts/run_dashboard_api.py';
+  const selected = index.allowed.source_symbols[api];
+  const news = manifest.views.find(view => view.id === 'news-worker-audit');
+  assert.ok(selected.length > 0);
+  for (const root of index.allowed.views['news-worker-audit'].roots.filter(id => id.startsWith(`${api}::`))) {
+    assert.ok(news.node_ids.includes(root), root);
+    assert.ok(projection.code.code_index.facts.some(fact => fact.id === root && fact.path === api));
+  }
+  assert.match(news.summary, /explicit symbol scopes are not whole-file coverage/);
+  assert.doesNotMatch(news.summary, /Full selected-file/);
+  assert.ok(!manifest.edges.some(edge => edge.from === `${api}::_news_projection_source_for_request`
+    && edge.to === `${api}::_finish_news_projection_source_build`), 'thread target is not a direct call');
+  assert.ok(!projection.code.code_index.facts.some(fact => fact.id === `${api}::_dashboard_payload`));
+  assert.ok(!manifest.edges.some(edge => edge.from.startsWith(`${api}::`) && edge.to.startsWith('web/')),
+    'source selection must not fabricate HTTP or import dispatch');
 });
 
 test('browser projection excludes raw SQL, native arguments and unselected operational data', () => {

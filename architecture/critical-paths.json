@@ -1,8 +1,25 @@
 {
   "schema": "critical-path-selection-v1",
+  "source_symbols": {
+    "scripts/run_dashboard_api.py": [
+      "scripts/run_dashboard_api.py::Handler.do_GET",
+      "scripts/run_dashboard_api.py::_build_news_projection_source",
+      "scripts/run_dashboard_api.py::_build_news_projection_source_from_database",
+      "scripts/run_dashboard_api.py::_finish_news_projection_source_build",
+      "scripts/run_dashboard_api.py::_news_projection_source_for_request",
+      "scripts/run_dashboard_api.py::_news_projection_batch",
+      "scripts/run_dashboard_api.py::_build_news_evidence_resource",
+      "scripts/run_dashboard_api.py::_materialize_news_evidence_generation",
+      "scripts/run_dashboard_api.py::_publish_news_evidence_snapshot",
+      "scripts/run_dashboard_api.py::_news_evidence_page",
+      "scripts/run_dashboard_api.py::_optional_resource_payload",
+      "scripts/run_dashboard_api.py::main"
+    ]
+  },
   "views": {
     "news-worker-audit": {
       "files": [
+        "scripts/run_dashboard_api.py",
         "scripts/run_dashboard_sync.py",
         "xauusd_forecaster/news_projection.py",
         "web/worker/api-router.ts",
@@ -16,6 +33,13 @@
         "web/app/_lib/news-index-contract.ts"
       ],
       "roots": [
+        "scripts/run_dashboard_api.py::Handler.do_GET",
+        "scripts/run_dashboard_api.py::_build_news_projection_source",
+        "scripts/run_dashboard_api.py::_news_projection_source_for_request",
+        "scripts/run_dashboard_api.py::_finish_news_projection_source_build",
+        "scripts/run_dashboard_api.py::_build_news_evidence_resource",
+        "scripts/run_dashboard_api.py::_optional_resource_payload",
+        "scripts/run_dashboard_api.py::main",
         "xauusd_forecaster/news_projection.py::build_news_projection_generation",
         "scripts/run_dashboard_sync.py::_sync_news",
         "scripts/run_dashboard_sync.py::_sync_news_evidence",
