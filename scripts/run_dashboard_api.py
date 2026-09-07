@@ -30,6 +30,7 @@ from xauusd_forecaster.dashboard.status_cache import (
     StatusSnapshotCache,
     StatusSnapshotUnavailable,
 )
+from xauusd_forecaster.signal_timing import DashboardSignalObserver
 from xauusd_forecaster.dashboard.health_projection import (
     collector_component as _collector_component,
     decision_collector_component as _decision_collector_component,
@@ -106,6 +107,7 @@ from xauusd_forecaster.runtime_paths import (
     runtime_child_path,
 )
 UTC = timezone.utc
+_signal_observer = DashboardSignalObserver()
 PAYLOAD_SCHEMA_VERSION = "xauusd-dashboard-v4-event-episode"
 NEWS_READER_WINDOW_DAYS = 60
 NEWS_ARCHIVE_PAGE_LIMIT = 20
@@ -1253,7 +1255,8 @@ def _dashboard_payload(
         connection.execute("BEGIN")
     try:
         latest = connection.execute(
-            """SELECT d.decision_id, d.decision_time, d.effective_action, d.data_health,
+            """SELECT d.decision_id, d.snapshot_id, s.snapshot_hash,
+                      d.decision_time, d.effective_action, d.data_health,
                       d.reason_codes_json, s.source_event_time,
                       s.source_received_time, s.bid, s.ask, s.spread,
                       s.features_json, s.u5, s.u5_status
@@ -1278,9 +1281,7 @@ def _dashboard_payload(
         latest_news_input_coverage = None
         if latest:
             latest_prediction = connection.execute(
-                """SELECT p.model_identity,p.model_version,p.recommended_action,
-                          p.prediction_status,p.ev_long_u5,p.ev_short_u5,
-                          p.interval_width,p.decision_time
+                """SELECT p.*
                    FROM predictions_v2 p
                    JOIN model_updates_v2 u USING(model_version)
                    WHERE p.source_decision_id=?
@@ -1291,6 +1292,17 @@ def _dashboard_payload(
                    LIMIT 1""",
                 (latest["decision_id"],),
             ).fetchone()
+            _signal_observer.observe(connection, database, latest, latest_prediction)
+            # Full rows bind private observations; retain the existing public
+            # projection rather than leaking diagnostic-only fields downstream.
+            latest = {key: latest[key] for key in latest.keys()
+                      if key not in {"snapshot_id", "snapshot_hash"}}
+            if latest_prediction is not None:
+                latest_prediction = {key: latest_prediction[key] for key in (
+                    "model_identity", "model_version", "recommended_action",
+                    "prediction_status", "ev_long_u5", "ev_short_u5",
+                    "interval_width", "decision_time",
+                )}
             coverage_table = connection.execute(
                 """SELECT 1 FROM sqlite_master
                    WHERE type='table' AND name='news_input_coverage_snapshots_v1'"""

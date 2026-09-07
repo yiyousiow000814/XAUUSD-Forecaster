@@ -2946,14 +2946,26 @@ def test_generation_receipts_remain_complete_when_runtime_gates_force_wait(
         "news_exposed": 0, "broad_news_exposed": 0,
     }
 
-    created, prepared_rows, _ = inference_v2.prepare_live_predictions_v2(
-        object(), decision_id="decision", decision_time=datetime.now(UTC),
+    arguments = dict(decision_id="decision", decision_time=datetime.now(UTC),
         created_at=datetime.now(UTC), market_snapshot=market_snapshot,
         news_snapshot=news_snapshot,
         news_input_coverage={
             "state": news_input_state, "snapshot_hash": "coverage",
         },
     )
+    baseline = inference_v2.prepare_live_predictions_v2(object(), **arguments)
+    observed = []
+
+    def failing_observer(row):
+        observed.append(row)
+        raise OSError("synthetic optional timing failure")
+
+    result = inference_v2.prepare_live_predictions_v2(
+        object(), **arguments, prediction_observer=failing_observer,
+    )
+    assert result == baseline
+    created, prepared_rows, _ = result
+    assert observed == prepared_rows
 
     assert {row["model_identity"] for row in created} == {
         "CHAMPION_0", *inference_v2.MODEL_IDENTITIES,

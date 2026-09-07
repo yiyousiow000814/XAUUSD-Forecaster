@@ -26,6 +26,7 @@ from xauusd_forecaster.market_session import skipped_grid_reason  # noqa: E402
 from xauusd_forecaster.u5_state import U5State  # noqa: E402
 from xauusd_forecaster.clock_recovery import ExcludedIncompleteClock  # noqa: E402
 from xauusd_forecaster.clock_commit import read_completed_clock  # noqa: E402
+from xauusd_forecaster.signal_timing import queue_signal_event  # noqa: E402
 from xauusd_forecaster.maintenance import (  # noqa: E402
     DailyBackupOwner,
     apply_backup_retention,
@@ -287,7 +288,8 @@ def main() -> int:
     u5_path = local_root / "u5-state.json"
     U5State.reconcile_checkpoint(ledger, u5_path)
     u5_state = U5State.load(u5_path) if u5_path.exists() else U5State()
-    engine = ForwardEngine(ledger, provider, u5_state, u5_checkpoint_path=u5_path)
+    engine = ForwardEngine(ledger, provider, u5_state, u5_checkpoint_path=u5_path,
+                           on_clock_committed=queue_signal_event)
     write_runtime_heartbeat(
         status_file, service="collector", state="STARTING",
     )
@@ -462,19 +464,6 @@ def main() -> int:
                     ledger, engine, provider, last_decision, news_status,
                 )
             )
-            for decision_time, snapshot_id, decision_id in appended_decisions:
-                print(
-                    json.dumps(
-                        {
-                            "event": "DECISION_APPENDED",
-                            "decision_time": decision_time.isoformat(),
-                            "snapshot_id": snapshot_id,
-                            "decision_id": decision_id,
-                        },
-                        sort_keys=True,
-                    ),
-                    flush=True,
-                )
             if skipped_grids:
                 print(
                     json.dumps(

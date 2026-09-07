@@ -6,6 +6,10 @@ import json
 from datetime import datetime, timezone
 
 from .forward_ledger import canonical_hash, snapshot_evidence_hash
+from .signal_timing import (
+    MAX_PREDICTION_OBSERVATIONS, STAGES, TIMING_SOURCE, TIMING_VERSION,
+    prediction_timing_hash, timing_bytes, utc_text,
+)
 
 
 COMPLETION_SOURCE = "COLLECTOR_CLOCK_ATOMIC"
@@ -143,3 +147,102 @@ def read_completed_clock(ledger, decision_time: datetime) -> tuple[str, str] | N
                 raise ValueError("CLOCK_EVENT_INCOMPLETE_V2")
             _require_complete_active_generation(ledger, decision_time, [dict(row) for row in rows])
     return snapshot_id, decision_id
+
+
+def read_signal_timing(connection, *, decision_id, snapshot_id, prediction):
+    """Decode optional timing, without scanning clock families or granting PASS.
+
+    The caller supplies an actually read prediction from the same WAL snapshot.
+    This validates its timing binding, not deployment, first visibility or CPU.
+    Old completion/U5 readers continue to ignore this separate status entry.
+    """
+    try:
+        rows = connection.execute(
+            "SELECT c.run_id,c.snapshot_id,s.source_received_time,"
+            "CASE WHEN length(CAST(c.news_status_json AS BLOB))"
+            "<=262144 THEN c.news_status_json END AS statuses FROM collector_runs c "
+            "JOIN market_snapshots s ON s.snapshot_id=c.snapshot_id "
+            "WHERE c.decision_id=? LIMIT 2", (decision_id,),
+        ).fetchall()
+        if not rows:
+            return {"status": "UNKNOWN", "reason": "SIGNAL_TIMING_NOT_RECORDED"}
+        if len(rows) != 1 or rows[0]["snapshot_id"] != snapshot_id:
+            raise ValueError("SIGNAL_TIMING_CLOCK_IDENTITY")
+        statuses = json.loads(rows[0]["statuses"])
+        entries = [value for value in statuses if value.get("source") == TIMING_SOURCE]
+        if not entries:
+            return {"status": "UNKNOWN", "reason": "SIGNAL_TIMING_NOT_RECORDED"}
+        completions = [value for value in statuses if value.get("source") == COMPLETION_SOURCE]
+        if len(entries) != 1 or len(completions) != 1:
+            raise ValueError("SIGNAL_TIMING_AMBIGUOUS_RECORD")
+        entry = entries[0]
+        timing_bytes(entry)
+        digest = entry["timing_digest"]
+        if (entry["schema"] != TIMING_VERSION
+                or entry["decision_id"] != decision_id
+                or entry["snapshot_id"] != snapshot_id
+                or entry["collector_run_id"] != rows[0]["run_id"]
+                or entry["completion_digest"] != canonical_hash(completions[0])
+                or digest != canonical_hash({k: v for k, v in entry.items() if k != "timing_digest"})):
+            raise ValueError("SIGNAL_TIMING_IDENTITY_OR_DIGEST")
+        if entry["state"] == "UNAVAILABLE":
+            return {"status": "UNAVAILABLE", "timing_digest": digest}
+        if entry["state"] not in {"OBSERVED", "CLOCK_ANOMALY"}:
+            raise ValueError("SIGNAL_TIMING_STATE")
+        source_received = rows[0]["source_received_time"]
+        if entry["market_source_received_at"] != (
+            utc_text(datetime.fromisoformat(source_received)) if source_received else None
+        ):
+            raise ValueError("SIGNAL_TIMING_SOURCE_CLOCK")
+        stages, predictions = entry["stages"], entry["predictions"]
+        if (not {"collector_started", "market_features_completed", "write_batch_ready"} <= stages.keys()
+                or not stages.keys() <= STAGES
+                or not isinstance(predictions, list)
+                or len(predictions) > MAX_PREDICTION_OBSERVATIONS):
+            raise ValueError("SIGNAL_TIMING_SHAPE")
+        stamps = [*stages.values(), *predictions]
+        for stamp in stamps:
+            if (type(stamp["sequence"]) is not int
+                    or type(stamp["elapsed_ns"]) is not int
+                    or not -(2**63) < stamp["elapsed_ns"] < 2**63
+                    or utc_text(datetime.fromisoformat(stamp["observed_at"])) != stamp["observed_at"]):
+                raise ValueError("SIGNAL_TIMING_CLOCK")
+        ordered = sorted(stamps, key=lambda value: value["sequence"])
+        if [value["sequence"] for value in ordered] != list(range(1, len(ordered) + 1)):
+            raise ValueError("SIGNAL_TIMING_SEQUENCE")
+        if ordered[0] != stages["collector_started"] or ordered[-1] != stages["write_batch_ready"]:
+            raise ValueError("SIGNAL_TIMING_STAGE_ORDER")
+        if ordered[0]["elapsed_ns"] != 0:
+            raise ValueError("SIGNAL_TIMING_MONOTONIC_ORIGIN")
+        if entry["state"] == "OBSERVED" and any(
+            right["observed_at"] < left["observed_at"] or right["elapsed_ns"] < left["elapsed_ns"]
+            for left, right in zip(ordered, ordered[1:])
+        ):
+            raise ValueError("SIGNAL_TIMING_UNDECLARED_CLOCK_ANOMALY")
+        identities = [(value["model_identity"], value["model_version"]) for value in predictions]
+        if len(set(identities)) != len(identities) or any(
+            not isinstance(value, str) or not 0 < len(value) <= 256
+            for pair in identities for value in pair
+        ):
+            raise ValueError("SIGNAL_TIMING_MODEL_IDENTITY")
+        selected = [value for value in predictions if (
+            value["model_identity"], value["model_version"]
+        ) == (prediction["model_identity"], prediction["model_version"])]
+        if (len(selected) != 1 or prediction["source_decision_id"] != decision_id
+                or selected[0]["prediction_hash"] != prediction_timing_hash(prediction)
+                or selected[0]["feature_snapshot_hash"] != prediction["feature_snapshot_hash"]
+                or selected[0]["prediction_status"] != prediction["prediction_status"]):
+            raise ValueError("SIGNAL_TIMING_PREDICTION_BINDING")
+        return {
+            "status": entry["state"], "timing_digest": digest,
+            "collector_run_id": entry["collector_run_id"],
+            "completion_digest": entry["completion_digest"],
+            "market_source_received_at": entry["market_source_received_at"],
+            "collector_started_at": stages["collector_started"]["observed_at"],
+            "market_features_completed_at": stages["market_features_completed"]["observed_at"],
+            "prediction_computed_at": selected[0]["observed_at"],
+            "write_batch_ready_at": stages["write_batch_ready"]["observed_at"],
+        }
+    except Exception:
+        # Evidence invalidity remains visible but is not a new prediction gate.
+        return {"status": "INVALID", "reason": "SIGNAL_TIMING_INVALID_EVIDENCE"}

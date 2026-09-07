@@ -15,6 +15,7 @@ from .inference import build_shadow_predictions
 from .market import MarketProvider, build_forward_snapshot
 from .news import collect_official_news
 from .u5_state import U5State
+from .signal_timing import ClockTiming
 
 
 UTC = timezone.utc
@@ -32,11 +33,14 @@ class ForwardEngine:
         market_provider: MarketProvider,
         u5_state: U5State | None = None,
         *, u5_checkpoint_path: Path | None = None,
+        clock_timing_factory=ClockTiming, on_clock_committed=None,
     ) -> None:
         self.ledger = ledger
         self.market_provider = market_provider
         self.u5_state = u5_state or U5State()
         self.u5_checkpoint_path = u5_checkpoint_path
+        self.clock_timing_factory = clock_timing_factory
+        self.on_clock_committed = on_clock_committed
 
     def collect_news(self, now: datetime) -> list[dict[str, object]]:
         return collect_official_news(self.ledger, now)
@@ -64,6 +68,11 @@ class ForwardEngine:
         completed_clock = read_completed_clock(self.ledger, decision_time)
         if completed_clock is not None:
             return completed_clock
+        run_id = str(uuid.uuid4())
+        decision_id = f"XAU-{decision_time.strftime('%Y%m%dT%H%M%SZ')}"
+        timing = self.clock_timing_factory(
+            run_id, decision_id, f"XAU-SNAPSHOT-{decision_time.strftime('%Y%m%dT%H%M%SZ')}",
+        )
         with self.ledger.clock_preparation():
             from .evidence_v2 import evaluation_epoch
 
@@ -91,14 +100,15 @@ class ForwardEngine:
                 u5=prepared_u5.last_u5,
                 u5_status=prepared_u5.status,
             )
+            timing.record("market_features_completed")
             if provider_error is not None:
                 snapshot["reason_codes"] = tuple(
                     dict.fromkeys((*snapshot["reason_codes"], "MARKET_PROVIDER_ERROR"))
                 )
                 snapshot["features"]["market_provider_error"] = provider_error
             snapshot["snapshot_hash"] = snapshot_evidence_hash(snapshot)
-            decision_id = f"XAU-{decision_time.strftime('%Y%m%dT%H%M%SZ')}"
             predictions = build_shadow_predictions(self.ledger, snapshot, decision_time)
+            timing.record("legacy_predictions_completed")
             decision_record = {
                     "decision_id": decision_id,
                     "decision_time": decision_time,
@@ -123,6 +133,7 @@ class ForwardEngine:
                 self.ledger, decision_id=decision_id, decision_time=decision_time,
                 created_at=collected_at, snapshot=snapshot,
                 news_pipeline_health=coverage_health,
+                timing=timing,
             )
         checkpoint_hash = None
         if self.u5_checkpoint_path is not None:
@@ -135,7 +146,6 @@ class ForwardEngine:
                 raise ValueError("U5_CHECKPOINT_RECONCILIATION_REQUIRED")
             U5State.write_payload(pending, payload)
             checkpoint_hash = canonical_hash(payload)
-        run_id = str(uuid.uuid4())
         with self.ledger.connection:
             self.ledger.connection.execute("BEGIN IMMEDIATE")
             if evaluation_epoch(self.ledger.connection) != prepared_epoch:
@@ -146,7 +156,8 @@ class ForwardEngine:
             completion = completion_status(self.ledger.connection, decision_time)
             if checkpoint_hash is not None:
                 completion["u5_checkpoint_hash"] = checkpoint_hash
-            statuses = [*(news_status or []), completion]
+            timing_entry = timing.finish(completion, snapshot["source_received_time"])
+            statuses = [*(news_status or []), completion, timing_entry]
             self.ledger.connection.execute(
                 "INSERT INTO collector_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -160,6 +171,7 @@ class ForwardEngine:
                     decision_id,
                 ),
             )
+        timing.committed(timing_entry, decision_time, self.on_clock_committed)
         self.u5_state.__dict__.update(prepared_u5.__dict__)
         if self.u5_checkpoint_path is not None:
             U5State.reconcile_checkpoint(self.ledger, self.u5_checkpoint_path)
