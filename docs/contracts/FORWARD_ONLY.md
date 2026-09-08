@@ -179,7 +179,13 @@ validation cause, and only the selected output fields needed to reproduce the
 failure. When structured fields cannot be decoded, only a 500-character output
 prefix and the complete response hash may replace selected fields. Full rejected
 responses, source bodies, prompts, and credentials MUST NOT be duplicated into
-the failure evidence table. Model-output contract
+the failure evidence table. HTTP diagnostics use the same persisted evidence
+schema and retain the actual request model/purpose plus an allowlisted provider
+status. Their response hash covers at most 4,096 bytes and must declare
+`response_scope=PREFIX_4096`; it is not a complete-response hash. Raw HTTP error
+messages are excluded. Boundary tests must execute gateway failure, annotation
+failure persistence and the returned scheduler evidence, so diagnostics cannot
+replace the original failure with a schema error. Model-output contract
 failures retry once after five minutes and become terminal when the same failure
 repeats. Each retry
 preserves bounded failure evidence, and a later versioned recovery may authorize
