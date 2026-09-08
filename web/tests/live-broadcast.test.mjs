@@ -91,6 +91,8 @@ test("one complete HTTP baseline precedes push and recurring status polling is s
   const liveRoom = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
   const audit = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const shell = readFileSync(new URL("../app/_components/DashboardShell.tsx", import.meta.url), "utf8");
+  const health = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
+  assert.match(health, /subscribeDashboardResource\("\/api\/status"/);
   const previewBanner = readFileSync(new URL("../app/_components/PreviewBanner.tsx", import.meta.url), "utf8");
   assert.match(liveRoom, /DASHBOARD_REFRESH_INTERVALS\.live,[\s\S]*"current",[\s\S]*"status"/);
   assert.doesNotMatch(liveRoom, /"live-status"/);

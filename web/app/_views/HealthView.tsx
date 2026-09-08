@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useId, useState } from "react";
 import { CurrentDataNotice, type CurrentDataPhase } from "../_components/CurrentDataState";
 import CountValue from "../_components/CountValue";
-import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
+import { loadDashboardResource, readDashboardResource, readDashboardResourceState, subscribeDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { operationalEvidenceText } from "../_lib/operational-evidence";
 import { operationalEventDiagnostic, operationalIncidentActionLabels, operationalIncidentNextRetryAt, operationalIncidentsNextRetryAt, operationalScopeLabel, operationalSummaryDetails } from "../_lib/operational-incident-presentation";
@@ -220,6 +220,19 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
   const [payload, setPayload] = useState<StatusPayload | null>(() => cachedStatus);
   const [error, setError] = useState<string | null>(null);
   const [syncingCurrent, setSyncingCurrent] = useState(Boolean(cachedStatus?.preview_status_summary));
+  useEffect(() => {
+    const update = () => {
+      const resource = readDashboardResourceState<StatusPayload>("/api/status");
+      if (resource.data) {
+        setPayload(resource.data);
+        if (!resource.data.preview_status_summary) setSyncingCurrent(false);
+      }
+      setError(resource.error?.message ?? null);
+    };
+    const unsubscribe = subscribeDashboardResource("/api/status", update);
+    update();
+    return unsubscribe;
+  }, []);
   const refresh = useCallback(async (force = false, showSyncState = false) => {
     if (showSyncState) setSyncingCurrent(true);
     try {
@@ -242,6 +255,14 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
   }, [refresh, payload?.preview_status_summary]);
   const currentPhase: CurrentDataPhase = error
     ? "error" : !payload || syncingCurrent ? "loading" : payload.preview_status_summary ? "snapshot" : "ready";
+  if (!payload?.system?.components || !Array.isArray(payload.news_source_health)) {
+    return <main className="status-main">
+      <section className="status-hero"><h1>系统健康状态</h1></section>
+      {error
+        ? <CurrentDataNotice phase="error" />
+        : <p role="status">正在加载系统健康状态…</p>}
+    </main>;
+  }
   const operationalEvents = payload?.operational_health?.alerts ?? [];
   const incidents = correlateOperationalEvents(operationalEvents);
   const components = sortAttentionFirst(Object.entries(payload?.system.components ?? {}).map(([name, item]) => {
