@@ -1,0 +1,35 @@
+%% Generated source syntax, not runtime/transaction proof.
+%% input cb006ccbd114f468854b7283736c2bcd6d08f43b9c300d5b75d54e06df7f9c43
+flowchart LR
+  nbe85043807a3659c["ForEach-Object"]
+  ne2ada56e7567b573["Out-Null"]
+  na223eb7a51a0cbb7["Start-Sleep"]
+  n9821a5fd1b8ea5a9["Test-Path"]
+  n218c9be1753c30ba["scripts/main_runtime.ps1::Get-RuntimeServiceProcesses"]
+  n16e7e1b0d0b36099["scripts/main_runtime.ps1::Get-RuntimeServices"]
+  n97fab46664bed680["scripts/main_runtime.ps1::Invoke-MainRuntime"]
+  nfc0de6269e314ea7["scripts/main_runtime.ps1::Invoke-RuntimeGit"]
+  ndbd666cf2e8e1dde["scripts/main_runtime.ps1::Read-RuntimeJson"]
+  n48735128c2b01a5b["scripts/main_runtime.ps1::Set-RuntimeRevision"]
+  n8d5a588bbc493eed["scripts/main_runtime.ps1::Start-RuntimeService"]
+  nf9548d763ed7e384["scripts/main_runtime.ps1::Stop-RuntimeService"]
+  n050877116c4a1791["scripts/main_runtime.ps1::Update-MainRuntime"]
+  n4d35c1d8f202df3d["scripts/main_runtime.ps1::Write-RuntimeJson"]
+  n97fab46664bed680 -->|"calls L243 UNKNOWN"| ndbd666cf2e8e1dde
+  n97fab46664bed680 -->|"calls L243 UNKNOWN"| n9821a5fd1b8ea5a9
+  n97fab46664bed680 -->|"calls L245 UNKNOWN"| n16e7e1b0d0b36099
+  n97fab46664bed680 -->|"calls L247 UNKNOWN"| nf9548d763ed7e384
+  n97fab46664bed680 -->|"calls L253 UNKNOWN"| n050877116c4a1791
+  n97fab46664bed680 -->|"calls L257 UNKNOWN"| n8d5a588bbc493eed
+  n97fab46664bed680 -->|"calls L267 UNKNOWN"| nbe85043807a3659c
+  n97fab46664bed680 -->|"calls L267 UNKNOWN"| n218c9be1753c30ba
+  n97fab46664bed680 -->|"calls L268 UNKNOWN"| nfc0de6269e314ea7
+  n97fab46664bed680 -->|"calls L268 UNKNOWN"| n4d35c1d8f202df3d
+  n97fab46664bed680 -->|"calls L269 UNKNOWN"| na223eb7a51a0cbb7
+  n97fab46664bed680 -->|"calls L273 UNKNOWN"| n16e7e1b0d0b36099
+  n97fab46664bed680 -->|"calls L273 UNKNOWN"| nf9548d763ed7e384
+  n050877116c4a1791 -->|"calls L205 UNKNOWN"| nfc0de6269e314ea7
+  n050877116c4a1791 -->|"calls L205 UNKNOWN"| ne2ada56e7567b573
+  n050877116c4a1791 -->|"calls L206 UNKNOWN"| nfc0de6269e314ea7
+  n050877116c4a1791 -->|"calls L207 UNKNOWN"| n16e7e1b0d0b36099
+  n050877116c4a1791 -->|"calls L207 UNKNOWN"| n48735128c2b01a5b

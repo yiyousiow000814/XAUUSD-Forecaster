@@ -106,10 +106,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--shard", required=True)
     parser.add_argument("--output", choices=("local", "ci"), required=True)
+    parser.add_argument("--report-directory", type=Path,
+                        help="Optional evidence directory outside the checked source tree")
     args = parser.parse_args()
     shard = _load_shard(args.shard)
     safe_shard_id = str(shard["id"])
     output_root = ROOT / (".local/formal-results" if args.output == "local" else "formal-results")
+    if args.report_directory is not None:
+        output_root = args.report_directory.resolve()
+        if output_root == ROOT.resolve() or ROOT.resolve() in output_root.parents:
+            parser.error("--report-directory must be outside the checked source tree")
     report_path = output_root / f"{safe_shard_id}.json"
     output_root.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()

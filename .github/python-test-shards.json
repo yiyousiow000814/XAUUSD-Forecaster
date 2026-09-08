@@ -27,23 +27,28 @@
       "tests": [
         "tests/test_evidence_integrity_v2.py",
         "tests/test_clock_recovery.py",
-        "tests/test_daily_brief.py",
-        "tests/test_brief_date_discovery.py",
-        "tests/test_brief_synthesis_source_first.py",
         "tests/test_news_event_identity.py",
         "tests/test_model_gateway.py",
         "tests/test_news_pipeline_health.py",
         "tests/test_assistant_chat_worker.py",
         "tests/test_news_semantic_contract_v15.py",
         "tests/test_scheduler_model_gateway.py",
-        "tests/test_assistant_events.py",
-        "tests/test_release_evidence_nodes.py"
+        "tests/test_assistant_events.py"
+      ]
+    },
+    {
+      "id": "python-daily-brief",
+      "tests": [
+        "tests/test_daily_brief.py",
+        "tests/test_brief_date_discovery.py",
+        "tests/test_brief_synthesis_source_first.py"
       ]
     },
     {
       "id": "python-5",
       "tests": [
         "tests/test_ci_contracts.py",
+        "tests/test_news_recovery_rehearsal.py",
         "tests/test_model_repair_replay.py",
         "tests/test_offline_model_repair.py",
         "tests/test_offline_market_methods.py",
@@ -63,6 +68,7 @@
       "id": "python-3",
       "tests": [
         "tests/test_dashboard_api.py",
+        "tests/test_dashboard_news_resources.py",
         "tests/test_runtime_root_ownership.py",
         "tests/test_production_shape.py",
         "tests/test_assistant_routing.py",
@@ -71,7 +77,6 @@
         "tests/test_market_session.py",
         "tests/test_repository_policy.py",
         "tests/test_live_broadcast.py",
-        "tests/test_critical_annotation_state.py",
         "tests/test_gemini_embeddings.py",
         "tests/test_dashboard_sync_progress.py",
         "tests/test_news_qa.py",
@@ -81,7 +86,8 @@
         "tests/test_decision.py",
         "tests/test_named_reference_benchmark.py",
         "tests/test_public_health_check.py",
-        "tests/test_execution_costs.py"
+        "tests/test_execution_costs.py",
+        "tests/test_main_runtime.py"
       ]
     },
     {
@@ -111,6 +117,12 @@
         "tests/test_architecture_imports.py",
         "tests/test_architecture_compiler.py",
         "tests/test_architecture_mutation_contracts.py"
+      ]
+    },
+    {
+      "id": "python-annotation-state",
+      "tests": [
+        "tests/test_critical_annotation_state.py"
       ]
     }
   ]

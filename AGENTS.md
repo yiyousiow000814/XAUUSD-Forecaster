@@ -312,11 +312,13 @@ typos.
   especially when passing field flags that would otherwise imply a write.
 - Follow `docs/contracts/HOSTING_BOUNDARIES.md` and
   `docs/runbooks/CLOUDFLARE_DEPLOYMENT.md`.
-- Git push, pull-request merge, and `main` movement must never change Stable.
-  Cloudflare builds upload immutable Versions only, and Windows may stage and
-  test a newer revision but must not activate it from branch movement. Stable
-  changes only through explicit local Control Center Promote; normal rollback
-  is Reverse Stable. Follow `docs/contracts/RELEASE_CONTROL.md`.
+- Protected main is the only production source. Native Cloudflare Workers
+  Builds builds and directly deploys main at 100 percent traffic. Local runtime
+  uses `scripts/run_main_services.ps1` to update its single checkout from main.
+  PR branches must never activate production. No Control Panel, blue-green
+  coordination, retained code slots or automatic rollback is required.
+  Preserve authoritative data, authentication, source-first and strict ACK.
+  Follow `docs/contracts/RELEASE_CONTROL.md`.
 
 ## Preview Discipline
 

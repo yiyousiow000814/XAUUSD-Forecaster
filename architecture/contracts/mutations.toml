@@ -19,13 +19,3 @@ after = 'f"BEFORE UPDATE OF __mutation_never__ ON {table} BEGIN SELECT RAISE(ABO
 test = "tests/test_architecture_mutation_contracts.py::test_forward_ledger_rejects_real_update_and_delete"
 expected_cases = 1
 failure_marker = "FORWARD_APPEND_ONLY_VIOLATED"
-
-[[mutation]]
-id = "MUT-RELEASE-PREVIEW-PROMOTION"
-path = "scripts/control_center_transaction_engine.ps1"
-symbol = "Start-ReleasePromotion"
-before = 'if ([string]$candidate.artifact_kind -ne $productionCandidateArtifactKind) {'
-after = 'if ($false) {'
-test = "tests/test_architecture_mutation_contracts.py::test_preview_guard_rejects_at_exact_boundary_before_later_preconditions"
-expected_cases = 2
-failure_marker = "PREVIEW_GUARD_BOUNDARY_VIOLATED"

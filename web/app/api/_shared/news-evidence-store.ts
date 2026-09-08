@@ -290,6 +290,23 @@ async function sha256(value: string): Promise<string> {
   return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
+/** Bind a completed write to the producer's exact bounded UTF-8 request. */
+export async function newsEvidenceWriteAcknowledgement(
+  serialized: string, snapshotId: string, result: Record<string, unknown>,
+) {
+  if (result.status !== "OK" || !NEWS_EVIDENCE_SNAPSHOT_ID.test(snapshotId)) {
+    throw new NewsEvidenceProtocolError(
+      "invalid evidence acknowledgement", 500, "NEWS_EVIDENCE_ACK_INVALID",
+    );
+  }
+  return {
+    ...result,
+    contract_version: NEWS_EVIDENCE_CONTRACT_VERSION,
+    snapshot_id: snapshotId,
+    request_sha256: await sha256(serialized),
+  };
+}
+
 export async function prepareNewsEvidenceBatch(
   items: EvidenceItem[], existingPayloadHash?: string,
 ) {

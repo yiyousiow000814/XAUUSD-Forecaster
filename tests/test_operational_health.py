@@ -217,6 +217,13 @@ def test_scheduled_retry_loop_is_visible_without_claiming_current_impact() -> No
                 next_retry.isoformat(),
             ),
         )
+    connection.execute(
+        """INSERT INTO news_ai_job_attempts_v1 VALUES
+           (?,?,?,?,?,'ERROR','PROVIDER_HTTP_ERROR','HTTPError',503,
+            'later account failure',?,?)""",
+        ("failure-10-second-account", job_id, 10, "second-account", "credential",
+         (NOW - timedelta(seconds=1)).isoformat(), next_retry.isoformat()),
+    )
     connection.commit()
 
     snapshot = scheduler_health_snapshot(connection, now=NOW)
@@ -235,12 +242,12 @@ def test_scheduled_retry_loop_is_visible_without_claiming_current_impact() -> No
     assert alert["evidence"] == {
         "max_claim_count": 10,
         "lifetime_claim_count": 10,
-        "effective_failure_streak": 10,
+        "effective_failure_streak": 11,
         "job_ref": job_id[:12],
         "state": "BACKING_OFF",
         "claimable": False,
         "next_retry_at": next_retry.isoformat(),
-        "latest_failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
+        "latest_failure_code": "PROVIDER_HTTP_ERROR",
     }
     assert annotation["claimable"] == 0
     assert annotation["scheduled_retry"] == 1
@@ -340,10 +347,14 @@ def test_historical_capacity_debt_does_not_become_a_retry_loop() -> None:
     }
 
 
-def test_interleaved_deferrals_are_neutral_and_retirement_resets_failures() -> None:
+@pytest.mark.parametrize("task_type", ("ACTIVE_ANNOTATION", "ACTIVE_IMPACT", "TITLE_TRANSLATION"))
+@pytest.mark.parametrize("reset_outcome", ("OK", "NOT_CURRENT"))
+def test_interleaved_deferrals_are_neutral_and_retirement_resets_failures(
+    task_type: str, reset_outcome: str,
+) -> None:
     connection = _connection()
     job_id = enqueue_job(
-        connection, task_type="ACTIVE_IMPACT", source="source",
+        connection, task_type=task_type, source="source",
         source_item_id="interleaved-history", revision_number=1,
         annotation_id="annotation", prompt_version="prompt",
         priority="BACKGROUND", now=NOW - timedelta(hours=2),
@@ -356,7 +367,7 @@ def test_interleaved_deferrals_are_neutral_and_retirement_resets_failures() -> N
         (4, "DEFERRED", "NEWS_EMBEDDING_COOLDOWN", None, None),
         (5, "ERROR", "MODEL_REQUEST_FAILED", "TimeoutError", None),
         (6, "ERROR", "SCHEDULER_MAINTENANCE_DEFERRED", "RuntimeError", None),
-        (7, "NOT_CURRENT", None, None, None),
+        (7, reset_outcome, None, None, None),
         (8, "ERROR", "MODEL_CAPACITY_DEFERRED",
          "ModelGatewayCapacityExhausted", None),
         (9, "ERROR", "PROVIDER_HTTP_ERROR", "HTTPError", 503),
@@ -378,19 +389,65 @@ def test_interleaved_deferrals_are_neutral_and_retirement_resets_failures() -> N
                 None,
             ),
         )
+    # Attempts may have several account records. Reset uses attempt number,
+    # not wall-clock ordering; same-number errors are reset too.
+    for number, account in ((7, "same-reset-number"), (11, "second-account")):
+        connection.execute(
+            """INSERT INTO news_ai_job_attempts_v1 VALUES
+               (?,?,?,?,?,'ERROR','PROVIDER_HTTP_ERROR','HTTPError',503,
+                'bounded evidence',?,NULL)""",
+            (f"parallel-{number}", job_id, number, account, "credential",
+             (NOW - timedelta(seconds=number)).isoformat()),
+        )
     connection.commit()
 
     snapshot = scheduler_health_snapshot(connection, now=NOW)
     impact = next(
         task for task in snapshot["scheduler"]["tasks"]
-        if task["task_type"] == "ACTIVE_IMPACT"
+        if task["task_type"] == task_type
     )
 
     assert impact["max_claim_count"] == 11
-    assert impact["max_effective_failure_streak"] == 2
+    assert impact["max_effective_failure_streak"] == 3
     assert "OPS_AI_JOB_RETRY_LOOP" not in {
         alert["code"] for alert in snapshot["alerts"]
     }
+
+
+def test_retry_health_does_not_rescan_attempt_history_for_each_failure() -> None:
+    connection = _connection()
+    job_id = enqueue_job(
+        connection, task_type="ACTIVE_ANNOTATION", source="source",
+        source_item_id="long-lived-retry", revision_number=1,
+        prompt_version="prompt", priority="NORMAL", now=NOW - timedelta(days=2),
+    )
+    connection.execute(
+        "UPDATE news_ai_jobs_v1 SET attempt_count=1000 WHERE job_id=?", (job_id,),
+    )
+    connection.executemany(
+        """INSERT INTO news_ai_job_attempts_v1 VALUES
+           (?,?,?,?,?,'ERROR','MODEL_OUTPUT_CONTRACT_FAILED','ValueError',NULL,
+            'bounded evidence',?,NULL)""",
+        [(f"history-{number}", job_id, number, "account", "credential",
+          (NOW - timedelta(days=1, seconds=number)).isoformat())
+         for number in range(1, 1001)],
+    )
+    connection.commit()
+    steps = 0
+    def bounded_work() -> int:
+        nonlocal steps
+        steps += 1000
+        return int(steps > 500_000)
+    connection.set_progress_handler(bounded_work, 1000)
+    try:
+        snapshot = scheduler_health_snapshot(connection, now=NOW)
+    finally:
+        connection.set_progress_handler(None, 0)
+        connection.close()
+    annotation = next(task for task in snapshot["scheduler"]["tasks"]
+                      if task["task_type"] == "ACTIVE_ANNOTATION")
+    assert annotation["max_effective_failure_streak"] == 1000
+    assert steps <= 500_000
 
 
 def test_embedding_maintenance_is_not_capacity_or_retry_failure() -> None:

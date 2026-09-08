@@ -32,31 +32,7 @@ AUTOMATION_SUFFIXES = {
 IGNORED_PARTS = {".next", ".open-next", "node_modules", "__pycache__"}
 POLICY_IMPLEMENTATION = Path("scripts/check_repository_policy.py")
 CLOUDFLARE_BUILD_CONTRACT = Path("web/cloudflare-build-contract.json")
-EXPECTED_CLOUDFLARE_BUILD_CONTRACT = {
-    "schema_version": "cloudflare-production-build-v1",
-    "source": {
-        "provider": "github",
-        "repository": "yiyousiow000814/XAUUSD-Forecaster",
-        "production_branch": "main",
-        "root_directory": "/web",
-        "path_includes": ["*"],
-        "path_excludes": [],
-    },
-    "commands": {
-        "build": "npm ci && npm test",
-        "deploy": (
-            'npx wrangler versions upload --message '
-            '"release:$WORKERS_CI_COMMIT_SHA branch:$WORKERS_CI_BRANCH '
-            'artifact_kind:PRODUCTION_CANDIDATE"'
-        ),
-    },
-    "output": {
-        "artifact_kind": "PRODUCTION_CANDIDATE",
-        "immutable_version_only": True,
-        "changes_stable_traffic": False,
-    },
-    "non_production_builds_enabled": False,
-}
+EXPECTED_CLOUDFLARE_BUILD_CONTRACT = {'schema_version': 'cloudflare-production-build-v3', 'source': {'provider': 'github', 'repository': 'yiyousiow000814/XAUUSD-Forecaster', 'production_branch': 'main', 'root_directory': '/web', 'path_includes': ['*'], 'path_excludes': []}, 'commands': {'build': 'npm ci && npm test', 'deploy': 'npx wrangler deploy --message "main:$WORKERS_CI_COMMIT_SHA"'}, 'output': {'artifact_kind': 'PRODUCTION_ARTIFACT', 'immutable_version_only': False, 'changes_stable_traffic': True}, 'non_production_builds_enabled': False}
 
 YAML_ENVIRONMENT_KEY = re.compile(
     r"(?:^|[{,])\s*(?:environment|'environment'|\"environment\")\s*:",
@@ -211,14 +187,14 @@ def check_repository(root: Path) -> list[PolicyViolation]:
         violations.append(PolicyViolation(
             CLOUDFLARE_BUILD_CONTRACT,
             1,
-            "exact-main immutable Cloudflare production build contract is required",
+            "exact-main direct Cloudflare production build contract is required",
         ))
     else:
         if build_contract != EXPECTED_CLOUDFLARE_BUILD_CONTRACT:
             violations.append(PolicyViolation(
                 CLOUDFLARE_BUILD_CONTRACT,
                 1,
-                "Cloudflare production build contract drifted from exact-main immutable upload",
+                "Cloudflare production build contract drifted from exact-main direct deployment",
             ))
 
     package_path = root / "web/package.json"

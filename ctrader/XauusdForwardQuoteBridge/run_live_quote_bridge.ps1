@@ -13,6 +13,12 @@ $projectRoot = $PSScriptRoot
 $moduleRoot = Split-Path (Split-Path $projectRoot -Parent) -Parent
 $project = Join-Path $projectRoot 'XauusdForwardQuoteBridge.csproj'
 
+# Retired release fixtures must never fall through to production credentials.
+if ([Environment]::GetEnvironmentVariable('XAUUSD_ISOLATED_CONFIGURATION', 'Process') -or
+    [Environment]::GetEnvironmentVariable('XAUUSD_ISOLATED_CONFIGURATION_SHA256', 'Process')) {
+    throw 'RETIRED_RELEASE_FIXTURE_CONFIGURATION'
+}
+
 if (-not $BuildOnly) {
     $profileRoot = [Environment]::GetFolderPath('UserProfile')
     $authorityRoot = [System.IO.Path]::GetFullPath((Join-Path $profileRoot (

@@ -729,12 +729,123 @@ def test_sync_state_round_trip_and_malformed_state_fail_to_empty(tmp_path) -> No
     state_file = tmp_path / "dashboard-news-sync-state.json"
     expected = {"contract_version": "news-v1", "cursor": "abc:12"}
 
-    module._write_news_sync_state(state_file, expected)
+    module._write_news_sync_state(state_file, expected, state_root=tmp_path)
 
     assert module._read_news_sync_state(state_file) == expected
     assert not state_file.with_suffix(".json.tmp").exists()
     state_file.write_text("not-json", encoding="utf-8")
     assert module._read_news_sync_state(state_file) == {}
+
+
+@pytest.mark.parametrize("form", ["absolute", "bare", "normalized", "hardlink", "symlink"])
+def test_validated_state_write_stays_in_authority(tmp_path, form):
+    module = _sync_module()
+    authority = tmp_path / "authority"
+    authority.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"original":true}', encoding="utf-8")
+    target = authority / "state.json"
+    supplied = target
+    if form == "bare":
+        supplied = Path("state.json")
+    elif form == "normalized":
+        supplied = authority / "child" / ".." / "state.json"
+    elif form == "hardlink":
+        import os
+        os.link(outside, target)
+    elif form == "symlink":
+        try:
+            target.symlink_to(outside)
+        except OSError as error:
+            pytest.skip(f"symlink privilege unavailable: {error}")
+    checked = module._validated_sync_state_path(supplied, authority)
+    module._write_news_sync_state(checked, {"cursor": 8}, state_root=authority)
+    assert json.loads(target.read_text(encoding="utf-8")) == {"cursor": 8}
+    assert outside.read_text(encoding="utf-8") == '{"original":true}'
+    assert set(authority.iterdir()) == {target}
+    assert not target.is_symlink()
+    with pytest.raises(ValueError, match="sync state path"):
+        module._validated_sync_state_path(authority / ".." / "outside.json", authority)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Windows junction boundary")
+@pytest.mark.parametrize("stage", ["after-configuration", "ancestor", "replace-retry"])
+def test_sync_state_writer_rejects_actual_authority_junction(tmp_path, monkeypatch, stage):
+    module = _sync_module()
+    directory = tmp_path / "authority"
+    authority = directory / "forward" if stage == "ancestor" else directory
+    retained = tmp_path / "retained-authority"
+    outside = tmp_path / "outside"
+    authority.mkdir(parents=True)
+    outside.mkdir()
+    target = authority / "state.json"
+    target.write_text('{"prior":true}', encoding="utf-8")
+    outside_state = outside / "state.json"
+    outside_state.write_text('{"outside":true}', encoding="utf-8")
+    checked = module._validated_sync_state_path(target, authority)
+    calls = []
+
+    def shell(command):
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")
+
+    def redirect():
+        directory.rename(retained)
+        escaped_authority = str(directory).replace("'", "''")
+        escaped_outside = str(outside).replace("'", "''")
+        shell(f"$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path '{escaped_authority}' -Target '{escaped_outside}' | Out-Null")
+
+    def sharing_then_redirect(_temporary, destination):
+        calls.append(destination)
+        redirect()
+        error = PermissionError("sharing violation")
+        error.winerror = 32
+        raise error
+
+    try:
+        if stage != "replace-retry":
+            redirect()
+        else:
+            monkeypatch.setattr(Path, "replace", sharing_then_redirect)
+        with pytest.raises(ValueError, match="authority is redirected"):
+            module._write_news_sync_state(checked, {"cursor": 8}, state_root=authority)
+        assert outside_state.read_text(encoding="utf-8") == '{"outside":true}'
+        assert set(outside.iterdir()) == {outside_state}
+        assert len(calls) == (1 if stage == "replace-retry" else 0)
+        prior_path = retained / "forward" / "state.json" if stage == "ancestor" else retained / "state.json"
+        assert prior_path.read_text(encoding="utf-8") == '{"prior":true}'
+    finally:
+        # Remove only this exact junction entry; never recurse into its target.
+        if directory.exists() and directory.lstat().st_file_attributes & 0x400:
+            assert directory.parent.resolve() == tmp_path.resolve()
+            escaped = str(directory).replace("'", "''")
+            shell(f"[IO.Directory]::Delete('{escaped}')")
+        if retained.exists() and not directory.exists():
+            retained.rename(directory)
+    # A redirected owner is not safe cleanup authority. After restoring the
+    # real directory, the fixture may remove only the writer's retained temps.
+    for temporary in authority.glob("dashboard-sync-state-*.tmp"):
+        temporary.unlink()
+    assert set(authority.iterdir()) == {target}
+
+
+def test_sync_state_write_requires_independent_root_and_checks_before_io(tmp_path, monkeypatch):
+    module = _sync_module()
+    authority = tmp_path / "authority"
+    outsider = tmp_path / "outside.json"
+    calls = []
+    monkeypatch.setattr(module.tempfile, "NamedTemporaryFile", lambda **kwargs: calls.append(kwargs))
+    with pytest.raises(TypeError, match="state_root"):
+        module._write_news_sync_state(outsider, {})
+    with pytest.raises(ValueError, match="sync state path"):
+        module._write_news_sync_state(outsider, {}, state_root=authority)
+    assert calls == []
+    assert not authority.exists()
+    assert not outsider.exists()
 
 
 def test_sync_status_records_real_success_and_preserves_it_on_error(tmp_path) -> None:
@@ -846,14 +957,21 @@ def test_news_projection_health_verifies_exact_generation_receipt(monkeypatch) -
     assert requested == ["https://worker.example/api/news-index?health_check=1"]
 
 
-def test_news_projection_health_reports_exact_contradictions(monkeypatch) -> None:
+@pytest.mark.parametrize("field,value", (
+    ("receipt_digest", "0" * 64),
+    ("verified_complete", 1),
+    ("index_count", 2.0),
+    ("missing_detail_count", False),
+))
+def test_news_projection_health_reports_exact_contradictions(monkeypatch, field, value) -> None:
     module = _sync_module()
     monkeypatch.setattr(module, "_get_json", lambda *_a, **_k: {
         "status": "OK", "projection_state": "CURRENT", "verified_complete": True,
         "active_generation_id": "a" * 64, "snapshot_id": "b" * 64,
-        "source_digest": "c" * 64, "receipt_digest": "0" * 64,
+        "source_digest": "c" * 64, "receipt_digest": "d" * 64,
         "index_count": 2, "detail_count": 2,
         "missing_detail_count": 0, "invariant_violation_count": 0,
+        field: value,
     })
     manifest = {
         "generation_id": "a" * 64, "snapshot_id": "b" * 64,
@@ -868,9 +986,7 @@ def test_news_projection_health_reports_exact_contradictions(monkeypatch) -> Non
 
     assert module.sync_error_code(captured.value) == "NEWS_PROJECTION_HEALTH_MISMATCH"
     assert captured.value.evidence["violation_count"] == 1
-    assert captured.value.evidence["contradictions"]["receipt_digest"] == {
-        "expected": "d" * 64, "received": "0" * 64,
-    }
+    assert captured.value.evidence["contradictions"][field]["received"] == value
 
 
 
@@ -1165,6 +1281,32 @@ def _projection_local_get(generation, url: str) -> dict:
     return {"items": [], "offset": offset, "next_offset": offset}
 
 
+def _projection_provider_ack(generation, offsets, payload, *, active=False):
+    from xauusd_forecaster.news_projection import receipt_digest
+    accepted = {}
+    for kind in ("detail", "index"):
+        count = 0
+        accepted[kind] = []
+        for batch in getattr(generation, f"{kind}_batches"):
+            count += len(batch)
+            if count <= offsets[kind]:
+                accepted[kind].append(batch)
+    digest = receipt_digest(accepted["detail"], accepted["index"])
+    identity = generation.manifest["generation_id"]
+    action = payload["action"]
+    if action == "prepare":
+        return {"status": "OK", "active": active, "generation_id": identity,
+                "next_detail_offset": offsets["detail"], "next_index_offset": offsets["index"],
+                "receipt_digest": digest}
+    if action in {"stage_details", "stage_index"}:
+        return {"status": "OK", "received": len(payload["items"]), "receipt_digest": digest}
+    if action == "activate":
+        return {"status": "OK", "activated": identity,
+                "index_count": generation.manifest["expected_index_count"],
+                "detail_count": generation.manifest["expected_detail_count"]}
+    return {"status": "OK", "generation_id": identity}
+
+
 def test_news_generation_stages_all_details_before_index_and_activation(
     monkeypatch, tmp_path,
 ) -> None:
@@ -1178,16 +1320,12 @@ def test_news_generation_stages_all_details_before_index_and_activation(
         payload = json.loads(body)
         posted.append((url, payload))
         if payload["action"] == "prepare":
-            return {"status": "OK", "active": False,
-                    "next_detail_offset": offsets["detail"],
-                    "next_index_offset": offsets["index"]}
+            return _projection_provider_ack(generation, offsets, payload)
         if payload["action"] == "stage_details":
             offsets["detail"] += len(payload["items"])
-            return {"status": "OK", "received": len(payload["items"])}
         if payload["action"] == "stage_index":
             offsets["index"] += len(payload["items"])
-            return {"status": "OK", "received": len(payload["items"])}
-        return {"status": "OK"}
+        return _projection_provider_ack(generation, offsets, payload)
 
     manifest = generation.manifest
     monkeypatch.setattr(module, "_get_local_json", lambda url: _projection_local_get(generation, url))
@@ -1232,8 +1370,7 @@ def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_pat
         posted.append(action)
         if action == "stage_details":
             raise TimeoutError("detail upload timed out")
-        return {"status": "OK", "active": False, "next_detail_offset": 0,
-                "next_index_offset": 0}
+        return _projection_provider_ack(generation, {"detail": 0, "index": 0}, {"action": action})
 
     monkeypatch.setattr(module, "_post_json", fail_detail)
     config = {
@@ -1247,6 +1384,237 @@ def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_pat
         module._sync_news({}, config)
 
     assert posted == ["prepare", "stage_details"]
+
+
+@pytest.mark.parametrize("release_after", [1, 3, None])
+def test_sync_state_atomic_replace_bounds_windows_sharing_retry(monkeypatch, tmp_path, release_after):
+    module = _sync_module()
+    path = tmp_path / "state.json"
+    path.write_text('{"cursor":4}', encoding="utf-8")
+    original_replace = Path.replace
+    attempts, delays = [], []
+    def replace(source, target):
+        attempts.append(source)
+        assert json.loads(path.read_text(encoding="utf-8")) == {"cursor": 4}
+        assert json.loads(source.read_text(encoding="utf-8")) == {"cursor": 8}
+        if release_after is None or len(attempts) <= release_after:
+            error = PermissionError("fixture sharing conflict")
+            error.winerror = 32
+            raise error
+        return original_replace(source, target)
+    monkeypatch.setattr(Path, "replace", replace)
+    monkeypatch.setattr(module.time, "sleep", delays.append)
+    if release_after is None:
+        with pytest.raises(PermissionError, match="sharing conflict"):
+            module._write_news_sync_state(path, {"cursor": 8}, state_root=tmp_path)
+        assert json.loads(path.read_text()) == {"cursor": 4}
+        assert len(attempts) == 4
+    else:
+        module._write_news_sync_state(path, {"cursor": 8}, state_root=tmp_path)
+        assert json.loads(path.read_text()) == {"cursor": 8}
+        assert len(attempts) == release_after + 1
+    assert sum(delays) <= .071
+    assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Windows delete-sharing boundary")
+def test_sync_state_replaces_after_real_windows_reader_releases(tmp_path):
+    import threading
+    module = _sync_module()
+    path = tmp_path / "state.json"
+    path.write_text('{"cursor":4}', encoding="utf-8")
+    reader = path.open("rb")
+    timer = threading.Timer(.025, reader.close)
+    timer.start()
+    try:
+        module._write_news_sync_state(path, {"cursor": 8}, state_root=tmp_path)
+    finally:
+        reader.close()
+        timer.join(1)
+    assert not timer.is_alive()
+    assert json.loads(path.read_text()) == {"cursor": 8}
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def _evidence_ack(body: bytes, result: dict) -> dict:
+    """The additive HTTP ACK envelope; operation results remain explicit."""
+    request = json.loads(body)
+    snapshot = next(request[key] for key in (
+        "prepare_snapshot", "snapshot_id", "activate_snapshot", "cleanup_active_snapshot",
+    ) if key in request)
+    return {
+        **result, "contract_version": "news-evidence-paged-v2",
+        "snapshot_id": snapshot,
+        "request_sha256": __import__("hashlib").sha256(body).hexdigest(),
+    }
+
+
+def _evidence_cleanup_result(*, pending=False, exhausted=False) -> dict:
+    return {
+        "status": "OK", "cleanup": "budget_exhausted" if exhausted else "advanced",
+        "deleted_records": 0, "deleted_batches": 0, "deleted_staging": 0,
+        "cleanup_pending": pending, "cleanup_budget_exhausted": exhausted,
+    }
+
+
+@pytest.mark.parametrize("operation", ["prepare", "stage", "activate", "cleanup"])
+@pytest.mark.parametrize("corruption", [
+    "missing", "nonobject", "status", "contract", "identity", "digest",
+    "missing_result", "wrong_result_type", "wrong_result",
+])
+def test_news_evidence_ack_requires_exact_complete_response(
+    monkeypatch, operation, corruption,
+) -> None:
+    module = _sync_module()
+    snapshot = "a" * 64
+    requests = {
+        "prepare": {"prepare_snapshot": snapshot, "expected_count": 1},
+        "stage": {"snapshot_id": snapshot, "offset": 0, "items": [{"value": "中文"}]},
+        "activate": {"activate_snapshot": snapshot, "expected_count": 1},
+        "cleanup": {"cleanup_active_snapshot": snapshot},
+    }
+    results = {
+        "prepare": {"status": "OK", "active": True, "next_offset": 1},
+        "stage": {"status": "OK", "received": 1},
+        "activate": {"status": "OK", "activated": snapshot, "count": 1},
+        "cleanup": _evidence_cleanup_result(),
+    }
+    body = json.dumps({"contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION,
+                       **requests[operation]}, ensure_ascii=False).encode("utf-8")
+    good = _evidence_ack(body, results[operation])
+    monkeypatch.setattr(module, "_post_json", lambda *_: good)
+    assert module._post_news_evidence("https://fixture.invalid", body, {}) == good
+    bad = dict(good)
+    field = {"prepare": "next_offset", "stage": "received", "activate": "count",
+             "cleanup": "cleanup_pending"}[operation]
+    if corruption == "missing":
+        bad = {}
+    elif corruption == "nonobject":
+        bad = []
+    elif corruption in {"status", "contract", "identity", "digest"}:
+        bad[{"status": "status", "contract": "contract_version",
+             "identity": "snapshot_id", "digest": "request_sha256"}[corruption]] = "wrong"
+    elif corruption == "missing_result":
+        del bad[field]
+    elif corruption == "wrong_result_type":
+        bad[field] = 0 if operation == "cleanup" else True
+    elif operation == "cleanup":
+        bad["deleted_records"] = 201
+    else:
+        bad[field] = 0
+    monkeypatch.setattr(module, "_post_json", lambda *_: bad)
+    with pytest.raises(module.PayloadContractError, match="NEWS_EVIDENCE_ACK_INVALID"):
+        module._post_news_evidence("https://fixture.invalid", body, {})
+
+
+@pytest.mark.parametrize("wire_body", [b"", b"{", b"[]", b"null", b"{}"])
+def test_news_evidence_malformed_http_success_never_acknowledges(monkeypatch, wire_body):
+    module = _sync_module()
+
+    class Response:
+        status = 200
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            return False
+        def read(self):
+            return wire_body
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k: Response())
+    body = json.dumps({"prepare_snapshot": "a" * 64, "expected_count": 1}).encode()
+    with pytest.raises(module.PayloadContractError, match="NEWS_EVIDENCE_ACK_INVALID"):
+        module._post_news_evidence("https://fixture.invalid", body, {"token": "fixture"})
+
+
+@pytest.mark.parametrize("deferred_state", ["PROGRESS", "PENDING", "ERROR"])
+def test_deferred_heavy_turns_yield_to_due_resources_without_duplicate_owners(
+    monkeypatch, tmp_path, deferred_state,
+):
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import UTC, datetime, timedelta
+
+    module = _sync_module()
+    config = module.configure_runtime_state({
+        "local_status_url": "http://127.0.0.1:1/api/status",
+        "targets": [{"name": "cloudflare", "token": "fixture",
+                     "remote_ingest_url": "https://127.0.0.1:2/api/ingest"}],
+    }, tmp_path)
+    target = module.configured_targets(config)[0]
+    now = datetime.now(UTC)
+    module._write_news_sync_state(Path(target["resource_schedule_state_file"]), {
+        "schema_version": 1, "resources": {policy[0]: {"next_run_at": (
+            now - timedelta(seconds=10) if policy[0] in
+            {"learning", "market_chart", "news_evidence", "audit"} else now + timedelta(hours=1)
+        ).isoformat()} for policy in module.RESOURCE_POLICIES},
+    }, state_root=tmp_path)
+    calls = []
+    monkeypatch.setattr(module, "_deferred_projection_pending", lambda _: True)
+    monkeypatch.setattr(module, "_read_deferred_projection_request", lambda _: {
+        "routes": ["/api/news-evidence", "/api/audit-briefs"],
+    })
+    def deferred(*_):
+        calls.append("deferred")
+        return module.SyncResourceResults(
+            [{"resource": "deferred_projection"}] if deferred_state == "ERROR" else [],
+            [] if deferred_state == "PENDING" else [{"target": "cloudflare",
+                "resource": "deferred_projection", "status": deferred_state}],
+        )
+    monkeypatch.setattr(module, "sync_deferred_projection_once", deferred)
+    monkeypatch.setattr(module, "_sync_learning_summary", lambda *_: calls.append("learning"))
+    monkeypatch.setattr(module, "_sync_market", lambda *_: calls.append("market_chart"))
+    monkeypatch.setattr(module, "_sync_news_evidence", lambda *_: pytest.fail("second News owner"))
+    monkeypatch.setattr(module, "_sync_audit", lambda *_: pytest.fail("replayed accepted Audit"))
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        for turn in range(5):
+            module._submit_resource_lane(executor, "heavy", [target], config,
+                                         prefer_regular=bool(turn % 2)).result(timeout=5)
+    assert calls == ["deferred", "learning", "deferred", "market_chart", "deferred"]
+
+
+def test_news_evidence_python_bytes_worker_store_and_ack_consumer(monkeypatch):
+    import base64
+    import shutil
+    import subprocess
+
+    module = _sync_module()
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required for the producer/Worker boundary")
+    snapshot = "a" * 64
+    items = [{"event_key": "b" * 64, "collector_first_seen_time": "2026-09-05T00:00:00+00:00",
+              "broad_model_eligible": True, "model_seen": False,
+              "headline": "中文 😀", "integer_float": 1.0, "negative_zero": -0.0,
+              "small": 1e-7, "missing": None}]
+    requests = [
+        {"prepare_snapshot": snapshot, "expected_count": 1},
+        {"snapshot_id": snapshot, "offset": 0, "items": items},
+        {"snapshot_id": snapshot, "offset": 0, "items": items},
+        {"activate_snapshot": snapshot, "expected_count": 1},
+        {"prepare_snapshot": snapshot, "expected_count": 1},
+        {"cleanup_active_snapshot": snapshot},
+    ]
+    bodies = [json.dumps({"contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION, **request},
+                         ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+              for request in requests]
+    result = subprocess.run(
+        [node, "--import", (module.MODULE_ROOT / "web/tests/register-cloudflare-worker-loader.mjs").as_uri(),
+         str(module.MODULE_ROOT / "tests/fixtures/news_evidence_ack_worker.mjs")],
+        input=json.dumps([base64.b64encode(body).decode("ascii") for body in bodies]),
+        capture_output=True, text=True, encoding="utf-8", timeout=15, check=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    observed = json.loads(result.stdout)
+    assert observed["page"]["items"] == items
+    from xauusd_forecaster.news_projection import receipt_payload_hash
+    assert observed["inspection"] == {
+        "snapshot_id": snapshot, "count": 1, "expected_count": 1,
+        "content_digest": receipt_payload_hash(items),
+    }
+    for body, ack in zip(bodies, observed["results"], strict=True):
+        monkeypatch.setattr(module, "_post_json", lambda *_, ack=ack: ack)
+        assert module._post_news_evidence("https://fixture.invalid", body, {}) == ack
+        with pytest.raises(module.PayloadContractError, match="NEWS_EVIDENCE_ACK_INVALID"):
+            module._post_news_evidence("https://fixture.invalid", body + b" ", {})
 
 
 def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
@@ -1304,19 +1672,19 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
         payload = json.loads(body)
         posted.append((url, payload))
         if "prepare_snapshot" in payload:
-            return {
+            return _evidence_ack(body, {
                 "status": "OK", "active": remote_active,
                 "next_offset": len(rows) if remote_active else remote_next_offset,
-            }
+            })
         if "items" in payload:
             assert payload["offset"] == remote_next_offset
             remote_next_offset += len(payload["items"])
-            return {"status": "OK", "received": len(payload["items"])}
+            return _evidence_ack(body, {"status": "OK", "received": len(payload["items"])})
         if "activate_snapshot" in payload:
             assert remote_next_offset == len(rows)
             remote_active = True
-            return {"status": "OK", "activated": snapshot_id, "count": len(rows)}
-        return {"status": "OK"}
+            return _evidence_ack(body, {"status": "OK", "activated": snapshot_id, "count": len(rows)})
+        return _evidence_ack(body, _evidence_cleanup_result())
 
     monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
     monkeypatch.setattr(module, "_post_json", post)
@@ -1402,7 +1770,11 @@ def test_news_evidence_cleanup_uses_feedback_and_stops_at_daily_budget(
 
     def post(url, body, _config):
         calls.append((url, json.loads(body)))
-        return next(responses)
+        result = next(responses)
+        return _evidence_ack(body, _evidence_cleanup_result(
+            pending=result["cleanup_pending"],
+            exhausted=result.get("cleanup_budget_exhausted", False),
+        ))
 
     monkeypatch.setattr(module, "_post_json", post)
     snapshot_id = "a" * 64
@@ -1448,7 +1820,7 @@ def test_news_evidence_sync_drains_old_snapshot_before_admitting_replacement(
     def post(_url, body, _config):
         payload = json.loads(body)
         posted.append(payload)
-        return {"status": "OK", "cleanup_pending": True}
+        return _evidence_ack(body, _evidence_cleanup_result(pending=True))
 
     monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
     monkeypatch.setattr(module, "_post_json", post)
@@ -1471,7 +1843,7 @@ def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_field
     monkeypatch, tmp_path,
 ) -> None:
     sync = _sync_module()
-    api = _dashboard_module()
+    from xauusd_forecaster.dashboard import news_resources as api
     rows = [{
         "event_key": f"{index:064x}",
         "collector_first_seen_time": f"2026-08-19T10:{index:02d}:00+00:00",
@@ -1521,21 +1893,24 @@ def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_field
         snapshot = payload.get("prepare_snapshot") or payload.get("snapshot_id") \
             or payload.get("activate_snapshot") or payload.get("cleanup_active_snapshot")
         if "prepare_snapshot" in payload:
-            return {
+            return _evidence_ack(body, {
                 "status": "OK", "active": active[0] == snapshot,
                 "next_offset": offsets.get(snapshot, 0),
-            }
+            })
         if "items" in payload:
             assert payload["offset"] == offsets.get(snapshot, 0)
             received_keys.setdefault(snapshot, []).extend(
                 item["event_key"] for item in payload["items"]
             )
             offsets[snapshot] = payload["offset"] + len(payload["items"])
+            return _evidence_ack(body, {"status": "OK", "received": len(payload["items"])})
         if "activate_snapshot" in payload:
             assert offsets.get(snapshot, 0) == payload["expected_count"]
             active[0] = snapshot
             activations.append(snapshot)
-        return {"status": "OK"}
+            return _evidence_ack(body, {"status": "OK", "activated": snapshot,
+                                        "count": payload["expected_count"]})
+        return _evidence_ack(body, _evidence_cleanup_result())
 
     monkeypatch.setattr(sync.urllib.request, "urlopen", urlopen)
     monkeypatch.setattr(sync, "_post_json", post)
@@ -1611,8 +1986,9 @@ def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_field
     assert age_only_rows == changed_rows
 
 
+@pytest.mark.parametrize("failure", ["lost", "prepare_invalid", "stage_invalid", "activate_invalid"])
 def test_news_evidence_activation_acknowledgement_replays_idempotently(
-    monkeypatch, tmp_path,
+    monkeypatch, tmp_path, failure,
 ) -> None:
     module = _sync_module()
     snapshot_id = "a" * 64
@@ -1644,20 +2020,30 @@ def test_news_evidence_activation_acknowledgement_replays_idempotently(
 
     def post(_url, body, _config):
         payload = json.loads(body)
+        operation = "prepare" if "prepare_snapshot" in payload else (
+            "stage" if "items" in payload else "activate"
+        )
+        if remote["lose_ack"] and operation != "activate" and failure == f"{operation}_invalid":
+            remote["lose_ack"] = False
+            return {}
         if "prepare_snapshot" in payload:
-            return {
+            return _evidence_ack(body, {
                 "status": "OK", "active": remote["active"],
                 "next_offset": remote["next_offset"],
-            }
+            })
         if "items" in payload:
             remote["next_offset"] = 1
-            return {"status": "OK"}
+            return _evidence_ack(body, {"status": "OK", "received": 1})
         if "activate_snapshot" in payload:
             remote["active"] = True
-            if remote["lose_ack"]:
+            if remote["lose_ack"] and failure == "activate_invalid":
+                remote["lose_ack"] = False
+                return {}
+            if remote["lose_ack"] and failure == "lost":
                 remote["lose_ack"] = False
                 raise TimeoutError("activation response was lost")
-        return {"status": "OK"}
+            return _evidence_ack(body, {"status": "OK", "activated": snapshot_id, "count": 1})
+        return _evidence_ack(body, _evidence_cleanup_result())
 
     monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k: Response())
     monkeypatch.setattr(module, "_post_json", post)
@@ -1670,7 +2056,9 @@ def test_news_evidence_activation_acknowledgement_replays_idempotently(
     }
     config[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
 
-    with pytest.raises(TimeoutError, match="response was lost"):
+    error_type = TimeoutError if failure == "lost" else module.PayloadContractError
+    reason = "response was lost" if failure == "lost" else "NEWS_EVIDENCE_ACK_INVALID"
+    with pytest.raises(error_type, match=reason):
         module._sync_news_evidence({}, config)
     assert not state_path.exists() or "active_snapshot_id" not in json.loads(
         state_path.read_text(encoding="utf-8")
@@ -2055,22 +2443,20 @@ def test_news_generation_resumes_remote_offsets_and_bounds_each_cycle(
         action = payload["action"]
         actions.append(action)
         if action == "prepare":
-            return {"status": "OK", "active": active,
-                    "next_detail_offset": offsets["detail"],
-                    "next_index_offset": offsets["index"]}
+            return _projection_provider_ack(generation, offsets, payload, active=active)
         if action == "stage_details":
             assert payload["offset"] == offsets["detail"]
             offsets["detail"] += len(payload["items"])
-            return {"status": "OK", "received": len(payload["items"])}
+            return _projection_provider_ack(generation, offsets, payload)
         if action == "stage_index":
             assert offsets["detail"] == 25
             assert payload["offset"] == offsets["index"]
             offsets["index"] += len(payload["items"])
-            return {"status": "OK", "received": len(payload["items"])}
+            return _projection_provider_ack(generation, offsets, payload)
         if action == "activate":
             assert offsets == {"detail": 25, "index": 25}
             active = True
-        return {"status": "OK"}
+        return _projection_provider_ack(generation, offsets, payload)
 
     monkeypatch.setattr(module, "_post_json", post)
     monkeypatch.setattr(module, "_get_json", lambda *_a, **_k: {
@@ -2096,7 +2482,18 @@ def test_news_generation_resumes_remote_offsets_and_bounds_each_cycle(
     assert actions == ["prepare"] + ["stage_details"] * 4
     first_state = json.loads(Path(config["news_state_file"]).read_text(encoding="utf-8"))
     assert first_state["projection_state"] == "REPLAYING"
+    assert first_state["target_binding"] == {
+        "index_url": "https://remote/api/news-index",
+        "detail_url": "https://remote/api/news-content",
+        "contract_version": module.NEWS_MIRROR_CONTRACT_VERSION,
+    }
     actions.clear()
+    with pytest.raises(module.PayloadContractError, match="target changed"):
+        module._sync_news({}, {
+            **config, "remote_ingest_url": "https://other/api/ingest",
+        }, **sync_options)
+    assert actions == []
+    assert json.loads(Path(config["news_state_file"]).read_text(encoding="utf-8")) == first_state
     module._sync_news({}, config, **sync_options)
     assert actions == ["prepare"] + ["stage_index"] * 4
     actions.clear()
@@ -2107,6 +2504,57 @@ def test_news_generation_resumes_remote_offsets_and_bounds_each_cycle(
     actions.clear()
     module._sync_news({}, config, **sync_options)
     assert actions == ["prepare"]
+
+
+@pytest.mark.parametrize("action,field,value", (
+    ("prepare", "generation_id", "wrong"),
+    ("prepare", "active", "false"),
+    ("prepare", "next_detail_offset", True),
+    ("prepare", "next_index_offset", 1),
+    ("prepare", "receipt_digest", None),
+    ("stage_details", "received", "1"),
+    ("stage_details", "receipt_digest", "0" * 64),
+    ("stage_details", "status", "ERROR"),
+    ("stage_index", "received", True),
+    ("stage_index", "receipt_digest", None),
+    ("activate", "activated", "wrong"),
+    ("activate", "index_count", "1"),
+    ("verify", "generation_id", "wrong"),
+    ("verify", None, None),
+))
+def test_news_generation_invalid_success_ack_never_advances_checkpoint(
+    monkeypatch, tmp_path, action, field, value,
+):
+    module = _sync_module()
+    generation = _projection_fixture(1)
+    offsets = {"detail": 0, "index": 0}
+    state_path = tmp_path / "news-state.json"
+    prior = json.dumps({"projection_state": "REPLAYING", "generation_id": generation.manifest["generation_id"]})
+    state_path.write_text(prior, encoding="utf-8")
+    calls = []
+
+    def post(_url, body, _config):
+        payload = json.loads(body)
+        calls.append(payload["action"])
+        for kind, stage in (("detail", "stage_details"), ("index", "stage_index")):
+            if payload["action"] == stage:
+                offsets[kind] += len(payload["items"])
+        result = _projection_provider_ack(generation, offsets, payload)
+        if payload["action"] == action:
+            if field is None:
+                return []
+            result[field] = value
+        return result
+
+    monkeypatch.setattr(module, "_post_json", post)
+    monkeypatch.setattr(module, "_get_json", lambda *_: pytest.fail("invalid ACK proceeded to health"))
+    with pytest.raises(module.PayloadContractError):
+        module._sync_news({}, {
+            "remote_ingest_url": "https://remote/api/ingest", "token": "test",
+            "news_state_file": str(state_path), module.RUNTIME_STATE_ROOT_KEY: str(tmp_path),
+        }, frozen_generation=generation)
+    assert calls[-1] == action
+    assert state_path.read_text(encoding="utf-8") == prior
 
 
 def test_news_generation_rejects_manifest_drift_without_abandoning(
@@ -2146,7 +2594,7 @@ def test_news_generation_rejects_manifest_drift_without_abandoning(
 def test_news_projection_restart_restores_exact_frozen_generation(
     monkeypatch, tmp_path,
 ) -> None:
-    api = _dashboard_module()
+    from xauusd_forecaster.dashboard import news_resources as api
     api._NEWS_PROJECTION_CACHE.clear()
     database = tmp_path / "forward.sqlite3"
     first = _projection_fixture(25)
@@ -2189,7 +2637,7 @@ def test_news_projection_restart_restores_exact_frozen_generation(
 def test_news_projection_restart_fails_closed_on_corrupt_frozen_generation(
     tmp_path,
 ) -> None:
-    api = _dashboard_module()
+    from xauusd_forecaster.dashboard import news_resources as api
     database = tmp_path / "forward.sqlite3"
     api._write_persisted_news_projection_generation(
         database, _projection_fixture(25),
@@ -2551,6 +2999,7 @@ def test_operator_retry_mirror_persists_exact_digest_only_after_delta_completes(
     state_path = tmp_path / "operator-retry.json"
     config = {
         "operator_retry_state_file": str(state_path),
+        module.RUNTIME_STATE_ROOT_KEY: str(tmp_path),
         "token": "test",
     }
     items = [{
@@ -2732,8 +3181,9 @@ def test_continuous_heavy_owner_drains_overdue_queue_before_next_heartbeat(
     ]
 
 
+@pytest.mark.parametrize("incident,continuous", [(False, False), (True, False), (True, True)])
 def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
-    monkeypatch, tmp_path,
+    monkeypatch, tmp_path, incident, continuous,
 ) -> None:
     module = _sync_module()
     config = module.configure_runtime_state({}, tmp_path)
@@ -2759,6 +3209,33 @@ def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
         "routes": sorted(module.DEFERRED_PROJECTION_ROUTES),
         "created_at": required_after.isoformat(),
     }
+    news_calls = []
+    if incident:
+        request["routes"].append("/api/news-evidence")
+        request["collector_recovery"] = {
+            "incident": "COLLECTOR_CLOCK_EVENT_ATOMICITY",
+            "broken_revision": "ffe1de29c0891cc3a3cf3d602f3d3ee657faa9b8",
+            "target_revision": revision,
+        }
+        target["news_evidence_state_file"] = str(tmp_path / "news-state.json")
+        def advance_news(_payload, _target):
+            news_calls.append(1)
+            if len(news_calls) == 1:
+                module._write_news_sync_state(Path(target["news_evidence_state_file"]), {
+                    "contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION,
+                    "staging_snapshot_id": "d"*64, "staged_count": 4,
+                }, state_root=tmp_path)
+            if len(news_calls) == 2:
+                module._write_news_sync_state(Path(target["news_evidence_state_file"]), {
+                    "contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION,
+                    "active_snapshot_id": "d"*64, "record_count": 8,
+                    "ack_remote_url": target["remote_ingest_url"].rsplit("/", 1)[0] + "/news-evidence",
+                    "ack_request_sha256": "e" * 64,
+                }, state_root=tmp_path)
+            return "d" * 64
+        monkeypatch.setattr(module, "_sync_news_evidence", advance_news)
+        monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k:
+                            pytest.fail("deferred owner must not reread the accepted source page"))
     Path(config["deferred_projection_request_file"]).write_text(
         json.dumps(request), encoding="utf-8",
     )
@@ -2786,7 +3263,49 @@ def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
     )
 
     pending = module.sync_deferred_projection_once([target], config)
+    if continuous:
+        logical_time = [0.0]
+        heartbeats = []
+        class LogicalStop:
+            def is_set(self):
+                return False
+
+            def wait(self, seconds):
+                logical_time[0] += seconds
+                time.sleep(0.001)
+                return False
+
+        def heartbeat(_config):
+            heartbeats.append((logical_time[0], len(news_calls)))
+            return [target], module.SyncResourceResults([], [])
+
+        monkeypatch.setattr(module.time, "monotonic", lambda: logical_time[0])
+        monkeypatch.setattr(module, "sync_heartbeat_once", heartbeat)
+        monkeypatch.setattr(module, "sync_resource_lane", lambda *_a, **_k: module.SyncResourceResults([], []))
+        monkeypatch.setattr(module, "write_sync_status", lambda *_a, **_k: None)
+        module.run_continuous_sync(config, status_file=tmp_path / "status.json",
+                                   interval_seconds=30, stop_event=LogicalStop(), max_heartbeats=2)
+        assert heartbeats == [(0.0, 0), (30.0, 2)]
+        assert json.loads(Path(config["deferred_projection_receipt_file"]).read_text())["state"] == "COMPLETED"
+        assert len(writes) == 4
+        assert not module.sync_deferred_projection_once([target], config).resource_observations
+        return
     completed = module.sync_deferred_projection_once([target], config)
+    if incident:
+        assert completed.resource_observations[0]["status"] == "PROGRESS"
+        assert len(news_calls) == 1
+        assert json.loads(Path(config["deferred_projection_receipt_file"]).read_text())["state"] == "PARTIAL"
+        retained_failure = {"target": "cloudflare", "resource": "deferred_projection", "error": "prior failure"}
+        retained = module._merge_lane_results(module.SyncResourceResults([retained_failure], []), completed)
+        assert list(retained) == [retained_failure], "page progress is not resource recovery"
+        monkeypatch.setattr(module, "_sync_news_evidence", lambda *_a: "d" * 64)
+        stalled = module.sync_deferred_projection_once([target], config)
+        assert stalled.resource_observations == [], "unchanged cursor must not busy-drain"
+        monkeypatch.setattr(module, "_sync_news_evidence", advance_news)
+        # This third invocation cannot rebuild/repost accepted Audit work: the
+        # source iterator is exhausted and the write count stays exactly four.
+        completed = module.sync_deferred_projection_once([target], config)
+        assert len(news_calls) == 2
     repeated = module.sync_deferred_projection_once([target], config)
 
     assert pending.resource_observations == []
@@ -2802,13 +3321,17 @@ def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
     assert receipt["request_id"] == request["request_id"]
     assert receipt["producer_revision"] == revision
     assert receipt["generated_at"] == fresh["generated_at"]
-    assert set(receipt["projection_hashes"]) == module.DEFERRED_PROJECTION_ROUTES
+    assert set(receipt["projection_hashes"]) == set(request["routes"])
     posted = {"/api/" + url.rsplit("/api/", 1)[-1]: body for url, body in writes}
-    assert receipt["projection_hashes"] == {
+    expected_hashes = {
         route: module.hashlib.sha256(posted[route]).hexdigest()
         for route in module.DEFERRED_PROJECTION_ROUTES
     }
-    assert completed.resource_observations[0]["resource"] == "deferred_projection"
+    if incident:
+        expected_hashes["/api/news-evidence"] = "d"*64
+        assert completed.resource_observations[0]["resource"] == "news_evidence"
+    assert receipt["projection_hashes"] == expected_hashes
+    assert completed.resource_observations[-1]["resource"] == "deferred_projection"
     schedule = json.loads(schedule_path.read_text(encoding="utf-8"))
     assert schedule["resources"]["audit"]["last_success_at"]
 

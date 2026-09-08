@@ -156,15 +156,15 @@ def test_current_repository_satisfies_hosting_policy() -> None:
 def test_rejects_missing_or_mutable_production_build_contract(tmp_path: Path) -> None:
     contract = tmp_path / "web" / "cloudflare-build-contract.json"
     contract.unlink()
-    assert "exact-main immutable Cloudflare production build contract is required" in boundaries(tmp_path)
+    assert "exact-main direct Cloudflare production build contract is required" in boundaries(tmp_path)
 
     write(
         tmp_path,
         "web/cloudflare-build-contract.json",
-        VALID_BUILD_CONTRACT.replace("versions upload", "deploy"),
+        VALID_BUILD_CONTRACT.replace("wrangler deploy", "wrangler versions upload"),
     )
     assert (
-        "Cloudflare production build contract drifted from exact-main immutable upload"
+        "Cloudflare production build contract drifted from exact-main direct deployment"
         in boundaries(tmp_path)
     )
 
@@ -176,3 +176,13 @@ def test_rejects_direct_production_deploy_package_script(tmp_path: Path) -> None
         '{"scripts":{"cf:deploy":"npm test && wrangler deploy"}}',
     )
     assert "direct production wrangler deploy script is forbidden" in boundaries(tmp_path)
+
+
+def test_admits_only_exact_main_direct_build_contract(tmp_path: Path) -> None:
+    write(tmp_path, "web/cloudflare-build-contract.json", json.dumps(EXPECTED_CLOUDFLARE_BUILD_CONTRACT))
+    assert check_repository(tmp_path) == []
+    for branch in ("feature", "", "*"):
+        changed = json.loads(json.dumps(EXPECTED_CLOUDFLARE_BUILD_CONTRACT))
+        changed["source"]["production_branch"] = branch
+        write(tmp_path, "web/cloudflare-build-contract.json", json.dumps(changed))
+        assert boundaries(tmp_path)

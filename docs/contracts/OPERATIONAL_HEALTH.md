@@ -237,7 +237,10 @@ The preflight contract versions its executable readiness behavior, not only its
 database-copy shape. A failed revision is suppressed under the same contract to
 prevent retry storms, but one controlled retry is permitted after a newer
 contract changes that behavior. Every failed phase records a bounded,
-secret-redacted diagnostic containing process exit state, the last HTTP result,
+secret-redacted diagnostic. The explicit copy-timeout retry exception is owned
+by `RELEASE_CONTROL.md`: a current native copy timeout is non-promotable review,
+and manual retry reruns the complete preflight without extending its deadline.
+Every failed phase records process exit state, the last HTTP result,
 and candidate log tails. The prior runtime remains active throughout failure.
 A bounded stale snapshot remains suitable for production-shape validation while
 its single background refresh runs. When no bounded snapshot exists, the
