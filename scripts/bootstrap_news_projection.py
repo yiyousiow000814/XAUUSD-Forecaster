@@ -380,13 +380,14 @@ def main() -> int:
         parser.error("cycle and retry bounds are invalid")
     config = json.loads(args.config.read_text(encoding="utf-8"))
     state_file = _validated_sync_state_path(args.state_file, PRODUCTION_RUNTIME_STATE_ROOT)
-    artifact_path = state_file.with_name(
-        f"{state_file.stem}-generation.json.gz"
-    ).resolve()
-    # The CLI filename is bounded separately; a pre-existing artifact link must
-    # not redirect this reader/writer outside the declared private runtime.
-    if (not artifact_path.is_relative_to(PRODUCTION_RUNTIME_STATE_ROOT)
-            or artifact_path != state_file.with_name(f"{state_file.stem}-generation.json.gz")):
+    expected_artifact = state_file.with_name(f"{state_file.stem}-generation.json.gz")
+    artifact_name = os.path.realpath(expected_artifact)
+    # Normalize links before checking the complete directory prefix. Keep the
+    # exact declared filename too: an in-root link cannot select another fact.
+    if not artifact_name.startswith(str(PRODUCTION_RUNTIME_STATE_ROOT) + os.sep):
+        raise ValueError("NEWS_GENERATION_ARTIFACT_OUTSIDE_RUNTIME")
+    artifact_path = Path(artifact_name)
+    if artifact_path != expected_artifact:
         raise ValueError("NEWS_GENERATION_ARTIFACT_OUTSIDE_RUNTIME")
     origin = _version_origin(args.version_host)
     token = os.environ.get(args.token_env, "")
