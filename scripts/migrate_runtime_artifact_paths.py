@@ -23,9 +23,7 @@ from xauusd_forecaster.artifact_path_migration import (  # noqa: E402
     verify_artifact_path_migration,
     write_migration_receipt,
 )
-from xauusd_forecaster.training_v2 import (  # noqa: E402
-    require_current_contract_generation,
-)
+from xauusd_forecaster.training.generation import require_current_contract_generation
 from xauusd_forecaster.sqlite_wal import (  # noqa: E402
     open_forward_writer_connection,
 )

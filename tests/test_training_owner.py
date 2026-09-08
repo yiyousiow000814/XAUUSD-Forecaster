@@ -10,13 +10,13 @@ import sys
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
-from xauusd_forecaster.forward_ledger import ForwardLedger
-from xauusd_forecaster.forward_engine import ForwardEngine
-from xauusd_forecaster import training_owner
+from xauusd_forecaster.evidence.ledger import ForwardLedger
+from xauusd_forecaster.decision.engine import ForwardEngine
+import xauusd_forecaster.training.runtime as training_owner
 from xauusd_forecaster.market import BrokerMarketSession, MarketObservation
-from xauusd_forecaster.runtime_health import write_runtime_heartbeat
-from scripts.run_forward_collector import append_current_grid_events
-from scripts.run_forward_collector import append_due_grid_events
+from xauusd_forecaster.runtime.health import write_runtime_heartbeat
+from xauusd_forecaster.decision.collector_runtime import append_current_grid_events
+from xauusd_forecaster.decision.collector_runtime import append_due_grid_events
 from xauusd_forecaster.sqlite_wal import is_forward_sqlite_contention
 
 
@@ -101,7 +101,7 @@ def test_decision_cursor_does_not_advance_on_real_writer_contention(
     blocker.execute("PRAGMA busy_timeout=20")
     blocker.execute("BEGIN IMMEDIATE")
     monkeypatch.setattr(
-        "scripts.run_forward_collector.skipped_grid_reason", lambda *_args: None,
+        "xauusd_forecaster.decision.collector_runtime.skipped_grid_reason", lambda *_args: None,
     )
 
     class Provider:
@@ -162,7 +162,7 @@ def test_collector_does_not_normalize_non_contention_sqlite_errors(monkeypatch) 
 
     ledger = SimpleNamespace(forward_epoch=decision, connection=SimpleNamespace())
     monkeypatch.setattr(
-        "scripts.run_forward_collector.skipped_grid_reason", lambda *_args: None,
+        "xauusd_forecaster.decision.collector_runtime.skipped_grid_reason", lambda *_args: None,
     )
     try:
         append_due_grid_events(

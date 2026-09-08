@@ -23,10 +23,11 @@ package = types.ModuleType("xauusd_forecaster")
 package.__path__ = [str(MODULE_ROOT / "xauusd_forecaster")]
 sys.modules["xauusd_forecaster"] = package
 factor_coverage = importlib.import_module("xauusd_forecaster.factors").factor_coverage
-model_limits = importlib.import_module("xauusd_forecaster.model_limits")
-dashboard_sync = importlib.import_module("scripts.run_dashboard_sync")
+model_limits = importlib.import_module('xauusd_forecaster.ai.model_limits')
+resource_contracts = importlib.import_module("xauusd_forecaster.dashboard.resource_contracts")
+dashboard_payloads = importlib.import_module("xauusd_forecaster.dashboard.payloads")
 assess_news_semantic_eligibility = importlib.import_module(
-    "xauusd_forecaster.news_time"
+    'xauusd_forecaster.news.semantics.time'
 ).assess_news_semantic_eligibility
 
 
@@ -89,7 +90,7 @@ def _resource_evidence(
 def _read_optional_json(base_url: str, path: str) -> tuple[dict | None, dict]:
     try:
         payload = _read_json(base_url, path)
-        if path.startswith("/api/audit-") and not dashboard_sync.valid_audit_detail_payload(
+        if path.startswith("/api/audit-") and not dashboard_payloads.valid_audit_detail_payload(
             payload, path.removeprefix("/api/audit-"), renderable=True,
         ):
             return None, _resource_evidence(
@@ -109,7 +110,7 @@ def _legacy_resource(
     projector,
 ) -> tuple[dict | None, dict]:
     projected = projector(legacy) if all(field in legacy for field in required_fields) else None
-    if projected is not None and dashboard_sync.valid_audit_detail_payload(
+    if projected is not None and dashboard_payloads.valid_audit_detail_payload(
         projected, path.removeprefix("/api/audit-"), renderable=True,
     ):
         return projected, _resource_evidence(
@@ -246,9 +247,9 @@ def _execution_history_records(base_url: str) -> list[dict]:
                 if not isinstance(point, dict) or not point.get("time"):
                     continue
                 payload = {"model_identity": identity, **point}
-                record = dashboard_sync._learning_record(
+                record = resource_contracts._learning_record(
                     "execution-point", f"{identity}\0{point['time']}",
-                    dashboard_sync._epoch(point["time"]), payload,
+                    resource_contracts._epoch(point["time"]), payload,
                 )
                 records[(record["resource"], record["record_key"])] = record
             cursor = page.get("next_cursor")
@@ -276,9 +277,9 @@ def _curve_overview_records(base_url: str) -> list[dict]:
             if not last_time:
                 continue
             payload = {**item, "cadence": cadence}
-            record = dashboard_sync._learning_record(
+            record = resource_contracts._learning_record(
                 "curve-overview", f"{cadence}\0{identity}",
-                dashboard_sync._epoch(last_time), payload,
+                resource_contracts._epoch(last_time), payload,
             )
             records[(record["resource"], record["record_key"])] = record
     return list(records.values())
@@ -304,12 +305,12 @@ def _version_history_records(base_url: str) -> list[dict]:
     for identity, groups in groups_by_identity.items():
         ordered = sorted(groups, key=lambda row: (
             row.get("created_at") or "", row.get("generation") or 0,
-        ))[-dashboard_sync.LEARNING_OVERVIEW_GROUPS_PER_IDENTITY:]
+        ))[-resource_contracts.LEARNING_OVERVIEW_GROUPS_PER_IDENTITY:]
         for group in ordered:
             dataset_hash = str(group["training_dataset_hash"])
-            record = dashboard_sync._learning_record(
+            record = resource_contracts._learning_record(
                 "version-group", f"{identity}\0{dataset_hash}",
-                dashboard_sync._epoch(group["created_at"]), group,
+                resource_contracts._epoch(group["created_at"]), group,
             )
             records[(record["resource"], record["record_key"])] = record
     return list(records.values())
@@ -464,8 +465,8 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
         audit_briefs, resources["audit_briefs"] = _legacy_resource(
             "/api/audit-briefs", source_audit,
             ("daily_news_briefs",),
-            lambda value: dashboard_sync.audit_briefs_payload(
-                value, brief_limit=dashboard_sync.REMOTE_DAILY_BRIEF_LIMIT,
+            lambda value: dashboard_payloads.audit_briefs_payload(
+                value, brief_limit=resource_contracts.REMOTE_DAILY_BRIEF_LIMIT,
             ),
         )
     audit_stories, resources["audit_stories"] = _read_optional_json(
@@ -475,7 +476,7 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
         audit_stories, resources["audit_stories"] = _legacy_resource(
             "/api/audit-stories", source_audit,
             ("storylines", "storyline_summary"),
-            dashboard_sync.audit_stories_payload,
+            dashboard_payloads.audit_stories_payload,
         )
     audit_decisions, resources["audit_decisions"] = _read_optional_json(
         base_url, "/api/audit-decisions",
@@ -484,8 +485,8 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
         audit_decisions, resources["audit_decisions"] = _legacy_resource(
             "/api/audit-decisions", source_audit,
             ("recent_decisions",),
-            lambda value: dashboard_sync.audit_decisions_payload(
-                value, decision_limit=dashboard_sync.REMOTE_DECISION_LIMIT,
+            lambda value: dashboard_payloads.audit_decisions_payload(
+                value, decision_limit=resource_contracts.REMOTE_DECISION_LIMIT,
             ),
         )
 
@@ -552,11 +553,11 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
 
     status["factor_coverage"] = _rebuild_factor_coverage(status)
     _backfill_annotation_reasons(news_index, status)
-    audit = json.loads(dashboard_sync.audit_snapshot(source_audit))
+    audit = json.loads(resource_contracts.audit_snapshot(source_audit))
     resources["audit_summary"] = _resource_evidence(
         "/api/audit", available=True, source="/api/audit",
     )
-    status = json.loads(dashboard_sync.remote_snapshot(status))
+    status = json.loads(resource_contracts.remote_snapshot(status))
     if resources["recent_decisions"]["availability"] == UNAVAILABLE_IN_BUILD_SNAPSHOT:
         status.pop("recent_decisions", None)
     if resources["live_oos_summary"]["availability"] == UNAVAILABLE_IN_BUILD_SNAPSHOT:
@@ -602,7 +603,7 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
         except (OSError, RuntimeError, json.JSONDecodeError):
             continue
 
-    learning_history = dashboard_sync.learning_history_records(
+    learning_history = resource_contracts.learning_history_records(
         learning, infer_source_gaps=False,
     )
     try:

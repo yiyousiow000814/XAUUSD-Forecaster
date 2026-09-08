@@ -14,34 +14,6 @@
     },
     "script_imports": [
       {
-        "source": "scripts/bootstrap_news_projection.py",
-        "target": "scripts/run_dashboard_sync.py",
-        "reason": "Existing bounded bootstrap reuses the actual Sync protocol and state I/O.",
-        "remove_when": "The protocol and all state I/O callers move together to their package owner.",
-        "binding": "MODULE_REQUEST_ONLY"
-      },
-      {
-        "source": "scripts/build_preview_bundle.py",
-        "target": "scripts/run_dashboard_sync.py",
-        "reason": "The retained immutable Preview builder consumes explicit serializer re-exports.",
-        "remove_when": "The builder imports the package owner and exact bundle byte parity passes.",
-        "binding": "MODULE_REQUEST_ONLY"
-      },
-      {
-        "source": "scripts/build_release_validation_fixtures.py",
-        "target": "scripts/run_dashboard_sync.py",
-        "reason": "The retained release fixture builder consumes explicit serializer re-exports.",
-        "remove_when": "The builder imports the package owner and all fixture bytes remain equivalent.",
-        "binding": "MODULE_REQUEST_ONLY"
-      },
-      {
-        "source": "scripts/check_deferred_projection_parity.py",
-        "target": "scripts/run_dashboard_sync.py",
-        "reason": "Producer-root-selected parity consumes that producer's Sync; local syntax is not its revision identity.",
-        "remove_when": "Producer-compatible parity has an explicit replacement interface and cross-version tests.",
-        "binding": "PARAMETERIZED_PRODUCER_ROOT"
-      },
-      {
         "source": "scripts/architecture_compiler.py",
         "target": "scripts/architecture_typescript_tool.py",
         "reason": "Current compiler reuses its lock-bound parser dependency owner.",
@@ -82,8 +54,10 @@
   "source_symbols": {
     "scripts/run_dashboard_api.py": [
       "scripts/run_dashboard_api.py::Handler.do_GET",
-      "scripts/run_dashboard_api.py::_optional_resource_payload",
       "scripts/run_dashboard_api.py::main"
+    ],
+    "xauusd_forecaster/dashboard/status_resources.py": [
+      "xauusd_forecaster/dashboard/status_resources.py::_optional_resource_payload"
     ],
     "xauusd_forecaster/dashboard/news_resources.py": [
       "xauusd_forecaster/dashboard/news_resources.py::_build_news_projection_source",
@@ -113,7 +87,9 @@
         "web/app/api/_shared/news-evidence-store.ts",
         "web/app/_views/AuditView.tsx",
         "web/app/_lib/dashboard-resource.ts",
-        "web/app/_lib/news-index-contract.ts"
+        "web/app/_lib/news-index-contract.ts",
+        "xauusd_forecaster/dashboard/status_resources.py",
+        "xauusd_forecaster/dashboard/sync/resources.py"
       ],
       "roots": [
         "scripts/run_dashboard_api.py::Handler.do_GET",
@@ -121,12 +97,12 @@
         "xauusd_forecaster/dashboard/news_resources.py::_news_projection_source_for_request",
         "xauusd_forecaster/dashboard/news_resources.py::_finish_news_projection_source_build",
         "xauusd_forecaster/dashboard/news_resources.py::_build_news_evidence_resource",
-        "scripts/run_dashboard_api.py::_optional_resource_payload",
+        "xauusd_forecaster/dashboard/status_resources.py::_optional_resource_payload",
         "scripts/run_dashboard_api.py::main",
         "xauusd_forecaster/news_projection.py::build_news_projection_generation",
-        "scripts/run_dashboard_sync.py::_sync_news",
-        "scripts/run_dashboard_sync.py::_sync_news_evidence",
-        "scripts/run_dashboard_sync.py::_sync_audit",
+        "xauusd_forecaster/dashboard/sync/resources.py::_sync_news",
+        "xauusd_forecaster/dashboard/sync/resources.py::_sync_news_evidence",
+        "xauusd_forecaster/dashboard/sync/resources.py::_sync_audit",
         "web/worker/api-router.ts::routeApiRequest",
         "web/worker/api-router.ts::genericRoute",
         "web/app/api/news-index/route.ts::POST",
@@ -155,14 +131,15 @@
     "clock-transaction": {
       "files": [
         "scripts/run_forward_collector.py",
-        "xauusd_forecaster/forward_engine.py",
+        "xauusd_forecaster/decision/engine.py",
         "xauusd_forecaster/clock_commit.py",
         "xauusd_forecaster/clock_recovery.py",
-        "xauusd_forecaster/u5_state.py"
+        "xauusd_forecaster/u5_state.py",
+        "xauusd_forecaster/decision/collector_runtime.py"
       ],
       "roots": [
-        "scripts/run_forward_collector.py::append_due_grid_events",
-        "xauusd_forecaster/forward_engine.py::ForwardEngine.append_clock_event",
+        "xauusd_forecaster/decision/collector_runtime.py::append_due_grid_events",
+        "xauusd_forecaster/decision/engine.py::ForwardEngine.append_clock_event",
         "xauusd_forecaster/clock_commit.py::read_completed_clock"
       ],
       "tests": [
@@ -176,15 +153,16 @@
         "scripts/run_dashboard_sync.py",
         "xauusd_forecaster/dashboard/resource_contracts.py",
         "xauusd_forecaster/dashboard/sync/transport.py",
-        "xauusd_forecaster/dashboard/learning_resources.py"
+        "xauusd_forecaster/dashboard/learning_resources.py",
+        "xauusd_forecaster/dashboard/sync/resources.py"
       ],
       "roots": [
-        "scripts/run_dashboard_sync.py::_sync_learning_summary",
-        "scripts/run_dashboard_sync.py::_sync_learning_history",
-        "scripts/run_dashboard_sync.py::_sync_market",
-        "scripts/run_dashboard_sync.py::_sync_market_history",
-        "scripts/run_dashboard_sync.py::_sync_operator_retries",
-        "scripts/run_dashboard_sync.py::_sync_news_evidence",
+        "xauusd_forecaster/dashboard/sync/resources.py::_sync_learning_summary",
+        "xauusd_forecaster/dashboard/sync/resources.py::_sync_learning_history",
+        "xauusd_forecaster/dashboard/sync/resources.py::_sync_market",
+        "xauusd_forecaster/dashboard/sync/resources.py::_sync_market_history",
+        "xauusd_forecaster/dashboard/sync/resources.py::_sync_operator_retries",
+        "xauusd_forecaster/dashboard/sync/resources.py::_sync_news_evidence",
         "xauusd_forecaster/dashboard/sync/transport.py::_post_json"
       ],
       "tests": [

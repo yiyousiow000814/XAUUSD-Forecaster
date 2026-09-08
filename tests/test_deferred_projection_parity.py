@@ -2,8 +2,12 @@ from datetime import UTC, datetime, timedelta
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import shutil
 import sqlite3
+import subprocess
+import sys
 import urllib.error
 import pytest
 from urllib.parse import parse_qs, urlsplit
@@ -266,14 +270,41 @@ def test_corrupt_persisted_authority_fails_closed_without_api_fallback(
     assert result["diagnostic"] == "persisted audit authority hash mismatch"
 
 
-def test_runtime_and_producer_roots_are_independent_cli_contracts() -> None:
+def test_runtime_and_producer_roots_are_independent_cli_contracts(tmp_path) -> None:
     source = (ROOT / "scripts" / "check_deferred_projection_parity.py").read_text(
         encoding="utf-8"
     )
     assert 'parser.add_argument("--runtime-root", required=True)' in source
     assert 'parser.add_argument("--producer-root", required=True)' in source
     assert 'LOCAL_DATABASE = RUNTIME_ROOT / ".local"' in source
-    assert 'sys.path.insert(0, str(PRODUCER_ROOT / "scripts"))' in source
+    producer = tmp_path / "producer"
+    shutil.copytree(ROOT / "xauusd_forecaster", producer / "xauusd_forecaster",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    runtime = tmp_path / "runtime"
+    other = tmp_path / "unrelated"
+    runtime.mkdir()
+    other.mkdir()
+    code = '''
+import pathlib, runpy, sys
+entry, producer, runtime = sys.argv[1:]
+sys.argv = [entry, "--producer-root", producer, "--runtime-root", runtime]
+values = runpy.run_path(entry, run_name="source_probe")
+assert values["RUNTIME_ROOT"] == pathlib.Path(runtime)
+assert values["LOCAL_DATABASE"].is_relative_to(pathlib.Path(runtime))
+owner = pathlib.Path(values["_deferred_projection_request_digest"].__code__.co_filename)
+assert owner.is_relative_to(pathlib.Path(producer))
+'''
+    command = [sys.executable, '-c', code, str(ROOT / 'scripts/check_deferred_projection_parity.py'),
+               str(producer), str(runtime)]
+    def run():
+        return subprocess.run(command, cwd=other, capture_output=True, text=True, timeout=20,
+                              creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+    result = run()
+    assert result.returncode == 0, result.stderr
+    command[-2] = str(tmp_path / 'missing-producer')
+    result = run()
+    assert result.returncode != 0 and 'PROJECTION_PRODUCER_OWNER_UNAVAILABLE' in result.stderr
+    assert list(runtime.iterdir()) == []
 
 
 def test_real_entrypoint_owns_http_identity_for_all_deferred_routes(monkeypatch) -> None:

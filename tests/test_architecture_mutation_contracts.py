@@ -9,7 +9,7 @@ import subprocess
 import pytest
 
 from scripts import run_dashboard_sync as sync
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 
 ROOT = Path(__file__).resolve().parents[1]
 

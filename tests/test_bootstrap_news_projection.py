@@ -230,7 +230,7 @@ def test_bootstrap_persists_generation_before_first_replay(
 def test_bootstrap_capture_retains_input_and_never_calls_remote_or_initializer(
     tmp_path, monkeypatch, source_state,
 ):
-    from xauusd_forecaster.forward_ledger import ForwardLedger
+    from xauusd_forecaster.evidence.ledger import ForwardLedger
     from xauusd_forecaster.dashboard import news_resources as api_owner
     from xauusd_forecaster import news_projection as capture_owner
 

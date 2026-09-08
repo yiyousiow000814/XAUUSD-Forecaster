@@ -2,26 +2,24 @@ import ast
 import re
 from pathlib import Path
 
-from xauusd_forecaster.daily_brief import GENERATION_FAILURE_CODES
-from xauusd_forecaster.gemini_embeddings import GEMINI_EMBEDDING_FAILURE_CODES
-from xauusd_forecaster.operational_taxonomy import (
-    INTENTIONALLY_UNCORRELATED_FAILURE_CODES,
-    normalize_operational_event,
-    operational_code_index,
-    operational_code_registry,
-    validate_operational_code_registry,
-)
+from xauusd_forecaster.news.brief.product import GENERATION_FAILURE_CODES
+from xauusd_forecaster.news.retrieval.gemini_embeddings import GEMINI_EMBEDDING_FAILURE_CODES
+from xauusd_forecaster.runtime.taxonomy import INTENTIONALLY_UNCORRELATED_FAILURE_CODES
+from xauusd_forecaster.runtime.taxonomy import normalize_operational_event
+from xauusd_forecaster.runtime.taxonomy import operational_code_index
+from xauusd_forecaster.runtime.taxonomy import operational_code_registry
+from xauusd_forecaster.runtime.taxonomy import validate_operational_code_registry
 
 
 ROOT = Path(__file__).resolve().parents[1]
 FAILURE_CODE_SOURCES = (
-    "xauusd_forecaster/gemini_embeddings.py",
-    "xauusd_forecaster/news_retrieval.py",
-    "xauusd_forecaster/news_scheduler.py",
-    "xauusd_forecaster/model_gateway.py",
-    "xauusd_forecaster/scheduler_model_gateway.py",
-    "xauusd_forecaster/daily_brief.py",
-    "xauusd_forecaster/operational_health.py",
+    "xauusd_forecaster/news/retrieval/gemini_embeddings.py",
+    "xauusd_forecaster/news/retrieval/search.py",
+    "xauusd_forecaster/news/scheduler/state.py",
+    "xauusd_forecaster/ai/model_gateway.py",
+    "xauusd_forecaster/news/scheduler/model_gateway.py",
+    "xauusd_forecaster/news/brief/product.py",
+    "xauusd_forecaster/runtime/operational_health.py",
     "scripts/run_news_annotator.py",
 )
 FAILURE_FIELDS = {"failure_code", "latest_failure_code", "dominant_failure_code"}
@@ -183,7 +181,7 @@ def test_disallowed_emitted_severity_fails_visibly_instead_of_hiding_event() -> 
 def test_current_python_operational_emitters_use_allowed_severities() -> None:
     registered = operational_code_index()
     emitted = _emitted_alert_calls(
-        ROOT / "xauusd_forecaster" / "operational_health.py"
+        ROOT / "xauusd_forecaster" / "runtime/operational_health.py"
     )
     assert emitted
     for codes, severities in emitted:

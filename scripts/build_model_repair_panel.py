@@ -39,7 +39,7 @@ def replay_exact_ridge(payload,features,expected_hash,*,expected_order=None,targ
  if legacy_scales:
   if any(s==0 for s in payload['scales']):raise ValueError('HISTORICAL_ZERO_SCALE')
   return float((payload['intercept']+((np.asarray([values])-np.asarray(payload['means']))/np.asarray(payload['scales']))@np.asarray(payload['coefficients']))[0])
- from xauusd_forecaster.ridge import RidgeArtifact
+ from xauusd_forecaster.training.ridge import RidgeArtifact
  artifact=RidgeArtifact(tuple(payload['feature_names']),tuple(payload['means']),tuple(payload['scales']),tuple(payload['coefficients']),payload['intercept'],payload['alpha'],payload['training_dataset_hash'],payload.get('residual_std',0),payload.get('training_rows',0),payload.get('weighting_version'),payload.get('weight_summary'))
  return float(artifact.predict(np.asarray([values],dtype=np.float64))[0])
 
@@ -80,7 +80,7 @@ def main():
   for g in v['generation']:generations[g][v['model_identity']]=v['model_version'];version_gen[v['model_version']].append(g)
  activations=sorted(f['activations'],key=lambda a:date(a['activated_at']));arts={};inventory=[];artifact_by_path={}
  frozen_inventory={(i['source_path'],i['expected_canonical_hash']):i for i in json.loads(a.artifact_inventory.read_text(encoding='utf-8')) if i['status']=='EXACT_HASH_VERIFIED'}
- sys.path.insert(0,str(a.source_root));from xauusd_forecaster.ridge import RidgeArtifact
+ sys.path.insert(0,str(a.source_root));from xauusd_forecaster.training.ridge import RidgeArtifact
  def load_artifact(path,expected):
   key=(str(path),expected)
   if key in arts:return arts[key]

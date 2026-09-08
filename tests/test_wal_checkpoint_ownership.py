@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.sqlite_wal import (
     FORWARD_WAL_SIZE_LIMIT_BYTES,
     checkpoint_forward_wal,
@@ -104,11 +104,11 @@ def test_forward_ledger_uses_shared_writer_policy(tmp_path: Path) -> None:
 def test_every_runtime_writer_crosses_shared_wal_policy_boundary() -> None:
     root = Path(__file__).resolve().parents[1]
     owners = {
-        "xauusd_forecaster/dashboard_read_models.py": "open_forward_writer_connection",
-        "xauusd_forecaster/forward_ledger.py": "open_forward_writer_connection",
-        "xauusd_forecaster/news_pruning.py": "open_forward_writer_connection",
-        "xauusd_forecaster/news_retrieval.py": "open_forward_writer_connection",
-        "xauusd_forecaster/training_owner.py": "open_forward_writer_connection",
+        "xauusd_forecaster/dashboard/read_models.py": "open_forward_writer_connection",
+        "xauusd_forecaster/evidence/ledger.py": "open_forward_writer_connection",
+        "xauusd_forecaster/news/collection/pruning.py": "open_forward_writer_connection",
+        "xauusd_forecaster/news/retrieval/search.py": "open_forward_writer_connection",
+        "xauusd_forecaster/training/runtime.py": "open_forward_writer_connection",
         "xauusd_forecaster/dashboard/operator_bridge.py": "open_forward_writer_connection",
         "scripts/migrate_runtime_artifact_paths.py": "open_forward_writer_connection",
     }

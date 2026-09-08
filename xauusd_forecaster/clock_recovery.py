@@ -12,7 +12,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 
-from .forward_ledger import canonical_hash
+from xauusd_forecaster.evidence.ledger import canonical_hash
 
 
 RULE = "clock-event-snapshot-exclusion-v1"

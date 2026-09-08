@@ -649,7 +649,7 @@ def test_generated_transport_composes_complete_facts_with_explicit_finite_budget
     assert sum(manifest['counts'].values()) <= compiler.MAXIMUM_RECORDS
     assert compiler.MAXIMUM_INDEX_BYTES == 2 * 1024 * 1024
     assert compiler.MAXIMUM_TRANSPORT_BYTES == 3 * 1024 * 1024
-    assert compiler.MAXIMUM_PARTS == 32
+    assert compiler.MAXIMUM_PARTS == 40
     assert compiler.MAXIMUM_RECORDS == 10_240
     index['unexpected_large_fact'] = 'x' * compiler.MAXIMUM_INDEX_BYTES
     with pytest.raises(ValueError, match='ARCHITECTURE_INDEX_BUDGET_EXCEEDED'):
@@ -896,7 +896,7 @@ def test_transport_growth_has_independent_hard_limits(source, kind, reason):
     elif kind == 'total':
         index['observed']['edges'] = [dict(edge, statement='x' * 810_000) for _ in range(4)]
     elif kind == 'parts':
-        paths = [f'scripts/owner_{i}.py' for i in range(33)]
+        paths = [f'scripts/owner_{i}.py' for i in range(compiler.MAXIMUM_PARTS + 1)]
         index['inputs'].update({path: 'a' * 64 for path in paths})
         index['observed']['edges'] = [dict(edge, source=path + '::owner') for path in paths]
     elif kind == 'records':
@@ -952,7 +952,7 @@ def test_consumer_rejects_aggregate_budget_before_any_part_read(source, tmp_path
     index = compiler.compile_index(source)
     manifest = json.loads(compiler.render(index)['critical-index.json'])
     if kind == 'parts':
-        manifest['parts'] *= 33
+        manifest['parts'] *= compiler.MAXIMUM_PARTS + 1
     elif kind == 'records':
         manifest['counts']['edges'] = compiler.MAXIMUM_RECORDS + 1
     else:
@@ -1122,7 +1122,8 @@ def test_current_news_worker_audit_view_keeps_independent_transports_and_dynamic
 
     api = 'scripts/run_dashboard_api.py::'
     news = 'xauusd_forecaster/dashboard/news_resources.py::'
-    assert {api + name for name in ('Handler.do_GET', '_optional_resource_payload', 'main')} <= roots
+    status = 'xauusd_forecaster/dashboard/status_resources.py::'
+    assert {api + 'Handler.do_GET', api + 'main', status + '_optional_resource_payload'} <= roots
     assert {news + name for name in ('_build_news_projection_source',
         '_news_projection_source_for_request', '_finish_news_projection_source_build',
         '_build_news_evidence_resource')} <= roots
@@ -1139,13 +1140,13 @@ def test_current_news_worker_audit_view_keeps_independent_transports_and_dynamic
             '_publish_news_evidence_snapshot'} <= calls(news + '_build_news_evidence_resource')
     assert {'temporary.write_text', 'temporary.replace'} <= calls(news + '_materialize_news_evidence_generation')
     assert {'_dashboard_payload', 'audit_snapshot', 'audit_briefs_snapshot',
-            'audit_stories_snapshot', 'audit_decisions_snapshot'} <= calls(api + '_optional_resource_payload')
+            'audit_stories_snapshot', 'audit_decisions_snapshot'} <= calls(status + '_optional_resource_payload')
     assert {'DashboardReadModelOwner', 'read_model_owner.start', 'ThreadingHTTPServer'} <= calls(api + 'main')
     scoped_ids = {row['id'] for row in index['observed']['symbols'] if row['path'] == 'scripts/run_dashboard_api.py'}
     selected = set(index['allowed']['source_symbols']['scripts/run_dashboard_api.py'])
     assert selected <= scoped_ids
     assert all(any(symbol == owner or symbol.startswith(owner + '.') for owner in selected) for symbol in scoped_ids)
-    for prefix, target in ((news, '_news_reader_rows'), (api, '_dashboard_payload'),
+    for prefix, target in ((news, '_news_reader_rows'), (status, '_dashboard_payload'),
                            (news, 'build_news_projection_generation')):
         frontier = [row for row in edges if row['source'].startswith(prefix) and row['target'] == target]
         assert frontier and all(row['resolution'] == 'UNKNOWN' and 'candidate_symbol' not in row for row in frontier)

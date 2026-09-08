@@ -14,7 +14,7 @@ from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 
-from xauusd_forecaster.production_shape import production_shape_violations  # noqa: E402
+from xauusd_forecaster.runtime.production_shape import production_shape_violations  # noqa: E402
 
 
 TRANSIENT_STATUS_EXIT = 75

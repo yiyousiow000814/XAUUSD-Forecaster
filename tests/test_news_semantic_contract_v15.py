@@ -6,28 +6,22 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from xauusd_forecaster import annotation as annotation_module
-from xauusd_forecaster.annotation import (
-    annotate_pending_news,
-    pending_annotation_records,
-)
-from xauusd_forecaster.forward_ledger import ForwardLedger
-from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
-from xauusd_forecaster.model_gateway import GeminiModelGateway
-from xauusd_forecaster.news_semantics import (
-    CURRENT_NEWS_PROMPT_VERSION,
-    LEGACY_NEWS_PROMPT_VERSION,
-    LEGACY_SEMANTIC_NEWS_PROMPT_VERSION,
-    PREVIOUS_NEWS_PROMPT_VERSION,
-    canonicalize_active_annotation,
-    news_annotation_schema,
-    validate_news_annotation,
-)
-from xauusd_forecaster.news_evidence import event_evidence_rows
-from xauusd_forecaster.news_impact import (
-    IMPACT_PROMPT_VERSION,
-    pending_impact_records,
-)
+import xauusd_forecaster.news.annotation.product as annotation_module
+from xauusd_forecaster.news.annotation.product import annotate_pending_news
+from xauusd_forecaster.news.annotation.product import pending_annotation_records
+from xauusd_forecaster.evidence.ledger import ForwardLedger
+from xauusd_forecaster.ai.quota import GeminiQuotaLedger
+from xauusd_forecaster.ai.model_gateway import GeminiModelGateway
+from xauusd_forecaster.news.semantics.contracts import CURRENT_NEWS_PROMPT_VERSION
+from xauusd_forecaster.news.semantics.contracts import LEGACY_NEWS_PROMPT_VERSION
+from xauusd_forecaster.news.semantics.contracts import LEGACY_SEMANTIC_NEWS_PROMPT_VERSION
+from xauusd_forecaster.news.semantics.contracts import PREVIOUS_NEWS_PROMPT_VERSION
+from xauusd_forecaster.news.semantics.contracts import canonicalize_active_annotation
+from xauusd_forecaster.news.semantics.contracts import news_annotation_schema
+from xauusd_forecaster.news.semantics.contracts import validate_news_annotation
+from xauusd_forecaster.news.semantics.evidence import event_evidence_rows
+from xauusd_forecaster.news.annotation.impact import IMPACT_PROMPT_VERSION
+from xauusd_forecaster.news.annotation.impact import pending_impact_records
 from tests.model_accounting_fakes import CallbackModelAccountant
 
 
@@ -458,7 +452,7 @@ def test_previous_v16_and_active_v17_annotations_coexist(tmp_path) -> None:
 def test_pending_annotation_identity_projection_preserves_scoped_eligibility(
     tmp_path, selection_order, discovery_only,
 ) -> None:
-    from xauusd_forecaster.news_scheduler import enqueue_job
+    from xauusd_forecaster.news.scheduler.state import enqueue_job
 
     now = datetime(2026, 8, 11, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "scoped-annotation.sqlite3", now=now)

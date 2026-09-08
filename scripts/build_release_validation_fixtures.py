@@ -12,7 +12,8 @@ from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 
-from scripts import run_dashboard_sync as dashboard_sync
+from xauusd_forecaster.dashboard import resource_contracts
+from xauusd_forecaster.dashboard.sync import resources
 from xauusd_forecaster.news_projection import (
     build_news_projection_generation,
     canonicalize_news_projection_impact_clocks,
@@ -72,7 +73,7 @@ def _news(index: int, *, impact_expiry: datetime | None = None) -> dict:
         "annotation_status": "READY", "model_visibility": "MODEL_VISIBLE",
         "parsed_at": at.isoformat(),
         "impact_expires_at": impact_expiry.isoformat(),
-        "mirror_contract": dashboard_sync.NEWS_MIRROR_CONTRACT_VERSION,
+        "mirror_contract": resources.NEWS_MIRROR_CONTRACT_VERSION,
         "broad_model_eligible": True, "model_seen": index % 2 == 0,
     })
 
@@ -165,12 +166,12 @@ def build_fixtures() -> dict[str, bytes]:
         for index in range(2_500)
     ]
     market_history = max(
-        dashboard_sync._market_history_payloads(candles[:500], decisions[:2_500]),
+        resources._market_history_payloads(candles[:500], decisions[:2_500]),
         key=len,
     )
-    learning_records = dashboard_sync.learning_history_records(source)
+    learning_records = resource_contracts.learning_history_records(source)
     learning_batch = max(
-        dashboard_sync.learning_history_batches(learning_records),
+        resource_contracts.learning_history_batches(learning_records),
         key=lambda rows: len(json.dumps(
             {"records": rows}, ensure_ascii=False, separators=(",", ":"),
         ).encode()),
@@ -186,10 +187,10 @@ def build_fixtures() -> dict[str, bytes]:
     )
     evidence_items = [
         {**_news(index), "headline": f"Bounded evidence headline {index}"}
-        for index in range(dashboard_sync.NEWS_EVIDENCE_WRITE_BATCH_ITEMS)
+        for index in range(resources.NEWS_EVIDENCE_WRITE_BATCH_ITEMS)
     ]
     news_evidence = json.dumps({
-        "contract_version": dashboard_sync.NEWS_EVIDENCE_CONTRACT_VERSION,
+        "contract_version": resources.NEWS_EVIDENCE_CONTRACT_VERSION,
         "snapshot_id": "f" * 64, "offset": 0, "items": evidence_items,
     }, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
     snapshot_id = "f" * 64
@@ -197,26 +198,26 @@ def build_fixtures() -> dict[str, bytes]:
         value, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
     ).encode("utf-8")
     return {
-        "status-ingest.json": dashboard_sync.remote_snapshot(source),
-        "audit-write.json": dashboard_sync.audit_snapshot(source),
-        "audit-briefs-write.json": dashboard_sync.audit_briefs_snapshot(source),
-        "audit-stories-write.json": dashboard_sync.audit_stories_snapshot(source),
-        "audit-decisions-write.json": dashboard_sync.audit_decisions_snapshot(source),
-        "learning-write.json": dashboard_sync.learning_snapshot(source),
-        "market-chart-write.json": dashboard_sync.market_chart_snapshot(source),
+        "status-ingest.json": resource_contracts.remote_snapshot(source),
+        "audit-write.json": resource_contracts.audit_snapshot(source),
+        "audit-briefs-write.json": resource_contracts.audit_briefs_snapshot(source),
+        "audit-stories-write.json": resource_contracts.audit_stories_snapshot(source),
+        "audit-decisions-write.json": resource_contracts.audit_decisions_snapshot(source),
+        "learning-write.json": resource_contracts.learning_snapshot(source),
+        "market-chart-write.json": resource_contracts.market_chart_snapshot(source),
         "market-history-write.json": market_history,
         "learning-history-write.json": learning_history,
         "news-evidence-prepare.json": encode({
-            "contract_version": dashboard_sync.NEWS_EVIDENCE_CONTRACT_VERSION,
+            "contract_version": resources.NEWS_EVIDENCE_CONTRACT_VERSION,
             "prepare_snapshot": snapshot_id, "expected_count": len(evidence_items),
         }),
         "news-evidence-stage.json": news_evidence,
         "news-evidence-activate.json": encode({
-            "contract_version": dashboard_sync.NEWS_EVIDENCE_CONTRACT_VERSION,
+            "contract_version": resources.NEWS_EVIDENCE_CONTRACT_VERSION,
             "activate_snapshot": snapshot_id, "expected_count": len(evidence_items),
         }),
         "news-evidence-cleanup.json": encode({
-            "contract_version": dashboard_sync.NEWS_EVIDENCE_CONTRACT_VERSION,
+            "contract_version": resources.NEWS_EVIDENCE_CONTRACT_VERSION,
             "cleanup_active_snapshot": snapshot_id,
         }),
         "news-index-prepare.json": encode({

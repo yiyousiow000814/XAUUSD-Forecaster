@@ -215,7 +215,7 @@ def run(args):
                                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).strip()
     source_files = ["scripts/run_causal_signal_replay.py", "xauusd_forecaster/causal_signal_replay.py",
                     "scripts/report_causal_signal_replay.py",
-                    "xauusd_forecaster/market.py", "xauusd_forecaster/executable_label.py",
+                    "xauusd_forecaster/market.py", "xauusd_forecaster/evidence/executable_label.py",
                     "xauusd_forecaster/offline_model_repair.py", "xauusd_forecaster/execution_costs.py",
                     "docs/plans/CAUSAL_SIGNAL_TIME_REPLAY.md"]
     write(args.output/"execution.json", {"source_git_sha": git("rev-parse", "HEAD"),

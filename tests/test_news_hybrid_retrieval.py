@@ -5,27 +5,21 @@ import sqlite3
 import numpy as np
 import pytest
 
-from xauusd_forecaster.forward_ledger import ForwardLedger
-from xauusd_forecaster.gemini_embeddings import (
-    GeminiEmbeddingCapacityDeferred,
-    GeminiEmbeddingClient,
-    GeminiEmbeddingFailure,
-)
-from xauusd_forecaster.news_scheduler import (
-    ApiCredential,
-    LIVE_OPERATIONAL_WORKLOAD,
-    ROUTINE_POOL,
-    enqueue_job,
-)
-from xauusd_forecaster.news_retrieval import (
-    EmbeddingProfile,
-    append_missing_embeddings,
-    attach_hybrid_prior_event_context,
-    lexical_identity_similarity,
-    load_embeddings,
-    NewsEmbeddingPrerequisiteCooldown,
-    retrieve_hybrid_prior_event_context,
-)
+from xauusd_forecaster.evidence.ledger import ForwardLedger
+from xauusd_forecaster.news.retrieval.gemini_embeddings import GeminiEmbeddingCapacityDeferred
+from xauusd_forecaster.news.retrieval.gemini_embeddings import GeminiEmbeddingClient
+from xauusd_forecaster.news.retrieval.gemini_embeddings import GeminiEmbeddingFailure
+from xauusd_forecaster.news.scheduler.state import ApiCredential
+from xauusd_forecaster.news.scheduler.state import LIVE_OPERATIONAL_WORKLOAD
+from xauusd_forecaster.news.scheduler.state import ROUTINE_POOL
+from xauusd_forecaster.news.scheduler.state import enqueue_job
+from xauusd_forecaster.news.retrieval.search import EmbeddingProfile
+from xauusd_forecaster.news.retrieval.search import append_missing_embeddings
+from xauusd_forecaster.news.retrieval.search import attach_hybrid_prior_event_context
+from xauusd_forecaster.news.retrieval.search import lexical_identity_similarity
+from xauusd_forecaster.news.retrieval.search import load_embeddings
+from xauusd_forecaster.news.retrieval.search import NewsEmbeddingPrerequisiteCooldown
+from xauusd_forecaster.news.retrieval.search import retrieve_hybrid_prior_event_context
 
 
 def _row(
@@ -406,7 +400,7 @@ def test_embedding_throttle_cooldown_survives_restart_and_clears_on_progress(
 def test_throttled_generation_uses_frozen_deterministic_fallback(
     tmp_path, monkeypatch,
 ) -> None:
-    import xauusd_forecaster.news_retrieval as retrieval
+    import xauusd_forecaster.news.retrieval.search as retrieval
 
     ledger = ForwardLedger(tmp_path / "evidence.sqlite3")
     prior = _row(
@@ -492,7 +486,7 @@ def test_throttled_generation_uses_frozen_deterministic_fallback(
 def test_live_pressure_selects_fallback_then_stabilized_ready_returns_hybrid(
     tmp_path, monkeypatch,
 ) -> None:
-    import xauusd_forecaster.news_retrieval as retrieval
+    import xauusd_forecaster.news.retrieval.search as retrieval
 
     ledger = ForwardLedger(tmp_path / "evidence.sqlite3")
     prior = _row(
@@ -626,7 +620,7 @@ def test_embedding_local_capacity_uses_bounded_exponential_generation_cooldown(
 def test_successful_embedding_admission_records_vector_commit(
     tmp_path, monkeypatch,
 ) -> None:
-    from xauusd_forecaster import gemini_embeddings
+    import xauusd_forecaster.news.retrieval.gemini_embeddings as gemini_embeddings
 
     ledger = ForwardLedger(tmp_path / "evidence.sqlite3")
     row = _row(
@@ -697,7 +691,7 @@ def test_successful_embedding_admission_records_vector_commit(
 def test_runtime_catches_up_historical_embedding_gap_before_retrieval(
     tmp_path, monkeypatch,
 ):
-    import xauusd_forecaster.news_retrieval as retrieval
+    import xauusd_forecaster.news.retrieval.search as retrieval
 
     ledger = ForwardLedger(tmp_path / "evidence.sqlite3")
     prior = _row(

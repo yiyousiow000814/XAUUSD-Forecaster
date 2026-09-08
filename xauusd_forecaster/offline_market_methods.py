@@ -7,8 +7,11 @@ import math
 import numpy as np
 
 from .offline_model_repair import action, finite, fit_affine, matured, predict, sha, timestamp
-from .ridge import RidgeArtifact, train_ridge
-from .training import MARKET_FEATURES
+from xauusd_forecaster.training.ridge import (
+    RidgeArtifact,
+    train_ridge,
+)
+from xauusd_forecaster.training.materialization import MARKET_FEATURES
 from .execution_costs import ROUND_TRIP_COMMISSION_LOG_COST
 
 STATE_NAMES = tuple(f"return_{n}m_div_u5" for n in (1, 5, 15, 30, 60)) + (

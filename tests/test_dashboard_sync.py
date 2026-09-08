@@ -47,7 +47,8 @@ def _dashboard_module():
 
 
 def _stub_assistant_capacity_route(monkeypatch, accountant_value: str) -> list[dict]:
-    from xauusd_forecaster import assistant_capacity, assistant_routing
+    import xauusd_forecaster.assistant.capacity as assistant_capacity
+    import xauusd_forecaster.assistant.routing as assistant_routing
 
     calls: list[dict] = []
 
@@ -138,8 +139,8 @@ spec = importlib.util.spec_from_file_location("preview_without_sqlite", path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 from xauusd_forecaster.dashboard import resource_contracts
-assert module.dashboard_sync.remote_snapshot is resource_contracts.remote_snapshot
-assert module.dashboard_sync.PayloadContractError is resource_contracts.PayloadContractError
+assert module.resource_contracts.remote_snapshot is resource_contracts.remote_snapshot
+assert module.resource_contracts.PayloadContractError is resource_contracts.PayloadContractError
 assert resource_contracts.remote_snapshot({})
 assert resource_contracts.learning_snapshot({})
 assert resource_contracts.market_chart_snapshot({})
@@ -281,7 +282,7 @@ def test_preview_legacy_projection_is_not_coupled_to_sync_transport_limit(
     monkeypatch,
 ) -> None:
     module = _preview_module()
-    large = "x" * (module.dashboard_sync.AUDIT_DETAIL_LIMIT_BYTES + 1)
+    large = "x" * (module.resource_contracts.AUDIT_DETAIL_LIMIT_BYTES + 1)
     legacy_audit = {
         "generated_at": "2026-08-23T05:00:00+00:00",
         "recent_decisions": [{"decision_id": "decision-1", "reason": large, "predictions": []}],
@@ -679,7 +680,7 @@ def test_preview_freezes_pageable_version_history_beyond_first_page(
          if row["payload"]["model_identity"] == "MARKET_ONLY"),
         key=lambda row: row["sort_epoch"],
     )
-    assert len(market_groups) == module.dashboard_sync.LEARNING_OVERVIEW_GROUPS_PER_IDENTITY
+    assert len(market_groups) == module.resource_contracts.LEARNING_OVERVIEW_GROUPS_PER_IDENTITY
     assert market_groups[0]["payload"]["generation"] == 2
     assert market_groups[-1]["payload"]["generation"] == 61
 
@@ -725,7 +726,7 @@ def test_sync_does_not_retry_authentication_error(monkeypatch) -> None:
 
 
 def test_sync_state_round_trip_and_malformed_state_fail_to_empty(tmp_path) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     state_file = tmp_path / "dashboard-news-sync-state.json"
     expected = {"contract_version": "news-v1", "cursor": "abc:12"}
 
@@ -739,7 +740,7 @@ def test_sync_state_round_trip_and_malformed_state_fail_to_empty(tmp_path) -> No
 
 @pytest.mark.parametrize("form", ["absolute", "bare", "normalized", "hardlink", "symlink"])
 def test_validated_state_write_stays_in_authority(tmp_path, form):
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     authority = tmp_path / "authority"
     authority.mkdir()
     outside = tmp_path / "outside.json"
@@ -771,7 +772,7 @@ def test_validated_state_write_stays_in_authority(tmp_path, form):
 @pytest.mark.skipif(sys.platform != "win32", reason="real Windows junction boundary")
 @pytest.mark.parametrize("stage", ["after-configuration", "ancestor", "replace-retry"])
 def test_sync_state_writer_rejects_actual_authority_junction(tmp_path, monkeypatch, stage):
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     directory = tmp_path / "authority"
     authority = directory / "forward" if stage == "ancestor" else directory
     retained = tmp_path / "retained-authority"
@@ -834,7 +835,7 @@ def test_sync_state_writer_rejects_actual_authority_junction(tmp_path, monkeypat
 
 
 def test_sync_state_write_requires_independent_root_and_checks_before_io(tmp_path, monkeypatch):
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     authority = tmp_path / "authority"
     outsider = tmp_path / "outside.json"
     calls = []
@@ -896,7 +897,7 @@ def test_sync_status_reports_optional_resource_degradation(tmp_path) -> None:
 def test_ingest_response_records_valid_main_revision(
     tmp_path, monkeypatch,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     revision = "a" * 40
 
     class Response:
@@ -932,7 +933,7 @@ def test_ingest_response_records_valid_main_revision(
 
 
 def test_news_projection_health_verifies_exact_generation_receipt(monkeypatch) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     requested = []
     manifest = {
         "generation_id": "a" * 64, "snapshot_id": "b" * 64,
@@ -964,7 +965,7 @@ def test_news_projection_health_verifies_exact_generation_receipt(monkeypatch) -
     ("missing_detail_count", False),
 ))
 def test_news_projection_health_reports_exact_contradictions(monkeypatch, field, value) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     monkeypatch.setattr(module, "_get_json", lambda *_a, **_k: {
         "status": "OK", "projection_state": "CURRENT", "verified_complete": True,
         "active_generation_id": "a" * 64, "snapshot_id": "b" * 64,
@@ -1061,7 +1062,7 @@ def test_all_rejected_heartbeat_targets_preserve_structured_failures(
 
 
 def test_audit_sync_owns_four_independently_bounded_resources(monkeypatch) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     payload = {
         "generated_at": "2026-08-20T00:00:00+00:00",
         "news_metrics": {"events": 2},
@@ -1123,7 +1124,7 @@ def test_audit_sync_owns_four_independently_bounded_resources(monkeypatch) -> No
 ])
 @pytest.mark.parametrize("bad", [{}, None, "invalid", [None], []])
 def test_audit_sync_invalid_source_cannot_publish_false_empty(monkeypatch, family, field, bad):
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     timestamp = "2026-09-06T00:00:00+00:00"
     fields = {"briefs": "daily_news_briefs", "stories": "storylines", "decisions": "recent_decisions"}
 
@@ -1166,7 +1167,7 @@ def test_preview_http_200_ambiguous_detail_is_not_available(monkeypatch, family,
 def test_learning_history_is_durable_before_summary_and_retries_idempotently(
     monkeypatch, tmp_path,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     payload = {
         "learning_curves": {
             "models": [],
@@ -1204,7 +1205,7 @@ def test_learning_history_is_durable_before_summary_and_retries_idempotently(
 def test_learning_history_state_drops_hashes_outside_current_source_universe(
     monkeypatch, tmp_path,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     payload = {
         "learning_curves": {
             "models": [],
@@ -1310,7 +1311,7 @@ def _projection_provider_ack(generation, offsets, payload, *, active=False):
 def test_news_generation_stages_all_details_before_index_and_activation(
     monkeypatch, tmp_path,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     generation = _projection_fixture()
     state_file = tmp_path / "news-state.json"
     posted: list[tuple[str, dict]] = []
@@ -1359,7 +1360,7 @@ def test_news_generation_stages_all_details_before_index_and_activation(
 
 
 def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_path) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     generation = _projection_fixture(1)
     state_file = tmp_path / "news-state.json"
     posted: list[str] = []
@@ -1388,7 +1389,7 @@ def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_pat
 
 @pytest.mark.parametrize("release_after", [1, 3, None])
 def test_sync_state_atomic_replace_bounds_windows_sharing_retry(monkeypatch, tmp_path, release_after):
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     path = tmp_path / "state.json"
     path.write_text('{"cursor":4}', encoding="utf-8")
     original_replace = Path.replace
@@ -1420,7 +1421,7 @@ def test_sync_state_atomic_replace_bounds_windows_sharing_retry(monkeypatch, tmp
 @pytest.mark.skipif(sys.platform != "win32", reason="real Windows delete-sharing boundary")
 def test_sync_state_replaces_after_real_windows_reader_releases(tmp_path):
     import threading
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     path = tmp_path / "state.json"
     path.write_text('{"cursor":4}', encoding="utf-8")
     reader = path.open("rb")
@@ -1465,7 +1466,7 @@ def _evidence_cleanup_result(*, pending=False, exhausted=False) -> dict:
 def test_news_evidence_ack_requires_exact_complete_response(
     monkeypatch, operation, corruption,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     snapshot = "a" * 64
     requests = {
         "prepare": {"prepare_snapshot": snapshot, "expected_count": 1},
@@ -1509,7 +1510,7 @@ def test_news_evidence_ack_requires_exact_complete_response(
 
 @pytest.mark.parametrize("wire_body", [b"", b"{", b"[]", b"null", b"{}"])
 def test_news_evidence_malformed_http_success_never_acknowledges(monkeypatch, wire_body):
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
 
     class Response:
         status = 200
@@ -1576,7 +1577,7 @@ def test_news_evidence_python_bytes_worker_store_and_ack_consumer(monkeypatch):
     import shutil
     import subprocess
 
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     node = shutil.which("node")
     if not node:
         pytest.skip("Node is required for the producer/Worker boundary")
@@ -1620,7 +1621,7 @@ def test_news_evidence_python_bytes_worker_store_and_ack_consumer(monkeypatch):
 def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
     monkeypatch, tmp_path,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     snapshot_id = "a" * 64
     rows = [{
         "event_key": f"{index:064x}",
@@ -1764,7 +1765,7 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
 def test_news_evidence_cleanup_uses_feedback_and_stops_at_daily_budget(
     monkeypatch, responses, expected_pending, expected_calls,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     calls = []
     responses = iter(responses)
 
@@ -1791,7 +1792,7 @@ def test_news_evidence_cleanup_uses_feedback_and_stops_at_daily_budget(
 def test_news_evidence_sync_drains_old_snapshot_before_admitting_replacement(
     monkeypatch, tmp_path,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     active_snapshot = "a" * 64
     replacement_snapshot = "b" * 64
     state_path = tmp_path / "evidence-state.json"
@@ -1842,7 +1843,7 @@ def test_news_evidence_sync_drains_old_snapshot_before_admitting_replacement(
 def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_fields(
     monkeypatch, tmp_path,
 ) -> None:
-    sync = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as sync
     from xauusd_forecaster.dashboard import news_resources as api
     rows = [{
         "event_key": f"{index:064x}",
@@ -1935,7 +1936,7 @@ def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_field
     ], manifest)
     assert age_drift_snapshot == stable_snapshot
     assert api._publish_news_evidence_snapshot(restarted_rows) == stable_snapshot
-    sync = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as sync
     monkeypatch.setattr(sync, "NEWS_EVIDENCE_PAGES_PER_CYCLE", 2)
     monkeypatch.setattr(sync.urllib.request, "urlopen", urlopen)
     monkeypatch.setattr(sync, "_post_json", post)
@@ -1990,7 +1991,7 @@ def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_field
 def test_news_evidence_activation_acknowledgement_replays_idempotently(
     monkeypatch, tmp_path, failure,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     snapshot_id = "a" * 64
     row = {
         "event_key": "b" * 64,
@@ -2419,7 +2420,7 @@ def test_optional_resource_families_degrade_only_their_owner(
 def test_news_generation_resumes_remote_offsets_and_bounds_each_cycle(
     monkeypatch, tmp_path, source_mode,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     generation = _projection_fixture(25)
     manifest = generation.manifest
     offsets = {"detail": 0, "index": 0}
@@ -2525,7 +2526,7 @@ def test_news_generation_resumes_remote_offsets_and_bounds_each_cycle(
 def test_news_generation_invalid_success_ack_never_advances_checkpoint(
     monkeypatch, tmp_path, action, field, value,
 ):
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     generation = _projection_fixture(1)
     offsets = {"detail": 0, "index": 0}
     state_path = tmp_path / "news-state.json"
@@ -2560,7 +2561,7 @@ def test_news_generation_invalid_success_ack_never_advances_checkpoint(
 def test_news_generation_rejects_manifest_drift_without_abandoning(
     monkeypatch, tmp_path,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     first = _projection_fixture(25)
     replacement = _projection_fixture(26)
     state_path = tmp_path / "news-state.json"
@@ -2712,7 +2713,7 @@ def test_pinned_news_generation_model_reaches_current_under_24h_arrivals(
 def test_news_generation_preserves_foreign_staging_owner(
     monkeypatch, tmp_path,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     generation = _projection_fixture(1)
     orphan = "f" * 64
     actions: list[tuple[str, str | None]] = []
@@ -2747,7 +2748,7 @@ def test_news_generation_preserves_foreign_staging_owner(
 
 
 def test_remote_market_chart_is_split_from_status_and_keeps_recent_window() -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     decisions = [{
         "source_decision_id": f"d-{index}",
         "decision_time": f"2026-08-06T{index // 60:02d}:{index % 60:02d}:00+00:00",
@@ -2793,7 +2794,7 @@ def test_remote_market_chart_is_split_from_status_and_keeps_recent_window() -> N
 
 
 def test_seven_day_market_snapshot_is_recent_only_under_limit() -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     start = datetime(2026, 8, 1, tzinfo=timezone.utc)
     identities = ("MARKET_ONLY", "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL")
     candles = []
@@ -2832,7 +2833,7 @@ def test_seven_day_market_snapshot_is_recent_only_under_limit() -> None:
 
 
 def test_market_overview_downsampling_preserves_ohlc_extremes() -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     rows = [{
         "time": f"t-{index}", "open": float(index), "high": float(index + 2),
         "low": float(index - 2), "close": float(index + 0.5),
@@ -2849,7 +2850,7 @@ def test_market_overview_downsampling_preserves_ohlc_extremes() -> None:
 
 
 def test_market_history_ingest_batches_are_bounded_and_complete() -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     start = datetime(2026, 8, 7, tzinfo=timezone.utc)
     candles = [{
         "time": (start + timedelta(minutes=index)).isoformat(),
@@ -2880,7 +2881,7 @@ def test_market_history_ingest_batches_are_bounded_and_complete() -> None:
 
 
 def test_market_decision_overview_payload_is_bounded_and_keeps_edges() -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     decisions = [{
         "source_decision_id": f"d-{index}",
         "decision_time": f"2026-08-07T{index // 60:02d}:{index % 60:02d}:00+00:00",
@@ -2923,7 +2924,7 @@ def test_annotator_heartbeat_reports_idle_loop_as_healthy(tmp_path) -> None:
 def test_assistant_sync_surfaces_are_paused_without_network_or_model_calls(
     monkeypatch,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     monkeypatch.setattr(
         module, "_get_json",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
@@ -2944,7 +2945,7 @@ def test_assistant_sync_surfaces_are_paused_without_network_or_model_calls(
 
 
 def test_operator_retry_sync_mirrors_claims_applies_and_finishes(monkeypatch) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     job = {
         "job_id": "a" * 64, "task_type": "ACTIVE_IMPACT", "title": "Gold",
         "state": "BACKING_OFF", "priority": "NORMAL",
@@ -2995,7 +2996,7 @@ def test_operator_retry_sync_mirrors_claims_applies_and_finishes(monkeypatch) ->
 def test_operator_retry_mirror_persists_exact_digest_only_after_delta_completes(
     monkeypatch, tmp_path,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     state_path = tmp_path / "operator-retry.json"
     config = {
         "operator_retry_state_file": str(state_path),
@@ -3186,6 +3187,7 @@ def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
     monkeypatch, tmp_path, incident, continuous,
 ) -> None:
     module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources
     config = module.configure_runtime_state({}, tmp_path)
     schedule_path = tmp_path / "resource-schedule-cloudflare.json"
     target = {
@@ -3233,7 +3235,7 @@ def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
                     "ack_request_sha256": "e" * 64,
                 }, state_root=tmp_path)
             return "d" * 64
-        monkeypatch.setattr(module, "_sync_news_evidence", advance_news)
+        monkeypatch.setattr(resources, "_sync_news_evidence", advance_news)
         monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k:
                             pytest.fail("deferred owner must not reread the accepted source page"))
     Path(config["deferred_projection_request_file"]).write_text(
@@ -3250,15 +3252,15 @@ def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
     }
     payloads = iter((stale, fresh))
     writes = []
-    monkeypatch.setattr(module, "_projection_producer_revision", lambda: revision)
+    monkeypatch.setattr(resources, "_projection_producer_revision", lambda: revision)
     def read_resource(_target, route):
         if route == "/api/audit":
             return next(payloads)
         return {**fresh, "projection_contract": "audit-detail-source-v1"}
 
-    monkeypatch.setattr(module, "_read_local_resource", read_resource)
+    monkeypatch.setattr(resources, "_read_local_resource", read_resource)
     monkeypatch.setattr(
-        module, "_post_json",
+        resources, "_post_json",
         lambda url, body, _target: writes.append((url, body)) or {},
     )
 
@@ -3298,10 +3300,10 @@ def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
         retained_failure = {"target": "cloudflare", "resource": "deferred_projection", "error": "prior failure"}
         retained = module._merge_lane_results(module.SyncResourceResults([retained_failure], []), completed)
         assert list(retained) == [retained_failure], "page progress is not resource recovery"
-        monkeypatch.setattr(module, "_sync_news_evidence", lambda *_a: "d" * 64)
+        monkeypatch.setattr(resources, "_sync_news_evidence", lambda *_a: "d" * 64)
         stalled = module.sync_deferred_projection_once([target], config)
         assert stalled.resource_observations == [], "unchanged cursor must not busy-drain"
-        monkeypatch.setattr(module, "_sync_news_evidence", advance_news)
+        monkeypatch.setattr(resources, "_sync_news_evidence", advance_news)
         # This third invocation cannot rebuild/repost accepted Audit work: the
         # source iterator is exhausted and the write count stays exactly four.
         completed = module.sync_deferred_projection_once([target], config)
@@ -3339,7 +3341,7 @@ def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
 def test_deferred_projection_identity_mismatch_fails_without_publication(
     monkeypatch, tmp_path,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     config = module.configure_runtime_state({}, tmp_path)
     request = {
         "schema_version": module.DEFERRED_PROJECTION_CONTRACT,
@@ -3369,7 +3371,7 @@ def test_deferred_projection_identity_mismatch_fails_without_publication(
 
 
 def test_local_operator_bridge_transport_requires_dedicated_secret(monkeypatch) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     monkeypatch.delenv("DASHBOARD_OPERATOR_BRIDGE_TOKEN", raising=False)
     with pytest.raises(RuntimeError, match="credential is not configured"):
         module._get_local_json("http://127.0.0.1:8765/api/retry-jobs")
@@ -3378,7 +3380,7 @@ def test_local_operator_bridge_transport_requires_dedicated_secret(monkeypatch) 
 
 
 def test_operator_retry_bridge_auth_failure_leaves_cloud_lease_reclaimable(monkeypatch) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     job = {
         "job_id": "e" * 64, "task_type": "ACTIVE_IMPACT", "title": "Gold",
         "state": "BACKING_OFF", "priority": "NORMAL",
@@ -3421,7 +3423,7 @@ def test_operator_retry_bridge_auth_failure_leaves_cloud_lease_reclaimable(monke
 def test_operator_retry_state_races_finish_with_explicit_terminal_result(
     monkeypatch, status, code,
 ) -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     job = {
         "job_id": "f" * 64, "task_type": "ACTIVE_IMPACT", "title": "Gold",
         "state": "BACKING_OFF", "priority": "NORMAL",
@@ -3460,7 +3462,7 @@ def test_operator_retry_state_races_finish_with_explicit_terminal_result(
 
 
 def test_operator_retry_worker_urls_keep_human_and_machine_planes_separate() -> None:
-    module = _sync_module()
+    from xauusd_forecaster.dashboard.sync import resources as module
     config = {
         "local_status_url": "http://127.0.0.1:8765/api/status",
         "remote_ingest_url": "https://example.workers.dev/api/ingest",

@@ -1,11 +1,9 @@
 import pytest
 
-from xauusd_forecaster.news_semantics import CURRENT_NEWS_PROMPT_VERSION
-from xauusd_forecaster.storylines import (
-    LEGACY_POLICY_STATUS,
-    storyline_rows,
-    temporal_event_graph,
-)
+from xauusd_forecaster.news.semantics.contracts import CURRENT_NEWS_PROMPT_VERSION
+from xauusd_forecaster.news.annotation.storylines import LEGACY_POLICY_STATUS
+from xauusd_forecaster.news.annotation.storylines import storyline_rows
+from xauusd_forecaster.news.annotation.storylines import temporal_event_graph
 
 
 def event(key, time, headline, **overrides):

@@ -7,9 +7,10 @@ import time
 from datetime import datetime, timedelta, timezone
 import pytest
 from xauusd_forecaster.dashboard import news_resources
-from xauusd_forecaster.annotation import ANNOTATION_FAILURE_RECOVERY_VERSION, PROMPT_VERSION
-from xauusd_forecaster.forward_ledger import ForwardLedger
-from xauusd_forecaster.news_scheduler import authorize_repairable_annotation_failures
+from xauusd_forecaster.news.annotation.product import ANNOTATION_FAILURE_RECOVERY_VERSION
+from xauusd_forecaster.news.annotation.product import PROMPT_VERSION
+from xauusd_forecaster.evidence.ledger import ForwardLedger
+from xauusd_forecaster.news.scheduler.state import authorize_repairable_annotation_failures
 from tests.dashboard_news_fixtures import (
     _isolated_dashboard_credentials, _basic_annotation_payload, _append_basic_annotation,
 )

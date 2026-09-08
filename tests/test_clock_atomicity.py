@@ -10,8 +10,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from xauusd_forecaster.clock_commit import read_completed_clock
-from xauusd_forecaster.forward_engine import ForwardEngine
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.decision.engine import ForwardEngine
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.market import NullMarketProvider
 from xauusd_forecaster.u5_state import U5State
 
@@ -23,8 +23,8 @@ CHILD = r'''
 import os, sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from xauusd_forecaster.forward_ledger import ForwardLedger
-from xauusd_forecaster.forward_engine import ForwardEngine
+from xauusd_forecaster.evidence.ledger import ForwardLedger
+from xauusd_forecaster.decision.engine import ForwardEngine
 from xauusd_forecaster.market import MarketObservation
 from xauusd_forecaster.u5_state import U5State
 clock = datetime(2026, 9, 4, 16, 10, tzinfo=timezone.utc)
@@ -96,7 +96,7 @@ def test_process_death_has_all_or_no_clock_and_restart_replays(clock_ledger, sta
 
 def test_preparation_and_failure_do_not_advance_u5_or_commit_helpers(clock_ledger, monkeypatch):
     from xauusd_forecaster.market import MarketObservation
-    from xauusd_forecaster import live_v2
+    import xauusd_forecaster.decision.live as live_v2
 
     ledger = clock_ledger
 
@@ -132,7 +132,7 @@ def test_preparation_and_failure_do_not_advance_u5_or_commit_helpers(clock_ledge
 
 def test_completion_references_only_this_clocks_shared_immutable_news(clock_ledger):
     from xauusd_forecaster.clock_commit import clock_evidence
-    from xauusd_forecaster.forward_ledger import canonical_hash
+    from xauusd_forecaster.evidence.ledger import canonical_hash
 
     connection = clock_ledger.connection
     _, decision_id = ForwardEngine(clock_ledger, NullMarketProvider()).append_clock_event(CLOCK, CLOCK)
@@ -167,7 +167,8 @@ def test_completion_references_only_this_clocks_shared_immutable_news(clock_ledg
 
 
 def test_calibration_preparation_is_read_only_and_persistence_is_transaction_owned(clock_ledger):
-    from xauusd_forecaster.inference_v2 import _calibration, persist_calibration_rows
+    from xauusd_forecaster.decision.inference import _calibration
+    from xauusd_forecaster.decision.inference import persist_calibration_rows
 
     connection = clock_ledger.connection
     before = connection.total_changes

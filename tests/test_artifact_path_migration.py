@@ -22,9 +22,9 @@ from xauusd_forecaster.artifact_path_migration import (
     write_migration_receipt,
 )
 from xauusd_forecaster.artifact_paths import canonicalize_artifact_path
-from xauusd_forecaster.forward_ledger import canonical_hash
-from xauusd_forecaster.news_contracts import CURRENT_NEWS_CONTRACT
-from xauusd_forecaster.ridge import RidgeArtifact
+from xauusd_forecaster.evidence.ledger import canonical_hash
+from xauusd_forecaster.news.semantics.model_contracts import CURRENT_NEWS_CONTRACT
+from xauusd_forecaster.training.ridge import RidgeArtifact
 
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]

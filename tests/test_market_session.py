@@ -9,9 +9,9 @@ from xauusd_forecaster.market_session import (
     horizon_crosses_weekly_closure,
     skipped_grid_reason,
 )
-from xauusd_forecaster.forward_engine import ForwardEngine
-from xauusd_forecaster.forward_ledger import ForwardLedger
-from scripts.run_forward_collector import (
+from xauusd_forecaster.decision.engine import ForwardEngine
+from xauusd_forecaster.evidence.ledger import ForwardLedger
+from xauusd_forecaster.decision.collector_runtime import (
     append_current_grid_events,
     append_due_grid_events,
     startup_reconciliation_plan,
@@ -23,7 +23,7 @@ UTC = timezone.utc
 
 def test_current_generation_makes_startup_reconciliation_background(monkeypatch) -> None:
     monkeypatch.setattr(
-        "scripts.run_forward_collector.require_current_contract_generation",
+        "xauusd_forecaster.decision.collector_runtime.require_current_contract_generation",
         lambda _connection: "generation-current",
     )
     assert startup_reconciliation_plan(object()) == {
@@ -36,7 +36,7 @@ def test_missing_generation_keeps_startup_fail_closed(monkeypatch) -> None:
     def missing(_connection):
         raise RuntimeError("missing current generation")
     monkeypatch.setattr(
-        "scripts.run_forward_collector.require_current_contract_generation", missing,
+        "xauusd_forecaster.decision.collector_runtime.require_current_contract_generation", missing,
     )
     assert startup_reconciliation_plan(object())["synchronous"] is True
 
@@ -232,7 +232,7 @@ def test_collector_arithmetically_settles_a_multi_year_unobservable_gap(
         return skipped_grid_reason(*args, **kwargs)
 
     monkeypatch.setattr(
-        "scripts.run_forward_collector.skipped_grid_reason", recording_skip_reason,
+        "xauusd_forecaster.decision.collector_runtime.skipped_grid_reason", recording_skip_reason,
     )
     ledger = type("Ledger", (), {"forward_epoch": start})()
     engine = type(

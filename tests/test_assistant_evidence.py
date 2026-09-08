@@ -5,11 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.assistant_evidence import (
-    AssistantEvidenceValidationError,
-    validate_assistant_evidence_claims,
-    validate_assistant_evidence_model_text,
-)
+from xauusd_forecaster.assistant.evidence import AssistantEvidenceValidationError
+from xauusd_forecaster.assistant.evidence import validate_assistant_evidence_claims
+from xauusd_forecaster.assistant.evidence import validate_assistant_evidence_model_text
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "assistant_evidence_validation.json"

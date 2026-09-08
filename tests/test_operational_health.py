@@ -6,15 +6,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from xauusd_forecaster.news_scheduler import (
-    apply_retry_schedule_override,
-    enqueue_job,
-    install_scheduler_schema,
-)
-from xauusd_forecaster.operational_health import (
-    extend_with_component_alerts,
-    scheduler_health_snapshot,
-)
+from xauusd_forecaster.news.scheduler.state import apply_retry_schedule_override
+from xauusd_forecaster.news.scheduler.state import enqueue_job
+from xauusd_forecaster.news.scheduler.state import install_scheduler_schema
+from xauusd_forecaster.runtime.operational_health import extend_with_component_alerts
+from xauusd_forecaster.runtime.operational_health import scheduler_health_snapshot
 
 
 NOW = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)

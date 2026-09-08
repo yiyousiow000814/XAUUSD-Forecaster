@@ -21,26 +21,20 @@ from tests.dashboard_news_fixtures import (
 
 from xauusd_forecaster.dashboard import news_presentation, news_resources
 
-from xauusd_forecaster.annotation import (
-    ANNOTATION_FAILURE_RECOVERY_VERSION,
-    INVALID_CHINESE_TITLE,
-    PROMPT_VERSION,
-)
-from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES
-from xauusd_forecaster.forward_ledger import ForwardLedger
-from xauusd_forecaster.dashboard_read_models import (
-    DashboardReadModelOwner,
-    DashboardReadModelSnapshot,
-    DashboardReadModelUnavailable,
-    READ_MODEL_CONTRACTS,
-    REFRESHED_DIRTY,
-    read_dashboard_read_model,
-)
-from xauusd_forecaster.dashboard_summaries import (
-    DASHBOARD_COUNT_TABLES,
-    dashboard_news_source_summary,
-    install_dashboard_summary_schema,
-)
+from xauusd_forecaster.news.annotation.product import ANNOTATION_FAILURE_RECOVERY_VERSION
+from xauusd_forecaster.news.annotation.product import INVALID_CHINESE_TITLE
+from xauusd_forecaster.news.annotation.product import PROMPT_VERSION
+from xauusd_forecaster.ai.provider_registry import AI_QUOTA_SURFACES
+from xauusd_forecaster.evidence.ledger import ForwardLedger
+from xauusd_forecaster.dashboard.read_models import DashboardReadModelOwner
+from xauusd_forecaster.dashboard.read_models import DashboardReadModelSnapshot
+from xauusd_forecaster.dashboard.read_models import DashboardReadModelUnavailable
+from xauusd_forecaster.dashboard.read_models import READ_MODEL_CONTRACTS
+from xauusd_forecaster.dashboard.read_models import REFRESHED_DIRTY
+from xauusd_forecaster.dashboard.read_models import read_dashboard_read_model
+from xauusd_forecaster.dashboard.summaries import DASHBOARD_COUNT_TABLES
+from xauusd_forecaster.dashboard.summaries import dashboard_news_source_summary
+from xauusd_forecaster.dashboard.summaries import install_dashboard_summary_schema
 from xauusd_forecaster.dashboard.learning_resources import (
     LEARNING_REVISION_TABLES,
     LearningSurfaceOwner,
@@ -60,13 +54,11 @@ from xauusd_forecaster.maintenance import (
     BACKUP_RETENTION_SCHEMA,
     BACKUP_RETENTION_STATE,
 )
-from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
-from xauusd_forecaster.news_scheduler import (
-    authorize_repairable_annotation_failures,
-    configured_api_credentials,
-    reserve_account_request,
-)
-from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
+from xauusd_forecaster.ai.quota import GeminiQuotaLedger
+from xauusd_forecaster.news.scheduler.state import authorize_repairable_annotation_failures
+from xauusd_forecaster.news.scheduler.state import configured_api_credentials
+from xauusd_forecaster.news.scheduler.state import reserve_account_request
+from xauusd_forecaster.news.collection.source_registry import NEWS_SOURCE_REGISTRY
 
 
 UTC = timezone.utc
@@ -372,7 +364,7 @@ def test_dashboard_reports_broker_close_and_reopen_time(tmp_path) -> None:
 
 
 def test_dashboard_exposes_frozen_news_coverage_separately_from_current_health(
-    tmp_path,
+    tmp_path, monkeypatch,
 ) -> None:
     now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
     database = tmp_path / "forward-evidence.sqlite3"
@@ -384,13 +376,14 @@ def test_dashboard_exposes_frozen_news_coverage_separately_from_current_health(
     )
     _append_news_input_coverage(database, now)
     module = _dashboard_module()
-    module.news_semantic_pipeline_health = lambda *_args, **_kwargs: {
+    from xauusd_forecaster.dashboard import status_resources
+    monkeypatch.setattr(status_resources, "news_semantic_pipeline_health", lambda *_args, **_kwargs: {
         "observed_at": now.isoformat(),
         "status": "HEALTHY",
         "reason_codes": (),
         "heartbeat_at": now.isoformat(),
         "actionable_failure_counts": {},
-    }
+    })
 
     payload = module._dashboard_payload(database, clock=lambda: now)
 
@@ -989,7 +982,7 @@ def test_dashboard_annotation_counts_match_current_worker_policy(tmp_path) -> No
                 parsed_at=now + timedelta(seconds=1),
                 prompt_version=PROMPT_VERSION,
             )
-    from xauusd_forecaster.news_scheduler import sync_pending_jobs
+    from xauusd_forecaster.news.scheduler.state import sync_pending_jobs
     sync_pending_jobs(ledger.connection, now=now + timedelta(seconds=2))
     ledger.connection.close()
 
@@ -1018,7 +1011,7 @@ def test_dashboard_annotation_counts_match_current_worker_policy(tmp_path) -> No
 
 
 def test_dashboard_quota_uses_scheduler_ledger(tmp_path, monkeypatch) -> None:
-    import xauusd_forecaster.news_scheduler as news_scheduler
+    import xauusd_forecaster.news.scheduler.state as news_scheduler
 
     configured = {"GEMINI_API_KEYS": "key-a;key-b", "GEMINI_API_KEY": ""}
     monkeypatch.setattr(
@@ -1066,7 +1059,7 @@ def test_dashboard_quota_uses_scheduler_ledger(tmp_path, monkeypatch) -> None:
 def test_dashboard_quota_keeps_pre_scheduler_file_compatibility(
     tmp_path, monkeypatch,
 ) -> None:
-    import xauusd_forecaster.news_scheduler as news_scheduler
+    import xauusd_forecaster.news.scheduler.state as news_scheduler
 
     configured = {"GEMINI_API_KEYS": "legacy-key", "GEMINI_API_KEY": ""}
     monkeypatch.setattr(
@@ -1289,7 +1282,7 @@ def test_optional_api_producers_fail_independently(
 def test_durable_optional_read_models_are_atomic_bounded_and_incremental(
     monkeypatch, tmp_path,
 ) -> None:
-    import xauusd_forecaster.dashboard_read_models as read_models
+    import xauusd_forecaster.dashboard.read_models as read_models
 
     database = tmp_path / "forward.sqlite3"
     ForwardLedger(database).close()
@@ -1389,7 +1382,7 @@ def _insert_brief(connection: sqlite3.Connection, index: int) -> None:
 
 @pytest.mark.parametrize("empty", [False, True])
 def test_audit_source_build_http_sync_preserves_each_detail_once(monkeypatch, tmp_path, empty):
-    from scripts import run_dashboard_sync as sync
+    from xauusd_forecaster.dashboard.sync import resources as sync
     from scripts.build_release_validation_fixtures import _source_payload
 
     module = _dashboard_module()
@@ -1408,7 +1401,8 @@ def test_audit_source_build_http_sync_preserves_each_detail_once(monkeypatch, tm
         builds.append(kwargs["snapshot_connection"])
         return {**source, "generated_at": kwargs["clock"]().isoformat()}
 
-    monkeypatch.setattr(module, "_dashboard_payload", build)
+    from xauusd_forecaster.dashboard import status_resources
+    monkeypatch.setattr(status_resources, "_dashboard_payload", build)
     owner = DashboardReadModelOwner(database, {
         "audit": lambda snapshot: module._optional_resource_payload(snapshot, "audit"),
     })
@@ -1615,9 +1609,7 @@ def test_read_model_freshness_cannot_be_manufactured(
 
 
 def test_existing_read_model_schema_gains_snapshot_provenance(tmp_path) -> None:
-    from xauusd_forecaster.dashboard_read_models import (
-        install_dashboard_read_model_schema,
-    )
+    from xauusd_forecaster.dashboard.read_models import install_dashboard_read_model_schema
 
     database = tmp_path / "forward.sqlite3"
     ForwardLedger(database).close()
@@ -1701,9 +1693,10 @@ def test_optional_read_model_validation_and_concurrent_reads(tmp_path) -> None:
 def test_retry_operator_bridge_lists_and_atomically_applies_idempotent_override(
     monkeypatch, tmp_path,
 ) -> None:
-    from xauusd_forecaster.news_scheduler import (
-        ROUTINE_POOL, backoff_job, claim_job, enqueue_job,
-    )
+    from xauusd_forecaster.news.scheduler.state import ROUTINE_POOL
+    from xauusd_forecaster.news.scheduler.state import backoff_job
+    from xauusd_forecaster.news.scheduler.state import claim_job
+    from xauusd_forecaster.news.scheduler.state import enqueue_job
 
     module = _dashboard_module()
     bridge_token = "test-operator-bridge-token-" + "x" * 32
@@ -2825,7 +2818,7 @@ def test_dashboard_keeps_readable_late_news_in_semantic_queue(tmp_path) -> None:
             "cluster_id": "late-readable",
         }
     )
-    from xauusd_forecaster.news_scheduler import sync_pending_jobs
+    from xauusd_forecaster.news.scheduler.state import sync_pending_jobs
     sync_pending_jobs(ledger.connection, now=now)
     ledger.connection.close()
 

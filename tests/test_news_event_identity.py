@@ -1,14 +1,12 @@
 import pytest
 import sqlite3
 
-from xauusd_forecaster.news_event_identity import resolve_event_identity
-from xauusd_forecaster.news_identity import (
-    identity_resolution_status,
-    resolved_identity_ids,
-)
-from xauusd_forecaster.news_impact import (
-    prior_identity_similarity, public_impact_reason, validate_impact_assessment,
-)
+from xauusd_forecaster.news.retrieval.event_identity import resolve_event_identity
+from xauusd_forecaster.news.retrieval.identity import identity_resolution_status
+from xauusd_forecaster.news.retrieval.identity import resolved_identity_ids
+from xauusd_forecaster.news.annotation.impact import prior_identity_similarity
+from xauusd_forecaster.news.annotation.impact import public_impact_reason
+from xauusd_forecaster.news.annotation.impact import validate_impact_assessment
 
 
 def assessment(update_type="DUPLICATE_REPORT", relation="SAME_EVENT", candidate="prior"):

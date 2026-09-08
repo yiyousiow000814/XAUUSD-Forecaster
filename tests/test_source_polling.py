@@ -5,19 +5,15 @@ from email.utils import format_datetime
 
 import pytest
 
-from xauusd_forecaster.forward_ledger import ForwardLedger
-from xauusd_forecaster.news import (
-    BEA_API_SOURCE,
-    EIA_API_SOURCE,
-    FRED_POLL_SOURCE,
-    GDELT_SOURCE,
-)
-from xauusd_forecaster.source_polling import (
-    MAX_PROVIDER_RETRY_AFTER_SECONDS,
-    classified_poll_error,
-    source_poll_gate,
-    source_poll_recovery_state,
-)
+from xauusd_forecaster.evidence.ledger import ForwardLedger
+from xauusd_forecaster.news.collection.intake import BEA_API_SOURCE
+from xauusd_forecaster.news.collection.intake import EIA_API_SOURCE
+from xauusd_forecaster.news.collection.intake import FRED_POLL_SOURCE
+from xauusd_forecaster.news.collection.intake import GDELT_SOURCE
+from xauusd_forecaster.news.collection.source_polling import MAX_PROVIDER_RETRY_AFTER_SECONDS
+from xauusd_forecaster.news.collection.source_polling import classified_poll_error
+from xauusd_forecaster.news.collection.source_polling import source_poll_gate
+from xauusd_forecaster.news.collection.source_polling import source_poll_recovery_state
 
 
 NOW = datetime(2026, 8, 18, 2, 35, tzinfo=UTC)

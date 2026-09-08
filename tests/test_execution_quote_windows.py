@@ -9,8 +9,9 @@ import pytest
 
 from xauusd_forecaster import execution_learning
 from xauusd_forecaster.execution_learning import _read_execution_quote_windows
-from xauusd_forecaster.forward_ledger import ForwardLedger, canonical_hash
-from xauusd_forecaster.training import MARKET_FEATURES
+from xauusd_forecaster.evidence.ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import canonical_hash
+from xauusd_forecaster.training.materialization import MARKET_FEATURES
 
 
 UTC = timezone.utc

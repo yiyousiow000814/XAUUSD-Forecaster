@@ -8,12 +8,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from xauusd_forecaster.forward_ledger import ForwardLedger
-from xauusd_forecaster.news import (
-    collect_bea_macro,
-    collect_eia_macro,
-    collect_fred_macro,
-)
+from xauusd_forecaster.evidence.ledger import ForwardLedger
+from xauusd_forecaster.news.collection.intake import collect_bea_macro
+from xauusd_forecaster.news.collection.intake import collect_eia_macro
+from xauusd_forecaster.news.collection.intake import collect_fred_macro
 
 
 UTC = timezone.utc

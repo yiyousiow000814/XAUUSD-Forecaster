@@ -23,7 +23,7 @@ def test_resource_serializers_do_not_depend_on_entrypoints_or_runtime_io() -> No
     }
     assert imports <= {
         "__future__", "copy", "json", "math", "datetime",
-        "xauusd_forecaster.dashboard_payloads", "xauusd_forecaster.news_projection",
+        'xauusd_forecaster.dashboard.payloads', "xauusd_forecaster.news_projection",
     }
 
 

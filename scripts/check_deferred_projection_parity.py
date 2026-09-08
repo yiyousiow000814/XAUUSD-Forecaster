@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Verify Candidate-produced Dashboard projections without mutating either store."""
+"""Verify source-selected Dashboard projections without mutating either store."""
 from __future__ import annotations
 
 import argparse
@@ -23,9 +23,12 @@ RUNTIME_ROOT = Path(_root_args.runtime_root or Path.cwd()).resolve()
 PRODUCER_ROOT = Path(_root_args.producer_root or Path.cwd()).resolve()
 # Projection builders belong to the exact Windows producer revision. Mutable
 # authority belongs to RuntimeRoot; neither location is inferred from the other.
-sys.path.insert(0, str(PRODUCER_ROOT / "scripts"))
+PRODUCER_RESOURCE_OWNER = PRODUCER_ROOT / "xauusd_forecaster/dashboard/sync/resources.py"
+if not PRODUCER_RESOURCE_OWNER.is_file():
+    raise ValueError("PROJECTION_PRODUCER_OWNER_UNAVAILABLE")
+sys.path.insert(0, str(PRODUCER_ROOT))
 
-from run_dashboard_sync import (  # noqa: E402
+from xauusd_forecaster.dashboard.sync.resources import (  # noqa: E402
     AUDIT_DETAIL_LIMIT_BYTES,
     AUDIT_FIRST_PAGE_LIMIT_BYTES,
     REMOTE_PAYLOAD_LIMIT_BYTES,
@@ -37,7 +40,10 @@ from run_dashboard_sync import (  # noqa: E402
     UUID_PATTERN,
     valid_audit_detail_payload,
 )
-from xauusd_forecaster.dashboard_read_models import READ_MODEL_CONTRACTS  # noqa: E402
+from xauusd_forecaster.dashboard.read_models import READ_MODEL_CONTRACTS  # noqa: E402
+
+if Path(_deferred_projection_request_digest.__code__.co_filename).resolve() != PRODUCER_RESOURCE_OWNER.resolve():
+    raise ValueError("PROJECTION_PRODUCER_OWNER_MISMATCH")
 
 BUILDERS = {
     "/api/audit-briefs": audit_briefs_snapshot,

@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from .forward_ledger import canonical_hash, snapshot_evidence_hash
+from xauusd_forecaster.evidence.ledger import (
+    canonical_hash,
+    snapshot_evidence_hash,
+)
 
 
 COMPLETION_SOURCE = "COLLECTOR_CLOCK_ATOMIC"
@@ -126,8 +129,8 @@ def read_completed_clock(ledger, decision_time: datetime) -> tuple[str, str] | N
             raise ValueError("CLOCK_EVENT_COMPLETION_CONFLICT")
     else:
         # Historical completion is retained, but still check mandatory families.
-        from .evidence_v2 import evaluation_epoch
-        from .inference_v2 import _require_complete_active_generation
+        from xauusd_forecaster.evidence.schema import evaluation_epoch
+        from xauusd_forecaster.decision.inference import _require_complete_active_generation
 
         epoch = evaluation_epoch(connection)
         if epoch is not None and decision_time >= epoch:

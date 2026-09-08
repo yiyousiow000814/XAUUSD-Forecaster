@@ -12,11 +12,14 @@ from pathlib import Path
 
 import numpy as np
 
-from .forward_ledger import canonical_hash
+from xauusd_forecaster.evidence.ledger import canonical_hash
 from .execution_costs import net_shadow_log_return
 from .market import MarketObservation, parse_quote_line
-from .ridge import RidgeArtifact, train_ridge
-from .training import MARKET_FEATURES
+from xauusd_forecaster.training.ridge import (
+    RidgeArtifact,
+    train_ridge,
+)
+from xauusd_forecaster.training.materialization import MARKET_FEATURES
 
 
 UTC = timezone.utc
@@ -184,7 +187,7 @@ def _read_execution_quote_windows(
 
 def bootstrap_execution_examples(ledger, quote_root: str | Path, cutoff: datetime) -> int:
     """Build training material only from frozen predictions and retained quotes."""
-    from .executable_label import build_executable_label_v2
+    from xauusd_forecaster.evidence.executable_label import build_executable_label_v2
 
     missing = ledger.connection.execute(
         """SELECT o.source_decision_id,o.decision_time,o.recomputed_at,o.source_evidence_hash

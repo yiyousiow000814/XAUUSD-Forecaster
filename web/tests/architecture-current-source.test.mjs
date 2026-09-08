@@ -112,7 +112,7 @@ test('descriptor byte, work and part budgets fail before missing parts are read'
     manifest => { manifest.parts.forEach(part => { part.bytes = 2 * 1024 * 1024; }); },
     manifest => { manifest.counts.symbols = 10241; },
     manifest => { manifest.counts = { symbols: 6000, edges: 6000, tests: 0 }; },
-    manifest => { manifest.parts = Array(33).fill(manifest.parts[0]); },
+    manifest => { manifest.parts = Array(41).fill(manifest.parts[0]); },
     manifest => { manifest.parts[0].bytes = Number.MAX_SAFE_INTEGER; },
   ];
   for (const mutate of cases) {

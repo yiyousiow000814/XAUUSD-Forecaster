@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import Callable
 
 from xauusd_forecaster.execution_learning import execution_learning_status
-from xauusd_forecaster.learning_curves import learning_curve_payload
+from xauusd_forecaster.dashboard.learning_curves import learning_curve_payload
 
 
 LEARNING_REVISION_TABLES = (

@@ -14,6 +14,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+
+
+
+
 def put(root, path, text):
     target = root / path
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -76,7 +80,7 @@ def test_declared_decision_namespace_cannot_gain_optional_runtime_dependency(che
 
 def test_similar_names_flat_modules_and_dynamic_requests_do_not_gain_runtime_authority(checker, source):
     root, _ = source
-    put(root, 'xauusd_forecaster/decision.py', 'from .dashboard import owner\n')
+    put(root, 'xauusd_forecaster/decision/selection.py', 'from .dashboard import owner\n')
     put(root, 'xauusd_forecaster/news/owner.py',
         'import scripts_extra\nfrom xauusd_forecaster.dashboard_extra import value\n'
         'import importlib\nimportlib.import_module("scripts.entry")\n'
@@ -160,7 +164,7 @@ def test_policy_missing_or_invalid_authority_is_not_a_pass(checker, source, muta
         put(root, 'scripts/missing.py', '# Present\n')
         policy['script_imports'].append(deepcopy(record))
     if mutation == 'no_reason': record['reason'] = ''
-    if mutation == 'wrong_area': policy['canonical_packages']['news'] = 'xauusd_forecaster/news.py'
+    if mutation == 'wrong_area': policy['canonical_packages']['news'] = 'xauusd_forecaster/news/collection/intake.py'
     save_policy(root, policy)
     if mutation == 'no_policy': put(root, 'architecture/critical-paths.json', '{}')
     with pytest.raises(ValueError, match='ARCHITECTURE_(IMPORT_POLICY|INPUT_INVALID)'):
@@ -173,8 +177,8 @@ def test_actual_repository_policy_and_required_workflow(checker):
     assert result['files'] == len(list((ROOT / 'xauusd_forecaster').rglob('*.py'))) + len(list((ROOT / 'scripts').glob('*.py')))
     preview = next(row for row in result['dynamic_requests']
                    if row['path'] == 'scripts/build_preview_bundle.py'
-                   and row['requested_module'] == 'scripts.run_dashboard_sync')
-    assert preview['requested_module'] == 'scripts.run_dashboard_sync'
+                   and row['requested_module'] == 'xauusd_forecaster.dashboard.resource_contracts')
+    assert preview['requested_module'] == 'xauusd_forecaster.dashboard.resource_contracts'
     assert preview['runtime_resolution'] == 'UNKNOWN'
     workflow = (ROOT / '.github/workflows/architecture.yml').read_text()
     assert 'python scripts/check_architecture_imports.py' in workflow

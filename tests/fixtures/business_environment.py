@@ -416,5 +416,5 @@ elif DOCUMENT.get('legacy_configuration_revision'):
         creationflags=subprocess.CREATE_NO_WINDOW).stdout.strip()
     if observed == DOCUMENT['legacy_configuration_revision']:
         sys.path.insert(0, str(code_root))
-        from xauusd_forecaster import news_scheduler
+        import xauusd_forecaster.news.scheduler.state as news_scheduler
         news_scheduler._runtime_environment_value = environment_value

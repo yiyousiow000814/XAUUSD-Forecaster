@@ -9,47 +9,42 @@ from types import SimpleNamespace
 
 import pytest
 
-from xauusd_forecaster.evidence_v2 import (
-    ELIGIBILITY_VERSION,
-    V2_SCHEMA,
-    install_v2_schema,
-)
-from xauusd_forecaster.executable_label import build_executable_label_v2
+from xauusd_forecaster.evidence.schema import ELIGIBILITY_VERSION
+from xauusd_forecaster.evidence.schema import V2_SCHEMA
+from xauusd_forecaster.evidence.schema import install_v2_schema
+from xauusd_forecaster.evidence.executable_label import build_executable_label_v2
 from xauusd_forecaster.execution_costs import net_shadow_log_return
-from xauusd_forecaster.forward_ledger import ForwardLedger, canonical_hash
-from xauusd_forecaster.learning_curves import _bounded_curve, _stage, learning_curve_payload
-from xauusd_forecaster.live_v2 import (
-    _append_news_visibility_receipts,
-    append_live_decision_v2,
-    append_live_outcome_v2,
-)
+from xauusd_forecaster.evidence.ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import canonical_hash
+from xauusd_forecaster.dashboard.learning_curves import _bounded_curve
+from xauusd_forecaster.dashboard.learning_curves import _stage
+from xauusd_forecaster.dashboard.learning_curves import learning_curve_payload
+from xauusd_forecaster.decision.live import _append_news_visibility_receipts
+from xauusd_forecaster.decision.live import append_live_decision_v2
+from xauusd_forecaster.decision.live import append_live_outcome_v2
 from xauusd_forecaster.market import MarketObservation
-from xauusd_forecaster.macro_release import (
-    macro_release_features_at,
-    macro_release_packets_at,
-)
-from xauusd_forecaster.news_evidence import EVIDENCE_POLICY_VERSION, event_evidence_rows
-from xauusd_forecaster.news_identity import canonical_source_organization
-from xauusd_forecaster.news_contracts import (
-    CURRENT_NEWS_CONTRACT,
-    NewsContract,
-)
-from xauusd_forecaster.news_features_v2 import (
-    aggregate_news_features_v2,
-    event_raw_weight,
-)
-from xauusd_forecaster.news_impact import impact_time_rule, pending_impact_records
-from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
-from xauusd_forecaster.news_semantics import (
-    CURRENT_NEWS_PROMPT_VERSION,
-    annotation_topics,
-    effective_record_kind,
-)
-from xauusd_forecaster.news_time import assess_news_time, category_time_rule
+from xauusd_forecaster.news.collection.macro_release import macro_release_features_at
+from xauusd_forecaster.news.collection.macro_release import macro_release_packets_at
+from xauusd_forecaster.news.semantics.evidence import EVIDENCE_POLICY_VERSION
+from xauusd_forecaster.news.semantics.evidence import event_evidence_rows
+from xauusd_forecaster.news.retrieval.identity import canonical_source_organization
+from xauusd_forecaster.news.semantics.model_contracts import CURRENT_NEWS_CONTRACT
+from xauusd_forecaster.news.semantics.model_contracts import NewsContract
+from xauusd_forecaster.news.semantics.features import aggregate_news_features_v2
+from xauusd_forecaster.news.semantics.features import event_raw_weight
+from xauusd_forecaster.news.annotation.impact import impact_time_rule
+from xauusd_forecaster.news.annotation.impact import pending_impact_records
+from xauusd_forecaster.news.collection.source_registry import NEWS_SOURCE_REGISTRY
+from xauusd_forecaster.news.semantics.contracts import CURRENT_NEWS_PROMPT_VERSION
+from xauusd_forecaster.news.semantics.contracts import annotation_topics
+from xauusd_forecaster.news.semantics.contracts import effective_record_kind
+from xauusd_forecaster.news.semantics.time import assess_news_time
+from xauusd_forecaster.news.semantics.time import category_time_rule
 from xauusd_forecaster.repair_v2 import immutable_table_hash
-from xauusd_forecaster import (
-    execution_learning, inference_v2, news_contract_migration, training_v2,
-)
+from xauusd_forecaster import execution_learning
+import xauusd_forecaster.decision.inference as inference_v2
+import xauusd_forecaster.news.semantics.migration as news_contract_migration
+import xauusd_forecaster.training.generation as training_v2
 from xauusd_forecaster.u5_state import U5State, U5_VERSION
 from xauusd_forecaster.execution_learning import (
     EXECUTION_CHART_MAX_POINTS, LOT_FEATURES, EXIT_FEATURES,
@@ -57,7 +52,7 @@ from xauusd_forecaster.execution_learning import (
     append_execution_examples, append_lot_predictions, execution_learning_status,
     score_execution_predictions, train_due_execution,
 )
-from xauusd_forecaster.training import MARKET_FEATURES
+from xauusd_forecaster.training.materialization import MARKET_FEATURES
 
 
 def _append_materializable_training_row(

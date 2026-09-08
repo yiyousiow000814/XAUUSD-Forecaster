@@ -13,7 +13,7 @@ import pytest
 
 from xauusd_forecaster import offline_market_methods as methods
 from xauusd_forecaster.execution_costs import ROUND_TRIP_COMMISSION_LOG_COST
-from xauusd_forecaster.training import MARKET_FEATURES
+from xauusd_forecaster.training.materialization import MARKET_FEATURES
 
 
 def row(i=0):

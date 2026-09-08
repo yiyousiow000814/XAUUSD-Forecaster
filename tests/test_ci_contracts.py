@@ -427,7 +427,7 @@ def test_publication_receipt_comparison_is_owned_by_news_time() -> None:
     offenders: list[str] = []
     for root in (ROOT / "xauusd_forecaster", ROOT / "scripts"):
         for path in root.rglob("*.py"):
-            if path == ROOT / "xauusd_forecaster" / "news_time.py":
+            if path == ROOT / "xauusd_forecaster" / "news/semantics/time.py":
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             offenders.extend(

@@ -18,7 +18,7 @@ from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 
-from scripts.run_dashboard_sync import (  # noqa: E402
+from xauusd_forecaster.dashboard.sync.resources import (  # noqa: E402
     NEWS_MIRROR_CONTRACT_VERSION,
     NEWS_PROJECTION_BATCHES_PER_CYCLE,
     PayloadContractError,
@@ -39,7 +39,7 @@ from xauusd_forecaster.dashboard.news_resources import (  # noqa: E402
     _read_news_projection_generation_artifact,
     _write_news_projection_generation_artifact,
 )
-from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
+from xauusd_forecaster.evidence.ledger import ForwardLedger  # noqa: E402
 from xauusd_forecaster.news_projection import (  # noqa: E402
     NewsProjectionGeneration, NewsProjectionRetainedGeneration, NewsProjectionSourceCapture,
 )

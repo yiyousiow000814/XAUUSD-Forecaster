@@ -7,7 +7,7 @@ from xauusd_forecaster import (
     ShadowDecisionGate,
     select_recommended_action,
 )
-from xauusd_forecaster.decision import select_post_cost_ev_action
+from xauusd_forecaster.decision.selection import select_post_cost_ev_action
 
 
 UTC = timezone.utc

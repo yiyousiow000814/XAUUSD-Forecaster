@@ -84,7 +84,7 @@ admission; it does not claim the old total limit was met.
 | --- | --- |
 | Any manifest or part | 2,097,152 physical UTF-8 bytes, unchanged per-file limit |
 | Manifest plus every referenced part | 3,145,728 bytes total |
-| Fact parts | At most 32 |
+| Fact parts | At most 40 |
 | Complete symbols + edges + tests | At most 10,240 records |
 | JSON structure | At most 32 nesting levels; Unicode scalar strings and safe integer numbers only |
 | Public Explorer manifest | Existing 300,000-byte bound, unchanged |
@@ -99,6 +99,14 @@ transport is 2,302,433 bytes in 27 parts (largest 588,422), including the 15,109
 manifest. These are retained-input codec measurements, not runtime/Cloudflare
 performance evidence. Growth beyond any bound fails without dropping facts or
 automatically increasing limits.
+
+The current-main owner extraction explicitly revises only the source-part count
+from 32 to 40. Its measured intermediate input has 33 source-owned parts and
+2,289,673 total UTF-8 bytes: smaller transport than retained input A, spread over
+more modules. Per-file, aggregate-byte, record, depth and public-manifest limits
+remain unchanged. Producer and build consumer enforce the same finite count;
+this is a reviewed source-layout change, not automatic limit growth or a runtime
+request fan-out increase.
 
 `critical-index.json` is now a `critical-source-index-parts-v1` manifest. Its
 `index` retains every original field except `observed`; `counts` binds each

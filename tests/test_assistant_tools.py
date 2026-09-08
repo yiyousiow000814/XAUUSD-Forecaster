@@ -7,17 +7,15 @@ from datetime import UTC, datetime
 
 import pytest
 
-from xauusd_forecaster.assistant_tools import (
-    NEWS_SEARCH_TOOL_NAME,
-    AssistantToolActor,
-    AssistantToolCall,
-    AssistantToolCapability,
-    AssistantToolDefinition,
-    AssistantToolPlanRejected,
-    AssistantToolRegistry,
-    AssistantToolStatus,
-    build_news_search_tool,
-)
+from xauusd_forecaster.assistant.tools import NEWS_SEARCH_TOOL_NAME
+from xauusd_forecaster.assistant.tools import AssistantToolActor
+from xauusd_forecaster.assistant.tools import AssistantToolCall
+from xauusd_forecaster.assistant.tools import AssistantToolCapability
+from xauusd_forecaster.assistant.tools import AssistantToolDefinition
+from xauusd_forecaster.assistant.tools import AssistantToolPlanRejected
+from xauusd_forecaster.assistant.tools import AssistantToolRegistry
+from xauusd_forecaster.assistant.tools import AssistantToolStatus
+from xauusd_forecaster.assistant.tools import build_news_search_tool
 
 
 NOW = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)

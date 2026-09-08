@@ -92,7 +92,8 @@
         "tests/test_named_reference_benchmark.py",
         "tests/test_public_health_check.py",
         "tests/test_execution_costs.py",
-        "tests/test_main_runtime.py"
+        "tests/test_main_runtime.py",
+        "tests/test_package_ownership.py"
       ]
     },
     {

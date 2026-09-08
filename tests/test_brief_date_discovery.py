@@ -8,8 +8,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from xauusd_forecaster import daily_brief
-from xauusd_forecaster.forward_ledger import ForwardLedger
+import xauusd_forecaster.news.brief.product as daily_brief
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 
 
 NOW = datetime(2026, 8, 13, 4, tzinfo=UTC)
@@ -467,7 +467,7 @@ def test_date_discovery_large_tail_does_not_read_payload_or_publish_partial_iden
 
 def test_actual_brief_batch_and_scheduler_share_dates_without_skipping_due_owners(ledger):
     from scripts.run_news_annotator import run_daily_brief_batch
-    from xauusd_forecaster.news_scheduler import sync_pending_jobs
+    from xauusd_forecaster.news.scheduler.state import sync_pending_jobs
 
     # Explicit empty credentials preserve actual scheduler/Brief behavior and
     # prohibit reading a user's credential source. Finalization is real SQLite.

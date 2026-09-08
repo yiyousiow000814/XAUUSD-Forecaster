@@ -3,15 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.named_reference_benchmark import (
-    EXPECTED_HARD_GUARD_CASES,
-    EXPECTED_REVIEW_CASES,
-    benchmark_manifest_sha256,
-    decode_named_reference_review,
-    load_named_reference_benchmark,
-    named_reference_review_payload,
-    score_named_reference_runs,
-)
+from xauusd_forecaster.news.retrieval.named_reference_benchmark import EXPECTED_HARD_GUARD_CASES
+from xauusd_forecaster.news.retrieval.named_reference_benchmark import EXPECTED_REVIEW_CASES
+from xauusd_forecaster.news.retrieval.named_reference_benchmark import benchmark_manifest_sha256
+from xauusd_forecaster.news.retrieval.named_reference_benchmark import decode_named_reference_review
+from xauusd_forecaster.news.retrieval.named_reference_benchmark import load_named_reference_benchmark
+from xauusd_forecaster.news.retrieval.named_reference_benchmark import named_reference_review_payload
+from xauusd_forecaster.news.retrieval.named_reference_benchmark import score_named_reference_runs
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "news_named_reference_benchmark.json"

@@ -76,7 +76,7 @@ correction.
 `xauusd_forecaster/dashboard/resource_contracts.py` owns pure, bounded
 Critical, Audit, Learning, Market chart, and News batch serialization. API
 and Sync consume that owner; it reuses the field projections in
-`xauusd_forecaster/dashboard_payloads.py` and the News generation contract in
+`xauusd_forecaster/dashboard/payloads.py` and the News generation contract in
 `xauusd_forecaster/news_projection.py`. It accepts already-read source values
 and an explicit optional producer revision. It must not discover a runtime
 root, query Git or a database, perform HTTP, advance an ACK, or schedule work.
@@ -116,10 +116,12 @@ It does not import application modules or infer runtime loading from syntax.
   canonical source may not import a declared legacy shim. Dashboard is the
   terminal read/projection namespace. These are declared syntax boundaries,
   not inferred process, timing or mutation authority.
-- Flat modules remain unclassified by this package-direction rule. For example,
-  a flat file named `decision.py` is not silently treated as an implemented
-  Decision package. The package-to-script ban still applies to every flat file.
-  Unpopulated declared namespaces do not count as completed owner extraction.
+- Canonical Decision, Evidence, Training, News, AI, Assistant, Runtime and
+  Dashboard packages contain their implementations. Remaining root modules are
+  shared foundations or separately scoped owners; the package-to-script ban
+  applies to them too. Do not add a root compatibility implementation for a moved
+  owner. Import composition is additionally executed in fresh Python processes
+  outside the repository working directory.
 - A shim declaration requires an existing source and distinct existing owner
   plus an explicit removal condition. The current whole-file shim list is
   empty. Neither the root public facade nor the mixed Sync orchestrator is a
@@ -139,7 +141,8 @@ Current source-index coverage, UNKNOWN edges and transport budgets are unchanged
 - The product is Shadow research only and has no order-submission authority.
 - Assistant chat, Q&A, title generation, compaction, and indexing remain
   PAUSED until a separately authorized activation contract passes.
-- Stable changes only through explicit Release Control Promote and observation.
+- Publication follows the sole main-only runtime and Cloudflare entry points in
+  `RELEASE_CONTROL.md`; retired Stable/Candidate promotion is not an authority.
 - Unknown storage is never deleted automatically.
 - Performance work must preserve point-in-time causality, append-only evidence,
   model behavior, rollback authority, and fail-closed validation.

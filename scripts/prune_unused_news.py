@@ -10,7 +10,7 @@ import sys
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 
-from xauusd_forecaster.news_pruning import prune_unused_news
+from xauusd_forecaster.news.collection.pruning import prune_unused_news
 
 
 def main() -> int:

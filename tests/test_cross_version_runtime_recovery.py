@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.evidence.ledger import ForwardLedger
 
 
 ROOT = Path(__file__).resolve().parents[1]

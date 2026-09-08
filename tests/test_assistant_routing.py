@@ -4,25 +4,23 @@ import json
 
 import pytest
 
-from xauusd_forecaster.assistant_routing import (
-    ASSISTANT_ROUTING_POLICY_VERSION,
-    GOOGLE_GENERATIVE_LANGUAGE,
-    OLLAMA_LOCAL,
-    AssistantModelRoutingUnavailable,
-    AssistantTaskType,
-    AssistantToolPolicy,
-    ModelCapacityClass,
-    ModelProfile,
-    ModelRequirement,
-    ReasoningClass,
-    ThinkingLevel,
-    apply_provider_thinking_level,
-    classify_assistant_reasoning,
-    classify_assistant_tool_policy,
-    configured_assistant_model_profiles,
-    plan_assistant_route,
-    routing_provenance,
-)
+from xauusd_forecaster.assistant.routing import ASSISTANT_ROUTING_POLICY_VERSION
+from xauusd_forecaster.assistant.routing import GOOGLE_GENERATIVE_LANGUAGE
+from xauusd_forecaster.assistant.routing import OLLAMA_LOCAL
+from xauusd_forecaster.assistant.routing import AssistantModelRoutingUnavailable
+from xauusd_forecaster.assistant.routing import AssistantTaskType
+from xauusd_forecaster.assistant.routing import AssistantToolPolicy
+from xauusd_forecaster.assistant.routing import ModelCapacityClass
+from xauusd_forecaster.assistant.routing import ModelProfile
+from xauusd_forecaster.assistant.routing import ModelRequirement
+from xauusd_forecaster.assistant.routing import ReasoningClass
+from xauusd_forecaster.assistant.routing import ThinkingLevel
+from xauusd_forecaster.assistant.routing import apply_provider_thinking_level
+from xauusd_forecaster.assistant.routing import classify_assistant_reasoning
+from xauusd_forecaster.assistant.routing import classify_assistant_tool_policy
+from xauusd_forecaster.assistant.routing import configured_assistant_model_profiles
+from xauusd_forecaster.assistant.routing import plan_assistant_route
+from xauusd_forecaster.assistant.routing import routing_provenance
 
 
 @pytest.mark.parametrize(

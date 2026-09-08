@@ -6,15 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.assistant_memory_index import (
-    ASSISTANT_MEMORY_INDEX_VERSION,
-    build_assistant_memory_index_result,
-    tokenize_assistant_memory,
-)
-from xauusd_forecaster.local_embeddings import (
-    LOCAL_EMBEDDING_MODEL_DIGEST,
-    EmbeddingProfile,
-)
+from xauusd_forecaster.assistant.memory_index import ASSISTANT_MEMORY_INDEX_VERSION
+from xauusd_forecaster.assistant.memory_index import build_assistant_memory_index_result
+from xauusd_forecaster.assistant.memory_index import tokenize_assistant_memory
+from xauusd_forecaster.news.retrieval.local_embeddings import LOCAL_EMBEDDING_MODEL_DIGEST
+from xauusd_forecaster.news.retrieval.local_embeddings import EmbeddingProfile
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "assistant_memory_tokenizer.json"

@@ -217,7 +217,7 @@ def run(args):
                                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).strip()
     files = ["scripts/run_market_method_batch.py", "xauusd_forecaster/offline_market_methods.py",
              "xauusd_forecaster/causal_signal_replay.py", "xauusd_forecaster/offline_model_repair.py",
-             "xauusd_forecaster/ridge.py", "xauusd_forecaster/execution_costs.py", "docs/plans/MODEL_METHOD_BATCH1.json"]
+             "xauusd_forecaster/training/ridge.py", "xauusd_forecaster/execution_costs.py", "docs/plans/MODEL_METHOD_BATCH1.json"]
     write(args.output / "execution.json", {"source_git_sha": git("rev-parse", "HEAD"),
         "worktree_clean": not bool(git("status", "--porcelain")), "source_files_sha256": {p: digest(root / p) for p in files},
         "plan_sha256": PLAN_SHA, "panel_sha256": digest(args.panel), "quote_extract_sha256": QUOTE_SHA,

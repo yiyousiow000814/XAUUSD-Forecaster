@@ -32,8 +32,8 @@ def main():
     def digest(path):
         return hashlib.sha256(path.read_bytes()).hexdigest()
     files = ["scripts/run_model_repair_offline.py", "scripts/build_model_repair_panel.py", "scripts/report_model_repair_offline.py",
-             "xauusd_forecaster/offline_model_repair.py", "xauusd_forecaster/offline_model_paths.py", "xauusd_forecaster/ridge.py",
-             "xauusd_forecaster/training.py", "xauusd_forecaster/execution_costs.py", "xauusd_forecaster/forward_ledger.py"]
+             "xauusd_forecaster/offline_model_repair.py", "xauusd_forecaster/offline_model_paths.py", "xauusd_forecaster/training/ridge.py",
+             "xauusd_forecaster/training/materialization.py", "xauusd_forecaster/execution_costs.py", "xauusd_forecaster/evidence/ledger.py"]
     evidence = {"source_git_sha": git("rev-parse", "HEAD"), "worktree_clean": not bool(git("status", "--porcelain")),
                 "source_files_sha256": {p: digest(root/p) for p in files},
                 "panel_path": str(args.panel.resolve()), "panel_sha256": digest(args.panel),

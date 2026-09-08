@@ -35,7 +35,7 @@ def main() -> None:
     from xauusd_forecaster.runtime_paths import isolated_runtime_configuration
     isolated = isolated_runtime_configuration()
     if isolated:
-        from xauusd_forecaster.news_scheduler import _runtime_environment_value
+        from xauusd_forecaster.news.scheduler.state import _runtime_environment_value
         if Path(isolated["owned_root"]) != root or _runtime_environment_value("GEMINI_API_KEY") != "synthetic-configuration-sentinel":
             raise RuntimeError("STAGED_CONFIGURATION_SOURCE_MISMATCH")
         state = Path(isolated["runtime_root"]) / ".local/forward"

@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 
 from xauusd_forecaster import maintenance
-from xauusd_forecaster.forward_ledger import ForwardLedger
-from xauusd_forecaster.training_owner import _process_start_token
+from xauusd_forecaster.evidence.ledger import ForwardLedger
+from xauusd_forecaster.training.runtime import _process_start_token
 from scripts import run_forward_collector as collector
 from scripts import run_dashboard_api as dashboard_api
 

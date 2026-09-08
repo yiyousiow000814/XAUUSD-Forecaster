@@ -1923,7 +1923,7 @@ test("reads the bounded learning first page before the compact live relay", () =
 
 test("stores growing learning history as bounded idempotent D1 records", () => {
   const route = readFileSync(new URL("../app/api/learning-history/route.ts", import.meta.url), "utf8");
-  const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
+  const sync = readFileSync(new URL("../../xauusd_forecaster/dashboard/sync/resources.py", import.meta.url), "utf8");
   const contracts = readFileSync(new URL("../../xauusd_forecaster/dashboard/resource_contracts.py", import.meta.url), "utf8");
   assert.match(route, /MAX_INGEST_BYTES = 350_000/);
   assert.match(route, /readBoundedBody\(request, MAX_INGEST_BYTES\)/);
@@ -2001,7 +2001,7 @@ test("activates only complete paged news-evidence generations outside status", (
   const store = readFileSync(
     new URL("../app/api/_shared/news-evidence-store.ts", import.meta.url), "utf8",
   );
-  const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
+  const sync = readFileSync(new URL("../../xauusd_forecaster/dashboard/sync/resources.py", import.meta.url), "utf8");
   const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
   assert.match(migration, /PRIMARY KEY\(`snapshot_id`, `event_key`\)/);
   assert.match(migration, /news_evidence_snapshot_eligible_idx/);
@@ -2663,7 +2663,7 @@ test("explains training rows separately from independent news events", () => {
 
 test("live room reports articles and independent events instead of revision rows", async () => {
   const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
-  const payloads = readFileSync(new URL("../../xauusd_forecaster/dashboard_payloads.py", import.meta.url), "utf8");
+  const payloads = readFileSync(new URL("../../xauusd_forecaster/dashboard/payloads.py", import.meta.url), "utf8");
   assert.match(source, /NEWS ARTICLES/);
   assert.match(source, /newsMetrics\.articles\.received/);
   assert.match(source, /newsMetrics\.events\.independent/);
@@ -2853,7 +2853,7 @@ test("keeps the legacy news Q&A queue protected and paused without a duplicate s
   );
   const queue = readFileSync(new URL("../app/api/_shared/news-questions.ts", import.meta.url), "utf8");
   const auth = readFileSync(new URL("../app/api/_shared/dashboard-operator-auth.ts", import.meta.url), "utf8");
-  const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
+  const sync = readFileSync(new URL("../../xauusd_forecaster/dashboard/sync/resources.py", import.meta.url), "utf8");
 
   assert.doesNotMatch(view, /view === "qa"/);
   assert.doesNotMatch(view, /PRIVATE · EVIDENCE GROUNDED|私有问答|\/api\/news-questions/);
@@ -2944,9 +2944,9 @@ test("separates Access-owned human APIs from the ingest worker control plane", (
   ].map(name => readFileSync(
     new URL(`../app/admin/api/${name}/route.ts`, import.meta.url), "utf8",
   ));
-  const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
+  const sync = readFileSync(new URL("../../xauusd_forecaster/dashboard/sync/resources.py", import.meta.url), "utf8");
   const chatWorker = readFileSync(
-    new URL("../../xauusd_forecaster/assistant_chat_worker.py", import.meta.url), "utf8",
+    new URL("../../xauusd_forecaster/assistant/chat_worker.py", import.meta.url), "utf8",
   );
   const security = readFileSync(
     new URL("../../docs/contracts/ASSISTANT_SECURITY.md", import.meta.url), "utf8",

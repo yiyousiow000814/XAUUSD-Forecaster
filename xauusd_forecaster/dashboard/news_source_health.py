@@ -5,14 +5,14 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from xauusd_forecaster.dashboard_summaries import (
+from xauusd_forecaster.dashboard.summaries import (
     dashboard_macro_source_summary,
     dashboard_news_source_summary,
     dashboard_source_poll_summary,
 )
-from xauusd_forecaster.news_relevance import GOOGLE_NEWS_MAX_AGE
-from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
-from xauusd_forecaster.source_polling import source_poll_recovery_state
+from xauusd_forecaster.news.semantics.relevance import GOOGLE_NEWS_MAX_AGE
+from xauusd_forecaster.news.collection.source_registry import NEWS_SOURCE_REGISTRY
+from xauusd_forecaster.news.collection.source_polling import source_poll_recovery_state
 
 
 UTC = timezone.utc

@@ -266,7 +266,7 @@ def test_retained_generation_admission_rejects_before_replay(tmp_path, corruptio
 
 def test_retained_and_materialized_consumers_share_exact_batch_contract(tmp_path, monkeypatch):
     from xauusd_forecaster.dashboard.news_resources import _news_projection_batch
-    from scripts.run_dashboard_sync import _frozen_news_projection_batch
+    from xauusd_forecaster.dashboard.sync.resources import _frozen_news_projection_batch
 
     rows = [_source_row(i, withdrawal=i % 3 == 0) for i in range(17)]
     records = [news_source_capture_record(row, [

@@ -12,7 +12,7 @@ failure_marker = "HEARTBEAT_ORDER_VIOLATED"
 
 [[mutation]]
 id = "MUT-EVIDENCE-APPEND-ONLY"
-path = "xauusd_forecaster/forward_ledger.py"
+path = "xauusd_forecaster/evidence/ledger.py"
 symbol = "_install_append_only_triggers"
 before = 'f"BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT, "'
 after = 'f"BEFORE UPDATE OF __mutation_never__ ON {table} BEGIN SELECT RAISE(ABORT, "'
