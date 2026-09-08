@@ -1181,7 +1181,8 @@ test("keeps the 60-day news archive inside bounded D1 work", () => {
   const countMigration = readFileSync(new URL("../drizzle/0027_materialize_news_projection_counts.sql", import.meta.url), "utf8");
   assert.match(detail, /DETAIL_BATCH_LIMIT = 12/);
   assert.match(store, /FROM news_details\s+WHERE detail_key IN \(\$\{placeholders\}\)/);
-  assert.match(store, /ORDER BY published_time DESC/);
+  // Ordering, ties and reverse walks are executed against both persisted index
+  // families in news-projection-store.test.mjs, rather than pinned to SQL copy.
   assert.match(store, /activeCandidateCount/);
   assert.match(store, /candidate_expiries/);
   assert.match(index, /model_visibility: "IMPACT_EXPIRED"/);
