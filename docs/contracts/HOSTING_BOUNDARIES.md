@@ -214,10 +214,6 @@
   convergence. Restart resumes that delta instead of replacing all retained
   jobs. The normal 200-job mirror must initially converge within seven control
   cycles, and ongoing small live changes must not starve obsolete-row cleanup.
-  Cleanup may skip membership evaluation when post-upsert cardinality equals
-  the unique incoming count: remaining changes already prohibit deletion, and
-  a fully matched equal-size set has no surplus. Check and deletion remain in
-  the same D1 batch; equal-size identity replacement must still converge.
   Capacity accounting includes these bounded catch-up writes separately from
   recurring actual changes; a per-invocation limit is not a daily quota proof.
 - Learning-history pages use a composite resource/model-identity/time index and
