@@ -370,3 +370,8 @@ notification to a later-mounted consumer. Every consumer subscribes, reads the
 current cache after subscribing, and unsubscribes on unmount. Missing or partial
 health data is loading/unavailable, never a healthy zero-component report.
 A subscription does not create a new HTTP request or change the polling cadence.
+
+News activation expands receipt items once for category/review aggregates and
+reuses those compact aggregates for global totals. Candidate expiries remain
+globally sorted for the existing binary-search consumer. Atomic activation,
+empty-generation semantics and all review/category counts remain unchanged.
