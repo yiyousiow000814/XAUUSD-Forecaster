@@ -318,6 +318,17 @@ Independent review and production eligibility remain outstanding.
 
 ## Worker identity origin survives isolated transport binding
 
+The ebbfeefa connected run passed all 434 directed Worker requests but rejected
+all 14 static routes: the static host guard still derived the expected hostname
+from the isolated transport. Extend the same origin contract to this consumer.
+The guard changes only its identity input; scheme, port, path, exact version host,
+body and status checks remain intact. Protected Access checks compare their
+configured active transport and must not be changed to a public identity check.
+The existing static success and rejection families now execute PS5.1 and PS7
+with normal and loopback transports. Four isolated cases failed before repair.
+This closes a consumer omitted by the earlier producer-only origin review;
+the complete connected lifecycle remains the acceptance gate.
+
 Installed 205ce275 passed copy/preflight and the corrected database capability
 query, then failed the first Candidate status read because browser_url was
 empty. The isolated entry point replaces workerUrl with a loopback provider;

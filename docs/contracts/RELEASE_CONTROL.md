@@ -648,6 +648,9 @@ verified version metadata. An isolated provider transport address must not
 replace that origin or erase the derived URL. All isolated requests remain
 subject to exact declared origin/method/path matching and owned loopback
 forwarding; deriving an identity grants no additional network authority.
+Static asset host validation consumes that same canonical identity origin.
+Protected Access validation instead binds its configured active transport;
+an isolated transport receipt does not qualify a production Access boundary.
 
 Control JSON and receipt publication share one UTF-8 atomic persistence owner.
 Mutable replacement and create-new publication expose complete documents;

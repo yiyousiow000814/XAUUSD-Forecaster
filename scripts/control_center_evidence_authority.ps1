@@ -2250,7 +2250,7 @@ function Get-CandidateStaticAssetBaseUri {
             [UriKind]::Absolute, [ref]$candidateUri)) {
         throw "CANDIDATE_STATIC_HOST_MISMATCH"
     }
-    $productionUri = [Uri]$workerUrl
+    $productionUri = [Uri]$workerVersionOrigin
     $workerPrefix = "$workerName."
     if (-not $productionUri.Host.StartsWith(
             $workerPrefix, [StringComparison]::OrdinalIgnoreCase)) {

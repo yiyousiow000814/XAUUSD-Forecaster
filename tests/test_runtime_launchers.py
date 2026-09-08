@@ -4355,10 +4355,13 @@ def test_compatibility_redirects_validate_their_final_page_marker() -> None:
     )
 
 
-def test_static_asset_validation_uses_raw_utf8_and_exact_contract(tmp_path) -> None:
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("isolated_transport", (False, True))
+def test_static_asset_validation_uses_raw_utf8_and_exact_contract(tmp_path, powershell, isolated_transport) -> None:
     candidate = "b" * 40
     result = _run_control_center_contract(
         tmp_path,
+        ("$workerUrl='https://127.0.0.1:19001';" if isolated_transport else "") +
         f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' "
         "-WorkerVersionId '22222222-2222-2222-2222-222222222222' "
         f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE'; "
@@ -4381,6 +4384,7 @@ def test_static_asset_validation_uses_raw_utf8_and_exact_contract(tmp_path) -> N
         'Write-Output "$($ok.passed),$($ok.marker_present),$($ok.body_sha256.Length),'
         '$($badUtf8.reason),$($missing.reason),$($charset.reason),'
         '$($wrongType.reason),$($ok.requested_host)"',
+        powershell=powershell,
     )
 
     assert result == (
@@ -4390,10 +4394,13 @@ def test_static_asset_validation_uses_raw_utf8_and_exact_contract(tmp_path) -> N
     )
 
 
-def test_static_asset_validation_fails_closed_for_status_body_and_host(tmp_path) -> None:
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("isolated_transport", (False, True))
+def test_static_asset_validation_fails_closed_for_status_body_and_host(tmp_path, powershell, isolated_transport) -> None:
     candidate = "b" * 40
     result = _run_control_center_contract(
         tmp_path,
+        ("$workerUrl='https://127.0.0.1:19001';" if isolated_transport else "") +
         f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' "
         "-WorkerVersionId '33333333-3333-3333-3333-333333333333' "
         f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE'; "
@@ -4415,6 +4422,7 @@ def test_static_asset_validation_fails_closed_for_status_body_and_host(tmp_path)
         "function Invoke-CandidateStaticAssetRequest { throw 'timeout' };"
         "$reasons+=(Invoke-CandidateStaticAssetSample -Candidate $candidate -Route $route).reason; "
         "Write-Output ($reasons -join ',')",
+        powershell=powershell,
     )
 
     assert result == (
