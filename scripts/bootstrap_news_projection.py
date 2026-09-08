@@ -32,7 +32,7 @@ from scripts.run_dashboard_sync import (  # noqa: E402
     _write_news_sync_state,
     RUNTIME_STATE_ROOT_KEY,
 )
-from scripts.run_dashboard_api import (  # noqa: E402
+from xauusd_forecaster.dashboard.news_resources import (  # noqa: E402
     _advance_news_projection_capture,
     _build_news_projection_source_from_database,
     _news_projection_snapshot_stat,
@@ -240,17 +240,17 @@ def advance_frozen_source_capture(
         raise ValueError("NEWS_SOURCE_CAPTURE_PROVENANCE_REQUIRED")
     if watermark.utcoffset() is None:
         raise ValueError("NEWS_SOURCE_CAPTURE_TIME_INVALID")
-    from scripts import run_dashboard_api as source_owner
+    from xauusd_forecaster.dashboard import news_resources as source_owner
     from xauusd_forecaster import news_projection as capture_owner
 
     actual_files = {
         "scripts/bootstrap_news_projection.py": Path(__file__),
-        "scripts/run_dashboard_api.py": Path(source_owner.__file__),
+        "xauusd_forecaster/dashboard/news_resources.py": Path(source_owner.__file__),
         "xauusd_forecaster/news_projection.py": Path(capture_owner.__file__),
     }
     executing_identity = active_producer_identity if active_producer_identity is not None else source_identity
     if (Path(source_owner._news_reader_rows.__code__.co_filename).resolve()
-            != actual_files["scripts/run_dashboard_api.py"].resolve()
+            != actual_files["xauusd_forecaster/dashboard/news_resources.py"].resolve()
             or any(hashlib.sha256(path.read_bytes()).hexdigest()
                    != executing_identity.get("inputs", {}).get(name)
                    for name, path in actual_files.items())):
@@ -380,9 +380,15 @@ def main() -> int:
         parser.error("cycle and retry bounds are invalid")
     config = json.loads(args.config.read_text(encoding="utf-8"))
     state_file = _validated_sync_state_path(args.state_file, PRODUCTION_RUNTIME_STATE_ROOT)
-    artifact_path = state_file.with_name(
-        f"{state_file.stem}-generation.json.gz"
-    )
+    expected_artifact = state_file.with_name(f"{state_file.stem}-generation.json.gz")
+    artifact_name = os.path.realpath(expected_artifact)
+    # Normalize links before checking the complete directory prefix. Keep the
+    # exact declared filename too: an in-root link cannot select another fact.
+    if not artifact_name.startswith(str(PRODUCTION_RUNTIME_STATE_ROOT) + os.sep):
+        raise ValueError("NEWS_GENERATION_ARTIFACT_OUTSIDE_RUNTIME")
+    artifact_path = Path(artifact_name)
+    if artifact_path != expected_artifact:
+        raise ValueError("NEWS_GENERATION_ARTIFACT_OUTSIDE_RUNTIME")
     origin = _version_origin(args.version_host)
     token = os.environ.get(args.token_env, "")
     remote_config = {

@@ -1121,21 +1121,23 @@ def test_current_news_worker_audit_view_keeps_independent_transports_and_dynamic
     assert not any(row['source'].startswith('web/') and row['resolution'] not in {'UNKNOWN', 'LITERAL'} for row in edges)
 
     api = 'scripts/run_dashboard_api.py::'
-    assert {api + name for name in ('Handler.do_GET', '_build_news_projection_source',
+    news = 'xauusd_forecaster/dashboard/news_resources.py::'
+    assert {api + name for name in ('Handler.do_GET', '_optional_resource_payload', 'main')} <= roots
+    assert {news + name for name in ('_build_news_projection_source',
         '_news_projection_source_for_request', '_finish_news_projection_source_build',
-        '_build_news_evidence_resource', '_optional_resource_payload', 'main')} <= roots
+        '_build_news_evidence_resource')} <= roots
     assert {'_news_projection_source_for_request', '_news_projection_batch',
             '_build_news_evidence_resource', '_news_evidence_page',
             'read_dashboard_read_model'} <= calls(api + 'Handler.do_GET')
     assert '_news_archive_page' not in calls(api + 'Handler.do_GET')
-    assert {'_news_reader_rows', 'build_news_projection_generation'} <= calls(api + '_build_news_projection_source')
-    assert '_build_news_projection_source_from_database' in calls(api + '_finish_news_projection_source_build')
-    assert '_build_news_projection_source' in calls(api + '_build_news_projection_source_from_database')
-    assert 'threading.Thread' in calls(api + '_news_projection_source_for_request')
-    assert '_finish_news_projection_source_build' not in calls(api + '_news_projection_source_for_request'), 'callback argument is not a direct call'
+    assert {'_news_reader_rows', 'build_news_projection_generation'} <= calls(news + '_build_news_projection_source')
+    assert '_build_news_projection_source_from_database' in calls(news + '_finish_news_projection_source_build')
+    assert '_build_news_projection_source' in calls(news + '_build_news_projection_source_from_database')
+    assert 'threading.Thread' in calls(news + '_news_projection_source_for_request')
+    assert '_finish_news_projection_source_build' not in calls(news + '_news_projection_source_for_request'), 'callback argument is not a direct call'
     assert {'event_evidence_rows_from_connection', '_materialize_news_evidence_generation',
-            '_publish_news_evidence_snapshot'} <= calls(api + '_build_news_evidence_resource')
-    assert {'temporary.write_text', 'temporary.replace'} <= calls(api + '_materialize_news_evidence_generation')
+            '_publish_news_evidence_snapshot'} <= calls(news + '_build_news_evidence_resource')
+    assert {'temporary.write_text', 'temporary.replace'} <= calls(news + '_materialize_news_evidence_generation')
     assert {'_dashboard_payload', 'audit_snapshot', 'audit_briefs_snapshot',
             'audit_stories_snapshot', 'audit_decisions_snapshot'} <= calls(api + '_optional_resource_payload')
     assert {'DashboardReadModelOwner', 'read_model_owner.start', 'ThreadingHTTPServer'} <= calls(api + 'main')
@@ -1143,7 +1145,8 @@ def test_current_news_worker_audit_view_keeps_independent_transports_and_dynamic
     selected = set(index['allowed']['source_symbols']['scripts/run_dashboard_api.py'])
     assert selected <= scoped_ids
     assert all(any(symbol == owner or symbol.startswith(owner + '.') for owner in selected) for symbol in scoped_ids)
-    for target in ('_news_reader_rows', '_dashboard_payload', 'build_news_projection_generation'):
-        frontier = [row for row in edges if row['source'].startswith(api) and row['target'] == target]
+    for prefix, target in ((news, '_news_reader_rows'), (api, '_dashboard_payload'),
+                           (news, 'build_news_projection_generation')):
+        frontier = [row for row in edges if row['source'].startswith(prefix) and row['target'] == target]
         assert frontier and all(row['resolution'] == 'UNKNOWN' and 'candidate_symbol' not in row for row in frontier)
     assert api + '_news_projection_source' not in scoped_ids

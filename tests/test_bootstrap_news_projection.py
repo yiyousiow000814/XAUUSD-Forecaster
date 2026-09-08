@@ -19,25 +19,34 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(MODULE)
 
 
-@pytest.mark.parametrize("authorized", [True, False])
-def test_cli_state_path_uses_runtime_authority(tmp_path, monkeypatch, authorized):
+@pytest.mark.parametrize("context", ["inside", "outside", "linked-outside", "linked-inside"])
+def test_cli_state_path_uses_runtime_authority(tmp_path, monkeypatch, context):
     authority = tmp_path / "runtime"
     authority.mkdir()
     config = tmp_path / "config.json"
     config.write_text("{}", encoding="utf-8")
-    state = (authority if authorized else tmp_path) / "bootstrap.json"
+    state = (tmp_path if context == "outside" else authority) / "bootstrap.json"
+    target = None
+    if context.startswith("linked-"):
+        target = (authority if context == "linked-inside" else tmp_path) / "raw.sqlite3"
+        target.write_bytes(b"original-fact-sentinel")
+        try:
+            (authority / "bootstrap-generation.json.gz").symlink_to(target)
+        except OSError:
+            pytest.skip("creating filesystem links requires platform permission")
     monkeypatch.setattr(MODULE, "PRODUCTION_RUNTIME_STATE_ROOT", authority)
     monkeypatch.setattr(MODULE.sys, "argv", [
         "bootstrap_news_projection.py", "--config", str(config),
         "--state-file", str(state), "--version-host", "not-a-version",
     ])
-    # Origin rejection happens only after the real runtime-path validation;
-    # neither branch can make a network call or write state.
-    with pytest.raises(ValueError, match=(
-        "version host" if authorized else "sync state path"
-    )):
+    # Rejection precedes network access, artifact reads, and any write.
+    expected = ("NEWS_GENERATION_ARTIFACT_OUTSIDE_RUNTIME" if target else
+                "sync state path" if context == "outside" else "version host")
+    with pytest.raises(ValueError, match=expected):
         MODULE.main()
     assert not state.exists()
+    if target:
+        assert target.read_bytes() == b"original-fact-sentinel"
 
 
 @pytest.mark.parametrize("value", [
@@ -222,7 +231,7 @@ def test_bootstrap_capture_retains_input_and_never_calls_remote_or_initializer(
     tmp_path, monkeypatch, source_state,
 ):
     from xauusd_forecaster.forward_ledger import ForwardLedger
-    from scripts import run_dashboard_api as api_owner
+    from xauusd_forecaster.dashboard import news_resources as api_owner
     from xauusd_forecaster import news_projection as capture_owner
 
     now = datetime(2026, 9, 7, tzinfo=UTC)
@@ -256,7 +265,7 @@ def test_bootstrap_capture_retains_input_and_never_calls_remote_or_initializer(
         "source_identity": {"fixture": "current imported test source", "inputs": {
             name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in {
                 "scripts/bootstrap_news_projection.py": Path(MODULE.__file__),
-                "scripts/run_dashboard_api.py": Path(api_owner.__file__),
+                "xauusd_forecaster/dashboard/news_resources.py": Path(api_owner.__file__),
                 "xauusd_forecaster/news_projection.py": Path(capture_owner.__file__),
             }.items()
         }},
@@ -265,7 +274,7 @@ def test_bootstrap_capture_retains_input_and_never_calls_remote_or_initializer(
     }
     try:
         if source_state == "omitted-transition":
-            arguments["source_identity"]["inputs"]["scripts/run_dashboard_api.py"] = "0" * 64
+            arguments["source_identity"]["inputs"]["xauusd_forecaster/dashboard/news_resources.py"] = "0" * 64
             existing = capture_owner.NewsProjectionSourceCapture(
                 state_root / "bootstrap-generation.capture",
                 binding={"snapshot_stat": before, "input_identity": arguments["input_identity"],
@@ -290,12 +299,12 @@ def test_bootstrap_capture_retains_input_and_never_calls_remote_or_initializer(
             arguments["active_producer_identity"] = {"inputs": {
                 name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in {
                     "scripts/bootstrap_news_projection.py": Path(MODULE.__file__),
-                    "scripts/run_dashboard_api.py": Path(api_owner.__file__),
+                    "xauusd_forecaster/dashboard/news_resources.py": Path(api_owner.__file__),
                     "xauusd_forecaster/news_projection.py": Path(capture_owner.__file__),
                 }.items()
             }}
             if source_state == "executing-mismatch":
-                arguments["active_producer_identity"]["inputs"]["scripts/run_dashboard_api.py"] = "0" * 64
+                arguments["active_producer_identity"]["inputs"]["xauusd_forecaster/dashboard/news_resources.py"] = "0" * 64
             monkeypatch.setattr(MODULE, "_advance_news_projection_capture",
                                 lambda *_args: pytest.fail("unadmitted executing producer queried"))
             with pytest.raises(ValueError, match=("EXECUTING_PRODUCER_MISMATCH" if source_state == "executing-mismatch"
