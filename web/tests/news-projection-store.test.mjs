@@ -61,6 +61,7 @@ const database = () => new D1TestDatabase([
   "0028_fence_legacy_news_current_identity.sql",
   "0029_news_projection_receipt_index.sql",
   "0032_news_keyset_pagination.sql",
+  "0033_news_superseded_cleanup_index.sql",
 ]);
 
 test("shares canonical receipt vectors with the Python producer", async () => {
@@ -435,6 +436,14 @@ test("activation rejects missing details and receipt contradictions", async () =
 
 test("retains only current plus one staging while preparing a third generation", async () => {
   const db = database();
+  const prepare = db.prepare.bind(db);
+  const cleanupPlans = [];
+  db.prepare = sql => {
+    if (sql.includes("DELETE FROM news_index")) {
+      cleanupPlans.push(db.database.prepare(`EXPLAIN QUERY PLAN ${sql}`).all());
+    }
+    return prepare(sql);
+  };
   for (const [generationDigit, itemDigit] of [["a", "1"], ["b", "2"]]) {
     const details = [detail(itemDigit)];
     const indexes = [index(itemDigit)];
@@ -444,6 +453,11 @@ test("retains only current plus one staging while preparing a third generation",
     await activateNewsProjection(db, id(generationDigit));
   }
   await prepareNewsProjection(db, await manifest("c", [detail("3")], [index("3")]));
+  assert.ok(cleanupPlans.length > 0);
+  for (const plan of cleanupPlans) {
+    assert.ok(plan.some(row => row.detail.includes("news_index_superseded_cleanup_idx")),
+      "superseded cleanup must visit only indexed candidates, not all retained news");
+  }
   const generations = db.database.prepare(
     "SELECT generation_id,state FROM news_projection_generations ORDER BY generation_id",
   ).all();
