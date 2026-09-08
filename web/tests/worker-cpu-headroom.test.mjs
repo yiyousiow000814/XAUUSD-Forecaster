@@ -1278,3 +1278,75 @@ test("keeps Preview reads immutable and rejects sync writes before D1", async ()
   assert.equal(write.status, 403);
   assert.match(await write.text(), /只读.*不接受写入/);
 });
+
+
+test("built news route carries cursor bindings through forward, reverse and filter changes", async () => {
+  const store = await import("../app/api/_shared/news-projection-store.ts");
+  const local = new D1TestDatabase(migrations);
+  const previousEnvironment = globalThis.__AURUM_TEST_WORKER_ENV;
+  const localEnv = {...runtimeEnv, DB:local};
+  globalThis.__AURUM_TEST_WORKER_ENV = localEnv;
+  try {
+    const generation = "a".repeat(64);
+    const details = ["1", "2", "3", "4"].map(digit => ({
+      detail_key:digit.repeat(64), detail_hash:"b".repeat(64), payload:{headline:`News ${digit}`},
+    }));
+    const indexes = details.map(row => ({
+      detail_key:row.detail_key, category:"增长/经济", cluster_id:row.detail_key,
+      source_published_time:"2026-08-21T10:00:00Z", collector_first_seen_time:"2026-08-21T10:01:00Z",
+      annotation_status:"NOT_REQUIRED", model_visibility:"MODEL_INELIGIBLE", parsed_at:null,
+      mirror_contract:store.NEWS_PROJECTION_CONTRACT_VERSION,
+    }));
+    let digest = store.EMPTY_RECEIPT_DIGEST;
+    for (const [kind, items] of [["detail",details],["index",indexes]]) {
+      digest = await store.advanceNewsReceiptDigest(digest,kind,0,items.length,
+        await store.newsProjectionPayloadHash(items));
+    }
+    await store.prepareNewsProjection(local, {
+      generation_id:generation, snapshot_id:generation, contract_version:store.NEWS_PROJECTION_CONTRACT_VERSION,
+      window_start:"2026-06-25T00:00:00Z", watermark:"2026-08-24T00:00:00Z",
+      expected_index_count:4, expected_detail_count:4, withdrawal_count:0,
+      source_digest:"c".repeat(64), expected_receipt_digest:digest,
+    });
+    await store.stageNewsProjectionBatch(local,"detail",generation,0,details);
+    await store.stageNewsProjectionBatch(local,"index",generation,0,indexes);
+    await store.activateNewsProjection(local,generation);
+    // A batch keeps its envelope even on a one-row final page or after
+    // deduplication. The lazy single-detail consumer retains its own shape.
+    for (const keys of [[details[0].detail_key], details.slice(0,2).map(row => row.detail_key),
+      [details[0].detail_key,details[0].detail_key], ["f".repeat(64)]]) {
+      const response = await invoke(`/api/news-content?keys=${keys.join(",")}`,{},localEnv);
+      assert.equal(response.status,200);
+      const body = await response.json();
+      const found = [...new Set(keys)].filter(key => key !== "f".repeat(64));
+      assert.deepEqual(Object.keys(body.items).sort(),found.sort());
+      assert.deepEqual(body.missing,keys.filter(key => key === "f".repeat(64)));
+      for (const key of found) assert.equal(typeof body.items[key].payload.headline,"string");
+    }
+    const single = await invoke(`/api/news-content?key=${details[0].detail_key}`,{},localEnv);
+    assert.equal(single.status,200);
+    assert.equal(typeof (await single.json()).payload.headline,"string");
+    assert.equal((await invoke(`/api/news-content?key=${"f".repeat(64)}`,{},localEnv)).status,404);
+    const get = async fields => {
+      const query = new URLSearchParams({limit:"2",review_state:"COMPLETED",...fields});
+      const response = await invoke(`/api/news-index?${query}`,{},localEnv);
+      return {status:response.status, body:await response.json()};
+    };
+    const first = await get({page:"1"});
+    assert.equal(first.status,200);
+    assert.ok(first.body.next_cursor);
+    const second = await get({page:"2",cursor:first.body.next_cursor});
+    assert.equal(second.status,200);
+    assert.deepEqual(second.body.items.map(row => row.detail_key), ["2".repeat(64),"1".repeat(64)]);
+    assert.equal(second.body.next_cursor,null);
+    const previous = await get({page:"1",cursor:second.body.previous_cursor});
+    assert.deepEqual(previous.body.items,first.body.items);
+    assert.equal((await get({page:"2"})).body.error_code,"NEWS_PAGE_CURSOR_REQUIRED");
+    assert.equal((await get({page:"2",cursor:first.body.next_cursor,category:"利率/Fed"})).status,400);
+    local.database.prepare("UPDATE news_projection_state SET active_generation_id=?").run("b".repeat(64));
+    assert.equal((await get({page:"2",cursor:first.body.next_cursor})).status,409);
+  } finally {
+    globalThis.__AURUM_TEST_WORKER_ENV = previousEnvironment;
+    local.database.close();
+  }
+});

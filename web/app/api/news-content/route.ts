@@ -60,7 +60,7 @@ export async function GET(request: Request) {
     const items = Object.fromEntries(Object.entries(result.items).map(([key, value]) => [
       key, publicNewsRecord(value),
     ]));
-    if (detailKeys.length === 1) {
+    if (!query.has("keys") && detailKeys.length === 1) {
       const item = items[detailKeys[0]];
       if (!item) {
         return NextResponse.json({

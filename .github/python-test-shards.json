@@ -4,7 +4,6 @@
     {
       "id": "python-1",
       "tests": [
-        "tests/test_forward_only.py",
         "tests/test_dashboard_health_projection.py",
         "tests/test_artifact_path_migration.py",
         "tests/test_bootstrap_news_projection.py",
@@ -20,6 +19,12 @@
         "tests/test_news_retrieval_benchmark.py",
         "tests/test_assistant_titles.py",
         "tests/test_news_revision_quality.py"
+      ]
+    },
+    {
+      "id": "python-forward",
+      "tests": [
+        "tests/test_forward_only.py"
       ]
     },
     {

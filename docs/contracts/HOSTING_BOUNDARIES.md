@@ -237,12 +237,26 @@
   change inside an immutable generation are materialized atomically at every
   activation and read from the generation summary; they must not be recomputed
   by scanning CURRENT on each visitor request. Page rows use review/category
-  ordering indexes. Canonical fixed-width candidate-expiry timestamps are
+  ordering indexes and bidirectional keyset predicates over published time,
+  first-seen time and unique detail key. A page reads at most `limit + 1`
+  candidates; numeric labels must not become OFFSET scans. Boundary tokens
+  bind generation, filters, page size and direction. Generation replacement
+  requires an explicit first-page reset, and the page query verifies the
+  generation again inside its read snapshot. Obsolete UI requests cannot
+  overwrite a newer navigation. Existing materialized counts retain exact
+  page totals. The two current-index additions incur one initial index build
+  per retained active row and ongoing index writes for membership or indexed
+  field changes; include both index storage and maintenance in capacity
+  accounting. Canonical fixed-width candidate-expiry timestamps are
   stored once in sorted order with the generation summary; the Worker derives
   the time-dependent active count by binary search without another D1 row scan.
   Page rows, counts, review buckets, category buckets, and staging identity cross
   the D1 boundary together; the Worker decodes the page array once and preserves
   the established public-copy, expiry, ordering, and pagination semantics.
+  News-content request mode determines response shape: `keys` always returns
+  the batch envelope, including a single remaining/deduplicated record or an
+  entirely missing batch; `key` returns the single-detail object. Batch size
+  must not silently change the serializer contract seen by the consumer.
 - During a split-snapshot handover, the read boundary selects the freshest
   valid compatible snapshot by durable `received_at`, with the split snapshot
   winning only an exact timestamp tie. Legacy audit detail is projected and
