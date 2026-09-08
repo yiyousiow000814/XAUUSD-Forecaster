@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from .artifact_paths import canonicalize_artifact_path, require_runtime_artifact_path
-from .forward_ledger import canonical_hash
-from .ridge import RidgeArtifact
+from xauusd_forecaster.evidence.ledger import canonical_hash
+from xauusd_forecaster.training.ridge import RidgeArtifact
 
 
 UTC = timezone.utc

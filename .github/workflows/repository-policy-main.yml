@@ -25,4 +25,4 @@ jobs:
           path: policy
           persist-credentials: false
       - name: Check main policy
-        run: python3 policy/scripts/check_repository_policy.py --root policy
+        run: python3 policy/scripts/validation/check_repository_policy.py --root policy

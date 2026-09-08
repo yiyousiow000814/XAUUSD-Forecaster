@@ -100,7 +100,7 @@ class U5State:
     def reconcile_checkpoint(ledger, path: str | Path) -> None:
         """Publish a prepared U5 file only when the exact clock really committed."""
         from .clock_commit import COMPLETION_SOURCE, read_completed_clock
-        from .forward_ledger import canonical_hash
+        from xauusd_forecaster.evidence.ledger import canonical_hash
 
         target = Path(path)
         pending = target.with_name(target.name + ".pending")

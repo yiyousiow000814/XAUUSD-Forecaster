@@ -4,130 +4,141 @@
     {
       "id": "python-1",
       "tests": [
-        "tests/test_dashboard_health_projection.py",
-        "tests/test_artifact_path_migration.py",
-        "tests/test_bootstrap_news_projection.py",
-        "tests/test_news_input_coverage.py",
-        "tests/test_dashboard_sync_transport.py",
-        "tests/test_news_hybrid_retrieval.py",
-        "tests/test_formal_release_control.py",
-        "tests/test_operational_taxonomy.py",
-        "tests/test_ai_work_provenance.py",
-        "tests/test_dashboard_status_cache.py",
-        "tests/test_assistant_memory_index.py",
-        "tests/test_news_projection.py",
-        "tests/test_news_retrieval_benchmark.py",
-        "tests/test_assistant_titles.py",
-        "tests/test_news_revision_quality.py"
+        "tests/dashboard/test_dashboard_health_projection.py",
+        "tests/runtime/test_artifact_path_migration.py",
+        "tests/news/test_bootstrap_news_projection.py",
+        "tests/news/test_news_input_coverage.py",
+        "tests/dashboard/test_dashboard_sync_transport.py",
+        "tests/news/test_news_hybrid_retrieval.py",
+        "tests/architecture/test_formal_release_control.py",
+        "tests/runtime/test_operational_taxonomy.py",
+        "tests/ai/test_ai_work_provenance.py",
+        "tests/dashboard/test_dashboard_status_cache.py",
+        "tests/assistant/test_assistant_memory_index.py",
+        "tests/news/test_news_projection.py",
+        "tests/news/test_news_retrieval_benchmark.py",
+        "tests/assistant/test_assistant_titles.py",
+        "tests/news/test_news_revision_quality.py"
       ]
     },
     {
       "id": "python-forward",
       "tests": [
-        "tests/test_forward_only.py"
+        "tests/decision/test_forward_only.py"
       ]
     },
     {
       "id": "python-2",
       "tests": [
-        "tests/test_evidence_integrity_v2.py",
-        "tests/test_clock_recovery.py",
-        "tests/test_news_event_identity.py",
-        "tests/test_model_gateway.py",
-        "tests/test_news_pipeline_health.py",
-        "tests/test_assistant_chat_worker.py",
-        "tests/test_news_semantic_contract_v15.py",
-        "tests/test_scheduler_model_gateway.py",
-        "tests/test_assistant_events.py"
+        "tests/evidence/test_evidence_integrity_v2.py",
+        "tests/evidence/test_clock_recovery.py",
+        "tests/news/test_news_event_identity.py",
+        "tests/ai/test_model_gateway.py",
+        "tests/news/test_news_pipeline_health.py",
+        "tests/assistant/test_assistant_chat_worker.py",
+        "tests/news/test_news_semantic_contract_v15.py",
+        "tests/news/test_scheduler_model_gateway.py",
+        "tests/assistant/test_assistant_events.py"
       ]
     },
     {
       "id": "python-daily-brief",
       "tests": [
-        "tests/test_daily_brief.py",
-        "tests/test_brief_date_discovery.py",
-        "tests/test_brief_synthesis_source_first.py"
+        "tests/news/test_daily_brief.py",
+        "tests/news/test_brief_date_discovery.py",
+        "tests/news/test_brief_synthesis_source_first.py"
       ]
     },
     {
       "id": "python-5",
       "tests": [
-        "tests/test_ci_contracts.py",
-        "tests/test_news_recovery_rehearsal.py",
-        "tests/test_model_repair_replay.py",
-        "tests/test_offline_model_repair.py",
-        "tests/test_offline_market_methods.py",
-        "tests/test_clock_atomicity.py",
-        "tests/test_assistant_content.py",
-        "tests/test_assistant_tools.py",
-        "tests/test_execution_quote_windows.py",
-        "tests/test_check_production_shape_cli.py",
-        "tests/test_quotes_and_labeling.py",
-        "tests/test_news_coverage_live_path.py",
-        "tests/test_news_pruning.py",
-        "tests/test_admin_access_boundary_check.py",
-        "tests/test_news_collection_owner.py"
+        "tests/architecture/test_ci_contracts.py",
+        "tests/news/test_news_recovery_rehearsal.py",
+        "tests/training/test_model_repair_replay.py",
+        "tests/training/test_offline_model_repair.py",
+        "tests/training/test_offline_market_methods.py",
+        "tests/evidence/test_clock_atomicity.py",
+        "tests/assistant/test_assistant_content.py",
+        "tests/assistant/test_assistant_tools.py",
+        "tests/evidence/test_execution_quote_windows.py",
+        "tests/runtime/test_check_production_shape_cli.py",
+        "tests/evidence/test_quotes_and_labeling.py",
+        "tests/news/test_news_coverage_live_path.py",
+        "tests/news/test_news_pruning.py",
+        "tests/dashboard/test_admin_access_boundary_check.py",
+        "tests/news/test_news_collection_owner.py"
       ]
     },
     {
       "id": "python-3",
       "tests": [
-        "tests/test_dashboard_api.py",
-        "tests/test_dashboard_news_resources.py",
-        "tests/test_runtime_root_ownership.py",
-        "tests/test_production_shape.py",
-        "tests/test_assistant_routing.py",
-        "tests/test_operational_health.py",
-        "tests/test_assistant_agent.py",
-        "tests/test_market_session.py",
-        "tests/test_repository_policy.py",
-        "tests/test_live_broadcast.py",
-        "tests/test_gemini_embeddings.py",
-        "tests/test_dashboard_sync_progress.py",
-        "tests/test_news_qa.py",
-        "tests/test_wal_checkpoint_ownership.py",
-        "tests/test_dashboard_market_resources.py",
-        "tests/test_assistant_compaction.py",
-        "tests/test_decision.py",
-        "tests/test_named_reference_benchmark.py",
-        "tests/test_public_health_check.py",
-        "tests/test_execution_costs.py",
-        "tests/test_main_runtime.py"
+        "tests/dashboard/test_dashboard_api.py",
+        "tests/dashboard/test_dashboard_news_resources.py",
+        "tests/runtime/test_runtime_root_ownership.py",
+        "tests/runtime/test_production_shape.py",
+        "tests/assistant/test_assistant_routing.py",
+        "tests/runtime/test_operational_health.py",
+        "tests/assistant/test_assistant_agent.py",
+        "tests/decision/test_market_session.py",
+        "tests/architecture/test_repository_policy.py",
+        "tests/decision/test_live_broadcast.py",
+        "tests/ai/test_gemini_embeddings.py",
+        "tests/dashboard/test_dashboard_sync_progress.py",
+        "tests/news/test_news_qa.py",
+        "tests/runtime/test_wal_checkpoint_ownership.py",
+        "tests/dashboard/test_dashboard_market_resources.py",
+        "tests/assistant/test_assistant_compaction.py",
+        "tests/decision/test_decision.py",
+        "tests/news/test_named_reference_benchmark.py",
+        "tests/dashboard/test_public_health_check.py",
+        "tests/evidence/test_execution_costs.py",
+        "tests/runtime/test_main_runtime.py",
+        "tests/architecture/test_package_ownership.py"
       ]
     },
     {
       "id": "python-4",
       "tests": [
-        "tests/test_news_scheduler.py",
-        "tests/test_dashboard_sync.py",
-        "tests/test_dashboard_resource_contracts.py",
-        "tests/test_storylines.py",
-        "tests/test_source_polling.py",
-        "tests/test_assistant_capacity.py",
-        "tests/test_backup_containment.py",
-        "tests/test_registered_macro_collector_contracts.py",
-        "tests/test_assistant_evidence.py",
-        "tests/test_deferred_projection_parity.py",
-        "tests/test_scheduler_transition_execution.py",
-        "tests/test_dashboard_payloads.py",
-        "tests/test_training_owner.py",
-        "tests/test_gemini_quota.py",
-        "tests/test_release_validation_fixtures.py",
-        "tests/test_cross_version_runtime_recovery.py",
-        "tests/test_runtime_health.py",
-        "tests/test_public_repository_contract.py",
-        "tests/test_dashboard_runtime_status.py",
-        "tests/test_ledger.py",
-        "tests/test_architecture_docs.py",
-        "tests/test_architecture_imports.py",
-        "tests/test_architecture_compiler.py",
-        "tests/test_architecture_mutation_contracts.py"
+        "tests/dashboard/test_dashboard_sync.py",
+        "tests/dashboard/test_dashboard_resource_contracts.py",
+        "tests/assistant/test_assistant_capacity.py",
+        "tests/runtime/test_backup_containment.py",
+        "tests/assistant/test_assistant_evidence.py",
+        "tests/dashboard/test_deferred_projection_parity.py",
+        "tests/dashboard/test_dashboard_payloads.py",
+        "tests/training/test_training_owner.py",
+        "tests/ai/test_gemini_quota.py",
+        "tests/dashboard/test_release_validation_fixtures.py",
+        "tests/runtime/test_cross_version_runtime_recovery.py",
+        "tests/runtime/test_runtime_health.py",
+        "tests/dashboard/test_dashboard_runtime_status.py",
+        "tests/evidence/test_ledger.py"
       ]
     },
     {
       "id": "python-annotation-state",
       "tests": [
-        "tests/test_critical_annotation_state.py"
+        "tests/news/test_critical_annotation_state.py"
+      ]
+    },
+    {
+      "id": "python-news-contracts",
+      "tests": [
+        "tests/news/test_news_scheduler.py",
+        "tests/news/test_storylines.py",
+        "tests/news/test_source_polling.py",
+        "tests/news/test_registered_macro_collector_contracts.py",
+        "tests/news/test_scheduler_transition_execution.py"
+      ]
+    },
+    {
+      "id": "python-architecture",
+      "tests": [
+        "tests/architecture/test_public_repository_contract.py",
+        "tests/architecture/test_architecture_docs.py",
+        "tests/architecture/test_architecture_imports.py",
+        "tests/architecture/test_architecture_compiler.py",
+        "tests/architecture/test_architecture_mutation_contracts.py"
       ]
     }
   ]

@@ -2,20 +2,20 @@ schema = "architecture-mutations-v1"
 
 [[mutation]]
 id = "MUT-SYNC-HEARTBEAT-FIRST"
-path = "scripts/run_dashboard_sync.py"
+path = "scripts/runtime/run_dashboard_sync.py"
 symbol = "sync_once"
 before = "healthy, heartbeat = sync_heartbeat_once(config)\n    optional = sync_resource_lane(healthy)"
 after = "healthy = configured_targets(config)\n    optional = sync_resource_lane(healthy)\n    healthy, heartbeat = sync_heartbeat_once(config)"
-test = "tests/test_architecture_mutation_contracts.py::test_sync_publishes_heartbeat_before_optional_work"
+test = "tests/architecture/test_architecture_mutation_contracts.py::test_sync_publishes_heartbeat_before_optional_work"
 expected_cases = 1
 failure_marker = "HEARTBEAT_ORDER_VIOLATED"
 
 [[mutation]]
 id = "MUT-EVIDENCE-APPEND-ONLY"
-path = "xauusd_forecaster/forward_ledger.py"
+path = "xauusd_forecaster/evidence/ledger.py"
 symbol = "_install_append_only_triggers"
 before = 'f"BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT, "'
 after = 'f"BEFORE UPDATE OF __mutation_never__ ON {table} BEGIN SELECT RAISE(ABORT, "'
-test = "tests/test_architecture_mutation_contracts.py::test_forward_ledger_rejects_real_update_and_delete"
+test = "tests/architecture/test_architecture_mutation_contracts.py::test_forward_ledger_rejects_real_update_and_delete"
 expected_cases = 1
 failure_marker = "FORWARD_APPEND_ONLY_VIOLATED"

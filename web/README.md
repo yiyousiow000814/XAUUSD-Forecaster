@@ -135,8 +135,8 @@ Keep `/api/assistant-worker/*` and `/api/operator-retry-worker` outside that
 application; they are non-browser control planes and accept only `INGEST_TOKEN`
 plus the applicable job lease.
 
-`scripts/check_public_health.py` intentionally checks only anonymous public
-surfaces. Use `scripts/check_admin_access_boundary.py` for the anonymous Access
+`scripts/validation/check_public_health.py` intentionally checks only anonymous public
+surfaces. Use `scripts/validation/check_admin_access_boundary.py` for the anonymous Access
 redirect and machine-route boundary, then verify private Assistant health in an
 authenticated Admin browser session.
 

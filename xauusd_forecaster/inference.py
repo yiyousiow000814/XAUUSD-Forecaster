@@ -9,9 +9,9 @@ from pathlib import Path
 import numpy as np
 
 from .factors import NEWS_FEATURES, aggregate_news_features
-from .forward_ledger import ForwardLedger
-from .ridge import RidgeArtifact
-from .training import MARKET_FEATURES
+from xauusd_forecaster.evidence.ledger import ForwardLedger
+from xauusd_forecaster.training.ridge import RidgeArtifact
+from xauusd_forecaster.training.materialization import MARKET_FEATURES
 
 
 MAX_ACTIVE_COHORTS = 4

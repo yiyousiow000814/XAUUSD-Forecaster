@@ -29,13 +29,13 @@ def main() -> None:
     if provider.scheme != "https" or provider.hostname != "127.0.0.1" or not provider.port:
         raise RuntimeError("STAGED_NON_LOOPBACK_PROVIDER_DENIED")
     sys.path.insert(0, str(args.source_root.resolve(strict=True)))
-    spec = importlib.util.spec_from_file_location("staged_sync", args.source_root / "scripts/run_dashboard_sync.py")
+    spec = importlib.util.spec_from_file_location("staged_sync", args.source_root / "scripts/runtime/run_dashboard_sync.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     from xauusd_forecaster.runtime_paths import isolated_runtime_configuration
     isolated = isolated_runtime_configuration()
     if isolated:
-        from xauusd_forecaster.news_scheduler import _runtime_environment_value
+        from xauusd_forecaster.news.scheduler.state import _runtime_environment_value
         if Path(isolated["owned_root"]) != root or _runtime_environment_value("GEMINI_API_KEY") != "synthetic-configuration-sentinel":
             raise RuntimeError("STAGED_CONFIGURATION_SOURCE_MISMATCH")
         state = Path(isolated["runtime_root"]) / ".local/forward"

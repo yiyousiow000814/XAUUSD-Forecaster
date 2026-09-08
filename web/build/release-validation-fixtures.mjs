@@ -67,7 +67,7 @@ export function prepareReleaseValidationFixtures({
   const generatedRoot = mkdtempSync(join(tmpdir(), "aurum-worker-release-fixtures-"));
   const executable = platform === "win32" ? "python.exe" : "python3";
   const args = [
-    join(repositoryRoot, "scripts", "build_release_validation_fixtures.py"),
+    join(repositoryRoot, "scripts", "validation", "build_release_validation_fixtures.py"),
     "--output", generatedRoot,
   ];
   const result = spawn(executable, args, {

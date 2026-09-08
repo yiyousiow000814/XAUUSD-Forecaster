@@ -49,7 +49,7 @@ export default defineConfig(async () => {
     const python = process.platform === "win32" ? "python" : "python3";
     const output = execFileSync(
       python,
-      [resolve("../scripts/build_preview_bundle.py"), "--branch", branch, "--commit", commit],
+      [resolve("../scripts/validation/build_preview_bundle.py"), "--branch", branch, "--commit", commit],
       { cwd: resolve("."), encoding: "utf8", maxBuffer: 5 * 1024 * 1024 },
     );
     previewBundle = JSON.parse(output);

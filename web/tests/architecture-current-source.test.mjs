@@ -112,7 +112,7 @@ test('descriptor byte, work and part budgets fail before missing parts are read'
     manifest => { manifest.parts.forEach(part => { part.bytes = 2 * 1024 * 1024; }); },
     manifest => { manifest.counts.symbols = 10241; },
     manifest => { manifest.counts = { symbols: 6000, edges: 6000, tests: 0 }; },
-    manifest => { manifest.parts = Array(33).fill(manifest.parts[0]); },
+    manifest => { manifest.parts = Array(41).fill(manifest.parts[0]); },
     manifest => { manifest.parts[0].bytes = Number.MAX_SAFE_INTEGER; },
   ];
   for (const mutate of cases) {
@@ -244,7 +244,7 @@ test('actual generated source feeds the existing Explorer without runtime or per
   assert.equal(new Set(phone.nodes.map(node => node.position.y)).size, Object.keys(index.allowed.views).length);
   assert.equal(phone.edges.length, 0, 'display ordering must not invent execution edges');
 
-  const api = 'scripts/run_dashboard_api.py';
+  const api = 'scripts/runtime/run_dashboard_api.py';
   const selected = index.allowed.source_symbols[api];
   const news = manifest.views.find(view => view.id === 'news-worker-audit');
   assert.ok(selected.length > 0);

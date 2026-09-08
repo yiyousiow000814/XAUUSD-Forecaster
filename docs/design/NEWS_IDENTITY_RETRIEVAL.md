@@ -45,7 +45,7 @@ The initial historical universe must be backfilled before hybrid impact work is
 enabled:
 
 ```powershell
-python scripts/backfill_news_identity_embeddings.py `
+python scripts/maintenance/backfill_news_identity_embeddings.py `
   --database C:\path\to\forward-evidence.sqlite3
 ```
 

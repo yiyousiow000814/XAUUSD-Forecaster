@@ -40,6 +40,16 @@ NEWS_SOURCE_CAPTURE_DISK_BYTES = (
 )
 
 
+def _source_api_digest(identity: dict) -> str | None:
+    """Read retained source locators without rewriting their signed identity."""
+    inputs = identity.get("inputs", {})
+    keys = ("scripts/runtime/run_dashboard_api.py", "scripts/run_dashboard_api.py")
+    present = [inputs[key] for key in keys if key in inputs]
+    if len(present) > 1:
+        raise ValueError("NEWS_SOURCE_CAPTURE_API_IDENTITY_AMBIGUOUS")
+    return present[0] if present else None
+
+
 def news_projection_capture_rss() -> int:
     """Observed process memory; not a claim of OS-enforced memory isolation."""
     if os.name != "nt":
@@ -563,7 +573,7 @@ class NewsProjectionSourceCapture:
                 or not isinstance(segment.get("equivalence"), dict)):
             raise ValueError("NEWS_SOURCE_CAPTURE_READER_PREFIX_INVALID")
         equivalence = segment["equivalence"]
-        target = segment["producer_identity"].get("inputs", {}).get("scripts/run_dashboard_api.py")
+        target = _source_api_digest(segment["producer_identity"])
         review = equivalence.get("review_identity")
         if (not isinstance(review, dict) or review.get("target_api_sha256") != target
                 or equivalence.get("accepted_part_sha256") not in {part["sha256"] for part in prefix}
@@ -606,7 +616,7 @@ class NewsProjectionSourceCapture:
         inputs = json.loads(proof_input.decode("utf-8"))
         binding = self.identity["binding"]
         original_source = binding.get("source_identity")
-        target_api = self.active_producer_identity.get("inputs", {}).get("scripts/run_dashboard_api.py")
+        target_api = _source_api_digest(self.active_producer_identity)
         if (not isinstance(original_source, dict)
                 or inputs.get("source_identity") != original_source
                 or inputs.get("input_identity") != binding.get("input_identity")
@@ -619,7 +629,7 @@ class NewsProjectionSourceCapture:
                 or proof.get("equivalent") is not True or proof.get("input_stat_unchanged") is not True
                 or proof.get("mismatched_ordinals") != []
                 or proof.get("target_file_sha256") != target_api
-                or target_api == original_source.get("inputs", {}).get("scripts/run_dashboard_api.py")
+                or target_api == _source_api_digest(original_source)
                 or review_identity.get("target_api_sha256") != target_api
                 or proof.get("replacement_scope") != "_news_reader_rows only; all other API AST nodes equal"):
             raise ValueError("NEWS_SOURCE_CAPTURE_READER_PROOF_INVALID")

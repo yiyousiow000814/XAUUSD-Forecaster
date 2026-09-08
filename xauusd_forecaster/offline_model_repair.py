@@ -11,8 +11,8 @@ from pathlib import Path
 import numpy as np
 
 from .execution_costs import ROUND_TRIP_COMMISSION_LOG_COST
-from .ridge import train_ridge
-from .training import MARKET_FEATURES
+from xauusd_forecaster.training.ridge import train_ridge
+from xauusd_forecaster.training.materialization import MARKET_FEATURES
 from .offline_model_paths import research_path
 
 IDENTITIES = ("MARKET_ONLY", "FULL", "BROAD_FULL", "NEWS_ONLY", "NEWS_RESIDUAL", "BROAD_NEWS_RESIDUAL")

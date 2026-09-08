@@ -200,7 +200,7 @@ def _qualification_entrypoint():
         if workspace_name != canonical_name:
             raise RuntimeError('FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
         root = parent / canonical_name
-        declared_entry = root / 'scripts/build_release_validation_fixtures.py'
+        declared_entry = root / 'scripts/validation/build_release_validation_fixtures.py'
         if (entry != declared_entry
                 or sys.argv[1:] != ['--output', str(root / '.release-validation-fixtures')]):
             raise RuntimeError('FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
@@ -211,10 +211,10 @@ def _qualification_entrypoint():
         retained = entry.name == 'retained_news_bootstrap.py'
         declared_caller = values.get('BOOTSTRAP_CALLER_PATH', '')
         if (retained and (not declared_caller or entry != Path(os.path.abspath(declared_caller)))
-                or not retained and entry != SOURCE_ROOT / 'scripts/bootstrap_news_projection.py'):
+                or not retained and entry != SOURCE_ROOT / 'scripts/maintenance/bootstrap_news_projection.py'):
             raise RuntimeError('FIXTURE_QUALIFICATION_PATH_UNDECLARED')
         declared_entry = (Path(os.path.abspath(declared_caller)) if retained
-                          else SOURCE_ROOT / 'scripts/bootstrap_news_projection.py')
+                          else SOURCE_ROOT / 'scripts/maintenance/bootstrap_news_projection.py')
         expected = json.loads(values.get('BOOTSTRAP_ARGUMENTS_JSON', 'null'))
         if not isinstance(expected, list) or sys.argv[1:] != expected:
             raise RuntimeError('FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
@@ -273,7 +273,7 @@ def _qualification_entrypoint():
                     '/api/audit-decisions', '/api/news-evidence'}):
             raise RuntimeError('FIXTURE_QUALIFICATION_ARGUMENTS_UNDECLARED')
         declared_entry = _owned_existing_path(bundle / 'check_deferred_projection_parity.py')
-        original = _owned_existing_path(SOURCE_ROOT / 'scripts/check_deferred_projection_parity.py')
+        original = _owned_existing_path(SOURCE_ROOT / 'scripts/validation/check_deferred_projection_parity.py')
         # Installed scripts do not have a Git checkout. Bind their actual bytes
         # to the exact target source instead of inventing a bundle Git identity.
         with declared_entry.open('rb') as stream:
@@ -389,18 +389,23 @@ elif DOCUMENT.get('legacy_configuration_revision'):
     # placement: target code intentionally runs outside the old code checkout.
     # Select an exact declared entrypoint lexically before any resolve/stat.
     # Unknown UNC/reparse paths must not cause a filesystem lookup to reject them.
+    paths = (
+        'runtime/run_dashboard_api.py', 'runtime/run_dashboard_sync.py',
+        'runtime/run_forward_collector.py', 'runtime/run_news_annotator.py',
+        'runtime/run_live_broadcast_publisher.py', 'validation/check_production_shape.py',
+        'maintenance/run_evidence_repair_v2.py',
+    )
+    # Frozen historical code keeps its original paths; current code is nested.
     entrypoints = {
-        os.path.normcase(os.path.abspath(root / 'scripts' / name)): root / 'scripts' / name
-        for root in CODE_ROOTS for name in (
-            'run_dashboard_api.py', 'run_dashboard_sync.py', 'run_forward_collector.py',
-            'run_news_annotator.py', 'run_live_broadcast_publisher.py', 'check_production_shape.py',
-            'run_evidence_repair_v2.py',
-        )
+        os.path.normcase(os.path.abspath(root / 'scripts' / relative)):
+            (root / 'scripts' / relative, root)
+        for root in CODE_ROOTS for path in paths
+        for relative in (path, Path(path).name)
     }
-    entrypoint = entrypoints.get(os.path.normcase(os.path.abspath(sys.argv[0])))
-    if entrypoint is None or entrypoint.resolve() != entrypoint:
+    selected = entrypoints.get(os.path.normcase(os.path.abspath(sys.argv[0])))
+    if selected is None or selected[0].resolve() != selected[0]:
         raise RuntimeError('FIXTURE_LEGACY_ENTRYPOINT_UNDECLARED')
-    code_root = entrypoint.parent.parent
+    entrypoint, code_root = selected
     if entrypoint.name == 'check_production_shape.py' and sys.argv[1:] == [
             '--status-url', 'http://127.0.0.1:8765/api/critical-status', '--allow-pending-generation-decision']:
         base = urlsplit(DOCUMENT['values'].get('LOCAL_API_BASE_URL', ''))
@@ -416,5 +421,5 @@ elif DOCUMENT.get('legacy_configuration_revision'):
         creationflags=subprocess.CREATE_NO_WINDOW).stdout.strip()
     if observed == DOCUMENT['legacy_configuration_revision']:
         sys.path.insert(0, str(code_root))
-        from xauusd_forecaster import news_scheduler
+        import xauusd_forecaster.news.scheduler.state as news_scheduler
         news_scheduler._runtime_environment_value = environment_value

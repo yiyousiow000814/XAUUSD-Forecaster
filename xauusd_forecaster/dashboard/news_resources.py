@@ -36,17 +36,17 @@ from xauusd_forecaster.news_projection import (
     build_news_projection_generation,
     receipt_digest,
 )
-from xauusd_forecaster.annotation import (
+from xauusd_forecaster.news.annotation.product import (
     INVALID_CHINESE_TITLE,
     PROMPT_VERSION,
     pending_annotation_records,
 )
-from xauusd_forecaster.news_evidence import event_evidence_rows_from_connection
-from xauusd_forecaster.news_semantics import model_usable_annotation_predicate
-from xauusd_forecaster.news_identity import preferred_cluster_peer_predicate
-from xauusd_forecaster.news_contracts import CURRENT_NEWS_CONTRACT
-from xauusd_forecaster.news_features_v2 import COLLECTION_SOURCES
-from xauusd_forecaster.news_impact import (
+from xauusd_forecaster.news.semantics.evidence import event_evidence_rows_from_connection
+from xauusd_forecaster.news.semantics.contracts import model_usable_annotation_predicate
+from xauusd_forecaster.news.retrieval.identity import preferred_cluster_peer_predicate
+from xauusd_forecaster.news.semantics.model_contracts import CURRENT_NEWS_CONTRACT
+from xauusd_forecaster.news.semantics.features import COLLECTION_SOURCES
+from xauusd_forecaster.news.annotation.impact import (
     HANDOVER_IMPACT_PROMPT_VERSION,
     IMPACT_MODEL,
     IMPACT_PROMPT_VERSION,

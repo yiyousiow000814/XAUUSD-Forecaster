@@ -8,7 +8,7 @@ import math
 
 from .execution_costs import ROUND_TRIP_COMMISSION_LOG_COST
 from .offline_model_repair import input_availability, summary, timestamp, predict, predict_market, action
-from .ridge import RidgeArtifact
+from xauusd_forecaster.training.ridge import RidgeArtifact
 
 MODES = ("EVIDENCE_ONLY", "HISTORICAL_COMPLETION_CONDITIONAL",
          "DEPENDENCY_MARKER_ASSUMED", "COMMON_MARKER_ASSUMED")

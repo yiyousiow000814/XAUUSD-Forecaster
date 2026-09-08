@@ -19,7 +19,7 @@ Publication timestamps may differ slightly from the local receipt clock. A
 bounded positive publication clock skew of up to and including 10 minutes does
 not by itself invalidate semantic processing for any source. Larger positive
 skew remains an invalid publication-time signal. The semantic-admission owner
-is `xauusd_forecaster/news_time.py`; timestamp provenance and positive skew
+is `xauusd_forecaster/news/semantics/time.py`; timestamp provenance and positive skew
 remain audit metadata, while impact lifetime is owned by the news-impact
 contract and trading/training visibility is owned by the forward-only contract.
 `collector_first_seen_time` remains the authoritative earliest visibility and

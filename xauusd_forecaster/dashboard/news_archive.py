@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from xauusd_forecaster.news_identity import preferred_cluster_peer_predicate
+from xauusd_forecaster.news.retrieval.identity import preferred_cluster_peer_predicate
 
 
 def news_mirror_candidate_keys(

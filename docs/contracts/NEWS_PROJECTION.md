@@ -191,6 +191,10 @@
   bootstrap and capture files against the active producer identity before source
   work. The current reader owner is `dashboard/news_resources.py`; relocating
   that owner does not reinterpret an existing API-bound reader-correction proof.
+  API source identity readers recognize the retained `scripts/run_dashboard_api.py`
+  locator and the classified `scripts/runtime/run_dashboard_api.py` locator.
+  Exactly one may occur; ambiguous identities are rejected. This lookup never
+  rewrites or rehashes stored identity bytes or grants a new producer authority.
   Partial captures retain their admitted producer or explicitly reviewed
   transition. Completed retained artifacts remain immutable evidence and do not
   grant a new producer permission to append source parts.

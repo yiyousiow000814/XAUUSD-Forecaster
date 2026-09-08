@@ -36,9 +36,9 @@ $result = "$evidence\experiment\exact-source-results"
 $snapshot = 'C:\Users\yiyou\Documents\Codex\2026-09-05\collector-atomicity\production-online.sqlite3'
 $env:OPENBLAS_NUM_THREADS = '1'
 $env:OMP_NUM_THREADS = '1'
-python scripts/build_model_repair_panel.py --input-dir $evidence --snapshot $snapshot --input-sha256 1277e34220d09428829db00435510e7b06013562ebc7fe5fa75d23bd98485dc8 --artifact-root "$replay\artifacts" --artifact-inventory "$replay\artifact_inventory.json" --source-root . --plan docs/plans/MODEL_REPAIR_OFFLINE.json --selected-inputs "$replay\selected_inputs.json" --selected-sha256 3a25c5ea7892f2ae2e1fdd782506b39c918c4a4a37c00d966020d27b6d16e46b --output-dir $panel
-python scripts/run_model_repair_offline.py --panel "$panel\panel.json" --plan docs/plans/MODEL_REPAIR_OFFLINE.json --output $result
-python scripts/report_model_repair_offline.py --results-dir $result
+python scripts/research/build_model_repair_panel.py --input-dir $evidence --snapshot $snapshot --input-sha256 1277e34220d09428829db00435510e7b06013562ebc7fe5fa75d23bd98485dc8 --artifact-root "$replay\artifacts" --artifact-inventory "$replay\artifact_inventory.json" --source-root . --plan docs/plans/MODEL_REPAIR_OFFLINE.json --selected-inputs "$replay\selected_inputs.json" --selected-sha256 3a25c5ea7892f2ae2e1fdd782506b39c918c4a4a37c00d966020d27b6d16e46b --output-dir $panel
+python scripts/research/run_model_repair_offline.py --panel "$panel\panel.json" --plan docs/plans/MODEL_REPAIR_OFFLINE.json --output $result
+python scripts/research/report_model_repair_offline.py --results-dir $result
 ```
 
 Omit both selected-input options only when that small selected-column cache is
@@ -71,7 +71,7 @@ explicitly remains NOT_RUN when no untouched data or acceptable candidate exists
 Tests:
 
 ```powershell
-python -m pytest tests/test_offline_model_repair.py tests/test_model_repair_replay.py tests/test_execution_costs.py -q
+python -m pytest tests/training/test_offline_model_repair.py tests/training/test_model_repair_replay.py tests/evidence/test_execution_costs.py -q
 ```
 
 No production runtime behavior changes. Recovery work and original PR-intent

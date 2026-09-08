@@ -25,15 +25,15 @@ jobs:
         with:
           node-version: '24'
       - name: Install only the lock-bound TypeScript parser
-        run: python scripts/architecture_typescript_tool.py
+        run: python scripts/architecture/architecture_typescript_tool.py
       - name: Require real PowerShell parser
         run: pwsh -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()'
       - name: Verify tool contracts and generated source identity
         run: |
-          python -m pytest tests/test_architecture_compiler.py -q
-          python -m pytest tests/test_architecture_imports.py -q
-          python scripts/check_architecture_imports.py
-          python scripts/compile_architecture.py check
+          python -m pytest tests/architecture/test_architecture_compiler.py -q
+          python -m pytest tests/architecture/test_architecture_imports.py -q
+          python scripts/architecture/check_architecture_imports.py
+          python scripts/architecture/compile_architecture.py check
       - name: Record exact execution source outside generated content
         env:
           SOURCE_SHA: ${{ github.sha }}
@@ -54,9 +54,9 @@ jobs:
         with:
           node-version: '24'
       - name: Install only the lock-bound TypeScript parser
-        run: python scripts/architecture_typescript_tool.py
+        run: python scripts/architecture/architecture_typescript_tool.py
       - name: Execute three bounded baseline and mutation pairs
-        run: python scripts/run_architecture_mutations.py --output "${{ runner.temp }}/architecture-mutations"
+        run: python scripts/architecture/run_architecture_mutations.py --output "${{ runner.temp }}/architecture-mutations"
       - name: Retain actual assertion and mutation evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

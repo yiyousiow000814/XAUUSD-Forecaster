@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: select
         name: Select authoritative Python test shards
-        run: python scripts/select_python_test_shards.py --github-output "$GITHUB_OUTPUT"
+        run: python scripts/validation/select_python_test_shards.py --github-output "$GITHUB_OUTPUT"
 
   python-shards:
     name: Python ${{ matrix.id }}
@@ -43,14 +43,14 @@ jobs:
       - name: Install authoritative Python test environment
         run: python -m pip install -e . pytest==9.1.1 pytest-timeout==2.4.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: matrix.id == 'python-4'
+        if: matrix.id == 'python-4' || matrix.id == 'python-architecture'
         with:
           node-version: '24'
       - name: Install the architecture owner's lock-bound TypeScript parser
-        if: matrix.id == 'python-4'
-        run: python scripts/architecture_typescript_tool.py
+        if: matrix.id == 'python-architecture'
+        run: python scripts/architecture/architecture_typescript_tool.py
       - name: Run bounded Python shard
-        run: python scripts/run_python_test_shard.py --shard "${{ matrix.id }}" --output output/python-tests
+        run: python scripts/validation/run_python_test_shard.py --shard "${{ matrix.id }}" --output output/python-tests
       - name: Upload bounded Python diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -98,7 +98,7 @@ jobs:
         run: npm install --global npm@11.6.2
       - name: Install locked dependencies
         run: >-
-          python ../scripts/run_bounded_web_install.py
+          python ../scripts/validation/run_bounded_web_install.py
           --timeout-seconds 150
           --kill-grace-seconds 10
       - name: Install the production fixture builder

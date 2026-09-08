@@ -61,7 +61,7 @@ prompt improvement cannot satisfy a candidate-retrieval gate.
 ## Command
 
 ```powershell
-python scripts/audit_news_candidate_retrieval.py `
+python scripts/research/audit_news_candidate_retrieval.py `
   --database C:\path\to\forward-evidence.sqlite3 `
   --manifest tests/fixtures/news_candidate_retrieval_benchmark.json `
   --mode hybrid `

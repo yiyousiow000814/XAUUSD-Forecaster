@@ -34,7 +34,7 @@ def main():
             or provider.path or provider.username or provider.password or provider.query or provider.fragment):
         raise ValueError("ISOLATED_CONSUMER_LOOPBACK_REQUIRED")
     sys.argv = [sys.argv[0], "--runtime-root", str(runtime), "--producer-root", str(ROOT), *remaining]
-    spec = importlib.util.spec_from_file_location("isolated_deferred_consumer", ROOT / "scripts/check_deferred_projection_parity.py")
+    spec = importlib.util.spec_from_file_location("isolated_deferred_consumer", ROOT / "scripts/validation/check_deferred_projection_parity.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     module.REMOTE_URLS = {"/api/news-evidence": fixture.fixture_provider + "/api/news-evidence"}

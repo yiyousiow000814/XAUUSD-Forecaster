@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const maximumFileBytes = 2 * 1024 * 1024;
 const maximumTransportBytes = 3 * 1024 * 1024;
-const maximumParts = 32;
+const maximumParts = 40;
 const maximumRecords = 10240;
 const families = ['symbols', 'edges', 'tests'];
 const digestPattern = /^[a-f0-9]{64}$/;

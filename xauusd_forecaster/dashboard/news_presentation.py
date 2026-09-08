@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from xauusd_forecaster.news_evidence import resolve_event_clock
-from xauusd_forecaster.news_impact import (
+from xauusd_forecaster.news.semantics.evidence import resolve_event_clock
+from xauusd_forecaster.news.annotation.impact import (
     impact_is_actionable,
     impact_time_rule,
 )
 from xauusd_forecaster.news_projection import (
     canonicalize_news_projection_impact_clocks,
 )
-from xauusd_forecaster.news_time import assess_news_semantic_eligibility
+from xauusd_forecaster.news.semantics.time import assess_news_semantic_eligibility
 
 
 NEWS_CATEGORY_LABELS = {

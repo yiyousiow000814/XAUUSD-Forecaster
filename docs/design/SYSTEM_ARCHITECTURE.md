@@ -97,7 +97,27 @@ The local API and Sync share pure resource serializers in
 News generation identities retain their existing package owners. The shared
 serializers accept source values; they do not perform reads, schedule work,
 resolve Git identity, send requests, or advance receipts. Preview and release
-fixture builders retain the explicit Sync import compatibility boundary.
+fixture builders import those package owners directly. Bootstrap and diagnostic
+parity use `dashboard/sync/resources.py`; a producer-root-selected diagnostic
+must load the selected producer's package, not infer identity from the reader.
+
+### Canonical source ownership
+
+| Package | Responsibility |
+| --- | --- |
+| `decision` | Selection, inference, live engine and Collector grid/reconciliation rules |
+| `evidence` | Forward ledger, generation schema, executable labels and shared projection schema |
+| `training` | Materialization, generation publication, background owner and Ridge fitting |
+| `news` | Collection, semantics, annotation, retrieval, scheduler and Daily Brief owners |
+| `ai` | Provider registry, credentials, quota, model limits and provider transport |
+| `assistant` | Retained private Assistant contracts, still PAUSED |
+| `runtime` | Health, operational taxonomy and production-shape interpretation |
+| `dashboard` | Read models, API resources, status composition and Sync protocols |
+
+The four Python entry scripts retain command-line and process/thread lifecycle.
+They do not become a second implementation of imported domain work. Shared
+projection schema lives under Evidence so ledger startup does not import the
+Dashboard read layer. Schema content and installation order remain unchanged.
 
 ### Source revision to Stable
 
@@ -130,22 +150,22 @@ Unknown objects, active worktrees, and rollback artifacts are not deleted.
 
 | Concern | Authoritative implementation | Entry point / consumer | Contract tests |
 |---|---|---|---|
-| Quotes and causal market snapshot | `xauusd_forecaster/market.py`, `xauusd_forecaster/market_session.py` | `scripts/run_forward_collector.py` | `tests/test_market_session.py`, `tests/test_quotes_and_labeling.py` |
-| Decision and evidence | `xauusd_forecaster/forward_engine.py`, `xauusd_forecaster/forward_ledger.py`, `xauusd_forecaster/live_v2.py` | Collector | `tests/test_forward_only.py`, `tests/test_evidence_integrity_v2.py` |
-| Execution learning | `xauusd_forecaster/execution_learning.py` | Collector background work | `tests/test_evidence_integrity_v2.py` |
-| Training | `xauusd_forecaster/training_owner.py`, `xauusd_forecaster/training_v2.py` | Collector background owner | `tests/test_training_owner.py`, `tests/test_forward_only.py` |
-| News collection and scheduling | `xauusd_forecaster/news_collection_owner.py`, `xauusd_forecaster/news_scheduler.py`, `xauusd_forecaster/annotation.py` | Collector thread / `scripts/run_news_annotator.py` | `tests/test_news_collection_owner.py`, `tests/test_news_scheduler.py` |
-| Dashboard bounded payloads, provenance, cache, component health, source health, incremental News archive selection and presentation, learning, market, runtime, and storage status resources | `xauusd_forecaster/dashboard_payloads.py`, `xauusd_forecaster/dashboard_read_models.py`, `xauusd_forecaster/dashboard/deployment_provenance.py`, `xauusd_forecaster/dashboard/status_cache.py`, `xauusd_forecaster/dashboard/health_projection.py`, `xauusd_forecaster/dashboard/news_source_health.py`, `xauusd_forecaster/dashboard/news_archive.py`, `xauusd_forecaster/dashboard/news_presentation.py`, `xauusd_forecaster/dashboard/learning_resources.py`, `xauusd_forecaster/dashboard/market_resources.py`, `xauusd_forecaster/dashboard/runtime_status.py`, `xauusd_forecaster/dashboard/storage_status.py` | `scripts/run_dashboard_api.py` | `tests/test_dashboard_api.py`, `tests/test_dashboard_payloads.py`, `tests/test_dashboard_status_cache.py`, `tests/test_dashboard_health_projection.py`, `tests/test_dashboard_market_resources.py`, `tests/test_dashboard_runtime_status.py` |
-| Dashboard transport and progress policy | `xauusd_forecaster/dashboard/sync/transport.py`, `xauusd_forecaster/dashboard/sync/progress.py`; runtime-state I/O stays at the trusted entry-point boundary | `scripts/run_dashboard_sync.py` | `tests/test_dashboard_sync_transport.py`, `tests/test_dashboard_sync_progress.py`, `tests/test_dashboard_sync.py` |
-| Dashboard pure resource serialization | `xauusd_forecaster/dashboard/resource_contracts.py`; existing field projections and News generation remain authoritative | API and Sync; compatibility imports for Preview and release fixture builders | `tests/test_dashboard_resource_contracts.py`, `tests/test_dashboard_sync.py`, `tests/test_release_validation_fixtures.py` |
-| Dashboard operator retry bridge | `xauusd_forecaster/dashboard/operator_bridge.py` | HTTP adapter in `scripts/run_dashboard_api.py` | `tests/test_dashboard_api.py` |
-| Local storage lifecycle | `xauusd_forecaster/maintenance.py`, `xauusd_forecaster/sqlite_wal.py` | Collector maintenance owners | `tests/test_backup_containment.py`, `tests/test_wal_checkpoint_ownership.py` |
+| Quotes and causal market snapshot | `xauusd_forecaster/market.py`, `xauusd_forecaster/market_session.py` | `scripts/runtime/run_forward_collector.py` | `tests/decision/test_market_session.py`, `tests/evidence/test_quotes_and_labeling.py` |
+| Decision and evidence | `xauusd_forecaster/decision/engine.py`, `xauusd_forecaster/evidence/ledger.py`, `xauusd_forecaster/decision/live.py` | Collector | `tests/decision/test_forward_only.py`, `tests/evidence/test_evidence_integrity_v2.py` |
+| Execution learning | `xauusd_forecaster/execution_learning.py` | Collector background work | `tests/evidence/test_evidence_integrity_v2.py` |
+| Training | `xauusd_forecaster/training/runtime.py`, `xauusd_forecaster/training/generation.py` | Collector background owner | `tests/training/test_training_owner.py`, `tests/decision/test_forward_only.py` |
+| News collection and scheduling | `xauusd_forecaster/news/collection/runtime.py`, `xauusd_forecaster/news/scheduler/state.py`, `xauusd_forecaster/news/annotation/product.py` | Collector thread / `scripts/runtime/run_news_annotator.py` | `tests/news/test_news_collection_owner.py`, `tests/news/test_news_scheduler.py` |
+| Dashboard bounded payloads, provenance, cache, component health, source health, incremental News archive selection and presentation, learning, market, runtime, and storage status resources | `xauusd_forecaster/dashboard/payloads.py`, `xauusd_forecaster/dashboard/read_models.py`, `xauusd_forecaster/dashboard/deployment_provenance.py`, `xauusd_forecaster/dashboard/status_cache.py`, `xauusd_forecaster/dashboard/health_projection.py`, `xauusd_forecaster/dashboard/news_source_health.py`, `xauusd_forecaster/dashboard/news_archive.py`, `xauusd_forecaster/dashboard/news_presentation.py`, `xauusd_forecaster/dashboard/learning_resources.py`, `xauusd_forecaster/dashboard/market_resources.py`, `xauusd_forecaster/dashboard/runtime_status.py`, `xauusd_forecaster/dashboard/storage_status.py` | `scripts/runtime/run_dashboard_api.py` | `tests/dashboard/test_dashboard_api.py`, `tests/dashboard/test_dashboard_payloads.py`, `tests/dashboard/test_dashboard_status_cache.py`, `tests/dashboard/test_dashboard_health_projection.py`, `tests/dashboard/test_dashboard_market_resources.py`, `tests/dashboard/test_dashboard_runtime_status.py` |
+| Dashboard transport and progress policy | `xauusd_forecaster/dashboard/sync/transport.py`, `xauusd_forecaster/dashboard/sync/progress.py`; runtime-state I/O stays at the trusted entry-point boundary | `scripts/runtime/run_dashboard_sync.py` | `tests/dashboard/test_dashboard_sync_transport.py`, `tests/dashboard/test_dashboard_sync_progress.py`, `tests/dashboard/test_dashboard_sync.py` |
+| Dashboard pure resource serialization | `xauusd_forecaster/dashboard/resource_contracts.py`; existing field projections and News generation remain authoritative | API and Sync; compatibility imports for Preview and release fixture builders | `tests/dashboard/test_dashboard_resource_contracts.py`, `tests/dashboard/test_dashboard_sync.py`, `tests/dashboard/test_release_validation_fixtures.py` |
+| Dashboard operator retry bridge | `xauusd_forecaster/dashboard/operator_bridge.py` | HTTP adapter in `scripts/runtime/run_dashboard_api.py` | `tests/dashboard/test_dashboard_api.py` |
+| Local storage lifecycle | `xauusd_forecaster/maintenance.py`, `xauusd_forecaster/sqlite_wal.py` | Collector maintenance owners | `tests/runtime/test_backup_containment.py`, `tests/runtime/test_wal_checkpoint_ownership.py` |
 | Worker and D1 projection | `web/worker/index.ts`, `web/worker/api-router.ts`, `web/db/schema.ts` | Cloudflare Workers | `web/tests/d1-capabilities.test.mjs`, `web/tests/worker-cpu-headroom.test.mjs` |
-| Live broadcast | `xauusd_forecaster/live_broadcast.py`, `broadcast/src/index.js` | `scripts/run_live_broadcast_publisher.py` | `tests/test_live_broadcast.py`, `broadcast/tests/broadcast.test.mjs` |
+| Live broadcast | `xauusd_forecaster/live_broadcast.py`, `broadcast/src/index.js` | `scripts/runtime/run_live_broadcast_publisher.py` | `tests/decision/test_live_broadcast.py`, `broadcast/tests/broadcast.test.mjs` |
 
 ## Current structural gaps
 
-- `scripts/run_dashboard_api.py` and `scripts/run_dashboard_sync.py` still own
+- `scripts/runtime/run_dashboard_api.py` and `scripts/runtime/run_dashboard_sync.py` still own
   substantial domain logic as well as process composition.
 - The flat Python package contains one 14-module strongly connected import
   component around ledger, scheduler, annotation, time, and retained Assistant
