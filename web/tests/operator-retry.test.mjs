@@ -153,6 +153,17 @@ test("a changed mirror updates only changed jobs and exact replay writes zero", 
     database, source, new Date("2026-09-03T00:00:30Z"),
   );
   assert.equal(replay.written, 0);
+  // Equal cardinality does not mean equal identities. Upsert must expose the
+  // surplus before cleanup can skip membership work.
+  const replacement = source.map((item, index) => index === 199
+    ? { ...item, job_id: "f".repeat(64) } : item);
+  for (const snapshot of [replacement, source]) {
+    const swapped = await syncOperatorRetryJobs(database, snapshot);
+    assert.equal(swapped.written, 1);
+    assert.equal(swapped.deleted, 1);
+    assert.equal(swapped.complete, true);
+    assert.deepEqual(database.database.prepare("SELECT job_id FROM operator_retry_jobs ORDER BY job_id").all().map(row => row.job_id), snapshot.map(row => row.job_id).sort());
+  }
   const changed = source.map((item, index) => index === 73
     ? { ...item, title: "One changed job" } : item);
   const delta = await syncOperatorRetryJobs(
