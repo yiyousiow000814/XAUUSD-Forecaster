@@ -169,13 +169,11 @@ const migrationInputs = migrationNames.map(name => ({
   name, sha256: sha256(readFileSync(contained(ROOT, ["web", "drizzle", name], { limit: 1_000_000 }))),
 }));
 const migrationsDigest = sha256(JSON.stringify(migrationInputs));
-const controllerSource = readFileSync(contained(ROOT, ["scripts", "control_center_evidence_authority.ps1"], { limit: 1_000_000 }), "utf8");
-const capabilityMatches = [...controllerSource.matchAll(/\$capabilitySql = @"\r?\n([\s\S]*?)\r?\n"@/g)];
+// Fixture-owned retained schema observation. The retired release controller
+// no longer owns test input identity or a production qualification workflow.
+const capabilitySource = readFileSync(contained(ROOT, ["tests", "fixtures", "news_schema_observation.sql"], { limit: 1_000_000 }), "utf8");
 const ledgerSql = "SELECT name,applied_at FROM d1_migrations ORDER BY id";
-if (capabilityMatches.length !== 1 || !controllerSource.includes(`"${ledgerSql}"`)
-  || /\$(?:[A-Za-z_({])/.test(capabilityMatches[0][1])) fail("WORKER_ADAPTER_CONTROLLER_QUERY_INVALID");
-// Apply exactly the controller's whitespace-only native transport conversion.
-const capabilitySql = capabilityMatches[0][1].replace(/\r\n|\n|\r/g, " ").trim();
+const capabilitySql = capabilitySource.replace(/\r\n|\n|\r/g, " ").trim();
 const capabilityDigest = sha256(capabilitySql);
 
 // Disposable external inputs only: the production JWT verifier remains intact.
@@ -530,7 +528,7 @@ async function execute(command) {
   if (command.command === "describe_inputs" && !initialized) return {
     migrations_sha256: migrationsDigest, migrations: migrationInputs,
     capabilities_sql_sha256: capabilityDigest, ledger_sql: ledgerSql,
-    controller_source_sha256: sha256(controllerSource),
+    schema_query_source_sha256: sha256(capabilitySource),
   };
   if (command.command === "initialize") return initialize(command);
   const target = exactTarget(command);

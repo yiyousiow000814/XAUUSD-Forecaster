@@ -39,3 +39,11 @@ Production takeover, final independent review, all required CI and business
 health remain pending until recorded against the final source. Cloudflare main
 configuration and deletion of three obsolete Workers are real completed writes.
 Production D1 compatibility must be established before activating current main.
+
+## Retired fixture boundary
+
+The connected Worker fixture reads its retained news schema observation from
+`tests/fixtures/news_schema_observation.sql`. Its query digest remains bound to
+the executed SQL; it no longer parses a retired controller or represents its
+source as production authority. Native main publication is checked through the
+actual checked-in build contract; no Preview project upload entry remains.
