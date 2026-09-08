@@ -403,6 +403,11 @@ def sync_resource_lane(
                 else:
                     operation({}, target)
                 completed_at = datetime.now(UTC)
+                evidence_state = (
+                    _read_news_sync_state(Path(target["news_evidence_state_file"]))
+                    if resource == "news_evidence" and target.get("news_evidence_state_file")
+                    else {}
+                )
                 _persist_resource_schedule_result(
                     schedule_path, target, resource, cadence_seconds,
                     now=completed_at, success=True,
@@ -413,10 +418,8 @@ def sync_resource_lane(
                             "projection_state"
                         ) == "REPLAYING"
                         or resource == "news_evidence"
-                        and bool(target.get("news_evidence_state_file"))
-                        and bool(_read_news_sync_state(
-                            Path(target["news_evidence_state_file"])
-                        ).get("staging_snapshot_id"))
+                        and bool(evidence_state.get("staging_snapshot_id")
+                                 or evidence_state.get("cleanup_pending"))
                     ),
                 )
                 observations.append({

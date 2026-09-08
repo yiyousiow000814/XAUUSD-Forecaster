@@ -138,7 +138,8 @@
   another replacement snapshot. Immutable replacement therefore cannot turn
   into unbounded retained duplication even though each request is bounded.
 - News-evidence cleanup progresses in bounded requests without a daily admission
-  lock. Each request deletes at most 200 obsolete records, 20 receipts and 20
+  lock. Pending cleanup is checkpointed and immediately rescheduled through the
+  same fair single heavy owner; failures retain normal backoff. Each request deletes at most 200 obsolete records, 20 receipts and 20
   stale staging rows; each producer cycle allows at most eight requests. Active
   data, recent readers and fresh staging remain protected. Account for physical
   index writes in catch-up and recurring replacement usage. The retired daily
