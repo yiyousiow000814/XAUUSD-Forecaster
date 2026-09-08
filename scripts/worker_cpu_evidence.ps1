@@ -57,11 +57,7 @@ function Write-WorkerCpuAtomicJson {
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][object]$Value
     )
-    $directory = Split-Path -Parent $Path
-    New-Item -ItemType Directory -Path $directory -Force | Out-Null
-    $temporary = "$Path.tmp"
-    $Value | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $temporary -Encoding UTF8
-    Move-Item -LiteralPath $temporary -Destination $Path -Force
+    Write-ControlCenterJsonAtomic -Path $Path -Value $Value -Depth 30
 }
 
 function Add-WorkerCpuLedgerEvent {
@@ -71,13 +67,13 @@ function Add-WorkerCpuLedgerEvent {
         [Parameter(Mandatory = $true)][object]$Detail
     )
     $root = Get-WorkerCpuRunRoot -ValidationRun $ValidationRun
-    New-Item -ItemType Directory -Path $root -Force | Out-Null
+    [IO.Directory]::CreateDirectory((ConvertTo-ReleaseEvidenceNativePath -Path $root)) | Out-Null
     [pscustomobject][ordered]@{
         occurred_at = [DateTimeOffset]::UtcNow.ToString("o")
         event = $Event
         detail = $Detail
     } | ConvertTo-Json -Compress -Depth 30 |
-        Add-Content -LiteralPath (Join-Path $root "directed-ledger.jsonl") -Encoding UTF8
+        Add-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path (Join-Path $root "directed-ledger.jsonl")) -Encoding UTF8
 }
 
 function New-WorkerCpuRequestPlan {
@@ -231,8 +227,8 @@ function Add-WorkerCpuPlannedRequests {
 function Read-WorkerCpuDeficitRepairPlan {
     param([Parameter(Mandatory = $true)][string]$ValidationRun)
     $path = Join-Path (Get-WorkerCpuRunRoot -ValidationRun $ValidationRun) "deficit-repair-plan.json"
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
-    $plan = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-ReleaseControlJson
+    if (-not (Test-Path -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $path))) { return $null }
+    $plan = Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $path) -Raw -Encoding UTF8 | ConvertFrom-ReleaseControlJson
     if (-not $plan.payload -or -not $plan.plan_digest -or
         [string]$plan.payload.schema_version -ne $workerCpuDeficitRepairVersion -or
         [string]$plan.payload.validation_run -ne $ValidationRun -or
@@ -249,10 +245,10 @@ function Get-WorkerCpuProviderPlateauState {
     )
     $policy = Get-WorkerCpuDeficitRepairPolicy
     $path = Join-Path (Get-WorkerCpuRunRoot -ValidationRun $ValidationRun) "directed-ledger.jsonl"
-    if (-not (Test-Path -LiteralPath $path)) {
+    if (-not (Test-Path -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $path))) {
         return [pscustomobject]@{ stable=$false; matching_reads=0; digest=$CurrentDigest }
     }
-    $reads = @(Get-Content -LiteralPath $path -Encoding UTF8 | ForEach-Object {
+    $reads = @(Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $path) -Encoding UTF8 | ForEach-Object {
         if (-not $_) { return }
         $entry = $_ | ConvertFrom-ReleaseControlJson
         if ([string]$entry.event -eq "PROVIDER_EVIDENCE_UNIONED" -and
@@ -437,8 +433,8 @@ function Read-WorkerCpuOutlierConfirmationPlan {
     param([Parameter(Mandatory = $true)][string]$ValidationRun)
     $path = Join-Path (Get-WorkerCpuRunRoot -ValidationRun $ValidationRun) `
         "outlier-confirmation-plan.json"
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
-    $plan = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
+    if (-not (Test-Path -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $path))) { return $null }
+    $plan = Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $path) -Raw -Encoding UTF8 |
         ConvertFrom-ReleaseControlJson
     if (-not $plan.payload -or -not $plan.plan_digest -or
         [string]$plan.payload.schema_version -ne $workerCpuOutlierConfirmationVersion -or
@@ -639,8 +635,8 @@ function Repair-WorkerCpuDirectResponseIdentityExpectation {
     }
     $path = Join-Path (Get-WorkerCpuRunRoot -ValidationRun $ValidationRun) `
         "directed-ledger.jsonl"
-    if (-not (Test-Path -LiteralPath $path)) { return $false }
-    $entries = @(Get-Content -LiteralPath $path -Encoding UTF8 | Where-Object { $_ } |
+    if (-not (Test-Path -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $path))) { return $false }
+    $entries = @(Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $path) -Encoding UTF8 | Where-Object { $_ } |
         ForEach-Object { $_ | ConvertFrom-ReleaseControlJson })
     $requestId = [string]$Request.request_id
     if (@($entries | Where-Object {
@@ -1011,17 +1007,17 @@ function Write-WorkerCpuProviderEvidence {
 function Read-WorkerCpuRunArtifact {
     param([Parameter(Mandatory = $true)][string]$ValidationRun, [Parameter(Mandatory = $true)][string]$Name)
     $path = Join-Path (Get-WorkerCpuRunRoot -ValidationRun $ValidationRun) $Name
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
-    return Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-ReleaseControlJson
+    if (-not (Test-Path -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $path))) { return $null }
+    return Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $path) -Raw -Encoding UTF8 | ConvertFrom-ReleaseControlJson
 }
 
 function Get-WorkerCpuDirectResponseReceipts {
     param([Parameter(Mandatory = $true)][string]$ValidationRun)
     $path = Join-Path (Get-WorkerCpuRunRoot -ValidationRun $ValidationRun) "directed-ledger.jsonl"
-    if (-not (Test-Path -LiteralPath $path)) { return @() }
+    if (-not (Test-Path -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $path))) { return @() }
     $receipts = @()
     $reconciliations = @()
-    foreach ($line in @(Get-Content -LiteralPath $path -Encoding UTF8)) {
+    foreach ($line in @(Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $path) -Encoding UTF8)) {
         if (-not $line) { continue }
         $entry = $line | ConvertFrom-ReleaseControlJson
         if ([string]$entry.event -eq "DIRECT_RESPONSE_RECORDED") { $receipts += $entry.detail }
@@ -1187,8 +1183,8 @@ function Get-WorkerCpuQualificationReceipt {
     param([Parameter(Mandatory = $true)][string]$QualificationKey)
     if ($QualificationKey -notmatch '^[0-9a-f]{64}$') { throw "WORKER_CPU_QUALIFICATION_KEY_INVALID" }
     $path = Join-Path (Join-Path $workerCpuEvidenceRoot "qualifications") "$QualificationKey.json"
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
-    $receipt = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-ReleaseControlJson
+    if (-not (Test-Path -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $path))) { return $null }
+    $receipt = Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $path) -Raw -Encoding UTF8 | ConvertFrom-ReleaseControlJson
     $core = [pscustomobject][ordered]@{
         schema_version = [string]$receipt.schema_version
         qualification_key = [string]$receipt.qualification_key

@@ -503,11 +503,14 @@ def test_cpu_deficit_repair_policy_has_manifest_derived_global_bound(tmp_path) -
     assert result == "worker-cpu-deficit-repair-v1,3,3,4,4,16"
 
 
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("long_path", (False, True))
 def test_provider_unavailable_persists_active_and_background_retry_budget(
-    tmp_path,
+    tmp_path, powershell, long_path,
 ) -> None:
     result = _run_control_center_contract(
         tmp_path,
+        ("$workerCpuEvidenceRoot=Join-Path $workerCpuEvidenceRoot ('segment-'*20);" if long_path else "") +
         "$run='11111111-1111-1111-1111-111111111111';"
         "$candidate=[pscustomobject]@{worker_version_id='worker';git_sha=('a'*40)};"
         "$expected=@(1..12|ForEach-Object{[pscustomobject]@{request_id=('r-'+$_);"
@@ -529,6 +532,7 @@ def test_provider_unavailable_persists_active_and_background_retry_budget(
         "$final=Read-WorkerCpuRunArtifact -ValidationRun $run -Name 'provider-evidence.json';"
         'Write-Output "$script:queries,$active,$($final.recovery.background_reads),'
         '$script:lastWorkersObservabilityDiagnostic"',
+        powershell=powershell,
     )
 
     assert result == "10,6,4,PROVIDER_EVIDENCE_INSUFFICIENT"
@@ -777,11 +781,14 @@ def test_multi_family_deficit_repair_eligibility_is_globally_bounded(
     assert result == expected
 
 
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("long_path", (False, True))
 def test_deficit_repair_plan_is_frozen_before_send_and_idempotent_across_restart(
-    tmp_path,
+    tmp_path, powershell, long_path,
 ) -> None:
     result = _run_control_center_contract(
         tmp_path,
+        ("$workerCpuEvidenceRoot=Join-Path $workerCpuEvidenceRoot ('segment-'*20);" if long_path else "") +
         "$run='11111111-1111-1111-1111-111111111111';$key='a'*64;"
         "$request=[pscustomobject]@{request_id='original';family='qualified';"
         "scenario='default';method='GET';path='/';phase='acceptance'};"
@@ -795,8 +802,8 @@ def test_deficit_repair_plan_is_frozen_before_send_and_idempotent_across_restart
         "$repair=New-WorkerCpuDeficitRepairPlan -RequestPlan $plan -DeficientGroups $groups "
         "-CandidateWorkerVersion worker -QualificationKey $key -PriorProviderDigest ('b'*64) "
         "-PriorObservedTotal 18;"
-        "$frozenBeforeApply=Test-Path (Join-Path (Get-WorkerCpuRunRoot $run) "
-        "'deficit-repair-plan.json');$first=@(Apply-WorkerCpuDeficitRepairPlan -RequestPlan $plan "
+        "$frozenBeforeApply=Test-Path -LiteralPath (ConvertTo-ReleaseEvidenceNativePath (Join-Path (Get-WorkerCpuRunRoot $run) "
+        "'deficit-repair-plan.json'));$first=@(Apply-WorkerCpuDeficitRepairPlan -RequestPlan $plan "
         "-RepairPlan $repair);$countAfterFirst=@($plan.requests).Count;"
         "$second=@(Apply-WorkerCpuDeficitRepairPlan -RequestPlan $plan -RepairPlan $repair);"
         "$ids=@($repair.payload.requests.request_id|Sort-Object -Unique);"
@@ -804,6 +811,7 @@ def test_deficit_repair_plan_is_frozen_before_send_and_idempotent_across_restart
         'Write-Output "$frozenBeforeApply,$($first.Count),$countAfterFirst,'
         '$($plan.requests.Count),$($ids.Count),$($read.plan_digest -eq $repair.plan_digest),'
         '$($repair.payload.total_request_count)"',
+        powershell=powershell,
     )
 
     assert result == "True,8,9,9,8,True,8"
@@ -1061,11 +1069,14 @@ def test_incomplete_confirmation_is_nonqualifying_and_cannot_start_another_round
     )
 
 
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("long_path", (False, True))
 def test_isolated_outlier_receipt_retains_raw_event_and_exact_candidate_identity(
-    tmp_path,
+    tmp_path, powershell, long_path,
 ) -> None:
     result = _run_control_center_contract(
         tmp_path,
+        ("$workerCpuEvidenceRoot=Join-Path $workerCpuEvidenceRoot ('segment-'*20);" if long_path else "") +
         "$key='a'*64;$decision=[pscustomobject]@{state='QUALIFIED_WITH_ISOLATED_CPU_OUTLIER';"
         "global=[pscustomobject]@{invocations=22;max_cpu_ms=15};"
         "qualification_global=[pscustomobject]@{invocations=21;max_cpu_ms=4};"
@@ -1082,6 +1093,7 @@ def test_isolated_outlier_receipt_retains_raw_event_and_exact_candidate_identity
         '$($read.source_git_sha),$($read.cpu_evidence.global.max_cpu_ms),'
         '$($read.cpu_evidence.isolated_cpu_outlier.request_id),'
         '$($read.cpu_evidence.outlier_confirmation.observed)"',
+        powershell=powershell,
     )
 
     assert result == (
@@ -1228,11 +1240,14 @@ def test_control_plane_only_git_and_provenance_etag_change_reuse_cpu_behavior_ke
     assert result == "True,True,64"
 
 
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("long_path", (False, True))
 def test_reused_cpu_receipt_binds_source_and_current_exact_worker_artifacts(
-    tmp_path,
+    tmp_path, powershell, long_path,
 ) -> None:
     result = _run_control_center_contract(
         tmp_path,
+        ("$workerCpuEvidenceRoot=Join-Path $workerCpuEvidenceRoot ('segment-'*20);" if long_path else "") +
         "$key='a'*64;$qualification=[pscustomobject]@{key=$key;fields=[pscustomobject]@{version='v1'};"
         "candidate_worker_version='source-worker';candidate_git_sha=('1'*40);"
         "exact_candidate_binding=[pscustomobject]@{executable_bundle_etag=('b'*64)}};"
@@ -1250,6 +1265,7 @@ def test_reused_cpu_receipt_binds_source_and_current_exact_worker_artifacts(
         'Write-Output "$($e.qualification_mode),$($e.source_worker_version),'
         '$($e.worker_version_id),$($e.source_executable_bundle_etag),'
         '$($e.current_executable_bundle_etag),$($receipt.receipt_digest -eq $written.receipt_digest)"',
+        powershell=powershell,
     )
 
     assert result == (

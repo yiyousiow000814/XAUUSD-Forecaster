@@ -443,3 +443,22 @@ Freeze source behavior identities (package tree and API/Sync blobs), input file 
 ### Daily-brief contract gate ownership
 
 The 5da07f38 Python python-2 job exhausted its unchanged five-minute budget after more than 87 percent of 476 tests. Retained hosted timestamps attribute approximately142seconds to daily_brief, brief_date_discovery and brief_synthesis_source_first, and approximately160seconds to the other completed cases. Move those three existing files into the independent python-daily-brief shard. Preserve every test, the30-second per-case limit, five-minute job budget and all-selected aggregate. Exact-once file ownership and both real runner entrypoints must pass; no runtime state or production behavior changes.
+
+## CPU evidence persistence uses the shared native path boundary
+
+The 64080336 connected run reached CPU qualification receipt publication after
+migration and directed validation, then PS5.1 failed to create the digest-named
+qualification temporary file beyond MAX_PATH. The CPU module retained a second
+atomic writer, so the earlier Control Center persistence repair omitted it.
+Route its mutable JSON publication through Write-ControlCenterJsonAtomic at its
+existing depth 30. Preserve receipt fields, digests, replacement semantics and
+canonical stored paths. Use native paths only at CPU file I/O, including sibling
+plan/provider/ledger readers and ledger append directory creation. No new state,
+lock, authority, retry, expiry or receipt reuse is introduced. The Control Center
+entrypoint loads both modules before any action invokes their functions.
+
+The existing receipt outlier and reuse families now cover short/deep roots under
+PS5.1/PS7; two deep PS5.1 cases fail before repair. Verify actual reads after
+publication, full CPU contract families and the installed connected lifecycle.
+Failure evidence and old qualification files remain intact; a new Candidate
+still has to qualify. Restart and Reverse use the same canonical receipt names.
