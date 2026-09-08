@@ -35,3 +35,9 @@ parsing from an unrelated working directory. Existing behavior suites establish
 the transaction, lifecycle, provider and serialized-contract properties beyond
 import success. Historical mutation outcomes remain evidence for their original
 source; current evidence must identify its own source and actual test execution.
+
+The former 722-case `python-4` shard exceeded the five-minute job budget on
+GitHub despite all cases passing. Its news and architecture contracts now run
+in `python-news-contracts` and `python-architecture`; the remaining contracts
+stay in `python-4`. The same manifest and aggregate gate require every shard.
+All five-minute job and 30-second case limits remain unchanged.

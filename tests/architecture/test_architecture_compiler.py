@@ -626,9 +626,9 @@ def test_parser_acquisition_failures_never_become_source_success(typescript_sour
 def test_typescript_runtime_is_explicit_in_each_existing_required_owner():
     shards = json.loads((ROOT / '.github/python-test-shards.json').read_text())['shards']
     owners = [row['id'] for row in shards if 'tests/architecture/test_architecture_compiler.py' in row['tests']]
-    assert owners == ['python-4']
+    assert owners == ['python-architecture']
     quality = (ROOT / '.github/workflows/quality-gates.yml').read_text()
-    assert "if: matrix.id == 'python-4'" in quality
+    assert "if: matrix.id == 'python-architecture'\n        run: python scripts/architecture/architecture_typescript_tool.py" in quality
     assert 'run: python scripts/architecture/architecture_typescript_tool.py\n' in quality
     architecture = (ROOT / '.github/workflows/architecture.yml').read_text()
     assert architecture.count('run: python scripts/architecture/architecture_typescript_tool.py\n') == 2
