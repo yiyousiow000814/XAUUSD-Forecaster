@@ -1461,6 +1461,7 @@ def _record_resource_schedule(
     *,
     now: datetime,
     success: bool,
+    pending: bool = False,
 ) -> None:
     resources = state.setdefault("resources", {})
     current = resources.get(resource)
@@ -1471,7 +1472,9 @@ def _record_resource_schedule(
         RESOURCE_BACKOFF_MAX_SECONDS,
         max(cadence_seconds, 30 * (2 ** min(failures - 1, 7))),
     )
-    if success:
+    if success and pending:
+        next_run_at = now
+    elif success:
         previous_due = _schedule_epoch(current.get("next_run_at"))
         next_run_epoch = (
             previous_due + cadence_seconds
@@ -1505,11 +1508,12 @@ def _persist_resource_schedule_result(
     *,
     now: datetime,
     success: bool,
+    pending: bool = False,
 ) -> None:
     """Merge one lane's result without overwriting another lane's progress."""
     with _RESOURCE_SCHEDULE_LOCK:
         state = _read_news_sync_state(path)
         _record_resource_schedule(
-            state, resource, cadence_seconds, now=now, success=success,
+            state, resource, cadence_seconds, now=now, success=success, pending=pending,
         )
         _write_news_sync_state(path, state, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))

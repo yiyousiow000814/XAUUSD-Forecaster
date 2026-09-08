@@ -84,7 +84,11 @@
 - One detail batch contains at most eight items and 400,000 serialized bytes.
   One index batch contains at most four items and 100,000 serialized bytes; its
   Worker envelope is capped at 120,000 bytes.
-  One sync cycle advances at most four generation batches.
+  One sync work slice advances at most four generation batches, then yields
+  to other due resources. An ACKed incomplete replay is immediately eligible
+  again; the 60-second discovery cadence applies only after completion.
+  Failed attempts retain the existing bounded backoff. This slice is not an
+  upload rate limit and must not introduce idle time while replay is pending.
 - D1 retains at most one `CURRENT`, one replacement `STAGING`, and one
   short-lived `SUPERSEDED` receipt generation. A new prepare removes older
   superseded receipts and obsolete v3 staging rows. Staging expires after 24
