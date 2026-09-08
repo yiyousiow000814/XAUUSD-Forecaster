@@ -830,7 +830,7 @@ def test_news_archive_materializes_late_discovery_canonical_annotation(
 
 
 def test_news_evidence_generation_freezes_until_activation_then_tracks_current_state(
-    tmp_path,
+    tmp_path, monkeypatch,
 ) -> None:
     manifest = tmp_path / "news-evidence-generation.json"
     base = {
@@ -848,6 +848,18 @@ def test_news_evidence_generation_freezes_until_activation_then_tracks_current_s
     first_id, first_rows = news_resources._materialize_news_evidence_generation(
         [base], manifest,
     )
+    with monkeypatch.context() as pending_scope:
+        def reject_database_read(*_args, **_kwargs):
+            raise AssertionError("fresh source requested")
+        pending_scope.setattr(news_resources.sqlite3, "connect", reject_database_read)
+        assert news_resources._build_news_evidence_resource(
+            tmp_path / "source.sqlite3", manifest_path=manifest,
+        ) == {"snapshot_id": first_id, "record_count": 1}
+        with pytest.raises(AssertionError, match="fresh source requested"):
+            news_resources._build_news_evidence_resource(
+                tmp_path / "source.sqlite3", manifest_path=manifest,
+                activated_snapshot_id=first_id,
+            )
     later_id, later_rows = news_resources._materialize_news_evidence_generation([{
         **base,
         "economic_age_minutes": 181.5,

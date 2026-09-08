@@ -137,15 +137,12 @@
   cycle. While eligible cleanup debt remains, the producer must not admit
   another replacement snapshot. Immutable replacement therefore cannot turn
   into unbounded retained duplication even though each request is bounded.
-- News-evidence cleanup reserves its worst-case physical D1 row-write cost in
-  one D1-owned UTC-day ledger before deleting anything. The reservation is
-  serialized with all cleanup callers, survives producer and machine restart,
-  and fails closed on budget exhaustion or clock regression. A claim lost to
-  installer or producer death may delay cleanup but cannot be reused. Recovery
-  cleanup is limited to one 1,280-row reservation (1,280 deletion writes,
-  plus at most one ledger-row write) per UTC day. Debt therefore remains
-  bounded independently from recurring Free-plan work; temporary Paid capacity
-  is never cleanup authority.
+- News-evidence cleanup progresses in bounded requests without a daily admission
+  lock. Each request deletes at most 200 obsolete records, 20 receipts and 20
+  stale staging rows; each producer cycle allows at most eight requests. Active
+  data, recent readers and fresh staging remain protected. Account for physical
+  index writes in catch-up and recurring replacement usage. The retired daily
+  reservation ledger remains historical evidence, not runtime authority.
 - A producer may abandon only the staging generation recorded in its own
   durable state. A foreign busy generation is retained for its owner to advance;
   cleanup excludes fresh staging snapshots. Prepare reconciles staging receipts
@@ -201,6 +198,10 @@
   accumulating execution-time drift, while missed periods coalesce instead of
   creating a catch-up burst. Restarting the synchronizer must not collapse those
   independent cadences into one upload burst.
+  Successful incomplete news-index and news-evidence transfers immediately
+  resume through that owner. A hash-verified local evidence generation awaiting
+  its remote ACK is reused before opening SQLite; transfer progress must not
+  repeatedly rebuild the same accepted source snapshot.
 - Operator retry presentation is a digest-owned delta mirror. An unchanged
   authoritative scheduler snapshot creates no Worker request and no D1 write;
   a changed snapshot updates at most 32 changed jobs and removes at most 32
@@ -210,12 +211,11 @@
   convergence. Restart resumes that delta instead of replacing all retained
   jobs. The normal 200-job mirror must initially converge within seven control
   cycles, and ongoing small live changes must not starve obsolete-row cleanup.
-  Cleanup may skip membership evaluation when post-upsert cardinality equals
-  the unique incoming count: remaining changes already prohibit deletion, and
-  a fully matched equal-size set has no surplus. Check and deletion remain in
-  the same D1 batch; equal-size identity replacement must still converge.
   Capacity accounting includes these bounded catch-up writes separately from
   recurring actual changes; a per-invocation limit is not a daily quota proof.
+  Mutation-cost evidence covers both no-op and actual insertion/deletion work.
+  A read-only SELECT-equivalent measurement alone does not qualify a DELETE
+  optimization; obsolete identities must continue to drive indexed deletion.
 - Learning-history pages use a composite resource/model-identity/time index and
   an exact materialized count maintained at the D1 write boundary. Page reads
   fetch at most `limit + 1` rows before byte bounding; visitor pagination must

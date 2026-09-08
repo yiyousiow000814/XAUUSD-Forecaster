@@ -2,8 +2,6 @@ export const NEWS_EVIDENCE_CONTRACT_VERSION = "news-evidence-paged-v2";
 export const NEWS_EVIDENCE_SNAPSHOT_ID = /^[a-f0-9]{64}$/;
 export const NEWS_EVIDENCE_CURSOR_STALE = "NEWS_EVIDENCE_CURSOR_STALE";
 export const NEWS_EVIDENCE_CURSOR_INVALID = "NEWS_EVIDENCE_CURSOR_INVALID";
-export const NEWS_EVIDENCE_CLEANUP_STEP_WRITE_RESERVATION = 1_280;
-export const NEWS_EVIDENCE_CLEANUP_DAILY_WRITE_RESERVATION = 1_280;
 
 export type EvidenceMode = "all" | "eligible" | "seen" | "unseen";
 
@@ -512,38 +510,6 @@ export async function cleanupNewsEvidenceSnapshots(
       status: "OK", cleanup: "advanced",
       deleted_records: 0, deleted_batches: 0, deleted_staging: 0,
       cleanup_pending: false,
-    };
-  }
-  const budgetDay = now.toISOString().slice(0, 10);
-  // Reserve the worst physical row cost before mutation. One step can delete
-  // 200 records (table + PK + four indexes), 20 receipts (table + PK), and
-  // 20 stale staging rows (table + PK): 1,280 rows written at most. A crash
-  // after this claim loses capacity but cannot exceed the Free-plan budget.
-  const claim = await binding.prepare(
-    `INSERT INTO news_evidence_cleanup_budget
-       (id,budget_day,reserved_rows_written,updated_at) VALUES (1,?,?,?)
-     ON CONFLICT(id) DO UPDATE SET
-       budget_day=excluded.budget_day,
-       reserved_rows_written=CASE
-         WHEN news_evidence_cleanup_budget.budget_day<excluded.budget_day
-           THEN excluded.reserved_rows_written
-         ELSE news_evidence_cleanup_budget.reserved_rows_written
-              + excluded.reserved_rows_written END,
-       updated_at=excluded.updated_at
-     WHERE news_evidence_cleanup_budget.budget_day<excluded.budget_day
-        OR (news_evidence_cleanup_budget.budget_day=excluded.budget_day
-            AND news_evidence_cleanup_budget.reserved_rows_written
-                + excluded.reserved_rows_written<=?)`,
-  ).bind(
-    budgetDay, NEWS_EVIDENCE_CLEANUP_STEP_WRITE_RESERVATION, now.toISOString(),
-    NEWS_EVIDENCE_CLEANUP_DAILY_WRITE_RESERVATION,
-  ).run();
-  if (Number(claim.meta?.changes ?? 0) !== 1) {
-    return {
-      status: "OK", cleanup: "budget_exhausted",
-      deleted_records: 0, deleted_batches: 0, deleted_staging: 0,
-      cleanup_pending: true, cleanup_budget_exhausted: true,
-      cleanup_budget_day: budgetDay,
     };
   }
   const cleanup = await binding.batch([

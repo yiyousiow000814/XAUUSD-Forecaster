@@ -91,3 +91,16 @@ public requirement needs the complete cold evidence archive, and the local
 authority remains intact. This is provisional until the exact merged PR A
 Candidate proof and additive migration measurements reconcile these bounds.
 R2 is not justified by the current product requirement or capacity model.
+
+
+## September 9 superseding observation
+
+The earlier daily cleanup assumption is obsolete. One 200-record step per day
+blocked valid evidence replacement for days. Cleanup now retains its per-request
+200/20/20 record/receipt/staging bounds and eight-request producer-cycle bound,
+but no daily reservation. The historical ledger and this original estimate are
+retained as evidence. Catch-up and recurring replacement must include physical
+index writes; the earlier 46,881-write recurring estimate is not current
+acceptance. Production currently uses the user-authorized Paid plan. Re-measure
+complete equal-duration windows after catch-up before claiming Free-plan fit or
+an aggregate percentage reduction.

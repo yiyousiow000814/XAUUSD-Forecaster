@@ -1270,26 +1270,18 @@ def _post_news_evidence(remote_url: str, payload: bytes, config: dict) -> dict:
         require(result.get("activated") == snapshot_id)
         require(integer("count", request["expected_count"]) == request["expected_count"])
     else:
-        require(result.get("cleanup") in {"advanced", "budget_exhausted"})
+        require(result.get("cleanup") == "advanced")
         require(type(result.get("cleanup_pending")) is bool)
         for field, limit in (("deleted_records", 200), ("deleted_batches", 20),
                              ("deleted_staging", 20)):
             integer(field, limit)
-        if "cleanup_budget_exhausted" in result:
-            require(type(result["cleanup_budget_exhausted"]) is bool)
-        exhausted = result.get("cleanup_budget_exhausted") is True
-        require(exhausted == (result["cleanup"] == "budget_exhausted"))
-        require(not exhausted or (result["cleanup_pending"] and all(
-            result[field] == 0 for field in
-            ("deleted_records", "deleted_batches", "deleted_staging")
-        )))
     return result
 
 
 def _cleanup_news_evidence_snapshots(
     remote_url: str, snapshot_id: str, config: dict,
 ) -> bool:
-    """Advance bounded cleanup debt until the D1-owned daily budget stops it."""
+    """Advance cleanup debt within the bounded per-cycle request allowance."""
     payload = json.dumps({
         "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
         "cleanup_active_snapshot": snapshot_id,
@@ -1298,8 +1290,6 @@ def _cleanup_news_evidence_snapshots(
     for _ in range(NEWS_EVIDENCE_CLEANUP_STEPS_PER_CYCLE):
         result = _post_news_evidence(remote_url, payload, config)
         cleanup_pending = result.get("cleanup_pending") is True
-        if result.get("cleanup_budget_exhausted") is True:
-            return True
         if not cleanup_pending:
             return False
     return cleanup_pending

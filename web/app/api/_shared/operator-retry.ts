@@ -340,15 +340,14 @@ export async function syncOperatorRetryJobs(
     binding.prepare(
     `WITH incoming AS (${incomingSql}), changed AS (${changedSql})
      DELETE FROM operator_retry_jobs
-     WHERE CASE WHEN (SELECT count(*) FROM operator_retry_jobs)=? THEN 0
-       ELSE NOT EXISTS (SELECT 1 FROM changed)
+     WHERE NOT EXISTS (SELECT 1 FROM changed)
        AND job_id IN (
          SELECT current.job_id FROM operator_retry_jobs current
          WHERE current.job_id NOT IN (SELECT incoming.job_id FROM incoming)
          ORDER BY current.job_id
          LIMIT ${OPERATOR_RETRY_SYNC_MUTATIONS_PER_INVOCATION}
-       ) END`,
-    ).bind(payload, normalized.length),
+       )`,
+    ).bind(payload),
     binding.prepare(
       `INSERT INTO operator_retry_sync_state (id,payload_digest,item_count,synced_at)
        SELECT 1,?,?,? WHERE

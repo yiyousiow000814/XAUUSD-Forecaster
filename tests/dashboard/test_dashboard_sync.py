@@ -1450,11 +1450,11 @@ def _evidence_ack(body: bytes, result: dict) -> dict:
     }
 
 
-def _evidence_cleanup_result(*, pending=False, exhausted=False) -> dict:
+def _evidence_cleanup_result(*, pending=False) -> dict:
     return {
-        "status": "OK", "cleanup": "budget_exhausted" if exhausted else "advanced",
+        "status": "OK", "cleanup": "advanced",
         "deleted_records": 0, "deleted_batches": 0, "deleted_staging": 0,
-        "cleanup_pending": pending, "cleanup_budget_exhausted": exhausted,
+        "cleanup_pending": pending,
     }
 
 
@@ -1753,16 +1753,10 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
             {"status": "OK", "cleanup_pending": True},
             {"status": "OK", "cleanup_pending": False},
         ], False, 3),
-        ([
-            {"status": "OK", "cleanup_pending": True},
-            {
-                "status": "OK", "cleanup_pending": True,
-                "cleanup_budget_exhausted": True,
-            },
-        ], True, 2),
+        ([{"status": "OK", "cleanup_pending": True}] * 8, True, 8),
     ],
 )
-def test_news_evidence_cleanup_uses_feedback_and_stops_at_daily_budget(
+def test_news_evidence_cleanup_uses_feedback_and_bounds_each_cycle(
     monkeypatch, responses, expected_pending, expected_calls,
 ) -> None:
     from xauusd_forecaster.dashboard.sync import resources as module
@@ -1774,7 +1768,6 @@ def test_news_evidence_cleanup_uses_feedback_and_stops_at_daily_budget(
         result = next(responses)
         return _evidence_ack(body, _evidence_cleanup_result(
             pending=result["cleanup_pending"],
-            exhausted=result.get("cleanup_budget_exhausted", False),
         ))
 
     monkeypatch.setattr(module, "_post_json", post)
@@ -3476,28 +3469,32 @@ def test_operator_retry_worker_urls_keep_human_and_machine_planes_separate() -> 
 
 
 @pytest.mark.parametrize("state,failed", [("REPLAYING", False), ("CURRENT", False), ("REPLAYING", True)])
-def test_news_replay_immediate_resume_only_after_success(tmp_path, monkeypatch, state, failed):
+@pytest.mark.parametrize("resource", ["news", "news_evidence"])
+def test_news_replay_immediate_resume_only_after_success(tmp_path, monkeypatch, state, failed, resource):
     module = _sync_module()
     schedule = tmp_path / "schedule.json"
     news = tmp_path / "news.json"
-    _schedule_only(module, schedule, "news")
+    _schedule_only(module, schedule, resource)
     target = {"name": "cloudflare", "resource_schedule_state_file": str(schedule),
-              "news_state_file": str(news), module.RUNTIME_STATE_ROOT_KEY: str(tmp_path)}
-    news.write_text(json.dumps({"projection_state": state}), encoding="utf-8")
+              f"{resource}_state_file": str(news), module.RUNTIME_STATE_ROOT_KEY: str(tmp_path)}
+    checkpoint = {"projection_state": state} if resource == "news" else {
+        "staging_snapshot_id" if state == "REPLAYING" else "active_snapshot_id": "a" * 64,
+    }
+    news.write_text(json.dumps(checkpoint), encoding="utf-8")
     def advance(_payload, _target):
         if failed:
             raise urllib.error.HTTPError("https://worker/api/news-index", 429, "limited", {}, None)
-    monkeypatch.setattr(module, "_sync_news", advance)
+    monkeypatch.setattr(module, f"_sync_{resource}", advance)
     before = datetime.now(timezone.utc)
     result = module.sync_resource_lane([target], lane="heavy")
-    recorded = json.loads(schedule.read_text(encoding="utf-8"))["resources"]["news"]
+    recorded = json.loads(schedule.read_text(encoding="utf-8"))["resources"][resource]
     attempted = datetime.fromisoformat(recorded["last_attempt_at"])
     due = datetime.fromisoformat(recorded["next_run_at"])
     assert attempted >= before
     if state == "REPLAYING" and not failed:
         assert due == attempted
         assert not result
-        assert module._due_resource_policies(json.loads(schedule.read_text()), attempted, lane="heavy")[0][0] == "news"
+        assert module._due_resource_policies(json.loads(schedule.read_text()), attempted, lane="heavy")[0][0] == resource
         # A different overdue resource runs first; repeated replay does not starve it.
         scheduled = json.loads(schedule.read_text())
         scheduled["resources"]["audit"] = {"next_run_at": before.isoformat()}
