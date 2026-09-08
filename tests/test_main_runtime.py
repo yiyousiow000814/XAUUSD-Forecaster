@@ -235,3 +235,31 @@ $service = @(Get-RuntimeServices)[0]
 Stop-RuntimeService $service
 @{{remaining=@(Get-RuntimeServiceProcesses $service).Count}} | ConvertTo-Json
 """)
+
+
+def test_real_scheduled_task_registration_preserves_scoped_hidden_entry(tmp_path: Path) -> None:
+    import uuid
+    scripts = tmp_path / "runtime with spaces" / "scripts"
+    scripts.mkdir(parents=True)
+    for name in ("main_runtime.ps1", "run_main_services.ps1", "main_services_launcher.vbs"):
+        (scripts / name).write_bytes((ROOT / "scripts" / name).read_bytes())
+    task_name = "XAUUSD-Test-Main-" + uuid.uuid4().hex
+    result = powershell(tmp_path, f"""
+$script:RuntimeRoot = {ps_quote(scripts.parent)}
+$script:RepositoryRoot = {ps_quote(tmp_path / 'configuration root')}
+try {{
+    Install-MainRuntimeTask -TaskName {ps_quote(task_name)}
+    $task = Get-ScheduledTask -TaskName {ps_quote(task_name)}
+    @{{execute=$task.Actions[0].Execute; arguments=$task.Actions[0].Arguments; working_directory=$task.Actions[0].WorkingDirectory; triggers=@($task.Triggers).Count; multiple_instances=[string]$task.Settings.MultipleInstances; limit=$task.Settings.ExecutionTimeLimit}} | ConvertTo-Json
+}} finally {{
+    Unregister-ScheduledTask -TaskName {ps_quote(task_name)} -Confirm:$false -ErrorAction SilentlyContinue
+}}
+""")
+    assert result["execute"].lower().endswith("system32\\wscript.exe")
+    assert str(scripts / "main_services_launcher.vbs") in result["arguments"]
+    assert str(scripts / "run_main_services.ps1") in result["arguments"]
+    assert str(tmp_path / "configuration root") in result["arguments"]
+    assert result["working_directory"] == str(scripts.parent)
+    assert result["triggers"] == 2
+    assert result["multiple_instances"] == "IgnoreNew"
+    assert result["limit"] == "PT0S"

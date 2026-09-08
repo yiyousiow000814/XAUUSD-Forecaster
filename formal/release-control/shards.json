@@ -14,67 +14,6 @@
   ],
   "shards": [
     {
-      "id": "cpu-evidence-safety",
-      "module": "CpuEvidence.tla",
-      "config": "CpuEvidenceSafety.cfg",
-      "kind": "safety",
-      "paths": [
-        "scripts/worker_cpu_evidence.ps1",
-        "formal/release-control/CpuEvidence*"
-      ],
-      "properties": [
-        "TypeOK",
-        "CpuQualificationIsValid",
-        "CpuRetryBudgetIsBounded",
-        "DeficitRepairRequestBudgetIsBounded",
-        "DeficitRepairSetIsFrozen",
-        "QualifiedFamiliesAreNeverReplayed",
-        "DeficitRepairCannotFabricateEvidence",
-        "NoSecondDeficitRepairRound",
-        "ReserveEvidenceUseIsBounded",
-        "CpuHardFailureCannotQualify",
-        "OutlierRequiresBoundedConfirmation",
-        "NoSecondOutlierConfirmation",
-        "OutlierConfirmationMatchesRequestShape",
-        "RepeatedCpuPressureCannotQualify",
-        "OriginalOutlierCannotBeErased",
-        "ReusedCpuEvidenceMatchesArtifact",
-        "CpuRecoveryPreservesIndependentStages",
-        "EveryRequiredFamilyQuotaSatisfied",
-        "ArtifactKeyChangeInvalidatesReuse",
-        "CpuEvidenceOnlyGrows",
-        "TargetedRetryPreservesAcceptedWork"
-      ]
-    },
-    {
-      "id": "cpu-evidence-liveness",
-      "module": "CpuEvidence.tla",
-      "config": "CpuEvidenceLiveness.cfg",
-      "kind": "liveness",
-      "paths": [
-        "scripts/worker_cpu_evidence.ps1",
-        "formal/release-control/CpuEvidence*"
-      ],
-      "properties": [
-        "TypeOK",
-        "CpuQualificationIsValid",
-        "CpuRetryBudgetIsBounded",
-        "DeficitRepairRequestBudgetIsBounded",
-        "DeficitRepairSetIsFrozen",
-        "QualifiedFamiliesAreNeverReplayed",
-        "DeficitRepairCannotFabricateEvidence",
-        "NoSecondDeficitRepairRound",
-        "ReserveEvidenceUseIsBounded",
-        "CpuHardFailureCannotQualify",
-        "OutlierRequiresBoundedConfirmation",
-        "NoSecondOutlierConfirmation",
-        "OutlierConfirmationMatchesRequestShape",
-        "RepeatedCpuPressureCannotQualify",
-        "OriginalOutlierCannotBeErased",
-        "PendingEventuallyResolves"
-      ]
-    },
-    {
       "id": "news-migration-safety",
       "module": "NewsMigration.tla",
       "config": "NewsMigrationSafety.cfg",
@@ -93,31 +32,6 @@
         "CurrentGenerationCannotBeCleaned",
         "FreshStagingCannotBeCleaned",
         "InvalidStagedLegacyCannotActivate"
-      ]
-    },
-    {
-      "id": "access-evidence-safety",
-      "module": "AccessEvidence.tla",
-      "config": "AccessEvidenceSafety.cfg",
-      "kind": "safety",
-      "paths": [
-        "scripts/access-qualification-contract.json",
-        "formal/release-control/AccessEvidence*"
-      ],
-      "properties": [
-        "TypeOK",
-        "AccessEvidenceIsRequired",
-        "InvalidAccessReceiptCannotPass",
-        "AccessApprovalIsIdempotent",
-        "ReuseRequiresExactAccessKey",
-        "UnreadableOrChangedProviderCannotReuse",
-        "AccessFailureCannotReuse",
-        "ReuseDoesNotFabricateHumanApproval",
-        "RenewalRequiresContinuousAudit",
-        "StaleMachineEvidenceCannotPass",
-        "BrokenChainCannotRenew",
-        "RenewalKeepsHumanRoot",
-        "RenewalIsBounded"
       ]
     }
   ]

@@ -16,6 +16,9 @@ On 2026-09-08 the settings above were saved and obsolete Workers `agents`,
 The dashboard inventory was refreshed and showed exactly one application.
 Required production storage, secrets and Access were preserved.
 
-Production currently needs the reviewed 0031 learning-history schema checked
-against measured D1 quota headroom before current main is activated. Configuration
-completion does not establish migration or deployment completion.
+Production migration 0031 was applied and verified on 2026-09-08. Exact counts
+match all source resource/model groups, and learning-history lookups use the new
+identity/time index. The account was already on Workers Paid (verified in the
+Cloudflare Current plan display); no plan change was made. Retain efficient
+bounded requests and measured headroom rather than assuming Free limits describe
+the actual account. Migration, ongoing traffic and backlog remain distinct costs.

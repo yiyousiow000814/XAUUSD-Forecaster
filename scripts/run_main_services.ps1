@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('Run','Start','Stop','StatusJson')][string]$Action = 'Run',
+    [ValidateSet('Run','Start','Stop','StatusJson','Install')][string]$Action = 'Run',
     [string]$RuntimeRoot = '', [string]$RepositoryRoot = ''
 )
 $ErrorActionPreference = 'Stop'
@@ -17,6 +17,7 @@ if ($Action -eq 'StatusJson') {
     else { @{state='not_started'} | ConvertTo-Json }
     exit 0
 }
+if ($Action -eq 'Install') { Install-MainRuntimeTask; exit 0 }
 New-Item -ItemType Directory -Path $script:LogRoot -Force | Out-Null
 if ($Action -eq 'Stop') { Write-RuntimeJson $script:DesiredPath @{state='stopped'}; exit 0 }
 if ($Action -eq 'Start') {

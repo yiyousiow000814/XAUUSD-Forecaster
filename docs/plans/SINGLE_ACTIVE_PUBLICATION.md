@@ -47,3 +47,17 @@ The connected Worker fixture reads its retained news schema observation from
 the executed SQL; it no longer parses a retired controller or represents its
 source as production authority. Native main publication is checked through the
 actual checked-in build contract; no Preview project upload entry remains.
+
+## Final owner and qualification retirement
+
+Windows Task Scheduler owns login and one-minute restart admission. Its hidden
+launcher and the root mutex prevent duplicate service owners. Install registers
+only; Start/Stop retain intent, including after process and machine restart.
+The real registration test creates/removes one isolated task and validates its
+command, quoting, root, repeat trigger and instance policy.
+
+CPU qualification/top-up and Access receipt-renewal machinery were exclusive to
+the retired publisher and have no production caller. Remove those scripts,
+contracts and formal models. Actual Worker CPU/capacity tests, authentication,
+JWT verification and original human audit remain. The final repository policy
+accepts only native main direct deployment, with no old upload alternative.

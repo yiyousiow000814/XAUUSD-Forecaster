@@ -207,6 +207,25 @@ function Update-MainRuntime {
     Set-RuntimeRevision -Services @(Get-RuntimeServices) -Revision $revision
 }
 
+function Install-MainRuntimeTask {
+    param([string]$TaskName = 'XAUUSD-Forecaster-Main')
+    $launcher = Join-Path $script:RuntimeRoot 'scripts/main_services_launcher.vbs'
+    $entry = Join-Path $script:RuntimeRoot 'scripts/run_main_services.ps1'
+    foreach ($path in @($launcher, $entry, (Join-Path $script:RuntimeRoot 'scripts/main_runtime.ps1'))) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'Main runtime installation is missing a source file' }
+    }
+    $arguments = @($launcher, $entry, $script:RuntimeRoot, $script:RepositoryRoot) | ForEach-Object { ConvertTo-RuntimeArgument $_ }
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $action = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32/wscript.exe') -Argument ($arguments -join ' ') -WorkingDirectory $script:RuntimeRoot
+    $triggers = @(
+        (New-ScheduledTaskTrigger -AtLogOn -User $user),
+        (New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 1))
+    )
+    $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $triggers -Principal $principal -Settings $settings -Force | Out-Null
+}
+
 function Invoke-MainRuntime {
     $key = [Security.Cryptography.SHA256]::Create()
     try { $name = [BitConverter]::ToString($key.ComputeHash([Text.Encoding]::UTF8.GetBytes($script:RuntimeRoot.ToLowerInvariant()))).Replace('-', '') }

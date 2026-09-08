@@ -102,20 +102,16 @@ fixture builders retain the explicit Sync import compatibility boundary.
 ### Source revision to Stable
 
 ```text
-exact Git source + immutable Worker Version
-  -> behavior-keyed evidence DAG
-  -> renew only near-expiry live leases
-  -> Candidate at 0%
-  -> cheap Promote precheck
-  -> Switch Windows and Worker owner
-  -> targeted deferred projection + immediate Sync
-  -> Observe
-  -> COMMIT_STABLE
+reviewed main + required CI
+  -> native Cloudflare build and direct single-version deploy
+  -> local main owner fetches a fixed main SHA
+  -> stop owned services, update source/dependencies, reload and start
+  -> actual source identity, business health and strict Sync ACK
 ```
 
-`scripts/release-evidence-contract.json` declares the current evidence graph.
-CPU, semantic, Access, migration, placement, rollback, Promote, and Observe are
-separate nodes; an unrelated source change must not invalidate all nodes.
+Windows Task Scheduler admits the hidden main owner at login and after a crash.
+A root-specific mutex excludes duplicate owners. Failed updates remain visible
+and retry forward; no Candidate graph or rollback controller remains.
 
 ### Storage lifecycle
 
