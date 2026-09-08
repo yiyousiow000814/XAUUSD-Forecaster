@@ -64,6 +64,7 @@
       "id": "python-3",
       "tests": [
         "tests/test_dashboard_api.py",
+        "tests/test_dashboard_news_resources.py",
         "tests/test_runtime_root_ownership.py",
         "tests/test_production_shape.py",
         "tests/test_assistant_routing.py",

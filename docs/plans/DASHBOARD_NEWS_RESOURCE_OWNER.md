@@ -68,3 +68,16 @@ capture is consumed as immutable generation evidence by the existing retained
 artifact path, without impersonating its producer. The installer stages the
 exact tracked revision via Git worktree, including the new package module.
 Final integration and independent review remain required.
+
+## Test ownership completion
+
+Eighteen resource-only test definitions (24 parameterized cases) now live in
+`tests/test_dashboard_news_resources.py`. Remove only their unused API-module
+initialization; retain all assertions and fixtures. The two annotation builders
+and existing credential/cache lifetime fixture live in one shared test module.
+Twenty-one moved definitions have identical ASTs after removing that unused
+load. HTTP integration tests remain in the API suite. CI assigns the resource
+suite to the same existing shard; no tests or timeout gates are removed. The
+News architecture view adds the new resource test and shared fixture sources
+to its existing selected test set. API/bootstrap integration still runs as a
+separate gate; this does not claim all-repository graph coverage.

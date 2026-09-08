@@ -147,7 +147,9 @@
         "tests/test_dashboard_resource_contracts.py",
         "web/tests/news-projection-store.test.mjs",
         "web/tests/news-evidence-store.test.mjs",
-        "web/tests/audit-content-rendering.test.mjs"
+        "web/tests/audit-content-rendering.test.mjs",
+        "tests/test_dashboard_news_resources.py",
+        "tests/dashboard_news_fixtures.py"
       ]
     },
     "clock-transaction": {
