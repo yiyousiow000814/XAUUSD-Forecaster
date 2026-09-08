@@ -120,6 +120,10 @@ CREATE TABLE IF NOT EXISTS news_ai_job_attempts_v1 (
     UNIQUE(job_id,attempt_number,account_id,credential_id)
 );
 
+-- Avoid repeatedly scanning a whole task generation for each annotation.
+CREATE INDEX IF NOT EXISTS news_ai_jobs_annotation_lookup_v1
+ON news_ai_jobs_v1(annotation_id,task_type,prompt_version);
+
 CREATE INDEX IF NOT EXISTS news_ai_job_attempts_lookup_v1
 ON news_ai_job_attempts_v1(job_id,attempt_number,attempted_at);
 

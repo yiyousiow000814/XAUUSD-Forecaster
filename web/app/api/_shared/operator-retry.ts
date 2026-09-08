@@ -16,10 +16,9 @@ export class OperatorRetryInputError extends Error {
   }
 }
 
-// A full 200-row mirror can change at once after an offline period. Drain that
-// delta across control cycles instead of spending an unbounded share of the
-// account's daily D1 write allowance in one catch-up burst.
-export const OPERATOR_RETRY_SYNC_MUTATIONS_PER_INVOCATION = 1;
+// Drain a bounded burst faster than live jobs change. One row per control
+// cycle can starve deletion forever; unchanged rows still write nothing.
+export const OPERATOR_RETRY_SYNC_MUTATIONS_PER_INVOCATION = 32;
 
 const retryJobJson = (alias: string) => `json_object(
   'job_id',${alias}.job_id,'task_type',${alias}.task_type,'title',${alias}.title,
@@ -344,9 +343,7 @@ export async function syncOperatorRetryJobs(
      WHERE NOT EXISTS (SELECT 1 FROM changed)
        AND job_id IN (
          SELECT current.job_id FROM operator_retry_jobs current
-         WHERE NOT EXISTS (
-           SELECT 1 FROM incoming WHERE incoming.job_id=current.job_id
-         )
+         WHERE current.job_id NOT IN (SELECT incoming.job_id FROM incoming)
          ORDER BY current.job_id
          LIMIT ${OPERATOR_RETRY_SYNC_MUTATIONS_PER_INVOCATION}
        )`,
@@ -363,9 +360,8 @@ export async function syncOperatorRetryJobs(
          )
          AND NOT EXISTS (
            SELECT 1 FROM operator_retry_jobs current
-           WHERE NOT EXISTS (
-             SELECT 1 FROM json_each(?) incoming
-             WHERE json_extract(incoming.value,'$.job_id')=current.job_id
+           WHERE current.job_id NOT IN (
+             SELECT json_extract(incoming.value,'$.job_id') FROM json_each(?) incoming
            )
          )
        ON CONFLICT(id) DO UPDATE SET

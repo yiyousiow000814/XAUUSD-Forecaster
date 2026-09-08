@@ -1723,7 +1723,16 @@ def test_learning_curve_excludes_predictions_not_after_model_creation(tmp_path) 
     _insert_prediction(ledger.connection, "too-early", created_at)
     _insert_prediction(ledger.connection, "true-oos", created_at + timedelta(minutes=5))
     ledger.connection.commit()
+    statements = []
+    ledger.connection.set_trace_callback(statements.append)
     payload = learning_curve_payload(ledger.connection)
+    ledger.connection.set_trace_callback(None)
+    version_reads = [sql for sql in statements if "WHERE p.model_version=" in sql]
+    assert version_reads
+    for sql in version_reads:
+        plan = [str(row[3]) for row in ledger.connection.execute("EXPLAIN QUERY PLAN " + sql)]
+        assert any("model_version=?" in step for step in plan)
+        assert not any(step == "SCAN p" for step in plan)
     model = payload["models"][0]
     assert model["subsequent_oos_rows"] == 1
     assert model["cumulative_quote_return"] == pytest.approx(net_shadow_log_return(2.0))

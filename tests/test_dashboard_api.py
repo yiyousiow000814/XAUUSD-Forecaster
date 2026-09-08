@@ -2095,6 +2095,18 @@ def test_critical_status_owns_bounded_recent_decisions_and_live_oos_count(
         ]
     assert any("source_decision_id=?" in step for step in plan)
     assert not any("prediction_v2_time" in step for step in plan)
+    statements.clear()
+    module._dashboard_payload(
+        database, clock=lambda: now, optional_resources=frozenset({"audit"}),
+    )
+    audit_reads = [sql for sql in statements if "LIMIT 30" in sql and
+                   "FROM decision_events d" in sql]
+    assert audit_reads
+    with real_connect(database) as connection:
+        for sql in audit_reads:
+            plan = [str(row[3]) for row in connection.execute("EXPLAIN QUERY PLAN " + sql)]
+            assert any("source_decision_id=?" in step for step in plan)
+            assert not any("prediction_v2_time" in step for step in plan)
 
 
 def test_critical_status_returns_every_available_decision_below_window(tmp_path) -> None:
