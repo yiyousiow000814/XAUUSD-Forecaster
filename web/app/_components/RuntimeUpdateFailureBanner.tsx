@@ -2,7 +2,7 @@ import { runtimeUpdateFailurePresentation } from "../_lib/runtime-update-failure
 
 export type RuntimeUpdateFailure = {
   status: string;
-  failed_at: string;
+  failed_at: string | null;
 };
 
 export default function RuntimeUpdateFailureBanner({ failure }: { failure?: RuntimeUpdateFailure | null }) {

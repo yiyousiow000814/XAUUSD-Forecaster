@@ -894,17 +894,22 @@ def _dashboard_payload(
         str(collector_heartbeat.get("last_error") or "") or None,
     )
     runtime_update_failure = None
-    runtime_update_path = database.parent / "runtime-update-state.json"
+    runtime_update_path = database.parent / "main-runtime-status.json"
     if runtime_update_path.exists():
         try:
             runtime_update = json.loads(runtime_update_path.read_text(encoding="utf-8-sig"))
-            if runtime_update.get("user_visible_failure") is True:
+            if (not isinstance(runtime_update, dict)
+                    or runtime_update.get("state") not in {
+                        "running", "stopped", "failed", "update_failed",
+                    }):
+                raise ValueError("invalid main runtime status")
+            if runtime_update.get("state") in {"failed", "update_failed"}:
                 runtime_update_failure = {
-                    "status": runtime_update.get("update_status"),
-                    "failed_at": runtime_update.get("failed_at"),
+                    "status": str(runtime_update["state"]).upper(),
+                    "failed_at": runtime_update.get("updated_at"),
                 }
         except (OSError, ValueError):
-            pass
+            runtime_update_failure = {"status": "STATUS_UNAVAILABLE", "failed_at": None}
 
     system_components = {
         "quote_bridge": quote_component,
@@ -960,7 +965,16 @@ def _dashboard_payload(
         runtime_update_failure=runtime_update_failure,
         daily_news_brief=daily_news_brief_summary,
         sync_degraded_resources=[
-            row for row in degraded_resources if isinstance(row, dict)
+            {
+                **row,
+                "last_observation": next((
+                    observation for observation in sync_status.get("resource_observations", [])
+                    if isinstance(observation, dict)
+                    and observation.get("target") == row.get("target")
+                    and observation.get("resource") == row.get("resource")
+                ), None),
+            }
+            for row in degraded_resources if isinstance(row, dict)
         ],
     )
 

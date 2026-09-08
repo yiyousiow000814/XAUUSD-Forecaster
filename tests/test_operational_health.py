@@ -990,3 +990,23 @@ def test_scheduler_health_detects_unrepaired_display_placeholder() -> None:
     )
     assert alert["blocking"] is True
     assert alert["evidence"]["unrepaired_invalid_annotations"] == 1
+
+
+def test_sync_health_retains_unconfirmed_failure_and_clears_success() -> None:
+    for state in ("ERROR", "OK", None):
+        observation = {"status": state, "completed_at": NOW.isoformat()}
+        result = extend_with_component_alerts(
+            scheduler_health_snapshot(_connection(), now=NOW),
+            components={}, news_sources=[], runtime_update_failure=None,
+            sync_degraded_resources=[{
+                "target": "cloudflare", "resource": "learning",
+                "error_code": "REMOTE_UNAVAILABLE", "last_observation": observation,
+            }],
+        )
+        alerts = [a for a in result["alerts"] if a["code"] == "OPS_SYNC_RESOURCE_FAILED"]
+        if state == "OK":
+            assert not alerts
+        else:
+            assert len(alerts) == 1
+            assert alerts[0]["evidence"]["last_observation"] == observation
+            assert "尚未确认恢复" in alerts[0]["message_zh"]
