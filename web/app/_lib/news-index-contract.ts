@@ -32,11 +32,11 @@ const digest = (value: unknown): value is string => (
   typeof value === "string" && /^[a-f0-9]{64}$/.test(value)
 );
 
-/** Only one exact, receipt-matched CURRENT generation may claim the 60-day total. */
+/** Totals belong to the verified serving generation, even while its replacement uploads. */
 export function authoritativeNewsTotals(index: NewsIndexTotals): AuthoritativeNewsTotals | null {
   if (
     index.totals_scope !== "VERIFIED_CURRENT_GENERATION"
-    || index.projection_state !== "CURRENT" || index.verified_complete !== true
+    || !["CURRENT", "REPLAYING"].includes(index.projection_state ?? "") || index.verified_complete !== true
     || !digest(index.generation_id) || !digest(index.snapshot_id)
     || !digest(index.source_digest) || !digest(index.receipt_digest)
     || index.receipt_digest !== index.source_receipt_digest

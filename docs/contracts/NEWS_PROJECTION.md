@@ -64,6 +64,11 @@
 - `CURRENT`, `RECOVERY_REQUIRED`, `REPLAYING`, `VERIFYING`, and `DEGRADED` are
   user-visible truth states. Only a receipt-matched, verified `CURRENT`
   generation may claim a complete selected-window total.
+  While a replacement is `REPLAYING`, its verified serving generation remains
+  complete and may display its own totals, explicitly labelled with the serving
+  activation time. These are not replacement totals or a freshness guarantee.
+  Replacement progress comes from indexed acknowledged receipt offsets and is
+  informational only; it cannot authorize activation or replace strict ACK.
 
 ## Bounds and retention
 
