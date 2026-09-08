@@ -67,6 +67,9 @@ def test_windows_runtime_gate_is_parallel_bounded_and_keeps_required_name() -> N
 def test_windows_runtime_manifest_assigns_every_required_test_exactly_once() -> None:
     expected: set[str] = set()
     for relative in (
+        "tests/test_main_runtime.py",
+        "tests/test_single_publication.py",
+        "tests/test_public_health_check.py",
         "tests/test_runtime_health.py",
         "tests/test_news_scheduler.py",
         "tests/test_runtime_root_ownership.py",
@@ -93,6 +96,7 @@ def test_windows_runtime_manifest_assigns_every_required_test_exactly_once() -> 
     assert set(assignments) == expected
     assert {nodeid: count for nodeid, count in assignments.items() if count != 1} == {}
     assert {shard["family"] for shard in WINDOWS_MANIFEST["shards"]} == {
+        "single-active-publication",
         "windows-runtime-core",
         "windows-runtime-paths",
         "windows-runtime-release",
