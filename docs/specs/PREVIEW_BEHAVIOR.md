@@ -145,7 +145,9 @@ product requirement.
   before the allowed current status refresh completes.
 - The news index reads the bounded current D1 archive. If that complete archive
   is unavailable, Preview reports it unavailable rather than substituting a
-  partial relay window.
+  partial relay window. Previous/next navigation uses the same generation-bound
+  keyset cursors as production; a changed generation resets to the first page
+  with a visible notice. Numeric page labels do not request OFFSET scans.
 - The news-evidence archive uses a bounded production-derived window frozen into
   the build artifact. The branch serves cursor-bound pages from that immutable
   fixture so filtering, paging, refresh, and stale-generation behavior can be

@@ -88,6 +88,7 @@ export async function GET(request: Request) {
     const payload = await readNewsProjectionPage(binding, {
       page, pageSize, reviewState, category: query.get("category")?.trim() ?? "",
       expectedGenerationId: expectedGenerationId || undefined,
+      cursor: query.get("cursor") || undefined,
     });
     const now = new Date().toISOString();
     payload.items = payload.items.map(raw => {

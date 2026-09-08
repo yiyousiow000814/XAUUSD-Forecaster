@@ -996,10 +996,42 @@ function activeCandidateCount(serialized: string, now: string) {
   return total - low;
 }
 
+type NewsPageCursor = {
+  version: 1; generation: string; review: NewsReviewState; category: string;
+  size: number; page: number; direction: "next" | "previous";
+  key: [string, string, string];
+};
+
+function encodeNewsPageCursor(cursor: NewsPageCursor) {
+  return btoa(encodeURIComponent(JSON.stringify(cursor)))
+    .replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+function decodeNewsPageCursor(value: string): NewsPageCursor {
+  try {
+    if (value.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(value)) throw new Error();
+    const text = value.replaceAll("-", "+").replaceAll("_", "/")
+      + "=".repeat((4 - value.length % 4) % 4);
+    const cursor = JSON.parse(decodeURIComponent(atob(text))) as NewsPageCursor;
+    if (cursor.version !== 1 || !NEWS_GENERATION_ID.test(cursor.generation)
+        || !["COMPLETED", "PROCESSING", "ISOLATED"].includes(cursor.review)
+        || typeof cursor.category !== "string" || cursor.category.length > 128
+        || !Number.isSafeInteger(cursor.size) || cursor.size < 1 || cursor.size > 50
+        || !Number.isSafeInteger(cursor.page) || cursor.page < 1
+        || !["next", "previous"].includes(cursor.direction)
+        || !Array.isArray(cursor.key) || cursor.key.length !== 3
+        || !cursor.key.every(key => typeof key === "string" && key.length <= 128)
+        || !SHA256.test(cursor.key[2])) throw new Error();
+    return cursor;
+  } catch {
+    throw new NewsProjectionProtocolError("invalid news page cursor", 400, "NEWS_PAGE_CURSOR_INVALID");
+  }
+}
+
 export async function readNewsProjectionPage(
   binding: D1Database, options: {
     page: number; pageSize: number; category: string; reviewState: NewsReviewState;
-    expectedGenerationId?: string;
+    expectedGenerationId?: string; cursor?: string;
   },
 ) {
   const state = await readNewsProjectionState(binding);
@@ -1026,6 +1058,23 @@ export async function readNewsProjectionPage(
       },
     );
   }
+  const cursor = options.cursor ? decodeNewsPageCursor(options.cursor) : null;
+  if (cursor && cursor.generation !== state.active_generation_id) {
+    throw new NewsProjectionProtocolError(
+      "news generation changed during pagination", 409, "NEWS_PROJECTION_GENERATION_CHANGED",
+    );
+  }
+  if (cursor && (cursor.review !== options.reviewState || cursor.category !== options.category
+      || cursor.size !== options.pageSize || cursor.page !== options.page)) {
+    throw new NewsProjectionProtocolError("news page filters changed", 400, "NEWS_PAGE_CURSOR_INVALID");
+  }
+  if (!cursor && options.page !== 1) {
+    throw new NewsProjectionProtocolError(
+      "请刷新新闻列表后重新翻页", 409, "NEWS_PAGE_CURSOR_REQUIRED",
+    );
+  }
+  const backwards = cursor?.direction === "previous";
+  const order = backwards ? "ASC" : "DESC";
   const receiptIndexed = state.contract_version === NEWS_PROJECTION_RECEIPT_INDEX_CONTRACT;
   const conditions = receiptIndexed
     ? [ACTIVE_NEWS_SQL, `(${NEWS_REVIEW_STATE_CASE_SQL})=?`]
@@ -1035,17 +1084,30 @@ export async function readNewsProjectionPage(
   if (options.category) {
     conditions.push("category=?"); binds.push(options.category);
   }
+  if (cursor) {
+    conditions.push(`(published_time,collector_first_seen_time,detail_key)${backwards ? ">" : "<"}(?,?,?)`);
+    binds.push(...cursor.key);
+  }
   const where = conditions.join(" AND ");
-  const offset = (options.page - 1) * options.pageSize;
   const now = new Date().toISOString();
   const pageData = await binding.prepare(
-    `WITH page_rows(payload,published_time,collector_first_seen_time,detail_key) AS (
+    `WITH page_candidates(payload,published_time,collector_first_seen_time,detail_key) AS MATERIALIZED (
        SELECT payload,published_time,collector_first_seen_time,detail_key
          FROM ${receiptIndexed ? "news_index" : "news_projection_index"} WHERE ${where}
-        ORDER BY published_time DESC,collector_first_seen_time DESC,detail_key DESC
-        LIMIT ? OFFSET ?
+        ORDER BY published_time ${order},collector_first_seen_time ${order},detail_key ${order}
+        LIMIT ?
+     ), page_rows AS (
+       SELECT * FROM page_candidates
+       ORDER BY published_time ${order},collector_first_seen_time ${order},detail_key ${order}
+       LIMIT ?
      )
-     SELECT COALESCE((SELECT json_group_array(json(payload) ORDER BY
+     SELECT (SELECT count(*) FROM page_candidates) fetched_count,
+            (SELECT json_array(published_time,collector_first_seen_time,detail_key)
+               FROM page_rows ORDER BY published_time DESC,collector_first_seen_time DESC,detail_key DESC LIMIT 1) first_key,
+            (SELECT json_array(published_time,collector_first_seen_time,detail_key)
+               FROM page_rows ORDER BY published_time ASC,collector_first_seen_time ASC,detail_key ASC LIMIT 1) last_key,
+            (SELECT active_generation_id FROM news_projection_state WHERE id=1 AND projection_state='CURRENT') observed_generation,
+            COALESCE((SELECT json_group_array(json(payload) ORDER BY
                               published_time DESC,collector_first_seen_time DESC,detail_key DESC)
                         FROM page_rows),'[]') items_json,
             COALESCE((SELECT item_count FROM news_projection_counts
@@ -1064,7 +1126,7 @@ export async function readNewsProjectionPage(
             (SELECT json_object('generation_id',generation_id,'updated_at',updated_at)
                FROM news_projection_generations WHERE state='STAGING' LIMIT 1) staging_json`,
   ).bind(
-    ...binds, options.pageSize, offset,
+    ...binds, options.pageSize + 1, options.pageSize,
     state.active_generation_id, options.reviewState, options.category,
     state.active_generation_id,
     state.active_generation_id,
@@ -1073,11 +1135,18 @@ export async function readNewsProjectionPage(
   ).first<{
     items_json: string; total: number; parsed: number; candidate_expiries: string;
     categories_json: string; reviews_json: string; staging_json: string | null;
+    fetched_count: number; first_key: string | null; last_key: string | null;
+    observed_generation: string | null;
   }>();
   if (!pageData) {
     throw new NewsProjectionProtocolError(
       "verified news archive page is unavailable", 503,
       "NEWS_PROJECTION_PAGE_UNAVAILABLE",
+    );
+  }
+  if (pageData.observed_generation !== state.active_generation_id) {
+    throw new NewsProjectionProtocolError(
+      "news generation changed during pagination", 409, "NEWS_PROJECTION_GENERATION_CHANGED",
     );
   }
   const items = JSON.parse(pageData.items_json) as NewsProjectionIndexItem[];
@@ -1086,8 +1155,19 @@ export async function readNewsProjectionPage(
   const staging = pageData.staging_json
     ? JSON.parse(pageData.staging_json) as { generation_id: string; updated_at: string }
     : null;
+  const more = Number(pageData.fetched_count) > options.pageSize;
+  const token = (direction: "next" | "previous", key: string | null) => key
+    ? encodeNewsPageCursor({
+      version: 1, generation: state.active_generation_id, review: options.reviewState,
+      category: options.category, size: options.pageSize,
+      page: options.page + (direction === "next" ? 1 : -1), direction,
+      key: JSON.parse(key) as NewsPageCursor["key"],
+    }) : null;
   return {
     items,
+    next_cursor: (backwards || more) ? token("next", pageData.last_key) : null,
+    previous_cursor: options.page > 1 && (!backwards || more)
+      ? token("previous", pageData.first_key) : null,
     total: Number(pageData.total ?? 0),
     all_total: Number(state.index_count), readable_total: Number(state.index_count),
     parsed_total: Number(pageData.parsed ?? 0),

@@ -60,6 +60,7 @@ const database = () => new D1TestDatabase([
   "0022_news_projection_generation.sql", "0027_materialize_news_projection_counts.sql",
   "0028_fence_legacy_news_current_identity.sql",
   "0029_news_projection_receipt_index.sql",
+  "0032_news_keyset_pagination.sql",
 ]);
 
 test("shares canonical receipt vectors with the Python producer", async () => {
@@ -270,6 +271,123 @@ test("materializes every generation's review totals and keeps page reads bounded
     "SELECT count(*) total FROM news_projection_counts WHERE generation_id=?",
   ).get(id("e")).total, 7);
 });
+
+// Exercise both persisted index families with the same navigation contract.
+for (const legacy of [false, true]) {
+  for (const [reviewState, annotation_status, model_visibility] of [
+    ["COMPLETED", "NOT_REQUIRED", "MODEL_INELIGIBLE"],
+    ["PROCESSING", "QUEUED", "NOT_YET_PARSED"],
+    ["ISOLATED", "DEAD_LETTER", "DEAD_LETTER"],
+  ]) {
+    test(`news keyset walk preserves filters, ties and reverse order: ${legacy}/${reviewState}`, async () => {
+      const db = database();
+      try {
+        const details = ["1", "2", "3", "4"].map(detail);
+        const indexes = ["1", "2", "3", "4"].map(digit => ({
+          ...index(digit), annotation_status, model_visibility, parsed_at: null,
+          category: digit === "4" ? "利率/Fed" : "增长/经济",
+          source_published_time: digit === "4" ? "2026-08-22T10:00:00Z" : "2026-08-21T10:00:00Z",
+          collector_first_seen_time: digit === "3" ? "2026-08-21T10:02:00Z" : "2026-08-21T10:01:00Z",
+        }));
+        await prepareNewsProjection(db, await manifest("a", details, indexes));
+        await stageNewsProjectionBatch(db, "detail", id("a"), 0, details);
+        await stageNewsProjectionBatch(db, "index", id("a"), 0, indexes);
+        await activateNewsProjection(db, id("a"));
+        if (legacy) {
+          db.database.exec(`INSERT INTO news_projection_index
+            (generation_id,detail_key,ordinal,category,cluster_id,published_time,
+             collector_first_seen_time,parsed,model_candidate,impact_expires_at,
+             mirror_contract,payload_hash,payload,received_at)
+            SELECT '${id("a")}',detail_key,row_number() OVER (ORDER BY detail_key)-1,
+              category,cluster_id,published_time,collector_first_seen_time,parsed,
+              model_candidate,impact_expires_at,mirror_contract,'${id("b")}',payload,received_at
+            FROM news_index;
+            UPDATE news_projection_state SET contract_version='news-projection-generation-v3'`);
+        }
+        const originalPrepare = db.prepare.bind(db);
+        let lastPlan = [];
+        db.prepare = sql => {
+          const statement = originalPrepare(sql);
+          if (!sql.includes("WITH page_candidates")) return statement;
+          return { bind(...bindings) {
+            lastPlan = db.database.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...bindings);
+            return statement.bind(...bindings);
+          } };
+        };
+        for (const category of ["", "增长/经济"]) {
+          for (const pageSize of [1, 2]) {
+            const options = { page: 1, pageSize, category, reviewState };
+            const expected = (category ? ["3", "2", "1"] : ["4", "3", "2", "1"]).map(id);
+            const pages = [];
+            let page = await readNewsProjectionPage(db, options);
+            assert.equal(page.previous_cursor, null);
+            while (true) {
+              pages.push(page);
+              assert.equal(page.total, expected.length);
+              if (!page.next_cursor) break;
+              assert.ok(pages.length <= expected.length, "walk terminates");
+              page = await readNewsProjectionPage(db, {
+                ...options, page: page.page + 1, cursor: page.next_cursor,
+              });
+              const reads = lastPlan.map(row => row.detail).filter(value =>
+                value.includes(`SEARCH ${legacy ? "news_projection_index" : "news_index"} `));
+              assert.equal(reads.length, 1, JSON.stringify(lastPlan));
+              assert.match(reads[0], /\(published_time,collector_first_seen_time,detail_key\)</, "bound tuple seeks into the index");
+              assert.ok(!lastPlan.some(row => /SCAN news_(?:projection_)?index(?: |$)/.test(row.detail)),
+                JSON.stringify(lastPlan));
+            }
+            assert.deepEqual(pages.flatMap(value => value.items.map(item => item.detail_key)), expected);
+            for (let i = pages.length - 2; i >= 0; i--) {
+              assert.ok(page.previous_cursor);
+              page = await readNewsProjectionPage(db, {
+                ...options, page: page.page - 1, cursor: page.previous_cursor,
+              });
+              assert.deepEqual(page.items, pages[i].items);
+              assert.ok(page.next_cursor, "reverse traversal can resume forward");
+            }
+            assert.equal(page.previous_cursor, null);
+            const cursor = pages[0].next_cursor;
+            for (const override of [{category:"利率/Fed"}, {pageSize:3}, {page:3},
+              {reviewState:reviewState === "COMPLETED" ? "PROCESSING" : "COMPLETED"},
+              {cursor:"malformed"}]) {
+              await assert.rejects(readNewsProjectionPage(db, {
+                ...options, page:2, cursor, ...override,
+              }), error => error.code === "NEWS_PAGE_CURSOR_INVALID");
+            }
+          }
+        }
+        const empty = await readNewsProjectionPage(db, {
+          page:1, pageSize:2, category:"油价/能源", reviewState,
+        });
+        assert.deepEqual(empty.items, []);
+        assert.equal(empty.total, 0);
+        assert.equal(empty.next_cursor, null);
+        assert.equal(empty.previous_cursor, null);
+        await assert.rejects(readNewsProjectionPage(db, {
+          page:2, pageSize:2, category:"", reviewState,
+        }), error => error.code === "NEWS_PAGE_CURSOR_REQUIRED");
+        const options = {page:1, pageSize:2, category:"", reviewState};
+        const first = await readNewsProjectionPage(db, options);
+        db.database.prepare("UPDATE news_projection_state SET active_generation_id=?").run(id("b"));
+        await assert.rejects(readNewsProjectionPage(db, {
+          ...options, page:2, cursor:first.next_cursor,
+        }), error => error.code === "NEWS_PROJECTION_GENERATION_CHANGED");
+        db.database.prepare("UPDATE news_projection_state SET active_generation_id=?").run(id("a"));
+        // A replacement between the preliminary check and SQL must also be detected.
+        db.prepare = sql => {
+          if (sql.includes("WITH page_candidates")) {
+            db.database.prepare("UPDATE news_projection_state SET active_generation_id=?").run(id("b"));
+          }
+          return originalPrepare(sql);
+        };
+        await assert.rejects(readNewsProjectionPage(db, options),
+          error => error.code === "NEWS_PROJECTION_GENERATION_CHANGED");
+      } finally {
+        db.database.close();
+      }
+    });
+  }
+}
 
 test("rejects unbounded categories and non-canonical active expiries at the batch boundary", async () => {
   for (const [generationDigit, badIndex] of [

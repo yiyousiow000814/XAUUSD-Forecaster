@@ -479,6 +479,8 @@ type NewsIndexResponse = {
   page: number;
   page_size: number;
   window_days?: number;
+  next_cursor?: string | null;
+  previous_cursor?: string | null;
   totals_scope?: NewsTotalsScope;
   projection_state?: "CURRENT" | "RECOVERY_REQUIRED" | "REPLAYING" | "VERIFYING" | "DEGRADED";
   verified_complete?: boolean;
@@ -913,6 +915,17 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
   const [searchError, setSearchError] = useState<string | null>(null);
   const [newsCategory, setNewsCategory] = useState("全部");
   const [newsPage, setNewsPage] = useState(1);
+  const [newsCursor, setNewsCursor] = useState<string | null>(null);
+  const [newsBusy, setNewsBusy] = useState(false);
+  const newsRequestSequence = useRef(0);
+  const [newsPageNotice, setNewsPageNotice] = useState<string | null>(null);
+  const navigateNews = (page: number, cursor: string | null = null) => {
+    newsRequestSequence.current += 1;
+    setNewsBusy(true);
+    setNewsPage(page);
+    setNewsCursor(cursor);
+    setNewsPageNotice(null);
+  };
   const [newsReviewState, setNewsReviewState] = useState<NewsReviewState>("COMPLETED");
   const [showAllEvidence, setShowAllEvidence] = useState(false);
   const [showEvidenceMetrics, setShowEvidenceMetrics] = useState(false);
@@ -1093,33 +1106,46 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
   }, [evidenceMode, evidenceUrl]);
 
   const refreshNews = useCallback(async (force = false) => {
+    const sequence = ++newsRequestSequence.current;
+    setNewsBusy(true);
     const query = new URLSearchParams({
       page: String(newsPage), limit: String(NEWS_PER_PAGE),
       review_state: newsReviewState,
     });
-    if (newsPage > 1 && newsIndex.generation_id) {
-      query.set("generation", newsIndex.generation_id);
-    }
+    if (newsCursor) query.set("cursor", newsCursor);
     if (newsCategory !== "全部") query.set("category", newsCategory);
-    let body: NewsIndexResponse;
     try {
-      body = await loadDashboardResource<NewsIndexResponse>(`/api/news-index?${query}`, { force });
+      let body: NewsIndexResponse;
+      try {
+        body = await loadDashboardResource<NewsIndexResponse>(`/api/news-index?${query}`, { force });
+      } catch (reason) {
+        if (sequence !== newsRequestSequence.current) return;
+        if (
+          !(reason instanceof DashboardResourceError)
+          || !["NEWS_PROJECTION_GENERATION_CHANGED", "NEWS_PAGE_CURSOR_REQUIRED"].includes(reason.code ?? "")
+        ) throw reason;
+        query.set("page", "1");
+        query.delete("cursor");
+        body = await loadDashboardResource<NewsIndexResponse>(
+          `/api/news-index?${query}`, { force: true },
+        );
+        if (sequence !== newsRequestSequence.current) return;
+        setNewsPage(1);
+        setNewsCursor(null);
+        setNewsPageNotice("新闻已更新，已回到第一页。");
+      }
+      if (sequence !== newsRequestSequence.current) return;
+      setNewsIndex(body);
+      if (authoritativeNewsTotals(body)) fullNewsIndexReadyRef.current = true;
+      setNewsError(null);
     } catch (reason) {
-      if (
-        !(reason instanceof DashboardResourceError)
-        || reason.code !== "NEWS_PROJECTION_GENERATION_CHANGED" || newsPage <= 1
-      ) throw reason;
-      query.set("page", "1");
-      query.delete("generation");
-      body = await loadDashboardResource<NewsIndexResponse>(
-        `/api/news-index?${query}`, { force: true },
-      );
-      setNewsPage(1);
+      if (sequence === newsRequestSequence.current) throw reason;
+    } finally {
+      if (sequence === newsRequestSequence.current) setNewsBusy(false);
     }
-    setNewsIndex(body);
-    if (authoritativeNewsTotals(body)) fullNewsIndexReadyRef.current = true;
-    setNewsError(null);
-  }, [newsCategory, newsIndex.generation_id, newsPage, newsReviewState]);
+  }, [newsCategory, newsCursor, newsPage, newsReviewState]);
+
+  useEffect(() => () => { newsRequestSequence.current += 1; }, []);
 
   useEffect(() => {
     return scheduleDashboardRefresh(
@@ -1644,9 +1670,10 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
               className={newsReviewState === state ? "active" : ""}
               aria-pressed={newsReviewState === state}
               onClick={() => {
+                if (state === newsReviewState) return;
                 setNewsReviewState(state);
                 setNewsCategory("全部");
-                setNewsPage(1);
+                navigateNews(1);
               }}
             >
               <span>{presentation.label}</span>
@@ -1658,13 +1685,13 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         <section className="news-browser" aria-label="新闻自动分类">
           <div><strong>{NEWS_REVIEW_PRESENTATION[newsReviewState].label}新闻</strong><span>{archiveTotals ? `${NEWS_REVIEW_PRESENTATION[newsReviewState].description} · 按媒体发布时间排序 · 每页 ${formatExactCount(NEWS_PER_PAGE)} 条` : `正在读取近60天新闻总量 · 每页 ${formatExactCount(NEWS_PER_PAGE)} 条`}</span></div>
           <nav>
-            {categories.map(category => <button key={category.name} type="button" className={newsCategory === category.name ? "active" : ""} onClick={() => { setNewsCategory(category.name); setNewsPage(1); }}>
+            {categories.map(category => <button key={category.name} type="button" className={newsCategory === category.name ? "active" : ""} onClick={() => { if (category.name === newsCategory) return; setNewsCategory(category.name); navigateNews(1); }}>
               {category.name}{category.count !== null && <b><CountValue value={category.count} /></b>}
             </button>)}
           </nav>
           <label className="news-category-picker">
             <span>新闻分类</span>
-            <select value={newsCategory} onChange={(event) => { setNewsCategory(event.target.value); setNewsPage(1); }}>
+            <select value={newsCategory} onChange={(event) => { setNewsCategory(event.target.value); navigateNews(1); }}>
               {categories.map(category => <option key={category.name} value={category.name}>{category.name}{category.count !== null ? ` · ${formatExactCount(category.count)}` : ""}</option>)}
             </select>
           </label>
@@ -1679,10 +1706,11 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
           />)}
           {Array.from({ length: emptyNewsRows }, (_, index) => <div className="news-row-placeholder" aria-hidden="true" key={`empty-news-row-${index}`} />)}
         </section>
+        {newsPageNotice && <p role="status">{newsPageNotice}</p>}
         {newsPageCount > 1 && <nav className="news-pagination" aria-label="新闻分页">
-          <button type="button" disabled={currentNewsPage === 1} onClick={() => setNewsPage(page => Math.max(1, page - 1))}>← 上一页</button>
+          <button type="button" disabled={newsBusy || newsIndex.page !== newsPage || !newsIndex.previous_cursor} onClick={() => navigateNews(newsPage - 1, newsIndex.previous_cursor ?? null)}>← 上一页</button>
           <span>第 <b>{formatExactCount(currentNewsPage)}</b> / {formatExactCount(newsPageCount)} 页 · {NEWS_REVIEW_PRESENTATION[newsReviewState].label} · 当前分类 {formatExactCount(newsIndex.total)} 条</span>
-          <button type="button" disabled={currentNewsPage === newsPageCount} onClick={() => setNewsPage(page => Math.min(newsPageCount, page + 1))}>下一页 →</button>
+          <button type="button" disabled={newsBusy || newsIndex.page !== newsPage || !newsIndex.next_cursor} onClick={() => navigateNews(newsPage + 1, newsIndex.next_cursor ?? null)}>下一页 →</button>
         </nav>}
       </>}
 
