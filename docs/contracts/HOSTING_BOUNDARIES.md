@@ -337,3 +337,12 @@
 
 Preview-specific write isolation and provenance guarantees are defined in
 [`PREVIEW_ISOLATION.md`](PREVIEW_ISOLATION.md).
+
+## Shared dashboard status consumers
+
+The shell and mounted status views consume the same cached status baseline and
+subsequent push updates. Deduplicating the initial request must not suppress
+notification to a later-mounted consumer. Every consumer subscribes, reads the
+current cache after subscribing, and unsubscribes on unmount. Missing or partial
+health data is loading/unavailable, never a healthy zero-component report.
+A subscription does not create a new HTTP request or change the polling cadence.

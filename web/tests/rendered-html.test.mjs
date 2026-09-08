@@ -3500,3 +3500,11 @@ test("route inventory parser covers const and re-exported handlers", () => {
   }
   assert.deepEqual([...methods].sort(), ["DELETE", "GET", "POST"]);
 });
+
+
+test("direct health navigation never calls an absent baseline healthy", async () => {
+  const { response, html } = await renderSettled("/health", /正在加载系统健康状态/);
+  assert.equal(response.status, 200);
+  assert.match(html, /正在加载系统健康状态/);
+  assert.doesNotMatch(html, /当前没有运行异常|无需处理|0 正常/);
+});
