@@ -1450,11 +1450,11 @@ def _evidence_ack(body: bytes, result: dict) -> dict:
     }
 
 
-def _evidence_cleanup_result(*, pending=False, exhausted=False) -> dict:
+def _evidence_cleanup_result(*, pending=False) -> dict:
     return {
-        "status": "OK", "cleanup": "budget_exhausted" if exhausted else "advanced",
+        "status": "OK", "cleanup": "advanced",
         "deleted_records": 0, "deleted_batches": 0, "deleted_staging": 0,
-        "cleanup_pending": pending, "cleanup_budget_exhausted": exhausted,
+        "cleanup_pending": pending,
     }
 
 
@@ -1753,16 +1753,10 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
             {"status": "OK", "cleanup_pending": True},
             {"status": "OK", "cleanup_pending": False},
         ], False, 3),
-        ([
-            {"status": "OK", "cleanup_pending": True},
-            {
-                "status": "OK", "cleanup_pending": True,
-                "cleanup_budget_exhausted": True,
-            },
-        ], True, 2),
+        ([{"status": "OK", "cleanup_pending": True}] * 8, True, 8),
     ],
 )
-def test_news_evidence_cleanup_uses_feedback_and_stops_at_daily_budget(
+def test_news_evidence_cleanup_uses_feedback_and_bounds_each_cycle(
     monkeypatch, responses, expected_pending, expected_calls,
 ) -> None:
     from xauusd_forecaster.dashboard.sync import resources as module
@@ -1774,7 +1768,6 @@ def test_news_evidence_cleanup_uses_feedback_and_stops_at_daily_budget(
         result = next(responses)
         return _evidence_ack(body, _evidence_cleanup_result(
             pending=result["cleanup_pending"],
-            exhausted=result.get("cleanup_budget_exhausted", False),
         ))
 
     monkeypatch.setattr(module, "_post_json", post)

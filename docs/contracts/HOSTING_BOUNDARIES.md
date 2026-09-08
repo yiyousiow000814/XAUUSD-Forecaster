@@ -137,15 +137,12 @@
   cycle. While eligible cleanup debt remains, the producer must not admit
   another replacement snapshot. Immutable replacement therefore cannot turn
   into unbounded retained duplication even though each request is bounded.
-- News-evidence cleanup reserves its worst-case physical D1 row-write cost in
-  one D1-owned UTC-day ledger before deleting anything. The reservation is
-  serialized with all cleanup callers, survives producer and machine restart,
-  and fails closed on budget exhaustion or clock regression. A claim lost to
-  installer or producer death may delay cleanup but cannot be reused. Recovery
-  cleanup is limited to one 1,280-row reservation (1,280 deletion writes,
-  plus at most one ledger-row write) per UTC day. Debt therefore remains
-  bounded independently from recurring Free-plan work; temporary Paid capacity
-  is never cleanup authority.
+- News-evidence cleanup progresses in bounded requests without a daily admission
+  lock. Each request deletes at most 200 obsolete records, 20 receipts and 20
+  stale staging rows; each producer cycle allows at most eight requests. Active
+  data, recent readers and fresh staging remain protected. Account for physical
+  index writes in catch-up and recurring replacement usage. The retired daily
+  reservation ledger remains historical evidence, not runtime authority.
 - A producer may abandon only the staging generation recorded in its own
   durable state. A foreign busy generation is retained for its owner to advance;
   cleanup excludes fresh staging snapshots. Prepare reconciles staging receipts
