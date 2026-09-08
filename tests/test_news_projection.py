@@ -265,7 +265,7 @@ def test_retained_generation_admission_rejects_before_replay(tmp_path, corruptio
 
 
 def test_retained_and_materialized_consumers_share_exact_batch_contract(tmp_path, monkeypatch):
-    from scripts.run_dashboard_api import _news_projection_batch
+    from xauusd_forecaster.dashboard.news_resources import _news_projection_batch
     from scripts.run_dashboard_sync import _frozen_news_projection_batch
 
     rows = [_source_row(i, withdrawal=i % 3 == 0) for i in range(17)]
@@ -298,7 +298,7 @@ def test_retained_and_materialized_consumers_share_exact_batch_contract(tmp_path
 @pytest.mark.parametrize("source_kind", ("original", "derived"))
 def test_retained_artifact_restart_is_exact_and_does_not_materialize_bodies(tmp_path, monkeypatch, corruption, source_kind):
     import gzip
-    from scripts import run_dashboard_api as api
+    from xauusd_forecaster.dashboard import news_resources as api
     if source_kind == "derived":
         _, capture, records, _, transition = _derived_reader_fixture(tmp_path)
         capture.derive_reader_segment(**transition)

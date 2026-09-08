@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from xauusd_forecaster.dashboard import news_presentation, news_resources
+
 from xauusd_forecaster.annotation import (
     ANNOTATION_FAILURE_RECOVERY_VERSION,
     INVALID_CHINESE_TITLE,
@@ -72,6 +74,10 @@ def _isolated_dashboard_credentials(monkeypatch: pytest.MonkeyPatch):
     # is sent. Tests must not consult inherited or Windows User credentials;
     # credential-specific cases supply their own explicit fake source below.
     from xauusd_forecaster import news_scheduler
+
+    # Each HTTP fixture represents a fresh process-owned News resource cache.
+    monkeypatch.setattr(news_resources, "_NEWS_EVIDENCE_CACHE", {})
+    monkeypatch.setattr(news_resources, "_NEWS_PROJECTION_CACHE", {})
 
     monkeypatch.setattr(news_scheduler, "_runtime_environment_value", lambda _name: "")
     user_reads = []
@@ -939,7 +945,7 @@ def test_news_evidence_display_collapses_frozen_versions_to_one_event() -> None:
         "reason_codes": [], "prompt_version": "news-json-v14-material-event-evidence",
     }]
 
-    rows = module._news_evidence_display_rows(connection, current)
+    rows = news_resources._news_evidence_display_rows(connection, current)
 
     assert len(rows) == 1
     assert rows[0]["event_key"] == "same-event"
@@ -965,7 +971,7 @@ def test_news_evidence_display_includes_current_event_from_prior_prompt() -> Non
         "prompt_version": "prior-prompt-version",
     }]
 
-    rows = module._news_evidence_display_rows(connection, current)
+    rows = news_resources._news_evidence_display_rows(connection, current)
 
     assert [row["event_key"] for row in rows] == ["prior-prompt-current"]
     assert rows[0]["model_unseen_reason_codes"] == [
@@ -1016,7 +1022,7 @@ def test_news_evidence_display_orders_events_by_latest_publication_time() -> Non
         "prompt_version": "prior-prompt-version",
     }]
 
-    rows = module._news_evidence_display_rows(connection, current)
+    rows = news_resources._news_evidence_display_rows(connection, current)
 
     assert [row["event_key"] for row in rows] == ["new-unseen", "old-used"]
 
@@ -1106,7 +1112,7 @@ def test_news_evidence_display_reconciles_event_identity_handover(include_auxili
         "prompt_version": "news-json-v14-material-event-evidence",
     }]
 
-    rows = module._news_evidence_display_rows(connection, current)
+    rows = news_resources._news_evidence_display_rows(connection, current)
 
     canonical = next(row for row in rows if row["event_key"] == "canonical-key")
     assert len(rows) == 2
@@ -1132,11 +1138,11 @@ def test_news_evidence_display_reconciles_event_identity_handover(include_auxili
             (f"shared-{decision}", "2026-08-10T02:00:00+00:00", "FULL", "model-v1",
              f"alias-{alias}", f"hash-{alias}") for decision in range(32)
         ])
-    optimized = module._news_evidence_display_rows(connection, current)
+    optimized = news_resources._news_evidence_display_rows(connection, current)
     optimized_steps = connection.visibility_steps
     connection.set_progress_handler(None, 0)
     connection.reference = True
-    reference = module._news_evidence_display_rows(connection, current)
+    reference = news_resources._news_evidence_display_rows(connection, current)
     reference_steps = connection.visibility_steps
     connection.set_progress_handler(None, 0)
     assert optimized == reference
@@ -2548,7 +2554,7 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
     assert payload["recent_news"][0]["headline"] == "六月个人收入与支出正式报告"
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
-        archive = module._news_reader_rows(connection, now + timedelta(seconds=3))
+        archive = news_resources._news_reader_rows(connection, now + timedelta(seconds=3))
         assert len(archive) == 1
         assert archive[0]["headline"] == payload["recent_news"][0]["headline"]
     assert {row["source"] for row in payload["news_source_health"]} == {
@@ -2856,8 +2862,8 @@ def test_news_archive_is_60_day_bounded_and_cursor_safe(tmp_path) -> None:
             "cluster_id": item_id,
         })
 
-    first = module._news_archive_page(ledger.connection, None, 2)
-    second = module._news_archive_page(ledger.connection, first["next_cursor"], 2)
+    first = news_resources._news_archive_page(ledger.connection, None, 2)
+    second = news_resources._news_archive_page(ledger.connection, first["next_cursor"], 2)
     rows = [*first["items"], *second["items"]]
 
     assert first["has_more"] is True
@@ -2873,7 +2879,7 @@ def test_news_archive_is_60_day_bounded_and_cursor_safe(tmp_path) -> None:
 
 def test_news_projection_source_freezes_until_exact_snapshot_is_activated(tmp_path) -> None:
     module = _dashboard_module()
-    module._NEWS_PROJECTION_CACHE.clear()
+    news_resources._NEWS_PROJECTION_CACHE.clear()
     now = datetime.now(UTC).replace(microsecond=0)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
 
@@ -2888,16 +2894,16 @@ def test_news_projection_source_freezes_until_exact_snapshot_is_activated(tmp_pa
         })
 
     append("first")
-    frozen = module._news_projection_source(ledger.connection, None)
+    frozen = news_resources._news_projection_source(ledger.connection, None)
     append("second")
-    retry = module._news_projection_source(ledger.connection, None)
+    retry = news_resources._news_projection_source(ledger.connection, None)
 
     assert retry is frozen
     assert frozen.manifest["expected_index_count"] == 1
     assert sum(map(len, frozen.detail_batches)) == 1
     assert sum(map(len, frozen.index_batches)) == 1
 
-    replacement = module._news_projection_source(
+    replacement = news_resources._news_projection_source(
         ledger.connection, frozen.manifest["snapshot_id"],
     )
     assert replacement.manifest["snapshot_id"] != frozen.manifest["snapshot_id"]
@@ -2930,7 +2936,7 @@ def test_news_projection_scans_candidate_universe_once_across_detail_pages(
         nonlocal candidate_calls
         candidate_calls += 1
         assert after is None
-        assert limit == module.NEWS_PROJECTION_MAX_ITEMS + 1
+        assert limit == news_resources.NEWS_PROJECTION_MAX_ITEMS + 1
         return candidate_keys
 
     def rows(_connection, _now, *, after=None, limit, candidate_keys=None):
@@ -2949,12 +2955,12 @@ def test_news_projection_scans_candidate_universe_once_across_detail_pages(
         assert claimable is frozen_context[1]
         return rows
 
-    monkeypatch.setattr(module, "_news_archive_context", context)
-    monkeypatch.setattr(module, "_news_mirror_candidate_keys", candidates)
-    monkeypatch.setattr(module, "_news_reader_rows", rows)
-    monkeypatch.setattr(module, "_serialize_news_rows", serialize)
+    monkeypatch.setattr(news_resources, "_news_archive_context", context)
+    monkeypatch.setattr(news_resources, "_news_mirror_candidate_keys", candidates)
+    monkeypatch.setattr(news_resources, "_news_reader_rows", rows)
+    monkeypatch.setattr(news_resources, "_serialize_news_rows", serialize)
 
-    generation = module._build_news_projection_source(object())
+    generation = news_resources._build_news_projection_source(object())
 
     assert context_calls == 1
     assert candidate_calls == 1
@@ -2971,8 +2977,8 @@ def test_news_capture_uses_fixed_input_scoped_identity_and_real_cursor(tmp_path,
         def now(cls, tz=None):
             return now
 
-    monkeypatch.setattr(module, "datetime", FrozenClock)
-    monkeypatch.setattr(module, "NEWS_SOURCE_CAPTURE_PAGE_ITEMS", 2)
+    monkeypatch.setattr(news_resources, "datetime", FrozenClock)
+    monkeypatch.setattr(news_resources, "NEWS_SOURCE_CAPTURE_PAGE_ITEMS", 2)
     database = tmp_path / "owned-snapshot.sqlite3"
     ledger = ForwardLedger(database, now=now - timedelta(days=1))
     for number in range(5):
@@ -2987,16 +2993,16 @@ def test_news_capture_uses_fixed_input_scoped_identity_and_real_cursor(tmp_path,
     epoch = str(ledger.connection.execute(
         "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
     ).fetchone()[0])
-    original = module._build_news_projection_source(ledger.connection)
+    original = news_resources._build_news_projection_source(ledger.connection)
     ledger.close()
-    stat_before = module._news_projection_snapshot_stat(database)
-    capture = module.NewsProjectionSourceCapture(
+    stat_before = news_resources._news_projection_snapshot_stat(database)
+    capture = news_resources.NewsProjectionSourceCapture(
         tmp_path / "source.capture", binding={"snapshot_stat": stat_before},
         watermark=now.isoformat(), window_start=(now - timedelta(days=60)).isoformat(),
         epoch=epoch,
     )
-    pending = module.pending_annotation_records
-    source_reader = module._news_reader_rows
+    pending = news_resources.pending_annotation_records
+    source_reader = news_resources._news_reader_rows
     seen_keys = []
     cursors = []
 
@@ -3015,15 +3021,15 @@ def test_news_capture_uses_fixed_input_scoped_identity_and_real_cursor(tmp_path,
         cursors.append(rows)
         return rows
 
-    monkeypatch.setattr(module, "pending_annotation_records", scoped)
-    monkeypatch.setattr(module, "_news_reader_rows", streamed)
+    monkeypatch.setattr(news_resources, "pending_annotation_records", scoped)
+    monkeypatch.setattr(news_resources, "_news_reader_rows", streamed)
     for expected in (2, 4, 5):
-        state = module._advance_news_projection_capture(database, capture)
+        state = news_resources._advance_news_projection_capture(database, capture)
         assert state["source_count"] == expected
         assert state["last_source_step"]["vm_steps"] < 40_000_000
         assert state["last_source_step"]["sampled_rss_max_bytes"] < 512 * 1024 * 1024
         # A fresh process would reconstruct this same small artifact identity.
-        capture = module.NewsProjectionSourceCapture(
+        capture = news_resources.NewsProjectionSourceCapture(
             capture.directory, binding=capture.identity["binding"],
             watermark=capture.identity["watermark"], window_start=capture.identity["window_start"],
             epoch=epoch,
@@ -3036,14 +3042,14 @@ def test_news_capture_uses_fixed_input_scoped_identity_and_real_cursor(tmp_path,
     retained = sorted(capture.records(), key=lambda row: row["detail"]["detail_key"])
     assert [row["index"] for row in retained] == list(original.index_rows)
     assert [row["detail"] for row in retained] == list(original.detail_rows)
-    assert module._news_projection_snapshot_stat(database) == stat_before
-    monkeypatch.setattr(module.sqlite3, "connect", lambda *_args, **_kwargs: pytest.fail("completed input reopened"))
-    assert module._advance_news_projection_capture(database, capture) == state
+    assert news_resources._news_projection_snapshot_stat(database) == stat_before
+    monkeypatch.setattr(news_resources.sqlite3, "connect", lambda *_args, **_kwargs: pytest.fail("completed input reopened"))
+    assert news_resources._advance_news_projection_capture(database, capture) == state
 
 
 def test_news_projection_request_starts_one_background_build(monkeypatch, tmp_path) -> None:
     module = _dashboard_module()
-    module._NEWS_PROJECTION_CACHE.clear()
+    news_resources._NEWS_PROJECTION_CACHE.clear()
     generation = __import__(
         "xauusd_forecaster.news_projection", fromlist=["build_news_projection_generation"],
     ).build_news_projection_generation(
@@ -3063,43 +3069,43 @@ def test_news_projection_request_starts_one_background_build(monkeypatch, tmp_pa
         def start(self):
             return None
 
-    monkeypatch.setattr(module.threading, "Thread", DeferredThread)
+    monkeypatch.setattr(news_resources.threading, "Thread", DeferredThread)
     monkeypatch.setattr(
-        module, "_build_news_projection_source_from_database",
+        news_resources, "_build_news_projection_source_from_database",
         lambda _database: generation,
     )
 
-    with pytest.raises(module.NewsProjectionSourcePending):
-        module._news_projection_source_for_request(tmp_path / "db.sqlite3", None)
-    with pytest.raises(module.NewsProjectionSourcePending):
-        module._news_projection_source_for_request(tmp_path / "db.sqlite3", None)
+    with pytest.raises(news_resources.NewsProjectionSourcePending):
+        news_resources._news_projection_source_for_request(tmp_path / "db.sqlite3", None)
+    with pytest.raises(news_resources.NewsProjectionSourcePending):
+        news_resources._news_projection_source_for_request(tmp_path / "db.sqlite3", None)
     assert len(pending_threads) == 1
 
     pending_threads[0].target(*pending_threads[0].args)
 
-    assert module._news_projection_source_for_request(
+    assert news_resources._news_projection_source_for_request(
         tmp_path / "db.sqlite3", None,
     ) is generation
 
-    module._NEWS_PROJECTION_CACHE["built_at"] = (
-        time.monotonic() - module.NEWS_PROJECTION_SOURCE_REFRESH_SECONDS - 1
+    news_resources._NEWS_PROJECTION_CACHE["built_at"] = (
+        time.monotonic() - news_resources.NEWS_PROJECTION_SOURCE_REFRESH_SECONDS - 1
     )
-    assert module._news_projection_source_for_request(
+    assert news_resources._news_projection_source_for_request(
         tmp_path / "db.sqlite3", generation.manifest["snapshot_id"],
     ) is generation
     assert len(pending_threads) == 2
-    assert module._news_projection_source_for_request(
+    assert news_resources._news_projection_source_for_request(
         tmp_path / "db.sqlite3", generation.manifest["snapshot_id"],
     ) is generation
     assert len(pending_threads) == 2
-    module._NEWS_PROJECTION_CACHE.clear()
+    news_resources._NEWS_PROJECTION_CACHE.clear()
 
 
 def test_news_projection_manifest_is_authorized_and_nonblocking(
     monkeypatch, tmp_path,
 ) -> None:
     module = _dashboard_module()
-    module._NEWS_PROJECTION_CACHE.clear()
+    news_resources._NEWS_PROJECTION_CACHE.clear()
     module.Handler.database = tmp_path / "forward.sqlite3"
     token = "operator-bridge-" + "x" * 32
     monkeypatch.setenv("DASHBOARD_OPERATOR_BRIDGE_TOKEN", token)
@@ -3117,7 +3123,7 @@ def test_news_projection_manifest_is_authorized_and_nonblocking(
         assert release.wait(timeout=2)
         return generation
 
-    monkeypatch.setattr(module, "_build_news_projection_source_from_database", build)
+    monkeypatch.setattr(news_resources, "_build_news_projection_source_from_database", build)
     server = module.ThreadingHTTPServer(("127.0.0.1", 0), module.Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -3143,7 +3149,7 @@ def test_news_projection_manifest_is_authorized_and_nonblocking(
         assert started.wait(timeout=1)
         release.set()
         for _ in range(100):
-            if module._NEWS_PROJECTION_CACHE.get("building") is False:
+            if news_resources._NEWS_PROJECTION_CACHE.get("building") is False:
                 break
             time.sleep(0.01)
 
@@ -3160,7 +3166,7 @@ def test_news_projection_manifest_is_authorized_and_nonblocking(
 
 def test_news_projection_source_rejects_non_batch_offsets(tmp_path) -> None:
     module = _dashboard_module()
-    module._NEWS_PROJECTION_CACHE.clear()
+    news_resources._NEWS_PROJECTION_CACHE.clear()
     generation = __import__(
         "xauusd_forecaster.news_projection", fromlist=["build_news_projection_generation"],
     ).build_news_projection_generation(
@@ -3173,10 +3179,10 @@ def test_news_projection_source_rejects_non_batch_offsets(tmp_path) -> None:
         watermark="2026-08-24T00:00:00+00:00",
     )
 
-    first = module._news_projection_batch(generation, "detail", 0)
+    first = news_resources._news_projection_batch(generation, "detail", 0)
     assert len(first["items"]) == 8
     with pytest.raises(ValueError, match="batch boundary"):
-        module._news_projection_batch(generation, "detail", 1)
+        news_resources._news_projection_batch(generation, "detail", 1)
 
 
 def test_news_projection_accepts_a_large_realistic_article_within_worker_bound() -> None:
@@ -3220,7 +3226,7 @@ def test_news_archive_discovers_a_bounded_changed_key_page(tmp_path) -> None:
         now.isoformat(), "bea_economic_releases", "item-099", 1,
     ])
 
-    keys = module._news_mirror_candidate_keys(
+    keys = news_resources._news_mirror_candidate_keys(
         ledger.connection,
         cutoff=(now - timedelta(days=60)).isoformat(),
         after=cursor,
@@ -3271,7 +3277,7 @@ def test_news_reader_materializations_exclude_semantically_irrelevant_articles(
                 parsed_at=now + timedelta(seconds=1),
                 xauusd_relevance=relevance,
             )
-    archive = module._news_archive_page(ledger.connection, None, 20)
+    archive = news_resources._news_archive_page(ledger.connection, None, 20)
     ledger.close()
     dashboard = module._dashboard_payload(database)
 
@@ -3297,7 +3303,7 @@ def test_news_archive_reemits_legacy_invalid_annotation_for_recovery(tmp_path) -
         "fetched_time": now, "headline": "Current market report",
         "body": body, "content_hash": digest, "cluster_id": "recover-me",
     })
-    first = module._news_archive_page(ledger.connection, None, 20)
+    first = news_resources._news_archive_page(ledger.connection, None, 20)
     invalid = json.dumps({
         "xauusd_relevance": "IRRELEVANT",
         "semantic_reason_zh": "语言或结构一致性检查未通过，禁止进入当前模型。",
@@ -3319,7 +3325,7 @@ def test_news_archive_reemits_legacy_invalid_annotation_for_recovery(tmp_path) -
     )
     ledger.connection.commit()
 
-    changed = module._news_archive_page(
+    changed = news_resources._news_archive_page(
         ledger.connection, first["next_cursor"], 20,
     )
 
@@ -3359,7 +3365,7 @@ def test_news_archive_reemits_failure_when_recovery_is_authorized(tmp_path) -> N
             "cause_type": "ValueError", "cause": cause,
         },
     })
-    before = module._news_archive_page(ledger.connection, None, 20)
+    before = news_resources._news_archive_page(ledger.connection, None, 20)
     authorized_at = now + timedelta(seconds=1)
 
     recovered = authorize_repairable_annotation_failures(
@@ -3368,7 +3374,7 @@ def test_news_archive_reemits_failure_when_recovery_is_authorized(tmp_path) -> N
         recovery_version=ANNOTATION_FAILURE_RECOVERY_VERSION,
         now=authorized_at,
     )
-    changed = module._news_archive_page(
+    changed = news_resources._news_archive_page(
         ledger.connection, before["next_cursor"], 20,
     )
 
@@ -3398,7 +3404,7 @@ def test_news_archive_does_not_mark_nonclaimable_news_as_waiting(tmp_path) -> No
         "cluster_id": "stale-at-intake",
     })
 
-    item = module._news_archive_page(ledger.connection, None, 20)["items"][0]
+    item = news_resources._news_archive_page(ledger.connection, None, 20)["items"][0]
 
     assert item["annotation_status"] == "NOT_REQUIRED"
     assert item["model_visibility"] == "MODEL_INELIGIBLE"
@@ -3436,7 +3442,7 @@ def test_news_archive_exposes_display_checkpoint_as_active_repair(tmp_path) -> N
         "captured_at": now,
     })
 
-    item = module._news_archive_page(ledger.connection, None, 20)["items"][0]
+    item = news_resources._news_archive_page(ledger.connection, None, 20)["items"][0]
 
     assert item["annotation_status"] == "REPAIRING_DISPLAY"
     assert item["annotation_reason_code"] == "DISPLAY_REPAIR_IN_PROGRESS"
@@ -3448,7 +3454,7 @@ def test_news_archive_exposes_display_checkpoint_as_active_repair(tmp_path) -> N
 def test_duplicate_collection_copy_is_not_reported_as_queue_anomaly() -> None:
     module = _dashboard_module()
     now = datetime.now(UTC)
-    code, reason = module._not_required_reason({
+    code, reason = news_presentation.not_required_reason({
         "source": "google_news_gold_context",
         "headline": "CPI report",
         "source_published_time": now.isoformat(),
@@ -3497,7 +3503,7 @@ def test_news_reader_global_peer_lookup_preserves_out_of_page_latest_semantics(t
         append("example", str(number), ("Unrelated evidence " + str(number)) * 30, now - timedelta(days=80))
     keys = [(source, item, 1, now.isoformat())]
     try:
-        rows = module._news_reader_rows(ledger.connection, now, candidate_keys=keys, limit=1)
+        rows = news_resources._news_reader_rows(ledger.connection, now, candidate_keys=keys, limit=1)
         assert [(row["source"], row["source_item_id"], row["revision_number"]) for row in rows] == [(source, item, 1)]
         assert bool(rows[0]["has_canonical_content_peer"]) is expected
         assert rows[0]["body"] == body
@@ -3539,7 +3545,7 @@ def test_news_archive_materializes_late_discovery_canonical_annotation(
         parsed_at=first_seen + timedelta(seconds=1),
     )
 
-    archive = module._news_archive_page(ledger.connection, None, 20)
+    archive = news_resources._news_archive_page(ledger.connection, None, 20)
 
     assert len(archive["items"]) == 1
     item = archive["items"][0]
@@ -3612,7 +3618,7 @@ def test_news_archive_explains_terminal_model_contract_failure(tmp_path) -> None
         },
     })
 
-    archive = module._news_archive_page(ledger.connection, None, 20)
+    archive = news_resources._news_archive_page(ledger.connection, None, 20)
     ledger.close()
     dashboard = module._dashboard_payload(tmp_path / "forward.sqlite3")
     archive_by_id = {row["source_item_id"]: row for row in archive["items"]}
@@ -3891,7 +3897,7 @@ def test_dashboard_canonicalizes_derived_impact_clocks_to_utc(offset) -> None:
         "collector_first_seen_time": first_seen.isoformat(timespec="microseconds"),
     }
 
-    module._apply_impact_status(item, event_utc + timedelta(minutes=3))
+    news_presentation.apply_impact_status(item, event_utc + timedelta(minutes=3))
 
     assert item["model_visibility"] == "MODEL_VISIBLE"
     assert item["impact_event_at"] == event_utc.isoformat(timespec="microseconds")
@@ -3905,11 +3911,11 @@ def test_dashboard_canonicalizes_derived_impact_clocks_to_utc(offset) -> None:
 
 def test_dashboard_category_is_semantic_not_processing_state() -> None:
     module = _dashboard_module()
-    assert module._news_category_label("central_bank_gold") == "央行购金"
-    assert module._news_category_label("risk_sentiment") == "风险情绪 / 避险"
-    assert module._news_category_label(None) == "其他"
-    assert module._news_category_label("") == "其他"
-    assert module._news_category_label("other-custom-topic") == "其他"
+    assert news_presentation.news_category_label("central_bank_gold") == "央行购金"
+    assert news_presentation.news_category_label("risk_sentiment") == "风险情绪 / 避险"
+    assert news_presentation.news_category_label(None) == "其他"
+    assert news_presentation.news_category_label("") == "其他"
+    assert news_presentation.news_category_label("other-custom-topic") == "其他"
 
 
 def test_dashboard_reports_gdelt_fallback_and_retry_time(tmp_path) -> None:
@@ -4068,13 +4074,13 @@ def test_news_evidence_pages_are_byte_bounded_and_complete_at_large_scale(
         "reason_codes": ["TEST_EVIDENCE"],
         "detail": "x" * 3_000,
     } for index in range(1_000)]
-    published = module._publish_news_evidence_snapshot(rows)
+    published = news_resources._publish_news_evidence_snapshot(rows)
     if tight_envelope:
         two_rows = {
             "snapshot_id": published, "items": rows[:2], "total": len(rows),
             "has_more": True, "next_cursor": f"{published}:2",
         }
-        monkeypatch.setattr(module, "NEWS_EVIDENCE_PAGE_LIMIT_BYTES", len(json.dumps(
+        monkeypatch.setattr(news_resources, "NEWS_EVIDENCE_PAGE_LIMIT_BYTES", len(json.dumps(
             two_rows, ensure_ascii=False, separators=(",", ":"),
         ).encode("utf-8")) - 1)
 
@@ -4082,13 +4088,13 @@ def test_news_evidence_pages_are_byte_bounded_and_complete_at_large_scale(
     received = []
     snapshot_id = None
     while True:
-        page = module._news_evidence_page(cursor, 50)
+        page = news_resources._news_evidence_page(cursor, 50)
         snapshot_id = snapshot_id or page["snapshot_id"]
         assert page["snapshot_id"] == snapshot_id
         encoded = json.dumps(
             page, ensure_ascii=False, separators=(",", ":"),
         ).encode("utf-8")
-        assert len(encoded) <= module.NEWS_EVIDENCE_PAGE_LIMIT_BYTES
+        assert len(encoded) <= news_resources.NEWS_EVIDENCE_PAGE_LIMIT_BYTES
         received.extend(page["items"])
         if not page["has_more"]:
             break
@@ -4112,8 +4118,8 @@ def test_news_evidence_pages_are_byte_bounded_and_complete_at_large_scale(
                 f"http://127.0.0.1:{server.server_port}/api/news-evidence?{query}", timeout=2,
             ) as response:
                 wire = response.read()
-            assert len(wire) <= module.NEWS_EVIDENCE_PAGE_LIMIT_BYTES
-            assert json.loads(wire) == module._news_evidence_page(requested_cursor, 50)
+            assert len(wire) <= news_resources.NEWS_EVIDENCE_PAGE_LIMIT_BYTES
+            assert json.loads(wire) == news_resources._news_evidence_page(requested_cursor, 50)
     finally:
         server.shutdown()
         server.server_close()
@@ -4137,10 +4143,10 @@ def test_news_evidence_generation_freezes_until_activation_then_tracks_current_s
         "model_permission": "BROAD_MODEL",
         "reason_codes": ["EVIDENCE_PRIMARY"],
     }
-    first_id, first_rows = module._materialize_news_evidence_generation(
+    first_id, first_rows = news_resources._materialize_news_evidence_generation(
         [base], manifest,
     )
-    later_id, later_rows = module._materialize_news_evidence_generation([{
+    later_id, later_rows = news_resources._materialize_news_evidence_generation([{
         **base,
         "economic_age_minutes": 181.5,
         "freshness_status": "EVENT_LIFETIME_EXPIRED",
@@ -4153,7 +4159,7 @@ def test_news_evidence_generation_freezes_until_activation_then_tracks_current_s
     assert later_rows == first_rows
     assert "economic_age_minutes" not in later_rows[0]
 
-    age_only_id, age_only_rows = module._materialize_news_evidence_generation(
+    age_only_id, age_only_rows = news_resources._materialize_news_evidence_generation(
         [{**base, "economic_age_minutes": 240.0}],
         manifest,
         activated_snapshot_id=first_id,
@@ -4161,7 +4167,7 @@ def test_news_evidence_generation_freezes_until_activation_then_tracks_current_s
     assert age_only_id == first_id
     assert age_only_rows == first_rows
 
-    expired_id, expired_rows = module._materialize_news_evidence_generation(
+    expired_id, expired_rows = news_resources._materialize_news_evidence_generation(
         [{
             **base,
             "economic_age_minutes": 241.0,
