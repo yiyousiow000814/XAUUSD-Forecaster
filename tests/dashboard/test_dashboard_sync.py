@@ -1831,6 +1831,24 @@ def test_news_evidence_sync_drains_old_snapshot_before_admitting_replacement(
     assert len(posted) == module.NEWS_EVIDENCE_CLEANUP_STEPS_PER_CYCLE
     assert all(payload["cleanup_active_snapshot"] == active_snapshot for payload in posted)
     assert not any("prepare_snapshot" in payload for payload in posted)
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert persisted["cleanup_pending"] is True
+    assert persisted["active_snapshot_id"] == active_snapshot
+
+    # Restart from the persisted ACK, finish cleanup, then admit replacement.
+    posted.clear()
+    def recovered(_url, body, _config):
+        payload = json.loads(body)
+        posted.append(payload)
+        if "cleanup_active_snapshot" in payload:
+            return _evidence_ack(body, _evidence_cleanup_result())
+        assert payload["prepare_snapshot"] == replacement_snapshot
+        return _evidence_ack(body, {"status": "OK", "active": True, "next_offset": 1})
+    monkeypatch.setattr(module, "_post_json", recovered)
+    module._sync_news_evidence({}, config)
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert persisted["active_snapshot_id"] == replacement_snapshot
+    assert not persisted.get("cleanup_pending")
 
 
 def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_fields(
@@ -3469,8 +3487,9 @@ def test_operator_retry_worker_urls_keep_human_and_machine_planes_separate() -> 
 
 
 @pytest.mark.parametrize("state,failed", [("REPLAYING", False), ("CURRENT", False), ("REPLAYING", True)])
+@pytest.mark.parametrize("cleanup", [False, True])
 @pytest.mark.parametrize("resource", ["news", "news_evidence"])
-def test_news_replay_immediate_resume_only_after_success(tmp_path, monkeypatch, state, failed, resource):
+def test_news_replay_immediate_resume_only_after_success(tmp_path, monkeypatch, state, failed, resource, cleanup):
     module = _sync_module()
     schedule = tmp_path / "schedule.json"
     news = tmp_path / "news.json"
@@ -3480,6 +3499,8 @@ def test_news_replay_immediate_resume_only_after_success(tmp_path, monkeypatch, 
     checkpoint = {"projection_state": state} if resource == "news" else {
         "staging_snapshot_id" if state == "REPLAYING" else "active_snapshot_id": "a" * 64,
     }
+    if resource == "news_evidence" and cleanup:
+        checkpoint = {"active_snapshot_id": "a" * 64, "cleanup_pending": state == "REPLAYING"}
     news.write_text(json.dumps(checkpoint), encoding="utf-8")
     def advance(_payload, _target):
         if failed:

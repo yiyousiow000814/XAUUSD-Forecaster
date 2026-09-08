@@ -1335,10 +1335,15 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> str | None:
         and ack_target_matches
         and state.get("active_snapshot_id") else ""
     )
-    if active_snapshot and _cleanup_news_evidence_snapshots(
-        remote_url, active_snapshot, config,
-    ):
-        return first_snapshot
+    if active_snapshot:
+        cleanup_pending = _cleanup_news_evidence_snapshots(remote_url, active_snapshot, config)
+        if cleanup_pending or state.get("cleanup_pending"):
+            state = {**state, "cleanup_pending": cleanup_pending}
+            _write_news_sync_state(
+                state_path, state, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]),
+            )
+        if cleanup_pending:
+            return first_snapshot
     if (
         state.get("contract_version") == NEWS_EVIDENCE_CONTRACT_VERSION
         and state.get("active_snapshot_id") == first_snapshot
