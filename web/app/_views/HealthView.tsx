@@ -209,7 +209,7 @@ function ComponentHealthCard({
         {name === "sites_synchronizer" && <>
           <div><dt>新闻同步</dt><dd>{({ CURRENT: "本批完整核对通过", REPLAYING: "新一批同步中", VERIFYING: "核对中", DEGRADED: "同步异常", RECOVERY_REQUIRED: "需要恢复" } as Record<string, string>)[item.news_projection_state ?? ""] ?? "状态尚未取得"}</dd></div>
           <div><dt>最近新闻完整核对</dt><dd>{localTime(item.news_last_verified_at ?? null)}</dd></div>
-          <div><dt>状态含义</dt><dd>通道成功不代表新闻已全部更新；完整核对时间也不是最新新闻发布时间。<a href="/audit?view=news">查看新闻与同步进度</a></dd></div>
+          <div><dt>状态含义</dt><dd>通道成功不代表新闻已全部更新；完整核对时间也不是最新新闻发布时间。<a href="/audit?view=news" style={{ display: "inline-flex", alignItems: "center", minHeight: 44 }}>查看新闻与同步进度</a></dd></div>
         </>}
         {item.latest_decision ? <div><dt>最新决策</dt><dd>{localTime(item.latest_decision)}</dd></div> : null}
         {item.decision_output_message ? <div><dt>决策输出</dt><dd>{item.decision_output_message}</dd></div> : null}
