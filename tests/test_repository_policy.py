@@ -7,6 +7,7 @@ import pytest
 
 from scripts.check_repository_policy import (
     EXPECTED_CLOUDFLARE_BUILD_CONTRACT,
+    MAIN_DIRECT_BUILD_CONTRACT,
     check_repository,
 )
 
@@ -176,3 +177,13 @@ def test_rejects_direct_production_deploy_package_script(tmp_path: Path) -> None
         '{"scripts":{"cf:deploy":"npm test && wrangler deploy"}}',
     )
     assert "direct production wrangler deploy script is forbidden" in boundaries(tmp_path)
+
+
+def test_admits_only_exact_main_direct_build_contract(tmp_path: Path) -> None:
+    write(tmp_path, "web/cloudflare-build-contract.json", json.dumps(MAIN_DIRECT_BUILD_CONTRACT))
+    assert check_repository(tmp_path) == []
+    for branch in ("feature", "", "*"):
+        changed = json.loads(json.dumps(MAIN_DIRECT_BUILD_CONTRACT))
+        changed["source"]["production_branch"] = branch
+        write(tmp_path, "web/cloudflare-build-contract.json", json.dumps(changed))
+        assert boundaries(tmp_path)

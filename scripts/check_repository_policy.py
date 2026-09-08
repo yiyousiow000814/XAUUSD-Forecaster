@@ -58,6 +58,22 @@ EXPECTED_CLOUDFLARE_BUILD_CONTRACT = {
     "non_production_builds_enabled": False,
 }
 
+# Staged admission: current v1 is retained until the cleanup PR changes the
+# checked-in contract. Direct deployment is confined to protected main.
+MAIN_DIRECT_BUILD_CONTRACT = {
+    **EXPECTED_CLOUDFLARE_BUILD_CONTRACT,
+    "schema_version": "cloudflare-production-build-v3",
+    "commands": {
+        "build": "npm ci && npm test",
+        "deploy": 'npx wrangler deploy --message "main:$WORKERS_CI_COMMIT_SHA"',
+    },
+    "output": {
+        "artifact_kind": "PRODUCTION_ARTIFACT",
+        "immutable_version_only": False,
+        "changes_stable_traffic": True,
+    },
+}
+
 YAML_ENVIRONMENT_KEY = re.compile(
     r"(?:^|[{,])\s*(?:environment|'environment'|\"environment\")\s*:",
     re.IGNORECASE,
@@ -214,7 +230,7 @@ def check_repository(root: Path) -> list[PolicyViolation]:
             "exact-main immutable Cloudflare production build contract is required",
         ))
     else:
-        if build_contract != EXPECTED_CLOUDFLARE_BUILD_CONTRACT:
+        if build_contract not in (EXPECTED_CLOUDFLARE_BUILD_CONTRACT, MAIN_DIRECT_BUILD_CONTRACT):
             violations.append(PolicyViolation(
                 CLOUDFLARE_BUILD_CONTRACT,
                 1,
