@@ -178,6 +178,7 @@ def _model_failure_details(error: Exception) -> dict[str, object]:
             "error_type": type(error).__name__,
             "error": str(error)[:500],
             "provider_http_status": provider_status,
+            "failure_evidence": getattr(error, "failure_evidence", None),
         }
     if declared_failure_code:
         return {

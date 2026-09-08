@@ -115,7 +115,7 @@ export const globalOperationalAlerts = (alerts: OperationalAlert[]) => alerts.fi
 );
 
 export const schedulerTaskLabel: Record<string, string> = {
-  ACTIVE_ANNOTATION: "Gemini 语义复核",
+  ACTIVE_ANNOTATION: "新闻语义与展示复核",
   ACTIVE_IMPACT: "Gemma 事件与影响复核",
   TITLE_TRANSLATION: "中文标题展示",
 };
