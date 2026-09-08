@@ -253,6 +253,10 @@
   Page rows, counts, review buckets, category buckets, and staging identity cross
   the D1 boundary together; the Worker decodes the page array once and preserves
   the established public-copy, expiry, ordering, and pagination semantics.
+  News-content request mode determines response shape: `keys` always returns
+  the batch envelope, including a single remaining/deduplicated record or an
+  entirely missing batch; `key` returns the single-detail object. Batch size
+  must not silently change the serializer contract seen by the consumer.
 - During a split-snapshot handover, the read boundary selects the freshest
   valid compatible snapshot by durable `received_at`, with the split snapshot
   winning only an exact timestamp tie. Legacy audit detail is projected and

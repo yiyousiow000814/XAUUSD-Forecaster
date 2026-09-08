@@ -1311,6 +1311,22 @@ test("built news route carries cursor bindings through forward, reverse and filt
     await store.stageNewsProjectionBatch(local,"detail",generation,0,details);
     await store.stageNewsProjectionBatch(local,"index",generation,0,indexes);
     await store.activateNewsProjection(local,generation);
+    // A batch keeps its envelope even on a one-row final page or after
+    // deduplication. The lazy single-detail consumer retains its own shape.
+    for (const keys of [[details[0].detail_key], details.slice(0,2).map(row => row.detail_key),
+      [details[0].detail_key,details[0].detail_key], ["f".repeat(64)]]) {
+      const response = await invoke(`/api/news-content?keys=${keys.join(",")}`,{},localEnv);
+      assert.equal(response.status,200);
+      const body = await response.json();
+      const found = [...new Set(keys)].filter(key => key !== "f".repeat(64));
+      assert.deepEqual(Object.keys(body.items).sort(),found.sort());
+      assert.deepEqual(body.missing,keys.filter(key => key === "f".repeat(64)));
+      for (const key of found) assert.equal(typeof body.items[key].payload.headline,"string");
+    }
+    const single = await invoke(`/api/news-content?key=${details[0].detail_key}`,{},localEnv);
+    assert.equal(single.status,200);
+    assert.equal(typeof (await single.json()).payload.headline,"string");
+    assert.equal((await invoke(`/api/news-content?key=${"f".repeat(64)}`,{},localEnv)).status,404);
     const get = async fields => {
       const query = new URLSearchParams({limit:"2",review_state:"COMPLETED",...fields});
       const response = await invoke(`/api/news-index?${query}`,{},localEnv);
