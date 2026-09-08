@@ -32,7 +32,7 @@ from scripts.run_dashboard_sync import (  # noqa: E402
     _write_news_sync_state,
     RUNTIME_STATE_ROOT_KEY,
 )
-from scripts.run_dashboard_api import (  # noqa: E402
+from xauusd_forecaster.dashboard.news_resources import (  # noqa: E402
     _advance_news_projection_capture,
     _build_news_projection_source_from_database,
     _news_projection_snapshot_stat,
@@ -240,17 +240,17 @@ def advance_frozen_source_capture(
         raise ValueError("NEWS_SOURCE_CAPTURE_PROVENANCE_REQUIRED")
     if watermark.utcoffset() is None:
         raise ValueError("NEWS_SOURCE_CAPTURE_TIME_INVALID")
-    from scripts import run_dashboard_api as source_owner
+    from xauusd_forecaster.dashboard import news_resources as source_owner
     from xauusd_forecaster import news_projection as capture_owner
 
     actual_files = {
         "scripts/bootstrap_news_projection.py": Path(__file__),
-        "scripts/run_dashboard_api.py": Path(source_owner.__file__),
+        "xauusd_forecaster/dashboard/news_resources.py": Path(source_owner.__file__),
         "xauusd_forecaster/news_projection.py": Path(capture_owner.__file__),
     }
     executing_identity = active_producer_identity if active_producer_identity is not None else source_identity
     if (Path(source_owner._news_reader_rows.__code__.co_filename).resolve()
-            != actual_files["scripts/run_dashboard_api.py"].resolve()
+            != actual_files["xauusd_forecaster/dashboard/news_resources.py"].resolve()
             or any(hashlib.sha256(path.read_bytes()).hexdigest()
                    != executing_identity.get("inputs", {}).get(name)
                    for name, path in actual_files.items())):

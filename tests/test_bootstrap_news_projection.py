@@ -222,7 +222,7 @@ def test_bootstrap_capture_retains_input_and_never_calls_remote_or_initializer(
     tmp_path, monkeypatch, source_state,
 ):
     from xauusd_forecaster.forward_ledger import ForwardLedger
-    from scripts import run_dashboard_api as api_owner
+    from xauusd_forecaster.dashboard import news_resources as api_owner
     from xauusd_forecaster import news_projection as capture_owner
 
     now = datetime(2026, 9, 7, tzinfo=UTC)
@@ -256,7 +256,7 @@ def test_bootstrap_capture_retains_input_and_never_calls_remote_or_initializer(
         "source_identity": {"fixture": "current imported test source", "inputs": {
             name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in {
                 "scripts/bootstrap_news_projection.py": Path(MODULE.__file__),
-                "scripts/run_dashboard_api.py": Path(api_owner.__file__),
+                "xauusd_forecaster/dashboard/news_resources.py": Path(api_owner.__file__),
                 "xauusd_forecaster/news_projection.py": Path(capture_owner.__file__),
             }.items()
         }},
@@ -265,7 +265,7 @@ def test_bootstrap_capture_retains_input_and_never_calls_remote_or_initializer(
     }
     try:
         if source_state == "omitted-transition":
-            arguments["source_identity"]["inputs"]["scripts/run_dashboard_api.py"] = "0" * 64
+            arguments["source_identity"]["inputs"]["xauusd_forecaster/dashboard/news_resources.py"] = "0" * 64
             existing = capture_owner.NewsProjectionSourceCapture(
                 state_root / "bootstrap-generation.capture",
                 binding={"snapshot_stat": before, "input_identity": arguments["input_identity"],
@@ -290,12 +290,12 @@ def test_bootstrap_capture_retains_input_and_never_calls_remote_or_initializer(
             arguments["active_producer_identity"] = {"inputs": {
                 name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in {
                     "scripts/bootstrap_news_projection.py": Path(MODULE.__file__),
-                    "scripts/run_dashboard_api.py": Path(api_owner.__file__),
+                    "xauusd_forecaster/dashboard/news_resources.py": Path(api_owner.__file__),
                     "xauusd_forecaster/news_projection.py": Path(capture_owner.__file__),
                 }.items()
             }}
             if source_state == "executing-mismatch":
-                arguments["active_producer_identity"]["inputs"]["scripts/run_dashboard_api.py"] = "0" * 64
+                arguments["active_producer_identity"]["inputs"]["xauusd_forecaster/dashboard/news_resources.py"] = "0" * 64
             monkeypatch.setattr(MODULE, "_advance_news_projection_capture",
                                 lambda *_args: pytest.fail("unadmitted executing producer queried"))
             with pytest.raises(ValueError, match=("EXECUTING_PRODUCER_MISMATCH" if source_state == "executing-mismatch"

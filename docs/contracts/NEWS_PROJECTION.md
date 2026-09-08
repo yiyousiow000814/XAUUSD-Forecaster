@@ -187,8 +187,13 @@
   independent semantic-review identity. A later clock/input supplement binds
   the original input bytes; it does not alter the earlier observed proof report.
   The atomic schema transition must make the actual unchanged old reader reject
-  before querying or appending. New code verifies its executing API, bootstrap
-  and capture files against the active producer identity before source work.
+  before querying or appending. New code verifies its executing reader owner,
+  bootstrap and capture files against the active producer identity before source
+  work. The current reader owner is `dashboard/news_resources.py`; relocating
+  that owner does not reinterpret an existing API-bound reader-correction proof.
+  Partial captures retain their admitted producer or explicitly reviewed
+  transition. Completed retained artifacts remain immutable evidence and do not
+  grant a new producer permission to append source parts.
 - Derived parts bind that single reader segment; all readers verify the original
   prefix and complete derived suffix. The identity proof hashes the original
   identity serialization in the validated capture manifest. A caller restored

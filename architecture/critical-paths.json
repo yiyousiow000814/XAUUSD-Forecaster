@@ -21,13 +21,6 @@
         "binding": "MODULE_REQUEST_ONLY"
       },
       {
-        "source": "scripts/bootstrap_news_projection.py",
-        "target": "scripts/run_dashboard_api.py",
-        "reason": "Existing bootstrap uses the actual source and generation artifact owner.",
-        "remove_when": "Those source/artifact owners are independently extracted and bootstrap parity passes.",
-        "binding": "MODULE_REQUEST_ONLY"
-      },
-      {
         "source": "scripts/build_preview_bundle.py",
         "target": "scripts/run_dashboard_sync.py",
         "reason": "The retained immutable Preview builder consumes explicit serializer re-exports.",
@@ -89,23 +82,26 @@
   "source_symbols": {
     "scripts/run_dashboard_api.py": [
       "scripts/run_dashboard_api.py::Handler.do_GET",
-      "scripts/run_dashboard_api.py::_build_news_projection_source",
-      "scripts/run_dashboard_api.py::_build_news_projection_source_from_database",
-      "scripts/run_dashboard_api.py::_finish_news_projection_source_build",
-      "scripts/run_dashboard_api.py::_news_projection_source_for_request",
-      "scripts/run_dashboard_api.py::_news_projection_batch",
-      "scripts/run_dashboard_api.py::_build_news_evidence_resource",
-      "scripts/run_dashboard_api.py::_materialize_news_evidence_generation",
-      "scripts/run_dashboard_api.py::_publish_news_evidence_snapshot",
-      "scripts/run_dashboard_api.py::_news_evidence_page",
       "scripts/run_dashboard_api.py::_optional_resource_payload",
       "scripts/run_dashboard_api.py::main"
+    ],
+    "xauusd_forecaster/dashboard/news_resources.py": [
+      "xauusd_forecaster/dashboard/news_resources.py::_build_news_projection_source",
+      "xauusd_forecaster/dashboard/news_resources.py::_build_news_projection_source_from_database",
+      "xauusd_forecaster/dashboard/news_resources.py::_finish_news_projection_source_build",
+      "xauusd_forecaster/dashboard/news_resources.py::_news_projection_source_for_request",
+      "xauusd_forecaster/dashboard/news_resources.py::_news_projection_batch",
+      "xauusd_forecaster/dashboard/news_resources.py::_build_news_evidence_resource",
+      "xauusd_forecaster/dashboard/news_resources.py::_materialize_news_evidence_generation",
+      "xauusd_forecaster/dashboard/news_resources.py::_publish_news_evidence_snapshot",
+      "xauusd_forecaster/dashboard/news_resources.py::_news_evidence_page"
     ]
   },
   "views": {
     "news-worker-audit": {
       "files": [
         "scripts/run_dashboard_api.py",
+        "xauusd_forecaster/dashboard/news_resources.py",
         "scripts/run_dashboard_sync.py",
         "xauusd_forecaster/dashboard/resource_contracts.py",
         "xauusd_forecaster/news_projection.py",
@@ -121,10 +117,10 @@
       ],
       "roots": [
         "scripts/run_dashboard_api.py::Handler.do_GET",
-        "scripts/run_dashboard_api.py::_build_news_projection_source",
-        "scripts/run_dashboard_api.py::_news_projection_source_for_request",
-        "scripts/run_dashboard_api.py::_finish_news_projection_source_build",
-        "scripts/run_dashboard_api.py::_build_news_evidence_resource",
+        "xauusd_forecaster/dashboard/news_resources.py::_build_news_projection_source",
+        "xauusd_forecaster/dashboard/news_resources.py::_news_projection_source_for_request",
+        "xauusd_forecaster/dashboard/news_resources.py::_finish_news_projection_source_build",
+        "xauusd_forecaster/dashboard/news_resources.py::_build_news_evidence_resource",
         "scripts/run_dashboard_api.py::_optional_resource_payload",
         "scripts/run_dashboard_api.py::main",
         "xauusd_forecaster/news_projection.py::build_news_projection_generation",

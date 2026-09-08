@@ -145,7 +145,6 @@ Unknown objects, active worktrees, and rollback artifacts are not deleted.
 
 ## Current structural gaps
 
-  release, supervision, provider adapters, recovery, and presentation.
 - `scripts/run_dashboard_api.py` and `scripts/run_dashboard_sync.py` still own
   substantial domain logic as well as process composition.
 - The flat Python package contains one 14-module strongly connected import
@@ -163,3 +162,22 @@ The point-in-time evidence is recorded in
 Protected main feeds native Cloudflare deployment and the single local
 `scripts/run_main_services.ps1` owner. The generated main-update diagram tracks
 source fetch, service ownership and update behavior. No Control Panel remains.
+
+### Local News resource ownership
+
+`xauusd_forecaster.news_projection.NEWS_READER_WINDOW_DAYS` owns the existing
+60-day window used by both the local API and Sync. Both entrypoints import the
+same stdlib-only projection owner; Sync does not import the SQLite-backed API.
+This ownership extraction preserves the numeric value, query cutoffs, payloads,
+persisted generations, ACK rules and restart behavior. It introduces no mutable
+state, background work or migration. The existing archive window/cursor and
+Sync generation contracts remain the behavioral checks.
+
+`xauusd_forecaster.dashboard.news_resources` owns local News reader queries,
+projection generation, evidence pagination and both cache/lock pairs. The API
+retains HTTP authentication, routing and response handling; bootstrap imports
+its capture/generation functions directly from the package. Importing the owner
+starts no worker. The existing API process starts and supervises its on-demand
+builder, which persists generations before publication and retains the existing
+failure/retry behavior. Architecture source selections follow the moved symbols;
+the obsolete bootstrap-to-API import exception is removed.
