@@ -32,11 +32,11 @@ module starts no work. Each running API process serves one configured database.
 
 ## Compatibility and verification
 
-No serialized producer/consumer contract changes. Old Stable and new consumers
+No serialized producer/consumer contract changes. Existing and new consumers
 retain the same generation format, cursor ordering and remote ACK rules. The
-existing installer copies the tracked package, so verify the new module is in
-its real staged dependency closure. Reverse Stable restores the prior package
-without rewriting history or captures. There is no new expiry or migration.
+main-only owner updates the tracked package in the one runtime checkout and
+restarts its services. Verify the new module through that actual entrypoint;
+there is no retained version slot, rollback, new expiry or migration.
 
 Move existing resource-level tests to the canonical owner and retain HTTP,
 bootstrap, Sync and retained-capture integration tests. Do not emulate the old
@@ -65,8 +65,8 @@ API-only equivalence proof cannot authorize the relocated producer. A partial
 capture remains bound to its original producer or its existing explicitly
 reviewed transition; retain that frozen producer for continuation. A completed
 capture is consumed as immutable generation evidence by the existing retained
-artifact path, without impersonating its producer. The installer stages the
-exact tracked revision via Git worktree, including the new package module.
+artifact path, without impersonating its producer. The main-only owner installs the
+exact tracked revision in its single checkout, including the new package module.
 Final integration and independent review remain required.
 
 ## Test ownership completion
@@ -81,3 +81,14 @@ suite to the same existing shard; no tests or timeout gates are removed. The
 News architecture view adds the new resource test and shared fixture sources
 to its existing selected test set. API/bootstrap integration still runs as a
 separate gate; this does not claim all-repository graph coverage.
+
+
+## Integration with main-only publication
+
+The two completed News ownership commits are integrated onto main438c2d10.
+Conflict resolution retains the current main-update graph and regenerates all
+outputs; no retired installation/switch owner is restored. All29 resource
+definitions remain AST-identical to that main. API/resource/bootstrap and CI
+ownership contracts pass177cases. This evidence does not claim D1 acceptance:
+production returned its actual free-tier daily read-limit error7500 after the
+main-only recovery, so remote cohort/materialization verification remains open.
