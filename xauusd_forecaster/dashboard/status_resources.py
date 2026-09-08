@@ -891,6 +891,17 @@ def _dashboard_payload(
     sites_sync_component = component(
         "sites_synchronizer", 120, sync_status.get("last_error")
     )
+    news_checkpoint = {}
+    try:
+        news_checkpoint = json.loads(
+            (database.parent / "dashboard-news-sync-state-cloudflare.json").read_text(encoding="utf-8")
+        )
+        if not isinstance(news_checkpoint, dict):
+            news_checkpoint = {}
+    except (OSError, ValueError):
+        pass
+    sites_sync_component["news_projection_state"] = news_checkpoint.get("projection_state", "UNKNOWN")
+    sites_sync_component["news_last_verified_at"] = news_checkpoint.get("last_success")
     semantic_pipeline_component = _semantic_pipeline_component(
         current_semantic_health, now=now,
     )
