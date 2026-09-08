@@ -764,29 +764,28 @@ export async function activateNewsProjection(
          FROM news_projection_index WHERE generation_id=?`;
   await binding.batch([
     binding.prepare(
-      `WITH projection AS (${projectionSource})
+      `WITH projection AS (${projectionSource}), grouped AS MATERIALIZED (
+         SELECT generation_id,review_state,category,count(*) item_count,
+                sum(parsed) parsed_count,
+                json_group_array(impact_expires_at) FILTER (
+                  WHERE model_candidate=1 AND impact_expires_at IS NOT NULL
+                ) expiries
+           FROM (
+             SELECT generation_id,category,parsed,model_candidate,impact_expires_at,
+                    ${NEWS_REVIEW_STATE_CASE_SQL} review_state FROM projection
+           ) GROUP BY generation_id,review_state,category
+       )
        INSERT INTO news_projection_counts
          (generation_id,review_state,category,item_count,parsed_count,candidate_expiries)
-       SELECT generation_id,review_state,category,count(*),sum(parsed),''
-         FROM (
-           SELECT generation_id,category,parsed,
-                   ${NEWS_REVIEW_STATE_CASE_SQL} review_state
-             FROM projection
-          ) GROUP BY generation_id,review_state,category
+       SELECT generation_id,review_state,category,item_count,parsed_count,'' FROM grouped
        UNION ALL
-       SELECT generation_id,review_state,'',count(*),sum(parsed),''
-         FROM (
-           SELECT generation_id,parsed,
-                   ${NEWS_REVIEW_STATE_CASE_SQL} review_state
-             FROM projection
-          ) GROUP BY generation_id,review_state
+       SELECT generation_id,review_state,'',sum(item_count),sum(parsed_count),''
+         FROM grouped GROUP BY generation_id,review_state
        UNION ALL
-       SELECT generation_id,'ALL','',count(*),sum(parsed),
-              COALESCE(group_concat(
-                CASE WHEN model_candidate=1 THEN impact_expires_at END,
-                char(10) ORDER BY impact_expires_at
-              ),'')
-         FROM projection GROUP BY generation_id`,
+       SELECT generation_id,'ALL','',sum(item_count),sum(parsed_count),
+              (SELECT COALESCE(group_concat(value,char(10) ORDER BY value),'')
+                 FROM grouped,json_each(grouped.expiries))
+         FROM grouped GROUP BY generation_id`,
     ).bind(generationId),
     binding.prepare(
       `UPDATE news_projection_generations SET state='SUPERSEDED',updated_at=?

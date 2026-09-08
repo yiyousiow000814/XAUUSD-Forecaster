@@ -246,8 +246,8 @@ test("materializes every generation's review totals and keeps page reads bounded
   const details = ["1", "2", "3", "4"].map(detail);
   const indexes = [
     { ...index("1"), category: "利率/Fed", impact_expires_at: "2099-01-01T00:00:00.000000+00:00" },
-    { ...index("2"), category: "利率/Fed", annotation_status: "NOT_REQUIRED",
-      model_visibility: "MODEL_INELIGIBLE", parsed_at: null },
+    { ...index("2"), category: "油价/能源",
+      impact_expires_at: "2020-01-01T00:00:00.000000+00:00" },
     { ...index("3"), category: "油价/能源", annotation_status: "QUEUED",
       model_visibility: "NOT_YET_PARSED", parsed_at: null },
     { ...index("4"), category: "油价/能源", annotation_status: "DEAD_LETTER",
@@ -256,15 +256,25 @@ test("materializes every generation's review totals and keeps page reads bounded
   await prepareNewsProjection(db, await manifest("e", details, indexes));
   await stageNewsProjectionBatch(db, "detail", id("e"), 0, details);
   await stageNewsProjectionBatch(db, "index", id("e"), 0, indexes);
+  const prepare = db.prepare.bind(db);
+  let countsSql;
+  db.prepare = sql => {
+    if (sql.includes("INSERT INTO news_projection_counts")) countsSql = sql;
+    return prepare(sql);
+  };
   await activateNewsProjection(db, id("e"));
+  db.prepare = prepare;
+  const plan = db.database.prepare(`EXPLAIN QUERY PLAN ${countsSql}`).all(id("e"));
+  assert.equal(plan.filter(row => /SCAN j VIRTUAL TABLE/.test(row.detail)).length, 1,
+    "activation expands source receipts once for all summary levels");
 
   const completed = await readNewsProjectionPage(db, {
     page: 1, pageSize: 20, category: "", reviewState: "COMPLETED",
   });
   assert.equal(completed.total, 2);
-  assert.equal(completed.parsed_total, 1);
+  assert.equal(completed.parsed_total, 2);
   assert.equal(completed.model_candidate_total, 1);
-  assert.deepEqual(completed.category_counts, { "利率/Fed": 2 });
+  assert.deepEqual(completed.category_counts, { "利率/Fed": 1, "油价/能源": 1 });
   assert.deepEqual(completed.review_state_counts, {
     COMPLETED: 2, PROCESSING: 1, ISOLATED: 1,
   });
@@ -275,7 +285,7 @@ test("materializes every generation's review totals and keeps page reads bounded
   assert.equal(processing.items[0].detail_key, id("3"));
   assert.equal(db.database.prepare(
     "SELECT count(*) total FROM news_projection_counts WHERE generation_id=?",
-  ).get(id("e")).total, 7);
+  ).get(id("e")).total, 8);
 });
 
 // Exercise both persisted index families with the same navigation contract.
