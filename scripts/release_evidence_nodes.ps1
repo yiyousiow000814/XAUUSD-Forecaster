@@ -6,7 +6,7 @@ $releaseEvidenceReceiptMaximumBytes = 65536
 
 function ConvertTo-ReleaseEvidenceJson {
     param([Parameter(Mandatory = $true)][object]$Value)
-    return ($Value | ConvertTo-Json -Depth 12 -Compress)
+    return (ConvertTo-Json -InputObject $Value -Depth 12 -Compress)
 }
 
 function ConvertFrom-ReleaseEvidenceJson {
@@ -29,18 +29,6 @@ function Get-ReleaseEvidenceSha256 {
     try {
         return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
     } finally { $sha.Dispose() }
-}
-
-function ConvertTo-ReleaseEvidenceNativePath {
-    param([Parameter(Mandatory = $true)][string]$Path)
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
-    if ($env:OS -ne "Windows_NT" -or $fullPath.StartsWith("\\?\")) {
-        return $fullPath
-    }
-    if ($fullPath.StartsWith("\\")) {
-        return "\\?\UNC\$($fullPath.Substring(2))"
-    }
-    return "\\?\$fullPath"
 }
 
 function Get-ReleaseEvidenceContract {

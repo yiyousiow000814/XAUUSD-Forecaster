@@ -13,11 +13,64 @@ $projectRoot = $PSScriptRoot
 $moduleRoot = Split-Path (Split-Path $projectRoot -Parent) -Parent
 $project = Join-Path $projectRoot 'XauusdForwardQuoteBridge.csproj'
 
+$isolated = $null
+if ([Environment]::GetEnvironmentVariable('XAUUSD_ISOLATED_CONFIGURATION', 'Process') -or
+    [Environment]::GetEnvironmentVariable('XAUUSD_ISOLATED_CONFIGURATION_SHA256', 'Process')) {
+    . (Join-Path $moduleRoot 'scripts\control_center_common.ps1')
+    $isolated = Get-IsolatedRuntimeConfiguration
+    $allowedCodeRoots = @([string]$isolated.runtime_root)
+    if ($BuildOnly) { $allowedCodeRoots += [string]$isolated.source_root }
+    if ([IO.Path]::GetFullPath($moduleRoot) -notin $allowedCodeRoots) {
+        throw 'ISOLATED_QUOTE_CODE_CONTEXT_MISMATCH'
+    }
+    $expectedConfig = Join-Path ([string]$isolated.repository_root) '.local\config'
+    if ($ConfigRoot -and -not ([IO.Path]::GetFullPath($ConfigRoot)).Equals(
+            $expectedConfig, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'ISOLATED_QUOTE_CONFIG_CONTEXT_MISMATCH'
+    }
+    $ConfigRoot = $expectedConfig
+    if (-not $BuildOnly) {
+      foreach ($binding in @(
+        @{Parameter='CliPath'; Key='CTRADER_CLI_PATH'},
+        @{Parameter='SecretRoot'; Key='CTRADER_SECRET_ROOT'}
+      )) {
+        $declared = [string](Get-UserEnvironmentValue -Name $binding.Key)
+        if (-not $declared -or -not [IO.Path]::IsPathRooted($declared)) {
+            throw 'ISOLATED_QUOTE_CREDENTIAL_PATH_REQUIRED'
+        }
+        $declared = [IO.Path]::GetFullPath($declared)
+        if (-not $declared.StartsWith(([string]$isolated.owned_root + '\'),
+                [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'ISOLATED_QUOTE_CREDENTIAL_PATH_OUTSIDE_ROOT'
+        }
+        $supplied = [string](Get-Variable -Name $binding.Parameter -ValueOnly)
+        if ($supplied -and -not ([IO.Path]::GetFullPath($supplied)).Equals(
+                $declared, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'ISOLATED_QUOTE_CREDENTIAL_CONTEXT_MISMATCH'
+        }
+        Assert-IsolatedConfigurationPath -Path $declared
+        Set-Variable -Name $binding.Parameter -Value $declared
+      }
+      foreach ($required in @($CliPath, (Join-Path $SecretRoot 'ctid.txt'),
+            (Join-Path $SecretRoot 'account.txt'), (Join-Path $SecretRoot 'ctrader-cli.pwd'))) {
+        Assert-IsolatedConfigurationPath -Path $required
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw 'ISOLATED_QUOTE_CREDENTIAL_FILE_MISSING'
+        }
+      }
+    }
+    Assert-IsolatedConfigurationPath -Path $ConfigRoot
+}
+
 if (-not $BuildOnly) {
-    $profileRoot = [Environment]::GetFolderPath('UserProfile')
-    $authorityRoot = [System.IO.Path]::GetFullPath((Join-Path $profileRoot (
-        'XAUUSD-Forecaster-runtime\.local\forward'
-    )))
+    if ($isolated) {
+        $authorityRoot = Join-Path ([string]$isolated.runtime_root) '.local\forward'
+    } else {
+        $profileRoot = [Environment]::GetFolderPath('UserProfile')
+        $authorityRoot = [System.IO.Path]::GetFullPath((Join-Path $profileRoot (
+            'XAUUSD-Forecaster-runtime\.local\forward'
+        )))
+    }
     if ([string]::IsNullOrWhiteSpace($StateRoot)) {
         throw 'StateRoot is required for the production quote bridge.'
     }
@@ -34,6 +87,7 @@ if (-not $BuildOnly) {
         throw "OutputDirectory must be $expectedOutput"
     }
     $OutputDirectory = $expectedOutput
+    if ($isolated) { Assert-IsolatedConfigurationPath -Path $OutputDirectory }
     New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 }
 

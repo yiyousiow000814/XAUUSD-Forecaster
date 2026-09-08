@@ -397,8 +397,9 @@ SELECT
     'learning_record_count_identity_update')) AS learning_count_triggers,
  (SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN
   ('dashboard_snapshots','news_index','news_details','news_evidence_records')) AS legacy_tables,
-  coalesce((SELECT json_array_length(json_extract(payload,'$.recent_decisions'))
-    FROM dashboard_snapshots WHERE id=4 AND json_valid(payload)),0) AS legacy_decisions,
+  coalesce((SELECT CASE WHEN json_type(payload,'$.recent_decisions')='array'
+    THEN json_array_length(payload,'$.recent_decisions') ELSE 0 END
+    FROM dashboard_snapshots WHERE id=1 AND json_valid(payload)),0) AS legacy_decisions,
   (SELECT count(*) FROM current_projection pi
     WHERE EXISTS(SELECT 1 FROM news_index li WHERE li.detail_key=pi.detail_key))
     AS legacy_current_index_count,
@@ -630,7 +631,7 @@ function Get-CoordinatedMigrationReceiptCore {
 function Get-CoordinatedMigrationRootReceiptPath {
     param([Parameter(Mandatory = $true)][string]$Digest)
     if ($Digest -notmatch '^[0-9a-f]{64}$') { throw "MIGRATION_RECEIPT_TAMPERED" }
-    return Join-Path $coordinatedMigrationRootReceiptRoot "$Digest.json"
+    return ConvertTo-ReleaseEvidenceNativePath -Path (Join-Path $coordinatedMigrationRootReceiptRoot "$Digest.json")
 }
 
 function New-CoordinatedMigrationReceipt {
@@ -659,8 +660,6 @@ function Write-CoordinatedMigrationRootReceipt {
             (Get-CoordinatedMigrationReceiptDigest -Core $core)) {
         throw "MIGRATION_RECEIPT_TAMPERED"
     }
-    New-Item -ItemType Directory -Path $coordinatedMigrationRootReceiptRoot -Force |
-        Out-Null
     $rootPath = Get-CoordinatedMigrationRootReceiptPath `
         -Digest ([string]$Receipt.receipt_digest)
     if (Test-Path -LiteralPath $rootPath) {
@@ -899,7 +898,7 @@ function Get-CoordinatedMigrationRenewalReceiptPath {
     if ($Digest -notmatch '^[0-9a-f]{64}$') {
         throw "MIGRATION_QUALIFICATION_RENEWAL_TAMPERED"
     }
-    return Join-Path $coordinatedMigrationRenewalReceiptRoot "$Digest.json"
+    return ConvertTo-ReleaseEvidenceNativePath -Path (Join-Path $coordinatedMigrationRenewalReceiptRoot "$Digest.json")
 }
 
 function Write-CoordinatedMigrationRenewalReceipt {
@@ -911,8 +910,6 @@ function Write-CoordinatedMigrationRenewalReceipt {
     }
     $path = Get-CoordinatedMigrationRenewalReceiptPath `
         -Digest ([string]$Receipt.receipt_digest)
-    New-Item -ItemType Directory -Path $coordinatedMigrationRenewalReceiptRoot -Force |
-        Out-Null
     if (Test-Path -LiteralPath $path) {
         $existing = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
@@ -1012,10 +1009,10 @@ function Get-LatestCoordinatedMigrationRenewalReceipt {
         [Parameter(Mandatory = $true)][string[]]$MigrationFiles,
         [Parameter(Mandatory = $true)][string]$RootDigest
     )
-    if (-not (Test-Path -LiteralPath $coordinatedMigrationRenewalReceiptRoot)) {
+    if (-not (Test-Path -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $coordinatedMigrationRenewalReceiptRoot))) {
         return $null
     }
-    $files = @(Get-ChildItem -LiteralPath $coordinatedMigrationRenewalReceiptRoot `
+    $files = @(Get-ChildItem -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $coordinatedMigrationRenewalReceiptRoot) `
         -File -Filter "*.json")
     if ($files.Count -gt $coordinatedMigrationRenewalStoreMaximumReceipts) {
         throw "MIGRATION_QUALIFICATION_RENEWAL_STORE_BOUND_EXCEEDED"
@@ -1027,7 +1024,7 @@ function Get-LatestCoordinatedMigrationRenewalReceipt {
             throw "MIGRATION_QUALIFICATION_RENEWAL_TAMPERED"
         }
         try {
-            $receipt = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
+            $receipt = Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $file.FullName) -Raw -Encoding UTF8 |
                 ConvertFrom-ReleaseControlJson
         } catch { throw "MIGRATION_QUALIFICATION_RENEWAL_TAMPERED" }
         $core = Get-CoordinatedMigrationRenewalCore -Receipt $receipt
@@ -1420,19 +1417,32 @@ function Test-CandidateSupersessionIdentity {
     )
 }
 
+function Test-CandidateSupersessionAccepted {
+    param([object]$Candidate, [array]$History, [switch]$CandidateAcceptanceOnly)
+    $acceptedEvents = @("CANDIDATE_PASSED", "PROMOTION_STARTED", "STABLE_COMMITTED")
+    if (-not $CandidateAcceptanceOnly) { $acceptedEvents += "CANDIDATE_ACCESS_BOUNDARY_ACCEPTED" }
+    return [bool](@($History | Where-Object {
+        [string]$_.release.validation_key -eq [string]$Candidate.validation_key -and
+        [string]$_.event -in $acceptedEvents
+    }).Count -gt 0)
+}
+
 function Test-UnqualifiedSupersessionIntermediate {
     param(
         [Parameter(Mandatory = $true)][object]$Candidate,
-        [Parameter(Mandatory = $true)][array]$History
+        [Parameter(Mandatory = $true)][array]$History,
+        [switch]$PendingEvidenceBoundary
     )
+    $allowedStates = if ($PendingEvidenceBoundary) { @("EVIDENCE_PENDING") } else {
+        @("NEW", "CHECKS_PENDING", "CHECKS_BLOCKED", "TESTING", "REVIEW_REQUIRED",
+            "PLATFORM_PENDING")
+    }
     if (-not (Test-CandidateSupersessionIdentity -Candidate $Candidate) -or
         [string]$Candidate.compatibility_state -notin @(
             "PENDING", "REVIEW_REQUIRED", "COORDINATED_STORAGE_MIGRATION_PASSED"
         ) -or
-        [string]$Candidate.validation_state -notin @(
-            "NEW", "CHECKS_PENDING", "CHECKS_BLOCKED", "TESTING", "REVIEW_REQUIRED",
-            "PLATFORM_PENDING"
-        )) {
+        [string]$Candidate.validation_state -notin $allowedStates -or
+        ($PendingEvidenceBoundary -and -not $Candidate.validation)) {
         return $false
     }
     if ($Candidate.migration_acceptance -and (
@@ -1446,14 +1456,8 @@ function Test-UnqualifiedSupersessionIntermediate {
         [string]$Candidate.validation.key -ne [string]$Candidate.validation_key) {
         return $false
     }
-    $accepted = @($History | Where-Object {
-        [string]$_.release.validation_key -eq [string]$Candidate.validation_key -and
-        [string]$_.event -in @(
-            "CANDIDATE_PASSED", "CANDIDATE_ACCESS_BOUNDARY_ACCEPTED",
-            "PROMOTION_STARTED", "STABLE_COMMITTED"
-        )
-    })
-    return [bool]($accepted.Count -eq 0)
+    return -not (Test-CandidateSupersessionAccepted -Candidate $Candidate -History $History `
+        -CandidateAcceptanceOnly:$PendingEvidenceBoundary)
 }
 
 function Test-QualifiedSupersessionCandidateShape {
@@ -1572,6 +1576,15 @@ function Test-CandidateSupersessionAncestry {
     return [bool]([int]$edge.exit_code -eq 0 -and [int]$main.exit_code -eq 0)
 }
 
+function Test-UnacceptedFailedSupersessionCandidate {
+    param([object]$Candidate, [array]$History)
+    return [bool]($Candidate -and
+        [string]$Candidate.validation_state -eq "FAILED" -and
+        $Candidate.validation -and
+        [string]$Candidate.validation.key -eq [string]$Candidate.validation_key -and
+        -not (Test-CandidateSupersessionAccepted -Candidate $Candidate -History $History))
+}
+
 function Get-CandidateSupersessionRecoveryPlan {
     param(
         [Parameter(Mandatory = $true)][object]$Head,
@@ -1610,18 +1623,26 @@ function Get-CandidateSupersessionRecoveryPlan {
     $null = $visitedWorkers.Add([string]$Head.worker_version_id)
     $traversed = @()
     for ($depth = 0; $depth -lt $candidateSupersessionMaxDepth; $depth++) {
-        if (-not (Test-UnqualifiedSupersessionIntermediate `
+        $edges = @($history | Where-Object {
+            [string]$_.event -eq "CANDIDATE_SUPERSEDED" -and
+            [string]$_.detail.replacement_key -eq [string]$current.validation_key
+        })
+        $failedPredecessor = [bool]($depth -gt 0 -and
+            (Test-UnacceptedFailedSupersessionCandidate -Candidate $current -History $history) -and
+            ($edges.Count -eq 0 -or ($edges.Count -eq 1 -and
+                (Test-UnacceptedFailedSupersessionCandidate -Candidate $edges[0].release -History $history))))
+        $pendingEvidenceBoundary = [bool]($depth -gt 0 -and
+            (Test-UnqualifiedSupersessionIntermediate -Candidate $current `
+                -History $history -PendingEvidenceBoundary))
+        if (-not $failedPredecessor -and -not $pendingEvidenceBoundary -and
+            -not (Test-UnqualifiedSupersessionIntermediate `
                 -Candidate $current -History $history)) {
             return [pscustomobject]@{
                 state = "FAILED"; reason = "CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"
                 chain_head = $headKey; traversed = $traversed
             }
         }
-        $edges = @($history | Where-Object {
-            [string]$_.event -eq "CANDIDATE_SUPERSEDED" -and
-            [string]$_.detail.replacement_key -eq [string]$current.validation_key
-        })
-        if ($edges.Count -eq 0) {
+        if ($edges.Count -eq 0 -or $pendingEvidenceBoundary) {
             return [pscustomobject]@{
                 state = if ($depth -eq 0) { "NOT_APPLICABLE" } else {
                     "REUSE_UNAVAILABLE"
@@ -2236,7 +2257,7 @@ function Get-CandidateStaticAssetBaseUri {
             [UriKind]::Absolute, [ref]$candidateUri)) {
         throw "CANDIDATE_STATIC_HOST_MISMATCH"
     }
-    $productionUri = [Uri]$workerUrl
+    $productionUri = [Uri]$workerVersionOrigin
     $workerPrefix = "$workerName."
     if (-not $productionUri.Host.StartsWith(
             $workerPrefix, [StringComparison]::OrdinalIgnoreCase)) {
@@ -2691,7 +2712,7 @@ function Invoke-CandidateWorkerValidation {
     $reusedQualificationReceipt = $null
     $requestPlan = $null
     $directResponses = @()
-    $ingestToken = [Environment]::GetEnvironmentVariable("CLOUDFLARE_INGEST_TOKEN", "User")
+    $ingestToken = Get-UserEnvironmentValue -Name 'CLOUDFLARE_INGEST_TOKEN'
     try {
         if (@($RoutePlan.worker_writes).Count -gt 0) {
             $workspace = New-CandidateValidationFixtureWorkspace -Candidate $Candidate
@@ -2993,7 +3014,7 @@ function Resume-CandidateWorkerPlatformEvidence {
             $fixtureRoot = if ($workspace) { [string]$workspace.fixture_root } else { "" }
             $routes = @($Validation.cpu_route_plan.worker_reads) + @($Validation.cpu_route_plan.worker_writes)
             $headers = @{ "Cloudflare-Workers-Version-Overrides" = "$workerName=`"$([string]$Candidate.worker_version_id)`"" }
-            $ingestToken = [Environment]::GetEnvironmentVariable("CLOUDFLARE_INGEST_TOKEN", "User")
+            $ingestToken = Get-UserEnvironmentValue -Name 'CLOUDFLARE_INGEST_TOKEN'
             foreach ($request in $unsent) {
                 $route = @($routes | Where-Object {
                     [string]$_.family -eq [string]$request.family -and
@@ -3084,8 +3105,7 @@ function Resume-CandidateWorkerPlatformEvidence {
                     -ProviderEvidence $storedEvidence `
                     -QualificationKey ([string]$Validation.worker_qualification.key) `
                     -FixtureRoot $topUpFixtureRoot `
-                    -IngestToken ([Environment]::GetEnvironmentVariable(
-                        "CLOUDFLARE_INGEST_TOKEN", "User"))
+                    -IngestToken (Get-UserEnvironmentValue -Name 'CLOUDFLARE_INGEST_TOKEN')
                 $expectedRequests = @($plan.requests | Where-Object {
                     [string]$_.phase -eq "acceptance"
                 })
@@ -3112,7 +3132,7 @@ function Resume-CandidateWorkerPlatformEvidence {
                     -Groups @($pendingDecision.review_groups) -SampleKind "headroom_top_up" `
                     -CountPerGroup ([int]$policy.headroom_top_up_acceptance) `
                     -FixtureRoot $topUpFixtureRoot `
-                    -IngestToken ([Environment]::GetEnvironmentVariable("CLOUDFLARE_INGEST_TOKEN", "User"))
+                    -IngestToken (Get-UserEnvironmentValue -Name 'CLOUDFLARE_INGEST_TOKEN')
                 $expectedRequests = @($plan.requests | Where-Object { [string]$_.phase -eq "acceptance" })
                 $to = $topUp.completed_at
                 $storedEvidence.recovery.active_reads = 0
@@ -3179,8 +3199,7 @@ function Resume-CandidateWorkerPlatformEvidence {
                             -Candidate $Candidate -RoutePlan $Validation.cpu_route_plan `
                             -RequestPlan $plan -PlannedRequests $plannedRepairRequests `
                             -FixtureRoot $topUpFixtureRoot `
-                            -IngestToken ([Environment]::GetEnvironmentVariable(
-                                "CLOUDFLARE_INGEST_TOKEN", "User"))
+                            -IngestToken (Get-UserEnvironmentValue -Name 'CLOUDFLARE_INGEST_TOKEN')
                         $expectedRequests = @($plan.requests | Where-Object {
                             [string]$_.phase -eq "acceptance"
                         })
@@ -3656,6 +3675,19 @@ function Test-CandidateDataParity {
             }
         }
     }
+    if ('/api/news-evidence' -in @(Get-ReleaseDeferredProjectionRoutes -Target $Candidate)) {
+        $results += [pscustomobject]@{
+            route = '/api/news-evidence'
+            acceptance_class = 'INCIDENT_PRODUCER_RECOVERY'
+            state = 'DEFERRED_TO_POST_CUTOVER_OBSERVATION'
+            passed = $false
+            blocking = $false
+            reason = 'EXACT_TARGET_NEWS_READ_AND_REMOTE_ACK_BEFORE_COMMIT'
+            validation_key = [string]$Candidate.validation_key
+            required_producer_revision = [string]$Candidate.windows_revision
+            authority_generated_at = $null
+        }
+    }
     $deferred = @($results | Where-Object {
         [string]$_.state -eq "DEFERRED_TO_POST_CUTOVER_OBSERVATION"
     })
@@ -3916,13 +3948,13 @@ function Assert-AccessProviderInspectionReceipt {
 }
 
 function Get-LatestAccessProviderInspectionReceipt {
-    if (-not (Test-Path -LiteralPath $accessProviderInspectionRoot)) {
+    if (-not (Test-Path -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $accessProviderInspectionRoot))) {
         throw "ACCESS_PROVIDER_INSPECTION_UNAVAILABLE"
     }
     $valid = @()
-    foreach ($file in @(Get-ChildItem -LiteralPath $accessProviderInspectionRoot -Filter '*.json' -File)) {
+    foreach ($file in @(Get-ChildItem -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $accessProviderInspectionRoot) -Filter '*.json' -File)) {
         try {
-            $receipt = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
+            $receipt = Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $file.FullName) -Raw -Encoding UTF8 |
                 ConvertFrom-ReleaseControlJson
             $valid += Assert-AccessProviderInspectionReceipt -Receipt $receipt
         } catch {}
@@ -4008,7 +4040,7 @@ function Get-AccessBoundaryReceiptPath {
     param([Parameter(Mandatory = $true)][string]$ValidationKey)
     $keyDigest = Get-Sha256BytesHex -Bytes `
         ([System.Text.Encoding]::UTF8.GetBytes($ValidationKey))
-    return Join-Path $accessBoundaryReceiptRoot "$keyDigest.json"
+    return ConvertTo-ReleaseEvidenceNativePath -Path (Join-Path $accessBoundaryReceiptRoot "$keyDigest.json")
 }
 
 function New-AccessBoundaryAcceptanceReceipt {
@@ -4058,7 +4090,6 @@ function New-AccessBoundaryAcceptanceReceipt {
 function Write-AccessBoundaryAcceptanceReceipt {
     param([Parameter(Mandatory = $true)][object]$Receipt)
     $path = Get-AccessBoundaryReceiptPath -ValidationKey ([string]$Receipt.validation_key)
-    New-Item -ItemType Directory -Path $accessBoundaryReceiptRoot -Force | Out-Null
     if (Test-Path -LiteralPath $path) {
         $existing = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
@@ -4208,13 +4239,13 @@ function Assert-HistoricalAccessBoundaryReceipt {
 }
 
 function Get-LatestHistoricalAccessBoundaryReceipt {
-    if (-not (Test-Path -LiteralPath $accessBoundaryReceiptRoot)) {
+    if (-not (Test-Path -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $accessBoundaryReceiptRoot))) {
         throw "ACCESS_HISTORICAL_RECEIPT_MISSING"
     }
     $valid = @()
-    foreach ($file in @(Get-ChildItem -LiteralPath $accessBoundaryReceiptRoot -Filter '*.json' -File)) {
+    foreach ($file in @(Get-ChildItem -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $accessBoundaryReceiptRoot) -Filter '*.json' -File)) {
         try {
-            $receipt = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
+            $receipt = Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $file.FullName) -Raw -Encoding UTF8 |
                 ConvertFrom-ReleaseControlJson
             $valid += Assert-HistoricalAccessBoundaryReceipt -Receipt $receipt
         } catch {}
@@ -4257,7 +4288,7 @@ function Get-AccessQualificationReuseReceiptDigest {
 function Get-AccessQualificationReuseReceiptPath {
     param([Parameter(Mandatory = $true)][string]$ValidationKey)
     $digest = Get-Sha256BytesHex -Bytes ([Text.Encoding]::UTF8.GetBytes($ValidationKey))
-    return Join-Path $accessQualificationReuseReceiptRoot "$digest.json"
+    return ConvertTo-ReleaseEvidenceNativePath -Path (Join-Path $accessQualificationReuseReceiptRoot "$digest.json")
 }
 
 function New-AccessQualificationReuseReceipt {
@@ -4310,7 +4341,6 @@ function New-AccessQualificationReuseReceipt {
 function Write-AccessQualificationReuseReceipt {
     param([Parameter(Mandatory = $true)][object]$Receipt)
     $path = Get-AccessQualificationReuseReceiptPath -ValidationKey $Receipt.validation_key
-    New-Item -ItemType Directory -Path $accessQualificationReuseReceiptRoot -Force | Out-Null
     if (Test-Path -LiteralPath $path) {
         $existing = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
@@ -4360,6 +4390,10 @@ function Assert-AccessQualificationReuseReceipt {
         @($receipt.changed_access_artifacts).Count -ne 0) {
         throw "ACCESS_QUALIFICATION_REUSE_TAMPERED"
     }
+    $boundary = Get-ProtectedAccessBoundaryIdentity
+    if ([string]$receipt.protected_origin -cne [string]$boundary.origin) {
+        throw "ACCESS_RECEIPT_HOST_MISMATCH"
+    }
     $verifiedAt = ConvertTo-ReleaseTimestampUtc -Value $receipt.verified_at
     $expiresAt = ConvertTo-ReleaseTimestampUtc -Value $receipt.expires_at
     if ($verifiedAt -eq [DateTimeOffset]::MinValue -or
@@ -4394,13 +4428,13 @@ function Get-AccessProviderInspectionReceiptByDigest {
 function Get-HistoricalAccessBoundaryReceiptByDigest {
     param([Parameter(Mandatory = $true)][string]$Digest)
     if ($Digest -notmatch '^[0-9a-f]{64}$' -or
-        -not (Test-Path -LiteralPath $accessBoundaryReceiptRoot)) {
+        -not (Test-Path -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $accessBoundaryReceiptRoot))) {
         throw "ACCESS_HISTORICAL_RECEIPT_MISSING"
     }
-    foreach ($file in @(Get-ChildItem -LiteralPath $accessBoundaryReceiptRoot `
+    foreach ($file in @(Get-ChildItem -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $accessBoundaryReceiptRoot) `
             -Filter '*.json' -File)) {
         try {
-            $receipt = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
+            $receipt = Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $file.FullName) -Raw -Encoding UTF8 |
                 ConvertFrom-ReleaseControlJson
             if ([string]$receipt.receipt_digest -ceq $Digest) {
                 return Assert-HistoricalAccessBoundaryReceipt -Receipt $receipt
@@ -4421,7 +4455,7 @@ function Get-AccessQualificationRenewalReceiptPath {
     if ($Digest -notmatch '^[0-9a-f]{64}$') {
         throw "ACCESS_QUALIFICATION_RENEWAL_TAMPERED"
     }
-    return Join-Path $accessQualificationRenewalReceiptRoot "$Digest.json"
+    return ConvertTo-ReleaseEvidenceNativePath -Path (Join-Path $accessQualificationRenewalReceiptRoot "$Digest.json")
 }
 
 function Get-AccessQualificationRenewalCore {
@@ -4472,8 +4506,6 @@ function New-HistoricalAccessMachineCandidate {
 function Write-AccessQualificationRenewalReceipt {
     param([Parameter(Mandatory = $true)][object]$Receipt)
     $path = Get-AccessQualificationRenewalReceiptPath -Digest $Receipt.receipt_digest
-    New-Item -ItemType Directory -Path $accessQualificationRenewalReceiptRoot -Force |
-        Out-Null
     if (Test-Path -LiteralPath $path) {
         $existing = Get-Content -LiteralPath $path -Raw -Encoding UTF8 |
             ConvertFrom-ReleaseControlJson
@@ -4561,12 +4593,12 @@ function Assert-AccessQualificationRenewalReceipt {
         $previousProviderDigest = [string]$previous.provider_inspection_receipt_digest
         $previousAccessKey = [string]$previous.access_qualification_key
     } else {
-        $reuseFiles = @(Get-ChildItem -LiteralPath $accessQualificationReuseReceiptRoot `
+        $reuseFiles = @(Get-ChildItem -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $accessQualificationReuseReceiptRoot) `
             -Filter '*.json' -File -ErrorAction SilentlyContinue)
         $previousRaw = $null
         foreach ($file in $reuseFiles) {
             try {
-                $candidateReceipt = Get-Content -LiteralPath $file.FullName -Raw `
+                $candidateReceipt = Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $file.FullName) -Raw `
                     -Encoding UTF8 | ConvertFrom-ReleaseControlJson
                 if ([string]$candidateReceipt.receipt_digest -ceq
                         [string]$receipt.previous_machine_receipt_digest) {
@@ -4621,10 +4653,10 @@ function Assert-AccessQualificationRenewalReceipt {
 
 function Get-LatestHistoricalAccessMachineAuthority {
     $valid = @()
-    foreach ($file in @(Get-ChildItem -LiteralPath $accessQualificationRenewalReceiptRoot `
+    foreach ($file in @(Get-ChildItem -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $accessQualificationRenewalReceiptRoot) `
             -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
         try {
-            $raw = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
+            $raw = Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $file.FullName) -Raw -Encoding UTF8 |
                 ConvertFrom-ReleaseControlJson
             $historicalCandidate = New-HistoricalAccessMachineCandidate -Receipt $raw
             $receipt = Assert-AccessQualificationRenewalReceipt `
@@ -4637,10 +4669,10 @@ function Get-LatestHistoricalAccessMachineAuthority {
             }
         } catch { throw }
     }
-    foreach ($file in @(Get-ChildItem -LiteralPath $accessQualificationReuseReceiptRoot `
+    foreach ($file in @(Get-ChildItem -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $accessQualificationReuseReceiptRoot) `
             -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
         try {
-            $raw = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
+            $raw = Get-Content -LiteralPath (ConvertTo-ReleaseEvidenceNativePath -Path $file.FullName) -Raw -Encoding UTF8 |
                 ConvertFrom-ReleaseControlJson
             $historicalCandidate = New-HistoricalAccessMachineCandidate -Receipt $raw
             $receipt = Assert-AccessQualificationReuseReceipt `

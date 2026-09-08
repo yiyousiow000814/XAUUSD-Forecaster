@@ -123,7 +123,7 @@
         {
           "path": "tests/test_runtime_launchers.py",
           "from": "test_future_release_history_is_versioned_bounded_and_preserves_old_lines",
-          "through": "test_future_release_history_is_versioned_bounded_and_preserves_old_lines"
+          "through": "test_release_history_cpu_request_reference_preserves_authority"
         }
       ]
     },
@@ -160,7 +160,7 @@
       ]
     },
     {
-      "id": "runtime-supervision",
+      "id": "runtime-ownership",
       "family": "windows-runtime-release",
       "paths": [
         "tests/test_runtime_launchers.py",
@@ -188,6 +188,36 @@
         {
           "path": "tests/test_runtime_launchers.py",
           "from": "test_control_center_stages_releases_without_main_driven_activation",
+          "through": "test_runtime_control_bundle_records_exact_source_revision_and_hashes"
+        }
+      ]
+    },
+    {
+      "id": "runtime-candidate-validation",
+      "family": "windows-runtime-release",
+      "paths": [
+        "tests/test_runtime_launchers.py",
+        "tests/test_release_runtime_read_model.py",
+        "scripts/xauusd_control_center.ps1",
+        "scripts/release_runtime_read_model.ps1",
+        "scripts/xauusd_control_center_launcher.vbs",
+        "scripts/control_center.xaml",
+        "scripts/runtime_paths.ps1",
+        "scripts/run_dashboard_sync.py",
+        "scripts/run_dashboard_api.py",
+        "scripts/run_forward_collector.py",
+        "scripts/run_news_annotator.py",
+        "scripts/run_live_broadcast_publisher.py",
+        "web/worker-validation-manifest.json",
+        "scripts/control_center_common.ps1",
+        "scripts/control_center_persistence_gateway.ps1",
+        "scripts/control_center_provider_adapters.ps1",
+        "scripts/control_center_runtime_supervision.ps1"
+      ],
+      "tests": [
+        {
+          "path": "tests/test_runtime_launchers.py",
+          "from": "test_candidate_status_parity_fails_closed",
           "through": "test_failed_directed_validation_persists_bounded_route_receipt"
         }
       ]
@@ -233,6 +263,30 @@
         {
           "path": "tests/test_runtime_launchers.py",
           "from": "test_all_operator_and_json_consumers_preserve_membership_enum",
+          "through": "test_release_requires_exactly_one_owner_for_every_side_effect_service"
+        }
+      ]
+    },
+    {
+      "id": "migration-acceptance",
+      "family": "windows-runtime-release",
+      "paths": [
+        "tests/test_runtime_launchers.py",
+        "scripts/worker_cpu_evidence.ps1",
+        "scripts/xauusd_control_center.ps1",
+        "scripts/release_runtime_read_model.ps1",
+        "scripts/runtime_paths.ps1",
+        "scripts/control_center_common.ps1",
+        "scripts/control_center_persistence_gateway.ps1",
+        "scripts/control_center_provider_adapters.ps1",
+        "scripts/control_center_runtime_supervision.ps1",
+        "scripts/control_center_evidence_authority.ps1",
+        "scripts/control_center_transaction_engine.ps1"
+      ],
+      "tests": [
+        {
+          "path": "tests/test_runtime_launchers.py",
+          "from": "test_storage_migration_requires_coordinated_compatibility_review",
           "through": "test_storage_or_resource_failure_cannot_use_compatibility_approval"
         }
       ]
@@ -261,7 +315,7 @@
       ]
     },
     {
-      "id": "compatibility-release",
+      "id": "compatibility-discovery",
       "family": "windows-runtime-release",
       "paths": [
         "tests/test_runtime_launchers.py",
@@ -280,6 +334,30 @@
         {
           "path": "tests/test_runtime_launchers.py",
           "from": "test_required_github_gate_set_is_exact_and_missing_gate_stays_pending",
+          "through": "test_unavailable_supersession_reuse_falls_back_once_without_copying_evidence"
+        }
+      ]
+    },
+    {
+      "id": "compatibility-qualification",
+      "family": "windows-runtime-release",
+      "paths": [
+        "tests/test_runtime_launchers.py",
+        "scripts/xauusd_control_center.ps1",
+        "scripts/check_admin_access_boundary.py",
+        "scripts/run_live_broadcast_publisher.py",
+        "scripts/control_center_common.ps1",
+        "scripts/control_center_persistence_gateway.ps1",
+        "scripts/control_center_provider_adapters.ps1",
+        "scripts/control_center_runtime_supervision.ps1",
+        "scripts/control_center_evidence_authority.ps1",
+        "scripts/control_center_transaction_engine.ps1",
+        "scripts/control_center_recovery_engine.ps1"
+      ],
+      "tests": [
+        {
+          "path": "tests/test_runtime_launchers.py",
+          "from": "test_observe_probe_failure_restores_exact_qualification_and_preserves_attempt",
           "through": "test_access_provider_inspection_fails_closed"
         }
       ]
@@ -353,6 +431,7 @@
         "scripts/rehearse_control_plane_takeover.py",
         "tests/test_control_plane_install.py",
         "tests/fixtures/control_plane_staged_boundary.ps1",
+        "tests/fixtures/control_plane_user_environment.ps1",
         "tests/fixtures/staged_sync_owner.py",
         "scripts/control_center_install.ps1",
         "scripts/control_center_watchdog_singleton.ps1",
@@ -364,6 +443,29 @@
       ],
       "tests": [],
       "rehearsal_script": "scripts/rehearse_control_plane_takeover.py"
+    },
+    {
+      "id": "control-install-configuration",
+      "family": "windows-runtime-artifact-repair",
+      "paths": [
+        "tests/test_control_plane_install.py",
+        "scripts/install_control_plane.ps1",
+        "scripts/xauusd_control_center.ps1",
+        "scripts/xauusd_control_center_launcher.vbs",
+        "scripts/control_center.xaml",
+        "scripts/runtime-control-files.json",
+        "scripts/control_center_common.ps1",
+        "scripts/control_center_persistence_gateway.ps1",
+        "scripts/control_center_runtime_supervision.ps1",
+        "scripts/control_center_install.ps1"
+      ],
+      "tests": [
+        {
+          "path": "tests/test_control_plane_install.py",
+          "from": "test_business_configuration_rejects_foreign_locator_before_filesystem",
+          "through": "test_business_entrypoint_configuration_is_inherited_and_fail_closed"
+        }
+      ]
     },
     {
       "id": "control-install",
@@ -382,7 +484,9 @@
       ],
       "tests": [
         {
-          "path": "tests/test_control_plane_install.py"
+          "path": "tests/test_control_plane_install.py",
+          "from": "test_repository_entrypoint_bootstraps_from_exact_origin_main_worktree",
+          "through": "test_incident_rollback_reports_degraded_and_requires_live_session_and_inventory"
         }
       ]
     },

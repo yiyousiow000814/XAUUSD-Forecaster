@@ -4,6 +4,18 @@
 $releaseHistoryEventSchema = "release-history-event-v2"
 $releaseHistoryMaximumEventBytes = 65536
 
+function ConvertTo-ReleaseEvidenceNativePath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if ($env:OS -ne "Windows_NT" -or $fullPath.StartsWith("\\?\")) {
+        return $fullPath
+    }
+    if ($fullPath.StartsWith("\\")) {
+        return "\\?\UNC\$($fullPath.Substring(2))"
+    }
+    return "\\?\$fullPath"
+}
+
 function Write-ControlCenterJsonAtomic {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -11,26 +23,8 @@ function Write-ControlCenterJsonAtomic {
         [ValidateRange(2, 32)][int]$Depth = 12,
         [switch]$Immutable
     )
-    $directory = Split-Path -Parent $Path
-    New-Item -ItemType Directory -Path $directory -Force | Out-Null
-    # Keep the temporary leaf short: receipt paths already contain a 64-byte
-    # digest and Windows PowerShell 5.1 still encounters legacy path limits.
-    $temporary = Join-Path $directory (
-        ".cc-{0}.tmp" -f [guid]::NewGuid().ToString("N")
-    )
-    try {
-        $json = $Value | ConvertTo-Json -Depth $Depth
-        [System.IO.File]::WriteAllText(
-            $temporary, $json, [System.Text.UTF8Encoding]::new($false)
-        )
-        if ($Immutable) {
-            Move-Item -LiteralPath $temporary -Destination $Path -ErrorAction Stop
-        } else {
-            Move-Item -LiteralPath $temporary -Destination $Path -Force -ErrorAction Stop
-        }
-    } finally {
-        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
-    }
+    $json = $Value | ConvertTo-Json -Depth $Depth
+    Write-ReleaseEvidenceUtf8Atomic -Path $Path -Content $json -CreateNew:$Immutable
 }
 
 function Write-ReleaseEvidenceUtf8Atomic {
@@ -39,28 +33,18 @@ function Write-ReleaseEvidenceUtf8Atomic {
         [Parameter(Mandatory = $true)][string]$Content,
         [switch]$CreateNew
     )
-    $directory = Split-Path -Parent $Path
-    $nativeDirectory = ConvertTo-ReleaseEvidenceNativePath -Path $directory
     $nativePath = ConvertTo-ReleaseEvidenceNativePath -Path $Path
+    $nativeDirectory = [System.IO.Path]::GetDirectoryName($nativePath)
     [System.IO.Directory]::CreateDirectory($nativeDirectory) | Out-Null
     $encoding = New-Object System.Text.UTF8Encoding($false)
-    if ($CreateNew) {
-        $stream = [System.IO.File]::Open(
-            $nativePath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write,
-            [System.IO.FileShare]::Read)
-        try {
-            $writer = [System.IO.StreamWriter]::new($stream, $encoding)
-            try { $writer.Write($Content) } finally { $writer.Dispose() }
-        } finally { $stream.Dispose() }
-        return
-    }
-    $temporary = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
-    $nativeTemporary = ConvertTo-ReleaseEvidenceNativePath -Path $temporary
-    $backup = "$Path.$([guid]::NewGuid().ToString('N')).bak"
-    $nativeBackup = ConvertTo-ReleaseEvidenceNativePath -Path $backup
-    [System.IO.File]::WriteAllText($nativeTemporary, $Content, $encoding)
+    $nativeTemporary = [System.IO.Path]::Combine(
+        $nativeDirectory, (".cc-{0}.tmp" -f [guid]::NewGuid().ToString("N")))
+    $nativeBackup = "$nativePath.$([guid]::NewGuid().ToString('N')).bak"
     try {
-        if ([System.IO.File]::Exists($nativePath)) {
+        [System.IO.File]::WriteAllText($nativeTemporary, $Content, $encoding)
+        if ($CreateNew) {
+            [System.IO.File]::Move($nativeTemporary, $nativePath)
+        } elseif ([System.IO.File]::Exists($nativePath)) {
             [System.IO.File]::Replace($nativeTemporary, $nativePath, $nativeBackup)
         } else {
             [System.IO.File]::Move($nativeTemporary, $nativePath)
@@ -140,6 +124,94 @@ function ConvertTo-BoundedReleaseHistoryValue {
     return [pscustomobject]$answer
 }
 
+function ConvertTo-ReleaseHistoryValidation {
+    param([Parameter(Mandatory = $true)][object]$Release)
+    $validation = $Release.validation
+    $projection = ConvertTo-BoundedReleaseHistoryValue -Value $validation
+    foreach ($name in @("route_plan", "cpu_route_plan")) {
+        if (-not $validation -or -not $validation.$name) { continue }
+        $routePlan = $validation.$name
+        $projection.PSObject.Properties.Remove($name)
+        $projection | Add-Member -Force -NotePropertyName ($name + "_summary") -NotePropertyValue (
+            [pscustomobject]@{
+                canonical_digest = Get-WorkerCpuCanonicalDigest -Value $routePlan
+                manifest_schema_version = $routePlan.manifest_schema_version
+                worker_cpu_required = [bool]$routePlan.worker_cpu_required
+                requires_validation = [bool]$routePlan.requires_validation
+                static_asset_count = @($routePlan.static_assets | Where-Object { $null -ne $_ }).Count
+                worker_read_count = @($routePlan.worker_reads | Where-Object { $null -ne $_ }).Count
+                worker_write_count = @($routePlan.worker_writes | Where-Object { $null -ne $_ }).Count
+                contract_route_count = @($routePlan.contract_routes | Where-Object { $null -ne $_ }).Count
+            }
+        )
+    }
+    foreach ($kind in @("validation", "cpu_evidence")) {
+        $source = if ($kind -eq "validation") { $validation } else { $validation.cpu_evidence }
+        $target = if ($kind -eq "validation") { $projection } else { $projection.cpu_evidence }
+        if ($kind -eq "cpu_evidence") {
+            if (-not $source -or $source -is [string] -or
+                [string]$source.qualification_key -notmatch '^[0-9a-f]{64}$' -or
+                [string]$source.worker_version_id -cne [string]$Release.worker_version_id -or
+                [string]$source.validation_run -cne [string]$validation.validation_run) { continue }
+            try { $receipt = Get-WorkerCpuQualificationReceipt -QualificationKey $source.qualification_key }
+            catch { continue }
+            if (-not $receipt -or
+                [string]$receipt.receipt_digest -cne [string]$source.qualification_receipt_digest -or
+                [string]$receipt.source_worker_version -cne [string]$Release.worker_version_id -or
+                [string]$receipt.source_git_sha -cne [string]$Release.git_sha -or
+                [string]$receipt.validation_run -cne [string]$validation.validation_run -or
+                [string]$receipt.qualification_key -cne [string]$validation.worker_qualification.key) { continue }
+            $groupDigest = Get-WorkerCpuCanonicalDigest -Value @($receipt.cpu_evidence.groups)
+            if ((Get-WorkerCpuCanonicalDigest -Value @($source.family_reconciliation)) -cne $groupDigest -or
+                (Get-WorkerCpuCanonicalDigest -Value @($source.scenario_reconciliation)) -cne $groupDigest) { continue }
+        }
+        if (-not $validation -or $null -eq $source.expected_requests -or
+            @($source.expected_requests).Count -eq 0 -or
+            [string]$validation.validation_run -notmatch '^[0-9a-fA-F-]{36}$' -or
+            [string]$validation.key -cne [string]$Release.validation_key) {
+            continue
+        }
+        $plan = Read-WorkerCpuRunArtifact -ValidationRun ([string]$validation.validation_run) -Name "plan.json"
+        if (-not $plan -or
+            [string]$plan.validation_run -cne [string]$validation.validation_run -or
+            [string]$plan.candidate_worker_version -cne [string]$Release.worker_version_id -or
+            [string]$plan.qualification_key -cne [string]$validation.worker_qualification.key) {
+            continue
+        }
+        $acceptance = @($plan.requests | Where-Object { [string]$_.phase -eq "acceptance" })
+        $digest = Get-WorkerCpuCanonicalDigest -Value @($source.expected_requests)
+        if ((Get-WorkerCpuCanonicalDigest -Value $acceptance) -cne $digest -or
+            (Get-WorkerCpuCanonicalDigest -Value @($plan.requests)) -cne [string]$plan.request_universe_digest) {
+            continue
+        }
+        $target.PSObject.Properties.Remove("expected_requests")
+        $target | Add-Member -Force -NotePropertyName expected_requests_reference -NotePropertyValue (
+            [pscustomobject]@{
+                validation_run = [string]$plan.validation_run
+                artifact = "plan.json"
+                request_count = @($plan.requests).Count
+                request_universe_digest = [string]$plan.request_universe_digest
+                acceptance_count = $acceptance.Count
+                acceptance_digest = $digest
+            }
+        )
+        if ($kind -eq "cpu_evidence") {
+            foreach ($name in @("family_reconciliation", "scenario_reconciliation")) {
+                $target.PSObject.Properties.Remove($name)
+                $target | Add-Member -Force -NotePropertyName ($name + "_summary") -NotePropertyValue (
+                    [pscustomobject]@{
+                        count = @($source.$name).Count
+                        canonical_digest = $groupDigest
+                        validation_run = [string]$validation.validation_run
+                        qualification_receipt_digest = [string]$receipt.receipt_digest
+                    }
+                )
+            }
+        }
+    }
+    return $projection
+}
+
 function ConvertTo-ReleaseHistoryProjection {
     param([AllowNull()][object]$Release)
     if (-not $Release) { return $null }
@@ -155,8 +227,11 @@ function ConvertTo-ReleaseHistoryProjection {
         "validation"
     )) {
         if ($Release.PSObject.Properties[$name]) {
-            $projection[$name] = ConvertTo-BoundedReleaseHistoryValue `
-                -Value $Release.$name
+            $projection[$name] = if ($name -eq "validation") {
+                ConvertTo-ReleaseHistoryValidation -Release $Release
+            } else {
+                ConvertTo-BoundedReleaseHistoryValue -Value $Release.$name
+            }
         }
     }
     return [pscustomobject]$projection

@@ -19,7 +19,8 @@ param(
     [int]$TargetProcessId = 0,
     [string]$TargetProcessStartToken = "",
     [switch]$SkipProviderObservation,
-    [switch]$CollectorClockRecovery
+    [switch]$CollectorClockRecovery,
+    [string]$CollectorRecoveryEvidencePath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,6 +32,16 @@ $repositoryRoot = if ($RepositoryRoot) {
 $moduleRoot = if ($RuntimeRoot) {
     [System.IO.Path]::GetFullPath($RuntimeRoot)
 } else { $scriptRepositoryRoot }
+. (Join-Path $PSScriptRoot 'control_center_common.ps1')
+$isolatedConfiguration = Get-IsolatedRuntimeConfiguration
+if ($isolatedConfiguration -and -not (
+    ($moduleRoot -ceq [string]$isolatedConfiguration.runtime_root -and
+     $repositoryRoot -ceq [string]$isolatedConfiguration.repository_root) -or
+    ($Action -ceq 'ControlBundlePreflight' -and
+     $moduleRoot -ceq [string]$isolatedConfiguration.source_root -and
+     $repositoryRoot -ceq [string]$isolatedConfiguration.source_root))) {
+    throw 'ISOLATED_CONFIGURATION_CONTEXT_MISMATCH'
+}
 $script:nativeProcessOwnershipReceiptPath = $NativeProcessReceiptPath
 $runtimeLocalRoot = Join-Path $moduleRoot ".local"
 $runtimeForwardRoot = Join-Path $runtimeLocalRoot "forward"
@@ -38,10 +49,16 @@ $repositoryLocalRoot = Join-Path $repositoryRoot ".local"
 $logRoot = Join-Path $runtimeForwardRoot "logs"
 $taskName = "XAUUSD-Forecaster-Autostart"
 $guardTaskName = "XAUUSD-Forecaster-Watchdog-Guard"
+if ($isolatedConfiguration) {
+    $taskName = 'XAUUSD-Contract-' + $isolatedConfiguration.fixture_id + '-Main'
+    $guardTaskName = 'XAUUSD-Contract-' + $isolatedConfiguration.fixture_id + '-Guard'
+}
 $workerName = "aurum-signal-room"
-$workerUrl = "https://aurum-signal-room.yiyousiow1234.workers.dev"
-$dashboardUrl = if ([Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL", "User")) {
-    [Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL", "User")
+$workerVersionOrigin = "https://aurum-signal-room.yiyousiow1234.workers.dev"
+$workerUrl = $workerVersionOrigin
+if ($isolatedConfiguration) { $workerUrl = [string]$isolatedConfiguration.provider_endpoint }
+$dashboardUrl = if (Get-UserEnvironmentValue -Name 'XAUUSD_DASHBOARD_URL') {
+    Get-UserEnvironmentValue -Name 'XAUUSD_DASHBOARD_URL'
 } else {
     $workerUrl
 }
@@ -1013,6 +1030,11 @@ $services = @(Resolve-ServiceLaunchContracts -Revision $serviceContractRevision 
 
 
 
+foreach ($externalDefinition in @(Get-IsolatedExternalAdapterDefinitions)) {
+    Set-Item -Path ('function:' + $externalDefinition.name) `
+        -Value ([scriptblock]::Create($externalDefinition.body))
+}
+
 if ($ExpectedControlScriptPath -or $ExpectedControlRevision) {
     $null = Assert-ControlCenterProcessIdentity `
         -ExpectedScriptPath $ExpectedControlScriptPath `
@@ -1235,9 +1257,19 @@ switch ($Action) {
         if (-not $SourceRoot -or -not $SourceRevision) {
             throw "SourceRoot and SourceRevision are required for InstallControlPlane."
         }
+        $newsEvidence = $null
+        if ($CollectorRecoveryEvidencePath) {
+            if (-not $CollectorClockRecovery -or
+                (Get-Item -LiteralPath $CollectorRecoveryEvidencePath -ErrorAction Stop).Length -gt 65536) {
+                throw 'COLLECTOR_NEWS_RECOVERY_EVIDENCE_INVALID'
+            }
+            $newsEvidence = Get-Content -LiteralPath $CollectorRecoveryEvidencePath -Raw -Encoding UTF8 |
+                ConvertFrom-ReleaseControlJson
+        }
         Invoke-ControlPlaneInstall -VerifiedSourceRoot `
             ([System.IO.Path]::GetFullPath($SourceRoot)) `
-            -TargetRevision $SourceRevision -CollectorClockRecovery:$CollectorClockRecovery | Format-List
+            -TargetRevision $SourceRevision -CollectorClockRecovery:$CollectorClockRecovery `
+            -NewsRecoveryEvidence $newsEvidence | Format-List
     }
     "RecoverCollectorClock" {
         if (-not (Enter-ReleaseTransactionLock)) { throw 'COLLECTOR_RECOVERY_RELEASE_LOCK_REQUIRED' }

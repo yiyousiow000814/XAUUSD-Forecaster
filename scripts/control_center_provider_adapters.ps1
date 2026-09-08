@@ -116,6 +116,12 @@ function Get-CloudflareVersionDetails {
     )
 }
 
+function Invoke-WranglerDeploymentCommand {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+    $output = @(& npx.cmd wrangler @Arguments 2>&1)
+    [pscustomobject]@{ exit_code = $LASTEXITCODE; output = $output }
+}
+
 function Invoke-CloudflareDeployment {
     param(
         [Parameter(Mandatory = $true)][string]$StableVersionId,
@@ -127,8 +133,10 @@ function Invoke-CloudflareDeployment {
     $webRoot = Join-Path $repositoryRoot "web"
     Push-Location $webRoot
     try {
-        $null = @(& npx.cmd wrangler versions deploy @specifications --name $workerName --yes --message $Message 2>&1)
-        if ($LASTEXITCODE -ne 0) { throw "Cloudflare deployment failed." }
+        $result = Invoke-WranglerDeploymentCommand -Arguments (
+            @('versions', 'deploy') + $specifications + @('--name', $workerName, '--yes', '--message', $Message)
+        )
+        if ($result.exit_code -ne 0) { throw "Cloudflare deployment failed." }
     } finally { Pop-Location }
 }
 
@@ -226,7 +234,7 @@ function Get-ReleaseVersionPreviewUrl {
         (Get-ReleaseArtifactKindFromVersion -Version $Version) -ne
             $productionCandidateArtifactKind) { return "" }
     try {
-        $production = [Uri]$workerUrl
+        $production = [Uri]$workerVersionOrigin
         $workerPrefix = "$workerName."
         if (-not $production.Host.StartsWith(
             $workerPrefix, [StringComparison]::OrdinalIgnoreCase
@@ -329,13 +337,18 @@ function Invoke-RepositoryRead {
     }
 }
 
+function Invoke-GitHubChecksRead {
+    param([Parameter(Mandatory = $true)][string]$Revision)
+    Invoke-Utf8NativeProcess -FilePath "gh.exe" -Arguments @(
+        "api", "--method", "GET",
+        "repos/yiyousiow000814/XAUUSD-Forecaster/commits/$Revision/check-runs?filter=latest&per_page=100"
+    )
+}
+
 function Get-RequiredGitHubChecksResult {
     param([Parameter(Mandatory = $true)][string]$Revision)
     try {
-        $read = Invoke-Utf8NativeProcess -FilePath "gh.exe" -Arguments @(
-            "api", "--method", "GET",
-            "repos/yiyousiow000814/XAUUSD-Forecaster/commits/$Revision/check-runs?filter=latest&per_page=100"
-        )
+        $read = Invoke-GitHubChecksRead -Revision $Revision
         $exitCode = [int]$read.exit_code
         $json = if ($exitCode -eq 0) { [string]$read.stdout } else {
             ((@($read.stdout_lines) + @($read.stderr_lines)) -join "`n")
@@ -1705,8 +1718,8 @@ function Register-AccessProviderInspection {
         $receipt | Add-Member -NotePropertyName access_failure_count `
             -NotePropertyValue $core.access_failure_count
     }
-    New-Item -ItemType Directory -Path $accessProviderInspectionRoot -Force | Out-Null
-    $path = Join-Path $accessProviderInspectionRoot "$($receipt.receipt_digest).json"
+    $path = ConvertTo-ReleaseEvidenceNativePath -Path (
+        Join-Path $accessProviderInspectionRoot "$($receipt.receipt_digest).json")
     if (-not (Test-Path -LiteralPath $path)) {
         Write-ControlCenterJsonAtomic -Path $path -Value $receipt `
             -Depth 12 -Immutable

@@ -181,8 +181,18 @@ nodes=$waterfall.node_count;waterfall_elapsed=$waterfall.elapsed_ms}}|ConvertTo-
 
 
 @pytest.mark.parametrize("shell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize(
+    ("factory", "root_variable", "argument", "identity"),
+    [
+        ("Get-CoordinatedMigrationRootReceiptPath", "coordinatedMigrationRootReceiptRoot", "Digest", "a" * 64),
+        ("Get-CoordinatedMigrationRenewalReceiptPath", "coordinatedMigrationRenewalReceiptRoot", "Digest", "a" * 64),
+        ("Get-AccessBoundaryReceiptPath", "accessBoundaryReceiptRoot", "ValidationKey", "worker:git"),
+        ("Get-AccessQualificationReuseReceiptPath", "accessQualificationReuseReceiptRoot", "ValidationKey", "worker:git"),
+        ("Get-AccessQualificationRenewalReceiptPath", "accessQualificationRenewalReceiptRoot", "Digest", "a" * 64),
+    ],
+)
 def test_evidence_store_supports_long_authoritative_runtime_root(
-    tmp_path: Path, shell: str,
+    tmp_path: Path, shell: str, factory: str, root_variable: str, argument: str, identity: str,
 ) -> None:
     evidence_root = (
         tmp_path
@@ -190,11 +200,25 @@ def test_evidence_store_supports_long_authoritative_runtime_root(
         / ".local"
         / "forward"
         / "release-evidence"
+        / ("retained-authority-" + "x" * 48)
     )
     output = _run_module(
         tmp_path,
         shell,
         f"""
+{_control_function("Get-Sha256BytesHex")}
+{_control_function(factory)}
+${root_variable}={_ps_literal(evidence_root)}
+$jsonPath={factory} -{argument} {_ps_literal(identity)}
+$mutablePath=ConvertTo-ReleaseEvidenceNativePath -Path (Join-Path {_ps_literal(evidence_root)} (('b'*64)+'.json'))
+Write-ControlCenterJsonAtomic -Path $jsonPath -Value @{{value='retained'}} -Immutable
+$collision=$false
+try {{Write-ControlCenterJsonAtomic -Path $jsonPath -Value @{{value='wrong'}} -Immutable}}
+catch {{$collision=$true}}
+$immutable=Get-Content -LiteralPath $jsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
+Write-ControlCenterJsonAtomic -Path $mutablePath -Value @{{value='old'}}
+Write-ControlCenterJsonAtomic -Path $mutablePath -Value @{{value='new'}}
+$mutable=Get-Content -LiteralPath $mutablePath -Raw -Encoding UTF8 | ConvertFrom-Json
 $source=[ordered]@{{validation_key='worker:git';worker_version_id='worker';git_sha='git'}}
 $receipt=Write-ReleaseEvidenceNodeReceipt -Root {_ps_literal(evidence_root)} `
  -ContractPath {_ps_literal(CONTRACT)} -ValidationKey 'worker:git' `
@@ -202,11 +226,15 @@ $receipt=Write-ReleaseEvidenceNodeReceipt -Root {_ps_literal(evidence_root)} `
  -SourceIdentity $source -StartedAt '2026-09-01T00:00:00Z' `
  -CompletedAt '2026-09-01T00:00:01Z' -ExecutionMode 'FRESH' -WhyRan 'DISCOVERED'
 $waterfall=Get-ReleaseEvidenceWaterfall -Root {_ps_literal(evidence_root)} -ValidationKey 'worker:git'
-[ordered]@{{valid=(Test-ReleaseEvidenceNodeReceipt $receipt);nodes=$waterfall.node_count}}|
+[ordered]@{{valid=(Test-ReleaseEvidenceNodeReceipt $receipt);nodes=$waterfall.node_count;
+ path_length=$jsonPath.Length;collision=$collision;immutable=$immutable.value;mutable=$mutable.value}}|
  ConvertTo-Json -Compress
 """,
     )
-    assert json.loads(output) == {"valid": True, "nodes": 1}
+    result = json.loads(output)
+    assert result.pop("path_length") > 260
+    assert result == {"valid": True, "nodes": 1, "collision": True,
+                      "immutable": "retained", "mutable": "new"}
 
 
 def test_receipt_digest_and_dependency_validation_fail_closed(tmp_path: Path) -> None:
@@ -383,6 +411,10 @@ function Copy-TestValue($Value){$Value|ConvertTo-Json -Depth 30|ConvertFrom-Json
 function Get-ReleaseControlState{return Copy-TestValue $script:testState}
 function Write-ReleaseControlState{param($State)$script:testState=Copy-TestValue $State}
 function Write-ReleaseHistory{}
+function Get-HistoricalAccessBoundaryReceiptByDigest{param($Digest)
+ if($script:foreignAccessOrigin){throw 'ACCESS_RECEIPT_HOST_MISMATCH'}
+ return [pscustomobject]@{receipt_digest=$Digest}
+}
 function Get-CandidateChangedFiles{return @()}
 function Get-CandidateCompatibilityRequirement{
  if($script:migrationRequired){[pscustomobject]@{state='COORDINATED_STORAGE_MIGRATION_REQUIRED';files=@('m.sql')}}
@@ -429,7 +461,9 @@ function Complete-TestProducer([string]$Name){
   'PLACEMENT'{$state.candidate.validation.cloudflare='PASSED'}
   'MIGRATION'{$script:migrationReady=$true;$state.candidate|Add-Member -Force migration_acceptance ([pscustomobject]@{validation_key='candidate:key'})}
   'MIGRATION_NOT_REQUIRED'{$script:migrationRequired=$false}
-  'ACCESS'{$state.candidate.validation.auth_inspection.state='ACCESS_QUALIFICATION_RENEWED'}
+  'ACCESS'{$state.candidate.validation.auth_inspection.state='ACCESS_QUALIFICATION_RENEWED';
+   $state.candidate|Add-Member -Force access_qualification ([pscustomobject]@{
+    root_human_receipt_digest=('a'*64);provider_fingerprint=('b'*64)})}
   'FREE'{$script:freeReady=$true}
   'RESTART'{$state=Copy-TestValue $state}
  }
@@ -468,10 +502,18 @@ function Set-TestReadyState{
  $script:testState.candidate.validation.windows='PASSED'
  $script:testState.candidate.validation.cloudflare='PASSED'
  $script:testState.candidate.validation.data_parity.passed=$true
- $script:testState.candidate.validation.auth_inspection.state='ACCESS_QUALIFICATION_RENEWED'
+$script:testState.candidate.validation.auth_inspection.state='ACCESS_QUALIFICATION_RENEWED'
+ $script:testState.candidate|Add-Member -Force access_qualification ([pscustomobject]@{
+  root_human_receipt_digest=('a'*64);provider_fingerprint=('b'*64)})
  $script:testState.candidate|Add-Member -Force migration_acceptance ([pscustomobject]@{validation_key='candidate:key'})
  $script:freeReady=$true;$script:migrationRequired=$true;$script:allNodes=$false;$script:publishCount=0
 }
+Set-TestReadyState
+$script:allNodes=$true;$script:testState.candidate.validation_state='PASSED'
+$script:foreignAccessOrigin=$true
+$foreign=Finalize-CandidateQualificationEvidence
+$foreignState=(Get-ReleaseControlState).candidate.validation_state
+$script:foreignAccessOrigin=$false
 Set-TestReadyState
 $script:testState.candidate.validation.auth_inspection.state='UNKNOWN'
 $accessUnknown=Finalize-CandidateQualificationEvidence
@@ -503,6 +545,7 @@ function Publish-CandidateQualificationEvidence{
 }
 $transactionRace=Finalize-CandidateQualificationEvidence
 [pscustomobject]@{permutations=$results;edges=[pscustomobject]@{
+ foreign=$foreign.reason;foreign_state=$foreignState;
  access_unknown=$accessUnknown.state;free_missing=$freeMissing.state;stale=$stale.state;
  stale_state=$staleState;key_mismatch=$keyMismatch.state;key_mismatch_state=$keyMismatchState;
  superseded=$superseded.state;replacement_state=$replacementState;
@@ -523,6 +566,8 @@ $transactionRace=Finalize-CandidateQualificationEvidence
         "transaction": False,
     }
     assert payload["edges"] == {
+        "foreign": "ACCESS_RECEIPT_HOST_MISMATCH",
+        "foreign_state": "REVIEW_REQUIRED",
         "access_unknown": "INCOMPLETE",
         "free_missing": "INCOMPLETE",
         "stale": "BLOCKED",
@@ -568,18 +613,22 @@ elapsed=$receipt.elapsed_ms;waterfall_nodes=$waterfall.node_count}}|ConvertTo-Js
 
 
 @pytest.mark.parametrize("shell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("shape", (None, [], [None], ["one"], ["one", "two"], [["one"], []], {"digest": "artifacts"}))
 def test_behavior_key_planner_and_bounded_lookup_are_exact(
-    tmp_path: Path, shell: str,
+    tmp_path: Path, shell: str, shape,
 ) -> None:
-    evidence_root = tmp_path.parent / f"authority-{Path(shell).stem}"
+    evidence_root = tmp_path / "authority"
     output = _run_module(
         tmp_path,
         shell,
         f"""
+$shape={_ps_literal(json.dumps({"value": shape}))}|ConvertFrom-ReleaseControlJson
+$rootShape=,($shape.value)
+$shapeWire=ConvertTo-ReleaseEvidenceJson -Value $rootShape
 $source=[pscustomobject]@{{validation_key='old';qualification_state='PASSED'}}
 $inputs=[pscustomobject][ordered]@{{protected_origin='https://example.invalid';
  provider_application_policy=[pscustomobject]@{{digest='policy'}};
- access_artifacts=[pscustomobject]@{{digest='artifacts'}};
+ access_artifacts=$shape.value;
  acceptance_contract='access-v1'}}
 $args=@{{Root={_ps_literal(evidence_root)};ContractPath={_ps_literal(CONTRACT)};
  ValidationKey='old';BehaviorInputs=$inputs;SourceIdentity=$source;
@@ -598,13 +647,15 @@ $reuse=Publish-ReleaseEvidenceReuse -Root {_ps_literal(evidence_root)} `
  -ReuseReason 'EXACT_ACCESS_BEHAVIOR_UNCHANGED'
 $changed=[pscustomobject][ordered]@{{protected_origin='https://other.invalid';
  provider_application_policy=[pscustomobject]@{{digest='policy'}};
- access_artifacts=[pscustomobject]@{{digest='artifacts'}};
+ access_artifacts=$shape.value;
  acceptance_contract='access-v1'}}
 $changedKey=Get-ReleaseEvidenceBehaviorKey -ContractPath {_ps_literal(CONTRACT)} `
  -Node 'human_access_root' -Inputs $changed
 [ordered]@{{found=($found.receipt_digest -ceq $first.receipt_digest);
  reused=($reuse.prior_receipt -ceq $first.receipt_digest);
- mode=$reuse.execution_mode;changed=($changedKey -cne $key)}}|ConvertTo-Json -Compress
+ mode=$reuse.execution_mode;changed=($changedKey -cne $key);
+ shape=$first.source_identity.behavior_inputs.access_artifacts;shape_wire=$shapeWire;
+ recomputed=($key -ceq (Get-ReleaseEvidenceBehaviorKey -ContractPath {_ps_literal(CONTRACT)} -Node human_access_root -Inputs $first.source_identity.behavior_inputs))}}|ConvertTo-Json -Compress
 """,
     )
     assert json.loads(output) == {
@@ -612,6 +663,9 @@ $changedKey=Get-ReleaseEvidenceBehaviorKey -ContractPath {_ps_literal(CONTRACT)}
         "reused": True,
         "mode": "REUSED",
         "changed": True,
+        "shape": shape,
+        "shape_wire": json.dumps([shape], separators=(",", ":")),
+        "recomputed": True,
     }
 
 
@@ -831,8 +885,6 @@ def test_free_plan_proof_rejects_duplicate_overflow_migration_and_storage_breach
         "production_calibration",
     ):
         value = proof[name]
-        if name in {"workload_manifest", "cadence"}:
-            value = {**value, "producers": value["producers"][0]}
         canonical = json.dumps(
             value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
         ).encode("utf-8")
@@ -1066,8 +1118,6 @@ def test_controller_registers_exact_candidate_free_plan_proof(
         "production_calibration",
     ):
         value = proof[name]
-        if name in {"workload_manifest", "cadence"}:
-            value = {**value, "producers": value["producers"][0]}
         canonical = json.dumps(
             value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
         ).encode("utf-8")

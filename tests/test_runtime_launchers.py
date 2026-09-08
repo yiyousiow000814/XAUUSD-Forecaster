@@ -100,7 +100,7 @@ def test_control_center_facade_composes_unique_canonical_owners() -> None:
                 f"{name} is defined by both {definitions.get(name)} and {owner_file}"
             )
             definitions[name] = owner_file
-    assert 420 <= len(definitions) <= 450
+    assert set(definitions.values()) == set(owner_files)
 
 
 def test_control_center_owner_boundaries_keep_authority_out_of_presentation() -> None:
@@ -127,6 +127,8 @@ def test_control_center_owner_boundaries_keep_authority_out_of_presentation() ->
     assert "Complete-ReleasePromotion" not in runtime
     assert "function Write-ReleaseEvidenceUtf8Atomic" in persistence
     assert "function Write-ReleaseEvidenceUtf8Atomic" not in evidence_nodes
+    assert "function ConvertTo-ReleaseEvidenceNativePath" in persistence
+    assert "function ConvertTo-ReleaseEvidenceNativePath" not in evidence_nodes
     for non_owner in (presentation, providers):
         assert "Set-Content" not in non_owner
         assert "[System.IO.File]::WriteAllText" not in non_owner
@@ -303,6 +305,120 @@ def test_future_release_history_is_versioned_bounded_and_preserves_old_lines(
     assert fields[4:] == ["tx-1", "True", "False"]
 
 
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("plan_case", ("matching", "missing", "wrong-worker", "wrong-universe", "misbound-run", "no-expected", "production-inflight", "later-append", "completed", "completed-wrong-digest", "completed-wrong-groups", "completed-missing-receipt", "completed-wrong-source", "completed-wrong-worker", "completed-wrong-run"))
+def test_release_history_cpu_request_reference_preserves_authority(tmp_path, powershell, plan_case):
+    setup = {
+        "matching": "",
+        "missing": "$release.validation.validation_run=[guid]::NewGuid().ToString();",
+        "wrong-worker": "$release.worker_version_id='22222222-2222-4222-8222-222222222222';",
+        "wrong-universe": "$release.validation.expected_requests[0].request_query='changed';",
+        "misbound-run": "$plan.validation_run=[guid]::NewGuid().ToString();"
+        "Write-WorkerCpuAtomicJson -Path $planPath -Value $plan;"
+        "$planBefore=Get-Sha256Hex -LiteralPath $planPath;",
+        "no-expected": "$release.validation.PSObject.Properties.Remove('expected_requests');",
+        "production-inflight": "",
+        "later-append": "",
+        "completed": "", "completed-wrong-digest": "",
+        "completed-wrong-groups": "", "completed-missing-receipt": "",
+        "completed-wrong-source": "", "completed-wrong-worker": "", "completed-wrong-run": "",
+    }[plan_case]
+    production_routes = (
+        "New-Item -ItemType Directory -Path (Join-Path $repositoryRoot 'web') -Force|Out-Null;"
+        f"Copy-Item -LiteralPath '{ROOT / 'web/worker-validation-manifest.json'}' "
+        "-Destination (Join-Path $repositoryRoot 'web/worker-validation-manifest.json');"
+        "$routePlan=Get-CandidateRouteValidationPlan -ChangedFiles @('web/worker-validation-manifest.json') -AllCpuRoutes;"
+        "$routes=@($routePlan.worker_reads)+@($routePlan.worker_writes);"
+    ) if plan_case == "production-inflight" else ""
+    publish = (
+        "$state=New-ReleaseControlState -Stable $release;$state.candidate=$release;Write-ReleaseControlState $state;"
+        "Write-CandidateCpuInFlightState -Candidate $release -RoutePlan $routePlan -RequestPlan $plan "
+        "-Qualification $release.validation.worker_qualification -WindowFrom ([DateTimeOffset]::UtcNow);"
+        "$saved=Get-ReleaseControlState;if(@($saved.candidate.validation.expected_requests).Count -ne 372)"
+        "{throw 'LIVE_REQUESTS_CHANGED'};"
+    ) if plan_case == "production-inflight" else "Write-ReleaseHistory -Event 'CPU_PLAN_BOUNDARY' -Release $release;"
+    later_append = (
+        "$null=Add-WorkerCpuPlannedRequests -Plan $plan -Groups @($routes[0]) "
+        "-SampleKind deficit_top_up -CountPerGroup 1;"
+    ) if plan_case == "later-append" else ""
+    completed = (
+        "$groups=@(1..31|%{[pscustomobject]@{family=('family-'+$_);scenario=('q'*1000);"
+        "observed=12;required=10;metrics=[pscustomobject]@{p95_cpu_ms=2;max_cpu_ms=2}}});"
+        "$q=[pscustomobject]@{key=('b'*64);fields=[pscustomobject]@{};"
+        "candidate_worker_version=$release.worker_version_id;candidate_git_sha=$release.git_sha;"
+        "exact_candidate_binding=[pscustomobject]@{executable_bundle_etag=('d'*64)}};"
+        "$decision=[pscustomobject]@{state='QUALIFIED';groups=$groups;global=[pscustomobject]@{max_cpu_ms=2}};"
+        "$receipt=Write-WorkerCpuQualificationReceipt -Qualification $q -ValidationRun $run -Decision $decision;"
+        "$cpu=[pscustomobject]@{worker_version_id=$release.worker_version_id;validation_run=$run;"
+        "qualification_key=$q.key;qualification_receipt_digest=$receipt.receipt_digest;"
+        "qualification_state='QUALIFIED';passed=$true;gate_state='PASSED';max_cpu_ms=2;"
+        "expected_requests=$release.validation.expected_requests;family_reconciliation=$groups;scenario_reconciliation=$groups};"
+        "$release.validation.PSObject.Properties.Remove('expected_requests');"
+        "$release.validation|Add-Member cpu_evidence $cpu;"
+        + ({"completed-wrong-source": "$q.candidate_git_sha='f'*40;$receipt=Write-WorkerCpuQualificationReceipt -Qualification $q -ValidationRun $run -Decision $decision;$cpu.qualification_receipt_digest=$receipt.receipt_digest;",
+            "completed-wrong-worker": "$q.candidate_worker_version='22222222-2222-4222-8222-222222222222';$receipt=Write-WorkerCpuQualificationReceipt -Qualification $q -ValidationRun $run -Decision $decision;$cpu.qualification_receipt_digest=$receipt.receipt_digest;",
+            "completed-wrong-run": "$receipt=Write-WorkerCpuQualificationReceipt -Qualification $q -ValidationRun '22222222-2222-4222-8222-222222222222' -Decision $decision;$cpu.qualification_receipt_digest=$receipt.receipt_digest;",
+            "completed-wrong-digest": "$cpu.qualification_receipt_digest='e'*64;",
+            "completed-wrong-groups": "$cpu.family_reconciliation=@([pscustomobject]@{family='wrong'});",
+            "completed-missing-receipt": "Remove-Item -LiteralPath (Join-Path (Join-Path $workerCpuEvidenceRoot 'qualifications') (($q.key)+'.json'));"}.get(plan_case, ""))
+    ) if plan_case.startswith("completed") else ""
+    result = _run_control_center_contract(
+        tmp_path,
+        "$release=New-ReleaseIdentity -GitSha ('a'*40) "
+        "-WorkerVersionId '11111111-1111-4111-8111-111111111111' "
+        "-WindowsRevision ('a'*40) -ArtifactKind 'PRODUCTION_CANDIDATE';"
+        "$run=[guid]::NewGuid().ToString();$routes=@(1..31|ForEach-Object{"
+        "[pscustomobject]@{family='status';scenario=[string]$_;method='GET';"
+        "path='/api/status';request_query=('q'*1000);fixture='';warmup_samples=2}});"
+        + production_routes +
+        "$plan=New-WorkerCpuRequestPlan -Routes $routes -ValidationRun $run "
+        "-CandidateWorkerVersion $release.worker_version_id -QualificationKey ('b'*64) "
+        "-ValidationPlanDigest ('c'*64) -FixtureDigestSet @();"
+        "$planPath=Join-Path (Get-WorkerCpuRunRoot $run) 'plan.json';"
+        "$planBefore=Get-Sha256Hex -LiteralPath $planPath;"
+        "$release.validation=[pscustomobject]@{key=$release.validation_key;validation_run=$run;"
+        "worker_qualification=[pscustomobject]@{key=('b'*64)};"
+        "expected_requests=@($plan.requests|Where-Object phase -eq 'acceptance')};"
+        + setup + completed +
+        "$before=Get-WorkerCpuCanonicalDigest $release.validation;"
+        "$reason='PASSED';try{" + publish + "}"
+        "catch{$reason=$_.Exception.Message};"
+        "$sourceSame=(Get-WorkerCpuCanonicalDigest $release.validation)-ceq$before;"
+        "$planSame=(Get-Sha256Hex -LiteralPath $planPath)-ceq$planBefore;"
+        "$count=0;$bytes=0;$linked=$false;"
+        "if($reason -eq 'PASSED'){$line=Get-Content -LiteralPath $releaseHistoryPath -Raw;"
+        "$event=$line|ConvertFrom-ReleaseControlJson;$ref=$event.release.validation.expected_requests_reference;"
+        "if(-not $ref){$ref=$event.release.validation.cpu_evidence.expected_requests_reference};"
+        "if($event.release.validation.cpu_evidence.expected_requests_reference){"
+        "$cpuSummary=$event.release.validation.cpu_evidence;"
+        "if($cpuSummary.gate_state -ne 'PASSED' -or $cpuSummary.max_cpu_ms -ne 2 -or "
+        "$cpuSummary.family_reconciliation_summary.count -ne 31 -or "
+        "$cpuSummary.scenario_reconciliation_summary.canonical_digest -cne "
+        "$cpuSummary.family_reconciliation_summary.canonical_digest){throw 'CPU_HISTORY_SUMMARY_CHANGED'}};"
+        "$bytes=[Text.Encoding]::UTF8.GetByteCount($line);if($ref){"
+        + later_append +
+        "$stored=Read-WorkerCpuRunArtifact -ValidationRun $ref.validation_run -Name $ref.artifact;"
+        "$prefix=@($stored.requests|Select-Object -First ([int]$ref.request_count));"
+        "$requests=@($prefix|Where-Object phase -eq 'acceptance');"
+        "$count=$requests.Count;$bytes=[Text.Encoding]::UTF8.GetByteCount($line);"
+        "$linked=($ref.acceptance_count -eq $count -and "
+        "$ref.acceptance_digest -ceq (Get-WorkerCpuCanonicalDigest $requests) -and "
+        "$ref.request_universe_digest -ceq (Get-WorkerCpuCanonicalDigest $prefix))}};"
+        'Write-Output "$reason,$sourceSame,$planSame,$count,$bytes,$linked"',
+        powershell=powershell,
+    )
+    reason, source_same, plan_same, count, size, linked = result.split(",")
+    assert (source_same, plan_same) == ("True", "True")
+    if plan_case in {"matching", "production-inflight", "later-append", "completed"}:
+        assert reason == "PASSED"
+        assert (count, linked) == ("372", "True")
+        assert int(size) <= 65536
+    elif plan_case == "no-expected":
+        assert (reason, count, linked) == ("PASSED", "0", "False")
+    else:
+        assert reason == "PERSISTENCE_EVENT_TOO_LARGE"
+
+
 @pytest.mark.parametrize(
     ("status", "diagnostic"),
     [
@@ -418,11 +534,14 @@ def test_cpu_deficit_repair_policy_has_manifest_derived_global_bound(tmp_path) -
     assert result == "worker-cpu-deficit-repair-v1,3,3,4,4,16"
 
 
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("long_path", (False, True))
 def test_provider_unavailable_persists_active_and_background_retry_budget(
-    tmp_path,
+    tmp_path, powershell, long_path,
 ) -> None:
     result = _run_control_center_contract(
         tmp_path,
+        ("$workerCpuEvidenceRoot=Join-Path $workerCpuEvidenceRoot ('segment-'*20);" if long_path else "") +
         "$run='11111111-1111-1111-1111-111111111111';"
         "$candidate=[pscustomobject]@{worker_version_id='worker';git_sha=('a'*40)};"
         "$expected=@(1..12|ForEach-Object{[pscustomobject]@{request_id=('r-'+$_);"
@@ -444,6 +563,7 @@ def test_provider_unavailable_persists_active_and_background_retry_budget(
         "$final=Read-WorkerCpuRunArtifact -ValidationRun $run -Name 'provider-evidence.json';"
         'Write-Output "$script:queries,$active,$($final.recovery.background_reads),'
         '$script:lastWorkersObservabilityDiagnostic"',
+        powershell=powershell,
     )
 
     assert result == "10,6,4,PROVIDER_EVIDENCE_INSUFFICIENT"
@@ -692,11 +812,14 @@ def test_multi_family_deficit_repair_eligibility_is_globally_bounded(
     assert result == expected
 
 
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("long_path", (False, True))
 def test_deficit_repair_plan_is_frozen_before_send_and_idempotent_across_restart(
-    tmp_path,
+    tmp_path, powershell, long_path,
 ) -> None:
     result = _run_control_center_contract(
         tmp_path,
+        ("$workerCpuEvidenceRoot=Join-Path $workerCpuEvidenceRoot ('segment-'*20);" if long_path else "") +
         "$run='11111111-1111-1111-1111-111111111111';$key='a'*64;"
         "$request=[pscustomobject]@{request_id='original';family='qualified';"
         "scenario='default';method='GET';path='/';phase='acceptance'};"
@@ -710,8 +833,8 @@ def test_deficit_repair_plan_is_frozen_before_send_and_idempotent_across_restart
         "$repair=New-WorkerCpuDeficitRepairPlan -RequestPlan $plan -DeficientGroups $groups "
         "-CandidateWorkerVersion worker -QualificationKey $key -PriorProviderDigest ('b'*64) "
         "-PriorObservedTotal 18;"
-        "$frozenBeforeApply=Test-Path (Join-Path (Get-WorkerCpuRunRoot $run) "
-        "'deficit-repair-plan.json');$first=@(Apply-WorkerCpuDeficitRepairPlan -RequestPlan $plan "
+        "$frozenBeforeApply=Test-Path -LiteralPath (ConvertTo-ReleaseEvidenceNativePath (Join-Path (Get-WorkerCpuRunRoot $run) "
+        "'deficit-repair-plan.json'));$first=@(Apply-WorkerCpuDeficitRepairPlan -RequestPlan $plan "
         "-RepairPlan $repair);$countAfterFirst=@($plan.requests).Count;"
         "$second=@(Apply-WorkerCpuDeficitRepairPlan -RequestPlan $plan -RepairPlan $repair);"
         "$ids=@($repair.payload.requests.request_id|Sort-Object -Unique);"
@@ -719,6 +842,7 @@ def test_deficit_repair_plan_is_frozen_before_send_and_idempotent_across_restart
         'Write-Output "$frozenBeforeApply,$($first.Count),$countAfterFirst,'
         '$($plan.requests.Count),$($ids.Count),$($read.plan_digest -eq $repair.plan_digest),'
         '$($repair.payload.total_request_count)"',
+        powershell=powershell,
     )
 
     assert result == "True,8,9,9,8,True,8"
@@ -976,11 +1100,14 @@ def test_incomplete_confirmation_is_nonqualifying_and_cannot_start_another_round
     )
 
 
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("long_path", (False, True))
 def test_isolated_outlier_receipt_retains_raw_event_and_exact_candidate_identity(
-    tmp_path,
+    tmp_path, powershell, long_path,
 ) -> None:
     result = _run_control_center_contract(
         tmp_path,
+        ("$workerCpuEvidenceRoot=Join-Path $workerCpuEvidenceRoot ('segment-'*20);" if long_path else "") +
         "$key='a'*64;$decision=[pscustomobject]@{state='QUALIFIED_WITH_ISOLATED_CPU_OUTLIER';"
         "global=[pscustomobject]@{invocations=22;max_cpu_ms=15};"
         "qualification_global=[pscustomobject]@{invocations=21;max_cpu_ms=4};"
@@ -997,6 +1124,7 @@ def test_isolated_outlier_receipt_retains_raw_event_and_exact_candidate_identity
         '$($read.source_git_sha),$($read.cpu_evidence.global.max_cpu_ms),'
         '$($read.cpu_evidence.isolated_cpu_outlier.request_id),'
         '$($read.cpu_evidence.outlier_confirmation.observed)"',
+        powershell=powershell,
     )
 
     assert result == (
@@ -1025,6 +1153,100 @@ def test_aggregate_corroboration_cannot_override_raw_and_contradiction_fails_clo
     )
 
 
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+def test_cpu_version_metadata_uses_exact_provider_adapter_and_fails_closed(
+    tmp_path, monkeypatch, powershell: str,
+) -> None:
+    version = "11111111-1111-4111-8111-111111111111"
+    revision = "a" * 40
+    message = f"release:{revision} branch:main artifact_kind:PRODUCTION_CANDIDATE"
+    raw = {
+        "id": version, "number": 979,
+        "metadata": {"created_on": "2026-08-20T04:08:20Z", "source": "wrangler", "has_preview": True},
+        "annotations": {"workers/message": message, "workers/triggered_by": "version_upload"},
+        "resources": {
+            "script": {"etag": "exact-etag", "handlers": ["fetch"]},
+            "script_runtime": {"compatibility_date": "2026-08-07",
+                "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+                "assets": {"serve_directly": True}},
+            "bindings": [
+                {"name": "VECTOR", "type": "vectorize", "index_name": "index-exact"},
+                {"name": "DB", "type": "d1", "database_id": "database-exact"},
+                {"name": "CACHE", "type": "kv_namespace", "namespace_id": "namespace-exact"},
+            ],
+        },
+    }
+    cases = []
+    for name in ("valid", "wrong-version", "wrong-git", "missing-etag", "malformed", "null", "transport"):
+        response = json.loads(json.dumps(raw))
+        if name == "wrong-version":
+            response["id"] = "22222222-2222-4222-8222-222222222222"
+        elif name == "wrong-git":
+            response["annotations"]["workers/message"] = f"release:{'b' * 40} branch:main"
+        elif name == "missing-etag":
+            del response["resources"]["script"]["etag"]
+        elif name == "malformed":
+            response = {"unexpected_provider_envelope": raw}
+        elif name == "null":
+            response = None
+        cases.append({"name": name, "response": response})
+    encoded = base64.b64encode(json.dumps(cases).encode("utf-8")).decode("ascii")
+    # Reuse the real facade loader; only its outer test process gets a finite,
+    # hidden launch. Provider response replacement happens after real loading.
+    run = subprocess.run
+    def hidden_bounded_run(*args, **kwargs):
+        kwargs.setdefault("timeout", 22)
+        kwargs["creationflags"] = kwargs.get("creationflags", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        return run(*args, **kwargs)
+    monkeypatch.setattr(subprocess, "run", hidden_bounded_run)
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:rawReads=0;$script:nativeReads=0;"
+        "function Invoke-Utf8NativeProcess{$script:nativeReads++;throw 'UNDECLARED_NATIVE_FALLBACK'};"
+        "function Invoke-WranglerJson{param([string[]]$Arguments);"
+        "$script:rawReads++;"
+        f"if(($Arguments -join '|') -cne 'versions|view|{version}|--name|aurum-signal-room')"
+        "{throw 'WRONG_EXACT_VERSION_REQUEST'};"
+        "$owners=@((Get-PSCallStack).FunctionName);"
+        "if('Get-CloudflareVersionDetails' -notin $owners -or "
+        "'Get-WorkerVersionQualificationMetadata' -notin $owners){throw 'PROVIDER_OWNER_BYPASSED'};"
+        "if($script:rawCase.name -ceq 'transport'){throw 'CLOUDFLARE_WRANGLER_COMMAND_FAILED'};"
+        "return $script:rawCase.response};"
+        "if(Test-Path -LiteralPath (Join-Path $repositoryRoot 'web\\node_modules'))"
+        "{throw 'TEST_MUST_NOT_DEPEND_ON_INSTALLED_WRANGLER'};"
+        f"$candidate=[pscustomobject]@{{worker_version_id='{version}';git_sha='{revision}'}};"
+        f"$cases=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'))|ConvertFrom-ReleaseControlJson;"
+        "$observed=@();foreach($case in $cases){$script:rawCase=$case;$value=$null;$reason=$null;"
+        "try{$value=Get-WorkerVersionQualificationMetadata -Candidate $candidate}"
+        "catch{$reason=$_.Exception.Message};"
+        "$observed += [pscustomobject]@{name=$case.name;value=$value;reason=$reason}};"
+        "[pscustomobject]@{observed=$observed;raw_reads=$script:rawReads;native_reads=$script:nativeReads}"
+        "|ConvertTo-Json -Depth 20 -Compress",
+        powershell=powershell,
+    )
+    observed = json.loads(result)
+    assert observed["raw_reads"] == len(cases)
+    assert observed["native_reads"] == 0
+    assert observed["observed"][0] == {
+        "name": "valid", "reason": None, "value": {
+            "worker_version_id": version, "executable_bundle_etag": "exact-etag",
+            "compatibility_date": "2026-08-07",
+            "compatibility_flags": ["global_fetch_strictly_public", "nodejs_compat"],
+            "assets": {"serve_directly": True},
+            "bindings": [
+                {"name": "CACHE", "type": "kv_namespace", "resource": ""},
+                {"name": "DB", "type": "d1", "resource": "database-exact"},
+                {"name": "VECTOR", "type": "vectorize", "resource": "index-exact"},
+            ],
+            "provenance_message": message,
+        },
+    }
+    for item in observed["observed"][1:]:
+        assert item["value"] is None
+        assert item["reason"] == ("CLOUDFLARE_WRANGLER_COMMAND_FAILED"
+            if item["name"] == "transport" else "WORKER_CPU_VERSION_METADATA_MISMATCH"), item
+
+
 def test_control_plane_only_git_and_provenance_etag_change_reuse_cpu_behavior_key(
     tmp_path,
 ) -> None:
@@ -1049,11 +1271,14 @@ def test_control_plane_only_git_and_provenance_etag_change_reuse_cpu_behavior_ke
     assert result == "True,True,64"
 
 
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("long_path", (False, True))
 def test_reused_cpu_receipt_binds_source_and_current_exact_worker_artifacts(
-    tmp_path,
+    tmp_path, powershell, long_path,
 ) -> None:
     result = _run_control_center_contract(
         tmp_path,
+        ("$workerCpuEvidenceRoot=Join-Path $workerCpuEvidenceRoot ('segment-'*20);" if long_path else "") +
         "$key='a'*64;$qualification=[pscustomobject]@{key=$key;fields=[pscustomobject]@{version='v1'};"
         "candidate_worker_version='source-worker';candidate_git_sha=('1'*40);"
         "exact_candidate_binding=[pscustomobject]@{executable_bundle_etag=('b'*64)}};"
@@ -1071,6 +1296,7 @@ def test_reused_cpu_receipt_binds_source_and_current_exact_worker_artifacts(
         'Write-Output "$($e.qualification_mode),$($e.source_worker_version),'
         '$($e.worker_version_id),$($e.source_executable_bundle_etag),'
         '$($e.current_executable_bundle_etag),$($receipt.receipt_digest -eq $written.receipt_digest)"',
+        powershell=powershell,
     )
 
     assert result == (
@@ -2104,7 +2330,8 @@ def test_preflight_selects_an_available_loopback_port(tmp_path) -> None:
     assert result != occupied_port
 
 
-def test_candidate_preflight_migrates_an_isolated_consistent_copy(tmp_path) -> None:
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+def test_candidate_preflight_migrates_an_isolated_consistent_copy(tmp_path, powershell) -> None:
     source = tmp_path / "legacy.sqlite3"
     target = tmp_path / "candidate" / "forward.sqlite3"
     connection = sqlite3.connect(source)
@@ -2132,14 +2359,20 @@ def test_candidate_preflight_migrates_an_isolated_consistent_copy(tmp_path) -> N
 
     result = _run_control_center_contract(
         tmp_path,
+        "$script:actualCopyNative=(Get-Command Invoke-Utf8NativeProcess).ScriptBlock;"
+        "$script:copyBudgets=@();"
+        "function Invoke-Utf8NativeProcess {param($FilePath,$Arguments,$WorkingDirectory,"
+        "$Environment,[int]$TimeoutMilliseconds=30000);"
+        "$script:copyBudgets+= $TimeoutMilliseconds; & $script:actualCopyNative @PSBoundParameters};"
         f"New-CandidatePreflightDatabase -Python '{sys.executable}' "
         f"-StageRoot '{ROOT}' -SourceDatabase '{source}' "
         f"-TargetDatabase '{target}'; Copy-CandidatePreflightState "
         f"-SourceDatabase '{source}' -TargetDatabase '{target}'; "
-        "Write-Output 'prepared'",
+        "Write-Output ('prepared:'+($script:copyBudgets -join ','))",
+        powershell=powershell,
     )
 
-    assert result == "prepared"
+    assert result == "prepared:120000,30000"
     source_connection = sqlite3.connect(source)
     target_connection = sqlite3.connect(target)
     assert source_connection.execute(
@@ -4169,10 +4402,13 @@ def test_compatibility_redirects_validate_their_final_page_marker() -> None:
     )
 
 
-def test_static_asset_validation_uses_raw_utf8_and_exact_contract(tmp_path) -> None:
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("isolated_transport", (False, True))
+def test_static_asset_validation_uses_raw_utf8_and_exact_contract(tmp_path, powershell, isolated_transport) -> None:
     candidate = "b" * 40
     result = _run_control_center_contract(
         tmp_path,
+        ("$workerUrl='https://127.0.0.1:19001';" if isolated_transport else "") +
         f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' "
         "-WorkerVersionId '22222222-2222-2222-2222-222222222222' "
         f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE'; "
@@ -4195,6 +4431,7 @@ def test_static_asset_validation_uses_raw_utf8_and_exact_contract(tmp_path) -> N
         'Write-Output "$($ok.passed),$($ok.marker_present),$($ok.body_sha256.Length),'
         '$($badUtf8.reason),$($missing.reason),$($charset.reason),'
         '$($wrongType.reason),$($ok.requested_host)"',
+        powershell=powershell,
     )
 
     assert result == (
@@ -4204,10 +4441,13 @@ def test_static_asset_validation_uses_raw_utf8_and_exact_contract(tmp_path) -> N
     )
 
 
-def test_static_asset_validation_fails_closed_for_status_body_and_host(tmp_path) -> None:
+@pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("isolated_transport", (False, True))
+def test_static_asset_validation_fails_closed_for_status_body_and_host(tmp_path, powershell, isolated_transport) -> None:
     candidate = "b" * 40
     result = _run_control_center_contract(
         tmp_path,
+        ("$workerUrl='https://127.0.0.1:19001';" if isolated_transport else "") +
         f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' "
         "-WorkerVersionId '33333333-3333-3333-3333-333333333333' "
         f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE'; "
@@ -4229,6 +4469,7 @@ def test_static_asset_validation_fails_closed_for_status_body_and_host(tmp_path)
         "function Invoke-CandidateStaticAssetRequest { throw 'timeout' };"
         "$reasons+=(Invoke-CandidateStaticAssetSample -Candidate $candidate -Route $route).reason; "
         "Write-Output ($reasons -join ',')",
+        powershell=powershell,
     )
 
     assert result == (
@@ -4238,23 +4479,30 @@ def test_static_asset_validation_fails_closed_for_status_body_and_host(tmp_path)
     )
 
 
-def test_candidate_version_url_is_derived_from_worker_not_formal_dashboard(tmp_path) -> None:
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+@pytest.mark.parametrize("isolated_transport", [False, True])
+@pytest.mark.parametrize("valid_metadata", [False, True])
+def test_candidate_version_url_is_derived_from_worker_not_formal_dashboard(
+    tmp_path, powershell, isolated_transport, valid_metadata,
+) -> None:
     candidate = "b" * 40
     worker = "44444444-4444-4444-4444-444444444444"
     result = _run_control_center_contract(
         tmp_path,
-        "$dashboardUrl='https://aurum-signal-room.yiyousiow1234.chatgpt.site';"
+        ("$workerUrl='https://127.0.0.1:19001';" if isolated_transport else "")
+        + "$dashboardUrl='https://aurum-signal-room.yiyousiow1234.chatgpt.site';"
         f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId '{worker}' "
         f"-WindowsRevision '{candidate}' -ArtifactKind 'PRODUCTION_CANDIDATE';"
         f"$version=[pscustomobject]@{{id='{worker}';metadata=[pscustomobject]@{{"
-        "has_preview=$true};annotations=[pscustomobject]@{"
+        f"has_preview=${str(valid_metadata).lower()}}};annotations=[pscustomobject]@{{"
         f"'workers/message'='release:{candidate} branch:main "
         "artifact_kind:PRODUCTION_CANDIDATE'}};"
         "Write-Output (Get-ReleaseVersionPreviewUrl -Version $version -Candidate $candidate)",
+        powershell=powershell,
     )
 
     assert result == (
-        "https://44444444-aurum-signal-room.yiyousiow1234.workers.dev"
+        "https://44444444-aurum-signal-room.yiyousiow1234.workers.dev" if valid_metadata else ""
     )
 
 
@@ -4429,11 +4677,19 @@ def test_directed_route_sample_fails_closed_on_exact_identity_mismatch(tmp_path)
     assert result == "False,WORKER_IDENTITY_MISMATCH,GET,/api/status,200,wrong-worker,status"
 
 
-def test_failed_directed_validation_persists_bounded_route_receipt(tmp_path) -> None:
+@pytest.mark.parametrize("complete_plan", (False, True))
+def test_failed_directed_validation_persists_bounded_route_receipt(tmp_path, complete_plan) -> None:
     stable = "a" * 40
     candidate = "b" * 40
+    production_plan = (
+        "New-Item -ItemType Directory -Path (Join-Path $repositoryRoot 'web') -Force|Out-Null;"
+        f"Copy-Item -LiteralPath '{ROOT / 'web/worker-validation-manifest.json'}' "
+        "-Destination (Join-Path $repositoryRoot 'web/worker-validation-manifest.json');"
+        "$script:testRoutePlan=Get-CandidateRouteValidationPlan -ChangedFiles @('web/worker-validation-manifest.json') -AllCpuRoutes;"
+    ) if complete_plan else ""
     result = _run_control_center_contract(
         tmp_path,
+        production_plan +
         f"$stable=New-ReleaseIdentity -GitSha '{stable}' -WorkerVersionId 'stable-worker' "
         f"-WindowsRevision '{stable}';"
         f"$candidate=New-ReleaseIdentity -GitSha '{candidate}' -WorkerVersionId 'candidate-worker' "
@@ -4446,10 +4702,10 @@ def test_failed_directed_validation_persists_bounded_route_receipt(tmp_path) -> 
         "function Test-RequiredGitHubChecks { return 'PASSED' };"
         "function Get-CandidateChangedFiles { return @('web/worker/api-router.ts') };"
         "function Get-CandidateCompatibilityRequirement { return [pscustomobject]@{state='COMPATIBLE';files=@()} };"
-        "function Get-CandidateRouteValidationPlan { return [pscustomobject]@{worker_cpu_required=$true;requires_validation=$true;static_assets=@();worker_reads=@();worker_writes=@()} };"
+        "function Get-CandidateRouteValidationPlan { if($script:testRoutePlan){return $script:testRoutePlan};return [pscustomobject]@{worker_cpu_required=$true;requires_validation=$true;static_assets=@();worker_reads=@();worker_writes=@()} };"
         "function Set-CloudflareCandidatePointer {};"
         "function Wait-CandidatePlacementPropagation { return [pscustomobject]@{passed=$true;state='READY'} };"
-        "function Invoke-CandidateWorkerValidation { return [pscustomobject]@{passed=$false;validation_run='run-2';"
+        "function Invoke-CandidateWorkerValidation { $answer=[pscustomobject]@{passed=$false;validation_run='run-2';"
         "expected_worker_invocations=10;observed_worker_invocations=$null;static_worker_invocations=0;"
         "static_observability_state='PASSED';cpu_evidence='NOT_RUN';routes=@([pscustomobject]@{"
         "route='/api/learning-history';path='/api/learning-history?limit=100';method='GET';passed=$false;"
@@ -4458,9 +4714,18 @@ def test_failed_directed_validation_persists_bounded_route_receipt(tmp_path) -> 
         "requested_worker_version='candidate-worker';observed_worker_version='candidate-worker';"
         f"observed_git_sha='{candidate}';resource='learning-history';d1_operations='0';"
         "request_bytes='0';response_bytes='28';failure_stage='route';request_id='request-2';"
-        "validation_run='run-2'}})} };"
+        "validation_run='run-2'}})};"
+        "if($script:testRoutePlan){$row=$answer.routes[0];"
+        "$row|Add-Member request_ids @(1..12|ForEach-Object{[guid]::NewGuid().ToString()});"
+        "$answer.routes=@(1..31|ForEach-Object{$row.PSObject.Copy()})};return $answer };"
         "Invoke-AutomaticCandidateValidation -Candidate $candidate | Out-Null;"
         "$saved=Get-ReleaseControlState; $json=$saved|ConvertTo-Json -Depth 20 -Compress;"
+        "$history=Get-Content -LiteralPath $releaseHistoryPath -Tail 1|ConvertFrom-ReleaseControlJson;"
+        "$summary=Get-DirectedWorkerValidationSummary -Validation $history.release.validation;"
+        "if($summary.failed -ne $saved.candidate.validation.routes_failed -or "
+        "$summary.first_failure.reason -ne 'INVALID_RESOURCE'){throw 'FAILURE_HISTORY_LOST'};"
+        "if($history.release.validation.route_plan -or -not $saved.candidate.validation.route_plan -or "
+        "-not $history.release.validation.route_plan_summary.canonical_digest){throw 'PLAN_SUMMARY_AUTHORITY_INVALID'};"
         'Write-Output "$($saved.candidate.validation_state),$($saved.candidate.validation.reason),'
         '$($saved.candidate.validation.cloudflare),$($saved.candidate.validation.routes_failed),'
         '$($saved.candidate.validation.first_failure.method),$($saved.candidate.validation.first_failure.path),'
@@ -4470,7 +4735,7 @@ def test_failed_directed_validation_persists_bounded_route_receipt(tmp_path) -> 
     )
 
     assert result == (
-        "FAILED,DIRECTED_WORKER_VALIDATION_FAILED,FAILED,1,GET,"
+        f"FAILED,DIRECTED_WORKER_VALIDATION_FAILED,FAILED,{31 if complete_plan else 1},GET,"
         "/api/learning-history?limit=100,400,INVALID_RESOURCE,NOT_RUN,NOT_RUN,False"
     )
 
@@ -7316,20 +7581,20 @@ def test_migration_contract_reads_the_exact_candidate_not_stable_checkout(
             "MIGRATION_RECEIPT_CANDIDATE_MISMATCH",
         ),
         (
-            "$saved=Get-Content $coordinatedMigrationReceiptPath -Raw|"
+            "$saved=Get-Content -LiteralPath $coordinatedMigrationReceiptPath -Raw|"
             "ConvertFrom-ReleaseControlJson;"
             "$saved.expires_at=[DateTimeOffset]::UtcNow.AddMinutes(-1).ToString('o');"
             "$core=[ordered]@{schema_version=$saved.schema_version;checked_at=$saved.checked_at;"
             "expires_at=$saved.expires_at;evidence=$saved.evidence};"
             "$saved.receipt_digest=Get-CoordinatedMigrationReceiptDigest $core;"
-            "$saved|ConvertTo-Json -Depth 12|Set-Content $coordinatedMigrationReceiptPath",
+            "$saved|ConvertTo-Json -Depth 12|Set-Content -LiteralPath $coordinatedMigrationReceiptPath",
             "MIGRATION_RECEIPT_STALE",
         ),
         (
-            "$saved=Get-Content $coordinatedMigrationReceiptPath -Raw|"
+            "$saved=Get-Content -LiteralPath $coordinatedMigrationReceiptPath -Raw|"
             "ConvertFrom-ReleaseControlJson;"
             "$saved.evidence.database_name='tampered';"
-            "$saved|ConvertTo-Json -Depth 12|Set-Content $coordinatedMigrationReceiptPath",
+            "$saved|ConvertTo-Json -Depth 12|Set-Content -LiteralPath $coordinatedMigrationReceiptPath",
             "MIGRATION_RECEIPT_TAMPERED",
         ),
     ),
@@ -7538,9 +7803,9 @@ def test_migration_renewal_rejects_broken_root_receipt_digest(tmp_path) -> None:
         tmp_path,
         _expired_migration_acceptance_body()
         + "$path=Get-CoordinatedMigrationRootReceiptPath $root.receipt_digest;"
-        "$saved=Get-Content $path -Raw|ConvertFrom-ReleaseControlJson;"
+        "$saved=Get-Content -LiteralPath $path -Raw|ConvertFrom-ReleaseControlJson;"
         "$saved.evidence.database_name='tampered';"
-        "$saved|ConvertTo-Json -Depth 12|Set-Content $path;"
+        "$saved|ConvertTo-Json -Depth 12|Set-Content -LiteralPath $path;"
         "$reason='';try{Ensure-CoordinatedMigrationQualification "
         "$candidate $stable $files|Out-Null}catch{$reason=$_.Exception.Message};"
         "Write-Output $reason",
@@ -7556,9 +7821,9 @@ def test_migration_renewal_chain_tampering_fails_closed(tmp_path) -> None:
         + "$qualification=Ensure-CoordinatedMigrationQualification $candidate $stable $files;"
         "$digest=$qualification.receipt.receipt_digest;"
         "$path=Get-CoordinatedMigrationRenewalReceiptPath $digest;"
-        "$saved=Get-Content $path -Raw|ConvertFrom-ReleaseControlJson;"
+        "$saved=Get-Content -LiteralPath $path -Raw|ConvertFrom-ReleaseControlJson;"
         "$saved.previous_migration_renewal_digest=('9'*64);"
-        "$saved|ConvertTo-Json -Depth 16|Set-Content $path;"
+        "$saved|ConvertTo-Json -Depth 16|Set-Content -LiteralPath $path;"
         "$reason='';try{Ensure-CoordinatedMigrationQualification "
         "$candidate $stable $files|Out-Null}catch{$reason=$_.Exception.Message};"
         "Write-Output $reason",
@@ -7713,7 +7978,21 @@ def test_supersession_recovery_entrypoint_renews_stale_migration_qualification(
     assert result == "True,MIGRATION_QUALIFICATION_RENEWED,True,True"
 
 
-def test_migration_capability_reuses_json_projection_from_one_bounded_scan() -> None:
+@pytest.mark.parametrize(
+    ("status_payload", "legacy_count", "expected_count"),
+    [
+        ({"recent_decisions": [{"id": "current-1"}, {"id": "current-2"}]}, 0, 2),
+        ({"recent_decisions": [{"id": "current"}]}, 5, 1),
+        (None, 5, 0),
+        ({"recent_decisions": []}, 5, 0),
+        ({"recent_decisions": "wrong type"}, 5, 0),
+        ({}, 5, 0),
+        ("malformed-json", 5, 0),
+    ],
+)
+def test_migration_capability_reuses_json_projection_from_one_bounded_scan(
+    status_payload, legacy_count, expected_count,
+) -> None:
     control_center = _control_center_source()
     capability_sql = control_center.split('$capabilitySql = @"', 1)[1].split(
         '"@', 1,
@@ -7724,6 +8003,40 @@ def test_migration_capability_reuses_json_projection_from_one_bounded_scan() -> 
     assert capability_sql.count("FROM current_projection") >= 4
     assert "EXCEPT SELECT detail_key FROM current_projection" in capability_sql
     assert "JOIN current_projection" not in capability_sql
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    try:
+        for migration in sorted((ROOT / "web" / "drizzle").glob("*.sql")):
+            connection.executescript(migration.read_text(encoding="utf-8"))
+        # A minimal CURRENT generation makes the complete production capability
+        # query return a row; this test does not claim a qualified generation.
+        connection.execute(
+            "INSERT INTO news_projection_generations VALUES "
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("generation", "snapshot", "CURRENT", "news-projection-generation-v4",
+             "2026-09-01", "2026-09-08", 0, 0, 0, "source", "receipt", "receipt",
+             0, 0, 0, 0, 0, 0, "2026-09-08", "2026-09-08", "2026-09-08"),
+        )
+        connection.execute(
+            "INSERT INTO news_projection_state VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (1, "generation", "snapshot", "news-projection-generation-v4", "source",
+             "receipt", 0, 0, 0, 0, "CURRENT", "2026-09-08", "2026-09-08"),
+        )
+        if legacy_count:
+            connection.execute(
+                "INSERT INTO dashboard_snapshots VALUES (4,?,?)",
+                (json.dumps({"recent_decisions": [{"id": "historical"}] * legacy_count}), "old"),
+            )
+        if status_payload is not None:
+            raw = status_payload if isinstance(status_payload, str) else json.dumps(status_payload)
+            connection.execute("INSERT INTO dashboard_snapshots VALUES (1,?,?)", (raw, "current"))
+        historical = connection.execute("SELECT * FROM dashboard_snapshots WHERE id=4").fetchone()
+        result = connection.execute(capability_sql).fetchone()
+        assert result["legacy_decisions"] == expected_count
+        assert connection.execute("SELECT * FROM dashboard_snapshots WHERE id=4").fetchone() == historical
+    finally:
+        connection.close()
 
 
 @pytest.mark.parametrize(
@@ -8130,7 +8443,7 @@ def test_required_github_gate_uses_latest_exact_sha_attempt(tmp_path) -> None:
         "$new=[pscustomobject]@{id=3;name=$requiredGitHubChecks[0];head_sha=('a'*40);"
         "started_at='2026-08-23T03:00:00Z';status='completed';conclusion='success'};"
         "$script:payload=[pscustomobject]@{check_runs=@($base)+@($old,$new)}|ConvertTo-Json -Depth 5;"
-        "function Invoke-Utf8NativeProcess{return [pscustomobject]@{exit_code=0;stdout=$script:payload;"
+        "function Invoke-GitHubChecksRead{param($Revision);if($Revision -cne ('a'*40)){throw 'WRONG_REVISION'};return [pscustomobject]@{exit_code=0;stdout=$script:payload;"
         "stderr='';stdout_lines=@($script:payload);stderr_lines=@()}};"
         "$recovered=Test-RequiredGitHubChecks -Revision ('a'*40);"
         "$new.status='in_progress';$new.conclusion=$null;"
@@ -8174,6 +8487,25 @@ def test_repository_transport_failure_classifier_is_bounded(
         f"-ExitCode 1 -Diagnostic '{escaped}'",
     )
     assert result == str(expected)
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_deployment_raw_transport_preserves_specification_and_failure(tmp_path, exit_code) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$null=New-Item -ItemType Directory -Path (Join-Path $repositoryRoot 'web') -Force;"
+        "$prior=(Get-Location).Path;"
+        f"$script:transportExit={exit_code};"
+        "function Invoke-WranglerDeploymentCommand{param($Arguments);"
+        "$script:seen=@($Arguments);return [pscustomobject]@{exit_code=$script:transportExit;output=@()}};"
+        "$state='SUCCEEDED';try{Invoke-CloudflareDeployment -StableVersionId 'stable-id' "
+        "-CandidateVersionId 'candidate-id' -Message 'bounded fixture'}catch{"
+        "if($_.Exception.Message -cne 'Cloudflare deployment failed.'){throw};$state='FAILED'};"
+        "if((Get-Location).Path -cne $prior){throw 'WORKING_DIRECTORY_LEAK'};"
+        "if(($script:seen -join '|') -cne 'versions|deploy|stable-id@100|candidate-id@0|--name|aurum-signal-room|--yes|--message|bounded fixture'){throw 'SPECIFICATION_CHANGED'};"
+        "Write-Output $state",
+    )
+    assert result == ("SUCCEEDED" if exit_code == 0 else "FAILED")
 
 
 def test_github_cli_auth_and_invalid_payload_are_not_retryable(tmp_path) -> None:
@@ -8626,6 +8958,62 @@ def _supersession_chain_contract(scenario: str) -> str:
             "Add-Edge $mid $head;Write-ReleaseHistory -Event 'CANDIDATE_PASSED' "
             "-Release $mid;Add-Edge $qualified $mid;"
         ),
+        "evidence_pending_predecessor": (
+            "$mid.validation_state='EVIDENCE_PENDING';Add-Edge $mid $head;"
+        ),
+        "evidence_pending_access_predecessor": (
+            "$mid.validation_state='EVIDENCE_PENDING';Add-Edge $mid $head;"
+            "Write-ReleaseHistory -Event 'CANDIDATE_ACCESS_BOUNDARY_ACCEPTED' -Release $mid;"
+            "Add-Edge $qualified $mid;"
+        ),
+        "evidence_pending_accepted_predecessor": (
+            "$mid.validation_state='EVIDENCE_PENDING';Add-Edge $mid $head;"
+            "Write-ReleaseHistory -Event 'CANDIDATE_PASSED' -Release $mid;"
+        ),
+        "evidence_pending_promoted_predecessor": (
+            "$mid.validation_state='EVIDENCE_PENDING';Add-Edge $mid $head;"
+            "Write-ReleaseHistory -Event 'PROMOTION_STARTED' -Release $mid;"
+        ),
+        "evidence_pending_stable_predecessor": (
+            "$mid.validation_state='EVIDENCE_PENDING';Add-Edge $mid $head;"
+            "Write-ReleaseHistory -Event 'STABLE_COMMITTED' -Release $mid;"
+        ),
+        "evidence_pending_invalid_migration": (
+            "$mid.validation_state='EVIDENCE_PENDING';"
+            "$mid|Add-Member migration_acceptance ([pscustomobject]@{"
+            "validation_key='wrong';receipt_digest=('7'*64)});Add-Edge $mid $head;"
+        ),
+        "evidence_pending_mismatched_predecessor": (
+            "$mid.validation_state='EVIDENCE_PENDING';$mid.validation.key='wrong';"
+            "Add-Edge $mid $head;"
+        ),
+        "failed_unaccepted_predecessor": (
+            "$mid.validation_state='FAILED';"
+            "$mid.validation=[pscustomobject]@{key=$mid.validation_key;"
+            "error='Candidate fixture worktree is unavailable.'};"
+            "Add-Edge $mid $head;"
+        ),
+        "failed_accepted_predecessor": (
+            "$mid.validation_state='FAILED';Add-Edge $mid $head;"
+            "Write-ReleaseHistory -Event 'CANDIDATE_PASSED' -Release $mid;"
+        ),
+        "failed_mismatched_predecessor": (
+            "$mid.validation_state='FAILED';$mid.validation.key='wrong';"
+            "Add-Edge $mid $head;"
+        ),
+        "failed_predecessor_with_older_edge": (
+            "$mid.validation_state='FAILED';Add-Edge $mid $head;"
+            "Add-Edge $qualified $mid;"
+        ),
+        "consecutive_failed_predecessors": (
+            "$mid.validation_state='FAILED';$mid2.validation_state='FAILED';"
+            "Add-Edge $mid $head;Add-Edge $mid2 $mid;"
+        ),
+        "consecutive_failed_accepted": (
+            "$mid.validation_state='FAILED';$mid2.validation_state='FAILED';"
+            "Add-Edge $mid $head;Add-Edge $mid2 $mid;"
+            "Write-ReleaseHistory -Event 'CANDIDATE_PASSED' -Release $mid2;"
+        ),
         "partially_validated_head": (
             "$head.compatibility_state='COORDINATED_STORAGE_MIGRATION_PASSED';"
             "$head.validation_state='PLATFORM_PENDING';"
@@ -8752,6 +9140,12 @@ def _supersession_chain_contract(scenario: str) -> str:
         ("reused_receipt_wrong_current", "ERROR:CANDIDATE_SUPERSESSION_QUALIFICATION_REUSE_INVALID:CANDIDATE_SUPERSESSION_CPU_REUSE_LINEAGE_INVALID"),
         ("qualification_key_mismatch", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
         ("accepted_intermediate", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+        ("failed_unaccepted_predecessor", "NONE"),
+        ("failed_accepted_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+        ("failed_mismatched_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+        ("failed_predecessor_with_older_edge", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+        ("consecutive_failed_predecessors", "NONE"),
+        ("consecutive_failed_accepted", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
         ("partially_validated_head", "FOUND:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee:" + "e" * 40),
         ("observation_failed", "FOUND:66666666-6666-4666-8666-666666666666:" + "6" * 40),
         ("worker_reused", "ERROR:CANDIDATE_SUPERSESSION_WORKER_REUSED"),
@@ -8770,6 +9164,18 @@ def test_supersession_chain_recovery_is_bounded_and_fail_closed(
 @pytest.mark.parametrize("scenario,expected", (
     ("two_hop", "FOUND:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee:" + "e" * 40),
     ("missing_edge", "NONE"),
+    ("evidence_pending_predecessor", "NONE"),
+    ("evidence_pending_access_predecessor", "NONE"),
+    ("evidence_pending_accepted_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+    ("evidence_pending_promoted_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+    ("evidence_pending_stable_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+    ("evidence_pending_invalid_migration", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+    ("evidence_pending_mismatched_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+    ("failed_unaccepted_predecessor", "NONE"),
+    ("failed_accepted_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+    ("failed_mismatched_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+    ("consecutive_failed_predecessors", "NONE"),
+    ("consecutive_failed_accepted", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
 ))
 @pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
 def test_supersession_chain_recovery_has_powershell_runtime_parity(
@@ -8797,8 +9203,9 @@ def test_supersession_head_without_edge_is_not_applicable(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("prior_state", ("TESTING", "FAILED", "EVIDENCE_PENDING"))
 def test_unavailable_supersession_reuse_falls_back_once_without_copying_evidence(
-    tmp_path, powershell: str,
+    tmp_path, powershell: str, prior_state: str,
 ) -> None:
     if not shutil.which(powershell):
         pytest.skip(f"{powershell} is not installed")
@@ -8817,11 +9224,13 @@ def test_unavailable_supersession_reuse_falls_back_once_without_copying_evidence
         "-WorkerVersionId 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' "
         "-WindowsRevision ('a'*40) -Branch 'main' "
         "-ArtifactKind 'PRODUCTION_CANDIDATE';"
-        "$prior.compatibility_state='PENDING';$prior.validation_state='TESTING';"
+        f"$prior.compatibility_state='PENDING';$prior.validation_state='{prior_state}';"
         "$prior.validation=[pscustomobject]@{key=$prior.validation_key;"
         "cpu_evidence=[pscustomobject]@{receipt_digest=('e'*64)}};"
         "Write-ReleaseHistory -Event 'CANDIDATE_SUPERSEDED' -Release $prior "
         "-Detail @{replacement_key=$head.validation_key};"
+        "if($prior.validation_state -eq 'EVIDENCE_PENDING'){Write-ReleaseHistory "
+        "-Event 'CANDIDATE_ACCESS_BOUNDARY_ACCEPTED' -Release $prior};"
         "function Get-OriginMainRevision{return ('b'*40)};"
         "function Get-ProductionCandidateProvenanceResult{"
         "[pscustomobject]@{state='PASSED';mode='EXACT_MAIN';"
@@ -9277,6 +9686,100 @@ def test_explicit_review_retry_rejects_non_retryable_reason(tmp_path) -> None:
     assert result == "Only an exact retryable Candidate review can restart validation."
 
 
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+@pytest.mark.parametrize("case", ["copy_timeout", "stale", "future", "wrong_revision", "migration", "other"])
+def test_candidate_copy_timeout_review_requires_current_exact_failure(
+    tmp_path, powershell, case,
+) -> None:
+    result = json.loads(_run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + f"$script:copyCase='{case}';"
+        "function Test-ProductionCandidateProvenance{return $true};"
+        "function Invoke-ProductionShapePreflight{param($Revision);"
+        "$phase=if($script:copyCase -eq 'migration'){'MIGRATE_DATABASE'}else{'COPY_DATABASE'};"
+        "$detail=if($script:copyCase -eq 'other'){'copy invalid'}else{'NATIVE_PROCESS_TIMEOUT'};"
+        "Write-RuntimeUpdateFailure -Revision $Revision -Status PREFLIGHT_FAILED "
+        "-Message 'copy failed' -ErrorCode ($phase+'_FAILED') -Phase $phase "
+        "-Diagnostics @{failure_detail=$detail};"
+        "if($script:copyCase -eq 'stale'){Write-RuntimeUpdateState @{failed_at='2000-01-01T00:00:00Z'}};"
+        "if($script:copyCase -eq 'future'){Write-RuntimeUpdateState @{failed_at='2099-01-01T00:00:00Z'}};"
+        "if($script:copyCase -eq 'wrong_revision'){Write-RuntimeUpdateState @{failed_revision=('c'*40)}};"
+        "return $false};"
+        "$ok=Invoke-AutomaticCandidateValidation -Candidate (Get-ReleaseControlState).candidate;"
+        "$state=Get-ReleaseControlState;"
+        "[pscustomobject]@{ok=$ok;state=$state.candidate.validation_state;"
+        "repository=$state.candidate.validation.repository;"
+        "reason=$state.candidate.validation.reason;windows=$state.candidate.validation.windows;"
+        "stable=$state.stable.git_sha;key=$state.candidate.validation.key} | ConvertTo-Json -Compress",
+        powershell=powershell,
+    ))
+    assert result["ok"] is False
+    assert result["stable"] == "a" * 40
+    assert result["key"] == "22222222-2222-4222-8222-222222222222:" + "b" * 40
+    assert result["state"] == ("REVIEW_REQUIRED" if case == "copy_timeout" else "FAILED")
+    if case == "copy_timeout":
+        assert result["reason"] == "WINDOWS_PREFLIGHT_COPY_RETRY_REQUIRED"
+        assert result["windows"] == "FAILED"
+        assert result["repository"] == "PENDING"
+
+
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+@pytest.mark.parametrize("mutation", ["none", "timeout_again", "transaction", "key", "failure"])
+def test_candidate_copy_retry_dispatcher_preserves_identity_and_failure(
+    tmp_path, powershell, mutation,
+) -> None:
+    result = json.loads(_run_control_center_contract(
+        tmp_path,
+        _authorized_candidate("a" * 40, "b" * 40)
+        + f"$script:copyCalls=0;$script:retryMutation='{mutation}';"
+        "function Test-ProductionCandidateProvenance{return $true};"
+        "function Invoke-ProductionShapePreflight{param($Revision);$script:copyCalls++;"
+        "if($script:copyCalls -gt 1 -and $script:retryMutation -ne 'timeout_again'){return $true};"
+        "Write-RuntimeUpdateFailure -Revision $Revision -Status PREFLIGHT_FAILED "
+        "-Message 'copy timed out' -ErrorCode COPY_DATABASE_FAILED -Phase COPY_DATABASE "
+        "-Diagnostics @{failure_detail='NATIVE_PROCESS_TIMEOUT'};return $false};"
+        "function Test-RequiredGitHubChecks{return 'CHECKS_BLOCKED'};"
+        "$null=Invoke-AutomaticCandidateValidation -Candidate (Get-ReleaseControlState).candidate;"
+        "function Reconcile-ReleaseControlState{return Get-ReleaseControlState};"
+        "function Find-NewCandidateRelease{return (Get-ReleaseControlState).candidate};"
+        "$null=Invoke-CandidateDiscovery;$discoveryCalls=$script:copyCalls;"
+        "$state=Get-ReleaseControlState;$prior=$state.candidate.validation.copy_failure;"
+        f"$mutation='{mutation}';"
+        "if($mutation -eq 'transaction'){$state.transaction=[pscustomobject]@{id='active';phase='OBSERVE';"
+        "type='PROMOTE';target=$state.candidate;previous=$state.stable}};"
+        "if($mutation -eq 'key'){$state.candidate.validation.key='wrong'};"
+        "if($mutation -eq 'failure'){$state.candidate.validation.copy_failure=$null};"
+        "Write-ReleaseControlState $state;$diagnostic='';"
+        "try{$null=Invoke-ControlCenterOperationAction -Operation RetryCandidateValidation}"
+        "catch{$diagnostic=$_.Exception.Message};"
+        "$state=Get-ReleaseControlState;"
+        "$history=@(Get-Content -LiteralPath $releaseHistoryPath | ForEach-Object {$_|ConvertFrom-Json});"
+        "$retry=@($history|Where-Object event -eq 'CANDIDATE_COPY_RETRY_REQUESTED');"
+        "[pscustomobject]@{calls=$script:copyCalls;discovery_calls=$discoveryCalls;state=$state.candidate.validation_state;"
+        "windows=$state.candidate.validation.windows;key=$state.candidate.validation_key;"
+        "stable=$state.stable.git_sha;error=$diagnostic;retries=$retry.Count;"
+        "prior_retained=($retry.Count -eq 1 -and $retry[0].detail.copy_failure.failed_at -eq $prior.failed_at)}"
+        "| ConvertTo-Json -Compress",
+        powershell=powershell,
+    ))
+    assert result["key"] == "22222222-2222-4222-8222-222222222222:" + "b" * 40
+    assert result["stable"] == "a" * 40
+    assert result["discovery_calls"] == 1
+    if mutation in {"none", "timeout_again"}:
+        assert result["calls"] == 2
+        assert result["state"] == ("CHECKS_BLOCKED" if mutation == "none" else "REVIEW_REQUIRED")
+        assert result["windows"] == ("PASSED" if mutation == "none" else "FAILED")
+        assert result["error"] == ""
+        assert result["retries"] == 1
+        assert result["prior_retained"] is True
+    else:
+        assert result["calls"] == 1
+        assert result["state"] == "REVIEW_REQUIRED"
+        assert "exact recorded copy timeout" in result["error"]
+        assert result["retries"] == 0
+
+
 @pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
 def test_access_approval_is_exact_idempotent_and_preserves_passed_evidence(
     tmp_path, powershell: str,
@@ -9367,7 +9870,7 @@ def test_unobservable_protected_host_enters_access_review_without_losing_gates(
         ),
         ("$protectedDashboardUrl='https://other-protected.example'", "ACCESS_PROTECTED_HOST_INVALID"),
         (
-            "$saved=Get-Content $accessBoundaryReceiptPath -Raw|ConvertFrom-ReleaseControlJson;"
+            "$saved=Get-Content -LiteralPath $accessBoundaryReceiptPath -Raw|ConvertFrom-ReleaseControlJson;"
             "$saved.accepted_at=[DateTimeOffset]::UtcNow.AddHours(-3).ToString('o');"
             "$saved.expires_at=([DateTimeOffset]$saved.accepted_at).AddHours(2).ToString('o');"
             "$core=[ordered]@{schema_version=$saved.schema_version;accepted_at=$saved.accepted_at;"
@@ -9375,24 +9878,24 @@ def test_unobservable_protected_host_enters_access_review_without_losing_gates(
             "validation_key=$saved.validation_key;candidate=$saved.candidate;stable=$saved.stable;"
             "access_boundary=$saved.access_boundary;checklist=$saved.checklist};"
             "$saved.receipt_digest=Get-AccessBoundaryReceiptDigest $core;"
-            "$saved|ConvertTo-Json -Depth 12|Set-Content $accessBoundaryReceiptPath",
+            "$saved|ConvertTo-Json -Depth 12|Set-Content -LiteralPath $accessBoundaryReceiptPath",
             "ACCESS_RECEIPT_STALE",
         ),
         (
-            "$saved=Get-Content $accessBoundaryReceiptPath -Raw|ConvertFrom-ReleaseControlJson;"
+            "$saved=Get-Content -LiteralPath $accessBoundaryReceiptPath -Raw|ConvertFrom-ReleaseControlJson;"
             "$saved.accepted_by='tampered';"
-            "$saved|ConvertTo-Json -Depth 12|Set-Content $accessBoundaryReceiptPath",
+            "$saved|ConvertTo-Json -Depth 12|Set-Content -LiteralPath $accessBoundaryReceiptPath",
             "ACCESS_RECEIPT_TAMPERED",
         ),
         (
-            "$saved=Get-Content $accessBoundaryReceiptPath -Raw|ConvertFrom-ReleaseControlJson;"
+            "$saved=Get-Content -LiteralPath $accessBoundaryReceiptPath -Raw|ConvertFrom-ReleaseControlJson;"
             "$saved.checklist.PSObject.Properties.Remove('reauthentication_succeeds');"
             "$core=[ordered]@{schema_version=$saved.schema_version;accepted_at=$saved.accepted_at;"
             "expires_at=$saved.expires_at;accepted_by=$saved.accepted_by;"
             "validation_key=$saved.validation_key;candidate=$saved.candidate;stable=$saved.stable;"
             "access_boundary=$saved.access_boundary;checklist=$saved.checklist};"
             "$saved.receipt_digest=Get-AccessBoundaryReceiptDigest $core;"
-            "$saved|ConvertTo-Json -Depth 12|Set-Content $accessBoundaryReceiptPath",
+            "$saved|ConvertTo-Json -Depth 12|Set-Content -LiteralPath $accessBoundaryReceiptPath",
             "ACCESS_RECEIPT_CHECKLIST_INCOMPLETE:reauthentication_succeeds",
         ),
     ),
@@ -9469,21 +9972,29 @@ def _historical_access_authority_contract() -> str:
 
 
 @pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("copied_origin", (False, True))
 def test_access_qualification_reuse_is_machine_evidence_and_preserves_other_gates(
-    tmp_path, powershell: str,
+    tmp_path, powershell: str, copied_origin: bool,
 ) -> None:
     result = _run_control_center_contract(
         tmp_path,
         _access_review_candidate()
+        + ("$workerUrl='https://127.0.0.1:45443';$protectedDashboardUrl=$workerUrl;" if copied_origin else "")
         + _historical_access_authority_contract()
         + _access_provider_inspection_contract()
         + _mock_candidate_finalizer_pass()
         + "$inspection=Register-AccessProviderInspection $provider;"
         "function Get-AccessQualificationIdentity{param($GitSha,$ProviderInspection)"
         "[pscustomobject]@{access_qualification_key=('1'*64);core=[pscustomobject]@{"
-        "protected_boundary=[pscustomobject]@{origin='https://aurum-signal-room.yiyousiow1234.workers.dev'};"
+        "protected_boundary=[pscustomobject]@{origin=$workerUrl};"
         "repository_artifacts=[ordered]@{auth='same'}}}};"
         "$reused=Invoke-CandidateAccessQualificationReuse;$final=Get-ReleaseControlState;"
+        + ("$workerUrl='https://aurum-signal-room.yiyousiow1234.workers.dev';"
+           "$protectedDashboardUrl=$workerUrl;"
+           "try{Assert-AccessQualificationReuseReceipt $final.candidate|Out-Null;"
+           "throw 'COPIED_ORIGIN_ACCEPTED'}catch{Write-Output $_.Exception.Message;return};"
+           if copied_origin else "")
+        +
         "$verified=Assert-AccessQualificationReuseReceipt $final.candidate;"
         "$history=Get-Content -LiteralPath $releaseHistoryPath -Raw;"
         "$humanCount=([regex]::Matches($history,'CANDIDATE_ACCESS_BOUNDARY_ACCEPTED')).Count;"
@@ -9497,6 +10008,9 @@ def test_access_qualification_reuse_is_machine_evidence_and_preserves_other_gate
         '$($final.candidate.migration_acceptance.receipt_digest),$humanCount,$reuseCount"',
         powershell=powershell,
     )
+    if copied_origin:
+        assert result == "ACCESS_RECEIPT_HOST_MISMATCH"
+        return
     assert result == (
         "PASSED,ACCESS_QUALIFICATION_REUSED,True,0,kept-run,parity-kept,"
         "migration-kept,1,1"
@@ -9557,7 +10071,7 @@ def _stale_access_reuse_ready_for_renewal(ttl_setup: str = "") -> str:
         "repository_artifacts=[ordered]@{auth='same'}}}};"
         "$null=Invoke-CandidateAccessQualificationReuse;$state=Get-ReleaseControlState;"
         "$candidate=$state.candidate;$reusePath=Get-AccessQualificationReuseReceiptPath $candidate.validation_key;"
-        "$reuse=Get-Content $reusePath -Raw -Encoding UTF8|ConvertFrom-ReleaseControlJson;"
+        "$reuse=Get-Content -LiteralPath $reusePath -Raw -Encoding UTF8|ConvertFrom-ReleaseControlJson;"
         "$staleAt=[DateTimeOffset]::UtcNow.AddHours(-3);"
         "$reuse.verified_at=$staleAt.ToString('o');"
         "$reuse.expires_at=$staleAt.Add($accessMachineReceiptMaxAge).ToString('o');"
@@ -9570,11 +10084,11 @@ def _stale_access_reuse_ready_for_renewal(ttl_setup: str = "") -> str:
         "provider_inspection_receipt_digest=$reuse.provider_inspection_receipt_digest;"
         "changed_access_artifacts=@($reuse.changed_access_artifacts)};"
         "$reuse.receipt_digest=Get-AccessQualificationReuseReceiptDigest $reuseCore;"
-        "$reuse|ConvertTo-Json -Depth 16|Set-Content $reusePath -Encoding UTF8;"
+        "$reuse|ConvertTo-Json -Depth 16|Set-Content -LiteralPath $reusePath -Encoding UTF8;"
         "$candidate.access_qualification.receipt_digest=$reuse.receipt_digest;"
         "$candidate.validation.auth_inspection.receipt_digest=$reuse.receipt_digest;"
         "$state.candidate=$candidate;Write-ReleaseControlState $state;"
-        "$oldReuseBytes=Get-Content $reusePath -Raw -Encoding UTF8;"
+        "$oldReuseBytes=Get-Content -LiteralPath $reusePath -Raw -Encoding UTF8;"
     )
 
 
@@ -9619,7 +10133,7 @@ def test_stale_machine_access_evidence_renews_without_new_human_acceptance(
         + _cloudflare_access_read_stubs()
         + "$receipt=Ensure-AccessQualificationMachineReceipt $candidate;"
         "$new=Assert-AccessQualificationMachineReceipt $candidate;"
-        "$reuseUnchanged=(Get-Content $reusePath -Raw -Encoding UTF8)-ceq$oldReuseBytes;"
+        "$reuseUnchanged=(Get-Content -LiteralPath $reusePath -Raw -Encoding UTF8)-ceq$oldReuseBytes;"
         "$renewalFiles=@(Get-ChildItem $accessQualificationRenewalReceiptRoot -File).Count;"
         "$humanEvents=([regex]::Matches((Get-Content $releaseHistoryPath -Raw),"
         "'CANDIDATE_ACCESS_BOUNDARY_ACCEPTED')).Count;"
@@ -9663,7 +10177,7 @@ def test_new_candidate_renews_from_complete_historical_machine_chain(
         + _mock_candidate_finalizer_pass()
         + "$first=Ensure-AccessQualificationMachineReceipt $candidate;"
         "$firstPath=Get-AccessQualificationRenewalReceiptPath $first.receipt_digest;"
-        "$firstBytes=Get-Content $firstPath -Raw -Encoding UTF8;"
+        "$firstBytes=Get-Content -LiteralPath $firstPath -Raw -Encoding UTF8;"
         "$state=Get-ReleaseControlState;$old=$state.candidate;"
         "$new=New-ReleaseIdentity -GitSha ('c'*40) "
         "-WorkerVersionId 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' "
@@ -9679,7 +10193,7 @@ def test_new_candidate_renews_from_complete_historical_machine_chain(
         "function Get-AccessEvidenceUtcNow{return $script:accessNow};"
         "$renewed=Invoke-CandidateAccessQualificationReuse;"
         "$verified=Assert-AccessQualificationMachineReceipt $renewed;"
-        "$priorUnchanged=(Get-Content $firstPath -Raw -Encoding UTF8)-ceq$firstBytes;"
+        "$priorUnchanged=(Get-Content -LiteralPath $firstPath -Raw -Encoding UTF8)-ceq$firstBytes;"
         "$files=@(Get-ChildItem $accessQualificationRenewalReceiptRoot -File).Count;"
         '$provider=Get-AccessProviderInspectionReceiptByDigest '
         '$verified.provider_inspection_receipt_digest;'
@@ -9702,7 +10216,7 @@ def test_new_candidate_renewal_does_not_fall_back_past_corrupt_machine_tip(
         + "$first=Ensure-AccessQualificationMachineReceipt $candidate;"
         "$firstPath=Get-AccessQualificationRenewalReceiptPath $first.receipt_digest;"
         "$first.receipt_digest=('f'*64);"
-        "$first|ConvertTo-Json -Depth 16|Set-Content $firstPath -Encoding UTF8;"
+        "$first|ConvertTo-Json -Depth 16|Set-Content -LiteralPath $firstPath -Encoding UTF8;"
         "$reason='';try{Get-LatestHistoricalAccessMachineAuthority|Out-Null}"
         "catch{$reason=$_.Exception.Message};Write-Output $reason",
     )
@@ -9868,10 +10382,10 @@ def test_access_renewal_requires_human_review_for_change_revert_or_history_gap(
 @pytest.mark.parametrize(
     "mutation",
     (
-        "$reuse.receipt_digest=('f'*64);$reuse|ConvertTo-Json -Depth 16|Set-Content $reusePath -Encoding UTF8;",
+        "$reuse.receipt_digest=('f'*64);$reuse|ConvertTo-Json -Depth 16|Set-Content -LiteralPath $reusePath -Encoding UTF8;",
         "$root=Get-HistoricalAccessBoundaryReceiptByDigest $reuse.prior_access_receipt_digest;"
         "$root.receipt_digest=('f'*64);$rootPath=Get-AccessBoundaryReceiptPath $root.validation_key;"
-        "$root|ConvertTo-Json -Depth 16|Set-Content $rootPath -Encoding UTF8;",
+        "$root|ConvertTo-Json -Depth 16|Set-Content -LiteralPath $rootPath -Encoding UTF8;",
     ),
 )
 def test_access_renewal_fails_closed_for_corrupt_chain_or_human_root(
@@ -9898,7 +10412,7 @@ def test_access_renewal_fails_closed_when_previous_machine_link_is_broken(tmp_pa
         "$core=Get-AccessQualificationRenewalCore $bad;"
         "$bad.receipt_digest=Get-AccessQualificationRenewalReceiptDigest $core;"
         "$badPath=Get-AccessQualificationRenewalReceiptPath $bad.receipt_digest;"
-        "$bad|ConvertTo-Json -Depth 16|Set-Content $badPath -Encoding UTF8;"
+        "$bad|ConvertTo-Json -Depth 16|Set-Content -LiteralPath $badPath -Encoding UTF8;"
         "$candidate.access_qualification.receipt_digest=$bad.receipt_digest;"
         "$candidate.validation.auth_inspection.receipt_digest=$bad.receipt_digest;"
         "$reason='';try{Assert-AccessQualificationMachineReceipt $candidate|Out-Null}"

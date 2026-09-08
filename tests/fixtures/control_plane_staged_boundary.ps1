@@ -11,16 +11,20 @@ trap {
     throw $_
 }
 $null = Get-Command Get-FileHash -ErrorAction Stop
+if ((Get-UserEnvironmentValue -Name 'GEMINI_API_KEY') -cne 'synthetic-configuration-sentinel') {
+    throw 'STAGED_CONFIGURATION_SOURCE_MISMATCH'
+}
 $script:fixtureTaskPath = '\XAUUSD-Contract-__FIXTURE_ID__\'
 $taskName = 'XAUUSD-Contract-__FIXTURE_ID__-Main'
 $guardTaskName = 'XAUUSD-Contract-__FIXTURE_ID__-Guard'
 $workerUrl = 'http://127.0.0.1:1'
 $dashboardUrl = $workerUrl
 $protectedDashboardUrl = $workerUrl
+$fixtureRealProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
 $script:fixtureDenyRoots = @(
-    (Join-Path $env:USERPROFILE 'XAUUSD-Forecaster'),
-    (Join-Path $env:USERPROFILE 'XAUUSD-Forecaster-runtime'),
-    (Join-Path $env:USERPROFILE 'XAUUSD-Forecaster.local')
+    (Join-Path $fixtureRealProfile 'XAUUSD-Forecaster'),
+    (Join-Path $fixtureRealProfile 'XAUUSD-Forecaster-runtime'),
+    (Join-Path $fixtureRealProfile 'XAUUSD-Forecaster.local')
 )
 function Assert-FixturePath {
     param([string]$Path)

@@ -305,13 +305,35 @@ def pending_annotation_records(
     before_cursor: tuple[str, str, str, int] | None = None,
     selection_order: str = "default",
     discovery_only: bool = False,
+    source_keys: tuple[tuple[str, str, int], ...] | None = None,
+    identity_only: bool = False,
 ) -> list[dict[str, object]]:
     """Return exactly the rows that the current annotator may claim.
 
     Dashboard queue counts must use this function too.  Keeping a second SQL
     approximation made display-only, archival, duplicate and stale-prompt rows
     look permanently queued even though the worker could never select them.
+
+    Explicit keys scope this same eligibility query before ordering and limit.
+    They must be unique exact identities; an empty tuple performs no SQL.
+    Identity-only projection avoids returning payloads, but eligibility and
+    ordering may still inspect source bodies inside SQLite.
     """
+    if source_keys is not None:
+        if not isinstance(source_keys, tuple) or len(source_keys) > 128:
+            raise ValueError("annotation source keys require at most 128 exact tuples")
+        for key in source_keys:
+            if (
+                not isinstance(key, tuple) or len(key) != 3
+                or not isinstance(key[0], str) or not key[0].strip()
+                or not isinstance(key[1], str) or not key[1].strip()
+                or type(key[2]) is not int or not 1 <= key[2] < 2**63
+            ):
+                raise ValueError("annotation source key is not an exact identity")
+        if len(set(source_keys)) != len(source_keys):
+            raise ValueError("annotation source keys must be unique")
+        if not source_keys:
+            return []
     now = observed_at or datetime.now(UTC)
     forward_epoch = _forward_epoch(connection)
     register_news_semantic_eligibility_sql(connection)
@@ -330,6 +352,12 @@ def pending_annotation_records(
         raise ValueError("annotation selection order is not controlled")
     scope_clauses: list[str] = []
     scope_parameters: list[object] = []
+    if source_keys is not None:
+        scope_clauses.append(
+            "(n.source,n.source_item_id,n.revision_number) IN ("
+            + ",".join("(?,?,?)" for _ in source_keys) + ")"
+        )
+        scope_parameters.extend(value for key in source_keys for value in key)
     if received_from is not None:
         scope_clauses.append("n.collector_first_seen_time>=?")
         scope_parameters.append(received_from.isoformat(timespec="microseconds"))
@@ -400,8 +428,13 @@ def pending_annotation_records(
             OR (j.state='DEAD_LETTER' AND COALESCE(j.last_error,'')<>
                 'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'))
         ) THEN 0 ELSE (""" if discovery_only else ""
+    projection = (
+        "n.source,n.source_item_id,n.revision_number,"
+        "n.source_published_time,n.collector_first_seen_time"
+        if identity_only else "n.*"
+    )
     rows = connection.execute(
-        f"""SELECT n.* FROM news_revisions n
+        f"""SELECT {projection} FROM news_revisions n
         LEFT JOIN news_annotations a
          ON a.source=n.source AND a.source_item_id=n.source_item_id
          AND a.revision_number=n.revision_number

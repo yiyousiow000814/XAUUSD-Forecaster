@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 from datetime import UTC, datetime, timedelta
 import importlib.util
-import json
+import os
 from pathlib import Path
 import sys
 import threading
@@ -32,20 +32,35 @@ def main() -> None:
     spec = importlib.util.spec_from_file_location("staged_sync", args.source_root / "scripts/run_dashboard_sync.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    state = root / "runtime/.local/forward"
-    state.mkdir(parents=True, exist_ok=True)
+    from xauusd_forecaster.runtime_paths import isolated_runtime_configuration
+    isolated = isolated_runtime_configuration()
+    if isolated:
+        from xauusd_forecaster.news_scheduler import _runtime_environment_value
+        if Path(isolated["owned_root"]) != root or _runtime_environment_value("GEMINI_API_KEY") != "synthetic-configuration-sentinel":
+            raise RuntimeError("STAGED_CONFIGURATION_SOURCE_MISMATCH")
+        state = Path(isolated["runtime_root"]) / ".local/forward"
+        attestations = root / "environment-attestations"
+        module._write_news_sync_state(attestations / f"{os.getpid()}.json", {
+            "pid": os.getpid(), "action": "BusinessSync", "fixture_id": isolated["fixture_id"],
+            "configuration_sha256": os.environ["XAUUSD_ISOLATED_CONFIGURATION_SHA256"],
+        }, state_root=attestations)
+    else:
+        state = root / "runtime/.local/forward"
     config = module.configure_runtime_state({
         "local_status_url": args.provider + "/api/status",
         "targets": [{"name": "fixture", "remote_ingest_url": args.provider + "/api/ingest", "token": "isolated-test-token"}],
     }, state)
     target = module.configured_targets(config)[0]
     future = (datetime.now(UTC) + timedelta(days=1)).isoformat()
-    Path(target["resource_schedule_state_file"]).write_text(json.dumps({
+    # Use the production writer's at-use directory/reparse checks and atomic
+    # replacement. Validation of the configured runtime root alone does not
+    # validate mutable .local/forward descendants appended by this consumer.
+    module._write_news_sync_state(Path(target["resource_schedule_state_file"]), {
         "schema_version": 1, "resources": {
             policy[0]: {"next_run_at": future} for policy in module.RESOURCE_POLICIES
             if policy[0] != "news_evidence"
         },
-    }), encoding="utf-8")
+    }, state_root=state)
     stop = threading.Event()
 
     def watch_stop() -> None:

@@ -51,6 +51,24 @@ The interface contract and the complete old-to-new property mapping are in
    missing, or tampered state. Promote requires a complete valid waterfall,
    matching behavior keys, fresh action-time leases, and frozen dependency
    digests; planning is modeled as mutation-free.
+9. Core release carries one abstract deferred producer obligation, not News rows
+   or batches. The normal Switch starts it; a valid exact-target ACK accepts it,
+   while rejection or the existing observation deadline fails it. Pending or
+   failed evidence cannot commit Stable. Failure enters the same recovery
+   actions, and does not require a successful ACK to terminate. The weak-fair
+   resolution assumption means the producer responds or the deadline is checked,
+   not that the provider eventually succeeds. `AcceptProjection` consumes the
+   strict count/digest/identity guarantee owned by the Worker ACK consumer and
+   `check_deferred_projection_parity.py`; their implementation tests cover the
+   concrete boundary. This model does not prove copied-query equivalence or
+   successful real-process startup, which require the connected rehearsal.
+
+The added core properties map directly to `Complete-ReleasePromotion`'s exact
+validation-key/deferred-PASSED guard (`CommitRequiresExactDeferredAck`), its
+pending refusal (`PendingOrFailedProjectionKeepsPreviousCommitted`), and
+`Test-RuntimeObservation`'s rejection/deadline-to-rollback path
+(`ProjectionFailureEventuallyRestoresPrevious`). Existing core properties remain
+assigned and enabled. No state constraint or timeout change is used.
 
 ## Local execution
 

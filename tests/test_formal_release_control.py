@@ -273,6 +273,44 @@ def test_model_interfaces_match_the_cpu_control_implementation() -> None:
     assert "NoPromoteFromPendingCpu" in (FORMAL / "CoreRelease.tla").read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("inside_source", [False, True])
+def test_formal_report_can_be_isolated_without_misreporting_tool_failure(
+    tmp_path, monkeypatch, tool_runner, inside_source,
+):
+    import sys
+    source = tmp_path / "source"
+    source.mkdir()
+    monkeypatch.setattr(tool_runner, "ROOT", source)
+    output = source / "generated" if inside_source else tmp_path / "evidence"
+    monkeypatch.setattr(sys, "argv", ["run_tla_model.py", "--shard", "core-release-safety",
+        "--output", "local", "--report-directory", str(output)])
+    def unavailable(*_args):
+        raise tool_runner.ToolError("TOOL_UNAVAILABLE", "fixture source unavailable")
+    monkeypatch.setattr(tool_runner, "_execute", unavailable)
+    if inside_source:
+        with pytest.raises(SystemExit):
+            tool_runner.main()
+        assert not output.exists()
+    else:
+        assert tool_runner.main() == 2
+        report = json.loads((output / "core-release-safety.json").read_text())
+        assert report["result"] == "TOOL_UNAVAILABLE"
+        assert not list(source.iterdir())
+
+
+def test_deferred_projection_properties_are_owned_by_core_integration():
+    required = {"CommitRequiresExactDeferredAck", "PendingOrFailedProjectionKeepsPreviousCommitted",
+                "ProjectionFailureEventuallyRestoresPrevious"}
+    shards = [row for row in MANIFEST["shards"] if row["module"] == "CoreRelease.tla"]
+    assert required <= {prop for row in shards for prop in row["properties"]}
+    for row in shards:
+        assert "scripts/check_deferred_projection_parity.py" in row["paths"]
+        assert "scripts/run_dashboard_sync.py" in row["paths"]
+        config = (FORMAL / row["config"]).read_text()
+        for prop in required.intersection(row["properties"]):
+            assert prop in config
+
+
 def test_release_integration_models_authoritative_receipt_waterfall() -> None:
     integration = (FORMAL / "ReleaseIntegration.tla").read_text(encoding="utf-8")
     config = (FORMAL / "ReleaseIntegrationSafety.cfg").read_text(encoding="utf-8")

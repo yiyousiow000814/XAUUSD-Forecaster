@@ -82,6 +82,20 @@ Supersession recovery is an optional evidence-preservation optimization. An
 incomplete but non-contradictory chain disables reuse and falls back to fresh
 validation; contradictory or unsafe chains remain fail-closed. This fallback
 does not restore an older Candidate, copy its evidence, or change Worker traffic.
+A chain of traversed failed predecessors, each with a matching validation key
+and no prior Candidate, Access, Promote or Stable acceptance, may end optional
+reuse as unavailable when no older supersession edge remains. Every edge still
+requires identity, ancestry, uniqueness, cycle and depth checks. A failed
+intermediate leading to a qualified or accepted predecessor remains unsafe;
+the new head still requires complete fresh qualification. Accepted or mismatched
+failed predecessors remain unsafe. This does not retry or reclassify the failed identity.
+A traversed `EVIDENCE_PENDING` predecessor with matching identity and no whole
+Candidate, Promote or Stable acceptance ends optional reuse at that node.
+Partial Access acceptance remains immutable and is not full qualification.
+Do not restore an older candidate through this unfinished finalizer or copy its
+receipts. The replacement must obtain full fresh qualification. Contradictory
+whole acceptance, mismatched identities and all existing FAILED-state rejection
+rules remain fail closed. This boundary is not a new state or release authority.
 An older main build that completes out of order advances the discovery watermark
 but cannot replace, validate as, or supersede the current main Candidate. A
 missing exact Version remains visible and retryable without changing Stable.
@@ -171,6 +185,12 @@ reused, or renewed. Reuse and renewal must link the prior receipt; invalidation
 must state the changed behavior input. Receipts are stored beneath the mutable
 RuntimeRoot, keyed by a digest of the exact validation key, while small bounded
 current and behavior-key indexes select immutable receipts.
+Canonical evidence identities preserve JSON types and array order, including
+null, empty arrays, singleton arrays and nested arrays. Object keys are sorted;
+PowerShell pipeline enumeration must not turn collections into scalars or empty
+objects. Producer hashing, stored behavior inputs and consumer recomputation
+use the same typed canonical representation. Historical receipt bytes are not
+rewritten to acquire a different identity.
 
 Every one of the fixed fifteen nodes has exactly one producer adapter and one or
 more named consumers. The Evidence Authority owns behavior-key construction,
@@ -402,6 +422,28 @@ ID and Git SHA. Authentication, authorization, malformed identity, invalid ref,
 missing commit, and main-reachability failures remain deterministic and never
 become retryable merely because a transport retry path exists.
 
+A fresh isolated Windows `COPY_DATABASE` failure caused specifically by
+`NATIVE_PROCESS_TIMEOUT` is operator-reviewable for the same exact Candidate,
+with reason `WINDOWS_PREFLIGHT_COPY_RETRY_REQUIRED`. It is not proof of a
+deterministic source defect. The current preflight attempt must bind the
+failure time and Windows revision; older untyped failures are not reclassified.
+Automatic discovery does not retry it. The existing locked
+`RetryCandidateValidation` action may retry outside a release transaction,
+preserving the original failure in release history and rerunning provenance
+and the entire Windows preflight. Failed Windows work never supplies a passed
+qualification. Repeated timeouts return to review, without changing the native
+deadline or any later CI, Worker, Access, compatibility or promotion gate.
+Other preflight failures retain their existing classification.
+
+The isolated SQLite database backup has a fixed 120-second native execution
+budget, including destination close/flush. The generic subprocess default,
+migration and later qualification budgets are unchanged. Online backup must
+finish successfully; file length or partial data never qualifies. Native
+process-tree termination and partial-preflight cleanup apply on expiry. Both
+preflight entry points use this same copy owner; retry does not renew or extend
+the per-attempt allowance. This budget covers real retained-database I/O, not
+additional test scenarios or repeated verification work.
+
 Required CI is repository trust evidence, not deployed Stable runtime debt.
 Progressive delivery never converts a red latest exact-SHA check into Class C.
 If a repository test represents a known production defect, its fixture must
@@ -606,8 +648,29 @@ the Candidate read path, the still-active Stable read path, and the normal
 Reverse target against the same live database. Pending migrations, missing
 capabilities, destructive or unknown migration contracts, non-current News,
 empty required legacy evidence, stale receipts, receipt tampering, or any live
-identity drift fail closed. Candidate validation rechecks the live evidence;
+identity drift fail closed. The retained Stable decision evidence follows the
+actual critical status consumer: snapshot 1 must contain a nonempty
+recent_decisions array. Historical full-audit snapshot 4 is preserved but cannot
+substitute for missing or malformed current status; split audit summary/detail
+slots are separate resources. The receipt field legacy_decisions records the
+still-active Stable status count. Candidate validation rechecks the live evidence;
 the receipt cannot be copied to another Git SHA or Worker Version.
+
+Candidate Version URL identity derives from the canonical Worker origin and
+verified version metadata. An isolated provider transport address must not
+replace that origin or erase the derived URL. All isolated requests remain
+subject to exact declared origin/method/path matching and owned loopback
+forwarding; deriving an identity grants no additional network authority.
+Static asset host validation consumes that same canonical identity origin.
+Protected Access validation instead binds its configured active transport;
+an isolated transport receipt does not qualify a production Access boundary.
+
+Control JSON and receipt publication share one UTF-8 atomic persistence owner.
+Mutable replacement and create-new publication expose complete documents;
+immutable collisions preserve the accepted bytes. Digest-named receipts must
+remain readable and discoverable beyond Win32 MAX_PATH, using native I/O path
+representations without changing stored root identities, receipt names or
+content digests. Reader path handling is part of the same contract as writing.
 
 **Verify Migration** does not stop Dashboard Sync. It binds the receipt to the
 CURRENT generation and its activation watermark, then independently revalidates
@@ -894,6 +957,55 @@ new Control Plane establishes supervision only. Database exclusion, Candidate
 qualification, NORMAL Promote and real progress through Observe remain separate
 gates. Access, CPU, Free capacity and Assistant PAUSED requirements are unchanged.
 
+For the same incident only, the recorded old local News evidence GET timeout
+may be retained as a degraded starting fact. Admission requires reviewed
+evidence bound to the broken and target revisions, the local GET stage and
+correlated-alias-scan cause, the retained database baseline, copied-database
+semantic and API-to-Sync acceptance, and a post-cutover recovery obligation.
+The target must contain the already-merged atomicity and News query correction.
+`SYNC DEGRADED` alone is not admission authority. Exact single owners, fresh
+heartbeat, basic API health, snapshot integrity, provider placement and absence
+of conflicting transactions remain unconditional. Other resource failures,
+remote invariant errors or changed identity are not covered. The existing
+install incident context retains this evidence across the repeated snapshot
+repair and action-time checks; no status file is rewritten to make it healthy.
+
+Historical failure support, same-input result equivalence, target API/Sync
+performance, and injected-failure recovery are distinct evidence claims. The
+copied-data producer hashes the retained reviewed historical artifact and the
+consumer requires that identity to match the incident reference. A new natural
+timeout is not mandatory: a legacy query completing now does not invalidate
+the retained failure. SQL elapsed time is not HTTP latency, and injected timeout
+is never described as natural reproduction. Exact-target clean-source identity,
+same-input full equality, actual API/Sync budgets and verified ACK remain
+mandatory; an old or partial report cannot satisfy them by changing its label.
+
+Copied-database admission binds both the untouched online-backup baseline and
+the independently owned working input. The existing report carries the
+`sqlite-main-wal-input-v1` manifest: explicit main/WAL presence, byte digests,
+sizes, modification identities and read-only logical page metadata. The
+consumer independently recomputes its canonical digest. A missing WAL is an
+explicit absent record, not an omitted field interpreted as zero. SHM reader
+locks are not logical data authority. Main/WAL movement during the isolated
+run invalidates admission; hashing only the main file cannot qualify a live
+WAL input. This assumes exclusive fixture ownership, not an adversarial
+filesystem. The producer closes its read connections and bounds hash work;
+it never checkpoints or recopies the baseline to make evidence pass.
+
+The existing deferred projection request may include `/api/news-evidence` only
+for that exact incident target. The sole Sync owner advances its normal bounded
+News operation and retains accepted Audit work between pages. Observe requires
+the existing serial heavy owner to drain accepted page progress independently
+of heartbeat cadence. Progress is not resource success: an unchanged cursor or
+error cannot trigger an immediate repeated operation, and progress cannot clear
+a retained failure or complete the recovery receipt. Observe requires
+the exact request and transaction, new producer identity and post-cutover local
+read, normal Sync activation ACK, normal resource success, and matching exact
+Worker generation. Missing evidence remains pending under the existing Observe
+deadline; contradictions fail. No Stable commit is permitted without this
+obligation passing. An old-runtime rollback is explicitly a degraded baseline,
+not a claim that the old SQL or absent Collector has recovered.
+
 Candidate at 0% MUST NOT own background, scheduled, queue, or other duplicate
 production side effects. Directed Version Override requests are the only normal
 Candidate Worker traffic; this project does not use random percentage canaries.
@@ -902,3 +1014,93 @@ Release mutation is local operator control, never a public HTTP endpoint.
 Cloudflare credentials stay in user-scoped authenticated tooling or protected
 secret storage and MUST NOT enter Git, command output, logs, UI payloads,
 SQLite/D1 evidence, or pull-request comments.
+
+### Isolated recovery configuration boundary
+
+An isolated rehearsal may declare `XAUUSD_ISOLATED_CONFIGURATION` and its exact
+`XAUUSD_ISOLATED_CONFIGURATION_SHA256` in the inherited process environment.
+Before opening that locator, both Windows owners require containment beneath
+`AppData/Local/Temp/XAUUSD-Forecaster-Rehearsals` of the current-token profile
+(not `USERPROFILE`). UUID-shaped names and a document's self-declared root are
+not independent read authority. This private test estate does not grant access
+to production data, endpoints, tasks or persistent credentials.
+Both are required together. The bounded existing fixture JSON must declare
+`ISOLATED_REHEARSAL`, a unique owned root, canonical profile/runtime root,
+repository root, loopback endpoints excluding port 8765, and a unique contract
+task namespace. Validate the local locator, reparse boundary, complete digest
+and declared authorities before consuming configuration. An isolated process
+must never fall back to HKCU, inherited credential decoys or local secret files
+when a declared key or configuration is missing. Defaults outside explicit
+isolated mode retain their existing production authority.
+
+This is an external configuration seam, not an operating-system sandbox or a
+release-evidence receipt. Rehearsal process/network/scheduler adapters must still
+contain their declared external boundaries. Original and adapter-derived source
+identities must remain distinct; source rewriting does not authorize reporting
+the original immutable SHA. Real locks, installation, transaction transitions,
+Collector output, Sync ACK and Observe must not be replaced by success stubs.
+An optional `external_adapter_sha256` binds only the reviewed connected fixture
+at `source_root/tests/fixtures/control_plane_connected_boundary.ps1`. Its loader
+accepts only the complete named external-function set, not arbitrary startup
+code or lifecycle overrides. Provider adapters return raw provider data through
+the existing acceptance consumers; unknown operations fail before external I/O.
+Tests compare all non-external function definitions before and after composition.
+The raw static-asset transport is included in that boundary: only an exact
+declared HTTPS origin, method and query maps to the owned loopback listener.
+The real byte/MIME/redirect and Worker identity consumers remain unchanged.
+Isolated version publication may atomically replace the one declared
+`worker-read-responses.json` beneath the owned root after discovery's initial
+watermark; malformed, missing, oversized or redirected input never falls back
+to an earlier successful provider record.
+The connected Node fixture executes the real built Worker against its declared
+in-memory D1 adapter. Before importing code, require the complete bounded
+server/client file set and source/dependency identities, not only the entry
+file hash. Serving roots must remain immutable for the session, including when
+the separate Windows runtime checkout switches revision. Retain actual build
+execution and any verified copy mapping separately from byte identity. Local
+Node results and declared synthetic provider telemetry are not Cloudflare
+qualification, provider usage, human Access acceptance or production evidence.
+Python qualification children also require exact declared entrypoints, arguments
+and owned paths. Validation worktrees bind their actual Git target; installed
+Observe scripts bind their actual bytes to that source. Their HTTP adapter
+preserves the logical remote URL, request bytes and version headers while
+mapping only declared transport to loopback. Unknown operations, redirects and
+reparse paths fail closed; the adapter cannot replace qualification or ACK
+consumers. A built static redirect remains part of the verified asset bytes.
+The scheduler fixture keeps only its two declared task states in owned files,
+so suspension and restoration are visible to every child without registering
+production tasks. Replacement still runs the real hidden WScript command and
+uses the install owner's exact 32-hex transaction ID.
+
+The real quote launcher uses this same explicit configuration before build or
+credential reads. Its code root must equal the declared runtime root, mutable
+output must equal that root's `.local/forward/quotes`, and config must equal the
+declared repository's `.local/config`. CLI and secret paths must match the
+declared values exactly, remain under the owned fixture and have no reparse
+ancestors. Missing or conflicting values fail before native execution. A
+declared external broker adapter may produce quote/session inputs only; it is
+not proof of real broker connectivity and cannot produce Collector or release
+success state. Unconfigured production launch authority remains unchanged.
+
+The connected fixture reserves its preflight port through a real bind/release
+on one configuration-declared loopback port. Preflight process arguments and the
+two inline SQLite copy/migration programs must match their actual source owner
+and private destinations before execution. This does not replace preflight,
+installation, lifecycle, or Observe checks.
+Long quote input is bound to the same original scenario deadline across process
+restarts, with a 45-minute external-fixture ceiling (the existing two 15-minute
+startup/Observe budgets, five-minute reload, and bounded preparation/cleanup).
+This is not a production or CI timeout increase; a timed-out scenario remains
+incomplete and its verified owned tree must be cleaned up.
+
+## Bounded release-history request references
+
+History records executable route plans only as explicitly named
+`route_plan_summary` and `cpu_route_plan_summary`: canonical digest, manifest
+schema, validation flags and route counts. Complete plans remain in current
+state; history summaries cannot substitute for them during resume. Directed
+request and response evidence remains in the existing append-only ledger.
+Failure publication must preserve the original first-failure diagnostic and
+counts instead of replacing them with a serialization failure.
+
+Release history retains its 64 KiB per-event limit. The complete current validation and CPU request plan remain authoritative in their existing stores. A history projection may replace expected_requests with expected_requests_reference only after matching the persisted plan's run, Candidate Worker, qualification key, full request-universe digest and exact acceptance-request digest. The reference names plan.json and retains the run, complete request count, request-universe digest, acceptance count and acceptance digest. Later targeted requests append to the plan; an older reference resolves exactly its recorded request-count prefix and verifies both digests. Existing prefix records must not be rewritten. Missing or mismatched authority cannot justify compaction. Current-state arrays, complete plans, directed ledgers and prior history bytes remain unchanged. Runtime resume reads current state and the plan; history is not a substitute for pending execution state or an independent qualification receipt.
