@@ -35,6 +35,7 @@ export const DASHBOARD_ADMIN_DESTINATIONS = [
   { id: "overview", label: "概览", href: "/admin", room: "admin" },
   { id: "assistant", label: "Assistant", href: "/admin/assistant", room: "assistant" },
   { id: "retry", label: "重试任务", href: "/admin/retry-jobs", room: "retry" },
+  { id: "architecture", label: "系统架构", href: "/admin/architecture", room: "architecture" },
   { id: "ai-usage", label: "AI 模型用量", href: "/admin/ai-usage", room: "status" },
 ] as const;
 
