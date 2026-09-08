@@ -873,10 +873,11 @@ def test_dashboard_exposes_only_runtime_update_failures(tmp_path) -> None:
         else:
             assert failure == {"status": state.upper(), "failed_at": now.isoformat()}
             assert any(a["code"] == "OPS_RUNTIME_UPDATE_FAILED" for a in alerts)
-    state_path.write_text("[]", encoding="utf-8")
-    assert _dashboard_module()._dashboard_payload(database)["system"][
-        "runtime_update_failure"
-    ]["status"] == "STATUS_UNAVAILABLE"
+    for malformed in ([], {"state": []}, {"state": "unknown"}):
+        state_path.write_text(json.dumps(malformed), encoding="utf-8")
+        assert _dashboard_module()._dashboard_payload(database)["system"][
+            "runtime_update_failure"
+        ]["status"] == "STATUS_UNAVAILABLE"
     state_path.unlink()
     assert _dashboard_module()._dashboard_payload(database)["system"][
         "runtime_update_failure"

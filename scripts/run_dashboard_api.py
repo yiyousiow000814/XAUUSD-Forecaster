@@ -899,6 +899,7 @@ def _dashboard_payload(
         try:
             runtime_update = json.loads(runtime_update_path.read_text(encoding="utf-8-sig"))
             if (not isinstance(runtime_update, dict)
+                    or not isinstance(runtime_update.get("state"), str)
                     or runtime_update.get("state") not in {
                         "running", "stopped", "failed", "update_failed",
                     }):
