@@ -12,7 +12,7 @@ const migrations = [
   "0031_bounded_learning_history_reads.sql",
 ];
 
-test("learning history keeps exact counts while its page lookup uses the identity index", () => {
+test("learning history keeps exact counts while its page lookup uses the identity index", async () => {
   const db = new D1TestDatabase(migrations);
   const insert = db.database.prepare(
     `INSERT INTO learning_records
@@ -42,6 +42,58 @@ test("learning history keeps exact counts while its page lookup uses the identit
   ).all("curve-5m", "FULL", 7).map(row => row.detail).join("\n");
   assert.match(plan, /learning_records_resource_identity_time_idx/);
   assert.doesNotMatch(plan, /SCAN learning_records(?:\s|$)/);
+
+  if (!process.env.WORKERS_CI_BRANCH || process.env.WORKERS_CI_BRANCH === "main") {
+    const previousEnv = globalThis.__AURUM_TEST_WORKER_ENV;
+    const bindings = { DB: db, ASSETS: { fetch: async () => new Response("asset") } };
+    globalThis.__AURUM_TEST_WORKER_ENV = bindings;
+    const prepare = db.prepare.bind(db);
+    let checked = 0;
+    db.prepare = sql => {
+      const statement = prepare(sql);
+      if (!sql.includes("page_source AS")) return statement;
+      return { bind(...values) {
+        const details = db.database.prepare(`EXPLAIN QUERY PLAN ${sql}`)
+          .all(...values).map(row => row.detail);
+        assert.ok(details.some(detail => /SEARCH lr .*sort_epoch/.test(detail)),
+          `deep page must seek its time boundary: ${details.join("; ")}`);
+        checked += 1;
+        return statement.bind(...values);
+      } };
+    };
+    try {
+      const { default: worker } = await import("../dist/server/index.js");
+      for (const position of [1501, 501, 51]) {
+        const cursor = btoa(JSON.stringify([
+          position, `FULL\u0000${position}`, 1999, "FULL\u00001999",
+        ]));
+        const response = await worker.fetch(new Request(
+          `https://example.test/api/learning-history?resource=curve-5m&identity=FULL&limit=7&cursor=${encodeURIComponent(cursor)}`,
+        ), bindings, { waitUntil() {}, passThroughOnException() {} });
+        assert.equal(response.status, 200);
+        const page = await response.json();
+        assert.deepEqual(page.items.map(row => row.value),
+          Array.from({ length: 7 }, (_, index) => position - 2 * (index + 1)));
+        assert.equal(page.total, 1000);
+        assert.equal(page.has_more, true);
+      }
+      assert.equal(checked, 3);
+      insert.run("curve-5m", "FULL\u0000!tie", 501, "a".repeat(64),
+        JSON.stringify({ model_identity: "FULL", value: "same-time" }),
+        "2026-09-03T00:00:00Z");
+      const tiedCursor = btoa(JSON.stringify([501, "FULL\u0000501", 1999, "FULL\u00001999"]));
+      const tiedResponse = await worker.fetch(new Request(
+        `https://example.test/api/learning-history?resource=curve-5m&identity=FULL&limit=2&cursor=${encodeURIComponent(tiedCursor)}`,
+      ), bindings, { waitUntil() {}, passThroughOnException() {} });
+      assert.equal(tiedResponse.status, 200);
+      assert.deepEqual((await tiedResponse.json()).items.map(row => row.value), ["same-time", 499]);
+      db.database.prepare("DELETE FROM learning_records WHERE resource=? AND record_key=?")
+        .run("curve-5m", "FULL\u0000!tie");
+    } finally {
+      db.prepare = prepare;
+      globalThis.__AURUM_TEST_WORKER_ENV = previousEnv;
+    }
+  }
 
   db.database.prepare(
     `UPDATE learning_records SET payload=? WHERE resource='curve-5m' AND record_key=?`,
