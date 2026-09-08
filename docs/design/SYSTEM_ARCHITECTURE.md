@@ -36,7 +36,7 @@ D1 = bounded public mirror, not forecasting recovery authority
 
 | Owner | Boundary | Critical path | Bounded work | Incremental state | Failure and recovery |
 |---|---|---|---|---|---|
-| Control Plane / Control Center | Hidden Windows control processes plus immutable Cloudflare Versions; one bounded read-only runtime read model | Explicit Candidate, Promote, Switch, Observe, Reverse | Time-bounded checks and single-flight provider observation; 15 receipt-keyed evidence nodes | Release state/history, behavior keys, renewable leases; provider caches and the read model add no authority | Stable remains owner until observation; artifact availability, placement, and Reverse eligibility remain separate |
+| Main runtime owner | One Windows owner and native Workers Builds | Main fetch, stop, update, start | Five-minute fetch, bounded command timeouts | Running/stopped intent and observed source | Visible failure, forward retry; no code rollback |
 | Quote Bridge | cTrader process | Broker-native Bid/Ask and session facts | One append per tick; one current session file | Daily UTC quote partitions | Collector fails closed to `WAIT` when quote/session authority is stale |
 | Collector | Python process, main decision loop plus owned background threads | Five-minute decision and later outcome append | Quote lookback 61 minutes; restart grid detail at most the live window; bounded maintenance pages | Decision clock, append-only IDs, checkpoints, training requests | Optional News/training/display failures do not invent a decision |
 | News collection | Collector-owned thread with separate source cadence | Immutable source revisions available to future decisions | Registered bounded source polls | Poll/revision identities | Failure degrades News availability without stopping market evidence |
@@ -102,20 +102,16 @@ fixture builders retain the explicit Sync import compatibility boundary.
 ### Source revision to Stable
 
 ```text
-exact Git source + immutable Worker Version
-  -> behavior-keyed evidence DAG
-  -> renew only near-expiry live leases
-  -> Candidate at 0%
-  -> cheap Promote precheck
-  -> Switch Windows and Worker owner
-  -> targeted deferred projection + immediate Sync
-  -> Observe
-  -> COMMIT_STABLE
+reviewed main + required CI
+  -> native Cloudflare build and direct single-version deploy
+  -> local main owner fetches a fixed main SHA
+  -> stop owned services, update source/dependencies, reload and start
+  -> actual source identity, business health and strict Sync ACK
 ```
 
-`scripts/release-evidence-contract.json` declares the current evidence graph.
-CPU, semantic, Access, migration, placement, rollback, Promote, and Observe are
-separate nodes; an unrelated source change must not invalidate all nodes.
+Windows Task Scheduler admits the hidden main owner at login and after a crash.
+A root-specific mutex excludes duplicate owners. Failed updates remain visible
+and retry forward; no Candidate graph or rollback controller remains.
 
 ### Storage lifecycle
 
@@ -144,15 +140,11 @@ Unknown objects, active worktrees, and rollback artifacts are not deleted.
 | Dashboard pure resource serialization | `xauusd_forecaster/dashboard/resource_contracts.py`; existing field projections and News generation remain authoritative | API and Sync; compatibility imports for Preview and release fixture builders | `tests/test_dashboard_resource_contracts.py`, `tests/test_dashboard_sync.py`, `tests/test_release_validation_fixtures.py` |
 | Dashboard operator retry bridge | `xauusd_forecaster/dashboard/operator_bridge.py` | HTTP adapter in `scripts/run_dashboard_api.py` | `tests/test_dashboard_api.py` |
 | Local storage lifecycle | `xauusd_forecaster/maintenance.py`, `xauusd_forecaster/sqlite_wal.py` | Collector maintenance owners | `tests/test_backup_containment.py`, `tests/test_wal_checkpoint_ownership.py` |
-| Release evidence DAG | `scripts/release_evidence_nodes.ps1`, `scripts/release-evidence-contract.json` | `scripts/xauusd_control_center.ps1` | `tests/test_release_evidence_nodes.py`, `tests/test_runtime_launchers.py` |
-| Release runtime read model | `scripts/release_runtime_read_model.ps1` | Pure resolved Committed/Previous/Target identities; provider-only cached facts joined with once-per-refresh Windows, business-health, ownership, bundle, lock, and transaction facts; shared WPF/WinForms presentation with one max-stale envelope bound to the full authority fingerprint; asynchronous verified single-flight process-tree cleanup including nested native PID/start-token ownership; both JSON views; and fresh Reverse action-time authority in `scripts/xauusd_control_center.ps1` | `tests/test_release_runtime_read_model.py`, `tests/test_runtime_launchers.py`, `formal/release-control/ReleaseRuntimeReadModel.tla` |
-| Runtime root and heartbeat | `xauusd_forecaster/runtime_paths.py`, `xauusd_forecaster/runtime_health.py` | All Windows launchers | `tests/test_runtime_launchers.py`, `tests/test_runtime_health.py` |
 | Worker and D1 projection | `web/worker/index.ts`, `web/worker/api-router.ts`, `web/db/schema.ts` | Cloudflare Workers | `web/tests/d1-capabilities.test.mjs`, `web/tests/worker-cpu-headroom.test.mjs` |
 | Live broadcast | `xauusd_forecaster/live_broadcast.py`, `broadcast/src/index.js` | `scripts/run_live_broadcast_publisher.py` | `tests/test_live_broadcast.py`, `broadcast/tests/broadcast.test.mjs` |
 
 ## Current structural gaps
 
-- `scripts/xauusd_control_center.ps1` still combines 374 functions across
   release, supervision, provider adapters, recovery, and presentation.
 - `scripts/run_dashboard_api.py` and `scripts/run_dashboard_sync.py` still own
   substantial domain logic as well as process composition.
@@ -165,3 +157,9 @@ Unknown objects, active worktrees, and rollback artifacts are not deleted.
 
 The point-in-time evidence is recorded in
 [Current-main architecture audit](../audits/CURRENT_MAIN_ARCHITECTURE_2026_09_01.md).
+
+## Main publication
+
+Protected main feeds native Cloudflare deployment and the single local
+`scripts/run_main_services.ps1` owner. The generated main-update diagram tracks
+source fetch, service ownership and update behavior. No Control Panel remains.

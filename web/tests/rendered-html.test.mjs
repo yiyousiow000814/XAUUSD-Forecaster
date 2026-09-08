@@ -3482,13 +3482,15 @@ test("Worker validation manifest owns every production route and direct router",
   );
 });
 
-test("non-production builds target an isolated Preview Worker", () => {
+test("only native main publication remains configured", () => {
   const config = JSON.parse(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const contract = JSON.parse(readFileSync(new URL("../cloudflare-build-contract.json", import.meta.url), "utf8"));
   assert.equal(config.name, "aurum-signal-room");
-  assert.equal(packageJson.scripts["cf:preview-upload"],
-    "wrangler versions upload --name aurum-signal-room-preview");
-  assert.ok(!packageJson.scripts["cf:preview-upload"].includes("--env"));
+  assert.equal(packageJson.scripts["cf:preview-upload"], undefined);
+  assert.equal(contract.source.production_branch, "main");
+  assert.equal(contract.non_production_builds_enabled, false);
+  assert.equal(contract.commands.deploy, 'npx wrangler deploy --message "main:$WORKERS_CI_COMMIT_SHA"');
 });
 
 test("route inventory parser covers const and re-exported handlers", () => {

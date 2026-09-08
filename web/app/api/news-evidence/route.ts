@@ -10,6 +10,7 @@ import {
   NEWS_EVIDENCE_CONTRACT_VERSION,
   NEWS_EVIDENCE_SNAPSHOT_ID,
   NewsEvidenceProtocolError,
+  newsEvidenceWriteAcknowledgement,
   prepareNewsEvidenceBatch,
   prepareNewsEvidenceSnapshot,
   readNewsEvidencePage,
@@ -132,8 +133,9 @@ export async function POST(request: Request) {
           mutation_boundary: "evidence-snapshot-cleanup",
         });
       }
-      return NextResponse.json(await cleanupNewsEvidenceSnapshots(
-        binding, body.cleanup_active_snapshot,
+      return NextResponse.json(await newsEvidenceWriteAcknowledgement(
+        bounded.serialized, body.cleanup_active_snapshot,
+        await cleanupNewsEvidenceSnapshots(binding, body.cleanup_active_snapshot),
       ));
     }
     if (typeof body.prepare_snapshot === "string") {
@@ -154,8 +156,9 @@ export async function POST(request: Request) {
           mutation_boundary: "evidence-snapshot-prepare",
         });
       }
-      return NextResponse.json(await prepareNewsEvidenceSnapshot(
-        binding, body.prepare_snapshot, Number(body.expected_count),
+      return NextResponse.json(await newsEvidenceWriteAcknowledgement(
+        bounded.serialized, body.prepare_snapshot,
+        await prepareNewsEvidenceSnapshot(binding, body.prepare_snapshot, Number(body.expected_count)),
       ));
     }
     if (typeof body.activate_snapshot === "string") {
@@ -176,8 +179,9 @@ export async function POST(request: Request) {
           mutation_boundary: "evidence-snapshot-activation",
         });
       }
-      return NextResponse.json(await activateNewsEvidenceSnapshot(
-        binding, body.activate_snapshot, Number(body.expected_count),
+      return NextResponse.json(await newsEvidenceWriteAcknowledgement(
+        bounded.serialized, body.activate_snapshot,
+        await activateNewsEvidenceSnapshot(binding, body.activate_snapshot, Number(body.expected_count)),
       ));
     }
     if (
@@ -201,8 +205,9 @@ export async function POST(request: Request) {
         mutation_boundary: "evidence-stage-batch",
       });
     }
-    return NextResponse.json(await stageNewsEvidenceBatch(
-      binding, body.snapshot_id, Number(body.offset), body.items as EvidenceItem[],
+    return NextResponse.json(await newsEvidenceWriteAcknowledgement(
+      bounded.serialized, body.snapshot_id,
+      await stageNewsEvidenceBatch(binding, body.snapshot_id, Number(body.offset), body.items as EvidenceItem[]),
     ));
   } catch (reason) {
     return protocolFailure(reason);

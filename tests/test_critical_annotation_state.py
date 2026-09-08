@@ -779,16 +779,37 @@ def test_critical_and_health_reads_avoid_full_job_scan_with_ten_thousand_mixed_j
         and "news_ai_jobs_v1" in sql
     ]
     assert job_queries
+    job_roots = {int(row[0]) for row in ledger.connection.execute(
+        "SELECT rootpage FROM sqlite_master WHERE tbl_name='news_ai_jobs_v1' AND rootpage>0"
+    )}
+    def historical_full_scans(sql):
+        bytecode = ledger.connection.execute(f"EXPLAIN {sql}").fetchall()
+        historical_cursors = {int(row[2]) for row in bytecode
+            if row[1] == "OpenRead" and int(row[3]) in job_roots and int(row[4]) == 0}
+        return [tuple(row) for row in bytecode
+            if row[1] in {"Rewind", "Last", "Count"} and int(row[2]) in historical_cursors]
+
+    # Negative controls protect aliased scans, including SQLite's special
+    # count(*) operation, which need not iterate using Rewind/Last.
+    for sql in ("SELECT job_id FROM news_ai_jobs_v1 AS j NOT INDEXED",
+                "SELECT count(*) FROM news_ai_jobs_v1 AS j NOT INDEXED"):
+        assert historical_full_scans(sql), sql
     job_plan_details: list[str] = []
     for sql in job_queries:
+        # A materialized frontier can reuse the base-table alias in an outer
+        # SCAN. Inspect actual database cursors so that this is neither mistaken
+        # for a full historical-table scan nor allowed to hide a real one.
+        full_scans = historical_full_scans(sql)
+        assert not full_scans, full_scans
         job_plan_details.extend(
             str(row[3]) for row in ledger.connection.execute(
                 f"EXPLAIN QUERY PLAN {sql}"
             ).fetchall()
-            if "news_ai_jobs_v1" in str(row[3]) or " j " in f" {row[3]} "
+            if "news_ai_jobs_" in str(row[3])
         )
     assert job_plan_details
-    assert all("SEARCH" in detail for detail in job_plan_details)
+    unindexed = [detail for detail in job_plan_details if "SEARCH" not in detail]
+    assert not unindexed, "\n".join(unindexed)
     assert any("news_ai_jobs_lane_" in detail for detail in job_plan_details)
     ledger.close()
 

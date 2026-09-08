@@ -121,16 +121,20 @@ def test_configured_targets_rejects_every_state_path_outside_runtime_root(
             module.configure_runtime_state(config, state_root)
 
 
-@pytest.mark.parametrize("value", [
-    "../escape.json", "nested/state.json", "state.txt", "state name.json",
-    f"{'a' * 129}.json",
+@pytest.mark.parametrize("value,accepted", [
+    ("../escape.json", False), ("nested/state.json", False), ("state.txt", False),
+    ("state name.json", False), (f"{'a' * 124}.json", False),
+    (".json", False), ("é.json", False), ("a.json", True),
+    ("state-name_2.json", True), (f"{'a' * 123}.json", True),
 ])
-def test_sync_state_path_rejects_traversal_and_non_json_names(
-    monkeypatch, tmp_path, value
+def test_sync_state_path_preserves_bounded_runtime_filename_authority(
+    tmp_path, value, accepted
 ) -> None:
-
-    with pytest.raises(ValueError, match="must be one JSON file under"):
-        module._validated_sync_state_path(Path(value), tmp_path)
+    if accepted:
+        assert module._validated_sync_state_path(Path(value), tmp_path) == tmp_path / value
+    else:
+        with pytest.raises(ValueError, match="must be one JSON file under"):
+            module._validated_sync_state_path(Path(value), tmp_path)
 
 
 def test_sites_bypass_header_is_shared_by_get_and_post_but_not_cloudflare(

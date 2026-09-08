@@ -167,7 +167,7 @@ test('actual symbol claims retain their exact source span, never the first file 
   const projection = projectCurrentSource(index);
   const code = parseArchitectureCodeIndex(projection.code);
   const evidence = parseArchitectureEvidence(projection.evidence);
-  for (const name of ['Start-ReleasePromotion', '_sync_news_evidence', 'Handler.do_GET',
+  for (const name of ['Update-MainRuntime', '_sync_news_evidence', 'Handler.do_GET',
     '_build_news_projection_source', '_build_news_evidence_resource']) {
     const original = index.observed.symbols.find(symbol => symbol.name === name);
     assert.ok(original, name);

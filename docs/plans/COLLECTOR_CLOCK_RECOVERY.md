@@ -190,3 +190,380 @@ cleanup closes it, and parent death also closes it. A fixed sleep lifetime is
 not a business-preservation contract: the former 60-second stand-in could exit
 on its own during a valid hosted handoff. Both real-process scenarios retain
 their living-owner assertions and explicit bounded cleanup.
+
+## Copy-timeout retry boundary
+
+The connected rehearsal exposed a local copy timeout followed by a cached
+Candidate failure. An unchanged copy-only diagnostic completed in14.467s;
+the actual PowerShell copy with API/Sync/annotator running completed in27.834s
+under the unchanged30s native limit. Neither qualifies production. A timeout
+does not prove that the immutable Candidate can never complete a later copy.
+
+The correction uses the existing REVIEW_REQUIRED state and explicit
+RetryCandidateValidation action for a freshly recorded COPY_DATABASE failure
+whose detail is exactly NATIVE_PROCESS_TIMEOUT. Automatic discovery does not
+retry review states. All other preflight failures keep their existing semantics.
+No deadline, accepted gate, SQLite content, mutation privilege or service owner
+changes. This is an explicit retry of failed Windows work, not its acceptance.
+
+Actors are the serialized Control Center action, preflight native child, current
+runtime readers/writers, candidate discovery, and existing cleanup owner. Only
+the current preflight attempt may classify its own failure; stale runtime
+diagnostics cannot create retry authority. The Candidate validation key and
+Windows revision bind the retained failure. Retry appends its prior failure to
+release history and reruns provenance and the complete Windows preflight;
+Windows success is never inherited from the failed attempt. No provider or
+human acceptance is synthesized. Active transactions exclude retry.
+
+Transitions: testing -> review after a current copy timeout; explicit locked
+retry -> testing; repeated timeout -> review; complete qualification -> the
+existing later gates. A crash leaves the existing non-promotable state and
+owned-child cleanup/reconciliation contract. Review survives process/machine
+restart and has no automatic expiry or background retry. The current Stable
+runtime is retained throughout; Reverse Stable and production switch authority
+remain unchanged. Old controllers remain fail closed on the new review reason;
+new controllers do not reinterpret old untyped FAILED records.
+
+Before integration, extend the existing PowerShell preflight/retry contracts:
+fresh copy timeout, stale diagnostic rejection, migration/other failures,
+same-identity rejection then recovery, active transaction exclusion, preserved
+failure history, and unchanged CPU/semantic retries. Exercise PS5.1 and PS7
+through the actual operation dispatcher. Rehearse the exact installed owner
+with the retained input and actual native copy. Existing independent review
+requirements remain; author testing is not independent approval.
+
+
+## Measured database-copy execution budget
+
+The complete installed rehearsal at source `0dce57e3` recorded two continuously
+growing copies of the 6,955,085,824-byte working database. Progress reached
+6,018,481,600 bytes after about 25 seconds on the first attempt; the retry
+reached full file length only around the generic 30-second deadline. Both native
+children were terminated before successful completion. File length alone is not
+a consistent-copy receipt. The earlier guarded baseline-only copy completed in
+28.317 seconds. These observations expose an unsuitable generic subprocess
+budget for a real full-database backup, not test state-space growth or repeated
+historical test work. No database size reduction or new copy is required for
+unrelated changes.
+
+Change only the existing Copy-CandidatePreflightDatabase invocation to a fixed
+120-second operation budget. The generic native timeout remains 30 seconds and
+its maximum remains 300 seconds. Two minutes bounds this single required online
+backup, including destination close/flush, under running-owner I/O variability;
+it is an execution allowance, not a promised storage throughput. Migration,
+API preflight, CI, qualification and observation deadlines do not change.
+
+The serialized controller remains the sole owner. Both its direct preflight
+call and New-CandidatePreflightDatabase compose the same copy helper, real
+Python/SQLite backup and native process-tree cleanup. Source remains read-only;
+partial destinations never qualify. The current business runtime stays active.
+No durable state, lock, retry loop, schema, locator or mutation authority is
+added. Success still requires native exit 0, followed by migration and the full
+existing validation path. Timeout remains explicit same-identity review with
+preserved failure history; other errors retain existing classification.
+
+New controller/old runtime and new controller/old database use the same backup
+interface; old controller/new runtime or rollback retains its former bounded
+copy behavior and remains fail closed. A crash uses existing owned-child and
+partial-preflight cleanup. No switch has occurred during copy, so Stable
+recovery does not depend on finishing it. This is controlled local OS/SQLite
+work; provider and human evidence are unaffected.
+
+Verification: extend the existing consistent-copy/migration contract for both
+Windows PowerShell and pwsh, recording the actual native binding while executing
+real Python/SQLite and preserving source data/schema. Existing native timeout
+termination and preflight failure cleanup contracts remain mandatory. Execute
+the exact installed controller against the retained production-shaped database
+with no other local build/test workload; require successful copy, migration,
+API preflight and subsequent qualification. Independent review and real
+production eligibility remain separate requirements.
+
+
+## Stable migration evidence follows the actual status consumer
+
+The installed 9ecef2a8 rehearsal passed copy, Windows preflight and repository
+checks, then failed MIGRATION_LEGACY_COMPATIBILITY_FAILED. The migration SQL
+reads recent_decisions from obsolete full-audit snapshot 4. The frozen actual
+Stable ffe1de29 Worker reads dashboard status from snapshot 1; its audit writer
+uses summary 9 and detail 6/7/8. Stable Python already emits bounded recent
+decisions on the critical status route. Seeding snapshot 4 solely to pass this
+check would not prove the actual Stable read path.
+
+Correct the existing legacy_decisions evidence projection to read the bounded
+critical status snapshot 1 and require an actual nonempty recent_decisions array.
+Keep its existing receipt field: legacy denotes the still-active Stable, not a
+particular retired audit storage slot. Required legacy tables, all News identity
+and receipt checks, live Stable/Candidate endpoint checks and exact source/
+Worker/database binding remain mandatory. Preserve historical snapshot 4 bytes;
+no writer, schema, cleanup, data migration or service switch is introduced.
+
+Actors are existing Stable Sync/status writer, both Worker status consumers,
+serialized migration verification, receipt renewal and Reverse qualification.
+Missing, malformed or empty current status is rejected even if historical 4 is
+nonempty. A later valid same-target heartbeat may restore required evidence;
+there is no new state, retry loop or acceptance shortcut. Old controllers retain
+their old fail-closed check; new controllers read the same status contract used
+by the recorded Stable. Existing receipts are immutable and live-evidence
+matching still applies; old source qualification is not relabeled.
+
+Extend the existing migration capability SQL family to execute its complete
+query against the real migration schema with current status present/absent,
+empty, wrong-type and malformed payloads, and independent historical 4 contents.
+Retain the one-bounded-scan assertions and actual PowerShell migration rejection/
+renewal contracts. Rehearse actual old and target built Workers against the same
+D1 fixture after real heartbeat/bootstrap writes. The reusable review failure
+is producer-to-consumer wiring: mocked capability counts hid the retired slot.
+Independent review and production eligibility remain outstanding.
+
+
+## Worker identity origin survives isolated transport binding
+
+The ebbfeefa connected run passed all 434 directed Worker requests but rejected
+all 14 static routes: the static host guard still derived the expected hostname
+from the isolated transport. Extend the same origin contract to this consumer.
+The guard changes only its identity input; scheme, port, path, exact version host,
+body and status checks remain intact. Protected Access checks compare their
+configured active transport and must not be changed to a public identity check.
+The existing static success and rejection families now execute PS5.1 and PS7
+with normal and loopback transports. Four isolated cases failed before repair.
+This closes a consumer omitted by the earlier producer-only origin review;
+the complete connected lifecycle remains the acceptance gate.
+
+Installed 205ce275 passed copy/preflight and the corrected database capability
+query, then failed the first Candidate status read because browser_url was
+empty. The isolated entry point replaces workerUrl with a loopback provider;
+Get-ReleaseVersionPreviewUrl incorrectly uses that transport endpoint to derive
+a workers.dev version identity. Production's unchanged canonical hostname and
+the verified version metadata already provide the required identity.
+
+Retain one named canonical Worker origin before applying the existing isolated
+transport override. Derive version URLs from that origin; keep Stable/provider
+requests, protected Access binding and all network interception on their existing
+transport path. No user-supplied origin, new allowed destination, DNS request,
+provider claim, durable state, receipt or mutation privilege is added. Exact
+Worker/Git/artifact/has_preview checks still precede URL construction.
+
+The entry point owns origin and transport configuration; discovery consumes the
+provider adapter's exact URL; migration/qualification consumers retain their
+existing request boundary. Old/new production behavior is identical. Only the
+isolated transport can differ, and its network wrapper must still match the
+exact declared origin/method/path before forwarding locally. Missing or invalid
+metadata remains fail closed; restart reinitializes both values from the same
+entry point. Reverse and production Stable remain unaffected.
+
+Extend the existing actual-PowerShell version URL family across normal and
+loopback transport, PS5.1/PS7, valid and invalid metadata. Execute the connected
+installed entry point and real built Candidate status route afterward. Never
+patch Candidate.browser_url in persisted state or relax the request allowlist.
+
+
+## Shared atomic persistence on long runtime roots
+
+Installed 0d4b364c reached migration receipt publication after the prior gates,
+but Write-ControlCenterJsonAtomic failed at Move-Item for the digest-named
+receipt. Its separate cmdlet implementation does not share the native-path
+support already used by Write-ReleaseEvidenceUtf8Atomic.
+
+Compose JSON serialization with the existing UTF-8 persistence owner. Move the
+native-path converter into that owner and publish CreateNew through a completed
+temporary file plus atomic no-overwrite move. Mutable replacement continues to
+use File.Replace; first publication uses File.Move. Reuse the short temporary
+leaf and existing bounded serializer. No new storage root, receipt schema,
+lock, state or authority is introduced; existing callers retain their immutable
+or mutable mode. Do not change global Windows path policy or relocate evidence.
+
+Actors include migration/qualification receipt writers, release/runtime state,
+watchdog state, immutable evidence-node writers and their readers. Before
+publication readers see the previous complete document or absence; after it,
+they see the complete new document. Immutable collision retains original bytes.
+Timeout/crash leaves at most an unreferenced temporary file, never a partial
+final receipt. Existing serialized lifecycle ownership and caller containment
+remain authoritative. Cleanup targets only the unique temporary/backup files
+of the current call; historical evidence remains untouched.
+
+Old/new readers use unchanged UTF-8 JSON and paths. No migration, service
+switch, provider permission or recovery ownership changes; reverse uses the
+same persisted records. Native converter and writer must load from the same
+persistence module so standalone consumers do not gain a hidden import.
+
+Extend the existing long-root evidence family for actual PS5.1/PS7 JSON create,
+mutable replacement, immutable collision and complete reader round trip. Keep
+existing evidence immutability/renewal and installation/state tests. Execute the
+installed migration receipt writer and subsequent reader in the full fixture.
+This consolidates two implementations of the same atomicity invariant rather
+than introducing a new persistence mechanism. Independent review is required.
+
+
+The extended regression also reproduced reader failure in PS5.1 after native
+publication succeeded. Migration root/renewal and Access boundary/reuse/renewal
+path constructors now return the existing native I/O representation; receipt
+enumerators normalize their file reads the same way. Provider-inspection receipt
+publication/retrieval follows this sibling rule. Existing receipt bytes, path
+names, root identity and acceptance checks remain unchanged. Ten long-path
+create/read/replace/collision cases pass across the five locator families and
+both PowerShell runtimes; broader consumer gates remain required.
+
+### Finite quote-input publication recovery
+
+Connected ceaadecf execution retained a Windows PermissionError replacing the synthetic market-session file while readers were active. The quote process exited; its absence then correctly prevented the business-preserving watchdog termination operation. The isolated launcher/watchdog and business children were subsequently identified by PID, start time and exact owned paths and stopped; original failure evidence is retained.
+
+The finite synthetic quote process remains the sole session-file writer. API and control readers can briefly hold a Windows handle. Retry only the same completed temporary session bytes after PermissionError, at 20 ms intervals for at most one second and never beyond the original scenario deadline. Do not append the accepted quote again, recompute its time, extend input lifetime, replace any production data or publish a health/ACK receipt. Permanent denial remains failure, and the writer removes only its own temporary file. Restart continues to use the existing sealed deadline and append-only quote identity. This introduces no durable state, service owner, authority or real broker behavior.
+
+Extend the existing quote-input contract family with transient lock recovery, persistent denial and non-permission failure. Verify old session bytes until atomic publication, unchanged accepted quote count, finite retries and temporary cleanup. Exercise an actual Windows reader handle for the replacement boundary. Separately, the deep isolated Git estate requires local core.longpaths=true; the same real worktree command failed with Filename too long before this fixture-only configuration and succeeded afterward. Production Git configuration is unchanged.
+### Failed predecessor does not own new-candidate progress
+
+A source-bound contract reproduces the retained candidate's FAILED/worktree-unavailable shape as a predecessor of a new exact-main candidate. The optional supersession traversal currently rejects that predecessor as an unsafe intermediate, blocking fresh qualification even though it has never been accepted. This contradicts the existing incomplete-but-non-contradictory fallback contract.
+
+Keep current-head identity, provider ownership, ancestry, edge uniqueness, no active transaction, accepted-history and receipt-integrity checks. Only a traversed predecessor at the end of its supersession chain, with matching validation key, FAILED state and no Candidate/Access/Promote/Stable acceptance event ends optional reuse as unavailable. Do not restore it, copy receipts, erase history, turn FAILED into success or retry that same identity. The new head remains non-promotable and must complete every fresh gate. An accepted or key-mismatched failed predecessor remains rejected. Discovery is the existing retry owner; no new durable state, lock, timer, expiry or recovery authority is introduced. Restart recomputes the same bounded plan from preserved history. Extend the existing supersession family and execute both PowerShell runtimes before the next connected run.
+### Bounded compatibility gates
+
+On 6b067688, the hosted compatibility-release job collected151 cases and was cancelled at the unchanged five-minute job limit after140 passed in253.04s of test execution. The retained per-case timestamps put the discovery/history endpoint near half of the test time. Split its existing contiguous function selection at test_unavailable_supersession_reuse_falls_back_once_without_copying_evidence: candidate discovery/history owns the first range, qualification/recovery/Access owns the second. The existing impact selector, five-minute jobs,30-second per-case limit and all-selected-shards aggregate remain authoritative. No test is deleted, skipped, duplicated or assigned a longer timeout. Existing exact-once manifest coverage verifies the union, and both actual shard entrypoints must run before completion. Failure of either shard still blocks the aggregate; scheduler retries retain the same source identity. No runtime/production owner, secret, deployment or evidence schema changes.
+### Reference the complete CPU plan from bounded history
+
+The 6b connected run froze an actual434-request plan (372 acceptance requests,275452-byte persisted JSON) and then failed PERSISTENCE_EVENT_TOO_LARGE before any directed request. Write-CandidateCpuInFlightState first stores the complete current validation, then Write-ReleaseHistory recursively copies up to128 full requests plus route and qualification data into a64KiB event. Count/depth limits do not bound this transport sufficiently.
+
+Keep the existing worker-cpu-evidence/<validation_run>/plan.json owner and its complete request universe. For a history validation projection only, replace expected_requests with a compact reference only when the persisted plan matches the Candidate worker, qualification key and exact acceptance-request digest. Include the validation run, artifact name, full request-universe digest, acceptance count and acceptance digest. Do not change live state, the plan, ledger, qualification or any old history bytes; do not add a new store or raise the64KiB limit. Missing/mismatched plans keep the original projection and existing fail-closed byte gate. The producer writes the plan before current state/history; atomic plan publication and the release transaction remain the existing owners. Restart uses complete current state and plan. History qualification reuse accepts PASSED predecessors and independently verifies the preserved plan/provider artifacts; pending expected-request arrays are consumed from current state, not restored from history. Review those consumers and extend the history family with complete-plan reconstruction, unchanged authority bytes and invalid references in both PowerShell runtimes.
+The next hosted runtime-supervision job passed all 208 tests in 236.05 seconds but was cancelled during artifact upload at the same five-minute job limit. Split that existing range at the exact runtime-control bundle identity test: runtime-ownership keeps the read model and service ownership tests; runtime-candidate-validation keeps status parity, preflight and directed-validation tests. Preserve identical impact paths and aggregate requirements. Exact-once coverage and both real shard entrypoints must pass; setup and upload remain inside the unchanged job budget.
+
+
+### Complete directed-failure history
+
+The 81d6 connected run recorded all 434 directed requests, including 112 actual failures, then lost the primary diagnostic when the failure event exceeded 64 KiB. The frozen event alone was 60,730 bytes: its bounded CPU plan and routes duplicated most of the manifest. Extend the existing real automatic-validation failure contract to the full manifest and 31 route results; it reproduces the diagnostic loss. History needs an audit summary, not executable route plans. Replace only history route_plan/cpu_route_plan with explicitly named summaries retaining the canonical digest, schema, gate flags and counts. Keep full current-state plans and the complete directed ledger unchanged. Resume consumes current state; qualified history recovery verifies independent receipts and does not execute these plans. Missing executable plans cannot authorize resume. No new artifact, durable owner, timeout, limit or acceptance exemption is introduced. Verify first-failure preservation through the actual transaction caller, history/current-state separation and supersession consumers before another full run.
+
+### Consecutive unaccepted failures
+
+The retained 6b failure now has the earlier CEA failure as its predecessor. The existing terminal-only fallback rejects this same valid correction sequence before fresh validation. The existing supersession family reproduces this on both PowerShell runtimes. Extend traversal only across consecutive unaccepted FAILED predecessors with matching validation keys; all identity, ancestry, unique-edge, cycle and depth checks still execute. A chain reaching any accepted or qualified predecessor through a failed intermediate remains rejected. A chain ending without reusable evidence returns the existing REUSE_UNAVAILABLE result and leaves the new head to complete fresh qualification. No prior evidence is copied, no FAILED identity is retried or reclassified, and no state/history is erased. Discovery retains retry and restart ownership; no new state, timer or authority is introduced.
+
+### Complete isolated baseline resources
+
+The connected fixture starts a fresh D1, but its incident schedule defers normal resource publication. Full directed validation therefore reads seven unsynchronized resources and an absent market overview. Before starting business actors, the same fixture owner must publish bounded baseline commands through the actual built Candidate Worker. Reuse hash-verified learning/market read models and the existing unacknowledged 1908-item News evidence generation; rebuild only the obsolete audit-v1 resource with the current audit-v2 producer on a read-only SQLite snapshot. The original DB baseline and 7186-item News projection capture remain untouched.
+
+Freeze source behavior identities (package tree and API/Sync blobs), input file hashes and exact serialized request bytes. Source-unrelated control changes may reuse those inputs. The Python relay and Node adapter derive an additional finite baseline phase from seven ordinary writes, actual bounded market batches, News prepare/stage/activate and eight actual readbacks. This changes the declared disposable scenario, not production quotas or general execution limits. Validate every Worker identity/status and use the existing Sync News acknowledgement validator against actual returned bodies. Never insert rows directly or synthesize an ACK. Publication failure stops before business startup and the existing relay owner closes D1 and its process. A new disposable run repeats real publication into its fresh D1, preserving prior journals; partial publication cannot be accepted. Restart/activation/Observe remain owned by the installed controller after initialization. These are isolated source-backed inputs, not real production or provider approval.
+
+### Daily-brief contract gate ownership
+
+The 5da07f38 Python python-2 job exhausted its unchanged five-minute budget after more than 87 percent of 476 tests. Retained hosted timestamps attribute approximately142seconds to daily_brief, brief_date_discovery and brief_synthesis_source_first, and approximately160seconds to the other completed cases. Move those three existing files into the independent python-daily-brief shard. Preserve every test, the30-second per-case limit, five-minute job budget and all-selected aggregate. Exact-once file ownership and both real runner entrypoints must pass; no runtime state or production behavior changes.
+
+## CPU evidence persistence uses the shared native path boundary
+
+The 64080336 connected run reached CPU qualification receipt publication after
+migration and directed validation, then PS5.1 failed to create the digest-named
+qualification temporary file beyond MAX_PATH. The CPU module retained a second
+atomic writer, so the earlier Control Center persistence repair omitted it.
+Route its mutable JSON publication through Write-ControlCenterJsonAtomic at its
+existing depth 30. Preserve receipt fields, digests, replacement semantics and
+canonical stored paths. Use native paths only at CPU file I/O, including sibling
+plan/provider/ledger readers and ledger append directory creation. No new state,
+lock, authority, retry, expiry or receipt reuse is introduced. The Control Center
+entrypoint loads both modules before any action invokes their functions.
+
+The existing receipt outlier and reuse families now cover short/deep roots under
+PS5.1/PS7; two deep PS5.1 cases fail before repair. Verify actual reads after
+publication, full CPU contract families and the installed connected lifecycle.
+Failure evidence and old qualification files remain intact; a new Candidate
+still has to qualify. Restart and Reverse use the same canonical receipt names.
+
+## Completed CPU evidence has a bounded history projection
+
+The 66bb4bc7 connected run reached completed CPU qualification and persisted its
+receipt, then the Access-preparation history event exceeded 64 KiB. Completed
+cpu_evidence duplicated 372 expected requests and the same 31 reconciliation
+groups twice. In-flight history already referenced the complete request plan;
+apply that identical plan/prefix identity rule to the completed nested payload.
+Before summarizing completed reconciliation groups, verify the qualification
+receipt digest, Worker, Git, run, key and both exact group digests. Preserve all
+other diagnostic/display fields, current executable evidence and original files.
+History uses explicitly named count/digest summaries for the two group arrays;
+they are neither executable qualification nor replacement receipt authority.
+The per-run plan, directed ledger and provider evidence retain raw inputs.
+
+Missing, mismatched or unreadable authority retains the unabridged bounded copy
+and may fail the existing event limit. No event-size increase, old-history rewrite,
+new receipt store, acceptance bypass or provider guarantee is introduced. Existing
+history request-reference tests now cover completed evidence in PS5.1/PS7 and
+wrong receipt digest, altered groups and missing receipt. The two valid completed
+cases failed before correction. Final verification must include the real history
+consumer and complete Access/Switch/Observe path; author review is not independent.
+
+## Transaction and migration gates have separate latency ownership
+
+On fae42780, hosted Windows transaction passed 137/138 cases in 210.09 seconds
+before the five-minute job budget cancelled the final case. Setup consumes the
+remaining job time. The suite mixes Stable/Promote/Reverse ownership with storage
+compatibility and renewable migration evidence. Split the existing contiguous
+contract ranges at that ownership boundary into transaction and
+migration-acceptance shards. Preserve every case, actual PowerShell runtime,
+30-second per-test allowance, five-minute job limit and aggregate required gate.
+The changed-path selector must select both affected groups, and exact-once
+manifest coverage must pass. This is a gate organization repair, not evidence
+that the previously cancelled run passed.
+
+## Evidence canonicalization preserves JSON collection identity
+
+The fae42780 connected retry passed completed-history and isolated Access
+preparation, then directed_worker failed its own behavior-key recomputation.
+The persisted fixture_digests input became an empty object. PowerShell pipeline
+enumeration in the canonicalizer and behavior-input selection collapses empty,
+singleton and nested arrays; the JSON serializer also enumerates root arrays.
+The existing publish/find/reuse behavior-key family now reproduces eight shape
+failures across PS5.1/PS7.
+
+Preserve arrays as a single return value, assign each selected property directly
+instead of collecting conditional pipeline output, and serialize with InputObject.
+Canonicalization still sorts object keys and preserves array order. No receipt,
+index or prior evidence is rewritten; immutable receipt-object digest validation
+keeps its existing shape. New typed inputs receive their actual type-bound key;
+old lossy input cannot be relabeled as new evidence. Wrong keys remain rejected.
+The same owner serves all15 producer adapters, behavior reuse and Free-plan proof
+input digests. Test null, empty, singleton-null, singleton-value, multiple and
+nested collections through actual publish/read/reuse plus the complete evidence
+family and connected finalizer. No promotion authority or gate is relaxed.
+
+## Supersession stops at an unfinished evidence-finalization boundary
+
+The 259603b2 connected run reached installation, retained ACK and migration,
+then discovery rejected a prior EVIDENCE_PENDING node. That prior candidate
+completed only Access preparation before its finalizer failed. It has no
+CANDIDATE_PASSED, PROMOTION_STARTED or STABLE_COMMITTED history. Access acceptance
+is durable partial work; it neither proves full qualification nor authorizes
+restoring a still older candidate through that node.
+
+Keep discovery and its existing transaction lock as the only mutation owner.
+The optional planner reads bounded immutable history; provider ownership must
+still show Stable at 100 percent and no transaction may exist. Each traversed
+edge retains exact identity, ancestry, uniqueness, cycle and depth validation.
+At a matching EVIDENCE_PENDING predecessor, stop optional reuse as unavailable
+instead of traversing past the unfinished finalizer. Reject contradictory whole
+Candidate/Promote/Stable acceptance, wrong validation identity and invalid
+compatibility. Do not apply this exception to FAILED or PASSED predecessors.
+The current head still runs complete fresh qualification; no prior receipt,
+accepted step, source identity, history, traffic or runtime state is rewritten.
+
+Actors include discovery, semantic/Access finalizers, provider inspection,
+installer, watchdog, history writer and operator release actions. A crash after
+persisting EVIDENCE_PENDING remains non-promotable and readable by old/new
+controllers; later discovery may qualify a distinct exact candidate without
+restoring old work. Restart repeats the bounded read, with one diagnostic per
+head/main/reason. Provider uncertainty and existing production ownership checks
+remain fail closed. Reverse Stable and the business runtime are untouched.
+No new durable state, lock, receipt, expiry or cleanup owner is introduced.
+
+Execute the existing planner and actual discovery/fresh-validation families in
+PS5.1 and PS7, including Access-only partial acceptance, whole acceptance,
+identity mismatch and a qualified older node that must not be restored. Reuse
+the preserved real history in a read-only actual planner rehearsal. Then run the
+complete connected recovery with current exact source and original frozen input.
+This is author verification; independent review remains required.
+
+Execution matrix: real powershell.exe 5.1 and pwsh.exe load the actual
+CodeRevision entrypoint, then Discovery -> Find-NewCandidateRelease -> Restore
+-> bounded planner. Tests use isolated runtime/repository roots and the actual
+parameter binding/import chain. The existing caller contract executes discovery
+twice, verifies one fresh validation, zero pointer changes, no copied CPU evidence,
+one diagnostic and no transaction. The complete supersession family passes61
+cases in58.18s; four added Stable/migration rejection cases plus CI ownership
+pass17 in12.58s. Read-only planning against the preserved actual state/history
+returns REUSE_UNAVAILABLE at depth1 with both file hashes unchanged. Architecture
+check passes. Actual source review confirms only the pending-boundary call omits
+partial Access from the whole-acceptance test; failed-chain callers retain all
+previous accepted-event rejection rules. Full connected acceptance is pending.

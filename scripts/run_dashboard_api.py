@@ -94,6 +94,12 @@ from xauusd_forecaster.news_projection import (
     NEWS_PROJECTION_CONTRACT_VERSION,
     NEWS_PROJECTION_MAX_ITEMS,
     NewsProjectionGeneration,
+    NewsProjectionRetainedGeneration,
+    NewsProjectionSourceCapture,
+    NewsSourceCapturePage,
+    NEWS_SOURCE_CAPTURE_PAGE_ITEMS,
+    news_source_capture_record,
+    news_projection_capture_rss as _news_projection_capture_rss,
     build_news_projection_generation,
     receipt_digest,
 )
@@ -201,7 +207,8 @@ def _news_reader_rows(
     after: str | None = None,
     limit: int = 200,
     candidate_keys: list[tuple[str, str, int, str]] | None = None,
-) -> list[sqlite3.Row]:
+    stream: bool = False,
+) -> list[sqlite3.Row] | sqlite3.Cursor:
     """Read one bounded page from the canonical 60-day reader archive."""
     cutoff = (now - timedelta(days=NEWS_READER_WINDOW_DAYS)).isoformat(
         timespec="microseconds"
@@ -216,10 +223,41 @@ def _news_reader_rows(
     candidate_parameters = tuple(
         value for key in candidate_keys for value in key
     )
-    return connection.execute(
+    cursor = connection.execute(
         f"""WITH candidate_changes(
               source,source_item_id,revision_number,mirror_updated_at
-            ) AS (VALUES {candidate_clause})
+            ) AS (VALUES {candidate_clause}),
+            candidate_identity AS MATERIALIZED (
+              SELECT candidate.source,candidate.source_item_id,
+                     candidate.revision_number,candidate.content_hash
+              FROM candidate_changes keys
+              JOIN news_revisions candidate
+                ON candidate.source=keys.source
+               AND candidate.source_item_id=keys.source_item_id
+               AND candidate.revision_number=keys.revision_number
+            ),
+            candidate_title_translations AS MATERIALIZED (
+              SELECT translation_id,source,source_item_id,revision_number,
+                     headline_zh,parsed_at
+              FROM news_title_translations
+              WHERE (source,source_item_id,revision_number) IN (
+                SELECT source,source_item_id,revision_number FROM candidate_changes)
+            ),
+            candidate_content_peers AS MATERIALIZED (
+              SELECT possible_peer.source,possible_peer.source_item_id,
+                     possible_peer.content_hash
+              FROM news_revisions possible_peer
+              WHERE (possible_peer.content_hash IN (
+                       SELECT content_hash FROM candidate_identity)
+                  OR possible_peer.source_item_id IN (
+                       SELECT source_item_id FROM candidate_identity))
+                AND length(trim(COALESCE(possible_peer.body,'')))>=240
+                AND NOT EXISTS (
+                  SELECT 1 FROM news_revisions peer_revision
+                  WHERE peer_revision.source=possible_peer.source
+                    AND peer_revision.source_item_id=possible_peer.source_item_id
+                    AND peer_revision.revision_number>possible_peer.revision_number)
+            )
             SELECT n.source, n.source_item_id, n.revision_number,
                    n.cluster_id, n.source_published_time,
                    n.collector_first_seen_time, n.fetched_time,
@@ -245,19 +283,12 @@ def _news_reader_rows(
                        AND checkpoint.prompt_version=?
                    ) AS has_display_checkpoint,
                    EXISTS (
-                     SELECT 1 FROM news_revisions same_content
+                     SELECT 1 FROM candidate_content_peers same_content
                      WHERE (same_content.content_hash=n.content_hash
                          OR (same_content.source<>n.source
                            AND same_content.source_item_id=n.source_item_id))
                        AND (same_content.source<>n.source
                          OR same_content.source_item_id<>n.source_item_id)
-                       AND length(trim(COALESCE(same_content.body,'')))>=240
-                       AND NOT EXISTS (
-                         SELECT 1 FROM news_revisions same_content_newer
-                         WHERE same_content_newer.source=same_content.source
-                           AND same_content_newer.source_item_id=same_content.source_item_id
-                           AND same_content_newer.revision_number>
-                               same_content.revision_number)
                    ) AS has_canonical_content_peer,
                    json_extract(a.annotation_json, '$.summary_zh') AS summary_zh,
                    json_extract(a.annotation_json, '$.primary_category') AS primary_category,
@@ -313,7 +344,7 @@ def _news_reader_rows(
              AND n.source_item_id=candidate_changes.source_item_id
              AND n.revision_number=candidate_changes.revision_number
             LEFT JOIN news_title_translations t ON t.translation_id=(
-              SELECT latest_t.translation_id FROM news_title_translations latest_t
+              SELECT latest_t.translation_id FROM candidate_title_translations latest_t
               WHERE latest_t.source=n.source
                 AND latest_t.source_item_id=n.source_item_id
                 AND latest_t.revision_number=n.revision_number
@@ -391,7 +422,8 @@ def _news_reader_rows(
             HANDOVER_IMPACT_PROMPT_VERSION, IMPACT_PROMPT_VERSION,
             PROMPT_VERSION, cutoff, limit,
         ),
-    ).fetchall()
+    )
+    return cursor if stream else cursor.fetchall()
 
 
 def _serialize_news_rows(
@@ -604,6 +636,127 @@ def _build_news_projection_source_from_database(
         connection.close()
 
 
+def _news_projection_snapshot_stat(database: Path) -> dict:
+    """Change detection for an already-owned frozen input, not its provenance."""
+    database = database.resolve(strict=True)
+    source = database.stat()
+    wal = database.with_name(database.name + "-wal")
+    wal_stat = wal.stat() if wal.exists() else None
+    return {
+        "path": str(database), "size": source.st_size,
+        "mtime_ns": source.st_mtime_ns,
+        "wal_size": wal_stat.st_size if wal_stat else 0,
+        "wal_mtime_ns": wal_stat.st_mtime_ns if wal_stat else None,
+    }
+
+
+def _advance_news_projection_capture(
+    database: Path, capture: NewsProjectionSourceCapture,
+) -> dict:
+    """Advance one immutable source page; no HTTP, generation or D1 admission."""
+    def reader(state: dict) -> NewsSourceCapturePage:
+        identity = state["identity"]
+        expected_stat = identity["binding"].get("snapshot_stat")
+        if expected_stat != _news_projection_snapshot_stat(database):
+            raise ValueError("NEWS_SOURCE_CAPTURE_SNAPSHOT_MISMATCH")
+        if expected_stat["wal_size"] != 0:
+            raise ValueError("NEWS_SOURCE_CAPTURE_CHECKPOINTED_SNAPSHOT_REQUIRED")
+        now = datetime.fromisoformat(identity["watermark"])
+        started = time.monotonic()
+        vm_steps = 0
+        metrics = {"vm_steps": 0, "sampled_rss_max_bytes": _news_projection_capture_rss()}
+        if metrics["sampled_rss_max_bytes"] > 512 * 1024 * 1024:
+            raise ValueError("NEWS_SOURCE_CAPTURE_MEMORY_BOUND")
+
+        def within_sql_budget() -> int:
+            nonlocal vm_steps
+            vm_steps += 1_000
+            metrics["vm_steps"] = vm_steps
+            if vm_steps % 1_000_000 == 0:
+                metrics["sampled_rss_max_bytes"] = max(
+                    metrics["sampled_rss_max_bytes"], _news_projection_capture_rss(),
+                )
+            return int(
+                vm_steps > 40_000_000 or time.monotonic() - started > 15
+                or metrics["sampled_rss_max_bytes"] > 512 * 1024 * 1024
+            )
+
+        # The producer must have completed this owned snapshot's backup and
+        # checkpoint. immutable=1 must never conceal a nonempty WAL.
+        connection = sqlite3.connect(
+            database.resolve().as_uri() + "?mode=ro&immutable=1", uri=True, timeout=1,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 2 * 1024 * 1024)
+        connection.set_progress_handler(within_sql_budget, 1_000)
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("PRAGMA cache_size=-8192")
+            connection.execute("BEGIN")
+            epoch = connection.execute(
+                "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
+            ).fetchone()
+            if epoch is None or str(epoch[0]) != identity["epoch"]:
+                raise ValueError("NEWS_SOURCE_CAPTURE_EPOCH_MISMATCH")
+            keys = _news_mirror_candidate_keys(
+                connection, cutoff=datetime.fromisoformat(identity["window_start"]).isoformat(timespec="microseconds"),
+                after=json.dumps(state["cursor"]) if state["cursor"] is not None else None,
+                limit=NEWS_SOURCE_CAPTURE_PAGE_ITEMS + 1,
+            )
+            page_keys = keys[:NEWS_SOURCE_CAPTURE_PAGE_ITEMS]
+            claimable = {
+                (str(row["source"]), str(row["source_item_id"]), int(row["revision_number"]))
+                for row in pending_annotation_records(
+                    connection, observed_at=now,
+                    received_from=datetime.fromisoformat(identity["window_start"]),
+                    limit=NEWS_SOURCE_CAPTURE_PAGE_ITEMS,
+                    source_keys=tuple((source, item, revision) for source, item, revision, _ in page_keys),
+                    identity_only=True,
+                )
+            }
+            rows = _news_reader_rows(
+                connection, now, limit=len(page_keys), candidate_keys=page_keys,
+                stream=True,
+            )
+        except BaseException:
+            connection.close()
+            raise
+
+        def records():
+            try:
+                position = 0
+                for row in rows:
+                    metrics["sampled_rss_max_bytes"] = max(
+                        metrics["sampled_rss_max_bytes"], _news_projection_capture_rss(),
+                    )
+                    if metrics["sampled_rss_max_bytes"] > 512 * 1024 * 1024:
+                        raise ValueError("NEWS_SOURCE_CAPTURE_MEMORY_BOUND")
+                    if time.monotonic() - started > 15:
+                        raise ValueError("NEWS_SOURCE_CAPTURE_STEP_TIME_BOUND")
+                    if position >= len(page_keys):
+                        raise ValueError("NEWS_SOURCE_CAPTURE_DUPLICATE_ROW")
+                    source, item, revision, changed = page_keys[position]
+                    cursor = [changed, source, item, revision]
+                    if (row["source"], row["source_item_id"], row["revision_number"], row["mirror_updated_at"]) != (source, item, revision, changed):
+                        raise ValueError("NEWS_SOURCE_CAPTURE_ROW_MEMBERSHIP_MISMATCH")
+                    serialized = _serialize_news_rows([row], now, identity["epoch"], claimable)
+                    if len(serialized) != 1:
+                        raise ValueError("NEWS_SOURCE_CAPTURE_MISSING_ROW")
+                    position += 1
+                    yield news_source_capture_record(serialized[0], cursor)
+                if position != len(page_keys):
+                    raise ValueError("NEWS_SOURCE_CAPTURE_MISSING_ROW")
+            finally:
+                connection.close()
+                metrics["source_step_seconds"] = time.monotonic() - started
+                if expected_stat != _news_projection_snapshot_stat(database):
+                    raise ValueError("NEWS_SOURCE_CAPTURE_SNAPSHOT_MISMATCH")
+
+        return NewsSourceCapturePage(iter(records()), len(keys) > len(page_keys), metrics)
+
+    return capture.advance(reader)
+
+
 def _news_projection_generation_path(database: Path) -> Path:
     return database.parent / NEWS_PROJECTION_GENERATION_FILE
 
@@ -673,8 +826,8 @@ def _news_projection_generation_from_payload(
 
 
 def _read_news_projection_generation_artifact(
-    path: Path,
-) -> NewsProjectionGeneration | None:
+    path: Path, *, expected_target: dict | None = None,
+) -> NewsProjectionGeneration | NewsProjectionRetainedGeneration | None:
     if not path.exists():
         return None
     with gzip.open(path, "rt", encoding="utf-8") as handle:
@@ -682,11 +835,17 @@ def _read_news_projection_generation_artifact(
     if not isinstance(envelope, dict) or envelope.get("schema_version") != 1:
         raise ValueError("persisted news generation envelope is invalid")
     payload = envelope.get("generation")
+    retained = isinstance(payload, dict) and payload.get("storage") == "retained-source-plan-v1"
+    digest_input = {"generation": payload, "target": envelope.get("target")} if retained else payload
     if (
         not isinstance(payload, dict)
-        or envelope.get("sha256") != _news_projection_payload_digest(payload)
+        or envelope.get("sha256") != _news_projection_payload_digest(digest_input)
     ):
         raise ValueError("persisted news generation digest is invalid")
+    if payload.get("storage") == "retained-source-plan-v1":
+        if not expected_target or envelope.get("target") != expected_target:
+            raise ValueError("NEWS_SOURCE_CAPTURE_ARTIFACT_TARGET_MISMATCH")
+        return NewsProjectionRetainedGeneration.from_artifact_payload(path, payload, target=expected_target)
     return _news_projection_generation_from_payload(payload)
 
 
@@ -699,15 +858,25 @@ def _read_persisted_news_projection_generation(
 
 
 def _write_news_projection_generation_artifact(
-    path: Path, generation: NewsProjectionGeneration,
+    path: Path, generation: NewsProjectionGeneration | NewsProjectionRetainedGeneration,
+    *, target: dict | None = None,
 ) -> None:
+    if isinstance(generation, NewsProjectionRetainedGeneration) and not target:
+        raise ValueError("NEWS_SOURCE_CAPTURE_ARTIFACT_TARGET_REQUIRED")
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = _news_projection_generation_payload(generation)
+    payload = (
+        generation.artifact_payload(path)
+        if isinstance(generation, NewsProjectionRetainedGeneration)
+        else _news_projection_generation_payload(generation)
+    )
     envelope = {
         "schema_version": 1,
         "sha256": _news_projection_payload_digest(payload),
         "generation": payload,
     }
+    if isinstance(generation, NewsProjectionRetainedGeneration):
+        envelope["target"] = target
+        envelope["sha256"] = _news_projection_payload_digest({"generation": payload, "target": target})
     temporary = path.with_suffix(path.suffix + ".tmp")
     with gzip.open(temporary, "wt", encoding="utf-8", newline="") as handle:
         json.dump(
@@ -798,38 +967,16 @@ def _news_projection_source_for_request(
 
 
 def _news_projection_batch(
-    generation: NewsProjectionGeneration, kind: str, offset: int,
+    generation: NewsProjectionGeneration | NewsProjectionRetainedGeneration,
+    kind: str, offset: int,
 ) -> dict:
-    batches = (
-        generation.detail_batches if kind == "detail"
-        else generation.index_batches if kind == "index"
-        else None
-    )
-    if batches is None or offset < 0:
-        raise ValueError("invalid news projection batch request")
-    next_offset = 0
-    for batch in batches:
-        if next_offset == offset:
-            items = list(batch)
-            return {
-                "generation_id": generation.manifest["generation_id"],
-                "snapshot_id": generation.manifest["snapshot_id"],
-                "kind": kind,
-                "offset": offset,
-                "items": items,
-                "next_offset": offset + len(items),
-            }
-        next_offset += len(batch)
-    expected = generation.manifest[
-        "expected_detail_count" if kind == "detail" else "expected_index_count"
-    ]
-    if offset == expected:
-        return {
-            "generation_id": generation.manifest["generation_id"],
-            "snapshot_id": generation.manifest["snapshot_id"],
-            "kind": kind, "offset": offset, "items": [], "next_offset": offset,
-        }
-    raise ValueError("news projection offset is not a frozen batch boundary")
+    items = generation.batch_items(kind, offset)
+    return {
+        "generation_id": generation.manifest["generation_id"],
+        "snapshot_id": generation.manifest["snapshot_id"],
+        "kind": kind, "offset": offset, "items": items,
+        "next_offset": offset + len(items),
+    }
 
 
 

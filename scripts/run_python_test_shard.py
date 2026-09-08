@@ -39,7 +39,7 @@ def main() -> int:
         sys.executable,
         "-m",
         "pytest",
-        "-q",
+        "-vv",
         "--timeout=30",
         "--timeout-method=thread",
         "--durations=30",

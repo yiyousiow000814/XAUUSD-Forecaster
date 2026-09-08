@@ -59,7 +59,7 @@ On Windows, use the control center to start the Collector, Annotator, Dashboard
 API, and synchronizer:
 
 ```powershell
-powershell -File scripts/xauusd_control_center.ps1
+powershell -File scripts/run_main_services.ps1 -Action StatusJson
 ```
 
 Run the test suite:

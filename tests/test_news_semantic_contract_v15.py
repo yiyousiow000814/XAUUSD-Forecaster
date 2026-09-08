@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+import sqlite3
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -454,6 +455,131 @@ def test_previous_v16_and_active_v17_annotations_coexist(tmp_path) -> None:
     )
     assert [row["annotation_id"] for row in target_impacts] == ["target"]
     ledger.close()
+
+
+@pytest.mark.parametrize("selection_order", ("default", "receipt_desc"))
+@pytest.mark.parametrize("discovery_only", (False, True))
+def test_pending_annotation_identity_projection_preserves_scoped_eligibility(
+    tmp_path, selection_order, discovery_only,
+) -> None:
+    from xauusd_forecaster.news_scheduler import enqueue_job
+
+    now = datetime(2026, 8, 11, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "scoped-annotation.sqlite3", now=now)
+    try:
+        for index in range(7):
+            instant = now + timedelta(minutes=index)
+            body = f"Complete macro source evidence {index}. " * (1 if index == 6 else 20)
+            ledger.append_news_revision({
+                "source": "scoped-test", "source_item_id": f"item-{index}",
+                "source_published_time": instant,
+                "collector_first_seen_time": instant, "fetched_time": instant,
+                "headline": "Source report", "body": body,
+                "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+                "cluster_id": f"item-{index}",
+            })
+        enqueue_job(
+            ledger.connection, task_type="ACTIVE_ANNOTATION", source="scoped-test",
+            source_item_id="item-0", revision_number=1,
+            prompt_version=CURRENT_NEWS_PROMPT_VERSION, priority="NORMAL", now=now,
+        )
+        options = {
+            "observed_at": now + timedelta(hours=1),
+            "selection_order": selection_order,
+            "discovery_only": discovery_only,
+        }
+        fields = {
+            "source", "source_item_id", "revision_number",
+            "source_published_time", "collector_first_seen_time",
+        }
+        unscoped = pending_annotation_records(ledger.connection, **options)
+        assert len(unscoped) == (5 if discovery_only else 6)
+        assert all("body" in row for row in unscoped)
+        assert pending_annotation_records(
+            ledger.connection, identity_only=True, **options,
+        ) == [{key: row[key] for key in fields} for row in unscoped]
+        assert pending_annotation_records(
+            ledger.connection, limit=1, **options,
+        )[0]["source_item_id"] == "item-5"
+
+        # Both selected eligible identities are beyond the global LIMIT prefix.
+        # Wrong source/revision and an unreadable body must remain ineligible.
+        keys = (
+            ("scoped-test", "item-0", 1), ("scoped-test", "item-1", 1),
+            ("wrong-source", "item-2", 1), ("scoped-test", "item-3", 2),
+            ("scoped-test", "item-6", 1),
+        )
+        full = pending_annotation_records(
+            ledger.connection, source_keys=keys, limit=2, **options,
+        )
+        identities = pending_annotation_records(
+            ledger.connection, source_keys=keys, identity_only=True, limit=2, **options,
+        )
+        assert identities == [{key: row[key] for key in fields} for row in full]
+        assert [row["source_item_id"] for row in full] == (
+            ["item-1"] if discovery_only else ["item-1", "item-0"]
+        )
+        assert pending_annotation_records(
+            ledger.connection, source_keys=keys, identity_only=True, limit=1, **options,
+        ) == identities[:1]
+        # The inclusive 128-key bound is usable, without coercing absent keys.
+        bound_keys = (("scoped-test", "item-1", 1),) + tuple(
+            ("scoped-test", f"absent-{index}", 1) for index in range(127)
+        )
+        assert pending_annotation_records(
+            ledger.connection, source_keys=bound_keys, identity_only=True, **options,
+        ) == identities[:1]
+        # Ordinary claim resolution still sees queued jobs when discovery is off.
+        assert pending_annotation_records(
+            ledger.connection, source_keys=(("scoped-test", "item-0", 1),),
+            observed_at=now + timedelta(hours=1),
+        )[0]["body"].startswith("Complete macro source evidence 0.")
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize(("source_keys", "reason"), (
+    pytest.param((), None, id="empty-no-database-access"),
+    pytest.param([], "at most 128 exact tuples", id="outer-not-tuple"),
+    pytest.param(("source", "item", 1), "exact identity", id="not-nested"),
+    pytest.param((("source", "item"),), "exact identity", id="missing-revision"),
+    pytest.param((["source", "item", 1],), "exact identity", id="key-not-tuple"),
+    pytest.param(((" ", "item", 1),), "exact identity", id="blank-source"),
+    pytest.param((("source", "", 1),), "exact identity", id="blank-item"),
+    pytest.param((("source", "item", 0),), "exact identity", id="zero-revision"),
+    pytest.param((("source", "item", True),), "exact identity", id="boolean-revision"),
+    pytest.param((("source", "item", "1"),), "exact identity", id="coerced-revision"),
+    pytest.param((("source", "item", 2**63),), "exact identity", id="sqlite-overflow"),
+    pytest.param((("source", "item", 1),) * 2, "must be unique", id="duplicate"),
+    pytest.param(
+        tuple(("source", str(index), 1) for index in range(129)),
+        "at most 128 exact tuples", id="over-bound",
+    ),
+))
+def test_pending_annotation_source_key_validation_precedes_database_access(
+    source_keys, reason,
+) -> None:
+    class NoDatabaseAccess(sqlite3.Connection):
+        def execute(self, *args, **kwargs):
+            raise AssertionError("unexpected SQL before source-key validation")
+
+        def create_function(self, *args, **kwargs):
+            raise AssertionError("unexpected UDF registration before validation")
+
+    connection = sqlite3.connect(":memory:", factory=NoDatabaseAccess)
+    try:
+        for identity_only in (False, True):
+            if reason is None:
+                assert pending_annotation_records(
+                    connection, source_keys=source_keys, identity_only=identity_only,
+                ) == []
+            else:
+                with pytest.raises(ValueError, match=reason):
+                    pending_annotation_records(
+                        connection, source_keys=source_keys, identity_only=identity_only,
+                    )
+    finally:
+        connection.close()
 
 
 def test_active_annotation_requires_independent_impact_before_model_visibility(tmp_path) -> None:
