@@ -168,7 +168,7 @@ async function pagedRecords(binding: D1Database, url: URL) {
   const pageIdentityClause = identity
     ? "AND json_extract(lr.payload,'$.model_identity')=?" : "";
   const positionClause = cursor
-    ? "AND (lr.sort_epoch<? OR (lr.sort_epoch=? AND lr.record_key<?))" : "";
+    ? "AND (lr.sort_epoch,lr.record_key)<(?,?)" : "";
   const totalIdentity = identity || "";
   const values: unknown[] = [resource, totalIdentity];
   const watermarkSql = cursor
@@ -185,7 +185,7 @@ async function pagedRecords(binding: D1Database, url: URL) {
   values.push(resource);
   if (identity) values.push(identity);
   if (cursor) values.push(
-    cursor.positionEpoch, cursor.positionEpoch, cursor.positionKey,
+    cursor.positionEpoch, cursor.positionKey,
   );
   values.push(limit + 1);
   const result = await binding.prepare(
@@ -198,8 +198,7 @@ async function pagedRecords(binding: D1Database, url: URL) {
        SELECT lr.sort_epoch,lr.record_key,lr.payload
        FROM learning_records lr,watermark
        WHERE lr.resource=? ${pageIdentityClause}
-         AND (lr.sort_epoch<watermark.sort_epoch
-          OR (lr.sort_epoch=watermark.sort_epoch AND lr.record_key<=watermark.record_key))
+         AND (lr.sort_epoch,lr.record_key)<=(watermark.sort_epoch,watermark.record_key)
          ${positionClause}
        ORDER BY lr.sort_epoch DESC,lr.record_key DESC LIMIT ?
      ), candidates AS (

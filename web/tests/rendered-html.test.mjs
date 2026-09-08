@@ -1937,7 +1937,7 @@ test("stores growing learning history as bounded idempotent D1 records", () => {
   assert.match(route, /next_cursor/);
   assert.match(route, /type LearningCursor/);
   assert.match(route, /watermarkEpoch/);
-  assert.match(route, /sort_epoch<watermark\.sort_epoch/);
+  assert.match(route, /\(lr\.sort_epoch,lr\.record_key\)<=\(watermark\.sort_epoch,watermark\.record_key\)/);
   assert.match(route, /FROM learning_record_counts/);
   assert.match(route, /ORDER BY lr\.sort_epoch DESC,lr\.record_key DESC LIMIT \?/);
   assert.doesNotMatch(route, /SELECT count\(\*\) FROM base/);
