@@ -293,12 +293,12 @@ def _dashboard_payload(
                       (SELECT p.recommended_action FROM predictions_v2 p
                        JOIN model_updates_v2 u USING(model_version)
                        WHERE p.source_decision_id=d.decision_id
-                         AND p.model_identity='BROAD_FULL'
+                         AND +p.model_identity='BROAD_FULL'
                        ORDER BY u.created_at DESC LIMIT 1) AS research_action,
                       (SELECT p.prediction_status FROM predictions_v2 p
                        JOIN model_updates_v2 u USING(model_version)
                        WHERE p.source_decision_id=d.decision_id
-                         AND p.model_identity='BROAD_FULL'
+                         AND +p.model_identity='BROAD_FULL'
                        ORDER BY u.created_at DESC LIMIT 1) AS research_status
                FROM decision_events d
                JOIN market_snapshots s USING(snapshot_id)

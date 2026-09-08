@@ -780,6 +780,9 @@ CREATE INDEX IF NOT EXISTS derived_outcome_time_v2
 ON derived_outcomes(decision_time, evidence_lane, outcome_status);
 CREATE INDEX IF NOT EXISTS prediction_v2_time
 ON predictions_v2(model_identity, decision_time);
+
+CREATE INDEX IF NOT EXISTS prediction_v2_version_time
+ON predictions_v2(model_version, decision_time);
 CREATE INDEX IF NOT EXISTS news_visibility_event_v1
 ON news_model_visibility_receipts_v1(event_key, decision_time);
 CREATE INDEX IF NOT EXISTS news_visibility_decision_v1

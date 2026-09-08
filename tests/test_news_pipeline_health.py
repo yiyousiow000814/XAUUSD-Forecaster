@@ -23,6 +23,26 @@ from xauusd_forecaster.news_scheduler import (
 )
 
 
+def test_impact_health_joins_jobs_by_annotation_identity(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "health.sqlite3")
+    try:
+        captured = []
+        ledger.connection.set_trace_callback(captured.append)
+        try:
+            news_pipeline_health._current_actionable_impact_rows(
+                ledger, observed_at=datetime.now(UTC),
+            )
+        finally:
+            ledger.connection.set_trace_callback(None)
+        query = next(sql for sql in captured if "LEFT JOIN news_ai_jobs_v1 j" in sql)
+        plan = ledger.connection.execute("EXPLAIN QUERY PLAN " + query).fetchall()
+        job_lookups = [str(row[3]) for row in plan if "SEARCH j " in str(row[3])]
+        assert job_lookups
+        assert all("annotation_id=?" in detail for detail in job_lookups)
+    finally:
+        ledger.close()
+
+
 def _heartbeat(ledger: ForwardLedger, at: datetime) -> None:
     (ledger.path.parent / "news-annotator-status.json").write_text(
         json.dumps({

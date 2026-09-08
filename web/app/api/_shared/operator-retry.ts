@@ -344,9 +344,7 @@ export async function syncOperatorRetryJobs(
      WHERE NOT EXISTS (SELECT 1 FROM changed)
        AND job_id IN (
          SELECT current.job_id FROM operator_retry_jobs current
-         WHERE NOT EXISTS (
-           SELECT 1 FROM incoming WHERE incoming.job_id=current.job_id
-         )
+         WHERE current.job_id NOT IN (SELECT incoming.job_id FROM incoming)
          ORDER BY current.job_id
          LIMIT ${OPERATOR_RETRY_SYNC_MUTATIONS_PER_INVOCATION}
        )`,
@@ -363,9 +361,8 @@ export async function syncOperatorRetryJobs(
          )
          AND NOT EXISTS (
            SELECT 1 FROM operator_retry_jobs current
-           WHERE NOT EXISTS (
-             SELECT 1 FROM json_each(?) incoming
-             WHERE json_extract(incoming.value,'$.job_id')=current.job_id
+           WHERE current.job_id NOT IN (
+             SELECT json_extract(incoming.value,'$.job_id') FROM json_each(?) incoming
            )
          )
        ON CONFLICT(id) DO UPDATE SET

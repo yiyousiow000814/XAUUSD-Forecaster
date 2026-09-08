@@ -114,6 +114,22 @@ test("machine lease completion is bounded and public reads contain no secrets", 
 
 test("a changed mirror updates only changed jobs and exact replay writes zero", async () => {
   const database = new D1TestDatabase(retryMigrations);
+  const batch = database.batch.bind(database);
+  database.batch = async statements => {
+    for (const statement of statements) {
+      const plan = database.database.prepare(`EXPLAIN QUERY PLAN ${statement.sql}`)
+        .all(...statement.bindings);
+      // JSON membership must be built once, never scanned for every stored job.
+      for (const row of plan.filter(row => /VIRTUAL TABLE/.test(row.detail))) {
+        let parent = plan.find(node => node.id === row.parent);
+        while (parent) {
+          assert.doesNotMatch(parent.detail, /CORRELATED/);
+          parent = plan.find(node => node.id === parent.parent);
+        }
+      }
+    }
+    return batch(statements);
+  };
   const source = Array.from({ length: 200 }, (_, index) => ({
     ...job((index % 10).toString()),
     job_id: index.toString(16).padStart(64, "0"),
