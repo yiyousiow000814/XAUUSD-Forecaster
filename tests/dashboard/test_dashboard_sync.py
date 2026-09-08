@@ -3473,3 +3473,35 @@ def test_operator_retry_worker_urls_keep_human_and_machine_planes_separate() -> 
     assert module._local_retry_url(config, "/api/retry-jobs") == (
         "http://127.0.0.1:8765/api/retry-jobs"
     )
+
+
+@pytest.mark.parametrize("state,failed", [("REPLAYING", False), ("CURRENT", False), ("REPLAYING", True)])
+def test_news_replay_immediate_resume_only_after_success(tmp_path, monkeypatch, state, failed):
+    module = _sync_module()
+    schedule = tmp_path / "schedule.json"
+    news = tmp_path / "news.json"
+    _schedule_only(module, schedule, "news")
+    target = {"name": "cloudflare", "resource_schedule_state_file": str(schedule),
+              "news_state_file": str(news), module.RUNTIME_STATE_ROOT_KEY: str(tmp_path)}
+    news.write_text(json.dumps({"projection_state": state}), encoding="utf-8")
+    def advance(_payload, _target):
+        if failed:
+            raise urllib.error.HTTPError("https://worker/api/news-index", 429, "limited", {}, None)
+    monkeypatch.setattr(module, "_sync_news", advance)
+    before = datetime.now(timezone.utc)
+    result = module.sync_resource_lane([target], lane="heavy")
+    recorded = json.loads(schedule.read_text(encoding="utf-8"))["resources"]["news"]
+    attempted = datetime.fromisoformat(recorded["last_attempt_at"])
+    due = datetime.fromisoformat(recorded["next_run_at"])
+    assert attempted >= before
+    if state == "REPLAYING" and not failed:
+        assert due == attempted
+        assert not result
+        assert module._due_resource_policies(json.loads(schedule.read_text()), attempted, lane="heavy")[0][0] == "news"
+        # A different overdue resource runs first; repeated replay does not starve it.
+        scheduled = json.loads(schedule.read_text())
+        scheduled["resources"]["audit"] = {"next_run_at": before.isoformat()}
+        assert module._due_resource_policies(scheduled, attempted, lane="heavy")[0][0] == "audit"
+    else:
+        assert due > attempted
+        assert bool(result) is failed

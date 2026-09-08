@@ -406,6 +406,13 @@ def sync_resource_lane(
                 _persist_resource_schedule_result(
                     schedule_path, target, resource, cadence_seconds,
                     now=completed_at, success=True,
+                    pending=(
+                        resource == "news"
+                        and bool(target.get("news_state_file"))
+                        and _read_news_sync_state(Path(target["news_state_file"])).get(
+                            "projection_state"
+                        ) == "REPLAYING"
+                    ),
                 )
                 observations.append({
                     "target": target_name,
