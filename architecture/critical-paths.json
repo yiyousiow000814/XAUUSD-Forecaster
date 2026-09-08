@@ -82,6 +82,13 @@
         "reason": "The import checker reuses the existing Python AST parse and source admission boundary.",
         "remove_when": "The owning source checker is retired or moved together.",
         "binding": "MODULE_REQUEST_ONLY"
+      },
+      {
+        "source": "scripts/publish_single_version.py",
+        "target": "scripts/check_public_health.py",
+        "reason": "The maintenance entry reuses the existing public business health probe.",
+        "remove_when": "The probe and both CLI consumers move together to a package owner.",
+        "binding": "MODULE_REQUEST_ONLY"
       }
     ],
     "legacy_shims": []

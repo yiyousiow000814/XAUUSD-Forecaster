@@ -312,11 +312,15 @@ typos.
   especially when passing field flags that would otherwise imply a write.
 - Follow `docs/contracts/HOSTING_BOUNDARIES.md` and
   `docs/runbooks/CLOUDFLARE_DEPLOYMENT.md`.
-- Git push, pull-request merge, and `main` movement must never change Stable.
-  Cloudflare builds upload immutable Versions only, and Windows may stage and
-  test a newer revision but must not activate it from branch movement. Stable
-  changes only through explicit local Control Center Promote; normal rollback
-  is Reverse Stable. Follow `docs/contracts/RELEASE_CONTROL.md`.
+- Git push, pull-request merge, and `main` movement must never activate
+  production. Cloudflare builds upload immutable Versions only. The replacement
+  publication entry is `scripts/publish_single_version.py`: fixed artifacts,
+  required tests and compatibility, authorized maintenance, single-version
+  native deployment, real business/ACK verification and explicit code recovery.
+  Preserve current authoritative data during recovery. Retain old supervision
+  until validated takeover, then retire its exclusive coordination; old
+  Candidate/Switch/Observe gates do not govern the replacement. Follow
+  `docs/contracts/RELEASE_CONTROL.md`.
 
 ## Preview Discipline
 

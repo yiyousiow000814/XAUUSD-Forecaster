@@ -15,6 +15,33 @@
   ],
   "shards": [
     {
+      "id": "single-publication",
+      "family": "single-active-publication",
+      "paths": [
+        "scripts/main_runtime.ps1",
+        "scripts/apply_single_revision.ps1",
+        "scripts/publish_single_version.py",
+        "scripts/xauusd_single_runtime.ps1",
+        "scripts/xauusd_single_runtime_launcher.vbs",
+        "scripts/windows-service-launch-contract.json",
+        "scripts/check_public_health.py",
+        "tests/test_main_runtime.py",
+        "tests/test_single_publication.py",
+        "tests/test_public_health_check.py"
+      ],
+      "tests": [
+        {
+          "path": "tests/test_main_runtime.py"
+        },
+        {
+          "path": "tests/test_single_publication.py"
+        },
+        {
+          "path": "tests/test_public_health_check.py"
+        }
+      ]
+    },
+    {
       "id": "runtime-core",
       "family": "windows-runtime-core",
       "paths": [

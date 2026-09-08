@@ -1,5 +1,47 @@
 # Cloudflare Deployment Runbook
 
+## Replacement publication (takeover pending)
+
+Use `scripts/publish_single_version.py` for the single-active replacement.
+Existing installed coordination instructions below remain solely for inspecting
+or safely disengaging the old owner. Do not continue Candidate qualification as
+a prerequisite for replacement deployment.
+
+Preparation uses fixed target/recovery identities and an existing reviewed
+compatibility JSON, then `preflight`. The publisher consumes the runtime root,
+configuration repository root, installed controller directory and a new journal.
+Keep configuration ownership at the existing repository; do not point it at a
+new source worktree merely to find a different Wrangler installation. Install
+the source-locked Wrangler version before provider calls. The journal records
+source, tool, native artifact, compatibility and required CI observations.
+
+For takeover, record the actual scheduled-task definitions, supervisor and
+business process identities. Disable the scoped old Autostart and Guard writers
+through the Windows Task Scheduler entry, preserving definitions and status as
+evidence. Do not terminate unowned processes. Stage the source-verified new
+controller in the existing control directory before retiring its old entry.
+The new supervisor initially persists stopped and can adopt exact existing
+service identities; the publisher requests their bounded stop only inside the
+authorized maintenance scope. Enable new supervision and replace the shortcut
+only after isolated runtime tests and required independent review are accepted.
+
+Run `deploy` with `--maintenance-scope` and the reviewed fixed identities. It
+applies the local code and uses `wrangler versions deploy VERSION@100`, then
+checks live Collector, source identity and strict sync ACK while maintenance
+remains durable. An interrupted attempt uses `recover` with the same journal
+and explicit scope. Never restore an old database to make old code appear healthy.
+Do not manually edit a journal or desired state to claim successful recovery.
+
+Workers Builds continues immutable upload without traffic assignment. The
+checked-in v1 build contract remains unchanged for the first admission change;
+after trusted-main policy admits v2 and takeover is verified, configure
+`npm run cf:upload`, which uploads the exact main artifact. Remove old admission
+and coordination instructions during final retirement. CF capacity, news and
+real responsive page acceptance remain separate work.
+
+## Retained installation instructions
+
+
 The hosting architecture is described in
 [`CLOUDFLARE_HOSTING.md`](../design/CLOUDFLARE_HOSTING.md). Run these commands
 from `web/`:

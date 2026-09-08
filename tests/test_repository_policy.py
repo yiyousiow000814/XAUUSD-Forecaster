@@ -153,26 +153,26 @@ def test_current_repository_satisfies_hosting_policy() -> None:
     assert check_repository(root) == []
 
 
-def test_rejects_missing_or_mutable_production_build_contract(tmp_path: Path) -> None:
+def test_rejects_missing_or_wrong_production_build_contract(tmp_path: Path) -> None:
     contract = tmp_path / "web" / "cloudflare-build-contract.json"
     contract.unlink()
-    assert "exact-main immutable Cloudflare production build contract is required" in boundaries(tmp_path)
+    assert "main artifact Cloudflare production build contract is required" in boundaries(tmp_path)
 
     write(
         tmp_path,
         "web/cloudflare-build-contract.json",
-        VALID_BUILD_CONTRACT.replace("versions upload", "deploy"),
+        VALID_BUILD_CONTRACT.replace("npm run cf:upload", "wrangler versions upload"),
     )
     assert (
-        "Cloudflare production build contract drifted from exact-main immutable upload"
+        "Cloudflare production build contract drifted from main artifact upload"
         in boundaries(tmp_path)
     )
 
 
-def test_rejects_direct_production_deploy_package_script(tmp_path: Path) -> None:
+def test_rejects_package_script_bypassing_main_publication_entrypoint(tmp_path: Path) -> None:
     write(
         tmp_path,
         "web/package.json",
         '{"scripts":{"cf:deploy":"npm test && wrangler deploy"}}',
     )
-    assert "direct production wrangler deploy script is forbidden" in boundaries(tmp_path)
+    assert "production package scripts must use the maintenance publication entrypoint" in boundaries(tmp_path)

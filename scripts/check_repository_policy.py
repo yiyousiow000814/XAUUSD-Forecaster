@@ -30,9 +30,9 @@ AUTOMATION_SUFFIXES = {
     ".yml",
 }
 IGNORED_PARTS = {".next", ".open-next", "node_modules", "__pycache__"}
-POLICY_IMPLEMENTATION = Path("scripts/check_repository_policy.py")
-CLOUDFLARE_BUILD_CONTRACT = Path("web/cloudflare-build-contract.json")
-EXPECTED_CLOUDFLARE_BUILD_CONTRACT = {
+# The trusted-main checker must admit the replacement before the live build
+# contract changes. Remove the old exact contract after maintenance takeover.
+TRANSITIONAL_CLOUDFLARE_BUILD_CONTRACT = {
     "schema_version": "cloudflare-production-build-v1",
     "source": {
         "provider": "github",
@@ -52,6 +52,29 @@ EXPECTED_CLOUDFLARE_BUILD_CONTRACT = {
     },
     "output": {
         "artifact_kind": "PRODUCTION_CANDIDATE",
+        "immutable_version_only": True,
+        "changes_stable_traffic": False,
+    },
+    "non_production_builds_enabled": False,
+}
+POLICY_IMPLEMENTATION = Path("scripts/check_repository_policy.py")
+CLOUDFLARE_BUILD_CONTRACT = Path("web/cloudflare-build-contract.json")
+EXPECTED_CLOUDFLARE_BUILD_CONTRACT = {
+    "schema_version": "cloudflare-production-build-v2",
+    "source": {
+        "provider": "github",
+        "repository": "yiyousiow000814/XAUUSD-Forecaster",
+        "production_branch": "main",
+        "root_directory": "/web",
+        "path_includes": ["*"],
+        "path_excludes": [],
+    },
+    "commands": {
+        "build": "npm ci && npm test",
+        "deploy": "npm run cf:upload",
+    },
+    "output": {
+        "artifact_kind": "PRODUCTION_ARTIFACT",
         "immutable_version_only": True,
         "changes_stable_traffic": False,
     },
@@ -211,14 +234,14 @@ def check_repository(root: Path) -> list[PolicyViolation]:
         violations.append(PolicyViolation(
             CLOUDFLARE_BUILD_CONTRACT,
             1,
-            "exact-main immutable Cloudflare production build contract is required",
+            "main artifact Cloudflare production build contract is required",
         ))
     else:
-        if build_contract != EXPECTED_CLOUDFLARE_BUILD_CONTRACT:
+        if build_contract not in (EXPECTED_CLOUDFLARE_BUILD_CONTRACT, TRANSITIONAL_CLOUDFLARE_BUILD_CONTRACT):
             violations.append(PolicyViolation(
                 CLOUDFLARE_BUILD_CONTRACT,
                 1,
-                "Cloudflare production build contract drifted from exact-main immutable upload",
+                "Cloudflare production build contract drifted from main artifact upload",
             ))
 
     package_path = root / "web/package.json"
@@ -232,7 +255,7 @@ def check_repository(root: Path) -> list[PolicyViolation]:
                 violations.append(PolicyViolation(
                     Path("web/package.json"),
                     1,
-                    "direct production wrangler deploy script is forbidden",
+                    "production package scripts must use the maintenance publication entrypoint",
                 ))
                 break
 

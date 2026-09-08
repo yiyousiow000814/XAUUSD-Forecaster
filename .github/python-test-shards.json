@@ -87,7 +87,9 @@
         "tests/test_decision.py",
         "tests/test_named_reference_benchmark.py",
         "tests/test_public_health_check.py",
-        "tests/test_execution_costs.py"
+        "tests/test_execution_costs.py",
+        "tests/test_main_runtime.py",
+        "tests/test_single_publication.py"
       ]
     },
     {

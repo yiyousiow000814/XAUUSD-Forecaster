@@ -1,5 +1,51 @@
 # Release Control Contract
 
+## Single-active publication authority
+
+The owner-approved replacement strategy is one active runtime and one native
+Worker version at 100 percent traffic, updated in a scoped maintenance window.
+`scripts/publish_single_version.py` is the sole replacement publication entry.
+Its `preflight`, `deploy` and `recover` actions share the same existing tools
+and authoritative data. Main movement only prepares source and immutable Worker
+artifacts; it does not activate either production runtime.
+
+Before interruption, bind the exact local source SHA, Worker source SHA and
+native Version ID, required build/security/business checks, current schema and
+data epoch, and compatible recovery identities. Compatibility evidence must
+reference existing hash-verified results. An author's PASS label is not an
+independent review. Unavailable evidence is unaccepted, never inferred.
+
+During maintenance, the publisher owns service start/stop through the existing
+service registry. The supervisor cannot update code and remains passive in
+persisted maintenance. Ordinary operator state writes share the publication
+lock and cannot exit maintenance. A process restart releases the transient lock
+but preserves maintenance, allowing explicit recovery after interruption.
+
+Deploy exactly one fixed native Worker version at 100 percent traffic. Confirm
+actual local/Worker identities, post-maintenance Collector business health,
+data epoch and real strict sync ACK before returning to running. Failure uses
+the explicit compatible code recovery target and repeats business verification.
+Code recovery must never replace current SQLite/D1 data with an older copy.
+Record attempted and completed mutations and failed recovery honestly.
+
+The replacement does not require Candidate discovery, supersession, eligibility
+reuse, Promote, Reverse Stable or NORMAL Switch/Observe qualification. Those
+requirements below describe the retained installed controller only, pending
+validated takeover; they are not prerequisites for the replacement. Before
+activation, inventory and isolate its scheduled tasks and other publication
+writers. Preserve active supervision until the new owner is validated. After
+takeover, retire its exclusive code and tests with a responsibility mapping;
+retained audit history supplies facts but no current release authority.
+
+Assistant remains PAUSED. Collector atomicity, source-first processing, strict
+ACK, authentication, single ownership, Preview isolation and immutable facts
+remain required. Separate capacity, news backlog and page acceptance cannot be
+claimed from publication health. See the implementation and retirement status
+in [SINGLE_ACTIVE_PUBLICATION.md](../plans/SINGLE_ACTIVE_PUBLICATION.md).
+
+## Installed coordination contract pending retirement
+
+
 ## Release identity and authority
 
 A release binds one exact Git SHA, one immutable Cloudflare Worker Version ID,
