@@ -186,6 +186,11 @@ test("partial replacement never displaces the last verified current generation",
   });
   assert.equal(page.generation_id, id("a"));
   assert.equal(page.projection_state, "REPLAYING");
+  assert.equal(page.replacement_progress.next_detail_offset, 1);
+  assert.equal(page.replacement_progress.next_index_offset, 0);
+  assert.equal(page.replacement_progress.expected_detail_count, 1);
+  assert.equal(page.replacement_progress.expected_index_count, 1);
+  assert.equal(page.all_total, 1, "totals still describe the verified serving generation");
   await assert.rejects(
     readNewsProjectionPage(db, {
       page: 2, pageSize: 10, category: "", reviewState: "COMPLETED",

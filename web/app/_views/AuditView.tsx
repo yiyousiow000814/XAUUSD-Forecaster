@@ -484,6 +484,11 @@ type NewsIndexResponse = {
   totals_scope?: NewsTotalsScope;
   projection_state?: "CURRENT" | "RECOVERY_REQUIRED" | "REPLAYING" | "VERIFYING" | "DEGRADED";
   verified_complete?: boolean;
+  activated_at?: string;
+  replacement_progress?: {
+    next_detail_offset: number; expected_detail_count: number;
+    next_index_offset: number; expected_index_count: number;
+  } | null;
   generation_id?: string;
   snapshot_id?: string;
   source_digest?: string;
@@ -1296,7 +1301,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
 
   const archiveTotals = authoritativeNewsTotals(newsIndex);
   const newsProjectionNotice = ({
-    REPLAYING: ["新闻档案正在重播", "当前仍保留上一版可读资料；新代次完成精确核对前，不宣称近60天总量。"],
+    REPLAYING: ["新新闻正在同步", `列表和数量来自 ${time(newsIndex.activated_at)} 启用的已核对快照；新一批完成后自动更新。`],
     VERIFYING: ["新闻档案正在核对", "索引、详情与来源回执正在做最终一致性检查。"],
     RECOVERY_REQUIRED: ["新闻档案需要恢复", "完整性证据不一致，系统已停止发布近60天总量。"],
     DEGRADED: ["新闻档案暂时降级", "当前资料不足以证明完整近60天范围。"],
@@ -1646,10 +1651,15 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         {searchResults.total > searchResults.page_size && <nav className="search-pages" aria-label="搜索结果分页"><button type="button" aria-label="上一页搜索结果" disabled={searchResults.page <= 1 || searchBusy} onClick={() => void runNewsSearch(searchResults.page - 1, searchResults)}>←</button><span>{formatExactCount(searchResults.page)} / {formatExactCount(Math.ceil(searchResults.total / searchResults.page_size))}</span><button type="button" aria-label="下一页搜索结果" disabled={searchResults.page >= Math.ceil(searchResults.total / searchResults.page_size) || searchBusy} onClick={() => void runNewsSearch(searchResults.page + 1, searchResults)}>→</button></nav>}
       </section>}
       {view === "news" && <>
-        {!archiveTotals && newsProjectionNotice && <div
+        {newsProjectionNotice && <div
           className={`current-data-notice ${newsIndex.projection_state === "RECOVERY_REQUIRED" || newsIndex.projection_state === "DEGRADED" ? "is-error" : "is-loading"}`}
           role={newsIndex.projection_state === "RECOVERY_REQUIRED" || newsIndex.projection_state === "DEGRADED" ? "alert" : "status"}
-        ><b>{newsProjectionNotice[0]}</b><span>{newsProjectionNotice[1]}</span></div>}
+        ><b>{newsProjectionNotice[0]}</b><span>{newsProjectionNotice[1]}</span>
+          {newsIndex.projection_state === "REPLAYING" && newsIndex.replacement_progress && <span>
+            正文 {formatExactCount(newsIndex.replacement_progress.next_detail_offset)} / {formatExactCount(newsIndex.replacement_progress.expected_detail_count)}
+            {" · "}目录 {formatExactCount(newsIndex.replacement_progress.next_index_offset)} / {formatExactCount(newsIndex.replacement_progress.expected_index_count)}
+          </span>}
+        </div>}
         <section className="annotation-queue" aria-label="新闻处理进度">
           <span><b><CountValue value={readableNewsTotal} /></b> {readableNewsTotal === null ? "正在读取近60天新闻总量" : "条近60天可读新闻"}</span>
           <span><b><CountValue value={parsedNewsTotal} /></b> 条语义复核完成</span>
