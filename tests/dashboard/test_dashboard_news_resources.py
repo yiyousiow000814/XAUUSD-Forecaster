@@ -351,11 +351,12 @@ def test_news_projection_scans_candidate_universe_once_across_detail_pages(
         context_calls += 1
         return frozen_context
 
-    def candidates(_connection, *, cutoff, after, limit):
+    def candidates(_connection, *, cutoff, after, limit, latest):
         nonlocal candidate_calls
         candidate_calls += 1
         assert after is None
-        assert limit == news_resources.NEWS_PROJECTION_MAX_ITEMS + 1
+        assert limit == news_resources.NEWS_PROJECTION_MAX_ITEMS
+        assert latest is True
         return candidate_keys
 
     def rows(_connection, _now, *, after=None, limit, candidate_keys=None):
@@ -884,3 +885,56 @@ def test_news_evidence_generation_freezes_until_activation_then_tracks_current_s
     assert expired_rows[0]["broad_model_eligible"] is False
     assert expired_rows[0]["freshness_status"] == "EVENT_LIFETIME_EXPIRED"
 
+
+
+def test_news_generation_keeps_latest_window_when_source_grows(tmp_path, monkeypatch):
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "window.sqlite3", now=now)
+    body = "complete rolling news evidence " * 20
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    count = news_resources.NEWS_PROJECTION_MAX_ITEMS + 1
+    ledger.connection.executemany(
+        """INSERT INTO news_revisions VALUES
+           (?,?,1,?,?,?,?,?,?,NULL,?,?,NULL)""",
+        [("bea_economic_releases", f"item-{index:05d}",
+          (now - timedelta(seconds=count-index)).isoformat(),
+          now.isoformat(), now.isoformat(), now.isoformat(),
+          f"headline {index}", body, digest, f"cluster-{index}")
+         for index in range(count)],
+    )
+    ledger.connection.commit()
+    # Exercise real selection and generation wiring without model enrichment.
+    monkeypatch.setattr(news_resources, "_news_archive_context", lambda *_: ("epoch", set()))
+    monkeypatch.setattr(news_resources, "_news_reader_rows", lambda *_, limit, candidate_keys: [
+        {"source": source, "source_item_id": item, "revision_number": revision,
+         "cluster_id": item, "collector_first_seen_time": changed}
+        for source, item, revision, changed in candidate_keys
+    ])
+    monkeypatch.setattr(news_resources, "_serialize_news_rows", lambda rows, *_: rows)
+    first = news_resources._build_news_projection_source(ledger.connection)
+    identities = {row["source_item_id"] for row in first.index_rows}
+    assert len(identities) == 10_000
+    assert "item-00000" not in identities
+    assert "item-10000" in identities
+    # A genuine new arrival displaces the oldest retained member.
+    ledger.connection.executemany(
+        """INSERT INTO news_revisions VALUES
+           (?,?,1,NULL,?,?,?,?,?,NULL,?,?,NULL)""",
+        [("bea_economic_releases", name, now.isoformat(), now.isoformat(),
+          now.isoformat(), name, body, digest, name)
+         for name in ("new-a", "new-b")],
+    )
+    second = news_resources._build_news_projection_source(ledger.connection)
+    identities = {row["source_item_id"] for row in second.index_rows}
+    assert len(identities) == 10_000
+    assert {"new-a", "new-b"} <= identities
+    assert not {"item-00000", "item-00001", "item-00002"} & identities
+    assert first.manifest["source_digest"] != second.manifest["source_digest"]
+    assert ledger.connection.execute("SELECT count(*) FROM news_revisions").fetchone()[0] == count + 2
+    # Equal publication/receipt times use stable identity ordering.
+    keys = news_resources._news_mirror_candidate_keys(
+        ledger.connection, cutoff=(now-timedelta(days=60)).isoformat(),
+        after=None, limit=2, latest=True,
+    )
+    assert [row[1] for row in keys] == ["new-b", "new-a"]
+    ledger.close()

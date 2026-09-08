@@ -14,8 +14,18 @@ def news_mirror_candidate_keys(
     cutoff: str,
     after: str | None,
     limit: int,
+    latest: bool = False,
 ) -> list[tuple[str, str, int, str]]:
     """Find changed reader keys before running the expensive detail joins."""
+    if latest and after:
+        raise ValueError("latest news window does not accept a changed-key cursor")
+    order = (
+        "COALESCE(n.source_published_time,n.collector_first_seen_time) DESC, "
+        "n.collector_first_seen_time DESC, changes.source DESC, "
+        "changes.source_item_id DESC, changes.revision_number DESC"
+        if latest else
+        "max(changed_at),changes.source,changes.source_item_id,changes.revision_number"
+    )
     cursor_clause = ""
     cursor_parameters: tuple[object, ...] = ()
     if after:
@@ -81,8 +91,7 @@ def news_mirror_candidate_keys(
             GROUP BY changes.source,changes.source_item_id,
                      changes.revision_number
             {cursor_clause}
-            ORDER BY max(changed_at),changes.source,
-                     changes.source_item_id,changes.revision_number
+            ORDER BY {order}
             LIMIT ?""",
         (
             cutoff,

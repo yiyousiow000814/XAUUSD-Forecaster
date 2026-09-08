@@ -63,10 +63,18 @@
   SQLite authority, not D1, retains historical news evidence.
 - `CURRENT`, `RECOVERY_REQUIRED`, `REPLAYING`, `VERIFYING`, and `DEGRADED` are
   user-visible truth states. Only a receipt-matched, verified `CURRENT`
-  generation may claim a complete 60-day total.
+  generation may claim a complete selected-window total.
 
 ## Bounds and retention
 
+- The recurring reader source selects the latest 10,000 eligible candidate
+  identities within 60 days, ordered by publication time (first receipt when
+  absent), first receipt, source, source item identity, and revision descending.
+  Relevance withdrawals are applied within that selected window. New arrivals
+  displace its oldest members without deleting authoritative local records.
+  Exceeding the window is normal growth, not a source-generation failure.
+  Public totals describe the selected generation, not the entire local archive.
+  Changed-key capture cursors retain their independent ascending change order.
 - A generation contains at most 10,000 index rows and 10,000 detail rows, plus
   at most 10,000 unique withdrawal identities. Raw source processing is not
   materialized D1 membership: withdrawals contribute to the exact source digest
