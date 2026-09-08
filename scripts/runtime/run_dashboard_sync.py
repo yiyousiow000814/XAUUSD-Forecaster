@@ -412,6 +412,11 @@ def sync_resource_lane(
                         and _read_news_sync_state(Path(target["news_state_file"])).get(
                             "projection_state"
                         ) == "REPLAYING"
+                        or resource == "news_evidence"
+                        and bool(target.get("news_evidence_state_file"))
+                        and bool(_read_news_sync_state(
+                            Path(target["news_evidence_state_file"])
+                        ).get("staging_snapshot_id"))
                     ),
                 )
                 observations.append({

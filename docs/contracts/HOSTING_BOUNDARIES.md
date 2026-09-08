@@ -201,6 +201,10 @@
   accumulating execution-time drift, while missed periods coalesce instead of
   creating a catch-up burst. Restarting the synchronizer must not collapse those
   independent cadences into one upload burst.
+  Successful incomplete news-index and news-evidence transfers immediately
+  resume through that owner. A hash-verified local evidence generation awaiting
+  its remote ACK is reused before opening SQLite; transfer progress must not
+  repeatedly rebuild the same accepted source snapshot.
 - Operator retry presentation is a digest-owned delta mirror. An unchanged
   authoritative scheduler snapshot creates no Worker request and no D1 write;
   a changed snapshot updates at most 32 changed jobs and removes at most 32

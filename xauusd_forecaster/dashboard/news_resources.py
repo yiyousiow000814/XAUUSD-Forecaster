@@ -1062,11 +1062,10 @@ def _publish_news_evidence_snapshot(rows: list[dict]) -> str:
     return snapshot_id
 
 
-def _materialize_news_evidence_generation(
-    rows: list[dict], manifest_path: Path, *, activated_snapshot_id: str | None = None,
-) -> tuple[str, list[dict]]:
-    """Freeze a generation until its remote activation is acknowledged."""
-    rows = _durable_news_evidence_rows(rows)
+def _pending_news_evidence_generation(
+    manifest_path: Path, activated_snapshot_id: str | None,
+) -> tuple[str, list[dict]] | None:
+    """Reuse only a hash-verified generation still awaiting remote ACK."""
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, json.JSONDecodeError):
@@ -1088,6 +1087,18 @@ def _materialize_news_evidence_generation(
                 and frozen_snapshot != activated_snapshot_id
             ):
                 return frozen_snapshot, frozen_rows
+
+    return None
+
+
+def _materialize_news_evidence_generation(
+    rows: list[dict], manifest_path: Path, *, activated_snapshot_id: str | None = None,
+) -> tuple[str, list[dict]]:
+    """Freeze a generation until its remote activation is acknowledged."""
+    rows = _durable_news_evidence_rows(rows)
+    pending = _pending_news_evidence_generation(manifest_path, activated_snapshot_id)
+    if pending is not None:
+        return pending
 
     encoded = json.dumps(
         rows, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
@@ -1114,21 +1125,23 @@ def _build_news_evidence_resource(
     activated_snapshot_id: str | None = None,
 ) -> dict:
     """Materialize the independently owned durable evidence generation."""
-    now = (clock or (lambda: datetime.now(UTC)))()
-    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)
-    connection.row_factory = sqlite3.Row
-    connection.execute("BEGIN")
-    try:
-        evidence = event_evidence_rows_from_connection(connection, now)
-        rows = _news_evidence_display_rows(connection, evidence)
-    finally:
-        connection.rollback()
-        connection.close()
-    snapshot_id, frozen_rows = _materialize_news_evidence_generation(
-        rows,
-        manifest_path or database.parent / "dashboard-news-evidence-generation-v2.json",
-        activated_snapshot_id=activated_snapshot_id,
-    )
+    manifest_path = manifest_path or database.parent / "dashboard-news-evidence-generation-v2.json"
+    pending = _pending_news_evidence_generation(manifest_path, activated_snapshot_id)
+    if pending is None:
+        now = (clock or (lambda: datetime.now(UTC)))()
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)
+        connection.row_factory = sqlite3.Row
+        connection.execute("BEGIN")
+        try:
+            evidence = event_evidence_rows_from_connection(connection, now)
+            rows = _news_evidence_display_rows(connection, evidence)
+        finally:
+            connection.rollback()
+            connection.close()
+        pending = _materialize_news_evidence_generation(
+            rows, manifest_path, activated_snapshot_id=activated_snapshot_id,
+        )
+    snapshot_id, frozen_rows = pending
     published_snapshot = _publish_news_evidence_snapshot(frozen_rows)
     if published_snapshot != snapshot_id:
         raise ValueError("news evidence manifest snapshot hash is invalid")
