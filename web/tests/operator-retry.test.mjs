@@ -119,6 +119,10 @@ test("a changed mirror updates only changed jobs and exact replay writes zero", 
     for (const statement of statements) {
       const plan = database.database.prepare(`EXPLAIN QUERY PLAN ${statement.sql}`)
         .all(...statement.bindings);
+      if (statement.sql.includes("DELETE FROM operator_retry_jobs")) {
+        assert.ok(plan.some(row => /SEARCH operator_retry_jobs USING .*INDEX/.test(row.detail)),
+          "bounded obsolete identities must drive indexed deletion, not a table scan");
+      }
       // JSON membership must be built once, never scanned for every stored job.
       for (const row of plan.filter(row => /VIRTUAL TABLE/.test(row.detail))) {
         let parent = plan.find(node => node.id === row.parent);

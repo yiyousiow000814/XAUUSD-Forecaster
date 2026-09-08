@@ -216,6 +216,9 @@
   cycles, and ongoing small live changes must not starve obsolete-row cleanup.
   Capacity accounting includes these bounded catch-up writes separately from
   recurring actual changes; a per-invocation limit is not a daily quota proof.
+  Mutation-cost evidence covers both no-op and actual insertion/deletion work.
+  A read-only SELECT-equivalent measurement alone does not qualify a DELETE
+  optimization; obsolete identities must continue to drive indexed deletion.
 - Learning-history pages use a composite resource/model-identity/time index and
   an exact materialized count maintained at the D1 write boundary. Page reads
   fetch at most `limit + 1` rows before byte bounding; visitor pagination must
