@@ -1041,7 +1041,8 @@ test("only a receipt-matched current generation may publish the 60-day news tota
   assert.deepEqual(authoritativeNewsTotals(current), {
     category: 1138, readable: 1138, parsed: 1100, modelCandidates: 31,
   });
-  assert.equal(authoritativeNewsTotals({ ...current, projection_state: "REPLAYING" }), null);
+  assert.deepEqual(authoritativeNewsTotals({ ...current, projection_state: "REPLAYING" }), authoritativeNewsTotals(current));
+  assert.equal(authoritativeNewsTotals({ ...current, projection_state: "REPLAYING", verified_complete: false }), null);
   assert.equal(authoritativeNewsTotals({ ...current, source_receipt_digest: "e".repeat(64) }), null);
   assert.equal(authoritativeNewsTotals({
     ...frozen,

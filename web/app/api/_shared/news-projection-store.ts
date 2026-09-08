@@ -1118,8 +1118,16 @@ export async function readNewsProjectionPage(
             COALESCE((SELECT json_group_object(review_state,item_count)
                        FROM news_projection_counts WHERE generation_id=?
                          AND review_state<>'ALL' AND category=''),'{}') reviews_json,
-            (SELECT json_object('generation_id',generation_id,'updated_at',updated_at)
-               FROM news_projection_generations WHERE state='STAGING' LIMIT 1) staging_json
+            (SELECT json_object('generation_id',g.generation_id,'updated_at',g.updated_at,
+                     'expected_detail_count',g.expected_detail_count,
+                     'expected_index_count',g.expected_index_count,
+                     'next_detail_offset',COALESCE((SELECT batch_offset+item_count
+                       FROM news_projection_receipts_v2 r WHERE r.generation_id=g.generation_id
+                         AND batch_kind='detail' ORDER BY batch_offset DESC LIMIT 1),0),
+                     'next_index_offset',COALESCE((SELECT batch_offset+item_count
+                       FROM news_projection_receipts_v2 r WHERE r.generation_id=g.generation_id
+                         AND batch_kind='index' ORDER BY batch_offset DESC LIMIT 1),0))
+               FROM news_projection_generations g WHERE state='STAGING' LIMIT 1) staging_json
        FROM page_data`,
   ).bind(
     ...binds, options.pageSize + 1,
@@ -1178,6 +1186,7 @@ export async function readNewsProjectionPage(
     window_days: 60, totals_scope: "VERIFIED_CURRENT_GENERATION",
     projection_state: staging ? "REPLAYING" : "CURRENT", verified_complete: true,
     replacement_generation_id: staging?.generation_id ?? null,
+    replacement_progress: staging,
     generation_id: state.active_generation_id, snapshot_id: state.snapshot_id,
     source_digest: state.source_digest, receipt_digest: state.receipt_digest,
     source_receipt_digest: state.receipt_digest,
