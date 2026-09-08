@@ -1418,29 +1418,31 @@ function Test-CandidateSupersessionIdentity {
 }
 
 function Test-CandidateSupersessionAccepted {
-    param([object]$Candidate, [array]$History)
+    param([object]$Candidate, [array]$History, [switch]$CandidateAcceptanceOnly)
+    $acceptedEvents = @("CANDIDATE_PASSED", "PROMOTION_STARTED", "STABLE_COMMITTED")
+    if (-not $CandidateAcceptanceOnly) { $acceptedEvents += "CANDIDATE_ACCESS_BOUNDARY_ACCEPTED" }
     return [bool](@($History | Where-Object {
         [string]$_.release.validation_key -eq [string]$Candidate.validation_key -and
-        [string]$_.event -in @(
-            "CANDIDATE_PASSED", "CANDIDATE_ACCESS_BOUNDARY_ACCEPTED",
-            "PROMOTION_STARTED", "STABLE_COMMITTED"
-        )
+        [string]$_.event -in $acceptedEvents
     }).Count -gt 0)
 }
 
 function Test-UnqualifiedSupersessionIntermediate {
     param(
         [Parameter(Mandatory = $true)][object]$Candidate,
-        [Parameter(Mandatory = $true)][array]$History
+        [Parameter(Mandatory = $true)][array]$History,
+        [switch]$PendingEvidenceBoundary
     )
+    $allowedStates = if ($PendingEvidenceBoundary) { @("EVIDENCE_PENDING") } else {
+        @("NEW", "CHECKS_PENDING", "CHECKS_BLOCKED", "TESTING", "REVIEW_REQUIRED",
+            "PLATFORM_PENDING")
+    }
     if (-not (Test-CandidateSupersessionIdentity -Candidate $Candidate) -or
         [string]$Candidate.compatibility_state -notin @(
             "PENDING", "REVIEW_REQUIRED", "COORDINATED_STORAGE_MIGRATION_PASSED"
         ) -or
-        [string]$Candidate.validation_state -notin @(
-            "NEW", "CHECKS_PENDING", "CHECKS_BLOCKED", "TESTING", "REVIEW_REQUIRED",
-            "PLATFORM_PENDING"
-        )) {
+        [string]$Candidate.validation_state -notin $allowedStates -or
+        ($PendingEvidenceBoundary -and -not $Candidate.validation)) {
         return $false
     }
     if ($Candidate.migration_acceptance -and (
@@ -1454,7 +1456,8 @@ function Test-UnqualifiedSupersessionIntermediate {
         [string]$Candidate.validation.key -ne [string]$Candidate.validation_key) {
         return $false
     }
-    return -not (Test-CandidateSupersessionAccepted -Candidate $Candidate -History $History)
+    return -not (Test-CandidateSupersessionAccepted -Candidate $Candidate -History $History `
+        -CandidateAcceptanceOnly:$PendingEvidenceBoundary)
 }
 
 function Test-QualifiedSupersessionCandidateShape {
@@ -1628,14 +1631,18 @@ function Get-CandidateSupersessionRecoveryPlan {
             (Test-UnacceptedFailedSupersessionCandidate -Candidate $current -History $history) -and
             ($edges.Count -eq 0 -or ($edges.Count -eq 1 -and
                 (Test-UnacceptedFailedSupersessionCandidate -Candidate $edges[0].release -History $history))))
-        if (-not $failedPredecessor -and -not (Test-UnqualifiedSupersessionIntermediate `
+        $pendingEvidenceBoundary = [bool]($depth -gt 0 -and
+            (Test-UnqualifiedSupersessionIntermediate -Candidate $current `
+                -History $history -PendingEvidenceBoundary))
+        if (-not $failedPredecessor -and -not $pendingEvidenceBoundary -and
+            -not (Test-UnqualifiedSupersessionIntermediate `
                 -Candidate $current -History $history)) {
             return [pscustomobject]@{
                 state = "FAILED"; reason = "CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"
                 chain_head = $headKey; traversed = $traversed
             }
         }
-        if ($edges.Count -eq 0) {
+        if ($edges.Count -eq 0 -or $pendingEvidenceBoundary) {
             return [pscustomobject]@{
                 state = if ($depth -eq 0) { "NOT_APPLICABLE" } else {
                     "REUSE_UNAVAILABLE"

@@ -8958,6 +8958,35 @@ def _supersession_chain_contract(scenario: str) -> str:
             "Add-Edge $mid $head;Write-ReleaseHistory -Event 'CANDIDATE_PASSED' "
             "-Release $mid;Add-Edge $qualified $mid;"
         ),
+        "evidence_pending_predecessor": (
+            "$mid.validation_state='EVIDENCE_PENDING';Add-Edge $mid $head;"
+        ),
+        "evidence_pending_access_predecessor": (
+            "$mid.validation_state='EVIDENCE_PENDING';Add-Edge $mid $head;"
+            "Write-ReleaseHistory -Event 'CANDIDATE_ACCESS_BOUNDARY_ACCEPTED' -Release $mid;"
+            "Add-Edge $qualified $mid;"
+        ),
+        "evidence_pending_accepted_predecessor": (
+            "$mid.validation_state='EVIDENCE_PENDING';Add-Edge $mid $head;"
+            "Write-ReleaseHistory -Event 'CANDIDATE_PASSED' -Release $mid;"
+        ),
+        "evidence_pending_promoted_predecessor": (
+            "$mid.validation_state='EVIDENCE_PENDING';Add-Edge $mid $head;"
+            "Write-ReleaseHistory -Event 'PROMOTION_STARTED' -Release $mid;"
+        ),
+        "evidence_pending_stable_predecessor": (
+            "$mid.validation_state='EVIDENCE_PENDING';Add-Edge $mid $head;"
+            "Write-ReleaseHistory -Event 'STABLE_COMMITTED' -Release $mid;"
+        ),
+        "evidence_pending_invalid_migration": (
+            "$mid.validation_state='EVIDENCE_PENDING';"
+            "$mid|Add-Member migration_acceptance ([pscustomobject]@{"
+            "validation_key='wrong';receipt_digest=('7'*64)});Add-Edge $mid $head;"
+        ),
+        "evidence_pending_mismatched_predecessor": (
+            "$mid.validation_state='EVIDENCE_PENDING';$mid.validation.key='wrong';"
+            "Add-Edge $mid $head;"
+        ),
         "failed_unaccepted_predecessor": (
             "$mid.validation_state='FAILED';"
             "$mid.validation=[pscustomobject]@{key=$mid.validation_key;"
@@ -9135,6 +9164,13 @@ def test_supersession_chain_recovery_is_bounded_and_fail_closed(
 @pytest.mark.parametrize("scenario,expected", (
     ("two_hop", "FOUND:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee:" + "e" * 40),
     ("missing_edge", "NONE"),
+    ("evidence_pending_predecessor", "NONE"),
+    ("evidence_pending_access_predecessor", "NONE"),
+    ("evidence_pending_accepted_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+    ("evidence_pending_promoted_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+    ("evidence_pending_stable_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+    ("evidence_pending_invalid_migration", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
+    ("evidence_pending_mismatched_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
     ("failed_unaccepted_predecessor", "NONE"),
     ("failed_accepted_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
     ("failed_mismatched_predecessor", "ERROR:CANDIDATE_SUPERSESSION_INTERMEDIATE_UNSAFE"),
@@ -9167,7 +9203,7 @@ def test_supersession_head_without_edge_is_not_applicable(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
-@pytest.mark.parametrize("prior_state", ("TESTING", "FAILED"))
+@pytest.mark.parametrize("prior_state", ("TESTING", "FAILED", "EVIDENCE_PENDING"))
 def test_unavailable_supersession_reuse_falls_back_once_without_copying_evidence(
     tmp_path, powershell: str, prior_state: str,
 ) -> None:
@@ -9193,6 +9229,8 @@ def test_unavailable_supersession_reuse_falls_back_once_without_copying_evidence
         "cpu_evidence=[pscustomobject]@{receipt_digest=('e'*64)}};"
         "Write-ReleaseHistory -Event 'CANDIDATE_SUPERSEDED' -Release $prior "
         "-Detail @{replacement_key=$head.validation_key};"
+        "if($prior.validation_state -eq 'EVIDENCE_PENDING'){Write-ReleaseHistory "
+        "-Event 'CANDIDATE_ACCESS_BOUNDARY_ACCEPTED' -Release $prior};"
         "function Get-OriginMainRevision{return ('b'*40)};"
         "function Get-ProductionCandidateProvenanceResult{"
         "[pscustomobject]@{state='PASSED';mode='EXACT_MAIN';"

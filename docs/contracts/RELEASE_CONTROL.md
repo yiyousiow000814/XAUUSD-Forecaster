@@ -89,6 +89,13 @@ requires identity, ancestry, uniqueness, cycle and depth checks. A failed
 intermediate leading to a qualified or accepted predecessor remains unsafe;
 the new head still requires complete fresh qualification. Accepted or mismatched
 failed predecessors remain unsafe. This does not retry or reclassify the failed identity.
+A traversed `EVIDENCE_PENDING` predecessor with matching identity and no whole
+Candidate, Promote or Stable acceptance ends optional reuse at that node.
+Partial Access acceptance remains immutable and is not full qualification.
+Do not restore an older candidate through this unfinished finalizer or copy its
+receipts. The replacement must obtain full fresh qualification. Contradictory
+whole acceptance, mismatched identities and all existing FAILED-state rejection
+rules remain fail closed. This boundary is not a new state or release authority.
 An older main build that completes out of order advances the discovery watermark
 but cannot replace, validate as, or supersede the current main Candidate. A
 missing exact Version remains visible and retryable without changing Stable.

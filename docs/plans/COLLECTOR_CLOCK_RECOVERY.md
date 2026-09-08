@@ -518,3 +518,52 @@ The same owner serves all15 producer adapters, behavior reuse and Free-plan proo
 input digests. Test null, empty, singleton-null, singleton-value, multiple and
 nested collections through actual publish/read/reuse plus the complete evidence
 family and connected finalizer. No promotion authority or gate is relaxed.
+
+## Supersession stops at an unfinished evidence-finalization boundary
+
+The 259603b2 connected run reached installation, retained ACK and migration,
+then discovery rejected a prior EVIDENCE_PENDING node. That prior candidate
+completed only Access preparation before its finalizer failed. It has no
+CANDIDATE_PASSED, PROMOTION_STARTED or STABLE_COMMITTED history. Access acceptance
+is durable partial work; it neither proves full qualification nor authorizes
+restoring a still older candidate through that node.
+
+Keep discovery and its existing transaction lock as the only mutation owner.
+The optional planner reads bounded immutable history; provider ownership must
+still show Stable at 100 percent and no transaction may exist. Each traversed
+edge retains exact identity, ancestry, uniqueness, cycle and depth validation.
+At a matching EVIDENCE_PENDING predecessor, stop optional reuse as unavailable
+instead of traversing past the unfinished finalizer. Reject contradictory whole
+Candidate/Promote/Stable acceptance, wrong validation identity and invalid
+compatibility. Do not apply this exception to FAILED or PASSED predecessors.
+The current head still runs complete fresh qualification; no prior receipt,
+accepted step, source identity, history, traffic or runtime state is rewritten.
+
+Actors include discovery, semantic/Access finalizers, provider inspection,
+installer, watchdog, history writer and operator release actions. A crash after
+persisting EVIDENCE_PENDING remains non-promotable and readable by old/new
+controllers; later discovery may qualify a distinct exact candidate without
+restoring old work. Restart repeats the bounded read, with one diagnostic per
+head/main/reason. Provider uncertainty and existing production ownership checks
+remain fail closed. Reverse Stable and the business runtime are untouched.
+No new durable state, lock, receipt, expiry or cleanup owner is introduced.
+
+Execute the existing planner and actual discovery/fresh-validation families in
+PS5.1 and PS7, including Access-only partial acceptance, whole acceptance,
+identity mismatch and a qualified older node that must not be restored. Reuse
+the preserved real history in a read-only actual planner rehearsal. Then run the
+complete connected recovery with current exact source and original frozen input.
+This is author verification; independent review remains required.
+
+Execution matrix: real powershell.exe 5.1 and pwsh.exe load the actual
+CodeRevision entrypoint, then Discovery -> Find-NewCandidateRelease -> Restore
+-> bounded planner. Tests use isolated runtime/repository roots and the actual
+parameter binding/import chain. The existing caller contract executes discovery
+twice, verifies one fresh validation, zero pointer changes, no copied CPU evidence,
+one diagnostic and no transaction. The complete supersession family passes61
+cases in58.18s; four added Stable/migration rejection cases plus CI ownership
+pass17 in12.58s. Read-only planning against the preserved actual state/history
+returns REUSE_UNAVAILABLE at depth1 with both file hashes unchanged. Architecture
+check passes. Actual source review confirms only the pending-boundary call omits
+partial Access from the whole-acceptance test; failed-chain callers retain all
+previous accepted-event rejection rules. Full connected acceptance is pending.
