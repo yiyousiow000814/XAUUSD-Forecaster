@@ -308,7 +308,7 @@ for (const legacy of [false, true]) {
         let lastPlan = [];
         db.prepare = sql => {
           const statement = originalPrepare(sql);
-          if (!sql.includes("WITH page_candidates")) return statement;
+          if (!sql.includes("WITH page_data")) return statement;
           return { bind(...bindings) {
             lastPlan = db.database.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...bindings);
             return statement.bind(...bindings);
@@ -375,7 +375,7 @@ for (const legacy of [false, true]) {
         db.database.prepare("UPDATE news_projection_state SET active_generation_id=?").run(id("a"));
         // A replacement between the preliminary check and SQL must also be detected.
         db.prepare = sql => {
-          if (sql.includes("WITH page_candidates")) {
+          if (sql.includes("WITH page_data")) {
             db.database.prepare("UPDATE news_projection_state SET active_generation_id=?").run(id("b"));
           }
           return originalPrepare(sql);

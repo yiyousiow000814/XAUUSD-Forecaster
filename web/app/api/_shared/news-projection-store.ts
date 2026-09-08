@@ -1091,25 +1091,20 @@ export async function readNewsProjectionPage(
   const where = conditions.join(" AND ");
   const now = new Date().toISOString();
   const pageData = await binding.prepare(
-    `WITH page_candidates(payload,published_time,collector_first_seen_time,detail_key) AS MATERIALIZED (
-       SELECT payload,published_time,collector_first_seen_time,detail_key
-         FROM ${receiptIndexed ? "news_index" : "news_projection_index"} WHERE ${where}
-        ORDER BY published_time ${order},collector_first_seen_time ${order},detail_key ${order}
-        LIMIT ?
-     ), page_rows AS (
-       SELECT * FROM page_candidates
-       ORDER BY published_time ${order},collector_first_seen_time ${order},detail_key ${order}
-       LIMIT ?
+    `WITH page_data AS (
+       SELECT json_group_array(json_object(
+                'item',json(payload),
+                'key',json_array(published_time,collector_first_seen_time,detail_key)) ORDER BY
+                published_time ${order},collector_first_seen_time ${order},detail_key ${order}) rows_json
+         FROM (
+           SELECT payload,published_time,collector_first_seen_time,detail_key
+             FROM ${receiptIndexed ? "news_index" : "news_projection_index"} WHERE ${where}
+            ORDER BY published_time ${order},collector_first_seen_time ${order},detail_key ${order}
+            LIMIT ?
+         )
      )
-     SELECT (SELECT count(*) FROM page_candidates) fetched_count,
-            (SELECT json_array(published_time,collector_first_seen_time,detail_key)
-               FROM page_rows ORDER BY published_time DESC,collector_first_seen_time DESC,detail_key DESC LIMIT 1) first_key,
-            (SELECT json_array(published_time,collector_first_seen_time,detail_key)
-               FROM page_rows ORDER BY published_time ASC,collector_first_seen_time ASC,detail_key ASC LIMIT 1) last_key,
+     SELECT page_data.*,
             (SELECT active_generation_id FROM news_projection_state WHERE id=1 AND projection_state='CURRENT') observed_generation,
-            COALESCE((SELECT json_group_array(json(payload) ORDER BY
-                              published_time DESC,collector_first_seen_time DESC,detail_key DESC)
-                        FROM page_rows),'[]') items_json,
             COALESCE((SELECT item_count FROM news_projection_counts
                        WHERE generation_id=? AND review_state=? AND category=?),0) total,
             COALESCE((SELECT parsed_count FROM news_projection_counts
@@ -1124,18 +1119,18 @@ export async function readNewsProjectionPage(
                        FROM news_projection_counts WHERE generation_id=?
                          AND review_state<>'ALL' AND category=''),'{}') reviews_json,
             (SELECT json_object('generation_id',generation_id,'updated_at',updated_at)
-               FROM news_projection_generations WHERE state='STAGING' LIMIT 1) staging_json`,
+               FROM news_projection_generations WHERE state='STAGING' LIMIT 1) staging_json
+       FROM page_data`,
   ).bind(
-    ...binds, options.pageSize + 1, options.pageSize,
+    ...binds, options.pageSize + 1,
     state.active_generation_id, options.reviewState, options.category,
     state.active_generation_id,
     state.active_generation_id,
     state.active_generation_id, options.reviewState,
     state.active_generation_id,
   ).first<{
-    items_json: string; total: number; parsed: number; candidate_expiries: string;
+    rows_json: string; total: number; parsed: number; candidate_expiries: string;
     categories_json: string; reviews_json: string; staging_json: string | null;
-    fetched_count: number; first_key: string | null; last_key: string | null;
     observed_generation: string | null;
   }>();
   if (!pageData) {
@@ -1149,25 +1144,30 @@ export async function readNewsProjectionPage(
       "news generation changed during pagination", 409, "NEWS_PROJECTION_GENERATION_CHANGED",
     );
   }
-  const items = JSON.parse(pageData.items_json) as NewsProjectionIndexItem[];
+  const rows = JSON.parse(pageData.rows_json) as Array<{
+    item: NewsProjectionIndexItem; key: NewsPageCursor["key"];
+  }>;
+  const more = rows.length > options.pageSize;
+  if (more) rows.pop();
+  if (backwards) rows.reverse();
+  const items = rows.map(row => row.item);
   const categoryCounts = JSON.parse(pageData.categories_json) as Record<string, number>;
   const reviewCounts = JSON.parse(pageData.reviews_json) as Record<NewsReviewState, number>;
   const staging = pageData.staging_json
     ? JSON.parse(pageData.staging_json) as { generation_id: string; updated_at: string }
     : null;
-  const more = Number(pageData.fetched_count) > options.pageSize;
-  const token = (direction: "next" | "previous", key: string | null) => key
+  const token = (direction: "next" | "previous", key: NewsPageCursor["key"] | undefined) => key
     ? encodeNewsPageCursor({
       version: 1, generation: state.active_generation_id, review: options.reviewState,
       category: options.category, size: options.pageSize,
       page: options.page + (direction === "next" ? 1 : -1), direction,
-      key: JSON.parse(key) as NewsPageCursor["key"],
+      key,
     }) : null;
   return {
     items,
-    next_cursor: (backwards || more) ? token("next", pageData.last_key) : null,
+    next_cursor: (backwards || more) ? token("next", rows.at(-1)?.key) : null,
     previous_cursor: options.page > 1 && (!backwards || more)
-      ? token("previous", pageData.first_key) : null,
+      ? token("previous", rows[0]?.key) : null,
     total: Number(pageData.total ?? 0),
     all_total: Number(state.index_count), readable_total: Number(state.index_count),
     parsed_total: Number(pageData.parsed ?? 0),
