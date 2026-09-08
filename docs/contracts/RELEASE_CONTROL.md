@@ -178,6 +178,12 @@ reused, or renewed. Reuse and renewal must link the prior receipt; invalidation
 must state the changed behavior input. Receipts are stored beneath the mutable
 RuntimeRoot, keyed by a digest of the exact validation key, while small bounded
 current and behavior-key indexes select immutable receipts.
+Canonical evidence identities preserve JSON types and array order, including
+null, empty arrays, singleton arrays and nested arrays. Object keys are sorted;
+PowerShell pipeline enumeration must not turn collections into scalars or empty
+objects. Producer hashing, stored behavior inputs and consumer recomputation
+use the same typed canonical representation. Historical receipt bytes are not
+rewritten to acquire a different identity.
 
 Every one of the fixed fifteen nodes has exactly one producer adapter and one or
 more named consumers. The Evidence Authority owns behavior-key construction,

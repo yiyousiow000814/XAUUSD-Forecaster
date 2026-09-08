@@ -778,7 +778,7 @@ function ConvertTo-ReleaseEvidenceCanonicalObject {
         foreach ($item in $Value) {
             $items += ,(ConvertTo-ReleaseEvidenceCanonicalObject -Value $item)
         }
-        return $items
+        return ,$items
     }
     $properties = @($Value.PSObject.Properties | Where-Object {
         $_.MemberType -in @("NoteProperty", "Property", "AliasProperty")
@@ -828,9 +828,9 @@ function Get-ReleaseEvidenceBehaviorKey {
     }
     $canonicalInputs = [ordered]@{}
     foreach ($name in $expected) {
-        $value = if ($Inputs -is [System.Collections.IDictionary]) {
-            $Inputs[$name]
-        } else { $Inputs.$name }
+        if ($Inputs -is [System.Collections.IDictionary]) {
+            $value = $Inputs[$name]
+        } else { $value = $Inputs.$name }
         $canonicalInputs[$name] = ConvertTo-ReleaseEvidenceCanonicalObject -Value $value
     }
     $preimage = [ordered]@{

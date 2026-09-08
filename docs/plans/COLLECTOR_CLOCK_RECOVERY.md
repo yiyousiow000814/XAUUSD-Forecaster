@@ -497,3 +497,24 @@ migration-acceptance shards. Preserve every case, actual PowerShell runtime,
 The changed-path selector must select both affected groups, and exact-once
 manifest coverage must pass. This is a gate organization repair, not evidence
 that the previously cancelled run passed.
+
+## Evidence canonicalization preserves JSON collection identity
+
+The fae42780 connected retry passed completed-history and isolated Access
+preparation, then directed_worker failed its own behavior-key recomputation.
+The persisted fixture_digests input became an empty object. PowerShell pipeline
+enumeration in the canonicalizer and behavior-input selection collapses empty,
+singleton and nested arrays; the JSON serializer also enumerates root arrays.
+The existing publish/find/reuse behavior-key family now reproduces eight shape
+failures across PS5.1/PS7.
+
+Preserve arrays as a single return value, assign each selected property directly
+instead of collecting conditional pipeline output, and serialize with InputObject.
+Canonicalization still sorts object keys and preserves array order. No receipt,
+index or prior evidence is rewritten; immutable receipt-object digest validation
+keeps its existing shape. New typed inputs receive their actual type-bound key;
+old lossy input cannot be relabeled as new evidence. Wrong keys remain rejected.
+The same owner serves all15 producer adapters, behavior reuse and Free-plan proof
+input digests. Test null, empty, singleton-null, singleton-value, multiple and
+nested collections through actual publish/read/reuse plus the complete evidence
+family and connected finalizer. No promotion authority or gate is relaxed.

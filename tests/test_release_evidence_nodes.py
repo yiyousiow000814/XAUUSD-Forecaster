@@ -613,18 +613,22 @@ elapsed=$receipt.elapsed_ms;waterfall_nodes=$waterfall.node_count}}|ConvertTo-Js
 
 
 @pytest.mark.parametrize("shell", ("powershell.exe", "pwsh.exe"))
+@pytest.mark.parametrize("shape", (None, [], [None], ["one"], ["one", "two"], [["one"], []], {"digest": "artifacts"}))
 def test_behavior_key_planner_and_bounded_lookup_are_exact(
-    tmp_path: Path, shell: str,
+    tmp_path: Path, shell: str, shape,
 ) -> None:
-    evidence_root = tmp_path.parent / f"authority-{Path(shell).stem}"
+    evidence_root = tmp_path / "authority"
     output = _run_module(
         tmp_path,
         shell,
         f"""
+$shape={_ps_literal(json.dumps({"value": shape}))}|ConvertFrom-ReleaseControlJson
+$rootShape=,($shape.value)
+$shapeWire=ConvertTo-ReleaseEvidenceJson -Value $rootShape
 $source=[pscustomobject]@{{validation_key='old';qualification_state='PASSED'}}
 $inputs=[pscustomobject][ordered]@{{protected_origin='https://example.invalid';
  provider_application_policy=[pscustomobject]@{{digest='policy'}};
- access_artifacts=[pscustomobject]@{{digest='artifacts'}};
+ access_artifacts=$shape.value;
  acceptance_contract='access-v1'}}
 $args=@{{Root={_ps_literal(evidence_root)};ContractPath={_ps_literal(CONTRACT)};
  ValidationKey='old';BehaviorInputs=$inputs;SourceIdentity=$source;
@@ -643,13 +647,15 @@ $reuse=Publish-ReleaseEvidenceReuse -Root {_ps_literal(evidence_root)} `
  -ReuseReason 'EXACT_ACCESS_BEHAVIOR_UNCHANGED'
 $changed=[pscustomobject][ordered]@{{protected_origin='https://other.invalid';
  provider_application_policy=[pscustomobject]@{{digest='policy'}};
- access_artifacts=[pscustomobject]@{{digest='artifacts'}};
+ access_artifacts=$shape.value;
  acceptance_contract='access-v1'}}
 $changedKey=Get-ReleaseEvidenceBehaviorKey -ContractPath {_ps_literal(CONTRACT)} `
  -Node 'human_access_root' -Inputs $changed
 [ordered]@{{found=($found.receipt_digest -ceq $first.receipt_digest);
  reused=($reuse.prior_receipt -ceq $first.receipt_digest);
- mode=$reuse.execution_mode;changed=($changedKey -cne $key)}}|ConvertTo-Json -Compress
+ mode=$reuse.execution_mode;changed=($changedKey -cne $key);
+ shape=$first.source_identity.behavior_inputs.access_artifacts;shape_wire=$shapeWire;
+ recomputed=($key -ceq (Get-ReleaseEvidenceBehaviorKey -ContractPath {_ps_literal(CONTRACT)} -Node human_access_root -Inputs $first.source_identity.behavior_inputs))}}|ConvertTo-Json -Compress
 """,
     )
     assert json.loads(output) == {
@@ -657,6 +663,9 @@ $changedKey=Get-ReleaseEvidenceBehaviorKey -ContractPath {_ps_literal(CONTRACT)}
         "reused": True,
         "mode": "REUSED",
         "changed": True,
+        "shape": shape,
+        "shape_wire": json.dumps([shape], separators=(",", ":")),
+        "recomputed": True,
     }
 
 
@@ -876,8 +885,6 @@ def test_free_plan_proof_rejects_duplicate_overflow_migration_and_storage_breach
         "production_calibration",
     ):
         value = proof[name]
-        if name in {"workload_manifest", "cadence"}:
-            value = {**value, "producers": value["producers"][0]}
         canonical = json.dumps(
             value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
         ).encode("utf-8")
@@ -1111,8 +1118,6 @@ def test_controller_registers_exact_candidate_free_plan_proof(
         "production_calibration",
     ):
         value = proof[name]
-        if name in {"workload_manifest", "cadence"}:
-            value = {**value, "producers": value["producers"][0]}
         canonical = json.dumps(
             value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
         ).encode("utf-8")

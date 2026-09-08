@@ -6,7 +6,7 @@ $releaseEvidenceReceiptMaximumBytes = 65536
 
 function ConvertTo-ReleaseEvidenceJson {
     param([Parameter(Mandatory = $true)][object]$Value)
-    return ($Value | ConvertTo-Json -Depth 12 -Compress)
+    return (ConvertTo-Json -InputObject $Value -Depth 12 -Compress)
 }
 
 function ConvertFrom-ReleaseEvidenceJson {
