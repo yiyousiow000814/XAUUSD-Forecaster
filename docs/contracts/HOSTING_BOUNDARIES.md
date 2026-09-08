@@ -203,10 +203,15 @@
   independent cadences into one upload burst.
 - Operator retry presentation is a digest-owned delta mirror. An unchanged
   authoritative scheduler snapshot creates no Worker request and no D1 write;
-  a changed snapshot advances at most three job mutations per invocation and
+  a changed snapshot updates at most 32 changed jobs and removes at most 32
+  obsolete mirror jobs per invocation, using one-time identity-set membership
+  rather than a correlated scan of the incoming list for each retained row, and
   persists its local source digest only after the remote mirror reports exact
   convergence. Restart resumes that delta instead of replacing all retained
-  jobs.
+  jobs. The normal 200-job mirror must initially converge within seven control
+  cycles, and ongoing small live changes must not starve obsolete-row cleanup.
+  Capacity accounting includes these bounded catch-up writes separately from
+  recurring actual changes; a per-invocation limit is not a daily quota proof.
 - Learning-history pages use a composite resource/model-identity/time index and
   an exact materialized count maintained at the D1 write boundary. Page reads
   fetch at most `limit + 1` rows before byte bounding; visitor pagination must

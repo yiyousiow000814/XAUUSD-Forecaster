@@ -141,13 +141,13 @@ test("a changed mirror updates only changed jobs and exact replay writes zero", 
     const result = await syncOperatorRetryJobs(
       database, source, new Date(Date.parse("2026-09-03T00:00:00Z") + cycles * 30_000),
     );
-    assert.ok(result.written <= 1);
+    assert.ok(result.written <= 32);
     admitted += result.written;
     cycles += 1;
-    assert.ok(cycles <= 200);
+    assert.ok(cycles <= 7);
   }
   assert.equal(admitted, 200);
-  assert.equal(cycles, 200, "catch-up is serialized into a bounded delta drain");
+  assert.ok(cycles <= 7, "200 jobs catch up within seven control cycles");
   const replay = await syncOperatorRetryJobs(
     database, source, new Date("2026-09-03T00:00:30Z"),
   );
@@ -164,6 +164,17 @@ test("a changed mirror updates only changed jobs and exact replay writes zero", 
   );
   assert.equal(removed.written, 0);
   assert.equal(removed.deleted, 1);
+  let completed = false;
+  for (let cycle = 0; cycle < 4 && !completed; cycle += 1) {
+    const live = changed.slice(100, 199).map((item, index) => index === 0
+      ? { ...item, title: `Live change ${cycle}` } : item);
+    const result = await syncOperatorRetryJobs(database, live);
+    assert.ok(result.written <= 32);
+    assert.ok(result.deleted <= 32);
+    completed = result.complete;
+  }
+  assert.equal(completed, true, "live changes must not starve stale-row cleanup");
+  assert.equal(database.database.prepare("SELECT count(*) n FROM operator_retry_jobs").get().n, 99);
 });
 
 test("expired machine leases are reclaimed without duplicating the durable command", async () => {
