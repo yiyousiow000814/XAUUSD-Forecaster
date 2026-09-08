@@ -853,29 +853,36 @@ def test_dashboard_exposes_only_runtime_update_failures(tmp_path) -> None:
     now = datetime.now(UTC).replace(microsecond=0)
     database = tmp_path / "forward-evidence.sqlite3"
     ForwardLedger(database, now=now).close()
-    state_path = tmp_path / "runtime-update-state.json"
-    state_path.write_text(json.dumps({
-        "update_status": "ACTIVE", "user_visible_failure": False,
-        "failure_message": None,
-    }), encoding="utf-8")
-
-    healthy = _dashboard_module()._dashboard_payload(database)
-    assert healthy["system"]["runtime_update_failure"] is None
-
-    state_path.write_text(json.dumps({
-        "update_status": "ROLLED_BACK", "user_visible_failure": True,
-        "failure_message": "新版运行验证失败，已自动恢复上一版。",
+    retired = tmp_path / "runtime-update-state.json"
+    retired.write_text(json.dumps({
+        "update_status": "PREFLIGHT_FAILED", "user_visible_failure": True,
         "failed_at": now.isoformat(),
     }), encoding="utf-8")
-    failed = _dashboard_module()._dashboard_payload(database)
-    assert failed["system"]["runtime_update_failure"] == {
-        "status": "ROLLED_BACK",
-        "failed_at": now.isoformat(),
-    }
-    assert any(
-        alert["code"] == "OPS_RUNTIME_UPDATE_FAILED"
-        for alert in failed["operational_health"]["alerts"]
-    )
+    original = retired.read_bytes()
+    state_path = tmp_path / "main-runtime-status.json"
+    for state in ("running", "update_failed", "failed", "running"):
+        state_path.write_text(json.dumps({
+            "state": state, "updated_at": now.isoformat(),
+        }), encoding="utf-8-sig")
+        payload = _dashboard_module()._dashboard_payload(database)
+        failure = payload["system"]["runtime_update_failure"]
+        alerts = payload["operational_health"]["alerts"]
+        if state == "running":
+            assert failure is None
+            assert not any(a["code"] == "OPS_RUNTIME_UPDATE_FAILED" for a in alerts)
+        else:
+            assert failure == {"status": state.upper(), "failed_at": now.isoformat()}
+            assert any(a["code"] == "OPS_RUNTIME_UPDATE_FAILED" for a in alerts)
+    for malformed in ([], {"state": []}, {"state": "unknown"}):
+        state_path.write_text(json.dumps(malformed), encoding="utf-8")
+        assert _dashboard_module()._dashboard_payload(database)["system"][
+            "runtime_update_failure"
+        ]["status"] == "STATUS_UNAVAILABLE"
+    state_path.unlink()
+    assert _dashboard_module()._dashboard_payload(database)["system"][
+        "runtime_update_failure"
+    ] is None
+    assert retired.read_bytes() == original
 
 
 def test_deployment_provenance_discovers_git_from_standalone_module_root(

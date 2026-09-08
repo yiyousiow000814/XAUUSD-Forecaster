@@ -386,3 +386,15 @@ The outcome settler runs inside the supervised collector loop. Its health uses
 that loop's successful heartbeat, not the timestamp of the most recently
 appended outcome. A quiet interval with no decision past its 30-minute horizon
 is valid idle work and must not become a stale-component alert.
+
+## Current release and sync authority
+
+Current publication health reads main-runtime-status.json only. Retired release
+state is historical audit, never current health authority. Current failed and
+update_failed states remain visible; running supersedes previous failures.
+A missing observation must not fabricate a successful update.
+
+Resource sync warnings describe the latest resource observation, not the latest
+heartbeat cycle. Retained failures remain unresolved until that resource has a
+successful observation. A successful latest resource observation supersedes a
+stale degraded-list entry. Evidence includes its resource observation time.

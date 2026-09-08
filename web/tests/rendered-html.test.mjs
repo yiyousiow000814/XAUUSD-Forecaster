@@ -481,23 +481,16 @@ test("keeps branch throughput limits while refreshing Preview metrics from D1", 
 
 test("runtime update success stays silent while failures have stable presentation", () => {
   assert.equal(runtimeUpdateFailurePresentation(null), null);
-  assert.deepEqual(runtimeUpdateFailurePresentation({
-    status: "ROLLED_BACK",
-    message: "observation failed",
-    failed_at: "2026-08-13T03:00:00Z",
-  }), {
-    label: "新版运行验证失败，已自动恢复上一版。",
-    failedAt: "2026-08-13T03:00:00Z",
-  });
-  assert.equal(runtimeUpdateFailurePresentation({
-    status: "SWITCH_FAILED", message: "switch failed", failed_at: "now",
-  }).label, "新版切换失败，当前版本继续运行。");
-  assert.equal(runtimeUpdateFailurePresentation({
-    status: "ROLLBACK_FAILED", message: "rollback failed", failed_at: "now",
-  }).label, "新版运行验证失败，自动恢复也失败，请检查本机服务。");
-  assert.equal(runtimeUpdateFailurePresentation({
-    status: "PREFLIGHT_FAILED", message: "preflight failed", failed_at: "now",
-  }).label, "新版预检失败，当前版本继续运行。");
+  for (const [status, label] of [
+    ["UPDATE_FAILED", "main 更新失败，请检查当前运行状态。"],
+    ["FAILED", "main 服务启动失败，请检查本机服务。"],
+    ["STATUS_UNAVAILABLE", "无法读取当前 main 运行状态。"],
+    ["UNKNOWN", "当前运行状态异常，请检查本机服务。"],
+  ]) {
+    assert.deepEqual(runtimeUpdateFailurePresentation({status, failed_at: "now"}), {
+      label, failedAt: "now",
+    });
+  }
 });
 
 test("formats growing counts through one compact and exact display contract", () => {

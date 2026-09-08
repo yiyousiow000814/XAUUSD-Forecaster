@@ -725,7 +725,7 @@ def extend_with_component_alerts(
         alerts.append(_alert(
             "OPS_RUNTIME_UPDATE_FAILED",
             severity="ERROR", scope="runtime_update",
-            message_zh="运行版本更新失败，系统已保留或恢复上一版本。",
+            message_zh="main 运行状态异常，请检查当前发布或服务状态。",
             blocking=True, evidence=dict(runtime_update_failure),
         ))
     if daily_news_brief is not None:
@@ -795,6 +795,9 @@ def extend_with_component_alerts(
                 },
             ))
     for resource in sync_degraded_resources:
+        observation = resource.get("last_observation")
+        if isinstance(observation, dict) and observation.get("status") == "OK":
+            continue
         target = str(resource.get("target") or "unknown")
         name = str(resource.get("resource") or "unknown")
         upstream_code = str(resource.get("error_code") or "UNCLASSIFIED")
@@ -813,7 +816,7 @@ def extend_with_component_alerts(
             scope=f"{target}:{name}",
             message_zh=(
                 "公开新闻镜像与预期状态不一致，已停止把本轮同步视为健康。"
-                if mirror_diverged else f"同步资源 {target}/{name} 本轮失败。"
+                if mirror_diverged else f"同步资源 {target}/{name} 最近一次检查失败，尚未确认恢复。"
             ),
             blocking=mirror_diverged or name == "heartbeat",
             evidence={
@@ -823,6 +826,7 @@ def extend_with_component_alerts(
                 "error_type": resource.get("error_type"),
                 "error": resource.get("error"),
                 "details": resource.get("evidence"),
+                "last_observation": resource.get("last_observation"),
             },
         ))
     alerts.sort(key=lambda item: (
