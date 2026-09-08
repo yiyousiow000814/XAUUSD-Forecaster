@@ -143,6 +143,7 @@ test("a changed mirror updates only changed jobs and exact replay writes zero", 
     );
     assert.ok(result.written <= 32);
     admitted += result.written;
+    assert.equal(result.complete, admitted === source.length);
     cycles += 1;
     assert.ok(cycles <= 7);
   }
@@ -172,6 +173,7 @@ test("a changed mirror updates only changed jobs and exact replay writes zero", 
     assert.ok(result.written <= 32);
     assert.ok(result.deleted <= 32);
     completed = result.complete;
+    assert.equal(completed, database.database.prepare("SELECT count(*) n FROM operator_retry_jobs").get().n === live.length);
   }
   assert.equal(completed, true, "live changes must not starve stale-row cleanup");
   assert.equal(database.database.prepare("SELECT count(*) n FROM operator_retry_jobs").get().n, 99);
