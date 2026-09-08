@@ -2229,6 +2229,16 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
     synchronizer = payload["system"]["components"]["sites_synchronizer"]
     assert synchronizer["last_success"] == sync_success
     assert synchronizer["status"] == "OK"
+    assert synchronizer["news_projection_state"] == "UNKNOWN"
+    assert synchronizer["news_last_verified_at"] is None
+    (tmp_path / "dashboard-news-sync-state-cloudflare.json").write_text(
+        json.dumps({"projection_state": "REPLAYING", "last_success": sync_success}),
+        encoding="utf-8",
+    )
+    replay = module._dashboard_payload(database)["system"]["components"]["sites_synchronizer"]
+    assert replay["status"] == "OK", "transport success is independent of news completion"
+    assert replay["news_projection_state"] == "REPLAYING"
+    assert replay["news_last_verified_at"] == sync_success
 
 
 def test_public_source_403_does_not_claim_credentials_are_broken(tmp_path) -> None:
