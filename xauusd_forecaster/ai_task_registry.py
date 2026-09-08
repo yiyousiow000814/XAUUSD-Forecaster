@@ -8,7 +8,6 @@ from .annotation import (
     DEFAULT_GEMINI_MODEL,
     DEFAULT_GEMMA_MODEL,
     FALLBACK_GEMINI_MODEL,
-    TITLE_TRANSLATION_MODELS,
 )
 from .news_impact import IMPACT_MODEL
 from .ai_provider_registry import GEMINI_EMBEDDING_MODEL
@@ -40,7 +39,7 @@ AI_TASK_ROUTES = (
         quota_pressure_tasks=("ACTIVE_IMPACT",),
     ),
     AiTaskRoute(
-        task_type="TITLE_TRANSLATION", models=TITLE_TRANSLATION_MODELS,
+        task_type="TITLE_TRANSLATION", models=(DEFAULT_GEMMA_MODEL,),
         semantic_owner="DISPLAY_ONLY",
         provenance_source="ACTIVE_ANNOTATION",
         quota_pressure_tasks=("TITLE_TRANSLATION",),
