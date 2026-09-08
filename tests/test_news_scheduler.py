@@ -2873,7 +2873,7 @@ def test_embedding_maintenance_does_not_consume_job_attempts_and_resumes(
     ledger.close()
 
 
-def test_display_repair_tries_another_independent_account_before_waiting(
+def test_display_output_failure_does_not_trigger_account_fallback(
     tmp_path, monkeypatch,
 ) -> None:
     from scripts import run_news_annotator as runner
@@ -2898,7 +2898,6 @@ def test_display_repair_tries_another_independent_account_before_waiting(
         if credential.account_id == "account-a":
             return {
                 "status": "ERROR", "error": "display remains invalid",
-                "retry_with_another_account": True,
             }
         return {"status": "OK"}
 
@@ -2906,9 +2905,9 @@ def test_display_repair_tries_another_independent_account_before_waiting(
 
     statuses = runner.run_scheduled_batch(ledger, batch_size=1)
 
-    assert calls == ["account-a", "account-b"]
-    assert statuses[0]["status"] == "OK"
-    assert statuses[0]["attempted_accounts"] == 2
+    assert calls == ["account-a"]
+    assert statuses[0]["status"] == "ERROR"
+    assert statuses[0]["attempted_accounts"] == 1
     ledger.close()
 
 
@@ -3144,7 +3143,7 @@ def test_daily_brief_capacity_reserves_only_its_own_account(
     ledger.close()
 
 
-def test_display_route_uses_declared_fallback_when_gemma_capacity_is_full(
+def test_display_route_does_not_fallback_when_gemma_capacity_is_full(
     monkeypatch,
 ) -> None:
     import xauusd_forecaster.annotation as annotation
@@ -3170,13 +3169,9 @@ def test_display_route_uses_declared_fallback_when_gemma_capacity_is_full(
 
     monkeypatch.setattr(pool.gateway, "generate", generate)
 
-    title, model = pool.call_title(0, annotation.DEFAULT_GEMMA_MODEL, "Headline")
-
-    assert title == "中文标题"
-    assert model == annotation.DEFAULT_GEMINI_MODEL
-    assert calls == [
-        annotation.DEFAULT_GEMMA_MODEL, annotation.DEFAULT_GEMINI_MODEL,
-    ]
+    with pytest.raises(ModelGatewayCapacityExhausted):
+        pool.call_title(0, annotation.DEFAULT_GEMMA_MODEL, "Headline")
+    assert calls == [annotation.DEFAULT_GEMMA_MODEL]
 
 
 def test_scheduler_persists_structured_model_failure_without_credentials(

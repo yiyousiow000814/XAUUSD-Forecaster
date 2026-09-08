@@ -126,8 +126,9 @@ def test_v17_accepts_source_grounded_latin_without_provider_declaration() -> Non
     )
 
 
-def test_v17_ledger_cannot_persist_ungrounded_visible_latin(
-    tmp_path,
+@pytest.mark.parametrize("reviewed_text", ["简述", "iShares S&P/TSX Global Gold Index ETF 股价上涨", "说明" * 900])
+def test_ledger_does_not_second_guess_gemma_display_language(
+    tmp_path, reviewed_text,
 ) -> None:
     now = datetime(2026, 8, 19, 2, 0, tzinfo=UTC)
     prose = "Market expects growth to be strong"
@@ -147,24 +148,21 @@ def test_v17_ledger_cannot_persist_ungrounded_visible_latin(
     })
     annotation = _target_annotation(prose)
     annotation["supporting_evidence"] = [prose]
-    annotation["summary_zh"] = (
-        "报道称 OpenAI Launches New Model，并继续讨论市场反应与政策影响。"
-    )
+    annotation["summary_zh"] = reviewed_text
 
-    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_DISPLAY"):
-        ledger.append_annotation({
-            "annotation_id": "prose-abuse",
-            "source": "named-reference-contract",
-            "source_item_id": "prose-abuse",
-            "revision_number": 1,
-            "raw_content_hash": digest,
-            "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
-            "prompt_version": CURRENT_NEWS_PROMPT_VERSION,
-            "parse_started_at": now,
-            "parsed_at": now,
-            "annotation": annotation,
-        })
-    assert ledger.count("news_annotations") == 0
+    ledger.append_annotation({
+        "annotation_id": "prose-abuse",
+        "source": "named-reference-contract",
+        "source_item_id": "prose-abuse",
+        "revision_number": 1,
+        "raw_content_hash": digest,
+        "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
+        "prompt_version": CURRENT_NEWS_PROMPT_VERSION,
+        "parse_started_at": now,
+        "parsed_at": now,
+        "annotation": annotation,
+    })
+    assert ledger.count("news_annotations") == 1
     ledger.close()
 
 
@@ -263,8 +261,6 @@ def test_v17_retains_v16_current_event_and_transmission_evidence() -> None:
     assert "genre does not erase quoted current market facts" in prompt
     assert "supporting_evidence is a copy field" in prompt
     assert "Never translate, paraphrase" in prompt
-    assert "Any Latin text retained in a Chinese display field" in prompt
-    assert "final visible field must remain Chinese-primary overall" in prompt
     assert "named_references" not in prompt
 
 

@@ -170,20 +170,9 @@ publisher timestamp may serve as `OFFICIAL_RELEASE_TIME` only when the official
 publication is itself the event. Date-only, missing, future, and media-derived
 substitute clocks fail closed for training.
 
-Display-number formatting is repaired deterministically against source
-lexemes. A rejected display response gets one bounded, feedback-guided repair:
-the repair request includes the prior rejection reason and rejected display
-fields, freezes semantic and already-valid display fields, and may return only
-the rejected fields. The repair model may copy exact source-number spellings or
-remove the unsupported numeric claim; it may never convert units or magnitudes.
-An ambiguous or unsupported number remains a validation failure and is never
-replaced by manufactured prose. Validated semantics are checkpointed before a
-failed display attempt is released. Later attempts resume only the rejected
-display fields, carry the latest validation reason, and may use the declared
-fallback display route; they never repeat semantic analysis. Until the display
-passes, no annotation is persisted and no model permission is granted. Display
-repair remains nonterminal and uses bounded retry intervals. Provider,
-transport, malformed-JSON, and model-output contract failures append a
+Display text uses one Gemma review/edit as defined in
+`NEWS_EVIDENCE.md`. Existing checkpoints preserve accepted semantic work.
+Provider, transport, malformed-JSON, and model-output contract failures append a
 `news_llm_failures` row before retry. A rejected structured response also
 appends bounded diagnostic evidence: its failure stage and code, response hash,
 validation cause, and only the selected output fields needed to reproduce the
@@ -192,42 +181,15 @@ prefix and the complete response hash may replace selected fields. Full rejected
 responses, source bodies, prompts, and credentials MUST NOT be duplicated into
 the failure evidence table. Model-output contract
 failures retry once after five minutes and become terminal when the same failure
-repeats, except checkpointed display repair, which remains retryable because it
-cannot change semantic measurements or grant model permission. Each retry
+repeats. Each retry
 preserves bounded failure evidence, and a later versioned recovery may authorize
 one new attempt after another repair mechanism changes.
-
-Chinese-facing annotation fields use two deterministic V17 display questions.
-First, local code derives every maximal visible Latin-and-digit run directly
-from the final field. Each run MUST be an exact, case-sensitive, boundary-safe
-substring of the sole immutable source coordinate space
-`headline + "\n" + body`, or the exact controlled system token `XAUUSD`.
-Repeated source occurrences are valid; no provider declaration or semantic
-classification is consulted. Invented prefixes, suffixes, middle text, joined
-source regions, unsupported scripts, and ungrounded runs fail closed.
-
-Second, the validator evaluates the complete final visible field, without
-masking grounded Latin text, and requires the field to remain Chinese-primary.
-Language balance compares Han content with Latin-letter content only; digits
-have zero English-language weight and remain governed by the independent
-source-number integrity contract. Ordinary line breaks and tabs are layout
-boundaries, while invisible formatting, bidirectional, and surrogate controls
-fail closed.
-Quotation marks, brackets, title casing, source identity, and model-declared
-roles never exempt English prose from that field-level balance. This rule is
-applied consistently during initial validation, invalid-field detection,
-display repair, and checkpoint revalidation. V16 and older records retain their
-frozen legacy display behavior. No V17 row existed in production when the
-obsolete structured declaration schema was removed, so no historical semantic
-object needs a compatibility field or rewrite. Existing display checkpoints
-MUST be revalidated locally against the current deterministic rules before
-another provider request is attempted.
 
 The model gateway distinguishes a request that produced no trustworthy response
 from a response that failed decoding or validation. Capacity, provider pacing,
 HTTP, URL, connection, and timeout failures retain request/transport failure
-codes across display repair and MUST NOT become `MODEL_OUTPUT_CONTRACT_FAILED`.
-Only a returned response rejected by schema, semantic, or display validation may
+codes across display review and MUST NOT become `MODEL_OUTPUT_CONTRACT_FAILED`.
+Only a returned response rejected by schema or semantic validation may
 enter the model-output failure family.
 Waiting six hours would outlive the decision value of timely news.
 HTTP 429 and transient 5xx failures use bounded progressive backoff and become

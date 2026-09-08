@@ -25,44 +25,16 @@ contract and trading/training visibility is owned by the forward-only contract.
 `collector_first_seen_time` remains the authoritative earliest visibility and
 no-lookahead boundary in every case.
 
-Chinese display text is Chinese-primary rather than Chinese-only. Natural
-names, company names, tickers, identifiers, and common abbreviations MAY remain
-in English when English improves readability. Under V17, every maximal visible
-Latin-and-digit run MUST exactly match the immutable
-`headline + "\n" + body` source with safe Latin/digit boundaries, except for
-the controlled system token `XAUUSD`. Grounded Latin remains visible when the
-field-level Chinese-primary balance is measured; source grounding never exempts
-English prose from that check. Digits carry no English-language weight because
-source-number integrity validates them independently. Newlines, carriage
-returns, and tabs are layout boundaries; other control or formatting characters
-fail closed. Display-language repair MUST NOT
-rewrite an otherwise valid semantic category, direction, impact, evidence, or
-confidence measurement. If readable Chinese-primary display text cannot be
-produced, the annotation MUST be withheld from model permission and retried; it
-MUST NOT be persisted as irrelevant or admitted behind a placeholder. A
-semantic-schema or source-evidence failure MUST fail independently and MUST NOT
-be disguised as a translation failure.
-The bounded display repair request MUST identify the prior rejection reason and
-rejected fields, MUST include only the rejected display output, and MUST freeze
-semantic and already-valid display fields. Once semantic validation succeeds,
-an immutable bounded display checkpoint preserves that result. Every later
-attempt resumes from the checkpoint, corrects only rejected display fields,
-includes the latest rejection reason, and MAY escalate across declared display
-model routes; it MUST NOT analyze the article semantics again. Display repair
-remains retryable with bounded backoff until valid output exists. It never
-becomes a completed placeholder or terminal semantic rejection. Historical
-placeholders written by the superseded behavior are ineligible for model use
-and are automatically rediscovered for append-only recovery.
-When exact numeric grounding fails, the next corrective request MUST remove
-numeric spans from its rewrite seed and require complete, numeric-free Chinese
-prose instead of asking the model to choose among the same ambiguous values.
-The validator MUST identify every failed display sibling before retrying so an
-unrequested invalid field cannot make an otherwise valid repair impossible.
-Language validation MUST distinguish ordinary untranslated prose from natural
-English identifiers and names. A complete foreign-language clause or a script
-other than Chinese and Latin requires repair; punctuation, numbers, symbols,
-and natural English proper nouns do not by themselves make Chinese display
-unreadable.
+Gemma reviews the four Chinese display fields once after semantic annotation.
+It returns suitable text unchanged or translates/rewrites it directly. Proper
+names, tickers and abbreviations are allowed. Local code does not veto Gemma's
+text using language ratios, Latin-span grounding or numeric-spelling heuristics.
+There is no display repair loop or fallback model. Only display fields can be
+changed by this review; source facts and semantic measurements remain immutable.
+Existing semantic checkpoints are read to finish previously accepted work, not
+to recreate the retired display-repair workflow. Historical failures remain
+append-only audit evidence. Provider and JSON errors retain ordinary request
+handling and are never recorded as a successful review.
 
 Supporting evidence MUST be an exact span of the immutable headline or body.
 When an otherwise valid semantic response fails only this anchor check, a
