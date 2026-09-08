@@ -382,6 +382,21 @@ export function sessionCommandBudget(declaration) {
     news_evidence: 2 * resource.pages + 10 + (1 + 2700 / 300) * 8,
     heartbeat: 1 + 2700 / 30,
     deferred_audit: 4, observe: 4 * (1 + 900 / 30), inspection: 2 };
+  if (declaration.baseline_resources !== undefined) {
+    const baseline = declaration.baseline_resources;
+    if (!baseline || !validDigest(hashes.baseline_resources)
+      || Object.keys(baseline).sort().join(",") !== "market_batches,market_rows,news_pages,news_records,regular_posts"
+      || baseline.regular_posts !== 7
+      || !bounded(baseline.market_rows, 0, 20_000)
+      || !bounded(baseline.market_batches, Math.ceil(baseline.market_rows / 25), baseline.market_rows)
+      || !bounded(baseline.news_records, 0, NEWS_PROJECTION_MAX_ITEMS)
+      || !bounded(baseline.news_pages, Math.ceil(baseline.news_records / 8), baseline.news_records)) {
+      fail("WORKER_ADAPTER_BASELINE_RESOURCE_COUNTS_INVALID");
+    }
+    // Seven regular writes, real market batches, News prepare/stage/activate,
+    // then eight real route reads. No fabricated acknowledgement or SQL seed.
+    phases.baseline_resources = 17 + baseline.market_batches + baseline.news_pages;
+  }
   const maximum = Object.values(phases).reduce((sum, value) => sum + value, 0);
   if (!Number.isSafeInteger(maximum) || declaration.maximum_commands !== maximum
     || Object.keys(declaration.phases ?? {}).length !== Object.keys(phases).length
