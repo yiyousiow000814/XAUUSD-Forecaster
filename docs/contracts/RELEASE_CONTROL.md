@@ -1,5 +1,23 @@
 # Release Control Contract
 
+## Current main-only publication authority
+
+The owner has retired the custom Stable/Candidate publication policy. Protected
+main is the only production source. Workers Builds directly deploys main after
+the existing build and business tests pass. Unmerged PRs do not activate
+production. The local replacement runs one service set and updates from main
+without retained code slots or automatic rollback. Update failures remain
+visible and are corrected forward; current authoritative data is never reset.
+
+The old coordination contract below applies only to safely retiring the installed
+entrypoints. It is not an activation gate for the replacement. Old scheduled
+publication writers must be disabled before the new owner takes over. Preserve
+Collector atomicity, source-first, strict ACK, authentication and raw evidence.
+The staged policy admission leaves the checked-in old build contract unchanged
+until the cleanup PR replaces it; both exact configurations are checked.
+
+## Retained coordination reference pending deletion
+
 ## Release identity and authority
 
 A release binds one exact Git SHA, one immutable Cloudflare Worker Version ID,
