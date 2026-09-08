@@ -306,7 +306,7 @@ def test_future_release_history_is_versioned_bounded_and_preserves_old_lines(
 
 
 @pytest.mark.parametrize("powershell", ("powershell.exe", "pwsh.exe"))
-@pytest.mark.parametrize("plan_case", ("matching", "missing", "wrong-worker", "wrong-universe", "misbound-run", "no-expected", "production-inflight", "later-append"))
+@pytest.mark.parametrize("plan_case", ("matching", "missing", "wrong-worker", "wrong-universe", "misbound-run", "no-expected", "production-inflight", "later-append", "completed", "completed-wrong-digest", "completed-wrong-groups", "completed-missing-receipt", "completed-wrong-source", "completed-wrong-worker", "completed-wrong-run"))
 def test_release_history_cpu_request_reference_preserves_authority(tmp_path, powershell, plan_case):
     setup = {
         "matching": "",
@@ -319,6 +319,9 @@ def test_release_history_cpu_request_reference_preserves_authority(tmp_path, pow
         "no-expected": "$release.validation.PSObject.Properties.Remove('expected_requests');",
         "production-inflight": "",
         "later-append": "",
+        "completed": "", "completed-wrong-digest": "",
+        "completed-wrong-groups": "", "completed-missing-receipt": "",
+        "completed-wrong-source": "", "completed-wrong-worker": "", "completed-wrong-run": "",
     }[plan_case]
     production_routes = (
         "New-Item -ItemType Directory -Path (Join-Path $repositoryRoot 'web') -Force|Out-Null;"
@@ -338,6 +341,27 @@ def test_release_history_cpu_request_reference_preserves_authority(tmp_path, pow
         "$null=Add-WorkerCpuPlannedRequests -Plan $plan -Groups @($routes[0]) "
         "-SampleKind deficit_top_up -CountPerGroup 1;"
     ) if plan_case == "later-append" else ""
+    completed = (
+        "$groups=@(1..31|%{[pscustomobject]@{family=('family-'+$_);scenario=('q'*1000);"
+        "observed=12;required=10;metrics=[pscustomobject]@{p95_cpu_ms=2;max_cpu_ms=2}}});"
+        "$q=[pscustomobject]@{key=('b'*64);fields=[pscustomobject]@{};"
+        "candidate_worker_version=$release.worker_version_id;candidate_git_sha=$release.git_sha;"
+        "exact_candidate_binding=[pscustomobject]@{executable_bundle_etag=('d'*64)}};"
+        "$decision=[pscustomobject]@{state='QUALIFIED';groups=$groups;global=[pscustomobject]@{max_cpu_ms=2}};"
+        "$receipt=Write-WorkerCpuQualificationReceipt -Qualification $q -ValidationRun $run -Decision $decision;"
+        "$cpu=[pscustomobject]@{worker_version_id=$release.worker_version_id;validation_run=$run;"
+        "qualification_key=$q.key;qualification_receipt_digest=$receipt.receipt_digest;"
+        "qualification_state='QUALIFIED';passed=$true;gate_state='PASSED';max_cpu_ms=2;"
+        "expected_requests=$release.validation.expected_requests;family_reconciliation=$groups;scenario_reconciliation=$groups};"
+        "$release.validation.PSObject.Properties.Remove('expected_requests');"
+        "$release.validation|Add-Member cpu_evidence $cpu;"
+        + ({"completed-wrong-source": "$q.candidate_git_sha='f'*40;$receipt=Write-WorkerCpuQualificationReceipt -Qualification $q -ValidationRun $run -Decision $decision;$cpu.qualification_receipt_digest=$receipt.receipt_digest;",
+            "completed-wrong-worker": "$q.candidate_worker_version='22222222-2222-4222-8222-222222222222';$receipt=Write-WorkerCpuQualificationReceipt -Qualification $q -ValidationRun $run -Decision $decision;$cpu.qualification_receipt_digest=$receipt.receipt_digest;",
+            "completed-wrong-run": "$receipt=Write-WorkerCpuQualificationReceipt -Qualification $q -ValidationRun '22222222-2222-4222-8222-222222222222' -Decision $decision;$cpu.qualification_receipt_digest=$receipt.receipt_digest;",
+            "completed-wrong-digest": "$cpu.qualification_receipt_digest='e'*64;",
+            "completed-wrong-groups": "$cpu.family_reconciliation=@([pscustomobject]@{family='wrong'});",
+            "completed-missing-receipt": "Remove-Item -LiteralPath (Join-Path (Join-Path $workerCpuEvidenceRoot 'qualifications') (($q.key)+'.json'));"}.get(plan_case, ""))
+    ) if plan_case.startswith("completed") else ""
     result = _run_control_center_contract(
         tmp_path,
         "$release=New-ReleaseIdentity -GitSha ('a'*40) "
@@ -355,7 +379,7 @@ def test_release_history_cpu_request_reference_preserves_authority(tmp_path, pow
         "$release.validation=[pscustomobject]@{key=$release.validation_key;validation_run=$run;"
         "worker_qualification=[pscustomobject]@{key=('b'*64)};"
         "expected_requests=@($plan.requests|Where-Object phase -eq 'acceptance')};"
-        + setup +
+        + setup + completed +
         "$before=Get-WorkerCpuCanonicalDigest $release.validation;"
         "$reason='PASSED';try{" + publish + "}"
         "catch{$reason=$_.Exception.Message};"
@@ -364,6 +388,13 @@ def test_release_history_cpu_request_reference_preserves_authority(tmp_path, pow
         "$count=0;$bytes=0;$linked=$false;"
         "if($reason -eq 'PASSED'){$line=Get-Content -LiteralPath $releaseHistoryPath -Raw;"
         "$event=$line|ConvertFrom-ReleaseControlJson;$ref=$event.release.validation.expected_requests_reference;"
+        "if(-not $ref){$ref=$event.release.validation.cpu_evidence.expected_requests_reference};"
+        "if($event.release.validation.cpu_evidence.expected_requests_reference){"
+        "$cpuSummary=$event.release.validation.cpu_evidence;"
+        "if($cpuSummary.gate_state -ne 'PASSED' -or $cpuSummary.max_cpu_ms -ne 2 -or "
+        "$cpuSummary.family_reconciliation_summary.count -ne 31 -or "
+        "$cpuSummary.scenario_reconciliation_summary.canonical_digest -cne "
+        "$cpuSummary.family_reconciliation_summary.canonical_digest){throw 'CPU_HISTORY_SUMMARY_CHANGED'}};"
         "$bytes=[Text.Encoding]::UTF8.GetByteCount($line);if($ref){"
         + later_append +
         "$stored=Read-WorkerCpuRunArtifact -ValidationRun $ref.validation_run -Name $ref.artifact;"
@@ -378,7 +409,7 @@ def test_release_history_cpu_request_reference_preserves_authority(tmp_path, pow
     )
     reason, source_same, plan_same, count, size, linked = result.split(",")
     assert (source_same, plan_same) == ("True", "True")
-    if plan_case in {"matching", "production-inflight", "later-append"}:
+    if plan_case in {"matching", "production-inflight", "later-append", "completed"}:
         assert reason == "PASSED"
         assert (count, linked) == ("372", "True")
         assert int(size) <= 65536

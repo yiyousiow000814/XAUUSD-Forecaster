@@ -462,3 +462,25 @@ PS5.1/PS7; two deep PS5.1 cases fail before repair. Verify actual reads after
 publication, full CPU contract families and the installed connected lifecycle.
 Failure evidence and old qualification files remain intact; a new Candidate
 still has to qualify. Restart and Reverse use the same canonical receipt names.
+
+## Completed CPU evidence has a bounded history projection
+
+The 66bb4bc7 connected run reached completed CPU qualification and persisted its
+receipt, then the Access-preparation history event exceeded 64 KiB. Completed
+cpu_evidence duplicated 372 expected requests and the same 31 reconciliation
+groups twice. In-flight history already referenced the complete request plan;
+apply that identical plan/prefix identity rule to the completed nested payload.
+Before summarizing completed reconciliation groups, verify the qualification
+receipt digest, Worker, Git, run, key and both exact group digests. Preserve all
+other diagnostic/display fields, current executable evidence and original files.
+History uses explicitly named count/digest summaries for the two group arrays;
+they are neither executable qualification nor replacement receipt authority.
+The per-run plan, directed ledger and provider evidence retain raw inputs.
+
+Missing, mismatched or unreadable authority retains the unabridged bounded copy
+and may fail the existing event limit. No event-size increase, old-history rewrite,
+new receipt store, acceptance bypass or provider guarantee is introduced. Existing
+history request-reference tests now cover completed evidence in PS5.1/PS7 and
+wrong receipt digest, altered groups and missing receipt. The two valid completed
+cases failed before correction. Final verification must include the real history
+consumer and complete Access/Switch/Observe path; author review is not independent.

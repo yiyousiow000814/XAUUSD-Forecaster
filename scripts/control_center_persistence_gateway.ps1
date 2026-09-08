@@ -145,36 +145,70 @@ function ConvertTo-ReleaseHistoryValidation {
             }
         )
     }
-    if (-not $validation -or $null -eq $validation.expected_requests -or
-        @($validation.expected_requests).Count -eq 0 -or
-        [string]$validation.validation_run -notmatch '^[0-9a-fA-F-]{36}$' -or
-        [string]$validation.key -cne [string]$Release.validation_key) {
-        return $projection
-    }
-    $plan = Read-WorkerCpuRunArtifact -ValidationRun ([string]$validation.validation_run) -Name "plan.json"
-    if (-not $plan -or
-        [string]$plan.validation_run -cne [string]$validation.validation_run -or
-        [string]$plan.candidate_worker_version -cne [string]$Release.worker_version_id -or
-        [string]$plan.qualification_key -cne [string]$validation.worker_qualification.key) {
-        return $projection
-    }
-    $acceptance = @($plan.requests | Where-Object { [string]$_.phase -eq "acceptance" })
-    $digest = Get-WorkerCpuCanonicalDigest -Value @($validation.expected_requests)
-    if ((Get-WorkerCpuCanonicalDigest -Value $acceptance) -cne $digest -or
-        (Get-WorkerCpuCanonicalDigest -Value @($plan.requests)) -cne [string]$plan.request_universe_digest) {
-        return $projection
-    }
-    $projection.PSObject.Properties.Remove("expected_requests")
-    $projection | Add-Member -Force -NotePropertyName expected_requests_reference -NotePropertyValue (
-        [pscustomobject]@{
-            validation_run = [string]$plan.validation_run
-            artifact = "plan.json"
-            request_count = @($plan.requests).Count
-            request_universe_digest = [string]$plan.request_universe_digest
-            acceptance_count = $acceptance.Count
-            acceptance_digest = $digest
+    foreach ($kind in @("validation", "cpu_evidence")) {
+        $source = if ($kind -eq "validation") { $validation } else { $validation.cpu_evidence }
+        $target = if ($kind -eq "validation") { $projection } else { $projection.cpu_evidence }
+        if ($kind -eq "cpu_evidence") {
+            if (-not $source -or $source -is [string] -or
+                [string]$source.qualification_key -notmatch '^[0-9a-f]{64}$' -or
+                [string]$source.worker_version_id -cne [string]$Release.worker_version_id -or
+                [string]$source.validation_run -cne [string]$validation.validation_run) { continue }
+            try { $receipt = Get-WorkerCpuQualificationReceipt -QualificationKey $source.qualification_key }
+            catch { continue }
+            if (-not $receipt -or
+                [string]$receipt.receipt_digest -cne [string]$source.qualification_receipt_digest -or
+                [string]$receipt.source_worker_version -cne [string]$Release.worker_version_id -or
+                [string]$receipt.source_git_sha -cne [string]$Release.git_sha -or
+                [string]$receipt.validation_run -cne [string]$validation.validation_run -or
+                [string]$receipt.qualification_key -cne [string]$validation.worker_qualification.key) { continue }
+            $groupDigest = Get-WorkerCpuCanonicalDigest -Value @($receipt.cpu_evidence.groups)
+            if ((Get-WorkerCpuCanonicalDigest -Value @($source.family_reconciliation)) -cne $groupDigest -or
+                (Get-WorkerCpuCanonicalDigest -Value @($source.scenario_reconciliation)) -cne $groupDigest) { continue }
         }
-    )
+        if (-not $validation -or $null -eq $source.expected_requests -or
+            @($source.expected_requests).Count -eq 0 -or
+            [string]$validation.validation_run -notmatch '^[0-9a-fA-F-]{36}$' -or
+            [string]$validation.key -cne [string]$Release.validation_key) {
+            continue
+        }
+        $plan = Read-WorkerCpuRunArtifact -ValidationRun ([string]$validation.validation_run) -Name "plan.json"
+        if (-not $plan -or
+            [string]$plan.validation_run -cne [string]$validation.validation_run -or
+            [string]$plan.candidate_worker_version -cne [string]$Release.worker_version_id -or
+            [string]$plan.qualification_key -cne [string]$validation.worker_qualification.key) {
+            continue
+        }
+        $acceptance = @($plan.requests | Where-Object { [string]$_.phase -eq "acceptance" })
+        $digest = Get-WorkerCpuCanonicalDigest -Value @($source.expected_requests)
+        if ((Get-WorkerCpuCanonicalDigest -Value $acceptance) -cne $digest -or
+            (Get-WorkerCpuCanonicalDigest -Value @($plan.requests)) -cne [string]$plan.request_universe_digest) {
+            continue
+        }
+        $target.PSObject.Properties.Remove("expected_requests")
+        $target | Add-Member -Force -NotePropertyName expected_requests_reference -NotePropertyValue (
+            [pscustomobject]@{
+                validation_run = [string]$plan.validation_run
+                artifact = "plan.json"
+                request_count = @($plan.requests).Count
+                request_universe_digest = [string]$plan.request_universe_digest
+                acceptance_count = $acceptance.Count
+                acceptance_digest = $digest
+            }
+        )
+        if ($kind -eq "cpu_evidence") {
+            foreach ($name in @("family_reconciliation", "scenario_reconciliation")) {
+                $target.PSObject.Properties.Remove($name)
+                $target | Add-Member -Force -NotePropertyName ($name + "_summary") -NotePropertyValue (
+                    [pscustomobject]@{
+                        count = @($source.$name).Count
+                        canonical_digest = $groupDigest
+                        validation_run = [string]$validation.validation_run
+                        qualification_receipt_digest = [string]$receipt.receipt_digest
+                    }
+                )
+            }
+        }
+    }
     return $projection
 }
 
