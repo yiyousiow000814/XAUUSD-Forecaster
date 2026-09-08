@@ -13,31 +13,13 @@ ROOT = Path(__file__).resolve().parents[1]
 FORMAL = ROOT / "formal" / "release-control"
 MANIFEST = json.loads((FORMAL / "shards.json").read_text(encoding="utf-8"))
 
-LEGACY_PROPERTIES = {
-    "TypeOK", "AtMostOneProductionWriter", "PrepareVerifyKeepsStableSync",
-    "CandidatePreparationPreservesStable", "VerificationWatermarkDoesNotRegress",
-    "StaleSupervisorIsFenced", "PassedIdentityIsExact", "AcceptedEvidenceIsRequired",
-    "AccessEvidenceIsRequired", "InvalidAccessReceiptCannotPass",
-    "AccessApprovalIsIdempotent", "PassedGatesAreSafe", "HardFailuresBlock",
-    "UnrelatedDebtIsNotFailure", "SwitchRequiresAcceptance",
-    "StableUnchangedDuringSwitchAndObserve", "SingleTransaction",
-    "ActiveLegacyEqualsCurrent", "LegacyStableWritesRemainFenced",
-    "CurrentIdentitySetMatchesGeneration", "FreshStagingIdentitySetMatchesGeneration",
-    "CurrentGenerationCannotBeCleaned", "FreshStagingCannotBeCleaned",
-    "InvalidStagedLegacyCannotActivate", "RecoveredActivationRequiresIndependentChecks",
-    "ActiveRecoveredSupervisorIsSafe", "CpuQualificationRequiredForPass",
-    "ProviderPendingIsNotCandidateFailure", "CpuRetryBudgetIsBounded",
-    "CpuHardFailureCannotQualify", "ReusedCpuEvidenceMatchesArtifact",
-    "CpuRecoveryPreservesIndependentStages", "StableChangesOnlyAfterObservation",
-    "CpuEvidenceOnlyGrows", "ObservedFailureEventuallyRestoresPrevious",
-    "SwitchFailureEventuallyTerminates", "TransactionEventuallyTerminates",
-    "AbandonedInstallEventuallySafe",
-}
+REQUIRED_PROPERTIES = {"TypeOK", "VerificationWatermarkDoesNotRegress", "CurrentGenerationCannotBeCleaned", "InvalidStagedLegacyCannotActivate", "AccessEvidenceIsRequired", "InvalidAccessReceiptCannotPass", "ReuseDoesNotFabricateHumanApproval", "CpuRetryBudgetIsBounded", "CpuHardFailureCannotQualify"}
 
 
-def test_every_legacy_property_has_an_authoritative_shard() -> None:
+
+def test_retained_business_properties_have_authoritative_shards() -> None:
     assigned = {prop for shard in MANIFEST["shards"] for prop in shard["properties"]}
-    assert LEGACY_PROPERTIES <= assigned
+    assert REQUIRED_PROPERTIES <= assigned
     for shard in MANIFEST["shards"]:
         module = FORMAL / shard["module"]
         config = FORMAL / shard["config"]
@@ -48,23 +30,6 @@ def test_every_legacy_property_has_an_authoritative_shard() -> None:
             assert prop in contract, (shard["id"], prop)
 
 
-def test_required_models_do_not_reintroduce_the_monolithic_cartesian_product() -> None:
-    cpu = (FORMAL / "CpuEvidence.tla").read_text(encoding="utf-8")
-    integration = (FORMAL / "ReleaseIntegration.tla").read_text(encoding="utf-8")
-    core = (FORMAL / "CoreRelease.tla").read_text(encoding="utf-8")
-    other = "\n".join(
-        (FORMAL / name).read_text(encoding="utf-8")
-        for name in ("InstallRecovery.tla", "NewsMigration.tla", "AccessEvidence.tla")
-    )
-    assert "evidence" in cpu and "topUps" in cpu and "receiptKey" in cpu
-    assert 'CpuStates == {"NOT_REQUIRED", "PENDING", "QUALIFIED", "HARD_FAILURE"}' in integration
-    assert "CpuSamples" not in integration + core + other
-    for detailed_cpu_dimension in (
-        "receiptValid", "receiptQuotasSatisfied", "reserveUses", "topUps"
-    ):
-        assert detailed_cpu_dimension not in integration + core + other
-    assert "install" not in cpu and "stagingGeneration" not in cpu and "accessReceipt" not in cpu
-    assert "evidence" not in core and "topUps" not in core
 
 
 def test_cpu_formal_shard_models_one_globally_bounded_multi_family_repair() -> None:
@@ -258,19 +223,10 @@ def test_tool_failure_report_is_not_model_pass(tmp_path, monkeypatch, tool_runne
     assert report["tool_identity"]["sha256"] == tool_runner._load_tool_lock()["sha256"]
 
 
-def test_model_interfaces_match_the_cpu_control_implementation() -> None:
-    evidence = (ROOT / "scripts" / "worker_cpu_evidence.ps1").read_text(encoding="utf-8")
-    controller = (ROOT / "scripts" / "xauusd_control_center.ps1").read_text(encoding="utf-8")
-    for production_state in (
-        "PROVIDER_EVIDENCE_PENDING", "PROVIDER_EVIDENCE_INSUFFICIENT",
-        "HARD_FAILURE", "QUALIFIED", "QUALIFIED_WITH_PROVIDER_OMISSION",
-        "CPU_OUTLIER_REVIEW_REQUIRED", "QUALIFIED_WITH_ISOLATED_CPU_OUTLIER",
-    ):
-        assert production_state in evidence + controller
-    assert "qualification_key" in evidence
-    assert "RetryCandidateValidation" in controller
-    assert "CpuQualificationRequiredForPass" in (FORMAL / "ReleaseIntegration.tla").read_text(encoding="utf-8")
-    assert "NoPromoteFromPendingCpu" in (FORMAL / "CoreRelease.tla").read_text(encoding="utf-8")
+def test_cpu_evidence_interface_retains_bounded_qualification_states() -> None:
+    evidence = (ROOT / "scripts/worker_cpu_evidence.ps1").read_text(encoding="utf-8")
+    for state in ("HARD_FAILURE", "QUALIFIED", "qualification_key"):
+        assert state in evidence
 
 
 @pytest.mark.parametrize("inside_source", [False, True])
@@ -282,7 +238,7 @@ def test_formal_report_can_be_isolated_without_misreporting_tool_failure(
     source.mkdir()
     monkeypatch.setattr(tool_runner, "ROOT", source)
     output = source / "generated" if inside_source else tmp_path / "evidence"
-    monkeypatch.setattr(sys, "argv", ["run_tla_model.py", "--shard", "core-release-safety",
+    monkeypatch.setattr(sys, "argv", ["run_tla_model.py", "--shard", "cpu-evidence-safety",
         "--output", "local", "--report-directory", str(output)])
     def unavailable(*_args):
         raise tool_runner.ToolError("TOOL_UNAVAILABLE", "fixture source unavailable")
@@ -293,97 +249,6 @@ def test_formal_report_can_be_isolated_without_misreporting_tool_failure(
         assert not output.exists()
     else:
         assert tool_runner.main() == 2
-        report = json.loads((output / "core-release-safety.json").read_text())
+        report = json.loads((output / "cpu-evidence-safety.json").read_text())
         assert report["result"] == "TOOL_UNAVAILABLE"
         assert not list(source.iterdir())
-
-
-def test_deferred_projection_properties_are_owned_by_core_integration():
-    required = {"CommitRequiresExactDeferredAck", "PendingOrFailedProjectionKeepsPreviousCommitted",
-                "ProjectionFailureEventuallyRestoresPrevious"}
-    shards = [row for row in MANIFEST["shards"] if row["module"] == "CoreRelease.tla"]
-    assert required <= {prop for row in shards for prop in row["properties"]}
-    for row in shards:
-        assert "scripts/check_deferred_projection_parity.py" in row["paths"]
-        assert "scripts/run_dashboard_sync.py" in row["paths"]
-        config = (FORMAL / row["config"]).read_text()
-        for prop in required.intersection(row["properties"]):
-            assert prop in config
-
-
-def test_release_integration_models_authoritative_receipt_waterfall() -> None:
-    integration = (FORMAL / "ReleaseIntegration.tla").read_text(encoding="utf-8")
-    config = (FORMAL / "ReleaseIntegrationSafety.cfg").read_text(encoding="utf-8")
-    for contract in (
-        "CompleteEvidenceRequiredForPass",
-        "BehaviorKeyChangeInvalidatesReuse",
-        "StaleLeaseCannotAuthorize",
-        "TamperedReceiptCannotPromote",
-        "DependencyDigestCannotBeReplaced",
-        "ImmutableReusePreservesIdentity",
-        "ReadPlanningDoesNotMutateProduction",
-        "EvidenceTransactionIsSingle",
-    ):
-        assert contract in integration
-        assert contract in config
-    for unrelated_detail in (
-        "CpuSamples", "accessReceipt", "stagingGeneration", "installCheckpoint",
-    ):
-        assert unrelated_detail not in integration
-
-
-def test_runtime_read_model_formal_shard_separates_observation_from_authority() -> None:
-    model = (FORMAL / "ReleaseRuntimeReadModel.tla").read_text(encoding="utf-8")
-    config = (FORMAL / "ReleaseRuntimeReadModelSafety.cfg").read_text(encoding="utf-8")
-    for contract in (
-        "ActiveMismatchDoesNotMoveCommittedOrLkg",
-        "ArtifactExistenceIndependentFromPlacement",
-        "NotAssignedAloneDoesNotMeanArtifactMissing",
-        "ReverseAttemptRequiresSafeAuthority",
-        "FailedOrUnknownLookupFailsClosed",
-        "UnknownActiveObservationFailsClosed",
-        "ActiveDriftFailsClosed",
-        "ReverseTransactionRequiresActualActiveCommittedEquality",
-        "DegradedAuthorityAllowsReverse",
-        "InvalidCommittedIdentityFailsClosed",
-        "InvalidPreviousIdentityFailsClosed",
-        "ArbitraryLegacyLabelFailsClosed",
-        "ExactNarrowLegacyReachesArtifactEvaluation",
-        "InvalidOwnershipFailsClosed",
-        "MissingObservationStatusIsNotAvailable",
-        "ReadObservationDoesNotMutateRelease",
-        "ReadModelNeverChangesCommittedOrLkg",
-    ):
-        assert contract in model
-        assert contract in config
-    assert "CpuSamples" not in model
-    assert "accessReceipt" not in model
-    assert "stagingGeneration" not in model
-    assert "CommitAfterSuccessfulObservation" not in model
-    assert "activeMatchesCommitted" not in model
-    assert '/\\ active = committed' in model
-    assert "transaction => active = committed" in model
-
-
-def test_recovery_hotfix_formal_shards_keep_mode_orthogonal_and_bounded() -> None:
-    model = (FORMAL / "RecoveryHotfix.tla").read_text(encoding="utf-8")
-    safety = (FORMAL / "RecoveryHotfixSafety.cfg").read_text(encoding="utf-8")
-    liveness = (FORMAL / "RecoveryHotfixLiveness.cfg").read_text(encoding="utf-8")
-    for contract in (
-        "ActiveUnknownCannotBegin",
-        "RestoreLkgDoesNotChangeCommitted",
-        "HotfixCommitsOnlyAfterObservation",
-        "FailedHotfixRestoresLkg",
-        "SingleRecoveryTransaction",
-        "ForbiddenFamilyCannotEnterHotfix",
-        "RecoveryUsesEvidenceDag",
-        "RecoveryModeAddsNoPhase",
-        "DegradedActiveHasRecoveryPath",
-        "DriftedActiveCanRestoreLkg",
-    ):
-        assert contract in model
-        assert contract in safety
-    assert "RecoveryEventuallyTerminates" in model
-    assert "RecoveryEventuallyTerminates" in liveness
-    assert '{"STABLE", "SWITCH", "OBSERVE"}' in model
-    assert "hotfixReceipt" not in model

@@ -12,7 +12,6 @@ ARCHITECTURE_DOCS = (
     Path("docs/README.md"),
     Path("docs/contracts/ARCHITECTURE_RULES.md"),
     Path("docs/design/SYSTEM_ARCHITECTURE.md"),
-    Path("docs/audits/CURRENT_MAIN_ARCHITECTURE_2026_09_01.md"),
 )
 LINK_PATTERN = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 CODE_PATTERN = re.compile(r"`([^`\r\n]+)`")

@@ -65,174 +65,22 @@ def test_windows_runtime_gate_is_parallel_bounded_and_keeps_required_name() -> N
 
 
 def test_windows_runtime_manifest_assigns_every_required_test_exactly_once() -> None:
-    expected: set[str] = set()
-    for relative in (
-        "tests/test_main_runtime.py",
-        "tests/test_single_publication.py",
-        "tests/test_public_health_check.py",
-        "tests/test_runtime_health.py",
-        "tests/test_news_scheduler.py",
-        "tests/test_runtime_root_ownership.py",
-        "tests/test_cross_version_runtime_recovery.py",
-        "tests/test_runtime_launchers.py",
-            "tests/test_control_plane_install.py",
-            "tests/test_release_evidence_nodes.py",
-            "tests/test_release_runtime_read_model.py",
-            "tests/test_recovery_hotfix.py",
-            "tests/test_watchdog_singleton.py",
-        ):
-        expected.update(f"{relative}::{name}" for name in _top_level_tests(relative))
-    expected.add(
-        "tests/test_artifact_path_migration.py::"
-        "test_real_repair_entrypoint_preserves_source_authority_and_fails_closed"
-    )
-
-    assignments = Counter(
-        nodeid
-        for shard in WINDOWS_MANIFEST["shards"]
-        for spec in shard["tests"]
-        for nodeid in _owned_tests(spec)
-    )
-    assert set(assignments) == expected
-    assert {nodeid: count for nodeid, count in assignments.items() if count != 1} == {}
-    assert {shard["family"] for shard in WINDOWS_MANIFEST["shards"]} == {
-        "single-active-publication",
-        "windows-runtime-core",
-        "windows-runtime-paths",
-        "windows-runtime-release",
-        "windows-runtime-artifact-repair",
-        "windows-runtime-cross-version",
-    }
-    shard_by_id = {shard["id"]: shard for shard in WINDOWS_MANIFEST["shards"]}
-    assert "compatibility" not in shard_by_id
-    assert {
-        "compatibility-discovery",
-        "compatibility-qualification",
-        "compatibility-boundaries",
-    }.issubset(shard_by_id)
-    compatibility_assignments = {
-        nodeid
-        for shard_id in ("compatibility-discovery", "compatibility-qualification", "compatibility-boundaries")
-        for spec in shard_by_id[shard_id]["tests"]
-        for nodeid in _owned_tests(spec)
-    }
-    assert compatibility_assignments == set(_owned_tests({
-        "path": "tests/test_runtime_launchers.py",
-        "from": "test_required_github_gate_set_is_exact_and_missing_gate_stays_pending",
-        "through": "test_broadcast_owner_starts_independently_without_reclassifying_core_services",
-    }))
-    install_owners = ("control-install-configuration", "control-install")
-    install_assignments = Counter(
-        nodeid
-        for shard_id in install_owners
-        for spec in shard_by_id[shard_id]["tests"]
-        for nodeid in _owned_tests(spec)
-    )
-    assert install_assignments == Counter(_owned_tests({"path": "tests/test_control_plane_install.py"}))
-    # Whole function selectors preserve every parameterized case under exactly
-    # one owner; neither family may silently fall back to the complete file.
-    for shard_id in install_owners:
-        assert all({"from", "through"}.issubset(spec) for spec in shard_by_id[shard_id]["tests"])
+    required = ['tests/test_main_runtime.py', 'tests/test_public_health_check.py', 'tests/test_runtime_health.py', 'tests/test_news_scheduler.py', 'tests/test_runtime_root_ownership.py', 'tests/test_cross_version_runtime_recovery.py']
+    expected = {f"{path}::{name}" for path in required for name in _top_level_tests(path)}
+    assigned = Counter(nodeid for shard in WINDOWS_MANIFEST["shards"] for spec in shard["tests"] for nodeid in _owned_tests(spec))
+    assert set(assigned) == expected
+    assert all(count == 1 for count in assigned.values())
 
 
 def test_windows_runtime_selector_uses_authoritative_impact_map(monkeypatch) -> None:
-    spec = importlib.util.spec_from_file_location(
-        "select_windows_runtime_shards",
-        ROOT / "scripts" / "select_windows_runtime_shards.py",
-    )
-    assert spec and spec.loader
+    spec = importlib.util.spec_from_file_location("select_windows_runtime_shards", ROOT / "scripts/select_windows_runtime_shards.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-
-    monkeypatch.setattr(
-        module, "_changed_paths", lambda _base: [".github/windows-runtime-shards.json"]
-    )
-    assert {item["id"] for item in module.select("base")} == {
-        shard["id"] for shard in WINDOWS_MANIFEST["shards"]
-    }
+    for path in ("scripts/main_runtime.ps1", "scripts/run_main_services.ps1", ".github/windows-runtime-shards.json"):
+        monkeypatch.setattr(module, "_changed_paths", lambda _base, p=path: [p])
+        assert {row["id"] for row in module.select("base")} == {"main-runtime"}
     monkeypatch.setattr(module, "_changed_paths", lambda _base: ["web/app/page.tsx"])
-    assert module.select("base") == [
-        {"id": "no-windows-impact", "runner": "ubuntu-latest"}
-    ]
-    monkeypatch.setattr(
-        module, "_changed_paths", lambda _base: ["scripts/worker_cpu_evidence.ps1"]
-    )
-    assert {item["id"] for item in module.select("base")} == {
-        "evidence",
-        "provider-adapters",
-        "transaction",
-        "migration-acceptance",
-    }
-    owner_shards = {
-        "scripts/control_center_persistence_gateway.ps1": "persistence",
-        "scripts/control_center_provider_adapters.ps1": "provider-adapters",
-        "scripts/control_center_runtime_supervision.ps1": "runtime-ownership",
-        "scripts/control_center_evidence_authority.ps1": "evidence",
-        "scripts/control_center_transaction_engine.ps1": "transaction",
-        "scripts/control_center_recovery_engine.ps1": "recovery",
-        "scripts/control_center_install.ps1": "control-install",
-        "scripts/control_center_presentation.ps1": "presentation",
-    }
-    for owner_path, owner_shard in owner_shards.items():
-        monkeypatch.setattr(module, "_changed_paths", lambda _base, p=owner_path: [p])
-        selected = {item["id"] for item in module.select("base")}
-        assert {"facade-composition", owner_shard}.issubset(selected)
-        if owner_path == "scripts/control_center_transaction_engine.ps1":
-            assert "migration-acceptance" in selected
-        if owner_path == "scripts/control_center_runtime_supervision.ps1":
-            assert "runtime-candidate-validation" in selected
-    rehearsal = next(row for row in WINDOWS_MANIFEST["shards"] if row["id"] == "control-install-rehearsal")
-    for path in rehearsal["paths"]:
-        monkeypatch.setattr(module, "_changed_paths", lambda _base, p=path: [p])
-        assert "control-install-rehearsal" in {item["id"] for item in module.select("base")}
-    install = next(row for row in WINDOWS_MANIFEST["shards"] if row["id"] == "control-install")
-    for path in install["paths"]:
-        monkeypatch.setattr(module, "_changed_paths", lambda _base, p=path: [p])
-        assert {"control-install-configuration", "control-install"}.issubset(
-            item["id"] for item in module.select("base")
-        )
-
-
-def test_windows_runtime_runner_emits_bounded_machine_evidence(monkeypatch, tmp_path) -> None:
-    runner = (ROOT / "scripts" / "run_windows_runtime_shard.py").read_text(
-        encoding="utf-8"
-    )
-    for contract in (
-        '"--timeout=30"',
-        '"--durations=30"',
-        '"schema_version": "windows-runtime-shard-result-v1"',
-        '"elapsed_seconds"',
-        '"test_selectors"',
-    ):
-        assert contract in runner
-    spec = importlib.util.spec_from_file_location("windows_rehearsal_runner", ROOT / "scripts/run_windows_runtime_shard.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    calls = []
-
-    def execute(command, **kwargs):
-        calls.append(command)
-        assert kwargs["env"]["XAUUSD_CONTROL_LOAD_TIMING"] == "1"
-        assert kwargs["env"]["XAUUSD_CONTROL_LOAD_DIAGNOSTIC_SHARD"] == module.sys.argv[2]
-        return subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr(module.subprocess, "run", execute)
-    monkeypatch.setattr(module.sys, "argv", ["runner", "--shard", "control-install-rehearsal", "--output", str(tmp_path)])
-    assert module.main() == 0
-    assert calls == [[module.sys.executable, str(ROOT / "scripts/rehearse_control_plane_takeover.py")]]
-    report = json.loads((tmp_path / "control-install-rehearsal.json").read_text())
-    assert report["result"] == "PASS"
-    assert report["rehearsal_script"] == "scripts/rehearse_control_plane_takeover.py"
-    assigned = []
-    for shard_id in ("control-install-configuration", "control-install"):
-        monkeypatch.setattr(module.sys, "argv", ["runner", "--shard", shard_id, "--output", str(tmp_path)])
-        assert module.main() == 0
-        selectors = module.shard_nodeids(shard_id)
-        assert selectors and all("::" in selector and "[" not in selector for selector in selectors)
-        assert calls[-1][-len(selectors):] == selectors
-        assert "--timeout=30" in calls[-1]
-        assigned.extend(selectors)
-    assert Counter(assigned) == Counter(_owned_tests({"path": "tests/test_control_plane_install.py"}))
+    assert module.select("base") == [{"id": "no-windows-impact", "runner": "ubuntu-latest"}]
 
 
 def test_python_gate_is_parallel_bounded_and_keeps_required_name() -> None:

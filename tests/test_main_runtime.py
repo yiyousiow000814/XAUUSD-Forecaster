@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -120,24 +121,24 @@ catch {{ @{{error=$_.Exception.Message}} | ConvertTo-Json }}
     assert "local changes" in result["error"]
     assert (runtime / "version.txt").read_text() == "user WIP"
     assert git(runtime, "rev-parse", "HEAD") == expected
-    # Recover code after new authoritative facts arrive: never restore old data.
+    # Update forward after new authoritative facts arrive; never restore old data.
     (runtime / "version.txt").write_text("second")
     evidence.write_text("newest authoritative fixture facts")
     result = powershell(tmp_path, f"""
 $script:RuntimeRoot = {ps_quote(runtime)}
 $script:ForwardRoot = {ps_quote(forward)}
 $script:LogRoot = $script:ForwardRoot
-$changed = Set-RuntimeRevision -Services @() -Revision {ps_quote(first)}
+$changed = Set-RuntimeRevision -Services @() -Revision {ps_quote(third)}
 @{{changed=$changed; head=(Invoke-RuntimeGit -Arguments @('rev-parse', 'HEAD'))}} | ConvertTo-Json
 """)
-    assert result == {"changed": True, "head": first}
+    assert result == {"changed": True, "head": third}
     assert evidence.read_text() == "newest authoritative fixture facts"
 
 
 def test_actual_control_entrypoint_reads_status_without_creating_runtime(tmp_path: Path) -> None:
     runtime = tmp_path / "not created"
     result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-File", str(ROOT / "scripts/xauusd_single_runtime.ps1"),
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-File", str(ROOT / "scripts/run_main_services.ps1"),
          "-Action", "StatusJson", "-RuntimeRoot", str(runtime)],
         capture_output=True, text=True, timeout=20, creationflags=subprocess.CREATE_NO_WINDOW,
     )
@@ -164,7 +165,7 @@ def test_actual_supervisor_preserves_stop_and_rejects_duplicate_owner(tmp_path: 
     runtime = tmp_path / "isolated runtime"
     scripts = runtime / "scripts"
     scripts.mkdir(parents=True)
-    for name in ("main_runtime.ps1", "xauusd_single_runtime.ps1", "xauusd_single_runtime_launcher.vbs"):
+    for name in ("main_runtime.ps1", "run_main_services.ps1", "main_services_launcher.vbs"):
         (scripts / name).write_bytes((ROOT / "scripts" / name).read_bytes())
     (scripts / "fixture.py").write_text("import time\ntime.sleep(120)\n")
     (scripts / "windows-service-launch-contract.json").write_text(json.dumps({
@@ -172,15 +173,19 @@ def test_actual_supervisor_preserves_stop_and_rejects_duplicate_owner(tmp_path: 
         "services": [{"key": "fixture", "kind": "Python", "script": "scripts\\fixture.py", "arguments": []}],
     }))
     (runtime / ".gitignore").write_text(".local/\n")
+    (runtime / "pyproject.toml").write_text("# fixture dependencies\n")
     git(runtime, "init", "-b", "main")
     git(runtime, "config", "user.name", "Runtime contract")
     git(runtime, "config", "user.email", "fixture@example.invalid")
     git(runtime, "add", ".")
     git(runtime, "commit", "-m", "isolated runtime")
     forward = runtime / ".local/forward"
+    git(runtime, "remote", "add", "origin", str(runtime))
+    forward.mkdir(parents=True)
+    (forward / "main-installed-dependencies.sha256").write_text(hashlib.sha256((runtime / "pyproject.toml").read_bytes()).hexdigest().upper())
     status_path = forward / "main-runtime-status.json"
-    command = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(scripts / "xauusd_single_runtime.ps1"), "-RuntimeRoot", str(runtime)]
-    owner = subprocess.Popen([*command, "-Action", "Watchdog"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW)
+    command = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(scripts / "run_main_services.ps1"), "-RuntimeRoot", str(runtime)]
+    owner = subprocess.Popen([*command, "-Action", "Run"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW)
 
     def wait_state(state: str) -> dict:
         deadline = time.monotonic() + 20
@@ -198,7 +203,7 @@ def test_actual_supervisor_preserves_stop_and_rejects_duplicate_owner(tmp_path: 
     try:
         status = wait_state("stopped")
         assert status["services"]["fixture"] == []
-        second = subprocess.run([*command, "-Action", "Watchdog"], capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+        second = subprocess.run([*command, "-Action", "Run"], capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
         assert second.returncode == 0, second.stderr
         assert read_runtime_json(status_path)["controller_pid"] == owner.pid
         # Exercise the actual CLI without making its launcher the initial owner.

@@ -7,6 +7,7 @@ import pytest
 
 from scripts.check_repository_policy import (
     EXPECTED_CLOUDFLARE_BUILD_CONTRACT,
+    MAIN_DIRECT_BUILD_CONTRACT,
     check_repository,
 )
 
@@ -153,26 +154,36 @@ def test_current_repository_satisfies_hosting_policy() -> None:
     assert check_repository(root) == []
 
 
-def test_rejects_missing_or_wrong_production_build_contract(tmp_path: Path) -> None:
+def test_rejects_missing_or_mutable_production_build_contract(tmp_path: Path) -> None:
     contract = tmp_path / "web" / "cloudflare-build-contract.json"
     contract.unlink()
-    assert "main artifact Cloudflare production build contract is required" in boundaries(tmp_path)
+    assert "exact-main immutable Cloudflare production build contract is required" in boundaries(tmp_path)
 
     write(
         tmp_path,
         "web/cloudflare-build-contract.json",
-        VALID_BUILD_CONTRACT.replace("npm run cf:upload", "wrangler versions upload"),
+        VALID_BUILD_CONTRACT.replace("versions upload", "deploy"),
     )
     assert (
-        "Cloudflare production build contract drifted from main artifact upload"
+        "Cloudflare production build contract drifted from exact-main immutable upload"
         in boundaries(tmp_path)
     )
 
 
-def test_rejects_package_script_bypassing_main_publication_entrypoint(tmp_path: Path) -> None:
+def test_rejects_direct_production_deploy_package_script(tmp_path: Path) -> None:
     write(
         tmp_path,
         "web/package.json",
         '{"scripts":{"cf:deploy":"npm test && wrangler deploy"}}',
     )
-    assert "production package scripts must use the maintenance publication entrypoint" in boundaries(tmp_path)
+    assert "direct production wrangler deploy script is forbidden" in boundaries(tmp_path)
+
+
+def test_admits_only_exact_main_direct_build_contract(tmp_path: Path) -> None:
+    write(tmp_path, "web/cloudflare-build-contract.json", json.dumps(MAIN_DIRECT_BUILD_CONTRACT))
+    assert check_repository(tmp_path) == []
+    for branch in ("feature", "", "*"):
+        changed = json.loads(json.dumps(MAIN_DIRECT_BUILD_CONTRACT))
+        changed["source"]["production_branch"] = branch
+        write(tmp_path, "web/cloudflare-build-contract.json", json.dumps(changed))
+        assert boundaries(tmp_path)

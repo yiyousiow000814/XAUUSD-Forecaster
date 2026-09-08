@@ -33,8 +33,7 @@
         "tests/test_assistant_chat_worker.py",
         "tests/test_news_semantic_contract_v15.py",
         "tests/test_scheduler_model_gateway.py",
-        "tests/test_assistant_events.py",
-        "tests/test_release_evidence_nodes.py"
+        "tests/test_assistant_events.py"
       ]
     },
     {
@@ -88,8 +87,7 @@
         "tests/test_named_reference_benchmark.py",
         "tests/test_public_health_check.py",
         "tests/test_execution_costs.py",
-        "tests/test_main_runtime.py",
-        "tests/test_single_publication.py"
+        "tests/test_main_runtime.py"
       ]
     },
     {

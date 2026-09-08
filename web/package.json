@@ -16,9 +16,7 @@
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
     "cf:types": "wrangler types worker-configuration.d.ts",
-    "cf:types:check": "wrangler types worker-configuration.d.ts --check",
-    "cf:preview-upload": "wrangler versions upload --name aurum-signal-room-preview",
-    "cf:upload": "node ./build/upload-main.mjs"
+    "cf:types:check": "wrangler types worker-configuration.d.ts --check"
   },
   "dependencies": {
     "@dagrejs/dagre": "3.1.1",

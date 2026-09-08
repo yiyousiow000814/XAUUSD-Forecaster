@@ -1,34 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
-import { uploadMain } from "../build/upload-main.mjs";
 
-const sha = "a".repeat(40);
-const env = { WORKERS_CI_BRANCH: "main", WORKERS_CI_COMMIT_SHA: sha };
-
-test("matching main build uploads an artifact without changing traffic", () => {
-  let calls = 0;
-  const status = uploadMain({ env, head: () => sha, deploy: (args) => {
-    calls++;
-    assert.deepEqual(args, ["versions", "upload", "--message", `main:${sha}`]);
-    return 7;
-  } });
-  assert.equal(calls, 1);
-  assert.equal(status, 7);
-});
-
-test("other branches, missing identity and mismatched source cannot upload", () => {
-  for (const build of [{}, { ...env, WORKERS_CI_BRANCH: "preview" }, { ...env, WORKERS_CI_COMMIT_SHA: "bad" }, env]) {
-    assert.throws(() => uploadMain({ env: build, head: () => "b".repeat(40), deploy: () => assert.fail("must not deploy") }));
-  }
-});
-
-test("actual node entrypoint rejects a non-main build without starting Wrangler", () => {
-  const result = spawnSync(process.execPath, [fileURLToPath(new URL("../build/upload-main.mjs", import.meta.url))], {
-    env: { ...process.env, WORKERS_CI_BRANCH: "preview", WORKERS_CI_COMMIT_SHA: sha },
-    encoding: "utf8", windowsHide: true,
-  });
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /requires a Cloudflare main build/);
+const contract = JSON.parse(readFileSync(new URL("../cloudflare-build-contract.json", import.meta.url), "utf8"));
+test("production builds use only main and native direct deployment", () => {
+  assert.equal(contract.source.production_branch, "main");
+  assert.equal(contract.non_production_builds_enabled, false);
+  assert.equal(contract.commands.build, "npm ci && npm test");
+  assert.equal(contract.commands.deploy, 'npx wrangler deploy --message "main:$WORKERS_CI_COMMIT_SHA"');
+  assert.deepEqual(contract.output, {artifact_kind:"PRODUCTION_ARTIFACT", immutable_version_only:false, changes_stable_traffic:true});
 });

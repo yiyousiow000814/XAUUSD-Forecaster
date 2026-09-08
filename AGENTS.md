@@ -312,15 +312,13 @@ typos.
   especially when passing field flags that would otherwise imply a write.
 - Follow `docs/contracts/HOSTING_BOUNDARIES.md` and
   `docs/runbooks/CLOUDFLARE_DEPLOYMENT.md`.
-- Git push, pull-request merge, and `main` movement must never activate
-  production. Cloudflare builds upload immutable Versions only. The replacement
-  publication entry is `scripts/publish_single_version.py`: fixed artifacts,
-  required tests and compatibility, authorized maintenance, single-version
-  native deployment, real business/ACK verification and explicit code recovery.
-  Preserve current authoritative data during recovery. Retain old supervision
-  until validated takeover, then retire its exclusive coordination; old
-  Candidate/Switch/Observe gates do not govern the replacement. Follow
-  `docs/contracts/RELEASE_CONTROL.md`.
+- Protected main is the only production source. Native Cloudflare Workers
+  Builds builds and directly deploys main at 100 percent traffic. Local runtime
+  uses `scripts/run_main_services.ps1` to update its single checkout from main.
+  PR branches must never activate production. No Control Panel, blue-green
+  coordination, retained code slots or automatic rollback is required.
+  Preserve authoritative data, authentication, source-first and strict ACK.
+  Follow `docs/contracts/RELEASE_CONTROL.md`.
 
 ## Preview Discipline
 

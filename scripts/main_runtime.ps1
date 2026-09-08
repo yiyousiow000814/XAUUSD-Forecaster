@@ -1,5 +1,4 @@
-# Single-checkout runtime. The service registry owns commands; this controller
-# owns process lifetime. Only the maintenance caller changes source identity.
+# Main-only runtime: one service registry, one process owner, forward updates.
 Set-StrictMode -Version Latest
 
 function ConvertTo-RuntimeArgument {
@@ -83,29 +82,6 @@ function Read-RuntimeJson {
 function Get-RuntimeSetting {
     param([string]$Name)
     [Environment]::GetEnvironmentVariable($Name, 'User')
-}
-
-function Assert-RuntimeWriterIsolation {
-    # Read-only inventory. Takeover must disable old tasks and stop their
-    # publication owners explicitly; this assertion never stops them itself.
-    foreach ($process in @(Get-CimInstance Win32_Process)) {
-        $command = [string]$process.CommandLine
-        if ($command -match 'xauusd_(control_center|watchdog_guard)\.ps1' -and
-            ($command.IndexOf($script:RuntimeRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-             $command.IndexOf($script:RepositoryRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0)) {
-            throw 'Old runtime/publication owner is still running; takeover is required'
-        }
-    }
-    foreach ($task in @(Get-CimInstance -Namespace 'Root/Microsoft/Windows/TaskScheduler' -ClassName MSFT_ScheduledTask -Filter "TaskName LIKE 'XAUUSD-Forecaster%'") ) {
-        foreach ($action in @($task.Actions)) {
-            $arguments = [string]$action.Arguments
-            if ($task.State -ne 1 -and $arguments -match 'xauusd_(control_center|watchdog_guard|watchdog_launcher)' -and
-                ($arguments.IndexOf($script:RuntimeRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-                 $arguments.IndexOf($script:RepositoryRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0)) {
-                throw 'Old runtime/publication task remains enabled; takeover is required'
-            }
-        }
-    }
 }
 
 function Get-RuntimeServices {
@@ -203,15 +179,15 @@ function Start-RuntimeService {
 
 function Set-RuntimeRevision {
     param([object[]]$Services, [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{40}$')][string]$Revision)
-    # The maintenance caller supplies a fixed, locally available source identity.
+    # Resolve main once, then apply that fixed source identity.
     $target = Invoke-RuntimeGit -Arguments @('rev-parse', ($Revision + '^{commit}'))
     $current = Invoke-RuntimeGit -Arguments @('rev-parse', 'HEAD')
     $dependencyPath = Join-Path $script:RuntimeRoot 'pyproject.toml'
     $installedPath = Join-Path $script:ForwardRoot 'main-installed-dependencies.sha256'
     $installed = if (Test-Path -LiteralPath $installedPath) { [IO.File]::ReadAllText($installedPath).Trim() } else { '' }
     $dependencyHash = (Get-RuntimeFileHash $dependencyPath)
-    if ($target -eq $current -and $installed -eq $dependencyHash) { return $false }
     if (Invoke-RuntimeGit -Arguments @('status', '--porcelain', '--untracked-files=normal')) { throw 'Runtime checkout has local changes; preserved without updating' }
+    if ($target -eq $current -and $installed -eq $dependencyHash) { return $false }
     foreach ($service in $Services) { Stop-RuntimeService $service }
     # Never reset/clean the checkout or overwrite ignored persistent state.
     if ($target -ne $current) { $null = Invoke-RuntimeGit -Arguments @('checkout', '--detach', '--no-overwrite-ignore', $target) }
@@ -225,43 +201,57 @@ function Set-RuntimeRevision {
     return $true
 }
 
+function Update-MainRuntime {
+    Invoke-RuntimeGit -Arguments @('fetch', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main') | Out-Null
+    $revision = Invoke-RuntimeGit -Arguments @('rev-parse', 'origin/main')
+    Set-RuntimeRevision -Services @(Get-RuntimeServices) -Revision $revision
+}
+
 function Invoke-MainRuntime {
-    $hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($script:RuntimeRoot.ToLowerInvariant()))).Replace('-', '')
-    $mutex = [Threading.Mutex]::new($false, "Global\XauusdMainRuntime-$hash")
+    $key = [Security.Cryptography.SHA256]::Create()
+    try { $name = [BitConverter]::ToString($key.ComputeHash([Text.Encoding]::UTF8.GetBytes($script:RuntimeRoot.ToLowerInvariant()))).Replace('-', '') }
+    finally { $key.Dispose() }
+    $mutex = [Threading.Mutex]::new($false, "Global\XauusdMainRuntime-$name")
     $owned = $false
-    $services = @()
     try {
         try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
         if (-not $owned) { return 0 }
-        Assert-RuntimeWriterIsolation
-        $services = @(Get-RuntimeServices)
-        $loadedRevision = Invoke-RuntimeGit -Arguments @('rev-parse', 'HEAD')
+        $nextUpdate = [DateTime]::MinValue
         $nextStart = [DateTime]::MinValue
         $errorText = $null
         while ($true) {
             $desired = 'stopped'
-            if (Test-Path -LiteralPath $script:DesiredPath) {
-                $desired = (Read-RuntimeJson $script:DesiredPath).state
-            }
-            if ($desired -notin @('running', 'stopped', 'maintenance')) { throw 'Invalid runtime command' }
-            if ((Invoke-RuntimeGit -Arguments @('rev-parse', 'HEAD')) -ne $loadedRevision) { return 75 }
+            if (Test-Path -LiteralPath $script:DesiredPath) { $desired = (Read-RuntimeJson $script:DesiredPath).state }
+            if ($desired -notin @('running', 'stopped')) { throw 'Invalid runtime command' }
+            $services = @(Get-RuntimeServices)
             if ($desired -eq 'stopped') {
-                $nextStart = [DateTime]::MinValue
                 foreach ($service in $services) { Stop-RuntimeService $service }
-            } elseif ($desired -eq 'running') {
-                if ([DateTime]::UtcNow -ge $nextStart) {
+                $nextStart = [DateTime]::MinValue
+                $errorText = $null
+            } elseif ([DateTime]::UtcNow -ge $nextStart) {
+                try {
+                    if ([DateTime]::UtcNow -ge $nextUpdate) {
+                        $changed = Update-MainRuntime
+                        $nextUpdate = [DateTime]::UtcNow.AddMinutes(5)
+                        if ($changed) { return 75 }
+                    }
                     foreach ($service in $services) { Start-RuntimeService $service }
+                    $errorText = $null
                     $nextStart = [DateTime]::UtcNow.AddSeconds(60)
+                } catch {
+                    $errorText = $_.Exception.Message
+                    $nextStart = [DateTime]::UtcNow.AddSeconds(60)
+                    # No rollback: fix the failed current update and retry forward.
                 }
             }
             $processes = @{}
             foreach ($service in $services) { $processes[$service.Key] = @((Get-RuntimeServiceProcesses $service) | ForEach-Object { $_.ProcessId }) }
-            Write-RuntimeJson $script:StatusPath @{ state = $desired; source_revision = (Invoke-RuntimeGit -Arguments @('rev-parse', 'HEAD')); updated_at = [DateTime]::UtcNow.ToString('o'); controller_pid = $PID; services = $processes; error = $errorText }
+            Write-RuntimeJson $script:StatusPath @{ state = $(if ($errorText) { 'update_failed' } else { $desired }); source_revision = (Invoke-RuntimeGit -Arguments @('rev-parse', 'HEAD')); updated_at = [DateTime]::UtcNow.ToString('o'); controller_pid = $PID; services = $processes; error = $errorText }
             Start-Sleep -Seconds 5
         }
     } finally {
         if ($owned) {
-            foreach ($service in $services) { Stop-RuntimeService $service }
+            foreach ($service in @(Get-RuntimeServices)) { Stop-RuntimeService $service }
             $mutex.ReleaseMutex()
         }
         $mutex.Dispose()

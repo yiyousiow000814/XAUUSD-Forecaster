@@ -5,16 +5,6 @@
     ".github/workflows/formal-verification.yml",
     "scripts/run_tla_model.py",
     "scripts/select_tla_shards.py",
-    "scripts/control-center-owners.json",
-    "scripts/control_center_common.ps1",
-    "scripts/control_center_persistence_gateway.ps1",
-    "scripts/control_center_provider_adapters.ps1",
-    "scripts/control_center_runtime_supervision.ps1",
-    "scripts/control_center_evidence_authority.ps1",
-    "scripts/control_center_transaction_engine.ps1",
-    "scripts/control_center_recovery_engine.ps1",
-    "scripts/control_center_install.ps1",
-    "scripts/control_center_presentation.ps1",
     "formal/release-control/shards.json",
     "formal/release-control/README.md",
     "formal/release-control/DECOMPOSITION_AUDIT.md",
@@ -23,19 +13,112 @@
     "AGENTS.md"
   ],
   "shards": [
-    {"id":"cpu-evidence-safety","module":"CpuEvidence.tla","config":"CpuEvidenceSafety.cfg","kind":"safety","paths":["scripts/worker_cpu_evidence.ps1","scripts/xauusd_control_center.ps1","formal/release-control/CpuEvidence*"],"properties":["TypeOK","CpuQualificationIsValid","CpuRetryBudgetIsBounded","DeficitRepairRequestBudgetIsBounded","DeficitRepairSetIsFrozen","QualifiedFamiliesAreNeverReplayed","DeficitRepairCannotFabricateEvidence","NoSecondDeficitRepairRound","ReserveEvidenceUseIsBounded","CpuHardFailureCannotQualify","OutlierRequiresBoundedConfirmation","NoSecondOutlierConfirmation","OutlierConfirmationMatchesRequestShape","RepeatedCpuPressureCannotQualify","OriginalOutlierCannotBeErased","ReusedCpuEvidenceMatchesArtifact","CpuRecoveryPreservesIndependentStages","EveryRequiredFamilyQuotaSatisfied","ArtifactKeyChangeInvalidatesReuse","CpuEvidenceOnlyGrows","TargetedRetryPreservesAcceptedWork"]},
-    {"id":"cpu-evidence-liveness","module":"CpuEvidence.tla","config":"CpuEvidenceLiveness.cfg","kind":"liveness","paths":["scripts/worker_cpu_evidence.ps1","scripts/xauusd_control_center.ps1","formal/release-control/CpuEvidence*"],"properties":["TypeOK","CpuQualificationIsValid","CpuRetryBudgetIsBounded","DeficitRepairRequestBudgetIsBounded","DeficitRepairSetIsFrozen","QualifiedFamiliesAreNeverReplayed","DeficitRepairCannotFabricateEvidence","NoSecondDeficitRepairRound","ReserveEvidenceUseIsBounded","CpuHardFailureCannotQualify","OutlierRequiresBoundedConfirmation","NoSecondOutlierConfirmation","OutlierConfirmationMatchesRequestShape","RepeatedCpuPressureCannotQualify","OriginalOutlierCannotBeErased","PendingEventuallyResolves"]},
-    {"id":"release-integration-safety","module":"ReleaseIntegration.tla","config":"ReleaseIntegrationSafety.cfg","kind":"safety","paths":["scripts/xauusd_control_center.ps1","scripts/release_evidence_authority.ps1","scripts/release_evidence_nodes.ps1","scripts/release-evidence-contract.json","scripts/release-evidence-change-ownership.json","scripts/release-free-plan-contract.json","formal/release-control/ReleaseIntegration*"],"properties":["TypeOK","CpuQualificationRequiredForPass","ProviderPendingIsNotCandidateFailure","CpuRecoveryPreservesIndependentStages","ArtifactMovementInvalidatesCpu","PassedIdentityIsExact","AcceptedEvidenceIsRequired","PassedGatesAreSafe","HardFailuresBlock","UnrelatedDebtIsNotFailure","PromoteRequiresPassed","CompleteEvidenceRequiredForPass","EveryProducerRequiredForPass","NoSingleProducerCommitsPassed","FinalizedEvidenceHasEveryProducer","FinalizerIsSingleUse","FinalizerCreatesNoTransaction","BehaviorKeyChangeInvalidatesReuse","StaleLeaseCannotAuthorize","TamperedReceiptCannotPromote","DependencyDigestCannotBeReplaced","ImmutableReusePreservesIdentity","ReadPlanningDoesNotMutateProduction","EvidenceTransactionIsSingle","SupersessionReuseRequiresFound","FreshFallbackCannotReuseSupersededEvidence","UnsafeSupersessionBlocksFreshValidation","SupersessionFallbackPreservesCandidateIdentity"]},
-    {"id":"core-release-safety","module":"CoreRelease.tla","config":"CoreReleaseSafety.cfg","kind":"safety","paths":["scripts/xauusd_control_center.ps1","scripts/run_dashboard_sync.py","scripts/check_deferred_projection_parity.py","formal/release-control/CoreRelease*"],"properties":["TypeOK","AtMostOneProductionWriter","PrepareVerifyKeepsStableSync","CandidatePreparationPreservesStable","SwitchRequiresAcceptance","StableUnchangedDuringSwitchAndObserve","SingleTransaction","NoPromoteFromPendingCpu","CommitRequiresExactDeferredAck","PendingOrFailedProjectionKeepsPreviousCommitted","StableChangesOnlyAfterObservation"]},
-    {"id":"core-release-liveness","module":"CoreRelease.tla","config":"CoreReleaseLiveness.cfg","kind":"liveness","paths":["scripts/xauusd_control_center.ps1","scripts/run_dashboard_sync.py","scripts/check_deferred_projection_parity.py","formal/release-control/CoreRelease*"],"properties":["TypeOK","StableUnchangedDuringSwitchAndObserve","SingleTransaction","ObservedFailureEventuallyRestoresPrevious","SwitchFailureEventuallyTerminates","TransactionEventuallyTerminates","ProjectionFailureEventuallyRestoresPrevious"]},
-    {"id":"recovery-hotfix-safety","module":"RecoveryHotfix.tla","config":"RecoveryHotfixSafety.cfg","kind":"safety","paths":["scripts/recovery_hotfix.ps1","scripts/release_evidence_authority.ps1","scripts/release-evidence-change-ownership.json","scripts/xauusd_control_center.ps1","formal/release-control/RecoveryHotfix*"],"properties":["TypeOK","ActiveUnknownCannotBegin","RestoreLkgDoesNotChangeCommitted","HotfixCommitsOnlyAfterObservation","FailedHotfixRestoresLkg","SingleRecoveryTransaction","ForbiddenFamilyCannotEnterHotfix","RecoveryUsesEvidenceDag","RecoveryModeAddsNoPhase","DegradedActiveHasRecoveryPath","DriftedActiveCanRestoreLkg"]},
-    {"id":"recovery-hotfix-liveness","module":"RecoveryHotfix.tla","config":"RecoveryHotfixLiveness.cfg","kind":"liveness","paths":["scripts/recovery_hotfix.ps1","scripts/release_evidence_authority.ps1","scripts/release-evidence-change-ownership.json","scripts/xauusd_control_center.ps1","formal/release-control/RecoveryHotfix*"],"properties":["TypeOK","ActiveUnknownCannotBegin","RestoreLkgDoesNotChangeCommitted","SingleRecoveryTransaction","RecoveryUsesEvidenceDag","RecoveryEventuallyTerminates"]},
-    {"id":"release-runtime-read-model-safety","module":"ReleaseRuntimeReadModel.tla","config":"ReleaseRuntimeReadModelSafety.cfg","kind":"safety","paths":["scripts/release_runtime_read_model.ps1","scripts/xauusd_control_center.ps1","formal/release-control/ReleaseRuntimeReadModel*"],"properties":["TypeOK","ActiveMismatchDoesNotMoveCommittedOrLkg","ArtifactExistenceIndependentFromPlacement","NotAssignedAloneDoesNotMeanArtifactMissing","ReverseAttemptRequiresSafeAuthority","FailedOrUnknownLookupFailsClosed","UnknownActiveObservationFailsClosed","ActiveDriftFailsClosed","ReverseTransactionRequiresActualActiveCommittedEquality","SingleTransaction","DegradedAuthorityAllowsReverse","InvalidCommittedIdentityFailsClosed","InvalidPreviousIdentityFailsClosed","ArbitraryLegacyLabelFailsClosed","ExactNarrowLegacyReachesArtifactEvaluation","InvalidOwnershipFailsClosed","MissingObservationStatusIsNotAvailable","ReadObservationDoesNotMutateRelease","ReadModelNeverChangesCommittedOrLkg"]},
-    {"id":"watchdog-singleton-safety","module":"WatchdogSingleton.tla","config":"WatchdogSingletonSafety.cfg","kind":"safety","paths":["scripts/control_center_watchdog_singleton.ps1","scripts/xauusd_watchdog_launcher.vbs","scripts/xauusd_watchdog_guard.ps1","scripts/xauusd_watchdog_guard_launcher.vbs","formal/release-control/WatchdogSingleton*"],"properties":["TypeOK","AtMostOneMachineOwner","AtMostOneActiveWriter","ActiveWriterRequiresVerifiedOwnership","QuiescedInstallCannotWrite","UnresolvedTerminationCannotStartReplacement","ControllerReplacementPreservesBusinessOwnerSet","UnknownDescendantBlocksReplacement"]},
-    {"id":"watchdog-singleton-liveness","module":"WatchdogSingleton.tla","config":"WatchdogSingletonLiveness.cfg","kind":"liveness","paths":["scripts/control_center_watchdog_singleton.ps1","scripts/xauusd_watchdog_launcher.vbs","scripts/xauusd_watchdog_guard.ps1","scripts/xauusd_watchdog_guard_launcher.vbs","formal/release-control/WatchdogSingleton*"],"properties":["TypeOK","AtMostOneMachineOwner","AtMostOneActiveWriter","ActiveWriterRequiresVerifiedOwnership","QuiescedInstallCannotWrite","UnresolvedTerminationCannotStartReplacement","ControllerReplacementPreservesBusinessOwnerSet","UnknownDescendantBlocksReplacement","DeadOrTerminatedOwnerEventuallyReplaced"]},
-{"id":"install-recovery-safety","module":"InstallRecovery.tla","config":"InstallRecoverySafety.cfg","kind":"safety","paths":["scripts/xauusd_control_center.ps1","scripts/control_center_watchdog_singleton.ps1","scripts/control_center_runtime_supervision.ps1","scripts/xauusd_watchdog_guard.ps1","formal/release-control/InstallRecovery*"],"properties":["TypeOK","StaleSupervisorIsFenced","RecoveredActivationRequiresIndependentChecks","ActiveRecoveredSupervisorIsSafe","BootstrapReservationExcludesReplacement","DegradedRollbackNeverClaimsSupervision"]},
-    {"id":"install-recovery-liveness","module":"InstallRecovery.tla","config":"InstallRecoveryLiveness.cfg","kind":"liveness","paths":["scripts/xauusd_control_center.ps1","scripts/control_center_watchdog_singleton.ps1","scripts/control_center_runtime_supervision.ps1","scripts/xauusd_watchdog_guard.ps1","formal/release-control/InstallRecovery*"],"properties":["TypeOK","StaleSupervisorIsFenced","ActiveRecoveredSupervisorIsSafe","BootstrapReservationExcludesReplacement","DegradedRollbackNeverClaimsSupervision","AbandonedInstallEventuallySafe"]},
-    {"id":"news-migration-safety","module":"NewsMigration.tla","config":"NewsMigrationSafety.cfg","kind":"safety","paths":["scripts/build_news_projection_generation.py","scripts/xauusd_control_center.ps1","formal/release-control/NewsMigration*"],"properties":["TypeOK","VerificationWatermarkDoesNotRegress","ActiveLegacyEqualsCurrent","LegacyStableWritesRemainFenced","CurrentIdentitySetMatchesGeneration","FreshStagingIdentitySetMatchesGeneration","CurrentGenerationCannotBeCleaned","FreshStagingCannotBeCleaned","InvalidStagedLegacyCannotActivate"]},
-    {"id":"access-evidence-safety","module":"AccessEvidence.tla","config":"AccessEvidenceSafety.cfg","kind":"safety","paths":["scripts/access-qualification-contract.json","scripts/xauusd_control_center.ps1","formal/release-control/AccessEvidence*"],"properties":["TypeOK","AccessEvidenceIsRequired","InvalidAccessReceiptCannotPass","AccessApprovalIsIdempotent","ReuseRequiresExactAccessKey","UnreadableOrChangedProviderCannotReuse","AccessFailureCannotReuse","ReuseDoesNotFabricateHumanApproval","RenewalRequiresContinuousAudit","StaleMachineEvidenceCannotPass","BrokenChainCannotRenew","RenewalKeepsHumanRoot","RenewalIsBounded"]}
+    {
+      "id": "cpu-evidence-safety",
+      "module": "CpuEvidence.tla",
+      "config": "CpuEvidenceSafety.cfg",
+      "kind": "safety",
+      "paths": [
+        "scripts/worker_cpu_evidence.ps1",
+        "formal/release-control/CpuEvidence*"
+      ],
+      "properties": [
+        "TypeOK",
+        "CpuQualificationIsValid",
+        "CpuRetryBudgetIsBounded",
+        "DeficitRepairRequestBudgetIsBounded",
+        "DeficitRepairSetIsFrozen",
+        "QualifiedFamiliesAreNeverReplayed",
+        "DeficitRepairCannotFabricateEvidence",
+        "NoSecondDeficitRepairRound",
+        "ReserveEvidenceUseIsBounded",
+        "CpuHardFailureCannotQualify",
+        "OutlierRequiresBoundedConfirmation",
+        "NoSecondOutlierConfirmation",
+        "OutlierConfirmationMatchesRequestShape",
+        "RepeatedCpuPressureCannotQualify",
+        "OriginalOutlierCannotBeErased",
+        "ReusedCpuEvidenceMatchesArtifact",
+        "CpuRecoveryPreservesIndependentStages",
+        "EveryRequiredFamilyQuotaSatisfied",
+        "ArtifactKeyChangeInvalidatesReuse",
+        "CpuEvidenceOnlyGrows",
+        "TargetedRetryPreservesAcceptedWork"
+      ]
+    },
+    {
+      "id": "cpu-evidence-liveness",
+      "module": "CpuEvidence.tla",
+      "config": "CpuEvidenceLiveness.cfg",
+      "kind": "liveness",
+      "paths": [
+        "scripts/worker_cpu_evidence.ps1",
+        "formal/release-control/CpuEvidence*"
+      ],
+      "properties": [
+        "TypeOK",
+        "CpuQualificationIsValid",
+        "CpuRetryBudgetIsBounded",
+        "DeficitRepairRequestBudgetIsBounded",
+        "DeficitRepairSetIsFrozen",
+        "QualifiedFamiliesAreNeverReplayed",
+        "DeficitRepairCannotFabricateEvidence",
+        "NoSecondDeficitRepairRound",
+        "ReserveEvidenceUseIsBounded",
+        "CpuHardFailureCannotQualify",
+        "OutlierRequiresBoundedConfirmation",
+        "NoSecondOutlierConfirmation",
+        "OutlierConfirmationMatchesRequestShape",
+        "RepeatedCpuPressureCannotQualify",
+        "OriginalOutlierCannotBeErased",
+        "PendingEventuallyResolves"
+      ]
+    },
+    {
+      "id": "news-migration-safety",
+      "module": "NewsMigration.tla",
+      "config": "NewsMigrationSafety.cfg",
+      "kind": "safety",
+      "paths": [
+        "scripts/build_news_projection_generation.py",
+        "formal/release-control/NewsMigration*"
+      ],
+      "properties": [
+        "TypeOK",
+        "VerificationWatermarkDoesNotRegress",
+        "ActiveLegacyEqualsCurrent",
+        "LegacyStableWritesRemainFenced",
+        "CurrentIdentitySetMatchesGeneration",
+        "FreshStagingIdentitySetMatchesGeneration",
+        "CurrentGenerationCannotBeCleaned",
+        "FreshStagingCannotBeCleaned",
+        "InvalidStagedLegacyCannotActivate"
+      ]
+    },
+    {
+      "id": "access-evidence-safety",
+      "module": "AccessEvidence.tla",
+      "config": "AccessEvidenceSafety.cfg",
+      "kind": "safety",
+      "paths": [
+        "scripts/access-qualification-contract.json",
+        "formal/release-control/AccessEvidence*"
+      ],
+      "properties": [
+        "TypeOK",
+        "AccessEvidenceIsRequired",
+        "InvalidAccessReceiptCannotPass",
+        "AccessApprovalIsIdempotent",
+        "ReuseRequiresExactAccessKey",
+        "UnreadableOrChangedProviderCannotReuse",
+        "AccessFailureCannotReuse",
+        "ReuseDoesNotFabricateHumanApproval",
+        "RenewalRequiresContinuousAudit",
+        "StaleMachineEvidenceCannotPass",
+        "BrokenChainCannotRenew",
+        "RenewalKeepsHumanRoot",
+        "RenewalIsBounded"
+      ]
+    }
   ]
 }

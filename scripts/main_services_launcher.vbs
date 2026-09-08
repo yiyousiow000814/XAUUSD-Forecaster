@@ -1,6 +1,6 @@
 Option Explicit
 
-If WScript.Arguments.Count < 3 Or WScript.Arguments.Count > 4 Then
+If WScript.Arguments.Count <> 3 Then
     WScript.Quit 2
 End If
 
@@ -12,14 +12,10 @@ Dim controlScript, runtimeRoot, repositoryRoot
 controlScript = WScript.Arguments(0)
 runtimeRoot = WScript.Arguments(1)
 repositoryRoot = WScript.Arguments(2)
-Dim action
-action = "Watchdog"
-If WScript.Arguments.Count = 4 Then action = WScript.Arguments(3)
-If action <> "Watchdog" And action <> "Gui" Then WScript.Quit 2
 Dim command
 command = "powershell.exe -NoProfile -STA -NonInteractive -ExecutionPolicy Bypass" _
     & " -File " & QuoteArgument(controlScript) _
-    & " -Action " & action _
+    & " -Action Run" _
     & " -RuntimeRoot " & QuoteArgument(runtimeRoot) _
     & " -RepositoryRoot " & QuoteArgument(repositoryRoot)
 
@@ -29,5 +25,5 @@ Set shell = CreateObject("WScript.Shell")
 Do
     exitCode = shell.Run(command, 0, True)
     If exitCode = 75 Then WScript.Sleep 1000
-Loop While exitCode = 75 And action = "Watchdog"
+Loop While exitCode = 75
 WScript.Quit exitCode

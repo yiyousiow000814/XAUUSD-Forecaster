@@ -270,20 +270,10 @@ def test_runtime_and_producer_roots_are_independent_cli_contracts() -> None:
     source = (ROOT / "scripts" / "check_deferred_projection_parity.py").read_text(
         encoding="utf-8"
     )
-    controller = "\n".join(
-        path.read_text(encoding="utf-8-sig")
-        for path in (
-            ROOT / "scripts" / "xauusd_control_center.ps1",
-            *sorted((ROOT / "scripts").glob("control_center_*.ps1")),
-        )
-    )
-
     assert 'parser.add_argument("--runtime-root", required=True)' in source
     assert 'parser.add_argument("--producer-root", required=True)' in source
     assert 'LOCAL_DATABASE = RUNTIME_ROOT / ".local"' in source
     assert 'sys.path.insert(0, str(PRODUCER_ROOT / "scripts"))' in source
-    assert '"--runtime-root", $moduleRoot' in controller
-    assert '"--producer-root", $moduleRoot' in controller
 
 
 def test_real_entrypoint_owns_http_identity_for_all_deferred_routes(monkeypatch) -> None:

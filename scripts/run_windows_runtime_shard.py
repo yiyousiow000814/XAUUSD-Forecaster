@@ -77,18 +77,9 @@ def main() -> int:
         f"--junitxml={junit}",
         *nodeids,
     ]
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    shard = next(row for row in manifest["shards"] if row["id"] == args.shard)
-    if "rehearsal_script" in shard:
-        if shard["rehearsal_script"] != "scripts/rehearse_control_plane_takeover.py" or nodeids:
-            raise ValueError("invalid isolated rehearsal ownership")
-        command = [sys.executable, str(ROOT / shard["rehearsal_script"])]
     started_at = datetime.now(timezone.utc)
     started = time.perf_counter()
     environment = dict(os.environ)
-    if args.shard in {"control-install-configuration", "control-install", "control-install-rehearsal"}:
-        environment["XAUUSD_CONTROL_LOAD_TIMING"] = "1"
-        environment["XAUUSD_CONTROL_LOAD_DIAGNOSTIC_SHARD"] = args.shard
     completed = subprocess.run(command, cwd=ROOT, check=False, env=environment)
     elapsed = time.perf_counter() - started
     report = {
@@ -100,7 +91,6 @@ def main() -> int:
         "exit_code": completed.returncode,
         "test_selectors": nodeids,
         "command": command,
-        "rehearsal_script": shard.get("rehearsal_script"),
     }
     (output / f"{args.shard}.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n",
