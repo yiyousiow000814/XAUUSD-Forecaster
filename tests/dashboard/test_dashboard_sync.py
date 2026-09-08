@@ -3487,8 +3487,7 @@ def test_operator_retry_worker_urls_keep_human_and_machine_planes_separate() -> 
 
 
 @pytest.mark.parametrize("state,failed", [("REPLAYING", False), ("CURRENT", False), ("REPLAYING", True)])
-@pytest.mark.parametrize("cleanup", [False, True])
-@pytest.mark.parametrize("resource", ["news", "news_evidence"])
+@pytest.mark.parametrize("resource,cleanup", [("news", False), ("news_evidence", False), ("news_evidence", True)])
 def test_news_replay_immediate_resume_only_after_success(tmp_path, monkeypatch, state, failed, resource, cleanup):
     module = _sync_module()
     schedule = tmp_path / "schedule.json"

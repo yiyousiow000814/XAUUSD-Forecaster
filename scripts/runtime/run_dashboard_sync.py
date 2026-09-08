@@ -434,11 +434,6 @@ def sync_resource_lane(
             except Exception as error:
                 duration_ms = round((time.perf_counter() - started) * 1000, 1)
                 completed_at = datetime.now(UTC)
-                evidence_state = (
-                    _read_news_sync_state(Path(target["news_evidence_state_file"]))
-                    if resource == "news_evidence" and target.get("news_evidence_state_file")
-                    else {}
-                )
                 _persist_resource_schedule_result(
                     schedule_path, target, resource, cadence_seconds,
                     now=completed_at, success=False,
