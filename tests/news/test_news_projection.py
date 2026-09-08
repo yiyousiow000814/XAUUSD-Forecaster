@@ -643,7 +643,7 @@ def test_capture_global_plan_matches_original_generation_across_parts(tmp_path, 
     import xauusd_forecaster.news_projection as module
     rows = [
         _source_row(i, withdrawal=(case == "withdrawals" or i % 11 == 0),
-                    body=('ä¸­\\"\n' * 20_000 if case == "unicode-byte-batches" else "frozen"))
+                    body=('中\\"\n' * 20_000 if case == "unicode-byte-batches" else "frozen"))
         for i in range(0 if case == "empty" else 21)
     ]
     for row in rows:
