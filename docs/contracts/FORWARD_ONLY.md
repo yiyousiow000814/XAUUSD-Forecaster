@@ -56,6 +56,66 @@ checkpoint; after a post-commit crash, restart completes that publication before
 advancing the collector cursor. No wall-clock or file existence alone authorizes
 checkpoint adoption.
 
+### Future signal-time observations
+
+New collector attempts append one optional `COLLECTOR_SIGNAL_TIMING` entry
+(`collector-signal-timing-v1`) beside, not inside, the existing completion
+entry. It binds the collector run, decision, snapshot, completion digest and
+exact returned prediction rows. The same atomic transaction commits both
+entries. A failed transaction publishes neither; replay never backfills old
+rows or replaces their timestamps. Existing `created_at`, `recomputed_at` and
+`completed_at` meanings do not become inference or COMMIT timestamps.
+The timing-only prediction digest follows the existing SQLite REAL-column
+affinity, including integer-to-float and signed-zero normalization; it does not
+change prediction values or the global/completion hashing contract.
+
+The timing owner samples canonical UTC with six fractional digits and
+same-process monotonic elapsed nanoseconds at collector start, market-feature
+completion, legacy prediction preparation, News-feature completion, each v2
+prediction return, and write-batch readiness. Each model has its own return
+observation; Market-only does not inherit the later News-family return time.
+The selected quote's existing source-received timestamp remains a source fact,
+not a local inference clock. Metadata is bounded to 16 prediction observations,
+256 characters per model identity/version and 16 KiB per timing entry/event.
+Missing clocks remain `UNAVAILABLE`; wall/monotonic regressions remain
+`CLOCK_ANOMALY`, even after a later normal clock sample. Neither grants model,
+execution or historical replay eligibility.
+
+Only after SQLite COMMIT returns successfully may the collector's existing log
+emit `DECISION_APPENDED` with `COMMIT_RETURN_OBSERVED`. This is a no-later-than
+bound, not the physical commit instant or first consumer visibility. Failure
+to deliver that optional observation cannot turn a committed clock into a
+failed/retried clock. Idempotent completion returns do not renew the timestamp.
+A crash before the observation leaves its time unknown.
+
+After an actual selected-prediction SQLite read, the Dashboard API may emit
+`SIGNAL_CONSUMER_OBSERVED` with
+`DASHBOARD_SQLITE_READ_OBSERVED_NO_LATER_THAN`. The bounded decoder checks the
+same decision/snapshot/prediction and versioned timing/completion digests; old,
+missing, malformed or mismatched evidence remains `UNKNOWN`, `UNAVAILABLE` or
+`INVALID`. `database_locator_hash` hashes only the database locator text, not
+database contents or epoch identity. This observation proves neither first
+visibility, successful full-payload construction, HTTP delivery, Sync ACK nor
+browser receipt. Cached payloads do not renew it.
+Full rows used for private identity checks must not expand the existing public
+`latest` or `research_forecast` field projections.
+
+The API diagnostic attempts delivery only on changed identity and at most once
+per 60 seconds per process. A failed sink gets at most one bounded retry of the
+same retained event, without another metadata read or a new observation time.
+This is optional in-memory log deduplication, not a second data/cache authority.
+Clock capture/comparison follows one lock order, so concurrent reader scheduling
+does not manufacture clock regressions. Slow sink delivery runs outside all
+business/observer locks, using one shared in-flight diagnostic thread per
+process and no queue. A blocked sink cannot start more threads or stop the next
+clock/critical read. Shutdown waits at most 100 ms; a still-running sink remains
+unknown, not killed or delivered. The default sink uses the existing stdout
+descriptor directly, without holding Python's buffered-stream lock at exit.
+No raw payloads or credentials are logged. Existing bounded stdout-log rotation
+still applies; missing/rotated observations are unknown, not durable receipts.
+These facts do not by themselves satisfy the separate offline research
+requirement for independently verified deployed-writer/source identity.
+
 ## Weekly market closure
 
 - News collection and annotation continue during the expected weekly XAUUSD

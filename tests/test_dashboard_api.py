@@ -81,6 +81,136 @@ def _dashboard_module():
     return module
 
 
+@pytest.mark.parametrize("sink_fails", [False, True])
+def test_actual_clock_to_dashboard_read_timing_preserves_cache_and_bounded_log_retry(monkeypatch, tmp_path, sink_fails):
+    from xauusd_forecaster import inference_v2, training_v2
+    from xauusd_forecaster.forward_engine import ForwardEngine
+    from xauusd_forecaster.market import NullMarketProvider
+    from xauusd_forecaster.signal_timing import ClockTiming, DashboardSignalObserver, SignalLogDelivery, TIMING_SOURCE
+    from xauusd_forecaster.dashboard.status_cache import StatusSnapshotCache
+
+    # A complete synthetic generation runs the real unhealthy-input WAIT path;
+    # no fit, provider, real artifact, production database or order is used.
+    at = datetime(2026, 9, 7, 8, 0, tzinfo=UTC)
+    database = tmp_path / "clock.sqlite3"
+    ledger = ForwardLedger(database, now=at - timedelta(minutes=5))
+    artifact = tmp_path / "unread-unhealthy-input-artifact.json"
+    artifact.write_text("{}", encoding="utf-8")
+    earlier = (at - timedelta(minutes=1)).isoformat()
+    with ledger.connection:
+        ledger.connection.execute("INSERT INTO evaluation_epochs VALUES (?,?,?,?,?,?,?)",
+            ("timing-test", ledger.forward_epoch.isoformat(), at.isoformat(), earlier, earlier, "e" * 40, "fixture"))
+        ledger.connection.execute("INSERT INTO news_model_generations_v1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("timing-generation", "SHADOW", earlier, earlier, inference_v2.EVIDENCE_POLICY_VERSION,
+             inference_v2.NEWS_FEATURE_VERSION, inference_v2.ELIGIBILITY_VERSION,
+             "events", "market", "core", "broad", training_v2.EVENT_WEIGHTING_VERSION, 5, "READY"))
+        for identity in sorted(inference_v2.MODEL_IDENTITIES):
+            feature, eligibility = inference_v2._expected_news_contract(identity) or (
+                inference_v2.FEATURE_VERSION, inference_v2.ELIGIBILITY_VERSION)
+            version = f"{identity.lower()}-timing-test"
+            ledger.connection.execute("INSERT INTO model_updates_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (version, identity, "SHADOW", earlier, earlier, 0, 0, 0, 0, 0, 0,
+                 "fixture-dataset", feature, eligibility, str(artifact), "fixture-not-used", "CHALLENGER"))
+            table = "news_model_generation_aux_members_v1" if identity == "NEWS_ONLY" else "news_model_generation_members_v1"
+            ledger.connection.execute(f"INSERT INTO {table} VALUES (?,?,?)", ("timing-generation", identity, version))
+        ledger.connection.execute("INSERT INTO news_model_generation_activations_v1 VALUES (?,?,?,?,?)",
+            ("timing-activation", "timing-generation", None, earlier, "SYNTHETIC_TEST"))
+    monotonic = [0]
+
+    def observation_clock():
+        monotonic[0] += 1_000_000_000
+        return at + timedelta(seconds=monotonic[0] / 1_000_000_000)
+
+    ids = ForwardEngine(ledger, NullMarketProvider(), clock_timing_factory=lambda *identity:
+        ClockTiming(*identity, clock=observation_clock, monotonic=lambda: monotonic[0])).append_clock_event(at, at)
+    stored = ledger.connection.execute("SELECT news_status_json FROM collector_runs WHERE decision_id=?", (ids[1],)).fetchone()[0]
+    entry = next(value for value in json.loads(stored) if value["source"] == TIMING_SOURCE)
+    model_times = {value["model_identity"]: value["observed_at"] for value in entry["predictions"]}
+    assert set(model_times) == {"CHAMPION_0", *inference_v2.MODEL_IDENTITIES}
+    assert model_times["MARKET_ONLY"] < model_times["BROAD_FULL"] < model_times["NEWS_ONLY"]
+    assert ledger.connection.execute("SELECT count(*) FROM predictions_v2 WHERE effective_action<>'WAIT'").fetchone()[0] == 0
+    ledger.close()
+
+    module = _dashboard_module()
+    events = []
+
+    def sink(event):
+        events.append(event)
+        if sink_fails:
+            raise OSError("synthetic log failure")
+        return True
+
+    delivery = SignalLogDelivery()
+    observer = DashboardSignalObserver(clock=observation_clock, monotonic=lambda: monotonic[0],
+                                      sink=sink, delivery=delivery)
+    monkeypatch.setattr(module, "_signal_observer", observer)
+    from xauusd_forecaster import clock_commit
+
+    timing_reads = []
+    original_read = clock_commit.read_signal_timing
+
+    def read_timing(*args, **kwargs):
+        timing_reads.append(kwargs["decision_id"])
+        return original_read(*args, **kwargs)
+
+    monkeypatch.setattr(clock_commit, "read_signal_timing", read_timing)
+    builds = [0]
+    build_completed = threading.Event()
+
+    def builder(path):
+        builds[0] += 1
+        payload = module._dashboard_payload(path, include_optional=False)
+        assert set(payload["research_forecast"]) == {
+            "model_identity", "model_version", "recommended_action",
+            "prediction_status", "ev_long_u5", "ev_short_u5", "interval_width",
+            "decision_time", "signal_expiry_seconds", "forecast_horizon_seconds",
+            "directional_bias", "frozen_record",
+        }
+        assert set(payload["latest"]) == {
+            "decision_time", "effective_action", "data_health", "source_event_time",
+            "source_received_time", "bid", "ask", "spread", "u5", "u5_status",
+            "features", "reason_codes",
+        }
+        result = module.critical_status_payload(payload)
+        build_completed.set()
+        return result
+
+    cache_tick = [0.0]
+    cache = StatusSnapshotCache(clock=lambda: cache_tick[0])
+    first = cache.get(database, builder)[0]
+    assert delivery.wait(timeout=5)
+    assert len(events) == 1
+    assert events[0]["producer_timing"]["status"] == "OBSERVED"
+    assert events[0]["decision_id"] == ids[1]
+    assert events[0]["model_identity"] == "BROAD_FULL"
+    assert events[0]["scope"] == "DASHBOARD_SQLITE_READ_OBSERVED_NO_LATER_THAN"
+    assert "database_identity" not in events[0] and "database_locator_hash" in events[0]
+    assert str(database) not in json.dumps(events)
+    initial_observation = events[0]["consumer_observed_at"]
+    assert cache.get(database, builder)[0] == first and builds == [1]
+    build_completed.clear()
+    cache_tick[0] = 16.0
+    stale, state, _ = cache.get(database, builder)
+    assert stale == first and state == "stale"
+    assert build_completed.wait(timeout=5)
+    # Real rebuilds of unchanged identity also do no extra timing SELECT/log.
+    for _ in range(3):
+        builder(database)
+    assert len(events) == 1
+    monotonic[0] += 61_000_000_000
+    builder(database)
+    assert delivery.wait(timeout=5)
+    for _ in range(3):
+        monotonic[0] += 61_000_000_000
+        builder(database)
+        assert delivery.wait(timeout=5)
+    assert len(events) == (2 if sink_fails else 1)
+    assert timing_reads == [ids[1]]
+    assert all(value["consumer_observed_at"] == initial_observation for value in events)
+    assert all(value["producer_timing"]["timing_digest"] == entry["timing_digest"] for value in events)
+    assert delivery.close()
+
+
 def test_wal_checkpoint_component_accepts_only_digest_bound_runtime_state(
     tmp_path: Path,
 ) -> None:

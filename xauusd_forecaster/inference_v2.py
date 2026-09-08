@@ -372,13 +372,20 @@ def prepare_live_predictions_v2(ledger, *, decision_id: str, decision_time: date
                                created_at: datetime, market_snapshot: dict,
                                news_snapshot: dict,
                                news_snapshots: dict[str, dict] | None = None,
-                               news_input_coverage: dict) -> tuple[list[dict], list[tuple], list[tuple]]:
+                               news_input_coverage: dict,
+                               prediction_observer=None) -> tuple[list[dict], list[tuple], list[tuple]]:
     """Freeze inference without taking a writer lock or appending a prediction."""
     rows = []
     calibration_rows = []
 
     def record(**values):
         rows.append(_prediction_values(**values))
+        if prediction_observer is not None:
+            try:
+                prediction_observer(rows[-1])
+            except Exception:
+                # Optional timing cannot change the exact model/EV/action result.
+                pass
 
     created = []
     empty_cal = {"version": "always-wait-no-calibration", "rows": 0, "blocks": 0,

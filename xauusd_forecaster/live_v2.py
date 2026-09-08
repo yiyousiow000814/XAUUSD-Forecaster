@@ -115,6 +115,7 @@ def _append_news_visibility_receipts(
 def prepare_live_decision_v2(
     ledger, *, decision_id: str, decision_time: datetime,
     created_at: datetime, snapshot: dict, news_pipeline_health: dict,
+    timing=None,
 ) -> dict | None:
     epoch = evaluation_epoch(ledger.connection)
     if epoch is None or decision_time < epoch:
@@ -157,6 +158,8 @@ def prepare_live_decision_v2(
         ledger, decision_time=decision_time, news_snapshot=news,
         operational_health=news_pipeline_health,
     )
+    if timing is not None:
+        timing.record("news_features_completed")
     predictions, prediction_rows, calibration_rows = prepare_live_predictions_v2(
         ledger, decision_id=decision_id, decision_time=decision_time,
         created_at=created_at,
@@ -169,6 +172,7 @@ def prepare_live_decision_v2(
             "broad_news_exposed": news.get("broad_news_exposed", 0),
         },
         news_input_coverage=news_input_coverage,
+        prediction_observer=timing.prediction if timing is not None else None,
     )
     lot_row = prepare_lot_prediction(
         ledger, source=next((row for row in predictions
