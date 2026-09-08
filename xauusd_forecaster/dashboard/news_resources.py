@@ -424,7 +424,7 @@ def _news_archive_page(
 def _build_news_projection_source(
     connection: sqlite3.Connection,
 ) -> NewsProjectionGeneration:
-    """Freeze one complete, bounded 60-day source universe in reader order."""
+    """Freeze the latest bounded reader window within the last 60 days."""
     now = datetime.now(UTC)
     context = _news_archive_context(connection, now)
     # This is an in-process materialization bound, not an HTTP display or write
@@ -436,10 +436,8 @@ def _build_news_projection_source(
     )
     candidate_keys = _news_mirror_candidate_keys(
         connection, cutoff=cutoff, after=None,
-        limit=NEWS_PROJECTION_MAX_ITEMS + 1,
+        limit=NEWS_PROJECTION_MAX_ITEMS, latest=True,
     )
-    if len(candidate_keys) > NEWS_PROJECTION_MAX_ITEMS:
-        raise ValueError("news source universe exceeds the 10,000-row bound")
     items: list[dict] = []
     withdrawals: list[dict] = []
     epoch, claimable_keys = context
