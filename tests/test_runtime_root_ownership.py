@@ -191,3 +191,20 @@ def test_quote_bridge_rejects_output_outside_runtime_authority(tmp_path: Path) -
     assert result.returncode != 0
     assert "OutputDirectory must be" in result.stderr
     assert not outside.exists()
+
+
+@pytest.mark.parametrize("variable", [
+    "XAUUSD_ISOLATED_CONFIGURATION", "XAUUSD_ISOLATED_CONFIGURATION_SHA256",
+])
+def test_quote_bridge_rejects_retired_release_context_before_credentials(variable: str) -> None:
+    launcher = ROOT / "ctrader" / "XauusdForwardQuoteBridge" / "run_live_quote_bridge.ps1"
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+         "-File", str(launcher), "-BuildOnly"],
+        env={**os.environ, variable: "retired-context"},
+        capture_output=True, text=True, check=False, timeout=15,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    assert result.returncode != 0
+    assert "RETIRED_RELEASE_FIXTURE_CONFIGURATION" in result.stderr
+    assert "control_center_common" not in result.stderr

@@ -61,3 +61,13 @@ the retired publisher and have no production caller. Remove those scripts,
 contracts and formal models. Actual Worker CPU/capacity tests, authentication,
 JWT verification and original human audit remain. The final repository policy
 accepts only native main direct deployment, with no old upload alternative.
+
+
+The quote launcher rejects retired isolated-release environment variables before
+building or reading credentials; it no longer imports the deleted controller.
+Normal quote collection retains the fixed runtime root and order-API rejection.
+Real PowerShell rejection tests cover both old variables.
+
+The annotation-state contract has its own required Python shard after measured
+CI execution exhausted the five-minute combined shard budget. Every original
+test remains assigned exactly once; job and per-test time limits are unchanged.

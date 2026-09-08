@@ -76,7 +76,6 @@
         "tests/test_market_session.py",
         "tests/test_repository_policy.py",
         "tests/test_live_broadcast.py",
-        "tests/test_critical_annotation_state.py",
         "tests/test_gemini_embeddings.py",
         "tests/test_dashboard_sync_progress.py",
         "tests/test_news_qa.py",
@@ -117,6 +116,12 @@
         "tests/test_architecture_imports.py",
         "tests/test_architecture_compiler.py",
         "tests/test_architecture_mutation_contracts.py"
+      ]
+    },
+    {
+      "id": "python-annotation-state",
+      "tests": [
+        "tests/test_critical_annotation_state.py"
       ]
     }
   ]
