@@ -1701,6 +1701,7 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
     first_cycle_batches = [body for _url, body in posted if "items" in body]
     assert not any("activate_snapshot" in body for _url, body in posted)
     assert len(first_cycle_batches) == module.NEWS_EVIDENCE_PAGES_PER_CYCLE
+    assert sum("prepare_snapshot" in body for _, body in posted) == 1
     assert posted[0][1] == {
         "contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION,
         "prepare_snapshot": snapshot_id,
