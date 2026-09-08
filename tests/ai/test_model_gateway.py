@@ -30,8 +30,11 @@ from tests.fixtures.model_accounting_fakes import CallbackModelAccountant
     (500, b'{"error":{"status":{"unexpected":"secret-key"}}}', "UNKNOWN"),
     (500, b'', "UNKNOWN"),
 ])
-def test_http_failure_keeps_actual_request_identity_without_provider_text(monkeypatch, code, body, status):
-    from xauusd_forecaster.news.annotation.product import _model_failure_details
+def test_http_failure_keeps_actual_request_identity_without_provider_text(monkeypatch, tmp_path, code, body, status):
+    import hashlib
+    from datetime import datetime, UTC
+    from xauusd_forecaster.evidence.ledger import ForwardLedger
+    from xauusd_forecaster.news.annotation.product import _model_failure_details, _append_llm_failure
 
     failure = urllib.error.HTTPError("https://provider.invalid", code, "failure", {}, io.BytesIO(body))
     def urlopen(_request, *, timeout):
@@ -51,13 +54,33 @@ def test_http_failure_keeps_actual_request_identity_without_provider_text(monkey
     assert caught.value is failure
     details = _model_failure_details(caught.value)
     evidence = details["failure_evidence"]
-    assert evidence["requested_model"] == DEFAULT_GEMMA_MODEL
+    assert evidence["selected_output"]["requested_model"] == DEFAULT_GEMMA_MODEL
     assert evidence["failure_stage"] == "news-display-review"
-    assert evidence["provider_status"] == status
+    assert evidence["selected_output"]["provider_status"] == status
     assert details["provider_http_status"] == code
     assert "secret-key" not in json.dumps(evidence)
     assert "private prompt" not in json.dumps(evidence)
     assert len(json.dumps(evidence)) < 500
+    now = datetime.now(UTC)
+    ledger = ForwardLedger(tmp_path / "evidence.sqlite3", now=now)
+    source_body = "Original news evidence"
+    content_hash = hashlib.sha256(source_body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": "fixture", "source_item_id": "news", "source_published_time": now,
+        "collector_first_seen_time": now, "fetched_time": now,
+        "headline": "News", "body": source_body, "content_hash": content_hash,
+        "cluster_id": "news",
+    })
+    persisted = _append_llm_failure(ledger, {
+        **details, "model_version": DEFAULT_GEMMA_MODEL, "error_code": code,
+        "row": {"source": "fixture", "source_item_id": "news", "revision_number": 1,
+                "content_hash": content_hash},
+    }, "ANNOTATION", "display-review-test")
+    row = ledger.connection.execute("SELECT * FROM news_llm_failure_evidence_v1").fetchone()
+    assert row["response_hash"] == evidence["response_hash"]
+    assert json.loads(row["selected_output_json"]) == evidence["selected_output"]
+    assert persisted["failure_evidence"] == evidence, "scheduler receives the same evidence"
+    ledger.close()
 
 
 def test_gateway_requires_accounting_before_it_can_be_constructed() -> None:
