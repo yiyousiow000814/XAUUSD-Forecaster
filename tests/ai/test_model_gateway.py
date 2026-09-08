@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import urllib.error
 import urllib.request
+import io
+import json
 from pathlib import Path
 
 import pytest
@@ -19,6 +21,43 @@ from xauusd_forecaster.ai.model_gateway import ModelRequestAccountant
 from xauusd_forecaster.ai.model_gateway import ModelRequestUsage
 from xauusd_forecaster.ai.model_gateway import post_gemini_batch_embeddings
 from tests.fixtures.model_accounting_fakes import CallbackModelAccountant
+
+
+@pytest.mark.parametrize("code,body,status", [
+    (500, b'{"error":{"status":"INTERNAL","message":"secret-key private prompt"}}', "INTERNAL"),
+    (503, b'{"error":{"status":"UNAVAILABLE"}}', "UNAVAILABLE"),
+    (503, b'not json secret-key', "UNKNOWN"),
+    (500, b'{"error":{"status":{"unexpected":"secret-key"}}}', "UNKNOWN"),
+    (500, b'', "UNKNOWN"),
+])
+def test_http_failure_keeps_actual_request_identity_without_provider_text(monkeypatch, code, body, status):
+    from xauusd_forecaster.news.annotation.product import _model_failure_details
+
+    failure = urllib.error.HTTPError("https://provider.invalid", code, "failure", {}, io.BytesIO(body))
+    def urlopen(_request, *, timeout):
+        assert timeout == 120.0
+        raise failure
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    gateway = GeminiModelGateway(
+        ("secret-key",), requests_per_key=1,
+        accountant=CallbackModelAccountant(lambda _usage: True),
+    )
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        gateway.generate(
+            0, model=DEFAULT_GEMMA_MODEL, purpose="news-display-review",
+            payload={}, input_tokens=1, decode=lambda value: value,
+            retryable_http_codes=frozenset(),
+        )
+    assert caught.value is failure
+    details = _model_failure_details(caught.value)
+    evidence = details["failure_evidence"]
+    assert evidence["requested_model"] == DEFAULT_GEMMA_MODEL
+    assert evidence["failure_stage"] == "news-display-review"
+    assert evidence["provider_status"] == status
+    assert details["provider_http_status"] == code
+    assert "secret-key" not in json.dumps(evidence)
+    assert "private prompt" not in json.dumps(evidence)
+    assert len(json.dumps(evidence)) < 500
 
 
 def test_gateway_requires_accounting_before_it_can_be_constructed() -> None:

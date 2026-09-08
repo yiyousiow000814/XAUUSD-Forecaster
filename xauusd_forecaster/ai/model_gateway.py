@@ -68,6 +68,29 @@ def _http_retry_after_seconds(error: Exception) -> int | None:
             return None
 
 
+def _http_failure_evidence(
+    error: urllib.error.HTTPError, *, model: str, purpose: str,
+) -> dict[str, object]:
+    """Identify the failing request without retaining provider/request text."""
+    evidence: dict[str, object] = {
+        "requested_model": model[:100], "failure_stage": purpose[:80],
+        "provider_http_status": int(error.code), "provider_status": "UNKNOWN",
+    }
+    try:
+        prefix = error.read(4096)
+        evidence["response_prefix_hash"] = hashlib.sha256(prefix).hexdigest()
+        body = json.loads(prefix)
+        status = body.get("error", {}).get("status")
+        if status in {
+            "INTERNAL", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "INVALID_ARGUMENT",
+            "PERMISSION_DENIED", "UNAUTHENTICATED", "DEADLINE_EXCEEDED", "NOT_FOUND",
+        }:
+            evidence["provider_status"] = status
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return evidence
+
+
 def post_gemini_batch_embeddings(
     api_key: str,
     model: str,
@@ -284,6 +307,9 @@ class GeminiModelGateway:
                     }
                 last_error = error
             except urllib.error.HTTPError as error:
+                error.failure_evidence = _http_failure_evidence(
+                    error, model=model, purpose=purpose,
+                )
                 if provider_attempted:
                     self.accountant.record_provider_outcome(
                         (

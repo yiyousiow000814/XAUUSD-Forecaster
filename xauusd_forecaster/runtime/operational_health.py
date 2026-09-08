@@ -26,7 +26,7 @@ TASK_QUEUE_SLA = {
     "TITLE_TRANSLATION": timedelta(hours=2),
 }
 TASK_LABELS = {
-    "ACTIVE_ANNOTATION": "Gemini 语义复核",
+    "ACTIVE_ANNOTATION": "新闻语义与展示复核",
     "ACTIVE_IMPACT": "Gemma 事件与影响复核",
     "TITLE_TRANSLATION": "中文标题展示",
 }
