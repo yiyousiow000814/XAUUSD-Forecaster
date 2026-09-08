@@ -767,6 +767,7 @@ test("renders one canonical Admin navigation with direct child active state", as
     assert.equal(page.response.status, 200, path);
     const navigation = page.html.match(/<nav class="dashboard-section-nav admin-section-nav"[\s\S]*?<\/nav>/)?.[0] ?? "";
     assert.match(navigation, /概览[\s\S]*Assistant[\s\S]*重试任务[\s\S]*AI 模型用量/, path);
+    assert.match(navigation, /href="\/admin\/architecture"[^>]*>系统架构<\/a>/, path);
     assert.match(navigation, new RegExp(`aria-current="page"[^>]*>${label}</a>`), path);
   }
 });
