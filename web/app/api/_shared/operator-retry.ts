@@ -358,16 +358,11 @@ export async function syncOperatorRetryJobs(
            WHERE current.job_id IS NULL
               OR ${retryJobJson("current")} IS NOT json(incoming.value)
          )
-         AND NOT EXISTS (
-           SELECT 1 FROM operator_retry_jobs current
-           WHERE current.job_id NOT IN (
-             SELECT json_extract(incoming.value,'$.job_id') FROM json_each(?) incoming
-           )
-         )
+         AND (SELECT count(*) FROM operator_retry_jobs)=?
        ON CONFLICT(id) DO UPDATE SET
          payload_digest=excluded.payload_digest,item_count=excluded.item_count,
          synced_at=excluded.synced_at`,
-    ).bind(payloadDigest, normalized.length, syncedAt, payload, payload),
+    ).bind(payloadDigest, normalized.length, syncedAt, payload, normalized.length),
   ]);
   return {
     count: normalized.length, accepted: normalized.length,
