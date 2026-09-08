@@ -89,6 +89,30 @@ test("learning history keeps exact counts while its page lookup uses the identit
       assert.deepEqual((await tiedResponse.json()).items.map(row => row.value), ["same-time", 499]);
       db.database.prepare("DELETE FROM learning_records WHERE resource=? AND record_key=?")
         .run("curve-5m", "FULL\u0000!tie");
+      // Exercise the real page serializer at byte and empty boundaries.
+      for (let i = 0; i < 3; i++) insert.run(
+        "curve-5m", `LARGE-${i}`, 3000+i, "a".repeat(64),
+        JSON.stringify({ model_identity: "LARGE", value: i, text: "x".repeat(210_000) }),
+        "2026-09-03T00:00:00Z",
+      );
+      const largeResponse = await worker.fetch(new Request(
+        "https://example.test/api/learning-history?resource=curve-5m&identity=LARGE&limit=500",
+      ), bindings, { waitUntil() {}, passThroughOnException() {} });
+      const large = await largeResponse.json();
+      assert.deepEqual(large.items.map(row => row.value), [2]);
+      assert.equal(large.has_more, true);
+      assert.ok(large.next_cursor);
+      const nextResponse = await worker.fetch(new Request(
+        `https://example.test/api/learning-history?resource=curve-5m&identity=LARGE&limit=500&cursor=${encodeURIComponent(large.next_cursor)}`,
+      ), bindings, { waitUntil() {}, passThroughOnException() {} });
+      assert.deepEqual((await nextResponse.json()).items.map(row => row.value), [1]);
+      const emptyResponse = await worker.fetch(new Request(
+        "https://example.test/api/learning-history?resource=curve-5m&identity=MISSING&limit=6",
+      ), bindings, { waitUntil() {}, passThroughOnException() {} });
+      const empty = await emptyResponse.json();
+      assert.deepEqual(empty.items, []);
+      assert.equal(empty.has_more, false);
+      assert.equal(empty.next_cursor, null);
     } finally {
       db.prepare = prepare;
       globalThis.__AURUM_TEST_WORKER_ENV = previousEnv;

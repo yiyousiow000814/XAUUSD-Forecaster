@@ -205,39 +205,35 @@ async function pagedRecords(binding: D1Database, url: URL) {
        SELECT sort_epoch,record_key,payload,
               row_number() OVER (ORDER BY sort_epoch DESC,record_key DESC) sequence,
               sum(length(CAST(payload AS BLOB))+1) OVER (
-                ORDER BY sort_epoch DESC,record_key DESC
+                ORDER BY sort_epoch DESC,record_key DESC ROWS UNBOUNDED PRECEDING
               ) running_bytes
        FROM page_source
-     ), visible AS (
-       SELECT sort_epoch,record_key,payload FROM candidates
-       WHERE sequence<=? AND (running_bytes<=? OR sequence=1)
      )
      SELECT
-       COALESCE((SELECT json_group_array(json(payload)) FROM (
-         SELECT payload FROM visible ORDER BY sort_epoch DESC,record_key DESC
-       )),'[]') items_json,
+       COALESCE(json_group_array(json_array(sort_epoch,record_key,json(payload))
+         ORDER BY sort_epoch DESC,record_key DESC)
+         FILTER (WHERE sequence<=? AND (running_bytes<=? OR sequence=1)), '[]') rows_json,
        COALESCE((SELECT record_count FROM total),0) total,
-       (SELECT count(*) FROM page_source) fetched_count,
-       (SELECT count(*) FROM visible) visible_count,
-       (SELECT sort_epoch FROM visible ORDER BY sort_epoch,record_key LIMIT 1) last_epoch,
-       (SELECT record_key FROM visible ORDER BY sort_epoch,record_key LIMIT 1) last_key,
+       count(*) fetched_count,
        (SELECT sort_epoch FROM watermark) watermark_epoch,
-       (SELECT record_key FROM watermark) watermark_key`,
+       (SELECT record_key FROM watermark) watermark_key
+     FROM candidates`,
   ).bind(...values, limit, MAX_RESPONSE_BYTES).first<{
-    items_json: string; total: number; fetched_count: number; visible_count: number;
-    last_epoch: number | null; last_key: string | null;
+    rows_json: string; total: number; fetched_count: number;
     watermark_epoch: number | null; watermark_key: string | null;
   }>();
   if (!result) throw new Error("missing bounded learning page");
-  const hasMore = Number(result.fetched_count) > Number(result.visible_count);
+  const visible = JSON.parse(result.rows_json) as Array<[number, string, Record<string, unknown>]>;
+  const last = visible.at(-1);
+  const hasMore = Number(result.fetched_count) > visible.length;
   const watermark = result.watermark_epoch !== null && result.watermark_key
     ? { sort_epoch: Number(result.watermark_epoch), record_key: result.watermark_key } : null;
-  const nextCursor = hasMore && result.last_epoch !== null && result.last_key && watermark
+  const nextCursor = hasMore && last && watermark
     ? encodeCursor({
-      positionEpoch: Number(result.last_epoch), positionKey: result.last_key,
+      positionEpoch: Number(last[0]), positionKey: last[1],
       watermarkEpoch: watermark.sort_epoch, watermarkKey: watermark.record_key,
     }) : null;
-  return rawItemsResponse(result.items_json, {
+  return rawItemsResponse(JSON.stringify(visible.map(row => row[2])), {
     total: Number(result.total), next_cursor: nextCursor, has_more: hasMore,
     watermark, byte_limit: MAX_RESPONSE_BYTES,
   });
