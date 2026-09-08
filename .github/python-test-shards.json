@@ -28,10 +28,15 @@
       ]
     },
     {
-      "id": "python-2",
+      "id": "python-evidence-integrity",
       "tests": [
         "tests/evidence/test_evidence_integrity_v2.py",
-        "tests/evidence/test_clock_recovery.py",
+        "tests/evidence/test_clock_recovery.py"
+      ]
+    },
+    {
+      "id": "python-2",
+      "tests": [
         "tests/news/test_news_event_identity.py",
         "tests/ai/test_model_gateway.py",
         "tests/news/test_news_pipeline_health.py",
