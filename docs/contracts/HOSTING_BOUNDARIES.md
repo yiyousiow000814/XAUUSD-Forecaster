@@ -375,3 +375,8 @@ News activation expands receipt items once for category/review aggregates and
 reuses those compact aggregates for global totals. Candidate expiries remain
 globally sorted for the existing binary-search consumer. Atomic activation,
 empty-generation semantics and all review/category counts remain unchanged.
+
+Evidence transfer reuses one preparation across four bounded eight-record pages
+per heavy-owner invocation. Every page retains its own exact ACK and transport
+bound; restart preparation and prefix repair remain unchanged. This amortizes
+prefix verification without parallel uploaders or changing the heartbeat lane.
