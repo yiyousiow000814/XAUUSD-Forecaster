@@ -382,7 +382,12 @@ def main() -> int:
     state_file = _validated_sync_state_path(args.state_file, PRODUCTION_RUNTIME_STATE_ROOT)
     artifact_path = state_file.with_name(
         f"{state_file.stem}-generation.json.gz"
-    )
+    ).resolve()
+    # The CLI filename is bounded separately; a pre-existing artifact link must
+    # not redirect this reader/writer outside the declared private runtime.
+    if (not artifact_path.is_relative_to(PRODUCTION_RUNTIME_STATE_ROOT)
+            or artifact_path != state_file.with_name(f"{state_file.stem}-generation.json.gz")):
+        raise ValueError("NEWS_GENERATION_ARTIFACT_OUTSIDE_RUNTIME")
     origin = _version_origin(args.version_host)
     token = os.environ.get(args.token_env, "")
     remote_config = {

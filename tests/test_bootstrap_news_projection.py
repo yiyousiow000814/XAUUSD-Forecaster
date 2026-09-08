@@ -19,25 +19,34 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(MODULE)
 
 
-@pytest.mark.parametrize("authorized", [True, False])
-def test_cli_state_path_uses_runtime_authority(tmp_path, monkeypatch, authorized):
+@pytest.mark.parametrize("context", ["inside", "outside", "linked-outside", "linked-inside"])
+def test_cli_state_path_uses_runtime_authority(tmp_path, monkeypatch, context):
     authority = tmp_path / "runtime"
     authority.mkdir()
     config = tmp_path / "config.json"
     config.write_text("{}", encoding="utf-8")
-    state = (authority if authorized else tmp_path) / "bootstrap.json"
+    state = (tmp_path if context == "outside" else authority) / "bootstrap.json"
+    target = None
+    if context.startswith("linked-"):
+        target = (authority if context == "linked-inside" else tmp_path) / "raw.sqlite3"
+        target.write_bytes(b"original-fact-sentinel")
+        try:
+            (authority / "bootstrap-generation.json.gz").symlink_to(target)
+        except OSError:
+            pytest.skip("creating filesystem links requires platform permission")
     monkeypatch.setattr(MODULE, "PRODUCTION_RUNTIME_STATE_ROOT", authority)
     monkeypatch.setattr(MODULE.sys, "argv", [
         "bootstrap_news_projection.py", "--config", str(config),
         "--state-file", str(state), "--version-host", "not-a-version",
     ])
-    # Origin rejection happens only after the real runtime-path validation;
-    # neither branch can make a network call or write state.
-    with pytest.raises(ValueError, match=(
-        "version host" if authorized else "sync state path"
-    )):
+    # Rejection precedes network access, artifact reads, and any write.
+    expected = ("NEWS_GENERATION_ARTIFACT_OUTSIDE_RUNTIME" if target else
+                "sync state path" if context == "outside" else "version host")
+    with pytest.raises(ValueError, match=expected):
         MODULE.main()
     assert not state.exists()
+    if target:
+        assert target.read_bytes() == b"original-fact-sentinel"
 
 
 @pytest.mark.parametrize("value", [

@@ -1843,7 +1843,7 @@ def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_field
     monkeypatch, tmp_path,
 ) -> None:
     sync = _sync_module()
-    api = _dashboard_module()
+    from xauusd_forecaster.dashboard import news_resources as api
     rows = [{
         "event_key": f"{index:064x}",
         "collector_first_seen_time": f"2026-08-19T10:{index:02d}:00+00:00",
@@ -2594,7 +2594,7 @@ def test_news_generation_rejects_manifest_drift_without_abandoning(
 def test_news_projection_restart_restores_exact_frozen_generation(
     monkeypatch, tmp_path,
 ) -> None:
-    api = _dashboard_module()
+    from xauusd_forecaster.dashboard import news_resources as api
     api._NEWS_PROJECTION_CACHE.clear()
     database = tmp_path / "forward.sqlite3"
     first = _projection_fixture(25)
@@ -2637,7 +2637,7 @@ def test_news_projection_restart_restores_exact_frozen_generation(
 def test_news_projection_restart_fails_closed_on_corrupt_frozen_generation(
     tmp_path,
 ) -> None:
-    api = _dashboard_module()
+    from xauusd_forecaster.dashboard import news_resources as api
     database = tmp_path / "forward.sqlite3"
     api._write_persisted_news_projection_generation(
         database, _projection_fixture(25),
