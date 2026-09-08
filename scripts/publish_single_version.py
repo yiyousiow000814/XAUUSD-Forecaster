@@ -104,8 +104,10 @@ class Publication:
     def git(self, *args: str) -> str:
         return run(["git", "-C", str(self.runtime), *args], cwd=self.runtime)
 
-    def wrangler(self, *args: str, read: bool = False):
-        command = ["node", str(self.repository / "web/node_modules/wrangler/bin/wrangler.js"), *args, "--name", WORKER]
+    def wrangler(self, *args: str, read: bool = False, worker: bool = True):
+        command = ["node", str(self.repository / "web/node_modules/wrangler/bin/wrangler.js"), *args]
+        if worker:
+            command.extend(["--name", WORKER])
         if read:
             command.append("--json")
         output = run(command, cwd=self.repository / "web", timeout=120)
@@ -214,27 +216,46 @@ class Publication:
         for identity in (target, recovery):
             validate_identity(identity)
         database = database_contract(self.forward / "forward-evidence.sqlite3")
-        review_hash = check_compatibility_review(compatibility, target, recovery, database)
         self.control_action("Preflight")
         if self.git("status", "--porcelain", "--untracked-files=normal"):
             raise RuntimeError("Runtime has local changes; they will not be overwritten")
         self.git("fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main")
         controller = self.check_control_source(target["revision"])
         deployment_tool = self.check_deployment_tool(target["revision"])
+        database["d1"] = self.d1_contract(target["worker_revision"])
+        review_hash = check_compatibility_review(compatibility, target, recovery, database)
         for identity in (target, recovery):
-            revision = identity["revision"]
-            self.git("cat-file", "-e", revision + "^{commit}")
-            self.git("merge-base", "--is-ancestor", revision, "origin/main")
+            for revision in sorted({identity["revision"], identity["worker_revision"]}):
+                self.git("cat-file", "-e", revision + "^{commit}")
+                self.git("merge-base", "--is-ancestor", revision, "origin/main")
             version = self.wrangler("versions", "view", identity["worker_version"], read=True)
             message = version.get("annotations", {}).get("workers/message", "")
             match = re.search(r"(?:main:|release:)([0-9a-f]{40})", message)
-            if version.get("id") != identity["worker_version"] or not match or match[1] != identity["worker_revision"]:
+            if version.get("id") != identity["worker_version"] or "artifact_kind:PREVIEW" in message or not match or match[1] != identity["worker_revision"]:
                 raise RuntimeError("Native Worker artifact does not match the fixed source identity")
         ci = {revision: required_ci(revision, self.repository)
               for revision in sorted({target["revision"], target["worker_revision"]})}
         return {"target": target, "recovery": recovery, "compatibility_review_sha256": review_hash, "database": database,
                 "required_ci": ci, "controller": controller, "deployment_tool": deployment_tool, "current_local_revision": self.git("rev-parse", "HEAD"),
                 "current_worker_deployment": self.wrangler("deployments", "status", read=True)}
+
+    def d1_contract(self, revision: str) -> dict:
+        config = json.loads(self.git("show", f"{revision}:web/wrangler.jsonc"))
+        bindings = config["d1_databases"]
+        if len(bindings) != 1:
+            raise ValueError("Publication requires the reviewed single D1 binding")
+        binding = bindings[0]
+        info = self.wrangler("d1", "info", binding["database_name"], read=True, worker=False)
+        if info.get("uuid") != binding["database_id"]:
+            raise ValueError("D1 identity differs from the fixed Worker binding")
+        result = self.wrangler("d1", "execute", binding["database_name"], "--remote", "--command",
+            "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name",
+            read=True, worker=False)
+        if len(result) != 1 or result[0].get("success") is not True or result[0].get("meta", {}).get("rows_written") != 0:
+            raise ValueError("D1 compatibility schema observation is unavailable")
+        schema = result[0]["results"]
+        return {"database_id": info["uuid"], "schema_sha256": hashlib.sha256(
+            json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
 
     def check_deployment_tool(self, revision: str) -> dict:
         locked = json.loads(self.git("show", f"{revision}:web/package-lock.json"))

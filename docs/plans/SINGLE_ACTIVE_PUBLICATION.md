@@ -165,3 +165,12 @@ ACK. Verify crash recovery without overwriting newer facts and reconcile the
 old task/shortcut writers before enabling the replacement. The author cannot
 supply this independent approval. Full retirement and separate CF/news remain
 open after minimum-entry review.
+
+Compatibility binds the remote D1 UUID and schema fingerprint to the fixed
+Worker configuration as well as the local SQLite schema/epoch. The native D1
+observer was exercised read-only against production. Its current schema lacks
+the bounded-learning index/count migration; no compatible-deployment PASS was
+issued. Before any production write, resolve the reviewed additive migration
+and quota reserve. Worker source identities must also belong to protected main;
+Preview-marked artifacts are rejected. This closes the actual local-to-D1
+compatibility boundary rather than reintroducing Candidate qualification.

@@ -239,3 +239,28 @@ def test_operator_command_cannot_compete_with_publication_or_exit_maintenance(tm
     desired.write_text(json.dumps({"state": "running"}))
     release.run(command, cwd=tmp_path)
     assert json.loads(desired.read_text())["state"] == "stopped"
+
+
+def test_remote_compatibility_binds_actual_database_schema_and_fixed_worker_binding(tmp_path, monkeypatch):
+    publisher = release.Publication(tmp_path, tmp_path, tmp_path, tmp_path / "journal.jsonl")
+    monkeypatch.setattr(publisher, "git", lambda *args: json.dumps({"d1_databases": [
+        {"database_name": "fixture", "database_id": "fixture-database"}]}))
+    info = {"uuid": "fixture-database"}
+    schema = [{"type": "table", "name": "facts", "tbl_name": "facts", "sql": "CREATE TABLE facts(value TEXT)"}]
+    commands = []
+    def native(*args, **kwargs):
+        commands.append(args)
+        assert kwargs == {"read": True, "worker": False}
+        if args[1] == "info":
+            return info
+        assert args[args.index("--command") + 1].startswith("SELECT type,name,tbl_name,sql FROM sqlite_schema")
+        return [{"success": True, "results": schema, "meta": {"rows_written": 0}}]
+    monkeypatch.setattr(publisher, "wrangler", native)
+    first = publisher.d1_contract(TARGET["worker_revision"])
+    assert first["database_id"] == "fixture-database"
+    schema.append({"type": "index", "name": "new_index", "tbl_name": "facts", "sql": "CREATE INDEX new_index ON facts(value)"})
+    assert publisher.d1_contract(TARGET["worker_revision"]) != first
+    info["uuid"] = "another-database"
+    with pytest.raises(ValueError, match="D1 identity"):
+        publisher.d1_contract(TARGET["worker_revision"])
+    assert all(args[0] == "d1" for args in commands)
