@@ -80,3 +80,30 @@ Any UI behavior change additionally requires immutable Preview checks on desktop
 390x844 and 360x800. Reuse unchanged UI evidence only with explicit behavior
 identity. Record exact commands, results and remaining gaps before marking any
 intent complete; closed PR status alone is not implementation evidence.
+
+## Script and test directory classification
+
+Move development/operational Python entrypoints into runtime, maintenance,
+research, architecture and validation directories; move test contracts into
+matching domain directories. Keep the four installed Windows launcher/registry
+files at their stable public paths: scheduled tasks and an already-running
+controller hold those locators. They remain real entrypoints, not compatibility
+copies. Python service paths inside the registry move atomically with source.
+
+Authority and state are unchanged: callers are CI, developer CLIs, the Windows
+launcher, the Web build and fixture subprocesses. Callees resolve the same
+repository and data roots from their new physical locations. No new timers,
+leases, retries, migration state or production writes are introduced. Stored
+historical receipts remain unchanged; current generated source identities and
+all active path consumers are regenerated. Partial working-tree states are not
+published. New source with existing data is compatible; old running controller
+uses the retained registry path, exits after updating, then restarts the same
+launcher with new service paths. A failed check leaves the branch unmerged.
+
+Execution matrix: real Python CLI from unrelated cwd (help, fixture generation,
+missing-input rejection), pytest recursive collection with exactly-once shard
+membership, PowerShell startup/status and service registry lifecycle tests,
+Node Web build/compiler subprocesses, and source compiler currentness. Preserve
+all tests and fixture bytes; compare collected node IDs modulo directory moves.
+Use current required CI on the final head. Classification does not complete the
+separately retained runtime-evidence integration requirement.

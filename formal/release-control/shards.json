@@ -3,8 +3,8 @@
   "shared_paths": [
     "formal/tools/tlc/*",
     ".github/workflows/formal-verification.yml",
-    "scripts/run_tla_model.py",
-    "scripts/select_tla_shards.py",
+    "scripts/validation/run_tla_model.py",
+    "scripts/validation/select_tla_shards.py",
     "formal/release-control/shards.json",
     "formal/release-control/README.md",
     "formal/release-control/DECOMPOSITION_AUDIT.md",

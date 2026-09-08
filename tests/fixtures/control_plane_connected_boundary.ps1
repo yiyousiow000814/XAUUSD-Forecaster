@@ -288,7 +288,7 @@ function Start-Process {
     if ($targetRevision -cmatch '^[0-9a-f]{40}$' -and [string]$WorkingDirectory -ceq $stageRoot -and
         [string]$FilePath -ceq [string]$config.values.PYTHON_EXECUTABLE -and $PassThru) {
         $state = Join-Path ([string]$config.runtime_root) '.local\preflight'
-        $raw = @((Join-Path $stageRoot 'scripts\run_dashboard_api.py'), '--state-root', $state,
+        $raw = @((Join-Path $stageRoot 'scripts\runtime\run_dashboard_api.py'), '--state-root', $state,
             '--runtime-role', 'preflight', '--database', (Join-Path $state 'forward-evidence.sqlite3'),
             '--host', '127.0.0.1', '--port', [string]$config.values.PREFLIGHT_API_PORT)
         $actual = @($ArgumentList)

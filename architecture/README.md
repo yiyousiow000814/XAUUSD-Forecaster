@@ -1,13 +1,13 @@
 # Current-source architecture
 
-Run `python scripts/compile_architecture.py build`, then commit the generated
-files. `python scripts/compile_architecture.py check` fails on drift without
-rewriting anything. `python scripts/compile_architecture.py explain append_clock_event`
+Run `python scripts/architecture/compile_architecture.py build`, then commit the generated
+files. `python scripts/architecture/compile_architecture.py check` fails on drift without
+rewriting anything. `python scripts/architecture/compile_architecture.py explain append_clock_event`
 prints source call sites and side-effect syntax. PowerShell is required for the
 real parser; inspected scripts are never dot-sourced or executed.
 Node and the exact TypeScript package locked by `web/package-lock.json` are
 required for selected TS/TSX sources. With no Web installation, run
-`python scripts/architecture_typescript_tool.py` first. It installs only that
+`python scripts/architecture/architecture_typescript_tool.py` first. It installs only that
 package with an npm-ci projection of the existing lock, SRI verification and
 lifecycle scripts disabled; it does not install the Web application. A missing,
 malformed or mismatched tool fails, never omits TypeScript coverage.
@@ -219,7 +219,7 @@ calls, frontier and exact spans without importing the API or accessing SQLite.
 
 ## Retained execution evidence
 
-`python scripts/architecture_evidence.py --evidence <run-directory> --source-sha <exact-sha>`
+`python scripts/architecture/architecture_evidence.py --evidence <run-directory> --source-sha <exact-sha>`
 projects an existing mutation report plus its actual baseline/mutant JUnit files.
 It validates the complete declared family set, exact test bindings, case identity,
 case counts and the named behavior assertions. A report's `KILLED` label alone is

@@ -6,8 +6,16 @@ current main uses one authoritative inventory in
 file is assigned exactly once. Shards preserve the existing five-minute CI and
 30-second per-test budgets. A package move does not justify dropping a test.
 
-This replaces #301's old directory-only grouping while retaining its owner and
-complete-collection intent. Focused contract files keep their stable test IDs;
+Test files are physically grouped into `decision/`, `evidence/`, `training/`,
+`news/`, `ai/`, `assistant/`, `dashboard/`, `runtime/` and `architecture/`.
+Shared fixture helpers and immutable vectors live in `fixtures/`; `conftest.py`
+stays at the root so every domain inherits the same repository import root.
+Directory ownership and CI sharding are separate: shards balance bounded runtime,
+while directories explain what a test protects. Recursive inventory checking
+proves that nested tests are collected and assigned exactly once.
+
+This implements #301's physical grouping and complete-collection intent.
+Focused contract files keep their test names;
 fixtures patch the actual package owner. Process tests still invoke production
 entry points, including HTTP routing, thread lifecycle, restart and failure.
 

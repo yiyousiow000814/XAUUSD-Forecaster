@@ -29,7 +29,7 @@ def main() -> None:
     if provider.scheme != "https" or provider.hostname != "127.0.0.1" or not provider.port:
         raise RuntimeError("STAGED_NON_LOOPBACK_PROVIDER_DENIED")
     sys.path.insert(0, str(args.source_root.resolve(strict=True)))
-    spec = importlib.util.spec_from_file_location("staged_sync", args.source_root / "scripts/run_dashboard_sync.py")
+    spec = importlib.util.spec_from_file_location("staged_sync", args.source_root / "scripts/runtime/run_dashboard_sync.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     from xauusd_forecaster.runtime_paths import isolated_runtime_configuration

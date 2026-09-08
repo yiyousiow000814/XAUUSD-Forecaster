@@ -83,7 +83,7 @@ root, query Git or a database, perform HTTP, advance an ACK, or schedule work.
 Field selection, input validity and transport limits remain governed by
 [Hosting boundaries](HOSTING_BOUNDARIES.md), not by the location of the code.
 
-The explicit serializer re-exports in `scripts/run_dashboard_sync.py` preserve
+The explicit serializer re-exports in `scripts/runtime/run_dashboard_sync.py` preserve
 existing build and runtime callers with the same function and exception
 objects; they introduce no second implementation or mutable state. Remove
 compatibility-only aliases after every external importer (including immutable
@@ -95,7 +95,7 @@ serialization does not qualify the remaining entrypoint logic as extracted.
 
 ### Executable Python import policy
 
-`scripts/check_architecture_imports.py` shares the current compiler's Python
+`scripts/architecture/check_architecture_imports.py` shares the current compiler's Python
 AST parser. `architecture/critical-paths.json` declares its canonical package
 namespaces, exact script-composition edges and any legacy shims. The existing
 Current source architecture CI check executes the policy on all package Python

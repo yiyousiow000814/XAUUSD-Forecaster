@@ -44,8 +44,9 @@ intent evidence and are not merged into the new branch. See the
   now checks the real loaded owner and rejects an unavailable producer root.
 - Preserve main-only publication and Assistant PAUSED. Control Center split from
   #295 is retired; scheduler operator authorization from #291 remains in force.
-- Keep #301 complete-collection intent through the current test inventory and
-  contract families; do not restore superseded release-control test directories.
+- Implement #301 physical ownership directories and retain recursive, exactly-once
+  CI inventory. Move 45 scripts and 90 test modules; centralize two fixture helpers.
+  Four installed Windows public launcher/registry files retain their stable paths.
 
 ## Verification evidence
 
@@ -78,3 +79,19 @@ This Draft is the single replacement review surface for the original chain.
 Creating or closing PRs does not complete production recovery, Cloudflare capacity,
 news backlog, research, or the unresolved runtime evidence requirement. Those
 results must keep their own actual acceptance status.
+
+## Directory classification follow-up
+
+The same replacement PR now physically groups 45 scripts into five operational
+areas and 90 test modules into nine domain directories. Two shared test helper
+modules move into `tests/fixtures`. The four installed Windows launcher and
+registry paths stay fixed, with their role documented in `scripts/README.md`.
+CI inventories, selectors, Web fixture builds, service registry, source compiler
+and subprocess fixtures use the classified paths. Recursive test and import
+inventories preserve complete coverage; there are no old-path Python shims.
+
+Collection retains all prior test functions and now yields 2,107 cases. The
+production entrypoint family derives its Python cases from the actual Windows
+service registry. Historical and current API source locators are exercised by
+the existing immutable capture/restart family; ambiguous source identities fail.
+Existing data and evidence files are not relocated or rewritten.

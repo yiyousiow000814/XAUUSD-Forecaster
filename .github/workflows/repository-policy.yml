@@ -31,4 +31,4 @@ jobs:
           path: candidate
           persist-credentials: false
       - name: Check pull-request policy
-        run: python3 policy/scripts/check_repository_policy.py --root candidate
+        run: python3 policy/scripts/validation/check_repository_policy.py --root candidate

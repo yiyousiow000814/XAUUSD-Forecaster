@@ -3,9 +3,9 @@
   "shared_paths": [
     ".github/workflows/windows-runtime-gates.yml",
     ".github/windows-runtime-shards.json",
-    "scripts/run_windows_runtime_shard.py",
-    "scripts/select_windows_runtime_shards.py",
-    "tests/test_ci_contracts.py",
+    "scripts/validation/run_windows_runtime_shard.py",
+    "scripts/validation/select_windows_runtime_shards.py",
+    "tests/architecture/test_ci_contracts.py",
     "pyproject.toml",
     "AGENTS.md",
     "docs/protocols/CHANGE_SAFETY.md"
@@ -19,31 +19,31 @@
         "scripts/run_main_services.ps1",
         "scripts/main_services_launcher.vbs",
         "scripts/windows-service-launch-contract.json",
-        "tests/test_main_runtime.py",
-        "tests/test_public_health_check.py",
-        "tests/test_runtime_health.py",
-        "tests/test_news_scheduler.py",
-        "tests/test_runtime_root_ownership.py",
-        "tests/test_cross_version_runtime_recovery.py"
+        "tests/runtime/test_main_runtime.py",
+        "tests/dashboard/test_public_health_check.py",
+        "tests/runtime/test_runtime_health.py",
+        "tests/news/test_news_scheduler.py",
+        "tests/runtime/test_runtime_root_ownership.py",
+        "tests/runtime/test_cross_version_runtime_recovery.py"
       ],
       "tests": [
         {
-          "path": "tests/test_main_runtime.py"
+          "path": "tests/runtime/test_main_runtime.py"
         },
         {
-          "path": "tests/test_public_health_check.py"
+          "path": "tests/dashboard/test_public_health_check.py"
         },
         {
-          "path": "tests/test_runtime_health.py"
+          "path": "tests/runtime/test_runtime_health.py"
         },
         {
-          "path": "tests/test_news_scheduler.py"
+          "path": "tests/news/test_news_scheduler.py"
         },
         {
-          "path": "tests/test_runtime_root_ownership.py"
+          "path": "tests/runtime/test_runtime_root_ownership.py"
         },
         {
-          "path": "tests/test_cross_version_runtime_recovery.py"
+          "path": "tests/runtime/test_cross_version_runtime_recovery.py"
         }
       ]
     }

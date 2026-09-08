@@ -72,7 +72,7 @@ Final integration and independent review remain required.
 ## Test ownership completion
 
 Eighteen resource-only test definitions (24 parameterized cases) now live in
-`tests/test_dashboard_news_resources.py`. Remove only their unused API-module
+`tests/dashboard/test_dashboard_news_resources.py`. Remove only their unused API-module
 initialization; retain all assertions and fixtures. The two annotation builders
 and existing credential/cache lifetime fixture live in one shared test module.
 Twenty-one moved definitions have identical ASTs after removing that unused

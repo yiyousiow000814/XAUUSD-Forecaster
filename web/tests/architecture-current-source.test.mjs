@@ -244,7 +244,7 @@ test('actual generated source feeds the existing Explorer without runtime or per
   assert.equal(new Set(phone.nodes.map(node => node.position.y)).size, Object.keys(index.allowed.views).length);
   assert.equal(phone.edges.length, 0, 'display ordering must not invent execution edges');
 
-  const api = 'scripts/run_dashboard_api.py';
+  const api = 'scripts/runtime/run_dashboard_api.py';
   const selected = index.allowed.source_symbols[api];
   const news = manifest.views.find(view => view.id === 'news-worker-audit');
   assert.ok(selected.length > 0);

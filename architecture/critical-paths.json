@@ -14,36 +14,36 @@
     },
     "script_imports": [
       {
-        "source": "scripts/architecture_compiler.py",
-        "target": "scripts/architecture_typescript_tool.py",
+        "source": "scripts/architecture/architecture_compiler.py",
+        "target": "scripts/architecture/architecture_typescript_tool.py",
         "reason": "Current compiler reuses its lock-bound parser dependency owner.",
         "remove_when": "The owning compiler is retired or this developer tool interface moves together.",
         "binding": "MODULE_REQUEST_ONLY"
       },
       {
-        "source": "scripts/architecture_evidence.py",
-        "target": "scripts/run_architecture_mutations.py",
+        "source": "scripts/architecture/architecture_evidence.py",
+        "target": "scripts/architecture/run_architecture_mutations.py",
         "reason": "The evidence reader reuses the actual mutation result classifier.",
         "remove_when": "The mutation/evidence developer tool interface is retired or moved together.",
         "binding": "MODULE_REQUEST_ONLY"
       },
       {
-        "source": "scripts/compile_architecture.py",
-        "target": "scripts/architecture_compiler.py",
+        "source": "scripts/architecture/compile_architecture.py",
+        "target": "scripts/architecture/architecture_compiler.py",
         "reason": "The CLI composes the existing source compiler.",
         "remove_when": "The source compiler CLI is retired or moved together.",
         "binding": "MODULE_REQUEST_ONLY"
       },
       {
-        "source": "scripts/run_architecture_mutations.py",
-        "target": "scripts/architecture_compiler.py",
+        "source": "scripts/architecture/run_architecture_mutations.py",
+        "target": "scripts/architecture/architecture_compiler.py",
         "reason": "The historical mutation runner checks actual source identities using the same compiler.",
         "remove_when": "The source/mutation developer tool interface is retired or moved together.",
         "binding": "MODULE_REQUEST_ONLY"
       },
       {
-        "source": "scripts/check_architecture_imports.py",
-        "target": "scripts/architecture_compiler.py",
+        "source": "scripts/architecture/check_architecture_imports.py",
+        "target": "scripts/architecture/architecture_compiler.py",
         "reason": "The import checker reuses the existing Python AST parse and source admission boundary.",
         "remove_when": "The owning source checker is retired or moved together.",
         "binding": "MODULE_REQUEST_ONLY"
@@ -52,9 +52,9 @@
     "legacy_shims": []
   },
   "source_symbols": {
-    "scripts/run_dashboard_api.py": [
-      "scripts/run_dashboard_api.py::Handler.do_GET",
-      "scripts/run_dashboard_api.py::main"
+    "scripts/runtime/run_dashboard_api.py": [
+      "scripts/runtime/run_dashboard_api.py::Handler.do_GET",
+      "scripts/runtime/run_dashboard_api.py::main"
     ],
     "xauusd_forecaster/dashboard/status_resources.py": [
       "xauusd_forecaster/dashboard/status_resources.py::_optional_resource_payload"
@@ -74,9 +74,9 @@
   "views": {
     "news-worker-audit": {
       "files": [
-        "scripts/run_dashboard_api.py",
+        "scripts/runtime/run_dashboard_api.py",
         "xauusd_forecaster/dashboard/news_resources.py",
-        "scripts/run_dashboard_sync.py",
+        "scripts/runtime/run_dashboard_sync.py",
         "xauusd_forecaster/dashboard/resource_contracts.py",
         "xauusd_forecaster/news_projection.py",
         "web/worker/api-router.ts",
@@ -92,13 +92,13 @@
         "xauusd_forecaster/dashboard/sync/resources.py"
       ],
       "roots": [
-        "scripts/run_dashboard_api.py::Handler.do_GET",
+        "scripts/runtime/run_dashboard_api.py::Handler.do_GET",
         "xauusd_forecaster/dashboard/news_resources.py::_build_news_projection_source",
         "xauusd_forecaster/dashboard/news_resources.py::_news_projection_source_for_request",
         "xauusd_forecaster/dashboard/news_resources.py::_finish_news_projection_source_build",
         "xauusd_forecaster/dashboard/news_resources.py::_build_news_evidence_resource",
         "xauusd_forecaster/dashboard/status_resources.py::_optional_resource_payload",
-        "scripts/run_dashboard_api.py::main",
+        "scripts/runtime/run_dashboard_api.py::main",
         "xauusd_forecaster/news_projection.py::build_news_projection_generation",
         "xauusd_forecaster/dashboard/sync/resources.py::_sync_news",
         "xauusd_forecaster/dashboard/sync/resources.py::_sync_news_evidence",
@@ -118,19 +118,19 @@
         "web/app/_lib/news-index-contract.ts::authoritativeNewsTotals"
       ],
       "tests": [
-        "tests/test_news_projection.py",
-        "tests/test_dashboard_sync.py",
-        "tests/test_dashboard_resource_contracts.py",
+        "tests/news/test_news_projection.py",
+        "tests/dashboard/test_dashboard_sync.py",
+        "tests/dashboard/test_dashboard_resource_contracts.py",
         "web/tests/news-projection-store.test.mjs",
         "web/tests/news-evidence-store.test.mjs",
         "web/tests/audit-content-rendering.test.mjs",
-        "tests/test_dashboard_news_resources.py",
-        "tests/dashboard_news_fixtures.py"
+        "tests/dashboard/test_dashboard_news_resources.py",
+        "tests/fixtures/dashboard_news_fixtures.py"
       ]
     },
     "clock-transaction": {
       "files": [
-        "scripts/run_forward_collector.py",
+        "scripts/runtime/run_forward_collector.py",
         "xauusd_forecaster/decision/engine.py",
         "xauusd_forecaster/clock_commit.py",
         "xauusd_forecaster/clock_recovery.py",
@@ -143,14 +143,14 @@
         "xauusd_forecaster/clock_commit.py::read_completed_clock"
       ],
       "tests": [
-        "tests/test_clock_atomicity.py",
-        "tests/test_clock_recovery.py",
-        "tests/test_market_session.py"
+        "tests/evidence/test_clock_atomicity.py",
+        "tests/evidence/test_clock_recovery.py",
+        "tests/decision/test_market_session.py"
       ]
     },
     "source-first-ack": {
       "files": [
-        "scripts/run_dashboard_sync.py",
+        "scripts/runtime/run_dashboard_sync.py",
         "xauusd_forecaster/dashboard/resource_contracts.py",
         "xauusd_forecaster/dashboard/sync/transport.py",
         "xauusd_forecaster/dashboard/learning_resources.py",
@@ -166,8 +166,8 @@
         "xauusd_forecaster/dashboard/sync/transport.py::_post_json"
       ],
       "tests": [
-        "tests/test_dashboard_sync.py",
-        "tests/test_dashboard_resource_contracts.py"
+        "tests/dashboard/test_dashboard_sync.py",
+        "tests/dashboard/test_dashboard_resource_contracts.py"
       ]
     },
     "main-update": {
@@ -180,7 +180,7 @@
         "scripts/main_runtime.ps1::Invoke-MainRuntime"
       ],
       "tests": [
-        "tests/test_main_runtime.py"
+        "tests/runtime/test_main_runtime.py"
       ]
     }
   }

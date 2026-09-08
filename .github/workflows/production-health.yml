@@ -22,4 +22,4 @@ jobs:
         with:
           python-version: "3.13"
       - name: Probe public production surfaces
-        run: python scripts/check_public_health.py
+        run: python scripts/validation/check_public_health.py

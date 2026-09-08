@@ -21,7 +21,7 @@ function Start-Process {
 function Start-ForecasterService {
     param($Service,[switch]$SkipExistingCheck)
     if ($Service.Key -ne 'api' -or $Service.CodeRoot -ne '__SOURCE_ROOT__' -or
-        $Service.ScriptPath -ne '__SOURCE_ROOT__\scripts\run_dashboard_api.py' -or
+        $Service.ScriptPath -ne '__SOURCE_ROOT__\scripts\runtime\run_dashboard_api.py' -or
         ($Service.Arguments -join '|') -cne '__API_ARGUMENTS__') {
         throw 'STAGED_UNEXPECTED_BUSINESS_START'
     }
