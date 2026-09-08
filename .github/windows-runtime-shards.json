@@ -263,6 +263,30 @@
         {
           "path": "tests/test_runtime_launchers.py",
           "from": "test_all_operator_and_json_consumers_preserve_membership_enum",
+          "through": "test_release_requires_exactly_one_owner_for_every_side_effect_service"
+        }
+      ]
+    },
+    {
+      "id": "migration-acceptance",
+      "family": "windows-runtime-release",
+      "paths": [
+        "tests/test_runtime_launchers.py",
+        "scripts/worker_cpu_evidence.ps1",
+        "scripts/xauusd_control_center.ps1",
+        "scripts/release_runtime_read_model.ps1",
+        "scripts/runtime_paths.ps1",
+        "scripts/control_center_common.ps1",
+        "scripts/control_center_persistence_gateway.ps1",
+        "scripts/control_center_provider_adapters.ps1",
+        "scripts/control_center_runtime_supervision.ps1",
+        "scripts/control_center_evidence_authority.ps1",
+        "scripts/control_center_transaction_engine.ps1"
+      ],
+      "tests": [
+        {
+          "path": "tests/test_runtime_launchers.py",
+          "from": "test_storage_migration_requires_coordinated_compatibility_review",
           "through": "test_storage_or_resource_failure_cannot_use_compatibility_approval"
         }
       ]

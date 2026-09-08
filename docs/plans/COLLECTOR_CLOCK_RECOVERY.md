@@ -484,3 +484,16 @@ history request-reference tests now cover completed evidence in PS5.1/PS7 and
 wrong receipt digest, altered groups and missing receipt. The two valid completed
 cases failed before correction. Final verification must include the real history
 consumer and complete Access/Switch/Observe path; author review is not independent.
+
+## Transaction and migration gates have separate latency ownership
+
+On fae42780, hosted Windows transaction passed 137/138 cases in 210.09 seconds
+before the five-minute job budget cancelled the final case. Setup consumes the
+remaining job time. The suite mixes Stable/Promote/Reverse ownership with storage
+compatibility and renewable migration evidence. Split the existing contiguous
+contract ranges at that ownership boundary into transaction and
+migration-acceptance shards. Preserve every case, actual PowerShell runtime,
+30-second per-test allowance, five-minute job limit and aggregate required gate.
+The changed-path selector must select both affected groups, and exact-once
+manifest coverage must pass. This is a gate organization repair, not evidence
+that the previously cancelled run passed.

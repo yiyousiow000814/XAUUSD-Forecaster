@@ -157,6 +157,7 @@ def test_windows_runtime_selector_uses_authoritative_impact_map(monkeypatch) -> 
         "evidence",
         "provider-adapters",
         "transaction",
+        "migration-acceptance",
     }
     owner_shards = {
         "scripts/control_center_persistence_gateway.ps1": "persistence",
@@ -172,6 +173,8 @@ def test_windows_runtime_selector_uses_authoritative_impact_map(monkeypatch) -> 
         monkeypatch.setattr(module, "_changed_paths", lambda _base, p=owner_path: [p])
         selected = {item["id"] for item in module.select("base")}
         assert {"facade-composition", owner_shard}.issubset(selected)
+        if owner_path == "scripts/control_center_transaction_engine.ps1":
+            assert "migration-acceptance" in selected
         if owner_path == "scripts/control_center_runtime_supervision.ps1":
             assert "runtime-candidate-validation" in selected
     rehearsal = next(row for row in WINDOWS_MANIFEST["shards"] if row["id"] == "control-install-rehearsal")
