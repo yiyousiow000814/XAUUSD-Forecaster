@@ -118,6 +118,8 @@ def compare_news_queries(database, api, instant, *, deadline_seconds=30, row_bud
     This proves query/display equivalence, not a historical HTTP timeout.
     The legacy SQL is retained as a bounded oracle; interruption is not equality.
     """
+    from xauusd_forecaster.dashboard.news_resources import _durable_news_evidence_rows
+
     started = time.monotonic()
     captured = {}
 
@@ -193,7 +195,7 @@ def compare_news_queries(database, api, instant, *, deadline_seconds=30, row_bud
         result = {"frozen_at": instant.isoformat(), "receipt_count": receipt_count,
             "compared_display_count": len(optimized), "semantic_equality_verified": optimized == independent,
             "optimized_digest": digest(optimized), "independent_digest": digest(independent),
-            "durable_digest": digest(api._durable_news_evidence_rows(optimized)),
+            "durable_digest": digest(_durable_news_evidence_rows(optimized)),
             "sql_sha256": digest(captured["sql"]), "parameters_sha256": digest(captured["parameters"])}
         legacy = captured["sql"][captured["sql"].index("SELECT canonical_event_key AS event_key"):].replace(
             "LEFT JOIN event_aliases AS alias", "LEFT JOIN json_each(?) AS alias")
