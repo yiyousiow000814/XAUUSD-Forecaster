@@ -73,19 +73,24 @@ def _http_failure_evidence(
 ) -> dict[str, object]:
     """Identify the failing request without retaining provider/request text."""
     evidence: dict[str, object] = {
-        "requested_model": model[:100], "failure_stage": purpose[:80],
-        "provider_http_status": int(error.code), "provider_status": "UNKNOWN",
+        "failure_code": "PROVIDER_HTTP_ERROR", "failure_stage": purpose[:80],
+        "response_hash": hashlib.sha256(b"").hexdigest(),
+        "cause_type": "HTTPError", "cause": f"HTTP {int(error.code)}",
+        "selected_output": {
+            "requested_model": model[:100], "provider_http_status": int(error.code),
+            "provider_status": "UNKNOWN", "response_scope": "PREFIX_4096",
+        },
     }
     try:
         prefix = error.read(4096)
-        evidence["response_prefix_hash"] = hashlib.sha256(prefix).hexdigest()
+        evidence["response_hash"] = hashlib.sha256(prefix).hexdigest()
         body = json.loads(prefix)
         status = body.get("error", {}).get("status")
         if status in {
             "INTERNAL", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "INVALID_ARGUMENT",
             "PERMISSION_DENIED", "UNAUTHENTICATED", "DEADLINE_EXCEEDED", "NOT_FOUND",
         }:
-            evidence["provider_status"] = status
+            evidence["selected_output"]["provider_status"] = status
     except (OSError, ValueError, TypeError, AttributeError):
         pass
     return evidence

@@ -2093,6 +2093,7 @@ def _append_llm_failure(
         "is_terminal": terminal,
         "failure_code": failure_code,
         "provider_http_status": parsed_record.get("provider_http_status"),
+        "failure_evidence": failure_evidence,
     }
 
 
@@ -2156,6 +2157,7 @@ def _append_impact_failure(
         "is_terminal": terminal,
         "failure_code": details["failure_code"],
         "provider_http_status": details["provider_http_status"],
+        "failure_evidence": details.get("failure_evidence"),
     }
 
 

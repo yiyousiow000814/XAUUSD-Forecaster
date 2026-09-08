@@ -4,7 +4,9 @@ Tests protect contracts, not the historical PR stack or a directory move. The
 current main uses one authoritative inventory in
 `.github/python-test-shards.json`; `test_ci_contracts.py` proves every Python test
 file is assigned exactly once. Shards preserve the existing five-minute CI and
-30-second per-test budgets. A package move does not justify dropping a test.
+30-second per-test budgets. A package move does not justify dropping a test. Evidence integrity and clock
+recovery run independently from model/news integration, preserving coverage
+when their combined fixture setup exceeds one shard budget.
 
 Test files are physically grouped into `decision/`, `evidence/`, `training/`,
 `news/`, `ai/`, `assistant/`, `dashboard/`, `runtime/` and `architecture/`.
