@@ -169,7 +169,8 @@ def build_fixtures() -> dict[str, bytes]:
         resources._market_history_payloads(candles[:500], decisions[:2_500]),
         key=len,
     )
-    learning_records = resource_contracts.learning_history_records(source)
+    learning_records = [{**row, "resource": "exact-" + row["resource"]}
+                        for row in resource_contracts.learning_history_records(source)]
     learning_batch = max(
         resource_contracts.learning_history_batches(learning_records),
         key=lambda rows: len(json.dumps(

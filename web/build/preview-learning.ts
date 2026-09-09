@@ -144,13 +144,12 @@ export function compactPreviewLearning(learning: JsonObject): JsonObject {
         const model = value && typeof value === "object" ? value as JsonObject : {};
         const evaluation = model.evaluation && typeof model.evaluation === "object"
           ? model.evaluation as JsonObject : {};
-        const points = Array.isArray(evaluation.points) ? evaluation.points : [];
         const results = Array.isArray(evaluation.results) ? evaluation.results : [];
         return {
           ...model,
           evaluation: {
             ...evaluation,
-            points: points.slice(-48),
+            points: [],
             results: results.slice(-20),
             result_total: evaluation.result_total ?? results.length,
           },

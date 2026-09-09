@@ -380,3 +380,46 @@ Evidence transfer reuses one preparation across four bounded eight-record pages
 per heavy-owner invocation. Every page retains its own exact ACK and transport
 bound; restart preparation and prefix repair remain unchanged. This amortizes
 prefix verification without parallel uploaders or changing the heartbeat lane.
+
+## Chart history ownership
+
+`/api/chart` is the graph read entry point. Learning charts read the requested
+24-hour, 7-day, 30-day or complete time interval from exact derived records;
+selecting a wider interval must not reuse a recent metrics summary. Up to 1,200
+points per series are returned exactly. Larger intervals retain the full time
+extent, bucket extrema, version markers and explicit source-gap boundaries.
+The response declares source and displayed counts and whether it was sampled.
+Selecting a narrower interval issues a new indexed range read. Sampling changes
+display resolution, never stored evidence or the requested historical extent.
+
+The existing optional learning owner derives all learning and execution rows
+from one SQLite snapshot and publishes them with the metrics read model. Metrics
+contain no chart arrays. Execution record identity includes the source decision
+and model version: settlement timestamps alone are not unique. Duplicate keys
+are rejected before publishing a partial derived set. Historical facts are not
+rewritten to repair a graph.
+
+The existing single Dashboard Sync owner exports at most 200 rows and 55 KB of
+record JSON per local `/api/chart-history` page. Its revision/resource/key cursor
+advances only after the existing authenticated D1 writer acknowledges the exact
+accepted count. Modified older records receive a newer revision; reconnects and
+restarts resume from the last acknowledged cursor. Backfill retains its own
+immediate continuation while other scheduled resources retain their turns.
+An empty export page establishes a caught-up revision; its completion marker is
+published only when the exact D1 record count agrees. Unchanged completion is
+not posted again. No new service, lease, release owner or task platform exists.
+
+Corrected rows use the `exact-*` resource namespace to avoid confusing old,
+partially sampled history with a complete baseline. The read API reports pending
+until the baseline completion marker exists. Initial backfill, subsequent delta
+writes and visitor range reads are separate capacity costs. Historic old rows
+are audit data, not graph authority. The old curve/version overview reads are
+retired. Worker code replacement never rolls back the authoritative database.
+
+Branch Preview runs the same range-query implementation against allowed
+read-only D1 data and labels its provenance. It never substitutes a compact
+build snapshot for missing complete graph history. Cache reuse is bounded to
+30 seconds in production; charts load on demand rather than through homepage
+metrics polling. SQL range work is proportional to the selected source interval,
+not the number of returned sampled points; capacity claims require actual D1
+measurements and must include this distinction.

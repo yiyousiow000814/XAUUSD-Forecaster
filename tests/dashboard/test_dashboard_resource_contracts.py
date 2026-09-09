@@ -174,9 +174,9 @@ def test_critical_status_excludes_growing_resources_and_keeps_references() -> No
     ]
     assert learning["learning_curves"]["archived_model_count"] == 1
     assert learning["learning_history_resource"] == "/api/learning-history"
-    assert learning["learning_curves"]["identity_curves"] == [body]
-    assert learning["learning_curves"]["full_minus_market"] == [body]
-    assert learning["learning_curves"]["broad_full_minus_core_full"] == [body]
+    assert learning["learning_curves"]["identity_curves"] == []
+    assert learning["learning_curves"]["full_minus_market"] == []
+    assert learning["learning_curves"]["broad_full_minus_core_full"] == []
     assert "learning_curves" not in mirrored
     assert "models" not in mirrored["training"]
     assert len(index_rows) == 100
@@ -310,13 +310,22 @@ def test_learning_history_records_have_stable_keys_and_bounded_batches() -> None
         "execution_learning": {"models": []},
     }
 
+    payload["execution_learning"]["models"] = [{"model_identity": "LOT_RIDGE", "evaluation": {
+        "points": [{"time": "2026-08-10T02:00:00Z", "decision_id": decision,
+                    "model_version": version, "selected_cumulative_return": i}
+                   for i, (decision, version) in enumerate([("a", "v1"), ("b", "v1"), ("a", "v2")])],
+        "results": [{"scored_at": "2026-08-10T02:00:00Z", "decision_id": decision,
+                     "model_version": version}
+                    for decision, version in [("a", "v1"), ("b", "v1"), ("a", "v2")]],
+    }}]
     first = module.learning_history_records(payload)
     second = module.learning_history_records(payload)
+    assert len({(row["resource"], row["record_key"]) for row in first}) == len(first)
 
     assert first == second
     assert {row["resource"] for row in first} == {
         "model", "version-group", "curve-5m", "curve-30m",
-        "curve-overview", "version-overview",
+        "execution-point", "execution-result",
     }
     assert all(len(row["payload_hash"]) == 64 for row in first)
     batches = module.learning_history_batches(first * 2_000)
@@ -326,65 +335,6 @@ def test_learning_history_records_have_stable_keys_and_bounded_batches() -> None
             {"records": batch}, ensure_ascii=False, separators=(",", ":"),
         ).encode("utf-8")
         assert len(encoded) <= module.LEARNING_HISTORY_BATCH_LIMIT_BYTES
-
-
-def test_visual_overviews_stay_bounded_and_preserve_the_full_span() -> None:
-    points = [{
-        "decision_time": (
-            datetime(2026, 1, 1, tzinfo=timezone.utc)
-            + timedelta(minutes=5 * index)
-        ).isoformat(),
-        "cumulative_quote_return": (-1 if index == 50_000 else index / 100_000),
-    } for index in range(100_000)]
-
-    overview = module._visual_curve_overview(points, 240)
-
-    assert len(overview) <= 240
-    assert overview[0]["decision_time"] == points[0]["decision_time"]
-    assert overview[-1]["decision_time"] == points[-1]["decision_time"]
-    assert any(
-        row["decision_time"] == points[50_000]["decision_time"]
-        for row in overview
-    )
-    assert not any(row["source_gap_before"] for row in overview)
-
-    groups = [{
-        "created_at": point["decision_time"],
-        "generation": index,
-        "cumulative_quote_return": point["cumulative_quote_return"],
-        "cadence_metrics": {
-            "FIXED_30M": {
-                "cumulative_quote_return": 2 if index == 75_000 else -index / 100_000,
-            },
-        },
-    } for index, point in enumerate(points)]
-    group_overview = module._visual_version_overview(groups, 60)
-
-    assert len(group_overview) <= 60
-    assert group_overview[0] == groups[0]
-    assert group_overview[-1] == groups[-1]
-    assert groups[50_000] in group_overview
-    assert groups[75_000] in group_overview
-
-
-def test_curve_overview_marks_only_real_source_gaps() -> None:
-    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    offsets = [0, 5, 10, 120, 125]
-    points = [{
-        "decision_time": (start + timedelta(minutes=offset)).isoformat(),
-        "cumulative_quote_return": index / 100,
-    } for index, offset in enumerate(offsets)]
-
-    overview = module._visual_curve_overview(points, 240)
-
-    assert [row["source_gap_before"] for row in overview] == [
-        False, False, False, True, False,
-    ]
-
-    compressed_source = module._visual_curve_overview(
-        points, 240, infer_source_gaps=False,
-    )
-    assert not any(row["source_gap_before"] for row in compressed_source)
 
 
 def test_decision_overviews_are_incremental_bounded_and_frequency_scoped() -> None:
@@ -455,6 +405,7 @@ def test_learning_summary_size_is_fixed_as_history_grows() -> None:
     summary = json.loads(module.learning_snapshot(payload))
 
     assert len(summary["learning_curves"]["version_groups"]) == 6
-    assert len(summary["learning_curves"]["identity_curves"][0]["points"]) == 48
+    assert summary["learning_curves"]["identity_curves"] == []
+    assert module._learning_summary(summary) == summary
     assert summary["learning_history_manifest"]["version_group_total"] == 1_000
     assert len(module.learning_snapshot(payload)) < 100_000

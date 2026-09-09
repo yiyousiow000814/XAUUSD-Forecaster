@@ -1329,7 +1329,10 @@ def _optional_resource_payload(
                 key: value for key, value in summary["training"].items()
                 if key != "models"
             }
-        summary.update(_learning_summary(payload))
+        from xauusd_forecaster.dashboard.resource_contracts import learning_history_records
+        records = learning_history_records(payload)
+        summary.update(_learning_summary(payload, record_total=len(records)))
+        summary["_chart_records"] = records
         return summary
     if resource == "market_chart":
         return {

@@ -103,11 +103,8 @@ from xauusd_forecaster.dashboard.resource_contracts import (
     REMOTE_DAILY_BRIEF_LIMIT,
     LEARNING_HISTORY_CONTRACT_VERSION,
     LEARNING_HISTORY_BATCH_LIMIT_BYTES,
-    LEARNING_SUMMARY_CURVE_POINTS,
     LEARNING_SUMMARY_GROUPS_PER_IDENTITY,
     LEARNING_SUMMARY_EXECUTION_RESULTS,
-    LEARNING_OVERVIEW_CURVE_POINTS,
-    LEARNING_OVERVIEW_GROUPS_PER_IDENTITY,
     MARKET_OVERVIEW_DECISIONS_PER_SERIES,
     REMOTE_MARKET_DECISION_LIMIT,
     REMOTE_MARKET_CANDLE_LIMIT,
@@ -127,12 +124,8 @@ from xauusd_forecaster.dashboard.resource_contracts import (
     _bounded_item_batches,
     _epoch,
     _learning_record,
-    _visual_curve_overview,
     _visual_decision_overview,
-    _version_metric,
-    _visual_version_overview,
     _update_decision_overviews,
-    _learning_overview_records,
     learning_history_records,
     learning_history_batches,
     _learning_summary,
@@ -378,71 +371,48 @@ def _learning_payload(local_payload: dict, config: dict) -> dict:
 
 
 def _sync_learning_history(local_payload: dict, config: dict) -> None:
-    local_payload = _learning_payload(local_payload, config)
-    remote_host = urllib.parse.urlsplit(config["remote_ingest_url"]).hostname or ""
-    if remote_host.lower().endswith(".chatgpt.site"):
-        return
+    """Export exact derived rows, never the first-paint learning summary."""
     history_url = config.get("remote_learning_history_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/learning-history"
     )
-    history_state_path = Path(config["learning_history_state_file"])
-    history_state = _read_news_sync_state(history_state_path)
-    hashes = history_state.get("hashes", {})
-    if not isinstance(hashes, dict):
-        hashes = {}
-    now = datetime.now(UTC)
-    last_full = history_state.get("last_full_sync")
-    refresh_in_progress = bool(history_state.get("full_refresh_started_at"))
-    try:
-        full_refresh_due = (
-            history_state.get("contract_version") != LEARNING_HISTORY_CONTRACT_VERSION
-            or not last_full
-            or (now - datetime.fromisoformat(str(last_full))).total_seconds()
-            >= LEARNING_HISTORY_FULL_REFRESH_SECONDS
-        )
-    except (TypeError, ValueError):
-        full_refresh_due = True
-    if full_refresh_due and not refresh_in_progress:
-        hashes = {}
-        history_state["full_refresh_started_at"] = now.isoformat()
-
-    records = learning_history_records(local_payload)
-    current_keys = {_learning_record_identity(row) for row in records}
-    hashes = {
-        key: value for key, value in hashes.items()
-        if key in current_keys
-    }
-    pending = [
-        row for row in records
-        if hashes.get(_learning_record_identity(row))
-        != row["payload_hash"]
-    ]
-    batches = learning_history_batches(pending)
-    if batches:
-        batch = batches[0]
-        encoded = json.dumps(
-            {"records": batch}, ensure_ascii=False, allow_nan=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        _post_json(history_url, encoded, config)
-        for row in batch:
-            hashes[_learning_record_identity(row)] = row["payload_hash"]
-        _write_news_sync_state(history_state_path, {
-            "contract_version": LEARNING_HISTORY_CONTRACT_VERSION,
-            "hashes": hashes,
-            "last_full_sync": last_full,
-            "full_refresh_started_at": history_state.get("full_refresh_started_at"),
-            "pending_record_count": len(pending) - len(batch),
-            "last_progress": now.isoformat(),
-        }, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
-        return
-
-    _write_news_sync_state(history_state_path, {
-        "contract_version": LEARNING_HISTORY_CONTRACT_VERSION,
-        "hashes": hashes,
-        "last_full_sync": now.isoformat() if full_refresh_due else last_full,
-        "last_success": now.isoformat(),
-        "pending_record_count": 0,
+    state_path = Path(config["learning_history_state_file"])
+    state = _read_news_sync_state(state_path)
+    cursor = state.get("cursor") if state.get("contract_version") == "exact-chart-history-v1" else None
+    query = "?cursor=" + urllib.parse.quote(cursor, safe="") if cursor else ""
+    page = _read_local_resource(config, "/api/chart-history" + query)
+    if page.get("contract") != "exact-chart-history-v1" or not isinstance(page.get("records"), list):
+        raise ValueError("Exact chart export is unavailable")
+    position = json.loads(page.get("cursor", "null"))
+    if (not isinstance(position, list) or len(position) != 3
+            or type(position[0]) is not int
+            or not all(isinstance(value, str) for value in position[1:])
+            or type(page.get("source_revision")) is not int
+            or type(page.get("record_count")) is not int
+            or not isinstance(page.get("generated_at"), str)
+            or len(page["records"]) > 200):
+        raise ValueError("Invalid chart export metadata")
+    if page["records"] and cursor and tuple(position) <= tuple(json.loads(cursor)):
+        raise ValueError("Chart export cursor did not advance")
+    records = [{**row, "resource": "exact-" + row["resource"]} for row in page["records"]]
+    if records:
+        response = _post_json(history_url, json.dumps({"records": records}, ensure_ascii=False,
+                              separators=(",", ":"), allow_nan=False).encode("utf-8"), config)
+        if response.get("accepted") != len(records):
+            raise ValueError("Chart history ACK mismatch")
+    elif page.get("complete") and state.get("completed_revision") != page["source_revision"]:
+        response = _post_json(history_url, json.dumps({"chart_completion": {
+            "contract": page["contract"], "source_revision": page["source_revision"],
+            "generated_at": page["generated_at"], "record_count": page["record_count"],
+        }}, separators=(",", ":")).encode("utf-8"), config)
+        if response.get("status") != "OK":
+            raise ValueError("Chart completion ACK mismatch")
+    elif not page.get("complete"):
+        raise ValueError("Chart export did not advance")
+    _write_news_sync_state(state_path, {
+        "contract_version": page["contract"], "cursor": page["cursor"],
+        "pending_record_count": 1 if records else 0,
+        "completed_revision": state.get("completed_revision") if records else page["source_revision"],
+        "last_success": datetime.now(UTC).isoformat(),
     }, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
 
 

@@ -6,6 +6,7 @@ import sqlite3
 import threading
 from types import SimpleNamespace
 from typing import Callable
+from functools import partial
 
 from xauusd_forecaster.execution_learning import execution_learning_status
 from xauusd_forecaster.dashboard.learning_curves import learning_curve_payload
@@ -30,9 +31,9 @@ class LearningSurfaceOwner:
         self,
         *,
         learning_builder: Callable[[sqlite3.Connection], dict] = (
-            learning_curve_payload
+            partial(learning_curve_payload, exact_history=True)
         ),
-        execution_builder: Callable[[object], dict] = execution_learning_status,
+        execution_builder: Callable[[object], dict] = partial(execution_learning_status, exact_history=True),
     ) -> None:
         self._learning_builder = learning_builder
         self._execution_builder = execution_builder
@@ -60,8 +61,6 @@ class LearningSurfaceOwner:
                 self._cache.update({
                     "revision": revision,
                     "learning": self._learning_builder(connection),
-                    "execution": self._execution_builder(
-                        SimpleNamespace(connection=connection)
-                    ),
+                    "execution": self._execution_builder(SimpleNamespace(connection=connection)),
                 })
             return self._cache["learning"], self._cache["execution"]

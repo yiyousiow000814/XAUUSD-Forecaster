@@ -178,6 +178,19 @@ class Handler(BaseHTTPRequestHandler):
             body = json.dumps(payload, separators=(",", ":")).encode()
             self._write_json(status, body)
             return
+        if path == "/api/chart-history":
+            from xauusd_forecaster.dashboard.chart_history import chart_history_page
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                connection = sqlite3.connect(f"file:{self.database}?mode=ro", uri=True, timeout=5)
+                try:
+                    payload = chart_history_page(connection, (query.get("cursor") or [None])[0])
+                finally:
+                    connection.close()
+                self._write_json(200, json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+            except (sqlite3.Error, ValueError, TypeError) as error:
+                self._write_json(503, json.dumps({"error": str(error)[:300]}).encode("utf-8"))
+            return
         if path == "/api/market-history":
             query = urllib.parse.parse_qs(parsed.query)
             after = (query.get("after") or [None])[0]

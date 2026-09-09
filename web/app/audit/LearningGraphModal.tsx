@@ -66,7 +66,7 @@ type ExecutionHistoryResponse = {
   next_cursor: string | null; preview_limited?: boolean;
 };
 type GraphTab = "curve" | "versions" | "market" | "execution";
-type HistoryResponse<T> = { items: T[]; preview_limited?: boolean };
+type HistoryResponse<T> = { items: T[]; preview_limited?: boolean; source_count?: number; downsampled?: boolean; range_start?: string; range_end?: string; has_earlier?: boolean; has_later?: boolean };
 
 const HISTORY_CACHE_MAX_AGE_MS = 60_000;
 const historyCacheAge = (payload: unknown) => payload && typeof payload === "object"
@@ -218,11 +218,11 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
   const [cutoffWindow, setCutoffWindow] = useState<"20" | "all">("20");
   const [hovered, setHovered] = useState<VersionGroup | null>(null);
   const [page, setPage] = useState(0);
-  const overviewUrl = historyResource ? `${historyResource}?resource=version-overview` : "";
+  const overviewUrl = historyResource ? `/api/chart?type=versions` : "";
   const cachedOverview = overviewUrl
     ? readDashboardResource<HistoryResponse<VersionGroup>>(overviewUrl) : null;
   const initialPageUrl = historyResource
-    ? `${historyResource}?resource=version-group&identity=BROAD_FULL&limit=${pageSize}` : "";
+    ? `/api/chart?type=version-group&identity=BROAD_FULL&limit=${pageSize}` : "";
   const cachedInitialPage = initialPageUrl
     ? readDashboardResource<{ items: VersionGroup[]; total: number; next_cursor: string | null; preview_limited?: boolean }>(initialPageUrl) : null;
   const [remotePages, setRemotePages] = useState<Record<number, VersionGroup[]>>(
@@ -243,7 +243,7 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
   const pageCursor = pageCursors[page];
   useEffect(() => {
     if (!historyResource) return;
-    const url = `${historyResource}?resource=version-overview`;
+    const url = `/api/chart?type=versions`;
     const cached = readDashboardResource<HistoryResponse<VersionGroup>>(url);
     let cancelled = false;
     loadDashboardResource<HistoryResponse<VersionGroup>>(url, {
@@ -266,7 +266,7 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
       resource: "version-group", identity, limit: String(pageSize),
     });
     if (pageCursor) query.set("cursor", pageCursor);
-    const url = `${historyResource}?${query}`;
+    const url = `/api/chart?type=version-group&${query}`;
     const cached = readDashboardResource<{ items: VersionGroup[]; total: number; next_cursor: string | null; preview_limited?: boolean }>(url);
     let cancelled = false;
     loadDashboardResource<{ items: VersionGroup[]; total: number; next_cursor: string | null; preview_limited?: boolean }>(url, {
@@ -393,15 +393,17 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   const [cadence, setCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [pageOffset, setPageOffset] = useState(0);
   const chartScrollRef = useRef<HTMLDivElement>(null);
-  const initialHistoryUrl = historyResource
-    ? `${historyResource}?resource=curve-overview&cadence=5m` : "";
+  const requestKey = `${cadence}:${range}:${pageOffset}`;
+  const chartUrl = `/api/chart?type=learning&cadence=${cadence === "FIXED_30M" ? "30m" : "5m"}&range=${range}&page=${pageOffset}`;
+  const [rangeMetadata, setRangeMetadata] = useState<Record<string, HistoryResponse<unknown>>>({});
+  const initialHistoryUrl = historyResource ? chartUrl : "";
   const initialHistory = initialHistoryUrl
     ? readDashboardResource<HistoryResponse<(CurvePoint & { model_identity: string }) | (Curve & { cadence?: string })>>(initialHistoryUrl) : null;
-  const [historyCurves, setHistoryCurves] = useState<Partial<Record<EvaluationCadence, Curve[]>>>(
-    initialHistory ? { EVERY_5M: curveResponseItems(initialHistory, "EVERY_5M") } : {},
+  const [historyCurves, setHistoryCurves] = useState<Partial<Record<string, Curve[]>>>(
+    initialHistory ? { [requestKey]: curveResponseItems(initialHistory, cadence) } : {},
   );
-  const [historyErrors, setHistoryErrors] = useState<Partial<Record<EvaluationCadence, boolean>>>({});
-  const [historyRetries, setHistoryRetries] = useState<Partial<Record<EvaluationCadence, number>>>({});
+  const [historyErrors, setHistoryErrors] = useState<Partial<Record<string, boolean>>>({});
+  const [historyRetries, setHistoryRetries] = useState<Partial<Record<string, number>>>({});
   useLayoutEffect(() => {
     const frame = requestAnimationFrame(() => {
       const chart = chartScrollRef.current;
@@ -410,40 +412,47 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
     return () => cancelAnimationFrame(frame);
   }, [range, cadence, pageOffset, historyCurves]);
   useEffect(() => {
-    if (!historyResource || historyErrors[cadence]) return;
-    const cadenceQuery = cadence === "FIXED_30M" ? "30m" : "5m";
-    const url = `${historyResource}?resource=curve-overview&cadence=${cadenceQuery}`;
+    if (!historyResource || historyErrors[requestKey]) return;
+    const url = chartUrl;
     const cached = readDashboardResource<HistoryResponse<(CurvePoint & { model_identity: string }) | (Curve & { cadence?: string })>>(url);
     let cancelled = false;
     loadDashboardResource<HistoryResponse<(CurvePoint & { model_identity: string }) | (Curve & { cadence?: string })>>(url, {
-      force: (historyRetries[cadence] ?? 0) > 0,
+      force: (historyRetries[requestKey] ?? 0) > 0,
       maxAgeMs: historyCacheAge(cached),
     }).then(body => {
-      if (!cancelled) setHistoryCurves(previous => ({ ...previous, [cadence]: curveResponseItems(body, cadence) }));
+      if (!cancelled) {
+        setHistoryCurves(previous => ({ ...previous, [requestKey]: curveResponseItems(body, cadence) }));
+        setRangeMetadata(previous => ({...previous, [requestKey]: body}));
+      }
     }).catch(() => {
       if (cancelled) return;
-      if (!cancelled && !cached) setHistoryErrors(previous => ({ ...previous, [cadence]: true }));
+      if (!cancelled && !cached) setHistoryErrors(previous => ({ ...previous, [requestKey]: true }));
     });
     return () => { cancelled = true; };
-  }, [historyResource, cadence, historyErrors, historyRetries]);
-  const historyLoading = Boolean(historyResource && !historyCurves[cadence] && !historyErrors[cadence]);
+  }, [historyResource, cadence, historyErrors, historyRetries, requestKey, chartUrl]);
+  const historyLoading = Boolean(historyResource && !historyCurves[requestKey] && !historyErrors[requestKey]);
   // The compact learning snapshot and the canonical history overview have
   // different point counts. Never paint the compact fallback while the
   // canonical resource is loading, otherwise the chart visibly redraws with
   // different axes and curves a moment after opening.
-  const resolvedCurves = historyResource ? historyCurves[cadence] ?? [] : curves;
+  const resolvedCurves = historyResource ? historyCurves[requestKey] ?? [] : curves;
   const usable = resolvedCurves.map(row => cadence === "FIXED_30M" ? { ...row, points: row.points_30m ?? [], source_point_count: row.source_point_count_30m, chart_point_count: row.chart_point_count_30m, chart_downsampled: row.chart_downsampled_30m } : row).filter(row => row.model_identity !== "CHAMPION_0" && row.points.length > 0);
   const overviewPoints = usable.flatMap(row => row.points);
   if (!overviewPoints.length) return <div className="chart-block long-curve-block graph-state-shell">
     <div className="chart-caption"><div><b>历史＋实时成熟 OOS（只追加，不重写）</b><span>切换统计频率时，页面结构会保留。</span></div></div>
     <div className="curve-navigation" aria-label="长期 OOS 时间范围">
       <label>统计频率<select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPageOffset(0); }}><option value="EVERY_5M">每5分钟（重叠）</option><option value="FIXED_30M">每30分钟（非重叠）</option></select></label>
-      <label>开市窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); }}><option value="24h">24开市小时</option><option value="7d">7个开市日</option><option value="30d">30个开市日</option><option value="all">全部总览</option></select></label>
+      <label>时间范围<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); }}><option value="24h">24小时</option><option value="7d">7天</option><option value="30d">30天</option><option value="all">全部历史</option></select></label>
     </div>
-    {historyLoading ? <GraphLoading label="正在读取长期曲线" compact /> : historyErrors[cadence] ? <GraphLoadError compact label="长期曲线读取失败" onRetry={() => {
-      setHistoryErrors(previous => ({ ...previous, [cadence]: false }));
-      setHistoryRetries(previous => ({ ...previous, [cadence]: (previous[cadence] ?? 0) + 1 }));
-    }} /> : <Empty compact title="暂无长期曲线" text="第一个预测走完30分钟后才会出现。" />}
+    <div className="curve-navigation">
+      <button type="button" disabled={!rangeMetadata[requestKey]?.has_earlier || range === "all"} onClick={() => setPageOffset(value => value + 1)}>较早一段</button>
+      <button type="button" disabled={pageOffset === 0} onClick={() => setPageOffset(value => value - 1)}>较晚一段</button>
+      {pageOffset > 0 && <button type="button" onClick={() => setPageOffset(0)}>回到最新</button>}
+    </div>
+    {historyLoading ? <GraphLoading label="正在读取长期曲线" compact /> : historyErrors[requestKey] ? <GraphLoadError compact label="长期曲线读取失败" onRetry={() => {
+      setHistoryErrors(previous => ({ ...previous, [requestKey]: false }));
+      setHistoryRetries(previous => ({ ...previous, [requestKey]: (previous[requestKey] ?? 0) + 1 }));
+    }} /> : <Empty compact title="暂无长期曲线" text="该时间范围内暂无已成熟结果，可以选择较早时间或全部历史。" />}
   </div>;
   const availableResultTimes = [...new Set(overviewPoints.map(point => Date.parse(point.decision_time)))].sort((a, b) => a - b);
   const fullStart = availableResultTimes[0];
@@ -451,11 +460,11 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   const rangeMs = range === "24h" ? 24 * 3_600_000 : range === "7d" ? 7 * 86_400_000 : range === "30d" ? 30 * 86_400_000 : Math.max(1, fullEnd-fullStart);
   // Page by elapsed market-open time. Expected weekly closure never consumes
   // the selected window, while an unexplained gap during open hours still does.
-  const resultWindows = range === "all"
+  const resultWindows = historyResource || range === "all"
     ? [{ start: fullStart, end: fullEnd }]
     : buildMarketOpenResultWindows(availableResultTimes, rangeMs);
-  const activePage = Math.min(pageOffset, resultWindows.length - 1);
-  const { start, end } = resultWindows[activePage];
+  const activePage = historyResource ? pageOffset : Math.min(pageOffset, resultWindows.length - 1);
+  const { start, end } = resultWindows[historyResource ? 0 : activePage];
   const visibleCurves = usable.map(row => {
     const previousPoint = row.points.filter(point => Date.parse(point.decision_time) < start).at(-1);
     const points = row.points.filter(point => {
@@ -487,8 +496,8 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   const curveRuns = (points: CurvePoint[]) => points.reduce<CurvePoint[][]>((runs, point) => {
     const current = runs.at(-1);
     const previous = current?.at(-1);
-    // Sparse overview points form a dashed sampled envelope. Dense recent
-    // results remain solid, matching the original long-OOS presentation.
+    // Actual source gaps split the curve. Sparse sampled intervals may use
+    // dashed connections, but must never bridge a source gap.
     const beginsOverviewBridge = point.source_gap_before === true
       || Boolean(previous && Date.parse(point.decision_time) - Date.parse(previous.decision_time) >= overviewStep);
     if (!current || beginsOverviewBridge) runs.push([point]);
@@ -581,28 +590,27 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   const plotTop = compactBoundaryRail ? 56 : boundaryLaneCount ? boundaryDividerY + 14 : 70;
   const plotHeight = Math.max(118, 338 - plotTop);
   const y = (value: number) => plotTop + (high - value) / Math.max(.000001, high - low) * plotHeight;
-  const sourcePointCount = usable.reduce((total, row) => total + (row.source_point_count ?? row.points.length), 0);
-  const sourceTimeCount = Math.max(...usable.map(row => row.source_point_count ?? row.points.length));
-  const chartDownsampled = usable.some(row => row.chart_downsampled);
-  const canGoEarlier = range !== "all" && activePage < resultWindows.length - 1;
+  const sourcePointCount = rangeMetadata[requestKey]?.source_count ?? usable.reduce((total, row) => total + (row.source_point_count ?? row.points.length), 0);
+  const chartDownsampled = rangeMetadata[requestKey]?.downsampled ?? usable.some(row => row.chart_downsampled);
+  const canGoEarlier = range !== "all" && (historyResource ? Boolean(rangeMetadata[requestKey]?.has_earlier) : activePage < resultWindows.length - 1);
   const canGoLater = range !== "all" && activePage > 0;
   const windowLabel = `${axisLabel(new Date(start).toISOString())} — ${axisLabel(new Date(end).toISOString())}`;
   return <div className="chart-block long-curve-block">
-    <div className="chart-caption"><div><b>历史＋实时成熟 OOS（只追加，不重写）</b><span>数据库永久保留每个成熟结果；图表固定宽度，按开市时间窗口查看，全部历史只画压缩轮廓。</span></div><strong>全历史 <CountValue value={sourceTimeCount} suffix=" 个时点" /><small> · <CountValue value={sourcePointCount} suffix=" 条模型评分" /></small></strong></div>
+    <div className="chart-caption"><div><b>历史＋实时成熟 OOS（只追加，不重写）</b><span>按所选时间范围读取真实结果；仅在点数过多时抽样，缩小范围重新读取细节。</span></div><strong>所选范围 <CountValue value={sourcePointCount} suffix=" 条模型评分" /></strong></div>
     <div className="curve-navigation" aria-label="长期 OOS 时间范围">
       <label>统计频率<select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPageOffset(0); }}><option value="EVERY_5M">每5分钟（重叠）</option><option value="FIXED_30M">每30分钟（非重叠）</option></select></label>
-      <label>开市窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); }}><option value="24h">24开市小时</option><option value="7d">7个开市日</option><option value="30d">30个开市日</option><option value="all">全部总览</option></select></label>
+      <label>时间范围<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); }}><option value="24h">24小时</option><option value="7d">7天</option><option value="30d">30天</option><option value="all">全部历史</option></select></label>
       <div className="curve-navigation-actions">
         <button type="button" aria-label="查看较早一段" disabled={!canGoEarlier} onClick={() => setPageOffset(activePage + 1)}><span aria-hidden="true">←</span><span className="curve-nav-text">较早一段</span></button>
         <button type="button" aria-label="查看较晚一段" disabled={!canGoLater} onClick={() => setPageOffset(Math.max(0, activePage - 1))}><span className="curve-nav-text">较晚一段</span><span aria-hidden="true">→</span></button>
         <button type="button" aria-label="回到最新" disabled={pageOffset === 0} onClick={() => setPageOffset(0)}><span aria-hidden="true">↺</span><span className="curve-nav-text">回到最新</span></button>
       </div>
-      <span>{windowLabel}{chartDownsampled ? ` · 全历史 ${formatExactCount(sourcePointCount)} 条已压缩为 ${formatExactCount(overviewPoints.length)} 个绘图点` : ` · 当前 ${formatExactCount(visiblePoints.length)} 个绘图点`}</span>
+      <span>{windowLabel}{chartDownsampled ? ` · 所选范围 ${formatExactCount(sourcePointCount)} 条已压缩为 ${formatExactCount(overviewPoints.length)} 个绘图点` : ` · 当前 ${formatExactCount(visiblePoints.length)} 个绘图点`}</span>
     </div>
     {historyLoading && <GraphLoading label="正在更新长期曲线" compact />}
-    {historyErrors[cadence] && <GraphLoadError compact label="长期曲线更新失败" onRetry={() => {
-      setHistoryErrors(previous => ({ ...previous, [cadence]: false }));
-      setHistoryRetries(previous => ({ ...previous, [cadence]: (previous[cadence] ?? 0) + 1 }));
+    {historyErrors[requestKey] && <GraphLoadError compact label="长期曲线更新失败" onRetry={() => {
+      setHistoryErrors(previous => ({ ...previous, [requestKey]: false }));
+      setHistoryRetries(previous => ({ ...previous, [requestKey]: (previous[requestKey] ?? 0) + 1 }));
     }} />}
     <span className="mobile-scroll-hint long-curve-interaction-hint" role="note">左右滑动浏览长期曲线 · 文字与时间轴保持可读大小</span>
     {/* Keyboard users need focus here so arrow keys can pan the wide chart. */}
@@ -627,15 +635,15 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
         const runs = curveRuns(row.points);
         const first = runs[0]?.[0];
         const carryIn = row.previousPoint && first
-          && (first.source_gap_before === true
-            || Date.parse(first.decision_time) - Date.parse(row.previousPoint.decision_time) >= overviewStep)
+          && first.source_gap_before !== true
+          && Date.parse(first.decision_time) - Date.parse(row.previousPoint.decision_time) >= overviewStep
           && x(first.decision_time) > 59
-          ? <line key={`${row.model_identity}-carry-in`} className="curve-gap-bridge curve-gap-carry-in" stroke={COLORS[row.model_identity]} x1="58" y1={y(row.previousPoint.cumulative_quote_return)} x2={x(first.decision_time)} y2={y(first.cumulative_quote_return)}><title>窗口开始前的压缩历史轮廓</title></line>
+          ? <line key={`${row.model_identity}-carry-in`} className="curve-gap-bridge curve-gap-carry-in" stroke={COLORS[row.model_identity]} x1="58" y1={y(row.previousPoint.cumulative_quote_return)} x2={x(first.decision_time)} y2={y(first.cumulative_quote_return)}><title>窗口开始前的抽样连接</title></line>
           : null;
         return [carryIn, ...runs.flatMap((run, index) => {
           const previous = runs[index - 1]?.at(-1);
-          const bridge = previous && run[0]
-            ? <line key={`${row.model_identity}-bridge-${index}`} className="curve-gap-bridge" stroke={COLORS[row.model_identity]} x1={x(previous.decision_time)} y1={y(previous.cumulative_quote_return)} x2={x(run[0].decision_time)} y2={y(run[0].cumulative_quote_return)}><title>压缩历史轮廓</title></line>
+          const bridge = previous && run[0] && run[0].source_gap_before !== true
+            ? <line key={`${row.model_identity}-bridge-${index}`} className="curve-gap-bridge" stroke={COLORS[row.model_identity]} x1={x(previous.decision_time)} y1={y(previous.cumulative_quote_return)} x2={x(run[0].decision_time)} y2={y(run[0].cumulative_quote_return)}><title>抽样点连接</title></line>
             : null;
           const curve = run.length === 1
             ? <circle key={`${row.model_identity}-run-${index}`} cx={x(run[0].decision_time)} cy={y(run[0].cumulative_quote_return)} r="4" fill={COLORS[row.model_identity]} />
@@ -669,7 +677,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   if (before && range !== "all") historyQuery.set("before", before);
   const historyQueryString = historyQuery.toString();
   const historyRequestKey = market?.history_resource
-    ? `${market.history_resource}?${historyQueryString}` : "";
+    ? `/api/chart?type=market&${historyQueryString}` : "";
   const initialHistoryResult = historyRequestKey
     ? readDashboardResource<MarketData>(historyRequestKey) : null;
   const [historyResult, setHistoryResult] = useState<{
@@ -687,7 +695,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   useEffect(() => {
     if (!market?.history_resource) return;
     let cancelled = false;
-    const url = `${market.history_resource}?${historyQueryString}`;
+    const url = `/api/chart?type=market&${historyQueryString}`;
     const cached = readDashboardResource<MarketData>(url);
     loadDashboardResource<MarketData>(url, {
       force: historyRetry > 0,
@@ -949,7 +957,7 @@ function ExecutionHistoryChart({ title, subtitle, model, historyResource, firstK
   const pageSize = 96;
   const identity = model?.model_identity ?? "";
   const firstUrl = historyResource && identity
-    ? `${historyResource}?resource=execution-point&identity=${encodeURIComponent(identity)}&limit=${pageSize}` : "";
+    ? `/api/chart?type=execution-point&identity=${encodeURIComponent(identity)}&limit=${pageSize}` : "";
   const initial = firstUrl ? readDashboardResource<ExecutionHistoryResponse>(firstUrl) : null;
   const [page, setPage] = useState(0);
   const [pages, setPages] = useState<Record<number, Array<Record<string, string | number>>>>(
@@ -979,7 +987,7 @@ function ExecutionHistoryChart({ title, subtitle, model, historyResource, firstK
     return () => { cancelled = true; };
   }, [cursor, firstUrl, page, pages, retry]);
   const remotePoints = pages[page];
-  const fallbackPoints = page === 0 ? model?.evaluation.points ?? [] : [];
+  const fallbackPoints = !historyResource && page === 0 ? model?.evaluation.points ?? [] : [];
   const points = (remotePoints ?? fallbackPoints).slice().sort((a, b) => Date.parse(String(a.time)) - Date.parse(String(b.time)));
   const loading = Boolean(firstUrl && !remotePoints && !error);
   const hasEarlier = typeof cursors[page + 1] === "string";
@@ -993,7 +1001,7 @@ function ExecutionHistoryChart({ title, subtitle, model, historyResource, firstK
     {page > 0 && <button type="button" onClick={() => setPage(0)}>最新</button>}
   </div> : undefined;
   return <ExecutionLineChart title={title} subtitle={subtitle} points={points}
-    sourceCount={total || model?.evaluation.chart_source_count} downsampled={model?.evaluation.chart_downsampled}
+    sourceCount={total || model?.evaluation.chart_source_count} downsampled={!historyResource && model?.evaluation.chart_downsampled}
     firstKey={firstKey} secondKey={secondKey} firstLabel={firstLabel} secondLabel={secondLabel}
     format={pct} controls={controls} loading={loading} error={error ? () => { setError(false); setRetry(value => value + 1); } : undefined} />;
 }

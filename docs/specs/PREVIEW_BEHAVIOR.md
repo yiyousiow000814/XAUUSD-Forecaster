@@ -156,8 +156,10 @@ product requirement.
   represent current production authority.
 - A news detail embedded in the build snapshot is used first; other requested
   details may be read from D1.
-- Market chart and paged market or learning history currently use bounded data
-  frozen into the build artifact.
+- Learning graphs and their version/execution pages use `/api/chart` and the
+  branch implementation over current read-only D1. Missing complete history is
+  unavailable, with no compact build-summary fallback. Market chart input
+  remains a bounded frozen snapshot until its independent transport changes.
 - Production-precomputed storylines may support presentation review, but they do
   not prove a changed branch grouping policy. Such a change requires complete
   independent-event replay input rather than reverse-engineering grouped output.

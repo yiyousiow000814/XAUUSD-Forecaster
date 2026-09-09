@@ -105,6 +105,7 @@
       "id": "python-4",
       "tests": [
         "tests/dashboard/test_dashboard_sync.py",
+        "tests/dashboard/test_chart_history.py",
         "tests/dashboard/test_dashboard_resource_contracts.py",
         "tests/assistant/test_assistant_capacity.py",
         "tests/runtime/test_backup_containment.py",

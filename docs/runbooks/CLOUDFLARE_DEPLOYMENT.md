@@ -22,3 +22,20 @@ identity/time index. The account was already on Workers Paid (verified in the
 Cloudflare Current plan display); no plan change was made. Retain efficient
 bounded requests and measured headroom rather than assuming Free limits describe
 the actual account. Migration, ongoing traffic and backlog remain distinct costs.
+
+## Exact chart history activation
+
+Apply additive migration `0034_exact_chart_history.sql` before activating the
+new chart reader. Preserve old learning rows and all source SQLite facts.
+Deploy the single main revision normally. The existing local optional learning
+owner rebuilds its changed contract, then Dashboard Sync drains bounded exact
+history pages. A 503 chart response during initial backfill means pending, not
+an empty history. Do not manufacture the completion marker to bypass a failed
+export or count mismatch.
+
+Acceptance compares per-resource/identity counts and first/last timestamps with
+the source-derived rows. Verify 24h, 7d, 30d, all history, navigation back to
+older windows, both cadences and execution pages. Repeat on the branch Preview
+and production desktop/phone. Record D1 read/write costs separately for initial
+backfill and subsequent requests. Metrics summaries must contain no chart data,
+and old curve/version overview GETs must no longer return misleading graphs.

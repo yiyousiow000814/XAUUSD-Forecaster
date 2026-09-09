@@ -867,14 +867,8 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   assert.match(learning, /lifecycle_status === "LATEST"/);
   assert.match(learning, /identity_curves: \[\]/);
   assert.match(learning, /execution_learning:/);
-  assert.match(learning, /points: points\.slice\(-48\)/);
+  assert.match(learning, /points: \[\]/);
   assert.match(learning, /results: results\.slice\(-20\)/);
-  assert.match(previewBuilder, /resource=execution-point/);
-  assert.match(previewBuilder, /for identity in \("LOT_RIDGE", "EXIT_RIDGE"\)/);
-  assert.match(previewBuilder, /resource=curve-overview&cadence=\{cadence\}/);
-  assert.match(previewBuilder, /for cadence in \("5m", "30m"\)/);
-  assert.match(previewBuilder, /resource=version-overview/);
-  assert.match(previewBuilder, /\*version_history/);
   assert.match(previewBuilder, /"news_evidence": news_evidence/);
   assert.match(previewBuilder, /UNAVAILABLE_IN_BUILD_SNAPSHOT/);
   const auditView = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
@@ -1931,9 +1925,8 @@ test("stores growing learning history as bounded idempotent D1 records", () => {
   assert.match(route, /readBoundedBody\(request, MAX_INGEST_BYTES\)/);
   assert.match(route, /json_each\(json_extract\(doc,'\$\.records'\)\)/);
   assert.match(route, /ON CONFLICT\(resource,record_key\) DO UPDATE/);
-  assert.doesNotMatch(route, /JSON\.parse\(body\.serialized\)/);
+  assert.match(route, /body\.serialized\.length < 2000/);
   assert.match(route, /MAX_RESPONSE_BYTES = 400_000/);
-  assert.match(route, /json_group_array\(json\(payload\)\)/);
   assert.match(route, /length\(CAST\(payload AS BLOB\)\)/);
   assert.match(route, /running_bytes<=\?/);
   assert.doesNotMatch(route, /results\.map\(row => JSON\.parse\(row\.payload\)\)/);
@@ -1944,14 +1937,11 @@ test("stores growing learning history as bounded idempotent D1 records", () => {
   assert.match(route, /FROM learning_record_counts/);
   assert.match(route, /ORDER BY lr\.sort_epoch DESC,lr\.record_key DESC LIMIT \?/);
   assert.doesNotMatch(route, /SELECT count\(\*\) FROM base/);
-  assert.match(contracts, /LEARNING_HISTORY_CONTRACT_VERSION = "learning-history-d1-v2"/);
-  assert.match(route, /resource='curve-overview'/);
-  assert.match(route, /resource='version-overview'/);
+  assert.match(contracts, /LEARNING_HISTORY_CONTRACT_VERSION = "exact-chart-history-v1"/);
   assert.doesNotMatch(route, /row_number\(\) OVER \(PARTITION BY model_identity/);
   assert.match(sync, /learning_history_records/);
   assert.match(sync, /from xauusd_forecaster\.dashboard\.resource_contracts import/);
   assert.match(contracts, /LEARNING_SUMMARY_GROUPS_PER_IDENTITY = 6/);
-  assert.match(contracts, /LEARNING_SUMMARY_CURVE_POINTS = 48/);
 });
 
 test("uses one D1-validated writer for every large dashboard snapshot", () => {
@@ -2281,7 +2271,7 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /总计 <CountValue value=\{count\} suffix=" 笔" \/>/);
   assert.match(modal, /当前显示最新 \{formatExactCount\(visibleCount\)\} 笔/);
   assert.match(modal, /图中压缩为/);
-  assert.match(modal, /resource=execution-point/);
+  assert.match(modal, /type=execution-point/);
   assert.match(modal, /第 \{formatExactCount\(page \+ 1\)\} 段 · 共 \{formatExactCount\(total\)\} 个历史绘图点/);
   assert.match(modal, /aria-label="查看较早时间段"/);
   assert.match(modal, /aria-label="查看较晚时间段"/);
@@ -2308,20 +2298,20 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /"数据缺口"/);
   assert.match(modal, /gap\.duration >= 45 \* 60_000/);
   assert.match(modal, /历史＋实时成熟 OOS（只追加，不重写）/);
-  assert.match(modal, /24开市小时/);
-  assert.match(modal, /7个开市日/);
-  assert.match(modal, /30个开市日/);
-  assert.match(modal, /全部总览/);
+  assert.match(modal, /24小时/);
+  assert.match(modal, /7天/);
+  assert.match(modal, /30天/);
+  assert.match(modal, /全部历史/);
   assert.match(modal, /较早一段/);
   assert.match(modal, /较晚一段/);
   assert.match(modal, /回到最新/);
-  assert.match(modal, /全部历史只画压缩轮廓/);
+  assert.match(modal, /仅在点数过多时抽样/);
   assert.match(modal, /Page by elapsed market-open time/);
   assert.match(modal, /Plot result time, not wall-clock time/);
   assert.match(modal, /curve-gap-bridge/);
-  assert.match(modal, /压缩历史轮廓/);
+  assert.match(modal, /抽样点连接/);
   assert.match(modal, /curve-gap-carry-in/);
-  assert.match(modal, /窗口开始前的压缩历史轮廓/);
+  assert.match(modal, /窗口开始前的抽样连接/);
   assert.doesNotMatch(modal, /points\.unshift\(\{ decision_time: new Date\(start\)/);
   assert.doesNotMatch(modal, /points\.push\(\{ decision_time: new Date\(end\)/);
   assert.match(modal, /成本后EV较高方向/);
@@ -2704,8 +2694,8 @@ test("auto-loads the bounded learning summary but keeps deep history interactive
   assert.match(audit, /if \(!fullLearningReadyRef\.current\) void refreshLearning\(true\)/);
   assert.match(audit, /historyResource=\{payload\?\.learning_history_resource\}/);
   assert.match(modal, /resource: "version-group"/);
-  assert.match(modal, /resource=curve-overview/);
-  assert.match(modal, /const resolvedCurves = historyResource \? historyCurves\[cadence\] \?\? \[\] : curves/);
+  assert.doesNotMatch(modal, /resource=curve-overview/);
+  assert.match(modal, /const resolvedCurves = historyResource \? historyCurves\[requestKey\] \?\? \[\] : curves/);
   assert.doesNotMatch(modal, /const resolvedCurves = historyCurves\[cadence\] \?\? curves/);
   assert.match(modal, /next_cursor/);
   assert.match(modal, /const pageCursor = pageCursors\[page\]/);
@@ -2751,6 +2741,9 @@ test("distinguishes market history loading, empty, and failed states", () => {
   assert.doesNotMatch(modal, /waitForMinimumLoading|startedAt/);
   assert.match(modal, /point\.source_gap_before/);
   assert.match(modal, /first\.source_gap_before/);
+  assert.match(modal, /run\[0\]\.source_gap_before !== true/);
+  assert.match(modal, /first\.source_gap_before !== true/);
+  assert.match(modal, /downsampled=\{!historyResource && model\?\.evaluation\.chart_downsampled\}/);
   assert.match(modal, /overviewStep/);
   assert.match(modal, /Date\.parse\(point\.decision_time\) - Date\.parse\(previous\.decision_time\) >= overviewStep/);
   assert.doesNotMatch(modal, /source_gap_before \?\?/);
@@ -3505,9 +3498,18 @@ test("route inventory parser covers const and re-exported handlers", () => {
 });
 
 
-test("direct health navigation never calls an absent baseline healthy", async () => {
-  const { response, html } = await renderSettled("/health", /正在加载系统健康状态/);
+test("direct health navigation distinguishes missing and frozen baselines", async () => {
+  const hasPreview = Boolean(process.env.WORKERS_CI_COMMIT_SHA
+    && process.env.WORKERS_CI_BRANCH && process.env.WORKERS_CI_BRANCH !== "main");
+  const { response, html } = await renderSettled("/health",
+    hasPreview ? /系统组件/ : /正在加载系统健康状态/);
   assert.equal(response.status, 200);
+  if (hasPreview) {
+    assert.match(html, /PR 预览/);
+    assert.match(html, /系统组件/);
+    assert.doesNotMatch(html, /正在加载系统健康状态/);
+    return;
+  }
   assert.match(html, /正在加载系统健康状态/);
   assert.doesNotMatch(html, /当前没有运行异常|无需处理|0 正常/);
 });

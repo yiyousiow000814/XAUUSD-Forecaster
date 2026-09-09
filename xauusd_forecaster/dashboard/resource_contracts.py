@@ -36,13 +36,10 @@ REMOTE_PAYLOAD_LIMIT_BYTES = 750_000
 REMOTE_NEWS_LIMIT = 200
 REMOTE_DECISION_LIMIT = 20
 REMOTE_DAILY_BRIEF_LIMIT = 14
-LEARNING_HISTORY_CONTRACT_VERSION = "learning-history-d1-v2"
+LEARNING_HISTORY_CONTRACT_VERSION = "exact-chart-history-v1"
 LEARNING_HISTORY_BATCH_LIMIT_BYTES = 60_000
-LEARNING_SUMMARY_CURVE_POINTS = 48
 LEARNING_SUMMARY_GROUPS_PER_IDENTITY = 6
 LEARNING_SUMMARY_EXECUTION_RESULTS = 20
-LEARNING_OVERVIEW_CURVE_POINTS = 240
-LEARNING_OVERVIEW_GROUPS_PER_IDENTITY = 60
 MARKET_OVERVIEW_DECISIONS_PER_SERIES = 240
 REMOTE_MARKET_DECISION_LIMIT = 288 * 5
 REMOTE_MARKET_CANDLE_LIMIT = 576
@@ -154,52 +151,6 @@ def _learning_record(
     }
 
 
-def _visual_curve_overview(
-    points: list[dict], limit: int, expected_step_seconds: int = 300,
-    infer_source_gaps: bool = True,
-) -> list[dict]:
-    """Keep curve shape plus real source gaps in a fixed-size overview."""
-    ordered = sorted(points, key=lambda row: row.get("decision_time") or "")
-    selected_indices: list[int] = []
-    if len(ordered) <= limit:
-        selected_indices = list(range(len(ordered)))
-    else:
-        bucket_count = max(1, limit // 4)
-        bucket_size = math.ceil(len(ordered) / bucket_count)
-        for start in range(0, len(ordered), bucket_size):
-            bucket = ordered[start:start + bucket_size]
-            indexed = list(enumerate(bucket))
-            selected = {
-                0,
-                len(bucket) - 1,
-                min(indexed, key=lambda item: float(
-                    item[1].get("cumulative_quote_return") or 0.0
-                ))[0],
-                max(indexed, key=lambda item: float(
-                    item[1].get("cumulative_quote_return") or 0.0
-                ))[0],
-            }
-            selected_indices.extend(start + index for index in sorted(selected))
-    selected_indices = selected_indices[:limit]
-    gap_threshold = max(45 * 60, expected_step_seconds * 3)
-    overview: list[dict] = []
-    previous_index: int | None = None
-    for index in selected_indices:
-        source_gap_before = False
-        if infer_source_gaps and previous_index is not None:
-            source_gap_before = any(
-                _epoch(ordered[current].get("decision_time"))
-                - _epoch(ordered[current - 1].get("decision_time"))
-                >= gap_threshold
-                for current in range(previous_index + 1, index + 1)
-            )
-        overview.append({
-            **ordered[index], "source_gap_before": source_gap_before,
-        })
-        previous_index = index
-    return overview
-
-
 def _visual_decision_overview(rows: list[dict], limit: int) -> list[dict]:
     """Retain the time span and action changes in a bounded marker summary."""
     ordered = sorted(rows, key=lambda row: (
@@ -227,39 +178,6 @@ def _visual_decision_overview(rows: list[dict], limit: int) -> list[dict]:
             ), None)
             if match is not None:
                 selected.add(match)
-        overview.extend(bucket[index] for index in sorted(selected))
-    return overview[:limit]
-
-
-def _version_metric(row: dict, cadence: str) -> float:
-    metrics = row.get("cadence_metrics") or {}
-    selected = metrics.get(cadence) if isinstance(metrics, dict) else None
-    if isinstance(selected, dict):
-        return float(selected.get("cumulative_quote_return") or 0.0)
-    return float(row.get("cumulative_quote_return") or 0.0)
-
-
-def _visual_version_overview(rows: list[dict], limit: int) -> list[dict]:
-    """Preserve the full generation span and extrema for both chart cadences."""
-    ordered = sorted(rows, key=lambda row: (
-        row.get("created_at") or "", row.get("generation") or 0,
-    ))
-    if len(ordered) <= limit:
-        return ordered
-    bucket_count = max(1, limit // 6)
-    bucket_size = math.ceil(len(ordered) / bucket_count)
-    overview: list[dict] = []
-    for start in range(0, len(ordered), bucket_size):
-        bucket = ordered[start:start + bucket_size]
-        indexed = list(enumerate(bucket))
-        selected = {0, len(bucket) - 1}
-        for cadence in ("EVERY_5M", "FIXED_30M"):
-            selected.add(min(
-                indexed, key=lambda item: _version_metric(item[1], cadence),
-            )[0])
-            selected.add(max(
-                indexed, key=lambda item: _version_metric(item[1], cadence),
-            )[0])
         overview.extend(bucket[index] for index in sorted(selected))
     return overview[:limit]
 
@@ -327,73 +245,8 @@ def _update_decision_overviews(
     return updated
 
 
-def _learning_overview_records(
-    payload: dict, *, infer_source_gaps: bool = True,
-) -> list[dict]:
-    """Materialize fixed-size graph summaries before data reaches the Worker."""
-    learning = payload.get("learning_curves") or {}
-    records: list[dict] = []
-    for curve in learning.get("identity_curves", []):
-        if not isinstance(curve, dict):
-            continue
-        identity = str(curve.get("model_identity") or "")
-        if not identity:
-            continue
-        for field, cadence in (("points", "5m"), ("points_30m", "30m")):
-            points = [
-                point for point in (curve.get(field, []) or [])
-                if isinstance(point, dict) and point.get("decision_time")
-            ]
-            if not points:
-                continue
-            overview = _visual_curve_overview(
-                points, LEARNING_OVERVIEW_CURVE_POINTS,
-                expected_step_seconds=1_800 if cadence == "30m" else 300,
-                infer_source_gaps=infer_source_gaps,
-            )
-            summary = {
-                "model_identity": identity,
-                "cadence": cadence,
-                "source_point_count": len(points),
-                "chart_point_count": len(overview),
-                "chart_downsampled": len(overview) < len(points),
-                "points": overview,
-            }
-            records.append(_learning_record(
-                "curve-overview", f"{cadence}\0{identity}",
-                _epoch(points[-1]["decision_time"]), summary,
-            ))
-    groups = learning.get("version_groups", [])
-    identities = sorted({
-        str(row.get("model_identity") or "") for row in groups
-        if isinstance(row, dict) and row.get("model_identity")
-    })
-    for identity in identities:
-        rows = sorted(
-            (row for row in groups if isinstance(row, dict)
-             and row.get("model_identity") == identity),
-            key=lambda row: (row.get("created_at") or "", row.get("generation") or 0),
-        )
-        if not rows:
-            continue
-        overview = _visual_version_overview(
-            rows, LEARNING_OVERVIEW_GROUPS_PER_IDENTITY,
-        )
-        summary = {
-            "model_identity": identity,
-            "source_group_count": len(rows),
-            "chart_group_count": len(overview),
-            "chart_downsampled": len(overview) < len(rows),
-            "groups": overview,
-        }
-        records.append(_learning_record(
-            "version-overview", identity, _epoch(rows[-1].get("created_at")), summary,
-        ))
-    return records
-
-
 def learning_history_records(
-    payload: dict, *, infer_source_gaps: bool = True,
+    payload: dict,
 ) -> list[dict]:
     """Normalize append-only learning evidence into idempotent D1 records."""
     learning = payload.get("learning_curves") or {}
@@ -442,7 +295,7 @@ def learning_history_records(
                 continue
             record_payload = {"model_identity": identity, **point}
             records.append(_learning_record(
-                "execution-point", f"{identity}\0{point['time']}",
+                "execution-point", f"{identity}\0{point['time']}\0{point.get('decision_id', '')}\0{point.get('model_version', '')}",
                 _epoch(point["time"]), record_payload,
             ))
         for index, result in enumerate(evaluation.get("results", []) or []):
@@ -452,12 +305,9 @@ def learning_history_records(
             result_id = result.get("decision_id") or result.get("source_decision_id") or index
             record_payload = {"model_identity": identity, **result}
             records.append(_learning_record(
-                "execution-result", f"{identity}\0{result_id}\0{result_time}",
+                "execution-result", f"{identity}\0{result_id}\0{result_time}\0{result.get('model_version', '')}",
                 _epoch(result_time), record_payload,
             ))
-    records.extend(_learning_overview_records(
-        payload, infer_source_gaps=infer_source_gaps,
-    ))
     return records
 
 
@@ -467,8 +317,12 @@ def learning_history_batches(rows: list[dict]) -> list[list[dict]]:
     )
 
 
-def _learning_summary(payload: dict) -> dict:
+def _learning_summary(payload: dict, *, record_total: int | None = None) -> dict:
     """Return a fixed-size first page; D1 owns every older learning record."""
+    if (payload.get("learning_history_manifest") or {}).get("contract_version") == LEARNING_HISTORY_CONTRACT_VERSION:
+        return {key: copy.deepcopy(payload[key]) for key in (
+            "learning_curves", "execution_learning", "learning_history_resource", "learning_history_manifest",
+        )}
     learning = copy.deepcopy(payload.get("learning_curves") or {})
     models = learning.get("models")
     if isinstance(models, list):
@@ -498,23 +352,16 @@ def _learning_summary(payload: dict) -> dict:
             )
             retained_groups.extend(rows[:LEARNING_SUMMARY_GROUPS_PER_IDENTITY])
         learning["version_groups"] = retained_groups
-    curves = learning.get("identity_curves")
-    if isinstance(curves, list):
-        for curve in curves:
-            if not isinstance(curve, dict):
-                continue
-            for field in ("points", "points_30m"):
-                if isinstance(curve.get(field), list):
-                    curve[field] = curve[field][-LEARNING_SUMMARY_CURVE_POINTS:]
+    learning["identity_curves"] = []
     for field in ("full_minus_market", "broad_full_minus_core_full"):
         if isinstance(learning.get(field), list):
-            learning[field] = learning[field][-LEARNING_SUMMARY_CURVE_POINTS:]
+            learning[field] = []
 
     execution = copy.deepcopy(payload.get("execution_learning") or {})
     for model in execution.get("models", []) if isinstance(execution, dict) else []:
         evaluation = model.get("evaluation") if isinstance(model, dict) else None
         if isinstance(evaluation, dict) and isinstance(evaluation.get("points"), list):
-            evaluation["points"] = evaluation["points"][-LEARNING_SUMMARY_CURVE_POINTS:]
+            evaluation["points"] = []
         if isinstance(evaluation, dict) and isinstance(evaluation.get("results"), list):
             evaluation["result_total"] = len(evaluation["results"])
             evaluation["results"] = evaluation["results"][-LEARNING_SUMMARY_EXECUTION_RESULTS:]
@@ -526,7 +373,8 @@ def _learning_summary(payload: dict) -> dict:
             "contract_version": LEARNING_HISTORY_CONTRACT_VERSION,
             "model_total": len(payload.get("learning_curves", {}).get("models", [])),
             "version_group_total": len(payload.get("learning_curves", {}).get("version_groups", [])),
-            "record_total": len(learning_history_records(payload)),
+            "record_total": record_total if record_total is not None else len(
+                learning_history_records(payload)),
         },
     }
 
