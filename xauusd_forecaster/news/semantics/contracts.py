@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from xauusd_forecaster.news.semantics.article_source import SELECTION_SCHEMA, SELECTION_FIELDS
+
 import json
 import math
 import re
@@ -138,6 +140,7 @@ def news_annotation_schema(
         for field in ("headline_zh", "summary_zh", "primary_story_title_zh", "semantic_reason_zh"):
             schema["properties"][field].pop("minLength", None)
             schema["properties"][field].pop("maxLength", None)
+    schema["properties"].update(SELECTION_SCHEMA)
     return schema
 
 
@@ -266,6 +269,8 @@ def validate_news_annotation(
             "annotation has unknown schema fields: " + ", ".join(sorted(additional))
         )
     for name, rule in properties.items():
+        if name in SELECTION_FIELDS and name not in annotation:
+            continue
         value = annotation[name]
         expected = rule.get("type")
         if expected == "string":

@@ -641,7 +641,7 @@ def test_non_fed_article_hydration_appends_auditable_revision(tmp_path) -> None:
     text, source = extract_article_full_text(article_url, lambda _: page)
     assert source == article_url
     assert "Reported purchases" in text
-    assert "Navigation" not in text
+    assert "Navigation" in text
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
     ledger.append_news_revision(
@@ -1755,7 +1755,7 @@ def test_generic_article_extractor_reads_pdf(monkeypatch) -> None:
     assert source.endswith("statement.pdf")
 
 
-def test_generic_article_extractor_prefers_treasury_news_body_over_navigation() -> None:
+def test_generic_article_extractor_preserves_page_for_ai_selection() -> None:
     navigation = "About Treasury General Information " * 30
     article = "Gold sanctions oil and foreign-exchange policy evidence. " * 30
     page = f"""<html><body>
@@ -1767,7 +1767,7 @@ def test_generic_article_extractor_prefers_treasury_news_body_over_navigation() 
         lambda _: page,
     )
     assert "Gold sanctions oil" in text
-    assert "About Treasury" not in text
+    assert "About Treasury" in text
 
 
 def test_forward_engine_appends_strict_executable_30_minute_outcome(tmp_path) -> None:
@@ -4410,3 +4410,91 @@ def test_saved_semantics_reach_writer_through_one_gemma_review(tmp_path, monkeyp
     ).fetchone()) == before
     assert ledger.count("news_llm_failures") == 0
     ledger.close()
+
+
+@pytest.mark.parametrize("extractor", [extract_article_full_text, extract_federal_reserve_full_text])
+def test_page_selection_shares_annotation_request_and_gemma_source(monkeypatch, extractor):
+    from xauusd_forecaster.news.semantics.article_source import page_segments, selected_article
+    vector, article = _production_shaped_identity_annotation()
+    # Navigation is longer than the article and deliberately precedes it.
+    html = ("<html><body><div id='content'><article>" + "MENU_ONLY " * 400
+            + "</article><h2>Complete original article title</h2><p>" + article
+            + "</p><footer>FOOTER_ONLY</footer></div></body></html>").encode()
+    page, _ = extractor("https://example.test/news", lambda _: html)
+    segments = page_segments(page)
+    title_id = segments.index("Complete original article title")
+    body_id = segments.index(article)
+    vector.update(source_title_segment_ids=[title_id], source_body_segment_ids=[body_id])
+    calls = []
+
+    def respond(_key, model, payload):
+        prompt = payload["contents"][0]["parts"][0]["text"]
+        calls.append((model, prompt))
+        if model == annotation_module.DEFAULT_GEMINI_MODEL:
+            assert "MENU_ONLY" in prompt and "FOOTER_ONLY" in prompt
+            required = payload["generationConfig"]["responseSchema"]["required"]
+            assert "source_body_segment_ids" in required
+            return vector
+        assert "Complete original article title" in prompt
+        assert article in prompt
+        assert "MENU_ONLY" not in prompt and "FOOTER_ONLY" not in prompt
+        return {k: vector[k] for k in ("headline_zh", "summary_zh", "primary_story_title_zh", "semantic_reason_zh")}
+
+    _mock_model_json(monkeypatch, respond)
+    pool = annotation_module._GeminiRequestPool(("test-key",), request_accountant=ALLOW_MODEL_REQUEST)
+    result, _ = pool.call(0, annotation_module.DEFAULT_GEMINI_MODEL, "Truncated", page)
+    assert [m for m, _ in calls] == [annotation_module.DEFAULT_GEMINI_MODEL, annotation_module.DEFAULT_GEMMA_MODEL]
+    assert selected_article("Truncated", page, json.loads(json.dumps(result))) == ("Complete original article title", article)
+    annotation_module._validate_current_semantics(result, headline="Truncated", body=page, prompt_version=annotation_module.PROMPT_VERSION)
+
+
+def test_model_decoder_uses_answer_not_thought():
+    envelope = {"candidates": [{"content": {"parts": [
+        {"thought": True, "text": "not JSON"}, {"text": '{"ok": true}'},
+    ]}}]}
+    assert annotation_module._decode_model_json(envelope) == {"ok": True}
+
+
+@pytest.mark.parametrize("ids", [[], [-1], [2], [True], [0, 0], [1, 0]])
+def test_page_selection_never_fabricates_or_reorders_original_text(ids):
+    from xauusd_forecaster.news.semantics.article_source import PAGE_TEXT_MARKER, selected_article
+    with pytest.raises(ValueError, match="invalid article source selection"):
+        selected_article("discovery", PAGE_TEXT_MARKER + "title\nbody", {
+            "source_title_segment_ids": [0], "source_body_segment_ids": ids,
+        })
+
+
+def test_impact_consumes_selected_article_and_preserves_raw_row(monkeypatch):
+    from xauusd_forecaster.news.semantics.article_source import PAGE_TEXT_MARKER
+    article = "The source discusses an independent historical event. " * 8
+    row = {"headline": "Truncated", "body": PAGE_TEXT_MARKER + "MENU_ONLY\nFull title\n" + article,
+           "annotation": {"source_title_segment_ids": [1], "source_body_segment_ids": [2]},
+           "prior_event_context": []}
+    raw_body = row["body"]
+    calls = []
+    def respond(_key, _model, payload):
+        text = payload["contents"][0]["parts"][0]["text"]
+        calls.append(text)
+        assert "Full title" in text and article in text and "MENU_ONLY" not in text
+        return _impact_model_result()
+    _mock_model_json(monkeypatch, respond)
+    pool = annotation_module._GeminiRequestPool(("key",), request_accountant=ALLOW_MODEL_REQUEST)
+    result, _ = pool.call_impact(0, row)
+    assert len(calls) == 1
+    assert result["_source_body_character_count"] == len(article)
+    assert row["body"] == raw_body
+
+
+def test_invalid_article_selection_adds_no_repair_request(monkeypatch):
+    from xauusd_forecaster.news.semantics.article_source import PAGE_TEXT_MARKER
+    vector, source = _production_shaped_identity_annotation()
+    vector.update(source_title_segment_ids=[0], source_body_segment_ids=[999])
+    calls = []
+    def respond(_key, model, payload):
+        calls.append(model)
+        return vector
+    _mock_model_json(monkeypatch, respond)
+    pool = annotation_module._GeminiRequestPool(("key",), request_accountant=ALLOW_MODEL_REQUEST)
+    with pytest.raises(ValueError, match="invalid article source selection"):
+        pool.call(0, annotation_module.DEFAULT_GEMINI_MODEL, "title", PAGE_TEXT_MARKER + source)
+    assert calls == [annotation_module.DEFAULT_GEMINI_MODEL]

@@ -320,3 +320,32 @@ read only the latest activated generation. An evidence-empty Core lane is
 represented by an explicit zero-effect cold-start artifact, never by fabricated
 rows or a partial generation. Once a generation has been activated, every
 healthy decision must publish the complete model identity set or fail visibly.
+
+
+## Article selection within annotation
+
+HTML collectors retain ordered page text, marked `PAGE_TEXT_V1`, instead of
+choosing the longest DOM container as the article. Script, style and noscript
+content is excluded; visible navigation is not silently treated as article
+content. PDF and existing plain-text evidence retain their original input path.
+
+The existing Gemini annotation request selects original title/body segment IDs
+and performs translation, summary, classification and event measurement in one
+response. No extraction request, extraction repair loop, or alternative model
+is added. The existing Gemma display review and impact assessment consume the
+selected original text. Selection never authorizes rewriting a source revision.
+
+Selection IDs are stored in annotation JSON and bound to its immutable raw
+content hash. Code checks only membership and order, not semantic word rules.
+Missing or invalid selection on a marked page is an ordinary failed annotation;
+a successful provider response alone does not establish correct article meaning.
+Historical annotations without selection remain readable for plain-text sources.
+The reader projects selected text while retaining raw source evidence locally.
+The legacy navigation-recovery query must not repeatedly hydrate marked pages.
+
+Only the annotation-capable runtime may process the new page representation.
+Returning to old code requires pausing new-page processing or retaining this
+reader capability; historical raw records and accepted annotations must not be
+rewritten for rollback. Existing scheduler quota accounting and retry ownership
+remain unchanged. Page text can use more input tokens than a correctly extracted
+article; unchanged request count is not a claim of unchanged token consumption.

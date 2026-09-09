@@ -950,3 +950,42 @@ def test_news_generation_keeps_latest_window_when_source_grows(tmp_path, monkeyp
     )
     assert [row[1] for row in keys] == ["new-b", "new-a"]
     ledger.close()
+
+
+def test_selected_article_survives_ledger_and_reader_without_rehydrating(tmp_path):
+    from xauusd_forecaster.news.semantics.article_source import PAGE_TEXT_MARKER
+    from xauusd_forecaster.news.collection.content import hydrate_pending_non_fed_content
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "source.sqlite3", now=now)
+    article = "Treasury changed the operation size from two to four billion dollars. " * 8
+    body = "[FULL_TEXT source=https://example.test/news]\n" + PAGE_TEXT_MARKER + "About Treasury General Information\nOriginal title\n" + article
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    source, item_id = "us_treasury_press_releases", "selected-source"
+    ledger.append_news_revision({
+        "source": source, "source_item_id": item_id,
+        "source_published_time": now, "collector_first_seen_time": now,
+        "fetched_time": now, "headline": "Truncated", "body": body,
+        "link": "https://example.test/news", "content_hash": digest, "cluster_id": item_id,
+    })
+    annotation = _basic_annotation_payload(ledger, source=source, item_id=item_id, parsed_at=now)
+    annotation.update(source_title_segment_ids=[1], source_body_segment_ids=[2],
+                      supporting_evidence=[article[:69]])
+    ledger.append_annotation({
+        "annotation_id": "selected-annotation", "source": source,
+        "source_item_id": item_id, "revision_number": 1, "raw_content_hash": digest,
+        "annotation": annotation, "llm_model_version": "gemini-3.5-flash-lite",
+        "prompt_version": PROMPT_VERSION, "parse_started_at": now, "parsed_at": now,
+    })
+    rows = news_resources._news_reader_rows(ledger.connection, now)
+    output = news_resources._serialize_news_rows(rows, now, now.isoformat(), set())
+    assert len(output) == 1
+    assert output[0]["body"] == article
+    assert output[0]["content_characters"] == len(article)
+    assert output[0]["content_hash"] == digest
+    assert not any(k.endswith("segment_ids_json") for k in output[0])
+    assert ledger.connection.execute("SELECT body FROM news_revisions").fetchone()[0] == body
+    def no_fetch(_):
+        pytest.fail("An acquired page must not re-enter legacy navigation recovery")
+    report = hydrate_pending_non_fed_content(ledger, now, extractor=no_fetch)
+    assert report["attempted"] == 0
+    ledger.close()

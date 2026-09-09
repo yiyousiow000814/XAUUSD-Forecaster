@@ -17,6 +17,7 @@ from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
 from xauusd_forecaster.evidence.ledger import ForwardLedger
+from xauusd_forecaster.news.semantics.article_source import PAGE_TEXT_MARKER
 from xauusd_forecaster.news.semantics.relevance import google_news_item_is_relevant
 from xauusd_forecaster.news.collection.source_polling import source_poll_gate
 
@@ -67,15 +68,6 @@ def fetch_content(url: str, timeout_seconds: float = 12.0) -> bytes:
         return response.read()
 
 
-def _clean_text(node) -> str:
-    for unwanted in node.select("script,style,noscript,nav,form,button,.share,footer"):
-        unwanted.decompose()
-    return "\n".join(
-        line.strip() for line in node.get_text("\n", strip=True).splitlines()
-        if line.strip()
-    )
-
-
 def extract_federal_reserve_full_text(
     url: str,
     fetcher: Callable[[str], bytes] = fetch_content,
@@ -108,12 +100,9 @@ def extract_federal_reserve_full_text(
             reader = PdfReader(io.BytesIO(attachment))
             text = "\n".join((page.extract_text() or "").strip() for page in reader.pages)
         else:
-            attachment_soup = BeautifulSoup(attachment, "html.parser")
-            attachment_content = attachment_soup.select_one("#content") or attachment_soup.body
-            if attachment_content is not None:
-                text = _clean_text(attachment_content)
+            text = _page_text(attachment)
     if not text:
-        text = _clean_text(content)
+        text = _page_text(raw)
     text = text.strip()
     if len(text) < 240:
         raise ValueError(f"full text extraction produced only {len(text)} characters")
@@ -133,31 +122,21 @@ def extract_article_full_text(
         if len(text) < 500:
             raise ValueError(f"PDF article extraction produced only {len(text)} characters")
         return text, url
+    return _page_text(raw), url
+
+
+def _page_text(raw: bytes) -> str:
+    """Keep page text for AI selection; do not guess an article by length."""
     soup = BeautifulSoup(raw, "html.parser")
-    candidates = [
-        soup.select_one(selector)
-        for selector in (
-            ".field--name-field-news-body",
-            "article",
-            "#story-body",
-            "[itemprop='articleBody']",
-            ".article-body",
-            ".story-body",
-            ".entry-content",
-            ".post-content",
-            ".field--name-body",
-            "main",
-        )
-    ]
-    candidates = [node for node in candidates if node is not None]
-    if not candidates and soup.body is not None:
-        candidates.append(soup.body)
-    if not candidates:
-        raise ValueError("article page has no usable content container")
-    text = max((_clean_text(node).strip() for node in candidates), key=len)
-    if len(text) < 500:
-        raise ValueError(f"article extraction produced only {len(text)} characters")
-    return text, url
+    for node in soup.select("script,style,noscript"):
+        node.decompose()
+    container = soup.body or soup
+    lines = [line.strip() for text in container.stripped_strings
+             for line in text.splitlines() if line.strip()]
+    text = "\n".join(lines)
+    if len(text) < 240:
+        raise ValueError(f"page extraction produced only {len(text)} characters")
+    return PAGE_TEXT_MARKER + text
 
 
 def hydrate_pending_non_fed_content(
@@ -201,7 +180,8 @@ def hydrate_pending_non_fed_content(
               AND (
                 n.body NOT LIKE '[FULL_TEXT%'
                 OR (n.source='us_treasury_press_releases'
-                    AND n.body LIKE '%About Treasury%General Information%')
+                    AND n.body LIKE '%About Treasury%General Information%'
+                    AND instr(n.body, '[PAGE_TEXT_V1]')=0)
               )
             ORDER BY CASE
                        WHEN n.source IN ('bls_employment_situation',
