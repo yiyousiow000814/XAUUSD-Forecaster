@@ -401,7 +401,7 @@ test("replays the production read route family through bounded API modules", asy
     history_end: "2026-08-20T01:00:00Z",
   }), new Date().toISOString());
   database.database.prepare(
-    `INSERT OR REPLACE INTO news_evidence_state
+    `INSERT OR REPLACE INTO news_evidence_publication
      (id,active_snapshot_id,contract_version,record_count,activated_at)
      VALUES(1,?,?,0,?)`,
   ).run("e".repeat(64), "news-evidence-paged-v2", new Date().toISOString());

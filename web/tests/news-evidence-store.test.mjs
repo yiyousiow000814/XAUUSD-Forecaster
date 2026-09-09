@@ -25,6 +25,7 @@ const item = (digit, minute = 0) => ({
 const database = () => new D1TestDatabase([
   "0021_paged_news_evidence.sql",
   "0030_news_evidence_cleanup_budget.sql",
+  "0036_incremental_news_evidence.sql",
 ]);
 
 test("pages immutable Preview evidence with generation-bound cursors", () => {
@@ -140,7 +141,7 @@ test("activates first-ever and replacement empty generations idempotently", asyn
   await prepareNewsEvidenceSnapshot(replacementDb, emptyB, 0);
   await activateNewsEvidenceSnapshot(replacementDb, emptyB, 0);
   const state = replacementDb.database.prepare(
-    "SELECT active_snapshot_id,record_count FROM news_evidence_state WHERE id=1",
+    "SELECT active_snapshot_id,record_count FROM news_evidence_publication WHERE id=1",
   ).get();
   assert.deepEqual({ ...state }, { active_snapshot_id: emptyB, record_count: 0 });
 
@@ -152,120 +153,135 @@ test("activates first-ever and replacement empty generations idempotently", asyn
     error => error.code === "NEWS_EVIDENCE_INCOMPLETE",
   );
   assert.equal(replacementDb.database.prepare(
-    "SELECT active_snapshot_id FROM news_evidence_state WHERE id=1",
+    "SELECT active_snapshot_id FROM news_evidence_publication WHERE id=1",
   ).get().active_snapshot_id, emptyB);
 });
 
-test("bounded cleanup retains the active generation", async () => {
+test("bounded receipt cleanup preserves current data and fresh transfers", async () => {
   const db = database();
-  const oldGeneration = id("a");
-  const activeGeneration = id("b");
-  await prepareNewsEvidenceSnapshot(db, oldGeneration, 1);
-  await stageNewsEvidenceBatch(db, oldGeneration, 0, [item("1", 1)]);
-  await activateNewsEvidenceSnapshot(db, oldGeneration, 1);
-  await prepareNewsEvidenceSnapshot(db, activeGeneration, 1);
-  await stageNewsEvidenceBatch(db, activeGeneration, 0, [item("2", 2)]);
-  await activateNewsEvidenceSnapshot(db, activeGeneration, 1);
-  db.database.exec(
-    "UPDATE news_evidence_records SET received_at='2020-01-01T00:00:00.000Z' "
-    + `WHERE snapshot_id='${oldGeneration}'`,
-  );
-  db.database.exec(
-    "UPDATE news_evidence_batches SET updated_at='2020-01-01T00:00:00.000Z' "
-    + `WHERE snapshot_id='${oldGeneration}'`,
-  );
-  const cleanup = await cleanupNewsEvidenceSnapshots(db, activeGeneration);
-  assert.deepEqual(cleanup, {
-    status: "OK",
-    cleanup: "advanced",
-    deleted_records: 1,
-    deleted_batches: 1,
-    deleted_staging: 0,
-    cleanup_pending: false,
-  });
-  assert.equal(db.database.prepare(
-    "SELECT count(*) AS count FROM news_evidence_records WHERE snapshot_id=?",
-  ).get(activeGeneration).count, 1);
-  assert.equal(db.database.prepare(
-    "SELECT count(*) AS count FROM news_evidence_records WHERE snapshot_id=?",
-  ).get(oldGeneration).count, 0);
+  for (const generation of [id("a"), id("b")]) {
+    await prepareNewsEvidenceSnapshot(db, generation, 25);
+    for (let i=0;i<25;i++) await stageNewsEvidenceBatch(db,generation,i,[{
+      ...item("1",i),event_key:i.toString(16).padStart(64,"0"),
+    }]);
+    await activateNewsEvidenceSnapshot(db,generation,25);
+  }
+  db.database.exec("UPDATE news_evidence_receipts SET updated_at='2020-01-01'");
+  const first=await cleanupNewsEvidenceSnapshots(db,id("b"));
+  assert.equal(first.deleted_records,0);
+  assert.equal(first.deleted_batches,20);
+  assert.equal(first.cleanup_pending,true);
+  const second=await cleanupNewsEvidenceSnapshots(db,id("b"));
+  assert.equal(second.deleted_batches,5);
+  assert.equal(second.cleanup_pending,false);
+  assert.equal((await readNewsEvidencePage(db,{mode:"all",rawCursor:null,page:1,pageSize:50})).items.length,25);
+  await prepareNewsEvidenceSnapshot(db,id("c"),1);
+  await stageNewsEvidenceBatch(db,id("c"),0,[item("f")]);
+  db.database.exec("UPDATE news_evidence_receipts SET updated_at='2020-01-01'");
+  assert.equal((await cleanupNewsEvidenceSnapshots(db,id("b"))).deleted_batches,0);
 });
 
-test("cleanup retains fresh staging and prepare repairs its first receipt gap", async () => {
-  const db = database();
-  const activeGeneration = id("a");
-  const stagingGeneration = id("b");
-  const rows = [item("1", 1), item("2", 2), item("3", 3)];
-  await prepareNewsEvidenceSnapshot(db, activeGeneration, 1);
-  await stageNewsEvidenceBatch(db, activeGeneration, 0, [rows[0]]);
-  await activateNewsEvidenceSnapshot(db, activeGeneration, 1);
-  await prepareNewsEvidenceSnapshot(db, stagingGeneration, rows.length);
-  await stageNewsEvidenceBatch(db, stagingGeneration, 0, [rows[0]]);
-  await stageNewsEvidenceBatch(db, stagingGeneration, 1, [rows[1]]);
-  await stageNewsEvidenceBatch(db, stagingGeneration, 2, [rows[2]]);
-  db.database.exec(
-    "UPDATE news_evidence_records SET received_at='2020-01-01T00:00:00.000Z' "
-    + `WHERE snapshot_id='${stagingGeneration}'`,
-  );
-  db.database.exec(
-    "UPDATE news_evidence_batches SET updated_at='2020-01-01T00:00:00.000Z' "
-    + `WHERE snapshot_id='${stagingGeneration}'`,
-  );
-
-  const cleanup = await cleanupNewsEvidenceSnapshots(db, activeGeneration);
-  assert.equal(cleanup.deleted_records, 0);
-  assert.equal(cleanup.deleted_batches, 0);
-  db.database.exec(
-    `DELETE FROM news_evidence_records WHERE snapshot_id='${stagingGeneration}' AND ordinal=1`,
-  );
-  const repaired = await prepareNewsEvidenceSnapshot(db, stagingGeneration, rows.length);
-  assert.deepEqual(repaired, {
-    status: "OK", active: false, next_offset: 1, repaired_from: 3,
+test("prepare repairs the first missing receipt and can resume after restart",async()=>{
+  const db=database(); const g=id("c");
+  await prepareNewsEvidenceSnapshot(db,g,3);
+  for(let i=0;i<3;i++) await stageNewsEvidenceBatch(db,g,i,[item(String(i+1),i)]);
+  db.database.prepare("DELETE FROM news_evidence_receipts WHERE snapshot_id=? AND batch_offset=1").run(g);
+  assert.deepEqual(await prepareNewsEvidenceSnapshot(db,g,3),{
+    status:"OK",active:false,next_offset:1,repaired_from:3,
   });
-  assert.equal(db.database.prepare(
-    "SELECT count(*) AS count FROM news_evidence_records WHERE snapshot_id=?",
-  ).get(stagingGeneration).count, 1);
-  await stageNewsEvidenceBatch(db, stagingGeneration, 1, rows.slice(1));
-  await activateNewsEvidenceSnapshot(db, stagingGeneration, rows.length);
-  assert.equal((await readNewsEvidencePage(db, {
-    mode: "all", rawCursor: null, page: 1, pageSize: 20,
-  })).items.length, rows.length);
+  await stageNewsEvidenceBatch(db,g,1,[item("2",1),item("3",2)]);
+  await activateNewsEvidenceSnapshot(db,g,3);
+  assert.equal((await readNewsEvidencePage(db,{mode:"all",rawCursor:null,page:1,pageSize:20})).items.length,3);
 });
 
-test("cleanup feedback remains pending until bounded debt is drained", async () => {
-  const db = database();
-  const oldGeneration = id("c");
-  const activeGeneration = id("d");
-  const oldItems = Array.from({ length: 205 }, (_, index) => ({
-    ...item(((index % 9) + 1).toString(), index % 60),
-    event_key: index.toString(16).padStart(64, "0"),
-  }));
-  await prepareNewsEvidenceSnapshot(db, oldGeneration, oldItems.length);
-  await stageNewsEvidenceBatch(db, oldGeneration, 0, oldItems);
-  await activateNewsEvidenceSnapshot(db, oldGeneration, oldItems.length);
-  await prepareNewsEvidenceSnapshot(db, activeGeneration, 1);
-  await stageNewsEvidenceBatch(db, activeGeneration, 0, [item("f", 1)]);
-  await activateNewsEvidenceSnapshot(db, activeGeneration, 1);
-  db.database.exec(
-    "UPDATE news_evidence_records SET received_at='2020-01-01T00:00:00.000Z' "
-    + `WHERE snapshot_id='${oldGeneration}'`,
-  );
-  db.database.exec(
-    "UPDATE news_evidence_batches SET updated_at='2020-01-01T00:00:00.000Z' "
-    + `WHERE snapshot_id='${oldGeneration}'`,
-  );
+test("500-row replacement writes only changed current records and counts receipt overhead",async()=>{
+  const db=database();
+  db.database.exec(`CREATE TABLE mutation_audit(kind TEXT);
+    CREATE TRIGGER evidence_insert AFTER INSERT ON news_evidence_current BEGIN INSERT INTO mutation_audit VALUES ('insert'); END;
+    CREATE TRIGGER evidence_update AFTER UPDATE ON news_evidence_current BEGIN INSERT INTO mutation_audit VALUES ('update'); END;
+    CREATE TRIGGER evidence_delete AFTER DELETE ON news_evidence_current BEGIN INSERT INTO mutation_audit VALUES ('delete'); END;`);
+  const rows=Array.from({length:500},(_,i)=>({...item("1",i%60),event_key:i.toString(16).padStart(64,"0")}));
+  const publish=async(g,items)=>{
+    await prepareNewsEvidenceSnapshot(db,g,items.length);
+    for(let i=0;i<items.length;i+=8) await stageNewsEvidenceBatch(db,g,i,items.slice(i,i+8));
+    await activateNewsEvidenceSnapshot(db,g,items.length);
+  };
+  await publish(id("a"),rows);
+  db.database.exec('DELETE FROM mutation_audit');
+  rows[0]={...rows[0],canonical_headline:"changed"};
+  const before=db.database.prepare('SELECT total_changes() AS n').get().n;
+  await publish(id("b"),rows);
+  const total=db.database.prepare('SELECT total_changes() AS n').get().n-before;
+  assert.deepEqual(db.database.prepare('SELECT kind FROM mutation_audit').all().map(r=>r.kind),['update']);
+  // Actual table writes include 63 receipts and 63 offset updates, not only the changed news.
+  assert.ok(total>=128 && total<140, `logical writes including audit trigger: ${total}`);
+  db.database.exec('DELETE FROM mutation_audit');
+  await publish(id("c"),rows);
+  assert.equal(db.database.prepare('SELECT count(*) AS n FROM mutation_audit').get().n,0);
+  const beforeReplay=db.database.prepare('SELECT total_changes() AS n').get().n;
+  await prepareNewsEvidenceSnapshot(db,id("c"),rows.length);
+  await activateNewsEvidenceSnapshot(db,id("c"),rows.length);
+  assert.equal(db.database.prepare('SELECT total_changes() AS n').get().n,beforeReplay);
+  db.database.exec('DELETE FROM mutation_audit');
+  await publish(id("d"),rows.slice(1));
+  assert.deepEqual(db.database.prepare('SELECT kind FROM mutation_audit').all().map(r=>r.kind),['delete']);
+});
 
-  const first = await cleanupNewsEvidenceSnapshots(
-    db, activeGeneration, new Date("2026-09-03T12:00:00.000Z"),
-  );
-  assert.equal(first.deleted_records, 200);
-  assert.equal(first.cleanup_pending, true);
-  const second = await cleanupNewsEvidenceSnapshots(
-    db, activeGeneration, new Date("2026-09-03T12:00:01.000Z"),
-  );
-  assert.equal(second.deleted_records, 5);
-  assert.equal(second.cleanup_pending, false);
-  assert.equal(db.database.prepare(
-    "SELECT count(*) AS count FROM news_evidence_records WHERE snapshot_id=?",
-  ).get(activeGeneration).count, 1);
+test("staged changes stay invisible and a competing publication requires rebase",async()=>{
+  const db=database();
+  await prepareNewsEvidenceSnapshot(db,id("a"),1);await stageNewsEvidenceBatch(db,id("a"),0,[item("1")]);await activateNewsEvidenceSnapshot(db,id("a"),1);
+  await prepareNewsEvidenceSnapshot(db,id("b"),1);await stageNewsEvidenceBatch(db,id("b"),0,[item("2")]);
+  assert.equal((await readNewsEvidencePage(db,{mode:"all",rawCursor:null,page:1,pageSize:20})).items[0].event_key,id("1"));
+  await prepareNewsEvidenceSnapshot(db,id("c"),1);await stageNewsEvidenceBatch(db,id("c"),0,[item("3")]);await activateNewsEvidenceSnapshot(db,id("c"),1);
+  await assert.rejects(activateNewsEvidenceSnapshot(db,id("b"),1),e=>e.code==='NEWS_EVIDENCE_INCOMPLETE');
+  assert.equal((await prepareNewsEvidenceSnapshot(db,id("b"),1)).next_offset,0);
+  await stageNewsEvidenceBatch(db,id("b"),0,[item("2")]);await activateNewsEvidenceSnapshot(db,id("b"),1);
+});
+
+test("duplicate membership cannot activate and keeps previous publication intact",async()=>{
+  const db=database();await prepareNewsEvidenceSnapshot(db,id("a"),0);await activateNewsEvidenceSnapshot(db,id("a"),0);
+  await prepareNewsEvidenceSnapshot(db,id("b"),2);await stageNewsEvidenceBatch(db,id("b"),0,[item("1"),item("1")]);
+  await assert.rejects(activateNewsEvidenceSnapshot(db,id("b"),2),e=>e.code==='NEWS_EVIDENCE_INCOMPLETE');
+  assert.equal((await readNewsEvidencePage(db,{mode:"all",rawCursor:null,page:1,pageSize:20})).snapshot_id,id("a"));
+});
+
+test("migration retains the last complete legacy publication without rewriting its audit rows",async()=>{
+  const db=new D1TestDatabase(["0021_paged_news_evidence.sql"]);
+  const value=item("1");
+  db.database.prepare("INSERT INTO news_evidence_records VALUES (?,?,?,?,?,?,?,?)")
+    .run(id("a"),value.event_key,0,value.source_published_time,1,1,JSON.stringify(value),"2026-09-09");
+  db.database.prepare("INSERT INTO news_evidence_state VALUES (1,?,?,1,?)")
+    .run(id("a"),"news-evidence-paged-v2","2026-09-09");
+  db.applyMigration("0036_incremental_news_evidence.sql");
+  assert.deepEqual((await readNewsEvidencePage(db,{mode:"all",rawCursor:null,page:1,pageSize:20})).items,[value]);
+  assert.equal((await prepareNewsEvidenceSnapshot(db,id("a"),1)).active,true);
+  assert.equal(db.database.prepare("SELECT count(*) AS n FROM news_evidence_records").get().n,1);
+});
+
+test("reader detects publication changing between its metadata and page SQL",async()=>{
+  const db=database();
+  await prepareNewsEvidenceSnapshot(db,id("a"),0);await activateNewsEvidenceSnapshot(db,id("a"),0);
+  const original=db.prepare.bind(db);let changed=false;
+  db.prepare=sql=>{
+    if(sql.includes("WITH page AS")&&!changed){
+      changed=true;db.database.prepare("UPDATE news_evidence_publication SET active_snapshot_id=?").run(id("b"));
+    }
+    return original(sql);
+  };
+  await assert.rejects(readNewsEvidencePage(db,{mode:"all",rawCursor:null,page:1,pageSize:20}),
+    e=>e.code===NEWS_EVIDENCE_CURSOR_STALE);
+});
+
+test("activation rolls back changed rows when staging disappears at the transaction boundary",async()=>{
+  const db=database();
+  await prepareNewsEvidenceSnapshot(db,id("a"),1);await stageNewsEvidenceBatch(db,id("a"),0,[item("1")]);
+  await activateNewsEvidenceSnapshot(db,id("a"),1);
+  await prepareNewsEvidenceSnapshot(db,id("b"),1);await stageNewsEvidenceBatch(db,id("b"),0,[item("2")]);
+  const batch=db.batch.bind(db);
+  db.batch=statements=>{
+    db.database.prepare("DELETE FROM news_evidence_transfers WHERE snapshot_id=?").run(id("b"));
+    return batch(statements);
+  };
+  await assert.rejects(activateNewsEvidenceSnapshot(db,id("b"),1));
+  assert.deepEqual((await readNewsEvidencePage(db,{mode:"all",rawCursor:null,page:1,pageSize:20})).items,[item("1")]);
 });
