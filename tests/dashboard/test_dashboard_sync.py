@@ -1734,6 +1734,69 @@ def test_news_evidence_sync_drains_old_snapshot_before_admitting_replacement(
     assert not persisted.get("cleanup_pending")
 
 
+
+@pytest.mark.parametrize("error_code", ["NEWS_EVIDENCE_CLEANUP_INVALID", "OTHER_REMOTE_FAILURE"])
+def test_news_evidence_reconciles_obsolete_ack_without_bypassing_remote_errors(
+    monkeypatch, tmp_path, error_code,
+) -> None:
+    from xauusd_forecaster.dashboard.sync import resources as module
+    snapshot = "a" * 64
+    remote = "https://remote/api/news-evidence"
+    path = tmp_path / "evidence-state.json"
+    original = {
+        "contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION,
+        "active_snapshot_id": snapshot,
+        "ack_remote_url": remote,
+        "ack_request_sha256": "b" * 64,
+    }
+    path.write_text(json.dumps(original), encoding="utf-8")
+
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            return False
+        def read(self):
+            return json.dumps({"snapshot_id": snapshot, "total": 0, "items": [],
+                               "has_more": False}).encode()
+
+    posted = []
+    def post(_url, body, _config):
+        payload = json.loads(body)
+        posted.append(payload)
+        if "cleanup_active_snapshot" in payload and len(posted) == 1:
+            raise module.RemoteInvariantViolation({"error_code": error_code})
+        if "prepare_snapshot" in payload:
+            # The old ACK has not been overwritten before a genuine remote ACK.
+            assert json.loads(path.read_text(encoding="utf-8")) == original
+            return _evidence_ack(body, {"status": "OK", "active": False, "next_offset": 0})
+        if "activate_snapshot" in payload:
+            return _evidence_ack(body, {"status": "OK", "activated": snapshot, "count": 0})
+        return _evidence_ack(body, _evidence_cleanup_result())
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_kw: Response())
+    monkeypatch.setattr(module, "_post_json", post)
+    config = {
+        "local_status_url": "http://local/api/status",
+        "remote_ingest_url": "https://remote/api/ingest",
+        "news_evidence_state_file": str(path),
+        module.RUNTIME_STATE_ROOT_KEY: str(tmp_path),
+    }
+    if error_code != "NEWS_EVIDENCE_CLEANUP_INVALID":
+        with pytest.raises(module.RemoteInvariantViolation):
+            module._sync_news_evidence({}, config)
+        assert len(posted) == 1
+        assert json.loads(path.read_text(encoding="utf-8")) == original
+    else:
+        module._sync_news_evidence({}, config)
+        assert [next(k for k in p if k != "contract_version") for p in posted] == [
+            "cleanup_active_snapshot", "prepare_snapshot", "activate_snapshot", "cleanup_active_snapshot",
+        ]
+        persisted = json.loads(path.read_text(encoding="utf-8"))
+        assert persisted["active_snapshot_id"] == snapshot
+        assert persisted["ack_request_sha256"] != original["ack_request_sha256"]
+
+
 def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_fields(
     monkeypatch, tmp_path,
 ) -> None:

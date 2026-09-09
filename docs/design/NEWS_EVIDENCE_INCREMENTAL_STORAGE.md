@@ -76,3 +76,25 @@ Focused tests have a two-minute budget; complete required CI retains its existin
 budgets. Check actual read pages on desktop, 390x844 and 360x800; verify navigate,
 paginate, filter and stale-cursor restart. After deployment verify natural Sync
 completion and continued updates, preserving prior cost and failure evidence.
+
+## Sender acknowledgement reconciliation
+
+A schema copy and deployment are separate boundaries: the old Worker can
+advance its publication after the copy, leaving the sender's valid prior ACK
+ahead of the copied publication. Cleanup is not a prerequisite that may prevent
+reconciliation forever. On the explicit NEWS_EVIDENCE_CLEANUP_INVALID response,
+the single existing sender discards the fast-path authority in memory and runs
+normal prepare/stage/activate against its frozen local generation. It preserves
+the on-disk ACK until a genuine new response or normal staging progress replaces
+it. Other remote errors continue to propagate. No new owner, durable mode,
+manual ACK, timer, or database reset is introduced. Restart repeats the same
+bounded reconciliation and accepted receipts remain reusable.
+
+The deployment review must pair sender checkpoints with target publications,
+including old-version writes between migration and activation; verifying the
+copied database alone does not prove handover. Existing cleanup, preparation,
+staging, authentication and exact-request ACK contracts retain ownership of
+their respective invariants. The focused recovery test covers unchanged local
+identity (which must not take the stale fast path), real preparation/activation
+ACK validation, and unrelated errors remaining visible. Production acceptance
+requires the natural Windows sender to complete a publication on the new store.
