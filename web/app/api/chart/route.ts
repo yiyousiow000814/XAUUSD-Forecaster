@@ -118,7 +118,7 @@ async function readChart(request:Request) {
       url.searchParams.set("resource","exact-"+type);const response=await pagedRecords(db,url);
       if(previewBundle)response.headers.set("X-Aurum-Preview","current-read-only-d1");return response;
     }
-    if(type==="learning"&&completed.chart_format!=="pyramid-v1")throw new Error("chart blocks pending");
+    if(type==="learning"&&completed.chart_format!=="pyramid-v2")throw new Error("chart blocks pending");
     const bounds=await db.prepare(`SELECT
       (SELECT sort_epoch FROM learning_records WHERE resource=? ORDER BY sort_epoch,record_key LIMIT 1) first,
       (SELECT sort_epoch FROM learning_records WHERE resource=? ORDER BY sort_epoch DESC,record_key DESC LIMIT 1) last`)

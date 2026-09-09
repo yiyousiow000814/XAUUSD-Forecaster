@@ -434,7 +434,7 @@ must preserve interval endpoints, extrema and anchors without SQL window scans.
 Block keys include identity, block size and block ordinal; sort_epoch remains
 an actual source timestamp. Per-request SQL is batched within D1 parameter bounds.
 
-The actual local publication persists chart_format=pyramid-v1 and carries it
+The actual local publication persists chart_format=pyramid-v2 and carries it
 through the strict completion receipt. A reader must not use partial initial
 blocks under an old completion format. The stable revision cursor remains
 compatible, so acknowledged rows are reused while modified derived rows and
@@ -442,3 +442,8 @@ new blocks receive newer revisions. A source shrink cannot silently qualify
 retained old records as a new complete input. Initial index/backfill writes,
 subsequent changed-block writes and visitor reads require separate real D1
 measurements; returned row counts alone are not billed rows_read evidence.
+
+Chart export revisions belong to the derived publication owner. Every publication
+must advance beyond its prior revision even when the source revision is unchanged
+or lower. A format rebuild republishes affected records beyond acknowledged
+cursors, including unchanged payloads; source clocks cannot order transport.

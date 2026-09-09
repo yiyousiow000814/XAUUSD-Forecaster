@@ -45,7 +45,7 @@ and old curve/version overview GETs must no longer return misleading graphs.
 Apply additive index migration0035 before the pyramid reader. The existing
 optional owner upgrades its derived format and syncs changed raw ordinals plus
 extrema blocks through the unchanged acknowledged cursor. Wait for an actual
-pyramid-v1 completion receipt, then verify the next incremental publication.
+pyramid-v2 completion receipt, then verify the next incremental publication.
 Do not replace the cursor, manufacture completion, or rewrite original facts.
 Compare the same range/source identity with measured D1 reads and preserve the
 PR502 baseline (core24h11171 rows; all607708 rows). Those baseline numbers are
