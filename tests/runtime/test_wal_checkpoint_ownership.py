@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -56,20 +56,36 @@ def test_checkpoint_preserves_reader_then_truncates_after_full_backfill(
     )
     writer.commit()
 
+    from xauusd_forecaster.dashboard.storage_status import wal_checkpoint_status
+
+    started = datetime.now(UTC)
     pinned = checkpoint_forward_wal(
-        database, tmp_path, datetime.now(UTC), size_limit_bytes=4096,
+        database, tmp_path, started, size_limit_bytes=4096,
     )
     assert pinned.status == "READER_PINNED"
     assert pinned.pending_frames > 0
     assert pinned.truncate_attempted is False
     assert _receipt_is_valid(pinned.state_path)
 
+    assert wal_checkpoint_status(tmp_path, clock=lambda: started)["status"] == "OK"
+    assert wal_checkpoint_status(tmp_path, clock=lambda: started)["last_success"] is None
+    # A new invocation reloads the receipt, as after an owner restart.
+    later = started + timedelta(seconds=300)
+    checkpoint_forward_wal(database, tmp_path, later, size_limit_bytes=4096)
+    assert wal_checkpoint_status(tmp_path, clock=lambda: later)["status"] == "WARN"
+    assert wal_checkpoint_status(tmp_path, clock=lambda: later)["contention_seconds"] == 300
+
     reader.rollback()
     reader.close()
     completed = checkpoint_forward_wal(
-        database, tmp_path, datetime.now(UTC), size_limit_bytes=4096,
+        database, tmp_path, later + timedelta(seconds=60), size_limit_bytes=4096,
     )
     assert completed.status == "TRUNCATED"
+    health = wal_checkpoint_status(tmp_path, clock=lambda: later + timedelta(seconds=60))
+    assert health["status"] == "OK"
+    assert health["contention_seconds"] is None
+    assert health["last_success"] == (later + timedelta(seconds=60)).isoformat(timespec="microseconds")
+    assert wal_checkpoint_status(tmp_path, clock=lambda: later + timedelta(seconds=361))["status"] == "ERROR"
     assert completed.pending_frames == 0
     assert completed.truncate_attempted is True
     assert completed.wal_bytes_after <= 4096

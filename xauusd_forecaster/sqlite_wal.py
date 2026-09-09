@@ -19,6 +19,10 @@ FORWARD_WAL_CHECKPOINT_INTERVAL_SECONDS = 60.0
 FORWARD_WAL_CHECKPOINT_BUSY_TIMEOUT_MS = 250
 FORWARD_WAL_CHECKPOINT_SCHEMA = "xauusd.forward.wal-checkpoint.v1"
 FORWARD_WAL_CHECKPOINT_STATE = "wal-checkpoint-state.json"
+FORWARD_WAL_CONTENTION_WARN_SECONDS = 300
+FORWARD_WAL_RETRYABLE_STATES = frozenset({
+    "CHECKPOINT_BUSY", "READER_PINNED", "TRUNCATE_BUSY", "TRUNCATE_INCOMPLETE",
+})
 
 
 def is_forward_sqlite_contention(error: BaseException) -> bool:
@@ -176,6 +180,29 @@ def checkpoint_forward_wal(
         connection.close()
 
     wal_bytes_after = wal_path.stat().st_size if wal_path.is_file() else 0
+    recorded_at = now.astimezone(UTC).isoformat(timespec="microseconds")
+    previous: dict[str, object] = {}
+    try:
+        candidate = json.loads(state_path.read_text(encoding="utf-8"))
+        digest = candidate.pop("receipt_digest")
+        if (digest == _digest(candidate)
+                and candidate.get("schema") == FORWARD_WAL_CHECKPOINT_SCHEMA
+                and candidate.get("database") == str(database)):
+            previous = candidate
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        pass
+    contention_since = None
+    if status in FORWARD_WAL_RETRYABLE_STATES:
+        contention_since = recorded_at
+        if previous.get("status") in FORWARD_WAL_RETRYABLE_STATES:
+            prior_since = previous.get("contention_since") or previous.get("recorded_at")
+            try:
+                prior_time = datetime.fromisoformat(str(prior_since))
+                if prior_time.tzinfo is not None and prior_time <= now:
+                    contention_since = prior_time.astimezone(UTC).isoformat(timespec="microseconds")
+            except (ValueError, TypeError):
+                pass
+    completed = status in {"CHECKPOINTED", "TRUNCATED"}
     payload: dict[str, object] = {
         "schema": FORWARD_WAL_CHECKPOINT_SCHEMA,
         "recorded_at": now.astimezone(UTC).isoformat(timespec="microseconds"),
@@ -190,6 +217,8 @@ def checkpoint_forward_wal(
         "busy_timeout_ms": busy_timeout_ms,
         "truncate_attempted": truncate_attempted,
         "error": error,
+        "contention_since": contention_since,
+        "last_completed_at": recorded_at if completed else previous.get("last_completed_at"),
     }
     payload["receipt_digest"] = _digest(payload)
     _atomic_json(state_path, payload)

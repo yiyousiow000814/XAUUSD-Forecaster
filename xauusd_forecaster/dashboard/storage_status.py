@@ -15,6 +15,8 @@ from xauusd_forecaster.maintenance import (
     BACKUP_RETENTION_STATE,
 )
 from xauusd_forecaster.sqlite_wal import (
+    FORWARD_WAL_CONTENTION_WARN_SECONDS,
+    FORWARD_WAL_RETRYABLE_STATES,
     FORWARD_WAL_CHECKPOINT_SCHEMA,
     FORWARD_WAL_CHECKPOINT_STATE,
 )
@@ -168,21 +170,30 @@ def wal_checkpoint_status(
         recorded_at = datetime.fromisoformat(str(state["recorded_at"]))
         age_seconds = max(0.0, (clock() - recorded_at).total_seconds())
         checkpoint_status = str(state.get("status") or "UNKNOWN")
+        contention_seconds = None
         if checkpoint_status in {"CHECKPOINTED", "TRUNCATED"}:
             component_status = "OK"
-        elif checkpoint_status in {
-            "CHECKPOINT_BUSY", "READER_PINNED", "TRUNCATE_BUSY",
-            "TRUNCATE_INCOMPLETE",
-        }:
+        elif checkpoint_status in FORWARD_WAL_RETRYABLE_STATES:
             component_status = "WARN"
+            if state.get("contention_since"):
+                since = datetime.fromisoformat(str(state["contention_since"]))
+                if since.tzinfo is None or since > recorded_at:
+                    raise ValueError("Invalid WAL contention start")
+                contention_seconds = max(0.0, (clock() - since).total_seconds())
+                if contention_seconds < FORWARD_WAL_CONTENTION_WARN_SECONDS:
+                    component_status = "OK"
         else:
             component_status = "ERROR"
-        if age_seconds > 300:
+        if age_seconds > 300 or state.get("error"):
             component_status = "ERROR"
         result.update({
             "status": component_status,
             "checkpoint_status": checkpoint_status,
-            "last_success": state.get("recorded_at"),
+            "last_success": state.get("last_completed_at") or (
+                state.get("recorded_at")
+                if checkpoint_status in {"CHECKPOINTED", "TRUNCATED"} else None
+            ),
+            "contention_seconds": contention_seconds,
             "age_seconds": age_seconds,
             "pending_frames": int(state.get("pending_frames") or 0),
             "wal_bytes": int(state.get("wal_bytes_after") or 0),

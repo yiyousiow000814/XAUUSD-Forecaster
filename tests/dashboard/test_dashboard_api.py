@@ -101,6 +101,23 @@ def test_wal_checkpoint_component_accepts_only_digest_bound_runtime_state(
     assert accepted["wal_bytes"] == 0
     assert accepted["journal_size_limit_bytes"] == 64 * 1024**2
 
+    # Retryable observations are visible but warn only when sustained.
+    now = datetime.now(timezone.utc)
+    for retry_status in ("CHECKPOINT_BUSY", "READER_PINNED", "TRUNCATE_BUSY", "TRUNCATE_INCOMPLETE"):
+        for elapsed, expected in ((0, "OK"), (299, "OK"), (300, "WARN")):
+            retry = dict(payload)
+            retry.pop("receipt_digest", None)
+            retry.update(status=retry_status, recorded_at=now.isoformat(),
+                         contention_since=(now - timedelta(seconds=elapsed)).isoformat())
+            retry["receipt_digest"] = canonical_payload_digest(retry)
+            state.write_text(json.dumps(retry), encoding="utf-8")
+            assert wal_checkpoint_status(tmp_path, clock=lambda: now)["status"] == expected
+        retry.pop("receipt_digest")
+        retry.pop("contention_since")
+        retry["receipt_digest"] = canonical_payload_digest(retry)
+        state.write_text(json.dumps(retry), encoding="utf-8")
+        assert wal_checkpoint_status(tmp_path, clock=lambda: now)["status"] == "WARN"
+
     payload["pending_frames"] = 1
     state.write_text(json.dumps(payload), encoding="utf-8")
     rejected = wal_checkpoint_status(tmp_path)

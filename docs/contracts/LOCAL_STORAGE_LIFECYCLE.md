@@ -35,6 +35,15 @@ truncate decision, and error state. Long readers remain bounded by their own
 snapshot contracts. Owner restart retries from SQLite's durable WAL state; the
 receipt is observability evidence and is never used as database authority.
 
+Health distinguishes an incomplete maintenance round from sustained contention.
+The same receipt retains a digest-bound `contention_since` across owner restart
+and consecutive retryable rounds; a completed checkpoint clears it. Short
+contention remains visible in technical state without an operator warning.
+Five continuous minutes without completion produce WARN. Legacy retryable
+receipts without a contention start remain WARN; corrupt receipts, SQLite
+errors, and receipts older than five minutes remain ERROR. `last_success`
+reports the last completed checkpoint, never merely the latest attempt.
+
 ## Managed daily snapshots
 
 A daily snapshot is retention-managed only when all of these facts hold:
