@@ -307,3 +307,9 @@ revisions and semantic artifacts present in the ledger. The revision's actual
 never be rewritten to impersonate a contemporaneous brief. Reconstruction uses
 the same bounded backlog, population, capacity, validation, and finalization
 rules as normal processing.
+
+Reader-facing prose must not expose temporary evidence-packet references such
+as [E04, E14]. Generation puts refs in structured evidence_ids only. The reader
+also removes bracketed packet refs from all brief text fields for retained
+revisions, without rewriting stored text, changing canonical evidence IDs,
+issuing model requests or removing ordinary bracketed source content.

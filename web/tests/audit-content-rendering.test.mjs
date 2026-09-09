@@ -243,3 +243,26 @@ test("actual Audit detail effects poll current data but never immutable Preview 
     }
   }
 });
+
+test("brief prose hides packet refs in every field without rewriting evidence", () => {
+  const brief = {
+    title: "每日简报 [E01]", overview: "黄金表现 [E04, E14, E23]",
+    drivers: ["驱动一 [E05，E21]", "驱动二［E06、E30］"],
+    watch_next: "关注 CPI [E04]",
+    items: [{headline: "重点标题 [E07]", summary: "变化25 [bp]，保留型号E04，参考 [E07, E10, E26]。",
+      evidence_ids: ["real-evidence-7", "real-evidence-10", "real-evidence-26"]}],
+  };
+  const original = JSON.stringify(brief);
+  const html = render("briefs", {...baseline, "/api/audit-briefs": {
+    ...details.briefs,
+    daily_news_briefs: [{brief_date: "2026-09-06", revision_number: 21,
+      cutoff_at: generatedAt, generated_at: generatedAt, model_version: "gemma", prompt_version: "retained",
+      phase: "FINAL", reviewed_items: 407, brief}],
+    daily_news_brief_summary: {brief_date: "2026-09-06", phase: "FINAL", reviewed_items: 407, pending_items: 0},
+  }});
+  assert.doesNotMatch(html, /[\[［]E\d/);
+  for (const text of ["黄金表现", "驱动一", "驱动二", "关注 CPI", "重点标题", "25 [bp]", "型号E04", "3 份来源证据"]) {
+    assert.ok(html.includes(text), text);
+  }
+  assert.equal(JSON.stringify(brief), original);
+});
