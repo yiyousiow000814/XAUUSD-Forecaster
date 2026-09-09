@@ -39,3 +39,15 @@ older windows, both cadences and execution pages. Repeat on the branch Preview
 and production desktop/phone. Record D1 read/write costs separately for initial
 backfill and subsequent requests. Metrics summaries must contain no chart data,
 and old curve/version overview GETs must no longer return misleading graphs.
+
+## Lightweight chart reads
+
+Apply additive index migration0035 before the pyramid reader. The existing
+optional owner upgrades its derived format and syncs changed raw ordinals plus
+extrema blocks through the unchanged acknowledged cursor. Wait for an actual
+pyramid-v1 completion receipt, then verify the next incremental publication.
+Do not replace the cursor, manufacture completion, or rewrite original facts.
+Compare the same range/source identity with measured D1 reads and preserve the
+PR502 baseline (core24h11171 rows; all607708 rows). Those baseline numbers are
+not an account-wide reduction claim. Healthy graph extent and small-range
+exactness remain required alongside lower read cost.

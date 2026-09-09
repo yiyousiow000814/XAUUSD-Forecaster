@@ -420,6 +420,25 @@ Branch Preview runs the same range-query implementation against allowed
 read-only D1 data and labels its provenance. It never substitutes a compact
 build snapshot for missing complete graph history. Cache reuse is bounded to
 30 seconds in production; charts load on demand rather than through homepage
-metrics polling. SQL range work is proportional to the selected source interval,
-not the number of returned sampled points; capacity claims require actual D1
-measurements and must include this distinction.
+metrics polling. Sampled reads must not scan the complete selected source
+interval. The local owner maintains extrema blocks of 16, 64, 256 and successive
+powers of four source points. Each block retains original first/last/min/max
+points, and only blocks affected by changed points are replaced. No-op
+publication must not rewrite historical blocks. Full raw source records remain.
+
+Exact interval endpoint ordinals supply the source count through indexed
+first/last lookups. Intervals above the point threshold use aligned blocks and
+successively smaller edge blocks, with at most 15 original points at each outer
+edge. Version and source-gap anchors use a dedicated partial index. The reader
+must preserve interval endpoints, extrema and anchors without SQL window scans.
+Block keys include identity, block size and block ordinal; sort_epoch remains
+an actual source timestamp. Per-request SQL is batched within D1 parameter bounds.
+
+The actual local publication persists chart_format=pyramid-v1 and carries it
+through the strict completion receipt. A reader must not use partial initial
+blocks under an old completion format. The stable revision cursor remains
+compatible, so acknowledged rows are reused while modified derived rows and
+new blocks receive newer revisions. A source shrink cannot silently qualify
+retained old records as a new complete input. Initial index/backfill writes,
+subsequent changed-block writes and visitor reads require separate real D1
+measurements; returned row counts alone are not billed rows_read evidence.

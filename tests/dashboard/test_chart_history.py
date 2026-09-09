@@ -8,14 +8,14 @@ from xauusd_forecaster.dashboard.resource_contracts import _learning_record
 
 def test_exact_export_is_bounded_resumable_and_preserves_old_rows(tmp_path):
     connection=sqlite3.connect(tmp_path / "derived.sqlite3")
-    rows=[_learning_record("curve-5m",str(i),i,{"decision_time":str(i),"model_identity":"FULL","v":i}) for i in range(501)]
+    rows=[_learning_record("execution-result",str(i),i,{"decision_time":str(i),"model_identity":"FULL","v":i}) for i in range(501)]
     publish_chart_history(connection,rows,1,datetime.now(UTC).isoformat());connection.commit()
     first=chart_history_page(connection)
     assert len(first["records"])==200
     assert first==chart_history_page(connection)
     cursor=first["cursor"];seen=list(first["records"])
     # Updates behind the cursor acquire a later revision and are not lost.
-    rows[0]=_learning_record("curve-5m","0",0,{"decision_time":"0","model_identity":"FULL","v":999})
+    rows[0]=_learning_record("execution-result","0",0,{"decision_time":"0","model_identity":"FULL","v":999})
     publish_chart_history(connection,rows,2,datetime.now(UTC).isoformat());connection.commit()
     while True:
         page=chart_history_page(connection,cursor)
@@ -36,7 +36,7 @@ def test_production_export_route_and_sync_url_resume_without_skipping(tmp_path, 
     from xauusd_forecaster.dashboard.sync import resources
     database = tmp_path / "derived.sqlite3"
     connection = sqlite3.connect(database)
-    records = [_learning_record("curve-5m", str(i), i,
+    records = [_learning_record("execution-result", str(i), i,
                {"decision_time": str(i), "model_identity": "FULL"}) for i in range(401)]
     publish_chart_history(connection, records, 1, datetime.now(UTC).isoformat())
     connection.commit(); connection.close()
@@ -65,7 +65,8 @@ def test_production_export_route_and_sync_url_resume_without_skipping(tmp_path, 
             resources._sync_learning_history({}, config)
         assert len(sent) == 401
         assert completions[0]["record_count"] == 401
-        assert all(row["resource"] == "exact-curve-5m" for row in sent.values())
+        assert completions[0]["chart_format"] == "pyramid-v1"
+        assert all(row["resource"] == "exact-execution-result" for row in sent.values())
     finally:
         server.shutdown(); server.server_close(); thread.join(timeout=3)
 
@@ -92,6 +93,32 @@ def test_learning_owner_publishes_exact_rows_and_metrics_atomically(tmp_path, mo
         assert "_chart_records" not in summary
         assert summary["learning_curves"]["identity_curves"] == []
         page = chart_history_page(connection)
-        assert len(page["records"]) == 24
+        assert len([r for r in page["records"] if r["resource"] == "curve-5m"]) == 24
+        assert page["chart_format"] == "pyramid-v1"
         assert page["records"][0]["payload"]["decision_time"] == "2026-08-01T00:00:00Z"
+    connection.close()
+
+
+def test_pyramid_preserves_extrema_and_only_updates_changed_blocks(tmp_path):
+    connection=sqlite3.connect(tmp_path / "pyramid.sqlite3")
+    connection.execute("CREATE TABLE dashboard_chart_state_v1(id INTEGER PRIMARY KEY,revision INTEGER,generated_at TEXT,record_count INTEGER)")
+    connection.execute("INSERT INTO dashboard_chart_state_v1 VALUES(1,0,'old',0)")
+    def source(count):
+        return [_learning_record("curve-5m",f"FULL-{i:06d}",i,
+            {"model_identity":"FULL","decision_time":str(i),
+             "cumulative_quote_return":999 if i==123 else -999 if i==124 else i/100,
+             **({"model_version":"changed"} if i==120 else {}),
+             **({"source_gap_before":True} if i==130 else {})}) for i in range(count)]
+    rows=source(4096)
+    publish_chart_history(connection,rows,1,"2026-09-09T00:00:00Z");connection.commit()
+    tile=json.loads(connection.execute("SELECT payload FROM dashboard_chart_records_v1 WHERE resource='curve-tile-5m' AND record_key=?",("FULL\0"+f"{4096:016d}\0{0:016d}",)).fetchone()[0])
+    assert {p["chart_ordinal"] for p in tile["points"]} == {0,123,124,4095}
+    assert {json.loads(r[0])["chart_ordinal"] for r in connection.execute("SELECT payload FROM dashboard_chart_records_v1 WHERE resource='curve-5m' AND json_extract(payload,'$.chart_anchor')=1")} == {120,129,130}
+    before=connection.total_changes
+    publish_chart_history(connection,rows,2,"2026-09-09T00:01:00Z");connection.commit()
+    assert connection.total_changes-before==1  # completion metadata only
+    before=connection.total_changes
+    publish_chart_history(connection,source(4097),3,"2026-09-09T00:02:00Z");connection.commit()
+    assert connection.total_changes-before==8  # new point, six tail blocks, metadata
+    assert connection.execute("SELECT count(*) FROM dashboard_chart_records_v1 WHERE resource='curve-5m' AND revision=3").fetchone()[0]==1
     connection.close()
