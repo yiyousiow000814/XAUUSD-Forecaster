@@ -15,7 +15,7 @@ import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
 import { authoritativeNewsTotals, type NewsTotalsScope } from "../_lib/news-index-contract";
 import type { NewsReviewState } from "../_lib/news-review-state";
 import { formatExactCount, progressCountPresentation } from "../_lib/count-format";
-import { publicImpactReason } from "../_lib/public-news-copy";
+import { publicImpactReason, publicBriefText } from "../_lib/public-news-copy";
 import { validAuditDetailPayload } from "../_lib/audit-detail-contract";
 import { sortNewsEvidenceByTime } from "../_lib/news-evidence-order";
 import type { VersionEvaluationStatus } from "../_lib/version-result-state";
@@ -1569,21 +1569,21 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
               ? `Gemma 汇总未生成，当前为系统整理版；另有 ${formatExactCount(terminal)} 条资料因正文缺失或复核失败未纳入。`
               : "Gemma 汇总未生成，当前为系统整理版。"
           : null;
-        const overview = selected?.brief.overview?.trim() || null;
-        const drivers = selected?.brief.drivers?.map(driver => driver.trim()).filter(Boolean) ?? [];
-        const watchNext = selected?.brief.watch_next?.trim() || null;
+        const overview = publicBriefText(selected?.brief.overview) || null;
+        const drivers = selected?.brief.drivers?.map(publicBriefText).filter(Boolean) ?? [];
+        const watchNext = publicBriefText(selected?.brief.watch_next) || null;
         const visibleEvidence = selected?.brief.items.slice(0, 2) ?? [];
         const remainingEvidence = selected?.brief.items.slice(2) ?? [];
         const renderBriefItem = (item: DailyNewsBrief["brief"]["items"][number], index: number) => <li key={`${selectedDate}-${index}`}>
           <span>{String(index + 1).padStart(2, "0")}</span>
           <div>
-            <h3>{item.headline}</h3>
-            <p>{item.summary}</p>
+            <h3>{publicBriefText(item.headline)}</h3>
+            <p>{publicBriefText(item.summary)}</p>
             <small>{formatExactCount(item.evidence_ids.length)} 份来源证据</small>
           </div>
         </li>;
         return <section className="daily-brief-desk">
-          <header><div><p className="eyebrow">{selectedDate ? `${shortBriefDate(selectedDate)} · DAILY BRIEF · ASIA/KUALA_LUMPUR` : "DAILY BRIEF · ASIA/KUALA_LUMPUR"}</p><h2>{selected?.brief.title ?? (selectedDate ? `${shortBriefDate(selectedDate)} 每日简报` : "每日简报")}</h2><p className={`brief-phase phase-${(phase ?? "WAITING").toLowerCase()}`}>{dailyBriefPhaseLabel(phase, isCurrent)}</p></div>
+          <header><div><p className="eyebrow">{selectedDate ? `${shortBriefDate(selectedDate)} · DAILY BRIEF · ASIA/KUALA_LUMPUR` : "DAILY BRIEF · ASIA/KUALA_LUMPUR"}</p><h2>{publicBriefText(selected?.brief.title) || (selectedDate ? `${shortBriefDate(selectedDate)} 每日简报` : "每日简报")}</h2><p className={`brief-phase phase-${(phase ?? "WAITING").toLowerCase()}`}>{dailyBriefPhaseLabel(phase, isCurrent)}</p></div>
             <div className="brief-date-switcher">
               <nav aria-label="最近简报日期">{recentDates.map(date => { const row = briefs.find(item => item.brief_date === date); const isToday = date === summary?.brief_date; const datePhase = isToday ? summary.phase : row?.phase; return <button type="button" key={date} className={selectedDate === date ? "active" : ""} onClick={() => setBriefDate(date)}><span>{shortBriefDate(date)}</span><small>{dailyBriefDateLabel(datePhase, isToday)}</small></button>; })}</nav>
               {historicalDates.length > 0 && <label className="brief-history-picker">

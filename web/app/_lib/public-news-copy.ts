@@ -3,6 +3,11 @@ const internalReasonField = /\b(?:matched_candidate_id|candidate_id|annotation_i
 const labeledInternalId = /(?:候选|已有报道记录|已有报道)\s*[：:#]?\s*[0-9a-f]{8}[0-9a-f-]{0,40}/giu;
 const internalUuidProbe = /(?<![0-9a-f])[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?![0-9a-f])/iu;
 
+// Brief packet refs belong to structured evidence_ids, not reader-facing prose.
+// Apply at render time so retained historical briefs need no rewrite or inference.
+export const publicBriefText = (value: string | null | undefined): string =>
+  (value ?? "").replace(/\s*[\[［]\s*E\d{2,}(?:\s*[,，、]\s*E\d{2,})*\s*[\]］]/giu, "").trim();
+
 const needsPublicImpactRewrite = (value: string) => value.includes("候选")
   || value.includes("已有报道")
   || value.includes("candidate_id")

@@ -546,6 +546,7 @@ def _brief_payload(day: str, evidence: list[dict[str, object]]) -> dict[str, obj
             "一句watch_next和最多5条重点。overview先说黄金表现与最主要原因；"
             "drivers每条只表达一个驱动，不得重复overview；watch_next只写资料支持的后续关注点。"
             "每条必须从资料中的ref原样选择支持它的evidence_ids；不得复制或猜测内部ID。"
+            "ref只放在evidence_ids中；标题、摘要、overview、drivers和watch_next不要写E编号或方括号引用。"
             "如果资料不足，宁可少写。"
             "只返回JSON。\nEVIDENCE\n" +
             json.dumps(cited_evidence, ensure_ascii=False, separators=(",", ":"))
