@@ -30,8 +30,8 @@ const blockKey=(identity:string,size:number,bucket:number)=>
 
 async function queryPlans(db:D1Database,plans:Plan[]) {
   const statements=[];
-  for(let i=0;i<plans.length;i+=8) {
-    const chunk=plans.slice(i,i+8);
+  for(let i=0;i<plans.length;i+=4) {
+    const chunk=plans.slice(i,i+4);
     statements.push(db.prepare(chunk.map(p=>p.sql).join(" UNION ALL ")).bind(...chunk.flatMap(p=>p.values)));
   }
   if(!statements.length)return [];
@@ -40,12 +40,13 @@ async function queryPlans(db:D1Database,plans:Plan[]) {
 }
 
 async function learningPoints(db:D1Database,resource:string,start:number,end:number) {
+  // Unary plus removes the TEXT column affinity, preserving JSON-index equality.
   const endpoints=await db.prepare(`SELECT model_identity,
-    (SELECT payload FROM learning_records WHERE resource=?
-       AND json_extract(payload,'$.model_identity')=counts.model_identity
+    (SELECT payload FROM learning_records INDEXED BY learning_records_resource_identity_time_idx WHERE resource=?
+       AND json_extract(payload,'$.model_identity')=+counts.model_identity
        AND sort_epoch>=? AND sort_epoch<=? ORDER BY sort_epoch,record_key LIMIT 1) first_point,
-    (SELECT payload FROM learning_records WHERE resource=?
-       AND json_extract(payload,'$.model_identity')=counts.model_identity
+    (SELECT payload FROM learning_records INDEXED BY learning_records_resource_identity_time_idx WHERE resource=?
+       AND json_extract(payload,'$.model_identity')=+counts.model_identity
        AND sort_epoch>=? AND sort_epoch<=? ORDER BY sort_epoch DESC,record_key DESC LIMIT 1) last_point
     FROM learning_record_counts counts WHERE resource=? AND model_identity<>''`)
     .bind(resource,start,end,resource,start,end,resource).all<{model_identity:string;first_point:string|null;last_point:string|null}>();
@@ -59,7 +60,7 @@ async function learningPoints(db:D1Database,resource:string,start:number,end:num
     const count=last.chart_ordinal-first.chart_ordinal+1;
     series.set(row.model_identity,{count,first:first.chart_ordinal,last:last.chart_ordinal});
     const exact=(limit:number,descending=false):Plan=>({
-      sql:`SELECT 'point' kind,payload FROM (SELECT payload FROM learning_records WHERE resource=?
+      sql:`SELECT 'point' kind,payload FROM (SELECT payload FROM learning_records INDEXED BY learning_records_resource_identity_time_idx WHERE resource=?
         AND json_extract(payload,'$.model_identity')=? AND sort_epoch>=? AND sort_epoch<=?
         ORDER BY sort_epoch ${descending?"DESC":"ASC"},record_key ${descending?"DESC":"ASC"} LIMIT ?)`,
       values:[resource,row.model_identity,start,end,limit]});
