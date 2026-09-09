@@ -287,7 +287,7 @@ export async function POST(request: Request) {
     if (smallBody && Object.hasOwn(smallBody, "chart_completion")) {
       const completion = smallBody.chart_completion;
       if (completion?.contract !== "exact-chart-history-v1"
-          || completion.chart_format != null && !["exact-v1","pyramid-v1"].includes(completion.chart_format)
+          || completion.chart_format != null && !["exact-v1","pyramid-v2"].includes(completion.chart_format)
           || !Number.isSafeInteger(completion.source_revision) || completion.source_revision < 0
           || !Number.isSafeInteger(completion.record_count) || completion.record_count < 0
           || !Number.isFinite(Date.parse(completion.generated_at))) throw new Error("invalid completion");

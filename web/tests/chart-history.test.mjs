@@ -9,7 +9,7 @@ test("chart range reads real rows, only samples large ranges and refuses an unre
  const request=q=>worker.fetch(new Request("https://example.test/api/chart?type=learning&"+q),bindings,{waitUntil(){},passThroughOnException(){}});
  assert.equal((await request("range=all")).status,503);
  db.database.exec("CREATE TABLE chart_history_state(id INTEGER PRIMARY KEY,payload TEXT)");
- db.database.prepare("INSERT INTO chart_history_state VALUES(1,?)").run(JSON.stringify({generated_at:"2026-09-09T00:00:00Z",chart_format:"pyramid-v1"}));
+ db.database.prepare("INSERT INTO chart_history_state VALUES(1,?)").run(JSON.stringify({generated_at:"2026-09-09T00:00:00Z",chart_format:"pyramid-v2"}));
  const put=db.database.prepare("INSERT INTO learning_records VALUES(?,?,?,?,?,?)");
  const first=Date.parse("2026-08-01T00:00:00Z")/1000;
  const originals=[];

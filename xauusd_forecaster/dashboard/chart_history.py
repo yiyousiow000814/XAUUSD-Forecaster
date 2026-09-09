@@ -21,18 +21,18 @@ def install_chart_history(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE dashboard_chart_state_v1 ADD COLUMN chart_format TEXT NOT NULL DEFAULT 'exact-v1'")
 
 
-CHART_FORMAT = "pyramid-v1"
+CHART_FORMAT = "pyramid-v2"
 
 
-def _upsert_record(connection, row, revision):
+def _upsert_record(connection, row, revision, *, force=False):
     return connection.execute("""INSERT INTO dashboard_chart_records_v1
         (resource,record_key,sort_epoch,payload_hash,payload,revision) VALUES (?,?,?,?,?,?)
         ON CONFLICT(resource,record_key) DO UPDATE SET sort_epoch=excluded.sort_epoch,
         payload_hash=excluded.payload_hash,payload=excluded.payload,revision=excluded.revision
-        WHERE dashboard_chart_records_v1.payload_hash IS NOT excluded.payload_hash
+        WHERE dashboard_chart_records_v1.payload_hash IS NOT excluded.payload_hash OR ?
         RETURNING record_key""", (row["resource"],row["record_key"],row["sort_epoch"],
         row["payload_hash"],json.dumps(row["payload"],ensure_ascii=False,separators=(",",":")),
-        revision)).fetchone() is not None
+        revision,force)).fetchone() is not None
 
 
 def publish_chart_history(connection, records, revision, generated_at):
@@ -41,8 +41,11 @@ def publish_chart_history(connection, records, revision, generated_at):
     if len({(row["resource"], row["record_key"]) for row in records}) != len(records):
         raise ValueError("Chart source contains duplicate record identities")
     install_chart_history(connection)
-    previous = connection.execute("SELECT chart_format FROM dashboard_chart_state_v1 WHERE id=1").fetchone()
+    previous = connection.execute("SELECT chart_format,revision FROM dashboard_chart_state_v1 WHERE id=1").fetchone()
     rebuild = previous is None or previous[0] != CHART_FORMAT
+    # Source revisions can remain unchanged across format rebuilds. Export order
+    # belongs to this publication owner, never to the source ledger clock.
+    revision = max(revision, previous[1] + 1 if previous else 0)
     groups = {}
     for row in records:
         if row["resource"] in {"curve-5m", "curve-30m"}:
@@ -58,7 +61,7 @@ def publish_chart_history(connection, records, revision, generated_at):
                     or row["payload"].get("source_gap_before")
                     or ordinal+1<len(source) and source[ordinal+1]["payload"].get("source_gap_before"))}
             normalized=_learning_record(resource,row["record_key"],row["sort_epoch"],payload)
-            if _upsert_record(connection,normalized,revision) or rebuild: changed.append(ordinal)
+            if _upsert_record(connection,normalized,revision,force=rebuild): changed.append(ordinal)
             points.append(payload)
         size=16
         while points:
@@ -72,7 +75,7 @@ def publish_chart_history(connection, records, revision, generated_at):
                     "points":[chunk[n] for n in sorted(chosen)]}
                 block=_learning_record(resource.replace("curve-","curve-tile-"),
                     f"{identity}\0{size:016d}\0{bucket:016d}",source[bucket*size]["sort_epoch"],payload)
-                _upsert_record(connection,block,revision)
+                _upsert_record(connection,block,revision,force=rebuild)
             if size>=len(points): break
             size*=4
     raw_count=connection.execute("SELECT count(*) FROM dashboard_chart_records_v1 WHERE resource NOT IN ('curve-tile-5m','curve-tile-30m')").fetchone()[0]

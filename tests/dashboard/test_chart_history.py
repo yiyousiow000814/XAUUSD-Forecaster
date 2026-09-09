@@ -1,12 +1,14 @@
 from datetime import datetime, UTC
 import json
 import sqlite3
+import pytest
 
 from xauusd_forecaster.dashboard.chart_history import publish_chart_history, chart_history_page
 from xauusd_forecaster.dashboard.resource_contracts import _learning_record
 
 
-def test_exact_export_is_bounded_resumable_and_preserves_old_rows(tmp_path):
+@pytest.mark.parametrize("source_revision", [0, 1, 2])
+def test_exact_export_is_bounded_resumable_and_preserves_old_rows(tmp_path, source_revision):
     connection=sqlite3.connect(tmp_path / "derived.sqlite3")
     rows=[_learning_record("execution-result",str(i),i,{"decision_time":str(i),"model_identity":"FULL","v":i}) for i in range(501)]
     publish_chart_history(connection,rows,1,datetime.now(UTC).isoformat());connection.commit()
@@ -16,7 +18,7 @@ def test_exact_export_is_bounded_resumable_and_preserves_old_rows(tmp_path):
     cursor=first["cursor"];seen=list(first["records"])
     # Updates behind the cursor acquire a later revision and are not lost.
     rows[0]=_learning_record("execution-result","0",0,{"decision_time":"0","model_identity":"FULL","v":999})
-    publish_chart_history(connection,rows,2,datetime.now(UTC).isoformat());connection.commit()
+    publish_chart_history(connection,rows,source_revision,datetime.now(UTC).isoformat());connection.commit()
     while True:
         page=chart_history_page(connection,cursor)
         assert len(json.dumps(page).encode())<60000
@@ -65,7 +67,7 @@ def test_production_export_route_and_sync_url_resume_without_skipping(tmp_path, 
             resources._sync_learning_history({}, config)
         assert len(sent) == 401
         assert completions[0]["record_count"] == 401
-        assert completions[0]["chart_format"] == "pyramid-v1"
+        assert completions[0]["chart_format"] == "pyramid-v2"
         assert all(row["resource"] == "exact-execution-result" for row in sent.values())
     finally:
         server.shutdown(); server.server_close(); thread.join(timeout=3)
@@ -94,7 +96,7 @@ def test_learning_owner_publishes_exact_rows_and_metrics_atomically(tmp_path, mo
         assert summary["learning_curves"]["identity_curves"] == []
         page = chart_history_page(connection)
         assert len([r for r in page["records"] if r["resource"] == "curve-5m"]) == 24
-        assert page["chart_format"] == "pyramid-v1"
+        assert page["chart_format"] == "pyramid-v2"
         assert page["records"][0]["payload"]["decision_time"] == "2026-08-01T00:00:00Z"
     connection.close()
 
@@ -114,11 +116,22 @@ def test_pyramid_preserves_extrema_and_only_updates_changed_blocks(tmp_path):
     tile=json.loads(connection.execute("SELECT payload FROM dashboard_chart_records_v1 WHERE resource='curve-tile-5m' AND record_key=?",("FULL\0"+f"{4096:016d}\0{0:016d}",)).fetchone()[0])
     assert {p["chart_ordinal"] for p in tile["points"]} == {0,123,124,4095}
     assert {json.loads(r[0])["chart_ordinal"] for r in connection.execute("SELECT payload FROM dashboard_chart_records_v1 WHERE resource='curve-5m' AND json_extract(payload,'$.chart_anchor')=1")} == {120,129,130}
+    # A format rebuild after ACK must export even unchanged payloads past that cursor.
+    cursor = json.dumps(connection.execute("SELECT revision,resource,record_key FROM dashboard_chart_records_v1 ORDER BY revision DESC,resource DESC,record_key DESC LIMIT 1").fetchone())
+    connection.execute("UPDATE dashboard_chart_state_v1 SET chart_format='pyramid-v1'")
+    publish_chart_history(connection,rows,1,"2026-09-09T00:00:30Z");connection.commit()
+    replay=[]
+    while True:
+        page=chart_history_page(connection,cursor)
+        if page["complete"]: break
+        replay.extend(page["records"]);cursor=page["cursor"]
+    assert len(replay)==page["record_count"]
+    assert page["source_revision"]>1
     before=connection.total_changes
     publish_chart_history(connection,rows,2,"2026-09-09T00:01:00Z");connection.commit()
     assert connection.total_changes-before==1  # completion metadata only
     before=connection.total_changes
     publish_chart_history(connection,source(4097),3,"2026-09-09T00:02:00Z");connection.commit()
     assert connection.total_changes-before==8  # new point, six tail blocks, metadata
-    assert connection.execute("SELECT count(*) FROM dashboard_chart_records_v1 WHERE resource='curve-5m' AND revision=3").fetchone()[0]==1
+    assert connection.execute("SELECT count(*) FROM dashboard_chart_records_v1 WHERE resource='curve-5m' AND revision=4").fetchone()[0]==1
     connection.close()
