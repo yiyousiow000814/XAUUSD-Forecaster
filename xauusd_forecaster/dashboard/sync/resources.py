@@ -1307,7 +1307,15 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> str | None:
         and state.get("active_snapshot_id") else ""
     )
     if active_snapshot:
-        cleanup_pending = _cleanup_news_evidence_snapshots(remote_url, active_snapshot, config)
+        try:
+            cleanup_pending = _cleanup_news_evidence_snapshots(remote_url, active_snapshot, config)
+        except RemoteInvariantViolation as error:
+            if error.error_code != "NEWS_EVIDENCE_CLEANUP_INVALID":
+                raise
+            # A deployment may expose a different publication than our last ACK.
+            # Reconcile through prepare; never manufacture a replacement ACK.
+            state = {}
+            cleanup_pending = False
         if cleanup_pending or state.get("cleanup_pending"):
             state = {**state, "cleanup_pending": cleanup_pending}
             _write_news_sync_state(
