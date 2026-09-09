@@ -1988,16 +1988,16 @@ test("streams byte bounds before parsing every history-sensitive large write", (
 test("activates only complete paged news-evidence generations outside status", () => {
   const route = readFileSync(new URL("../app/api/news-evidence/route.ts", import.meta.url), "utf8");
   const migration = readFileSync(
-    new URL("../drizzle/0021_paged_news_evidence.sql", import.meta.url), "utf8",
+    new URL("../drizzle/0036_incremental_news_evidence.sql", import.meta.url), "utf8",
   );
   const store = readFileSync(
     new URL("../app/api/_shared/news-evidence-store.ts", import.meta.url), "utf8",
   );
   const sync = readFileSync(new URL("../../xauusd_forecaster/dashboard/sync/resources.py", import.meta.url), "utf8");
   const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
-  assert.match(migration, /PRIMARY KEY\(`snapshot_id`, `event_key`\)/);
-  assert.match(migration, /news_evidence_snapshot_eligible_idx/);
-  assert.match(migration, /news_evidence_batches/);
+  assert.match(migration, /event_key TEXT PRIMARY KEY/);
+  assert.match(migration, /news_evidence_current_eligible/);
+  assert.match(migration, /news_evidence_receipts/);
   assert.match(migration, /expected_count/);
   assert.match(route, /MAX_WRITE_BYTES = 80_000/);
   assert.match(route, /MAX_PAGE_ITEMS = 50/);
@@ -2006,14 +2006,14 @@ test("activates only complete paged news-evidence generations outside status", (
   assert.match(store, /pageSize \+ 1/);
   assert.match(store, /next_cursor/);
   assert.doesNotMatch(store, / OFFSET \?/);
-  assert.match(store, /SELECT count\(\*\) AS count FROM news_evidence_records/);
-  assert.match(store, /news_evidence_staging/);
-  assert.match(store, /news_evidence_batches/);
+
+  assert.match(store, /news_evidence_transfers/);
+  assert.match(store, /news_evidence_receipts/);
   assert.match(store, /next_offset/);
   assert.match(route, /cleanup_active_snapshot/);
-  assert.match(store, /LIMIT 200/);
-  assert.match(store, /INSERT INTO news_evidence_state/);
-  assert.match(store, /WHERE snapshot_id<>\?/);
+  assert.match(store, /LIMIT 20/);
+  assert.match(store, /INSERT INTO news_evidence_publication/);
+
   assert.ok(route.indexOf("rejectPreviewWrite()") < route.indexOf("authorizeReleaseValidation("));
   assert.ok(route.indexOf("rejectPreviewWrite()") < route.indexOf("readBoundedBody(request"));
   assert.match(sync, /news evidence snapshot expected \{total\} rows but staged \{received\}/);

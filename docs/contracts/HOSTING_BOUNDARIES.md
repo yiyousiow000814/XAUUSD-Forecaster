@@ -137,13 +137,21 @@
   cycle. While eligible cleanup debt remains, the producer must not admit
   another replacement snapshot. Immutable replacement therefore cannot turn
   into unbounded retained duplication even though each request is bounded.
-- News-evidence cleanup progresses in bounded requests without a daily admission
-  lock. Pending cleanup is checkpointed and immediately rescheduled through the
-  same fair single heavy owner; failures retain normal backoff. Each request deletes at most 200 obsolete records, 20 receipts and 20
-  stale staging rows; each producer cycle allows at most eight requests. Active
-  data, recent readers and fresh staging remain protected. Account for physical
-  index writes in catch-up and recurring replacement usage. The retired daily
-  reservation ledger remains historical evidence, not runtime authority.
+- News-evidence current rows are keyed by stable event identity. Bounded upload
+  receipts retain complete membership keys and only payloads different from the
+  captured current publication. Activation atomically validates membership,
+  applies changed payloads, removes absent identities and advances the pointer.
+  Unchanged current rows MUST NOT be copied into a new snapshot. The public
+  generation-bound cursor and exact-request ACK contract remain unchanged.
+  Every page verifies publication identity inside the same SQL read as its rows.
+  A changed comparison baseline requires prepare/replay against the new baseline.
+- Evidence cleanup deletes at most 20 obsolete receipts and 20 expired transfer
+  rows per request. It never deletes current evidence. Fresh staging and current
+  publication receipts remain protected; five-minute receipt grace and 24-hour
+  abandoned-transfer expiry remain. Old snapshot tables are retained migration
+  audit/recovery data, not active publication or recurring cleanup authority.
+  Receipt insertions, offset updates, receipt cleanup and physical index writes
+  count toward capacity; only measuring changed news rows is insufficient.
 - A producer may abandon only the staging generation recorded in its own
   durable state. A foreign busy generation is retained for its owner to advance;
   cleanup excludes fresh staging snapshots. Prepare reconciles staging receipts

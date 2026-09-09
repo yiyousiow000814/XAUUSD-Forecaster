@@ -75,7 +75,7 @@ sourceDatabase.database.prepare(
   history_start: "2026-08-20T00:00:00Z", history_end: "2026-08-20T01:00:00Z",
 }), new Date().toISOString());
 sourceDatabase.database.prepare(
-  `INSERT INTO news_evidence_state
+  `INSERT INTO news_evidence_publication
    (id,active_snapshot_id,contract_version,record_count,activated_at)
    VALUES(1,?,?,0,?)`,
 ).run("e".repeat(64), "news-evidence-paged-v2", new Date().toISOString());

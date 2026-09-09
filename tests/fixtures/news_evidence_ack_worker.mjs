@@ -9,17 +9,17 @@ import { createInterface } from "node:readline";
 import { newsProjectionPayloadHash } from "../../web/app/api/_shared/news-projection-store.ts";
 
 const db = new D1TestDatabase([
-  "0021_paged_news_evidence.sql", "0030_news_evidence_cleanup_budget.sql",
+  "0021_paged_news_evidence.sql", "0030_news_evidence_cleanup_budget.sql", "0036_incremental_news_evidence.sql",
 ]);
 async function execute(encoded) {
     if (encoded?.read === true) {
       return readNewsEvidencePage(db, { mode: "all", rawCursor: null, page: 1, pageSize: 1 });
     }
     if (encoded?.inspect === true) {
-      const active = db.database.prepare("SELECT active_snapshot_id,record_count FROM news_evidence_state WHERE id=1").get();
+      const active = db.database.prepare("SELECT active_snapshot_id,record_count FROM news_evidence_publication WHERE id=1").get();
       const rows = active ? db.database.prepare(
-        "SELECT payload FROM news_evidence_records WHERE snapshot_id=? ORDER BY ordinal LIMIT 8193",
-      ).all(active.active_snapshot_id) : [];
+        "SELECT payload FROM news_evidence_current ORDER BY event_key LIMIT 8193",
+      ).all() : [];
       if (rows.length > 8192) throw new Error("fixture inspection exceeds bound");
       return { snapshot_id: active?.active_snapshot_id, count: rows.length,
         expected_count: active?.record_count,

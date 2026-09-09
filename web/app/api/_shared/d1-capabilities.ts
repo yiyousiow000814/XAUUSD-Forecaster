@@ -6,11 +6,8 @@ export const D1_CAPABILITIES = {
     "operator_retry_sync_state",
   ],
   paged_news_evidence: [
-    "news_evidence_records",
-    "news_evidence_state",
-    "news_evidence_staging",
-    "news_evidence_batches",
-    "news_evidence_cleanup_budget",
+    "news_evidence_current", "news_evidence_publication",
+    "news_evidence_transfers", "news_evidence_receipts",
   ],
   news_projection_generation: [
     "news_projection_generations",

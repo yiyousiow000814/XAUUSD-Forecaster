@@ -51,3 +51,20 @@ Compare the same range/source identity with measured D1 reads and preserve the
 PR502 baseline (core24h11171 rows; all607708 rows). Those baseline numbers are
 not an account-wide reduction claim. Healthy graph extent and small-range
 exactness remain required alongside lower read cost.
+
+## Incremental news evidence storage
+
+Apply additive migration `0036_incremental_news_evidence.sql` before the new
+Worker. It copies only the last active evidence snapshot into stable event-keyed
+current rows once; all old snapshot tables and local facts remain intact. Verify
+the copied count and publication ID, then validate the immutable branch Preview.
+The existing sender protocol and strict ACK are unchanged. Pending old uploads
+are replayed from the new transfer's offset; never edit the sender checkpoint.
+
+After main deployment, verify natural evidence publication and a subsequent
+update. Record changed-current rows separately from receipt inserts, offset
+updates, membership reads and receipt cleanup. Old snapshot tables are not
+recurring cleanup authority in the new code. A code rollback sees its retained
+old publication and must re-synchronize from local authority; do not present that
+old snapshot as fresh or restore a database over newer facts. Normal release
+failure handling remains fix-forward under RELEASE_CONTROL.
