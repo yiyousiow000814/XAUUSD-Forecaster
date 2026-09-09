@@ -112,6 +112,7 @@
   ],
   "api_classes": {
     "PUBLIC_READ": [
+      "GET /api/chart",
       "GET /api/status", "GET /api/ingest", "GET /api/audit",
       "GET /api/audit-briefs", "GET /api/audit-stories", "GET /api/audit-decisions",
       "GET /api/learning", "GET /api/learning-history", "GET /api/market-chart",

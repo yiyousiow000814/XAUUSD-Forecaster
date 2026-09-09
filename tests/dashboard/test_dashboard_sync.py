@@ -609,89 +609,6 @@ def test_preview_backfills_missing_daily_brief_summary_without_fake_counts() -> 
     assert summary["observation_scope"] == "BUILD_SNAPSHOT_COMPATIBILITY"
 
 
-def test_preview_freezes_both_materialized_curve_overviews(monkeypatch) -> None:
-    module = _preview_module()
-    requested: list[str] = []
-
-    def fake_read_json(_base_url: str, path: str) -> dict:
-        requested.append(path)
-        cadence = path.rsplit("=", 1)[-1]
-        return {"items": [{
-            "model_identity": "MARKET_ONLY",
-            "cadence": cadence,
-            "source_point_count": 1059 if cadence == "5m" else 174,
-            "chart_point_count": 1,
-            "chart_downsampled": True,
-            "points": [{
-                "decision_time": "2026-08-12T01:00:00+00:00",
-                "cumulative_quote_return": 0.1,
-            }],
-        }]}
-
-    monkeypatch.setattr(module, "_read_json", fake_read_json)
-    records = module._curve_overview_records("https://example.test")
-
-    assert requested == [
-        "/api/learning-history?resource=curve-overview&cadence=5m",
-        "/api/learning-history?resource=curve-overview&cadence=30m",
-    ]
-    assert {(row["record_key"], row["payload"]["source_point_count"])
-            for row in records} == {
-        ("5m\0MARKET_ONLY", 1059),
-        ("30m\0MARKET_ONLY", 174),
-    }
-
-
-def test_preview_freezes_pageable_version_history_beyond_first_page(
-    monkeypatch,
-) -> None:
-    module = _preview_module()
-    groups = [{
-        "model_identity": "MARKET_ONLY",
-        "training_dataset_hash": f"market-{generation}",
-        "created_at": (
-            datetime(2026, 8, 1, tzinfo=timezone.utc)
-            + timedelta(hours=generation)
-        ).isoformat(),
-        "generation": generation,
-        "training_rows": generation * 50,
-    } for generation in range(1, 62)]
-    groups.append({
-        "model_identity": "NEWS_ONLY",
-        "training_dataset_hash": "news-1",
-        "created_at": "2026-08-14T07:00:00+00:00",
-        "generation": 1,
-        "training_rows": 124,
-    })
-
-    monkeypatch.setattr(
-        module, "_read_json",
-        lambda _base_url, path: {"items": groups}
-        if path.endswith("resource=version-overview") else {},
-    )
-    records = module._version_history_records("https://example.test")
-
-    version_groups = [
-        row for row in records if row["resource"] == "version-group"
-    ]
-    assert len(version_groups) == 61
-    market_groups = sorted(
-        (row for row in version_groups
-         if row["payload"]["model_identity"] == "MARKET_ONLY"),
-        key=lambda row: row["sort_epoch"],
-    )
-    assert len(market_groups) == module.resource_contracts.LEARNING_OVERVIEW_GROUPS_PER_IDENTITY
-    assert market_groups[0]["payload"]["generation"] == 2
-    assert market_groups[-1]["payload"]["generation"] == 61
-
-    bundle = module.build_bundle(
-        "https://example.test", "feature/example", "abcdef12",
-    )
-    stored = bundle["learning_history"]
-    assert len([row for row in stored if row["resource"] == "version-group"]) == 61
-    assert not [row for row in stored if row["resource"] == "version-overview"]
-
-
 def test_sync_retries_transient_disconnect(monkeypatch) -> None:
     module = _sync_module()
     calls = []
@@ -1164,90 +1081,55 @@ def test_preview_http_200_ambiguous_detail_is_not_available(monkeypatch, family,
     assert provenance["availability"] == "AVAILABLE"
 
 
-def test_learning_history_is_durable_before_summary_and_retries_idempotently(
-    monkeypatch, tmp_path,
-) -> None:
+@pytest.mark.parametrize("ack", [{"accepted": 0}, {}, {"accepted": 1}])
+def test_chart_export_advances_only_after_exact_ack(monkeypatch, tmp_path, ack):
     from xauusd_forecaster.dashboard.sync import resources as module
-    payload = {
-        "learning_curves": {
-            "models": [],
-            "version_groups": [{
-                "model_identity": "FULL", "training_dataset_hash": "hash-1",
-                "created_at": "2026-08-10T01:00:00+00:00", "generation": 1,
-            }],
-            "identity_curves": [],
-        },
-        "execution_learning": {"models": []},
-    }
-    posted: list[str] = []
-    monkeypatch.setattr(
-        module, "_post_json", lambda url, _body, _config: posted.append(url)
-    )
-    config = {
-        "remote_ingest_url": "https://worker.example/api/ingest",
-        "token": "test",
-        "learning_state_file": str(tmp_path / "summary.json"),
-        "learning_history_state_file": str(tmp_path / "history.json"),
-    }
-    config[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
-
-    module._sync_learning(payload, config)
-
-    assert posted == [
-        "https://worker.example/api/learning-history",
-        "https://worker.example/api/learning",
-    ]
-    posted.clear()
-    module._sync_learning(payload, config)
-    assert posted == []
+    record = module.learning_history_records({"learning_curves": {"identity_curves": [{
+        "model_identity": "FULL", "points": [{"decision_time": "2026-08-01T00:00:00Z"}],
+    }]}})[0]
+    page = dict(contract="exact-chart-history-v1", records=[record],
+                cursor='[1,"curve-5m","key"]', complete=False,
+                source_revision=1, generated_at="2026-09-09T00:00:00Z", record_count=1)
+    monkeypatch.setattr(module, "_read_local_resource", lambda *_: page)
+    sent = []
+    def post(url, body, config):
+        sent.append(json.loads(body))
+        return ack
+    monkeypatch.setattr(module, "_post_json", post)
+    path = tmp_path / "history.json"
+    config = {"remote_ingest_url": "https://worker.example/api/ingest",
+              "learning_history_state_file": str(path), module.RUNTIME_STATE_ROOT_KEY: str(tmp_path)}
+    if ack.get("accepted") != 1:
+        with pytest.raises(ValueError, match="ACK"):
+            module._sync_learning_history({}, config)
+        assert not path.exists()
+    else:
+        module._sync_learning_history({}, config)
+        assert json.loads(path.read_text())["cursor"] == page["cursor"]
+    assert sent[0]["records"][0]["resource"] == "exact-curve-5m"
 
 
-def test_learning_history_state_drops_hashes_outside_current_source_universe(
-    monkeypatch, tmp_path,
-) -> None:
+def test_chart_completion_is_not_reposted_when_source_is_unchanged(monkeypatch, tmp_path):
     from xauusd_forecaster.dashboard.sync import resources as module
-    payload = {
-        "learning_curves": {
-            "models": [],
-            "version_groups": [{
-                "model_identity": "FULL", "training_dataset_hash": "hash-1",
-                "created_at": "2026-08-10T01:00:00+00:00", "generation": 1,
-            }],
-            "identity_curves": [],
-        },
-        "execution_learning": {"models": []},
-    }
-    records = module.learning_history_records(payload)
-    hashes = {
-        module._learning_record_identity(row): row["payload_hash"]
-        for row in records
-    }
-    hashes.update({f"obsolete\0{index}": f"hash-{index}" for index in range(1_000)})
-    state_path = tmp_path / "history.json"
-    state_path.write_text(json.dumps({
-        "contract_version": module.LEARNING_HISTORY_CONTRACT_VERSION,
-        "hashes": hashes,
-        "last_full_sync": datetime.now(timezone.utc).isoformat(),
-    }), encoding="utf-8")
-    monkeypatch.setattr(
-        module, "_post_json",
-        lambda *_args: pytest.fail("unchanged current records must not be reposted"),
-    )
-    config = {
-        "remote_ingest_url": "https://worker.example/api/ingest",
-        "token": "test",
-        "learning_history_state_file": str(state_path),
-    }
-    config[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
-
-    module._sync_learning_history(payload, config)
-
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    assert state["hashes"] == {
-        module._learning_record_identity(row): row["payload_hash"]
-        for row in records
-    }
-    assert state["pending_record_count"] == 0
+    page = dict(contract="exact-chart-history-v1", records=[], cursor='[-1,"",""]',
+                complete=True, source_revision=1, generated_at="2026-09-09T00:00:00Z", record_count=0)
+    monkeypatch.setattr(module, "_read_local_resource", lambda *_: page)
+    posted = []
+    def post(*args):
+        posted.append(args)
+        return {"status": "OK"}
+    monkeypatch.setattr(module, "_post_json", post)
+    path = tmp_path / "history.json"
+    path.write_text(json.dumps({"contract_version": "old", "hashes": {"old": "old"}}))
+    config = {"remote_ingest_url": "https://worker.example/api/ingest",
+              "learning_history_state_file": str(path), module.RUNTIME_STATE_ROOT_KEY: str(tmp_path)}
+    module._sync_learning_history({}, config)
+    module._sync_learning_history({}, config)
+    assert len(posted) == 1
+    assert "hashes" not in json.loads(path.read_text())
+    page["source_revision"] = 2
+    module._sync_learning_history({}, config)
+    assert len(posted) == 2
 
 
 def _projection_fixture(count: int = 10):

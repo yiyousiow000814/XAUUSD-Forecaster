@@ -273,6 +273,7 @@ class DashboardReadModelOwner:
             raise TimeoutError(
                 f"{resource} read model snapshot age is {snapshot_age:.3f} seconds"
             )
+        chart_records = payload.pop("_chart_records", None)
         body = _payload_bytes(payload)
         digest = _payload_hash(body)
         connection = self._connect()
@@ -306,6 +307,9 @@ class DashboardReadModelOwner:
                 ):
                     return 0
                 now = _utc_now().isoformat()
+                if chart_records is not None:
+                    from xauusd_forecaster.dashboard.chart_history import publish_chart_history
+                    publish_chart_history(connection, chart_records, source_revision, generated_at)
                 connection.execute(
                     """INSERT INTO dashboard_optional_read_models_v1
                          (resource,contract_version,source_revision,generated_at,

@@ -202,7 +202,7 @@ def _version_cadence_metrics(
     return result
 
 
-def learning_curve_payload(connection, observed_at: datetime | None = None) -> dict:
+def learning_curve_payload(connection, observed_at: datetime | None = None, *, exact_history: bool = False) -> dict:
     from xauusd_forecaster.decision.inference import news_model_activation_status
     from xauusd_forecaster.training.generation import NEWS_MIN_EXPOSED_ROWS
     observed_at = observed_at or datetime.now(timezone.utc)
@@ -598,14 +598,19 @@ def learning_curve_payload(connection, observed_at: datetime | None = None) -> d
                        value_quote_return FROM ranked
                 WHERE version_rank=1 ORDER BY decision_time""", (identity,)
             ).fetchall()
-        def build_points(source_rows):
+        def build_points(source_rows, step_seconds=300):
             cumulative = 0.0
             result = []
             previous_generation = None
+            previous_time = None
             for row in source_rows:
                 cumulative += _net_row_value(row)
                 model_version = row["model_version"] if identity != "CHAMPION_0" else "always-wait-v1"
                 point = {"decision_time": row["decision_time"], "cumulative_quote_return": cumulative}
+                point_time = datetime.fromisoformat(row["decision_time"].replace("Z", "+00:00"))
+                if previous_time is not None and (point_time - previous_time).total_seconds() >= max(2700, step_seconds * 3):
+                    point["source_gap_before"] = True
+                previous_time = point_time
                 generation = row["training_dataset_hash"] if identity != "CHAMPION_0" else "always-wait"
                 if generation != previous_generation:
                     point["model_version"] = model_version
@@ -616,9 +621,9 @@ def learning_curve_payload(connection, observed_at: datetime | None = None) -> d
             return result
 
         points = build_points(rows)
-        points_30m = build_points([row for row in rows if _is_fixed_30m_grid(row["decision_time"])])
-        bounded_points = _bounded_curve(points)
-        bounded_points_30m = _bounded_curve(points_30m)
+        points_30m = build_points([row for row in rows if _is_fixed_30m_grid(row["decision_time"])], 1800)
+        bounded_points = points if exact_history else _bounded_curve(points)
+        bounded_points_30m = points_30m if exact_history else _bounded_curve(points_30m)
         identity_curves.append({
             "model_identity": identity,
             "source_point_count": len(points),

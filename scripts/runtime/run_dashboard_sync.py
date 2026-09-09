@@ -75,7 +75,6 @@ from xauusd_forecaster.dashboard.resource_contracts import (
     REMOTE_DAILY_BRIEF_LIMIT,
     LEARNING_HISTORY_CONTRACT_VERSION,
     LEARNING_HISTORY_BATCH_LIMIT_BYTES,
-    LEARNING_OVERVIEW_GROUPS_PER_IDENTITY,
     MARKET_OVERVIEW_DECISIONS_PER_SERIES,
     REMOTE_MARKET_DECISION_LIMIT,
     REMOTE_MARKET_CANDLE_LIMIT,
@@ -88,8 +87,6 @@ from xauusd_forecaster.dashboard.resource_contracts import (
     news_index_batches,
     _epoch,
     _learning_record,
-    _visual_curve_overview,
-    _visual_version_overview,
     _update_decision_overviews,
     learning_history_records,
     learning_history_batches,
@@ -417,6 +414,9 @@ def sync_resource_lane(
                         and _read_news_sync_state(Path(target["news_state_file"])).get(
                             "projection_state"
                         ) == "REPLAYING"
+                        or resource == "learning_history"
+                        and bool(target.get("learning_history_state_file"))
+                        and bool(_read_news_sync_state(Path(target["learning_history_state_file"])).get("pending_record_count"))
                         or resource == "news_evidence"
                         and bool(evidence_state.get("staging_snapshot_id")
                                  or evidence_state.get("cleanup_pending"))

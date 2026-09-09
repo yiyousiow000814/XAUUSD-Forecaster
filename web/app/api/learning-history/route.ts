@@ -24,6 +24,8 @@ const MAX_RESPONSE_BYTES = 400_000;
 const ALLOWED_RESOURCES = new Set([
   "model", "version-group", "curve-5m", "curve-30m",
   "execution-point", "execution-result", "curve-overview", "version-overview",
+  "exact-model", "exact-version-group", "exact-curve-5m", "exact-curve-30m",
+  "exact-execution-point", "exact-execution-result",
 ]);
 
 type LearningCursor = {
@@ -82,7 +84,9 @@ async function validateLearningBatch(binding: D1Database, serialized: string) {
               json_type(row)='object'
               AND json_extract(row,'$.resource') IN
                 ('model','version-group','curve-5m','curve-30m',
-                 'execution-point','execution-result','curve-overview','version-overview')
+                 'execution-point','execution-result','curve-overview','version-overview',
+                 'exact-model','exact-version-group','exact-curve-5m','exact-curve-30m',
+                 'exact-execution-point','exact-execution-result')
               AND length(json_extract(row,'$.record_key'))>0
               AND json_type(row,'$.sort_epoch')='integer'
               AND json_extract(row,'$.sort_epoch')>=0
@@ -159,7 +163,10 @@ function previewPage(url: URL) {
   });
 }
 
-async function pagedRecords(binding: D1Database, url: URL) {
+export async function pagedRecords(binding: D1Database, url: URL) {
+  if (url.searchParams.has("cursor") && !decodeCursor(url.searchParams.get("cursor"))) {
+    return NextResponse.json({error:"invalid cursor"}, {status:400});
+  }
   const resource = url.searchParams.get("resource") ?? "";
   const identity = url.searchParams.get("identity") ?? "";
   const limit = Math.min(MAX_PAGE_ROWS, Math.max(1, Number(url.searchParams.get("limit")) || 6));
@@ -239,100 +246,11 @@ async function pagedRecords(binding: D1Database, url: URL) {
   });
 }
 
-async function curveOverview(binding: D1Database, url: URL) {
-  const cadence = url.searchParams.get("cadence") === "30m" ? "30m" : "5m";
-  const result = await binding.prepare(
-    `SELECT COALESCE(json_group_array(json(payload)),'[]') items_json,
-            count(*) visible_count
-     FROM learning_records
-     WHERE resource='curve-overview'
-       AND json_extract(payload,'$.cadence')=?`,
-  ).bind(cadence).first<{
-      items_json: string; visible_count: number;
-    }>();
-  if (!result) throw new Error("missing curve overview");
-  return rawItemsResponse(result.items_json, {
-    mode: "materialized-overview", byte_limit: MAX_RESPONSE_BYTES,
-    summary_count: Number(result.visible_count),
-  });
-}
-
-async function versionOverview(binding: D1Database) {
-  const result = await binding.prepare(
-    `SELECT COALESCE(json_group_array(json(value)),'[]') items_json,
-            count(*) visible_count
-     FROM learning_records,json_each(learning_records.payload,'$.groups')
-     WHERE resource='version-overview'`,
-  ).first<{
-      items_json: string; visible_count: number;
-    }>();
-  if (!result) throw new Error("missing version overview");
-  return rawItemsResponse(result.items_json, {
-    mode: "materialized-overview", byte_limit: MAX_RESPONSE_BYTES,
-    summary_count: Number(result.visible_count),
-  });
-}
-
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const resource = url.searchParams.get("resource") ?? "";
-  if (resource === "version-overview") {
-    if (previewBundle) {
-      const summaries = previewRecords().filter(row => row.resource === "version-overview");
-      if (summaries.length) return previewJson({
-        items: summaries.flatMap(row => Array.isArray(row.payload.groups) ? row.payload.groups : []),
-        mode: "materialized-overview", preview_limited: true,
-      });
-      const source = previewRecords().filter(row => row.resource === "version-group");
-      const identities = [...new Set(source.map(row => String(row.payload.model_identity ?? "")))];
-      return previewJson({
-        items: identities.flatMap(identity => source
-          .filter(row => row.payload.model_identity === identity)
-          .sort((a, b) => a.sort_epoch - b.sort_epoch)
-          .slice(-60)
-          .map(row => row.payload)),
-        mode: "overview", preview_limited: true,
-      });
-    }
-    const binding = env.DB as D1Database | undefined;
-    if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
-    try {
-      return await versionOverview(binding);
-    } catch {
-      return NextResponse.json({ error: "训练组总览读取失败" }, { status: 500 });
-    }
-  }
-  if (resource === "curve-overview") {
-    if (previewBundle) {
-      const cadenceName = url.searchParams.get("cadence") === "30m" ? "30m" : "5m";
-      const summaries = previewRecords().filter(row => row.resource === "curve-overview"
-        && row.payload.cadence === cadenceName);
-      if (summaries.length) return previewJson({
-        items: summaries.map(row => row.payload),
-        mode: "materialized-overview", preview_limited: true,
-      });
-      const cadence = cadenceName === "30m" ? "curve-30m" : "curve-5m";
-      const source = previewRecords().filter(row => row.resource === cadence);
-      const identities = [...new Set(source.map(row => String(row.payload.model_identity ?? "")))];
-      const sampled = identities.flatMap(identity => {
-        const rows = source.filter(row => row.payload.model_identity === identity)
-          .sort((a, b) => a.sort_epoch - b.sort_epoch);
-        if (rows.length <= 240) return rows;
-        const stride = Math.ceil(rows.length / 240);
-        return rows.filter((_, index) => index % stride === 0).slice(0, 240);
-      });
-      return previewJson({
-        items: sampled.map(row => row.payload),
-        mode: "overview", preview_limited: true,
-      });
-    }
-    const binding = env.DB as D1Database | undefined;
-    if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
-    try {
-      return await curveOverview(binding, url);
-    } catch {
-      return NextResponse.json({ error: "学习曲线历史读取失败" }, { status: 500 });
-    }
+  if (["curve-overview", "version-overview", "curve-5m", "curve-30m"].includes(resource)) {
+    return NextResponse.json({error:"Use /api/chart for chart ranges"}, {status:410});
   }
   if (!ALLOWED_RESOURCES.has(resource)) {
     return NextResponse.json({ error: "invalid resource" }, { status: 400 });
@@ -364,6 +282,27 @@ export async function POST(request: Request) {
   const binding = env.DB as D1Database | undefined;
   if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   try {
+    const smallBody = body.serialized.length < 2000 ? JSON.parse(body.serialized) : null;
+    if (smallBody && Object.hasOwn(smallBody, "chart_completion")) {
+      const completion = smallBody.chart_completion;
+      if (completion?.contract !== "exact-chart-history-v1"
+          || !Number.isSafeInteger(completion.source_revision) || completion.source_revision < 0
+          || !Number.isSafeInteger(completion.record_count) || completion.record_count < 0
+          || !Number.isFinite(Date.parse(completion.generated_at))) throw new Error("invalid completion");
+      const counts = await binding.prepare(
+        "SELECT COALESCE(sum(record_count),0) total FROM learning_record_counts WHERE resource GLOB 'exact-*' AND model_identity=''",
+      ).first<{total:number}>();
+      if (counts?.total !== completion.record_count) throw new Error("incomplete chart history");
+      if (isReleaseValidationContext(validation)) return releaseValidationResponse(validation, {completion:"validated"});
+      await binding.prepare(`CREATE TABLE IF NOT EXISTS chart_history_state (
+        id INTEGER PRIMARY KEY CHECK(id=1),payload TEXT NOT NULL)`).run();
+      await binding.prepare(`INSERT INTO chart_history_state VALUES (1,?)
+        ON CONFLICT(id) DO UPDATE SET payload=excluded.payload
+        WHERE CAST(json_extract(chart_history_state.payload,'$.source_revision') AS INTEGER)
+           <= CAST(json_extract(excluded.payload,'$.source_revision') AS INTEGER)`)
+        .bind(JSON.stringify(completion)).run();
+      return NextResponse.json({status:"OK"});
+    }
     const total = await validateLearningBatch(binding, body.serialized);
     if (isReleaseValidationContext(validation)) {
       return releaseValidationResponse(validation, {

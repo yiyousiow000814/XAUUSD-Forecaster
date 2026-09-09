@@ -567,7 +567,7 @@ def _append_score(ledger, prediction, scored_at: datetime, action: str,
     return cursor.rowcount
 
 
-def execution_learning_status(ledger) -> dict:
+def execution_learning_status(ledger, *, exact_history: bool = False) -> dict:
     training = _training_rows(ledger, datetime.max.replace(tzinfo=UTC))
     models = []
     for identity in (LOT_IDENTITY, EXIT_IDENTITY):
@@ -588,7 +588,7 @@ def execution_learning_status(ledger) -> dict:
             ).fetchall()
         }
         scores = ledger.connection.execute(
-            "SELECT * FROM execution_position_scores_v2 WHERE model_identity=? ORDER BY scored_at",
+            "SELECT * FROM execution_position_scores_v2 WHERE model_identity=? ORDER BY scored_at,source_decision_id,model_version",
             (identity,),
         ).fetchall()
         prediction_times = {
@@ -613,6 +613,7 @@ def execution_learning_status(ledger) -> dict:
             selected_total += selected
             baseline_total += baseline
             point = {
+                "decision_id": row["source_decision_id"],
                 "time": row["scored_at"], "model_version": row["model_version"],
                 "selected_cumulative_return": selected_total,
                 "baseline_cumulative_return": baseline_total,
@@ -633,7 +634,7 @@ def execution_learning_status(ledger) -> dict:
                 "delta_quote_return": selected - baseline,
             })
         training_decisions = int(latest["training_decisions"]) if latest else 0
-        chart_points = _bounded_execution_curve(points)
+        chart_points = points if exact_history else _bounded_execution_curve(points)
         models.append({
             "model_identity": identity, "status": "RUNNING" if latest else "COLLECTING",
             "training_rows": training_decisions,
@@ -652,8 +653,8 @@ def execution_learning_status(ledger) -> dict:
                 "points": chart_points,
                 "chart_source_count": len(points),
                 "chart_point_count": len(chart_points),
-                "chart_downsampled": len(points) > EXECUTION_CHART_MAX_POINTS,
-                "results": result_rows[-100:], "unit": "QUOTE_RETURN",
+                "chart_downsampled": len(chart_points) < len(points),
+                "results": result_rows if exact_history else result_rows[-100:], "unit": "QUOTE_RETURN",
             },
         })
     return {

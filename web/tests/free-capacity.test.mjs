@@ -22,14 +22,14 @@ test("learning history keeps exact counts while its page lookup uses the identit
   for (let index = 0; index < 2_000; index += 1) {
     const identity = index % 2 ? "FULL" : "MARKET_ONLY";
     insert.run(
-      "curve-5m", `${identity}\u0000${index}`, index, "a".repeat(64),
+      "model", `${identity}\u0000${index}`, index, "a".repeat(64),
       JSON.stringify({ model_identity: identity, value: index }),
       "2026-09-03T00:00:00Z",
     );
   }
   assert.deepEqual(db.database.prepare(
     `SELECT model_identity,record_count FROM learning_record_counts
-     WHERE resource='curve-5m' ORDER BY model_identity`,
+     WHERE resource='model' ORDER BY model_identity`,
   ).all().map(row => ({ ...row })), [
     { model_identity: "", record_count: 2_000 },
     { model_identity: "FULL", record_count: 1_000 },
@@ -39,7 +39,7 @@ test("learning history keeps exact counts while its page lookup uses the identit
     `EXPLAIN QUERY PLAN SELECT sort_epoch,record_key,payload FROM learning_records
      WHERE resource=? AND json_extract(payload,'$.model_identity')=?
      ORDER BY sort_epoch DESC,record_key DESC LIMIT ?`,
-  ).all("curve-5m", "FULL", 7).map(row => row.detail).join("\n");
+  ).all("model", "FULL", 7).map(row => row.detail).join("\n");
   assert.match(plan, /learning_records_resource_identity_time_idx/);
   assert.doesNotMatch(plan, /SCAN learning_records(?:\s|$)/);
 
@@ -68,7 +68,7 @@ test("learning history keeps exact counts while its page lookup uses the identit
           position, `FULL\u0000${position}`, 1999, "FULL\u00001999",
         ]));
         const response = await worker.fetch(new Request(
-          `https://example.test/api/learning-history?resource=curve-5m&identity=FULL&limit=7&cursor=${encodeURIComponent(cursor)}`,
+          `https://example.test/api/learning-history?resource=model&identity=FULL&limit=7&cursor=${encodeURIComponent(cursor)}`,
         ), bindings, { waitUntil() {}, passThroughOnException() {} });
         assert.equal(response.status, 200);
         const page = await response.json();
@@ -78,36 +78,36 @@ test("learning history keeps exact counts while its page lookup uses the identit
         assert.equal(page.has_more, true);
       }
       assert.equal(checked, 3);
-      insert.run("curve-5m", "FULL\u0000!tie", 501, "a".repeat(64),
+      insert.run("model", "FULL\u0000!tie", 501, "a".repeat(64),
         JSON.stringify({ model_identity: "FULL", value: "same-time" }),
         "2026-09-03T00:00:00Z");
       const tiedCursor = btoa(JSON.stringify([501, "FULL\u0000501", 1999, "FULL\u00001999"]));
       const tiedResponse = await worker.fetch(new Request(
-        `https://example.test/api/learning-history?resource=curve-5m&identity=FULL&limit=2&cursor=${encodeURIComponent(tiedCursor)}`,
+        `https://example.test/api/learning-history?resource=model&identity=FULL&limit=2&cursor=${encodeURIComponent(tiedCursor)}`,
       ), bindings, { waitUntil() {}, passThroughOnException() {} });
       assert.equal(tiedResponse.status, 200);
       assert.deepEqual((await tiedResponse.json()).items.map(row => row.value), ["same-time", 499]);
       db.database.prepare("DELETE FROM learning_records WHERE resource=? AND record_key=?")
-        .run("curve-5m", "FULL\u0000!tie");
+        .run("model", "FULL\u0000!tie");
       // Exercise the real page serializer at byte and empty boundaries.
       for (let i = 0; i < 3; i++) insert.run(
-        "curve-5m", `LARGE-${i}`, 3000+i, "a".repeat(64),
+        "model", `LARGE-${i}`, 3000+i, "a".repeat(64),
         JSON.stringify({ model_identity: "LARGE", value: i, text: "x".repeat(210_000) }),
         "2026-09-03T00:00:00Z",
       );
       const largeResponse = await worker.fetch(new Request(
-        "https://example.test/api/learning-history?resource=curve-5m&identity=LARGE&limit=500",
+        "https://example.test/api/learning-history?resource=model&identity=LARGE&limit=500",
       ), bindings, { waitUntil() {}, passThroughOnException() {} });
       const large = await largeResponse.json();
       assert.deepEqual(large.items.map(row => row.value), [2]);
       assert.equal(large.has_more, true);
       assert.ok(large.next_cursor);
       const nextResponse = await worker.fetch(new Request(
-        `https://example.test/api/learning-history?resource=curve-5m&identity=LARGE&limit=500&cursor=${encodeURIComponent(large.next_cursor)}`,
+        `https://example.test/api/learning-history?resource=model&identity=LARGE&limit=500&cursor=${encodeURIComponent(large.next_cursor)}`,
       ), bindings, { waitUntil() {}, passThroughOnException() {} });
       assert.deepEqual((await nextResponse.json()).items.map(row => row.value), [1]);
       const emptyResponse = await worker.fetch(new Request(
-        "https://example.test/api/learning-history?resource=curve-5m&identity=MISSING&limit=6",
+        "https://example.test/api/learning-history?resource=model&identity=MISSING&limit=6",
       ), bindings, { waitUntil() {}, passThroughOnException() {} });
       const empty = await emptyResponse.json();
       assert.deepEqual(empty.items, []);
@@ -120,15 +120,15 @@ test("learning history keeps exact counts while its page lookup uses the identit
   }
 
   db.database.prepare(
-    `UPDATE learning_records SET payload=? WHERE resource='curve-5m' AND record_key=?`,
+    `UPDATE learning_records SET payload=? WHERE resource='model' AND record_key=?`,
   ).run(JSON.stringify({ model_identity: "MARKET_ONLY", value: 1 }), "FULL\u00001");
   assert.equal(db.database.prepare(
     `SELECT record_count FROM learning_record_counts
-     WHERE resource='curve-5m' AND model_identity='FULL'`,
+     WHERE resource='model' AND model_identity='FULL'`,
   ).get().record_count, 999);
   assert.equal(db.database.prepare(
     `SELECT record_count FROM learning_record_counts
-     WHERE resource='curve-5m' AND model_identity='MARKET_ONLY'`,
+     WHERE resource='model' AND model_identity='MARKET_ONLY'`,
   ).get().record_count, 1_001);
 });
 
