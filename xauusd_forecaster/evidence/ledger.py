@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from xauusd_forecaster.news.semantics.article_source import selected_article, SELECTION_FIELDS
+
 import hashlib
 import json
 import sqlite3
@@ -902,7 +904,10 @@ class ForwardLedger:
             frozenset(news_annotation_schema(version)["required"])
             for version in SEMANTIC_NEWS_PROMPT_VERSIONS
         }
-        vector_fields = frozenset(vector)
+        selected_headline, selected_body = selected_article(
+            news["headline"], news["body"] or "", vector,
+        )
+        vector_fields = frozenset(vector) - frozenset(SELECTION_FIELDS)
         if vector_fields not in (
             legacy_fields, summary_fields, translated_fields, classified_fields,
             storyline_fields, event_claim_fields, material_event_fields,
@@ -915,7 +920,7 @@ class ForwardLedger:
             source_text = None
             if vector_fields in semantic_field_sets:
                 source_text = canonical_annotation_source_text(
-                    news["headline"], news["body"] or "",
+                    selected_headline, selected_body,
                 )
             validate_news_annotation(
                 vector,

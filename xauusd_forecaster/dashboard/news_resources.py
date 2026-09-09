@@ -1,6 +1,8 @@
 """Canonical local Dashboard News resources, caches and generation lifecycle."""
 from __future__ import annotations
 
+from xauusd_forecaster.news.semantics.article_source import selected_article
+
 import gzip
 import hashlib
 import json
@@ -139,6 +141,8 @@ def _news_reader_rows(
                         ELSE 'PENDING' END AS content_fetch_status,
                    cf.error_type AS content_error_type,
                    n.link, n.content_hash, n.body,
+                   json_extract(a.annotation_json, '$.source_title_segment_ids') AS source_title_segment_ids_json,
+                   json_extract(a.annotation_json, '$.source_body_segment_ids') AS source_body_segment_ids_json,
                    EXISTS (
                      SELECT 1 FROM news_annotation_display_checkpoints_v1 checkpoint
                      WHERE checkpoint.source=n.source
@@ -299,6 +303,16 @@ def _serialize_news_rows(
     news: list[dict] = []
     for row in rows:
         item = dict(row)
+        source_selection = {
+            field: json.loads(item.pop(field + "_json", None) or "null")
+            for field in ("source_title_segment_ids", "source_body_segment_ids")
+        }
+        if source_selection["source_body_segment_ids"] is not None:
+            _, item["body"] = selected_article(
+                str(item.get("headline") or ""), str(item.get("body") or ""),
+                source_selection,
+            )
+            item["content_characters"] = len(item["body"])
         listed_source = str(item.get("source") or "") in COLLECTION_SOURCES
         item["source_eligibility"] = (
             "SEMANTIC_CANDIDATE" if listed_source else "UNLISTED_CANDIDATE"
