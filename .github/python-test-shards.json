@@ -77,7 +77,6 @@
     {
       "id": "python-3",
       "tests": [
-        "tests/dashboard/test_dashboard_api.py",
         "tests/dashboard/test_dashboard_news_resources.py",
         "tests/runtime/test_runtime_root_ownership.py",
         "tests/runtime/test_production_shape.py",
@@ -145,6 +144,12 @@
         "tests/architecture/test_architecture_imports.py",
         "tests/architecture/test_architecture_compiler.py",
         "tests/architecture/test_architecture_mutation_contracts.py"
+      ]
+    },
+    {
+      "id": "python-dashboard-api",
+      "tests": [
+        "tests/dashboard/test_dashboard_api.py"
       ]
     }
   ]
