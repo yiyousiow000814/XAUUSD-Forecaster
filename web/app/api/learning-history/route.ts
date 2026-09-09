@@ -26,6 +26,7 @@ const ALLOWED_RESOURCES = new Set([
   "execution-point", "execution-result", "curve-overview", "version-overview",
   "exact-model", "exact-version-group", "exact-curve-5m", "exact-curve-30m",
   "exact-execution-point", "exact-execution-result",
+  "exact-curve-tile-5m", "exact-curve-tile-30m",
 ]);
 
 type LearningCursor = {
@@ -86,7 +87,7 @@ async function validateLearningBatch(binding: D1Database, serialized: string) {
                 ('model','version-group','curve-5m','curve-30m',
                  'execution-point','execution-result','curve-overview','version-overview',
                  'exact-model','exact-version-group','exact-curve-5m','exact-curve-30m',
-                 'exact-execution-point','exact-execution-result')
+                 'exact-execution-point','exact-execution-result','exact-curve-tile-5m','exact-curve-tile-30m')
               AND length(json_extract(row,'$.record_key'))>0
               AND json_type(row,'$.sort_epoch')='integer'
               AND json_extract(row,'$.sort_epoch')>=0
@@ -249,7 +250,7 @@ export async function pagedRecords(binding: D1Database, url: URL) {
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const resource = url.searchParams.get("resource") ?? "";
-  if (["curve-overview", "version-overview", "curve-5m", "curve-30m"].includes(resource)) {
+  if (["curve-overview", "version-overview", "curve-5m", "curve-30m", "exact-curve-tile-5m", "exact-curve-tile-30m"].includes(resource)) {
     return NextResponse.json({error:"Use /api/chart for chart ranges"}, {status:410});
   }
   if (!ALLOWED_RESOURCES.has(resource)) {
@@ -286,6 +287,7 @@ export async function POST(request: Request) {
     if (smallBody && Object.hasOwn(smallBody, "chart_completion")) {
       const completion = smallBody.chart_completion;
       if (completion?.contract !== "exact-chart-history-v1"
+          || completion.chart_format != null && !["exact-v1","pyramid-v1"].includes(completion.chart_format)
           || !Number.isSafeInteger(completion.source_revision) || completion.source_revision < 0
           || !Number.isSafeInteger(completion.record_count) || completion.record_count < 0
           || !Number.isFinite(Date.parse(completion.generated_at))) throw new Error("invalid completion");

@@ -6,99 +6,139 @@ import { pagedRecords } from "../learning-history/route";
 
 export const dynamic = "force-dynamic";
 const POINT_LIMIT = 1200;
-const WINDOWS: Record<string, number> = { "24h":86400, "7d":604800, "30d":2592000 };
-type Row = { resource: string; sort_epoch: number; payload: Record<string, unknown> };
+const WINDOWS: Record<string,number> = {"24h":86400,"7d":604800,"30d":2592000};
+type Point = {model_identity:string;decision_time:string;chart_ordinal:number;[key:string]:unknown};
+type Plan = {sql:string;values:unknown[]};
+type Part = {first:number;last:number;size:number};
 
-async function readChart(request: Request) {
-  const url = new URL(request.url);
-  const type = url.searchParams.get("type") || "learning";
-  if (type === "market") return marketHistory(request);
-  if (!["learning","versions","version-group","execution-point","model"].includes(type)) return NextResponse.json({error:"invalid chart"},{status:400});
-  const resource = type === "versions" ? "version-group"
-    : url.searchParams.get("cadence") === "30m" ? "curve-30m" : "curve-5m";
-  const range = url.searchParams.get("range") || "all";
-  const page = Number(url.searchParams.get("page") || 0);
-  if ((range !== "all" && !WINDOWS[range]) || !Number.isSafeInteger(page) || page<0)
-    return NextResponse.json({error:"invalid range"},{status:400});
-  try {
-    let rows: Row[]; let historyStart: number; let historyEnd: number;
-    let generatedAt: string; let sourceCount: number; let start: number; let end: number;
-    let seriesCounts: Record<string, number> = {};
-    {
-      const db=env.DB as D1Database | undefined;
-      if (!db) throw new Error("database unavailable");
-      const state=await db.prepare("SELECT payload FROM chart_history_state WHERE id=1").first<{payload:string}>();
-      if (!state) throw new Error("完整图表历史正在同步");
-      generatedAt=JSON.parse(state.payload).generated_at;
-      if (["version-group","execution-point","model"].includes(type)) {
-        url.searchParams.set("resource", "exact-" + type);
-        const response = await pagedRecords(db, url);
-        if (previewBundle) response.headers.set("X-Aurum-Preview", "current-read-only-d1");
-        return response;
-      }
-      const bounds=await db.prepare(`SELECT
-        (SELECT sort_epoch FROM learning_records WHERE resource=? ORDER BY sort_epoch,record_key LIMIT 1) first,
-        (SELECT sort_epoch FROM learning_records WHERE resource=? ORDER BY sort_epoch DESC,record_key DESC LIMIT 1) last`)
-        .bind("exact-"+resource,"exact-"+resource).first<{first:number|null;last:number|null}>();
-      if (bounds?.first==null || bounds.last==null) return NextResponse.json({items:[],source_count:0,chart_point_count:0,generated_at:generatedAt,history_start:null,history_end:null});
-      historyStart=bounds.first;historyEnd=bounds.last;
-      end=historyEnd-(WINDOWS[range] || 0)*page;
-      start=range==="all"?historyStart:end-WINDOWS[range];
-      const from=url.searchParams.get("from"),to=url.searchParams.get("to");
-      if (from) start=Date.parse(from)/1000;
-      if (to) end=Date.parse(to)/1000;
-      if (!Number.isFinite(start)||!Number.isFinite(end)||start>end) return NextResponse.json({error:"invalid interval"},{status:400});
-      // One SQL snapshot owns selection, counts and sampling. Only oversized
-      // series enter the window calculations; small ranges return every row.
-      const result=await db.prepare(`WITH selected AS MATERIALIZED (
-        SELECT sort_epoch,record_key,payload,
-          json_extract(payload,'$.model_identity') identity,
-          COALESCE(json_extract(payload,'$.cumulative_quote_return'),0) value
-        FROM learning_records WHERE resource=? AND sort_epoch>=? AND sort_epoch<=?
-      ), stats AS MATERIALIZED (
-        SELECT identity,count(*) series_count FROM selected GROUP BY identity
-      ), numbered AS (
-        SELECT selected.*,stats.series_count,
-          row_number() OVER (PARTITION BY identity ORDER BY sort_epoch,record_key) n
-        FROM selected JOIN stats USING(identity) WHERE series_count>?
-      ), buckets AS (
-        SELECT *,CAST((n-1)*150/MAX(series_count,1) AS INTEGER) bucket FROM numbered
-      ), extremes AS (
-        SELECT *,row_number() OVER (PARTITION BY identity,bucket ORDER BY value,sort_epoch) lo,
-          row_number() OVER (PARTITION BY identity,bucket ORDER BY value DESC,sort_epoch) hi FROM buckets
-      ), visible AS (
-        SELECT payload,sort_epoch,record_key FROM selected JOIN stats USING(identity)
-        WHERE series_count<=?
-        UNION ALL
-        SELECT payload,sort_epoch,record_key FROM extremes WHERE n=1 OR n=series_count
-          OR lo=1 OR hi=1 OR json_extract(payload,'$.model_version') IS NOT NULL
-          OR json_extract(payload,'$.source_gap_before')=1
-      ) SELECT (SELECT COALESCE(sum(series_count),0) FROM stats) source_count,
-        (SELECT json_group_object(identity,series_count) FROM stats) series_counts,
-        COALESCE(json_group_array(json(payload)),'[]') items
-        FROM (SELECT payload FROM visible ORDER BY sort_epoch,record_key)`)
-        .bind("exact-"+resource,start,end,POINT_LIMIT,POINT_LIMIT)
-        .first<{source_count:number;series_counts:string;items:string}>();
-      seriesCounts=JSON.parse(result?.series_counts || "{}");
-      sourceCount=Number(result?.source_count || 0);
-      rows=JSON.parse(result?.items || "[]").map((payload:Record<string,unknown>)=>({payload}));
-    }
-    const points=rows.map(row=>row.payload);
-    const items=type==="versions"?points:Array.from(new Set(points.map(p=>p.model_identity))).map(identity=>{
-      const subset=points.filter(p=>p.model_identity===identity);
-      return {model_identity:identity,cadence:resource==="curve-30m"?"30m":"5m",points:subset,
-        source_point_count:seriesCounts[String(identity)] ?? subset.length,
-        chart_point_count:subset.length,chart_downsampled:(seriesCounts[String(identity)] ?? subset.length)>subset.length};
-    });
-    const body={items,mode:sourceCount>points.length?"sampled":"exact",generated_at:generatedAt,
-      source_count:sourceCount,chart_point_count:points.length,downsampled:sourceCount>points.length,
-      history_start:new Date(historyStart*1000).toISOString(),history_end:new Date(historyEnd*1000).toISOString(),
-      range_start:new Date(start*1000).toISOString(),range_end:new Date(end*1000).toISOString(),
-      has_earlier:start>historyStart,has_later:page>0};
-    return previewBundle?previewJson(body, 200, "current-read-only-d1"):NextResponse.json(body);
-  } catch {
-    return NextResponse.json({error:"完整图表历史尚未就绪，请稍后重试"},{status:503});
+// Aligned interior blocks plus smaller edge blocks cover every ordinal exactly.
+// Only the two outer edges can require individual source points (at most15 each).
+function partition(first:number,last:number,maximum:number):Part[] {
+  const parts:Part[]=[];
+  for(let next=first;next<=last;) {
+    let size=maximum;
+    while(size>1 && (next%size!==0 || next+size-1>last)) size=size===16?1:size/4;
+    const previous=parts.at(-1);
+    if(previous?.size===size) previous.last=next+size-1;
+    else parts.push({first:next,last:next+size-1,size});
+    next+=size;
   }
+  return parts;
+}
+const blockKey=(identity:string,size:number,bucket:number)=>
+  `${identity}\0${String(size).padStart(16,"0")}\0${String(bucket).padStart(16,"0")}`;
+
+async function queryPlans(db:D1Database,plans:Plan[]) {
+  const statements=[];
+  for(let i=0;i<plans.length;i+=8) {
+    const chunk=plans.slice(i,i+8);
+    statements.push(db.prepare(chunk.map(p=>p.sql).join(" UNION ALL ")).bind(...chunk.flatMap(p=>p.values)));
+  }
+  if(!statements.length)return [];
+  const results=await db.batch<{kind:string;payload:string}>(statements);
+  return results.flatMap(result=>result.results ?? []);
+}
+
+async function learningPoints(db:D1Database,resource:string,start:number,end:number) {
+  const endpoints=await db.prepare(`SELECT model_identity,
+    (SELECT payload FROM learning_records WHERE resource=?
+       AND json_extract(payload,'$.model_identity')=counts.model_identity
+       AND sort_epoch>=? AND sort_epoch<=? ORDER BY sort_epoch,record_key LIMIT 1) first_point,
+    (SELECT payload FROM learning_records WHERE resource=?
+       AND json_extract(payload,'$.model_identity')=counts.model_identity
+       AND sort_epoch>=? AND sort_epoch<=? ORDER BY sort_epoch DESC,record_key DESC LIMIT 1) last_point
+    FROM learning_record_counts counts WHERE resource=? AND model_identity<>''`)
+    .bind(resource,start,end,resource,start,end,resource).all<{model_identity:string;first_point:string|null;last_point:string|null}>();
+  const series=new Map<string,{count:number;first:number;last:number}>();
+  const plans:Plan[]=[];let expectedBlocks=0;
+  for(const row of endpoints.results ?? []) {
+    if(!row.first_point || !row.last_point)continue;
+    const first=JSON.parse(row.first_point) as Point,last=JSON.parse(row.last_point) as Point;
+    if(!Number.isSafeInteger(first.chart_ordinal)||!Number.isSafeInteger(last.chart_ordinal)
+      ||first.chart_ordinal>last.chart_ordinal)throw new Error("chart ordinal unavailable");
+    const count=last.chart_ordinal-first.chart_ordinal+1;
+    series.set(row.model_identity,{count,first:first.chart_ordinal,last:last.chart_ordinal});
+    const exact=(limit:number,descending=false):Plan=>({
+      sql:`SELECT 'point' kind,payload FROM (SELECT payload FROM learning_records WHERE resource=?
+        AND json_extract(payload,'$.model_identity')=? AND sort_epoch>=? AND sort_epoch<=?
+        ORDER BY sort_epoch ${descending?"DESC":"ASC"},record_key ${descending?"DESC":"ASC"} LIMIT ?)`,
+      values:[resource,row.model_identity,start,end,limit]});
+    if(count<=POINT_LIMIT){plans.push(exact(count));continue;}
+    let size=16;
+    while(Math.ceil(count/size)>150)size*=4;
+    for(const part of partition(first.chart_ordinal,last.chart_ordinal,size)) {
+      if(part.size===1) {
+        if(part.first!==first.chart_ordinal && part.last!==last.chart_ordinal)throw new Error("invalid chart edge");
+        plans.push(exact(part.last-part.first+1,part.first!==first.chart_ordinal));
+      } else {
+        expectedBlocks+=(part.last-part.first+1)/part.size;
+        plans.push({sql:"SELECT 'block' kind,payload FROM learning_records WHERE resource=? AND record_key>=? AND record_key<=?",
+          values:[resource.replace("curve-","curve-tile-"),blockKey(row.model_identity,part.size,part.first/part.size),
+            blockKey(row.model_identity,part.size,Math.floor(part.last/part.size))]});
+      }
+    }
+    plans.push({sql:`SELECT 'point' kind,payload FROM learning_records INDEXED BY learning_records_chart_anchor_idx
+      WHERE resource=? AND json_extract(payload,'$.model_identity')=? AND sort_epoch>=? AND sort_epoch<=?
+        AND json_extract(payload,'$.chart_anchor')=1`,values:[resource,row.model_identity,start,end]});
+  }
+  const rows=await queryPlans(db,plans);
+  if(rows.filter(row=>row.kind==="block").length!==expectedBlocks)throw new Error("chart blocks unavailable");
+  const points=new Map<string,Point>();
+  for(const row of rows) {
+    const payload=JSON.parse(row.payload);
+    for(const point of (row.kind==="block"?payload.points:[payload]) as Point[]) {
+      const bounds=series.get(point.model_identity);
+      if(bounds && point.chart_ordinal>=bounds.first && point.chart_ordinal<=bounds.last)
+        points.set(`${point.model_identity}\0${point.chart_ordinal}`,point);
+    }
+  }
+  const items=Array.from(series,([identity,meta])=>{
+    const selected=Array.from(points.values()).filter(p=>p.model_identity===identity).sort((a,b)=>a.chart_ordinal-b.chart_ordinal);
+    if(selected[0]?.chart_ordinal!==meta.first || selected.at(-1)?.chart_ordinal!==meta.last
+      ||meta.count<=POINT_LIMIT&&selected.length!==meta.count)throw new Error("incomplete chart interval");
+    return {model_identity:identity,cadence:resource.endsWith("30m")?"30m":"5m",points:selected,
+      source_point_count:meta.count,chart_point_count:selected.length,chart_downsampled:selected.length<meta.count};
+  });
+  return {items,sourceCount:Array.from(series.values()).reduce((sum,r)=>sum+r.count,0),pointCount:points.size};
+}
+
+async function readChart(request:Request) {
+  const url=new URL(request.url),type=url.searchParams.get("type")||"learning";
+  if(type==="market")return marketHistory(request);
+  if(!["learning","versions","version-group","execution-point","model"].includes(type))return NextResponse.json({error:"invalid chart"},{status:400});
+  const resource=type==="versions"?"exact-version-group":url.searchParams.get("cadence")==="30m"?"exact-curve-30m":"exact-curve-5m";
+  const range=url.searchParams.get("range")||"all",page=Number(url.searchParams.get("page")||0);
+  if(range!=="all"&&!WINDOWS[range]||!Number.isSafeInteger(page)||page<0)return NextResponse.json({error:"invalid range"},{status:400});
+  try {
+    const db=env.DB as D1Database|undefined;if(!db)throw new Error("database unavailable");
+    const state=await db.prepare("SELECT payload FROM chart_history_state WHERE id=1").first<{payload:string}>();
+    if(!state)throw new Error("chart history unavailable");
+    const completed=JSON.parse(state.payload);
+    if(["version-group","execution-point","model"].includes(type)){
+      url.searchParams.set("resource","exact-"+type);const response=await pagedRecords(db,url);
+      if(previewBundle)response.headers.set("X-Aurum-Preview","current-read-only-d1");return response;
+    }
+    if(type==="learning"&&completed.chart_format!=="pyramid-v1")throw new Error("chart blocks pending");
+    const bounds=await db.prepare(`SELECT
+      (SELECT sort_epoch FROM learning_records WHERE resource=? ORDER BY sort_epoch,record_key LIMIT 1) first,
+      (SELECT sort_epoch FROM learning_records WHERE resource=? ORDER BY sort_epoch DESC,record_key DESC LIMIT 1) last`)
+      .bind(resource,resource).first<{first:number|null;last:number|null}>();
+    if(bounds?.first==null||bounds.last==null)return NextResponse.json({items:[],source_count:0,chart_point_count:0,generated_at:completed.generated_at,history_start:null,history_end:null});
+    let end=bounds.last-(WINDOWS[range]||0)*page,start=range==="all"?bounds.first:end-WINDOWS[range];
+    if(url.searchParams.has("from"))start=Date.parse(url.searchParams.get("from")!)/1000;
+    if(url.searchParams.has("to"))end=Date.parse(url.searchParams.get("to")!)/1000;
+    if(!Number.isFinite(start)||!Number.isFinite(end)||start>end)return NextResponse.json({error:"invalid interval"},{status:400});
+    let items:unknown[],sourceCount:number,pointCount:number;
+    if(type==="versions") {
+      const rows=await db.prepare("SELECT payload FROM learning_records WHERE resource=? AND sort_epoch>=? AND sort_epoch<=? ORDER BY sort_epoch,record_key").bind(resource,start,end).all<{payload:string}>();
+      items=(rows.results??[]).map(row=>JSON.parse(row.payload));sourceCount=pointCount=items.length;
+    } else ({items,sourceCount,pointCount}=await learningPoints(db,resource,start,end));
+    const body={items,mode:sourceCount>pointCount?"sampled":"exact",generated_at:completed.generated_at,
+      source_count:sourceCount,chart_point_count:pointCount,downsampled:sourceCount>pointCount,
+      history_start:new Date(bounds.first*1000).toISOString(),history_end:new Date(bounds.last*1000).toISOString(),
+      range_start:new Date(start*1000).toISOString(),range_end:new Date(end*1000).toISOString(),has_earlier:start>bounds.first,has_later:page>0};
+    return previewBundle?previewJson(body,200,"current-read-only-d1"):NextResponse.json(body);
+  } catch {return NextResponse.json({error:"完整图表历史尚未就绪，请稍后重试"},{status:503});}
 }
 
 export async function GET(request: Request) {

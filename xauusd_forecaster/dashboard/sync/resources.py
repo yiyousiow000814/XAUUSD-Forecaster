@@ -403,6 +403,7 @@ def _sync_learning_history(local_payload: dict, config: dict) -> None:
         response = _post_json(history_url, json.dumps({"chart_completion": {
             "contract": page["contract"], "source_revision": page["source_revision"],
             "generated_at": page["generated_at"], "record_count": page["record_count"],
+            "chart_format": page.get("chart_format", "exact-v1"),
         }}, separators=(",", ":")).encode("utf-8"), config)
         if response.get("status") != "OK":
             raise ValueError("Chart completion ACK mismatch")
