@@ -38,7 +38,13 @@ test("chart range reads real rows, only samples large ranges and refuses an unre
    const statement=prepare(sql),bind=statement.bind.bind(statement);
    statement.bind=(...values)=>{
      const bound=bind(...values),execute=bound.execute.bind(bound);
-     bound.execute=()=>{queryPlans.push(...db.database.prepare("EXPLAIN QUERY PLAN "+sql).all(...values));const result=execute();returnedRows+=result.results.length;return result;};
+     bound.execute=()=>{
+       assert.ok(sql.split(" UNION ALL ").length<=4,"D1 compound-query budget");
+       const plan=db.database.prepare("EXPLAIN QUERY PLAN "+sql).all(...values);
+       for(const row of plan.filter(row=>row.detail.includes("learning_records_resource_identity_time_idx")))
+         assert.match(row.detail,/resource=\? AND <expr>=\? AND sort_epoch>/,"identity and time must both constrain the index");
+       queryPlans.push(...plan);const result=execute();returnedRows+=result.results.length;return result;
+     };
      return bound;
    };return statement;
  };

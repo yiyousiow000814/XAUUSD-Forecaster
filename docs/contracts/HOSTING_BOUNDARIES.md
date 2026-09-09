@@ -447,3 +447,9 @@ Chart export revisions belong to the derived publication owner. Every publicatio
 must advance beyond its prior revision even when the source revision is unchanged
 or lower. A format rebuild republishes affected records beyond acknowledged
 cursors, including unchanged payloads; source clocks cannot order transport.
+
+Chart SQL combines at most four SELECT terms per statement, validated against
+real D1. Identity/time reads must constrain both the identity expression key and
+the time range, including correlated endpoint lookups. Merely seeing SEARCH in
+an explain plan does not prove bounded work. SQL affinity and deployed planner
+behavior require real-D1 preflight; forcing an index alone is insufficient.
