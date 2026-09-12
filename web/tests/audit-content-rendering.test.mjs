@@ -55,6 +55,12 @@ test("admin usage renders both Groq models and distinguishes missing from zero e
   }}});
   assert.match(html,/qwen\/qwen3\.8-27b/);assert.match(html,/qwen\/qwen3\.6-27b/);
   assert.match(html,/2,964/);assert.match(html,/185,000/);
+  for (const label of ["今日实际请求", "今日已预留请求", "近24小时保守 token 占用", "近24小时本地 token 余量"]) {
+    assert.equal(html.split(`<dt>${label}</dt>`).length - 1, 2, `${label} remains visible for each model`);
+  }
+  assert.match(html, /<details[^>]*><summary>用量统计说明<\/summary>/);
+  assert.match(html, /已报告 tokens 不包含服务商未返回用量的请求/);
+  assert.match(html, /2026\/9\/13 08:00:00/);
   assert.match(html,/暂未观察到请求，不代表模型已连接或可用/);
   assert.doesNotMatch(html,/2026-09-12T17:39:40Z/);
 });
