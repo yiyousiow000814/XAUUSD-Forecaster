@@ -23,6 +23,34 @@ def _connection() -> sqlite3.Connection:
     return connection
 
 
+@pytest.mark.parametrize("task", ("ACTIVE_ANNOTATION", "ACTIVE_IMPACT", "TITLE_TRANSLATION"))
+@pytest.mark.parametrize("mixed", (False, True))
+def test_provider_retry_is_local_but_mixed_errors_and_pipeline_stalls_still_alert(task, mixed):
+    connection = _connection()
+    job_id = enqueue_job(connection, task_type=task, source="source",
+        source_item_id="provider-retry", revision_number=1, annotation_id="annotation",
+        prompt_version="prompt", priority="NORMAL", now=NOW - timedelta(minutes=5))
+    connection.execute("UPDATE news_ai_jobs_v1 SET attempt_count=12 WHERE job_id=?", (job_id,))
+    for number in range(12):
+        deterministic = mixed and number == 0
+        connection.execute("INSERT INTO news_ai_job_attempts_v1 VALUES (?,?,?,?,?,'ERROR',?,?,?,?,?,NULL)",
+            (f"provider-{number}", job_id, number + 1, "account", "credential",
+             "MODEL_OUTPUT_CONTRACT_FAILED" if deterministic else "PROVIDER_HTTP_ERROR",
+             "ValueError" if deterministic else "HTTPError",
+             None if deterministic else (500, 502, 503)[number % 3], "bounded evidence",
+             (NOW - timedelta(seconds=120 - number)).isoformat()))
+    connection.commit()
+    snapshot = scheduler_health_snapshot(connection, now=NOW)
+    retry = next(event for event in snapshot["alerts"] if event["code"] == "OPS_AI_JOB_RETRY_LOOP")
+    assert retry["blocking"] is mixed
+    assert retry["severity"] == ("ERROR" if mixed else "WARNING")
+    assert retry["evidence"].get("automatic_provider_retry", False) is not mixed
+    assert len([event for event in snapshot["alerts"] if event["blocking"] or event["severity"] == "ERROR"]) == int(mixed)
+    stalled = scheduler_health_snapshot(connection, now=NOW + timedelta(hours=3))
+    assert any(event["code"] == "OPS_AI_PIPELINE_STALLED" and event["blocking"] for event in stalled["alerts"])
+    assert connection.execute("SELECT count(*) FROM news_ai_job_attempts_v1").fetchone()[0] == 12
+
+
 def test_scheduler_health_exposes_retry_capacity_stall_and_age_codes() -> None:
     connection = _connection()
     job_id = enqueue_job(
@@ -78,6 +106,25 @@ def test_scheduler_health_exposes_retry_capacity_stall_and_age_codes() -> None:
     assert impact["failure_codes_15m"] == [
         {"code": "MODEL_CAPACITY_DEFERRED", "count": 11},
     ]
+
+
+def test_more_provider_errors_cannot_hide_another_jobs_deterministic_loop():
+    connection = _connection()
+    for item, count, code, http in (("provider", 25, "PROVIDER_HTTP_ERROR", 503),
+                                  ("invalid", 10, "MODEL_OUTPUT_CONTRACT_FAILED", None)):
+        job = enqueue_job(connection, task_type="ACTIVE_ANNOTATION", source="source",
+            source_item_id=item, revision_number=1, prompt_version="prompt",
+            priority="NORMAL", now=NOW - timedelta(minutes=2))
+        connection.execute("UPDATE news_ai_jobs_v1 SET attempt_count=? WHERE job_id=?", (count, job))
+        connection.executemany("INSERT INTO news_ai_job_attempts_v1 VALUES (?,?,?,?,?,'ERROR',?,?,?,?,?,NULL)",
+            [(f"{item}-{number}", job, number+1, "account", "credential", code,
+              "HTTPError" if http else "ValueError", http, "evidence", NOW.isoformat())
+             for number in range(count)])
+        connection.commit()
+    alert = next(event for event in scheduler_health_snapshot(connection, now=NOW)["alerts"]
+                 if event["code"] == "OPS_AI_JOB_RETRY_LOOP")
+    assert alert["blocking"] is True
+    assert alert["evidence"]["latest_failure_code"] == "MODEL_OUTPUT_CONTRACT_FAILED"
 
 
 def test_scheduler_health_separates_local_limits_from_provider_pacing() -> None:

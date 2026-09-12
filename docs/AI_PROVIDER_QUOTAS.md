@@ -28,6 +28,26 @@ independent account joins routing on the next cycle. An extra key inside an
 existing account adds transport redundancy but does not increase that account's
 quota or the scheduler's automatic batch size.
 
+## Optional news backup
+
+`OPENROUTER_API_KEY` enables one backup request after a Google generation HTTP
+500, 502 or 503 on LIVE news work. The fixed `nvidia/nemotron-3-super-120b-a12b:free` model
+uses the same complete source, prompt schema and downstream validation. Success
+on Google, quota deferrals, malformed output and other HTTP statuses do not call
+the backup. Assistant and historical backfill do not use it.
+
+All lanes share 50 requests per UTC day and 20 per trailing 60 seconds through
+the existing transactional request ledger. Failed and interrupted attempts count;
+changing keys or restarting does not reset the budget. OpenRouter Retry-After
+affects only its own provider scope. Paid models and paid routing are excluded by
+the fixed free model and zero provider maximum prices. The Windows main launcher
+loads the optional key for the annotator; restart is needed after configuration
+changes. Request/model outcome evidence contains no secrets.
+
+See [OpenRouter limits](https://openrouter.ai/docs/api_reference/limits).
+The account's actual free allowance may be lower or unavailable; provider
+availability is not guaranteed and backup failure returns to the existing queue.
+
 ## Assistant capacity policy
 
 Assistant generation is currently paused while a suitable API model is being

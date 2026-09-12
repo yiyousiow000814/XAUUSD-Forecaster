@@ -300,6 +300,10 @@ def scheduler_health_snapshot(
                          AND COALESCE(a.failure_code,'') NOT LIKE
                              'SCHEDULER_MAINTENANCE_%'
                         THEN 1 ELSE 0 END),0) AS effective_failure_streak
+                      ,COALESCE(sum(CASE WHEN a.outcome='ERROR'
+                         AND a.failure_code='PROVIDER_HTTP_ERROR'
+                         AND a.provider_http_status IN (500,502,503)
+                        THEN 1 ELSE 0 END),0) AS transient_provider_failures
                       ,(SELECT latest.failure_code
                           FROM news_ai_job_attempts_v1 latest
                          WHERE latest.job_id=j.job_id
@@ -321,9 +325,12 @@ def scheduler_health_snapshot(
                LEFT JOIN news_ai_job_attempts_v1 a
                  ON a.job_id=j.job_id AND a.attempt_number>j.reset_at
                GROUP BY j.job_id
-               ORDER BY effective_failure_streak DESC,j.attempt_count DESC,
+               ORDER BY CASE WHEN effective_failure_streak>=?
+                              AND effective_failure_streak>transient_provider_failures
+                             THEN 0 ELSE 1 END,
+                        effective_failure_streak DESC,j.attempt_count DESC,
                         j.created_at,j.job_id LIMIT 1""",
-            (task, WORK_PROVENANCE_VERSION),
+            (task, WORK_PROVENANCE_VERSION, RETRY_LOOP_THRESHOLD),
         ).fetchone()
         if retry_candidate is not None:
             lifetime_claims = int(retry_candidate["lifetime_claim_count"])
@@ -342,19 +349,24 @@ def scheduler_health_snapshot(
             retry_available_at = ""
             scheduled = False
         if failure_streak >= RETRY_LOOP_THRESHOLD:
+            provider_retry = (
+                int(retry_candidate["transient_provider_failures"]) == failure_streak
+            )
             alerts.append(_alert(
                 "OPS_AI_JOB_RETRY_LOOP",
-                severity="WARNING" if scheduled else "ERROR", scope=task,
+                severity="WARNING" if scheduled or provider_retry else "ERROR", scope=task,
                 message_zh=(
                     f"{label}（{task}）有任务连续有效失败 {failure_streak} 次，"
                     f"历史领取 {lifetime_claims} 次，"
                     + (
-                        "目前按计划等待下次重试。"
+                        "服务商暂时不可用，系统将自动重试。"
+                        if provider_retry else "目前按计划等待下次重试。"
                         if scheduled else "当前仍可处理，需要检查。"
                     )
                 ),
-                blocking=not scheduled,
+                blocking=not (scheduled or provider_retry),
                 evidence={
+                    **({"automatic_provider_retry": True} if provider_retry else {}),
                     "max_claim_count": lifetime_claims,
                     "lifetime_claim_count": lifetime_claims,
                     "effective_failure_streak": failure_streak,

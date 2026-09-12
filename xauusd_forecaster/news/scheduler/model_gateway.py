@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import math
+import os
 import sqlite3
 import uuid
+from datetime import UTC
 
 from xauusd_forecaster.ai.provider_registry import quota_surface_for_model
 from xauusd_forecaster.news.annotation.product import (
@@ -14,6 +16,7 @@ from xauusd_forecaster.news.annotation.product import (
 from xauusd_forecaster.ai.model_gateway import (
     ModelRequestAccountant,
     ModelRequestUsage,
+    OpenRouterNewsGateway,
 )
 from xauusd_forecaster.news.scheduler.state import (
     ApiCredential,
@@ -38,6 +41,7 @@ class SchedulerModelAccountant(ModelRequestAccountant):
         *,
         urgent: bool,
         work_lane: str = "LIVE",
+        enable_news_backup: bool = False,
     ) -> None:
         self.connection = connection
         self.credential = credential
@@ -51,6 +55,11 @@ class SchedulerModelAccountant(ModelRequestAccountant):
         self._failure_code: str | None = None
         self._failure_evidence: dict[str, object] | None = None
         self._usage_id: str | None = None
+        backup_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+        if backup_key and work_lane == "LIVE" and enable_news_backup:
+            self.fallback_gateway = OpenRouterNewsGateway(
+                backup_key, OpenRouterNewsAccountant(connection),
+            )
 
     def reserve(self, usage: ModelRequestUsage) -> bool:
         policy = quota_surface_for_model(usage.model)
@@ -162,3 +171,45 @@ class SchedulerModelAccountant(ModelRequestAccountant):
     @property
     def failure_evidence(self) -> dict[str, object] | None:
         return self._failure_evidence
+
+
+class OpenRouterNewsAccountant(ModelRequestAccountant):
+    """Reuse atomic scheduler admission with one shared free-provider budget."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.connection = connection
+        self._usage_id: str | None = None
+
+    def reserve(self, usage: ModelRequestUsage) -> bool:
+        usage_id = str(uuid.uuid4())
+        reserved = reserve_account_request(
+            self.connection, account_id="OPENROUTER_NEWS",
+            model_family="openrouter-free", daily_limit=50, requests_per_minute=20,
+            input_tokens=usage.input_tokens, usage_id=usage_id,
+            requested_model=usage.model, purpose=usage.purpose,
+            prompt_contract=usage.prompt_contract, estimator_version=usage.estimator_version,
+            quota_authority="openrouter_free", quota_timezone=UTC,
+            independent_provider_scope="OPENROUTER_NEWS",
+        )
+        self._usage_id = usage_id if reserved else None
+        return reserved
+
+    def mark_provider_attempted(self) -> None:
+        if self._usage_id is None:
+            raise ValueError("backup request has no reservation")
+        mark_account_request_attempted(self.connection, self._usage_id)
+
+    def record_provider_outcome(
+        self, outcome: str, *, retry_after_seconds: int | None = None,
+        usage_metadata: dict[str, int] | None = None,
+        provider_model_version: str | None = None,
+    ) -> None:
+        if self._usage_id is None:
+            raise ValueError("backup request has no reservation")
+        record_account_request_outcome(
+            self.connection, self._usage_id, outcome=outcome,
+            retry_after_seconds=retry_after_seconds, usage_metadata=usage_metadata,
+            provider_model_version=provider_model_version,
+            independent_provider_scope="OPENROUTER_NEWS",
+        )
+        self._usage_id = None

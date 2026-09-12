@@ -140,7 +140,7 @@ function Start-RuntimeService {
     if (@(Get-RuntimeServiceProcesses $Service).Count) { return }
     $names = switch ($Service.Key) {
         'collector' { 'BLS_API_KEY', 'BEA_API_KEY', 'FRED_API_KEY', 'EIA_API_KEY' }
-        'annotator' { 'GEMINI_API_KEY', 'GEMINI_API_KEYS' }
+        'annotator' { 'GEMINI_API_KEY', 'GEMINI_API_KEYS', 'OPENROUTER_API_KEY' }
         'api' { 'GEMINI_API_KEY', 'GEMINI_API_KEYS', 'DASHBOARD_OPERATOR_BRIDGE_TOKEN' }
         'sync' { 'DASHBOARD_OPERATOR_BRIDGE_TOKEN', 'SITES_BYPASS_TOKEN', 'CLOUDFLARE_INGEST_URL', 'CLOUDFLARE_INGEST_TOKEN' }
         'broadcast' { 'AURUM_LIVE_BROADCAST_PUBLISHER_ENABLED', 'LIVE_BROADCAST_PUBLISH_TOKEN' }
