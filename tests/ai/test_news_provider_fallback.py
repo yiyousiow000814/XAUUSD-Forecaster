@@ -350,7 +350,8 @@ def test_backup_requires_key_and_live_lane(database, monkeypatch):
     assert SchedulerModelAccountant(database, ApiCredential("a", "ROUTINE", "key", "id"), urgent=True).fallback_gateway is None
 
 
-def test_production_news_job_persists_backup_title_with_actual_model(tmp_path, monkeypatch):
+@pytest.mark.parametrize("scenario", ["backup-title", "blocked-title", "blocked-annotation"])
+def test_production_news_job_persists_provider_success_or_failure(tmp_path, monkeypatch, scenario):
     import hashlib
     from types import SimpleNamespace
     from xauusd_forecaster.evidence.ledger import ForwardLedger
@@ -364,17 +365,28 @@ def test_production_news_job_persists_backup_title_with_actual_model(tmp_path, m
         "source_published_time": now, "collector_first_seen_time": now,
         "fetched_time": now, "headline": body, "body": body,
         "content_hash": content_hash, "cluster_id": "one"})
-    row = {"source": "fixture", "source_item_id": "one", "revision_number": 1,
-           "headline": body, "content_hash": content_hash}
+    row = dict(ledger.connection.execute("SELECT * FROM news_revisions").fetchone())
     monkeypatch.setattr(runtime, "pending_record_for_job", lambda *_args, **_kwargs: row)
     def transport(request, *, timeout):
+        if scenario.startswith("blocked"):
+            return response({"promptFeedback": {"blockReason": "PROHIBITED_CONTENT"},
+                             "usageMetadata": {"promptTokenCount": 100, "totalTokenCount": 100}})
         if urllib.parse.urlsplit(request.full_url).hostname != "api.groq.com":
             raise urllib.error.HTTPError(request.full_url, 503, "temporary", {}, io.BytesIO(b"{}"))
         return response(backup_envelope())
     monkeypatch.setattr(urllib.request, "urlopen", transport)
     try:
         result = runtime._execute_job(ledger, ApiCredential("google", "ROUTINE", "secret", "id"),
-            SimpleNamespace(task_type="TITLE_TRANSLATION", work_lane="LIVE", priority="NORMAL"), now=now)
+            SimpleNamespace(task_type="ACTIVE_ANNOTATION" if scenario=="blocked-annotation" else "TITLE_TRANSLATION",
+                            work_lane="LIVE", priority="NORMAL"), now=now)
+        if scenario.startswith("blocked"):
+            assert result["status"] == "ERROR"
+            assert result["failure_code"] == "MODEL_OUTPUT_INVALID"
+            failure = ledger.connection.execute("SELECT * FROM news_llm_failure_evidence_v1").fetchone()
+            assert failure is not None and len(failure["response_hash"]) == 64
+            assert json.loads(failure["selected_output_json"])["provider_block_reason"] == "PROHIBITED_CONTENT"
+            assert ledger.connection.execute("SELECT count(*) FROM news_annotations").fetchone()[0] == 0
+            return
         assert result["status"] == "OK"
         translation = ledger.connection.execute("SELECT * FROM news_title_translations").fetchone()
         assert translation["llm_model_version"] == "groq/" + GROQ_NEWS_MODELS[0]

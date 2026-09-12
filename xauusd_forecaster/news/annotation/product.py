@@ -1440,6 +1440,10 @@ def _decode_model_json(envelope: dict[str, object]) -> dict:
         error.failure_evidence = {
             "failure_code": "MODEL_OUTPUT_INVALID",
             "failure_stage": "PROVIDER_RESPONSE",
+            "response_hash": hashlib.sha256(json.dumps(
+                envelope, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")).hexdigest(),
             "cause_type": "ProviderResponseUnavailable",
             "cause": str(error),
             "selected_output": {"provider_block_reason": reason,
