@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from xauusd_forecaster.news.semantics.article_source import selected_article
+from xauusd_forecaster.dashboard.news_syndication import group_article_copies
 
 import gzip
 import hashlib
@@ -130,7 +131,8 @@ def _news_reader_rows(
                    n.collector_first_seen_time, n.fetched_time,
                    candidate_changes.mirror_updated_at,
                    n.headline AS original_headline,
-                   COALESCE(t.headline_zh, n.headline) AS headline,
+                   COALESCE(json_extract(a.annotation_json, '$.headline_zh'),
+                            t.headline_zh, n.headline) AS headline,
                    length(COALESCE(n.body, '')) AS content_characters,
                    CASE WHEN n.body LIKE '[FULL_TEXT%' THEN 'FULL_TEXT'
                         WHEN length(trim(COALESCE(n.body, ''))) >= 240 THEN 'SOURCE_CONTENT'
@@ -308,7 +310,7 @@ def _serialize_news_rows(
             for field in ("source_title_segment_ids", "source_body_segment_ids")
         }
         if source_selection["source_body_segment_ids"] is not None:
-            _, item["body"] = selected_article(
+            item["source_article_title"], item["body"] = selected_article(
                 str(item.get("headline") or ""), str(item.get("body") or ""),
                 source_selection,
             )
@@ -471,7 +473,7 @@ def _build_news_projection_source(
             if item.get("xauusd_relevance") != "IRRELEVANT"
         )
     return build_news_projection_generation(
-        items, withdrawals,
+        group_article_copies(items), withdrawals,
         window_start=(now - timedelta(days=NEWS_READER_WINDOW_DAYS)).isoformat(),
         watermark=now.isoformat(),
     )

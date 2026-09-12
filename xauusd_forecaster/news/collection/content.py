@@ -128,7 +128,7 @@ def extract_article_full_text(
 def _page_text(raw: bytes) -> str:
     """Keep page text for AI selection; do not guess an article by length."""
     soup = BeautifulSoup(raw, "html.parser")
-    for node in soup.select("script,style,noscript"):
+    for node in soup.select("script,style,noscript,[hidden],[aria-hidden='true']"):
         node.decompose()
     container = soup.body or soup
     lines = [line.strip() for text in container.stripped_strings

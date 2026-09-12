@@ -73,6 +73,9 @@ type News = {
   collector_first_seen_time: string;
   headline: string;
   original_headline?: string;
+  syndicated_source_count?: number;
+  source_text_incomplete?: boolean;
+  syndicated_sources?: { source: string; source_item_id: string; link?: string; collector_first_seen_time: string; source_text_incomplete?: boolean }[];
   content_characters: number;
   content_status: "FULL_TEXT" | "SOURCE_CONTENT" | "HEADLINE_ONLY";
   content_fetch_status?: "AVAILABLE" | "PENDING" | "RETRYING" | "UNAVAILABLE";
@@ -557,6 +560,13 @@ const SOURCE_LABELS: Record<string, string> = {
   us_treasury_press_releases: "U.S. Treasury · 官方发布",
   bea_economic_releases: "U.S. BEA · 经济数据发布",
 };
+function safeSourceUrl(value?: string): string | undefined {
+  try {
+    const url = new URL(value || "");
+    return ["http:", "https:"].includes(url.protocol) ? url.href : undefined;
+  } catch { return undefined; }
+}
+
 function newsSourceLabel(row: Pick<News, "source" | "category">): string {
   if (row.source === "gdelt_gold_geopolitics") return `GDELT · ${row.category}`;
   return SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ");
@@ -728,7 +738,7 @@ const IMPACT_CLASS_LABELS: Record<string, string> = {
   BACKGROUND: "背景资料",
 };
 
-function NewsRow({
+export function NewsRow({
   row, prefetchedDetail,
 }: {
   row: News;
@@ -807,7 +817,7 @@ function NewsRow({
   return <details ref={detailElement} className="news-row" onToggle={loadDetail} aria-busy={resolvedDetailState === "loading"}>
     <summary>
       <div className="news-row-stamp"><b>{row.category}</b><time title="媒体发布时间；列表按此时间排序">发布 {row.source_published_time ? time(row.source_published_time) : "未知"}</time><small title="系统第一次收到；决定模型当时能否看见">收到 {time(row.collector_first_seen_time)}</small><small className={`eligibility-badge eligibility-${row.model_visibility.toLowerCase().replaceAll("_", "-")}`}>{VISIBILITY_LABELS[row.model_visibility] ?? row.model_visibility.replaceAll("_", " ")}</small></div>
-      <div className="news-row-title"><strong>{row.headline}</strong><small>{newsSourceLabel(row)}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}</small></div>
+      <div className="news-row-title"><strong>{row.headline}</strong><small>{newsSourceLabel(row)}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}{(row.syndicated_source_count ?? 0) > 1 ? ` · ${row.syndicated_source_count} 个转载来源` : ""}</small></div>
       <div className={`news-row-state state-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
         <b>{row.content_status === "FULL_TEXT" ? `${formatExactCount(row.content_characters)} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "正文不可用" : row.content_fetch_status === "RETRYING" ? "自动重试中" : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
         <small>{annotationStatus === "READY" ? (impactLabel ?? "等待 Gemma 判断") : annotationStatus === "NOT_REQUIRED" ? annotationReasonLabel : row.content_fetch_status === "UNAVAILABLE" ? "保留标题 · 不阻塞" : row.content_fetch_status === "RETRYING" ? "备用抓取中" : annotationStatus === "QUEUED" ? "AI 等待处理中" : annotationStatus === "BACKING_OFF" ? "失败后等待重试" : annotationStatus === "DEAD_LETTER" ? "待恢复处理" : "禁止判断"}</small>
@@ -817,6 +827,8 @@ function NewsRow({
       {resolvedDetailState === "loading" ? <section className={`news-detail-skeleton ${showSlowLoading ? "is-visible" : ""}`} aria-hidden="true"><i /><i /><i /></section>
       : resolvedDetailState === "error" ? <section className="gemini-summary summary-waiting"><span>详情暂未到达</span><p>{detailRetryCount >= 3 ? "自动重试已停止。" : "系统正在自动重试。"}<button type="button" onClick={retryDetail}>立即重试</button></p></section>
       : <>
+        {current.source_text_incomplete && <p className="summary-waiting">来源含不可读取片段，以下仅展示可读原文；缺失内容不视为已核实。</p>}
+        {!!current.syndicated_sources?.length && <details className="news-syndicated-sources"><summary>查看 {current.syndicated_sources.length} 个转载来源</summary><ul>{current.syndicated_sources.map(source => <li key={`${source.source}:${source.source_item_id}`}><a href={safeSourceUrl(source.link)} target="_blank" rel="noreferrer">{safeSourceUrl(source.link) ? new URL(safeSourceUrl(source.link)!).hostname : source.source}</a><span> · 收到 {time(source.collector_first_seen_time)}{source.source_text_incomplete ? " · 原文部分可读" : ""}</span></li>)}</ul></details>}
         <div className="news-detail-top">
           <div className={`content-proof content-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
             {row.content_status === "FULL_TEXT" ? `✓ 已读取正式正文 · ${formatExactCount(row.content_characters)} 字符` : row.content_status === "SOURCE_CONTENT" ? `已读取来源内容 · ${formatExactCount(row.content_characters)} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "发布网站拒绝自动读取或需要登录 · 仅保留标题，不进入模型" : row.content_fetch_status === "RETRYING" ? "首次抓取失败 · 系统将在退避结束后自动重试" : row.source === "google_news_gold_geopolitics" ? "Google News RSS 只提供聚合标题 · 未取得 publisher 正文" : "来源正文尚未抓取 · 禁止 Gemini 判断"}
@@ -845,7 +857,7 @@ function NewsRow({
             <span>{impactLabels.join(" · ")}</span>
             <p>{publicImpactReason(current.impact_reason_zh) || "Gemma 将根据新闻内容判断它现在是否仍会影响市场。晚收到只影响可见时间，不会改写过去。"}</p>
           </section>}
-          {current.event_type && <div className="news-classification"><b>{current.event_type}</b><span>鹰派 {impulse(current.hawkishness)}</span><span>通胀 {impulse(current.inflation_impulse)}</span><span>增长 {impulse(current.growth_impulse)}</span><span>地缘 {impulse(current.geopolitical_risk)}</span><span>美元 {impulse(current.usd_impulse)}</span><span>新颖 {number(current.novelty)}</span><span>置信 {number(current.confidence)}</span></div>}
+          {current.emerging_topic_zh && <div className="news-classification"><b>{current.emerging_topic_zh}</b><span>鹰派 {impulse(current.hawkishness)}</span><span>通胀 {impulse(current.inflation_impulse)}</span><span>增长 {impulse(current.growth_impulse)}</span><span>地缘 {impulse(current.geopolitical_risk)}</span><span>美元 {impulse(current.usd_impulse)}</span><span>新颖 {number(current.novelty)}</span><span>置信 {number(current.confidence)}</span></div>}
           <dl className="news-timeline"><div><dt>媒体发布时间</dt><dd>{time(row.source_published_time)}</dd></div><div><dt>系统首次收到</dt><dd>{time(row.collector_first_seen_time)}</dd></div><div><dt>Gemini 完成时间</dt><dd>{time(current.parsed_at)}</dd></div><div><dt>采集延迟</dt><dd>{current.collection_delay_seconds == null ? "—" : `${number(current.collection_delay_seconds, 1)} 秒`}</dd></div><div><dt>处理延迟</dt><dd>{current.processing_delay_seconds == null ? "—" : `${number(current.processing_delay_seconds, 1)} 秒`}</dd></div><div><dt>模型权限</dt><dd>{current.source_eligibility ?? "—"} · {row.model_visibility}</dd></div></dl>
           <footer className="card-footer"><span>{current.entities?.join(" · ") || "无实体"}</span><span>{current.llm_model_version ?? "未标注"} · 收到 {time(row.collector_first_seen_time)} · 标注 {time(current.parsed_at)}</span></footer>
         </div>
