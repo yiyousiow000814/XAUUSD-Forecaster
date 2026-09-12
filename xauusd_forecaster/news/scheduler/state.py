@@ -4204,16 +4204,16 @@ def news_backup_usage_snapshot(
     instant = (now or datetime.now(UTC)).astimezone(UTC)
     day_start = instant.replace(hour=0, minute=0, second=0, microsecond=0)
     rows = connection.execute(
-        f"""SELECT model_family,
+        """SELECT model_family,
           sum(CASE WHEN reserved_at>=? THEN attempted_at IS NOT NULL ELSE 0 END) attempts,
           sum(CASE WHEN reserved_at>=? THEN provider_outcome='PROVIDER_SUCCEEDED' ELSE 0 END) successes,
           sum(CASE WHEN reserved_at>=? THEN provider_outcome='PROVIDER_THROTTLED' ELSE 0 END) throttled,
           sum(CASE WHEN reserved_at>=? THEN provider_outcome='PROVIDER_FAILED' ELSE 0 END) failures,
           sum(CASE WHEN reserved_at>=? THEN COALESCE(provider_total_token_count,0) ELSE 0 END) actual_tokens,
-          sum({EFFECTIVE_INPUT_TOKENS_SQL}) reserved_tokens_24h,
+          sum(input_token_count) reserved_tokens_24h,
           max(attempted_at) last_attempt_at
         FROM news_ai_account_request_usage_v1
-        WHERE account_id=? AND reserved_at>=? AND reserved_at<=?
+        WHERE account_id=? AND reserved_at>? AND reserved_at<=?
         GROUP BY model_family""",
         (*([day_start.isoformat()] * 5), "GROQ_NEWS",
          (instant-timedelta(hours=24)).isoformat(), instant.isoformat()),
