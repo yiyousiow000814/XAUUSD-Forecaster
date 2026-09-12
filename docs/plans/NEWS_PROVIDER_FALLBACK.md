@@ -120,3 +120,11 @@ blocks, read-only snapshot tests including day/rolling windows and zero usage,
 status producer-to-projection tests, rendered admin UI and public redaction,
 then live snapshot/ledger reconciliation and responsive branch Preview. Revert
 is a main-only code correction; all ledger and source facts remain readable.
+
+The first production observation exposed a missing required response_hash in
+the new failure envelope. The correction hashes the exact canonical response
+and preserves the existing storage contract. Final regression now executes the
+production scheduler entrypoint for both annotation and title blocks through
+the actual append-only failure store, not only decoder/detail helpers. The
+escaped review gap was failing to execute the final evidence consumer. No
+storage requirement, source fact, retry policy or safety setting is relaxed.
