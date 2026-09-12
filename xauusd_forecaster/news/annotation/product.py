@@ -1431,6 +1431,21 @@ def generate_metered_json(
 
 
 def _decode_model_json(envelope: dict[str, object]) -> dict:
+    if not envelope.get("candidates"):
+        feedback = envelope.get("promptFeedback")
+        reason = feedback.get("blockReason") if isinstance(feedback, dict) else None
+        if reason not in {"SAFETY", "OTHER", "BLOCKLIST", "PROHIBITED_CONTENT", "IMAGE_SAFETY"}:
+            reason = "NO_CANDIDATES"
+        error = ValueError(f"Provider returned no generated content: {reason}")
+        error.failure_evidence = {
+            "failure_code": "MODEL_OUTPUT_INVALID",
+            "failure_stage": "PROVIDER_RESPONSE",
+            "cause_type": "ProviderResponseUnavailable",
+            "cause": str(error),
+            "selected_output": {"provider_block_reason": reason,
+                                "requested_model": str(envelope.get("modelVersion", "unknown"))[:100]},
+        }
+        raise ModelGatewayResponseInvalid(error)
     text = "".join(
         part.get("text", "")
         for part in envelope["candidates"][0]["content"]["parts"]

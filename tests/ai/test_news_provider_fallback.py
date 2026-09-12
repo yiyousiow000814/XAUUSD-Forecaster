@@ -165,6 +165,54 @@ def backup_envelope(text='{"headline_zh":"黄金新闻"}', finish="stop"):
             "choices": [{"finish_reason": finish, "message": {"content": text}}]}
 
 
+@pytest.mark.parametrize("reason", [None, "PROHIBITED_CONTENT", "SAFETY"])
+def test_missing_google_candidates_preserve_real_reason_and_usage(database, monkeypatch, reason):
+    request_pool = pool(database, monkeypatch)
+    calls = []
+    def transport(request, *, timeout):
+        calls.append(request.full_url)
+        return response({"promptFeedback": {"blockReason": reason},
+                         "usageMetadata": {"promptTokenCount": 4471, "totalTokenCount": 4471},
+                         "modelVersion": DEFAULT_GEMINI_MODEL})
+    monkeypatch.setattr(urllib.request, "urlopen", transport)
+    # The production annotation call does not declare retryable decode errors.
+    with pytest.raises(ModelGatewayResponseInvalid) as error:
+        request_pool.gateway.generate(0, model=DEFAULT_GEMINI_MODEL, purpose="news-annotation",
+            payload=PAYLOAD, input_tokens=100, decode=_decode_model_json, retryable_http_codes=frozenset())
+    from xauusd_forecaster.news.annotation.product import _model_failure_details
+    detail = _model_failure_details(error.value)
+    assert detail["failure_evidence"]["selected_output"]["provider_block_reason"] == (reason or "NO_CANDIDATES")
+    assert detail["failure_code"] == "MODEL_OUTPUT_INVALID"
+    assert len(calls) == 1
+    row = database.execute("SELECT provider_outcome,provider_total_token_count FROM news_ai_account_request_usage_v1").fetchone()
+    assert tuple(row) == ("PROVIDER_FAILED", 4471)
+
+
+def test_backup_usage_projection_uses_own_utc_and_rolling_ledgers(database):
+    from xauusd_forecaster.news.scheduler.state import news_backup_usage_snapshot
+    from xauusd_forecaster.dashboard.payloads import critical_status_payload
+    now = datetime.now(UTC)
+    accountant = GroqNewsAccountant(database, GROQ_NEWS_MODELS[0])
+    assert accountant.reserve(ModelRequestUsage(GROQ_NEWS_MODELS[0], "news-impact", 4000))
+    accountant.mark_provider_attempted()
+    accountant.record_provider_outcome("PROVIDER_SUCCEEDED", usage_metadata={"total_token_count": 900})
+    before = database.total_changes
+    result = news_backup_usage_snapshot(database)
+    assert database.total_changes == before
+    first, second = result["models"]
+    assert (first["reserved_today"], first["attempts"], first["successes"], first["actual_tokens"]) == (1, 1, 1, 900)
+    assert first["reserved_tokens_24h"] == 4000
+    assert second["attempts"] == 0 and second["last_attempt_at"] is None
+    # Preserve all backup fields across the real bounded transport projection.
+    assert critical_status_payload({"llm_routing": {"news_backup": result}})["llm_routing"]["news_backup"] == result
+    tomorrow = now.replace(hour=0,minute=0,second=0,microsecond=0)+timedelta(days=1)
+    future = news_backup_usage_snapshot(database,now=tomorrow)["models"][0]
+    assert future["reserved_today"] == future["attempts"] == 0
+    assert future["reserved_tokens_24h"] == 4000
+    expired = news_backup_usage_snapshot(database,now=now+timedelta(hours=25))["models"][0]
+    assert expired["reserved_tokens_24h"] == 0
+
+
 def response(envelope):
     return io.BytesIO(json.dumps(envelope).encode())
 

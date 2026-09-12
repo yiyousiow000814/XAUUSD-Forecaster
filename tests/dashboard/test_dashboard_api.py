@@ -1057,6 +1057,13 @@ def test_dashboard_quota_uses_scheduler_ledger(tmp_path, monkeypatch) -> None:
         model_family="gemma-title", daily_limit=15_000,
         requests_per_minute=12, now=now,
     )
+    from xauusd_forecaster.news.scheduler.model_gateway import GroqNewsAccountant
+    from xauusd_forecaster.ai.model_gateway import ModelRequestUsage
+    from xauusd_forecaster.ai.provider_registry import GROQ_NEWS_MODELS
+    backup = GroqNewsAccountant(ledger.connection, GROQ_NEWS_MODELS[0])
+    assert backup.reserve(ModelRequestUsage(GROQ_NEWS_MODELS[0], "news-impact", 3000))
+    backup.mark_provider_attempted()
+    backup.record_provider_outcome("PROVIDER_SUCCEEDED", usage_metadata={"total_token_count": 900})
     ledger.close()
 
     payload = _dashboard_module()._dashboard_payload(database)
@@ -1066,6 +1073,11 @@ def test_dashboard_quota_uses_scheduler_ledger(tmp_path, monkeypatch) -> None:
     assert [row["sent"] for row in payload["gemini_quota"]["keys"]] == [1, 1]
     assert payload["gemma_quota"]["total_sent"] == 2
     assert [row["sent"] for row in payload["gemma_quota"]["keys"]] == [2, 0]
+    qwen = payload["llm_routing"]["news_backup"]["models"]
+    assert len(qwen) == 2
+    assert qwen[0]["model"] == GROQ_NEWS_MODELS[0]
+    assert qwen[0]["successes"] == 1 and qwen[0]["actual_tokens"] == 900
+    assert qwen[1]["last_attempt_at"] is None
     scheduler_usage = payload["production_contract"]["scheduler_usage"]
     for surface in AI_QUOTA_SURFACES:
         assert scheduler_usage[surface.payload_key] == payload[

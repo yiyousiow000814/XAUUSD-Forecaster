@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from xauusd_forecaster.ai.credentials import derived_credential_id
+from xauusd_forecaster.ai.provider_registry import GROQ_NEWS_MODELS, GROQ_NEWS_LIMITS
 
 PACIFIC = ZoneInfo("America/Los_Angeles")
 ROUTINE_POOL = "ROUTINE"
@@ -4189,6 +4190,57 @@ def reconcile_completed_jobs(
                     else:
                         connection.execute("RELEASE news_reconciliation_cache")
     return completed.rowcount + obsolete.rowcount
+
+
+def news_backup_usage_snapshot(
+    connection: sqlite3.Connection, *, now: datetime | None = None,
+) -> dict[str, object] | None:
+    """Read the backup's own admission ledger without credentials or writes."""
+    if not connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        ("news_ai_account_request_usage_v1",),
+    ).fetchone():
+        return None
+    instant = (now or datetime.now(UTC)).astimezone(UTC)
+    day_start = instant.replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = connection.execute(
+        f"""SELECT model_family,
+          sum(CASE WHEN reserved_at>=? THEN attempted_at IS NOT NULL ELSE 0 END) attempts,
+          sum(CASE WHEN reserved_at>=? THEN provider_outcome='PROVIDER_SUCCEEDED' ELSE 0 END) successes,
+          sum(CASE WHEN reserved_at>=? THEN provider_outcome='PROVIDER_THROTTLED' ELSE 0 END) throttled,
+          sum(CASE WHEN reserved_at>=? THEN provider_outcome='PROVIDER_FAILED' ELSE 0 END) failures,
+          sum(CASE WHEN reserved_at>=? THEN COALESCE(provider_total_token_count,0) ELSE 0 END) actual_tokens,
+          sum({EFFECTIVE_INPUT_TOKENS_SQL}) reserved_tokens_24h,
+          max(attempted_at) last_attempt_at
+        FROM news_ai_account_request_usage_v1
+        WHERE account_id=? AND reserved_at>=? AND reserved_at<=?
+        GROUP BY model_family""",
+        (*([day_start.isoformat()] * 5), "GROQ_NEWS",
+         (instant-timedelta(hours=24)).isoformat(), instant.isoformat()),
+    ).fetchall()
+    by_model = {r["model_family"]: dict(r) for r in rows}
+    models = []
+    for model in GROQ_NEWS_MODELS:
+        row = by_model.get(model, {})
+        daily = connection.execute(
+            """SELECT request_count FROM news_ai_account_daily_usage_v1
+               WHERE quota_day=? AND account_id=? AND model_family=?""",
+            (day_start.date().isoformat(), "GROQ_NEWS", model),
+        ).fetchone()
+        reserved = int(daily[0]) if daily else 0
+        tokens = int(row.get("reserved_tokens_24h") or 0)
+        models.append({
+            "model": model, "limits": dict(GROQ_NEWS_LIMITS),
+            "reserved_today": reserved,
+            "remaining_today": max(0, GROQ_NEWS_LIMITS["rpd"]-reserved),
+            **{key: int(row.get(key) or 0) for key in
+               ("attempts", "successes", "throttled", "failures", "actual_tokens")},
+            "reserved_tokens_24h": tokens,
+            "remaining_tokens_24h": max(0, GROQ_NEWS_LIMITS["tpd"]-tokens),
+            "last_attempt_at": row.get("last_attempt_at"),
+        })
+    return {"provider": "Groq", "quota_day_utc": day_start.date().isoformat(),
+            "next_reset_at": (day_start+timedelta(days=1)).isoformat(), "models": models}
 
 
 def pending_record_for_job(

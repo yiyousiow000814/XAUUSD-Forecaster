@@ -8,7 +8,7 @@ import sqlite3
 import uuid
 from datetime import UTC
 
-from xauusd_forecaster.ai.provider_registry import quota_surface_for_model, GROQ_NEWS_MODELS
+from xauusd_forecaster.ai.provider_registry import quota_surface_for_model, GROQ_NEWS_MODELS, GROQ_NEWS_LIMITS
 from xauusd_forecaster.news.annotation.product import (
     DEFAULT_GEMINI_MODEL,
     GEMINI_DAILY_PRIORITY_RESERVE,
@@ -185,7 +185,9 @@ class GroqNewsAccountant(ModelRequestAccountant):
         self._usage_id: str | None = None
         self.account_id = "GROQ_NEWS"
         self.model_family = model
-        self.daily_limit, self.rpm, self.tpm, self.tpd = 1000, 30, 8000, 200000
+        self.daily_limit, self.rpm, self.tpm, self.tpd = (
+            GROQ_NEWS_LIMITS[key] for key in ("rpd", "rpm", "tpm", "tpd")
+        )
         self.scope = "GROQ_NEWS/" + model
 
     def reserve(self, usage: ModelRequestUsage) -> bool:
