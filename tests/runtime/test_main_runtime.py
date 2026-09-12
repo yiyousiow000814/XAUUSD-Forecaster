@@ -71,26 +71,27 @@ try {{
 
 
 @pytest.mark.parametrize("configured", [False, True])
-def test_annotator_launch_receives_optional_backup_key_and_restores_parent(tmp_path: Path, configured: bool) -> None:
+@pytest.mark.parametrize("variable", ["OPENROUTER_API_KEY", "GROQ_API_KEY"])
+def test_annotator_launch_receives_optional_backup_key_and_restores_parent(tmp_path: Path, configured: bool, variable: str) -> None:
     output = tmp_path / "credential-check.json"
     worker = tmp_path / "credential-fixture.py"
     worker.write_text("import os,json,time\nfrom pathlib import Path\n"
-        f"Path({str(output)!r}).write_text(json.dumps({{'backup':os.environ.get('OPENROUTER_API_KEY','')}}))\n"
+        f"Path({str(output)!r}).write_text(json.dumps({{'backup':os.environ.get({variable!r},'')}}))\n"
         "time.sleep(45)\n")
     configured_key = "fixture-backup-only" if configured else ""
     result = powershell(tmp_path, f"""
 $script:RuntimeRoot = {ps_quote(tmp_path)}
 $script:RepositoryRoot = $script:RuntimeRoot
 $script:LogRoot = $script:RuntimeRoot
-function Get-RuntimeSetting {{ param([string]$Name); if ($Name -eq 'OPENROUTER_API_KEY') {{ {ps_quote(configured_key)} }} else {{ '' }} }}
-$env:OPENROUTER_API_KEY = 'parent-sentinel'
+function Get-RuntimeSetting {{ param([string]$Name); if ($Name -eq '{variable}') {{ {ps_quote(configured_key)} }} else {{ '' }} }}
+$env:{variable} = 'parent-sentinel'
 $service = [pscustomobject]@{{Key='annotator'; Kind='Python'; ScriptPath={ps_quote(worker)}; Arguments=@()}}
 try {{
     Start-RuntimeService $service
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     while (-not (Test-Path -LiteralPath {ps_quote(output)}) -and [DateTime]::UtcNow -lt $deadline) {{ Start-Sleep -Milliseconds 100 }}
 }} finally {{ Stop-RuntimeService $service }}
-@{{parent=$env:OPENROUTER_API_KEY; remaining=@(Get-RuntimeServiceProcesses $service).Count}} | ConvertTo-Json
+@{{parent=$env:{variable}; remaining=@(Get-RuntimeServiceProcesses $service).Count}} | ConvertTo-Json
 """)
     assert result == {"parent": "parent-sentinel", "remaining": 0}
     assert json.loads(output.read_text()) == {"backup": configured_key}

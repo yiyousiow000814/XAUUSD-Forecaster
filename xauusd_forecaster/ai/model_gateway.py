@@ -16,6 +16,8 @@ from typing import Callable, TypeVar
 from xauusd_forecaster.ai.provider_registry import (
     OPENROUTER_GENERATION_ENDPOINT,
     OPENROUTER_NEWS_MODEL,
+    GROQ_GENERATION_ENDPOINT,
+    GROQ_NEWS_MODELS,
     google_embedding_endpoint_for_model,
     google_generation_endpoint_for_model,
 )
@@ -174,7 +176,7 @@ class ModelRequestUsage:
 class ModelRequestAccountant(ABC):
     """Durable accounting boundary required before provider transport."""
 
-    fallback_gateway: OpenRouterNewsGateway | None = None
+    fallback_gateway: NewsBackupChain | None = None
 
     @abstractmethod
     def reserve(self, usage: ModelRequestUsage) -> bool:
@@ -273,6 +275,12 @@ class GeminiModelGateway:
                 estimator_version=estimator_version.strip(),
             )
             if not self._reserve(api_key, usage):
+                if model.startswith("gemma") and self.accountant.fallback_gateway:
+                    fallback = self.accountant.fallback_gateway.generate(
+                        usage=usage, payload=payload, decode=decode,
+                    )
+                    if fallback is not None:
+                        return fallback
                 continue
             envelope: dict[str, object] | None = None
             provider_attempted = False
@@ -328,7 +336,8 @@ class GeminiModelGateway:
                         retry_after_seconds=_http_retry_after_seconds(error),
                     )
                 last_error = error
-                if error.code in {500, 502, 503} and self.accountant.fallback_gateway:
+                if (error.code in {500, 502, 503} or
+                    (error.code == 429 and model.startswith("gemma"))) and self.accountant.fallback_gateway:
                     fallback = self.accountant.fallback_gateway.generate(
                         usage=usage, payload=payload, decode=decode,
                     )
@@ -342,6 +351,12 @@ class GeminiModelGateway:
                 if provider_attempted:
                     self.accountant.record_provider_outcome("PROVIDER_FAILED")
                 last_error = error
+                if self.accountant.fallback_gateway:
+                    fallback = self.accountant.fallback_gateway.generate(
+                        usage=usage, payload=payload, decode=decode,
+                    )
+                    if fallback is not None:
+                        return fallback
             except Exception:
                 if provider_attempted:
                     self.accountant.record_provider_outcome("PROVIDER_FAILED")
@@ -403,12 +418,18 @@ class GeminiModelGateway:
         return envelope
 
 
-class OpenRouterNewsGateway:
-    """One free backup attempt for a failed Google news generation request."""
+class NewsBackupGateway:
+    """One metered text request to an explicitly allowed news backup model."""
 
-    def __init__(self, api_key: str, accountant: ModelRequestAccountant) -> None:
+    def __init__(self, api_key: str, accountant: ModelRequestAccountant,
+                 *, provider: str = "openrouter", model: str = OPENROUTER_NEWS_MODEL) -> None:
+        if not ((provider == "openrouter" and model == OPENROUTER_NEWS_MODEL)
+                or (provider == "groq" and model in GROQ_NEWS_MODELS)):
+            raise ValueError("unapproved news backup route")
         self.api_key = api_key
         self.accountant = accountant
+        self.provider = provider
+        self.model = model
 
     def generate(
         self, *, usage: ModelRequestUsage, payload: dict[str, object],
@@ -431,16 +452,23 @@ class OpenRouterNewsGateway:
             messages.insert(0, {"role": "system", "content":
                 "Return one JSON object satisfying this schema: " + json.dumps(schema)})
         body = {
-            "model": OPENROUTER_NEWS_MODEL, "messages": messages,
+            "model": self.model, "messages": messages,
             "response_format": {"type": "json_object"},
-            "reasoning": {"enabled": False},
             "temperature": config.get("temperature", 0),
             "max_tokens": config.get("maxOutputTokens", 8192),
-            "provider": {"max_price": {"prompt": 0, "completion": 0}},
         }
+        # Count the complete converted prompt, including the copied JSON schema.
+        # UTF-8 bytes conservatively bound text tokens without another request.
+        tokens = max(usage.input_tokens, len(json.dumps(messages, ensure_ascii=False).encode("utf-8")) + 64)
+        if self.provider == "openrouter":
+            body["provider"] = {"max_price": {"prompt": 0, "completion": 0}}
+        else:
+            body["max_tokens"] = min(int(body["max_tokens"]), 2048)
+            body["reasoning_effort"] = "none"
+            tokens += int(body["max_tokens"])
         backup_usage = ModelRequestUsage(
-            model=OPENROUTER_NEWS_MODEL, purpose=usage.purpose,
-            input_tokens=usage.input_tokens, prompt_contract=usage.prompt_contract,
+            model=self.model, purpose=usage.purpose,
+            input_tokens=tokens, prompt_contract=usage.prompt_contract,
             estimator_version=usage.estimator_version,
         )
         if not self.accountant.reserve(backup_usage):
@@ -448,12 +476,13 @@ class OpenRouterNewsGateway:
         self.accountant.mark_provider_attempted()
         try:
             request = urllib.request.Request(
-                OPENROUTER_GENERATION_ENDPOINT,
+                OPENROUTER_GENERATION_ENDPOINT if self.provider == "openrouter" else GROQ_GENERATION_ENDPOINT,
                 data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
                 headers={"Content-Type": "application/json",
+                         "User-Agent": "XAUUSD-Forecaster/1.0",
                          "Authorization": "Bearer " + self.api_key}, method="POST",
             )
-            with urllib.request.urlopen(request, timeout=120.0) as response:
+            with urllib.request.urlopen(request, timeout=15.0) as response:
                 envelope = json.loads(response.read())
             if "error" in envelope:
                 raise ValueError("backup provider returned an error envelope")
@@ -464,14 +493,14 @@ class OpenRouterNewsGateway:
             if not isinstance(text, str) or not text.strip():
                 raise ValueError("backup provider response has no text")
             actual_model = str(envelope.get("model") or "")
-            if actual_model not in {OPENROUTER_NEWS_MODEL, OPENROUTER_NEWS_MODEL.removesuffix(":free")}:
+            if actual_model not in {self.model, self.model.removesuffix(":free")}:
                 raise ValueError("backup provider returned an unexpected model")
-            identity = "openrouter/" + actual_model
+            identity = self.provider + "/" + actual_model
             result = decode({"candidates": [{"content": {"parts": [{"text": text}]}}],
                              "modelVersion": identity})
         except urllib.error.HTTPError as error:
             error.failure_evidence = _http_failure_evidence(
-                error, model="openrouter/" + OPENROUTER_NEWS_MODEL, purpose=usage.purpose,
+                error, model=self.provider + "/" + self.model, purpose=usage.purpose,
             )
             self.accountant.record_provider_outcome(
                 "PROVIDER_THROTTLED" if error.code == 429 else "PROVIDER_FAILED",
@@ -486,6 +515,11 @@ class OpenRouterNewsGateway:
             raise ModelGatewayResponseInvalid(ValueError("Backup response did not satisfy the news contract")) from error
         self.accountant.record_provider_outcome(
             "PROVIDER_SUCCEEDED", provider_model_version=identity,
+            usage_metadata=_sanitized_usage_metadata({"usageMetadata": {
+                "promptTokenCount": envelope.get("usage", {}).get("prompt_tokens"),
+                "candidatesTokenCount": envelope.get("usage", {}).get("completion_tokens"),
+                "totalTokenCount": envelope.get("usage", {}).get("total_tokens"),
+            }}),
         )
         return result, identity
 
@@ -495,6 +529,31 @@ class OpenRouterNewsGateway:
         if any(set(part) != {"text"} or not isinstance(part["text"], str) for part in parts):
             raise ValueError("backup news input must contain text only")
         return "\n".join(part["text"] for part in parts)
+
+
+class NewsBackupChain:
+    """Try each configured route once; ordinary retries belong to the queue."""
+
+    def __init__(self, routes: tuple[NewsBackupGateway, ...]) -> None:
+        self.routes = routes
+
+    def generate(self, *, usage: ModelRequestUsage, payload: dict[str, object],
+                 decode: Callable[[dict[str, object]], T]) -> tuple[T, str] | None:
+        last_error = None
+        for route in self.routes:
+            try:
+                result = route.generate(usage=usage, payload=payload, decode=decode)
+                if result is not None:
+                    return result
+            except urllib.error.HTTPError as error:
+                if error.code not in {404, 429, 500, 502, 503, 504}:
+                    raise
+                last_error = error
+            except ModelGatewayRequestFailed as error:
+                last_error = error
+        if last_error is not None:
+            raise last_error
+        return None
 
 
 class OllamaAssistantGateway:

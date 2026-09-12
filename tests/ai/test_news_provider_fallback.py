@@ -11,9 +11,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from xauusd_forecaster.ai.model_gateway import ModelGatewayResponseInvalid, ModelRequestUsage
-from xauusd_forecaster.ai.provider_registry import DEFAULT_GEMINI_MODEL, OPENROUTER_NEWS_MODEL
+from xauusd_forecaster.ai.provider_registry import DEFAULT_GEMINI_MODEL, DEFAULT_GEMMA_MODEL, OPENROUTER_NEWS_MODEL, GROQ_NEWS_MODELS
 from xauusd_forecaster.news.annotation.product import _GeminiRequestPool, _decode_model_json
-from xauusd_forecaster.news.scheduler.model_gateway import SchedulerModelAccountant, OpenRouterNewsAccountant
+from xauusd_forecaster.news.scheduler.model_gateway import SchedulerModelAccountant, OpenRouterNewsAccountant, GroqNewsAccountant
 from xauusd_forecaster.news.scheduler.state import (
     ApiCredential, install_scheduler_schema, reserve_account_request,
 )
@@ -35,12 +35,118 @@ def database(tmp_path):
 
 
 def pool(db, monkeypatch, lane="LIVE"):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
     monkeypatch.setenv("OPENROUTER_API_KEY", "backup-secret")
     accountant = SchedulerModelAccountant(
         db, ApiCredential("google-account", "ROUTINE", "google-secret", "credential"),
         urgent=True, work_lane=lane, enable_news_backup=True,
     )
     return _GeminiRequestPool(("google-secret",), request_accountant=accountant)
+
+
+@pytest.mark.parametrize("google_model", [DEFAULT_GEMINI_MODEL, DEFAULT_GEMMA_MODEL])
+@pytest.mark.parametrize("first_failure", [429, 503, 404])
+def test_backup_route_order_and_actual_identity(database, monkeypatch, google_model, first_failure):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-fixture")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-fixture")
+    accountant = SchedulerModelAccountant(database, ApiCredential("google", "ROUTINE", "key", "id"),
+                                         urgent=True, enable_news_backup=True)
+    request_pool = _GeminiRequestPool(("key",), request_accountant=accountant)
+    called = []
+    def transport(request, *, timeout):
+        body = json.loads(request.data)
+        if "generativelanguage" in request.full_url:
+            raise urllib.error.HTTPError(request.full_url, 503, "temporary", {}, io.BytesIO(b"{}"))
+        called.append(body["model"])
+        assert "secret" not in str(body)
+        assert request.get_header("X-goog-api-key") is None
+        assert request.get_header("User-agent") == "XAUUSD-Forecaster/1.0"
+        assert timeout == 15
+        if body["model"] != GROQ_NEWS_MODELS[1]:
+            raise urllib.error.HTTPError(request.full_url, first_failure, "unavailable", {"Retry-After":"60"}, io.BytesIO(b"{}"))
+        assert "provider" not in body
+        assert body["reasoning_effort"] == "none"
+        assert any(message["content"] == "Full original news article." for message in body["messages"])
+        return response({**backup_envelope(), "model": GROQ_NEWS_MODELS[1],
+                         "usage":{"prompt_tokens":100,"completion_tokens":40,"total_tokens":140}})
+    monkeypatch.setattr(urllib.request, "urlopen", transport)
+    result, model = request_pool.call_json(google_model, purpose="news-impact", payload=PAYLOAD, decode=_decode_model_json)
+    expected = [OPENROUTER_NEWS_MODEL, *GROQ_NEWS_MODELS]
+    assert called == expected
+    assert model == "groq/" + GROQ_NEWS_MODELS[1]
+    assert result["headline_zh"] == "黄金新闻"
+    row = database.execute("SELECT * FROM news_ai_account_request_usage_v1 WHERE provider_model_version=?", (model,)).fetchone()
+    assert row["provider_total_token_count"] == 140
+    assert row["input_token_count"] >= 2048 + 100
+
+
+@pytest.mark.parametrize("failure", [429, "capacity", "timeout"])
+def test_gemma_capacity_and_transport_can_recover(database, monkeypatch, failure):
+    monkeypatch.setenv("GROQ_API_KEY", "groq-fixture")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    accountant = SchedulerModelAccountant(database, ApiCredential("google", "ROUTINE", "key", "id"),
+                                         urgent=True, enable_news_backup=True)
+    if failure == "capacity":
+        monkeypatch.setattr(accountant, "reserve", lambda _usage: False)
+    request_pool = _GeminiRequestPool(("key",), request_accountant=accountant)
+    def transport(request, *, timeout):
+        if "generativelanguage" in request.full_url:
+            if failure == "timeout":
+                raise TimeoutError()
+            raise urllib.error.HTTPError(request.full_url, 429, "quota", {}, io.BytesIO(b"{}"))
+        return response({**backup_envelope(), "model": GROQ_NEWS_MODELS[0]})
+    monkeypatch.setattr(urllib.request, "urlopen", transport)
+    assert request_pool.call_json(DEFAULT_GEMMA_MODEL, purpose="news-impact", payload=PAYLOAD,
+                                  decode=_decode_model_json)[1] == "groq/" + GROQ_NEWS_MODELS[0]
+
+
+@pytest.mark.parametrize("model", GROQ_NEWS_MODELS)
+def test_groq_combined_token_caps_survive_success_and_restart(database, model):
+    from xauusd_forecaster.news.scheduler.state import rolling_account_usage
+    accountant = GroqNewsAccountant(database, model)
+    usage = ModelRequestUsage(model, "news-impact", 4000)
+    for _ in range(2):
+        assert accountant.reserve(usage)
+        accountant.mark_provider_attempted()
+        accountant.record_provider_outcome("PROVIDER_SUCCEEDED", usage_metadata={
+            "prompt_token_count":100, "total_token_count":200}, provider_model_version="groq/"+model)
+    assert rolling_account_usage(database, account_id="GROQ_NEWS", model_families=(model,), now=datetime.now(UTC))[1] == 8000
+    assert not GroqNewsAccountant(database, model).reserve(usage)
+    database.execute("UPDATE news_ai_account_request_usage_v1 SET reserved_at=?,input_token_count=100000",
+                     ((datetime.now(UTC)-timedelta(hours=2)).isoformat(),))
+    database.commit()
+    assert not GroqNewsAccountant(database, model).reserve(usage)
+    database.execute("UPDATE news_ai_account_request_usage_v1 SET reserved_at=?",
+                     ((datetime.now(UTC)-timedelta(hours=25)).isoformat(),))
+    database.commit()
+    assert GroqNewsAccountant(database, model).reserve(usage)
+
+
+def test_oversized_complete_input_skips_groq_without_network(database, monkeypatch):
+    from xauusd_forecaster.ai.model_gateway import NewsBackupGateway
+    gateway = NewsBackupGateway("fixture", GroqNewsAccountant(database, GROQ_NEWS_MODELS[0]),
+                               provider="groq", model=GROQ_NEWS_MODELS[0])
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: pytest.fail("oversized input sent"))
+    payload = {**PAYLOAD, "contents":[{"parts":[{"text":"全文" * 4000}]}]}
+    assert gateway.generate(usage=ModelRequestUsage(DEFAULT_GEMMA_MODEL,"news-impact",100),
+                            payload=payload, decode=_decode_model_json) is None
+    assert len(payload["contents"][0]["parts"][0]["text"]) == 8000
+
+
+def test_groq_token_admission_is_atomic_across_lanes(tmp_path):
+    path = tmp_path / "groq-quota.sqlite3"
+    with connection(path) as db:
+        install_scheduler_schema(db)
+    def reserve(_):
+        db = connection(path)
+        try:
+            return GroqNewsAccountant(db, GROQ_NEWS_MODELS[0]).reserve(
+                ModelRequestUsage(GROQ_NEWS_MODELS[0], "news-impact", 1000))
+        finally:
+            db.close()
+    with ThreadPoolExecutor(max_workers=8) as threads:
+        assert sum(threads.map(reserve, range(20))) == 8
+    assert not reserve(None)
 
 
 PAYLOAD = {

@@ -30,11 +30,14 @@ quota or the scheduler's automatic batch size.
 
 ## Optional news backup
 
-`OPENROUTER_API_KEY` enables one backup request after a Google generation HTTP
-500, 502 or 503 on LIVE news work. The fixed `nvidia/nemotron-3-super-120b-a12b:free` model
-uses the same complete source, prompt schema and downstream validation. Success
-on Google, quota deferrals, malformed output and other HTTP statuses do not call
-the backup. Assistant and historical backfill do not use it.
+`OPENROUTER_API_KEY` enables only `google/gemma-4-31b-it:free`.
+`GROQ_API_KEY` enables `qwen/qwen3.8-27b`, then `qwen/qwen3.6-27b`.
+Both Google Gemma and Gemini recovery try OpenRouter Gemma first, followed by
+Groq Qwen 3.8 and then 3.6. Each route is tried once per
+failed generation, with the complete source, prompt schema and original decoder.
+HTTP 500/502/503 and transport failure trigger recovery; Gemma capacity denial
+and HTTP 429 also qualify. Successful generation and invalid model output do
+not cause extra requests. Assistant and historical backfill never use backups.
 
 All lanes share 50 requests per UTC day and 20 per trailing 60 seconds through
 the existing transactional request ledger. Failed and interrupted attempts count;
@@ -43,6 +46,16 @@ affects only its own provider scope. Paid models and paid routing are excluded b
 the fixed free model and zero provider maximum prices. The Windows main launcher
 loads the optional key for the annotator; restart is needed after configuration
 changes. Request/model outcome evidence contains no secrets.
+
+Groq shares each model's budget across all scheduler lanes: 30 RPM, 1,000 RPD,
+8,000 combined tokens/minute and 200,000 tokens/trailing 24 hours. Reservations
+count the complete converted prompt conservatively using UTF-8 bytes plus up to
+2,048 output tokens. This can skip large articles; input is never truncated to
+fit. Failed attempts retain their reservation. Actual provider token usage is
+also recorded. Per-model Retry-After survives restart independently of Google
+and OpenRouter. Backup network inactivity timeouts are 15 seconds per route.
+These limits follow the configured free account; provider limits can be lower.
+See [Groq limits](https://console.groq.com/docs/rate-limits).
 
 See [OpenRouter limits](https://openrouter.ai/docs/api_reference/limits).
 The account's actual free allowance may be lower or unavailable; provider

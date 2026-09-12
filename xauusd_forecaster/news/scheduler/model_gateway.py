@@ -8,7 +8,7 @@ import sqlite3
 import uuid
 from datetime import UTC
 
-from xauusd_forecaster.ai.provider_registry import quota_surface_for_model
+from xauusd_forecaster.ai.provider_registry import quota_surface_for_model, GROQ_NEWS_MODELS
 from xauusd_forecaster.news.annotation.product import (
     DEFAULT_GEMINI_MODEL,
     GEMINI_DAILY_PRIORITY_RESERVE,
@@ -16,7 +16,8 @@ from xauusd_forecaster.news.annotation.product import (
 from xauusd_forecaster.ai.model_gateway import (
     ModelRequestAccountant,
     ModelRequestUsage,
-    OpenRouterNewsGateway,
+    NewsBackupGateway,
+    NewsBackupChain,
 )
 from xauusd_forecaster.news.scheduler.state import (
     ApiCredential,
@@ -56,10 +57,16 @@ class SchedulerModelAccountant(ModelRequestAccountant):
         self._failure_evidence: dict[str, object] | None = None
         self._usage_id: str | None = None
         backup_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-        if backup_key and work_lane == "LIVE" and enable_news_backup:
-            self.fallback_gateway = OpenRouterNewsGateway(
-                backup_key, OpenRouterNewsAccountant(connection),
-            )
+        groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+        if work_lane == "LIVE" and enable_news_backup:
+            routes = []
+            if backup_key:
+                routes.append(NewsBackupGateway(backup_key, OpenRouterNewsAccountant(connection)))
+            if groq_key:
+                routes.extend(NewsBackupGateway(groq_key, GroqNewsAccountant(connection, model),
+                              provider="groq", model=model) for model in GROQ_NEWS_MODELS)
+            if routes:
+                self.fallback_gateway = NewsBackupChain(tuple(routes))
 
     def reserve(self, usage: ModelRequestUsage) -> bool:
         policy = quota_surface_for_model(usage.model)
@@ -179,17 +186,25 @@ class OpenRouterNewsAccountant(ModelRequestAccountant):
     def __init__(self, connection: sqlite3.Connection) -> None:
         self.connection = connection
         self._usage_id: str | None = None
+        self.account_id = "OPENROUTER_NEWS"
+        self.model_family = "openrouter-free"
+        self.daily_limit = 50
+        self.rpm = 20
+        self.tpm = None
+        self.tpd = None
+        self.scope = "OPENROUTER_NEWS"
 
     def reserve(self, usage: ModelRequestUsage) -> bool:
         usage_id = str(uuid.uuid4())
         reserved = reserve_account_request(
-            self.connection, account_id="OPENROUTER_NEWS",
-            model_family="openrouter-free", daily_limit=50, requests_per_minute=20,
+            self.connection, account_id=self.account_id,
+            model_family=self.model_family, daily_limit=self.daily_limit, requests_per_minute=self.rpm,
+            input_tokens_per_minute=self.tpm, tokens_per_24_hours=self.tpd,
             input_tokens=usage.input_tokens, usage_id=usage_id,
             requested_model=usage.model, purpose=usage.purpose,
             prompt_contract=usage.prompt_contract, estimator_version=usage.estimator_version,
-            quota_authority="openrouter_free", quota_timezone=UTC,
-            independent_provider_scope="OPENROUTER_NEWS",
+            quota_authority=self.model_family, quota_timezone=UTC,
+            independent_provider_scope=self.scope,
         )
         self._usage_id = usage_id if reserved else None
         return reserved
@@ -210,6 +225,19 @@ class OpenRouterNewsAccountant(ModelRequestAccountant):
             self.connection, self._usage_id, outcome=outcome,
             retry_after_seconds=retry_after_seconds, usage_metadata=usage_metadata,
             provider_model_version=provider_model_version,
-            independent_provider_scope="OPENROUTER_NEWS",
+            independent_provider_scope=self.scope,
         )
         self._usage_id = None
+
+
+class GroqNewsAccountant(OpenRouterNewsAccountant):
+    """Same transaction owner, with Groq's request and combined token caps."""
+
+    def __init__(self, connection: sqlite3.Connection, model: str) -> None:
+        if model not in GROQ_NEWS_MODELS:
+            raise ValueError("unapproved Groq model")
+        super().__init__(connection)
+        self.account_id = "GROQ_NEWS"
+        self.model_family = model
+        self.daily_limit, self.rpm, self.tpm, self.tpd = 1000, 30, 8000, 200000
+        self.scope = "GROQ_NEWS/" + model

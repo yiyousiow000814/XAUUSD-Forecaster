@@ -62,6 +62,8 @@ TOKEN_CALIBRATION_MAX_RATIO = 8.00
 TOKEN_CALIBRATION_MAX_DOWNWARD_STEP = 0.01
 SCHEDULER_DEFERRAL_RETENTION = timedelta(hours=24)
 EFFECTIVE_INPUT_TOKENS_SQL = """CASE
+  WHEN account_id='GROQ_NEWS'
+    THEN MAX(input_token_count,COALESCE(provider_total_token_count,0))
   WHEN provider_outcome='PROVIDER_SUCCEEDED'
    AND provider_prompt_token_count>0
     THEN provider_prompt_token_count
@@ -2316,6 +2318,7 @@ def reserve_account_request(
     request_count: int = 1,
     input_tokens: int = 0,
     input_tokens_per_minute: int | None = None,
+    tokens_per_24_hours: int | None = None,
     shared_model_families: tuple[str, ...] | None = None,
     share_minute_across_accounts: bool = False,
     reserve_total: int = 0,
@@ -2389,6 +2392,23 @@ def reserve_account_request(
             (day, account_id, *families),
         ).fetchone()
         daily_count = int(daily["request_count"])
+        if tokens_per_24_hours is not None:
+            # Backup budgets include reserved output as well as prompt tokens.
+            # A rolling day avoids assuming the external provider's reset zone.
+            token_day = connection.execute(
+                f"""SELECT COALESCE(sum(input_token_count),0), MIN(reserved_at)
+                    FROM news_ai_account_request_usage_v1
+                    WHERE account_id=? AND model_family IN ({placeholders})
+                      AND reserved_at>? AND reserved_at<=?""",
+                (account_id, *families, _iso(instant - timedelta(days=1)), timestamp),
+            ).fetchone()
+            if int(token_day[0]) + estimated_tokens > tokens_per_24_hours:
+                connection.rollback()
+                if decision is not None:
+                    decision.update(failure_code="MODEL_CAPACITY_DEFERRED",
+                                    dimension="TPD", current=int(token_day[0]),
+                                    requested=estimated_tokens, limit=tokens_per_24_hours)
+                return False
         if workload_class == CONTRACT_BACKFILL_WORKLOAD:
             backfill = _backfill_admission_locked(
                 connection,

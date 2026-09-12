@@ -39,6 +39,7 @@
       "tests": [
         "tests/news/test_news_event_identity.py",
         "tests/ai/test_model_gateway.py",
+        "tests/ai/test_news_provider_fallback.py",
         "tests/news/test_news_pipeline_health.py",
         "tests/assistant/test_assistant_chat_worker.py",
         "tests/news/test_news_semantic_contract_v15.py",
