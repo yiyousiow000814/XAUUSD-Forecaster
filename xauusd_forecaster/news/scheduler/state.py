@@ -18,6 +18,18 @@ from zoneinfo import ZoneInfo
 
 from xauusd_forecaster.ai.credentials import derived_credential_id
 
+# Historic receipts predate typed HTTP diagnostics. Match their exact emitted
+# messages; arbitrary provider prose or deterministic errors cannot grant recovery.
+RECOVERABLE_PROVIDER_ERRORS = (
+    "HTTP Error 429: Too Many Requests",
+    "HTTP Error 500: Internal Server Error",
+    "HTTP Error 502: Bad Gateway",
+    "HTTP Error 503: Service Unavailable",
+    "HTTP Error 504: Gateway Timeout",
+    "Model provider request failed: TimeoutError",
+    "Model provider request failed: ConnectionResetError",
+)
+
 PACIFIC = ZoneInfo("America/Los_Angeles")
 ROUTINE_POOL = "ROUTINE"
 PREEMPTIBLE_POOL = "PREEMPTIBLE"
@@ -3082,10 +3094,11 @@ def authorize_repairable_annotation_failures(
     now: datetime | None = None,
 ) -> int:
     """Grant one auditable retry to failures fixed by this recovery version."""
+    provider_placeholders = ",".join("?" for _ in RECOVERABLE_PROVIDER_ERRORS)
     timestamp = _iso(now or datetime.now(UTC))
     with connection:
         inserted = connection.execute(
-            """INSERT OR IGNORE INTO news_ai_failure_recoveries_v1
+            f"""INSERT OR IGNORE INTO news_ai_failure_recoveries_v1
                (failure_id,recovery_version,source,source_item_id,
                 revision_number,llm_model_version,prompt_version,authorized_at)
                SELECT f.failure_id,?,f.source,f.source_item_id,
@@ -3096,10 +3109,13 @@ def authorize_repairable_annotation_failures(
                WHERE f.task_type='ANNOTATION' AND f.prompt_version=?
                  AND f.is_terminal=1
                  AND (
-                   e.failure_stage IN (
+                   f.error IN ({provider_placeholders})
+                   OR e.failure_stage IN (
                      'DISPLAY_REPAIR','EVIDENCE_ANCHOR_REPAIR')
                    OR (e.failure_stage='SEMANTIC_CONTRACT'
-                     AND e.cause='annotation supporting evidence is absent from source')
+                     AND e.cause IN (
+                       'annotation supporting evidence is absent from source',
+                       'annotation supporting_evidence contains a long item'))
                    OR EXISTS (
                      SELECT 1
                      FROM news_annotation_display_checkpoints_v1 c
@@ -3114,7 +3130,7 @@ def authorize_repairable_annotation_failures(
                      AND f2.revision_number=f.revision_number
                      AND f2.llm_model_version=f.llm_model_version
                      AND f2.prompt_version=f.prompt_version)""",
-            (recovery_version, timestamp, prompt_version),
+            (recovery_version, timestamp, prompt_version, *RECOVERABLE_PROVIDER_ERRORS),
         ).rowcount
         connection.execute(
             """UPDATE news_ai_jobs_v1 AS j
@@ -3157,6 +3173,7 @@ def authorize_repairable_impact_failures(
     timestamp = _iso(now or datetime.now(UTC))
     repairable_errors = (
         "New-episode identity requires an anchor difference",
+        *RECOVERABLE_PROVIDER_ERRORS,
     )
     placeholders = ",".join("?" for _ in repairable_errors)
     with connection:

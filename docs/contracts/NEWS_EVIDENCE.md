@@ -31,19 +31,28 @@ names, tickers and abbreviations are allowed. Local code does not veto Gemma's
 text using language ratios, Latin-span grounding or numeric-spelling heuristics.
 There is no display repair loop or fallback model. Only display fields can be
 changed by this review; source facts and semantic measurements remain immutable.
+The same source-grounded review compares quantity magnitude and units, currency,
+sign, reference period and total/component relationships. It preserves attributed
+opinions, plans and uncertainty, and explicitly dates historical context when the
+source supports it. Neither review stage invents a calendar date or timezone
+from the receipt clock. These are model instructions, not a claim that model
+accuracy is guaranteed or an additional deterministic language gate.
 Existing semantic checkpoints are read to finish previously accepted work, not
 to recreate the retired display-repair workflow. Historical failures remain
 append-only audit evidence. Provider and JSON errors retain ordinary request
 handling and are never recorded as a successful review.
 
 Supporting evidence MUST be an exact span of the immutable headline or body.
-When an otherwise valid semantic response fails only this anchor check, a
+When an otherwise valid semantic response fails only this anchor check or the
+bounded evidence excerpt length check, a
 bounded repair MAY ask the same annotation model to select one to three opaque
 IDs from system-generated exact source spans. The repair MUST freeze every
 semantic and display field, map selected IDs back to source text
 deterministically, and re-run the complete semantic contract. Free-form repaired
 evidence, unknown IDs, or a failed second validation remain a model-output
-contract failure. The rejected output and repair stage remain bounded failure
+contract failure. This same recovery applies after valid whole-page article
+selection, with candidate excerpts restricted to the selected article. Invalid
+selection never triggers an extraction or repair request. The rejected output and repair stage remain bounded failure
 evidence for diagnosis.
 
 Collector lanes are not independent publishers. Google News and GDELT are
@@ -349,3 +358,15 @@ reader capability; historical raw records and accepted annotations must not be
 rewritten for rollback. Existing scheduler quota accounting and retry ownership
 remain unchanged. Page text can use more input tokens than a correctly extracted
 article; unchanged request count is not a claim of unchanged token consumption.
+
+## Temporary provider unavailability
+
+HTTP 429/500/502/503/504 and typed transport failures are operational delay,
+not a finding that an article is invalid. They retain BACKING_OFF with the
+existing 15-minute, one-hour, six-hour, then twelve-hour retry cadence. Twelve
+hours is the per-record cap between attempts, not an immediate retry loop.
+Scheduler quota admission, leases and current-source eligibility remain required.
+Repeated deterministic output failures retain their bounded stopping policy.
+The existing versioned recovery receipt authorizes previously terminal matching
+provider failures once; it cannot authorize a newer deterministic failure from
+an older provider receipt or rewrite any historical evidence.

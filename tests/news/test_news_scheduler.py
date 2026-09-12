@@ -1186,7 +1186,13 @@ def test_annotation_surge_takes_priority_after_embedding_pressure_falls() -> Non
     )[0] is True
 
 
-def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path) -> None:
+@pytest.mark.parametrize("legacy_error", [
+    "New-episode identity requires an anchor difference",
+    "HTTP Error 500: Internal Server Error",
+    "HTTP Error 503: Service Unavailable",
+    "Model provider request failed: TimeoutError",
+])
+def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path, legacy_error) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     ledger.connection.execute("PRAGMA foreign_keys=OFF")
     job_id = enqueue_job(
@@ -1199,9 +1205,17 @@ def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path) -> 
         "source": "source", "source_item_id": "item", "revision_number": 1,
         "content_hash": "hash", "annotation_id": "annotation",
     }
-    error = ValueError("New-episode identity requires an anchor difference")
-    _append_impact_failure(ledger, row, error, model_version=IMPACT_MODEL)
-    _append_impact_failure(ledger, row, error, model_version=IMPACT_MODEL)
+    error = ValueError(legacy_error)
+    # Persist a genuine old-policy terminal receipt, independently of the new policy.
+    ledger.append_news_impact_failure({
+        "failure_id": "legacy-terminal-impact", "source": "source",
+        "source_item_id": "item", "revision_number": 1, "raw_content_hash": "hash",
+        "annotation_id": "annotation", "llm_model_version": IMPACT_MODEL,
+        "prompt_version": IMPACT_PROMPT_VERSION, "attempt_number": 5,
+        "error_type": "HTTPError" if legacy_error.startswith("HTTP") else "ValueError",
+        "error_signature": "legacy-error", "error": legacy_error,
+        "failed_at": NOW, "next_retry_at": None, "is_terminal": True,
+    })
     assert claim_job(
         ledger.connection, worker_id="worker", pool=ROUTINE_POOL, now=NOW,
     ) is not None
@@ -1825,6 +1839,9 @@ def test_dead_letter_is_terminal() -> None:
 
 @pytest.mark.parametrize(("stage", "cause"), (
     ("DISPLAY_REPAIR", "number mismatch"),
+    ("news-display-review", "HTTP Error 500: Internal Server Error"),
+    ("news-annotation", "HTTP Error 503: Service Unavailable"),
+    ("SEMANTIC_CONTRACT", "annotation supporting_evidence contains a long item"),
     (
         "SEMANTIC_CONTRACT",
         "annotation supporting evidence is absent from source",
@@ -1866,7 +1883,7 @@ def test_repair_version_reopens_matching_annotation_failure_only_once(
             "prompt_version": CURRENT_NEWS_PROMPT_VERSION,
             "attempt_number": attempt, "error_type": "ValueError",
             "error_signature": f"signature-{attempt}",
-            "error": "display repair failed", "failed_at": NOW,
+            "error": cause, "failed_at": NOW,
             "is_terminal": True,
             "failure_evidence": {
                 "failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
