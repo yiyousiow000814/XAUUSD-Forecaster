@@ -4,6 +4,19 @@ This specification defines the required visual behavior of the dashboard's
 data-dense navigation, metric grids, tables, and expandable evidence panels.
 It applies to both desktop and phone layouts.
 
+## Backup model usage
+
+The admin AI usage page shows both authorized Groq Qwen models in fallback
+order, even when no request has been observed. Missing telemetry is unavailable,
+not zero or proof of a configured key. Read the existing private
+`llm_routing.news_backup` snapshot without exposing credentials or adding
+client-side provider calls. Display reserved requests separately from actual
+attempts, success, failure, throttling, and provider-reported token counts.
+RPD follows UTC midnight; token admission uses a trailing 24-hour window.
+Show local admission balances as local estimates, not provider availability.
+All operator timestamps use Asia/Kuala_Lumpur. Both model sections must remain
+readable without horizontal scrolling on supported phone viewports.
+
 ## Grid boundaries
 
 - A bordered grid has one continuous outer boundary and one visible one-pixel

@@ -86,3 +86,37 @@ passes. Existing quota and CI invariants were strengthened, not bypassed.
 Exact-head CI, desktop/390x844/360x800 branch Preview and main/runtime identity
 are separate acceptance gates. Local tests and provider rehearsals do not by
 themselves establish production activation or future provider availability.
+
+## Usage visibility and response-envelope correction
+
+Baseline: main d24442531a7bd18b7d37754a19304413d557da2b. Production Groq
+requests succeeded but the dashboard only projected Google quota surfaces.
+The existing local status producer will read the same Groq admission ledger
+and include two fixed model summaries under private `llm_routing.news_backup`.
+The sync snapshot, admin-status route and StatusView consume that existing
+private field. Public status continues to remove all llm_routing data.
+No credentials are copied to dashboard processes. An empty ledger means no
+observed usage, not proof of a configured credential or provider availability.
+
+Reads use the account/time index over the retained 24-hour request window and
+the daily primary key. Two model rows are transported, independently of queue
+or article growth. Report reservations, attempts, successes, failures and
+provider-reported tokens separately; quota balances are local admission
+balances, not provider promises. RPD uses UTC; token budget uses trailing 24h.
+Old payloads display unavailable; new fields are optional to old consumers.
+Restart reloads existing counters. No migrations or new recurring owner.
+
+One real request reproduced Google's documented promptFeedback.blockReason
+PROHIBITED_CONTENT without candidates for a collected film-ranking article.
+The shared news decoder must report that bounded reason before it indexes the
+candidate list, preserve actual usage, and never manufacture an annotation.
+This correction does not classify the article, change queue eligibility,
+disable provider safeguards, or broaden the approved fallback triggers.
+Historical errors remain. An omitted candidate without a block reason remains
+an explicit invalid response. Existing retry and recovery ownership is retained.
+
+Verification: shared gateway regression for absent candidates and explicit
+blocks, read-only snapshot tests including day/rolling windows and zero usage,
+status producer-to-projection tests, rendered admin UI and public redaction,
+then live snapshot/ledger reconciliation and responsive branch Preview. Revert
+is a main-only code correction; all ledger and source facts remain readable.

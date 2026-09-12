@@ -357,7 +357,11 @@ class GeminiModelGateway:
                         return fallback
             except Exception:
                 if provider_attempted:
-                    self.accountant.record_provider_outcome("PROVIDER_FAILED")
+                    self.accountant.record_provider_outcome(
+                        "PROVIDER_FAILED",
+                        usage_metadata=_sanitized_usage_metadata(envelope) if envelope else None,
+                        provider_model_version=_sanitized_model_version(envelope) if envelope else None,
+                    )
                 raise
             else:
                 self.accountant.record_provider_outcome(

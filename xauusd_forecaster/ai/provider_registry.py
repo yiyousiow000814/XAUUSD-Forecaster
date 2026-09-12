@@ -17,6 +17,7 @@ FALLBACK_GEMINI_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_GEMMA_MODEL = "gemma-4-31b-it"
 GEMINI_EMBEDDING_MODEL = "gemini-embedding-2"
 GROQ_NEWS_MODELS = ("qwen/qwen3.8-27b", "qwen/qwen3.6-27b")
+GROQ_NEWS_LIMITS = {"rpd": 1000, "rpm": 30, "tpm": 8000, "tpd": 200000}
 GROQ_GENERATION_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 GEMMA_REQUESTS_PER_DAY_PER_KEY = 15_000
 GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL = (

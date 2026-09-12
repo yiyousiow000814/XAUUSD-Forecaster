@@ -26,8 +26,10 @@ const built = await build({
     contents: `import React from 'react';
       import {renderToStaticMarkup} from 'react-dom/server';
       import AuditView, {NewsRow} from ${JSON.stringify(viewPath)};
+      import StatusView from ${JSON.stringify(fileURLToPath(new URL("../app/_views/StatusView.tsx", import.meta.url)))};
       import {clearDashboardResource,updateDashboardResource} from ${JSON.stringify(resourcesPath)};
       export function renderNews(row) { return renderToStaticMarkup(React.createElement(NewsRow,{row})); }
+      export function renderStatus(payload) { return renderToStaticMarkup(React.createElement(StatusView,{initialPayload:payload})); }
       export function render(view, resources) {
         for (const url of ${JSON.stringify(resourceUrls)}) clearDashboardResource(url);
         for (const [url,body] of Object.entries(resources)) updateDashboardResource(url,()=>body);
@@ -37,7 +39,25 @@ const built = await build({
 });
 const renderedModule = join(temporaryRoot, "audit.mjs");
 writeFileSync(renderedModule, built.outputFiles[0].contents);
-const { render, renderNews } = await import(pathToFileURL(renderedModule).href);
+const { render, renderNews, renderStatus } = await import(pathToFileURL(renderedModule).href);
+
+test("admin usage renders both Groq models and distinguishes missing from zero evidence", () => {
+  const empty = renderStatus({generated_at:"2026-09-12T17:42:00Z"});
+  assert.match(empty,/备用模型用量尚未同步/);
+  const models = ["qwen/qwen3.8-27b","qwen/qwen3.6-27b"].map((model,index)=>({
+    model, limits:{rpd:1000,rpm:30,tpm:8000,tpd:200000}, reserved_today:index?0:3,
+    remaining_today:index?1000:997, attempts:index?0:3,successes:index?0:3, failures:0,throttled:0,
+    actual_tokens:index?0:2964,reserved_tokens_24h:index?0:15000,remaining_tokens_24h:index?200000:185000,
+    last_attempt_at:index?null:"2026-09-12T17:39:40Z",
+  }));
+  const html=renderStatus({generated_at:"2026-09-12T17:42:00Z",llm_routing:{news_backup:{
+    provider:"Groq",quota_day_utc:"2026-09-12",next_reset_at:"2026-09-13T00:00:00Z",models,
+  }}});
+  assert.match(html,/qwen\/qwen3\.8-27b/);assert.match(html,/qwen\/qwen3\.6-27b/);
+  assert.match(html,/2,964/);assert.match(html,/185,000/);
+  assert.match(html,/暂未观察到请求，不代表模型已连接或可用/);
+  assert.doesNotMatch(html,/2026-09-12T17:39:40Z/);
+});
 
 test("article row expands publisher provenance with one coherent public label", () => {
   const row = {headline: "政策会议展望", emerging_topic_zh: "政策会议展望", event_type: "macro_preview",

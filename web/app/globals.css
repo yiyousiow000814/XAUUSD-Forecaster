@@ -1078,6 +1078,11 @@ body.modal-open { overflow:hidden; }
 .source-technical-details dt { color:var(--muted); font-size:12px; font-weight:800; }
 .source-technical-details dd { margin:0; font-size:12px; line-height:1.55; overflow-wrap:anywhere; }
 .source-technical-details code { font-size:11px; overflow-wrap:anywhere; word-break:break-word; }
+.news-backup-model { border-top:1px solid var(--ink); padding:16px 0; }
+.news-backup-model h3 { overflow-wrap:anywhere; }
+.news-backup-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr)); gap:16px; }
+.news-backup-metrics dt { font-size:12px; color:var(--muted); }
+.news-backup-metrics dd { margin:4px 0 0; font-weight:700; }
 .quota-overview { margin-top:24px; }
 .quota-overview-head,.throughput-section>header { display:flex; align-items:end; justify-content:space-between; gap:32px; margin-bottom:12px; }
 .quota-overview-head h2,.throughput-section>header h2 { margin:4px 0 0; font-family:var(--font-display); font-size:32px; line-height:1; }

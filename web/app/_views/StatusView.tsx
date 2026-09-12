@@ -26,6 +26,16 @@ type QuotaState = {
   total_remaining: number;
 };
 
+type NewsBackupUsage = {
+  provider: string; quota_day_utc: string; next_reset_at: string;
+  models: Array<{
+    model: string; limits: { rpd: number; rpm: number; tpm: number; tpd: number };
+    reserved_today: number; remaining_today: number; attempts: number;
+    successes: number; failures: number; throttled: number; actual_tokens: number;
+    reserved_tokens_24h: number; remaining_tokens_24h: number; last_attempt_at: string | null;
+  }>;
+};
+
 export type StatusPayload = {
   preview_status_summary?: boolean;
   preview?: {
@@ -64,6 +74,7 @@ export type StatusPayload = {
   gemma_quota?: QuotaState;
   gemini_embedding_quota?: QuotaState;
   llm_routing?: {
+    news_backup?: NewsBackupUsage | null;
     action_bearing?: { model?: string; fallback_model?: string; role?: string };
     display_only?: {
       model: string; role: string; configured_account_count: number;
@@ -235,6 +246,28 @@ export default function StatusView({ initialPayload }: { initialPayload?: Status
           <article><span>Gemma</span><strong><MetricValue phase={gemmaThroughputPhase} snapshotLabel="分支配置" snapshotTitle="每个独立账户分别执行 RPM 与 TPM 入场检查"><CountValue value={payload?.llm_routing?.display_only?.requests_per_minute} /></MetricValue></strong><small>总 RPM · 总 TPM <CountValue value={payload?.llm_routing?.display_only?.input_tokens_per_minute} /> · 并发 <CountValue value={payload?.llm_routing?.display_only?.maximum_concurrent_requests} format="exact" /> · <CountValue value={payload?.llm_routing?.display_only?.configured_account_count} format="exact" /> 个账户</small></article>
           <article><span>Embedding</span><strong>100</strong><small>每账户 RPM · 30K TPM · 1K RPD · batch 按条计数</small></article>
         </div>
+      </section>
+
+      <section className="quota-panel" aria-labelledby="news-backup-title">
+        <div className="quota-panel-head"><div><p className="eyebrow">NEWS BACKUP / GROQ</p><h2 id="news-backup-title">Qwen · 新闻备用模型</h2></div>
+          <div><b>Google → Qwen 3.8 → Qwen 3.6</b><span>只在符合切换条件时使用，不会接管所有失败</span></div></div>
+        {!payload?.llm_routing?.news_backup ? <p>备用模型用量尚未同步，不能据此判断是否已配置。</p> : <>
+          <p>UTC 配额日 {payload.llm_routing.news_backup.quota_day_utc} · 请求额度重置：{localTime(payload.llm_routing.news_backup.next_reset_at)}</p>
+          {payload.llm_routing.news_backup.models.map((model) => <article className="news-backup-model" key={model.model}>
+            <h3>{model.model}</h3>
+            <p>{model.last_attempt_at ? `最近请求：${localTime(model.last_attempt_at)}` : "暂未观察到请求，不代表模型已连接或可用"}</p>
+            <dl className="news-backup-metrics">
+              <div><dt>今日实际请求</dt><dd>{model.attempts}</dd></div>
+              <div><dt>成功 / 失败 / 限流</dt><dd>{model.successes} / {model.failures} / {model.throttled}</dd></div>
+              <div><dt>今日已预留请求</dt><dd>{model.reserved_today} / {model.limits.rpd}</dd></div>
+              <div><dt>今日服务商已报告 tokens</dt><dd>{model.actual_tokens.toLocaleString("en-US")}</dd></div>
+              <div><dt>近24小时保守 token 占用</dt><dd>{model.reserved_tokens_24h.toLocaleString("en-US")} / {model.limits.tpd.toLocaleString("en-US")}</dd></div>
+              <div><dt>近24小时本地 token 余量</dt><dd>{model.remaining_tokens_24h.toLocaleString("en-US")}</dd></div>
+            </dl>
+            <p>每分钟 {model.limits.rpm} 请求 · {model.limits.tpm.toLocaleString("en-US")} tokens（输入＋输出）</p>
+          </article>)}
+          <p>本地预留量包含失败及尚未发出的预留；成功只表示模型响应通过该阶段解析。已报告 tokens 不包含服务商未返回用量的请求。本地余量不保证服务商此刻可用。</p>
+        </>}
       </section>
 
       <QuotaPanel title="Gemini 3.5 Flash-Lite · 逐 Key 配额" eyebrow="ACTION-BEARING / FULL CONTENT" quota={quota} nowMs={nowMs} />
