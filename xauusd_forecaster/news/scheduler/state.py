@@ -62,6 +62,8 @@ TOKEN_CALIBRATION_MAX_RATIO = 8.00
 TOKEN_CALIBRATION_MAX_DOWNWARD_STEP = 0.01
 SCHEDULER_DEFERRAL_RETENTION = timedelta(hours=24)
 EFFECTIVE_INPUT_TOKENS_SQL = """CASE
+  WHEN account_id='GROQ_NEWS'
+    THEN MAX(input_token_count,COALESCE(provider_total_token_count,0))
   WHEN provider_outcome='PROVIDER_SUCCEEDED'
    AND provider_prompt_token_count>0
     THEN provider_prompt_token_count
@@ -2316,6 +2318,7 @@ def reserve_account_request(
     request_count: int = 1,
     input_tokens: int = 0,
     input_tokens_per_minute: int | None = None,
+    tokens_per_24_hours: int | None = None,
     shared_model_families: tuple[str, ...] | None = None,
     share_minute_across_accounts: bool = False,
     reserve_total: int = 0,
@@ -2333,6 +2336,8 @@ def reserve_account_request(
     workload_class: str = LIVE_OPERATIONAL_WORKLOAD,
     quota_authority: str | None = None,
     decision: dict[str, object] | None = None,
+    quota_timezone=PACIFIC,
+    independent_provider_scope: str | None = None,
 ) -> bool:
     """Atomically count attempted provider requests against one account.
 
@@ -2340,7 +2345,7 @@ def reserve_account_request(
     HTTP envelope. ``request_count`` represents that provider-visible unit.
     """
     instant = now or datetime.now(UTC)
-    day = quota_day(instant)
+    day = instant.astimezone(quota_timezone).date().isoformat()
     minute = minute_bucket(instant)
     timestamp = _iso(instant)
     estimated_tokens = max(0, int(input_tokens))
@@ -2360,6 +2365,25 @@ def reserve_account_request(
     usable_daily_limit = daily_limit if urgent else max(0, daily_limit - reserve_total)
     connection.execute("BEGIN IMMEDIATE")
     try:
+        # Competing lanes can commit while this caller waits for the write
+        # lock. Read the clock under that lock so their newer reservations
+        # are included in the rolling window, including midnight rollover.
+        if now is None:
+            instant = datetime.now(UTC)
+            day = instant.astimezone(quota_timezone).date().isoformat()
+            minute = minute_bucket(instant)
+            timestamp = _iso(instant)
+        if independent_provider_scope is not None:
+            cooldown = connection.execute(
+                "SELECT next_eligible_at FROM news_ai_provider_dispatch_state_v1 "
+                "WHERE provider_scope=?", (independent_provider_scope,),
+            ).fetchone()
+            if cooldown and str(cooldown[0]) > timestamp:
+                connection.rollback()
+                if decision is not None:
+                    decision.update(failure_code="PROVIDER_DISPATCH_DEFERRED",
+                                    next_retry_at=str(cooldown[0]))
+                return False
         daily = connection.execute(
             f"""SELECT COALESCE(sum(request_count),0) AS request_count
                 FROM news_ai_account_daily_usage_v1
@@ -2368,6 +2392,23 @@ def reserve_account_request(
             (day, account_id, *families),
         ).fetchone()
         daily_count = int(daily["request_count"])
+        if tokens_per_24_hours is not None:
+            # Backup budgets include reserved output as well as prompt tokens.
+            # A rolling day avoids assuming the external provider's reset zone.
+            token_day = connection.execute(
+                f"""SELECT COALESCE(sum(input_token_count),0), MIN(reserved_at)
+                    FROM news_ai_account_request_usage_v1
+                    WHERE account_id=? AND model_family IN ({placeholders})
+                      AND reserved_at>? AND reserved_at<=?""",
+                (account_id, *families, _iso(instant - timedelta(days=1)), timestamp),
+            ).fetchone()
+            if int(token_day[0]) + estimated_tokens > tokens_per_24_hours:
+                connection.rollback()
+                if decision is not None:
+                    decision.update(failure_code="MODEL_CAPACITY_DEFERRED",
+                                    dimension="TPD", current=int(token_day[0]),
+                                    requested=estimated_tokens, limit=tokens_per_24_hours)
+                return False
         if workload_class == CONTRACT_BACKFILL_WORKLOAD:
             backfill = _backfill_admission_locked(
                 connection,
@@ -2416,7 +2457,7 @@ def reserve_account_request(
                 next_retry_at = None
                 if daily_exhausted:
                     next_retry_at = _iso(
-                        (instant.astimezone(PACIFIC) + timedelta(days=1)).replace(
+                        (instant.astimezone(quota_timezone) + timedelta(days=1)).replace(
                             hour=0, minute=0, second=0, microsecond=0,
                         )
                     )
@@ -2465,7 +2506,7 @@ def reserve_account_request(
                     next_retry_at=next_retry_at,
                 )
             return False
-        if provider_task is not None:
+        if provider_task is not None and independent_provider_scope is None:
             dispatch = _reserve_provider_dispatch_locked(
                 connection, provider_task=provider_task, now=instant,
             )
@@ -2517,7 +2558,7 @@ def reserve_account_request(
                 workload_class,
             ),
         )
-        pacific = instant.astimezone(PACIFIC)
+        quota_instant = instant.astimezone(quota_timezone)
         connection.execute(
             """INSERT INTO news_ai_quota_day_workload_v1
                (quota_day,hour_bucket,account_id,quota_authority,
@@ -2528,7 +2569,7 @@ def reserve_account_request(
                  request_count=request_count+excluded.request_count,
                  updated_at=excluded.updated_at""",
             (
-                day, pacific.hour, account_id, authority, workload_class,
+                day, quota_instant.hour, account_id, authority, workload_class,
                 attempted_requests, timestamp,
             ),
         )
@@ -2933,6 +2974,7 @@ def record_account_request_outcome(
     usage_metadata: dict[str, int] | None = None,
     provider_model_version: str | None = None,
     now: datetime | None = None,
+    independent_provider_scope: str | None = None,
 ) -> None:
     if outcome not in {
         "PROVIDER_SUCCEEDED", "PROVIDER_THROTTLED", "PROVIDER_FAILED",
@@ -2979,6 +3021,22 @@ def record_account_request_outcome(
                 provider_model_version=provider_model_version,
                 updated_at=timestamp,
             )
+        if independent_provider_scope is not None and retry_after_seconds:
+            deadline = _iso(datetime.fromisoformat(timestamp) + timedelta(
+                seconds=max(1, min(86_400, retry_after_seconds)),
+            ))
+            connection.execute(
+                """INSERT INTO news_ai_provider_dispatch_state_v1
+                       (provider_scope,next_eligible_at,interval_ms,cooldown_until,
+                        last_outcome,updated_at) VALUES (?,?,250,?,?,?)
+                       ON CONFLICT(provider_scope) DO UPDATE SET
+                         next_eligible_at=max(next_eligible_at,excluded.next_eligible_at),
+                         cooldown_until=max(COALESCE(cooldown_until,''),excluded.cooldown_until),
+                         last_outcome=excluded.last_outcome,updated_at=excluded.updated_at""",
+                (independent_provider_scope, deadline, deadline, outcome, timestamp),
+            )
+    if independent_provider_scope is not None:
+        return
     record_provider_dispatch_outcome(
         connection,
         outcome=outcome,

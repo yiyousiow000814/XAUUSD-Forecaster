@@ -14,6 +14,8 @@ from email.utils import parsedate_to_datetime
 from typing import Callable, TypeVar
 
 from xauusd_forecaster.ai.provider_registry import (
+    GROQ_GENERATION_ENDPOINT,
+    GROQ_NEWS_MODELS,
     google_embedding_endpoint_for_model,
     google_generation_endpoint_for_model,
 )
@@ -172,6 +174,8 @@ class ModelRequestUsage:
 class ModelRequestAccountant(ABC):
     """Durable accounting boundary required before provider transport."""
 
+    fallback_gateway: NewsBackupChain | None = None
+
     @abstractmethod
     def reserve(self, usage: ModelRequestUsage) -> bool:
         """Persist one attempted request when quota is available."""
@@ -269,6 +273,12 @@ class GeminiModelGateway:
                 estimator_version=estimator_version.strip(),
             )
             if not self._reserve(api_key, usage):
+                if model.startswith("gemma") and self.accountant.fallback_gateway:
+                    fallback = self.accountant.fallback_gateway.generate(
+                        usage=usage, payload=payload, decode=decode,
+                    )
+                    if fallback is not None:
+                        return fallback
                 continue
             envelope: dict[str, object] | None = None
             provider_attempted = False
@@ -324,6 +334,13 @@ class GeminiModelGateway:
                         retry_after_seconds=_http_retry_after_seconds(error),
                     )
                 last_error = error
+                if (error.code in {500, 502, 503} or
+                    (error.code == 429 and model.startswith("gemma"))) and self.accountant.fallback_gateway:
+                    fallback = self.accountant.fallback_gateway.generate(
+                        usage=usage, payload=payload, decode=decode,
+                    )
+                    if fallback is not None:
+                        return fallback
                 if error.code not in retryable_http_codes:
                     raise
             except (
@@ -332,6 +349,12 @@ class GeminiModelGateway:
                 if provider_attempted:
                     self.accountant.record_provider_outcome("PROVIDER_FAILED")
                 last_error = error
+                if self.accountant.fallback_gateway:
+                    fallback = self.accountant.fallback_gateway.generate(
+                        usage=usage, payload=payload, decode=decode,
+                    )
+                    if fallback is not None:
+                        return fallback
             except Exception:
                 if provider_attempted:
                     self.accountant.record_provider_outcome("PROVIDER_FAILED")
@@ -391,6 +414,139 @@ class GeminiModelGateway:
         if not isinstance(envelope, dict):
             raise ValueError("model provider response is not a JSON object")
         return envelope
+
+
+class NewsBackupGateway:
+    """One metered text request to an explicitly allowed news backup model."""
+
+    def __init__(self, api_key: str, accountant: ModelRequestAccountant,
+                 *, model: str) -> None:
+        if model not in GROQ_NEWS_MODELS:
+            raise ValueError("unapproved news backup route")
+        self.api_key = api_key
+        self.accountant = accountant
+        self.model = model
+
+    def generate(
+        self, *, usage: ModelRequestUsage, payload: dict[str, object],
+        decode: Callable[[dict[str, object]], T],
+    ) -> tuple[T, str] | None:
+        messages = []
+        system = payload.get("systemInstruction", {})
+        if system:
+            messages.append({"role": "system", "content": self._text(system)})
+        for content in payload.get("contents", []):
+            messages.append({
+                "role": "assistant" if content.get("role") == "model" else "user",
+                "content": self._text(content),
+            })
+        config = payload.get("generationConfig", {})
+        # Keep the complete original schema in the same request. Consumer-side
+        # semantic validation remains authoritative across both transports.
+        schema = config.get("responseSchema") or config.get("responseJsonSchema")
+        if schema:
+            messages.insert(0, {"role": "system", "content":
+                "Return one JSON object satisfying this schema: " + json.dumps(schema)})
+        body = {
+            "model": self.model, "messages": messages,
+            "response_format": {"type": "json_object"},
+            "temperature": config.get("temperature", 0),
+            "max_tokens": config.get("maxOutputTokens", 8192),
+        }
+        # Count the complete converted prompt, including the copied JSON schema.
+        # UTF-8 bytes conservatively bound text tokens without another request.
+        tokens = max(usage.input_tokens, len(json.dumps(messages, ensure_ascii=False).encode("utf-8")) + 64)
+        body["max_tokens"] = min(int(body["max_tokens"]), 2048)
+        body["reasoning_effort"] = "none"
+        tokens += int(body["max_tokens"])
+        backup_usage = ModelRequestUsage(
+            model=self.model, purpose=usage.purpose,
+            input_tokens=tokens, prompt_contract=usage.prompt_contract,
+            estimator_version=usage.estimator_version,
+        )
+        if not self.accountant.reserve(backup_usage):
+            return None
+        self.accountant.mark_provider_attempted()
+        try:
+            request = urllib.request.Request(
+                GROQ_GENERATION_ENDPOINT,
+                data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                headers={"Content-Type": "application/json",
+                         "User-Agent": "XAUUSD-Forecaster/1.0",
+                         "Authorization": "Bearer " + self.api_key}, method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=15.0) as response:
+                envelope = json.loads(response.read())
+            if "error" in envelope:
+                raise ValueError("backup provider returned an error envelope")
+            choice = envelope["choices"][0]
+            if choice.get("finish_reason") != "stop":
+                raise ValueError("backup provider response is incomplete")
+            text = choice["message"]["content"]
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("backup provider response has no text")
+            actual_model = str(envelope.get("model") or "")
+            if actual_model != self.model:
+                raise ValueError("backup provider returned an unexpected model")
+            identity = "groq/" + actual_model
+            result = decode({"candidates": [{"content": {"parts": [{"text": text}]}}],
+                             "modelVersion": identity})
+        except urllib.error.HTTPError as error:
+            error.failure_evidence = _http_failure_evidence(
+                error, model="groq/" + self.model, purpose=usage.purpose,
+            )
+            self.accountant.record_provider_outcome(
+                "PROVIDER_THROTTLED" if error.code == 429 else "PROVIDER_FAILED",
+                retry_after_seconds=_http_retry_after_seconds(error) or (60 if error.code == 429 else None),
+            )
+            raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            self.accountant.record_provider_outcome("PROVIDER_FAILED")
+            raise ModelGatewayRequestFailed(error) from error
+        except Exception as error:
+            self.accountant.record_provider_outcome("PROVIDER_FAILED")
+            raise ModelGatewayResponseInvalid(ValueError("Backup response did not satisfy the news contract")) from error
+        self.accountant.record_provider_outcome(
+            "PROVIDER_SUCCEEDED", provider_model_version=identity,
+            usage_metadata=_sanitized_usage_metadata({"usageMetadata": {
+                "promptTokenCount": envelope.get("usage", {}).get("prompt_tokens"),
+                "candidatesTokenCount": envelope.get("usage", {}).get("completion_tokens"),
+                "totalTokenCount": envelope.get("usage", {}).get("total_tokens"),
+            }}),
+        )
+        return result, identity
+
+    @staticmethod
+    def _text(content: dict[str, object]) -> str:
+        parts = content.get("parts", [])
+        if any(set(part) != {"text"} or not isinstance(part["text"], str) for part in parts):
+            raise ValueError("backup news input must contain text only")
+        return "\n".join(part["text"] for part in parts)
+
+
+class NewsBackupChain:
+    """Try each configured route once; ordinary retries belong to the queue."""
+
+    def __init__(self, routes: tuple[NewsBackupGateway, ...]) -> None:
+        self.routes = routes
+
+    def generate(self, *, usage: ModelRequestUsage, payload: dict[str, object],
+                 decode: Callable[[dict[str, object]], T]) -> tuple[T, str] | None:
+        last_error = None
+        for route in self.routes:
+            try:
+                result = route.generate(usage=usage, payload=payload, decode=decode)
+                if result is not None:
+                    return result
+            except urllib.error.HTTPError as error:
+                if error.code not in {404, 429, 500, 502, 503, 504}:
+                    raise
+                last_error = error
+            except ModelGatewayRequestFailed as error:
+                last_error = error
+        if last_error is not None:
+            raise last_error
+        return None
 
 
 class OllamaAssistantGateway:

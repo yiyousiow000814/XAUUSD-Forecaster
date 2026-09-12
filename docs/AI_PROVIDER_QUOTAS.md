@@ -28,6 +28,31 @@ independent account joins routing on the next cycle. An extra key inside an
 existing account adds transport redundancy but does not increase that account's
 quota or the scheduler's automatic batch size.
 
+## Optional news backup
+
+`GROQ_API_KEY` enables `qwen/qwen3.8-27b`, then `qwen/qwen3.6-27b` after
+Google generation HTTP 500/502/503 or transport failure. Google Gemma capacity
+denial and 429 also qualify. Each route is tried once per failed generation,
+with the complete source, schema and original decoder. Successful generation,
+authentication failures and invalid output do not cause extra requests.
+Assistant and historical backfill never use backups.
+
+All lanes share each Groq model's budget through the existing SQLite owner:
+30 RPM, 1,000 RPD, 8,000 combined tokens/minute and 200,000 tokens/trailing
+24 hours. Complete converted prompt UTF-8 bytes plus up to 2,048 output tokens
+form a conservative reservation. Large requests skip the route; source input
+is never truncated. Failed attempts retain usage and successful responses also
+record actual tokens and model identity. Per-model Retry-After is durable and
+independent of Google. Network inactivity timeout is 15 seconds per route.
+Both Qwen models use `reasoning_effort=none` for bounded JSON news tasks.
+
+Only the annotator receives the optional Windows user setting. Restart is
+needed after a credential change. Credentials never enter logs or Git. Account
+limits and external availability remain authoritative; unavailable backup work
+returns to the existing queue. No paid account or model is enabled.
+See [Groq limits](https://console.groq.com/docs/rate-limits) and
+[reasoning parameters](https://console.groq.com/docs/reasoning).
+
 ## Assistant capacity policy
 
 Assistant generation is currently paused while a suitable API model is being

@@ -60,6 +60,14 @@ maintenance deferrals; a later `OK` or `NOT_CURRENT` outcome resets the effectiv
 streak. Health evidence reports both lifetime claims and the effective failure
 streak.
 
+An unresolved streak consisting exclusively of provider HTTP 500/502/503 remains
+a nonblocking automatic-retry warning in system details, even when eligible now.
+A mixed or deterministic failure streak retains existing escalation. Whole-route
+no-progress and backlog SLA alerts remain independent and may still be blocking.
+An eligible retry is neither evidence of recovery nor a reason to request human
+intervention by itself. Public incident grouping honors the producer's
+`automatic_provider_retry` evidence without concealing any blocking sibling.
+
 Daily Brief capacity protection is account-scoped. If its selected account
 fills the shared Gemma window, only that account's lane is temporarily limited
 to Gemini annotation. Other independent accounts must continue impact and

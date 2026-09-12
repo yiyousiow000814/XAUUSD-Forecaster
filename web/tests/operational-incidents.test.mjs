@@ -11,6 +11,21 @@ const event = (code, scope, evidence = {}, overrides = {}) => ({
   ...overrides,
 });
 
+test("eligible transient provider retries stay in details; a stalled pipeline remains global", () => {
+  const retry = event("OPS_AI_JOB_RETRY_LOOP", "ACTIVE_ANNOTATION", {
+    latest_failure_code: "PROVIDER_HTTP_ERROR", claimable: true,
+    automatic_provider_retry: true,
+  });
+  const incidents = correlateOperationalEvents([retry]);
+  assert.equal(globalOperationalIncidents(incidents).length, 0);
+  assert.equal(incidents[0].state, "RECOVERING");
+  assert.equal(incidents[0].action_state, "AUTO_RECOVERING");
+  const stalled = correlateOperationalEvents([retry,
+    event("OPS_AI_PIPELINE_STALLED", "ACTIVE_ANNOTATION", {}, {severity: "ERROR", blocking: true}),
+  ]);
+  assert.equal(globalOperationalIncidents(stalled).length, 1);
+});
+
 function capacityChain(componentReasons = ["ACTIONABLE_NEWS_IMPACT_PENDING"]) {
   return [
     event("OPS_AI_ROUTE_CAPACITY_SATURATED", "ACTIVE_IMPACT", { capacity_deferred_15m: 50, completed_15m: 1 }),

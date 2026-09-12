@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import math
+import os
 import sqlite3
 import uuid
+from datetime import UTC
 
-from xauusd_forecaster.ai.provider_registry import quota_surface_for_model
+from xauusd_forecaster.ai.provider_registry import quota_surface_for_model, GROQ_NEWS_MODELS
 from xauusd_forecaster.news.annotation.product import (
     DEFAULT_GEMINI_MODEL,
     GEMINI_DAILY_PRIORITY_RESERVE,
@@ -14,6 +16,8 @@ from xauusd_forecaster.news.annotation.product import (
 from xauusd_forecaster.ai.model_gateway import (
     ModelRequestAccountant,
     ModelRequestUsage,
+    NewsBackupGateway,
+    NewsBackupChain,
 )
 from xauusd_forecaster.news.scheduler.state import (
     ApiCredential,
@@ -38,6 +42,7 @@ class SchedulerModelAccountant(ModelRequestAccountant):
         *,
         urgent: bool,
         work_lane: str = "LIVE",
+        enable_news_backup: bool = False,
     ) -> None:
         self.connection = connection
         self.credential = credential
@@ -51,6 +56,12 @@ class SchedulerModelAccountant(ModelRequestAccountant):
         self._failure_code: str | None = None
         self._failure_evidence: dict[str, object] | None = None
         self._usage_id: str | None = None
+        groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+        if groq_key and work_lane == "LIVE" and enable_news_backup:
+            self.fallback_gateway = NewsBackupChain(tuple(
+                NewsBackupGateway(groq_key, GroqNewsAccountant(connection, model), model=model)
+                for model in GROQ_NEWS_MODELS
+            ))
 
     def reserve(self, usage: ModelRequestUsage) -> bool:
         policy = quota_surface_for_model(usage.model)
@@ -162,3 +173,52 @@ class SchedulerModelAccountant(ModelRequestAccountant):
     @property
     def failure_evidence(self) -> dict[str, object] | None:
         return self._failure_evidence
+
+
+class GroqNewsAccountant(ModelRequestAccountant):
+    """Reuse atomic scheduler admission with one shared free-provider budget."""
+
+    def __init__(self, connection: sqlite3.Connection, model: str) -> None:
+        if model not in GROQ_NEWS_MODELS:
+            raise ValueError("unapproved Groq model")
+        self.connection = connection
+        self._usage_id: str | None = None
+        self.account_id = "GROQ_NEWS"
+        self.model_family = model
+        self.daily_limit, self.rpm, self.tpm, self.tpd = 1000, 30, 8000, 200000
+        self.scope = "GROQ_NEWS/" + model
+
+    def reserve(self, usage: ModelRequestUsage) -> bool:
+        usage_id = str(uuid.uuid4())
+        reserved = reserve_account_request(
+            self.connection, account_id=self.account_id,
+            model_family=self.model_family, daily_limit=self.daily_limit, requests_per_minute=self.rpm,
+            input_tokens_per_minute=self.tpm, tokens_per_24_hours=self.tpd,
+            input_tokens=usage.input_tokens, usage_id=usage_id,
+            requested_model=usage.model, purpose=usage.purpose,
+            prompt_contract=usage.prompt_contract, estimator_version=usage.estimator_version,
+            quota_authority=self.model_family, quota_timezone=UTC,
+            independent_provider_scope=self.scope,
+        )
+        self._usage_id = usage_id if reserved else None
+        return reserved
+
+    def mark_provider_attempted(self) -> None:
+        if self._usage_id is None:
+            raise ValueError("backup request has no reservation")
+        mark_account_request_attempted(self.connection, self._usage_id)
+
+    def record_provider_outcome(
+        self, outcome: str, *, retry_after_seconds: int | None = None,
+        usage_metadata: dict[str, int] | None = None,
+        provider_model_version: str | None = None,
+    ) -> None:
+        if self._usage_id is None:
+            raise ValueError("backup request has no reservation")
+        record_account_request_outcome(
+            self.connection, self._usage_id, outcome=outcome,
+            retry_after_seconds=retry_after_seconds, usage_metadata=usage_metadata,
+            provider_model_version=provider_model_version,
+            independent_provider_scope=self.scope,
+        )
+        self._usage_id = None

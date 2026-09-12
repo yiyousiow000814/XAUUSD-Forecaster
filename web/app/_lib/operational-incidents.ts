@@ -132,7 +132,9 @@ function recoveryState(
     event.evidence.claimable === false && Boolean(event.evidence.next_retry_at)
   ));
   const recovering = semanticReasons.some(reason => reason.endsWith("_RECOVERING"));
-  const automatic = scheduled || recovering;
+  const automatic = scheduled || recovering || lifecycleEvents.some(
+    event => event.evidence.automatic_provider_retry === true,
+  );
   if (automatic) return { state: "RECOVERING" as const, action: "AUTO_RECOVERING" as const };
   const operator = lifecycleEvents.some(
     event => event.recovery_policy === "OPERATOR" && event.severity === "ERROR",
