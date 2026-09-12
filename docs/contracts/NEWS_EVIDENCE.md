@@ -92,8 +92,7 @@ An immutable article that semantic review marks `IRRELEVANT` remains in the
 local evidence ledger for audit, but MUST NOT be materialized into the public
 news reader or its bounded D1 mirror. Missing or pending semantic review is not
 equivalent to `IRRELEVANT`. The public reader MUST default to completed review
-and present pending work and terminally isolated work in separate, explicitly
-labelled review zones. These records remain inspectable for diagnosis, but MUST
+and present all unfinished work in one explicitly labelled pending zone. These records remain inspectable for diagnosis, but MUST
 NOT be mixed into the completed-news list.
 `REPAIRING_DISPLAY` is a processing state with no parsed annotation and an
 equally named model-visibility state. The local reader, mirror transport, D1
@@ -107,7 +106,7 @@ semantic-review counts remain visible; only old model-candidate flags and
 unfinished operational states are neutralized. Historical local annotations and
 failure receipts remain immutable audit evidence; their old operational status
 MUST NOT be presented as the current backlog, current candidates, or current
-isolation count. Runtime cutover MUST preserve every incremental mirror cursor;
+failure count. Runtime cutover MUST preserve every incremental mirror cursor;
 losing a cursor MUST NOT masquerade as a new annotation-contract handover.
 Every persisted change that affects a public review state, including an
 explicit failure-recovery authorization, MUST advance that record's incremental
@@ -263,9 +262,9 @@ and is never recomputed after the decision.
 Archive semantic recovery consumes the same metered scheduler and never
 backdates model visibility, training eligibility, decisions, or predictions.
 Successful Gemini recovery enters the ordinary Gemma impact and identity queue.
-Terminal display or evidence failures may receive one explicitly versioned,
-persisted recovery authorization after the responsible contract is fixed. A
-new failure from that recovery is terminal again and cannot loop automatically.
+Legacy stopped attempts receive a versioned, persisted recovery authorization.
+Subsequent failed attempts retain capped backoff; an unsuccessful request does
+not establish permanent invalidity of the article. Superseded work stays retired.
 
 The bounded dashboard evidence window retains currently model-eligible events
 before historical-only rows. While the current-event total fits that declared
@@ -359,14 +358,28 @@ rewritten for rollback. Existing scheduler quota accounting and retry ownership
 remain unchanged. Page text can use more input tokens than a correctly extracted
 article; unchanged request count is not a claim of unchanged token consumption.
 
-## Temporary provider unavailability
+## Incomplete news processing
 
 HTTP 429/500/502/503/504 and typed transport failures are operational delay,
 not a finding that an article is invalid. They retain BACKING_OFF with the
 existing 15-minute, one-hour, six-hour, then twelve-hour retry cadence. Twelve
 hours is the per-record cap between attempts, not an immediate retry loop.
 Scheduler quota admission, leases and current-source eligibility remain required.
-Repeated deterministic output failures retain their bounded stopping policy.
-The existing versioned recovery receipt authorizes previously terminal matching
-provider failures once; it cannot authorize a newer deterministic failure from
-an older provider receipt or rewrite any historical evidence.
+JSON, source-anchor, field and model-contract failures follow the same retry
+cadence. Title translation, annotation, impact review and source hydration MUST
+NOT permanently stop an article because an attempt count was reached. Invalid
+output remains incomplete and model-ineligible. Source access denial remains
+visible and MUST NOT be bypassed. Legacy terminal source failures can be checked
+again after twelve hours; model failures use the existing versioned recovery
+receipt, in pages of at most 200 grants. Neither mechanism rewrites history or
+revives superseded jobs. A newer failure retains its own next retry time.
+
+The archive exposes only COMPLETED and PROCESSING review groups. Old terminal
+and unavailable-source rows belong to PROCESSING with specific diagnostics.
+Previously materialized ISOLATED counts are folded into PROCESSING until normal
+publication replaces them. The same classification MUST drive indexed pagination,
+counts, Preview and the public reader; removal must not hide historical rows.
+
+A pending-reader miss is not proof that a job is obsolete. Repeated misses MUST
+retain retry eligibility. Only the existing source/version/completion
+reconciliation can retire superseded work; lease counts cannot establish that fact.

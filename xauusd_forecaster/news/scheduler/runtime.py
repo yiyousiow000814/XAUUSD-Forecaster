@@ -151,7 +151,7 @@ def _execute_job(
 ) -> dict[str, object]:
     record = pending_record_for_job(ledger.connection, job, now=now)
     if record is None:
-        return {"status": "NOT_CURRENT"}
+        return {"status": "PENDING_EVIDENCE"}
     urgent = job.priority in URGENT_PRIORITIES
     accountant = SchedulerModelAccountant(
         ledger.connection, credential, urgent=urgent, work_lane=job.work_lane,
@@ -425,19 +425,16 @@ def _run_scheduled_lane(
         outcome = str(status.get("status") or "ERROR")
         if outcome == "OK":
             complete_job(ledger.connection, job.job_id, worker_id)
-        elif outcome == "NOT_CURRENT":
-            if job.attempt_count >= 2:
-                backoff_job(
-                    ledger.connection, job.job_id, worker_id,
-                    available_at=outcome_at,
-                    error="CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE", terminal=True,
-                )
-            else:
-                release_job(
-                    ledger.connection, job.job_id, worker_id,
-                    available_at=outcome_at + timedelta(minutes=1),
-                    error="CURRENT_EVIDENCE_NOT_AVAILABLE",
-                )
+        elif outcome == "PENDING_EVIDENCE":
+            # An empty filtered reader is not evidence that the identity is obsolete.
+            # Source/version reconciliation owns retirement, independently of retries.
+            release_job(
+                ledger.connection, job.job_id, worker_id,
+                available_at=outcome_at + timedelta(
+                    minutes=(15, 60, 360, 720)[min(max(job.attempt_count - 1, 0), 3)]
+                ),
+                error="CURRENT_EVIDENCE_NOT_AVAILABLE",
+            )
         elif status.get("failure_code") in MAINTENANCE_DEFERRAL_CODES:
             retry_at = _next_retry(status, outcome_at)
             record_scheduler_deferral(

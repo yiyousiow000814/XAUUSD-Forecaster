@@ -68,3 +68,15 @@ recurring cleanup authority in the new code. A code rollback sees its retained
 old publication and must re-synchronize from local authority; do not present that
 old snapshot as fresh or restore a database over newer facts. Normal release
 failure handling remains fix-forward under RELEASE_CONTROL.
+
+## Pending news classification
+
+Apply `0037_news_pending_review.sql` before deploying the two-state news reader.
+It replaces four expression indexes; it neither rewrites news nor rebuilds the
+archive. Account for this one-time index work separately from steady-state reads.
+Old active-generation counts remain compatible and are folded into pending until
+normal publication writes new counts. Verify pending totals and category counts,
+forward/backward keyset navigation, and the latest local retry state after sync.
+The local scheduler reopens up to 200 old model failures per task family per scan,
+using append-only recovery receipts. Collector retries old stopped source fetches
+after twelve hours. Do not reset cursors or mark unresolved news complete.

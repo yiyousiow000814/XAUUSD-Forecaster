@@ -62,6 +62,7 @@ const database = () => new D1TestDatabase([
   "0029_news_projection_receipt_index.sql",
   "0032_news_keyset_pagination.sql",
   "0033_news_superseded_cleanup_index.sql",
+  "0037_news_pending_review.sql",
 ]);
 
 test("shares canonical receipt vectors with the Python producer", async () => {
@@ -276,13 +277,30 @@ test("materializes every generation's review totals and keeps page reads bounded
   assert.equal(completed.model_candidate_total, 1);
   assert.deepEqual(completed.category_counts, { "利率/Fed": 1, "油价/能源": 1 });
   assert.deepEqual(completed.review_state_counts, {
-    COMPLETED: 2, PROCESSING: 1, ISOLATED: 1,
+    COMPLETED: 2, PROCESSING: 2,
   });
   const processing = await readNewsProjectionPage(db, {
     page: 1, pageSize: 20, category: "油价/能源", reviewState: "PROCESSING",
   });
-  assert.equal(processing.total, 1);
-  assert.equal(processing.items[0].detail_key, id("3"));
+  assert.equal(processing.total, 2);
+  assert.deepEqual(processing.items.map(item => item.detail_key), [id("4"), id("3")]);
+  // A previously activated generation has old buckets, but identical source rows.
+  db.database.exec(`UPDATE news_projection_counts SET item_count=1
+    WHERE generation_id='${id("e")}' AND review_state='PROCESSING';
+    INSERT INTO news_projection_counts SELECT generation_id,'ISOLATED',category,
+      1,0,'' FROM news_projection_counts
+      WHERE generation_id='${id("e")}' AND review_state='PROCESSING';`);
+  const oldCounts = await readNewsProjectionPage(db, {
+    page: 1, pageSize: 1, category: "油价/能源", reviewState: "PROCESSING",
+  });
+  assert.equal(oldCounts.total, 2);
+  assert.deepEqual(oldCounts.review_state_counts, { COMPLETED: 2, PROCESSING: 2 });
+  assert.deepEqual(oldCounts.category_counts, { "油价/能源": 2 });
+  const next = await readNewsProjectionPage(db, {
+    page: 2, pageSize: 1, category: "油价/能源", reviewState: "PROCESSING",
+    cursor: oldCounts.next_cursor,
+  });
+  assert.deepEqual([oldCounts.items[0].detail_key, next.items[0].detail_key], [id("4"), id("3")]);
   assert.equal(db.database.prepare(
     "SELECT count(*) total FROM news_projection_counts WHERE generation_id=?",
   ).get(id("e")).total, 8);
@@ -293,7 +311,7 @@ for (const legacy of [false, true]) {
   for (const [reviewState, annotation_status, model_visibility] of [
     ["COMPLETED", "NOT_REQUIRED", "MODEL_INELIGIBLE"],
     ["PROCESSING", "QUEUED", "NOT_YET_PARSED"],
-    ["ISOLATED", "DEAD_LETTER", "DEAD_LETTER"],
+    ["PROCESSING", "DEAD_LETTER", "DEAD_LETTER"],
   ]) {
     test(`news keyset walk preserves filters, ties and reverse order: ${legacy}/${reviewState}`, async () => {
       const db = database();

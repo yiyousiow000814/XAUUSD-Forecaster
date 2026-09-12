@@ -711,7 +711,7 @@ def test_article_fetch_uses_browser_document_headers(monkeypatch) -> None:
         ),
     ],
 )
-def test_non_fed_permanent_denial_is_quarantined_without_component_failure(
+def test_non_fed_denial_backs_off_and_recovers_same_source(
     tmp_path, denial,
 ) -> None:
     fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
@@ -747,14 +747,40 @@ def test_non_fed_permanent_denial_is_quarantined_without_component_failure(
 
     assert first["status"] == "OK"
     assert first["unavailable"] == 1
-    assert second["status"] == "OK"
-    assert second["attempted"] == 0
+    assert second.get("attempted", 0) == 0
     assert calls == 1
     failure = ledger.connection.execute(
         "SELECT * FROM news_content_failures"
     ).fetchone()
-    assert failure["is_terminal"] == 1
-    assert failure["next_retry_at"] is None
+    assert failure["is_terminal"] == 0
+    assert failure["next_retry_at"] is not None
+
+    # An inaccessible page cannot back off unrelated publishers in the shared lane.
+    unrelated = dict(ledger.connection.execute("SELECT * FROM news_revisions").fetchone())
+    unrelated.update(source_item_id="other-page", cluster_id="other-page",
+                     link="https://publisher.example/available")
+    for key in ("source_published_time", "collector_first_seen_time", "fetched_time"):
+        unrelated[key] = datetime.fromisoformat(unrelated[key])
+    ledger.append_news_revision(unrelated)
+    other = hydrate_pending_non_fed_content(
+        ledger, fetched + timedelta(minutes=15),
+        extractor=lambda url: ("Other complete source text. " * 30, url),
+    )
+    assert other["attempted"] == 1 and other["inserted"] == 1
+    # Simulate an immutable terminal receipt created by the previous runtime.
+    ledger.append_content_failure({
+        **dict(failure), "failure_id": "legacy-content-terminal", "attempt_number": 2,
+        "failed_at": fetched + timedelta(minutes=6), "next_retry_at": None,
+        "is_terminal": True,
+    })
+    recovered = hydrate_pending_non_fed_content(
+        ledger, fetched + timedelta(hours=13),
+        extractor=lambda url: ("Recovered complete source text. " * 30, url),
+    )
+    assert recovered["inserted"] == 1
+    assert ledger.connection.execute("SELECT count(*) FROM news_revisions").fetchone()[0] == 4
+    assert ledger.connection.execute("SELECT is_terminal FROM news_content_failures WHERE failure_id='legacy-content-terminal'").fetchone()[0] == 1
+    ledger.close()
 
 
 def test_bls_api_values_are_versioned_and_rate_limited(tmp_path, monkeypatch) -> None:
@@ -2398,7 +2424,7 @@ def test_semantic_contract_failure_keeps_bounded_diagnostic_evidence(
     assert len(evidence["response_hash"]) == 64
     assert datetime.fromisoformat(failure["next_retry_at"]) - datetime.fromisoformat(
         failure["failed_at"]
-    ) == timedelta(minutes=5)
+    ) == timedelta(minutes=15)
 
 
 def test_llm_failure_is_persisted_and_blocks_immediate_retry(
@@ -2441,7 +2467,7 @@ def test_llm_failure_is_persisted_and_blocks_immediate_retry(
         ledger.connection.execute("DELETE FROM news_llm_failures")
 
 
-def test_repeated_same_validation_failure_enters_dead_letter(tmp_path) -> None:
+def test_mixed_provider_and_validation_failures_remain_retryable(tmp_path) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
     body = "Complete source text with enough content for annotation. " * 10
@@ -2460,6 +2486,11 @@ def test_repeated_same_validation_failure_enters_dead_letter(tmp_path) -> None:
         "error_code": None,
         "model_version": annotation_module.DEFAULT_GEMINI_MODEL,
     }
+    for _ in range(4):
+        annotation_module._append_llm_failure(
+            ledger, {**parsed, "error_type": "HTTPError", "error": "HTTP Error 503: Service Unavailable", "error_code": 503},
+            "ANNOTATION", annotation_module.PROMPT_VERSION,
+        )
     first = annotation_module._append_llm_failure(
         ledger, parsed, "ANNOTATION", annotation_module.PROMPT_VERSION
     )
@@ -2467,15 +2498,17 @@ def test_repeated_same_validation_failure_enters_dead_letter(tmp_path) -> None:
         ledger, parsed, "ANNOTATION", annotation_module.PROMPT_VERSION
     )
     assert first["retry_state"] == "BACKING_OFF"
-    assert second["retry_state"] == "DEAD_LETTER"
+    assert second["retry_state"] == "BACKING_OFF"
     latest = ledger.connection.execute(
         "SELECT * FROM news_llm_failures ORDER BY attempt_number DESC LIMIT 1"
     ).fetchone()
-    assert latest["is_terminal"] == 1
-    assert latest["next_retry_at"] is None
+    assert latest["is_terminal"] == 0
+    assert datetime.fromisoformat(latest["next_retry_at"]) - datetime.fromisoformat(latest["failed_at"]) == timedelta(hours=12)
+    assert ledger.count("news_annotations") == 0
+    ledger.close()
 
 
-def test_repeated_same_impact_validation_failure_gets_one_recovery_attempt(
+def test_repeated_same_impact_validation_failure_remains_retryable(
     tmp_path,
 ) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
@@ -2499,15 +2532,14 @@ def test_repeated_same_impact_validation_failure_gets_one_recovery_attempt(
 
     assert first["retry_state"] == "BACKING_OFF"
     assert first["failure_code"] == "MODEL_OUTPUT_INVALID"
-    assert second["retry_state"] == "DEAD_LETTER"
-    assert second["is_terminal"] is True
+    assert second["retry_state"] == "BACKING_OFF"
+    assert second["is_terminal"] is False
     latest = ledger.connection.execute(
         """SELECT error_type,error,is_terminal,next_retry_at
         FROM news_impact_failures_v1 ORDER BY attempt_number DESC LIMIT 1"""
     ).fetchone()
-    assert tuple(latest) == (
-        "ValueError", "identity relation contradicts material update", 1, None,
-    )
+    assert tuple(latest)[:3] == ("ValueError", "identity relation contradicts material update", 0)
+    assert latest["next_retry_at"] is not None
     ledger.close()
 
 

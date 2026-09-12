@@ -539,12 +539,8 @@ const NEWS_REVIEW_PRESENTATION: Record<NewsReviewState, {
     description: "已通过语义复核，或已明确无需 AI 复核",
   },
   PROCESSING: {
-    label: "处理中",
-    description: "仍在排队、有限重试或等待必要证据",
-  },
-  ISOLATED: {
-    label: "已隔离",
-    description: "自动处理已停止，保留有限证据等待检查",
+    label: "待完成",
+    description: "排队、等待重试或来源正文；具体原因见新闻详情",
   },
 };
 const CATEGORY_ORDER = ["战争/地缘", "利率/Fed", "央行购金", "通胀/就业", "增长/经济", "油价/能源", "美元/流动性", "风险情绪 / 避险", "监管/其他", "其他"];
@@ -814,7 +810,7 @@ function NewsRow({
       <div className="news-row-title"><strong>{row.headline}</strong><small>{newsSourceLabel(row)}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}</small></div>
       <div className={`news-row-state state-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
         <b>{row.content_status === "FULL_TEXT" ? `${formatExactCount(row.content_characters)} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "正文不可用" : row.content_fetch_status === "RETRYING" ? "自动重试中" : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
-        <small>{annotationStatus === "READY" ? (impactLabel ?? "等待 Gemma 判断") : annotationStatus === "NOT_REQUIRED" ? annotationReasonLabel : row.content_fetch_status === "UNAVAILABLE" ? "保留标题 · 不阻塞" : row.content_fetch_status === "RETRYING" ? "备用抓取中" : annotationStatus === "QUEUED" ? "AI 等待处理中" : annotationStatus === "BACKING_OFF" ? "失败后等待重试" : annotationStatus === "DEAD_LETTER" ? "已隔离待审" : "禁止判断"}</small>
+        <small>{annotationStatus === "READY" ? (impactLabel ?? "等待 Gemma 判断") : annotationStatus === "NOT_REQUIRED" ? annotationReasonLabel : row.content_fetch_status === "UNAVAILABLE" ? "保留标题 · 不阻塞" : row.content_fetch_status === "RETRYING" ? "备用抓取中" : annotationStatus === "QUEUED" ? "AI 等待处理中" : annotationStatus === "BACKING_OFF" ? "失败后等待重试" : annotationStatus === "DEAD_LETTER" ? "待恢复处理" : "禁止判断"}</small>
       </div>
     </summary>
     <div className="news-row-detail">
@@ -833,13 +829,13 @@ function NewsRow({
         </section> : annotationStatus === "QUEUED" ? <section className="gemini-summary summary-queued">
           <span>中文摘要排队中</span><p>正文已经完整入库，不会截断；系统会依序生成中文摘要，标题翻译独立处理。</p>
         </section> : annotationStatus === "BACKING_OFF" ? <section className="gemini-summary summary-queued">
-          <span>暂时退避</span><p>{current.annotation_reason ?? "本次模型响应未通过验证；系统已停止每分钟重试，将在退避到期后有限重试。"}</p>
+          <span>暂时退避</span><p>{current.annotation_reason ?? "本次处理未完成；系统会在等待间隔到期后重试。"}</p>
         </section> : annotationStatus === "DEAD_LETTER" ? <section className="gemini-summary summary-waiting">
-          <span>{annotationReasonLabel}</span><p>{current.annotation_reason ?? "相同永久错误重复出现，系统不会再自动消耗 Flash 配额；该新闻保留在 Ledger 中等待规则修复或人工复核。"}</p>
+          <span>{annotationReasonLabel}</span><p>{current.annotation_reason ?? "这是旧流程留下的停止记录，等待重新进入处理队列；原始新闻和失败原因均已保留。"}</p>
         </section> : annotationStatus === "NOT_REQUIRED" ? <section className="gemini-summary summary-queued">
           <span>{annotationReasonLabel}</span><p>{current.annotation_reason ?? "该新闻不满足当前解析条件，不会消耗 AI 配额或进入模型。"}</p>
         </section> : row.content_fetch_status === "UNAVAILABLE" ? <section className="gemini-summary summary-waiting">
-          <span>来源正文不可自动读取</span><p>发布网站拒绝访问、要求登录或没有可提取正文；这类候选不会写入新闻库，也不会进入模型。</p>
+          <span>来源正文不可自动读取</span><p>发布网站拒绝访问、要求登录或没有可提取正文；保留来源记录，稍后重新检查；正文恢复并完成复核前不会进入模型。</p>
         </section> : <section className="gemini-summary summary-waiting">
           <span>{row.content_fetch_status === "RETRYING" ? "正文自动重试中" : "等待来源正文"}</span><p>当前只有标题或短描述，不会进入模型，也不会假装已经理解内容。</p>
         </section>}
@@ -885,7 +881,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
       items: [], total: 0, all_total: 0, category_counts: {}, page: 1,
       page_size: NEWS_PER_PAGE, totals_scope: "LOADING",
       review_state: "COMPLETED",
-      review_state_counts: { COMPLETED: 0, PROCESSING: 0, ISOLATED: 0 },
+      review_state_counts: { COMPLETED: 0, PROCESSING: 0 },
     }
   ));
   const [statusState, setStatusState] = useState<CurrentDataPhase>(
@@ -1374,9 +1370,6 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
   const newsWaitingTotal = archiveTotals
     ? newsIndex.review_state_counts?.PROCESSING ?? 0
     : null;
-  const isolatedNewsTotal = archiveTotals
-    ? newsIndex.review_state_counts?.ISOLATED ?? 0
-    : null;
   const rowsUntilTraining = statusState === "ready" && payload?.training
     ? Math.max(0, payload.training.next_training_at - payload.training.complete_rows)
     : null;
@@ -1664,11 +1657,10 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
           <span><b><CountValue value={readableNewsTotal} /></b> {readableNewsTotal === null ? "正在读取近60天新闻总量" : "条近60天可读新闻"}</span>
           <span><b><CountValue value={parsedNewsTotal} /></b> 条语义复核完成</span>
           <span><b><CountValue value={newsWaitingTotal} /></b> 条等待处理</span>
-          <span><b><CountValue value={isolatedNewsTotal} /></b> 条已隔离待查</span>
           <span className="is-model-ready"><b><CountValue value={newsMetrics.events.currently_model_eligible} /></b> 个当前可用事件</span>
           <details>
             <summary>查看处理器技术状态</summary>
-            <p>真正排队 {formatExactCount(payload?.annotation_queue?.queued)} · 失败后等待重试 {formatExactCount(payload?.annotation_queue?.backing_off)} · 已隔离 {formatExactCount(payload?.annotation_queue?.dead_letter)} · 等待正文 {formatExactCount(payload?.annotation_queue?.waiting_content)} · 正文不可用 {formatExactCount(payload?.annotation_queue?.unavailable_content)}</p>
+            <p>真正排队 {formatExactCount(payload?.annotation_queue?.queued)} · 失败后等待重试 {formatExactCount(payload?.annotation_queue?.backing_off)} · 旧失败待恢复 {formatExactCount(payload?.annotation_queue?.dead_letter)} · 等待正文 {formatExactCount(payload?.annotation_queue?.waiting_content)} · 正文不可用 {formatExactCount(payload?.annotation_queue?.unavailable_content)}</p>
           </details>
         </section>
         <nav className="news-review-zones" aria-label="新闻审核区域">

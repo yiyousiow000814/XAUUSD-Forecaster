@@ -1013,7 +1013,7 @@ function decodeNewsPageCursor(value: string): NewsPageCursor {
       + "=".repeat((4 - value.length % 4) % 4);
     const cursor = JSON.parse(decodeURIComponent(atob(text))) as NewsPageCursor;
     if (cursor.version !== 1 || !NEWS_GENERATION_ID.test(cursor.generation)
-        || !["COMPLETED", "PROCESSING", "ISOLATED"].includes(cursor.review)
+        || !["COMPLETED", "PROCESSING"].includes(cursor.review)
         || typeof cursor.category !== "string" || cursor.category.length > 128
         || !Number.isSafeInteger(cursor.size) || cursor.size < 1 || cursor.size > 50
         || !Number.isSafeInteger(cursor.page) || cursor.page < 1
@@ -1104,16 +1104,17 @@ export async function readNewsProjectionPage(
      )
      SELECT page_data.*,
             (SELECT active_generation_id FROM news_projection_state WHERE id=1 AND projection_state='CURRENT') observed_generation,
-            COALESCE((SELECT item_count FROM news_projection_counts
-                       WHERE generation_id=? AND review_state=? AND category=?),0) total,
+            COALESCE((SELECT sum(item_count) FROM news_projection_counts
+                       WHERE generation_id=? AND review_state IN (?,?) AND category=?),0) total,
             COALESCE((SELECT parsed_count FROM news_projection_counts
                        WHERE generation_id=? AND review_state='ALL' AND category=''),0) parsed,
             COALESCE((SELECT candidate_expiries FROM news_projection_counts
                        WHERE generation_id=? AND review_state='ALL' AND category=''),'')
               candidate_expiries,
             COALESCE((SELECT json_group_object(category,item_count)
-                       FROM news_projection_counts WHERE generation_id=?
-                         AND review_state=? AND category<>''),'{}') categories_json,
+                       FROM (SELECT category,sum(item_count) item_count
+                         FROM news_projection_counts WHERE generation_id=?
+                         AND review_state IN (?,?) AND category<>'' GROUP BY category)),'{}') categories_json,
             COALESCE((SELECT json_group_object(review_state,item_count)
                        FROM news_projection_counts WHERE generation_id=?
                          AND review_state<>'ALL' AND category=''),'{}') reviews_json,
@@ -1130,10 +1131,12 @@ export async function readNewsProjectionPage(
        FROM page_data`,
   ).bind(
     ...binds, options.pageSize + 1,
-    state.active_generation_id, options.reviewState, options.category,
+    state.active_generation_id, options.reviewState,
+    options.reviewState === "PROCESSING" ? "ISOLATED" : options.reviewState, options.category,
     state.active_generation_id,
     state.active_generation_id,
     state.active_generation_id, options.reviewState,
+    options.reviewState === "PROCESSING" ? "ISOLATED" : options.reviewState,
     state.active_generation_id,
   ).first<{
     rows_json: string; total: number; parsed: number; candidate_expiries: string;
@@ -1159,7 +1162,12 @@ export async function readNewsProjectionPage(
   if (backwards) rows.reverse();
   const items = rows.map(row => row.item);
   const categoryCounts = JSON.parse(pageData.categories_json) as Record<string, number>;
-  const reviewCounts = JSON.parse(pageData.reviews_json) as Record<NewsReviewState, number>;
+  // Old activated generations remain readable until normal publication replaces counts.
+  const storedReviews = JSON.parse(pageData.reviews_json) as Record<string, number>;
+  const reviewCounts: Record<NewsReviewState, number> = {
+    COMPLETED: storedReviews.COMPLETED ?? 0,
+    PROCESSING: (storedReviews.PROCESSING ?? 0) + (storedReviews.ISOLATED ?? 0),
+  };
   const staging = pageData.staging_json
     ? JSON.parse(pageData.staging_json) as { generation_id: string; updated_at: string }
     : null;

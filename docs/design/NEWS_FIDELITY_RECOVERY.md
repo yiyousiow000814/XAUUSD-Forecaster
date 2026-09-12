@@ -1,86 +1,99 @@
-# News fidelity and provider-failure recovery
+# News fidelity and incomplete-work recovery
 
-## Scope and evidence
+## Evidence and scope
 
 The September 12 source audit found numeric scale, modality and historical-time
-ambiguity in accepted prose. Display review already exists, but its instruction
-does not explicitly compare these dimensions against the source. Strengthen that
-same request, without adding a reviewer or a local language/numeric veto.
+ambiguity in accepted prose. Strengthen the existing Gemini/Gemma request using
+the same complete selected source; do not add a reviewer request or language veto.
+Whole-page annotation must use the existing exact-source anchor repair too.
 
-A read-only runtime query of current-generation dead-letter jobs updated since
-September 1 found 341 jobs excluding retired eligibility records: 271 ended with
-HTTP 500/503 and 45 with absent source anchors. These are task counts, not unique
-articles or an estimated corpus error rate. Page-selection requests explicitly
-skip the existing exact-source anchor recovery; this is an inconsistent boundary.
+At September 12, 15:59 MYT an indexed read-only runtime snapshot found 343
+non-retired terminal jobs updated since September 1. Of these, 273 ended with
+HTTP 500/503. These are task counts, not unique articles or a corpus error rate.
+One preserved attempt history contains four HTTP 500/503 failures followed by
+the first long-evidence validation failure, which became terminal because both
+shared the total attempt count. JSON, source-anchor and field errors also stopped
+work after two or three failures. Source fetching additionally stopped on access,
+redirect, certificate or extraction errors. An empty scheduler candidate read was
+incorrectly treated as proof of obsolescence after two leases.
 
-## Ownership and transitions
+## Actors, authority and transitions
 
-The annotation worker owns source selection, semantic validation and the single
-Gemma display review. The selected immutable article is the source for both
-review and bounded anchor recovery. Semantic values and selection IDs stay frozen
-during anchor repair; invalid selection still fails before another request.
+- The existing annotation worker owns source selection, semantic validation,
+  the single Gemma display review and append-only failure evidence. Anchor repair
+  uses only the selected immutable article; semantic fields and selection IDs
+  stay fixed. Accepted stages are reused. Invalid output never grants completion
+  or model eligibility.
+- The existing scheduler owns leases, admission, timing and recovery. Annotation,
+  title and impact failures remain BACKING_OFF at 15, 60, 360 and then 720 minutes.
+  A pending-reader miss releases its lease with the same capped delay. Current
+  source/version/completion reconciliation alone establishes retirement. There
+  is no new queue, fallback provider, retry mode or recurring owner.
+- Versioned recovery receipts reopen legacy annotation/title/impact failures in
+  pages of at most 200 grants per task family. Receipt and job updates share one
+  transaction. The receipt identity prevents restart from repeatedly granting
+  recovery. Later attempts have their own next retry time. Old source-ineligible
+  retirement flags are not blindly revived or asserted to have been incorrect.
+- The existing collector retries source-fetch failures with the same cadence.
+  Historical stopped fetches become eligible twelve hours after their failure
+  clock. Access denial stays visible; retry never bypasses authentication or
+  treats an unreadable page as usable content. An individually inaccessible page
+  does not pause the shared hydration lane for other publishers. Source revisions and original
+  failure receipts remain immutable.
+- The archive and public reader expose COMPLETED and PROCESSING only. Pending
+  work includes failures and unavailable sources, with specific diagnostics.
+  Generic news isolation is retired. Quote validity and historical training
+  exclusion are separate invariants and are unchanged.
 
-The scheduler owns leases, quota admission and retry eligibility. Provider
-unavailability remains BACKING_OFF after the fifth failure, with the existing
-backoff capped at twelve hours per record. It never grants completed/model
-permission. Existing current-source eligibility and quota controls still apply;
-there is no immediate retry loop, fallback provider or new recurring owner.
-Deterministic content/JSON failures retain their existing bounded stopping rule.
+## Persistence, publication and recovery
 
-Existing versioned recovery receipts reopen only matching old terminal failures
-once. Receipt and job updates remain one transaction. Repeated scheduler calls
-or restart cannot issue another recovery grant for the same version and identity.
-Latest failure selection prevents an older provider error from authorizing a
-later deterministic failure. Original failure rows and annotations are immutable.
+Worker -> append-only evidence -> scheduler -> archive/mirror -> D1 -> public
+reader retains the existing source identity and strict synchronization ACK.
+Recovery clocks already participate in incremental archive invalidation. Old
+failure and retirement enum values remain readable audit evidence, not a new
+policy for permanently stopping news.
 
-## Boundaries, compatibility and failure handling
+Forward migration 0037 replaces four expression indexes with the same two-state
+classification used by the reader. Apply it before activating the new reader.
+No article rewrite or full archive replay is required. Old activated-generation
+ISOLATED counts fold into PROCESSING until normal publication replaces them;
+category counts and keyset membership must agree throughout that interval.
+Index creation is one-time work, distinct from normal bounded page reads.
 
-Worker -> append-only evidence -> scheduler -> archive/mirror -> reader retains
-the current schema and state enum. Recovery clocks already participate in the
-incremental archive clock. Existing accepted annotations are not mass-rewritten;
-new interpretation is visible only at its actual completion time. This patch
-does not assert that historical research inputs or already accepted prose have
-been repaired. Source clocks must not be invented from receipt time.
+A crash before the recovery transaction commits changes nothing. After commit,
+normal scheduling resumes. A failed attempt stays incomplete with a future retry.
+Quota admission, current eligibility and model visibility still apply. Historical
+accepted prose is not mass-rewritten or backdated. Reverting code preserves facts
+but restores the old stopping policy; production uses the main-only fix-forward
+entrypoint, not the retired blue/green control plane.
 
-Old code can read new rows and receipts; reverting code preserves data but
-restores the old terminal retry policy. Before receipt commit a crash changes
-nothing; after commit the normal scheduler claims the queued job. Provider
-failure thereafter records a new backed-off attempt. Invalid model output never
-becomes a successful receipt. Optional news processing cannot stop collection.
+## Execution and verification
 
-## Verification
+| Boundary | Executed evidence |
+| --- | --- |
+| Python worker to immutable failure rows | Mixed provider/validation attempts remain retryable; no annotation success is fabricated |
+| Scheduler lease to candidate reader | Repeated missing prerequisites remain pending; later availability can complete the same job |
+| Recovery receipt to annotation/title/impact reader | Old failure remains immutable; one versioned grant requeues current work; retired jobs stay retired |
+| Collector failure clock to later source fetch | Old terminal source receipt does not prevent later successful hydration |
+| SQL migration to public page | Both persisted index families preserve counts, category filtering, forward/reverse keyset traversal and indexed seeks |
+| Built Worker to web readers | Full web build/tests, two public categories and old-count compatibility |
 
-Exercise both annotation and impact failure persistence beyond five attempts,
-bounded retry timing, exact-stage recovery and repeated scheduler reconciliation.
-Exercise page selection -> exact anchor repair -> Gemma review -> ledger using
-the real Python pipeline with metered provider fixtures. Check source fidelity
-instructions in the real outgoing request and preserve non-display semantics.
-Fixtures establish wiring and recovery, not actual model accuracy: real-provider
-evaluation and historical correction remain separate acceptance evidence.
+Final local checks: 401 related Python tests passed before the final composition
+corrections. Afterwards, all 134 scheduler and 154 forward/source tests passed;
+architecture contracts passed 177 tests with 4 declared skips. Full web validation
+passed 393 tests with 6 declared skips. Generated architecture and import/repository
+policy checks passed. Author verification is not independent
+review, deployed Preview verification or production acceptance.
 
-## Verification record
+A real Gemma display rehearsal of immutable annotation
+`afd8a749-bae8-5ee2-b05f-67d7d26b2b37` returned HTTP 500 at September 12, 15:27 MYT.
+Both bounded attempts used the existing scheduler quota accountant. Only request
+and quota receipts were written; no source, annotation or job was changed. This
+is a provider-availability result, not a model-accuracy pass.
 
-- Related Python contracts: 396 passed (failure persistence, scheduler,
-  annotation, source selection, ledger and dashboard resource consumers).
-- Architecture tool contracts: 177 passed, 4 skipped on this Windows host.
-  Generated architecture identity: `623c0d5d298c4838043c284a929908c064074d1f2c05568e26dfb4ce70124e14`.
-- Import and repository policy checks passed. No web component or route changed.
-- A real single-review rehearsal used immutable annotation
-  `afd8a749-bae8-5ee2-b05f-67d7d26b2b37` and source hash
-  `2dcc83ed0062050560acf03ad18b347d0582584f41c6d3c29650756c80bc74ee`.
-  The first attempt returned an HTTP error; one diagnostic confirmation at
-  September 12, 15:27 MYT returned HTTP 500. No accuracy pass is claimed.
-  Both attempts used the existing scheduler quota accountant; quota/request
-  receipts were written, but no annotation, raw source, model or job was changed.
-- A subsequent read-only indexed snapshot at September 12, 15:29 MYT found
-  342 non-retired terminal jobs since September 1. The initial 341-job count
-  is a point-in-time observation, not a fixed acceptance total.
-- Exact production-path review found the impact candidate reader ignored recovery
-  receipts even after its scheduler job was reopened. It now consumes the same
-  recovery identity. A regression executes lease -> recovery -> lease -> exact
-  source resolution, and confirms a later deterministic failure remains blocked.
-
-The PR fixes prospective behavior and recovery eligibility. Existing incorrect
-accepted prose still requires a reviewed append-only correction; this change
-must not be described as a completed historical cleanup or a production recovery.
-Provider availability and independent PR review remain separate acceptance gates.
+Remaining gates: independent PR review; immutable deployed Preview checks on
+desktop, 390x844 and 360x800; migration and main publication; actual backlog
+recovery and synchronization; real-provider fidelity evaluation and reviewed
+append-only correction of existing accepted prose. Non-production builds are
+currently disabled in the documented Cloudflare deployment configuration. No
+Preview pass or production recovery is claimed, and no browser session was opened.

@@ -18,18 +18,6 @@ from zoneinfo import ZoneInfo
 
 from xauusd_forecaster.ai.credentials import derived_credential_id
 
-# Historic receipts predate typed HTTP diagnostics. Match their exact emitted
-# messages; arbitrary provider prose or deterministic errors cannot grant recovery.
-RECOVERABLE_PROVIDER_ERRORS = (
-    "HTTP Error 429: Too Many Requests",
-    "HTTP Error 500: Internal Server Error",
-    "HTTP Error 502: Bad Gateway",
-    "HTTP Error 503: Service Unavailable",
-    "HTTP Error 504: Gateway Timeout",
-    "Model provider request failed: TimeoutError",
-    "Model provider request failed: ConnectionResetError",
-)
-
 PACIFIC = ZoneInfo("America/Los_Angeles")
 ROUTINE_POOL = "ROUTINE"
 PREEMPTIBLE_POOL = "PREEMPTIBLE"
@@ -3092,58 +3080,45 @@ def authorize_repairable_annotation_failures(
     prompt_version: str,
     recovery_version: str,
     now: datetime | None = None,
+    task_type: str = "ANNOTATION",
 ) -> int:
-    """Grant one auditable retry to failures fixed by this recovery version."""
-    provider_placeholders = ",".join("?" for _ in RECOVERABLE_PROVIDER_ERRORS)
+    """Reopen legacy failed attempts without changing their immutable evidence."""
+    job_type = {"ANNOTATION": "ACTIVE_ANNOTATION", "TITLE_TRANSLATION": "TITLE_TRANSLATION"}[task_type]
     timestamp = _iso(now or datetime.now(UTC))
     with connection:
         inserted = connection.execute(
-            f"""INSERT OR IGNORE INTO news_ai_failure_recoveries_v1
+            """INSERT OR IGNORE INTO news_ai_failure_recoveries_v1
                (failure_id,recovery_version,source,source_item_id,
                 revision_number,llm_model_version,prompt_version,authorized_at)
                SELECT f.failure_id,?,f.source,f.source_item_id,
                       f.revision_number,f.llm_model_version,f.prompt_version,?
                FROM news_llm_failures f
-               LEFT JOIN news_llm_failure_evidence_v1 e
-                 ON e.failure_id=f.failure_id
-               WHERE f.task_type='ANNOTATION' AND f.prompt_version=?
-                 AND f.is_terminal=1
-                 AND (
-                   f.error IN ({provider_placeholders})
-                   OR e.failure_stage IN (
-                     'DISPLAY_REPAIR','EVIDENCE_ANCHOR_REPAIR')
-                   OR (e.failure_stage='SEMANTIC_CONTRACT'
-                     AND e.cause IN (
-                       'annotation supporting evidence is absent from source',
-                       'annotation supporting_evidence contains a long item'))
-                   OR EXISTS (
-                     SELECT 1
-                     FROM news_annotation_display_checkpoints_v1 c
-                     WHERE c.source=f.source
-                       AND c.source_item_id=f.source_item_id
-                       AND c.revision_number=f.revision_number
-                       AND c.prompt_version=f.prompt_version))
+               WHERE f.task_type=? AND f.prompt_version=? AND f.is_terminal=1
+                 AND NOT EXISTS (SELECT 1 FROM news_ai_failure_recoveries_v1 r
+                     WHERE r.failure_id=f.failure_id AND r.recovery_version=?)
                  AND f.attempt_number=(
                    SELECT max(f2.attempt_number) FROM news_llm_failures f2
                    WHERE f2.task_type=f.task_type AND f2.source=f.source
                      AND f2.source_item_id=f.source_item_id
                      AND f2.revision_number=f.revision_number
                      AND f2.llm_model_version=f.llm_model_version
-                     AND f2.prompt_version=f.prompt_version)""",
-            (recovery_version, timestamp, prompt_version, *RECOVERABLE_PROVIDER_ERRORS),
+                     AND f2.prompt_version=f.prompt_version)
+               ORDER BY f.failed_at,f.failure_id LIMIT 200""",
+            (recovery_version, timestamp, task_type, prompt_version, recovery_version),
         ).rowcount
         connection.execute(
             """UPDATE news_ai_jobs_v1 AS j
                SET state='QUEUED',available_at=?,lease_owner=NULL,
                    lease_expires_at=NULL,last_error=NULL,updated_at=?,
                    completed_at=NULL
-               WHERE j.task_type='ACTIVE_ANNOTATION'
+               WHERE j.task_type=?
                  AND j.prompt_version=? AND j.state='DEAD_LETTER'
+                 AND COALESCE(j.last_error,'')<>'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'
                  AND EXISTS (
                    SELECT 1 FROM news_llm_failures f
                    JOIN news_ai_failure_recoveries_v1 r
                      ON r.failure_id=f.failure_id AND r.recovery_version=?
-                   WHERE f.source=j.source
+                   WHERE f.task_type=? AND f.source=j.source
                      AND f.source_item_id=j.source_item_id
                      AND f.revision_number=j.revision_number
                      AND f.prompt_version=j.prompt_version
@@ -3157,7 +3132,7 @@ def authorize_repairable_annotation_failures(
                          AND f2.revision_number=f.revision_number
                          AND f2.llm_model_version=f.llm_model_version
                          AND f2.prompt_version=f.prompt_version))""",
-            (timestamp, timestamp, prompt_version, recovery_version),
+            (timestamp, timestamp, job_type, prompt_version, recovery_version, task_type),
         )
     return max(0, inserted)
 
@@ -3169,30 +3144,27 @@ def authorize_repairable_impact_failures(
     recovery_version: str,
     now: datetime | None = None,
 ) -> int:
-    """Grant one auditable retry to identity-contract failures now repairable."""
+    """Reopen legacy impact failures through the existing recovery ledger."""
     timestamp = _iso(now or datetime.now(UTC))
-    repairable_errors = (
-        "New-episode identity requires an anchor difference",
-        *RECOVERABLE_PROVIDER_ERRORS,
-    )
-    placeholders = ",".join("?" for _ in repairable_errors)
     with connection:
         inserted = connection.execute(
-            f"""INSERT OR IGNORE INTO news_ai_impact_failure_recoveries_v1
+            """INSERT OR IGNORE INTO news_ai_impact_failure_recoveries_v1
                (failure_id,recovery_version,annotation_id,llm_model_version,
                 prompt_version,authorized_at)
                SELECT f.failure_id,?,f.annotation_id,f.llm_model_version,
                       f.prompt_version,?
                FROM news_impact_failures_v1 f
                WHERE f.prompt_version=? AND f.is_terminal=1
-                 AND f.error IN ({placeholders})
+                 AND NOT EXISTS (SELECT 1 FROM news_ai_impact_failure_recoveries_v1 r
+                     WHERE r.failure_id=f.failure_id AND r.recovery_version=?)
                  AND f.attempt_number=(
                    SELECT max(f2.attempt_number)
                    FROM news_impact_failures_v1 f2
                    WHERE f2.annotation_id=f.annotation_id
                      AND f2.llm_model_version=f.llm_model_version
-                     AND f2.prompt_version=f.prompt_version)""",
-            (recovery_version, timestamp, prompt_version, *repairable_errors),
+                     AND f2.prompt_version=f.prompt_version)
+               ORDER BY f.failed_at,f.failure_id LIMIT 200""",
+            (recovery_version, timestamp, prompt_version, recovery_version),
         ).rowcount
         connection.execute(
             """UPDATE news_ai_jobs_v1 AS j
@@ -3201,6 +3173,7 @@ def authorize_repairable_impact_failures(
                    completed_at=NULL
                WHERE j.task_type='ACTIVE_IMPACT'
                  AND j.prompt_version=? AND j.state='DEAD_LETTER'
+                 AND COALESCE(j.last_error,'')<>'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'
                  AND EXISTS (
                    SELECT 1 FROM news_impact_failures_v1 f
                    JOIN news_ai_impact_failure_recoveries_v1 r
@@ -3672,6 +3645,11 @@ def sync_pending_jobs(
         prompt_version=PROMPT_VERSION,
         recovery_version=ANNOTATION_FAILURE_RECOVERY_VERSION,
         now=instant,
+    )
+    authorize_repairable_annotation_failures(
+        connection, prompt_version=TITLE_PROMPT_VERSION,
+        recovery_version=ANNOTATION_FAILURE_RECOVERY_VERSION,
+        task_type="TITLE_TRANSLATION", now=instant,
     )
     authorize_repairable_impact_failures(
         connection,

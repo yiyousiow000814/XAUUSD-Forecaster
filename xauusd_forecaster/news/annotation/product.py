@@ -78,7 +78,7 @@ GEMMA_EVIDENCE_WINDOWS_MAX_CHARS = 8_000
 GEMMA_TITLE_BATCH_LIMIT = 10
 GEMMA_IMPACT_BATCH_LIMIT = 10
 PROMPT_VERSION = CURRENT_NEWS_PROMPT_VERSION
-ANNOTATION_FAILURE_RECOVERY_VERSION = "annotation-repair-v3-page-anchors-provider-backoff"
+ANNOTATION_FAILURE_RECOVERY_VERSION = "annotation-repair-v4-no-isolation"
 TITLE_PROMPT_VERSION = "headline-zh-v7-multilingual-month-preservation"
 INVALID_CHINESE_TITLE = "来源新闻（中文标题待校验）"
 HIGH_PRIORITY_NEWS_SOURCES = frozenset({"federal_reserve_monetary"})
@@ -790,6 +790,14 @@ def pending_title_translation_records(
     now = observed_at or datetime.now(UTC)
     forward_epoch = _forward_epoch(connection)
     register_news_semantic_eligibility_sql(connection)
+    recovery_table_exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='news_ai_failure_recoveries_v1'"
+    ).fetchone() is not None
+    recovery_clause = (
+        """AND NOT EXISTS (SELECT 1 FROM news_ai_failure_recoveries_v1 r
+             WHERE r.failure_id=f.failure_id AND r.recovery_version=?)"""
+        if recovery_table_exists else ""
+    )
     pending = connection.execute(
         f"""SELECT n.* FROM news_revisions n
         WHERE {semantic_eligibility_sql_predicate('n')}
@@ -828,6 +836,7 @@ def pending_title_translation_records(
                   AND f2.revision_number=f.revision_number
                   AND f2.llm_model_version=f.llm_model_version
                   AND f2.prompt_version=f.prompt_version)
+              {recovery_clause}
               AND (f.is_terminal=1 OR f.next_retry_at > ?))
         ORDER BY EXISTS (
             SELECT 1 FROM news_title_translations retry_t
@@ -843,6 +852,7 @@ def pending_title_translation_records(
             forward_epoch.isoformat(), INVALID_CHINESE_TITLE, "%相关数值%",
             forward_epoch.isoformat(),
             model, TITLE_PROMPT_VERSION,
+            *((ANNOTATION_FAILURE_RECOVERY_VERSION,) if recovery_table_exists else ()),
             now.isoformat(timespec="microseconds"),
             INVALID_CHINESE_TITLE, "%相关数值%", max(1, limit * 4),
         ),
@@ -2087,33 +2097,12 @@ def _append_llm_failure(
         ),
     ).fetchone()
     attempt = 1 if prior is None else int(prior["attempt_number"]) + 1
-    same_error = prior is not None and prior["error_signature"] == signature
-    error_code = parsed_record.get("error_code")
-    failure_code = str(
-        parsed_record.get("failure_code") or "MODEL_REQUEST_FAILED"
-    )
+    failure_code = str(parsed_record.get("failure_code") or "MODEL_REQUEST_FAILED")
     failure_evidence = parsed_record.get("failure_evidence")
-    transient = (
-        error_code in {429, 500, 502, 503, 504}
-        or parsed_record.get("retryable_transport") is True
-        or (
-            error_type == "RuntimeError"
-            and "unavailable" in normalized_error.casefold()
-        )
-    )
-    if transient:
-        terminal = False
-        delay = timedelta(minutes=(15, 60, 360, 720)[min(attempt - 1, 3)])
-    elif failure_code in {
-        "MODEL_OUTPUT_CONTRACT_FAILED", "MODEL_OUTPUT_INVALID",
-    }:
-        terminal = (same_error and attempt >= 2) or attempt >= 3
-        delay = timedelta(minutes=5)
-    else:
-        terminal = (same_error and attempt >= 2) or attempt >= 3
-        delay = timedelta(hours=6)
     failed_at = datetime.now(UTC)
-    next_retry = None if terminal else failed_at + delay
+    next_retry = failed_at + timedelta(
+        minutes=(15, 60, 360, 720)[min(attempt - 1, 3)]
+    )
     identity = "|".join(
         [
             task_type, str(row["source"]), str(row["source_item_id"]),
@@ -2137,7 +2126,7 @@ def _append_llm_failure(
             "error": normalized_error,
             "failed_at": failed_at,
             "next_retry_at": next_retry,
-            "is_terminal": terminal,
+            "is_terminal": False,
             "failure_evidence": (
                 {**failure_evidence, "failure_code": failure_code}
                 if isinstance(failure_evidence, dict) else None
@@ -2145,10 +2134,10 @@ def _append_llm_failure(
         }
     )
     return {
-        "retry_state": "DEAD_LETTER" if terminal else "BACKING_OFF",
+        "retry_state": "BACKING_OFF",
         "attempt_number": attempt,
-        "next_retry_at": next_retry.isoformat() if next_retry else None,
-        "is_terminal": terminal,
+        "next_retry_at": next_retry.isoformat(),
+        "is_terminal": False,
         "failure_code": failure_code,
         "provider_http_status": parsed_record.get("provider_http_status"),
         "failure_evidence": failure_evidence,
@@ -2176,21 +2165,10 @@ def _append_impact_failure(
         (row["annotation_id"], model_version, prompt_version),
     ).fetchone()
     attempt = 1 if prior is None else int(prior["attempt_number"]) + 1
-    same_error = prior is not None and prior["error_signature"] == signature
-    transient = (
-        details["provider_http_status"] in {429, 500, 502, 503, 504}
-        or details.get("retryable_transport") is True
-    )
-    terminal = False if transient else (same_error and attempt >= 2)
     failed_at = datetime.now(UTC)
-    if terminal:
-        next_retry = None
-    elif transient:
-        next_retry = failed_at + timedelta(
-            minutes=(15, 60, 360, 720)[min(attempt - 1, 3)]
-        )
-    else:
-        next_retry = failed_at + timedelta(hours=6)
+    next_retry = failed_at + timedelta(
+        minutes=(15, 60, 360, 720)[min(attempt - 1, 3)]
+    )
     identity = "|".join((
         str(row["annotation_id"]), model_version, prompt_version,
         str(attempt), signature,
@@ -2206,13 +2184,13 @@ def _append_impact_failure(
         "attempt_number": attempt, "error_type": error_type,
         "error_signature": signature, "error": normalized,
         "failed_at": failed_at, "next_retry_at": next_retry,
-        "is_terminal": terminal,
+        "is_terminal": False,
     })
     return {
-        "retry_state": "DEAD_LETTER" if terminal else "BACKING_OFF",
+        "retry_state": "BACKING_OFF",
         "attempt_number": attempt,
-        "next_retry_at": next_retry.isoformat() if next_retry else None,
-        "is_terminal": terminal,
+        "next_retry_at": next_retry.isoformat(),
+        "is_terminal": False,
         "failure_code": details["failure_code"],
         "provider_http_status": details["provider_http_status"],
         "failure_evidence": details.get("failure_evidence"),
