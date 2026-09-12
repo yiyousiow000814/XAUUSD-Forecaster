@@ -1,5 +1,18 @@
 """Original page segments selected within the existing annotation request."""
 
+import re
+
+
+def unreadable_source_segment(text: str) -> bool:
+    """Recognize publisher-encoded HTML blocks without decoding protected text."""
+    return bool(re.search(r"kAm.+k\^Am", text))
+
+
+def readable_source_text(text: str) -> tuple[str, bool]:
+    lines = text.splitlines()
+    readable = [line for line in lines if not unreadable_source_segment(line)]
+    return "\n".join(readable), len(readable) != len(lines)
+
 PAGE_TEXT_MARKER = "[PAGE_TEXT_V1]\n"
 SELECTION_FIELDS = ("source_title_segment_ids", "source_body_segment_ids")
 SELECTION_SCHEMA = {

@@ -85,7 +85,7 @@ NEWS_INDEX_FIELDS = (
     "impact_status", "impact_class", "impact_event_state",
     "impact_update_type", "impact_assessed_at", "impact_expires_at",
     "impact_event_at", "impact_clock_source", "impact_reason_zh",
-    "mirror_updated_at",
+    "mirror_updated_at", "syndicated_source_count", "source_text_incomplete",
 )
 NEWS_PROJECTION_IMPACT_CLOCK_FIELDS = (
     "impact_event_at", "impact_available_at", "impact_expires_at",
@@ -190,7 +190,9 @@ def split_news_rows(rows: Iterable[dict]) -> tuple[list[dict], list[dict]]:
             key: value for key, value in row.items() if key not in NEWS_INDEX_FIELDS
         }
         detail_key = content_addressed_detail_key(row, detail_payload)
-        index = {key: row.get(key) for key in NEWS_INDEX_FIELDS}
+        index = {key: row.get(key) for key in NEWS_INDEX_FIELDS
+                 if key not in {"syndicated_source_count", "source_text_incomplete"}
+                 or key in row}
         index["cluster_id"] = str(index.get("cluster_id") or detail_key)
         index.update({
             "detail_key": detail_key,

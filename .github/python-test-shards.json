@@ -78,6 +78,7 @@
       "id": "python-3",
       "tests": [
         "tests/dashboard/test_dashboard_news_resources.py",
+        "tests/dashboard/test_news_syndication.py",
         "tests/runtime/test_runtime_root_ownership.py",
         "tests/runtime/test_production_shape.py",
         "tests/assistant/test_assistant_routing.py",

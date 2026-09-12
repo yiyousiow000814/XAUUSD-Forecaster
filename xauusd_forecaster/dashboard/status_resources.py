@@ -426,7 +426,8 @@ def _dashboard_payload(
                        n.source_published_time, n.collector_first_seen_time,
                        n.fetched_time,
                       n.headline AS original_headline,
-                      COALESCE(t.headline_zh, n.headline) AS headline,
+                      COALESCE(json_extract(a.annotation_json, '$.headline_zh'),
+                               t.headline_zh, n.headline) AS headline,
                       length(COALESCE(n.body, '')) AS content_characters,
                       CASE WHEN n.body LIKE '[FULL_TEXT%' THEN 'FULL_TEXT'
                            WHEN length(trim(COALESCE(n.body, ''))) >= 240 THEN 'SOURCE_CONTENT'

@@ -982,10 +982,35 @@ def test_selected_article_survives_ledger_and_reader_without_rehydrating(tmp_pat
     assert output[0]["body"] == article
     assert output[0]["content_characters"] == len(article)
     assert output[0]["content_hash"] == digest
+    assert output[0]["source_article_title"] == "Original title"
     assert not any(k.endswith("segment_ids_json") for k in output[0])
     assert ledger.connection.execute("SELECT body FROM news_revisions").fetchone()[0] == body
     def no_fetch(_):
         pytest.fail("An acquired page must not re-enter legacy navigation recovery")
     report = hydrate_pending_non_fed_content(ledger, now, extractor=no_fetch)
     assert report["attempted"] == 0
+    second_body = body.replace("About Treasury General Information", "Publisher navigation")
+    second_digest = hashlib.sha256(second_body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": source, "source_item_id": "reprinted-source",
+        "source_published_time": now, "collector_first_seen_time": now,
+        "fetched_time": now, "headline": "Truncated - another publisher",
+        "body": second_body, "link": "https://reprint.test/news",
+        "content_hash": second_digest, "cluster_id": "different-feed-cluster",
+    })
+    ledger.append_annotation({
+        "annotation_id": "reprinted-annotation", "source": source,
+        "source_item_id": "reprinted-source", "revision_number": 1,
+        "raw_content_hash": second_digest, "annotation": annotation,
+        "llm_model_version": "gemini-3.5-flash-lite", "prompt_version": PROMPT_VERSION,
+        "parse_started_at": now, "parsed_at": now,
+    })
+    generation = news_resources._build_news_projection_source(ledger.connection)
+    assert len(generation.index_rows) == len(generation.detail_rows) == 1
+    assert generation.index_rows[0]["syndicated_source_count"] == 2
+    detail = generation.detail_rows[0]["payload"]
+    assert detail["body"] == article
+    assert len(detail["syndicated_sources"]) == 2
+    assert ledger.connection.execute("SELECT count(*) FROM news_revisions").fetchone()[0] == 2
+    assert {r[0] for r in ledger.connection.execute("SELECT body FROM news_revisions")} == {body, second_body}
     ledger.close()

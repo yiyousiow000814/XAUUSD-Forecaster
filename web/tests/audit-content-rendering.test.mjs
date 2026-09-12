@@ -25,8 +25,9 @@ const built = await build({
     resolveDir: fileURLToPath(new URL("..", import.meta.url)), loader: "tsx",
     contents: `import React from 'react';
       import {renderToStaticMarkup} from 'react-dom/server';
-      import AuditView from ${JSON.stringify(viewPath)};
+      import AuditView, {NewsRow} from ${JSON.stringify(viewPath)};
       import {clearDashboardResource,updateDashboardResource} from ${JSON.stringify(resourcesPath)};
+      export function renderNews(row) { return renderToStaticMarkup(React.createElement(NewsRow,{row})); }
       export function render(view, resources) {
         for (const url of ${JSON.stringify(resourceUrls)}) clearDashboardResource(url);
         for (const [url,body] of Object.entries(resources)) updateDashboardResource(url,()=>body);
@@ -36,7 +37,27 @@ const built = await build({
 });
 const renderedModule = join(temporaryRoot, "audit.mjs");
 writeFileSync(renderedModule, built.outputFiles[0].contents);
-const { render } = await import(pathToFileURL(renderedModule).href);
+const { render, renderNews } = await import(pathToFileURL(renderedModule).href);
+
+test("article row expands publisher provenance with one coherent public label", () => {
+  const row = {headline: "政策会议展望", emerging_topic_zh: "政策会议展望", event_type: "macro_preview",
+    source: "google_news_fed_rates", source_item_id: "one", category: "利率/Fed",
+    model_visibility: "MODEL_INELIGIBLE", content_status: "FULL_TEXT", content_characters: 500,
+    annotation_status: "READY", summary_zh: "决议尚未公布", body: "Readable original",
+    collector_first_seen_time: "2026-09-12T08:00:00Z", syndicated_source_count: 2,
+    syndicated_sources: [{source: "wire", source_item_id: "one", link: "https://publisher.test/article", collector_first_seen_time: "2026-09-12T08:00:00Z"},
+      {source: "copy", source_item_id: "two", link: "https://reprint.test/article", collector_first_seen_time: "2026-09-12T09:00:00Z", source_text_incomplete: true}]};
+  const original = JSON.stringify(row);
+  const html = renderNews(row);
+  assert.match(html, /2 个转载来源/);
+  assert.match(html, /publisher\.test/);
+  assert.match(html, /reprint\.test/);
+  assert.match(html, /原文部分可读/);
+  assert.match(html, /决议尚未公布/);
+  assert.doesNotMatch(html, /macro_preview/);
+  assert.equal(JSON.stringify(row), original);
+  assert.doesNotThrow(() => renderNews({...row, syndicated_sources: [{source: "invalid", source_item_id: "bad", link: "not a url"}]}));
+});
 const generatedAt = "2026-09-06T11:00:00Z";
 const baseline = {
   "/api/status": {generated_at: "2026-09-06T12:00:00Z", system: {online: false, market_session: "CLOSED"}, factor_coverage: []},

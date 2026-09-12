@@ -2168,7 +2168,8 @@ def test_forward_ledger_adds_dashboard_news_lookup_indexes(tmp_path) -> None:
 
 
 def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
-    now = datetime.now(UTC).replace(microsecond=0)
+    # Both translation and later review are already available to the live read.
+    now = (datetime.now(UTC) - timedelta(seconds=10)).replace(microsecond=0)
     database = tmp_path / "forward.sqlite3"
     ledger = ForwardLedger(database, now=now)
     body = "full evidence body " * 30
@@ -2207,6 +2208,8 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
             "prompt_version": "headline-zh-tie-test", "parsed_at": now,
         }
     )
+    untranslated = news_resources._news_reader_rows(ledger.connection, now + timedelta(seconds=1))
+    assert untranslated[0]["headline"] == "六月个人收入与支出正式报告"
     _append_basic_annotation(
         ledger,
         source="bea_economic_releases",
@@ -2224,7 +2227,7 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
 
     module = _dashboard_module()
     payload = module._dashboard_payload(database)
-    assert payload["recent_news"][0]["headline"] == "六月个人收入与支出正式报告"
+    assert payload["recent_news"][0]["headline"] == "测试经济数据发布"
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
         archive = news_resources._news_reader_rows(connection, now + timedelta(seconds=3))

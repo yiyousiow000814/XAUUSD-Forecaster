@@ -4514,7 +4514,8 @@ def test_page_selection_shares_annotation_request_and_gemma_source(monkeypatch, 
     # Navigation is longer than the article and deliberately precedes it.
     html = ("<html><body><div id='content'><article>" + "MENU_ONLY " * 400
             + "</article><h2>Complete original article title</h2><p>" + article
-            + "</p><footer>FOOTER_ONLY</footer></div></body></html>").encode()
+            + "</p><footer>FOOTER_ONLY</footer><div hidden>HIDDEN_BLOCK</div>"
+            + "<p>kAm6?4@565 A2C28C2A9k^Am</p></div></body></html>").encode()
     page, _ = extractor("https://example.test/news", lambda _: html)
     segments = page_segments(page)
     title_id = segments.index("Complete original article title")
@@ -4527,6 +4528,8 @@ def test_page_selection_shares_annotation_request_and_gemma_source(monkeypatch, 
         calls.append((model, prompt))
         if model == annotation_module.DEFAULT_GEMINI_MODEL:
             assert "MENU_ONLY" in prompt and "FOOTER_ONLY" in prompt
+            assert "HIDDEN_BLOCK" not in prompt and "kAm6?4@565" not in prompt
+            assert "Unreadable publisher-encoded segment" in prompt
             required = payload["generationConfig"]["responseSchema"]["required"]
             assert "source_body_segment_ids" in required
             return vector

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from xauusd_forecaster.news.semantics.article_source import (
-    page_segments, selected_article, SELECTION_FIELDS,
+    page_segments, selected_article, SELECTION_FIELDS, unreadable_source_segment,
 )
 
 import hashlib
@@ -1163,7 +1163,7 @@ class _GeminiRequestPool:
             start_index,
             model=model,
             purpose="news-annotation",
-            prompt_contract=(f"{prompt_version}:source-fidelity-v1"
+            prompt_contract=(f"{prompt_version}:source-fidelity-v2"
                              + (":page-selection-v1" if is_page else "")),
             payload=payload,
             input_tokens=input_tokens,
@@ -1630,9 +1630,22 @@ def _annotation_prompt(prompt_version: str, headline: str, body: str) -> str:
             "requested translation and semantic analysis using only that selected "
             "article. Evidence quotes must come from the selected original segments. "
             "Do not rewrite the original source or make a separate extraction request. "
+            "Encoded, hidden or unreadable blocks are not article evidence. Select "
+            "only readable original paragraphs; never infer missing paragraphs. "
         )
-        body = "\n".join(f"[{i}] {text}" for i, text in enumerate(segments))
+        body = "\n".join(
+            f"[{i}] " + ("[Unreadable publisher-encoded segment; do not select]"
+                         if unreadable_source_segment(text) else text)
+            for i, text in enumerate(segments)
+        )
     semantic_contract = (
+            "Separate the article's role from the event it discusses. A preview "
+            "of a future decision is not a decision already announced. Preserve "
+            "conditional language and distinguish publication time, scheduled "
+            "event time and actual outcome time. Do not invent a calendar date "
+            "from a relative weekday without source context. When an article "
+            "discusses several future events, retain their separate conditions "
+            "and do not turn the title into a claim that any has occurred. "
             "Judge semantic meaning from the complete source, never from casing, "
             "one keyword, publisher identity, or a fixed word list. Set "
             "xauusd_relevance to DIRECT only for gold itself, MACRO_DRIVER for a "
