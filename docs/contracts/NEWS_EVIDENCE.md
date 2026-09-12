@@ -361,18 +361,27 @@ article; unchanged request count is not a claim of unchanged token consumption.
 ## Incomplete news processing
 
 HTTP 429/500/502/503/504 and typed transport failures are operational delay,
-not a finding that an article is invalid. They retain BACKING_OFF with the
-existing 15-minute, one-hour, six-hour, then twelve-hour retry cadence. Twelve
-hours is the per-record cap between attempts, not an immediate retry loop.
-Scheduler quota admission, leases and current-source eligibility remain required.
-JSON, source-anchor, field and model-contract failures follow the same retry
-cadence. Title translation, annotation, impact review and source hydration MUST
+not a finding that an article is invalid. Ordinary model failures return to
+QUEUED at failure/release time, preserving the same task identity and failure
+evidence. JSON, source-anchor, field and model-contract failures use that same
+queue. Queue age follows eligibility/requeue time, not initial creation time.
+Every batch shares one eligibility cutoff across its account lanes: a requeued
+task must not repeat in that round. The existing supervised next round may use
+available capacity without an additional per-record delay. Provider Retry-After,
+account quotas, dispatch pacing, explicit operator schedules and genuine shared
+prerequisite waits remain authoritative. Eligibility is not dispatch permission
+or a successful result. Scheduler leases and current-source eligibility remain
+required. Title translation, annotation, impact review and source hydration MUST
 NOT permanently stop an article because an attempt count was reached. Invalid
 output remains incomplete and model-ineligible. Source access denial remains
 visible and MUST NOT be bypassed. Legacy terminal source failures can be checked
 again after twelve hours; model failures use the existing versioned recovery
-receipt, in pages of at most 200 grants. Neither mechanism rewrites history or
-revives superseded jobs. A newer failure retains its own next retry time.
+receipt, in pages of at most 200 grants per task family. The same receipt lifts
+old automatic per-record delays for annotation, title and impact work without
+rewriting failure timestamps. Recovery does not alter leased/completed jobs,
+active operator overrides, or superseded-job retirement. A new immediate failure
+does not qualify for another old-delay recovery grant. Source hydration retains
+its independent provider polling and source-access policy.
 
 The archive exposes only COMPLETED and PROCESSING review groups. Old terminal
 and unavailable-source rows belong to PROCESSING with specific diagnostics.

@@ -78,7 +78,7 @@ GEMMA_EVIDENCE_WINDOWS_MAX_CHARS = 8_000
 GEMMA_TITLE_BATCH_LIMIT = 10
 GEMMA_IMPACT_BATCH_LIMIT = 10
 PROMPT_VERSION = CURRENT_NEWS_PROMPT_VERSION
-ANNOTATION_FAILURE_RECOVERY_VERSION = "annotation-repair-v4-no-isolation"
+ANNOTATION_FAILURE_RECOVERY_VERSION = "annotation-repair-v5-queue"
 TITLE_PROMPT_VERSION = "headline-zh-v7-multilingual-month-preservation"
 INVALID_CHINESE_TITLE = "来源新闻（中文标题待校验）"
 HIGH_PRIORITY_NEWS_SOURCES = frozenset({"federal_reserve_monetary"})
@@ -2113,9 +2113,7 @@ def _append_llm_failure(
     failure_code = str(parsed_record.get("failure_code") or "MODEL_REQUEST_FAILED")
     failure_evidence = parsed_record.get("failure_evidence")
     failed_at = datetime.now(UTC)
-    next_retry = failed_at + timedelta(
-        minutes=(15, 60, 360, 720)[min(attempt - 1, 3)]
-    )
+    next_retry = failed_at
     identity = "|".join(
         [
             task_type, str(row["source"]), str(row["source_item_id"]),
@@ -2147,7 +2145,7 @@ def _append_llm_failure(
         }
     )
     return {
-        "retry_state": "BACKING_OFF",
+        "retry_state": "QUEUED",
         "attempt_number": attempt,
         "next_retry_at": next_retry.isoformat(),
         "is_terminal": False,
@@ -2179,9 +2177,7 @@ def _append_impact_failure(
     ).fetchone()
     attempt = 1 if prior is None else int(prior["attempt_number"]) + 1
     failed_at = datetime.now(UTC)
-    next_retry = failed_at + timedelta(
-        minutes=(15, 60, 360, 720)[min(attempt - 1, 3)]
-    )
+    next_retry = failed_at
     identity = "|".join((
         str(row["annotation_id"]), model_version, prompt_version,
         str(attempt), signature,
@@ -2200,7 +2196,7 @@ def _append_impact_failure(
         "is_terminal": False,
     })
     return {
-        "retry_state": "BACKING_OFF",
+        "retry_state": "QUEUED",
         "attempt_number": attempt,
         "next_retry_at": next_retry.isoformat(),
         "is_terminal": False,

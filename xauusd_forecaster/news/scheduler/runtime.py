@@ -318,6 +318,7 @@ def _run_scheduled_lane(
     *,
     credentials: tuple[ApiCredential, ...],
     maximum: int,
+    queued_before: datetime,
     worker_prefix: str,
     task_types: tuple[str, ...] | None = None,
     gemma_reserved_accounts: frozenset[str] = frozenset(),
@@ -357,6 +358,7 @@ def _run_scheduled_lane(
                 pool=ROUTINE_POOL,
                 task_types=task_types,
                 excluded_task_types=blocked_snapshot(),
+                queued_before=queued_before,
                 now=datetime.now(UTC),
             )
         elif has_preemptible:
@@ -366,6 +368,7 @@ def _run_scheduled_lane(
                 pool=PREEMPTIBLE_POOL,
                 task_types=task_types,
                 excluded_task_types=blocked_snapshot(),
+                queued_before=queued_before,
                 now=datetime.now(UTC),
             )
         if job is None:
@@ -459,7 +462,7 @@ def _run_scheduled_lane(
             )
             if route_capacity_deferred:
                 block_task_type(job.task_type)
-        else:
+        elif status.get("is_terminal"):
             retry_at = _next_retry(status, outcome_at)
             backoff_job(
                 ledger.connection, job.job_id, worker_id,
@@ -467,6 +470,17 @@ def _run_scheduled_lane(
                 error=str(status.get("error") or outcome),
                 terminal=bool(status.get("is_terminal")),
             )
+        else:
+            # Queue eligibility is separate from provider/account admission.
+            # Release after this round's cutoff so all lanes offer other work
+            # before retrying the same immutable task in a subsequent round.
+            retry_at = datetime.now(UTC)
+            release_job(
+                ledger.connection, job.job_id, worker_id,
+                available_at=retry_at,
+                error=str(status.get("failure_code") or status.get("error") or outcome),
+            )
+            status = {**status, "retry_state": "QUEUED", "next_retry_at": retry_at.isoformat()}
         statuses.append({
             "job_id": job.job_id,
             "task_type": job.task_type,
@@ -499,6 +513,7 @@ def run_scheduled_batch(
     if not gemma_reserved_accounts.issubset(account_ids):
         raise ValueError("Gemma reserved account is not configured")
     maximum = batch_size or max(1, len(account_ids) * 10)
+    queued_before = datetime.now(UTC)
     worker_prefix = f"{socket.gethostname()}-{os.getpid()}"
 
     # Explicit batches preserve deterministic maintenance/test behavior. The
@@ -521,6 +536,7 @@ def run_scheduled_batch(
             ledger,
             credentials=credentials,
             maximum=maximum,
+            queued_before=queued_before,
             worker_prefix=worker_prefix,
             task_types=task_types,
             gemma_reserved_accounts=gemma_reserved_accounts,
@@ -572,6 +588,7 @@ def run_scheduled_batch(
                     if item.account_id == account_id
                 ),
                 maximum=allocation,
+                queued_before=queued_before,
                 worker_prefix=(
                     f"{worker_prefix}-account-{index}-lane-{lane_index}"
                 ),

@@ -17,7 +17,7 @@ from xauusd_forecaster.news.semantics.contracts import (
 
 IMPACT_MODEL = "gemma-4-31b-it"
 IMPACT_PROMPT_VERSION = "news-impact-v7-continuous-observation-identity"
-IMPACT_FAILURE_RECOVERY_VERSION = "impact-repair-v4-no-isolation"
+IMPACT_FAILURE_RECOVERY_VERSION = "impact-repair-v5-queue"
 HANDOVER_IMPACT_PROMPT_VERSION = "news-impact-v3-independent-semantic-review"
 
 IMPACT_TIME_RULES = {

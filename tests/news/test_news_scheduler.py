@@ -933,6 +933,53 @@ def test_provider_dispatch_adapts_to_success_and_retry_after() -> None:
         "SELECT interval_ms FROM news_ai_provider_dispatch_state_v1"
     ).fetchone()[0] == 405
 
+    record_provider_dispatch_outcome(
+        connection, outcome="PROVIDER_FAILED", retry_after_seconds=30,
+        now=NOW + timedelta(seconds=3),
+    )
+    assert not reserve_provider_dispatch(
+        connection, provider_task="ACTIVE_IMPACT", now=NOW + timedelta(seconds=4),
+    )[0]
+    assert reserve_provider_dispatch(
+        connection, provider_task="ACTIVE_IMPACT", now=NOW + timedelta(seconds=33),
+    )[0]
+
+
+@pytest.mark.parametrize("task_type", ["ACTIVE_ANNOTATION", "ACTIVE_IMPACT", "TITLE_TRANSLATION"])
+@pytest.mark.parametrize("concurrent", [False, True])
+def test_failed_task_rejoins_queue_without_repeating_in_the_same_batch(
+    tmp_path, monkeypatch, task_type, concurrent,
+) -> None:
+    from xauusd_forecaster.news.scheduler import runtime as runner
+
+    ledger = ForwardLedger(tmp_path / "fair-queue.sqlite3", now=NOW)
+    start = datetime.now(UTC) - timedelta(minutes=2)
+    for i in range(2):
+        enqueue_job(
+            ledger.connection, task_type=task_type, source="source",
+            source_item_id=str(i), revision_number=1, annotation_id="a" if task_type == "ACTIVE_IMPACT" else "",
+            prompt_version="prompt", priority="NORMAL", now=start + timedelta(seconds=i),
+        )
+    credentials = (ApiCredential("account-a", ROUTINE_POOL, "key-a", "fp-a"),)
+    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_a, **_k: {})
+    calls = []
+    def execute(_ledger, _credential, job, **_kwargs):
+        calls.append(job.source_item_id)
+        return {"status": "ERROR", "failure_code": "PROVIDER_HTTP_ERROR", "provider_http_status": 503}
+    monkeypatch.setattr(runner, "_execute_job", execute)
+    batch_size = None if concurrent else 8
+    result = runner.run_scheduled_batch(ledger, batch_size=batch_size)
+    assert sorted(calls) == ["0", "1"]
+    assert all(r["retry_state"] == "QUEUED" for r in result)
+    assert all(datetime.fromisoformat(r["next_retry_at"]) <= datetime.now(UTC) for r in result)
+    assert {r[0] for r in ledger.connection.execute("SELECT state FROM news_ai_jobs_v1")} == {"QUEUED"}
+    monkeypatch.setattr(runner, "_execute_job", lambda *_a, **_k: {"status": "OK"})
+    resumed = runner.run_scheduled_batch(ledger, batch_size=batch_size)
+    assert len(resumed) == 2 and all(r["status"] == "OK" for r in resumed)
+    assert ledger.connection.execute("SELECT count(*) FROM news_ai_job_attempts_v1").fetchone()[0] == 4
+    ledger.close()
+
 
 def test_live_admission_is_not_reduced_by_backfill_reserves() -> None:
     connection = _connection()
@@ -1194,53 +1241,83 @@ def test_annotation_surge_takes_priority_after_embedding_pressure_falls() -> Non
     "Gemma repair contract failed",
     "Unterminated JSON string",
 ])
-def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path, legacy_error) -> None:
+@pytest.mark.parametrize("terminal,operator_wait", [(True, False), (False, False), (False, True)])
+def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path, legacy_error, terminal, operator_wait) -> None:
+    delayed_until = datetime.now(UTC) + timedelta(hours=12)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
-    ledger.connection.execute("PRAGMA foreign_keys=OFF")
+    from tests.fixtures.dashboard_news_fixtures import _append_basic_annotation
+    from xauusd_forecaster.news.annotation.impact import pending_impact_records
+    body = "Complete source evidence for the current economic report. " * 12
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": "source", "source_item_id": "item",
+        "source_published_time": NOW, "collector_first_seen_time": NOW,
+        "fetched_time": NOW, "headline": "Report", "body": body,
+        "content_hash": digest, "cluster_id": "item",
+    })
+    _append_basic_annotation(ledger, source="source", item_id="item", digest=digest, parsed_at=NOW)
     job_id = enqueue_job(
         ledger.connection, task_type="ACTIVE_IMPACT",
         source="source", source_item_id="item", revision_number=1,
-        annotation_id="annotation", prompt_version=IMPACT_PROMPT_VERSION,
+        annotation_id="annotation-source-item", prompt_version=IMPACT_PROMPT_VERSION,
         priority="NORMAL", now=NOW,
     )
-    row = {
-        "source": "source", "source_item_id": "item", "revision_number": 1,
-        "content_hash": "hash", "annotation_id": "annotation",
-    }
     error = ValueError(legacy_error)
-    # Persist a genuine old-policy terminal receipt, independently of the new policy.
+    # Old immutable evidence must remain unchanged while the same reader recovers.
     ledger.append_news_impact_failure({
         "failure_id": "legacy-terminal-impact", "source": "source",
-        "source_item_id": "item", "revision_number": 1, "raw_content_hash": "hash",
-        "annotation_id": "annotation", "llm_model_version": IMPACT_MODEL,
+        "source_item_id": "item", "revision_number": 1, "raw_content_hash": digest,
+        "annotation_id": "annotation-source-item", "llm_model_version": IMPACT_MODEL,
         "prompt_version": IMPACT_PROMPT_VERSION, "attempt_number": 5,
         "error_type": "HTTPError" if legacy_error.startswith("HTTP") else "ValueError",
         "error_signature": "legacy-error", "error": legacy_error,
-        "failed_at": NOW, "next_retry_at": None, "is_terminal": True,
+        "failed_at": NOW, "next_retry_at": None if terminal else delayed_until, "is_terminal": terminal,
     })
     assert claim_job(
         ledger.connection, worker_id="worker", pool=ROUTINE_POOL, now=NOW,
     ) is not None
     backoff_job(
-        ledger.connection, job_id, "worker", available_at=NOW,
-        error=str(error), terminal=True,
+        ledger.connection, job_id, "worker", available_at=delayed_until,
+        error=str(error), terminal=terminal,
     )
 
+    if operator_wait:
+        before_override = ledger.connection.execute("SELECT state,available_at FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone()
+        apply_retry_schedule_override(
+            ledger.connection, request_id="explicit-wait", job_id=job_id,
+            operator_id="owner", mode="DELAY_1_HOUR", reason="User scheduled a later attempt",
+            expected_state=before_override["state"], expected_available_at=before_override["available_at"],
+            now=datetime.now(UTC),
+        )
+    before_recovery = tuple(ledger.connection.execute("SELECT state,available_at FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone())
     recovery_at = datetime.now(UTC)
+    assert claim_job(ledger.connection, worker_id="worker", pool=ROUTINE_POOL, now=recovery_at) is None
+    assert pending_impact_records(ledger.connection, observed_at=recovery_at) == []
+    original_failure = tuple(ledger.connection.execute("SELECT * FROM news_impact_failures_v1").fetchone())
     assert authorize_repairable_impact_failures(
         ledger.connection,
         prompt_version=IMPACT_PROMPT_VERSION,
         recovery_version=IMPACT_FAILURE_RECOVERY_VERSION,
         now=recovery_at,
     ) == 1
+    if operator_wait:
+        assert tuple(ledger.connection.execute("SELECT state,available_at FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone()) == before_recovery
+        assert claim_job(ledger.connection, worker_id="worker", pool=ROUTINE_POOL, now=recovery_at) is None
+        ledger.close()
+        return
     assert ledger.connection.execute(
         "SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
     ).fetchone()[0] == "QUEUED"
 
-    assert claim_job(
+    assert [row["annotation_id"] for row in pending_impact_records(ledger.connection, observed_at=recovery_at)] == ["annotation-source-item"]
+    assert tuple(ledger.connection.execute("SELECT * FROM news_impact_failures_v1").fetchone()) == original_failure
+    claimed = claim_job(
         ledger.connection, worker_id="worker", pool=ROUTINE_POOL,
         now=recovery_at,
-    ) is not None
+    )
+    assert claimed is not None
+    resolved = news_scheduler_module.pending_record_for_job(ledger.connection, claimed, now=recovery_at)
+    assert resolved and resolved["source_item_id"] == "item"
     backoff_job(
         ledger.connection, job_id, "worker", available_at=NOW,
         error=str(error), terminal=True,
@@ -1259,10 +1336,13 @@ def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path, leg
 
 @pytest.mark.parametrize("task_type", ["ANNOTATION", "TITLE_TRANSLATION"])
 @pytest.mark.parametrize("retired", [False, True])
-def test_contract_recovery_requeues_each_current_task_only_once(tmp_path, task_type, retired) -> None:
-    from xauusd_forecaster.news.annotation.product import TITLE_PROMPT_VERSION, pending_title_translation_records
+@pytest.mark.parametrize("terminal,operator_wait", [(True, False), (False, False), (False, True)])
+def test_contract_recovery_requeues_each_current_task_only_once(tmp_path, task_type, retired, terminal, operator_wait) -> None:
+    from xauusd_forecaster.news.annotation.product import TITLE_PROMPT_VERSION, DEFAULT_GEMMA_MODEL, DEFAULT_GEMINI_MODEL, pending_title_translation_records, pending_annotation_records
+    model = DEFAULT_GEMINI_MODEL if task_type == "ANNOTATION" else DEFAULT_GEMMA_MODEL
     prompt = CURRENT_NEWS_PROMPT_VERSION if task_type == "ANNOTATION" else TITLE_PROMPT_VERSION
     job_type = "ACTIVE_ANNOTATION" if task_type == "ANNOTATION" else task_type
+    delayed_until = datetime.now(UTC) + timedelta(hours=12)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     body = "Complete source evidence for one bounded recovery attempt. " * 12
     digest = hashlib.sha256(body.encode()).hexdigest()
@@ -1282,11 +1362,12 @@ def test_contract_recovery_requeues_each_current_task_only_once(tmp_path, task_t
     ledger.append_llm_failure({
         "failure_id": "failure", "task_type": task_type,
         "source": "source", "source_item_id": "item", "revision_number": 1,
-        "raw_content_hash": digest, "llm_model_version": "model",
+        "raw_content_hash": digest, "llm_model_version": model,
         "prompt_version": prompt, "attempt_number": 1,
         "error_type": "ValueError",
         "error_signature": hashlib.sha256(cause.encode()).hexdigest(),
-        "error": cause, "failed_at": NOW, "is_terminal": True,
+        "error": cause, "failed_at": NOW, "is_terminal": terminal,
+        "next_retry_at": None if terminal else delayed_until,
         "failure_evidence": {
             "failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
             "failure_stage": "SEMANTIC_CONTRACT", "response_hash": "a" * 64,
@@ -1297,29 +1378,52 @@ def test_contract_recovery_requeues_each_current_task_only_once(tmp_path, task_t
         ledger.connection, worker_id="worker", pool=ROUTINE_POOL, now=NOW,
     ) is not None
     backoff_job(
-        ledger.connection, job_id, "worker", available_at=NOW,
-        error="CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE" if retired else cause, terminal=True,
+        ledger.connection, job_id, "worker", available_at=delayed_until,
+        error="CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE" if retired else cause, terminal=terminal,
     )
 
+    if operator_wait:
+        before_override = ledger.connection.execute("SELECT state,available_at FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone()
+        apply_retry_schedule_override(
+            ledger.connection, request_id="explicit-wait", job_id=job_id,
+            operator_id="owner", mode="DELAY_1_HOUR", reason="User scheduled a later attempt",
+            expected_state=before_override["state"], expected_available_at=before_override["available_at"],
+            now=datetime.now(UTC),
+        )
+    before_recovery = tuple(ledger.connection.execute("SELECT state,available_at FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone())
     recovery_at = datetime.now(UTC)
+    assert claim_job(ledger.connection, worker_id="worker", pool=ROUTINE_POOL, now=recovery_at) is None
+    def pending():
+        if task_type == "TITLE_TRANSLATION":
+            return pending_title_translation_records(ledger.connection, model=model, observed_at=recovery_at)
+        return pending_annotation_records(ledger.connection, expected_model_identity=model, observed_at=recovery_at)
+    assert pending() == []
+    original_failure = tuple(ledger.connection.execute("SELECT * FROM news_llm_failures").fetchone())
     assert authorize_repairable_annotation_failures(
         ledger.connection,
         prompt_version=prompt,
         recovery_version=ANNOTATION_FAILURE_RECOVERY_VERSION, task_type=task_type,
         now=recovery_at,
     ) == 1
+    if operator_wait:
+        assert tuple(ledger.connection.execute("SELECT state,available_at FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone()) == before_recovery
+        assert claim_job(ledger.connection, worker_id="worker", pool=ROUTINE_POOL, now=recovery_at) is None
+        ledger.close()
+        return
     if retired:
         assert ledger.connection.execute("SELECT state,last_error FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone()["last_error"] == "CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE"
         assert claim_job(ledger.connection, worker_id="worker", pool=ROUTINE_POOL, now=recovery_at) is None
         ledger.close()
         return
-    if task_type == "TITLE_TRANSLATION":
-        pending = pending_title_translation_records(ledger.connection, model="model", observed_at=recovery_at)
-        assert any(row["source_item_id"] == "item" for row in pending)
-    assert claim_job(
+    assert any(row["source_item_id"] == "item" for row in pending())
+    assert tuple(ledger.connection.execute("SELECT * FROM news_llm_failures").fetchone()) == original_failure
+    claimed = claim_job(
         ledger.connection, worker_id="worker", pool=ROUTINE_POOL,
         now=recovery_at,
-    ) is not None
+    )
+    assert claimed is not None
+    resolved = news_scheduler_module.pending_record_for_job(ledger.connection, claimed, now=recovery_at)
+    assert resolved and resolved["source_item_id"] == "item"
     backoff_job(
         ledger.connection, job_id, "worker", available_at=NOW,
         error=cause, terminal=True,

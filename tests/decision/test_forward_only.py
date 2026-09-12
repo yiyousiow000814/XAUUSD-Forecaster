@@ -2424,10 +2424,10 @@ def test_semantic_contract_failure_keeps_bounded_diagnostic_evidence(
     assert len(evidence["response_hash"]) == 64
     assert datetime.fromisoformat(failure["next_retry_at"]) - datetime.fromisoformat(
         failure["failed_at"]
-    ) == timedelta(minutes=15)
+    ) == timedelta(0)
 
 
-def test_llm_failure_is_persisted_and_blocks_immediate_retry(
+def test_llm_failure_is_persisted_and_allows_next_queued_attempt(
     tmp_path, monkeypatch
 ) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
@@ -2459,10 +2459,10 @@ def test_llm_failure_is_persisted_and_blocks_immediate_retry(
         ledger, provider="gemini", api_key="test-key", limit=1,
         request_accountant=ALLOW_MODEL_REQUEST,
     )
-    assert first[0]["retry_state"] == "BACKING_OFF"
-    assert second == []
-    assert calls == 1
-    assert ledger.count("news_llm_failures") == 1
+    assert first[0]["retry_state"] == "QUEUED"
+    assert second[0]["retry_state"] == "QUEUED"
+    assert calls == 2
+    assert ledger.count("news_llm_failures") == 2
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         ledger.connection.execute("DELETE FROM news_llm_failures")
 
@@ -2497,13 +2497,13 @@ def test_mixed_provider_and_validation_failures_remain_retryable(tmp_path) -> No
     second = annotation_module._append_llm_failure(
         ledger, parsed, "ANNOTATION", annotation_module.PROMPT_VERSION
     )
-    assert first["retry_state"] == "BACKING_OFF"
-    assert second["retry_state"] == "BACKING_OFF"
+    assert first["retry_state"] == "QUEUED"
+    assert second["retry_state"] == "QUEUED"
     latest = ledger.connection.execute(
         "SELECT * FROM news_llm_failures ORDER BY attempt_number DESC LIMIT 1"
     ).fetchone()
     assert latest["is_terminal"] == 0
-    assert datetime.fromisoformat(latest["next_retry_at"]) - datetime.fromisoformat(latest["failed_at"]) == timedelta(hours=12)
+    assert latest["next_retry_at"] == latest["failed_at"]
     assert ledger.count("news_annotations") == 0
     ledger.close()
 
@@ -2530,9 +2530,9 @@ def test_repeated_same_impact_validation_failure_remains_retryable(
         ledger, row, failure, model_version=annotation_module.IMPACT_MODEL,
     )
 
-    assert first["retry_state"] == "BACKING_OFF"
+    assert first["retry_state"] == "QUEUED"
     assert first["failure_code"] == "MODEL_OUTPUT_INVALID"
-    assert second["retry_state"] == "BACKING_OFF"
+    assert second["retry_state"] == "QUEUED"
     assert second["is_terminal"] is False
     latest = ledger.connection.execute(
         """SELECT error_type,error,is_terminal,next_retry_at
@@ -2544,7 +2544,7 @@ def test_repeated_same_impact_validation_failure_remains_retryable(
 
 
 @pytest.mark.parametrize("http_code", [None, 429, 500, 502, 503, 504])
-def test_typed_transport_failures_use_bounded_transient_policy_for_both_tasks(
+def test_typed_transport_failures_requeue_without_per_record_delays(
     tmp_path, http_code,
 ) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
@@ -2589,7 +2589,7 @@ def test_typed_transport_failures_use_bounded_transient_policy_for_both_tasks(
     ]
 
     for outcomes in (annotation_outcomes, impact_outcomes):
-        assert [item["retry_state"] for item in outcomes] == ["BACKING_OFF"] * 7
+        assert [item["retry_state"] for item in outcomes] == ["QUEUED"] * 7
         assert all(not item["is_terminal"] for item in outcomes)
         assert outcomes[-1]["next_retry_at"] is not None
     for table in ("news_llm_failures", "news_impact_failures_v1"):
@@ -2601,7 +2601,7 @@ def test_typed_transport_failures_use_bounded_transient_policy_for_both_tasks(
             int((datetime.fromisoformat(row["next_retry_at"])
                  - datetime.fromisoformat(row["failed_at"])).total_seconds() / 60)
             for row in rows
-        ] == [15, 60, 360, 720, 720, 720, 720]
+        ] == [0] * 7
     ledger.close()
 
 
