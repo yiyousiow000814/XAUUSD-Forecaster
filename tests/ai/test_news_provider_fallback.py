@@ -4,6 +4,7 @@ import io
 import json
 import sqlite3
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -53,7 +54,7 @@ def test_backup_route_order_and_actual_identity(database, monkeypatch, google_mo
     called = []
     def transport(request, *, timeout):
         body = json.loads(request.data)
-        if "generativelanguage" in request.full_url:
+        if urllib.parse.urlsplit(request.full_url).hostname == "generativelanguage.googleapis.com":
             raise urllib.error.HTTPError(request.full_url, 503, "temporary", {}, io.BytesIO(b"{}"))
         called.append(body["model"])
         assert "secret" not in str(body)
@@ -87,7 +88,7 @@ def test_gemma_capacity_and_transport_can_recover(database, monkeypatch, failure
         monkeypatch.setattr(accountant, "reserve", lambda _usage: False)
     request_pool = _GeminiRequestPool(("key",), request_accountant=accountant)
     def transport(request, *, timeout):
-        if "generativelanguage" in request.full_url:
+        if urllib.parse.urlsplit(request.full_url).hostname == "generativelanguage.googleapis.com":
             if failure == "timeout":
                 raise TimeoutError()
             raise urllib.error.HTTPError(request.full_url, 429, "quota", {}, io.BytesIO(b"{}"))
@@ -281,7 +282,7 @@ def test_backup_has_utc_day_and_does_not_inherit_google_deadline(database):
 def test_backup_retry_after_remains_independent_and_durable(database, monkeypatch):
     request_pool = pool(database, monkeypatch)
     def transport(request, *, timeout):
-        status = 429 if "api.groq.com" in request.full_url else 503
+        status = 429 if urllib.parse.urlsplit(request.full_url).hostname == "api.groq.com" else 503
         raise urllib.error.HTTPError(request.full_url, status, "temporary", {"Retry-After": "120"}, io.BytesIO(b"{}"))
     monkeypatch.setattr(urllib.request, "urlopen", transport)
     with pytest.raises(urllib.error.HTTPError) as caught:
@@ -319,7 +320,7 @@ def test_production_news_job_persists_backup_title_with_actual_model(tmp_path, m
            "headline": body, "content_hash": content_hash}
     monkeypatch.setattr(runtime, "pending_record_for_job", lambda *_args, **_kwargs: row)
     def transport(request, *, timeout):
-        if "api.groq.com" not in request.full_url:
+        if urllib.parse.urlsplit(request.full_url).hostname != "api.groq.com":
             raise urllib.error.HTTPError(request.full_url, 503, "temporary", {}, io.BytesIO(b"{}"))
         return response(backup_envelope())
     monkeypatch.setattr(urllib.request, "urlopen", transport)
