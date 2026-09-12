@@ -1705,6 +1705,7 @@ def claim_job(
     work_lanes: tuple[str, ...] = WORK_LANES,
     now: datetime | None = None,
     lease_seconds: int = 180,
+    queued_before: datetime | None = None,
 ) -> ScheduledJob | None:
     if pool not in {ROUTINE_POOL, PREEMPTIBLE_POOL}:
         raise ValueError("scheduler pool is not controlled")
@@ -1734,6 +1735,7 @@ def claim_job(
     )
     task_placeholders = ",".join("?" for _ in claimable_tasks)
     lane_placeholders = ",".join("?" for _ in claimable_lanes)
+    queue_cutoff = "AND j.available_at<=?" if queued_before is not None else ""
     connection.execute("BEGIN IMMEDIATE")
     try:
         connection.execute(
@@ -1753,7 +1755,7 @@ def claim_job(
                    AND (j.task_type='ACTIVE_ANNOTATION' OR
                         (j.provenance_resolved=1 AND j.provenance_version=?))
                    AND j.work_lane IN ({lane_placeholders})
-                   AND j.available_at<=? {priority_filter}
+                   AND j.available_at<=? {queue_cutoff} {priority_filter}
                  ORDER BY
                    CASE WHEN retry_override.mode='IDLE_CAPACITY'
                               AND retry_override.requested_at<=? THEN 0 ELSE 1 END,
@@ -1764,17 +1766,18 @@ def claim_job(
                         THEN 0 ELSE 1 END,
                   CASE WHEN retry_override.mode='IDLE_CAPACITY'
                              AND retry_override.requested_at>? THEN 1 ELSE 0 END,
-                  CASE WHEN j.created_at<=? THEN 0 ELSE 1 END,
-                  CASE WHEN j.created_at<=? THEN j.created_at ELSE NULL END,
+                  CASE WHEN j.available_at<=? THEN 0 ELSE 1 END,
+                  CASE WHEN j.available_at<=? THEN j.available_at ELSE NULL END,
                   CASE j.priority WHEN 'IMMEDIATE' THEN 0 WHEN 'FAST' THEN 1
                                 WHEN 'NORMAL' THEN 2 ELSE 3 END,
                   CASE j.task_type WHEN 'ACTIVE_IMPACT' THEN 0
                                  WHEN 'ACTIVE_ANNOTATION' THEN 1 ELSE 2 END,
-                  j.created_at,j.job_id
+                  j.available_at,j.job_id
                 LIMIT 1""",
             (
                 *claimable_tasks, WORK_PROVENANCE_VERSION,
                 *claimable_lanes, timestamp,
+                *((_iso(queued_before),) if queued_before is not None else ()),
                 _iso(instant - IDLE_CAPACITY_MAX_WAIT),
                 _iso(instant - IDLE_CAPACITY_MAX_WAIT),
                 aged_before, aged_before,
@@ -2870,6 +2873,10 @@ def record_provider_dispatch_outcome(
             )
             cooldown = instant + timedelta(seconds=wait_seconds)
             next_eligible = max(next_eligible, cooldown)
+        elif outcome == "PROVIDER_FAILED" and retry_after_seconds is not None:
+            cooldown = instant + timedelta(seconds=max(1, min(86_400, int(retry_after_seconds))))
+            next_eligible = max(next_eligible, cooldown)
+            success_streak = 0
         elif outcome == "PROVIDER_SUCCEEDED" and (
             cooldown is None or cooldown <= instant
         ):
@@ -3093,7 +3100,8 @@ def authorize_repairable_annotation_failures(
                SELECT f.failure_id,?,f.source,f.source_item_id,
                       f.revision_number,f.llm_model_version,f.prompt_version,?
                FROM news_llm_failures f
-               WHERE f.task_type=? AND f.prompt_version=? AND f.is_terminal=1
+               WHERE f.task_type=? AND f.prompt_version=?
+                 AND (f.is_terminal=1 OR f.next_retry_at>f.failed_at)
                  AND NOT EXISTS (SELECT 1 FROM news_ai_failure_recoveries_v1 r
                      WHERE r.failure_id=f.failure_id AND r.recovery_version=?)
                  AND f.attempt_number=(
@@ -3112,7 +3120,9 @@ def authorize_repairable_annotation_failures(
                    lease_expires_at=NULL,last_error=NULL,updated_at=?,
                    completed_at=NULL
                WHERE j.task_type=?
-                 AND j.prompt_version=? AND j.state='DEAD_LETTER'
+                 AND j.prompt_version=? AND j.state IN ('DEAD_LETTER','BACKING_OFF','QUEUED')
+                 AND NOT EXISTS (SELECT 1 FROM news_ai_retry_schedule_overrides_v1 o
+                                 WHERE o.job_id=j.job_id AND o.active=1)
                  AND COALESCE(j.last_error,'')<>'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'
                  AND EXISTS (
                    SELECT 1 FROM news_llm_failures f
@@ -3154,7 +3164,8 @@ def authorize_repairable_impact_failures(
                SELECT f.failure_id,?,f.annotation_id,f.llm_model_version,
                       f.prompt_version,?
                FROM news_impact_failures_v1 f
-               WHERE f.prompt_version=? AND f.is_terminal=1
+               WHERE f.prompt_version=?
+                 AND (f.is_terminal=1 OR f.next_retry_at>f.failed_at)
                  AND NOT EXISTS (SELECT 1 FROM news_ai_impact_failure_recoveries_v1 r
                      WHERE r.failure_id=f.failure_id AND r.recovery_version=?)
                  AND f.attempt_number=(
@@ -3172,7 +3183,9 @@ def authorize_repairable_impact_failures(
                    lease_expires_at=NULL,last_error=NULL,updated_at=?,
                    completed_at=NULL
                WHERE j.task_type='ACTIVE_IMPACT'
-                 AND j.prompt_version=? AND j.state='DEAD_LETTER'
+                 AND j.prompt_version=? AND j.state IN ('DEAD_LETTER','BACKING_OFF','QUEUED')
+                 AND NOT EXISTS (SELECT 1 FROM news_ai_retry_schedule_overrides_v1 o
+                                 WHERE o.job_id=j.job_id AND o.active=1)
                  AND COALESCE(j.last_error,'')<>'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'
                  AND EXISTS (
                    SELECT 1 FROM news_impact_failures_v1 f
