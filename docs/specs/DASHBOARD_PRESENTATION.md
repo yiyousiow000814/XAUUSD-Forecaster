@@ -16,6 +16,12 @@ RPD follows UTC midnight; token admission uses a trailing 24-hour window.
 Show local admission balances as local estimates, not provider availability.
 All operator timestamps use Asia/Kuala_Lumpur. Both model sections must remain
 readable without horizontal scrolling on supported phone viewports.
+Align the quota-day strip, model headers, metric bodies and disclosure with
+the panel's inset. Use three metric columns on desktop and two on phones,
+with larger primary values and smaller limits. Keep the counting explanation
+in an expandable disclosure. Acceptance must inspect populated cards, including
+long token counts, as well as the unavailable state; lack of overflow alone
+does not prove visual consistency with the adjacent quota panels.
 
 ## Grid boundaries
 
