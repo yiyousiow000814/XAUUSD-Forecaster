@@ -3101,7 +3101,7 @@ def authorize_repairable_annotation_failures(
                       f.revision_number,f.llm_model_version,f.prompt_version,?
                FROM news_llm_failures f
                WHERE f.task_type=? AND f.prompt_version=?
-                 AND (f.is_terminal=1 OR f.next_retry_at>f.failed_at)
+                 AND (f.is_terminal=1 OR (f.next_retry_at>f.failed_at AND f.next_retry_at>?))
                  AND NOT EXISTS (SELECT 1 FROM news_ai_failure_recoveries_v1 r
                      WHERE r.failure_id=f.failure_id AND r.recovery_version=?)
                  AND f.attempt_number=(
@@ -3112,7 +3112,7 @@ def authorize_repairable_annotation_failures(
                      AND f2.llm_model_version=f.llm_model_version
                      AND f2.prompt_version=f.prompt_version)
                ORDER BY f.failed_at,f.failure_id LIMIT 200""",
-            (recovery_version, timestamp, task_type, prompt_version, recovery_version),
+            (recovery_version, timestamp, task_type, prompt_version, timestamp, recovery_version),
         ).rowcount
         connection.execute(
             """UPDATE news_ai_jobs_v1 AS j
@@ -3165,7 +3165,7 @@ def authorize_repairable_impact_failures(
                       f.prompt_version,?
                FROM news_impact_failures_v1 f
                WHERE f.prompt_version=?
-                 AND (f.is_terminal=1 OR f.next_retry_at>f.failed_at)
+                 AND (f.is_terminal=1 OR (f.next_retry_at>f.failed_at AND f.next_retry_at>?))
                  AND NOT EXISTS (SELECT 1 FROM news_ai_impact_failure_recoveries_v1 r
                      WHERE r.failure_id=f.failure_id AND r.recovery_version=?)
                  AND f.attempt_number=(
@@ -3175,7 +3175,7 @@ def authorize_repairable_impact_failures(
                      AND f2.llm_model_version=f.llm_model_version
                      AND f2.prompt_version=f.prompt_version)
                ORDER BY f.failed_at,f.failure_id LIMIT 200""",
-            (recovery_version, timestamp, prompt_version, recovery_version),
+            (recovery_version, timestamp, prompt_version, timestamp, recovery_version),
         ).rowcount
         connection.execute(
             """UPDATE news_ai_jobs_v1 AS j

@@ -93,3 +93,14 @@ Pre-merge focused family: 368 passed. Extended exact-reader recovery coverage:
 30 passed. Repository policy and architecture/import checks passed. Generated
 architecture was checked against the changed source. Required remote CI and
 post-main production observations remain separate acceptance steps.
+
+## Post-deployment recovery scope correction
+
+The first production observation found recovery pages were also granting old
+nonterminal failures whose automatic delay had already expired. Those readers
+already admit the input, so renewing qualification adds no progress and delays
+currently blocked work. Only terminal failures or failures with retry time later
+than the current recovery observation qualify. Expired evidence and unrelated
+job availability remain unchanged. Existing grants remain immutable. The same
+family tests now verify future, expired, terminal, operator-held and retired
+inputs through each actual pending reader. No lifecycle or authority is added.

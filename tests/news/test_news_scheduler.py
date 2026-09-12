@@ -1241,8 +1241,8 @@ def test_annotation_surge_takes_priority_after_embedding_pressure_falls() -> Non
     "Gemma repair contract failed",
     "Unterminated JSON string",
 ])
-@pytest.mark.parametrize("terminal,operator_wait", [(True, False), (False, False), (False, True)])
-def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path, legacy_error, terminal, operator_wait) -> None:
+@pytest.mark.parametrize("terminal,operator_wait,delay_state", [(True, False, "future"), (False, False, "future"), (False, True, "future"), (False, False, "expired"), (False, False, "immediate")])
+def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path, legacy_error, terminal, operator_wait, delay_state) -> None:
     delayed_until = datetime.now(UTC) + timedelta(hours=12)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     from tests.fixtures.dashboard_news_fixtures import _append_basic_annotation
@@ -1271,7 +1271,7 @@ def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path, leg
         "prompt_version": IMPACT_PROMPT_VERSION, "attempt_number": 5,
         "error_type": "HTTPError" if legacy_error.startswith("HTTP") else "ValueError",
         "error_signature": "legacy-error", "error": legacy_error,
-        "failed_at": NOW, "next_retry_at": None if terminal else delayed_until, "is_terminal": terminal,
+        "failed_at": delayed_until if delay_state == "immediate" else NOW, "next_retry_at": None if terminal else (NOW + timedelta(hours=12) if delay_state == "expired" else delayed_until), "is_terminal": terminal,
     })
     assert claim_job(
         ledger.connection, worker_id="worker", pool=ROUTINE_POOL, now=NOW,
@@ -1292,15 +1292,15 @@ def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path, leg
     before_recovery = tuple(ledger.connection.execute("SELECT state,available_at FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone())
     recovery_at = datetime.now(UTC)
     assert claim_job(ledger.connection, worker_id="worker", pool=ROUTINE_POOL, now=recovery_at) is None
-    assert pending_impact_records(ledger.connection, observed_at=recovery_at) == []
+    assert bool(pending_impact_records(ledger.connection, observed_at=recovery_at)) == (delay_state == "expired")
     original_failure = tuple(ledger.connection.execute("SELECT * FROM news_impact_failures_v1").fetchone())
     assert authorize_repairable_impact_failures(
         ledger.connection,
         prompt_version=IMPACT_PROMPT_VERSION,
         recovery_version=IMPACT_FAILURE_RECOVERY_VERSION,
         now=recovery_at,
-    ) == 1
-    if operator_wait:
+    ) == (1 if delay_state == "future" else 0)
+    if delay_state != "future" or operator_wait:
         assert tuple(ledger.connection.execute("SELECT state,available_at FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone()) == before_recovery
         assert claim_job(ledger.connection, worker_id="worker", pool=ROUTINE_POOL, now=recovery_at) is None
         ledger.close()
@@ -1336,8 +1336,8 @@ def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path, leg
 
 @pytest.mark.parametrize("task_type", ["ANNOTATION", "TITLE_TRANSLATION"])
 @pytest.mark.parametrize("retired", [False, True])
-@pytest.mark.parametrize("terminal,operator_wait", [(True, False), (False, False), (False, True)])
-def test_contract_recovery_requeues_each_current_task_only_once(tmp_path, task_type, retired, terminal, operator_wait) -> None:
+@pytest.mark.parametrize("terminal,operator_wait,delay_state", [(True, False, "future"), (False, False, "future"), (False, True, "future"), (False, False, "expired"), (False, False, "immediate")])
+def test_contract_recovery_requeues_each_current_task_only_once(tmp_path, task_type, retired, terminal, operator_wait, delay_state) -> None:
     from xauusd_forecaster.news.annotation.product import TITLE_PROMPT_VERSION, DEFAULT_GEMMA_MODEL, DEFAULT_GEMINI_MODEL, pending_title_translation_records, pending_annotation_records
     model = DEFAULT_GEMINI_MODEL if task_type == "ANNOTATION" else DEFAULT_GEMMA_MODEL
     prompt = CURRENT_NEWS_PROMPT_VERSION if task_type == "ANNOTATION" else TITLE_PROMPT_VERSION
@@ -1366,8 +1366,8 @@ def test_contract_recovery_requeues_each_current_task_only_once(tmp_path, task_t
         "prompt_version": prompt, "attempt_number": 1,
         "error_type": "ValueError",
         "error_signature": hashlib.sha256(cause.encode()).hexdigest(),
-        "error": cause, "failed_at": NOW, "is_terminal": terminal,
-        "next_retry_at": None if terminal else delayed_until,
+        "error": cause, "failed_at": delayed_until if delay_state == "immediate" else NOW, "is_terminal": terminal,
+        "next_retry_at": None if terminal else (NOW + timedelta(hours=12) if delay_state == "expired" else delayed_until),
         "failure_evidence": {
             "failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
             "failure_stage": "SEMANTIC_CONTRACT", "response_hash": "a" * 64,
@@ -1397,15 +1397,15 @@ def test_contract_recovery_requeues_each_current_task_only_once(tmp_path, task_t
         if task_type == "TITLE_TRANSLATION":
             return pending_title_translation_records(ledger.connection, model=model, observed_at=recovery_at)
         return pending_annotation_records(ledger.connection, expected_model_identity=model, observed_at=recovery_at)
-    assert pending() == []
+    assert bool(pending()) == (delay_state == "expired")
     original_failure = tuple(ledger.connection.execute("SELECT * FROM news_llm_failures").fetchone())
     assert authorize_repairable_annotation_failures(
         ledger.connection,
         prompt_version=prompt,
         recovery_version=ANNOTATION_FAILURE_RECOVERY_VERSION, task_type=task_type,
         now=recovery_at,
-    ) == 1
-    if operator_wait:
+    ) == (1 if delay_state == "future" else 0)
+    if delay_state != "future" or operator_wait:
         assert tuple(ledger.connection.execute("SELECT state,available_at FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone()) == before_recovery
         assert claim_job(ledger.connection, worker_id="worker", pool=ROUTINE_POOL, now=recovery_at) is None
         ledger.close()
