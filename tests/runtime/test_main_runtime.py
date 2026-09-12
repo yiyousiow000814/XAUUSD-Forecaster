@@ -71,7 +71,7 @@ try {{
 
 
 @pytest.mark.parametrize("configured", [False, True])
-@pytest.mark.parametrize("variable", ["OPENROUTER_API_KEY", "GROQ_API_KEY"])
+@pytest.mark.parametrize("variable", ["GROQ_API_KEY"])
 def test_annotator_launch_receives_optional_backup_key_and_restores_parent(tmp_path: Path, configured: bool, variable: str) -> None:
     output = tmp_path / "credential-check.json"
     worker = tmp_path / "credential-fixture.py"

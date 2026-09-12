@@ -56,17 +56,12 @@ class SchedulerModelAccountant(ModelRequestAccountant):
         self._failure_code: str | None = None
         self._failure_evidence: dict[str, object] | None = None
         self._usage_id: str | None = None
-        backup_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
         groq_key = os.environ.get("GROQ_API_KEY", "").strip()
-        if work_lane == "LIVE" and enable_news_backup:
-            routes = []
-            if backup_key:
-                routes.append(NewsBackupGateway(backup_key, OpenRouterNewsAccountant(connection)))
-            if groq_key:
-                routes.extend(NewsBackupGateway(groq_key, GroqNewsAccountant(connection, model),
-                              provider="groq", model=model) for model in GROQ_NEWS_MODELS)
-            if routes:
-                self.fallback_gateway = NewsBackupChain(tuple(routes))
+        if groq_key and work_lane == "LIVE" and enable_news_backup:
+            self.fallback_gateway = NewsBackupChain(tuple(
+                NewsBackupGateway(groq_key, GroqNewsAccountant(connection, model), model=model)
+                for model in GROQ_NEWS_MODELS
+            ))
 
     def reserve(self, usage: ModelRequestUsage) -> bool:
         policy = quota_surface_for_model(usage.model)
@@ -180,19 +175,18 @@ class SchedulerModelAccountant(ModelRequestAccountant):
         return self._failure_evidence
 
 
-class OpenRouterNewsAccountant(ModelRequestAccountant):
+class GroqNewsAccountant(ModelRequestAccountant):
     """Reuse atomic scheduler admission with one shared free-provider budget."""
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(self, connection: sqlite3.Connection, model: str) -> None:
+        if model not in GROQ_NEWS_MODELS:
+            raise ValueError("unapproved Groq model")
         self.connection = connection
         self._usage_id: str | None = None
-        self.account_id = "OPENROUTER_NEWS"
-        self.model_family = "openrouter-free"
-        self.daily_limit = 50
-        self.rpm = 20
-        self.tpm = None
-        self.tpd = None
-        self.scope = "OPENROUTER_NEWS"
+        self.account_id = "GROQ_NEWS"
+        self.model_family = model
+        self.daily_limit, self.rpm, self.tpm, self.tpd = 1000, 30, 8000, 200000
+        self.scope = "GROQ_NEWS/" + model
 
     def reserve(self, usage: ModelRequestUsage) -> bool:
         usage_id = str(uuid.uuid4())
@@ -228,16 +222,3 @@ class OpenRouterNewsAccountant(ModelRequestAccountant):
             independent_provider_scope=self.scope,
         )
         self._usage_id = None
-
-
-class GroqNewsAccountant(OpenRouterNewsAccountant):
-    """Same transaction owner, with Groq's request and combined token caps."""
-
-    def __init__(self, connection: sqlite3.Connection, model: str) -> None:
-        if model not in GROQ_NEWS_MODELS:
-            raise ValueError("unapproved Groq model")
-        super().__init__(connection)
-        self.account_id = "GROQ_NEWS"
-        self.model_family = model
-        self.daily_limit, self.rpm, self.tpm, self.tpd = 1000, 30, 8000, 200000
-        self.scope = "GROQ_NEWS/" + model

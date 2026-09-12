@@ -30,36 +30,28 @@ quota or the scheduler's automatic batch size.
 
 ## Optional news backup
 
-`OPENROUTER_API_KEY` enables only `google/gemma-4-31b-it:free`.
-`GROQ_API_KEY` enables `qwen/qwen3.8-27b`, then `qwen/qwen3.6-27b`.
-Both Google Gemma and Gemini recovery try OpenRouter Gemma first, followed by
-Groq Qwen 3.8 and then 3.6. Each route is tried once per
-failed generation, with the complete source, prompt schema and original decoder.
-HTTP 500/502/503 and transport failure trigger recovery; Gemma capacity denial
-and HTTP 429 also qualify. Successful generation and invalid model output do
-not cause extra requests. Assistant and historical backfill never use backups.
+`GROQ_API_KEY` enables `qwen/qwen3.8-27b`, then `qwen/qwen3.6-27b` after
+Google generation HTTP 500/502/503 or transport failure. Google Gemma capacity
+denial and 429 also qualify. Each route is tried once per failed generation,
+with the complete source, schema and original decoder. Successful generation,
+authentication failures and invalid output do not cause extra requests.
+Assistant and historical backfill never use backups.
 
-All lanes share 50 requests per UTC day and 20 per trailing 60 seconds through
-the existing transactional request ledger. Failed and interrupted attempts count;
-changing keys or restarting does not reset the budget. OpenRouter Retry-After
-affects only its own provider scope. Paid models and paid routing are excluded by
-the fixed free model and zero provider maximum prices. The Windows main launcher
-loads the optional key for the annotator; restart is needed after configuration
-changes. Request/model outcome evidence contains no secrets.
+All lanes share each Groq model's budget through the existing SQLite owner:
+30 RPM, 1,000 RPD, 8,000 combined tokens/minute and 200,000 tokens/trailing
+24 hours. Complete converted prompt UTF-8 bytes plus up to 2,048 output tokens
+form a conservative reservation. Large requests skip the route; source input
+is never truncated. Failed attempts retain usage and successful responses also
+record actual tokens and model identity. Per-model Retry-After is durable and
+independent of Google. Network inactivity timeout is 15 seconds per route.
+Both Qwen models use `reasoning_effort=none` for bounded JSON news tasks.
 
-Groq shares each model's budget across all scheduler lanes: 30 RPM, 1,000 RPD,
-8,000 combined tokens/minute and 200,000 tokens/trailing 24 hours. Reservations
-count the complete converted prompt conservatively using UTF-8 bytes plus up to
-2,048 output tokens. This can skip large articles; input is never truncated to
-fit. Failed attempts retain their reservation. Actual provider token usage is
-also recorded. Per-model Retry-After survives restart independently of Google
-and OpenRouter. Backup network inactivity timeouts are 15 seconds per route.
-These limits follow the configured free account; provider limits can be lower.
-See [Groq limits](https://console.groq.com/docs/rate-limits).
-
-See [OpenRouter limits](https://openrouter.ai/docs/api_reference/limits).
-The account's actual free allowance may be lower or unavailable; provider
-availability is not guaranteed and backup failure returns to the existing queue.
+Only the annotator receives the optional Windows user setting. Restart is
+needed after a credential change. Credentials never enter logs or Git. Account
+limits and external availability remain authoritative; unavailable backup work
+returns to the existing queue. No paid account or model is enabled.
+See [Groq limits](https://console.groq.com/docs/rate-limits) and
+[reasoning parameters](https://console.groq.com/docs/reasoning).
 
 ## Assistant capacity policy
 

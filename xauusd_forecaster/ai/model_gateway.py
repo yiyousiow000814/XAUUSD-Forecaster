@@ -14,8 +14,6 @@ from email.utils import parsedate_to_datetime
 from typing import Callable, TypeVar
 
 from xauusd_forecaster.ai.provider_registry import (
-    OPENROUTER_GENERATION_ENDPOINT,
-    OPENROUTER_NEWS_MODEL,
     GROQ_GENERATION_ENDPOINT,
     GROQ_NEWS_MODELS,
     google_embedding_endpoint_for_model,
@@ -422,13 +420,11 @@ class NewsBackupGateway:
     """One metered text request to an explicitly allowed news backup model."""
 
     def __init__(self, api_key: str, accountant: ModelRequestAccountant,
-                 *, provider: str = "openrouter", model: str = OPENROUTER_NEWS_MODEL) -> None:
-        if not ((provider == "openrouter" and model == OPENROUTER_NEWS_MODEL)
-                or (provider == "groq" and model in GROQ_NEWS_MODELS)):
+                 *, model: str) -> None:
+        if model not in GROQ_NEWS_MODELS:
             raise ValueError("unapproved news backup route")
         self.api_key = api_key
         self.accountant = accountant
-        self.provider = provider
         self.model = model
 
     def generate(
@@ -460,12 +456,9 @@ class NewsBackupGateway:
         # Count the complete converted prompt, including the copied JSON schema.
         # UTF-8 bytes conservatively bound text tokens without another request.
         tokens = max(usage.input_tokens, len(json.dumps(messages, ensure_ascii=False).encode("utf-8")) + 64)
-        if self.provider == "openrouter":
-            body["provider"] = {"max_price": {"prompt": 0, "completion": 0}}
-        else:
-            body["max_tokens"] = min(int(body["max_tokens"]), 2048)
-            body["reasoning_effort"] = "none"
-            tokens += int(body["max_tokens"])
+        body["max_tokens"] = min(int(body["max_tokens"]), 2048)
+        body["reasoning_effort"] = "none"
+        tokens += int(body["max_tokens"])
         backup_usage = ModelRequestUsage(
             model=self.model, purpose=usage.purpose,
             input_tokens=tokens, prompt_contract=usage.prompt_contract,
@@ -476,7 +469,7 @@ class NewsBackupGateway:
         self.accountant.mark_provider_attempted()
         try:
             request = urllib.request.Request(
-                OPENROUTER_GENERATION_ENDPOINT if self.provider == "openrouter" else GROQ_GENERATION_ENDPOINT,
+                GROQ_GENERATION_ENDPOINT,
                 data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
                 headers={"Content-Type": "application/json",
                          "User-Agent": "XAUUSD-Forecaster/1.0",
@@ -493,14 +486,14 @@ class NewsBackupGateway:
             if not isinstance(text, str) or not text.strip():
                 raise ValueError("backup provider response has no text")
             actual_model = str(envelope.get("model") or "")
-            if actual_model not in {self.model, self.model.removesuffix(":free")}:
+            if actual_model != self.model:
                 raise ValueError("backup provider returned an unexpected model")
-            identity = self.provider + "/" + actual_model
+            identity = "groq/" + actual_model
             result = decode({"candidates": [{"content": {"parts": [{"text": text}]}}],
                              "modelVersion": identity})
         except urllib.error.HTTPError as error:
             error.failure_evidence = _http_failure_evidence(
-                error, model=self.provider + "/" + self.model, purpose=usage.purpose,
+                error, model="groq/" + self.model, purpose=usage.purpose,
             )
             self.accountant.record_provider_outcome(
                 "PROVIDER_THROTTLED" if error.code == 429 else "PROVIDER_FAILED",
