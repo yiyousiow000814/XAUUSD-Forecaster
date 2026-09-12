@@ -222,7 +222,7 @@ export default function StatusView({ initialPayload }: { initialPayload?: Status
             <header><span>03</span><div><h3 id="quota-queue-title">请求异常</h3><p>只有需要处理的队列状态</p></div></header>
             <div className="quota-metric-grid">
               <article className={payload?.annotation_queue?.backing_off ? "quota-metric-attention" : ""}><span>错误退避中</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue?.backing_off} /></MetricValue></strong><small>到期前不会重复请求</small></article>
-              <article className={payload?.annotation_queue?.dead_letter ? "quota-metric-danger" : ""}><span>已隔离</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue?.dead_letter} /></MetricValue></strong><small>永久错误不再消耗配额</small></article>
+              <article className={payload?.annotation_queue?.dead_letter ? "quota-metric-danger" : ""}><span>旧失败待恢复</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue?.dead_letter} /></MetricValue></strong><small>历史失败尚待重新进入处理队列</small></article>
             </div>
           </section>
         </div>

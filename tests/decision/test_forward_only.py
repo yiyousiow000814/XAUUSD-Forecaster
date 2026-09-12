@@ -711,7 +711,7 @@ def test_article_fetch_uses_browser_document_headers(monkeypatch) -> None:
         ),
     ],
 )
-def test_non_fed_permanent_denial_is_quarantined_without_component_failure(
+def test_non_fed_denial_backs_off_and_recovers_same_source(
     tmp_path, denial,
 ) -> None:
     fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
@@ -747,14 +747,40 @@ def test_non_fed_permanent_denial_is_quarantined_without_component_failure(
 
     assert first["status"] == "OK"
     assert first["unavailable"] == 1
-    assert second["status"] == "OK"
-    assert second["attempted"] == 0
+    assert second.get("attempted", 0) == 0
     assert calls == 1
     failure = ledger.connection.execute(
         "SELECT * FROM news_content_failures"
     ).fetchone()
-    assert failure["is_terminal"] == 1
-    assert failure["next_retry_at"] is None
+    assert failure["is_terminal"] == 0
+    assert failure["next_retry_at"] is not None
+
+    # An inaccessible page cannot back off unrelated publishers in the shared lane.
+    unrelated = dict(ledger.connection.execute("SELECT * FROM news_revisions").fetchone())
+    unrelated.update(source_item_id="other-page", cluster_id="other-page",
+                     link="https://publisher.example/available")
+    for key in ("source_published_time", "collector_first_seen_time", "fetched_time"):
+        unrelated[key] = datetime.fromisoformat(unrelated[key])
+    ledger.append_news_revision(unrelated)
+    other = hydrate_pending_non_fed_content(
+        ledger, fetched + timedelta(minutes=15),
+        extractor=lambda url: ("Other complete source text. " * 30, url),
+    )
+    assert other["attempted"] == 1 and other["inserted"] == 1
+    # Simulate an immutable terminal receipt created by the previous runtime.
+    ledger.append_content_failure({
+        **dict(failure), "failure_id": "legacy-content-terminal", "attempt_number": 2,
+        "failed_at": fetched + timedelta(minutes=6), "next_retry_at": None,
+        "is_terminal": True,
+    })
+    recovered = hydrate_pending_non_fed_content(
+        ledger, fetched + timedelta(hours=13),
+        extractor=lambda url: ("Recovered complete source text. " * 30, url),
+    )
+    assert recovered["inserted"] == 1
+    assert ledger.connection.execute("SELECT count(*) FROM news_revisions").fetchone()[0] == 4
+    assert ledger.connection.execute("SELECT is_terminal FROM news_content_failures WHERE failure_id='legacy-content-terminal'").fetchone()[0] == 1
+    ledger.close()
 
 
 def test_bls_api_values_are_versioned_and_rate_limited(tmp_path, monkeypatch) -> None:
@@ -2217,8 +2243,10 @@ def test_gemini_annotation_reserves_local_estimated_input_tokens(
     ]
 
 
+@pytest.mark.parametrize("whole_page", [False, True])
+@pytest.mark.parametrize("invalid_evidence", ["evidence absent from source", "x" * 300])
 def test_semantic_evidence_failure_uses_exact_source_pointer_repair(
-    monkeypatch,
+    monkeypatch, whole_page, invalid_evidence,
 ) -> None:
     vector = _v15_annotation(
         {
@@ -2229,7 +2257,7 @@ def test_semantic_evidence_failure_uses_exact_source_pointer_repair(
             "geopolitical_risk": 0.0, "usd_impulse": 0.0,
             "novelty": 0.5, "confidence": 0.8,
         },
-        "evidence absent from source",
+        invalid_evidence,
     )
     calls = []
     def respond(_key, _model, payload):
@@ -2247,10 +2275,19 @@ def test_semantic_evidence_failure_uses_exact_source_pointer_repair(
         ("test-key",), request_accountant=ALLOW_MODEL_REQUEST,
     )
 
+    body = "Source body"
+    if whole_page:
+        from xauusd_forecaster.news.semantics.article_source import PAGE_TEXT_MARKER
+        body = PAGE_TEXT_MARKER + "MENU_ONLY\nGold\nSource body\nFOOTER_ONLY"
+        vector.update(source_title_segment_ids=[1], source_body_segment_ids=[2])
     result, _ = pool.call(
-        0, annotation_module.DEFAULT_GEMINI_MODEL, "Gold", "Source body",
+        0, annotation_module.DEFAULT_GEMINI_MODEL, "Gold", body,
         prompt_version=annotation_module.PROMPT_VERSION,
     )
+    assert "MENU_ONLY" not in calls[1]["contents"][0]["parts"][0]["text"]
+    assert "FOOTER_ONLY" not in calls[1]["contents"][0]["parts"][0]["text"]
+    if whole_page:
+        assert result["source_body_segment_ids"] == [2]
     assert result["supporting_evidence"] == ["Gold\nSource body"]
     assert len(calls) == 3
     assert calls[1]["generationConfig"]["responseSchema"]["required"] == [
@@ -2387,7 +2424,7 @@ def test_semantic_contract_failure_keeps_bounded_diagnostic_evidence(
     assert len(evidence["response_hash"]) == 64
     assert datetime.fromisoformat(failure["next_retry_at"]) - datetime.fromisoformat(
         failure["failed_at"]
-    ) == timedelta(minutes=5)
+    ) == timedelta(minutes=15)
 
 
 def test_llm_failure_is_persisted_and_blocks_immediate_retry(
@@ -2430,7 +2467,7 @@ def test_llm_failure_is_persisted_and_blocks_immediate_retry(
         ledger.connection.execute("DELETE FROM news_llm_failures")
 
 
-def test_repeated_same_validation_failure_enters_dead_letter(tmp_path) -> None:
+def test_mixed_provider_and_validation_failures_remain_retryable(tmp_path) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
     body = "Complete source text with enough content for annotation. " * 10
@@ -2449,6 +2486,11 @@ def test_repeated_same_validation_failure_enters_dead_letter(tmp_path) -> None:
         "error_code": None,
         "model_version": annotation_module.DEFAULT_GEMINI_MODEL,
     }
+    for _ in range(4):
+        annotation_module._append_llm_failure(
+            ledger, {**parsed, "error_type": "HTTPError", "error": "HTTP Error 503: Service Unavailable", "error_code": 503},
+            "ANNOTATION", annotation_module.PROMPT_VERSION,
+        )
     first = annotation_module._append_llm_failure(
         ledger, parsed, "ANNOTATION", annotation_module.PROMPT_VERSION
     )
@@ -2456,15 +2498,17 @@ def test_repeated_same_validation_failure_enters_dead_letter(tmp_path) -> None:
         ledger, parsed, "ANNOTATION", annotation_module.PROMPT_VERSION
     )
     assert first["retry_state"] == "BACKING_OFF"
-    assert second["retry_state"] == "DEAD_LETTER"
+    assert second["retry_state"] == "BACKING_OFF"
     latest = ledger.connection.execute(
         "SELECT * FROM news_llm_failures ORDER BY attempt_number DESC LIMIT 1"
     ).fetchone()
-    assert latest["is_terminal"] == 1
-    assert latest["next_retry_at"] is None
+    assert latest["is_terminal"] == 0
+    assert datetime.fromisoformat(latest["next_retry_at"]) - datetime.fromisoformat(latest["failed_at"]) == timedelta(hours=12)
+    assert ledger.count("news_annotations") == 0
+    ledger.close()
 
 
-def test_repeated_same_impact_validation_failure_gets_one_recovery_attempt(
+def test_repeated_same_impact_validation_failure_remains_retryable(
     tmp_path,
 ) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
@@ -2488,20 +2532,20 @@ def test_repeated_same_impact_validation_failure_gets_one_recovery_attempt(
 
     assert first["retry_state"] == "BACKING_OFF"
     assert first["failure_code"] == "MODEL_OUTPUT_INVALID"
-    assert second["retry_state"] == "DEAD_LETTER"
-    assert second["is_terminal"] is True
+    assert second["retry_state"] == "BACKING_OFF"
+    assert second["is_terminal"] is False
     latest = ledger.connection.execute(
         """SELECT error_type,error,is_terminal,next_retry_at
         FROM news_impact_failures_v1 ORDER BY attempt_number DESC LIMIT 1"""
     ).fetchone()
-    assert tuple(latest) == (
-        "ValueError", "identity relation contradicts material update", 1, None,
-    )
+    assert tuple(latest)[:3] == ("ValueError", "identity relation contradicts material update", 0)
+    assert latest["next_retry_at"] is not None
     ledger.close()
 
 
+@pytest.mark.parametrize("http_code", [None, 429, 500, 502, 503, 504])
 def test_typed_transport_failures_use_bounded_transient_policy_for_both_tasks(
-    tmp_path,
+    tmp_path, http_code,
 ) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
@@ -2522,32 +2566,32 @@ def test_typed_transport_failures_use_bounded_transient_policy_for_both_tasks(
     error = annotation_module.ModelGatewayRequestFailed(
         ConnectionResetError("connection reset")
     )
+    if http_code is not None:
+        error = urllib.error.HTTPError("https://example.test", http_code, "unavailable", {}, None)
     details = annotation_module._model_failure_details(error)
 
     annotation_outcomes = [
         annotation_module._append_llm_failure(
             ledger,
             {
-                "row": row, **details, "error_code": None,
+                "row": row, **details, "error_code": http_code,
                 "model_version": annotation_module.DEFAULT_GEMINI_MODEL,
             },
             "ANNOTATION", annotation_module.PROMPT_VERSION,
         )
-        for _ in range(5)
+        for _ in range(7)
     ]
     impact_outcomes = [
         annotation_module._append_impact_failure(
             ledger, row, error, model_version=annotation_module.IMPACT_MODEL,
         )
-        for _ in range(5)
+        for _ in range(7)
     ]
 
     for outcomes in (annotation_outcomes, impact_outcomes):
-        assert [item["retry_state"] for item in outcomes] == [
-            "BACKING_OFF", "BACKING_OFF", "BACKING_OFF", "BACKING_OFF",
-            "DEAD_LETTER",
-        ]
-        assert outcomes[-1]["next_retry_at"] is None
+        assert [item["retry_state"] for item in outcomes] == ["BACKING_OFF"] * 7
+        assert all(not item["is_terminal"] for item in outcomes)
+        assert outcomes[-1]["next_retry_at"] is not None
     for table in ("news_llm_failures", "news_impact_failures_v1"):
         rows = ledger.connection.execute(
             f"""SELECT failed_at,next_retry_at FROM {table}
@@ -2556,9 +2600,8 @@ def test_typed_transport_failures_use_bounded_transient_policy_for_both_tasks(
         assert [
             int((datetime.fromisoformat(row["next_retry_at"])
                  - datetime.fromisoformat(row["failed_at"])).total_seconds() / 60)
-            for row in rows[:-1]
-        ] == [15, 60, 360, 720]
-        assert rows[-1]["next_retry_at"] is None
+            for row in rows
+        ] == [15, 60, 360, 720, 720, 720, 720]
     ledger.close()
 
 
@@ -3448,6 +3491,58 @@ def test_impact_selection_has_distinct_old_backfill_and_new_arrival_lanes(
 
     assert old_lane[0]["source_item_id"] == "old-official"
     assert new_lane[0]["source_item_id"] == "new-ordinary"
+
+    from xauusd_forecaster.news.scheduler.state import (
+        authorize_repairable_impact_failures, enqueue_job, claim_job,
+        pending_record_for_job, backoff_job, ROUTINE_POOL,
+    )
+    current = old_lane[0]
+    observed = now + timedelta(hours=3)
+    job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_IMPACT", source=current["source"],
+        source_item_id=current["source_item_id"], revision_number=1,
+        annotation_id=current["annotation_id"], prompt_version=annotation_module.IMPACT_PROMPT_VERSION,
+        priority="NORMAL", now=observed,
+    )
+    assert claim_job(ledger.connection, worker_id="old", pool=ROUTINE_POOL, now=observed)
+    ledger.append_news_impact_failure({
+        "failure_id": "old-provider-terminal", "source": current["source"],
+        "source_item_id": current["source_item_id"], "revision_number": 1,
+        "raw_content_hash": current["content_hash"], "annotation_id": current["annotation_id"],
+        "llm_model_version": annotation_module.IMPACT_MODEL,
+        "prompt_version": annotation_module.IMPACT_PROMPT_VERSION, "attempt_number": 5,
+        "error_type": "HTTPError", "error_signature": "503",
+        "error": "HTTP Error 503: Service Unavailable", "failed_at": observed,
+        "next_retry_at": None, "is_terminal": True,
+    })
+    backoff_job(ledger.connection, job_id, "old", available_at=observed,
+                error="HTTP Error 503: Service Unavailable", terminal=True)
+    assert current["annotation_id"] not in {
+        r["annotation_id"] for r in pending_impact_records(ledger.connection, observed_at=observed)
+    }
+    recovery_at = datetime.now(UTC) + timedelta(seconds=1)
+    assert authorize_repairable_impact_failures(
+        ledger.connection, prompt_version=annotation_module.IMPACT_PROMPT_VERSION,
+        recovery_version=annotation_module.IMPACT_FAILURE_RECOVERY_VERSION, now=recovery_at,
+    ) == 1
+    job = claim_job(ledger.connection, worker_id="new", pool=ROUTINE_POOL, now=recovery_at)
+    assert job and job.job_id == job_id
+    restored = pending_record_for_job(ledger.connection, job, now=recovery_at)
+    assert restored and restored["annotation_id"] == current["annotation_id"]
+    # Recovery authorization cannot hide a subsequent deterministic failure.
+    ledger.append_news_impact_failure({
+        "failure_id": "later-deterministic", "source": current["source"],
+        "source_item_id": current["source_item_id"], "revision_number": 1,
+        "raw_content_hash": current["content_hash"], "annotation_id": current["annotation_id"],
+        "llm_model_version": annotation_module.IMPACT_MODEL,
+        "prompt_version": annotation_module.IMPACT_PROMPT_VERSION, "attempt_number": 6,
+        "error_type": "ValueError", "error_signature": "invalid",
+        "error": "invalid identity", "failed_at": recovery_at,
+        "next_retry_at": None, "is_terminal": True,
+    })
+    assert pending_record_for_job(ledger.connection, job, now=recovery_at) is None
+    assert ledger.connection.execute("SELECT is_terminal FROM news_impact_failures_v1 WHERE failure_id='old-provider-terminal'").fetchone()[0] == 1
+    ledger.close()
 
 
 def test_json_object_decoder_accepts_fence_and_trailing_text() -> None:

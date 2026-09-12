@@ -1,9 +1,8 @@
-export const NEWS_REVIEW_STATES = ["COMPLETED", "PROCESSING", "ISOLATED"] as const;
+export const NEWS_REVIEW_STATES = ["COMPLETED", "PROCESSING"] as const;
 
 export type NewsReviewState = typeof NEWS_REVIEW_STATES[number];
 
 const COMPLETED_ANNOTATION_STATUSES = ["READY", "NOT_REQUIRED"] as const;
-const ISOLATED_ANNOTATION_STATUSES = ["DEAD_LETTER", "CONTENT_UNAVAILABLE"] as const;
 const ALIGNED_UNPARSED_ANNOTATION_STATUSES = [
   "REPAIRING_DISPLAY", "BACKING_OFF", "DEAD_LETTER",
   "WAITING_CONTENT", "CONTENT_UNAVAILABLE",
@@ -15,15 +14,13 @@ const sqlValues = (values: readonly string[]) =>
 /** SQL and TypeScript readers share one annotation-to-review-state contract. */
 export const NEWS_REVIEW_STATE_SQL: Record<NewsReviewState, string> = {
   COMPLETED: `json_extract(payload, '$.annotation_status') IN (${sqlValues(COMPLETED_ANNOTATION_STATUSES)})`,
-  ISOLATED: `json_extract(payload, '$.annotation_status') IN (${sqlValues(ISOLATED_ANNOTATION_STATUSES)})`,
   PROCESSING: `COALESCE(json_extract(payload, '$.annotation_status'), '') NOT IN (${sqlValues([
-    ...COMPLETED_ANNOTATION_STATUSES, ...ISOLATED_ANNOTATION_STATUSES,
+    ...COMPLETED_ANNOTATION_STATUSES,
   ])})`,
 };
 
 export const NEWS_REVIEW_STATE_CASE_SQL = `CASE
   WHEN ${NEWS_REVIEW_STATE_SQL.COMPLETED} THEN 'COMPLETED'
-  WHEN ${NEWS_REVIEW_STATE_SQL.ISOLATED} THEN 'ISOLATED'
   ELSE 'PROCESSING' END`;
 
 type NewsReviewStateFields = {
@@ -99,9 +96,6 @@ export const newsReviewStateOf = (
   const status = String(item.annotation_status ?? "");
   if ((COMPLETED_ANNOTATION_STATUSES as readonly string[]).includes(status)) {
     return "COMPLETED";
-  }
-  if ((ISOLATED_ANNOTATION_STATUSES as readonly string[]).includes(status)) {
-    return "ISOLATED";
   }
   return "PROCESSING";
 };

@@ -174,8 +174,8 @@ def hydrate_pending_non_fed_content(
                     WHERE f2.source=f.source
                       AND f2.source_item_id=f.source_item_id
                       AND f2.revision_number=f.revision_number)
-                  AND (f.is_terminal=1 OR
-                       (f.next_retry_at>? AND f.error NOT LIKE 'HTTP Error 405:%'))
+                  AND julianday(COALESCE(f.next_retry_at,
+                        datetime(f.failed_at, '+12 hours'))) > julianday(?)
               )
               AND (
                 n.body NOT LIKE '[FULL_TEXT%'
@@ -237,7 +237,7 @@ def hydrate_pending_non_fed_content(
                 f"{row['source_item_id']}:{type(result).__name__}:{str(result)[:160]}"
             )
             errors.append(description)
-            if not failure["is_terminal"]:
+            if not failure["source_unavailable"]:
                 operational_errors.append(description)
             continue
         try:
@@ -322,34 +322,9 @@ def _append_content_failure(
         (row["source"], row["source_item_id"], row["revision_number"]),
     ).fetchone()
     attempt = 1 if prior is None else int(prior["attempt_number"]) + 1
-    http_code = error.code if isinstance(error, urllib.error.HTTPError) else None
-    deterministic_extraction = isinstance(error, ValueError) and (
-        "content container" in normalized or "produced only" in normalized
+    next_retry = failed_at + timedelta(
+        minutes=(15, 60, 360, 720)[min(attempt - 1, 3)]
     )
-    permanent = (
-        http_code in {301, 302, 303, 307, 308, 401, 403, 404, 410, 451}
-        or deterministic_extraction
-        or (
-            isinstance(error, urllib.error.URLError)
-            and "certificate verify failed" in normalized.casefold()
-        )
-    )
-    transient = (
-        http_code == 429
-        or (http_code is not None and http_code >= 500)
-        or isinstance(error, (TimeoutError, ConnectionError))
-        or (isinstance(error, urllib.error.URLError) and http_code is None)
-    )
-    terminal = permanent or (transient and attempt >= 5) or (
-        not transient and attempt >= 2
-    )
-    if terminal:
-        next_retry = None
-    elif transient:
-        delay_minutes = (15, 60, 360, 720)[min(attempt - 1, 3)]
-        next_retry = failed_at + timedelta(minutes=delay_minutes)
-    else:
-        next_retry = failed_at + timedelta(hours=6)
     identity = "|".join(
         [
             str(row["source"]), str(row["source_item_id"]),
@@ -369,10 +344,22 @@ def _append_content_failure(
             "error": normalized,
             "failed_at": failed_at,
             "next_retry_at": next_retry,
-            "is_terminal": terminal,
+            "is_terminal": False,
         }
     )
-    return {"is_terminal": terminal, "next_retry_at": next_retry}
+    # An individual inaccessible page must not pause hydration of other publishers.
+    # This classifies diagnostics only: every failure above retains a next retry.
+    http_code = error.code if isinstance(error, urllib.error.HTTPError) else None
+    source_unavailable = (
+        http_code in {301, 302, 303, 307, 308, 401, 403, 404, 410, 451}
+        or (isinstance(error, ValueError) and (
+            "content container" in normalized or "produced only" in normalized
+        ))
+        or (isinstance(error, urllib.error.URLError)
+            and "certificate verify failed" in normalized.casefold())
+    )
+    return {"is_terminal": False, "next_retry_at": next_retry,
+            "source_unavailable": source_unavailable}
 
 
 def _extract_safely(

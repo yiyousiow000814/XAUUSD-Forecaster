@@ -599,7 +599,7 @@ test("keeps every remaining audit destination in one balanced desktop grid", () 
   assert.match(css, /\.audit-tabs a:nth-child\(n\+5\) \{ border-top:1px solid var\(--ink\); \}/);
   assert.doesNotMatch(view, /audit-tab-primary/);
   assert.equal(view.match(/<a href="\/audit\?view=/g)?.length, 8);
-  assert.match(css, /\.annotation-queue \{ grid-template-columns:repeat\(5,1fr\); gap:0;[^}]*background:var\(--paper\); \}/);
+  assert.match(css, /\.annotation-queue \{ grid-template-columns:repeat\(4,minmax\(0,1fr\)\); gap:0;[^}]*background:var\(--paper\); \}/);
   assert.match(css, /\.annotation-queue>span\+span \{ border-left:1px solid var\(--ink\); \}/);
   assert.match(css, /\.annotation-queue>details \{ grid-column:1\/-1; border-top:1px solid var\(--ink\); padding:0; \}/);
   assert.match(css, /\.news-timeline \{[^}]*gap:0/);
@@ -1092,11 +1092,11 @@ test("falls through to read-only D1 for later Preview news and details", () => {
   assert.doesNotMatch(detail, /该新闻详情不在本次 Preview 快照中/);
 });
 
-test("separates completed, processing, and isolated news by durable review state", () => {
+test("keeps all unfinished news pending without declaring it completed", () => {
   assert.equal(parseNewsReviewState(null), "COMPLETED");
   assert.equal(parseNewsReviewState("COMPLETED"), "COMPLETED");
   assert.equal(parseNewsReviewState("PROCESSING"), "PROCESSING");
-  assert.equal(parseNewsReviewState("ISOLATED"), "ISOLATED");
+  assert.equal(parseNewsReviewState("ISOLATED"), null);
   assert.equal(parseNewsReviewState("UNKNOWN"), null);
 
   for (const status of ["READY", "NOT_REQUIRED"]) {
@@ -1106,15 +1106,10 @@ test("separates completed, processing, and isolated news by durable review state
     assert.equal(newsReviewStateOf({ annotation_status: status }), "PROCESSING");
   }
   for (const status of ["DEAD_LETTER", "CONTENT_UNAVAILABLE"]) {
-    assert.equal(newsReviewStateOf({ annotation_status: status }), "ISOLATED");
+    assert.equal(newsReviewStateOf({ annotation_status: status }), "PROCESSING");
   }
   for (const status of ["READY", "NOT_REQUIRED"]) {
     assert.match(NEWS_REVIEW_STATE_SQL.COMPLETED, new RegExp(`'${status}'`));
-    assert.match(NEWS_REVIEW_STATE_SQL.PROCESSING, new RegExp(`'${status}'`));
-    assert.match(NEWS_REVIEW_STATE_CASE_SQL, new RegExp(`'${status}'`));
-  }
-  for (const status of ["DEAD_LETTER", "CONTENT_UNAVAILABLE"]) {
-    assert.match(NEWS_REVIEW_STATE_SQL.ISOLATED, new RegExp(`'${status}'`));
     assert.match(NEWS_REVIEW_STATE_SQL.PROCESSING, new RegExp(`'${status}'`));
     assert.match(NEWS_REVIEW_STATE_CASE_SQL, new RegExp(`'${status}'`));
   }
@@ -1157,13 +1152,13 @@ test("separates completed, processing, and isolated news by durable review state
   assert.doesNotMatch(route, /annotation_status'\) IN/);
   assert.match(css, /\.news-review-zones button \{[^}]*min-height:104px/);
   assert.match(view, /className="news-category-picker"/);
-  assert.match(css, /\.news-review-zones \{ grid-template-columns:repeat\(3,minmax\(0,1fr\)\);[^}]*overflow:visible/);
+  assert.match(css, /\.news-review-zones \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\);[^}]*overflow:visible/);
   assert.match(css, /\.news-browser nav \{ display:none; \}/);
   assert.match(css, /\.news-category-picker select \{[^}]*min-height:48px/);
   assert.match(css, /\.news-row>summary \{ grid-template-columns:1fr;/);
-  assert.match(css, /\.annotation-queue>span:nth-of-type\(4\),\.annotation-queue>span:nth-of-type\(5\) \{ display:flex/);
+  assert.match(css, /\.annotation-queue>span:nth-of-type\(3\),\.annotation-queue>span:nth-of-type\(4\) \{ display:flex/);
   assert.match(view, /newsIndex\.review_state_counts\?\.PROCESSING/);
-  assert.match(view, /newsIndex\.review_state_counts\?\.ISOLATED/);
+  assert.doesNotMatch(view, /条已隔离|ISOLATED/);
   assert.match(css, /\.news-row-title \{ order:1; \}/);
   assert.match(css, /\.news-table \{ display:grid; gap:15px; border:0/);
 });
@@ -1791,7 +1786,8 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /api\/news-content\?keys=/);
   assert.doesNotMatch(source, /这些新闻处理到哪里了/);
   assert.match(source, /条近60天可读新闻/);
-  assert.match(source, /条已隔离待查/);
+  assert.doesNotMatch(source, /条已隔离待查/);
+  assert.match(source, /条等待处理/);
   assert.match(source, /GDELT · \$\{row\.category\}/);
   assert.doesNotMatch(source, /GDELT · 新闻发现/);
   assert.match(source, /row\.model_visibility !== "NOT_YET_PARSED"/);

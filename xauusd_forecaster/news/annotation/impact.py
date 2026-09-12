@@ -17,6 +17,7 @@ from xauusd_forecaster.news.semantics.contracts import (
 
 IMPACT_MODEL = "gemma-4-31b-it"
 IMPACT_PROMPT_VERSION = "news-impact-v7-continuous-observation-identity"
+IMPACT_FAILURE_RECOVERY_VERSION = "impact-repair-v4-no-isolation"
 HANDOVER_IMPACT_PROMPT_VERSION = "news-impact-v3-independent-semantic-review"
 
 IMPACT_TIME_RULES = {
@@ -462,6 +463,16 @@ def pending_impact_records(
     if selection_order not in {"oldest", "newest"}:
         raise ValueError("impact selection order is not controlled")
     now = observed_at or datetime.now(UTC)
+    has_recoveries = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='news_ai_impact_failure_recoveries_v1'"
+    ).fetchone() is not None
+    recovery_clause = (
+        """AND NOT EXISTS (
+            SELECT 1 FROM news_ai_impact_failure_recoveries_v1 recovery
+            WHERE recovery.failure_id=f.failure_id AND recovery.recovery_version=?)"""
+        if has_recoveries else ""
+    )
     official_priority = """CASE WHEN n.source IN (
                    'federal_reserve_monetary','bls_employment_situation',
                    'bls_consumer_price_index','bls_job_openings',
@@ -501,16 +512,18 @@ def pending_impact_records(
                   AND f2.llm_model_version=f.llm_model_version
                   AND f2.prompt_version=f.prompt_version)
               AND (
-                (f.is_terminal=1 AND f.attempt_number>=5
-                 AND NOT (f.error_type='HTTPError' AND f.error LIKE '%429%'))
-                OR (f.next_retry_at IS NOT NULL AND f.next_retry_at>?)))
+                f.is_terminal=1
+                OR (f.next_retry_at IS NOT NULL AND f.next_retry_at>?))
+              {recovery_clause})
         ORDER BY {pending_order}
         LIMIT ?""",
         (
             annotation_prompt_version,
             IMPACT_MODEL, impact_prompt_version,
             IMPACT_MODEL, impact_prompt_version,
-            now.isoformat(timespec="microseconds"), max(1, limit * 4),
+            now.isoformat(timespec="microseconds"),
+            *((IMPACT_FAILURE_RECOVERY_VERSION,) if has_recoveries else ()),
+            max(1, limit * 4),
         ),
     ).fetchall()
     selected = []

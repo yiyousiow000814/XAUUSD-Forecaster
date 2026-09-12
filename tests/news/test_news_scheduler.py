@@ -1186,7 +1186,15 @@ def test_annotation_surge_takes_priority_after_embedding_pressure_falls() -> Non
     )[0] is True
 
 
-def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path) -> None:
+@pytest.mark.parametrize("legacy_error", [
+    "New-episode identity requires an anchor difference",
+    "HTTP Error 500: Internal Server Error",
+    "HTTP Error 503: Service Unavailable",
+    "Model provider request failed: TimeoutError",
+    "Gemma repair contract failed",
+    "Unterminated JSON string",
+])
+def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path, legacy_error) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     ledger.connection.execute("PRAGMA foreign_keys=OFF")
     job_id = enqueue_job(
@@ -1199,9 +1207,17 @@ def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path) -> 
         "source": "source", "source_item_id": "item", "revision_number": 1,
         "content_hash": "hash", "annotation_id": "annotation",
     }
-    error = ValueError("New-episode identity requires an anchor difference")
-    _append_impact_failure(ledger, row, error, model_version=IMPACT_MODEL)
-    _append_impact_failure(ledger, row, error, model_version=IMPACT_MODEL)
+    error = ValueError(legacy_error)
+    # Persist a genuine old-policy terminal receipt, independently of the new policy.
+    ledger.append_news_impact_failure({
+        "failure_id": "legacy-terminal-impact", "source": "source",
+        "source_item_id": "item", "revision_number": 1, "raw_content_hash": "hash",
+        "annotation_id": "annotation", "llm_model_version": IMPACT_MODEL,
+        "prompt_version": IMPACT_PROMPT_VERSION, "attempt_number": 5,
+        "error_type": "HTTPError" if legacy_error.startswith("HTTP") else "ValueError",
+        "error_signature": "legacy-error", "error": legacy_error,
+        "failed_at": NOW, "next_retry_at": None, "is_terminal": True,
+    })
     assert claim_job(
         ledger.connection, worker_id="worker", pool=ROUTINE_POOL, now=NOW,
     ) is not None
@@ -1241,7 +1257,12 @@ def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path) -> 
     ledger.close()
 
 
-def test_contract_recovery_requeues_each_annotation_only_once(tmp_path) -> None:
+@pytest.mark.parametrize("task_type", ["ANNOTATION", "TITLE_TRANSLATION"])
+@pytest.mark.parametrize("retired", [False, True])
+def test_contract_recovery_requeues_each_current_task_only_once(tmp_path, task_type, retired) -> None:
+    from xauusd_forecaster.news.annotation.product import TITLE_PROMPT_VERSION, pending_title_translation_records
+    prompt = CURRENT_NEWS_PROMPT_VERSION if task_type == "ANNOTATION" else TITLE_PROMPT_VERSION
+    job_type = "ACTIVE_ANNOTATION" if task_type == "ANNOTATION" else task_type
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     body = "Complete source evidence for one bounded recovery attempt. " * 12
     digest = hashlib.sha256(body.encode()).hexdigest()
@@ -1252,17 +1273,17 @@ def test_contract_recovery_requeues_each_annotation_only_once(tmp_path) -> None:
         "content_hash": digest, "cluster_id": "item",
     })
     job_id = enqueue_job(
-        ledger.connection, task_type="ACTIVE_ANNOTATION",
+        ledger.connection, task_type=job_type,
         source="source", source_item_id="item", revision_number=1,
-        prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+        prompt_version=prompt,
         priority="NORMAL", now=NOW,
     )
     cause = "annotation supporting evidence is absent from source"
     ledger.append_llm_failure({
-        "failure_id": "failure", "task_type": "ANNOTATION",
+        "failure_id": "failure", "task_type": task_type,
         "source": "source", "source_item_id": "item", "revision_number": 1,
         "raw_content_hash": digest, "llm_model_version": "model",
-        "prompt_version": CURRENT_NEWS_PROMPT_VERSION, "attempt_number": 1,
+        "prompt_version": prompt, "attempt_number": 1,
         "error_type": "ValueError",
         "error_signature": hashlib.sha256(cause.encode()).hexdigest(),
         "error": cause, "failed_at": NOW, "is_terminal": True,
@@ -1277,16 +1298,24 @@ def test_contract_recovery_requeues_each_annotation_only_once(tmp_path) -> None:
     ) is not None
     backoff_job(
         ledger.connection, job_id, "worker", available_at=NOW,
-        error=cause, terminal=True,
+        error="CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE" if retired else cause, terminal=True,
     )
 
     recovery_at = datetime.now(UTC)
     assert authorize_repairable_annotation_failures(
         ledger.connection,
-        prompt_version=CURRENT_NEWS_PROMPT_VERSION,
-        recovery_version=ANNOTATION_FAILURE_RECOVERY_VERSION,
+        prompt_version=prompt,
+        recovery_version=ANNOTATION_FAILURE_RECOVERY_VERSION, task_type=task_type,
         now=recovery_at,
     ) == 1
+    if retired:
+        assert ledger.connection.execute("SELECT state,last_error FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone()["last_error"] == "CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE"
+        assert claim_job(ledger.connection, worker_id="worker", pool=ROUTINE_POOL, now=recovery_at) is None
+        ledger.close()
+        return
+    if task_type == "TITLE_TRANSLATION":
+        pending = pending_title_translation_records(ledger.connection, model="model", observed_at=recovery_at)
+        assert any(row["source_item_id"] == "item" for row in pending)
     assert claim_job(
         ledger.connection, worker_id="worker", pool=ROUTINE_POOL,
         now=recovery_at,
@@ -1298,8 +1327,8 @@ def test_contract_recovery_requeues_each_annotation_only_once(tmp_path) -> None:
 
     assert authorize_repairable_annotation_failures(
         ledger.connection,
-        prompt_version=CURRENT_NEWS_PROMPT_VERSION,
-        recovery_version=ANNOTATION_FAILURE_RECOVERY_VERSION,
+        prompt_version=prompt,
+        recovery_version=ANNOTATION_FAILURE_RECOVERY_VERSION, task_type=task_type,
         now=recovery_at + timedelta(minutes=1),
     ) == 0
     assert ledger.connection.execute(
@@ -1825,6 +1854,9 @@ def test_dead_letter_is_terminal() -> None:
 
 @pytest.mark.parametrize(("stage", "cause"), (
     ("DISPLAY_REPAIR", "number mismatch"),
+    ("news-display-review", "HTTP Error 500: Internal Server Error"),
+    ("news-annotation", "HTTP Error 503: Service Unavailable"),
+    ("SEMANTIC_CONTRACT", "annotation supporting_evidence contains a long item"),
     (
         "SEMANTIC_CONTRACT",
         "annotation supporting evidence is absent from source",
@@ -1866,7 +1898,7 @@ def test_repair_version_reopens_matching_annotation_failure_only_once(
             "prompt_version": CURRENT_NEWS_PROMPT_VERSION,
             "attempt_number": attempt, "error_type": "ValueError",
             "error_signature": f"signature-{attempt}",
-            "error": "display repair failed", "failed_at": NOW,
+            "error": cause, "failed_at": NOW,
             "is_terminal": True,
             "failure_evidence": {
                 "failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
@@ -3162,6 +3194,36 @@ def test_display_route_does_not_fallback_when_gemma_capacity_is_full(
     with pytest.raises(ModelGatewayCapacityExhausted):
         pool.call_title(0, annotation.DEFAULT_GEMMA_MODEL, "Headline")
     assert calls == [annotation.DEFAULT_GEMMA_MODEL]
+
+
+def test_repeated_pending_reader_misses_remain_recoverable(tmp_path, monkeypatch) -> None:
+    from xauusd_forecaster.news.scheduler import runtime as runner
+    available = datetime.now(UTC) - timedelta(seconds=1)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_ANNOTATION", source="source",
+        source_item_id="pending", revision_number=1, prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+        priority="NORMAL", now=available,
+    )
+    credential = ApiCredential("account", ROUTINE_POOL, "test-key", "test-fingerprint")
+    monkeypatch.setattr(runner, "configured_api_credentials", lambda: (credential,))
+    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner, "pending_record_for_job", lambda *_args, **_kwargs: None)
+    for _ in range(5):
+        result = runner.run_scheduled_batch(ledger, batch_size=1)
+        assert result[0]["status"] == "PENDING_EVIDENCE"
+        state = ledger.connection.execute("SELECT state,available_at,updated_at FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone()
+        assert state["state"] == "QUEUED"
+        assert datetime.fromisoformat(state["available_at"]) > datetime.fromisoformat(state["updated_at"])
+        assert runner.run_scheduled_batch(ledger, batch_size=1) == []
+        # Advance only the fixture queue clock, never production evidence.
+        ledger.connection.execute("UPDATE news_ai_jobs_v1 SET available_at=? WHERE job_id=?", (available.isoformat(), job_id))
+        ledger.connection.commit()
+    monkeypatch.setattr(runner, "pending_record_for_job", lambda *_args, **_kwargs: {"source_item_id": "pending"})
+    monkeypatch.setattr(runner, "annotate_pending_news", lambda **_kwargs: [{"status": "OK"}])
+    assert runner.run_scheduled_batch(ledger, batch_size=1)[0]["status"] == "OK"
+    assert ledger.connection.execute("SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone()[0] == "COMPLETED"
+    ledger.close()
 
 
 def test_scheduler_persists_structured_model_failure_without_credentials(
