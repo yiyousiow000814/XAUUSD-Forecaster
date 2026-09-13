@@ -263,6 +263,17 @@ class GeminiModelGateway:
         if not purpose.strip():
             raise ValueError("model request purpose is required")
         last_error: Exception | None = None
+        backup_tried = False
+
+        def try_backup(usage: ModelRequestUsage):
+            nonlocal backup_tried
+            if backup_tried or not self.accountant.fallback_gateway:
+                return None
+            backup_tried = True
+            return self.accountant.fallback_gateway.generate(
+                usage=usage, payload=payload, decode=decode,
+            )
+
         for offset in range(len(self.api_keys)):
             api_key = self.api_keys[(start_index + offset) % len(self.api_keys)]
             usage = ModelRequestUsage(
@@ -274,9 +285,7 @@ class GeminiModelGateway:
             )
             if not self._reserve(api_key, usage):
                 if model.startswith("gemma") and self.accountant.fallback_gateway:
-                    fallback = self.accountant.fallback_gateway.generate(
-                        usage=usage, payload=payload, decode=decode,
-                    )
+                    fallback = try_backup(usage)
                     if fallback is not None:
                         return fallback
                 continue
@@ -292,9 +301,13 @@ class GeminiModelGateway:
                     raise ValueError("provider response is not a JSON object")
                 provider_model_version = _sanitized_model_version(envelope)
                 result = decode(envelope)
-            except retryable_decode_errors as error:
+            except (json.JSONDecodeError, *retryable_decode_errors) as error:
                 if provider_attempted:
-                    self.accountant.record_provider_outcome("PROVIDER_FAILED")
+                    self.accountant.record_provider_outcome(
+                        "PROVIDER_FAILED",
+                        usage_metadata=_sanitized_usage_metadata(envelope) if envelope else None,
+                        provider_model_version=_sanitized_model_version(envelope) if envelope else None,
+                    )
                 if getattr(error, "failure_evidence", None) is None:
                     if envelope is None:
                         raw_output = f"{type(error).__name__}: {error}"
@@ -316,11 +329,22 @@ class GeminiModelGateway:
                         ).hexdigest(),
                         "selected_output": {
                             "bounded_response_prefix": raw_output[:500],
+                            "provider_finish_reason": str(
+                                (envelope.get("candidates") or [{}])[0].get("finishReason", "UNKNOWN")
+                            )[:80] if envelope else "UNKNOWN",
                         },
                         "cause_type": type(error).__name__,
                         "cause": str(error)[:500],
                     }
                 last_error = error
+                candidate = (envelope.get("candidates") or [{}])[0] if envelope else {}
+                feedback = envelope.get("promptFeedback") or {} if envelope else {}
+                if (isinstance(error, json.JSONDecodeError)
+                        and not feedback.get("blockReason")
+                        and candidate.get("finishReason") in {None, "STOP", "MAX_TOKENS"}):
+                    fallback = try_backup(usage)
+                    if fallback is not None:
+                        return fallback
             except urllib.error.HTTPError as error:
                 error.failure_evidence = _http_failure_evidence(
                     error, model=model, purpose=purpose,
@@ -336,9 +360,7 @@ class GeminiModelGateway:
                 last_error = error
                 if (error.code in {500, 502, 503} or
                     (error.code == 429 and model.startswith("gemma"))) and self.accountant.fallback_gateway:
-                    fallback = self.accountant.fallback_gateway.generate(
-                        usage=usage, payload=payload, decode=decode,
-                    )
+                    fallback = try_backup(usage)
                     if fallback is not None:
                         return fallback
                 if error.code not in retryable_http_codes:
@@ -350,9 +372,7 @@ class GeminiModelGateway:
                     self.accountant.record_provider_outcome("PROVIDER_FAILED")
                 last_error = error
                 if self.accountant.fallback_gateway:
-                    fallback = self.accountant.fallback_gateway.generate(
-                        usage=usage, payload=payload, decode=decode,
-                    )
+                    fallback = try_backup(usage)
                     if fallback is not None:
                         return fallback
             except Exception:
@@ -380,7 +400,7 @@ class GeminiModelGateway:
             )
         if isinstance(last_error, urllib.error.HTTPError):
             raise last_error
-        if isinstance(last_error, retryable_decode_errors):
+        if isinstance(last_error, (json.JSONDecodeError, *retryable_decode_errors)):
             raise ModelGatewayResponseInvalid(last_error) from last_error
         raise ModelGatewayRequestFailed(last_error) from last_error
 
@@ -485,7 +505,10 @@ class NewsBackupGateway:
                 raise ValueError("backup provider returned an error envelope")
             choice = envelope["choices"][0]
             if choice.get("finish_reason") != "stop":
-                raise ValueError("backup provider response is incomplete")
+                error = ValueError("backup provider response is incomplete")
+                if choice.get("finish_reason") == "length":
+                    error.failure_evidence = {"failure_code": "MODEL_OUTPUT_INCOMPLETE"}
+                raise error
             text = choice["message"]["content"]
             if not isinstance(text, str) or not text.strip():
                 raise ValueError("backup provider response has no text")
@@ -509,7 +532,11 @@ class NewsBackupGateway:
             raise ModelGatewayRequestFailed(error) from error
         except Exception as error:
             self.accountant.record_provider_outcome("PROVIDER_FAILED")
-            raise ModelGatewayResponseInvalid(ValueError("Backup response did not satisfy the news contract")) from error
+            failure = ValueError("Backup response did not satisfy the news contract")
+            failure.failure_evidence = getattr(error, "failure_evidence", None)
+            if isinstance(error, json.JSONDecodeError):
+                failure.failure_evidence = {"failure_code": "MODEL_OUTPUT_INVALID_JSON"}
+            raise ModelGatewayResponseInvalid(failure) from error
         self.accountant.record_provider_outcome(
             "PROVIDER_SUCCEEDED", provider_model_version=identity,
             usage_metadata=_sanitized_usage_metadata({"usageMetadata": {
@@ -547,6 +574,12 @@ class NewsBackupChain:
                     raise
                 last_error = error
             except ModelGatewayRequestFailed as error:
+                last_error = error
+            except ModelGatewayResponseInvalid as error:
+                if (error.failure_evidence or {}).get("failure_code") not in {
+                    "MODEL_OUTPUT_INVALID_JSON", "MODEL_OUTPUT_INCOMPLETE",
+                }:
+                    raise
                 last_error = error
         if last_error is not None:
             raise last_error

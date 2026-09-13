@@ -392,6 +392,16 @@ active operator overrides, or superseded-job retirement. A new immediate failure
 does not qualify for another old-delay recovery grant. Source hydration retains
 its independent provider polling and source-access policy.
 
+Every annotation/title/impact result projection must preserve capacity failure
+codes, evidence and next eligibility supplied by the quota owner. Losing that
+time must not silently turn a known quota wait into periodic minute retries.
+Health headlines count processing failures separately from capacity deferrals;
+lifetime scheduler claims belong in technical evidence, not failure copy.
+Malformed JSON may use the configured, metered news backup chain once per route
+per gateway call. Provider safety refusals never authorize fallback. The same
+source and semantic validation still apply to backup output, and full source
+text must not be truncated merely to bypass a backup quota limit.
+
 The archive exposes only COMPLETED and PROCESSING review groups. Old terminal
 and unavailable-source rows belong to PROCESSING with specific diagnostics.
 Previously materialized ISOLATED counts are folded into PROCESSING until normal
