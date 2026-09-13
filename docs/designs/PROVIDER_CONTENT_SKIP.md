@@ -66,7 +66,7 @@ contracts. No shell, credential, or frontend interface changes are intended.
 ### Final local evidence
 
 - `python -m pytest tests/ai tests/news -q --disable-warnings --maxfail=2`:
-  833 passed, 2 existing optional-provider skips, 130 seconds.
+  833 passed, 2 filesystem-link permission skips, 130 seconds.
 - `python -m pytest tests/runtime/test_operational_health.py tests/dashboard/test_dashboard_health_projection.py tests/dashboard/test_dashboard_news_resources.py -q --disable-warnings --maxfail=2`:
   86 passed, 8 seconds.
 - Import-policy check: zero static violations; six pre-existing dynamic imports
