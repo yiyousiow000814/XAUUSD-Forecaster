@@ -411,3 +411,5 @@ counts, Preview and the public reader; removal must not hide historical rows.
 A pending-reader miss is not proof that a job is obsolete. Repeated misses MUST
 retain retry eligibility. Only the existing source/version/completion
 reconciliation can retire superseded work; lease counts cannot establish that fact.
+
+Display review preserves the complete selected source. If its calibrated input exceeds the entire Gemma minute budget, select the existing larger Gemini route before reservation rather than repeatedly waiting on an impossible Gemma admission. Normal-size display reviews retain the configured Gemma/Qwen routes; all routes retain source validation, quota admission and content-refusal handling.

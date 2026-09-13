@@ -609,3 +609,44 @@ def test_active_annotation_requires_independent_impact_before_model_visibility(t
     assert events[0]["broad_model_eligible"] is False
     assert "IMPACT_NOT_ASSESSED" in events[0]["reason_codes"]
     ledger.close()
+
+
+@pytest.mark.parametrize("checkpoint", [False, True])
+@pytest.mark.parametrize("budget_delta", [0, -1])
+def test_complete_display_review_selects_a_route_that_can_fit(monkeypatch, checkpoint, budget_delta):
+    import json
+    from xauusd_forecaster.ai.model_gateway import ModelRequestAccountant
+
+    evidence = "BLS reported lower job openings."
+    body = (evidence + " ") * 3200 + "END OF COMPLETE ARTICLE"
+    result = _target_annotation(evidence)
+    reservations, requests = [], []
+
+    class Accountant(ModelRequestAccountant):
+        def reserve(self, usage):
+            reservations.append(usage)
+            return True
+
+        def effective_base_input_token_budget(self, usage, **kwargs):
+            assert usage.model == annotation_module.DEFAULT_GEMMA_MODEL
+            assert usage.purpose == "news-display-review"
+            assert kwargs["input_tokens_per_minute"] == annotation_module.GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL
+            return usage.input_tokens + budget_delta
+
+    def post(_key, model, _action, payload, **kwargs):
+        requests.append((model, payload))
+        return {"candidates": [{"content": {"parts": [{"text": json.dumps(result)}]}}]}
+
+    monkeypatch.setattr(GeminiModelGateway, "_post_json", staticmethod(post))
+    pool = annotation_module._GeminiRequestPool(("offline-key",), request_accountant=Accountant())
+    if checkpoint:
+        reviewed, _ = pool.review_display_checkpoint(0, {"semantic_result": result,
+            "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL}, "Job openings", body)
+    else:
+        reviewed, _ = pool.call(0, annotation_module.DEFAULT_GEMINI_MODEL, "Job openings", body)
+    assert reviewed["headline_zh"] == result["headline_zh"]
+    assert len(requests) == (1 if checkpoint else 2)
+    assert requests[-1][0] == (annotation_module.DEFAULT_GEMMA_MODEL if budget_delta == 0
+                               else annotation_module.DEFAULT_GEMINI_MODEL)
+    assert body in requests[-1][1]["contents"][0]["parts"][0]["text"]
+    assert reservations[-1].purpose == "news-display-review"

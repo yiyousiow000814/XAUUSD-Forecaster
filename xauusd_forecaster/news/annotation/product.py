@@ -1279,10 +1279,21 @@ class _GeminiRequestPool:
                     "properties": {field: {"type": "string"} for field in fields}},
                 "maxOutputTokens": 2600, "temperature": 0},
         }
+        input_tokens = conservative_input_token_estimate(prompt) + 512
+        prompt_contract = "gemma-display-review-v2-source-fidelity"
+        gemma_budget = self.gateway.accountant.effective_base_input_token_budget(
+            ModelRequestUsage(DEFAULT_GEMMA_MODEL, "news-display-review", input_tokens,
+                              prompt_contract=prompt_contract),
+            input_tokens_per_minute=GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
+        )
+        # A request larger than the whole minute budget cannot recover by waiting.
+        # Keep the complete source and use the existing larger Google route.
+        review_model = (DEFAULT_GEMMA_MODEL if input_tokens <= gemma_budget
+                        else DEFAULT_GEMINI_MODEL)
         reviewed, _ = self.gateway.generate(
-            start_index, model=DEFAULT_GEMMA_MODEL, purpose="news-display-review",
-            prompt_contract="gemma-display-review-v2-source-fidelity", payload=payload,
-            input_tokens=conservative_input_token_estimate(prompt) + 512,
+            start_index, model=review_model, purpose="news-display-review",
+            prompt_contract=prompt_contract, payload=payload,
+            input_tokens=input_tokens,
             decode=_decode_model_json,
             retryable_http_codes=frozenset({401, 403, 429}),
             retryable_decode_errors=(),
