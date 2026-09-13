@@ -7,6 +7,7 @@ from xauusd_forecaster.news.semantics.article_source import (
 )
 
 import hashlib
+import copy
 import json
 import os
 import re
@@ -1368,7 +1369,7 @@ class _GeminiRequestPool:
             model=IMPACT_MODEL,
             purpose="news-impact",
             prompt_contract=prompt_version,
-            payload=_impact_payload(prompt),
+            payload=_impact_payload(prompt, row=request_row),
             input_tokens=counted_tokens,
             decode=_decode_model_json,
             retryable_http_codes=frozenset({401, 403, 429, 500, 502, 503, 504}),
@@ -1622,6 +1623,8 @@ def _decode_title(envelope: dict[str, object], headline: str) -> str:
 
 
 def _validate_impact_result(result: dict, row: dict) -> dict:
+    if result.get("matched_candidate_id") == "NO_MATCH":
+        result = {**result, "matched_candidate_id": ""}
     candidate_ids = {
         str(candidate.get("candidate_id") or "")
         for candidate in row.get("prior_event_context") or ()
@@ -1841,7 +1844,19 @@ def _decode_json_object(raw: object) -> dict:
     return result
 
 
-def _impact_payload(prompt: str) -> dict[str, object]:
+def _impact_response_schema(row: dict) -> dict[str, object]:
+    """Constrain reference generation to the same offered candidate universe."""
+    schema = copy.deepcopy(IMPACT_RESPONSE_SCHEMA)
+    candidate_ids = list(dict.fromkeys(
+        str(candidate.get("candidate_id") or "")
+        for candidate in row.get("prior_event_context") or ()
+        if candidate.get("candidate_id")
+    ))
+    schema["properties"]["matched_candidate_id"]["enum"] = ["NO_MATCH", *candidate_ids]
+    return schema
+
+
+def _impact_payload(prompt: str, *, row: dict | None = None) -> dict[str, object]:
     return {
         "systemInstruction": {"parts": [{"text": (
             "你是受严格约束的新闻影响寿命分类器，不是交易顾问。"
@@ -1851,7 +1866,7 @@ def _impact_payload(prompt: str) -> dict[str, object]:
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "responseSchema": IMPACT_RESPONSE_SCHEMA,
+            "responseSchema": _impact_response_schema(row or {}),
             "maxOutputTokens": 700,
             "temperature": 0,
         },
@@ -1888,7 +1903,8 @@ def _impact_contract_repair_payload(
         "SAME_EPISODE必须列出核心事实变化且不得列身份差异；"
         "NEW_EPISODE在OFFERED_CANDIDATES非空时必须列出具体身份差异；候选为空且上下文完整时"
         "不得虚构比较对象，identity_differences_zh可以为空。若现有证据不足以可靠修复，选择UNRESOLVED、"
-        "清空matched_candidate_id，并使用与不确定性一致的非新增事件update_type。"
+        "matched_candidate_id填写NO_MATCH，并使用与不确定性一致的非新增事件update_type。"
+        "matched_candidate_id只能从提供的candidate_id中选择或填写NO_MATCH，不得填写空字符串。"
         "reason_zh必须是普通用户可读的简体中文。只返回完整JSON。\n"
         f"VALIDATION_ERROR: {str(validation_error)[:300]}\n"
         "CURRENT_EVENT_EXTRACTION: "
@@ -1907,7 +1923,7 @@ def _impact_contract_repair_payload(
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "responseSchema": IMPACT_RESPONSE_SCHEMA,
+            "responseSchema": _impact_response_schema(row),
             "maxOutputTokens": 700,
             "temperature": 0,
         },
@@ -2055,8 +2071,9 @@ def _impact_prompt(row: dict, *, prompt_version: str = IMPACT_PROMPT_VERSION) ->
         "不能因为它对黄金影响小就创建新事件。"
         "SAME_EVENT只能选择identity_anchor_eligible=true的核心事实候选；"
         "评论、市场反应和背景可以附着在同一episode，但绝不能成为事实锚点。"
-        "没有任何候选属于同一现实事件才选NEW_EPISODE且matched_candidate_id留空；"
-        "证据不足则选UNRESOLVED且matched_candidate_id留空。不能自己发明candidate_id。"
+        "没有任何候选属于同一现实事件才选NEW_EPISODE且matched_candidate_id填写NO_MATCH；"
+        "证据不足则选UNRESOLVED且matched_candidate_id填写NO_MATCH。不能自己发明candidate_id。"
+        "matched_candidate_id只能从提供的candidate_id中选择或填写NO_MATCH，不得填写空字符串。"
         "若CANDIDATE_CONTEXT_TRUNCATED为true，未显示的候选仍可能属于同一现实事件；"
         "因此找不到匹配时必须选UNRESOLVED，禁止选NEW_EPISODE。"
         "SOURCE_CONTEXT_MODE为COMPLETE_BODY时，NEWS包含完整保存正文。"
