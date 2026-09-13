@@ -2783,9 +2783,10 @@ def test_provider_dispatch_deferral_does_not_probe_accounts_or_consume_attempt(
         ),
     ),
 )
+@pytest.mark.parametrize("alternate_delay", [None, 2, 6])
 def test_annotation_fallback_never_crosses_maintenance_deferral(
     tmp_path, monkeypatch, failure_code: str,
-    expected_models: tuple[str, ...], expected_status: str,
+    expected_models: tuple[str, ...], expected_status: str, alternate_delay,
 ) -> None:
     from xauusd_forecaster.news.scheduler import runtime as runner
 
@@ -2810,7 +2811,11 @@ def test_annotation_fallback_never_crosses_maintenance_deferral(
             return [{
                 "status": "DEFERRED",
                 "failure_code": failure_code,
+                "next_retry_at": (NOW + timedelta(hours=4)).isoformat(),
             }]
+        if alternate_delay is not None:
+            return [{"status":"DEFERRED", "failure_code":"MODEL_CAPACITY_DEFERRED",
+                     "next_retry_at":(NOW+timedelta(hours=alternate_delay)).isoformat()}]
         return [{"status": "OK"}]
 
     monkeypatch.setattr(runner, "annotate_pending_news", annotate)
@@ -2820,7 +2825,11 @@ def test_annotation_fallback_never_crosses_maintenance_deferral(
     )
 
     assert tuple(calls) == expected_models
-    assert status["status"] == expected_status
+    if alternate_delay is not None and len(expected_models) == 2:
+        assert status["status"] == "DEFERRED"
+        assert status["next_retry_at"] == (NOW + timedelta(hours=min(4,alternate_delay))).isoformat()
+    else:
+        assert status["status"] == expected_status
     ledger.close()
 
 

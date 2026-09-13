@@ -45,7 +45,7 @@ def pool(db, monkeypatch, lane="LIVE"):
 
 
 @pytest.mark.parametrize("google_model", [DEFAULT_GEMINI_MODEL, DEFAULT_GEMMA_MODEL])
-@pytest.mark.parametrize("first_failure", [429, 503, 404])
+@pytest.mark.parametrize("first_failure", [429, 503, 404, "json", "length"])
 def test_backup_route_order_and_actual_identity(database, monkeypatch, google_model, first_failure):
     monkeypatch.setenv("GROQ_API_KEY", "groq-fixture")
     accountant = SchedulerModelAccountant(database, ApiCredential("google", "ROUTINE", "key", "id"),
@@ -62,6 +62,9 @@ def test_backup_route_order_and_actual_identity(database, monkeypatch, google_mo
         assert request.get_header("User-agent") == "XAUUSD-Forecaster/1.0"
         assert timeout == 15
         if body["model"] != GROQ_NEWS_MODELS[1]:
+            if first_failure in {"json", "length"}:
+                return response(backup_envelope('{"headline_zh":',
+                    finish="length" if first_failure == "length" else "stop"))
             raise urllib.error.HTTPError(request.full_url, first_failure, "unavailable", {"Retry-After":"60"}, io.BytesIO(b"{}"))
         assert "provider" not in body
         assert body["reasoning_effort"] == "none"
@@ -79,7 +82,7 @@ def test_backup_route_order_and_actual_identity(database, monkeypatch, google_mo
     assert row["input_token_count"] >= 2048 + 100
 
 
-@pytest.mark.parametrize("failure", [429, "capacity", "timeout"])
+@pytest.mark.parametrize("failure", [429, "capacity", "timeout", "json"])
 def test_gemma_capacity_and_transport_can_recover(database, monkeypatch, failure):
     monkeypatch.setenv("GROQ_API_KEY", "groq-fixture")
     accountant = SchedulerModelAccountant(database, ApiCredential("google", "ROUTINE", "key", "id"),
@@ -89,6 +92,9 @@ def test_gemma_capacity_and_transport_can_recover(database, monkeypatch, failure
     request_pool = _GeminiRequestPool(("key",), request_accountant=accountant)
     def transport(request, *, timeout):
         if urllib.parse.urlsplit(request.full_url).hostname == "generativelanguage.googleapis.com":
+            if failure == "json":
+                return response({"candidates": [{"finishReason": "MAX_TOKENS",
+                    "content": {"parts": [{"text": '{"headline_zh":'}]}}]})
             if failure == "timeout":
                 raise TimeoutError()
             raise urllib.error.HTTPError(request.full_url, 429, "quota", {}, io.BytesIO(b"{}"))
@@ -96,6 +102,72 @@ def test_gemma_capacity_and_transport_can_recover(database, monkeypatch, failure
     monkeypatch.setattr(urllib.request, "urlopen", transport)
     assert request_pool.call_json(DEFAULT_GEMMA_MODEL, purpose="news-impact", payload=PAYLOAD,
                                   decode=_decode_model_json)[1] == "groq/" + GROQ_NEWS_MODELS[0]
+
+
+@pytest.mark.parametrize("finish", ["STOP", "SAFETY"])
+def test_json_backup_is_bounded_across_google_keys_and_never_bypasses_safety(monkeypatch, finish):
+    from xauusd_forecaster.ai.model_gateway import GeminiModelGateway
+    from tests.fixtures.model_accounting_fakes import CallbackModelAccountant
+    accountant = CallbackModelAccountant(lambda usage: True)
+    calls = []
+    class ExhaustedBackup:
+        def generate(self, **kwargs):
+            calls.append('backup')
+            return None
+    accountant.fallback_gateway = ExhaustedBackup()
+    monkeypatch.setattr(GeminiModelGateway,'_post_json',staticmethod(lambda *args,**kw:
+        {'candidates':[{'finishReason':finish,'content':{'parts':[{'text':'{"value":'}]}}]}))
+    gateway = GeminiModelGateway(('key-a','key-b'),requests_per_key=1,accountant=accountant)
+    with pytest.raises(ModelGatewayResponseInvalid):
+        gateway.generate(0,model=DEFAULT_GEMMA_MODEL,purpose='news-impact',payload=PAYLOAD,
+            input_tokens=100,decode=_decode_model_json,retryable_http_codes=frozenset())
+    assert calls == (['backup'] if finish == 'STOP' else [])
+
+
+@pytest.mark.parametrize("task", ["ACTIVE_ANNOTATION", "ACTIVE_IMPACT", "TITLE_TRANSLATION"])
+@pytest.mark.parametrize("code", ["MODEL_CAPACITY_DEFERRED", "PROVIDER_DISPATCH_DEFERRED"])
+def test_capacity_authority_survives_real_news_entrypoints(tmp_path, monkeypatch, task, code):
+    from xauusd_forecaster.evidence.ledger import ForwardLedger
+    from xauusd_forecaster.ai.model_gateway import GeminiModelGateway, ModelGatewayCapacityExhausted
+    from xauusd_forecaster.news.scheduler import runtime
+    from xauusd_forecaster.news.scheduler.state import enqueue_job
+    from tests.fixtures.dashboard_news_fixtures import _append_basic_annotation
+    import hashlib
+    ledger = ForwardLedger(tmp_path / 'capacity.sqlite3')
+    now = datetime.now(UTC)
+    due = (now + timedelta(hours=2)).isoformat()
+    digest = hashlib.sha256(b'Gold news').hexdigest()
+    ledger.append_news_revision(dict(source='fixture', source_item_id='one',
+        source_published_time=now,collector_first_seen_time=now,fetched_time=now,
+        headline='Gold news',body='Gold news',content_hash=digest,cluster_id='one'))
+    row = dict(ledger.connection.execute('SELECT * FROM news_revisions').fetchone())
+    if task == 'ACTIVE_IMPACT':
+        _append_basic_annotation(ledger, source='fixture',item_id='one',digest=digest,parsed_at=now)
+        ann = ledger.connection.execute('SELECT * FROM news_annotations').fetchone()
+        row.update(annotation_id=ann['annotation_id'],annotation=json.loads(ann['annotation_json']))
+        from xauusd_forecaster.news.retrieval import search
+        monkeypatch.setattr(search,'attach_hybrid_prior_event_context',lambda _db, rows, **kw:rows)
+    monkeypatch.setattr(runtime,'pending_record_for_job',lambda *a,**kw:row)
+    def unavailable(*args, **kwargs):
+        raise ModelGatewayCapacityExhausted('Account capacity unavailable',failure_code=code,
+            next_retry_at=due,failure_evidence={'quota_limit': 123})
+    monkeypatch.setattr(GeminiModelGateway,'generate',unavailable)
+    monkeypatch.setattr(urllib.request,'urlopen',lambda *a,**kw:pytest.fail('capacity wait sent a request'))
+    try:
+        job_id=enqueue_job(ledger.connection,task_type=task,source='fixture',source_item_id='one',
+            revision_number=1,annotation_id=row.get('annotation_id',''),prompt_version='fixture',
+            priority='NORMAL',now=now)
+        result=runtime._run_scheduled_lane(ledger,credentials=(ApiCredential('a','ROUTINE','key','id'),),
+            maximum=1,queued_before=datetime.now(UTC),worker_prefix='capacity-contract')[0]
+        assert result['failure_code']==code
+        assert result['next_retry_at']==due
+        job=ledger.connection.execute('SELECT state,available_at,last_error FROM news_ai_jobs_v1 WHERE job_id=?',(job_id,)).fetchone()
+        assert tuple(job)==('QUEUED',due,code)
+        again=runtime._run_scheduled_lane(ledger,credentials=(ApiCredential('a','ROUTINE','key','id'),),
+            maximum=1,queued_before=datetime.now(UTC),worker_prefix='capacity-next-round')
+        assert again==[]
+    finally:
+        ledger.close()
 
 
 @pytest.mark.parametrize("model", GROQ_NEWS_MODELS)
@@ -269,9 +341,10 @@ def test_success_and_other_failures_do_not_spend_backup(database, monkeypatch, c
     assert database.execute("SELECT count(*) FROM news_ai_account_request_usage_v1 WHERE account_id='GROQ_NEWS'").fetchone()[0] == 0
 
 
-@pytest.mark.parametrize("envelope", [backup_envelope("bad JSON"), backup_envelope(finish="length"),
-    {"error": {"code": 503}}, {"choices": []}, {**backup_envelope(), "model": "other/model"}])
-def test_bad_backup_output_is_not_success_or_recursive_retry(database, monkeypatch, envelope):
+@pytest.mark.parametrize("envelope,expected_calls", [(backup_envelope("bad JSON"),3),
+    (backup_envelope(finish="length"),3), (backup_envelope(finish="content_filter"),2),
+    ({"error": {"code": 503}},2), ({"choices": []},2), ({**backup_envelope(), "model": "other/model"},2)])
+def test_bad_backup_output_is_not_success_or_recursive_retry(database, monkeypatch, envelope, expected_calls):
     request_pool = pool(database, monkeypatch)
     calls = []
     def transport(request, *, timeout):
@@ -282,7 +355,7 @@ def test_bad_backup_output_is_not_success_or_recursive_retry(database, monkeypat
     monkeypatch.setattr(urllib.request, "urlopen", transport)
     with pytest.raises(ModelGatewayResponseInvalid):
         call(request_pool)
-    assert len(calls) == 2
+    assert len(calls) == expected_calls
     assert database.execute("SELECT count(*) FROM news_ai_account_request_usage_v1 WHERE provider_outcome='PROVIDER_SUCCEEDED'").fetchone()[0] == 0
 
 

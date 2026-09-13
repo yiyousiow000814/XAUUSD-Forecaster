@@ -30,7 +30,7 @@ def test_provider_retry_is_local_but_mixed_errors_and_pipeline_stalls_still_aler
     job_id = enqueue_job(connection, task_type=task, source="source",
         source_item_id="provider-retry", revision_number=1, annotation_id="annotation",
         prompt_version="prompt", priority="NORMAL", now=NOW - timedelta(minutes=5))
-    connection.execute("UPDATE news_ai_jobs_v1 SET attempt_count=12 WHERE job_id=?", (job_id,))
+    connection.execute("UPDATE news_ai_jobs_v1 SET attempt_count=613 WHERE job_id=?", (job_id,))
     for number in range(12):
         deterministic = mixed and number == 0
         connection.execute("INSERT INTO news_ai_job_attempts_v1 VALUES (?,?,?,?,?,'ERROR',?,?,?,?,?,NULL)",
@@ -39,16 +39,22 @@ def test_provider_retry_is_local_but_mixed_errors_and_pipeline_stalls_still_aler
              "ValueError" if deterministic else "HTTPError",
              None if deterministic else (500, 502, 503)[number % 3], "bounded evidence",
              (NOW - timedelta(seconds=120 - number)).isoformat()))
+    connection.executemany("INSERT INTO news_ai_job_attempts_v1 VALUES (?,?,?,?,?,'DEFERRED',?,?,?,?,?,NULL)",
+        [(f"capacity-{number}",job_id,13+number,"account","credential","MODEL_CAPACITY_DEFERRED",
+          "ModelGatewayCapacityExhausted",None,"capacity",(NOW-timedelta(hours=1)).isoformat()) for number in range(601)])
     connection.commit()
     snapshot = scheduler_health_snapshot(connection, now=NOW)
     retry = next(event for event in snapshot["alerts"] if event["code"] == "OPS_AI_JOB_RETRY_LOOP")
     assert retry["blocking"] is mixed
     assert retry["severity"] == ("ERROR" if mixed else "WARNING")
     assert retry["evidence"].get("automatic_provider_retry", False) is not mixed
+    assert retry["evidence"]["effective_failure_streak"] == 12
+    assert retry["evidence"]["lifetime_claim_count"] == 613
+    assert "613" not in retry["message_zh"] and "不含容量等待" in retry["message_zh"]
     assert len([event for event in snapshot["alerts"] if event["blocking"] or event["severity"] == "ERROR"]) == int(mixed)
     stalled = scheduler_health_snapshot(connection, now=NOW + timedelta(hours=3))
     assert any(event["code"] == "OPS_AI_PIPELINE_STALLED" and event["blocking"] for event in stalled["alerts"])
-    assert connection.execute("SELECT count(*) FROM news_ai_job_attempts_v1").fetchone()[0] == 12
+    assert connection.execute("SELECT count(*) FROM news_ai_job_attempts_v1").fetchone()[0] == 613
 
 
 def test_scheduler_health_exposes_retry_capacity_stall_and_age_codes() -> None:
@@ -282,6 +288,8 @@ def test_scheduled_retry_loop_is_visible_without_claiming_current_impact() -> No
     assert snapshot["status"] == "WARNING"
     assert alert["severity"] == "WARNING"
     assert alert["blocking"] is False
+    assert "历史领取" not in alert["message_zh"]
+    assert "不含容量等待" in alert["message_zh"]
     assert alert["evidence"] == {
         "max_claim_count": 10,
         "lifetime_claim_count": 10,

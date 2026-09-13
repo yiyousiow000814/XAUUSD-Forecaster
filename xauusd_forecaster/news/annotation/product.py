@@ -711,6 +711,9 @@ def _persist_parsed_annotation(
             "source_item_id": row["source_item_id"],
             "revision_number": row["revision_number"],
             "reason": parsed_record["reason"],
+            **{key: parsed_record[key] for key in (
+                "failure_code", "next_retry_at", "failure_evidence",
+            ) if key in parsed_record},
         }
     if parsed_record["status"] != "PARSED":
         failure = _append_llm_failure(

@@ -185,11 +185,18 @@ def _execute_job(
             status.get("status") == "DEFERRED"
             and status.get("failure_code") not in MAINTENANCE_DEFERRAL_CODES
         ):
-            status = annotate_pending_news(
+            alternate = annotate_pending_news(
                 **common,
                 model=FALLBACK_GEMINI_MODEL,
                 request_accountant=accountant,
             )[0]
+            if (alternate.get("status") == "DEFERRED"
+                    and alternate.get("failure_code") not in MAINTENANCE_DEFERRAL_CODES):
+                # Either model can resume this same job; wait for the earliest
+                # known route, not whichever route happened to be checked last.
+                status = min((status, alternate), key=lambda item: _next_retry(item, now))
+            else:
+                status = alternate
         return status
     if job.task_type == "ACTIVE_IMPACT":
         return assess_pending_news_impacts(

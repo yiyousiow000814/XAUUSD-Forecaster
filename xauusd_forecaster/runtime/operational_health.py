@@ -356,8 +356,8 @@ def scheduler_health_snapshot(
                 "OPS_AI_JOB_RETRY_LOOP",
                 severity="WARNING" if scheduled or provider_retry else "ERROR", scope=task,
                 message_zh=(
-                    f"{label}（{task}）有任务连续有效失败 {failure_streak} 次，"
-                    f"历史领取 {lifetime_claims} 次，"
+                    f"{label}（{task}）任务处理失败 {failure_streak} 次"
+                    "（不含容量等待），"
                     + (
                         "服务商暂时不可用，系统将自动重试。"
                         if provider_retry else "目前按计划等待下次重试。"
