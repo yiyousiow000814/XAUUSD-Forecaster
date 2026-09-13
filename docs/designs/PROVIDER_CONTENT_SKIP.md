@@ -78,3 +78,20 @@ contracts. No shell, credential, or frontend interface changes are intended.
 - Live read-only inspection at 2026-09-13 13:51 MYT: incident attempt count 364,
   unchanged since containment, with no active lease. The provider was not called
   again for diagnosis. Permanent skip policy has not been activated in production.
+
+### Windows verification latency correction
+
+The hosted Windows gate reached its unchanged five-minute job limit after 218
+passing tests. Its JUnit receipt attributed 207 seconds to the scheduler module;
+the largest two parameterized recovery contracts alone consumed 100 seconds.
+There was no failing test assertion. The prior single shard multiplied unrelated
+service startup, scheduler admission, account recovery, and queue-execution work.
+
+Reuse the existing manifest range mechanism to run four independent owners:
+main services, news discovery/admission, news recovery/accounts, and queue
+execution. The existing exact-ownership contract proves every required function
+is assigned once, including all of its parameters. Main entrypoint edits still
+select all four owners; scheduler source selects its three contracts. No timeout,
+assertion, required status, production path, or test case is removed. This changes
+only CI scheduling, so rollback is the prior manifest; hosted CI must demonstrate
+all shards complete within the original latency budget before merging.
