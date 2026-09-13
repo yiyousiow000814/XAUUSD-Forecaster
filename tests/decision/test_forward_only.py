@@ -3009,10 +3009,11 @@ def test_gemma_impact_local_preflight_does_not_treat_utf8_bytes_as_tokens(
         del timeout
         assert method == "generateContent"
         sent["prompt"] = payload["contents"][0]["parts"][0]["text"]
+        assert payload["generationConfig"]["responseSchema"]["properties"]["matched_candidate_id"]["enum"] == ["NO_MATCH"]
         return {
             "modelVersion": model,
             "candidates": [{"content": {"parts": [{
-                "text": json.dumps(_impact_model_result(), ensure_ascii=False),
+                "text": json.dumps({**_impact_model_result(), "matched_candidate_id": "NO_MATCH"}, ensure_ascii=False),
             }]}}],
         }
 
@@ -3025,6 +3026,7 @@ def test_gemma_impact_local_preflight_does_not_treat_utf8_bytes_as_tokens(
 
     prompt = sent["prompt"]
     assert result["impact_class"] == "BACKGROUND"
+    assert result["matched_candidate_id"] == ""
     assert reserved == [
         annotation_module.conservative_input_token_estimate(prompt) + 1024,
     ]
@@ -3048,11 +3050,12 @@ def test_gemma_impact_repairs_one_identity_contract_failure_through_gateway(
         "identity_anchor_zh": "美国就业数据公布。",
         "identity_differences_zh": [],
     }
-    responses = iter((invalid, _impact_model_result()))
+    responses = iter((invalid, {**_impact_model_result(), "matched_candidate_id": "NO_MATCH"}))
 
     def post_json(_key, model, method, _payload, *, timeout):
         del timeout
         assert method == "generateContent"
+        assert _payload["generationConfig"]["responseSchema"]["properties"]["matched_candidate_id"]["enum"] == ["NO_MATCH", "prior-event"]
         return {
             "modelVersion": model,
             "candidates": [{"content": {"parts": [{
@@ -3071,7 +3074,29 @@ def test_gemma_impact_repairs_one_identity_contract_failure_through_gateway(
     })
 
     assert result["identity_relation"] == "UNRESOLVED"
+    assert result["matched_candidate_id"] == ""
     assert purposes == ["news-impact", "news-impact-contract-repair"]
+
+
+@pytest.mark.parametrize("chosen", ["offered-a", "not-offered", "NO_MATCH"])
+def test_impact_reference_choice_preserves_semantic_authority(chosen):
+    first = {"prior_event_context": [{"candidate_id": "offered-a", "identity_anchor_eligible": True}]}
+    second = {"prior_event_context": [{"candidate_id": "offered-b", "identity_anchor_eligible": True}]}
+    payload = annotation_module._impact_payload("first", row=first)
+    annotation_module._impact_payload("second", row=second)
+    assert payload["generationConfig"]["responseSchema"]["properties"]["matched_candidate_id"]["enum"] == ["NO_MATCH", "offered-a"]
+    assert "enum" not in annotation_module.IMPACT_RESPONSE_SCHEMA["properties"]["matched_candidate_id"]
+    result = {**_impact_model_result(), "matched_candidate_id": chosen,
+              "identity_relation": "SAME_EVENT", "update_type": "DUPLICATE_REPORT",
+              "identity_differences_zh": [],
+              "identity_anchor_zh": "同一份就业报告公布值"}
+    if chosen == "offered-a":
+        assert annotation_module._validate_impact_result(result, first)["matched_candidate_id"] == chosen
+        with pytest.raises(ValueError, match="core fact"):
+            annotation_module._validate_impact_result(result, {"prior_event_context": [{"candidate_id": chosen}]})
+    else:
+        with pytest.raises(ValueError, match="offered candidate"):
+            annotation_module._validate_impact_result(result, first)
 
 
 def test_gemma_impact_reduces_candidates_to_fit_calibrated_tpm(
@@ -3129,6 +3154,7 @@ def test_gemma_impact_reduces_candidates_to_fit_calibrated_tpm(
     assert math.ceil(reserved[0] * 1.2) <= 15_000
     assert '"candidate_id":"nearest"' in sent_prompt
     assert '"candidate_id":"farther"' not in sent_prompt
+    assert sent_payloads[0]["generationConfig"]["responseSchema"]["properties"]["matched_candidate_id"]["enum"] == ["NO_MATCH", "nearest"]
     assert "CANDIDATE_CONTEXT_TRUNCATED: true" in sent_prompt
 
 

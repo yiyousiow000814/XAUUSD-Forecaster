@@ -138,6 +138,12 @@ new episode. Insufficient evidence remains unresolved. The stable anchor,
 factual changes, identity differences, and contextual differences are retained
 as immutable audit evidence with the resolution.
 
+Model-generated references to an offered candidate set must be constrained to
+that request's candidates and an explicit no-match choice. Both initial and
+repair requests share this constraint. Transport no-match values normalize to
+the canonical empty identifier before validation or persistence; local identity
+and evidence validation remain mandatory even with provider schema constraints.
+
 When the complete offered candidate universe is empty, `NEW_EPISODE` establishes
 the first event from the current stable anchor and MUST NOT fabricate a pairwise
 identity difference. When one or more candidates are offered, `NEW_EPISODE`
