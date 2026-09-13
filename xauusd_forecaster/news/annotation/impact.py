@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from xauusd_forecaster.news.annotation.content_policy import permitted_content_sql
+
 from datetime import UTC, datetime, timedelta
 import json
 import re
@@ -489,7 +491,8 @@ def pending_impact_records(
           ON a.source=n.source AND a.source_item_id=n.source_item_id
          AND a.revision_number=n.revision_number
          AND a.raw_content_hash=n.content_hash
-        WHERE length(trim(COALESCE(n.body,'')))>=240
+        WHERE {permitted_content_sql()}
+          AND length(trim(COALESCE(n.body,'')))>=240
           AND a.prompt_version=?
           AND {model_usable_annotation_predicate('a')}
           AND a.llm_model_version IN (

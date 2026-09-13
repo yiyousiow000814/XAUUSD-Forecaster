@@ -360,6 +360,15 @@ article; unchanged request count is not a claim of unchanged token consumption.
 
 ## Incomplete news processing
 
+An explicit provider `PROHIBITED_CONTENT` rejection is skipped under the
+operator's content policy. Persist a content-hash classification and retire
+pending AI work for that exact content; do not retry it, switch credentials or
+providers, or recreate work after restart or prompt migration. Changed content
+may be processed as a new identity. Preserve raw and accepted historical evidence;
+skip is neither successful annotation nor an actionable operational failure.
+Do not infer prohibited content from article keywords, HTTP failures, generic
+safety responses, or invalid JSON. Existing failure recovery must honor the skip.
+
 HTTP 429/500/502/503/504 and typed transport failures are operational delay,
 not a finding that an article is invalid. Ordinary model failures return to
 QUEUED at failure/release time, preserving the same task identity and failure

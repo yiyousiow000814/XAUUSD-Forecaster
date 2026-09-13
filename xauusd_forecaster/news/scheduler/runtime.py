@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from xauusd_forecaster.news.annotation.content_policy import (
+    PROHIBITED_CONTENT, content_is_skipped, skipped_content_status,
+)
 
 
 import json
@@ -149,6 +152,12 @@ def _execute_job(
     *,
     now: datetime,
 ) -> dict[str, object]:
+    raw = ledger.connection.execute(
+        "SELECT content_hash FROM news_revisions WHERE source=? AND source_item_id=? AND revision_number=?",
+        (job.source, job.source_item_id, job.revision_number),
+    ).fetchone()
+    if raw is not None and content_is_skipped(ledger.connection, raw):
+        return skipped_content_status()
     record = pending_record_for_job(ledger.connection, job, now=now)
     if record is None:
         return {"status": "PENDING_EVIDENCE"}
@@ -429,6 +438,11 @@ def _run_scheduled_lane(
         outcome = str(status.get("status") or "ERROR")
         if outcome == "OK":
             complete_job(ledger.connection, job.job_id, worker_id)
+        elif outcome == "SKIPPED":
+            backoff_job(
+                ledger.connection, job.job_id, worker_id,
+                available_at=outcome_at, error=PROHIBITED_CONTENT, terminal=True,
+            )
         elif outcome == "PENDING_EVIDENCE":
             # An empty filtered reader is not evidence that the identity is obsolete.
             # Source/version reconciliation owns retirement, independently of retries.

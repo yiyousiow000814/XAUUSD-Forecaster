@@ -2793,7 +2793,7 @@ def test_annotation_fallback_never_crosses_maintenance_deferral(
     job = SimpleNamespace(
         task_type="ACTIVE_ANNOTATION",
         priority="FAST",
-        work_lane="LIVE",
+        work_lane="LIVE", source="fixture", source_item_id="current", revision_number=1,
     )
     credential = ApiCredential(
         "account-a", ROUTINE_POOL, "key-a", "credential-a",

@@ -165,13 +165,15 @@ def backup_envelope(text='{"headline_zh":"黄金新闻"}', finish="stop"):
             "choices": [{"finish_reason": finish, "message": {"content": text}}]}
 
 
-@pytest.mark.parametrize("reason", [None, "PROHIBITED_CONTENT", "SAFETY"])
-def test_missing_google_candidates_preserve_real_reason_and_usage(database, monkeypatch, reason):
+@pytest.mark.parametrize("reason,candidate", [(None, False), ("SAFETY", False),
+    ("PROHIBITED_CONTENT", False), ("PROHIBITED_CONTENT", True)])
+def test_missing_google_candidates_preserve_real_reason_and_usage(database, monkeypatch, reason, candidate):
     request_pool = pool(database, monkeypatch)
     calls = []
     def transport(request, *, timeout):
         calls.append(request.full_url)
-        return response({"promptFeedback": {"blockReason": reason},
+        return response({**({"candidates": [{"finishReason": reason}]} if candidate else
+                           {"promptFeedback": {"blockReason": reason}}),
                          "usageMetadata": {"promptTokenCount": 4471, "totalTokenCount": 4471},
                          "modelVersion": DEFAULT_GEMINI_MODEL})
     monkeypatch.setattr(urllib.request, "urlopen", transport)
@@ -182,7 +184,7 @@ def test_missing_google_candidates_preserve_real_reason_and_usage(database, monk
     from xauusd_forecaster.news.annotation.product import _model_failure_details
     detail = _model_failure_details(error.value)
     assert detail["failure_evidence"]["selected_output"]["provider_block_reason"] == (reason or "NO_CANDIDATES")
-    assert detail["failure_code"] == "MODEL_OUTPUT_INVALID"
+    assert detail["failure_code"] == ("PROVIDER_PROHIBITED_CONTENT" if reason == "PROHIBITED_CONTENT" else "MODEL_OUTPUT_INVALID")
     assert len(calls) == 1
     row = database.execute("SELECT provider_outcome,provider_total_token_count FROM news_ai_account_request_usage_v1").fetchone()
     assert tuple(row) == ("PROVIDER_FAILED", 4471)
@@ -350,24 +352,34 @@ def test_backup_requires_key_and_live_lane(database, monkeypatch):
     assert SchedulerModelAccountant(database, ApiCredential("a", "ROUTINE", "key", "id"), urgent=True).fallback_gateway is None
 
 
-@pytest.mark.parametrize("scenario", ["backup-title", "blocked-title", "blocked-annotation"])
+@pytest.mark.parametrize("scenario", ["backup-title", "blocked-title", "blocked-annotation", "blocked-impact"])
 def test_production_news_job_persists_provider_success_or_failure(tmp_path, monkeypatch, scenario):
     import hashlib
-    from types import SimpleNamespace
     from xauusd_forecaster.evidence.ledger import ForwardLedger
     from xauusd_forecaster.news.scheduler import runtime
+    from xauusd_forecaster.news.scheduler.state import enqueue_job, scheduler_counts
+    from xauusd_forecaster.news.annotation.product import PROMPT_VERSION, TITLE_PROMPT_VERSION, IMPACT_PROMPT_VERSION
     monkeypatch.setenv("GROQ_API_KEY", "backup-secret")
     ledger = ForwardLedger(tmp_path / "source.sqlite3")
     now = datetime.now(UTC)
-    body = "Gold rises 1% as the dollar weakens"
+    body = "Gold rises 1% as the dollar weakens. " * 10
     content_hash = hashlib.sha256(body.encode()).hexdigest()
     ledger.append_news_revision({"source": "fixture", "source_item_id": "one",
         "source_published_time": now, "collector_first_seen_time": now,
         "fetched_time": now, "headline": body, "body": body,
         "content_hash": content_hash, "cluster_id": "one"})
     row = dict(ledger.connection.execute("SELECT * FROM news_revisions").fetchone())
+    if scenario == "blocked-impact":
+        from tests.fixtures.dashboard_news_fixtures import _append_basic_annotation
+        _append_basic_annotation(ledger, source="fixture", item_id="one", digest=content_hash, parsed_at=now)
+        annotation = ledger.connection.execute("SELECT * FROM news_annotations").fetchone()
+        row.update(annotation_id=annotation["annotation_id"], annotation=json.loads(annotation["annotation_json"]))
+        from xauusd_forecaster.news.retrieval import search
+        monkeypatch.setattr(search, "attach_hybrid_prior_event_context", lambda _db, rows, **_kw: rows)
     monkeypatch.setattr(runtime, "pending_record_for_job", lambda *_args, **_kwargs: row)
+    calls = []
     def transport(request, *, timeout):
+        calls.append(request.full_url)
         if scenario.startswith("blocked"):
             return response({"promptFeedback": {"blockReason": "PROHIBITED_CONTENT"},
                              "usageMetadata": {"promptTokenCount": 100, "totalTokenCount": 100}})
@@ -376,20 +388,114 @@ def test_production_news_job_persists_provider_success_or_failure(tmp_path, monk
         return response(backup_envelope())
     monkeypatch.setattr(urllib.request, "urlopen", transport)
     try:
-        result = runtime._execute_job(ledger, ApiCredential("google", "ROUTINE", "secret", "id"),
-            SimpleNamespace(task_type="ACTIVE_ANNOTATION" if scenario=="blocked-annotation" else "TITLE_TRANSLATION",
-                            work_lane="LIVE", priority="NORMAL"), now=now)
+        task_type, prompt = {
+            "blocked-annotation": ("ACTIVE_ANNOTATION", PROMPT_VERSION),
+            "blocked-impact": ("ACTIVE_IMPACT", IMPACT_PROMPT_VERSION),
+        }.get(scenario, ("TITLE_TRANSLATION", TITLE_PROMPT_VERSION))
+        job_id = enqueue_job(ledger.connection, task_type=task_type, source="fixture",
+            source_item_id="one", revision_number=1, prompt_version=prompt, priority="NORMAL",
+            annotation_id=row.get("annotation_id", ""), now=now)
+        result = runtime._run_scheduled_lane(ledger,
+            credentials=(ApiCredential("google", "ROUTINE", "secret", "id"),), maximum=1,
+            queued_before=datetime.now(UTC), worker_prefix="contract")[0]
         if scenario.startswith("blocked"):
-            assert result["status"] == "ERROR"
-            assert result["failure_code"] == "MODEL_OUTPUT_INVALID"
-            failure = ledger.connection.execute("SELECT * FROM news_llm_failure_evidence_v1").fetchone()
-            assert failure is not None and len(failure["response_hash"]) == 64
-            assert json.loads(failure["selected_output_json"])["provider_block_reason"] == "PROHIBITED_CONTENT"
-            assert ledger.connection.execute("SELECT count(*) FROM news_annotations").fetchone()[0] == 0
+            assert result["status"] == "SKIPPED", result
+            assert result["failure_code"] == "PROVIDER_PROHIBITED_CONTENT"
+            assert len(calls) == 1
+            job = ledger.connection.execute("SELECT * FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone()
+            assert job["state"] == "DEAD_LETTER" and job["last_error"] == "PROVIDER_PROHIBITED_CONTENT"
+            assert scheduler_counts(ledger.connection)["dead_letter"] == 0
+            from xauusd_forecaster.runtime.operational_health import scheduler_health_snapshot
+            from xauusd_forecaster.news.semantics.critical_state import scheduler_state_counts
+            assert not any(r["state"] == "DEAD_LETTER" for r in scheduler_state_counts(ledger.connection))
+            snapshot = scheduler_health_snapshot(ledger.connection, now=datetime.now(UTC))
+            assert not any(a["code"] == "OPS_AI_NEW_DEAD_LETTER" for a in snapshot["alerts"])
+            assert ledger.connection.execute("SELECT count(*) FROM news_item_classifications_v1").fetchone()[0] == 1
+            if scenario != "blocked-impact":
+                failure = ledger.connection.execute("SELECT * FROM news_llm_failure_evidence_v1").fetchone()
+                assert failure is not None and len(failure["response_hash"]) == 64
+                assert json.loads(failure["selected_output_json"])["provider_block_reason"] == "PROHIBITED_CONTENT"
+            expected_annotations = int(scenario == "blocked-impact")
+            assert ledger.connection.execute("SELECT count(*) FROM news_annotations").fetchone()[0] == expected_annotations
+            # A restarted scheduler, including legacy recovery and backfill,
+            # must not turn a refusal into another provider submission.
+            ledger.close()
+            ledger = ForwardLedger(tmp_path / "source.sqlite3")
+            from xauusd_forecaster.news.scheduler.state import sync_pending_jobs, reconcile_completed_jobs
+            sync_pending_jobs(ledger.connection, now=datetime.now(UTC))
+            reconcile_completed_jobs(ledger.connection, now=datetime.now(UTC))
+            runtime._run_scheduled_lane(ledger,
+                credentials=(ApiCredential("google", "ROUTINE", "secret", "id"),), maximum=3,
+                queued_before=datetime.now(UTC), worker_prefix="restart")
+            assert len(calls) == 1
+            assert ledger.connection.execute("SELECT count(*) FROM news_ai_failure_recoveries_v1").fetchone()[0] == 0
+            assert ledger.connection.execute("SELECT count(*) FROM news_ai_impact_failure_recoveries_v1").fetchone()[0] == 0
+            assert ledger.connection.execute("SELECT count(*) FROM news_ai_jobs_v1 WHERE state IN ('QUEUED','LEASED','BACKING_OFF')").fetchone()[0] == 0
             return
         assert result["status"] == "OK"
         translation = ledger.connection.execute("SELECT * FROM news_title_translations").fetchone()
         assert translation["llm_model_version"] == "groq/" + GROQ_NEWS_MODELS[0]
         assert translation["raw_content_hash"] == content_hash
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("stage", ["annotation", "title", "impact"])
+def test_content_skip_survives_duplicate_sources_and_keeps_new_content_eligible(tmp_path, monkeypatch, stage):
+    import hashlib
+    from xauusd_forecaster.evidence.ledger import ForwardLedger
+    from xauusd_forecaster.news.annotation.content_policy import skip_prohibited_content
+    from xauusd_forecaster.news.annotation.product import (
+        pending_annotation_records, pending_title_translation_records, pending_impact_records,
+    )
+    from tests.fixtures.dashboard_news_fixtures import _append_basic_annotation
+
+    readers = {"annotation": pending_annotation_records, "title": pending_title_translation_records,
+               "impact": pending_impact_records}
+    now = datetime.now(UTC)
+    ledger = ForwardLedger(tmp_path / "content.sqlite3", now=now - timedelta(minutes=1))
+    try:
+        for item, text in (("one", "Same report. "), ("duplicate", "Same report. "),
+                           ("new", "Updated facts. ")):
+            body = text * 30
+            digest = hashlib.sha256(body.encode()).hexdigest()
+            ledger.append_news_revision({"source": "fixture", "source_item_id": item,
+                "source_published_time": now, "collector_first_seen_time": now,
+                "fetched_time": now, "headline": "Gold economic release " + item, "body": body,
+                "content_hash": digest, "cluster_id": item})
+            if stage == "impact":
+                _append_basic_annotation(ledger, source="fixture", item_id=item,
+                    digest=digest, parsed_at=now)
+        assert {r["source_item_id"] for r in readers[stage](ledger.connection)} == {"one", "duplicate", "new"}
+        raw = dict(ledger.connection.execute("SELECT * FROM news_revisions WHERE source_item_id='one'").fetchone())
+        from xauusd_forecaster.news.scheduler.state import enqueue_job, apply_retry_schedule_override
+        held_job = enqueue_job(ledger.connection, task_type="ACTIVE_ANNOTATION", source="fixture",
+            source_item_id="one", revision_number=1, prompt_version="previous-generation",
+            priority="NORMAL", now=now)
+        job = ledger.connection.execute("SELECT * FROM news_ai_jobs_v1 WHERE job_id=?", (held_job,)).fetchone()
+        apply_retry_schedule_override(ledger.connection, job_id=held_job, request_id="stop-incident",
+            operator_id="operator", mode="CUSTOM_TIME", reason="Suspend explicit provider refusal",
+            expected_state="QUEUED", expected_available_at=job["available_at"],
+            requested_available_at=datetime(9999, 1, 1, tzinfo=UTC), now=now)
+        skip_prohibited_content(ledger.connection, raw)
+        assert ledger.connection.execute("SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (held_job,)).fetchone()[0] == "DEAD_LETTER"
+        assert ledger.connection.execute("SELECT active FROM news_ai_retry_schedule_overrides_v1 WHERE job_id=?", (held_job,)).fetchone()[0] == 0
+        ledger.close()
+        ledger = ForwardLedger(tmp_path / "content.sqlite3", now=now - timedelta(minutes=1))
+        assert [r["source_item_id"] for r in readers[stage](ledger.connection)] == ["new"]
+        from xauusd_forecaster.news.annotation.product import (
+            annotate_pending_news, translate_pending_headlines, assess_pending_news_impacts,
+        )
+        def unexpected_request(*args, **kwargs):
+            pytest.fail("Skipped content reached provider transport")
+        monkeypatch.setattr(urllib.request, "urlopen", unexpected_request)
+        functions = {"annotation": annotate_pending_news, "title": translate_pending_headlines,
+                     "impact": assess_pending_news_impacts}
+        accountant = SchedulerModelAccountant(ledger.connection,
+            ApiCredential("account", "ROUTINE", "secret", "id"), urgent=True)
+        result = functions[stage](ledger, api_key="secret", records=[raw], request_accountant=accountant)
+        assert result[0]["status"] == "SKIPPED"
+        assert ledger.connection.execute("SELECT count(*) FROM news_revisions").fetchone()[0] == 3
+        assert ledger.connection.execute("SELECT count(*) FROM news_annotations").fetchone()[0] == (3 if stage == "impact" else 0)
     finally:
         ledger.close()

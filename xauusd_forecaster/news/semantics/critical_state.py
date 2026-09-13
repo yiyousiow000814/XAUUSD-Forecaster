@@ -25,6 +25,7 @@ from xauusd_forecaster.news.semantics.contracts import (
 
 INSTALL_VERSION = "critical-annotation-state-v1"
 RETIRED_ERROR = "CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE"
+RETIRED_ERRORS_SQL = f"'{RETIRED_ERROR}','PROVIDER_PROHIBITED_CONTENT'"
 NEWS_JOB_REVISION_KEY = "NEWS_JOB_INPUT_REVISION_V1"
 NEWS_RECONCILIATION_CACHE_KEY = "NEWS_JOB_RECONCILIATION_CACHE_V1"
 
@@ -136,7 +137,7 @@ def _annotation_job_count_schema(*, has_runtime_metadata: bool, has_brief_cache:
           VALUES (NEW.task_type,NEW.prompt_version,NEW.lane_classified,
             NEW.provenance_resolved,COALESCE(NEW.provenance_version,''),
             NEW.work_lane,NEW.state,
-            CASE WHEN NEW.last_error='{RETIRED_ERROR}' THEN 1 ELSE 0 END,1)
+            CASE WHEN NEW.last_error IN ({RETIRED_ERRORS_SQL}) THEN 1 ELSE 0 END,1)
           ON CONFLICT(task_type,prompt_version,lane_classified,
                       provenance_resolved,provenance_version,
                       work_lane,state,retired)
@@ -157,7 +158,7 @@ def _annotation_job_count_schema(*, has_runtime_metadata: bool, has_brief_cache:
              AND provenance_version=COALESCE(OLD.provenance_version,'')
              AND work_lane=OLD.work_lane
              AND state=OLD.state AND retired=CASE
-               WHEN OLD.last_error='{RETIRED_ERROR}' THEN 1 ELSE 0 END;
+               WHEN OLD.last_error IN ({RETIRED_ERRORS_SQL}) THEN 1 ELSE 0 END;
           INSERT INTO dashboard_annotation_job_counts_v1
             (task_type,prompt_version,lane_classified,provenance_resolved,
              provenance_version,
@@ -165,7 +166,7 @@ def _annotation_job_count_schema(*, has_runtime_metadata: bool, has_brief_cache:
           VALUES (NEW.task_type,NEW.prompt_version,NEW.lane_classified,
             NEW.provenance_resolved,COALESCE(NEW.provenance_version,''),
             NEW.work_lane,NEW.state,
-            CASE WHEN NEW.last_error='{RETIRED_ERROR}' THEN 1 ELSE 0 END,1)
+            CASE WHEN NEW.last_error IN ({RETIRED_ERRORS_SQL}) THEN 1 ELSE 0 END,1)
           ON CONFLICT(task_type,prompt_version,lane_classified,
                       provenance_resolved,provenance_version,
                       work_lane,state,retired)
@@ -183,7 +184,7 @@ def _annotation_job_count_schema(*, has_runtime_metadata: bool, has_brief_cache:
              AND provenance_version=COALESCE(OLD.provenance_version,'')
              AND work_lane=OLD.work_lane
              AND state=OLD.state AND retired=CASE
-               WHEN OLD.last_error='{RETIRED_ERROR}' THEN 1 ELSE 0 END;
+               WHEN OLD.last_error IN ({RETIRED_ERRORS_SQL}) THEN 1 ELSE 0 END;
           {revision_update}
           {invalidate_brief('OLD', "OLD.task_type='ACTIVE_ANNOTATION' AND OLD.state='DEAD_LETTER'")}
         END;
@@ -311,13 +312,13 @@ def _install_annotation_job_count_schema(connection: sqlite3.Connection) -> None
                 SELECT task_type,prompt_version,lane_classified,
                   provenance_resolved,COALESCE(provenance_version,''),
                   work_lane,state,
-                  CASE WHEN last_error='{RETIRED_ERROR}' THEN 1 ELSE 0 END,
+                  CASE WHEN last_error IN ({RETIRED_ERRORS_SQL}) THEN 1 ELSE 0 END,
                   count(*)
                 FROM news_ai_jobs_v1
                 GROUP BY task_type,prompt_version,lane_classified,
                   provenance_resolved,COALESCE(provenance_version,''),
                   work_lane,state,
-                  CASE WHEN last_error='{RETIRED_ERROR}' THEN 1 ELSE 0 END"""
+                  CASE WHEN last_error IN ({RETIRED_ERRORS_SQL}) THEN 1 ELSE 0 END"""
     )
     connection.execute(
         "INSERT INTO dashboard_job_count_metadata_v1 VALUES (?)", (marker,),
