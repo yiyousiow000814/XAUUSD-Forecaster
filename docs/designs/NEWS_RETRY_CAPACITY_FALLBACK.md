@@ -21,3 +21,9 @@ Test no state, partial response, malformed JSON, valid backup, both backups unav
 ## Rollout and review
 
 Normal main-only PR release. Preserve previous main identity for normal code rollback. Verify current runtime revision, a real deferred task's next eligibility/reason, and provider outcome accounting after deployment. Do not call the production incident resolved merely because warnings change. Review all sibling producer/consumer boundaries on the final head. No temporary bridge needs cleanup.
+
+## Oversized display review follow-up
+
+The first live post-release receipt proved a distinct permanent route mismatch: a complete earnings-call review needs 21,019 calibrated input tokens while the Gemma route permits 15,000 TPM with zero current usage. Waiting cannot admit that same request. The annotation gateway first qualifies the full display payload against the existing calibrated per-request Gemma budget. Requests that fit retain Gemma and its metered Qwen backup; oversized display reviews use the existing Gemini generation route with the same complete source, schema and source-fidelity checks. No source truncation, new queue state, quota increase or accepted semantic changes are allowed. Atomic reservation remains the final authority even after route selection, including concurrent usage and restart. A Gemini capacity refusal remains retryable through the existing scheduler. This is a display-review route change only, not a fallback around content refusal or a change to impact classification.
+
+Verification must exercise both the live annotation caller and retained-checkpoint caller, both size boundaries, full source preservation and a valid reviewed result. Rehearse the existing non-prohibited earnings-call job through its normal runtime after deployment. Do not describe the historical 601 waits as conclusively identical: only the new detailed receipt proves the present route mismatch.
