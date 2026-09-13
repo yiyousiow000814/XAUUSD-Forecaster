@@ -78,7 +78,11 @@ def test_windows_runtime_selector_uses_authoritative_impact_map(monkeypatch) -> 
     spec.loader.exec_module(module)
     for path in ("scripts/main_runtime.ps1", "scripts/run_main_services.ps1", ".github/windows-runtime-shards.json"):
         monkeypatch.setattr(module, "_changed_paths", lambda _base, p=path: [p])
-        assert {row["id"] for row in module.select("base")} == {"main-runtime"}
+        assert {row["id"] for row in module.select("base")} == {"main-runtime", "news-discovery-admission", "news-recovery-accounts", "news-queue-execution"}
+    monkeypatch.setattr(module, "_changed_paths", lambda _base: ["xauusd_forecaster/news/scheduler/runtime.py"])
+    assert {row["id"] for row in module.select("base")} == {
+        "news-discovery-admission", "news-recovery-accounts", "news-queue-execution",
+    }
     monkeypatch.setattr(module, "_changed_paths", lambda _base: ["web/app/page.tsx"])
     assert module.select("base") == [{"id": "no-windows-impact", "runner": "ubuntu-latest"}]
 

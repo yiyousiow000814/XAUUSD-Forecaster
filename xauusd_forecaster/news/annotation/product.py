@@ -46,6 +46,10 @@ from xauusd_forecaster.news.semantics.time import (
     register_news_semantic_eligibility_sql,
     semantic_eligibility_sql_predicate,
 )
+from xauusd_forecaster.news.annotation.content_policy import (
+    PROHIBITED_CONTENT, content_is_skipped, permitted_content_sql,
+    skip_prohibited_content, skipped_content_status,
+)
 from xauusd_forecaster.news.annotation.impact import (
     IMPACT_MODEL,
     IMPACT_PROMPT_VERSION,
@@ -84,6 +88,7 @@ INVALID_CHINESE_TITLE = "来源新闻（中文标题待校验）"
 HIGH_PRIORITY_NEWS_SOURCES = frozenset({"federal_reserve_monetary"})
 GeminiBatchCapacityExhausted = ModelGatewayCapacityExhausted
 MODEL_REQUEST_FAILURES = (
+    ModelGatewayResponseInvalid,
     ModelGatewayCapacityExhausted,
     ModelGatewayRequestFailed,
     urllib.error.HTTPError,
@@ -386,6 +391,7 @@ def pending_annotation_records(
          AND a.llm_model_version IN (?, ?) AND a.prompt_version IN (?, ?)
          AND {model_usable_annotation_predicate('a')}
         WHERE {discovery_guard} a.annotation_id IS NULL
+          AND {permitted_content_sql()}
           AND {semantic_eligibility_sql_predicate('n')}
           AND length(trim(COALESCE(n.body, ''))) >= {ANNOTATION_BODY_MIN_CHARACTERS}
           {scope_clause}
@@ -622,6 +628,8 @@ def annotate_pending_news(
     )
     def parse(item: tuple[int, dict]) -> dict[str, object]:
         index, row = item
+        if content_is_skipped(ledger.connection, row):
+            return {"row": row, **skipped_content_status()}
         started = datetime.now(UTC)
         try:
             if selected_provider == "ollama":
@@ -694,6 +702,8 @@ def _persist_parsed_annotation(
 ) -> dict[str, object]:
     row = parsed_record["row"]
     prompt_version = str(parsed_record.get("prompt_version") or PROMPT_VERSION)
+    if parsed_record["status"] == "SKIPPED":
+        return skipped_content_status()
     if parsed_record["status"] == "DEFERRED":
         return {
             "status": "DEFERRED",
@@ -800,7 +810,8 @@ def pending_title_translation_records(
     )
     pending = connection.execute(
         f"""SELECT n.* FROM news_revisions n
-        WHERE {semantic_eligibility_sql_predicate('n')}
+        WHERE {permitted_content_sql()}
+          AND {semantic_eligibility_sql_predicate('n')}
           AND NOT EXISTS (
             SELECT 1 FROM news_title_translations t
             WHERE t.source=n.source AND t.source_item_id=n.source_item_id
@@ -901,6 +912,9 @@ def translate_pending_headlines(
     statuses: list[dict[str, object]] = []
     for index, raw_row in enumerate(pending):
         row = dict(raw_row)
+        if content_is_skipped(ledger.connection, row):
+            statuses.append(skipped_content_status())
+            continue
         started = datetime.now(UTC)
         try:
             headline_zh, exact_model = request_pool.call_title(
@@ -1000,15 +1014,21 @@ def assess_pending_news_impacts(
         annotation_prompt_version=annotation_prompt_version,
         impact_prompt_version=impact_prompt_version,
     )[:effective_limit]
-    if use_hybrid_retrieval:
+    skip_flags = [content_is_skipped(ledger.connection, row) for row in pending]
+    permitted = [row for row, skip in zip(pending, skip_flags) if not skip]
+    if use_hybrid_retrieval and permitted:
         if workload_class is None:
             raise ValueError("hybrid retrieval workload provenance is required")
         from xauusd_forecaster.news.retrieval.search import attach_hybrid_prior_event_context
-        pending = attach_hybrid_prior_event_context(
-            ledger.connection, list(pending), workload_class=workload_class,
-        )
+        enriched = iter(attach_hybrid_prior_event_context(
+            ledger.connection, permitted, workload_class=workload_class,
+        ))
+        pending = [row if skip else next(enriched) for row, skip in zip(pending, skip_flags)]
     statuses = []
     for index, row in enumerate(pending):
+        if content_is_skipped(ledger.connection, row):
+            statuses.append(skipped_content_status())
+            continue
         started = datetime.now(UTC)
         try:
             result, exact_model = request_pool.call_impact(
@@ -1431,14 +1451,18 @@ def generate_metered_json(
 
 
 def _decode_model_json(envelope: dict[str, object]) -> dict:
-    if not envelope.get("candidates"):
-        feedback = envelope.get("promptFeedback")
-        reason = feedback.get("blockReason") if isinstance(feedback, dict) else None
+    feedback = envelope.get("promptFeedback")
+    reason = feedback.get("blockReason") if isinstance(feedback, dict) else None
+    if any(candidate.get("finishReason") == "PROHIBITED_CONTENT"
+           for candidate in (envelope.get("candidates") or [])):
+        reason = "PROHIBITED_CONTENT"
+    if reason == "PROHIBITED_CONTENT" or not envelope.get("candidates"):
         if reason not in {"SAFETY", "OTHER", "BLOCKLIST", "PROHIBITED_CONTENT", "IMAGE_SAFETY"}:
             reason = "NO_CANDIDATES"
         error = ValueError(f"Provider returned no generated content: {reason}")
         error.failure_evidence = {
-            "failure_code": "MODEL_OUTPUT_INVALID",
+            "failure_code": (PROHIBITED_CONTENT if reason == "PROHIBITED_CONTENT"
+                             else "MODEL_OUTPUT_INVALID"),
             "failure_stage": "PROVIDER_RESPONSE",
             "response_hash": hashlib.sha256(json.dumps(
                 envelope, ensure_ascii=False, sort_keys=True,
@@ -2131,8 +2155,10 @@ def _append_llm_failure(
     attempt = 1 if prior is None else int(prior["attempt_number"]) + 1
     failure_code = str(parsed_record.get("failure_code") or "MODEL_REQUEST_FAILED")
     failure_evidence = parsed_record.get("failure_evidence")
+    skip = (skip_prohibited_content(ledger.connection, row)
+            if failure_code == PROHIBITED_CONTENT else {})
     failed_at = datetime.now(UTC)
-    next_retry = failed_at
+    next_retry = None if skip else failed_at
     identity = "|".join(
         [
             task_type, str(row["source"]), str(row["source_item_id"]),
@@ -2156,7 +2182,7 @@ def _append_llm_failure(
             "error": normalized_error,
             "failed_at": failed_at,
             "next_retry_at": next_retry,
-            "is_terminal": False,
+            "is_terminal": bool(skip),
             "failure_evidence": (
                 {**failure_evidence, "failure_code": failure_code}
                 if isinstance(failure_evidence, dict) else None
@@ -2166,11 +2192,12 @@ def _append_llm_failure(
     return {
         "retry_state": "QUEUED",
         "attempt_number": attempt,
-        "next_retry_at": next_retry.isoformat(),
-        "is_terminal": False,
+        "next_retry_at": next_retry.isoformat() if next_retry else None,
+        "is_terminal": bool(skip),
         "failure_code": failure_code,
         "provider_http_status": parsed_record.get("provider_http_status"),
         "failure_evidence": failure_evidence,
+        **skip,
     }
 
 
@@ -2183,6 +2210,8 @@ def _append_impact_failure(
     prompt_version: str = IMPACT_PROMPT_VERSION,
 ) -> dict[str, object]:
     details = _model_failure_details(error)
+    skip = (skip_prohibited_content(ledger.connection, row)
+            if details["failure_code"] == PROHIBITED_CONTENT else {})
     error_type = str(details["error_type"])
     normalized = re.sub(r"\s+", " ", str(details["error"])).strip()[:500]
     signature = hashlib.sha256(
@@ -2196,7 +2225,7 @@ def _append_impact_failure(
     ).fetchone()
     attempt = 1 if prior is None else int(prior["attempt_number"]) + 1
     failed_at = datetime.now(UTC)
-    next_retry = failed_at
+    next_retry = None if skip else failed_at
     identity = "|".join((
         str(row["annotation_id"]), model_version, prompt_version,
         str(attempt), signature,
@@ -2212,16 +2241,17 @@ def _append_impact_failure(
         "attempt_number": attempt, "error_type": error_type,
         "error_signature": signature, "error": normalized,
         "failed_at": failed_at, "next_retry_at": next_retry,
-        "is_terminal": False,
+        "is_terminal": bool(skip),
     })
     return {
         "retry_state": "QUEUED",
         "attempt_number": attempt,
-        "next_retry_at": next_retry.isoformat(),
-        "is_terminal": False,
+        "next_retry_at": next_retry.isoformat() if next_retry else None,
+        "is_terminal": bool(skip),
         "failure_code": details["failure_code"],
         "provider_http_status": details["provider_http_status"],
         "failure_evidence": details.get("failure_evidence"),
+        **skip,
     }
 
 

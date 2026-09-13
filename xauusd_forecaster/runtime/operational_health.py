@@ -253,8 +253,8 @@ def scheduler_health_snapshot(
                       (provenance_resolved=1 AND provenance_version=?))
                  AND state='DEAD_LETTER'
                  AND COALESCE(completed_at,updated_at)>=?
-                 AND COALESCE(last_error,'')<>
-                     'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'
+                 AND COALESCE(last_error,'') NOT IN (
+                     'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE','PROVIDER_PROHIBITED_CONTENT')
                GROUP BY task_type""",
             (WORK_PROVENANCE_VERSION, cutoff),
         ).fetchall()

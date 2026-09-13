@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from xauusd_forecaster.news.annotation.content_policy import permitted_content_sql
+
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -75,6 +77,7 @@ def _current_actionable_impact_rows(
             AND j.annotation_id=a.annotation_id
             AND j.prompt_version=?
            WHERE a.prompt_version=?
+             AND {permitted_content_sql()}
              AND {model_usable_annotation_predicate('a')}
              AND a.llm_model_version IN ({model_placeholders})
              AND length(trim(COALESCE(n.body,'')))>=240
@@ -273,6 +276,7 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
         WHERE j.task_type='ACTIVE_ANNOTATION' AND j.prompt_version=?
           AND j.work_lane=? AND j.lane_classified=1
           AND j.state IN ('BACKING_OFF','DEAD_LETTER')
+          AND {permitted_content_sql()}
           AND j.created_at>=? AND j.created_at<=?
           AND NOT EXISTS (
             SELECT 1 FROM news_revisions newer

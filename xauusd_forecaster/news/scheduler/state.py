@@ -6,6 +6,8 @@ annotations, assessments, failures, and predictions remain append-only evidence.
 
 from __future__ import annotations
 
+from xauusd_forecaster.news.annotation.content_policy import permitted_content_sql
+
 import hashlib
 import json
 import math
@@ -3074,6 +3076,7 @@ def scheduler_counts(connection: sqlite3.Connection) -> dict[str, int]:
         """SELECT state,count(*) AS total FROM news_ai_jobs_v1
         WHERE task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT','TITLE_TRANSLATION')
           AND lane_classified=1
+          AND COALESCE(last_error,'')<>'PROVIDER_PROHIBITED_CONTENT'
           AND (task_type='ACTIVE_ANNOTATION' OR
                (provenance_resolved=1 AND provenance_version=?))
         GROUP BY state""",
@@ -3087,6 +3090,7 @@ def scheduler_counts(connection: sqlite3.Connection) -> dict[str, int]:
         """SELECT count(*) FROM news_ai_jobs_v1
         WHERE state='DEAD_LETTER'
           AND lane_classified=1
+          AND COALESCE(last_error,'')<>'PROVIDER_PROHIBITED_CONTENT'
           AND (task_type='ACTIVE_ANNOTATION' OR
                (provenance_resolved=1 AND provenance_version=?))
           AND last_error='CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'""",
@@ -3100,6 +3104,7 @@ def scheduler_counts(connection: sqlite3.Connection) -> dict[str, int]:
            WHERE task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT',
                                'TITLE_TRANSLATION')
              AND lane_classified=1
+             AND COALESCE(last_error,'')<>'PROVIDER_PROHIBITED_CONTENT'
              AND (task_type='ACTIVE_ANNOTATION' OR
                   (provenance_resolved=1 AND provenance_version=?))
            GROUP BY task_type,work_lane,state""",
@@ -3153,13 +3158,14 @@ def authorize_repairable_annotation_failures(
     timestamp = _iso(now or datetime.now(UTC))
     with connection:
         inserted = connection.execute(
-            """INSERT OR IGNORE INTO news_ai_failure_recoveries_v1
+            f"""INSERT OR IGNORE INTO news_ai_failure_recoveries_v1
                (failure_id,recovery_version,source,source_item_id,
                 revision_number,llm_model_version,prompt_version,authorized_at)
                SELECT f.failure_id,?,f.source,f.source_item_id,
                       f.revision_number,f.llm_model_version,f.prompt_version,?
                FROM news_llm_failures f
                WHERE f.task_type=? AND f.prompt_version=?
+                 AND {permitted_content_sql("f", "raw_content_hash")}
                  AND (f.is_terminal=1 OR (f.next_retry_at>f.failed_at AND f.next_retry_at>?))
                  AND NOT EXISTS (SELECT 1 FROM news_ai_failure_recoveries_v1 r
                      WHERE r.failure_id=f.failure_id AND r.recovery_version=?)
@@ -3182,7 +3188,8 @@ def authorize_repairable_annotation_failures(
                  AND j.prompt_version=? AND j.state IN ('DEAD_LETTER','BACKING_OFF','QUEUED')
                  AND NOT EXISTS (SELECT 1 FROM news_ai_retry_schedule_overrides_v1 o
                                  WHERE o.job_id=j.job_id AND o.active=1)
-                 AND COALESCE(j.last_error,'')<>'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'
+                 AND COALESCE(j.last_error,'') NOT IN (
+                     'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE','PROVIDER_PROHIBITED_CONTENT')
                  AND EXISTS (
                    SELECT 1 FROM news_llm_failures f
                    JOIN news_ai_failure_recoveries_v1 r
@@ -3217,13 +3224,14 @@ def authorize_repairable_impact_failures(
     timestamp = _iso(now or datetime.now(UTC))
     with connection:
         inserted = connection.execute(
-            """INSERT OR IGNORE INTO news_ai_impact_failure_recoveries_v1
+            f"""INSERT OR IGNORE INTO news_ai_impact_failure_recoveries_v1
                (failure_id,recovery_version,annotation_id,llm_model_version,
                 prompt_version,authorized_at)
                SELECT f.failure_id,?,f.annotation_id,f.llm_model_version,
                       f.prompt_version,?
                FROM news_impact_failures_v1 f
                WHERE f.prompt_version=?
+                 AND {permitted_content_sql("f", "raw_content_hash")}
                  AND (f.is_terminal=1 OR (f.next_retry_at>f.failed_at AND f.next_retry_at>?))
                  AND NOT EXISTS (SELECT 1 FROM news_ai_impact_failure_recoveries_v1 r
                      WHERE r.failure_id=f.failure_id AND r.recovery_version=?)
@@ -3245,7 +3253,8 @@ def authorize_repairable_impact_failures(
                  AND j.prompt_version=? AND j.state IN ('DEAD_LETTER','BACKING_OFF','QUEUED')
                  AND NOT EXISTS (SELECT 1 FROM news_ai_retry_schedule_overrides_v1 o
                                  WHERE o.job_id=j.job_id AND o.active=1)
-                 AND COALESCE(j.last_error,'')<>'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'
+                 AND COALESCE(j.last_error,'') NOT IN (
+                     'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE','PROVIDER_PROHIBITED_CONTENT')
                  AND EXISTS (
                    SELECT 1 FROM news_impact_failures_v1 f
                    JOIN news_ai_impact_failure_recoveries_v1 r
@@ -4073,8 +4082,8 @@ def reconcile_completed_jobs(
                SET state='COMPLETED',lease_owner=NULL,lease_expires_at=NULL,
                    updated_at=?,completed_at=?
                WHERE state<>'COMPLETED'
-                 AND COALESCE(last_error,'')<>
-                     'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'
+                 AND COALESCE(last_error,'') NOT IN (
+                     'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE','PROVIDER_PROHIBITED_CONTENT')
                  AND (
                   (task_type='ACTIVE_ANNOTATION' AND EXISTS (
                    SELECT 1 FROM news_annotations a
@@ -4102,8 +4111,8 @@ def reconcile_completed_jobs(
                    last_error='CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE',
                    updated_at=?,completed_at=?
                WHERE state IN ('QUEUED','BACKING_OFF','COMPLETED','DEAD_LETTER')
-                 AND COALESCE(last_error,'')<>
-                     'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'
+                 AND COALESCE(last_error,'') NOT IN (
+                     'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE','PROVIDER_PROHIBITED_CONTENT')
                  AND (
                    (j.task_type='ACTIVE_ANNOTATION'
                     AND j.prompt_version<>?)

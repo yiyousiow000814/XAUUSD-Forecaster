@@ -8,7 +8,10 @@
     "tests/architecture/test_ci_contracts.py",
     "pyproject.toml",
     "AGENTS.md",
-    "docs/protocols/CHANGE_SAFETY.md"
+    "docs/protocols/CHANGE_SAFETY.md",
+    "scripts/main_runtime.ps1",
+    "scripts/run_main_services.ps1",
+    "scripts/main_services_launcher.vbs"
   ],
   "shards": [
     {
@@ -37,13 +40,61 @@
           "path": "tests/runtime/test_runtime_health.py"
         },
         {
-          "path": "tests/news/test_news_scheduler.py"
-        },
-        {
           "path": "tests/runtime/test_runtime_root_ownership.py"
         },
         {
           "path": "tests/runtime/test_cross_version_runtime_recovery.py"
+        }
+      ]
+    },
+    {
+      "id": "news-discovery-admission",
+      "family": "news-discovery-admission",
+      "paths": [
+        "tests/news/test_news_scheduler.py",
+        "xauusd_forecaster/news/scheduler/*",
+        "xauusd_forecaster/news/annotation/*",
+        "xauusd_forecaster/news/semantics/critical_state.py"
+      ],
+      "tests": [
+        {
+          "path": "tests/news/test_news_scheduler.py",
+          "from": "test_live_annotation_claim_preempts_aged_contract_backfill",
+          "through": "test_annotation_surge_takes_priority_after_embedding_pressure_falls"
+        }
+      ]
+    },
+    {
+      "id": "news-recovery-accounts",
+      "family": "news-recovery-accounts",
+      "paths": [
+        "tests/news/test_news_scheduler.py",
+        "xauusd_forecaster/news/scheduler/*",
+        "xauusd_forecaster/news/annotation/*",
+        "xauusd_forecaster/news/semantics/critical_state.py"
+      ],
+      "tests": [
+        {
+          "path": "tests/news/test_news_scheduler.py",
+          "from": "test_identity_contract_recovery_requeues_each_impact_only_once",
+          "through": "test_runtime_credentials_hot_reload_user_configuration"
+        }
+      ]
+    },
+    {
+      "id": "news-queue-execution",
+      "family": "news-queue-execution",
+      "paths": [
+        "tests/news/test_news_scheduler.py",
+        "xauusd_forecaster/news/scheduler/*",
+        "xauusd_forecaster/news/annotation/*",
+        "xauusd_forecaster/news/semantics/critical_state.py"
+      ],
+      "tests": [
+        {
+          "path": "tests/news/test_news_scheduler.py",
+          "from": "test_enqueue_is_idempotent_and_lease_is_exclusive",
+          "through": "test_scheduler_lifecycle_survives_restart_without_duplicate_terminal_work"
         }
       ]
     }
