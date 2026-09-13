@@ -38,18 +38,19 @@ this is not an actionable failed task or successful semantic annotation.
 
 ## Compatibility, rollout, and recovery
 
-New code reads existing evidence without a table migration. The existing job-count
+New code reads existing evidence without a table migration. The job-count
 trigger owner detects the changed retirement predicate and rebuilds only its
-disposable scheduler counts once; it does not rebuild historical news. Old code
-can read the classification but does not honor it; therefore old/new workers must not overlap
-during cutover. The running source inspected during this change is f56d5a59.
-The supplied working instructions require explicit Stable activation, but this revision
-has replaced that control plane with automatic main updates. Publishing a PR
-branch is isolated; merging would activate production. Resolve that instruction
-conflict before merging, rather than silently treating merge as activation.
-The existing audited far-future override for the incident is the safe containment until the new policy is active. Returning to old code requires
-restoring that containment before an old worker can resume blocked work. No
-historical evidence deletion is part of rollout or rollback.
+disposable scheduler counts once; it does not rebuild historical news.
+
+Production follows the current main-only release contract: merge qualified code
+into protected main and let the existing machine owner update its runtime.
+PR branches must not run production. The inspected prior runtime is f56d5a59.
+Old code can read the classification but does not honor it, so old/new workers
+must not overlap. Keep the existing incident's audited administrative hold until
+the new runtime identity is confirmed; then convert it through the content-policy
+owner and verify the retired job, inactive hold, and no further provider attempts.
+Returning to old code requires restoring the administrative hold before restarting
+old workers. No historical evidence deletion is part of recovery.
 
 ## Verification and evidence
 
