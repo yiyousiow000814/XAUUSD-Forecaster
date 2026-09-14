@@ -2592,6 +2592,21 @@ def test_news_projection_manifest_is_authorized_and_nonblocking(
             ready = json.loads(response.read())
         assert response.status == 200
         assert ready["manifest"] == generation.manifest
+        assert ready["sync_inventory_supported"] is True
+        inventory_url = url.replace("mode=manifest", "mode=sync_inventory&snapshot_id=" + generation.manifest["snapshot_id"])
+        with pytest.raises(urllib.error.HTTPError) as forbidden:
+            urllib.request.urlopen(inventory_url, timeout=2)
+        assert forbidden.value.code == 401
+        with urllib.request.urlopen(urllib.request.Request(
+            inventory_url, headers={"X-Aurum-Operator-Bridge-Token": token},
+        ), timeout=2) as response:
+            assert json.loads(response.read()) == generation.sync_inventory
+        with pytest.raises(urllib.error.HTTPError) as mismatch:
+            urllib.request.urlopen(urllib.request.Request(
+                inventory_url.replace(generation.manifest["snapshot_id"], "f" * 64),
+                headers={"X-Aurum-Operator-Bridge-Token": token},
+            ), timeout=2)
+        assert mismatch.value.code == 400
     finally:
         release.set()
         server.shutdown()

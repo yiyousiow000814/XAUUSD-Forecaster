@@ -95,6 +95,18 @@ def test_semantic_projection_separates_freshness_and_readiness() -> None:
         "reason_codes_json": "[]",
     }, now=now)
     assert stale["status"] == "STALE"
+    for evidence in (
+        {"reason_codes": ["ANNOTATOR_HEARTBEAT_STALE"], "actionable_failure_counts": {"failed": 300}},
+        {"reason_codes_json": '["ANNOTATOR_HEARTBEAT_STALE"]', "actionable_failure_counts_json": '{"failed":300}'},
+    ):
+        historical = semantic_pipeline_component({
+            **base, **evidence, "observed_at": (now - timedelta(days=2)).isoformat(),
+        }, now=now)
+        assert historical["reason_codes"] == ["DECISION_NEWS_SNAPSHOT_STALE"]
+        assert historical["historical_reason_codes"] == ["ANNOTATOR_HEARTBEAT_STALE"]
+        assert historical["actionable_failure_counts"] == {}
+        assert historical["historical_actionable_failure_counts"] == {"failed": 300}
+        assert "决策采集器" in historical["last_error"]
 
 
 @pytest.mark.parametrize(

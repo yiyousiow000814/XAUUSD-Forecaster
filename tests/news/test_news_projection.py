@@ -36,6 +36,77 @@ def test_receipt_vectors_are_cross_runtime_canonical() -> None:
     ) == vectors["expected_receipt_digest"]
 
 
+def test_sparse_inventory_matches_complete_batches_and_bounds_fallback(monkeypatch, tmp_path):
+    from xauusd_forecaster.dashboard.sync.news_delta import (
+        make_news_delta, news_delta_baseline, valid_news_delta_baseline,
+    )
+    from xauusd_forecaster.dashboard.sync import resources
+    from copy import deepcopy
+
+    def generation(rows, watermark="2026-09-14T04:00:00+00:00"):
+        return build_news_projection_generation(rows, [], window_start="2026-08-01T00:00:00+00:00", watermark=watermark)
+
+    old = generation([_source_row(i) for i in range(48)])
+    current = generation([_source_row(i) for i in range(1, 49)], "2026-09-14T04:05:00+00:00")
+    baseline = news_delta_baseline(old.sync_inventory, old.manifest)
+    assert valid_news_delta_baseline(baseline)
+    calls = []
+    def read(kind, offset):
+        calls.append((kind, offset))
+        return current.batch_items(kind, offset)
+    request = make_news_delta(current.sync_inventory, baseline, read)
+    assert len(request["patch"]["indexes"]) == len(request["patch"]["details"]) == len(request["patch"]["removed"]) == 1
+    assert len(calls) == 2
+    assert request == make_news_delta(current.sync_inventory, json.loads(json.dumps(baseline)), read)
+    damaged = deepcopy(baseline)
+    damaged["inventory"]["entries"].clear()
+    assert not valid_news_delta_baseline(damaged)
+    assert not valid_news_delta_baseline(news_delta_baseline({}, {}))
+    assert make_news_delta(generation([_source_row(i) for i in range(70)]).sync_inventory, baseline,
+                           lambda *_: pytest.fail("oversize patch fetched batches")) is None
+
+    # Exercise the production transport owner with actual frozen batches and
+    # serialization, including an accepted patch whose response was lost.
+    from xauusd_forecaster.dashboard.sync.news_delta import applied_delta_manifest
+    applied = applied_delta_manifest(request)
+    state = {"projection_state": "CURRENT", "delta_baseline": baseline,
+             "last_full_replay_watermark": old.manifest["watermark"]}
+    before = deepcopy(state)
+    posts = []
+    monkeypatch.setattr(resources, "_get_json", lambda *_: {"delta_supported": True, "projection_state": "CURRENT"})
+    def lost_ack(_url, raw, _config):
+        posts.append(json.loads(raw))
+        raise OSError("response lost after commit")
+    monkeypatch.setattr(resources, "_post_json", lost_ack)
+    with pytest.raises(OSError):
+        resources._try_news_delta({}, state, current.manifest, "https://example/api/news-index", current)
+    assert state == before
+    def accepted(_url, raw, _config):
+        posts.append(json.loads(raw))
+        return {"status": "OK", "applied": applied["generation_id"], "manifest": applied}
+    monkeypatch.setattr(resources, "_post_json", accepted)
+    monkeypatch.setattr(resources, "_verify_news_projection_state", lambda *_: {"status": "OK"})
+    assert resources._try_news_delta({}, state, current.manifest, "https://example/api/news-index", current)
+    assert posts[0] == posts[1] == request
+    assert state["active_snapshot_id"] == current.manifest["snapshot_id"]
+    assert valid_news_delta_baseline(state["delta_baseline"])
+    # The recurring production entrypoint must supply the same frozen source
+    # and persist the acknowledged inventory through its existing state owner.
+    persisted = {**before, "contract_version": resources.NEWS_MIRROR_CONTRACT_VERSION}
+    state_file = tmp_path / "news-sync.json"
+    state_file.write_text(json.dumps(persisted), encoding="utf-8")
+    config = {"news_state_file": str(state_file), resources.RUNTIME_STATE_ROOT_KEY: str(tmp_path),
+              "remote_ingest_url": "https://example/api/ingest"}
+    resources._sync_news({}, config, frozen_generation=current)
+    committed = json.loads(state_file.read_text(encoding="utf-8"))
+    assert committed["generation_id"] == applied["generation_id"]
+    assert committed["delta_baseline"] == state["delta_baseline"]
+    assert posts[-1] == request
+    tomorrow = generation([_source_row(i) for i in range(1, 49)], "2026-09-15T04:05:00+00:00")
+    monkeypatch.setattr(resources, "_get_json", lambda *_: pytest.fail("daily full recovery must be selected before delta transport"))
+    assert resources._try_news_delta({}, state, tomorrow.manifest, "https://example/api/news-index", tomorrow) is False
+
+
 def test_receipt_numbers_follow_json_number_semantics() -> None:
     assert receipt_payload_hash({"value": 0}) == receipt_payload_hash({"value": 0.0})
     assert receipt_payload_hash({"value": 0}) == receipt_payload_hash({"value": -0.0})

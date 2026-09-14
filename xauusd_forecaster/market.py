@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import gzip
 import json
+import hashlib
+import logging
 import math
 from collections import deque
 from dataclasses import dataclass
@@ -175,27 +177,44 @@ class JsonlMarketProvider:
     def _load_gzip_once(self, source: Path) -> None:
         if source in self._loaded_gzip:
             return
-        with gzip.open(source, "rt", encoding="utf-8") as handle:
-            for line in handle:
-                self._cache.append(self._parse_line(line, source))
+        with gzip.open(source, "rb") as handle:
+            while True:
+                offset = handle.tell()
+                line = handle.readline()
+                if not line:
+                    break
+                self._append_record(line, source, offset)
         self._loaded_gzip.add(source)
 
     def _load_incremental(self, source: Path) -> None:
         offset = self._offsets.get(source, 0)
         if source.stat().st_size < offset:
             raise ValueError(f"live quote file was truncated: {source}")
-        with source.open("r", encoding="utf-8") as handle:
+        with source.open("rb") as handle:
             handle.seek(offset)
             while True:
                 line_start = handle.tell()
                 line = handle.readline()
                 if not line:
                     break
-                if not line.endswith("\n"):
+                if not line.endswith(b"\n"):
                     handle.seek(line_start)
                     break
-                self._cache.append(self._parse_line(line, source))
+                self._append_record(line, source, line_start)
             self._offsets[source] = handle.tell()
+
+    def _append_record(self, raw: bytes, source: Path, offset: int) -> None:
+        try:
+            observation = self._parse_line(raw.decode("utf-8"), source)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # Preserve the authoritative bytes, never manufacture a quote or
+            # rewind onto a permanently damaged complete record after success.
+            logging.getLogger(__name__).warning(
+                "QUOTE_RECORD_MALFORMED source=%s offset=%d bytes=%d sha256=%s",
+                source, offset, len(raw), hashlib.sha256(raw).hexdigest(),
+            )
+            return
+        self._cache.append(observation)
 
     def _parse_line(self, line: str, source: Path) -> MarketObservation:
         return parse_quote_line(line, source, self.expected_symbol)

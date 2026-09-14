@@ -712,6 +712,94 @@ def _news_stage_receipt(previous: str, kind: str, offset: int, items: list) -> s
     ).hexdigest()
 
 
+def _news_sync_inventory(config: dict, manifest: dict, frozen_generation=None) -> dict:
+    if isinstance(frozen_generation, NewsProjectionGeneration):
+        inventory = frozen_generation.sync_inventory
+    else:
+        inventory = _get_local_json(_local_news_archive_url(
+            config, mode="sync_inventory", snapshot_id=manifest["snapshot_id"],
+        ))
+    if (not isinstance(inventory, dict) or inventory.get("manifest") != manifest
+            or not isinstance(inventory.get("entries"), dict)
+            or len(inventory["entries"]) != manifest["expected_index_count"]):
+        raise PayloadContractError("news sync inventory is incomplete")
+    for key, value in inventory["entries"].items():
+        if (not re.fullmatch(r"[a-f0-9]{64}", key) or not isinstance(value, dict)
+                or any(not re.fullmatch(r"[a-f0-9]{64}", str(value.get(k, "")))
+                       for k in ("index_hash", "detail_hash"))
+                or any(type(value.get(k)) is not int or value[k] < 0
+                       for k in ("index_offset", "detail_offset"))):
+            raise PayloadContractError("news sync inventory is invalid")
+    return inventory
+
+
+def _try_news_delta(config, state, manifest, news_index_url, frozen_generation):
+    from .news_delta import (make_news_delta, applied_delta_manifest,
+                            news_delta_baseline, valid_news_delta_baseline)
+    if (isinstance(frozen_generation, NewsProjectionRetainedGeneration)
+            or state.get("projection_state") != "CURRENT"
+            or not valid_news_delta_baseline(state.get("delta_baseline"))):
+        return False
+    baseline = state["delta_baseline"]
+    if baseline["inventory"]["manifest"] == manifest:
+        try:
+            _verify_news_projection_state(news_index_url, config, baseline["applied_manifest"])
+        except RemoteInvariantViolation as error:
+            if error.error_code == "NEWS_PROJECTION_HEALTH_MISMATCH":
+                return False
+            raise
+        state["last_success"] = datetime.now(UTC).isoformat()
+        return True
+    # Reuse the full publication owner's retention cleanup at least once per
+    # source day. Otherwise a permanently sparse feed would retain every old
+    # detail indefinitely. No timer, process or second cleanup owner is added.
+    try:
+        source_age = datetime.fromisoformat(manifest["watermark"].replace("Z", "+00:00")) - datetime.fromisoformat(
+            state["last_full_replay_watermark"].replace("Z", "+00:00")
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+    if source_age >= timedelta(days=1) or source_age < timedelta(0):
+        return False
+    health = _get_json(news_index_url + "?health_check=1", config)
+    if health.get("delta_supported") is not True or health.get("projection_state") != "CURRENT":
+        return False
+    inventory = _news_sync_inventory(config, manifest, frozen_generation)
+
+    def batch(kind, offset):
+        if frozen_generation is not None:
+            return _frozen_news_projection_batch(frozen_generation, kind=kind, offset=offset)
+        page = _get_local_json(_local_news_archive_url(
+            config, mode="batch", snapshot_id=manifest["snapshot_id"], kind=kind, offset=offset,
+        ))
+        return page["items"]
+
+    request = make_news_delta(inventory, baseline, batch)
+    if request is None:
+        return False
+    applied = applied_delta_manifest(request)
+    try:
+        result = _post_json(news_index_url, json.dumps(
+            request, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+        ).encode(), config)
+    except RemoteInvariantViolation as error:
+        if error.error_code == "NEWS_DELTA_BASE_CHANGED":
+            return False
+        raise
+    _require_news_ack(result, {"applied": applied["generation_id"], "manifest": applied}, action="apply_delta")
+    _verify_news_projection_state(news_index_url, config, applied)
+    state.update({"generation_id": applied["generation_id"], "snapshot_id": applied["snapshot_id"],
+                  "active_snapshot_id": applied["snapshot_id"], "source_digest": applied["source_digest"],
+                  "expected_receipt_digest": applied["expected_receipt_digest"],
+                  "expected_index_count": applied["expected_index_count"],
+                  "expected_detail_count": applied["expected_detail_count"],
+                  "next_index_offset": applied["expected_index_count"],
+                  "next_detail_offset": applied["expected_detail_count"],
+                  "last_success": datetime.now(UTC).isoformat(),
+                  "delta_baseline": news_delta_baseline(inventory, applied)})
+    return True
+
+
 def _sync_news(
     _local_payload: dict, config: dict, *,
     frozen_generation: NewsProjectionGeneration | NewsProjectionRetainedGeneration | None = None,
@@ -741,18 +829,24 @@ def _sync_news(
                 contract_version=NEWS_MIRROR_CONTRACT_VERSION,
             )
         manifest = frozen_generation.manifest
+        inventory_supported = isinstance(frozen_generation, NewsProjectionGeneration)
     elif config.get("local_status_url"):
         manifest_page = _get_local_json(_local_news_archive_url(
             config, mode="manifest",
             activated_snapshot_id=state.get("active_snapshot_id"),
         ))
         manifest = manifest_page.get("manifest")
+        inventory_supported = manifest_page.get("sync_inventory_supported") is True
     else:
         raise PayloadContractError(
             "news generation sync requires local_status_url for frozen batch replay"
         )
     if not isinstance(manifest, dict):
         raise PayloadContractError("local news projection manifest is missing")
+    if inventory_supported and _try_news_delta(config, state, manifest, news_index_url, frozen_generation):
+        state["updated_at"] = datetime.now(UTC).isoformat()
+        _write_news_sync_state(state_path, state, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
+        return
     generation_id = str(manifest.get("generation_id") or "")
     previous_generation = state.get("generation_id")
     if (
@@ -867,7 +961,15 @@ def _sync_news(
         }, separators=(",", ":")).encode(), config)
         _require_news_ack(verification, {"generation_id": generation_id}, action="verify")
     if prepare.get("active") or complete:
-        _verify_news_projection_state(news_index_url, config, manifest)
+        health = _verify_news_projection_state(news_index_url, config, manifest)
+        if health.get("delta_supported") is True and inventory_supported:
+            from .news_delta import news_delta_baseline
+            state["delta_baseline"] = news_delta_baseline(
+                _news_sync_inventory(config, manifest, frozen_generation), manifest,
+            )
+            state["last_full_replay_watermark"] = manifest["watermark"]
+        else:
+            state.pop("delta_baseline", None)
         state["active_snapshot_id"] = snapshot_id
         state["projection_state"] = "CURRENT"
         state["last_success"] = datetime.now(UTC).isoformat()

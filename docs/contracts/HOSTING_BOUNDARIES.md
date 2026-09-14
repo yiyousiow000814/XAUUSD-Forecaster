@@ -117,13 +117,24 @@ the main-only release contract; data preservation and transport invariants remai
   News-evidence staging keeps each complete request within 80,000 serialized
   bytes and eight items. The Worker enforces the matching item limits and these
   route byte bounds; the larger platform ceiling is not a normal target.
-- The retained legacy News tables are a Reverse-Stable projection, not another
+- The retained News tables are a derived publication projection, not another
   authority. Bounded generation batches append canonical receipts without
   rewriting unchanged projection rows. CURRENT activation applies the receipt-
   proven delta and marks
   legacy-only identities `SUPERSEDED_CONTRACT` in the same transaction that
   moves the generation pointer, so every completed activation restores exact
   active identity equality without replaying an unbounded serialized payload.
+- Sparse News publication requires both migration0038 fences and a complete
+  acknowledged source/target fingerprint inventory. `news-projection-delta-v1` binds its baseline, source
+  manifest and exact patch with a separate digest; it must never claim that
+  digest is the full-stream receipt. At most 32 changed indexes, eight changed
+  details, 32 explicit removals and 120,000 request bytes may cross this path.
+  A single transaction must recheck the baseline and atomically publish all
+  rows, counts and the generation pointer; missing ACK retries are idempotent.
+  Unknown/large baselines and each changed source day return to full replay,
+  which owns receipt and superseded-row retention. Full replay is recurring
+  expenditure, not a bootstrap-only budget. Old Workers and old local API
+  owners use full replay until both sides advertise sparse support.
 - Production-shaped News projection release validation remains a bounded,
   zero-mutation D1 JSON1 path. Each request crosses into D1 once and expands its
   item array once; all item counts and invariants are aggregated in that single

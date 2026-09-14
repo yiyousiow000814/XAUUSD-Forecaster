@@ -42,6 +42,12 @@ def semantic_pipeline_component(latest, *, now: datetime) -> dict:
         if code.startswith(("ANNOTATOR_HEARTBEAT_", "NEWS_COLLECTOR_POLL_"))
     )
     stale = age_seconds > SEMANTIC_SNAPSHOT_MAX_STALE_SECONDS or freshness_failure
+    historical = age_seconds > SEMANTIC_SNAPSHOT_MAX_STALE_SECONDS
+    counts = (
+        latest["actionable_failure_counts"] if "actionable_failure_counts" in latest_keys
+        else json.loads(latest["actionable_failure_counts_json"] or "{}")
+        if "actionable_failure_counts_json" in latest_keys else {}
+    )
     pending_only = bool(reason_codes) and all(
         code.endswith(("_PENDING", "_RECOVERING"))
         for code in reason_codes
@@ -54,14 +60,15 @@ def semantic_pipeline_component(latest, *, now: datetime) -> dict:
             "OK" if latest["status"] == "HEALTHY" else
             "WARN" if pending_only else "ERROR"
         ),
-        "last_error": None if not reason_codes else ", ".join(reason_codes),
-        "reason_codes": list(reason_codes),
-        "actionable_failure_counts": (
-            latest["actionable_failure_counts"]
-            if "actionable_failure_counts" in latest_keys
-            else json.loads(latest["actionable_failure_counts_json"] or "{}")
-            if "actionable_failure_counts_json" in latest_keys else {}
+        "last_error": (
+            "决策时点的新闻检查记录已过期；请检查决策采集器，旧记录不代表当前新闻处理失败"
+            if historical else None if not reason_codes else ", ".join(reason_codes)
         ),
+        "reason_codes": ["DECISION_NEWS_SNAPSHOT_STALE"] if historical else list(reason_codes),
+        "historical_reason_codes": list(reason_codes) if historical else [],
+        "observation_scope": "DECISION_INPUT_QUALIFICATION",
+        "actionable_failure_counts": {} if historical else counts,
+        "historical_actionable_failure_counts": counts if historical else {},
     }
 
 

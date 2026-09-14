@@ -69,6 +69,7 @@
         "tests/evidence/test_execution_quote_windows.py",
         "tests/runtime/test_check_production_shape_cli.py",
         "tests/evidence/test_quotes_and_labeling.py",
+        "tests/evidence/test_quote_record_recovery.py",
         "tests/news/test_news_coverage_live_path.py",
         "tests/news/test_news_pruning.py",
         "tests/dashboard/test_admin_access_boundary_check.py",
