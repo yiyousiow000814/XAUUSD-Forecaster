@@ -14,6 +14,7 @@ sys.path.insert(0, str(MODULE_ROOT))
 
 from xauusd_forecaster.dashboard import resource_contracts
 from xauusd_forecaster.dashboard.sync import resources
+from xauusd_forecaster.dashboard.sync.news_delta import make_news_delta, news_delta_baseline
 from xauusd_forecaster.news_projection import (
     build_news_projection_generation,
     canonicalize_news_projection_impact_clocks,
@@ -21,6 +22,30 @@ from xauusd_forecaster.news_projection import (
 
 
 FIXED_START = datetime(2026, 8, 13, tzinfo=UTC)
+
+
+def _sparse_news_fixture() -> dict:
+    """Freeze real Python publication bytes for dependency-free Workers builds."""
+    base = build_news_projection_generation(
+        [_news(0), _news(1)], [], window_start=FIXED_START.isoformat(),
+        watermark=(FIXED_START + timedelta(days=7)).isoformat(),
+    )
+    target = build_news_projection_generation(
+        [_news(0), _news(2)], [], window_start=FIXED_START.isoformat(),
+        watermark=(FIXED_START + timedelta(days=7, minutes=1)).isoformat(),
+    )
+    request = make_news_delta(
+        target.sync_inventory, news_delta_baseline(base.sync_inventory, base.manifest),
+        target.batch_items,
+    )
+    assert request is not None
+    return {
+        "base": base.manifest,
+        "base_details": [row for batch in base.detail_batches for row in batch],
+        "base_indexes": [row for batch in base.index_batches for row in batch],
+        "target_indexes": [row for batch in target.index_batches for row in batch],
+        "request": request,
+    }
 
 
 def _decision(index: int, identity: str = "BROAD_FULL") -> dict:
@@ -200,6 +225,7 @@ def build_fixtures() -> dict[str, bytes]:
     ).encode("utf-8")
     return {
         "status-ingest.json": resource_contracts.remote_snapshot(source),
+        "news-sparse-transport.json": encode(_sparse_news_fixture()),
         "audit-write.json": resource_contracts.audit_snapshot(source),
         "audit-briefs-write.json": resource_contracts.audit_briefs_snapshot(source),
         "audit-stories-write.json": resource_contracts.audit_stories_snapshot(source),

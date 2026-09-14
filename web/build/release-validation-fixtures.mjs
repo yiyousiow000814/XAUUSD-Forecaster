@@ -72,6 +72,7 @@ export function prepareReleaseValidationFixtures({
   ];
   const result = spawn(executable, args, {
     cwd: repositoryRoot,
+    windowsHide: true,
     encoding: "utf8",
     env: { ...env, PYTHONUTF8: "1" },
   });

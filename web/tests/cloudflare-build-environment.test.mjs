@@ -58,6 +58,7 @@ test("non-Workers CI invokes the builder command and verifies checked bytes", ()
     assert.match(calls[0].args[0], /build_release_validation_fixtures\.py$/);
     assert.equal(calls[0].args.at(-2), "--output");
     assert.equal(calls[0].options.env.PYTHONUTF8, "1");
+    assert.equal(calls[0].options.windowsHide, true);
   } finally {
     prepared.dispose();
   }

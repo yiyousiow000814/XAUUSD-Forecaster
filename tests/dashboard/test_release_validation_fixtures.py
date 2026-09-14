@@ -20,7 +20,7 @@ def test_release_validation_fixtures_are_bounded_production_contracts() -> None:
     manifest = json.loads((
         Path(__file__).resolve().parents[2] / "web" / "worker-validation-manifest.json"
     ).read_text(encoding="utf-8"))
-    expected = set()
+    expected = set(manifest.get("integration_fixtures", []))
     for route in manifest["routes"]:
         if route.get("fixture"):
             expected.add(route["fixture"])
@@ -30,6 +30,11 @@ def test_release_validation_fixtures_are_bounded_production_contracts() -> None:
         )
     assert set(fixtures) == expected
     decoded = {name: json.loads(payload) for name, payload in fixtures.items()}
+    sparse = decoded["news-sparse-transport.json"]
+    assert sparse["request"]["action"] == "apply_delta"
+    assert len(sparse["request"]["patch"]["removed"]) == 1
+    assert len(sparse["request"]["patch"]["details"]) == 1
+    assert len(json.dumps(sparse["request"], ensure_ascii=False, separators=(",", ":")).encode()) <= 120_000
     for name, payload in fixtures.items():
         limits = [limit for pattern, limit in manifest["fixture_contracts"].items()
                   if fnmatch(name, pattern)]

@@ -11,8 +11,8 @@ import {
   stageNewsProjectionBatch, verifyNewsProjection,
 } from "../app/api/_shared/news-projection-store.ts";
 import { D1TestDatabase } from "./d1-test-database.mjs";
-import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { prepareReleaseValidationFixtures } from "../build/release-validation-fixtures.mjs";
 import { applyNewsProjectionDelta } from "../app/api/_shared/news-projection-delta.ts";
 
 const id = digit => digit.repeat(64);
@@ -122,26 +122,14 @@ test("production Worker accepts Python sparse transport and enforces authenticat
   if (process.env.WORKERS_CI_BRANCH && process.env.WORKERS_CI_BRANCH !== "main") {
     t.skip("Preview rejects all writes; production mutation rehearsal uses a non-Preview build"); return;
   }
-  const { db, base, patch, targetDetails, targetIndexes } = await sparseFixture();
-  const python = spawnSync("python", ["-c", `
-import json,sys
-from xauusd_forecaster.news_projection import receipt_payload_hash
-from xauusd_forecaster.dashboard.sync.news_delta import make_news_delta,news_delta_baseline
-v=json.load(sys.stdin)
-def inventory(manifest, indexes, details):
-    entries={r['detail_key']:{'index_hash':receipt_payload_hash(r),'index_offset':0} for r in indexes}
-    for r in details: entries[r['detail_key']].update(detail_hash=r['detail_hash'],detail_offset=0)
-    return dict(manifest=manifest,entries=entries)
-old=inventory(v['base'],v['oldIndexes'],v['oldDetails'])
-current=inventory(v['source'],v['indexes'],v['details'])
-request=make_news_delta(current,news_delta_baseline(old,v['base']),lambda kind,offset:v['indexes' if kind=='index' else 'details'])
-print(json.dumps(request,ensure_ascii=False,separators=(',',':')))
-`], { cwd: fileURLToPath(new URL("../../", import.meta.url)), windowsHide: true, encoding: "utf8",
-    env: { ...process.env, PYTHONIOENCODING: "utf-8" }, input: JSON.stringify({ base, source: patch.source,
-      oldIndexes: [index("1"), index("2")], oldDetails: [detail("1"), detail("2")], indexes: targetIndexes, details: targetDetails }) });
-  assert.equal(python.status, 0, python.stderr);
-  const body = python.stdout.trim();
-  const request = JSON.parse(body);
+  const fixtures = prepareReleaseValidationFixtures();
+  t.after(() => fixtures.dispose());
+  const fixture = JSON.parse(readFileSync(join(fixtures.fixtureRoot, "news-sparse-transport.json"), "utf8"));
+  const db = database();
+  await publish(db, fixture.base, fixture.base_details, fixture.base_indexes);
+  const request = fixture.request;
+  const targetIndexes = fixture.target_indexes;
+  const body = JSON.stringify(request);
   const runtime = { DB: db, INGEST_TOKEN: "test-news-token", ASSETS: { fetch: async () => new Response("asset") } };
   globalThis.__AURUM_TEST_WORKER_ENV = runtime;
   const { default: worker } = await import("../dist/server/index.js");
