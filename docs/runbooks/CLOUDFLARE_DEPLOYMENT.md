@@ -85,7 +85,7 @@ after twelve hours. Do not reset cursors or mark unresolved news complete.
 
 Update React, React DOM, React Server DOM Webpack, and their type packages as
 one coordinated change; the three runtime packages must resolve to the same
-exact release. Dependabot groups their version updates in `react-runtime`.
+exact release. Routine Dependabot version-update PRs are disabled for all configured ecosystems; dependency upgrades are reviewed manually. Security alerts and security-update PRs remain available. The `react-runtime` group is retained for coordinated updates if routine updates are re-enabled.
 After changing Wrangler, regenerate `web/worker-configuration.d.ts` with
 `npm run cf:types` from `web`, then run clean install and the full Web test/build
 command. Do not disable peer resolution or generated-type checks to accept an
