@@ -66,8 +66,8 @@ External failures may be correlated across categories that appear independent.
 Do not assume only one bucket, family, or request class can be affected unless
 the provider contract guarantees that independence. Bound recovery by total
 work and required confidence. Delivery tolerance never applies to CPU or other
-acceptance limits, error limits, required observed quotas, Candidate identity,
-or correctness receipts.
+acceptance limits, error limits, required observed quotas, deployed source/input
+identity, or correctness receipts.
 
 Human acceptance is invalidated by changes to the behavior it qualifies, not by
 unrelated repository movement. Persist a versioned qualification key over the

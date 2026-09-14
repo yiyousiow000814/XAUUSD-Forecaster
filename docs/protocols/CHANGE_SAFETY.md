@@ -22,9 +22,14 @@ second checklist:
 | Serialized transport, growing data, recurring owners | [Hosting Boundaries](../contracts/HOSTING_BOUNDARIES.md) |
 | Production activation or recovery | [Release Control](../contracts/RELEASE_CONTROL.md) and [deployment runbook](../runbooks/CLOUDFLARE_DEPLOYMENT.md) |
 
-These procedures do not change mutation authorization. The current release
-contract owns deployment mechanics; historical Stable/Candidate terminology
-is not an instruction to restore a retired control plane.
+These procedures do not change mutation authorization. Deployment follows
+[Release Control](../contracts/RELEASE_CONTROL.md): protected `main` feeds
+Cloudflare Workers Builds, which deploys one version at 100 percent traffic.
+The local service owner updates its single runtime from `main` independently;
+it is not a second deployment slot. Recovery corrects forward while preserving
+authoritative data. Scope compatibility checks to interfaces and state that can
+actually meet during that update order; no blue-green controller/runtime matrix
+or retained old-version recovery path is required.
 
 ## Change contract
 
@@ -35,16 +40,20 @@ Record before editing:
 3. **Ownership:** code, mutable state, persistent data, config, secrets, cache,
    receipts, and lifecycle authority.
 4. **Boundary and impact graph:** callers, callees, and changed interfaces.
-5. **Compatibility matrix:** applicable `new -> new`, `new controller -> old
-   runtime`, `old controller -> new runtime`, `new code -> old state`, `old code
-   -> new state`, return-to-old where supported, and partial-migration restart
-   combinations.
+5. **Compatibility:** check changed code against existing production data,
+   schema, configuration, and actual producers/consumers. For independently
+   updated components (for example, the local sender and Cloudflare Worker),
+   check the interface combinations reachable in the actual update order.
+   When state or schema changes, cover interrupted migration and restart;
+   include existing code reading changed state only if it can still run during
+   that transition. A small matrix is useful when multiple combinations are
+   reachable; otherwise record the relevant check or why none is needed.
 6. **State transitions:** before, during, after, retry, and crash/restart.
 7. **Failure matrix:** failure at zero progress, partial progress, after an
    irreversible mutation, after the new component starts, and before commit.
 8. **Recovery authority:** capture the known-good identity and prove the
    supported recovery owner can restore service independently of the failing
-   component. Use the current release contract for forward repair or rollback.
+   component. Use the current release contract for forward repair.
 9. **External truth:** verify applicable pagination, truncation, eventual
    consistency, omission, encoding, rate limits, real envelopes, and versions.
 10. **Observability:** distinguish delayed, unavailable, corrupt, partial, and
@@ -63,7 +72,7 @@ Record before editing:
 ## Pre-mortem
 
 - What failure appears only after all earlier gates pass?
-- Which old/new combination has never executed?
+- Which reachable interface or code/data combination has never executed?
 - Which hidden state, process, provider, filesystem, encoding, or identity
   boundary is assumed?
 - What happens at the worst possible failure point?
@@ -137,8 +146,9 @@ typos.
 Classify each non-success state as transient/pending, externally retryable,
 operator-reviewable, or terminal deterministic failure. Externally mutable
 readiness for the same immutable identity remains retryable, fail closed, and
-non-promotable; test rejection and recovery on that same identity. Terminal
-failure requires a reason the immutable input cannot legitimately succeed.
+ineligible for successful acceptance; test rejection and recovery on that
+same identity. Terminal failure requires a reason the immutable input cannot
+legitimately succeed.
 
 For changed serialized boundaries, review names, shapes, units, optionality,
 ordering, and visible semantics across the producer and every meaningful
