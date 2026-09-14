@@ -1,6 +1,7 @@
 {
   "schema_version": 4,
   "fixture_builder": "scripts/validation/build_release_validation_fixtures.py",
+  "integration_fixtures": ["news-sparse-transport.json"],
   "cpu_evidence_policy": {
     "version": "worker-cpu-policy-v2",
     "required_observed_acceptance": 10,
@@ -25,6 +26,7 @@
     "web/package-lock.json", "web/*.config.*", "web/wrangler.jsonc"
   ],
   "fixture_contracts": {
+    "news-sparse-transport.json": 160000,
     "status-ingest.json": 800000,
     "audit-write.json": 800000,
     "audit-briefs-write.json": 120000,

@@ -85,3 +85,18 @@ Worst cases are a lost ACK followed by deleting the wrong baseline, validation
 after a partial commit, stale generation pagination, and a malformed quote being
 misreported as healthy data. Tests must exercise those boundaries, not only hash
 helpers. Review final callers and consumers independently after implementation.
+
+## Workers build dependency correction
+
+The first production build of PR537 rejected a new direct Python import because
+Workers Builds has no NumPy. GitHub and local checks had the application installed.
+Sparse transport now uses the existing release-fixture owner: real Python builds
+and byte-verifies the checked fixture in CI; Workers executes the same fixture
+through the built production route without importing the training package.
+The integration bundle includes baseline setup and is separately bounded; its
+actual request remains at most120,000bytes. No production protocol, dependency,
+authority or retry state changes. Missing or drifted fixtures still fail closed.
+The shared subprocess uses hidden Windows launch, and its existing family test
+covers that setting. Final validation must exercise both environment branches
+and the exact Workers build; do not add a second ad-hoc Python invocation to Web
+tests without reviewing the build environment and this existing boundary owner.
