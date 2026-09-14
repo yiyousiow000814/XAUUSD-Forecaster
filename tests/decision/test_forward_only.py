@@ -3033,8 +3033,9 @@ def test_gemma_impact_local_preflight_does_not_treat_utf8_bytes_as_tokens(
     assert reserved[0] < len(prompt.encode("utf-8")) + 1024
 
 
+@pytest.mark.parametrize("repair_succeeds", [True, False])
 def test_gemma_impact_repairs_one_identity_contract_failure_through_gateway(
-    monkeypatch,
+    monkeypatch, repair_succeeds,
 ) -> None:
     purposes = []
     pool = annotation_module._GeminiRequestPool(
@@ -3050,12 +3051,26 @@ def test_gemma_impact_repairs_one_identity_contract_failure_through_gateway(
         "identity_anchor_zh": "美国就业数据公布。",
         "identity_differences_zh": [],
     }
-    responses = iter((invalid, {**_impact_model_result(), "matched_candidate_id": "NO_MATCH"}))
+    repaired = ({**_impact_model_result(), "matched_candidate_id": "prior-event",
+                 "identity_relation": "SAME_EVENT", "update_type": "DUPLICATE_REPORT",
+                 "core_fact_changes_zh": [], "identity_differences_zh": [],
+                 "identity_anchor_zh": "美国就业数据公布。"}
+                if repair_succeeds else {**invalid, "identity_relation": "SAME_EVENT",
+                                         "matched_candidate_id": "not-offered"})
+    responses = iter((invalid, repaired))
+    claim = {"record_kind": "FACT", "actor": "BLS", "action": "releases",
+             "object": "employment", "event_time": "2026-09-14",
+             "material_event_key": "employment-september", "episode_key": "employment"}
 
     def post_json(_key, model, method, _payload, *, timeout):
         del timeout
         assert method == "generateContent"
         assert _payload["generationConfig"]["responseSchema"]["properties"]["matched_candidate_id"]["enum"] == ["NO_MATCH", "prior-event"]
+        if purposes[-1] == "news-impact-contract-repair":
+            prompt = _payload["contents"][0]["parts"][0]["text"]
+            offered = json.loads(prompt.split("OFFERED_CANDIDATES: ")[1].split("\nREJECTED_JSON:")[0])
+            assert all(offered[0][key] == value for key, value in claim.items())
+            assert offered[0]["identity_anchor_eligible"] is True
         return {
             "modelVersion": model,
             "candidates": [{"content": {"parts": [{
@@ -3065,16 +3080,26 @@ def test_gemma_impact_repairs_one_identity_contract_failure_through_gateway(
 
     monkeypatch.setattr(GeminiModelGateway, "_post_json", staticmethod(post_json))
 
-    result, _ = pool.call_impact(0, {
+    row = {
         "annotation": {}, "prior_event_context": [{
             "candidate_id": "prior-event",
-            "identity_anchor_eligible": True,
+            "identity_anchor_eligible": True, "event_claim": claim,
         }],
         "headline": "Employment report", "body": "Complete source body",
-    })
-
-    assert result["identity_relation"] == "UNRESOLVED"
-    assert result["matched_candidate_id"] == ""
+    }
+    if repair_succeeds:
+        result, _ = pool.call_impact(0, row)
+        assert result["identity_relation"] == "SAME_EVENT"
+        assert result["matched_candidate_id"] == "prior-event"
+    else:
+        with pytest.raises(annotation_module.ModelOutputContractFailed) as caught:
+            pool.call_impact(0, row)
+        evidence = caught.value.failure_evidence
+        assert evidence["selected_output"]["matched_candidate_id"] == "not-offered"
+        assert "initial_error" in evidence["selected_output"]
+        assert evidence["response_hash"] == hashlib.sha256(
+            json.dumps(repaired, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
     assert purposes == ["news-impact", "news-impact-contract-repair"]
 
 

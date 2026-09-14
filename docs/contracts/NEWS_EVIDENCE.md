@@ -143,6 +143,13 @@ that request's candidates and an explicit no-match choice. Both initial and
 repair requests share this constraint. Transport no-match values normalize to
 the canonical empty identifier before validation or persistence; local identity
 and evidence validation remain mandatory even with provider schema constraints.
+Repair requests preserve the offered candidates' nested `event_claim` facts and
+anchor eligibility. A failed repair records the rejected repair output, with
+the initial rejection reason as context. New structured scheduler failure
+receipts remain valid JSON, bounded to 8192 characters; oversized evidence is
+replaced by an explicit truncated summary and hash. Historical receipts remain
+unchanged. Plain-text errors retain their existing 500-character bound.
+
 
 When the complete offered candidate universe is empty, `NEW_EPISODE` establishes
 the first event from the current stable anchor and MUST NOT fabricate a pairwise

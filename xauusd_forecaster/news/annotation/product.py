@@ -1378,6 +1378,7 @@ class _GeminiRequestPool:
         try:
             return _validate_impact_result(raw_result, request_row), exact_model
         except ValueError as initial_error:
+            repaired = None
             try:
                 repaired = self._repair_impact_contract(
                     start_index + 1, request_row, raw_result, initial_error,
@@ -1388,7 +1389,8 @@ class _GeminiRequestPool:
                 raise
             except Exception as repair_error:
                 raise ModelOutputContractFailed(
-                    repair_error, raw_result, stage="IMPACT_CONTRACT_REPAIR",
+                    repair_error, repaired if repaired is not None else raw_result,
+                    stage="IMPACT_CONTRACT_REPAIR",
                     initial_error=initial_error,
                     public_message=(
                         "Gemma impact contract repair failed; assessment withheld"
@@ -1883,13 +1885,13 @@ def _impact_contract_repair_payload(
             "identity_anchor_eligible": bool(
                 candidate.get("identity_anchor_eligible")
             ),
-            "record_kind": candidate.get("record_kind"),
-            "actor": candidate.get("actor"),
-            "action": candidate.get("action"),
-            "object": candidate.get("object"),
-            "event_time": candidate.get("event_time"),
-            "material_event_key": candidate.get("material_event_key"),
-            "episode_key": candidate.get("episode_key"),
+            "record_kind": (candidate.get("event_claim") or {}).get("record_kind"),
+            "actor": (candidate.get("event_claim") or {}).get("actor"),
+            "action": (candidate.get("event_claim") or {}).get("action"),
+            "object": (candidate.get("event_claim") or {}).get("object"),
+            "event_time": (candidate.get("event_claim") or {}).get("event_time"),
+            "material_event_key": (candidate.get("event_claim") or {}).get("material_event_key"),
+            "episode_key": (candidate.get("event_claim") or {}).get("episode_key"),
         }
         for candidate in (row.get("prior_event_context") or ())
     ]
