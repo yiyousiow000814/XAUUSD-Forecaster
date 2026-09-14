@@ -3057,6 +3057,10 @@ def test_gemma_impact_repairs_one_identity_contract_failure_through_gateway(
                  "identity_anchor_zh": "美国就业数据公布。"}
                 if repair_succeeds else {**invalid, "identity_relation": "SAME_EVENT",
                                          "matched_candidate_id": "not-offered"})
+    repaired = {key: value for key, value in repaired.items()
+                if key not in {"identity_relation", "update_type", "matched_candidate_id"}}
+    repaired["identity_choice"] = ("SAME_EVENT:DUPLICATE_REPORT:prior-event"
+                                   if repair_succeeds else "SAME_EVENT:DUPLICATE_REPORT:not-offered")
     responses = iter((invalid, repaired))
     claim = {"record_kind": "FACT", "actor": "BLS", "action": "releases",
              "object": "employment", "event_time": "2026-09-14",
@@ -3065,7 +3069,6 @@ def test_gemma_impact_repairs_one_identity_contract_failure_through_gateway(
     def post_json(_key, model, method, _payload, *, timeout):
         del timeout
         assert method == "generateContent"
-        assert _payload["generationConfig"]["responseSchema"]["properties"]["matched_candidate_id"]["enum"] == ["NO_MATCH", "prior-event"]
         if purposes[-1] == "news-impact-contract-repair":
             prompt = _payload["contents"][0]["parts"][0]["text"]
             offered = json.loads(prompt.split("OFFERED_CANDIDATES: ")[1].split("\nREJECTED_JSON:")[0])
@@ -3095,7 +3098,7 @@ def test_gemma_impact_repairs_one_identity_contract_failure_through_gateway(
         with pytest.raises(annotation_module.ModelOutputContractFailed) as caught:
             pool.call_impact(0, row)
         evidence = caught.value.failure_evidence
-        assert evidence["selected_output"]["matched_candidate_id"] == "not-offered"
+        assert evidence["selected_output"]["identity_choice"] == repaired["identity_choice"]
         assert "initial_error" in evidence["selected_output"]
         assert evidence["response_hash"] == hashlib.sha256(
             json.dumps(repaired, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -4647,3 +4650,22 @@ def test_invalid_article_selection_adds_no_repair_request(monkeypatch):
     with pytest.raises(ValueError, match="invalid article source selection"):
         pool.call(0, annotation_module.DEFAULT_GEMINI_MODEL, "title", PAGE_TEXT_MARKER + source)
     assert calls == [annotation_module.DEFAULT_GEMINI_MODEL]
+
+
+@pytest.mark.parametrize("eligible,complete", [(True, True), (False, True), (True, False), (False, False)])
+def test_impact_repair_choices_preserve_identity_authority(eligible, complete):
+    row = {"prior_event_context": [{"candidate_id": "reaction", "identity_anchor_eligible": eligible}],
+           "identity_context_truncated": not complete}
+    payload = annotation_module._impact_contract_repair_payload(row, {}, ValueError("bad identity"))
+    props = payload["generationConfig"]["responseSchema"]["properties"]
+    choices = props["identity_choice"]["enum"]
+    assert not {"identity_relation", "matched_candidate_id", "update_type"} & props.keys()
+    assert any(x.startswith("SAME_EVENT:") for x in choices) == eligible
+    assert any(x.startswith("NEW_EPISODE:") for x in choices) == complete
+    for token in choices:
+        expanded = annotation_module._expand_impact_repair_choice({"identity_choice": token}, row)
+        assert expanded["identity_relation"] != "SAME_EVENT" or expanded["matched_candidate_id"] == "reaction"
+    with pytest.raises(ValueError, match="without separate"):
+        annotation_module._expand_impact_repair_choice({"identity_choice": choices[0], "identity_relation": "SAME_EVENT"}, row)
+    empty = annotation_module._impact_repair_choices({"prior_event_context": []})
+    assert not any(x.startswith(("SAME_EVENT:", "SAME_EPISODE:")) for x in empty)

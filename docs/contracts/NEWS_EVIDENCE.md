@@ -143,6 +143,11 @@ that request's candidates and an explicit no-match choice. Both initial and
 repair requests share this constraint. Transport no-match values normalize to
 the canonical empty identifier before validation or persistence; local identity
 and evidence validation remain mandatory even with provider schema constraints.
+Repair transport selects one offered combination of identity relation, update
+type and candidate ID. The system expands that choice without inferring a
+judgment from prose; separate or unknown identity fields are rejected. Choices
+respect anchor eligibility and context completeness, while the original factual
+and public-explanation validators remain authoritative.
 Repair requests preserve the offered candidates' nested `event_claim` facts and
 anchor eligibility. A failed repair records the rejected repair output, with
 the initial rejection reason as context. New structured scheduler failure
