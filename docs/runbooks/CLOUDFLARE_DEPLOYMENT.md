@@ -80,3 +80,14 @@ forward/backward keyset navigation, and the latest local retry state after sync.
 The local scheduler reopens up to 200 old model failures per task family per scan,
 using append-only recovery receipts. Collector retries old stopped source fetches
 after twelve hours. Do not reset cursors or mark unresolved news complete.
+
+## Dependency update preparation
+
+Update React, React DOM, React Server DOM Webpack, and their type packages as
+one coordinated change; the three runtime packages must resolve to the same
+exact release. Dependabot groups their version updates in `react-runtime`.
+After changing Wrangler, regenerate `web/worker-configuration.d.ts` with
+`npm run cf:types` from `web`, then run clean install and the full Web test/build
+command. Do not disable peer resolution or generated-type checks to accept an
+incomplete update. Security overrides remain until supported parent versions
+resolve patched dependencies themselves.
