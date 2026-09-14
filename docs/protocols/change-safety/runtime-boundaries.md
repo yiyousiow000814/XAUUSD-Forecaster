@@ -14,7 +14,8 @@ For every persistent filesystem locator, record:
 - its authoritative owner and permitted roots;
 - whether it is absolute, relative, or otherwise portable;
 - the finite relocation behavior for known old roots;
-- old-code/new-state and new-code/old-state compatibility;
+- compatibility with existing persisted paths and any intermediate state
+  reachable during the supported update and restart sequence;
 - whether its bytes participate in artifact hashes, generation identities,
   receipts, or immutable evidence.
 
@@ -46,7 +47,7 @@ and fail-closed case. At least one automated test must execute every changed
 critical composition boundary with the real runtime involved.
 
 Expected lifecycle:
-`request -> change contract -> impact graph -> compatibility/failure/recovery
-matrix -> test and rehearsal plan -> implementation -> independent verification
+`request -> change contract -> impact graph -> compatibility checks and failure/recovery
+paths -> test and rehearsal plan -> implementation -> independent verification
 -> rollout -> post-release cleanup`.
 

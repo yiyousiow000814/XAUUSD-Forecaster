@@ -10,14 +10,14 @@ unreachable, or make recovery depend on the failed precondition.
 Before implementation, the owning design must identify:
 
 - actors and external dependencies, including watchdogs, workers, timers,
-  leases, cleanup, migrations, bootstraps, operator actions, old and target
-  versions, and compatibility projections;
+  leases, cleanup, migrations, bootstraps, operator actions, and versions or
+  compatibility projections reachable during the actual update sequence;
 - durable states and internal checkpoints;
 - legal transitions and the authority that performs each mutation;
 - safety invariants and liveness requirements;
 - failure classifications and exact retry paths;
 - crash, process-restart, and machine-restart recovery;
-- rollback or return-to-previous-version behavior;
+- supported recovery and forward-repair behavior;
 - timeout, expiry, lease, cleanup, and stale-actor behavior; and
 - the runtime owner that maintains every long-term invariant.
 
@@ -38,7 +38,7 @@ Operator lifecycle states describe goals, not function calls. Internal
 checkpoints may be persisted for idempotence and crash recovery, but must not
 become first-level operator concepts unless the operator has a distinct choice
 or obligation there. Each persisted checkpoint still requires entry, exit,
-timeout, retry, restart, rollback, observability, and test semantics.
+timeout, retry, restart, recovery, observability, and test semantics.
 
 ## Required properties
 

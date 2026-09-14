@@ -12,9 +12,10 @@ deployment, recovery, or irreversible changes, follow the
 
 Before implementation, read the protocol core and the references selected by
 its boundary table. Record the changed boundary,
-invariants, impact graph, compatibility/failure/recovery matrices, and test and
-rehearsal plan. Apply its environment-sensitive evidence and real-runtime
-composition requirements to the affected boundary. After implementation,
+invariants, impact graph, applicable compatibility checks, failure/recovery
+paths, and test and rehearsal plan. Derive compatibility from the current
+release contract and reachable interfaces; do not assume multiple code slots.
+Apply its environment-sensitive evidence and real-runtime composition requirements to the affected boundary. After implementation,
 complete its final adversarial review and required verification.
 
 The protocol is the authority for these procedures; do not maintain a second
