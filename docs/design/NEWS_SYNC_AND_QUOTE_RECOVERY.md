@@ -100,3 +100,36 @@ The shared subprocess uses hidden Windows launch, and its existing family test
 covers that setting. Final validation must exercise both environment branches
 and the exact Workers build; do not add a second ad-hoc Python invocation to Web
 tests without reviewing the build environment and this existing boundary owner.
+
+## Decision-health lookup recovery
+
+Post-activation sampling found a second latency cause: the historical health
+reader repeatedly searched deferrals by job and cutoff using a time-only index.
+Two live process samples stopped in that lookup; a ten-second read-only profile
+completed only 398 statements. Individual lookups took about 0.12 seconds. There
+were 45,226 jobs and 12,642 retained deferrals in the captured database.
+
+The existing scheduler schema initializer now owns an additive index on
+job_id,deferred_at,deferral_id, matching the existing selection and tie ordering.
+No rows, timestamps, classification, retry policy, or evidence hashes change.
+Other task/time and retention indexes retain their separate query ownership.
+Existing databases gain the index on normal runtime initialization; interrupted
+creation retries through SQLite's atomic DDL and IF NOT EXISTS. There is no new
+process or manual checkpoint. Old and new readers accept the same schema/data.
+
+A real-source in-memory comparison of 100 lookups kept identical results and
+reduced elapsed time from 0.238 seconds to 0.00045 seconds; this isolates query work,
+not production end-to-end latency. Production progress still requires fresh
+completed decision clocks. The existing two-task causal health test now adds
+5,000 unrelated historical deferrals, limits SQLite instruction work, and proves
+unchanged historical readiness and subsequent retirement recovery. The final
+review must cover the actual collector caller and all sibling deferral readers,
+not merely verify index presence.
+
+Final source review traced collector grid preparation through the historical
+health reader and scheduler schema initialization. Retention deletes retain
+their time index; capacity aggregation retains its task/time query path. The
+new job index adds no new consumer or mutation authority. Both annotation and
+impact readiness use the same bounded-lookup contract. The 190 scheduler and
+live-coverage tests passed; activation still requires checking actual decision
+progress under the existing main runtime owner.

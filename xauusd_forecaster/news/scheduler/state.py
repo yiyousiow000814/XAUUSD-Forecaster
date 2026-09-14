@@ -177,6 +177,9 @@ ON news_ai_scheduler_deferrals_v1(task_type,deferred_at,failure_code);
 CREATE INDEX IF NOT EXISTS news_ai_scheduler_deferrals_retention_v1
 ON news_ai_scheduler_deferrals_v1(deferred_at);
 
+CREATE INDEX IF NOT EXISTS news_ai_scheduler_deferrals_job_clock_v1
+ON news_ai_scheduler_deferrals_v1(job_id,deferred_at DESC,deferral_id DESC);
+
 CREATE TABLE IF NOT EXISTS news_ai_account_daily_usage_v1 (
     quota_day TEXT NOT NULL,
     account_id TEXT NOT NULL,

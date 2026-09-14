@@ -247,6 +247,31 @@ def test_point_in_time_health_counts_only_authoritative_live_provenance(
     assert pending_reason in live_health["reason_codes"]
     assert live_health["unresolved_items"] == 1
 
+    # Unrelated scheduler history cannot turn one live job's point-in-time
+    # health lookup into a scan of the entire retained deferral ledger.
+    ledger.connection.executemany(
+        "INSERT INTO news_ai_scheduler_deferrals_v1 VALUES (?,?,?,?,?,?,?,?)",
+        [
+            (f"unrelated-{i}", unresolved_job_id, task_type, "account",
+             "MODEL_CAPACITY_DEFERRED", None,
+             (decision - timedelta(minutes=1)).isoformat(), None)
+            for i in range(5_000)
+        ],
+    )
+    progress_calls = 0
+
+    def bounded_lookup() -> int:
+        nonlocal progress_calls
+        progress_calls += 1
+        return int(progress_calls > 100)
+
+    ledger.connection.set_progress_handler(bounded_lookup, 200)
+    try:
+        bounded_health = news_semantic_pipeline_health_at(ledger, observed_at=decision)
+    finally:
+        ledger.connection.set_progress_handler(None, 0)
+    assert bounded_health == live_health
+
     retired_at = decision + timedelta(seconds=30)
     ledger.connection.execute(
         """UPDATE news_ai_jobs_v1
