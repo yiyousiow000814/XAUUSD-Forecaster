@@ -9,7 +9,9 @@ unreachable, or make recovery depend on the failed precondition.
 
 Before implementation, the owning design must identify:
 
-- actors and external dependencies;
+- actors and external dependencies, including watchdogs, workers, timers,
+  leases, cleanup, migrations, bootstraps, operator actions, old and target
+  versions, and compatibility projections;
 - durable states and internal checkpoints;
 - legal transitions and the authority that performs each mutation;
 - safety invariants and liveness requirements;

@@ -210,3 +210,66 @@ Expected lifecycle:
 `request -> change contract -> impact graph -> compatibility/failure/recovery
 matrix -> test and rehearsal plan -> implementation -> independent verification
 -> rollout -> post-release cleanup`.
+
+## Pre-Completion Adversarial Review
+
+A non-trivial change is not complete merely because focused tests, the full
+suite, lint, builds, or CI pass. After implementation is substantially finished,
+independently review the final exact head as if another engineer wrote it.
+
+For every changed cross-boundary workflow, trace the real production path:
+
+`producer -> state generation/storage -> transport -> routing -> production entry point -> consumer -> externally observable behavior`
+
+Use actual production call sites, configuration and route names, coordination
+keys, schemas, ownership, and deployed entry points. A helper-level test does
+not prove integration when production wiring can supply different values or
+take another path. The review must establish:
+
+- what invokes the workflow in production and who consumes every changed field;
+- behavior at first start with no state, genuine empty/zero and partial state,
+  stale state, process restart, machine restart, reconnect, dependency failure,
+  and later recovery;
+- compatibility with old Stable, activation ordering, Promote, Reverse Stable,
+  and rollback where those boundaries apply;
+- what grows, what bounds each operation and transport, whether optional
+  failure is isolated, and whether every recurring responsibility has one owner;
+- whether compact state can erase richer authority, mutable external state can
+  become accidentally terminal, and the production entry point matches the
+  tested assumptions; and
+- whether the result works from observable contracts without relying on the
+  implementation author's intended design.
+
+If this review finds a defect, fix it, rerun affected focused tests, repeat the
+review on the new exact head, and then run final exact-head validation. Before
+reporting completion, inspect the final diff, production callers, consumers,
+state transitions, lifecycle and restart paths, and tests independently. The
+implementation plan, earlier reasoning, and green tests are not evidence of the
+final implementation by themselves; completion reports must cite evidence from
+the final exact head.
+
+When human or code review finds a defect after implementation was considered
+complete, ask which reusable review rule or authoritative contract failed to
+catch that class. Update the appropriate rule or contract when the invariant
+generalizes beyond the incident; do not create permanent rules for one-off
+typos.
+
+## Boundary acceptance
+
+Classify each non-success state as transient/pending, externally retryable,
+operator-reviewable, or terminal deterministic failure. Externally mutable
+readiness for the same immutable identity remains retryable, fail closed, and
+non-promotable; test rejection and recovery on that same identity. Terminal
+failure requires a reason the immutable input cannot legitimately succeed.
+
+For changed serialized boundaries, review names, shapes, units, optionality,
+ordering, and visible semantics across the producer and every meaningful
+consumer. Changed semantics need consumer-level behavioral coverage. Follow
+[Hosting Boundaries](../contracts/HOSTING_BOUNDARIES.md) for baseline/delta,
+ownership, growth, and recovery invariants.
+
+Wiring-sensitive tests exercise actual production routes, entrypoints,
+configuration names, coordination keys, serializers, consumers, and service
+registries. Helper tests must also prove their production caller supplies all
+semantics-controlling values. Differences in test identifiers must be
+intentional and independently covered.
