@@ -1,239 +1,77 @@
 # Repository Working Rules
 
-## Before Adding Code
+## Scope and completion
 
-### Simplify and compose before implementation
+Find the existing authority and reuse its abstractions. Keep changes scoped to
+what the user requested, including necessary verification and repair. Remove
+obsolete code involved in the change rather than adding parallel logic.
 
-Do not design a safety mechanism in isolation. Simplify before adding
-coordination, and do not expose implementation complexity as operator
-complexity. Before implementing a non-trivial stateful, asynchronous,
-persistent, supervisory, lifecycle, or cross-boundary change, record the
-actors, states, transitions, mutation authority, safety invariants, liveness
-requirements, failure and retry paths, recovery and reverse paths,
-timeout/expiry behavior, restart behavior, and long-term invariant owner.
+Continue through implementation, affected checks, final review, and repair of
+change-caused failures within the authorized scope. Do not stop at a first
+implementation. Routine reversible local work does not need repeated approval.
+Report missing information, external blockers, remaining checks, and operations
+outside the user's authorization explicitly. Opening a PR does not authorize
+merging it or activating production.
 
-Review every actor that can observe or mutate the state, including watchdogs,
-background workers, timers, leases, cleanup, migrations, bootstraps, restarts,
-operator actions, old and target versions, compatibility projections, and
-external dependencies. Ask whether check and use can be separated by another
-mutation, whether two valid rules require incompatible states, whether retry
-preserves accepted work, whether recovery works from the failed state, and who
-maintains the invariant after the immediate repair.
+## Read according to the changed boundary
 
-Safety means that bad behavior cannot occur; liveness means that valid progress
-or recovery remains reachable. Both are required. Every additional durable
-state, lock, hold, exception, retry mode, or compatibility branch must justify
-why the same invariant cannot be achieved with a smaller lifecycle and one
-authoritative transaction or owner. A green test suite is not design proof when
-an actor or transition was omitted. An interaction bug requires review of the
-composition rule, not only a regression for the observed interleaving. Follow
-`docs/contracts/SAFETY_COMPOSITION.md` for the full design record.
+Tiny local behavior-preserving edits do not require an architecture review.
+Small pure-function repairs with no changed external contract, persistence,
+ownership, concurrency, or lifecycle use focused regression coverage; touching
+a dictionary or the word state alone does not trigger the material workflow.
+For material boundary changes, use the repository
+[change-safety skill](.agents/skills/change-safety/SKILL.md) and complete the
+[Change Safety Protocol](docs/protocols/CHANGE_SAFETY.md). That protocol owns the
+change record, evidence classification, runtime composition rehearsal,
+verification latency, small-blocker autonomy, and final adversarial review.
+Read other documents when their boundary applies:
 
-Required verification has an explicit latency budget. Extending a timeout is
-not a correction for state-space explosion or inefficient test architecture.
-Formal models must prove invariants at the smallest correct abstraction and
-compose bounded subsystem proofs instead of exhaustively multiplying
-independent implementation state. Ask whether verification models the invariant
-or simulates implementation detail, whether independent subsystems are being
-multiplied, whether proof can be decomposed without weakening coverage, whether
-the required gate meets its latency budget, and whether a timeout increase is
-hiding a modeling defect.
+- Non-trivial stateful, asynchronous, supervisory, persistent, or lifecycle changes:
+  [Safety Composition](docs/contracts/SAFETY_COMPOSITION.md), including the
+  pre-implementation actor/state record and safety plus liveness review.
+- Cross-process, service, storage, API, or synchronization data flows:
+  [Hosting Boundaries](docs/contracts/HOSTING_BOUNDARIES.md), including complete
+  baseline/delta semantics, producer/consumer compatibility, single runtime
+  ownership, independently bounded work/transport, and failure isolation.
+- Deployment and recovery: the release contract and runbook linked below.
+- User-facing web and Preview changes: the applicable sections below.
 
-Organize required test gates by independent contract ownership. When an
-integration suite exceeds its latency budget, profile it and compose bounded
-parallel contract shards instead of serially repeating every historical
-regression.
+## Failure resolution
 
-1. Find the existing source of truth.
-2. Reuse existing abstractions.
-3. Avoid duplicate logic.
-4. Identify obsolete code.
-5. Add or update tests.
+Restore safe service through the current release contract's recovery path while
+preserving forensic evidence before permanent redesign; follow the recovery
+requirements in [Safety Composition](docs/contracts/SAFETY_COMPOSITION.md).
+Fail-closed behavior, diagnostics, and audit evidence do not substitute for a
+corrective path that produces the intended valid result. Retry the deficient
+stage using its rejection reason and retain accepted work. Verify recovery with
+a representative end-to-end fixture and, when safe and available, a real-provider
+or production-shaped rehearsal; report external availability limits separately.
 
-For any material architecture, persistence/state, storage/database migration,
-deployment/release, process lifecycle, ownership, provider/public API,
-CLI/interface, authentication, concurrency, cross-version, background-service,
-rollback/recovery, or irreversible change, use the repository `change-safety`
-skill before implementation and follow `docs/protocols/CHANGE_SAFETY.md`. Tiny
-local behavior-preserving edits do not require this review.
+## Testing and final review
 
-Before changing a cross-boundary data flow, follow
-`docs/contracts/HOSTING_BOUNDARIES.md`: identify the authoritative owner,
-classify the path as critical or optional, classify accumulated growth, keep
-critical work and transport bounded independently, and isolate optional failure
-domains. Distinguish display limits from serialized transport bounds. Prefer
-repairing ownership or transport architecture over raising limits or deleting
-authoritative data.
-
-## Problem Resolution Standard
-
-Required assurance must be proportional to control. Internally controlled
-safety invariants may require exact deterministic evidence. External-provider
-evidence must declare its delivery/completeness contract, uncertainty budget,
-bounded retry, corroboration, and fallback; do not manufacture false precision
-by requiring guarantees the provider does not contractually supply. Follow
-`docs/protocols/CHANGE_SAFETY.md`.
-
-Separate durable qualification from renewable freshness. Recheck only the
-smallest expired live authority, and invalidate evidence through explicit
-behavior-key dependencies rather than unrelated repository or release movement.
-
-### Production recovery order
-
-When production is degraded, first identify and restore the last-known-safe
-Stable configuration through the safest supported path, while preserving the
-state, logs, receipts, and other forensic evidence needed for diagnosis. Only
-after Stable service is restored should permanent correction change the owning
-architecture. Safe recovery and permanent correction are separate obligations;
-neither substitutes for the other.
-
-A mechanism that can stop, isolate, or fence a production owner must define a
-direct legal path back to normal Stable operation when the release attempt is
-abandoned, expired, paused, invalidated, or crashes. Recovery must not depend on
-the failed precondition becoming true. If the last-known-safe configuration
-cannot be restored, fail closed, preserve evidence, and expose the exact
-recovery blocker.
-
-### Small-blocker autonomy
-
-Do not require new user authorization for an escaped deterministic blocker when
-its root cause is proven, it remains inside the authorized change or release
-family, the correction is narrow and reversible, no new production mutation or
-security/access authority is needed, no external ambiguity must be guessed, and
-no acceptance gate is weakened. Fix it, inspect siblings governed by the same
-invariant, add the durable family-level regression, run exact-head gates, merge
-normally, and continue the authorized workflow.
-
-Stop when the blocker enters a new failure family, changes mutation authority,
-requires destructive or irreversible action, needs human identity or Access,
-has an uncertain root cause, risks loss of safe Stable recovery, or proposes to
-relax a safety contract. Production code remains fail closed throughout.
-
-- Treat fail-closed behavior, error visibility, and audit evidence as safety
-  requirements, not as substitutes for fixing the failed workflow.
-- When the user asks to resolve a failure, completion requires a corrective path
-  that can produce the intended valid result and evidence that the path succeeds.
-  Do not redefine success as displaying, isolating, suppressing, or permanently
-  stopping at the failure state unless the underlying input is genuinely
-  impossible or the user explicitly requests that behavior.
-- A retry must use the prior rejection reason and preserve already-valid work.
-  Do not blindly repeat the same request or recompute an accepted stage when a
-  narrower failed stage can be repaired independently.
-- Verify recovery with a representative end-to-end fixture and, when safe and
-  available, one production-shaped or real-provider rehearsal. Report remaining
-  external availability limits separately from correctness.
-
-## Testing Discipline
-
-- Tests must protect durable behavior, system contracts, and invariants. Do not add a test merely because code changed.
-- Every bug fix must leave durable regression coverage, but this does not require a new standalone test for every bug.
-- Before adding a new regression test:
-  1. Identify the invariant or contract that the bug violated.
-  2. Identify sibling implementations governed by the same rule.
-  3. Search for an existing test or contract that already represents that rule.
-  4. Prefer extending or parameterizing the existing contract over adding another case-specific test.
-- A bug found in implementation B must trigger a review of equivalent implementations A, C, and other siblings. Do not protect only the instance that happened to fail when the underlying rule applies to a family.
-- Prefer family-level contract coverage for shared behavior such as collectors, model generations, transport payloads, evidence stores, API routes, schedulers, and runtime workers.
-- Keep a specific regression test only when it represents a distinct failure mode that is not clearly covered by a broader contract.
-- Once a broader contract fully subsumes an older regression test, consolidate or remove the redundant test.
-- Tests should assert externally meaningful behavior, persisted state, public contracts, safety properties, or required architecture boundaries. Avoid pinning incidental implementation details, private function names, exact source layout, dynamic copy, or temporary representations unless those details are themselves an explicit contract.
-- A refactor that preserves behavior should not require widespread test rewrites. If many tests fail only because implementation structure changed, review whether those tests are coupled to implementation rather than behavior.
-- Do not preserve stale tests for historical reasons. Update, consolidate, or remove tests whose original requirement no longer exists.
-- Do not optimize for test count. More tests are not automatically safer, and fewer tests are not automatically cleaner. Optimize for meaningful coverage with minimal duplication.
-- Shared test setup, builders, factories, fixtures, and assertions should be extracted when repetition becomes material, but do not hide the business meaning of a test behind a generic test framework.
-- Split oversized test modules by responsibility when a file spans unrelated domains or no longer has one clear contract.
-- Contract and invariant tests should remain explicit and easy to locate. Test organization should make it obvious which system rule is being protected.
-- When changing a test suite, preserve critical coverage for point-in-time correctness, causality, append-only evidence, immutable historical records, execution semantics, credential secrecy, fail-closed behavior, and production/Preview isolation.
-- Before deleting or consolidating a test, prove that its behavior is covered elsewhere or that the underlying requirement is obsolete.
-- A change is not complete merely because the full suite passes. Review whether the new or modified tests cover the correct abstraction level and whether equivalent sibling paths remain untested.
-- When correctness depends on language or runtime composition semantics, static
-  source inspection is not sufficient evidence. Execute the real boundary for
-  PowerShell dot-sourcing and scope, shell environment inheritance, CLI argument
-  parsing, process working directories, module/import resolution, subprocess
-  quoting, environment precedence, and serializer/consumer wiring as
-  applicable.
-- Before completing a material script or orchestration change, record a compact
-  execution matrix covering the actual runtime, entrypoint, caller, callee or
-  import, parameter binding, filesystem roots, working directory, success case,
-  and fail-closed case. At least one automated test must execute every changed
-  critical composition boundary with the real runtime involved.
-
-## Cross-Boundary Change Discipline
-
-- Before implementing a state machine, classify every non-success state as
-  transient/pending, externally retryable, operator-reviewable, or terminal
-  deterministic failure. An externally mutable condition for the same
-  immutable identity must not become terminal merely because it is currently
-  unavailable. A retryable state remains fail closed and non-promotable; test
-  both rejection and recovery on the same identity. A terminal state requires
-  an explicit reason why the same immutable input cannot legitimately succeed.
-- A change to an API payload, serialized object, persisted snapshot, queue or
-  event, WebSocket frame, sync payload, or database-derived projection requires
-  review of the producer and every meaningful consumer. Verify names, shapes,
-  units, optionality, ordering, and user-visible semantics. Producer validation
-  or serialization coverage alone is insufficient; changed semantics require
-  consumer-level behavioral coverage.
-- For partial, compact, delta, or incremental transport, follow
-  `docs/contracts/HOSTING_BOUNDARIES.md`. Identify the authoritative complete
-  baseline, field ownership, merge and deletion rules, stale and sequence
-  semantics, and reconnect/resync behavior. Prove that applying a delta
-  preserves unrelated baseline fields and that a complete required state can
-  be rebuilt.
-- Every recurring responsibility has exactly one explicit production runtime
-  owner. Identify who starts and supervises it, cadence, disabled or
-  not-configured behavior, activation boundary, durable state, process and
-  machine restart recovery, retry and failure isolation, rollback, and
-  shutdown. A library, CLI, endpoint, scheduler definition, Worker, Durable
-  Object, or fixture does not prove that recurring production work is owned.
-- Wiring-sensitive integration tests must exercise the actual production route,
-  entry point, configuration name, coordination key, serializer-to-consumer
-  path, and service registry. When a helper is tested, also prove that its
-  production caller supplies every semantics-controlling value. A test-only
-  identifier may differ from production only when the difference is intentional
-  and independently covered.
-
-## Pre-Completion Adversarial Review
-
-A non-trivial change is not complete merely because focused tests, the full
-suite, lint, builds, or CI pass. After implementation is substantially finished,
-independently review the final exact head as if another engineer wrote it.
-
-For every changed cross-boundary workflow, trace the real production path:
-
-`producer -> state generation/storage -> transport -> routing -> production entry point -> consumer -> externally observable behavior`
-
-Use actual production call sites, configuration and route names, coordination
-keys, schemas, ownership, and deployed entry points. A helper-level test does
-not prove integration when production wiring can supply different values or
-take another path. The review must establish:
-
-- what invokes the workflow in production and who consumes every changed field;
-- behavior at first start with no state, genuine empty/zero and partial state,
-  stale state, process restart, machine restart, reconnect, dependency failure,
-  and later recovery;
-- compatibility with old Stable, activation ordering, Promote, Reverse Stable,
-  and rollback where those boundaries apply;
-- what grows, what bounds each operation and transport, whether optional
-  failure is isolated, and whether every recurring responsibility has one owner;
-- whether compact state can erase richer authority, mutable external state can
-  become accidentally terminal, and the production entry point matches the
-  tested assumptions; and
-- whether the result works from observable contracts without relying on the
-  implementation author's intended design.
-
-If this review finds a defect, fix it, rerun affected focused tests, repeat the
-review on the new exact head, and then run final exact-head validation. Before
-reporting completion, inspect the final diff, production callers, consumers,
-state transitions, lifecycle and restart paths, and tests independently. The
-implementation plan, earlier reasoning, and green tests are not evidence of the
-final implementation by themselves; completion reports must cite evidence from
-the final exact head.
-
-When human or code review finds a defect after implementation was considered
-complete, ask which reusable review rule or authoritative contract failed to
-catch that class. Update the appropriate rule or contract when the invariant
-generalizes beyond the incident; do not create permanent rules for one-off
-typos.
+- Every behavioral bug fix leaves durable coverage of the violated behavior or
+  invariant. Typographical or formatting-only corrections use direct review and
+  applicable document checks, not a new automated test.
+  Inspect sibling implementations and extend an existing family contract where
+  possible. Keep separate cases only for distinct failure modes.
+- Assert observable behavior, persisted state, public contracts, and safety
+  boundaries. Do not pin incidental names, source layout, or representations;
+  widespread test rewrites during a behavior-preserving refactor warrant review.
+- Consolidate redundant tests only after proving coverage elsewhere; remove
+  obsolete tests only after establishing that the requirement no longer applies.
+  Preserve point-in-time correctness, causality, append-only evidence, immutable
+  history, execution semantics, credential secrecy, fail-closed behavior, and
+  production/Preview isolation.
+- Keep contract tests easy to locate. Split unrelated responsibilities and share
+  material fixture duplication without hiding business meaning in a framework.
+- Choose checks for the affected contracts and run all required gates for that
+  scope. Fix failures, rerun affected checks, and validate the final revision.
+  Repeat or broaden passed checks only for a new change, failure, unresolved
+  concern, or explicit gate/freshness requirement.
+- Non-trivial changes require independent inspection of the final diff and its
+  actual callers, consumers, lifecycle, and tests. For material boundary changes,
+  execute the protocol's final adversarial review. Plans and green tests alone
+  do not prove integration; cite evidence from the final revision.
 
 ## Documentation Language
 

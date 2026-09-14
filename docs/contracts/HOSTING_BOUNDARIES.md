@@ -1,5 +1,11 @@
 # Hosting Boundaries Contract
 
+Deployment mechanics are owned by [Release Control](RELEASE_CONTROL.md).
+References below to historical Stable/Candidate projections or Promote receipts
+apply to the corresponding data compatibility obligations, not to a requirement
+to run the retired deployment controller. Current activation and recovery follow
+the main-only release contract; data preservation and transport invariants remain.
+
 ## Public boundary
 
 - Cloudflare Workers is the only deployment plane for this repository.
