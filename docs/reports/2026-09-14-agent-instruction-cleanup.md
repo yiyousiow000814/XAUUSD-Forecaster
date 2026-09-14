@@ -65,3 +65,47 @@ retained all six later AGENTS.md policy sections, and verified local skill links
 No production actions or automated browser sessions were needed. Runtime speed
 or quality improvements require observing subsequent real tasks; no measured
 model-performance gain is claimed.
+
+## Follow-up: workflow bodies and forward testing
+
+The second pass examined local skill entrypoints and their workflow boundaries,
+not only descriptions. Changes remain local configuration outside this PR:
+
+| Skill family | Correction |
+| --- | --- |
+| hatch-pet | 923-line entrypoint becomes a 40-line stage router; generation, alpha/geometry, identity, direction, blind review, and packaging requirements remain in linked references |
+| playwright-interactive | 693-line entrypoint becomes a surface/stage router; removes automatic sandbox disabling, config edits, and package initialization; cleanup applies on failure/interruption too |
+| screenshot | Platform-specific capture instructions load only for the selected OS |
+| rmg-strategy-port-parity | Historical Current031 paths/results and contradictory fill examples are explicitly historical; current source and actual execution govern reuse |
+| playwright | Existing tool/runtime first; no forced global install or CLI-only test policy; Windows launcher and cleanup requirements explicit |
+| frontend-design | Preserve existing product design; remove universal font bans and forced dramatic styling |
+| codex-deepwiki | Source and official documentation govern current behavior; DeepWiki is secondary explanation |
+| figma | Implementation flow no longer applies to metadata/setup-only questions; tool prerequisites remain required |
+| ui-check-framework | Preserve project selectors/layout; do not impose qa: tags, global hooks, or a new framework on unrelated work |
+| release-notes-format | Template is a default subordinate to user/repository requirements; drafting is distinct from publishing |
+| Git/PR workflows | Previous pass's creation/edit/review separation retained after body review |
+
+Existing helper scripts were not modified. Detailed technical procedures were
+preserved in references rather than rewritten as shorter unverified commands.
+Global originals are backed up outside discovery under the phase2 skill-backups
+folder. A local diff artifact records the changes for review.
+
+The repository protocol now keeps common change/review requirements in its core
+and routes runtime composition and provider/verification evidence to separate
+procedures. The release contract and actual main service entrypoint were checked:
+current recovery is forward correction, so generic safety guidance must not
+require the retired Stable/Candidate controller. Historical hosting projection
+requirements remain intact and explicitly separate from deployment mechanics.
+
+An independent agent executed two bounded fixture tasks: a README typo fix and
+a dictionary delta repair. The delta test failed before repair and passed after
+repair (one unittest with seven contract subcases: preservation, replacement,
+addition, explicit deletion, missing deletion, empty delta, and input immutability).
+The fixture had no external provider, persisted storage, or production resource;
+this is instruction-routing and local behavior evidence, not a production rehearsal.
+
+That run exposed overbroad material-state routing and possible typo-test
+interpretation. The final rules distinguish pure-function repair with no changed
+external/persistent/lifecycle contract from material boundary work, and distinguish
+behavioral regressions from text-only corrections. No safety gate for actual
+cross-boundary changes was removed.

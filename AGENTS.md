@@ -16,6 +16,9 @@ merging it or activating production.
 ## Read according to the changed boundary
 
 Tiny local behavior-preserving edits do not require an architecture review.
+Small pure-function repairs with no changed external contract, persistence,
+ownership, concurrency, or lifecycle use focused regression coverage; touching
+a dictionary or the word state alone does not trigger the material workflow.
 For material boundary changes, use the repository
 [change-safety skill](.agents/skills/change-safety/SKILL.md) and complete the
 [Change Safety Protocol](docs/protocols/CHANGE_SAFETY.md). That protocol owns the
@@ -35,7 +38,7 @@ Read other documents when their boundary applies:
 
 ## Failure resolution
 
-Restore the last-known-safe service through the supported recovery path while
+Restore safe service through the current release contract's recovery path while
 preserving forensic evidence before permanent redesign; follow the recovery
 requirements in [Safety Composition](docs/contracts/SAFETY_COMPOSITION.md).
 Fail-closed behavior, diagnostics, and audit evidence do not substitute for a
@@ -46,7 +49,9 @@ or production-shaped rehearsal; report external availability limits separately.
 
 ## Testing and final review
 
-- Every bug fix leaves durable coverage of the violated behavior or invariant.
+- Every behavioral bug fix leaves durable coverage of the violated behavior or
+  invariant. Typographical or formatting-only corrections use direct review and
+  applicable document checks, not a new automated test.
   Inspect sibling implementations and extend an existing family contract where
   possible. Keep separate cases only for distinct failure modes.
 - Assert observable behavior, persisted state, public contracts, and safety

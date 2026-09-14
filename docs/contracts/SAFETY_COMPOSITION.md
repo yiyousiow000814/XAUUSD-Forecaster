@@ -58,14 +58,19 @@ and outside-in acceptance for deployed user-visible behavior.
 ## Production recovery order
 
 Safe recovery and permanent correction are distinct. When the running system
-is degraded, preserve forensic evidence and restore the last-known-safe Stable
-service through the safest supported path before redesigning the failed
+is degraded, preserve forensic evidence and restore safe
+service through the supported recovery path before redesigning the failed
 mechanism. Permanent correction then repairs the owning invariant and proves
 the full workflow.
 
 Any mechanism that can stop, isolate, or fence a production owner is incomplete
-without a direct legal transition back to normal Stable operation after an
+without a direct legal transition back to normal service operation after an
 abandoned, expired, paused, invalidated, or crashed release attempt. Recovery
 must be reachable from the degraded state and must not require the failed
 normal-state precondition. If safe restoration is impossible, the mechanism
 fails closed with the exact missing recovery fact and retains all evidence.
+
+Deployment recovery mechanics belong to [Release Control](RELEASE_CONTROL.md).
+For the current main-only runtime, recovery is corrected forward while
+preserving authoritative data and evidence; this contract does not require
+retained code slots, a Stable/Candidate controller, or automatic rollback.
