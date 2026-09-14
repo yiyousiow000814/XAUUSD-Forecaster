@@ -3521,6 +3521,39 @@ def test_annotator_retries_transient_writer_contention_without_exiting(
     ledger.close()
 
 
+@pytest.mark.parametrize("size", [1200, 20000])
+def test_structured_attempt_evidence_stays_valid_bounded_and_immutable(size):
+    import json
+    from xauusd_forecaster.news.scheduler.state import record_job_attempt
+
+    connection = _connection()
+    _enqueue(connection, "evidence", priority="NORMAL")
+    job = claim_job(connection, worker_id="worker", pool=ROUTINE_POOL, now=NOW)
+    assert job is not None
+    credential = ApiCredential("account", ROUTINE_POOL, "test-key", "credential")
+    evidence = {"failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
+                "failure_stage": "IMPACT_CONTRACT_REPAIR", "cause": "invalid reference",
+                "selected_output": {"reason_zh": "x" * size, "matched_candidate_id": "bad"}}
+    status = {"status": "ERROR", "failure_evidence": evidence}
+    record_job_attempt(connection, job=job, credential=credential, status=status, attempted_at=NOW)
+    saved = connection.execute("SELECT error_detail FROM news_ai_job_attempts_v1").fetchone()[0]
+    decoded = json.loads(saved)
+    assert connection.execute(
+        "SELECT json_valid(error_detail),json_extract(error_detail,'$.failure_stage') FROM news_ai_job_attempts_v1"
+    ).fetchone()[:] == (1, "IMPACT_CONTRACT_REPAIR")
+    assert len(saved) <= 8192
+    if size < 8192:
+        assert decoded == evidence
+    else:
+        assert decoded["evidence_truncated"] is True
+        assert len(decoded["evidence_hash"]) == 64
+        assert decoded["failure_stage"] == evidence["failure_stage"]
+    record_job_attempt(connection, job=job, credential=credential,
+                       status={"status": "ERROR", "error": "replacement"}, attempted_at=NOW)
+    assert connection.execute("SELECT error_detail FROM news_ai_job_attempts_v1").fetchone()[0] == saved
+    connection.close()
+
+
 def test_scheduler_lifecycle_survives_restart_without_duplicate_terminal_work(
     tmp_path,
 ) -> None:
@@ -3583,36 +3616,3 @@ def test_scheduler_lifecycle_survives_restart_without_duplicate_terminal_work(
     ).fetchone()
     assert dict(row) == {"state": "COMPLETED", "attempt_count": 2, "total": 1}
     verified.close()
-
-
-@pytest.mark.parametrize("size", [1200, 20000])
-def test_structured_attempt_evidence_stays_valid_bounded_and_immutable(size):
-    import json
-    from xauusd_forecaster.news.scheduler.state import record_job_attempt
-
-    connection = _connection()
-    _enqueue(connection, "evidence", priority="NORMAL")
-    job = claim_job(connection, worker_id="worker", pool=ROUTINE_POOL, now=NOW)
-    assert job is not None
-    credential = ApiCredential("account", ROUTINE_POOL, "test-key", "credential")
-    evidence = {"failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
-                "failure_stage": "IMPACT_CONTRACT_REPAIR", "cause": "invalid reference",
-                "selected_output": {"reason_zh": "x" * size, "matched_candidate_id": "bad"}}
-    status = {"status": "ERROR", "failure_evidence": evidence}
-    record_job_attempt(connection, job=job, credential=credential, status=status, attempted_at=NOW)
-    saved = connection.execute("SELECT error_detail FROM news_ai_job_attempts_v1").fetchone()[0]
-    decoded = json.loads(saved)
-    assert connection.execute(
-        "SELECT json_valid(error_detail),json_extract(error_detail,'$.failure_stage') FROM news_ai_job_attempts_v1"
-    ).fetchone()[:] == (1, "IMPACT_CONTRACT_REPAIR")
-    assert len(saved) <= 8192
-    if size < 8192:
-        assert decoded == evidence
-    else:
-        assert decoded["evidence_truncated"] is True
-        assert len(decoded["evidence_hash"]) == 64
-        assert decoded["failure_stage"] == evidence["failure_stage"]
-    record_job_attempt(connection, job=job, credential=credential,
-                       status={"status": "ERROR", "error": "replacement"}, attempted_at=NOW)
-    assert connection.execute("SELECT error_detail FROM news_ai_job_attempts_v1").fetchone()[0] == saved
-    connection.close()
