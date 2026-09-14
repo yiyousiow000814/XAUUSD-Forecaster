@@ -2924,6 +2924,13 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
     )
 
     def call_impact(_pool, _index, row, **_kwargs):
+        if _kwargs["resume_checkpoint"] is None:
+            checkpoint = {"request_row": {key: row[key] for key in annotation_module.CONTEXT_FIELDS if key in row}}
+            _kwargs["checkpoint_callback"](checkpoint)
+            key = annotation_module.checkpoint_key(row, _kwargs["prompt_version"], annotation_module.IMPACT_MODEL)
+            assert annotation_module.load_checkpoint(ledger.connection, key) == checkpoint
+            raise annotation_module.GeminiBatchCapacityExhausted("repair quota")
+        assert row["prior_event_context"] == _kwargs["resume_checkpoint"]["request_row"]["prior_event_context"]
         captured_rows.append(row)
         return ({
             "impact_class": "POLICY_SHIFT", "event_state": "ACTIVE",
@@ -2949,6 +2956,13 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
         workload_class=LIVE_OPERATIONAL_WORKLOAD,
     )
 
+    assert statuses[0]["status"] == "DEFERRED"
+    monkeypatch.setattr(retrieval_module, "attach_hybrid_prior_event_context",
+                        lambda *_args, **_kwargs: pytest.fail("resume repeated retrieval"))
+    statuses = assess_pending_news_impacts(
+        ledger, api_key="test-key", limit=1, request_accountant=ALLOW_MODEL_REQUEST,
+        use_hybrid_retrieval=True, workload_class=LIVE_OPERATIONAL_WORKLOAD,
+    )
     assert statuses[0]["status"] == "OK"
     assert captured_rows[0]["identity_retrieval_mode"] == "DETERMINISTIC_FALLBACK"
     assert captured_rows[0]["identity_retrieval_reason"] == (
@@ -4669,3 +4683,52 @@ def test_impact_repair_choices_preserve_identity_authority(eligible, complete):
         annotation_module._expand_impact_repair_choice({"identity_choice": choices[0], "identity_relation": "SAME_EVENT"}, row)
     empty = annotation_module._impact_repair_choices({"prior_event_context": []})
     assert not any(x.startswith(("SAME_EVENT:", "SAME_EPISODE:")) for x in empty)
+
+
+def test_impact_repair_resumes_after_quota_deferral_and_database_restart(tmp_path, monkeypatch):
+    from xauusd_forecaster.news.annotation.impact_repair import checkpoint_key, load_checkpoint, save_checkpoint
+    path = tmp_path / "repair.sqlite3"
+    ledger = ForwardLedger(path, now=datetime.now(UTC))
+    row = {"annotation_id": "annotation", "content_hash": "source-hash", "annotation": {},
+           "body": "Source text is not copied to the checkpoint", "prior_event_context": []}
+    key = checkpoint_key(row, annotation_module.IMPACT_PROMPT_VERSION, annotation_module.IMPACT_MODEL)
+    invalid = {**_impact_model_result(), "identity_relation": "SAME_EVENT", "matched_candidate_id": "bad"}
+    requests = []
+    def first_post(_key, model, method, payload, *, timeout):
+        requests.append("initial")
+        return {"modelVersion": model, "candidates": [{"content": {"parts": [{"text": json.dumps(invalid)}]}}]}
+    monkeypatch.setattr(GeminiModelGateway, "_post_json", staticmethod(first_post))
+    pool = annotation_module._GeminiRequestPool(("test-key",), requests_per_key=2, batch_limit=2,
+        request_accountant=CallbackModelAccountant(lambda usage: usage.purpose == "news-impact"))
+    with pytest.raises(annotation_module.GeminiBatchCapacityExhausted):
+        pool.call_impact(0, row, checkpoint_callback=lambda payload: save_checkpoint(ledger.connection, key, payload))
+    checkpoint = load_checkpoint(ledger.connection, key)
+    assert "body" not in checkpoint["request_row"]
+    ledger.close()
+    ledger = ForwardLedger(path, now=datetime.now(UTC))
+    checkpoint = load_checkpoint(ledger.connection, key)
+    assert checkpoint["raw_result"] == invalid
+    assert load_checkpoint(ledger.connection, checkpoint_key({**row, "content_hash": "other"},
+                           annotation_module.IMPACT_PROMPT_VERSION, annotation_module.IMPACT_MODEL)) is None
+    repaired = {k: v for k, v in _impact_model_result().items()
+                if k not in {"identity_relation", "update_type", "matched_candidate_id"}}
+    repaired["identity_choice"] = "UNRESOLVED:COMMENTARY:NO_MATCH"
+    def repair_post(_key, model, method, payload, *, timeout):
+        assert "identity_choice" in payload["generationConfig"]["responseSchema"]["properties"]
+        requests.append("repair")
+        return {"modelVersion": model, "candidates": [{"content": {"parts": [{"text": json.dumps(repaired)}]}}]}
+    monkeypatch.setattr(GeminiModelGateway, "_post_json", staticmethod(repair_post))
+    purposes = []
+    pool = annotation_module._GeminiRequestPool(("test-key",), requests_per_key=1, batch_limit=1,
+        request_accountant=CallbackModelAccountant(lambda usage: purposes.append(usage.purpose) or True))
+    result, _ = pool.call_impact(0, row, resume_checkpoint=checkpoint)
+    assert result["identity_relation"] == "UNRESOLVED"
+    assert requests == ["initial", "repair"]
+    assert purposes == ["news-impact-contract-repair"]
+    save_checkpoint(ledger.connection, key, {"replacement": True})
+    assert load_checkpoint(ledger.connection, key) == checkpoint
+    with pytest.raises(sqlite3.IntegrityError):
+        ledger.connection.execute("UPDATE news_impact_repair_checkpoints_v1 SET payload_json='{}'")
+    with pytest.raises(ValueError, match="bounded context"):
+        save_checkpoint(ledger.connection, "oversized", {"text": "x" * 262145})
+    ledger.close()

@@ -34,6 +34,7 @@ IMMUTABLE_TABLES = (
     "news_llm_failures",
     "news_llm_failure_evidence_v1",
     "news_annotation_display_checkpoints_v1",
+    "news_impact_repair_checkpoints_v1",
     "news_content_failures",
     "news_discovery_failures",
     "news_intake_rejections_v1",
@@ -285,6 +286,12 @@ CREATE TABLE IF NOT EXISTS news_llm_failure_evidence_v1 (
     captured_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS news_impact_repair_checkpoints_v1 (
+    checkpoint_key TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    captured_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS news_annotation_display_checkpoints_v1 (
     checkpoint_id TEXT PRIMARY KEY,
     source TEXT NOT NULL,

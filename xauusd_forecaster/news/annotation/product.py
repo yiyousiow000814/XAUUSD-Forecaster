@@ -47,6 +47,9 @@ from xauusd_forecaster.news.semantics.time import (
     register_news_semantic_eligibility_sql,
     semantic_eligibility_sql_predicate,
 )
+from xauusd_forecaster.news.annotation.impact_repair import (
+    CONTEXT_FIELDS, REPAIR_CONTRACT, checkpoint_key, load_checkpoint, save_checkpoint,
+)
 from xauusd_forecaster.news.annotation.content_policy import (
     PROHIBITED_CONTENT, content_is_skipped, permitted_content_sql,
     skip_prohibited_content, skipped_content_status,
@@ -1020,7 +1023,14 @@ def assess_pending_news_impacts(
         impact_prompt_version=impact_prompt_version,
     )[:effective_limit]
     skip_flags = [content_is_skipped(ledger.connection, row) for row in pending]
-    permitted = [row for row, skip in zip(pending, skip_flags) if not skip]
+    repair_checkpoints = {
+        str(row["annotation_id"]): load_checkpoint(
+            ledger.connection, checkpoint_key(row, impact_prompt_version, IMPACT_MODEL),
+        )
+        for row, skip in zip(pending, skip_flags) if not skip
+    }
+    permitted = [row for row, skip in zip(pending, skip_flags)
+                 if not skip and repair_checkpoints[str(row["annotation_id"])] is None]
     if use_hybrid_retrieval and permitted:
         if workload_class is None:
             raise ValueError("hybrid retrieval workload provenance is required")
@@ -1028,7 +1038,8 @@ def assess_pending_news_impacts(
         enriched = iter(attach_hybrid_prior_event_context(
             ledger.connection, permitted, workload_class=workload_class,
         ))
-        pending = [row if skip else next(enriched) for row, skip in zip(pending, skip_flags)]
+        pending = [row if skip or repair_checkpoints[str(row["annotation_id"])] is not None
+                   else next(enriched) for row, skip in zip(pending, skip_flags)]
     statuses = []
     for index, row in enumerate(pending):
         if content_is_skipped(ledger.connection, row):
@@ -1036,8 +1047,14 @@ def assess_pending_news_impacts(
             continue
         started = datetime.now(UTC)
         try:
+            repair_key = checkpoint_key(row, impact_prompt_version, IMPACT_MODEL)
+            checkpoint = repair_checkpoints[str(row["annotation_id"])]
+            if checkpoint is not None:
+                row = {**row, **checkpoint["request_row"]}
             result, exact_model = request_pool.call_impact(
-                index, row, prompt_version=impact_prompt_version
+                index, row, prompt_version=impact_prompt_version,
+                resume_checkpoint=repair_checkpoints[str(row["annotation_id"])],
+                checkpoint_callback=lambda payload: save_checkpoint(ledger.connection, repair_key, payload),
             )
             assessed = datetime.now(UTC)
             identity = "|".join((
@@ -1342,7 +1359,11 @@ class _GeminiRequestPool:
     def call_impact(
         self, start_index: int, row: dict, *,
         prompt_version: str = IMPACT_PROMPT_VERSION,
+        resume_checkpoint: dict | None = None,
+        checkpoint_callback: Callable[[dict], None] | None = None,
     ) -> tuple[dict, str]:
+        if resume_checkpoint is not None:
+            return self._finish_impact_repair(start_index, resume_checkpoint, prompt_version)
         request_row = dict(row)
         request_row["headline"], request_row["body"] = selected_article(
             str(row.get("headline") or ""), str(row.get("body") or ""),
@@ -1379,25 +1400,34 @@ class _GeminiRequestPool:
         try:
             return _validate_impact_result(raw_result, request_row), exact_model
         except ValueError as initial_error:
-            repaired = None
-            try:
-                repaired = self._repair_impact_contract(
-                    start_index + 1, request_row, raw_result, initial_error,
-                    prompt_version=prompt_version,
-                )
-                repaired = _expand_impact_repair_choice(repaired, request_row)
-                return _validate_impact_result(repaired, request_row), exact_model
-            except MODEL_REQUEST_FAILURES:
-                raise
-            except Exception as repair_error:
-                raise ModelOutputContractFailed(
-                    repair_error, repaired if repaired is not None else raw_result,
-                    stage="IMPACT_CONTRACT_REPAIR",
-                    initial_error=initial_error,
-                    public_message=(
-                        "Gemma impact contract repair failed; assessment withheld"
-                    ),
-                ) from repair_error
+            checkpoint = {
+                "request_row": {key: request_row[key] for key in CONTEXT_FIELDS if key in request_row},
+                "raw_result": raw_result, "exact_model": exact_model,
+                "initial_error": str(initial_error),
+            }
+            if checkpoint_callback is not None:
+                checkpoint_callback(checkpoint)
+            return self._finish_impact_repair(start_index + 1, checkpoint, prompt_version)
+
+    def _finish_impact_repair(self, start_index: int, checkpoint: dict, prompt_version: str) -> tuple[dict, str]:
+        request_row = checkpoint["request_row"]
+        raw_result = checkpoint["raw_result"]
+        initial_error = ValueError(checkpoint["initial_error"])
+        repaired = None
+        try:
+            repaired = self._repair_impact_contract(
+                start_index, request_row, raw_result, initial_error, prompt_version=prompt_version,
+            )
+            repaired = _expand_impact_repair_choice(repaired, request_row)
+            return _validate_impact_result(repaired, request_row), checkpoint["exact_model"]
+        except MODEL_REQUEST_FAILURES:
+            raise
+        except Exception as repair_error:
+            raise ModelOutputContractFailed(
+                repair_error, repaired if repaired is not None else raw_result,
+                stage="IMPACT_CONTRACT_REPAIR", initial_error=initial_error,
+                public_message="Gemma impact contract repair failed; assessment withheld",
+            ) from repair_error
 
     def _repair_impact_contract(
         self, start_index: int, row: dict, result: dict,
@@ -1412,7 +1442,7 @@ class _GeminiRequestPool:
             start_index,
             model=IMPACT_MODEL,
             purpose="news-impact-contract-repair",
-            prompt_contract=f"{prompt_version}:contract-repair-v2",
+            prompt_contract=f"{prompt_version}:{REPAIR_CONTRACT}",
             payload=payload,
             input_tokens=input_tokens,
             decode=_decode_model_json,

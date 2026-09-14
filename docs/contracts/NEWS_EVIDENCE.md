@@ -143,6 +143,12 @@ that request's candidates and an explicit no-match choice. Both initial and
 repair requests share this constraint. Transport no-match values normalize to
 the canonical empty identifier before validation or persistence; local identity
 and evidence validation remain mandatory even with provider schema constraints.
+An initial impact response requiring repair is captured with its exact candidate
+context before the repair request. Quota deferral, provider failure and process
+restart resume only repair for the same annotation/source/model/prompt/repair
+contract identity. The immutable checkpoint is capped at 256 KiB, excludes full
+article bodies and credentials, and never grants successful assessment status.
+Changed identities cannot reuse it; historical checkpoints remain audit evidence.
 Repair transport selects one offered combination of identity relation, update
 type and candidate ID. The system expands that choice without inferring a
 judgment from prose; separate or unknown identity fields are rejected. Choices
