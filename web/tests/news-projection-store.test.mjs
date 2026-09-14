@@ -123,7 +123,7 @@ test("production Worker accepts Python sparse transport and enforces authenticat
     t.skip("Preview rejects all writes; production mutation rehearsal uses a non-Preview build"); return;
   }
   const { db, base, patch, targetDetails, targetIndexes } = await sparseFixture();
-  const python = spawnSync(process.env.PYTHON_EXECUTABLE || "python", ["-c", `
+  const python = spawnSync("python", ["-c", `
 import json,sys
 from xauusd_forecaster.news_projection import receipt_payload_hash
 from xauusd_forecaster.dashboard.sync.news_delta import make_news_delta,news_delta_baseline
