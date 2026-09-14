@@ -6,6 +6,13 @@ import {
 } from "../../_lib/news-review-state";
 
 export const NEWS_PROJECTION_CONTRACT_VERSION = "news-projection-generation-v4";
+export const NEWS_DELTA_CONTRACT = "news-projection-delta-v1";
+export async function supportsNewsDelta(binding: D1Database): Promise<boolean> {
+  const row = await binding.prepare(`SELECT count(*) total FROM sqlite_schema WHERE type='trigger'
+    AND name IN ('news_delta_current_index_delete_fence','news_delta_current_detail_delete_fence')`)
+    .first<{ total: number }>();
+  return row?.total === 2;
+}
 const NEWS_PROJECTION_RECEIPT_INDEX_CONTRACT = "news-projection-generation-v4";
 export const NEWS_GENERATION_ID = /^[a-f0-9]{64}$/;
 export const NEWS_PROJECTION_MAX_ITEMS = 10_000;
@@ -195,7 +202,7 @@ function canonicalReceiptValue(value: unknown): string {
   );
 }
 
-function jsonValuesEqual(left: unknown, right: unknown): boolean {
+export function jsonValuesEqual(left: unknown, right: unknown): boolean {
   if (left === right) return true;
   if (left === null || right === null || typeof left !== typeof right) return false;
   if (Array.isArray(left) || Array.isArray(right)) {
@@ -446,13 +453,13 @@ export async function prepareNewsProjection(
   };
 }
 
-function validDetail(item: NewsProjectionDetailItem) {
+export function validDetail(item: NewsProjectionDetailItem) {
   return typeof item.detail_key === "string" && SHA256.test(item.detail_key)
     && typeof item.detail_hash === "string" && SHA256.test(item.detail_hash)
     && item.payload !== null && typeof item.payload === "object";
 }
 
-function validIndex(item: NewsProjectionIndexItem) {
+export function validIndex(item: NewsProjectionIndexItem) {
   return typeof item.detail_key === "string" && SHA256.test(item.detail_key)
     && typeof item.category === "string"
     && (NEWS_PROJECTION_CATEGORIES as readonly string[]).includes(item.category)
@@ -617,9 +624,12 @@ async function projectionCounts(
   binding: D1Database, generationId: string, contractVersion?: string,
 ) {
   const contract = contractVersion ?? (await generation(binding, generationId))?.contract_version;
-  if (contract === NEWS_PROJECTION_RECEIPT_INDEX_CONTRACT) {
+  if (contract === NEWS_PROJECTION_RECEIPT_INDEX_CONTRACT || contract === NEWS_DELTA_CONTRACT) {
+    const rows = contract === NEWS_DELTA_CONTRACT
+      ? `SELECT * FROM news_index WHERE ${ACTIVE_NEWS_SQL} AND ?=(SELECT active_generation_id FROM news_projection_state WHERE id=1)`
+      : receiptIndexRowsSql;
     return binding.prepare(
-      `WITH projection AS (${receiptIndexRowsSql})
+      `WITH projection AS MATERIALIZED (${rows})
        SELECT
          (SELECT count(*) FROM projection) index_count,
          (SELECT count(*) FROM projection i WHERE EXISTS (
@@ -705,6 +715,35 @@ async function reverseProjectionViolationCount(
   return Number(row?.violation_count ?? -1);
 }
 
+export function newsProjectionCountsStatement(
+  binding: D1Database, generationId: string, projectionSource: string,
+) {
+  return binding.prepare(
+      `WITH projection AS (${projectionSource}), grouped AS MATERIALIZED (
+         SELECT generation_id,review_state,category,count(*) item_count,
+                sum(parsed) parsed_count,
+                json_group_array(impact_expires_at) FILTER (
+                  WHERE model_candidate=1 AND impact_expires_at IS NOT NULL
+                ) expiries
+           FROM (
+             SELECT generation_id,category,parsed,model_candidate,impact_expires_at,
+                    ${NEWS_REVIEW_STATE_CASE_SQL} review_state FROM projection
+           ) GROUP BY generation_id,review_state,category
+       )
+       INSERT INTO news_projection_counts
+         (generation_id,review_state,category,item_count,parsed_count,candidate_expiries)
+       SELECT generation_id,review_state,category,item_count,parsed_count,'' FROM grouped
+       UNION ALL
+       SELECT generation_id,review_state,'',sum(item_count),sum(parsed_count),''
+         FROM grouped GROUP BY generation_id,review_state
+       UNION ALL
+       SELECT generation_id,'ALL','',sum(item_count),sum(parsed_count),
+              (SELECT COALESCE(group_concat(value,char(10) ORDER BY value),'')
+                 FROM grouped,json_each(grouped.expiries))
+         FROM grouped GROUP BY generation_id`,
+    ).bind(generationId);
+}
+
 export async function activateNewsProjection(
   binding: D1Database, generationId: string,
 ) {
@@ -763,30 +802,7 @@ export async function activateNewsProjection(
               mirror_contract,payload
          FROM news_projection_index WHERE generation_id=?`;
   await binding.batch([
-    binding.prepare(
-      `WITH projection AS (${projectionSource}), grouped AS MATERIALIZED (
-         SELECT generation_id,review_state,category,count(*) item_count,
-                sum(parsed) parsed_count,
-                json_group_array(impact_expires_at) FILTER (
-                  WHERE model_candidate=1 AND impact_expires_at IS NOT NULL
-                ) expiries
-           FROM (
-             SELECT generation_id,category,parsed,model_candidate,impact_expires_at,
-                    ${NEWS_REVIEW_STATE_CASE_SQL} review_state FROM projection
-           ) GROUP BY generation_id,review_state,category
-       )
-       INSERT INTO news_projection_counts
-         (generation_id,review_state,category,item_count,parsed_count,candidate_expiries)
-       SELECT generation_id,review_state,category,item_count,parsed_count,'' FROM grouped
-       UNION ALL
-       SELECT generation_id,review_state,'',sum(item_count),sum(parsed_count),''
-         FROM grouped GROUP BY generation_id,review_state
-       UNION ALL
-       SELECT generation_id,'ALL','',sum(item_count),sum(parsed_count),
-              (SELECT COALESCE(group_concat(value,char(10) ORDER BY value),'')
-                 FROM grouped,json_each(grouped.expiries))
-         FROM grouped GROUP BY generation_id`,
-    ).bind(generationId),
+    newsProjectionCountsStatement(binding, generationId, projectionSource),
     binding.prepare(
       `UPDATE news_projection_generations SET state='SUPERSEDED',updated_at=?
         WHERE state='CURRENT' AND generation_id<>?`,
@@ -953,6 +969,7 @@ export async function readNewsProjectionHealth(binding: D1Database) {
     status: verified ? "OK" : "ERROR",
     projection_state: staging ? "REPLAYING" : state.projection_state,
     verified_complete: verified,
+    delta_supported: await supportsNewsDelta(binding),
     active_generation_id: state.active_generation_id,
     snapshot_id: state.snapshot_id,
     source_digest: state.source_digest,
@@ -1074,7 +1091,8 @@ export async function readNewsProjectionPage(
   }
   const backwards = cursor?.direction === "previous";
   const order = backwards ? "ASC" : "DESC";
-  const receiptIndexed = state.contract_version === NEWS_PROJECTION_RECEIPT_INDEX_CONTRACT;
+  const receiptIndexed = [NEWS_PROJECTION_RECEIPT_INDEX_CONTRACT, NEWS_DELTA_CONTRACT]
+    .includes(state.contract_version);
   const conditions = receiptIndexed
     ? [ACTIVE_NEWS_SQL, `(${NEWS_REVIEW_STATE_CASE_SQL})=?`]
     : ["generation_id=?", `(${NEWS_REVIEW_STATE_CASE_SQL})=?`];

@@ -231,11 +231,24 @@ namespace CAlgo.Robots
                     this.activeDateUtc));
             FileStream stream = new FileStream(
                 this.activePath,
-                FileMode.Append,
-                FileAccess.Write,
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
                 FileShare.Read,
                 64 * 1024,
                 FileOptions.SequentialScan);
+            // A forced process stop may leave a partial buffered JSON record.
+            // Keep those bytes, but never concatenate the next session to it.
+            if (stream.Length > 0)
+            {
+                stream.Seek(-1, SeekOrigin.End);
+                int lastByte = stream.ReadByte();
+                stream.Seek(0, SeekOrigin.End);
+                if (lastByte != '\n')
+                {
+                    stream.WriteByte((byte)'\n');
+                    stream.Flush(true);
+                }
+            }
             this.writer = new StreamWriter(stream, new UTF8Encoding(false), 64 * 1024);
         }
 

@@ -674,7 +674,12 @@ def extend_with_component_alerts(
                 "OPS_COMPONENT_UNHEALTHY",
                 severity="ERROR" if status in {"ERROR", "STALE"} else "WARNING",
                 scope=name,
-                message_zh=f"组件 {name} 当前状态为 {status}。",
+                message_zh=(
+                    "决策时点的新闻检查记录已过期，请检查决策采集器；这不代表当前新闻处理失败。"
+                    if name == "news_semantic_pipeline"
+                    and "DECISION_NEWS_SNAPSHOT_STALE" in (component.get("reason_codes") or [])
+                    else f"组件 {name} 当前状态为 {status}。"
+                ),
                 blocking=status in {"ERROR", "STALE"},
                 evidence={
                     "status": status,

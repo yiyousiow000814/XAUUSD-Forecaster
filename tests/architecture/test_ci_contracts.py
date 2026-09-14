@@ -66,6 +66,7 @@ def test_windows_runtime_gate_is_parallel_bounded_and_keeps_required_name() -> N
 
 def test_windows_runtime_manifest_assigns_every_required_test_exactly_once() -> None:
     required = ['tests/runtime/test_main_runtime.py', 'tests/dashboard/test_public_health_check.py', 'tests/runtime/test_runtime_health.py', 'tests/news/test_news_scheduler.py', 'tests/runtime/test_runtime_root_ownership.py', 'tests/runtime/test_cross_version_runtime_recovery.py']
+    required.append("tests/evidence/test_quote_record_recovery.py")
     expected = {f"{path}::{name}" for path in required for name in _top_level_tests(path)}
     assigned = Counter(nodeid for shard in WINDOWS_MANIFEST["shards"] for spec in shard["tests"] for nodeid in _owned_tests(spec))
     assert set(assigned) == expected

@@ -7,6 +7,12 @@ operator querying SQLite or reading process output. A live heartbeat proves
 only that a process is running. It does not prove that work is progressing,
 capacity is usable, or outputs remain within expected bounds.
 
+Decision-time news qualification is historical evidence, not the live news
+worker's current health. Once that observation expires, publish
+`DECISION_NEWS_SNAPSHOT_STALE`, preserve its historical reasons/counts separately,
+and direct the operator to decision collection. Do not project those old failure
+counts as current actionable news failures. Keep the stale observation visible.
+
 Operator presentation has three independent axes. API read state is
 `CURRENT`, `REFRESHING`, `STALE_SNAPSHOT`, or `UNAVAILABLE`; a failed refresh
 with a prior snapshot retains the last factual state and identifies the stale

@@ -235,7 +235,11 @@ class Handler(BaseHTTPRequestHandler):
                     self.database, activated_snapshot_id,
                 )
                 if mode == "manifest":
-                    payload = {"manifest": generation.manifest}
+                    payload = {"manifest": generation.manifest, "sync_inventory_supported": True}
+                elif mode == "sync_inventory":
+                    if (query.get("snapshot_id") or [""])[0] != generation.manifest["snapshot_id"]:
+                        raise ValueError("news inventory snapshot is no longer available")
+                    payload = generation.sync_inventory
                 elif mode == "batch":
                     snapshot_id = (query.get("snapshot_id") or [""])[0]
                     if snapshot_id != generation.manifest["snapshot_id"]:

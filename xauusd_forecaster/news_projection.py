@@ -12,6 +12,7 @@ import struct
 import sys
 import tempfile
 import time
+from functools import cached_property
 from contextlib import contextmanager
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
@@ -253,6 +254,26 @@ class NewsProjectionGeneration:
     detail_rows: tuple[dict, ...]
     index_batches: tuple[tuple[dict, ...], ...]
     detail_batches: tuple[tuple[dict, ...], ...]
+
+    @cached_property
+    def sync_inventory(self) -> dict:
+        """Local-only fingerprint inventory for a frozen complete source."""
+        entries: dict[str, dict] = {}
+        for kind, batches in (("index", self.index_batches), ("detail", self.detail_batches)):
+            offset = 0
+            for batch in batches:
+                for item in batch:
+                    entry = entries.setdefault(item["detail_key"], {})
+                    entry[kind + "_hash"] = (
+                        receipt_payload_hash(item) if kind == "index" else item["detail_hash"]
+                    )
+                    entry[kind + "_offset"] = offset
+                offset += len(batch)
+        if len(entries) != self.manifest["expected_index_count"] or any(
+            len(value) != 4 for value in entries.values()
+        ):
+            raise ValueError("news inventory membership mismatch")
+        return {"manifest": self.manifest, "entries": entries}
 
     def batch_items(self, kind: str, offset: int) -> list[dict]:
         batches = self.detail_batches if kind == "detail" else self.index_batches if kind == "index" else None

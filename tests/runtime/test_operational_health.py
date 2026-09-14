@@ -847,6 +847,21 @@ def test_daily_brief_deferral_keeps_the_underlying_failure_code() -> None:
 
 
 def test_component_alert_preserves_structured_semantic_reason_codes() -> None:
+    from xauusd_forecaster.dashboard.health_projection import semantic_pipeline_component
+    stale = semantic_pipeline_component({
+        "observed_at": (NOW - timedelta(days=2)).isoformat(),
+        "heartbeat_at": (NOW - timedelta(days=2)).isoformat(), "status": "UNHEALTHY",
+        "reason_codes": ["ANNOTATOR_HEARTBEAT_STALE"],
+        "actionable_failure_counts": {"ACTIVE_IMPACT": 300},
+    }, now=NOW)
+    historical = extend_with_component_alerts(
+        scheduler_health_snapshot(_connection(), now=NOW),
+        components={"news_semantic_pipeline": stale}, news_sources=[], runtime_update_failure=None,
+    )
+    historical_alert = next(item for item in historical["alerts"] if item["code"] == "OPS_COMPONENT_UNHEALTHY")
+    assert "决策采集器" in historical_alert["message_zh"]
+    assert historical_alert["evidence"]["actionable_failure_counts"] == {}
+    assert historical_alert["evidence"]["reason_codes"] == ["DECISION_NEWS_SNAPSHOT_STALE"]
     result = extend_with_component_alerts(
         scheduler_health_snapshot(_connection(), now=NOW),
         components={

@@ -31,6 +31,7 @@ import {
   parseNewsReviewState,
 } from "../../_lib/news-review-state";
 import { publicNewsRecord } from "../../_lib/public-news-copy";
+import { applyNewsProjectionDelta } from "../_shared/news-projection-delta";
 
 export const dynamic = "force-dynamic";
 
@@ -252,7 +253,11 @@ export async function POST(request: Request) {
     const body = JSON.parse(bounded.serialized) as {
       action?: unknown; generation_id?: unknown; manifest?: unknown;
       offset?: unknown; items?: unknown;
+      patch?: unknown;
     };
+    if (body.action === "apply_delta") {
+      return NextResponse.json(await applyNewsProjectionDelta(binding, body.patch, body.generation_id));
+    }
     if (body.action === "prepare") {
       const manifest = validateNewsProjectionManifest(body.manifest);
       if (body.generation_id !== manifest.generation_id) {

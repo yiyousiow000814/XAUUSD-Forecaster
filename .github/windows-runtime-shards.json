@@ -23,6 +23,9 @@
         "scripts/main_services_launcher.vbs",
         "scripts/windows-service-launch-contract.json",
         "tests/runtime/test_main_runtime.py",
+        "ctrader/XauusdForwardQuoteBridge/XauusdForwardQuoteBridge.cs",
+        "xauusd_forecaster/market.py",
+        "tests/evidence/test_quote_record_recovery.py",
         "tests/dashboard/test_public_health_check.py",
         "tests/runtime/test_runtime_health.py",
         "tests/news/test_news_scheduler.py",
@@ -32,6 +35,9 @@
       "tests": [
         {
           "path": "tests/runtime/test_main_runtime.py"
+        },
+        {
+          "path": "tests/evidence/test_quote_record_recovery.py"
         },
         {
           "path": "tests/dashboard/test_public_health_check.py"

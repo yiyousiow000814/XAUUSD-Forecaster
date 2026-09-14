@@ -11,6 +11,9 @@ import {
   stageNewsProjectionBatch, verifyNewsProjection,
 } from "../app/api/_shared/news-projection-store.ts";
 import { D1TestDatabase } from "./d1-test-database.mjs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { applyNewsProjectionDelta } from "../app/api/_shared/news-projection-delta.ts";
 
 const id = digit => digit.repeat(64);
 const hash = value => createHash("sha256").update(value).digest("hex");
@@ -63,7 +66,192 @@ const database = () => new D1TestDatabase([
   "0032_news_keyset_pagination.sql",
   "0033_news_superseded_cleanup_index.sql",
   "0037_news_pending_review.sql",
+  "0038_news_delta_fences.sql",
 ]);
+
+async function publish(db, source, details, indexes) {
+  await prepareNewsProjection(db, source);
+  if (details.length) await stageNewsProjectionBatch(db, "detail", source.generation_id, 0, details);
+  if (indexes.length) await stageNewsProjectionBatch(db, "index", source.generation_id, 0, indexes);
+  await activateNewsProjection(db, source.generation_id);
+}
+
+async function sparseFixture() {
+  const db = database();
+  const details = [detail("1"), detail("2")], indexes = [index("1"), index("2")];
+  const base = await manifest("a", details, indexes);
+  await publish(db, base, details, indexes);
+  const changed = { ...index("1"), model_visibility: "IMPACT_EXPIRED", impact_status: "EXPIRED" };
+  const targetDetails = [detail("1"), detail("3")], targetIndexes = [changed, index("3")];
+  const patch = { base: { generation_id: base.generation_id, snapshot_id: base.snapshot_id,
+    receipt_digest: base.expected_receipt_digest },
+  source: await manifest("b", targetDetails, targetIndexes),
+  indexes: targetIndexes, details: [detail("3")], removed: [id("2")] };
+  return { db, base, patch, targetDetails, targetIndexes };
+}
+
+test("sparse publication atomically replaces membership, preserves immutable evidence and supports lost ACK", async () => {
+  const { db, patch } = await sparseFixture();
+  const original = db.database.prepare("SELECT * FROM news_details WHERE detail_key=?").get(id("1"));
+  const digest = await newsProjectionPayloadHash(patch);
+  const ack = await applyNewsProjectionDelta(db, patch, digest);
+  assert.equal(ack.manifest.contract_version, "news-projection-delta-v1");
+  assert.deepEqual(await applyNewsProjectionDelta(db, patch, digest), ack);
+  const health = await readNewsProjectionHealth(db);
+  assert.equal(health.verified_complete, true);
+  assert.equal(health.active_generation_id, digest);
+  const page = await readNewsProjectionPage(db, { page: 1, pageSize: 12, category: "", reviewState: "COMPLETED" });
+  assert.equal(page.all_total, 2);
+  assert.deepEqual(page.items.map(v => v.detail_key).sort(), [id("1"), id("3")]);
+  const contents = await readNewsProjectionDetails(db, [id("1"), id("2"), id("3")]);
+  assert.ok(contents.items[id("3")]);
+  assert.deepEqual(contents.missing, []); // Historical content-addressed evidence remains readable.
+  assert.deepEqual(db.database.prepare("SELECT * FROM news_details WHERE detail_key=?").get(id("1")), original);
+  assert.equal(db.database.prepare("SELECT count(*) n FROM news_details").get().n, 3);
+  assert.equal((await verifyNewsProjection(db, digest)).status, "OK");
+  await db.prepare("DELETE FROM news_index WHERE detail_key=?").bind(id("1")).run();
+  await db.prepare("DELETE FROM news_details WHERE detail_key=?").bind(id("1")).run();
+  assert.ok(db.database.prepare("SELECT 1 FROM news_index WHERE detail_key=?").get(id("1")));
+  assert.ok(db.database.prepare("SELECT 1 FROM news_details WHERE detail_key=?").get(id("1")));
+  // Full recovery still accepts the original complete source manifest.
+  await publish(db, patch.source, [detail("1"), detail("3")], patch.indexes);
+  assert.equal((await readNewsProjectionHealth(db)).active_generation_id, patch.source.generation_id);
+});
+
+test("production Worker accepts Python sparse transport and enforces authentication and body bounds", async t => {
+  if (process.env.WORKERS_CI_BRANCH && process.env.WORKERS_CI_BRANCH !== "main") {
+    t.skip("Preview rejects all writes; production mutation rehearsal uses a non-Preview build"); return;
+  }
+  const { db, base, patch, targetDetails, targetIndexes } = await sparseFixture();
+  const python = spawnSync(process.env.PYTHON_EXECUTABLE || "python", ["-c", `
+import json,sys
+from xauusd_forecaster.news_projection import receipt_payload_hash
+from xauusd_forecaster.dashboard.sync.news_delta import make_news_delta,news_delta_baseline
+v=json.load(sys.stdin)
+def inventory(manifest, indexes, details):
+    entries={r['detail_key']:{'index_hash':receipt_payload_hash(r),'index_offset':0} for r in indexes}
+    for r in details: entries[r['detail_key']].update(detail_hash=r['detail_hash'],detail_offset=0)
+    return dict(manifest=manifest,entries=entries)
+old=inventory(v['base'],v['oldIndexes'],v['oldDetails'])
+current=inventory(v['source'],v['indexes'],v['details'])
+request=make_news_delta(current,news_delta_baseline(old,v['base']),lambda kind,offset:v['indexes' if kind=='index' else 'details'])
+print(json.dumps(request,ensure_ascii=False,separators=(',',':')))
+`], { cwd: fileURLToPath(new URL("../../", import.meta.url)), windowsHide: true, encoding: "utf8",
+    env: { ...process.env, PYTHONIOENCODING: "utf-8" }, input: JSON.stringify({ base, source: patch.source,
+      oldIndexes: [index("1"), index("2")], oldDetails: [detail("1"), detail("2")], indexes: targetIndexes, details: targetDetails }) });
+  assert.equal(python.status, 0, python.stderr);
+  const body = python.stdout.trim();
+  const request = JSON.parse(body);
+  const runtime = { DB: db, INGEST_TOKEN: "test-news-token", ASSETS: { fetch: async () => new Response("asset") } };
+  globalThis.__AURUM_TEST_WORKER_ENV = runtime;
+  const { default: worker } = await import("../dist/server/index.js");
+  const invoke = (body, authorized=true) => worker.fetch(new Request("http://localhost/api/news-index", {
+    method: "POST", headers: authorized ? { Authorization: "Bearer test-news-token", "Content-Type": "application/json" } : {}, body,
+  }), runtime, { waitUntil() {}, passThroughOnException() {} });
+  assert.equal((await invoke(body, false)).status, 401);
+  assert.equal((await invoke("x".repeat(120_001))).status, 413);
+  const response = await invoke(body);
+  const ack = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(ack));
+  assert.equal(ack.applied, request.generation_id);
+  const page = await worker.fetch(new Request("http://localhost/api/news-index?review_state=COMPLETED"), runtime,
+    { waitUntil() {}, passThroughOnException() {} });
+  const payload = await page.json();
+  assert.equal(page.status, 200, JSON.stringify(payload));
+  assert.equal(payload.generation_id, request.generation_id);
+  assert.deepEqual(payload.items.map(r => r.detail_key).sort(), targetIndexes.map(r => r.detail_key).sort());
+});
+
+for (const defect of ["missing-detail", "wrong-total", "duplicate-cluster", "unknown-removal", "stale-base", "changed-detail", "bad-digest", "stale-time", "invalid-review", "raced-base", "missing-migration"]) {
+  test(`sparse ${defect} rejection preserves the complete baseline`, async () => {
+    const { db, base, patch } = await sparseFixture();
+    if (defect === "missing-detail") patch.details = [];
+    if (defect === "wrong-total") patch.source.expected_index_count = patch.source.expected_detail_count = 3;
+    if (defect === "duplicate-cluster") patch.indexes[1].cluster_id = patch.indexes[0].cluster_id;
+    if (defect === "unknown-removal") patch.removed = [id("f")];
+    if (defect === "stale-base") patch.base.generation_id = id("f");
+    if (defect === "changed-detail") patch.details.push({ ...detail("1"), payload: { body: "changed" } });
+    if (defect === "stale-time") patch.source.watermark = "2026-08-23T00:00:00.000Z";
+    if (defect === "invalid-review") patch.indexes[0].parsed_at = null;
+    if (defect === "missing-migration") db.database.exec("DROP TRIGGER news_delta_current_detail_delete_fence");
+    if (defect === "raced-base") {
+      const originalBatch = db.batch.bind(db);
+      db.batch = async statements => {
+        db.batch = originalBatch;
+        await prepareNewsProjection(db, await manifest("c", [detail("4")], [index("4")]));
+        return originalBatch(statements);
+      };
+    }
+    const before = db.database.prepare("SELECT * FROM news_index ORDER BY detail_key").all();
+    await assert.rejects(applyNewsProjectionDelta(db, patch,
+      defect === "bad-digest" ? id("f") : await newsProjectionPayloadHash(patch)));
+    assert.deepEqual(db.database.prepare("SELECT * FROM news_index ORDER BY detail_key").all(), before);
+    assert.equal((await readNewsProjectionHealth(db)).active_generation_id, base.generation_id);
+    assert.equal(db.database.prepare("SELECT count(*) n FROM news_details").get().n, 2);
+  });
+}
+
+test("sparse source can become empty and metadata remains bounded over repeated generations", async () => {
+  const { db, base } = await sparseFixture();
+  let current = base;
+  for (let i = 0; i < 8; i++) {
+    const source = await manifest("b", [], [], { watermark: `2026-09-0${i + 1}T00:00:00.000Z` });
+    const patch = { base: { generation_id: current.generation_id, snapshot_id: current.snapshot_id,
+      receipt_digest: current.expected_receipt_digest }, source, indexes: [], details: [], removed: i ? [] : [id("1"), id("2")] };
+    const ack = await applyNewsProjectionDelta(db, patch, await newsProjectionPayloadHash(patch));
+    current = ack.manifest;
+    const page = await readNewsProjectionPage(db, { page: 1, pageSize: 12, category: "", reviewState: "COMPLETED" });
+    assert.equal(page.all_total, 0);
+    assert.equal(page.items.length, 0);
+    assert.equal((await verifyNewsProjection(db, current.generation_id)).status, "OK");
+  }
+  assert.ok(db.database.prepare("SELECT count(*) n FROM news_projection_generations").get().n <= 3);
+});
+
+test("4877-row sparse publication leaves 4875 unchanged records untouched", async () => {
+  const db = database();
+  const indexes = Array.from({ length: 4877 }, (_, i) => ({ ...index("1"),
+    detail_key: i.toString(16).padStart(64, "0"), cluster_id: `event-${i}` }));
+  const details = indexes.map(row => ({ ...detail("1"), detail_key: row.detail_key }));
+  let digest = EMPTY_RECEIPT_DIGEST;
+  const batches = [];
+  for (const [kind, rows, size] of [["detail", details, 8], ["index", indexes, 4]]) {
+    for (let offset = 0; offset < rows.length; offset += size) {
+      const items = rows.slice(offset, offset + size);
+      digest = await advanceNewsReceiptDigest(digest, kind, offset, items.length, await newsProjectionPayloadHash(items));
+      batches.push({ kind, offset, items });
+    }
+  }
+  const source = await manifest("a", details, indexes, { expected_receipt_digest: digest });
+  await prepareNewsProjection(db, source);
+  for (const batch of batches) await stageNewsProjectionBatch(db, batch.kind, id("a"), batch.offset, batch.items);
+  await activateNewsProjection(db, id("a"));
+  assert.equal(batches.length, 1830);
+  db.database.exec(`CREATE TABLE changed_news_keys (key TEXT);
+    CREATE TRIGGER record_news_update AFTER UPDATE ON news_index BEGIN INSERT INTO changed_news_keys VALUES (NEW.detail_key); END;
+    CREATE TRIGGER record_news_insert AFTER INSERT ON news_index BEGIN INSERT INTO changed_news_keys VALUES (NEW.detail_key); END;`);
+  const changed = { ...indexes[0], model_visibility: "IMPACT_EXPIRED", impact_status: "EXPIRED" };
+  const added = { ...indexes[1], detail_key: id("f"), cluster_id: "event-new" };
+  const next = await manifest("b", details, indexes);
+  const patch = { base: { generation_id: id("a"), snapshot_id: id("a"), receipt_digest: digest },
+    source: next, indexes: [changed, added], details: [{ ...details[0], detail_key: id("f") }], removed: [indexes[1].detail_key] };
+  let statementCount = 0, writtenRows = 0;
+  const batch = db.batch.bind(db);
+  db.batch = async statements => {
+    statementCount = statements.length;
+    const result = await batch(statements);
+    writtenRows = result.reduce((n, row) => n + row.meta.changes, 0);
+    return result;
+  };
+  await applyNewsProjectionDelta(db, patch, await newsProjectionPayloadHash(patch));
+  const touched = db.database.prepare("SELECT DISTINCT key FROM changed_news_keys").all();
+  assert.equal(touched.length, 3, "one update, one addition and one withdrawal only");
+  assert.ok(statementCount <= 16, String(statementCount));
+  assert.ok(writtenRows <= 16, String(writtenRows));
+  assert.equal((await readNewsProjectionPage(db, { page: 1, pageSize: 12, category: "", reviewState: "COMPLETED" })).all_total, 4877);
+  console.log(JSON.stringify({ sparse_rehearsal: { total: 4877, untouched: 4875, full_batch_posts: 1830,
+    delta_posts: 1, transaction_statements: statementCount, sqlite_direct_row_changes: writtenRows } }));
+});
 
 test("shares canonical receipt vectors with the Python producer", async () => {
   assert.equal(receiptVectors.contract_version, NEWS_PROJECTION_CONTRACT_VERSION);
