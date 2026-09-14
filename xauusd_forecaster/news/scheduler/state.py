@@ -1358,6 +1358,18 @@ def record_job_attempt(
         if isinstance(failure_evidence, dict)
         else str(status.get("error") or status.get("reason") or "")
     )
+    if isinstance(failure_evidence, dict):
+        if len(error_detail) > 8192:
+            error_detail = json.dumps({
+                "failure_code": str(failure_evidence.get("failure_code") or "")[:100],
+                "failure_stage": str(failure_evidence.get("failure_stage") or "")[:100],
+                "cause_type": str(failure_evidence.get("cause_type") or "")[:100],
+                "cause": str(failure_evidence.get("cause") or "")[:500],
+                "evidence_truncated": True,
+                "evidence_hash": hashlib.sha256(error_detail.encode("utf-8")).hexdigest(),
+            }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    else:
+        error_detail = error_detail[:500]
     with connection:
         connection.execute(
             """INSERT OR IGNORE INTO news_ai_job_attempts_v1 VALUES
@@ -1369,7 +1381,7 @@ def record_job_attempt(
                 str(status.get("failure_code") or "") or None,
                 str(status.get("error_type") or "") or None,
                 int(provider_status) if isinstance(provider_status, int) else None,
-                error_detail[:500] or None,
+                error_detail or None,
                 _iso(attempted_at),
                 str(status.get("next_retry_at") or "") or None,
             ),
