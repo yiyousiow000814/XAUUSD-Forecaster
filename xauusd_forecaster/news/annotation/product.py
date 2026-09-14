@@ -124,6 +124,7 @@ class ModelOutputContractFailed(ValueError):
             "update_type": 40,
             "identity_relation": 40,
             "matched_candidate_id": 120,
+            "identity_choice": 240,
             "reason_zh": 300,
         }
         for name, limit in limits.items():
@@ -1384,6 +1385,7 @@ class _GeminiRequestPool:
                     start_index + 1, request_row, raw_result, initial_error,
                     prompt_version=prompt_version,
                 )
+                repaired = _expand_impact_repair_choice(repaired, request_row)
                 return _validate_impact_result(repaired, request_row), exact_model
             except MODEL_REQUEST_FAILURES:
                 raise
@@ -1410,7 +1412,7 @@ class _GeminiRequestPool:
             start_index,
             model=IMPACT_MODEL,
             purpose="news-impact-contract-repair",
-            prompt_contract=f"{prompt_version}:contract-repair-v1",
+            prompt_contract=f"{prompt_version}:contract-repair-v2",
             payload=payload,
             input_tokens=input_tokens,
             decode=_decode_model_json,
@@ -1875,6 +1877,39 @@ def _impact_payload(prompt: str, *, row: dict | None = None) -> dict[str, object
     }
 
 
+def _impact_repair_choices(row: dict) -> dict[str, dict[str, str]]:
+    """Offer whole valid identity decisions, without making the model's choice."""
+    choices = {}
+    def add(relation: str, matched: str, updates: tuple[str, ...]) -> None:
+        for update in updates:
+            token = f"{relation}:{update}:{matched or 'NO_MATCH'}"
+            choices[token] = {"identity_relation": relation,
+                              "update_type": update, "matched_candidate_id": matched}
+    contextual = ("COMMENTARY", "HISTORICAL_CONTEXT")
+    add("UNRESOLVED", "", contextual)
+    if not row.get("identity_context_truncated"):
+        add("NEW_EPISODE", "", ("NEW_EVENT", *contextual))
+    for candidate in row.get("prior_event_context") or ():
+        matched = str(candidate.get("candidate_id") or "")
+        if not matched:
+            continue
+        add("SAME_EPISODE", matched, ("MATERIAL_UPDATE", *contextual))
+        if candidate.get("identity_anchor_eligible"):
+            add("SAME_EVENT", matched, ("DUPLICATE_REPORT", *contextual))
+    return choices
+
+
+def _expand_impact_repair_choice(result: dict, row: dict) -> dict:
+    choices = _impact_repair_choices(row)
+    choice = result.get("identity_choice")
+    if not isinstance(choice, str) or choice not in choices:
+        raise ValueError("Impact repair identity choice is not offered")
+    if any(name in result for name in ("identity_relation", "update_type", "matched_candidate_id")):
+        raise ValueError("Impact repair must select one identity choice without separate identity fields")
+    return {**{key: value for key, value in result.items() if key != "identity_choice"},
+            **choices[choice]}
+
+
 def _impact_contract_repair_payload(
     row: dict, result: dict, validation_error: Exception,
 ) -> dict[str, object]:
@@ -1895,6 +1930,13 @@ def _impact_contract_repair_payload(
         }
         for candidate in (row.get("prior_event_context") or ())
     ]
+    choices = _impact_repair_choices(row)
+    schema = copy.deepcopy(IMPACT_RESPONSE_SCHEMA)
+    for name in ("identity_relation", "update_type", "matched_candidate_id"):
+        schema["required"].remove(name)
+        del schema["properties"][name]
+    schema["required"].append("identity_choice")
+    schema["properties"]["identity_choice"] = {"type": "string", "enum": list(choices)}
     prompt = (
         "修复一个新闻影响JSON，使其满足同一份事件身份合同。不要发明事实或candidate_id。"
         "保留仍有证据支持的判断，只修正互相矛盾或缺失的字段。"
@@ -1908,6 +1950,11 @@ def _impact_contract_repair_payload(
         "matched_candidate_id填写NO_MATCH，并使用与不确定性一致的非新增事件update_type。"
         "matched_candidate_id只能从提供的candidate_id中选择或填写NO_MATCH，不得填写空字符串。"
         "reason_zh必须是普通用户可读的简体中文。只返回完整JSON。\n"
+        "输出时不要分别返回identity_relation、update_type和matched_candidate_id。"
+        "只填写一个identity_choice，从ALLOWED_IDENTITY_CHOICES中选择完整组合；"
+        "代码会展开该组合。其余事实比较和解释必须与所选组合一致。"
+        "reason_zh只写普通用户可读的事实依据，不要解释JSON修改步骤或输出内部ID。\n"
+        "ALLOWED_IDENTITY_CHOICES: " + json.dumps(choices, ensure_ascii=False, separators=(",", ":")) + "\n"
         f"VALIDATION_ERROR: {str(validation_error)[:300]}\n"
         "CURRENT_EVENT_EXTRACTION: "
         + json.dumps(row.get("annotation") or {}, ensure_ascii=False, separators=(",", ":"))
@@ -1925,7 +1972,7 @@ def _impact_contract_repair_payload(
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "responseSchema": _impact_response_schema(row),
+            "responseSchema": schema,
             "maxOutputTokens": 700,
             "temperature": 0,
         },
