@@ -1,5 +1,5 @@
 %% Generated source syntax, not runtime/transaction proof.
-%% input 0124c362deb9f442e3b537c13a98f4bae30392022d2972e18182928b08fdbee2
+%% input c8f8c5aeeaefd5f1e047bb0eb52f07858507f8304efcf96ee5bcbdd2608222b2
 flowchart LR
   nb5fe90334b2f8f69["(now - timedelta(days=NEWS_READER_WINDOW_DAYS)).isoformat"]
   ndfd755133938cf31["&lt;dynamic-call&gt;"]
@@ -90,7 +90,6 @@ flowchart LR
   n6da88c34ba124c41["int"]
   n00cdccd07245a39f["isReleaseValidationContext"]
   n4a11dbf513153980["isinstance"]
-  nd4dec1d3f75a2d09["item.get"]
   nf5d7e34b8f301b47["items.extend"]
   nae23da37330152c6["json.dumps"]
   n23a4317c835e7334["json.dumps(audit, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode"]
@@ -121,6 +120,7 @@ flowchart LR
   n1f6fa6f69d185e60["min"]
   n89aeef7d7ea68a01["newsEvidenceWriteAcknowledgement"]
   n324086adbef7313d["news_delta_baseline"]
+  nb79d9b7bb780ba0f["news_reader_excludes"]
   n263e118c42d0eee5["now.isoformat"]
   n225cd991f145d42a["options.validate"]
   n6c9238c2ea89624f["page.get"]
@@ -684,91 +684,91 @@ flowchart LR
   ne8170720a84dd778 -->|"calls L480 UNKNOWN"| nff1889d009d848b6
   ne8170720a84dd778 -->|"calls L481 UNKNOWN"| nff1889d009d848b6
   ne8170720a84dd778 -->|"calls L486 UNKNOWN"| ne2327fc716e5f004
-  nc75d8db54b9c5df8 -->|"calls L1145 UNKNOWN"| n34588a5f246ee8b4
-  nc75d8db54b9c5df8 -->|"calls L1147 UNKNOWN"| n244489aec87f6eba
-  nc75d8db54b9c5df8 -->|"calls L1147 UNKNOWN"| n90c9566511564fc6
-  nc75d8db54b9c5df8 -->|"calls L1148 UNKNOWN"| n7d1e71c23f1ab7dc
-  nc75d8db54b9c5df8 -->|"calls L1150 UNKNOWN"| n70a24828a780d854
-  nc75d8db54b9c5df8 -->|"sql L1150 LITERAL"| n70a24828a780d854
-  nc75d8db54b9c5df8 -->|"calls L1152 UNKNOWN"| na3e8a1b0ded7c82c
-  nc75d8db54b9c5df8 -->|"calls L1153 UNKNOWN"| n4e49d3fc82248192
-  nc75d8db54b9c5df8 -->|"calls L1155 UNKNOWN"| ndba56fb65f1b79b3
-  nc75d8db54b9c5df8 -->|"rolls_back L1155 UNKNOWN"| ndba56fb65f1b79b3
-  nc75d8db54b9c5df8 -->|"calls L1156 UNKNOWN"| nc154b94bb301a678
-  nc75d8db54b9c5df8 -->|"calls L1157 UNKNOWN"| nca1a7d7bbdb2abc4
-  nc75d8db54b9c5df8 -->|"calls L1161 UNKNOWN"| naf05f328d23166a1
-  nc75d8db54b9c5df8 -->|"calls L1163 UNKNOWN"| nb6276ba72bbc5084
-  nc75d8db54b9c5df8 -->|"calls L1164 UNKNOWN"| n71fa9faaa6f884aa
-  nbbee89b635a2e5f1 -->|"calls L444 UNKNOWN"| n90c9566511564fc6
-  nbbee89b635a2e5f1 -->|"calls L445 UNKNOWN"| nebbb4b96ef5b30ca
-  nbbee89b635a2e5f1 -->|"calls L449 UNKNOWN"| n1f6fa6f69d185e60
-  nbbee89b635a2e5f1 -->|"calls L450 UNKNOWN"| nb5fe90334b2f8f69
-  nbbee89b635a2e5f1 -->|"calls L450 UNKNOWN"| nb098b4523e78b04b
-  nbbee89b635a2e5f1 -->|"calls L453 UNKNOWN"| n1351075bcd271d3a
-  nbbee89b635a2e5f1 -->|"calls L460 UNKNOWN"| n71fa9faaa6f884aa
-  nbbee89b635a2e5f1 -->|"calls L460 UNKNOWN"| n2269c0be009b610c
-  nbbee89b635a2e5f1 -->|"calls L462 UNKNOWN"| nfaee88711cab0cf6
+  nc75d8db54b9c5df8 -->|"calls L1148 UNKNOWN"| n34588a5f246ee8b4
+  nc75d8db54b9c5df8 -->|"calls L1150 UNKNOWN"| n244489aec87f6eba
+  nc75d8db54b9c5df8 -->|"calls L1150 UNKNOWN"| n90c9566511564fc6
+  nc75d8db54b9c5df8 -->|"calls L1151 UNKNOWN"| n7d1e71c23f1ab7dc
+  nc75d8db54b9c5df8 -->|"calls L1153 UNKNOWN"| n70a24828a780d854
+  nc75d8db54b9c5df8 -->|"sql L1153 LITERAL"| n70a24828a780d854
+  nc75d8db54b9c5df8 -->|"calls L1155 UNKNOWN"| na3e8a1b0ded7c82c
+  nc75d8db54b9c5df8 -->|"calls L1156 UNKNOWN"| n4e49d3fc82248192
+  nc75d8db54b9c5df8 -->|"calls L1158 UNKNOWN"| ndba56fb65f1b79b3
+  nc75d8db54b9c5df8 -->|"rolls_back L1158 UNKNOWN"| ndba56fb65f1b79b3
+  nc75d8db54b9c5df8 -->|"calls L1159 UNKNOWN"| nc154b94bb301a678
+  nc75d8db54b9c5df8 -->|"calls L1160 UNKNOWN"| nca1a7d7bbdb2abc4
+  nc75d8db54b9c5df8 -->|"calls L1164 UNKNOWN"| naf05f328d23166a1
+  nc75d8db54b9c5df8 -->|"calls L1166 UNKNOWN"| nb6276ba72bbc5084
+  nc75d8db54b9c5df8 -->|"calls L1167 UNKNOWN"| n71fa9faaa6f884aa
+  nbbee89b635a2e5f1 -->|"calls L447 UNKNOWN"| n90c9566511564fc6
+  nbbee89b635a2e5f1 -->|"calls L448 UNKNOWN"| nebbb4b96ef5b30ca
+  nbbee89b635a2e5f1 -->|"calls L452 UNKNOWN"| n1f6fa6f69d185e60
+  nbbee89b635a2e5f1 -->|"calls L453 UNKNOWN"| nb5fe90334b2f8f69
+  nbbee89b635a2e5f1 -->|"calls L453 UNKNOWN"| nb098b4523e78b04b
+  nbbee89b635a2e5f1 -->|"calls L456 UNKNOWN"| n1351075bcd271d3a
   nbbee89b635a2e5f1 -->|"calls L463 UNKNOWN"| n71fa9faaa6f884aa
-  nbbee89b635a2e5f1 -->|"calls L465 UNKNOWN"| n06f1a4a29a9c65a4
-  nbbee89b635a2e5f1 -->|"calls L466 UNKNOWN"| n2f4b7f8ce67bbf9b
-  nbbee89b635a2e5f1 -->|"calls L470 UNKNOWN"| nd4dec1d3f75a2d09
-  nbbee89b635a2e5f1 -->|"calls L471 UNKNOWN"| nf5d7e34b8f301b47
-  nbbee89b635a2e5f1 -->|"calls L473 UNKNOWN"| nd4dec1d3f75a2d09
-  nbbee89b635a2e5f1 -->|"calls L475 UNKNOWN"| n1fa2b2c9d44e4628
-  nbbee89b635a2e5f1 -->|"calls L476 UNKNOWN"| n3ea571557405ce03
-  nbbee89b635a2e5f1 -->|"calls L477 UNKNOWN"| nb5fe90334b2f8f69
-  nbbee89b635a2e5f1 -->|"calls L477 UNKNOWN"| nb098b4523e78b04b
-  nbbee89b635a2e5f1 -->|"calls L478 UNKNOWN"| n263e118c42d0eee5
-  n29a6a7447086ece0 -->|"calls L778 UNKNOWN"| n38942642bbbed08e
-  n29a6a7447086ece0 -->|"calls L780 UNKNOWN"| n7a564b907123e11d
-  n29a6a7447086ece0 -->|"calls L782 UNKNOWN"| n4a11dbf513153980
-  n29a6a7447086ece0 -->|"calls L787 UNKNOWN"| n826679e8a015eaa1
-  n29a6a7447086ece0 -->|"calls L790 UNKNOWN"| n1303c06b0b014d0c
-  n29a6a7447086ece0 -->|"calls L792 UNKNOWN"| n69ff21f8bbf10c81
-  n29a6a7447086ece0 -->|"calls L799 UNKNOWN"| n69ff21f8bbf10c81
-  n29a6a7447086ece0 -->|"calls L800 UNKNOWN"| n1c545b092af8f3d5
-  n29a6a7447086ece0 -->|"calls L801 UNKNOWN"| n1c545b092af8f3d5
-  n1248d85a590f11c1 -->|"calls L811 UNKNOWN"| n7a564b907123e11d
-  n1248d85a590f11c1 -->|"calls L812 UNKNOWN"| n4a11dbf513153980
-  n1248d85a590f11c1 -->|"calls L813 UNKNOWN"| nfc8d89dfdc54e731
-  n1248d85a590f11c1 -->|"calls L814 UNKNOWN"| n4a11dbf513153980
-  n1248d85a590f11c1 -->|"calls L816 UNKNOWN"| n69ff21f8bbf10c81
-  n1248d85a590f11c1 -->|"calls L817 UNKNOWN"| n7a564b907123e11d
-  n1248d85a590f11c1 -->|"calls L817 UNKNOWN"| n76a7e234dc54e9c6
-  n1248d85a590f11c1 -->|"calls L818 UNKNOWN"| n4a11dbf513153980
-  n1248d85a590f11c1 -->|"calls L819 UNKNOWN"| n8c25cb3686462e9a
-  n1248d85a590f11c1 -->|"calls L822 UNKNOWN"| n69ff21f8bbf10c81
-  n1248d85a590f11c1 -->|"calls L828 UNKNOWN"| n7a564b907123e11d
-  n1248d85a590f11c1 -->|"calls L831 UNKNOWN"| n28f5881cba3868e1
-  n1248d85a590f11c1 -->|"calls L832 UNKNOWN"| n7a564b907123e11d
-  n1248d85a590f11c1 -->|"calls L832 UNKNOWN"| n76a7e234dc54e9c6
-  n1248d85a590f11c1 -->|"calls L833 UNKNOWN"| n69ff21f8bbf10c81
-  n1248d85a590f11c1 -->|"calls L836 UNKNOWN"| n28f5881cba3868e1
-  n1248d85a590f11c1 -->|"calls L838 UNKNOWN"| nd99cefb843fbe95d
-  n1248d85a590f11c1 -->|"calls L842 UNKNOWN"| ncaf352eba27828d1
-  n1248d85a590f11c1 -->|"spawns L842 UNKNOWN"| ncaf352eba27828d1
-  n1248d85a590f11c1 -->|"calls L845 UNKNOWN"| n28f5881cba3868e1
-  nfce33056b54a689e -->|"calls L1312 UNKNOWN"| naade5dcb496702ac
-  nfce33056b54a689e -->|"calls L1315 UNKNOWN"| nda7ab45f38cdc975
-  nfce33056b54a689e -->|"calls L1319 UNKNOWN"| n4e181830acba64f0
-  nfce33056b54a689e -->|"calls L1319 UNKNOWN"| n11633437248876a8
-  nfce33056b54a689e -->|"calls L1321 UNKNOWN"| n27ff6bc901a2313e
+  nbbee89b635a2e5f1 -->|"calls L463 UNKNOWN"| n2269c0be009b610c
+  nbbee89b635a2e5f1 -->|"calls L465 UNKNOWN"| nfaee88711cab0cf6
+  nbbee89b635a2e5f1 -->|"calls L466 UNKNOWN"| n71fa9faaa6f884aa
+  nbbee89b635a2e5f1 -->|"calls L468 UNKNOWN"| n06f1a4a29a9c65a4
+  nbbee89b635a2e5f1 -->|"calls L469 UNKNOWN"| n2f4b7f8ce67bbf9b
+  nbbee89b635a2e5f1 -->|"calls L473 UNKNOWN"| nb79d9b7bb780ba0f
+  nbbee89b635a2e5f1 -->|"calls L474 UNKNOWN"| nf5d7e34b8f301b47
+  nbbee89b635a2e5f1 -->|"calls L476 UNKNOWN"| nb79d9b7bb780ba0f
+  nbbee89b635a2e5f1 -->|"calls L478 UNKNOWN"| n1fa2b2c9d44e4628
+  nbbee89b635a2e5f1 -->|"calls L479 UNKNOWN"| n3ea571557405ce03
+  nbbee89b635a2e5f1 -->|"calls L480 UNKNOWN"| nb5fe90334b2f8f69
+  nbbee89b635a2e5f1 -->|"calls L480 UNKNOWN"| nb098b4523e78b04b
+  nbbee89b635a2e5f1 -->|"calls L481 UNKNOWN"| n263e118c42d0eee5
+  n29a6a7447086ece0 -->|"calls L781 UNKNOWN"| n38942642bbbed08e
+  n29a6a7447086ece0 -->|"calls L783 UNKNOWN"| n7a564b907123e11d
+  n29a6a7447086ece0 -->|"calls L785 UNKNOWN"| n4a11dbf513153980
+  n29a6a7447086ece0 -->|"calls L790 UNKNOWN"| n826679e8a015eaa1
+  n29a6a7447086ece0 -->|"calls L793 UNKNOWN"| n1303c06b0b014d0c
+  n29a6a7447086ece0 -->|"calls L795 UNKNOWN"| n69ff21f8bbf10c81
+  n29a6a7447086ece0 -->|"calls L802 UNKNOWN"| n69ff21f8bbf10c81
+  n29a6a7447086ece0 -->|"calls L803 UNKNOWN"| n1c545b092af8f3d5
+  n29a6a7447086ece0 -->|"calls L804 UNKNOWN"| n1c545b092af8f3d5
+  n1248d85a590f11c1 -->|"calls L814 UNKNOWN"| n7a564b907123e11d
+  n1248d85a590f11c1 -->|"calls L815 UNKNOWN"| n4a11dbf513153980
+  n1248d85a590f11c1 -->|"calls L816 UNKNOWN"| nfc8d89dfdc54e731
+  n1248d85a590f11c1 -->|"calls L817 UNKNOWN"| n4a11dbf513153980
+  n1248d85a590f11c1 -->|"calls L819 UNKNOWN"| n69ff21f8bbf10c81
+  n1248d85a590f11c1 -->|"calls L820 UNKNOWN"| n7a564b907123e11d
+  n1248d85a590f11c1 -->|"calls L820 UNKNOWN"| n76a7e234dc54e9c6
+  n1248d85a590f11c1 -->|"calls L821 UNKNOWN"| n4a11dbf513153980
+  n1248d85a590f11c1 -->|"calls L822 UNKNOWN"| n8c25cb3686462e9a
+  n1248d85a590f11c1 -->|"calls L825 UNKNOWN"| n69ff21f8bbf10c81
+  n1248d85a590f11c1 -->|"calls L831 UNKNOWN"| n7a564b907123e11d
+  n1248d85a590f11c1 -->|"calls L834 UNKNOWN"| n28f5881cba3868e1
+  n1248d85a590f11c1 -->|"calls L835 UNKNOWN"| n7a564b907123e11d
+  n1248d85a590f11c1 -->|"calls L835 UNKNOWN"| n76a7e234dc54e9c6
+  n1248d85a590f11c1 -->|"calls L836 UNKNOWN"| n69ff21f8bbf10c81
+  n1248d85a590f11c1 -->|"calls L839 UNKNOWN"| n28f5881cba3868e1
+  n1248d85a590f11c1 -->|"calls L841 UNKNOWN"| nd99cefb843fbe95d
+  n1248d85a590f11c1 -->|"calls L845 UNKNOWN"| ncaf352eba27828d1
+  n1248d85a590f11c1 -->|"spawns L845 UNKNOWN"| ncaf352eba27828d1
+  n1248d85a590f11c1 -->|"calls L848 UNKNOWN"| n28f5881cba3868e1
+  nfce33056b54a689e -->|"calls L1314 UNKNOWN"| naade5dcb496702ac
+  nfce33056b54a689e -->|"calls L1317 UNKNOWN"| nda7ab45f38cdc975
+  nfce33056b54a689e -->|"calls L1321 UNKNOWN"| n4e181830acba64f0
   nfce33056b54a689e -->|"calls L1321 UNKNOWN"| n11633437248876a8
-  nfce33056b54a689e -->|"calls L1322 UNKNOWN"| nc9afc41841bc96a8
-  nfce33056b54a689e -->|"calls L1322 UNKNOWN"| n11633437248876a8
-  nfce33056b54a689e -->|"calls L1323 UNKNOWN"| n7d40ed9ed23b030f
+  nfce33056b54a689e -->|"calls L1323 UNKNOWN"| n27ff6bc901a2313e
   nfce33056b54a689e -->|"calls L1323 UNKNOWN"| n11633437248876a8
-  nfce33056b54a689e -->|"calls L1332 UNKNOWN"| n4a11dbf513153980
-  nfce33056b54a689e -->|"calls L1332 UNKNOWN"| n227bbfcd932bb38e
-  nfce33056b54a689e -->|"calls L1334 UNKNOWN"| nda0a764b18e874bb
-  nfce33056b54a689e -->|"calls L1338 UNKNOWN"| n0e05fd7fed7ef310
-  nfce33056b54a689e -->|"calls L1339 UNKNOWN"| ned661653a4d70a9d
-  nfce33056b54a689e -->|"calls L1339 UNKNOWN"| n71fa9faaa6f884aa
-  nfce33056b54a689e -->|"calls L1339 UNKNOWN"| n0544e5b46909da3a
-  nfce33056b54a689e -->|"calls L1344 UNKNOWN"| n209334387646ed57
-  nfce33056b54a689e -->|"calls L1345 UNKNOWN"| n11633437248876a8
-  nfce33056b54a689e -->|"calls L1345 UNKNOWN"| n91185525dcd7e1bb
-  nfce33056b54a689e -->|"calls L1347 UNKNOWN"| nb6276ba72bbc5084
+  nfce33056b54a689e -->|"calls L1324 UNKNOWN"| nc9afc41841bc96a8
+  nfce33056b54a689e -->|"calls L1324 UNKNOWN"| n11633437248876a8
+  nfce33056b54a689e -->|"calls L1325 UNKNOWN"| n7d40ed9ed23b030f
+  nfce33056b54a689e -->|"calls L1325 UNKNOWN"| n11633437248876a8
+  nfce33056b54a689e -->|"calls L1334 UNKNOWN"| n4a11dbf513153980
+  nfce33056b54a689e -->|"calls L1334 UNKNOWN"| n227bbfcd932bb38e
+  nfce33056b54a689e -->|"calls L1336 UNKNOWN"| nda0a764b18e874bb
+  nfce33056b54a689e -->|"calls L1340 UNKNOWN"| n0e05fd7fed7ef310
+  nfce33056b54a689e -->|"calls L1341 UNKNOWN"| ned661653a4d70a9d
+  nfce33056b54a689e -->|"calls L1341 UNKNOWN"| n71fa9faaa6f884aa
+  nfce33056b54a689e -->|"calls L1341 UNKNOWN"| n0544e5b46909da3a
+  nfce33056b54a689e -->|"calls L1346 UNKNOWN"| n209334387646ed57
+  nfce33056b54a689e -->|"calls L1347 UNKNOWN"| n11633437248876a8
+  nfce33056b54a689e -->|"calls L1347 UNKNOWN"| n91185525dcd7e1bb
+  nfce33056b54a689e -->|"calls L1349 UNKNOWN"| nb6276ba72bbc5084
   nc96848d699448c4d -->|"calls L1029 UNKNOWN"| ncf534327b04f953b
   nc96848d699448c4d -->|"calls L1029 UNKNOWN"| naf33d74bb2d42e43
   ne0cda1694bb17dc9 -->|"calls L808 UNKNOWN"| n62fa5a5b0d3c3188

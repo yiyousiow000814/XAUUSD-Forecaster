@@ -365,12 +365,17 @@ class NewsSourceCaptureStorageUnresolved(RuntimeError):
     retryable = False
 
 
+def news_reader_excludes(row: dict) -> bool:
+    """Shared reader visibility; skipped source evidence remains in the ledger."""
+    return bool(row.get("content_policy_skipped")) or row.get("xauusd_relevance") == "IRRELEVANT"
+
+
 def news_source_capture_record(row: dict, cursor: list) -> dict:
     """Preserve the original detail JSON order, never re-hash sorted payloads."""
     identity = (row["source"], row["source_item_id"], row["revision_number"])
     if tuple(cursor[1:]) != identity:
         raise ValueError("NEWS_SOURCE_CAPTURE_IDENTITY_MISMATCH")
-    if row.get("xauusd_relevance") == "IRRELEVANT":
+    if news_reader_excludes(row):
         return {"cursor": cursor, "withdrawal": stable_news_key(row)}
     index, detail = split_news_rows([row])
     return {"cursor": cursor, "index": index[0], "detail": detail[0]}

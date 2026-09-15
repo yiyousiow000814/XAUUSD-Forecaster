@@ -23,6 +23,7 @@ from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[2]
 
 
+from xauusd_forecaster.news.annotation.content_policy import permitted_content_sql
 from xauusd_forecaster.dashboard.news_resources import (
     NewsProjectionSourcePending,
     _build_news_evidence_resource,
@@ -572,6 +573,7 @@ def _dashboard_payload(
                  AND COALESCE(
                        json_extract(a.annotation_json, '$.xauusd_relevance'), ''
                      ) <> 'IRRELEVANT'
+                AND {permitted_content_sql("n")}
                -- Reader chronology follows the publisher clock.  First-seen
                -- remains the immutable point-in-time visibility clock.
                ORDER BY COALESCE(n.source_published_time,
