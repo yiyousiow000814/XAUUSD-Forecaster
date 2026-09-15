@@ -149,6 +149,18 @@ restart resume only repair for the same annotation/source/model/prompt/repair
 contract identity. The immutable checkpoint is capped at 256 KiB, excludes full
 article bodies and credentials, and never grants successful assessment status.
 Changed identities cannot reuse it; historical checkpoints remain audit evidence.
+The initial-evidence checkpoint contract is independent of the repair-request
+version when only repair instructions change. A resumed repair MUST receive the
+latest matching scheduler contract rejection, including bounded comparison
+fields when available. Provider/capacity failures do not replace that feedback.
+The indexed lookup is restricted to the same annotation, source revision and
+prompt; new rejection evidence also binds the original checkpoint key. Historical
+partial diagnostics are advisory, never a replacement complete result or fact.
+Every returned repair still passes the complete identity and impact validator.
+Relation/update choices do not waive comparison proof obligations: even a
+contextual SAME_EPISODE update needs a core factual change. An ineligible
+SAME_EVENT anchor is not evidence of such a change. Repair prompts must use one
+wire representation consistently, without retired separate-field instructions.
 Repair transport selects one offered combination of identity relation, update
 type and candidate ID. The system expands that choice without inferring a
 judgment from prose; separate or unknown identity fields are rejected. Choices

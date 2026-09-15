@@ -48,7 +48,7 @@ from xauusd_forecaster.news.semantics.time import (
     semantic_eligibility_sql_predicate,
 )
 from xauusd_forecaster.news.annotation.impact_repair import (
-    CONTEXT_FIELDS, REPAIR_CONTRACT, checkpoint_key, load_checkpoint, save_checkpoint,
+    CONTEXT_FIELDS, REPAIR_CONTRACT, checkpoint_key, load_checkpoint, save_checkpoint, load_repair_feedback,
 )
 from xauusd_forecaster.news.annotation.content_policy import (
     PROHIBITED_CONTENT, content_is_skipped, permitted_content_sql,
@@ -128,6 +128,7 @@ class ModelOutputContractFailed(ValueError):
             "identity_relation": 40,
             "matched_candidate_id": 120,
             "identity_choice": 240,
+            "identity_anchor_zh": 300,
             "reason_zh": 300,
         }
         for name, limit in limits.items():
@@ -138,6 +139,9 @@ class ModelOutputContractFailed(ValueError):
             selected["supporting_evidence"] = [
                 str(item)[:240] for item in evidence[:3]
             ]
+        for name in ("core_fact_changes_zh", "identity_differences_zh", "context_differences_zh"):
+            if isinstance(result.get(name), list):
+                selected[name] = [str(item)[:240] for item in result[name][:3]]
         self.failure_evidence = {
             "failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
             "failure_stage": stage,
@@ -1053,7 +1057,10 @@ def assess_pending_news_impacts(
                 row = {**row, **checkpoint["request_row"]}
             result, exact_model = request_pool.call_impact(
                 index, row, prompt_version=impact_prompt_version,
-                resume_checkpoint=repair_checkpoints[str(row["annotation_id"])],
+                resume_checkpoint=checkpoint,
+                repair_feedback=(load_repair_feedback(
+                    ledger.connection, row, impact_prompt_version, repair_key,
+                ) if checkpoint is not None else None),
                 checkpoint_callback=lambda payload: save_checkpoint(ledger.connection, repair_key, payload),
             )
             assessed = datetime.now(UTC)
@@ -1103,6 +1110,8 @@ def assess_pending_news_impacts(
                 **_capacity_deferred_status(error),
             })
         except Exception as error:
+            if isinstance(error, ModelOutputContractFailed):
+                error.failure_evidence["checkpoint_key"] = repair_key
             failure_details = _model_failure_details(error)
             failure = _append_impact_failure(
                 ledger, row, error, model_version=IMPACT_MODEL,
@@ -1360,10 +1369,11 @@ class _GeminiRequestPool:
         self, start_index: int, row: dict, *,
         prompt_version: str = IMPACT_PROMPT_VERSION,
         resume_checkpoint: dict | None = None,
+        repair_feedback: dict | None = None,
         checkpoint_callback: Callable[[dict], None] | None = None,
     ) -> tuple[dict, str]:
         if resume_checkpoint is not None:
-            return self._finish_impact_repair(start_index, resume_checkpoint, prompt_version)
+            return self._finish_impact_repair(start_index, resume_checkpoint, prompt_version, repair_feedback)
         request_row = dict(row)
         request_row["headline"], request_row["body"] = selected_article(
             str(row.get("headline") or ""), str(row.get("body") or ""),
@@ -1409,7 +1419,10 @@ class _GeminiRequestPool:
                 checkpoint_callback(checkpoint)
             return self._finish_impact_repair(start_index + 1, checkpoint, prompt_version)
 
-    def _finish_impact_repair(self, start_index: int, checkpoint: dict, prompt_version: str) -> tuple[dict, str]:
+    def _finish_impact_repair(
+        self, start_index: int, checkpoint: dict, prompt_version: str,
+        repair_feedback: dict | None = None,
+    ) -> tuple[dict, str]:
         request_row = checkpoint["request_row"]
         raw_result = checkpoint["raw_result"]
         initial_error = ValueError(checkpoint["initial_error"])
@@ -1417,6 +1430,7 @@ class _GeminiRequestPool:
         try:
             repaired = self._repair_impact_contract(
                 start_index, request_row, raw_result, initial_error, prompt_version=prompt_version,
+                repair_feedback=repair_feedback,
             )
             repaired = _expand_impact_repair_choice(repaired, request_row)
             return _validate_impact_result(repaired, request_row), checkpoint["exact_model"]
@@ -1432,9 +1446,10 @@ class _GeminiRequestPool:
     def _repair_impact_contract(
         self, start_index: int, row: dict, result: dict,
         validation_error: Exception, *, prompt_version: str,
+        repair_feedback: dict | None = None,
     ) -> dict[str, object]:
         payload = _impact_contract_repair_payload(
-            row, result, validation_error,
+            row, result, validation_error, repair_feedback=repair_feedback,
         )
         serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         input_tokens = conservative_input_token_estimate(serialized) + 512
@@ -1941,7 +1956,8 @@ def _expand_impact_repair_choice(result: dict, row: dict) -> dict:
 
 
 def _impact_contract_repair_payload(
-    row: dict, result: dict, validation_error: Exception,
+    row: dict, result: dict, validation_error: Exception, *,
+    repair_feedback: dict | None = None,
 ) -> dict[str, object]:
     """Give one bounded repair attempt the exact failed invariant and universe."""
     candidates = [
@@ -1976,16 +1992,22 @@ def _impact_contract_repair_payload(
         "NEW_EVENT必须对应NEW_EPISODE。SAME_EVENT不得有核心事实变化或身份差异；"
         "SAME_EPISODE必须列出核心事实变化且不得列身份差异；"
         "NEW_EPISODE在OFFERED_CANDIDATES非空时必须列出具体身份差异；候选为空且上下文完整时"
-        "不得虚构比较对象，identity_differences_zh可以为空。若现有证据不足以可靠修复，选择UNRESOLVED、"
-        "matched_candidate_id填写NO_MATCH，并使用与不确定性一致的非新增事件update_type。"
-        "matched_candidate_id只能从提供的candidate_id中选择或填写NO_MATCH，不得填写空字符串。"
+        "不得虚构比较对象，identity_differences_zh可以为空。若证据不足以可靠确认事件身份，"
+        "选择UNRESOLVED对应的identity_choice，并保留有证据支持的影响和事实判断。"
+        "候选不具备SAME_EVENT锚点资格，不代表存在SAME_EPISODE所需的新事实。"
+        "同主题、同时间、另一来源的评论或预测都不是核心事实变化；不得为通过校验而编造变化。"
+        "COMMENTARY或HISTORICAL_CONTEXT也不能豁免所选身份关系的事实比较要求。"
         "reason_zh必须是普通用户可读的简体中文。只返回完整JSON。\n"
         "输出时不要分别返回identity_relation、update_type和matched_candidate_id。"
         "只填写一个identity_choice，从ALLOWED_IDENTITY_CHOICES中选择完整组合；"
         "代码会展开该组合。其余事实比较和解释必须与所选组合一致。"
         "reason_zh只写普通用户可读的事实依据，不要解释JSON修改步骤或输出内部ID。\n"
         "ALLOWED_IDENTITY_CHOICES: " + json.dumps(choices, ensure_ascii=False, separators=(",", ":")) + "\n"
-        f"VALIDATION_ERROR: {str(validation_error)[:300]}\n"
+        "PREVIOUS_REPAIR_REJECTION是上次修复再次被拒绝的诊断片段，可能省略字段，"
+        "不是新事实或完整模型结果。纠正该拒绝原因，不要只重复修复最初的错误。\n"
+        "PREVIOUS_REPAIR_REJECTION: "
+        + json.dumps(repair_feedback, ensure_ascii=False, separators=(",", ":")) + "\n"
+        + f"VALIDATION_ERROR: {str(validation_error)[:300]}\n"
         "CURRENT_EVENT_EXTRACTION: "
         + json.dumps(row.get("annotation") or {}, ensure_ascii=False, separators=(",", ":"))
         + "\nCANDIDATE_CONTEXT_COMPLETE: "
