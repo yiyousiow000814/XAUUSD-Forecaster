@@ -27,6 +27,7 @@ from xauusd_forecaster.dashboard.news_archive import (
 )
 from xauusd_forecaster.news_projection import (
     NEWS_READER_WINDOW_DAYS,
+    news_reader_excludes,
     NEWS_PROJECTION_CONTRACT_VERSION,
     NEWS_PROJECTION_MAX_ITEMS,
     NewsProjectionGeneration,
@@ -39,6 +40,7 @@ from xauusd_forecaster.news_projection import (
     build_news_projection_generation,
     receipt_digest,
 )
+from xauusd_forecaster.news.annotation.content_policy import permitted_content_sql
 from xauusd_forecaster.news.annotation.product import (
     INVALID_CHINESE_TITLE,
     PROMPT_VERSION,
@@ -143,6 +145,7 @@ def _news_reader_rows(
                         ELSE 'PENDING' END AS content_fetch_status,
                    cf.error_type AS content_error_type,
                    n.link, n.content_hash, n.body,
+                   NOT ({permitted_content_sql("n")}) AS content_policy_skipped,
                    json_extract(a.annotation_json, '$.source_title_segment_ids') AS source_title_segment_ids_json,
                    json_extract(a.annotation_json, '$.source_body_segment_ids') AS source_body_segment_ids_json,
                    EXISTS (
@@ -414,11 +417,11 @@ def _news_archive_page(
             "revision_number": item["revision_number"],
         }
         for item in serialized
-        if item.get("xauusd_relevance") == "IRRELEVANT"
+        if news_reader_excludes(item)
     ]
     news = [
         item for item in serialized
-        if item.get("xauusd_relevance") != "IRRELEVANT"
+        if not news_reader_excludes(item)
     ]
     next_cursor = (
         json.dumps([
@@ -467,10 +470,10 @@ def _build_news_projection_source(
             "source": item["source"],
             "source_item_id": item["source_item_id"],
             "revision_number": item["revision_number"],
-        } for item in serialized if item.get("xauusd_relevance") == "IRRELEVANT")
+        } for item in serialized if news_reader_excludes(item))
         items.extend(
             item for item in serialized
-            if item.get("xauusd_relevance") != "IRRELEVANT"
+            if not news_reader_excludes(item)
         )
     return build_news_projection_generation(
         group_article_copies(items), withdrawals,

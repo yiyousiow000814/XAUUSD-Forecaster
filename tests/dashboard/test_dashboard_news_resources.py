@@ -1014,3 +1014,66 @@ def test_selected_article_survives_ledger_and_reader_without_rehydrating(tmp_pat
     assert ledger.connection.execute("SELECT count(*) FROM news_revisions").fetchone()[0] == 2
     assert {r[0] for r in ledger.connection.execute("SELECT body FROM news_revisions")} == {body, second_body}
     ledger.close()
+
+
+def test_prohibited_content_withdraws_canonical_reader_copy_without_deleting_evidence(tmp_path):
+    from xauusd_forecaster.news.annotation.content_policy import skip_prohibited_content, content_is_skipped
+    from xauusd_forecaster.news_projection import news_source_capture_record, stable_news_key
+    now = datetime.now(UTC) - timedelta(seconds=20)
+    ledger = ForwardLedger(tmp_path / "skipped.sqlite3", now=now - timedelta(seconds=1))
+    body = "Complete source evidence rejected explicitly by the provider. " * 20
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    for item in ("copy-a", "copy-b", "healthy"):
+        text = body if item != "healthy" else body + "Unrelated healthy report."
+        ledger.append_news_revision({
+            "source": "gdelt_gold_geopolitics", "source_item_id": item,
+            "source_published_time": now, "collector_first_seen_time": now,
+            "fetched_time": now, "headline": item, "body": text,
+            "content_hash": hashlib.sha256(text.encode()).hexdigest(),
+            "cluster_id": "copies" if item != "healthy" else "healthy",
+        })
+    first = news_resources._news_archive_page(ledger.connection, None, 20)
+    assert len(first["items"]) == 2
+    canonical = next(item for item in first["items"] if item["source_item_id"] != "healthy")
+    other = "copy-b" if canonical["source_item_id"] == "copy-a" else "copy-a"
+    skip_prohibited_content(ledger.connection, {"source": "gdelt_gold_geopolitics",
+        "source_item_id": other, "revision_number": 1, "content_hash": digest})
+    changed = news_resources._news_archive_page(ledger.connection, first["next_cursor"], 20)
+    assert changed["items"] == []
+    assert changed["withdrawals"] == [{"source": canonical["source"],
+        "source_item_id": canonical["source_item_id"], "revision_number": 1}]
+    assert changed["next_cursor"] != first["next_cursor"]
+    assert news_resources._news_archive_page(ledger.connection, changed["next_cursor"], 20)["withdrawals"] == []
+    # The complete builder and streaming capture produce the same withdrawal.
+    generation = news_resources._build_news_projection_source(ledger.connection)
+    assert len(generation.index_rows) == 1
+    assert generation.manifest["withdrawal_count"] == 1
+    from xauusd_forecaster.dashboard.status_resources import _dashboard_payload
+    payload = _dashboard_payload(ledger.path, optional_resources=frozenset({"audit"}))
+    assert [item["source_item_id"] for item in payload["recent_news"]] == ["healthy"]
+    keys = news_resources._news_mirror_candidate_keys(ledger.connection,
+        cutoff=(now-timedelta(days=60)).isoformat(), after=first["next_cursor"], limit=20)
+    raw = news_resources._news_reader_rows(ledger.connection, datetime.now(UTC), candidate_keys=keys)
+    epoch, claimable = news_resources._news_archive_context(ledger.connection, datetime.now(UTC))
+    item = news_resources._serialize_news_rows(raw, datetime.now(UTC), epoch, claimable)[0]
+    record = news_source_capture_record(item, [keys[0][3], *keys[0][:3]])
+    assert record["withdrawal"] == stable_news_key(canonical)
+    assert "index" not in record and "detail" not in record
+    assert ledger.connection.execute("SELECT count(*) FROM news_revisions").fetchone()[0] == 3
+    assert ledger.connection.execute("SELECT body FROM news_revisions WHERE source_item_id=?", (other,)).fetchone()[0] == body
+    ledger.close()
+    ledger = ForwardLedger(tmp_path / "skipped.sqlite3", now=now)
+    assert content_is_skipped(ledger.connection, {"content_hash": digest})
+    assert len(news_resources._news_archive_page(ledger.connection, None, 20)["items"]) == 1
+    # A genuinely changed revision is not hidden by the old hash classification.
+    revised = body + "Changed source content."
+    ledger.append_news_revision({
+        "source": "gdelt_gold_geopolitics", "source_item_id": canonical["source_item_id"],
+        "source_published_time": now, "collector_first_seen_time": now,
+        "fetched_time": datetime.now(UTC), "headline": "Changed report", "body": revised,
+        "content_hash": hashlib.sha256(revised.encode()).hexdigest(), "cluster_id": "copies",
+    })
+    assert not content_is_skipped(ledger.connection, {"content_hash": hashlib.sha256(revised.encode()).hexdigest()})
+    assert any(item["source_item_id"] == canonical["source_item_id"] for item in
+               news_resources._news_archive_page(ledger.connection, None, 20)["items"])
+    ledger.close()

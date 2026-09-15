@@ -402,6 +402,12 @@ pending AI work for that exact content; do not retry it, switch credentials or
 providers, or recreate work after restart or prompt migration. Changed content
 may be processed as a new identity. Preserve raw and accepted historical evidence;
 skip is neither successful annotation nor an actionable operational failure.
+Skipped content is excluded from public news lists and their totals. Keep its
+raw evidence privately; do not label it as an unprocessed queue failure. The
+classification must advance mirror discovery for every matching content hash,
+including canonical copies. Emit the existing withdrawal so already-published
+rows disappear through normal acknowledged publication. Complete builds,
+streaming capture and recent readers apply the same exclusion.
 Do not infer prohibited content from article keywords, HTTP failures, generic
 safety responses, or invalid JSON. Existing failure recovery must honor the skip.
 

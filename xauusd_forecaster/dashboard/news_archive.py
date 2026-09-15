@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
+from xauusd_forecaster.news.annotation.content_policy import PROHIBITED_CONTENT
 from xauusd_forecaster.news.retrieval.identity import preferred_cluster_peer_predicate
 
 
@@ -59,6 +60,11 @@ def news_mirror_candidate_keys(
               SELECT source,source_item_id,revision_number,failed_at
               FROM news_content_failures WHERE failed_at>=?
               UNION ALL
+              SELECT n.source,n.source_item_id,n.revision_number,p.classified_at
+              FROM news_item_classifications_v1 p
+              JOIN news_revisions n ON n.content_hash=p.source_hash
+              WHERE p.reason_code='{PROHIBITED_CONTENT}' AND p.classified_at>=?
+              UNION ALL
               SELECT f.source,f.source_item_id,f.revision_number,r.authorized_at
               FROM news_ai_failure_recoveries_v1 r
               JOIN news_llm_failures f ON f.failure_id=r.failure_id
@@ -94,6 +100,7 @@ def news_mirror_candidate_keys(
             ORDER BY {order}
             LIMIT ?""",
         (
+            cutoff,
             cutoff,
             cutoff,
             cutoff,

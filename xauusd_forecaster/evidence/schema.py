@@ -436,6 +436,13 @@ CREATE TABLE IF NOT EXISTS news_item_classifications_v1 (
     UNIQUE(source,source_item_id,revision_number,policy_version)
 );
 
+CREATE INDEX IF NOT EXISTS news_revisions_content_identity_v1
+ON news_revisions(content_hash,source,source_item_id,revision_number);
+
+CREATE INDEX IF NOT EXISTS news_prohibited_classification_changes_v1
+ON news_item_classifications_v1(classified_at,source_hash)
+WHERE reason_code='PROVIDER_PROHIBITED_CONTENT';
+
 CREATE TABLE IF NOT EXISTS news_semantic_health_snapshots_v1 (
     source_decision_id TEXT PRIMARY KEY,
     decision_time TEXT NOT NULL,
