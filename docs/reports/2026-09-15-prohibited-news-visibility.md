@@ -56,3 +56,10 @@ Worker receiving Python sparse transport, removal membership, count integrity,
 strict ACK, authentication and stale-delta failure. No acceptance gate changed.
 
 Final Python regression: 408 passed, 1 skipped in 61.91 seconds.
+
+CI caught an index initialization boundary: the independently installable v2
+schema must not reference base news tables that its installer does not own.
+The content-hash index now belongs beside news_revisions in the base schema;
+the classification index remains with its table. The existing standalone
+installer/foreign-key recovery contract protects this boundary without changing
+or weakening its fixture. Final review checks both installers independently.
