@@ -3533,6 +3533,7 @@ def test_structured_attempt_evidence_stays_valid_bounded_and_immutable(size):
     credential = ApiCredential("account", ROUTINE_POOL, "test-key", "credential")
     evidence = {"failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
                 "failure_stage": "IMPACT_CONTRACT_REPAIR", "cause": "invalid reference",
+                "checkpoint_key": "a" * 64,
                 "selected_output": {"reason_zh": "x" * size, "matched_candidate_id": "bad"}}
     status = {"status": "ERROR", "failure_evidence": evidence}
     record_job_attempt(connection, job=job, credential=credential, status=status, attempted_at=NOW)
@@ -3542,6 +3543,7 @@ def test_structured_attempt_evidence_stays_valid_bounded_and_immutable(size):
         "SELECT json_valid(error_detail),json_extract(error_detail,'$.failure_stage') FROM news_ai_job_attempts_v1"
     ).fetchone()[:] == (1, "IMPACT_CONTRACT_REPAIR")
     assert len(saved) <= 8192
+    assert decoded["checkpoint_key"] == evidence["checkpoint_key"]
     if size < 8192:
         assert decoded == evidence
     else:

@@ -2855,8 +2855,9 @@ def test_ambiguous_google_rate_title_reaches_ai_translation(
     assert ledger.count("news_title_translations") == 1
 
 
+@pytest.mark.parametrize("first_failure", ["capacity", "contract"])
 def test_gemma_impact_assessment_is_append_only_and_versioned(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, first_failure
 ) -> None:
     now = datetime(2026, 8, 8, 20, 40, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
@@ -2929,7 +2930,14 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
             _kwargs["checkpoint_callback"](checkpoint)
             key = annotation_module.checkpoint_key(row, _kwargs["prompt_version"], annotation_module.IMPACT_MODEL)
             assert annotation_module.load_checkpoint(ledger.connection, key) == checkpoint
+            if first_failure == "contract":
+                raise annotation_module.ModelOutputContractFailed(
+                    ValueError("Same-episode identity requires a core factual change"),
+                    {**_impact_model_result(), "core_fact_changes_zh": []}, stage="IMPACT_CONTRACT_REPAIR")
             raise annotation_module.GeminiBatchCapacityExhausted("repair quota")
+        if first_failure == "contract":
+            assert _kwargs["repair_feedback"]["cause"] == "Same-episode identity requires a core factual change"
+            assert _kwargs["repair_feedback"]["selected_output"]["core_fact_changes_zh"] == []
         assert row["prior_event_context"] == _kwargs["resume_checkpoint"]["request_row"]["prior_event_context"]
         captured_rows.append(row)
         return ({
@@ -2956,7 +2964,20 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
         workload_class=LIVE_OPERATIONAL_WORKLOAD,
     )
 
-    assert statuses[0]["status"] == "DEFERRED"
+    assert statuses[0]["status"] == ("ERROR" if first_failure == "contract" else "DEFERRED")
+    if first_failure == "contract":
+        from dataclasses import replace
+        from xauusd_forecaster.news.scheduler.state import enqueue_job, _job_from_row, record_job_attempt, ApiCredential
+        job_id = enqueue_job(ledger.connection, task_type="ACTIVE_IMPACT",
+            source="federal_reserve_monetary", source_item_id="impact-one", revision_number=1,
+            annotation_id="impact-annotation", prompt_version=annotation_module.IMPACT_PROMPT_VERSION,
+            priority="NORMAL", now=now)
+        job = replace(_job_from_row(ledger.connection.execute(
+            "SELECT * FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone()), attempt_count=1)
+        assert statuses[0]["failure_evidence"]["checkpoint_key"]
+        record_job_attempt(ledger.connection, job=job,
+            credential=ApiCredential("account", "test", "test-key", "credential"),
+            status=statuses[0], attempted_at=now)
     monkeypatch.setattr(retrieval_module, "attach_hybrid_prior_event_context",
                         lambda *_args, **_kwargs: pytest.fail("resume repeated retrieval"))
     statuses = assess_pending_news_impacts(
@@ -4679,6 +4700,14 @@ def test_impact_repair_choices_preserve_identity_authority(eligible, complete):
     for token in choices:
         expanded = annotation_module._expand_impact_repair_choice({"identity_choice": token}, row)
         assert expanded["identity_relation"] != "SAME_EVENT" or expanded["matched_candidate_id"] == "reaction"
+        relation = expanded["identity_relation"]
+        valid = {**_impact_model_result(), **expanded,
+                 "core_fact_changes_zh": ["本次决议新增一项政策措施。"] if relation == "SAME_EPISODE" else [],
+                 "identity_differences_zh": ["本次决议属于另一发生批次。"] if relation == "NEW_EPISODE" else []}
+        assert annotation_module._validate_impact_result(valid, row)["identity_relation"] == relation
+        if relation == "SAME_EPISODE":
+            with pytest.raises(ValueError, match="core factual change"):
+                annotation_module._validate_impact_result({**valid, "core_fact_changes_zh": []}, row)
     with pytest.raises(ValueError, match="without separate"):
         annotation_module._expand_impact_repair_choice({"identity_choice": choices[0], "identity_relation": "SAME_EVENT"}, row)
     empty = annotation_module._impact_repair_choices({"prior_event_context": []})
@@ -4731,4 +4760,114 @@ def test_impact_repair_resumes_after_quota_deferral_and_database_restart(tmp_pat
         ledger.connection.execute("UPDATE news_impact_repair_checkpoints_v1 SET payload_json='{}'")
     with pytest.raises(ValueError, match="bounded context"):
         save_checkpoint(ledger.connection, "oversized", {"text": "x" * 262145})
+    ledger.close()
+
+
+@pytest.mark.parametrize("relation,update,changes,differences,cause", [
+    ("SAME_EPISODE", "COMMENTARY", [], [], "core factual change"),
+    ("SAME_EPISODE", "MATERIAL_UPDATE", ["新增决定"], ["不同主体"], "core factual change"),
+    ("SAME_EVENT", "DUPLICATE_REPORT", ["新增决定"], [], "factual equivalence"),
+    ("NEW_EPISODE", "NEW_EVENT", [], [], "anchor difference"),
+])
+def test_impact_repair_rejection_feedback_survives_provider_failure_and_restart(
+    tmp_path, monkeypatch, relation, update, changes, differences, cause,
+):
+    from dataclasses import replace
+    from xauusd_forecaster.news.scheduler.state import (
+        enqueue_job, record_job_attempt, ApiCredential, _job_from_row,
+    )
+    from xauusd_forecaster.news.annotation.impact_repair import (
+        checkpoint_key, load_checkpoint, save_checkpoint, load_repair_feedback,
+    )
+    path = tmp_path / "feedback.sqlite3"
+    now = datetime.now(UTC)
+    ledger = ForwardLedger(path, now=now)
+    row = {"source": "news", "source_item_id": "item", "revision_number": 1,
+           "annotation_id": "annotation", "content_hash": "source-hash",
+           "annotation": {}, "body": "Complete unchanged evidence",
+           "prior_event_context": [{"candidate_id": "prior", "identity_anchor_eligible": True}]}
+    prompt_version = annotation_module.IMPACT_PROMPT_VERSION
+    key = checkpoint_key(row, prompt_version, annotation_module.IMPACT_MODEL)
+    job_id = enqueue_job(ledger.connection, task_type="ACTIVE_IMPACT",
+        source=row["source"], source_item_id=row["source_item_id"], revision_number=1,
+        annotation_id=row["annotation_id"], prompt_version=prompt_version, priority="NORMAL", now=now)
+    job = replace(_job_from_row(ledger.connection.execute(
+        "SELECT * FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,)).fetchone()), attempt_count=1)
+    credential = ApiCredential("account", "test", "test-key", "credential")
+    initial = {**_impact_model_result(), "identity_relation": "SAME_EVENT",
+               "update_type": "DUPLICATE_REPORT", "matched_candidate_id": "not-offered"}
+    rejected = {k: v for k, v in _impact_model_result().items()
+                if k not in {"identity_relation", "update_type", "matched_candidate_id"}}
+    rejected.update(identity_choice=f"{relation}:{update}:" + ("NO_MATCH" if relation == "NEW_EPISODE" else "prior"),
+                    core_fact_changes_zh=changes, identity_differences_zh=differences)
+    answers = iter((initial, rejected))
+    def post(_key, model, method, payload, *, timeout):
+        return {"modelVersion": model, "candidates": [{"content": {"parts": [{"text": json.dumps(next(answers))}]}}]}
+    monkeypatch.setattr(GeminiModelGateway, "_post_json", staticmethod(post))
+    pool = annotation_module._GeminiRequestPool(("test-key",), requests_per_key=2, batch_limit=2,
+                                               request_accountant=ALLOW_MODEL_REQUEST)
+    with pytest.raises(annotation_module.ModelOutputContractFailed) as caught:
+        pool.call_impact(0, row, checkpoint_callback=lambda value: save_checkpoint(ledger.connection, key, value))
+    evidence = caught.value.failure_evidence
+    assert cause in evidence["cause"]
+    assert evidence["selected_output"]["core_fact_changes_zh"] == changes
+    assert evidence["selected_output"]["identity_differences_zh"] == differences
+    evidence["checkpoint_key"] = key
+    status = {"status": "ERROR", "failure_code": "MODEL_OUTPUT_CONTRACT_FAILED", "failure_evidence": evidence}
+    record_job_attempt(ledger.connection, job=job, credential=credential, status=status, attempted_at=now)
+    before = ledger.connection.execute("SELECT error_detail FROM news_ai_job_attempts_v1").fetchone()[0]
+    # Unrelated transport/capacity outcomes must not erase the rejected repair.
+    for number, code, outcome in [(2, "PROVIDER_HTTP_ERROR", "ERROR"), (3, "MODEL_CAPACITY_DEFERRED", "DEFERRED")]:
+        record_job_attempt(ledger.connection, job=replace(job, attempt_count=number), credential=credential,
+            status={"status": outcome, "failure_code": code}, attempted_at=now + timedelta(seconds=number))
+    ledger.close()
+    ledger = ForwardLedger(path, now=now)
+    feedback = load_repair_feedback(ledger.connection, row, prompt_version, key)
+    assert feedback["cause"] == evidence["cause"]
+    assert load_repair_feedback(ledger.connection, row, prompt_version, "different-context") is None
+    for field, value in [("source", "other"), ("source_item_id", "other"), ("revision_number", 2), ("annotation_id", "other")]:
+        assert load_repair_feedback(ledger.connection, {**row, field: value}, prompt_version, key) is None
+    assert load_repair_feedback(ledger.connection, row, "different-prompt", key) is None
+    purposes = []
+    accepted = {**rejected, "identity_choice": "UNRESOLVED:COMMENTARY:NO_MATCH",
+                "core_fact_changes_zh": [], "identity_differences_zh": [],
+                "reason_zh": "现有评论未能提供可靠的核心事实变化证据。"}
+    def corrected_post(_key, model, method, payload, *, timeout):
+        prompt = payload["contents"][0]["parts"][0]["text"]
+        supplied = json.loads(prompt.split("PREVIOUS_REPAIR_REJECTION: ")[1].split("\nVALIDATION_ERROR:")[0])
+        assert supplied == feedback
+        assert "not an offered candidate" in prompt  # Original rejection remains distinct.
+        return {"modelVersion": model, "candidates": [{"content": {"parts": [{"text": json.dumps(accepted)}]}}]}
+    monkeypatch.setattr(GeminiModelGateway, "_post_json", staticmethod(corrected_post))
+    pool = annotation_module._GeminiRequestPool(("test-key",), requests_per_key=1, batch_limit=1,
+        request_accountant=CallbackModelAccountant(lambda usage: purposes.append(usage.purpose) or True))
+    checkpoint = load_checkpoint(ledger.connection, key)
+    result, _ = pool.call_impact(0, row, resume_checkpoint=checkpoint, repair_feedback=feedback)
+    assert result["identity_relation"] == "UNRESOLVED"
+    assert result["impact_class"] == initial["impact_class"]
+    assert purposes == ["news-impact-contract-repair"]
+    assert load_checkpoint(ledger.connection, key) == checkpoint
+    assert ledger.connection.execute("SELECT error_detail FROM news_ai_job_attempts_v1 WHERE attempt_number=1").fetchone()[0] == before
+    # The planner uses the bounded rejection index rather than a provider-error tail scan.
+    plan = ledger.connection.execute("""EXPLAIN QUERY PLAN SELECT error_detail FROM news_ai_job_attempts_v1
+        WHERE job_id=? AND outcome='ERROR' AND failure_code='MODEL_OUTPUT_CONTRACT_FAILED'
+        ORDER BY attempt_number DESC,attempted_at DESC LIMIT 1""", (job_id,)).fetchall()
+    assert any("contract_rejection" in item[3] for item in plan)
+    # Old partial diagnostics remain useful; malformed or mismatched evidence is advisory only.
+    variants = [
+        ({k: v for k, v in evidence.items() if k != "checkpoint_key"}, True),
+        ({**evidence, "selected_output": {}}, True),
+        ({**evidence, "checkpoint_key": "wrong"}, False),
+        ({**evidence, "failure_stage": "SEMANTIC_CONTRACT"}, False),
+        ({**evidence, "cause": []}, False),
+        ({**evidence, "selected_output": []}, False),
+    ]
+    for number, (variant, usable) in enumerate(variants, 4):
+        record_job_attempt(ledger.connection, job=replace(job, attempt_count=number), credential=credential,
+            status={**status, "failure_evidence": variant}, attempted_at=now + timedelta(seconds=number))
+        assert (load_repair_feedback(ledger.connection, row, prompt_version, key) is not None) == usable
+    record_job_attempt(ledger.connection, job=replace(job, attempt_count=10), credential=credential,
+        status={"status": "ERROR", "failure_code": "MODEL_OUTPUT_CONTRACT_FAILED", "error": '{"truncated":'},
+        attempted_at=now + timedelta(seconds=10))
+    assert load_repair_feedback(ledger.connection, row, prompt_version, key) is None
     ledger.close()

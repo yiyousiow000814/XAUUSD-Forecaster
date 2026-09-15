@@ -132,6 +132,11 @@ ON news_ai_jobs_v1(annotation_id,task_type,prompt_version);
 CREATE INDEX IF NOT EXISTS news_ai_job_attempts_lookup_v1
 ON news_ai_job_attempts_v1(job_id,attempt_number,attempted_at);
 
+-- Repair feedback must not scan an unbounded tail of provider failures.
+CREATE INDEX IF NOT EXISTS news_ai_job_attempts_contract_rejection_v1
+ON news_ai_job_attempts_v1(job_id,attempt_number DESC,attempted_at DESC)
+WHERE outcome='ERROR' AND failure_code='MODEL_OUTPUT_CONTRACT_FAILED';
+
 CREATE INDEX IF NOT EXISTS news_ai_job_attempts_recent_v1
 ON news_ai_job_attempts_v1(attempted_at,job_id,outcome,failure_code);
 
@@ -1366,6 +1371,8 @@ def record_job_attempt(
                 "cause_type": str(failure_evidence.get("cause_type") or "")[:100],
                 "cause": str(failure_evidence.get("cause") or "")[:500],
                 "evidence_truncated": True,
+                **({"checkpoint_key": str(failure_evidence["checkpoint_key"])[:64]}
+                   if "checkpoint_key" in failure_evidence else {}),
                 "evidence_hash": hashlib.sha256(error_detail.encode("utf-8")).hexdigest(),
             }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     else:
