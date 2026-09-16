@@ -37,3 +37,9 @@ host does not allow test symlink creation; seven chart-history tests passed.
 Web build passed. Updated Worker/UI suites passed after rebuilding the release
 validation fixture manifest. All Python tests collect successfully. Remote CI and
 production activation/cleanup remain release gates.
+
+CI cleanup: the static Python shard inventory now replaces the retired quote-window
+suite with the cleanup contract, and the architecture source map no longer points
+to the deleted execution module. The real updated shard passed 129 tests with the
+same host symlink skip. Keep source maps and explicit shard inventories in the
+removal impact graph alongside imports and producers.
