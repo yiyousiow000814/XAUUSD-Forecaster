@@ -41,9 +41,6 @@ def publish_chart_history(connection, records, revision, generated_at):
     if len({(row["resource"], row["record_key"]) for row in records}) != len(records):
         raise ValueError("Chart source contains duplicate record identities")
     install_chart_history(connection)
-    # This projection is replaceable derived state. Retired rows must not keep
-    # inflating its exact source count or be re-exported after a code update.
-    connection.execute("DELETE FROM dashboard_chart_records_v1 WHERE resource IN ('execution-point','execution-result')")
     previous = connection.execute("SELECT chart_format,revision FROM dashboard_chart_state_v1 WHERE id=1").fetchone()
     rebuild = previous is None or previous[0] != CHART_FORMAT
     # Source revisions can remain unchanged across format rebuilds. Export order

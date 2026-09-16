@@ -10,14 +10,14 @@ from xauusd_forecaster.dashboard.resource_contracts import _learning_record
 @pytest.mark.parametrize("source_revision", [0, 1, 2])
 def test_exact_export_is_bounded_resumable_and_preserves_old_rows(tmp_path, source_revision):
     connection=sqlite3.connect(tmp_path / "derived.sqlite3")
-    rows=[_learning_record("execution-result",str(i),i,{"decision_time":str(i),"model_identity":"FULL","v":i}) for i in range(501)]
+    rows=[_learning_record("model",str(i),i,{"decision_time":str(i),"model_identity":"FULL","v":i}) for i in range(501)]
     publish_chart_history(connection,rows,1,datetime.now(UTC).isoformat());connection.commit()
     first=chart_history_page(connection)
     assert len(first["records"])==200
     assert first==chart_history_page(connection)
     cursor=first["cursor"];seen=list(first["records"])
     # Updates behind the cursor acquire a later revision and are not lost.
-    rows[0]=_learning_record("execution-result","0",0,{"decision_time":"0","model_identity":"FULL","v":999})
+    rows[0]=_learning_record("model","0",0,{"decision_time":"0","model_identity":"FULL","v":999})
     publish_chart_history(connection,rows,source_revision,datetime.now(UTC).isoformat());connection.commit()
     while True:
         page=chart_history_page(connection,cursor)
@@ -38,7 +38,7 @@ def test_production_export_route_and_sync_url_resume_without_skipping(tmp_path, 
     from xauusd_forecaster.dashboard.sync import resources
     database = tmp_path / "derived.sqlite3"
     connection = sqlite3.connect(database)
-    records = [_learning_record("execution-result", str(i), i,
+    records = [_learning_record("model", str(i), i,
                {"decision_time": str(i), "model_identity": "FULL"}) for i in range(401)]
     publish_chart_history(connection, records, 1, datetime.now(UTC).isoformat())
     connection.commit(); connection.close()
@@ -68,7 +68,7 @@ def test_production_export_route_and_sync_url_resume_without_skipping(tmp_path, 
         assert len(sent) == 401
         assert completions[0]["record_count"] == 401
         assert completions[0]["chart_format"] == "pyramid-v2"
-        assert all(row["resource"] == "exact-execution-result" for row in sent.values())
+        assert all(row["resource"] == "exact-model" for row in sent.values())
     finally:
         server.shutdown(); server.server_close(); thread.join(timeout=3)
 
@@ -134,20 +134,4 @@ def test_pyramid_preserves_extrema_and_only_updates_changed_blocks(tmp_path):
     publish_chart_history(connection,source(4097),3,"2026-09-09T00:02:00Z");connection.commit()
     assert connection.total_changes-before==8  # new point, six tail blocks, metadata
     assert connection.execute("SELECT count(*) FROM dashboard_chart_records_v1 WHERE resource='curve-5m' AND revision=4").fetchone()[0]==1
-    connection.close()
-
-
-def test_retirement_rebuild_removes_old_execution_projection_without_losing_direction():
-    import sqlite3
-    from xauusd_forecaster.dashboard.chart_history import install_chart_history
-    connection = sqlite3.connect(":memory:")
-    install_chart_history(connection)
-    connection.execute("INSERT INTO dashboard_chart_records_v1 VALUES ('execution-point','retired',0,'old','{}',1)")
-    row = {"resource":"model", "record_key":"direction", "sort_epoch":1,
-           "payload_hash":"a"*64, "payload":{"model_identity":"FULL"}}
-    publish_chart_history(connection,[row],2,"2026-09-16T00:00:00Z")
-    connection.commit()
-    page = chart_history_page(connection)
-    assert page["record_count"] == 1
-    assert [r["resource"] for r in page["records"]] == ["model"]
     connection.close()

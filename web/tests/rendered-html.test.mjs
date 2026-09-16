@@ -3473,10 +3473,3 @@ test("direct health navigation distinguishes missing and frozen baselines", asyn
   assert.match(html, /正在加载系统健康状态/);
   assert.doesNotMatch(html, /当前没有运行异常|无需处理|0 正常/);
 });
-
-test("retired sizing and exit research is absent from the reader", () => {
-  for (const file of ["../app/audit/LearningGraphModal.tsx", "../app/_views/AuditView.tsx"]) {
-    const source = readFileSync(new URL(file, import.meta.url), "utf8");
-    assert.doesNotMatch(source, /LOT_RIDGE|EXIT_RIDGE|ExecutionResearch|仓位与退出|execution_learning/);
-  }
-});

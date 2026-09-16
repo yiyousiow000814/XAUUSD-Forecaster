@@ -1,5 +1,5 @@
 %% Generated source syntax, not runtime/transaction proof.
-%% input bb8e4387d13626d8c412296eae5c7586e434e8ae67c379ed6c6897716a290216
+%% input 29fa8ec8bcf62b624793decb741bcba09805ac78f2af947c0d864e40fc02339f
 flowchart LR
   n2efc9b34268fcf67["ExcludedIncompleteClock"]
   n4fb7344a568cff8e["U5State.load"]
@@ -34,7 +34,7 @@ flowchart LR
   n421a790c6ab5e467["is_excluded_snapshot"]
   nd07195e37fc9c0c4["is_forward_sqlite_contention"]
   nd4dec1d3f75a2d09["item.get"]
-  n36bd0fcc82d03965["item.get('evidence', {}).pop"]
+  n605fbcabfae8f67f["item.get('evidence', {}).items"]
   nae23da37330152c6["json.dumps"]
   n11633437248876a8["json.loads"]
   n71fa9faaa6f884aa["len"]
@@ -103,18 +103,18 @@ flowchart LR
   n1789248bb420b8e7 -->|"calls L119 UNKNOWN"| nd4dec1d3f75a2d09
   n1789248bb420b8e7 -->|"calls L121 UNKNOWN"| n71fa9faaa6f884aa
   n1789248bb420b8e7 -->|"calls L126 UNKNOWN"| nd4dec1d3f75a2d09
-  n1789248bb420b8e7 -->|"calls L126 UNKNOWN"| n36bd0fcc82d03965
-  n1789248bb420b8e7 -->|"calls L128 UNKNOWN"| nb6276ba72bbc5084
-  n1789248bb420b8e7 -->|"calls L134 UNKNOWN"| n7ff9b38e06e64963
-  n1789248bb420b8e7 -->|"calls L138 UNKNOWN"| n71fa9faaa6f884aa
-  n1789248bb420b8e7 -->|"calls L139 UNKNOWN"| nb6276ba72bbc5084
-  n1789248bb420b8e7 -->|"calls L140 UNKNOWN"| n70a24828a780d854
-  n1789248bb420b8e7 -->|"calls L140 UNKNOWN"| nbe5cebc528e14909
-  n1789248bb420b8e7 -->|"sql L140 LITERAL"| n70a24828a780d854
-  n1789248bb420b8e7 -->|"calls L144 UNKNOWN"| nd6a7cd2a7371b1a1
-  n1789248bb420b8e7 -->|"calls L145 UNKNOWN"| nb6276ba72bbc5084
-  n1789248bb420b8e7 -->|"calls L146 UNKNOWN"| n4dbee430bcb3b0ac
-  n1789248bb420b8e7 -->|"calls L146 UNKNOWN"| n6ab47d70854a8c69
+  n1789248bb420b8e7 -->|"calls L126 UNKNOWN"| n605fbcabfae8f67f
+  n1789248bb420b8e7 -->|"calls L129 UNKNOWN"| nb6276ba72bbc5084
+  n1789248bb420b8e7 -->|"calls L135 UNKNOWN"| n7ff9b38e06e64963
+  n1789248bb420b8e7 -->|"calls L139 UNKNOWN"| n71fa9faaa6f884aa
+  n1789248bb420b8e7 -->|"calls L140 UNKNOWN"| nb6276ba72bbc5084
+  n1789248bb420b8e7 -->|"calls L141 UNKNOWN"| n70a24828a780d854
+  n1789248bb420b8e7 -->|"calls L141 UNKNOWN"| nbe5cebc528e14909
+  n1789248bb420b8e7 -->|"sql L141 LITERAL"| n70a24828a780d854
+  n1789248bb420b8e7 -->|"calls L145 UNKNOWN"| nd6a7cd2a7371b1a1
+  n1789248bb420b8e7 -->|"calls L146 UNKNOWN"| nb6276ba72bbc5084
+  n1789248bb420b8e7 -->|"calls L147 UNKNOWN"| n4dbee430bcb3b0ac
+  n1789248bb420b8e7 -->|"calls L147 UNKNOWN"| n6ab47d70854a8c69
   n725db0c80a16e7d9 -->|"calls L129 UNKNOWN"| n658cf5dd9923e2c0
   n725db0c80a16e7d9 -->|"calls L133 UNKNOWN"| n77a0541f93e8c8e0
   n725db0c80a16e7d9 -->|"calls L135 UNKNOWN"| necaf360733ba89e8

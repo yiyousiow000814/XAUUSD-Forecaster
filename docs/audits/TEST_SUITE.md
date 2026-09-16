@@ -81,7 +81,6 @@ inference policy, and semantic identity. Safe split boundaries are:
 - `test_forward_training_contracts.py`
 - `test_evidence_time_contracts.py`
 - `test_model_generation_contracts.py`
-- `test_execution_learning_contracts.py`
 
 The physical split is intentionally deferred. Moving more than 170 tests while
 PR60-62 are open would create conflict-heavy, review-hostile diffs without

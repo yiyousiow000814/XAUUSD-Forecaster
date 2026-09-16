@@ -102,7 +102,7 @@ export const PUBLIC_STATUS_PRIVATE_FIELDS = [
 
 const snapshotUpsertSql = (valid: string) => `WITH incoming(payload) AS (SELECT CAST(? AS TEXT))
      INSERT INTO dashboard_snapshots (id, payload, received_at)
-     SELECT ?, json_remove(payload, '$.execution_learning'), ? FROM incoming WHERE ${valid}
+     SELECT ?, payload, ? FROM incoming WHERE ${valid}
      ON CONFLICT(id) DO UPDATE SET
        payload=excluded.payload, received_at=excluded.received_at
      WHERE dashboard_snapshots.payload IS NOT excluded.payload`;

@@ -189,16 +189,3 @@ versions, invalid size, or breached risk limits.
 The execution adapter may reject unsafe signals but must not invent a different
 direction, timing model, or exit policy. Research replay and runtime must use
 the same live-feasible decision semantics before any promotion claim.
-
-## Retired sizing and early-exit research
-
-Position-sizing and early-exit research are retired. The production Collector
-and background trainer must not create examples, predictions, model artifacts,
-or scores for LOT_RIDGE or EXIT_RIDGE. Reader summaries, chart history, Preview
-and web navigation must not publish these research families. The direction
-models retain their fixed 30-minute label and shared execution-cost assumptions.
-The explicit September 16, 2026 deletion request authorizes removal of the
-research-only V1/V2 tables, artifact directories and remote history records;
-it does not authorize deleting shared quotes, news or direction evidence.
-Historical Collector completion receipts retain their original research hashes
-for provenance; completeness verification excludes only the retired family.

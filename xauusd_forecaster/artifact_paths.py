@@ -8,8 +8,6 @@ from pathlib import Path, PureWindowsPath
 
 ARTIFACT_FAMILIES = (
     "models-v2",
-    "execution-models-v1",
-    "execution-models-v2",
 )
 FORMER_CHECKOUT_FORWARD = PureWindowsPath(
     r"C:\Users\yiyou\XAUUSD-Forecaster\.local\forward"

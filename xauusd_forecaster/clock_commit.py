@@ -120,10 +120,11 @@ def read_completed_clock(ledger, decision_time: datetime) -> tuple[str, str] | N
     if recorded:
         if len(recorded) == 1 and "u5_checkpoint_hash" in recorded[0]:
             actual["u5_checkpoint_hash"] = recorded[0]["u5_checkpoint_hash"]
-        # Retired research hashes remain in historical receipts, but their
-        # explicitly deleted rows are no longer part of clock completeness.
+        # Compare the clock-owned families; supplemental historical receipts
+        # remain audit metadata outside the current completeness contract.
         for item in recorded:
-            item.get("evidence", {}).pop("execution_predictions_v2", None)
+            item["evidence"] = {key: value for key, value in item.get("evidence", {}).items()
+                                if key in actual["evidence"]}
         if recorded != [actual]:
             raise ValueError("CLOCK_EVENT_COMPLETION_CONFLICT")
     else:

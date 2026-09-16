@@ -94,24 +94,3 @@ test("chart range reads real rows, only samples large ranges and refuses an unre
  assert.equal((await request("range=all")).status,200);
  db.database.close(); delete globalThis.__AURUM_TEST_WORKER_ENV;
 });
-
-
-test("retirement removes research history and rejects retired reader resources", async () => {
- const {readFileSync}=await import("node:fs");
- const db=new D1TestDatabase(["0000_sad_toad.sql","0005_learning_history.sql","0031_bounded_learning_history_reads.sql"]);
- const put=db.database.prepare("INSERT INTO learning_records VALUES(?,?,?,?,?,?)");
- for(const resource of ["curve-5m","execution-point","execution-result","exact-execution-point","exact-execution-result"])
-   put.run(resource,resource,1,"a".repeat(64),JSON.stringify({model_identity:resource==="curve-5m"?"FULL":"LOT_RIDGE"}),"now");
- db.database.prepare("INSERT OR REPLACE INTO dashboard_snapshots(id,payload,received_at) VALUES(3,?,?)").run(JSON.stringify({learning_curves:{preserved:true},execution_learning:{models:[{model_identity:"LOT_RIDGE"}]}}),"now");
- const sql=readFileSync(new URL("../drizzle/0039_retire_execution_learning.sql",import.meta.url),"utf8");
- db.database.exec(sql);db.database.exec(sql);
- assert.deepEqual(db.database.prepare("SELECT resource FROM learning_records").all().map(r=>r.resource),["curve-5m"]);
- assert.deepEqual(JSON.parse(db.database.prepare("SELECT payload FROM dashboard_snapshots WHERE id=3").get().payload),{learning_curves:{preserved:true}});
- assert.equal(db.database.prepare("SELECT sum(record_count) n FROM learning_record_counts WHERE model_identity=''").get().n,1);
- const bindings={DB:db,ASSETS:{fetch:async()=>new Response("asset")}};
- globalThis.__AURUM_TEST_WORKER_ENV=bindings;
- try {
-   for(const path of ["/api/chart?type=execution-point","/api/learning-history?resource=execution-result","/api/learning-history?resource=exact-execution-point"])
-     assert.equal((await worker.fetch(new Request("https://example.test"+path),bindings,{waitUntil(){},passThroughOnException(){}})).status,400);
- } finally {db.database.close();delete globalThis.__AURUM_TEST_WORKER_ENV;}
-});
