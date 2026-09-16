@@ -269,3 +269,9 @@ phones preserve explicit outgoing relationships without shrinking labels.
 The shared status pill is the health navigation entry; remove its duplicate
 System tab. Status labels remain four characters and health axes remain intact.
 Align the content and header dividers to the same shell gutters.
+
+The optional source index uses a compact desktop header: identity and summary
+on the left, mode and breadcrumbs sharing the available right-hand space.
+It inherits the shell gutter without a second inset. Admin navigation bottom
+borders belong to the actual tabs, not the empty leading spacer. On phones,
+controls wrap while retaining their minimum target size.
