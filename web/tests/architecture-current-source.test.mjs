@@ -10,7 +10,7 @@ import { build } from 'esbuild';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { projectCurrentSource, readCurrentSourceIndex } from '../build/architecture-current-source.mjs';
 import { parseArchitectureManifest, buildArchitectureGraph, architectureDisclosedGraph } from '../app/_lib/architecture-explorer.ts';
-import { parseArchitectureEvidence, parseArchitectureCodeIndex, sourceFactsForClaim } from '../app/_lib/architecture-evidence.ts';
+import { parseArchitectureEvidence, parseArchitectureCodeIndex, sourceFactsForClaim, claimEvidence, compactEvidenceStatus } from '../app/_lib/architecture-evidence.ts';
 
 let generatedIndex;
 const currentIndex = () => (generatedIndex ??= readCurrentSourceIndex(new URL('../../architecture/generated/critical-index.json', import.meta.url)));
@@ -231,7 +231,7 @@ test('actual generated source feeds the existing Explorer without runtime or per
   assert.deepEqual(evidence.traces, []);
   assert.deepEqual(evidence.mutations, []);
   assert.equal(evidence.executionDigestState, 'UNAVAILABLE');
-  assert.equal(parseArchitectureCodeIndex(projection.code).facts.length, index.observed.symbols.length);
+  assert.equal(parseArchitectureCodeIndex(projection.code).facts.length, index.observed.symbols.length + manifest.edges.length);
   for (const view of manifest.views) {
     for (const direction of ['LR', 'TB']) {
       const graph = buildArchitectureGraph(manifest, view.id, direction);
@@ -278,6 +278,44 @@ test('broken generated index cannot silently become an empty or declared-success
   const shaped = structuredClone(index);
   shaped.allowed.views['clock-transaction'].roots[0] = 'missing::symbol';
   assert.throws(() => projectCurrentSource(shaped), /ARCHITECTURE_ROOT_UNRESOLVED/);
+  for (const corrupt of [
+    value => { value.observed.symbols[0].line = 0; },
+    value => { value.observed.symbols[0].end_line = value.observed.symbols[0].line - 1; },
+    value => { value.observed.symbols.push(value.observed.symbols[0]); },
+  ]) {
+    const invalid = structuredClone(index);
+    corrupt(invalid);
+    assert.throws(() => projectCurrentSource(invalid), /ARCHITECTURE_SOURCE_SPAN_INVALID/);
+  }
+  const invalidCall = structuredClone(index);
+  const symbols = new Set(index.observed.symbols.map(symbol => symbol.id));
+  invalidCall.observed.edges.find(edge => edge.kind === 'calls' && symbols.has(edge.source) && symbols.has(edge.candidate_symbol)).line = 0;
+  assert.throws(() => projectCurrentSource(invalidCall), /ARCHITECTURE_CALL_SPAN_INVALID/);
+});
+
+test('source evidence reaches node and call inspectors without manufacturing execution evidence', () => {
+  const projection = projectCurrentSource(currentIndex());
+  const bundle = parseArchitectureEvidence(projection.evidence);
+  const code = parseArchitectureCodeIndex(projection.code);
+  for (const id of [...projection.manifest.nodes.map(node => `node:${node.id}`), ...projection.manifest.edges.map(edge => `edge:${edge.id}`)]) {
+    const evidence = claimEvidence(bundle, id);
+    assert.deepEqual(evidence.categories, ['STATIC_MATCH'], id);
+    assert.equal(compactEvidenceStatus(evidence.categories).tone, 'strong');
+    const source = sourceFactsForClaim(code, evidence.claim);
+    assert.ok(source.facts.length > 0, id);
+    if (id.startsWith('edge:')) {
+      assert.equal(source.facts.length, 1);
+      assert.equal(source.facts[0].type, 'call');
+      assert.equal(source.facts[0].line, source.facts[0].end_line);
+    } else {
+      assert.ok(source.facts.every(fact => fact.type !== 'call'), 'symbol overviews do not absorb call sites');
+    }
+  }
+  assert.equal(bundle.executionDigestState, 'UNAVAILABLE');
+  assert.deepEqual(bundle.contracts, []);
+  assert.deepEqual(bundle.traces, []);
+  assert.equal(claimEvidence(bundle, 'node:missing').claim, null);
+  assert.ok(projection.manifest.nodes.every(node => node.runtime_state === 'UNKNOWN'));
 });
 
 

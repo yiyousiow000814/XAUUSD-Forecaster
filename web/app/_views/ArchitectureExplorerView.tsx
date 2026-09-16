@@ -113,7 +113,7 @@ const ArchitectureGraphNode = memo(function ArchitectureGraphNode({ data }: Node
         if (["ArrowRight", "ArrowDown"].includes(event.key)) { event.preventDefault(); onNavigate(node.id, 1); }
         if (["ArrowLeft", "ArrowUp"].includes(event.key)) { event.preventDefault(); onNavigate(node.id, -1); }
       }} type="button">
-      <span className={styles.nodeTopline}><b aria-hidden="true">{KIND_SYMBOL[node.kind] ?? "□"}</b><span>{node.kind}</span><i>{node.runtime_state}</i></span>
+      <span className={styles.nodeTopline}><b aria-hidden="true">{KIND_SYMBOL[node.kind] ?? "□"}</b><span>{node.kind}</span><i>{node.implementation_state === "SOURCE_ONLY" ? "静态索引" : node.runtime_state}</i></span>
       <strong>{node.short_label}</strong>
       <small>{laneLabel}</small>
       <span className={`${styles.compactEvidence} ${styles[`evidenceTone${data.evidenceStatus.tone}`]}`} title={data.evidenceStatus.label}><b aria-hidden="true">{data.evidenceStatus.symbol}</b>{data.evidenceStatus.label}</span>

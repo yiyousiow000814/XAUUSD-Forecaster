@@ -104,12 +104,12 @@ export function sourceFactsForClaim(index: ArchitectureCodeIndex | null, claim: 
   if (!index || !claim) return { label: "Source facts unavailable", facts: [] };
   const valid = index.facts.filter(fact => Number(fact.line) > 0);
   if (claim.selector.startsWith("slice:")) {
-    return { label: "Subsystem source overview · first 18 symbols", facts: valid.filter(fact => claim.bindings.includes(String(fact.path))).slice(0, 18) };
+    return { label: "Subsystem source overview · first 18 symbols", facts: valid.filter(fact => fact.type !== "call" && claim.bindings.includes(String(fact.path))).slice(0, 18) };
   }
   if (claim.bindings.includes(claim.selector)) {
-    return { label: "File source overview · first 18 symbols", facts: valid.filter(fact => fact.path === claim.selector).slice(0, 18) };
+    return { label: "File source overview · first 18 symbols", facts: valid.filter(fact => fact.type !== "call" && fact.path === claim.selector).slice(0, 18) };
   }
-  return { label: "Exact selected source symbol", facts: valid.filter(fact => fact.id === claim.selector && claim.bindings.includes(String(fact.path))) };
+  return { label: claim.selector.startsWith("edge:") ? "Exact source call site" : "Exact selected source symbol", facts: valid.filter(fact => fact.id === claim.selector && claim.bindings.includes(String(fact.path))) };
 }
 
 export function compactEvidenceStatus(categories: Iterable<EvidenceCategory>) {
@@ -117,7 +117,7 @@ export function compactEvidenceStatus(categories: Iterable<EvidenceCategory>) {
   if (values.has("CONTRADICTED")) return { label: "CONTRADICTED", symbol: "!", tone: "danger" };
   if (values.has("STALE")) return { label: "STALE", symbol: "◷", tone: "warning" };
   if (values.has("UNRESOLVED")) return { label: "证据待确认", symbol: "?", tone: "warning" };
-  if (values.has("STATIC_MATCH")) return { label: "STATIC MATCH", symbol: "✓", tone: "strong" };
+  if (values.has("STATIC_MATCH")) return { label: "源码已核对", symbol: "✓", tone: "strong" };
   return { label: "DECLARED ONLY", symbol: "◇", tone: "neutral" };
 }
 
@@ -125,7 +125,7 @@ export function evidenceBadgeLabels(categories: Iterable<EvidenceCategory>) {
   const values = new Set(categories); const labels: string[] = [];
   for (const [category, label] of [
     ["CONTRADICTED", "CONTRADICTED"], ["STALE", "STALE"], ["UNRESOLVED", "证据待确认"],
-    ["STATIC_MATCH", "STATIC MATCH"], ["TEST_EXECUTED", "TEST EXECUTED"], ["RUNTIME_OBSERVED", "RUNTIME OBSERVED"],
+    ["STATIC_MATCH", "源码已核对"], ["TEST_EXECUTED", "TEST EXECUTED"], ["RUNTIME_OBSERVED", "RUNTIME OBSERVED"],
     ["MUTATION_KILLED", "MUTATION KILLED"],
   ] as const) if (values.has(category)) labels.push(label);
   if (!values.has("STATIC_MATCH") && values.has("DECLARED")) labels.push("DECLARED ONLY");
