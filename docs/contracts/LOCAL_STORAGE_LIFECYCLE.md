@@ -32,6 +32,12 @@ visible retryable state, not authority to block a critical writer or discard a
 frame. Oversized retryable rounds retry after five seconds; normal rounds
 retain the 60-second cadence. This catches reader release between optional
 builds without adding another checkpoint owner or cancelling readers.
+The optional read-model owner closes all connections after each resource and,
+while the WAL exceeds 64 MiB, yields for six interruptible seconds before the
+next resource, including dirty catch-up rounds. This bounds reader competition
+without a lock, checkpoint ACK dependency, or cancellation. It adds at most
+18 seconds to a three-resource pass; snapshot/freshness limits remain unchanged.
+The pause does not perform checkpoints or authorize any data deletion.
 
 The owner publishes a digest-bound fixed state receipt beneath the runtime root
 with frame counts, pending frames, physical bytes, size limit, lock timeout,

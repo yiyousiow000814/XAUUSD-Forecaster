@@ -3239,3 +3239,37 @@ def test_news_evidence_pages_are_byte_bounded_and_complete_at_large_scale(
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+@pytest.mark.parametrize("stop_after_first", [False, True])
+def test_optional_resource_round_releases_readers_for_wal_recovery(tmp_path, monkeypatch, stop_after_first):
+    from xauusd_forecaster.dashboard import read_models
+    from xauusd_forecaster.sqlite_wal import checkpoint_forward_wal, open_forward_writer_connection
+    database = tmp_path / "forward.sqlite3"
+    ForwardLedger(database).close()
+    writer = open_forward_writer_connection(database)
+    writer.execute("CREATE TABLE pressure_fixture(value)")
+    writer.commit()
+    def build(snapshot):
+        snapshot.connection.execute("SELECT count(*) FROM pressure_fixture").fetchone()
+        writer.execute("INSERT INTO pressure_fixture VALUES (?)", ("x" * 8192,))
+        writer.commit()
+        return {"generated_at": snapshot.started_at.isoformat()}
+    owner = DashboardReadModelOwner(database, {r: build for r in READ_MODEL_CONTRACTS})
+    pauses = []
+    class MaintenanceWindow:
+        def is_set(self): return stop_after_first and bool(pauses)
+        def wait(self, seconds):
+            pauses.append(seconds)
+            result = checkpoint_forward_wal(database, tmp_path, datetime.now(UTC), size_limit_bytes=4096)
+            assert result.status == "TRUNCATED"
+            assert result.pending_frames == 0
+    monkeypatch.setattr(read_models, "FORWARD_WAL_SIZE_LIMIT_BYTES", 4096)
+    owner._stop = MaintenanceWindow()
+    try:
+        assert all(value >= 1 for value in owner.refresh_once().values())
+        expected = 1 if stop_after_first else 3
+        assert pauses == [6] * expected
+        assert writer.execute("SELECT count(*) FROM pressure_fixture").fetchone()[0] == expected
+    finally:
+        writer.close()
