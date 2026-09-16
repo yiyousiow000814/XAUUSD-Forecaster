@@ -6,9 +6,9 @@ const source = (path: string, witness: string): MapSource => ({ path, witness })
 const collector = source('scripts/runtime/run_forward_collector.py', 'engine = ForwardEngine(ledger, provider');
 const engine = source('xauusd_forecaster/decision/engine.py', 'self.ledger.append_decision(decision_record');
 const news = source('xauusd_forecaster/news/collection/runtime.py', 'ForwardEngine(ledger, NullMarketProvider()).collect_news');
-const annotation = source('scripts/runtime/run_news_annotator.py', 'annotate_pending_news');
+const annotation = source('scripts/runtime/run_news_annotator.py', 'statuses = run_scheduled_batch_with_lock_retry(');
 const training = source('xauusd_forecaster/training/runtime.py', 'train_due_v2(ledger, cutoff, self.model_root)');
-const generation = source('xauusd_forecaster/training/generation.py', 'Build and atomically activate five core models');
+const generation = source('xauusd_forecaster/training/generation.py', 'INSERT INTO news_model_generation_activations_v1');
 const api = source('scripts/runtime/run_dashboard_api.py', 'read_model_owner.start()');
 const sync = source('scripts/runtime/run_dashboard_sync.py', '_post_json(target["remote_ingest_url"], live_payload, target)');
 const worker = source('web/worker/api-router.ts', 'return publicStatusRead(env.DB)');
@@ -36,7 +36,7 @@ export const SYSTEM_MAPS: SystemMap[] = [
     node('files', '本机行情文件', 'UTC 日分区与市场状态心跳', source('ctrader/XauusdForwardQuoteBridge/XauusdForwardQuoteBridge.cs', 'this.WriteMarketSession()')),
     node('provider', '行情窗口', 'JsonlMarketProvider 读取报价', market),
     node('forecast', '预测引擎', '冻结决策时点快照', engine, 'decision'),
-  ], edges: [edge('broker','files','写入报价',bridge),edge('files','provider','读取报价窗口',market),edge('provider','forecast','传入市场数据',collector)] },
+  ], edges: [edge('broker','files','写入报价',source('ctrader/XauusdForwardQuoteBridge/XauusdForwardQuoteBridge.cs', "this.writer.WriteLine('}')")),edge('files','provider','读取报价窗口',market),edge('provider','forecast','传入市场数据',collector)] },
   { id: 'news', title: '新闻处理', summary: '采集和 AI 复核独立运行；预测读取已经入库的可见结果。', nodes: [
     node('sources','新闻来源','按来源周期采集',news),
     node('intake','原文与修订','保存来源内容和时间证据',source('xauusd_forecaster/decision/engine.py','collect_official_news(self.ledger, now)')),
@@ -49,7 +49,7 @@ export const SYSTEM_MAPS: SystemMap[] = [
     node('infer','生成预测','Long / Short / Wait',source('xauusd_forecaster/decision/engine.py','predictions = build_shadow_predictions')),
     node('ledger','本机 SQLite','追加决策和预测证据',engine),
     node('outcome','30 分钟结果','到期后计算并追加结果',source('scripts/runtime/run_forward_collector.py','engine.settle_due_outcomes(now)')),
-  ], edges: [edge('clock','snapshot','创建决策快照',engine),edge('snapshot','infer','读取冻结输入',engine),edge('infer','ledger','追加记录',engine),edge('ledger','outcome','结算到期决策',source('xauusd_forecaster/decision/engine.py','def settle_due_outcomes('))] },
+  ], edges: [edge('clock','snapshot','创建决策快照',source('xauusd_forecaster/decision/engine.py','snapshot = build_forward_snapshot(')),edge('snapshot','infer','读取冻结输入',source('xauusd_forecaster/decision/engine.py','predictions = build_shadow_predictions(self.ledger, snapshot, decision_time)')),edge('infer','ledger','追加记录',engine),edge('ledger','outcome','结算到期决策',source('xauusd_forecaster/decision/engine.py','def settle_due_outcomes('))] },
   { id: 'training', title: '模型训练', summary: '训练由独立后台线程处理，失败时保留上一完整代际。', nodes: [
     node('results','结果与评分','Collector 完成到期结算',source('scripts/runtime/run_forward_collector.py','completed_outcomes = engine.settle_due_outcomes(now)')),
     node('owner','后台训练','按请求唤醒独立训练 owner',source('scripts/runtime/run_forward_collector.py','training_owner = BackgroundTrainingOwner(')),
@@ -62,7 +62,7 @@ export const SYSTEM_MAPS: SystemMap[] = [
     node('sync','Dashboard Sync','心跳与大资源分开传输',sync),
     node('d1','Cloudflare D1','经过身份验证的同步写入',source('web/worker/api-router.ts','if (pathname === "/api/ingest")')),
     node('web','Worker 与浏览器','读取投影，呈现页面',worker),
-  ], edges: [edge('local','read','生成读模型',api),edge('read','sync','本机 HTTP 读取',source('scripts/runtime/run_dashboard_sync.py','_local_critical_status_url(config)')),edge('sync','d1','认证同步',sync),edge('d1','web','查询页面数据',worker)] },
+  ], edges: [edge('local','read','生成读模型',source('scripts/runtime/run_dashboard_api.py','read_model_owner = DashboardReadModelOwner(')),edge('read','sync','本机 HTTP 读取',source('scripts/runtime/run_dashboard_sync.py','_local_critical_status_url(config)')),edge('sync','d1','认证同步',sync),edge('d1','web','查询页面数据',worker)] },
 ];
 export const systemMap = (id: string) => SYSTEM_MAPS.find(view => view.id === id) ?? SYSTEM_MAPS[0];
 

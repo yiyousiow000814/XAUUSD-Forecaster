@@ -59,7 +59,10 @@ export default function SystemArchitectureView() {
   const lastView = useRef('system');
   const view = systemMap(history[history.length - 1]);
   useEffect(() => {
-    if (lastView.current !== view.id) heading.current?.scrollIntoView({ block: 'start' });
+    if (lastView.current !== view.id) {
+      heading.current?.focus({ preventScroll: true });
+      heading.current?.scrollIntoView({ block: 'start' });
+    }
     lastView.current = view.id;
   }, [view.id]);
   const node = view.nodes.find(item => item.id === selected);
@@ -70,7 +73,7 @@ export default function SystemArchitectureView() {
   useEffect(() => { if (selected) detail.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, [selected]);
   if (sourceIndex) return <div className={styles.sourceIndex}><button type="button" onClick={() => setSourceIndex(false)}>← 返回系统流程图</button><Suspense fallback={<p>正在加载源码索引…</p>}><SourceIndex /></Suspense></div>;
   return <main className={styles.main}>
-    <header ref={heading} className={styles.header}><h1>系统架构</h1><p>从业务流程逐层查看实现</p><button type="button" onClick={() => setSourceIndex(true)}>源码索引</button></header>
+    <header ref={heading} tabIndex={-1} className={styles.header}><h1>系统架构</h1><p>从业务流程逐层查看实现</p><button type="button" onClick={() => setSourceIndex(true)}>源码索引</button></header>
     <nav className={styles.breadcrumbs} aria-label="架构层级">{history.map((id, index) => <span key={`${id}-${index}`}>{index > 0 ? <span aria-hidden="true">›</span> : null}<button type="button" aria-current={index === history.length - 1 ? 'page' : undefined} onClick={() => { setHistory(history.slice(0, index + 1)); setSelected(null); }}>{systemMap(id).title}</button></span>)}</nav>
     <section className={styles.flow} aria-label={view.title}><div className={styles.caption}><h2>{view.title}</h2><p>{view.summary}</p></div><FlowDiagram key={view.id} view={view} selected={selected} choose={open} /></section>
     {node ? <section className={styles.details} ref={detail} aria-label={`${node.title}源码依据`}><header><h2>{node.title}</h2><button type="button" onClick={() => setSelected(null)}>关闭详情</button></header><p>{node.detail}</p><SourceLink source={node.source} /><p className={styles.witness}>核对位置：<code>{node.source.witness}</code></p>
