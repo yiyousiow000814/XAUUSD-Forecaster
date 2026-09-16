@@ -653,6 +653,7 @@ test("keeps global shell ownership centralized and prevents view-level design dr
     "../app/_views/RetryView.tsx",
     "../app/_views/StatusView.tsx",
     "../app/_views/ArchitectureExplorerView.tsx",
+    "../app/_views/SystemArchitectureView.tsx",
   ];
 
   assert.match(app, /<DashboardShell location=\{location\}>/);
@@ -663,9 +664,9 @@ test("keeps global shell ownership centralized and prevents view-level design dr
   assert.match(shell, /DASHBOARD_ADMIN_DESTINATIONS\.map/);
   assert.match(mobile, /DASHBOARD_GLOBAL_DESTINATIONS\.map/);
   assert.doesNotMatch(mobile, /const SECTIONS|MobileDashboardSection/);
-  assert.equal(navigation.match(/label: "(?:总览|新闻与决策|系统|管理员登录)"/g)?.length, 4);
+  assert.equal(navigation.match(/label: "(?:总览|新闻与决策|系统|管理员登录)"/g)?.length, 3);
   assert.match(navigation, /href: "\/audit\?view=news"/);
-  assert.match(navigation, /rooms: \["health"\]/);
+  assert.match(shell, /href="\/health"/);
   assert.match(navigation, /DASHBOARD_ADMIN_DESTINATIONS/);
   assert.match(navigation, /概览[\s\S]*Assistant[\s\S]*重试任务[\s\S]*AI 模型用量/);
 
@@ -689,7 +690,7 @@ test("renders static public shell and path-specific admin shells with one invari
     ["/admin/retry-jobs", "管理员登录"],
     ["/admin/ai-usage", "管理员登录"],
   ];
-  const publicLabels = ["总览", "新闻与决策", "系统"];
+  const publicLabels = ["总览", "新闻与决策"];
 
   for (const [path, activeLabel] of routes) {
     const { response, html } = await renderSettled(path, /dashboard-header topbar/);
@@ -701,7 +702,8 @@ test("renders static public shell and path-specific admin shells with one invari
     assert.match(header, /<strong>Aurum Signal Room<\/strong>/, path);
     assert.match(header, /<small>XAUUSD · Forward-only intelligence<\/small>/, path);
     assert.equal(header.match(/aria-current="page"/g)?.length, 1, path);
-    assert.match(header, new RegExp(`aria-current="page"[^>]*>(?:<span[^>]*></span>)?${activeLabel}</(?:a|button)>`), path);
+    if (path === "/health") assert.match(header, /aria-current="page"[^>]*aria-label="查看系统运行状态"[^>]*href="\/health"/, path);
+    else assert.match(header, new RegExp(`aria-current="page"[^>]*>(?:<span[^>]*></span>)?${activeLabel}</(?:a|button)>`), path);
     assert.equal(header.match(/class="dashboard-global-state"/g)?.length, 1, path);
     assert.doesNotMatch(header, /返回实时室|学习曲线|AI 模型用量|系统健康|重试任务/, path);
 
@@ -761,7 +763,7 @@ test("renders one canonical Admin navigation with direct child active state", as
     ["/admin/assistant", "Assistant", /ASSISTANT/],
     ["/admin/retry-jobs", "重试任务", /PRIVATE OPERATOR QUEUE/],
     ["/admin/ai-usage", "AI 模型用量", /AI 模型使用状态/],
-    ["/admin/architecture", "系统架构", /Preparing architecture layout/],
+    ["/admin/architecture", "系统架构", /从业务流程逐层查看实现/],
   ]) {
     const page = await renderSettled(path, marker);
     assert.equal(page.response.status, 200, path);
@@ -1417,7 +1419,7 @@ test("renders the Gemini quota status route", async () => {
   assert.match(html, /data-read-state="(?:CURRENT|REFRESHING)"/);
   assert.match(html, /data-live-market-state="MARKET_DATA_UNAVAILABLE"/);
   assert.match(html, /data-operational-state="(?:HEALTHY|WARNING|ERROR)"/);
-  assert.match(html, /连接中|运行警告|运行异常|实时链路不可用/);
+  assert.match(html, /正在连接|运行警告|运行异常/);
 });
 
 test("keeps System Health separate from the dedicated retry workspace", async () => {
@@ -1648,10 +1650,10 @@ test("uses one Chinese system-state presentation across every dashboard page", (
   const freshness = readFileSync(new URL("../app/_components/CurrentDataState.tsx", import.meta.url), "utf8");
   assert.match(component, /systemStatePresentation/);
   assert.match(component, /data-read-state/);
-  assert.match(contract, /实时链路正常/);
-  assert.match(contract, /实时链路不可用/);
-  assert.match(contract, /市场休市/);
-  assert.match(contract, /状态不可用/);
+  assert.match(contract, /运行正常/);
+  assert.match(contract, /运行警告/);
+  assert.match(contract, /MARKET_CLOSED/);
+  assert.match(contract, /状态未知/);
   assert.doesNotMatch(contract, /状态离线|系统在线/);
   assert.match(freshness, /状态更新失败，正在重试/);
   assert.match(freshness, /最近状态/);
@@ -1674,11 +1676,11 @@ test("keeps read, live-market, and operational status axes independent", () => {
     marketSession: "OPEN", operationalStatus: "HEALTHY",
   });
   assert.equal(cachedRefreshFailure.readState, "STALE_SNAPSHOT");
-  assert.equal(cachedRefreshFailure.label, "状态更新失败");
+  assert.equal(cachedRefreshFailure.label, "更新失败");
 
   assert.equal(systemStatePresentation({
     loading: false, error: true, hasSnapshot: false, online: false,
-  }).label, "状态不可用");
+  }).label, "状态未知");
 
   const closed = systemStateAxes({
     loading: false, error: false, hasSnapshot: true, online: false,
@@ -1690,7 +1692,7 @@ test("keeps read, live-market, and operational status axes independent", () => {
   assert.equal(systemStatePresentation({
     loading: false, error: false, hasSnapshot: true, online: false,
     marketSession: "DATA_UNAVAILABLE", operationalStatus: "HEALTHY",
-  }).label, "实时链路不可用");
+  }).label, "运行警告");
 
   assert.equal(systemStatePresentation({
     loading: false, error: false, hasSnapshot: true, online: true,
@@ -3475,4 +3477,25 @@ test("direct health navigation distinguishes missing and frozen baselines", asyn
   }
   assert.match(html, /正在加载系统健康状态/);
   assert.doesNotMatch(html, /当前没有运行异常|无需处理|0 正常/);
+});
+
+test('global status uses four-character labels without losing health axes', () => {
+  for (const loading of [true, false]) for (const error of [true, false]) for (const hasSnapshot of [true, false]) for (const online of [true, false]) {
+    for (const marketSession of ['OPEN', 'CLOSED', 'DATA_UNAVAILABLE']) for (const operationalStatus of ['HEALTHY', 'WARNING', 'ERROR']) {
+      const presentation = systemStatePresentation({ loading, error, hasSnapshot, online, marketSession, operationalStatus });
+      assert.equal([...presentation.label].length, 4);
+      assert.equal(presentation.operationalState, operationalStatus);
+      if (!error && hasSnapshot && operationalStatus === 'ERROR') assert.equal(presentation.label, '运行异常');
+    }
+  }
+  for (const marketSession of ['OPEN', 'CLOSED']) assert.equal(systemStatePresentation({ loading: false, error: false, hasSnapshot: true, online: true, marketSession, operationalStatus: 'HEALTHY' }).label, '运行正常');
+});
+
+test('architecture route renders meaningful drill targets inside the shared shell', async () => {
+  const page = await renderSettled('/admin/architecture', /从业务流程逐层查看实现/);
+  assert.equal(page.response.status, 200);
+  for (const title of ['行情采集', '新闻处理', '预测与记录', '模型训练', '网页与同步']) assert.ok(page.html.includes(title), title);
+  assert.match(page.html, /展开流程/);
+  assert.doesNotMatch(page.html, /DECLARED SOURCE SELECTIONS|UNRESOLVED|证据待确认|Explorer experience mode/);
+  assert.match(page.html, /aria-label="查看系统运行状态"[^>]*href="\/health"/);
 });

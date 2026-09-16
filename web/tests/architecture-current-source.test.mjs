@@ -308,3 +308,31 @@ test('visible reference groups retain every source site without inventing flows 
     assert.equal(original.edges[0].memberIds, undefined, 'immutable source graph is not rewritten');
   }
 });
+
+test('reviewed system map is connected, drillable and backed by current source witnesses', async () => {
+  const { SYSTEM_MAPS, mapRanks } = await import('../app/_lib/system-map.ts');
+  const views = new Set(SYSTEM_MAPS.map(view => view.id));
+  const reached = new Set(['system']);
+  for (const view of SYSTEM_MAPS) {
+    const ids = new Set(view.nodes.map(node => node.id));
+    assert.equal(ids.size, view.nodes.length);
+    for (const record of [...view.nodes, ...view.edges]) {
+      assert.match(record.source.path, /^[a-zA-Z0-9_./-]+$/);
+      assert.ok(!record.source.path.includes('..'));
+      const text = readFileSync(new URL(`../../${record.source.path}`, import.meta.url), 'utf8');
+      assert.ok(text.includes(record.source.witness), `source drift: ${view.id} ${record.source.path}: ${record.source.witness}`);
+    }
+    for (const node of view.nodes) if (node.child) {
+      assert.ok(views.has(node.child)); reached.add(node.child);
+    }
+    const ranks = mapRanks(view);
+    assert.deepEqual(ranks.flat().map(node => node.id).sort(), [...ids].sort());
+    for (const edge of view.edges) {
+      assert.ok(ids.has(edge.from) && ids.has(edge.to));
+      assert.ok(ranks.findIndex(row => row.some(node => node.id === edge.from)) < ranks.findIndex(row => row.some(node => node.id === edge.to)), 'flow must be acyclic and point forward');
+    }
+    assert.ok(view.nodes.every(node => view.edges.some(edge => edge.from === node.id || edge.to === node.id)));
+  }
+  assert.deepEqual([...reached].sort(), [...views].sort());
+  assert.ok(Buffer.byteLength(JSON.stringify(SYSTEM_MAPS)) < 30000);
+});

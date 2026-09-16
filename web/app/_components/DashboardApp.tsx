@@ -15,7 +15,7 @@ import {
 import DashboardShell from "./DashboardShell";
 import DashboardContentBoundary from "./DashboardContentBoundary";
 
-const loadArchitectureView = () => import("../_views/ArchitectureExplorerView");
+const loadArchitectureView = () => import("../_views/SystemArchitectureView");
 const ArchitectureView = lazy(loadArchitectureView);
 const loadStatusView = () => import("../_views/StatusView");
 const loadHealthView = () => import("../_views/HealthView");

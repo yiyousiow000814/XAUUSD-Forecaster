@@ -251,3 +251,21 @@ its detail view. Hidden references cannot enter a visible group. Arrows denote
 source references, not distinct business flows. Unresolved architecture evidence
 is labeled as awaiting confirmation, never as incomplete operational work.
 The shared admin overview links to every admin tool, including architecture.
+
+## Interactive system map
+
+The private architecture page starts with reviewed product data flows, with
+child diagrams for quotes, news, forecasting, training and dashboard sync.
+Each node and relationship retains a current-source witness and a commit-bound
+source link. These establish configured structure, not live execution or health.
+The bounded map is maintained with `SYSTEM_ARCHITECTURE.md`; source-witness drift,
+invalid endpoints and unreachable child views fail the web contract tests.
+The syntactic index remains optional source inspection and cannot substitute
+for the product map or turn unknown dispatch into verified runtime evidence.
+
+Use one compact heading and breadcrumb row. Avoid identical mode switches and
+build provenance blocks in the primary flow. Desktop uses connected nodes;
+phones preserve explicit outgoing relationships without shrinking labels.
+The shared status pill is the health navigation entry; remove its duplicate
+System tab. Status labels remain four characters and health axes remain intact.
+Align the content and header dividers to the same shell gutters.
