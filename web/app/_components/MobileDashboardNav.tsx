@@ -16,7 +16,7 @@ export default function MobileDashboardNav({
   const navigation = useDashboardNavigation();
   const currentHref = DASHBOARD_GLOBAL_DESTINATIONS.find(
     destination => destination.id === activeDestination,
-  )?.href ?? "/";
+  )?.href ?? "";
 
   return <div className="mobile-dashboard-nav">
     <label>
@@ -36,6 +36,7 @@ export default function MobileDashboardNav({
           else window.location.assign(href);
         }}
       >
+        {activeDestination === "system" ? <option value="" disabled>当前：运行状态</option> : null}
         {DASHBOARD_GLOBAL_DESTINATIONS.map(destination => (
           <option key={destination.id} value={destination.href}>
             {adminAuthenticated && destination.authenticatedLabel

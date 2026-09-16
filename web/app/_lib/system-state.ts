@@ -29,13 +29,13 @@ export function systemStateAxes(state: SystemStateInput) {
 export function systemStatePresentation(state: SystemStateInput) {
   const axes = systemStateAxes(state);
   if (axes.readState === "UNAVAILABLE") {
-    return { ...axes, label: "状态不可用", tone: "is-down" };
+    return { ...axes, label: "状态未知", tone: "is-down" };
   }
   if (axes.readState === "REFRESHING" && !state.hasSnapshot) {
-    return { ...axes, label: "连接中", tone: "is-loading" };
+    return { ...axes, label: "正在连接", tone: "is-loading" };
   }
   if (axes.readState === "STALE_SNAPSHOT") {
-    return { ...axes, label: "状态更新失败", tone: "is-loading" };
+    return { ...axes, label: "更新失败", tone: "is-loading" };
   }
   if (axes.operationalState === "ERROR") {
     return { ...axes, label: "运行异常", tone: "is-down" };
@@ -44,10 +44,10 @@ export function systemStatePresentation(state: SystemStateInput) {
     return { ...axes, label: "运行警告", tone: "is-loading" };
   }
   if (axes.liveMarketState === "MARKET_CLOSED") {
-    return { ...axes, label: "市场休市", tone: "is-live" };
+    return { ...axes, label: "运行正常", tone: "is-live" };
   }
   if (axes.liveMarketState === "LIVE") {
-    return { ...axes, label: "实时链路正常", tone: "is-live" };
+    return { ...axes, label: "运行正常", tone: "is-live" };
   }
-  return { ...axes, label: "实时链路不可用", tone: "is-loading" };
+  return { ...axes, label: "运行警告", tone: "is-loading" };
 }

@@ -93,7 +93,7 @@ function GlobalNavigation({
   </nav>;
 }
 
-function GlobalSystemState() {
+function GlobalSystemState({ active }: { active: boolean }) {
   const [resource, setResource] = useState(
     () => readDashboardResourceState<ShellStatusPayload>("/api/status"),
   );
@@ -121,7 +121,7 @@ function GlobalSystemState() {
 
   const payload = resource.data;
 
-  return <div className="dashboard-global-state" aria-label="全局系统状态">
+  return <DashboardLink className="dashboard-global-state" ariaLabel="查看系统运行状态" ariaCurrent={active ? "page" : undefined} href="/health">
     <SystemStatePill
       loading={resource.loading}
       error={resource.error !== null}
@@ -130,7 +130,7 @@ function GlobalSystemState() {
       marketSession={payload?.system?.market_session}
       operationalStatus={payload?.operational_health?.status}
     />
-  </div>;
+  </DashboardLink>;
 }
 
 function DashboardHeader({
@@ -149,7 +149,7 @@ function DashboardHeader({
       adminAuthenticated={adminAuthenticated}
       openAdminLogin={openAdminLogin}
     />
-    <GlobalSystemState />
+    <GlobalSystemState active={location.room === "health"} />
   </header>;
 }
 

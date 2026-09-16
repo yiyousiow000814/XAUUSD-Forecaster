@@ -58,7 +58,7 @@ test("exposes initial loading and unavailable read state without a snapshot", as
   assert.equal(loading.loading, true);
   assert.equal(loading.error, null);
   assert.equal(presentationOf(loading).readState, "REFRESHING");
-  assert.equal(presentationOf(loading).label, "连接中");
+  assert.equal(presentationOf(loading).label, "正在连接");
 
   await assert.rejects(request, /offline/);
   const failed = readDashboardResourceState(url);
@@ -66,7 +66,7 @@ test("exposes initial loading and unavailable read state without a snapshot", as
   assert.equal(failed.loading, false);
   assert.match(failed.error.message, /offline/);
   assert.equal(presentationOf(failed).readState, "UNAVAILABLE");
-  assert.equal(presentationOf(failed).label, "状态不可用");
+  assert.equal(presentationOf(failed).label, "状态未知");
 });
 
 test("preserves machine-readable resource failure codes for generation recovery", async () => {
@@ -140,7 +140,7 @@ test("shares stale status with the shell subscriber and clears it after recovery
   assert.equal(stale.data.version, 1);
   assert.equal(readDashboardResource(url).version, 1);
   assert.equal(presentationOf(stale).readState, "STALE_SNAPSHOT");
-  assert.equal(presentationOf(stale).label, "状态更新失败");
+  assert.equal(presentationOf(stale).label, "更新失败");
   assert.equal(observed.at(-1).error.message, "refresh failed");
 
   await loadDashboardResource(url, { force: true });

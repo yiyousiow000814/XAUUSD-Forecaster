@@ -11,6 +11,13 @@ The system publishes `LONG`, `SHORT`, or `WAIT` research forecasts on a fixed
 five-minute clock and later records a fixed 30-minute executable Bid/Ask
 outcome. It is Shadow research only and has no order-submission authority.
 
+The private `/admin/architecture` page presents these principal flows as a
+drillable diagram. `web/app/_lib/system-map.ts` records each displayed node and
+connection with a current-source witness; update both when changing a mapped
+owner or boundary. Web contract tests detect witness drift and invalid drill
+targets. The optional source index retains syntactic uncertainty separately.
+Neither surface is a live health receipt.
+
 ## Level 0 — System context
 
 ```text

@@ -1,0 +1,62 @@
+.main { margin:0 3vw 36px; padding:0; min-height:0; color:var(--ink); }
+.header { scroll-margin-top:44px; display:flex; flex-wrap:wrap; align-items:center; gap:12px 20px; padding:16px 0 10px; border-bottom:1px solid var(--ink); }
+.header h1 { margin:0; font:400 clamp(28px,3vw,40px)/1.2 var(--font-display); }
+.header p { margin:0; color:var(--muted); font-size:14px; }
+.header > button { margin-left:auto; }
+.main button,.sourceIndex > button { min-height:44px; color:var(--ink); background:var(--paper); font:700 14px/1.45 var(--font-mono),monospace; cursor:pointer; }
+.header button,.details header button,.sourceIndex > button { border:1px solid var(--ink); padding:8px 14px; }
+.main button:focus-visible,.main a:focus-visible,.sourceIndex > button:focus-visible { outline:3px solid var(--green); outline-offset:3px; }
+.breadcrumbs { display:flex; flex-wrap:wrap; gap:8px; min-height:48px; align-items:center; }
+.breadcrumbs > span { display:flex; align-items:center; gap:8px; }
+.breadcrumbs button { border:0; padding:4px 8px; }
+.breadcrumbs button[aria-current="page"] { color:var(--green); }
+.flow { border:1px solid var(--ink); }
+.caption { padding:14px 20px; border-bottom:1px solid var(--ink); display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 20px; }
+.caption h2 { margin:0; font-size:19px; }
+.caption p { margin:0; font-size:14px; color:var(--muted); }
+.diagram { position:relative; padding:26px 24px; display:grid; gap:70px; background:var(--paper); }
+.row { display:flex; gap:40px; justify-content:center; }
+.nodeGroup { flex:0 1 280px; min-width:0; z-index:1; }
+.node { width:100%; min-height:108px!important; border:1px solid var(--ink); padding:14px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:5px; }
+.node:hover,.node[aria-pressed="true"] { background:#ddd7c8; box-shadow:inset 0 0 0 1px var(--green); }
+.node strong { font-size:19px; }
+.node span { font-size:13px; font-weight:400; }
+.node small { color:var(--green); font-size:12px; }
+.connections { position:absolute; inset:0; width:100%; height:100%; overflow:visible; pointer-events:none; }
+.connections g > path { stroke:var(--ink); stroke-width:1.5; fill:none; }
+.connections marker path { fill:var(--ink); }
+.connections text { fill:var(--ink); font:13px var(--font-sans),sans-serif; paint-order:stroke; stroke:var(--paper); stroke-width:5px; }
+.mobileEdges { display:none; }
+.details { border:1px solid var(--ink); margin-top:16px; padding:16px 20px; scroll-margin-top:48px; }
+.details header { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.details h2 { margin:0; font-size:22px; }
+.details p,.details a,.details code { font-size:14px; line-height:1.6; overflow-wrap:anywhere; }
+.details a { color:var(--green); }
+.details ul { list-style:none; padding:0; margin:16px 0 0; }
+.details li { padding:14px 0; border-top:1px solid var(--ink); }
+.details li code { display:block; margin-top:6px; }
+.witness { color:var(--muted); }
+.footer { margin-top:14px; font-size:13px; line-height:1.6; color:var(--muted); }
+.footer summary { min-height:44px; display:flex; align-items:center; cursor:pointer; color:var(--ink); }
+.footer ul { display:flex; flex-wrap:wrap; list-style:none; gap:8px; padding:0; }
+.footer button { border:1px solid var(--ink); padding:8px; }
+.sourceIndex { margin:12px 3vw; }
+.sourceIndex > button { margin-bottom:8px; }
+@media(max-width:720px) {
+  .main { margin:0 16px 24px; padding:0!important; }
+  .header { gap:8px; padding-top:12px; }
+  .header p { flex-basis:100%; order:3; font-size:13px; }
+  .header h1 { font-size:28px; }
+  .caption { padding:12px; }
+  .caption p { font-size:13px; }
+  .diagram { padding:16px; gap:16px; }
+  .row { flex-direction:column; gap:16px; }
+  .nodeGroup { flex:auto; }
+  .node { min-height:100px!important; }
+  .connections { display:none; }
+  .mobileEdges { display:grid; }
+  .mobileEdges button { text-align:left; background:transparent; border:0; border-left:1px solid var(--ink); margin-left:14px; padding:8px 12px; font-size:13px; }
+  .details { padding:12px; }
+  .details header button { flex-shrink:0; }
+}
+@media(max-width:420px) { .main { margin-inline:12px; } }
