@@ -662,6 +662,9 @@ test("keeps global shell ownership centralized and prevents view-level design dr
   assert.match(shell, /XAUUSD · Forward-only intelligence/);
   assert.match(shell, /DASHBOARD_GLOBAL_DESTINATIONS\.map/);
   assert.match(shell, /DASHBOARD_ADMIN_DESTINATIONS\.map/);
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.doesNotMatch(css.match(/\.dashboard-section-nav \{([^}]+)\}/)?.[1] ?? "", /border-bottom/);
+  assert.match(css.match(/\.dashboard-section-nav a \{([^}]+)\}/)?.[1] ?? "", /border-bottom:1px solid var\(--ink\)/);
   assert.match(mobile, /DASHBOARD_GLOBAL_DESTINATIONS\.map/);
   assert.doesNotMatch(mobile, /const SECTIONS|MobileDashboardSection/);
   assert.equal(navigation.match(/label: "(?:总览|新闻与决策|系统|管理员登录)"/g)?.length, 3);

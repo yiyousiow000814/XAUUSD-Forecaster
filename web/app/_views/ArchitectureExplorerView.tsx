@@ -535,7 +535,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
 
   return <main className={styles.main}>
     <header className={styles.header}>
-      <div><span>SANITIZED SOURCE INDEX · BUILD {sha?.slice(0, 8) ?? "UNVERIFIED"}</span><h1>系统架构</h1><p>{graph.view.summary}</p></div>
+      <div><span>SANITIZED SOURCE INDEX · BUILD {sha?.slice(0, 8) ?? "UNVERIFIED"}</span><h1>源码索引</h1><p>{graph.view.summary}</p></div>
       <div className={styles.headerNavigation}><div aria-label="Explorer experience mode" className={styles.modeSwitch} role="group">
         <button aria-pressed={experienceMode === "EXPLORE"} onClick={() => switchMode("EXPLORE")} type="button">Explore</button>
         <button aria-pressed={experienceMode === "REFERENCE"} onClick={() => switchMode("REFERENCE")} type="button">Reference</button>

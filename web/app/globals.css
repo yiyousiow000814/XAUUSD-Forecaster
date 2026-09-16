@@ -1974,8 +1974,8 @@ body:has(.assistant-main) > .operational-alert-banner { flex:0 0 auto; }
 .dashboard-global-link.is-navigating::after { content:""; position:absolute; inset:auto 0 -5px; height:3px; background:var(--acid); animation:nav-progress .7s ease-in-out infinite alternate; pointer-events:none; }
 .dashboard-global-state { display:flex; align-items:center; justify-content:flex-end; }
 .dashboard-global-state .live-pill { min-height:40px; white-space:nowrap; }
-.dashboard-section-nav { min-height:45px; display:flex; align-items:stretch; justify-content:flex-end; border-bottom:1px solid var(--ink); }
-.dashboard-section-nav a { min-width:150px; min-height:44px; display:inline-flex; align-items:center; justify-content:center; border-left:1px solid var(--ink); padding:8px 14px; font-size:12px; font-weight:800; text-decoration:none; }
+.dashboard-section-nav { min-height:45px; display:flex; align-items:stretch; justify-content:flex-end; }
+.dashboard-section-nav a { border-bottom:1px solid var(--ink); min-width:150px; min-height:44px; display:inline-flex; align-items:center; justify-content:center; border-left:1px solid var(--ink); padding:8px 14px; font-size:12px; font-weight:800; text-decoration:none; }
 .dashboard-section-nav a:last-child { border-right:1px solid var(--ink); }
 .dashboard-section-nav a:hover,.dashboard-section-nav a:focus-visible { background:#d9d2c1; outline:3px solid var(--acid); outline-offset:-3px; }
 .dashboard-section-nav a.is-active { background:var(--ink); color:var(--paper); }
