@@ -325,7 +325,6 @@ def test_learning_history_records_have_stable_keys_and_bounded_batches() -> None
     assert first == second
     assert {row["resource"] for row in first} == {
         "model", "version-group", "curve-5m", "curve-30m",
-        "execution-point", "execution-result",
     }
     assert all(len(row["payload_hash"]) == 64 for row in first)
     batches = module.learning_history_batches(first * 2_000)

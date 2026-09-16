@@ -221,3 +221,18 @@ def test_epoch_change_after_preparation_cannot_commit_a_partial_generation(tmp_p
         ForwardEngine(ledger, NullMarketProvider()).append_clock_event(CLOCK, CLOCK)
     assert ledger.count("market_snapshots") == ledger.count("collector_runs") == 0
     ledger.close()
+
+
+def test_retired_research_hash_does_not_invalidate_direction_clock(clock_ledger, monkeypatch):
+    import xauusd_forecaster.clock_commit as commit
+    original = commit.completion_status
+    def historical(connection, at):
+        status = original(connection, at)
+        status["evidence"]["execution_predictions_v2"] = ["f" * 64]
+        return status
+    monkeypatch.setattr(commit, "completion_status", historical)
+    engine = ForwardEngine(clock_ledger, NullMarketProvider())
+    first = engine.append_clock_event(CLOCK, CLOCK)
+    monkeypatch.setattr(commit, "completion_status", original)
+    assert read_completed_clock(clock_ledger, CLOCK) == first
+    assert engine.append_clock_event(CLOCK, CLOCK) == first

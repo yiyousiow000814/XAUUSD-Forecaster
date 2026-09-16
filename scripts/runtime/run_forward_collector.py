@@ -45,10 +45,6 @@ from xauusd_forecaster.training.generation import (
     train_due_v2,
 )
 from xauusd_forecaster.news.semantics.migration import append_missing_current_news_snapshots
-from xauusd_forecaster.execution_learning import (  # noqa: E402
-    append_due_exit_predictions,
-    train_due_execution,
-)
 from xauusd_forecaster.runtime.health import (
     RuntimeHeartbeatPulse,
     write_runtime_heartbeat,
@@ -247,7 +243,6 @@ def main() -> int:
     ledger.connection.commit()
     training_owner = BackgroundTrainingOwner(
         ledger.path, local_root / "models-v2",
-        local_root / "execution-models-v1", quote_root,
     )
     try:
         news_owner.start()
@@ -333,31 +328,6 @@ def main() -> int:
             grid_contention = loop_contention or bool(
                 skipped_grids.get("DATABASE_CONTENTION_DEFERRED")
             )
-            if quote_root:
-                try:
-                    checkpoint_quotes = provider.observations(now)
-                    checkpoint_count = append_due_exit_predictions(
-                        ledger, checkpoint_time=now, created_at=now,
-                        quotes=checkpoint_quotes,
-                    )
-                except sqlite3.Error as exc:
-                    if not is_forward_sqlite_contention(exc):
-                        raise
-                    print(json.dumps(
-                        _database_contention(ledger, "append_due_exit_predictions", exc),
-                        sort_keys=True,
-                    ), flush=True)
-                    checkpoint_count = 0
-                    grid_contention = True
-                if checkpoint_count:
-                    print(
-                        json.dumps(
-                            {"event": "EXIT_CHECKPOINT_PREDICTIONS_APPENDED",
-                             "count": checkpoint_count},
-                            sort_keys=True,
-                        ),
-                        flush=True,
-                    )
             try:
                 completed_outcomes = engine.settle_due_outcomes(now)
             except sqlite3.Error as exc:

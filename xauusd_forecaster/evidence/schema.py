@@ -51,14 +51,6 @@ V2_IMMUTABLE_TABLES = (
     "news_impact_failures_v1",
     "prediction_scores_v2",
     "calibration_snapshots_v2",
-    "execution_training_examples_v1",
-    "execution_model_updates_v1",
-    "execution_predictions_v1",
-    "execution_prediction_scores_v1",
-    "execution_training_examples_v2",
-    "execution_model_updates_v2",
-    "execution_predictions_v2",
-    "execution_position_scores_v2",
 )
 
 V2_SCHEMA = """
@@ -652,132 +644,6 @@ CREATE TABLE IF NOT EXISTS calibration_snapshots_v2 (
     source_hash TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS execution_training_examples_v1 (
-    example_id TEXT PRIMARY KEY,
-    source_decision_id TEXT NOT NULL,
-    direction TEXT NOT NULL CHECK(direction IN ('LONG','SHORT')),
-    checkpoint_minutes INTEGER NOT NULL CHECK(checkpoint_minutes IN (0,5,10,15,20,25)),
-    observed_at TEXT NOT NULL,
-    evidence_lane TEXT NOT NULL CHECK(evidence_lane IN ('REPAIRED_SEED','LIVE_OOS')),
-    feature_json TEXT NOT NULL,
-    target_value REAL NOT NULL,
-    target_action TEXT NOT NULL,
-    source_hash TEXT NOT NULL,
-    UNIQUE(source_decision_id,direction,checkpoint_minutes)
-);
-
-CREATE TABLE IF NOT EXISTS execution_model_updates_v1 (
-    model_version TEXT PRIMARY KEY,
-    model_identity TEXT NOT NULL CHECK(model_identity IN ('LOT_RIDGE','EXIT_RIDGE')),
-    model_stage TEXT NOT NULL CHECK(model_stage IN ('PREVIEW_ONLY','SHADOW')),
-    created_at TEXT NOT NULL,
-    training_cutoff TEXT NOT NULL,
-    training_rows INTEGER NOT NULL,
-    training_dataset_hash TEXT NOT NULL,
-    feature_version TEXT NOT NULL,
-    label_version TEXT NOT NULL,
-    artifact_path TEXT NOT NULL,
-    artifact_hash TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status='CHALLENGER')
-);
-
-CREATE TABLE IF NOT EXISTS execution_predictions_v1 (
-    source_decision_id TEXT NOT NULL,
-    model_version TEXT NOT NULL,
-    model_identity TEXT NOT NULL CHECK(model_identity IN ('LOT_RIDGE','EXIT_RIDGE')),
-    direction TEXT NOT NULL CHECK(direction IN ('LONG','SHORT')),
-    checkpoint_minutes INTEGER NOT NULL,
-    prediction_time TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    predicted_value REAL NOT NULL,
-    recommended_action TEXT NOT NULL,
-    prediction_status TEXT NOT NULL,
-    feature_hash TEXT NOT NULL,
-    PRIMARY KEY(source_decision_id,model_version,direction,checkpoint_minutes)
-);
-
-CREATE TABLE IF NOT EXISTS execution_prediction_scores_v1 (
-    source_decision_id TEXT NOT NULL,
-    model_version TEXT NOT NULL,
-    direction TEXT NOT NULL,
-    checkpoint_minutes INTEGER NOT NULL,
-    scored_at TEXT NOT NULL,
-    target_value REAL NOT NULL,
-    selected_utility REAL NOT NULL,
-    squared_error REAL NOT NULL,
-    score_hash TEXT NOT NULL,
-    PRIMARY KEY(source_decision_id,model_version,direction,checkpoint_minutes),
-    FOREIGN KEY(source_decision_id,model_version,direction,checkpoint_minutes)
-      REFERENCES execution_predictions_v1(source_decision_id,model_version,direction,checkpoint_minutes)
-);
-
-CREATE TABLE IF NOT EXISTS execution_training_examples_v2 (
-    source_decision_id TEXT PRIMARY KEY,
-    source_model_identity TEXT NOT NULL CHECK(source_model_identity='BROAD_FULL'),
-    source_model_version TEXT NOT NULL,
-    direction TEXT NOT NULL CHECK(direction IN ('LONG','SHORT')),
-    observed_at TEXT NOT NULL,
-    evidence_lane TEXT NOT NULL CHECK(evidence_lane IN ('REPAIRED_SEED','LIVE_OOS')),
-    feature_json TEXT NOT NULL,
-    u5 REAL NOT NULL,
-    final_quote_return REAL NOT NULL,
-    adverse_u5 REAL NOT NULL,
-    checkpoint_path_json TEXT NOT NULL,
-    source_hash TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS execution_model_updates_v2 (
-    model_version TEXT PRIMARY KEY,
-    model_identity TEXT NOT NULL CHECK(model_identity IN ('LOT_RIDGE','EXIT_RIDGE')),
-    model_stage TEXT NOT NULL CHECK(model_stage IN ('PREVIEW_ONLY','SHADOW')),
-    created_at TEXT NOT NULL,
-    training_cutoff TEXT NOT NULL,
-    training_decisions INTEGER NOT NULL,
-    training_observations INTEGER NOT NULL,
-    training_dataset_hash TEXT NOT NULL,
-    feature_version TEXT NOT NULL,
-    label_version TEXT NOT NULL,
-    artifact_paths_json TEXT NOT NULL,
-    artifact_hash TEXT NOT NULL,
-    source_model_identity TEXT NOT NULL CHECK(source_model_identity='BROAD_FULL'),
-    status TEXT NOT NULL CHECK(status='CHALLENGER')
-);
-
-CREATE TABLE IF NOT EXISTS execution_predictions_v2 (
-    source_decision_id TEXT NOT NULL,
-    model_version TEXT NOT NULL,
-    model_identity TEXT NOT NULL CHECK(model_identity IN ('LOT_RIDGE','EXIT_RIDGE')),
-    source_model_identity TEXT NOT NULL CHECK(source_model_identity='BROAD_FULL'),
-    source_model_version TEXT NOT NULL,
-    direction TEXT NOT NULL CHECK(direction IN ('LONG','SHORT')),
-    checkpoint_minutes INTEGER NOT NULL CHECK(checkpoint_minutes IN (0,5,10,15,20,25)),
-    prediction_time TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    predicted_value REAL NOT NULL,
-    recommended_action TEXT NOT NULL,
-    current_quote_return REAL,
-    prediction_status TEXT NOT NULL CHECK(prediction_status='SHADOW_ONLY'),
-    feature_hash TEXT NOT NULL,
-    PRIMARY KEY(source_decision_id,model_version,checkpoint_minutes)
-);
-
-CREATE TABLE IF NOT EXISTS execution_position_scores_v2 (
-    source_decision_id TEXT NOT NULL,
-    model_version TEXT NOT NULL,
-    model_identity TEXT NOT NULL CHECK(model_identity IN ('LOT_RIDGE','EXIT_RIDGE')),
-    scored_at TEXT NOT NULL,
-    direction TEXT NOT NULL CHECK(direction IN ('LONG','SHORT')),
-    selected_action TEXT NOT NULL,
-    exit_minutes INTEGER NOT NULL,
-    selected_quote_return REAL NOT NULL,
-    baseline_quote_return REAL NOT NULL,
-    delta_quote_return REAL NOT NULL,
-    score_hash TEXT NOT NULL,
-    PRIMARY KEY(source_decision_id,model_version),
-    FOREIGN KEY(model_version)
-      REFERENCES execution_model_updates_v2(model_version)
-);
-
 CREATE INDEX IF NOT EXISTS derived_market_time_v2
 ON derived_market_snapshots(decision_time, evidence_lane);
 CREATE INDEX IF NOT EXISTS derived_outcome_time_v2
@@ -803,57 +669,7 @@ CREATE INDEX IF NOT EXISTS news_generation_activation_time_v1
 ON news_model_generation_activations_v1(activated_at,generation_id);
 CREATE INDEX IF NOT EXISTS news_only_visibility_event_v1
 ON news_only_visibility_receipts_v1(event_key, decision_time);
-CREATE INDEX IF NOT EXISTS execution_examples_time_v1
-ON execution_training_examples_v1(checkpoint_minutes, observed_at);
-CREATE INDEX IF NOT EXISTS execution_predictions_time_v1
-ON execution_predictions_v1(model_identity, prediction_time);
-CREATE INDEX IF NOT EXISTS execution_examples_time_v2
-ON execution_training_examples_v2(observed_at);
-CREATE INDEX IF NOT EXISTS execution_predictions_time_v2
-ON execution_predictions_v2(model_identity, prediction_time);
 """
-
-
-def _repair_execution_score_foreign_key(connection: sqlite3.Connection) -> None:
-    """Replace the invalid two-column FK shipped with the initial V2 table.
-
-    ``execution_predictions_v2`` is unique by decision, model, and checkpoint.
-    A two-column reference to only decision and model is therefore invalid in
-    SQLite and causes outcome settlement to abort as soon as a score is added.
-    Score rows retain the decision identity while their enforceable parent is
-    the immutable model artifact that produced the prediction.
-    """
-    row = connection.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' "
-        "AND name='execution_position_scores_v2'"
-    ).fetchone()
-    if row is None or "REFERENCES execution_predictions_v2" not in str(row[0]):
-        return
-    connection.executescript(
-        """
-        ALTER TABLE execution_position_scores_v2
-          RENAME TO execution_position_scores_v2_invalid_fk;
-        CREATE TABLE execution_position_scores_v2 (
-            source_decision_id TEXT NOT NULL,
-            model_version TEXT NOT NULL,
-            model_identity TEXT NOT NULL CHECK(model_identity IN ('LOT_RIDGE','EXIT_RIDGE')),
-            scored_at TEXT NOT NULL,
-            direction TEXT NOT NULL CHECK(direction IN ('LONG','SHORT')),
-            selected_action TEXT NOT NULL,
-            exit_minutes INTEGER NOT NULL,
-            selected_quote_return REAL NOT NULL,
-            baseline_quote_return REAL NOT NULL,
-            delta_quote_return REAL NOT NULL,
-            score_hash TEXT NOT NULL,
-            PRIMARY KEY(source_decision_id,model_version),
-            FOREIGN KEY(model_version)
-              REFERENCES execution_model_updates_v2(model_version)
-        );
-        INSERT INTO execution_position_scores_v2
-          SELECT * FROM execution_position_scores_v2_invalid_fk;
-        DROP TABLE execution_position_scores_v2_invalid_fk;
-        """
-    )
 
 
 def install_v2_schema(connection: sqlite3.Connection) -> None:
@@ -890,7 +706,6 @@ def install_v2_schema(connection: sqlite3.Connection) -> None:
                 "ALTER TABLE news_identity_embedding_backfill_leases_v1 "
                 f"ADD COLUMN {name} {declaration}"
             )
-    _repair_execution_score_foreign_key(connection)
     for table in V2_IMMUTABLE_TABLES:
         for operation in ("UPDATE", "DELETE"):
             connection.execute(

@@ -178,7 +178,6 @@ def _source_payload() -> dict:
             "full_minus_market": curve_points,
             "broad_full_minus_core_full": curve_points,
         },
-        "execution_learning": {"models": []},
     }
 
 

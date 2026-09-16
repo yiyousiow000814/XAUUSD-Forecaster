@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from types import SimpleNamespace
 from typing import Callable
 from functools import partial
 
-from xauusd_forecaster.execution_learning import execution_learning_status
 from xauusd_forecaster.dashboard.learning_curves import learning_curve_payload
 
 
@@ -17,10 +15,6 @@ LEARNING_REVISION_TABLES = (
     "model_updates_v2",
     "predictions_v2",
     "prediction_scores_v2",
-    "execution_training_examples_v2",
-    "execution_model_updates_v2",
-    "execution_predictions_v2",
-    "execution_position_scores_v2",
 )
 
 
@@ -33,10 +27,8 @@ class LearningSurfaceOwner:
         learning_builder: Callable[[sqlite3.Connection], dict] = (
             partial(learning_curve_payload, exact_history=True)
         ),
-        execution_builder: Callable[[object], dict] = partial(execution_learning_status, exact_history=True),
     ) -> None:
         self._learning_builder = learning_builder
-        self._execution_builder = execution_builder
         self._lock = threading.Lock()
         self._cache: dict[str, object] = {}
 
@@ -54,13 +46,12 @@ class LearningSurfaceOwner:
         )
         return (database_identity, *counts)
 
-    def surfaces(self, connection: sqlite3.Connection) -> tuple[dict, dict]:
+    def surfaces(self, connection: sqlite3.Connection) -> dict:
         revision = self.revision(connection)
         with self._lock:
             if self._cache.get("revision") != revision:
                 self._cache.update({
                     "revision": revision,
                     "learning": self._learning_builder(connection),
-                    "execution": self._execution_builder(SimpleNamespace(connection=connection)),
                 })
-            return self._cache["learning"], self._cache["execution"]
+            return self._cache["learning"]

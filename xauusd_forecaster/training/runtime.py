@@ -10,7 +10,6 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from xauusd_forecaster.execution_learning import train_due_execution
 from xauusd_forecaster.evidence.ledger import ForwardLedger
 from xauusd_forecaster.news.semantics.migration import append_missing_current_news_snapshots
 from xauusd_forecaster.sqlite_wal import (
@@ -163,15 +162,12 @@ class BackgroundTrainingOwner:
 
     def __init__(
         self, ledger_path: str | Path, model_root: str | Path,
-        execution_root: str | Path, quote_root: str | Path | None = None,
         *, lease_seconds: float = LEASE_SECONDS,
         heartbeat_seconds: float = LEASE_HEARTBEAT_SECONDS,
         clock=None, process_probe=None,
     ) -> None:
         self.ledger_path = Path(ledger_path)
         self.model_root = Path(model_root)
-        self.execution_root = Path(execution_root)
-        self.quote_root = Path(quote_root) if quote_root else None
         self.lease_seconds = lease_seconds
         self.heartbeat_seconds = heartbeat_seconds
         self.clock = clock or (lambda: datetime.now(UTC))
@@ -367,13 +363,9 @@ class BackgroundTrainingOwner:
                         if job["reconcile"] else None
                     )
                     training = train_due_v2(ledger, cutoff, self.model_root)
-                    execution = train_due_execution(
-                        ledger, cutoff, self.execution_root, self.quote_root,
-                    )
                     print(json.dumps({
                         "event": "BACKGROUND_TRAINING_COMPLETED",
                         "migration": migration, "results": training,
-                        "execution_results": execution,
                     }, sort_keys=True), flush=True)
                 except Exception as exc:  # evidence is persisted; the loop survives
                     error = f"{type(exc).__name__}: {exc}"[:2000]

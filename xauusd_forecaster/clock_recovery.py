@@ -31,7 +31,6 @@ _DESCENDANTS = (
     ("derived_news_feature_snapshots", "source_decision_id"),
     ("derived_outcomes", "source_decision_id"),
     ("predictions_v2", "source_decision_id"),
-    ("execution_predictions_v2", "source_decision_id"),
     ("news_semantic_health_snapshots_v1", "source_decision_id"),
     ("news_input_coverage_snapshots_v1", "source_decision_id"),
 )

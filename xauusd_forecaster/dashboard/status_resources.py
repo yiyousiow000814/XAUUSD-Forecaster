@@ -625,7 +625,7 @@ def _dashboard_payload(
             connection, tuple(sorted(FACTOR_COVERAGE_NEWS_SOURCES)),
         )
         if include_learning:
-            learning, execution_learning = _LEARNING_SURFACE_OWNER.surfaces(connection)
+            learning = _LEARNING_SURFACE_OWNER.surfaces(connection)
             counts["live_oos_model_groups"] = len({
                 str(row.get("model_identity") or "")
                 for row in learning.get("models", [])
@@ -663,7 +663,6 @@ def _dashboard_payload(
                 ),
                 "news_contract_transition": {},
             }
-            execution_learning = {}
         market_chart = (
             _recent_market_chart(database, connection, now)
             if include_market_chart else {}
@@ -1293,7 +1292,6 @@ def _dashboard_payload(
             "models": learning["models"],
         },
         "learning_curves": learning,
-        "execution_learning": execution_learning,
         "market_chart": market_chart,
         "factor_coverage": factor_coverage(
             latest_macro, collected_news_sources, monitored_news_sources,

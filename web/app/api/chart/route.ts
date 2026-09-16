@@ -106,7 +106,7 @@ async function learningPoints(db:D1Database,resource:string,start:number,end:num
 async function readChart(request:Request) {
   const url=new URL(request.url),type=url.searchParams.get("type")||"learning";
   if(type==="market")return marketHistory(request);
-  if(!["learning","versions","version-group","execution-point","model"].includes(type))return NextResponse.json({error:"invalid chart"},{status:400});
+  if(!["learning","versions","version-group","model"].includes(type))return NextResponse.json({error:"invalid chart"},{status:400});
   const resource=type==="versions"?"exact-version-group":url.searchParams.get("cadence")==="30m"?"exact-curve-30m":"exact-curve-5m";
   const range=url.searchParams.get("range")||"all",page=Number(url.searchParams.get("page")||0);
   if(range!=="all"&&!WINDOWS[range]||!Number.isSafeInteger(page)||page<0)return NextResponse.json({error:"invalid range"},{status:400});
@@ -115,7 +115,7 @@ async function readChart(request:Request) {
     const state=await db.prepare("SELECT payload FROM chart_history_state WHERE id=1").first<{payload:string}>();
     if(!state)throw new Error("chart history unavailable");
     const completed=JSON.parse(state.payload);
-    if(["version-group","execution-point","model"].includes(type)){
+    if(["version-group","model"].includes(type)){
       url.searchParams.set("resource","exact-"+type);const response=await pagedRecords(db,url);
       if(previewBundle)response.headers.set("X-Aurum-Preview","current-read-only-d1");return response;
     }

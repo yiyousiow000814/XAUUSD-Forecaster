@@ -407,25 +407,6 @@ type Payload = {
     };
     disclaimer: string;
   };
-  execution_learning: {
-      shadow_only: boolean;
-      source_model_identity: string;
-      source_model_label: string;
-      training_contract: string;
-    lot_candidates: number[];
-    exit_checkpoints_minutes: number[];
-      models: Array<{ model_identity: string; status: string; training_rows: number;
-        training_decisions?: number; training_observations?: number;
-      available_examples: number; next_training_threshold: number;
-      model_version: string | null; predictions: number; scores: number;
-      evaluation: {
-          score_count: number; selected_cumulative_return?: number;
-          baseline_cumulative_return?: number; delta_cumulative_return?: number; unit: string;
-          chart_source_count?: number; chart_point_count?: number; chart_downsampled?: boolean;
-          points: Array<Record<string, string | number>>;
-          results?: Array<Record<string, string | number>>;
-      } }>;
-  };
   factor_coverage: Array<{
     domain: string;
     status: string;
@@ -968,7 +949,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     return () => { cancelled = true; };
   }, [pageDetailKeys, view]);
   const [graphOpen, setGraphOpen] = useState(false);
-  const [graphStartTab, setGraphStartTab] = useState<"curve" | "execution">("curve");
+  const [graphStartTab, setGraphStartTab] = useState<"curve">("curve");
   const fullStatusReadyRef = useRef(Boolean(cachedStatus && !cachedStatus.preview_status_summary));
   const fullLearningReadyRef = useRef(Boolean(cachedLearning && !cachedLearning.learning_preview_summary));
   const fullNewsIndexReadyRef = useRef(Boolean(
@@ -1245,7 +1226,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     );
   }, [evidenceMode, evidencePage, refreshEvidence, view]);
 
-  const openLearningGraph = (tab: "curve" | "execution") => {
+  const openLearningGraph = (tab: "curve") => {
     setGraphStartTab(tab);
     setGraphOpen(true);
     if (!fullLearningReadyRef.current) void refreshLearning(true);
@@ -1865,7 +1846,6 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
           const tone = group === null ? "is-pending" : group >= 0 ? "is-positive" : "is-negative";
           return <article key={identity}><b>{MODEL_LABELS[identity]}{diagnostic ? <small>新闻修正量</small> : newsOnlyPending ? <small>等待新版生成</small> : null}</b><div className="return-flow" aria-label={`本组开始前 ${percent(history)}，加入本组后 ${percent(total)}，本组贡献 ${percent(group)}`}><span className="return-value return-history" title="本组开始前的历史累计"><small>开始前</small><span>{history === null ? "—" : percent(history)}</span></span><i className={tone} aria-hidden="true">→</i><span className="return-value return-total" title="加入本组后的连续累计"><small>当前累计</small><strong>{total === null ? "等待" : percent(total)}</strong></span><i className="return-separator" aria-hidden="true">·</i><span className={`return-value return-group ${tone}`} title="本组独立贡献"><small>本组贡献</small><strong>{group === null ? "等待" : percent(group)}</strong></span></div></article>;
         })}</div>}</section>
-        <ExecutionResearch status={payload?.execution_learning} onOpenGraph={() => openLearningGraph("execution")} />
         <details className="model-method-note">
           <summary><span>方法与实盘边界</span><small>新闻修正量、成本与 Shadow 限制</small></summary>
           <div>
@@ -1876,7 +1856,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
           </div>
         </details>
         <footer className="league-footer">仅供研究观察，不代表盈利，也不会自动下单。</footer>
-        <LearningGraphModal key={graphStartTab} open={graphOpen} onClose={() => setGraphOpen(false)} startTab={graphStartTab} curves={payload?.learning_curves?.identity_curves ?? []} market={payload?.market_chart} versionGroups={payload?.learning_curves?.version_groups ?? []} execution={payload?.execution_learning} historyResource={payload?.learning_history_resource} />
+        <LearningGraphModal key={graphStartTab} open={graphOpen} onClose={() => setGraphOpen(false)} startTab={graphStartTab} curves={payload?.learning_curves?.identity_curves ?? []} market={payload?.market_chart} versionGroups={payload?.learning_curves?.version_groups ?? []} historyResource={payload?.learning_history_resource} />
       </section>}
 
       {view === "coverage" && <section className="coverage-grid">
@@ -1891,28 +1871,4 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
       <footer className="audit-footer"><span>{view === "search" ? "搜索结果按本次查询显示" : `所选资源时间 ${selectedResourceTime ? time(selectedResourceTime) : "尚未提供"}`}</span><span>SHADOW ONLY · APPEND ONLY</span></footer>
     </main>
   );
-}
-
-function ExecutionResearch({ status, onOpenGraph }: { status?: Payload["execution_learning"]; onOpenGraph: () => void }) {
-  const lot = status?.models.find(row => row.model_identity === "LOT_RIDGE");
-  const exit = status?.models.find(row => row.model_identity === "EXIT_RIDGE");
-  const card = (title: string, model: typeof lot, hint: string) => <article>
-    <div className="execution-title">
-      <div><b>{title}</b><small>{hint}</small></div>
-      <em className={model?.status === "RUNNING" ? "is-running" : ""}>{model?.status === "RUNNING" ? "学习中" : "收集中"}</em>
-    </div>
-    <dl>
-      <div><dt>已学习</dt><dd><CountValue value={model?.training_decisions} /></dd></div>
-      <div><dt>已结算</dt><dd><CountValue value={model?.scores} /></dd></div>
-      <div><dt>下次训练</dt><dd><CountValue value={model?.next_training_threshold} /></dd></div>
-    </dl>
-  </article>;
-  return <details className="model-method-note execution-research execution-research-details">
-    <summary><span>仓位与退出研究</span><small>仓位倍率与提前退出</small></summary>
-    <div>
-      {card("仓位倍率 Ridge", lot, "0.5x / 1.0x / 2.0x")}
-      {card("Exit Ridge", exit, "5 / 10 / 15 / 20 / 25 分钟")}
-      <article className="execution-detail-action"><p>跟随“{status?.source_model_label ?? "黄金＋大视野新闻 Ridge"}”的 Live 方向；WAIT 不建立位置。</p><button type="button" onClick={onOpenGraph}>打开详细结果 ↗</button></article>
-    </div>
-  </details>;
 }

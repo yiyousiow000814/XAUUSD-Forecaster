@@ -279,7 +279,7 @@ def test_plan_covers_path_family_hashes_manifests_and_active_generation(
         "ALREADY_CANONICAL": 0,
         "INVALID_OR_UNKNOWN": 0,
     }
-    assert len(plan["records"]) == 9
+    assert len(plan["records"]) == 7
     assert len(plan["manifest_locators"]) == 4
     assert all(item["ownership"] == "IMMUTABLE_MANIFEST_RESOLVED_AT_RUNTIME"
                for item in plan["manifest_locators"])
@@ -305,6 +305,7 @@ def test_migration_is_atomic_idempotent_receipted_and_reversible(
     receipt = read_migration_receipt(
         receipt_path, runtime_forward_root=forward_root,
     )
+    connection.execute("DROP TRIGGER IF EXISTS force_execution_locator_failure")
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         connection.execute(
             "UPDATE model_updates_v2 SET artifact_path='forbidden' "
@@ -347,13 +348,13 @@ def test_failed_locator_write_restores_append_only_guards_atomically(
     )
     assert {
         guard["name"] for guard in receipt["append_only_update_guards"]
-    } == set(ARTIFACT_UPDATE_GUARDS)
+    } == {name for name in ARTIFACT_UPDATE_GUARDS if "execution" not in name}
     before = connection.execute(
         "SELECT artifact_path FROM model_updates_v2 WHERE model_version='market'"
     ).fetchone()[0]
     connection.execute(
         "CREATE TRIGGER force_execution_locator_failure "
-        "BEFORE UPDATE ON execution_model_updates_v1 "
+        "BEFORE UPDATE ON model_updates_v2 "
         "BEGIN SELECT RAISE(ABORT, 'forced locator failure'); END"
     )
     connection.commit()
@@ -363,6 +364,7 @@ def test_failed_locator_write_restores_append_only_guards_atomically(
     assert connection.execute(
         "SELECT artifact_path FROM model_updates_v2 WHERE model_version='market'"
     ).fetchone()[0] == before
+    connection.execute("DROP TRIGGER IF EXISTS force_execution_locator_failure")
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         connection.execute(
             "UPDATE model_updates_v2 SET artifact_path='forbidden' "

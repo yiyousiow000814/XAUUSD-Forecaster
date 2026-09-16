@@ -46,11 +46,6 @@ def clock_evidence(connection, decision_time: datetime) -> dict:
         # Sort canonical row encodings, independent of SQLite's access plan.
         evidence[table] = sorted(canonical_hash(tuple(row)) for row in rows)
     rows = connection.execute(
-        "SELECT * FROM execution_predictions_v2 WHERE source_decision_id=? AND checkpoint_minutes=0",
-        (decision_id,),
-    ).fetchall()
-    evidence["execution_predictions_v2"] = sorted(canonical_hash(tuple(row)) for row in rows)
-    rows = connection.execute(
         "SELECT c.* FROM calibration_snapshots_v2 c WHERE c.calibration_version IN ("
         "SELECT calibration_version FROM predictions_v2 WHERE source_decision_id=? "
         "AND model_identity<>'CHAMPION_0')", (decision_id,),
@@ -125,6 +120,10 @@ def read_completed_clock(ledger, decision_time: datetime) -> tuple[str, str] | N
     if recorded:
         if len(recorded) == 1 and "u5_checkpoint_hash" in recorded[0]:
             actual["u5_checkpoint_hash"] = recorded[0]["u5_checkpoint_hash"]
+        # Retired research hashes remain in historical receipts, but their
+        # explicitly deleted rows are no longer part of clock completeness.
+        for item in recorded:
+            item.get("evidence", {}).pop("execution_predictions_v2", None)
         if recorded != [actual]:
             raise ValueError("CLOCK_EVENT_COMPLETION_CONFLICT")
     else:

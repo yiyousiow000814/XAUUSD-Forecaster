@@ -23,9 +23,9 @@ const MAX_PAGE_ROWS = 500;
 const MAX_RESPONSE_BYTES = 400_000;
 const ALLOWED_RESOURCES = new Set([
   "model", "version-group", "curve-5m", "curve-30m",
-  "execution-point", "execution-result", "curve-overview", "version-overview",
+    "curve-overview", "version-overview",
   "exact-model", "exact-version-group", "exact-curve-5m", "exact-curve-30m",
-  "exact-execution-point", "exact-execution-result",
+
   "exact-curve-tile-5m", "exact-curve-tile-30m",
 ]);
 
@@ -85,9 +85,9 @@ async function validateLearningBatch(binding: D1Database, serialized: string) {
               json_type(row)='object'
               AND json_extract(row,'$.resource') IN
                 ('model','version-group','curve-5m','curve-30m',
-                 'execution-point','execution-result','curve-overview','version-overview',
+                 'curve-overview','version-overview',
                  'exact-model','exact-version-group','exact-curve-5m','exact-curve-30m',
-                 'exact-execution-point','exact-execution-result','exact-curve-tile-5m','exact-curve-tile-30m')
+                 'exact-curve-tile-5m','exact-curve-tile-30m')
               AND length(json_extract(row,'$.record_key'))>0
               AND json_type(row,'$.sort_epoch')='integer'
               AND json_extract(row,'$.sort_epoch')>=0

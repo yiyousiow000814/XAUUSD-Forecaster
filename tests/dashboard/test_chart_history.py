@@ -135,3 +135,19 @@ def test_pyramid_preserves_extrema_and_only_updates_changed_blocks(tmp_path):
     assert connection.total_changes-before==8  # new point, six tail blocks, metadata
     assert connection.execute("SELECT count(*) FROM dashboard_chart_records_v1 WHERE resource='curve-5m' AND revision=4").fetchone()[0]==1
     connection.close()
+
+
+def test_retirement_rebuild_removes_old_execution_projection_without_losing_direction():
+    import sqlite3
+    from xauusd_forecaster.dashboard.chart_history import install_chart_history
+    connection = sqlite3.connect(":memory:")
+    install_chart_history(connection)
+    connection.execute("INSERT INTO dashboard_chart_records_v1 VALUES ('execution-point','retired',0,'old','{}',1)")
+    row = {"resource":"model", "record_key":"direction", "sort_epoch":1,
+           "payload_hash":"a"*64, "payload":{"model_identity":"FULL"}}
+    publish_chart_history(connection,[row],2,"2026-09-16T00:00:00Z")
+    connection.commit()
+    page = chart_history_page(connection)
+    assert page["record_count"] == 1
+    assert [r["resource"] for r in page["records"]] == ["model"]
+    connection.close()
