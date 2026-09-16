@@ -2414,7 +2414,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.evidence-summary \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); gap:8px/);
   assert.match(css, /\.quota-capacity-grid \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); \}/);
   assert.match(css, /@media \(max-width:430px\)\{[\s\S]*?\.throughput-summary \{ grid-template-columns:1fr; \}/);
-  assert.match(css, /\.graph-modal>nav \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.graph-modal>nav \{ grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
   assert.match(css, /\.graph-modal,\.graph-modal\.graph-modal-curve,\.graph-modal\.graph-modal-versions \{ width:100vw; height:100dvh/);
   assert.match(page, /return-value return-history/);
   assert.match(page, /return-value return-total/);

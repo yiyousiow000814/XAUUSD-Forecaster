@@ -1319,10 +1319,9 @@ body.modal-open { overflow:hidden; }
   .graph-modal>header span { display:none; }
   .graph-modal>header h2 { margin:0; font-size:clamp(24px,7vw,28px); line-height:1; white-space:nowrap; }
   .graph-modal>header button { width:46px; height:46px; flex:0 0 auto; }
-  .graph-modal>nav { grid-template-columns:repeat(2,minmax(0,1fr)); }
-  .graph-modal>nav button { min-height:46px; padding:8px 5px; border-right:1px solid var(--ink); border-bottom:1px solid var(--ink); font-size:11px; line-height:1.25; }
-  .graph-modal>nav button:nth-child(2n) { border-right:0; }
-  .graph-modal>nav button:nth-last-child(-n+2) { border-bottom:0; }
+  .graph-modal>nav { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .graph-modal>nav button { min-height:46px; padding:8px 5px; border-right:1px solid var(--ink); border-bottom:0; font-size:11px; line-height:1.25; }
+  .graph-modal>nav button:last-child { border-right:0; }
   .graph-modal>footer { padding:0; font-size:11px; }
   .graph-scope-full { display:none; }
   .graph-scope-mobile { display:block; }
