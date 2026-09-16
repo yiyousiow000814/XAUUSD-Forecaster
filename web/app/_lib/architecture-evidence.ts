@@ -104,10 +104,10 @@ export function sourceFactsForClaim(index: ArchitectureCodeIndex | null, claim: 
   if (!index || !claim) return { label: "Source facts unavailable", facts: [] };
   const valid = index.facts.filter(fact => Number(fact.line) > 0);
   if (claim.selector.startsWith("slice:")) {
-    return { label: "Subsystem source overview · first 18 symbols", facts: valid.filter(fact => claim.bindings.includes(String(fact.path))).slice(0, 18) };
+    return { label: "Subsystem source overview · first 18 symbols", facts: valid.filter(fact => fact.type !== "call" && claim.bindings.includes(String(fact.path))).slice(0, 18) };
   }
   if (claim.bindings.includes(claim.selector)) {
-    return { label: "File source overview · first 18 symbols", facts: valid.filter(fact => fact.path === claim.selector).slice(0, 18) };
+    return { label: "File source overview · first 18 symbols", facts: valid.filter(fact => fact.type !== "call" && fact.path === claim.selector).slice(0, 18) };
   }
   return { label: claim.selector.startsWith("edge:") ? "Exact source call site" : "Exact selected source symbol", facts: valid.filter(fact => fact.id === claim.selector && claim.bindings.includes(String(fact.path))) };
 }

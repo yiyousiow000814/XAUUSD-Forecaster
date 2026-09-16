@@ -307,6 +307,8 @@ test('source evidence reaches node and call inspectors without manufacturing exe
       assert.equal(source.facts.length, 1);
       assert.equal(source.facts[0].type, 'call');
       assert.equal(source.facts[0].line, source.facts[0].end_line);
+    } else {
+      assert.ok(source.facts.every(fact => fact.type !== 'call'), 'symbol overviews do not absorb call sites');
     }
   }
   assert.equal(bundle.executionDigestState, 'UNAVAILABLE');
