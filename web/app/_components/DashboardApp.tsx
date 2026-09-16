@@ -15,6 +15,8 @@ import {
 import DashboardShell from "./DashboardShell";
 import DashboardContentBoundary from "./DashboardContentBoundary";
 
+const loadArchitectureView = () => import("../_views/ArchitectureExplorerView");
+const ArchitectureView = lazy(loadArchitectureView);
 const loadStatusView = () => import("../_views/StatusView");
 const loadHealthView = () => import("../_views/HealthView");
 const loadRetryView = () => import("../_views/RetryView");
@@ -37,6 +39,7 @@ function validAuditView(value: string | null | undefined): AuditViewName {
 }
 
 function parseDashboardUrl(url: URL): DashboardLocation | null {
+  if (url.pathname === "/admin/architecture") return { room: "architecture", auditView: "news" };
   if (url.pathname === "/health") return { room: "health", auditView: "news" };
   if (url.pathname === "/admin") return { room: "admin", auditView: "news" };
   if (url.pathname === "/admin/assistant") return { room: "assistant", auditView: "news" };
@@ -54,6 +57,7 @@ function parseDashboardUrl(url: URL): DashboardLocation | null {
 }
 
 function canonicalHref(location: DashboardLocation): string {
+  if (location.room === "architecture") return "/admin/architecture";
   if (location.room === "live") return "/";
   if (location.room === "audit") return `/audit?view=${location.auditView}`;
   if (location.room === "health") return "/health";
@@ -64,6 +68,7 @@ function canonicalHref(location: DashboardLocation): string {
 }
 
 function preloadRoom(room: DashboardRoom): Promise<unknown> {
+  if (room === "architecture") return loadArchitectureView();
   if (room === "status") return loadStatusView();
   if (room === "health") return loadHealthView();
   if (room === "retry") return loadRetryView();
@@ -196,6 +201,7 @@ export default function DashboardApp({
       {navigationFailure && <div className="current-data-notice audit-resource-notice is-error" role="alert"><b>目标页面暂不可用</b><span>页面文件加载失败，当前内容已保留。</span><button type="button" onClick={() => window.location.assign(navigationFailure)}>重新打开目标页面</button></div>}
       <DashboardContentBoundary href={canonicalHref(location)}>
       <Suspense fallback={<main className="app-view-loading" role="status" aria-label="正在打开页面"><span>正在打开页面…</span><i /></main>}>
+        {location.room === "architecture" && <ArchitectureView />}
         {location.room === "live" && <LiveRoomView />}
         {location.room === "status" && <StatusView initialPayload={initialAdminStatus} />}
         {location.room === "health" && <HealthView initialPayload={initialStatus} />}
