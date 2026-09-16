@@ -16,6 +16,7 @@ from pathlib import Path
 FORWARD_WAL_AUTOCHECKPOINT_PAGES = 0
 FORWARD_WAL_SIZE_LIMIT_BYTES = 64 * 1024**2
 FORWARD_WAL_CHECKPOINT_INTERVAL_SECONDS = 60.0
+FORWARD_WAL_PRESSURE_RETRY_SECONDS = 5.0
 FORWARD_WAL_CHECKPOINT_BUSY_TIMEOUT_MS = 250
 FORWARD_WAL_CHECKPOINT_SCHEMA = "xauusd.forward.wal-checkpoint.v1"
 FORWARD_WAL_CHECKPOINT_STATE = "wal-checkpoint-state.json"
@@ -268,7 +269,7 @@ class ForwardWalCheckpointOwner:
                 )
                 if (result.status in FORWARD_WAL_RETRYABLE_STATES
                         and result.wal_bytes_after > FORWARD_WAL_SIZE_LIMIT_BYTES):
-                    delay = min(self.poll_seconds, 5.0)
+                    delay = min(self.poll_seconds, FORWARD_WAL_PRESSURE_RETRY_SECONDS)
                 with self._state_lock:
                     self.last_result = result
                     self.last_error = None

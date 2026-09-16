@@ -18,7 +18,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from xauusd_forecaster.sqlite_wal import open_forward_writer_connection
+from xauusd_forecaster.sqlite_wal import (
+    FORWARD_WAL_SIZE_LIMIT_BYTES,
+    FORWARD_WAL_PRESSURE_RETRY_SECONDS,
+    open_forward_writer_connection,
+)
 
 
 
@@ -349,6 +353,8 @@ class DashboardReadModelOwner:
     def refresh_once(self) -> dict[str, int]:
         refreshed: dict[str, int] = {}
         for resource in READ_MODEL_CONTRACTS:
+            if self._stop.is_set():
+                break
             try:
                 refreshed[resource] = self.refresh_resource(resource)
             except Exception as error:  # independent optional failure domains
@@ -357,6 +363,15 @@ class DashboardReadModelOwner:
                     self._record_failure(resource, error)
                 except Exception:
                     pass
+            # Every refresh has closed its snapshot and publication connection.
+            # Give the sole checkpoint owner a retry window before chaining a
+            # fresh reader, including the immediate dirty catch-up pass.
+            try:
+                oversized = Path(f"{self.database}-wal").stat().st_size > FORWARD_WAL_SIZE_LIMIT_BYTES
+            except FileNotFoundError:
+                oversized = False
+            if oversized:
+                self._stop.wait(FORWARD_WAL_PRESSURE_RETRY_SECONDS + 1.0)
         return refreshed
 
     def _run(self) -> None:
