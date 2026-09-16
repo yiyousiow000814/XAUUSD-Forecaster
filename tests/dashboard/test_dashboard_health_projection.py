@@ -280,3 +280,24 @@ def test_projection_threshold_contract_values() -> None:
     assert DECISION_OUTPUT_STALLED_SECONDS == 420.0
     assert DECISION_OUTPUT_GRACE_SECONDS == 120.0
     assert DECISION_HORIZON == timedelta(minutes=30)
+
+
+def test_semantic_snapshot_restart_grace_expires_without_rewriting_evidence():
+    now = datetime(2026, 9, 16, 3, 18, tzinfo=UTC)
+    old = {"observed_at": (now-timedelta(minutes=8)).isoformat(),
+           "heartbeat_at": None, "status": "UNHEALTHY",
+           "reason_codes": ["ACTIONABLE_NEWS_SEMANTICS_PENDING"]}
+    session = {**_open_session(now), "opened_at": (now-timedelta(minutes=3)).isoformat(),
+               "first_quote_after_open_at": (now-timedelta(minutes=2)).isoformat()}
+    for offset, expected in [(0, "WARN"), (241, "STALE")]:
+        instant = now + timedelta(seconds=offset)
+        collector = decision_collector_component(
+            _heartbeat(instant), latest_decision=old["observed_at"],
+            decision_observation_start=old["observed_at"], broker_session=session,
+            quote_current=True, now=instant)
+        result = semantic_pipeline_component(old, now=instant, decision_component=collector)
+        assert result["status"] == expected
+        assert result["age_seconds"] == 480 + offset
+        assert result["historical_reason_codes"] == old["reason_codes"]
+    fresh = {**old, "observed_at": now.isoformat(), "status": "HEALTHY", "reason_codes": []}
+    assert semantic_pipeline_component(fresh, now=now)["status"] == "OK"

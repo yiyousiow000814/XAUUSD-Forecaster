@@ -4,24 +4,18 @@ This specification defines the required visual behavior of the dashboard's
 data-dense navigation, metric grids, tables, and expandable evidence panels.
 It applies to both desktop and phone layouts.
 
-## Backup model usage
+## Retry tasks
 
-The admin AI usage page shows both authorized Groq Qwen models in fallback
-order, even when no request has been observed. Missing telemetry is unavailable,
-not zero or proof of a configured key. Read the existing private
-`llm_routing.news_backup` snapshot without exposing credentials or adding
-client-side provider calls. Display reserved requests separately from actual
-attempts, success, failure, throttling, and provider-reported token counts.
-RPD follows UTC midnight; token admission uses a trailing 24-hour window.
-Show local admission balances as local estimates, not provider availability.
-All operator timestamps use Asia/Kuala_Lumpur. Both model sections must remain
-readable without horizontal scrolling on supported phone viewports.
-Align the quota-day strip, model headers, metric bodies and disclosure with
-the panel's inset. Use three metric columns on desktop and two on phones,
-with larger primary values and smaller limits. Keep the counting explanation
-in an expandable disclosure. Acceptance must inspect populated cards, including
-long token counts, as well as the unavailable state; lack of overflow alone
-does not prove visual consistency with the adjacent quota panels.
+The retry page shows supported unresolved failed jobs and active manual schedule
+adjustments, not ordinary initial work or quota/prerequisite deferrals. The
+scheduler automatically retries eligible jobs. Successful and superseded jobs
+leave the current list; historical attempts remain evidence. Refresh the live
+queue every 15 seconds, with faster refresh while a submitted command is pending.
+Bounded results are labelled as the displayed count, not the total backlog.
+Decision-news freshness remains bound to its decision. After service recovery,
+an expired observation is pending only until the collector's existing first
+eligible grid deadline, and only while the collector is healthy. Beyond that
+deadline it is stale; never refresh the timestamp of historical evidence.
 
 ## Grid boundaries
 

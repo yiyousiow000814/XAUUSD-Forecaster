@@ -164,7 +164,6 @@ def _execute_job(
     urgent = job.priority in URGENT_PRIORITIES
     accountant = SchedulerModelAccountant(
         ledger.connection, credential, urgent=urgent, work_lane=job.work_lane,
-        enable_news_backup=True,
     )
 
     if job.task_type == "ACTIVE_ANNOTATION":
