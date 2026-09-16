@@ -44,6 +44,7 @@
 .sourceIndex > button { margin-bottom:8px; }
 .sourceIndex > main { padding:0 0 24px; width:100%; max-width:none; }
 @media(max-width:720px) {
+  .sourceIndex { margin-inline:16px; }
   .main { margin:0 16px 24px; padding:0!important; }
   .header { gap:8px; padding-top:12px; }
   .header p { flex-basis:100%; order:3; font-size:13px; }
@@ -60,4 +61,4 @@
   .details { padding:12px; }
   .details header button { flex-shrink:0; }
 }
-@media(max-width:420px) { .main { margin-inline:12px; } }
+@media(max-width:420px) { .main,.sourceIndex { margin-inline:12px; } }

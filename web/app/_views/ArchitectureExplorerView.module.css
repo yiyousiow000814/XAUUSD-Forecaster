@@ -14,9 +14,10 @@
 }
 
 .header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px 24px; margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--ink); }
+.header > div:first-child { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; min-width: 0; }
 .header > div > span { color: var(--graph-accent); font-size: 12px; font-weight: 900; letter-spacing: .12em; }
-.header h1 { margin: 3px 0; font: 400 32px/1.15 var(--font-display); letter-spacing: -.04em; }
-.header p { max-width: 720px; margin: 0; color: var(--graph-muted); font-size: 13px; line-height: 1.45; }
+.header h1 { order: -1; margin: 0; font: 400 32px/1.15 var(--font-display); letter-spacing: -.04em; }
+.header p { flex-basis: 100%; max-width: none; margin: 0; color: var(--graph-muted); font-size: 13px; line-height: 1.45; }
 .headerNavigation { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px 14px; max-width: 560px; min-width: 0; }
 .modeSwitch { display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; border: 1px solid var(--muted); border-radius: 0; background: var(--paper); }
 .modeSwitch button { min-width: 90px; min-height: 44px; border: 0; background: transparent; color: var(--graph-muted); cursor: pointer; font-weight: 850; }
