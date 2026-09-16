@@ -18,7 +18,9 @@ DECISION_OUTPUT_GRACE_SECONDS = (
 DECISION_HORIZON = timedelta(minutes=30)
 
 
-def semantic_pipeline_component(latest, *, now: datetime) -> dict:
+def semantic_pipeline_component(
+    latest, *, now: datetime, decision_component: dict | None = None,
+) -> dict:
     if latest is None:
         return {
             "last_success": None,
@@ -43,6 +45,16 @@ def semantic_pipeline_component(latest, *, now: datetime) -> dict:
     )
     stale = age_seconds > SEMANTIC_SNAPSHOT_MAX_STALE_SECONDS or freshness_failure
     historical = age_seconds > SEMANTIC_SNAPSHOT_MAX_STALE_SECONDS
+    awaiting_decision = False
+    if historical and decision_component and decision_component.get("status") == "OK":
+        deadline = decision_component.get("decision_output_stall_after")
+        try:
+            awaiting_decision = (
+                decision_component.get("decision_output_status") == "NO_RECENT_DECISION"
+                and now <= datetime.fromisoformat(str(deadline))
+            )
+        except (ValueError, TypeError):
+            pass
     counts = (
         latest["actionable_failure_counts"] if "actionable_failure_counts" in latest_keys
         else json.loads(latest["actionable_failure_counts_json"] or "{}")
@@ -56,11 +68,13 @@ def semantic_pipeline_component(latest, *, now: datetime) -> dict:
         "last_success": latest["heartbeat_at"],
         "age_seconds": age_seconds,
         "status": (
-            "STALE" if stale else
+            "WARN" if awaiting_decision else "STALE" if stale else
             "OK" if latest["status"] == "HEALTHY" else
             "WARN" if pending_only else "ERROR"
         ),
         "last_error": (
+            "服务恢复后等待下一个决策时点的新闻检查；旧记录不代表当前处理失败"
+            if awaiting_decision else
             "决策时点的新闻检查记录已过期；请检查决策采集器，旧记录不代表当前新闻处理失败"
             if historical else None if not reason_codes else ", ".join(reason_codes)
         ),

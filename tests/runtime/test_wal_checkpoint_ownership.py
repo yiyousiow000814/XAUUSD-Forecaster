@@ -62,9 +62,9 @@ def test_checkpoint_preserves_reader_then_truncates_after_full_backfill(
     pinned = checkpoint_forward_wal(
         database, tmp_path, started, size_limit_bytes=4096,
     )
-    assert pinned.status == "READER_PINNED"
+    assert pinned.status == "TRUNCATE_BUSY"
     assert pinned.pending_frames > 0
-    assert pinned.truncate_attempted is False
+    assert pinned.truncate_attempted is True
     assert _receipt_is_valid(pinned.state_path)
 
     assert wal_checkpoint_status(tmp_path, clock=lambda: started)["status"] == "OK"
@@ -135,3 +135,47 @@ def test_every_runtime_writer_crosses_shared_wal_policy_boundary() -> None:
     annotator = (root / "scripts/runtime/run_news_annotator.py").read_text(encoding="utf-8")
     assert "ForwardWalCheckpointOwner" in collector
     assert "ForwardWalCheckpointOwner" not in annotator
+
+
+def test_oversized_checkpoint_catches_reader_release_during_bounded_wait(tmp_path):
+    import threading
+    import time
+    database = tmp_path / "forward.sqlite3"
+    writer = open_forward_writer_connection(database)
+    writer.execute("CREATE TABLE evidence(value)")
+    writer.commit()
+    reader = sqlite3.connect(database, check_same_thread=False)
+    reader.execute("BEGIN")
+    reader.execute("SELECT * FROM evidence").fetchall()
+    writer.execute("INSERT INTO evidence VALUES (?)", ("x" * 8192,))
+    writer.commit()
+    release = threading.Thread(target=lambda: (time.sleep(.04), reader.rollback()))
+    release.start()
+    try:
+        result = checkpoint_forward_wal(database, tmp_path, datetime.now(UTC), size_limit_bytes=4096)
+        assert result.status == "TRUNCATED"
+        assert result.truncate_attempted and result.pending_frames == 0
+        assert writer.execute("SELECT count(*) FROM evidence").fetchone()[0] == 1
+    finally:
+        release.join()
+        reader.close()
+        writer.close()
+
+
+def test_checkpoint_owner_retries_oversize_contention_without_multiplying_owners(tmp_path, monkeypatch):
+    from xauusd_forecaster import sqlite_wal
+    from types import SimpleNamespace
+    outcomes = iter([
+        SimpleNamespace(status="TRUNCATE_BUSY", wal_bytes_after=FORWARD_WAL_SIZE_LIMIT_BYTES+1),
+        SimpleNamespace(status="TRUNCATED", wal_bytes_after=0),
+    ])
+    delays = []
+    class Stop:
+        def is_set(self): return len(delays) == 2
+        def wait(self, seconds): delays.append(seconds)
+    monkeypatch.setattr(sqlite_wal, "checkpoint_forward_wal", lambda *args: next(outcomes))
+    owner = sqlite_wal.ForwardWalCheckpointOwner(tmp_path / "forward.sqlite3", tmp_path)
+    owner._stop = Stop()
+    owner._run()
+    assert delays == [5, 60]
+    assert owner.last_result.status == "TRUNCATED"

@@ -18,6 +18,7 @@ import {
   operatorRetryCommandPresentation,
   shouldPollOperatorRetry,
   shouldPollOperatorRetryRequests,
+  operatorRetryRefreshDelay,
   summarizeOperatorRetryQueue,
 } from "../app/_lib/operator-retry-client.ts";
 
@@ -318,4 +319,11 @@ test("Admin overview and Retry queue share one authoritative summary contract", 
   assert.deepEqual(summarizeOperatorRetryQueue(jobs, requests), {
     total: 2, waiting: 2, overridden: 1, applying: 1, conflict: 1,
   });
+});
+
+
+test("retry queue renews automatic task state even without manual commands", () => {
+  assert.equal(operatorRetryRefreshDelay([]), 15_000);
+  assert.equal(operatorRetryRefreshDelay([{status:"PENDING",requested_at:new Date().toISOString()}]), 1_500);
+  assert.equal(operatorRetryRefreshDelay([{status:"APPLIED",requested_at:"2026-01-01T00:00:00Z",completed_at:"2026-01-01T00:01:00Z"}]), 15_000);
 });

@@ -159,20 +159,22 @@ def checkpoint_forward_wal(
         pending_frames = max(0, log_frames - checkpointed_frames)
         if busy:
             status = "CHECKPOINT_BUSY"
-        elif pending_frames:
-            status = "READER_PINNED"
         elif wal_bytes_before > size_limit_bytes:
             truncate_attempted = True
             truncate_busy, truncate_log, truncate_checkpointed = map(
                 int,
                 connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone(),
             )
+            log_frames, checkpointed_frames = truncate_log, truncate_checkpointed
+            pending_frames = max(0, log_frames - checkpointed_frames)
             if truncate_busy:
                 status = "TRUNCATE_BUSY"
             elif truncate_log != 0 or truncate_checkpointed != 0:
                 status = "TRUNCATE_INCOMPLETE"
             else:
                 status = "TRUNCATED"
+        elif pending_frames:
+            status = "READER_PINNED"
     except sqlite3.Error as exc:
         status = "CHECKPOINT_ERROR"
         error = f"{type(exc).__name__}: {str(exc)[:400]}"
@@ -259,10 +261,14 @@ class ForwardWalCheckpointOwner:
 
     def _run(self) -> None:
         while not self._stop.is_set():
+            delay = self.poll_seconds
             try:
                 result = checkpoint_forward_wal(
                     self.database, self.state_root, self.clock(),
                 )
+                if (result.status in FORWARD_WAL_RETRYABLE_STATES
+                        and result.wal_bytes_after > FORWARD_WAL_SIZE_LIMIT_BYTES):
+                    delay = min(self.poll_seconds, 5.0)
                 with self._state_lock:
                     self.last_result = result
                     self.last_error = None
@@ -270,7 +276,7 @@ class ForwardWalCheckpointOwner:
                 with self._state_lock:
                     self.last_result = None
                     self.last_error = f"{type(exc).__name__}: {str(exc)[:400]}"
-            self._stop.wait(self.poll_seconds)
+            self._stop.wait(delay)
 
     def start(self) -> None:
         self._thread.start()

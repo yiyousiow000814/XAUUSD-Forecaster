@@ -679,6 +679,18 @@ def test_retry_job_listing_exposes_schedule_provenance_without_credentials() -> 
     assert item["override_mode"] == "DELAY_1_HOUR"
     assert item["original_available_at"] == row["available_at"]
     assert "credential_id" not in item
+    ordinary = _enqueue(connection, "ordinary")
+    deferred = _enqueue(connection, "budget")
+    connection.execute("UPDATE news_ai_jobs_v1 SET last_error='BACKFILL_BUDGET_DEFERRED' WHERE job_id=?", (deferred,))
+    connection.commit()
+    assert {item["job_id"] for item in list_retry_schedule_jobs(connection)} == {job_id}
+    claimed = claim_job(connection, worker_id="recovery", pool=ROUTINE_POOL,
+                        now=NOW + timedelta(hours=3), task_types=("ACTIVE_ANNOTATION",))
+    # Scheduling still owns ordinary work; listing does not dispatch anything.
+    assert claimed is not None
+    connection.execute("UPDATE news_ai_jobs_v1 SET state='COMPLETED' WHERE job_id=?", (job_id,))
+    connection.commit()
+    assert job_id not in {item["job_id"] for item in list_retry_schedule_jobs(connection)}
 
 
 def test_provider_dispatch_staggers_independent_accounts_without_quota_leak() -> None:
@@ -2043,7 +2055,8 @@ def test_repair_version_reopens_matching_annotation_failure_only_once(
     ledger.close()
 
 
-def test_superseded_jobs_are_reconciled_without_another_model_attempt(tmp_path) -> None:
+@pytest.mark.parametrize("unsupported", [False, True])
+def test_superseded_jobs_are_reconciled_without_another_model_attempt(tmp_path, monkeypatch, unsupported) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     first_body = "First complete article body. " * 20
     second_body = "Corrected complete article body. " * 20
@@ -2063,13 +2076,23 @@ def test_superseded_jobs_are_reconciled_without_another_model_attempt(tmp_path) 
     job_id = enqueue_job(
         ledger.connection, task_type="ACTIVE_ANNOTATION",
         source="revision-source", source_item_id="item", revision_number=1,
-        prompt_version="prompt", priority="NORMAL", now=NOW,
+        prompt_version=CURRENT_NEWS_PROMPT_VERSION if unsupported else "prompt", priority="NORMAL", now=NOW,
     )
-    ledger.append_news_revision({
-        **common, "fetched_time": NOW + timedelta(minutes=1), "body": second_body,
-        "content_hash": hashlib.sha256(second_body.encode()).hexdigest(),
-    })
+    if not unsupported:
+        ledger.append_news_revision({
+            **common, "fetched_time": NOW + timedelta(minutes=1), "body": second_body,
+            "content_hash": hashlib.sha256(second_body.encode()).hexdigest(),
+        })
 
+    if unsupported:
+        monkeypatch.setattr(news_scheduler_module, "TASKS", ("ACTIVE_IMPACT", "TITLE_TRANSLATION"))
+    if unsupported:
+        assert list_retry_schedule_jobs(ledger.connection) == []
+        with pytest.raises(RetryScheduleConflict, match="JOB_NOT_MUTABLE"):
+            apply_retry_schedule_override(
+                ledger.connection, request_id="unsupported", job_id=job_id,
+                operator_id="owner", mode="IMMEDIATE", reason="stale browser command",
+                expected_state="QUEUED", expected_available_at=NOW.isoformat(), now=NOW)
     assert reconcile_completed_jobs(
         ledger.connection, now=NOW + timedelta(minutes=2),
     ) == 1

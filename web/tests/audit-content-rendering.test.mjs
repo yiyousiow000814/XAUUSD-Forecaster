@@ -41,30 +41,6 @@ const renderedModule = join(temporaryRoot, "audit.mjs");
 writeFileSync(renderedModule, built.outputFiles[0].contents);
 const { render, renderNews, renderStatus } = await import(pathToFileURL(renderedModule).href);
 
-test("admin usage renders both Groq models and distinguishes missing from zero evidence", () => {
-  const empty = renderStatus({generated_at:"2026-09-12T17:42:00Z"});
-  assert.match(empty,/备用模型用量尚未同步/);
-  const models = ["qwen/qwen3.8-27b","qwen/qwen3.6-27b"].map((model,index)=>({
-    model, limits:{rpd:1000,rpm:30,tpm:8000,tpd:200000}, reserved_today:index?0:3,
-    remaining_today:index?1000:997, attempts:index?0:3,successes:index?0:3, failures:0,throttled:0,
-    actual_tokens:index?0:2964,reserved_tokens_24h:index?0:15000,remaining_tokens_24h:index?200000:185000,
-    last_attempt_at:index?null:"2026-09-12T17:39:40Z",
-  }));
-  const html=renderStatus({generated_at:"2026-09-12T17:42:00Z",llm_routing:{news_backup:{
-    provider:"Groq",quota_day_utc:"2026-09-12",next_reset_at:"2026-09-13T00:00:00Z",models,
-  }}});
-  assert.match(html,/qwen\/qwen3\.8-27b/);assert.match(html,/qwen\/qwen3\.6-27b/);
-  assert.match(html,/2,964/);assert.match(html,/185,000/);
-  for (const label of ["今日实际请求", "今日已预留请求", "近24小时保守 token 占用", "近24小时本地 token 余量"]) {
-    assert.equal(html.split(`<dt>${label}</dt>`).length - 1, 2, `${label} remains visible for each model`);
-  }
-  assert.match(html, /<details[^>]*><summary>用量统计说明<\/summary>/);
-  assert.match(html, /已报告 tokens 不包含服务商未返回用量的请求/);
-  assert.match(html, /2026\/9\/13 08:00:00/);
-  assert.match(html,/暂未观察到请求，不代表模型已连接或可用/);
-  assert.doesNotMatch(html,/2026-09-12T17:39:40Z/);
-});
-
 test("article row expands publisher provenance with one coherent public label", () => {
   const row = {headline: "政策会议展望", emerging_topic_zh: "政策会议展望", event_type: "macro_preview",
     source: "google_news_fed_rates", source_item_id: "one", category: "利率/Fed",

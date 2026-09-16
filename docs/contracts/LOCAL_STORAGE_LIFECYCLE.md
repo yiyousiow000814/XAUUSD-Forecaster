@@ -23,11 +23,15 @@ Forward writer must use the shared writer-connection boundary.
 Only the Collector-supervised background checkpoint owner may perform recurring
 checkpoints. It runs independently from decision, annotation, training, and API
 commit paths. Each round first uses a non-blocking passive checkpoint. A
-truncate is attempted only when that round reports every valid WAL frame
-backfilled and the physical file exceeds the size limit. Lock acquisition for
+truncate is attempted whenever the physical file exceeds the size limit,
+including when the passive observation still has pending frames. SQLite
+rechecks reader/writer ownership within the bounded truncate operation; a
+passive observation is not a prerequisite that can starve reclamation. Lock acquisition for
 the truncate is capped at 250 milliseconds; a concurrent reader or writer is a
 visible retryable state, not authority to block a critical writer or discard a
-frame.
+frame. Oversized retryable rounds retry after five seconds; normal rounds
+retain the 60-second cadence. This catches reader release between optional
+builds without adding another checkpoint owner or cancelling readers.
 
 The owner publishes a digest-bound fixed state receipt beneath the runtime root
 with frame counts, pending frames, physical bytes, size limit, lock timeout,

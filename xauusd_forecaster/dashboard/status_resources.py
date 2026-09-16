@@ -180,7 +180,6 @@ from xauusd_forecaster.ai.quota import GeminiQuotaLedger
 
 
 from xauusd_forecaster.news.scheduler.state import account_quota_snapshot
-from xauusd_forecaster.news.scheduler.state import news_backup_usage_snapshot
 
 
 from xauusd_forecaster.news.scheduler.state import configured_api_credentials
@@ -271,7 +270,6 @@ def _dashboard_payload(
         credential.account_id for credential in credentials
     })
     scheduler_quotas = None
-    news_backup_usage = None
     owns_connection = snapshot_connection is None
     connection = snapshot_connection or sqlite3.connect(
         f"file:{database}?mode=ro", uri=True, timeout=5,
@@ -728,7 +726,6 @@ def _dashboard_payload(
                WHERE type='table' AND name='news_ai_account_daily_usage_v1'"""
         ).fetchone() is not None
         if scheduler_ledger_available:
-            news_backup_usage = news_backup_usage_snapshot(connection, now=now)
             scheduler_quotas = {
                 surface.payload_key: account_quota_snapshot(
                     connection, credentials,
@@ -908,7 +905,7 @@ def _dashboard_payload(
     sites_sync_component["news_projection_state"] = news_checkpoint.get("projection_state", "UNKNOWN")
     sites_sync_component["news_last_verified_at"] = news_checkpoint.get("last_success")
     semantic_pipeline_component = _semantic_pipeline_component(
-        current_semantic_health, now=now,
+        current_semantic_health, now=now, decision_component=decision_component,
     )
     degraded_resources = sync_status.get("degraded_resources") or []
     if (
@@ -1243,7 +1240,6 @@ def _dashboard_payload(
         "gemma_quota": gemma_quota,
         "gemini_embedding_quota": gemini_embedding_quota,
         "llm_routing": {
-            "news_backup": news_backup_usage,
             "action_bearing": {
                 "model": DEFAULT_GEMINI_MODEL,
                 "fallback_model": FALLBACK_GEMINI_MODEL,

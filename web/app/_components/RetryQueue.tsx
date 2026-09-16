@@ -6,7 +6,7 @@ import {
   operatorRetryPreviewJobs,
   operatorRetryPreviewRequests,
   operatorRetryCommandPresentation,
-  shouldPollOperatorRetryRequests,
+  operatorRetryRefreshDelay,
   summarizeOperatorRetryQueue,
   type OperatorRetryJob,
   type OperatorRetryRequest,
@@ -95,10 +95,10 @@ export default function RetryQueue() {
   const latestRequests = useMemo(() => latestOperatorRetryRequests(requests), [requests]);
   const summary = useMemo(() => summarizeOperatorRetryQueue(jobs, requests), [jobs, requests]);
   useEffect(() => {
-    if (preview || !shouldPollOperatorRetryRequests(requests)) return;
-    const timer = window.setTimeout(() => void load(false), 1_500);
+    if (preview || authRequired) return;
+    const timer = window.setTimeout(() => void load(false), operatorRetryRefreshDelay(requests));
     return () => window.clearTimeout(timer);
-  }, [load, preview, requests]);
+  }, [load, preview, authRequired, requests]);
 
   const eligible = useMemo(
     () => jobs.filter(job => job.state === "QUEUED" || job.state === "BACKING_OFF"),
@@ -144,9 +144,9 @@ export default function RetryQueue() {
 
   return <section className="retry-queue" id="retry-jobs" aria-label="重试任务">
     <header className="retry-queue-header">
-      <div><p className="eyebrow">PRIVATE OPERATOR QUEUE</p><h1>重试任务</h1><p>云端接受、Windows 应用与实际执行分阶段记录。</p></div>
+      <div><p className="eyebrow">PRIVATE OPERATOR QUEUE</p><h1>重试任务</h1><p>失败任务会自动重试；这里只显示尚未解决的失败，通常无需手动调整。</p></div>
       <dl className="retry-queue-summary" aria-label="重试队列摘要">
-        <div><dt>总任务</dt><dd>{summary.total}</dd></div>
+        <div><dt>当前显示</dt><dd>{summary.total}</dd></div>
         <div><dt>等待重试</dt><dd>{summary.waiting}</dd></div>
         <div><dt>人工调整</dt><dd>{summary.overridden}</dd></div>
         <div><dt>等待应用</dt><dd>{summary.applying}</dd></div>
@@ -165,7 +165,7 @@ export default function RetryQueue() {
       </div> : null}
     </div>
     {loading && !jobs.length ? <p className="retry-queue-empty">正在读取权威调度状态…</p> : null}
-    {!loading && !jobs.length ? <p className="retry-queue-empty">当前没有排队、退避或正在执行的重试任务。</p> : null}
+    {!loading && !jobs.length ? <p className="retry-queue-empty">当前没有待重试的失败任务。</p> : null}
     <div className="retry-job-list">{jobs.map(job => {
       const mutable = job.state === "QUEUED" || job.state === "BACKING_OFF";
       const overridden = Boolean(job.override_mode);

@@ -115,6 +115,9 @@ export const shouldPollOperatorRetryRequests = (
   now = Date.now(),
 ) => requests.some(request => shouldPollOperatorRetry(request, now));
 
+export const operatorRetryRefreshDelay = (requests: OperatorRetryRequest[]) =>
+  shouldPollOperatorRetryRequests(requests) ? 1_500 : 15_000;
+
 export const summarizeOperatorRetryQueue = (
   jobs: OperatorRetryJob[],
   requests: OperatorRetryRequest[],
