@@ -24,12 +24,6 @@ APPEND_ONLY_UPDATE_GUARDS = {
         "model_updates_v2_no_update",
         "prevent_update_model_updates_v2",
     ),
-    "execution_model_updates_v1": (
-        "prevent_update_execution_model_updates_v1",
-    ),
-    "execution_model_updates_v2": (
-        "prevent_update_execution_model_updates_v2",
-    ),
 }
 
 
@@ -258,64 +252,6 @@ def build_artifact_path_migration_plan(
     ) != 6:
         raise RuntimeError("ACTIVE_GENERATION_INCOMPLETE")
 
-    for row in connection.execute(
-        """SELECT model_version,model_identity,artifact_path,artifact_hash
-        FROM execution_model_updates_v1 ORDER BY model_version"""
-    ):
-        resolution = canonicalize_artifact_path(
-            row["artifact_path"], runtime_forward_root=runtime_forward_root,
-        )
-        target = require_runtime_artifact_path(
-            row["artifact_path"], runtime_forward_root=runtime_forward_root,
-        )
-        observed_hash = RidgeArtifact.read(target).artifact_hash
-        if observed_hash != str(row["artifact_hash"]):
-            raise RuntimeError(f"ARTIFACT_HASH_MISMATCH:{row['model_version']}")
-        records.append(_record(
-            table="execution_model_updates_v1",
-            model_version=str(row["model_version"]),
-            model_identity=str(row["model_identity"]),
-            old_value=str(row["artifact_path"]), new_value=str(target),
-            stored_hash=str(row["artifact_hash"]), observed_hash=observed_hash,
-            source_family=resolution.source_family,
-            disposition=("ALREADY_CANONICAL" if resolution.source_family ==
-                         "ALREADY_CANONICAL" else "RETAINED_HISTORICAL_MAPPED"),
-        ))
-
-    for row in connection.execute(
-        """SELECT model_version,model_identity,artifact_paths_json,artifact_hash
-        FROM execution_model_updates_v2 ORDER BY model_version"""
-    ):
-        old_paths = json.loads(str(row["artifact_paths_json"]))
-        new_paths: dict[str, str] = {}
-        observed_hashes: dict[str, str] = {}
-        source_families: set[str] = set()
-        for key, value in old_paths.items():
-            resolution = canonicalize_artifact_path(
-                value, runtime_forward_root=runtime_forward_root,
-            )
-            target = require_runtime_artifact_path(
-                value, runtime_forward_root=runtime_forward_root,
-            )
-            new_paths[str(key)] = str(target)
-            observed_hashes[str(key)] = RidgeArtifact.read(target).artifact_hash
-            source_families.add(resolution.source_family)
-        observed_hash = canonical_hash(observed_hashes)
-        if observed_hash != str(row["artifact_hash"]):
-            raise RuntimeError(f"ARTIFACT_HASH_MISMATCH:{row['model_version']}")
-        old_value = json.dumps(old_paths, sort_keys=True)
-        new_value = json.dumps(new_paths, sort_keys=True)
-        records.append(_record(
-            table="execution_model_updates_v2",
-            model_version=str(row["model_version"]),
-            model_identity=str(row["model_identity"]), old_value=old_value,
-            new_value=new_value, stored_hash=str(row["artifact_hash"]),
-            observed_hash=observed_hash,
-            source_family="+".join(sorted(source_families)),
-            disposition=("ALREADY_CANONICAL" if old_value == new_value else
-                         "RETAINED_HISTORICAL_MAPPED"),
-        ))
-
     canonical_records = [
         {
             "table": item["table"],
@@ -420,11 +356,7 @@ def read_migration_receipt(
 def _current_set_digest(connection: sqlite3.Connection, records: list[dict]) -> str:
     values = []
     for record in records:
-        column = (
-            "artifact_paths_json"
-            if record["table"] == "execution_model_updates_v2"
-            else "artifact_path"
-        )
+        column = "artifact_path"
         row = connection.execute(
             f"SELECT {column} FROM {record['table']} WHERE model_version=?",
             (record["model_version"],),
@@ -454,11 +386,7 @@ def apply_artifact_path_migration(
     try:
         guards = _suspend_append_only_update_guards(connection, receipt)
         for record in receipt["records"]:
-            column = (
-                "artifact_paths_json"
-                if record["table"] == "execution_model_updates_v2"
-                else "artifact_path"
-            )
+            column = "artifact_path"
             cursor = connection.execute(
                 f"UPDATE {record['table']} SET {column}=? "
                 f"WHERE model_version=? AND {column}=?",
@@ -494,11 +422,7 @@ def rollback_artifact_path_migration(
     try:
         guards = _suspend_append_only_update_guards(connection, receipt)
         for record in receipt["records"]:
-            column = (
-                "artifact_paths_json"
-                if record["table"] == "execution_model_updates_v2"
-                else "artifact_path"
-            )
+            column = "artifact_path"
             connection.execute(
                 f"UPDATE {record['table']} SET {column}=? "
                 f"WHERE model_version=? AND {column}=?",
@@ -525,17 +449,9 @@ def verify_artifact_path_migration(
     if current != receipt["after_set_digest"]:
         raise RuntimeError("ARTIFACT_PATH_MIGRATION_NOT_APPLIED")
     for record in receipt["records"]:
-        if record["table"] == "execution_model_updates_v2":
-            paths = json.loads(record["new_value"])
-            observed = {
-                key: RidgeArtifact.read(Path(value)).artifact_hash
-                for key, value in paths.items()
-            }
-            observed_hash = canonical_hash(observed)
-        else:
-            observed_hash = _artifact_hash(
-                record["model_identity"], Path(record["new_value"]),
-            )
+        observed_hash = _artifact_hash(
+            record["model_identity"], Path(record["new_value"]),
+        )
         if observed_hash != record["stored_artifact_hash"]:
             raise RuntimeError(
                 f"ARTIFACT_PATH_MIGRATION_VERIFY_HASH_MISMATCH:"

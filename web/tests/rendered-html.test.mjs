@@ -563,7 +563,6 @@ test("keeps nested compact counts in each dashboard headline hierarchy", () => {
     ["theme-streams article strong", "25px"],
     ["story-grid header>strong", "34px"],
     ["chart-caption>strong", "24px"],
-    ["execution-scorecards strong", "25px"],
   ]) {
     assert.match(css, new RegExp(`\\.${selector.replaceAll(".", "\\.")} \\{[^}]*font-size:${size}`));
   }
@@ -577,7 +576,6 @@ test("keeps nested compact counts in each dashboard headline hierarchy", () => {
     /\.theme-streams article span/,
     /\.story-grid header span/,
     /\.chart-caption span/,
-    /\.execution-scorecards small,\.execution-scorecards span/,
     /\.annotation-queue span \{/,
   ]) {
     assert.doesNotMatch(css, unsafeSelector);
@@ -866,9 +864,6 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   assert.match(learning, /models\.filter/);
   assert.match(learning, /lifecycle_status === "LATEST"/);
   assert.match(learning, /identity_curves: \[\]/);
-  assert.match(learning, /execution_learning:/);
-  assert.match(learning, /points: \[\]/);
-  assert.match(learning, /results: results\.slice\(-20\)/);
   assert.match(previewBuilder, /"news_evidence": news_evidence/);
   assert.match(previewBuilder, /UNAVAILABLE_IN_BUILD_SNAPSHOT/);
   const auditView = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
@@ -2219,7 +2214,6 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /const pageSize = 6/);
   assert.match(modal, /visibleRows\.map/);
   assert.match(modal, /function VersionPagination/);
-  assert.match(modal, /第 \{formatExactCount\(page \+ 1\)\} \/ \{formatExactCount\(pageCount\)\} 页/);
   assert.match(modal, /训练组分页（/);
   assert.match(modal, /aria-label="上一页训练组"/);
   assert.match(modal, /aria-label="下一页训练组"/);
@@ -2250,7 +2244,6 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.doesNotMatch(page, /learning-data-flow/);
   assert.match(page, /方法与实盘边界/);
   assert.match(modal, /K线与决策/);
-  assert.match(modal, /仓位与退出/);
   assert.doesNotMatch(modal, /冻结 Shadow 动作/);
   assert.match(modal, /每小时 :00 \/ :30/);
   assert.match(modal, /每5分钟/);
@@ -2259,26 +2252,10 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /U5 只是统一波动尺度，不是 WAIT 开关/);
   assert.match(modal, /<details className="wait-explainer"><summary>方向怎样产生<\/summary>/);
   assert.match(modal, /<details className="market-reading-guide"><summary>图表怎么看<\/summary>/);
-  assert.match(modal, /模型选择 vs 固定 1\.0x/);
-  assert.match(modal, /顺序 Exit Ridge vs 固定持有30分钟/);
-  assert.match(modal, /两套独立实验/);
-  assert.match(modal, /仓位倍率 OOS/);
-  assert.match(modal, /提前退出 OOS/);
-  assert.match(modal, /总计 <CountValue value=\{count\} suffix=" 笔" \/>/);
-  assert.match(modal, /当前显示最新 \{formatExactCount\(visibleCount\)\} 笔/);
-  assert.match(modal, /图中压缩为/);
-  assert.match(modal, /type=execution-point/);
-  assert.match(modal, /第 \{formatExactCount\(page \+ 1\)\} 段 · 共 \{formatExactCount\(total\)\} 个历史绘图点/);
-  assert.match(modal, /aria-label="查看较早时间段"/);
-  assert.match(modal, /aria-label="查看较晚时间段"/);
   assert.match(modal, /className="market-action-filters"/);
   assert.match(modal, /LONG <span>看多<\/span>/);
   assert.match(modal, /market-version-toggle/);
-  assert.match(css, /\.execution-chart-grid \{ display:grid; grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
-  assert.match(css, /\.execution-history-nav/);
-  assert.match(modal, /目前没有提前退出/);
   assert.doesNotMatch(modal, /等待退出 OOS/);
-  assert.match(modal, /WAIT 不创建仓位/);
   assert.match(modal, /点击图中的三角形/);
   assert.match(modal, /Ridge 预测未来30分钟连续收益/);
   assert.match(modal, /较高的一边只要大于0就记录为 Shadow 方向/);
@@ -2353,7 +2330,6 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.doesNotMatch(modal, /30分钟退出线/);
   assert.match(css, /\.version-pagination/);
   assert.match(css, /\.version-pagination button \{ width:46px; height:46px/);
-  assert.match(css, /\.execution-history-nav button \{[^}]*min-height:44px;[^}]*font-size:18px/);
   assert.match(css, /font-size:clamp\(24px,7vw,28px\)/);
   assert.match(css, /height:calc\(100dvh - 16px\)/);
   assert.match(css, /grid-template-rows:auto auto minmax\(0,1fr\) auto/);
@@ -2376,9 +2352,6 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(css, /\.version-result-metrics>\[data-label\]::before \{ content:attr\(data-label\)/);
   assert.match(css, /@media \(max-width:1100px\)\{[\s\S]*?\.version-ledger>header \{ grid-template-columns:1fr/);
   assert.match(css, /long-curve-block>\.chart-legend \{ margin-top:16px; padding-bottom:10px/);
-  assert.match(modal, /预测 \/ 方向/);
-  assert.match(modal, /row\.decision_time \?\? row\.time/);
-  assert.match(modal, /row\.scored_at \?\? row\.time/);
 });
 
 test("keeps the learning page focused and folds secondary research below the scoreboard", () => {
@@ -2386,13 +2359,11 @@ test("keeps the learning page focused and folds secondary research below the sco
   const summary = page.indexOf('<div className="learning-summary-grid">');
   const graph = page.indexOf('<section className="graph-launch">');
   const scoreboard = page.indexOf('<section className="model-score-summary">');
-  const execution = page.indexOf("<ExecutionResearch", scoreboard);
-  const methods = page.indexOf('<details className="model-method-note">', execution);
+  const methods = page.indexOf('<details className="model-method-note">', scoreboard);
   assert.ok(summary >= 0 && graph > summary);
-  assert.ok(scoreboard > graph && execution > scoreboard && methods > execution);
+  assert.ok(scoreboard > graph && methods > scoreboard);
   assert.doesNotMatch(page, /learning-audit-details|NEWS MODEL CONTRACT/);
   assert.doesNotMatch(page, /league-cost-note/);
-  assert.match(page, /仓位与退出研究/);
 });
 
 test("accepts split audit resources without status-only system provenance", () => {
@@ -2464,9 +2435,6 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.mobile-chart-scroll \{ width:100%; overflow-x:auto/);
   assert.match(css, /\.long-curve-block \.mobile-chart-scroll \{ overflow-x:auto; \}/);
   assert.match(css, /\.long-curve-block \.mobile-chart-scroll>\.learning-svg \{ width:720px; min-width:720px; min-height:300px; height:300px;/);
-  assert.match(css, /\.execution-chart \.mobile-chart-scroll \{ overflow-x:hidden; \}/);
-  assert.match(css, /\.execution-history-nav \{ display:grid; grid-template-columns:44px minmax\(0,1fr\) 44px;/);
-  assert.match(css, /\.execution-history-nav button \{ width:44px; min-width:44px; min-height:44px;/);
   assert.match(css, /\.market-history-nav \{[^}]*margin:10px 0 0;[^}]*border:1px solid/);
   assert.match(css, /\.prediction-counts \{[^}]*border-top:0/);
   assert.match(css, /\.curve-navigation-actions \{ grid-column:1\/-1; display:flex; width:max-content/);
@@ -2488,9 +2456,6 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.market-selected-window-caption \{ display:flex;/);
   assert.match(modal, /左右滑动浏览长期曲线 · 文字与时间轴保持可读大小/);
   assert.match(css, /\.market-chart-block>\.chart-legend \{ display:flex; flex-wrap:wrap;/);
-  assert.match(css, /\.execution-scorecards \{ grid-template-columns:minmax\(0,1fr\); gap:0; border-width:1px 0; background:transparent; \}/);
-  assert.match(css, /\.execution-scorecards article\+article \{ border-top:1px solid rgba\(17,17,15,\.36\); \}/);
-  assert.match(css, /\.execution-scorecards article>span \{ max-width:34ch; font-size:11px; line-height:1\.55; \}/);
   assert.match(css, /\.quota-row \{ grid-template-columns:minmax\(72px,\.8fr\) minmax\(88px,1fr\) auto;/);
   assert.match(css, /\.chart-block \{ overflow:visible/);
   assert.match(css, /\.graph-modal-backdrop \{ position:fixed; inset:0; z-index:1100/);
@@ -2739,7 +2704,6 @@ test("distinguishes market history loading, empty, and failed states", () => {
   assert.match(modal, /first\.source_gap_before/);
   assert.match(modal, /run\[0\]\.source_gap_before !== true/);
   assert.match(modal, /first\.source_gap_before !== true/);
-  assert.match(modal, /downsampled=\{!historyResource && model\?\.evaluation\.chart_downsampled\}/);
   assert.match(modal, /overviewStep/);
   assert.match(modal, /Date\.parse\(point\.decision_time\) - Date\.parse\(previous\.decision_time\) >= overviewStep/);
   assert.doesNotMatch(modal, /source_gap_before \?\?/);

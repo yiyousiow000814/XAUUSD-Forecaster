@@ -221,3 +221,20 @@ def test_epoch_change_after_preparation_cannot_commit_a_partial_generation(tmp_p
         ForwardEngine(ledger, NullMarketProvider()).append_clock_event(CLOCK, CLOCK)
     assert ledger.count("market_snapshots") == ledger.count("collector_runs") == 0
     ledger.close()
+
+
+def test_completion_checks_owned_families_without_rewriting_supplemental_receipts(clock_ledger, monkeypatch):
+    import xauusd_forecaster.clock_commit as commit
+    original = commit.completion_status
+    def with_metadata(connection, at):
+        status = original(connection, at)
+        status["evidence"]["supplemental_audit"] = ["f" * 64]
+        return status
+    monkeypatch.setattr(commit, "completion_status", with_metadata)
+    engine = ForwardEngine(clock_ledger, NullMarketProvider())
+    first = engine.append_clock_event(CLOCK, CLOCK)
+    before = clock_ledger.connection.execute("SELECT news_status_json FROM collector_runs").fetchone()[0]
+    monkeypatch.setattr(commit, "completion_status", original)
+    assert read_completed_clock(clock_ledger, CLOCK) == first
+    assert engine.append_clock_event(CLOCK, CLOCK) == first
+    assert clock_ledger.connection.execute("SELECT news_status_json FROM collector_runs").fetchone()[0] == before

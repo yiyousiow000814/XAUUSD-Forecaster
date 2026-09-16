@@ -45,14 +45,6 @@ ARTIFACT_UPDATE_GUARDS = {
     "prevent_update_model_updates_v2": (
         "model_updates_v2", "model_updates_v2 is append-only",
     ),
-    "prevent_update_execution_model_updates_v1": (
-        "execution_model_updates_v1",
-        "execution_model_updates_v1 is append-only",
-    ),
-    "prevent_update_execution_model_updates_v2": (
-        "execution_model_updates_v2",
-        "execution_model_updates_v2 is append-only",
-    ),
 }
 
 
@@ -117,12 +109,6 @@ def _database_fixture(tmp_path: Path) -> tuple[sqlite3.Connection, Path, Path, d
           generation_id TEXT,model_identity TEXT,model_version TEXT);
         CREATE TABLE news_model_generation_aux_members_v1(
           generation_id TEXT,model_identity TEXT,model_version TEXT);
-        CREATE TABLE execution_model_updates_v1(
-          model_version TEXT PRIMARY KEY,model_identity TEXT,
-          artifact_path TEXT,artifact_hash TEXT);
-        CREATE TABLE execution_model_updates_v2(
-          model_version TEXT PRIMARY KEY,model_identity TEXT,
-          artifact_paths_json TEXT,artifact_hash TEXT);
         """
     )
     _install_artifact_update_guards(connection)
@@ -200,33 +186,6 @@ def _database_fixture(tmp_path: Path) -> tuple[sqlite3.Connection, Path, Path, d
             r"models-v2\relative-history\model.json", historical_hash,
         ),
     )
-    execution_v1, execution_v1_hash = _write_ridge(
-        forward, "execution-models-v1", "legacy-execution",
-    )
-    connection.execute(
-        "INSERT INTO execution_model_updates_v1 VALUES(?,?,?,?)",
-        (
-            "legacy-execution", "LOT_RIDGE",
-            str(AUTO_FORWARD / "execution-models-v1" /
-                "legacy-execution" / "model.json"),
-            execution_v1_hash,
-        ),
-    )
-    execution_hashes = {}
-    execution_paths = {}
-    for size in ("0.5X", "1.0X", "2.0X"):
-        path, digest = _write_ridge(
-            forward, "execution-models-v2", f"lot/{size}",
-        )
-        execution_paths[size] = _legacy("execution-models-v2", path, forward)
-        execution_hashes[size] = digest
-    connection.execute(
-        "INSERT INTO execution_model_updates_v2 VALUES(?,?,?,?)",
-        (
-            "lot", "LOT_RIDGE", json.dumps(execution_paths, sort_keys=True),
-            canonical_hash(execution_hashes),
-        ),
-    )
     connection.commit()
     return connection, database, runtime_root, files
 
@@ -279,7 +238,7 @@ def test_plan_covers_path_family_hashes_manifests_and_active_generation(
         "ALREADY_CANONICAL": 0,
         "INVALID_OR_UNKNOWN": 0,
     }
-    assert len(plan["records"]) == 9
+    assert len(plan["records"]) == 7
     assert len(plan["manifest_locators"]) == 4
     assert all(item["ownership"] == "IMMUTABLE_MANIFEST_RESOLVED_AT_RUNTIME"
                for item in plan["manifest_locators"])
@@ -305,6 +264,7 @@ def test_migration_is_atomic_idempotent_receipted_and_reversible(
     receipt = read_migration_receipt(
         receipt_path, runtime_forward_root=forward_root,
     )
+    connection.execute("DROP TRIGGER IF EXISTS force_locator_failure")
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         connection.execute(
             "UPDATE model_updates_v2 SET artifact_path='forbidden' "
@@ -315,16 +275,16 @@ def test_migration_is_atomic_idempotent_receipted_and_reversible(
     assert apply_artifact_path_migration(connection, receipt) == "NO_CHANGE"
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         connection.execute(
-            "UPDATE execution_model_updates_v1 SET artifact_path='forbidden' "
-            "WHERE model_version='legacy-execution'"
+            "UPDATE model_updates_v2 SET artifact_path='forbidden' "
+            "WHERE model_version='market'"
         )
     connection.rollback()
     assert rollback_artifact_path_migration(connection, receipt) == "ROLLED_BACK"
     assert rollback_artifact_path_migration(connection, receipt) == "NO_CHANGE"
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         connection.execute(
-            "UPDATE execution_model_updates_v2 SET artifact_paths_json='{}' "
-            "WHERE model_version='lot'"
+            "UPDATE model_updates_v2 SET artifact_path='forbidden' "
+            "WHERE model_version='market'"
         )
     connection.rollback()
     payload = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -352,8 +312,8 @@ def test_failed_locator_write_restores_append_only_guards_atomically(
         "SELECT artifact_path FROM model_updates_v2 WHERE model_version='market'"
     ).fetchone()[0]
     connection.execute(
-        "CREATE TRIGGER force_execution_locator_failure "
-        "BEFORE UPDATE ON execution_model_updates_v1 "
+        "CREATE TRIGGER force_locator_failure "
+        "BEFORE UPDATE ON model_updates_v2 "
         "BEGIN SELECT RAISE(ABORT, 'forced locator failure'); END"
     )
     connection.commit()
@@ -363,6 +323,7 @@ def test_failed_locator_write_restores_append_only_guards_atomically(
     assert connection.execute(
         "SELECT artifact_path FROM model_updates_v2 WHERE model_version='market'"
     ).fetchone()[0] == before
+    connection.execute("DROP TRIGGER IF EXISTS force_locator_failure")
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         connection.execute(
             "UPDATE model_updates_v2 SET artifact_path='forbidden' "

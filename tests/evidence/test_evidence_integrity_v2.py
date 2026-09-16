@@ -41,17 +41,10 @@ from xauusd_forecaster.news.semantics.contracts import effective_record_kind
 from xauusd_forecaster.news.semantics.time import assess_news_time
 from xauusd_forecaster.news.semantics.time import category_time_rule
 from xauusd_forecaster.repair_v2 import immutable_table_hash
-from xauusd_forecaster import execution_learning
 import xauusd_forecaster.decision.inference as inference_v2
 import xauusd_forecaster.news.semantics.migration as news_contract_migration
 import xauusd_forecaster.training.generation as training_v2
 from xauusd_forecaster.u5_state import U5State, U5_VERSION
-from xauusd_forecaster.execution_learning import (
-    EXECUTION_CHART_MAX_POINTS, LOT_FEATURES, EXIT_FEATURES,
-    _bounded_execution_curve, append_due_exit_predictions,
-    append_execution_examples, append_lot_predictions, execution_learning_status,
-    score_execution_predictions, train_due_execution,
-)
 from xauusd_forecaster.training.materialization import MARKET_FEATURES
 
 
@@ -455,92 +448,10 @@ def test_reporting_source_aliases_share_one_identity(raw: str, expected: str) ->
     assert canonical_source_organization(raw) == expected
 
 
-def test_install_repairs_invalid_execution_score_foreign_key() -> None:
-    connection = sqlite3.connect(":memory:")
-    connection.executescript(V2_SCHEMA)
-    connection.executescript(
-        """
-        DROP TABLE execution_position_scores_v2;
-        CREATE TABLE execution_position_scores_v2 (
-            source_decision_id TEXT NOT NULL,
-            model_version TEXT NOT NULL,
-            model_identity TEXT NOT NULL,
-            scored_at TEXT NOT NULL,
-            direction TEXT NOT NULL,
-            selected_action TEXT NOT NULL,
-            exit_minutes INTEGER NOT NULL,
-            selected_quote_return REAL NOT NULL,
-            baseline_quote_return REAL NOT NULL,
-            delta_quote_return REAL NOT NULL,
-            score_hash TEXT NOT NULL,
-            PRIMARY KEY(source_decision_id,model_version),
-            FOREIGN KEY(source_decision_id,model_version)
-              REFERENCES execution_predictions_v2(source_decision_id,model_version)
-        );
-        """
-    )
-    install_v2_schema(connection)
-    foreign_keys = connection.execute(
-        "PRAGMA foreign_key_list(execution_position_scores_v2)"
-    ).fetchall()
-    assert len(foreign_keys) == 1
-    assert foreign_keys[0][2] == "execution_model_updates_v2"
-    assert foreign_keys[0][3:5] == ("model_version", "model_version")
 
 
-def test_execution_status_distinguishes_prediction_and_settlement_times(tmp_path) -> None:
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
-    decision = datetime(2026, 8, 6, 10, 50, tzinfo=timezone.utc)
-    settled = datetime(2026, 8, 6, 11, 28, 17, tzinfo=timezone.utc)
-    ledger.connection.execute(
-        "INSERT INTO execution_model_updates_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        ("lot-model", "LOT_RIDGE", "SHADOW", decision.isoformat(),
-         decision.isoformat(), 50, 50, "dataset", "features", "labels", "{}",
-         "artifact", "BROAD_FULL", "CHALLENGER"),
-    )
-    ledger.connection.execute(
-        "INSERT INTO execution_predictions_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        ("XAU-20260806T105000Z", "lot-model", "LOT_RIDGE", "BROAD_FULL",
-         "direction-model", "SHORT", 0, decision.isoformat(), decision.isoformat(),
-         0.1, "2.0X", None, "SHADOW_ONLY", "feature-hash"),
-    )
-    ledger.connection.execute(
-        "INSERT INTO execution_position_scores_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        ("XAU-20260806T105000Z", "lot-model", "LOT_RIDGE", settled.isoformat(),
-         "SHORT", "2.0X", 30, 0.004, 0.002, 0.002, "score-hash"),
-    )
-
-    result = execution_learning_status(ledger)["models"][0]["evaluation"]["results"][0]
-
-    assert result["decision_time"] == decision.isoformat()
-    assert result["scored_at"] == settled.isoformat()
-    assert result["time"] == settled.isoformat()
-    assert result["model_version"] == "lot-model"
-    ledger.close()
 
 
-def test_execution_curve_is_bounded_and_preserves_endpoints_and_extrema() -> None:
-    points = []
-    selected = baseline = 0.0
-    for index in range(10_000):
-        selected += 0.001 if index % 9 else -0.004
-        baseline += 0.0002 if index % 7 else -0.0005
-        if index == 4_321:
-            selected += 2.0
-        if index == 4_322:
-            selected -= 2.0
-        points.append({
-            "time": f"point-{index}",
-            "selected_cumulative_return": selected,
-            "baseline_cumulative_return": baseline,
-        })
-
-    bounded = _bounded_execution_curve(points)
-
-    assert len(bounded) <= EXECUTION_CHART_MAX_POINTS
-    assert bounded[0] == points[0]
-    assert bounded[-1] == points[-1]
-    assert points[4_321] in bounded
 
 
 UTC = timezone.utc
@@ -561,17 +472,6 @@ def test_received_time_after_expiry_invalidates_entry_even_when_event_time_is_ea
     assert label.reason_codes == ("NO_ENTRY_RECEIVED_WITHIN_EXPIRY",)
 
 
-def test_execution_collecting_gate_does_not_materialize_rows(tmp_path, monkeypatch) -> None:
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
-    monkeypatch.setattr(
-        execution_learning, "_training_rows",
-        lambda *_: pytest.fail("COLLECTING must not materialize execution rows"),
-    )
-    statuses = train_due_execution(
-        ledger, datetime.now(UTC), tmp_path / "execution-models",
-    )
-    assert {row["status"] for row in statuses} == {"COLLECTING"}
-    ledger.close()
 
 
 def test_executable_horizon_starts_from_entry_received_time() -> None:
@@ -589,140 +489,6 @@ def test_executable_horizon_starts_from_entry_received_time() -> None:
     assert label.exit_received_time == entry_received + timedelta(minutes=30)
 
 
-def test_execution_ridges_follow_one_frozen_live_direction(tmp_path, monkeypatch) -> None:
-    start = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=start)
-    quotes = [
-        _quote(start + timedelta(seconds=1), start + timedelta(seconds=1), 4000.0),
-        *[
-            _quote(start + timedelta(minutes=minute, seconds=1),
-                   start + timedelta(minutes=minute, seconds=1),
-                   4000.0 + minute)
-            for minute in range(1, 31)
-        ],
-    ]
-    label = build_executable_label_v2(decision_time=start, quotes=quotes)
-    assert [row["minutes"] for row in label.checkpoint_path] == [5, 10, 15, 20, 25]
-    features = {name: 0.001 * (index + 1) for index, name in enumerate(MARKET_FEATURES)}
-    for index in range(48):
-        decision_id = f"execution-{index}"
-        decision = start + timedelta(minutes=5 * index)
-        market_hash = canonical_hash((decision_id, features))
-        ledger.connection.execute(
-            """INSERT INTO derived_market_snapshots VALUES
-            (?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?)""",
-            (f"market-{index}", decision_id, decision.isoformat(), market_hash,
-             "LIVE_OOS", decision.isoformat(), "repaired-market-v2",
-             "finite-memory-u5-v5-contiguous-m1", 0.01,
-             json.dumps(features), "OK", "[]", market_hash, market_hash),
-        )
-        _insert_prediction(
-            ledger.connection, decision_id, decision,
-            model_version="broad-full-frozen", model_identity="BROAD_FULL",
-        )
-        assert append_execution_examples(
-            ledger, decision_id=decision_id,
-            appended_at=decision + timedelta(minutes=31), label=label,
-            source_hash=canonical_hash((decision_id, "quotes")),
-        ) == 1
-    statuses = train_due_execution(
-        ledger, start + timedelta(days=1), tmp_path / "execution-models"
-    )
-    assert {row["model_identity"] for row in statuses if row["status"] == "TRAINED"} == {
-        "LOT_RIDGE", "EXIT_RIDGE",
-    }
-    assert ledger.connection.execute(
-        "SELECT count(*) FROM execution_model_updates_v2"
-    ).fetchone()[0] == 2
-    with monkeypatch.context() as due_gate:
-        due_gate.setattr(
-            execution_learning, "_training_rows",
-            lambda *_: pytest.fail("NOT_DUE must not materialize execution rows"),
-        )
-        assert {row["status"] for row in train_due_execution(
-            ledger, start + timedelta(days=1), tmp_path / "execution-models"
-        )} == {"NOT_DUE"}
-    lot = ledger.connection.execute(
-        "SELECT artifact_paths_json FROM execution_model_updates_v2 WHERE model_identity='LOT_RIDGE'"
-    ).fetchone()
-    exit_model = ledger.connection.execute(
-        "SELECT model_version,artifact_paths_json FROM execution_model_updates_v2 WHERE model_identity='EXIT_RIDGE'"
-    ).fetchone()
-    lot_paths = json.loads(lot["artifact_paths_json"])
-    assert set(lot_paths) == {"0.5X", "1.0X", "2.0X"}
-    assert tuple(json.loads(Path(lot_paths["1.0X"]).read_text())["feature_names"]) == LOT_FEATURES
-    exit_path = json.loads(exit_model["artifact_paths_json"])["CONTINUATION"]
-    assert tuple(json.loads(Path(exit_path).read_text())["feature_names"]) == EXIT_FEATURES
-    status = execution_learning_status(ledger)
-    by_identity = {row["model_identity"]: row for row in status["models"]}
-    assert by_identity["LOT_RIDGE"]["evaluation"]["unit"] == "QUOTE_RETURN"
-    assert by_identity["EXIT_RIDGE"]["evaluation"]["unit"] == "QUOTE_RETURN"
-
-    live_decision = start + timedelta(days=1, minutes=5)
-    live_id = "execution-live-checkpoint"
-    live_hash = canonical_hash((live_id, features))
-    ledger.connection.execute(
-        """INSERT INTO derived_market_snapshots VALUES
-        (?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?)""",
-        ("market-live", live_id, live_decision.isoformat(), live_hash,
-         "LIVE_OOS", live_decision.isoformat(), "repaired-market-v2",
-         "finite-memory-u5-v5-contiguous-m1", 0.01,
-         json.dumps(features), "OK", "[]", live_hash, live_hash),
-    )
-    _insert_prediction(
-        ledger.connection, live_id, live_decision,
-        model_version="broad-full-live", model_identity="BROAD_FULL",
-    )
-    assert append_lot_predictions(
-        ledger, decision_id=live_id, decision_time=live_decision,
-        created_at=live_decision, market_snapshot={
-            "features_json": json.dumps(features), "data_health": "OK",
-            "output_hash": live_hash,
-        },
-    ) == 1
-    live_quotes = [
-        _quote(live_decision + timedelta(seconds=1),
-               live_decision + timedelta(seconds=1), 4000.0),
-        _quote(live_decision + timedelta(minutes=5, seconds=1),
-               live_decision + timedelta(minutes=5, seconds=1), 4001.0),
-    ]
-    observed_at = live_decision + timedelta(minutes=5, seconds=2)
-    assert append_due_exit_predictions(
-        ledger, checkpoint_time=observed_at, created_at=observed_at,
-        quotes=live_quotes,
-    ) == 1
-    rows = ledger.connection.execute(
-        """SELECT direction,checkpoint_minutes,prediction_time
-        FROM execution_predictions_v2 WHERE model_identity='EXIT_RIDGE'
-        ORDER BY direction"""
-    ).fetchall()
-    assert [(row["direction"], row["checkpoint_minutes"]) for row in rows] == [("LONG", 5)]
-    assert all(row["prediction_time"] == live_quotes[-1].received_time.isoformat()
-               for row in rows)
-    exit_status = {
-        row["model_identity"]: row for row in execution_learning_status(ledger)["models"]
-    }["EXIT_RIDGE"]
-    assert exit_status["action_counts"] == {
-        ledger.connection.execute(
-            "SELECT recommended_action FROM execution_predictions_v2 WHERE model_identity='EXIT_RIDGE'"
-        ).fetchone()[0]: 1
-    }
-
-    # Missing later checkpoints are a data gap, not permission to invent a
-    # completed HOLD_TO_30M position score.
-    ledger.connection.execute(
-        "INSERT INTO execution_predictions_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        ("execution-0", exit_model["model_version"], "EXIT_RIDGE", "BROAD_FULL",
-         "broad-full-frozen", "LONG", 5, observed_at.isoformat(),
-         observed_at.isoformat(), 0.1, "HOLD", 0.01, "SHADOW_ONLY",
-         canonical_hash(("execution-0", "incomplete-exit-path"))),
-    )
-    assert score_execution_predictions(
-        ledger, decision_id="execution-0", scored_at=observed_at + timedelta(minutes=30)
-    ) == 0
-    assert ledger.connection.execute(
-        "SELECT count(*) FROM execution_position_scores_v2 WHERE model_identity='EXIT_RIDGE'"
-    ).fetchone()[0] == 0
 
 
 def test_stable_ctrader_server_clock_lead_within_freshness_is_valid() -> None:

@@ -307,17 +307,8 @@ def test_learning_history_records_have_stable_keys_and_bounded_batches() -> None
                 }],
             }],
         },
-        "execution_learning": {"models": []},
     }
 
-    payload["execution_learning"]["models"] = [{"model_identity": "LOT_RIDGE", "evaluation": {
-        "points": [{"time": "2026-08-10T02:00:00Z", "decision_id": decision,
-                    "model_version": version, "selected_cumulative_return": i}
-                   for i, (decision, version) in enumerate([("a", "v1"), ("b", "v1"), ("a", "v2")])],
-        "results": [{"scored_at": "2026-08-10T02:00:00Z", "decision_id": decision,
-                     "model_version": version}
-                    for decision, version in [("a", "v1"), ("b", "v1"), ("a", "v2")]],
-    }}]
     first = module.learning_history_records(payload)
     second = module.learning_history_records(payload)
     assert len({(row["resource"], row["record_key"]) for row in first}) == len(first)
@@ -325,7 +316,6 @@ def test_learning_history_records_have_stable_keys_and_bounded_batches() -> None
     assert first == second
     assert {row["resource"] for row in first} == {
         "model", "version-group", "curve-5m", "curve-30m",
-        "execution-point", "execution-result",
     }
     assert all(len(row["payload_hash"]) == 64 for row in first)
     batches = module.learning_history_batches(first * 2_000)
@@ -399,7 +389,6 @@ def test_learning_summary_size_is_fixed_as_history_grows() -> None:
             "models": [], "version_groups": groups,
             "identity_curves": [{"model_identity": "FULL", "points": points}],
         },
-        "execution_learning": {"models": []},
     }
 
     summary = json.loads(module.learning_snapshot(payload))

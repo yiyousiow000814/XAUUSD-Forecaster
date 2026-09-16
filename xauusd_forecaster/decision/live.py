@@ -34,11 +34,7 @@ from xauusd_forecaster.repair_v2 import (
 )
 from xauusd_forecaster.training.materialization import MARKET_FEATURES
 from xauusd_forecaster.u5_state import U5_VERSION
-from xauusd_forecaster.execution_learning import (
-    append_execution_examples,
-    prepare_lot_prediction,
-    SOURCE_MODEL_IDENTITY,
-)
+
 
 
 def _uuid(namespace: str, value: str) -> str:
@@ -181,14 +177,6 @@ def prepare_live_decision_v2(
         },
         news_input_coverage=news_input_coverage,
     )
-    lot_row = prepare_lot_prediction(
-        ledger, source=next((row for row in predictions
-            if row["model_identity"] == SOURCE_MODEL_IDENTITY), None), decision_id=decision_id, decision_time=decision_time,
-        created_at=created_at,
-        market_snapshot={"features_json": json.dumps(features),
-                         "data_health": snapshot["data_health"],
-                         "output_hash": market_hash},
-    )
     return {
         "decision_id": decision_id,
         "decision_time": decision_time,
@@ -207,7 +195,6 @@ def prepare_live_decision_v2(
         "predictions": predictions,
         "prediction_rows": prediction_rows,
         "calibration_rows": calibration_rows,
-        "lot_row": lot_row,
         "generation_hash": generation_hash,
         "evaluation_epoch": epoch,
     }
@@ -354,11 +341,6 @@ def persist_live_decision_v2(ledger, prepared: dict | None) -> list[dict]:
             f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}": news,
         },
     )
-    if prepared["lot_row"] is not None:
-        ledger.connection.execute(
-            "INSERT INTO execution_predictions_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            prepared["lot_row"],
-        )
     return predictions
 
 
@@ -456,8 +438,4 @@ def append_live_outcome_v2(ledger, *, decision_id: str, decision_time: datetime,
                      appended_at.isoformat(), TRAINING_ELIGIBILITY_VERSION, market["output_hash"],
                      output_hash, news["output_hash"] if news else None),
                 )
-            append_execution_examples(
-                ledger, decision_id=decision_id, appended_at=appended_at,
-                label=label, source_hash=source_evidence_hash,
-            )
     return True

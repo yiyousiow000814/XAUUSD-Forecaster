@@ -73,7 +73,7 @@ def test_background_owner_claim_defers_without_killing_owner(tmp_path) -> None:
         ledger.connection, datetime.now(UTC), reconcile=True,
     ) == "REQUESTED"
     owner = training_owner.BackgroundTrainingOwner(
-        ledger.path, tmp_path / "models", tmp_path / "execution",
+        ledger.path, tmp_path / "models",
     )
     owner_ledger = ForwardLedger(ledger.path)
     owner_ledger.connection.execute("PRAGMA busy_timeout=20")
@@ -220,9 +220,8 @@ def test_blocked_training_does_not_stop_multiple_decision_cycles(
         return [{"status": "TRAINED"}]
 
     monkeypatch.setattr(training_owner, "train_due_v2", blocked_training)
-    monkeypatch.setattr(training_owner, "train_due_execution", lambda *_: [])
     owner = training_owner.BackgroundTrainingOwner(
-        ledger.path, tmp_path / "models", tmp_path / "execution",
+        ledger.path, tmp_path / "models",
     )
     owner.start()
     start = datetime(2026, 8, 20, 12, tzinfo=UTC)
@@ -292,9 +291,8 @@ def test_slow_training_is_owned_off_the_requesting_decision_connection(
         return [{"status": "NOT_DUE"}]
 
     monkeypatch.setattr(training_owner, "train_due_v2", slow_training)
-    monkeypatch.setattr(training_owner, "train_due_execution", lambda *_: [])
     owner = training_owner.BackgroundTrainingOwner(
-        ledger.path, tmp_path / "models", tmp_path / "execution",
+        ledger.path, tmp_path / "models",
     )
     owner.start()
     cutoff = datetime(2026, 8, 20, 12, tzinfo=UTC)
@@ -329,10 +327,10 @@ def test_expired_training_lease_cannot_be_stolen_from_live_owner(tmp_path) -> No
     cutoff = datetime(2026, 8, 20, 12, tzinfo=UTC)
     training_owner.request_background_training(ledger.connection, cutoff)
     first = training_owner.BackgroundTrainingOwner(
-        ledger.path, tmp_path / "models", tmp_path / "execution",
+        ledger.path, tmp_path / "models",
     )
     second = training_owner.BackgroundTrainingOwner(
-        ledger.path, tmp_path / "models", tmp_path / "execution",
+        ledger.path, tmp_path / "models",
     )
     first_ledger = ForwardLedger(ledger.path)
     second_ledger = ForwardLedger(ledger.path)
@@ -364,9 +362,8 @@ def test_blocked_training_renews_lease_across_twenty_logical_minutes(
         return [{"status": "NOT_DUE"}]
 
     monkeypatch.setattr(training_owner, "train_due_v2", blocked)
-    monkeypatch.setattr(training_owner, "train_due_execution", lambda *_: [])
     first = training_owner.BackgroundTrainingOwner(
-        ledger.path, tmp_path / "models", tmp_path / "execution",
+        ledger.path, tmp_path / "models",
         lease_seconds=60, heartbeat_seconds=0.01, clock=lambda: logical_now[0],
     )
     first.start()
@@ -395,7 +392,7 @@ def test_blocked_training_renews_lease_across_twenty_logical_minutes(
     assert initial[2] and initial[3]
 
     second = training_owner.BackgroundTrainingOwner(
-        ledger.path, tmp_path / "models", tmp_path / "execution",
+        ledger.path, tmp_path / "models",
         clock=lambda: logical_now[0],
     )
     second_ledger = ForwardLedger(ledger.path)
@@ -420,7 +417,7 @@ def test_confirmed_dead_training_process_is_recoverable(tmp_path) -> None:
     cutoff = datetime(2026, 8, 20, 12, tzinfo=UTC)
     training_owner.request_background_training(ledger.connection, cutoff)
     first = training_owner.BackgroundTrainingOwner(
-        ledger.path, tmp_path / "models", tmp_path / "execution",
+        ledger.path, tmp_path / "models",
     )
     first_ledger = ForwardLedger(ledger.path)
     assert first._claim(first_ledger.connection) is not None
@@ -430,7 +427,7 @@ def test_confirmed_dead_training_process_is_recoverable(tmp_path) -> None:
             ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(),),
         )
     recovered = training_owner.BackgroundTrainingOwner(
-        ledger.path, tmp_path / "models", tmp_path / "execution",
+        ledger.path, tmp_path / "models",
         process_probe=lambda _pid, _token: False,
     )
     recovered_ledger = ForwardLedger(ledger.path)
@@ -452,7 +449,7 @@ def test_inconsistent_expired_owner_identity_fails_closed(tmp_path) -> None:
     cutoff = datetime(2026, 8, 20, 12, tzinfo=UTC)
     training_owner.request_background_training(ledger.connection, cutoff)
     first = training_owner.BackgroundTrainingOwner(
-        ledger.path, tmp_path / "models", tmp_path / "execution",
+        ledger.path, tmp_path / "models",
     )
     first_ledger = ForwardLedger(ledger.path)
     assert first._claim(first_ledger.connection) is not None
@@ -463,7 +460,7 @@ def test_inconsistent_expired_owner_identity_fails_closed(tmp_path) -> None:
             ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(),),
         )
     second = training_owner.BackgroundTrainingOwner(
-        ledger.path, tmp_path / "models", tmp_path / "execution",
+        ledger.path, tmp_path / "models",
     )
     second_ledger = ForwardLedger(ledger.path)
     assert second._claim(second_ledger.connection) is None
@@ -489,9 +486,8 @@ def test_training_failure_preserves_active_generation_and_retries_once_later(
         raise RuntimeError("controlled training failure")
 
     monkeypatch.setattr(training_owner, "train_due_v2", fail_training)
-    monkeypatch.setattr(training_owner, "train_due_execution", lambda *_: [])
     owner = training_owner.BackgroundTrainingOwner(
-        ledger.path, tmp_path / "models", tmp_path / "execution",
+        ledger.path, tmp_path / "models",
     )
     owner.start()
     training_owner.request_background_training(

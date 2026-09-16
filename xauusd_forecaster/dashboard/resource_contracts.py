@@ -39,7 +39,6 @@ REMOTE_DAILY_BRIEF_LIMIT = 14
 LEARNING_HISTORY_CONTRACT_VERSION = "exact-chart-history-v1"
 LEARNING_HISTORY_BATCH_LIMIT_BYTES = 60_000
 LEARNING_SUMMARY_GROUPS_PER_IDENTITY = 6
-LEARNING_SUMMARY_EXECUTION_RESULTS = 20
 MARKET_OVERVIEW_DECISIONS_PER_SERIES = 240
 REMOTE_MARKET_DECISION_LIMIT = 288 * 5
 REMOTE_MARKET_CANDLE_LIMIT = 576
@@ -285,29 +284,6 @@ def learning_history_records(
                     resource, f"{identity}\0{point['decision_time']}",
                     _epoch(point["decision_time"]), record_payload,
                 ))
-    for model in (payload.get("execution_learning") or {}).get("models", []):
-        if not isinstance(model, dict):
-            continue
-        identity = str(model.get("model_identity") or "")
-        evaluation = model.get("evaluation") or {}
-        for point in evaluation.get("points", []) or []:
-            if not isinstance(point, dict) or not point.get("time"):
-                continue
-            record_payload = {"model_identity": identity, **point}
-            records.append(_learning_record(
-                "execution-point", f"{identity}\0{point['time']}\0{point.get('decision_id', '')}\0{point.get('model_version', '')}",
-                _epoch(point["time"]), record_payload,
-            ))
-        for index, result in enumerate(evaluation.get("results", []) or []):
-            if not isinstance(result, dict):
-                continue
-            result_time = result.get("scored_at") or result.get("decision_time") or ""
-            result_id = result.get("decision_id") or result.get("source_decision_id") or index
-            record_payload = {"model_identity": identity, **result}
-            records.append(_learning_record(
-                "execution-result", f"{identity}\0{result_id}\0{result_time}\0{result.get('model_version', '')}",
-                _epoch(result_time), record_payload,
-            ))
     return records
 
 
@@ -321,7 +297,7 @@ def _learning_summary(payload: dict, *, record_total: int | None = None) -> dict
     """Return a fixed-size first page; D1 owns every older learning record."""
     if (payload.get("learning_history_manifest") or {}).get("contract_version") == LEARNING_HISTORY_CONTRACT_VERSION:
         return {key: copy.deepcopy(payload[key]) for key in (
-            "learning_curves", "execution_learning", "learning_history_resource", "learning_history_manifest",
+            "learning_curves", "learning_history_resource", "learning_history_manifest",
         )}
     learning = copy.deepcopy(payload.get("learning_curves") or {})
     models = learning.get("models")
@@ -357,17 +333,8 @@ def _learning_summary(payload: dict, *, record_total: int | None = None) -> dict
         if isinstance(learning.get(field), list):
             learning[field] = []
 
-    execution = copy.deepcopy(payload.get("execution_learning") or {})
-    for model in execution.get("models", []) if isinstance(execution, dict) else []:
-        evaluation = model.get("evaluation") if isinstance(model, dict) else None
-        if isinstance(evaluation, dict) and isinstance(evaluation.get("points"), list):
-            evaluation["points"] = []
-        if isinstance(evaluation, dict) and isinstance(evaluation.get("results"), list):
-            evaluation["result_total"] = len(evaluation["results"])
-            evaluation["results"] = evaluation["results"][-LEARNING_SUMMARY_EXECUTION_RESULTS:]
     return {
         "learning_curves": learning,
-        "execution_learning": execution,
         "learning_history_resource": "/api/learning-history",
         "learning_history_manifest": {
             "contract_version": LEARNING_HISTORY_CONTRACT_VERSION,

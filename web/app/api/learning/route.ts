@@ -55,7 +55,6 @@ export async function GET() {
       return NextResponse.json({
         generated_at: payload.generated_at,
         learning_curves: payload.learning_curves ?? {},
-        execution_learning: payload.execution_learning ?? {},
       }, { status: response.status });
     } catch {
       return NextResponse.json({ error: "学习历史与本机后备服务均不可用" }, { status: 503 });

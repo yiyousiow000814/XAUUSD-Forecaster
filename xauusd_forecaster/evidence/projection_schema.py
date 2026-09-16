@@ -387,9 +387,7 @@ _RESOURCE_SOURCE_TABLES = {
         "news_revisions", "news_title_translations", "outcomes",
     ),
     "learning": (
-        "derived_outcomes", "execution_model_updates_v2",
-        "execution_position_scores_v2", "execution_predictions_v2",
-        "execution_training_examples_v2", "model_updates_v2",
+        "derived_outcomes", "model_updates_v2",
         "prediction_scores_v2", "predictions_v2",
     ),
     "market_chart": (

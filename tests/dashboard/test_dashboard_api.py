@@ -3164,30 +3164,25 @@ def test_learning_surfaces_rebuild_only_when_source_counts_change() -> None:
     connection = sqlite3.connect(":memory:")
     for table in LEARNING_REVISION_TABLES:
         connection.execute(f"CREATE TABLE {table} (id INTEGER)")
-    calls = {"learning": 0, "execution": 0}
+    calls = {"learning": 0}
 
     def learning(_connection):
         calls["learning"] += 1
         return {"generation": calls["learning"]}
 
-    def execution(_ledger):
-        calls["execution"] += 1
-        return {"generation": calls["execution"]}
-
     owner = LearningSurfaceOwner(
         learning_builder=learning,
-        execution_builder=execution,
     )
 
     first = owner.surfaces(connection)
     second = owner.surfaces(connection)
     assert first == second
-    assert calls == {"learning": 1, "execution": 1}
+    assert calls == {"learning": 1}
 
     connection.execute("INSERT INTO derived_outcomes VALUES (1)")
     third = owner.surfaces(connection)
     assert third != second
-    assert calls == {"learning": 2, "execution": 2}
+    assert calls == {"learning": 2}
     connection.close()
 
 
