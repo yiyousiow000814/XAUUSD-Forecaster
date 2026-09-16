@@ -159,7 +159,7 @@ function Inspector({ manifest, node, edge, impact, sha, modal, onClose, onDrill,
 }) {
   const [tab, setTab] = useState<"code" | "evidence" | "test" | "docs">("code");
   const relations = architectureRelations(manifest, node.id);
-  const names = (ids: string[]) => ids.map(id => manifest.nodes.find(item => item.id === id)?.short_label).filter(Boolean).join(" · ") || "无 · None";
+  const names = (ids: string[]) => [...new Set(ids)].map(id => manifest.nodes.find(item => item.id === id)?.short_label).filter(Boolean).join(" · ") || "无 · None";
   const unavailableImpact = "该节点没有显式 failure impact contract；不会推断其他节点安全。";
   return <aside aria-labelledby="architecture-inspector-title" aria-modal={modal || undefined} className={styles.inspector} role={modal ? "dialog" : "complementary"}>
     <header><div><span>{edge ? `${edge.kind} EDGE · ${edge.criticality}` : `${node.kind} · ${node.runtime_state}`}</span><h2 id="architecture-inspector-title">{edge ? edge.label : node.label}</h2></div>

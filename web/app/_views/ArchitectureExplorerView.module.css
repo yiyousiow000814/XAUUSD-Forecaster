@@ -126,15 +126,15 @@
 .inspector { display: flex; flex-direction: column; position: absolute; inset: 0 0 0 auto; z-index: 10; width: 380px; overflow: hidden; border-left: 1px solid var(--muted); background: color-mix(in srgb, var(--paper) 99%, transparent); box-shadow: none; }
 .inspector > header { display: flex; flex-shrink: 0; min-height: 100px; align-items: start; justify-content: space-between; gap: 12px; padding: 18px; border-bottom: 1px solid var(--paper); background: var(--ink); color: var(--paper); }
 .inspector > header > div { min-width: 0; flex: 1 1 0; overflow-wrap: anywhere; }
-.inspector header span { color: var(--green); font-size: 9px; font-weight: 900; letter-spacing: .08em; }.inspector header h2 { margin: 7px 0 0; font-size: 23px; line-height: 1.05; }
+.inspector header span { color: var(--gold); font-size: 9px; font-weight: 900; letter-spacing: .08em; }.inspector header h2 { margin: 7px 0 0; font-size: 23px; line-height: 1.05; }
 .inspector > header button { width: 44px; height: 44px; flex: 0 0 auto; border: 1px solid color-mix(in srgb, var(--paper) 35%, transparent); border-radius: 0; background: transparent; color: var(--paper); cursor: pointer; font-size: 25px; }
-.inspectorBody { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 14px; }
+.inspectorBody { flex: 1 1 auto; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; padding: 14px; }
 .sheetLayer { position: fixed; inset: 0; z-index: 100; }
 .sheetBackdrop { position: absolute; inset: 0; background: color-mix(in srgb, var(--ink) 52%, transparent); }
 .selectedDock { display: flex; min-height: 62px; align-items: center; gap: 7px; border: 1px solid var(--muted); border-top: 0; border-radius: 0; background: var(--paper); padding: 8px 10px; }
 .selectedDock strong { min-width: 0; margin-right: auto; overflow: hidden; color: var(--ink); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .selectedDock button { min-height: 44px; border: 1px solid var(--muted); border-radius: 0; background: var(--paper); padding: 0 10px; color: var(--ink); cursor: pointer; font-size: 11px; font-weight: 850; white-space: nowrap; }
-.beginnerDetails { display: grid; gap: 0; margin: 0; }.beginnerDetails > div { padding: 10px 0; border-bottom: 1px solid var(--paper); }.beginnerDetails dt { color: var(--graph-accent); font-size: 10px; font-weight: 900; }.beginnerDetails dd { margin: 4px 0 0; font-size: 12px; font-weight: 650; line-height: 1.45; }
+.beginnerDetails { display: grid; gap: 0; margin: 0; }.beginnerDetails > div { min-width: 0; padding: 10px 0; border-bottom: 1px solid var(--paper); }.beginnerDetails dt { color: var(--graph-accent); font-size: 10px; font-weight: 900; }.beginnerDetails dd { min-width: 0; overflow-wrap: anywhere; margin: 4px 0 0; font-size: 12px; font-weight: 650; line-height: 1.45; }
 .ownerAnswer { display: grid; gap: 3px; }.ownerAnswer strong { color: var(--ink); }.ownerAnswer span { color: var(--graph-muted); font-size: 11px; font-weight: 600; }
 .drillButton { width: 100%; min-height: 44px; margin: 12px 0; border: 1px solid var(--graph-accent); border-radius: 0; background: var(--paper); color: var(--graph-accent); cursor: pointer; font-weight: 850; }
 .dimensions details { border-bottom: 1px solid var(--paper); }.dimensions summary { display: flex; min-height: 44px; align-items: center; cursor: pointer; color: var(--ink); font-size: 11px; font-weight: 850; }.dimensions p { margin: 0 0 12px; font-size: 12px; line-height: 1.5; }
