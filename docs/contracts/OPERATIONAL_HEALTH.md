@@ -404,3 +404,8 @@ Resource sync warnings describe the latest resource observation, not the latest
 heartbeat cycle. Retained failures remain unresolved until that resource has a
 successful observation. A successful latest resource observation supersedes a
 stale degraded-list entry. Evidence includes its resource observation time.
+
+A durable `SKIPPED` attempt with `PROVIDER_PROHIBITED_CONTENT` closes news
+qualification work from its attempt timestamp onward. Both annotation and impact
+projections exclude it from unresolved work; earlier observations remain pending.
+A mutable job state alone, an ordinary error, or a future skip is insufficient.

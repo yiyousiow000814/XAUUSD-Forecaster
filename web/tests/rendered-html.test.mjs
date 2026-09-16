@@ -652,6 +652,7 @@ test("keeps global shell ownership centralized and prevents view-level design dr
     "../app/_views/AdminOverviewView.tsx",
     "../app/_views/RetryView.tsx",
     "../app/_views/StatusView.tsx",
+    "../app/_views/ArchitectureExplorerView.tsx",
   ];
 
   assert.match(app, /<DashboardShell location=\{location\}>/);
@@ -760,6 +761,7 @@ test("renders one canonical Admin navigation with direct child active state", as
     ["/admin/assistant", "Assistant", /ASSISTANT/],
     ["/admin/retry-jobs", "重试任务", /PRIVATE OPERATOR QUEUE/],
     ["/admin/ai-usage", "AI 模型用量", /AI 模型使用状态/],
+    ["/admin/architecture", "系统架构", /Preparing architecture layout/],
   ]) {
     const page = await renderSettled(path, marker);
     assert.equal(page.response.status, 200, path);

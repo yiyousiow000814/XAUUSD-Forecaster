@@ -2,7 +2,7 @@
 
 import "@xyflow/react/dist/style.css";
 import {
-  Background, BaseEdge, Controls, EdgeLabelRenderer, Handle, MarkerType, MiniMap, Position,
+  Background, BaseEdge, Controls, Handle, MarkerType, MiniMap, Position,
   ReactFlow, ReactFlowProvider, useReactFlow, useStore,
   type Edge, type EdgeProps, type Node, type NodeProps,
 } from "@xyflow/react";
@@ -15,7 +15,7 @@ import {
 import {
   ARCHITECTURE_MIN_ZOOM,
   architectureCanvasHeight, architectureCommitSha, architectureFailureImpact, architectureFitOptions, architectureGithubHref, architectureRelations,
-  architectureEdgeRoute, architectureMobileViewport, architectureRouteLabelPoint, architectureRoutePath,
+  architectureEdgeRoute, architectureMobileViewport, architectureRoutePath,
   architectureDisclosedEdgeIds, architectureDisclosedGraph, bestViewForNode, buildArchitectureGraph, bundledArchitectureManifest, searchArchitectureNodes,
   type ArchitectureEdge, type ArchitectureFailureImpact, type ArchitectureManifest, type ArchitectureNode, type ArchitecturePortSlot,
 } from "../_lib/architecture-explorer";
@@ -54,7 +54,7 @@ type FlowNodeData = Record<string, unknown> & {
   failureStatus: FailureStatus; onSelect: (id: string) => void; onHover: (id: string | null) => void;
   onDrill: (id: string) => void; onNavigate: (id: string, direction: number) => void;
 };
-type FlowEdgeData = Record<string, unknown> & { edge: ArchitectureEdge; highlighted: boolean; dimmed: boolean; guided: boolean; showLabel: boolean; route: Array<{ x: number; y: number }>; evidenceStatus: ReturnType<typeof compactEvidenceStatus> };
+type FlowEdgeData = Record<string, unknown> & { edge: ArchitectureEdge; highlighted: boolean; dimmed: boolean; guided: boolean; route: Array<{ x: number; y: number }>; evidenceStatus: ReturnType<typeof compactEvidenceStatus> };
 type FlowLaneData = Record<string, unknown> & { label: string; direction: "LR" | "TB" };
 type ArchitectureFlowNode = Node<FlowNodeData, "architecture">;
 type ArchitectureLaneNode = Node<FlowLaneData, "lane">;
@@ -127,15 +127,11 @@ const ArchitectureGraphNode = memo(function ArchitectureGraphNode({ data }: Node
 
 const ArchitectureGraphEdge = memo(function ArchitectureGraphEdge(props: EdgeProps<ArchitectureFlowEdge>) {
   const data = props.data!;
-  const path = architectureRoutePath(data.route); const label = architectureRouteLabelPoint(data.route);
+  const path = architectureRoutePath(data.route);
   const className = [styles.graphEdge, styles[`edge${data.edge.criticality}`], data.highlighted ? styles.edgeHighlighted : "",
     data.dimmed ? styles.edgeDimmed : "", data.guided ? styles.edgeGuided : ""].filter(Boolean).join(" ");
   return <>
     <BaseEdge id={props.id} markerEnd={props.markerEnd} path={path} className={className} />
-    {data.showLabel ? <EdgeLabelRenderer><span className={`${styles.edgeLabel} ${data.dimmed ? styles.edgeLabelDimmed : ""}`}
-      style={{ transform: `translate(-50%, -50%) translate(${label.x}px,${label.y}px)` }} title={data.edge.description}>
-      {data.edge.label}<small>{data.edge.kind}</small><mark title={`Evidence: ${data.evidenceStatus.label}`}>{data.evidenceStatus.symbol} {data.evidenceStatus.label}</mark>
-    </span></EdgeLabelRenderer> : null}
   </>;
 });
 
@@ -163,7 +159,7 @@ function Inspector({ manifest, node, edge, impact, sha, modal, onClose, onDrill,
 }) {
   const [tab, setTab] = useState<"code" | "evidence" | "test" | "docs">("code");
   const relations = architectureRelations(manifest, node.id);
-  const names = (ids: string[]) => ids.map(id => manifest.nodes.find(item => item.id === id)?.short_label).filter(Boolean).join(" · ") || "无 · None";
+  const names = (ids: string[]) => [...new Set(ids)].map(id => manifest.nodes.find(item => item.id === id)?.short_label).filter(Boolean).join(" · ") || "无 · None";
   const unavailableImpact = "该节点没有显式 failure impact contract；不会推断其他节点安全。";
   return <aside aria-labelledby="architecture-inspector-title" aria-modal={modal || undefined} className={styles.inspector} role={modal ? "dialog" : "complementary"}>
     <header><div><span>{edge ? `${edge.kind} EDGE · ${edge.criticality}` : `${node.kind} · ${node.runtime_state}`}</span><h2 id="architecture-inspector-title">{edge ? edge.label : node.label}</h2></div>
@@ -268,7 +264,6 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   const [viewHistory, setViewHistory] = useState<string[]>([]);
   const [interaction, dispatchInteraction] = useReducer(architectureMobileInteractionReducer, INITIAL_ARCHITECTURE_MOBILE_INTERACTION);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
-  const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [state, setState] = useState<(typeof STATES)[number]>("ALL");
@@ -385,7 +380,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   }, [mobile]);
   const changeView = useCallback((next: string, remember = false, cameraIntent?: ArchitectureCameraIntent) => {
     if (remember && next !== viewId) setViewHistory(items => [...items, viewId]);
-    setViewId(next); dispatchInteraction({ type: "CHANGE_VIEW" }); setHoveredId(null); setHoveredEdgeId(null); setFailureMode(false); setShowAllRelationships(false);
+    setViewId(next); dispatchInteraction({ type: "CHANGE_VIEW" }); setHoveredId(null); setFailureMode(false); setShowAllRelationships(false);
     camera.request(cameraIntent ?? { type: "FIT_VIEW", viewId: next });
   }, [camera, viewId]);
   const selectNode = useCallback((id: string) => {
@@ -472,7 +467,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
   const flowEdges: ArchitectureFlowEdge[] = useMemo(() => graph.edges.map(item => ({
     id: item.id, source: item.source, target: item.target, type: "architecture", label: item.label,
     sourceHandle: `${item.id}-source`, targetHandle: `${item.id}-target`,
-    markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18, color: item.criticality === "CRITICAL" ? "#137d74" : "#607278" },
+    markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18, color: item.criticality === "CRITICAL" ? "var(--green)" : "var(--muted)" },
     animated: scenarioEdges.has(item.id), data: {
       edge: item,
       route: architectureEdgeRoute(graph.nodes, item, graph.direction),
@@ -480,14 +475,8 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
       dimmed: hasFocus && !highlightedEdges.has(item.id),
       guided: scenarioEdges.has(item.id),
       evidenceStatus: compactEvidenceStatus(claimEvidence(evidenceBundle, `edge:${item.id}`).categories),
-      showLabel: item.criticality === "CRITICAL"
-        || (item.criticality === "CONTROL_PLANE" && viewId === "runtime-release")
-        || graph.edges.length <= 4
-        || highlightedEdges.has(item.id)
-        || scenarioEdges.has(item.id)
-        || hoveredEdgeId === item.id,
     },
-  })), [evidenceBundle, graph.direction, graph.edges, graph.nodes, hasFocus, highlightedEdges, hoveredEdgeId, scenarioEdges, viewId]);
+  })), [evidenceBundle, graph.direction, graph.edges, graph.nodes, hasFocus, highlightedEdges, scenarioEdges]);
   const flowElements = useMemo(() => [...laneNodes, ...flowNodes], [flowNodes, laneNodes]);
   useEffect(() => {
     flow.setNodes(flowElements);
@@ -585,15 +574,14 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
           elementsSelectable minZoom={ARCHITECTURE_MIN_ZOOM} maxZoom={1.6} nodesConnectable={false} nodesDraggable={false}
           onInit={initializeFlow}
           onEdgeClick={(_, edge) => selectEdge(edge.id)}
-          onEdgeMouseEnter={(_, edge) => setHoveredEdgeId(edge.id)} onEdgeMouseLeave={() => setHoveredEdgeId(null)}
           onPaneClick={() => { if (mobile && interaction.mobilePanel === "NONE") clearPath(); }}
           panOnDrag preventScrolling={!mobile} zoomOnPinch zoomOnScroll={!mobile} proOptions={{ hideAttribution: true }}>
-          <Background color="#b7c3c5" gap={22} size={1} />
+          <Background color="var(--muted)" gap={22} size={1} />
           <Controls position={mobile ? "bottom-right" : "top-left"} showInteractive={false} />
           {!mobile ? <MiniMap aria-label="Architecture minimap" position="bottom-right" pannable zoomable nodeColor={node => {
             const architectureNode = node.data.node as ArchitectureNode | undefined;
-            if (!architectureNode) return "#d7e2e0";
-            return architectureNode.runtime_state === "PAUSED" ? "#a88b55" : "#137d74";
+            if (!architectureNode) return "var(--paper)";
+            return architectureNode.runtime_state === "PAUSED" ? "var(--gold)" : "var(--green)";
           }} /> : null}
         </ReactFlow>
         <section className={styles.legend} aria-label="Graph legend"><span><i className={styles.criticalLine} /> Critical</span><span><i className={styles.backgroundLine} /> Background</span><span><i className={styles.optionalLine} /> Optional</span><span><i className={styles.controlLine} /> Control plane</span></section>

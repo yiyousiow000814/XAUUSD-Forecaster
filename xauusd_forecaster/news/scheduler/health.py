@@ -483,7 +483,12 @@ def news_semantic_pipeline_health_at(
                 if deferral_values is not None else (None,) * 3
             ),
         ))
-        if completed is not None or retired:
+        prohibited_skip = bool(
+            attempt_values is not None
+            and attempt_values["outcome"] == "SKIPPED"
+            and attempt_values["failure_code"] == "PROVIDER_PROHIBITED_CONTENT"
+        )
+        if completed is not None or retired or prohibited_skip:
             continue
 
         created_at = _instant(row["created_at"])

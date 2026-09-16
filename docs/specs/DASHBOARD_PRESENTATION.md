@@ -231,3 +231,9 @@ part of it.
   represented in the aggregate event count. Dense rails are intentionally
   non-interactive and must not add hover tooltips or a separate detail strip
   that obscures the chart or requires coordinated hovering and scrolling.
+
+Architecture content uses the shared DashboardApp navigation and DashboardShell,
+including the active admin destination, and the global paper/ink/type tokens.
+Graph relationships remain selectable and available in the relationship list
+and inspector. Do not overlay floating text labels on graph edges: selecting a
+node with many relationships must not cover nodes or neighboring controls.

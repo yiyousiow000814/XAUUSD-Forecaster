@@ -192,8 +192,9 @@ def test_current_grid_live_decision_keeps_prior_unavailable_after_later_recovery
         ("ACTIVE_IMPACT", "ACTIONABLE_NEWS_IMPACT_PENDING"),
     ),
 )
+@pytest.mark.parametrize("resolution", ["retired", "prohibited_skip", "ordinary_failure"])
 def test_point_in_time_health_counts_only_authoritative_live_provenance(
-    tmp_path, task_type: str, pending_reason: str,
+    tmp_path, task_type: str, pending_reason: str, resolution: str,
 ) -> None:
     decision = datetime(2026, 8, 10, 20, 5, tzinfo=UTC)
     ledger = ForwardLedger(
@@ -278,10 +279,20 @@ def test_point_in_time_health_counts_only_authoritative_live_provenance(
            SET state='DEAD_LETTER',last_error=?,completed_at=?,updated_at=?
            WHERE job_id=?""",
         (
-            RETIRED_ERROR, retired_at.isoformat(), retired_at.isoformat(),
+            RETIRED_ERROR if resolution == "retired" else "PROVIDER_PROHIBITED_CONTENT",
+            retired_at.isoformat(), retired_at.isoformat(),
             live_job_id,
         ),
     )
+
+    if resolution != "retired":
+        ledger.connection.execute(
+            """INSERT INTO news_ai_job_attempts_v1 VALUES
+               (?,?,?,?,?,?,?,NULL,NULL,NULL,?,NULL)""",
+            ("resolution", live_job_id, 1, "account", "credential",
+             "SKIPPED" if resolution == "prohibited_skip" else "ERROR",
+             "PROVIDER_PROHIBITED_CONTENT", retired_at.isoformat()),
+        )
 
     replayed_health = news_semantic_pipeline_health_at(
         ledger, observed_at=decision,
@@ -291,5 +302,5 @@ def test_point_in_time_health_counts_only_authoritative_live_provenance(
     )
 
     assert replayed_health["snapshot_hash"] == live_health["snapshot_hash"]
-    assert recovered_health["status"] == "HEALTHY"
-    assert recovered_health["unresolved_items"] == 0
+    assert recovered_health["status"] == ("UNHEALTHY" if resolution == "ordinary_failure" else "HEALTHY")
+    assert recovered_health["unresolved_items"] == (1 if resolution == "ordinary_failure" else 0)
