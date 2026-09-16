@@ -232,8 +232,22 @@ part of it.
   non-interactive and must not add hover tooltips or a separate detail strip
   that obscures the chart or requires coordinated hovering and scrolling.
 
+## Architecture explorer
+
 Architecture content uses the shared DashboardApp navigation and DashboardShell,
 including the active admin destination, and the global paper/ink/type tokens.
 Graph relationships remain selectable and available in the relationship list
 and inspector. Do not overlay floating text labels on graph edges: selecting a
 node with many relationships must not cover nodes or neighboring controls.
+
+Architecture borders use an explicit line token, never the surface token.
+Inspect every outer edge and internal divider after palette changes. Mode
+switches and breadcrumbs start beneath the title at the left. Advanced evidence
+panels use at least 12 CSS pixels for labels and explanatory copy.
+
+The graph groups disclosed source references only when direction, endpoints,
+relationship kind and criticality match, retaining all individual source IDs in
+its detail view. Hidden references cannot enter a visible group. Arrows denote
+source references, not distinct business flows. Unresolved architecture evidence
+is labeled as awaiting confirmation, never as incomplete operational work.
+The shared admin overview links to every admin tool, including architecture.

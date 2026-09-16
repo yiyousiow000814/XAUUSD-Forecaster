@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { projectCurrentSource, readCurrentSourceIndex } from '../build/architecture-current-source.mjs';
-import { parseArchitectureManifest, buildArchitectureGraph } from '../app/_lib/architecture-explorer.ts';
+import { parseArchitectureManifest, buildArchitectureGraph, architectureDisclosedGraph } from '../app/_lib/architecture-explorer.ts';
 import { parseArchitectureEvidence, parseArchitectureCodeIndex, sourceFactsForClaim } from '../app/_lib/architecture-evidence.ts';
 
 let generatedIndex;
@@ -278,4 +278,33 @@ test('broken generated index cannot silently become an empty or declared-success
   const shaped = structuredClone(index);
   shaped.allowed.views['clock-transaction'].roots[0] = 'missing::symbol';
   assert.throws(() => projectCurrentSource(shaped), /ARCHITECTURE_ROOT_UNRESOLVED/);
+});
+
+
+test('visible reference groups retain every source site without inventing flows or leaking disclosure', () => {
+  const manifest = parseArchitectureManifest(projectCurrentSource(currentIndex()).manifest);
+  const original = buildArchitectureGraph(manifest, 'clock-transaction');
+  const first = original.edges[0];
+  const graph = { ...original, edges: [first,
+    { ...first, id: 'second-source-site' },
+    { ...first, id: 'different-kind', kind: first.kind === 'READ' ? 'WRITE' : 'READ' },
+    { ...first, id: 'different-criticality', criticality: first.criticality === 'CRITICAL' ? 'OPTIONAL' : 'CRITICAL' },
+    { ...first, id: 'reverse', from: first.to, to: first.from, source: first.target, target: first.source },
+  ] };
+  for (const direction of ['LR', 'TB']) {
+    const source = { ...graph, direction };
+    const all = architectureDisclosedGraph(source, new Set(source.edges.map(e => e.id)));
+    assert.equal(all.edges.length, 4);
+    assert.deepEqual(all.edges[0].memberIds, [first.id, 'second-source-site']);
+    assert.deepEqual(all.edges.flatMap(e => e.memberIds).sort(), source.edges.map(e => e.id).sort());
+    for (const node of all.nodes) {
+      assert.equal(node.data.incomingPorts.length, all.edges.filter(e => e.target === node.id).length);
+      assert.equal(node.data.outgoingPorts.length, all.edges.filter(e => e.source === node.id).length);
+    }
+    const partial = architectureDisclosedGraph(source, new Set(['second-source-site']));
+    assert.equal(partial.edges.length, 1);
+    assert.deepEqual(partial.edges[0].memberIds, ['second-source-site']);
+    assert.equal(architectureDisclosedGraph(source, new Set()).edges.length, 0);
+    assert.equal(original.edges[0].memberIds, undefined, 'immutable source graph is not rewritten');
+  }
 });

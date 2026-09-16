@@ -116,7 +116,7 @@ export function compactEvidenceStatus(categories: Iterable<EvidenceCategory>) {
   const values = new Set(categories);
   if (values.has("CONTRADICTED")) return { label: "CONTRADICTED", symbol: "!", tone: "danger" };
   if (values.has("STALE")) return { label: "STALE", symbol: "◷", tone: "warning" };
-  if (values.has("UNRESOLVED")) return { label: "UNRESOLVED", symbol: "?", tone: "warning" };
+  if (values.has("UNRESOLVED")) return { label: "证据待确认", symbol: "?", tone: "warning" };
   if (values.has("STATIC_MATCH")) return { label: "STATIC MATCH", symbol: "✓", tone: "strong" };
   return { label: "DECLARED ONLY", symbol: "◇", tone: "neutral" };
 }
@@ -124,7 +124,7 @@ export function compactEvidenceStatus(categories: Iterable<EvidenceCategory>) {
 export function evidenceBadgeLabels(categories: Iterable<EvidenceCategory>) {
   const values = new Set(categories); const labels: string[] = [];
   for (const [category, label] of [
-    ["CONTRADICTED", "CONTRADICTED"], ["STALE", "STALE"], ["UNRESOLVED", "UNRESOLVED"],
+    ["CONTRADICTED", "CONTRADICTED"], ["STALE", "STALE"], ["UNRESOLVED", "证据待确认"],
     ["STATIC_MATCH", "STATIC MATCH"], ["TEST_EXECUTED", "TEST EXECUTED"], ["RUNTIME_OBSERVED", "RUNTIME OBSERVED"],
     ["MUTATION_KILLED", "MUTATION KILLED"],
   ] as const) if (values.has(category)) labels.push(label);
