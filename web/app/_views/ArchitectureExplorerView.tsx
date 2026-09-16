@@ -576,12 +576,12 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
           onEdgeClick={(_, edge) => selectEdge(edge.id)}
           onPaneClick={() => { if (mobile && interaction.mobilePanel === "NONE") clearPath(); }}
           panOnDrag preventScrolling={!mobile} zoomOnPinch zoomOnScroll={!mobile} proOptions={{ hideAttribution: true }}>
-          <Background color="#b7c3c5" gap={22} size={1} />
+          <Background color="var(--muted)" gap={22} size={1} />
           <Controls position={mobile ? "bottom-right" : "top-left"} showInteractive={false} />
           {!mobile ? <MiniMap aria-label="Architecture minimap" position="bottom-right" pannable zoomable nodeColor={node => {
             const architectureNode = node.data.node as ArchitectureNode | undefined;
-            if (!architectureNode) return "#d7e2e0";
-            return architectureNode.runtime_state === "PAUSED" ? "#a88b55" : "#137d74";
+            if (!architectureNode) return "var(--paper)";
+            return architectureNode.runtime_state === "PAUSED" ? "var(--gold)" : "var(--green)";
           }} /> : null}
         </ReactFlow>
         <section className={styles.legend} aria-label="Graph legend"><span><i className={styles.criticalLine} /> Critical</span><span><i className={styles.backgroundLine} /> Background</span><span><i className={styles.optionalLine} /> Optional</span><span><i className={styles.controlLine} /> Control plane</span></section>

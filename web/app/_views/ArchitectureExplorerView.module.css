@@ -27,7 +27,7 @@
 .breadcrumbs strong, .breadcrumbs em { overflow: hidden; text-overflow: ellipsis; font-size: 12px; font-style: normal; }
 .breadcrumbs em { color: var(--graph-accent); }
 
-.toolbar { position: relative; z-index: 40; display: grid; grid-template-columns: minmax(280px, 1fr) minmax(170px, .34fr) minmax(140px, .25fr) auto; gap: 8px; padding: 10px; border: 1px solid var(--paper); border-bottom: 0; border-radius: 0; background: color-mix(in srgb, var(--ink) 98%, transparent); box-shadow: none; }
+.toolbar { position: relative; z-index: 40; display: grid; grid-template-columns: minmax(280px, 1fr) minmax(170px, .34fr) minmax(140px, .25fr) auto; gap: 8px; padding: 10px; border: 1px solid var(--paper); border-bottom: 0; border-radius: 0; background: color-mix(in srgb, var(--paper) 98%, transparent); box-shadow: none; }
 .toolbar label { position: relative; display: grid; gap: 4px; min-width: 0; color: var(--graph-muted); font-size: 10px; font-weight: 800; }
 .toolbar input, .toolbar select, .toolbar > button { width: 100%; min-height: 44px; border: 1px solid var(--muted); border-radius: 0; background: var(--paper); padding: 0 11px; color: var(--graph-ink); font: 700 12px var(--font-sans), system-ui, sans-serif; }
 .toolbar input:focus, .toolbar select:focus, .toolbar > button:focus-visible { outline: 3px solid color-mix(in srgb, var(--ink) 28%, transparent); border-color: var(--graph-accent); }
@@ -82,17 +82,17 @@
 .canvas { position: relative; width: 100%; height: 650px; transition: margin .22s ease, width .22s ease; }
 .canvasPending { display: grid; place-items: center; color: var(--graph-muted); font-size: 12px; font-weight: 800; }
 .withInspector .canvas { width: calc(100% - 380px); }
-.canvas :global(.react-flow) { background: linear-gradient(135deg, color-mix(in srgb, var(--ink) 64%, transparent), color-mix(in srgb, var(--ink) 46%, transparent)); }
+.canvas :global(.react-flow) { background: linear-gradient(135deg, color-mix(in srgb, var(--paper) 64%, transparent), color-mix(in srgb, var(--paper) 46%, transparent)); }
 .canvas :global(.react-flow__attribution) { display: none; }
 .canvas :global(.react-flow__controls) { overflow: hidden; border: 1px solid var(--muted); border-radius: 0; box-shadow: none; }
-.canvas :global(.react-flow__controls-button) { width: 44px; height: 44px; border-color: var(--paper); background: color-mix(in srgb, var(--ink) 95%, transparent); }
-.canvas :global(.react-flow__minimap) { overflow: hidden; border: 1px solid var(--muted); border-radius: 0; background: color-mix(in srgb, var(--ink) 94%, transparent); box-shadow: none; }
+.canvas :global(.react-flow__controls-button) { width: 44px; height: 44px; border-color: var(--paper); background: color-mix(in srgb, var(--paper) 95%, transparent); }
+.canvas :global(.react-flow__minimap) { overflow: hidden; border: 1px solid var(--muted); border-radius: 0; background: color-mix(in srgb, var(--paper) 94%, transparent); box-shadow: none; }
 .canvas :global(.react-flow__node-lane) { pointer-events: none !important; }
 
-.laneRegion { position: relative; width: 100%; height: 100%; border: 1px solid color-mix(in srgb, var(--ink) 20%, transparent); border-radius: 0; background: color-mix(in srgb, var(--ink) 24%, transparent); box-shadow: none; pointer-events: none; }
+.laneRegion { position: relative; width: 100%; height: 100%; border: 1px solid color-mix(in srgb, var(--muted) 20%, transparent); border-radius: 0; background: color-mix(in srgb, var(--paper) 24%, transparent); box-shadow: none; pointer-events: none; }
 .laneRegion > span { position: absolute; top: 8px; left: 12px; max-width: calc(100% - 24px); overflow: hidden; color: var(--muted); font-size: 9px; font-weight: 900; letter-spacing: .08em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
 
-.graphNode { position: relative; width: 100%; height: 100%; border: 1px solid var(--muted); border-radius: 0; background: color-mix(in srgb, var(--ink) 98%, transparent); box-shadow: none; transition: opacity .16s ease, border-color .16s ease, box-shadow .16s ease, transform .16s ease; }
+.graphNode { position: relative; width: 100%; height: 100%; border: 1px solid var(--muted); border-radius: 0; background: color-mix(in srgb, var(--paper) 98%, transparent); box-shadow: none; transition: opacity .16s ease, border-color .16s ease, box-shadow .16s ease, transform .16s ease; }
 .graphNode button { display: grid; width: 100%; height: 100%; min-height: 44px; align-content: center; gap: 4px; border: 0; border-radius: 0; background: transparent; padding: 10px 12px; color: var(--graph-ink); text-align: left; cursor: pointer; }
 .graphNode button:focus-visible { outline: 4px solid var(--green); outline-offset: 3px; }
 .nodeTopline { display: flex; align-items: center; gap: 5px; color: var(--graph-muted); font-size: 8px; font-weight: 900; letter-spacing: .07em; }
@@ -104,7 +104,7 @@
 .compactEvidence b { font-size: 8px; }.evidenceTonestrong { border-color: var(--green); background: var(--paper); color: var(--ink); }.evidenceTonewarning { border-color: var(--gold); background: var(--paper); color: var(--ink); }.evidenceTonedanger { border-color: var(--red); background: var(--paper); color: var(--red); }.evidenceToneneutral { background: var(--paper); color: var(--muted); }
 .graphNode em { position: absolute; right: 8px; bottom: -11px; z-index: 3; border-radius: 0; padding: 4px 7px; background: var(--red); color: var(--paper); font-size: 8px; font-style: normal; font-weight: 900; letter-spacing: .05em; }
 .graphNode.failureCONTINUES em { background: var(--ink); }
-.graphNode.kindSTORE { border-radius: 0; }.graphNode.kindEXTERNAL { border-style: dashed; background: color-mix(in srgb, var(--ink) 83%, transparent); }.graphNode.kindTHREAD { border-radius: 0; }.graphNode.kindCONTROL { border-color: var(--gold); }.graphNode.kindWORKER { border-color: var(--muted); }
+.graphNode.kindSTORE { border-radius: 0; }.graphNode.kindEXTERNAL { border-style: dashed; background: color-mix(in srgb, var(--paper) 83%, transparent); }.graphNode.kindTHREAD { border-radius: 0; }.graphNode.kindCONTROL { border-color: var(--gold); }.graphNode.kindWORKER { border-color: var(--muted); }
 .graphNode.selected { border: 2px solid var(--graph-accent); box-shadow: none; transform: translateY(-1px); }
 .graphNode.highlighted { border-color: var(--graph-accent); box-shadow: none; }
 .graphNode.dimmed { opacity: .24; }
@@ -117,17 +117,17 @@
 .edgeCRITICAL { stroke: var(--graph-accent); stroke-width: 2.4; }.edgeBACKGROUND { stroke-dasharray: 7 5; }.edgeOPTIONAL { stroke: var(--muted); stroke-dasharray: 4 7; }.edgeCONTROL_PLANE { stroke: var(--graph-amber); stroke-dasharray: 2 5; }
 .edgeHighlighted, .edgeGuided { stroke: var(--green); stroke-width: 3.7; opacity: 1; }.edgeDimmed { opacity: .12; }
 .edgeGuided { animation: guidedPulse 1.5s ease-in-out infinite; }
-@keyframes guidedPulse { 50% { stroke-width: 5; filter: drop-shadow(0 0 3px color-mix(in srgb, var(--ink) 52%, transparent)); } }
+@keyframes guidedPulse { 50% { stroke-width: 5; filter: drop-shadow(0 0 3px color-mix(in srgb, var(--green) 52%, transparent)); } }
 
-.legend { position: absolute; left: 14px; bottom: 14px; z-index: 5; display: flex; flex-wrap: wrap; gap: 8px 12px; max-width: calc(100% - 190px); border: 1px solid var(--muted); border-radius: 0; background: color-mix(in srgb, var(--ink) 91%, transparent); padding: 8px 10px; box-shadow: none; }
+.legend { position: absolute; left: 14px; bottom: 14px; z-index: 5; display: flex; flex-wrap: wrap; gap: 8px 12px; max-width: calc(100% - 190px); border: 1px solid var(--muted); border-radius: 0; background: color-mix(in srgb, var(--paper) 91%, transparent); padding: 8px 10px; box-shadow: none; }
 .legend span { display: flex; align-items: center; gap: 5px; color: var(--graph-muted); font-size: 9px; font-weight: 800; }.legend i { display: block; width: 22px; border-top: 2px solid var(--graph-accent); }.legend .backgroundLine { border-style: dashed; border-color: var(--graph-line); }.legend .optionalLine { border-style: dashed; border-color: var(--muted); }.legend .controlLine { border-style: dotted; border-color: var(--graph-amber); }
-.keyboardHint { position: absolute; top: 12px; right: 14px; z-index: 4; border-radius: 0; background: color-mix(in srgb, var(--ink) 86%, transparent); padding: 5px 7px; color: var(--graph-muted); font-size: 9px; }
+.keyboardHint { position: absolute; top: 12px; right: 14px; z-index: 4; border-radius: 0; background: color-mix(in srgb, var(--paper) 86%, transparent); padding: 5px 7px; color: var(--graph-muted); font-size: 9px; }
 
-.inspector { display: flex; flex-direction: column; position: absolute; inset: 0 0 0 auto; z-index: 10; width: 380px; overflow: hidden; border-left: 1px solid var(--muted); background: color-mix(in srgb, var(--ink) 99%, transparent); box-shadow: none; }
+.inspector { display: flex; flex-direction: column; position: absolute; inset: 0 0 0 auto; z-index: 10; width: 380px; overflow: hidden; border-left: 1px solid var(--muted); background: color-mix(in srgb, var(--paper) 99%, transparent); box-shadow: none; }
 .inspector > header { display: flex; flex-shrink: 0; min-height: 100px; align-items: start; justify-content: space-between; gap: 12px; padding: 18px; border-bottom: 1px solid var(--paper); background: var(--ink); color: var(--paper); }
 .inspector > header > div { min-width: 0; flex: 1 1 0; overflow-wrap: anywhere; }
 .inspector header span { color: var(--green); font-size: 9px; font-weight: 900; letter-spacing: .08em; }.inspector header h2 { margin: 7px 0 0; font-size: 23px; line-height: 1.05; }
-.inspector > header button { width: 44px; height: 44px; flex: 0 0 auto; border: 1px solid color-mix(in srgb, var(--ink) 35%, transparent); border-radius: 0; background: transparent; color: var(--paper); cursor: pointer; font-size: 25px; }
+.inspector > header button { width: 44px; height: 44px; flex: 0 0 auto; border: 1px solid color-mix(in srgb, var(--paper) 35%, transparent); border-radius: 0; background: transparent; color: var(--paper); cursor: pointer; font-size: 25px; }
 .inspectorBody { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 14px; }
 .sheetLayer { position: fixed; inset: 0; z-index: 100; }
 .sheetBackdrop { position: absolute; inset: 0; background: color-mix(in srgb, var(--ink) 52%, transparent); }
@@ -181,8 +181,7 @@
   .stage { min-height: 0; border-radius: 0; }.canvas, .withInspector .canvas { width: 100%; }
   .canvas :global(.react-flow__pane) { touch-action: pan-y; }
   .canvas :global(.react-flow__controls) { bottom: 58px; }.legend { right: 10px; bottom: 10px; left: 10px; max-width: none; justify-content: center; }.keyboardHint { display: none; }
-  .graphNode strong { font-size: 17px; }.graphNode small { font-size: 11px; }.nodeTopline { font-size: 9px; }.edgeLabel { font-size: 9px; }.edgeLabel small { display: none; }
-  .laneRegion { border-radius: 0; background: color-mix(in srgb, var(--ink) 30%, transparent); }.laneRegion > span { top: 7px; left: 10px; font-size: 13px; letter-spacing: .04em; }
+  .graphNode strong { font-size: 17px; }.graphNode small { font-size: 11px; }.nodeTopline { font-size: 9px; }.laneRegion { border-radius: 0; background: color-mix(in srgb, var(--paper) 30%, transparent); }.laneRegion > span { top: 7px; left: 10px; font-size: 13px; letter-spacing: .04em; }
   .selectedDock { position: sticky; bottom: max(8px, env(safe-area-inset-bottom)); z-index: 20; flex-wrap: wrap; padding-bottom: max(8px, env(safe-area-inset-bottom)); }.selectedDock strong { flex: 1 0 calc(100% - 8px); }.selectedDock button { flex: 1 1 auto; }
   .inspector { position: fixed; inset: auto 0 0; z-index: 1; width: 100%; height: min(72dvh, 680px); max-height: calc(100dvh - max(env(safe-area-inset-top), var(--architecture-preview-inset, 0px))); border-top: 1px solid var(--muted); border-left: 0; border-radius: 0; box-shadow: none; }.inspector > header { position: sticky; top: 0; z-index: 2; min-height: 82px; padding: 12px 14px; padding-top: max(12px, env(safe-area-inset-top)); }.inspectorBody { overflow-y: auto; overscroll-behavior: contain; padding-bottom: max(18px, env(safe-area-inset-bottom)); }.inspector header h2 { font-size: 20px; }
   .advancedSheet { height: min(68dvh, 640px); }
