@@ -1633,6 +1633,7 @@ test("separates anonymous health data from owner-only Admin evidence", async () 
   assert.equal(overview.response.status, 200);
   assert.match(overview.html, /概览[\s\S]*Assistant[\s\S]*重试任务[\s\S]*AI 模型用量/);
   assert.match(overview.html, /总任务[\s\S]*等待应用[\s\S]*冲突/);
+  assert.match(overview.html, /class="admin-overview-card"[^>]*href="\/admin\/architecture"[\s\S]*?打开系统架构/);
   assert.doesNotMatch(adminOverview, /进入私有对话|查看 Windows 应用进度|查看模型额度/);
   assert.match(adminOverview, /className="admin-overview-health"/);
   const adminCss = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");

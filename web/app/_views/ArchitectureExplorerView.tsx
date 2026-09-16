@@ -154,7 +154,7 @@ function SourceLinks({ manifest, node, sha, kind }: { manifest: ArchitectureMani
 
 function Inspector({ manifest, node, edge, impact, sha, modal, onClose, onDrill, evidenceBundle, evidenceError }: {
   manifest: ArchitectureManifest; node: ArchitectureNode; impact: ArchitectureFailureImpact | null; sha: string | null;
-  edge?: ArchitectureEdge | null; modal: boolean; onClose: () => void; onDrill: (id: string) => void;
+  edge?: (ArchitectureEdge & { memberIds?: string[] }) | null; modal: boolean; onClose: () => void; onDrill: (id: string) => void;
   evidenceBundle: ReturnType<typeof useArchitectureEvidenceBundle>["bundle"]; evidenceError: boolean;
 }) {
   const [tab, setTab] = useState<"code" | "evidence" | "test" | "docs">("code");
@@ -165,7 +165,7 @@ function Inspector({ manifest, node, edge, impact, sha, modal, onClose, onDrill,
     <header><div><span>{edge ? `${edge.kind} EDGE · ${edge.criticality}` : `${node.kind} · ${node.runtime_state}`}</span><h2 id="architecture-inspector-title">{edge ? edge.label : node.label}</h2></div>
       <button aria-label="关闭详情" data-sheet-initial-focus onClick={onClose} type="button">×</button></header>
     <div className={styles.inspectorBody}>
-      {edge ? <dl className={styles.beginnerDetails}><div><dt>Relationship</dt><dd>{edge.description}</dd></div><div><dt>From → To</dt><dd>{edge.from} → {edge.to}</dd></div></dl> : <dl className={styles.beginnerDetails}>
+      {edge ? <dl className={styles.beginnerDetails}><div><dt>Relationship</dt><dd>{edge.memberIds?.length ?? 1} 处源码引用，合并为一条关系；不代表独立业务流程。<ul>{(edge.memberIds ?? [edge.id]).map(id => <li key={id}>{manifest.edges.find(item => item.id === id)?.description}</li>)}</ul></dd></div><div><dt>From → To</dt><dd>{edge.from} → {edge.to}</dd></div></dl> : <dl className={styles.beginnerDetails}>
         <div><dt>它是什么？</dt><dd>{node.summary}</dd></div>
         <div><dt>为什么需要它？</dt><dd>{node.purpose}</dd></div>
         <div><dt>谁负责它？</dt><dd className={styles.ownerAnswer}><strong>{node.owner}</strong><span>{node.architecture.ownership}</span></dd></div>
@@ -336,7 +336,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
     camera.layoutChanged();
   }, [camera, canvasHeight, flow, flowInitialized, fullGraph, mobile, nodesInitialized, viewId]);
   const selected = selectedId ? manifest.nodes.find(item => item.id === selectedId) ?? null : null;
-  const selectedEdge = selectedEdgeId ? manifest.edges.find(item => item.id === selectedEdgeId) ?? null : null;
+  const selectedEdge = selectedEdgeId ? graph.edges.find(item => item.id === selectedEdgeId) ?? null : null;
   const inspectorNode = interaction.inspectorNodeId
     ? manifest.nodes.find(item => item.id === interaction.inspectorNodeId) ?? null
     : null;
@@ -468,12 +468,12 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
     id: item.id, source: item.source, target: item.target, type: "architecture", label: item.label,
     sourceHandle: `${item.id}-source`, targetHandle: `${item.id}-target`,
     markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18, color: item.criticality === "CRITICAL" ? "var(--green)" : "var(--muted)" },
-    animated: scenarioEdges.has(item.id), data: {
+    animated: (item.memberIds ?? [item.id]).some(id => scenarioEdges.has(id)), data: {
       edge: item,
       route: architectureEdgeRoute(graph.nodes, item, graph.direction),
-      highlighted: highlightedEdges.has(item.id),
-      dimmed: hasFocus && !highlightedEdges.has(item.id),
-      guided: scenarioEdges.has(item.id),
+      highlighted: (item.memberIds ?? [item.id]).some(id => highlightedEdges.has(id)),
+      dimmed: hasFocus && !(item.memberIds ?? [item.id]).some(id => highlightedEdges.has(id)),
+      guided: (item.memberIds ?? [item.id]).some(id => scenarioEdges.has(id)),
       evidenceStatus: compactEvidenceStatus(claimEvidence(evidenceBundle, `edge:${item.id}`).categories),
     },
   })), [evidenceBundle, graph.direction, graph.edges, graph.nodes, hasFocus, highlightedEdges, scenarioEdges]);
@@ -546,7 +546,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
           {selected ? <><span aria-hidden="true">›</span><em>{selected.short_label}</em></> : null}
         </nav> : null}</div>
     </header>
-    <aside className={styles.generatedBanner}><b>SOURCE OBSERVED · PARTIAL</b><span>Generated critical slices at <code>{sha ?? "UNAVAILABLE"}</code>.</span><span>Runtime ownership and transaction success: UNKNOWN. Selection is not dependency permission.</span></aside>
+    <aside className={styles.generatedBanner}><b>SOURCE OBSERVED · PARTIAL</b><span>Generated critical slices at <code>{sha ?? "UNAVAILABLE"}</code>.</span><span>箭头表示源码引用，不代表已验证的业务流程。同类引用合并展示；“证据待确认”不表示任务失败。</span></aside>
     <section className={styles.toolbar} aria-label="Architecture graph toolbar">
       <label className={styles.search}><span>Search owner, purpose, file, test, or change target</span><input aria-label="Search architecture" onChange={event => setQuery(event.currentTarget.value)} placeholder="training, release, dashboard, retry…" type="search" value={query} />
         {query ? <div className={styles.searchResults} role="listbox">{searchMatches.slice(0, 7).map(node => <button aria-selected="false" key={node.id} onClick={() => selectSearch(node)} role="option" type="button"><strong>{node.short_label}</strong><span>{node.owner}</span></button>)}{!searchMatches.length ? <p>No matching change target.</p> : null}</div> : null}
@@ -606,7 +606,7 @@ function ExplorerGraph({ manifest, mobile }: { manifest: ArchitectureManifest; m
       </section>
     </MobileSheetLayer> : null}
     {activeImpact ? <section className={styles.failureSummary} aria-label="Explicit failure impact"><h2>{activeImpact.label}</h2><div><h3>AFFECTED</h3>{activeImpact.affected.map(item => <p key={item.node_id}>{item.message}</p>)}</div><div><h3>CONTINUES</h3>{activeImpact.continues.map(item => <p key={item.node_id}>{item.message}</p>)}</div></section> : null}
-    <details className={styles.textFallback}><summary>关系文字版 · Relationship text fallback</summary><div>{graph.edges.map(edge => <p key={edge.id}><b>{manifest.nodes.find(node => node.id === edge.from)?.short_label}</b><span>{edge.label} · {edge.kind} · {edge.criticality}</span><b>{manifest.nodes.find(node => node.id === edge.to)?.short_label}</b></p>)}</div></details>
+    <details className={styles.textFallback}><summary>关系文字版 · Relationship text fallback</summary><div>{graph.edges.map(edge => <button type="button" onClick={() => selectEdge(edge.id)} key={edge.id}><b>{manifest.nodes.find(node => node.id === edge.from)?.short_label}</b><span>{edge.memberIds?.length ?? 1} 处源码引用 · {edge.kind}</span><b>{manifest.nodes.find(node => node.id === edge.to)?.short_label}</b></button>)}</div></details>
     <p aria-live="polite" className={styles.srOnly}>{announced}</p>
     <p aria-live="polite" className={styles.srOnly}>{interaction.mobilePanel === "INSPECTOR" ? "详情面板已打开" : interaction.mobilePanel === "ADVANCED" ? "高级视图面板已打开" : "面板已关闭"}</p>
   </main>;

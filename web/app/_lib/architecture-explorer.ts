@@ -70,7 +70,7 @@ export type ArchitectureGraphLane = {
 };
 export type ArchitectureGraphEdge = ArchitectureEdge & {
   source: string; target: string; sourceAnchor: ArchitecturePoint; targetAnchor: ArchitecturePoint;
-  routeSlot: number; routeCount: number;
+  routeSlot: number; routeCount: number; memberIds?: string[];
 };
 export type ArchitecturePoint = { x: number; y: number };
 export type ArchitecturePortSlot = { edgeId: string; offset: number; anchor: ArchitecturePoint };
@@ -290,10 +290,26 @@ export function architectureDisclosedEdgeIds(
 }
 
 export function architectureDisclosedGraph<T extends ReturnType<typeof buildArchitectureGraph>>(graph: T, visibleEdgeIds: Set<string>): T {
-  const edges = graph.edges.filter(edge => visibleEdgeIds.has(edge.id));
+  const groups = new Map<string, ArchitectureGraphEdge>();
+  for (const edge of graph.edges.filter(edge => visibleEdgeIds.has(edge.id))) {
+    const key = JSON.stringify([edge.from, edge.to, edge.kind, edge.criticality]);
+    const existing = groups.get(key);
+    if (existing) existing.memberIds!.push(edge.id);
+    else groups.set(key, { ...edge, memberIds: [edge.id] });
+  }
+  const grouped = [...groups.values()];
+  const anchors = architectureEdgeAnchors(graph.nodes, grouped, graph.direction);
+  const edges = grouped.map((edge, routeSlot) => ({ ...edge,
+    ...anchors.get(edge.id)!, routeSlot, routeCount: grouped.length,
+  }));
   const nodes = graph.nodes.map(node => {
-    const incomingPorts = node.data.incomingPorts.filter(port => visibleEdgeIds.has(port.edgeId));
-    const outgoingPorts = node.data.outgoingPorts.filter(port => visibleEdgeIds.has(port.edgeId));
+    const port = (edge: ArchitectureGraphEdge, incoming: boolean): ArchitecturePortSlot => {
+      const anchor = incoming ? edge.targetAnchor : edge.sourceAnchor;
+      return { edgeId: edge.id, anchor,
+        offset: graph.direction === "LR" ? anchor.y - node.position.y : anchor.x - node.position.x };
+    };
+    const incomingPorts = edges.filter(edge => edge.target === node.id).map(edge => port(edge, true));
+    const outgoingPorts = edges.filter(edge => edge.source === node.id).map(edge => port(edge, false));
     return { ...node, data: { ...node.data, incomingPorts, outgoingPorts,
       hasIncomingEdge: incomingPorts.length > 0, hasOutgoingEdge: outgoingPorts.length > 0 } };
   });

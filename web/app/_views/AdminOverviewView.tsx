@@ -99,6 +99,12 @@ export default function AdminOverviewView() {
         </dl>}
         <b>打开重试队列 →</b>
       </DashboardLink>
+      <DashboardLink className="admin-overview-card" href="/admin/architecture">
+        <span>ARCHITECTURE</span><h2>系统架构</h2>
+        <strong>源码关系与证据</strong>
+        <small className="admin-overview-health">查看组件关系、源码位置和验证范围。</small>
+        <b>打开系统架构 →</b>
+      </DashboardLink>
       <DashboardLink className="admin-overview-card" href="/admin/ai-usage">
         <span>PROVIDER CAPACITY</span><h2>AI 模型用量</h2>
         <strong>权威配额账本</strong>
