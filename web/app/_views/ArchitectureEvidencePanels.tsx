@@ -45,7 +45,7 @@ export function EvidenceInspector({ manifest, node, edge, sha, bundle, error }: 
   const sourceSelection = sourceFactsForClaim(index, evidence.claim);
   const sourceFacts = sourceSelection.facts;
   return <div className={styles.evidencePanel} data-evidence-status={status.label}>
-    <div className={`${styles.evidenceVerdict} ${styles[`evidenceTone${status.tone}`]}`}><b aria-hidden="true">{status.symbol}</b><div><strong>{status.label}</strong><span>Semantic declaration and observed evidence remain separate.</span></div></div>
+    <div className={`${styles.evidenceVerdict} ${styles[`evidenceTone${status.tone}`]}`}><b aria-hidden="true">{status.symbol}</b><div><strong>{status.label}</strong><span>{evidence.categories.includes("STATIC_MATCH") ? "已核对索引中的源码位置与引用；这不是生产运行或测试通过的证明。" : "尚无匹配的源码核对结果；此处不会自动执行测试或采集生产记录。"}</span></div></div>
     <div className={styles.evidenceBadges}>{badges.map(label => <span key={label}>{label === "CONTRADICTED" ? "!" : label === "STALE" ? "◷" : label === "UNRESOLVED" ? "?" : "✓"} {label}</span>)}</div>
     <dl className={styles.evidenceFacts}>
       <div><dt>Source selection</dt><dd>architecture/critical-paths.json · {entityId}</dd></div>

@@ -55,6 +55,11 @@ edge does not prove absence of a side effect. `runtime` is explicitly UNKNOWN.
 Input digests exclude outputs, commit SHA, machine paths and time. They normalize
 UTF-8 BOM and CRLF/LF for Windows/Linux parity. The CI summary records source SHA
 separately. Test sources are inputs but their presence is not a test PASS.
+The browser projection confirms selected roots, unique symbol identities and
+source spans before emitting `STATIC_MATCH` evidence. Displayed call candidates
+retain their exact call-site span as evidence. This confirms source syntax only:
+runtime binding remains UNKNOWN, and neither test execution nor runtime evidence
+is inferred from source presence. Invalid spans or missing roots fail the build.
 The parser identity includes TypeScript's exact version, resolved archive and
 full SRI from the existing Web lock. Unrelated package-lock entries do not churn
 that identity. Parser execution accepts only the executing tool checkout's fixed

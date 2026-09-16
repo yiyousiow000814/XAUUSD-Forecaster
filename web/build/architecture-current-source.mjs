@@ -179,6 +179,11 @@ export function projectCurrentSource(index) {
   }
   const symbols = index.observed.symbols;
   const symbolById = new Map(symbols.map(symbol => [symbol.id, symbol]));
+  if (symbolById.size !== symbols.length || symbols.some(symbol => !sourcePath(symbol.path)
+      || !Number.isInteger(symbol.line) || symbol.line < 1
+      || !Number.isInteger(symbol.end_line) || symbol.end_line < symbol.line)) {
+    throw new Error('ARCHITECTURE_SOURCE_SPAN_INVALID');
+  }
   const selections = Object.entries(index.allowed.views);
   const dimensions = {
     ownership: 'UNKNOWN: file location is syntactic ownership, not runtime authority.',
@@ -196,8 +201,11 @@ export function projectCurrentSource(index) {
     architecture: dimensions, code_paths: [symbol.path], test_paths: [],
     document_paths: ['architecture/README.md'], tags: [symbol.language, 'SOURCE_OBSERVED'],
   }));
-  const edges = index.observed.edges.filter(edge => edge.kind === 'calls'
-    && symbolById.has(edge.source) && symbolById.has(edge.candidate_symbol)).map((edge, ordinal) => ({
+  const sourceCalls = index.observed.edges.filter(edge => edge.kind === 'calls'
+    && symbolById.has(edge.source) && symbolById.has(edge.candidate_symbol));
+  if (sourceCalls.some(edge => !Number.isInteger(edge.line) || edge.line < symbolById.get(edge.source).line
+      || edge.line > symbolById.get(edge.source).end_line)) throw new Error('ARCHITECTURE_CALL_SPAN_INVALID');
+  const edges = sourceCalls.map((edge, ordinal) => ({
     id: `source-call-${ordinal}`, from: edge.source, to: edge.candidate_symbol,
     label: 'Syntactic candidate · UNKNOWN', kind: 'DEPENDENCY', criticality: 'UNKNOWN',
     description: `AST call at line ${edge.line}; runtime dispatch, permission and criticality NOT_PROVEN.`,
@@ -214,7 +222,8 @@ export function projectCurrentSource(index) {
       document_paths: ['architecture/README.md'], tags: ['DECLARED_SELECTION'], subsystem_view: id });
     const roots = new Set(selection.roots);
     const displayed = new Set([...roots, ...edges.filter(edge => roots.has(edge.from)).map(edge => edge.to)]);
-    if (!displayed.size || [...displayed].some(key => !symbolById.has(key))) throw new Error('ARCHITECTURE_ROOT_UNRESOLVED');
+    if (!displayed.size || [...displayed].some(key => !symbolById.has(key))
+        || selection.roots.some(key => !selection.files.includes(symbolById.get(key).path))) throw new Error('ARCHITECTURE_ROOT_UNRESOLVED');
     const edgeIds = edges.filter(edge => displayed.has(edge.from) && displayed.has(edge.to)).map(edge => edge.id);
     return { id, label: id, summary: 'Selected roots + one syntactic candidate hop. Indexed symbols remain in Code Structure; explicit symbol scopes are not whole-file coverage.',
       layout_direction: 'LR', node_ids: [...displayed], edge_ids: edgeIds,
@@ -241,14 +250,20 @@ export function projectCurrentSource(index) {
     line: symbol.line, end_line: symbol.end_line, name: symbol.name, extractor: `${symbol.language}-ast`, certainty: 'SOURCE_SYNTAX_ONLY' }));
   const modules = [...new Set(symbols.map(symbol => symbol.path))].sort().map(path => ({
     id: path, label: path, path, shim: false, children: facts.filter(fact => fact.path === path) }));
+  const callFacts = manifest.edges.map(edge => {
+    const call = sourceCalls[Number(edge.id.slice('source-call-'.length))];
+    return { id: `edge:${edge.id}`, type: 'call', path: symbolById.get(edge.from).path,
+      line: call.line, end_line: call.line, name: edge.label, extractor: 'source-ast', certainty: 'SOURCE_SYNTAX_ONLY' };
+  });
   return { manifest,
-    code: { code_index: { source_digest: index.source_input_digest, facts,
+    code: { code_index: { source_digest: index.source_input_digest, facts: [...facts, ...callFacts],
       hierarchy: { id: 'source', label: 'Selected current-source files only', children: [{ id: 'critical', label: 'Critical slices', children: modules }] },
       counts: { symbols: facts.length }, dependencies: { observed: [], allowed_unused: [], unlisted_observed: [], violations: [],
         unresolved: ['Dependency policy NOT_EVALUATED; runtime binding UNKNOWN.'] } } },
     evidence: { source_digest: { source_digest: index.source_input_digest },
-      evidence_index: { claims: manifest.nodes.map(node => ({ claim_id: `node:${node.id}`, categories: ['UNRESOLVED'],
-        bindings: node.code_paths, selector: node.id })) },
+      evidence_index: { claims: [...manifest.nodes.map(node => ({ claim_id: `node:${node.id}`, categories: ['STATIC_MATCH'],
+        bindings: node.code_paths, selector: node.id })), ...callFacts.map(fact => ({ claim_id: fact.id,
+        categories: ['STATIC_MATCH'], bindings: [fact.path], selector: fact.id, relationship_static_match: true }))] },
       test_evidence: { contracts: [], execution_digest_state: 'UNAVAILABLE', counts: { collected: index.observed.tests.length, contract: 0, touches_only: 0, unclassified: index.observed.tests.length } },
       runtime_evidence: { traces: [] }, mutation_report: { mutations: [] } } };
 }
