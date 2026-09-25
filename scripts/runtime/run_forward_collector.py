@@ -68,6 +68,17 @@ from xauusd_forecaster.training.runtime import (
 NEWS_CONTRACT_RECONCILE_SECONDS = 300
 
 
+def forecast_models_paused(state_root: Path) -> bool:
+    """Read the operator's persistent model pause before starting model work."""
+    path = state_root / "forecast-model-activity.json"
+    if not path.exists():
+        return False
+    activity = json.loads(path.read_text(encoding="utf-8"))
+    if activity != {"state": "paused"}:
+        raise ValueError("INVALID_FORECAST_MODEL_ACTIVITY")
+    return True
+
+
 
 
 
@@ -105,6 +116,7 @@ def main() -> int:
         local_root, args.market_jsonl, name="quotes",
     )
     initialized_at = datetime.now(UTC)
+    models_paused = forecast_models_paused(local_root)
     ledger = ForwardLedger(local_root / "forward-evidence.sqlite3", now=initialized_at)
     epoch_receipt = local_root / "forward-epoch.json"
     if not epoch_receipt.exists():
@@ -157,9 +169,11 @@ def main() -> int:
     # Reconciliation is durable background work and must not make a healthy
     # restart wait behind historical materialization.  A missing/incompatible
     # generation remains fail-closed and is built before any decision append.
-    startup_plan = startup_reconciliation_plan(ledger.connection)
-    startup_requires_reconciliation = not startup_plan["synchronous"]
-    if not startup_plan["synchronous"]:
+    startup_plan = startup_reconciliation_plan(ledger.connection) if not models_paused else None
+    startup_requires_reconciliation = not models_paused and not startup_plan["synchronous"]
+    if models_paused:
+        startup_reconciliation = {"status": "FORECAST_MODELS_PAUSED"}
+    elif not startup_plan["synchronous"]:
         startup_reconciliation = {
             "status": "BACKGROUND_SCHEDULED",
             "active_generation_id": startup_plan["active_generation_id"],
@@ -246,7 +260,8 @@ def main() -> int:
     )
     try:
         news_owner.start()
-        training_owner.start()
+        if not models_paused:
+            training_owner.start()
         heartbeat.start()
         if quote_root:
             archive_completed_quote_days(quote_root, initialized_at)
@@ -279,7 +294,7 @@ def main() -> int:
                 archive_completed_quote_days(quote_root, now)
                 last_archive_day = now.date()
             news_status = news_owner.snapshot(now)
-            if ((now - last_news_reconciliation).total_seconds()
+            if (not models_paused and (now - last_news_reconciliation).total_seconds()
                     >= NEWS_CONTRACT_RECONCILE_SECONDS):
                 request_state = request_background_training(
                     ledger.connection, now, reconcile=True,
@@ -299,11 +314,14 @@ def main() -> int:
                         state="DATABASE_CONTENTION",
                         last_error="SQLITE_CONTENTION:request_background_training",
                     )
-            now, last_decision, appended_decisions, skipped_grids = (
-                append_current_grid_events(
-                    ledger, engine, provider, last_decision, news_status,
+            if models_paused:
+                appended_decisions, skipped_grids = [], {}
+            else:
+                now, last_decision, appended_decisions, skipped_grids = (
+                    append_current_grid_events(
+                        ledger, engine, provider, last_decision, news_status,
+                    )
                 )
-            )
             for decision_time, snapshot_id, decision_id in appended_decisions:
                 print(
                     json.dumps(
@@ -347,7 +365,7 @@ def main() -> int:
                     ),
                     flush=True,
                 )
-            if completed_outcomes:
+            if completed_outcomes and not models_paused:
                 request_state = request_background_training(ledger.connection, now)
                 if request_state == "REQUESTED":
                     training_owner.wake()

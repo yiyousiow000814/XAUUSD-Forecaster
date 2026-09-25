@@ -1,5 +1,20 @@
 # Live OOS Learning Curves Specification
 
+## Operator pause
+
+The local runtime may hold forecast model generation and prediction by keeping
+`forecast-model-activity.json` in its authoritative `.local/forward` state root
+with the exact content `{"state":"paused"}`. The collector reads this control
+at startup. While paused, it does not reconcile or train model generations,
+request background training, or append new decision grids. It continues news
+collection, quote archive maintenance, backups, WAL maintenance, and settlement
+of outcomes for decisions already recorded. Historical model artifacts,
+predictions, scores, and learning curves remain available. The existing runtime
+owner must restart the collector to apply the control; editing the file while
+the process is running does not change its current mode. Removing the control
+requires a separate resume procedure that establishes a new decision cursor;
+it must not backfill paused grids as if predictions had run during the pause.
+
 The forward-only scoring, immutability, and generation-atomicity guarantees are
 defined in [`FORWARD_ONLY.md`](../contracts/FORWARD_ONLY.md). This document
 defines the required lifecycle and presentation behavior of learning curves.
