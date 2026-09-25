@@ -109,6 +109,7 @@
         "tests/dashboard/test_dashboard_resource_contracts.py",
         "tests/assistant/test_assistant_capacity.py",
         "tests/runtime/test_backup_containment.py",
+        "tests/runtime/test_forecast_model_pause.py",
         "tests/assistant/test_assistant_evidence.py",
         "tests/dashboard/test_deferred_projection_parity.py",
         "tests/dashboard/test_dashboard_payloads.py",
