@@ -136,12 +136,12 @@ export default function LiveRoomView() {
 
       <section className="metric-grid">
         <article><span>MARKET STATUS</span><strong>{marketClosed ? "休市" : online ? "行情在线" : "行情暂不可用"}</strong><small>{localTime(latest?.source_received_time)}</small></article>
-        <article><span>CURRENT NEWS EVENTS</span><strong><MetricValue phase={currentPhase}><CountValue value={newsMetrics.events.currently_model_eligible} /></MetricValue></strong><a href="/audit?view=evidence">当前可用新闻事件 ↗</a></article>
+        <article><span>CURRENT NEWS EVENTS</span><strong>新闻事件</strong><a href="/audit?view=evidence">当前可用新闻事件 ↗</a></article>
         <article><span>NEWS &amp; STORIES</span><strong>新闻与脉络</strong><a href="/audit?view=stories">查看事件脉络 ↗</a></article>
         <article>
           <span>NEWS ARTICLES</span>
           <strong><MetricValue phase={currentPhase}><CountValue value={newsMetrics.articles.received} /></MetricValue></strong>
-          <small className="metric-detail metric-detail-stack"><CountValue value={newsMetrics.events.independent} format="exact" suffix=" 个独立事件" /><CountValue value={newsMetrics.articles.stored_revisions} format="exact" suffix=" 个保存版本" /></small>
+          <small className="metric-detail metric-detail-stack"><CountValue value={newsMetrics.articles.stored_revisions} format="exact" suffix=" 个保存版本" /></small>
         </article>
       </section>
 

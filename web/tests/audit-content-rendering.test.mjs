@@ -26,8 +26,10 @@ const built = await build({
     contents: `import React from 'react';
       import {renderToStaticMarkup} from 'react-dom/server';
       import AuditView, {NewsRow} from ${JSON.stringify(viewPath)};
+      import LiveRoomView from ${JSON.stringify(fileURLToPath(new URL('../app/_views/LiveRoomView.tsx', import.meta.url)))};
       import StatusView from ${JSON.stringify(fileURLToPath(new URL("../app/_views/StatusView.tsx", import.meta.url)))};
       import {clearDashboardResource,updateDashboardResource} from ${JSON.stringify(resourcesPath)};
+      export function renderLive(payload) { updateDashboardResource("/api/status",()=>payload); return renderToStaticMarkup(React.createElement(LiveRoomView)); }
       export function renderNews(row) { return renderToStaticMarkup(React.createElement(NewsRow,{row})); }
       export function renderStatus(payload) { return renderToStaticMarkup(React.createElement(StatusView,{initialPayload:payload})); }
       export function render(view, resources) {
@@ -39,7 +41,7 @@ const built = await build({
 });
 const renderedModule = join(temporaryRoot, "audit.mjs");
 writeFileSync(renderedModule, built.outputFiles[0].contents);
-const { render, renderNews, renderStatus } = await import(pathToFileURL(renderedModule).href);
+const { render, renderNews, renderStatus, renderLive } = await import(pathToFileURL(renderedModule).href);
 
 test("article row expands publisher provenance with one coherent public label", () => {
   const row = {headline: "政策会议展望", emerging_topic_zh: "政策会议展望", event_type: "macro_preview",
@@ -285,4 +287,12 @@ test("brief prose hides packet refs in every field without rewriting evidence", 
     assert.ok(html.includes(text), text);
   }
   assert.equal(JSON.stringify(brief), original);
+});
+
+
+test("overview links to current events without asserting omitted status counts", () => {
+  const html = renderLive({generated_at: "2026-09-26T08:00:00Z", system: {online:false,quote_age_seconds:null}, counts:{}, sources:{}, news_metrics:{articles:{received:10,stored_revisions:12},events:{independent:0,currently_model_eligible:0}}});
+  assert.match(html, /href="\/audit\?view=evidence"/);
+  assert.match(html, /<strong>新闻事件<\/strong>/);
+  assert.doesNotMatch(html, /0.*个独立事件/);
 });

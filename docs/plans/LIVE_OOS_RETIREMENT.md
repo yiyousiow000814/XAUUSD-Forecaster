@@ -110,3 +110,15 @@ fresh V2 payload replaces the old Durable Object state. Runtime and Worker
 identities must be verified on main before the cleanup runbook is applied.
 Old writers continuing after cleanup would repopulate retired data, so release
 and stopped-writer checks are required before physical production deletion.
+
+
+## PR verification follow-up
+
+PR555 Preview review found that the new overview event count used optional event
+fields from compact status, where zero is not a complete event count. The
+overview now links to the independently owned current-events page without
+claiming its count. Rendered coverage guards this behavior.
+The clean Linux checkout also exposed an obsolete package-ownership test that
+still imported removed decision/training packages; local ignored bytecode
+directories had made those imports appear as namespace packages. The owner
+inventory now tests only retained runtime packages.
