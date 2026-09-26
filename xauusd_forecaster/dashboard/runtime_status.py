@@ -21,24 +21,24 @@ QUOTE_ARCHIVE_BYTES = 128 * 1024 * 1024
 
 
 @lru_cache(maxsize=8)
-def _quote_tail(path: Path, size: int, modified_ns: int) -> tuple[bytes, ...]:
+def _quote_tail(path: Path, size: int, modified_ns: int, archive_budget: int) -> tuple[tuple[bytes, ...], int]:
     # Archive identity invalidates cached tails; never inflate an unbounded file.
     if path.suffix == ".gz":
         tail = b""
-        remaining = QUOTE_ARCHIVE_BYTES
+        remaining = archive_budget
         with gzip.open(path, "rb") as handle:
             while remaining:
                 chunk = handle.read(min(1024 * 1024, remaining))
                 if not chunk:
-                    return tuple(tail.splitlines())
+                    return tuple(tail.splitlines()), archive_budget - remaining
                 remaining -= len(chunk)
                 tail = (tail + chunk)[-QUOTE_TAIL_BYTES:]
             if handle.read(1):
-                return ()
-        return tuple(tail.splitlines())
+                return (), archive_budget
+        return tuple(tail.splitlines()), archive_budget - remaining
     with path.open("rb") as handle:
         handle.seek(max(0, size - QUOTE_TAIL_BYTES))
-        return tuple(handle.read(QUOTE_TAIL_BYTES).splitlines())
+        return tuple(handle.read(QUOTE_TAIL_BYTES).splitlines()), 0
 
 
 def latest_quote(database: Path) -> dict | None:
@@ -46,17 +46,18 @@ def latest_quote(database: Path) -> dict | None:
     # Prefer a raw day over its archive and skip an empty rollover day.
     sources = {path.name.removesuffix(".gz"): path for path in root.glob("*.jsonl.gz")}
     sources.update({path.name: path for path in root.glob("*.jsonl")})
-    archive_reads = 0
+    archive_budget = QUOTE_ARCHIVE_BYTES
     for name in sorted(sources, reverse=True)[:8]:
         path = sources[name]
         try:
-            if path.suffix == ".gz":
-                archive_reads += 1
-                if archive_reads > 1:
-                    break
+            if path.suffix == ".gz" and archive_budget <= 0:
+                break
             stat = path.stat()
-            lines = _quote_tail(path, stat.st_size, stat.st_mtime_ns)
+            lines, consumed = _quote_tail(path, stat.st_size, stat.st_mtime_ns, archive_budget)
+            archive_budget -= consumed
         except (OSError, EOFError, zlib.error):
+            if path.suffix == ".gz":
+                break
             continue
         for line in reversed(lines):
             try:

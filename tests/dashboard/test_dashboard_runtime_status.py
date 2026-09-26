@@ -119,6 +119,9 @@ def test_quote_survives_empty_rollover_archive_and_resumes(tmp_path):
     previous.write_text(json.dumps(row) + "\n")
     current = root / "xauusd-quotes-20260926.jsonl"
     current.touch()
+    # An archived empty weekend day must not hide the last trading day either.
+    with gzip.open(root / "xauusd-quotes-20260925z.jsonl.gz", "wb") as handle:
+        handle.write(b"")
     for archived in (False, True):
         if archived:
             with gzip.open(str(previous) + ".gz", "wt") as handle:
