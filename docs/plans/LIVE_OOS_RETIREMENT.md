@@ -134,3 +134,19 @@ Preview showed one banner after hydration/navigation, complete notice borders,
 and no horizontal overflow. All task browser sessions were closed (0 remaining).
 These results supersede the initial local-only acceptance status above; main
 activation and physical production data cleanup still require runtime evidence.
+
+## Production launcher follow-up
+
+Post-merge activation review found that the Windows service registry still
+passed two removed training options to the news-only collector. The CLI rejects
+them before opening storage. Remove those obsolete arguments from the existing
+owner; no replacement process or compatibility training path is introduced.
+Recovery is the normal main-owner update and restart, preserving the database.
+
+The previous entrypoint family test used `--help`, which exits before validating
+unknown options. The family now parses every Python service's actual registry
+arguments from an unrelated directory before any work. The collector lifecycle
+fixture also runs with those arguments and verifies retained owners start/close
+without model rows. This closes the production-call-site coverage gap required
+by the Change Safety Protocol. Physical cleanup remains blocked until the fixed
+main revision is active and retained services are healthy.
